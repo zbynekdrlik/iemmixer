@@ -2550,7 +2550,7 @@ dependencies = [
 
 [[package]]
 name = "iem-core"
-version = "2.0.0-dev.0"
+version = "2.0.0-dev.1"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2565,7 +2565,7 @@ dependencies = [
 
 [[package]]
 name = "iem-server"
-version = "2.0.0-dev.0"
+version = "2.0.0-dev.1"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2603,7 +2603,7 @@ dependencies = [
 
 [[package]]
 name = "iem-tray"
-version = "2.0.0-dev.0"
+version = "2.0.0-dev.1"
 dependencies = [
  "anyhow",
  "dirs",
@@ -2623,7 +2623,7 @@ dependencies = [
 
 [[package]]
 name = "iem-ui"
-version = "2.0.0-dev.0"
+version = "2.0.0-dev.1"
 dependencies = [
  "console_error_panic_hook",
  "gloo-net",
