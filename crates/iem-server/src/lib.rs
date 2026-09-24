@@ -13,6 +13,7 @@ pub mod backup_restore;
 pub mod backup_routes;
 pub mod backup_store;
 pub mod customization_store;
+pub mod login_guard;
 pub mod pepper;
 pub mod photo_store;
 pub mod pin_hash;
