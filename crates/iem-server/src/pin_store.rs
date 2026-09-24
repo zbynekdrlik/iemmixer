@@ -160,6 +160,14 @@ mod tests {
     }
 
     #[test]
+    fn an_unreadable_store_is_a_load_error_not_an_empty_store() {
+        // Only a missing file means "no PINs yet".
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(PIN_HASHES_FILE)).unwrap();
+        assert!(PinStore::load(dir.path()).is_err());
+    }
+
+    #[test]
     fn the_predecessor_plaintext_file_is_never_read() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("pins.json"), r#"{"member1":"1357"}"#).unwrap();

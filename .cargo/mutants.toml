@@ -1,7 +1,9 @@
 # cargo-mutants: PR gate in .github/workflows/ci.yml (diff-scoped; the shard
 # count is the `shard:` matrix length, sized by the `mutants-list` job), full
 # sweep in .github/workflows/mutation-full.yml (on demand). Both pass
-# --copy-target=true after a warm-up build. Tests run per package only.
+# --copy-target=true after a warm-up build and --timeout 60 (with
+# --baseline=skip there is no measured test time, so a hung mutant would
+# otherwise hold its job for 300 s). Tests run per package only.
 profile = "mutants"
 test_tool = "nextest"
 
@@ -35,4 +37,32 @@ exclude_re = [
   # e2e/tests/site-links.spec.ts and e2e/tests/login-protection.spec.ts.
   "iem-ui/src/api\\.rs.*replace (login|get_site_links) ",
   "iem-ui/src/components/tunnel_status\\.rs.*replace site_links ",
+  # Leptos component bodies are DOM event closures and effects: native tests
+  # cannot mount a component (web_sys panics off wasm). Their pure logic lives
+  # in tested helpers (e.g. dragged_pan, is_foreign_mixer, member_has_photo).
+  # Fader: `!is_animating` guards in the touchend/touchcancel handlers.
+  "iem-ui/src/components/fader\\.rs.* in Fader$",
+  # AlertToast / AlertButton / TalkButton: WebSocket `ready_state() == OPEN`
+  # checks and `document.hidden` in click, pointer and visibility handlers.
+  "iem-ui/src/components/alert_toast\\.rs.* in AlertToast$",
+  "iem-ui/src/components/alert_button\\.rs.* in AlertButton$",
+  "iem-ui/src/components/talk_button\\.rs.* in TalkButton$",
+  # LandingPage: the sessionStorage + router redirect effect; both branches are
+  # covered by e2e/tests/auto-redirect.spec.ts.
+  "iem-ui/src/pages/landing\\.rs.* in LandingPage$",
+  # SOS alert loops: window intervals via js_sys::Reflect and the service
+  # worker notification.
+  "iem-ui/src/components/alert_toast\\.rs.*(stop_loops|request_and_notify)",
+  # Engineer listen: opens the audio WebSocket and the AudioContext; the frame
+  # log sampling and the status mapping are tested helpers.
+  "iem-ui/src/components/audio_player\\.rs.*start_listening",
+  # localStorage reads/writes of the user settings.
+  "iem-ui/src/components/settings_modal\\.rs.*replace UserSettings::(load|save) ",
+  # Mixer WebSocket lifecycle (connect, onmessage/onclose closures, intervals,
+  # visibility listener); the message logic is in tested helpers
+  # (meter_update_due, update_channel, solo_change, clears_shown_alert, …).
+  "iem-ui/src/pages/mixer/connection\\.rs.*(setup_connection|connect_websocket)",
+  "iem-ui/src/pages/mixer/helpers\\.rs.*ws_send",
+  # Push subscription through the service worker's PushManager.
+  "iem-ui/src/pages/mixer/push\\.rs.*subscribe_to_push",
 ]

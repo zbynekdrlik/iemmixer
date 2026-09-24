@@ -33,7 +33,7 @@ jobs:
       - name: Full-tree mutants (survivors are reported, then filed as test-quality issues)
         run: |
           set -uo pipefail
-          cargo mutants --baseline=skip --jobs 2 --copy-target=true --shard "${{ matrix.shard }}/${{ strategy.job-total }}" \
+          cargo mutants --baseline=skip --timeout 60 --jobs 2 --copy-target=true --shard "${{ matrix.shard }}/${{ strategy.job-total }}" \
             --package iem-core --package iem-server --package iem-ui --all-features -- --all-targets
           code=$?
           if [ -f mutants.out/missed.txt ]; then echo "--- missed mutants ---"; cat mutants.out/missed.txt; fi

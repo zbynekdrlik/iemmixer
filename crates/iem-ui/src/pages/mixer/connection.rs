@@ -6,8 +6,10 @@
 
 use leptos::prelude::*;
 use leptos_router::hooks::use_navigate;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use wasm_bindgen::prelude::*;
+
+use iem_core::Channel;
 
 use crate::components::eq_modal::EqBandState;
 use crate::components::talk_button::TalkState;
@@ -265,6 +267,69 @@ pub(super) fn setup_connection(
     });
 }
 
+/// Minimum spacing (ms) between applied meter updates: the server sends every
+/// 150 ms, but network jitter can bunch messages; this caps reactive updates
+/// at ~20/s.
+const METER_THROTTLE_MS: f64 = 50.0;
+
+/// Whether a meter frame arriving at `now` (ms) is applied, given when the
+/// last one was.
+fn meter_update_due(now: f64, last_applied: f64) -> bool {
+    now - last_applied >= METER_THROTTLE_MS
+}
+
+/// Whether a server `ChannelUpdate` for `track_index` applies: never while the
+/// user is touching that fader (their gesture wins).
+fn channel_update_applies(touched: &HashMap<usize, bool>, track_index: usize) -> bool {
+    !touched.get(&track_index).copied().unwrap_or(false)
+}
+
+/// Write a server `ChannelUpdate` into the matching channel.
+fn update_channel(chs: &mut [Channel], track_index: usize, level_db: f32, muted: bool, pan: f32) {
+    if let Some(ch) = chs.iter_mut().find(|c| c.track_index == track_index) {
+        ch.level_db = level_db;
+        ch.muted = muted;
+        ch.pan = pan;
+    }
+}
+
+/// What a remote `SoloUpdate` changes locally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SoloChange {
+    /// The echo of our own command: nothing to do.
+    Unchanged,
+    /// Remote un-soloed everything: forget the pre-solo mutes.
+    Cleared,
+    /// Remote entered solo: save the current mutes for the restore.
+    Entered,
+    /// Remote switched the exclusive solo: update the mute display (reaperiem#131).
+    Switched,
+}
+
+fn solo_change(current: &HashSet<usize>, new: &HashSet<usize>) -> SoloChange {
+    if new == current {
+        SoloChange::Unchanged
+    } else if new.is_empty() {
+        SoloChange::Cleared
+    } else if current.is_empty() {
+        SoloChange::Entered
+    } else {
+        SoloChange::Switched
+    }
+}
+
+/// Exclusive solo: every channel outside `soloed` shows as muted.
+fn show_exclusive_solo(chs: &mut [Channel], soloed: &HashSet<usize>) {
+    for c in chs.iter_mut() {
+        c.muted = !soloed.contains(&c.track_index);
+    }
+}
+
+/// Whether an `AlertCleared` for `cleared` removes the alert on screen.
+fn clears_shown_alert(shown: Option<&(String, String)>, cleared: &str) -> bool {
+    shown.is_some_and(|(member, _)| member.as_str() == cleared)
+}
+
 /// Create and connect a WebSocket, wiring up message handlers to signals
 // Eight parameters: the Rc/Arc handles are created once by `setup_connection`
 // and shared by its two call sites (initial connect and the reconnect loop);
@@ -439,7 +504,7 @@ fn connect_websocket(
                     }
                     // Throttle: skip if less than 50ms since last meter update
                     let now = js_sys::Date::now();
-                    if now - last_meter_time.get() >= 50.0 {
+                    if meter_update_due(now, last_meter_time.get()) {
                         last_meter_time.set(now);
                         // Merge delta meters into existing map (server sends only changed values)
                         let _ = set_meters.try_update(|existing| {
@@ -456,14 +521,9 @@ fn connect_websocket(
                     muted,
                     pan,
                 } => {
-                    if !touched.get(&track_index).copied().unwrap_or(false) {
+                    if channel_update_applies(&touched, track_index) {
                         let _ = set_channels.try_update(|chs| {
-                            if let Some(ch) = chs.iter_mut().find(|c| c.track_index == track_index)
-                            {
-                                ch.level_db = level_db;
-                                ch.muted = muted;
-                                ch.pan = pan;
-                            }
+                            update_channel(chs, track_index, level_db, muted, pan);
                         });
                     }
                 }
@@ -493,34 +553,29 @@ fn connect_websocket(
                     let _ = set_tunnel.try_set(Some(info));
                 }
                 iem_core::ServerMsg::SoloUpdate { soloed: new_solo } => {
-                    let new_soloed: std::collections::HashSet<usize> =
-                        new_solo.into_iter().collect();
+                    let new_soloed: HashSet<usize> = new_solo.into_iter().collect();
                     let Some(current) = soloed.try_get_untracked() else {
                         return;
                     };
-                    // Skip echo from our own command
-                    if new_soloed != current {
-                        if new_soloed.is_empty() && !current.is_empty() {
-                            // Remote un-soloed all: clear pre-solo mutes
+                    match solo_change(&current, &new_soloed) {
+                        SoloChange::Unchanged => return,
+                        SoloChange::Cleared => {
                             let _ = set_pre_solo_mutes.try_set(HashMap::new());
-                        } else if !new_soloed.is_empty() && current.is_empty() {
-                            // Remote entered solo: save current mute states for restore
+                        }
+                        SoloChange::Entered => {
                             let chs = channels.try_get_untracked().unwrap_or_default();
                             let mut saved = HashMap::new();
                             for ch in &chs {
                                 saved.insert(ch.track_index, ch.muted);
                             }
                             let _ = set_pre_solo_mutes.try_set(saved);
-                        } else if !new_soloed.is_empty() && !current.is_empty() {
-                            // Remote exclusive switch: update local mute display (reaperiem#131)
-                            let _ = set_channels.try_update(|chs| {
-                                for c in chs.iter_mut() {
-                                    c.muted = !new_soloed.contains(&c.track_index);
-                                }
-                            });
                         }
-                        let _ = set_soloed.try_set(new_soloed);
+                        SoloChange::Switched => {
+                            let _ = set_channels
+                                .try_update(|chs| show_exclusive_solo(chs, &new_soloed));
+                        }
                     }
+                    let _ = set_soloed.try_set(new_soloed);
                 }
                 iem_core::ServerMsg::AudioStatus { .. } => {
                     // Audio status handled by ListenButton's own audio WebSocket
@@ -537,9 +592,10 @@ fn connect_websocket(
                     // Double-nested Option: outer is try_get_untracked
                     // disposal guard, inner is the signal's own
                     // Option<(String, String)>.
-                    if let Some(Some((ref m, _))) = alert_data.try_get_untracked()
-                        && *m == cleared
-                    {
+                    if clears_shown_alert(
+                        alert_data.try_get_untracked().flatten().as_ref(),
+                        &cleared,
+                    ) {
                         let _ = set_alert_data.try_set(None);
                     }
                 }
@@ -629,4 +685,77 @@ fn connect_websocket(
     // Store closures so they stay alive (preventing JS callback invalidation)
     // and get dropped on next reconnect (preventing memory leak from Closure::forget)
     *ws_closures.borrow_mut() = Some((onmessage, onclose));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn channel(track_index: usize, muted: bool) -> Channel {
+        Channel {
+            track_index,
+            name: format!("In {track_index}"),
+            level_db: 0.0,
+            pan: 0.5,
+            muted,
+            category: String::new(),
+            stereo_pair: None,
+            stereo_side: None,
+        }
+    }
+
+    fn set(tracks: &[usize]) -> HashSet<usize> {
+        tracks.iter().copied().collect()
+    }
+
+    #[test]
+    fn meter_updates_are_spaced_by_fifty_milliseconds() {
+        assert!(meter_update_due(100.0, 0.0));
+        assert!(!meter_update_due(149.9, 100.0));
+        assert!(meter_update_due(150.0, 100.0));
+    }
+
+    #[test]
+    fn a_touched_fader_ignores_server_updates() {
+        let touched = HashMap::from([(3, true), (4, false)]);
+        assert!(!channel_update_applies(&touched, 3));
+        assert!(channel_update_applies(&touched, 4));
+        assert!(channel_update_applies(&touched, 5));
+    }
+
+    #[test]
+    fn a_channel_update_writes_only_its_channel() {
+        let mut chs = vec![channel(1, false), channel(2, false)];
+        update_channel(&mut chs, 2, -6.0, true, 0.25);
+        assert_eq!(chs[0], channel(1, false));
+        assert_eq!(
+            (chs[1].level_db, chs[1].muted, chs[1].pan),
+            (-6.0, true, 0.25)
+        );
+    }
+
+    #[test]
+    fn solo_changes_are_classified() {
+        assert_eq!(solo_change(&set(&[2]), &set(&[2])), SoloChange::Unchanged);
+        assert_eq!(solo_change(&set(&[]), &set(&[])), SoloChange::Unchanged);
+        assert_eq!(solo_change(&set(&[2]), &set(&[])), SoloChange::Cleared);
+        assert_eq!(solo_change(&set(&[]), &set(&[2])), SoloChange::Entered);
+        assert_eq!(solo_change(&set(&[2]), &set(&[3])), SoloChange::Switched);
+    }
+
+    #[test]
+    fn an_exclusive_solo_mutes_every_other_channel() {
+        let mut chs = vec![channel(1, false), channel(2, true), channel(3, false)];
+        show_exclusive_solo(&mut chs, &set(&[2]));
+        let muted: Vec<bool> = chs.iter().map(|c| c.muted).collect();
+        assert_eq!(muted, [true, false, true]);
+    }
+
+    #[test]
+    fn only_the_shown_members_alert_is_cleared() {
+        let shown = ("member1".to_string(), "Member1".to_string());
+        assert!(clears_shown_alert(Some(&shown), "member1"));
+        assert!(!clears_shown_alert(Some(&shown), "member2"));
+        assert!(!clears_shown_alert(None, "member1"));
+    }
 }

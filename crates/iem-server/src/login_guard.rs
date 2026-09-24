@@ -455,6 +455,104 @@ mod tests {
     }
 
     #[test]
+    fn a_streak_survives_fourteen_quiet_minutes() {
+        let guard = LoginGuard::new();
+        let t0 = Instant::now();
+        let c = lan(1);
+        for _ in 0..5 {
+            guard.record_failure(&c, "member1", t0);
+        }
+        let later = t0 + secs(14 * 60);
+        guard.record_failure(&c, "member1", later);
+        assert_eq!(
+            guard.check(&c, "member1", later),
+            Err(secs(8)),
+            "the sixth failure of the streak owes 8 s"
+        );
+    }
+
+    #[test]
+    fn a_failure_after_fifteen_quiet_minutes_starts_a_new_streak() {
+        // No check in between: record_failure itself forgets the old streak.
+        let guard = LoginGuard::new();
+        let t0 = Instant::now();
+        let c = lan(1);
+        for _ in 0..5 {
+            guard.record_failure(&c, "member1", t0);
+        }
+        let later = t0 + STREAK_DECAY;
+        guard.record_failure(&c, "member1", later);
+        assert_eq!(guard.check(&c, "member1", later), Ok(()));
+    }
+
+    #[test]
+    fn a_new_member_streak_keeps_the_other_streaks() {
+        let guard = LoginGuard::new();
+        let t0 = Instant::now();
+        let c = lan(1);
+        for _ in 0..3 {
+            guard.record_failure(&c, "member1", t0);
+        }
+        guard.record_failure(&c, "member2", t0);
+        assert_eq!(guard.check(&c, "member1", t0), Err(secs(1)));
+    }
+
+    #[test]
+    fn a_new_client_keeps_the_other_client_windows() {
+        let guard = LoginGuard::new();
+        let t0 = Instant::now();
+        for i in 0..20u64 {
+            guard.record_failure(&lan(5), &format!("member{i}"), t0);
+        }
+        guard.record_failure(&lan(6), "member1", t0);
+        assert_eq!(guard.check(&lan(5), "fresh", t0), Err(CLIENT_SPACING));
+        assert_eq!(
+            guard.stats(),
+            LoginStats {
+                lan_failures: 21,
+                tunnel_failures: 0,
+                engineer_budget_trips: 0
+            }
+        );
+    }
+
+    #[test]
+    fn the_client_budget_spans_ten_minutes() {
+        let guard = LoginGuard::new();
+        let t0 = Instant::now();
+        let c = lan(7);
+        for i in 0..19u64 {
+            guard.record_failure(&c, &format!("member{i}"), t0);
+        }
+        let later = t0 + secs(9 * 60);
+        guard.record_failure(&c, "member19", later);
+        assert_eq!(guard.check(&c, "fresh", later), Err(CLIENT_SPACING));
+    }
+
+    #[test]
+    fn the_engineer_budget_counts_the_last_hour_only() {
+        let guard = LoginGuard::new();
+        let t0 = Instant::now();
+        for i in 0..31u8 {
+            guard.record_failure(&tunnel(i), &format!("member{i}"), t0);
+        }
+        let within = t0 + secs(59 * 60);
+        assert_eq!(guard.check(&tunnel(200), "member1", within), Ok(()));
+        assert_eq!(
+            guard.check(&tunnel(201), "member2", within),
+            Err(ENGINEER_SPACING),
+            "59 minutes later the origin is still over its budget"
+        );
+        let after = t0 + ENGINEER_WINDOW;
+        assert_eq!(guard.check(&tunnel(202), "member1", after), Ok(()));
+        assert_eq!(
+            guard.check(&tunnel(203), "member2", after),
+            Ok(()),
+            "an hour after the failures the origin is no longer spaced"
+        );
+    }
+
+    #[test]
     fn lan_and_tunnel_budgets_are_separate_for_the_same_address() {
         let guard = LoginGuard::new();
         let t0 = Instant::now();
@@ -728,6 +826,15 @@ mod tests {
         for waiter in waiters {
             assert!(waiter.await.unwrap());
         }
+        assert_eq!(gate.waiting(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_gate_without_a_queue_refuses_at_once() {
+        // Bounded: a gate that queued here would wait forever for a permit.
+        let gate = HashGate::new(0, 0);
+        let refused = tokio::time::timeout(Duration::from_secs(5), gate.acquire()).await;
+        assert!(matches!(refused, Ok(None)), "expected an immediate refusal");
         assert_eq!(gate.waiting(), 0);
     }
 

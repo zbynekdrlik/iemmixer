@@ -163,5 +163,19 @@ mod tests {
         let shown = format!("{secrets:?}");
         assert!(!shown.contains(&secrets.jwt_secret));
         assert!(!shown.contains(&secrets.vapid_private_key));
+        assert_eq!(shown, "Secrets { .. }");
+    }
+
+    #[test]
+    fn an_unreadable_secret_file_is_an_error_not_a_new_secret() {
+        // The path exists but is not a readable file: the read error comes
+        // back; only a missing file is generated (a create attempt would fail
+        // with AlreadyExists instead).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(JWT_SECRET_FILE);
+        std::fs::create_dir(&path).unwrap();
+        let err = load_or_create(dir.path()).unwrap_err();
+        assert_ne!(err.kind(), io::ErrorKind::AlreadyExists, "{err}");
+        assert!(path.is_dir());
     }
 }

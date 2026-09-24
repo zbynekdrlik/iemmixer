@@ -778,4 +778,15 @@ mod startup_tests {
             "never replaced"
         );
     }
+
+    // cargo-mutants 27.1 does not apply `exclude_re` to struct-field deletions,
+    // so the `new_for_test` exclude does not cover them: pin the field here.
+    #[cfg(feature = "test-helpers")]
+    #[tokio::test]
+    async fn new_for_test_targets_the_given_reaper_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let state =
+            AppState::new_for_test("http://127.0.0.1:9".to_string(), dir.path().to_path_buf());
+        assert_eq!(state.config.read().await.reaper_url, "http://127.0.0.1:9");
+    }
 }

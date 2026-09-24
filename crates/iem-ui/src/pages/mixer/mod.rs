@@ -28,6 +28,21 @@ use helpers::*;
 use push::subscribe_to_push;
 use state::MixerState;
 
+/// Whether the signed-in member must leave the mixer of `route_member`: only
+/// the engineer may open another member's mixer.
+fn is_foreign_mixer(auth_member: &str, engineer: bool, route_member: &str) -> bool {
+    !engineer && auth_member != route_member && !route_member.is_empty()
+}
+
+/// `has_photo` of `member_id` in the server's member list (`None` when the
+/// member is not listed).
+fn member_has_photo(members: &[crate::api::MemberInfo], member_id: &str) -> Option<bool> {
+    members
+        .iter()
+        .find(|m| m.id == member_id)
+        .map(|m| m.has_photo)
+}
+
 /// Mixer page for a specific member
 #[component]
 pub fn MixerPage() -> impl IntoView {
@@ -56,9 +71,7 @@ pub fn MixerPage() -> impl IntoView {
 
         // Cross-member access check: only allow access to own mixer (or engineer)
         if let Some(auth) = crate::auth::get_auth()
-            && !auth.engineer
-            && auth.member != member
-            && !member.is_empty()
+            && is_foreign_mixer(&auth.member, auth.engineer, &member)
         {
             // Clear stale auth and redirect to login for the target member
             crate::auth::clear_auth();
@@ -135,9 +148,9 @@ pub fn MixerPage() -> impl IntoView {
         let mid = member_id();
         wasm_bindgen_futures::spawn_local(async move {
             if let Ok(members) = crate::api::get_members().await
-                && let Some(m) = members.iter().find(|m| m.id == mid)
+                && let Some(has_photo) = member_has_photo(&members, &mid)
             {
-                state.update_has_photo(m.has_photo);
+                state.update_has_photo(has_photo);
             }
         });
     }
@@ -524,5 +537,34 @@ pub fn MixerPage() -> impl IntoView {
                 }}
             </Show>
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_engineer_opens_another_members_mixer() {
+        assert!(is_foreign_mixer("member1", false, "member2"));
+        assert!(!is_foreign_mixer("member1", false, "member1"));
+        assert!(!is_foreign_mixer("engineer", true, "member2"));
+        assert!(!is_foreign_mixer("member1", false, ""));
+    }
+
+    fn member(id: &str, has_photo: bool) -> crate::api::MemberInfo {
+        crate::api::MemberInfo {
+            id: id.to_string(),
+            name: id.to_uppercase(),
+            has_photo,
+        }
+    }
+
+    #[test]
+    fn member_has_photo_reads_the_listed_member() {
+        let members = [member("member1", false), member("member2", true)];
+        assert_eq!(member_has_photo(&members, "member2"), Some(true));
+        assert_eq!(member_has_photo(&members, "member1"), Some(false));
+        assert_eq!(member_has_photo(&members, "member3"), None);
     }
 }

@@ -631,7 +631,7 @@ mod tests {
 #[cfg(test)]
 mod login_tests {
     use super::*;
-    use crate::login_guard::HashGate;
+    use crate::login_guard::{HashGate, Origin};
     use crate::pin_hash::{PEPPER_LEN, PinHasher};
     use axum::body::Body;
     use axum::extract::connect_info::MockConnectInfo;
@@ -930,10 +930,36 @@ mod login_tests {
         let mut state = test_state(dir.path()).await;
         state.hash_gate = Arc::new(HashGate::new(0, 0));
         let app = app(state.clone(), LAN);
-        let resp = login_as(&app, "member1", MEMBER_PIN, &[]).await;
+        let resp = tokio::time::timeout(
+            Duration::from_secs(5),
+            login_as(&app, "member1", MEMBER_PIN, &[]),
+        )
+        .await
+        .expect("a full gate answers at once instead of queueing");
         assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(resp.headers()[header::RETRY_AFTER], "1");
         assert_eq!(state.login_guard.stats().lan_failures, 0);
+    }
+
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn exhausting_the_engineer_budget_is_logged() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path()).await;
+        let now = Instant::now();
+        let client = |last: u8| ClientKey {
+            origin: Origin::Lan,
+            ip: std::net::IpAddr::from([10, 0, 1, last]),
+        };
+        for i in 0..30u8 {
+            record_failure(&state, &client(i), "member1", now);
+        }
+        assert!(
+            !logs_contain("exhausted the engineer budget"),
+            "30 failures stay within the budget"
+        );
+        record_failure(&state, &client(30), "member1", now);
+        assert!(logs_contain("exhausted the engineer budget"));
     }
 
     #[test]

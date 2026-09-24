@@ -13,6 +13,10 @@ use crate::pin_hash::PEPPER_LEN;
 
 #[cfg(windows)]
 mod dpapi;
+// Windows protects the pepper with DPAPI directly (no wrappers here: Linux
+// CI cannot build them, so their mutants could never be caught).
+#[cfg(windows)]
+use dpapi::{protect, unprotect};
 
 /// File name of the stored pepper.
 #[cfg(windows)]
@@ -47,16 +51,6 @@ pub fn load_or_create(dir: &Path) -> io::Result<[u8; PEPPER_LEN]> {
         }
         Err(e) => Err(e),
     }
-}
-
-#[cfg(windows)]
-fn protect(data: &[u8]) -> io::Result<Vec<u8>> {
-    dpapi::protect(data)
-}
-
-#[cfg(windows)]
-fn unprotect(data: &[u8]) -> io::Result<Vec<u8>> {
-    dpapi::unprotect(data)
 }
 
 #[cfg(not(windows))]
@@ -99,6 +93,19 @@ mod tests {
         std::fs::write(&path, b"short").unwrap();
         assert!(load_or_create(dir.path()).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), b"short");
+    }
+
+    #[test]
+    fn an_unreadable_pepper_is_an_error_not_a_new_pepper() {
+        // The path exists but is not a readable file: the read error comes
+        // back; only a missing file creates a pepper (a create attempt would
+        // fail with AlreadyExists instead).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(PEPPER_FILE);
+        std::fs::create_dir(&path).unwrap();
+        let err = load_or_create(dir.path()).unwrap_err();
+        assert_ne!(err.kind(), io::ErrorKind::AlreadyExists, "{err}");
+        assert!(path.is_dir());
     }
 
     #[cfg(not(windows))]

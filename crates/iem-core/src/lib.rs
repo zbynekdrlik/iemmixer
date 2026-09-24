@@ -51,7 +51,13 @@ pub fn build_time() -> &'static str {
 
 /// Full version string for display, e.g. "2.0.0-dev.3 (24.09.2026 10:45)".
 pub fn full_version() -> String {
-    let timestamp = build_time().parse::<i64>().unwrap_or(0);
+    full_version_at(build_time())
+}
+
+/// [`full_version`] for a `BUILD_TIME` value (unix seconds; "0" or unparsable
+/// means a local build).
+fn full_version_at(build_time: &str) -> String {
+    let timestamp = build_time.parse::<i64>().unwrap_or(0);
     if timestamp == 0 {
         format!("{VERSION} (local)")
     } else {
@@ -104,5 +110,22 @@ mod version_tests {
     #[test]
     fn full_version_starts_with_the_cargo_version() {
         assert!(full_version().starts_with(&format!("{VERSION} (")));
+    }
+
+    #[test]
+    fn full_version_names_a_local_build() {
+        assert_eq!(full_version_at("0"), format!("{VERSION} (local)"));
+        assert_eq!(
+            full_version_at("not a number"),
+            format!("{VERSION} (local)")
+        );
+    }
+
+    #[test]
+    fn full_version_shows_the_utc_build_time() {
+        assert_eq!(
+            full_version_at("1758707100"),
+            format!("{VERSION} (24.09.2025 09:45)")
+        );
     }
 }

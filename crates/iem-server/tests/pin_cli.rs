@@ -1,5 +1,6 @@
-//! `iem-server pin …` end to end: the binary reads the PIN from stdin and
-//! stores only an argon2id hash next to the site config.
+//! The `iem-server` command line end to end: `pin …` reads the PIN from stdin
+//! and stores only an argon2id hash next to the site config; no arguments run
+//! the server.
 
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
@@ -120,4 +121,14 @@ fn a_missing_site_config_is_an_error() {
             .code(),
         Some(1)
     );
+}
+
+#[test]
+fn no_arguments_run_the_server_which_needs_the_site_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = run_pin(dir.path(), &[], "");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "stderr: {stderr}");
+    assert!(stderr.contains("loading site config"), "stderr: {stderr}");
+    assert!(!stderr.contains("usage"), "stderr: {stderr}");
 }
