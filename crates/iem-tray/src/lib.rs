@@ -86,9 +86,9 @@ pub fn run() {
         config_dir,
     };
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-    rt_handle.spawn(async move {
+    let server = rt_handle.spawn(async move {
         if let Err(e) = iem_server::start_server(server_config, Some(ready_tx)).await {
-            tracing::error!("Web server error: {}", e);
+            tracing::error!("Web server error: {e:#}");
         }
     });
 
@@ -96,7 +96,14 @@ pub fn run() {
     rt_handle.block_on(async {
         match tokio::time::timeout(std::time::Duration::from_secs(10), ready_rx).await {
             Ok(Ok(())) => tracing::info!("Server ready on port {}", port),
-            Ok(Err(_)) => tracing::error!("Server startup channel dropped"),
+            Ok(Err(_)) => {
+                // The server returned before it was ready (e.g. a corrupt pepper
+                // or PIN store): refuse to run a tray without a server. Wait for
+                // the server task so its error is logged before the exit.
+                let _ = server.await;
+                tracing::error!("the server failed to start — see the error above; exiting");
+                std::process::exit(1);
+            }
             Err(_) => tracing::error!("Server startup timed out after 10s"),
         }
     });

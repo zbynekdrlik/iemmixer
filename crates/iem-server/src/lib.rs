@@ -38,6 +38,7 @@ pub mod talkback_buffer;
 #[cfg(feature = "test-helpers")]
 pub mod test_helpers;
 
+use anyhow::Context as _;
 use axum::Router;
 use axum::http::{HeaderName, HeaderValue};
 use iem_core::{Config, DiscoveredMember, ServerMsg};
@@ -113,8 +114,14 @@ pub struct AppState {
     pub event_tx: broadcast::Sender<(String, ServerMsg)>,
     /// Cache of last-known state per member (for diff detection)
     pub mixer_cache: Arc<RwLock<MixerCache>>,
-    /// Runtime PIN storage (persisted to pins.json)
+    /// Argon2id PIN hashes (`<config dir>/secrets/pin_hashes.json`)
     pub pin_store: Arc<RwLock<pin_store::PinStore>>,
+    /// argon2id hasher keyed with the pepper (`<config dir>/secrets/`)
+    pub pin_hasher: pin_hash::PinHasher,
+    /// Login failure budgets (program spec §5.3)
+    pub login_guard: Arc<login_guard::LoginGuard>,
+    /// Bounded concurrency for argon2id work
+    pub hash_gate: Arc<login_guard::HashGate>,
     /// Snapshot storage for mix history
     pub snapshot_store: Arc<snapshot_store::SnapshotStore>,
     /// Backup file store (full system backups as JSON files)
@@ -228,7 +235,14 @@ impl MixerCache {
 }
 
 impl AppState {
-    pub fn new(config: Config, config_dir: &std::path::Path) -> Self {
+    /// Production constructor. Loads the PIN pepper and the PIN hashes from
+    /// `<config dir>/secrets/`; an unreadable pepper or a corrupt or plaintext
+    /// PIN store is an error — never regenerated, never ignored — so the server
+    /// refuses to start.
+    pub fn try_new(config: Config, config_dir: &std::path::Path) -> std::io::Result<Self> {
+        let secrets_dir = config_dir.join(secrets::SECRETS_DIR);
+        let pepper = pepper::load_or_create(&secrets_dir)?;
+        let pin_store = pin_store::PinStore::load(&secrets_dir)?;
         let (event_tx, _) = broadcast::channel(256);
         #[cfg(feature = "audio")]
         // Capacity 64 (was 8): a shallow channel caused stale state under
@@ -248,7 +262,7 @@ impl AppState {
         );
         let mut initial_cache = MixerCache::new();
         initial_cache.valid_input_track_indices = initial_valid;
-        Self {
+        Ok(Self {
             config: Arc::new(RwLock::new(config)),
             http_client: reqwest::Client::builder()
                 .connect_timeout(std::time::Duration::from_secs(2))
@@ -257,7 +271,13 @@ impl AppState {
                 .expect("failed to build HTTP client"),
             event_tx,
             mixer_cache: Arc::new(RwLock::new(initial_cache)),
-            pin_store: Arc::new(RwLock::new(pin_store::PinStore::load(config_dir))),
+            pin_store: Arc::new(RwLock::new(pin_store)),
+            pin_hasher: pin_hash::PinHasher::new(pepper),
+            login_guard: Arc::new(login_guard::LoginGuard::new()),
+            hash_gate: Arc::new(login_guard::HashGate::new(
+                login_guard::HASH_CONCURRENCY,
+                login_guard::HASH_QUEUE,
+            )),
             snapshot_store: Arc::new(snapshot_store::SnapshotStore::new(config_dir)),
             backup_store: Arc::new(backup_store::BackupStore::new(config_dir)),
             preset_store: Arc::new(preset_store::PresetStore::new(config_dir)),
@@ -288,7 +308,13 @@ impl AppState {
             tunnel_watch: Arc::new(RwLock::new(tunnel_watch::TunnelWatch::new(
                 std::time::Instant::now(),
             ))),
-        }
+        })
+    }
+
+    /// Test constructor: panics where `try_new` returns an error.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn new(config: Config, config_dir: &std::path::Path) -> Self {
+        Self::try_new(config, config_dir).expect("test AppState: pepper and PIN store")
     }
 
     /// Construct a minimal `AppState` for testing purposes.
@@ -311,7 +337,7 @@ impl AppState {
 pub struct ServerConfig {
     pub port: u16,
     pub config: Config,
-    /// Directory where config and runtime data live (for pins.json, etc.)
+    /// Directory where config and runtime data live (secrets/, stores, etc.)
     pub config_dir: std::path::PathBuf,
 }
 
@@ -345,7 +371,8 @@ pub async fn start_server(
     let secrets = secrets::load_or_create(&server_config.config_dir.join(secrets::SECRETS_DIR))?;
     config.jwt_secret = secrets.jwt_secret;
     config.vapid_private_key = secrets.vapid_private_key;
-    let state = AppState::new(config, &server_config.config_dir);
+    let state = AppState::try_new(config, &server_config.config_dir)
+        .context("loading the PIN pepper and PIN hashes")?;
 
     // Auto-detect public IP for LAN/WAN detection (if not configured)
     {
@@ -446,7 +473,9 @@ pub async fn start_server(
                         tokio::spawn(async move {
                             tracing::info!(port = https_port, "HTTPS server listening");
                             if let Err(e) = axum_server::bind_rustls(https_addr, rustls_config)
-                                .serve(https_app.into_make_service())
+                                .serve(
+                                    https_app.into_make_service_with_connect_info::<SocketAddr>(),
+                                )
                                 .await
                             {
                                 tracing::error!("HTTPS server failed: {}", e);
@@ -506,7 +535,11 @@ pub async fn start_server(
         let _ = tx.send(());
     }
 
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }
@@ -692,6 +725,54 @@ mod tests {
         assert_eq!(
             response.headers().get("location").unwrap(),
             "https://mixer.example.org/api/mixer/1?token=abc123"
+        );
+    }
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+
+    fn server_config(dir: &std::path::Path) -> ServerConfig {
+        ServerConfig {
+            port: 0,
+            config: Config::default(),
+            config_dir: dir.to_path_buf(),
+        }
+    }
+
+    #[tokio::test]
+    async fn start_refuses_a_plaintext_pin_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets_dir = dir.path().join(secrets::SECRETS_DIR);
+        std::fs::create_dir_all(&secrets_dir).unwrap();
+        std::fs::write(
+            secrets_dir.join(pin_store::PIN_HASHES_FILE),
+            r#"{"members":{"member1":"1357"}}"#,
+        )
+        .unwrap();
+        let err = start_server(server_config(dir.path()), None)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("argon2id"), "{err:#}");
+    }
+
+    // Linux only: on Windows the pepper file is DPAPI data and the error text differs.
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn start_refuses_a_corrupt_pepper() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets_dir = dir.path().join(secrets::SECRETS_DIR);
+        std::fs::create_dir_all(&secrets_dir).unwrap();
+        std::fs::write(secrets_dir.join(pepper::PEPPER_FILE), b"short").unwrap();
+        let err = start_server(server_config(dir.path()), None)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("pepper"), "{err:#}");
+        assert_eq!(
+            std::fs::read(secrets_dir.join(pepper::PEPPER_FILE)).unwrap(),
+            b"short",
+            "never replaced"
         );
     }
 }

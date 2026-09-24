@@ -4,9 +4,9 @@ use axum::{
     Json, Router,
     body::Body,
     extract::Path,
-    http::{Method, StatusCode, header},
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
-    routing::{any, delete, get, post, put},
+    routing::{delete, get, post, put},
 };
 use serde::{Deserialize, Serialize};
 
@@ -95,8 +95,6 @@ pub fn api_routes(_state: AppState) -> Router<AppState> {
         .route("/api/members/{member_id}/photo", get(get_photo))
         .route("/api/members/{member_id}/photo", post(post_photo))
         .route("/api/members/{member_id}/photo", delete(delete_photo))
-        // Raw REAPER proxy
-        .route("/api/reaper/{*path}", any(reaper_proxy))
         // Audio WebSocket (engineer-only audio streaming) — must be before /ws/{member_id}
         .route("/ws/audio", get(ws_audio_handler))
         // Talkback WebSocket (engineer push-to-talk) (reaperiem#123) — must be before /ws/{member_id}
@@ -655,31 +653,6 @@ async fn audio_diagnostics_handler() -> impl IntoResponse {
     )
 }
 
-/// REAPER proxy handler (engineer-only, requires auth)
-async fn reaper_proxy(
-    state: axum::extract::State<AppState>,
-    headers: axum::http::HeaderMap,
-    method: Method,
-    path: Path<String>,
-    body: Body,
-) -> Result<Response, (StatusCode, Json<iem_core::ApiError>)> {
-    let config = state.config.read().await;
-    let claims = crate::auth::verify_member_access(&headers, "engineer", &config.jwt_secret)?;
-    if !claims.engineer {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(iem_core::ApiError::new(
-                "FORBIDDEN",
-                "REAPER proxy is engineer-only",
-            )),
-        ));
-    }
-    drop(config);
-    Ok(proxy::proxy_reaper(state, method, path, body)
-        .await
-        .into_response())
-}
-
 /// Static file routes (WASM assets)
 pub fn static_routes() -> Router<AppState> {
     Router::new()
@@ -1088,6 +1061,39 @@ mod tests {
             .unwrap();
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// X10: the raw REAPER passthrough is gone — even an engineer gets 404.
+    #[tokio::test]
+    async fn raw_reaper_passthrough_is_gone() {
+        use axum::body::Body;
+        use axum::http::{Method, Request, StatusCode};
+        use tower::ServiceExt;
+
+        let secret = "passthrough-test-secret";
+        let dir = tempfile::tempdir().unwrap();
+        let config = iem_core::Config {
+            jwt_secret: secret.to_string(),
+            ..iem_core::Config::default()
+        };
+        let state = AppState::new(config, dir.path());
+        let router = api_routes(state.clone()).with_state(state);
+        let token = make_test_token(secret, "engineer", true);
+        for method in [Method::GET, Method::POST] {
+            let resp = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method.clone())
+                        .uri("/api/reaper/_/NTRACK")
+                        .header("authorization", format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{method}");
+        }
     }
 }
 

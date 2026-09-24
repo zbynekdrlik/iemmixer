@@ -348,29 +348,6 @@ pub async fn preview_restore(
         }
     }
 
-    // --- PINs ---
-    let current_pins = state.pin_store.read().await.all_pins();
-    for (member_id, backup_pin) in &backup.pins {
-        let cur_pin = current_pins
-            .get(member_id)
-            .map(|s| s.as_str())
-            .unwrap_or("");
-        if cur_pin != backup_pin.as_str() {
-            changes.push(RestoreChange {
-                category: RestoreCategory::Pin,
-                description: member_id.clone(),
-                current_value: if cur_pin.is_empty() {
-                    "(none)".to_string()
-                } else {
-                    "(set)".to_string()
-                },
-                backup_value: "(set)".to_string(),
-            });
-        } else {
-            unchanged_count += 1;
-        }
-    }
-
     // --- Track lifecycle diff: REAPER vs backup.track_mutes ---
     // Tracks present in REAPER but absent from backup.track_mutes
     let tracks_in_reaper_not_in_backup =
@@ -419,9 +396,20 @@ pub async fn preview_restore(
     })
 }
 
+/// Backups made by the predecessor may carry plaintext PINs; they are never
+/// restored — the engineer resets PINs instead.
+pub fn pins_skip_notice(backup: &MixerBackup) -> Option<SkippedEntry> {
+    (!backup.pins.is_empty()).then(|| SkippedEntry {
+        category: RestoreCategory::Pin,
+        description: "pins".to_string(),
+        reason: "PINs are never restored from backups; reset them on the engineer page".to_string(),
+    })
+}
+
 /// Apply all values from a `MixerBackup` to the live system.
 ///
-/// Order: sends → track volumes → EQ → limiter → customizations → PINs → save project.
+/// Order: sends → track volumes → EQ → limiter → customizations → save project
+/// (PINs are never restored).
 pub async fn apply_restore(
     state: &AppState,
     backup: &MixerBackup,
@@ -708,39 +696,9 @@ pub async fn apply_restore(
         restored_count += 1;
     }
 
-    // --- Apply PINs (only if changed) ---
-    {
-        let pin_store_read = state.pin_store.read().await;
-        let current_pins = pin_store_read.all_pins();
-        drop(pin_store_read);
-
-        let mut any_pin_changed = false;
-        for (member_id, pin) in &backup.pins {
-            let current = current_pins
-                .get(member_id)
-                .map(|s| s.as_str())
-                .unwrap_or("");
-            if current == pin.as_str() {
-                continue; // Already matches
-            }
-            any_pin_changed = true;
-        }
-
-        if any_pin_changed {
-            let mut pin_store = state.pin_store.write().await;
-            for (member_id, pin) in &backup.pins {
-                if let Err(e) = pin_store.set_pin(member_id, pin) {
-                    tracing::warn!(member = %member_id, error = %e, "apply_restore: failed to set PIN");
-                    skipped.push(SkippedEntry {
-                        category: RestoreCategory::Pin,
-                        description: member_id.clone(),
-                        reason: format!("IO error setting PIN: {e}"),
-                    });
-                    continue;
-                }
-                restored_count += 1;
-            }
-        }
+    // --- PINs are never restored from backups (security baseline) ---
+    if let Some(notice) = pins_skip_notice(backup) {
+        skipped.push(notice);
     }
 
     // --- Save REAPER project ---
@@ -1336,5 +1294,16 @@ mod tests {
         backup.track_mutes.insert("MEMBER3 mic".to_string(), true);
         let result = compute_skipped_tracks(&track_map, &backup);
         assert!(result.contains(&"MEMBER3 mic".to_string()));
+    }
+
+    #[test]
+    fn pins_in_a_legacy_backup_are_skipped_with_a_notice() {
+        let mut backup = MixerBackup::default();
+        assert!(pins_skip_notice(&backup).is_none());
+        backup
+            .pins
+            .insert("member1".to_string(), "<PIN>".to_string());
+        let notice = pins_skip_notice(&backup).expect("notice");
+        assert_eq!(notice.category, RestoreCategory::Pin);
     }
 }

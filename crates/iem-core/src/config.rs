@@ -42,14 +42,6 @@ pub struct Config {
     #[serde(default)]
     pub inputs: Vec<InputTrack>,
 
-    /// PIN codes for authentication (member_id -> PIN)
-    #[serde(default)]
-    pub pins: HashMap<String, String>,
-
-    /// Engineer PIN (full access)
-    #[serde(default)]
-    pub engineer_pin: Option<String>,
-
     /// JWT signing key. Never read from the site file: the server loads it
     /// from `<config dir>/secrets/jwt_secret` (`iem_server::secrets`).
     #[serde(skip)]
@@ -153,8 +145,6 @@ impl Default for Config {
             members: Vec::new(),
             dante_outputs: HashMap::new(),
             inputs: Vec::new(),
-            pins: HashMap::new(),
-            engineer_pin: None,
             jwt_secret: String::new(),
             vapid_private_key: String::new(),
             tls: false,
@@ -640,6 +630,13 @@ MEMBER3 = [75, 76]
         };
         assert_eq!(lan_only.share_url().as_deref(), Some("http://10.0.0.10"));
         assert_eq!(Config::default().share_url(), None);
+    }
+
+    #[test]
+    fn test_plaintext_pins_are_rejected_in_the_site_file() {
+        for text in ["engineer_pin = \"2468\"\n", "[pins]\nmember1 = \"2468\"\n"] {
+            assert!(toml::from_str::<Config>(text).is_err(), "{text}");
+        }
     }
 }
 
