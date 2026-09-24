@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="96" fill="#1a1a2e"/>
+  <g fill="none" stroke="#4ecdc4" stroke-width="28" stroke-linecap="round">
+    <!-- Headband -->
+    <path d="M136 260 C136 140, 376 140, 376 260"/>
+    <!-- Left ear cup -->
+    <rect x="108" y="240" width="56" height="80" rx="16" fill="#4ecdc4" stroke="none"/>
+    <!-- Right ear cup -->
+    <rect x="348" y="240" width="56" height="80" rx="16" fill="#4ecdc4" stroke="none"/>
+    <!-- Left cushion -->
+    <rect x="96" y="232" width="16" height="96" rx="8" fill="#4ecdc4" stroke="none" opacity="0.5"/>
+    <!-- Right cushion -->
+    <rect x="400" y="232" width="16" height="96" rx="8" fill="#4ecdc4" stroke="none" opacity="0.5"/>
+  </g>
+</svg>

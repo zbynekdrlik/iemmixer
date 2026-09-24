@@ -1,0 +1,98 @@
+[package]
+name = "iem-server"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "HTTPS/WebSocket server of iemmixer"
+
+[dependencies]
+# Core library
+iem-core = { path = "../iem-core", features = ["vapid"] }
+
+# Web framework
+axum = { version = "0.8", features = ["macros", "json", "ws"] }
+
+# Tower middleware
+tower-http = { version = "0.6", features = ["fs", "cors", "set-header"] }
+
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "net"] }
+
+# HTTP client for REAPER proxy
+reqwest = { version = "0.12", features = ["json"] }
+
+# Async combinators (parallel futures)
+futures = "0.3"
+
+# JWT authentication
+jsonwebtoken = "9"
+
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Embed WASM assets
+rust-embed = { version = "8", features = ["include-exclude"] }
+mime_guess = "2"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "2.0"
+
+# Logging
+tracing = "0.1"
+
+# Date/time for daily snapshots
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+
+# System info
+local-ip-address = "0.6"
+
+# For standalone server binary
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+
+# TLS support for HTTPS (PWA installability on phones)
+axum-server = { version = "0.8", features = ["tls-rustls"], optional = true }
+rustls = { version = "0.23", features = ["ring"], optional = true }
+dirs = { version = "6.0", optional = true }
+
+# Audio streaming (OIEM UDP relay -> WebSocket)
+bytes = { version = "1", optional = true }
+
+# Test harness helpers (only enabled by `test-helpers` feature for integration tests)
+tempfile = { version = "3", optional = true }
+
+# Web Push notifications (RFC 8291 + VAPID) — pure Rust, no OpenSSL (#133)
+p256 = { version = "0.13", features = ["ecdh", "pkcs8"] }
+aes-gcm = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+rand_core = { version = "0.6", features = ["getrandom"] }
+base64 = "0.22"
+url = "2"
+
+[[bin]]
+name = "iem-server"
+path = "src/bin/server.rs"
+required-features = ["standalone"]
+
+[[test]]
+name = "poller_snapshot_ordering"
+path = "tests/poller_snapshot_ordering.rs"
+required-features = ["test-helpers"]
+
+[features]
+default = []
+standalone = ["tracing-subscriber"]
+tls = ["axum-server", "rustls", "dirs"]
+audio = ["dep:bytes"]
+test-helpers = ["dep:tempfile"]  # exposes AppState::new_for_test and test_helpers module for integration tests
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+tempfile = "3"
+tracing-test = "0.2"
+proptest = "1"

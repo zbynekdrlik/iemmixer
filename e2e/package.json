@@ -1,0 +1,14 @@
+{
+  "name": "iem-mixer-e2e",
+  "version": "1.0.0",
+  "description": "E2E tests for IEM Mixer",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "test:debug": "playwright test --debug"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.42.0",
+    "ws": "^8.18.0"
+  }
+}

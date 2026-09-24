@@ -1,0 +1,26 @@
+[package]
+name = "iem-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core types, configuration and protocol for iemmixer"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = { version = "0.9", optional = true }
+serde_json = "1.0"
+thiserror = "2.0"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+# Constant-time comparison for PIN verification (prevents timing attacks)
+subtle = "2"
+# VAPID key generation (Web Push) — optional, not needed on WASM
+p256 = { version = "0.13", features = ["pkcs8", "ecdsa"], optional = true }
+rand_core = { version = "0.6", features = ["getrandom"], optional = true }
+base64 = { version = "0.22", optional = true }
+
+[features]
+default = ["config"]
+config = ["dep:serde_yaml"]
+vapid = ["dep:p256", "dep:rand_core", "dep:base64"]

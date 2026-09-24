@@ -1,0 +1,104 @@
+[package]
+name = "iem-ui"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Leptos WASM web UI of iemmixer"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Core library (WASM-safe: no config/serde_yaml)
+iem-core = { path = "../iem-core", default-features = false }
+
+# Leptos with CSR (client-side rendering)
+leptos = { version = "0.7", features = ["csr"] }
+leptos_router = "0.7"
+
+# WASM support
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+console_error_panic_hook = "0.1"
+
+# Web APIs
+web-sys = { version = "0.3", features = [
+    "Window",
+    "Storage",
+    "Document",
+    "Element",
+    "HtmlElement",
+    "HtmlInputElement",
+    "Location",
+    "console",
+    "WebSocket",
+    "MessageEvent",
+    "CloseEvent",
+    "ErrorEvent",
+    # Keyboard handling (Esc-to-cancel in ConfirmDialog, #206)
+    "KeyboardEvent",
+    # Touch event handling for safe fader touch
+    "TouchEvent",
+    "TouchList",
+    "Touch",
+    "DomRect",
+    "Navigator",
+    "MouseEvent",
+    "PointerEvent",
+    "EventTarget",
+    # Fetch timeout support
+    "AbortController",
+    "AbortSignal",
+    "RequestInit",
+    "Request",
+    "Response",
+    "Headers",
+    # Web Audio API for alert sounds (#125)
+    "AudioContext",
+    "BaseAudioContext",
+    "AudioNode",
+    "AudioScheduledSourceNode",
+    "AudioDestinationNode",
+    "AudioParam",
+    "OscillatorNode",
+    "OscillatorType",
+    "GainNode",
+    "HtmlAudioElement",
+    "HtmlMediaElement",
+    "Notification",
+    "NotificationOptions",
+    "NotificationPermission",
+    "MediaDevices",
+    "MediaStream",
+    "MediaStreamConstraints",
+    "MediaStreamTrack",
+    # Web Push subscription API (#133)
+    "ServiceWorkerContainer",
+    "ServiceWorkerRegistration",
+    "PushManager",
+    "PushSubscription",
+    "PushSubscriptionOptionsInit",
+    "PushSubscriptionJson",
+    # File upload and canvas for photo resize (#16)
+    "File",
+    "FileList",
+    "FileReader",
+    "Blob",
+    "HtmlCanvasElement",
+    "CanvasRenderingContext2d",
+    "HtmlImageElement",
+    "Url",
+] }
+js-sys = "0.3"
+
+# HTTP requests from WASM
+gloo-net = "0.6"
+gloo-timers = "0.3"
+gloo-storage = "0.3"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde-wasm-bindgen = "0.6"

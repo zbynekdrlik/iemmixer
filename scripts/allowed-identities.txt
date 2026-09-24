@@ -1,0 +1,7 @@
+# Author and committer emails allowed in this repository's history (checked by
+# scripts/denylist_scan.py --identities in the pre-push hook and in CI).
+26905282+zbynekdrlik@users.noreply.github.com
+# GitHub itself: committer of merges made on github.com / by `gh pr merge`
+noreply@github.com
+# Dependabot (alerts only today; kept so a future Dependabot PR is not blocked)
+49699333+dependabot[bot]@users.noreply.github.com

@@ -1,0 +1,28 @@
+/target/
+/crates/iem-ui/dist/
+/crates/iem-tray/gen/
+node_modules/
+/e2e/test-results/
+/e2e/playwright-report/
+__pycache__/
+*.log
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+# Harness-local Claude Code settings (never shared)
+.claude/settings.local.json
+# Runtime data and secrets are created on the PC, never committed
+# (exact file names: a `pepper.*` glob would also hide src/pepper.rs)
+secrets/
+pin_hashes.json
+pepper.dpapi
+pepper.test
+/config/site.toml
+.env
+*.env.local
+TARGETS.md
+credentials.json
+*.pem
+*.key

@@ -1,0 +1,21 @@
+Source: zbynekdrlik/reaperiem (private) at 03be5b97deafdc5d765516014c3f59370edd534b (origin/main, 2026-09-23)
+Method: git archive of the paths below, then scripts/scrub_import.py with the private map, manual scrub (S0 plan Task 2 Step 7:
+identities, removed default PINs, Dante channel numbers rewritten to the synthetic map), denylist + gitleaks scans.
+Lockfile: the predecessor's iem-mixer/Cargo.lock was stale (last changed 2026-03-28 at 1.121.0); the import re-resolves it with
+`cargo metadata`, so dozens of crates are resolved fresh at import time rather than taken from the predecessor's tested set.
+
+TAKE (source -> destination)
+iem-mixer/Cargo.lock                         -> Cargo.lock
+iem-mixer/crates/iem-core/                   -> crates/iem-core/
+iem-mixer/crates/iem-server/                 -> crates/iem-server/   (without tests/reaper_live.rs)
+iem-mixer/iem-ui/                            -> crates/iem-ui/       (without .gitignore)
+iem-mixer/src-tauri/                         -> crates/iem-tray/
+iem-mixer/e2e/{package.json,package-lock.json,playwright.config.ts} -> e2e/
+iem-mixer/e2e/tests/{smoke,auth-security,member-photo,auto-redirect,login-keyboard,pwa}.spec.ts -> e2e/tests/
+scripts/{check_disposal_safety.py,test_check_disposal_safety.py} -> scripts/
+
+DROP (everything else), by class: root workspace package and README, app config files with site data,
+live E2E specs and credential fixtures, the VST plugin and its submodule, MCP server, REAPER scripts and JSFX,
+REAPER projects, screenshots, legacy web pages, docs and plans, workflows, repo-level config and hooks.
+Kept for later imports from the same SHA: live E2E specs (S6/S7 via HIL), Windows service setup script (S6),
+REAPER scripts and projects as references for the importer/golden generator (S1b/S4).

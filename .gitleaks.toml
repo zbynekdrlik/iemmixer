@@ -1,0 +1,4 @@
+# gitleaks: the default rule set. An allowlist entry needs a comment naming the
+# test fixture and why it is not a secret; a real secret is never allowlisted.
+[extend]
+useDefault = true
