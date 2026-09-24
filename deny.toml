@@ -7,7 +7,7 @@ version = 2
 yanked = "deny"
 unmaintained = "workspace"
 ignore = [
-  { id = "RUSTSEC-2024-0429", reason = "glib < 0.20 only via Tauri's Linux GTK stack; the tray ships for Windows only; tracked in #2 until its own tracking issue is filed" },
+  { id = "RUSTSEC-2024-0429", reason = "glib < 0.20 only via Tauri's Linux GTK stack; the tray ships for Windows only; tracked in #12" },
 ]
 
 [licenses]
