@@ -214,7 +214,7 @@ pub fn MixerPage() -> impl IntoView {
                     when=move || !soloed.get().is_empty()
                     fallback=|| view! {
                         <div class="header-version">
-                            <span class="header-version-number">{iem_core::version_label()}</span>
+                            <span class="header-version-number" data-testid="version">{iem_core::version_label()}</span>
                             <span class="header-version-date">{iem_core::build_datetime()}</span>
                         </div>
                     }

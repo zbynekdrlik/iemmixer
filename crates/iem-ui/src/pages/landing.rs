@@ -79,7 +79,7 @@ pub fn LandingPage() -> impl IntoView {
             <header class="header">
                 <h1>"IEM Mixer"</h1>
                 <div class="header-version">
-                    <span class="header-version-number">{iem_core::version_label()}</span>
+                    <span class="header-version-number" data-testid="version">{iem_core::version_label()}</span>
                     <span class="header-version-date">{iem_core::build_datetime()}</span>
                 </div>
             </header>

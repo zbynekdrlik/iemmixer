@@ -1,5 +1,5 @@
 import { ENGINEER_PIN, MEMBER_PIN } from "./support/pins";
-import { test, expect, Page } from "@playwright/test";
+import { REAPER_ABSENT, test, expect, Page } from "./support/fixtures";
 
 // Helper to login and get a JWT token
 async function getToken(
@@ -33,6 +33,9 @@ async function loginAs(page: Page, member: string) {
 }
 
 test.describe("Cross-member access prevention (#77)", () => {
+  // REAPER absent in mock E2E until S5
+  test.use({ allowedConsole: REAPER_ABSENT });
+
   test("member cannot access another member's mixer API", async ({ page }) => {
     await page.goto("/");
 
@@ -153,10 +156,10 @@ test.describe("Cross-member access prevention (#77)", () => {
     expect(resp.status()).not.toBe(403);
   });
 
-  test("engineer member rejects default member PIN", async ({ page }) => {
+  test("engineer member rejects a member PIN", async ({ page }) => {
     await page.goto("/");
 
-    // Try to login as "engineer" with the default member PIN (<PIN>)
+    // Try to login as "engineer" with a member PIN — must be rejected
     const resp = await page.request.post("/api/auth", {
       data: { member: "engineer", pin: MEMBER_PIN },
     });

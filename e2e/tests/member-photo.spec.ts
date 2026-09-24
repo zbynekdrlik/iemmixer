@@ -3,7 +3,7 @@ import { ENGINEER_PIN, MEMBER_PIN } from "./support/pins";
  * Member Photo Tests — upload, display, and remove profile photos (#16).
  */
 
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./support/fixtures";
 
 const BASE_URL = process.env.E2E_BASE_URL || "http://localhost:80";
 

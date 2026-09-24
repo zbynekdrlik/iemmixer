@@ -1,5 +1,5 @@
 import { ENGINEER_PIN, MEMBER_PIN } from "./support/pins";
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./support/fixtures";
 
 
 test.describe("Smoke Tests - Must All Pass", () => {
@@ -147,6 +147,9 @@ test.describe("UX Polish - Issue #3: Login Back Button", () => {
 });
 
 test.describe("Network Error UX - Issue #56", () => {
+  // These tests abort /api/members on purpose; Chrome reports the aborted request.
+  test.use({ allowedConsole: [/Failed to load resource: net::ERR_CONNECTION_FAILED/] });
+
   test("shows error message when API is unreachable", async ({ page }) => {
     // Block /api/members requests to simulate network failure
     await page.route("**/api/members", (route) =>
