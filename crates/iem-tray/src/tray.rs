@@ -16,7 +16,7 @@ pub fn setup_tray(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Display full version with git hash for unique deploy identification
     let version_label = format!("IEM Mixer v{}", iem_core::full_version());
-    let version_item = MenuItem::with_id(app, "version", &version_label, false, None::<&str>)?;
+    let version_item = MenuItem::with_id(app, "version", version_label, false, None::<&str>)?;
 
     let separator1 = PredefinedMenuItem::separator(app)?;
 
@@ -107,7 +107,7 @@ fn copy_url_to_clipboard(app: &AppHandle, url: &str) {
     if let Some(window) = app.get_webview_window("main") {
         let quoted = serde_json::to_string(url).unwrap_or_else(|_| "\"\"".to_string());
         let js = format!("navigator.clipboard.writeText({quoted})");
-        let _ = window.eval(&js);
+        let _ = window.eval(js);
     }
 }
 

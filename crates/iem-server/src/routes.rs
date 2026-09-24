@@ -941,8 +941,10 @@ mod tests {
 
     fn push_unsubscribe_test_state(secret: &str) -> (AppState, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let mut config = iem_core::Config::default();
-        config.jwt_secret = secret.to_string();
+        let config = iem_core::Config {
+            jwt_secret: secret.to_string(),
+            ..Default::default()
+        };
         let state = AppState::new(config, dir.path());
         (state, dir)
     }

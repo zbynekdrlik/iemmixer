@@ -109,11 +109,11 @@ struct MeterEntry {
 }
 
 thread_local! {
-    static REGISTRY: RefCell<Vec<MeterEntry>> = RefCell::new(Vec::new());
-    static NEXT_ID: Cell<usize> = Cell::new(0);
-    static RAF_HANDLE: Cell<i32> = Cell::new(0);
-    static RAF_RUNNING: Cell<bool> = Cell::new(false);
-    static LAST_TICK_TIME: Cell<f64> = Cell::new(0.0);
+    static REGISTRY: RefCell<Vec<MeterEntry>> = const { RefCell::new(Vec::new()) };
+    static NEXT_ID: Cell<usize> = const { Cell::new(0) };
+    static RAF_HANDLE: Cell<i32> = const { Cell::new(0) };
+    static RAF_RUNNING: Cell<bool> = const { Cell::new(false) };
+    static LAST_TICK_TIME: Cell<f64> = const { Cell::new(0.0) };
 }
 
 /// Register a meter and ensure the shared RAF loop is running.

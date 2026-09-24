@@ -28,16 +28,16 @@ pub fn LandingPage() -> impl IntoView {
     Effect::new(move |_| {
         if let Some(auth) = get_auth() {
             let window = web_sys::window().unwrap();
-            if let Ok(Some(storage)) = window.session_storage() {
-                if storage.get_item("iem_redirected").ok().flatten().is_none() {
-                    let _ = storage.set_item("iem_redirected", "1");
-                    if !is_token_expired() {
-                        let target = format!("/{}", auth.member);
-                        navigate(&target, Default::default());
-                    } else {
-                        let target = format!("/login?member={m}&next=/{m}", m = auth.member);
-                        navigate(&target, Default::default());
-                    }
+            if let Ok(Some(storage)) = window.session_storage()
+                && storage.get_item("iem_redirected").ok().flatten().is_none()
+            {
+                let _ = storage.set_item("iem_redirected", "1");
+                if !is_token_expired() {
+                    let target = format!("/{}", auth.member);
+                    navigate(&target, Default::default());
+                } else {
+                    let target = format!("/login?member={m}&next=/{m}", m = auth.member);
+                    navigate(&target, Default::default());
                 }
             }
         }

@@ -328,8 +328,10 @@ impl AppState {
     /// Only compiled under `#[cfg(feature = "test-helpers")]`.
     #[cfg(feature = "test-helpers")]
     pub fn new_for_test(reaper_url: String, data_dir: std::path::PathBuf) -> Self {
-        let mut config = iem_core::Config::default();
-        config.reaper_url = reaper_url;
+        let config = iem_core::Config {
+            reaper_url,
+            ..Default::default()
+        };
         Self::new(config, &data_dir)
     }
 }

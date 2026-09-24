@@ -48,10 +48,10 @@ pub fn ConfirmDialog(
 
     let handle_overlay_click = move |ev: web_sys::MouseEvent| {
         let target = ev.target().unwrap();
-        if let Ok(elem) = target.dyn_into::<web_sys::HtmlElement>() {
-            if elem.class_list().contains("confirm-overlay") {
-                on_cancel.run(());
-            }
+        if let Ok(elem) = target.dyn_into::<web_sys::HtmlElement>()
+            && elem.class_list().contains("confirm-overlay")
+        {
+            on_cancel.run(());
         }
     };
 

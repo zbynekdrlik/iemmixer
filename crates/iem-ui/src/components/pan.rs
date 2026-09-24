@@ -277,20 +277,20 @@ pub fn PanKnob(
             // Pan is activated - prevent scroll and use RELATIVE positioning
             ev.prevent_default();
 
-            if let Some(target) = ev.target() {
-                if let Ok(input) = target.dyn_into::<HtmlInputElement>() {
-                    let rect = input.get_bounding_client_rect();
+            if let Some(target) = ev.target()
+                && let Ok(input) = target.dyn_into::<HtmlInputElement>()
+            {
+                let rect = input.get_bounding_client_rect();
 
-                    if let Some(base_x) = *move_base_x_tm.borrow() {
-                        let delta_x = current_x - base_x;
-                        // Pan range is 0.0-1.0, slider width maps to full range
-                        let delta_ratio = delta_x / rect.width();
-                        let base = saved_value.get_untracked();
-                        let new_value = (base + delta_ratio as f32).clamp(0.0, 1.0);
-                        let _ = set_local_value.try_set(new_value);
-                        input.set_value(&format!("{}", (new_value * 100.0) as i32));
-                        on_change_touch.run(new_value);
-                    }
+                if let Some(base_x) = *move_base_x_tm.borrow() {
+                    let delta_x = current_x - base_x;
+                    // Pan range is 0.0-1.0, slider width maps to full range
+                    let delta_ratio = delta_x / rect.width();
+                    let base = saved_value.get_untracked();
+                    let new_value = (base + delta_ratio as f32).clamp(0.0, 1.0);
+                    let _ = set_local_value.try_set(new_value);
+                    input.set_value(&format!("{}", (new_value * 100.0) as i32));
+                    on_change_touch.run(new_value);
                 }
             }
         }

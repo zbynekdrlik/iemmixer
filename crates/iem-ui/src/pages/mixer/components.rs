@@ -59,13 +59,13 @@ pub(super) fn GlobalVolumeFader(
             let _ = set_guard_id.try_set(None);
             let _ = set_global_touched.try_set(false);
         });
-        if let Some(w) = web_sys::window() {
-            if let Ok(id) = w.set_timeout_with_callback_and_timeout_and_arguments_0(
+        if let Some(w) = web_sys::window()
+            && let Ok(id) = w.set_timeout_with_callback_and_timeout_and_arguments_0(
                 cb.unchecked_ref(),
                 POST_RELEASE_GUARD_MS,
-            ) {
-                let _ = set_guard_id.try_set(Some(id));
-            }
+            )
+        {
+            let _ = set_guard_id.try_set(Some(id));
         }
     };
 
@@ -110,13 +110,13 @@ pub(super) fn GlobalVolumeFader(
                     ws_send(ws, &iem_core::ClientMsg::SetGlobalLevel { level_db: val });
                 }
             });
-            if let Some(w) = web_sys::window() {
-                if let Ok(id) = w.set_timeout_with_callback_and_timeout_and_arguments_0(
+            if let Some(w) = web_sys::window()
+                && let Ok(id) = w.set_timeout_with_callback_and_timeout_and_arguments_0(
                     cb.unchecked_ref(),
                     THROTTLE_INTERVAL_MS as i32,
-                ) {
-                    let _ = set_pending_timeout.try_set(Some(id));
-                }
+                )
+            {
+                let _ = set_pending_timeout.try_set(Some(id));
             }
         }
     });
@@ -292,13 +292,13 @@ pub(super) fn StemsVolumeFader(
             let _ = set_guard_id.try_set(None);
             let _ = set_stems_touched.try_set(false);
         });
-        if let Some(w) = web_sys::window() {
-            if let Ok(id) = w.set_timeout_with_callback_and_timeout_and_arguments_0(
+        if let Some(w) = web_sys::window()
+            && let Ok(id) = w.set_timeout_with_callback_and_timeout_and_arguments_0(
                 cb.unchecked_ref(),
                 POST_RELEASE_GUARD_MS,
-            ) {
-                let _ = set_guard_id.try_set(Some(id));
-            }
+            )
+        {
+            let _ = set_guard_id.try_set(Some(id));
         }
     };
 
@@ -342,13 +342,13 @@ pub(super) fn StemsVolumeFader(
                     ws_send(ws, &iem_core::ClientMsg::SetStemsLevel { level_db: val });
                 }
             });
-            if let Some(w) = web_sys::window() {
-                if let Ok(id) = w.set_timeout_with_callback_and_timeout_and_arguments_0(
+            if let Some(w) = web_sys::window()
+                && let Ok(id) = w.set_timeout_with_callback_and_timeout_and_arguments_0(
                     cb.unchecked_ref(),
                     THROTTLE_INTERVAL_MS as i32,
-                ) {
-                    let _ = set_pending_timeout.try_set(Some(id));
-                }
+                )
+            {
+                let _ = set_pending_timeout.try_set(Some(id));
             }
         }
     });
@@ -589,11 +589,9 @@ pub(super) fn ChannelList(
                     // All captures are Copy + Send + Sync, so this closure is too.
                     let cancel_guard = move |key: usize| {
                         let _ = set_guard_ids.try_update(|ids| {
-                            if let Some(id) = ids.remove(&key) {
-                                if let Some(w) = web_sys::window() {
+                            if let Some(id) = ids.remove(&key) && let Some(w) = web_sys::window() {
                                     w.clear_timeout_with_handle(id);
                                 }
-                            }
                         });
                     };
 
@@ -612,28 +610,23 @@ pub(super) fn ChannelList(
                                 }
                             });
                         });
-                        if let Some(w) = web_sys::window() {
-                            if let Ok(id) =
+                        if let Some(w) = web_sys::window() && let Ok(id) =
                                 w.set_timeout_with_callback_and_timeout_and_arguments_0(
                                     cb.unchecked_ref(),
                                     POST_RELEASE_GUARD_MS,
-                                )
-                            {
+                                ) {
                                 let _ = set_guard_ids.try_update(|ids| {
                                     ids.insert(key, id);
                                 });
                             }
-                        }
                     };
 
                     // Helper: cancel a pending throttle timeout for a track
                     let cancel_pending_timeout = move |tidx: usize| {
                         let _ = set_pending_timeouts.try_update(|m| {
-                            if let Some(id) = m.remove(&tidx) {
-                                if let Some(w) = web_sys::window() {
+                            if let Some(id) = m.remove(&tidx) && let Some(w) = web_sys::window() {
                                     w.clear_timeout_with_handle(id);
                                 }
-                            }
                         });
                     };
 
@@ -652,13 +645,10 @@ pub(super) fn ChannelList(
                             {
                                 ch.level_db = new_level;
                             }
-                            if let Some(partner) = partner_idx {
-                                if let Some(ch) =
-                                    chs.iter_mut().find(|c| c.track_index == partner)
-                                {
+                            if let Some(partner) = partner_idx && let Some(ch) =
+                                    chs.iter_mut().find(|c| c.track_index == partner) {
                                     ch.level_db = new_level;
                                 }
-                            }
                         });
 
                         // Throttled WebSocket send
@@ -730,18 +720,15 @@ pub(super) fn ChannelList(
                                     }
                                 }
                             });
-                            if let Some(w) = web_sys::window() {
-                                if let Ok(id) =
+                            if let Some(w) = web_sys::window() && let Ok(id) =
                                     w.set_timeout_with_callback_and_timeout_and_arguments_0(
                                         cb.unchecked_ref(),
                                         THROTTLE_INTERVAL_MS as i32,
-                                    )
-                                {
+                                    ) {
                                     let _ = set_pending_timeouts.try_update(|m| {
                                         m.insert(track_idx, id);
                                     });
                                 }
-                            }
                         }
                     });
 
@@ -766,13 +753,10 @@ pub(super) fn ChannelList(
                             {
                                 ch.pan = new_pan;
                             }
-                            if let Some(partner) = partner_idx {
-                                if let Some(ch) =
-                                    chs.iter_mut().find(|c| c.track_index == partner)
-                                {
+                            if let Some(partner) = partner_idx && let Some(ch) =
+                                    chs.iter_mut().find(|c| c.track_index == partner) {
                                     ch.pan = 1.0 - new_pan;
                                 }
-                            }
                         });
 
                         // Throttled WebSocket send (same pattern as level)
@@ -843,18 +827,15 @@ pub(super) fn ChannelList(
                                     }
                                 }
                             });
-                            if let Some(w) = web_sys::window() {
-                                if let Ok(id) =
+                            if let Some(w) = web_sys::window() && let Ok(id) =
                                     w.set_timeout_with_callback_and_timeout_and_arguments_0(
                                         cb.unchecked_ref(),
                                         THROTTLE_INTERVAL_MS as i32,
-                                    )
-                                {
+                                    ) {
                                     let _ = set_pending_timeouts.try_update(|m| {
                                         m.insert(pan_key, id);
                                     });
                                 }
-                            }
                         }
 
                         // Cancellable post-release guard
@@ -888,13 +869,10 @@ pub(super) fn ChannelList(
                             {
                                 ch.muted = new_muted;
                             }
-                            if let Some(partner) = partner_idx {
-                                if let Some(ch) =
-                                    chs.iter_mut().find(|c| c.track_index == partner)
-                                {
+                            if let Some(partner) = partner_idx && let Some(ch) =
+                                    chs.iter_mut().find(|c| c.track_index == partner) {
                                     ch.muted = new_muted;
                                 }
-                            }
                         });
 
                         ws_send(
@@ -952,11 +930,9 @@ pub(super) fn ChannelList(
                                     if let Some(ch) = chs.iter_mut().find(|c| c.track_index == track_idx) {
                                         ch.muted = true;
                                     }
-                                    if let Some(partner) = partner_idx {
-                                        if let Some(ch) = chs.iter_mut().find(|c| c.track_index == partner) {
+                                    if let Some(partner) = partner_idx && let Some(ch) = chs.iter_mut().find(|c| c.track_index == partner) {
                                             ch.muted = true;
                                         }
-                                    }
                                 });
                             }
 

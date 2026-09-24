@@ -11,16 +11,16 @@ pub fn AlertButton(
     active: ReadSignal<bool>,
 ) -> impl IntoView {
     let on_click = move |_| {
-        if let Some(socket) = ws.get_untracked() {
-            if socket.ready_state() == web_sys::WebSocket::OPEN {
-                let cmd = if active.get_untracked() {
-                    serde_json::to_string(&iem_core::ClientMsg::ClearAlert)
-                } else {
-                    serde_json::to_string(&iem_core::ClientMsg::CallEngineer)
-                };
-                if let Ok(json) = cmd {
-                    let _ = socket.send_with_str(&json);
-                }
+        if let Some(socket) = ws.get_untracked()
+            && socket.ready_state() == web_sys::WebSocket::OPEN
+        {
+            let cmd = if active.get_untracked() {
+                serde_json::to_string(&iem_core::ClientMsg::ClearAlert)
+            } else {
+                serde_json::to_string(&iem_core::ClientMsg::CallEngineer)
+            };
+            if let Ok(json) = cmd {
+                let _ = socket.send_with_str(&json);
             }
         }
 

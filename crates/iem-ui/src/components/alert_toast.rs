@@ -12,23 +12,23 @@ pub fn AlertToast(
     ws: ReadSignal<Option<web_sys::WebSocket>>,
 ) -> impl IntoView {
     // Start/stop vibration loop and sound loop when alert changes
-    let vib_effect: std::rc::Rc<std::cell::RefCell<Option<Closure<dyn FnMut()>>>> =
+    let vib_effect: crate::components::CallbackSlot =
         std::rc::Rc::new(std::cell::RefCell::new(None));
-    let snd_effect: std::rc::Rc<std::cell::RefCell<Option<Closure<dyn FnMut()>>>> =
+    let snd_effect: crate::components::CallbackSlot =
         std::rc::Rc::new(std::cell::RefCell::new(None));
-    let vis_effect: std::rc::Rc<std::cell::RefCell<Option<Closure<dyn FnMut()>>>> =
+    let vis_effect: crate::components::CallbackSlot =
         std::rc::Rc::new(std::cell::RefCell::new(None));
     Effect::new(move || {
         let current = alert.get();
         if let Some((_, ref name)) = current {
             // Clean up previous alert state if Effect re-fires (Some→Some transition)
-            if let Some(ref cb) = *vis_effect.borrow() {
-                if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
-                    let _ = doc.remove_event_listener_with_callback(
-                        "visibilitychange",
-                        cb.as_ref().unchecked_ref(),
-                    );
-                }
+            if let Some(ref cb) = *vis_effect.borrow()
+                && let Some(doc) = web_sys::window().and_then(|w| w.document())
+            {
+                let _ = doc.remove_event_listener_with_callback(
+                    "visibilitychange",
+                    cb.as_ref().unchecked_ref(),
+                );
             }
             vib_effect.borrow_mut().take();
             snd_effect.borrow_mut().take();
@@ -79,12 +79,11 @@ pub fn AlertToast(
             // visibilitychange listener: re-fire pattern when engineer returns to app
             let pattern_vis = pattern.clone();
             let vis_cb = Closure::wrap(Box::new(move || {
-                if let Some(window) = web_sys::window() {
-                    if let Some(doc) = window.document() {
-                        if !doc.hidden() {
-                            let _ = window.navigator().vibrate_with_pattern(&pattern_vis);
-                        }
-                    }
+                if let Some(window) = web_sys::window()
+                    && let Some(doc) = window.document()
+                    && !doc.hidden()
+                {
+                    let _ = window.navigator().vibrate_with_pattern(&pattern_vis);
                 }
             }) as Box<dyn FnMut()>);
             if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
@@ -116,22 +115,21 @@ pub fn AlertToast(
             *snd_effect.borrow_mut() = Some(sound_cb);
 
             // Red page pulse overlay for SOS alert (reaperiem#123)
-            if let Some(window) = web_sys::window() {
-                if let Some(doc) = window.document() {
-                    if let Some(body) = doc.body() {
-                        let _ = body.class_list().add_1("talk-live-overlay");
-                    }
-                }
+            if let Some(window) = web_sys::window()
+                && let Some(doc) = window.document()
+                && let Some(body) = doc.body()
+            {
+                let _ = body.class_list().add_1("talk-live-overlay");
             }
         } else {
             // Remove visibilitychange listener before dropping the closure
-            if let Some(ref cb) = *vis_effect.borrow() {
-                if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
-                    let _ = doc.remove_event_listener_with_callback(
-                        "visibilitychange",
-                        cb.as_ref().unchecked_ref(),
-                    );
-                }
+            if let Some(ref cb) = *vis_effect.borrow()
+                && let Some(doc) = web_sys::window().and_then(|w| w.document())
+            {
+                let _ = doc.remove_event_listener_with_callback(
+                    "visibilitychange",
+                    cb.as_ref().unchecked_ref(),
+                );
             }
             // Drop closures
             vib_effect.borrow_mut().take();
@@ -139,23 +137,21 @@ pub fn AlertToast(
             vis_effect.borrow_mut().take();
             stop_loops();
             // Remove red page pulse overlay
-            if let Some(window) = web_sys::window() {
-                if let Some(doc) = window.document() {
-                    if let Some(body) = doc.body() {
-                        let _ = body.class_list().remove_1("talk-live-overlay");
-                    }
-                }
+            if let Some(window) = web_sys::window()
+                && let Some(doc) = window.document()
+                && let Some(body) = doc.body()
+            {
+                let _ = body.class_list().remove_1("talk-live-overlay");
             }
         }
     });
 
     let on_dismiss = move |_| {
-        if let Some(socket) = ws.get_untracked() {
-            if socket.ready_state() == web_sys::WebSocket::OPEN {
-                let cmd =
-                    serde_json::to_string(&iem_core::ClientMsg::ClearAlert).unwrap_or_default();
-                let _ = socket.send_with_str(&cmd);
-            }
+        if let Some(socket) = ws.get_untracked()
+            && socket.ready_state() == web_sys::WebSocket::OPEN
+        {
+            let cmd = serde_json::to_string(&iem_core::ClientMsg::ClearAlert).unwrap_or_default();
+            let _ = socket.send_with_str(&cmd);
         }
     };
 
@@ -189,25 +185,21 @@ fn play_chime() {
 fn stop_loops() {
     if let Some(window) = web_sys::window() {
         let mut had_loops = false;
-        if let Ok(val) = js_sys::Reflect::get(&window, &JsValue::from_str("__iem_alert_vib")) {
-            if let Some(id) = val.as_f64() {
-                window.clear_interval_with_handle(id as i32);
-                let _ = js_sys::Reflect::delete_property(
-                    &window,
-                    &JsValue::from_str("__iem_alert_vib"),
-                );
-                had_loops = true;
-            }
+        if let Ok(val) = js_sys::Reflect::get(&window, &JsValue::from_str("__iem_alert_vib"))
+            && let Some(id) = val.as_f64()
+        {
+            window.clear_interval_with_handle(id as i32);
+            let _ =
+                js_sys::Reflect::delete_property(&window, &JsValue::from_str("__iem_alert_vib"));
+            had_loops = true;
         }
-        if let Ok(val) = js_sys::Reflect::get(&window, &JsValue::from_str("__iem_alert_snd")) {
-            if let Some(id) = val.as_f64() {
-                window.clear_interval_with_handle(id as i32);
-                let _ = js_sys::Reflect::delete_property(
-                    &window,
-                    &JsValue::from_str("__iem_alert_snd"),
-                );
-                had_loops = true;
-            }
+        if let Ok(val) = js_sys::Reflect::get(&window, &JsValue::from_str("__iem_alert_snd"))
+            && let Some(id) = val.as_f64()
+        {
+            window.clear_interval_with_handle(id as i32);
+            let _ =
+                js_sys::Reflect::delete_property(&window, &JsValue::from_str("__iem_alert_snd"));
+            had_loops = true;
         }
         // Only cancel vibration if we actually had loops running
         if had_loops {
@@ -225,33 +217,24 @@ async fn request_and_notify(name: &str) {
     let navigator = window.navigator();
 
     // Try to send via service worker (most reliable, works in background)
-    if let Ok(sw) = js_sys::Reflect::get(&navigator, &JsValue::from_str("serviceWorker")) {
-        if let Ok(ready) = js_sys::Reflect::get(&sw, &JsValue::from_str("ready")) {
-            if let Ok(promise) = ready.dyn_into::<js_sys::Promise>() {
-                if let Ok(reg) = wasm_bindgen_futures::JsFuture::from(promise).await {
-                    // Post message to SW to show notification
-                    let msg = js_sys::Object::new();
-                    let _ = js_sys::Reflect::set(
-                        &msg,
-                        &JsValue::from_str("type"),
-                        &JsValue::from_str("ALERT"),
-                    );
-                    let _ = js_sys::Reflect::set(
-                        &msg,
-                        &JsValue::from_str("name"),
-                        &JsValue::from_str(name),
-                    );
-                    if let Ok(active) = js_sys::Reflect::get(&reg, &JsValue::from_str("active")) {
-                        if let Ok(post_fn) =
-                            js_sys::Reflect::get(&active, &JsValue::from_str("postMessage"))
-                        {
-                            if let Some(func) = post_fn.dyn_ref::<js_sys::Function>() {
-                                let _ = func.call1(&active, &msg);
-                            }
-                        }
-                    }
-                }
-            }
+    if let Ok(sw) = js_sys::Reflect::get(&navigator, &JsValue::from_str("serviceWorker"))
+        && let Ok(ready) = js_sys::Reflect::get(&sw, &JsValue::from_str("ready"))
+        && let Ok(promise) = ready.dyn_into::<js_sys::Promise>()
+        && let Ok(reg) = wasm_bindgen_futures::JsFuture::from(promise).await
+    {
+        // Post message to SW to show notification
+        let msg = js_sys::Object::new();
+        let _ = js_sys::Reflect::set(
+            &msg,
+            &JsValue::from_str("type"),
+            &JsValue::from_str("ALERT"),
+        );
+        let _ = js_sys::Reflect::set(&msg, &JsValue::from_str("name"), &JsValue::from_str(name));
+        if let Ok(active) = js_sys::Reflect::get(&reg, &JsValue::from_str("active"))
+            && let Ok(post_fn) = js_sys::Reflect::get(&active, &JsValue::from_str("postMessage"))
+            && let Some(func) = post_fn.dyn_ref::<js_sys::Function>()
+        {
+            let _ = func.call1(&active, &msg);
         }
     }
 

@@ -76,6 +76,11 @@ pub fn parse_limiter_activity_totals(text: &str) -> HashMap<usize, u64> {
     totals
 }
 
+/// REAPER TRACK flags: bit 3 (value 8) means the track is muted.
+fn track_flags_muted(flags: i32) -> bool {
+    (flags & 8) != 0
+}
+
 /// Discover band members from REAPER by querying tracks ending in " inear".
 /// REAPER is the source of truth for member names.
 /// Returns the list of discovered members, or empty if REAPER is unreachable.
@@ -602,7 +607,7 @@ async fn poll_reaper_and_broadcast(state: &AppState) {
                 .insert(member_id.clone(), *track_idx);
 
             let level_db = crate::proxy::quantize_02(reaper_vol_to_db(*vol_linear));
-            let muted = (*flags & 8) != 0;
+            let muted = track_flags_muted(*flags);
 
             let changed = match cache.global_volumes.get(member_id) {
                 Some(gv) => (gv.level_db - level_db).abs() > 0.05 || gv.muted != muted,
@@ -637,7 +642,7 @@ async fn poll_reaper_and_broadcast(state: &AppState) {
                 .insert(member_id.clone(), *track_idx);
 
             let level_db = crate::proxy::quantize_02(reaper_vol_to_db(*vol_linear));
-            let muted = (*flags & 8) != 0;
+            let muted = track_flags_muted(*flags);
 
             let changed = match cache.stems_volumes.get(member_id) {
                 Some(sv) => (sv.level_db - level_db).abs() > 0.05 || sv.muted != muted,
@@ -1130,11 +1135,11 @@ mod tests {
     #[test]
     fn test_ntrack_flags_mute_bit() {
         // Flag 8 = muted (bit 3)
-        assert!((8_i32 & 8) != 0, "Flag 8 should be muted");
-        assert!((0_i32 & 8) == 0, "Flag 0 should be unmuted");
+        assert!(track_flags_muted(8), "Flag 8 should be muted");
+        assert!(!track_flags_muted(0), "Flag 0 should be unmuted");
         // Flag can have other bits set too
-        assert!((9_i32 & 8) != 0, "Flag 9 (8+1) should be muted");
-        assert!((7_i32 & 8) == 0, "Flag 7 should be unmuted");
+        assert!(track_flags_muted(9), "Flag 9 (8+1) should be muted");
+        assert!(!track_flags_muted(7), "Flag 7 should be unmuted");
     }
 
     /// Test MixerCache initializes with empty global volumes
@@ -1151,26 +1156,24 @@ mod tests {
         let mut meters = HashMap::new();
         for line in text.lines() {
             let parts: Vec<&str> = line.split('\t').collect();
-            if parts.first() == Some(&"TRACK") && parts.len() > 7 {
-                if let Ok(track_idx) = parts[1].parse::<usize>() {
-                    if parts.len() >= 14 {
-                        if let (Ok(peak_db10), Ok(pos_db10)) =
-                            (parts[6].parse::<f32>(), parts[7].parse::<f32>())
-                        {
-                            let db10_to_linear = |v: f32| -> f32 {
-                                if v <= -1500.0 {
-                                    0.0
-                                } else {
-                                    10.0_f32.powf(v / 10.0 / 20.0)
-                                }
-                            };
-                            meters.insert(
-                                track_idx,
-                                [db10_to_linear(peak_db10), db10_to_linear(pos_db10)],
-                            );
-                        }
+            if parts.first() == Some(&"TRACK")
+                && parts.len() > 7
+                && let Ok(track_idx) = parts[1].parse::<usize>()
+                && parts.len() >= 14
+                && let (Ok(peak_db10), Ok(pos_db10)) =
+                    (parts[6].parse::<f32>(), parts[7].parse::<f32>())
+            {
+                let db10_to_linear = |v: f32| -> f32 {
+                    if v <= -1500.0 {
+                        0.0
+                    } else {
+                        10.0_f32.powf(v / 10.0 / 20.0)
                     }
-                }
+                };
+                meters.insert(
+                    track_idx,
+                    [db10_to_linear(peak_db10), db10_to_linear(pos_db10)],
+                );
             }
         }
         meters
@@ -1493,9 +1496,7 @@ TRACK\t23\tOLDMEMBER1 inear\t0\t1.000000\t0.000000\t-50\t-60\t1.000000\t0\t0\t22
 
         // Track inserted → count changes
         let new_count: usize = 34;
-        let changed = cache
-            .last_track_count
-            .map_or(false, |prev| prev != new_count);
+        let changed = cache.last_track_count.is_some_and(|prev| prev != new_count);
         assert!(changed, "Should detect track count change from 33 to 34");
         cache.last_track_count = Some(new_count);
         assert_eq!(cache.last_track_count, Some(34));

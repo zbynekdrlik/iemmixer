@@ -100,7 +100,7 @@ pub fn ListenButton(
     // Uses raw JS setInterval to get an i32 handle (Send+Sync) for on_cleanup,
     // since gloo_timers::Interval contains non-Send closures.
     let (stats_interval, set_stats_interval) = signal(Option::<i32>::None);
-    let stats_closure_effect: std::rc::Rc<std::cell::RefCell<Option<Closure<dyn FnMut()>>>> =
+    let stats_closure_effect: crate::components::CallbackSlot =
         std::rc::Rc::new(std::cell::RefCell::new(None));
     Effect::new(move || {
         let current_state = state.get();
@@ -139,7 +139,7 @@ pub fn ListenButton(
 
     // Auto-reconnect: when state becomes Reconnecting, start exponential backoff
     let member_id_reconnect = member_id.clone();
-    let reconnect_closure_effect: std::rc::Rc<std::cell::RefCell<Option<Closure<dyn FnMut()>>>> =
+    let reconnect_closure_effect: crate::components::CallbackSlot =
         std::rc::Rc::new(std::cell::RefCell::new(None));
     Effect::new(move || {
         let current_state = state.get();
@@ -205,15 +205,15 @@ pub fn ListenButton(
     // so they can't be captured in on_cleanup. They are dropped naturally when the
     // component scope drops. The Effects already clean them up on re-run.
     on_cleanup(move || {
-        if let Some(id) = stats_interval.get_untracked() {
-            if let Some(w) = web_sys::window() {
-                w.clear_interval_with_handle(id);
-            }
+        if let Some(id) = stats_interval.get_untracked()
+            && let Some(w) = web_sys::window()
+        {
+            w.clear_interval_with_handle(id);
         }
-        if let Some(id) = reconnect_interval.get_untracked() {
-            if let Some(w) = web_sys::window() {
-                w.clear_interval_with_handle(id);
-            }
+        if let Some(id) = reconnect_interval.get_untracked()
+            && let Some(w) = web_sys::window()
+        {
+            w.clear_interval_with_handle(id);
         }
         let _ = set_intentional_stop.try_set(true);
         if let Some(ws) = ws.get_untracked() {
@@ -366,12 +366,11 @@ fn start_listening(
             member_id: member_id_open.clone(),
         })
         .unwrap_or_default();
-        if let Some(w) = web_sys::window() {
-            if let Ok(ws_val) = js_sys::Reflect::get(&w, &"__iem_audio_ws".into()) {
-                if let Some(ws) = ws_val.dyn_ref::<web_sys::WebSocket>() {
-                    let _ = ws.send_with_str(&cmd);
-                }
-            }
+        if let Some(w) = web_sys::window()
+            && let Ok(ws_val) = js_sys::Reflect::get(&w, &"__iem_audio_ws".into())
+            && let Some(ws) = ws_val.dyn_ref::<web_sys::WebSocket>()
+        {
+            let _ = ws.send_with_str(&cmd);
         }
     }) as Box<dyn FnMut(_)>);
 
@@ -394,7 +393,7 @@ fn start_listening(
             let raw_len = array.length();
             let data = array.to_vec();
             let count = frame_counter.get();
-            if count < 3 || count % 200 == 0 {
+            if count < 3 || count.is_multiple_of(200) {
                 web_sys::console::log_1(
                     &format!(
                         "[audio-ws] #{} arraybuf={}B vec={}B",
@@ -415,28 +414,27 @@ fn start_listening(
         }
 
         // Text message = status update
-        if let Some(text) = event.data().as_string() {
-            if let Ok(msg) = serde_json::from_str::<iem_core::ServerMsg>(&text) {
-                if let iem_core::ServerMsg::AudioStatus { status, target } = msg {
-                    if let Some(t) = target {
-                        let _ = set_listen_target.try_set(t);
-                    }
-                    match status.as_str() {
-                        "listening" => {
-                            let _ = set_state_msg.try_set(ListenState::Listening);
-                            is_listening.set(true);
-                        }
-                        "no_source" => {
-                            let _ = set_state_msg.try_set(ListenState::NoSource);
-                            is_listening.set(false);
-                        }
-                        "stopped" => {
-                            let _ = set_state_msg.try_set(ListenState::Idle);
-                            is_listening.set(false);
-                        }
-                        _ => {}
-                    }
+        if let Some(text) = event.data().as_string()
+            && let Ok(msg) = serde_json::from_str::<iem_core::ServerMsg>(&text)
+            && let iem_core::ServerMsg::AudioStatus { status, target } = msg
+        {
+            if let Some(t) = target {
+                let _ = set_listen_target.try_set(t);
+            }
+            match status.as_str() {
+                "listening" => {
+                    let _ = set_state_msg.try_set(ListenState::Listening);
+                    is_listening.set(true);
                 }
+                "no_source" => {
+                    let _ = set_state_msg.try_set(ListenState::NoSource);
+                    is_listening.set(false);
+                }
+                "stopped" => {
+                    let _ = set_state_msg.try_set(ListenState::Idle);
+                    is_listening.set(false);
+                }
+                _ => {}
             }
         }
     }) as Box<dyn FnMut(_)>);

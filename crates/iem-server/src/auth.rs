@@ -61,6 +61,23 @@ enum PinMatch {
     None,
 }
 
+/// A rejection already rendered as a response. Boxed so the `Err` variant of
+/// the login and PIN-change handlers stays pointer-sized (`Response` is 128
+/// bytes; clippy `result_large_err`).
+pub struct Rejection(Box<Response>);
+
+impl From<Response> for Rejection {
+    fn from(response: Response) -> Self {
+        Self(Box::new(response))
+    }
+}
+
+impl IntoResponse for Rejection {
+    fn into_response(self) -> Response {
+        *self.0
+    }
+}
+
 fn error_response(status: StatusCode, code: &str, message: &str) -> Response {
     (status, Json(ApiError::new(code, message))).into_response()
 }
@@ -87,10 +104,10 @@ pub fn too_many_attempts(wait: Duration) -> Response {
 async fn with_hasher<T: Send + 'static>(
     state: &AppState,
     job: impl FnOnce(&PinHasher) -> T + Send + 'static,
-) -> Result<T, Response> {
+) -> Result<T, Rejection> {
     let Some(permit) = state.hash_gate.acquire().await else {
         tracing::warn!("PIN hashing gate full — answering 429");
-        return Err(too_many_attempts(Duration::from_secs(1)));
+        return Err(Rejection::from(too_many_attempts(Duration::from_secs(1))));
     };
     let hasher = state.pin_hasher.clone();
     tokio::task::spawn_blocking(move || {
@@ -100,11 +117,11 @@ async fn with_hasher<T: Send + 'static>(
     .await
     .map_err(|e| {
         tracing::error!(error = %e, "PIN hashing task failed");
-        error_response(
+        Rejection::from(error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "HASH_ERROR",
             "PIN check failed",
-        )
+        ))
     })
 }
 
@@ -134,15 +151,15 @@ pub async fn login(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(req): Json<LoginRequest>,
-) -> Result<Json<LoginResponse>, Response> {
+) -> Result<Json<LoginResponse>, Rejection> {
     let client = ClientKey::from_request(peer.ip(), &headers);
     let now = Instant::now();
     if let Err(wait) = state.login_guard.check(&client, &req.member, now) {
         tracing::info!(origin = ?client.origin, member = %req.member, wait_ms = wait.as_millis() as u64, "login throttled");
-        return Err(too_many_attempts(wait));
+        return Err(Rejection::from(too_many_attempts(wait)));
     }
     if !req.member.is_empty() && !member_exists(&state, &req.member).await {
-        return Err(member_not_found());
+        return Err(Rejection::from(member_not_found()));
     }
     let (engineer_hash, member_hash) = {
         let store = state.pin_store.read().await;
@@ -166,20 +183,20 @@ pub async fn login(
     match matched {
         PinMatch::Engineer => {
             state.login_guard.record_success(&client, &req.member);
-            issue_token(&config, ENGINEER_ID, true).map_err(IntoResponse::into_response)
+            issue_token(&config, ENGINEER_ID, true).map_err(|e| Rejection::from(e.into_response()))
         }
         PinMatch::Member => {
             state.login_guard.record_success(&client, &req.member);
-            issue_token(&config, &req.member, false).map_err(IntoResponse::into_response)
+            issue_token(&config, &req.member, false).map_err(|e| Rejection::from(e.into_response()))
         }
         PinMatch::None => {
             record_failure(&state, &client, &req.member, now);
             tracing::info!(origin = ?client.origin, member = %req.member, "login failed: invalid PIN");
-            Err(error_response(
+            Err(Rejection::from(error_response(
                 StatusCode::UNAUTHORIZED,
                 "INVALID_PIN",
                 "Invalid PIN",
-            ))
+            )))
         }
     }
 }
@@ -240,45 +257,45 @@ pub async fn change_pin(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(req): Json<ChangePinRequest>,
-) -> Result<StatusCode, Response> {
+) -> Result<StatusCode, Rejection> {
     let claims = {
         let config = state.config.read().await;
         extract_claims_from_header(&headers, &config.jwt_secret)
             .map_err(IntoResponse::into_response)?
     };
     if !is_valid_pin_format(&req.new_pin) {
-        return Err(error_response(
+        return Err(Rejection::from(error_response(
             StatusCode::BAD_REQUEST,
             "INVALID_FORMAT",
             "PIN must be exactly 4 digits",
-        ));
+        )));
     }
     let target = if claims.engineer {
         let member = req.member.as_deref().unwrap_or("");
         if member.is_empty() {
-            return Err(error_response(
+            return Err(Rejection::from(error_response(
                 StatusCode::BAD_REQUEST,
                 "MISSING_MEMBER",
                 "Engineer must specify target member",
-            ));
+            )));
         }
         if member != ENGINEER_ID && !member_exists(&state, member).await {
-            return Err(member_not_found());
+            return Err(Rejection::from(member_not_found()));
         }
         member.to_string()
     } else {
         let old_pin = req.old_pin.clone().unwrap_or_default();
         if old_pin.is_empty() {
-            return Err(error_response(
+            return Err(Rejection::from(error_response(
                 StatusCode::BAD_REQUEST,
                 "MISSING_OLD_PIN",
                 "Current PIN is required",
-            ));
+            )));
         }
         let client = ClientKey::from_request(peer.ip(), &headers);
         let now = Instant::now();
         if let Err(wait) = state.login_guard.check(&client, &claims.sub, now) {
-            return Err(too_many_attempts(wait));
+            return Err(Rejection::from(too_many_attempts(wait)));
         }
         let current = state
             .pin_store
@@ -292,11 +309,11 @@ pub async fn change_pin(
         .await?;
         if !old_ok {
             record_failure(&state, &client, &claims.sub, now);
-            return Err(error_response(
+            return Err(Rejection::from(error_response(
                 StatusCode::UNAUTHORIZED,
                 "INVALID_PIN",
                 "Current PIN is incorrect",
-            ));
+            )));
         }
         state.login_guard.record_success(&client, &claims.sub);
         claims.sub.clone()

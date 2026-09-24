@@ -92,7 +92,6 @@ pub(crate) fn write_new_private(path: &Path, data: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::Engine as _;
 
     #[test]
     fn creates_both_secrets_once_and_reloads_them() {

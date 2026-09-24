@@ -1141,7 +1141,7 @@ mod tests {
         let cur = -3.0f64;
         let backup = -3.00005f64;
         // Within tolerance (0.0001) → no change
-        assert!(!((cur - backup).abs() > 0.0001));
+        assert!((cur - backup).abs() <= 0.0001);
 
         let cur = -3.0f64;
         let backup = -3.5f64;
@@ -1154,7 +1154,7 @@ mod tests {
         let cur = 0.0f64;
         let backup = 0.0005f64;
         // Within tolerance (0.001) → no change
-        assert!(!((cur - backup).abs() > 0.001));
+        assert!((cur - backup).abs() <= 0.001);
 
         let cur = 0.0f64;
         let backup = 0.1f64;

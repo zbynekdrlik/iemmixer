@@ -14,6 +14,16 @@ export const test = base.extend<ConsoleGuard>({
   allowedConsole: [[], { option: true }],
   consoleGuard: [
     async ({ page, allowedConsole }, use) => {
+      // Playwright reads an array whose second element is an object as a
+      // `[value, options]` fixture tuple, so `test.use({ allowedConsole:
+      // [/a/, /b/] })` would arrive here as the single RegExp /a/. Lists of
+      // two or more patterns go in the tuple form
+      // `[[/a/, /b/], { scope: "test" }]`.
+      if (!Array.isArray(allowedConsole)) {
+        throw new Error(
+          "allowedConsole must be a RegExp[]: wrap two or more patterns as [[/a/, /b/], { scope: \"test\" }]",
+        );
+      }
       const problems: string[] = [];
       page.on("console", (msg) => {
         if (msg.type() !== "error" && msg.type() !== "warning") return;

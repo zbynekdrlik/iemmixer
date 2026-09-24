@@ -55,13 +55,15 @@ pub fn MixerPage() -> impl IntoView {
         }
 
         // Cross-member access check: only allow access to own mixer (or engineer)
-        if let Some(auth) = crate::auth::get_auth() {
-            if !auth.engineer && auth.member != member && !member.is_empty() {
-                // Clear stale auth and redirect to login for the target member
-                crate::auth::clear_auth();
-                let login_url = format!("/login?member={}&next=/{}", member, member);
-                navigate_to_login(&login_url, Default::default());
-            }
+        if let Some(auth) = crate::auth::get_auth()
+            && !auth.engineer
+            && auth.member != member
+            && !member.is_empty()
+        {
+            // Clear stale auth and redirect to login for the target member
+            crate::auth::clear_auth();
+            let login_url = format!("/login?member={}&next=/{}", member, member);
+            navigate_to_login(&login_url, Default::default());
         }
     });
 
@@ -132,10 +134,10 @@ pub fn MixerPage() -> impl IntoView {
     {
         let mid = member_id();
         wasm_bindgen_futures::spawn_local(async move {
-            if let Ok(members) = crate::api::get_members().await {
-                if let Some(m) = members.iter().find(|m| m.id == mid) {
-                    state.update_has_photo(m.has_photo);
-                }
+            if let Ok(members) = crate::api::get_members().await
+                && let Some(m) = members.iter().find(|m| m.id == mid)
+            {
+                state.update_has_photo(m.has_photo);
             }
         });
     }
@@ -143,12 +145,12 @@ pub fn MixerPage() -> impl IntoView {
     // Set up all background tasks (WS connect, reconnect, watchdog, token-expiry).
     // Registers on_cleanup internally to clear JS intervals on scope disposal.
     // Background closures check disposal_guard + try_get_untracked for safety.
-    setup_connection(state, member_id.clone());
+    setup_connection(state, member_id);
 
     // Signal::derive wraps the member ID so it can be passed into Memo/Callback
     // closures that require Send + Sync bounds, while staying reactive (tracks
     // route params changes — StoredValue was a snapshot that missed late params).
-    let member_id_signal = Signal::derive(member_id.clone());
+    let member_id_signal = Signal::derive(member_id);
 
     // Handle back button
     let on_back = move |_| {
@@ -271,7 +273,7 @@ pub fn MixerPage() -> impl IntoView {
             {(!is_engineer).then(|| view! { <TunnelBanner status=tunnel /> })}
 
             <CategoryTabs
-                active=active_category.into()
+                active=active_category
                 on_select=move |cat| { state.select_category(cat); }
                 show_hidden=Signal::derive(move || !hidden_channels.get().is_empty())
                 show_mixes=Signal::derive(move || channels.get().iter().any(|ch| ch.category == "mixes"))
@@ -309,7 +311,7 @@ pub fn MixerPage() -> impl IntoView {
                                 set_global_touched=set_global_touched
                                 connected=connected
                                 ws=ws
-                                meters=meters.into()
+                                meters=meters
                                 output_track_idx=output_track_idx
                                 set_eq_open=set_eq_open
                                 set_eq_bands=set_eq_bands
@@ -330,7 +332,7 @@ pub fn MixerPage() -> impl IntoView {
                                 set_stems_touched=set_stems_touched
                                 connected=connected
                                 ws=ws
-                                meters=meters.into()
+                                meters=meters
                                 stems_bus_idx=stems_bus_idx
                                 set_eq_open=set_eq_open
                                 set_eq_bands=set_eq_bands
@@ -339,7 +341,7 @@ pub fn MixerPage() -> impl IntoView {
                         </Show>
                         <ChannelList
                             display_channels=display_channels.into()
-                            meters=meters.into()
+                            meters=meters
                             channels=channels
                             set_channels=set_channels
                             set_fader_touched=set_fader_touched
@@ -373,7 +375,7 @@ pub fn MixerPage() -> impl IntoView {
                                 set_stems_touched=set_stems_touched
                                 connected=connected
                                 ws=ws
-                                meters=meters.into()
+                                meters=meters
                                 stems_bus_idx=stems_bus_idx
                                 set_eq_open=set_eq_open
                                 set_eq_bands=set_eq_bands
@@ -407,7 +409,7 @@ pub fn MixerPage() -> impl IntoView {
             </Show>
 
             <PresetModal
-                visible=preset_modal_visible.into()
+                visible=preset_modal_visible
                 member_id=member_id()
                 connected=connected
                 on_close=on_close_modal
@@ -416,7 +418,7 @@ pub fn MixerPage() -> impl IntoView {
             />
 
             <SettingsModal
-                visible=settings_modal_visible.into()
+                visible=settings_modal_visible
                 on_close=Callback::new(move |_: ()| { state.close_settings_modal(); })
                 on_open_pin_change=Callback::new(move |_: ()| { state.open_pin_change_modal(); })
                 double_tap_fader=double_tap_fader
@@ -428,13 +430,13 @@ pub fn MixerPage() -> impl IntoView {
             />
 
             <PinChangeModal
-                visible=pin_modal_visible.into()
+                visible=pin_modal_visible
                 on_close=Callback::new(move |_: ()| { state.close_pin_change_modal(); })
                 member_id=member_id()
             />
 
             <SnapshotModal
-                visible=snapshot_modal_visible.into()
+                visible=snapshot_modal_visible
                 member_id=member_id()
                 on_close=Callback::new(move |_: ()| { state.close_snapshot_modal(); })
             />

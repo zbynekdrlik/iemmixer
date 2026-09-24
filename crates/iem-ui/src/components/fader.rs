@@ -386,10 +386,10 @@ pub fn Fader(
         *timeout_handle_te.borrow_mut() = None;
         let _ = set_is_pending.try_set(false);
 
-        if is_activated.get_untracked() {
-            if let Some(cb) = on_activate {
-                cb.run(false);
-            }
+        if is_activated.get_untracked()
+            && let Some(cb) = on_activate
+        {
+            cb.run(false);
         }
 
         let _ = set_is_activated.try_set(false);
@@ -400,10 +400,10 @@ pub fn Fader(
 
         // Don't fire on_touch_state(false) if animation is running
         // (animation manages its own touch state lifecycle)
-        if !is_animating.get_untracked() {
-            if let Some(cb) = on_touch_state {
-                cb.run(false);
-            }
+        if !is_animating.get_untracked()
+            && let Some(cb) = on_touch_state
+        {
+            cb.run(false);
         }
     };
 
@@ -412,29 +412,27 @@ pub fn Fader(
         *timeout_handle_tc.borrow_mut() = None;
         let _ = set_is_pending.try_set(false);
 
-        if is_activated.get_untracked() {
-            if let Some(cb) = on_activate {
-                cb.run(false);
-            }
+        if is_activated.get_untracked()
+            && let Some(cb) = on_activate
+        {
+            cb.run(false);
         }
 
         let _ = set_is_activated.try_set(false);
         let _ = set_is_touch_interaction.try_set(false);
 
-        if !is_animating.get_untracked() {
-            if let Some(cb) = on_touch_state {
-                cb.run(false);
-            }
+        if !is_animating.get_untracked()
+            && let Some(cb) = on_touch_state
+        {
+            cb.run(false);
         }
     };
 
     // --- Mouse handler (300ms activation, relative movement — same as touch) ---
 
     // Store document-level closures to remove them on mouseup (prevents listener leak)
-    let mouse_move_closure: Rc<RefCell<Option<Closure<dyn FnMut(web_sys::MouseEvent)>>>> =
-        Rc::new(RefCell::new(None));
-    let mouse_up_closure: Rc<RefCell<Option<Closure<dyn FnMut(web_sys::MouseEvent)>>>> =
-        Rc::new(RefCell::new(None));
+    let mouse_move_closure: crate::components::MouseCallbackSlot = Rc::new(RefCell::new(None));
+    let mouse_up_closure: crate::components::MouseCallbackSlot = Rc::new(RefCell::new(None));
     let mm_closure_md = mouse_move_closure.clone();
     let mu_closure_md = mouse_up_closure.clone();
 
@@ -540,10 +538,10 @@ pub fn Fader(
             *timeout_handle_mu.borrow_mut() = None;
             let _ = set_is_pending.try_set(false);
 
-            if is_activated.try_get_untracked().unwrap_or(false) {
-                if let Some(cb) = on_activate {
-                    cb.run(false);
-                }
+            if is_activated.try_get_untracked().unwrap_or(false)
+                && let Some(cb) = on_activate
+            {
+                cb.run(false);
             }
 
             let _ = set_is_activated.try_set(false);
@@ -633,8 +631,11 @@ mod tests {
         // Only .0/.2/.4/.6/.8 values should be produced
         assert_eq!(quantize(-1.1), -1.2);
         assert_eq!(quantize(-1.3), -1.4);
-        assert_eq!(quantize(-1.5), -1.4); // midpoint rounds to even (.4 is 7*0.2, .6 is 8*0.2 — round to -1.4)
-        assert_eq!(quantize(-1.7), -1.6); // -.7 is 3.5 steps below -1.0, rounds to -1.6
+        // Midpoints round half away from zero (`f32::round`), like -3.3, 6.7,
+        // -1.1 and -1.3 above and -1.9 below: -1.5 is -7.5 steps → -8 → -1.6,
+        // and -1.7 is -8.5 steps → -9 → -1.8.
+        assert_eq!(quantize(-1.5), -1.6);
+        assert_eq!(quantize(-1.7), -1.8);
         assert_eq!(quantize(-1.9), -2.0);
     }
 

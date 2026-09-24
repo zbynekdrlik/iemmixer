@@ -46,7 +46,8 @@ test.describe("Login protection (program spec §5.3)", () => {
 
   test.describe("login page", () => {
     // The wrong PINs below are deliberate: Chrome reports each rejected request.
-    test.use({ allowedConsole: [/status of 401/, /status of 429/] });
+    // Two patterns: the `[value, options]` tuple form (see support/fixtures.ts).
+    test.use({ allowedConsole: [[/status of 401/, /status of 429/], { scope: "test" }] });
 
     test("shows the wait time after repeated wrong PINs", async ({ page }) => {
       await page.setExtraHTTPHeaders(tunnelClient(14));

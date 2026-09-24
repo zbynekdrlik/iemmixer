@@ -208,7 +208,7 @@ mod tests {
         rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut auth_secret);
 
         let p256dh = B64.encode(subscriber_pub_bytes.as_bytes());
-        let auth = B64.encode(&auth_secret);
+        let auth = B64.encode(auth_secret);
 
         let body = encrypt_payload(b"test payload", &p256dh, &auth).unwrap();
 

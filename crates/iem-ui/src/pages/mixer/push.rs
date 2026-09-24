@@ -104,22 +104,19 @@ pub(super) fn subscribe_to_push() {
 
         // Unsubscribe any existing push subscription first (required when VAPID key changes,
         // otherwise Chrome rejects subscribe() with a different applicationServerKey)
-        if let Ok(existing_promise) = push_manager.get_subscription() {
-            if let Ok(existing_val) = wasm_bindgen_futures::JsFuture::from(existing_promise).await {
-                if !existing_val.is_null() && !existing_val.is_undefined() {
-                    if let Ok(existing_sub) = existing_val.dyn_into::<web_sys::PushSubscription>() {
-                        let _ = wasm_bindgen_futures::JsFuture::from(
-                            existing_sub.unsubscribe().unwrap_or_else(|_| {
-                                js_sys::Promise::resolve(&wasm_bindgen::JsValue::TRUE)
-                            }),
-                        )
-                        .await;
-                        web_sys::console::log_1(
-                            &"[push] unsubscribed old push subscription".into(),
-                        );
-                    }
-                }
-            }
+        if let Ok(existing_promise) = push_manager.get_subscription()
+            && let Ok(existing_val) = wasm_bindgen_futures::JsFuture::from(existing_promise).await
+            && !existing_val.is_null()
+            && !existing_val.is_undefined()
+            && let Ok(existing_sub) = existing_val.dyn_into::<web_sys::PushSubscription>()
+        {
+            let _ = wasm_bindgen_futures::JsFuture::from(
+                existing_sub
+                    .unsubscribe()
+                    .unwrap_or_else(|_| js_sys::Promise::resolve(&wasm_bindgen::JsValue::TRUE)),
+            )
+            .await;
+            web_sys::console::log_1(&"[push] unsubscribed old push subscription".into());
         }
 
         // Decode base64url VAPID key to Uint8Array
@@ -380,7 +377,7 @@ pub(crate) fn unsubscribe_from_push() {
 /// Rust's `.bytes()` gives UTF-8 which mangles values > 127. Use `.chars() as u8` instead.
 fn base64url_decode(input: &str) -> Option<Vec<u8>> {
     let mut s = input.replace('-', "+").replace('_', "/");
-    while s.len() % 4 != 0 {
+    while !s.len().is_multiple_of(4) {
         s.push('=');
     }
     web_sys::window()?

@@ -948,10 +948,8 @@ fn EqSlider(
     let track_ref = NodeRef::<leptos::html::Div>::new();
 
     // Store document-level closures for mouse (same pattern as fader.rs)
-    let mouse_move_closure: Rc<RefCell<Option<Closure<dyn FnMut(web_sys::MouseEvent)>>>> =
-        Rc::new(RefCell::new(None));
-    let mouse_up_closure: Rc<RefCell<Option<Closure<dyn FnMut(web_sys::MouseEvent)>>>> =
-        Rc::new(RefCell::new(None));
+    let mouse_move_closure: crate::components::MouseCallbackSlot = Rc::new(RefCell::new(None));
+    let mouse_up_closure: crate::components::MouseCallbackSlot = Rc::new(RefCell::new(None));
 
     // --- Rc clones for closures ---
     let timeout_ts = timeout_handle.clone();
@@ -1590,7 +1588,10 @@ mod tests {
     #[test]
     fn test_snap_oct_rounds_to_hundredth() {
         assert!((snap_oct(1.184) - 1.18).abs() < 0.001);
-        assert!((snap_oct(1.185) - 1.19).abs() < 0.001);
+        // 1.125 is exact in f32, so it is a true midpoint: half away from zero.
+        assert!((snap_oct(1.125) - 1.13).abs() < 0.001);
+        // 1.185 is not: 1.185_f32 ≈ 1.18499994, below the midpoint.
+        assert!((snap_oct(1.185) - 1.18).abs() < 0.001);
         assert!((snap_oct(2.005) - 2.01).abs() < 0.001);
         assert!((snap_oct(0.01) - 0.01).abs() < f32::EPSILON);
     }
