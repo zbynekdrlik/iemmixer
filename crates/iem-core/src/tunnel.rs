@@ -8,37 +8,34 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Single source of the mixer's local-network address (used in `concat!`).
-macro_rules! lan_url {
-    () => {
-        "http://10.0.0.10"
-    };
+/// Where the mixer is reachable, from the site config (`lan_url`,
+/// `https_domain`); served at `GET /api/site`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SiteLinks {
+    #[serde(default)]
+    pub lan_url: Option<String>,
+    #[serde(default)]
+    pub public_host: Option<String>,
 }
 
-/// Local-network address of the mixer — works on the venue network even when
-/// the public tunnel is down.
-pub const LAN_URL: &str = lan_url!();
-
-/// Public hostname served through the Cloudflare tunnel.
-pub const PUBLIC_HOST: &str = "mixer.example.org";
+const MEMBER_BANNER_PREFIX: &str = "Internetový prístup nefunguje";
 
 /// Banner text for band members while internet access is broken.
-pub const MEMBER_BANNER_TEXT: &str = concat!(
-    "Internetový prístup nefunguje — na tejto sieti otvorte ",
-    lan_url!()
-);
+pub fn member_banner_text(lan_url: Option<&str>) -> String {
+    match lan_url {
+        Some(url) => format!("{MEMBER_BANNER_PREFIX} — na tejto sieti otvorte {url}"),
+        None => MEMBER_BANNER_PREFIX.to_string(),
+    }
+}
 
-/// Hint under the "Reconnecting" banner for pages opened via the public URL:
-/// when the tunnel is down their WebSocket can never reconnect.
-pub const RECONNECT_LAN_HINT: &str = concat!(
-    "Ak nejde internet a ste na miestnej sieti, otvorte ",
-    lan_url!()
-);
+/// Hint under the "Reconnecting" banner for pages opened via the public host.
+pub fn reconnect_lan_hint(lan_url: &str) -> String {
+    format!("Ak nejde internet a ste na miestnej sieti, otvorte {lan_url}")
+}
 
-/// Whether a page loaded from `hostname` depends on the Cloudflare tunnel
-/// (and should therefore show [`RECONNECT_LAN_HINT`] while disconnected).
-pub fn needs_lan_hint(hostname: &str) -> bool {
-    hostname.eq_ignore_ascii_case(PUBLIC_HOST)
+/// Whether a page loaded from `hostname` depends on the tunnel.
+pub fn needs_lan_hint(hostname: &str, public_host: Option<&str>) -> bool {
+    public_host.is_some_and(|host| hostname.eq_ignore_ascii_case(host))
 }
 
 /// Health of the cloudflared tunnel.
@@ -140,25 +137,41 @@ mod tests {
     }
 
     #[test]
-    fn member_banner_points_to_the_lan_url() {
-        assert_eq!(LAN_URL, "http://10.0.0.10");
+    fn member_banner_points_to_the_configured_lan_url() {
         assert_eq!(
-            MEMBER_BANNER_TEXT,
+            member_banner_text(Some("http://10.0.0.10")),
             "Internetový prístup nefunguje — na tejto sieti otvorte http://10.0.0.10"
         );
+        assert_eq!(member_banner_text(None), "Internetový prístup nefunguje");
         assert_eq!(
-            RECONNECT_LAN_HINT,
+            reconnect_lan_hint("http://10.0.0.10"),
             "Ak nejde internet a ste na miestnej sieti, otvorte http://10.0.0.10"
         );
     }
 
     #[test]
-    fn lan_hint_only_for_the_public_host() {
-        assert!(needs_lan_hint("mixer.example.org"));
-        assert!(needs_lan_hint("mixer.example.org"));
-        assert!(!needs_lan_hint("10.0.0.10"));
-        assert!(!needs_lan_hint("localhost"));
-        assert!(!needs_lan_hint("127.0.0.1"));
+    fn lan_hint_only_for_the_configured_public_host() {
+        let host = Some("mixer.example.org");
+        assert!(needs_lan_hint("mixer.example.org", host));
+        assert!(needs_lan_hint("MIXER.example.org", host));
+        assert!(!needs_lan_hint("10.0.0.10", host));
+        assert!(!needs_lan_hint("localhost", host));
+        assert!(!needs_lan_hint("mixer.example.org", None));
+    }
+
+    #[test]
+    fn site_links_wire_format() {
+        let links = SiteLinks {
+            lan_url: Some("http://10.0.0.10".to_string()),
+            public_host: Some("mixer.example.org".to_string()),
+        };
+        let json = serde_json::to_value(&links).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"lan_url": "http://10.0.0.10", "public_host": "mixer.example.org"})
+        );
+        let empty: SiteLinks = serde_json::from_str("{}").unwrap();
+        assert_eq!(empty, SiteLinks::default());
     }
 
     fn info(state: TunnelState, last_restart_ok: Option<bool>) -> TunnelStatusInfo {

@@ -69,6 +69,7 @@ pub fn run() {
     };
 
     let port = config.port;
+    let share_url = config.share_url();
 
     // Create Tokio runtime
     let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
@@ -129,7 +130,7 @@ pub fn run() {
             let _ = APP_HANDLE.set(handle.clone());
 
             // Setup tray
-            if let Err(e) = tray::setup_tray(&handle, port) {
+            if let Err(e) = tray::setup_tray(&handle, port, share_url) {
                 tracing::error!("Failed to setup tray: {}", e);
             }
 

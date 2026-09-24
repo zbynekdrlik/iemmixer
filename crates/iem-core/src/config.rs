@@ -213,6 +213,23 @@ impl Config {
         let point = pk.to_encoded_point(false);
         Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(point.as_bytes()))
     }
+
+    /// LAN URL and public host for the UI (`GET /api/site`).
+    pub fn site_links(&self) -> crate::tunnel::SiteLinks {
+        crate::tunnel::SiteLinks {
+            lan_url: self.lan_url.clone(),
+            public_host: self.https_domain.clone(),
+        }
+    }
+
+    /// URL the tray's "Copy URL" shares: the public host over HTTPS, else the
+    /// LAN URL, else none.
+    pub fn share_url(&self) -> Option<String> {
+        self.https_domain
+            .as_ref()
+            .map(|domain| format!("https://{domain}"))
+            .or_else(|| self.lan_url.clone())
+    }
 }
 
 /// Band member configuration
@@ -588,6 +605,41 @@ MEMBER3 = [75, 76]
             Config::load(dir.path().join("missing.toml")),
             Err(ConfigError::Io(_))
         ));
+    }
+
+    #[test]
+    fn test_site_links_come_from_lan_url_and_https_domain() {
+        let config = Config {
+            lan_url: Some("http://10.0.0.10".to_string()),
+            https_domain: Some("mixer.example.org".to_string()),
+            ..Config::default()
+        };
+        let links = config.site_links();
+        assert_eq!(links.lan_url.as_deref(), Some("http://10.0.0.10"));
+        assert_eq!(links.public_host.as_deref(), Some("mixer.example.org"));
+        assert_eq!(
+            Config::default().site_links(),
+            crate::tunnel::SiteLinks::default()
+        );
+    }
+
+    #[test]
+    fn test_share_url_prefers_the_public_host_then_the_lan_url() {
+        let both = Config {
+            lan_url: Some("http://10.0.0.10".to_string()),
+            https_domain: Some("mixer.example.org".to_string()),
+            ..Config::default()
+        };
+        assert_eq!(
+            both.share_url().as_deref(),
+            Some("https://mixer.example.org")
+        );
+        let lan_only = Config {
+            lan_url: Some("http://10.0.0.10".to_string()),
+            ..Config::default()
+        };
+        assert_eq!(lan_only.share_url().as_deref(), Some("http://10.0.0.10"));
+        assert_eq!(Config::default().share_url(), None);
     }
 }
 

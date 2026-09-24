@@ -1578,8 +1578,10 @@ async fn handle_ws(
                                 {
                                     let push_store = state.push_store.clone();
                                     let http_client = state.http_client.clone();
-                                    let vapid_key =
-                                        state.config.read().await.vapid_private_key.clone();
+                                    let (vapid_key, vapid_subject) = {
+                                        let config = state.config.read().await;
+                                        (config.vapid_private_key.clone(), config.vapid_subject.clone())
+                                    };
                                     let push_name = display_name.clone();
                                     let push_member = member_id.clone();
                                     if !vapid_key.is_empty() {
@@ -1592,6 +1594,7 @@ async fn handle_ws(
                                             crate::push::send_push_to_engineers(
                                                 &http_client,
                                                 &vapid_key,
+                                                &vapid_subject,
                                                 &push_store,
                                                 payload.to_string().as_bytes(),
                                             )

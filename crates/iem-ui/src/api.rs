@@ -56,6 +56,19 @@ pub async fn get_members() -> Result<Vec<MemberInfo>, String> {
     }
 }
 
+/// Where the mixer is reachable (LAN URL, public host) — `GET /api/site`.
+pub async fn get_site_links() -> Result<iem_core::tunnel::SiteLinks, String> {
+    let resp = Request::get(&format!("{}/site", API_BASE))
+        .send()
+        .await
+        .map_err(|e| format!("Network error: {}", e))?;
+    if resp.ok() {
+        resp.json().await.map_err(|e| format!("Parse error: {}", e))
+    } else {
+        Err(format!("Server error: {}", resp.status()))
+    }
+}
+
 /// Get list of band members with timeout
 /// Returns NETWORK_TIMEOUT error if fetch takes longer than timeout_ms
 pub async fn get_members_with_timeout() -> Result<Vec<MemberInfo>, String> {

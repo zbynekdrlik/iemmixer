@@ -8,11 +8,12 @@ use tauri::{AppHandle, Manager};
 /// Icon size in pixels
 const ICON_SIZE: u32 = 16;
 
-/// Public URL for remote access
-const REMOTE_URL: &str = "https://mixer.example.org";
-
 /// Set up the tray icon with menu
-pub fn setup_tray(app: &AppHandle, port: u16) -> Result<(), Box<dyn std::error::Error>> {
+pub fn setup_tray(
+    app: &AppHandle,
+    port: u16,
+    share_url: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Display full version with git hash for unique deploy identification
     let version_label = format!("IEM Mixer v{}", iem_core::full_version());
     let version_item = MenuItem::with_id(app, "version", &version_label, false, None::<&str>)?;
@@ -22,14 +23,13 @@ pub fn setup_tray(app: &AppHandle, port: u16) -> Result<(), Box<dyn std::error::
     // Simple "Open Mixer" that opens the landing page
     let open_mixer_item = MenuItem::with_id(app, "open_mixer", "Open Mixer", true, None::<&str>)?;
 
-    // Combined URL display + copy (click to copy)
-    let copy_url_item = MenuItem::with_id(
-        app,
-        "copy_url",
-        format!("📋 {}", REMOTE_URL),
-        true,
-        None::<&str>,
-    )?;
+    // Combined URL display + copy (click to copy); disabled without a
+    // configured public host or LAN URL.
+    let (copy_label, copy_enabled) = match &share_url {
+        Some(url) => (format!("📋 {url}"), true),
+        None => ("No public URL configured".to_string(), false),
+    };
+    let copy_url_item = MenuItem::with_id(app, "copy_url", copy_label, copy_enabled, None::<&str>)?;
 
     let separator2 = PredefinedMenuItem::separator(app)?;
 
@@ -62,7 +62,9 @@ pub fn setup_tray(app: &AppHandle, port: u16) -> Result<(), Box<dyn std::error::
                     open_mixer(app, port_copy);
                 }
                 "copy_url" => {
-                    copy_url_to_clipboard(app);
+                    if let Some(url) = &share_url {
+                        copy_url_to_clipboard(app, url);
+                    }
                 }
                 "quit" => {
                     tracing::info!("Exit requested from tray");
@@ -99,14 +101,12 @@ fn open_mixer(app: &AppHandle, port: u16) {
     }
 }
 
-/// Copy the public URL to clipboard
-fn copy_url_to_clipboard(app: &AppHandle) {
-    tracing::info!("Copying URL to clipboard: {}", REMOTE_URL);
+/// Copy the share URL to the clipboard (quoted as a JSON string literal).
+fn copy_url_to_clipboard(app: &AppHandle, url: &str) {
+    tracing::info!(url, "copying the share URL to the clipboard");
     if let Some(window) = app.get_webview_window("main") {
-        let js = format!(
-            "navigator.clipboard.writeText('{}').then(() => console.log('URL copied'))",
-            REMOTE_URL
-        );
+        let quoted = serde_json::to_string(url).unwrap_or_else(|_| "\"\"".to_string());
+        let js = format!("navigator.clipboard.writeText({quoted})");
         let _ = window.eval(&js);
     }
 }

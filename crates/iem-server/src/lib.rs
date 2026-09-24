@@ -441,7 +441,7 @@ pub async fn start_server(
                         let https_addr = SocketAddr::from(([0, 0, 0, 0], https_port));
                         let https_app = app.clone();
                         tokio::spawn(async move {
-                            tracing::info!("HTTPS server on https://mixer.example.org");
+                            tracing::info!(port = https_port, "HTTPS server listening");
                             if let Err(e) = axum_server::bind_rustls(https_addr, rustls_config)
                                 .serve(https_app.into_make_service())
                                 .await

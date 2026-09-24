@@ -82,6 +82,7 @@ pub fn encrypt_payload(
 pub fn build_vapid_header(
     vapid_private_key_b64: &str,
     endpoint: &str,
+    subject: &str,
 ) -> anyhow::Result<(String, String)> {
     let raw = B64.decode(vapid_private_key_b64)?;
     let sk = p256::SecretKey::from_slice(&raw)?;
@@ -97,7 +98,7 @@ pub fn build_vapid_header(
     let claims = serde_json::json!({
         "aud": audience,
         "exp": now + 12 * 3600,
-        "sub": "mailto:admin@example.org",
+        "sub": subject,
     });
 
     // Sign with ES256 using jsonwebtoken
@@ -120,11 +121,12 @@ pub fn build_vapid_header(
 pub async fn send_push(
     client: &reqwest::Client,
     vapid_private_key_b64: &str,
+    subject: &str,
     sub: &PushSubscription,
     payload: &[u8],
 ) -> anyhow::Result<bool> {
     let body = encrypt_payload(payload, &sub.p256dh, &sub.auth)?;
-    let (jwt, pub_key) = build_vapid_header(vapid_private_key_b64, &sub.endpoint)?;
+    let (jwt, pub_key) = build_vapid_header(vapid_private_key_b64, &sub.endpoint, subject)?;
 
     let resp = client
         .post(&sub.endpoint)
@@ -151,6 +153,7 @@ pub async fn send_push(
 pub async fn send_push_to_engineers(
     client: &reqwest::Client,
     vapid_key: &str,
+    subject: &str,
     push_store: &std::sync::Arc<tokio::sync::RwLock<crate::push_store::PushStore>>,
     payload: &[u8],
 ) {
@@ -165,7 +168,7 @@ pub async fn send_push_to_engineers(
 
     let mut expired = Vec::new();
     for sub in &subs {
-        match send_push(client, vapid_key, sub, payload).await {
+        match send_push(client, vapid_key, subject, sub, payload).await {
             Ok(true) => {
                 tracing::debug!(
                     "push sent to {}",
@@ -221,10 +224,31 @@ mod tests {
         let sk = p256::SecretKey::random(&mut rand_core::OsRng);
         let key_b64 = B64.encode(sk.to_bytes());
 
-        let (jwt, pub_key) =
-            build_vapid_header(&key_b64, "https://fcm.googleapis.com/fcm/send/test").unwrap();
+        let (jwt, pub_key) = build_vapid_header(
+            &key_b64,
+            "https://fcm.googleapis.com/fcm/send/test",
+            "mailto:admin@example.org",
+        )
+        .unwrap();
 
         assert_eq!(jwt.split('.').count(), 3);
         assert!(!pub_key.is_empty());
+    }
+
+    #[test]
+    fn test_vapid_jwt_carries_the_configured_subject() {
+        let sk = p256::SecretKey::random(&mut rand_core::OsRng);
+        let key_b64 = B64.encode(sk.to_bytes());
+        let (jwt, _) = build_vapid_header(
+            &key_b64,
+            "https://push.example.org/send/1",
+            "mailto:ops@example.org",
+        )
+        .unwrap();
+        let payload = jwt.split('.').nth(1).unwrap();
+        let claims: serde_json::Value =
+            serde_json::from_slice(&B64.decode(payload).unwrap()).unwrap();
+        assert_eq!(claims["sub"], "mailto:ops@example.org");
+        assert_eq!(claims["aud"], "https://push.example.org");
     }
 }
