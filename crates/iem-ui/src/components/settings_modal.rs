@@ -108,7 +108,7 @@ pub fn SettingsModal(
                             <div class="photo-actions">
                                 <button class="settings-action-btn" on:click=move |_| {
                                     if let Some(input) = file_input_ref.get() {
-                                        let _ = input.click();
+                                        input.click();
                                     }
                                 }>
                                     "Change Photo"
