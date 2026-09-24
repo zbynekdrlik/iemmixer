@@ -17,3 +17,7 @@ strip = true
 
 [profile.dev]
 opt-level = 1
+
+[profile.mutants]
+inherits = "test"
+debug = "none"

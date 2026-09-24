@@ -1,0 +1,38 @@
+# cargo-mutants: PR gate in .github/workflows/ci.yml (diff-scoped; the shard
+# count is the `shard:` matrix length, sized by the `mutants-list` job), full
+# sweep in .github/workflows/mutation-full.yml (on demand). Both pass
+# --copy-target=true after a warm-up build. Tests run per package only.
+profile = "mutants"
+test_tool = "nextest"
+
+exclude_globs = [
+  # Windows-only DPAPI calls: not compiled on the Linux runners; the `windows`
+  # CI job runs their tests (`cargo test -p iem-server --lib pepper::`).
+  "crates/iem-server/src/pepper/dpapi.rs",
+  # Tauri tray shell: built and linted on Windows only.
+  "crates/iem-tray/**",
+]
+
+exclude_re = [
+  # Server bootstrap and WebSocket handlers need a bound server, a JWT and a
+  # WS client; the Playwright suite covers them (whole-body replacements only).
+  "replace start_server -> ",
+  "replace run_server -> ",
+  "replace handle_ws with \\(\\)",
+  "handle_talkback_ws",
+  "talkback_diagnostics_handler",
+  # Test-only constructors.
+  "new_for_test",
+  "make_test_state_with_bad_reaper",
+  # REAPER-era background loops (deleted in S5).
+  "poll_reaper_and_broadcast",
+  "try_persist_auto_snapshot",
+  # Tunnel watchdog loop and the Windows sc.exe restart.
+  "spawn_tunnel_watch",
+  "restart_service_blocking",
+  "sc_windows",
+  # Browser-only fetches and context accessors in the UI; covered by
+  # e2e/tests/site-links.spec.ts and e2e/tests/login-protection.spec.ts.
+  "iem-ui/src/api\\.rs.*replace (login|get_site_links) ",
+  "iem-ui/src/components/tunnel_status\\.rs.*replace site_links ",
+]

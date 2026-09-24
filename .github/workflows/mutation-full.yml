@@ -1,0 +1,49 @@
+name: mutation-full
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mutants:
+    name: mutation full shard ${{ matrix.shard }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        # 0-based (cargo-mutants --shard k/n)
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Placeholder UI dist (rust-embed needs the folder)
+        run: mkdir -p crates/iem-ui/dist && echo placeholder > crates/iem-ui/dist/index.html
+      - uses: taiki-e/install-action@7623a79cdfecb99d681017af368ca353d9f49bb5 # v2.87.19
+        with:
+          tool: cargo-mutants@27.1.0,cargo-nextest@0.9.146
+      - name: Warm target (copied into each cargo-mutants build directory)
+        run: cargo nextest run --locked --cargo-profile mutants --no-run -p iem-core -p iem-server -p iem-ui --all-features --all-targets
+      - name: Full-tree mutants (survivors are reported, then filed as test-quality issues)
+        run: |
+          set -uo pipefail
+          cargo mutants --baseline=skip --jobs 2 --copy-target=true --shard "${{ matrix.shard }}/${{ strategy.job-total }}" \
+            --package iem-core --package iem-server --package iem-ui --all-features -- --all-targets
+          code=$?
+          if [ -f mutants.out/missed.txt ]; then echo "--- missed mutants ---"; cat mutants.out/missed.txt; fi
+          case "$code" in
+            0|2|3) echo "cargo-mutants finished (exit $code)"; exit 0 ;;
+            *) echo "::error::cargo-mutants failed to run (exit $code)"; exit "$code" ;;
+          esac
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutants-shard-${{ matrix.shard }}
+          path: mutants.out/
+          retention-days: 14
+          if-no-files-found: error

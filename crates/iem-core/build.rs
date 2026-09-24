@@ -30,8 +30,14 @@ fn main() {
         .as_secs();
     println!("cargo:rustc-env=BUILD_TIME={}", now);
 
-    // Rebuild if git HEAD changes (path relative to repo root, not crate dir)
+    // Rebuild when git HEAD moves. Without a `.git` (cargo-mutants' scratch
+    // copy, a source archive) key the rerun on the CI commit instead, so
+    // BUILD_TIME does not change on every build and force a full rebuild.
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     let git_head = std::path::Path::new(&manifest_dir).join("../../.git/HEAD");
-    println!("cargo:rerun-if-changed={}", git_head.display());
+    if git_head.exists() {
+        println!("cargo:rerun-if-changed={}", git_head.display());
+    } else {
+        println!("cargo:rerun-if-env-changed=GITHUB_SHA");
+    }
 }

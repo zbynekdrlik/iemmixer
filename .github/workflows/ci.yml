@@ -1,0 +1,411 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  integrity:
+    name: integrity
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Integrity scan (skips, pins, workflow constructs, force-kill)
+        run: python3 scripts/check_integrity.py
+      - name: Script self-tests
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s scripts -p 'test_*.py' -v
+          python3 scripts/test_check_disposal_safety.py
+      - name: Leptos disposal safety
+        run: python3 scripts/check_disposal_safety.py
+      - name: Version consistency
+        run: python3 scripts/check_version.py
+      - name: Tray icons
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet pillow==11.3.0
+          cd crates/iem-tray/icons
+          "$RUNNER_TEMP/venv/bin/python" verify_icons.py
+
+  lint:
+    name: lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Placeholder UI dist (rust-embed needs the folder)
+        run: mkdir -p crates/iem-ui/dist && echo placeholder > crates/iem-ui/dist/index.html
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+      - name: Clippy (native, all features; the tray is linted on Windows)
+        run: cargo clippy --locked --workspace --exclude iem-tray --all-targets --all-features -- -D warnings
+      - name: Clippy (UI for wasm32)
+        run: cargo clippy --locked -p iem-ui --target wasm32-unknown-unknown -- -D warnings
+
+  test:
+    name: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Placeholder UI dist (rust-embed needs the folder)
+        run: mkdir -p crates/iem-ui/dist && echo placeholder > crates/iem-ui/dist/index.html
+      - uses: taiki-e/install-action@7623a79cdfecb99d681017af368ca353d9f49bb5 # v2.87.19
+        with:
+          tool: cargo-llvm-cov@0.9.1
+      - name: Tests with line coverage (iem-core, iem-server) against the floor
+        run: |
+          set -euo pipefail
+          cargo llvm-cov --locked --package iem-core --package iem-server --all-features \
+            --json --summary-only --output-path "$RUNNER_TEMP/coverage.json"
+          pct="$(jq '.data[0].totals.lines.percent' "$RUNNER_TEMP/coverage.json")"
+          floor="$(tr -d '[:space:]' < .github/coverage-floor)"
+          echo "line coverage: ${pct}% (floor ${floor}%)"
+          awk -v p="$pct" -v f="$floor" 'BEGIN { exit !(p >= f) }' \
+            || { echo "::error::line coverage ${pct}% is below the floor ${floor}%"; exit 1; }
+      - name: UI unit tests (native)
+        run: cargo test --locked -p iem-ui --lib
+
+  wasm:
+    name: wasm
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: taiki-e/install-action@7623a79cdfecb99d681017af368ca353d9f49bb5 # v2.87.19
+        with:
+          tool: trunk@0.21.14
+      - name: Build the UI (release)
+        working-directory: crates/iem-ui
+        run: trunk build --release --locked
+      - name: Verify the bundle
+        run: |
+          set -euo pipefail
+          test -f crates/iem-ui/dist/index.html
+          ls crates/iem-ui/dist/*.wasm
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wasm-dist
+          path: crates/iem-ui/dist/
+          retention-days: 1
+          if-no-files-found: error
+
+  e2e:
+    name: e2e
+    needs: [wasm]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: wasm-dist
+          path: crates/iem-ui/dist
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Build the server
+        run: cargo build --locked --release -p iem-server --features standalone,audio
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: e2e/package-lock.json
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('e2e/package-lock.json') }}
+      - name: Install Playwright
+        working-directory: e2e
+        run: |
+          set -euo pipefail
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Provision the synthetic site and per-run PINs
+        run: |
+          set -euo pipefail
+          site_dir="$RUNNER_TEMP/site"
+          mkdir -p "$site_dir"
+          cp config/test-site.toml "$site_dir/iemmixer.toml"
+          export IEMMIXER_CONFIG="$site_dir/iemmixer.toml"
+          read -r eng mem < <(python3 -c 'import random; a, b = random.SystemRandom().sample(range(10000), 2); print(f"{a:04d} {b:04d}")')
+          echo "::add-mask::$eng"
+          echo "::add-mask::$mem"
+          {
+            echo "IEMMIXER_CONFIG=$IEMMIXER_CONFIG"
+            echo "E2E_ENGINEER_PIN=$eng"
+            echo "E2E_MEMBER_PIN=$mem"
+          } >> "$GITHUB_ENV"
+          printf '%s\n' "$eng" | ./target/release/iem-server pin set-engineer
+          members="$(python3 -c 'import sys, tomllib; site = tomllib.load(open(sys.argv[1], "rb")); print(" ".join(m["name"].lower() for m in site["members"] if m["name"].lower() != "engineer"))' "$IEMMIXER_CONFIG")"
+          for member in $members; do
+            printf '%s\n' "$mem" | ./target/release/iem-server pin set-member "$member"
+          done
+      - name: Start the server
+        env:
+          RUST_LOG: info
+          PORT: "8080"
+        run: |
+          set -euo pipefail
+          nohup ./target/release/iem-server > "$RUNNER_TEMP/server.log" 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8080/api/version > /dev/null; then echo "server ready after ${i}s"; exit 0; fi
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/server.log"
+          exit 1
+      - name: Playwright (mock E2E, clean console)
+        working-directory: e2e
+        env:
+          CI: "true"
+          E2E_BASE_URL: http://127.0.0.1:8080
+        run: npx playwright test --reporter=list
+      - name: Upload failure evidence
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-failure
+          path: |
+            e2e/test-results/
+            ${{ runner.temp }}/server.log
+          retention-days: 7
+
+  windows:
+    name: windows
+    needs: [wasm]
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: wasm-dist
+          path: crates/iem-ui/dist
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Clippy (server + tray, Windows-only code)
+        run: cargo clippy --locked -p iem-server -p iem-tray --all-targets --all-features -- -D warnings
+      - name: Pepper DPAPI tests
+        run: "cargo test --locked -p iem-server --all-features --lib pepper::"
+      - name: Build release binaries
+        run: cargo build --locked --release -p iem-server -p iem-tray --features iem-server/standalone
+      - name: Upload the binaries (push runs only — pull requests, forks included, never yield binaries)
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-binaries
+          path: |
+            target/release/iem-server.exe
+            target/release/iem-tray.exe
+          retention-days: 7
+          if-no-files-found: error
+
+  supply-chain:
+    name: supply-chain
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: taiki-e/install-action@7623a79cdfecb99d681017af368ca353d9f49bb5 # v2.87.19
+        with:
+          tool: cargo-deny@0.20.2
+      - name: cargo-deny (advisories, bans, licences, sources)
+        run: cargo deny --locked check advisories bans licenses sources
+
+  secrets:
+    name: secrets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install gitleaks 8.30.1 (checksum-verified)
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/gitleaks.tar.gz" https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP" gitleaks
+      - name: gitleaks (full history)
+        run: '"$RUNNER_TEMP/gitleaks" git --no-banner --redact --exit-code 1 .'
+      - name: Private denylist and commit identities (tree and history)
+        env:
+          DENYLIST: ${{ secrets.DENYLIST }}
+          EVENT: ${{ github.event_name }}
+          SAME_REPO: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+          # On pull requests scan the PR head's history, not GitHub's synthetic merge commit
+          SCAN_REV: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "$DENYLIST" ]; then
+            if [ "$EVENT" = "pull_request" ] && [ "$SAME_REPO" != "true" ]; then
+              echo "::error::Fork pull request: the private denylist is unavailable here; a maintainer runs the scan locally before merging (CONTRIBUTING.md), and the merge push to dev runs it again."
+              exit 1
+            fi
+            echo "::error::The DENYLIST secret is missing."
+            exit 1
+          fi
+          umask 077
+          printf '%s\n' "$DENYLIST" > "$RUNNER_TEMP/denylist.txt"
+          python3 scripts/denylist_scan.py --denylist "$RUNNER_TEMP/denylist.txt" \
+            --allow scripts/denylist-allow.txt --identities scripts/allowed-identities.txt \
+            --tree HEAD --commits "$SCAN_REV"
+
+  version:
+    name: version
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Head version greater than main
+        run: python3 scripts/check_version.py --base-ref origin/main
+
+  mutants-list:
+    name: mutants-list
+    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: taiki-e/install-action@7623a79cdfecb99d681017af368ca353d9f49bb5 # v2.87.19
+        with:
+          tool: cargo-mutants@27.1.0
+      - name: The next dev→main PR's mutants fit the shard matrix
+        env:
+          # Mutants one shard tests within its 20-minute budget, setup included.
+          # Task 16 measures shard durations and adjusts this value.
+          MUTANTS_PER_SHARD: "20"
+        run: |
+          set -euo pipefail
+          git diff origin/main...HEAD -- '*.rs' > "$RUNNER_TEMP/pr.diff"
+          count=0
+          if [ -s "$RUNNER_TEMP/pr.diff" ]; then
+            cargo mutants --list --in-diff "$RUNNER_TEMP/pr.diff" \
+              --package iem-core --package iem-server --package iem-ui > "$RUNNER_TEMP/mutants.txt"
+            count="$(wc -l < "$RUNNER_TEMP/mutants.txt")"
+          fi
+          [ "$(grep -cE '^ +shard: \[' .github/workflows/ci.yml)" -eq 1 ] \
+            || { echo "::error::expected exactly one shard matrix in ci.yml"; exit 1; }
+          commas="$(grep -E '^ +shard: \[' .github/workflows/ci.yml | tr -cd ',' | wc -c)"
+          shards=$((commas + 1))
+          needed=$(( (count + MUTANTS_PER_SHARD - 1) / MUTANTS_PER_SHARD ))
+          echo "mutants in the dev→main diff: $count; shards: $shards; needed at <= $MUTANTS_PER_SHARD per shard: $needed"
+          [ "$needed" -le "$shards" ] \
+            || { echo "::error::$count mutants need $needed shards but the matrix has $shards: extend the shard list"; exit 1; }
+
+  mutation-warmup:
+    name: mutation-warmup
+    if: github.event_name == 'pull_request'
+    needs: [test]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: mutation
+      - name: Placeholder UI dist (rust-embed needs the folder)
+        run: mkdir -p crates/iem-ui/dist && echo placeholder > crates/iem-ui/dist/index.html
+      - uses: taiki-e/install-action@7623a79cdfecb99d681017af368ca353d9f49bb5 # v2.87.19
+        with:
+          tool: cargo-nextest@0.9.146
+      - name: Build the mutants profile once (the shards restore this cache)
+        run: cargo nextest run --locked --cargo-profile mutants --no-run -p iem-core -p iem-server -p iem-ui --all-features --all-targets
+
+  mutation:
+    name: mutation shard ${{ matrix.shard }}
+    if: github.event_name == 'pull_request'
+    needs: [mutation-warmup]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # 0-based (cargo-mutants --shard k/n); the length is the shard count
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: mutation
+          save-if: false
+      - name: Placeholder UI dist (rust-embed needs the folder)
+        run: mkdir -p crates/iem-ui/dist && echo placeholder > crates/iem-ui/dist/index.html
+      - uses: taiki-e/install-action@7623a79cdfecb99d681017af368ca353d9f49bb5 # v2.87.19
+        with:
+          tool: cargo-mutants@27.1.0,cargo-nextest@0.9.146
+      - name: Warm target (dependencies restored; workspace crates build once, then are copied per job)
+        run: cargo nextest run --locked --cargo-profile mutants --no-run -p iem-core -p iem-server -p iem-ui --all-features --all-targets
+      - name: Diff-scoped mutants
+        run: |
+          set -euo pipefail
+          git diff "origin/${{ github.base_ref }}...HEAD" -- '*.rs' > "$RUNNER_TEMP/pr.diff"
+          if [ ! -s "$RUNNER_TEMP/pr.diff" ]; then
+            echo "No Rust changes against ${{ github.base_ref }}: no mutants to test."
+            exit 0
+          fi
+          cargo mutants --in-diff "$RUNNER_TEMP/pr.diff" --baseline=skip --jobs 2 --copy-target=true \
+            --shard "${{ matrix.shard }}/${{ strategy.job-total }}" \
+            --package iem-core --package iem-server --package iem-ui \
+            --all-features -- --all-targets
