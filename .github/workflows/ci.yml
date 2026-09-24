@@ -326,7 +326,7 @@ jobs:
         env:
           # Mutants one shard tests within its 20-minute budget, setup included.
           # Task 16 measures shard durations and adjusts this value.
-          MUTANTS_PER_SHARD: "20"
+          MUTANTS_PER_SHARD: "12"
         run: |
           set -euo pipefail
           git diff origin/main...HEAD -- '*.rs' > "$RUNNER_TEMP/pr.diff"
@@ -378,7 +378,7 @@ jobs:
       fail-fast: false
       matrix:
         # 0-based (cargo-mutants --shard k/n); the length is the shard count
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
