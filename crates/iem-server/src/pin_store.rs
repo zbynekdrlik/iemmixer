@@ -73,6 +73,11 @@ impl PinStore {
         self.file.members.get(member_id).map(String::as_str)
     }
 
+    /// Whether any PIN hash (engineer or member) is stored.
+    pub fn has_hashes(&self) -> bool {
+        self.file.engineer.is_some() || !self.file.members.is_empty()
+    }
+
     pub fn set_engineer_hash(&mut self, phc: String) -> io::Result<()> {
         check_phc(ENGINEER_ID, &phc)?;
         self.file.engineer = Some(phc);
@@ -117,6 +122,23 @@ mod tests {
         let store = PinStore::load(dir.path()).unwrap();
         assert!(store.engineer_hash().is_none());
         assert!(store.member_hash("member1").is_none());
+    }
+
+    #[test]
+    fn has_hashes_counts_the_engineer_and_the_members() {
+        let h = hasher();
+        let empty = tempfile::tempdir().unwrap();
+        assert!(!PinStore::load(empty.path()).unwrap().has_hashes());
+
+        let engineer = tempfile::tempdir().unwrap();
+        let mut store = PinStore::load(engineer.path()).unwrap();
+        store.set_engineer_hash(h.hash("2468")).unwrap();
+        assert!(store.has_hashes());
+
+        let member = tempfile::tempdir().unwrap();
+        let mut store = PinStore::load(member.path()).unwrap();
+        store.set_member_hash("member1", h.hash("1357")).unwrap();
+        assert!(store.has_hashes());
     }
 
     #[test]

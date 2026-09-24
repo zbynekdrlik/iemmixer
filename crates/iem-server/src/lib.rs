@@ -47,7 +47,6 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{RwLock, broadcast};
-use tower_http::cors::CorsLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
 
 /// Listen mode target tracking.
@@ -359,6 +358,42 @@ impl Default for ServerConfig {
 #[folder = "../iem-ui/dist/"]
 pub struct Assets;
 
+/// The HTTP application: API and static routes behind the security headers.
+/// No CORS layer: the UI (browser, the tray's window, the E2E suite) is always
+/// loaded from this server, so its requests are same-origin; a foreign page
+/// gets no `Access-Control-Allow-Origin` and cannot read API responses.
+fn app_router(state: AppState) -> Router {
+    // Security headers to prevent common attacks
+    let x_frame_options = SetResponseHeaderLayer::overriding(
+        HeaderName::from_static("x-frame-options"),
+        HeaderValue::from_static("DENY"),
+    );
+    let x_content_type_options = SetResponseHeaderLayer::overriding(
+        HeaderName::from_static("x-content-type-options"),
+        HeaderValue::from_static("nosniff"),
+    );
+    let referrer_policy = SetResponseHeaderLayer::overriding(
+        HeaderName::from_static("referrer-policy"),
+        HeaderValue::from_static("strict-origin-when-cross-origin"),
+    );
+    // CSP allows WASM + inline scripts (Trunk), inline styles (Leptos), and WebSocket connections
+    let csp = SetResponseHeaderLayer::overriding(
+        HeaderName::from_static("content-security-policy"),
+        HeaderValue::from_static(
+            "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data:; font-src 'self'",
+        ),
+    );
+
+    Router::new()
+        .merge(routes::api_routes(state.clone()))
+        .merge(routes::static_routes())
+        .layer(x_frame_options)
+        .layer(x_content_type_options)
+        .layer(referrer_policy)
+        .layer(csp)
+        .with_state(state)
+}
+
 /// Start the server, optionally signaling readiness via a oneshot channel
 pub async fn start_server(
     server_config: ServerConfig,
@@ -422,38 +457,7 @@ pub async fn start_server(
         state.talkback_state.clone(),
     );
 
-    let cors = CorsLayer::permissive();
-
-    // Security headers to prevent common attacks
-    let x_frame_options = SetResponseHeaderLayer::overriding(
-        HeaderName::from_static("x-frame-options"),
-        HeaderValue::from_static("DENY"),
-    );
-    let x_content_type_options = SetResponseHeaderLayer::overriding(
-        HeaderName::from_static("x-content-type-options"),
-        HeaderValue::from_static("nosniff"),
-    );
-    let referrer_policy = SetResponseHeaderLayer::overriding(
-        HeaderName::from_static("referrer-policy"),
-        HeaderValue::from_static("strict-origin-when-cross-origin"),
-    );
-    // CSP allows WASM + inline scripts (Trunk), inline styles (Leptos), and WebSocket connections
-    let csp = SetResponseHeaderLayer::overriding(
-        HeaderName::from_static("content-security-policy"),
-        HeaderValue::from_static(
-            "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data:; font-src 'self'",
-        ),
-    );
-
-    let app = Router::new()
-        .merge(routes::api_routes(state.clone()))
-        .merge(routes::static_routes())
-        .layer(cors)
-        .layer(x_frame_options)
-        .layer(x_content_type_options)
-        .layer(referrer_policy)
-        .layer(csp)
-        .with_state(state.clone());
+    let app = app_router(state.clone());
 
     // Spawn HTTPS server on port 443 (if TLS enabled and certs exist)
     #[cfg(feature = "tls")]
@@ -760,6 +764,28 @@ mod startup_tests {
         assert!(format!("{err:#}").contains("argon2id"), "{err:#}");
     }
 
+    #[tokio::test]
+    async fn start_refuses_a_missing_pepper_next_to_pin_hashes() {
+        // A new pepper would silently void every stored PIN (spec P9).
+        let dir = tempfile::tempdir().unwrap();
+        let secrets_dir = dir.path().join(secrets::SECRETS_DIR);
+        std::fs::create_dir_all(&secrets_dir).unwrap();
+        std::fs::write(
+            secrets_dir.join(pin_store::PIN_HASHES_FILE),
+            r#"{"engineer":"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHQ$aGFzaGhhc2hoYXNo"}"#,
+        )
+        .unwrap();
+        let err = start_server(server_config(dir.path()), None)
+            .await
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("pepper") && msg.contains("missing"), "{msg}");
+        assert!(
+            !secrets_dir.join(pepper::PEPPER_FILE).exists(),
+            "no new pepper"
+        );
+    }
+
     // Linux only: on Windows the pepper file is DPAPI data and the error text differs.
     #[cfg(not(windows))]
     #[tokio::test]
@@ -788,5 +814,83 @@ mod startup_tests {
         let state =
             AppState::new_for_test("http://127.0.0.1:9".to_string(), dir.path().to_path_buf());
         assert_eq!(state.config.read().await.reaper_url, "http://127.0.0.1:9");
+    }
+}
+
+#[cfg(test)]
+mod app_router_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode, header};
+    use tower::util::ServiceExt;
+
+    const FOREIGN: &str = "https://evil.example";
+
+    #[tokio::test]
+    async fn a_foreign_origin_gets_no_cors_grant() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app_router(AppState::new(Config::default(), dir.path()));
+
+        let simple = app
+            .clone()
+            .oneshot(
+                Request::get("/api/version")
+                    .header(header::ORIGIN, FOREIGN)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            simple
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .is_none()
+        );
+
+        let preflight = app
+            .oneshot(
+                Request::options("/api/auth")
+                    .header(header::ORIGIN, FOREIGN)
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            preflight
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .is_none()
+        );
+        assert!(
+            preflight
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_METHODS)
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_same_origin_request_still_works() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app_router(AppState::new(Config::default(), dir.path()));
+        let resp = app
+            .oneshot(
+                Request::get("/api/version")
+                    .header(header::HOST, "10.0.0.10")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers().get("x-frame-options").unwrap(), "DENY");
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["version"], iem_core::VERSION);
     }
 }

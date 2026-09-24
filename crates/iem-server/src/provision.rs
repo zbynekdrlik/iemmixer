@@ -168,6 +168,27 @@ mod tests {
     }
 
     #[test]
+    fn store_pin_never_re_peppers_existing_hashes() {
+        // Provisioning one PIN after the pepper was lost must not create a
+        // new pepper: every other stored hash would silently stop verifying.
+        let dir = tempfile::tempdir().unwrap();
+        store_pin(dir.path(), &PinTarget::Engineer, "2468").unwrap();
+        let secrets = dir.path().join(SECRETS_DIR);
+        let hashes = secrets.join(crate::pin_store::PIN_HASHES_FILE);
+        std::fs::remove_file(secrets.join(pepper::PEPPER_FILE)).unwrap();
+        let before = std::fs::read(&hashes).unwrap();
+        let err = store_pin(
+            dir.path(),
+            &PinTarget::Member("member1".to_string()),
+            "1357",
+        )
+        .unwrap_err();
+        assert!(matches!(err, ProvisionError::Io(_)), "{err}");
+        assert!(!secrets.join(pepper::PEPPER_FILE).exists());
+        assert_eq!(std::fs::read(&hashes).unwrap(), before);
+    }
+
+    #[test]
     fn labels_name_the_target() {
         assert_eq!(PinTarget::Engineer.label(), "engineer");
         assert_eq!(

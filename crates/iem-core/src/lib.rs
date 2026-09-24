@@ -49,7 +49,8 @@ pub fn build_time() -> &'static str {
     option_env!("BUILD_TIME").unwrap_or("0")
 }
 
-/// Full version string for display, e.g. "2.0.0-dev.3 (24.09.2026 10:45)".
+/// Full version string for display (build time in UTC), e.g.
+/// "2.0.0-dev.3 (24.09.2025 09:45)" for `BUILD_TIME` 1758707100.
 pub fn full_version() -> String {
     full_version_at(build_time())
 }

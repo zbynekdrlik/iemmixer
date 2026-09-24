@@ -15,7 +15,7 @@ iem-core = { path = "../iem-core", features = ["vapid"] }
 axum = { version = "0.8", features = ["macros", "json", "ws"] }
 
 # Tower middleware
-tower-http = { version = "0.6", features = ["fs", "cors", "set-header"] }
+tower-http = { version = "0.6", features = ["fs", "set-header"] }
 
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "net"] }
