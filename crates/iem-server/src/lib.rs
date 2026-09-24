@@ -21,6 +21,7 @@ pub mod pin_store;
 pub mod poller;
 pub mod preset_routes;
 pub mod preset_store;
+pub mod provision;
 pub mod proxy;
 pub mod push;
 pub mod push_store;
