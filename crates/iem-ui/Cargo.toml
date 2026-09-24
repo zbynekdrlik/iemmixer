@@ -11,7 +11,7 @@ description = "Leptos WASM web UI of iemmixer"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# Core library (WASM-safe: no config/serde_yaml)
+# Core library (WASM-safe: no config/toml)
 iem-core = { path = "../iem-core", default-features = false }
 
 # Leptos with CSR (client-side rendering)

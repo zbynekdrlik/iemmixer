@@ -1,0 +1,198 @@
+# Synthetic site for CI, E2E and tests: the real site's shape (9 members plus
+# the engineer, 24 inputs) with placeholder names and synthetic channel
+# numbers. Never real site data (program spec P6). Input names follow program
+# spec §3.1 (KEYS, CONTENT, the stems) except where the imported REAPER-era
+# code keys on a name pattern until S5: "<MEMBER> mic" (ownership), "gtr"
+# (category), "HANDn mic" and "ENGINEER mic" (tech).
+reaper_url = "http://127.0.0.1:1"
+port = 8080
+tls = false
+https_domain = "mixer.example.org"
+lan_url = "http://10.0.0.10"
+vapid_subject = "mailto:admin@example.org"
+backup_schedule = ["13:00", "21:00"]
+backup_retention_days = 60
+
+[dante_outputs]
+MEMBER1 = [71, 72]
+MEMBER2 = [73, 74]
+MEMBER3 = [75, 76]
+MEMBER4 = [77, 78]
+MEMBER5 = [79, 80]
+MEMBER6 = [81, 82]
+MEMBER7 = [83, 84]
+MEMBER8 = [85, 86]
+MEMBER9 = [87, 88]
+ENGINEER = [91, 92]
+
+[[members]]
+name = "Member1"
+dante_output_l = 71
+dante_output_r = 72
+
+[[members]]
+name = "Member2"
+dante_output_l = 73
+dante_output_r = 74
+
+[[members]]
+name = "Member3"
+dante_output_l = 75
+dante_output_r = 76
+
+[[members]]
+name = "Member4"
+dante_output_l = 77
+dante_output_r = 78
+
+[[members]]
+name = "Member5"
+dante_output_l = 79
+dante_output_r = 80
+
+[[members]]
+name = "Member6"
+dante_output_l = 81
+dante_output_r = 82
+
+[[members]]
+name = "Member7"
+dante_output_l = 83
+dante_output_r = 84
+
+[[members]]
+name = "Member8"
+dante_output_l = 85
+dante_output_r = 86
+
+[[members]]
+name = "Member9"
+dante_output_l = 87
+dante_output_r = 88
+
+[[members]]
+name = "Engineer"
+dante_output_l = 91
+dante_output_r = 92
+
+[[inputs]]
+name = "MEMBER1 mic"
+dante_input = 101
+default_level_db = 0.0
+
+[[inputs]]
+name = "MEMBER2 mic"
+dante_input = 102
+default_level_db = 0.0
+
+[[inputs]]
+name = "MEMBER3 mic"
+dante_input = 103
+default_level_db = 0.0
+
+[[inputs]]
+name = "MEMBER4 mic"
+dante_input = 104
+default_level_db = 0.0
+
+[[inputs]]
+name = "MEMBER4 gtr"
+dante_input = 105
+default_level_db = 0.0
+
+[[inputs]]
+name = "MEMBER5 mic"
+dante_input = 106
+default_level_db = 0.0
+
+[[inputs]]
+name = "MEMBER6 mic"
+dante_input = 107
+default_level_db = 0.0
+
+[[inputs]]
+name = "MEMBER7 mic"
+dante_input = 108
+default_level_db = 0.0
+
+[[inputs]]
+name = "KEYS"
+dante_input = 109
+default_level_db = 0.0
+category = "mics"
+
+[[inputs]]
+name = "MEMBER8 mic"
+dante_input = 110
+default_level_db = 0.0
+
+[[inputs]]
+name = "MEMBER9 mic"
+dante_input = 111
+default_level_db = 0.0
+
+[[inputs]]
+name = "DRUMS"
+dante_input = 112
+default_level_db = 0.0
+
+[[inputs]]
+name = "BASS"
+dante_input = 113
+default_level_db = 0.0
+
+[[inputs]]
+name = "INST"
+dante_input = 114
+default_level_db = 0.0
+
+[[inputs]]
+name = "OTHER"
+dante_input = 115
+default_level_db = 0.0
+
+[[inputs]]
+name = "BGVS"
+dante_input = 116
+default_level_db = 0.0
+
+[[inputs]]
+name = "CLICK"
+dante_input = 117
+default_level_db = 0.0
+
+[[inputs]]
+name = "GUIDE"
+dante_input = 118
+default_level_db = 0.0
+
+[[inputs]]
+name = "IEMONLY"
+dante_input = 119
+default_level_db = 0.0
+
+[[inputs]]
+name = "HAND1 mic"
+dante_input = 120
+default_level_db = 0.0
+
+[[inputs]]
+name = "HAND2 mic"
+dante_input = 121
+default_level_db = 0.0
+
+[[inputs]]
+name = "HAND3 mic"
+dante_input = 122
+default_level_db = 0.0
+
+[[inputs]]
+name = "ENGINEER mic"
+dante_input = 123
+default_level_db = 0.0
+
+[[inputs]]
+name = "CONTENT"
+dante_input = 124
+default_level_db = 0.0
+category = "tech"

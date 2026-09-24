@@ -18,38 +18,17 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("Starting IEM Mixer Server v{}", iem_core::VERSION);
 
-    // Load config from file or environment variable
+    // Site config (TOML). A missing or invalid file stops the server.
     let config_path =
-        std::env::var("IEM_CONFIG_PATH").unwrap_or_else(|_| "config.yaml".to_string());
-
-    let config = match Config::load(&config_path) {
-        Ok(cfg) => {
-            tracing::info!(
-                path = %config_path,
-                members = cfg.members.len(),
-                inputs = cfg.inputs.len(),
-                reaper_url = %cfg.reaper_url,
-                "Config loaded successfully"
-            );
-            cfg
-        }
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                path = %config_path,
-                "Failed to load config, using defaults (controls will NOT work!)"
-            );
-            Config::default()
-        }
-    };
-
-    // Warn if config is effectively empty
-    if config.members.is_empty() {
-        tracing::error!("No band members configured! Mixer controls will return 404.");
-    }
-    if config.inputs.is_empty() {
-        tracing::error!("No input tracks configured! Mixer will show no channels.");
-    }
+        std::env::var("IEMMIXER_CONFIG").unwrap_or_else(|_| "iemmixer.toml".to_string());
+    let config = Config::load(&config_path)
+        .map_err(|e| anyhow::anyhow!("loading site config {config_path}: {e}"))?;
+    tracing::info!(
+        path = %config_path,
+        members = config.members.len(),
+        inputs = config.inputs.len(),
+        "site config loaded"
+    );
 
     // Allow PORT env var to override config (useful for CI where port 80 requires root)
     let port = std::env::var("PORT")

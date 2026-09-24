@@ -1,0 +1,57 @@
+# iemmixer site configuration — example documenting every key. The real site
+# file lives only in the private ops repository and on the PC.
+# Secrets never go here: the JWT key, VAPID key, PIN hashes and pepper are
+# generated on the PC under `<config dir>/secrets/`. Unknown keys are errors.
+
+# REAPER HTTP control surface (the predecessor engine; replaced in S5).
+reaper_url = "http://127.0.0.1:8080"
+# HTTP port of the web app.
+port = 80
+# HTTPS for phones (PWA install); certificate and key next to this file.
+tls = false
+https_port = 443
+tls_cert = "cert.pem"
+tls_key = "key.pem"
+# Public host served through the tunnel (HTTPS redirect, tray "Copy URL",
+# LAN hint on pages opened through it).
+https_domain = "mixer.example.org"
+# Local-network URL shown to band members while the tunnel is down.
+lan_url = "http://10.0.0.10"
+# Public IP of the venue network (LAN/WAN badge); detected when absent.
+# local_public_ip = "198.51.100.7"
+# Web Push contact (VAPID "sub" claim).
+vapid_subject = "mailto:admin@example.org"
+# cloudflared readiness endpoint polled by the tunnel watchdog.
+tunnel_ready_url = "http://127.0.0.1:20241/ready"
+# Automatic backups (local time, HH:MM) and their retention in days.
+backup_schedule = ["13:00", "21:00"]
+backup_retention_days = 60
+
+# Dante TX pair per member bus, keyed by the REAPER track-name prefix.
+[dante_outputs]
+MEMBER1 = [71, 72]
+ENGINEER = [91, 92]
+
+# Band members (login grid); the id is the lower-cased name.
+[[members]]
+name = "Member1"
+dante_output_l = 71
+dante_output_r = 72
+
+[[members]]
+name = "Engineer"
+dante_output_l = 91
+dante_output_r = 92
+
+# Inputs on every member's mixer. `category` = mics | stems | tech (derived
+# from the name when absent); a member owns the input named "<MEMBER> mic".
+[[inputs]]
+name = "MEMBER1 mic"
+dante_input = 101
+default_level_db = 0.0
+
+[[inputs]]
+name = "CONTENT"
+dante_input = 124
+default_level_db = 0.0
+category = "tech"

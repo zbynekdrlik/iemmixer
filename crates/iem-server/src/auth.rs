@@ -362,28 +362,12 @@ pub fn extract_claims(token: &str, secret: &str) -> Option<AuthClaims> {
 mod tests {
     use super::*;
     use iem_core::Config;
-    use std::collections::HashMap;
 
     fn test_config() -> Config {
         Config {
-            reaper_url: "http://localhost:8080".to_string(),
-            port: 80,
             jwt_secret: "test_secret_for_auth_testing".to_string(),
-            members: vec![],
-            inputs: vec![],
-            dante_outputs: HashMap::new(),
-            tls: false,
-            https_port: 443,
-            tls_cert: "cert.pem".to_string(),
-            tls_key: "key.pem".to_string(),
-            https_domain: None,
-            pins: HashMap::new(),
-            engineer_pin: Some("<PIN>".to_string()),
-            local_public_ip: None,
-            vapid_private_key: String::new(),
-            backup_schedule: vec!["13:00".to_string(), "21:00".to_string()],
-            backup_retention_days: 60,
-            tunnel_ready_url: "http://127.0.0.1:20241/ready".to_string(),
+            engineer_pin: Some("9999".to_string()),
+            ..Config::default()
         }
     }
 

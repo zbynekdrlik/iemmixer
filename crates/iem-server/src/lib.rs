@@ -22,6 +22,7 @@ pub mod proxy;
 pub mod push;
 pub mod push_store;
 pub mod routes;
+pub mod secrets;
 pub mod snapshot_routes;
 pub mod snapshot_store;
 pub mod tunnel_watch;
@@ -337,7 +338,11 @@ pub async fn start_server(
         let _ = rustls::crypto::ring::default_provider().install_default();
     }
 
-    let state = AppState::new(server_config.config, &server_config.config_dir);
+    let mut config = server_config.config;
+    let secrets = secrets::load_or_create(&server_config.config_dir.join(secrets::SECRETS_DIR))?;
+    config.jwt_secret = secrets.jwt_secret;
+    config.vapid_private_key = secrets.vapid_private_key;
+    let state = AppState::new(config, &server_config.config_dir);
 
     // Auto-detect public IP for LAN/WAN detection (if not configured)
     {
