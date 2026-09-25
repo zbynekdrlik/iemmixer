@@ -27,8 +27,10 @@ proptest! {
     fn capture_serialize_deserialize_identity(
         sends in proptest::collection::vec(arb_send_backup(), 1..50),
     ) {
-        let mut backup = MixerBackup::default();
-        backup.sends = sends;
+        let backup = MixerBackup {
+            sends,
+            ..Default::default()
+        };
 
         let json = serde_json::to_string(&backup).expect("serialize");
         let parsed: MixerBackup = serde_json::from_str(&json).expect("deserialize");

@@ -56,6 +56,19 @@ pub async fn get_members() -> Result<Vec<MemberInfo>, String> {
     }
 }
 
+/// Where the mixer is reachable (LAN URL, public host) — `GET /api/site`.
+pub async fn get_site_links() -> Result<iem_core::tunnel::SiteLinks, String> {
+    let resp = Request::get(&format!("{}/site", API_BASE))
+        .send()
+        .await
+        .map_err(|e| format!("Network error: {}", e))?;
+    if resp.ok() {
+        resp.json().await.map_err(|e| format!("Parse error: {}", e))
+    } else {
+        Err(format!("Server error: {}", resp.status()))
+    }
+}
+
 /// Get list of band members with timeout
 /// Returns NETWORK_TIMEOUT error if fetch takes longer than timeout_ms
 pub async fn get_members_with_timeout() -> Result<Vec<MemberInfo>, String> {
@@ -140,10 +153,24 @@ pub async fn login(member: &str, pin: &str) -> Result<AuthState, String> {
             member: login_resp.member,
             engineer: login_resp.engineer,
         })
-    } else if resp.status() == 401 {
-        Err("Invalid PIN".to_string())
     } else {
-        Err(format!("Server error: {}", resp.status()))
+        let retry_after = resp.headers().get("retry-after");
+        Err(login_error_message(resp.status(), retry_after.as_deref()))
+    }
+}
+
+/// User-facing text of a failed login (`status` = HTTP status,
+/// `retry_after` = the `Retry-After` header).
+pub fn login_error_message(status: u16, retry_after: Option<&str>) -> String {
+    match status {
+        401 => "Invalid PIN".to_string(),
+        429 => {
+            let secs = retry_after
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .unwrap_or(1);
+            format!("Too many attempts. Try again in {secs} s")
+        }
+        other => format!("Server error: {other}"),
     }
 }
 
@@ -305,4 +332,27 @@ pub async fn apply_restore(token: &str, filename: &str) -> Result<iem_core::Rest
         return Err(format!("HTTP {}", resp.status()));
     }
     resp.json().await.map_err(|e| format!("{e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn login_errors_are_readable() {
+        assert_eq!(login_error_message(401, None), "Invalid PIN");
+        assert_eq!(
+            login_error_message(429, Some("7")),
+            "Too many attempts. Try again in 7 s"
+        );
+        assert_eq!(
+            login_error_message(429, None),
+            "Too many attempts. Try again in 1 s"
+        );
+        assert_eq!(
+            login_error_message(429, Some("soon")),
+            "Too many attempts. Try again in 1 s"
+        );
+        assert_eq!(login_error_message(500, None), "Server error: 500");
+    }
 }

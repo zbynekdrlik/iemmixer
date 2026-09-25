@@ -3,10 +3,9 @@
 
 use axum::{
     Json,
-    body::Body,
     extract::{Path, Query, State},
-    http::{Method, StatusCode},
-    response::{IntoResponse, Response},
+    http::StatusCode,
+    response::IntoResponse,
 };
 use iem_core::{ApiError, BatchControlRequest, BatchOperation, PollResponse};
 use std::collections::HashMap;
@@ -64,67 +63,6 @@ pub async fn client_error(
 #[derive(Debug, serde::Deserialize)]
 pub struct WsQuery {
     pub token: Option<String>,
-}
-
-/// Proxy a request to REAPER
-///
-/// Forwards requests from /api/reaper/* to the REAPER HTTP API
-pub async fn proxy_reaper(
-    State(state): State<AppState>,
-    method: Method,
-    Path(path): Path<String>,
-    body: Body,
-) -> Result<Response, (StatusCode, Json<ApiError>)> {
-    let config = state.config.read().await;
-    let reaper_url = format!("{}/_/{}", config.reaper_url, path);
-    drop(config);
-
-    tracing::debug!(url = %reaper_url, method = %method, "Proxying to REAPER");
-
-    // Convert body to bytes
-    let body_bytes = match axum::body::to_bytes(body, 1024 * 1024).await {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to read request body");
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ApiError::new("BODY_ERROR", "Failed to read request body")),
-            ));
-        }
-    };
-
-    // Build proxy request
-    let req = state
-        .http_client
-        .request(method.clone(), &reaper_url)
-        .body(body_bytes.to_vec());
-
-    // Send request
-    let resp = req.send().await.map_err(|e| {
-        tracing::error!(error = %e, "REAPER proxy error");
-        (
-            StatusCode::BAD_GATEWAY,
-            Json(ApiError::new(
-                "REAPER_ERROR",
-                format!("REAPER unavailable: {}", e),
-            )),
-        )
-    })?;
-
-    // Build response
-    let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::OK);
-    let body = resp.bytes().await.map_err(|e| {
-        tracing::error!(error = %e, "Failed to read REAPER response");
-        (
-            StatusCode::BAD_GATEWAY,
-            Json(ApiError::new(
-                "REAPER_ERROR",
-                "Failed to read REAPER response",
-            )),
-        )
-    })?;
-
-    Ok((status, body.to_vec()).into_response())
 }
 
 /// Get current mixer state for a member
@@ -1578,8 +1516,10 @@ async fn handle_ws(
                                 {
                                     let push_store = state.push_store.clone();
                                     let http_client = state.http_client.clone();
-                                    let vapid_key =
-                                        state.config.read().await.vapid_private_key.clone();
+                                    let (vapid_key, vapid_subject) = {
+                                        let config = state.config.read().await;
+                                        (config.vapid_private_key.clone(), config.vapid_subject.clone())
+                                    };
                                     let push_name = display_name.clone();
                                     let push_member = member_id.clone();
                                     if !vapid_key.is_empty() {
@@ -1592,6 +1532,7 @@ async fn handle_ws(
                                             crate::push::send_push_to_engineers(
                                                 &http_client,
                                                 &vapid_key,
+                                                &vapid_subject,
                                                 &push_store,
                                                 payload.to_string().as_bytes(),
                                             )

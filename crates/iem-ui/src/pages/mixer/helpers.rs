@@ -22,12 +22,11 @@ pub(super) struct DisplayChannel {
 
 /// Send a command via WebSocket (synchronous, non-blocking)
 pub(super) fn ws_send(ws: ReadSignal<Option<web_sys::WebSocket>>, cmd: &iem_core::ClientMsg) {
-    if let Some(ws) = ws.get_untracked() {
-        if ws.ready_state() == web_sys::WebSocket::OPEN {
-            if let Ok(json) = serde_json::to_string(cmd) {
-                let _ = ws.send_with_str(&json);
-            }
-        }
+    if let Some(ws) = ws.get_untracked()
+        && ws.ready_state() == web_sys::WebSocket::OPEN
+        && let Ok(json) = serde_json::to_string(cmd)
+    {
+        let _ = ws.send_with_str(&json);
     }
 }
 

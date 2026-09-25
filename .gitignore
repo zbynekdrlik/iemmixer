@@ -26,3 +26,8 @@ TARGETS.md
 credentials.json
 *.pem
 *.key
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+target/

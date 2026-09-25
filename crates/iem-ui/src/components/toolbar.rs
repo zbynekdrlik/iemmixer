@@ -43,7 +43,7 @@ pub fn Toolbar(
     view! {
         <div class="toolbar">
             {(is_engineer_own_mixer && on_mute_all.is_some()).then(|| {
-                let cb = on_mute_all.clone().unwrap();
+                let cb = on_mute_all.unwrap();
                 view! {
                     <button
                         class="toolbar-btn toolbar-btn-mute-all toolbar-btn-icon"

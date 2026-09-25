@@ -53,7 +53,7 @@ pub fn TalkButton(
     });
 
     // Vibration loop + page red overlay when Live
-    let vib_closure_effect: std::rc::Rc<std::cell::RefCell<Option<Closure<dyn FnMut()>>>> =
+    let vib_closure_effect: crate::components::CallbackSlot =
         std::rc::Rc::new(std::cell::RefCell::new(None));
     Effect::new(move || {
         let current = state.get();
@@ -82,10 +82,10 @@ pub fn TalkButton(
                 // Initial vibrate
                 let _ = window.navigator().vibrate_with_duration(200);
                 // Add red overlay class to body
-                if let Some(doc) = window.document() {
-                    if let Some(body) = doc.body() {
-                        let _ = body.class_list().add_1("talk-live-overlay");
-                    }
+                if let Some(doc) = window.document()
+                    && let Some(body) = doc.body()
+                {
+                    let _ = body.class_list().add_1("talk-live-overlay");
                 }
             } else {
                 // Drop old closure
@@ -94,20 +94,19 @@ pub fn TalkButton(
                 if let Ok(val) = js_sys::Reflect::get(
                     &window,
                     &wasm_bindgen::JsValue::from_str("__iem_talk_vib"),
-                ) {
-                    if let Some(id) = val.as_f64() {
-                        window.clear_interval_with_handle(id as i32);
-                        let _ = js_sys::Reflect::delete_property(
-                            &window,
-                            &wasm_bindgen::JsValue::from_str("__iem_talk_vib"),
-                        );
-                    }
+                ) && let Some(id) = val.as_f64()
+                {
+                    window.clear_interval_with_handle(id as i32);
+                    let _ = js_sys::Reflect::delete_property(
+                        &window,
+                        &wasm_bindgen::JsValue::from_str("__iem_talk_vib"),
+                    );
                 }
                 // Remove red overlay class from body
-                if let Some(doc) = window.document() {
-                    if let Some(body) = doc.body() {
-                        let _ = body.class_list().remove_1("talk-live-overlay");
-                    }
+                if let Some(doc) = window.document()
+                    && let Some(body) = doc.body()
+                {
+                    let _ = body.class_list().remove_1("talk-live-overlay");
                 }
             }
         }
@@ -127,14 +126,14 @@ pub fn TalkButton(
     };
 
     // Pointer down: request talk lock via mixer WS
-    let ws_url_builder = build_talkback_ws_url.clone();
+    let ws_url_builder = build_talkback_ws_url;
     let on_pointer_down = move |e: web_sys::PointerEvent| {
         e.prevent_default();
         // Capture pointer — prevents pointerleave from firing on slight finger movement
-        if let Some(target) = e.target() {
-            if let Ok(el) = target.dyn_into::<web_sys::Element>() {
-                let _ = el.set_pointer_capture(e.pointer_id());
-            }
+        if let Some(target) = e.target()
+            && let Ok(el) = target.dyn_into::<web_sys::Element>()
+        {
+            let _ = el.set_pointer_capture(e.pointer_id());
         }
         let current = state.get_untracked();
         if current == TalkState::Unsupported
@@ -145,12 +144,11 @@ pub fn TalkButton(
         }
 
         // Send TalkStart via mixer WS to acquire lock
-        if let Some(socket) = ws.get_untracked() {
-            if socket.ready_state() == web_sys::WebSocket::OPEN {
-                if let Ok(json) = serde_json::to_string(&iem_core::ClientMsg::TalkStart) {
-                    let _ = socket.send_with_str(&json);
-                }
-            }
+        if let Some(socket) = ws.get_untracked()
+            && socket.ready_state() == web_sys::WebSocket::OPEN
+            && let Ok(json) = serde_json::to_string(&iem_core::ClientMsg::TalkStart)
+        {
+            let _ = socket.send_with_str(&json);
         }
 
         // Start mic capture (the WS handler will set state to Live on TalkAcquired,
@@ -192,12 +190,11 @@ pub fn TalkButton(
         stop_talkback();
 
         // Send TalkStop via mixer WS
-        if let Some(socket) = ws.get_untracked() {
-            if socket.ready_state() == web_sys::WebSocket::OPEN {
-                if let Ok(json) = serde_json::to_string(&iem_core::ClientMsg::TalkStop) {
-                    let _ = socket.send_with_str(&json);
-                }
-            }
+        if let Some(socket) = ws.get_untracked()
+            && socket.ready_state() == web_sys::WebSocket::OPEN
+            && let Ok(json) = serde_json::to_string(&iem_core::ClientMsg::TalkStop)
+        {
+            let _ = socket.send_with_str(&json);
         }
 
         let _ = set_state.try_set(TalkState::Idle);
@@ -205,10 +202,10 @@ pub fn TalkButton(
 
     let on_pointer_up = move |e: web_sys::PointerEvent| {
         // Release pointer capture
-        if let Some(target) = e.target() {
-            if let Ok(el) = target.dyn_into::<web_sys::Element>() {
-                let _ = el.release_pointer_capture(e.pointer_id());
-            }
+        if let Some(target) = e.target()
+            && let Ok(el) = target.dyn_into::<web_sys::Element>()
+        {
+            let _ = el.release_pointer_capture(e.pointer_id());
         }
         release_talk();
     };

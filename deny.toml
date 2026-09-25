@@ -1,0 +1,34 @@
+[graph]
+targets = ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc", "wasm32-unknown-unknown"]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+unmaintained = "workspace"
+ignore = [
+  { id = "RUSTSEC-2024-0429", reason = "glib < 0.20 only via Tauri's Linux GTK stack; the tray ships for Windows only; tracked in #12" },
+]
+
+[licenses]
+version = 2
+allow = [
+  "MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause", "ISC",
+  "Unicode-3.0", "Zlib", "MPL-2.0", "BSL-1.0", "CC0-1.0", "0BSD", "CDLA-Permissive-2.0", "Unlicense", "MIT-0",
+]
+confidence-threshold = 0.9
+unused-allowed-license = "allow"
+
+# aws-lc-sys (rustls' default aws-lc-rs crypto provider) is ISC AND (Apache-2.0 OR ISC) AND OpenSSL
+[[licenses.exceptions]]
+crate = "aws-lc-sys"
+allow = ["OpenSSL"]
+
+[bans]
+multiple-versions = "allow"
+wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

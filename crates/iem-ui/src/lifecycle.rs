@@ -461,7 +461,7 @@ mod tests {
         // Sanity: the staleness threshold must be strictly larger than the
         // interval, otherwise the watchdog would false-positive on its own
         // tick latency.
-        assert!((WS_WATCHDOG_INTERVAL_MS as f64) < WS_STALENESS_THRESHOLD_MS);
+        const { assert!((WS_WATCHDOG_INTERVAL_MS as f64) < WS_STALENESS_THRESHOLD_MS) }
     }
 
     #[test]
@@ -469,8 +469,8 @@ mod tests {
         // Guard against someone silently dropping the truncation by making
         // the cap ridiculously large. 200 chars is small enough to fit on
         // a phone viewport.
-        assert!(PANIC_MESSAGE_MAX_DISPLAY_CHARS <= 500);
-        assert!(PANIC_MESSAGE_MAX_DISPLAY_CHARS > 0);
+        const { assert!(PANIC_MESSAGE_MAX_DISPLAY_CHARS <= 500) }
+        const { assert!(PANIC_MESSAGE_MAX_DISPLAY_CHARS > 0) }
     }
 
     // -----------------------------------------------------------------------

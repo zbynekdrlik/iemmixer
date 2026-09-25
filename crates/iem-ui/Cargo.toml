@@ -11,7 +11,7 @@ description = "Leptos WASM web UI of iemmixer"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# Core library (WASM-safe: no config/serde_yaml)
+# Core library (WASM-safe: no config/toml)
 iem-core = { path = "../iem-core", default-features = false }
 
 # Leptos with CSR (client-side rendering)
@@ -97,6 +97,9 @@ js-sys = "0.3"
 gloo-net = "0.6"
 gloo-timers = "0.3"
 gloo-storage = "0.3"
+
+# VAPID key decoding for Web Push (#133)
+base64 = "0.22"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }

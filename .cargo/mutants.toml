@@ -1,0 +1,68 @@
+# cargo-mutants: PR gate in .github/workflows/ci.yml (diff-scoped; the shard
+# count is the `shard:` matrix length, sized by the `mutants-list` job), full
+# sweep in .github/workflows/mutation-full.yml (on demand). Both pass
+# --copy-target=true after a warm-up build and --timeout 60 (with
+# --baseline=skip there is no measured test time, so a hung mutant would
+# otherwise hold its job for 300 s). Tests run per package only.
+profile = "mutants"
+test_tool = "nextest"
+
+exclude_globs = [
+  # Windows-only DPAPI calls: not compiled on the Linux runners; the `windows`
+  # CI job runs their tests (`cargo test -p iem-server --lib pepper::`).
+  "crates/iem-server/src/pepper/dpapi.rs",
+  # Tauri tray shell: built and linted on Windows only.
+  "crates/iem-tray/**",
+]
+
+exclude_re = [
+  # Server bootstrap and WebSocket handlers need a bound server, a JWT and a
+  # WS client; the Playwright suite covers them (whole-body replacements only).
+  "replace start_server -> ",
+  "replace run_server -> ",
+  "replace handle_ws with \\(\\)",
+  "handle_talkback_ws",
+  "talkback_diagnostics_handler",
+  # Test-only constructors.
+  "new_for_test",
+  "make_test_state_with_bad_reaper",
+  # REAPER-era background loops (deleted in S5).
+  "poll_reaper_and_broadcast",
+  "try_persist_auto_snapshot",
+  # Tunnel watchdog loop and the Windows sc.exe restart.
+  "spawn_tunnel_watch",
+  "restart_service_blocking",
+  "sc_windows",
+  # Browser-only fetches and context accessors in the UI; covered by
+  # e2e/tests/site-links.spec.ts and e2e/tests/login-protection.spec.ts.
+  "iem-ui/src/api\\.rs.*replace (login|get_site_links) ",
+  "iem-ui/src/components/tunnel_status\\.rs.*replace site_links ",
+  # Leptos component bodies are DOM event closures and effects: native tests
+  # cannot mount a component (web_sys panics off wasm). Their pure logic lives
+  # in tested helpers (e.g. dragged_pan, is_foreign_mixer, member_has_photo).
+  # Fader: `!is_animating` guards in the touchend/touchcancel handlers.
+  "iem-ui/src/components/fader\\.rs.* in Fader$",
+  # AlertToast / AlertButton / TalkButton: WebSocket `ready_state() == OPEN`
+  # checks and `document.hidden` in click, pointer and visibility handlers.
+  "iem-ui/src/components/alert_toast\\.rs.* in AlertToast$",
+  "iem-ui/src/components/alert_button\\.rs.* in AlertButton$",
+  "iem-ui/src/components/talk_button\\.rs.* in TalkButton$",
+  # LandingPage: the sessionStorage + router redirect effect; both branches are
+  # covered by e2e/tests/auto-redirect.spec.ts.
+  "iem-ui/src/pages/landing\\.rs.* in LandingPage$",
+  # SOS alert loops: window intervals via js_sys::Reflect and the service
+  # worker notification.
+  "iem-ui/src/components/alert_toast\\.rs.*(stop_loops|request_and_notify)",
+  # Engineer listen: opens the audio WebSocket and the AudioContext; the frame
+  # log sampling and the status mapping are tested helpers.
+  "iem-ui/src/components/audio_player\\.rs.*start_listening",
+  # localStorage reads/writes of the user settings.
+  "iem-ui/src/components/settings_modal\\.rs.*replace UserSettings::(load|save) ",
+  # Mixer WebSocket lifecycle (connect, onmessage/onclose closures, intervals,
+  # visibility listener); the message logic is in tested helpers
+  # (meter_update_due, update_channel, solo_change, clears_shown_alert, …).
+  "iem-ui/src/pages/mixer/connection\\.rs.*(setup_connection|connect_websocket)",
+  "iem-ui/src/pages/mixer/helpers\\.rs.*ws_send",
+  # Push subscription through the service worker's PushManager.
+  "iem-ui/src/pages/mixer/push\\.rs.*subscribe_to_push",
+]

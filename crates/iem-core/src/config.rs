@@ -17,6 +17,7 @@ pub fn constant_time_eq(a: &str, b: &str) -> bool {
 
 /// Application configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     /// REAPER server URL
     #[serde(default = "default_reaper_url")]
@@ -41,20 +42,14 @@ pub struct Config {
     #[serde(default)]
     pub inputs: Vec<InputTrack>,
 
-    /// PIN codes for authentication (member_id -> PIN)
-    #[serde(default)]
-    pub pins: HashMap<String, String>,
-
-    /// Engineer PIN (full access)
-    #[serde(default)]
-    pub engineer_pin: Option<String>,
-
-    /// JWT secret for token signing
-    #[serde(default = "default_jwt_secret")]
+    /// JWT signing key. Never read from the site file: the server loads it
+    /// from `<config dir>/secrets/jwt_secret` (`iem_server::secrets`).
+    #[serde(skip)]
     pub jwt_secret: String,
 
-    /// VAPID private key for Web Push (base64url-encoded P-256 scalar, 32 bytes)
-    #[serde(default)]
+    /// VAPID private key (base64url P-256 scalar). Never read from the site
+    /// file: loaded from `<config dir>/secrets/vapid_private`.
+    #[serde(skip)]
     pub vapid_private_key: String,
 
     /// Enable HTTPS (for PWA installability on phones)
@@ -83,6 +78,15 @@ pub struct Config {
     #[serde(default)]
     pub local_public_ip: Option<String>,
 
+    /// Local-network URL of the mixer, shown to band members while the
+    /// tunnel is down (e.g. "http://10.0.0.10").
+    #[serde(default)]
+    pub lan_url: Option<String>,
+
+    /// Web Push contact (VAPID `sub` claim).
+    #[serde(default = "default_vapid_subject")]
+    pub vapid_subject: String,
+
     /// Backup schedule times (HH:MM format, 24h), e.g. ["13:00", "21:00"]
     #[serde(default = "default_backup_schedule")]
     pub backup_schedule: Vec<String>,
@@ -105,9 +109,8 @@ fn default_port() -> u16 {
     80
 }
 
-fn default_jwt_secret() -> String {
-    // In production, this should be set via config file or env var
-    "change-me-in-production".to_string()
+fn default_vapid_subject() -> String {
+    "mailto:admin@example.org".to_string()
 }
 
 fn default_https_port() -> u16 {
@@ -142,9 +145,7 @@ impl Default for Config {
             members: Vec::new(),
             dante_outputs: HashMap::new(),
             inputs: Vec::new(),
-            pins: HashMap::new(),
-            engineer_pin: None,
-            jwt_secret: default_jwt_secret(),
+            jwt_secret: String::new(),
             vapid_private_key: String::new(),
             tls: false,
             https_port: default_https_port(),
@@ -152,6 +153,8 @@ impl Default for Config {
             tls_key: default_tls_key(),
             https_domain: None,
             local_public_ip: None,
+            lan_url: None,
+            vapid_subject: default_vapid_subject(),
             backup_schedule: default_backup_schedule(),
             backup_retention_days: default_backup_retention_days(),
             tunnel_ready_url: default_tunnel_ready_url(),
@@ -160,117 +163,11 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Load configuration from a YAML file
+    /// Load the site configuration from a TOML file.
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
         let content =
             std::fs::read_to_string(path.as_ref()).map_err(|e| ConfigError::Io(e.to_string()))?;
-        serde_yaml::from_str(&content).map_err(|e| ConfigError::Parse(e.to_string()))
-    }
-
-    /// YAML key for the JWT signing token
-    const JWT_CONFIG_KEY: &'static str = "jwt_secret";
-
-    /// Validate that critical security settings are configured.
-    /// If jwt_secret is still the default placeholder, generates a random one
-    /// and persists it to the config file so tokens survive restarts.
-    pub fn validate_security(&mut self, config_path: Option<&Path>) {
-        if self.jwt_secret == "change-me-in-production" || self.jwt_secret.is_empty() {
-            // Generate a random value
-            use std::time::{SystemTime, UNIX_EPOCH};
-            let seed = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos();
-            self.jwt_secret = format!(
-                "auto-{:x}-{:x}",
-                seed,
-                seed.wrapping_mul(0x517cc1b727220a95)
-            );
-
-            // Persist so tokens survive app restarts
-            if let Some(path) = config_path
-                && let Err(e) = self.persist_jwt_to_config(path)
-            {
-                eprintln!("WARNING: Failed to save generated JWT config: {}", e);
-            }
-
-            eprintln!(
-                "INFO: Auto-generated JWT signing key and saved to config file. \
-                 Tokens will now persist across restarts."
-            );
-        }
-
-        // Auto-generate VAPID key pair for Web Push if not set
-        #[cfg(feature = "vapid")]
-        if self.vapid_private_key.is_empty() {
-            let sk = p256::SecretKey::random(&mut rand_core::OsRng);
-            use base64::Engine;
-            self.vapid_private_key =
-                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sk.to_bytes());
-
-            if let Some(path) = config_path {
-                let key = "vapid_private_key";
-                let new_line = format!("{}: \"{}\"", key, self.vapid_private_key);
-                if let Ok(content) = std::fs::read_to_string(path) {
-                    let updated = if content.contains(&format!("{}:", key)) {
-                        content
-                            .lines()
-                            .map(|line| {
-                                if line.trim_start().starts_with(&format!("{}:", key)) {
-                                    new_line.as_str()
-                                } else {
-                                    line
-                                }
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                            + "\n"
-                    } else {
-                        let mut result = content;
-                        if !result.ends_with('\n') {
-                            result.push('\n');
-                        }
-                        result.push_str(&new_line);
-                        result.push('\n');
-                        result
-                    };
-                    let _ = std::fs::write(path, updated);
-                }
-            }
-
-            eprintln!("INFO: Auto-generated VAPID key pair for Web Push notifications.");
-        }
-    }
-
-    /// Write the current jwt_secret back to the config file.
-    fn persist_jwt_to_config(&self, path: &Path) -> Result<(), ConfigError> {
-        let content = std::fs::read_to_string(path).map_err(|e| ConfigError::Io(e.to_string()))?;
-
-        let key = Self::JWT_CONFIG_KEY;
-        let new_line = format!("{}: \"{}\"", key, self.jwt_secret);
-        let updated = if content.contains(&format!("{}:", key)) {
-            let mut result = String::new();
-            for line in content.lines() {
-                if line.trim_start().starts_with(&format!("{}:", key)) {
-                    result.push_str(&new_line);
-                } else {
-                    result.push_str(line);
-                }
-                result.push('\n');
-            }
-            result
-        } else {
-            let mut result = content;
-            if !result.ends_with('\n') {
-                result.push('\n');
-            }
-            result.push_str(&new_line);
-            result.push('\n');
-            result
-        };
-
-        std::fs::write(path, updated).map_err(|e| ConfigError::Io(e.to_string()))?;
-        Ok(())
+        toml::from_str(&content).map_err(|e| ConfigError::Parse(e.to_string()))
     }
 
     /// Find a band member by their ID (lowercase name)
@@ -305,6 +202,23 @@ impl Config {
         let pk = sk.public_key();
         let point = pk.to_encoded_point(false);
         Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(point.as_bytes()))
+    }
+
+    /// LAN URL and public host for the UI (`GET /api/site`).
+    pub fn site_links(&self) -> crate::tunnel::SiteLinks {
+        crate::tunnel::SiteLinks {
+            lan_url: self.lan_url.clone(),
+            public_host: self.https_domain.clone(),
+        }
+    }
+
+    /// URL the tray's "Copy URL" shares: the public host over HTTPS, else the
+    /// LAN URL, else none.
+    pub fn share_url(&self) -> Option<String> {
+        self.https_domain
+            .as_ref()
+            .map(|domain| format!("https://{domain}"))
+            .or_else(|| self.lan_url.clone())
     }
 }
 
@@ -528,19 +442,19 @@ mod tests {
     }
 
     #[test]
-    fn test_dante_outputs_yaml_parsing() {
-        // Config YAML should parse dante_outputs map correctly
-        let yaml = r#"
-reaper_url: "http://127.0.0.1:8080"
-port: 80
-dante_outputs:
-  OLDMEMBER1: [89, 90]
-  MEMBER2: [73, 74]
-  MEMBER3: [75, 76]
-inputs: []
+    fn test_dante_outputs_toml_parsing() {
+        let text = r#"
+reaper_url = "http://127.0.0.1:8080"
+port = 80
+inputs = []
+
+[dante_outputs]
+MEMBER1 = [71, 72]
+MEMBER2 = [73, 74]
+MEMBER3 = [75, 76]
 "#;
-        let config: Config = serde_yaml::from_str(yaml).expect("YAML should parse");
-        assert_eq!(config.dante_outputs.get("OLDMEMBER1"), Some(&[89, 90]));
+        let config: Config = toml::from_str(text).expect("TOML should parse");
+        assert_eq!(config.dante_outputs.get("MEMBER1"), Some(&[71, 72]));
         assert_eq!(config.dante_outputs.get("MEMBER3"), Some(&[75, 76]));
     }
 
@@ -598,37 +512,131 @@ inputs: []
 
     #[test]
     fn test_backup_schedule_custom() {
-        let yaml = r#"
-reaper_url: "http://test:8080"
-backup_schedule:
-  - "09:00"
-  - "13:00"
-  - "18:00"
-  - "22:00"
-backup_retention_days: 30
-"#;
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let text = "reaper_url = \"http://test:8080\"\nbackup_schedule = [\"09:00\", \"13:00\", \"18:00\", \"22:00\"]\nbackup_retention_days = 30\n";
+        let config: Config = toml::from_str(text).unwrap();
         assert_eq!(config.backup_schedule.len(), 4);
         assert_eq!(config.backup_retention_days, 30);
     }
 
     #[test]
-    fn test_tunnel_ready_url_default_and_yaml_default() {
-        // Default points at cloudflared's local metrics server (reaperiem#202).
+    fn test_tunnel_ready_url_default_and_toml_default() {
         assert_eq!(
             Config::default().tunnel_ready_url,
             "http://127.0.0.1:20241/ready"
         );
-        // A deployed config without the key gets the same default.
-        let config: Config = serde_yaml::from_str("reaper_url: \"http://test:8080\"\n").unwrap();
+        let config: Config = toml::from_str("reaper_url = \"http://test:8080\"\n").unwrap();
         assert_eq!(config.tunnel_ready_url, "http://127.0.0.1:20241/ready");
     }
 
     #[test]
     fn test_tunnel_ready_url_custom() {
-        let yaml = "tunnel_ready_url: \"http://127.0.0.1:9999/ready\"\n";
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let config: Config =
+            toml::from_str("tunnel_ready_url = \"http://127.0.0.1:9999/ready\"\n").unwrap();
         assert_eq!(config.tunnel_ready_url, "http://127.0.0.1:9999/ready");
+    }
+
+    #[test]
+    fn test_secrets_are_never_read_from_the_site_file() {
+        for key in ["jwt_secret", "vapid_private_key"] {
+            let text = format!("{key} = \"value\"\n");
+            assert!(
+                toml::from_str::<Config>(&text).is_err(),
+                "{key} must be rejected"
+            );
+        }
+        assert!(
+            Config::default().jwt_secret.is_empty(),
+            "no compiled-in JWT key"
+        );
+    }
+
+    #[test]
+    fn test_unknown_keys_are_rejected() {
+        assert!(toml::from_str::<Config>("reaper_urll = \"http://x\"\n").is_err());
+    }
+
+    #[test]
+    fn test_site_extras_default_and_parse() {
+        let defaults = Config::default();
+        assert_eq!(defaults.lan_url, None);
+        assert_eq!(defaults.vapid_subject, "mailto:admin@example.org");
+        let config: Config = toml::from_str(
+            "lan_url = \"http://10.0.0.20\"\nvapid_subject = \"mailto:ops@example.org\"\n",
+        )
+        .unwrap();
+        assert_eq!(config.lan_url.as_deref(), Some("http://10.0.0.20"));
+        assert_eq!(config.vapid_subject, "mailto:ops@example.org");
+    }
+
+    #[test]
+    fn test_committed_site_files_parse() {
+        let site: Config = toml::from_str(include_str!("../../../config/test-site.toml"))
+            .expect("config/test-site.toml");
+        assert_eq!(site.members.len(), 10);
+        assert_eq!(site.inputs.len(), 24);
+        assert_eq!(site.dante_outputs.len(), 10);
+        assert_eq!(site.lan_url.as_deref(), Some("http://10.0.0.10"));
+        assert_eq!(site.https_domain.as_deref(), Some("mixer.example.org"));
+        let example: Config = toml::from_str(include_str!("../../../config/iemmixer.example.toml"))
+            .expect("config/iemmixer.example.toml");
+        assert_eq!(example.members.len(), 2);
+    }
+
+    #[test]
+    fn test_load_reads_a_toml_file_and_reports_parse_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = dir.path().join("good.toml");
+        std::fs::write(&good, "port = 8081\n").unwrap();
+        assert_eq!(Config::load(&good).unwrap().port, 8081);
+        let bad = dir.path().join("bad.toml");
+        std::fs::write(&bad, "port = \"eighty\"\n").unwrap();
+        assert!(matches!(Config::load(&bad), Err(ConfigError::Parse(_))));
+        assert!(matches!(
+            Config::load(dir.path().join("missing.toml")),
+            Err(ConfigError::Io(_))
+        ));
+    }
+
+    #[test]
+    fn test_site_links_come_from_lan_url_and_https_domain() {
+        let config = Config {
+            lan_url: Some("http://10.0.0.10".to_string()),
+            https_domain: Some("mixer.example.org".to_string()),
+            ..Config::default()
+        };
+        let links = config.site_links();
+        assert_eq!(links.lan_url.as_deref(), Some("http://10.0.0.10"));
+        assert_eq!(links.public_host.as_deref(), Some("mixer.example.org"));
+        assert_eq!(
+            Config::default().site_links(),
+            crate::tunnel::SiteLinks::default()
+        );
+    }
+
+    #[test]
+    fn test_share_url_prefers_the_public_host_then_the_lan_url() {
+        let both = Config {
+            lan_url: Some("http://10.0.0.10".to_string()),
+            https_domain: Some("mixer.example.org".to_string()),
+            ..Config::default()
+        };
+        assert_eq!(
+            both.share_url().as_deref(),
+            Some("https://mixer.example.org")
+        );
+        let lan_only = Config {
+            lan_url: Some("http://10.0.0.10".to_string()),
+            ..Config::default()
+        };
+        assert_eq!(lan_only.share_url().as_deref(), Some("http://10.0.0.10"));
+        assert_eq!(Config::default().share_url(), None);
+    }
+
+    #[test]
+    fn test_plaintext_pins_are_rejected_in_the_site_file() {
+        for text in ["engineer_pin = \"2468\"\n", "[pins]\nmember1 = \"2468\"\n"] {
+            assert!(toml::from_str::<Config>(text).is_err(), "{text}");
+        }
     }
 }
 
@@ -660,56 +668,5 @@ mod security_tests {
     fn test_validate_member_id_rejects_special_chars() {
         assert!(validate_member_id("foo bar").is_err());
         assert!(validate_member_id("foo.json").is_err());
-    }
-
-    #[test]
-    fn test_validate_security_generates_on_default() {
-        let mut config = Config::default();
-        config.validate_security(None);
-        assert_ne!(config.jwt_secret, "change-me-in-production");
-        assert!(config.jwt_secret.starts_with("auto-"));
-    }
-
-    #[test]
-    fn test_validate_security_keeps_custom() {
-        let mut config = Config::default();
-        let val = "not-the-default-placeholder".to_string();
-        config.jwt_secret = val.clone();
-        config.validate_security(None);
-        assert_eq!(config.jwt_secret, val);
-    }
-
-    #[test]
-    fn test_validate_security_persists_to_file() {
-        let dir = std::env::temp_dir().join(format!("iem-persist-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("config.yaml");
-        std::fs::write(&path, "port: 80\n").unwrap();
-
-        let mut cfg = Config::load(&path).unwrap();
-        cfg.validate_security(Some(&path));
-        let generated = cfg.jwt_secret.clone();
-        assert!(generated.starts_with("auto-"));
-
-        // Reload from file — must be persisted
-        let reloaded = Config::load(&path).unwrap();
-        assert_eq!(reloaded.jwt_secret, generated);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn test_validate_security_no_overwrite_custom() {
-        let dir = std::env::temp_dir().join(format!("iem-nowrite-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("config.yaml");
-        std::fs::write(&path, "port: 80\n").unwrap();
-
-        let mut cfg = Config::default();
-        let val = "my-custom-jwt-value".to_string();
-        cfg.jwt_secret = val.clone();
-        cfg.validate_security(Some(&path));
-        assert_eq!(cfg.jwt_secret, val);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -28,16 +28,16 @@ pub fn LandingPage() -> impl IntoView {
     Effect::new(move |_| {
         if let Some(auth) = get_auth() {
             let window = web_sys::window().unwrap();
-            if let Ok(Some(storage)) = window.session_storage() {
-                if storage.get_item("iem_redirected").ok().flatten().is_none() {
-                    let _ = storage.set_item("iem_redirected", "1");
-                    if !is_token_expired() {
-                        let target = format!("/{}", auth.member);
-                        navigate(&target, Default::default());
-                    } else {
-                        let target = format!("/login?member={m}&next=/{m}", m = auth.member);
-                        navigate(&target, Default::default());
-                    }
+            if let Ok(Some(storage)) = window.session_storage()
+                && storage.get_item("iem_redirected").ok().flatten().is_none()
+            {
+                let _ = storage.set_item("iem_redirected", "1");
+                if !is_token_expired() {
+                    let target = format!("/{}", auth.member);
+                    navigate(&target, Default::default());
+                } else {
+                    let target = format!("/login?member={m}&next=/{m}", m = auth.member);
+                    navigate(&target, Default::default());
                 }
             }
         }
@@ -79,7 +79,7 @@ pub fn LandingPage() -> impl IntoView {
             <header class="header">
                 <h1>"IEM Mixer"</h1>
                 <div class="header-version">
-                    <span class="header-version-number">{iem_core::version_label()}</span>
+                    <span class="header-version-number" data-testid="version">{iem_core::version_label()}</span>
                     <span class="header-version-date">{iem_core::build_datetime()}</span>
                 </div>
             </header>
@@ -143,8 +143,8 @@ fn MemberGrid(members: Vec<MemberInfo>) -> impl IntoView {
             <div class="empty-state">
                 <div class="empty-icon">"🎧"</div>
                 <h2>"No Members Configured"</h2>
-                <p>"Add band members in config.yaml to get started."</p>
-                <p class="hint">"Config location: %APPDATA%\\iem-mixer\\config.yaml"</p>
+                <p>"Add band members in iemmixer.toml to get started."</p>
+                <p class="hint">"Config location: %APPDATA%\\iemmixer\\iemmixer.toml"</p>
             </div>
         }
         .into_any()

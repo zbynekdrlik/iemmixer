@@ -968,6 +968,6 @@ mod tests {
         let band: EqBand = serde_json::from_str(json).unwrap();
         assert_eq!(band.gain_db_min, -12.0);
         assert_eq!(band.gain_db_max, 12.0);
-        assert_eq!(band.enabled, true); // also tests existing default_enabled
+        assert!(band.enabled); // also tests existing default_enabled
     }
 }

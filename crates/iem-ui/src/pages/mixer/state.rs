@@ -13,76 +13,56 @@ use crate::components::eq_modal::EqBandState;
 use crate::components::settings_modal::UserSettings;
 use crate::components::talk_button::TalkState;
 
+/// A read/write signal pair as returned by `signal()`. Named so the fields
+/// below stay readable (and under clippy's `type_complexity` threshold).
+pub(super) type SignalPair<T> = (ReadSignal<T>, WriteSignal<T>);
+
 /// All reactive state owned by MixerPage.
 #[derive(Clone, Copy)]
 pub(super) struct MixerState {
-    pub channels: (ReadSignal<Vec<Channel>>, WriteSignal<Vec<Channel>>),
-    pub meters: (
-        ReadSignal<HashMap<usize, [f32; 2]>>,
-        WriteSignal<HashMap<usize, [f32; 2]>>,
-    ),
-    pub connected: (ReadSignal<bool>, WriteSignal<bool>),
-    pub loading: (ReadSignal<bool>, WriteSignal<bool>),
-    pub fader_touched: (
-        ReadSignal<HashMap<usize, bool>>,
-        WriteSignal<HashMap<usize, bool>>,
-    ),
-    pub global_touched: (ReadSignal<bool>, WriteSignal<bool>),
-    pub stems_touched: (ReadSignal<bool>, WriteSignal<bool>),
-    pub global_level: (ReadSignal<f32>, WriteSignal<f32>),
-    pub global_muted: (ReadSignal<bool>, WriteSignal<bool>),
-    pub stems_level: (ReadSignal<f32>, WriteSignal<f32>),
-    pub stems_muted: (ReadSignal<bool>, WriteSignal<bool>),
-    pub stems_bus_idx: (ReadSignal<Option<usize>>, WriteSignal<Option<usize>>),
-    pub eq_open: (
-        ReadSignal<Option<(usize, String)>>,
-        WriteSignal<Option<(usize, String)>>,
-    ),
-    pub eq_bands: (ReadSignal<Vec<EqBandState>>, WriteSignal<Vec<EqBandState>>),
-    pub eq_loading: (ReadSignal<bool>, WriteSignal<bool>),
-    pub limiter_open: (
-        ReadSignal<Option<(usize, String)>>,
-        WriteSignal<Option<(usize, String)>>,
-    ),
-    pub limiter_limit_db: (ReadSignal<f32>, WriteSignal<f32>),
-    pub limiter_limit_norm: (ReadSignal<f32>, WriteSignal<f32>),
-    pub limiter_enabled: (ReadSignal<bool>, WriteSignal<bool>),
-    pub limiter_loading: (ReadSignal<bool>, WriteSignal<bool>),
-    pub limiter_active_seconds: (ReadSignal<f64>, WriteSignal<f64>),
-    pub active_category: (ReadSignal<Category>, WriteSignal<Category>),
-    pub data_pulse: (ReadSignal<bool>, WriteSignal<bool>),
-    pub pinned_channels: (ReadSignal<Vec<usize>>, WriteSignal<Vec<usize>>),
-    pub hidden_channels: (ReadSignal<Vec<usize>>, WriteSignal<Vec<usize>>),
-    pub network_mode: (ReadSignal<String>, WriteSignal<String>),
-    pub output_track_idx: (ReadSignal<Option<usize>>, WriteSignal<Option<usize>>),
-    pub soloed: (ReadSignal<HashSet<usize>>, WriteSignal<HashSet<usize>>),
-    pub pre_solo_mutes: (
-        ReadSignal<HashMap<usize, bool>>,
-        WriteSignal<HashMap<usize, bool>>,
-    ),
-    pub double_tap_fader: (ReadSignal<bool>, WriteSignal<bool>),
-    pub has_photo: (ReadSignal<bool>, WriteSignal<bool>),
-    pub preset_modal_visible: (ReadSignal<bool>, WriteSignal<bool>),
-    pub pin_modal_visible: (ReadSignal<bool>, WriteSignal<bool>),
-    pub settings_modal_visible: (ReadSignal<bool>, WriteSignal<bool>),
-    pub snapshot_modal_visible: (ReadSignal<bool>, WriteSignal<bool>),
-    pub alert_data: (
-        ReadSignal<Option<(String, String)>>,
-        WriteSignal<Option<(String, String)>>,
-    ),
-    pub alert_active: (ReadSignal<bool>, WriteSignal<bool>),
-    pub talk_state: (ReadSignal<TalkState>, WriteSignal<TalkState>),
-    pub engineer_talking: (ReadSignal<bool>, WriteSignal<bool>),
+    pub channels: SignalPair<Vec<Channel>>,
+    pub meters: SignalPair<HashMap<usize, [f32; 2]>>,
+    pub connected: SignalPair<bool>,
+    pub loading: SignalPair<bool>,
+    pub fader_touched: SignalPair<HashMap<usize, bool>>,
+    pub global_touched: SignalPair<bool>,
+    pub stems_touched: SignalPair<bool>,
+    pub global_level: SignalPair<f32>,
+    pub global_muted: SignalPair<bool>,
+    pub stems_level: SignalPair<f32>,
+    pub stems_muted: SignalPair<bool>,
+    pub stems_bus_idx: SignalPair<Option<usize>>,
+    pub eq_open: SignalPair<Option<(usize, String)>>,
+    pub eq_bands: SignalPair<Vec<EqBandState>>,
+    pub eq_loading: SignalPair<bool>,
+    pub limiter_open: SignalPair<Option<(usize, String)>>,
+    pub limiter_limit_db: SignalPair<f32>,
+    pub limiter_limit_norm: SignalPair<f32>,
+    pub limiter_enabled: SignalPair<bool>,
+    pub limiter_loading: SignalPair<bool>,
+    pub limiter_active_seconds: SignalPair<f64>,
+    pub active_category: SignalPair<Category>,
+    pub data_pulse: SignalPair<bool>,
+    pub pinned_channels: SignalPair<Vec<usize>>,
+    pub hidden_channels: SignalPair<Vec<usize>>,
+    pub network_mode: SignalPair<String>,
+    pub output_track_idx: SignalPair<Option<usize>>,
+    pub soloed: SignalPair<HashSet<usize>>,
+    pub pre_solo_mutes: SignalPair<HashMap<usize, bool>>,
+    pub double_tap_fader: SignalPair<bool>,
+    pub has_photo: SignalPair<bool>,
+    pub preset_modal_visible: SignalPair<bool>,
+    pub pin_modal_visible: SignalPair<bool>,
+    pub settings_modal_visible: SignalPair<bool>,
+    pub snapshot_modal_visible: SignalPair<bool>,
+    pub alert_data: SignalPair<Option<(String, String)>>,
+    pub alert_active: SignalPair<bool>,
+    pub talk_state: SignalPair<TalkState>,
+    pub engineer_talking: SignalPair<bool>,
     /// Internet access (Cloudflare tunnel) status from the server (reaperiem#202);
     /// `None` until the first `TunnelStatus` message arrives.
-    pub tunnel: (
-        ReadSignal<Option<iem_core::TunnelStatusInfo>>,
-        WriteSignal<Option<iem_core::TunnelStatusInfo>>,
-    ),
-    pub ws: (
-        ReadSignal<Option<web_sys::WebSocket>>,
-        WriteSignal<Option<web_sys::WebSocket>>,
-    ),
+    pub tunnel: SignalPair<Option<iem_core::TunnelStatusInfo>>,
+    pub ws: SignalPair<Option<web_sys::WebSocket>>,
 }
 
 impl MixerState {

@@ -10,7 +10,7 @@
  * Current approach only caches immutable hashed files — safe across deploys.
  */
 
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./support/fixtures";
 
 const BASE_URL = process.env.E2E_BASE_URL || "http://localhost:8080";
 

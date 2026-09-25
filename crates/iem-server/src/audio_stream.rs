@@ -245,8 +245,10 @@ mod tests {
     fn test_audio_diagnostics_serializes_frames_forwarded() {
         // Protects the /api/audio/diagnostics JSON contract: the field must
         // appear in the serialized output with the exact key clients expect.
-        let mut diag = AudioDiagnostics::default();
-        diag.frames_forwarded = 42;
+        let diag = AudioDiagnostics {
+            frames_forwarded: 42,
+            ..Default::default()
+        };
         let json = serde_json::to_string(&diag).unwrap();
         assert!(
             json.contains("\"frames_forwarded\":42"),

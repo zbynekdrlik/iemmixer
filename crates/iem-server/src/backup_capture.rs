@@ -352,14 +352,8 @@ pub async fn capture_mixer_state(state: &AppState) -> Result<(MixerBackup, Captu
         customizations.len()
     );
 
-    // --- 7. Read PINs ---
-    let pins = state.pin_store.read().await.all_pins();
-
-    tracing::info!(
-        count = pins.len(),
-        "Backup capture: captured {} PINs",
-        pins.len()
-    );
+    // --- 7. PINs are never part of a backup (security baseline) ---
+    let pins = std::collections::HashMap::new();
 
     // --- 8. Build timestamp ---
     let timestamp = chrono::Local::now()

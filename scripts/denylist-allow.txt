@@ -1,0 +1,4 @@
+# Reviewed single lines of ordinary text that equal a denylisted term:
+# "<sha256>  <path> — reviewed ordinary prose, not site data"
+# Key: python3 scripts/denylist_scan.py --hash <path> <line>. Prefer rewording the
+# line; the reason never names or hints at the term; never a real private value.

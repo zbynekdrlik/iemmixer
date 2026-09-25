@@ -82,6 +82,7 @@ pub fn encrypt_payload(
 pub fn build_vapid_header(
     vapid_private_key_b64: &str,
     endpoint: &str,
+    subject: &str,
 ) -> anyhow::Result<(String, String)> {
     let raw = B64.decode(vapid_private_key_b64)?;
     let sk = p256::SecretKey::from_slice(&raw)?;
@@ -97,7 +98,7 @@ pub fn build_vapid_header(
     let claims = serde_json::json!({
         "aud": audience,
         "exp": now + 12 * 3600,
-        "sub": "mailto:admin@example.org",
+        "sub": subject,
     });
 
     // Sign with ES256 using jsonwebtoken
@@ -120,11 +121,12 @@ pub fn build_vapid_header(
 pub async fn send_push(
     client: &reqwest::Client,
     vapid_private_key_b64: &str,
+    subject: &str,
     sub: &PushSubscription,
     payload: &[u8],
 ) -> anyhow::Result<bool> {
     let body = encrypt_payload(payload, &sub.p256dh, &sub.auth)?;
-    let (jwt, pub_key) = build_vapid_header(vapid_private_key_b64, &sub.endpoint)?;
+    let (jwt, pub_key) = build_vapid_header(vapid_private_key_b64, &sub.endpoint, subject)?;
 
     let resp = client
         .post(&sub.endpoint)
@@ -151,6 +153,7 @@ pub async fn send_push(
 pub async fn send_push_to_engineers(
     client: &reqwest::Client,
     vapid_key: &str,
+    subject: &str,
     push_store: &std::sync::Arc<tokio::sync::RwLock<crate::push_store::PushStore>>,
     payload: &[u8],
 ) {
@@ -165,7 +168,7 @@ pub async fn send_push_to_engineers(
 
     let mut expired = Vec::new();
     for sub in &subs {
-        match send_push(client, vapid_key, sub, payload).await {
+        match send_push(client, vapid_key, subject, sub, payload).await {
             Ok(true) => {
                 tracing::debug!(
                     "push sent to {}",
@@ -205,7 +208,7 @@ mod tests {
         rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut auth_secret);
 
         let p256dh = B64.encode(subscriber_pub_bytes.as_bytes());
-        let auth = B64.encode(&auth_secret);
+        let auth = B64.encode(auth_secret);
 
         let body = encrypt_payload(b"test payload", &p256dh, &auth).unwrap();
 
@@ -221,10 +224,137 @@ mod tests {
         let sk = p256::SecretKey::random(&mut rand_core::OsRng);
         let key_b64 = B64.encode(sk.to_bytes());
 
-        let (jwt, pub_key) =
-            build_vapid_header(&key_b64, "https://fcm.googleapis.com/fcm/send/test").unwrap();
+        let (jwt, pub_key) = build_vapid_header(
+            &key_b64,
+            "https://fcm.googleapis.com/fcm/send/test",
+            "mailto:admin@example.org",
+        )
+        .unwrap();
 
         assert_eq!(jwt.split('.').count(), 3);
         assert!(!pub_key.is_empty());
+    }
+
+    #[test]
+    fn test_vapid_jwt_carries_the_configured_subject() {
+        let sk = p256::SecretKey::random(&mut rand_core::OsRng);
+        let key_b64 = B64.encode(sk.to_bytes());
+        let (jwt, _) = build_vapid_header(
+            &key_b64,
+            "https://push.example.org/send/1",
+            "mailto:ops@example.org",
+        )
+        .unwrap();
+        let payload = jwt.split('.').nth(1).unwrap();
+        let claims: serde_json::Value =
+            serde_json::from_slice(&B64.decode(payload).unwrap()).unwrap();
+        assert_eq!(claims["sub"], "mailto:ops@example.org");
+        assert_eq!(claims["aud"], "https://push.example.org");
+    }
+
+    /// Requests seen by the fake push service: (path, Authorization, Content-Encoding).
+    type Seen = std::sync::Arc<std::sync::Mutex<Vec<(String, String, String)>>>;
+
+    /// Answers `POST /<status>` with that HTTP status and records the request.
+    async fn answer_with_status(
+        axum::extract::State(seen): axum::extract::State<Seen>,
+        axum::extract::Path(status): axum::extract::Path<u16>,
+        headers: axum::http::HeaderMap,
+    ) -> axum::http::StatusCode {
+        let header = |name: &str| {
+            headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_string()
+        };
+        seen.lock().unwrap().push((
+            format!("/{status}"),
+            header("authorization"),
+            header("content-encoding"),
+        ));
+        axum::http::StatusCode::from_u16(status).unwrap()
+    }
+
+    /// A stand-in for the browser vendor's push service (an external network
+    /// service): `POST /<status>` answers with that HTTP status.
+    async fn fake_push_service() -> (String, Seen) {
+        let seen = Seen::default();
+        let app = axum::Router::new()
+            .route("/{status}", axum::routing::post(answer_with_status))
+            .with_state(seen.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{addr}"), seen)
+    }
+
+    fn subscription(endpoint: String) -> PushSubscription {
+        let browser_key = p256::SecretKey::random(&mut rand_core::OsRng);
+        PushSubscription {
+            endpoint,
+            p256dh: B64.encode(browser_key.public_key().to_encoded_point(false).as_bytes()),
+            auth: B64.encode([7u8; 16]),
+        }
+    }
+
+    fn vapid_private_key() -> String {
+        B64.encode(p256::SecretKey::random(&mut rand_core::OsRng).to_bytes())
+    }
+
+    const SUBJECT: &str = "mailto:ops@example.org";
+
+    #[tokio::test]
+    async fn send_push_tells_delivered_from_expired() {
+        let (base, seen) = fake_push_service().await;
+        let client = reqwest::Client::new();
+        let key = vapid_private_key();
+        let send = |status: u16| {
+            let sub = subscription(format!("{base}/{status}"));
+            let (client, key) = (client.clone(), key.clone());
+            async move { send_push(&client, &key, SUBJECT, &sub, b"alert").await }
+        };
+        assert!(send(201).await.unwrap(), "2xx: delivered");
+        assert!(!send(410).await.unwrap(), "410: subscription gone");
+        assert!(!send(404).await.unwrap(), "404: subscription gone");
+        assert!(send(500).await.is_err(), "other statuses are errors");
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 4);
+        let (path, authorization, content_encoding) = &seen[0];
+        assert_eq!(path, "/201");
+        assert!(authorization.starts_with("vapid t="), "{authorization}");
+        assert_eq!(content_encoding, "aes128gcm");
+    }
+
+    #[tokio::test]
+    async fn expired_engineer_subscriptions_are_removed() {
+        let (base, seen) = fake_push_service().await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(tokio::sync::RwLock::new(
+            crate::push_store::PushStore::load(dir.path()),
+        ));
+        let live = subscription(format!("{base}/201"));
+        let gone = subscription(format!("{base}/410"));
+        {
+            let mut s = store.write().await;
+            s.add(live.clone()).unwrap();
+            s.add(gone).unwrap();
+        }
+        send_push_to_engineers(
+            &reqwest::Client::new(),
+            &vapid_private_key(),
+            SUBJECT,
+            &store,
+            b"alert",
+        )
+        .await;
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            2,
+            "both subscriptions were tried"
+        );
+        assert_eq!(store.read().await.all(), std::slice::from_ref(&live));
     }
 }

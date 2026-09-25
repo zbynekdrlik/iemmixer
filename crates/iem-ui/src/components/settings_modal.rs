@@ -36,11 +36,11 @@ impl UserSettings {
     }
 
     pub fn load(member_id: &str) -> Self {
-        LocalStorage::get(&Self::storage_key(member_id)).unwrap_or_default()
+        LocalStorage::get(Self::storage_key(member_id)).unwrap_or_default()
     }
 
     pub fn save(&self, member_id: &str) {
-        let _ = LocalStorage::set(&Self::storage_key(member_id), self);
+        let _ = LocalStorage::set(Self::storage_key(member_id), self);
     }
 }
 
@@ -108,7 +108,7 @@ pub fn SettingsModal(
                             <div class="photo-actions">
                                 <button class="settings-action-btn" on:click=move |_| {
                                     if let Some(input) = file_input_ref.get() {
-                                        let _ = input.click();
+                                        input.click();
                                     }
                                 }>
                                     "Change Photo"
@@ -118,13 +118,11 @@ pub fn SettingsModal(
                                         let mid = member_id.get_value();
                                         let set_hp = set_has_photo;
                                         wasm_bindgen_futures::spawn_local(async move {
-                                            if crate::api::delete_photo(&mid).await.is_ok() {
-                                                if let Some(set) = set_hp {
+                                            if crate::api::delete_photo(&mid).await.is_ok() && let Some(set) = set_hp {
                                                     // disposal-race-safe: try_set on destructured
                                                     // WriteSignal after .await in spawn_local.
                                                     let _ = set.try_set(false);
                                                 }
-                                            }
                                         });
                                     }>
                                         "Remove Photo"
@@ -185,13 +183,11 @@ pub fn SettingsModal(
                                         let base64 = jpeg_url.split(',').nth(1).unwrap_or("").to_string();
 
                                         wasm_bindgen_futures::spawn_local(async move {
-                                            if crate::api::upload_photo(&mid, &base64).await.is_ok() {
-                                                if let Some(set) = set_hp {
+                                            if crate::api::upload_photo(&mid, &base64).await.is_ok() && let Some(set) = set_hp {
                                                     // disposal-race-safe: try_set on destructured
                                                     // WriteSignal after .await in spawn_local.
                                                     let _ = set.try_set(true);
                                                 }
-                                            }
                                         });
                                     }) as Box<dyn FnOnce()>);
 

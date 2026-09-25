@@ -146,7 +146,7 @@ pub fn LimiterModal(
                                             }
                                                 .into_any()
                                         } else {
-                                            view! {}.into_any()
+                                            ().into_any()
                                         }
                                     }}
                                 </div>
@@ -237,13 +237,13 @@ fn LimiterSlider(
             let _ = set_is_activating.try_set(false);
             let _ = set_is_active.try_set(true);
         });
-        if let Some(w) = web_sys::window() {
-            if let Ok(id) = w.set_timeout_with_callback_and_timeout_and_arguments_0(
+        if let Some(w) = web_sys::window()
+            && let Ok(id) = w.set_timeout_with_callback_and_timeout_and_arguments_0(
                 cb.as_ref().unchecked_ref(),
                 ACTIVATION_DELAY_MS as i32,
-            ) {
-                activation_timer_down.set(Some(id));
-            }
+            )
+        {
+            activation_timer_down.set(Some(id));
         }
     };
 

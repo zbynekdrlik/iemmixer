@@ -104,22 +104,19 @@ pub(super) fn subscribe_to_push() {
 
         // Unsubscribe any existing push subscription first (required when VAPID key changes,
         // otherwise Chrome rejects subscribe() with a different applicationServerKey)
-        if let Ok(existing_promise) = push_manager.get_subscription() {
-            if let Ok(existing_val) = wasm_bindgen_futures::JsFuture::from(existing_promise).await {
-                if !existing_val.is_null() && !existing_val.is_undefined() {
-                    if let Ok(existing_sub) = existing_val.dyn_into::<web_sys::PushSubscription>() {
-                        let _ = wasm_bindgen_futures::JsFuture::from(
-                            existing_sub.unsubscribe().unwrap_or_else(|_| {
-                                js_sys::Promise::resolve(&wasm_bindgen::JsValue::TRUE)
-                            }),
-                        )
-                        .await;
-                        web_sys::console::log_1(
-                            &"[push] unsubscribed old push subscription".into(),
-                        );
-                    }
-                }
-            }
+        if let Ok(existing_promise) = push_manager.get_subscription()
+            && let Ok(existing_val) = wasm_bindgen_futures::JsFuture::from(existing_promise).await
+            && !existing_val.is_null()
+            && !existing_val.is_undefined()
+            && let Ok(existing_sub) = existing_val.dyn_into::<web_sys::PushSubscription>()
+        {
+            let _ = wasm_bindgen_futures::JsFuture::from(
+                existing_sub
+                    .unsubscribe()
+                    .unwrap_or_else(|_| js_sys::Promise::resolve(&wasm_bindgen::JsValue::TRUE)),
+            )
+            .await;
+            web_sys::console::log_1(&"[push] unsubscribed old push subscription".into());
         }
 
         // Decode base64url VAPID key to Uint8Array
@@ -375,16 +372,29 @@ pub(crate) fn unsubscribe_from_push() {
     });
 }
 
-/// Decode base64url (no padding) to bytes.
-/// Note: atob() returns a Latin-1 string (each char = one byte 0-255).
-/// Rust's `.bytes()` gives UTF-8 which mangles values > 127. Use `.chars() as u8` instead.
+/// Decode the server's VAPID public key: base64url without padding, as the
+/// server encodes it (`Config::vapid_public_key_base64url`). Pure Rust, so it
+/// needs no browser `atob` and is tested natively.
 fn base64url_decode(input: &str) -> Option<Vec<u8>> {
-    let mut s = input.replace('-', "+").replace('_', "/");
-    while s.len() % 4 != 0 {
-        s.push('=');
-    }
-    web_sys::window()?
-        .atob(&s)
+    use base64::Engine as _;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(input)
         .ok()
-        .map(|decoded| decoded.chars().map(|c| c as u8).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base64url_decode_reads_the_url_safe_alphabet_without_padding() {
+        assert_eq!(base64url_decode("AQID"), Some(vec![1, 2, 3]));
+        assert_eq!(base64url_decode("-_8"), Some(vec![0xFB, 0xFF]));
+    }
+
+    #[test]
+    fn base64url_decode_rejects_other_text() {
+        assert_eq!(base64url_decode("no spaces allowed"), None);
+        assert_eq!(base64url_decode("+/8="), None, "standard alphabet, padded");
+    }
 }

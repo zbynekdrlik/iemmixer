@@ -49,36 +49,30 @@ pub fn build_time() -> &'static str {
     option_env!("BUILD_TIME").unwrap_or("0")
 }
 
-/// Full version string for display
-/// On main: "1.6.0 (27.02.2026 12:07)"
-/// On dev:  "1.6.0-dev (27.02.2026 12:07)"
+/// Full version string for display (build time in UTC), e.g.
+/// "2.0.0-dev.3 (24.09.2025 09:45)" for `BUILD_TIME` 1758707100.
 pub fn full_version() -> String {
-    let branch = git_branch();
-    let version_base = if branch != "main" && branch != "unknown" {
-        format!("{}-{}", VERSION, branch)
-    } else {
-        VERSION.to_string()
-    };
+    full_version_at(build_time())
+}
 
-    let timestamp = build_time().parse::<i64>().unwrap_or(0);
+/// [`full_version`] for a `BUILD_TIME` value (unix seconds; "0" or unparsable
+/// means a local build).
+fn full_version_at(build_time: &str) -> String {
+    let timestamp = build_time.parse::<i64>().unwrap_or(0);
     if timestamp == 0 {
-        format!("{} (local)", version_base)
+        format!("{VERSION} (local)")
     } else {
         let datetime = chrono::DateTime::from_timestamp(timestamp, 0)
             .map(|dt| dt.format("%d.%m.%Y %H:%M").to_string())
             .unwrap_or_else(|| "unknown".to_string());
-        format!("{} ({})", version_base, datetime)
+        format!("{VERSION} ({datetime})")
     }
 }
 
-/// Version label for display (e.g., "v1.16.0" or "v1.16.0-dev")
+/// Version label for display: `v` + the Cargo version (pre-releases already
+/// carry `-dev.N`), e.g. "v2.0.0-dev.3".
 pub fn version_label() -> String {
-    let branch = git_branch();
-    if branch != "main" && branch != "unknown" {
-        format!("v{}-{}", VERSION, branch)
-    } else {
-        format!("v{}", VERSION)
-    }
+    format!("v{VERSION}")
 }
 
 /// Build datetime for display in Slovak format (e.g., "28.02.2026 09:47")
@@ -102,5 +96,37 @@ pub fn deployed_at() -> String {
         chrono::DateTime::from_timestamp(timestamp, 0)
             .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
             .unwrap_or_else(|| "unknown".to_string())
+    }
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::*;
+
+    #[test]
+    fn version_label_is_v_plus_the_cargo_version() {
+        assert_eq!(version_label(), format!("v{VERSION}"));
+    }
+
+    #[test]
+    fn full_version_starts_with_the_cargo_version() {
+        assert!(full_version().starts_with(&format!("{VERSION} (")));
+    }
+
+    #[test]
+    fn full_version_names_a_local_build() {
+        assert_eq!(full_version_at("0"), format!("{VERSION} (local)"));
+        assert_eq!(
+            full_version_at("not a number"),
+            format!("{VERSION} (local)")
+        );
+    }
+
+    #[test]
+    fn full_version_shows_the_utc_build_time() {
+        assert_eq!(
+            full_version_at("1758707100"),
+            format!("{VERSION} (24.09.2025 09:45)")
+        );
     }
 }

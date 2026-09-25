@@ -4,9 +4,9 @@ use axum::{
     Json, Router,
     body::Body,
     extract::Path,
-    http::{Method, StatusCode, header},
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
-    routing::{any, delete, get, post, put},
+    routing::{delete, get, post, put},
 };
 use serde::{Deserialize, Serialize};
 
@@ -37,6 +37,12 @@ async fn get_version() -> Json<VersionInfo> {
     })
 }
 
+/// `GET /api/site` — where the mixer is reachable (LAN URL, public host), for
+/// the UI's tunnel banner and reconnect hint. Public: it holds no secret.
+async fn get_site_links(State(state): State<AppState>) -> Json<iem_core::tunnel::SiteLinks> {
+    Json(state.config.read().await.site_links())
+}
+
 /// API routes
 ///
 /// Auth middleware is NOT enforced on routes yet — the frontend needs
@@ -47,6 +53,8 @@ pub fn api_routes(_state: AppState) -> Router<AppState> {
     Router::new()
         // Version endpoint (used by CI for deployment verification)
         .route("/api/version", get(get_version))
+        // Where the mixer is reachable (LAN URL, public host)
+        .route("/api/site", get(get_site_links))
         // Auth login (returns JWT)
         .route("/api/auth", post(auth::login))
         // Member list (needed for landing page)
@@ -87,8 +95,6 @@ pub fn api_routes(_state: AppState) -> Router<AppState> {
         .route("/api/members/{member_id}/photo", get(get_photo))
         .route("/api/members/{member_id}/photo", post(post_photo))
         .route("/api/members/{member_id}/photo", delete(delete_photo))
-        // Raw REAPER proxy
-        .route("/api/reaper/{*path}", any(reaper_proxy))
         // Audio WebSocket (engineer-only audio streaming) — must be before /ws/{member_id}
         .route("/ws/audio", get(ws_audio_handler))
         // Talkback WebSocket (engineer push-to-talk) (reaperiem#123) — must be before /ws/{member_id}
@@ -647,31 +653,6 @@ async fn audio_diagnostics_handler() -> impl IntoResponse {
     )
 }
 
-/// REAPER proxy handler (engineer-only, requires auth)
-async fn reaper_proxy(
-    state: axum::extract::State<AppState>,
-    headers: axum::http::HeaderMap,
-    method: Method,
-    path: Path<String>,
-    body: Body,
-) -> Result<Response, (StatusCode, Json<iem_core::ApiError>)> {
-    let config = state.config.read().await;
-    let claims = crate::auth::verify_member_access(&headers, "engineer", &config.jwt_secret)?;
-    if !claims.engineer {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(iem_core::ApiError::new(
-                "FORBIDDEN",
-                "REAPER proxy is engineer-only",
-            )),
-        ));
-    }
-    drop(config);
-    Ok(proxy::proxy_reaper(state, method, path, body)
-        .await
-        .into_response())
-}
-
 /// Static file routes (WASM assets)
 pub fn static_routes() -> Router<AppState> {
     Router::new()
@@ -960,8 +941,10 @@ mod tests {
 
     fn push_unsubscribe_test_state(secret: &str) -> (AppState, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let mut config = iem_core::Config::default();
-        config.jwt_secret = secret.to_string();
+        let config = iem_core::Config {
+            jwt_secret: secret.to_string(),
+            ..Default::default()
+        };
         let state = AppState::new(config, dir.path());
         (state, dir)
     }
@@ -1080,5 +1063,75 @@ mod tests {
             .unwrap();
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// X10: the raw REAPER passthrough is gone — even an engineer gets 404.
+    #[tokio::test]
+    async fn raw_reaper_passthrough_is_gone() {
+        use axum::body::Body;
+        use axum::http::{Method, Request, StatusCode};
+        use tower::ServiceExt;
+
+        let secret = "passthrough-test-secret";
+        let dir = tempfile::tempdir().unwrap();
+        let config = iem_core::Config {
+            jwt_secret: secret.to_string(),
+            ..iem_core::Config::default()
+        };
+        let state = AppState::new(config, dir.path());
+        let router = api_routes(state.clone()).with_state(state);
+        let token = make_test_token(secret, "engineer", true);
+        for method in [Method::GET, Method::POST] {
+            let resp = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method.clone())
+                        .uri("/api/reaper/_/NTRACK")
+                        .header("authorization", format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{method}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod site_links_tests {
+    use super::*;
+    use axum::http::Request;
+    use tower::util::ServiceExt;
+
+    #[tokio::test]
+    async fn site_links_come_from_the_site_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = iem_core::Config {
+            lan_url: Some("http://10.0.0.10".to_string()),
+            https_domain: Some("mixer.example.org".to_string()),
+            ..iem_core::Config::default()
+        };
+        let state = AppState::new(config, dir.path());
+        let app = Router::new()
+            .route("/api/site", get(get_site_links))
+            .with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/site")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"lan_url": "http://10.0.0.10", "public_host": "mixer.example.org"})
+        );
     }
 }

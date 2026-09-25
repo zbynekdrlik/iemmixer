@@ -6,8 +6,10 @@
 
 use leptos::prelude::*;
 use leptos_router::hooks::use_navigate;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use wasm_bindgen::prelude::*;
+
+use iem_core::Channel;
 
 use crate::components::eq_modal::EqBandState;
 use crate::components::talk_button::TalkState;
@@ -45,10 +47,10 @@ pub(super) fn setup_connection(
     {
         let pv = page_visible.clone();
         let vis_closure = Closure::wrap(Box::new(move || {
-            if let Some(w) = web_sys::window() {
-                if let Some(doc) = w.document() {
-                    pv.set(!doc.hidden());
-                }
+            if let Some(w) = web_sys::window()
+                && let Some(doc) = w.document()
+            {
+                pv.set(!doc.hidden());
             }
         }) as Box<dyn FnMut()>);
         if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
@@ -265,7 +267,74 @@ pub(super) fn setup_connection(
     });
 }
 
+/// Minimum spacing (ms) between applied meter updates: the server sends every
+/// 150 ms, but network jitter can bunch messages; this caps reactive updates
+/// at ~20/s.
+const METER_THROTTLE_MS: f64 = 50.0;
+
+/// Whether a meter frame arriving at `now` (ms) is applied, given when the
+/// last one was.
+fn meter_update_due(now: f64, last_applied: f64) -> bool {
+    now - last_applied >= METER_THROTTLE_MS
+}
+
+/// Whether a server `ChannelUpdate` for `track_index` applies: never while the
+/// user is touching that fader (their gesture wins).
+fn channel_update_applies(touched: &HashMap<usize, bool>, track_index: usize) -> bool {
+    !touched.get(&track_index).copied().unwrap_or(false)
+}
+
+/// Write a server `ChannelUpdate` into the matching channel.
+fn update_channel(chs: &mut [Channel], track_index: usize, level_db: f32, muted: bool, pan: f32) {
+    if let Some(ch) = chs.iter_mut().find(|c| c.track_index == track_index) {
+        ch.level_db = level_db;
+        ch.muted = muted;
+        ch.pan = pan;
+    }
+}
+
+/// What a remote `SoloUpdate` changes locally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SoloChange {
+    /// The echo of our own command: nothing to do.
+    Unchanged,
+    /// Remote un-soloed everything: forget the pre-solo mutes.
+    Cleared,
+    /// Remote entered solo: save the current mutes for the restore.
+    Entered,
+    /// Remote switched the exclusive solo: update the mute display (reaperiem#131).
+    Switched,
+}
+
+fn solo_change(current: &HashSet<usize>, new: &HashSet<usize>) -> SoloChange {
+    if new == current {
+        SoloChange::Unchanged
+    } else if new.is_empty() {
+        SoloChange::Cleared
+    } else if current.is_empty() {
+        SoloChange::Entered
+    } else {
+        SoloChange::Switched
+    }
+}
+
+/// Exclusive solo: every channel outside `soloed` shows as muted.
+fn show_exclusive_solo(chs: &mut [Channel], soloed: &HashSet<usize>) {
+    for c in chs.iter_mut() {
+        c.muted = !soloed.contains(&c.track_index);
+    }
+}
+
+/// Whether an `AlertCleared` for `cleared` removes the alert on screen.
+fn clears_shown_alert(shown: Option<&(String, String)>, cleared: &str) -> bool {
+    shown.is_some_and(|(member, _)| member.as_str() == cleared)
+}
+
 /// Create and connect a WebSocket, wiring up message handlers to signals
+// Eight parameters: the Rc/Arc handles are created once by `setup_connection`
+// and shared by its two call sites (initial connect and the reconnect loop);
+// bundling them into a struct is a refactor of imported code outside S0.
+#[allow(clippy::too_many_arguments)]
 fn connect_websocket(
     member: &str,
     last_frame_at: std::rc::Rc<std::cell::Cell<f64>>,
@@ -380,236 +449,223 @@ fn connect_websocket(
         // the extra cost is negligible and the code stays branch-free.
         last_frame_at_msg.set(js_sys::Date::now());
         reconnect_attempt_msg.set(0);
-        if let Some(text) = e.data().as_string() {
-            if let Ok(msg) = serde_json::from_str::<iem_core::ServerMsg>(&text) {
-                // Scope may already be disposed (e.g. frame delivered after
-                // navigate-back tore the mixer down). If so, drop the whole
-                // message — all downstream signal accesses would panic.
-                let Some(touched) = fader_touched.try_get_untracked() else {
-                    return;
-                };
-                match msg {
-                    iem_core::ServerMsg::State {
-                        channels: new_chs,
-                        connected: conn,
-                        global_level_db,
-                        global_muted,
-                        output_track_index,
-                        stems_level_db,
-                        stems_muted,
-                        stems_bus_index,
-                    } => {
-                        // Successfully received data — reset failure counter
-                        fail_count_msg.set(0);
-                        let _ = set_channels.try_update(|chs| {
-                            let touched_snapshot: std::collections::HashMap<usize, bool> =
-                                touched.iter().map(|(k, v)| (*k, *v)).collect();
-                            iem_core::merge_or_replace_channels(chs, new_chs, &touched_snapshot);
+        if let Some(text) = e.data().as_string()
+            && let Ok(msg) = serde_json::from_str::<iem_core::ServerMsg>(&text)
+        {
+            // Scope may already be disposed (e.g. frame delivered after
+            // navigate-back tore the mixer down). If so, drop the whole
+            // message — all downstream signal accesses would panic.
+            let Some(touched) = fader_touched.try_get_untracked() else {
+                return;
+            };
+            match msg {
+                iem_core::ServerMsg::State {
+                    channels: new_chs,
+                    connected: conn,
+                    global_level_db,
+                    global_muted,
+                    output_track_index,
+                    stems_level_db,
+                    stems_muted,
+                    stems_bus_index,
+                } => {
+                    // Successfully received data — reset failure counter
+                    fail_count_msg.set(0);
+                    let _ = set_channels.try_update(|chs| {
+                        let touched_snapshot: std::collections::HashMap<usize, bool> =
+                            touched.iter().map(|(k, v)| (*k, *v)).collect();
+                        iem_core::merge_or_replace_channels(chs, new_chs, &touched_snapshot);
+                    });
+                    // Update global volume from initial state
+                    if let Some(lvl) = global_level_db {
+                        let _ = set_global_level.try_set(lvl);
+                    }
+                    if let Some(muted) = global_muted {
+                        let _ = set_global_muted.try_set(muted);
+                    }
+                    if let Some(idx) = output_track_index {
+                        let _ = set_output_track_idx.try_set(Some(idx));
+                    }
+                    if let Some(lvl) = stems_level_db {
+                        let _ = set_stems_level.try_set(lvl);
+                    }
+                    if let Some(muted) = stems_muted {
+                        let _ = set_stems_muted.try_set(muted);
+                    }
+                    if let Some(idx) = stems_bus_index {
+                        let _ = set_stems_bus_idx.try_set(Some(idx));
+                    }
+                    let _ = set_connected.try_set(conn);
+                    let _ = set_loading.try_set(false);
+                }
+                iem_core::ServerMsg::Meters { meters: m } => {
+                    if !page_visible.get() {
+                        return; // Skip meter updates when backgrounded
+                    }
+                    // Throttle: skip if less than 50ms since last meter update
+                    let now = js_sys::Date::now();
+                    if meter_update_due(now, last_meter_time.get()) {
+                        last_meter_time.set(now);
+                        // Merge delta meters into existing map (server sends only changed values)
+                        let _ = set_meters.try_update(|existing| {
+                            for (k, v) in m {
+                                existing.insert(k, v);
+                            }
                         });
-                        // Update global volume from initial state
-                        if let Some(lvl) = global_level_db {
-                            let _ = set_global_level.try_set(lvl);
-                        }
-                        if let Some(muted) = global_muted {
-                            let _ = set_global_muted.try_set(muted);
-                        }
-                        if let Some(idx) = output_track_index {
-                            let _ = set_output_track_idx.try_set(Some(idx));
-                        }
-                        if let Some(lvl) = stems_level_db {
-                            let _ = set_stems_level.try_set(lvl);
-                        }
-                        if let Some(muted) = stems_muted {
-                            let _ = set_stems_muted.try_set(muted);
-                        }
-                        if let Some(idx) = stems_bus_index {
-                            let _ = set_stems_bus_idx.try_set(Some(idx));
-                        }
-                        let _ = set_connected.try_set(conn);
-                        let _ = set_loading.try_set(false);
+                        let _ = set_data_pulse.try_update(|v| *v = !*v);
                     }
-                    iem_core::ServerMsg::Meters { meters: m } => {
-                        if !page_visible.get() {
-                            return; // Skip meter updates when backgrounded
+                }
+                iem_core::ServerMsg::ChannelUpdate {
+                    track_index,
+                    level_db,
+                    muted,
+                    pan,
+                } => {
+                    if channel_update_applies(&touched, track_index) {
+                        let _ = set_channels.try_update(|chs| {
+                            update_channel(chs, track_index, level_db, muted, pan);
+                        });
+                    }
+                }
+                iem_core::ServerMsg::GlobalVolumeUpdate { level_db, muted } => {
+                    if !global_touched.try_get_untracked().unwrap_or(true) {
+                        let _ = set_global_level.try_set(level_db);
+                        let _ = set_global_muted.try_set(muted);
+                    }
+                }
+                iem_core::ServerMsg::StemsVolumeUpdate { level_db, muted } => {
+                    if !stems_touched.try_get_untracked().unwrap_or(true) {
+                        let _ = set_stems_level.try_set(level_db);
+                        let _ = set_stems_muted.try_set(muted);
+                    }
+                }
+                iem_core::ServerMsg::ConnectionChanged { connected: conn } => {
+                    let _ = set_connected.try_set(conn);
+                }
+                iem_core::ServerMsg::CustomizationUpdate { pinned, hidden } => {
+                    let _ = set_pinned_channels.try_set(pinned);
+                    let _ = set_hidden_channels.try_set(hidden);
+                }
+                iem_core::ServerMsg::NetworkMode { mode } => {
+                    let _ = set_network_mode.try_set(mode);
+                }
+                iem_core::ServerMsg::TunnelStatus(info) => {
+                    let _ = set_tunnel.try_set(Some(info));
+                }
+                iem_core::ServerMsg::SoloUpdate { soloed: new_solo } => {
+                    let new_soloed: HashSet<usize> = new_solo.into_iter().collect();
+                    let Some(current) = soloed.try_get_untracked() else {
+                        return;
+                    };
+                    match solo_change(&current, &new_soloed) {
+                        SoloChange::Unchanged => return,
+                        SoloChange::Cleared => {
+                            let _ = set_pre_solo_mutes.try_set(HashMap::new());
                         }
-                        // Throttle: skip if less than 50ms since last meter update
-                        let now = js_sys::Date::now();
-                        if now - last_meter_time.get() >= 50.0 {
-                            last_meter_time.set(now);
-                            // Merge delta meters into existing map (server sends only changed values)
-                            let _ = set_meters.try_update(|existing| {
-                                for (k, v) in m {
-                                    existing.insert(k, v);
-                                }
-                            });
-                            let _ = set_data_pulse.try_update(|v| *v = !*v);
-                        }
-                    }
-                    iem_core::ServerMsg::ChannelUpdate {
-                        track_index,
-                        level_db,
-                        muted,
-                        pan,
-                    } => {
-                        if !touched.get(&track_index).copied().unwrap_or(false) {
-                            let _ = set_channels.try_update(|chs| {
-                                if let Some(ch) =
-                                    chs.iter_mut().find(|c| c.track_index == track_index)
-                                {
-                                    ch.level_db = level_db;
-                                    ch.muted = muted;
-                                    ch.pan = pan;
-                                }
-                            });
-                        }
-                    }
-                    iem_core::ServerMsg::GlobalVolumeUpdate { level_db, muted } => {
-                        if !global_touched.try_get_untracked().unwrap_or(true) {
-                            let _ = set_global_level.try_set(level_db);
-                            let _ = set_global_muted.try_set(muted);
-                        }
-                    }
-                    iem_core::ServerMsg::StemsVolumeUpdate { level_db, muted } => {
-                        if !stems_touched.try_get_untracked().unwrap_or(true) {
-                            let _ = set_stems_level.try_set(level_db);
-                            let _ = set_stems_muted.try_set(muted);
-                        }
-                    }
-                    iem_core::ServerMsg::ConnectionChanged { connected: conn } => {
-                        let _ = set_connected.try_set(conn);
-                    }
-                    iem_core::ServerMsg::CustomizationUpdate { pinned, hidden } => {
-                        let _ = set_pinned_channels.try_set(pinned);
-                        let _ = set_hidden_channels.try_set(hidden);
-                    }
-                    iem_core::ServerMsg::NetworkMode { mode } => {
-                        let _ = set_network_mode.try_set(mode);
-                    }
-                    iem_core::ServerMsg::TunnelStatus(info) => {
-                        let _ = set_tunnel.try_set(Some(info));
-                    }
-                    iem_core::ServerMsg::SoloUpdate { soloed: new_solo } => {
-                        let new_soloed: std::collections::HashSet<usize> =
-                            new_solo.into_iter().collect();
-                        let Some(current) = soloed.try_get_untracked() else {
-                            return;
-                        };
-                        // Skip echo from our own command
-                        if new_soloed != current {
-                            if new_soloed.is_empty() && !current.is_empty() {
-                                // Remote un-soloed all: clear pre-solo mutes
-                                let _ = set_pre_solo_mutes.try_set(HashMap::new());
-                            } else if !new_soloed.is_empty() && current.is_empty() {
-                                // Remote entered solo: save current mute states for restore
-                                let chs = channels.try_get_untracked().unwrap_or_default();
-                                let mut saved = HashMap::new();
-                                for ch in &chs {
-                                    saved.insert(ch.track_index, ch.muted);
-                                }
-                                let _ = set_pre_solo_mutes.try_set(saved);
-                            } else if !new_soloed.is_empty() && !current.is_empty() {
-                                // Remote exclusive switch: update local mute display (reaperiem#131)
-                                let _ = set_channels.try_update(|chs| {
-                                    for c in chs.iter_mut() {
-                                        c.muted = !new_soloed.contains(&c.track_index);
-                                    }
-                                });
+                        SoloChange::Entered => {
+                            let chs = channels.try_get_untracked().unwrap_or_default();
+                            let mut saved = HashMap::new();
+                            for ch in &chs {
+                                saved.insert(ch.track_index, ch.muted);
                             }
-                            let _ = set_soloed.try_set(new_soloed);
+                            let _ = set_pre_solo_mutes.try_set(saved);
+                        }
+                        SoloChange::Switched => {
+                            let _ = set_channels
+                                .try_update(|chs| show_exclusive_solo(chs, &new_soloed));
                         }
                     }
-                    iem_core::ServerMsg::AudioStatus { .. } => {
-                        // Audio status handled by ListenButton's own audio WebSocket
+                    let _ = set_soloed.try_set(new_soloed);
+                }
+                iem_core::ServerMsg::AudioStatus { .. } => {
+                    // Audio status handled by ListenButton's own audio WebSocket
+                }
+                iem_core::ServerMsg::EngineerAlert {
+                    from_member,
+                    from_name,
+                } => {
+                    let _ = set_alert_data.try_set(Some((from_member.clone(), from_name)));
+                    let _ = set_alert_active.try_set(true);
+                }
+                iem_core::ServerMsg::AlertCleared { member_id: cleared } => {
+                    let _ = set_alert_active.try_set(false);
+                    // Double-nested Option: outer is try_get_untracked
+                    // disposal guard, inner is the signal's own
+                    // Option<(String, String)>.
+                    if clears_shown_alert(
+                        alert_data.try_get_untracked().flatten().as_ref(),
+                        &cleared,
+                    ) {
+                        let _ = set_alert_data.try_set(None);
                     }
-                    iem_core::ServerMsg::EngineerAlert {
-                        from_member,
-                        from_name,
-                    } => {
-                        let _ = set_alert_data.try_set(Some((from_member.clone(), from_name)));
-                        let _ = set_alert_active.try_set(true);
+                }
+                iem_core::ServerMsg::ActiveAlerts { alerts } => {
+                    if let Some(first) = alerts.first() {
+                        let _ = set_alert_data
+                            .try_set(Some((first.from_member.clone(), first.from_name.clone())));
                     }
-                    iem_core::ServerMsg::AlertCleared { member_id: cleared } => {
-                        let _ = set_alert_active.try_set(false);
-                        // Double-nested Option: outer is try_get_untracked
-                        // disposal guard, inner is the signal's own
-                        // Option<(String, String)>.
-                        if let Some(Some((ref m, _))) = alert_data.try_get_untracked() {
-                            if *m == cleared {
-                                let _ = set_alert_data.try_set(None);
-                            }
+                }
+                iem_core::ServerMsg::TalkAcquired => {
+                    let _ = set_talk_state.try_set(TalkState::Live);
+                }
+                iem_core::ServerMsg::TalkBusy { .. } => {
+                    let _ = set_talk_state.try_set(TalkState::InUse);
+                }
+                iem_core::ServerMsg::TalkReleased => {
+                    let _ = set_talk_state.try_set(TalkState::Idle);
+                }
+                iem_core::ServerMsg::EngineerTalking { active } => {
+                    // Red page overlay on band member devices (no vibration)
+                    if let Some(window) = web_sys::window()
+                        && let Some(doc) = window.document()
+                        && let Some(body) = doc.body()
+                    {
+                        if active {
+                            let _ = body.class_list().add_1("talk-live-overlay");
+                        } else {
+                            let _ = body.class_list().remove_1("talk-live-overlay");
                         }
                     }
-                    iem_core::ServerMsg::ActiveAlerts { alerts } => {
-                        if let Some(first) = alerts.first() {
-                            let _ = set_alert_data.try_set(Some((
-                                first.from_member.clone(),
-                                first.from_name.clone(),
-                            )));
-                        }
-                    }
-                    iem_core::ServerMsg::TalkAcquired => {
-                        let _ = set_talk_state.try_set(TalkState::Live);
-                    }
-                    iem_core::ServerMsg::TalkBusy { .. } => {
-                        let _ = set_talk_state.try_set(TalkState::InUse);
-                    }
-                    iem_core::ServerMsg::TalkReleased => {
-                        let _ = set_talk_state.try_set(TalkState::Idle);
-                    }
-                    iem_core::ServerMsg::EngineerTalking { active } => {
-                        // Red page overlay on band member devices (no vibration)
-                        if let Some(window) = web_sys::window() {
-                            if let Some(doc) = window.document() {
-                                if let Some(body) = doc.body() {
-                                    if active {
-                                        let _ = body.class_list().add_1("talk-live-overlay");
-                                    } else {
-                                        let _ = body.class_list().remove_1("talk-live-overlay");
-                                    }
-                                }
-                            }
-                        }
-                        let _ = set_engineer_talking.try_set(active);
-                    }
-                    iem_core::ServerMsg::EqParams {
-                        track_index: _,
-                        track_name: _,
-                        bands,
-                    } => {
-                        let _ = set_eq_bands.try_set(
-                            bands
-                                .into_iter()
-                                .map(|b| EqBandState {
-                                    band_type: b.band_type,
-                                    freq_hz: b.freq_hz,
-                                    gain_db: b.gain_db,
-                                    bw: b.bw,
-                                    freq_norm: b.freq_norm,
-                                    gain_norm: b.gain_norm,
-                                    bw_norm: b.bw_norm,
-                                    enabled: b.enabled,
-                                })
-                                .collect(),
-                        );
-                        let _ = set_eq_loading.try_set(false);
-                    }
-                    iem_core::ServerMsg::EqParamsMulti { .. } => {
-                        // Handled by preset modal (future integration)
-                    }
-                    iem_core::ServerMsg::LimiterParams {
-                        track_index: _,
-                        track_name: _,
-                        limit_db,
-                        limit_norm,
-                        enabled,
-                        active_seconds,
-                    } => {
-                        let _ = set_limiter_limit_db.try_set(limit_db);
-                        let _ = set_limiter_limit_norm.try_set(limit_norm);
-                        let _ = set_limiter_enabled.try_set(enabled);
-                        let _ = set_limiter_active_seconds.try_set(active_seconds);
-                        let _ = set_limiter_loading.try_set(false);
-                    }
+                    let _ = set_engineer_talking.try_set(active);
+                }
+                iem_core::ServerMsg::EqParams {
+                    track_index: _,
+                    track_name: _,
+                    bands,
+                } => {
+                    let _ = set_eq_bands.try_set(
+                        bands
+                            .into_iter()
+                            .map(|b| EqBandState {
+                                band_type: b.band_type,
+                                freq_hz: b.freq_hz,
+                                gain_db: b.gain_db,
+                                bw: b.bw,
+                                freq_norm: b.freq_norm,
+                                gain_norm: b.gain_norm,
+                                bw_norm: b.bw_norm,
+                                enabled: b.enabled,
+                            })
+                            .collect(),
+                    );
+                    let _ = set_eq_loading.try_set(false);
+                }
+                iem_core::ServerMsg::EqParamsMulti { .. } => {
+                    // Handled by preset modal (future integration)
+                }
+                iem_core::ServerMsg::LimiterParams {
+                    track_index: _,
+                    track_name: _,
+                    limit_db,
+                    limit_norm,
+                    enabled,
+                    active_seconds,
+                } => {
+                    let _ = set_limiter_limit_db.try_set(limit_db);
+                    let _ = set_limiter_limit_norm.try_set(limit_norm);
+                    let _ = set_limiter_enabled.try_set(enabled);
+                    let _ = set_limiter_active_seconds.try_set(active_seconds);
+                    let _ = set_limiter_loading.try_set(false);
                 }
             }
         }
@@ -629,4 +685,77 @@ fn connect_websocket(
     // Store closures so they stay alive (preventing JS callback invalidation)
     // and get dropped on next reconnect (preventing memory leak from Closure::forget)
     *ws_closures.borrow_mut() = Some((onmessage, onclose));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn channel(track_index: usize, muted: bool) -> Channel {
+        Channel {
+            track_index,
+            name: format!("In {track_index}"),
+            level_db: 0.0,
+            pan: 0.5,
+            muted,
+            category: String::new(),
+            stereo_pair: None,
+            stereo_side: None,
+        }
+    }
+
+    fn set(tracks: &[usize]) -> HashSet<usize> {
+        tracks.iter().copied().collect()
+    }
+
+    #[test]
+    fn meter_updates_are_spaced_by_fifty_milliseconds() {
+        assert!(meter_update_due(100.0, 0.0));
+        assert!(!meter_update_due(149.9, 100.0));
+        assert!(meter_update_due(150.0, 100.0));
+    }
+
+    #[test]
+    fn a_touched_fader_ignores_server_updates() {
+        let touched = HashMap::from([(3, true), (4, false)]);
+        assert!(!channel_update_applies(&touched, 3));
+        assert!(channel_update_applies(&touched, 4));
+        assert!(channel_update_applies(&touched, 5));
+    }
+
+    #[test]
+    fn a_channel_update_writes_only_its_channel() {
+        let mut chs = vec![channel(1, false), channel(2, false)];
+        update_channel(&mut chs, 2, -6.0, true, 0.25);
+        assert_eq!(chs[0], channel(1, false));
+        assert_eq!(
+            (chs[1].level_db, chs[1].muted, chs[1].pan),
+            (-6.0, true, 0.25)
+        );
+    }
+
+    #[test]
+    fn solo_changes_are_classified() {
+        assert_eq!(solo_change(&set(&[2]), &set(&[2])), SoloChange::Unchanged);
+        assert_eq!(solo_change(&set(&[]), &set(&[])), SoloChange::Unchanged);
+        assert_eq!(solo_change(&set(&[2]), &set(&[])), SoloChange::Cleared);
+        assert_eq!(solo_change(&set(&[]), &set(&[2])), SoloChange::Entered);
+        assert_eq!(solo_change(&set(&[2]), &set(&[3])), SoloChange::Switched);
+    }
+
+    #[test]
+    fn an_exclusive_solo_mutes_every_other_channel() {
+        let mut chs = vec![channel(1, false), channel(2, true), channel(3, false)];
+        show_exclusive_solo(&mut chs, &set(&[2]));
+        let muted: Vec<bool> = chs.iter().map(|c| c.muted).collect();
+        assert_eq!(muted, [true, false, true]);
+    }
+
+    #[test]
+    fn only_the_shown_members_alert_is_cleared() {
+        let shown = ("member1".to_string(), "Member1".to_string());
+        assert!(clears_shown_alert(Some(&shown), "member1"));
+        assert!(!clears_shown_alert(Some(&shown), "member2"));
+        assert!(!clears_shown_alert(None, "member1"));
+    }
 }

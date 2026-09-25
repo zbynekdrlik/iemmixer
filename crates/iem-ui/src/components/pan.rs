@@ -35,6 +35,14 @@ const ANIMATION_STEP: f32 = 0.02;
 /// Target pan for double-tap animation (center)
 const ANIMATION_TARGET: f32 = 0.5;
 
+/// Pan after a relative drag: the value saved at touch start moves by the
+/// finger's travel as a fraction of the slider width (the width spans the
+/// whole 0.0–1.0 range), clamped to that range.
+fn dragged_pan(saved: f32, base_x: f64, current_x: f64, width: f64) -> f32 {
+    let delta_ratio = (current_x - base_x) / width;
+    (saved + delta_ratio as f32).clamp(0.0, 1.0)
+}
+
 /// Horizontal pan slider component with touch-safe activation
 ///
 /// Touch behavior:
@@ -277,20 +285,17 @@ pub fn PanKnob(
             // Pan is activated - prevent scroll and use RELATIVE positioning
             ev.prevent_default();
 
-            if let Some(target) = ev.target() {
-                if let Ok(input) = target.dyn_into::<HtmlInputElement>() {
-                    let rect = input.get_bounding_client_rect();
+            if let Some(target) = ev.target()
+                && let Ok(input) = target.dyn_into::<HtmlInputElement>()
+            {
+                let rect = input.get_bounding_client_rect();
 
-                    if let Some(base_x) = *move_base_x_tm.borrow() {
-                        let delta_x = current_x - base_x;
-                        // Pan range is 0.0-1.0, slider width maps to full range
-                        let delta_ratio = delta_x / rect.width();
-                        let base = saved_value.get_untracked();
-                        let new_value = (base + delta_ratio as f32).clamp(0.0, 1.0);
-                        let _ = set_local_value.try_set(new_value);
-                        input.set_value(&format!("{}", (new_value * 100.0) as i32));
-                        on_change_touch.run(new_value);
-                    }
+                if let Some(base_x) = *move_base_x_tm.borrow() {
+                    let new_value =
+                        dragged_pan(saved_value.get_untracked(), base_x, current_x, rect.width());
+                    let _ = set_local_value.try_set(new_value);
+                    input.set_value(&format!("{}", (new_value * 100.0) as i32));
+                    on_change_touch.run(new_value);
                 }
             }
         }
@@ -390,5 +395,17 @@ mod tests {
         let full_steps = (1.0 / ANIMATION_STEP) as u32;
         let full_duration = full_steps * ANIMATION_TICK_MS;
         assert_eq!(full_duration, 2500);
+    }
+
+    #[test]
+    fn a_drag_moves_the_pan_by_the_travelled_share_of_the_width() {
+        assert_eq!(dragged_pan(0.5, 100.0, 150.0, 200.0), 0.75);
+        assert_eq!(dragged_pan(0.5, 150.0, 100.0, 200.0), 0.25);
+    }
+
+    #[test]
+    fn a_drag_stops_at_the_ends() {
+        assert_eq!(dragged_pan(0.9, 0.0, 100.0, 100.0), 1.0);
+        assert_eq!(dragged_pan(0.1, 100.0, 0.0, 100.0), 0.0);
     }
 }
