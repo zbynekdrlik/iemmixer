@@ -190,7 +190,12 @@ fn push_tap(
     overruns: &AtomicU64,
 ) {
     let mut used = 0;
-    for (pair, (a, b)) in scratch.as_chunks_mut::<2>().0.iter_mut().zip(l.iter().zip(r)) {
+    for (pair, (a, b)) in scratch
+        .as_chunks_mut::<2>()
+        .0
+        .iter_mut()
+        .zip(l.iter().zip(r))
+    {
         *pair = [*a as f32, *b as f32];
         used += 2;
     }
@@ -519,7 +524,11 @@ impl Processor {
                 }
             }
             RtOp::BusEq { b, eq } => {
-                if let Some(e) = self.buses.get_mut(usize::from(b)).and_then(|n| n.eq.as_mut()) {
+                if let Some(e) = self
+                    .buses
+                    .get_mut(usize::from(b))
+                    .and_then(|n| n.eq.as_mut())
+                {
                     e.set(&eq);
                 }
             }
@@ -640,7 +649,9 @@ impl Processor {
         if got < n {
             self.talk_gate.set(0.0);
             if got > 0 {
-                self.status.talkback_underruns.fetch_add(1, Ordering::Relaxed);
+                self.status
+                    .talkback_underruns
+                    .fetch_add(1, Ordering::Relaxed);
             }
         } else {
             self.talk_gate.set(1.0);
@@ -694,7 +705,9 @@ impl Processor {
                     node.eq.process([&mut *l, &mut *r]);
                 }
                 if fading {
-                    for ((a, b), (x, y)) in l.iter_mut().zip(r.iter_mut()).zip(dl.iter().zip(dr.iter())) {
+                    for ((a, b), (x, y)) in
+                        l.iter_mut().zip(r.iter_mut()).zip(dl.iter().zip(dr.iter()))
+                    {
                         let m = mix.tick();
                         *a = x + m * (*a - x);
                         *b = y + m * (*b - y);
@@ -757,7 +770,9 @@ impl Processor {
                 for (s, stems) in graph.buses.iter().zip(done.iter()) {
                     if s.kind == BusKind::Stems {
                         let (sl, sr) = stems.sum.get(n);
-                        for ((a, c), (x, y)) in l.iter_mut().zip(r.iter_mut()).zip(sl.iter().zip(sr)) {
+                        for ((a, c), (x, y)) in
+                            l.iter_mut().zip(r.iter_mut()).zip(sl.iter().zip(sr))
+                        {
                             *a += x;
                             *c += y;
                         }

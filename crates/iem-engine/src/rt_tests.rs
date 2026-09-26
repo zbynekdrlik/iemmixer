@@ -181,7 +181,10 @@ fn a_mono_input_feeds_both_channels_at_unity() {
     let out = r.run(&dc(&[0.25, 0.0, 0.0, 0.0], 512), 64);
     let want = 0.25 * g0() * g0();
     for ch in [M1_L, M1_R] {
-        assert!(out.channel(ch).iter().all(|y| close(*y, want, 1e-15)), "{ch}");
+        assert!(
+            out.channel(ch).iter().all(|y| close(*y, want, 1e-15)),
+            "{ch}"
+        );
     }
     // Nothing reaches a bus without a send, and every TX channel is written.
     assert!(out.channel(ENG_L).iter().all(|y| *y == 0.0));
@@ -217,7 +220,11 @@ fn trim_and_eq_apply_only_with_processing() {
     let dry = 0.25 * g0() * g0();
     assert!(close(y[999], wet, 1e-15), "{}", y[999]);
     // 20 ms crossfade: halfway at 960 samples, dry from 1920 on.
-    assert!(close(y[1000 + 959], 0.5 * (wet + dry), 1e-12), "{}", y[1959]);
+    assert!(
+        close(y[1000 + 959], 0.5 * (wet + dry), 1e-12),
+        "{}",
+        y[1959]
+    );
     assert!(close(y[1000 + 1919], dry, 1e-15));
     assert!(close(y[3999], dry, 1e-15));
     // With processing on, an enabled band shapes the signal: a +12 dB low
@@ -233,7 +240,11 @@ fn trim_and_eq_apply_only_with_processing() {
         },
     ]);
     let boosted = r.run(&dc(&[0.01, 0.0, 0.0, 0.0], 4000), 64);
-    assert!(boosted.channel(M1_L)[3999] > 0.02, "{}", boosted.channel(M1_L)[3999]);
+    assert!(
+        boosted.channel(M1_L)[3999] > 0.02,
+        "{}",
+        boosted.channel(M1_L)[3999]
+    );
 }
 
 #[test]
@@ -244,7 +255,11 @@ fn talkback_is_added_before_the_mute_gate() {
     let out = r.run(&dc(&[0.0; 4], 2048), 32);
     let want = 0.5 * TALKBACK_GAIN * g0() * g0();
     assert!(out.channel(M1_L)[0] < want);
-    assert!(close(out.channel(M1_L)[2047], want, 1e-9), "{}", out.channel(M1_L)[2047]);
+    assert!(
+        close(out.channel(M1_L)[2047], want, 1e-9),
+        "{}",
+        out.channel(M1_L)[2047]
+    );
     // Muting the talkback input silences the talkback too (A3).
     r.at(
         0,
@@ -273,7 +288,11 @@ fn pre_sends_ignore_the_input_fader_post_sends_follow_the_bus_fader() {
     let mut r = rig(&[send(src_in("mono"), "m1", 0.0), fader]);
     let out = r.run(&dc(&[0.25, 0.0, 0.0, 0.0], 256), 64);
     assert!(close(out.channel(M1_L)[255], 0.25 * g0() * g0(), 1e-15));
-    assert_eq!(out.channel(MASTER_L)[255], 0.0, "the input fader feeds only the master");
+    assert_eq!(
+        out.channel(MASTER_L)[255],
+        0.0,
+        "the input fader feeds only the master"
+    );
     // A post send (stems → m1) follows the stems bus fader.
     let mut r = rig(&[
         send(src_in("st"), "m1.stems", 0.0),
@@ -283,7 +302,11 @@ fn pre_sends_ignore_the_input_fader_post_sends_follow_the_bus_fader() {
     let out = r.run(&dc(&[0.0, 0.2, 0.2, 0.0], 256), 64);
     let g = gains(0.0).0;
     let want = 0.2 * g * (10f64.powf(-0.3) * g) * g * g;
-    assert!(close(out.channel(M1_L)[255], want, 1e-15), "{}", out.channel(M1_L)[255]);
+    assert!(
+        close(out.channel(M1_L)[255], want, 1e-15),
+        "{}",
+        out.channel(M1_L)[255]
+    );
 }
 
 #[test]
@@ -298,7 +321,10 @@ fn output_chain_is_eq_limiter_fader_mute_safety_clamp() {
     ]);
     let out = r.run(&dc(&[1.0, 0.0, 0.0, 0.0], 4096), 128);
     let m1 = out.channel(M1_L);
-    assert!(m1.iter().all(|y| y.abs() <= 1.0), "the TX never exceeds 1.0");
+    assert!(
+        m1.iter().all(|y| y.abs() <= 1.0),
+        "the TX never exceeds 1.0"
+    );
     assert!(m1[4095] > 0.99, "{}", m1[4095]);
     // A9: the engineer reads member 1 after its mute, before the safety stage:
     // 1.0 → limiter 0.501 → +12 dB ≈ 2.0, unclipped, → −12 dB ≈ 0.5.
@@ -306,7 +332,11 @@ fn output_chain_is_eq_limiter_fader_mute_safety_clamp() {
     let post = limited * g0() * (10f64.powf(0.6) * g0());
     let eng = post * g0() * (10f64.powf(-0.6) * g0());
     assert!(post > 1.9);
-    assert!(close(out.channel(ENG_L)[4095], eng, 1e-9), "{}", out.channel(ENG_L)[4095]);
+    assert!(
+        close(out.channel(ENG_L)[4095], eng, 1e-9),
+        "{}",
+        out.channel(ENG_L)[4095]
+    );
     // Muting the member mutes its bus-to-bus tap too.
     r.at(0, &set_bus("m1", None, None, Some(true)));
     let out = r.run(&dc(&[1.0, 0.0, 0.0, 0.0], 1024), 128);
@@ -326,7 +356,11 @@ fn translator_is_the_half_sum_on_one_channel() {
     let out = left.run(&dc(&[0.4, 0.0, 0.0, 0.0], 256), 64);
     let (gl, gr) = gains(-1.0);
     assert_eq!(gr, 0.0);
-    assert!(close(out.channel(TR)[255], (0.4 * g0() * gl) * 0.5, 1e-15), "{}", out.channel(TR)[255]);
+    assert!(
+        close(out.channel(TR)[255], (0.4 * g0() * gl) * 0.5, 1e-15),
+        "{}",
+        out.channel(TR)[255]
+    );
 }
 
 #[test]
@@ -350,7 +384,11 @@ fn master_sums_post_fader_inputs_and_stems() {
     // Inputs at unity fader also feed the master: st at 0 dB, tb silent.
     let l = (0.1 * v * pl + 0.2 * g0() + 0.2 * g0() * s) * m;
     let rr = (0.1 * v * pr + 0.3 * g0() + 0.3 * g0() * s) * m;
-    assert!(close(out.channel(MASTER_L)[255], l, 1e-12), "{} {l}", out.channel(MASTER_L)[255]);
+    assert!(
+        close(out.channel(MASTER_L)[255], l, 1e-12),
+        "{} {l}",
+        out.channel(MASTER_L)[255]
+    );
     assert!(close(out.channel(MASTER_R)[255], rr, 1e-12));
 }
 
@@ -362,7 +400,10 @@ fn sanitizer_silences_and_resets_a_tripping_node() {
     let out = r.run(&input, 64);
     let y = out.channel(M1_L);
     assert!(y[..64].iter().all(|v| *v > 0.2));
-    assert!(y[64..128].iter().all(|v| *v == 0.0), "the tripping block is silent");
+    assert!(
+        y[64..128].iter().all(|v| *v == 0.0),
+        "the tripping block is silent"
+    );
     assert!(y[128..].iter().all(|v| *v > 0.2), "the next block passes");
     assert_eq!(r.h.status.trips.load(Ordering::Relaxed), 1);
     let mut huge = dc(&[2e6, 0.0, 0.0, 0.0], 64);
@@ -380,7 +421,11 @@ fn commands_apply_at_their_sample() {
         let y = out.channel(M1_L);
         assert_eq!(y[999], y[998], "{block}");
         assert!(y[1000] < y[999], "{block}: the ramp starts at sample 1000");
-        assert!(close(y[1000 + 959], 0.25 * g0() * 10f64.powf(-0.3) * g0(), 1e-15));
+        assert!(close(
+            y[1000 + 959],
+            0.25 * g0() * 10f64.powf(-0.3) * g0(),
+            1e-15
+        ));
     }
 }
 
@@ -416,7 +461,11 @@ fn limiter_raise_ramps_lower_is_instant() {
     let wide = 0.9 * g0() * g0();
     assert!(close(y[1999], low, 1e-9), "{}", y[1999]);
     // Raising takes 10 ms (960 samples).
-    assert!(y[2000 + 480] > low + 0.01 && y[2000 + 480] < wide - 0.01, "{}", y[2480]);
+    assert!(
+        y[2000 + 480] > low + 0.01 && y[2000 + 480] < wide - 0.01,
+        "{}",
+        y[2480]
+    );
     assert!(close(y[4999], wide, 1e-9), "{}", y[4999]);
     // Lowering is instant.
     assert!(close(y[5000], low, 1e-9), "{}", y[5000]);
@@ -450,12 +499,27 @@ fn test_signal_caps_reachable_tx_and_ends_after_its_ttl() {
     let out = r.run(&dc(&[0.5, 0.5, 0.5, 0.0], 12_000), 256);
     let m1 = out.channel(M1_L);
     let active = 960 + 4800;
-    assert!(m1[..active].iter().all(|y| y.abs() <= TEST_CAP), "reachable TX capped");
+    assert!(
+        m1[..active].iter().all(|y| y.abs() <= TEST_CAP),
+        "reachable TX capped"
+    );
     assert!(m1[100..active].iter().any(|y| *y == TEST_CAP));
-    assert!(close(out.channel(TR)[1000], 0.5 * g0() * g0(), 1e-15), "unreachable TX untouched");
-    assert!(m1[active + 1000] > 0.4, "caps lifted: {}", m1[active + 1000]);
+    assert!(
+        close(out.channel(TR)[1000], 0.5 * g0() * g0(), 1e-15),
+        "unreachable TX untouched"
+    );
+    assert!(
+        m1[active + 1000] > 0.4,
+        "caps lifted: {}",
+        m1[active + 1000]
+    );
     // The sine replaced the input: its peak is at most −20 dBFS through a 0 dB send.
-    let mut probe = rig_with(SITE, &[send(src_in("st"), "eng", 0.0)], flags, Options { fade_in_ms: 0.0 });
+    let mut probe = rig_with(
+        SITE,
+        &[send(src_in("st"), "eng", 0.0)],
+        flags,
+        Options { fade_in_ms: 0.0 },
+    );
     probe.at(
         0,
         &Cmd::StartTestSignal {
@@ -466,7 +530,9 @@ fn test_signal_caps_reachable_tx_and_ends_after_its_ttl() {
         },
     );
     let out = probe.run(&dc(&[0.0, 0.3, 0.3, 0.0], 9600), 256);
-    let peak = out.channel(ENG_L)[5000..].iter().fold(0.0f64, |m, y| m.max(y.abs()));
+    let peak = out.channel(ENG_L)[5000..]
+        .iter()
+        .fold(0.0f64, |m, y| m.max(y.abs()));
     let want = 10f64.powf(-1.5) * g0() * g0();
     assert!(close(peak, want, 1e-4), "{peak} vs {want}");
     probe.at(0, &Cmd::StopTestSignal);
@@ -499,7 +565,11 @@ fn listen_taps_are_side_effect_free() {
     assert!(eng.iter().all(|x| (x - pre).abs() < 1e-6), "{}", eng[0]);
     // Slot 1: the member after fader and mute, through the 0 dB listen limiter.
     let post = (0.3 * g0() * 10f64.powf(-0.3) * g0()) as f32;
-    assert!(member.iter().all(|x| (x - post).abs() < 1e-6), "{}", member[0]);
+    assert!(
+        member.iter().all(|x| (x - post).abs() < 1e-6),
+        "{}",
+        member[0]
+    );
     tapped.at(0, &Cmd::StopListen { bus: bus("m1") });
     tapped.run(&input, 64);
     assert_eq!(tapped.h.taps[1].slots(), 0, "a stopped tap writes nothing");
@@ -545,7 +615,11 @@ fn meters_publish_every_3200_samples() {
     assert_eq!(f.seq, 1);
     assert_eq!(f.inputs[0], [0.9, 0.9]);
     assert_eq!(f.inputs[1], [0.0, 0.0]);
-    assert!(close(f.buses[g][0], 10f64.powf(-0.3) * g0() * g0(), 1e-9), "{:?}", f.buses[g]);
+    assert!(
+        close(f.buses[g][0], 10f64.powf(-0.3) * g0() * g0(), 1e-9),
+        "{:?}",
+        f.buses[g]
+    );
     assert!(f.gr_db[g] < -0.5, "{}", f.gr_db[g]);
     // 0.9 limited to −6 dB is ≈ −5 dB of GR: every sample since the reset is active.
     assert_eq!(f.active[g], 3200);
@@ -555,16 +629,26 @@ fn meters_publish_every_3200_samples() {
     assert_eq!((f.seq, f.inputs[0]), (2, [0.0, 0.0]));
     // X14 counts from the persisted base.
     let graph = Arc::new(compile(&parse(SITE).unwrap()).unwrap());
-    let mut core = Core::new(Arc::clone(&graph), &MixState::default(), 0, Flags::default());
+    let mut core = Core::new(
+        Arc::clone(&graph),
+        &MixState::default(),
+        0,
+        Flags::default(),
+    );
     core.apply(&send(src_in("mono"), "m1", 0.0)).unwrap();
     let mut counters = vec![0; graph.buses.len()];
     counters[g] = 1000;
-    let (mut p, mut h) = Processor::new(graph, &core.state(), &counters, Options { fade_in_ms: 0.0 });
+    let (mut p, mut h) =
+        Processor::new(graph, &core.state(), &counters, Options { fade_in_ms: 0.0 });
     let run = Offline { block: 3200 }.run(&mut p, &dc(&[2.0, 0.0, 0.0, 0.0], 3200), 7);
     assert!(run.fault.is_none());
     let f = h.meters.read().clone();
     assert_eq!(f.active[g], 1000 + 3200);
-    assert!(push_group(&mut h.cmds, 0, &[RtOp::ResetLimiter { b: g as u16 }]));
+    assert!(push_group(
+        &mut h.cmds,
+        0,
+        &[RtOp::ResetLimiter { b: g as u16 }]
+    ));
     Offline { block: 3200 }.run(&mut p, &dc(&[0.0, 0.0, 0.0, 0.0], 3200), 7);
     let f = h.meters.read().clone();
     // The reset cleared the base and the count; the GR meter recovers at
@@ -586,7 +670,12 @@ fn the_fault_injection_op_panics() {
 #[test]
 fn the_program_site_runs_and_reports_its_time() {
     let graph = Arc::new(crate::test_support::test_site());
-    let (mut p, _h) = Processor::new(Arc::clone(&graph), &MixState::default(), &[], Options::default());
+    let (mut p, _h) = Processor::new(
+        Arc::clone(&graph),
+        &MixState::default(),
+        &[],
+        Options::default(),
+    );
     let run = Offline { block: 32 }.run(&mut p, &dc(&[0.1; 32], 320), graph.tx.len());
     assert!(run.fault.is_none());
     assert_eq!(run.output.channels(), 23);
