@@ -504,6 +504,8 @@ fn eq_track(name: &str, stimulus: &str, rate: u32, ms: u64, eq: ReaEq) -> Track 
 fn eq(stimuli: &[Stimulus], rate: u32) -> Case {
     let mut b = Builder::new(format!("eq-{rate}"), rate);
     let imp = format!("imp-dm-{rate}.wav");
+    // Case names carry the rate (eq44, eq48, eq96): every case name is unique across the bundle.
+    let khz = rate / 1000;
     for (kind, tag) in [
         (BandKind::LowShelf, "ls"),
         (BandKind::HighShelf, "hs"),
@@ -515,7 +517,7 @@ fn eq(stimuli: &[Stimulus], rate: u32) -> Case {
                     let band = Band::new(kind, f, db(g), w);
                     b.case(
                         eq_track(
-                            &format!("eq-{tag}-f{fi}-g{gi}-w{wi}"),
+                            &format!("eq{khz}-{tag}-f{fi}-g{gi}-w{wi}"),
                             &imp,
                             rate,
                             500,
@@ -534,7 +536,7 @@ fn eq(stimuli: &[Stimulus], rate: u32) -> Case {
                 let band = Band::new(BandKind::HighPass, f, g, w);
                 b.case(
                     eq_track(
-                        &format!("eq-hp-f{fi}-g{gi}-w{wi}"),
+                        &format!("eq{khz}-hp-f{fi}-g{gi}-w{wi}"),
                         &imp,
                         rate,
                         500,
@@ -555,23 +557,27 @@ fn eq(stimuli: &[Stimulus], rate: u32) -> Case {
     cascade.bands[4] = Band::new(BandKind::HighShelf, 8000.0, db(-6.0), 2.0);
     for (name, e) in [
         (
-            "eq-edge-gain0",
+            "edge-gain0",
             ReaEq::single(Band::new(BandKind::Band, 1000.0, 0.0, 1.0)),
         ),
         (
-            "eq-edge-bw0",
+            "edge-bw0",
             ReaEq::single(Band::new(BandKind::Band, 1000.0, db(6.0), 0.0)),
         ),
         (
-            "eq-edge-top",
+            "edge-top",
             ReaEq::single(Band::new(BandKind::Band, 24_000.0, db(6.0), 1.0)),
         ),
-        ("eq-edge-disabled", disabled),
-        ("eq-edge-global", global),
-        ("eq-edge-cascade", cascade),
+        ("edge-disabled", disabled),
+        ("edge-global", global),
+        ("edge-cascade", cascade),
     ] {
         let params = json!({"eq": &e});
-        b.case(eq_track(name, &imp, rate, 500, e), "eq-edge", params);
+        b.case(
+            eq_track(&format!("eq{khz}-{name}"), &imp, rate, 500, e),
+            "eq-edge",
+            params,
+        );
     }
     b.finish(stimuli)
 }
