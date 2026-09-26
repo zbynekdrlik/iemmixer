@@ -65,4 +65,16 @@ exclude_re = [
   "iem-ui/src/pages/mixer/helpers\\.rs.*ws_send",
   # Push subscription through the service worker's PushManager.
   "iem-ui/src/pages/mixer/push\\.rs.*subscribe_to_push",
+  # Equivalent `>` → `>=` (S2): at equality both branches give the same
+  # result, so no input can tell them apart.
+  # |x| equal to the running peak: assigning the same value changes nothing.
+  "iem-dsp/src/meter\\.rs.*replace > with >= in PeakMeter<CH>::observe",
+  # x = ±0: 20·log10(0) = −∞, floored by max(−150) to the else branch's −150.
+  "iem-dsp/src/meter\\.rs.*replace > with >= in to_db",
+  # mag = 1e-15: 20·log10(1e-15) is exactly −300.0, the else branch's value.
+  "iem-dsp/src/eq\\.rs.*replace > with >= in response_db",
+  # gain ±0: 20·log10(0) = −∞, floored by max(RAMP_DB_MIN) to RAMP_DB_MIN.
+  "iem-dsp/src/eq\\.rs.*replace > with >= in gain_key",
+  # GR meter ±0: 20·log10(0) = −∞, floored by max(−150) to the else branch's −150.
+  "iem-limiter-mga/src/lib\\.rs.*replace > with >= in Limiter::gr_db",
 ]

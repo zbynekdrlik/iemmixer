@@ -404,6 +404,9 @@ mod tests {
     use super::*;
 
     const SR: f64 = 96_000.0;
+    /// 20 ms at 96 kHz. Tests loop over this constant, not over `samples()`, so
+    /// a wrong ramp length fails them at once instead of running for minutes.
+    const RAMP: usize = 1920;
 
     fn slot(kind: BandKind) -> usize {
         match kind {
@@ -652,7 +655,9 @@ mod tests {
         let mut eq = Equalizer::<1>::new(&from, SR);
         assert!(eq.set(&to));
         assert_eq!(eq.params(), to);
-        let n = samples(EQ_MS, SR) as usize; // 1920
+        let n = RAMP;
+        assert_eq!(samples(EQ_MS, SR), 1920);
+        assert_eq!(eq.bands[2].len, 1920);
         let mut x = vec![0.0; n - 1];
         eq.process([&mut x]);
         let b = &eq.bands[2];
@@ -673,7 +678,7 @@ mod tests {
         let to = single(band(BandKind::Peak, 4000.0, 4.0, 0.25));
         let mut eq = Equalizer::<1>::new(&from, SR);
         eq.set(&to);
-        let mut x = vec![0.0; samples(EQ_MS, SR) as usize / 2];
+        let mut x = vec![0.0; RAMP / 2];
         eq.process([&mut x]);
         let got = eq.bands[2].coefs;
         let want = design(&band(BandKind::Peak, 2000.0, 2.0, 0.5), SR);
@@ -688,13 +693,75 @@ mod tests {
     }
 
     #[test]
+    fn a_bandwidth_change_alone_ramps_in_log2() {
+        // 2 → 0.5 oct: after 10 ms log2 bw is halfway, 1 oct.
+        let from = single(band(BandKind::Peak, 1000.0, 2.0, 2.0));
+        let to = single(band(BandKind::Peak, 1000.0, 2.0, 0.5));
+        let mut eq = Equalizer::<1>::new(&from, SR);
+        eq.set(&to);
+        assert!(eq.bands[2].moving());
+        let mut x = vec![0.0; RAMP / 2];
+        eq.process([&mut x]);
+        let got = eq.bands[2].coefs;
+        let want = design(&band(BandKind::Peak, 1000.0, 2.0, 1.0), SR);
+        for (g, w) in [(got.k, want.k), (got.m1, want.m1), (got.a1, want.a1)] {
+            assert!((g - w).abs() <= 1e-9 * w.abs(), "{g} vs {w}");
+        }
+        let mut rest = vec![0.0; RAMP / 2];
+        eq.process([&mut rest]);
+        assert!(!eq.bands[2].moving());
+        assert_eq!(eq.bands[2].coefs, design(&to.bands[2], SR));
+    }
+
+    #[test]
+    fn a_change_below_the_ramp_floor_applies_at_once() {
+        // −140 dB and gain 0 (a notch) share the −120 dB ramp key: nothing
+        // ramps, so the new design must be taken immediately.
+        let from = single(band(BandKind::Peak, 1000.0, 1e-7, 1.0));
+        let to = single(band(BandKind::Peak, 1000.0, 0.0, 1.0));
+        let mut eq = Equalizer::<1>::new(&from, SR);
+        assert!(eq.set(&to));
+        assert!(!eq.bands[2].moving());
+        assert_ne!(design(&from.bands[2], SR), design(&to.bands[2], SR));
+        assert_eq!(eq.bands[2].coefs, design(&to.bands[2], SR));
+        let mut x = vec![0.0; 64];
+        x[0] = 1.0;
+        eq.process([&mut x]);
+        assert_eq!(x, impulse_response(&to, SR, 64));
+    }
+
+    #[test]
+    fn enabling_crossfades_linearly_from_dry_to_wet() {
+        // During the 20 ms fade-in, output = (1 − w)·dry + w·filtered with
+        // w = (i + 1)/n at sample i; the filtered signal starts from zero state.
+        let off = EqParams::standard_flat();
+        let mut on = off;
+        on.bands[2] = band(BandKind::Peak, 1000.0, 3.0, 1.0);
+        let input: Vec<f64> = (0..RAMP)
+            .map(|i| ((i * 7919) % 101) as f64 / 50.0 - 1.0)
+            .collect();
+        let mut filtered = input.clone();
+        Equalizer::<1>::new(&on, SR).process([&mut filtered]);
+        let mut eq = Equalizer::<1>::new(&off, SR);
+        eq.set(&on);
+        let mut y = input.clone();
+        eq.process([&mut y]);
+        for (i, ((got, x), f)) in y.iter().zip(&input).zip(&filtered).enumerate() {
+            let w = (i + 1) as f64 / RAMP as f64;
+            let want = (1.0 - w) * x + w * f;
+            assert!((got - want).abs() < 1e-9, "sample {i}: {got} vs {want}");
+        }
+        assert_eq!(y[RAMP - 1], filtered[RAMP - 1]);
+    }
+
+    #[test]
     fn during_a_ramp_the_parameters_move_monotonically() {
         let from = single(band(BandKind::Peak, 1000.0, 0.25, 1.0));
         let to = single(band(BandKind::Peak, 1000.0, 4.0, 1.0));
         let mut eq = Equalizer::<1>::new(&from, SR);
         eq.set(&to);
         let mut last = response_db(&from, SR, 1000.0);
-        for _ in 0..(samples(EQ_MS, SR) / 64) {
+        for _ in 0..RAMP / 64 {
             let mut x = [0.0; 64];
             eq.process([&mut x]);
             let c = eq.bands[2].coefs;
@@ -710,7 +777,7 @@ mod tests {
         let off = EqParams::standard_flat();
         let mut on = off;
         on.bands[2] = band(BandKind::Peak, 1000.0, 3.0, 1.0);
-        let n = samples(EQ_MS, SR) as usize;
+        let n = RAMP;
         let input: Vec<f64> = (0..4 * n)
             .map(|i| ((i * 7919) % 101) as f64 / 50.0 - 1.0)
             .collect();
@@ -798,6 +865,9 @@ mod tests {
         assert_eq!(flush(1e-31), 0.0);
         assert_eq!(flush(-1e-31), 0.0);
         assert_eq!(flush(1e-29), 1e-29);
+        // Only magnitudes strictly below the threshold are flushed.
+        assert_eq!(flush(DENORMAL), DENORMAL);
+        assert_eq!(flush(-DENORMAL), -DENORMAL);
         let mut eq = Equalizer::<1>::new(&single(band(BandKind::Peak, 1000.0, 2.0, 1.0)), SR);
         let mut x = vec![0.0; 200_000];
         x[0] = 1.0;

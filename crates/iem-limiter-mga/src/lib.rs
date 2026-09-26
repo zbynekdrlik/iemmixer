@@ -391,6 +391,31 @@ mod tests {
         c.env = 2e-30;
         c.gain(0.0, 0.25, 1.0);
         assert_eq!(c.env, 0.0);
+        // Only envelopes strictly below the denormal threshold are flushed.
+        c.gain(DENORMAL, 0.25, 1.0);
+        assert_eq!(c.env, DENORMAL);
+    }
+
+    #[test]
+    fn envelope_edges_follow_the_jsfx() {
+        // `env < envT ? envT : envT + r*(env-envT)`: at env = envT = ∞ the JSFX
+        // takes the release branch, ∞ − ∞ is NaN, and the envelope stays NaN
+        // until the node reset that the sanitiser's trip triggers (X1).
+        let mut c = Channel::new(4.0);
+        assert_eq!(c.gain(f64::INFINITY, 0.5, 1.0), 0.0);
+        assert_eq!(c.env, f64::INFINITY);
+        assert_eq!(c.gain(f64::INFINITY, 0.5, 1.0), 1.0);
+        assert!(c.env.is_nan());
+        // Equal finite envelope and peak: the release branch keeps the peak.
+        let mut d = Channel::new(4.0);
+        d.env = 0.75;
+        assert_eq!(d.gain(0.75, 0.5, 0.5), 0.5 / 0.75);
+        assert_eq!(d.env, 0.75);
+        // `env > thresh` is strict: an envelope equal to the threshold keeps
+        // unity GR, also at a zero threshold (−∞ dB) where the ratio is 0/0.
+        let mut z = Channel::new(4.0);
+        assert_eq!(z.gain(0.0, 0.5, 0.0), 1.0);
+        assert_eq!(z.env, 0.0);
     }
 
     #[test]
@@ -453,7 +478,9 @@ mod tests {
     #[test]
     fn disabling_fades_out_over_10_ms_and_enabling_is_instant() {
         let mut l = Limiter::new(1000.0, -6.0); // 10 samples
+        assert!(l.enabled());
         l.set_enabled(false);
+        assert!(!l.enabled());
         let mut left = vec![1.0; 12];
         let mut right = vec![1.0; 12];
         run(&mut l, &mut left, &mut right);
@@ -470,9 +497,43 @@ mod tests {
         );
         assert_eq!(&left[9..], &[1.0, 1.0, 1.0]);
         l.set_enabled(true);
+        assert!(l.enabled());
         let (mut a, mut b) = ([1.0], [1.0]);
         run(&mut l, &mut a, &mut b);
         assert!((a[0] - g).abs() < 1e-15);
+    }
+
+    #[test]
+    fn a_gr_of_exactly_minus_1_db_is_not_active() {
+        // X14 counts GR strictly below −1 dB. On silence the GR meter recovers
+        // by gr_decay per sample: start it just below the boundary so one
+        // silent sample lands it exactly on −1 dB.
+        let mut l = Limiter::new(SR, -6.0);
+        let boundary = l.active_below;
+        let decay = l.mga.gr_decay;
+        let mut start = boundary / decay;
+        for _ in 0..8 {
+            let next = start * decay;
+            if next == boundary {
+                break;
+            }
+            start = if next < boundary {
+                start.next_up()
+            } else {
+                start.next_down()
+            };
+        }
+        assert_eq!(start * decay, boundary);
+        l.mga.gr_meter = start;
+        let (mut a, mut b) = ([0.0], [0.0]);
+        run(&mut l, &mut a, &mut b);
+        assert_eq!(l.mga.gr_meter(), boundary);
+        assert_eq!(l.active_samples(), 0);
+        // One step deeper is active.
+        l.mga.gr_meter = start.next_down();
+        run(&mut l, &mut a, &mut b);
+        assert!(l.mga.gr_meter() < boundary);
+        assert_eq!(l.active_samples(), 1);
     }
 
     #[test]
