@@ -1,7 +1,8 @@
 //! A worst-case processor workload shared by the RT-safety tests (`rt.rs`
 //! under `assert_no_alloc`, `rtsan.rs` under RealtimeSanitizer): the program
-//! site with every send open, hot inputs driving the limiters, a command
-//! group every block (fader, EQ, processing, solo, listen, limiter raise and
+//! site with every level open, hot inputs driving the limiters, a command
+//! group every block (volume, input/mix/group EQ, processing, levels of an
+//! input and a heard mix, a group strip, solo, listen, limiter raise and
 //! lower, test signal, a full import), talkback, both taps, meter reads and a
 //! sanitiser trip every 1000 blocks.
 #![allow(dead_code)]
@@ -12,11 +13,11 @@ use std::sync::Arc;
 use iem_audio_io::{Block, Process};
 use iem_engine::cmd::{RtOp, push_group};
 use iem_engine::core::{Core, Flags};
-use iem_engine::graph::{Graph, compile};
 use iem_engine::rt::{Options, Processor, RtHandles};
 use iem_engine::site::load;
+use iem_engine::topology::{Topology, compile};
 use iem_engine_proto::{
-    BusId, Cmd, Eq, EqOwner, InputId, MixState, SendEntry, SendId, SendState, Source,
+    Cmd, Eq, EqTarget, GroupId, InputId, Level, Mix, MixGroup, MixId, MixState, Source,
 };
 
 pub const BLOCK: usize = 32;
@@ -25,22 +26,36 @@ pub fn site_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config/test-site.toml")
 }
 
-pub fn graph() -> Arc<Graph> {
+pub fn topology() -> Arc<Topology> {
     Arc::new(compile(&load(&site_path()).unwrap()).unwrap())
 }
 
-/// Every send at −12 dB.
-pub fn open_state(graph: &Graph) -> MixState {
+/// Every level at −12 dB, every group strip at 0 dB.
+pub fn open_state(topo: &Topology) -> MixState {
+    let open = Level {
+        gain_db: -12.0,
+        ..Level::default()
+    };
     MixState {
-        sends: graph
-            .sends
+        mixes: topo
+            .mixes
             .iter()
-            .map(|e| SendEntry {
-                id: e.id.clone(),
-                state: SendState {
-                    gain_db: -12.0,
-                    ..SendState::default()
-                },
+            .map(|m| {
+                let mix = Mix {
+                    inputs: topo.inputs.iter().map(|i| (i.id.clone(), open)).collect(),
+                    groups: topo
+                        .groups
+                        .iter()
+                        .map(|g| (g.id.clone(), MixGroup::default()))
+                        .collect(),
+                    mixes: m
+                        .mixes
+                        .iter()
+                        .map(|&s| (topo.mixes[s].id.clone(), open))
+                        .collect(),
+                    ..Mix::default()
+                };
+                (m.id.clone(), mix)
             })
             .collect(),
         ..MixState::default()
@@ -48,14 +63,14 @@ pub fn open_state(graph: &Graph) -> MixState {
 }
 
 pub struct Scenario {
-    pub graph: Arc<Graph>,
+    pub topo: Arc<Topology>,
     pub groups: Vec<Vec<RtOp>>,
     pub processor: Processor,
     pub handles: RtHandles,
 }
 
-fn bus(s: &str) -> BusId {
-    BusId::new(s)
+fn mix(s: &str) -> MixId {
+    MixId::new(s)
 }
 
 fn input(s: &str) -> InputId {
@@ -68,56 +83,68 @@ fn processing(i: &str, on: bool) -> Cmd {
         trim_db: None,
         muted: None,
         processing: Some(on),
-        fader_db: None,
-        pan: None,
+    }
+}
+
+fn level(m: &str, source: Source, gain_db: f64, pan: f64) -> Cmd {
+    Cmd::SetLevel {
+        mix: mix(m),
+        source,
+        gain_db: Some(gain_db),
+        pan: Some(pan),
+        muted: None,
     }
 }
 
 pub fn scenario() -> Scenario {
-    let graph = graph();
-    let state = open_state(&graph);
+    let topo = topology();
+    let state = open_state(&topo);
     let flags = Flags {
         test_signal: true,
         fault_injection: false,
     };
-    let mut core = Core::new(Arc::clone(&graph), &state, 0, flags);
+    let mut core = Core::new(Arc::clone(&topo), &state, 0, flags);
     let mut eq = Eq::default();
     for b in &mut eq.bands {
         b.enabled = true;
         b.gain_db = 6.0;
     }
-    let send = SendId {
-        src: Source::Input(input("mic1")),
-        dst: bus("member1"),
+    let stems = EqTarget::Group {
+        mix: mix("member2"),
+        group: GroupId::new("stems"),
     };
+    let heard = Source::Mix(mix("member2"));
     let cmds = vec![
-        Cmd::SetBus {
-            bus: bus("member1"),
-            fader_db: Some(-3.0),
-            pan: Some(0.4),
+        Cmd::SetMix {
+            mix: mix("member1"),
+            volume_db: Some(-3.0),
             muted: None,
         },
         Cmd::SetEq {
-            owner: EqOwner::Input(input("mic1")),
+            target: EqTarget::Input(input("mic1")),
             eq,
         },
         Cmd::SetEq {
-            owner: EqOwner::Bus(bus("member2")),
+            target: EqTarget::Mix(mix("member2")),
+            eq,
+        },
+        Cmd::SetEq {
+            target: stems.clone(),
             eq,
         },
         processing("mic3", false),
         Cmd::SetSolo {
-            scope: bus("member3"),
+            mix: mix("member3"),
             sources: vec![Source::Input(input("mic2"))],
         },
         Cmd::StartListen {
-            bus: bus("engineer"),
+            mix: mix("engineer"),
         },
         Cmd::StartListen {
-            bus: bus("member4"),
+            mix: mix("member4"),
         },
         Cmd::SetLimiter {
-            bus: bus("member2"),
+            mix: mix("member2"),
             enabled: None,
             limit_db: Some(0.0),
         },
@@ -127,53 +154,59 @@ pub fn scenario() -> Scenario {
             dbfs: -30.0,
             ttl_s: 0.01,
         },
-        Cmd::SetSend {
-            id: send.clone(),
+        level("member1", Source::Input(input("mic1")), -6.0, 0.3),
+        level("member1", heard.clone(), -6.0, -0.3),
+        Cmd::SetGroup {
+            mix: mix("member1"),
+            group: GroupId::new("stems"),
             gain_db: Some(-6.0),
-            pan: Some(0.3),
             muted: None,
         },
         Cmd::ResetLimiterStats {
-            bus: bus("member1"),
+            mix: mix("member1"),
         },
-        Cmd::SetBus {
-            bus: bus("engineer"),
-            fader_db: None,
-            pan: None,
+        Cmd::SetMix {
+            mix: mix("engineer"),
+            volume_db: None,
             muted: Some(true),
         },
         processing("mic3", true),
         Cmd::SetSolo {
-            scope: bus("member3"),
+            mix: mix("member3"),
             sources: vec![],
         },
         Cmd::StopListen {
-            bus: bus("member4"),
+            mix: mix("member4"),
         },
         Cmd::SetLimiter {
-            bus: bus("member2"),
+            mix: mix("member2"),
             enabled: Some(false),
             limit_db: Some(-6.0),
         },
         Cmd::SetEq {
-            owner: EqOwner::Input(input("mic1")),
+            target: EqTarget::Input(input("mic1")),
             eq: Eq::default(),
         },
-        Cmd::SetSend {
-            id: send,
-            gain_db: Some(-12.0),
-            pan: Some(0.0),
+        Cmd::SetEq {
+            target: stems,
+            eq: Eq::default(),
+        },
+        level("member1", Source::Input(input("mic1")), -12.0, 0.0),
+        level("member1", heard, -12.0, 0.0),
+        Cmd::SetGroup {
+            mix: mix("member1"),
+            group: GroupId::new("stems"),
+            gain_db: Some(0.0),
             muted: None,
         },
-        Cmd::SetBus {
-            bus: bus("engineer"),
-            fader_db: None,
-            pan: None,
+        Cmd::SetMix {
+            mix: mix("engineer"),
+            volume_db: None,
             muted: Some(false),
         },
         Cmd::StopTestSignal,
         Cmd::ImportState {
-            state: open_state(&graph),
+            state: open_state(&topo),
             baseline: false,
         },
     ];
@@ -182,9 +215,9 @@ pub fn scenario() -> Scenario {
         .map(|c| core.apply(c).unwrap().rt)
         .filter(|rt| !rt.is_empty())
         .collect();
-    let (processor, handles) = Processor::new(Arc::clone(&graph), &state, &[], Options::default());
+    let (processor, handles) = Processor::new(Arc::clone(&topo), &state, &[], Options::default());
     Scenario {
-        graph,
+        topo,
         groups,
         processor,
         handles,
@@ -199,13 +232,13 @@ pub struct Buffers {
     pub drain: Vec<f32>,
 }
 
-pub fn buffers(graph: &Graph) -> Buffers {
-    let mut bad = vec![0.3; graph.rx.len() * BLOCK];
+pub fn buffers(topo: &Topology) -> Buffers {
+    let mut bad = vec![0.3; topo.rx.len() * BLOCK];
     bad[7] = f64::NAN;
     Buffers {
-        input: vec![0.3; graph.rx.len() * BLOCK],
+        input: vec![0.3; topo.rx.len() * BLOCK],
         bad,
-        output: vec![0.0; graph.tx.len() * BLOCK],
+        output: vec![0.0; topo.tx.len() * BLOCK],
         talk: vec![0.25; BLOCK],
         drain: vec![0.0; 8192],
     }

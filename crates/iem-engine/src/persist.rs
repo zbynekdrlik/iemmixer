@@ -9,7 +9,8 @@
 //! payload's raw bytes, so a re-serialisation never matters. Readers ignore
 //! unknown fields and default missing ones (additive schemas). The load chain
 //! is current → generations (newest first) → baseline → defaults with every
-//! TX bus muted.
+//! mix muted. Files of an older schema (1: the REAPER-shaped graph before #20)
+//! are refused.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -17,13 +18,13 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use iem_engine_proto::{BusId, MixState, SCHEMA};
+use iem_engine_proto::{MixId, MixState, SCHEMA};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use sha2::{Digest, Sha256};
 
-use crate::core::{defaults_muted, reconcile, to_mix};
-use crate::graph::Graph;
+use crate::core::{defaults_muted, reconcile, to_state};
+use crate::topology::Topology;
 
 pub const FORMAT: &str = "iemmixer-state";
 pub const GENERATIONS: usize = 20;
@@ -39,8 +40,8 @@ pub struct Persisted {
     pub topology_hash: String,
     pub saved_unix_ms: u64,
     pub state: MixState,
-    /// X14 limiter-active samples per bus (Q4: kept until reset).
-    pub counters: BTreeMap<BusId, u64>,
+    /// X14 limiter-active samples per mix (Q4: kept until reset).
+    pub counters: BTreeMap<MixId, u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,7 +74,6 @@ struct FileOut<'a> {
 #[derive(Deserialize)]
 struct FileIn<'a> {
     format: String,
-    #[allow(dead_code)]
     schema: u32,
     sha256: String,
     #[serde(borrow)]
@@ -106,6 +106,12 @@ pub fn decode(bytes: &[u8]) -> Result<Persisted, String> {
         return Err(format!(
             "format {:?} is not {FORMAT}",
             file.format.chars().take(40).collect::<String>()
+        ));
+    }
+    if file.schema < SCHEMA {
+        return Err(format!(
+            "schema {} predates the engine model (schema {SCHEMA})",
+            file.schema
         ));
     }
     if digest(file.payload.get()) != file.sha256 {
@@ -203,7 +209,7 @@ impl Store {
     }
 
     /// The load chain.
-    pub fn load(&self, graph: &Graph) -> Loaded {
+    pub fn load(&self, topo: &Topology) -> Loaded {
         let mut candidates = vec![(self.dir.join(CURRENT), Source::Current)];
         if let Ok(gens) = self.generations() {
             candidates.extend(
@@ -225,8 +231,8 @@ impl Store {
             };
             match decode(&bytes) {
                 Ok(mut persisted) => {
-                    let (r, dropped) = reconcile(graph, &persisted.state);
-                    persisted.state = to_mix(graph, &r);
+                    let (r, dropped) = reconcile(topo, &persisted.state);
+                    persisted.state = to_state(topo, &r);
                     return Loaded {
                         persisted,
                         source,
@@ -239,8 +245,8 @@ impl Store {
         }
         Loaded {
             persisted: Persisted {
-                topology_hash: graph.hash.clone(),
-                state: defaults_muted(graph),
+                topology_hash: topo.hash.clone(),
+                state: defaults_muted(topo),
                 ..Persisted::default()
             },
             source: Source::Defaults,
@@ -289,7 +295,7 @@ impl SaveSchedule {
 mod tests {
     use super::*;
     use crate::test_support::test_site;
-    use iem_engine_proto::{BusKind, BusState, InputId, InputState};
+    use iem_engine_proto::{InputId, InputState, Level, Mix};
 
     fn sample(rev: u64) -> Persisted {
         let mut p = Persisted {
@@ -302,19 +308,21 @@ mod tests {
             InputId::new("mic1"),
             InputState {
                 trim_db: 0.1 + 0.2,
-                pan: -1e-300,
-                fader_db: 12.041199826559248,
                 ..InputState::default()
             },
         );
-        p.state.buses.insert(
-            BusId::new("member1"),
-            BusState {
-                fader_db: -3.0 - rev as f64 / 7.0,
-                ..BusState::default()
+        let mut mix = Mix::default();
+        mix.out.volume_db = -3.0 - rev as f64 / 7.0;
+        mix.inputs.insert(
+            InputId::new("mic1"),
+            Level {
+                gain_db: 12.041199826559248 - 12.0,
+                pan: -1e-300,
+                muted: false,
             },
         );
-        p.counters.insert(BusId::new("member1"), 123_456_789 + rev);
+        p.state.mixes.insert(MixId::new("member1"), mix);
+        p.counters.insert(MixId::new("member1"), 123_456_789 + rev);
         p
     }
 
@@ -330,7 +338,7 @@ mod tests {
         let bytes = encode(&p).unwrap();
         assert_eq!(decode(&bytes).unwrap(), p);
         let text = String::from_utf8(bytes).unwrap();
-        assert!(text.starts_with(r#"{"format":"iemmixer-state","schema":1,"sha256":""#));
+        assert!(text.starts_with(r#"{"format":"iemmixer-state","schema":2,"sha256":""#));
         let tampered = text.replace("123456792", "123456793");
         assert_ne!(tampered, text);
         assert_eq!(
@@ -339,6 +347,12 @@ mod tests {
         );
         let foreign = text.replace("iemmixer-state", "other");
         assert!(decode(foreign.as_bytes()).unwrap_err().contains("other"));
+        // A file of the REAPER-shaped model (schema 1) is refused, even intact.
+        let old = text.replacen("\"schema\":2", "\"schema\":1", 1);
+        assert_eq!(
+            decode(old.as_bytes()).unwrap_err(),
+            "schema 1 predates the engine model (schema 2)"
+        );
         assert!(
             decode(b"{\"format\":")
                 .unwrap_err()
@@ -351,7 +365,7 @@ mod tests {
         let (_d, s) = store();
         let g = test_site();
         let mut p = sample(1);
-        p.state = to_mix(&g, &reconcile(&g, &p.state).0);
+        p.state = to_state(&g, &reconcile(&g, &p.state).0);
         assert_eq!(s.save(&p).unwrap(), 0);
         let loaded = s.load(&g);
         assert_eq!(loaded.source, Source::Current);
@@ -359,7 +373,9 @@ mod tests {
         assert!(loaded.rejected.is_empty());
         let i = loaded.persisted.state.inputs[&InputId::new("mic1")];
         assert_eq!(i.trim_db, 0.1 + 0.2);
-        assert_eq!(i.pan, -1e-300);
+        let l = loaded.persisted.state.mixes[&MixId::new("member1")].inputs[&InputId::new("mic1")];
+        assert_eq!(l.pan, -1e-300);
+        assert_eq!(l.gain_db, 12.041199826559248 - 12.0);
     }
 
     #[test]
@@ -465,9 +481,8 @@ mod tests {
         assert!(loaded.rejected.is_empty());
         assert_eq!(loaded.persisted.rev, 0);
         assert_eq!(loaded.persisted.topology_hash, g.hash);
-        for n in &g.buses {
-            let muted = loaded.persisted.state.buses[&n.id].muted;
-            assert_eq!(muted, n.kind != BusKind::Stems, "{}", n.id);
+        for n in &g.mixes {
+            assert!(loaded.persisted.state.mixes[&n.id].out.muted, "{}", n.id);
         }
     }
 
@@ -487,7 +502,7 @@ mod tests {
         let mic1 = loaded.persisted.state.inputs[&InputId::new("mic1")];
         assert_eq!(mic1.trim_db, -2.0);
         assert!(mic1.processing);
-        assert_eq!(loaded.persisted.state.sends.len(), 268);
+        assert_eq!(loaded.persisted.state.mixes.len(), 11);
     }
 
     #[test]

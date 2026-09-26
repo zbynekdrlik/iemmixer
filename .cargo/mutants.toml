@@ -84,10 +84,10 @@ exclude_re = [
   # GR meter ±0: 20·log10(0) = −∞, floored by max(−150) to the else branch's −150.
   "iem-limiter-mga/src/lib\\.rs.*replace > with >= in Limiter::gr_db",
   # Equivalent (S3). `trips > 0` only skips adding zero trips to the counters.
-  "iem-engine/src/rt\\.rs.*replace > with >= in Processor::render_buses",
+  "iem-engine/src/rt\\.rs.*replace > with >= in Processor::render_mixes",
   # Equivalent (S3). With the budget spent, `budget >= 0` also cuts the segment at the
   # waiting command; rendering in two pieces is bit-identical (block-size invariance tests).
-  "iem-engine/src/rt\\.rs:925:.*replace > with >= in <impl Process for Processor>::process",
+  "iem-engine/src/rt\\.rs:963:.*replace > with >= in <impl Process for Processor>::process",
   # The fade wait's `elapsed < FADE_WAIT`: differs only at the exact nanosecond.
   "iem-engine/src/control\\.rs.*replace < with <= in Control::shutdown_now",
   # Unobservable (S3): the `!` only decides whether "solos cleared" is logged.

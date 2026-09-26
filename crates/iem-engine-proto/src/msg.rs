@@ -1,5 +1,5 @@
-//! Commands, replies and events (program spec §2.3, I6; design note §3.3,
-//! §3.6). JSON shapes: client messages and engine messages carry a `type`
+//! Commands, replies and events (program spec §2.3, I6; S3 design note §3.3,
+//! §3.6; the model of the #20 design note §5). JSON shapes: client messages and engine messages carry a `type`
 //! tag, commands an `op` tag, state changes a `kind` tag, all snake_case.
 //!
 //! Protocol N/N−1: the engine speaks `min(ours, theirs)` while the client is at
@@ -7,8 +7,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{BusId, EqOwner, InputId, SendId, Source};
-use crate::state::{BusState, Eq, InputState, MixState, SendState, TestSignal, Transient};
+use crate::ids::{EqTarget, GroupId, InputId, MixId, Source};
+use crate::state::{Eq, InputState, Level, MixGroup, MixOut, MixState, TestSignal, Transient};
 
 /// The protocol version this build speaks.
 pub const PROTO: u16 = 1;
@@ -28,47 +28,55 @@ pub fn negotiate(ours: u16, theirs: u16) -> Option<u16> {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Cmd {
+    /// F29: trim, mute and processing of an input (its EQ: `SetEq`).
     SetInput {
         input: InputId,
         trim_db: Option<f64>,
         muted: Option<bool>,
         processing: Option<bool>,
-        fader_db: Option<f64>,
-        pan: Option<f64>,
     },
-    SetBus {
-        bus: BusId,
-        fader_db: Option<f64>,
-        pan: Option<f64>,
+    /// F7: a mix's volume and mute (its EQ: `SetEq`, its limiter: `SetLimiter`).
+    SetMix {
+        mix: MixId,
+        volume_db: Option<f64>,
         muted: Option<bool>,
     },
-    SetSend {
-        id: SendId,
+    /// F5, F16: the level of an input or a heard mix in a mix.
+    SetLevel {
+        mix: MixId,
+        source: Source,
         gain_db: Option<f64>,
         pan: Option<f64>,
         muted: Option<bool>,
     },
+    /// F7: a group's strip in a mix (its EQ: `SetEq`).
+    SetGroup {
+        mix: MixId,
+        group: GroupId,
+        gain_db: Option<f64>,
+        muted: Option<bool>,
+    },
     SetEq {
-        owner: EqOwner,
+        target: EqTarget,
         eq: Eq,
     },
     SetLimiter {
-        bus: BusId,
+        mix: MixId,
         enabled: Option<bool>,
         limit_db: Option<f64>,
     },
     ResetLimiterStats {
-        bus: BusId,
+        mix: MixId,
     },
     SetSolo {
-        scope: BusId,
+        mix: MixId,
         sources: Vec<Source>,
     },
     StartListen {
-        bus: BusId,
+        mix: MixId,
     },
     StopListen {
-        bus: BusId,
+        mix: MixId,
     },
     StartTestSignal {
         input: InputId,
@@ -94,10 +102,11 @@ pub enum Cmd {
 }
 
 /// Every `op` tag, for telling an unknown command from a malformed one.
-pub const OPS: [&str; 19] = [
+pub const OPS: [&str; 20] = [
     "set_input",
-    "set_bus",
-    "set_send",
+    "set_mix",
+    "set_level",
+    "set_group",
     "set_eq",
     "set_limiter",
     "reset_limiter_stats",
@@ -187,82 +196,95 @@ pub struct Hello {
     pub role: Role,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BusKind {
-    /// A member or engineer bus: stereo TX, EQ, limiter (A8).
-    Output,
-    /// A stems group bus: EQ, no TX (A7).
-    Stems,
-    /// The translator: one TX channel carrying the mono downmix (A10).
-    Translator,
-    /// The master: post-fader inputs and stems buses (A11).
-    Master,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Tap {
-    /// Pre-fader, post-FX (REAPER send mode 3); from inputs.
-    Pre,
-    /// Post-fader, post-mute (mode 0); from buses.
-    Post,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InputInfo {
     pub id: InputId,
     pub channels: u8,
     pub talkback: bool,
+    /// The group the input belongs to; mixes hear it through that group.
+    #[serde(default)]
+    pub group: Option<GroupId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BusInfo {
-    pub id: BusId,
-    pub kind: BusKind,
-    pub tx_channels: u8,
-    pub eq: bool,
-    pub limiter: bool,
+pub struct GroupInfo {
+    pub id: GroupId,
+    pub inputs: Vec<InputId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SendInfo {
-    pub id: SendId,
-    pub tap: Tap,
+pub struct MixInfo {
+    pub id: MixId,
+    /// TX channels: 2 (stereo) or 1 (the mono downmix, A10).
+    pub channels: u8,
+    /// The mixes this mix hears (the Mixes tab, F16), all declared before it.
+    #[serde(default)]
+    pub mixes: Vec<MixId>,
 }
 
-/// The compiled topology; meter frames list inputs, then buses, in this order.
+/// The compiled topology. Every mix has a level for every input, a strip for
+/// every group and a level for each mix it hears. Meter frames list inputs,
+/// then mixes, then every mix's group strips (mix-major), in this order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TopologyInfo {
     pub hash: String,
     pub sample_rate: u32,
-    pub engineer: BusId,
+    /// The mix with the fixed listen tap (X3 slot 0).
+    pub engineer: MixId,
     pub inputs: Vec<InputInfo>,
-    pub buses: Vec<BusInfo>,
-    pub sends: Vec<SendInfo>,
+    #[serde(default)]
+    pub groups: Vec<GroupInfo>,
+    pub mixes: Vec<MixInfo>,
 }
 
 /// One changed entity, carried whole.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Change {
-    Input { id: InputId, state: InputState },
-    Bus { id: BusId, state: BusState },
-    Send { id: SendId, state: SendState },
-    Solo { scope: BusId, sources: Vec<Source> },
-    Listen { listen: [Option<BusId>; 2] },
-    TestSignal { signal: Option<TestSignal> },
-    LimiterStatsReset { bus: BusId },
+    Input {
+        id: InputId,
+        state: InputState,
+    },
+    MixOut {
+        mix: MixId,
+        out: MixOut,
+    },
+    Level {
+        mix: MixId,
+        source: Source,
+        level: Level,
+    },
+    Group {
+        mix: MixId,
+        group: GroupId,
+        state: MixGroup,
+    },
+    Solo {
+        mix: MixId,
+        sources: Vec<Source>,
+    },
+    Listen {
+        listen: [Option<MixId>; 2],
+    },
+    TestSignal {
+        signal: Option<TestSignal>,
+    },
+    LimiterStatsReset {
+        mix: MixId,
+    },
 }
 
-/// Peaks since the previous frame (linear), limiter GR (dB, 0 without a
-/// limiter) and X14 active seconds per bus, in topology order.
+/// Peaks since the previous frame (linear): inputs (post-mute), mixes (post
+/// volume and mute) and group strips (mix-major: mix `m`, group `g` at
+/// `m · groups + g`); limiter GR (dB, 0 while disabled) and X14 active
+/// seconds per mix; all in topology order.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Meters {
     pub seq: u64,
     pub inputs: Vec<[f32; 2]>,
-    pub buses: Vec<[f32; 2]>,
+    pub mixes: Vec<[f32; 2]>,
+    pub groups: Vec<[f32; 2]>,
     pub gr_db: Vec<f32>,
     pub limiter_active_s: Vec<f64>,
     pub trips: u64,
@@ -286,7 +308,7 @@ pub struct Status {
 pub enum AlarmCode {
     /// The state came from a generation or the baseline, not `current.json`.
     StateFallback,
-    /// No state loaded: defaults with every TX bus muted.
+    /// No state loaded: defaults with every mix muted.
     StateLost,
     /// A node's sanitiser tripped (X1).
     Sanitizer,
@@ -391,58 +413,58 @@ mod tests {
     use super::*;
     use crate::state::EqBand;
 
-    fn bus(s: &str) -> BusId {
-        BusId::new(s)
+    fn mix(s: &str) -> MixId {
+        MixId::new(s)
     }
 
     fn every_cmd() -> Vec<Cmd> {
         let input = InputId::new("mic1");
-        let send = SendId {
-            src: Source::Input(input.clone()),
-            dst: bus("member1"),
-        };
         vec![
             Cmd::SetInput {
                 input: input.clone(),
                 trim_db: Some(1.0),
                 muted: None,
                 processing: Some(false),
-                fader_db: None,
-                pan: None,
             },
-            Cmd::SetBus {
-                bus: bus("member1"),
-                fader_db: Some(-3.0),
-                pan: None,
+            Cmd::SetMix {
+                mix: mix("member1"),
+                volume_db: Some(-3.0),
                 muted: None,
             },
-            Cmd::SetSend {
-                id: send,
+            Cmd::SetLevel {
+                mix: mix("member1"),
+                source: Source::Input(input.clone()),
                 gain_db: None,
                 pan: Some(0.5),
                 muted: Some(true),
             },
+            Cmd::SetGroup {
+                mix: mix("member1"),
+                group: GroupId::new("stems"),
+                gain_db: Some(-6.0),
+                muted: None,
+            },
             Cmd::SetEq {
-                owner: EqOwner::Input(input.clone()),
+                target: EqTarget::Input(input.clone()),
                 eq: Eq::default(),
             },
             Cmd::SetLimiter {
-                bus: bus("member1"),
+                mix: mix("member1"),
                 enabled: Some(true),
                 limit_db: Some(-3.0),
             },
             Cmd::ResetLimiterStats {
-                bus: bus("member1"),
+                mix: mix("member1"),
             },
             Cmd::SetSolo {
-                scope: bus("member1"),
+                mix: mix("member1"),
                 sources: vec![Source::Input(input.clone())],
             },
             Cmd::StartListen {
-                bus: bus("member1"),
+                mix: mix("member1"),
             },
             Cmd::StopListen {
-                bus: bus("member1"),
+                mix: mix("member1"),
             },
             Cmd::StartTestSignal {
                 input,
@@ -480,15 +502,16 @@ mod tests {
 
     #[test]
     fn json_shapes_are_stable() {
-        let cmd = Cmd::SetBus {
-            bus: bus("member1"),
-            fader_db: Some(-3.0),
+        let cmd = Cmd::SetLevel {
+            mix: mix("member1"),
+            source: Source::Mix(mix("member2")),
+            gain_db: Some(-3.0),
             pan: None,
             muted: None,
         };
         assert_eq!(
             serde_json::to_string(&cmd).unwrap(),
-            r#"{"op":"set_bus","bus":"member1","fader_db":-3.0,"pan":null,"muted":null}"#
+            r#"{"op":"set_level","mix":"member1","source":{"mix":"member2"},"gain_db":-3.0,"pan":null,"muted":null}"#
         );
         let req = ClientMsg::Request {
             id: 7,
@@ -512,28 +535,43 @@ mod tests {
             rev: 3,
             origin: Some(9),
             changes: vec![Change::LimiterStatsReset {
-                bus: bus("engineer"),
+                mix: mix("engineer"),
             }],
         };
         assert_eq!(
             serde_json::to_string(&delta).unwrap(),
-            r#"{"type":"delta","rev":3,"origin":9,"changes":[{"kind":"limiter_stats_reset","bus":"engineer"}]}"#
+            r#"{"type":"delta","rev":3,"origin":9,"changes":[{"kind":"limiter_stats_reset","mix":"engineer"}]}"#
+        );
+        let level = Change::Level {
+            mix: mix("member1"),
+            source: Source::Input(InputId::new("mic1")),
+            level: Level::default(),
+        };
+        assert_eq!(
+            serde_json::to_string(&level).unwrap(),
+            r#"{"kind":"level","mix":"member1","source":{"input":"mic1"},"level":{"gain_db":-150.0,"pan":0.0,"muted":false}}"#
         );
         assert_eq!(
             serde_json::to_string(&EngineMsg::Superseded).unwrap(),
             r#"{"type":"superseded"}"#
         );
         // Missing optional fields are None.
-        let parsed: Cmd = serde_json::from_str(r#"{"op":"set_bus","bus":"member1"}"#).unwrap();
+        let parsed: Cmd = serde_json::from_str(r#"{"op":"set_mix","mix":"member1"}"#).unwrap();
         assert_eq!(
             parsed,
-            Cmd::SetBus {
-                bus: bus("member1"),
-                fader_db: None,
-                pan: None,
+            Cmd::SetMix {
+                mix: mix("member1"),
+                volume_db: None,
                 muted: None
             }
         );
+        // An older topology without groups or heard mixes still reads.
+        let info: TopologyInfo = serde_json::from_str(
+            r#"{"hash":"h","sample_rate":96000,"engineer":"e","inputs":[{"id":"mic","channels":1,"talkback":false}],"mixes":[{"id":"e","channels":2}]}"#,
+        )
+        .unwrap();
+        assert!(info.groups.is_empty() && info.mixes[0].mixes.is_empty());
+        assert_eq!(info.inputs[0].group, None);
     }
 
     #[test]
@@ -556,6 +594,26 @@ mod tests {
                     msg: "x".into(),
                 }),
             }),
+            EngineMsg::Topology(TopologyInfo {
+                hash: "h".into(),
+                sample_rate: 96_000,
+                engineer: mix("engineer"),
+                inputs: vec![InputInfo {
+                    id: InputId::new("drums"),
+                    channels: 2,
+                    talkback: false,
+                    group: Some(GroupId::new("stems")),
+                }],
+                groups: vec![GroupInfo {
+                    id: GroupId::new("stems"),
+                    inputs: vec![InputId::new("drums")],
+                }],
+                mixes: vec![MixInfo {
+                    id: mix("engineer"),
+                    channels: 2,
+                    mixes: vec![mix("member1")],
+                }],
+            }),
             EngineMsg::State {
                 rev: 1,
                 state: MixState::default(),
@@ -565,18 +623,28 @@ mod tests {
                 rev: 2,
                 origin: None,
                 changes: vec![
-                    Change::Bus {
-                        id: bus("member1"),
-                        state: BusState::default(),
+                    Change::MixOut {
+                        mix: mix("member1"),
+                        out: MixOut::default(),
+                    },
+                    Change::Group {
+                        mix: mix("member1"),
+                        group: GroupId::new("stems"),
+                        state: MixGroup::default(),
+                    },
+                    Change::Solo {
+                        mix: mix("member1"),
+                        sources: vec![Source::Mix(mix("member2"))],
                     },
                     Change::Listen {
-                        listen: [Some(bus("engineer")), None],
+                        listen: [Some(mix("engineer")), None],
                     },
                 ],
             },
             EngineMsg::Meters(Meters {
                 seq: 1,
                 inputs: vec![[0.5, 0.25]],
+                groups: vec![[0.125, 0.0]],
                 ..Meters::default()
             }),
             EngineMsg::Status(Status::default()),
@@ -616,7 +684,7 @@ mod tests {
     #[test]
     fn a_malformed_known_op_is_a_bad_request_with_its_id() {
         let (id, e) =
-            parse_client(br#"{"type":"request","id":4,"cmd":{"op":"set_bus"}}"#).unwrap_err();
+            parse_client(br#"{"type":"request","id":4,"cmd":{"op":"set_mix"}}"#).unwrap_err();
         assert_eq!(id, Some(4));
         assert_eq!(e.code, ErrCode::BadRequest);
     }

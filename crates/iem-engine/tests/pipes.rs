@@ -16,8 +16,8 @@ use iem_engine::engine::{EngineError, RunConfig, run};
 use iem_engine::pipe::{control_name, media_name};
 use iem_engine_proto::media::stream;
 use iem_engine_proto::{
-    AlarmCode, BusId, Change, ClientMsg, Cmd, EngineMsg, ErrCode, FRAME_48K, FrameError, Hello,
-    InputId, MAX_FRAME, MediaHeader, PROTO, Reply, Role, Source, TopologyInfo, read_frame,
+    AlarmCode, Change, ClientMsg, Cmd, EngineMsg, ErrCode, FRAME_48K, FrameError, Hello, InputId,
+    MAX_FRAME, MediaHeader, MixId, PROTO, Reply, Role, Source, TopologyInfo, read_frame,
     read_media, write_frame, write_media,
 };
 use interprocess::local_socket::Stream;
@@ -189,11 +189,10 @@ impl Engine {
     }
 }
 
-fn set_bus(bus: &str, fader_db: f64) -> Cmd {
-    Cmd::SetBus {
-        bus: BusId::new(bus),
-        fader_db: Some(fader_db),
-        pan: None,
+fn set_mix(mix: &str, volume_db: f64) -> Cmd {
+    Cmd::SetMix {
+        mix: MixId::new(mix),
+        volume_db: Some(volume_db),
         muted: None,
     }
 }
@@ -211,13 +210,13 @@ fn hello_topology_state_then_reply_and_delta() {
     assert_eq!(rev, 0);
     assert_eq!(topo.hash, h.topology_hash);
     assert_eq!(
-        (topo.inputs.len(), topo.buses.len(), topo.sends.len()),
-        (24, 22, 268)
+        (topo.inputs.len(), topo.groups.len(), topo.mixes.len()),
+        (24, 1, 11)
     );
     assert!(h.engine_build.starts_with(env!("CARGO_PKG_VERSION")));
     let mut obs = e.client();
     obs.hello(Role::Observe);
-    let reply = ctl.request(7, set_bus("member1", -3.0));
+    let reply = ctl.request(7, set_mix("member1", -3.0));
     assert_eq!((reply.rev, reply.error), (1, None));
     for c in [&mut ctl, &mut obs] {
         let (rev, origin, changes) = c.wait(|m| match m {
@@ -230,7 +229,7 @@ fn hello_topology_state_then_reply_and_delta() {
         });
         assert_eq!((rev, origin), (1, Some(1007)));
         assert!(
-            matches!(&changes[..], [Change::Bus { id, state }] if id.0 == "member1" && state.fader_db == -3.0)
+            matches!(&changes[..], [Change::MixOut { mix, out }] if mix.0 == "member1" && out.volume_db == -3.0)
         );
     }
     // GetState answers with the state; GetTopology with the topology.
@@ -241,7 +240,7 @@ fn hello_topology_state_then_reply_and_delta() {
         _ => None,
     });
     assert_eq!(state.0, 1);
-    assert_eq!(state.1.buses[&BusId::new("member1")].fader_db, -3.0);
+    assert_eq!(state.1.mixes[&MixId::new("member1")].out.volume_db, -3.0);
     obs.request(9, Cmd::GetTopology);
     obs.wait(|m| matches!(m, EngineMsg::Topology(_)).then_some(()));
     e.shutdown();
@@ -255,7 +254,7 @@ fn observers_cannot_write_and_strangers_must_say_hello() {
     assert_eq!(r.error.unwrap().code, ErrCode::BadRequest);
     let mut obs = e.client();
     obs.hello(Role::Observe);
-    let r = obs.request(2, set_bus("member2", -1.0));
+    let r = obs.request(2, set_mix("member2", -1.0));
     assert_eq!(r.error.unwrap().code, ErrCode::NotController);
     assert!(obs.request(3, Cmd::Ping).error.is_none());
     // A client far older than the engine is refused and closed.
@@ -293,7 +292,7 @@ fn a_new_controller_supersedes_the_old() {
     second.hello(Role::Control);
     first.wait(|m| matches!(m, EngineMsg::Superseded).then_some(()));
     assert!(first.closed());
-    assert!(second.request(1, set_bus("member3", -2.0)).error.is_none());
+    assert!(second.request(1, set_mix("member3", -2.0)).error.is_none());
     e.shutdown();
 }
 
@@ -349,21 +348,17 @@ fn meters_and_status_flow() {
         trim_db: Some(24.0),
         muted: None,
         processing: None,
-        fader_db: None,
-        pan: None,
     };
     assert!(c.request(1, hot).error.is_none());
-    let send = Cmd::SetSend {
-        id: iem_engine_proto::SendId {
-            src: Source::Input(InputId::new("mic1")),
-            dst: BusId::new("member1"),
-        },
+    let level = Cmd::SetLevel {
+        mix: MixId::new("member1"),
+        source: Source::Input(InputId::new("mic1")),
         gain_db: Some(12.0),
         pan: None,
         muted: None,
     };
-    assert!(c.request(2, send).error.is_none());
-    let m1 = topo.buses.iter().position(|b| b.id.0 == "member1").unwrap();
+    assert!(c.request(2, level).error.is_none());
+    let m1 = topo.mixes.iter().position(|m| m.id.0 == "member1").unwrap();
     let start = Instant::now();
     let mut meters = 0;
     let mut loud = false;
@@ -374,8 +369,11 @@ fn meters_and_status_flow() {
         match c.recv() {
             EngineMsg::Meters(m) => {
                 meters += 1;
-                assert_eq!((m.inputs.len(), m.buses.len(), m.gr_db.len()), (24, 22, 22));
-                assert_eq!(m.limiter_active_s.len(), 22);
+                assert_eq!(
+                    (m.inputs.len(), m.mixes.len(), m.groups.len(), m.gr_db.len()),
+                    (24, 11, 11, 11)
+                );
+                assert_eq!(m.limiter_active_s.len(), 11);
                 loud |= m.inputs.iter().skip(1).all(|p| p[0] > 0.05);
                 active = m.limiter_active_s[m1];
                 gr = gr.min(m.gr_db[m1]);
@@ -518,7 +516,7 @@ fn listen_frames_arrive_on_the_media_pipe() {
         c.request(
             1,
             Cmd::StartListen {
-                bus: BusId::new("engineer")
+                mix: MixId::new("engineer")
             }
         )
         .error
@@ -528,7 +526,7 @@ fn listen_frames_arrive_on_the_media_pipe() {
         c.request(
             2,
             Cmd::StartListen {
-                bus: BusId::new("member4")
+                mix: MixId::new("member4")
             }
         )
         .error
@@ -537,7 +535,7 @@ fn listen_frames_arrive_on_the_media_pipe() {
     let r = c.request(
         3,
         Cmd::StartListen {
-            bus: BusId::new("member5"),
+            mix: MixId::new("member5"),
         },
     );
     assert_eq!(r.error.unwrap().code, ErrCode::NoSource);
@@ -606,7 +604,7 @@ fn talkback_frames_reach_the_talkback_input() {
 fn solos_survive_a_quick_reconnect_and_clear_after_the_grace() {
     let e = Engine::start(Flags::default(), InputSignal::Silence);
     let solo = Cmd::SetSolo {
-        scope: BusId::new("member3"),
+        mix: MixId::new("member3"),
         sources: vec![Source::Input(InputId::new("mic2"))],
     };
     let transient = |c: &mut Client| {
@@ -640,7 +638,7 @@ fn solos_survive_a_quick_reconnect_and_clear_after_the_grace() {
 }
 
 fn h_hash(_e: &Engine) -> String {
-    iem_engine::graph::compile(&iem_engine::site::load(&common::site_path()).unwrap())
+    iem_engine::topology::compile(&iem_engine::site::load(&common::site_path()).unwrap())
         .unwrap()
         .hash
 }
@@ -658,7 +656,7 @@ fn shutdown_saves_fades_and_releases() {
         AlarmCode::StateLost,
         "a fresh state directory has no state"
     );
-    assert!(c.request(1, set_bus("member6", -4.0)).error.is_none());
+    assert!(c.request(1, set_mix("member6", -4.0)).error.is_none());
     let mut e = e;
     let r = c.request(2, Cmd::Shutdown);
     assert!(r.error.is_none());
@@ -699,7 +697,7 @@ fn fault_injection_releases_the_driver_and_exits() {
     );
     let mut c = e.client();
     c.hello(Role::Control);
-    assert!(c.request(1, set_bus("member7", -5.0)).error.is_none());
+    assert!(c.request(1, set_mix("member7", -5.0)).error.is_none());
     assert!(c.request(2, Cmd::InjectFault).error.is_none());
     let code = c.wait(|m| match m {
         EngineMsg::Alarm(a) if a.code == AlarmCode::Fault => Some(a.detail.clone()),
@@ -783,7 +781,7 @@ fn the_binary_renders_offline() {
         String::from_utf8_lossy(&ok.stderr)
     );
     let (rate, out) = wav::read_file(&output).unwrap();
-    assert_eq!((rate, out.channels(), out.frames()), (96_000, 23, 960));
+    assert_eq!((rate, out.channels(), out.frames()), (96_000, 21, 960));
     wav::write_file(&input, 48_000, &audio).unwrap();
     let refused = run(&[]);
     assert_eq!(refused.status.code(), Some(2));

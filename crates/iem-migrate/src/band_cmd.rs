@@ -1,13 +1,16 @@
-//! `iem-migrate band` (design note §3.4): the predecessor's data directory →
-//! the server's band directory. Everything is checked first; nothing is
-//! written unless every category maps (and never with `--dry-run`).
+//! `iem-migrate band` (S4 design note §3.4, #20 design note §7): the
+//! predecessor's data directory → the server's band directory. Everything is
+//! checked first; nothing is written unless every category maps (and never
+//! with `--dry-run`). The output is transactional: it is written into a
+//! staging copy of the band directory and swapped in whole ([`crate::stage`]).
 
 use std::collections::{BTreeMap, HashMap};
+use std::io;
 use std::path::{Path, PathBuf};
 
 use iem_core::band::{CustomizationFile, Preset, PresetFile, Snapshot, SnapshotFile};
 use iem_core::{Customization, MixSnapshot, PresetEntry};
-use iem_engine_proto::{BusId, BusKind};
+use iem_engine_proto::MixId;
 use iem_rpp::aliases::{Aliases, Eras, MemberAlias, parse_aliases, parse_eras};
 use iem_rpp::band::{Ctx, Stats, rekey_customization, rekey_presets, rekey_snapshots};
 use iem_rpp::topology::Topology;
@@ -22,6 +25,7 @@ use iem_server::secrets::{JWT_SECRET_FILE, SECRETS_DIR, VAPID_PRIVATE_FILE};
 use serde::de::DeserializeOwned;
 
 use crate::args::parse;
+use crate::stage::{MARKER, Stage, Step, no_faults, recover, siblings};
 use crate::{Failure, read_text, site};
 
 /// The predecessor's server config file in its data directory.
@@ -37,8 +41,9 @@ struct Plan<'a> {
     topology: &'a Topology,
     report: Vec<String>,
     problems: Vec<String>,
-    /// JSON files to write (path, text).
+    /// JSON files to write (path inside the band directory, text).
     files: Vec<(PathBuf, String)>,
+    /// Photos to copy (source, path inside the band directory).
     photos: Vec<(PathBuf, PathBuf)>,
     pins: Vec<PinRequest>,
     config: Option<LegacyConfig>,
@@ -80,18 +85,11 @@ impl<'a> Plan<'a> {
         let mut ids: BTreeMap<&str, &str> = BTreeMap::new();
         let aliases: &'a Aliases = self.aliases;
         let topology: &'a Topology = self.topology;
-        let kind = |id: &str| topology.bus(&BusId::new(id)).map(|b| b.kind);
         for (legacy, m) in &aliases.members {
-            if kind(m.bus.as_str()) != Some(BusKind::Output) {
+            if topology.mix(&MixId::new(m.mix.clone())).is_none() {
                 self.problems.push(format!(
-                    "member {legacy}: {} is not an output bus of the site",
-                    m.bus
-                ));
-            }
-            if kind(m.stems.as_str()) != Some(BusKind::Stems) {
-                self.problems.push(format!(
-                    "member {legacy}: {} is not a stems bus of the site",
-                    m.stems
+                    "member {legacy}: {} is not a mix of the site",
+                    m.mix
                 ));
             }
             if !m.archived
@@ -149,8 +147,8 @@ impl<'a> Plan<'a> {
 
     fn stats(&mut self, what: &str, id: &str, n: usize, st: Stats) {
         self.report.push(format!(
-            "{what} {id}: {n} (sends {}, input EQs kept {}, other buses' EQs dropped {}, between eras {})",
-            st.sends, st.input_eqs, st.dropped_bus_eqs, st.between_eras
+            "{what} {id}: {n} (sends {}, input EQs kept {}, other mixes' EQs dropped {}, between eras {})",
+            st.sends, st.input_eqs, st.dropped_mix_eqs, st.between_eras
         ));
     }
 
@@ -181,7 +179,7 @@ impl<'a> Plan<'a> {
         }
         for (id, (list, st)) in by_member {
             self.stats("presets", &id, list.len(), st);
-            let path = self.out.join("presets").join(format!("{id}.json"));
+            let path = Path::new("presets").join(format!("{id}.json"));
             self.json_out(path, &PresetFile::new(id, list));
         }
     }
@@ -213,7 +211,7 @@ impl<'a> Plan<'a> {
         }
         for (id, (list, st)) in by_member {
             self.stats("snapshots", &id, list.len(), st);
-            let path = self.out.join("snapshots").join(format!("{id}.json"));
+            let path = Path::new("snapshots").join(format!("{id}.json"));
             self.json_out(path, &SnapshotFile::new(id, list));
         }
     }
@@ -244,10 +242,7 @@ impl<'a> Plan<'a> {
                         pinned.len(),
                         hidden.len()
                     ));
-                    let path = self
-                        .out
-                        .join("customizations")
-                        .join(format!("{}.json", m.id));
+                    let path = Path::new("customizations").join(format!("{}.json", m.id));
                     self.json_out(path, &CustomizationFile::new(m.id.clone(), pinned, hidden));
                 }
                 Err(p) => self
@@ -271,11 +266,11 @@ impl<'a> Plan<'a> {
                     .push(format!("photo {legacy}: ignored (renamed member)"));
                 continue;
             }
-            let dst = self.out.join("photos").join(format!("{}.jpg", m.id));
-            match import_photo(&path, &dst, true) {
+            let rel = Path::new("photos").join(format!("{}.jpg", m.id));
+            match import_photo(&path, &self.out.join(&rel), true) {
                 Ok(()) => {
                     self.report.push(format!("photo {}", m.id));
-                    self.photos.push((path, dst));
+                    self.photos.push((path, rel));
                 }
                 Err(e) => self.problems.push(e.to_string()),
             }
@@ -453,9 +448,7 @@ impl<'a> Plan<'a> {
             if let Some(obj) = v.as_object_mut() {
                 obj.remove("pins");
             }
-            let dst = self
-                .out
-                .join("legacy")
+            let dst = Path::new("legacy")
                 .join("backups")
                 .join(format!("{name}.json"));
             self.json_out(dst, &v);
@@ -465,27 +458,37 @@ impl<'a> Plan<'a> {
         ));
     }
 
-    fn write(&mut self) -> Result<(), Failure> {
-        let io = |p: &Path, e: std::io::Error| Failure::io(format!("{}: {e}", p.display()));
-        for (path, text) in &self.files {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| io(parent, e))?;
-            }
-            let tmp = path.with_extension("tmp");
-            std::fs::write(&tmp, text).map_err(|e| io(&tmp, e))?;
-            std::fs::rename(tmp, path).map_err(|e| io(path, e))?;
+    /// Writes every output into the staging directory; returns the PIN
+    /// outcomes. Each item is a fault-injection point.
+    fn write(
+        &mut self,
+        stage: &mut Stage,
+        fail: &dyn Fn(Step) -> io::Result<()>,
+    ) -> Result<Vec<(String, PinOutcome)>, Failure> {
+        let dir = stage.dir().to_path_buf();
+        let io = |p: &Path, e: io::Error| Failure::io(format!("{}: {e}", p.display()));
+        for (rel, text) in &self.files {
+            stage.step(fail).map_err(|e| io(rel, e))?;
+            stage
+                .write(rel, text.as_bytes())
+                .map_err(|e| io(&self.out.join(rel), e))?;
         }
-        for (src, dst) in &self.photos {
-            import_photo(src, dst, false).map_err(|e| io(src, e))?;
+        for (src, rel) in &self.photos {
+            stage.step(fail).map_err(|e| io(rel, e))?;
+            import_photo(src, &dir.join(rel), false).map_err(|e| io(src, e))?;
         }
+        let secrets = dir.join(SECRETS_DIR);
+        stage.step(fail).map_err(|e| io(&secrets, e))?;
+        let outcomes = import_pins(&secrets, &self.pins, false)
+            .map_err(|e| Failure::io(format!("{}: {e}", self.out.join(SECRETS_DIR).display())))?;
         if let Some(c) = &self.config {
-            let dir = self.out.join(SECRETS_DIR);
             for (value, file) in [
                 (&c.jwt_secret, JWT_SECRET_FILE),
                 (&c.vapid_private_key, VAPID_PRIVATE_FILE),
             ] {
                 if let Some(v) = value {
-                    let path = dir.join(file);
+                    let path = secrets.join(file);
+                    stage.step(fail).map_err(|e| io(&path, e))?;
                     let outcome = import_secret(&path, v, false).map_err(|e| io(&path, e))?;
                     self.report.push(format!(
                         "{file}: {}",
@@ -499,16 +502,18 @@ impl<'a> Plan<'a> {
             }
             let (cert, key) = (self.legacy.join(&c.tls_cert), self.legacy.join(&c.tls_key));
             if cert.exists() && key.exists() {
-                import_tls(&cert, &key, self.out, false).map_err(|e| io(&cert, e))?;
+                stage.step(fail).map_err(|e| io(&cert, e))?;
+                import_tls(&cert, &key, &dir, false).map_err(|e| io(&cert, e))?;
                 self.report.push("LAN certificate imported".into());
             }
+            stage.step(fail).map_err(|e| io(self.legacy, e))?;
             let (added, total) =
-                import_push(self.legacy, self.out, false).map_err(|e| io(self.legacy, e))?;
+                import_push(self.legacy, &dir, false).map_err(|e| io(self.legacy, e))?;
             self.report.push(format!(
                 "push subscriptions: {added} added, {total} in total"
             ));
         }
-        Ok(())
+        Ok(outcomes)
     }
 
     fn pin_report(&mut self, outcomes: &[(String, PinOutcome)]) {
@@ -524,6 +529,11 @@ impl<'a> Plan<'a> {
 }
 
 pub fn run(args: &[String]) -> Result<String, Failure> {
+    run_with(args, &no_faults)
+}
+
+/// [`run`] with a fault-injection hook at every write step (tests).
+pub fn run_with(args: &[String], fail: &dyn Fn(Step) -> io::Result<()>) -> Result<String, Failure> {
     let a = parse(
         args,
         &[
@@ -582,25 +592,47 @@ pub fn run(args: &[String]) -> Result<String, Failure> {
             plan.problems.join("\n  - ")
         )));
     }
-    let secrets = out.join(SECRETS_DIR);
-    let outcomes = import_pins(&secrets, &plan.pins, dry)
-        .map_err(|e| Failure::io(format!("{}: {e}", secrets.display())))?;
+    let io = |e: io::Error| Failure::io(format!("{}: {e}", out.display()));
     if dry {
+        let (staging, old) = siblings(&out).map_err(io)?;
+        for p in [staging, old] {
+            if p.exists() {
+                plan.report.push(format!(
+                    "note: an interrupted run left {} (complete: {}); a real run recovers it first",
+                    p.display(),
+                    p.join(MARKER).exists()
+                ));
+            }
+        }
+        let secrets = out.join(SECRETS_DIR);
+        let outcomes = import_pins(&secrets, &plan.pins, true)
+            .map_err(|e| Failure::io(format!("{}: {e}", secrets.display())))?;
         plan.pin_report(&outcomes);
         plan.report.push(format!(
             "dry run: nothing written ({} file(s) and {} photo(s) would be)",
             plan.files.len(),
             plan.photos.len()
         ));
-    } else {
-        plan.write()?;
-        plan.pin_report(&outcomes);
-        plan.report.push(format!(
-            "written to {}: {} file(s), {} photo(s)",
-            out.display(),
-            plan.files.len(),
-            plan.photos.len()
-        ));
+        return Ok(plan.report.join("\n"));
     }
+    let recovered = recover(&out).map_err(io)?;
+    plan.report.extend(recovered);
+    let mut stage = Stage::begin(&out, fail).map_err(io)?;
+    let outcomes = match plan.write(&mut stage, fail) {
+        Ok(o) => o,
+        Err(e) => {
+            stage.abort();
+            return Err(e);
+        }
+    };
+    let notes = stage.commit(fail).map_err(io)?;
+    plan.pin_report(&outcomes);
+    plan.report.push(format!(
+        "written to {}: {} file(s), {} photo(s)",
+        out.display(),
+        plan.files.len(),
+        plan.photos.len()
+    ));
+    plan.report.extend(notes);
     Ok(plan.report.join("\n"))
 }

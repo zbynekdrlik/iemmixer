@@ -146,7 +146,8 @@ fn meters_msg(f: &MeterFrame) -> Meters {
     Meters {
         seq: f.seq,
         inputs: f.inputs.iter().map(pair).collect(),
-        buses: f.buses.iter().map(pair).collect(),
+        mixes: f.mixes.iter().map(pair).collect(),
+        groups: f.groups.iter().map(pair).collect(),
         gr_db: f.gr_db.iter().map(|g| *g as f32).collect(),
         limiter_active_s: f
             .active
@@ -321,18 +322,18 @@ impl Control {
             "connection {id}: hello from {:?} as {role:?}, protocol {proto}",
             client.chars().take(64).collect::<String>()
         );
-        let graph = Arc::clone(self.core.graph());
+        let topo = Arc::clone(self.core.topology());
         let hello = EngineMsg::Hello(Hello {
             proto,
             engine_build: engine_build(),
-            topology_hash: graph.hash.clone(),
+            topology_hash: topo.hash.clone(),
             state_rev: self.core.rev(),
             sample_rate: SAMPLE_RATE,
             block: self.settings.block,
             role,
         });
         self.send(id, &hello);
-        self.send(id, &EngineMsg::Topology(graph.info()));
+        self.send(id, &EngineMsg::Topology(topo.info()));
         let state = self.state_msg();
         self.send(id, &state);
         for alarm in self.alarms.clone() {
@@ -403,7 +404,7 @@ impl Control {
                 self.send(id, &state);
             }
             Effect::SendTopology => {
-                let info = self.core.graph().info();
+                let info = self.core.topology().info();
                 self.send(id, &EngineMsg::Topology(info));
             }
             Effect::Save => self.save(),
@@ -445,14 +446,14 @@ impl Control {
     }
 
     fn persisted(&self) -> Persisted {
-        let graph = self.core.graph();
+        let topo = self.core.topology();
         Persisted {
             rev: self.core.rev(),
-            topology_hash: graph.hash.clone(),
+            topology_hash: topo.hash.clone(),
             saved_unix_ms: unix_ms(),
             state: self.core.state(),
-            counters: graph
-                .buses
+            counters: topo
+                .mixes
                 .iter()
                 .zip(&self.counters)
                 .map(|(b, c)| (b.id.clone(), *c))
@@ -617,7 +618,8 @@ mod tests {
         let f = MeterFrame {
             seq: 3,
             inputs: vec![[0.5, 0.25]],
-            buses: vec![[1.0, 0.0], [0.125, 2.0]],
+            mixes: vec![[1.0, 0.0], [0.125, 2.0]],
+            groups: vec![[0.5, 0.0], [0.0, 0.75]],
             gr_db: vec![-3.0, 0.0],
             active: vec![96_000, 48_000],
             trips: 2,
@@ -625,7 +627,8 @@ mod tests {
         let m = meters_msg(&f);
         assert_eq!(m.seq, 3);
         assert_eq!(m.inputs, vec![[0.5f32, 0.25]]);
-        assert_eq!(m.buses, vec![[1.0f32, 0.0], [0.125, 2.0]]);
+        assert_eq!(m.mixes, vec![[1.0f32, 0.0], [0.125, 2.0]]);
+        assert_eq!(m.groups, vec![[0.5f32, 0.0], [0.0, 0.75]]);
         assert_eq!(m.gr_db, vec![-3.0f32, 0.0]);
         assert_eq!(m.limiter_active_s, vec![1.0, 0.5]);
         assert_eq!(m.trips, 2);
@@ -662,13 +665,13 @@ mod tests {
     /// A control loop on the test site with the processor's ends in hand.
     fn rig() -> Rig {
         let dir = tempfile::tempdir().unwrap();
-        let graph = Arc::new(crate::test_support::test_site());
+        let topo = Arc::new(crate::test_support::test_site());
         let flags = crate::core::Flags {
             test_signal: true,
             fault_injection: false,
         };
         let core = Core::new(
-            Arc::clone(&graph),
+            Arc::clone(&topo),
             &iem_engine_proto::MixState::default(),
             0,
             flags,
@@ -684,7 +687,7 @@ mod tests {
             status: Arc::clone(&status),
             talkback_dropped: Arc::new(AtomicU64::new(0)),
             driver: Box::new(Idle),
-            counters: vec![0; graph.buses.len()],
+            counters: vec![0; topo.mixes.len()],
             alarms: Vec::new(),
             settings: Settings {
                 solo_grace: Duration::from_secs(10),
@@ -906,7 +909,7 @@ mod tests {
             r.c.handle(request(3, import(true)));
             let saved = crate::persist::decode(&std::fs::read(&baseline).unwrap()).unwrap();
             assert_eq!((saved.rev, r.c.core.rev()), (2, 2));
-            assert_eq!(saved.topology_hash, r.c.core.graph().hash);
+            assert_eq!(saved.topology_hash, r.c.core.topology().hash);
         }
     }
 }

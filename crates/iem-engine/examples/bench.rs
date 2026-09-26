@@ -1,10 +1,11 @@
 //! CPU benchmark of `process()` at B = 32, 96 kHz (period 333.3 µs; program
 //! spec I2, §3.5; design note §3.8). Two cases on `config/test-site.toml`:
 //!
-//! - `typical`: every send open, sine inputs, EQs flat, the site at rest;
-//! - `worst`: all 220 EQ bands enabled and moving, every send ramping, the
-//!   limiters in gain reduction, both listen taps, talkback, a test signal and
-//!   a 512-command group every block.
+//! - `typical`: every level open, sine inputs, EQs flat, the site at rest;
+//! - `worst`: all 230 EQ bands (inputs, mixes, group strips) enabled and
+//!   moving, every level and strip ramping, the limiters in gain reduction,
+//!   both listen taps, talkback, a test signal and a 512-command group every
+//!   block.
 //!
 //! Prints p50/p99/p99.9/max per case. Exits 1 when the typical median
 //! exceeds 25 % of the period or the worst-case median exceeds the period;
@@ -20,33 +21,48 @@ use std::time::Instant;
 use iem_audio_io::{Block, Process};
 use iem_dsp::eq::{BandKind, EqParams};
 use iem_engine::cmd::{RtOp, push_group};
-use iem_engine::graph::{Graph, compile};
 use iem_engine::params::InputParams;
 use iem_engine::rt::{Options, Processor};
 use iem_engine::site::load;
+use iem_engine::topology::{Topology, compile};
 use iem_engine::{MAX_CMDS_PER_BLOCK, SAMPLE_RATE};
-use iem_engine_proto::{MixState, SendEntry, SendState};
+use iem_engine_proto::{Level, Mix, MixGroup, MixId, MixState};
 
 const B: usize = 32;
 const WARMUP: usize = 3_000;
 const CALLS: usize = 30_000;
 
-fn graph() -> Arc<Graph> {
+fn topology() -> Arc<Topology> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config/test-site.toml");
-    Arc::new(compile(&load(&path).expect("site")).expect("graph"))
+    Arc::new(compile(&load(&path).expect("site")).expect("topology"))
 }
 
-fn open(graph: &Graph) -> MixState {
+/// Every level at −12 dB.
+fn open(topo: &Topology) -> MixState {
+    let level = Level {
+        gain_db: -12.0,
+        ..Level::default()
+    };
     MixState {
-        sends: graph
-            .sends
+        mixes: topo
+            .mixes
             .iter()
-            .map(|e| SendEntry {
-                id: e.id.clone(),
-                state: SendState {
-                    gain_db: -12.0,
-                    ..SendState::default()
-                },
+            .map(|m| {
+                let mix = Mix {
+                    inputs: topo.inputs.iter().map(|i| (i.id.clone(), level)).collect(),
+                    groups: topo
+                        .groups
+                        .iter()
+                        .map(|g| (g.id.clone(), MixGroup::default()))
+                        .collect(),
+                    mixes: m
+                        .mixes
+                        .iter()
+                        .filter_map(|&s| topo.mixes.get(s).map(|h| (h.id.clone(), level)))
+                        .collect(),
+                    ..Mix::default()
+                };
+                (m.id.clone(), mix)
             })
             .collect(),
         ..MixState::default()
@@ -67,18 +83,10 @@ fn eq(shift: f64) -> EqParams {
 }
 
 /// Two alternating groups of 512 commands that keep every ramp moving.
-fn worst_groups(graph: &Graph) -> [Vec<RtOp>; 2] {
+fn worst_groups(topo: &Topology) -> [Vec<RtOp>; 2] {
     [0.0, 0.25].map(|shift| {
         let mut ops = Vec::new();
-        for s in 0..graph.sends.len() {
-            ops.push(RtOp::Send {
-                s: s as u16,
-                gain: 0.25 + shift,
-                pan: shift - 0.1,
-                muted: false,
-            });
-        }
-        for i in 0..graph.inputs.len() {
+        for i in 0..topo.inputs.len() {
             ops.push(RtOp::InputEq {
                 i: i as u16,
                 eq: eq(shift),
@@ -89,32 +97,49 @@ fn worst_groups(graph: &Graph) -> [Vec<RtOp>; 2] {
                     trim: 1.0 + shift,
                     muted: false,
                     processing: true,
-                    fader: 0.5 + shift,
-                    pan: shift,
                 },
             });
         }
-        for b in 0..graph.buses.len() {
-            if graph.has_eq(b) {
-                ops.push(RtOp::BusEq {
-                    b: b as u16,
+        for m in 0..topo.mixes.len() {
+            let mix = m as u16;
+            for k in 0..topo.levels(m) {
+                ops.push(RtOp::Level {
+                    m: mix,
+                    k: k as u16,
+                    gain: 0.25 + shift,
+                    pan: shift - 0.1,
+                    muted: false,
+                });
+            }
+            for g in 0..topo.groups.len() {
+                ops.push(RtOp::GroupEq {
+                    m: mix,
+                    g: g as u16,
                     eq: eq(shift),
                 });
-            }
-            ops.push(RtOp::Bus {
-                b: b as u16,
-                fader: 1.0 + shift,
-                pan: -shift,
-                muted: false,
-            });
-            if graph.has_limiter(b) {
-                ops.push(RtOp::Limiter {
-                    b: b as u16,
-                    enabled: true,
-                    limit_db: -6.0 + 12.0 * shift,
+                ops.push(RtOp::Group {
+                    m: mix,
+                    g: g as u16,
+                    gain: 1.0 - shift,
+                    muted: false,
                 });
             }
+            ops.push(RtOp::MixEq {
+                m: mix,
+                eq: eq(shift),
+            });
+            ops.push(RtOp::MixOut {
+                m: mix,
+                volume: 1.0 + shift,
+                muted: false,
+            });
+            ops.push(RtOp::Limiter {
+                m: mix,
+                enabled: true,
+                limit_db: -6.0 + 12.0 * shift,
+            });
         }
+        assert!(ops.len() <= MAX_CMDS_PER_BLOCK, "{}", ops.len());
         // The budget's worst case: exactly 512 commands every block.
         ops.resize(MAX_CMDS_PER_BLOCK, RtOp::Nop);
         ops
@@ -127,25 +152,23 @@ fn percentile(sorted: &[f64], q: f64) -> f64 {
 }
 
 fn bench(name: &str, worst: bool) -> f64 {
-    let graph = graph();
-    let (mut p, mut h) = Processor::new(Arc::clone(&graph), &open(&graph), &[], Options::default());
-    let groups = worst_groups(&graph);
+    let topo = topology();
+    let (mut p, mut h) = Processor::new(Arc::clone(&topo), &open(&topo), &[], Options::default());
+    let groups = worst_groups(&topo);
     if worst {
-        let engineer = graph.engineer as u16;
-        let member = graph
-            .bus_index(&iem_engine_proto::BusId::new("member4"))
-            .unwrap_or(0) as u16;
+        let engineer = topo.engineer as u16;
+        let member = topo.mix_index(&MixId::new("member4")).unwrap_or(0) as u16;
         push_group(
             &mut h.cmds,
             0,
             &[
                 RtOp::Listen {
                     slot: 0,
-                    bus: Some(engineer),
+                    mix: Some(engineer),
                 },
                 RtOp::Listen {
                     slot: 1,
-                    bus: Some(member),
+                    mix: Some(member),
                 },
                 RtOp::TestSignal {
                     i: 4,
@@ -157,8 +180,8 @@ fn bench(name: &str, worst: bool) -> f64 {
         );
     }
     let amp = if worst { 0.8 } else { 0.1 };
-    let mut input = vec![0.0; graph.rx.len() * B];
-    let mut output = vec![0.0; graph.tx.len() * B];
+    let mut input = vec![0.0; topo.rx.len() * B];
+    let mut output = vec![0.0; topo.tx.len() * B];
     let talk = vec![0.3f32; B];
     let mut drain = vec![0.0f32; 4 * B];
     let mut times = Vec::with_capacity(CALLS);

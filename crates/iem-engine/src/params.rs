@@ -3,12 +3,15 @@
 //! Shared by the control core (commands) and the processor (initial state).
 
 use iem_dsp::eq::{Band, BandKind as DspKind, EqParams};
-use iem_engine_proto::{BandKind, BusState, DB_OFF, Eq, EqBand, InputState, SendState, db_to_lin};
+use iem_engine_proto::{
+    BandKind, DB_OFF, Eq, EqBand, InputState, Level, MixGroup, MixOut, db_to_lin,
+};
 
 /// Inclusive ranges.
 pub type Range = (f64, f64);
 pub const TRIM_DB: Range = (DB_OFF, 24.0);
-/// F5/F7: faders and sends up to +12 dB; at or below `DB_OFF` silent.
+/// F5/F7: levels, group faders and mix volumes up to +12 dB; at or below
+/// `DB_OFF` silent.
 pub const FADER_DB: Range = (DB_OFF, 12.0);
 pub const PAN: Range = (-1.0, 1.0);
 /// ReaEQ's range (A12).
@@ -56,30 +59,35 @@ pub fn cap_eq(e: &Eq) -> Eq {
 pub fn cap_input(s: &InputState) -> InputState {
     InputState {
         trim_db: fix(s.trim_db, TRIM_DB, 0.0),
-        fader_db: fix(s.fader_db, FADER_DB, 0.0),
-        pan: fix(s.pan, PAN, 0.0),
         eq: cap_eq(&s.eq),
         ..*s
     }
 }
 
-pub fn cap_bus(s: &BusState) -> BusState {
-    let mut b = BusState {
-        fader_db: fix(s.fader_db, FADER_DB, 0.0),
-        pan: fix(s.pan, PAN, 0.0),
-        eq: cap_eq(&s.eq),
-        ..*s
-    };
-    b.limiter.limit_db = fix(s.limiter.limit_db, LIMIT_DB, LIMIT_DB.0);
-    b
-}
-
-pub fn cap_send(s: &SendState) -> SendState {
-    SendState {
+pub fn cap_level(s: &Level) -> Level {
+    Level {
         gain_db: fix(s.gain_db, FADER_DB, DB_OFF),
         pan: fix(s.pan, PAN, 0.0),
         ..*s
     }
+}
+
+pub fn cap_group(s: &MixGroup) -> MixGroup {
+    MixGroup {
+        gain_db: fix(s.gain_db, FADER_DB, 0.0),
+        eq: cap_eq(&s.eq),
+        ..*s
+    }
+}
+
+pub fn cap_out(s: &MixOut) -> MixOut {
+    let mut o = MixOut {
+        volume_db: fix(s.volume_db, FADER_DB, 0.0),
+        eq: cap_eq(&s.eq),
+        ..*s
+    };
+    o.limiter.limit_db = fix(s.limiter.limit_db, LIMIT_DB, LIMIT_DB.0);
+    o
 }
 
 fn dsp_kind(k: BandKind) -> DspKind {
@@ -111,8 +119,6 @@ pub struct InputParams {
     pub trim: f64,
     pub muted: bool,
     pub processing: bool,
-    pub fader: f64,
-    pub pan: f64,
 }
 
 pub fn input_params(s: &InputState) -> InputParams {
@@ -120,8 +126,6 @@ pub fn input_params(s: &InputState) -> InputParams {
         trim: db_to_lin(s.trim_db),
         muted: s.muted,
         processing: s.processing,
-        fader: db_to_lin(s.fader_db),
-        pan: s.pan,
     }
 }
 
@@ -169,44 +173,78 @@ mod tests {
         }
         let i = cap_input(&InputState {
             trim_db: 99.0,
-            fader_db: f64::NAN,
-            pan: -7.0,
             muted: true,
-            ..InputState::default()
+            processing: false,
+            eq,
         });
+        assert_eq!((i.trim_db, i.muted, i.processing), (24.0, true, false));
+        assert_eq!(i.eq, c);
         assert_eq!(
-            (i.trim_db, i.fader_db, i.pan, i.muted),
-            (24.0, 0.0, -1.0, true)
+            cap_input(&InputState {
+                trim_db: f64::NAN,
+                ..InputState::default()
+            })
+            .trim_db,
+            0.0
         );
-        let mut b = BusState {
-            fader_db: 13.0,
-            pan: f64::NAN,
-            ..BusState::default()
-        };
-        b.limiter.limit_db = -9.0;
-        let cb = cap_bus(&b);
-        assert_eq!(
-            (cb.fader_db, cb.pan, cb.limiter.limit_db),
-            (12.0, 0.0, -6.0)
-        );
-        b.limiter.limit_db = f64::NAN;
-        assert_eq!(cap_bus(&b).limiter.limit_db, -6.0);
-        b.limiter.limit_db = 3.0;
-        assert_eq!(cap_bus(&b).limiter.limit_db, 0.0);
-        let s = cap_send(&SendState {
+        let l = cap_level(&Level {
             gain_db: f64::NAN,
             pan: 2.0,
             muted: true,
         });
-        assert_eq!((s.gain_db, s.pan, s.muted), (DB_OFF, 1.0, true));
+        assert_eq!((l.gain_db, l.pan, l.muted), (DB_OFF, 1.0, true));
+        let l = cap_level(&Level {
+            gain_db: 40.0,
+            pan: f64::NAN,
+            muted: false,
+        });
+        assert_eq!((l.gain_db, l.pan), (12.0, 0.0));
         assert_eq!(
-            cap_send(&SendState {
+            cap_level(&Level {
                 gain_db: -3.0,
-                ..SendState::default()
+                ..Level::default()
             })
             .gain_db,
             -3.0
         );
+        let g = cap_group(&MixGroup {
+            gain_db: f64::INFINITY,
+            muted: true,
+            eq,
+        });
+        assert_eq!((g.gain_db, g.muted), (0.0, true));
+        assert_eq!(g.eq, c);
+        assert_eq!(
+            cap_group(&MixGroup {
+                gain_db: -1e308,
+                ..MixGroup::default()
+            })
+            .gain_db,
+            DB_OFF
+        );
+        let mut o = MixOut {
+            volume_db: 13.0,
+            muted: true,
+            eq,
+            ..MixOut::default()
+        };
+        o.limiter.limit_db = -9.0;
+        let co = cap_out(&o);
+        assert_eq!(
+            (co.volume_db, co.muted, co.limiter.limit_db),
+            (12.0, true, -6.0)
+        );
+        assert_eq!(co.eq, c);
+        o.volume_db = f64::NAN;
+        o.limiter.limit_db = f64::NAN;
+        assert_eq!(
+            (cap_out(&o).volume_db, cap_out(&o).limiter.limit_db),
+            (0.0, -6.0)
+        );
+        o.limiter.limit_db = 3.0;
+        o.limiter.enabled = false;
+        assert_eq!(cap_out(&o).limiter.limit_db, 0.0);
+        assert!(!cap_out(&o).limiter.enabled);
     }
 
     #[test]
@@ -246,14 +284,12 @@ mod tests {
     fn input_params_are_linear() {
         let p = input_params(&InputState {
             trim_db: -6.0,
-            fader_db: DB_OFF,
-            pan: 0.5,
             muted: true,
             processing: false,
             eq: Eq::default(),
         });
         assert_eq!(p.trim, 10f64.powf(-0.3));
-        assert_eq!(p.fader, 0.0);
-        assert_eq!((p.pan, p.muted, p.processing), (0.5, true, false));
+        assert_eq!((p.muted, p.processing), (true, false));
+        assert_eq!(input_params(&InputState::default()).trim, 1.0);
     }
 }

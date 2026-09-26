@@ -1,9 +1,10 @@
 //! The private mapping from the predecessor's names to iemmixer ids (S4
 //! design note §3.1). Both files live in the ops repo, never here (P6):
 //!
-//! - `aliases.toml`: `master = "<bus id>"`, `[tracks]` REAPER track name (of
-//!   any era) → engine id, `[members]` predecessor member id →
-//!   `{ id, bus, stems, archived }` (`archived`: a renamed member, D8);
+//! - `aliases.toml`: `[tracks]` REAPER track name (of any era) → engine id
+//!   (an input, a mix, or for a stems bus the group it is an instance of),
+//!   `[members]` predecessor member id → `{ id, mix, archived }` (`archived`:
+//!   a renamed member, D8);
 //! - `eras.toml`: `[[era]] first_seen`, `last_seen` (Unix seconds of the first
 //!   and last saved project with this track layout) and `tracks` (track 1…N).
 
@@ -18,20 +19,16 @@ use serde::Deserialize;
 pub struct MemberAlias {
     /// The iemmixer member id.
     pub id: String,
-    /// The member's output bus.
-    pub bus: String,
-    /// The member's stems bus.
-    pub stems: String,
+    /// The member's mix.
+    pub mix: String,
     /// A renamed member: its history is imported archived and read-only.
     #[serde(default)]
     pub archived: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Aliases {
-    /// Bus id of the master (it is not a REAPER track).
-    pub master: String,
     #[serde(default)]
     pub tracks: BTreeMap<String, String>,
     #[serde(default)]
@@ -57,9 +54,6 @@ pub struct Eras {
 pub fn parse_aliases(text: &str) -> Result<Aliases, String> {
     let a: Aliases = toml::from_str(text).map_err(|e| format!("aliases: {e}"))?;
     let mut bad = Vec::new();
-    if !valid_id(&a.master) {
-        bad.push(format!("master {:?} is not a valid id", a.master));
-    }
     for (name, id) in &a.tracks {
         if !valid_id(id) {
             bad.push(format!("track {name:?}: {id:?} is not a valid id"));
@@ -72,10 +66,8 @@ pub fn parse_aliases(text: &str) -> Result<Aliases, String> {
         if let Err(e) = validate_member_id(&m.id) {
             bad.push(format!("member {legacy:?}: {e}"));
         }
-        for bus in [&m.bus, &m.stems] {
-            if !valid_id(bus) {
-                bad.push(format!("member {legacy:?}: {bus:?} is not a valid id"));
-            }
+        if !valid_id(&m.mix) {
+            bad.push(format!("member {legacy:?}: {:?} is not a valid id", m.mix));
         }
     }
     if bad.is_empty() {
@@ -140,39 +132,42 @@ mod tests {
     use super::*;
 
     const ALIASES: &str = r#"
-master = "master"
 [tracks]
 "MIC1 trk" = "mic1"
 "OLD MIC1" = "mic1"
+"M1 STEMS" = "stems"
 [members]
-member1 = { id = "member1", bus = "member1", stems = "member1.stems" }
-oldname = { id = "member1", bus = "member1", stems = "member1.stems", archived = true }
+member1 = { id = "member1", mix = "member1" }
+oldname = { id = "member1", mix = "member1", archived = true }
 "#;
 
     #[test]
     fn aliases_parse_and_validate() {
         let a = parse_aliases(ALIASES).unwrap();
-        assert_eq!(a.master, "master");
         assert_eq!(a.tracks["OLD MIC1"], "mic1");
+        assert_eq!(a.tracks["M1 STEMS"], "stems");
+        assert_eq!(a.members["member1"].mix, "member1");
         assert!(!a.members["member1"].archived);
         assert!(a.members["oldname"].archived);
+        assert_eq!(parse_aliases("").unwrap(), Aliases::default());
         for (bad, why) in [
-            ("master = \"Master\"", "master"),
-            ("master = \"m\"\n[tracks]\nX = \"Bad Id\"", "track \"X\""),
+            ("[tracks]\nX = \"Bad Id\"", "track \"X\""),
             (
-                "master = \"m\"\n[members]\n\"a b\" = { id = \"a\", bus = \"a\", stems = \"a.s\" }",
+                "[members]\n\"a b\" = { id = \"a\", mix = \"a\" }",
                 "member \"a b\"",
             ),
             (
-                "master = \"m\"\n[members]\na = { id = \"a/b\", bus = \"a\", stems = \"a.s\" }",
+                "[members]\na = { id = \"a/b\", mix = \"a\" }",
                 "member \"a\"",
             ),
+            ("[members]\na = { id = \"a\", mix = \"A\" }", "\"A\""),
+            // The REAPER-shaped aliases of S4 are refused, not half-read.
+            ("master = \"m\"", "master"),
             (
-                "master = \"m\"\n[members]\na = { id = \"a\", bus = \"A\", stems = \"a.s\" }",
-                "\"A\"",
+                "[members]\na = { id = \"a\", bus = \"a\", stems = \"a.s\" }",
+                "bus",
             ),
-            ("master = \"m\"\ncolour = 1", "colour"),
-            ("[tracks]", "master"),
+            ("colour = 1", "colour"),
         ] {
             let err = parse_aliases(bad).unwrap_err();
             assert!(err.contains(why), "{bad:?}: {err}");
