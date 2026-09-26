@@ -137,10 +137,10 @@ impl Project {
             if !(t.vol.is_finite() && t.vol >= 0.0 && (-1.0..=1.0).contains(&t.pan)) {
                 return bad(format!("track {} vol/pan", t.name));
             }
-            if let Some(item) = &t.item {
-                if !safe_name(&item.stimulus) || item.length == 0 {
-                    return bad(format!("track {} item", t.name));
-                }
+            if let Some(item) = &t.item
+                && (!safe_name(&item.stimulus) || item.length == 0)
+            {
+                return bad(format!("track {} item", t.name));
             }
             for s in &t.receives {
                 if s.src >= i
