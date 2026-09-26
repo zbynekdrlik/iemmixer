@@ -215,6 +215,44 @@ fn a_topology_that_differs_from_the_site_is_refused_with_its_diff() {
     assert_eq!(site::topology(&table).diff(&topo()), Vec::<String>::new());
 }
 
+#[test]
+fn a_site_without_an_engine_table_gets_the_projects_topology_proposed() {
+    let w = World::new(12);
+    let bare = w.path("site.toml");
+    std::fs::write(&bare, "port = 8080\n").unwrap();
+    let emitted = w.path("engine.toml");
+    let mut a = cmd(&["import", "--rpp"]);
+    a.extend([
+        s(&w.rpp),
+        "--aliases".into(),
+        s(&w.aliases),
+        "--site".into(),
+        s(&bare),
+        "--dry-run".into(),
+        "--emit-topology".into(),
+        s(&emitted),
+    ]);
+    let e = run(&a).unwrap_err();
+    assert_eq!(e.code, EXIT_TOPOLOGY);
+    assert!(e.msg.contains("no [engine] table yet"), "{}", e.msg);
+    let table = iem_engine::site::parse(&std::fs::read_to_string(emitted).unwrap()).unwrap();
+    assert_eq!(table.channels, 132);
+    iem_engine::graph::compile(&table).unwrap();
+    assert_eq!(site::topology(&table).diff(&topo()), Vec::<String>::new());
+    let e = run(&cmd(&[
+        "import",
+        "--rpp",
+        "x",
+        "--aliases",
+        "y",
+        "--site",
+        "z",
+        "--dry-run",
+    ]))
+    .unwrap_err();
+    assert_eq!(e.code, iem_migrate::EXIT_IO);
+}
+
 fn import_to(w: &World, dir: &Path) {
     let mut a = import_args(w, &[]);
     a.extend(["--state-dir".into(), s(dir)]);

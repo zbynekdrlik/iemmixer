@@ -47,7 +47,7 @@ pub fn run(args: &[String]) -> Result<String, Failure> {
         return Err(Failure::input("--state-dir is required unless --dry-run"));
     }
     let aliases = parse_aliases(&read_text(&a.path("--aliases")?)?).map_err(Failure::input)?;
-    let site = site::open(&a.path("--site")?)?;
+    let site = site::open_optional(&a.path("--site")?)?;
     let project = LegacyProject::parse(&read_text(&rpp)?)
         .map_err(|e| Failure::input(format!("{}: {e}", rpp.display())))?;
     let imp = import(&project, &aliases).map_err(|p| Failure::input(p.to_string()))?;
@@ -57,7 +57,10 @@ pub fn run(args: &[String]) -> Result<String, Failure> {
     ];
     report.extend(imp.notes.iter().map(|n| format!("note: {n}")));
     if let Some(path) = a.opt_path("--emit-topology") {
-        std::fs::write(&path, imp.topology.engine_toml(site.site.channels))
+        let channels = site
+            .as_ref()
+            .map_or_else(|| imp.topology.max_channel(), |s| s.site.channels);
+        std::fs::write(&path, imp.topology.engine_toml(channels))
             .map_err(|e| Failure::io(format!("{}: {e}", path.display())))?;
         report.push(format!("topology written to {}", path.display()));
     }
@@ -79,6 +82,17 @@ pub fn run(args: &[String]) -> Result<String, Failure> {
         ));
         report.extend(check.differing.iter().map(|d| format!("  differs: {d}")));
     }
+    let Some(site) = site else {
+        report.push(
+            "site.toml has no [engine] table yet: the project's topology is the proposal \
+             (--emit-topology writes it for the ops PR); nothing written"
+                .into(),
+        );
+        return Err(Failure {
+            code: EXIT_TOPOLOGY,
+            msg: report.join("\n"),
+        });
+    };
     let diff = imp.topology.diff(&site.topology);
     if !diff.is_empty() {
         report.push(format!(

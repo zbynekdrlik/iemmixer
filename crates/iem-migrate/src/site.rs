@@ -4,7 +4,7 @@
 use std::path::Path;
 
 use iem_engine::graph::{Graph, compile};
-use iem_engine::site::{Site, load};
+use iem_engine::site::{Site, SiteError, load};
 use iem_engine_proto::{BusId, InputId, SendId, Source};
 use iem_rpp::topology::{TopoBus, TopoInput, Topology};
 
@@ -25,6 +25,15 @@ pub fn open(path: &Path) -> Result<SiteFile, Failure> {
         site,
         graph,
     })
+}
+
+/// Like [`open`], but `Ok(None)` while the file has no `[engine]` table yet
+/// (the first import proposes one).
+pub fn open_optional(path: &Path) -> Result<Option<SiteFile>, Failure> {
+    match load(path) {
+        Err(SiteError::NoEngineTable) => Ok(None),
+        _ => open(path).map(Some),
+    }
 }
 
 /// The `[engine]` table with its send families expanded.

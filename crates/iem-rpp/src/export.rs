@@ -296,10 +296,10 @@ mod tests {
     #[test]
     fn one_edit_changes_one_line() {
         let (text, aliases, state) = setup(22);
-        fn input(s: &mut MixState, id: &str) -> &mut iem_engine_proto::InputState {
+        fn input<'s>(s: &'s mut MixState, id: &str) -> &'s mut iem_engine_proto::InputState {
             s.inputs.get_mut(&InputId::new(id)).unwrap()
         }
-        fn bus(s: &mut MixState, id: &str) -> &mut iem_engine_proto::BusState {
+        fn bus<'s>(s: &'s mut MixState, id: &str) -> &'s mut iem_engine_proto::BusState {
             s.buses.get_mut(&BusId::new(id)).unwrap()
         }
         let edits: [fn(&mut MixState); 15] = [

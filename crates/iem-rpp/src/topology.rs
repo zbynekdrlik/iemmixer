@@ -135,6 +135,17 @@ impl Topology {
         self.tap(id).is_some()
     }
 
+    /// The highest card channel any input or bus uses (1 when none).
+    pub fn max_channel(&self) -> u16 {
+        self.inputs
+            .iter()
+            .flat_map(|i| i.rx.iter())
+            .chain(self.buses.iter().flat_map(|b| b.tx.iter()))
+            .copied()
+            .max()
+            .unwrap_or(1)
+    }
+
     pub fn counts(&self) -> Counts {
         let of = |k: BusKind| self.buses.iter().filter(|b| b.kind == k).count();
         let outputs = of(BusKind::Output);
@@ -477,6 +488,15 @@ mod tests {
             ..t
         };
         assert!(!no_engineer.engine_toml(8).contains("engineer ="));
+    }
+
+    #[test]
+    fn the_highest_channel_counts_rx_and_tx() {
+        let mut t = synthetic_site();
+        assert_eq!(t.max_channel(), 132);
+        t.buses[0].tx = vec![150, 151];
+        assert_eq!(t.max_channel(), 151);
+        assert_eq!(Topology::default().max_channel(), 1);
     }
 
     #[test]
