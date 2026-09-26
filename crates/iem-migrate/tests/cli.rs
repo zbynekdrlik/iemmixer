@@ -171,7 +171,10 @@ fn a_dry_run_writes_nothing() {
 #[test]
 fn a_topology_that_differs_from_the_site_is_refused_with_its_diff() {
     let w = World::new(4);
-    let site = std::fs::read_to_string(site_path()).unwrap();
+    // Windows checkouts may turn the file's line ends into CRLF.
+    let site = std::fs::read_to_string(site_path())
+        .unwrap()
+        .replace("\r\n", "\n");
     let family = "from = [\"hand1\"]\nto = [\"translator\"]";
     assert!(site.contains(family));
     let other = w.path("site.toml");
