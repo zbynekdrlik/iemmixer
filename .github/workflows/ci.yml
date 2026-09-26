@@ -32,6 +32,12 @@ jobs:
           set -euo pipefail
           python3 -m unittest discover -s scripts -p 'test_*.py' -v
           python3 scripts/test_check_disposal_safety.py
+      - name: Golden tooling self-tests (numpy venv)
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/gvenv"
+          "$RUNNER_TEMP/gvenv/bin/pip" install --quiet numpy==2.4.6
+          "$RUNNER_TEMP/gvenv/bin/python" -m unittest discover -s scripts/golden -p 'test_*.py' -v
       - name: Leptos disposal safety
         run: python3 scripts/check_disposal_safety.py
       - name: Version consistency
@@ -92,6 +98,31 @@ jobs:
             || { echo "::error::line coverage ${pct}% is below the floor ${floor}%"; exit 1; }
       - name: UI unit tests (native)
         run: cargo test --locked -p iem-ui --lib
+
+  golden-bundle:
+    name: golden-bundle
+    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+    needs: [test]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Generate the golden bundle
+        run: cargo run --locked --release -p iem-rpp --bin iem-rpp-gen -- --out "$RUNNER_TEMP/golden-bundle"
+      - name: Check the bundle (hashes, plug-in allowlist, job-relative paths)
+        run: python3 scripts/golden/check_bundle.py "$RUNNER_TEMP/golden-bundle"
+      - name: Upload (dev pushes only — the only bundle that may reach the PC, P5)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: golden-bundle-${{ github.sha }}
+          path: ${{ runner.temp }}/golden-bundle
+          retention-days: 14
+          if-no-files-found: error
 
   wasm:
     name: wasm
