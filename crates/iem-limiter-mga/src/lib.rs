@@ -361,7 +361,7 @@ mod tests {
             },
         );
         assert_eq!(slow.hold, 344.53125);
-        assert_eq!(slow.r, (-3.0 / (44_100.0 * 0.2)).exp());
+        assert_eq!(slow.r, (-3.0f64 / (44_100.0 * 0.2)).exp());
         assert_eq!(slow.link, 1.0);
     }
 

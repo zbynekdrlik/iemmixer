@@ -89,16 +89,14 @@ impl Goldens {
             .and_then(Value::as_object)
             .ok_or_else(|| invalid(file, "not in index.json"))?;
         let raw = read(&self.dir.join(format!("{file}.f64")))?;
-        if raw.len() % 8 != 0 {
+        if !raw.len().is_multiple_of(8) {
             return Err(invalid(file, "length is not a whole number of f64"));
         }
         let values: Vec<f64> = raw
-            .chunks_exact(8)
-            .map(|b| {
-                let mut a = [0u8; 8];
-                a.copy_from_slice(b);
-                f64::from_le_bytes(a)
-            })
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|b| f64::from_le_bytes(*b))
             .collect();
         entries
             .iter()
