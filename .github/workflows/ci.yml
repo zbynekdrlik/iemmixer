@@ -120,7 +120,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --locked --release -p iem-dsp -p iem-limiter-mga --test golden -- --nocapture --test-threads 1 | tee "$RUNNER_TEMP/golden.log"
-          grep '^golden ' "$RUNNER_TEMP/golden.log"
+          grep -o 'golden [a-z].*' "$RUNNER_TEMP/golden.log"
 
   golden-bundle:
     name: golden-bundle

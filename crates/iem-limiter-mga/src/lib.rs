@@ -201,8 +201,9 @@ pub struct Limiter {
     sample_rate: f64,
     limit_db: f64,
     enabled: bool,
-    wet: f64,
-    fade_step: f64,
+    /// Samples left of the disable fade: wet = fade / fade_len (exactly 1 or 0 at the ends).
+    fade: u32,
+    fade_len: u32,
     active: u64,
     active_below: f64,
 }
@@ -228,14 +229,15 @@ impl Limiter {
     /// An enabled limiter at `limit_db` (clamped to −6…0 dB; non-finite is −6).
     pub fn new(sample_rate: f64, limit_db: f64) -> Self {
         let limit_db = clamp_limit(limit_db);
-        let fade = (DISABLE_MS * sample_rate / 1000.0).round().max(1.0);
+        // `as` saturates; at least one sample.
+        let fade_len = ((DISABLE_MS * sample_rate / 1000.0).round() as u32).max(1);
         Self {
             mga: Mga::new(sample_rate, product_sliders(limit_db)),
             sample_rate,
             limit_db,
             enabled: true,
-            wet: 1.0,
-            fade_step: 1.0 / fade,
+            fade: fade_len,
+            fade_len,
             active: 0,
             active_below: 10f64.powf(ACTIVE_BELOW_DB / 20.0),
         }
@@ -256,7 +258,7 @@ impl Limiter {
     pub fn set_enabled(&mut self, on: bool) {
         self.enabled = on;
         if on {
-            self.wet = 1.0;
+            self.fade = self.fade_len;
         }
     }
 
@@ -273,14 +275,15 @@ impl Limiter {
                 if self.mga.gr_meter() < self.active_below {
                     self.active += 1;
                 }
-            } else if self.wet > 0.0 {
-                self.wet = (self.wet - self.fade_step).max(0.0);
+            } else {
+                self.fade = self.fade.saturating_sub(1);
             }
-            if self.wet == 1.0 {
+            if self.fade == self.fade_len {
                 (*l, *r) = (yl, yr);
             } else {
-                *l += self.wet * (yl - *l);
-                *r += self.wet * (yr - *r);
+                let wet = f64::from(self.fade) / f64::from(self.fade_len);
+                *l += wet * (yl - *l);
+                *r += wet * (yr - *r);
             }
         }
     }
