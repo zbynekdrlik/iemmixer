@@ -102,12 +102,10 @@ mod tests {
                 if i % 2 == 0 { x as f32 } else { -x as f32 }
             })
             .collect();
-        f.feed(&tone[..3838], &mut out);
-        assert!(
-            out.is_empty(),
-            "1919 input frames make 960 outputs only with the next one"
-        );
-        f.feed(&tone[3838..3840], &mut out);
+        // Input frames 0, 2, … yield outputs: 1918 frames give 959.
+        f.feed(&tone[..3836], &mut out);
+        assert!(out.is_empty());
+        f.feed(&tone[3836..3840], &mut out);
         assert_eq!(out.len(), 1);
         f.feed(&tone[3840..], &mut out);
         assert_eq!(out.len(), 5);
