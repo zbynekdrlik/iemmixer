@@ -1026,7 +1026,8 @@ fn band_output_is_unchanged_after_a_failure_at_every_step() {
     run(&band_args(&w, &l, &eras, &out, &[])).unwrap();
     newer_presets(&l);
     let before = tree(&out);
-    let args = band_args(&w, &l, &eras, &out, &[]);
+    // `run_with` takes the arguments after the subcommand.
+    let args = band_args(&w, &l, &eras, &out, &[]).split_off(1);
     let mut steps = Vec::new();
     for k in 0..500usize {
         let calls = Cell::new(0usize);
