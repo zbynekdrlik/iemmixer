@@ -5,8 +5,8 @@
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
 
-const SITE: &str = "[[members]]\nname = \"Member1\"\ndante_output_l = 71\ndante_output_r = 72\n\n\
-[[members]]\nname = \"Engineer\"\ndante_output_l = 91\ndante_output_r = 92\n";
+const SITE: &str = "[[members]]\nid = \"member1\"\nname = \"Member1\"\nmix = \"member1\"\n\n\
+[[members]]\nid = \"engineer\"\nname = \"Engineer\"\nmix = \"engineer\"\n";
 
 fn site_dir() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
@@ -131,4 +131,19 @@ fn no_arguments_run_the_server_which_needs_the_site_config() {
     assert_eq!(out.status.code(), Some(1), "stderr: {stderr}");
     assert!(stderr.contains("loading site config"), "stderr: {stderr}");
     assert!(!stderr.contains("usage"), "stderr: {stderr}");
+}
+
+#[test]
+fn notify_without_a_subscription_exits_3() {
+    let dir = site_dir();
+    let out = run_pin(dir.path(), &["notify", "Kapela hrá", "test"], "");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(3), "stderr: {stderr}");
+    assert!(stderr.contains("no device"), "stderr: {stderr}");
+    assert_eq!(
+        run_pin(dir.path(), &["notify", "only a title"], "")
+            .status
+            .code(),
+        Some(2)
+    );
 }

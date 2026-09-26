@@ -13,6 +13,10 @@ pub const SCHEMA: u32 = 3;
 pub const PRESETS_FORMAT: &str = "iemmixer-presets";
 pub const SNAPSHOTS_FORMAT: &str = "iemmixer-snapshots";
 pub const CUSTOMIZATION_FORMAT: &str = "iemmixer-customization";
+/// Presets per member (F13).
+pub const MAX_PRESETS: usize = 20;
+/// History entries per member; the oldest unpinned ones are pruned (F14).
+pub const MAX_SNAPSHOTS: usize = 50;
 
 /// One source's level in a member's mix: an input (grouped or not) or a mix
 /// it hears, in dB (≤ −150 = off) and pan −1…1.
@@ -121,6 +125,54 @@ impl CustomizationFile {
     }
 }
 
+/// A preset in the list the UI shows (`GET /api/presets/{member}`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PresetInfo {
+    pub name: String,
+    /// Levels the preset holds.
+    pub channel_count: usize,
+    pub created_at: i64,
+    pub updated_at: i64,
+    /// Imported from a renamed member (D8): loadable, never changed.
+    #[serde(default)]
+    pub archived: bool,
+}
+
+/// A history entry in the list the UI shows (`GET /api/snapshots/{member}`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SnapshotInfo {
+    pub timestamp: i64,
+    pub label: String,
+    pub pinned: bool,
+    pub channel_count: usize,
+    #[serde(default)]
+    pub archived: bool,
+}
+
+impl From<&Preset> for PresetInfo {
+    fn from(p: &Preset) -> Self {
+        Self {
+            name: p.name.clone(),
+            channel_count: p.sends.len(),
+            created_at: p.created_at,
+            updated_at: p.updated_at,
+            archived: p.archived,
+        }
+    }
+}
+
+impl From<&Snapshot> for SnapshotInfo {
+    fn from(s: &Snapshot) -> Self {
+        Self {
+            timestamp: s.timestamp,
+            label: s.label.clone(),
+            pinned: s.pinned,
+            channel_count: s.sends.len(),
+            archived: s.archived,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use iem_engine_proto::MixId;
@@ -175,6 +227,52 @@ mod tests {
         let json = serde_json::to_string(&c).unwrap();
         assert!(json.contains(r#""pinned":[{"mix":"member2"}]"#), "{json}");
         assert_eq!(serde_json::from_str::<CustomizationFile>(&json).unwrap(), c);
+    }
+
+    #[test]
+    fn list_entries_count_the_levels_and_carry_the_archive_flag() {
+        let send = MixSend {
+            src: Source::Input(InputId::new("mic1")),
+            gain_db: 0.0,
+            pan: 0.0,
+            muted: false,
+        };
+        let p = Preset {
+            name: "x".into(),
+            created_at: 1,
+            updated_at: 2,
+            sends: vec![send.clone(), send.clone()],
+            archived: true,
+            ..Preset::default()
+        };
+        assert_eq!(
+            PresetInfo::from(&p),
+            PresetInfo {
+                name: "x".into(),
+                channel_count: 2,
+                created_at: 1,
+                updated_at: 2,
+                archived: true
+            }
+        );
+        let s = Snapshot {
+            timestamp: 9,
+            label: "auto".into(),
+            pinned: true,
+            sends: vec![send],
+            ..Snapshot::default()
+        };
+        assert_eq!(
+            SnapshotInfo::from(&s),
+            SnapshotInfo {
+                timestamp: 9,
+                label: "auto".into(),
+                pinned: true,
+                channel_count: 1,
+                archived: false
+            }
+        );
+        assert_eq!((MAX_PRESETS, MAX_SNAPSHOTS), (20, 50));
     }
 
     #[test]

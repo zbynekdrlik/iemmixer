@@ -68,6 +68,11 @@ pub fn run() {
         Config::default()
     };
 
+    let mut config = config;
+    if let Ok(pipe) = std::env::var("IEMMIXER_ENGINE_PIPE") {
+        config.engine_pipe = pipe;
+    }
+    let mode = iem_server::RunMode::parse(std::env::var("IEMMIXER_MODE").ok().as_deref());
     let port = config.port;
     let share_url = config.share_url();
 
@@ -84,6 +89,7 @@ pub fn run() {
         port,
         config,
         config_dir,
+        mode,
     };
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     let server = rt_handle.spawn(async move {

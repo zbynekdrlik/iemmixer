@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use iem_core::band::{MixSend, Preset, Snapshot};
-use iem_core::{Customization, EqBand as LegacyBand, MixSnapshot, PresetEntry};
+use iem_core::legacy::{Customization, EqBand as LegacyBand, MixSnapshot, PresetEntry};
 use iem_engine_proto::{
     BandKind as EqKind, DB_OFF, Eq as EqSettings, EqBand, GroupId, InputId, MixId, Source,
 };
@@ -375,7 +375,7 @@ pub fn rekey_customization(
 
 #[cfg(test)]
 mod tests {
-    use iem_core::{ChannelPreset, ChannelSnapshot};
+    use iem_core::legacy::{ChannelPreset, ChannelSnapshot};
 
     use super::*;
     use crate::aliases::{parse_aliases, parse_eras};

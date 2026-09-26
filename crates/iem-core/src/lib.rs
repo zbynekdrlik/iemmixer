@@ -1,33 +1,35 @@
 //! IEM Mixer Core Library
 //!
-//! Shared types, configuration, and constants for the IEM mixing system.
+//! Shared types, configuration, and constants for the IEM mixing system: the
+//! site file, the UI protocol, band data and backups; the predecessor's
+//! formats only in [`legacy`] (the importer's).
 
 pub mod backup;
 pub mod band;
 #[cfg(feature = "config")]
 pub mod config;
-pub mod preset;
-pub mod snapshot;
+pub mod legacy;
 pub mod tunnel;
 pub mod types;
 pub mod ws;
 
 pub use backup::{
-    BACKUP_VERSION, BackupInfo, CaptureAudit, EqBandBackup, LimiterBackup, MixerBackup,
-    RestoreCategory, RestoreChange, RestorePreview, RestoreProgress, RestoreResult, SendBackup,
-    SkippedEntry,
+    BACKUP_FORMAT, BACKUP_VERSION, BackupError, BackupInfo, MixerBackup, RestoreCategory,
+    RestoreChange, RestorePreview, RestoreResult, SkippedEntry,
 };
+pub use band::{MAX_PRESETS, MAX_SNAPSHOTS, PresetInfo, SnapshotInfo};
 #[cfg(feature = "config")]
-pub use config::{BandMember, Config, DiscoveredMember, InputTrack};
-pub use preset::{ChannelPreset, MAX_PRESETS, PresetEntry};
-pub use snapshot::{ChannelSnapshot, MAX_SNAPSHOTS, MixSnapshot};
+pub use config::{ActivityConfig, Config, SiteInputMeta, SiteMember};
 pub use types::{
     ApiError, AuthClaims, BatchControlRequest, BatchOperation, Channel, Customization, MixerState,
-    PollResponse, is_valid_pan, merge_or_replace_channels,
+    is_valid_ui_pan, merge_or_replace_channels,
 };
 
 pub use tunnel::{TunnelState, TunnelStatusInfo};
-pub use ws::{AlertInfo, ClientMsg, EqBand, ServerMsg};
+pub use ws::{
+    AlertInfo, ClientMsg, ConsoleInfo, ConsoleInput, ConsoleMix, EqBand, LoginFailures,
+    MIN_CLIENT_PROTO, PageLink, ServerMsg, UI_PROTO,
+};
 
 /// Application version (from Cargo.toml)
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

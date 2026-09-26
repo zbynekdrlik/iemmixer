@@ -1,13 +1,10 @@
-//! Mix snapshot types for history and restore
-//!
-//! Captures the state of a member's mixer settings at a point in time,
-//! allowing restoration to previous mix states.
+//! The predecessor's mix snapshots (keyed by REAPER track number, volume
+//! linear): read only by the importer (`iem-rpp::band`).
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Maximum number of snapshots to keep per member
-pub const MAX_SNAPSHOTS: usize = 50;
+use super::EqBand;
 
 /// A snapshot of a single channel's settings
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -35,14 +32,14 @@ pub struct MixSnapshot {
     pub channels: HashMap<usize, ChannelSnapshot>,
     /// EQ band data per track (None for old snapshots)
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub eq_bands: Option<HashMap<usize, Vec<crate::EqBand>>>,
+    pub eq_bands: Option<HashMap<usize, Vec<EqBand>>>,
 }
 
 impl MixSnapshot {
     /// Create a new automatic snapshot with the current timestamp
     pub fn new_auto(
         channels: HashMap<usize, ChannelSnapshot>,
-        eq_bands: Option<HashMap<usize, Vec<crate::EqBand>>>,
+        eq_bands: Option<HashMap<usize, Vec<EqBand>>>,
     ) -> Self {
         Self {
             timestamp: chrono::Utc::now().timestamp(),
@@ -57,7 +54,7 @@ impl MixSnapshot {
     pub fn new_manual(
         label: String,
         channels: HashMap<usize, ChannelSnapshot>,
-        eq_bands: Option<HashMap<usize, Vec<crate::EqBand>>>,
+        eq_bands: Option<HashMap<usize, Vec<EqBand>>>,
     ) -> Self {
         Self {
             timestamp: chrono::Utc::now().timestamp(),
@@ -157,11 +154,6 @@ mod tests {
     }
 
     #[test]
-    fn test_max_snapshots_constant() {
-        assert_eq!(MAX_SNAPSHOTS, 50);
-    }
-
-    #[test]
     fn test_old_snapshot_without_eq_bands_deserializes() {
         let json = r#"{
             "timestamp": 1709582400,
@@ -191,7 +183,7 @@ mod tests {
         let mut eq_map = HashMap::new();
         eq_map.insert(
             1,
-            vec![crate::EqBand {
+            vec![EqBand {
                 band_type: "band".to_string(),
                 freq_hz: 1000.0,
                 gain_db: 3.0,

@@ -9,7 +9,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use iem_core::band::{CustomizationFile, Preset, PresetFile, Snapshot, SnapshotFile};
-use iem_core::{Customization, MixSnapshot, PresetEntry};
+use iem_core::legacy::{Customization, MixSnapshot, PresetEntry};
 use iem_engine_proto::MixId;
 use iem_rpp::aliases::{Aliases, Eras, MemberAlias, parse_aliases, parse_eras};
 use iem_rpp::band::{Ctx, Stats, rekey_customization, rekey_presets, rekey_snapshots};

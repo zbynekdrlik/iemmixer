@@ -70,7 +70,7 @@ pub fn check_target(config: &iem_core::Config, target: &PinTarget) -> Result<(),
             ));
         }
         iem_core::config::validate_member_id(id).map_err(ProvisionError::Invalid)?;
-        if !config.members.iter().any(|m| m.id() == *id) {
+        if !config.members.iter().any(|m| m.id == *id) {
             return Err(ProvisionError::Invalid(format!(
                 "unknown member `{id}` (not in the site config)"
             )));
@@ -110,10 +110,8 @@ mod tests {
     use super::*;
 
     fn site() -> iem_core::Config {
-        toml::from_str(
-            "[[members]]\nname = \"Member1\"\ndante_output_l = 71\ndante_output_r = 72\n",
-        )
-        .unwrap()
+        toml::from_str("[[members]]\nid = \"member1\"\nname = \"Member1\"\nmix = \"member1\"\n")
+            .unwrap()
     }
 
     #[test]

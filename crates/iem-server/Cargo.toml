@@ -11,6 +11,9 @@ description = "HTTPS/WebSocket server of iemmixer"
 # Core library
 iem-core = { path = "../iem-core", features = ["vapid"] }
 
+# The engine protocol (MIT OR Apache-2.0; the GPL engine is a separate process)
+iem-engine-proto = { path = "../iem-engine-proto" }
+
 # Web framework
 axum = { version = "0.8", features = ["macros", "json", "ws"] }
 
@@ -18,17 +21,13 @@ axum = { version = "0.8", features = ["macros", "json", "ws"] }
 tower-http = { version = "0.6", features = ["fs", "set-header"] }
 
 # Async runtime
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "net"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "net", "io-util"] }
 
-# HTTP client for REAPER proxy
+# HTTP client (Web Push, public-IP detection)
 reqwest = { version = "0.12", features = ["json"] }
-
-# Async combinators (parallel futures)
-futures = "0.3"
 
 # JWT authentication
 jsonwebtoken = "9"
-
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -59,13 +58,11 @@ axum-server = { version = "0.8", features = ["tls-rustls"], optional = true }
 rustls = { version = "0.23", features = ["ring"], optional = true }
 dirs = { version = "6.0", optional = true }
 
-# Audio streaming (OIEM UDP relay -> WebSocket)
+# Listen and talkback: Opus in the server (X4; the engine links no codec, I1)
 bytes = { version = "1", optional = true }
+opus = { version = "0.4", optional = true }
 
-# Test harness helpers (only enabled by `test-helpers` feature for integration tests)
-tempfile = { version = "3", optional = true }
-
-# Web Push notifications (RFC 8291 + VAPID) — pure Rust, no OpenSSL (#133)
+# Web Push notifications (RFC 8291 + VAPID) — pure Rust, no OpenSSL
 p256 = { version = "0.13", features = ["ecdh", "pkcs8"] }
 aes-gcm = "0.10"
 hkdf = "0.12"
@@ -86,11 +83,6 @@ path = "src/bin/server.rs"
 required-features = ["standalone"]
 
 [[test]]
-name = "poller_snapshot_ordering"
-path = "tests/poller_snapshot_ordering.rs"
-required-features = ["test-helpers"]
-
-[[test]]
 name = "pin_cli"
 path = "tests/pin_cli.rs"
 required-features = ["standalone"]
@@ -99,12 +91,13 @@ required-features = ["standalone"]
 default = []
 standalone = ["tracing-subscriber"]
 tls = ["axum-server", "rustls", "dirs"]
-audio = ["dep:bytes"]
-test-helpers = ["dep:tempfile"]  # exposes AppState::new_for_test and test_helpers module for integration tests
+audio = ["dep:bytes", "dep:opus"]
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 tempfile = "3"
 toml = "0.9"
 tracing-test = "0.2"
-proptest = "1"
+# The real engine for the server's tests (never linked into the server)
+iem-engine = { path = "../iem-engine" }
+iem-audio-io = { path = "../iem-audio-io" }

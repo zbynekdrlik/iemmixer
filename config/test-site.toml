@@ -1,201 +1,188 @@
 # Synthetic site for CI, E2E and tests: the real site's shape (9 members plus
-# the engineer, 24 inputs) with placeholder names and synthetic channel
-# numbers. Never real site data (program spec P6). Input names follow program
-# spec §3.1 (KEYS, CONTENT, the stems) except where the imported REAPER-era
-# code keys on a name pattern until S5: "<MEMBER> mic" (ownership), "gtr"
-# (category), "HANDn mic" and "ENGINEER mic" (tech).
-reaper_url = "http://127.0.0.1:1"
+# the engineer, 24 inputs, the translator) with placeholder names and synthetic
+# channel numbers. Never real site data (program spec P6).
 port = 8080
+engine_pipe = "iemmixer-engine"
 tls = false
 https_domain = "mixer.example.org"
 lan_url = "http://10.0.0.10"
 vapid_subject = "mailto:admin@example.org"
 backup_schedule = ["13:00", "21:00"]
 backup_retention_days = 60
+# CI stand-in for S6's `iemmode event`: a command that succeeds and does nothing.
+back_to_reaper = ["true"]
 
-[dante_outputs]
-MEMBER1 = [71, 72]
-MEMBER2 = [73, 74]
-MEMBER3 = [75, 76]
-MEMBER4 = [77, 78]
-MEMBER5 = [79, 80]
-MEMBER6 = [81, 82]
-MEMBER7 = [83, 84]
-MEMBER8 = [85, 86]
-MEMBER9 = [87, 88]
-ENGINEER = [91, 92]
+# E2E-length band-activity windows (the site default is 300 s / 120 s): the
+# E2E engine plays a sine on every input, so the banner shows after 5 s.
+[activity]
+threshold_dbfs = -50.0
+window_s = 30
+sustain_s = 5
 
 [[members]]
+id = "member1"
 name = "Member1"
-dante_output_l = 71
-dante_output_r = 72
+mix = "member1"
 
 [[members]]
+id = "member2"
 name = "Member2"
-dante_output_l = 73
-dante_output_r = 74
+mix = "member2"
 
 [[members]]
+id = "member3"
 name = "Member3"
-dante_output_l = 75
-dante_output_r = 76
+mix = "member3"
 
 [[members]]
+id = "member4"
 name = "Member4"
-dante_output_l = 77
-dante_output_r = 78
+mix = "member4"
 
 [[members]]
+id = "member5"
 name = "Member5"
-dante_output_l = 79
-dante_output_r = 80
+mix = "member5"
 
 [[members]]
+id = "member6"
 name = "Member6"
-dante_output_l = 81
-dante_output_r = 82
+mix = "member6"
 
 [[members]]
+id = "member7"
 name = "Member7"
-dante_output_l = 83
-dante_output_r = 84
+mix = "member7"
 
 [[members]]
+id = "member8"
 name = "Member8"
-dante_output_l = 85
-dante_output_r = 86
+mix = "member8"
 
 [[members]]
+id = "member9"
 name = "Member9"
-dante_output_l = 87
-dante_output_r = 88
+mix = "member9"
 
 [[members]]
+id = "engineer"
 name = "Engineer"
-dante_output_l = 91
-dante_output_r = 92
+mix = "engineer"
 
+# How the engine inputs are shown: labels, tabs (grouped inputs are stems)
+# and owners (X7).
 [[inputs]]
+id = "mic1"
 name = "MEMBER1 mic"
-dante_input = 101
-default_level_db = 0.0
+owner = "member1"
 
 [[inputs]]
+id = "mic2"
 name = "MEMBER2 mic"
-dante_input = 102
-default_level_db = 0.0
+owner = "member2"
 
 [[inputs]]
+id = "mic3"
 name = "MEMBER3 mic"
-dante_input = 103
-default_level_db = 0.0
+owner = "member3"
 
 [[inputs]]
+id = "mic4"
 name = "MEMBER4 mic"
-dante_input = 104
-default_level_db = 0.0
+owner = "member4"
 
 [[inputs]]
+id = "mic5"
 name = "MEMBER4 gtr"
-dante_input = 105
-default_level_db = 0.0
+owner = "member4"
 
 [[inputs]]
+id = "mic6"
 name = "MEMBER5 mic"
-dante_input = 106
-default_level_db = 0.0
+owner = "member5"
 
 [[inputs]]
+id = "mic7"
 name = "MEMBER6 mic"
-dante_input = 107
-default_level_db = 0.0
+owner = "member6"
 
 [[inputs]]
+id = "mic8"
 name = "MEMBER7 mic"
-dante_input = 108
-default_level_db = 0.0
+owner = "member7"
 
 [[inputs]]
-name = "KEYS"
-dante_input = 109
-default_level_db = 0.0
-category = "mics"
-
-[[inputs]]
+id = "mic9"
 name = "MEMBER8 mic"
-dante_input = 110
-default_level_db = 0.0
+owner = "member8"
 
 [[inputs]]
+id = "mic10"
 name = "MEMBER9 mic"
-dante_input = 111
-default_level_db = 0.0
+owner = "member9"
 
 [[inputs]]
-name = "DRUMS"
-dante_input = 112
-default_level_db = 0.0
-
-[[inputs]]
-name = "BASS"
-dante_input = 113
-default_level_db = 0.0
-
-[[inputs]]
-name = "INST"
-dante_input = 114
-default_level_db = 0.0
-
-[[inputs]]
-name = "OTHER"
-dante_input = 115
-default_level_db = 0.0
-
-[[inputs]]
-name = "BGVS"
-dante_input = 116
-default_level_db = 0.0
-
-[[inputs]]
-name = "CLICK"
-dante_input = 117
-default_level_db = 0.0
-
-[[inputs]]
-name = "GUIDE"
-dante_input = 118
-default_level_db = 0.0
-
-[[inputs]]
-name = "IEMONLY"
-dante_input = 119
-default_level_db = 0.0
-
-[[inputs]]
+id = "hand1"
 name = "HAND1 mic"
-dante_input = 120
-default_level_db = 0.0
-
-[[inputs]]
-name = "HAND2 mic"
-dante_input = 121
-default_level_db = 0.0
-
-[[inputs]]
-name = "HAND3 mic"
-dante_input = 122
-default_level_db = 0.0
-
-[[inputs]]
-name = "ENGINEER mic"
-dante_input = 123
-default_level_db = 0.0
-
-[[inputs]]
-name = "CONTENT"
-dante_input = 124
-default_level_db = 0.0
 category = "tech"
+
+[[inputs]]
+id = "hand2"
+name = "HAND2 mic"
+category = "tech"
+
+[[inputs]]
+id = "hand3"
+name = "HAND3 mic"
+category = "tech"
+
+[[inputs]]
+id = "eng_mic"
+name = "ENGINEER mic"
+category = "tech"
+owner = "engineer"
+
+[[inputs]]
+id = "keys"
+name = "KEYS"
+
+[[inputs]]
+id = "iemonly"
+name = "IEMONLY"
+category = "stems"
+
+[[inputs]]
+id = "content"
+name = "CONTENT"
+category = "tech"
+
+[[inputs]]
+id = "click"
+name = "CLICK"
+
+[[inputs]]
+id = "guide"
+name = "GUIDE"
+
+[[inputs]]
+id = "drums"
+name = "DRUMS"
+
+[[inputs]]
+id = "bass"
+name = "BASS"
+
+[[inputs]]
+id = "inst"
+name = "INST"
+
+[[inputs]]
+id = "other"
+name = "OTHER"
+
+[[inputs]]
+id = "bgvs"
+name = "BGVS"
 
 # Engine topology (program spec §3.1, #20 design note §4): 24 inputs on 32 RX
 # channels, the stems group, and 11 mixes: 9 members and the engineer (stereo)

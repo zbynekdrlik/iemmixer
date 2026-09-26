@@ -11,47 +11,32 @@ pub struct MixerState {
     pub channels: Vec<Channel>,
 }
 
-/// A single channel in the mixer
+/// One channel strip of a mixer page (F5): an engine input or a mix the
+/// page's mix hears (the Mixes tab), keyed by that id.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Channel {
-    /// Input track index (1-based)
-    pub track_index: usize,
-    /// Input track name
+    /// The engine input id or heard mix id (one namespace).
+    pub id: String,
+    /// Label, as the band knows it (e.g. "MEMBER3 mic").
     pub name: String,
-    /// Level in dB
+    /// Level in dB; −60 is off (−∞ on the fader).
     pub level_db: f32,
     /// Pan position in UI range: 0.0 = left, 0.5 = center, 1.0 = right.
-    /// The poller converts REAPER's native -1.0..1.0 to this range on read
-    /// (`reaper_pan_to_ui`); the restore path converts it back
-    /// (`restore_send_pan`/`ui_pan_to_reaper`) before writing to REAPER. (reaperiem#203)
     pub pan: f32,
-    /// Muted state
+    /// Muted, or silenced by a solo on another channel (X2).
     pub muted: bool,
-    /// Track category (mics, stems, tech)
+    /// Tab: "mics", "stems", "tech" or "mixes".
     #[serde(default)]
     pub category: String,
-    /// Stereo pair name (if part of a pair)
+    /// The viewer may open this channel's EQ (X7).
     #[serde(default)]
-    pub stereo_pair: Option<String>,
-    /// Stereo side ("L" or "R")
+    pub eq: bool,
+    /// The page member's own channel (shown first on Main).
     #[serde(default)]
-    pub stereo_side: Option<String>,
+    pub own: bool,
 }
 
-/// Polling response with channels and meters
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PollResponse {
-    /// Member ID
-    pub member_id: String,
-    /// Channel states
-    pub channels: Vec<Channel>,
-    /// Meter levels (track_index -> [left, right] peak levels 0.0-1.0)
-    pub meters: std::collections::HashMap<usize, [f32; 2]>,
-    /// Connection status
-    pub connected: bool,
-}
-
-/// Batch control request for Reset
+/// Batch control request (`POST /api/mixer/{page}/batch`)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchControlRequest {
     /// Operation type
@@ -62,9 +47,7 @@ pub struct BatchControlRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BatchOperation {
-    /// Reset: all to 0dB, unmuted, centered pan
-    Reset,
-    /// MuteAll: mute all input channels (engineer default state — safe, produces silence)
+    /// MuteAll: mute every level of the engineer's mix (F15)
     MuteAll,
 }
 
@@ -81,63 +64,50 @@ pub struct AuthClaims {
     pub iat: u64,
 }
 
-/// Per-member channel customization (pin/hide preferences)
+/// Per-member channel pins and hides (F8), by channel id.
 /// Stored server-side so preferences follow the member to any device
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct Customization {
-    /// Track indices that are pinned to the Main tab
+    /// Channel ids pinned to the Main tab
     #[serde(default)]
-    pub pinned: Vec<usize>,
-    /// Track indices that are hidden from all category tabs
+    pub pinned: Vec<String>,
+    /// Channel ids hidden from the category tabs
     #[serde(default)]
-    pub hidden: Vec<usize>,
+    pub hidden: Vec<String>,
 }
 
 /// Merge incoming channels into existing list.
-/// If the set of track_indices changed (structural shift), fully replace.
+/// If the set of ids changed (structural change), fully replace.
 /// Otherwise, merge values for non-touched channels.
 pub fn merge_or_replace_channels(
     existing: &mut Vec<Channel>,
     incoming: Vec<Channel>,
-    touched: &std::collections::HashMap<usize, bool>,
+    touched: &std::collections::HashMap<String, bool>,
 ) {
     if existing.is_empty() {
         *existing = incoming;
         return;
     }
-
-    // Detect structural change: different set of track_indices
-    let old_indices: std::collections::HashSet<usize> =
-        existing.iter().map(|c| c.track_index).collect();
-    let new_indices: std::collections::HashSet<usize> =
-        incoming.iter().map(|c| c.track_index).collect();
-
-    if old_indices != new_indices {
-        // Structural change (track inserted/removed/shifted) — full replace
+    let old_ids: std::collections::HashSet<&str> = existing.iter().map(|c| c.id.as_str()).collect();
+    let new_ids: std::collections::HashSet<&str> = incoming.iter().map(|c| c.id.as_str()).collect();
+    if old_ids != new_ids {
         *existing = incoming;
         return;
     }
-
-    // Same structure — merge values for non-touched channels
-    for new_ch in &incoming {
-        if !touched.get(&new_ch.track_index).copied().unwrap_or(false)
-            && let Some(ch) = existing
-                .iter_mut()
-                .find(|c| c.track_index == new_ch.track_index)
-        {
-            ch.level_db = new_ch.level_db;
-            ch.muted = new_ch.muted;
-            ch.pan = new_ch.pan;
+    for new_ch in incoming {
+        if touched.get(&new_ch.id).copied().unwrap_or(false) {
+            continue;
+        }
+        if let Some(ch) = existing.iter_mut().find(|c| c.id == new_ch.id) {
+            *ch = new_ch;
         }
     }
 }
 
-/// Returns true when `value` is a pan value within [-1.0, 1.0].
-/// NaN and infinities return false: `Range::contains` uses ordered
-/// comparisons, which always return false for NaN, and infinities are
-/// not ≤ 1.0, so the single range check suffices.
-pub fn is_valid_pan(value: f32) -> bool {
-    (-1.0..=1.0).contains(&value)
+/// Returns true when `value` is a UI pan value within [0.0, 1.0]; NaN and
+/// infinities are not.
+pub fn is_valid_ui_pan(value: f32) -> bool {
+    (0.0..=1.0).contains(&value)
 }
 
 /// API error response
@@ -212,33 +182,28 @@ mod tests {
         assert!(err.message.contains("invalid input"));
     }
 
-    #[test]
-    fn test_channel_default_values() {
-        let channel = Channel {
-            track_index: 1,
-            name: "Test".to_string(),
-            level_db: 0.0,
-            pan: 0.0,
+    fn channel(id: &str, level_db: f32) -> Channel {
+        Channel {
+            id: id.to_string(),
+            name: id.to_uppercase(),
+            level_db,
+            pan: 0.5,
             muted: false,
-            category: String::new(),
-            stereo_pair: None,
-            stereo_side: None,
-        };
-        assert_eq!(channel.track_index, 1);
-        assert!(!channel.muted);
+            category: "mics".to_string(),
+            eq: false,
+            own: false,
+        }
     }
 
     #[test]
-    fn test_batch_operation_serialization() {
-        let op = BatchOperation::Reset;
-        let json = serde_json::to_string(&op).unwrap();
-        assert_eq!(json, "\"reset\"");
-    }
-
-    #[test]
-    fn test_batch_operation_deserialization() {
-        let op: BatchOperation = serde_json::from_str("\"reset\"").unwrap();
-        assert!(matches!(op, BatchOperation::Reset));
+    fn a_channel_serialises_its_id_and_defaults_the_flags() {
+        let json = serde_json::to_string(&channel("mic1", -6.0)).unwrap();
+        assert!(json.starts_with(r#"{"id":"mic1","name":"MIC1""#), "{json}");
+        let old: Channel = serde_json::from_str(
+            r#"{"id":"keys","name":"KEYS","level_db":0.0,"pan":0.5,"muted":true}"#,
+        )
+        .unwrap();
+        assert!(old.muted && !old.eq && !old.own && old.category.is_empty());
     }
 
     #[test]
@@ -246,12 +211,9 @@ mod tests {
         let op = BatchOperation::MuteAll;
         let json = serde_json::to_string(&op).unwrap();
         assert_eq!(json, "\"mute_all\"");
-    }
-
-    #[test]
-    fn test_batch_operation_mute_all_deserialization() {
         let op: BatchOperation = serde_json::from_str("\"mute_all\"").unwrap();
         assert!(matches!(op, BatchOperation::MuteAll));
+        assert!(serde_json::from_str::<BatchOperation>("\"reset\"").is_err());
     }
 
     #[test]
@@ -266,185 +228,70 @@ mod tests {
         assert!(!claims.engineer);
     }
 
-    // ================================================================
-    // is_valid_pan tests — designed to kill all cargo-mutants mutants:
-    // body replacement (true, false), range-endpoint mutations, and
-    // boundary drift. The implementation is a single Range::contains
-    // call, so the mutation surface is small.
-    // ================================================================
-
     #[test]
-    fn test_is_valid_pan_true_in_range() {
-        assert!(is_valid_pan(0.0));
-        assert!(is_valid_pan(0.5));
-        assert!(is_valid_pan(-0.5));
-    }
-
-    #[test]
-    fn test_is_valid_pan_true_at_boundaries() {
-        // These kill `<=` → `<` and `>=` → `>` mutants.
-        assert!(is_valid_pan(-1.0));
-        assert!(is_valid_pan(1.0));
-    }
-
-    #[test]
-    fn test_is_valid_pan_false_just_outside_range() {
-        // These kill body-replace-with-true mutants and catch boundary drift.
-        assert!(!is_valid_pan(-1.0001));
-        assert!(!is_valid_pan(1.0001));
-        assert!(!is_valid_pan(-2.0));
-        assert!(!is_valid_pan(2.0));
-    }
-
-    #[test]
-    fn test_is_valid_pan_false_for_non_finite() {
-        // NaN: Range::contains returns false because NaN comparisons
-        // always return false. Infinities: ±INFINITY is never ≤ 1.0 and
-        // NEG_INFINITY is never ≥ -1.0. So the range check alone
-        // rejects all non-finite inputs without a separate is_finite guard.
-        assert!(!is_valid_pan(f32::NAN));
-        assert!(!is_valid_pan(f32::INFINITY));
-        assert!(!is_valid_pan(f32::NEG_INFINITY));
-    }
-
-    // ================================================================
-    // Customization type tests
-    // ================================================================
-
-    #[test]
-    fn test_customization_default_is_empty() {
-        let cust = Customization::default();
-        assert!(cust.pinned.is_empty());
-        assert!(cust.hidden.is_empty());
-    }
-
-    #[test]
-    fn test_customization_serialization_roundtrip() {
-        let cust = Customization {
-            pinned: vec![1, 5, 8],
-            hidden: vec![3, 7, 12],
-        };
-        let json = serde_json::to_string(&cust).unwrap();
-        let decoded: Customization = serde_json::from_str(&json).unwrap();
-        assert_eq!(cust, decoded);
-    }
-
-    #[test]
-    fn test_customization_deserialize_missing_fields() {
-        // Old data without pinned/hidden should default to empty
-        let json = "{}";
-        let cust: Customization = serde_json::from_str(json).unwrap();
-        assert!(cust.pinned.is_empty());
-        assert!(cust.hidden.is_empty());
-    }
-
-    // ================================================================
-    // "Me" fader input detection - case-sensitive comparison regression
-    // ================================================================
-
-    #[test]
-    fn test_my_input_detection_case_match() {
-        // Reproduces the bug: format must produce uppercase "MIC" to match
-        // channel names that are compared via to_uppercase()
-        let member = "oldmember1";
-        let my_input = format!("{} MIC", member.to_uppercase());
-        let channel_name = "OLDMEMBER1 mic";
-
-        assert_eq!(
-            channel_name.to_uppercase(),
-            my_input,
-            "is_my_input must match when channel is member's mic"
-        );
-    }
-
-    #[test]
-    fn test_my_input_detection_non_member() {
-        let member = "oldmember1";
-        let my_input = format!("{} MIC", member.to_uppercase());
-        let other_channel = "MEMBER2 mic";
-
-        assert_ne!(
-            other_channel.to_uppercase(),
-            my_input,
-            "Other member's mic must NOT match"
-        );
-    }
-
-    // ================================================================
-    // merge_or_replace_channels tests
-    // ================================================================
-
-    fn make_channel(track_index: usize, name: &str, level_db: f32) -> Channel {
-        Channel {
-            track_index,
-            name: name.to_string(),
-            level_db,
-            pan: 0.0,
-            muted: false,
-            category: String::new(),
-            stereo_pair: None,
-            stereo_side: None,
+    fn ui_pan_is_zero_to_one_and_finite() {
+        for ok in [0.0, 0.5, 1.0] {
+            assert!(is_valid_ui_pan(ok), "{ok}");
+        }
+        for bad in [
+            -0.0001,
+            1.0001,
+            -1.0,
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+        ] {
+            assert!(!is_valid_ui_pan(bad), "{bad}");
         }
     }
 
     #[test]
-    fn test_merge_replaces_on_index_shift() {
-        let mut existing = vec![
-            make_channel(1, "OLDMEMBER1 mic", 0.0),
-            make_channel(2, "MEMBER2 mic", 0.0),
-            make_channel(3, "MEMBER3 mic", 0.0),
-        ];
-        let incoming = vec![
-            make_channel(1, "OLDMEMBER1 mic", 0.0),
-            make_channel(3, "MEMBER2 mic", 0.0),
-            make_channel(4, "MEMBER3 mic", 0.0),
-        ];
-        let touched = HashMap::new();
-        merge_or_replace_channels(&mut existing, incoming, &touched);
-        // Must be fully replaced — MEMBER2 at 3, MEMBER3 at 4
-        assert_eq!(existing.len(), 3);
-        assert_eq!(existing[1].name, "MEMBER2 mic");
-        assert_eq!(existing[1].track_index, 3);
-        assert_eq!(existing[2].name, "MEMBER3 mic");
-        assert_eq!(existing[2].track_index, 4);
+    fn customization_uses_ids_and_defaults_to_empty() {
+        let cust = Customization {
+            pinned: vec!["mic1".into(), "member2".into()],
+            hidden: vec!["keys".into()],
+        };
+        let json = serde_json::to_string(&cust).unwrap();
+        assert_eq!(json, r#"{"pinned":["mic1","member2"],"hidden":["keys"]}"#);
+        assert_eq!(serde_json::from_str::<Customization>(&json).unwrap(), cust);
+        assert_eq!(
+            serde_json::from_str::<Customization>("{}").unwrap(),
+            Customization::default()
+        );
     }
 
     #[test]
-    fn test_merge_preserves_touched_when_same_structure() {
-        let mut existing = vec![
-            make_channel(1, "OLDMEMBER1 mic", -10.0),
-            make_channel(2, "MEMBER2 mic", -5.0),
-        ];
-        let incoming = vec![
-            make_channel(1, "OLDMEMBER1 mic", -20.0),
-            make_channel(2, "MEMBER2 mic", -15.0),
-        ];
-        let mut touched = HashMap::new();
-        touched.insert(2_usize, true); // MEMBER2 fader is being dragged
+    fn merge_replaces_when_the_ids_change() {
+        let mut existing = vec![channel("mic1", 0.0), channel("mic2", 0.0)];
+        merge_or_replace_channels(
+            &mut existing,
+            vec![channel("mic1", -3.0), channel("keys", -9.0)],
+            &HashMap::new(),
+        );
+        let ids: Vec<&str> = existing.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["mic1", "keys"]);
+        assert_eq!(existing[1].level_db, -9.0);
+    }
+
+    #[test]
+    fn merge_keeps_touched_channels_when_the_ids_are_the_same() {
+        let mut existing = vec![channel("mic1", -10.0), channel("mic2", -5.0)];
+        let mut incoming = vec![channel("mic1", -20.0), channel("mic2", -15.0)];
+        incoming[0].muted = true;
+        let touched = HashMap::from([("mic2".to_string(), true), ("mic1".to_string(), false)]);
         merge_or_replace_channels(&mut existing, incoming, &touched);
-        // OLDMEMBER1 updated, MEMBER2 preserved (touched)
         assert_eq!(existing[0].level_db, -20.0);
-        assert_eq!(existing[1].level_db, -5.0); // preserved
+        assert!(existing[0].muted);
+        assert_eq!(existing[1].level_db, -5.0);
     }
 
     #[test]
-    fn test_merge_populates_empty() {
+    fn merge_populates_an_empty_list_and_replaces_on_a_shift_even_when_touched() {
         let mut existing: Vec<Channel> = vec![];
-        let incoming = vec![make_channel(1, "OLDMEMBER1 mic", 0.0)];
-        merge_or_replace_channels(&mut existing, incoming, &HashMap::new());
+        merge_or_replace_channels(&mut existing, vec![channel("mic1", 0.0)], &HashMap::new());
         assert_eq!(existing.len(), 1);
-        assert_eq!(existing[0].name, "OLDMEMBER1 mic");
-    }
-
-    #[test]
-    fn test_full_replace_on_shift_ignores_touched() {
-        let mut existing = vec![make_channel(2, "MEMBER2 mic", -5.0)];
-        let incoming = vec![make_channel(3, "MEMBER2 mic", -15.0)];
-        let mut touched = HashMap::new();
-        touched.insert(2_usize, true);
-        merge_or_replace_channels(&mut existing, incoming, &touched);
-        // Structural change — full replace even though old index was touched
-        assert_eq!(existing[0].track_index, 3);
-        assert_eq!(existing[0].level_db, -15.0);
+        let touched = HashMap::from([("mic1".to_string(), true)]);
+        merge_or_replace_channels(&mut existing, vec![channel("mic9", -15.0)], &touched);
+        assert_eq!(existing[0].id, "mic9");
     }
 }

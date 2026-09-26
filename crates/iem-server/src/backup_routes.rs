@@ -1,78 +1,48 @@
-//! REST API routes for backup management (engineer-only)
+//! Backups (F19) and restore with preview (F31), engineer only.
 
 use axum::{
     Json, Router,
     extract::{Path, State},
-    http::{StatusCode, header},
+    http::StatusCode,
     routing::{get, post},
 };
 use iem_core::{
     ApiError,
     backup::{BackupInfo, MixerBackup, RestorePreview, RestoreResult},
 };
+use iem_engine_proto::{Cmd, Source};
 
 use crate::AppState;
 
-/// Verify that the request carries a valid engineer JWT.
-///
-/// Returns `Ok(())` on success, `Err(403)` if the token is missing,
-/// invalid, or belongs to a non-engineer.
-async fn verify_engineer(
-    state: &AppState,
-    headers: &axum::http::HeaderMap,
-) -> Result<(), (StatusCode, Json<ApiError>)> {
-    let config = state.config.read().await;
-    let token = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|h| h.strip_prefix("Bearer "))
-        .unwrap_or("");
+type Reject = (StatusCode, Json<ApiError>);
 
-    let claims = crate::auth::extract_claims(token, &config.jwt_secret);
-    drop(config);
-
-    match claims {
-        Some(c) if c.engineer => Ok(()),
-        _ => Err((
-            StatusCode::FORBIDDEN,
-            Json(ApiError::new("FORBIDDEN", "engineer access required")),
-        )),
-    }
-}
-
-/// Backup routes — all endpoints require an engineer JWT.
 pub fn backup_routes() -> Router<AppState> {
     Router::new()
-        // List all backups (newest-first)
         .route("/api/backups", get(list_backups))
-        // Get a specific backup by filename
         .route("/api/backups/{filename}", get(get_backup))
-        // Preview what a restore would change
         .route("/api/backups/{filename}/preview", post(preview_backup))
-        // Apply a backup (full restore)
         .route("/api/backups/{filename}/restore", post(restore_backup))
-        // Trigger a manual backup capture
         .route("/api/backups/capture", post(trigger_capture))
 }
 
-/// `GET /api/backups` — return list of available backup files (newest first).
-async fn list_backups(
-    State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
-) -> Result<Json<Vec<BackupInfo>>, (StatusCode, Json<ApiError>)> {
-    verify_engineer(&state, &headers).await?;
-    let list = state.backup_store.list();
-    Ok(Json(list))
+async fn engineer(state: &AppState, headers: &axum::http::HeaderMap) -> Result<(), Reject> {
+    crate::routes::require_engineer(state, headers)
+        .await
+        .map(|_| ())
+        .map_err(|(code, body)| {
+            if code == StatusCode::UNAUTHORIZED {
+                (
+                    StatusCode::FORBIDDEN,
+                    Json(ApiError::new("FORBIDDEN", "engineer access required")),
+                )
+            } else {
+                (code, body)
+            }
+        })
 }
 
-/// `GET /api/backups/:filename` — return full backup contents.
-async fn get_backup(
-    State(state): State<AppState>,
-    Path(filename): Path<String>,
-    headers: axum::http::HeaderMap,
-) -> Result<Json<MixerBackup>, (StatusCode, Json<ApiError>)> {
-    verify_engineer(&state, &headers).await?;
-    state.backup_store.load(&filename).map(Json).map_err(|e| {
+fn load(state: &AppState, filename: &str) -> Result<MixerBackup, Reject> {
+    state.backup_store.load(filename).map_err(|e| {
         if e.starts_with("invalid filename") {
             (
                 StatusCode::BAD_REQUEST,
@@ -84,106 +54,149 @@ async fn get_backup(
     })
 }
 
-/// `POST /api/backups/:filename/preview` — diff backup vs. live state.
+fn unavailable() -> Reject {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(ApiError::new(
+            "ENGINE_UNAVAILABLE",
+            "The engine is not connected",
+        )),
+    )
+}
+
+/// A backup of the running state, saved; `None` when the engine never spoke.
+pub fn capture_now(state: &AppState) -> Result<(String, MixerBackup), String> {
+    let site = state
+        .site()
+        .ok_or("the engine has not announced its topology")?;
+    if !state.engine.mirror().synced {
+        return Err("the engine state is not synced".into());
+    }
+    let b = crate::backup::capture(
+        &site,
+        &state.engine.mirror(),
+        &state.band,
+        chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+    );
+    let name = state.backup_store.save(&b).map_err(|e| e.to_string())?;
+    Ok((name, b))
+}
+
+async fn list_backups(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<Vec<BackupInfo>>, Reject> {
+    engineer(&state, &headers).await?;
+    Ok(Json(state.backup_store.list()))
+}
+
+async fn get_backup(
+    State(state): State<AppState>,
+    Path(filename): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<MixerBackup>, Reject> {
+    engineer(&state, &headers).await?;
+    load(&state, &filename).map(Json)
+}
+
+fn preview_of(state: &AppState, b: &MixerBackup) -> Result<RestorePreview, Reject> {
+    let site = state.site().ok_or_else(unavailable)?;
+    let current = state.engine.mirror().state.clone();
+    let band = std::sync::Arc::clone(&state.band);
+    Ok(crate::backup::preview(
+        &site,
+        &current,
+        &move |m: &str| band.customization(m).ok(),
+        b,
+    ))
+}
+
 async fn preview_backup(
     State(state): State<AppState>,
     Path(filename): Path<String>,
     headers: axum::http::HeaderMap,
-) -> Result<Json<RestorePreview>, (StatusCode, Json<ApiError>)> {
-    verify_engineer(&state, &headers).await?;
-
-    let backup = state
-        .backup_store
-        .load(&filename)
-        .map_err(|e| (StatusCode::NOT_FOUND, Json(ApiError::new("NOT_FOUND", &e))))?;
-
-    crate::backup_restore::preview_restore(&state, &backup)
-        .await
-        .map(Json)
-        .map_err(|e| {
-            tracing::error!(filename = %filename, error = %e, "backup preview failed");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiError::new("PREVIEW_FAILED", &e)),
-            )
-        })
+) -> Result<Json<RestorePreview>, Reject> {
+    engineer(&state, &headers).await?;
+    let b = load(&state, &filename)?;
+    preview_of(&state, &b).map(Json)
 }
 
-/// `POST /api/backups/:filename/restore` — apply backup to live system.
 async fn restore_backup(
     State(state): State<AppState>,
     Path(filename): Path<String>,
     headers: axum::http::HeaderMap,
-) -> Result<Json<RestoreResult>, (StatusCode, Json<ApiError>)> {
-    verify_engineer(&state, &headers).await?;
-
-    let backup = state
-        .backup_store
-        .load(&filename)
-        .map_err(|e| (StatusCode::NOT_FOUND, Json(ApiError::new("NOT_FOUND", &e))))?;
-
-    crate::backup_restore::apply_restore(&state, &backup)
+) -> Result<Json<RestoreResult>, Reject> {
+    engineer(&state, &headers).await?;
+    let b = load(&state, &filename)?;
+    let preview = preview_of(&state, &b)?;
+    state
+        .engine
+        .request_applied(
+            Cmd::ImportState {
+                state: b.state.clone(),
+                baseline: false,
+            },
+            None,
+        )
         .await
-        .map(Json)
         .map_err(|e| {
-            tracing::error!(filename = %filename, error = %e, "backup restore failed");
+            tracing::error!(%filename, error = %e, "restore failed");
             (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiError::new("RESTORE_FAILED", &e)),
+                StatusCode::BAD_GATEWAY,
+                Json(ApiError::new("RESTORE_FAILED", e.to_string())),
             )
-        })
+        })?;
+    let site = state.site().ok_or_else(unavailable)?;
+    for (member, c) in &b.customizations {
+        if site.member(member).is_none() {
+            continue;
+        }
+        let keep = |list: &[Source]| -> Vec<Source> {
+            list.iter()
+                .filter(|s| match s {
+                    Source::Input(i) => site.input(&i.0).is_some(),
+                    Source::Mix(m) => site.mix(m).is_some(),
+                })
+                .cloned()
+                .collect()
+        };
+        if let Err(e) = state
+            .band
+            .save_customization(member, keep(&c.pinned), keep(&c.hidden))
+        {
+            tracing::error!(%member, error = %e, "restoring pins and hides failed");
+        }
+    }
+    tracing::warn!(%filename, changes = preview.changes.len(), "backup restored");
+    Ok(Json(RestoreResult {
+        restored_count: preview.changes.len(),
+        skipped: preview.skipped,
+    }))
 }
 
-/// `POST /api/backups/capture` — capture current mixer state and save as backup.
-///
-/// Returns the `BackupInfo` plus a `CaptureAudit` for the newly created backup file.
 async fn trigger_capture(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    verify_engineer(&state, &headers).await?;
-
-    let (backup, audit) = crate::backup_capture::capture_mixer_state(&state)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "backup capture failed");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiError::new("CAPTURE_FAILED", &e)),
-            )
-        })?;
-
-    let filename = state.backup_store.save(&backup).map_err(|e| {
-        tracing::error!(error = %e, "backup save failed");
+) -> Result<Json<BackupInfo>, Reject> {
+    engineer(&state, &headers).await?;
+    let (filename, b) = capture_now(&state).map_err(|e| {
+        tracing::error!(error = %e, "backup capture failed");
         (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiError::new("SAVE_FAILED", e.to_string())),
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ApiError::new("CAPTURE_FAILED", e)),
         )
     })?;
-
-    // Build BackupInfo from what we just saved
     let size_bytes = state
         .backup_store
         .list()
         .into_iter()
-        .find(|info| info.filename == filename)
-        .map(|info| info.size_bytes)
-        .unwrap_or(0);
-
-    let info = BackupInfo {
+        .find(|i| i.filename == filename)
+        .map_or(0, |i| i.size_bytes);
+    Ok(Json(BackupInfo {
         filename,
-        timestamp: backup.timestamp,
+        timestamp: b.timestamp.clone(),
         size_bytes,
-        send_count: backup.sends.len(),
-        track_count: backup.track_layout.len(),
-    };
-
-    Ok(Json(serde_json::json!({
-        "filename": info.filename,
-        "timestamp": info.timestamp,
-        "size_bytes": info.size_bytes,
-        "send_count": info.send_count,
-        "track_count": info.track_count,
-        "audit": audit,
-    })))
+        send_count: b.level_count(),
+        track_count: b.state.mixes.len(),
+    }))
 }
