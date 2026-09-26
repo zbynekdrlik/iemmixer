@@ -25,6 +25,12 @@ pub const SHELF_GAIN_MIN: f64 = 1e-6;
 pub const SHELF_SLOPE_MAX: f64 = 1.2;
 /// Floor of the gain ramp in dB (gain 0 is −∞ dB).
 const RAMP_DB_MIN: f64 = -120.0;
+/// While a band moves, its filter is redesigned every this many samples and
+/// exactly at the target on the last step. A design costs several
+/// transcendental functions; 220 bands moving at once must fit one 32-sample
+/// period at 96 kHz (S3 benchmark). The count runs per sample, so the output
+/// still depends only on sample indices, never on the block size.
+pub const DESIGN_EVERY: u32 = 16;
 /// Filter states below this are flushed to zero (denormals).
 const DENORMAL: f64 = 1e-30;
 
@@ -213,6 +219,8 @@ struct BandState<const CH: usize> {
     coefs: Coefs,
     state: [[f64; 2]; CH],
     len: u32,
+    /// Samples since the current parameter ramp started.
+    step: u32,
 }
 
 fn freq_key(b: &Band) -> f64 {
@@ -242,6 +250,7 @@ impl<const CH: usize> BandState<CH> {
             coefs: design(&b, fs),
             state: [[0.0; 2]; CH],
             len,
+            step: 0,
         }
     }
 
@@ -257,6 +266,10 @@ impl<const CH: usize> BandState<CH> {
             self.wet = wet;
         } else {
             self.target = b;
+            let keys = (freq_key(&b), gain_key(&b), bw_key(&b));
+            if keys != (self.freq.target(), self.gain.target(), self.bw.target()) {
+                self.step = 0;
+            }
             self.freq.set(freq_key(&b));
             self.gain.set(gain_key(&b));
             self.bw.set(bw_key(&b));
@@ -271,27 +284,28 @@ impl<const CH: usize> BandState<CH> {
         self.freq.is_moving() || self.gain.is_moving() || self.bw.is_moving()
     }
 
-    /// Advance the ramps one sample; recompute the filter while it moves.
+    /// Advance the ramps one sample; redesign the filter every
+    /// [`DESIGN_EVERY`] samples while it moves, and at the target at the end.
     fn advance(&mut self, fs: f64) {
         self.wet.tick();
         if self.moving() {
-            let f = self.freq.tick().exp2();
+            let f = self.freq.tick();
             let db = self.gain.tick();
-            let bw = self.bw.tick().exp2();
-            self.coefs = if self.moving() {
-                let gain_lin = 10f64.powf(db / 20.0);
-                design(
+            let bw = self.bw.tick();
+            self.step = self.step.wrapping_add(1);
+            if !self.moving() {
+                self.coefs = design(&self.target, fs);
+            } else if self.step.is_multiple_of(DESIGN_EVERY) {
+                self.coefs = design(
                     &Band {
-                        freq_hz: f,
-                        gain_lin,
-                        bw_oct: bw,
+                        freq_hz: f.exp2(),
+                        gain_lin: 10f64.powf(db / 20.0),
+                        bw_oct: bw.exp2(),
                         ..self.target
                     },
                     fs,
-                )
-            } else {
-                design(&self.target, fs)
-            };
+                );
+            }
         }
         if self.bypassed() {
             self.state = [[0.0; 2]; CH];
@@ -372,6 +386,15 @@ impl<const CH: usize> Equalizer<CH> {
     }
 
     /// Zero every filter state (node reset after a sanitiser trip, X1).
+    /// True while the EQ passes its input through unchanged: every band
+    /// bypassed and the global gain resting at exactly 1 (the engine then
+    /// skips `process`, which would return the input bit for bit).
+    pub fn is_identity(&self) -> bool {
+        !self.global.is_moving()
+            && self.global.value() == 1.0
+            && self.bands.iter().all(BandState::bypassed)
+    }
+
     pub fn reset(&mut self) {
         for b in &mut self.bands {
             b.state = [[0.0; 2]; CH];
@@ -511,6 +534,47 @@ mod tests {
             .zip(b)
             .map(|(x, y)| (x - y).abs())
             .fold(0.0, f64::max)
+    }
+
+    fn run_silence(eq: &mut Equalizer<2>, n: usize) {
+        let (mut l, mut r) = (vec![0.0; n], vec![0.0; n]);
+        eq.process([l.as_mut_slice(), r.as_mut_slice()]);
+    }
+
+    #[test]
+    fn identity_only_when_every_band_is_bypassed_at_unity() {
+        let flat = EqParams::standard_flat();
+        let mut eq = Equalizer::<2>::new(&flat, SR);
+        assert!(eq.is_identity());
+        let x: Vec<f64> = (0..64)
+            .map(|i| ((i * 37) % 11) as f64 / 7.0 - 0.6)
+            .collect();
+        let (mut l, mut r) = (x.clone(), x.clone());
+        eq.process([l.as_mut_slice(), r.as_mut_slice()]);
+        assert_eq!((&l, &r), (&x, &x));
+        let mut on = flat;
+        on.bands[2] = band(BandKind::Peak, 1000.0, 2.0, 1.0);
+        eq.set(&on);
+        assert!(!eq.is_identity());
+        run_silence(&mut eq, RAMP);
+        assert!(!eq.is_identity());
+        on.bands[2].enabled = false;
+        eq.set(&on);
+        assert!(!eq.is_identity());
+        run_silence(&mut eq, RAMP - 1);
+        assert!(!eq.is_identity());
+        run_silence(&mut eq, 1);
+        assert!(eq.is_identity());
+        let mut half = flat;
+        half.global_gain = 0.5;
+        eq.set(&half);
+        assert!(!eq.is_identity());
+        run_silence(&mut eq, RAMP);
+        assert!(!eq.is_identity());
+        eq.set(&flat);
+        assert!(!eq.is_identity());
+        run_silence(&mut eq, RAMP);
+        assert!(eq.is_identity());
     }
 
     #[test]
@@ -668,6 +732,42 @@ mod tests {
         eq.process([&mut one]);
         assert!(!eq.bands[2].moving());
         assert_eq!(eq.bands[2].coefs, design(&to.bands[2], SR));
+    }
+
+    #[test]
+    fn a_moving_band_is_redesigned_every_16_samples() {
+        let from = single(band(BandKind::Peak, 1000.0, 1.0, 1.0));
+        let to = single(band(BandKind::Peak, 4000.0, 4.0, 0.5));
+        let mut eq = Equalizer::<1>::new(&from, SR);
+        eq.set(&to);
+        let start = eq.bands[2].coefs;
+        let mut run = |n: usize| {
+            let mut x = vec![0.0; n];
+            eq.process([&mut x]);
+            eq.bands[2].coefs
+        };
+        assert_eq!(run(15), start, "no redesign before the 16th sample");
+        let first = run(1);
+        assert_ne!(first, start);
+        assert_eq!(run(15), first);
+        assert_ne!(run(1), first);
+        // A set with unchanged targets keeps the redesign phase.
+        let mut eq = Equalizer::<1>::new(&from, SR);
+        eq.set(&to);
+        let mut x = vec![0.0; 10];
+        eq.process([&mut x]);
+        eq.set(&to);
+        let mut y = vec![0.0; 6];
+        eq.process([&mut y]);
+        assert_ne!(eq.bands[2].coefs, start, "redesigned at sample 16");
+        // A new target restarts the count.
+        let other = single(band(BandKind::Peak, 2000.0, 2.0, 1.0));
+        eq.set(&other);
+        let before = eq.bands[2].coefs;
+        let mut z = vec![0.0; 15];
+        eq.process([&mut z]);
+        assert_eq!(eq.bands[2].coefs, before);
+        assert_eq!(DESIGN_EVERY, 16);
     }
 
     #[test]

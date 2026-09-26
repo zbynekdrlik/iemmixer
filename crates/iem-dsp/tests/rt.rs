@@ -48,6 +48,7 @@ fn eq_process_set_reset_and_response_do_not_allocate() {
     let (mut l, mut r) = (vec![0.1; 4096], vec![-0.2; 4096]);
     allocation_free(|| {
         eq.set(&q);
+        assert!(!eq.is_identity());
         eq.process([l.as_mut_slice(), r.as_mut_slice()]);
         eq.reset();
         eq.process([l.as_mut_slice(), r.as_mut_slice()]);
@@ -65,6 +66,7 @@ fn gains_meters_ramps_and_the_sanitiser_do_not_allocate() {
     let (mut l, mut r) = (vec![0.25; 512], vec![f64::NAN; 512]);
     allocation_free(|| {
         g.set(0.5, true, -0.3);
+        assert!(g.steady().is_none());
         let mut acc = 0.0;
         for _ in 0..2000 {
             let (a, b) = g.tick();

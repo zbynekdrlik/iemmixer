@@ -1,0 +1,1 @@
+{"type": "request", "id": 4, "cmd": {"op": "batch", "ops": [{"op": "set_bus", "bus": "member2", "muted": true}, {"op": "start_listen", "bus": "engineer"}]}}

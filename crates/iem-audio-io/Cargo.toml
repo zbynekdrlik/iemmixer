@@ -1,0 +1,10 @@
+[package]
+name = "iem-audio-io"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "iemmixer audio backends: the Process trait, deterministic Offline and paced NullRt (ASIO follows in S6)"
+
+[dependencies]

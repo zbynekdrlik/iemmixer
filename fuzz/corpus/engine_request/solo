@@ -1,0 +1,1 @@
+{"type": "request", "id": 3, "cmd": {"op": "set_solo", "scope": "member3", "sources": [{"input": "mic2"}]}}

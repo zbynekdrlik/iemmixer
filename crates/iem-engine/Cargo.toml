@@ -1,0 +1,33 @@
+[package]
+name = "iem-engine"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+# D1(a): the engine links the GPL MGA limiter port, so the engine is GPL too.
+license = "GPL-3.0-or-later"
+repository.workspace = true
+description = "iemmixer audio engine: site graph, real-time mixer, state, persistence and pipes"
+
+[dependencies]
+iem-audio-io = { path = "../iem-audio-io" }
+iem-dsp = { path = "../iem-dsp" }
+iem-engine-proto = { path = "../iem-engine-proto" }
+iem-limiter-mga = { path = "../iem-limiter-mga" }
+interprocess = "2.4"
+rtrb = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["raw_value", "float_roundtrip"] }
+sha2 = "0.10"
+thiserror = "2.0"
+toml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+triple_buffer = "9"
+
+[dev-dependencies]
+assert_no_alloc = { version = "1.1.2", default-features = false, features = ["warn_debug", "warn_release"] }
+tempfile = "3"
+
+[lints.rust]
+# `iem_rtsan` is set by the rtsan CI job (nightly, -Zsanitizer=realtime).
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(iem_rtsan)"] }

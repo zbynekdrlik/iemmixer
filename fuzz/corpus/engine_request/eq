@@ -1,0 +1,1 @@
+{"type": "request", "id": 6, "cmd": {"op": "set_eq", "owner": {"bus": "member1"}, "eq": {"gain_db": 0.0, "bands": [{"kind": "high_pass", "enabled": true, "freq_hz": 80.0, "gain_db": 0.0, "bw_oct": 2.0}, {}, {}, {}, {}]}}}

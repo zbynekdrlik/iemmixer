@@ -31,6 +31,11 @@ allow = ["OpenSSL"]
 crate = "iem-limiter-mga"
 allow = ["GPL-3.0-or-later"]
 
+# D1(a): the engine links the limiter, so the engine binary is GPL (S3)
+[[licenses.exceptions]]
+crate = "iem-engine"
+allow = ["GPL-3.0-or-later"]
+
 [bans]
 multiple-versions = "allow"
 wildcards = "allow"

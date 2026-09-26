@@ -1,9 +1,9 @@
 [workspace]
-members = ["crates/iem-core", "crates/iem-server", "crates/iem-ui", "crates/iem-tray", "crates/iem-rpp", "crates/iem-dsp", "crates/iem-limiter-mga"]
+members = ["crates/iem-core", "crates/iem-server", "crates/iem-ui", "crates/iem-tray", "crates/iem-rpp", "crates/iem-dsp", "crates/iem-limiter-mga", "crates/iem-engine-proto", "crates/iem-audio-io", "crates/iem-engine"]
 resolver = "2"
 
 [workspace.package]
-version = "2.0.0-dev.3"
+version = "2.0.0-dev.4"
 edition = "2024"
 authors = ["iemmixer contributors"]
 license = "MIT OR Apache-2.0"

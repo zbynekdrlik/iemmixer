@@ -12,6 +12,7 @@ Gen 2 of the band's in-ear-monitor mixer: a native Rust audio engine replacing R
 - Playwright E2E (console guard, env PINs, login budgets) → `.claude/rules/e2e.md`
 - CI Rust toolchain, `--locked`, mutation gate → `.claude/rules/ci-rust-toolchain.md`
 - Leptos `view!` gotchas and disposal safety → `.claude/rules/leptos-view-macro.md`
+- Engine core, RT contract at B = 32, site `[engine]` table, protocol, persistence, pipes, rtsan/bench → `.claude/rules/engine.md`
 - Pan domains + send_index (REAPER-era server code) → `.claude/rules/pan-and-send-domains.md`
 - Cloudflare tunnel watchdog, LAN URL / public host → `.claude/rules/tunnel-watchdog.md`
 - DSP kernels, EQ/pan/limiter parity, golden tolerances → `.claude/rules/dsp-parity.md`

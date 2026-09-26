@@ -1279,6 +1279,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "doctest-file"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2db04e74f0a9a93103b50e90b96024c9b2bdca8bce6a632ec71b88736d3d359"
+
+[[package]]
 name = "dom_query"
 version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2577,8 +2583,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "iem-audio-io"
+version = "2.0.0-dev.4"
+
+[[package]]
 name = "iem-core"
-version = "2.0.0-dev.3"
+version = "2.0.0-dev.4"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2593,7 +2603,7 @@ dependencies = [
 
 [[package]]
 name = "iem-dsp"
-version = "2.0.0-dev.3"
+version = "2.0.0-dev.4"
 dependencies = [
  "assert_no_alloc",
  "iem-rpp",
@@ -2601,8 +2611,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "iem-engine"
+version = "2.0.0-dev.4"
+dependencies = [
+ "assert_no_alloc",
+ "iem-audio-io",
+ "iem-dsp",
+ "iem-engine-proto",
+ "iem-limiter-mga",
+ "interprocess",
+ "rtrb",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "toml 0.9.12+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+ "triple_buffer",
+]
+
+[[package]]
+name = "iem-engine-proto"
+version = "2.0.0-dev.4"
+dependencies = [
+ "iem-dsp",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "iem-limiter-mga"
-version = "2.0.0-dev.3"
+version = "2.0.0-dev.4"
 dependencies = [
  "assert_no_alloc",
  "iem-rpp",
@@ -2610,7 +2651,7 @@ dependencies = [
 
 [[package]]
 name = "iem-rpp"
-version = "2.0.0-dev.3"
+version = "2.0.0-dev.4"
 dependencies = [
  "base64 0.22.1",
  "serde",
@@ -2622,7 +2663,7 @@ dependencies = [
 
 [[package]]
 name = "iem-server"
-version = "2.0.0-dev.3"
+version = "2.0.0-dev.4"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2663,7 +2704,7 @@ dependencies = [
 
 [[package]]
 name = "iem-tray"
-version = "2.0.0-dev.3"
+version = "2.0.0-dev.4"
 dependencies = [
  "anyhow",
  "dirs",
@@ -2683,7 +2724,7 @@ dependencies = [
 
 [[package]]
 name = "iem-ui"
-version = "2.0.0-dev.3"
+version = "2.0.0-dev.4"
 dependencies = [
  "base64 0.22.1",
  "console_error_panic_hook",
@@ -2748,6 +2789,19 @@ name = "interpolator"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "71dd52191aae121e8611f1e8dc3e324dd0dd1dee1e6dd91d10ee07a3cfb4d9d8"
+
+[[package]]
+name = "interprocess"
+version = "2.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6cb02ffbf25e8ef0f4a95bff054eef75f6d1bf16919474cf2caa63b21997478a"
+dependencies = [
+ "doctest-file",
+ "libc",
+ "recvmsg",
+ "widestring",
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "ipnet"
@@ -4588,6 +4642,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "recvmsg"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3edd4d5d42c92f0a659926464d4cce56b562761267ecf0f469d85b7de384175"
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4768,6 +4828,12 @@ dependencies = [
  "syn_derive",
  "thiserror 2.0.18",
 ]
+
+[[package]]
+name = "rtrb"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9278fb35b3e730abe136e9b395b5b81b96d06b9f5478a50f0c8430a2237b22de"
 
 [[package]]
 name = "rust-embed"
@@ -6553,6 +6619,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "triple_buffer"
+version = "9.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e875ab7068a75b74f419da453927e05527c36f0001b3c7aad3ce443640683487"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
 name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7082,6 +7157,12 @@ dependencies = [
  "windows",
  "windows-core 0.61.2",
 ]
+
+[[package]]
+name = "widestring"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72069c3113ab32ab29e5584db3c6ec55d416895e60715417b5b883a357c3e471"
 
 [[package]]
 name = "winapi"

@@ -65,6 +65,12 @@ exclude_re = [
   "iem-ui/src/pages/mixer/helpers\\.rs.*ws_send",
   # Push subscription through the service worker's PushManager.
   "iem-ui/src/pages/mixer/push\\.rs.*subscribe_to_push",
+  # Engine (S3): effects with no observable outcome through the engine's API.
+  # fsync of the state directory: durability shows only across a power loss.
+  "iem-engine/src/persist\\.rs.*replace sync_dir -> ",
+  # The NullRt pacing thread's end after release; NullRt::stop itself is
+  # tested in iem-audio-io (stop_ends_a_running_stream).
+  "iem-engine/src/engine\\.rs.*replace <impl Driver for NullRtDriver>::stop with \\(\\)",
   # Equivalent `>` → `>=` (S2): at equality both branches give the same
   # result, so no input can tell them apart.
   # |x| equal to the running peak: assigning the same value changes nothing.
@@ -77,4 +83,13 @@ exclude_re = [
   "iem-dsp/src/eq\\.rs.*replace > with >= in gain_key",
   # GR meter ±0: 20·log10(0) = −∞, floored by max(−150) to the else branch's −150.
   "iem-limiter-mga/src/lib\\.rs.*replace > with >= in Limiter::gr_db",
+  # Equivalent (S3). `trips > 0` only skips adding zero trips to the counters.
+  "iem-engine/src/rt\\.rs.*replace > with >= in Processor::render_buses",
+  # Equivalent (S3). With the budget spent, `budget >= 0` also cuts the segment at the
+  # waiting command; rendering in two pieces is bit-identical (block-size invariance tests).
+  "iem-engine/src/rt\\.rs:925:.*replace > with >= in <impl Process for Processor>::process",
+  # The fade wait's `elapsed < FADE_WAIT`: differs only at the exact nanosecond.
+  "iem-engine/src/control\\.rs.*replace < with <= in Control::shutdown_now",
+  # Unobservable (S3): the `!` only decides whether "solos cleared" is logged.
+  "iem-engine/src/control\\.rs.*delete ! in Control::tick",
 ]

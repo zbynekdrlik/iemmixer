@@ -1,0 +1,45 @@
+name: fuzz-nightly
+
+# The nightly shard of the engine's coverage-guided fuzzing (program spec
+# 5.2; S3 design note 4): 30 minutes of the request parser and control core.
+# Per-push runs are 60 s in ci.yml's fuzz job.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz-nightly:
+    name: fuzz-nightly
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Nightly toolchain for cargo-fuzz (pinned)
+        run: rustup toolchain install nightly-2026-09-20 --profile minimal
+      - name: cargo-fuzz (pinned)
+        run: cargo install cargo-fuzz --locked --version 0.13.2
+      - name: The fuzz lockfile is current
+        run: cargo metadata --locked --manifest-path fuzz/Cargo.toml --format-version 1 > /dev/null
+      - name: Coverage-guided fuzzing (30 min)
+        working-directory: fuzz
+        run: cargo +nightly-2026-09-20 fuzz run engine_request -- -max_total_time=1800
+      - name: Upload crashes
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts/
+          retention-days: 14
