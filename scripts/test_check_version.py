@@ -81,7 +81,7 @@ class ConsistencyTests(unittest.TestCase):
         write_tree(self.root, "2.0.0-dev.2", fuzz_lock_versions=stale)
         errors = cv.consistency_errors(self.root)
         # Only the workspace crates are checked; the fuzz crate has its own version.
-        self.assertEqual(sorted(e.split()[3] for e in errors), ["iem-dsp", "iem-engine", "iem-engine-proto"])
+        self.assertEqual(sorted(e.split()[2] for e in errors), ["iem-dsp", "iem-engine", "iem-engine-proto"])
         self.assertTrue(all(e.startswith("fuzz/Cargo.lock has ") for e in errors))
 
 
