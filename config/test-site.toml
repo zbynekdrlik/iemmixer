@@ -201,9 +201,9 @@ category = "tech"
 # channels, 9 member buses and the engineer (stereo TX, EQ, limiter), their 10
 # stems buses, the translator (one TX channel) and the master; 268 sends.
 # Synthetic channels: RX 101-132, TX 71-88 (members), 91/92 (engineer),
-# 89/90 (master), 93 (translator).
+# 89/90 (master), 93 (translator), in a synthetic 160-channel map.
 [engine]
-channels = 128
+channels = 160
 engineer = "engineer"
 
 [[engine.inputs]]
