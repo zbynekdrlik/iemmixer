@@ -573,6 +573,8 @@ mod tests {
         assert!(!reach("mic1", "translator"));
         assert!(reach("hand1", "translator"));
         assert!(reach("drums", "member3"));
+        // drums feeds member3.stems, but a stems bus has no TX to reach.
+        assert!(!reach("drums", "member3.stems"));
         assert!(reach("drums", "master"));
         assert!(!reach("drums", "translator"));
     }
@@ -735,6 +737,9 @@ tap = "pre"
             replaced("tx = [5]", "tx = [4]"),
             SiteError::ChannelReused { ch: 4 }
         );
+        // The last channel of the map is in range.
+        let last = compile(&parse(&BASE.replacen("rx = [1]", "rx = [16]", 1)).unwrap()).unwrap();
+        assert_eq!(last.rx, vec![16, 2, 3]);
         // The same channel number may be an RX and a TX channel.
         compile(&parse(&BASE.replacen("rx = [1]", "rx = [9]", 1)).unwrap()).unwrap();
         assert_eq!(

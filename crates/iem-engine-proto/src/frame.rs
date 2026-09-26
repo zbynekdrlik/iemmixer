@@ -187,6 +187,42 @@ mod tests {
         ));
     }
 
+    /// A reader that fails once with `kind`, then serves `data`.
+    struct FailOnce<'a> {
+        kind: Option<io::ErrorKind>,
+        data: &'a [u8],
+    }
+
+    impl Read for FailOnce<'_> {
+        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+            if let Some(kind) = self.kind.take() {
+                return Err(kind.into());
+            }
+            self.data.read(out)
+        }
+    }
+
+    #[test]
+    fn a_read_error_other_than_an_interruption_ends_the_header() {
+        let mut wire = Vec::new();
+        write_frame(&mut wire, &Cmd::Ping).unwrap();
+        let mut buf = Vec::new();
+        let mut broken = FailOnce {
+            kind: Some(io::ErrorKind::ConnectionReset),
+            data: &wire,
+        };
+        match read_frame(&mut broken, &mut buf) {
+            Err(FrameError::Io(e)) => assert_eq!(e.kind(), io::ErrorKind::ConnectionReset),
+            other => panic!("{other:?}"),
+        }
+        let mut interrupted = FailOnce {
+            kind: Some(io::ErrorKind::Interrupted),
+            data: &wire,
+        };
+        read_frame(&mut interrupted, &mut buf).unwrap();
+        assert_eq!(buf, br#"{"op":"ping"}"#);
+    }
+
     #[test]
     fn errors_display() {
         assert_eq!(FrameError::Closed.to_string(), "pipe closed");

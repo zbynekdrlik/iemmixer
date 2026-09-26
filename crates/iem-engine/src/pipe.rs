@@ -23,16 +23,18 @@ pub const POLL: Duration = Duration::from_millis(50);
 /// A peer that does not take a message within this long is dropped.
 pub const SEND_TIMEOUT: Duration = Duration::from_secs(1);
 
-#[cfg(unix)]
+/// A socket path on Unix, a pipe name elsewhere.
 fn name(s: String) -> io::Result<Name<'static>> {
-    use interprocess::local_socket::GenericFilePath;
-    s.to_fs_name::<GenericFilePath>()
-}
-
-#[cfg(not(unix))]
-fn name(s: String) -> io::Result<Name<'static>> {
-    use interprocess::local_socket::GenericNamespaced;
-    s.to_ns_name::<GenericNamespaced>()
+    #[cfg(unix)]
+    {
+        use interprocess::local_socket::GenericFilePath;
+        s.to_fs_name::<GenericFilePath>()
+    }
+    #[cfg(not(unix))]
+    {
+        use interprocess::local_socket::GenericNamespaced;
+        s.to_ns_name::<GenericNamespaced>()
+    }
 }
 
 /// The control pipe: a socket path on Unix, a pipe name on Windows.
@@ -234,6 +236,17 @@ mod tests {
         assert_eq!(f.next_media().unwrap().unwrap(), (h, vec![0.5, -0.5, 0.25]));
         f.fill(&b"XXXXXXXXXXXXXXXXXXXXXXXX"[..]).unwrap();
         assert!(f.next_media().is_err());
+    }
+
+    #[test]
+    fn one_fill_takes_up_to_16_kib() {
+        let big = vec![7u8; 20_000];
+        let mut f = Framer::new();
+        let mut r = big.as_slice();
+        assert!(f.fill(&mut r).unwrap());
+        assert_eq!(f.buf.len(), 16 * 1024);
+        assert!(f.fill(&mut r).unwrap());
+        assert_eq!(f.buf.len(), 20_000);
     }
 
     struct Timeouts(u8);

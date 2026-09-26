@@ -130,10 +130,17 @@ mod tests {
         // 48 samples per cycle, sampled half a sample off the crest.
         assert!((peak - 0.5).abs() < 3e-3, "{peak}");
         assert!(last.chunks(2).all(|p| p[0] == -p[1]));
+        // Three input frames leave two outputs of a partial frame and an odd
+        // phase; a restart drops both and the filter history.
+        f.feed(&tone[..6], &mut out);
         f.restart();
         let mut more = Vec::new();
         f.feed(&tone[..3840], &mut more);
+        assert_eq!(more.len(), 1);
         assert_eq!(more[0].0.seq, 5);
+        let mut fresh = Vec::new();
+        TapFramer::new(stream::MEMBER_LISTEN).feed(&tone[..3840], &mut fresh);
+        assert_eq!(more[0].1, fresh[0].1);
     }
 
     #[test]

@@ -95,10 +95,50 @@ impl<P: Process + 'static> NullRt<P> {
     }
 }
 
+/// One callback's period: `block / sample_rate` seconds.
+fn period(block: usize, rate: f64) -> Duration {
+    Duration::from_secs_f64(block as f64 / rate)
+}
+
+/// What the pacing thread does after a callback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Step {
+    /// The next callback's deadline.
+    deadline: Instant,
+    /// The callback finished more than one period after its deadline.
+    late: bool,
+    /// How long to sleep before the next callback.
+    sleep: Duration,
+}
+
+/// Advances `deadline` by one period; a thread more than eight periods
+/// behind resynchronises to `now` instead of bursting.
+fn step(deadline: Instant, now: Instant, period: Duration) -> Step {
+    let deadline = deadline + period;
+    if now > deadline + period {
+        let deadline = if now > deadline + 8 * period {
+            now
+        } else {
+            deadline
+        };
+        Step {
+            deadline,
+            late: true,
+            sleep: Duration::ZERO,
+        }
+    } else {
+        Step {
+            deadline,
+            late: false,
+            sleep: deadline.saturating_duration_since(now),
+        }
+    }
+}
+
 fn pace<P: Process>(cfg: &NullRtConfig, p: &mut P, s: &Shared) {
     let block = cfg.block.max(1);
     let rate = f64::from(cfg.sample_rate.max(1));
-    let period = Duration::from_secs_f64(block as f64 / rate);
+    let period = period(block, rate);
     let mut input = vec![0.0; cfg.inputs.saturating_mul(block)];
     let mut output = vec![0.0; cfg.outputs.saturating_mul(block)];
     let (inc, amp) = match cfg.signal {
@@ -136,16 +176,13 @@ fn pace<P: Process>(cfg: &NullRtConfig, p: &mut P, s: &Shared) {
             return;
         }
         s.callbacks.fetch_add(1, Ordering::AcqRel);
-        deadline += period;
-        let now = Instant::now();
-        if now > deadline + period {
+        let next = step(deadline, Instant::now(), period);
+        if next.late {
             s.late.fetch_add(1, Ordering::AcqRel);
-            if now > deadline + 8 * period {
-                deadline = now;
-            }
-        } else if deadline > now {
-            std::thread::sleep(deadline - now);
         }
+        deadline = next.deadline;
+        // A zero sleep returns at once.
+        std::thread::sleep(next.sleep);
     }
 }
 
@@ -232,6 +269,13 @@ mod tests {
         let peak = p.first.iter().fold(0.0f64, |m, x| m.max(x.abs()));
         assert!((peak - 0.5).abs() < 1e-3, "{peak}");
         assert_eq!(p.first, p.second);
+        // From phase 0 the sine rises: positive over the first half cycle.
+        assert!(
+            p.first[1..47].iter().all(|x| *x > 0.0),
+            "{:?}",
+            &p.first[..4]
+        );
+        assert!(p.first[49..95].iter().all(|x| *x < 0.0));
         // 1 kHz at 96 kHz: an upward zero crossing every 96 samples (±1 where
         // the accumulated phase lands a hair either side of zero).
         let ups: Vec<usize> = (1..960)
@@ -296,6 +340,45 @@ mod tests {
         assert!(s.late >= 1, "{s:?}");
         assert!(s.max_process_ns >= 20_000_000, "{s:?}");
         assert!(rt.stop().unwrap().calls >= 100);
+    }
+
+    #[test]
+    fn the_period_is_block_over_rate() {
+        assert_eq!(period(48_000, 48_000.0), Duration::from_secs(1));
+        assert_eq!(period(96, 96_000.0), Duration::from_millis(1));
+        assert_eq!(period(32, 96_000.0).as_nanos(), 333_333);
+    }
+
+    #[test]
+    fn a_step_sleeps_until_the_next_deadline_and_counts_late_callbacks() {
+        let t0 = Instant::now();
+        let p = Duration::from_millis(1);
+        let ns = Duration::from_nanos(1);
+        let at = |deadline: Instant, late: bool, sleep: Duration| Step {
+            deadline,
+            late,
+            sleep,
+        };
+        // On time: sleep the whole period.
+        assert_eq!(step(t0, t0, p), at(t0 + p, false, p));
+        assert_eq!(step(t0, t0 + p / 4, p), at(t0 + p, false, p * 3 / 4));
+        // Behind the next deadline but within one period of it: no sleep, not late.
+        assert_eq!(
+            step(t0, t0 + p * 3 / 2, p),
+            at(t0 + p, false, Duration::ZERO)
+        );
+        assert_eq!(step(t0, t0 + 2 * p, p), at(t0 + p, false, Duration::ZERO));
+        // More than one period after it: late, the deadline keeps its grid.
+        assert_eq!(
+            step(t0, t0 + 2 * p + ns, p),
+            at(t0 + p, true, Duration::ZERO)
+        );
+        assert_eq!(step(t0, t0 + 9 * p, p), at(t0 + p, true, Duration::ZERO));
+        // More than eight periods behind: resynchronise to now.
+        let far = t0 + 9 * p + ns;
+        assert_eq!(step(t0, far, p), at(far, true, Duration::ZERO));
+        let farther = t0 + 50 * p;
+        assert_eq!(step(t0, farther, p), at(farther, true, Duration::ZERO));
     }
 
     #[test]

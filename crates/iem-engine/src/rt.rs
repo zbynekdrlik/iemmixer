@@ -871,7 +871,8 @@ impl Processor {
         }
         self.render_inputs(block, off, n);
         self.render_buses(block, off, n);
-        if self.fading_out && !self.fade.is_moving() && self.fade.value() == 0.0 {
+        // After `FadeOut` the fade's target is 0: at rest it is silent.
+        if self.fading_out && !self.fade.is_moving() {
             self.status.faded_out.store(true, Ordering::Release);
         }
     }

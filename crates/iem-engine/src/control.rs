@@ -636,4 +636,277 @@ mod tests {
         assert!(engine_build().starts_with(concat!(env!("CARGO_PKG_VERSION"), "+")));
         assert!(unix_ms() > 1_700_000_000_000);
     }
+
+    /// A backend that runs and never faults.
+    struct Idle;
+
+    impl Driver for Idle {
+        fn stats(&self) -> StreamStats {
+            StreamStats {
+                running: true,
+                ..StreamStats::default()
+            }
+        }
+
+        fn stop(self: Box<Self>) {}
+    }
+
+    struct Rig {
+        c: Control,
+        meters: triple_buffer::Input<MeterFrame>,
+        status: Arc<RtStatus>,
+        _ring: rtrb::Consumer<RtCmd>,
+        dir: tempfile::TempDir,
+    }
+
+    /// A control loop on the test site with the processor's ends in hand.
+    fn rig() -> Rig {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = Arc::new(crate::test_support::test_site());
+        let flags = crate::core::Flags {
+            test_signal: true,
+            fault_injection: false,
+        };
+        let core = Core::new(
+            Arc::clone(&graph),
+            &iem_engine_proto::MixState::default(),
+            0,
+            flags,
+        );
+        let (cmds, ring) = rtrb::RingBuffer::new(crate::rt::CMD_RING);
+        let (meters_in, meters) = triple_buffer::triple_buffer(&MeterFrame::default());
+        let status = Arc::new(RtStatus::default());
+        let c = Control::new(Parts {
+            core,
+            store: Store::open(&dir.path().join("state")).unwrap(),
+            cmds,
+            meters,
+            status: Arc::clone(&status),
+            talkback_dropped: Arc::new(AtomicU64::new(0)),
+            driver: Box::new(Idle),
+            counters: vec![0; graph.buses.len()],
+            alarms: Vec::new(),
+            settings: Settings {
+                solo_grace: Duration::from_secs(10),
+                block: 32,
+            },
+        });
+        Rig {
+            c,
+            meters: meters_in,
+            status,
+            _ring: ring,
+            dir,
+        }
+    }
+
+    /// `run` on a thread: its exit and how long it took; fails after 5 s
+    /// instead of hanging.
+    fn run_bounded(c: Control, rx: Receiver<CtlMsg>) -> (Exit, Duration) {
+        let (tx, done) = std::sync::mpsc::channel();
+        let _ = std::thread::spawn(move || {
+            let t0 = Instant::now();
+            let exit = c.run(&rx);
+            let _ = tx.send((exit, t0.elapsed()));
+        });
+        done.recv_timeout(Duration::from_secs(5))
+            .expect("run returns")
+    }
+
+    #[test]
+    fn shutdown_waits_for_the_fade_but_not_beyond_it() {
+        // Already faded: no wait.
+        let mut r = rig();
+        r.status.faded_out.store(true, Ordering::Release);
+        r.c.shutdown = true;
+        let (_tx, rx) = std::sync::mpsc::channel();
+        let (exit, took) = run_bounded(r.c, rx);
+        assert_eq!(exit, Exit::Shutdown { faded: true });
+        assert!(took < FADE_WAIT / 2, "{took:?}");
+        assert!(r.dir.path().join("state/current.json").exists(), "saved");
+        // Never faded: the driver is released after FADE_WAIT.
+        let mut r = rig();
+        r.c.shutdown = true;
+        let (_tx, rx) = std::sync::mpsc::channel();
+        let (exit, took) = run_bounded(r.c, rx);
+        assert_eq!(exit, Exit::Shutdown { faded: false });
+        assert!(took >= FADE_WAIT, "{took:?}");
+    }
+
+    #[test]
+    fn status_reports_microseconds_counters_and_the_backlog() {
+        let mut r = rig();
+        r.c.pending.push_back(vec![RtOp::Nop; 3]);
+        r.c.pending.push_back(vec![RtOp::Nop; 2]);
+        r.status.trips.store(4, Ordering::Relaxed);
+        let st = StreamStats {
+            callbacks: 7,
+            late: 1,
+            faulted: false,
+            running: true,
+            max_process_ns: 2_500_000,
+            fault: None,
+        };
+        let s = r.c.status_msg(&st);
+        assert_eq!((s.callbacks, s.late, s.faulted), (7, 1, false));
+        assert_eq!(s.process_max_us, 2500.0);
+        assert_eq!((s.trips, s.cmd_backlog), (4, 5));
+    }
+
+    #[test]
+    fn only_new_sanitiser_trips_raise_an_alarm() {
+        let mut r = rig();
+        let now = Instant::now();
+        for (trips, alarms) in [(0, 0), (2, 1), (2, 1), (3, 2)] {
+            r.meters.input_buffer_mut().trips = trips;
+            r.meters.publish();
+            assert!(r.c.tick(now).is_none());
+            assert_eq!(r.c.alarms.len(), alarms, "at {trips} trips");
+        }
+        assert_eq!(r.c.alarms[0].code, AlarmCode::Sanitizer);
+        assert_eq!(r.c.alarms[0].detail, "sanitiser trips: 2");
+        assert_eq!(r.c.alarms[1].detail, "sanitiser trips: 3");
+    }
+
+    /// Connections need a socket; the pipe tests run on Linux only (engine
+    /// rule: no timeouts on Windows named pipes).
+    #[cfg(unix)]
+    mod peers {
+        use super::*;
+        use crate::pipe::{control_name, listen};
+        use iem_engine_proto::{InputId, MixState, read_frame};
+        use interprocess::local_socket::Stream;
+        use interprocess::local_socket::prelude::*;
+
+        const WAIT: Duration = Duration::from_secs(5);
+
+        /// The engine's end and the client's end of one connection.
+        fn peer(dir: &std::path::Path) -> (Conn, Stream) {
+            let path = dir.join("ctl.sock").to_string_lossy().into_owned();
+            let listener = listen(control_name(&path).unwrap()).unwrap();
+            let client = Stream::connect(control_name(&path).unwrap()).unwrap();
+            client.set_recv_timeout(Some(WAIT)).unwrap();
+            let start = Instant::now();
+            loop {
+                match listener.accept() {
+                    Ok(s) => return (Conn::new(s), client),
+                    Err(e) => {
+                        assert!(start.elapsed() < WAIT, "accept: {e}");
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                }
+            }
+        }
+
+        /// Reads every message until the engine closes the connection (or 5 s pass).
+        fn reader(mut client: Stream) -> std::thread::JoinHandle<Vec<EngineMsg>> {
+            std::thread::spawn(move || {
+                let mut out = Vec::new();
+                let mut buf = Vec::new();
+                while read_frame(&mut client, &mut buf).is_ok() {
+                    out.push(serde_json::from_slice(&buf).unwrap());
+                }
+                out
+            })
+        }
+
+        fn frame(msg: &ClientMsg) -> CtlMsg {
+            CtlMsg::Frame {
+                id: 1,
+                bytes: serde_json::to_vec(msg).unwrap(),
+            }
+        }
+
+        fn hello() -> CtlMsg {
+            frame(&ClientMsg::Hello {
+                proto: PROTO,
+                role: Role::Control,
+                client: "test".into(),
+            })
+        }
+
+        fn request(id: u64, cmd: Cmd) -> CtlMsg {
+            frame(&ClientMsg::Request {
+                id,
+                origin: None,
+                cmd,
+            })
+        }
+
+        #[test]
+        fn nothing_after_a_shutdown_request_is_handled() {
+            let r = rig();
+            r.status.faded_out.store(true, Ordering::Release);
+            let (conn, client) = peer(r.dir.path());
+            let got = reader(client);
+            let (tx, rx) = std::sync::mpsc::channel();
+            for msg in [
+                CtlMsg::Connected { id: 1, conn },
+                hello(),
+                request(2, Cmd::Shutdown),
+                request(3, Cmd::Ping),
+            ] {
+                tx.send(msg).unwrap();
+            }
+            let (exit, _) = run_bounded(r.c, rx);
+            assert_eq!(exit, Exit::Shutdown { faded: true });
+            let replies: Vec<u64> = got
+                .join()
+                .unwrap()
+                .iter()
+                .filter_map(|m| match m {
+                    EngineMsg::Reply(rep) => Some(rep.id),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                replies,
+                vec![2],
+                "the ping after the shutdown stays unanswered"
+            );
+        }
+
+        #[test]
+        fn stopping_the_test_signal_clears_its_deadline() {
+            let mut r = rig();
+            let (conn, client) = peer(r.dir.path());
+            let _got = reader(client);
+            r.c.handle(CtlMsg::Connected { id: 1, conn });
+            r.c.handle(hello());
+            r.c.handle(request(
+                2,
+                Cmd::StartTestSignal {
+                    input: InputId::new("mic1"),
+                    hz: 1000.0,
+                    dbfs: -30.0,
+                    ttl_s: 60.0,
+                },
+            ));
+            assert!(r.c.test_deadline.is_some());
+            r.c.handle(request(3, Cmd::StopTestSignal));
+            assert_eq!(r.c.test_deadline, None);
+            assert!(r.c.core.transient().test_signal.is_none());
+        }
+
+        #[test]
+        fn an_import_as_baseline_writes_the_baseline() {
+            let mut r = rig();
+            let (conn, client) = peer(r.dir.path());
+            let _got = reader(client);
+            r.c.handle(CtlMsg::Connected { id: 1, conn });
+            r.c.handle(hello());
+            let import = |baseline: bool| Cmd::ImportState {
+                state: MixState::default(),
+                baseline,
+            };
+            let baseline = r.dir.path().join("state/baseline.json");
+            r.c.handle(request(2, import(false)));
+            assert_eq!(r.c.core.rev(), 1);
+            assert!(!baseline.exists(), "a plain import keeps the baseline");
+            r.c.handle(request(3, import(true)));
+            let saved = crate::persist::decode(&std::fs::read(&baseline).unwrap()).unwrap();
+            assert_eq!((saved.rev, r.c.core.rev()), (2, 2));
+            assert_eq!(saved.topology_hash, r.c.core.graph().hash);
+        }
+    }
 }

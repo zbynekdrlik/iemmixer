@@ -158,7 +158,14 @@ mod tests {
         // The header must match the payload, and the payload must fit.
         assert!(write_media(&mut Vec::new(), &header(2, 1), &[0.5]).is_err());
         assert!(write_media(&mut Vec::new(), &header(960, 5), &vec![0.0; 4800]).is_err());
-        // Exactly the maximum is fine.
-        write_media(&mut Vec::new(), &header(960, 4), &vec![0.0; MAX_SAMPLES]).unwrap();
+        // Exactly the maximum is fine, both ways.
+        let mut max = Vec::new();
+        let full: Vec<f32> = (0..MAX_SAMPLES).map(|i| i as f32).collect();
+        write_media(&mut max, &header(960, 4), &full).unwrap();
+        assert_eq!(
+            read_media(&mut max.as_slice(), &mut out).unwrap(),
+            header(960, 4)
+        );
+        assert_eq!(out, full);
     }
 }

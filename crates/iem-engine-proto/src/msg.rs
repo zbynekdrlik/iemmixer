@@ -644,6 +644,17 @@ mod tests {
         assert!(e.msg.len() <= MAX_MSG, "{}", e.msg.len());
         assert_eq!(short("é".repeat(150)).len(), 200);
         assert_eq!(short("abc".into()), "abc");
+        // Byte 200 inside a character: cut before it. In a thread, so that a
+        // cut that never finds a boundary fails instead of hanging.
+        let odd = format!("a{}", "é".repeat(150));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let text = odd.clone();
+        let _ = std::thread::spawn(move || tx.send(short(text)));
+        let cut = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("short() returns");
+        assert_eq!(cut.len(), 199);
+        assert_eq!(cut, odd[..199]);
     }
 
     #[test]

@@ -1,0 +1,9 @@
+# cargo-nextest configuration. Both mutation workflows select the `mutants`
+# profile (NEXTEST_PROFILE=mutants); the other jobs use the default profile.
+
+[profile.mutants]
+# A mutant is caught at its first failing test: stop there and end the tests
+# still running, so a mutant that makes some tests hang (a render loop that
+# never ends) is caught by a bounded test in seconds instead of holding the
+# run until cargo-mutants' 60 s timeout (TIMEOUT).
+fail-fast = { max-fail = 1, terminate = "immediate" }

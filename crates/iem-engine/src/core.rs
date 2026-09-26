@@ -1082,6 +1082,16 @@ mod tests {
             assert!(e.msg.len() < 100, "{}", e.msg.len());
         }
         assert_eq!(clip("é".repeat(40).as_str()).len(), 64);
+        // Byte 64 inside a character: cut before it (in a thread, so that a
+        // cut that never finds a boundary fails instead of hanging).
+        let odd = format!("{}é", "a".repeat(63));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let text = odd.clone();
+        let _ = std::thread::spawn(move || tx.send(clip(&text).to_owned()));
+        let cut = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("clip returns");
+        assert_eq!(cut, odd[..63]);
         assert_eq!(c.rev(), 0);
     }
 
@@ -1145,6 +1155,32 @@ mod tests {
             ops: (0..MAX_BATCH).map(|k| flip(k % 2 == 0)).collect(),
         };
         assert_eq!(code(c.apply(&solos)), ErrCode::BadValue);
+        assert!(c.transient().solo.is_empty());
+        // Exactly 256 commands are one batch.
+        let full = Cmd::Batch {
+            ops: (1..=MAX_BATCH)
+                .map(|k| set_bus("member4", Some(-0.1 * k as f64), None))
+                .collect(),
+        };
+        let out = c.apply(&full).unwrap();
+        assert_eq!(
+            (out.rev, out.changes.len(), out.rt.len()),
+            (2, MAX_BATCH, MAX_BATCH)
+        );
+        // Exactly 512 RT commands fit one block: 20 solo toggles on member3
+        // (25 sends each) and 12 fader moves.
+        let member3 = |on: bool| Cmd::SetSolo {
+            scope: bus("member3"),
+            sources: if on {
+                vec![Source::Input(input("mic2"))]
+            } else {
+                vec![]
+            },
+        };
+        let mut ops: Vec<Cmd> = (0..20).map(|k| member3(k % 2 == 0)).collect();
+        ops.extend((1..=12).map(|k| set_bus("member6", Some(-f64::from(k)), None)));
+        let out = c.apply(&Cmd::Batch { ops }).unwrap();
+        assert_eq!((out.rev, out.rt.len()), (3, MAX_CMDS_PER_BLOCK));
         assert!(c.transient().solo.is_empty());
     }
 

@@ -8,6 +8,7 @@ use crate::site::parse;
 use iem_audio_io::{Offline, Planar};
 use iem_dsp::pan::gains;
 use iem_engine_proto::{BusId, Cmd, EqOwner, InputId, SendId, Source};
+use std::time::Duration;
 
 /// RX: mono 0, st 1/2, tb 3. TX: eng 0/1, m1 2/3, tr 4, master 5/6.
 const SITE: &str = r#"
@@ -227,6 +228,8 @@ fn trim_and_eq_apply_only_with_processing() {
     );
     assert!(close(y[1000 + 1919], dry, 1e-15));
     assert!(close(y[3999], dry, 1e-15));
+    // A centred mono input: the right channel crossfades exactly like the left.
+    assert_eq!(out.channel(M1_R), out.channel(M1_L));
     // With processing on, an enabled band shapes the signal: a +12 dB low
     // shelf lifts DC about four times.
     let mut eq = iem_engine_proto::Eq::default();
@@ -259,6 +262,11 @@ fn talkback_is_added_before_the_mute_gate() {
         close(out.channel(M1_L)[2047], want, 1e-9),
         "{}",
         out.channel(M1_L)[2047]
+    );
+    assert_eq!(
+        out.channel(M1_R),
+        out.channel(M1_L),
+        "talkback on both channels"
     );
     // Muting the talkback input silences the talkback too (A3).
     r.at(
@@ -692,4 +700,223 @@ fn the_program_site_runs_and_reports_its_time() {
     assert!(run.fault.is_none());
     assert_eq!(run.output.channels(), 23);
     assert_eq!(p.time(), 320);
+}
+
+/// Runs `p` on a thread; fails after 5 s instead of hanging when a block
+/// never ends.
+fn run_bounded(mut p: Processor, input: Planar, block: usize) -> (Processor, Planar) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let _ = std::thread::spawn(move || {
+        let outs = p.graph.tx.len();
+        let run = Offline { block }.run(&mut p, &input, outs);
+        let _ = tx.send((p, run));
+    });
+    let (p, run) = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("process returns");
+    assert!(run.fault.is_none());
+    (p, run.output)
+}
+
+#[test]
+fn process_returns_after_its_block_even_when_a_group_waits() {
+    let Rig { p, mut h, .. } = rig(&[]);
+    let (p, out) = run_bounded(p, dc(&[0.0; 4], 64), 32);
+    assert_eq!((p.time(), out.frames()), (64, 64));
+    // Due at the current sample: 200 single commands, then a group of 400
+    // that no longer fits the block's budget and waits whole.
+    for _ in 0..200 {
+        assert!(push_group(&mut h.cmds, 64, &[RtOp::Nop]));
+    }
+    assert!(push_group(&mut h.cmds, 64, &[RtOp::Nop; 400]));
+    let (p, _) = run_bounded(p, dc(&[0.0; 4], 32), 32);
+    assert_eq!(p.time(), 96);
+    assert_eq!(h.cmds.slots(), CMD_RING - 400);
+    assert_eq!(h.status.deferred.load(Ordering::Relaxed), 1);
+    let (p, _) = run_bounded(p, dc(&[0.0; 4], 32), 32);
+    assert_eq!((p.time(), h.cmds.slots()), (128, CMD_RING));
+}
+
+#[test]
+fn a_spent_budget_does_not_cut_the_block() {
+    let mut r = rig(&[]);
+    for _ in 0..MAX_CMDS_PER_BLOCK {
+        assert!(push_group(&mut r.h.cmds, 0, &[RtOp::Nop]));
+    }
+    // Due mid-block after the budget is spent: nothing more applies in this
+    // block, so it runs whole and the command waits for the next one.
+    assert!(push_group(&mut r.h.cmds, 16, &[RtOp::Nop]));
+    r.run(&dc(&[0.0; 4], 32), 32);
+    assert_eq!(r.h.cmds.slots(), CMD_RING - 1);
+    assert_eq!(r.h.status.deferred.load(Ordering::Relaxed), 0);
+    r.run(&dc(&[0.0; 4], 32), 32);
+    assert_eq!(r.h.cmds.slots(), CMD_RING);
+}
+
+#[test]
+fn meter_frames_keep_the_3200_sample_grid_across_odd_blocks() {
+    let mut r = rig(&[]);
+    for k in 1..=20u64 {
+        r.run(&dc(&[0.0; 4], 1000), 1000);
+        assert_eq!(r.h.meters.read().seq, k * 1000 / METER_PERIOD, "block {k}");
+    }
+}
+
+#[test]
+fn a_listen_tap_ring_holds_200_ms() {
+    let mut r = rig(&[send(src_in("mono"), "eng", 0.0)]);
+    r.at(0, &Cmd::StartListen { bus: bus("eng") });
+    r.run(&dc(&[0.3, 0.0, 0.0, 0.0], 19_200), 32);
+    assert_eq!(r.h.taps[0].slots(), 2 * 19_200);
+    assert_eq!(r.h.status.tap_overruns.load(Ordering::Relaxed), 0);
+    r.run(&dc(&[0.3, 0.0, 0.0, 0.0], 32), 32);
+    assert_eq!(r.h.status.tap_overruns.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn switching_the_member_listen_restarts_its_limiter() {
+    let mut r = rig(&[
+        send(src_in("mono"), "m1", 12.0),
+        set_bus("m1", Some(12.0), None, None),
+        send(src_in("mono"), "eng", 0.0),
+    ]);
+    let m1 = r.p.graph.bus_index(&bus("m1")).unwrap() as u16;
+    let eng = r.p.graph.bus_index(&bus("eng")).unwrap() as u16;
+    let listen = |b: u16| {
+        [RtOp::Listen {
+            slot: 1,
+            bus: Some(b),
+        }]
+    };
+    assert!(push_group(&mut r.h.cmds, 0, &listen(m1)));
+    // m1 runs hot (≈ +6 dBFS): the 0 dB listen limiter holds it.
+    r.run(&dc(&[0.25, 0.0, 0.0, 0.0], 3200), 32);
+    let mut hot = vec![0.0f32; 6400];
+    r.h.taps[1].pop_entire_slice(&mut hot).unwrap();
+    assert!(
+        hot[6000..].iter().all(|x| *x > 0.9 && *x < 1.001),
+        "{}",
+        hot[6399]
+    );
+    // The quieter engineer mix passes untouched at once: no leftover gain
+    // reduction from m1.
+    assert!(push_group(&mut r.h.cmds, 3200, &listen(eng)));
+    r.run(&dc(&[0.25, 0.0, 0.0, 0.0], 64), 32);
+    let mut quiet = vec![0.0f32; 128];
+    r.h.taps[1].pop_entire_slice(&mut quiet).unwrap();
+    let want = (0.25 * g0() * g0()) as f32;
+    assert!(
+        quiet.iter().all(|x| (x - want).abs() < 1e-6),
+        "{:?}",
+        &quiet[..4]
+    );
+}
+
+#[test]
+fn a_trim_change_ramps_while_processing() {
+    let trim = set_input("mono", |c| {
+        if let Cmd::SetInput { trim_db, .. } = c {
+            *trim_db = Some(-6.0);
+        }
+    });
+    let mut r = rig(&[send(src_in("mono"), "m1", 0.0)]);
+    r.at(1000, &trim);
+    let out = r.run(&dc(&[0.25, 0.0, 0.0, 0.0], 3000), 64);
+    let y = out.channel(M1_L);
+    let (t, g2) = (10f64.powf(-0.3), g0() * g0());
+    assert!(close(y[999], 0.25 * g2, 1e-15));
+    // 10 ms (960 samples) from 1 to t: the first step and the landing.
+    let first = 0.25 * (1.0 + (t - 1.0) / 960.0) * g2;
+    assert!(close(y[1000], first, 1e-12), "{} vs {first}", y[1000]);
+    assert!(y[1958] > 0.25 * t * g2);
+    assert!(close(y[1959], 0.25 * t * g2, 1e-15), "{}", y[1959]);
+}
+
+#[test]
+fn a_bus_eq_shapes_the_bus() {
+    let mut eq = iem_engine_proto::Eq::default();
+    eq.bands[1].enabled = true;
+    eq.bands[1].gain_db = 12.0;
+    let mut r = rig(&[
+        send(src_in("mono"), "m1", 0.0),
+        Cmd::SetEq {
+            owner: EqOwner::Bus(bus("m1")),
+            eq,
+        },
+    ]);
+    let out = r.run(&dc(&[0.01, 0.0, 0.0, 0.0], 4000), 64);
+    // A +12 dB low shelf lifts DC about four times.
+    let y = out.channel(M1_L)[3999];
+    assert!(y > 0.03 && y < 0.05, "{y}");
+}
+
+#[test]
+fn a_tripping_bus_counts_in_the_status_and_the_meters() {
+    let mut r = rig(&[send(src_in("st"), "m1.stems", 12.0)]);
+    // 9e5 passes the inputs; ×3.98 on the stems bus trips it once per block.
+    r.run(&dc(&[0.0, 9e5, 9e5, 0.0], 3200), 32);
+    assert_eq!(r.h.status.trips.load(Ordering::Relaxed), 100);
+    let f = r.h.meters.read().clone();
+    assert_eq!((f.seq, f.trips), (1, 100));
+    let stems = r.p.graph.bus_index(&bus("m1.stems")).unwrap();
+    assert_eq!(f.buses[stems], [0.0, 0.0], "a tripping bus is silenced");
+}
+
+#[test]
+fn faded_out_is_reported_when_the_fade_ends() {
+    let mut r = rig(&[send(src_in("mono"), "m1", 0.0)]);
+    assert!(push_group(&mut r.h.cmds, 0, &[RtOp::FadeOut]));
+    let full = 0.25 * g0() * g0();
+    let out = r.run(&dc(&[0.25, 0.0, 0.0, 0.0], 2400), 32);
+    assert!(
+        !r.h.status.faded_out.load(Ordering::Acquire),
+        "halfway through the 50 ms fade"
+    );
+    assert!(close(out.channel(M1_L)[2399], 0.5 * full, 1e-12));
+    assert_eq!(out.channel(M1_R), out.channel(M1_L));
+    let out = r.run(&dc(&[0.25, 0.0, 0.0, 0.0], 2400), 32);
+    assert!(r.h.status.faded_out.load(Ordering::Acquire));
+    assert_eq!(out.channel(M1_L)[2399], 0.0);
+    assert_eq!(out.channel(M1_R), out.channel(M1_L));
+}
+
+#[test]
+fn the_test_sine_starts_upwards_and_fades_out_after_its_ttl() {
+    let flags = Flags {
+        test_signal: true,
+        fault_injection: false,
+    };
+    let mut r = rig_with(
+        SITE,
+        &[send(src_in("st"), "eng", 0.0)],
+        flags,
+        Options { fade_in_ms: 0.0 },
+    );
+    r.at(
+        0,
+        &Cmd::StartTestSignal {
+            input: input("st"),
+            hz: 1000.0,
+            dbfs: -30.0,
+            ttl_s: 0.01,
+        },
+    );
+    let out = r.run(&dc(&[0.0; 4], 7000), 256);
+    let y = out.channel(ENG_L);
+    // 1 kHz at 96 kHz from phase 0: positive over the first half of every
+    // 96-sample cycle, negative over the second.
+    for (n, v) in y.iter().enumerate().take(960) {
+        let k = n % 96;
+        if (2..46).contains(&k) {
+            assert!(*v > 0.0, "{n}: {v}");
+        } else if (50..94).contains(&k) {
+            assert!(*v < 0.0, "{n}: {v}");
+        }
+    }
+    // The fade-out starts at the TTL (960 samples) from 0.2 and takes 50 ms:
+    // from sample 5300 the envelope is below 0.2 · 459/4800 ≈ 0.019.
+    let amp = 10f64.powf(-1.5) * g0() * g0();
+    let tail = y[5300..5760].iter().fold(0.0f64, |m, v| m.max(v.abs()));
+    assert!(tail > 0.0 && tail < 0.02 * amp, "{tail} vs {amp}");
+    assert!(y[5760..].iter().all(|v| *v == 0.0), "silent after the end");
 }

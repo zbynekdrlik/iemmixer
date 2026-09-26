@@ -83,4 +83,10 @@ exclude_re = [
   "iem-dsp/src/eq\\.rs.*replace > with >= in gain_key",
   # GR meter ±0: 20·log10(0) = −∞, floored by max(−150) to the else branch's −150.
   "iem-limiter-mga/src/lib\\.rs.*replace > with >= in Limiter::gr_db",
+  # Equivalent (S3). `trips > 0` only skips adding zero trips to the counters.
+  "iem-engine/src/rt\\.rs.*replace > with >= in Processor::render_buses",
+  # The fade wait's `elapsed < FADE_WAIT`: differs only at the exact nanosecond.
+  "iem-engine/src/control\\.rs.*replace < with <= in Control::shutdown_now",
+  # Unobservable (S3): the `!` only decides whether "solos cleared" is logged.
+  "iem-engine/src/control\\.rs.*delete ! in Control::tick",
 ]

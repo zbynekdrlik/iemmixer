@@ -444,6 +444,19 @@ mod tests {
     }
 
     #[test]
+    fn an_unreadable_file_is_rejected_not_skipped_as_missing() {
+        let (_d, s) = store();
+        s.save_baseline(&sample(4)).unwrap();
+        // A directory where current.json belongs: reading it fails, not NotFound.
+        fs::create_dir(s.dir().join(CURRENT)).unwrap();
+        let loaded = s.load(&test_site());
+        assert_eq!(loaded.source, Source::Baseline);
+        assert_eq!(loaded.persisted.rev, 4);
+        assert_eq!(loaded.rejected.len(), 1);
+        assert!(loaded.rejected[0].0.ends_with(CURRENT));
+    }
+
+    #[test]
     fn nothing_loadable_gives_muted_defaults() {
         let (_d, s) = store();
         let g = test_site();

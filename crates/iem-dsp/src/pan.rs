@@ -153,6 +153,14 @@ mod tests {
         let mut p = StereoGain::new(96_000.0, 1.0, false, 0.0);
         p.set(1.0, false, 0.5);
         assert!(p.steady().is_none());
+        // Hard left or right, a volume change moves one channel only: that
+        // alone is not steady.
+        for (pan, rest) in [(-1.0, (0.5, 0.0)), (1.0, (0.0, 0.5))] {
+            let mut one = StereoGain::new(96_000.0, 0.5, false, pan);
+            assert_eq!(one.steady(), Some(rest));
+            one.set(0.8, false, pan);
+            assert!(one.steady().is_none(), "{pan}");
+        }
     }
 
     #[test]

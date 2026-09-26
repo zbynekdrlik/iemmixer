@@ -252,6 +252,17 @@ mod tests {
         for b in bad {
             assert_eq!(read(&b).unwrap_err().kind(), io::ErrorKind::InvalidData);
         }
+        // Valid chunks do not rescue a wrong RIFF or WAVE tag.
+        let good = riff(&fmt(FLOAT, 1, 64), &[], &0.5f64.to_le_bytes());
+        assert_eq!(read(&good).unwrap().1.channel(0), &[0.5]);
+        for (at, tag) in [(0, b"RIFX"), (8, b"WAVX")] {
+            let mut wrong = good.clone();
+            wrong[at..at + 4].copy_from_slice(tag);
+            assert_eq!(
+                read(&wrong).unwrap_err().to_string(),
+                "not a RIFF/WAVE file"
+            );
+        }
         // A trailing partial frame is ignored.
         let partial = riff(&fmt(PCM, 2, 16), &[], &[0, 0x40, 0, 0x40, 0]);
         assert_eq!(read(&partial).unwrap().1.frames(), 1);

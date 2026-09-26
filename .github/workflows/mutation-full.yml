@@ -31,6 +31,9 @@ jobs:
       - name: Warm target (copied into each cargo-mutants build directory)
         run: cargo nextest run --locked --cargo-profile mutants --no-run -p iem-core -p iem-server -p iem-ui -p iem-rpp -p iem-dsp -p iem-limiter-mga -p iem-engine-proto -p iem-audio-io -p iem-engine --all-features --all-targets
       - name: Full-tree mutants (survivors are reported, then filed as test-quality issues)
+        env:
+          # .config/nextest.toml: stop at the first failing test (fail fast on hangs).
+          NEXTEST_PROFILE: mutants
         run: |
           set -uo pipefail
           cargo mutants --baseline=skip --timeout 60 --jobs 2 --copy-target=true --shard "${{ matrix.shard }}/${{ strategy.job-total }}" \

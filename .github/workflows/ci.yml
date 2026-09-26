@@ -501,6 +501,9 @@ jobs:
       - name: Warm target (dependencies restored; workspace crates build once, then are copied per job)
         run: cargo nextest run --locked --cargo-profile mutants --no-run -p iem-core -p iem-server -p iem-ui -p iem-rpp -p iem-dsp -p iem-limiter-mga -p iem-engine-proto -p iem-audio-io -p iem-engine --all-features --all-targets
       - name: Diff-scoped mutants
+        env:
+          # .config/nextest.toml: stop at the first failing test (fail fast on hangs).
+          NEXTEST_PROFILE: mutants
         run: |
           set -euo pipefail
           git diff "origin/${{ github.base_ref }}...HEAD" -- '*.rs' > "$RUNNER_TEMP/pr.diff"

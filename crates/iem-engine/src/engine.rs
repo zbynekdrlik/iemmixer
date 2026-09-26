@@ -317,6 +317,16 @@ fn media_pump(mut taps: [Consumer<f32>; 2], conns: mpsc::Receiver<Conn>, stop: A
     }
 }
 
+/// The warning for state entries the topology no longer has, if any.
+fn dropped_note(dropped: &[String]) -> Option<String> {
+    (!dropped.is_empty()).then(|| {
+        format!(
+            "state entries the topology no longer has: {}",
+            dropped.join(", ")
+        )
+    })
+}
+
 /// Runs the engine until `Shutdown` or a fault (blocking).
 pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
     if !(1..=MAX_BLOCK).contains(&cfg.block) {
@@ -336,11 +346,8 @@ pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
     for (path, why) in &loaded.rejected {
         warn!("state file {} skipped: {why}", path.display());
     }
-    if !loaded.dropped.is_empty() {
-        warn!(
-            "state entries the topology no longer has: {}",
-            loaded.dropped.join(", ")
-        );
+    if let Some(note) = dropped_note(&loaded.dropped) {
+        warn!("{note}");
     }
     let mut alarms = Vec::new();
     match loaded.source {
@@ -598,6 +605,15 @@ mod tests {
         assert_eq!(backoff(&idle, "t"), Duration::from_millis(10));
         let broken = std::io::Error::other("broken");
         assert_eq!(backoff(&broken, "t"), Duration::from_millis(100));
+    }
+
+    #[test]
+    fn dropped_state_entries_are_named_once() {
+        assert_eq!(dropped_note(&[]), None);
+        assert_eq!(
+            dropped_note(&["input ghost".into(), "bus old".into()]).as_deref(),
+            Some("state entries the topology no longer has: input ghost, bus old")
+        );
     }
 
     /// `run` in a thread, bounded: a refused start must return at once.

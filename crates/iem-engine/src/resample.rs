@@ -10,25 +10,24 @@ pub const TAPS: usize = 79;
 pub const BETA: f64 = 10.06;
 const CENTER: usize = TAPS / 2;
 
-/// The modified Bessel function I0 by its power series.
+/// The modified Bessel function I0 by its power series: 99 terms; for x ≤ β
+/// the terms fall below one ulp of the sum long before the last.
 fn bessel_i0(x: f64) -> f64 {
     let q = x * x / 4.0;
     let (mut sum, mut term) = (1.0, 1.0);
     for k in 1..100u32 {
         term *= q / f64::from(k * k);
         sum += term;
-        if term < 1e-17 * sum {
-            break;
-        }
     }
     sum
 }
 
 /// The filter: symmetric, taps at even non-zero offsets exactly 0, the centre
-/// 0.5 and the odd taps summing to 0.5.
+/// 0.5 and the odd taps summing to 0.5. The Kaiser window is left unscaled
+/// (no division by I0(β)): the normalisation of the odd taps removes any
+/// constant factor.
 pub fn half_band() -> [f64; TAPS] {
     let mut h = [0.0; TAPS];
-    let norm = bessel_i0(BETA);
     let half = CENTER as f64;
     for (n, v) in h.iter_mut().enumerate() {
         let k = n as f64 - half;
@@ -39,7 +38,7 @@ pub fn half_band() -> [f64; TAPS] {
             0.0
         } else {
             let r = k / half;
-            let w = bessel_i0(BETA * (1.0 - r * r).max(0.0).sqrt()) / norm;
+            let w = bessel_i0(BETA * (1.0 - r * r).max(0.0).sqrt());
             (PI * k / 2.0).sin() / (PI * k) * w
         };
     }
