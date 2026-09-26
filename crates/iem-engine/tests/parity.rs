@@ -5,7 +5,8 @@
 //!   every RX channel to every TX channel; the engine's `Offline` output of
 //!   staggered impulses equals it within 1e-12 and is exactly zero elsewhere;
 //! - block-size invariance: hot material, EQs and limiters working, commands
-//!   inside blocks; blocks of 32, 64, 97 and 256 agree within 1e-12.
+//!   inside blocks; blocks of 32, 64, 97 and 256 agree bit for bit (§3.5
+//!   asks ≤ 1e-12).
 //!
 //! `cargo test --release -p iem-engine --test parity -- --nocapture` prints
 //! the maximum errors (the `engine` CI job reports them).
@@ -614,7 +615,9 @@ fn outputs_do_not_depend_on_the_block_size() {
                 worst = worst.max((a - b).abs());
             }
         }
-        assert!(worst <= 1e-12, "block {block}: {worst:e}");
+        // §3.5 allows 1e-12; the design (every ramp per sample, blocks cut
+        // at command times) promises bit-identical output.
+        assert_eq!(worst, 0.0, "block {block}: {worst:e}");
     }
     println!(
         "invariance max difference {worst:e} (blocks 32/64/97/256, {} commands, {frames} samples x {} TX)",
