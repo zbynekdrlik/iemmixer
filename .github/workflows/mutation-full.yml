@@ -29,12 +29,12 @@ jobs:
         with:
           tool: cargo-mutants@27.1.0,cargo-nextest@0.9.146
       - name: Warm target (copied into each cargo-mutants build directory)
-        run: cargo nextest run --locked --cargo-profile mutants --no-run -p iem-core -p iem-server -p iem-ui -p iem-rpp -p iem-dsp -p iem-limiter-mga --all-features --all-targets
+        run: cargo nextest run --locked --cargo-profile mutants --no-run -p iem-core -p iem-server -p iem-ui -p iem-rpp -p iem-dsp -p iem-limiter-mga -p iem-engine-proto --all-features --all-targets
       - name: Full-tree mutants (survivors are reported, then filed as test-quality issues)
         run: |
           set -uo pipefail
           cargo mutants --baseline=skip --timeout 60 --jobs 2 --copy-target=true --shard "${{ matrix.shard }}/${{ strategy.job-total }}" \
-            --package iem-core --package iem-server --package iem-ui --package iem-rpp --package iem-dsp --package iem-limiter-mga --all-features -- --all-targets
+            --package iem-core --package iem-server --package iem-ui --package iem-rpp --package iem-dsp --package iem-limiter-mga --package iem-engine-proto --all-features -- --all-targets
           code=$?
           if [ -f mutants.out/missed.txt ]; then echo "--- missed mutants ---"; cat mutants.out/missed.txt; fi
           case "$code" in

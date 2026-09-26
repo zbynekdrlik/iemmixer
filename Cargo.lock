@@ -2601,6 +2601,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "iem-engine-proto"
+version = "2.0.0-dev.4"
+dependencies = [
+ "iem-dsp",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "iem-limiter-mga"
 version = "2.0.0-dev.4"
 dependencies = [

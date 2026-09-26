@@ -67,8 +67,8 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Clippy (native, all features; the tray is linted on Windows)
         run: cargo clippy --locked --workspace --exclude iem-tray --all-targets --all-features -- -D warnings
-      - name: Clippy (UI and DSP for wasm32; the EQ response function is shared with the UI)
-        run: cargo clippy --locked -p iem-ui -p iem-dsp --target wasm32-unknown-unknown -- -D warnings
+      - name: Clippy (UI, DSP and engine protocol for wasm32; the EQ response function and the protocol are shared with the UI)
+        run: cargo clippy --locked -p iem-ui -p iem-dsp -p iem-engine-proto --target wasm32-unknown-unknown -- -D warnings
 
   test:
     name: test
@@ -86,11 +86,11 @@ jobs:
       - uses: taiki-e/install-action@7623a79cdfecb99d681017af368ca353d9f49bb5 # v2.87.19
         with:
           tool: cargo-llvm-cov@0.9.1
-      - name: Tests with line coverage (iem-core, iem-server, iem-rpp, iem-dsp, iem-limiter-mga) against the floor
+      - name: Tests with line coverage (iem-core, iem-server, iem-rpp, iem-dsp, iem-limiter-mga, engine crates) against the floor
         run: |
           set -euo pipefail
           cargo llvm-cov --locked --package iem-core --package iem-server --package iem-rpp \
-            --package iem-dsp --package iem-limiter-mga --all-features \
+            --package iem-dsp --package iem-limiter-mga --package iem-engine-proto --all-features \
             --json --summary-only --output-path "$RUNNER_TEMP/coverage.json"
           pct="$(jq '.data[0].totals.lines.percent' "$RUNNER_TEMP/coverage.json")"
           floor="$(tr -d '[:space:]' < .github/coverage-floor)"
@@ -391,7 +391,7 @@ jobs:
           if [ -s "$RUNNER_TEMP/pr.diff" ]; then
             cargo mutants --list --in-diff "$RUNNER_TEMP/pr.diff" \
               --package iem-core --package iem-server --package iem-ui --package iem-rpp \
-              --package iem-dsp --package iem-limiter-mga > "$RUNNER_TEMP/mutants.txt"
+              --package iem-dsp --package iem-limiter-mga --package iem-engine-proto > "$RUNNER_TEMP/mutants.txt"
             count="$(wc -l < "$RUNNER_TEMP/mutants.txt")"
           fi
           [ "$(grep -cE '^ +shard: \[' .github/workflows/ci.yml)" -eq 1 ] \
@@ -424,7 +424,7 @@ jobs:
         with:
           tool: cargo-nextest@0.9.146
       - name: Build the mutants profile once (the shards restore this cache)
-        run: cargo nextest run --locked --cargo-profile mutants --no-run -p iem-core -p iem-server -p iem-ui -p iem-rpp -p iem-dsp -p iem-limiter-mga --all-features --all-targets
+        run: cargo nextest run --locked --cargo-profile mutants --no-run -p iem-core -p iem-server -p iem-ui -p iem-rpp -p iem-dsp -p iem-limiter-mga -p iem-engine-proto --all-features --all-targets
 
   mutation:
     name: mutation shard ${{ matrix.shard }}
@@ -454,7 +454,7 @@ jobs:
         with:
           tool: cargo-mutants@27.1.0,cargo-nextest@0.9.146
       - name: Warm target (dependencies restored; workspace crates build once, then are copied per job)
-        run: cargo nextest run --locked --cargo-profile mutants --no-run -p iem-core -p iem-server -p iem-ui -p iem-rpp -p iem-dsp -p iem-limiter-mga --all-features --all-targets
+        run: cargo nextest run --locked --cargo-profile mutants --no-run -p iem-core -p iem-server -p iem-ui -p iem-rpp -p iem-dsp -p iem-limiter-mga -p iem-engine-proto --all-features --all-targets
       - name: Diff-scoped mutants
         run: |
           set -euo pipefail
@@ -468,5 +468,5 @@ jobs:
           cargo mutants --in-diff "$RUNNER_TEMP/pr.diff" --baseline=skip --timeout 60 --jobs 2 --copy-target=true \
             --shard "${{ matrix.shard }}/${{ strategy.job-total }}" \
             --package iem-core --package iem-server --package iem-ui --package iem-rpp \
-            --package iem-dsp --package iem-limiter-mga \
+            --package iem-dsp --package iem-limiter-mga --package iem-engine-proto \
             --all-features -- --all-targets
