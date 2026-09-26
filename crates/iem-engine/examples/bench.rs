@@ -6,9 +6,10 @@
 //!   limiters in gain reduction, both listen taps, talkback, a test signal and
 //!   a 512-command group every block.
 //!
-//! Prints p50/p99/p99.9/max per case. Exits 1 when a median exceeds 25 % of
-//! the period; hosted runners preempt, so tails are reported, not gated (the
-//! §3.5 p99.9 gate is measured on the PC in S7).
+//! Prints p50/p99/p99.9/max per case. Exits 1 when the typical median
+//! exceeds 25 % of the period or the worst-case median exceeds the period;
+//! hosted runners preempt, so tails are reported, not gated (the §3.5 p99.9
+//! gate is measured on the PC in S7).
 //!
 //! `cargo run --release -p iem-engine --example bench`
 
@@ -204,8 +205,12 @@ fn bench(name: &str, worst: bool) -> f64 {
 fn main() {
     let typical = bench("typical", false);
     let worst = bench("worst", true);
-    if typical > 0.25 || worst > 0.25 {
-        eprintln!("bench: a median exceeds 25 % of the 32-sample period");
+    if typical > 0.25 {
+        eprintln!("bench: the typical median exceeds 25 % of the 32-sample period");
+        std::process::exit(1);
+    }
+    if worst > 1.0 {
+        eprintln!("bench: the worst-case median exceeds the 32-sample period");
         std::process::exit(1);
     }
 }

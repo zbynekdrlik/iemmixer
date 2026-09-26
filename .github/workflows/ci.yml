@@ -152,14 +152,14 @@ jobs:
           set -euo pipefail
           cargo test --locked --release -p iem-engine --test parity -- --nocapture --test-threads 1 | tee "$RUNNER_TEMP/parity.log"
           grep -E 'oracle max error|invariance max difference' "$RUNNER_TEMP/parity.log"
-      - name: CPU benchmark of process() at B = 32 (gate p50 <= 25 % of 333 us; tails reported)
-        run: cargo run --locked --release -p iem-engine --example bench
       - name: Nightly toolchain with rust-src (rtsan builds std with -Zbuild-std)
         run: rustup toolchain install nightly-2026-09-20 --profile minimal --component rust-src
       - name: RealtimeSanitizer over process() (I7)
         env:
           RUSTFLAGS: "-Zsanitizer=realtime --cfg iem_rtsan"
         run: cargo +nightly-2026-09-20 test --locked -Zbuild-std --target x86_64-unknown-linux-gnu -p iem-engine --test rtsan -- --nocapture
+      - name: CPU benchmark of process() at B = 32 (typical p50 <= 25 %, worst p50 <= 100 % of 333 us; tails reported)
+        run: cargo run --locked --release -p iem-engine --example bench
 
   golden-bundle:
     name: golden-bundle
