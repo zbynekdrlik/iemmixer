@@ -2,3 +2,5 @@
 //! importer and exporter to this crate.
 
 pub mod rpp;
+pub mod stimulus;
+pub mod wav;
