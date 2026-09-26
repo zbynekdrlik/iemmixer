@@ -2,6 +2,8 @@
 
 **Ticket:** #7 (program #1). **Spec:** `2026-09-24-iemmixer-gen2-program.md` §2.4 (topology authority, baseline), §3.4 "Migration", §3.5 "Data", §4.3 (rollback export), P6, P9, D8 (renamed member archived). **Plan:** `docs/superpowers/plans/2026-09-26-s4-migration.md`. **Inputs:** the S3 hand-off on #7 (`[engine]` table, `MixState`, baseline via `iem_engine::persist`, `iem-engine render`), the S1b generator and ReaEQ encoder in `iem-rpp`.
 
+> **Model superseded (#20):** §3.2–3.4 (the project → topology mapping and the band data keys) describe the REAPER-shaped model that `2026-09-26-engine-model-rework-design.md` replaced; the rest stands.
+
 ## 1. Goal
 
 Move the band's mixes and data from the predecessor to iemmixer without loss, and back: a CLI that reads **files only** (the project saved at switch time, the predecessor's data directory, the newest backup JSON), fails loudly on anything it cannot map, and prints a dry-run report. Nothing in S4 runs on the IEM PC; S6 (guard) and S8 (shadow imports, trials, cutover, rollback drill) call the CLI there.

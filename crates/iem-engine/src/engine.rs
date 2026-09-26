@@ -20,12 +20,12 @@ use tracing::{error, info, warn};
 use crate::SAMPLE_RATE;
 use crate::control::{Control, CtlMsg, Driver, Exit, Parts, Settings};
 use crate::core::{Core, Flags};
-use crate::graph::compile;
 use crate::media::{Frame, TalkbackFeed, TapFramer};
 use crate::persist::{Source, Store, decode};
 use crate::pipe::{Conn, Framer, control_name, listen, media_name, read_loop};
 use crate::rt::{Options, Processor, RtHandles};
 use crate::site::{SiteError, load};
+use crate::topology::compile;
 
 /// Largest block the engine accepts.
 pub const MAX_BLOCK: usize = 4096;
@@ -332,17 +332,17 @@ pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
     if !(1..=MAX_BLOCK).contains(&cfg.block) {
         return Err(EngineError::Usage(format!("block must be 1…{MAX_BLOCK}")));
     }
-    let graph = Arc::new(compile(&load(&cfg.site)?)?);
+    let topo = Arc::new(compile(&load(&cfg.site)?)?);
     info!(
-        "site {}: {} inputs, {} buses, {} sends, topology {}",
+        "site {}: {} inputs, {} groups, {} mixes, topology {}",
         cfg.site.display(),
-        graph.inputs.len(),
-        graph.buses.len(),
-        graph.sends.len(),
-        graph.hash
+        topo.inputs.len(),
+        topo.groups.len(),
+        topo.mixes.len(),
+        topo.hash
     );
     let store = Store::open(&cfg.state_dir)?;
-    let loaded = store.load(&graph);
+    let loaded = store.load(&topo);
     for (path, why) in &loaded.rejected {
         warn!("state file {} skipped: {why}", path.display());
     }
@@ -367,19 +367,19 @@ pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
     for a in &alarms {
         warn!("alarm {:?}: {}", a.code, a.detail);
     }
-    let counters: Vec<u64> = graph
-        .buses
+    let counters: Vec<u64> = topo
+        .mixes
         .iter()
         .map(|b| loaded.persisted.counters.get(&b.id).copied().unwrap_or(0))
         .collect();
     let core = Core::new(
-        Arc::clone(&graph),
+        Arc::clone(&topo),
         &loaded.persisted.state,
         loaded.persisted.rev,
         cfg.flags,
     );
     let (processor, handles) = Processor::new(
-        Arc::clone(&graph),
+        Arc::clone(&topo),
         &loaded.persisted.state,
         &counters,
         Options::default(),
@@ -397,8 +397,8 @@ pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
         NullRtConfig {
             sample_rate: SAMPLE_RATE,
             block: cfg.block,
-            inputs: graph.rx.len(),
-            outputs: graph.tx.len(),
+            inputs: topo.rx.len(),
+            outputs: topo.tx.len(),
             signal: cfg.signal,
         },
         processor,
@@ -465,7 +465,7 @@ fn read_state(path: &Path) -> Result<MixState, EngineError> {
 /// Renders a 96 kHz WAV (one channel per RX channel) to a WAV with one
 /// channel per TX channel, deterministically (§3.5 parity harness).
 pub fn render(a: &RenderArgs) -> Result<(), EngineError> {
-    let graph = Arc::new(compile(&load(&a.site)?)?);
+    let topo = Arc::new(compile(&load(&a.site)?)?);
     let state = match &a.state {
         Some(p) => read_state(p)?,
         None => MixState::default(),
@@ -477,20 +477,20 @@ pub fn render(a: &RenderArgs) -> Result<(), EngineError> {
             a.input.display()
         )));
     }
-    if audio.channels() != graph.rx.len() {
+    if audio.channels() != topo.rx.len() {
         return Err(EngineError::Usage(format!(
             "{} has {} channels; the site has {} RX channels",
             a.input.display(),
             audio.channels(),
-            graph.rx.len()
+            topo.rx.len()
         )));
     }
     if !(1..=MAX_BLOCK).contains(&a.block) {
         return Err(EngineError::Usage(format!("block must be 1…{MAX_BLOCK}")));
     }
     let (mut p, _handles) =
-        Processor::new(Arc::clone(&graph), &state, &[], Options { fade_in_ms: 0.0 });
-    let run = Offline { block: a.block }.run(&mut p, &audio, graph.tx.len());
+        Processor::new(Arc::clone(&topo), &state, &[], Options { fade_in_ms: 0.0 });
+    let run = Offline { block: a.block }.run(&mut p, &audio, topo.tx.len());
     if let Some(f) = run.fault {
         return Err(EngineError::Fault {
             frame: f.frame,
@@ -679,7 +679,7 @@ mod tests {
         assert!(matches!(render(&args(0)), Err(EngineError::Usage(_))));
         render(&args(32)).unwrap();
         let (rate, out) = wav::read_file(&output).unwrap();
-        assert_eq!((rate, out.channels(), out.frames()), (96_000, 23, 100));
+        assert_eq!((rate, out.channels(), out.frames()), (96_000, 21, 100));
         // A plain mix-state JSON is accepted as --state; garbage is explained.
         let state = dir.path().join("state.json");
         std::fs::write(&state, "{}").unwrap();

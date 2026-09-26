@@ -2,9 +2,10 @@
 //! "Migration", P9): PINs with their current values (hashed), the JWT secret
 //! and VAPID key (phones stay logged in and subscribed), push subscriptions,
 //! the LAN HTTPS certificate and member photos. Everything is read from files;
-//! every function has a dry run that writes nothing. Values are never logged.
+//! every function that writes has a dry run that writes nothing. Values are
+//! never logged.
 
-use std::io::{self, Write as _};
+use std::io::{self, Read as _, Write as _};
 use std::path::Path;
 
 use base64::Engine as _;
@@ -372,24 +373,18 @@ pub fn import_push(legacy_dir: &Path, out_dir: &Path, dry_run: bool) -> io::Resu
     Ok((added, all.len()))
 }
 
-/// A member photo (JPEG, ≤ 256 KB) copied to `dst` (replacing an older copy).
-pub fn import_photo(src: &Path, dst: &Path, dry_run: bool) -> io::Result<()> {
-    let data = std::fs::read(src)?;
+/// A member photo (JPEG, ≤ 256 KB), read for the import. The read stops one
+/// byte past the limit, so a file that is (or grows) too large is refused
+/// without being read whole. Errors do not name `src`; the caller does.
+pub fn read_photo(src: &Path) -> io::Result<Vec<u8>> {
+    let mut data = Vec::new();
+    std::fs::File::open(src)?
+        .take(PHOTO_MAX_BYTES as u64 + 1)
+        .read_to_end(&mut data)?;
     if data.len() > PHOTO_MAX_BYTES || !data.starts_with(&[0xFF, 0xD8, 0xFF]) {
-        return Err(invalid(format!(
-            "{} is not a JPEG of at most 256 KB",
-            src.display()
-        )));
+        return Err(invalid("not a JPEG of at most 256 KB"));
     }
-    if !dry_run {
-        if let Some(parent) = dst.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let tmp = dst.with_extension("tmp");
-        std::fs::write(&tmp, data)?;
-        std::fs::rename(tmp, dst)?;
-    }
-    Ok(())
+    Ok(data)
 }
 
 #[cfg(test)]
@@ -689,40 +684,51 @@ mod tests {
     fn photos_must_be_small_jpegs() {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("a.jpg");
-        let dst = dir.path().join("photos").join("member1.jpg");
         std::fs::write(&src, [0xFF_u8, 0xD8, 0xFF, 0xE0, 1, 2]).unwrap();
-        import_photo(&src, &dst, true).unwrap();
-        assert!(!dst.exists());
-        import_photo(&src, &dst, false).unwrap();
         assert_eq!(
-            std::fs::read(&dst).unwrap(),
+            read_photo(&src).unwrap(),
             vec![0xFF, 0xD8, 0xFF, 0xE0, 1, 2]
         );
         std::fs::write(&src, b"GIF89a").unwrap();
-        assert!(import_photo(&src, &dst, true).is_err());
-        let mut big: Vec<u8> = vec![0xFF, 0xD8, 0xFF];
-        big.resize(PHOTO_MAX_BYTES + 1, 0);
-        std::fs::write(&src, &big).unwrap();
-        assert!(import_photo(&src, &dst, true).is_err());
-        big.truncate(PHOTO_MAX_BYTES);
-        std::fs::write(&src, big).unwrap();
-        assert!(import_photo(&src, &dst, true).is_ok());
+        let err = read_photo(&src).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(err.to_string(), "not a JPEG of at most 256 KB");
+        let err = read_photo(&dir.path().join("none.jpg")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 
     #[test]
     fn the_photo_limit_is_256_kilobytes() {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("a.jpg");
-        let dst = dir.path().join("member1.jpg");
+        // Varied bytes: a truncated or padded read would not compare equal.
         let mut photo: Vec<u8> = vec![0xFF, 0xD8, 0xFF];
-        photo.resize(262_144, 0);
+        photo.extend((3..262_144_u32).map(|i| (i % 251) as u8));
+        assert_eq!(photo.len(), PHOTO_MAX_BYTES);
         std::fs::write(&src, &photo).unwrap();
-        import_photo(&src, &dst, false).unwrap();
-        assert_eq!(std::fs::read(&dst).unwrap().len(), 262_144);
+        assert_eq!(read_photo(&src).unwrap(), photo);
         photo.push(0);
         std::fs::write(&src, photo).unwrap();
-        let err = import_photo(&src, &dst, true).unwrap_err();
+        let err = read_photo(&src).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    /// The read is bounded: a 1 TiB (sparse) photo is refused after
+    /// `PHOTO_MAX_BYTES + 1` bytes, never loaded whole.
+    #[cfg(unix)]
+    #[test]
+    fn a_huge_photo_is_refused_without_reading_it_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("a.jpg");
+        std::fs::write(&src, [0xFF_u8, 0xD8, 0xFF, 0xE0]).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&src)
+            .unwrap()
+            .set_len(1 << 40)
+            .unwrap();
+        let err = read_photo(&src).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{err}");
     }
 
     #[test]

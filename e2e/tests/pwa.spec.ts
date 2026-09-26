@@ -2,8 +2,12 @@
  * PWA Service Worker Tests — verify SW registers and caches hashed assets.
  *
  * The service worker caches content-hashed WASM/JS files (cache-first strategy)
- * for instant repeat loads. Only files matching /[a-f0-9]{16,}\.(js|wasm)$/ are
- * cached. index.html and unhashed files are NEVER cached in SW.
+ * for instant repeat loads. Only Trunk's hashed loader and module
+ * (`iem-ui-<hash>.js`, `iem-ui-<hash>_bg.wasm`) are cached. index.html and
+ * unhashed files are NEVER cached in SW.
+ *
+ * Trunk writes the hash as an unpadded hex u64, so it has 16 digits or fewer
+ * (15 in about one build of 16), and the module ends in `_bg.wasm`.
  *
  * Previous cache-ALL strategy caused blank pages after every deploy because
  * old WASM/JS assets were served from SW cache but didn't match new HTML references.
@@ -13,6 +17,9 @@
 import { test, expect } from "./support/fixtures";
 
 const BASE_URL = process.env.E2E_BASE_URL || "http://localhost:8080";
+
+// Trunk's hashed assets (see above); the worker must cache exactly these.
+const TRUNK_ASSET = /\/iem-ui-[0-9a-f]{1,16}(_bg)?\.(js|wasm)$/;
 
 test.describe("Service Worker — PWA with hashed asset caching", () => {
   test("service worker registers and activates", async ({ page }) => {
@@ -51,6 +58,34 @@ test.describe("Service Worker — PWA with hashed asset caching", () => {
     // No silent skip — if the browser somehow lacks SW support, fail loudly.
     expect(swRegistered).not.toBe("unsupported");
     expect(swRegistered).toBe("active");
+  });
+
+  test("the worker's asset pattern matches every Trunk hash length", async ({
+    request,
+  }) => {
+    const sw = await (await request.get(`${BASE_URL}/sw.js`)).text();
+    const literal = /const HASH_RE = \/(.+)\/;/.exec(sw);
+    expect(literal, "sw.js declares HASH_RE").not.toBeNull();
+    const pattern = new RegExp(literal![1]);
+    // Names of real builds: a 16-digit hash and a 15-digit one (the build
+    // whose module and loader were never cached).
+    for (const hash of ["ae0d19a3a9310e9f", "fc2ce22442e2055", "7"]) {
+      for (const name of [`/iem-ui-${hash}.js`, `/iem-ui-${hash}_bg.wasm`]) {
+        expect(pattern.test(name), name).toBe(true);
+      }
+    }
+    for (const name of [
+      "/",
+      "/index.html",
+      "/sw.js",
+      "/audio_player.js",
+      "/talkback.js",
+      "/talkback-worklet.js",
+      "/manifest.json",
+      "/style-ae0d19a3a9310e9f.css",
+    ]) {
+      expect(pattern.test(name), name).toBe(false);
+    }
   });
 
   test("hashed WASM/JS assets are cached after navigation", async ({
@@ -101,7 +136,8 @@ test.describe("Service Worker — PWA with hashed asset caching", () => {
     // SW interception by refetching the hashed assets explicitly with
     // `cache: "no-store"`, which bypasses HTTP cache and routes through
     // the SW fetch handler.
-    await page.evaluate(async () => {
+    await page.evaluate(async (asset: string) => {
+      const trunkAsset = new RegExp(asset);
       // Wait until the SW is actually controlling this page (clients.claim
       // racing with the navigation can leave us briefly uncontrolled).
       if (!navigator.serviceWorker.controller) {
@@ -120,11 +156,11 @@ test.describe("Service Worker — PWA with hashed asset caching", () => {
       const urls = new Set<string>();
       document.querySelectorAll("script[src]").forEach((el) => {
         const src = (el as HTMLScriptElement).src;
-        if (/[a-f0-9]{16,}\.(js|wasm)$/.test(src)) urls.add(src);
+        if (trunkAsset.test(new URL(src).pathname)) urls.add(src);
       });
       document.querySelectorAll("link[href]").forEach((el) => {
         const href = (el as HTMLLinkElement).href;
-        if (/[a-f0-9]{16,}\.(js|wasm)$/.test(href)) urls.add(href);
+        if (trunkAsset.test(new URL(href).pathname)) urls.add(href);
       });
       // Best-effort refetch — failures don't stop the test (the SW
       // intercept itself is what matters; cache.put inside the SW does
@@ -134,7 +170,7 @@ test.describe("Service Worker — PWA with hashed asset caching", () => {
           fetch(url, { cache: "no-store" }).catch(() => {}),
         ),
       );
-    });
+    }, TRUNK_ASSET.source);
 
     // Poll for SW cache to be populated. After the explicit refetch above
     // the SW should have written entries on the same tick; the loop is
@@ -153,20 +189,15 @@ test.describe("Service Worker — PWA with hashed asset caching", () => {
           keys: requests.map((r) => new URL(r.url).pathname),
         };
       });
-      if (cacheInfo.exists && cacheInfo.keys.length > 0) break;
+      // The loader and the module.
+      if (cacheInfo.exists && cacheInfo.keys.length >= 2) break;
     }
 
     expect(cacheInfo.exists).toBe(true);
-    // Should have cached at least the WASM and JS loader files
-    const hashedFiles = cacheInfo.keys.filter((k: string) =>
-      /[a-f0-9]{16,}\.(js|wasm)$/.test(k),
-    );
-    expect(hashedFiles.length).toBeGreaterThanOrEqual(1);
-
-    // Verify unhashed files are NOT in cache
-    const unhashedFiles = cacheInfo.keys.filter(
-      (k: string) => !/[a-f0-9]{16,}\.(js|wasm)$/.test(k),
-    );
-    expect(unhashedFiles).toHaveLength(0);
+    // Both the JS loader and the WASM module are cached ...
+    expect(cacheInfo.keys.some((k) => /\/iem-ui-[0-9a-f]+\.js$/.test(k))).toBe(true);
+    expect(cacheInfo.keys.some((k) => /_bg\.wasm$/.test(k))).toBe(true);
+    // ... and nothing else (unhashed files are never cached).
+    expect(cacheInfo.keys.filter((k) => !TRUNK_ASSET.test(k))).toEqual([]);
   });
 });

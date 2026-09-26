@@ -1,7 +1,7 @@
 //! The engine ↔ server protocol (S3; program spec §2.3, §2.4, I6; design note
 //! `docs/superpowers/specs/2026-09-26-s3-engine-core-design.md` §3.3, §3.6):
 //!
-//! - [`ids`]: stable string ids of inputs, buses and sends;
+//! - [`ids`]: stable string ids of inputs, groups and mixes (#20 design note);
 //! - [`state`]: the persisted mix state and the transient engine state;
 //! - [`msg`]: commands, replies and events, protocol N/N−1 negotiation;
 //! - [`frame`]: the control pipe's length-prefixed JSON frames;
@@ -28,14 +28,13 @@ pub mod msg;
 pub mod state;
 
 pub use frame::{FrameError, MAX_FRAME, read_frame, write_frame};
-pub use ids::{BusId, EqOwner, InputId, MAX_ID_LEN, SendId, Source, valid_id};
+pub use ids::{EqTarget, GroupId, InputId, MAX_ID_LEN, MixId, Source, valid_id};
 pub use media::{FRAME_48K, MEDIA_HEADER, MediaHeader, read_media, write_media};
 pub use msg::{
-    Alarm, AlarmCode, BusInfo, BusKind, Change, ClientMsg, Cmd, EngineMsg, ErrCode, ErrorBody,
-    Hello, InputInfo, Meters, PROTO, Reply, Role, SendInfo, Status, Tap, TopologyInfo, negotiate,
-    parse_client,
+    Alarm, AlarmCode, Change, ClientMsg, Cmd, EngineMsg, ErrCode, ErrorBody, GroupInfo, Hello,
+    InputInfo, Meters, MixInfo, PROTO, Reply, Role, Status, TopologyInfo, negotiate, parse_client,
 };
 pub use state::{
-    BandKind, BusState, DB_OFF, Eq, EqBand, InputState, Limiter, MixState, SCHEMA, SendEntry,
-    SendState, Solo, TestSignal, Transient, db_to_lin,
+    BandKind, DB_OFF, Eq, EqBand, InputState, Level, Limiter, Mix, MixGroup, MixOut, MixState,
+    SCHEMA, Solo, TestSignal, Transient, db_to_lin,
 };

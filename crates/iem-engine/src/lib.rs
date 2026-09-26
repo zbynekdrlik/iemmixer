@@ -1,12 +1,12 @@
 //! The iemmixer audio engine (S3; program spec §2, §3.3, §3.4; design note
 //! `docs/superpowers/specs/2026-09-26-s3-engine-core-design.md`):
 //!
-//! - [`site`], [`graph`]: the `[engine]` table of `site.toml`, validated and
-//!   compiled once per run (I4);
+//! - [`site`], [`topology`]: the `[engine]` table of `site.toml` (inputs,
+//!   groups, mixes), validated and compiled once per run (I4, #20);
 //! - [`params`]: field caps and the conversion to DSP parameters;
 //! - [`cmd`]: the RT thread's command messages;
 //! - [`core`]: the pure control core, single writer of the state (I6);
-//! - [`rt`]: the RT processor, the whole graph in one callback (I5, I7);
+//! - [`rt`]: the RT processor, the fixed mix pipeline in one callback (I5, I7);
 //! - [`resample`], [`media`]: 96 ↔ 48 kHz for listen taps and talkback (X3, X4);
 //! - [`persist`]: atomic checksummed saves, generations, baseline, load chain;
 //! - [`pipe`], [`control`], [`engine`]: local-socket pipes, the control loop,
@@ -32,7 +32,6 @@ pub mod cmd;
 pub mod control;
 pub mod core;
 pub mod engine;
-pub mod graph;
 pub mod media;
 pub mod params;
 pub mod persist;
@@ -40,6 +39,7 @@ pub mod pipe;
 pub mod resample;
 pub mod rt;
 pub mod site;
+pub mod topology;
 
 /// The only rate the engine runs at (I2).
 pub const SAMPLE_RATE: u32 = 96_000;
@@ -49,7 +49,7 @@ pub const SEG: usize = 256;
 pub const MAX_CMDS_PER_BLOCK: usize = 512;
 /// Talkback into the talkback input after its EQ, ≈ −8.4 dB (A4).
 pub const TALKBACK_GAIN: f64 = 0.379934;
-/// X13: TX buses a test signal reaches are clamped here (−20 dBFS).
+/// X13: while a test signal sounds, every TX output is clamped here (−20 dBFS).
 pub const TEST_CAP: f64 = 0.1;
 /// Commands in one batch at most.
 pub const MAX_BATCH: usize = 256;
@@ -60,8 +60,8 @@ pub const MAX_SOLO: usize = 64;
 pub(crate) mod test_support {
     use std::path::PathBuf;
 
-    use crate::graph::{Graph, compile};
     use crate::site::load;
+    use crate::topology::{Topology, compile};
 
     pub fn test_site_path() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config/test-site.toml")
@@ -71,7 +71,7 @@ pub(crate) mod test_support {
         std::fs::read_to_string(test_site_path()).unwrap()
     }
 
-    pub fn test_site() -> Graph {
+    pub fn test_site() -> Topology {
         compile(&load(&test_site_path()).unwrap()).unwrap()
     }
 }

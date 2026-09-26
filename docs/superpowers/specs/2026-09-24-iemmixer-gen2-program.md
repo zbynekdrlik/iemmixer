@@ -2,6 +2,8 @@
 
 **Status:** APPROVED by the owner 2026-09-24 (D1–D4 as recommended, plus the switching amendment in §4.3), ticket iemmixer#1; supersedes the archived 22.6k-word draft where they conflict (§9).
 
+**Amended 2026-09-26 (#20, owner rulings):** the engine model is derived from the members' GUI (inputs, groups, mixes that may hear earlier mixes, taps, talkback) instead of REAPER's routing graph — design note `2026-09-26-engine-model-rework-design.md`. A11 and the F29 master fader are removed (the master is muted in the saved project); I4 is reworded.
+
 **Predecessor:** `reaperiem` (private, frozen) serves every event until cutover. It is maintained separately and is out of scope here; this work never pushes to it and never changes its code, config or deployment.
 
 **Placeholders** (real values only in the private ops repo): `<public-host>` (the band's hostname), `<build-box>` (Linux render machine), `MEMBER_1`…`MEMBER_9`, `ELEVATED_MEMBER` (= `MEMBER_1`), `ENGINEER`, `TRANSLATOR`.
@@ -108,7 +110,7 @@ Numbers are tunable defaults unless they are parity requirements, tolerances (§
 - **I1** The engine opens no socket, links no codec, parses no browser data.
 - **I2** **iemmixer runs at a 32-sample buffer at 96 kHz (≈ 0.33 ms) — mandatory** (owner 2026-09-26: in-ear system). The PC is an appliance bound to iemmixer: the engine runs with the highest safe priority and the OS is tuned (admin rights) so nothing interrupts it (S1c). The buffer is the card driver's preferred size: iemmixer's switch sets 32 when it takes the card and restores the predecessor's previous value on "ide event", so REAPER stays exactly as it is. The engine never changes the rate or buffer at runtime and refuses any rate but 96 kHz.
 - **I3** One ASIO host at a time: the engine refuses while `reaper.exe` exists; the guard never starts REAPER while an engine exists.
-- **I4** The graph is compiled once per run from `site.toml` and validated (acyclic, unique TX, channels in map, one send per pair); topology change = controlled engine restart.
+- **I4** The topology is compiled once per run from `site.toml` and validated (unique channels in the map, disjoint groups, every heard mix declared before the mix that hears it); topology change = controlled engine restart.
 - **I5** f64, plain summing, no bus pan law, zero added latency, no delay-compensation emulation.
 - **I6** The engine is the single writer; clients get revisioned `State`/`Delta`, and any gap forces a resync.
 - **I7** RT contract: lock-free rings, atomics and fixed messages only; ≤ 512 commands per block; no allocation, lock, syscall or log; CI checks with `assert_no_alloc` and rtsan.
@@ -133,6 +135,7 @@ Numbers are tunable defaults unless they are parity requirements, tolerances (§
   - 17 bus-to-bus (mode 0, muted by default): 8 into `ELEVATED_MEMBER`, 9 into `ENGINEER`.
 - **Processing:** 44 five-band EQs, 24 trims, 10 limiters.
 - **Roles:** `ELEVATED_MEMBER` views and controls the other member mixes. `ENGINEER` has talkback, listen, Mute All, backups and admin.
+- **iemmixer model (#20):** 24 inputs (the 7 stems in one group), 11 mixes on 21 TX (9 members and `ENGINEER` stereo, `TRANSLATOR` mono); `ELEVATED_MEMBER` hears members 2–9 and `ENGINEER` members 1–9 (the Mixes tab); the muted master is not reproduced.
 
 ### 3.2 Features
 
@@ -166,7 +169,7 @@ Proof codes: **M** mock E2E, **L** live E2E/HIL, **S** server tests, **E** engin
 - **F26** PWA: HTTPS, redirect, network-first `index.html` (M)
 - **F27** Tray: Open Mixer, Copy URL, Exit (tray only) (S6 checklist)
 - **F28** Diagnostics endpoints with today's JSON fields (S,L)
-- **F29** **New engineer surface** for REAPER-GUI-only controls: input mute, trim, processing on/off, `TRANSLATOR` controls, master fader, limiter-stats reset (O,M,L)
+- **F29** **New engineer surface** for REAPER-GUI-only controls: input mute, trim, processing on/off, `TRANSLATOR` controls, limiter-stats reset (O,M,L) (the master fader was dropped by #20)
 - **F30** **Topology change** procedure (add, rename, re-route, add member) in `dev` after cutover; no UI (S6 test)
 - **F31** Restore with preview as a diff of two states (S,L)
 - **F32** Limiter active-seconds counted in the engine, persistence per Q4 (E)
@@ -183,7 +186,7 @@ Proof codes: **M** mock E2E, **L** live E2E/HIL, **S** server tests, **E** engin
 - **A8** Output bus: Σ → EQ → limiter → fader ≤ +12 dB → mute → safety stage (Q1) → clamp ±1.0 (G).
 - **A9** Bus-to-bus taps read after mute, before safety stage and clamp, unclipped as in REAPER; graph acyclic (O).
 - **A10** `TRANSLATOR`: `HAND_1` → fader → mute → mono downmix `(gL·L + gR·R)/2` on channel 1, channel 2 silent (S1b `mono_downmix_half_sum`) → safety stage → clamp (G).
-- **A11** Master: Σ post-fader outputs of inputs and stems buses (O).
+- **A11** ~~Master: Σ post-fader outputs of inputs and stems buses~~ — removed by #20: the master is muted in the saved project, its TX pair stays silent.
 - **A12** EQ: ReaEQ band types as an SVF fed RBJ parameters: band and HPF bandwidth with the octave warp capped at π/2, shelf slope `S = min(1/bw², 1.2)`, HPF gain ignored, `f0 ≤ 0.49·fs`, `bw ≥ 0.01`, gain 0 = notch (S1b, S2) (G).
 - **A13** Limiter: faithful MGA port (no lookahead, instant attack, 50 ms release, 75 % link, hold sr/128, ceiling −6…0 dB) (E,G).
 

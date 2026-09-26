@@ -7,7 +7,7 @@
 //! - `export`: engine state → a **new** project from the original (rollback);
 //! - `band`: the predecessor's data directory → the server's band directory
 //!   (presets, snapshots, customizations, photos, PINs, secrets, push,
-//!   certificate, PIN-free backup archive).
+//!   certificate, PIN-free backup archive), written transactionally.
 //!
 //! GPL-3.0-or-later: it links `iem-engine` (D1).
 
@@ -18,6 +18,7 @@ pub mod band_cmd;
 pub mod export_cmd;
 pub mod import_cmd;
 pub mod site;
+pub mod stage;
 
 use std::path::Path;
 

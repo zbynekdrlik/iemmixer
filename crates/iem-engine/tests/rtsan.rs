@@ -27,7 +27,7 @@ const PROBE: &str = "IEM_RTSAN_PROBE";
 #[test]
 fn process_is_realtime_safe() {
     let mut s = common::scenario();
-    let mut b = common::buffers(&s.graph);
+    let mut b = common::buffers(&s.topo);
     common::drive(&mut s, &mut b, 3_000);
     assert_eq!(s.processor.time(), 3_000 * common::BLOCK as u64);
     assert!(b.output.iter().all(|y| y.is_finite() && y.abs() <= 1.0));

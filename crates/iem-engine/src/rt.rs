@@ -1,5 +1,8 @@
 //! The RT processor (program spec §3.3 A1–A13, §3.4 X1–X4, X13–X15, Q1, I5,
-//! I7; design note §3.2, §3.4): one callback renders the whole graph.
+//! I7; S3 design note §3.2, §3.4; #20 design note §3, §6): one callback runs
+//! the fixed pipeline — the inputs, then every mix in declaration order (its
+//! inputs directly or through their group's strip, the mixes it hears, then
+//! EQ → limiter → volume/mute → Q1 safety → clamp → TX).
 //!
 //! A block is cut into segments of at most [`SEG`] samples at every command
 //! timestamp and test-signal end, and every ramp steps per sample, so the
@@ -17,14 +20,14 @@ use iem_dsp::meter::PeakMeter;
 use iem_dsp::pan::StereoGain;
 use iem_dsp::ramp::{EQ_MS, GAIN_MS, MUTE_MS, Ramp, samples};
 use iem_dsp::sanitize::Trips;
-use iem_engine_proto::{BusKind, MixState, db_to_lin};
+use iem_engine_proto::{MixState, db_to_lin};
 use iem_limiter_mga::{DISABLE_MS, Limiter, Mga, Sliders};
 use rtrb::{Consumer, Producer, RingBuffer};
 
 use crate::cmd::{RtCmd, RtOp};
 use crate::core::reconcile;
-use crate::graph::{Graph, Src};
 use crate::params::{eq_params, input_params};
+use crate::topology::Topology;
 use crate::{MAX_CMDS_PER_BLOCK, SAMPLE_RATE, SEG, TALKBACK_GAIN, TEST_CAP};
 
 /// Samples between meter frames: 30 Hz at 96 kHz.
@@ -50,13 +53,15 @@ impl Default for Options {
     }
 }
 
-/// One meter frame: peaks since the previous frame (inputs at the pre-fader
-/// tap, buses post-fader), limiter GR in dB and X14 active samples per bus.
+/// One meter frame: peaks since the previous frame (inputs after their mute,
+/// mixes after volume and mute, group strips after their fader, mix-major),
+/// limiter GR in dB and X14 active samples per mix.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MeterFrame {
     pub seq: u64,
     pub inputs: Vec<[f64; 2]>,
-    pub buses: Vec<[f64; 2]>,
+    pub mixes: Vec<[f64; 2]>,
+    pub groups: Vec<[f64; 2]>,
     pub gr_db: Vec<f64>,
     pub active: Vec<u64>,
     pub trips: u64,
@@ -78,7 +83,7 @@ pub struct RtStatus {
 pub struct RtHandles {
     pub cmds: Producer<RtCmd>,
     pub meters: triple_buffer::Output<MeterFrame>,
-    /// Interleaved stereo 96 kHz: slot 0 engineer, slot 1 member (X3).
+    /// Interleaved stereo 96 kHz: slot 0 the engineer, slot 1 one other mix (X3).
     pub taps: [Consumer<f32>; 2],
     /// Mono 96 kHz talkback into the talkback input (A4).
     pub talkback: Producer<f32>,
@@ -153,7 +158,7 @@ fn stereo_gain(g: &mut StereoGain, l: &mut [f64], r: &mut [f64]) {
     }
 }
 
-/// Adds `g · src` to `dst` (a send, or an input's post-fader signal into master).
+/// Adds `g · src` to `dst` (a level).
 fn accumulate(g: &mut StereoGain, src: (&[f64], &[f64]), dst: (&mut [f64], &mut [f64])) {
     let ((sl, sr), (dl, dr)) = (src, dst);
     if let Some((gl, gr)) = g.steady() {
@@ -219,7 +224,7 @@ fn safety(sr: f64) -> Mga {
 }
 
 struct InputRt {
-    /// The pre-fader tap P (post-FX, post-mute).
+    /// The input's signal P (post-FX, post-mute) every level reads.
     p: Stereo,
     trim: Ramp,
     /// 1 = processed (trim → EQ), 0 = dry (Q3); crossfades 20 ms.
@@ -227,21 +232,19 @@ struct InputRt {
     eq: Equalizer<2>,
     /// 1 = open, 0 = muted (A3), 5 ms.
     gate: Ramp,
-    /// Track fader and pan into the master (A11).
-    fader: StereoGain,
     trips: Trips,
     peak: PeakMeter<2>,
 }
 
-/// A bus limiter (A13, §4.4): enabling and lowering instant, raising over 10 ms.
-struct BusLimiter {
+/// A mix limiter (A13, §4.4): enabling and lowering instant, raising over 10 ms.
+struct MixLimiter {
     lim: Limiter,
     raise: Ramp,
     /// X14 samples counted before this run (Q4: persisted until reset).
     base: u64,
 }
 
-impl BusLimiter {
+impl MixLimiter {
     fn new(sr: f64, enabled: bool, limit_db: f64, base: u64) -> Self {
         let mut lim = Limiter::new(sr, limit_db);
         lim.set_enabled(enabled);
@@ -279,14 +282,27 @@ impl BusLimiter {
     }
 }
 
-struct BusRt {
-    /// The sum, then the node's output in place: O (post-fader, post-mute).
-    sum: Stereo,
-    eq: Option<Equalizer<2>>,
-    limiter: Option<BusLimiter>,
+/// A group's strip in one mix (A7): Σ → EQ → fader → mute.
+struct GroupRt {
+    eq: Equalizer<2>,
     fader: StereoGain,
-    safety: Option<Mga>,
-    /// Output clamp: 1.0, or 0.1 while a test signal reaches this bus (X13).
+    trips: Trips,
+    peak: PeakMeter<2>,
+}
+
+struct MixRt {
+    /// The sum, then the mix's output in place: O (post-volume, post-mute),
+    /// which later mixes that hear this one read (A9: unclipped).
+    sum: Stereo,
+    /// Level slots: every input, then the mixes it hears.
+    levels: Vec<StereoGain>,
+    groups: Vec<GroupRt>,
+    eq: Equalizer<2>,
+    limiter: MixLimiter,
+    /// Volume and mute (A5 at pan 0).
+    fader: StereoGain,
+    safety: Mga,
+    /// Output clamp: 1.0, or 0.1 while a test signal sounds (X13).
     cap: f64,
     trips: Trips,
     peak: PeakMeter<2>,
@@ -322,11 +338,10 @@ impl TestRt {
 }
 
 pub struct Processor {
-    graph: Arc<Graph>,
+    topo: Arc<Topology>,
     sr: f64,
     inputs: Vec<InputRt>,
-    buses: Vec<BusRt>,
-    sends: Vec<StereoGain>,
+    mixes: Vec<MixRt>,
     talkback_input: Option<usize>,
     cmds: Consumer<RtCmd>,
     meter_in: triple_buffer::Input<MeterFrame>,
@@ -337,6 +352,8 @@ pub struct Processor {
     talk_buf: Vec<f64>,
     tap_buf: Vec<f32>,
     dry: Stereo,
+    /// A group strip's sum, one group at a time.
+    group_buf: Stereo,
     tx: Stereo,
     listen_buf: Stereo,
     fade_buf: Vec<f64>,
@@ -353,16 +370,16 @@ pub struct Processor {
 }
 
 impl Processor {
-    /// A processor at `state` (reconciled against the graph), with the X14
-    /// counters `counters` per bus (graph order; missing ones are 0).
+    /// A processor at `state` (reconciled against the topology), with the
+    /// X14 counters `counters` per mix (topology order; missing ones are 0).
     pub fn new(
-        graph: Arc<Graph>,
+        topo: Arc<Topology>,
         state: &MixState,
         counters: &[u64],
         opts: Options,
     ) -> (Self, RtHandles) {
         let sr = f64::from(SAMPLE_RATE);
-        let r = reconcile(&graph, state).0;
+        let r = reconcile(&topo, state).0;
         let inputs = r
             .inputs
             .iter()
@@ -374,47 +391,53 @@ impl Processor {
                     proc_mix: Ramp::new(if p.processing { 1.0 } else { 0.0 }, samples(EQ_MS, sr)),
                     eq: Equalizer::new(&eq_params(&s.eq), sr),
                     gate: Ramp::new(if p.muted { 0.0 } else { 1.0 }, samples(MUTE_MS, sr)),
-                    fader: StereoGain::new(sr, p.fader, false, p.pan),
                     trips: Trips::default(),
                     peak: PeakMeter::new(),
                 }
             })
             .collect();
-        let buses = r
-            .buses
+        let mixes = r
+            .mixes
             .iter()
             .enumerate()
-            .map(|(b, s)| BusRt {
+            .map(|(m, rec)| MixRt {
                 sum: Stereo::new(),
-                eq: graph
-                    .has_eq(b)
-                    .then(|| Equalizer::new(&eq_params(&s.eq), sr)),
-                limiter: graph.has_limiter(b).then(|| {
-                    BusLimiter::new(
-                        sr,
-                        s.limiter.enabled,
-                        s.limiter.limit_db,
-                        counters.get(b).copied().unwrap_or(0),
-                    )
-                }),
-                fader: StereoGain::new(sr, db_to_lin(s.fader_db), s.muted, s.pan),
-                safety: (graph.kind(b) != Some(BusKind::Stems)).then(|| safety(sr)),
+                levels: rec
+                    .levels
+                    .iter()
+                    .map(|l| StereoGain::new(sr, db_to_lin(l.gain_db), l.muted, l.pan))
+                    .collect(),
+                groups: rec
+                    .groups
+                    .iter()
+                    .map(|g| GroupRt {
+                        eq: Equalizer::new(&eq_params(&g.eq), sr),
+                        fader: StereoGain::new(sr, db_to_lin(g.gain_db), g.muted, 0.0),
+                        trips: Trips::default(),
+                        peak: PeakMeter::new(),
+                    })
+                    .collect(),
+                eq: Equalizer::new(&eq_params(&rec.out.eq), sr),
+                limiter: MixLimiter::new(
+                    sr,
+                    rec.out.limiter.enabled,
+                    rec.out.limiter.limit_db,
+                    counters.get(m).copied().unwrap_or(0),
+                ),
+                fader: StereoGain::new(sr, db_to_lin(rec.out.volume_db), rec.out.muted, 0.0),
+                safety: safety(sr),
                 cap: 1.0,
                 trips: Trips::default(),
                 peak: PeakMeter::new(),
             })
             .collect();
-        let sends = r
-            .sends
-            .iter()
-            .map(|s| StereoGain::new(sr, db_to_lin(s.gain_db), s.muted, s.pan))
-            .collect();
         let frame = MeterFrame {
             seq: 0,
-            inputs: vec![[0.0; 2]; graph.inputs.len()],
-            buses: vec![[0.0; 2]; graph.buses.len()],
-            gr_db: vec![0.0; graph.buses.len()],
-            active: vec![0; graph.buses.len()],
+            inputs: vec![[0.0; 2]; topo.inputs.len()],
+            mixes: vec![[0.0; 2]; topo.mixes.len()],
+            groups: vec![[0.0; 2]; topo.mixes.len() * topo.groups.len()],
+            gr_db: vec![0.0; topo.mixes.len()],
+            active: vec![0; topo.mixes.len()],
             trips: 0,
         };
         let (meter_in, meters) = triple_buffer::triple_buffer(&frame);
@@ -430,12 +453,11 @@ impl Processor {
             fade.jump(1.0);
         }
         let processor = Self {
-            talkback_input: graph.inputs.iter().position(|n| n.talkback),
-            graph,
+            talkback_input: topo.inputs.iter().position(|n| n.talkback),
+            topo,
             sr,
             inputs,
-            buses,
-            sends,
+            mixes,
             cmds,
             meter_in,
             taps: [tap0, tap1],
@@ -445,6 +467,7 @@ impl Processor {
             talk_buf: vec![0.0; SEG],
             tap_buf: vec![0.0; 2 * SEG],
             dry: Stereo::new(),
+            group_buf: Stereo::new(),
             tx: Stereo::new(),
             listen_buf: Stereo::new(),
             fade_buf: vec![1.0; SEG],
@@ -474,11 +497,10 @@ impl Processor {
         self.time
     }
 
-    fn set_caps(&mut self, input: Option<usize>) {
-        let reach = input.and_then(|i| self.graph.reach.get(i));
-        for (b, bus) in self.buses.iter_mut().enumerate() {
-            let capped = reach.and_then(|r| r.get(b)).copied().unwrap_or(false);
-            bus.cap = if capped { TEST_CAP } else { 1.0 };
+    /// X13: every mix hears every input, so a test signal caps every TX.
+    fn set_caps(&mut self, on: bool) {
+        for mix in &mut self.mixes {
+            mix.cap = if on { TEST_CAP } else { 1.0 };
         }
     }
 
@@ -505,7 +527,6 @@ impl Processor {
                         n.eq = Equalizer::new(&n.eq.params(), sr);
                     }
                     n.proc_mix.set(if p.processing { 1.0 } else { 0.0 });
-                    n.fader.set(p.fader, false, p.pan);
                 }
             }
             RtOp::InputEq { i, eq } => {
@@ -513,61 +534,67 @@ impl Processor {
                     n.eq.set(&eq);
                 }
             }
-            RtOp::Bus {
-                b,
-                fader,
-                pan,
-                muted,
-            } => {
-                if let Some(n) = self.buses.get_mut(usize::from(b)) {
-                    n.fader.set(fader, muted, pan);
+            RtOp::MixOut { m, volume, muted } => {
+                if let Some(n) = self.mixes.get_mut(usize::from(m)) {
+                    n.fader.set(volume, muted, 0.0);
                 }
             }
-            RtOp::BusEq { b, eq } => {
-                if let Some(e) = self
-                    .buses
-                    .get_mut(usize::from(b))
-                    .and_then(|n| n.eq.as_mut())
-                {
-                    e.set(&eq);
+            RtOp::MixEq { m, eq } => {
+                if let Some(n) = self.mixes.get_mut(usize::from(m)) {
+                    n.eq.set(&eq);
                 }
             }
             RtOp::Limiter {
-                b,
+                m,
                 enabled,
                 limit_db,
             } => {
-                if let Some(l) = self
-                    .buses
-                    .get_mut(usize::from(b))
-                    .and_then(|n| n.limiter.as_mut())
-                {
-                    l.set(enabled, limit_db);
+                if let Some(n) = self.mixes.get_mut(usize::from(m)) {
+                    n.limiter.set(enabled, limit_db);
                 }
             }
-            RtOp::ResetLimiter { b } => {
-                if let Some(l) = self
-                    .buses
-                    .get_mut(usize::from(b))
-                    .and_then(|n| n.limiter.as_mut())
-                {
-                    l.lim.reset_active();
-                    l.base = 0;
+            RtOp::ResetLimiter { m } => {
+                if let Some(n) = self.mixes.get_mut(usize::from(m)) {
+                    n.limiter.lim.reset_active();
+                    n.limiter.base = 0;
                 }
             }
-            RtOp::Send {
-                s,
+            RtOp::Level {
+                m,
+                k,
                 gain,
                 pan,
                 muted,
             } => {
-                if let Some(g) = self.sends.get_mut(usize::from(s)) {
+                if let Some(g) = self
+                    .mixes
+                    .get_mut(usize::from(m))
+                    .and_then(|n| n.levels.get_mut(usize::from(k)))
+                {
                     g.set(gain, muted, pan);
                 }
             }
-            RtOp::Listen { slot, bus } => {
+            RtOp::Group { m, g, gain, muted } => {
+                if let Some(s) = self
+                    .mixes
+                    .get_mut(usize::from(m))
+                    .and_then(|n| n.groups.get_mut(usize::from(g)))
+                {
+                    s.fader.set(gain, muted, 0.0);
+                }
+            }
+            RtOp::GroupEq { m, g, eq } => {
+                if let Some(s) = self
+                    .mixes
+                    .get_mut(usize::from(m))
+                    .and_then(|n| n.groups.get_mut(usize::from(g)))
+                {
+                    s.eq.set(&eq);
+                }
+            }
+            RtOp::Listen { slot, mix } => {
                 if let Some(l) = self.listen.get_mut(usize::from(slot)) {
-                    *l = bus.map(usize::from);
+                    *l = mix.map(usize::from);
                 }
                 if slot == 1 {
                     self.listen_lim.reset();
@@ -577,9 +604,8 @@ impl Processor {
                 let len = samples(FADE_MS, sr);
                 let mut fade = Ramp::new(0.0, len);
                 fade.set(1.0);
-                let input = usize::from(i);
                 self.test = Some(TestRt {
-                    input,
+                    input: usize::from(i),
                     phase: 0.0,
                     inc: hz / sr,
                     amp: amp.min(TEST_CAP),
@@ -587,7 +613,7 @@ impl Processor {
                     fade,
                     end: self.time.saturating_add(ttl).saturating_add(u64::from(len)),
                 });
-                self.set_caps(Some(input));
+                self.set_caps(true);
             }
             RtOp::StopTestSignal => {
                 let now = self.time;
@@ -667,11 +693,11 @@ impl Processor {
     }
 
     fn render_inputs(&mut self, block: &Block<'_>, off: usize, n: usize) {
-        let graph = Arc::clone(&self.graph);
+        let topo = Arc::clone(&self.topo);
         if self.talkback_input.is_some() {
             self.read_talkback(n);
         }
-        for (i, spec) in graph.inputs.iter().enumerate() {
+        for (i, spec) in topo.inputs.iter().enumerate() {
             let mut tripped = false;
             let Some(node) = self.inputs.get_mut(i) else {
                 continue;
@@ -738,14 +764,14 @@ impl Processor {
         }
     }
 
-    fn render_buses(&mut self, block: &mut Block<'_>, off: usize, n: usize) {
-        let graph = Arc::clone(&self.graph);
+    fn render_mixes(&mut self, block: &mut Block<'_>, off: usize, n: usize) {
+        let topo = Arc::clone(&self.topo);
         let Self {
             inputs,
-            buses,
-            sends,
+            mixes,
             taps,
             tap_buf,
+            group_buf,
             tx,
             listen,
             listen_lim,
@@ -754,97 +780,102 @@ impl Processor {
             status,
             ..
         } = self;
+        let heard_from = topo.inputs.len();
         let mut trips = 0;
-        if let Some(m) = graph.master.and_then(|m| buses.get_mut(m)) {
-            let (ml, mr) = m.sum.get_mut(n);
-            ml.fill(0.0);
-            mr.fill(0.0);
-            for node in inputs.iter_mut() {
-                let (pl, pr) = node.p.get(n);
-                accumulate(&mut node.fader, (pl, pr), (&mut *ml, &mut *mr));
-            }
-        }
-        for (b, spec) in graph.buses.iter().enumerate() {
-            let (done, rest) = buses.split_at_mut(b);
-            let Some((bus, _)) = rest.split_first_mut() else {
+        for (m, spec) in topo.mixes.iter().enumerate() {
+            let (done, rest) = mixes.split_at_mut(m);
+            let Some((mix, _)) = rest.split_first_mut() else {
                 continue;
             };
-            let (l, r) = bus.sum.get_mut(n);
-            if spec.kind == BusKind::Master {
-                for (s, stems) in graph.buses.iter().zip(done.iter()) {
-                    if s.kind == BusKind::Stems {
-                        let (sl, sr) = stems.sum.get(n);
-                        for ((a, c), (x, y)) in
-                            l.iter_mut().zip(r.iter_mut()).zip(sl.iter().zip(sr))
-                        {
-                            *a += x;
-                            *c += y;
-                        }
+            let MixRt {
+                sum,
+                levels,
+                groups,
+                eq,
+                limiter,
+                fader,
+                safety,
+                cap,
+                trips: mix_trips,
+                peak,
+            } = mix;
+            let (l, r) = sum.get_mut(n);
+            l.fill(0.0);
+            r.fill(0.0);
+            // The inputs in no group, at their levels.
+            for &i in &topo.direct {
+                if let (Some(input), Some(g)) = (inputs.get(i), levels.get_mut(i)) {
+                    accumulate(g, input.p.get(n), (&mut *l, &mut *r));
+                }
+            }
+            // Each group's strip: its inputs at their levels → EQ → fader → mute.
+            for (group, strip) in topo.groups.iter().zip(groups.iter_mut()) {
+                let (gl, gr) = group_buf.get_mut(n);
+                gl.fill(0.0);
+                gr.fill(0.0);
+                for &i in &group.inputs {
+                    if let (Some(input), Some(g)) = (inputs.get(i), levels.get_mut(i)) {
+                        accumulate(g, input.p.get(n), (&mut *gl, &mut *gr));
                     }
                 }
-            } else {
-                l.fill(0.0);
-                r.fill(0.0);
-            }
-            for (edge, gain) in graph
-                .sends
-                .get(spec.sends.clone())
-                .unwrap_or_default()
-                .iter()
-                .zip(sends.get_mut(spec.sends.clone()).unwrap_or_default())
-            {
-                let src = match edge.src {
-                    Src::Pre(i) => inputs.get(i).map(|x| x.p.get(n)),
-                    Src::Post(j) => done.get(j).map(|x| x.sum.get(n)),
-                };
-                if let Some(src) = src {
-                    accumulate(gain, src, (&mut *l, &mut *r));
+                if !strip.eq.is_identity() {
+                    strip.eq.process([&mut *gl, &mut *gr]);
+                }
+                stereo_gain(&mut strip.fader, gl, gr);
+                if strip.trips.check([&mut *gl, &mut *gr]) {
+                    strip.eq.reset();
+                    trips += 1;
+                }
+                strip.peak.observe([&*gl, &*gr]);
+                for ((a, c), (x, y)) in l.iter_mut().zip(r.iter_mut()).zip(gl.iter().zip(gr.iter()))
+                {
+                    *a += x;
+                    *c += y;
                 }
             }
-            if let Some(eq) = bus.eq.as_mut().filter(|e| !e.is_identity()) {
+            // The mixes it hears, after their mute and unclipped (A9).
+            for (k, &s) in spec.mixes.iter().enumerate() {
+                if let (Some(src), Some(g)) = (done.get(s), levels.get_mut(heard_from + k)) {
+                    accumulate(g, src.sum.get(n), (&mut *l, &mut *r));
+                }
+            }
+            if !eq.is_identity() {
                 eq.process([&mut *l, &mut *r]);
             }
-            if let Some(lim) = bus.limiter.as_mut() {
-                lim.process(l, r);
-            }
-            if listen[0] == Some(b) {
+            limiter.process(l, r);
+            if listen[0] == Some(m) {
                 push_tap(&mut taps[0], (&*l, &*r), tap_buf, &status.tap_overruns);
             }
-            stereo_gain(&mut bus.fader, l, r);
-            if bus.trips.check([&mut *l, &mut *r]) {
-                if let Some(eq) = bus.eq.as_mut() {
-                    eq.reset();
-                }
-                if let Some(lim) = bus.limiter.as_mut() {
-                    lim.lim.reset();
-                }
+            stereo_gain(fader, l, r);
+            if mix_trips.check([&mut *l, &mut *r]) {
+                eq.reset();
+                limiter.lim.reset();
                 trips += 1;
             }
-            bus.peak.observe([&*l, &*r]);
-            if listen[1] == Some(b) {
+            peak.observe([&*l, &*r]);
+            if listen[1] == Some(m) {
                 let (ll, lr) = listen_buf.get_mut(n);
                 copy(ll, l);
                 copy(lr, r);
                 listen_lim.process(ll, lr);
                 push_tap(&mut taps[1], (&*ll, &*lr), tap_buf, &status.tap_overruns);
             }
-            let Some(safety) = bus.safety.as_mut() else {
-                continue;
-            };
             let (tl, tr) = tx.get_mut(n);
-            let cap = bus.cap;
             let fade = fade_buf.get(..n).unwrap_or_default();
-            let mono = spec.kind == BusKind::Translator;
             for (((a, c), (x, y)), f) in tl
                 .iter_mut()
                 .zip(tr.iter_mut())
                 .zip(l.iter().zip(r.iter()))
                 .zip(fade)
             {
-                let (inl, inr) = if mono { ((x + y) * 0.5, 0.0) } else { (*x, *y) };
+                let (inl, inr) = if spec.mono {
+                    ((x + y) * 0.5, 0.0)
+                } else {
+                    (*x, *y)
+                };
                 let (yl, yr) = safety.tick(inl, inr);
-                *a = yl.clamp(-cap, cap) * f;
-                *c = yr.clamp(-cap, cap) * f;
+                *a = yl.clamp(-*cap, *cap) * f;
+                *c = yr.clamp(-*cap, *cap) * f;
             }
             for (ch, src) in spec.tx.iter().zip([&*tl, &*tr]) {
                 let Some(ch) = *ch else {
@@ -864,14 +895,14 @@ impl Processor {
     fn render(&mut self, block: &mut Block<'_>, off: usize, n: usize) {
         if self.test.as_ref().is_some_and(|t| t.end <= self.time) {
             self.test = None;
-            self.set_caps(None);
+            self.set_caps(false);
         }
         let fade = self.fade_buf.get_mut(..n).unwrap_or_default();
         for f in fade.iter_mut() {
             *f = self.fade.tick();
         }
         self.render_inputs(block, off, n);
-        self.render_buses(block, off, n);
+        self.render_mixes(block, off, n);
         // After `FadeOut` the fade's target is 0: at rest it is silent.
         if self.fading_out && !self.fade.is_moving() {
             self.status.faded_out.store(true, Ordering::Release);
@@ -886,15 +917,22 @@ impl Processor {
         for (d, n) in f.inputs.iter_mut().zip(self.inputs.iter_mut()) {
             *d = n.peak.take();
         }
-        for ((d, (g, a)), bus) in f
-            .buses
+        for ((d, (g, a)), mix) in f
+            .mixes
             .iter_mut()
             .zip(f.gr_db.iter_mut().zip(f.active.iter_mut()))
-            .zip(self.buses.iter_mut())
+            .zip(self.mixes.iter_mut())
         {
-            *d = bus.peak.take();
-            *g = bus.limiter.as_ref().map_or(0.0, |l| l.lim.gr_db());
-            *a = bus.limiter.as_ref().map_or(0, BusLimiter::active);
+            *d = mix.peak.take();
+            *g = mix.limiter.lim.gr_db();
+            *a = mix.limiter.active();
+        }
+        for (d, strip) in f
+            .groups
+            .iter_mut()
+            .zip(self.mixes.iter_mut().flat_map(|mix| mix.groups.iter_mut()))
+        {
+            *d = strip.peak.take();
         }
         self.meter_in.publish();
     }

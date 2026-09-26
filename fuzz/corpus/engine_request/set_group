@@ -1,0 +1,1 @@
+{"type": "request", "id": 7, "cmd": {"op": "set_group", "mix": "engineer", "group": "stems", "gain_db": -10.0, "muted": false}}

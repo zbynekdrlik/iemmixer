@@ -1,10 +1,10 @@
-//! The engine's part of `site.toml` (program spec I4, §3.1; design note §3.1):
-//! the `[engine]` table. Everything else in the file belongs to the server and
-//! is ignored here; inside `[engine]` unknown keys are errors.
+//! The engine's part of `site.toml` (program spec I4, §3.1; #20 design note
+//! §4): the `[engine]` table of inputs, groups and mixes. Everything else in
+//! the file belongs to the server and is ignored here; inside `[engine]`
+//! unknown keys are errors.
 
 use std::path::Path;
 
-use iem_engine_proto::{BusKind, Tap};
 use serde::Deserialize;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -18,23 +18,24 @@ pub struct SiteInput {
     pub talkback: bool,
 }
 
+/// A group of inputs (the stems): every mix hears them through one strip.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SiteBus {
+pub struct SiteGroup {
     pub id: String,
-    pub kind: BusKind,
-    /// Card TX channels: output and master 2, translator 1, stems none.
-    #[serde(default)]
-    pub tx: Vec<u16>,
+    pub inputs: Vec<String>,
 }
 
-/// A family of sends: every `from` to every `to`.
+/// A mix: one listener. It hears every input; `mixes` are the other mixes it
+/// hears (the Mixes tab), each declared before it.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SiteSends {
-    pub from: Vec<String>,
-    pub to: Vec<String>,
-    pub tap: Tap,
+pub struct SiteMix {
+    pub id: String,
+    /// Card TX channels: two (stereo) or one (the mono downmix, A10).
+    pub tx: Vec<u16>,
+    #[serde(default)]
+    pub mixes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -42,12 +43,12 @@ pub struct SiteSends {
 pub struct Site {
     /// The card's channel map: RX and TX channels are 1…=channels.
     pub channels: u16,
-    /// The output bus with the fixed listen tap (X3 slot 0).
+    /// The mix with the fixed listen tap (X3 slot 0).
     pub engineer: String,
     pub inputs: Vec<SiteInput>,
-    pub buses: Vec<SiteBus>,
     #[serde(default)]
-    pub sends: Vec<SiteSends>,
+    pub groups: Vec<SiteGroup>,
+    pub mixes: Vec<SiteMix>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -62,8 +63,6 @@ pub enum SiteError {
     BadId(String),
     #[error("id {0:?} is used twice")]
     DuplicateId(String),
-    #[error("unknown id {0:?}")]
-    UnknownId(String),
     #[error("{id}: expected {expected} channel(s), got {got}")]
     ChannelCount {
         id: String,
@@ -74,21 +73,17 @@ pub enum SiteError {
     ChannelRange { id: String, ch: u16 },
     #[error("card channel {ch} is used twice")]
     ChannelReused { ch: u16 },
-    #[error("second send from {from:?} to {to:?}")]
-    DuplicateSend { from: String, to: String },
-    #[error("{from:?}: inputs send pre, buses send post")]
-    TapMismatch { from: String },
-    #[error("{to:?} cannot receive sends")]
-    BadDestination { to: String },
-    #[error("{from:?} cannot send")]
-    BadSource { from: String },
-    #[error("the sends form a cycle through {0}")]
-    Cycle(String),
-    #[error("more than one master bus")]
-    SecondMaster,
+    #[error("group {group:?}: {input:?} is not an input")]
+    UnknownInput { group: String, input: String },
+    #[error("group {0:?} has no inputs")]
+    EmptyGroup(String),
+    #[error("input {0:?} is in two groups")]
+    SecondGroup(String),
+    #[error("mix {mix:?} can hear only mixes declared before it, each once: {heard:?}")]
+    HeardMix { mix: String, heard: String },
     #[error("more than one talkback input")]
     SecondTalkback,
-    #[error("engineer {0:?} is not an output bus")]
+    #[error("engineer {0:?} is not a stereo mix")]
     Engineer(String),
 }
 
@@ -127,38 +122,65 @@ mod tests {
             id = "mic"
             rx = [1]
             talkback = true
-            [[engine.buses]]
+            [[engine.inputs]]
+            id = "drums"
+            rx = [2, 3]
+            [[engine.groups]]
+            id = "stems"
+            inputs = ["drums"]
+            [[engine.mixes]]
+            id = "m1"
+            tx = [3, 4]
+            [[engine.mixes]]
             id = "eng"
-            kind = "output"
             tx = [1, 2]
-            [[engine.sends]]
-            from = ["mic"]
-            to = ["eng"]
-            tap = "pre"
+            mixes = ["m1"]
             "#,
         )
         .unwrap();
         assert_eq!(site.channels, 8);
         assert_eq!(site.engineer, "eng");
         assert_eq!(
-            site.inputs,
-            vec![SiteInput {
+            site.inputs[0],
+            SiteInput {
                 id: "mic".into(),
                 rx: vec![1],
                 talkback: true
+            }
+        );
+        assert!(!site.inputs[1].talkback);
+        assert_eq!(
+            site.groups,
+            vec![SiteGroup {
+                id: "stems".into(),
+                inputs: vec!["drums".into()]
             }]
         );
-        assert_eq!(site.buses[0].kind, BusKind::Output);
-        assert_eq!(site.sends[0].tap, Tap::Pre);
+        assert!(site.mixes[0].mixes.is_empty());
+        assert_eq!(
+            site.mixes[1],
+            SiteMix {
+                id: "eng".into(),
+                tx: vec![1, 2],
+                mixes: vec!["m1".into()]
+            }
+        );
     }
 
     #[test]
     fn a_missing_table_and_unknown_keys_are_errors() {
         assert_eq!(parse("port = 1"), Err(SiteError::NoEngineTable));
         let unknown = parse(
-            "[engine]\nchannels = 2\nengineer = \"e\"\ninputs = []\nbuses = []\ncolour = 1\n",
+            "[engine]\nchannels = 2\nengineer = \"e\"\ninputs = []\nmixes = []\ncolour = 1\n",
         );
         assert!(matches!(unknown, Err(SiteError::Toml(m)) if m.contains("colour")));
+        let old_shape = parse(
+            "[engine]\nchannels = 2\nengineer = \"e\"\ninputs = []\nmixes = []\n[[engine.sends]]\nfrom = []\nto = []\ntap = \"pre\"\n",
+        );
+        assert!(matches!(old_shape, Err(SiteError::Toml(m)) if m.contains("sends")));
+        let groupless =
+            parse("[engine]\nchannels = 2\nengineer = \"e\"\ninputs = []\nmixes = []\n").unwrap();
+        assert!(groupless.groups.is_empty());
         assert!(matches!(parse("[engine"), Err(SiteError::Toml(_))));
         assert!(matches!(
             load(Path::new("/nonexistent/site.toml")),

@@ -1,14 +1,15 @@
-//! Synthetic projects in the predecessor's shape (S4): the public tests'
-//! stand-in for the real site project (P6). `synthetic_site` is the program
-//! spec §3.1 topology with the synthetic ids and channels of
-//! `config/test-site.toml`; `project` writes a topology and a state as the
-//! predecessor's REAPER project would hold them.
+//! Synthetic projects in the predecessor's shape (S4, #20 design note §7):
+//! the public tests' stand-in for the real site project (P6).
+//! `synthetic_site` is the program spec §3.1 topology with the synthetic ids
+//! and channels of `config/test-site.toml`, `synthetic_routing` the
+//! predecessor's REAPER routing for it, and `project` writes a topology and a
+//! state as the predecessor's REAPER project would hold them.
 
 use std::collections::BTreeMap;
 
 use iem_engine_proto::{
-    BandKind as EqKind, BusId, BusKind, BusState, Eq as EqSettings, EqBand, InputId, InputState,
-    Limiter, MixState, SendEntry, SendId, SendState, Source, Tap, db_to_lin,
+    BandKind as EqKind, Eq as EqSettings, EqBand, GroupId, InputId, InputState, Level, Limiter,
+    Mix, MixGroup, MixId, MixOut, MixState, Source, db_to_lin,
 };
 
 use crate::aliases::MemberAlias;
@@ -16,7 +17,7 @@ use crate::fx::guid;
 use crate::import::rea_kind;
 use crate::reaeq::{Band, ReaEq};
 use crate::rpp::{Chunk, RppError, num, q};
-use crate::topology::{TopoBus, TopoInput, Topology};
+use crate::topology::{Routing, TopoGroup, TopoInput, TopoMix, Topology};
 
 const DIRECT: [&str; 17] = [
     "mic1", "mic2", "mic3", "mic4", "mic5", "mic6", "mic7", "mic8", "mic9", "mic10", "hand1",
@@ -26,8 +27,11 @@ const STEMS_GROUP: [&str; 7] = ["click", "guide", "drums", "bass", "inst", "othe
 const STEREO: [&str; 8] = [
     "keys", "iemonly", "content", "drums", "bass", "inst", "other", "bgvs",
 ];
+/// The input the translator hears in the predecessor (program spec §3.1).
+const TRANSLATED: &str = "hand1";
 
-/// The §3.1 topology with the ids and channels of `config/test-site.toml`.
+/// The §3.1 topology with the ids and channels of `config/test-site.toml`,
+/// the mixes in the predecessor's track order.
 pub fn synthetic_site() -> Topology {
     let mut t = Topology::default();
     let mut rx = 101u16;
@@ -40,86 +44,61 @@ pub fn synthetic_site() -> Topology {
         });
         rx += n;
     }
-    let members: Vec<String> = (1..=9)
-        .map(|n| format!("member{n}"))
-        .chain(["engineer".to_owned()])
-        .collect();
+    t.groups.push(TopoGroup {
+        id: GroupId::new("stems"),
+        inputs: STEMS_GROUP.iter().map(|i| InputId::new(*i)).collect(),
+    });
+    let members: Vec<MixId> = (1..=9).map(|n| MixId::new(format!("member{n}"))).collect();
     for (n, m) in (1u16..).zip(&members) {
-        let first = if m == "engineer" { 91 } else { 69 + 2 * n };
-        t.buses.push(TopoBus {
-            id: BusId::new(m.clone()),
-            kind: BusKind::Output,
-            tx: vec![first, first + 1],
-        });
-    }
-    for m in &members {
-        t.buses.push(TopoBus {
-            id: BusId::new(format!("{m}.stems")),
-            kind: BusKind::Stems,
-            tx: Vec::new(),
-        });
-    }
-    t.buses.push(TopoBus {
-        id: BusId::new("translator"),
-        kind: BusKind::Translator,
-        tx: vec![93],
-    });
-    t.buses.push(TopoBus {
-        id: BusId::new("master"),
-        kind: BusKind::Master,
-        tx: vec![89, 90],
-    });
-    let mut add = |src: Source, dst: String, tap: Tap| {
-        t.sends.push((
-            SendId {
-                src,
-                dst: BusId::new(dst),
+        t.mixes.push(TopoMix {
+            id: m.clone(),
+            tx: vec![69 + 2 * n, 70 + 2 * n],
+            mixes: if n == 1 {
+                members.iter().skip(1).cloned().collect()
+            } else {
+                Vec::new()
             },
-            tap,
-        ));
-    };
-    for i in DIRECT {
-        for m in &members {
-            add(Source::Input(InputId::new(i)), m.clone(), Tap::Pre);
-        }
+        });
     }
-    for i in STEMS_GROUP {
-        for m in &members {
-            add(
-                Source::Input(InputId::new(i)),
-                format!("{m}.stems"),
-                Tap::Pre,
-            );
-        }
-    }
-    add(
-        Source::Input(InputId::new("hand1")),
-        "translator".into(),
-        Tap::Pre,
-    );
-    for m in &members {
-        add(
-            Source::Bus(BusId::new(format!("{m}.stems"))),
-            m.clone(),
-            Tap::Post,
-        );
-    }
-    for m in members.iter().skip(1).take(8) {
-        add(
-            Source::Bus(BusId::new(m.clone())),
-            "member1".into(),
-            Tap::Post,
-        );
-    }
-    for m in members.iter().take(9) {
-        add(
-            Source::Bus(BusId::new(m.clone())),
-            "engineer".into(),
-            Tap::Post,
-        );
-    }
-    t.engineer = Some(BusId::new("engineer"));
+    t.mixes.push(TopoMix {
+        id: MixId::new("engineer"),
+        tx: vec![91, 92],
+        mixes: members.clone(),
+    });
+    t.mixes.push(TopoMix {
+        id: MixId::new("translator"),
+        tx: vec![93],
+        mixes: Vec::new(),
+    });
+    t.engineer = Some(MixId::new("engineer"));
     t
+}
+
+/// The predecessor's routing for a topology of the §3.1 shape: a stereo mix
+/// receives every ungrouped input and the mixes it hears and has an instance
+/// of every group, which receives the group's inputs; a mono mix (the
+/// translator) receives only `hand1`.
+pub fn synthetic_routing(topo: &Topology) -> Routing {
+    let mut r = Routing::default();
+    for m in &topo.mixes {
+        if m.tx.len() != 2 {
+            let hand1 = InputId::new(TRANSLATED);
+            if topo.input(&hand1).is_some() {
+                r.levels.insert((m.id.clone(), Source::Input(hand1)));
+            }
+            continue;
+        }
+        for i in &topo.inputs {
+            r.levels.insert((m.id.clone(), Source::Input(i.id.clone())));
+        }
+        for h in &m.mixes {
+            r.levels.insert((m.id.clone(), Source::Mix(h.clone())));
+        }
+        for g in &topo.groups {
+            r.strips.insert((m.id.clone(), g.id.clone()));
+        }
+    }
+    r
 }
 
 fn random_eq(r: &mut dyn FnMut() -> f64) -> EqSettings {
@@ -145,9 +124,10 @@ fn random_eq(r: &mut dyn FnMut() -> f64) -> EqSettings {
     e
 }
 
-/// A deterministic state over `topo` in which every kind of value differs
-/// from its default (within the engine's caps); `seed` varies it.
-pub fn sample_state(topo: &Topology, seed: u64) -> MixState {
+/// A deterministic state over what `routing` holds in `topo` (see
+/// `import::project`), in which every kind of value differs from its default
+/// within the engine's caps; `seed` varies it.
+pub fn sample_state(topo: &Topology, routing: &Routing, seed: u64) -> MixState {
     let mut k = seed;
     let mut next = move || {
         k = k
@@ -164,55 +144,82 @@ pub fn sample_state(topo: &Topology, seed: u64) -> MixState {
                 trim_db: next() * 30.0 - 10.0,
                 muted: next() > 0.8,
                 processing: next() > 0.2,
-                fader_db: next() * 20.0 - 10.0,
-                pan: next() * 2.0 - 1.0,
                 eq: e,
             },
         );
     }
-    for b in &topo.buses {
+    for m in &topo.mixes {
         let e = random_eq(&mut next);
-        let mut v = BusState {
-            fader_db: next() * 20.0 - 12.0,
-            pan: next() * 2.0 - 1.0,
+        let mut out = MixOut {
+            volume_db: next() * 20.0 - 12.0,
             muted: next() > 0.7,
-            ..BusState::default()
+            ..MixOut::default()
         };
-        if matches!(b.kind, BusKind::Output | BusKind::Stems) {
-            v.eq = e;
-        }
-        if b.kind == BusKind::Output {
-            v.limiter = Limiter {
+        if m.tx.len() == 2 {
+            out.eq = e;
+            out.limiter = Limiter {
                 enabled: next() > 0.2,
                 limit_db: -(next() * 6.0),
             };
+        } else {
+            out.limiter.enabled = false;
         }
-        s.buses.insert(b.id.clone(), v);
-    }
-    for (id, _) in &topo.sends {
-        let off = next() > 0.9;
-        s.sends.push(SendEntry {
-            id: id.clone(),
-            state: SendState {
+        let mut mix = Mix {
+            out,
+            ..Mix::default()
+        };
+        for g in &topo.groups {
+            if routing.has_strip(&m.id, &g.id) {
+                let e = random_eq(&mut next);
+                mix.groups.insert(
+                    g.id.clone(),
+                    MixGroup {
+                        gain_db: next() * 20.0 - 12.0,
+                        muted: next() > 0.7,
+                        eq: e,
+                    },
+                );
+            }
+        }
+        let sources = topo
+            .inputs
+            .iter()
+            .map(|i| Source::Input(i.id.clone()))
+            .chain(m.mixes.iter().map(|h| Source::Mix(h.clone())));
+        for src in sources {
+            if !routing.has_level(&m.id, &src) {
+                continue;
+            }
+            let off = next() > 0.9;
+            let level = Level {
                 gain_db: if off { -150.0 } else { next() * 72.0 - 60.0 },
                 pan: next() * 2.0 - 1.0,
                 muted: next() > 0.7,
-            },
-        });
+            };
+            match src {
+                Source::Input(i) => mix.inputs.insert(i, level),
+                Source::Mix(h) => mix.mixes.insert(h, level),
+            };
+        }
+        s.mixes.insert(m.id.clone(), mix);
     }
-    s.sends.sort_by(|a, b| a.id.cmp(&b.id));
     // Every seed has an input without processing, a disabled limiter and a
-    // send that is off.
+    // level that is off.
     if let Some(i) = s.inputs.values_mut().next() {
         i.processing = false;
     }
-    if let Some(b) = topo.buses.iter().find(|b| b.kind == BusKind::Output)
-        && let Some(v) = s.buses.get_mut(&b.id)
+    if let Some(m) = topo.mixes.iter().find(|m| m.tx.len() == 2)
+        && let Some(x) = s.mixes.get_mut(&m.id)
     {
-        v.limiter.enabled = false;
+        x.out.limiter.enabled = false;
     }
-    if let Some(e) = s.sends.first_mut() {
-        e.state.gain_db = -150.0;
+    if let Some(l) = s
+        .mixes
+        .values_mut()
+        .flat_map(|m| m.inputs.values_mut())
+        .next()
+    {
+        l.gain_db = -150.0;
     }
     s
 }
@@ -222,27 +229,38 @@ pub fn track_name(id: &str) -> String {
     format!("{} trk", id.to_uppercase())
 }
 
+/// The id-like name of `group`'s instance in `mix` (its synthetic track is
+/// `track_name` of it).
+pub fn instance_name(mix: &MixId, group: &GroupId) -> String {
+    format!("{mix}.{group}")
+}
+
 /// `aliases.toml` text for a synthetic project written with `track_name`.
-pub fn aliases_toml(topo: &Topology, members: &BTreeMap<String, MemberAlias>) -> String {
-    let mut s = String::new();
-    if let Some(m) = topo.buses.iter().find(|b| b.kind == BusKind::Master) {
-        s.push_str(&format!("master = \"{}\"\n", m.id));
-    }
-    s.push_str("\n[tracks]\n");
-    let ids = topo.inputs.iter().map(|i| i.id.0.as_str()).chain(
-        topo.buses
-            .iter()
-            .filter(|b| b.kind != BusKind::Master)
-            .map(|b| b.id.0.as_str()),
-    );
+pub fn aliases_toml(
+    topo: &Topology,
+    routing: &Routing,
+    members: &BTreeMap<String, MemberAlias>,
+) -> String {
+    let mut s = String::from("[tracks]\n");
+    let ids = topo
+        .inputs
+        .iter()
+        .map(|i| i.id.0.as_str())
+        .chain(topo.mixes.iter().map(|m| m.id.0.as_str()));
     for id in ids {
         s.push_str(&format!("\"{}\" = \"{id}\"\n", track_name(id)));
+    }
+    for (mix, group) in &routing.strips {
+        s.push_str(&format!(
+            "\"{}\" = \"{group}\"\n",
+            track_name(&instance_name(mix, group))
+        ));
     }
     s.push_str("\n[members]\n");
     for (legacy, m) in members {
         s.push_str(&format!(
-            "{legacy} = {{ id = \"{}\", bus = \"{}\", stems = \"{}\", archived = {} }}\n",
-            m.id, m.bus, m.stems, m.archived
+            "{legacy} = {{ id = \"{}\", mix = \"{}\", archived = {} }}\n",
+            m.id, m.mix, m.archived
         ));
     }
     s
@@ -316,14 +334,25 @@ fn track_head(
     Ok(())
 }
 
-/// A project in the predecessor's shape: inputs (record-armed, TRIM, ReaEQ,
-/// the talkback stand-in on the talkback input, a bypassed extra plug-in on
-/// the first input), then every bus but the master (receives, one hardware
-/// output, ReaEQ and limiter, the listen stand-in on the engineer bus), and
-/// the master in the project header. Channels map back as the importer reads
-/// them (design note §3.2).
+fn receive(src: usize, mode: u8, l: &Level) -> Result<String, RppError> {
+    Ok(format!(
+        "AUXRECV {src} {mode} {} {} {} 0 0 0 0 -1:U 0 -1 ''",
+        num(db_to_lin(l.gain_db))?,
+        num(l.pan)?,
+        u8::from(l.muted)
+    ))
+}
+
+/// A project in the predecessor's shape: the muted master in the header;
+/// inputs (record-armed at unity, TRIM, ReaEQ, the talkback stand-in on the
+/// talkback input, a bypassed extra plug-in on the first input); mixes (one
+/// hardware output, the receives `routing` holds, ReaEQ and the limiter and
+/// the listen stand-in on the engineer's when stereo, no plug-ins when mono);
+/// then every group instance (ReaEQ, its inputs' receives, feeding its mix at
+/// unity). Channels map back as the importer reads them.
 pub fn project(
     topo: &Topology,
+    routing: &Routing,
     state: &MixState,
     name: &dyn Fn(&str) -> String,
 ) -> Result<String, RppError> {
@@ -333,41 +362,30 @@ pub fn project(
         .line("PANLAW 1")
         .line("PANMODE 3")
         .line("SAMPLERATE 96000 1 0");
-    let master = topo
-        .buses
-        .iter()
-        .find(|b| b.kind == BusKind::Master)
-        .ok_or_else(|| bad("no master bus".into()))?;
-    let ms = state.buses.get(&master.id).copied().unwrap_or_default();
-    p.line(format!("MASTERMUTESOLO {}", u8::from(ms.muted)));
-    let first = master
-        .tx
-        .first()
-        .ok_or_else(|| bad("master without TX".into()))?;
-    p.line(format!("MASTERHWOUT {} 0 1 0 0 0 0 -1", first - 1));
+    p.line("MASTERMUTESOLO 1");
+    p.line("MASTERHWOUT 88 0 1 0 0 0 0 -1");
     p.line("MASTER_NCH 2 2");
-    p.line(format!(
-        "MASTER_VOLUME {} {} -1 -1 1",
-        num(db_to_lin(ms.fader_db))?,
-        num(ms.pan)?
-    ));
-    let mut index: BTreeMap<Source, usize> = BTreeMap::new();
+    p.line("MASTER_VOLUME 1 0 -1 -1 1");
+    let instances: Vec<&(MixId, GroupId)> = routing.strips.iter().collect();
+    let mut index: BTreeMap<String, usize> = BTreeMap::new();
     for (k, i) in topo.inputs.iter().enumerate() {
-        index.insert(Source::Input(i.id.clone()), k);
+        index.insert(i.id.0.clone(), k);
     }
-    let buses: Vec<&TopoBus> = topo
-        .buses
-        .iter()
-        .filter(|b| b.kind != BusKind::Master)
-        .collect();
-    for (k, b) in buses.iter().enumerate() {
-        index.insert(Source::Bus(b.id.clone()), topo.inputs.len() + k);
+    for (k, m) in topo.mixes.iter().enumerate() {
+        index.insert(m.id.0.clone(), topo.inputs.len() + k);
     }
+    let first_instance = topo.inputs.len() + topo.mixes.len();
+    let find = |id: &str| {
+        index
+            .get(id)
+            .copied()
+            .ok_or_else(|| bad(format!("{id} is not in the topology")))
+    };
     for (k, i) in topo.inputs.iter().enumerate() {
         let s = state.inputs.get(&i.id).copied().unwrap_or_default();
         let seed = format!("site/{}", i.id);
         let mut c = Chunk::new(format!("TRACK {}", guid(&seed)));
-        track_head(&mut c, &name(i.id.0.as_str()), s.fader_db, s.pan, s.muted)?;
+        track_head(&mut c, &name(i.id.0.as_str()), 0.0, 0.0, s.muted)?;
         let rec = match i.rx.as_slice() {
             [a] => i64::from(*a) - 1,
             [a, _] => i64::from(*a) + 1023,
@@ -397,62 +415,93 @@ pub fn project(
         c.child(chain(&seed, plugins));
         p.child(c);
     }
-    for b in &buses {
-        let s = state.buses.get(&b.id).copied().unwrap_or_default();
-        let seed = format!("site/{}", b.id);
+    for m in &topo.mixes {
+        let s = state.mixes.get(&m.id).cloned().unwrap_or_default();
+        let seed = format!("site/{}", m.id);
         let mut c = Chunk::new(format!("TRACK {}", guid(&seed)));
-        track_head(&mut c, &name(b.id.0.as_str()), s.fader_db, s.pan, s.muted)?;
+        track_head(
+            &mut c,
+            &name(m.id.0.as_str()),
+            s.out.volume_db,
+            0.0,
+            s.out.muted,
+        )?;
         c.line("REC 0 0 1 0 0 0 0 0");
         c.line("NCHAN 2");
         c.line("FX 1");
         c.line(format!("TRACKID {}", guid(&seed)));
-        c.line(format!("MAINSEND {} 0", u8::from(b.kind == BusKind::Stems)));
-        match (b.kind, b.tx.as_slice()) {
-            (BusKind::Output, [a, _]) => {
-                c.line(format!("HWOUT {} 0 1 0 0 0 0 -1:U -1", a - 1));
+        c.line("MAINSEND 0 0");
+        match m.tx.as_slice() {
+            [a, _] => c.line(format!("HWOUT {} 0 1 0 0 0 0 -1:U -1", a - 1)),
+            [a] => c.line(format!(
+                "HWOUT {} 0 1 0 0 0 0 -1:U -1",
+                u32::from(*a) + 1023
+            )),
+            _ => return Err(bad(format!("mix {} has TX {:?}", m.id, m.tx))),
+        };
+        for i in &topo.inputs {
+            let src = Source::Input(i.id.clone());
+            if topo.group_of(&i.id).is_none() && routing.has_level(&m.id, &src) {
+                let l = s.inputs.get(&i.id).copied().unwrap_or_default();
+                c.line(receive(find(&i.id.0)?, 3, &l)?);
             }
-            (BusKind::Translator, [a]) => {
+        }
+        for (k, (mix, _)) in instances.iter().enumerate() {
+            if *mix == m.id {
                 c.line(format!(
-                    "HWOUT {} 0 1 0 0 0 0 -1:U -1",
-                    u32::from(*a) + 1023
+                    "AUXRECV {} 0 1 0 0 0 0 0 0 -1:U 0 -1 ''",
+                    first_instance + k
                 ));
             }
-            (BusKind::Stems, []) => {}
-            _ => return Err(bad(format!("bus {} has TX {:?}", b.id, b.tx))),
         }
-        for (id, tap) in topo.sends.iter().filter(|(id, _)| id.dst == b.id) {
-            let src = index
-                .get(&id.src)
-                .ok_or_else(|| bad(format!("send {id} from an unknown source")))?;
-            let st = state
-                .sends
-                .iter()
-                .find(|e| e.id == *id)
-                .map(|e| e.state)
-                .unwrap_or_default();
-            c.line(format!(
-                "AUXRECV {src} {} {} {} {} 0 0 0 0 -1:U 0 -1 ''",
-                if *tap == Tap::Pre { 3 } else { 0 },
-                num(db_to_lin(st.gain_db))?,
-                num(st.pan)?,
-                u8::from(st.muted)
-            ));
+        for h in &m.mixes {
+            if routing.has_level(&m.id, &Source::Mix(h.clone())) {
+                let l = s.mixes.get(h).copied().unwrap_or_default();
+                c.line(receive(find(&h.0)?, 0, &l)?);
+            }
         }
         let mut plugins = Vec::new();
-        if matches!(b.kind, BusKind::Output | BusKind::Stems) {
-            plugins.push((false, reaeq(&s.eq).chunk()?));
-        }
-        if b.kind == BusKind::Output {
-            let l = s.limiter.limit_db;
+        if m.tx.len() == 2 {
+            plugins.push((false, reaeq(&s.out.eq).chunk()?));
+            let l = s.out.limiter.limit_db;
             plugins.push((
-                !s.limiter.enabled,
+                !s.out.limiter.enabled,
                 js("JS loser/MGA_JSLimiterST LIMITER", &[l, 50.0, 75.0, l, 0.0])?,
             ));
-            if topo.engineer.as_ref() == Some(&b.id) {
+            if topo.engineer.as_ref() == Some(&m.id) {
                 plugins.push((false, stand_in("VBAN IEM")));
             }
         }
         c.child(chain(&seed, plugins));
+        p.child(c);
+    }
+    for (mix, group) in &instances {
+        let strip = state
+            .mixes
+            .get(mix)
+            .and_then(|x| x.groups.get(group))
+            .copied()
+            .unwrap_or_default();
+        let levels = state.mixes.get(mix).map(|x| &x.inputs);
+        let id = instance_name(mix, group);
+        let seed = format!("site/{id}");
+        let mut c = Chunk::new(format!("TRACK {}", guid(&seed)));
+        track_head(&mut c, &name(&id), strip.gain_db, 0.0, strip.muted)?;
+        c.line("REC 0 0 1 0 0 0 0 0");
+        c.line("NCHAN 2");
+        c.line("FX 1");
+        c.line(format!("TRACKID {}", guid(&seed)));
+        c.line("MAINSEND 1 0");
+        let members = topo
+            .group(group)
+            .ok_or_else(|| bad(format!("group {group} is not in the topology")))?;
+        for i in &members.inputs {
+            if routing.has_level(mix, &Source::Input(i.clone())) {
+                let l = levels.and_then(|x| x.get(i)).copied().unwrap_or_default();
+                c.line(receive(find(&i.0)?, 3, &l)?);
+            }
+        }
+        c.child(chain(&seed, vec![(false, reaeq(&strip.eq).chunk()?)]));
         p.child(c);
     }
     Ok(p.render())
@@ -464,13 +513,15 @@ mod tests {
     use crate::aliases::parse_aliases;
     use crate::import::{compare, import, project as projection};
     use crate::legacy::LegacyProject;
+    use crate::topology::Counts;
 
     #[test]
-    fn a_synthetic_project_imports_to_its_topology_and_state() {
+    fn a_synthetic_project_imports_to_its_topology_routing_and_state() {
         let topo = synthetic_site();
-        let state = sample_state(&topo, 7);
-        let text = project(&topo, &state, &track_name).unwrap();
-        let aliases = parse_aliases(&aliases_toml(&topo, &BTreeMap::new())).unwrap();
+        let routing = synthetic_routing(&topo);
+        let state = sample_state(&topo, &routing, 7);
+        let text = project(&topo, &routing, &state, &track_name).unwrap();
+        let aliases = parse_aliases(&aliases_toml(&topo, &routing, &BTreeMap::new())).unwrap();
         let p = LegacyProject::parse(&text).unwrap();
         assert_eq!(p.tracks.len(), 45);
         let imp = import(&p, &aliases).unwrap();
@@ -479,96 +530,144 @@ mod tests {
             "{:#?}",
             imp.topology.diff(&topo)
         );
-        assert_eq!(imp.counts, topo.counts());
+        assert_eq!(imp.routing, routing);
         assert_eq!(
-            compare(&topo, &imp.state, &state, 1e-9),
+            imp.counts,
+            Counts {
+                tracks: 45,
+                sends: 268,
+                eqs: 44,
+                limiters: 10,
+                trims: 24
+            }
+        );
+        assert_eq!(
+            compare(&topo, &routing, &imp.state, &state, 1e-9),
             Vec::<String>::new()
         );
-        assert_eq!(imp.state, projection(&topo, &imp.state));
+        assert_eq!(imp.state, projection(&topo, &routing, &imp.state));
         assert_eq!(imp.notes.len(), 1, "{:?}", imp.notes);
         assert!(imp.notes[0].contains("synthesis/tonegenerator"));
     }
 
     #[test]
+    fn the_synthetic_routing_is_the_predecessors() {
+        let topo = synthetic_site();
+        let r = synthetic_routing(&topo);
+        // 10 stereo mixes × 24 inputs, 17 heard mixes, the translator's hand1.
+        assert_eq!(r.levels.len(), 10 * 24 + 17 + 1);
+        assert_eq!(r.strips.len(), 10);
+        let tr = MixId::new("translator");
+        assert!(r.has_level(&tr, &Source::Input(InputId::new("hand1"))));
+        assert!(!r.has_level(&tr, &Source::Input(InputId::new("mic1"))));
+        assert!(!r.has_strip(&tr, &GroupId::new("stems")));
+        let m1 = MixId::new("member1");
+        assert!(r.has_level(&m1, &Source::Mix(MixId::new("member9"))));
+        assert!(r.has_level(&m1, &Source::Input(InputId::new("drums"))));
+        assert!(!r.has_level(&MixId::new("member2"), &Source::Mix(m1)));
+    }
+
+    #[test]
     fn sample_states_vary_with_the_seed_and_stay_in_caps() {
         let topo = synthetic_site();
-        let a = sample_state(&topo, 1);
-        assert_ne!(a, sample_state(&topo, 2));
-        assert_eq!(a, sample_state(&topo, 1));
-        assert_eq!(a.sends.len(), 268);
-        assert!(a.sends.iter().any(|e| e.state.gain_db <= -150.0));
-        assert!(a.sends.iter().all(|e| e.state.gain_db <= 12.0));
+        let routing = synthetic_routing(&topo);
+        let a = sample_state(&topo, &routing, 1);
+        assert_ne!(a, sample_state(&topo, &routing, 2));
+        assert_eq!(a, sample_state(&topo, &routing, 1));
+        let levels: Vec<&Level> = a
+            .mixes
+            .values()
+            .flat_map(|m| m.inputs.values().chain(m.mixes.values()))
+            .collect();
+        assert_eq!(levels.len(), 258);
+        assert!(levels.iter().any(|l| l.gain_db <= -150.0));
+        assert!(levels.iter().all(|l| l.gain_db <= 12.0));
         assert!(a.inputs.values().any(|i| !i.processing));
-        assert!(a.buses.values().any(|b| !b.limiter.enabled));
-        for b in a.buses.values() {
-            assert!((-6.0..=0.0).contains(&b.limiter.limit_db));
+        assert!(a.mixes.values().any(|m| !m.out.limiter.enabled));
+        for m in a.mixes.values() {
+            assert!((-6.0..=0.0).contains(&m.out.limiter.limit_db));
+            assert!(m.out.volume_db <= 12.0);
         }
+        let tr = &a.mixes[&MixId::new("translator")];
+        assert!(!tr.out.limiter.enabled);
+        assert_eq!(tr.out.eq, EqSettings::default());
+        assert!(tr.groups.is_empty());
+        assert_eq!(a.mixes[&MixId::new("member1")].groups.len(), 1);
+        // Mix mutes and off levels are drawn, not only forced (values
+        // computed from the generator's definition): 3 muted mixes, and 26
+        // levels drawn off besides the one set off.
+        let muted: Vec<&str> = a
+            .mixes
+            .iter()
+            .filter(|(_, m)| m.out.muted)
+            .map(|(id, _)| id.0.as_str())
+            .collect();
+        assert_eq!(muted, ["engineer", "member2", "member6"]);
+        assert_eq!(levels.iter().filter(|l| l.gain_db <= -150.0).count(), 27);
     }
 
     #[test]
     fn projects_refuse_what_they_cannot_hold() {
+        let routing = synthetic_routing(&synthetic_site());
+        let state = sample_state(&synthetic_site(), &routing, 3);
         let mut topo = synthetic_site();
-        let state = sample_state(&topo, 3);
         topo.inputs[0].rx = vec![1, 2, 3];
-        assert!(project(&topo, &state, &track_name).is_err());
+        assert!(project(&topo, &routing, &state, &track_name).is_err());
         let mut topo = synthetic_site();
-        topo.buses[0].tx = vec![1];
-        assert!(project(&topo, &state, &track_name).is_err());
-        let mut topo = synthetic_site();
-        topo.buses.retain(|b| b.kind != BusKind::Master);
-        assert!(project(&topo, &state, &track_name).is_err());
-        let mut topo = synthetic_site();
-        topo.sends.push((
-            SendId {
-                src: Source::Input(InputId::new("nope")),
-                dst: BusId::new("member1"),
-            },
-            Tap::Pre,
-        ));
-        assert!(project(&topo, &state, &track_name).is_err());
+        topo.mixes[0].tx = vec![1, 2, 3];
+        assert!(project(&topo, &routing, &state, &track_name).is_err());
+        let topo = synthetic_site();
+        let mut r = routing.clone();
+        r.levels
+            .insert((MixId::new("member1"), Source::Mix(MixId::new("nope"))));
+        let mut t = topo.clone();
+        t.mixes[0].mixes.push(MixId::new("nope"));
+        assert!(project(&t, &r, &state, &track_name).is_err());
+        let mut r = routing;
+        r.strips
+            .insert((MixId::new("member1"), GroupId::new("nope")));
+        assert!(project(&topo, &r, &state, &track_name).is_err());
     }
 
     #[test]
-    fn synthetic_buses_use_the_test_site_channels() {
+    fn synthetic_mixes_use_the_test_site_channels() {
         let t = synthetic_site();
-        let tx: Vec<(&str, BusKind, Vec<u16>)> = t
-            .buses
+        let tx: Vec<(&str, Vec<u16>)> = t
+            .mixes
             .iter()
-            .map(|b| (b.id.0.as_str(), b.kind, b.tx.clone()))
+            .map(|m| (m.id.0.as_str(), m.tx.clone()))
             .collect();
-        let out = BusKind::Output;
-        let stems = BusKind::Stems;
-        let want: Vec<(&str, BusKind, Vec<u16>)> = vec![
-            ("member1", out, vec![71, 72]),
-            ("member2", out, vec![73, 74]),
-            ("member3", out, vec![75, 76]),
-            ("member4", out, vec![77, 78]),
-            ("member5", out, vec![79, 80]),
-            ("member6", out, vec![81, 82]),
-            ("member7", out, vec![83, 84]),
-            ("member8", out, vec![85, 86]),
-            ("member9", out, vec![87, 88]),
-            ("engineer", out, vec![91, 92]),
-            ("member1.stems", stems, vec![]),
-            ("member2.stems", stems, vec![]),
-            ("member3.stems", stems, vec![]),
-            ("member4.stems", stems, vec![]),
-            ("member5.stems", stems, vec![]),
-            ("member6.stems", stems, vec![]),
-            ("member7.stems", stems, vec![]),
-            ("member8.stems", stems, vec![]),
-            ("member9.stems", stems, vec![]),
-            ("engineer.stems", stems, vec![]),
-            ("translator", BusKind::Translator, vec![93]),
-            ("master", BusKind::Master, vec![89, 90]),
+        let want: Vec<(&str, Vec<u16>)> = vec![
+            ("member1", vec![71, 72]),
+            ("member2", vec![73, 74]),
+            ("member3", vec![75, 76]),
+            ("member4", vec![77, 78]),
+            ("member5", vec![79, 80]),
+            ("member6", vec![81, 82]),
+            ("member7", vec![83, 84]),
+            ("member8", vec![85, 86]),
+            ("member9", vec![87, 88]),
+            ("engineer", vec![91, 92]),
+            ("translator", vec![93]),
         ];
         assert_eq!(tx, want);
+        assert_eq!(t.mixes[0].mixes.len(), 8);
+        assert_eq!(t.mixes[9].mixes.len(), 9);
+        assert_eq!(t.groups[0].inputs.len(), 7);
+        assert_eq!(t.engineer, Some(MixId::new("engineer")));
     }
 
     #[test]
-    fn the_first_input_carries_a_bypassed_tone_generator() {
+    fn the_first_input_carries_a_bypassed_tone_generator_and_the_master_is_muted() {
         let topo = synthetic_site();
-        let text = project(&topo, &sample_state(&topo, 7), &track_name).unwrap();
+        let routing = synthetic_routing(&topo);
+        let text = project(
+            &topo,
+            &routing,
+            &sample_state(&topo, &routing, 7),
+            &track_name,
+        )
+        .unwrap();
         assert_eq!(text.matches("tonegenerator").count(), 1);
         let lines: Vec<&str> = text.lines().collect();
         let at = lines
@@ -579,6 +678,8 @@ mod tests {
         assert_eq!(lines[at].trim(), r#"<JS synthesis/tonegenerator """#);
         let sliders = format!("-12 -6 440{}", " -".repeat(61));
         assert_eq!(lines[at + 1].trim(), sliders);
+        assert!(text.contains("\n  MASTERMUTESOLO 1\n"));
+        assert_eq!(instance_name(&MixId::new("m"), &GroupId::new("g")), "m.g");
     }
 
     /// An EQ with the band kinds `random_eq` gives: (enabled, Hz, dB, octaves).
@@ -613,53 +714,47 @@ mod tests {
     /// deliberate (values computed from the generator's definition).
     #[test]
     fn sample_state_is_pinned_value_for_value() {
-        let input = |i: &str| Source::Input(InputId::new(i));
-        let bus = |b: &str| Source::Bus(BusId::new(b));
+        let input = |i: &str, rx: u16| TopoInput {
+            id: InputId::new(i),
+            rx: vec![rx],
+            talkback: false,
+        };
+        let mix = |m: &str, tx: Vec<u16>, heard: &[&str]| TopoMix {
+            id: MixId::new(m),
+            tx,
+            mixes: heard.iter().map(|h| MixId::new(*h)).collect(),
+        };
         let topo = Topology {
-            inputs: ["a", "b", "c"]
-                .into_iter()
-                .map(|i| TopoInput {
-                    id: InputId::new(i),
-                    rx: vec![1],
-                    talkback: false,
-                })
-                .collect(),
-            buses: [
-                ("out1", BusKind::Output),
-                ("out2", BusKind::Output),
-                ("st", BusKind::Stems),
-                ("tr", BusKind::Translator),
-                ("master", BusKind::Master),
-            ]
-            .into_iter()
-            .map(|(b, kind)| TopoBus {
-                id: BusId::new(b),
-                kind,
-                tx: Vec::new(),
-            })
-            .collect(),
-            sends: [
-                (input("a"), "out1"),
-                (input("b"), "out2"),
-                (input("c"), "st"),
-                (bus("st"), "out1"),
-                (input("a"), "tr"),
-                (input("b"), "out1"),
-                (bus("out2"), "out1"),
-            ]
-            .into_iter()
-            .map(|(src, dst)| {
-                (
-                    SendId {
-                        src,
-                        dst: BusId::new(dst),
-                    },
-                    Tap::Pre,
-                )
-            })
-            .collect(),
+            inputs: vec![input("a", 1), input("b", 2), input("c", 3)],
+            groups: vec![TopoGroup {
+                id: GroupId::new("g"),
+                inputs: vec![InputId::new("c")],
+            }],
+            mixes: vec![
+                mix("out2", vec![3, 4], &[]),
+                mix("out1", vec![1, 2], &["out2"]),
+                mix("tr", vec![5], &[]),
+            ],
             engineer: None,
         };
+        let mut routing = Routing::default();
+        for (m, i) in [
+            ("out1", "a"),
+            ("out1", "b"),
+            ("out1", "c"),
+            ("out2", "b"),
+            ("tr", "a"),
+        ] {
+            routing
+                .levels
+                .insert((MixId::new(m), Source::Input(InputId::new(i))));
+        }
+        routing
+            .levels
+            .insert((MixId::new("out1"), Source::Mix(MixId::new("out2"))));
+        routing
+            .strips
+            .insert((MixId::new("out1"), GroupId::new("g")));
         let mut want = MixState::default();
         want.inputs.insert(
             InputId::new("a"),
@@ -667,8 +762,6 @@ mod tests {
                 trim_db: 7.860745325569493,
                 muted: true,
                 processing: false,
-                fader_db: -2.9863661282611904,
-                pan: 0.994263885156115,
                 eq: golden_eq(
                     4.0,
                     [
@@ -704,38 +797,36 @@ mod tests {
         want.inputs.insert(
             InputId::new("b"),
             InputState {
-                trim_db: 6.090730311470619,
-                muted: false,
+                trim_db: -1.2040519771370999,
+                muted: true,
                 processing: true,
-                fader_db: 6.761666797859263,
-                pan: -0.012911063942519174,
                 eq: golden_eq(
-                    -4.0,
+                    -2.0,
                     [
                         (
-                            false,
-                            6470.401958192328,
-                            0.5021446813616546,
-                            0.19688359597780206,
+                            true,
+                            1581.2409648583675,
+                            -6.174539722524267,
+                            1.7076004895480819,
                         ),
-                        (
-                            false,
-                            11901.148979447818,
-                            11.133731280551594,
-                            0.16030331371989817,
-                        ),
-                        (false, 4053.644459677573, -150.0, 0.7825190766565605),
                         (
                             true,
-                            735.5941438025018,
-                            -11.470716544718346,
-                            2.5092624167790056,
+                            427.5343839112082,
+                            -6.022011340477347,
+                            3.065287244861955,
+                        ),
+                        (true, 281.2132548795927, -150.0, 0.10470576157791059),
+                        (
+                            false,
+                            2770.076306626242,
+                            5.692047239534784,
+                            0.2738985359506254,
                         ),
                         (
                             false,
-                            1200.6210660070149,
-                            -4.96324158170968,
-                            2.666851871684069,
+                            9677.049667116022,
+                            -11.73719494152377,
+                            0.3901552665017537,
                         ),
                     ],
                 ),
@@ -744,262 +835,224 @@ mod tests {
         want.inputs.insert(
             InputId::new("c"),
             InputState {
-                trim_db: 9.74874610834748,
+                trim_db: -6.621520090429529,
                 muted: false,
                 processing: true,
-                fader_db: -1.8094168493480733,
-                pan: -0.18455953606452713,
                 eq: golden_eq(
-                    -5.0,
+                    3.0,
                     [
+                        (
+                            true,
+                            10097.000078715557,
+                            -0.1549327673102301,
+                            0.390466853682767,
+                        ),
                         (
                             true,
                             3882.815203156875,
                             -8.386903782575477,
                             1.5795244724403958,
                         ),
+                        (true, 1924.0233518485884, -150.0, 0.22347864603391868),
                         (
-                            true,
-                            1924.0233518485884,
-                            -11.01217083172865,
-                            0.18260427270756532,
+                            false,
+                            6411.503766339949,
+                            -3.09594962105016,
+                            2.7735297299149155,
                         ),
-                        (true, 4492.025189474921, -150.0, 2.7735297299149155),
                         (
                             true,
                             10912.60490330623,
                             -7.865116961622644,
                             1.93032652129178,
                         ),
-                        (
-                            false,
-                            5026.636099729572,
-                            -3.307348655680954,
-                            1.228379515053895,
-                        ),
                     ],
                 ),
             },
         );
-        want.buses.insert(
-            BusId::new("out1"),
-            BusState {
-                fader_db: 2.495521336750077,
-                pan: -0.46934761714109086,
-                muted: true,
+        let mut out2 = Mix {
+            out: MixOut {
+                volume_db: -10.201552614400986,
+                muted: false,
                 eq: golden_eq(
-                    0.0,
+                    -1.0,
                     [
                         (
-                            false,
-                            9742.087017799977,
-                            -6.0805269907599255,
-                            1.8584697541449708,
+                            true,
+                            3337.518449803024,
+                            11.911862843979627,
+                            1.328587472597789,
                         ),
                         (
                             true,
-                            4851.60332530278,
-                            8.858507609198632,
-                            2.0176527131274087,
+                            6171.43354348855,
+                            -5.697084940225904,
+                            2.5255217544499944,
                         ),
-                        (false, 10854.533206212067, -150.0, 0.15009490173878062),
+                        (false, 7073.879016579883, -150.0, 2.7099804432343926),
                         (
                             true,
-                            7073.5491137812,
-                            -9.841863137281184,
-                            0.9573047008724025,
+                            10469.253804599315,
+                            3.3412217050192687,
+                            0.10799098169480151,
                         ),
                         (
                             true,
-                            8759.01356258902,
-                            -0.13073934463131387,
-                            2.5668502745471504,
+                            240.37960695512248,
+                            -0.15207232957601313,
+                            1.8583872784453,
                         ),
                     ],
                 ),
                 limiter: Limiter {
                     enabled: false,
-                    limit_db: -2.898392646264181,
+                    limit_db: -4.35950678129451,
                 },
             },
+            ..Mix::default()
+        };
+        out2.inputs.insert(
+            InputId::new("b"),
+            Level {
+                gain_db: -0.7955934108683991,
+                pan: 0.4495521336750077,
+                muted: false,
+            },
         );
-        want.buses.insert(
-            BusId::new("out2"),
-            BusState {
-                fader_db: -8.872329496139283,
-                pan: -0.9938020829404317,
+        want.mixes.insert(MixId::new("out2"), out2);
+        let mut out1 = Mix {
+            out: MixOut {
+                volume_db: -4.414614413689444,
                 muted: false,
                 eq: golden_eq(
-                    0.0,
+                    3.0,
                     [
                         (
-                            false,
-                            8552.733893251341,
-                            -3.6854257470868887,
-                            1.1572525961080844,
+                            true,
+                            5836.785292528361,
+                            0.24417464270893063,
+                            1.1006820919639724,
                         ),
                         (
                             true,
-                            10293.178110885969,
-                            11.769178998214443,
-                            1.4402821252744298,
+                            4197.287126456556,
+                            -3.5419792311353255,
+                            1.435953916032347,
                         ),
-                        (true, 362.99649068234925, -150.0, 2.663431534906306),
-                        (
-                            false,
-                            4146.844681567507,
-                            -4.374104574700849,
-                            1.1871577437579943,
-                        ),
+                        (true, 11924.589499107222, -150.0, 1.4402821252744298),
                         (
                             true,
-                            4591.231351786333,
-                            2.0732156837345244,
-                            2.008289927755123,
+                            362.99649068234925,
+                            8.507452279250447,
+                            0.31684116004784313,
+                        ),
+                        (
+                            false,
+                            3852.947712649576,
+                            -3.302738049936046,
+                            2.186791679218299,
                         ),
                     ],
                 ),
                 limiter: Limiter {
                     enabled: true,
-                    limit_db: -4.4514733044767265,
+                    limit_db: -0.9383011511582153,
                 },
             },
-        );
-        want.buses.insert(
-            BusId::new("st"),
-            BusState {
-                fader_db: 2.1840260959726443,
-                pan: -0.3075480587313071,
-                muted: false,
+            ..Mix::default()
+        };
+        out1.groups.insert(
+            GroupId::new("g"),
+            MixGroup {
+                gain_db: 4.767233006947041,
+                muted: true,
                 eq: golden_eq(
-                    -4.0,
+                    -6.0,
                     [
+                        (
+                            false,
+                            4585.781760815448,
+                            5.805893217906906,
+                            0.5982765293665356,
+                        ),
                         (
                             true,
                             765.3514794650102,
                             -10.692908852337979,
                             2.8197269010741532,
                         ),
+                        (false, 10258.236684863237, -150.0, 2.8801707883206205),
                         (
                             false,
-                            10258.236684863237,
-                            10.241366306564963,
-                            0.6297656910649826,
+                            1893.1325492056992,
+                            -1.2654140995116627,
+                            0.6789130628655704,
                         ),
-                        (false, 5407.292950244168, -150.0, 0.6789130628655704),
                         (
                             true,
                             5760.929344855779,
                             11.159369543006008,
                             1.5455577584036342,
                         ),
-                        (
-                            true,
-                            8446.224609434617,
-                            -8.036087287485376,
-                            1.4131039713976368,
-                        ),
                     ],
                 ),
-                ..BusState::default()
             },
         );
-        want.buses.insert(
-            BusId::new("tr"),
-            BusState {
-                fader_db: -11.952896559775493,
-                pan: 0.09452584976670364,
-                muted: false,
-                ..BusState::default()
-            },
-        );
-        want.buses.insert(
-            BusId::new("master"),
-            BusState {
-                fader_db: -9.208932751919967,
-                pan: 0.29818602483110324,
-                muted: false,
-                ..BusState::default()
-            },
-        );
-        want.sends.push(SendEntry {
-            id: SendId {
-                src: Source::Input(InputId::new("a")),
-                dst: BusId::new("out1"),
-            },
-            state: SendState {
+        out1.inputs.insert(
+            InputId::new("a"),
+            Level {
                 gain_db: -150.0,
-                pan: 0.15941987738312036,
+                pan: 0.4184026095972644,
                 muted: false,
             },
-        });
-        want.sends.push(SendEntry {
-            id: SendId {
-                src: Source::Input(InputId::new("a")),
-                dst: BusId::new("tr"),
-            },
-            state: SendState {
-                gain_db: -150.0,
-                pan: 0.1503492464787195,
-                muted: false,
-            },
-        });
-        want.sends.push(SendEntry {
-            id: SendId {
-                src: Source::Input(InputId::new("b")),
-                dst: BusId::new("out1"),
-            },
-            state: SendState {
-                gain_db: -35.566241320880216,
-                pan: 0.6731766466410807,
-                muted: false,
-            },
-        });
-        want.sends.push(SendEntry {
-            id: SendId {
-                src: Source::Input(InputId::new("b")),
-                dst: BusId::new("out2"),
-            },
-            state: SendState {
-                gain_db: -32.14479707284505,
-                pan: -0.3452460250054328,
-                muted: false,
-            },
-        });
-        want.sends.push(SendEntry {
-            id: SendId {
-                src: Source::Input(InputId::new("c")),
-                dst: BusId::new("st"),
-            },
-            state: SendState {
-                gain_db: -47.55859137801734,
-                pan: 0.8308216760923159,
+        );
+        out1.inputs.insert(
+            InputId::new("b"),
+            Level {
+                gain_db: -56.72250935947566,
+                pan: -0.51653629493709,
                 muted: true,
             },
-        });
-        want.sends.push(SendEntry {
-            id: SendId {
-                src: Source::Bus(BusId::new("out2")),
-                dst: BusId::new("out1"),
+        );
+        out1.inputs.insert(
+            InputId::new("c"),
+            Level {
+                gain_db: -26.925410759704747,
+                pan: -0.9614036318125088,
+                muted: true,
             },
-            state: SendState {
-                gain_db: 7.882211183128575,
-                pan: 0.5170551393454226,
+        );
+        out1.mixes.insert(
+            MixId::new("out2"),
+            Level {
+                gain_db: -19.491270429328857,
+                pan: -0.9887505464729192,
                 muted: false,
             },
-        });
-        want.sends.push(SendEntry {
-            id: SendId {
-                src: Source::Bus(BusId::new("st")),
-                dst: BusId::new("out1"),
+        );
+        want.mixes.insert(MixId::new("out1"), out1);
+        let mut tr = Mix {
+            out: MixOut {
+                volume_db: 5.89271240134401,
+                muted: false,
+                eq: EqSettings::default(),
+                limiter: Limiter {
+                    enabled: false,
+                    limit_db: -6.0,
+                },
             },
-            state: SendState {
-                gain_db: -47.03979025427532,
-                pan: 0.8989565683413256,
+            ..Mix::default()
+        };
+        tr.inputs.insert(
+            InputId::new("a"),
+            Level {
+                gain_db: -32.93793984812034,
+                pan: 0.8861208868323762,
                 muted: false,
             },
-        });
+        );
+        want.mixes.insert(MixId::new("tr"), tr);
 
-        assert_eq!(sample_state(&topo, 5), want);
+        assert_eq!(sample_state(&topo, &routing, 5), want);
     }
 }

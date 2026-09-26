@@ -24,7 +24,7 @@ fn the_detector_sees_an_allocation() {
 #[test]
 fn process_does_not_allocate() {
     let mut s = common::scenario();
-    let mut b = common::buffers(&s.graph);
+    let mut b = common::buffers(&s.topo);
     assert!(s.groups.len() >= 18, "{}", s.groups.len());
     assert!(
         s.groups.iter().any(|g| g.len() > 300),

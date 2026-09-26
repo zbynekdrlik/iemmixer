@@ -1,20 +1,21 @@
-//! Band data files, schema 2 (S4 design note §3.4): presets, snapshots and
-//! customizations keyed by the engine's stable ids instead of REAPER track
-//! indices. The S4 migration writes them from the predecessor's data; the S5
-//! server reads and writes them.
+//! Band data files, schema 3 (S4 design note §3.4, #20 design note §7):
+//! presets, snapshots and customizations keyed by the engine's stable ids
+//! instead of REAPER track indices. The S4 migration writes them from the
+//! predecessor's data; the S5 server reads and writes them. Schema 3: sources
+//! are inputs or heard mixes, group faders are keyed by group.
 
 use std::collections::BTreeMap;
 
-use iem_engine_proto::{Eq as EqSettings, InputId, Source};
+use iem_engine_proto::{Eq as EqSettings, GroupId, InputId, Source};
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA: u32 = 2;
+pub const SCHEMA: u32 = 3;
 pub const PRESETS_FORMAT: &str = "iemmixer-presets";
 pub const SNAPSHOTS_FORMAT: &str = "iemmixer-snapshots";
 pub const CUSTOMIZATION_FORMAT: &str = "iemmixer-customization";
 
-/// One source in a member's mix: the send from `src` into the member's bus
-/// (or stems bus, for the stems group), in dB (≤ −150 = off) and pan −1…1.
+/// One source's level in a member's mix: an input (grouped or not) or a mix
+/// it hears, in dB (≤ −150 = off) and pan −1…1.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MixSend {
     pub src: Source,
@@ -33,8 +34,8 @@ pub struct Preset {
     pub created_at: i64,
     pub updated_at: i64,
     pub sends: Vec<MixSend>,
-    /// The member's stems bus fader.
-    pub stems_fader_db: Option<f64>,
+    /// The member's group strips (the stems fader), in dB.
+    pub groups: BTreeMap<GroupId, f64>,
     /// Input EQ saved with the preset: metadata, never applied (Q2).
     pub input_eq: BTreeMap<InputId, EqSettings>,
     /// Imported from a renamed member (D8): shown read-only.
@@ -50,7 +51,7 @@ pub struct Snapshot {
     pub label: String,
     pub pinned: bool,
     pub sends: Vec<MixSend>,
-    pub stems_fader_db: Option<f64>,
+    pub groups: BTreeMap<GroupId, f64>,
     /// Input EQ saved with the snapshot: metadata, never applied (Q2).
     pub input_eq: BTreeMap<InputId, EqSettings>,
     pub archived: bool,
@@ -122,7 +123,7 @@ impl CustomizationFile {
 
 #[cfg(test)]
 mod tests {
-    use iem_engine_proto::BusId;
+    use iem_engine_proto::MixId;
 
     use super::*;
 
@@ -136,20 +137,23 @@ mod tests {
         };
         let mut eq = BTreeMap::new();
         eq.insert(InputId::new("mic1"), EqSettings::default());
+        let mut groups = BTreeMap::new();
+        groups.insert(GroupId::new("stems"), -3.0);
         let preset = Preset {
             name: "p".into(),
             created_at: 1,
             updated_at: 2,
             sends: vec![send.clone()],
-            stems_fader_db: Some(-3.0),
+            groups,
             input_eq: eq,
             archived: true,
             legacy_member: Some("old".into()),
         };
         let file = PresetFile::new("member1", vec![preset]);
         let json = serde_json::to_string(&file).unwrap();
-        assert!(json.starts_with(r#"{"format":"iemmixer-presets","schema":2,"member":"member1""#));
+        assert!(json.starts_with(r#"{"format":"iemmixer-presets","schema":3,"member":"member1""#));
         assert!(json.contains(r#""input_eq":{"mic1":{"#), "{json}");
+        assert!(json.contains(r#""groups":{"stems":-3.0}"#), "{json}");
         assert_eq!(serde_json::from_str::<PresetFile>(&json).unwrap(), file);
         let snap = SnapshotFile::new(
             "member1",
@@ -165,11 +169,11 @@ mod tests {
         assert_eq!(serde_json::from_str::<SnapshotFile>(&json).unwrap(), snap);
         let c = CustomizationFile::new(
             "member1",
-            vec![Source::Bus(BusId::new("member2"))],
+            vec![Source::Mix(MixId::new("member2"))],
             vec![Source::Input(InputId::new("keys"))],
         );
         let json = serde_json::to_string(&c).unwrap();
-        assert!(json.contains(r#""pinned":[{"bus":"member2"}]"#), "{json}");
+        assert!(json.contains(r#""pinned":[{"mix":"member2"}]"#), "{json}");
         assert_eq!(serde_json::from_str::<CustomizationFile>(&json).unwrap(), c);
     }
 
@@ -177,7 +181,7 @@ mod tests {
     fn readers_default_missing_fields_and_ignore_unknown_ones() {
         let p: Preset = serde_json::from_str(r#"{"name":"x","future":1}"#).unwrap();
         assert_eq!(p.name, "x");
-        assert!(p.sends.is_empty() && !p.archived && p.stems_fader_db.is_none());
+        assert!(p.sends.is_empty() && !p.archived && p.groups.is_empty());
         let s: MixSend = serde_json::from_str(r#"{"src":{"input":"mic1"}}"#).unwrap();
         assert_eq!((s.gain_db, s.pan, s.muted), (0.0, 0.0, false));
     }

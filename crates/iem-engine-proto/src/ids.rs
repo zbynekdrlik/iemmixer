@@ -1,6 +1,5 @@
-//! Stable ids (program spec I4, I6): inputs and buses share one namespace in
-//! the site file; a send is identified by its (source, destination) pair,
-//! of which a site has at most one.
+//! Stable ids (program spec I4, I6; #20 design note §5): inputs, groups and
+//! mixes share one namespace in the site file.
 
 use core::fmt;
 
@@ -22,13 +21,20 @@ pub fn valid_id(s: &str) -> bool {
         })
 }
 
+/// An input: a channel strip on one or two of the card's RX channels.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct InputId(pub String);
 
+/// A group of inputs (the stems): every mix has one strip for it.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct BusId(pub String);
+pub struct GroupId(pub String);
+
+/// A mix: one listener's in-ear mix or feed.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct MixId(pub String);
 
 impl InputId {
     pub fn new(s: impl Into<String>) -> Self {
@@ -36,7 +42,13 @@ impl InputId {
     }
 }
 
-impl BusId {
+impl GroupId {
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+}
+
+impl MixId {
     pub fn new(s: impl Into<String>) -> Self {
         Self(s.into())
     }
@@ -48,48 +60,44 @@ impl fmt::Display for InputId {
     }
 }
 
-impl fmt::Display for BusId {
+impl fmt::Display for GroupId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
 }
 
-/// The source of a send: an input (pre-fader tap) or a bus (post-fader tap).
+impl fmt::Display for MixId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// What a level in a mix reads: an input, or another mix the mix hears (the
+/// Mixes tab, F16).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Source {
     Input(InputId),
-    Bus(BusId),
+    Mix(MixId),
 }
 
 impl fmt::Display for Source {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Input(id) => write!(f, "{id}"),
-            Self::Bus(id) => write!(f, "{id}"),
+            Self::Mix(id) => write!(f, "{id}"),
         }
     }
 }
 
-/// A send: at most one per (source, destination) pair (I4).
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct SendId {
-    pub src: Source,
-    pub dst: BusId,
-}
-
-impl fmt::Display for SendId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}>{}", self.src, self.dst)
-    }
-}
-
-/// Whose EQ a command addresses.
+/// Whose EQ a command addresses (F11): an input's, a mix's output, or a
+/// group's strip in one mix.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum EqOwner {
+pub enum EqTarget {
     Input(InputId),
-    Bus(BusId),
+    Mix(MixId),
+    Group { mix: MixId, group: GroupId },
 }
 
 #[cfg(test)]
@@ -101,11 +109,12 @@ mod tests {
         let longest = "a".repeat(64);
         let too_long = "a".repeat(65);
         for ok in [
-            "member1.stems",
+            "member1",
             "mic1",
             "0",
             "eng_mic",
             "a-b",
+            "a.b",
             longest.as_str(),
         ] {
             assert!(valid_id(ok), "{ok}");
@@ -127,22 +136,36 @@ mod tests {
 
     #[test]
     fn ids_serialise_as_plain_strings_and_display() {
-        let send = SendId {
-            src: Source::Input(InputId::new("mic1")),
-            dst: BusId::new("member1"),
-        };
         assert_eq!(
-            serde_json::to_string(&send).unwrap(),
-            r#"{"src":{"input":"mic1"},"dst":"member1"}"#
+            serde_json::to_string(&Source::Input(InputId::new("mic1"))).unwrap(),
+            r#"{"input":"mic1"}"#
         );
-        assert_eq!(send.to_string(), "mic1>member1");
-        let bus = Source::Bus(BusId::new("member2"));
-        assert_eq!(serde_json::to_string(&bus).unwrap(), r#"{"bus":"member2"}"#);
-        assert_eq!(bus.to_string(), "member2");
+        let heard = Source::Mix(MixId::new("member2"));
         assert_eq!(
-            serde_json::to_string(&EqOwner::Bus(BusId::new("engineer"))).unwrap(),
-            r#"{"bus":"engineer"}"#
+            serde_json::to_string(&heard).unwrap(),
+            r#"{"mix":"member2"}"#
         );
-        assert!(Source::Input(InputId::new("z")) < Source::Bus(BusId::new("a")));
+        assert_eq!(heard.to_string(), "member2");
+        assert_eq!(Source::Input(InputId::new("keys")).to_string(), "keys");
+        assert_eq!(GroupId::new("stems").to_string(), "stems");
+        assert_eq!(MixId::new("engineer").to_string(), "engineer");
+        assert_eq!(InputId::new("mic2").to_string(), "mic2");
+        assert_eq!(
+            serde_json::to_string(&EqTarget::Group {
+                mix: MixId::new("member1"),
+                group: GroupId::new("stems")
+            })
+            .unwrap(),
+            r#"{"group":{"mix":"member1","group":"stems"}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&EqTarget::Mix(MixId::new("engineer"))).unwrap(),
+            r#"{"mix":"engineer"}"#
+        );
+        assert!(Source::Input(InputId::new("z")) < Source::Mix(MixId::new("a")));
+        assert_eq!(
+            serde_json::to_string(&GroupId::new("stems")).unwrap(),
+            r#""stems""#
+        );
     }
 }

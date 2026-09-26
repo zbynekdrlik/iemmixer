@@ -1,11 +1,13 @@
-//! The engine topology as the importer sees it (S4 design note §3.2): the
-//! same content as the `[engine]` table of `site.toml` with every send family
-//! expanded, so a project and a site file compare id by id.
+//! The engine topology as the importer sees it (#20 design note §4, §7): the
+//! same content as the `[engine]` table of `site.toml` — inputs, groups,
+//! mixes and the mixes each one hears — so a project and a site file compare
+//! id by id. The project's own routing (which levels and group strips it can
+//! hold) is [`Routing`]; its REAPER counts are [`Counts`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Write as _};
 
-use iem_engine_proto::{BusId, BusKind, InputId, SendId, Source, Tap};
+use iem_engine_proto::{GroupId, InputId, MixId, Source};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopoInput {
@@ -15,31 +17,59 @@ pub struct TopoInput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TopoBus {
-    pub id: BusId,
-    pub kind: BusKind,
+pub struct TopoGroup {
+    pub id: GroupId,
+    pub inputs: Vec<InputId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TopoMix {
+    pub id: MixId,
+    /// Two TX channels (stereo) or one (mono).
     pub tx: Vec<u16>,
+    /// The mixes it hears.
+    pub mixes: Vec<MixId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Topology {
     pub inputs: Vec<TopoInput>,
-    pub buses: Vec<TopoBus>,
-    pub sends: Vec<(SendId, Tap)>,
-    pub engineer: Option<BusId>,
+    pub groups: Vec<TopoGroup>,
+    pub mixes: Vec<TopoMix>,
+    pub engineer: Option<MixId>,
 }
 
-/// Program spec §3.5 "Data": what an import must reproduce.
+/// What a predecessor project can hold beyond the topology: the levels that
+/// have a receive (an ungrouped input or a heard mix into a mix, a grouped
+/// input into the mix's group instance) and the group strips that have an
+/// instance (a stems bus). The engine holds a level for every input and a
+/// strip for every group; the rest cannot be written back.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Routing {
+    pub levels: BTreeSet<(MixId, Source)>,
+    pub strips: BTreeSet<(MixId, GroupId)>,
+}
+
+impl Routing {
+    pub fn has_level(&self, mix: &MixId, source: &Source) -> bool {
+        self.levels.contains(&(mix.clone(), source.clone()))
+    }
+
+    pub fn has_strip(&self, mix: &MixId, group: &GroupId) -> bool {
+        self.strips.contains(&(mix.clone(), group.clone()))
+    }
+}
+
+/// Program spec §3.5 "Data": the predecessor project's shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Counts {
-    /// Inputs plus every bus but the master (the master is not a REAPER track).
+    /// Tracks: inputs, mixes and group instances (the master is no track).
     pub tracks: usize,
+    /// Receives.
     pub sends: usize,
-    /// Inputs, output buses and stems buses.
+    /// ReaEQ instances.
     pub eqs: usize,
-    /// Output buses.
     pub limiters: usize,
-    /// Inputs.
     pub trims: usize,
 }
 
@@ -93,29 +123,19 @@ impl fmt::Display for Counts {
     }
 }
 
-pub const fn kind_name(kind: BusKind) -> &'static str {
-    match kind {
-        BusKind::Output => "output",
-        BusKind::Stems => "stems",
-        BusKind::Translator => "translator",
-        BusKind::Master => "master",
-    }
-}
-
-pub const fn tap_name(tap: Tap) -> &'static str {
-    match tap {
-        Tap::Pre => "pre",
-        Tap::Post => "post",
-    }
-}
-
-fn opt(id: Option<&BusId>) -> String {
+fn opt(id: Option<&MixId>) -> String {
     id.map_or_else(|| "none".to_owned(), ToString::to_string)
 }
 
-fn list(ids: &[String]) -> String {
+fn list<T: fmt::Display>(ids: &[T]) -> String {
     let quoted: Vec<String> = ids.iter().map(|i| format!("\"{i}\"")).collect();
     format!("[{}]", quoted.join(", "))
+}
+
+fn sorted<T: Ord + Clone>(v: &[T]) -> Vec<T> {
+    let mut v = v.to_vec();
+    v.sort();
+    v
 }
 
 impl Topology {
@@ -123,42 +143,40 @@ impl Topology {
         self.inputs.iter().find(|i| i.id == *id)
     }
 
-    pub fn bus(&self, id: &BusId) -> Option<&TopoBus> {
-        self.buses.iter().find(|b| b.id == *id)
+    pub fn group(&self, id: &GroupId) -> Option<&TopoGroup> {
+        self.groups.iter().find(|g| g.id == *id)
     }
 
-    pub fn tap(&self, id: &SendId) -> Option<Tap> {
-        self.sends.iter().find(|(s, _)| s == id).map(|(_, t)| *t)
+    pub fn mix(&self, id: &MixId) -> Option<&TopoMix> {
+        self.mixes.iter().find(|m| m.id == *id)
     }
 
-    pub fn has_send(&self, id: &SendId) -> bool {
-        self.tap(id).is_some()
+    /// The group `input` belongs to.
+    pub fn group_of(&self, input: &InputId) -> Option<&TopoGroup> {
+        self.groups.iter().find(|g| g.inputs.contains(input))
     }
 
-    /// The highest card channel any input or bus uses (1 when none).
+    /// Whether `mix` hears `source`: every input, and the mixes it lists.
+    pub fn hears(&self, mix: &MixId, source: &Source) -> bool {
+        match source {
+            Source::Input(id) => self.mix(mix).is_some() && self.input(id).is_some(),
+            Source::Mix(id) => self.mix(mix).is_some_and(|m| m.mixes.contains(id)),
+        }
+    }
+
+    /// The highest card channel any input or mix uses (1 when none).
     pub fn max_channel(&self) -> u16 {
         self.inputs
             .iter()
             .flat_map(|i| i.rx.iter())
-            .chain(self.buses.iter().flat_map(|b| b.tx.iter()))
+            .chain(self.mixes.iter().flat_map(|m| m.tx.iter()))
             .copied()
             .max()
             .unwrap_or(1)
     }
 
-    pub fn counts(&self) -> Counts {
-        let of = |k: BusKind| self.buses.iter().filter(|b| b.kind == k).count();
-        let outputs = of(BusKind::Output);
-        Counts {
-            tracks: self.inputs.len() + self.buses.len() - of(BusKind::Master),
-            sends: self.sends.len(),
-            eqs: self.inputs.len() + outputs + of(BusKind::Stems),
-            limiters: outputs,
-            trims: self.inputs.len(),
-        }
-    }
-
-    /// Differences between this topology (the project's) and `site`'s, by id.
+    /// Differences between this topology (the project's) and `site`'s, by id;
+    /// the order of groups' inputs and of heard mixes does not matter.
     pub fn diff(&self, site: &Topology) -> Vec<String> {
         let mut out = Vec::new();
         let a: BTreeMap<&InputId, &TopoInput> = self.inputs.iter().map(|i| (&i.id, i)).collect();
@@ -185,46 +203,46 @@ impl Topology {
         for id in b.keys().filter(|id| !a.contains_key(*id)) {
             out.push(format!("input {id}: in site.toml, not in the project"));
         }
-        let a: BTreeMap<&BusId, &TopoBus> = self.buses.iter().map(|x| (&x.id, x)).collect();
-        let b: BTreeMap<&BusId, &TopoBus> = site.buses.iter().map(|x| (&x.id, x)).collect();
+        let a: BTreeMap<&GroupId, &TopoGroup> = self.groups.iter().map(|g| (&g.id, g)).collect();
+        let b: BTreeMap<&GroupId, &TopoGroup> = site.groups.iter().map(|g| (&g.id, g)).collect();
         for (id, x) in &a {
             match b.get(id) {
-                None => out.push(format!("bus {id}: in the project, not in site.toml")),
+                None => out.push(format!("group {id}: in the project, not in site.toml")),
+                Some(y) if sorted(&x.inputs) != sorted(&y.inputs) => out.push(format!(
+                    "group {id}: inputs {} in the project, {} in site.toml",
+                    list(&sorted(&x.inputs)),
+                    list(&sorted(&y.inputs))
+                )),
+                Some(_) => {}
+            }
+        }
+        for id in b.keys().filter(|id| !a.contains_key(*id)) {
+            out.push(format!("group {id}: in site.toml, not in the project"));
+        }
+        let a: BTreeMap<&MixId, &TopoMix> = self.mixes.iter().map(|m| (&m.id, m)).collect();
+        let b: BTreeMap<&MixId, &TopoMix> = site.mixes.iter().map(|m| (&m.id, m)).collect();
+        for (id, x) in &a {
+            match b.get(id) {
+                None => out.push(format!("mix {id}: in the project, not in site.toml")),
                 Some(y) => {
-                    if x.kind != y.kind {
-                        out.push(format!(
-                            "bus {id}: {} in the project, {} in site.toml",
-                            kind_name(x.kind),
-                            kind_name(y.kind)
-                        ));
-                    }
                     if x.tx != y.tx {
                         out.push(format!(
-                            "bus {id}: tx {:?} in the project, {:?} in site.toml",
+                            "mix {id}: tx {:?} in the project, {:?} in site.toml",
                             x.tx, y.tx
+                        ));
+                    }
+                    if sorted(&x.mixes) != sorted(&y.mixes) {
+                        out.push(format!(
+                            "mix {id}: hears {} in the project, {} in site.toml",
+                            list(&sorted(&x.mixes)),
+                            list(&sorted(&y.mixes))
                         ));
                     }
                 }
             }
         }
         for id in b.keys().filter(|id| !a.contains_key(*id)) {
-            out.push(format!("bus {id}: in site.toml, not in the project"));
-        }
-        let a: BTreeMap<&SendId, Tap> = self.sends.iter().map(|(s, t)| (s, *t)).collect();
-        let b: BTreeMap<&SendId, Tap> = site.sends.iter().map(|(s, t)| (s, *t)).collect();
-        for (id, x) in &a {
-            match b.get(id) {
-                None => out.push(format!("send {id}: in the project, not in site.toml")),
-                Some(y) if y != x => out.push(format!(
-                    "send {id}: tap {} in the project, {} in site.toml",
-                    tap_name(*x),
-                    tap_name(*y)
-                )),
-                Some(_) => {}
-            }
-        }
-        for id in b.keys().filter(|id| !a.contains_key(*id)) {
-            out.push(format!("send {id}: in site.toml, not in the project"));
+            out.push(format!("mix {id}: in site.toml, not in the project"));
         }
         if self.engineer != site.engineer {
             out.push(format!(
@@ -236,8 +254,26 @@ impl Topology {
         out
     }
 
-    /// This topology as a `site.toml` `[engine]` table: sources with the same
-    /// tap and destinations share one send family.
+    /// The mixes in an order where every mix follows the mixes it hears
+    /// (the engine's define-before-use rule), otherwise as listed; mixes in a
+    /// hearing cycle keep their place at the end (the engine refuses them).
+    pub fn declaration_order(&self) -> Vec<&TopoMix> {
+        let mut done: Vec<&TopoMix> = Vec::with_capacity(self.mixes.len());
+        let mut left: Vec<&TopoMix> = self.mixes.iter().collect();
+        loop {
+            let ready = left
+                .iter()
+                .position(|m| m.mixes.iter().all(|h| done.iter().any(|d| d.id == *h)));
+            match ready {
+                Some(k) => done.push(left.remove(k)),
+                None => break,
+            }
+        }
+        done.extend(left);
+        done
+    }
+
+    /// This topology as a `site.toml` `[engine]` table.
     pub fn engine_toml(&self, channels: u16) -> String {
         let mut s = String::new();
         let _ = writeln!(s, "[engine]\nchannels = {channels}");
@@ -254,50 +290,23 @@ impl Topology {
                 s.push_str("talkback = true\n");
             }
         }
-        for b in &self.buses {
+        for g in &self.groups {
             let _ = write!(
                 s,
-                "\n[[engine.buses]]\nid = \"{}\"\nkind = \"{}\"\n",
-                b.id,
-                kind_name(b.kind)
+                "\n[[engine.groups]]\nid = \"{}\"\ninputs = {}\n",
+                g.id,
+                list(&g.inputs)
             );
-            if !b.tx.is_empty() {
-                let _ = writeln!(s, "tx = {:?}", b.tx);
-            }
         }
-        let sources = self
-            .inputs
-            .iter()
-            .map(|i| Source::Input(i.id.clone()))
-            .chain(self.buses.iter().map(|b| Source::Bus(b.id.clone())));
-        let mut families: Vec<(Tap, Vec<String>, Vec<String>)> = Vec::new();
-        for src in sources {
-            let mut tap = None;
-            let mut to = Vec::new();
-            for b in &self.buses {
-                let id = SendId {
-                    src: src.clone(),
-                    dst: b.id.clone(),
-                };
-                if let Some(t) = self.tap(&id) {
-                    tap = Some(t);
-                    to.push(b.id.to_string());
-                }
-            }
-            let Some(tap) = tap else { continue };
-            match families.iter_mut().find(|(t, _, d)| *t == tap && *d == to) {
-                Some((_, from, _)) => from.push(src.to_string()),
-                None => families.push((tap, vec![src.to_string()], to)),
-            }
-        }
-        for (tap, from, to) in &families {
+        for m in self.declaration_order() {
             let _ = write!(
                 s,
-                "\n[[engine.sends]]\nfrom = {}\nto = {}\ntap = \"{}\"\n",
-                list(from),
-                list(to),
-                tap_name(*tap)
+                "\n[[engine.mixes]]\nid = \"{}\"\ntx = {:?}\n",
+                m.id, m.tx
             );
+            if !m.mixes.is_empty() {
+                let _ = writeln!(s, "mixes = {}", list(&m.mixes));
+            }
         }
         s
     }
@@ -308,35 +317,23 @@ mod tests {
     use super::*;
     use crate::sitegen::synthetic_site;
 
-    fn send(src: Source, dst: &str) -> SendId {
-        SendId {
-            src,
-            dst: BusId::new(dst),
-        }
-    }
-
-    #[test]
-    fn the_synthetic_site_has_the_program_counts() {
-        let c = synthetic_site().counts();
-        assert_eq!(
-            c,
-            Counts {
-                tracks: 45,
-                sends: 268,
-                eqs: 44,
-                limiters: 10,
-                trims: 24
-            }
-        );
-        assert_eq!(
-            c.to_string(),
-            "tracks 45, sends 268, eqs 44, limiters 10, trims 24"
-        );
+    fn mix(id: &str) -> MixId {
+        MixId::new(id)
     }
 
     #[test]
     fn expect_checks_any_subset() {
-        let c = synthetic_site().counts();
+        let c = Counts {
+            tracks: 45,
+            sends: 268,
+            eqs: 44,
+            limiters: 10,
+            trims: 24,
+        };
+        assert_eq!(
+            c.to_string(),
+            "tracks 45, sends 268, eqs 44, limiters 10, trims 24"
+        );
         assert_eq!(
             c.check("tracks=45,sends=268,eqs=44,limiters=10,trims=24"),
             Ok(())
@@ -357,8 +354,13 @@ mod tests {
         let a = synthetic_site();
         let mut b = a.clone();
         b.inputs.reverse();
-        b.buses.reverse();
-        b.sends.reverse();
+        b.mixes.reverse();
+        for m in &mut b.mixes {
+            m.mixes.reverse();
+        }
+        for g in &mut b.groups {
+            g.inputs.reverse();
+        }
         assert!(a.diff(&b).is_empty());
     }
 
@@ -374,41 +376,44 @@ mod tests {
             rx: vec![150],
             talkback: false,
         });
-        b.buses[0].tx = vec![1, 2];
-        b.buses[1].kind = BusKind::Stems;
-        b.buses.remove(2);
-        b.buses.push(TopoBus {
-            id: BusId::new("spare"),
-            kind: BusKind::Stems,
-            tx: vec![],
+        b.groups[0].inputs.pop();
+        b.groups.push(TopoGroup {
+            id: GroupId::new("more"),
+            inputs: vec![InputId::new("extra")],
         });
-        let first = b.sends[0].0.clone();
-        b.sends[0].1 = Tap::Post;
-        b.sends
-            .retain(|(s, _)| *s != send(Source::Input(InputId::new("mic1")), "member2"));
-        b.sends.push((
-            send(Source::Input(InputId::new("mic3")), "translator"),
-            Tap::Pre,
-        ));
+        let m1 = b.mixes.iter().position(|m| m.id == mix("member1")).unwrap();
+        b.mixes[m1].tx = vec![1, 2];
+        b.mixes[m1].mixes.pop();
+        let m2 = b.mixes.iter().position(|m| m.id == mix("member3")).unwrap();
+        b.mixes.remove(m2);
+        b.mixes.push(TopoMix {
+            id: mix("spare"),
+            tx: vec![150],
+            mixes: vec![],
+        });
         b.engineer = None;
         let d = a.diff(&b);
         for want in [
-            "input mic1: rx [101] in the project, [1] in site.toml".to_owned(),
-            "input eng_mic: talkback true in the project, false in site.toml".to_owned(),
-            "input mic2: in the project, not in site.toml".to_owned(),
-            "input extra: in site.toml, not in the project".to_owned(),
-            "bus member1: tx [71, 72] in the project, [1, 2] in site.toml".to_owned(),
-            "bus member2: output in the project, stems in site.toml".to_owned(),
-            "bus member3: in the project, not in site.toml".to_owned(),
-            "bus spare: in site.toml, not in the project".to_owned(),
-            format!("send {first}: tap pre in the project, post in site.toml"),
-            "send mic1>member2: in the project, not in site.toml".to_owned(),
-            "send mic3>translator: in site.toml, not in the project".to_owned(),
-            "engineer: engineer in the project, none in site.toml".to_owned(),
+            "input mic1: rx [101] in the project, [1] in site.toml",
+            "input eng_mic: talkback true in the project, false in site.toml",
+            "input mic2: in the project, not in site.toml",
+            "input extra: in site.toml, not in the project",
+            "group stems: inputs [\"bass\", \"bgvs\", \"click\", \"drums\", \"guide\", \"inst\", \"other\"] in the project, [\"bass\", \"click\", \"drums\", \"guide\", \"inst\", \"other\"] in site.toml",
+            "group more: in site.toml, not in the project",
+            "mix member1: tx [71, 72] in the project, [1, 2] in site.toml",
+            "mix member1: hears [\"member2\", \"member3\", \"member4\", \"member5\", \"member6\", \"member7\", \"member8\", \"member9\"] in the project, [\"member2\", \"member3\", \"member4\", \"member5\", \"member6\", \"member7\", \"member8\"] in site.toml",
+            "mix member3: in the project, not in site.toml",
+            "mix spare: in site.toml, not in the project",
+            "engineer: engineer in the project, none in site.toml",
         ] {
-            assert!(d.contains(&want), "missing {want:?} in {d:#?}");
+            assert!(d.contains(&want.to_owned()), "missing {want:?} in {d:#?}");
         }
-        assert_eq!(d.len(), 12, "{d:#?}");
+        assert_eq!(d.len(), 11, "{d:#?}");
+        // The reverse direction names the other side.
+        let back = b.diff(&a);
+        assert!(back.contains(&"group more: in the project, not in site.toml".to_owned()));
+        assert!(back.contains(&"mix spare: in the project, not in site.toml".to_owned()));
+        assert!(back.contains(&"engineer: none in the project, engineer in site.toml".to_owned()));
     }
 
     #[derive(serde::Deserialize)]
@@ -421,68 +426,58 @@ mod tests {
         channels: u16,
         engineer: String,
         inputs: Vec<toml::Value>,
-        buses: Vec<toml::Value>,
-        sends: Vec<Family>,
+        groups: Vec<Group>,
+        mixes: Vec<Mix>,
     }
 
     #[derive(serde::Deserialize)]
-    struct Family {
-        from: Vec<String>,
-        to: Vec<String>,
-        tap: String,
+    struct Group {
+        id: String,
+        inputs: Vec<String>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Mix {
+        id: String,
+        tx: Vec<u16>,
+        #[serde(default)]
+        mixes: Vec<String>,
     }
 
     #[test]
-    fn the_engine_table_round_trips_through_toml() {
+    fn the_engine_table_round_trips_through_toml_in_declaration_order() {
         let t = synthetic_site();
         let text = t.engine_toml(160);
         let file: File = toml::from_str(&text).unwrap();
         assert_eq!(file.engine.channels, 160);
         assert_eq!(file.engine.engineer, "engineer");
         assert_eq!(file.engine.inputs.len(), 24);
-        assert_eq!(file.engine.buses.len(), 22);
-        let talkback: Vec<&toml::Value> = file
+        let talkback = file
             .engine
             .inputs
             .iter()
             .filter(|i| i.get("talkback").is_some())
-            .collect();
-        assert_eq!(talkback.len(), 1);
-        assert!(file.engine.buses.iter().all(|b| {
-            let kind = b.get("kind").and_then(toml::Value::as_str).unwrap();
-            b.get("tx").is_some() == (kind != "stems")
-        }));
-        let mut expanded = Vec::new();
-        for f in &file.engine.sends {
-            for from in &f.from {
-                for to in &f.to {
-                    expanded.push((from.clone(), to.clone(), f.tap.clone()));
-                }
+            .count();
+        assert_eq!(talkback, 1);
+        assert_eq!(file.engine.groups.len(), 1);
+        assert_eq!(file.engine.groups[0].id, "stems");
+        assert_eq!(file.engine.groups[0].inputs.len(), 7);
+        assert_eq!(file.engine.mixes.len(), 11);
+        // Every mix follows the mixes it hears.
+        for (k, m) in file.engine.mixes.iter().enumerate() {
+            for h in &m.mixes {
+                let at = file.engine.mixes.iter().position(|x| x.id == *h).unwrap();
+                assert!(at < k, "{} before {}", h, m.id);
             }
         }
-        let mut want: Vec<(String, String, String)> = t
-            .sends
-            .iter()
-            .map(|(s, tap)| {
-                (
-                    s.src.to_string(),
-                    s.dst.to_string(),
-                    tap_name(*tap).to_owned(),
-                )
-            })
-            .collect();
-        expanded.sort();
-        want.sort();
-        assert_eq!(expanded, want);
-        let direct = file
+        let tr = file
             .engine
-            .sends
+            .mixes
             .iter()
-            .find(|f| f.from.contains(&"mic2".to_owned()))
+            .find(|m| m.id == "translator")
             .unwrap();
-        assert_eq!(direct.from.len(), 16, "hand1 also feeds the translator");
-        assert_eq!(direct.to.len(), 10);
-        assert_eq!(direct.tap, "pre");
+        assert_eq!(tr.tx, vec![93]);
+        assert!(tr.mixes.is_empty() && !text.contains("mixes = []"));
         let no_engineer = Topology {
             engineer: None,
             ..t
@@ -491,27 +486,65 @@ mod tests {
     }
 
     #[test]
+    fn declaration_order_puts_heard_mixes_first_and_keeps_cycles_last() {
+        let m = |id: &str, hears: &[&str]| TopoMix {
+            id: mix(id),
+            tx: vec![1, 2],
+            mixes: hears.iter().map(|h| mix(h)).collect(),
+        };
+        let t = Topology {
+            mixes: vec![
+                m("eng", &["a", "b"]),
+                m("a", &["b"]),
+                m("b", &[]),
+                m("x", &["y"]),
+                m("y", &["x"]),
+            ],
+            ..Topology::default()
+        };
+        let order: Vec<&str> = t
+            .declaration_order()
+            .iter()
+            .map(|m| m.id.0.as_str())
+            .collect();
+        assert_eq!(order, vec!["b", "a", "eng", "x", "y"]);
+    }
+
+    #[test]
     fn the_highest_channel_counts_rx_and_tx() {
         let mut t = synthetic_site();
         assert_eq!(t.max_channel(), 132);
-        t.buses[0].tx = vec![150, 151];
+        t.mixes[0].tx = vec![150, 151];
         assert_eq!(t.max_channel(), 151);
         assert_eq!(Topology::default().max_channel(), 1);
     }
 
     #[test]
-    fn lookups_find_ids() {
+    fn lookups_find_ids_and_what_a_mix_hears() {
         let t = synthetic_site();
         assert!(t.input(&InputId::new("mic1")).is_some());
         assert!(t.input(&InputId::new("nope")).is_none());
+        assert_eq!(t.mix(&mix("translator")).unwrap().tx, vec![93]);
+        assert!(t.group(&GroupId::new("stems")).is_some());
+        assert!(t.group(&GroupId::new("nope")).is_none());
         assert_eq!(
-            t.bus(&BusId::new("translator")).unwrap().kind,
-            BusKind::Translator
+            t.group_of(&InputId::new("drums")).map(|g| g.id.0.as_str()),
+            Some("stems")
         );
-        let s = send(Source::Bus(BusId::new("member2")), "member1");
-        assert_eq!(t.tap(&s), Some(Tap::Post));
-        assert!(t.has_send(&s));
-        assert!(!t.has_send(&send(Source::Bus(BusId::new("member1")), "member2")));
-        assert_eq!(kind_name(BusKind::Master), "master");
+        assert!(t.group_of(&InputId::new("mic1")).is_none());
+        let heard = Source::Mix(mix("member2"));
+        assert!(t.hears(&mix("member1"), &heard));
+        assert!(t.hears(&mix("engineer"), &heard));
+        assert!(!t.hears(&mix("member3"), &heard));
+        assert!(t.hears(&mix("translator"), &Source::Input(InputId::new("drums"))));
+        assert!(!t.hears(&mix("ghost"), &Source::Input(InputId::new("mic1"))));
+        assert!(!t.hears(&mix("member1"), &Source::Input(InputId::new("ghost"))));
+        let mut r = Routing::default();
+        r.levels.insert((mix("member1"), heard.clone()));
+        r.strips.insert((mix("member1"), GroupId::new("stems")));
+        assert!(r.has_level(&mix("member1"), &heard));
+        assert!(!r.has_level(&mix("member2"), &heard));
+        assert!(r.has_strip(&mix("member1"), &GroupId::new("stems")));
+        assert!(!r.has_strip(&mix("translator"), &GroupId::new("stems")));
     }
 }

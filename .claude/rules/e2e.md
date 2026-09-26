@@ -11,4 +11,5 @@ paths:
 - The server runs with `config/test-site.toml`. REAPER is absent (the REAPER-era poller fails fast against `127.0.0.1:1`); cloudflared is absent (the tunnel is Down, so members see the tunnel banner).
 - Login budgets are shared by the whole run: tests that fail logins act as tunnel clients from their own `203.0.113.N` (`CF-Connecting-IP` from a loopback peer is trusted) and keep the total under 30 failures per origin.
 - **UI login attempts wait for their response:** `const r = page.waitForResponse(…/api/auth POST…)` before typing, `(await r).status()` after, and the PIN dots cleared before the next attempt — asserting on a still-visible "Invalid PIN" races the request.
+- **Service worker (`crates/iem-ui/sw.js`):** `HASH_RE` is Trunk's shape — `iem-ui-<hash>.js` and `iem-ui-<hash>_bg.wasm`, the hash an *unpadded* hex u64 (≤ 16 digits; 15 in about one build of 16). A `{16,}` pattern passes most builds and fails the PWA spec only when the build's hash is short; `pwa.spec.ts` checks the pattern against real build names.
 - Live specs (real PC, audio) come back in S6/S7 through HIL in the private ops repo — never in public CI.

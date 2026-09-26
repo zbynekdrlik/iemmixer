@@ -1,11 +1,12 @@
-//! `iem-migrate import` (design note §3.2): the saved project (and the
-//! newest backup JSON, cross-checked) → the engine's `current.json` and
-//! `baseline.json`, only when the project's topology equals `site.toml`.
+//! `iem-migrate import` (S4 design note §3.2, #20 design note §7): the saved
+//! project (and the newest backup JSON, cross-checked) → the engine's
+//! `current.json` and `baseline.json`, only when the project's topology
+//! equals `site.toml`.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use iem_core::MixerBackup;
-use iem_engine::core::{reconcile, to_mix};
+use iem_engine::core::{reconcile, to_state};
 use iem_engine::persist::{Persisted, Store};
 use iem_rpp::aliases::parse_aliases;
 use iem_rpp::backup::cross_check;
@@ -71,7 +72,7 @@ pub fn run(args: &[String]) -> Result<String, Failure> {
     if let Some(path) = a.opt_path("--backup") {
         let backup: MixerBackup = serde_json::from_str(&read_text(&path)?)
             .map_err(|e| Failure::input(format!("{}: {e}", path.display())))?;
-        let check = cross_check(&backup, &imp, &aliases)
+        let check = cross_check(&backup, &imp)
             .map_err(|p| Failure::input(format!("{}: {p}", path.display())))?;
         report.push(format!(
             "backup {} ({}): {} values compared, {} differ (the project's values are kept)",
@@ -105,9 +106,15 @@ pub fn run(args: &[String]) -> Result<String, Failure> {
             msg: report.join("\n"),
         });
     }
-    let (reconciled, dropped) = reconcile(&site.graph, &imp.state);
-    let state = to_mix(&site.graph, &reconciled);
-    let capped = compare(&imp.topology, &state, &imp.state, CAP_TOLERANCE_DB);
+    let (reconciled, dropped) = reconcile(&site.compiled, &imp.state);
+    let state = to_state(&site.compiled, &reconciled);
+    let capped = compare(
+        &imp.topology,
+        &imp.routing,
+        &state,
+        &imp.state,
+        CAP_TOLERANCE_DB,
+    );
     if !dropped.is_empty() || !capped.is_empty() {
         let lines: Vec<String> = dropped
             .iter()
@@ -131,7 +138,7 @@ pub fn run(args: &[String]) -> Result<String, Failure> {
     let store = Store::open(&dir).map_err(|e| Failure::io(format!("{}: {e}", dir.display())))?;
     // `rev` stays at the default 0: an import starts a new revision count.
     let persisted = Persisted {
-        topology_hash: site.graph.hash.clone(),
+        topology_hash: site.compiled.hash.clone(),
         saved_unix_ms: now_ms(),
         state,
         ..Persisted::default()

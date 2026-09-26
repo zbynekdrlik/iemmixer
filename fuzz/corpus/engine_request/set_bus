@@ -1,1 +1,0 @@
-{"type": "request", "id": 1, "origin": null, "cmd": {"op": "set_bus", "bus": "member1", "fader_db": -3.0, "pan": 0.2, "muted": false}}
