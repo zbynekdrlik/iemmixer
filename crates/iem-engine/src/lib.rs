@@ -7,7 +7,8 @@
 //! - [`cmd`]: the RT thread's command messages;
 //! - [`core`]: the pure control core, single writer of the state (I6);
 //! - [`rt`]: the RT processor, the whole graph in one callback (I5, I7);
-//! - [`resample`], [`media`]: 96 ↔ 48 kHz for listen taps and talkback (X3, X4).
+//! - [`resample`], [`media`]: 96 ↔ 48 kHz for listen taps and talkback (X3, X4);
+//! - [`persist`]: atomic checksummed saves, generations, baseline, load chain.
 //!
 //! GPL-3.0-or-later: the engine links the MGA limiter port (D1).
 
@@ -27,6 +28,7 @@ pub mod core;
 pub mod graph;
 pub mod media;
 pub mod params;
+pub mod persist;
 pub mod resample;
 pub mod rt;
 pub mod site;
