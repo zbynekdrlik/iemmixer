@@ -527,4 +527,481 @@ mod tests {
         ));
         assert!(project(&topo, &state, &track_name).is_err());
     }
+
+    #[test]
+    fn synthetic_buses_use_the_test_site_channels() {
+        let t = synthetic_site();
+        let tx: Vec<(&str, BusKind, Vec<u16>)> = t
+            .buses
+            .iter()
+            .map(|b| (b.id.0.as_str(), b.kind, b.tx.clone()))
+            .collect();
+        let out = BusKind::Output;
+        let stems = BusKind::Stems;
+        let want: Vec<(&str, BusKind, Vec<u16>)> = vec![
+            ("member1", out, vec![71, 72]),
+            ("member2", out, vec![73, 74]),
+            ("member3", out, vec![75, 76]),
+            ("member4", out, vec![77, 78]),
+            ("member5", out, vec![79, 80]),
+            ("member6", out, vec![81, 82]),
+            ("member7", out, vec![83, 84]),
+            ("member8", out, vec![85, 86]),
+            ("member9", out, vec![87, 88]),
+            ("engineer", out, vec![91, 92]),
+            ("member1.stems", stems, vec![]),
+            ("member2.stems", stems, vec![]),
+            ("member3.stems", stems, vec![]),
+            ("member4.stems", stems, vec![]),
+            ("member5.stems", stems, vec![]),
+            ("member6.stems", stems, vec![]),
+            ("member7.stems", stems, vec![]),
+            ("member8.stems", stems, vec![]),
+            ("member9.stems", stems, vec![]),
+            ("engineer.stems", stems, vec![]),
+            ("translator", BusKind::Translator, vec![93]),
+            ("master", BusKind::Master, vec![89, 90]),
+        ];
+        assert_eq!(tx, want);
+    }
+
+    #[test]
+    fn the_first_input_carries_a_bypassed_tone_generator() {
+        let topo = synthetic_site();
+        let text = project(&topo, &sample_state(&topo, 7), &track_name).unwrap();
+        assert_eq!(text.matches("tonegenerator").count(), 1);
+        let lines: Vec<&str> = text.lines().collect();
+        let at = lines
+            .iter()
+            .position(|l| l.contains("tonegenerator"))
+            .unwrap();
+        assert_eq!(lines[at - 1].trim(), "BYPASS 1 0 0");
+        assert_eq!(lines[at].trim(), r#"<JS synthesis/tonegenerator """#);
+        let sliders = format!("-12 -6 440{}", " -".repeat(61));
+        assert_eq!(lines[at + 1].trim(), sliders);
+    }
+
+    /// An EQ with the band kinds `random_eq` gives: (enabled, Hz, dB, octaves).
+    fn golden_eq(gain_db: f64, bands: [(bool, f64, f64, f64); 5]) -> EqSettings {
+        let kinds = [
+            EqKind::HighPass,
+            EqKind::LowShelf,
+            EqKind::Peak,
+            EqKind::HighShelf,
+            EqKind::HighPass,
+        ];
+        let mut e = EqSettings {
+            gain_db,
+            ..EqSettings::default()
+        };
+        for (b, (kind, (enabled, freq_hz, gain_db, bw_oct))) in
+            e.bands.iter_mut().zip(kinds.into_iter().zip(bands))
+        {
+            *b = EqBand {
+                kind,
+                enabled,
+                freq_hz,
+                gain_db,
+                bw_oct,
+            };
+        }
+        e
+    }
+
+    /// Every value of a small topology's sample state, pinned: the generator
+    /// is the public tests' stand-in for the site, so a change to it must be
+    /// deliberate (values computed from the generator's definition).
+    #[test]
+    fn sample_state_is_pinned_value_for_value() {
+        let input = |i: &str| Source::Input(InputId::new(i));
+        let bus = |b: &str| Source::Bus(BusId::new(b));
+        let topo = Topology {
+            inputs: ["a", "b", "c"]
+                .into_iter()
+                .map(|i| TopoInput {
+                    id: InputId::new(i),
+                    rx: vec![1],
+                    talkback: false,
+                })
+                .collect(),
+            buses: [
+                ("out1", BusKind::Output),
+                ("out2", BusKind::Output),
+                ("st", BusKind::Stems),
+                ("tr", BusKind::Translator),
+                ("master", BusKind::Master),
+            ]
+            .into_iter()
+            .map(|(b, kind)| TopoBus {
+                id: BusId::new(b),
+                kind,
+                tx: Vec::new(),
+            })
+            .collect(),
+            sends: [
+                (input("a"), "out1"),
+                (input("b"), "out2"),
+                (input("c"), "st"),
+                (bus("st"), "out1"),
+                (input("a"), "tr"),
+                (input("b"), "out1"),
+                (bus("out2"), "out1"),
+            ]
+            .into_iter()
+            .map(|(src, dst)| {
+                (
+                    SendId {
+                        src,
+                        dst: BusId::new(dst),
+                    },
+                    Tap::Pre,
+                )
+            })
+            .collect(),
+            engineer: None,
+        };
+        let mut want = MixState::default();
+        want.inputs.insert(
+            InputId::new("a"),
+            InputState {
+                trim_db: 7.860745325569493,
+                muted: true,
+                processing: false,
+                fader_db: -2.9863661282611904,
+                pan: 0.994263885156115,
+                eq: golden_eq(
+                    4.0,
+                    [
+                        (
+                            false,
+                            9886.044151794627,
+                            -4.573148693757647,
+                            1.428206679367011,
+                        ),
+                        (
+                            false,
+                            5478.82485321425,
+                            9.676293490464722,
+                            0.9023689834282962,
+                        ),
+                        (false, 2387.418789928381, -150.0, 0.754046099943221),
+                        (
+                            true,
+                            2392.262500215231,
+                            1.5781712142400401,
+                            2.976385130613216,
+                        ),
+                        (
+                            false,
+                            11582.863382255046,
+                            -5.72233850346369,
+                            1.2231254879589302,
+                        ),
+                    ],
+                ),
+            },
+        );
+        want.inputs.insert(
+            InputId::new("b"),
+            InputState {
+                trim_db: 6.090730311470619,
+                muted: false,
+                processing: true,
+                fader_db: 6.761666797859263,
+                pan: -0.012911063942519174,
+                eq: golden_eq(
+                    -4.0,
+                    [
+                        (
+                            false,
+                            6470.401958192328,
+                            0.5021446813616546,
+                            0.19688359597780206,
+                        ),
+                        (
+                            false,
+                            11901.148979447818,
+                            11.133731280551594,
+                            0.16030331371989817,
+                        ),
+                        (false, 4053.644459677573, -150.0, 0.7825190766565605),
+                        (
+                            true,
+                            735.5941438025018,
+                            -11.470716544718346,
+                            2.5092624167790056,
+                        ),
+                        (
+                            false,
+                            1200.6210660070149,
+                            -4.96324158170968,
+                            2.666851871684069,
+                        ),
+                    ],
+                ),
+            },
+        );
+        want.inputs.insert(
+            InputId::new("c"),
+            InputState {
+                trim_db: 9.74874610834748,
+                muted: false,
+                processing: true,
+                fader_db: -1.8094168493480733,
+                pan: -0.18455953606452713,
+                eq: golden_eq(
+                    -5.0,
+                    [
+                        (
+                            true,
+                            3882.815203156875,
+                            -8.386903782575477,
+                            1.5795244724403958,
+                        ),
+                        (
+                            true,
+                            1924.0233518485884,
+                            -11.01217083172865,
+                            0.18260427270756532,
+                        ),
+                        (true, 4492.025189474921, -150.0, 2.7735297299149155),
+                        (
+                            true,
+                            10912.60490330623,
+                            -7.865116961622644,
+                            1.93032652129178,
+                        ),
+                        (
+                            false,
+                            5026.636099729572,
+                            -3.307348655680954,
+                            1.228379515053895,
+                        ),
+                    ],
+                ),
+            },
+        );
+        want.buses.insert(
+            BusId::new("out1"),
+            BusState {
+                fader_db: 2.495521336750077,
+                pan: -0.46934761714109086,
+                muted: true,
+                eq: golden_eq(
+                    0.0,
+                    [
+                        (
+                            false,
+                            9742.087017799977,
+                            -6.0805269907599255,
+                            1.8584697541449708,
+                        ),
+                        (
+                            true,
+                            4851.60332530278,
+                            8.858507609198632,
+                            2.0176527131274087,
+                        ),
+                        (false, 10854.533206212067, -150.0, 0.15009490173878062),
+                        (
+                            true,
+                            7073.5491137812,
+                            -9.841863137281184,
+                            0.9573047008724025,
+                        ),
+                        (
+                            true,
+                            8759.01356258902,
+                            -0.13073934463131387,
+                            2.5668502745471504,
+                        ),
+                    ],
+                ),
+                limiter: Limiter {
+                    enabled: false,
+                    limit_db: -2.898392646264181,
+                },
+                ..BusState::default()
+            },
+        );
+        want.buses.insert(
+            BusId::new("out2"),
+            BusState {
+                fader_db: -8.872329496139283,
+                pan: -0.9938020829404317,
+                muted: false,
+                eq: golden_eq(
+                    0.0,
+                    [
+                        (
+                            false,
+                            8552.733893251341,
+                            -3.6854257470868887,
+                            1.1572525961080844,
+                        ),
+                        (
+                            true,
+                            10293.178110885969,
+                            11.769178998214443,
+                            1.4402821252744298,
+                        ),
+                        (true, 362.99649068234925, -150.0, 2.663431534906306),
+                        (
+                            false,
+                            4146.844681567507,
+                            -4.374104574700849,
+                            1.1871577437579943,
+                        ),
+                        (
+                            true,
+                            4591.231351786333,
+                            2.0732156837345244,
+                            2.008289927755123,
+                        ),
+                    ],
+                ),
+                limiter: Limiter {
+                    enabled: true,
+                    limit_db: -4.4514733044767265,
+                },
+                ..BusState::default()
+            },
+        );
+        want.buses.insert(
+            BusId::new("st"),
+            BusState {
+                fader_db: 2.1840260959726443,
+                pan: -0.3075480587313071,
+                muted: false,
+                eq: golden_eq(
+                    -4.0,
+                    [
+                        (
+                            true,
+                            765.3514794650102,
+                            -10.692908852337979,
+                            2.8197269010741532,
+                        ),
+                        (
+                            false,
+                            10258.236684863237,
+                            10.241366306564963,
+                            0.6297656910649826,
+                        ),
+                        (false, 5407.292950244168, -150.0, 0.6789130628655704),
+                        (
+                            true,
+                            5760.929344855779,
+                            11.159369543006008,
+                            1.5455577584036342,
+                        ),
+                        (
+                            true,
+                            8446.224609434617,
+                            -8.036087287485376,
+                            1.4131039713976368,
+                        ),
+                    ],
+                ),
+                ..BusState::default()
+            },
+        );
+        want.buses.insert(
+            BusId::new("tr"),
+            BusState {
+                fader_db: -11.952896559775493,
+                pan: 0.09452584976670364,
+                muted: false,
+                ..BusState::default()
+            },
+        );
+        want.buses.insert(
+            BusId::new("master"),
+            BusState {
+                fader_db: -9.208932751919967,
+                pan: 0.29818602483110324,
+                muted: false,
+                ..BusState::default()
+            },
+        );
+        want.sends.push(SendEntry {
+            id: SendId {
+                src: Source::Input(InputId::new("a")),
+                dst: BusId::new("out1"),
+            },
+            state: SendState {
+                gain_db: -150.0,
+                pan: 0.15941987738312036,
+                muted: false,
+            },
+        });
+        want.sends.push(SendEntry {
+            id: SendId {
+                src: Source::Input(InputId::new("a")),
+                dst: BusId::new("tr"),
+            },
+            state: SendState {
+                gain_db: -150.0,
+                pan: 0.1503492464787195,
+                muted: false,
+            },
+        });
+        want.sends.push(SendEntry {
+            id: SendId {
+                src: Source::Input(InputId::new("b")),
+                dst: BusId::new("out1"),
+            },
+            state: SendState {
+                gain_db: -35.566241320880216,
+                pan: 0.6731766466410807,
+                muted: false,
+            },
+        });
+        want.sends.push(SendEntry {
+            id: SendId {
+                src: Source::Input(InputId::new("b")),
+                dst: BusId::new("out2"),
+            },
+            state: SendState {
+                gain_db: -32.14479707284505,
+                pan: -0.3452460250054328,
+                muted: false,
+            },
+        });
+        want.sends.push(SendEntry {
+            id: SendId {
+                src: Source::Input(InputId::new("c")),
+                dst: BusId::new("st"),
+            },
+            state: SendState {
+                gain_db: -47.55859137801734,
+                pan: 0.8308216760923159,
+                muted: true,
+            },
+        });
+        want.sends.push(SendEntry {
+            id: SendId {
+                src: Source::Bus(BusId::new("out2")),
+                dst: BusId::new("out1"),
+            },
+            state: SendState {
+                gain_db: 7.882211183128575,
+                pan: 0.5170551393454226,
+                muted: false,
+            },
+        });
+        want.sends.push(SendEntry {
+            id: SendId {
+                src: Source::Bus(BusId::new("st")),
+                dst: BusId::new("out1"),
+            },
+            state: SendState {
+                gain_db: -47.03979025427532,
+                pan: 0.8989565683413256,
+                muted: false,
+            },
+        });
+
+        assert_eq!(sample_state(&topo, 5), want);
+    }
 }

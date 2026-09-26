@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use iem_core::band::{CustomizationFile, PresetFile, SnapshotFile};
 use iem_core::{ChannelPreset, ChannelSnapshot, Customization, MixSnapshot, PresetEntry};
@@ -100,6 +101,11 @@ fn the_synthetic_site_is_the_test_site() {
     assert_eq!(topo().diff(&synthetic_site()), Vec::<String>::new());
 }
 
+fn unix_ms() -> u64 {
+    let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    u64::try_from(since.as_millis()).unwrap()
+}
+
 #[test]
 fn import_writes_current_and_baseline_with_the_program_counts() {
     let w = World::new(1);
@@ -112,7 +118,9 @@ fn import_writes_current_and_baseline_with_the_program_counts() {
         ],
     );
     a.extend(["--state-dir".into(), s(&dir)]);
+    let before = unix_ms();
     let report = run(&a).unwrap();
+    let after = unix_ms();
     assert!(
         report.contains("counts: tracks 45, sends 268, eqs 44, limiters 10, trims 24"),
         "{report}"
@@ -123,6 +131,12 @@ fn import_writes_current_and_baseline_with_the_program_counts() {
     let loaded = Store::open(&dir).unwrap().load(&sf.graph);
     assert_eq!(loaded.source, Saved::Current);
     assert_eq!(loaded.persisted.topology_hash, sf.graph.hash);
+    assert_eq!(loaded.persisted.rev, 0);
+    let saved = loaded.persisted.saved_unix_ms;
+    assert!(
+        (before..=after).contains(&saved),
+        "saved at {saved}, import ran {before}..={after}"
+    );
     assert_eq!(
         compare(&sf.topology, &loaded.persisted.state, &w.state, 1e-9),
         Vec::<String>::new()
@@ -166,6 +180,28 @@ fn a_dry_run_writes_nothing() {
     let report = run(&a).unwrap();
     assert!(report.ends_with("dry run: nothing written"), "{report}");
     assert!(!dir.exists());
+}
+
+#[test]
+fn a_value_outside_the_engines_caps_fails_the_import() {
+    // Seed 1 imports cleanly (the program-counts test); one fader goes over.
+    let w = World::new(1);
+    let t = topo();
+    let first = t.inputs[0].id.clone();
+    let mut state = w.state.clone();
+    state.inputs.get_mut(&first).unwrap().fader_db = 20.0;
+    std::fs::write(&w.rpp, project(&t, &state, &track_name).unwrap()).unwrap();
+    let dir = w.path("state");
+    let mut a = import_args(&w, &[]);
+    a.extend(["--state-dir".into(), s(&dir)]);
+    let e = run(&a).unwrap_err();
+    assert_eq!(e.code, EXIT_INPUT);
+    let capped = format!(
+        "the state does not fit the engine:\n  outside the engine's caps: input {first}: fader "
+    );
+    assert!(e.msg.contains(&capped), "{}", e.msg);
+    assert!(!e.msg.contains("not in site.toml"), "{}", e.msg);
+    assert!(!dir.exists(), "nothing written");
 }
 
 #[test]
@@ -529,6 +565,12 @@ fn band_data_moves_with_the_same_pins_secrets_and_certificate() {
         report.contains("pins: 1 member(s) with their own PIN, 1 on the predecessor's default PIN"),
         "{report}"
     );
+    for line in [
+        "\npresets member1: 1 (sends ",
+        "\nsnapshots member1: 3 (sends ",
+    ] {
+        assert!(report.contains(line), "{report}");
+    }
     let presets: PresetFile =
         serde_json::from_str(&std::fs::read_to_string(out.join("presets/member1.json")).unwrap())
             .unwrap();
@@ -637,6 +679,201 @@ fn missing_or_unmappable_band_data_fails_loudly() {
     json(&l.join("snapshots/m2.json"), &[late]);
     let e = run(&band_args(&w, &l, &eras, &out, &["--partial"])).unwrap_err();
     assert!(e.msg.contains("snapshots/m2.json: snapshot 1"), "{}", e.msg);
+}
+
+fn edit(path: &Path, from: &str, to: &str) {
+    let text = std::fs::read_to_string(path).unwrap();
+    assert!(text.contains(from), "{text}");
+    std::fs::write(path, text.replace(from, to)).unwrap();
+}
+
+#[test]
+fn two_live_members_on_one_iemmixer_member_fail() {
+    let w = World::new(13);
+    let (l, eras) = legacy(&w);
+    let mut m = members();
+    m.insert("old1".to_owned(), member("member1", false));
+    std::fs::write(&w.aliases, aliases_toml(&topo(), &m)).unwrap();
+    let e = run(&band_args(&w, &l, &eras, &w.path("band"), &["--dry-run"])).unwrap_err();
+    assert_eq!(e.code, EXIT_INPUT);
+    assert!(
+        e.msg.contains(
+            "members m1 and old1 are both iemmixer member member1 (mark the renamed one archived)"
+        ),
+        "{}",
+        e.msg
+    );
+}
+
+#[test]
+fn an_absent_band_directory_is_none_and_an_unreadable_one_fails() {
+    let w = World::new(14);
+    let (l, eras) = legacy(&w);
+    let out = w.path("band");
+    let presets = l.join("presets");
+    std::fs::remove_dir_all(&presets).unwrap();
+    let report = run(&band_args(&w, &l, &eras, &out, &["--dry-run"])).unwrap();
+    assert!(report.contains("\npresets: none\n"), "{report}");
+    assert!(!report.contains("presets member1"), "{report}");
+    // A file where the directory belongs is not an absent directory.
+    std::fs::write(&presets, b"not a directory").unwrap();
+    let e = run(&band_args(&w, &l, &eras, &out, &["--dry-run"])).unwrap_err();
+    assert_eq!(e.code, EXIT_INPUT);
+    assert!(
+        e.msg.contains(&format!("  - {}: ", presets.display())),
+        "{}",
+        e.msg
+    );
+    assert!(!out.exists(), "nothing written");
+}
+
+#[test]
+fn an_unreadable_config_is_a_problem_even_with_partial() {
+    let w = World::new(15);
+    let (l, eras) = legacy(&w);
+    let config = l.join("config.yaml");
+    std::fs::remove_file(&config).unwrap();
+    std::fs::create_dir(&config).unwrap();
+    let e = run(&band_args(
+        &w,
+        &l,
+        &eras,
+        &w.path("band"),
+        &["--dry-run", "--partial"],
+    ))
+    .unwrap_err();
+    assert_eq!(e.code, EXIT_INPUT);
+    assert!(
+        e.msg.contains(&format!("  - {}: ", config.display())),
+        "{}",
+        e.msg
+    );
+    assert!(!e.msg.contains("is missing"), "{}", e.msg);
+}
+
+#[test]
+fn predecessor_pins_of_renamed_members_and_the_engineer_are_ignored() {
+    let w = World::new(16);
+    let (l, eras) = legacy(&w);
+    json(
+        &l.join("pins.json"),
+        &HashMap::from([
+            ("m1", "1357"),
+            ("m2", "2244"),
+            ("old1", "9999"),
+            ("eng", "1111"),
+        ]),
+    );
+    let report = run(&band_args(&w, &l, &eras, &w.path("band"), &["--dry-run"])).unwrap();
+    assert!(
+        report.contains(
+            "\npins.json: 2 entr(ies) ignored (renamed members, or the engineer, whose PIN is in the config)\n"
+        ),
+        "{report}"
+    );
+    assert!(
+        report.contains("pins: 2 member(s) with their own PIN, 0 on the predecessor's default PIN"),
+        "{report}"
+    );
+    assert!(
+        report.contains("engineer PIN from the predecessor's config"),
+        "{report}"
+    );
+}
+
+#[test]
+fn an_engineer_pin_that_is_not_4_digits_fails() {
+    let w = World::new(17);
+    let (l, eras) = legacy(&w);
+    edit(
+        &l.join("config.yaml"),
+        "engineer_pin: \"8642\"",
+        "engineer_pin: \"86x2\"",
+    );
+    let e = run(&band_args(&w, &l, &eras, &w.path("band"), &["--dry-run"])).unwrap_err();
+    assert_eq!(e.code, EXIT_INPUT);
+    assert!(
+        e.msg.contains("  - the engineer PIN is not 4 digits"),
+        "{}",
+        e.msg
+    );
+}
+
+#[test]
+fn a_missing_or_placeholder_jwt_secret_fails() {
+    let w = World::new(18);
+    let (l, eras) = legacy(&w);
+    let config = l.join("config.yaml");
+    let jwt = format!("jwt_secret: \"{JWT}\"\n");
+    edit(&config, &jwt, "");
+    let out = w.path("band");
+    let e = run(&band_args(&w, &l, &eras, &out, &["--dry-run"])).unwrap_err();
+    assert_eq!(e.code, EXIT_INPUT);
+    assert!(
+        e.msg
+            .contains("  - config.yaml jwt_secret is missing (--partial accepts a partial copy)"),
+        "{}",
+        e.msg
+    );
+    edit(
+        &config,
+        "port: 80\n",
+        "port: 80\njwt_secret: \"change-me-in-production\"\n",
+    );
+    let e = run(&band_args(&w, &l, &eras, &out, &["--dry-run"])).unwrap_err();
+    assert_eq!(e.code, EXIT_INPUT);
+    assert!(
+        e.msg
+            .contains("  - the predecessor's JWT secret is missing or the placeholder"),
+        "{}",
+        e.msg
+    );
+}
+
+#[test]
+fn a_missing_or_broken_lan_certificate() {
+    let w = World::new(19);
+    let (l, eras) = legacy(&w);
+    std::fs::remove_file(l.join("key.pem")).unwrap();
+    let out = w.path("band");
+    let e = run(&band_args(&w, &l, &eras, &out, &["--dry-run"])).unwrap_err();
+    assert_eq!(e.code, EXIT_INPUT);
+    assert!(
+        e.msg.contains(
+            "  - the LAN certificate (tls_cert / tls_key) is missing (--partial accepts a partial copy)"
+        ),
+        "{}",
+        e.msg
+    );
+    // --partial imports the rest without the certificate.
+    let report = run(&band_args(&w, &l, &eras, &out, &["--partial"])).unwrap();
+    assert!(
+        report.contains("\nabsent: the LAN certificate (tls_cert / tls_key)\n"),
+        "{report}"
+    );
+    assert!(!report.contains("LAN certificate imported"), "{report}");
+    assert!(!out.join("cert.pem").exists() && !out.join("key.pem").exists());
+    assert!(out.join("presets/member1.json").exists());
+    // A certificate that is there but not PEM is a problem, not an absence.
+    std::fs::write(l.join("key.pem"), key()).unwrap();
+    std::fs::write(l.join("cert.pem"), "not a certificate\n").unwrap();
+    let e = run(&band_args(
+        &w,
+        &l,
+        &eras,
+        &w.path("band2"),
+        &["--dry-run", "--partial"],
+    ))
+    .unwrap_err();
+    assert_eq!(e.code, EXIT_INPUT);
+    assert!(
+        e.msg.contains(&format!(
+            "  - {} is not a PEM certificate",
+            l.join("cert.pem").display()
+        )),
+        "{}",
+        e.msg
+    );
 }
 
 fn bin(args: &[&str]) -> std::process::Output {

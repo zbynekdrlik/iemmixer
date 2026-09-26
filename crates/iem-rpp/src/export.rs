@@ -421,4 +421,18 @@ mod tests {
             "{err:#?}"
         );
     }
+
+    #[test]
+    fn a_changed_band_kind_is_written() {
+        use iem_engine_proto::BandKind;
+        let (text, aliases, state) = setup(22);
+        let mic4 = InputId::new("mic4");
+        let mut s = state;
+        let band = &mut s.inputs.get_mut(&mic4).unwrap().eq.bands[1];
+        assert_eq!(band.kind, BandKind::LowShelf);
+        band.kind = BandKind::Peak;
+        let out = export_checked(&text, &aliases, &s).unwrap();
+        let back = import(&LegacyProject::parse(&out).unwrap(), &aliases).unwrap();
+        assert_eq!(back.state.inputs[&mic4].eq.bands[1].kind, BandKind::Peak);
+    }
 }

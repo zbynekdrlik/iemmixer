@@ -1037,4 +1037,72 @@ mod tests {
         let e: Problems = RppError::Invalid("x".into()).into();
         assert_eq!(e.0, vec!["invalid project: x".to_owned()]);
     }
+
+    #[test]
+    fn faders_need_a_non_negative_volume_and_a_pan_in_range() {
+        let track = |vol: f64, pan: f64| Track {
+            name: "t".into(),
+            volpan: None,
+            vol,
+            pan,
+            mutesolo: None,
+            muted: false,
+            soloed: false,
+            rec: None,
+            fx: None,
+            fx_on: true,
+            hwout: Vec::new(),
+            receives: Vec::new(),
+            plugins: Vec::new(),
+        };
+        assert_eq!(check_fader(&track(0.0, 0.0)), Ok(()));
+        assert_eq!(check_fader(&track(1.0, -1.0)), Ok(()));
+        assert_eq!(
+            check_fader(&track(-0.5, 0.0)),
+            Err("volume -0.5 / pan 0 out of range".to_owned())
+        );
+        assert_eq!(
+            check_fader(&track(1.0, 1.5)),
+            Err("volume 1 / pan 1.5 out of range".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_bad_slider_names_its_line() {
+        let f = fixture();
+        let text = after(&f.text, "mic1", " 0 0 - ", " x 0 - ");
+        let at = text
+            .find(&format!("NAME \"{}\"", track_name("mic1")))
+            .unwrap();
+        let slider = at + text[at..].find(" x 0 - ").unwrap();
+        let line = text[..slider].matches('\n').count() + 1;
+        fails_with(
+            &text,
+            &f.aliases,
+            &format!("line {line}: field 1 \"x\" is not a finite number"),
+        );
+    }
+
+    #[test]
+    fn a_silent_master_imports() {
+        let topo = synthetic_site();
+        let mut s = sample_state(&topo, 11);
+        s.buses.get_mut(&BusId::new("master")).unwrap().fader_db = DB_OFF;
+        let text = write(&topo, &s, &track_name).unwrap();
+        assert!(text.contains("\n  MASTER_VOLUME 0 "));
+        let f = fixture();
+        let imp = import(&LegacyProject::parse(&text).unwrap(), &f.aliases).unwrap();
+        assert_eq!(imp.state.buses[&BusId::new("master")].fader_db, DB_OFF);
+    }
+
+    #[test]
+    fn a_project_without_a_listen_tap_imports() {
+        let mut topo = synthetic_site();
+        topo.engineer = None;
+        let text = write(&topo, &sample_state(&topo, 11), &track_name).unwrap();
+        assert!(!text.contains("VBAN IEM"));
+        let f = fixture();
+        let imp = import(&LegacyProject::parse(&text).unwrap(), &f.aliases).unwrap();
+        assert_eq!(imp.topology.engineer, None);
+    }
 }

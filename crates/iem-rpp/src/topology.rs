@@ -53,7 +53,7 @@ impl Counts {
     /// Checks `--expect tracks=45,sends=268,…` (any subset, any order).
     pub fn check(&self, expect: &str) -> Result<(), String> {
         let mut wrong = Vec::new();
-        let mut seen = 0;
+        let mut seen = false;
         for part in expect.split(',').map(str::trim).filter(|p| !p.is_empty()) {
             let (name, value) = part
                 .split_once('=')
@@ -69,9 +69,9 @@ impl Counts {
             if got != want {
                 wrong.push(format!("{name} {got}, expected {want}"));
             }
-            seen += 1;
+            seen = true;
         }
-        if seen == 0 {
+        if !seen {
             return Err("--expect: no counts given".into());
         }
         if wrong.is_empty() {

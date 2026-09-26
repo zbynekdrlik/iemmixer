@@ -510,6 +510,7 @@ mod tests {
         assert!((s[0].sends[0].pan - 0.5).abs() < 1e-12);
         assert_eq!(s[0].label, "auto");
         assert!(!s[0].archived && s[0].legacy_member.is_none());
+        assert_eq!(st.between_eras, 0, "both items fall inside an era");
     }
 
     #[test]
@@ -709,5 +710,37 @@ mod tests {
                 between_eras: 10
             }
         );
+    }
+
+    #[test]
+    fn presets_count_the_ones_between_eras() {
+        let e = env();
+        let c = ctx(&e, &e.member);
+        let entry = |name: &str, updated_at: i64| PresetEntry {
+            name: name.into(),
+            channels: HashMap::from([(
+                3,
+                ChannelPreset {
+                    vol: -6.0,
+                    mute: false,
+                    pan: 0.5,
+                },
+            )]),
+            created_at: 90,
+            updated_at,
+            stems_level_db: None,
+            eq_bands: None,
+        };
+        let entries = HashMap::from([
+            ("inside".to_owned(), entry("inside", 160)),
+            ("between".to_owned(), entry("between", 250)),
+        ]);
+        let (p, st) = rekey_presets(&entries, &c).unwrap();
+        assert_eq!(p.len(), 2);
+        assert_eq!(st.items, 2);
+        assert_eq!(st.between_eras, 1);
+        for x in &p {
+            assert_eq!(x.sends[0].src, src_in("drums"), "{}", x.name);
+        }
     }
 }

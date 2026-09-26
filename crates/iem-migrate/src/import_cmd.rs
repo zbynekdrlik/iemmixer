@@ -129,8 +129,8 @@ pub fn run(args: &[String]) -> Result<String, Failure> {
         return Ok(report.join("\n"));
     };
     let store = Store::open(&dir).map_err(|e| Failure::io(format!("{}: {e}", dir.display())))?;
+    // `rev` stays at the default 0: an import starts a new revision count.
     let persisted = Persisted {
-        rev: 0,
         topology_hash: site.graph.hash.clone(),
         saved_unix_ms: now_ms(),
         state,

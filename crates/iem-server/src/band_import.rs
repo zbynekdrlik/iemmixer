@@ -708,4 +708,139 @@ mod tests {
         std::fs::write(&src, big).unwrap();
         assert!(import_photo(&src, &dst, true).is_ok());
     }
+
+    #[test]
+    fn the_photo_limit_is_256_kilobytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("a.jpg");
+        let dst = dir.path().join("member1.jpg");
+        let mut photo: Vec<u8> = vec![0xFF, 0xD8, 0xFF];
+        photo.resize(262_144, 0);
+        std::fs::write(&src, &photo).unwrap();
+        import_photo(&src, &dst, false).unwrap();
+        assert_eq!(std::fs::read(&dst).unwrap().len(), 262_144);
+        photo.push(0);
+        std::fs::write(&src, photo).unwrap();
+        let err = import_photo(&src, &dst, true).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn debug_output_shows_no_pin_or_secret() {
+        let c = parse_legacy_config("jwt_secret: auto-9\nengineer_pin: 4321\n").unwrap();
+        assert_eq!(
+            format!("{c:?}"),
+            "LegacyConfig { tls_cert: \"cert.pem\", tls_key: \"key.pem\", .. }"
+        );
+        let d = parse_default_pins("member=1234\nengineer=5678\n").unwrap();
+        assert_eq!(format!("{d:?}"), "DefaultPins { .. }");
+        assert_eq!(
+            format!("{:?}", req("member1", "1357")),
+            "PinRequest { owner: \"member1\", .. }"
+        );
+    }
+
+    #[test]
+    fn an_iemmixer_pin_is_kept_even_in_a_dry_run_or_with_the_same_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = dir.path().join(SECRETS_DIR);
+        import_pins(&secrets, &[req("member1", "1357")], false).unwrap();
+        let h = PinHasher::new(pepper::load_or_create(&secrets).unwrap());
+        let mut store = PinStore::load(&secrets).unwrap();
+        store.set_member_hash("member1", h.hash("9753")).unwrap();
+        store.set_engineer_hash(h.hash("8642")).unwrap();
+        let dry = import_pins(&secrets, &[req("member1", "1357")], true).unwrap();
+        assert_eq!(
+            dry,
+            vec![("member1".to_owned(), PinOutcome::KeptIemmixerPin)]
+        );
+        let same = import_pins(
+            &secrets,
+            &[req("member1", "9753"), req(ENGINEER_ID, "8642")],
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            same,
+            vec![
+                ("member1".to_owned(), PinOutcome::KeptIemmixerPin),
+                (ENGINEER_ID.to_owned(), PinOutcome::KeptIemmixerPin),
+            ]
+        );
+        let store = PinStore::load(&secrets).unwrap();
+        assert!(!store.is_imported("member1"));
+        assert!(!store.is_imported(ENGINEER_ID));
+    }
+
+    #[test]
+    fn a_dry_run_with_a_pepper_writes_no_pin() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = dir.path().join(SECRETS_DIR);
+        import_pins(&secrets, &[req("member1", "1357")], false).unwrap();
+        let file = secrets.join(crate::pin_store::PIN_HASHES_FILE);
+        let before = std::fs::read(&file).unwrap();
+        let out = import_pins(
+            &secrets,
+            &[req("member1", "2222"), req("member2", "4444")],
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            vec![
+                ("member1".to_owned(), PinOutcome::Set),
+                ("member2".to_owned(), PinOutcome::Set),
+            ]
+        );
+        assert_eq!(std::fs::read(file).unwrap(), before);
+        let h = PinHasher::new(pepper::load_or_create(&secrets).unwrap());
+        let store = PinStore::load(&secrets).unwrap();
+        assert!(h.verify("1357", store.member_hash("member1").unwrap()));
+        assert_eq!(store.member_hash("member2"), None);
+    }
+
+    #[test]
+    fn a_key_file_without_a_private_key_header_is_rejected() {
+        let legacy = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let (c, k) = (legacy.path().join("c.pem"), legacy.path().join("k.pem"));
+        std::fs::write(&c, CERT).unwrap();
+        std::fs::write(&k, CERT).unwrap();
+        let err = import_tls(&c, &k, out.path(), false).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().ends_with("is not a PEM private key"));
+        assert!(!out.path().join("cert.pem").exists());
+        assert!(!out.path().join("key.pem").exists());
+    }
+
+    /// A target that exists but cannot be read (a directory) is an error,
+    /// never taken for a missing file.
+    fn assert_unreadable<T: std::fmt::Debug>(r: io::Result<T>) {
+        let kind = r.unwrap_err().kind();
+        assert_ne!(kind, io::ErrorKind::NotFound);
+        #[cfg(unix)]
+        {
+            assert_eq!(kind, io::ErrorKind::IsADirectory);
+        }
+    }
+
+    #[test]
+    fn an_unreadable_target_is_an_error_not_a_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = dir.path().join(JWT_SECRET_FILE);
+        std::fs::create_dir(&secret).unwrap();
+        assert_unreadable(import_secret(&secret, "auto-1", true));
+
+        let legacy = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let (c, k) = (legacy.path().join("c.pem"), legacy.path().join("k.pem"));
+        std::fs::write(&c, CERT).unwrap();
+        std::fs::write(&k, key()).unwrap();
+        std::fs::create_dir(out.path().join("cert.pem")).unwrap();
+        assert_unreadable(import_tls(&c, &k, out.path(), true));
+
+        std::fs::create_dir(out.path().join(PUSH_FILE)).unwrap();
+        assert_unreadable(import_push(legacy.path(), out.path(), true));
+        assert!(!out.path().join(PUSH_MARKER).exists());
+    }
 }

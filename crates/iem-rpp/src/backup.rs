@@ -420,4 +420,103 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn band_types_map_to_kinds() {
+        use iem_engine_proto::BandKind as K;
+        assert_eq!(eq_type("highpass"), Some(K::HighPass));
+        assert_eq!(eq_type("lowshelf"), Some(K::LowShelf));
+        assert_eq!(eq_type("band"), Some(K::Peak));
+        assert_eq!(eq_type("highshelf"), Some(K::HighShelf));
+        assert_eq!(eq_type("notch"), None);
+    }
+
+    #[test]
+    fn f32_precision_scales_with_the_magnitude() {
+        assert!(same_f32(1000.0, 1000.0005));
+        assert!(!same_f32(1000.0, 1000.002));
+        assert!(same_f32(0.5, 0.500_000_5));
+        assert!(!same_f32(0.5, 0.500_002));
+    }
+
+    #[test]
+    fn eq_band_gains_and_frequencies_compare_within_their_tolerances() {
+        let (imp, aliases) = setup();
+        let mut r = Run {
+            imp: &imp,
+            aliases: &aliases,
+            check: Check::default(),
+            unknown: Vec::new(),
+        };
+        // (backup dB, project dB, backup Hz, project Hz, the difference reported)
+        let cases: [(f32, f64, f32, f64, Option<&str>); 6] = [
+            (-200.0, -150.0, 1000.0, 1004.0, None),
+            (
+                3.0,
+                -150.0,
+                1000.0,
+                1000.0,
+                Some("dB 3 in the backup, -150 in the project"),
+            ),
+            (-150.0, -160.0, 1000.0, 1000.0, None),
+            (
+                -150.0,
+                3.0,
+                1000.0,
+                1000.0,
+                Some("dB -150 in the backup, 3 in the project"),
+            ),
+            (1.0, 1.04, 1000.0, 1000.0, None),
+            (
+                0.0,
+                0.0,
+                1000.0,
+                1010.0,
+                Some("Hz 1000 in the backup, 1010 in the project"),
+            ),
+        ];
+        for (i, (bg, pg, bhz, phz, want)) in cases.into_iter().enumerate() {
+            r.check = Check::default();
+            let mut eq = iem_engine_proto::Eq::default();
+            eq.bands[2] = iem_engine_proto::EqBand {
+                kind: iem_engine_proto::BandKind::Peak,
+                enabled: true,
+                freq_hz: phz,
+                gain_db: pg,
+                bw_oct: 1.0,
+            };
+            let band = EqBandBackup {
+                band: 2,
+                band_type: "band".into(),
+                freq_norm: 0.0,
+                gain_norm: 0.0,
+                bw_norm: 0.0,
+                freq_hz: bhz,
+                gain_db: bg,
+                bw_oct: 1.0,
+                enabled: true,
+            };
+            r.eq_bands("x", &eq, &[band]);
+            assert_eq!(r.check.compared, 5, "case {i}");
+            let want: Vec<String> = want
+                .map(|w| format!("x EQ band 3: {w}"))
+                .into_iter()
+                .collect();
+            assert_eq!(r.check.differing, want, "case {i}");
+        }
+    }
+
+    #[test]
+    fn each_unknown_name_is_listed_once() {
+        let (imp, aliases) = setup();
+        let mut b = agreeing(&imp);
+        b.track_mutes.insert("GONE".into(), false);
+        b.track_volumes.insert("GONE".into(), 1.0);
+        b.eq.insert("LOST".into(), Vec::new());
+        let err = cross_check(&b, &imp, &aliases).unwrap_err().0;
+        assert_eq!(
+            err,
+            vec!["backup names missing from the aliases: \"GONE\", \"LOST\"".to_owned()]
+        );
+    }
 }
