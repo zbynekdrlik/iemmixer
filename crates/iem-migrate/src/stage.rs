@@ -260,7 +260,12 @@ mod tests {
                 if p.is_dir() {
                     walk(root, &p, out);
                 } else {
-                    let rel = p.strip_prefix(root).unwrap().to_string_lossy().into_owned();
+                    // Keyed with '/' on every platform (Windows walks with '\\').
+                    let rel = p
+                        .strip_prefix(root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/");
                     out.insert(rel, fs::read(&p).unwrap());
                 }
             }
