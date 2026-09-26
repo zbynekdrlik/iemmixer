@@ -4,7 +4,8 @@ version must be greater than main's (SemVer 2.0 precedence).
 
 Single source: [workspace.package].version in Cargo.toml. Every crate uses
 `version.workspace = true`, tauri.conf.json sets no version, and Cargo.lock
-records that version for every workspace package.
+records that version for every workspace package (so does fuzz/Cargo.lock for
+the workspace crates it builds).
 """
 from __future__ import annotations
 
@@ -71,6 +72,12 @@ def consistency_errors(root: Path) -> list[str]:
     for crate in CRATES:
         if locked.get(crate) != version:
             errors.append(f"Cargo.lock has {crate} {locked.get(crate)}, expected {version}")
+    # The fuzz workspace (its own Cargo.lock, checked with --locked) records the
+    # workspace crates it builds; a bump must update it too.
+    fuzz = tomllib.loads((root / "fuzz" / "Cargo.lock").read_text(encoding="utf-8"))
+    for package in fuzz["package"]:
+        if package["name"] in CRATES and package["version"] != version:
+            errors.append(f"fuzz/Cargo.lock has {package['name']} {package['version']}, expected {version}")
     return errors
 
 
