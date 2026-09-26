@@ -12,6 +12,7 @@ pub mod backup_daemon;
 pub mod backup_restore;
 pub mod backup_routes;
 pub mod backup_store;
+pub mod band_import;
 pub mod customization_store;
 pub mod login_guard;
 pub mod pepper;
