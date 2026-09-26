@@ -2601,6 +2601,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "iem-limiter-mga"
+version = "2.0.0-dev.3"
+dependencies = [
+ "assert_no_alloc",
+ "iem-rpp",
+]
+
+[[package]]
 name = "iem-rpp"
 version = "2.0.0-dev.3"
 dependencies = [

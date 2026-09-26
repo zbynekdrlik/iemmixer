@@ -1,0 +1,14 @@
+[package]
+name = "iem-limiter-mga"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license = "GPL-3.0-or-later"
+repository.workspace = true
+description = "Faithful Rust port of the MGA JS Limiter (Michael Gruhn, GPL-3.0-or-later) for iemmixer"
+
+[dependencies]
+
+[dev-dependencies]
+assert_no_alloc = { version = "1.1.2", default-features = false, features = ["warn_debug", "warn_release"] }
+iem-rpp = { path = "../iem-rpp" }

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/iem-core", "crates/iem-server", "crates/iem-ui", "crates/iem-tray", "crates/iem-rpp", "crates/iem-dsp"]
+members = ["crates/iem-core", "crates/iem-server", "crates/iem-ui", "crates/iem-tray", "crates/iem-rpp", "crates/iem-dsp", "crates/iem-limiter-mga"]
 resolver = "2"
 
 [workspace.package]
