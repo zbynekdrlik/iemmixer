@@ -2,6 +2,8 @@
 //! importer and exporter to this crate.
 
 pub mod fx;
+pub mod oracle;
+pub mod project;
 pub mod reaeq;
 pub mod rpp;
 pub mod stimulus;
