@@ -80,6 +80,25 @@ def alpha_bw(fs: float, f0: float, bw: float) -> float:
     return math.sin(w0) * math.sinh(math.log(2) / 2 * bw * w0 / math.sin(w0))
 
 
+def alpha_oct(fs: float, f0: float, bw: float) -> float:
+    """ReaEQ band/HPF bandwidth (measured, window 2): the octave formula with
+    the warp w0/sin(w0) capped at pi/2, i.e. from w0 = pi/2 (f0 = fs/4) on."""
+    w0 = 2 * math.pi * f0 / fs
+    warp = w0 / math.sin(w0) if w0 <= math.pi / 2 else math.pi / 2
+    return math.sin(w0) * math.sinh(math.log(2) / 2 * bw * warp)
+
+
+SHELF_S_MAX = 1.2
+
+
+def alpha_shelf(fs: float, f0: float, g: float, bw: float) -> float:
+    """ReaEQ shelf (measured, window 2): RBJ shelf slope S = min(1/bw^2, 1.2)."""
+    w0 = 2 * math.pi * f0 / fs
+    a = math.sqrt(g)
+    s = min(1.0 / bw**2, SHELF_S_MAX) if bw > 0 else SHELF_S_MAX
+    return math.sin(w0) / 2 * math.sqrt(max((a + 1 / a) * (1 / s - 1) + 2, 0.0))
+
+
 def alpha_slope(fs: float, f0: float, g: float, bw: float) -> float:
     w0 = 2 * math.pi * f0 / fs
     a = math.sqrt(g)
@@ -148,7 +167,7 @@ def shelf_alpha(kind: str, fs: float, f0: float, g: float, coef: np.ndarray) -> 
 
 
 def classify_shelf(kind: str, fs: float, f0: float, g: float, bw: float, h: np.ndarray) -> str:
-    for name, alpha in (("B", alpha_bw(fs, f0, bw)), ("A", alpha_slope(fs, f0, g, bw))):
+    for name, alpha in (("C", alpha_shelf(fs, f0, g, bw)), ("B", alpha_bw(fs, f0, bw)), ("A", alpha_slope(fs, f0, g, bw))):
         if ir_residual(h[:EQ_TAPS], rbj(kind, fs, f0, g, bw, alpha=alpha)) <= TOL_COEF:
             return name
     return "neither"
@@ -156,7 +175,54 @@ def classify_shelf(kind: str, fs: float, f0: float, g: float, bw: float, h: np.n
 
 def hp_gain_scale(fs: float, f0: float, bw: float, h: np.ndarray) -> float:
     """h[0] = b0 exactly, so the gain applied to an HPF band is h[0] / b0(G=1)."""
-    return float(h[0] / rbj("high_pass", fs, f0, 1.0, bw)[0])
+    return float(h[0] / rbj("high_pass", fs, f0, 1.0, bw, alpha=alpha_oct(fs, f0, bw))[0])
+
+
+def pan_direction_error(table: dict[float, tuple[float, float]]) -> float:
+    """Max deviation of atan2(gR, gL) from the sine-taper angle (p+1)*pi/4."""
+    return max(abs(math.atan2(r, l) - (p + 1) * math.pi / 4) for p, (l, r) in table.items())
+
+
+def pan_gain(table: dict[float, tuple[float, float]], pan: float) -> tuple[float, float]:
+    key = round(pan, 9)
+    if key not in table:
+        raise Fail(f"pan {pan} is not in the measured pan table")
+    return table[key]
+
+
+def downmix_error(y: np.ndarray, table: dict[float, tuple[float, float]], p: dict) -> float:
+    """Mono destination: channel 1 = vol * (gL*L + gR*R) / 2, channel 2 silent."""
+    k0, k2 = p["k"]
+    gl, gr = pan_gain(table, p["pan"])
+    ref = np.zeros_like(y)
+    if p["source"] == "st":
+        ref[k0, 0] = p["vol"] * gl * 0.5 / 2
+        ref[k2, 0] = p["vol"] * gr * 0.5 / 2
+    else:
+        ref[k0, 0] = p["vol"] * (gl + gr) * 0.5 / 2
+    return float(np.max(np.abs(y - ref)))
+
+
+def pan_table_error(y: np.ndarray, table: dict[float, tuple[float, float]], p: dict, fam: str, rate: int) -> float | None:
+    """Recomputes the expected taps of a pan-dependent case with the measured
+    pan gains instead of the +0 dB balance hypothesis (None: not such a case)."""
+    k0, k2 = rate // 100, rate // 50
+    ref = np.zeros_like(y)
+    if fam == "mono":
+        gl, gr = pan_gain(table, p["pan"])
+        ref[k0] = [0.5 * gl, 0.5 * gr]
+    elif fam == "pan" and p.get("what") in ("send_pan", "track_pan"):
+        gl, gr = pan_gain(table, p["pan"])
+        if p["source"] == "dm":
+            ref[k0] = [0.5 * gl, 0.5 * gr]
+        else:
+            ref[k0, 0], ref[k2, 1] = 0.5 * gl, 0.5 * gr
+    elif fam == "pan" and p.get("what") == "post_fader":
+        (tl, tr), (sl, sr) = pan_gain(table, p["track_pan"]), pan_gain(table, p["pan"])
+        ref[k0, 0], ref[k2, 1] = 0.5 * p["track_vol"] * tl * sl, 0.5 * p["track_vol"] * tr * sr
+    else:
+        return None
+    return float(np.max(np.abs(y - ref)))
 
 
 def fftconv(a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -206,6 +272,8 @@ def law(laws: dict, name: str, case: str, residual: float, tol: float = TOL_LINE
 def analyse(bundle: dict, renders: Path, stimuli: Path, out: Path, families: set[str] | None) -> dict:
     laws: dict = {}
     vec = Vectors(out)
+    pan_table: dict[float, tuple[float, float]] = {}
+    later: list[tuple[str, str, dict, int, np.ndarray]] = []   # pan-dependent cases, checked with the measured table
     for proj in bundle["projects"]:
         for case in proj["tracks"]:
             fam = case["family"]
@@ -222,6 +290,10 @@ def analyse(bundle: dict, renders: Path, stimuli: Path, out: Path, families: set
             if bits != 64:
                 continue   # 1e-9 comparisons need 64-bit renders (Task 13 fixes the config)
             k0 = rate // 100
+            if fam == "pan" and p.get("what") == "send_pan" and p.get("source") == "dm":
+                pan_table[round(p["pan"], 9)] = (float(y[k0, 0]) / 0.5, float(y[k0, 1]) / 0.5)
+            if fam in ("pan", "mono", "downmix"):
+                later.append((fam, name, p, rate, y))
             if case["expect"] is not None:
                 fam_law = {"pan": p.get("what", "pan"), "mute": "mute", "sum": "summing", "mono": "mono_media", "cal": "cal_" + str(p.get("case"))}.get(fam, fam)
                 law(laws, fam_law, name, oracle_error(y, case["expect"]), detail={"params": p, "measured": [taps(y, t["at"]) for t in case["expect"]]})
@@ -246,10 +318,10 @@ def analyse(bundle: dict, renders: Path, stimuli: Path, out: Path, families: set
                 hn = h[:EQ_TAPS]
                 kind, f0, g, bw = band["kind"], band["freq_hz"], band["gain_lin"], band["bw_oct"]
                 if kind == "band":
-                    law(laws, "peak_bw", name, ir_residual(hn, rbj("band", rate, f0, g, bw)), tol=TOL_COEF, detail={"coef": coef.tolist()})
+                    law(laws, "peak_bw", name, ir_residual(hn, rbj("band", rate, f0, g, bw, alpha=alpha_oct(rate, f0, bw))), tol=TOL_COEF, detail={"coef": coef.tolist()})
                 elif kind == "high_pass":
                     scale = hp_gain_scale(rate, f0, bw, hn)
-                    law(laws, "hp_bw", name, ir_residual(hn / scale, rbj("high_pass", rate, f0, 1.0, bw)), tol=TOL_COEF)
+                    law(laws, "hp_bw", name, ir_residual(hn / scale, rbj("high_pass", rate, f0, 1.0, bw, alpha=alpha_oct(rate, f0, bw))), tol=TOL_COEF)
                     laws.setdefault("hp_gain", {"verdict": "measured", "max_residual": 0.0, "cases": [], "detail": []})
                     laws["hp_gain"]["cases"].append(name)
                     laws["hp_gain"]["detail"].append({"gain_lin": g, "scale": scale})
@@ -282,6 +354,17 @@ def analyse(bundle: dict, renders: Path, stimuli: Path, out: Path, families: set
                 vec.add(f"lim-{rate}", name, y[:n], {"params": p})
                 law(laws, "limiter_ceiling", name, 0.0, detail={"peak": peak, "ceiling": ceiling})
     vec.close()
+    if pan_table:
+        laws["pan_law"] = {"verdict": "table (sine direction)" if pan_direction_error(pan_table) <= TOL_LINEAR else "table",
+                           "max_residual": pan_direction_error(pan_table), "cases": [f"send_pan dm {k}" for k in sorted(pan_table)],
+                           "detail": [{"pan": k, "gain_l": v[0], "gain_r": v[1]} for k, v in sorted(pan_table.items())]}
+        for fam, name, p, rate, y in later:
+            if fam == "downmix":
+                law(laws, "mono_downmix_half_sum", name, downmix_error(y, pan_table, p), detail={"params": p})
+                continue
+            err = pan_table_error(y, pan_table, p, fam, rate)
+            if err is not None:
+                law(laws, f"{'mono_media' if fam == 'mono' else p['what']}_with_pan_table", name, err)
     for key in ("shelf_bw",):
         entry = laws.get(key)
         if entry:
@@ -300,12 +383,21 @@ def analyse(bundle: dict, renders: Path, stimuli: Path, out: Path, families: set
     return laws
 
 
+LAW_NOTES = [
+    "`peak_bw`, `hp_bw`: RBJ biquads with alpha = sin(w0) * sinh(ln2/2 * bw * k), k = w0/sin(w0) for w0 <= pi/2, else pi/2 (`alpha_oct`).",
+    "`shelf_bw` candidate C: RBJ shelves with A = sqrt(gain) and slope S = min(1/bw^2, 1.2) (`alpha_shelf`); B = octave bandwidth, A = S from 1/bw.",
+    "`hp_gain` ignored: the HPF band's gain value has no effect.",
+    "`pan_law`: gains (gL, gR) have the exact sine-taper direction atan2(gR, gL) = (p+1)*pi/4; the magnitude is tabulated in `laws.json` (not +0 dB balance, not constant power). `*_with_pan_table` re-checks the pan-dependent cases with this table.",
+    "`mono_downmix_half_sum`: a mono destination (channel field 1024) gets vol * (gL*L + gR*R) / 2 on channel 1 and nothing on channel 2.",
+]
+
+
 def readme(laws: dict) -> str:
     rows = ["| Law | Verdict | Max residual | Cases |", "|---|---|---|---|"]
     for name in sorted(laws):
         e = laws[name]
         rows.append(f"| `{name}` | {e['verdict']} | {e['max_residual']:.3g} | {len(e['cases'])} |")
-    return "\n".join(["# S1b goldens", "", "Measured on the IEM PC's REAPER 7.65 (offline renders, D7). Generated by `scripts/golden/analyze.py`; vectors are float64 little-endian, offsets in `index.json`.", "", *rows, "", "## Not covered by offline renders", "", *[f"- {r}" for r in RESIDUALS], ""])
+    return "\n".join(["# S1b goldens", "", "Measured on the IEM PC's REAPER 7.65 (offline renders, D7). Generated by `scripts/golden/analyze.py`; vectors are float64 little-endian, offsets in `index.json`.", "", *rows, "", "## Formulas", "", *[f"- {n}" for n in LAW_NOTES], "", "## Not covered by offline renders", "", *[f"- {r}" for r in RESIDUALS], ""])
 
 
 def main(argv: list[str]) -> int:
