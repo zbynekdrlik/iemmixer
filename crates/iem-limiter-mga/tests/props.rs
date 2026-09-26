@@ -87,3 +87,22 @@ fn fuzz_the_limiter_never_amplifies_and_holds_its_limit() {
         }
     }
 }
+
+#[test]
+fn a_disabled_limiter_is_bit_exact_dry_after_its_fade() {
+    // Regression: the fade once accumulated `wet -= 1/n` and ended at ~1e-16, not 0.
+    let mut rng = Rng(env("IEM_FUZZ_SEED", 0x11_2026) | 1);
+    for sr in [44_100.0, 48_000.0, 96_000.0] {
+        let mut lim = Limiter::new(sr, -6.0);
+        lim.set_enabled(false);
+        let fade = (sr / 100.0f64).round() as usize;
+        let (mut l, mut r): (Vec<f64>, Vec<f64>) = (0..fade + 500)
+            .map(|_| (rng.range(-4.0, 4.0), rng.range(-4.0, 4.0)))
+            .unzip();
+        let (xl, xr) = (l.clone(), r.clone());
+        lim.process(&mut l, &mut r);
+        assert_eq!(&l[fade..], &xl[fade..], "{sr}");
+        assert_eq!(&r[fade..], &xr[fade..], "{sr}");
+        assert_ne!(&l[..fade], &xl[..fade]);
+    }
+}
