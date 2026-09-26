@@ -16,7 +16,7 @@ WORKFLOW_FORBIDDEN = re.compile(r"continue-on-error|self-hosted|pull_request_tar
 USES = re.compile(r"^\s*-?\s*uses:\s*(\S+)")
 PINNED = re.compile(r"^[^@\s]+@[0-9a-f]{40}$")
 FORCE_KILL = re.compile(r"(?i)\btaskkill\b|terminateprocess|stop-process|\bshutdown(?:\.exe)?\s+/f\b")
-CODE_SUFFIXES = (".rs", ".ts", ".js", ".py", ".sh", ".ps1", ".yml", ".yaml", ".toml")
+CODE_SUFFIXES = (".rs", ".ts", ".js", ".py", ".sh", ".ps1", ".psm1", ".yml", ".yaml", ".toml")
 
 
 def files(root: Path, base: str, suffixes: tuple[str, ...]) -> list[Path]:

@@ -54,6 +54,12 @@ class IntegrityTests(unittest.TestCase):
         self.put("scripts/stop.ps1", "taskkill /F /IM engine.exe\n")
         self.assertEqual(len(ci.violations(self.root)), 1)
 
+    def test_force_kill_in_a_powershell_module_is_found(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "scripts" / "golden").mkdir(parents=True)
+            (root / "scripts" / "golden" / "M.psm1").write_text("function X { Stop-Process -Id 1 }\n", encoding="utf-8")
+            self.assertEqual(ci.violations(root), ["scripts/golden/M.psm1:1: force-kill command (program spec I8)"])
 
 if __name__ == "__main__":
     unittest.main()
