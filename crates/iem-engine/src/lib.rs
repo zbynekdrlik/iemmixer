@@ -15,6 +15,9 @@
 //! GPL-3.0-or-later: the engine links the MGA limiter port (D1).
 
 #![forbid(unsafe_code)]
+// The rtsan CI job (nightly, `--cfg iem_rtsan`) marks `Processor::process`
+// as a real-time context (design note §3.8).
+#![cfg_attr(iem_rtsan, feature(sanitize))]
 #![cfg_attr(
     not(test),
     deny(
