@@ -11,11 +11,11 @@ use iem_audio_io::{Offline, Planar};
 use iem_engine::MAX_CMDS_PER_BLOCK;
 use iem_engine::cmd::push_group;
 use iem_engine::core::{Core, Flags};
-use iem_engine::graph::Graph;
 use iem_engine::rt::{Options, Processor};
+use iem_engine::topology::Topology;
 use iem_engine_proto::{
-    BandKind, BusId, BusState, ClientMsg, Cmd, Eq, EqOwner, InputId, InputState, Limiter, MixState,
-    SendEntry, SendId, SendState, Source, parse_client,
+    BandKind, ClientMsg, Cmd, Eq, EqTarget, GroupId, InputId, InputState, Level, Limiter, Mix,
+    MixGroup, MixId, MixOut, MixState, Source, parse_client,
 };
 
 struct Rng(u64);
@@ -75,7 +75,7 @@ fn flag(rng: &mut Rng) -> Option<bool> {
     rng.chance(0.5).then(|| rng.chance(0.5))
 }
 
-fn input_id(rng: &mut Rng, g: &Graph) -> InputId {
+fn input_id(rng: &mut Rng, g: &Topology) -> InputId {
     if rng.chance(0.05) {
         InputId::new(["", "ghost", "MIC1", "x".repeat(300).as_str()][rng.below(4)])
     } else {
@@ -83,12 +83,16 @@ fn input_id(rng: &mut Rng, g: &Graph) -> InputId {
     }
 }
 
-fn bus_id(rng: &mut Rng, g: &Graph) -> BusId {
+fn mix_id(rng: &mut Rng, g: &Topology) -> MixId {
     if rng.chance(0.05) {
-        BusId::new(["", "ghost", "Member1"][rng.below(3)])
+        MixId::new(["", "ghost", "Member1", "stems"][rng.below(4)])
     } else {
-        g.buses[rng.below(g.buses.len())].id.clone()
+        g.mixes[rng.below(g.mixes.len())].id.clone()
     }
+}
+
+fn group_id(rng: &mut Rng) -> GroupId {
+    GroupId::new(if rng.chance(0.9) { "stems" } else { "ghost" })
 }
 
 fn eq(rng: &mut Rng) -> Eq {
@@ -109,33 +113,37 @@ fn eq(rng: &mut Rng) -> Eq {
     e
 }
 
-fn source(rng: &mut Rng, g: &Graph) -> Source {
+fn source(rng: &mut Rng, g: &Topology) -> Source {
     if rng.chance(0.3) {
-        Source::Bus(bus_id(rng, g))
+        Source::Mix(mix_id(rng, g))
     } else {
         Source::Input(input_id(rng, g))
     }
 }
 
-fn random_state(rng: &mut Rng, g: &Graph) -> MixState {
+fn level(rng: &mut Rng) -> Level {
+    Level {
+        gain_db: value(rng),
+        pan: value(rng),
+        muted: rng.chance(0.3),
+    }
+}
+
+fn random_state(rng: &mut Rng, g: &Topology) -> MixState {
     let mut s = MixState::default();
     for _ in 0..rng.below(30) {
         s.inputs.insert(
             input_id(rng, g),
             InputState {
                 trim_db: value(rng),
-                fader_db: value(rng),
-                pan: value(rng),
                 muted: rng.chance(0.3),
                 processing: rng.chance(0.5),
                 eq: eq(rng),
             },
         );
-        s.buses.insert(
-            bus_id(rng, g),
-            BusState {
-                fader_db: value(rng),
-                pan: value(rng),
+        let mut mix = Mix {
+            out: MixOut {
+                volume_db: value(rng),
                 muted: rng.chance(0.3),
                 eq: eq(rng),
                 limiter: Limiter {
@@ -143,73 +151,73 @@ fn random_state(rng: &mut Rng, g: &Graph) -> MixState {
                     limit_db: value(rng),
                 },
             },
-        );
-        s.sends.push(SendEntry {
-            id: g.sends[rng.below(g.sends.len())].id.clone(),
-            state: SendState {
+            ..Mix::default()
+        };
+        for _ in 0..rng.below(8) {
+            mix.inputs.insert(input_id(rng, g), level(rng));
+            mix.mixes.insert(mix_id(rng, g), level(rng));
+        }
+        mix.groups.insert(
+            group_id(rng),
+            MixGroup {
                 gain_db: value(rng),
-                pan: value(rng),
                 muted: rng.chance(0.3),
+                eq: eq(rng),
             },
-        });
+        );
+        s.mixes.insert(mix_id(rng, g), mix);
     }
     s
 }
 
-fn command(rng: &mut Rng, g: &Graph, depth: u32) -> Cmd {
-    match rng.below(if depth > 0 { 14 } else { 15 }) {
+fn command(rng: &mut Rng, g: &Topology, depth: u32) -> Cmd {
+    match rng.below(if depth > 0 { 15 } else { 16 }) {
         0 => Cmd::SetInput {
             input: input_id(rng, g),
             trim_db: opt(rng),
             muted: flag(rng),
             processing: flag(rng),
-            fader_db: opt(rng),
-            pan: opt(rng),
         },
-        1 => Cmd::SetBus {
-            bus: bus_id(rng, g),
-            fader_db: opt(rng),
-            pan: opt(rng),
+        1 => Cmd::SetMix {
+            mix: mix_id(rng, g),
+            volume_db: opt(rng),
             muted: flag(rng),
         },
-        2 | 3 => Cmd::SetSend {
-            id: if rng.chance(0.9) {
-                g.sends[rng.below(g.sends.len())].id.clone()
-            } else {
-                SendId {
-                    src: source(rng, g),
-                    dst: bus_id(rng, g),
-                }
-            },
+        2 | 3 => Cmd::SetLevel {
+            mix: mix_id(rng, g),
+            source: source(rng, g),
             gain_db: opt(rng),
             pan: opt(rng),
             muted: flag(rng),
         },
         4 => Cmd::SetEq {
-            owner: if rng.chance(0.5) {
-                EqOwner::Input(input_id(rng, g))
-            } else {
-                EqOwner::Bus(bus_id(rng, g))
+            target: match rng.below(3) {
+                0 => EqTarget::Input(input_id(rng, g)),
+                1 => EqTarget::Mix(mix_id(rng, g)),
+                _ => EqTarget::Group {
+                    mix: mix_id(rng, g),
+                    group: group_id(rng),
+                },
             },
             eq: eq(rng),
         },
         5 => Cmd::SetLimiter {
-            bus: bus_id(rng, g),
+            mix: mix_id(rng, g),
             enabled: flag(rng),
             limit_db: opt(rng),
         },
         6 => Cmd::ResetLimiterStats {
-            bus: bus_id(rng, g),
+            mix: mix_id(rng, g),
         },
         7 => Cmd::SetSolo {
-            scope: bus_id(rng, g),
+            mix: mix_id(rng, g),
             sources: (0..rng.below(4)).map(|_| source(rng, g)).collect(),
         },
         8 => Cmd::StartListen {
-            bus: bus_id(rng, g),
+            mix: mix_id(rng, g),
         },
         9 => Cmd::StopListen {
-            bus: bus_id(rng, g),
+            mix: mix_id(rng, g),
         },
         10 => Cmd::StartTestSignal {
             input: input_id(rng, g),
@@ -223,6 +231,12 @@ fn command(rng: &mut Rng, g: &Graph, depth: u32) -> Cmd {
             baseline: rng.chance(0.5),
         },
         13 => [Cmd::GetState, Cmd::Ping, Cmd::SaveNow, Cmd::InjectFault][rng.below(4)].clone(),
+        14 => Cmd::SetGroup {
+            mix: mix_id(rng, g),
+            group: group_id(rng),
+            gain_db: opt(rng),
+            muted: flag(rng),
+        },
         _ => Cmd::Batch {
             ops: (0..rng.below(8))
                 .map(|_| command(rng, g, depth + 1))
@@ -256,40 +270,47 @@ fn in_range(v: f64, lo: f64, hi: f64) -> bool {
     v.is_finite() && v >= lo && v <= hi
 }
 
+fn assert_level_capped(what: &str, l: &Level) {
+    assert!(
+        in_range(l.gain_db, -150.0, 12.0),
+        "{what} gain {}",
+        l.gain_db
+    );
+    assert!(in_range(l.pan, -1.0, 1.0), "{what} pan {}", l.pan);
+}
+
 fn assert_capped(core: &Core) {
     let s = core.state();
     for (id, i) in &s.inputs {
         assert!(in_range(i.trim_db, -150.0, 24.0), "{id} trim {}", i.trim_db);
-        assert!(
-            in_range(i.fader_db, -150.0, 12.0),
-            "{id} fader {}",
-            i.fader_db
-        );
-        assert!(in_range(i.pan, -1.0, 1.0), "{id} pan {}", i.pan);
         assert_eq_capped(&i.eq);
     }
-    for (id, b) in &s.buses {
+    for (id, m) in &s.mixes {
         assert!(
-            in_range(b.fader_db, -150.0, 12.0),
-            "{id} fader {}",
-            b.fader_db
+            in_range(m.out.volume_db, -150.0, 12.0),
+            "{id} volume {}",
+            m.out.volume_db
         );
-        assert!(in_range(b.pan, -1.0, 1.0));
         assert!(
-            in_range(b.limiter.limit_db, -6.0, 0.0),
+            in_range(m.out.limiter.limit_db, -6.0, 0.0),
             "{id} limit {}",
-            b.limiter.limit_db
+            m.out.limiter.limit_db
         );
-        assert_eq_capped(&b.eq);
-    }
-    for e in &s.sends {
-        assert!(
-            in_range(e.state.gain_db, -150.0, 12.0),
-            "{} {}",
-            e.id,
-            e.state.gain_db
-        );
-        assert!(in_range(e.state.pan, -1.0, 1.0));
+        assert_eq_capped(&m.out.eq);
+        for (src, l) in &m.inputs {
+            assert_level_capped(&format!("{id} {src}"), l);
+        }
+        for (src, l) in &m.mixes {
+            assert_level_capped(&format!("{id} {src}"), l);
+        }
+        for (g, strip) in &m.groups {
+            assert!(
+                in_range(strip.gain_db, -150.0, 12.0),
+                "{id} {g} {}",
+                strip.gain_db
+            );
+            assert_eq_capped(&strip.eq);
+        }
     }
     let t = core.transient();
     if let Some(ts) = t.test_signal {
@@ -309,7 +330,7 @@ fn assert_eq_capped(e: &Eq) {
 
 #[test]
 fn random_requests_never_panic_and_keep_state_in_caps() {
-    let g = common::graph();
+    let g = common::topology();
     let mut rng = Rng(env("IEM_FUZZ_SEED", 0x5eed_0003) | 1);
     let iters = env("IEM_FUZZ_ITERS", 2_000);
     let flags = Flags {
@@ -364,7 +385,7 @@ fn random_requests_never_panic_and_keep_state_in_caps() {
 
 #[test]
 fn random_command_groups_render_finite_bounded_output() {
-    let g = common::graph();
+    let g = common::topology();
     let mut rng = Rng(env("IEM_FUZZ_SEED", 0x5eed_0004) | 1);
     let blocks = env("IEM_FUZZ_ITERS", 2_000) / 10;
     let flags = Flags {

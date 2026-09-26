@@ -1,12 +1,12 @@
 //! Cross-check of the predecessor's newest backup JSON (v1) against an
-//! imported project (S4 design note §3.2). Names must map; differing values
-//! are reported, never applied: the project saved at switch time is newer.
+//! imported project (S4 design note §3.2, #20 design note §7). Names must be
+//! the project's tracks; differing values are reported, never applied: the
+//! project saved at switch time is newer.
 
 use iem_core::{EqBandBackup, MixerBackup};
-use iem_engine_proto::{BusId, InputId, SendId, Source, db_to_lin};
+use iem_engine_proto::{Level, Source, db_to_lin};
 
-use crate::aliases::Aliases;
-use crate::import::{Imported, Problems};
+use crate::import::{Imported, Place, Problems};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Check {
@@ -21,16 +21,6 @@ fn same_f32(a: f64, b: f64) -> bool {
     (a - b).abs() <= 1e-6 * a.abs().max(b.abs()).max(1.0)
 }
 
-fn source(imp: &Imported, aliases: &Aliases, name: &str) -> Option<Source> {
-    let id = aliases.tracks.get(name)?;
-    let input = InputId::new(id.clone());
-    if imp.topology.input(&input).is_some() {
-        return Some(Source::Input(input));
-    }
-    let bus = BusId::new(id.clone());
-    imp.topology.bus(&bus).map(|_| Source::Bus(bus))
-}
-
 fn eq_type(kind: &str) -> Option<iem_engine_proto::BandKind> {
     use iem_engine_proto::BandKind as K;
     match kind {
@@ -42,20 +32,26 @@ fn eq_type(kind: &str) -> Option<iem_engine_proto::BandKind> {
     }
 }
 
+/// A group strip's link into its mix: unity, centred, unmuted.
+const LINK: Level = Level {
+    gain_db: 0.0,
+    pan: 0.0,
+    muted: false,
+};
+
 struct Run<'a> {
     imp: &'a Imported,
-    aliases: &'a Aliases,
     check: Check,
     unknown: Vec<String>,
 }
 
 impl Run<'_> {
-    fn source(&mut self, name: &str) -> Option<Source> {
-        let s = source(self.imp, self.aliases, name);
-        if s.is_none() && !self.unknown.iter().any(|u| u == name) {
+    fn place(&mut self, name: &str) -> Option<Place> {
+        let p = self.imp.place(name).cloned();
+        if p.is_none() && !self.unknown.iter().any(|u| u == name) {
             self.unknown.push(name.to_owned());
         }
-        s
+        p
     }
 
     fn note(
@@ -109,15 +105,19 @@ impl Run<'_> {
     }
 }
 
-/// Compares `backup` with `imp` (both through `aliases`).
-pub fn cross_check(
-    backup: &MixerBackup,
-    imp: &Imported,
-    aliases: &Aliases,
-) -> Result<Check, Problems> {
+/// The project names and what they became, as `who` for reports.
+fn who(p: &Place) -> String {
+    match p {
+        Place::Input(id) => format!("input {id}"),
+        Place::Mix(id) => format!("mix {id}"),
+        Place::Group { group, mix } => format!("mix {mix} group {group}"),
+    }
+}
+
+/// Compares `backup` with `imp` by the project's track names.
+pub fn cross_check(backup: &MixerBackup, imp: &Imported) -> Result<Check, Problems> {
     let mut r = Run {
         imp,
-        aliases,
         check: Check::default(),
         unknown: Vec::new(),
     };
@@ -129,120 +129,117 @@ pub fn cross_check(
             .then_with(|| a.dest_name.cmp(&b.dest_name))
     });
     for s in sends {
-        let (Some(src), Some(dst)) = (r.source(&s.src_name), r.source(&s.dest_name)) else {
+        let (Some(src), Some(dst)) = (r.place(&s.src_name), r.place(&s.dest_name)) else {
             continue;
         };
-        let Source::Bus(dst) = dst else {
-            missing.push(format!(
-                "send {:?} → {:?}: the destination is an input",
-                s.src_name, s.dest_name
-            ));
+        let (source, mix) = match (&src, &dst) {
+            (Place::Input(i), Place::Mix(m) | Place::Group { mix: m, .. }) => {
+                (Source::Input(i.clone()), m.clone())
+            }
+            (Place::Mix(h), Place::Mix(m)) => (Source::Mix(h.clone()), m.clone()),
+            (Place::Group { mix: into, .. }, Place::Mix(m)) if into == m => {
+                let w = format!("{} link", who(&src));
+                r.note(&w, "volume", same_f32(s.vol, 1.0), s.vol, 1.0);
+                r.note(&w, "pan", same_f32(s.pan, LINK.pan), s.pan, LINK.pan);
+                r.note(&w, "mute", s.mute == LINK.muted, s.mute, LINK.muted);
+                continue;
+            }
+            _ => {
+                missing.push(format!(
+                    "send {:?} → {:?}: not a level of the engine's model",
+                    s.src_name, s.dest_name
+                ));
+                continue;
+            }
+        };
+        let Some(l) = imp.state.mixes.get(&mix).and_then(|x| x.level(&source)) else {
+            missing.push(format!("level {source} in {mix} is not in the project"));
             continue;
         };
-        let id = SendId { src, dst };
-        let Some(st) = imp.state.sends.iter().find(|e| e.id == id).map(|e| e.state) else {
-            missing.push(format!("send {id} is not in the project"));
-            continue;
-        };
-        let who = format!("send {id}");
-        let lin = db_to_lin(st.gain_db);
-        r.note(&who, "volume", same_f32(s.vol, lin), s.vol, lin);
-        r.note(&who, "pan", same_f32(s.pan, st.pan), s.pan, st.pan);
-        r.note(&who, "mute", s.mute == st.muted, s.mute, st.muted);
+        let w = format!("mix {mix} level {source}");
+        let lin = db_to_lin(l.gain_db);
+        r.note(&w, "volume", same_f32(s.vol, lin), s.vol, lin);
+        r.note(&w, "pan", same_f32(s.pan, l.pan), s.pan, l.pan);
+        r.note(&w, "mute", s.mute == l.muted, s.mute, l.muted);
     }
     let mut mutes: Vec<_> = backup.track_mutes.iter().collect();
     mutes.sort();
     for (name, muted) in mutes {
-        match r.source(name) {
-            Some(Source::Input(id)) => {
-                let v = imp.state.inputs.get(&id).map(|s| s.muted);
-                r.note(
-                    &format!("input {id}"),
-                    "mute",
-                    v == Some(*muted),
-                    muted,
-                    v.unwrap_or_default(),
-                );
-            }
-            Some(Source::Bus(id)) => {
-                let v = imp.state.buses.get(&id).map(|s| s.muted);
-                r.note(
-                    &format!("bus {id}"),
-                    "mute",
-                    v == Some(*muted),
-                    muted,
-                    v.unwrap_or_default(),
-                );
-            }
-            None => {}
-        }
+        let Some(p) = r.place(name) else { continue };
+        let v = match &p {
+            Place::Input(id) => imp.state.inputs.get(id).map(|s| s.muted),
+            Place::Mix(id) => imp.state.mixes.get(id).map(|m| m.out.muted),
+            Place::Group { group, mix } => imp
+                .state
+                .mixes
+                .get(mix)
+                .and_then(|m| m.groups.get(group))
+                .map(|g| g.muted),
+        };
+        r.note(
+            &who(&p),
+            "mute",
+            v == Some(*muted),
+            muted,
+            v.unwrap_or_default(),
+        );
     }
     let mut volumes: Vec<_> = backup.track_volumes.iter().collect();
     volumes.sort_by_key(|a| a.0);
     for (name, vol) in volumes {
-        match r.source(name) {
-            Some(Source::Bus(id)) => {
-                let lin = imp
-                    .state
-                    .buses
-                    .get(&id)
-                    .map_or(0.0, |s| db_to_lin(s.fader_db));
-                r.note(
-                    &format!("bus {id}"),
-                    "volume",
-                    same_f32(*vol, lin),
-                    vol,
-                    lin,
-                );
+        let Some(p) = r.place(name) else { continue };
+        let db = match &p {
+            Place::Mix(id) => imp.state.mixes.get(id).map(|m| m.out.volume_db),
+            Place::Group { group, mix } => imp
+                .state
+                .mixes
+                .get(mix)
+                .and_then(|m| m.groups.get(group))
+                .map(|g| g.gain_db),
+            Place::Input(id) => {
+                missing.push(format!(
+                    "track volume of input {id} (only mixes and group strips are captured)"
+                ));
+                continue;
             }
-            Some(Source::Input(id)) => missing.push(format!(
-                "track volume of input {id} (only buses are captured)"
-            )),
-            None => {}
-        }
+        };
+        let lin = db.map_or(0.0, db_to_lin);
+        r.note(&who(&p), "volume", same_f32(*vol, lin), vol, lin);
     }
     let mut eqs: Vec<_> = backup.eq.iter().collect();
     eqs.sort_by_key(|a| a.0);
     for (name, bands) in eqs {
-        match r.source(name) {
-            Some(Source::Input(id)) => {
-                if let Some(s) = imp.state.inputs.get(&id) {
-                    let eq = s.eq;
-                    r.eq_bands(&format!("input {id}"), &eq, bands);
-                }
-            }
-            Some(Source::Bus(id)) => {
-                if let Some(s) = imp.state.buses.get(&id) {
-                    let eq = s.eq;
-                    r.eq_bands(&format!("bus {id}"), &eq, bands);
-                }
-            }
-            None => {}
+        let Some(p) = r.place(name) else { continue };
+        let eq = match &p {
+            Place::Input(id) => imp.state.inputs.get(id).map(|s| s.eq),
+            Place::Mix(id) => imp.state.mixes.get(id).map(|m| m.out.eq),
+            Place::Group { group, mix } => imp
+                .state
+                .mixes
+                .get(mix)
+                .and_then(|m| m.groups.get(group))
+                .map(|g| g.eq),
+        };
+        if let Some(eq) = eq {
+            r.eq_bands(&who(&p), &eq, bands);
         }
     }
     let mut limiters: Vec<_> = backup.limiter.iter().collect();
     limiters.sort_by_key(|a| a.0);
     for (name, lim) in limiters {
-        match r.source(name) {
-            Some(Source::Bus(id)) => {
-                let Some(s) = imp.state.buses.get(&id) else {
-                    continue;
-                };
-                let (limit, enabled) = (s.limiter.limit_db, s.limiter.enabled);
-                let who = format!("bus {id}");
-                let l = f64::from(lim.limit_db);
-                r.note(&who, "limit dB", (l - limit).abs() <= 0.01, l, limit);
-                r.note(
-                    &who,
-                    "limiter",
-                    lim.enabled == enabled,
-                    lim.enabled,
-                    enabled,
-                );
-            }
-            Some(Source::Input(id)) => missing.push(format!("limiter on input {id}")),
-            None => {}
-        }
+        let Some(p) = r.place(name) else { continue };
+        let Place::Mix(id) = &p else {
+            missing.push(format!("limiter on {}", who(&p)));
+            continue;
+        };
+        let Some(m) = imp.state.mixes.get(id) else {
+            continue;
+        };
+        let (limit, enabled) = (m.out.limiter.limit_db, m.out.limiter.enabled);
+        let w = who(&p);
+        let l = f64::from(lim.limit_db);
+        r.note(&w, "limit dB", (l - limit).abs() <= 0.01, l, limit);
+        r.note(&w, "limiter", lim.enabled == enabled, lim.enabled, enabled);
     }
     let mut problems = missing;
     if !r.unknown.is_empty() {
@@ -250,7 +247,7 @@ pub fn cross_check(
         problems.insert(
             0,
             format!(
-                "backup names missing from the aliases: {}",
+                "backup names missing from the project: {}",
                 names.join(", ")
             ),
         );
@@ -267,29 +264,38 @@ mod tests {
     use std::collections::BTreeMap;
 
     use iem_core::{LimiterBackup, SendBackup};
+    use iem_engine_proto::{InputId, MixId};
 
     use super::*;
     use crate::aliases::parse_aliases;
     use crate::import::import;
     use crate::legacy::LegacyProject;
-    use crate::sitegen::{aliases_toml, project, sample_state, synthetic_site, track_name};
+    use crate::sitegen::{
+        aliases_toml, instance_name, project, sample_state, synthetic_routing, synthetic_site,
+        track_name,
+    };
 
-    fn setup() -> (Imported, Aliases) {
+    fn setup() -> Imported {
         let topo = synthetic_site();
-        let text = project(&topo, &sample_state(&topo, 31), &track_name).unwrap();
-        let aliases = parse_aliases(&aliases_toml(&topo, &BTreeMap::new())).unwrap();
-        (
-            import(&LegacyProject::parse(&text).unwrap(), &aliases).unwrap(),
-            aliases,
+        let routing = synthetic_routing(&topo);
+        let text = project(
+            &topo,
+            &routing,
+            &sample_state(&topo, &routing, 31),
+            &track_name,
         )
+        .unwrap();
+        let aliases = parse_aliases(&aliases_toml(&topo, &routing, &BTreeMap::new())).unwrap();
+        import(&LegacyProject::parse(&text).unwrap(), &aliases).unwrap()
     }
 
-    /// The first send that is not off.
-    fn on_send(imp: &Imported) -> usize {
-        imp.state
-            .sends
+    /// The first level of member1 that is not off.
+    fn on_level(imp: &Imported) -> (InputId, Level) {
+        imp.state.mixes[&MixId::new("member1")]
+            .inputs
             .iter()
-            .position(|e| e.state.gain_db > -100.0)
+            .find(|(_, l)| l.gain_db > -100.0)
+            .map(|(i, l)| (i.clone(), *l))
             .unwrap()
     }
 
@@ -299,15 +305,24 @@ mod tests {
             version: 1,
             ..MixerBackup::default()
         };
-        let e = &imp.state.sends[on_send(imp)];
+        let (i, l) = on_level(imp);
+        let grouped = imp.topology.group_of(&i).is_some();
+        let dest = if grouped {
+            instance_name(
+                &MixId::new("member1"),
+                &iem_engine_proto::GroupId::new("stems"),
+            )
+        } else {
+            "member1".to_owned()
+        };
         b.sends.push(SendBackup {
-            src_name: track_name(&e.id.src.to_string()),
-            dest_name: track_name(&e.id.dst.0),
-            vol: f64::from(db_to_lin(e.state.gain_db) as f32),
-            pan: f64::from(e.state.pan as f32),
-            mute: e.state.muted,
+            src_name: track_name(&i.0),
+            dest_name: track_name(&dest),
+            vol: f64::from(db_to_lin(l.gain_db) as f32),
+            pan: f64::from(l.pan as f32),
+            mute: l.muted,
         });
-        let m1 = &imp.state.buses[&BusId::new("member1")];
+        let m1 = &imp.state.mixes[&MixId::new("member1")].out;
         b.track_mutes.insert(track_name("member1"), m1.muted);
         b.track_mutes.insert(
             track_name("mic1"),
@@ -315,7 +330,7 @@ mod tests {
         );
         b.track_volumes.insert(
             track_name("member1"),
-            f64::from(db_to_lin(m1.fader_db) as f32),
+            f64::from(db_to_lin(m1.volume_db) as f32),
         );
         b.limiter.insert(
             track_name("member1"),
@@ -345,15 +360,15 @@ mod tests {
 
     #[test]
     fn an_agreeing_backup_compares_clean() {
-        let (imp, aliases) = setup();
-        let c = cross_check(&agreeing(&imp), &imp, &aliases).unwrap();
+        let imp = setup();
+        let c = cross_check(&agreeing(&imp), &imp).unwrap();
         assert_eq!(c.differing, Vec::<String>::new());
         assert_eq!(c.compared, 3 + 2 + 1 + 2 + 5);
     }
 
     #[test]
     fn changed_values_are_reported_not_applied() {
-        let (imp, aliases) = setup();
+        let imp = setup();
         let mut b = agreeing(&imp);
         b.sends[0].mute ^= true;
         b.sends[0].vol *= 2.0;
@@ -363,29 +378,64 @@ mod tests {
         b.limiter.get_mut(&name).unwrap().enabled ^= true;
         b.eq.get_mut(&name).unwrap()[0].band_type = "band".into();
         b.eq.get_mut(&name).unwrap()[0].gain_db += 1.0;
-        let c = cross_check(&b, &imp, &aliases).unwrap();
+        let c = cross_check(&b, &imp).unwrap();
         assert_eq!(c.differing.len(), 7, "{:#?}", c.differing);
-        let id = &imp.state.sends[on_send(&imp)].id;
+        let (i, _) = on_level(&imp);
         assert!(
             c.differing
                 .iter()
-                .any(|d| d.starts_with(&format!("send {id}: mute ")))
+                .any(|d| d.starts_with(&format!("mix member1 level {i}: mute ")))
         );
         assert!(
             c.differing
                 .iter()
-                .any(|d| d.starts_with("bus member1 EQ band 2: type band in the backup"))
+                .any(|d| d.starts_with("mix member1 EQ band 2: type band in the backup"))
         );
     }
 
     #[test]
-    fn unknown_names_and_missing_sends_fail() {
-        let (imp, aliases) = setup();
+    fn group_strips_and_their_links_compare() {
+        let imp = setup();
+        let strip = track_name(&instance_name(
+            &MixId::new("member3"),
+            &iem_engine_proto::GroupId::new("stems"),
+        ));
+        let g = imp.state.mixes[&MixId::new("member3")].groups
+            [&iem_engine_proto::GroupId::new("stems")];
+        let mut b = MixerBackup::default();
+        b.track_volumes
+            .insert(strip.clone(), f64::from(db_to_lin(g.gain_db) as f32));
+        b.track_mutes.insert(strip.clone(), !g.muted);
+        b.sends.push(SendBackup {
+            src_name: strip.clone(),
+            dest_name: track_name("member3"),
+            vol: 1.0,
+            pan: 0.0,
+            mute: false,
+        });
+        let c = cross_check(&b, &imp).unwrap();
+        assert_eq!(c.compared, 1 + 1 + 3);
+        assert_eq!(c.differing.len(), 1, "{:#?}", c.differing);
+        assert!(c.differing[0].starts_with("mix member3 group stems: mute "));
+        b.sends[0].vol = 0.5;
+        let c = cross_check(&b, &imp).unwrap();
+        assert!(
+            c.differing
+                .iter()
+                .any(|d| d.starts_with("mix member3 group stems link: volume 0.5")),
+            "{:#?}",
+            c.differing
+        );
+    }
+
+    #[test]
+    fn unknown_names_and_sends_outside_the_model_fail() {
+        let imp = setup();
         let mut b = agreeing(&imp);
         b.track_mutes.insert("GONE".into(), false);
         b.sends.push(SendBackup {
-            src_name: track_name("member1"),
-            dest_name: track_name("member2"),
+            src_name: track_name("member2"),
+            dest_name: track_name("member3"),
             vol: 1.0,
             pan: 0.0,
             mute: false,
@@ -406,11 +456,11 @@ mod tests {
                 enabled: true,
             },
         );
-        let err = cross_check(&b, &imp, &aliases).unwrap_err().0;
-        assert_eq!(err[0], "backup names missing from the aliases: \"GONE\"");
+        let err = cross_check(&b, &imp).unwrap_err().0;
+        assert_eq!(err[0], "backup names missing from the project: \"GONE\"");
         for want in [
-            "send member1>member2 is not in the project",
-            "the destination is an input",
+            "level member2 in member3 is not in the project",
+            "not a level of the engine's model",
             "track volume of input mic2",
             "limiter on input mic2",
         ] {
@@ -441,10 +491,9 @@ mod tests {
 
     #[test]
     fn eq_band_gains_and_frequencies_compare_within_their_tolerances() {
-        let (imp, aliases) = setup();
+        let imp = setup();
         let mut r = Run {
             imp: &imp,
-            aliases: &aliases,
             check: Check::default(),
             unknown: Vec::new(),
         };
@@ -504,19 +553,62 @@ mod tests {
                 .collect();
             assert_eq!(r.check.differing, want, "case {i}");
         }
+        let short = iem_engine_proto::Eq::default();
+        r.check = Check::default();
+        let band = EqBandBackup {
+            band: 7,
+            band_type: "band".into(),
+            freq_norm: 0.0,
+            gain_norm: 0.0,
+            bw_norm: 0.0,
+            freq_hz: 1.0,
+            gain_db: 0.0,
+            bw_oct: 1.0,
+            enabled: true,
+        };
+        r.eq_bands("y", &short, &[band]);
+        assert_eq!(
+            r.check.differing,
+            vec!["y: EQ band 8 does not exist".to_owned()]
+        );
     }
 
     #[test]
     fn each_unknown_name_is_listed_once() {
-        let (imp, aliases) = setup();
+        let imp = setup();
         let mut b = agreeing(&imp);
         b.track_mutes.insert("GONE".into(), false);
         b.track_volumes.insert("GONE".into(), 1.0);
         b.eq.insert("LOST".into(), Vec::new());
-        let err = cross_check(&b, &imp, &aliases).unwrap_err().0;
+        let err = cross_check(&b, &imp).unwrap_err().0;
         assert_eq!(
             err,
-            vec!["backup names missing from the aliases: \"GONE\", \"LOST\"".to_owned()]
+            vec!["backup names missing from the project: \"GONE\", \"LOST\"".to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_group_strip_links_only_into_its_own_mix() {
+        let imp = setup();
+        let strip = track_name(&instance_name(
+            &MixId::new("member1"),
+            &iem_engine_proto::GroupId::new("stems"),
+        ));
+        let mut b = MixerBackup::default();
+        b.sends.push(SendBackup {
+            src_name: strip.clone(),
+            dest_name: track_name("member3"),
+            vol: 1.0,
+            pan: 0.0,
+            mute: false,
+        });
+        let err = cross_check(&b, &imp).unwrap_err().0;
+        assert_eq!(
+            err,
+            vec![format!(
+                "send {strip:?} → {:?}: not a level of the engine's model",
+                track_name("member3")
+            )]
         );
     }
 }

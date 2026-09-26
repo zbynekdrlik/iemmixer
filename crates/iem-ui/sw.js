@@ -3,8 +3,10 @@
 // index.html and unhashed files are NEVER cached in SW (caused blank pages 2026-03-19).
 
 const CACHE_NAME = 'iem-assets-v1';
-// Trunk outputs files like: iem-ui-c72f48fccb666eb9.js, iem-ui-c72f48fccb666eb9_bg.wasm
-const HASH_RE = /[a-f0-9]{16,}\.(js|wasm)$/;
+// Trunk outputs the loader and the module as iem-ui-c72f48fccb666eb9.js and
+// iem-ui-c72f48fccb666eb9_bg.wasm; the hash is an unpadded hex u64, so it can
+// have fewer than 16 digits (15 in about one build of 16).
+const HASH_RE = /\/iem-ui-[0-9a-f]{1,16}(_bg)?\.(js|wasm)$/;
 
 self.addEventListener("install", () => {
   self.skipWaiting();

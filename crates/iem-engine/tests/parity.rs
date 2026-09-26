@@ -1,9 +1,10 @@
-//! Parity of the linear mix (program spec §3.5; design note §4):
+//! Parity of the linear mix (program spec §3.5; #20 design note §3, §8):
 //!
-//! - the impulse oracle: an independent reference model, written from A2–A11
-//!   over the declarative site (not the engine's graph), gives the gain from
-//!   every RX channel to every TX channel; the engine's `Offline` output of
-//!   staggered impulses equals it within 1e-12 and is exactly zero elsewhere;
+//! - the impulse oracle: an independent reference model, written from the
+//!   design note's model (A2–A10) over the declarative site (not the engine's
+//!   topology code), gives the gain from every RX channel to every TX channel;
+//!   the engine's `Offline` output of staggered impulses equals it within
+//!   1e-12 and is exactly zero elsewhere;
 //! - block-size invariance: hot material, EQs and limiters working, commands
 //!   inside blocks; blocks of 32, 64, 97 and 256 agree bit for bit (§3.5
 //!   asks ≤ 1e-12).
@@ -20,12 +21,12 @@ use iem_audio_io::{Offline, Planar};
 use iem_dsp::pan::{gains, send_gains};
 use iem_engine::cmd::{RtOp, push_group};
 use iem_engine::core::{Core, Flags};
-use iem_engine::graph::Graph;
 use iem_engine::rt::{Options, Processor};
 use iem_engine::site::{Site, load};
+use iem_engine::topology::Topology;
 use iem_engine_proto::{
-    BandKind, BusId, BusKind, BusState, Cmd, Eq, EqOwner, InputId, InputState, Limiter, MixState,
-    SendEntry, SendId, SendState, Source, Tap, db_to_lin,
+    BandKind, Cmd, Eq, EqTarget, GroupId, InputId, InputState, Level, Limiter, Mix, MixGroup,
+    MixId, MixOut, MixState, Source, db_to_lin,
 };
 
 struct Rng(u64);
@@ -54,7 +55,7 @@ impl Rng {
 }
 
 // ---------------------------------------------------------------------------
-// The reference model (A2–A11), independent of the engine's graph code.
+// The reference model (design note §3), independent of the engine's code.
 
 /// A stereo signal as gains from each RX channel: rows L and R.
 #[derive(Clone)]
@@ -85,7 +86,8 @@ struct Model<'a> {
     /// RX column of each input channel, in site order.
     columns: HashMap<&'a str, [usize; 2]>,
     rx: usize,
-    memo: HashMap<String, Sig>,
+    /// Each mix's output O, in declaration order.
+    out: HashMap<String, Sig>,
 }
 
 impl<'a> Model<'a> {
@@ -106,7 +108,7 @@ impl<'a> Model<'a> {
             state,
             columns,
             rx,
-            memo: HashMap::new(),
+            out: HashMap::new(),
         }
     }
 
@@ -118,19 +120,15 @@ impl<'a> Model<'a> {
             .unwrap_or_default()
     }
 
-    fn bus_state(&self, id: &str) -> BusState {
+    fn mix_state(&self, id: &str) -> Mix {
         self.state
-            .buses
-            .get(&BusId::new(id))
-            .copied()
+            .mixes
+            .get(&MixId::new(id))
+            .cloned()
             .unwrap_or_default()
     }
 
-    fn kind(&self, id: &str) -> Option<BusKind> {
-        self.site.buses.iter().find(|b| b.id == id).map(|b| b.kind)
-    }
-
-    /// A2, A3, A4: the pre-fader tap (EQs are flat here).
+    /// A2, A3, A4: an input's signal P (EQs are flat here).
     fn pre(&self, id: &str) -> Sig {
         let s = self.input_state(id);
         let mut sig = Sig::zero(self.rx);
@@ -146,84 +144,81 @@ impl<'a> Model<'a> {
         sig
     }
 
-    /// A11: an input's post-fader output (no mute there: the gate is in `pre`).
-    fn input_post(&self, id: &str) -> Sig {
-        let s = self.input_state(id);
-        self.pre(id)
-            .scaled(send_gains(db_to_lin(s.fader_db), false, s.pan))
+    /// A5: a level's gain pair.
+    fn law(l: &Level) -> (f64, f64) {
+        send_gains(db_to_lin(l.gain_db), l.muted, l.pan)
     }
 
-    fn send_state(&self, src: &Source, dst: &str) -> SendState {
-        let id = SendId {
-            src: src.clone(),
-            dst: BusId::new(dst),
-        };
-        self.state
-            .sends
-            .iter()
-            .find(|e| e.id == id)
-            .map(|e| e.state)
-            .unwrap_or_default()
-    }
-
-    /// A7, A8, A9, A10, A11: a bus's output after its fader and mute (O).
-    fn bus(&mut self, id: &str) -> Sig {
-        if let Some(s) = self.memo.get(id) {
-            return s.clone();
-        }
+    /// A7–A9: a mix's output O after its volume and mute.
+    fn mix(&mut self, id: &str) -> Sig {
         let site: &'a Site = self.site;
+        let spec = site.mixes.iter().find(|m| m.id == id).unwrap();
+        let state = self.mix_state(id);
+        let level = |input: &str| {
+            state
+                .inputs
+                .get(&InputId::new(input))
+                .copied()
+                .unwrap_or_default()
+        };
+        let grouped: Vec<&str> = site
+            .groups
+            .iter()
+            .flat_map(|g| g.inputs.iter().map(String::as_str))
+            .collect();
         let mut sum = Sig::zero(self.rx);
-        for family in &site.sends {
-            for to in family.to.iter().filter(|t| t.as_str() == id) {
-                for from in &family.from {
-                    let (src, sig) = match family.tap {
-                        // A6: mode 3 reads pre-fader post-FX.
-                        Tap::Pre => (Source::Input(InputId::new(from.clone())), self.pre(from)),
-                        // A6/A9: mode 0 reads post-fader post-mute.
-                        Tap::Post => (Source::Bus(BusId::new(from.clone())), self.bus(from)),
-                    };
-                    let st = self.send_state(&src, to);
-                    sum.add(&sig.scaled(send_gains(db_to_lin(st.gain_db), st.muted, st.pan)));
-                }
+        // A6: every ungrouped input at its level, read at P.
+        for input in &site.inputs {
+            if !grouped.contains(&input.id.as_str()) {
+                sum.add(&self.pre(&input.id).scaled(Self::law(&level(&input.id))));
             }
         }
-        if self.kind(id) == Some(BusKind::Master) {
-            for input in &site.inputs {
-                sum.add(&self.input_post(&input.id));
+        // A7: each group's strip: its inputs at their levels → fader → mute.
+        for group in &site.groups {
+            let mut g = Sig::zero(self.rx);
+            for input in &group.inputs {
+                g.add(&self.pre(input).scaled(Self::law(&level(input))));
             }
-            let stems: Vec<String> = site
-                .buses
-                .iter()
-                .filter(|b| b.kind == BusKind::Stems)
-                .map(|b| b.id.clone())
-                .collect();
-            for s in stems {
-                let o = self.bus(&s);
-                sum.add(&o);
-            }
+            let strip = state
+                .groups
+                .get(&GroupId::new(group.id.clone()))
+                .copied()
+                .unwrap_or_default();
+            sum.add(&g.scaled(send_gains(db_to_lin(strip.gain_db), strip.muted, 0.0)));
         }
-        let b = self.bus_state(id);
-        let out = sum.scaled(send_gains(db_to_lin(b.fader_db), b.muted, b.pan));
-        self.memo.insert(id.to_owned(), out.clone());
-        out
+        // A9: the mixes it hears, after their mute, unclipped.
+        for heard in &spec.mixes {
+            let l = state
+                .mixes
+                .get(&MixId::new(heard.clone()))
+                .copied()
+                .unwrap_or_default();
+            let o = self.out[heard.as_str()].clone();
+            sum.add(&o.scaled(Self::law(&l)));
+        }
+        // A8: volume and mute (the EQ is flat, the limiter below its threshold).
+        let o = sum.scaled(send_gains(
+            db_to_lin(state.out.volume_db),
+            state.out.muted,
+            0.0,
+        ));
+        self.out.insert(id.to_owned(), o.clone());
+        o
     }
 
     /// Gain from each RX channel to each TX channel, in TX order.
     fn tx_matrix(&mut self) -> Vec<Vec<f64>> {
         let mut rows = Vec::new();
-        let buses: Vec<(String, BusKind, usize)> = self
+        let mixes: Vec<(String, usize)> = self
             .site
-            .buses
+            .mixes
             .iter()
-            .map(|b| (b.id.clone(), b.kind, b.tx.len()))
+            .map(|m| (m.id.clone(), m.tx.len()))
             .collect();
-        for (id, kind, tx) in buses {
-            if tx == 0 {
-                continue;
-            }
-            let o = self.bus(&id);
-            if kind == BusKind::Translator {
-                // A10: (gL·L + gR·R)/2 on its one channel.
+        for (id, tx) in mixes {
+            let o = self.mix(&id);
+            if tx == 1 {
+                // A10: (L + R)/2 on its one channel.
                 rows.push(
                     o.0[0]
                         .iter()
@@ -246,32 +241,36 @@ fn site() -> Site {
     load(&common::site_path()).unwrap()
 }
 
-fn db(rng: &mut Rng, lo: f64, hi: f64) -> f64 {
-    rng.range(lo, hi)
+fn level(rng: &mut Rng) -> Level {
+    Level {
+        gain_db: if rng.chance(0.05) {
+            -150.0
+        } else {
+            rng.range(-30.0, 6.0)
+        },
+        pan: rng.range(-1.0, 1.0),
+        muted: rng.chance(0.2),
+    }
 }
 
 /// A random state with flat EQs (the oracle's linear case).
-fn random_state(graph: &Graph, rng: &mut Rng) -> MixState {
+fn random_state(topo: &Topology, rng: &mut Rng) -> MixState {
     let mut s = MixState::default();
-    for n in &graph.inputs {
+    for n in &topo.inputs {
         s.inputs.insert(
             n.id.clone(),
             InputState {
-                trim_db: db(rng, -12.0, 12.0),
+                trim_db: rng.range(-12.0, 12.0),
                 muted: rng.chance(0.2),
                 processing: rng.chance(0.7),
-                fader_db: db(rng, -30.0, 6.0),
-                pan: rng.range(-1.0, 1.0),
                 eq: Eq::default(),
             },
         );
     }
-    for n in &graph.buses {
-        s.buses.insert(
-            n.id.clone(),
-            BusState {
-                fader_db: db(rng, -30.0, 6.0),
-                pan: rng.range(-1.0, 1.0),
+    for n in &topo.mixes {
+        let mut mix = Mix {
+            out: MixOut {
+                volume_db: rng.range(-30.0, 6.0),
                 muted: rng.chance(0.1),
                 eq: Eq::default(),
                 limiter: Limiter {
@@ -279,34 +278,48 @@ fn random_state(graph: &Graph, rng: &mut Rng) -> MixState {
                     limit_db: rng.range(-6.0, 0.0),
                 },
             },
-        );
-    }
-    for e in &graph.sends {
-        s.sends.push(SendEntry {
-            id: e.id.clone(),
-            state: SendState {
-                gain_db: if rng.chance(0.05) {
-                    -150.0
-                } else {
-                    db(rng, -30.0, 6.0)
+            ..Mix::default()
+        };
+        for i in &topo.inputs {
+            mix.inputs.insert(i.id.clone(), level(rng));
+        }
+        for g in &topo.groups {
+            mix.groups.insert(
+                g.id.clone(),
+                MixGroup {
+                    gain_db: rng.range(-30.0, 6.0),
+                    muted: rng.chance(0.1),
+                    eq: Eq::default(),
                 },
-                pan: rng.range(-1.0, 1.0),
-                muted: rng.chance(0.2),
-            },
-        });
+            );
+        }
+        for &h in &n.mixes {
+            mix.mixes.insert(topo.mixes[h].id.clone(), level(rng));
+        }
+        s.mixes.insert(n.id.clone(), mix);
     }
     s
 }
 
-const AMP: f64 = 1e-3;
+/// Small enough that no limiter or safety stage acts on any path.
+const AMP: f64 = 1e-4;
 
 fn impulse_times(rx: usize) -> Vec<usize> {
     (0..rx).map(|k| 64 + 16 * k).collect()
 }
 
-fn render(graph: &Arc<Graph>, state: &MixState, input: &Planar, block: usize) -> Planar {
-    let (mut p, _h) = Processor::new(Arc::clone(graph), state, &[], Options { fade_in_ms: 0.0 });
-    let run = Offline { block }.run(&mut p, input, graph.tx.len());
+fn impulses(rx: usize) -> Planar {
+    let times = impulse_times(rx);
+    let mut input = Planar::new(rx, times.last().unwrap() + 64);
+    for (k, t) in times.iter().enumerate() {
+        input.channel_mut(k)[*t] = AMP;
+    }
+    input
+}
+
+fn render(topo: &Arc<Topology>, state: &MixState, input: &Planar, block: usize) -> Planar {
+    let (mut p, _h) = Processor::new(Arc::clone(topo), state, &[], Options { fade_in_ms: 0.0 });
+    let run = Offline { block }.run(&mut p, input, topo.tx.len());
     assert!(run.fault.is_none());
     run.output
 }
@@ -314,23 +327,19 @@ fn render(graph: &Arc<Graph>, state: &MixState, input: &Planar, block: usize) ->
 #[test]
 fn impulse_oracle_matches_random_states() {
     let site = site();
-    let graph = common::graph();
-    let times = impulse_times(graph.rx.len());
-    let frames = times.last().unwrap() + 64;
-    let mut input = Planar::new(graph.rx.len(), frames);
-    for (k, t) in times.iter().enumerate() {
-        input.channel_mut(k)[*t] = AMP;
-    }
+    let topo = common::topology();
+    let times = impulse_times(topo.rx.len());
+    let input = impulses(topo.rx.len());
     let mut worst = 0.0f64;
     let mut nonzero = 0usize;
     for seed in 1..=8u64 {
         let mut rng = Rng(0x0dd5_eed0 ^ seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
-        let state = random_state(&graph, &mut rng);
+        let state = random_state(&topo, &mut rng);
         let mut model = Model::new(&site, &state);
-        assert_eq!(model.rx, graph.rx.len());
+        assert_eq!(model.rx, topo.rx.len());
         let expected = model.tx_matrix();
-        assert_eq!(expected.len(), graph.tx.len());
-        let out = render(&graph, &state, &input, 32);
+        assert_eq!(expected.len(), topo.tx.len());
+        let out = render(&topo, &state, &input, 32);
         for (tx, row) in expected.iter().enumerate() {
             let y = out.channel(tx);
             for (k, t) in times.iter().enumerate() {
@@ -361,39 +370,45 @@ fn impulse_oracle_matches_random_states() {
 }
 
 #[test]
-fn the_reference_model_encodes_a3_a6_a9_a10() {
+fn the_reference_model_encodes_a3_a6_a7_a9_a10() {
     let site = site();
-    let graph = common::graph();
+    let topo = common::topology();
     let mut state = MixState::default();
-    let send = |s: &mut MixState, src: Source, dst: &str, gain_db: f64| {
-        s.sends.push(SendEntry {
-            id: SendId {
-                src,
-                dst: BusId::new(dst),
-            },
-            state: SendState {
-                gain_db,
-                ..SendState::default()
-            },
-        });
+    let set = |s: &mut MixState, mix: &str, source: Source, gain_db: f64| {
+        let m = s.mixes.entry(MixId::new(mix)).or_default();
+        let l = Level {
+            gain_db,
+            ..Level::default()
+        };
+        match source {
+            Source::Input(id) => m.inputs.insert(id, l),
+            Source::Mix(id) => m.mixes.insert(id, l),
+        };
     };
     let input = |s: &str| Source::Input(InputId::new(s));
-    send(&mut state, input("mic1"), "member2", 0.0);
-    send(&mut state, input("mic2"), "member2", 0.0);
-    send(&mut state, input("drums"), "member2.stems", 0.0);
-    send(
+    set(&mut state, "member2", input("mic1"), 0.0);
+    set(&mut state, "member2", input("mic2"), 0.0);
+    set(&mut state, "member2", input("drums"), 0.0);
+    set(
         &mut state,
-        Source::Bus(BusId::new("member2.stems")),
-        "member2",
-        0.0,
-    );
-    send(
-        &mut state,
-        Source::Bus(BusId::new("member2")),
         "member1",
+        Source::Mix(MixId::new("member2")),
         0.0,
     );
-    send(&mut state, input("hand1"), "translator", 0.0);
+    set(&mut state, "translator", input("hand1"), 0.0);
+    set(&mut state, "member3", input("drums"), 0.0);
+    state
+        .mixes
+        .get_mut(&MixId::new("member3"))
+        .unwrap()
+        .groups
+        .insert(
+            GroupId::new("stems"),
+            MixGroup {
+                muted: true,
+                ..MixGroup::default()
+            },
+        );
     state.inputs.insert(
         InputId::new("mic1"),
         InputState {
@@ -404,50 +419,45 @@ fn the_reference_model_encodes_a3_a6_a9_a10() {
     state.inputs.insert(
         InputId::new("mic2"),
         InputState {
-            fader_db: -150.0,
+            trim_db: -6.0,
+            processing: false,
             ..InputState::default()
         },
     );
-    state.buses.insert(
-        BusId::new("member2.stems"),
-        BusState {
-            fader_db: -6.0,
-            ..BusState::default()
+    let m2 = state.mixes.get_mut(&MixId::new("member2")).unwrap();
+    m2.groups.insert(
+        GroupId::new("stems"),
+        MixGroup {
+            gain_db: -6.0,
+            ..MixGroup::default()
         },
     );
-    state.buses.insert(
-        BusId::new("member2"),
-        BusState {
-            fader_db: 12.0,
-            ..BusState::default()
-        },
-    );
+    m2.out.volume_db = 12.0;
     let mut model = Model::new(&site, &state);
     let m = model.tx_matrix();
-    let col = |id: &str| graph.inputs[graph.input_index(&InputId::new(id)).unwrap()].rx[0];
-    let row = |id: &str| graph.buses[graph.bus_index(&BusId::new(id)).unwrap()].tx[0].unwrap();
+    let col = |id: &str| topo.inputs[topo.input_index(&InputId::new(id)).unwrap()].rx[0];
+    let row = |id: &str| topo.mixes[topo.mix_index(&MixId::new(id)).unwrap()].tx[0].unwrap();
     let g = gains(0.0).0;
     // A3: a muted input reaches nothing.
     assert!(m.iter().all(|r| r[col("mic1")] == 0.0));
-    // A6: the input fader at −∞ does not touch the pre-fader send.
+    // A6: a level reads the input after its processing: trim is ignored
+    // while processing is off.
     assert_eq!(m[row("member2")][col("mic2")], g * (db_to_lin(12.0) * g));
-    // A6: a post send follows the stems fader.
-    let stems = g * (db_to_lin(-6.0) * g) * g * (db_to_lin(12.0) * g);
+    // A7: a grouped input reaches its mix through the group's strip.
+    let stems = g * (db_to_lin(-6.0) * g) * (db_to_lin(12.0) * g);
     assert!((m[row("member2")][col("drums")] - stems).abs() < 1e-15);
-    // A9: the elevated member reads member 2 post-fader, unclipped (> 1).
+    // Only through it: with member3's strip muted, drums at 0 dB are silent there.
+    assert_eq!(m[row("member3")][col("drums")], 0.0);
+    // A9: member1 hears member2 after its volume, unclipped (> 1).
     let post = g * (db_to_lin(12.0) * g);
     assert!(post > 3.9);
     assert!((m[row("member1")][col("mic2")] - post * g * g).abs() < 1e-15);
-    // A10: the translator carries only its send, downmixed.
+    // A10: the translator carries only its level, downmixed.
     assert!((m[row("translator")][col("hand1")] - g * g).abs() < 1e-15);
     assert_eq!(m[row("translator")][col("hand2")], 0.0);
     // The engine agrees on this state too (impulses kept below every limit).
-    let times = impulse_times(graph.rx.len());
-    let mut input = Planar::new(graph.rx.len(), times.last().unwrap() + 64);
-    for (k, t) in times.iter().enumerate() {
-        input.channel_mut(k)[*t] = AMP;
-    }
-    let out = render(&graph, &state, &input, 64);
+    let times = impulse_times(topo.rx.len());
+    let out = render(&topo, &state, &impulses(topo.rx.len()), 64);
     for (tx, r) in m.iter().enumerate() {
         for (k, t) in times.iter().enumerate() {
             assert!((out.channel(tx)[*t] / AMP - r[k]).abs() <= 1e-12);
@@ -483,80 +493,79 @@ fn hot_material(rx: usize, frames: usize, rng: &mut Rng) -> Planar {
     p
 }
 
-fn random_cmd(graph: &Graph, rng: &mut Rng) -> Cmd {
-    let bus_of = |rng: &mut Rng, kinds: &[BusKind]| loop {
-        let n = &graph.buses[rng.below(graph.buses.len())];
-        if kinds.contains(&n.kind) {
-            return n.id.clone();
+fn random_cmd(topo: &Topology, rng: &mut Rng) -> Cmd {
+    let m = rng.below(topo.mixes.len());
+    let mix = topo.mixes[m].id.clone();
+    let input_of = |rng: &mut Rng| topo.inputs[rng.below(topo.inputs.len())].id.clone();
+    let stems = GroupId::new("stems");
+    match rng.below(10) {
+        0 => Cmd::SetMix {
+            mix,
+            volume_db: Some(rng.range(-20.0, 6.0)),
+            muted: Some(rng.chance(0.2)),
+        },
+        1 | 2 => {
+            let heard = &topo.mixes[m].mixes;
+            let source = if !heard.is_empty() && rng.chance(0.3) {
+                Source::Mix(topo.mixes[heard[rng.below(heard.len())]].id.clone())
+            } else {
+                Source::Input(input_of(rng))
+            };
+            Cmd::SetLevel {
+                mix,
+                source,
+                gain_db: Some(rng.range(-20.0, 6.0)),
+                pan: Some(rng.range(-1.0, 1.0)),
+                muted: Some(rng.chance(0.2)),
+            }
         }
-    };
-    let input_of = |rng: &mut Rng| graph.inputs[rng.below(graph.inputs.len())].id.clone();
-    match rng.below(9) {
-        0 => Cmd::SetBus {
-            bus: bus_of(
-                rng,
-                &[
-                    BusKind::Output,
-                    BusKind::Stems,
-                    BusKind::Translator,
-                    BusKind::Master,
-                ],
-            ),
-            fader_db: Some(rng.range(-20.0, 6.0)),
-            pan: Some(rng.range(-1.0, 1.0)),
-            muted: Some(rng.chance(0.2)),
-        },
-        1 | 2 => Cmd::SetSend {
-            id: graph.sends[rng.below(graph.sends.len())].id.clone(),
-            gain_db: Some(rng.range(-20.0, 6.0)),
-            pan: Some(rng.range(-1.0, 1.0)),
-            muted: Some(rng.chance(0.2)),
-        },
         3 => Cmd::SetEq {
-            owner: EqOwner::Input(input_of(rng)),
+            target: EqTarget::Input(input_of(rng)),
             eq: random_eq(rng),
         },
         4 => Cmd::SetEq {
-            owner: EqOwner::Bus(bus_of(rng, &[BusKind::Output, BusKind::Stems])),
+            target: if rng.chance(0.5) {
+                EqTarget::Mix(mix)
+            } else {
+                EqTarget::Group { mix, group: stems }
+            },
             eq: random_eq(rng),
         },
         5 => Cmd::SetLimiter {
-            bus: bus_of(rng, &[BusKind::Output]),
+            mix,
             enabled: Some(rng.chance(0.7)),
             limit_db: Some(rng.range(-6.0, 0.0)),
         },
-        6 => {
-            let scope = bus_of(rng, &[BusKind::Output]);
-            let src = if rng.chance(0.5) {
+        6 => Cmd::SetSolo {
+            mix,
+            sources: if rng.chance(0.5) {
                 vec![Source::Input(input_of(rng))]
             } else {
                 vec![]
-            };
-            Cmd::SetSolo {
-                scope,
-                sources: src,
-            }
-        }
+            },
+        },
         7 => Cmd::SetInput {
             input: input_of(rng),
             trim_db: Some(rng.range(-12.0, 12.0)),
             muted: Some(rng.chance(0.2)),
             processing: Some(rng.chance(0.6)),
-            fader_db: Some(rng.range(-20.0, 6.0)),
-            pan: Some(rng.range(-1.0, 1.0)),
         },
-        _ => Cmd::StartListen {
-            bus: bus_of(rng, &[BusKind::Output]),
+        8 => Cmd::SetGroup {
+            mix,
+            group: stems,
+            gain_db: Some(rng.range(-20.0, 6.0)),
+            muted: Some(rng.chance(0.2)),
         },
+        _ => Cmd::StartListen { mix },
     }
 }
 
 #[test]
 fn outputs_do_not_depend_on_the_block_size() {
-    let graph = common::graph();
+    let topo = common::topology();
     let mut rng = Rng(0x1b10_c512_e000_0001);
-    let mut state = common::open_state(&graph);
-    for n in &graph.inputs {
+    let mut state = common::open_state(&topo);
+    for n in &topo.inputs {
         let mut eq = random_eq(&mut rng);
         eq.bands[0].kind = BandKind::HighPass;
         state.inputs.insert(
@@ -568,24 +577,21 @@ fn outputs_do_not_depend_on_the_block_size() {
             },
         );
     }
-    for n in &graph.buses {
-        state.buses.insert(
-            n.id.clone(),
-            BusState {
-                eq: random_eq(&mut rng),
-                ..BusState::default()
-            },
-        );
+    for mix in state.mixes.values_mut() {
+        mix.out.eq = random_eq(&mut rng);
+        for strip in mix.groups.values_mut() {
+            strip.eq = random_eq(&mut rng);
+        }
     }
     let frames = 24_000;
-    let input = hot_material(graph.rx.len(), frames, &mut rng);
+    let input = hot_material(topo.rx.len(), frames, &mut rng);
     // One schedule of commands at fixed sample indices, applied through the core.
-    let mut core = Core::new(Arc::clone(&graph), &state, 0, Flags::default());
+    let mut core = Core::new(Arc::clone(&topo), &state, 0, Flags::default());
     let mut schedule: Vec<(u64, Vec<RtOp>)> = Vec::new();
     let mut at = 100u64;
     while schedule.len() < 40 {
         at += 100 + rng.below(450) as u64;
-        let cmd = random_cmd(&graph, &mut rng);
+        let cmd = random_cmd(&topo, &mut rng);
         if let Ok(out) = core.apply(&cmd)
             && !out.rt.is_empty()
         {
@@ -594,23 +600,23 @@ fn outputs_do_not_depend_on_the_block_size() {
     }
     assert!(schedule.last().unwrap().0 < frames as u64);
     let run = |block: usize| {
-        let (mut p, mut h) = Processor::new(Arc::clone(&graph), &state, &[], Options::default());
+        let (mut p, mut h) = Processor::new(Arc::clone(&topo), &state, &[], Options::default());
         for (at, ops) in &schedule {
             assert!(push_group(&mut h.cmds, *at, ops));
         }
-        let out = Offline { block }.run(&mut p, &input, graph.tx.len());
+        let out = Offline { block }.run(&mut p, &input, topo.tx.len());
         assert!(out.fault.is_none());
         out.output
     };
     let reference = run(32);
-    let loud = (0..graph.tx.len())
+    let loud = (0..topo.tx.len())
         .filter(|&ch| reference.channel(ch).iter().any(|y| y.abs() > 0.05))
         .count();
     assert!(loud >= 10, "the material reaches the outputs: {loud}");
     let mut worst = 0.0f64;
     for block in [64, 97, 256] {
         let other = run(block);
-        for ch in 0..graph.tx.len() {
+        for ch in 0..topo.tx.len() {
             for (a, b) in reference.channel(ch).iter().zip(other.channel(ch)) {
                 worst = worst.max((a - b).abs());
             }
@@ -622,6 +628,6 @@ fn outputs_do_not_depend_on_the_block_size() {
     println!(
         "invariance max difference {worst:e} (blocks 32/64/97/256, {} commands, {frames} samples x {} TX)",
         schedule.len(),
-        graph.tx.len()
+        topo.tx.len()
     );
 }

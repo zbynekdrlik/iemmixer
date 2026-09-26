@@ -1,15 +1,15 @@
 //! The predecessor's presets, snapshots and customizations re-keyed from
-//! REAPER track numbers to stable ids (S4 design note §3.4). A key is read in
-//! the era of the item's time (`eras.toml`); it must name a source the member
-//! can send: an input with a send into the member's bus or stems bus, or
-//! another bus with a send into the member's bus.
+//! REAPER track numbers to stable ids (S4 design note §3.4, #20 design note
+//! §7). A key is read in the era of the item's time (`eras.toml`); it must
+//! name a source the member's mix hears: an input, or another mix it hears.
+//! A stems level becomes the fader of the site's (only) group.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use iem_core::band::{MixSend, Preset, Snapshot};
 use iem_core::{Customization, EqBand as LegacyBand, MixSnapshot, PresetEntry};
 use iem_engine_proto::{
-    BandKind as EqKind, BusId, DB_OFF, Eq as EqSettings, EqBand, InputId, SendId, Source,
+    BandKind as EqKind, DB_OFF, Eq as EqSettings, EqBand, GroupId, InputId, MixId, Source,
 };
 
 use crate::aliases::{Aliases, Eras, MemberAlias};
@@ -32,8 +32,8 @@ pub struct Stats {
     pub sends: usize,
     /// Input EQs kept as metadata.
     pub input_eqs: usize,
-    /// EQs of other members' buses (mix viewers' snapshots), dropped.
-    pub dropped_bus_eqs: usize,
+    /// EQs of other members' mixes (mix viewers' snapshots), dropped.
+    pub dropped_mix_eqs: usize,
     /// Items whose time fell between two eras.
     pub between_eras: usize,
 }
@@ -43,7 +43,7 @@ impl std::ops::AddAssign for Stats {
         self.items += o.items;
         self.sends += o.sends;
         self.input_eqs += o.input_eqs;
-        self.dropped_bus_eqs += o.dropped_bus_eqs;
+        self.dropped_mix_eqs += o.dropped_mix_eqs;
         self.between_eras += o.between_eras;
     }
 }
@@ -90,33 +90,35 @@ pub fn legacy_eq(bands: &[LegacyBand]) -> Result<EqSettings, String> {
 type KeyMap = BTreeMap<usize, Source>;
 
 impl Ctx<'_> {
-    fn bus(&self) -> BusId {
-        BusId::new(self.member.bus.clone())
+    fn mix(&self) -> MixId {
+        MixId::new(self.member.mix.clone())
     }
 
-    fn stems(&self) -> BusId {
-        BusId::new(self.member.stems.clone())
-    }
-
-    fn sends_to(&self, src: &Source, dst: BusId) -> bool {
-        self.topology.has_send(&SendId {
-            src: src.clone(),
-            dst,
-        })
-    }
-
-    /// The source REAPER track `key` (1-based) names in era `era`, if this
-    /// member can send it.
+    /// The source REAPER track `key` (1-based) names in era `era`, if the
+    /// member's mix hears it.
     pub fn source(&self, era: usize, key: usize) -> Option<Source> {
         let name = self.eras.era.get(era)?.tracks.get(key.checked_sub(1)?)?;
         let id = self.aliases.tracks.get(name)?;
         let input = Source::Input(InputId::new(id.clone()));
-        if self.topology.input(&InputId::new(id.clone())).is_some() {
-            let ok = self.sends_to(&input, self.bus()) || self.sends_to(&input, self.stems());
-            return ok.then_some(input);
+        if self.topology.hears(&self.mix(), &input) {
+            return Some(input);
         }
-        let bus = Source::Bus(BusId::new(id.clone()));
-        self.sends_to(&bus, self.bus()).then_some(bus)
+        let heard = Source::Mix(MixId::new(id.clone()));
+        self.topology.hears(&self.mix(), &heard).then_some(heard)
+    }
+
+    /// A stems level as the fader of the site's group (there must be one).
+    fn groups(&self, level: Option<f32>) -> Result<BTreeMap<GroupId, f64>, String> {
+        let Some(db) = level else {
+            return Ok(BTreeMap::new());
+        };
+        match self.topology.groups.as_slice() {
+            [g] => Ok(BTreeMap::from([(g.id.clone(), f64::from(db))])),
+            gs => Err(format!(
+                "a stems level needs exactly one group in the site ({} found)",
+                gs.len()
+            )),
+        }
     }
 
     fn map_in(&self, era: usize, keys: &BTreeSet<usize>) -> Result<KeyMap, Vec<usize>> {
@@ -190,7 +192,7 @@ impl Ctx<'_> {
                     );
                     stats.input_eqs += 1;
                 }
-                Some(Source::Bus(_)) => stats.dropped_bus_eqs += 1,
+                Some(Source::Mix(_)) => stats.dropped_mix_eqs += 1,
                 None => return Err(format!("EQ key {k} has no source")),
             }
         }
@@ -249,6 +251,9 @@ pub fn rekey_presets(
             let input_eq = ctx
                 .eqs(e.eq_bands.as_ref(), &map, &mut st)
                 .map_err(|x| format!("{label}: {x}"))?;
+            let groups = ctx
+                .groups(e.stems_level_db)
+                .map_err(|x| format!("{label}: {x}"))?;
             let (archived, legacy_member) = ctx.archive();
             stats += st;
             Ok(Preset {
@@ -256,7 +261,7 @@ pub fn rekey_presets(
                 created_at: e.created_at,
                 updated_at: e.updated_at,
                 sends,
-                stems_fader_db: e.stems_level_db.map(f64::from),
+                groups,
                 input_eq,
                 archived,
                 legacy_member,
@@ -318,7 +323,7 @@ pub fn rekey_snapshots(
                 label: s.label.clone(),
                 pinned: s.pinned,
                 sends,
-                stems_fader_db: None,
+                groups: BTreeMap::new(),
                 input_eq,
                 archived,
                 legacy_member,
@@ -374,7 +379,8 @@ mod tests {
 
     use super::*;
     use crate::aliases::{parse_aliases, parse_eras};
-    use crate::sitegen::{aliases_toml, synthetic_site, track_name};
+    use crate::sitegen::{aliases_toml, synthetic_routing, synthetic_site, track_name};
+    use crate::topology::TopoGroup;
 
     struct Env {
         topology: Topology,
@@ -387,8 +393,7 @@ mod tests {
     fn member(n: &str) -> MemberAlias {
         MemberAlias {
             id: n.into(),
-            bus: n.into(),
-            stems: format!("{n}.stems"),
+            mix: n.into(),
             archived: false,
         }
     }
@@ -398,7 +403,8 @@ mod tests {
     /// Era 3 (t 500…600): mic1, spare, drums, member2 (spare is not aliased).
     fn env() -> Env {
         let topology = synthetic_site();
-        let aliases = parse_aliases(&aliases_toml(&topology, &BTreeMap::new())).unwrap();
+        let routing = synthetic_routing(&topology);
+        let aliases = parse_aliases(&aliases_toml(&topology, &routing, &BTreeMap::new())).unwrap();
         let n = |id: &str| format!("{:?}", track_name(id));
         let eras = parse_eras(&format!(
             "[[era]]\nfirst_seen = 100\nlast_seen = 200\ntracks = [{}, {}, {}, {}]\n\
@@ -517,8 +523,8 @@ mod tests {
     fn between_eras_the_one_that_maps_wins_or_both_agree() {
         let e = env();
         let c = ctx(&e, &e.member);
-        // Keys 3 (drums, a stems-group input → the stems bus) and 4 (another
-        // member's bus: member3 does not receive it) — neither era maps key 4.
+        // Keys 3 (drums, an input of the stems group) and 4 (another member's
+        // mix: member3 does not hear it) — neither era maps key 4.
         let err = rekey_snapshots(&[snap(250, &[(4, 1.0)])], &c).unwrap_err();
         assert!(err.0[0].contains("unmappable for member legacy3"), "{err}");
         assert!(
@@ -541,7 +547,7 @@ mod tests {
     }
 
     #[test]
-    fn mix_viewers_map_other_members_buses() {
+    fn mix_viewers_map_the_mixes_they_hear() {
         let e = env();
         let c = ctx(&e, &e.viewer);
         let mut s = snap(150, &[(1, 1.0), (4, 1.0)]);
@@ -550,9 +556,9 @@ mod tests {
         eq.insert(4, five());
         s.eq_bands = Some(eq);
         let (out, st) = rekey_snapshots(&[s], &c).unwrap();
-        assert_eq!(out[0].sends[1].src, Source::Bus(BusId::new("member2")));
+        assert_eq!(out[0].sends[1].src, Source::Mix(MixId::new("member2")));
         assert_eq!(st.input_eqs, 1);
-        assert_eq!(st.dropped_bus_eqs, 1);
+        assert_eq!(st.dropped_mix_eqs, 1);
         let eq = &out[0].input_eq[&InputId::new("mic1")];
         assert_eq!(eq.bands[1].kind, EqKind::LowShelf);
         assert_eq!(eq.bands[1].gain_db, 2.5);
@@ -606,10 +612,28 @@ mod tests {
         assert_eq!(p[1].sends[0].gain_db, -12.5);
         assert!(p[1].sends[0].muted);
         assert!((p[1].sends[0].pan + 0.5).abs() < 1e-12);
-        assert_eq!(p[1].stems_fader_db, Some(-4.0));
-        assert_eq!(p[0].stems_fader_db, None);
+        assert_eq!(p[1].groups, BTreeMap::from([(GroupId::new("stems"), -4.0)]));
+        assert!(p[0].groups.is_empty());
         assert!(p[0].archived);
         assert_eq!(p[0].legacy_member.as_deref(), Some("legacy3"));
+        // A stems level needs exactly one group in the site.
+        let mut two = env();
+        two.topology.groups.push(TopoGroup {
+            id: GroupId::new("more"),
+            inputs: vec![],
+        });
+        let c2 = ctx(&two, &two.member);
+        let err = rekey_presets(&entries, &c2).unwrap_err();
+        assert!(
+            err.0
+                .iter()
+                .any(|x| x.contains("exactly one group in the site (2 found)")),
+            "{err}"
+        );
+        let mut none = env();
+        none.topology.groups.clear();
+        let c0 = ctx(&none, &none.member);
+        assert!(rekey_presets(&entries, &c0).unwrap_err().0[0].contains("(0 found)"));
     }
 
     #[test]
@@ -695,7 +719,7 @@ mod tests {
             items: 1,
             sends: 2,
             input_eqs: 3,
-            dropped_bus_eqs: 4,
+            dropped_mix_eqs: 4,
             between_eras: 5,
         };
         let b = a;
@@ -706,7 +730,7 @@ mod tests {
                 items: 2,
                 sends: 4,
                 input_eqs: 6,
-                dropped_bus_eqs: 8,
+                dropped_mix_eqs: 8,
                 between_eras: 10
             }
         );

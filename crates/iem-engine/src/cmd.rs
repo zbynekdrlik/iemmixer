@@ -19,34 +19,48 @@ pub enum RtOp {
         i: u16,
         eq: EqParams,
     },
-    Bus {
-        b: u16,
-        fader: f64,
-        pan: f64,
+    /// A mix's volume and mute (its output stage).
+    MixOut {
+        m: u16,
+        volume: f64,
         muted: bool,
     },
-    BusEq {
-        b: u16,
+    MixEq {
+        m: u16,
         eq: EqParams,
     },
     Limiter {
-        b: u16,
+        m: u16,
         enabled: bool,
         limit_db: f64,
     },
     ResetLimiter {
-        b: u16,
+        m: u16,
     },
-    /// `muted` is the effective mute (the send's own or a solo's).
-    Send {
-        s: u16,
+    /// Level slot `k` of mix `m`; `muted` is the effective mute (the
+    /// level's own or a solo's).
+    Level {
+        m: u16,
+        k: u16,
         gain: f64,
         pan: f64,
         muted: bool,
     },
+    /// Group `g`'s strip in mix `m`.
+    Group {
+        m: u16,
+        g: u16,
+        gain: f64,
+        muted: bool,
+    },
+    GroupEq {
+        m: u16,
+        g: u16,
+        eq: EqParams,
+    },
     Listen {
         slot: u8,
-        bus: Option<u16>,
+        mix: Option<u16>,
     },
     TestSignal {
         i: u16,

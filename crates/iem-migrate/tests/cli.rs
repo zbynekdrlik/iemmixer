@@ -1,6 +1,7 @@
 //! `iem-migrate` end to end on `config/test-site.toml` and synthetic
 //! predecessor data (S4 design note §4). No site data (P6).
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -8,14 +9,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use iem_core::band::{CustomizationFile, PresetFile, SnapshotFile};
 use iem_core::{ChannelPreset, ChannelSnapshot, Customization, MixSnapshot, PresetEntry};
-use iem_engine::core::{reconcile, to_mix};
+use iem_engine::core::{reconcile, to_state};
 use iem_engine::persist::{Persisted, Source as Saved, Store};
-use iem_engine_proto::{InputId, MixState, Source};
-use iem_migrate::{EXIT_INPUT, EXIT_TOPOLOGY, run, site};
+use iem_engine_proto::{GroupId, InputId, MixId, MixState, Source};
+use iem_migrate::stage::{Step, siblings};
+use iem_migrate::{EXIT_INPUT, EXIT_TOPOLOGY, band_cmd, run, site};
 use iem_rpp::aliases::MemberAlias;
 use iem_rpp::import::compare;
-use iem_rpp::sitegen::{aliases_toml, project, sample_state, synthetic_site, track_name};
-use iem_rpp::topology::Topology;
+use iem_rpp::sitegen::{
+    aliases_toml, instance_name, project, sample_state, synthetic_routing, synthetic_site,
+    track_name,
+};
+use iem_rpp::topology::{Routing, Topology};
 use iem_server::pepper;
 use iem_server::pin_hash::PinHasher;
 use iem_server::pin_store::PinStore;
@@ -28,11 +33,14 @@ fn topo() -> Topology {
     site::open(&site_path()).unwrap().topology
 }
 
+fn routing() -> Routing {
+    synthetic_routing(&topo())
+}
+
 fn member(id: &str, archived: bool) -> MemberAlias {
     MemberAlias {
         id: id.into(),
-        bus: id.into(),
-        stems: format!("{id}.stems"),
+        mix: id.into(),
         archived,
     }
 }
@@ -56,12 +64,12 @@ struct World {
 impl World {
     fn new(seed: u64) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let t = topo();
-        let state = sample_state(&t, seed);
+        let (t, r) = (topo(), routing());
+        let state = sample_state(&t, &r, seed);
         let rpp = dir.path().join("project.RPP");
-        std::fs::write(&rpp, project(&t, &state, &track_name).unwrap()).unwrap();
+        std::fs::write(&rpp, project(&t, &r, &state, &track_name).unwrap()).unwrap();
         let aliases = dir.path().join("aliases.toml");
-        std::fs::write(&aliases, aliases_toml(&t, &members())).unwrap();
+        std::fs::write(&aliases, aliases_toml(&t, &r, &members())).unwrap();
         Self {
             dir,
             rpp,
@@ -128,9 +136,9 @@ fn import_writes_current_and_baseline_with_the_program_counts() {
     assert!(report.contains("counts match --expect"));
     assert!(dir.join("current.json").exists() && dir.join("baseline.json").exists());
     let sf = site::open(&site_path()).unwrap();
-    let loaded = Store::open(&dir).unwrap().load(&sf.graph);
+    let loaded = Store::open(&dir).unwrap().load(&sf.compiled);
     assert_eq!(loaded.source, Saved::Current);
-    assert_eq!(loaded.persisted.topology_hash, sf.graph.hash);
+    assert_eq!(loaded.persisted.topology_hash, sf.compiled.hash);
     assert_eq!(loaded.persisted.rev, 0);
     let saved = loaded.persisted.saved_unix_ms;
     assert!(
@@ -138,9 +146,21 @@ fn import_writes_current_and_baseline_with_the_program_counts() {
         "saved at {saved}, import ran {before}..={after}"
     );
     assert_eq!(
-        compare(&sf.topology, &loaded.persisted.state, &w.state, 1e-9),
+        compare(
+            &sf.topology,
+            &routing(),
+            &loaded.persisted.state,
+            &w.state,
+            1e-9
+        ),
         Vec::<String>::new()
     );
+    // The engine's state holds every level: the ones the project has no
+    // receive for are off.
+    let tr = &loaded.persisted.state.mixes[&MixId::new("translator")];
+    assert_eq!(tr.inputs.len(), 24);
+    assert_eq!(tr.inputs[&InputId::new("mic1")].gain_db, -150.0);
+    assert!(!tr.out.limiter.enabled);
     // A second import keeps the first as a generation.
     run(&a).unwrap();
     assert_eq!(Store::open(&dir).unwrap().generations().unwrap().len(), 1);
@@ -184,20 +204,24 @@ fn a_dry_run_writes_nothing() {
 
 #[test]
 fn a_value_outside_the_engines_caps_fails_the_import() {
-    // Seed 1 imports cleanly (the program-counts test); one fader goes over.
+    // Seed 1 imports cleanly (the program-counts test); one volume goes over.
     let w = World::new(1);
     let t = topo();
-    let first = t.inputs[0].id.clone();
+    let first = t.mixes[0].id.clone();
     let mut state = w.state.clone();
-    state.inputs.get_mut(&first).unwrap().fader_db = 20.0;
-    std::fs::write(&w.rpp, project(&t, &state, &track_name).unwrap()).unwrap();
+    state.mixes.get_mut(&first).unwrap().out.volume_db = 20.0;
+    std::fs::write(
+        &w.rpp,
+        project(&t, &routing(), &state, &track_name).unwrap(),
+    )
+    .unwrap();
     let dir = w.path("state");
     let mut a = import_args(&w, &[]);
     a.extend(["--state-dir".into(), s(&dir)]);
     let e = run(&a).unwrap_err();
     assert_eq!(e.code, EXIT_INPUT);
     let capped = format!(
-        "the state does not fit the engine:\n  outside the engine's caps: input {first}: fader "
+        "the state does not fit the engine:\n  outside the engine's caps: mix {first}: volume "
     );
     assert!(e.msg.contains(&capped), "{}", e.msg);
     assert!(!e.msg.contains("not in site.toml"), "{}", e.msg);
@@ -211,12 +235,18 @@ fn a_topology_that_differs_from_the_site_is_refused_with_its_diff() {
     let site = std::fs::read_to_string(site_path())
         .unwrap()
         .replace("\r\n", "\n");
-    let family = "from = [\"hand1\"]\nto = [\"translator\"]";
-    assert!(site.contains(family));
+    let stems =
+        "inputs = [\"click\", \"guide\", \"drums\", \"bass\", \"inst\", \"other\", \"bgvs\"]";
+    let translator = "id = \"translator\"\ntx = [93]";
+    assert!(site.contains(stems) && site.contains(translator));
     let other = w.path("site.toml");
     std::fs::write(
         &other,
-        site.replace(family, "from = [\"hand2\"]\nto = [\"translator\"]"),
+        site.replace(
+            stems,
+            "inputs = [\"click\", \"guide\", \"drums\", \"bass\", \"inst\", \"other\"]",
+        )
+        .replace(translator, "id = \"translator\"\ntx = [94]"),
     )
     .unwrap();
     let dir = w.path("state");
@@ -235,22 +265,16 @@ fn a_topology_that_differs_from_the_site_is_refused_with_its_diff() {
     ]);
     let e = run(&a).unwrap_err();
     assert_eq!(e.code, EXIT_TOPOLOGY);
-    assert!(
-        e.msg
-            .contains("send hand1>translator: in the project, not in site.toml"),
-        "{}",
-        e.msg
-    );
-    assert!(
-        e.msg
-            .contains("send hand2>translator: in site.toml, not in the project"),
-        "{}",
-        e.msg
-    );
+    for want in [
+        "group stems: inputs [\"bass\", \"bgvs\", \"click\", \"drums\", \"guide\", \"inst\", \"other\"] in the project, [\"bass\", \"click\", \"drums\", \"guide\", \"inst\", \"other\"] in site.toml",
+        "mix translator: tx [93] in the project, [94] in site.toml",
+    ] {
+        assert!(e.msg.contains(want), "{want:?} not in {}", e.msg);
+    }
     assert!(!dir.exists(), "nothing written");
     // The emitted [engine] table is the project's topology and compiles.
     let table = iem_engine::site::parse(&std::fs::read_to_string(emitted).unwrap()).unwrap();
-    iem_engine::graph::compile(&table).unwrap();
+    iem_engine::topology::compile(&table).unwrap();
     assert_eq!(site::topology(&table).diff(&topo()), Vec::<String>::new());
 }
 
@@ -276,7 +300,7 @@ fn a_site_without_an_engine_table_gets_the_projects_topology_proposed() {
     assert!(e.msg.contains("no [engine] table yet"), "{}", e.msg);
     let table = iem_engine::site::parse(&std::fs::read_to_string(emitted).unwrap()).unwrap();
     assert_eq!(table.channels, 132);
-    iem_engine::graph::compile(&table).unwrap();
+    iem_engine::topology::compile(&table).unwrap();
     assert_eq!(site::topology(&table).diff(&topo()), Vec::<String>::new());
     let e = run(&cmd(&[
         "import",
@@ -344,14 +368,14 @@ fn an_edited_state_exports_and_reimports_within_1e_9_db() {
     let dir = w.path("state");
     import_to(&w, &dir);
     let sf = site::open(&site_path()).unwrap();
-    let edited = to_mix(
-        &sf.graph,
-        &reconcile(&sf.graph, &sample_state(&sf.topology, 77)).0,
+    let edited = to_state(
+        &sf.compiled,
+        &reconcile(&sf.compiled, &sample_state(&sf.topology, &routing(), 77)).0,
     );
     Store::open(&dir)
         .unwrap()
         .save(&Persisted {
-            topology_hash: sf.graph.hash.clone(),
+            topology_hash: sf.compiled.hash.clone(),
             state: edited.clone(),
             ..Persisted::default()
         })
@@ -370,11 +394,45 @@ fn an_edited_state_exports_and_reimports_within_1e_9_db() {
         s(&back),
     ]);
     run(&a).unwrap();
-    let loaded = Store::open(&back).unwrap().load(&sf.graph);
+    let loaded = Store::open(&back).unwrap().load(&sf.compiled);
     assert_eq!(
-        compare(&sf.topology, &loaded.persisted.state, &edited, 1e-9),
+        compare(
+            &sf.topology,
+            &routing(),
+            &loaded.persisted.state,
+            &edited,
+            1e-9
+        ),
         Vec::<String>::new()
     );
+}
+
+#[test]
+fn values_the_project_cannot_hold_are_reported_by_the_export() {
+    let w = World::new(20);
+    let dir = w.path("state");
+    import_to(&w, &dir);
+    let sf = site::open(&site_path()).unwrap();
+    let store = Store::open(&dir).unwrap();
+    let mut state = store.load(&sf.compiled).persisted.state;
+    let tr = state.mixes.get_mut(&MixId::new("translator")).unwrap();
+    tr.inputs.get_mut(&InputId::new("mic1")).unwrap().gain_db = -6.0;
+    store
+        .save(&Persisted {
+            topology_hash: sf.compiled.hash.clone(),
+            state,
+            ..Persisted::default()
+        })
+        .unwrap();
+    let out = w.path("rollback.RPP");
+    let report = run(&export_args(&w, &dir, &out)).unwrap();
+    assert!(
+        report.contains(
+            "not carried back (iemmixer only): mix translator level mic1: -6.00 dB (no receive in the project)"
+        ),
+        "{report}"
+    );
+    assert_eq!(std::fs::read(&out).unwrap(), std::fs::read(&w.rpp).unwrap());
 }
 
 #[test]
@@ -498,11 +556,12 @@ fn legacy(w: &World) -> (PathBuf, PathBuf) {
         .inputs
         .iter()
         .map(|i| format!("{:?}", track_name(&i.id.0)))
+        .chain(t.mixes.iter().map(|m| format!("{:?}", track_name(&m.id.0))))
         .chain(
-            t.buses
+            routing()
+                .strips
                 .iter()
-                .filter(|b| b.id.0 != "master")
-                .map(|b| format!("{:?}", track_name(&b.id.0))),
+                .map(|(m, g)| format!("{:?}", track_name(&instance_name(m, g)))),
         )
         .collect();
     let eras = w.path("eras.toml");
@@ -579,7 +638,10 @@ fn band_data_moves_with_the_same_pins_secrets_and_certificate() {
         presets.presets[0].sends[0].src,
         Source::Input(InputId::new("mic1"))
     );
-    assert_eq!(presets.presets[0].stems_fader_db, Some(-3.0));
+    assert_eq!(
+        presets.presets[0].groups,
+        BTreeMap::from([(GroupId::new("stems"), -3.0)])
+    );
     let snaps: SnapshotFile =
         serde_json::from_str(&std::fs::read_to_string(out.join("snapshots/member1.json")).unwrap())
             .unwrap();
@@ -693,7 +755,7 @@ fn two_live_members_on_one_iemmixer_member_fail() {
     let (l, eras) = legacy(&w);
     let mut m = members();
     m.insert("old1".to_owned(), member("member1", false));
-    std::fs::write(&w.aliases, aliases_toml(&topo(), &m)).unwrap();
+    std::fs::write(&w.aliases, aliases_toml(&topo(), &routing(), &m)).unwrap();
     let e = run(&band_args(&w, &l, &eras, &w.path("band"), &["--dry-run"])).unwrap_err();
     assert_eq!(e.code, EXIT_INPUT);
     assert!(
@@ -901,4 +963,154 @@ fn the_binary_reports_through_exit_codes() {
         String::from_utf8_lossy(&ok.stderr)
     );
     assert!(String::from_utf8_lossy(&ok.stdout).contains("dry run: nothing written"));
+}
+
+/// Every file under `dir`: relative path → bytes.
+fn tree(dir: &Path) -> BTreeMap<String, Vec<u8>> {
+    fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, Vec<u8>>) {
+        for e in std::fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                walk(root, &p, out);
+            } else {
+                let rel = p
+                    .strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                out.insert(rel, std::fs::read(&p).unwrap());
+            }
+        }
+    }
+    let mut out = BTreeMap::new();
+    walk(dir, dir, &mut out);
+    out
+}
+
+fn copy_tree(from: &Path, to: &Path) {
+    for (rel, bytes) in tree(from) {
+        let dst = to.join(rel);
+        std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
+        std::fs::write(dst, bytes).unwrap();
+    }
+}
+
+/// Newer predecessor data: a second band run changes member1's presets.
+fn newer_presets(l: &Path) {
+    let preset = PresetEntry {
+        name: "rehearsal".into(),
+        channels: HashMap::from([(
+            1,
+            ChannelPreset {
+                vol: -12.0,
+                mute: true,
+                pan: 0.5,
+            },
+        )]),
+        created_at: 1000,
+        updated_at: 1600,
+        stems_level_db: Some(-9.0),
+        eq_bands: None,
+    };
+    json(
+        &l.join("presets/m1.json"),
+        &HashMap::from([("rehearsal", preset)]),
+    );
+}
+
+#[test]
+fn band_output_is_unchanged_after_a_failure_at_every_step() {
+    let w = World::new(21);
+    let (l, eras) = legacy(&w);
+    let out = w.path("band");
+    run(&band_args(&w, &l, &eras, &out, &[])).unwrap();
+    newer_presets(&l);
+    let before = tree(&out);
+    // `run_with` takes the arguments after the subcommand.
+    let args = band_args(&w, &l, &eras, &out, &[]).split_off(1);
+    let mut steps = Vec::new();
+    for k in 0..500usize {
+        let calls = Cell::new(0usize);
+        let seen = Cell::new(None);
+        let fail = |s: Step| {
+            let n = calls.get();
+            calls.set(n + 1);
+            if n == k {
+                seen.set(Some(s));
+                Err(std::io::Error::other(format!("injected at {s:?}")))
+            } else {
+                Ok(())
+            }
+        };
+        match band_cmd::run_with(&args, &fail) {
+            Err(e) => {
+                assert!(e.msg.contains("injected at"), "{}", e.msg);
+                assert_eq!(tree(&out), before, "a failure at {:?}", seen.get());
+                let (staging, old) = siblings(&out).unwrap();
+                assert!(!staging.exists() && !old.exists(), "{:?}", seen.get());
+                steps.extend(seen.get());
+            }
+            Ok(_) => break,
+        }
+    }
+    for want in [
+        Step::Copy(0),
+        Step::Write(0),
+        Step::Marker,
+        Step::Aside,
+        Step::Swap,
+    ] {
+        assert!(steps.contains(&want), "{want:?} not in {steps:?}");
+    }
+    assert!(steps.len() > 20, "{steps:?}");
+    let after = tree(&out);
+    assert_ne!(after, before);
+    let presets: PresetFile = serde_json::from_slice(&after["presets/member1.json"]).unwrap();
+    assert_eq!(presets.presets[0].sends[0].gain_db, -12.0);
+    assert_eq!(after["cert.pem"], before["cert.pem"]);
+    let (h, store) = hasher(&out);
+    assert!(h.verify("1357", store.member_hash("member1").unwrap()));
+}
+
+#[test]
+fn a_band_run_interrupted_between_the_renames_is_recovered() {
+    let w = World::new(22);
+    let (l, eras) = legacy(&w);
+    let out = w.path("band");
+    run(&band_args(&w, &l, &eras, &out, &[])).unwrap();
+    let first = tree(&out);
+    // A crash after the band directory went aside and before the complete
+    // staging copy took its place.
+    let (staging, old) = siblings(&out).unwrap();
+    copy_tree(&out, &staging);
+    std::fs::write(staging.join("crashed-run.txt"), b"x").unwrap();
+    std::fs::write(staging.join(iem_migrate::stage::MARKER), b"").unwrap();
+    std::fs::rename(&out, &old).unwrap();
+    assert!(!out.exists());
+    let dry = run(&band_args(&w, &l, &eras, &out, &["--dry-run"])).unwrap();
+    assert!(
+        dry.contains("(complete: true); a real run recovers it first"),
+        "{dry}"
+    );
+    assert!(
+        staging.exists() && old.exists(),
+        "a dry run changes nothing"
+    );
+    let report = run(&band_args(&w, &l, &eras, &out, &[])).unwrap();
+    assert!(
+        report.contains("recovered: completed the interrupted swap"),
+        "{report}"
+    );
+    assert!(!staging.exists() && !old.exists());
+    let now = tree(&out);
+    assert_eq!(now["crashed-run.txt"], b"x", "the complete run was kept");
+    assert_eq!(now["cert.pem"], first["cert.pem"]);
+    assert!(!now.contains_key(iem_migrate::stage::MARKER));
+    // An incomplete staging copy is dropped instead.
+    copy_tree(&out, &staging);
+    std::fs::write(staging.join("half.txt"), b"y").unwrap();
+    std::fs::rename(&out, &old).unwrap();
+    let report = run(&band_args(&w, &l, &eras, &out, &[])).unwrap();
+    assert!(report.contains("recovered: restored"), "{report}");
+    assert!(!tree(&out).contains_key("half.txt"));
 }

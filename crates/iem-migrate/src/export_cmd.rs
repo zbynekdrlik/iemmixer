@@ -1,6 +1,7 @@
-//! `iem-migrate export` (design note §3.3, program spec §4.3): the engine's
-//! saved state written into a **new** project made from the original, which
-//! is never overwritten; the result is self-checked before it is written.
+//! `iem-migrate export` (S4 design note §3.3, program spec §4.3, #20 design
+//! note §7): the engine's saved state written into a **new** project made
+//! from the original, which is never overwritten; the result is self-checked
+//! before it is written, and the values it cannot hold are reported.
 
 use std::io::Write as _;
 use std::path::Path;
@@ -47,17 +48,17 @@ pub fn run(args: &[String]) -> Result<String, Failure> {
     let aliases = parse_aliases(&read_text(&a.path("--aliases")?)?).map_err(Failure::input)?;
     let site = site::open(&a.path("--site")?)?;
     let store = Store::open(&dir).map_err(|e| Failure::io(format!("{}: {e}", dir.display())))?;
-    let loaded = store.load(&site.graph);
+    let loaded = store.load(&site.compiled);
     if loaded.source == Saved::Defaults {
         return Err(Failure::input(format!("{}: no saved state", dir.display())));
     }
     let text = read_text(&rpp)?;
     let exported = export_checked(&text, &aliases, &loaded.persisted.state)
         .map_err(|p| Failure::input(format!("{}: {p}", rpp.display())))?;
-    write_new(&out, &exported)?;
+    write_new(&out, &exported.text)?;
     let changed = text
         .lines()
-        .zip(exported.lines())
+        .zip(exported.text.lines())
         .filter(|(x, y)| x != y)
         .count();
     let mut report = vec![
@@ -69,6 +70,12 @@ pub fn run(args: &[String]) -> Result<String, Failure> {
         format!("{changed} line(s) changed; self-check passed"),
         format!("written to {}", out.display()),
     ];
+    report.extend(
+        exported
+            .dropped
+            .iter()
+            .map(|d| format!("not carried back (iemmixer only): {d}")),
+    );
     report.extend(
         loaded
             .rejected
