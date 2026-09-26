@@ -52,6 +52,11 @@ def violations(root: Path) -> list[str]:
             if rel in SELF:
                 continue
             found += [f"{rel}:{n}: force-kill command (program spec I8)" for n, line in lines(path) if FORCE_KILL.search(line)]
+    goldens = root / "goldens"
+    if goldens.is_dir():
+        total = sum(p.stat().st_size for p in goldens.rglob("*") if p.is_file())
+        if total > 20 * 1024 * 1024:
+            found.append(f"goldens/: {total} bytes, over the 20 MB budget (spec §3.5)")
     return found
 
 

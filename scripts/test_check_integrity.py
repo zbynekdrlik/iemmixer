@@ -61,5 +61,12 @@ class IntegrityTests(unittest.TestCase):
             (root / "scripts" / "golden" / "M.psm1").write_text("function X { Stop-Process -Id 1 }\n", encoding="utf-8")
             self.assertEqual(ci.violations(root), ["scripts/golden/M.psm1:1: force-kill command (program spec I8)"])
 
+    def test_goldens_over_twenty_megabytes_fail(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "goldens" / "s1b").mkdir(parents=True)
+            (root / "goldens" / "s1b" / "x.f64").write_bytes(b"\0" * (20 * 1024 * 1024 + 1))
+            self.assertIn("goldens/: 20971521 bytes, over the 20 MB budget (spec §3.5)", ci.violations(root))
+
 if __name__ == "__main__":
     unittest.main()
