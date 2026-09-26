@@ -439,6 +439,8 @@ fn commands_apply_at_their_sample() {
             0.25 * g0() * 10f64.powf(-0.3) * g0(),
             1e-15
         ));
+        // Due mid-block with budget left: the block is cut, nothing waits.
+        assert_eq!(r.h.status.deferred.load(Ordering::Relaxed), 0, "{block}");
     }
 }
 
@@ -744,13 +746,48 @@ fn a_spent_budget_does_not_cut_the_block() {
         assert!(push_group(&mut r.h.cmds, 0, &[RtOp::Nop]));
     }
     // Due mid-block after the budget is spent: nothing more applies in this
-    // block, so it runs whole and the command waits for the next one.
+    // block, so it runs whole and the command waits for the next one, which
+    // makes this a block that left a command for the next block.
     assert!(push_group(&mut r.h.cmds, 16, &[RtOp::Nop]));
+    r.run(&dc(&[0.0; 4], 32), 32);
+    assert_eq!(r.h.cmds.slots(), CMD_RING - 1);
+    assert_eq!(r.h.status.deferred.load(Ordering::Relaxed), 1);
+    r.run(&dc(&[0.0; 4], 32), 32);
+    assert_eq!(r.h.cmds.slots(), CMD_RING);
+    assert_eq!(r.h.status.deferred.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn a_spent_budget_counts_only_what_was_due_in_the_block() {
+    let mut r = rig(&[]);
+    for _ in 0..MAX_CMDS_PER_BLOCK {
+        assert!(push_group(&mut r.h.cmds, 0, &[RtOp::Nop]));
+    }
+    // Due at the next block's first sample: it was never due in this one.
+    assert!(push_group(&mut r.h.cmds, 32, &[RtOp::Nop]));
     r.run(&dc(&[0.0; 4], 32), 32);
     assert_eq!(r.h.cmds.slots(), CMD_RING - 1);
     assert_eq!(r.h.status.deferred.load(Ordering::Relaxed), 0);
     r.run(&dc(&[0.0; 4], 32), 32);
     assert_eq!(r.h.cmds.slots(), CMD_RING);
+    assert_eq!(r.h.status.deferred.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn a_waiting_group_counts_its_block_once() {
+    let mut r = rig(&[]);
+    for _ in 0..200 {
+        assert!(push_group(&mut r.h.cmds, 0, &[RtOp::Nop]));
+    }
+    assert!(push_group(&mut r.h.cmds, 0, &[RtOp::Nop; 400]));
+    // One block of four 256-sample segments: the group waits in each of
+    // them, and the block counts once.
+    r.run(&dc(&[0.0; 4], 4 * SEG), 4 * SEG);
+    assert_eq!(r.h.cmds.slots(), CMD_RING - 400);
+    assert_eq!(r.h.status.deferred.load(Ordering::Relaxed), 1);
+    r.run(&dc(&[0.0; 4], 32), 32);
+    assert_eq!(r.h.cmds.slots(), CMD_RING);
+    assert_eq!(r.h.status.deferred.load(Ordering::Relaxed), 1);
 }
 
 #[test]
