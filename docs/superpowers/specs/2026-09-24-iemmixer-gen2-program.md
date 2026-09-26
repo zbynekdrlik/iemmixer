@@ -57,6 +57,7 @@
 - **P6** Site data never enters the public repo: names, hosts, Dante channel numbers and real track names, PINs, keys. EQ and limiter values are not site data.
 - **P7** The PC is self-contained at runtime: no dependency on any other machine we run.
 - **P8** Framework first; reuse predecessor app code that does not depend on REAPER.
+- **P10** **Appliance.** The IEM PC serves only the mixer: any process, service, driver or power feature that can disturb the audio callback is disabled or constrained (S1c). Gen 3 (later, out of scope): Linux with a real-time kernel and own drivers for a zero-latency system.
 - **P9** **Band members notice nothing.** Same address, same PINs, same app on their phones, same controls and sound; switching between REAPER and iemmixer (trials included) and the cutover need no action from them. Internal fixes (e.g. how PINs are stored) never change what they type or see.
 
 Numbers are tunable defaults unless they are parity requirements, tolerances (§3.5) or safety invariants (§2.5, §4.4).
@@ -105,7 +106,7 @@ Numbers are tunable defaults unless they are parity requirements, tolerances (§
 ### 2.5 Hard invariants
 
 - **I1** The engine opens no socket, links no codec, parses no browser data.
-- **I2** **Lowest stable latency (owner requirement 2026-09-26: in-ear system, target 32 samples ≈ 0.33 ms per buffer, as REAPER originally ran).** The buffer is the card driver's preferred size (one setting shared by REAPER and iemmixer); S1a measures 32/48/64 under load and the lowest size with 0 missed periods becomes the site setting for both, with owner-visible numbers. The engine never changes the rate or the buffer at runtime and refuses any rate but 96 kHz.
+- **I2** **32-sample buffer at 96 kHz (≈ 0.33 ms) is mandatory** (owner 2026-09-26: in-ear system; REAPER ran at 32 before something in Windows degraded it). The PC is an appliance bound to iemmixer: the engine runs with the highest safe priority and the OS is tuned (admin rights) so nothing interrupts it (S1c). The buffer is the card driver's preferred size, shared by REAPER and iemmixer. The engine never changes the rate or buffer at runtime and refuses any rate but 96 kHz.
 - **I3** One ASIO host at a time: the engine refuses while `reaper.exe` exists; the guard never starts REAPER while an engine exists.
 - **I4** The graph is compiled once per run from `site.toml` and validated (acyclic, unique TX, channels in map, one send per pair); topology change = controlled engine restart.
 - **I5** f64, plain summing, no bus pan law, zero added latency, no delay-compensation emulation.
@@ -121,7 +122,7 @@ Numbers are tunable defaults unless they are parity requirements, tolerances (§
 
 ### 3.1 The system reproduced
 
-- **Card:** Yamaha AIC128-D, ASIO only, 96 kHz, buffer today B = 64 (667 µs; originally 32), target the lowest stable B (I2), treated as single-client.
+- **Card:** Yamaha AIC128-D, ASIO only, 96 kHz, buffer today B = 64 (667 µs; originally 32), target B = 32 (I2), treated as single-client.
 - **32 RX, 24 inputs.** Direct: `MIC_1`…`MIC_10`, `HAND_1`…`HAND_3`, `ENG_MIC` (mono), `KEYS`, `IEMONLY`, `CONTENT` (stereo). Stems group: `CLICK`, `GUIDE` (mono), `DRUMS`, `BASS`, `INST`, `OTHER`, `BGVS` (stereo).
 - **23 TX:** 9 member buses and `ENGINEER` (stereo, with EQ, limiter, fader and mute), `TRANSLATOR` (mono), master; plus 10 stems buses without TX.
 - **268 sends:**
@@ -345,7 +346,7 @@ Proof codes: **M** mock E2E, **L** live E2E/HIL, **S** server tests, **E** engin
 
 - **R1** azo fails on this driver → S1a first; fallbacks (§2.2).
 - **R2** REAPER behaviours stay unknown or goldens are blocked → goldens before DSP freeze; D7 fallback chain; Methods B/C; A/B.
-- **R3** Dropouts at the lowest buffer (target B = 32) → S1a buffer sweep; CPU gate; late-callback telemetry; soak; fall back only to the next stable size.
+- **R3** Dropouts at B = 32 → S1c OS tuning (priorities, interrupts, power, background services), DPC/ISR latency measurement, CPU gate, late-callback telemetry, soak.
 - **R4** Development or a HIL job cuts into an event (the owner's signal comes late, or an agent switches unasked) → owner-message rule; immediate "ide event" with job cancel; band-activity alarm; G1.
 - **R5** Engine bug harms hearing → §4.4; fuzzing.
 - **R6** Engine death or parking hangs the PC → graceful paths; S1a reboot test; power cycle last.
