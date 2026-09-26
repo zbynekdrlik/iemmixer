@@ -139,6 +139,10 @@ pub enum Role {
     Observe,
 }
 
+// One message at a time, on the control thread only (never the RT thread):
+// its size does not matter, and boxing the command would only add an
+// allocation per request.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMsg {
