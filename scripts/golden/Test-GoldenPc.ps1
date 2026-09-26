@@ -2,7 +2,8 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
-foreach ($f in (Get-ChildItem -LiteralPath $here -Include '*.ps1', '*.psm1' -Recurse)) {
+# -Include is ignored next to -LiteralPath in Windows PowerShell 5.1: filter by extension.
+foreach ($f in (Get-ChildItem -LiteralPath $here -Recurse -File | Where-Object { @('.ps1', '.psm1') -contains $_.Extension })) {
     $tokens = $null; $errors = $null
     [void][System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$tokens, [ref]$errors)
     if ($errors.Count -gt 0) { throw "parse errors in $($f.Name): $($errors[0].Message)" }
@@ -106,6 +107,18 @@ Set-ItemProperty -Path "Registry::$key" -Name 'v' -Value 'two'
 $v4 = Invoke-GoldenVerify -Backup $backup4
 Assert (-not $v4.identical -and @($v4.registry.differences) -contains $key) 'registry-difference-is-reported'
 Remove-Item -Path "Registry::$key" -Recurse -Force
+
+# Over ssh USERDOMAIN is the workgroup, not the machine; the task must still register for this account.
+$savedDomain = $env:USERDOMAIN
+$env:USERDOMAIN = 'WORKGROUP'
+try {
+    Register-GoldenTask -Root $base -Name 'iemmixer-golden-selftest'
+    $task = Get-ScheduledTask -TaskName 'iemmixer-golden-selftest'
+    Assert ($task.Principal.LogonType -eq 'Interactive' -and $task.Settings.ExecutionTimeLimit -eq 'PT0S' -and $task.Settings.MultipleInstances -eq 'IgnoreNew') 'task-registers-interactive-unbounded-ignorenew-outside-a-domain'
+} finally {
+    $env:USERDOMAIN = $savedDomain
+    Unregister-ScheduledTask -TaskName 'iemmixer-golden-selftest' -Confirm:$false -ErrorAction SilentlyContinue
+}
 
 Remove-Item -LiteralPath $base -Recurse -Force
 Write-Host 'Test-GoldenPc: all passed'
