@@ -131,4 +131,20 @@ mod tests {
         assert!(s.iter().all(|x| x.abs() <= 0.25));
         assert!(s.iter().any(|x| x.abs() > 0.249));
     }
+
+    #[test]
+    fn log_sweep_matches_reference_samples() {
+        // Independent Python implementation (math.exp / math.sin), 2026-09-26.
+        // The tolerance absorbs libm differences; the phase reaches ~3.6e4 rad.
+        let s = log_sweep(96_000, 20.0, 20_000.0, 2.0, 0.25);
+        assert_eq!(s[0], 0.0);
+        for (i, want) in [
+            (1, 0.00032725502822692816),
+            (1000, 0.24295480664072464),
+            (96_000, 0.22343312830799963),
+            (191_999, -0.13943979608114962),
+        ] {
+            assert!((s[i] - want).abs() < 1e-9, "sample {i}: {}", s[i]);
+        }
+    }
 }

@@ -165,6 +165,15 @@ mod tests {
     }
 
     #[test]
+    fn hex_is_lowercase_with_two_digits_per_byte() {
+        assert_eq!(hex(&[0x00, 0x0f, 0xab]), "000fab");
+        assert_eq!(
+            hex(&Sha256::digest(b"abc")),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
     fn bundles_are_byte_identical_across_runs_and_hashes_match_the_files() {
         let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         let cat = catalogue(&["cal".into(), "sum".into()]).unwrap();

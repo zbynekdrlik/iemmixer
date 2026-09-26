@@ -165,6 +165,41 @@ mod tests {
     }
 
     #[test]
+    fn send_volume_scales_both_sides_of_a_panned_send() {
+        let panned = |name: &str, pan: f64| {
+            let mut bus = Track::new(name);
+            let mut s = Send::new(0, SendMode::PreFader);
+            s.vol = 0.5;
+            s.pan = pan;
+            bus.receives.push(s);
+            bus
+        };
+        let p = Project {
+            id: "o".into(),
+            rate: 96_000,
+            format: RenderFormat::Float64,
+            tracks: vec![src("s"), panned("l", -0.5), panned("r", 0.5)],
+        };
+        let taps = post_fader_taps(&p, &stim);
+        assert_eq!(
+            taps[1],
+            Some(vec![Tap {
+                at: 10,
+                l: 0.25,
+                r: 0.125
+            }])
+        );
+        assert_eq!(
+            taps[2],
+            Some(vec![Tap {
+                at: 10,
+                l: 0.125,
+                r: 0.25
+            }])
+        );
+    }
+
+    #[test]
     fn mute_zeroes_every_tap_and_fx_or_mono_leave_the_oracle() {
         let mut s = src("s");
         s.mute = true;

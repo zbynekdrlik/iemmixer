@@ -224,6 +224,16 @@ mod tests {
     }
 
     #[test]
+    fn zero_gains_are_valid_and_written_as_is() {
+        let mut eq = ReaEq::single(Band::new(BandKind::Band, 1000.0, 0.0, 1.0));
+        eq.global_gain = 0.0;
+        let state = eq.state().unwrap();
+        let n = state.len();
+        assert_eq!(state[n - 24..n - 16], 0.0f64.to_le_bytes());
+        assert_eq!(state[n - 16..], TAIL);
+    }
+
+    #[test]
     fn kinds_serialise_in_snake_case() {
         assert_eq!(
             serde_json::to_string(&BandKind::HighPass).unwrap(),

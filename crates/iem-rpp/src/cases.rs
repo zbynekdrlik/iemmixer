@@ -805,9 +805,172 @@ mod tests {
     #[test]
     fn site_eq_file_parses() {
         let eqs = site_eqs().unwrap();
+        assert!(!eqs.is_empty());
+        assert_eq!(eqs[0].0, "EQ-01");
         assert!(
             eqs.iter()
                 .all(|(id, e)| id.starts_with("EQ-") && e.bands.len() == 5)
         );
+    }
+
+    fn param(m: &CaseMeta, key: &str) -> f64 {
+        m.params[key].as_f64().unwrap()
+    }
+
+    fn track<'a>(c: &'a Catalogue, name: &str) -> &'a Track {
+        c.projects
+            .iter()
+            .flat_map(|p| &p.project.tracks)
+            .find(|t| t.name == name)
+            .unwrap()
+    }
+
+    fn item_length(c: &Catalogue, name: &str) -> u64 {
+        track(c, name).item.as_ref().unwrap().length
+    }
+
+    #[test]
+    fn db_converts_decibels_to_linear_gain() {
+        for (x, want) in [
+            (20.0, 10.0),
+            (-20.0, 0.1),
+            (6.0, 1.9952623149688795),
+            (-12.0, 0.251188643150958),
+        ] {
+            assert!((db(x) - want).abs() < 1e-12, "db({x}) = {}", db(x));
+        }
+    }
+
+    #[test]
+    fn durations_become_sample_counts_at_the_project_rate() {
+        assert_eq!(samples(96_000, 500), 48_000);
+        assert_eq!(samples(44_100, 1000), 44_100);
+        assert_eq!(samples(48_000, 2000), 96_000);
+        let c = all();
+        assert_eq!(item_length(&c, "cal64-identity"), 48_000);
+        assert_eq!(item_length(&c, "lim-44100-m6"), 44_100);
+        assert_eq!(item_length(&c, "lim-48000-m6"), 48_000);
+    }
+
+    #[test]
+    fn stimuli_have_their_designed_lengths_and_impulse_positions() {
+        let s = stimuli();
+        assert_eq!(s.len(), 13);
+        for st in &s {
+            let rate = usize::try_from(st.rate).unwrap();
+            let want = if st.file.starts_with("imp-") {
+                rate / 2
+            } else if st.file.starts_with("hot-") {
+                rate
+            } else {
+                192_000
+            };
+            assert!(st.channels.iter().all(|ch| ch.len() == want), "{}", st.file);
+        }
+        let st = s.iter().find(|x| x.file == "imp-st-48000.wav").unwrap();
+        assert_eq!(st.channels[0][480], AMP);
+        assert_eq!(st.channels[1][960], AMP);
+    }
+
+    #[test]
+    fn pan_points_cover_the_grid_and_three_off_grid_values() {
+        let p = pan_points();
+        assert_eq!(p.len(), 44);
+        assert_eq!(p[0], -1.0);
+        assert_eq!(p[10], -0.5);
+        assert_eq!(p[20], 0.0);
+        assert_eq!(p[40], 1.0);
+        assert_eq!(p[41..], [0.86, -0.4, 0.04]);
+    }
+
+    #[test]
+    fn post_fader_pan_cases_cross_track_and_send_pan() {
+        let c = all();
+        let got: Vec<(f64, f64)> = (0..6)
+            .map(|i| {
+                let m = case(&c, &format!("pan-post-{i}"));
+                (param(m, "track_pan"), param(m, "pan"))
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (-0.5, -0.5),
+                (-0.5, 0.0),
+                (-0.5, 0.5),
+                (0.5, -0.5),
+                (0.5, 0.0),
+                (0.5, 0.5)
+            ]
+        );
+        for (i, (tp, _)) in got.iter().enumerate() {
+            assert_eq!(track(&c, &format!("src-post-{i}")).pan, *tp);
+        }
+    }
+
+    #[test]
+    fn downmix_cases_pan_left_and_right() {
+        let c = all();
+        assert_eq!(param(case(&c, "dmx-st-pl"), "pan"), -0.5);
+        assert_eq!(param(case(&c, "dmx-st-pr"), "pan"), 0.5);
+        assert_eq!(track(&c, "dmx-st-pl").receives[0].pan, -0.5);
+    }
+
+    #[test]
+    fn eq_cases_carry_the_rate_in_khz_and_the_designed_gains() {
+        let c = all();
+        for khz in [44, 48, 96] {
+            assert_eq!(case(&c, &format!("eq{khz}-pk-f2-g0-w3")).family, "eq");
+        }
+        for (g, want) in [
+            0.251188643150958,
+            0.7079457843841379,
+            1.4125375446227544,
+            3.9810717055349722,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let band = &case(&c, &format!("eq96-pk-f2-g{g}-w3")).params["band"];
+            let got = band["gain_lin"].as_f64().unwrap();
+            assert!((got - want).abs() < 1e-12, "g{g}: {got}");
+            assert_eq!(band["freq_hz"].as_f64(), Some(1000.0));
+        }
+        let bands = &case(&c, "eq96-edge-cascade").params["eq"]["bands"];
+        let gain = |i: usize| bands[i]["gain_lin"].as_f64().unwrap();
+        assert!((gain(1) - 1.9952623149688795).abs() < 1e-12);
+        assert!((gain(4) - 0.5011872336272722).abs() < 1e-12);
+    }
+
+    #[test]
+    fn site_eq_family_builds_an_impulse_and_a_sweep_case_per_eq() {
+        let n = site_eqs().unwrap().len();
+        let c = catalogue(&["site-eq".into()]).unwrap();
+        assert_eq!(c.projects.len(), 1);
+        let p = &c.projects[0];
+        assert_eq!(p.project.id, "site-eq-96000");
+        assert_eq!(p.meta.len(), 2 * n);
+        assert_eq!(p.meta[0].track, "seq-eq-01-imp");
+        assert_eq!(p.meta[1].track, "seq-eq-01-sweep");
+        assert_eq!(p.meta[1].stimulus.as_deref(), Some("sweep-96000.wav"));
+        assert_eq!(item_length(&c, "seq-eq-01-sweep"), 192_000);
+    }
+
+    #[test]
+    fn limiter_cases_have_their_ceilings() {
+        let c = all();
+        for (name, want) in [
+            ("lim-96000-m6", -6.0),
+            ("lim-96000-m3", -3.0),
+            ("lim-96000-0", 0.0),
+            ("lim-48000-m6", -6.0),
+            ("lim-44100-m6", -6.0),
+        ] {
+            assert_eq!(param(case(&c, name), "limit_db"), want, "{name}");
+            assert_eq!(
+                track(&c, name).fx,
+                vec![FxSlot::active(Fx::Limiter { limit_db: want })]
+            );
+        }
     }
 }

@@ -244,6 +244,7 @@ impl Project {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fx::Fx;
 
     fn two_track() -> Project {
         let mut src = Track::new("src");
@@ -302,6 +303,41 @@ mod tests {
         let mut p = two_track();
         p.rate = 22_050;
         assert!(p.to_rpp().is_err());
+    }
+
+    #[test]
+    fn refuses_bad_track_faders_and_empty_or_unsafe_items() {
+        for (vol, pan) in [
+            (-1.0, 0.0),
+            (f64::INFINITY, 0.0),
+            (f64::NAN, 0.0),
+            (1.0, 1.5),
+        ] {
+            let mut p = two_track();
+            p.tracks[0].vol = vol;
+            p.tracks[0].pan = pan;
+            assert!(p.validate().is_err(), "vol {vol} pan {pan}");
+        }
+        let mut p = two_track();
+        p.tracks[0].vol = 0.0;
+        p.tracks[0].pan = -1.0;
+        assert!(p.validate().is_ok());
+        let mut p = two_track();
+        p.tracks[0].item.as_mut().unwrap().length = 0;
+        assert!(p.validate().is_err());
+        let mut p = two_track();
+        p.tracks[0].item.as_mut().unwrap().stimulus = "a b.wav".into();
+        assert!(p.validate().is_err());
+    }
+
+    #[test]
+    fn writes_an_fx_chain_only_for_tracks_with_plugins() {
+        let mut p = two_track();
+        assert!(!p.to_rpp().unwrap().contains("<FXCHAIN"));
+        p.tracks[1].fx.push(FxSlot::active(Fx::Trim { db: 6.0 }));
+        let text = p.to_rpp().unwrap();
+        assert_eq!(text.matches("<FXCHAIN").count(), 1);
+        assert!(text.contains("<JS utility/volume_pan \"\"\n"));
     }
 
     #[test]
