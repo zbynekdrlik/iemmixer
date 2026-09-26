@@ -106,7 +106,7 @@ Numbers are tunable defaults unless they are parity requirements, tolerances (§
 ### 2.5 Hard invariants
 
 - **I1** The engine opens no socket, links no codec, parses no browser data.
-- **I2** **32-sample buffer at 96 kHz (≈ 0.33 ms) is mandatory** (owner 2026-09-26: in-ear system; REAPER ran at 32 before something in Windows degraded it). The PC is an appliance bound to iemmixer: the engine runs with the highest safe priority and the OS is tuned (admin rights) so nothing interrupts it (S1c). The buffer is the card driver's preferred size, shared by REAPER and iemmixer. The engine never changes the rate or buffer at runtime and refuses any rate but 96 kHz.
+- **I2** **iemmixer runs at a 32-sample buffer at 96 kHz (≈ 0.33 ms) — mandatory** (owner 2026-09-26: in-ear system). The PC is an appliance bound to iemmixer: the engine runs with the highest safe priority and the OS is tuned (admin rights) so nothing interrupts it (S1c). The buffer is the card driver's preferred size: iemmixer's switch sets 32 when it takes the card and restores the predecessor's previous value on "ide event", so REAPER stays exactly as it is. The engine never changes the rate or buffer at runtime and refuses any rate but 96 kHz.
 - **I3** One ASIO host at a time: the engine refuses while `reaper.exe` exists; the guard never starts REAPER while an engine exists.
 - **I4** The graph is compiled once per run from `site.toml` and validated (acyclic, unique TX, channels in map, one send per pair); topology change = controlled engine restart.
 - **I5** f64, plain summing, no bus pan law, zero added latency, no delay-compensation emulation.
@@ -122,7 +122,7 @@ Numbers are tunable defaults unless they are parity requirements, tolerances (§
 
 ### 3.1 The system reproduced
 
-- **Card:** Yamaha AIC128-D, ASIO only, 96 kHz, buffer today B = 64 (667 µs; originally 32), target B = 32 (I2), treated as single-client.
+- **Card:** Yamaha AIC128-D, ASIO only, 96 kHz, predecessor today B = 64 (667 µs); iemmixer B = 32 (I2), treated as single-client.
 - **32 RX, 24 inputs.** Direct: `MIC_1`…`MIC_10`, `HAND_1`…`HAND_3`, `ENG_MIC` (mono), `KEYS`, `IEMONLY`, `CONTENT` (stereo). Stems group: `CLICK`, `GUIDE` (mono), `DRUMS`, `BASS`, `INST`, `OTHER`, `BGVS` (stereo).
 - **23 TX:** 9 member buses and `ENGINEER` (stereo, with EQ, limiter, fader and mute), `TRANSLATOR` (mono), master; plus 10 stems buses without TX.
 - **268 sends:**
