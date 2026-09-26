@@ -30,7 +30,7 @@
   - **D2** zdieľanie počítača: okná otváraš ty správou (vyššie).
   - **D3** zvláštnosti REAPERa: mix presne ako dnes, 4 zvláštnosti opraviť.
   - **D4** prechod: 2 skúšky a 1 ostrá akcia na dočasnej adrese, potom súhlas zvukára a kapely, hlavná adresa a 8 týždňov možnosť návratu.
-  - D5 a D7 prídu neskôr, pri príslušnej časti.
+  - D5 príde neskôr, pri príslušnej časti. D7 rozhodnuté: referenčné rendery robí REAPER na iem PC (záloha → render na kópii → obnova).
 - **Pre kapelu sa nič nemení:** rovnaká adresa, rovnaké PINy, rovnaká appka v telefóne. Pri skúškach a pri prechode nemusia nič riešiť.
 
 ---
@@ -230,7 +230,7 @@ Proof codes: **M** mock E2E, **L** live E2E/HIL, **S** server tests, **E** engin
 - **Remaining:** A/B in trials → recorded in D3.
 - **Human acceptance:** 2 rehearsals + 1 service in trial (D4) → engineer and band sign-off.
 
-**Goldens:** Method A renders REAPER headless on `<build-box>` from `iem-rpp`-generated projects (D7); fallbacks: a Windows VM, a ReaPlugs harness, Method B plus analytic references, A/B. Stored compactly (≤ 20 MB); site EQ and limiter settings are anonymised, rendered once, compared in public CI.
+**Goldens:** Method A renders with the IEM PC's own REAPER in dev time, from `iem-rpp`-generated project copies, offline without opening the card (D7): back up REAPER's and the predecessor's state first, restore and verify it afterwards; the original project is never touched; fallbacks: a Windows VM, a ReaPlugs harness, Method B plus analytic references, A/B. Stored compactly (≤ 20 MB); site EQ and limiter settings are anonymised, rendered once, compared in public CI.
 
 ---
 
@@ -324,7 +324,7 @@ Proof codes: **M** mock E2E, **L** live E2E/HIL, **S** server tests, **E** engin
 |---|---|---|---|---|
 | **S0** | Fresh import, LICENSE, repo settings, CI skeleton, security baseline incl. complete login limiter, ops repo skeleton | No | ~1k, 1.5 wk | D1 (push only) |
 | S1a | Owner-present ASIO spike (interim switch script): driver, duplex, callback baseline, resets, clock role, fault injections incl. `seh_ctl`, OS restart, parked-engine reboot; optional hard-kill | Yes | ~0.5k, 1 wk | S0 |
-| S1b | Golden spike on `<build-box>`: generator, headless render, taper, shelf, HPF, downmix | No | ~0.6k, 1.5 wk | D7 |
+| S1b | Golden spike on the IEM PC's REAPER (backup → offline render of project copies → restore + verify): generator, taper, shelf, HPF, downmix | Yes (dev time) | ~0.6k, 1.5 wk | S0 |
 | S2 | DSP, limiter, golden harness, vectors | No | ~2.5k, 2 wk | S1b, D1 |
 | S3 | Engine on Offline/NullRt: graph, RT, persistence, pipes, crash handling, test cap, oracle | No | ~3.5k, 3 wk | S2 |
 | S4 | Importer, exporter, legacy data, certificate, PIN rule | No | ~0.9k, 1.5 wk | S3 |
@@ -356,16 +356,16 @@ Proof codes: **M** mock E2E, **L** live E2E/HIL, **S** server tests, **E** engin
 
 ---
 
-## 8. Owner decisions (D1–D4 approved 2026-09-24; D5, D7 pending)
+## 8. Owner decisions (D1–D4 approved 2026-09-24, D7 2026-09-26; D5 pending)
 
-D1–D4: the **bold** option was approved. D5 and D7 wait for the named sub-project; **bold** = recommended. (Former D6 and D8 are settled by P9 and the agent: PINs stay 4 digits; a renamed member's old history is imported archived and read-only.)
+D1–D4: the **bold** option was approved. D5 waits for S8; **bold** = recommended. (Former D6 and D8 are settled by P9 and the agent: PINs stay 4 digits; a renamed member's old history is imported archived and read-only.)
 
 - **D1 Licence** (blocks the first push): **(a) MIT OR Apache-2.0 with a GPL limiter crate (engine binary GPL).** (b) All GPL. (c) Permissive with a clean-room limiter: behavioural parity only, weak legal footing.
 - **D2 Sharing the PC — approved (owner model, 2026-09-24):** **the owner signals every event by message — "ide event" → `event`, "event skončil" → `dev`; the PC belongs to development in between; reboot = `event`; interlock and band-activity alarm kept; G2 procedural.** (Superseded alternatives: 12 h owner-granted windows, signed grants, calendar-autonomous, unrestricted, owner-present only.)
 - **D3 REAPER quirks Q1–Q4** (blocks S8): **(a) exact mix math; fix all four (§3.4).** (b) Replicate any chosen item.
 - **D4 Cutover** (blocks S8): **(a) all gates green, 2 trial rehearsals and 1 service on the band's usual address, engineer and band sign-off, then iemmixer becomes the boot default; 8-week rollback window.** (b) 1 rehearsal, 12 weeks. (c) 4 rehearsals and 2 services, 6 weeks. The band's address never changes; trial mixes are discarded.
 - **D5 Dante self-loopback** (S8): (a) none. **(b) The owner subscribes a spare TX pair to a spare RX pair on the same card (the A1 exception).** (c) The same on a band pair.
-- **D7 REAPER licence for golden renders** (S1b): **(a) headless on `<build-box>`.** (b) A Windows VM (+1 week). (c) No: taper, mute and downmix move to Method B in S6/S7.
+- **D7 Golden renders — decided 2026-09-26:** REAPER is never installed on a dev box; renders run on the IEM PC's REAPER in dev time, with a full backup of REAPER's and the predecessor's state before and a verified restore after.
 
 ---
 
