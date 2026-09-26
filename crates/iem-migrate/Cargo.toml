@@ -1,0 +1,26 @@
+[package]
+name = "iem-migrate"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+# D1(a): links iem-engine (site, graph, persist), which links the GPL limiter.
+license = "GPL-3.0-or-later"
+repository.workspace = true
+description = "iemmixer migration CLI: predecessor project and band data import, rollback export"
+
+[dependencies]
+iem-core = { path = "../iem-core" }
+iem-engine = { path = "../iem-engine" }
+iem-engine-proto = { path = "../iem-engine-proto" }
+iem-rpp = { path = "../iem-rpp" }
+iem-server = { path = "../iem-server" }
+serde = "1.0"
+serde_json = "1.0"
+
+[dev-dependencies]
+base64 = "0.22"
+tempfile = "3"
+
+[[bin]]
+name = "iem-migrate"
+path = "src/main.rs"
