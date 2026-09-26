@@ -107,6 +107,16 @@ impl StereoGain {
     }
 
     /// Gains for the next sample.
+    /// The gains [`StereoGain::tick`] returns while no ramp moves (the
+    /// engine's steady-state fast path); `None` while one does.
+    pub fn steady(&self) -> Option<(f64, f64)> {
+        if self.l.is_moving() || self.r.is_moving() || self.on.is_moving() {
+            return None;
+        }
+        let on = self.on.value();
+        Some((self.l.value() * on, self.r.value() * on))
+    }
+
     pub fn tick(&mut self) -> (f64, f64) {
         let on = self.on.tick();
         (self.l.tick() * on, self.r.tick() * on)
@@ -116,6 +126,34 @@ impl StereoGain {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn steady_is_none_while_moving_and_equals_tick_at_rest() {
+        let mut g = StereoGain::new(96_000.0, 0.5, false, 0.25);
+        let rest = g.steady().unwrap();
+        assert_eq!(g.tick(), rest);
+        assert_eq!(rest, send_gains(0.5, false, 0.25));
+        g.set(0.8, false, -0.5);
+        for _ in 0..959 {
+            assert!(g.steady().is_none());
+            g.tick();
+        }
+        assert!(g.steady().is_none());
+        let last = g.tick();
+        assert_eq!(g.steady(), Some(last));
+        assert_eq!(g.tick(), last);
+        // Muting ramps over 5 ms and then rests at zero.
+        g.set(0.8, true, -0.5);
+        for _ in 0..480 {
+            assert!(g.steady().is_none());
+            g.tick();
+        }
+        assert_eq!(g.steady(), Some((0.0, 0.0)));
+        // A pan-only change moves the channel ramps.
+        let mut p = StereoGain::new(96_000.0, 1.0, false, 0.0);
+        p.set(1.0, false, 0.5);
+        assert!(p.steady().is_none());
+    }
 
     #[test]
     fn centre_and_edges() {

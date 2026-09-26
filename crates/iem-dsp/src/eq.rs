@@ -372,6 +372,15 @@ impl<const CH: usize> Equalizer<CH> {
     }
 
     /// Zero every filter state (node reset after a sanitiser trip, X1).
+    /// True while the EQ passes its input through unchanged: every band
+    /// bypassed and the global gain resting at exactly 1 (the engine then
+    /// skips `process`, which would return the input bit for bit).
+    pub fn is_identity(&self) -> bool {
+        !self.global.is_moving()
+            && self.global.value() == 1.0
+            && self.bands.iter().all(BandState::bypassed)
+    }
+
     pub fn reset(&mut self) {
         for b in &mut self.bands {
             b.state = [[0.0; 2]; CH];
@@ -511,6 +520,47 @@ mod tests {
             .zip(b)
             .map(|(x, y)| (x - y).abs())
             .fold(0.0, f64::max)
+    }
+
+    fn run_silence(eq: &mut Equalizer<2>, n: usize) {
+        let (mut l, mut r) = (vec![0.0; n], vec![0.0; n]);
+        eq.process([l.as_mut_slice(), r.as_mut_slice()]);
+    }
+
+    #[test]
+    fn identity_only_when_every_band_is_bypassed_at_unity() {
+        let flat = EqParams::standard_flat();
+        let mut eq = Equalizer::<2>::new(&flat, SR);
+        assert!(eq.is_identity());
+        let x: Vec<f64> = (0..64)
+            .map(|i| ((i * 37) % 11) as f64 / 7.0 - 0.6)
+            .collect();
+        let (mut l, mut r) = (x.clone(), x.clone());
+        eq.process([l.as_mut_slice(), r.as_mut_slice()]);
+        assert_eq!((&l, &r), (&x, &x));
+        let mut on = flat;
+        on.bands[2] = band(BandKind::Peak, 1000.0, 2.0, 1.0);
+        eq.set(&on);
+        assert!(!eq.is_identity());
+        run_silence(&mut eq, RAMP);
+        assert!(!eq.is_identity());
+        on.bands[2].enabled = false;
+        eq.set(&on);
+        assert!(!eq.is_identity());
+        run_silence(&mut eq, RAMP - 1);
+        assert!(!eq.is_identity());
+        run_silence(&mut eq, 1);
+        assert!(eq.is_identity());
+        let mut half = flat;
+        half.global_gain = 0.5;
+        eq.set(&half);
+        assert!(!eq.is_identity());
+        run_silence(&mut eq, RAMP);
+        assert!(!eq.is_identity());
+        eq.set(&flat);
+        assert!(!eq.is_identity());
+        run_silence(&mut eq, RAMP);
+        assert!(eq.is_identity());
     }
 
     #[test]
