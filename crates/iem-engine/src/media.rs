@@ -133,6 +133,21 @@ mod tests {
     }
 
     #[test]
+    fn a_non_finite_talkback_frame_does_not_poison_later_frames() {
+        let (mut p, mut c) = rtrb::RingBuffer::new(8000);
+        let mut feed = TalkbackFeed::new();
+        feed.feed(&[f32::NAN, f32::INFINITY, 0.5, f32::NEG_INFINITY], &mut p);
+        feed.feed(&[0.25; 960], &mut p);
+        let got: Vec<f32> = std::iter::from_fn(|| c.pop().ok()).collect();
+        assert_eq!(got.len(), 1928);
+        assert!(
+            got.iter().all(|x| x.is_finite()),
+            "non-finite talkback reached the ring"
+        );
+        assert!(got[400..].iter().all(|x| (x - 0.25).abs() < 1e-6));
+    }
+
+    #[test]
     fn talkback_feed_upsamples_and_counts_drops() {
         let (mut p, mut c) = rtrb::RingBuffer::new(100);
         let mut feed = TalkbackFeed::new();
