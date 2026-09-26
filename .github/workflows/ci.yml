@@ -90,7 +90,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo llvm-cov --locked --package iem-core --package iem-server --package iem-rpp \
-            --package iem-dsp --package iem-limiter-mga --package iem-engine-proto --all-features \
+            --package iem-dsp --package iem-limiter-mga --package iem-engine-proto --package iem-audio-io --all-features \
             --json --summary-only --output-path "$RUNNER_TEMP/coverage.json"
           pct="$(jq '.data[0].totals.lines.percent' "$RUNNER_TEMP/coverage.json")"
           floor="$(tr -d '[:space:]' < .github/coverage-floor)"
@@ -391,7 +391,7 @@ jobs:
           if [ -s "$RUNNER_TEMP/pr.diff" ]; then
             cargo mutants --list --in-diff "$RUNNER_TEMP/pr.diff" \
               --package iem-core --package iem-server --package iem-ui --package iem-rpp \
-              --package iem-dsp --package iem-limiter-mga --package iem-engine-proto > "$RUNNER_TEMP/mutants.txt"
+              --package iem-dsp --package iem-limiter-mga --package iem-engine-proto --package iem-audio-io > "$RUNNER_TEMP/mutants.txt"
             count="$(wc -l < "$RUNNER_TEMP/mutants.txt")"
           fi
           [ "$(grep -cE '^ +shard: \[' .github/workflows/ci.yml)" -eq 1 ] \
@@ -424,7 +424,7 @@ jobs:
         with:
           tool: cargo-nextest@0.9.146
       - name: Build the mutants profile once (the shards restore this cache)
-        run: cargo nextest run --locked --cargo-profile mutants --no-run -p iem-core -p iem-server -p iem-ui -p iem-rpp -p iem-dsp -p iem-limiter-mga -p iem-engine-proto --all-features --all-targets
+        run: cargo nextest run --locked --cargo-profile mutants --no-run -p iem-core -p iem-server -p iem-ui -p iem-rpp -p iem-dsp -p iem-limiter-mga -p iem-engine-proto -p iem-audio-io --all-features --all-targets
 
   mutation:
     name: mutation shard ${{ matrix.shard }}
@@ -454,7 +454,7 @@ jobs:
         with:
           tool: cargo-mutants@27.1.0,cargo-nextest@0.9.146
       - name: Warm target (dependencies restored; workspace crates build once, then are copied per job)
-        run: cargo nextest run --locked --cargo-profile mutants --no-run -p iem-core -p iem-server -p iem-ui -p iem-rpp -p iem-dsp -p iem-limiter-mga -p iem-engine-proto --all-features --all-targets
+        run: cargo nextest run --locked --cargo-profile mutants --no-run -p iem-core -p iem-server -p iem-ui -p iem-rpp -p iem-dsp -p iem-limiter-mga -p iem-engine-proto -p iem-audio-io --all-features --all-targets
       - name: Diff-scoped mutants
         run: |
           set -euo pipefail
@@ -468,5 +468,5 @@ jobs:
           cargo mutants --in-diff "$RUNNER_TEMP/pr.diff" --baseline=skip --timeout 60 --jobs 2 --copy-target=true \
             --shard "${{ matrix.shard }}/${{ strategy.job-total }}" \
             --package iem-core --package iem-server --package iem-ui --package iem-rpp \
-            --package iem-dsp --package iem-limiter-mga --package iem-engine-proto \
+            --package iem-dsp --package iem-limiter-mga --package iem-engine-proto --package iem-audio-io \
             --all-features -- --all-targets
