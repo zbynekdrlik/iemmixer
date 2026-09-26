@@ -821,7 +821,6 @@ mod tests {
                     enabled: false,
                     limit_db: -2.898392646264181,
                 },
-                ..BusState::default()
             },
         );
         want.buses.insert(
@@ -864,7 +863,6 @@ mod tests {
                     enabled: true,
                     limit_db: -4.4514733044767265,
                 },
-                ..BusState::default()
             },
         );
         want.buses.insert(
