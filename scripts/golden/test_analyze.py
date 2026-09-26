@@ -94,6 +94,25 @@ class SizeTests(unittest.TestCase):
                 an.check_size(Path(d), limit=512)
 
 
+class VectorsTests(unittest.TestCase):
+    def test_every_vector_of_a_file_survives(self) -> None:
+        # S2 found goldens/s1b/*.f64 mostly zero: each add() reopened the file with "wb".
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d)
+            v = an.Vectors(out)
+            # Larger than the writer's buffer, so an early vector reaches the disk before the next add().
+            a, b = np.arange(1.0, 5001.0), np.arange(-3000.0, 0.0)
+            v.add("eq-96000", "a", a, {})
+            v.add("lim-96000", "c", np.array([[6.0, 7.0]]), {})
+            v.add("eq-96000", "b", b, {})
+            v.close()
+            data = np.fromfile(out / "eq-96000.f64", dtype="<f8")
+            self.assertTrue(np.array_equal(data, np.concatenate([a, b])))
+            index = json.loads((out / "index.json").read_text(encoding="utf-8"))
+            self.assertEqual(index["eq-96000"]["b"], {"offset": 5000, "shape": [3000]})
+            self.assertEqual(np.fromfile(out / "lim-96000.f64", dtype="<f8").tolist(), [6.0, 7.0])
+
+
 class EndToEndTests(unittest.TestCase):
     def test_a_pan_case_and_an_eq_case_become_laws_and_vectors(self) -> None:
         with tempfile.TemporaryDirectory() as d:
