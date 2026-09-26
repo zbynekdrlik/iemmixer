@@ -708,9 +708,13 @@ impl Processor {
                     for ((a, b), (x, y)) in
                         l.iter_mut().zip(r.iter_mut()).zip(dl.iter().zip(dr.iter()))
                     {
+                        // At the ends the result is exactly wet or dry, as in a
+                        // segment that starts after the fade (block-size invariance).
                         let m = mix.tick();
-                        *a = x + m * (*a - x);
-                        *b = y + m * (*b - y);
+                        if m != 1.0 {
+                            *a = x + m * (*a - x);
+                            *b = y + m * (*b - y);
+                        }
                     }
                 }
             }
