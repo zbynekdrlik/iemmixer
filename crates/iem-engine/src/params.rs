@@ -142,8 +142,10 @@ mod tests {
 
     #[test]
     fn state_caps_replace_non_finite_with_defaults() {
-        let mut eq = Eq::default();
-        eq.gain_db = f64::NAN;
+        let mut eq = Eq {
+            gain_db: f64::NAN,
+            ..Eq::default()
+        };
         eq.bands[1].freq_hz = 1e9;
         eq.bands[2].gain_db = f64::NEG_INFINITY;
         eq.bands[3].bw_oct = 0.0;
@@ -209,8 +211,10 @@ mod tests {
 
     #[test]
     fn eq_params_convert_to_linear() {
-        let mut eq = Eq::default();
-        eq.gain_db = -6.0;
+        let mut eq = Eq {
+            gain_db: -6.0,
+            ..Eq::default()
+        };
         eq.bands[2].enabled = true;
         eq.bands[2].gain_db = 6.0;
         eq.bands[3].gain_db = DB_OFF;
