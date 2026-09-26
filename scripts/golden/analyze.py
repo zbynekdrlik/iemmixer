@@ -247,7 +247,9 @@ class Vectors:
         self.out, self.index, self.handles = out, {}, {}
 
     def add(self, name: str, case: str, data: np.ndarray, meta: dict) -> None:
-        fh = self.handles.setdefault(name, (self.out / f"{name}.f64").open("wb"))
+        fh = self.handles.get(name)
+        if fh is None:   # open once: reopening with "wb" truncated earlier vectors (found in S2)
+            fh = self.handles[name] = (self.out / f"{name}.f64").open("wb")
         offset = fh.tell() // 8
         arr = np.ascontiguousarray(data, dtype="<f8")
         fh.write(arr.tobytes())
