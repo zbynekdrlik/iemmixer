@@ -80,10 +80,10 @@ jobs:
       - uses: taiki-e/install-action@7623a79cdfecb99d681017af368ca353d9f49bb5 # v2.87.19
         with:
           tool: cargo-llvm-cov@0.9.1
-      - name: Tests with line coverage (iem-core, iem-server) against the floor
+      - name: Tests with line coverage (iem-core, iem-server, iem-rpp) against the floor
         run: |
           set -euo pipefail
-          cargo llvm-cov --locked --package iem-core --package iem-server --all-features \
+          cargo llvm-cov --locked --package iem-core --package iem-server --package iem-rpp --all-features \
             --json --summary-only --output-path "$RUNNER_TEMP/coverage.json"
           pct="$(jq '.data[0].totals.lines.percent' "$RUNNER_TEMP/coverage.json")"
           floor="$(tr -d '[:space:]' < .github/coverage-floor)"
@@ -333,7 +333,7 @@ jobs:
           count=0
           if [ -s "$RUNNER_TEMP/pr.diff" ]; then
             cargo mutants --list --in-diff "$RUNNER_TEMP/pr.diff" \
-              --package iem-core --package iem-server --package iem-ui > "$RUNNER_TEMP/mutants.txt"
+              --package iem-core --package iem-server --package iem-ui --package iem-rpp > "$RUNNER_TEMP/mutants.txt"
             count="$(wc -l < "$RUNNER_TEMP/mutants.txt")"
           fi
           [ "$(grep -cE '^ +shard: \[' .github/workflows/ci.yml)" -eq 1 ] \
@@ -366,7 +366,7 @@ jobs:
         with:
           tool: cargo-nextest@0.9.146
       - name: Build the mutants profile once (the shards restore this cache)
-        run: cargo nextest run --locked --cargo-profile mutants --no-run -p iem-core -p iem-server -p iem-ui --all-features --all-targets
+        run: cargo nextest run --locked --cargo-profile mutants --no-run -p iem-core -p iem-server -p iem-ui -p iem-rpp --all-features --all-targets
 
   mutation:
     name: mutation shard ${{ matrix.shard }}
@@ -396,7 +396,7 @@ jobs:
         with:
           tool: cargo-mutants@27.1.0,cargo-nextest@0.9.146
       - name: Warm target (dependencies restored; workspace crates build once, then are copied per job)
-        run: cargo nextest run --locked --cargo-profile mutants --no-run -p iem-core -p iem-server -p iem-ui --all-features --all-targets
+        run: cargo nextest run --locked --cargo-profile mutants --no-run -p iem-core -p iem-server -p iem-ui -p iem-rpp --all-features --all-targets
       - name: Diff-scoped mutants
         run: |
           set -euo pipefail
@@ -409,5 +409,5 @@ jobs:
           # and would allow 300 s per mutant; the tests take ~6 s.
           cargo mutants --in-diff "$RUNNER_TEMP/pr.diff" --baseline=skip --timeout 60 --jobs 2 --copy-target=true \
             --shard "${{ matrix.shard }}/${{ strategy.job-total }}" \
-            --package iem-core --package iem-server --package iem-ui \
+            --package iem-core --package iem-server --package iem-ui --package iem-rpp \
             --all-features -- --all-targets
