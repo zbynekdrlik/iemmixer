@@ -16,8 +16,8 @@ use iem_rpp::band::{Ctx, Stats, rekey_customization, rekey_presets, rekey_snapsh
 use iem_rpp::topology::Topology;
 use iem_server::band_import::{
     DefaultPins, FileOutcome, LegacyConfig, PinOutcome, PinRequest, check_jwt_secret, check_vapid,
-    import_photo, import_pins, import_push, import_secret, import_tls, parse_default_pins,
-    parse_legacy_config,
+    import_pins, import_push, import_secret, import_tls, parse_default_pins, parse_legacy_config,
+    read_photo,
 };
 use iem_server::pin_hash::is_valid_pin_format;
 use iem_server::pin_store::ENGINEER_ID;
@@ -43,8 +43,9 @@ struct Plan<'a> {
     problems: Vec<String>,
     /// JSON files to write (path inside the band directory, text).
     files: Vec<(PathBuf, String)>,
-    /// Photos to copy (source, path inside the band directory).
-    photos: Vec<(PathBuf, PathBuf)>,
+    /// Photos to copy (source, path inside the band directory, the bytes
+    /// checked): the copy must read the same bytes.
+    photos: Vec<(PathBuf, PathBuf, Vec<u8>)>,
     pins: Vec<PinRequest>,
     config: Option<LegacyConfig>,
 }
@@ -267,12 +268,12 @@ impl<'a> Plan<'a> {
                 continue;
             }
             let rel = Path::new("photos").join(format!("{}.jpg", m.id));
-            match import_photo(&path, &self.out.join(&rel), true) {
-                Ok(()) => {
+            match read_photo(&path) {
+                Ok(data) => {
                     self.report.push(format!("photo {}", m.id));
-                    self.photos.push((path, rel));
+                    self.photos.push((path, rel, data));
                 }
-                Err(e) => self.problems.push(e.to_string()),
+                Err(e) => self.problems.push(format!("{}: {e}", path.display())),
             }
         }
     }
@@ -473,9 +474,19 @@ impl<'a> Plan<'a> {
                 .write(rel, text.as_bytes())
                 .map_err(|e| io(&self.out.join(rel), e))?;
         }
-        for (src, rel) in &self.photos {
+        for (src, rel, checked) in &self.photos {
             stage.step(fail).map_err(|e| io(rel, e))?;
-            import_photo(src, &dir.join(rel), false).map_err(|e| io(src, e))?;
+            // Read again (bounded): the source may have changed since the check.
+            let data = read_photo(src).map_err(|e| io(src, e))?;
+            if data != *checked {
+                return Err(Failure::io(format!(
+                    "{}: changed since it was checked; run the import again",
+                    src.display()
+                )));
+            }
+            stage
+                .write(rel, &data)
+                .map_err(|e| io(&self.out.join(rel), e))?;
         }
         let secrets = dir.join(SECRETS_DIR);
         stage.step(fail).map_err(|e| io(&secrets, e))?;

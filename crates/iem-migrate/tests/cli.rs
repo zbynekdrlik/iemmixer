@@ -13,7 +13,7 @@ use iem_engine::core::{reconcile, to_state};
 use iem_engine::persist::{Persisted, Source as Saved, Store};
 use iem_engine_proto::{GroupId, InputId, MixId, MixState, Source};
 use iem_migrate::stage::{Step, siblings};
-use iem_migrate::{EXIT_INPUT, EXIT_TOPOLOGY, band_cmd, run, site};
+use iem_migrate::{EXIT_INPUT, EXIT_IO, EXIT_TOPOLOGY, band_cmd, run, site};
 use iem_rpp::aliases::MemberAlias;
 use iem_rpp::import::compare;
 use iem_rpp::sitegen::{
@@ -21,6 +21,7 @@ use iem_rpp::sitegen::{
     track_name,
 };
 use iem_rpp::topology::{Routing, Topology};
+use iem_server::band_import::PHOTO_MAX_BYTES;
 use iem_server::pepper;
 use iem_server::pin_hash::PinHasher;
 use iem_server::pin_store::PinStore;
@@ -1070,6 +1071,68 @@ fn band_output_is_unchanged_after_a_failure_at_every_step() {
     assert_eq!(after["cert.pem"], before["cert.pem"]);
     let (h, store) = hasher(&out);
     assert!(h.verify("1357", store.member_hash("member1").unwrap()));
+}
+
+/// A JPEG-headed photo of `n` varied bytes (`seed` varies them).
+fn jpeg(n: usize, seed: usize) -> Vec<u8> {
+    let mut photo = vec![0xFF_u8, 0xD8, 0xFF];
+    photo.extend((3..n).map(|i| ((i + seed) % 251) as u8));
+    photo
+}
+
+#[test]
+fn a_photo_that_changes_after_its_check_fails_the_band_run_and_writes_nothing() {
+    let w = World::new(23);
+    let (l, eras) = legacy(&w);
+    let out = w.path("band");
+    let photo = l.join("photos/m1.jpg");
+    let (staging, old) = siblings(&out).unwrap();
+    // `run_with` takes the arguments after the subcommand.
+    let args = band_args(&w, &l, &eras, &out, &[]).split_off(1);
+    // The photo grows past the limit after the check, before its copy.
+    let grow = |s: Step| -> std::io::Result<()> {
+        if s == Step::Write(0) {
+            std::fs::write(&photo, jpeg(PHOTO_MAX_BYTES + 1, 0)).unwrap();
+        }
+        Ok(())
+    };
+    let e = band_cmd::run_with(&args, &grow).unwrap_err();
+    assert_eq!(e.code, EXIT_IO, "{}", e.msg);
+    assert!(
+        e.msg.contains("m1.jpg: not a JPEG of at most 256 KB"),
+        "{}",
+        e.msg
+    );
+    assert!(!out.exists() && !staging.exists() && !old.exists());
+    let e = run(&band_args(&w, &l, &eras, &out, &["--dry-run"])).unwrap_err();
+    assert_eq!(e.code, EXIT_INPUT);
+    assert!(
+        e.msg.contains("m1.jpg: not a JPEG of at most 256 KB"),
+        "{}",
+        e.msg
+    );
+    // A photo of exactly the limit is copied byte for byte.
+    let full = jpeg(PHOTO_MAX_BYTES, 0);
+    std::fs::write(&photo, &full).unwrap();
+    run(&band_args(&w, &l, &eras, &out, &[])).unwrap();
+    assert_eq!(std::fs::read(out.join("photos/member1.jpg")).unwrap(), full);
+    // Still a valid photo, but not the one checked: nothing changes.
+    let before = tree(&out);
+    let swap = |s: Step| -> std::io::Result<()> {
+        if s == Step::Write(0) {
+            std::fs::write(&photo, jpeg(PHOTO_MAX_BYTES, 1)).unwrap();
+        }
+        Ok(())
+    };
+    let e = band_cmd::run_with(&args, &swap).unwrap_err();
+    assert_eq!(e.code, EXIT_IO, "{}", e.msg);
+    assert!(
+        e.msg.contains("m1.jpg: changed since it was checked"),
+        "{}",
+        e.msg
+    );
+    assert_eq!(tree(&out), before);
+    assert!(!staging.exists() && !old.exists());
 }
 
 #[test]
