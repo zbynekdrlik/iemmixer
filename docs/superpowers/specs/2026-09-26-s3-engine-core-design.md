@@ -44,7 +44,7 @@ The engine reads only the `[engine]` table; the REAPER-era server keys in the sa
 - **TX stage:** Q1 safety stage = the MGA core at 0 dB with 100 % link → clamp ±1.0 (±0.1 while a test signal reaches this bus, X13) → engine fade (500 ms fade-in at start, fade-out on `Shutdown`) → the TX channel. Only topology TX channels exist in the backend's output (A1; S6 zeroes every other device channel).
 - **Fader stage** = `StereoGain(v, m, p)` for every node, so the track law is the send law (A5); input nodes never mute there (their mute is the gate).
 - **Ramps (X15):** gain/pan 10 ms, mute 5 ms, EQ 20 ms, processing 20 ms, fade-in 500 ms. Bus limiter: enabling and lowering are instant, raising ramps over 10 ms in dB, disabling crossfades 10 ms (the S2 policy, §4.4). The 50 ms preset ramp is not built (§6).
-- **Budget:** ≤ 512 commands per block; a batch is one ring chunk and is applied whole or waits for the next block. Steady-state fast paths (`StereoGain::steady`, `Equalizer::is_identity`, two small `iem-dsp` additions) keep the per-sample work to the moving parameters.
+- **Budget:** ≤ 512 commands per block; a batch is one ring chunk and is applied whole or waits for the next block. Steady-state fast paths (`StereoGain::steady`, `Equalizer::is_identity`, two small `iem-dsp` additions) keep the per-sample work to the moving parameters, and a moving EQ band is redesigned every 16 samples of its own ramp (exactly at the target on the last step): redesigning 220 moving bands on every sample cost 640 µs per 32-sample block.
 - **X1:** every input and node block is sanitised; a trip zeroes the block, resets the node's EQ and limiter, counts, and raises an alarm.
 
 ### 3.3 Commands, state, solo (I6, X2, X3, X13)
@@ -58,7 +58,7 @@ The engine reads only the `[engine]` table; the REAPER-era server keys in the sa
 ### 3.4 Meters and taps
 
 - **Meters:** the RT thread accumulates peaks (inputs at P, buses at O), limiter GR and X14 active samples, trips and overruns, and every 3 200 samples (30 Hz at 96 kHz) fills the input side of a `triple_buffer` in place and publishes. The control loop forwards changed frames as `Meters`.
-- **Taps (X3, X4):** the RT thread pushes 96 kHz stereo into an `rtrb` ring per slot (overruns counted, never blocking); the media thread decimates 2:1 with a 79-tap Kaiser half-band FIR (β = 10.06: ±1e-4 dB to 20 kHz, ≥ 100 dB from 28 kHz, measured in numpy) and sends 20 ms 48 kHz f32 frames on the media pipe. Talkback frames from the server are interpolated with the same filter into a 120 ms ring the RT thread reads with a 5 ms gate.
+- **Taps (X3, X4):** the RT thread pushes 96 kHz stereo into an `rtrb` ring per slot (overruns counted, never blocking); the media thread decimates 2:1 with a 79-tap Kaiser half-band FIR (β = 10.06, each polyphase branch at unity: ±1e-4 dB to 20 kHz, ≥ 99.6 dB from 28 kHz, measured in numpy) and sends 20 ms 48 kHz f32 frames on the media pipe. Talkback frames from the server are interpolated with the same filter (non-finite samples enter as silence) into a 120 ms ring the RT thread reads with a 5 ms gate.
 
 ### 3.5 Persistence (§2.4, I10)
 
@@ -83,7 +83,7 @@ The engine reads only the `[engine]` table; the REAPER-era server keys in the sa
 
 - `tests/rt.rs` (`assert_no_alloc`): `process()` with commands, taps, meters, talkback, test signal and fault-free sanitiser trips.
 - **rtsan** (`-Zsanitizer=realtime`, merged in rustc Nov 2025, runtime shipped for x86_64 Linux): `process()` carries `#[sanitize(realtime = "nonblocking")]` under `cfg(iem_rtsan)`; the `rt-safety` job builds with a pinned nightly and `-Zbuild-std` and runs `tests/rtsan.rs`, including a self-test that a violation is detected.
-- **CPU:** `benches/process.rs` times `process()` at B = 32 on the hosted runner for a typical and a worst case (every EQ band and send moving, limiters in GR, both taps, talkback, test signal, 512 commands per block) and prints p50/p99/p99.9/max against the 333 µs period. The gate on the hosted runner is p50 ≤ 25 % of the period (shared runners preempt, so tail numbers are reported, not gated); the §3.5 p99.9 gate belongs to the PC (S7).
+- **CPU:** `examples/bench.rs` times `process()` at B = 32 on the hosted runner for a typical and a worst case (every EQ band and send moving, limiters in GR, both taps, talkback, test signal, 512 commands per block) and prints p50/p99/p99.9/max against the 333 µs period. Gates on the hosted runner: typical p50 ≤ 25 %, worst p50 ≤ the period (shared runners preempt, so tails are reported, not gated); the §3.5 p99.9 gate belongs to the PC (S7). Measured (run 36246425178): typical p50 20.8 µs (6.3 %), p99.9 37.7 µs (11.3 %); worst p50 200.6 µs (60.2 %), p99.9 272 µs (81.6 %), max 354 µs.
 
 ## 4. Proof
 
@@ -96,6 +96,9 @@ The engine reads only the `[engine]` table; the REAPER-era server keys in the sa
 - Panics unwind (spec §2.4) — the synthesis's `panic = "abort"` is not used.
 - Sends are declared as `from × to` families in `site.toml`; stable ids are strings (`InputId`, `BusId`, `SendId{src, dst}`), not `SmolStr`.
 - Track pan (A5) exists on every node; `master` and `translator` have no EQ or limiter (§3.1 counts 44 EQs and 10 limiters).
+- A moving EQ band is redesigned every 16 samples (S2 redesigned per sample); steady state and block-size invariance are unchanged.
+- Block-size invariance is bit-exact (§3.5 asks ≤ 1e-12): a crossfade keeps the wet sample exactly at its end.
+- Windows named pipes in `interprocess` have no read timeouts, so the reader that closes a dropped connection works on Unix only; the pipe integration tests run on Linux, the Windows job runs the engine's library tests (S6 reworks the Windows reader).
 
 ## 6. Not in S3
 
@@ -104,5 +107,6 @@ ASIO, the STA thread, the stall watchdog, driver resets, DACL and reject-remote 
 ## 7. Risks
 
 - **B = 32 on the PC:** hosted numbers only bound the arithmetic; interrupts and DPCs are S1c/S7.
-- **Mutation budget:** the engine adds well over a thousand mutants; the shard matrix grows with the `mutants-list` count.
+- **Mutation budget:** the S3 diff has 1 031 mutants (88 shards at 12 per shard); shard durations are measured at the first PR.
+- **Worst-case transients:** every EQ band and send moving at once costs about 60 % of the period on the hosted runner (a preset or import, 20 ms); the PC is faster, S1c/S7 measure it.
 - **rtsan toolchain:** a nightly feature; the job pins the nightly and documents a failure rather than hiding it.
