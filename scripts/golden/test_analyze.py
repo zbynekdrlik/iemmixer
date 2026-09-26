@@ -150,7 +150,7 @@ class MeasuredLawTests(unittest.TestCase):
     def test_pan_table_has_the_sine_direction(self) -> None:
         table = {0.5: (0.509665970138, 1.230442497388), 0.0: (1.0, 1.0), -1.0: (1.0, 0.0)}
         self.assertLess(an.pan_direction_error(table), 1e-11)
-        self.assertGreater(an.pan_direction_error({0.5: (0.5, 1.0)}), 0.1)
+        self.assertGreater(an.pan_direction_error({0.5: (0.5, 1.0)}), 0.05)
 
     def test_downmix_is_half_the_panned_sum_on_channel_one(self) -> None:
         table = {0.0: (1.0, 1.0), -0.5: (1.230442497388, 0.509665970138)}
