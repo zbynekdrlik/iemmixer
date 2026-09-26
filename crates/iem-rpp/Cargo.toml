@@ -5,14 +5,17 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "REAPER project (RPP) generator for iemmixer golden renders (importer and exporter follow in S4)"
+description = "REAPER projects for iemmixer: golden-render generator, importer, exporter and legacy data migration"
 
 [dependencies]
 base64 = "0.22"
+iem-core = { path = "../iem-core" }
+iem-engine-proto = { path = "../iem-engine-proto" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
 thiserror = "2.0"
+toml = "0.9"
 
 [dev-dependencies]
 tempfile = "3"
