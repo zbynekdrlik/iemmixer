@@ -271,6 +271,11 @@ fn talkback_is_added_before_the_mute_gate() {
     );
     let out = r.run(&dc(&[0.0; 4], 1024), 32);
     assert_eq!(out.channel(M1_L)[1023], 0.0);
+    // A partial block of talkback is an underrun.
+    let mut short = rig(&[send(src_in("tb"), "m1", 0.0)]);
+    short.h.talkback.push_entire_slice(&[0.5f32; 20]).unwrap();
+    short.run(&dc(&[0.0; 4], 64), 32);
+    assert_eq!(short.h.status.talkback_underruns.load(Ordering::Relaxed), 1);
     // Without talkback samples the gate closes and nothing is added.
     let mut quiet = rig(&[send(src_in("tb"), "m1", 0.0)]);
     let out = quiet.run(&dc(&[0.0; 4], 256), 32);
@@ -570,6 +575,13 @@ fn listen_taps_are_side_effect_free() {
         "{}",
         member[0]
     );
+    assert_eq!(tapped.h.status.tap_overruns.load(Ordering::Relaxed), 0);
+    // Nobody draining the engineer tap: the ring fills and overruns count.
+    tapped.run(&dc(&[0.3, 0.0, 0.0, 0.0], TAP_RING), 64);
+    assert!(tapped.h.status.tap_overruns.load(Ordering::Relaxed) > 0);
+    let mut sink = vec![0.0f32; TAP_RING];
+    let _ = tapped.h.taps[0].pop_partial_slice(&mut sink);
+    let _ = tapped.h.taps[1].pop_partial_slice(&mut sink);
     tapped.at(0, &Cmd::StopListen { bus: bus("m1") });
     tapped.run(&input, 64);
     assert_eq!(tapped.h.taps[1].slots(), 0, "a stopped tap writes nothing");

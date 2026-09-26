@@ -71,7 +71,6 @@ pub struct RtStatus {
     pub talkback_underruns: AtomicU64,
     /// Blocks that left commands for the next block (the 512 budget).
     pub deferred: AtomicU64,
-    pub time: AtomicU64,
 }
 
 /// The non-RT ends of the processor's rings.
@@ -931,7 +930,6 @@ impl Process for Processor {
             self.since_meter %= METER_PERIOD;
             self.publish_meters();
         }
-        self.status.time.store(self.time, Ordering::Relaxed);
     }
 }
 

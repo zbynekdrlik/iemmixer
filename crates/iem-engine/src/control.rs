@@ -50,7 +50,10 @@ pub enum CtlMsg {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Exit {
-    Shutdown,
+    /// `faded`: the output reached silence before the driver stopped.
+    Shutdown {
+        faded: bool,
+    },
     Fault(String),
 }
 
@@ -125,6 +128,16 @@ fn encode(msg: &EngineMsg) -> Option<Vec<u8>> {
             error!("cannot encode an engine message: {e}");
             None
         }
+    }
+}
+
+/// Alarms replayed to each new connection: the newest `MAX_ALARMS`.
+pub const MAX_ALARMS: usize = 16;
+
+fn push_alarm(list: &mut Vec<Alarm>, alarm: Alarm) {
+    list.push(alarm);
+    if list.len() > MAX_ALARMS {
+        list.remove(0);
     }
 }
 
@@ -266,10 +279,7 @@ impl Control {
     fn alarm(&mut self, code: AlarmCode, detail: String) {
         warn!("alarm {code:?}: {detail}");
         let alarm = Alarm { code, detail };
-        self.alarms.push(alarm.clone());
-        if self.alarms.len() > 16 {
-            self.alarms.remove(0);
-        }
+        push_alarm(&mut self.alarms, alarm.clone());
         self.broadcast(&EngineMsg::Alarm(alarm));
     }
 
@@ -286,8 +296,7 @@ impl Control {
             let err = ErrorBody {
                 code: ErrCode::Unsupported,
                 msg: format!(
-                    "protocol {proto} is not supported (engine speaks {PROTO} and {})",
-                    PROTO - 1
+                    "protocol {proto} is not supported (the engine speaks {PROTO} and one version older)"
                 ),
             };
             self.reply(id, 0, Some(err));
@@ -496,8 +505,9 @@ impl Control {
             self.flush_rt();
             std::thread::sleep(Duration::from_millis(5));
         }
+        let faded = self.status.faded_out.load(Ordering::Acquire);
         self.release("shutdown");
-        Exit::Shutdown
+        Exit::Shutdown { faded }
     }
 
     fn fault(&mut self, why: String) -> Exit {
@@ -572,5 +582,58 @@ impl Control {
             self.save();
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn alarm(k: usize) -> Alarm {
+        Alarm {
+            code: AlarmCode::Sanitizer,
+            detail: k.to_string(),
+        }
+    }
+
+    #[test]
+    fn alarms_keep_the_newest_sixteen() {
+        let mut list = Vec::new();
+        for k in 0..MAX_ALARMS {
+            push_alarm(&mut list, alarm(k));
+        }
+        assert_eq!(list.len(), MAX_ALARMS);
+        assert_eq!(list[0].detail, "0");
+        push_alarm(&mut list, alarm(16));
+        assert_eq!(list.len(), MAX_ALARMS);
+        assert_eq!(
+            (list[0].detail.as_str(), list[15].detail.as_str()),
+            ("1", "16")
+        );
+    }
+
+    #[test]
+    fn meter_frames_convert_to_the_protocol() {
+        let f = MeterFrame {
+            seq: 3,
+            inputs: vec![[0.5, 0.25]],
+            buses: vec![[1.0, 0.0], [0.125, 2.0]],
+            gr_db: vec![-3.0, 0.0],
+            active: vec![96_000, 48_000],
+            trips: 2,
+        };
+        let m = meters_msg(&f);
+        assert_eq!(m.seq, 3);
+        assert_eq!(m.inputs, vec![[0.5f32, 0.25]]);
+        assert_eq!(m.buses, vec![[1.0f32, 0.0], [0.125, 2.0]]);
+        assert_eq!(m.gr_db, vec![-3.0f32, 0.0]);
+        assert_eq!(m.limiter_active_s, vec![1.0, 0.5]);
+        assert_eq!(m.trips, 2);
+    }
+
+    #[test]
+    fn the_build_names_the_version() {
+        assert!(engine_build().starts_with(concat!(env!("CARGO_PKG_VERSION"), "+")));
+        assert!(unix_ms() > 1_700_000_000_000);
     }
 }

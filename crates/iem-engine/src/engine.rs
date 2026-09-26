@@ -195,6 +195,17 @@ fn spawn(name: &str, f: impl FnOnce() + Send + 'static) -> std::io::Result<JoinH
     std::thread::Builder::new().name(name.into()).spawn(f)
 }
 
+/// How long an acceptor waits after `accept` found nothing (10 ms) or failed
+/// (100 ms, logged).
+fn backoff(e: &std::io::Error, what: &str) -> Duration {
+    if e.kind() == std::io::ErrorKind::WouldBlock {
+        Duration::from_millis(10)
+    } else {
+        warn!("{what} accept failed: {e}");
+        Duration::from_millis(100)
+    }
+}
+
 fn accept_control(listener: Listener, tx: mpsc::Sender<CtlMsg>, stop: Arc<AtomicBool>) {
     let mut next = 1u64;
     while !stop.load(Ordering::Acquire) {
@@ -219,13 +230,7 @@ fn accept_control(listener: Listener, tx: mpsc::Sender<CtlMsg>, stop: Arc<Atomic
                     error!("cannot start a reader thread: {e}");
                 }
             }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Err(e) => {
-                warn!("control accept failed: {e}");
-                std::thread::sleep(Duration::from_millis(100));
-            }
+            Err(e) => std::thread::sleep(backoff(&e, "control")),
         }
     }
 }
@@ -266,13 +271,7 @@ fn accept_media(
                     error!("cannot start a media reader thread: {e}");
                 }
             }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Err(e) => {
-                warn!("media accept failed: {e}");
-                std::thread::sleep(Duration::from_millis(100));
-            }
+            Err(e) => std::thread::sleep(backoff(&e, "media")),
         }
     }
 }
@@ -284,7 +283,7 @@ fn media_pump(mut taps: [Consumer<f32>; 2], conns: mpsc::Receiver<Conn>, stop: A
         TapFramer::new(stream::MEMBER_LISTEN),
     ];
     let mut current: Option<Conn> = None;
-    let mut buf = vec![0.0f32; 16 * 1024];
+    let mut buf = vec![0.0f32; crate::rt::TAP_RING];
     let mut frames: Vec<Frame> = Vec::new();
     while !stop.load(Ordering::Acquire) {
         while let Ok(c) = conns.try_recv() {
@@ -292,18 +291,11 @@ fn media_pump(mut taps: [Consumer<f32>; 2], conns: mpsc::Receiver<Conn>, stop: A
                 old.close();
             }
         }
+        // 5 ms of a tap is 960 values; the buffer holds a whole tap ring.
         for (tap, framer) in taps.iter_mut().zip(framers.iter_mut()) {
-            loop {
-                let (got, _) = tap.pop_partial_slice(&mut buf);
-                let n = got.len();
-                if n == 0 {
-                    break;
-                }
-                framer.feed(buf.get(..n).unwrap_or_default(), &mut frames);
-                if n < buf.len() {
-                    break;
-                }
-            }
+            let (got, _) = tap.pop_partial_slice(&mut buf);
+            let n = got.len();
+            framer.feed(buf.get(..n).unwrap_or_default(), &mut frames);
         }
         let mut failed = false;
         if let Some(c) = current.as_ref().filter(|c| !c.is_closed()) {
@@ -586,6 +578,7 @@ mod tests {
             ("run --site s --state-dir d --pipe p --block x", "--block"),
             ("run --site s --state-dir d --pipe p --sine 0", "--sine"),
             ("run --site s --state-dir d --pipe p --sine 50000", "--sine"),
+            ("run --site s --state-dir d --pipe p --sine 48000", "--sine"),
             ("run --site s --state-dir d --pipe p --sine nan", "--sine"),
             (
                 "run --site s --state-dir d --pipe p --loud",
@@ -600,6 +593,28 @@ mod tests {
     }
 
     #[test]
+    fn acceptors_back_off_briefly_when_idle_and_longer_on_errors() {
+        let idle = std::io::Error::from(std::io::ErrorKind::WouldBlock);
+        assert_eq!(backoff(&idle, "t"), Duration::from_millis(10));
+        let broken = std::io::Error::other("broken");
+        assert_eq!(backoff(&broken, "t"), Duration::from_millis(100));
+    }
+
+    /// `run` in a thread, bounded: a refused start must return at once.
+    fn run_bounded(cfg: RunConfig) -> Result<Exit, EngineError> {
+        let handle = std::thread::spawn(move || run(cfg));
+        let start = std::time::Instant::now();
+        while !handle.is_finished() {
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "run did not refuse"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        handle.join().unwrap()
+    }
+
+    #[test]
     fn run_refuses_a_bad_block_and_a_bad_site() {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = RunConfig::new(
@@ -608,10 +623,21 @@ mod tests {
             dir.path().join("p.sock").to_string_lossy().into_owned(),
         );
         cfg.block = 0;
-        assert!(matches!(run(cfg.clone()), Err(EngineError::Usage(_))));
+        assert!(matches!(
+            run_bounded(cfg.clone()),
+            Err(EngineError::Usage(_))
+        ));
+        cfg.block = MAX_BLOCK + 1;
+        assert!(matches!(
+            run_bounded(cfg.clone()),
+            Err(EngineError::Usage(_))
+        ));
         cfg.block = 32;
         cfg.site = dir.path().join("missing.toml");
-        assert!(matches!(run(cfg), Err(EngineError::Site(SiteError::Io(_)))));
+        assert!(matches!(
+            run_bounded(cfg),
+            Err(EngineError::Site(SiteError::Io(_)))
+        ));
     }
 
     #[test]

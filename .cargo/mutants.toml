@@ -65,6 +65,12 @@ exclude_re = [
   "iem-ui/src/pages/mixer/helpers\\.rs.*ws_send",
   # Push subscription through the service worker's PushManager.
   "iem-ui/src/pages/mixer/push\\.rs.*subscribe_to_push",
+  # Engine (S3): effects with no observable outcome through the engine's API.
+  # fsync of the state directory: durability shows only across a power loss.
+  "iem-engine/src/persist\\.rs.*replace sync_dir -> ",
+  # The NullRt pacing thread's end after release; NullRt::stop itself is
+  # tested in iem-audio-io (stop_ends_a_running_stream).
+  "iem-engine/src/engine\\.rs.*replace <impl Driver for NullRtDriver>::stop with \\(\\)",
   # Equivalent `>` → `>=` (S2): at equality both branches give the same
   # result, so no input can tell them apart.
   # |x| equal to the running peak: assigning the same value changes nothing.

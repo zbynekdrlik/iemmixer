@@ -29,7 +29,7 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         Ok(Command::Run(cfg)) => run(cfg).map(|exit| match exit {
-            Exit::Shutdown => 0,
+            Exit::Shutdown { .. } => 0,
             Exit::Fault(_) => 70,
         }),
         Ok(Command::Render(a)) => render(&a).map(|()| 0),

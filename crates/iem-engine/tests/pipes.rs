@@ -184,7 +184,7 @@ impl Engine {
         c.hello(Role::Control);
         let r = c.request(99, Cmd::Shutdown);
         assert!(r.error.is_none());
-        assert_eq!(self.exit(), Exit::Shutdown);
+        assert_eq!(self.exit(), Exit::Shutdown { faded: true });
         self.dir
     }
 }
@@ -342,26 +342,157 @@ fn meters_and_status_flow() {
         },
     );
     let mut c = e.client();
-    c.hello(Role::Observe);
+    let (_, topo, _) = c.hello(Role::Control);
+    // mic1 at +24 dB trim into member1 at +12 dB drives its −6 dB limiter.
+    let hot = Cmd::SetInput {
+        input: InputId::new("mic1"),
+        trim_db: Some(24.0),
+        muted: None,
+        processing: None,
+        fader_db: None,
+        pan: None,
+    };
+    assert!(c.request(1, hot).error.is_none());
+    let send = Cmd::SetSend {
+        id: iem_engine_proto::SendId {
+            src: Source::Input(InputId::new("mic1")),
+            dst: BusId::new("member1"),
+        },
+        gain_db: Some(12.0),
+        pan: None,
+        muted: None,
+    };
+    assert!(c.request(2, send).error.is_none());
+    let m1 = topo.buses.iter().position(|b| b.id.0 == "member1").unwrap();
     let start = Instant::now();
     let mut meters = 0;
     let mut loud = false;
-    let mut status = None;
-    while start.elapsed() < Duration::from_secs(3) && (meters < 3 || status.is_none()) {
+    let mut statuses = Vec::new();
+    let mut active = 0.0;
+    let mut gr = 0.0f32;
+    while start.elapsed() < Duration::from_millis(2500) {
         match c.recv() {
             EngineMsg::Meters(m) => {
                 meters += 1;
                 assert_eq!((m.inputs.len(), m.buses.len(), m.gr_db.len()), (24, 22, 22));
-                loud |= m.inputs.iter().all(|p| p[0] > 0.05);
+                assert_eq!(m.limiter_active_s.len(), 22);
+                loud |= m.inputs.iter().skip(1).all(|p| p[0] > 0.05);
+                active = m.limiter_active_s[m1];
+                gr = gr.min(m.gr_db[m1]);
             }
-            EngineMsg::Status(s) => status = Some(s),
+            EngineMsg::Status(s) => statuses.push(s),
             _ => {}
         }
     }
     assert!(meters >= 3, "{meters} meter frames");
     assert!(loud, "the sine shows on every input meter");
-    let s = status.expect("a status within a second");
+    assert!(gr < -3.0, "member1's limiter works: {gr} dB");
+    assert!(
+        active > 0.0 && active < 5.0,
+        "limiter-active seconds {active}"
+    );
+    assert!(
+        (1..=4).contains(&statuses.len()),
+        "about one status a second: {}",
+        statuses.len()
+    );
+    let s = statuses.last().unwrap();
     assert!(s.callbacks > 0 && !s.faulted);
+    assert!(
+        s.process_max_us > 0.0 && s.process_max_us < 100_000.0,
+        "{}",
+        s.process_max_us
+    );
+    assert_eq!(s.cmd_backlog, 0);
+    e.shutdown();
+}
+
+#[test]
+fn a_test_signal_ends_after_its_ttl() {
+    let e = Engine::start(
+        Flags {
+            test_signal: true,
+            fault_injection: false,
+        },
+        InputSignal::Silence,
+    );
+    let mut c = e.client();
+    c.hello(Role::Control);
+    let start = Instant::now();
+    let r = c.request(
+        1,
+        Cmd::StartTestSignal {
+            input: InputId::new("mic1"),
+            hz: 1000.0,
+            dbfs: -30.0,
+            ttl_s: 0.4,
+        },
+    );
+    assert!(r.error.is_none());
+    let signal = |m: &EngineMsg| match m {
+        EngineMsg::Delta { changes, .. } => changes.iter().find_map(|ch| match ch {
+            Change::TestSignal { signal } => Some(signal.clone()),
+            _ => None,
+        }),
+        _ => None,
+    };
+    assert!(c.wait(signal).is_some());
+    assert!(c.wait(signal).is_none());
+    let took = start.elapsed();
+    assert!(
+        took >= Duration::from_millis(350) && took < Duration::from_secs(3),
+        "{took:?}"
+    );
+    e.shutdown();
+}
+
+#[test]
+fn a_huge_talkback_frame_trips_the_sanitiser_alarm() {
+    let e = Engine::start(Flags::default(), InputSignal::Silence);
+    let mut c = e.client();
+    c.hello(Role::Observe);
+    let mut m = media_client(&e.pipe);
+    write_media(
+        &mut m,
+        &MediaHeader {
+            stream: stream::TALKBACK,
+            channels: 1,
+            seq: 0,
+            frames: 4,
+        },
+        &[1e30; 4],
+    )
+    .unwrap();
+    let detail = c.wait(|msg| match msg {
+        EngineMsg::Alarm(a) if a.code == AlarmCode::Sanitizer => Some(a.detail.clone()),
+        _ => None,
+    });
+    assert!(detail.contains("trips"), "{detail}");
+    // New connections get the alarm replayed after their hello.
+    let mut late = e.client();
+    late.hello(Role::Observe);
+    late.wait(|msg| {
+        matches!(msg, EngineMsg::Alarm(a) if a.code == AlarmCode::Sanitizer).then_some(())
+    });
+    drop(m);
+    e.shutdown();
+}
+
+#[test]
+fn a_ninth_connection_is_refused() {
+    let e = Engine::start(Flags::default(), InputSignal::Silence);
+    let mut clients: Vec<Client> = (0..8).map(|_| e.client()).collect();
+    for c in &mut clients {
+        assert!(
+            c.request(1, Cmd::Ping).error.is_some(),
+            "no hello yet: refused but connected"
+        );
+    }
+    let mut ninth = e.client();
+    assert!(ninth.closed());
+    drop(clients);
+    // Let the engine see the eight closes before the shutdown client connects.
+    std::thread::sleep(Duration::from_millis(500));
     e.shutdown();
 }
 
@@ -506,6 +637,12 @@ fn solos_survive_a_quick_reconnect_and_clear_after_the_grace() {
     e.shutdown();
 }
 
+fn h_hash(_e: &Engine) -> String {
+    iem_engine::graph::compile(&iem_engine::site::load(&common::site_path()).unwrap())
+        .unwrap()
+        .hash
+}
+
 #[test]
 fn shutdown_saves_fades_and_releases() {
     let e = Engine::start(Flags::default(), InputSignal::Silence);
@@ -526,8 +663,12 @@ fn shutdown_saves_fades_and_releases() {
     c.wait(|m| {
         matches!(m, EngineMsg::DriverReleased { reason } if reason == "shutdown").then_some(())
     });
-    assert_eq!(e.exit(), Exit::Shutdown);
-    assert!(e.dir.path().join("state/current.json").exists());
+    assert_eq!(e.exit(), Exit::Shutdown { faded: true });
+    let saved = std::fs::read(e.dir.path().join("state/current.json")).unwrap();
+    let saved = iem_engine::persist::decode(&saved).unwrap();
+    assert_eq!(saved.rev, 1);
+    assert!(saved.saved_unix_ms > 1_700_000_000_000);
+    assert_eq!(saved.topology_hash, h_hash(&e));
     // A second run loads that state.
     let again = Engine::start_in(e.dir, Flags::default(), InputSignal::Silence);
     let mut c = again.client();

@@ -272,6 +272,32 @@ mod tests {
         assert_eq!(p.calls, 3);
     }
 
+    struct Slow {
+        calls: u64,
+    }
+
+    impl Process for Slow {
+        fn process(&mut self, _: &mut Block<'_>) {
+            self.calls += 1;
+            if self.calls == 3 {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
+
+    #[test]
+    fn a_slow_callback_is_counted_late() {
+        let rt = NullRt::start(cfg(InputSignal::Silence), Slow { calls: 0 }).unwrap();
+        let start = Instant::now();
+        while rt.stats().callbacks < 100 && start.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let s = rt.stats();
+        assert!(s.late >= 1, "{s:?}");
+        assert!(s.max_process_ns >= 20_000_000, "{s:?}");
+        assert!(rt.stop().unwrap().calls >= 100);
+    }
+
     #[test]
     fn stop_ends_a_running_stream() {
         let rt = NullRt::start(cfg(InputSignal::Silence), Count::default()).unwrap();
