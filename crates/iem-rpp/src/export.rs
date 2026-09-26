@@ -289,6 +289,18 @@ pub fn export_checked(
     let before = import(&p, aliases)?;
     let out = export(&p, aliases, state)?;
     let back = import(&LegacyProject::parse(&out.text)?, aliases)?;
+    let problems = self_check(&before, &back, state);
+    if problems.is_empty() {
+        Ok(out)
+    } else {
+        Err(Problems(problems))
+    }
+}
+
+/// What [`export_checked`] refuses: `back` (the export, re-imported) must
+/// hold `before`'s topology and routing, and `state` within [`SAME_DB`]
+/// wherever the project holds it.
+fn self_check(before: &Imported, back: &Imported, state: &MixState) -> Vec<String> {
     let mut problems: Vec<String> = Vec::new();
     if back.topology != before.topology || back.routing != before.routing {
         problems.push("self-check: the export changed the topology".into());
@@ -304,11 +316,7 @@ pub fn export_checked(
         .into_iter()
         .map(|d| format!("self-check: {d}")),
     );
-    if problems.is_empty() {
-        Ok(out)
-    } else {
-        Err(Problems(problems))
-    }
+    problems
 }
 
 #[cfg(test)]
@@ -556,6 +564,22 @@ mod tests {
                 .any(|e| e.starts_with("self-check: mix member1: limiter")),
             "{err:#?}"
         );
+    }
+
+    #[test]
+    fn the_self_check_refuses_a_changed_topology_or_routing() {
+        let (text, aliases, state) = setup(21);
+        let before = import(&LegacyProject::parse(&text).unwrap(), &aliases).unwrap();
+        assert_eq!(self_check(&before, &before, &state), Vec::<String>::new());
+        let changed = vec!["self-check: the export changed the topology".to_owned()];
+        // The routing alone…
+        let mut back = before.clone();
+        back.routing.levels.pop_first().unwrap();
+        assert_eq!(self_check(&before, &back, &state), changed);
+        // …or the topology alone.
+        let mut back = before.clone();
+        back.topology.inputs[0].talkback ^= true;
+        assert_eq!(self_check(&before, &back, &state), changed);
     }
 
     #[test]

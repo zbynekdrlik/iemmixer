@@ -974,6 +974,12 @@ mod tests {
         );
     }
 
+    /// `want`, word for word, is one of the problems of importing `text`.
+    fn has_problem(text: &str, aliases: &Aliases, want: &str) {
+        let p = problems(text, aliases);
+        assert!(p.iter().any(|x| x == want), "{want:?} not in {p:#?}");
+    }
+
     /// `text` with the first `from` after the line naming `track` replaced.
     fn after(text: &str, track: &str, from: &str, to: &str) -> String {
         let anchor = format!("NAME \"{}\"", track_name(track));
@@ -1004,14 +1010,39 @@ mod tests {
         );
         let mut a = f.aliases.clone();
         a.tracks.insert(track_name("mic2"), "mic1".into());
-        fails_with(&f.text, &a, "both map to mic1");
+        has_problem(
+            &f.text,
+            &a,
+            &format!(
+                "tracks {:?} (input) and {:?} (input) both map to mic1",
+                track_name("mic1"),
+                track_name("mic2")
+            ),
+        );
         // A group id names only group strips: not an input, not a mix.
         let mut a = f.aliases.clone();
         a.tracks.insert(track_name("member2"), "stems".into());
-        fails_with(&f.text, &a, "both map to stems");
+        let engineer_stems = instance_name(&MixId::new("engineer"), &GroupId::new("stems"));
+        has_problem(
+            &f.text,
+            &a,
+            &format!(
+                "tracks {:?} (mix) and {:?} (group) both map to stems",
+                track_name("member2"),
+                track_name(&engineer_stems)
+            ),
+        );
         let mut a = f.aliases;
         a.tracks.insert(track_name(&m1_stems()), "mic3".into());
-        fails_with(&f.text, &a, "both map to mic3");
+        has_problem(
+            &f.text,
+            &a,
+            &format!(
+                "tracks {:?} (input) and {:?} (group) both map to mic3",
+                track_name("mic3"),
+                track_name(&m1_stems())
+            ),
+        );
     }
 
     #[test]
@@ -1074,6 +1105,18 @@ mod tests {
         let clean = import(&LegacyProject::parse(&f.text).unwrap(), &f.aliases).unwrap();
         assert_eq!(clean.state, imp.state, "the fader changes nothing");
         assert!(!clean.notes.iter().any(|n| n.contains("input faders")));
+        // A pan alone, or a fader alone, is noted as well.
+        for (volpan, fader) in [
+            ("VOLPAN 1 -0.25 ", "hand1 0.00 dB pan -0.25"),
+            ("VOLPAN 0.5 0 ", "hand1 -6.02 dB pan 0"),
+        ] {
+            let text = after(&f.text, "hand1", "VOLPAN 1 0 ", volpan);
+            let imp = import(&LegacyProject::parse(&text).unwrap(), &f.aliases).unwrap();
+            let want = format!(
+                "input faders and pans feed only the muted master and are ignored: {fader}"
+            );
+            assert!(imp.notes.contains(&want), "{want:?} not in {:?}", imp.notes);
+        }
     }
 
     #[test]
@@ -1273,6 +1316,92 @@ mod tests {
     }
 
     #[test]
+    fn a_mix_holds_one_instance_of_a_group() {
+        let f = fixture();
+        // member2's stems strip also linked into member1 (ahead of member1's
+        // own): member1 then has two instances of stems.
+        let at2 = f
+            .text
+            .find(&format!("NAME \"{}\"", track_name("member2")))
+            .unwrap();
+        let link = at2 + f.text[at2..].find(" 0 1 0 0 0 0 0 0 -1:U 0 -1 ''").unwrap();
+        let start = f.text[..link].rfind("    AUXRECV").unwrap();
+        let line_end = link + f.text[link..].find('\n').unwrap() + 1;
+        let line = &f.text[start..line_end];
+        let at1 = f
+            .text
+            .find(&format!("NAME \"{}\"", track_name("member1")))
+            .unwrap();
+        let hw = at1 + f.text[at1..].find("    HWOUT").unwrap();
+        let text = format!("{}{line}{}", &f.text[..hw], &f.text[hw..]);
+        has_problem(
+            &text,
+            &f.aliases,
+            &format!(
+                "send {:?} → {:?}: member1 has a second instance of stems",
+                track_name(&m1_stems()),
+                track_name("member1")
+            ),
+        );
+    }
+
+    #[test]
+    fn an_input_belongs_to_one_group() {
+        // The stems split in two groups: every stereo mix has an instance
+        // of each, and that imports.
+        let mut topo = synthetic_site();
+        let beat = topo.groups[0].inputs.split_off(3);
+        topo.groups.push(TopoGroup {
+            id: GroupId::new("beat"),
+            inputs: beat,
+        });
+        let routing = synthetic_routing(&topo);
+        let text = write(
+            &topo,
+            &routing,
+            &sample_state(&topo, &routing, 11),
+            &track_name,
+        )
+        .unwrap();
+        let aliases = parse_aliases(&aliases_toml(&topo, &routing, &BTreeMap::new())).unwrap();
+        let imp = import(&LegacyProject::parse(&text).unwrap(), &aliases).unwrap();
+        let members = |g: &str| {
+            imp.topology
+                .groups
+                .iter()
+                .find(|x| x.id == GroupId::new(g))
+                .map(|x| x.inputs.clone())
+        };
+        assert_eq!(
+            members("stems"),
+            Some(["click", "guide", "drums"].map(InputId::new).to_vec())
+        );
+        assert_eq!(
+            members("beat"),
+            Some(["bass", "inst", "other", "bgvs"].map(InputId::new).to_vec())
+        );
+        assert_eq!(imp.state.mixes[&MixId::new("member1")].groups.len(), 2);
+        // bass (in beat) also sends into member1's stems strip.
+        let bass = topo
+            .inputs
+            .iter()
+            .position(|i| i.id == InputId::new("bass"))
+            .unwrap();
+        let strip = instance_name(&MixId::new("member1"), &GroupId::new("stems"));
+        let text = after(
+            &text,
+            &strip,
+            "    NCHAN 2\n",
+            &format!("    NCHAN 2\n    AUXRECV {bass} 3 1 0 0 0 0 0 0 -1:U 0 -1 ''\n"),
+        );
+        has_problem(
+            &text,
+            &aliases,
+            "input bass sends into the groups beat and stems",
+        );
+    }
+
+    #[test]
     fn grouped_inputs_reach_mixes_only_through_their_group() {
         let f = fixture();
         let a = &f.aliases;
@@ -1324,7 +1453,45 @@ mod tests {
         let line_end = at + f.text[at..].find('\n').unwrap() + 1;
         let dup = format!("{}{}", &f.text[..line_end], &f.text[at..]);
         fails_with(&dup, a, "a second send for mic1 in member1");
+        // Into a group strip an input sends with mode 3 only…
         let topo = synthetic_site();
+        let click = topo
+            .inputs
+            .iter()
+            .position(|i| i.id == InputId::new("click"))
+            .unwrap();
+        has_problem(
+            &after(
+                &f.text,
+                &m1_stems(),
+                &format!("AUXRECV {click} 3 "),
+                &format!("AUXRECV {click} 0 "),
+            ),
+            a,
+            &format!(
+                "send {:?} → {:?}: mode 0 is not supported here (inputs send with mode 3, mixes \
+                 with mode 0 into mixes)",
+                track_name("click"),
+                track_name(&m1_stems())
+            ),
+        );
+        // …and a mix into a mix with mode 0 only.
+        let member2 = topo.inputs.len() + 1;
+        has_problem(
+            &after(
+                &f.text,
+                "member1",
+                &format!("AUXRECV {member2} 0 "),
+                &format!("AUXRECV {member2} 3 "),
+            ),
+            a,
+            &format!(
+                "send {:?} → {:?}: mode 3 is not supported here (inputs send with mode 3, mixes \
+                 with mode 0 into mixes)",
+                track_name("member2"),
+                track_name("member1")
+            ),
+        );
         let routing = synthetic_routing(&topo);
         let mut s = sample_state(&topo, &routing, 11);
         s.mixes

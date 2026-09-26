@@ -823,6 +823,71 @@ fn every_mix_has_an_eq_a_limiter_and_group_strips() {
 }
 
 #[test]
+fn a_group_strip_keeps_what_a_command_leaves_out() {
+    let mut c = core(Flags::default());
+    let m = c.topology().mix_index(&mix("member1")).unwrap() as u16;
+    let strip = |c: &Core| c.state().mixes[&mix("member1")].groups[&stems()];
+    c.apply(&Cmd::SetGroup {
+        mix: mix("member1"),
+        group: stems(),
+        gain_db: Some(-10.0),
+        muted: Some(true),
+    })
+    .unwrap();
+    // An EQ keeps the fader and the mute…
+    let mut eq = Eq::default();
+    eq.bands[0].enabled = true;
+    let out = c
+        .apply(&Cmd::SetEq {
+            target: EqTarget::Group {
+                mix: mix("member1"),
+                group: stems(),
+            },
+            eq,
+        })
+        .unwrap();
+    assert!(
+        matches!(out.rt.as_slice(), [RtOp::GroupEq { g: 0, .. }]),
+        "{:?}",
+        out.rt
+    );
+    assert_eq!(
+        strip(&c),
+        MixGroup {
+            gain_db: -10.0,
+            muted: true,
+            eq
+        }
+    );
+    // …a fader keeps the mute and the EQ.
+    let out = c
+        .apply(&Cmd::SetGroup {
+            mix: mix("member1"),
+            group: stems(),
+            gain_db: Some(-4.0),
+            muted: None,
+        })
+        .unwrap();
+    assert_eq!(
+        out.rt,
+        vec![RtOp::Group {
+            m,
+            g: 0,
+            gain: 10f64.powf(-4.0 / 20.0),
+            muted: true
+        }]
+    );
+    assert_eq!(
+        strip(&c),
+        MixGroup {
+            gain_db: -4.0,
+            muted: true,
+            eq
+        }
+    );
+}
+
+#[test]
 fn read_only_commands_and_effects() {
     let mut c = core(Flags::default());
     let cases = [

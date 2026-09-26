@@ -586,4 +586,29 @@ mod tests {
             vec!["backup names missing from the project: \"GONE\", \"LOST\"".to_owned()]
         );
     }
+
+    #[test]
+    fn a_group_strip_links_only_into_its_own_mix() {
+        let imp = setup();
+        let strip = track_name(&instance_name(
+            &MixId::new("member1"),
+            &iem_engine_proto::GroupId::new("stems"),
+        ));
+        let mut b = MixerBackup::default();
+        b.sends.push(SendBackup {
+            src_name: strip.clone(),
+            dest_name: track_name("member3"),
+            vol: 1.0,
+            pan: 0.0,
+            mute: false,
+        });
+        let err = cross_check(&b, &imp).unwrap_err().0;
+        assert_eq!(
+            err,
+            vec![format!(
+                "send {strip:?} → {:?}: not a level of the engine's model",
+                track_name("member3")
+            )]
+        );
+    }
 }

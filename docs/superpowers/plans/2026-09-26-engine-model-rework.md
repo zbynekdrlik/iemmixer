@@ -49,71 +49,71 @@ crates/iem-migrate/src/{site,import_cmd,export_cmd,band_cmd,stage}.rs, tests/cli
 
 ### Task 1: Design on #20 and the docs
 
-- [ ] **Step 1:** design note and this plan; denylist-scan the staged tree; commit `docs(#20): engine model rework design note and plan`.
-- [ ] **Step 2:** Slovak design summary on #20 (model, what disappears, parity, transactional band output).
+- [x] **Step 1:** design note and this plan; denylist-scan the staged tree; commit `docs(#20): engine model rework design note and plan`.
+- [x] **Step 2:** Slovak design summary on #20 (model, what disappears, parity, transactional band output).
 
 ### Task 2: Protocol (`iem-engine-proto`)
 
 **Interfaces:** `InputId`, `GroupId`, `MixId`, `Source::{Input, Mix}`, `EqTarget::{Input, Mix, Group{mix, group}}`; `InputState{trim_db, processing, muted, eq}`, `Level{gain_db = DB_OFF, pan, muted}`, `MixGroup{gain_db, muted, eq}`, `MixOut{volume_db, muted, eq, limiter}`, `Mix{out, inputs, groups, mixes}`, `MixState{inputs, mixes}` (`SCHEMA = 2`), `Solo{mix, sources}`, `Transient{solo, listen: [Option<MixId>; 2], test_signal}`; `Cmd::{SetInput, SetMix, SetLevel, SetGroup, SetEq, SetLimiter, ResetLimiterStats, SetSolo, StartListen, StopListen, …}` (`OPS` 20); `Change::{Input, MixOut, Level, Group, Solo, Listen, TestSignal, LimiterStatsReset}`; `TopologyInfo{hash, sample_rate, engineer, inputs[InputInfo{id, channels, talkback, group}], groups[GroupInfo{id, inputs}], mixes[MixInfo{id, channels, mixes}]}`; `Meters{seq, inputs, mixes, groups (mix-major), gr_db, limiter_active_s, trips}`.
 
-- [ ] **Step 1: Tests** — ids validate and serialise as plain strings / `{"input": …}`, `{"mix": …}`, `{"group": {"mix", "group"}}`; defaults (level off, strips 0 dB, limiter on −6 dB); unknown fields ignored, missing defaulted; every command round-trips and its op is listed; JSON shapes of `set_level` and a `level` change; N/N−1 negotiation unchanged.
-- [ ] **Step 2: Implement.**
+- [x] **Step 1: Tests** — ids validate and serialise as plain strings / `{"input": …}`, `{"mix": …}`, `{"group": {"mix", "group"}}`; defaults (level off, strips 0 dB, limiter on −6 dB); unknown fields ignored, missing defaulted; every command round-trips and its op is listed; JSON shapes of `set_level` and a `level` change; N/N−1 negotiation unchanged.
+- [x] **Step 2: Implement.**
 
 ### Task 3: Site and topology (`iem-engine`)
 
 **Interfaces:** `site::{Site{channels, engineer, inputs, groups, mixes}, SiteInput{id, rx, talkback}, SiteGroup{id, inputs}, SiteMix{id, tx, mixes}, parse, load, SiteError}`; `topology::{compile(&Site) -> Result<Topology, SiteError>, Topology{inputs, groups, mixes, direct, rx, tx, engineer, hash}, InputNode{id, rx, stereo, talkback, group}, GroupNode{id, inputs}, MixNode{id, tx, mono, mixes}}` with `input_index`, `group_index`, `mix_index`, `slot(mix, &Source)`, `levels(mix)`, `info()`.
 
-- [ ] **Step 1: Tests** — the test site's shape (24 inputs / 32 RX, 1 group of 7, 11 mixes / 21 TX, member1 hears 8, the engineer 9, the translator mono); every `SiteError` (ids, channels, groups, heard mixes: unknown, self, repeated, declared later; engineer not a stereo mix; second talkback); hash stable and topology-sensitive; slots.
-- [ ] **Step 2: Implement; rewrite `config/test-site.toml`** (the §3.1 shape, synthetic channels, member1 after the mixes it hears).
+- [x] **Step 1: Tests** — the test site's shape (24 inputs / 32 RX, 1 group of 7, 11 mixes / 21 TX, member1 hears 8, the engineer 9, the translator mono); every `SiteError` (ids, channels, groups, heard mixes: unknown, self, repeated, declared later; engineer not a stereo mix; second talkback); hash stable and topology-sensitive; slots.
+- [x] **Step 2: Implement; rewrite `config/test-site.toml`** (the §3.1 shape, synthetic channels, member1 after the mixes it hears).
 
 ### Task 4: Caps, RT commands and the control core
 
 **Interfaces:** `params::{cap_input, cap_level, cap_group, cap_out, …, InputParams{trim, muted, processing}}`; `RtOp::{Input, InputEq, MixOut, MixEq, Limiter, ResetLimiter, Level{m, k, gain, pan, muted}, Group{m, g, gain, muted}, GroupEq, Listen{slot, mix}, TestSignal, StopTestSignal, FadeOut, Panic}`; `core::{reconcile, to_state, defaults_muted, Core}`.
 
-- [ ] **Step 1: Tests** — one set → one revision and one RT op per changed stage; unchanged sets keep the revision; caps and non-finite rejection for every field; unknown ids; batches atomic and bounded; solo silences every other level of the mix only (groups and output untouched) and clears; foreign solo sources refused; listen slot 0 engineer, slot 1 one other mix (`NoSource` for a second); test signal and fault flags; import fits one block; full sync covers every stage; defaults mute every mix.
-- [ ] **Step 2: Implement.**
+- [x] **Step 1: Tests** — one set → one revision and one RT op per changed stage; unchanged sets keep the revision; caps and non-finite rejection for every field; unknown ids; batches atomic and bounded; solo silences every other level of the mix only (groups and output untouched) and clears; foreign solo sources refused; listen slot 0 engineer, slot 1 one other mix (`NoSource` for a second); test signal and fault flags; import fits one block; full sync covers every stage; defaults mute every mix.
+- [x] **Step 2: Implement.**
 
 ### Task 5: The RT processor
 
-- [ ] **Step 1: Tests (`rt_tests.rs`)** — mono input at unity on both sides; stereo keeps channels; trim/EQ only with processing; talkback before the mute gate; a level reads P (mute kills it, talkback too); the group strip is Σ → EQ → fader → mute; a heard mix is read post-mute and unclipped; output chain EQ → limiter → volume → mute → safety → clamp; a mono mix is the half-sum on its one channel; sanitiser; commands at their sample; 512 budget; limiter ramps; test signal caps every TX; taps side-effect-free; fades; meters every 3 200 samples (inputs, mixes, groups); the bounded-run tests.
-- [ ] **Step 2: Implement.**
+- [x] **Step 1: Tests (`rt_tests.rs`)** — mono input at unity on both sides; stereo keeps channels; trim/EQ only with processing; talkback before the mute gate; a level reads P (mute kills it, talkback too); the group strip is Σ → EQ → fader → mute; a heard mix is read post-mute and unclipped; output chain EQ → limiter → volume → mute → safety → clamp; a mono mix is the half-sum on its one channel; sanitiser; commands at their sample; 512 budget; limiter ramps; test signal caps every TX; taps side-effect-free; fades; meters every 3 200 samples (inputs, mixes, groups); the bounded-run tests.
+- [x] **Step 2: Implement.**
 
 ### Task 6: Persistence, control loop, engine binary
 
-- [ ] **Step 1:** counters per mix; schema-1 files refused with a reason; meters message layout; the control tests and `engine.rs` start-up on the new topology.
+- [x] **Step 1:** counters per mix; schema-1 files refused with a reason; meters message layout; the control tests and `engine.rs` start-up on the new topology.
 
 ### Task 7: Integration tests, benchmark, fuzz target
 
-- [ ] **Step 1:** `tests/common/mod.rs` worst case with the new commands; `parity.rs` new reference model (design note §3) and the A3/A6/A9/A10 cases; block-size invariance; `props.rs` generators; `pipes.rs` commands; `examples/bench.rs` typical and worst; `fuzz/fuzz_targets/engine_request.rs`.
+- [x] **Step 1:** `tests/common/mod.rs` worst case with the new commands; `parity.rs` new reference model (design note §3) and the A3/A6/A9/A10 cases; block-size invariance; `props.rs` generators; `pipes.rs` commands; `examples/bench.rs` typical and worst; `fuzz/fuzz_targets/engine_request.rs`.
 
 ### Task 8: Band data schema 3 (`iem-core`)
 
-- [ ] **Step 1:** `MixSend{src: Source{input|mix}, …}`, `groups: {id → gain_db}` replaces `stems_fader_db`, `SCHEMA = 3`; round-trip tests.
+- [x] **Step 1:** `MixSend{src: Source{input|mix}, …}`, `groups: {id → gain_db}` replaces `stems_fader_db`, `SCHEMA = 3`; round-trip tests.
 
 ### Task 9: Importer and exporter (`iem-rpp`)
 
 **Interfaces:** `topology::{Topology{inputs, groups, mixes, engineer}, TopoInput, TopoGroup, TopoMix, Counts, diff, engine_toml}`; `aliases::{Aliases{tracks, members}, MemberAlias{id, mix, archived}}`; `import::{import, Imported{topology, state, counts, notes, tracks: Vec<Place>}, Place::{Input, Mix, Group{group, mix}}, project, compare}`; `export::{export, export_checked}` (with the not-carried-back report); `sitegen::{synthetic_site, sample_state, project, aliases_toml}`; `band` and `backup` on the new sources.
 
-- [ ] **Step 1: Tests** — every mapping rule and error of design note §7 (master muted, pans 0, unity stems sends, group membership, heard mixes, mono mix, missing receives off, input faders ignored and reported); counts 45/268/44/10/24 of the synthetic predecessor project; diff and `engine_toml` (dependency order) round-trip; unchanged export byte-identical; edited state within 1e-9 dB; values the project cannot hold are reported and not carried back; era re-keying on inputs and heard mixes, stems level → the group; backup cross-check.
-- [ ] **Step 2: Implement.**
+- [x] **Step 1: Tests** — every mapping rule and error of design note §7 (master muted, pans 0, unity stems sends, group membership, heard mixes, mono mix, missing receives off, input faders ignored and reported); counts 45/268/44/10/24 of the synthetic predecessor project; diff and `engine_toml` (dependency order) round-trip; unchanged export byte-identical; edited state within 1e-9 dB; values the project cannot hold are reported and not carried back; era re-keying on inputs and heard mixes, stems level → the group; backup cross-check.
+- [x] **Step 2: Implement.**
 
 ### Task 10: `iem-migrate`, transactional band output
 
 **Interfaces:** `stage::{Stage, Step, commit, recover}` (staging dir next to the target, `.complete` marker, two renames, roll forward/back); `band_cmd::run_with(args, fail: &dyn Fn(Step) -> io::Result<()>)`.
 
-- [ ] **Step 1: Tests** — the CLI integration tests on the new site; a failure injected at every step leaves the target byte-identical and no staging directory; a crash after the first rename is rolled forward by `recover`, one before it rolled back; a second run after a crash succeeds.
-- [ ] **Step 2: Implement.**
+- [x] **Step 1: Tests** — the CLI integration tests on the new site; a failure injected at every step leaves the target byte-identical and no staging directory; a crash after the first rename is rolled forward by `recover`, one before it rolled back; a second run after a crash succeeds.
+- [x] **Step 2: Implement.**
 
 ### Task 11: CI cycles
 
-- [ ] **Step 1:** `cargo fmt --all`, denylist scan, push `dev`; watch lint/test/engine/fuzz/migrate/windows to terminal; one fix commit per failing cycle.
-- [ ] **Step 2:** read `mutants-list`; resize the `shard:` matrix in `ci.yml` when needed (Task 11 repeats).
-- [ ] **Step 3:** record the parity maxima, the B = 32 benchmark and the mutant count on #20.
+- [x] **Step 1:** `cargo fmt --all`, denylist scan, push `dev`; watch lint/test/engine/fuzz/migrate/windows to terminal; one fix commit per failing cycle.
+- [x] **Step 2:** read `mutants-list`; resize the `shard:` matrix in `ci.yml` when needed (Task 11 repeats).
+- [x] **Step 3:** record the parity maxima, the B = 32 benchmark and the mutant count on #20.
 
 ### Task 12: Private site (ops repo, `dev`)
 
-- [ ] **Step 1:** aliases in the new form (stems tracks → the group id, members `{id, mix, archived}`, no `master`); the `[engine]` table emitted by the CI-built `iem-migrate import --emit-topology` from the saved project; `tools/check_import.sh` passes; commit on the ops `dev` branch.
+- [x] **Step 1:** aliases in the new form (stems tracks → the group id, members `{id, mix, archived}`, no `master`); the `[engine]` table emitted by the CI-built `iem-migrate import --emit-topology` from the saved project; `tools/check_import.sh` passes; commit on the ops `dev` branch.
 
 ### Task 13: Playbook, spec amendment, hand-offs
 
-- [ ] **Step 1:** `.claude/rules/engine.md` and `migration.md`; program spec amendment line (A11, F29 master, I4, §3.1 counts); hand-offs on #8 (S5) and #9 (S6); results on #20.
+- [x] **Step 1:** `.claude/rules/engine.md` and `migration.md`; program spec amendment line (A11, F29 master, I4, §3.1 counts); hand-offs on #8 (S5) and #9 (S6); results on #20.

@@ -345,9 +345,70 @@ mod tests {
     fn a_first_commit_creates_the_target() {
         let d = tempfile::tempdir().unwrap();
         let target = d.path().join("band");
-        run(&target, &no_faults).unwrap();
+        // No old copy to remove: nothing to note.
+        let notes = run(&target, &no_faults).unwrap();
+        assert!(notes.is_empty(), "{notes:?}");
         assert_eq!(tree(&target).unwrap().len(), 2);
         assert_eq!(leftovers(&target), (false, false));
+    }
+
+    #[test]
+    fn an_old_copy_that_cannot_be_removed_is_noted() {
+        let d = tempfile::tempdir().unwrap();
+        let target = d.path().join("band");
+        let (_, old) = siblings(&target).unwrap();
+        let mut s = Stage::begin(&target, &no_faults).unwrap();
+        s.step(&no_faults).unwrap();
+        s.write(Path::new("cert.pem"), b"new cert").unwrap();
+        // A file where the old copy belongs: removing a directory fails.
+        fs::write(&old, "not a directory").unwrap();
+        let notes = s.commit(&no_faults).unwrap();
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        let head = format!("note: {} was not removed (", old.display());
+        assert!(notes[0].starts_with(&head), "{notes:?}");
+        assert!(
+            notes[0].ends_with("); the next run removes it"),
+            "{notes:?}"
+        );
+        let t = tree(&target).unwrap();
+        assert_eq!(t.len(), 1, "no marker is left: {t:?}");
+        assert_eq!(t["cert.pem"], b"new cert");
+        assert_eq!(fs::read(&old).unwrap(), b"not a directory");
+    }
+
+    #[test]
+    fn a_failed_first_commit_moves_nothing_back() {
+        // No target at the start: nothing was moved aside, so a directory
+        // at the old path (not this run's) stays where it is.
+        let d = tempfile::tempdir().unwrap();
+        let target = d.path().join("band");
+        let (_, old) = siblings(&target).unwrap();
+        let mut s = Stage::begin(&target, &no_faults).unwrap();
+        s.step(&no_faults).unwrap();
+        s.write(Path::new("cert.pem"), b"new cert").unwrap();
+        fill(&old, &[("x.json", "stray")]);
+        let at_swap = |step: Step| {
+            if step == Step::Swap {
+                Err(io::Error::other("injected at the swap"))
+            } else {
+                Ok(())
+            }
+        };
+        let e = s.commit(&at_swap).unwrap_err();
+        assert_eq!(e.to_string(), "injected at the swap");
+        assert_eq!(tree(&target), None);
+        let stray = BTreeMap::from([("x.json".to_owned(), b"stray".to_vec())]);
+        assert_eq!(tree(&old), Some(stray));
+        assert_eq!(leftovers(&target), (false, true));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_sync_opens_the_directory() {
+        let d = tempfile::tempdir().unwrap();
+        assert!(sync_dir(d.path()).is_ok());
+        let e = sync_dir(&d.path().join("gone")).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::NotFound);
     }
 
     #[test]

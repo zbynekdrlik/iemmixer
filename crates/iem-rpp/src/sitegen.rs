@@ -593,6 +593,17 @@ mod tests {
         assert_eq!(tr.out.eq, EqSettings::default());
         assert!(tr.groups.is_empty());
         assert_eq!(a.mixes[&MixId::new("member1")].groups.len(), 1);
+        // Mix mutes and off levels are drawn, not only forced (values
+        // computed from the generator's definition): 3 muted mixes, and 26
+        // levels drawn off besides the one set off.
+        let muted: Vec<&str> = a
+            .mixes
+            .iter()
+            .filter(|(_, m)| m.out.muted)
+            .map(|(id, _)| id.0.as_str())
+            .collect();
+        assert_eq!(muted, ["engineer", "member2", "member6"]);
+        assert_eq!(levels.iter().filter(|l| l.gain_db <= -150.0).count(), 27);
     }
 
     #[test]

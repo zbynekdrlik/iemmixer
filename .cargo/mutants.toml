@@ -105,4 +105,6 @@ exclude_re = [
   "iem-rpp/src/aliases\\.rs.*replace > with >= in Eras::candidates$",
   # `flags & !1` has bit 0 clear, so `| muted` and `^ muted` are the same.
   "iem-rpp/src/export\\.rs.*replace \\| with \\^ in export$",
+  # Unobservable (#20): which parent directory commit fsyncs (result dropped); durability shows only across a power loss.
+  "iem-migrate/src/stage\\.rs:229:.*delete ! in Stage::commit$",
 ]
