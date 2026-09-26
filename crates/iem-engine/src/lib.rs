@@ -5,7 +5,8 @@
 //!   compiled once per run (I4);
 //! - [`params`]: field caps and the conversion to DSP parameters;
 //! - [`cmd`]: the RT thread's command messages;
-//! - [`core`]: the pure control core, single writer of the state (I6).
+//! - [`core`]: the pure control core, single writer of the state (I6);
+//! - [`rt`]: the RT processor, the whole graph in one callback (I5, I7).
 //!
 //! GPL-3.0-or-later: the engine links the MGA limiter port (D1).
 
@@ -24,6 +25,7 @@ pub mod cmd;
 pub mod core;
 pub mod graph;
 pub mod params;
+pub mod rt;
 pub mod site;
 
 /// The only rate the engine runs at (I2).
