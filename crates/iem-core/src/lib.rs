@@ -3,6 +3,7 @@
 //! Shared types, configuration, and constants for the IEM mixing system.
 
 pub mod backup;
+pub mod band;
 #[cfg(feature = "config")]
 pub mod config;
 pub mod preset;
