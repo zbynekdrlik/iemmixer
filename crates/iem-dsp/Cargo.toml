@@ -1,0 +1,15 @@
+[package]
+name = "iem-dsp"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "iemmixer DSP kernels: ReaEQ-parity EQ, measured pan law, smoothers, meters and sanitiser"
+
+[dependencies]
+
+[dev-dependencies]
+assert_no_alloc = { version = "1.1.2", default-features = false, features = ["warn_debug", "warn_release"] }
+iem-rpp = { path = "../iem-rpp" }
+serde_json = "1.0"

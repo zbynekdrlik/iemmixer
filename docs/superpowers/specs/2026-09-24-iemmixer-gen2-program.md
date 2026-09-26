@@ -177,14 +177,14 @@ Proof codes: **M** mock E2E, **L** live E2E/HIL, **S** server tests, **E** engin
 - **A2** Mono inputs: L = R = x at unity, no input pan law (O, Method B).
 - **A3** Input mute zeroes every tap incl. pre-fader sends; on `ENG_MIC` it also silences talkback (G,O).
 - **A4** With processing on: trim → EQ → (`ENG_MIC` only) `+= 0.379934·talkback` (≈ −8.4 dB), before the mute gate (E,G).
-- **A5** Send gain `g = v·(1−m)·[1−max(p,0), 1+min(p,0)]`; taper confirmed by a golden pan sweep (G,O).
+- **A5** Send and track gain `g = v·(1−m)·(gL(p), gR(p))`: the measured law (S1b `pan_law`): exact sine-taper direction `atan2(gR, gL) = (p+1)·π/4`, magnitude tabulated from √2 (p = 0) to 1 (p = ±1); one law for send pan (modes 0 and 3), track pan, stereo, dual-mono and mono media (G,O).
 - **A6** Mode 3 reads pre-fader post-FX; mode 0 reads post-fader post-mute (O,G).
 - **A7** Stems bus: Σ of the 7 stems-group sends → EQ → fader → mute → mode 0 into its output bus (O,G).
 - **A8** Output bus: Σ → EQ → limiter → fader ≤ +12 dB → mute → safety stage (Q1) → clamp ±1.0 (G).
 - **A9** Bus-to-bus taps read after mute, before safety stage and clamp, unclipped as in REAPER; graph acyclic (O).
-- **A10** `TRANSLATOR`: `HAND_1` → fader → mute → mono downmix (law from a golden) → safety stage → clamp (G).
+- **A10** `TRANSLATOR`: `HAND_1` → fader → mute → mono downmix `(gL·L + gR·R)/2` on channel 1, channel 2 silent (S1b `mono_downmix_half_sum`) → safety stage → clamp (G).
 - **A11** Master: Σ post-fader outputs of inputs and stems buses (O).
-- **A12** EQ: ReaEQ band types as an SVF fed RBJ parameters; shelf bandwidth and HPF gain from goldens (G).
+- **A12** EQ: ReaEQ band types as an SVF fed RBJ parameters: band and HPF bandwidth with the octave warp capped at π/2, shelf slope `S = min(1/bw², 1.2)`, HPF gain ignored, `f0 ≤ 0.49·fs`, `bw ≥ 0.01`, gain 0 = notch (S1b, S2) (G).
 - **A13** Limiter: faithful MGA port (no lookahead, instant attack, 50 ms release, 75 % link, hold sr/128, ceiling −6…0 dB) (E,G).
 
 ### 3.4 Deviations and quirks

@@ -4,6 +4,7 @@
 pub mod bundle;
 pub mod cases;
 pub mod fx;
+pub mod golden;
 pub mod oracle;
 pub mod project;
 pub mod reaeq;

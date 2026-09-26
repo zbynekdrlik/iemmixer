@@ -1,1 +1,2 @@
 goldens/**/*.f64 binary
+crates/iem-limiter-mga/fixtures/* -text
