@@ -92,8 +92,10 @@ fn copy_tree(
         } else if kind.is_file() {
             fail(Step::Copy(*n))?;
             *n += 1;
-            fs::copy(e.path(), &dst)?;
-            File::open(&dst)?.sync_all()?;
+            // Written through a created (writable) handle: Windows flushes
+            // only a handle with write access. The permissions follow after.
+            write_synced(&dst, &fs::read(e.path())?)?;
+            fs::set_permissions(&dst, e.metadata()?.permissions())?;
         } else {
             return Err(invalid(format!(
                 "{}: only files and directories belong in the band directory",
@@ -499,6 +501,21 @@ mod tests {
         assert_eq!(t["kept.json"], b"from the crashed run");
         assert_eq!(t["cert.pem"], b"new cert");
         assert_eq!(leftovers(&target), (false, false));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copies_keep_their_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let target = d.path().join("band");
+        fill(&target, &[("secrets/jwt_secret", "s")]);
+        let secret = target.join("secrets/jwt_secret");
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o400)).unwrap();
+        run(&target, &no_faults).unwrap();
+        let mode = fs::metadata(&secret).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o400);
+        assert_eq!(fs::read(&secret).unwrap(), b"s");
     }
 
     #[cfg(unix)]

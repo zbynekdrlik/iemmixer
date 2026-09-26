@@ -2,6 +2,8 @@
 
 **Ticket:** #6 (program #1). **Spec:** `2026-09-24-iemmixer-gen2-program.md` §2.2–2.5 (I1–I10), §3.1, §3.3 (A1–A13), §3.4 (X1–X4, X13–X15, Q1, Q4), §3.5, §4.4. **Plan:** `docs/superpowers/plans/2026-09-26-s3-engine-core.md`. **Inputs:** the S2 kernels (`iem-dsp`, `iem-limiter-mga`) and the S0/S2 hand-offs on #6.
 
+> **Model superseded (#20):** §3.1–3.4 (graph, sends, buses) describe the REAPER-shaped model that `2026-09-26-engine-model-rework-design.md` replaced; the rest stands.
+
 ## 1. Goal
 
 The whole engine except the ASIO driver: a process that compiles the §3.1 graph from `site.toml`, mixes it in one real-time callback at **B = 32, 96 kHz (333 µs, I2)**, owns and persists the mix state, talks to the server over local pipes, and survives faults the way §2.4 prescribes. It runs on two backends: `Offline` (deterministic, any block size; the parity harness) and `NullRt` (paced real time; E2E and soak). S6 adds ASIO behind the same trait.
