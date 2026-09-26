@@ -114,3 +114,10 @@ Residuals for Method B/C (S7/S8), never claimed: live input duplication; the har
 - **Action 40004 = Quit** is M-confidence. If it fails, the window aborts before the backup.
 - **No MCP server for the PC desktop is configured here yet.** Task 9 registers it; no window starts without it.
 - **The predecessor's start task has a 72 h execution limit.** That is out of scope; the observation goes on #4.
+
+## 10. Results
+
+- Laws, formulas and vectors: `goldens/s1b/README.md` and `laws.json` (window `20260926T091333Z`, bundle `82716ea`); per-law lines and both restore records on #4.
+- **Changes a program-spec assumption:** A5 — the pan law has the exact sine-taper direction with a tabulated magnitude, not the +0 dB balance law; A10 — a mono destination gets half the panned sum on channel 1. Recorded for S2 on #5.
+- **Fills A12:** peak and HPF are RBJ with the octave warp capped at π/2, shelves use S = min(1/bw², 1.2), the HPF band gain is ignored.
+- **Procedure findings:** `RENDER_STEMS 2` renders nothing in REAPER 7.65 (the generator uses 1); a fresh render resource folder scans every default VST3 folder (the scan cache is now copied); the Dummy Audio `mode` value stays unverified, and no render instance ever loaded the ASIO module.
