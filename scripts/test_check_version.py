@@ -91,5 +91,13 @@ class BaseRefTests(unittest.TestCase):
         self.assertEqual(cv.main(["--root", str(self.root), "--base-ref", "main"]), 1)
 
 
+class WorkspaceMembersTests(unittest.TestCase):
+    def test_crates_list_matches_the_workspace_members(self) -> None:
+        import tomllib
+        root = Path(__file__).resolve().parent.parent
+        members = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8"))["workspace"]["members"]
+        self.assertEqual(sorted(m.split("/")[-1] for m in members), sorted(cv.CRATES))
+
+
 if __name__ == "__main__":
     unittest.main()

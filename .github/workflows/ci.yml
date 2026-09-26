@@ -32,6 +32,12 @@ jobs:
           set -euo pipefail
           python3 -m unittest discover -s scripts -p 'test_*.py' -v
           python3 scripts/test_check_disposal_safety.py
+      - name: Golden tooling self-tests (numpy venv)
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/gvenv"
+          "$RUNNER_TEMP/gvenv/bin/pip" install --quiet numpy==2.4.6
+          "$RUNNER_TEMP/gvenv/bin/python" -m unittest discover -s scripts/golden -p 'test_*.py' -v
       - name: Leptos disposal safety
         run: python3 scripts/check_disposal_safety.py
       - name: Version consistency
@@ -80,10 +86,10 @@ jobs:
       - uses: taiki-e/install-action@7623a79cdfecb99d681017af368ca353d9f49bb5 # v2.87.19
         with:
           tool: cargo-llvm-cov@0.9.1
-      - name: Tests with line coverage (iem-core, iem-server) against the floor
+      - name: Tests with line coverage (iem-core, iem-server, iem-rpp) against the floor
         run: |
           set -euo pipefail
-          cargo llvm-cov --locked --package iem-core --package iem-server --all-features \
+          cargo llvm-cov --locked --package iem-core --package iem-server --package iem-rpp --all-features \
             --json --summary-only --output-path "$RUNNER_TEMP/coverage.json"
           pct="$(jq '.data[0].totals.lines.percent' "$RUNNER_TEMP/coverage.json")"
           floor="$(tr -d '[:space:]' < .github/coverage-floor)"
@@ -92,6 +98,31 @@ jobs:
             || { echo "::error::line coverage ${pct}% is below the floor ${floor}%"; exit 1; }
       - name: UI unit tests (native)
         run: cargo test --locked -p iem-ui --lib
+
+  golden-bundle:
+    name: golden-bundle
+    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+    needs: [test]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Generate the golden bundle
+        run: cargo run --locked --release -p iem-rpp --bin iem-rpp-gen -- --out "$RUNNER_TEMP/golden-bundle"
+      - name: Check the bundle (hashes, plug-in allowlist, job-relative paths)
+        run: python3 scripts/golden/check_bundle.py "$RUNNER_TEMP/golden-bundle"
+      - name: Upload (dev pushes only — the only bundle that may reach the PC, P5)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: golden-bundle-${{ github.sha }}
+          path: ${{ runner.temp }}/golden-bundle
+          retention-days: 14
+          if-no-files-found: error
 
   wasm:
     name: wasm
@@ -213,6 +244,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Golden PC module self-test (Windows PowerShell 5.1, as on the PC)
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/golden/Test-GoldenPc.ps1
       - name: Rust toolchain (rust-toolchain.toml)
         run: rustup toolchain install
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -333,7 +367,7 @@ jobs:
           count=0
           if [ -s "$RUNNER_TEMP/pr.diff" ]; then
             cargo mutants --list --in-diff "$RUNNER_TEMP/pr.diff" \
-              --package iem-core --package iem-server --package iem-ui > "$RUNNER_TEMP/mutants.txt"
+              --package iem-core --package iem-server --package iem-ui --package iem-rpp > "$RUNNER_TEMP/mutants.txt"
             count="$(wc -l < "$RUNNER_TEMP/mutants.txt")"
           fi
           [ "$(grep -cE '^ +shard: \[' .github/workflows/ci.yml)" -eq 1 ] \
@@ -366,7 +400,7 @@ jobs:
         with:
           tool: cargo-nextest@0.9.146
       - name: Build the mutants profile once (the shards restore this cache)
-        run: cargo nextest run --locked --cargo-profile mutants --no-run -p iem-core -p iem-server -p iem-ui --all-features --all-targets
+        run: cargo nextest run --locked --cargo-profile mutants --no-run -p iem-core -p iem-server -p iem-ui -p iem-rpp --all-features --all-targets
 
   mutation:
     name: mutation shard ${{ matrix.shard }}
@@ -396,7 +430,7 @@ jobs:
         with:
           tool: cargo-mutants@27.1.0,cargo-nextest@0.9.146
       - name: Warm target (dependencies restored; workspace crates build once, then are copied per job)
-        run: cargo nextest run --locked --cargo-profile mutants --no-run -p iem-core -p iem-server -p iem-ui --all-features --all-targets
+        run: cargo nextest run --locked --cargo-profile mutants --no-run -p iem-core -p iem-server -p iem-ui -p iem-rpp --all-features --all-targets
       - name: Diff-scoped mutants
         run: |
           set -euo pipefail
@@ -409,5 +443,5 @@ jobs:
           # and would allow 300 s per mutant; the tests take ~6 s.
           cargo mutants --in-diff "$RUNNER_TEMP/pr.diff" --baseline=skip --timeout 60 --jobs 2 --copy-target=true \
             --shard "${{ matrix.shard }}/${{ strategy.job-total }}" \
-            --package iem-core --package iem-server --package iem-ui \
+            --package iem-core --package iem-server --package iem-ui --package iem-rpp \
             --all-features -- --all-targets

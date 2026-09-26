@@ -1,0 +1,647 @@
+[
+ {
+  "id": "EQ-01",
+  "eq": {
+   "bands": [
+    {
+     "kind": "high_pass",
+     "enabled": true,
+     "freq_hz": 100.41747866600939,
+     "gain_lin": 1.0,
+     "bw_oct": 2.0
+    },
+    {
+     "kind": "low_shelf",
+     "enabled": false,
+     "freq_hz": 200.3077623397404,
+     "gain_lin": 1.0,
+     "bw_oct": 2.0
+    },
+    {
+     "kind": "band",
+     "enabled": false,
+     "freq_hz": 801.9398157380639,
+     "gain_lin": 1.0,
+     "bw_oct": 1.0
+    },
+    {
+     "kind": "band",
+     "enabled": false,
+     "freq_hz": 2996.2342070275295,
+     "gain_lin": 1.0,
+     "bw_oct": 1.0
+    },
+    {
+     "kind": "high_shelf",
+     "enabled": false,
+     "freq_hz": 8016.061124722856,
+     "gain_lin": 1.0,
+     "bw_oct": 2.0
+    }
+   ],
+   "global_gain": 1.0
+  }
+ },
+ {
+  "id": "EQ-02",
+  "eq": {
+   "bands": [
+    {
+     "kind": "high_pass",
+     "enabled": true,
+     "freq_hz": 347.1588333999119,
+     "gain_lin": 2.8615798950195312,
+     "bw_oct": 2.0
+    },
+    {
+     "kind": "low_shelf",
+     "enabled": true,
+     "freq_hz": 504.4173769710022,
+     "gain_lin": 1.4166680574417114,
+     "bw_oct": 2.0
+    },
+    {
+     "kind": "band",
+     "enabled": false,
+     "freq_hz": 801.9398157380639,
+     "gain_lin": 1.0,
+     "bw_oct": 1.0
+    },
+    {
+     "kind": "band",
+     "enabled": false,
+     "freq_hz": 2018.992882811832,
+     "gain_lin": 0.8857679963111877,
+     "bw_oct": 1.1799999475479126
+    },
+    {
+     "kind": "high_shelf",
+     "enabled": false,
+     "freq_hz": 6390.505299035513,
+     "gain_lin": 1.3125280141830444,
+     "bw_oct": 2.0
+    }
+   ],
+   "global_gain": 1.0
+  }
+ },
+ {
+  "id": "EQ-03",
+  "eq": {
+   "bands": [
+    {
+     "kind": "high_pass",
+     "enabled": true,
+     "freq_hz": 162.86475808075633,
+     "gain_lin": 1.0,
+     "bw_oct": 2.0
+    },
+    {
+     "kind": "low_shelf",
+     "enabled": false,
+     "freq_hz": 200.3077623397404,
+     "gain_lin": 1.0,
+     "bw_oct": 2.0
+    },
+    {
+     "kind": "band",
+     "enabled": false,
+     "freq_hz": 801.9398157380639,
+     "gain_lin": 1.0,
+     "bw_oct": 1.0
+    },
+    {
+     "kind": "band",
+     "enabled": false,
+     "freq_hz": 2996.2342070275295,
+     "gain_lin": 1.0,
+     "bw_oct": 1.0
+    },
+    {
+     "kind": "high_shelf",
+     "enabled": false,
+     "freq_hz": 8016.061124722856,
+     "gain_lin": 1.0,
+     "bw_oct": 2.0
+    }
+   ],
+   "global_gain": 1.0
+  }
+ },
+ {
+  "id": "EQ-04",
+  "eq": {
+   "bands": [
+    {
+     "kind": "high_pass",
+     "enabled": true,
+     "freq_hz": 166.4964650269641,
+     "gain_lin": 1.0,
+     "bw_oct": 2.0
+    },
+    {
+     "kind": "low_shelf",
+     "enabled": false,
+     "freq_hz": 200.3077623397404,
+     "gain_lin": 1.0,
+     "bw_oct": 2.0
+    },
+    {
+     "kind": "band",
+     "enabled": false,
+     "freq_hz": 801.9398157380639,
+     "gain_lin": 1.0,
+     "bw_oct": 1.0
+    },
+    {
+     "kind": "band",
+     "enabled": false,
+     "freq_hz": 2996.2342070275295,
+     "gain_lin": 1.0,
+     "bw_oct": 1.0
+    },
+    {
+     "kind": "high_shelf",
+     "enabled": false,
+     "freq_hz": 8016.061124722856,
+     "gain_lin": 1.0,
+     "bw_oct": 2.0
+    }
+   ],
+   "global_gain": 1.0
+  }
+ },
+ {
+  "id": "EQ-05",
+  "eq": {
+   "bands": [
+    {
+     "kind": "high_pass",
+     "enabled": false,
+     "freq_hz": 164.68665525244825,
+     "gain_lin": 3.1063919067382812,
+     "bw_oct": 2.0
+    },
+    {
+     "kind": "low_shelf",
+     "enabled": false,
+     "freq_hz": 244.8937531610033,
+     "gain_lin": 3.405872106552124,
+     "bw_oct": 2.0
+    },
+    {
+     "kind": "band",
+     "enabled": false,
+     "freq_hz": 801.9398157380639,
+     "gain_lin": 1.0,
+     "bw_oct": 1.0
+    },
+    {
+     "kind": "band",
+     "enabled": false,
+     "freq_hz": 2996.2342070275295,
+     "gain_lin": 1.0,
+     "bw_oct": 1.0
+    },
+    {
+     "kind": "high_shelf",
+     "enabled": false,
+     "freq_hz": 8016.061124722856,
+     "gain_lin": 1.0,
+     "bw_oct": 2.0
+    }
+   ],
+   "global_gain": 1.0
+  }
+ },
+ {
+  "id": "EQ-06",
+  "eq": {
+   "bands": [
+    {
+     "kind": "high_pass",
+     "enabled": true,
+     "freq_hz": 173.73768388686443,
+     "gain_lin": 1.0,
+     "bw_oct": 2.0
+    },
+    {
+     "kind": "low_shelf",
+     "enabled": false,
+     "freq_hz": 200.3077623397404,
+     "gain_lin": 1.0,
+     "bw_oct": 2.0
+    },
+    {
+     "kind": "band",
+     "enabled": true,
+     "freq_hz": 259.6941396757433,
+     "gain_lin": 0.6245332363330517,
+     "bw_oct": 0.4000000000000001
+    },
+    {
+     "kind": "band",
+     "enabled": true,
+     "freq_hz": 444.91171050137393,
+     "gain_lin": 0.5089400951518099,
+     "bw_oct": 0.4000000000000001
+    },
+    {
+     "kind": "high_shelf",
+     "enabled": false,
+     "freq_hz": 8016.061124722856,
+     "gain_lin": 1.0,
+     "bw_oct": 2.0
+    }
+   ],
+   "global_gain": 1.0
+  }
+ },
+ {
+  "id": "EQ-07",
+  "eq": {
+   "bands": [
+    {
+     "kind": "high_pass",
+     "enabled": false,
+     "freq_hz": 48.457388116035744,
+     "gain_lin": 1.0,
+     "bw_oct": 2.0
+    },
+    {
+     "kind": "low_shelf",
+     "enabled": false,
+     "freq_hz": 200.3077623397404,
+     "gain_lin": 1.0,
+     "bw_oct": 2.0
+    },
+    {
+     "kind": "band",
+     "enabled": false,
+     "freq_hz": 801.9398157380639,
+     "gain_lin": 1.0,
+     "bw_oct": 1.0
+    },
+    {
+     "kind": "band",
+     "enabled": false,
+     "freq_hz": 2996.2342070275295,
+     "gain_lin": 1.0,
+     "bw_oct": 1.0
+    },
+    {
+     "kind": "high_shelf",
+     "enabled": false,
+     "freq_hz": 8016.061124722856,
+     "gain_lin": 1.0,
+     "bw_oct": 2.0
+    }
+   ],
+   "global_gain": 1.0
+  }
+ },
+ {
+  "id": "EQ-08",
+  "eq": {
+   "bands": [
+    {
+     "kind": "high_pass",
+     "enabled": false,
+     "freq_hz": 4448.053740392013,
+     "gain_lin": 1.0,
+     "bw_oct": 2.0
+    },
+    {
+     "kind": "low_shelf",
+     "enabled": false,
+     "freq_hz": 200.3077623397404,
+     "gain_lin": 1.0,
+     "bw_oct": 2.0
+    },
+    {
+     "kind": "band",
+     "enabled": false,
+     "freq_hz": 801.9398157380639,
+     "gain_lin": 1.0,
+     "bw_oct": 1.0
+    },
+    {
+     "kind": "band",
+     "enabled": false,
+     "freq_hz": 2996.2342070275295,
+     "gain_lin": 1.0,
+     "bw_oct": 1.0
+    },
+    {
+     "kind": "high_shelf",
+     "enabled": false,
+     "freq_hz": 8016.061124722856,
+     "gain_lin": 1.0,
+     "bw_oct": 2.0
+    }
+   ],
+   "global_gain": 1.0
+  }
+ },
+ {
+  "id": "EQ-09",
+  "eq": {
+   "bands": [
+    {
+     "kind": "low_shelf",
+     "enabled": true,
+     "freq_hz": 99.99994765191569,
+     "gain_lin": 1.0,
+     "bw_oct": 0.800000011920929
+    },
+    {
+     "kind": "band",
+     "enabled": true,
+     "freq_hz": 300.0000206356015,
+     "gain_lin": 1.0,
+     "bw_oct": 2.0
+    },
+    {
+     "kind": "band",
+     "enabled": true,
+     "freq_hz": 1000.0024405577284,
+     "gain_lin": 1.0,
+     "bw_oct": 2.0
+    },
+    {
+     "kind": "high_shelf",
+     "enabled": true,
+     "freq_hz": 5000.003345747248,
+     "gain_lin": 1.0,
+     "bw_oct": 0.800000011920929
+    },
+    {
+     "kind": "high_pass",
+     "enabled": false,
+     "freq_hz": 99.99994765191569,
+     "gain_lin": 1.0,
+     "bw_oct": 2.0
+    }
+   ],
+   "global_gain": 1.0
+  }
+ },
+ {
+  "id": "EQ-10",
+  "eq": {
+   "bands": [
+    {
+     "kind": "high_pass",
+     "enabled": true,
+     "freq_hz": 163.85305637349208,
+     "gain_lin": 1.0,
+     "bw_oct": 2.0
+    },
+    {
+     "kind": "low_shelf",
+     "enabled": false,
+     "freq_hz": 200.3077623397404,
+     "gain_lin": 1.0,
+     "bw_oct": 2.0
+    },
+    {
+     "kind": "band",
+     "enabled": false,
+     "freq_hz": 801.9398157380639,
+     "gain_lin": 1.0,
+     "bw_oct": 1.0
+    },
+    {
+     "kind": "band",
+     "enabled": false,
+     "freq_hz": 2996.2342070275295,
+     "gain_lin": 1.0,
+     "bw_oct": 1.0
+    },
+    {
+     "kind": "high_shelf",
+     "enabled": false,
+     "freq_hz": 8016.061124722856,
+     "gain_lin": 1.0,
+     "bw_oct": 2.0
+    }
+   ],
+   "global_gain": 1.0
+  }
+ },
+ {
+  "id": "EQ-11",
+  "eq": {
+   "bands": [
+    {
+     "kind": "high_pass",
+     "enabled": true,
+     "freq_hz": 100.43177180172184,
+     "gain_lin": 1.0,
+     "bw_oct": 2.0
+    },
+    {
+     "kind": "low_shelf",
+     "enabled": false,
+     "freq_hz": 200.3077623397404,
+     "gain_lin": 1.0,
+     "bw_oct": 1.8300000429153442
+    },
+    {
+     "kind": "band",
+     "enabled": true,
+     "freq_hz": 800.2872987596792,
+     "gain_lin": 1.0,
+     "bw_oct": 1.0
+    },
+    {
+     "kind": "band",
+     "enabled": false,
+     "freq_hz": 2996.2342070275295,
+     "gain_lin": 1.0,
+     "bw_oct": 1.0
+    },
+    {
+     "kind": "high_shelf",
+     "enabled": false,
+     "freq_hz": 8016.061124722856,
+     "gain_lin": 1.0,
+     "bw_oct": 2.0
+    }
+   ],
+   "global_gain": 1.0
+  }
+ },
+ {
+  "id": "EQ-12",
+  "eq": {
+   "bands": [
+    {
+     "kind": "high_pass",
+     "enabled": true,
+     "freq_hz": 102.26281802155147,
+     "gain_lin": 1.0,
+     "bw_oct": 2.0
+    },
+    {
+     "kind": "low_shelf",
+     "enabled": false,
+     "freq_hz": 200.3077623397404,
+     "gain_lin": 1.0,
+     "bw_oct": 2.0
+    },
+    {
+     "kind": "band",
+     "enabled": false,
+     "freq_hz": 801.9398157380639,
+     "gain_lin": 1.0,
+     "bw_oct": 1.0
+    },
+    {
+     "kind": "band",
+     "enabled": false,
+     "freq_hz": 2996.2342070275295,
+     "gain_lin": 1.0,
+     "bw_oct": 1.0
+    },
+    {
+     "kind": "high_shelf",
+     "enabled": false,
+     "freq_hz": 8016.061124722856,
+     "gain_lin": 1.0,
+     "bw_oct": 2.0
+    }
+   ],
+   "global_gain": 1.0
+  }
+ },
+ {
+  "id": "EQ-13",
+  "eq": {
+   "bands": [
+    {
+     "kind": "high_pass",
+     "enabled": false,
+     "freq_hz": 80.20834168547684,
+     "gain_lin": 1.0,
+     "bw_oct": 2.0
+    },
+    {
+     "kind": "low_shelf",
+     "enabled": false,
+     "freq_hz": 200.3077623397404,
+     "gain_lin": 1.0,
+     "bw_oct": 2.0
+    },
+    {
+     "kind": "band",
+     "enabled": false,
+     "freq_hz": 801.9398157380639,
+     "gain_lin": 1.0,
+     "bw_oct": 1.0
+    },
+    {
+     "kind": "band",
+     "enabled": false,
+     "freq_hz": 2996.2342070275295,
+     "gain_lin": 1.0,
+     "bw_oct": 1.0
+    },
+    {
+     "kind": "high_shelf",
+     "enabled": false,
+     "freq_hz": 8016.061124722856,
+     "gain_lin": 1.0,
+     "bw_oct": 2.0
+    }
+   ],
+   "global_gain": 1.0
+  }
+ },
+ {
+  "id": "EQ-14",
+  "eq": {
+   "bands": [
+    {
+     "kind": "high_pass",
+     "enabled": true,
+     "freq_hz": 333.08384756696734,
+     "gain_lin": 0.9427840113639832,
+     "bw_oct": 2.0
+    },
+    {
+     "kind": "low_shelf",
+     "enabled": false,
+     "freq_hz": 200.3077623397404,
+     "gain_lin": 1.2615385055541992,
+     "bw_oct": 2.0
+    },
+    {
+     "kind": "band",
+     "enabled": false,
+     "freq_hz": 801.9398157380639,
+     "gain_lin": 2.1600000858306885,
+     "bw_oct": 1.0
+    },
+    {
+     "kind": "band",
+     "enabled": true,
+     "freq_hz": 2996.2342070275295,
+     "gain_lin": 1.2444765605047494,
+     "bw_oct": 1.0
+    },
+    {
+     "kind": "high_shelf",
+     "enabled": true,
+     "freq_hz": 8016.061124722856,
+     "gain_lin": 1.559999942779541,
+     "bw_oct": 2.0
+    }
+   ],
+   "global_gain": 1.0
+  }
+ },
+ {
+  "id": "EQ-15",
+  "eq": {
+   "bands": [
+    {
+     "kind": "high_pass",
+     "enabled": true,
+     "freq_hz": 181.21030996422076,
+     "gain_lin": 1.0,
+     "bw_oct": 1.5
+    },
+    {
+     "kind": "low_shelf",
+     "enabled": true,
+     "freq_hz": 307.2466557497769,
+     "gain_lin": 0.354667991399765,
+     "bw_oct": 1.5
+    },
+    {
+     "kind": "band",
+     "enabled": true,
+     "freq_hz": 534.7692917723191,
+     "gain_lin": 1.2458640336990356,
+     "bw_oct": 1.5
+    },
+    {
+     "kind": "band",
+     "enabled": true,
+     "freq_hz": 2747.518263220966,
+     "gain_lin": 0.9702280163764954,
+     "bw_oct": 1.0
+    },
+    {
+     "kind": "high_shelf",
+     "enabled": true,
+     "freq_hz": 8132.787581251436,
+     "gain_lin": 1.4966679811477661,
+     "bw_oct": 1.5
+    }
+   ],
+   "global_gain": 1.0
+  }
+ }
+]

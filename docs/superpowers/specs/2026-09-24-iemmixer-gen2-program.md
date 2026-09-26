@@ -30,7 +30,7 @@
   - **D2** zdieľanie počítača: okná otváraš ty správou (vyššie).
   - **D3** zvláštnosti REAPERa: mix presne ako dnes, 4 zvláštnosti opraviť.
   - **D4** prechod: 2 skúšky a 1 ostrá akcia na dočasnej adrese, potom súhlas zvukára a kapely, hlavná adresa a 8 týždňov možnosť návratu.
-  - D5 a D7 prídu neskôr, pri príslušnej časti.
+  - D5 príde neskôr, pri príslušnej časti. D7 rozhodnuté: referenčné rendery robí REAPER na iem PC (záloha → render na kópii → obnova).
 - **Pre kapelu sa nič nemení:** rovnaká adresa, rovnaké PINy, rovnaká appka v telefóne. Pri skúškach a pri prechode nemusia nič riešiť.
 
 ---
@@ -57,6 +57,7 @@
 - **P6** Site data never enters the public repo: names, hosts, Dante channel numbers and real track names, PINs, keys. EQ and limiter values are not site data.
 - **P7** The PC is self-contained at runtime: no dependency on any other machine we run.
 - **P8** Framework first; reuse predecessor app code that does not depend on REAPER.
+- **P10** **Appliance.** The IEM PC serves only the mixer: any process, service, driver or power feature that can disturb the audio callback is disabled or constrained (S1c). Gen 3 (later, out of scope): Linux with a real-time kernel and own drivers for a zero-latency system.
 - **P9** **Band members notice nothing.** Same address, same PINs, same app on their phones, same controls and sound; switching between REAPER and iemmixer (trials included) and the cutover need no action from them. Internal fixes (e.g. how PINs are stored) never change what they type or see.
 
 Numbers are tunable defaults unless they are parity requirements, tolerances (§3.5) or safety invariants (§2.5, §4.4).
@@ -105,7 +106,7 @@ Numbers are tunable defaults unless they are parity requirements, tolerances (§
 ### 2.5 Hard invariants
 
 - **I1** The engine opens no socket, links no codec, parses no browser data.
-- **I2** The engine never sets rate or buffer size; it uses the driver's buffer and refuses any rate but 96 kHz.
+- **I2** **iemmixer runs at a 32-sample buffer at 96 kHz (≈ 0.33 ms) — mandatory** (owner 2026-09-26: in-ear system). The PC is an appliance bound to iemmixer: the engine runs with the highest safe priority and the OS is tuned (admin rights) so nothing interrupts it (S1c). The buffer is the card driver's preferred size: iemmixer's switch sets 32 when it takes the card and restores the predecessor's previous value on "ide event", so REAPER stays exactly as it is. The engine never changes the rate or buffer at runtime and refuses any rate but 96 kHz.
 - **I3** One ASIO host at a time: the engine refuses while `reaper.exe` exists; the guard never starts REAPER while an engine exists.
 - **I4** The graph is compiled once per run from `site.toml` and validated (acyclic, unique TX, channels in map, one send per pair); topology change = controlled engine restart.
 - **I5** f64, plain summing, no bus pan law, zero added latency, no delay-compensation emulation.
@@ -121,7 +122,7 @@ Numbers are tunable defaults unless they are parity requirements, tolerances (§
 
 ### 3.1 The system reproduced
 
-- **Card:** Yamaha AIC128-D, ASIO only, 96 kHz, buffer B = 64 (667 µs), treated as single-client.
+- **Card:** Yamaha AIC128-D, ASIO only, 96 kHz, predecessor today B = 64 (667 µs); iemmixer B = 32 (I2), treated as single-client.
 - **32 RX, 24 inputs.** Direct: `MIC_1`…`MIC_10`, `HAND_1`…`HAND_3`, `ENG_MIC` (mono), `KEYS`, `IEMONLY`, `CONTENT` (stereo). Stems group: `CLICK`, `GUIDE` (mono), `DRUMS`, `BASS`, `INST`, `OTHER`, `BGVS` (stereo).
 - **23 TX:** 9 member buses and `ENGINEER` (stereo, with EQ, limiter, fader and mute), `TRANSLATOR` (mono), master; plus 10 stems buses without TX.
 - **268 sends:**
@@ -230,7 +231,7 @@ Proof codes: **M** mock E2E, **L** live E2E/HIL, **S** server tests, **E** engin
 - **Remaining:** A/B in trials → recorded in D3.
 - **Human acceptance:** 2 rehearsals + 1 service in trial (D4) → engineer and band sign-off.
 
-**Goldens:** Method A renders REAPER headless on `<build-box>` from `iem-rpp`-generated projects (D7); fallbacks: a Windows VM, a ReaPlugs harness, Method B plus analytic references, A/B. Stored compactly (≤ 20 MB); site EQ and limiter settings are anonymised, rendered once, compared in public CI.
+**Goldens:** Method A renders with the IEM PC's own REAPER in dev time, from `iem-rpp`-generated project copies, offline without opening the card (D7): back up REAPER's and the predecessor's state first, restore and verify it afterwards; the original project is never touched; fallbacks: a Windows VM, a ReaPlugs harness, Method B plus analytic references, A/B. Stored compactly (≤ 20 MB); site EQ and limiter settings are anonymised, rendered once, compared in public CI.
 
 ---
 
@@ -324,7 +325,7 @@ Proof codes: **M** mock E2E, **L** live E2E/HIL, **S** server tests, **E** engin
 |---|---|---|---|---|
 | **S0** | Fresh import, LICENSE, repo settings, CI skeleton, security baseline incl. complete login limiter, ops repo skeleton | No | ~1k, 1.5 wk | D1 (push only) |
 | S1a | Owner-present ASIO spike (interim switch script): driver, duplex, callback baseline, resets, clock role, fault injections incl. `seh_ctl`, OS restart, parked-engine reboot; optional hard-kill | Yes | ~0.5k, 1 wk | S0 |
-| S1b | Golden spike on `<build-box>`: generator, headless render, taper, shelf, HPF, downmix | No | ~0.6k, 1.5 wk | D7 |
+| S1b | Golden spike on the IEM PC's REAPER (backup → offline render of project copies → restore + verify): generator, taper, shelf, HPF, downmix | Yes (dev time) | ~0.6k, 1.5 wk | S0 |
 | S2 | DSP, limiter, golden harness, vectors | No | ~2.5k, 2 wk | S1b, D1 |
 | S3 | Engine on Offline/NullRt: graph, RT, persistence, pipes, crash handling, test cap, oracle | No | ~3.5k, 3 wk | S2 |
 | S4 | Importer, exporter, legacy data, certificate, PIN rule | No | ~0.9k, 1.5 wk | S3 |
@@ -345,7 +346,7 @@ Proof codes: **M** mock E2E, **L** live E2E/HIL, **S** server tests, **E** engin
 
 - **R1** azo fails on this driver → S1a first; fallbacks (§2.2).
 - **R2** REAPER behaviours stay unknown or goldens are blocked → goldens before DSP freeze; D7 fallback chain; Methods B/C; A/B.
-- **R3** Dropouts at B = 64 → CPU gate; late-callback telemetry; soak.
+- **R3** Dropouts at B = 32 → S1c OS tuning (priorities, interrupts, power, background services), DPC/ISR latency measurement, CPU gate, late-callback telemetry, soak.
 - **R4** Development or a HIL job cuts into an event (the owner's signal comes late, or an agent switches unasked) → owner-message rule; immediate "ide event" with job cancel; band-activity alarm; G1.
 - **R5** Engine bug harms hearing → §4.4; fuzzing.
 - **R6** Engine death or parking hangs the PC → graceful paths; S1a reboot test; power cycle last.
@@ -356,16 +357,16 @@ Proof codes: **M** mock E2E, **L** live E2E/HIL, **S** server tests, **E** engin
 
 ---
 
-## 8. Owner decisions (D1–D4 approved 2026-09-24; D5, D7 pending)
+## 8. Owner decisions (D1–D4 approved 2026-09-24, D7 2026-09-26; D5 pending)
 
-D1–D4: the **bold** option was approved. D5 and D7 wait for the named sub-project; **bold** = recommended. (Former D6 and D8 are settled by P9 and the agent: PINs stay 4 digits; a renamed member's old history is imported archived and read-only.)
+D1–D4: the **bold** option was approved. D5 waits for S8; **bold** = recommended. (Former D6 and D8 are settled by P9 and the agent: PINs stay 4 digits; a renamed member's old history is imported archived and read-only.)
 
 - **D1 Licence** (blocks the first push): **(a) MIT OR Apache-2.0 with a GPL limiter crate (engine binary GPL).** (b) All GPL. (c) Permissive with a clean-room limiter: behavioural parity only, weak legal footing.
 - **D2 Sharing the PC — approved (owner model, 2026-09-24):** **the owner signals every event by message — "ide event" → `event`, "event skončil" → `dev`; the PC belongs to development in between; reboot = `event`; interlock and band-activity alarm kept; G2 procedural.** (Superseded alternatives: 12 h owner-granted windows, signed grants, calendar-autonomous, unrestricted, owner-present only.)
 - **D3 REAPER quirks Q1–Q4** (blocks S8): **(a) exact mix math; fix all four (§3.4).** (b) Replicate any chosen item.
 - **D4 Cutover** (blocks S8): **(a) all gates green, 2 trial rehearsals and 1 service on the band's usual address, engineer and band sign-off, then iemmixer becomes the boot default; 8-week rollback window.** (b) 1 rehearsal, 12 weeks. (c) 4 rehearsals and 2 services, 6 weeks. The band's address never changes; trial mixes are discarded.
 - **D5 Dante self-loopback** (S8): (a) none. **(b) The owner subscribes a spare TX pair to a spare RX pair on the same card (the A1 exception).** (c) The same on a band pair.
-- **D7 REAPER licence for golden renders** (S1b): **(a) headless on `<build-box>`.** (b) A Windows VM (+1 week). (c) No: taper, mute and downmix move to Method B in S6/S7.
+- **D7 Golden renders — decided 2026-09-26:** REAPER is never installed on a dev box; renders run on the IEM PC's REAPER in dev time, with a full backup of REAPER's and the predecessor's state before and a verified restore after.
 
 ---
 

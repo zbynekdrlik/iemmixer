@@ -2572,7 +2572,7 @@ dependencies = [
 
 [[package]]
 name = "iem-core"
-version = "2.0.0-dev.1"
+version = "2.0.0-dev.2"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2586,8 +2586,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "iem-rpp"
+version = "2.0.0-dev.2"
+dependencies = [
+ "base64 0.22.1",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "iem-server"
-version = "2.0.0-dev.1"
+version = "2.0.0-dev.2"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2628,7 +2640,7 @@ dependencies = [
 
 [[package]]
 name = "iem-tray"
-version = "2.0.0-dev.1"
+version = "2.0.0-dev.2"
 dependencies = [
  "anyhow",
  "dirs",
@@ -2648,7 +2660,7 @@ dependencies = [
 
 [[package]]
 name = "iem-ui"
-version = "2.0.0-dev.1"
+version = "2.0.0-dev.2"
 dependencies = [
  "base64 0.22.1",
  "console_error_panic_hook",
