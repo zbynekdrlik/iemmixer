@@ -125,5 +125,41 @@ class EndToEndTests(unittest.TestCase):
             self.assertTrue(math.isclose(laws["peak_bw"]["max_residual"], 0.0, abs_tol=1e-9))
 
 
+class MeasuredLawTests(unittest.TestCase):
+    """Laws found in window 2 (#4): they must be recognised, and a wrong
+    variant must not be."""
+
+    def test_octave_warp_is_capped_above_a_quarter_of_the_rate(self) -> None:
+        fs, f0, bw = 44100, 20000.0, 1.0
+        w0 = 2 * math.pi * f0 / fs
+        self.assertAlmostEqual(an.alpha_oct(fs, f0, bw), math.sin(w0) * math.sinh(math.log(2) / 2 * bw * math.pi / 2), places=15)
+        self.assertAlmostEqual(an.alpha_oct(96000, 1000.0, bw), an.alpha_bw(96000, 1000.0, bw), places=15)
+        h = direct_form_ir(an.rbj("band", fs, f0, 2.0, bw, alpha=an.alpha_oct(fs, f0, bw)), 256)
+        self.assertLess(an.ir_residual(h, an.rbj("band", fs, f0, 2.0, bw, alpha=an.alpha_oct(fs, f0, bw))), 1e-12)
+        self.assertGreater(an.ir_residual(h, an.rbj("band", fs, f0, 2.0, bw)), 1e-3)
+
+    def test_shelf_slope_is_one_over_bw_squared_capped_at_1_2(self) -> None:
+        for fs, f0, g, bw in ((96000, 1000.0, 10 ** (3 / 20), 2.0), (48000, 80.0, 10 ** (-12 / 20), 0.4), (44100, 8000.0, 10 ** (12 / 20), 4.0)):
+            h = direct_form_ir(an.rbj("high_shelf", fs, f0, g, bw, alpha=an.alpha_shelf(fs, f0, g, bw)), 256)
+            self.assertEqual(an.classify_shelf("high_shelf", fs, f0, g, bw, h), "C", (fs, f0, bw))
+        w0 = 2 * math.pi * 1000.0 / 96000
+        a = math.sqrt(10 ** (3 / 20))
+        s_capped = math.sin(w0) / 2 * math.sqrt((a + 1 / a) * (1 / 1.2 - 1) + 2)
+        self.assertAlmostEqual(an.alpha_shelf(96000, 1000.0, 10 ** (3 / 20), 0.4), s_capped, places=15)
+
+    def test_pan_table_has_the_sine_direction(self) -> None:
+        table = {0.5: (0.509665970138, 1.230442497388), 0.0: (1.0, 1.0), -1.0: (1.0, 0.0)}
+        self.assertLess(an.pan_direction_error(table), 1e-11)
+        self.assertGreater(an.pan_direction_error({0.5: (0.5, 1.0)}), 0.1)
+
+    def test_downmix_is_half_the_panned_sum_on_channel_one(self) -> None:
+        table = {0.0: (1.0, 1.0), -0.5: (1.230442497388, 0.509665970138)}
+        y = np.zeros((3000, 2))
+        y[960, 0] = 0.5 * 1.230442497388 * 0.5
+        y[1920, 0] = 0.5 * 0.509665970138 * 0.5
+        self.assertLess(an.downmix_error(y, table, {"source": "st", "vol": 1.0, "pan": -0.5, "k": [960, 1920]}), 1e-12)
+        y[5, 1] = 1e-3
+        self.assertGreaterEqual(an.downmix_error(y, table, {"source": "st", "vol": 1.0, "pan": -0.5, "k": [960, 1920]}), 1e-3)
+
 if __name__ == "__main__":
     unittest.main()
