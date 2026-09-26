@@ -4,7 +4,11 @@
 //! fixture it translates) equals the port, and the port equals REAPER's renders
 //! (S1b `lim-*`: residual < −100 dBFS, spec ≤ 1e-12), in any block size.
 
-#![allow(non_snake_case)]
+#![allow(
+    non_snake_case,
+    clippy::identity_op,
+    clippy::field_reassign_with_default
+)]
 
 use iem_limiter_mga::{LINK_PCT, Limiter, Mga, RELEASE_MS, Sliders};
 use iem_rpp::golden::{Goldens, s1b_dir};

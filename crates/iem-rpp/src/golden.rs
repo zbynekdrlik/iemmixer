@@ -11,12 +11,12 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum GoldenError {
-    #[error("{path}: {source}")]
+    #[error("{}: {source}", .path.display())]
     Io {
         path: PathBuf,
         source: std::io::Error,
     },
-    #[error("{path}: {source}")]
+    #[error("{}: {source}", .path.display())]
     Json {
         path: PathBuf,
         source: serde_json::Error,
