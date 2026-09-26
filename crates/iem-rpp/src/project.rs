@@ -273,7 +273,8 @@ mod tests {
             "<REAPER_PROJECT 0.1 \"7.65/win64\" 0 0\n",
             "\n  SAMPLERATE 96000 1 0\n",
             "\n  RENDER_FILE \"@@OUT@@\\p\"\n",
-            "\n  RENDER_STEMS 2\n",
+            // REAPER 7.65 (window 1): 2 ends in "Nothing to render!"; 1 = stems + master mix.
+            "\n  RENDER_STEMS 1\n",
             "\n  <RENDER_CFG\n    ZXZhd0AAAQ==\n  >\n",
             "\n    SEL 0\n",
             "\n    AUXRECV 0 3 1 0.5 0 0 0 0 1024 -1:U 0 -1 ''\n",

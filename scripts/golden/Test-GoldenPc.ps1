@@ -46,6 +46,14 @@ $backup2 = Join-Path $base 'backup2'
 $held = [IO.File]::Open((Join-Path $c 'held.db'), 'Open', 'ReadWrite', 'None')
 try {
     Throws { Invoke-GoldenBackup -Roots @{ 'a' = $a; 'c' = $c } -Dest (Join-Path $base 'backup-strict') } 'backup-refuses-an-unreadable-file-in-a-strict-root'
+    # The caller's error preference must not matter (Get-FileHash only writes a non-terminating error).
+    $savedPref = $global:ErrorActionPreference
+    $global:ErrorActionPreference = 'Continue'
+    try {
+        Throws { Get-GoldenManifest -Roots @{ 'c' = $c } } 'manifest-refuses-a-held-file-in-a-strict-root-under-continue'
+        $rows = Get-GoldenManifest -Roots @{ 'c' = $c } -Volatile @('c')
+        Assert (@($rows | Where-Object { $_.sha256 -eq 'unreadable' }).Count -eq 1) 'manifest-marks-a-held-file-unreadable-under-continue'
+    } finally { $global:ErrorActionPreference = $savedPref }
     $r2 = Invoke-GoldenBackup -Roots @{ 'a' = $a; 'c' = $c } -Dest $backup2 -VolatileRoots @('c')
 } finally { $held.Close() }
 Assert ($r2.files -eq 4 -and $r2.volatile.unreadable -eq 1) 'backup-tolerates-a-held-file-in-a-volatile-root'
@@ -82,11 +90,13 @@ $main = Join-Path $base 'main-resource'
 New-Item -ItemType Directory -Force -Path (Join-Path $main 'Effects\utility'), (Join-Path $main 'Effects\loser') | Out-Null
 Set-Content -LiteralPath (Join-Path $main 'Effects\utility\volume_pan') -Value 'desc:x'
 Set-Content -LiteralPath (Join-Path $main 'Effects\loser\MGA_JSLimiterST') -Value 'desc:y'
+Set-Content -LiteralPath (Join-Path $main 'reaper-vstplugins64.ini') -Value '[vstcache]'
 Throws { New-GoldenResourceDir -Path (Join-Path $base 'res3') -MainResource $main -DummyMode 3 } 'resource-dir-refuses-asio'
 $ini = New-GoldenResourceDir -Path (Join-Path $base 'res') -MainResource $main -DummyMode 4 -VstPath 'C:\Plugins\FX'
 $iniText = Get-Content -LiteralPath $ini -Raw
 Assert ($iniText.Contains('mode=4') -and -not ($iniText -match '(?i)asio') -and (Test-Path -LiteralPath (Join-Path $base 'res\Effects\loser\MGA_JSLimiterST'))) 'resource-dir-is-minimal-and-asio-free'
 Assert ($iniText.Contains("vstpath64=C:\Plugins\FX`r`n")) 'resource-dir-pins-the-vst-path'
+Assert (Test-Path -LiteralPath (Join-Path $base 'res\reaper-vstplugins64.ini')) 'resource-dir-carries-the-plugin-scan-cache'
 
 $st = Join-Path $base 's.json'
 Write-GoldenStatus -Path $st -State 'done' -Results @([pscustomobject]@{ n = 1 })
