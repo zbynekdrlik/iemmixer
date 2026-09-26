@@ -90,7 +90,7 @@ pub enum RenderFormat {
 }
 
 impl RenderFormat {
-    /// `RENDER_CFG` payload "evaw" + bit depth + 0 + 1 (UNVERIFIED until Task 13).
+    /// `RENDER_CFG` payload "evaw" + bit depth + 0 + 1 (64-bit float confirmed on REAPER 7.65, window 1).
     pub const fn cfg(self) -> &'static str {
         match self {
             Self::Float64 => "ZXZhd0AAAQ==",
@@ -169,7 +169,7 @@ impl Project {
         p.line("RENDER_RANGE 1 0 0 18 1000")
             .line("RENDER_RESAMPLE 3 0 1")
             .line("RENDER_ADDTOPROJ 0");
-        p.line("RENDER_STEMS 2")
+        p.line("RENDER_STEMS 1")
             .line("RENDER_DITHER 0")
             .line("RENDER_TRIM 0.000001 0.000001 0 0");
         let mut cfg = Chunk::new("RENDER_CFG");

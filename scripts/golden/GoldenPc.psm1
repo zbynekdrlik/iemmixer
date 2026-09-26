@@ -231,7 +231,8 @@ function New-GoldenResourceDir {
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dst) | Out-Null
         Copy-Item -LiteralPath (Join-Path $MainResource $rel) -Destination $dst
     }
-    foreach ($name in @('reaper-license.rk', 'reaper-reginfo2.ini')) {
+    # The plug-in scan cache keeps REAPER from loading every VST3 in the default folders again.
+    foreach ($name in @('reaper-license.rk', 'reaper-reginfo2.ini', 'reaper-vstplugins64.ini')) {
         $src = Join-Path $MainResource $name
         if (Test-Path -LiteralPath $src) { Copy-Item -LiteralPath $src -Destination (Join-Path $Path $name) }
     }
