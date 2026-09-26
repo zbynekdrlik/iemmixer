@@ -99,6 +99,11 @@ pub struct Config {
     /// Returns `{"status":200,"readyConnections":N}` (HTTP 503 when N = 0).
     #[serde(default = "default_tunnel_ready_url")]
     pub tunnel_ready_url: String,
+
+    /// The engine's topology table (`[engine]`): read by `iem-engine` only
+    /// (S3 design note §3.1); the server ignores it until S5.
+    #[serde(default, skip_serializing)]
+    pub engine: Option<serde::de::IgnoredAny>,
 }
 
 fn default_reaper_url() -> String {
@@ -158,6 +163,7 @@ impl Default for Config {
             backup_schedule: default_backup_schedule(),
             backup_retention_days: default_backup_retention_days(),
             tunnel_ready_url: default_tunnel_ready_url(),
+            engine: None,
         }
     }
 }
@@ -577,6 +583,8 @@ MEMBER3 = [75, 76]
         assert_eq!(site.dante_outputs.len(), 10);
         assert_eq!(site.lan_url.as_deref(), Some("http://10.0.0.10"));
         assert_eq!(site.https_domain.as_deref(), Some("mixer.example.org"));
+        assert!(site.engine.is_some(), "the [engine] table is accepted");
+        assert!(Config::default().engine.is_none());
         let example: Config = toml::from_str(include_str!("../../../config/iemmixer.example.toml"))
             .expect("config/iemmixer.example.toml");
         assert_eq!(example.members.len(), 2);

@@ -196,3 +196,290 @@ name = "CONTENT"
 dante_input = 124
 default_level_db = 0.0
 category = "tech"
+
+# Engine topology (program spec §3.1, S3 design note §3.1): 24 inputs on 32 RX
+# channels, 9 member buses and the engineer (stereo TX, EQ, limiter), their 10
+# stems buses, the translator (one TX channel) and the master; 268 sends.
+# Synthetic channels: RX 101-132, TX 71-88 (members), 91/92 (engineer),
+# 89/90 (master), 93 (translator).
+[engine]
+channels = 128
+engineer = "engineer"
+
+[[engine.inputs]]
+id = "mic1"
+rx = [101]
+
+[[engine.inputs]]
+id = "mic2"
+rx = [102]
+
+[[engine.inputs]]
+id = "mic3"
+rx = [103]
+
+[[engine.inputs]]
+id = "mic4"
+rx = [104]
+
+[[engine.inputs]]
+id = "mic5"
+rx = [105]
+
+[[engine.inputs]]
+id = "mic6"
+rx = [106]
+
+[[engine.inputs]]
+id = "mic7"
+rx = [107]
+
+[[engine.inputs]]
+id = "mic8"
+rx = [108]
+
+[[engine.inputs]]
+id = "mic9"
+rx = [109]
+
+[[engine.inputs]]
+id = "mic10"
+rx = [110]
+
+[[engine.inputs]]
+id = "hand1"
+rx = [111]
+
+[[engine.inputs]]
+id = "hand2"
+rx = [112]
+
+[[engine.inputs]]
+id = "hand3"
+rx = [113]
+
+[[engine.inputs]]
+id = "eng_mic"
+rx = [114]
+talkback = true
+
+[[engine.inputs]]
+id = "keys"
+rx = [115, 116]
+
+[[engine.inputs]]
+id = "iemonly"
+rx = [117, 118]
+
+[[engine.inputs]]
+id = "content"
+rx = [119, 120]
+
+[[engine.inputs]]
+id = "click"
+rx = [121]
+
+[[engine.inputs]]
+id = "guide"
+rx = [122]
+
+[[engine.inputs]]
+id = "drums"
+rx = [123, 124]
+
+[[engine.inputs]]
+id = "bass"
+rx = [125, 126]
+
+[[engine.inputs]]
+id = "inst"
+rx = [127, 128]
+
+[[engine.inputs]]
+id = "other"
+rx = [129, 130]
+
+[[engine.inputs]]
+id = "bgvs"
+rx = [131, 132]
+
+[[engine.buses]]
+id = "member1"
+kind = "output"
+tx = [71, 72]
+
+[[engine.buses]]
+id = "member2"
+kind = "output"
+tx = [73, 74]
+
+[[engine.buses]]
+id = "member3"
+kind = "output"
+tx = [75, 76]
+
+[[engine.buses]]
+id = "member4"
+kind = "output"
+tx = [77, 78]
+
+[[engine.buses]]
+id = "member5"
+kind = "output"
+tx = [79, 80]
+
+[[engine.buses]]
+id = "member6"
+kind = "output"
+tx = [81, 82]
+
+[[engine.buses]]
+id = "member7"
+kind = "output"
+tx = [83, 84]
+
+[[engine.buses]]
+id = "member8"
+kind = "output"
+tx = [85, 86]
+
+[[engine.buses]]
+id = "member9"
+kind = "output"
+tx = [87, 88]
+
+[[engine.buses]]
+id = "engineer"
+kind = "output"
+tx = [91, 92]
+
+[[engine.buses]]
+id = "member1.stems"
+kind = "stems"
+
+[[engine.buses]]
+id = "member2.stems"
+kind = "stems"
+
+[[engine.buses]]
+id = "member3.stems"
+kind = "stems"
+
+[[engine.buses]]
+id = "member4.stems"
+kind = "stems"
+
+[[engine.buses]]
+id = "member5.stems"
+kind = "stems"
+
+[[engine.buses]]
+id = "member6.stems"
+kind = "stems"
+
+[[engine.buses]]
+id = "member7.stems"
+kind = "stems"
+
+[[engine.buses]]
+id = "member8.stems"
+kind = "stems"
+
+[[engine.buses]]
+id = "member9.stems"
+kind = "stems"
+
+[[engine.buses]]
+id = "engineer.stems"
+kind = "stems"
+
+[[engine.buses]]
+id = "translator"
+kind = "translator"
+tx = [93]
+
+[[engine.buses]]
+id = "master"
+kind = "master"
+tx = [89, 90]
+
+# 170: the 17 direct inputs to the 10 output buses (mode 3)
+[[engine.sends]]
+from = ["mic1", "mic2", "mic3", "mic4", "mic5", "mic6", "mic7", "mic8", "mic9", "mic10", "hand1", "hand2", "hand3", "eng_mic", "keys", "iemonly", "content"]
+to = ["member1", "member2", "member3", "member4", "member5", "member6", "member7", "member8", "member9", "engineer"]
+tap = "pre"
+
+# 70: the 7 stems-group inputs to the 10 stems buses (mode 3)
+[[engine.sends]]
+from = ["click", "guide", "drums", "bass", "inst", "other", "bgvs"]
+to = ["member1.stems", "member2.stems", "member3.stems", "member4.stems", "member5.stems", "member6.stems", "member7.stems", "member8.stems", "member9.stems", "engineer.stems"]
+tap = "pre"
+
+# 1: HAND_1 to the translator (mode 3)
+[[engine.sends]]
+from = ["hand1"]
+to = ["translator"]
+tap = "pre"
+
+# 10: each stems bus to its output bus (mode 0), one table per pair
+[[engine.sends]]
+from = ["member1.stems"]
+to = ["member1"]
+tap = "post"
+
+[[engine.sends]]
+from = ["member2.stems"]
+to = ["member2"]
+tap = "post"
+
+[[engine.sends]]
+from = ["member3.stems"]
+to = ["member3"]
+tap = "post"
+
+[[engine.sends]]
+from = ["member4.stems"]
+to = ["member4"]
+tap = "post"
+
+[[engine.sends]]
+from = ["member5.stems"]
+to = ["member5"]
+tap = "post"
+
+[[engine.sends]]
+from = ["member6.stems"]
+to = ["member6"]
+tap = "post"
+
+[[engine.sends]]
+from = ["member7.stems"]
+to = ["member7"]
+tap = "post"
+
+[[engine.sends]]
+from = ["member8.stems"]
+to = ["member8"]
+tap = "post"
+
+[[engine.sends]]
+from = ["member9.stems"]
+to = ["member9"]
+tap = "post"
+
+[[engine.sends]]
+from = ["engineer.stems"]
+to = ["engineer"]
+tap = "post"
+
+# 8 bus-to-bus into the elevated member (mode 0)
+[[engine.sends]]
+from = ["member2", "member3", "member4", "member5", "member6", "member7", "member8", "member9"]
+to = ["member1"]
+tap = "post"
+
+# 9 bus-to-bus into the engineer (mode 0)
+[[engine.sends]]
+from = ["member1", "member2", "member3", "member4", "member5", "member6", "member7", "member8", "member9"]
+to = ["engineer"]
+tap = "post"
