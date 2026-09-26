@@ -103,7 +103,7 @@ jobs:
   fuzz:
     name: fuzz
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -116,11 +116,50 @@ jobs:
           IEM_FUZZ_ITERS: "20000"
           IEM_FUZZ_SEED: ${{ github.run_id }}
         run: cargo test --locked --release -p iem-dsp -p iem-limiter-mga --test props -- --nocapture
+      - name: Randomised engine requests and command groups (seed = run id)
+        env:
+          IEM_FUZZ_ITERS: "20000"
+          IEM_FUZZ_SEED: ${{ github.run_id }}
+        run: cargo test --locked --release -p iem-engine --test props -- --nocapture
+      - name: Nightly toolchain for cargo-fuzz (pinned)
+        run: rustup toolchain install nightly-2026-09-20 --profile minimal
+      - name: cargo-fuzz (pinned; no prebuilt in install-action)
+        run: cargo install cargo-fuzz --locked --version 0.13.2
+      - name: The fuzz lockfile is current (cargo-fuzz has no --locked)
+        run: cargo metadata --locked --manifest-path fuzz/Cargo.toml --format-version 1 > /dev/null
+      - name: Coverage-guided fuzzing of the request parser and control core (60 s)
+        working-directory: fuzz
+        run: cargo +nightly-2026-09-20 fuzz run engine_request -- -max_total_time=60
       - name: Golden parity report (maximum error per category)
         run: |
           set -euo pipefail
           cargo test --locked --release -p iem-dsp -p iem-limiter-mga --test golden -- --nocapture --test-threads 1 | tee "$RUNNER_TEMP/golden.log"
           grep -o 'golden [a-z].*' "$RUNNER_TEMP/golden.log"
+
+  engine:
+    name: engine
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Parity report (impulse oracle, block-size invariance)
+        run: |
+          set -euo pipefail
+          cargo test --locked --release -p iem-engine --test parity -- --nocapture --test-threads 1 | tee "$RUNNER_TEMP/parity.log"
+          grep -E 'oracle max error|invariance max difference' "$RUNNER_TEMP/parity.log"
+      - name: CPU benchmark of process() at B = 32 (gate p50 <= 25 % of 333 us; tails reported)
+        run: cargo run --locked --release -p iem-engine --example bench
+      - name: Nightly toolchain with rust-src (rtsan builds std with -Zbuild-std)
+        run: rustup toolchain install nightly-2026-09-20 --profile minimal --component rust-src
+      - name: RealtimeSanitizer over process() (I7)
+        env:
+          RUSTFLAGS: "-Zsanitizer=realtime --cfg iem_rtsan"
+        run: cargo +nightly-2026-09-20 test --locked -Zbuild-std --target x86_64-unknown-linux-gnu -p iem-engine --test rtsan -- --nocapture
 
   golden-bundle:
     name: golden-bundle
@@ -281,6 +320,10 @@ jobs:
         run: cargo clippy --locked -p iem-server -p iem-tray --all-targets --all-features -- -D warnings
       - name: Pepper DPAPI tests
         run: "cargo test --locked -p iem-server --all-features --lib pepper::"
+      - name: Clippy (engine crates on the engine's target OS)
+        run: cargo clippy --locked -p iem-engine-proto -p iem-audio-io -p iem-engine --all-targets -- -D warnings
+      - name: Engine crate tests (library; the pipe integration tests need socket timeouts, Unix-only until S6)
+        run: cargo test --locked -p iem-engine-proto -p iem-audio-io -p iem-engine --lib
       - name: Build release binaries
         run: cargo build --locked --release -p iem-server -p iem-tray --features iem-server/standalone
       - name: Upload the binaries (push runs only — pull requests, forks included, never yield binaries)
@@ -310,6 +353,8 @@ jobs:
           tool: cargo-deny@0.20.2
       - name: cargo-deny (advisories, bans, licences, sources)
         run: cargo deny --locked check advisories bans licenses sources
+      - name: Engine dependency allowlist (program spec 5.2)
+        run: python3 scripts/check_engine_deps.py
 
   secrets:
     name: secrets

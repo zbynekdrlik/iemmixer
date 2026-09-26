@@ -1,0 +1,27 @@
+# Coverage-guided fuzzing of the engine's request parser and control core
+# (S3 design note §4). Its own workspace; built by cargo-fuzz on a pinned
+# nightly in the `fuzz` CI job (60 s per run) and `fuzz-nightly.yml`.
+[package]
+name = "iem-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "GPL-3.0-or-later"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+iem-engine = { path = "../crates/iem-engine" }
+iem-engine-proto = { path = "../crates/iem-engine-proto" }
+
+[[bin]]
+name = "engine_request"
+path = "fuzz_targets/engine_request.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

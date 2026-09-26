@@ -1,0 +1,1 @@
+{"type": "request", "id": 5, "cmd": {"op": "start_test_signal", "input": "mic5", "hz": 1000.0, "dbfs": -30.0, "ttl_s": 10.0}}
