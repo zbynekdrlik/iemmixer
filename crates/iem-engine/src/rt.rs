@@ -69,7 +69,8 @@ pub struct RtStatus {
     pub trips: AtomicU64,
     pub tap_overruns: AtomicU64,
     pub talkback_underruns: AtomicU64,
-    /// Blocks that left commands for the next block (the 512 budget).
+    /// Blocks that left commands for the next block (the 512 budget): a
+    /// command due in the block that it did not apply. Counted once per block.
     pub deferred: AtomicU64,
 }
 
@@ -610,19 +611,19 @@ impl Processor {
     }
 
     /// Applies the commands due now within the block's remaining budget.
-    fn apply_due(&mut self, budget: &mut usize) {
+    /// Returns whether a due group did not fit the budget and waits.
+    fn apply_due(&mut self, budget: &mut usize) -> bool {
         loop {
             let (at, group) = match self.cmds.peek() {
                 Ok(c) => (c.at, c.group),
-                Err(_) => return,
+                Err(_) => return false,
             };
             if at > self.time {
-                return;
+                return false;
             }
             let len = usize::from(group.max(1));
             if len > *budget {
-                self.status.deferred.fetch_add(1, Ordering::Relaxed);
-                return;
+                return true;
             }
             for _ in 0..len {
                 if let Ok(c) = self.cmds.pop() {
@@ -904,10 +905,17 @@ impl Process for Processor {
     fn process(&mut self, block: &mut Block<'_>) {
         let frames = block.frames();
         let mut budget = MAX_CMDS_PER_BLOCK;
+        let mut left = false;
         let mut done = 0;
         while done < frames {
-            self.apply_due(&mut budget);
+            left |= self.apply_due(&mut budget);
             let mut n = (frames - done).min(SEG);
+            let next = self.cmds.peek().map(|c| c.at).ok();
+            // A spent budget does not cut the block: a command due in this
+            // segment waits for the next block.
+            if budget == 0 && next.is_some_and(|at| at < self.time + n as u64) {
+                left = true;
+            }
             let mut cut = |at: u64| {
                 if at > self.time {
                     let k = usize::try_from(at - self.time).unwrap_or(usize::MAX);
@@ -915,9 +923,9 @@ impl Process for Processor {
                 }
             };
             if budget > 0
-                && let Ok(c) = self.cmds.peek()
+                && let Some(at) = next
             {
-                cut(c.at);
+                cut(at);
             }
             if let Some(t) = self.test.as_ref() {
                 cut(t.end);
@@ -925,6 +933,9 @@ impl Process for Processor {
             self.render(block, done, n);
             done += n;
             self.time += n as u64;
+        }
+        if left {
+            self.status.deferred.fetch_add(1, Ordering::Relaxed);
         }
         self.since_meter += frames as u64;
         if self.since_meter >= METER_PERIOD {
