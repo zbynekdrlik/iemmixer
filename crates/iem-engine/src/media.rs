@@ -72,11 +72,15 @@ impl TalkbackFeed {
         Self::default()
     }
 
-    /// Returns the samples the full ring dropped (120 ms cap, X5).
+    /// Returns the samples the full ring dropped (120 ms cap, X5). A
+    /// non-finite sample enters as silence: in the filter history it would
+    /// poison every later sample (large finite values pass; the RT
+    /// sanitiser handles them, X1).
     pub fn feed(&mut self, samples: &[f32], ring: &mut rtrb::Producer<f32>) -> usize {
         self.scratch.clear();
         for x in samples {
-            let [a, b] = self.interp.push(f64::from(*x));
+            let x = if x.is_finite() { f64::from(*x) } else { 0.0 };
+            let [a, b] = self.interp.push(x);
             self.scratch.push(a as f32);
             self.scratch.push(b as f32);
         }
