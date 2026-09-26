@@ -36,6 +36,11 @@ allow = ["GPL-3.0-or-later"]
 crate = "iem-engine"
 allow = ["GPL-3.0-or-later"]
 
+# D1(a): the migration CLI links the engine (site, graph, persist), so it is GPL (S4)
+[[licenses.exceptions]]
+crate = "iem-migrate"
+allow = ["GPL-3.0-or-later"]
+
 [bans]
 multiple-versions = "allow"
 wildcards = "allow"

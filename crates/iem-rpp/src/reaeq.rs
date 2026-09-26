@@ -24,6 +24,17 @@ impl BandKind {
         }
     }
 
+    /// The kind of a ReaEQ band type code (only the four the site uses).
+    pub const fn from_code(code: i32) -> Option<Self> {
+        match code {
+            0 => Some(Self::LowShelf),
+            1 => Some(Self::HighShelf),
+            4 => Some(Self::HighPass),
+            8 => Some(Self::Band),
+            _ => None,
+        }
+    }
+
     /// Slot of this kind in the standard HP / LS / Band / Band / HS layout.
     const fn slot(self) -> usize {
         match self {
@@ -166,6 +177,139 @@ impl ReaEq {
     }
 }
 
+const MAGIC: &[u8; 4] = b"qeer";
+const HEADER_LEN: usize = 60;
+const SIZE_AT: usize = 48;
+const STATE_VERSION: i32 = 33;
+const BAND_LEN: usize = 33;
+
+fn truncated(at: usize) -> RppError {
+    RppError::Invalid(format!("ReaEQ chunk truncated at byte {at}"))
+}
+
+fn arr<const N: usize>(b: &[u8], at: usize) -> Result<[u8; N], RppError> {
+    b.get(at..at + N)
+        .and_then(|s| <[u8; N]>::try_from(s).ok())
+        .ok_or_else(|| truncated(at))
+}
+
+fn put(b: &mut [u8], at: usize, v: &[u8]) -> Result<(), RppError> {
+    b.get_mut(at..at + v.len())
+        .ok_or_else(|| truncated(at))?
+        .copy_from_slice(v);
+    Ok(())
+}
+
+fn check_value(x: f64) -> Result<(), RppError> {
+    if x.is_finite() && x >= 0.0 {
+        Ok(())
+    } else {
+        Err(RppError::Invalid(format!("ReaEQ value {x}")))
+    }
+}
+
+/// A ReaEQ chunk as read from a project (S4): the decoded EQ plus the exact
+/// bytes and base64 line layout, so a patch changes only the values that differ.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EqBlob {
+    pub eq: ReaEq,
+    bytes: Vec<u8>,
+    line_lens: Vec<usize>,
+}
+
+impl EqBlob {
+    /// Decodes the chunk's body lines (each line is its own base64 block).
+    pub fn decode(lines: &[&str]) -> Result<Self, RppError> {
+        let mut bytes = Vec::new();
+        let mut line_lens = Vec::with_capacity(lines.len());
+        for line in lines {
+            let b = STANDARD
+                .decode(line.trim())
+                .map_err(|e| RppError::Invalid(format!("ReaEQ base64: {e}")))?;
+            line_lens.push(b.len());
+            bytes.extend_from_slice(&b);
+        }
+        if bytes.get(..4) != Some(&MAGIC[..]) {
+            return Err(RppError::Invalid("not a ReaEQ chunk".into()));
+        }
+        let size = u32::from_le_bytes(arr(&bytes, SIZE_AT)?) as usize;
+        let state = bytes
+            .get(HEADER_LEN..HEADER_LEN + size)
+            .ok_or_else(|| RppError::Invalid("ReaEQ state shorter than its header says".into()))?;
+        let version = i32::from_le_bytes(arr(state, 0)?);
+        if version != STATE_VERSION {
+            return Err(RppError::Invalid(format!("ReaEQ state version {version}")));
+        }
+        let n = usize::try_from(i32::from_le_bytes(arr(state, 4)?))
+            .map_err(|_| RppError::Invalid("negative ReaEQ band count".into()))?;
+        let mut bands = Vec::with_capacity(n.min(64));
+        for i in 0..n {
+            let o = 8 + i * BAND_LEN;
+            let code = i32::from_le_bytes(arr(state, o)?);
+            let kind = BandKind::from_code(code).ok_or_else(|| {
+                RppError::Invalid(format!("ReaEQ band {} has type {code}", i + 1))
+            })?;
+            bands.push(Band {
+                kind,
+                enabled: i32::from_le_bytes(arr(state, o + 4)?) != 0,
+                freq_hz: f64::from_le_bytes(arr(state, o + 8)?),
+                gain_lin: f64::from_le_bytes(arr(state, o + 16)?),
+                bw_oct: f64::from_le_bytes(arr(state, o + 24)?),
+            });
+        }
+        let global_gain = f64::from_le_bytes(arr(state, 8 + n * BAND_LEN + 8)?);
+        Ok(Self {
+            eq: ReaEq { bands, global_gain },
+            bytes,
+            line_lens,
+        })
+    }
+
+    /// The chunk's body lines with `eq` written in: fields equal to the
+    /// decoded ones keep their bytes, the base64 keeps the line layout.
+    pub fn lines_for(&self, eq: &ReaEq) -> Result<Vec<String>, RppError> {
+        if eq.bands.len() != self.eq.bands.len() {
+            return Err(RppError::Invalid(format!(
+                "ReaEQ has {} bands, the state {}",
+                self.eq.bands.len(),
+                eq.bands.len()
+            )));
+        }
+        let mut b = self.bytes.clone();
+        for (i, (new, old)) in eq.bands.iter().zip(&self.eq.bands).enumerate() {
+            let o = HEADER_LEN + 8 + i * BAND_LEN;
+            if new.kind != old.kind {
+                put(&mut b, o, &new.kind.code().to_le_bytes())?;
+            }
+            if new.enabled != old.enabled {
+                put(&mut b, o + 4, &i32::from(new.enabled).to_le_bytes())?;
+            }
+            for (at, x, was) in [
+                (o + 8, new.freq_hz, old.freq_hz),
+                (o + 16, new.gain_lin, old.gain_lin),
+                (o + 24, new.bw_oct, old.bw_oct),
+            ] {
+                check_value(x)?;
+                if x.to_bits() != was.to_bits() {
+                    put(&mut b, at, &x.to_le_bytes())?;
+                }
+            }
+        }
+        check_value(eq.global_gain)?;
+        if eq.global_gain.to_bits() != self.eq.global_gain.to_bits() {
+            let at = HEADER_LEN + 8 + eq.bands.len() * BAND_LEN + 8;
+            put(&mut b, at, &eq.global_gain.to_le_bytes())?;
+        }
+        let mut out = Vec::with_capacity(self.line_lens.len());
+        let mut at = 0;
+        for len in &self.line_lens {
+            out.push(STANDARD.encode(b.get(at..at + len).ok_or_else(|| truncated(at))?));
+            at += len;
+        }
+        Ok(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,5 +385,95 @@ mod tests {
         );
         let back: BandKind = serde_json::from_str("\"low_shelf\"").unwrap();
         assert_eq!(back, BandKind::LowShelf);
+    }
+
+    fn body(c: &Chunk) -> Vec<String> {
+        lines(c)
+    }
+
+    #[test]
+    fn decodes_the_reaper_written_chunk() {
+        let eq = ReaEq::single(Band::new(BandKind::HighPass, 100.41747866600939, 1.0, 2.0));
+        let text = body(&eq.chunk().unwrap());
+        let refs: Vec<&str> = text.iter().map(String::as_str).collect();
+        let blob = EqBlob::decode(&refs).unwrap();
+        assert_eq!(blob.eq, eq);
+        assert_eq!(blob.lines_for(&eq).unwrap(), text);
+        assert_eq!(BandKind::from_code(3), None);
+        for kind in [
+            BandKind::LowShelf,
+            BandKind::HighShelf,
+            BandKind::HighPass,
+            BandKind::Band,
+        ] {
+            assert_eq!(BandKind::from_code(kind.code()), Some(kind));
+        }
+    }
+
+    #[test]
+    fn a_patch_changes_only_the_written_values() {
+        let eq = ReaEq::standard_flat();
+        let text = body(&eq.chunk().unwrap());
+        let refs: Vec<&str> = text.iter().map(String::as_str).collect();
+        let blob = EqBlob::decode(&refs).unwrap();
+        let mut new = eq.clone();
+        new.bands[2] = Band {
+            kind: BandKind::HighShelf,
+            enabled: true,
+            freq_hz: 1234.5,
+            gain_lin: 0.5,
+            bw_oct: 0.7,
+        };
+        new.bands[4].enabled = true;
+        new.global_gain = 2.0;
+        let patched = blob.lines_for(&new).unwrap();
+        assert_eq!(patched.len(), text.len());
+        assert_eq!(patched[0], text[0], "header untouched");
+        assert_eq!(patched.last(), text.last(), "program block untouched");
+        let prefs: Vec<&str> = patched.iter().map(String::as_str).collect();
+        assert_eq!(EqBlob::decode(&prefs).unwrap().eq, new);
+        let mut fewer = eq.clone();
+        fewer.bands.pop();
+        assert!(blob.lines_for(&fewer).is_err());
+        let mut bad = eq;
+        bad.bands[0].gain_lin = f64::NAN;
+        assert!(blob.lines_for(&bad).is_err());
+        let mut bad_gain = ReaEq::standard_flat();
+        bad_gain.global_gain = -1.0;
+        assert!(blob.lines_for(&bad_gain).is_err());
+    }
+
+    #[test]
+    fn broken_chunks_are_errors() {
+        let text = body(&ReaEq::standard_flat().chunk().unwrap());
+        assert!(EqBlob::decode(&["not base64!"]).is_err());
+        assert!(EqBlob::decode(&["AAAA"]).is_err(), "no magic");
+        let header_only = [text[0].as_str()];
+        assert!(EqBlob::decode(&header_only).is_err(), "state missing");
+        let mut state = ReaEq::standard_flat().state().unwrap();
+        state[0] = 34;
+        let mut bytes = STANDARD.decode(&text[0]).unwrap();
+        bytes.extend_from_slice(&state);
+        let wrong_version = STANDARD.encode(&bytes);
+        assert!(EqBlob::decode(&[wrong_version.as_str()]).is_err());
+        let mut state = ReaEq::standard_flat().state().unwrap();
+        state[8] = 3;
+        let mut bytes = STANDARD.decode(&text[0]).unwrap();
+        bytes.extend_from_slice(&state);
+        let bad_type = STANDARD.encode(&bytes);
+        let err = EqBlob::decode(&[bad_type.as_str()]).unwrap_err();
+        assert!(err.to_string().contains("type 3"), "{err}");
+        let mut state = ReaEq::standard_flat().state().unwrap();
+        state[4..8].copy_from_slice(&(-1i32).to_le_bytes());
+        let mut bytes = STANDARD.decode(&text[0]).unwrap();
+        bytes.extend_from_slice(&state);
+        let negative = STANDARD.encode(&bytes);
+        assert!(EqBlob::decode(&[negative.as_str()]).is_err());
+        let mut state = ReaEq::standard_flat().state().unwrap();
+        state[4..8].copy_from_slice(&6i32.to_le_bytes());
+        let mut bytes = STANDARD.decode(&text[0]).unwrap();
+        bytes.extend_from_slice(&state);
+        let too_many = STANDARD.encode(&bytes);
+        assert!(EqBlob::decode(&[too_many.as_str()]).is_err());
     }
 }

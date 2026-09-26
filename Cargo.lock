@@ -2584,14 +2584,15 @@ dependencies = [
 
 [[package]]
 name = "iem-audio-io"
-version = "2.0.0-dev.4"
+version = "2.0.0-dev.5"
 
 [[package]]
 name = "iem-core"
-version = "2.0.0-dev.4"
+version = "2.0.0-dev.5"
 dependencies = [
  "base64 0.22.1",
  "chrono",
+ "iem-engine-proto",
  "p256",
  "serde",
  "serde_json",
@@ -2603,7 +2604,7 @@ dependencies = [
 
 [[package]]
 name = "iem-dsp"
-version = "2.0.0-dev.4"
+version = "2.0.0-dev.5"
 dependencies = [
  "assert_no_alloc",
  "iem-rpp",
@@ -2612,7 +2613,7 @@ dependencies = [
 
 [[package]]
 name = "iem-engine"
-version = "2.0.0-dev.4"
+version = "2.0.0-dev.5"
 dependencies = [
  "assert_no_alloc",
  "iem-audio-io",
@@ -2634,7 +2635,7 @@ dependencies = [
 
 [[package]]
 name = "iem-engine-proto"
-version = "2.0.0-dev.4"
+version = "2.0.0-dev.5"
 dependencies = [
  "iem-dsp",
  "serde",
@@ -2643,27 +2644,45 @@ dependencies = [
 
 [[package]]
 name = "iem-limiter-mga"
-version = "2.0.0-dev.4"
+version = "2.0.0-dev.5"
 dependencies = [
  "assert_no_alloc",
  "iem-rpp",
 ]
 
 [[package]]
-name = "iem-rpp"
-version = "2.0.0-dev.4"
+name = "iem-migrate"
+version = "2.0.0-dev.5"
 dependencies = [
  "base64 0.22.1",
+ "iem-core",
+ "iem-engine",
+ "iem-engine-proto",
+ "iem-rpp",
+ "iem-server",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "iem-rpp"
+version = "2.0.0-dev.5"
+dependencies = [
+ "base64 0.22.1",
+ "iem-core",
+ "iem-engine-proto",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
  "thiserror 2.0.18",
+ "toml 0.9.12+spec-1.1.0",
 ]
 
 [[package]]
 name = "iem-server"
-version = "2.0.0-dev.4"
+version = "2.0.0-dev.5"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2704,7 +2723,7 @@ dependencies = [
 
 [[package]]
 name = "iem-tray"
-version = "2.0.0-dev.4"
+version = "2.0.0-dev.5"
 dependencies = [
  "anyhow",
  "dirs",
@@ -2724,7 +2743,7 @@ dependencies = [
 
 [[package]]
 name = "iem-ui"
-version = "2.0.0-dev.4"
+version = "2.0.0-dev.5"
 dependencies = [
  "base64 0.22.1",
  "console_error_panic_hook",

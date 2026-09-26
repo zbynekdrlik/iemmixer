@@ -92,4 +92,17 @@ exclude_re = [
   "iem-engine/src/control\\.rs.*replace < with <= in Control::shutdown_now",
   # Unobservable (S3): the `!` only decides whether "solos cleared" is logged.
   "iem-engine/src/control\\.rs.*delete ! in Control::tick",
+  # Equivalent (S4). The synthetic generator draws k/2^53; a draw equal to a
+  # threshold (0.2, 0.4, …) is a 2^-53 event, so `>` and `>=` pick alike.
+  "iem-rpp/src/sitegen\\.rs.*replace > with >= in (random_eq|sample_state)$",
+  # v = 0: 20·log10(0) = −∞, floored by max(DB_OFF) to the else branch's DB_OFF.
+  "iem-rpp/src/import\\.rs.*replace > with >= in lin_to_db$",
+  # At i == len the byte lookup falls back to a space (skipped) or ends the
+  # quoted token at len anyway: both loops end with the same tokens.
+  "iem-rpp/src/read\\.rs:(73|82):.*replace < with <= in raw_tokens$",
+  # A time equal to an era's first_seen lies inside that era's window, which
+  # the branch before already returned.
+  "iem-rpp/src/aliases\\.rs.*replace > with >= in Eras::candidates$",
+  # `flags & !1` has bit 0 clear, so `| muted` and `^ muted` are the same.
+  "iem-rpp/src/export\\.rs.*replace \\| with \\^ in export$",
 ]

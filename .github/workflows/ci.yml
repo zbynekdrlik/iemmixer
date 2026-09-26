@@ -86,11 +86,11 @@ jobs:
       - uses: taiki-e/install-action@7623a79cdfecb99d681017af368ca353d9f49bb5 # v2.87.19
         with:
           tool: cargo-llvm-cov@0.9.1
-      - name: Tests with line coverage (iem-core, iem-server, iem-rpp, iem-dsp, iem-limiter-mga, engine crates) against the floor
+      - name: Tests with line coverage (iem-core, iem-server, iem-rpp, iem-dsp, iem-limiter-mga, engine crates, iem-migrate) against the floor
         run: |
           set -euo pipefail
           cargo llvm-cov --locked --package iem-core --package iem-server --package iem-rpp \
-            --package iem-dsp --package iem-limiter-mga --package iem-engine-proto --package iem-audio-io --package iem-engine --all-features \
+            --package iem-dsp --package iem-limiter-mga --package iem-engine-proto --package iem-audio-io --package iem-engine --package iem-migrate --all-features \
             --json --summary-only --output-path "$RUNNER_TEMP/coverage.json"
           pct="$(jq '.data[0].totals.lines.percent' "$RUNNER_TEMP/coverage.json")"
           floor="$(tr -d '[:space:]' < .github/coverage-floor)"
@@ -183,6 +183,31 @@ jobs:
         with:
           name: golden-bundle-${{ github.sha }}
           path: ${{ runner.temp }}/golden-bundle
+          retention-days: 14
+          if-no-files-found: error
+
+  migrate-bin:
+    name: migrate-bin
+    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+    needs: [test]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Placeholder UI dist (rust-embed needs the folder)
+        run: mkdir -p crates/iem-ui/dist && echo placeholder > crates/iem-ui/dist/index.html
+      - name: Build the migration CLI (Linux, for private dry runs on the dev box, S4)
+        run: cargo build --locked --release -p iem-migrate
+      - name: Upload (dev pushes only)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: iem-migrate-linux-${{ github.sha }}
+          path: target/release/iem-migrate
           retention-days: 14
           if-no-files-found: error
 
@@ -324,8 +349,12 @@ jobs:
         run: cargo clippy --locked -p iem-engine-proto -p iem-audio-io -p iem-engine --all-targets -- -D warnings
       - name: Engine crate tests (library; the pipe integration tests need socket timeouts, Unix-only until S6)
         run: cargo test --locked -p iem-engine-proto -p iem-audio-io -p iem-engine --lib
+      - name: Migration CLI clippy and tests (it runs on the PC; the PIN pepper is DPAPI here)
+        run: |
+          cargo clippy --locked -p iem-migrate --all-targets -- -D warnings
+          cargo test --locked -p iem-migrate
       - name: Build release binaries
-        run: cargo build --locked --release -p iem-server -p iem-tray --features iem-server/standalone
+        run: cargo build --locked --release -p iem-server -p iem-tray -p iem-migrate --features iem-server/standalone
       - name: Upload the binaries (push runs only — pull requests, forks included, never yield binaries)
         if: github.event_name == 'push'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -334,6 +363,7 @@ jobs:
           path: |
             target/release/iem-server.exe
             target/release/iem-tray.exe
+            target/release/iem-migrate.exe
           retention-days: 7
           if-no-files-found: error
 
@@ -436,7 +466,7 @@ jobs:
           if [ -s "$RUNNER_TEMP/pr.diff" ]; then
             cargo mutants --list --in-diff "$RUNNER_TEMP/pr.diff" \
               --package iem-core --package iem-server --package iem-ui --package iem-rpp \
-              --package iem-dsp --package iem-limiter-mga --package iem-engine-proto --package iem-audio-io --package iem-engine > "$RUNNER_TEMP/mutants.txt"
+              --package iem-dsp --package iem-limiter-mga --package iem-engine-proto --package iem-audio-io --package iem-engine --package iem-migrate > "$RUNNER_TEMP/mutants.txt"
             count="$(wc -l < "$RUNNER_TEMP/mutants.txt")"
           fi
           [ "$(grep -cE '^ +shard: \[' .github/workflows/ci.yml)" -eq 1 ] \
@@ -469,7 +499,7 @@ jobs:
         with:
           tool: cargo-nextest@0.9.146
       - name: Build the mutants profile once (the shards restore this cache)
-        run: cargo nextest run --locked --cargo-profile mutants --no-run -p iem-core -p iem-server -p iem-ui -p iem-rpp -p iem-dsp -p iem-limiter-mga -p iem-engine-proto -p iem-audio-io -p iem-engine --all-features --all-targets
+        run: cargo nextest run --locked --cargo-profile mutants --no-run -p iem-core -p iem-server -p iem-ui -p iem-rpp -p iem-dsp -p iem-limiter-mga -p iem-engine-proto -p iem-audio-io -p iem-engine -p iem-migrate --all-features --all-targets
 
   mutation:
     name: mutation shard ${{ matrix.shard }}
@@ -499,7 +529,7 @@ jobs:
         with:
           tool: cargo-mutants@27.1.0,cargo-nextest@0.9.146
       - name: Warm target (dependencies restored; workspace crates build once, then are copied per job)
-        run: cargo nextest run --locked --cargo-profile mutants --no-run -p iem-core -p iem-server -p iem-ui -p iem-rpp -p iem-dsp -p iem-limiter-mga -p iem-engine-proto -p iem-audio-io -p iem-engine --all-features --all-targets
+        run: cargo nextest run --locked --cargo-profile mutants --no-run -p iem-core -p iem-server -p iem-ui -p iem-rpp -p iem-dsp -p iem-limiter-mga -p iem-engine-proto -p iem-audio-io -p iem-engine -p iem-migrate --all-features --all-targets
       - name: Diff-scoped mutants
         env:
           # .config/nextest.toml: stop at the first failing test (fail fast on hangs).
@@ -516,5 +546,5 @@ jobs:
           cargo mutants --in-diff "$RUNNER_TEMP/pr.diff" --baseline=skip --timeout 60 --jobs 2 --copy-target=true \
             --shard "${{ matrix.shard }}/${{ strategy.job-total }}" \
             --package iem-core --package iem-server --package iem-ui --package iem-rpp \
-            --package iem-dsp --package iem-limiter-mga --package iem-engine-proto --package iem-audio-io --package iem-engine \
+            --package iem-dsp --package iem-limiter-mga --package iem-engine-proto --package iem-audio-io --package iem-engine --package iem-migrate \
             --all-features -- --all-targets
