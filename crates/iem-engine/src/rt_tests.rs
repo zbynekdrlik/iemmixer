@@ -503,7 +503,7 @@ fn test_signal_caps_reachable_tx_and_ends_after_its_ttl() {
         m1[..active].iter().all(|y| y.abs() <= TEST_CAP),
         "reachable TX capped"
     );
-    assert!(m1[100..active].iter().any(|y| *y == TEST_CAP));
+    assert!(m1[100..active].contains(&TEST_CAP));
     assert!(
         close(out.channel(TR)[1000], 0.5 * g0() * g0(), 1e-15),
         "unreachable TX untouched"
