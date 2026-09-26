@@ -458,9 +458,11 @@ fn a_huge_talkback_frame_trips_the_sanitiser_alarm() {
             stream: stream::TALKBACK,
             channels: 1,
             seq: 0,
-            frames: 4,
+            frames: FRAME_48K as u16,
         },
-        &[1e30; 4],
+        // A whole 20 ms frame: shorter bursts are underruns and never open
+        // the talkback gate.
+        &[1e30; FRAME_48K],
     )
     .unwrap();
     let detail = c.wait(|msg| match msg {
