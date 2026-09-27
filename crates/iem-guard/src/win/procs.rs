@@ -310,10 +310,14 @@ pub(super) fn server_stop(pc: &mut WinPc, c: &Cancel) -> R<()> {
     Ok(())
 }
 
+/// The tray reads the server's site config for its links (Open Mixer,
+/// Copy URL), as `iem-server` does (S6 plan Task 11 hand-off).
 pub(super) fn tray_start(pc: &mut WinPc) -> R<()> {
     let dir = pc.bundle_dir()?;
+    let config = pc.s.pc.server_config.clone();
     let mut cmd = Command::new(dir.join(TRAY_EXE));
-    cmd.current_dir(dir);
+    cmd.env("IEMMIXER_CONFIG", &config)
+        .current_dir(config.parent().unwrap_or(dir.as_path()));
     start_kid(pc, Kid::Tray, &mut cmd, false).map(|_| ())
 }
 
