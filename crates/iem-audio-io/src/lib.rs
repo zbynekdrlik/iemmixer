@@ -5,12 +5,16 @@
 //! - [`Offline`]: deterministic, any block size — the parity harness;
 //! - [`NullRt`]: paced real time with synthetic inputs — E2E and soak runs.
 //!
+//! For the card (S1a design note §3): [`format`] (ASIO sample types ↔ f64,
+//! the I2 refusals), [`telemetry`] (lock-free callback statistics) and, on
+//! Windows only, `asio` — the crate's only unsafe code.
+//!
 //! Buffers are f64 and channel-major. Both backends call `process()` inside
 //! `catch_unwind`: a panic zeroes that block's outputs, the processor is never
-//! called again and the fault is reported (§2.4 crash model). The ASIO backend
-//! (S6) implements the same contract.
+//! called again and the fault is reported (§2.4 crash model). The ASIO host
+//! (`asio`, Windows) follows the same contract in S6.
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 #![cfg_attr(
     not(test),
     deny(
@@ -24,6 +28,12 @@
 use core::any::Any;
 use core::ops::Range;
 
+#[cfg(windows)]
+#[allow(
+    unsafe_code,
+    reason = "ASIO FFI: azo buffers and callbacks (S1a design note §3)"
+)]
+pub mod asio;
 pub mod format;
 pub mod nullrt;
 pub mod offline;
