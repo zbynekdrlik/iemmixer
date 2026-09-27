@@ -652,10 +652,21 @@ mod tests {
             claims_of(Some(fresh.as_str()), secret).unwrap().sub,
             "member1"
         );
-        let (code, body) = claims_of(Some(token(1).as_str()), secret).unwrap_err();
+        // Expired inside the JWT library's 60 s leeway: our own check.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let (code, body) = claims_of(Some(token(now - 10).as_str()), secret).unwrap_err();
         assert_eq!(
             (code, body.0.code.as_str()),
             (StatusCode::UNAUTHORIZED, "TOKEN_EXPIRED")
+        );
+        // Long expired: refused by the JWT validation itself.
+        let (code, body) = claims_of(Some(token(1).as_str()), secret).unwrap_err();
+        assert_eq!(
+            (code, body.0.code.as_str()),
+            (StatusCode::UNAUTHORIZED, "UNAUTHORIZED")
         );
     }
 
