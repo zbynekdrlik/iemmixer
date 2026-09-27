@@ -373,15 +373,181 @@ mod tests {
         }
     }
 
+    /// `msg` serialises to exactly `json`, and `json` reads back as `msg`.
+    fn assert_shape<T>(msg: &T, json: &str)
+    where
+        T: Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+    {
+        assert_eq!(serde_json::to_string(msg).unwrap(), json);
+        assert_eq!(&serde_json::from_str::<T>(json).unwrap(), msg, "{json}");
+    }
+
+    /// Every command's tag. The match has no wildcard: a new command does not
+    /// compile until it is named here, and then `client_json_shapes_are_stable`
+    /// counts one command short until it has a literal shape.
+    fn command_tag(m: &ClientMsg) -> &'static str {
+        match m {
+            ClientMsg::SetLevel { .. } => "SetLevel",
+            ClientMsg::SetMute { .. } => "SetMute",
+            ClientMsg::SetPan { .. } => "SetPan",
+            ClientMsg::SetGlobalLevel { .. } => "SetGlobalLevel",
+            ClientMsg::SetGlobalMute { .. } => "SetGlobalMute",
+            ClientMsg::SetStemsLevel { .. } => "SetStemsLevel",
+            ClientMsg::SetStemsMute { .. } => "SetStemsMute",
+            ClientMsg::UpdateCustomization { .. } => "UpdateCustomization",
+            ClientMsg::SetSolo { .. } => "SetSolo",
+            ClientMsg::ListenStart { .. } => "ListenStart",
+            ClientMsg::ListenStop => "ListenStop",
+            ClientMsg::GetEqParams { .. } => "GetEqParams",
+            ClientMsg::SetEqBand { .. } => "SetEqBand",
+            ClientMsg::CallEngineer => "CallEngineer",
+            ClientMsg::ClearAlert => "ClearAlert",
+            ClientMsg::TalkStart => "TalkStart",
+            ClientMsg::TalkStop => "TalkStop",
+            ClientMsg::GetLimiterParams => "GetLimiterParams",
+            ClientMsg::SetLimiterParam { .. } => "SetLimiterParam",
+            ClientMsg::SetLimiterEnabled { .. } => "SetLimiterEnabled",
+            ClientMsg::ResetLimiterActivity => "ResetLimiterActivity",
+            ClientMsg::GetConsole => "GetConsole",
+            ClientMsg::SetInput { .. } => "SetInput",
+            ClientMsg::ResetLimiterStats { .. } => "ResetLimiterStats",
+        }
+    }
+
+    /// Every command's JSON, field names included. The predecessor asserted
+    /// them per message (`level_db`, `member_id`, `pinned`/`hidden`,
+    /// `soloed`, …); the page and the E2E specs build these objects by name,
+    /// so a serde rename must fail here, not in the browser.
     #[test]
     fn client_json_shapes_are_stable() {
+        let cases = [
+            (
+                ClientMsg::SetLevel {
+                    id: "mic1".into(),
+                    level_db: -6.0,
+                },
+                r#"{"cmd":"SetLevel","id":"mic1","level_db":-6.0}"#,
+            ),
+            (
+                ClientMsg::SetMute {
+                    id: "mic3".into(),
+                    muted: true,
+                },
+                r#"{"cmd":"SetMute","id":"mic3","muted":true}"#,
+            ),
+            (
+                ClientMsg::SetPan {
+                    id: "mic2".into(),
+                    pan: 0.75,
+                },
+                r#"{"cmd":"SetPan","id":"mic2","pan":0.75}"#,
+            ),
+            (
+                ClientMsg::SetGlobalLevel { level_db: -6.0 },
+                r#"{"cmd":"SetGlobalLevel","level_db":-6.0}"#,
+            ),
+            (
+                ClientMsg::SetGlobalMute { muted: true },
+                r#"{"cmd":"SetGlobalMute","muted":true}"#,
+            ),
+            (
+                ClientMsg::SetStemsLevel { level_db: -3.0 },
+                r#"{"cmd":"SetStemsLevel","level_db":-3.0}"#,
+            ),
+            (
+                ClientMsg::SetStemsMute { muted: false },
+                r#"{"cmd":"SetStemsMute","muted":false}"#,
+            ),
+            (
+                ClientMsg::UpdateCustomization {
+                    pinned: vec!["mic1".into(), "mic5".into()],
+                    hidden: vec!["click".into(), "keys".into()],
+                },
+                r#"{"cmd":"UpdateCustomization","pinned":["mic1","mic5"],"hidden":["click","keys"]}"#,
+            ),
+            (
+                ClientMsg::SetSolo {
+                    soloed: vec!["mic1".into(), "mic5".into()],
+                },
+                r#"{"cmd":"SetSolo","soloed":["mic1","mic5"]}"#,
+            ),
+            (
+                ClientMsg::ListenStart {
+                    member_id: "member3".into(),
+                },
+                r#"{"cmd":"ListenStart","member_id":"member3"}"#,
+            ),
+            // The engineer listens to their own mix by its id.
+            (
+                ClientMsg::ListenStart {
+                    member_id: "engineer".into(),
+                },
+                r#"{"cmd":"ListenStart","member_id":"engineer"}"#,
+            ),
+            (ClientMsg::ListenStop, r#"{"cmd":"ListenStop"}"#),
+            (
+                ClientMsg::GetEqParams {
+                    target: "mic3".into(),
+                },
+                r#"{"cmd":"GetEqParams","target":"mic3"}"#,
+            ),
+            (
+                ClientMsg::SetEqBand {
+                    target: "mic3".into(),
+                    band: 2,
+                    param: "gain_db".into(),
+                    value: 3.5,
+                },
+                r#"{"cmd":"SetEqBand","target":"mic3","band":2,"param":"gain_db","value":3.5}"#,
+            ),
+            (ClientMsg::CallEngineer, r#"{"cmd":"CallEngineer"}"#),
+            (ClientMsg::ClearAlert, r#"{"cmd":"ClearAlert"}"#),
+            (ClientMsg::TalkStart, r#"{"cmd":"TalkStart"}"#),
+            (ClientMsg::TalkStop, r#"{"cmd":"TalkStop"}"#),
+            (ClientMsg::GetLimiterParams, r#"{"cmd":"GetLimiterParams"}"#),
+            (
+                ClientMsg::SetLimiterParam {
+                    param: "limit".into(),
+                    value: 0.6,
+                },
+                r#"{"cmd":"SetLimiterParam","param":"limit","value":0.6}"#,
+            ),
+            (
+                ClientMsg::SetLimiterEnabled { enabled: false },
+                r#"{"cmd":"SetLimiterEnabled","enabled":false}"#,
+            ),
+            (
+                ClientMsg::ResetLimiterActivity,
+                r#"{"cmd":"ResetLimiterActivity"}"#,
+            ),
+            (ClientMsg::GetConsole, r#"{"cmd":"GetConsole"}"#),
+            (
+                ClientMsg::SetInput {
+                    input: "keys".into(),
+                    trim_db: Some(3.0),
+                    muted: None,
+                    processing: Some(false),
+                },
+                r#"{"cmd":"SetInput","input":"keys","trim_db":3.0,"muted":null,"processing":false}"#,
+            ),
+            (
+                ClientMsg::ResetLimiterStats {
+                    mix: "member1".into(),
+                },
+                r#"{"cmd":"ResetLimiterStats","mix":"member1"}"#,
+            ),
+        ];
+        let mut tags = std::collections::BTreeSet::new();
+        for (msg, json) in &cases {
+            assert_shape(msg, json);
+            let tag = command_tag(msg);
+            assert!(json.starts_with(&format!(r#"{{"cmd":"{tag}""#)), "{json}");
+            tags.insert(tag);
+        }
         assert_eq!(
-            serde_json::to_string(&ClientMsg::SetLevel {
-                id: "mic1".into(),
-                level_db: -6.0
-            })
-            .unwrap(),
-            r#"{"cmd":"SetLevel","id":"mic1","level_db":-6.0}"#
+            tags.len(),
+            24,
+            "a literal shape for every command: {tags:?}"
         );
         let set_input: ClientMsg =
             serde_json::from_str(r#"{"cmd":"SetInput","input":"keys","muted":true}"#).unwrap();
@@ -600,6 +766,322 @@ mod tests {
                 can_switch: true,
             },
             "BandActivity",
+        );
+    }
+
+    /// Every server event's tag (no wildcard, like `command_tag`).
+    fn event_tag(m: &ServerMsg) -> &'static str {
+        match m {
+            ServerMsg::Hello { .. } => "Hello",
+            ServerMsg::State { .. } => "State",
+            ServerMsg::Meters { .. } => "Meters",
+            ServerMsg::ChannelUpdate { .. } => "ChannelUpdate",
+            ServerMsg::GlobalVolumeUpdate { .. } => "GlobalVolumeUpdate",
+            ServerMsg::StemsVolumeUpdate { .. } => "StemsVolumeUpdate",
+            ServerMsg::ConnectionChanged { .. } => "ConnectionChanged",
+            ServerMsg::CustomizationUpdate { .. } => "CustomizationUpdate",
+            ServerMsg::NetworkMode { .. } => "NetworkMode",
+            ServerMsg::SoloUpdate { .. } => "SoloUpdate",
+            ServerMsg::AudioStatus { .. } => "AudioStatus",
+            ServerMsg::EqParams { .. } => "EqParams",
+            ServerMsg::EngineerAlert { .. } => "EngineerAlert",
+            ServerMsg::AlertCleared { .. } => "AlertCleared",
+            ServerMsg::ActiveAlerts { .. } => "ActiveAlerts",
+            ServerMsg::TalkAcquired { .. } => "TalkAcquired",
+            ServerMsg::TalkBusy { .. } => "TalkBusy",
+            ServerMsg::TalkReleased => "TalkReleased",
+            ServerMsg::EngineerTalking { .. } => "EngineerTalking",
+            ServerMsg::LimiterParams { .. } => "LimiterParams",
+            ServerMsg::TunnelStatus(_) => "TunnelStatus",
+            ServerMsg::Console(_) => "Console",
+            ServerMsg::InputUpdate(_) => "InputUpdate",
+            ServerMsg::BandActivity { .. } => "BandActivity",
+        }
+    }
+
+    /// Every event's JSON, field names included (W4 of the gen1 test parity
+    /// report, iemmixer#25): the predecessor asserted `member_id`, `soloed`,
+    /// `level_db`, `from_member`, `holder`, `mode`, `active_seconds`,
+    /// `global_level_db` and the meters' `[L,R]` pairs per message; a round
+    /// trip alone passes a serde rename that the page and the E2E specs, which
+    /// read these objects by name, would not survive.
+    #[test]
+    fn server_json_shapes_are_stable() {
+        let cases = [
+            (
+                ServerMsg::Hello {
+                    proto: UI_PROTO,
+                    build: "2.0.0-dev.7".into(),
+                    min_client_proto: MIN_CLIENT_PROTO,
+                },
+                r#"{"event":"Hello","data":{"proto":2,"build":"2.0.0-dev.7","min_client_proto":2}}"#,
+            ),
+            (
+                ServerMsg::State {
+                    channels: vec![Channel {
+                        id: "mic1".into(),
+                        name: "MEMBER1 mic".into(),
+                        level_db: -6.0,
+                        pan: 0.5,
+                        muted: false,
+                        category: "mics".into(),
+                        eq: true,
+                        own: true,
+                    }],
+                    connected: true,
+                    global_level_db: Some(-3.5),
+                    global_muted: Some(false),
+                    mix: Some("member1".into()),
+                    stems_level_db: Some(-6.0),
+                    stems_muted: Some(true),
+                    group: Some("stems".into()),
+                },
+                concat!(
+                    r#"{"event":"State","data":{"channels":[{"id":"mic1","name":"MEMBER1 mic","#,
+                    r#""level_db":-6.0,"pan":0.5,"muted":false,"category":"mics","eq":true,"#,
+                    r#""own":true}],"connected":true,"global_level_db":-3.5,"global_muted":false,"#,
+                    r#""mix":"member1","stems_level_db":-6.0,"stems_muted":true,"group":"stems"}}"#,
+                ),
+            ),
+            // Meters are linear [left, right] pairs by id.
+            (
+                ServerMsg::Meters {
+                    meters: HashMap::from([("mic1".to_string(), [0.5, 0.3])]),
+                },
+                r#"{"event":"Meters","data":{"meters":{"mic1":[0.5,0.3]}}}"#,
+            ),
+            (
+                ServerMsg::ChannelUpdate {
+                    id: "member2".into(),
+                    level_db: -12.0,
+                    muted: true,
+                    pan: 0.3,
+                },
+                r#"{"event":"ChannelUpdate","data":{"id":"member2","level_db":-12.0,"muted":true,"pan":0.3}}"#,
+            ),
+            (
+                ServerMsg::GlobalVolumeUpdate {
+                    level_db: -12.0,
+                    muted: false,
+                },
+                r#"{"event":"GlobalVolumeUpdate","data":{"level_db":-12.0,"muted":false}}"#,
+            ),
+            (
+                ServerMsg::StemsVolumeUpdate {
+                    level_db: -6.0,
+                    muted: true,
+                },
+                r#"{"event":"StemsVolumeUpdate","data":{"level_db":-6.0,"muted":true}}"#,
+            ),
+            (
+                ServerMsg::ConnectionChanged { connected: false },
+                r#"{"event":"ConnectionChanged","data":{"connected":false}}"#,
+            ),
+            (
+                ServerMsg::CustomizationUpdate {
+                    pinned: vec!["mic1".into(), "keys".into()],
+                    hidden: vec!["click".into()],
+                },
+                r#"{"event":"CustomizationUpdate","data":{"pinned":["mic1","keys"],"hidden":["click"]}}"#,
+            ),
+            (
+                ServerMsg::NetworkMode {
+                    mode: "local".into(),
+                },
+                r#"{"event":"NetworkMode","data":{"mode":"local"}}"#,
+            ),
+            (
+                ServerMsg::SoloUpdate {
+                    soloed: vec!["mic1".into(), "mic5".into()],
+                },
+                r#"{"event":"SoloUpdate","data":{"soloed":["mic1","mic5"]}}"#,
+            ),
+            (
+                ServerMsg::SoloUpdate { soloed: vec![] },
+                r#"{"event":"SoloUpdate","data":{"soloed":[]}}"#,
+            ),
+            // Without a target the field is absent, and such a status reads.
+            (
+                ServerMsg::AudioStatus {
+                    status: "no_source".into(),
+                    target: None,
+                },
+                r#"{"event":"AudioStatus","data":{"status":"no_source"}}"#,
+            ),
+            (
+                ServerMsg::AudioStatus {
+                    status: "listening".into(),
+                    target: Some("member3".into()),
+                },
+                r#"{"event":"AudioStatus","data":{"status":"listening","target":"member3"}}"#,
+            ),
+            (
+                ServerMsg::EqParams {
+                    target: "mic3".into(),
+                    track_name: "MEMBER3 mic".into(),
+                    bands: vec![EqBand {
+                        band_type: "lowshelf".into(),
+                        freq_hz: 287.5,
+                        gain_db: -2.7,
+                        bw: 1.18,
+                        enabled: true,
+                    }],
+                },
+                concat!(
+                    r#"{"event":"EqParams","data":{"target":"mic3","track_name":"MEMBER3 mic","#,
+                    r#""bands":[{"band_type":"lowshelf","freq_hz":287.5,"gain_db":-2.7,"#,
+                    r#""bw":1.18,"enabled":true}]}}"#,
+                ),
+            ),
+            (
+                ServerMsg::EngineerAlert {
+                    from_member: "member1".into(),
+                    from_name: "Member1".into(),
+                },
+                r#"{"event":"EngineerAlert","data":{"from_member":"member1","from_name":"Member1"}}"#,
+            ),
+            (
+                ServerMsg::AlertCleared {
+                    member_id: "member1".into(),
+                },
+                r#"{"event":"AlertCleared","data":{"member_id":"member1"}}"#,
+            ),
+            (
+                ServerMsg::ActiveAlerts {
+                    alerts: vec![AlertInfo {
+                        from_member: "member1".into(),
+                        from_name: "Member1".into(),
+                    }],
+                },
+                r#"{"event":"ActiveAlerts","data":{"alerts":[{"from_member":"member1","from_name":"Member1"}]}}"#,
+            ),
+            (
+                ServerMsg::TalkAcquired {
+                    talk_id: "talk-1".into(),
+                },
+                r#"{"event":"TalkAcquired","data":{"talk_id":"talk-1"}}"#,
+            ),
+            (
+                ServerMsg::TalkBusy {
+                    holder: "engineer".into(),
+                },
+                r#"{"event":"TalkBusy","data":{"holder":"engineer"}}"#,
+            ),
+            (ServerMsg::TalkReleased, r#"{"event":"TalkReleased"}"#),
+            (
+                ServerMsg::EngineerTalking { active: true },
+                r#"{"event":"EngineerTalking","data":{"active":true}}"#,
+            ),
+            (
+                ServerMsg::LimiterParams {
+                    mix: "member1".into(),
+                    track_name: "IEM VOL".into(),
+                    limit_db: -6.0,
+                    limit_norm: 0.0,
+                    enabled: true,
+                    active_seconds: 83.5,
+                },
+                concat!(
+                    r#"{"event":"LimiterParams","data":{"mix":"member1","track_name":"IEM VOL","#,
+                    r#""limit_db":-6.0,"limit_norm":0.0,"enabled":true,"active_seconds":83.5}}"#,
+                ),
+            ),
+            (
+                ServerMsg::TunnelStatus(TunnelStatusInfo {
+                    state: crate::TunnelState::Down,
+                    ready_connections: 0,
+                    since_secs: 42,
+                    last_restart_secs_ago: None,
+                    last_restart_ok: None,
+                }),
+                concat!(
+                    r#"{"event":"TunnelStatus","data":{"state":"Down","ready_connections":0,"#,
+                    r#""since_secs":42,"last_restart_secs_ago":null,"last_restart_ok":null}}"#,
+                ),
+            ),
+            (
+                ServerMsg::TunnelStatus(TunnelStatusInfo {
+                    state: crate::TunnelState::Restarting,
+                    ready_connections: 2,
+                    since_secs: 30,
+                    last_restart_secs_ago: Some(7),
+                    last_restart_ok: Some(false),
+                }),
+                concat!(
+                    r#"{"event":"TunnelStatus","data":{"state":"Restarting","ready_connections":2,"#,
+                    r#""since_secs":30,"last_restart_secs_ago":7,"last_restart_ok":false}}"#,
+                ),
+            ),
+            (
+                ServerMsg::Console(ConsoleInfo {
+                    inputs: vec![ConsoleInput {
+                        id: "mic1".into(),
+                        name: "MEMBER1 mic".into(),
+                        trim_db: 0.0,
+                        muted: false,
+                        processing: true,
+                    }],
+                    limiters: vec![ConsoleMix {
+                        id: "member1".into(),
+                        name: "Member1".into(),
+                        active_seconds: 1.5,
+                    }],
+                    pages: vec![PageLink {
+                        id: "translator".into(),
+                        name: "Translator".into(),
+                    }],
+                    login: LoginFailures {
+                        lan: 1,
+                        tunnel: 2,
+                        engineer_budget_trips: 3,
+                    },
+                }),
+                concat!(
+                    r#"{"event":"Console","data":{"inputs":[{"id":"mic1","name":"MEMBER1 mic","#,
+                    r#""trim_db":0.0,"muted":false,"processing":true}],"limiters":[{"id":"member1","#,
+                    r#""name":"Member1","active_seconds":1.5}],"pages":[{"id":"translator","#,
+                    r#""name":"Translator"}],"login":{"lan":1,"tunnel":2,"engineer_budget_trips":3}}}"#,
+                ),
+            ),
+            (
+                ServerMsg::InputUpdate(ConsoleInput {
+                    id: "keys".into(),
+                    name: "KEYS".into(),
+                    trim_db: -3.0,
+                    muted: true,
+                    processing: false,
+                }),
+                concat!(
+                    r#"{"event":"InputUpdate","data":{"id":"keys","name":"KEYS","trim_db":-3.0,"#,
+                    r#""muted":true,"processing":false}}"#,
+                ),
+            ),
+            (
+                ServerMsg::BandActivity {
+                    active: true,
+                    can_switch: false,
+                },
+                r#"{"event":"BandActivity","data":{"active":true,"can_switch":false}}"#,
+            ),
+        ];
+        let mut tags = std::collections::BTreeSet::new();
+        for (msg, json) in &cases {
+            assert_shape(msg, json);
+            let tag = event_tag(msg);
+            assert!(json.starts_with(&format!(r#"{{"event":"{tag}""#)), "{json}");
+            tags.insert(tag);
+        }
+        assert_eq!(tags.len(), 24, "a literal shape for every event: {tags:?}");
+        // Several meters read as one [L,R] pair per id (object order is free).
+        let two = r#"{"event":"Meters","data":{"meters":{"mic1":[0.5,0.3],"member2":[0.0,1.0]}}}"#;
+        assert_eq!(
+            serde_json::from_str::<ServerMsg>(two).unwrap(),
+            ServerMsg::Meters {
+                meters: HashMap::from([
+                    ("mic1".to_string(), [0.5, 0.3]),
+                    ("member2".to_string(), [0.0, 1.0]),
+                ]),
+            }
         );
     }
 
