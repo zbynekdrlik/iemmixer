@@ -11,8 +11,7 @@
 //! [`Shared::route`]: while a switch runs, "ide event" pre-empts or waits
 //! for it and everything else but `Status` is refused; otherwise the
 //! request goes to the daemon thread. `Subscribe` turns the connection into
-//! a stream of status replies (the tray), which also carries the tray's
-//! quit request ([`proto::TRAY_QUIT`]).
+//! a stream of [`Update`]s (the tray): the state, and the tray's quit.
 
 use std::fmt;
 use std::io;
@@ -29,7 +28,7 @@ use interprocess::local_socket::{
 use tracing::{info, warn};
 
 use crate::daemon::{Job, Route, Shared};
-use crate::proto::{self, FrameError, Reply, Request};
+use crate::proto::{self, FrameError, Reply, Request, Update};
 
 /// An idle listener looks for a new connection this often.
 const ACCEPT_POLL: Duration = Duration::from_millis(50);
@@ -213,26 +212,24 @@ fn connection(stream: &Stream, shared: &Shared, jobs: &Sender<Job>) {
     }
 }
 
-/// A subscriber (the tray): the status now, then every change, and the
-/// tray's quit request when the guard stops the tray.
+/// A subscriber (the tray): the state now, then every change, and
+/// `Update::Quit` when the guard stops the tray: at once, or right after
+/// the first state when the quit came while no tray was subscribed.
 fn subscribe(stream: &Stream, shared: &Shared) {
     shared.add_subscriber();
     let mut wire = stream;
     let first = shared.view();
     let mut seen = (first.version, first.tray_quits);
-    if proto::write_frame(&mut wire, &first.reply(true, &first.status)).is_ok() {
-        loop {
-            let v = shared.wait_change(seen, SUBSCRIBER_POLL);
-            let quit = v.tray_quits != seen.1;
-            let changed = v.version != seen.0;
-            seen = (v.version, v.tray_quits);
-            if quit && proto::write_frame(&mut wire, &v.reply(true, proto::TRAY_QUIT)).is_err() {
-                break;
-            }
-            if changed && proto::write_frame(&mut wire, &v.reply(true, &v.status)).is_err() {
-                break;
-            }
+    let state = |v: &crate::daemon::View| Update::State(v.reply(true, &v.status));
+    let mut open = proto::write_update(&mut wire, &state(&first)).is_ok();
+    while open {
+        if shared.take_tray_quit() && proto::write_update(&mut wire, &Update::Quit).is_err() {
+            break;
         }
+        let v = shared.wait_change(seen, SUBSCRIBER_POLL);
+        let changed = v.version != seen.0;
+        seen = (v.version, v.tray_quits);
+        open = !changed || proto::write_update(&mut wire, &state(&v)).is_ok();
     }
     shared.drop_subscriber();
     info!("a subscriber left");

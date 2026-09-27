@@ -205,6 +205,9 @@ pub struct View {
     pub version: u64,
     /// Counts the requests to the tray to quit.
     pub tray_quits: u64,
+    /// A quit no subscription has delivered yet (the tray may be in its
+    /// retry sleep): the next subscription delivers it, once.
+    pub tray_quit_pending: bool,
     pub subscribers: u32,
     /// The session ended and the guard stopped what it stops.
     pub session_done: bool,
@@ -350,16 +353,27 @@ impl Shared {
         v.subscribers = v.subscribers.saturating_sub(1);
     }
 
-    /// Asks the subscribed tray to quit (`WinPc::tray_stop`).
+    /// Asks the tray to quit (`WinPc::tray_stop`): its subscription gets
+    /// `Update::Quit` at once, or its next one does when the tray waits to
+    /// connect again (its 2 s retry). `WinPc::tray_stop` then waits for the
+    /// process to end.
     pub fn tray_quit(&self) -> Result<(), String> {
         let mut v = self.lock();
-        if v.subscribers == 0 {
-            return Err("the tray is not subscribed to the guard".to_owned());
-        }
+        v.tray_quit_pending = true;
         v.tray_quits += 1;
         drop(v);
         self.changed.notify_all();
         Ok(())
+    }
+
+    /// Takes a quit no subscription has delivered yet (one delivers it).
+    pub fn take_tray_quit(&self) -> bool {
+        std::mem::take(&mut self.lock().tray_quit_pending)
+    }
+
+    /// Forgets a quit no tray took: a tray that starts must not quit at once.
+    pub fn clear_tray_quit(&self) {
+        self.lock().tray_quit_pending = false;
     }
 
     /// The session window's wait (design §5.4): true once the guard stopped
@@ -975,7 +989,10 @@ fn run_step(pc: &mut dyn Pc, g: &mut Guard, step: Step, to: Mode, facts: &Facts)
             g.info(format!("server started (pid {pid})"));
             Ok(())
         }
-        Step::TrayStart => pc.tray_start(),
+        Step::TrayStart => {
+            g.shared.clear_tray_quit();
+            pc.tray_start()
+        }
         Step::IdentityCheck => {
             let sha = g
                 .state

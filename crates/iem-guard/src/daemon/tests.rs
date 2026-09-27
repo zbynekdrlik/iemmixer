@@ -1037,6 +1037,21 @@ fn a_tray_quit_waits_for_the_next_subscriber() {
 }
 
 #[test]
+fn a_tray_start_forgets_a_quit_no_tray_took() {
+    let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Event));
+    g.state.pins.current = Some(SHA.into());
+    // A stop whose tray never came back to take its quit.
+    g.shared.tray_quit().unwrap();
+    run_switch(&mut pc, &mut g, Mode::Event, Mode::Dev);
+    assert!(pc.called(Call::TrayStart));
+    assert_eq!(g.state.mode, Mode::Dev);
+    assert!(
+        !g.shared.take_tray_quit(),
+        "the new tray must not quit at once"
+    );
+}
+
+#[test]
 fn dry_run_changes_nothing() {
     let live = Request::Live {
         build: SHA.into(),
