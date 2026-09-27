@@ -2794,6 +2794,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "iem-win"
+version = "2.0.0-dev.8"
+dependencies = [
+ "tokio",
+ "windows-registry 0.100.0",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "indexmap"
 version = "1.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6288,6 +6297,7 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",

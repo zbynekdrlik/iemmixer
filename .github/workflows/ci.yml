@@ -89,14 +89,14 @@ jobs:
           tool: cargo-llvm-cov@0.9.1
       - name: UI unit tests (native)
         run: cargo test --locked -p iem-ui --lib
-      - name: Tests with line coverage (iem-core, iem-server, iem-rpp, iem-dsp, iem-limiter-mga, engine crates, iem-migrate) against the floor
+      - name: Tests with line coverage (iem-core, iem-server, iem-rpp, iem-dsp, iem-limiter-mga, engine crates, iem-migrate, iem-win) against the floor
         # Runs after a failed UI test step too (the job still fails): one CI
         # cycle reports every failing test.
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           cargo llvm-cov --locked --no-fail-fast --package iem-core --package iem-server --package iem-rpp \
-            --package iem-dsp --package iem-limiter-mga --package iem-engine-proto --package iem-audio-io --package iem-engine --package iem-migrate --all-features \
+            --package iem-dsp --package iem-limiter-mga --package iem-engine-proto --package iem-audio-io --package iem-engine --package iem-migrate --package iem-win --all-features \
             --json --summary-only --output-path "$RUNNER_TEMP/coverage.json"
           pct="$(jq '.data[0].totals.lines.percent' "$RUNNER_TEMP/coverage.json")"
           floor="$(tr -d '[:space:]' < .github/coverage-floor)"
@@ -369,6 +369,10 @@ jobs:
         run: cargo clippy --locked -p iem-engine-proto -p iem-audio-io -p iem-engine --all-targets -- -D warnings
       - name: Engine crate tests (library; the pipe integration tests need socket timeouts, Unix-only until S6)
         run: cargo test --locked -p iem-engine-proto -p iem-audio-io -p iem-engine --lib
+      - name: Clippy (Windows glue iem-win, with its Ctrl-Break test helper)
+        run: cargo clippy --locked -p iem-win --all-targets --features test-helper -- -D warnings
+      - name: Windows glue tests (processes, ports, windows, registry under a test key, Ctrl-Break to a child)
+        run: cargo test --locked -p iem-win --features test-helper
       - name: Migration CLI clippy and tests (it runs on the PC; the PIN pepper is DPAPI here)
         run: |
           cargo clippy --locked -p iem-migrate --all-targets -- -D warnings
