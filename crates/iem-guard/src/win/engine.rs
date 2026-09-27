@@ -611,3 +611,48 @@ pub(super) fn install_site(pc: &WinPc, path: &str, c: &Cancel) -> R<String> {
     info!("the site {} replaced {}", new.display(), site.display());
     Ok(format!("site before: {before}; site now: {now}"))
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use interprocess::local_socket::prelude::*;
+    use interprocess::local_socket::{GenericNamespaced, ListenerOptions, Stream};
+
+    use super::Supervisor;
+
+    /// An engine pipe with no free instance (its acceptor stuck): an
+    /// attempt to connect as its supervisor fails within a bound instead of
+    /// waiting for an instance forever, so neither a guard tick (`seen`)
+    /// nor a step holds the daemon thread, and a queued "ide event" behind
+    /// it (lane review). On the CI's Windows runner.
+    #[test]
+    fn a_busy_engine_pipe_fails_the_connect_within_a_bound() {
+        let pipe = format!("iemmixer-guard-test-busy-{}", std::process::id());
+        let name = || pipe.clone().to_ns_name::<GenericNamespaced>().unwrap();
+        let listener = ListenerOptions::new().name(name()).create_sync().unwrap();
+        // The listener's one instance is taken and never accepted: the next
+        // client finds no free instance (ERROR_PIPE_BUSY).
+        let first = Stream::connect(name()).unwrap();
+        let (tx, rx) = mpsc::channel();
+        let busy = pipe.clone();
+        thread::spawn(move || {
+            let start = Instant::now();
+            let r = Supervisor::connect(&busy, Vec::new()).map(|_| ());
+            let _ = tx.send((r, start.elapsed()));
+        });
+        let (r, took) = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the connect to a busy pipe returned within 5 s");
+        assert!(r.is_err(), "{r:?}");
+        assert!(took < Duration::from_secs(2), "{took:?}");
+        drop(first);
+        drop(listener);
+        // No pipe at all fails at once.
+        let start = Instant::now();
+        assert!(Supervisor::connect(&format!("{pipe}-none"), Vec::new()).is_err());
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+}
