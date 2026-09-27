@@ -57,17 +57,17 @@ try {
     $prefArgs = @{ PrefKey = $regKey; PrefName = 'Pref'; PrefOriginal = '64' }
     $sch = New-Object -ComObject 'Schedule.Service'
     $sch.Connect()
-    $e = ErrorOf { Register-IemTasks -Root $root -AppExe $appExe -Folder '\iemmixer-test-none' -ElevatedDir $elevated @prefArgs }
+    $e = ErrorOf { Register-IemTasks -Root $root -AppExe $appExe -Folder '\iemmixer-test-none' -ElevatedRoot $elevated @prefArgs }
     Assert ($e -like '*iemmixer-StartREAPER is missing*') "tasks-need-the-existing-start-reaper-task ($e)"
     Throws { $sch.GetFolder('\iemmixer-test-none') } 'tasks-refused-before-any-folder-exists'
     Assert (-not (Test-Path -LiteralPath $elevated)) 'tasks-refused-before-the-elevated-folder'
-    Throws { Register-IemTasks -Root $root -AppExe $appExe -Folder $folder -ElevatedDir $elevated -PrefKey $regKey -PrefName 'Pref' -PrefOriginal '64x' } 'tasks-refuse-a-non-numeric-original'
-    Throws { Register-IemTasks -Root ($root + '"') -AppExe $appExe -Folder $folder -ElevatedDir $elevated @prefArgs } 'tasks-refuse-a-quote-in-a-path'
+    Throws { Register-IemTasks -Root $root -AppExe $appExe -Folder $folder -ElevatedRoot $elevated -PrefKey $regKey -PrefName 'Pref' -PrefOriginal '64x' } 'tasks-refuse-a-non-numeric-original'
+    Throws { Register-IemTasks -Root ($root + '"') -AppExe $appExe -Folder $folder -ElevatedRoot $elevated @prefArgs } 'tasks-refuse-a-quote-in-a-path'
 
     Register-ScheduledTask -TaskPath '\iemmixer-test\' -TaskName 'iemmixer-StartREAPER' `
         -Action (New-ScheduledTaskAction -Execute 'cmd.exe' -Argument '/c exit 0') `
         -Principal (New-ScheduledTaskPrincipal -UserId $me.name -LogonType Interactive -RunLevel Limited) | Out-Null
-    $reports = Register-IemTasks -Root $root -AppExe $appExe -Folder $folder -ElevatedDir $elevated @prefArgs
+    $reports = Register-IemTasks -Root $root -AppExe $appExe -Folder $folder -ElevatedRoot $elevated @prefArgs
     $byName = @{}
     foreach ($r in $reports) { $byName[$r.task] = $r }
     Assert ((Sorted $byName.Keys) -ceq (Sorted @('iemmixer-guard', 'iemmixer-StartApp', 'iemmixer-probe', 'iemmixer-tuning', 'iemmixer-exclude', 'iemmixer-logon', 'iemmixer-StartREAPER'))) 'tasks-all-seven'
@@ -92,27 +92,45 @@ try {
     Assert ($p.Actions[0].Arguments -eq '/c exit 0') 'tasks-probe-exits-0'
     $l = Get-ScheduledTask -TaskPath '\iemmixer-test\' -TaskName 'iemmixer-logon'
     Assert (@($l.Triggers).Count -eq 1 -and $l.Triggers[0].CimClass.CimClassName -eq 'MSFT_TaskLogonTrigger' -and $l.Triggers[0].UserId -like "*$(Split-Path -Leaf $me.name)") 'tasks-logon-fires-at-the-users-logon'
-    $entry = Join-Path $elevated 'iem-task.ps1'
-    Assert ($l.Actions[0].Arguments -like "*-File `"$entry`" -Root `"$root`" -Kind logon -PrefKey `"$regKey`" -PrefName `"Pref`" -PrefOriginal `"64`"") "tasks-logon-runs-the-elevated-entry ($($l.Actions[0].Arguments))"
+    $etasks = Join-Path $elevated 'tasks'
+    $eout = Join-Path $etasks 'out'
+    $etuning = Join-Path $elevated 'tuning'
+    $entry = Join-Path $etasks 'iem-task.ps1'
+    Assert ($l.Actions[0].Arguments -like "*-File `"$entry`" -Root `"$root`" -TuningDir `"$etuning`" -Kind logon -PrefKey `"$regKey`" -PrefName `"Pref`" -PrefOriginal `"64`"") "tasks-logon-runs-the-elevated-entry ($($l.Actions[0].Arguments))"
     $tu = Get-ScheduledTask -TaskPath '\iemmixer-test\' -TaskName 'iemmixer-tuning'
-    Assert ($tu.Actions[0].Arguments -like "*-File `"$entry`" -Root `"$root`" -Kind tuning" -and $tu.Actions[0].Execute -like '*\WindowsPowerShell\v1.0\powershell.exe') 'tasks-tuning-runs-the-elevated-entry'
+    Assert ($tu.Actions[0].Arguments -like "*-File `"$entry`" -Root `"$root`" -TuningDir `"$etuning`" -Kind tuning" -and $tu.Actions[0].Execute -like '*\WindowsPowerShell\v1.0\powershell.exe' -and $tu.Actions[0].WorkingDirectory -eq $etasks) 'tasks-tuning-runs-the-elevated-entry-with-its-tuning-folder'
     $sr = Get-ScheduledTask -TaskPath '\iemmixer-test\' -TaskName 'iemmixer-StartREAPER'
     Assert ($sr.Actions[0].Execute -eq 'cmd.exe' -and $sr.Actions[0].Arguments -eq '/c exit 0') 'tasks-start-reaper-keeps-its-action'
     foreach ($n in @('iemmixer-StartREAPER', 'iemmixer-guard', 'iemmixer-exclude')) {
         $sd = $sch.GetFolder($folder).GetTask($n).GetSecurityDescriptor(4)
         Assert (Test-IemTaskSddl -Sddl $sd -UserSid $me.sid) "tasks-$n-descriptor-lets-the-user-run-it ($sd)"
     }
-    # The elevated folder: this module and the entry, changeable only by Administrators and SYSTEM.
-    Assert ((Get-FileHash -LiteralPath (Join-Path $elevated 'IemPc.psm1')).Hash -eq (Get-FileHash -LiteralPath (Join-Path $here 'IemPc.psm1')).Hash) 'elevated-folder-holds-this-module'
+    # The elevated root: this module and the entry, the results and the tuning
+    # folder, owned by Administrators and changeable only by them and SYSTEM.
+    Assert ((Get-FileHash -LiteralPath (Join-Path $etasks 'IemPc.psm1')).Hash -eq (Get-FileHash -LiteralPath (Join-Path $here 'IemPc.psm1')).Hash) 'elevated-folder-holds-this-module'
     $tokens = $null; $errors = $null
     [void][System.Management.Automation.Language.Parser]::ParseFile($entry, [ref]$tokens, [ref]$errors)
     Assert ($errors.Count -eq 0) 'elevated-entry-parses'
-    $ea = Get-Acl -LiteralPath $elevated
-    $er = @($ea.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
-    $userRule = @($er | Where-Object { $_.IdentityReference.Value -eq $me.sid })
-    Assert ($ea.AreAccessRulesProtected -and $er.Count -eq 3 -and $userRule.Count -eq 1 -and [int]$userRule[0].FileSystemRights -eq 1179817) 'elevated-folder-protected-user-reads-only'
-    Assert ((Sorted ($er | ForEach-Object { $_.IdentityReference.Value })) -eq (Sorted @($me.sid, 'S-1-5-18', 'S-1-5-32-544'))) 'elevated-folder-user-system-administrators'
-    $again = Register-IemTasks -Root $root -AppExe $appExe -Folder $folder -ElevatedDir $elevated @prefArgs
+    foreach ($d in @($elevated, $etasks, $eout, $etuning)) {
+        $ea = Get-Acl -LiteralPath $d
+        $er = @($ea.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
+        $userRule = @($er | Where-Object { $_.IdentityReference.Value -eq $me.sid })
+        Assert ($ea.AreAccessRulesProtected -and $er.Count -eq 3 -and $userRule.Count -eq 1 -and [int]$userRule[0].FileSystemRights -eq 1179817) "elevated-folder-protected-user-reads-only [$d]"
+        Assert ((Sorted ($er | ForEach-Object { $_.IdentityReference.Value })) -eq (Sorted @($me.sid, 'S-1-5-18', 'S-1-5-32-544'))) "elevated-folder-user-system-administrators [$d]"
+        Assert ($ea.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -eq 'S-1-5-32-544') "elevated-folder-owned-by-administrators [$d]"
+    }
+    foreach ($f in @((Join-Path $etasks 'IemPc.psm1'), $entry)) {
+        $fa = Get-Acl -LiteralPath $f
+        $fr = @($fa.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
+        Assert ($fa.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -eq 'S-1-5-32-544' -and $fr.Count -eq 3 -and @($fr | Where-Object { -not $_.IsInherited }).Count -eq 0) "elevated-file-owned-by-administrators-rules-inherited [$f]"
+        $fb = Test-IemElevatedItem -Path $f -UserSid $me.sid
+        Assert ($fb.Count -eq 0) "elevated-file-reads-back [$f] ($($fb -join '; '))"
+    }
+    $eb = Test-IemElevatedItem -Path $elevated -UserSid $me.sid
+    Assert ($eb.Count -eq 0) "elevated-root-reads-back ($($eb -join '; '))"
+    Throws { Register-IemTasks -Root $root -AppExe $appExe -Folder $folder -ElevatedRoot (Join-Path $root 'elevated') @prefArgs } 'tasks-refuse-an-elevated-root-inside-the-users-root'
+    Throws { Register-IemTasks -Root $root -AppExe $appExe -Folder $folder -ElevatedRoot 'relative\elevated' @prefArgs } 'tasks-refuse-a-relative-elevated-root'
+    $again = Register-IemTasks -Root $root -AppExe $appExe -Folder $folder -ElevatedRoot $elevated @prefArgs
     Assert ($again.Count -eq 7) 'tasks-register-again-idempotent'
 
     # ---- the root's DACL ----
@@ -272,10 +290,11 @@ try {
     # ---- the preference and the elevated tasks' body ----
     New-ItemProperty -LiteralPath $regKey -Name 'Pref' -Value 32 -PropertyType DWord | Out-Null
     $noTuning = Join-Path $base 'no-tuning'
-    $lg = Invoke-IemTaskRequest -Kind logon -Root $root -TuningDir $noTuning -PrefKey $regKey -PrefName 'Pref' -PrefOriginal '64'
+    $lg = Invoke-IemTaskRequest -Kind logon -Root $root -OutDir $eout -TuningDir $noTuning -PrefKey $regKey -PrefName 'Pref' -PrefOriginal '64'
     $pv = Get-IemPref -Key $regKey -Name 'Pref'
     Assert ($lg.ok -and $pv.value -eq 64 -and $pv.kind -eq 'DWord' -and $lg.result.pref.attempts -eq 1 -and $lg.result.tuning -eq 'absent') 'logon-restores-the-preference-keeping-its-kind'
-    Assert ((Get-Content -LiteralPath (Join-Path $root 'guard\tasks\logon.result.json') -Raw | ConvertFrom-Json).ok) 'logon-writes-its-result-file'
+    Assert ((Get-Content -LiteralPath (Join-Path $eout 'logon.result.json') -Raw | ConvertFrom-Json).ok) 'logon-writes-its-result-in-the-admin-only-folder'
+    Assert (-not (Test-Path -LiteralPath (Join-Path $root 'guard'))) 'the-elevated-task-writes-nothing-in-the-users-root'
     $r0 = Restore-IemPref -Key $regKey -Name 'Pref' -Original '64'
     Assert ($r0.ok -and $r0.attempts -eq 0) 'pref-at-its-original-is-not-written'
     New-ItemProperty -LiteralPath $regKey -Name 'Text' -Value '32' -PropertyType String | Out-Null
@@ -284,28 +303,119 @@ try {
     Assert ($rt.ok -and $tv.raw -ceq '064' -and $tv.kind -eq 'String') 'pref-restores-the-raw-text-of-a-string'
     Throws { Restore-IemPref -Key $regKey -Name 'Pref' -Original '6 4' } 'pref-refuses-a-non-numeric-original'
     Assert ((ConvertTo-IemHkcuPath -Key 'Software\ASIO\Test Card') -ceq 'HKCU:\Software\ASIO\Test Card') 'pref-site-key-is-under-hkcu'
-    $nk = Invoke-IemTaskRequest -Kind logon -Root $root -TuningDir $noTuning -PrefKey $regKey -PrefName 'NoSuchValue' -PrefOriginal '64'
+    $nk = Invoke-IemTaskRequest -Kind logon -Root $root -OutDir $eout -TuningDir $noTuning -PrefKey $regKey -PrefName 'NoSuchValue' -PrefOriginal '64'
     Assert (-not $nk.ok -and $nk.error) 'logon-reports-a-missing-value'
 
     $td = Join-Path $root 'guard\tasks'
+    New-Item -ItemType Directory -Force -Path $td | Out-Null
     [IO.File]::WriteAllText((Join-Path $td 'tuning.request.json'), '{"id":"t-1","verb":"state"}')
-    $tr = Invoke-IemTaskRequest -Kind tuning -Root $root -TuningDir $noTuning
+    $tr = Invoke-IemTaskRequest -Kind tuning -Root $root -OutDir $eout -TuningDir $noTuning
     Assert ($tr.ok -and $tr.id -ceq 't-1' -and $tr.result -eq 'absent') 'tuning-request-is-absent-before-s1c'
     [IO.File]::WriteAllText((Join-Path $td 'tuning.request.json'), '{"id":"t-2","verb":"format"}')
-    $tr = Invoke-IemTaskRequest -Kind tuning -Root $root -TuningDir $noTuning
+    $tr = Invoke-IemTaskRequest -Kind tuning -Root $root -OutDir $eout -TuningDir $noTuning
     Assert (-not $tr.ok -and $tr.id -ceq 't-2' -and $tr.error -like '*refused*') 'tuning-request-refuses-an-unknown-verb'
     [IO.File]::WriteAllText((Join-Path $td 'tuning.request.json'), '{"id":"t 3; x","verb":"state"}')
-    Assert (-not (Invoke-IemTaskRequest -Kind tuning -Root $root -TuningDir $noTuning).ok) 'task-request-refuses-a-bad-id'
+    Assert (-not (Invoke-IemTaskRequest -Kind tuning -Root $root -OutDir $eout -TuningDir $noTuning).ok) 'task-request-refuses-a-bad-id'
+    [IO.File]::WriteAllText((Join-Path $td 'tuning.request.json'), 'not json at all')
+    $tr = Invoke-IemTaskRequest -Kind tuning -Root $root -OutDir $eout -TuningDir $noTuning
+    Assert (-not $tr.ok -and $tr.error -ceq 'the request is not JSON') "task-request-refuses-a-non-json-request-without-echoing-it ($($tr.error))"
     [IO.File]::WriteAllText((Join-Path $td 'exclude.request.json'), '{"id":"x-1","sha":"..\\..\\x","keep":[]}')
-    $xr = Invoke-IemTaskRequest -Kind exclude -Root $root
+    $xr = Invoke-IemTaskRequest -Kind exclude -Root $root -OutDir $eout
     Assert (-not $xr.ok -and $xr.error -like '*not a bundle SHA*') 'exclude-request-refuses-a-bad-sha'
-    Throws { Invoke-IemTaskRequest -Kind format -Root $root } 'task-request-refuses-an-unknown-kind'
-    # The generated entry, as the task runs it.
+    Throws { Invoke-IemTaskRequest -Kind format -Root $root -OutDir $eout } 'task-request-refuses-an-unknown-kind'
+    $userOut = Join-Path $base 'user-out'
+    New-Item -ItemType Directory -Force -Path $userOut | Out-Null
+    $e = ErrorOf { Invoke-IemTaskRequest -Kind tuning -Root $root -OutDir $userOut -TuningDir $noTuning }
+    Assert ($e -like '*result folder is refused*' -and -not (Test-Path -LiteralPath (Join-Path $userOut 'tuning.result.json'))) "task-request-never-writes-into-a-user-writable-folder ($e)"
+
+    # A junction on the request path (the redirect of the classic elevated-write
+    # attack) is refused, and the result still lands only in the admin-only folder.
+    $jroot = Join-Path $base 'jroot'
+    $jtarget = Join-Path $base 'jtarget'
+    New-Item -ItemType Directory -Force -Path (Join-Path $jroot 'guard'), $jtarget | Out-Null
+    [IO.File]::WriteAllText((Join-Path $jtarget 'tuning.request.json'), '{"id":"j-1","verb":"state"}')
+    New-Item -ItemType Junction -Path (Join-Path $jroot 'guard\tasks') -Value $jtarget | Out-Null
+    Assert ((Test-IemReparsePoint -Path (Join-Path $jroot 'guard\tasks')) -and -not (Test-IemReparsePoint -Path $jtarget) -and -not (Test-IemReparsePoint -Path (Join-Path $base 'no-such-thing'))) 'reparse-points-are-seen-and-folders-are-not'
+    $jr = Invoke-IemTaskRequest -Kind tuning -Root $jroot -OutDir $eout -TuningDir $noTuning
+    $jres = Get-Content -LiteralPath (Join-Path $eout 'tuning.result.json') -Raw | ConvertFrom-Json
+    Assert (-not $jr.ok -and $jr.error -like '*junction or a link*' -and $jres.error -like '*junction or a link*') "task-request-refuses-a-junctioned-tasks-folder ($($jr.error))"
+    Assert (@(Get-ChildItem -LiteralPath $jtarget -File).Count -eq 1) 'task-request-writes-nothing-through-the-junction'
+    $junctionAsRoot = Join-Path $base 'elevated-link'
+    New-Item -ItemType Junction -Path $junctionAsRoot -Value $jtarget | Out-Null
+    $e = ErrorOf { Install-IemElevatedFolder -Path $junctionAsRoot -UserSid $me.sid }
+    Assert ($e -like '*junction or a link*') "elevated-folder-refuses-a-junction ($e)"
+    $foreign = Join-Path $base 'foreign'
+    New-Item -ItemType Directory -Force -Path $foreign | Out-Null
+    $ds = New-Object System.Security.AccessControl.DirectorySecurity
+    $ds.SetOwner((New-Object System.Security.Principal.SecurityIdentifier $me.sid))
+    [IO.Directory]::SetAccessControl($foreign, $ds)
+    $e = ErrorOf { Install-IemElevatedFolder -Path $foreign -UserSid $me.sid }
+    Assert ($e -like '*is owned by*refused*') "elevated-folder-refuses-a-folder-someone-else-made ($e)"
+
+    # S1c's tuning module is imported only from an admin-owned, admin-only folder.
+    $fakeTuning = @'
+function Get-IemTuningState { param([string]$ProfilePath) return 'fake-state' }
+function Enter-IemTuningMode { param([string]$ProfilePath) return 'fake-enter' }
+function Exit-IemTuningMode { param([string]$ProfilePath) return 'fake-exit' }
+function Invoke-IemTuningApply { param([string]$ProfilePath, [int]$Tier) return ('fake-apply-{0}' -f $Tier) }
+'@
+    $tmod = Join-Path $etuning 'IemTuning.psm1'
+    $tprof = Join-Path $etuning 'profile.json'
+    function Write-FakeTuning {
+        foreach ($p in @($tmod, $tprof)) { if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Force } }
+        [IO.File]::WriteAllText($tmod, $fakeTuning)
+        [IO.File]::WriteAllText($tprof, '{}')
+        foreach ($p in @($tmod, $tprof)) { Set-IemAdminsOwner -Path $p }
+    }
+    Write-FakeTuning
+    Assert ((Invoke-IemTuningVerb -Verb 'state' -TuningDir $etuning) -ceq 'fake-state') 'tuning-imports-an-admin-only-module'
+    Assert ((Invoke-IemTuningVerb -Verb 'apply-tier2' -TuningDir $etuning) -ceq 'fake-apply-2') 'tuning-apply-tier2-passes-tier-2'
+    [IO.File]::WriteAllText((Join-Path $td 'tuning.request.json'), '{"id":"t-5","verb":"enter"}')
+    $tr = Invoke-IemTaskRequest -Kind tuning -Root $root -OutDir $eout -TuningDir $etuning
+    Assert ($tr.ok -and $tr.result -ceq 'fake-enter') 'tuning-request-runs-the-verified-module'
+    foreach ($p in @($tmod, $tprof)) {
+        # The user may change it: refused.
+        $fs = [IO.File]::GetAccessControl($p)
+        $fs.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier $me.sid), 'Modify', 'Allow')))
+        [IO.File]::SetAccessControl($p, $fs)
+        $e = ErrorOf { Invoke-IemTuningVerb -Verb 'state' -TuningDir $etuning }
+        Assert ($e -like '*tuning module refused*') "tuning-refuses-a-user-writable-file [$p] ($e)"
+        Write-FakeTuning
+        # Owned by the user (who could change its DACL): refused.
+        $fo = New-Object System.Security.AccessControl.FileSecurity
+        $fo.SetOwner((New-Object System.Security.Principal.SecurityIdentifier $me.sid))
+        [IO.File]::SetAccessControl($p, $fo)
+        $e = ErrorOf { Invoke-IemTuningVerb -Verb 'state' -TuningDir $etuning }
+        Assert ($e -like "*tuning module refused*owned by $($me.sid)*") "tuning-refuses-a-file-owned-by-the-user [$p] ($e)"
+        $tr = Invoke-IemTaskRequest -Kind tuning -Root $root -OutDir $eout -TuningDir $etuning
+        Assert (-not $tr.ok -and $tr.error -like '*tuning module refused*') "tuning-request-refuses-an-unverified-module [$p]"
+        Write-FakeTuning
+    }
+    # The tuning folder itself: a rule that lets the user add files, then a user owner.
+    $dsec = [IO.Directory]::GetAccessControl($etuning)
+    $dsec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier $me.sid), 'Modify', 'ContainerInherit, ObjectInherit', 'None', 'Allow')))
+    [IO.Directory]::SetAccessControl($etuning, $dsec)
+    $e = ErrorOf { Invoke-IemTuningVerb -Verb 'state' -TuningDir $etuning }
+    Assert ($e -like '*tuning module refused*') "tuning-refuses-a-user-writable-folder ($e)"
+    [IO.Directory]::SetAccessControl($etuning, (New-IemElevatedSecurity -UserSid $me.sid))
+    Write-FakeTuning
+    Assert ((Invoke-IemTuningVerb -Verb 'state' -TuningDir $etuning) -ceq 'fake-state') 'tuning-folder-restored'
+    $do = New-Object System.Security.AccessControl.DirectorySecurity
+    $do.SetOwner((New-Object System.Security.Principal.SecurityIdentifier $me.sid))
+    [IO.Directory]::SetAccessControl($etuning, $do)
+    $e = ErrorOf { Invoke-IemTuningVerb -Verb 'state' -TuningDir $etuning }
+    Assert ($e -like "*tuning module refused*owned by $($me.sid)*") "tuning-refuses-a-folder-owned-by-the-user ($e)"
+    [IO.Directory]::SetAccessControl($etuning, (New-IemElevatedSecurity -UserSid $me.sid))
+    Throws { Invoke-IemTuningVerb -Verb 'state' -TuningDir 'relative\tuning' } 'tuning-refuses-a-relative-folder'
+    foreach ($p in @($tmod, $tprof)) { Remove-Item -LiteralPath $p -Force }
+
+    # The generated entry, as the task runs it (its results in tasks\out).
     [IO.File]::WriteAllText((Join-Path $td 'tuning.request.json'), '{"id":"t-4","verb":"exit"}')
-    & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $entry -Kind tuning -Root $root | Out-Null
+    & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $entry -Kind tuning -Root $root -TuningDir $noTuning | Out-Null
     $code = $LASTEXITCODE
-    $res = Get-Content -LiteralPath (Join-Path $td 'tuning.result.json') -Raw | ConvertFrom-Json
+    $res = Get-Content -LiteralPath (Join-Path $eout 'tuning.result.json') -Raw | ConvertFrom-Json
     Assert ($code -eq 0 -and $res.ok -and $res.id -ceq 't-4') "elevated-entry-runs-a-request (exit $code)"
+    Assert (-not (Test-Path -LiteralPath (Join-Path $td 'tuning.result.json'))) 'elevated-entry-writes-no-result-into-the-users-root'
 
     # ---- bootstrap state (read only) ----
     $bs = Get-IemBootstrapState -Root $root -Module 'iemmixer-no-such-module.dll' -PrefKey $regKey -PrefName 'Pref' -AppImage 'iemmixer-no-such-app.exe' -Folder $folder -FirewallRule $ruleName

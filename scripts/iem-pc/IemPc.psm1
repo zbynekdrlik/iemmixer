@@ -46,15 +46,22 @@ $script:TuningVerbs = @('enter', 'exit', 'state', 'apply-tier2')
 # copy of this module.
 $script:TaskEntry = @'
 # iemmixer S6: the elevated tasks' entry (tuning, exclude, logon), written by
-# Register-IemTasks next to its copy of IemPc.psm1 in a folder only
-# Administrators and SYSTEM may change. The result goes to
-# <Root>\guard\tasks\<kind>.result.json.
+# Register-IemTasks next to its copy of IemPc.psm1 in <elevated root>\tasks
+# (owner Administrators; only Administrators and SYSTEM may change it). It
+# reads <Root>\guard\tasks\<kind>.request.json from the user's root and writes
+# <elevated root>\tasks\out\<kind>.result.json, which the user may only read.
 param([Parameter(Mandatory)][string]$Kind, [Parameter(Mandatory)][string]$Root,
+      [Parameter(Mandatory)][string]$TuningDir,
       [string]$PrefKey = '', [string]$PrefName = '', [string]$PrefOriginal = '')
+# This process runs elevated: modules load only from Windows PowerShell's own
+# folders, never from the user's Documents or an HKCU environment's path.
+$pinned = [IO.Path]::Combine($PSHOME, 'Modules') + ';' + [IO.Path]::Combine([Environment]::GetFolderPath('ProgramFiles'), 'WindowsPowerShell\Modules')
+$env:PSModulePath = $pinned
 $ErrorActionPreference = 'Stop'
 try {
-    Import-Module (Join-Path $PSScriptRoot 'IemPc.psm1') -Force
-    $r = Invoke-IemTaskRequest -Kind $Kind -Root $Root -PrefKey $PrefKey -PrefName $PrefName -PrefOriginal $PrefOriginal
+    Import-Module ([IO.Path]::Combine($PSScriptRoot, 'IemPc.psm1')) -Force
+    $out = [IO.Path]::Combine($PSScriptRoot, 'out')
+    $r = Invoke-IemTaskRequest -Kind $Kind -Root $Root -OutDir $out -TuningDir $TuningDir -PrefKey $PrefKey -PrefName $PrefName -PrefOriginal $PrefOriginal
     if ($r.ok) { exit 0 }
     exit 1
 } catch {
@@ -266,8 +273,12 @@ function Register-IemTasks {
     # lets the Limited guard run it. StartREAPER predates S6 and holds site
     # values: it keeps its definition, gains only the descriptor, and must
     # exist (nothing is registered without it). The Highest tasks run this
-    # module from a copy in -ElevatedDir, which only Administrators and SYSTEM
-    # may change. Read back; any difference throws after every task was tried.
+    # module from a copy in -ElevatedRoot\tasks and load S1c's tuning module
+    # from -ElevatedRoot\tuning (default %ProgramData%\iemmixer, resolved here
+    # from the known folder and passed on the command line, so the elevated
+    # process never reads an environment variable for it); only Administrators
+    # and SYSTEM may change that root. Read back; any difference throws after
+    # every task was tried.
     param(
         [Parameter(Mandatory)][string]$Root,
         [Parameter(Mandatory)][string]$AppExe,
@@ -276,11 +287,22 @@ function Register-IemTasks {
         [Parameter(Mandatory)][string]$PrefOriginal,
         [string]$Folder = '\iemmixer',
         [string]$User = '',
-        [string]$ElevatedDir = ''
+        [string]$ElevatedRoot = ''
     )
-    if (-not $ElevatedDir) { $ElevatedDir = Join-Path $env:ProgramData 'iemmixer\tasks' }
+    if (-not $ElevatedRoot) {
+        $pd = [Environment]::GetFolderPath('CommonApplicationData')
+        if (-not $pd) { throw 'the ProgramData known folder is unknown' }
+        $ElevatedRoot = Join-Path $pd 'iemmixer'
+    }
+    $ElevatedRoot = $ElevatedRoot.TrimEnd('\')
+    if (-not [IO.Path]::IsPathRooted($ElevatedRoot)) { throw "the elevated root $ElevatedRoot is not an absolute path" }
+    $userRoot = $Root.TrimEnd('\') + '\'
+    if (($ElevatedRoot + '\').StartsWith($userRoot, [StringComparison]::OrdinalIgnoreCase) -or
+        $userRoot.StartsWith($ElevatedRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
+        throw "the elevated root $ElevatedRoot and the user's root $Root must not contain each other"
+    }
     if ($PrefOriginal -cnotmatch '^[0-9]{1,5}$') { throw "PrefOriginal '$PrefOriginal' refused (the recorded buffer, digits)" }
-    foreach ($v in @($Root, $AppExe, $PrefKey, $PrefName, $ElevatedDir)) { [void](Format-IemArg -Value $v) }
+    foreach ($v in @($Root, $AppExe, $PrefKey, $PrefName, $ElevatedRoot)) { [void](Format-IemArg -Value $v) }
     if (-not (Test-Path -LiteralPath $AppExe -PathType Leaf)) { throw "the app exe $AppExe does not exist" }
     $u = Resolve-IemUser -User $User
     $sddl = Get-IemTaskSddl -UserSid $u.sid
@@ -295,20 +317,23 @@ function Register-IemTasks {
     }
     $reaperActions = Get-IemTaskActions -Definition $reaperDef
     $f = Get-IemTaskFolder -Scheduler $sch -Path $Folder
-    Install-IemElevatedDir -Dir $ElevatedDir -UserSid $u.sid
+    Install-IemElevatedDir -Root $ElevatedRoot -UserSid $u.sid
+    $tasksDir = Join-Path $ElevatedRoot 'tasks'
 
-    $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $system = [Environment]::GetFolderPath('System')
+    $ps = Join-Path $system 'WindowsPowerShell\v1.0\powershell.exe'
     $common = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File ' +
-        (Format-IemArg (Join-Path $ElevatedDir 'iem-task.ps1')) + ' -Root ' + (Format-IemArg $Root)
+        (Format-IemArg (Join-Path $tasksDir 'iem-task.ps1')) + ' -Root ' + (Format-IemArg $Root) +
+        ' -TuningDir ' + (Format-IemArg (Join-Path $ElevatedRoot 'tuning'))
     $logonArgs = $common + ' -Kind logon -PrefKey ' + (Format-IemArg $PrefKey) + ' -PrefName ' + (Format-IemArg $PrefName) +
         ' -PrefOriginal ' + (Format-IemArg $PrefOriginal)
     $specs = @(
         @{ name = 'iemmixer-guard'; level = $script:RunLevelLimited; exe = (Join-Path $Root 'bin\iemmixer-guard.exe'); args = 'run'; dir = $Root; logon = $false },
         @{ name = 'iemmixer-StartApp'; level = $script:RunLevelLimited; exe = $AppExe; args = ''; dir = (Split-Path -Parent $AppExe); logon = $false },
-        @{ name = 'iemmixer-probe'; level = $script:RunLevelLimited; exe = (Join-Path $env:SystemRoot 'System32\cmd.exe'); args = '/c exit 0'; dir = ''; logon = $false },
-        @{ name = 'iemmixer-tuning'; level = $script:RunLevelHighest; exe = $ps; args = ($common + ' -Kind tuning'); dir = $ElevatedDir; logon = $false },
-        @{ name = 'iemmixer-exclude'; level = $script:RunLevelHighest; exe = $ps; args = ($common + ' -Kind exclude'); dir = $ElevatedDir; logon = $false },
-        @{ name = 'iemmixer-logon'; level = $script:RunLevelHighest; exe = $ps; args = $logonArgs; dir = $ElevatedDir; logon = $true }
+        @{ name = 'iemmixer-probe'; level = $script:RunLevelLimited; exe = (Join-Path $system 'cmd.exe'); args = '/c exit 0'; dir = ''; logon = $false },
+        @{ name = 'iemmixer-tuning'; level = $script:RunLevelHighest; exe = $ps; args = ($common + ' -Kind tuning'); dir = $tasksDir; logon = $false },
+        @{ name = 'iemmixer-exclude'; level = $script:RunLevelHighest; exe = $ps; args = ($common + ' -Kind exclude'); dir = $tasksDir; logon = $false },
+        @{ name = 'iemmixer-logon'; level = $script:RunLevelHighest; exe = $ps; args = $logonArgs; dir = $tasksDir; logon = $true }
     )
     $reports = @()
     $problems = @()
@@ -417,23 +442,135 @@ function Set-IemRootAcl {
     [pscustomobject]@{ root = $Root; user = $u.name; changed = ($before.Count -gt 0); before = $before }
 }
 
-function Install-IemElevatedDir {
-    # The folder the Highest tasks run from: this module and the entry script,
-    # under a DACL only Administrators and SYSTEM may change.
-    param([Parameter(Mandatory)][string]$Dir, [Parameter(Mandatory)][string]$UserSid)
-    if (-not (Test-Path -LiteralPath $Dir -PathType Container)) { New-Item -ItemType Directory -Force -Path $Dir | Out-Null }
+function Test-IemReparsePoint {
+    # Whether a file or folder is a junction or a link (the attributes of the
+    # link itself, so a dangling one counts too). The elevated code never
+    # follows one. $false when nothing is there.
+    param([Parameter(Mandatory)][string]$Path)
+    try { $a = [IO.File]::GetAttributes($Path) } catch {
+        $e = $_.Exception
+        while ($null -ne $e.InnerException) { $e = $e.InnerException }
+        if ($e -is [IO.FileNotFoundException] -or $e -is [IO.DirectoryNotFoundException]) { return $false }
+        throw
+    }
+    return (($a -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+}
+
+function Test-IemElevatedItem {
+    # A folder or file the Highest tasks run, load or write (design section 5.1):
+    # no junction or link, owned by Administrators or SYSTEM, and a DACL that
+    # grants exactly Get-IemElevatedRights (the user reads only): nothing
+    # denied, nobody else. A folder carries its own protected rules (as
+    # Set-IemDirectoryAcl writes them); a file inherits its folder's. Returns
+    # the differences.
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$UserSid)
+    if (Test-IemReparsePoint -Path $Path) { return ,@("$Path is a junction or a link") }
+    if (-not (Test-Path -LiteralPath $Path)) { return ,@("$Path does not exist") }
+    $acl = Get-Acl -LiteralPath $Path
+    $bad = @()
+    $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+    if (@($script:SidAdmins, $script:SidSystem) -notcontains $owner) { $bad += "$Path is owned by $owner" }
     $rights = Get-IemElevatedRights -UserSid $UserSid
-    Set-IemDirectoryAcl -Path $Dir -Rights $rights
-    $bad = Test-IemDirectoryAcl -Path $Dir -Rights $rights
-    if ($bad.Count -gt 0) { throw ('elevated folder ACL read-back: ' + ($bad -join '; ')) }
-    $module = Join-Path $Dir 'IemPc.psm1'
-    if ($module -ne $script:ModuleFile) { Copy-Item -LiteralPath $script:ModuleFile -Destination $module -Force }
-    $entry = Join-Path $Dir 'iem-task.ps1'
-    [IO.File]::WriteAllText($entry, $script:TaskEntry, $script:Utf8NoBom)
+    if (Test-Path -LiteralPath $Path -PathType Container) {
+        $dirBad = Test-IemDirectoryAcl -Path $Path -Rights $rights
+        foreach ($b in $dirBad) { $bad += ('{0}: {1}' -f $Path, $b) }
+        return ,$bad
+    }
+    $seen = @{}
+    foreach ($r in @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))) {
+        $sid = $r.IdentityReference.Value
+        if (-not $rights.ContainsKey($sid)) { $bad += "${Path}: a rule for $sid"; continue }
+        if ("$($r.AccessControlType)" -ne 'Allow') { $bad += "${Path}: a deny rule for $sid"; continue }
+        # An allow rule always carries Synchronize (1048576).
+        if ([int]$r.FileSystemRights -ne (([int]$rights[$sid]) -bor 1048576)) { $bad += ('{0}: {1} {2}' -f $Path, $sid, $r.FileSystemRights) }
+        if ($seen.ContainsKey($sid)) { $bad += "${Path}: two rules for $sid" }
+        $seen[$sid] = $true
+    }
+    foreach ($sid in $rights.Keys) { if (-not $seen.ContainsKey($sid)) { $bad += "${Path}: no rule for $sid" } }
+    return ,$bad
+}
+
+function New-IemElevatedSecurity {
+    # The elevated root's folders: owner Administrators and a protected DACL
+    # (Get-IemElevatedRights) that everything below inherits.
+    param([Parameter(Mandatory)][string]$UserSid)
+    $sec = New-Object System.Security.AccessControl.DirectorySecurity
+    $sec.SetOwner((New-Object System.Security.Principal.SecurityIdentifier $script:SidAdmins))
+    $sec.SetAccessRuleProtection($true, $false)
+    $rights = Get-IemElevatedRights -UserSid $UserSid
+    foreach ($sid in $rights.Keys) {
+        $id = New-Object System.Security.Principal.SecurityIdentifier $sid
+        $sec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($id, $rights[$sid], 'ContainerInherit, ObjectInherit', 'None', 'Allow')))
+    }
+    return $sec
+}
+
+function Set-IemAdminsOwner {
+    # A file's owner becomes Administrators (its DACL is left alone).
+    param([Parameter(Mandatory)][string]$Path)
+    if (Test-IemReparsePoint -Path $Path) { throw "$Path is a junction or a link: refused" }
+    $fs = New-Object System.Security.AccessControl.FileSecurity
+    $fs.SetOwner((New-Object System.Security.Principal.SecurityIdentifier $script:SidAdmins))
+    [IO.File]::SetAccessControl($Path, $fs)
+}
+
+function Install-IemElevatedFolder {
+    # One folder of the elevated root. A new one is created with its owner and
+    # DACL in one step (no moment in which another user may add to it). One
+    # that exists must be no junction or link and owned by Administrators or
+    # SYSTEM, else it is refused (someone else made it: inspect it by hand);
+    # its owner and DACL are then set again. Read back.
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$UserSid)
+    if (Test-IemReparsePoint -Path $Path) { throw "$Path is a junction or a link: refused" }
+    $sec = New-IemElevatedSecurity -UserSid $UserSid
+    if (Test-Path -LiteralPath $Path -PathType Container) {
+        $owner = (Get-Acl -LiteralPath $Path).GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+        if (@($script:SidAdmins, $script:SidSystem) -notcontains $owner) {
+            throw "$Path exists and is owned by $owner, not Administrators or SYSTEM: refused (inspect it and remove it by hand)"
+        }
+        [IO.Directory]::SetAccessControl($Path, $sec)
+    } else {
+        [void][IO.Directory]::CreateDirectory($Path, $sec)
+    }
+    $bad = Test-IemElevatedItem -Path $Path -UserSid $UserSid
+    if ($bad.Count -gt 0) { throw ('elevated folder read-back: ' + ($bad -join '; ')) }
+}
+
+function Write-IemElevatedFile {
+    # A file of the elevated root, written fresh (an old one is removed first,
+    # so none of its rules survive; the new one inherits the folder's), owned
+    # by Administrators.
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][byte[]]$Bytes)
+    if (Test-IemReparsePoint -Path $Path) { throw "$Path is a junction or a link: refused" }
+    if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Force }
+    [IO.File]::WriteAllBytes($Path, $Bytes)
+    Set-IemAdminsOwner -Path $Path
+}
+
+function Install-IemElevatedDir {
+    # The elevated root (design section 5.1; %ProgramData%\iemmixer on the PC):
+    # tasks\ (this module and the entry script), tasks\out\ (the tasks'
+    # results) and tuning\ (S1c's module). Every folder is owned by
+    # Administrators with a protected DACL (Administrators and SYSTEM change
+    # it, the user only reads), our files are written fresh, and all of it
+    # reads back.
+    param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][string]$UserSid)
+    $tasks = Join-Path $Root 'tasks'
+    foreach ($d in @($Root, $tasks, (Join-Path $tasks 'out'), (Join-Path $Root 'tuning'))) {
+        Install-IemElevatedFolder -Path $d -UserSid $UserSid
+    }
+    $module = Join-Path $tasks 'IemPc.psm1'
+    $entry = Join-Path $tasks 'iem-task.ps1'
+    if ($module -ne $script:ModuleFile) { Write-IemElevatedFile -Path $module -Bytes ([IO.File]::ReadAllBytes($script:ModuleFile)) }
+    Write-IemElevatedFile -Path $entry -Bytes ($script:Utf8NoBom.GetBytes($script:TaskEntry))
+    foreach ($f in @($module, $entry)) {
+        $bad = Test-IemElevatedItem -Path $f -UserSid $UserSid
+        if ($bad.Count -gt 0) { throw ('elevated file read-back: ' + ($bad -join '; ')) }
+    }
     $h1 = (Get-FileHash -LiteralPath $script:ModuleFile -Algorithm SHA256).Hash
     $h2 = (Get-FileHash -LiteralPath $module -Algorithm SHA256).Hash
-    if ($h1 -cne $h2) { throw "the copy of IemPc.psm1 in $Dir does not match the module" }
-    if ([IO.File]::ReadAllText($entry) -cne $script:TaskEntry) { throw "the entry script in $Dir does not read back" }
+    if ($h1 -cne $h2) { throw "the copy of IemPc.psm1 in $tasks does not match the module" }
+    if ([IO.File]::ReadAllText($entry) -cne $script:TaskEntry) { throw "the entry script in $tasks does not read back" }
 }
 
 # ---- firewall (P9) ----
@@ -625,7 +762,10 @@ function Set-IemDefenderExclusion {
     [CmdletBinding(SupportsShouldProcess)]
     param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][string]$Sha, [string[]]$Keep = @())
     foreach ($s in (@($Sha) + @($Keep))) { if ($s -cnotmatch '^[0-9a-f]{40}$') { throw "not a bundle SHA: '$s'" } }
-    $dir = Join-Path (Join-Path $Root 'bundles') $Sha
+    $bundles = Join-Path $Root 'bundles'
+    $dir = Join-Path $bundles $Sha
+    # The exclude task runs elevated in the user's root: never through a junction or a link.
+    foreach ($p in @($Root, $bundles, $dir)) { if (Test-IemReparsePoint -Path $p) { throw "$p is a junction or a link: refused" } }
     $names = Test-IemBundleSums -Dir $dir
     $want = @($names | Where-Object { $_ -notlike '*/*' -and $_ -like '*.exe' } | ForEach-Object { Join-Path $dir $_ })
     if ($want.Count -eq 0) { throw "bundle $Sha has no executable" }
@@ -928,24 +1068,49 @@ function Get-IemBootstrapState {
 
 # ---- the elevated tasks' body (design section 5.1) ----
 
+function Get-IemTaskUserSid {
+    # The account this task runs as: the user whose rights the elevated root grants.
+    return [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+}
+
 function Read-IemTaskRequest {
-    param([Parameter(Mandatory)][string]$Path)
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "no request at $Path" }
-    $doc = [IO.File]::ReadAllText($Path) | ConvertFrom-Json
+    # <Root>\guard\tasks\<kind>.request.json, written by the Limited guard in the
+    # user's root: never read through a junction or a link, at most 64 KiB, and
+    # only its own fields are used.
+    param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][string]$Kind)
+    $guard = Join-Path $Root 'guard'
+    $dir = Join-Path $guard 'tasks'
+    $path = Join-Path $dir ($Kind + '.request.json')
+    foreach ($p in @($Root, $guard, $dir, $path)) { if (Test-IemReparsePoint -Path $p) { throw "$p is a junction or a link: refused" } }
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "no request at $path" }
+    if ((Get-Item -LiteralPath $path -Force).Length -gt 65536) { throw 'the request is larger than 64 KiB' }
+    $doc = $null
+    try { $doc = [IO.File]::ReadAllText($path) | ConvertFrom-Json } catch { throw 'the request is not JSON' }
     $id = [string](Get-IemProp $doc 'id')
-    if ($id -cnotmatch '^[A-Za-z0-9_.:-]{1,64}$') { throw "request id '$id' refused" }
+    if ($id -cnotmatch '^[A-Za-z0-9_.:-]{1,64}$') { throw 'request id refused (1 to 64 of A-Z a-z 0-9 _ . : -)' }
     [pscustomobject]@{ id = $id; doc = $doc }
 }
 
 function Invoke-IemTuningVerb {
-    # S1c's tuning module (IemTuning.psm1 and profile.json in -TuningDir,
-    # default %ProgramData%\iemmixer\tuning): 'absent' until S1c ships them.
+    # S1c's tuning module: IemTuning.psm1 and profile.json in -TuningDir
+    # (<elevated root>\tuning, from the task's command line); 'absent' until S1c
+    # ships them. The module runs elevated, so it is imported only when its
+    # folder, that folder's parent, the module and the profile are all owned
+    # by Administrators or SYSTEM and only they may change them.
     param([Parameter(Mandatory)][string]$Verb, [string]$TuningDir = '')
     if ($script:TuningVerbs -cnotcontains $Verb) { throw "tuning verb '$Verb' refused (enter, exit, state, apply-tier2)" }
-    if (-not $TuningDir) { $TuningDir = Join-Path $env:ProgramData 'iemmixer\tuning' }
+    $TuningDir = $TuningDir.TrimEnd('\')
+    if (-not $TuningDir -or -not [IO.Path]::IsPathRooted($TuningDir)) { throw 'the tuning folder (-TuningDir) is not an absolute path' }
     $module = Join-Path $TuningDir 'IemTuning.psm1'
     $profilePath = Join-Path $TuningDir 'profile.json'
     if (-not (Test-Path -LiteralPath $module -PathType Leaf) -or -not (Test-Path -LiteralPath $profilePath -PathType Leaf)) { return 'absent' }
+    $sid = Get-IemTaskUserSid
+    $bad = @()
+    foreach ($p in @((Split-Path -Parent $TuningDir), $TuningDir, $module, $profilePath)) {
+        $b = Test-IemElevatedItem -Path $p -UserSid $sid
+        $bad += $b
+    }
+    if ($bad.Count -gt 0) { throw ('tuning module refused (not admin-only): ' + ($bad -join '; ')) }
     Import-Module $module -Force
     switch ($Verb) {
         'enter' { return (Enter-IemTuningMode -ProfilePath $profilePath) }
@@ -958,24 +1123,29 @@ function Invoke-IemTuningVerb {
 function Invoke-IemTaskRequest {
     # The body of the Highest tasks. The guard writes <Root>\guard\tasks\
     # <kind>.request.json ({"id", "verb"} for tuning; {"id", "sha", "keep"} for
-    # exclude), runs the task and reads <kind>.result.json ({"kind", "id",
-    # "ok", "at", "result", "error"}). logon (at the user's logon, G1): tuning
+    # exclude), runs the task and reads -OutDir\<kind>.result.json ({"kind",
+    # "id", "ok", "at", "result", "error"}; -OutDir is <elevated root>\tasks\out,
+    # which only Administrators and SYSTEM may change, so the elevated write
+    # never lands in the user's root). logon (at the user's logon, G1): tuning
     # exit, then the preference back to its original.
     param([Parameter(Mandatory)][ValidateSet('tuning', 'exclude', 'logon')][string]$Kind, [Parameter(Mandatory)][string]$Root,
-          [string]$TuningDir = '', [string]$PrefKey = '', [string]$PrefName = '', [string]$PrefOriginal = '')
-    $dir = Join-Path $Root 'guard\tasks'
-    if (-not (Test-Path -LiteralPath $dir -PathType Container)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+          [Parameter(Mandatory)][string]$OutDir, [string]$TuningDir = '', [string]$PrefKey = '', [string]$PrefName = '',
+          [string]$PrefOriginal = '')
+    $outBad = Test-IemElevatedItem -Path $OutDir -UserSid (Get-IemTaskUserSid)
+    if ($outBad.Count -gt 0) { throw ('the result folder is refused (not admin-only): ' + ($outBad -join '; ')) }
+    $outFile = Join-Path $OutDir ($Kind + '.result.json')
+    foreach ($p in @($outFile, ($outFile + '.tmp'))) { if (Test-IemReparsePoint -Path $p) { throw "$p is a junction or a link: refused" } }
     $result = [ordered]@{ kind = $Kind; id = ''; ok = $false; at = (Get-Date).ToUniversalTime().ToString('o'); result = $null; error = '' }
     try {
         switch ($Kind) {
             'tuning' {
-                $req = Read-IemTaskRequest -Path (Join-Path $dir 'tuning.request.json')
+                $req = Read-IemTaskRequest -Root $Root -Kind 'tuning'
                 $result.id = $req.id
                 $result.result = Invoke-IemTuningVerb -Verb ([string](Get-IemProp $req.doc 'verb')) -TuningDir $TuningDir
                 $result.ok = $true
             }
             'exclude' {
-                $req = Read-IemTaskRequest -Path (Join-Path $dir 'exclude.request.json')
+                $req = Read-IemTaskRequest -Root $Root -Kind 'exclude'
                 $result.id = $req.id
                 $keep = @(Get-IemProp $req.doc 'keep' | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ })
                 $result.result = Set-IemDefenderExclusion -Root $Root -Sha ([string](Get-IemProp $req.doc 'sha')) -Keep $keep
@@ -995,7 +1165,7 @@ function Invoke-IemTaskRequest {
         $result.error = $_.Exception.Message
     }
     $out = [pscustomobject]$result
-    Write-IemJsonFile -Path (Join-Path $dir ($Kind + '.result.json')) -Value $out
+    Write-IemJsonFile -Path $outFile -Value $out
     return $out
 }
 
