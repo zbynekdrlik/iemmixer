@@ -10,10 +10,12 @@
 //! statistics), [`channels`] (topology card channels → card indices),
 //! [`period`] (the period the driver really delivers, measured from sample
 //! positions), [`reset`] (the reopen budget and the stall rule), [`rtpanic`]
-//! (panics on the real-time thread, recorded in atomics) and, on Windows
-//! only, `asio` — the crate's only unsafe code, the S6 backend. The
-//! preference window (the driver's preferred buffer holds 32 only while the
-//! driver opens) lives in `iem_win::prefwin`, which the guard shares.
+//! (panics on the real-time thread, recorded in atomics), [`owner`] (the
+//! decisions of the backend's owner thread) and, on Windows only, `asio` —
+//! the crate's only unsafe code: the S1a spike host and the S6 backend
+//! `AsioStream`. The preference window (the driver's preferred buffer holds
+//! 32 only while the driver opens) lives in `iem_win::prefwin`, which the
+//! guard shares.
 //!
 //! Buffers are f64 and channel-major. Every backend calls `process()` inside
 //! `catch_unwind`: a panic zeroes that block's outputs, the processor is never
@@ -46,6 +48,7 @@ pub mod channels;
 pub mod format;
 pub mod nullrt;
 pub mod offline;
+pub mod owner;
 pub mod period;
 pub mod reset;
 pub mod rtpanic;

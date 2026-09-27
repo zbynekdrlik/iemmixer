@@ -174,6 +174,32 @@ impl HistogramSnapshot {
     }
 }
 
+/// The counters of a [`Snapshot`] that a control loop polls, without the
+/// histograms: [`Telemetry::counters`] reads them without allocating.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Counters {
+    pub callbacks: u64,
+    pub late: u64,
+    pub missed: u64,
+    pub overruns: u64,
+    /// The longest callback so far (ns).
+    pub max_ns: u64,
+}
+
+impl Counters {
+    /// `self` followed by `later` (the stream after a reopen): the counts
+    /// add up, the longest callback is the longer of the two.
+    pub fn plus(self, later: Counters) -> Counters {
+        Counters {
+            callbacks: self.callbacks.saturating_add(later.callbacks),
+            late: self.late.saturating_add(later.late),
+            missed: self.missed.saturating_add(later.missed),
+            overruns: self.overruns.saturating_add(later.overruns),
+            max_ns: self.max_ns.max(later.max_ns),
+        }
+    }
+}
+
 /// Everything one stream recorded, read at one moment.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Snapshot {
@@ -341,6 +367,17 @@ impl Telemetry {
     /// True once after the driver asked for a reset (or a buffer resize).
     pub fn take_reopen(&self) -> bool {
         self.reopen.swap(false, Relaxed)
+    }
+
+    /// The polled counters (no allocation, unlike [`Telemetry::snapshot`]).
+    pub fn counters(&self) -> Counters {
+        Counters {
+            callbacks: self.callbacks.load(Relaxed),
+            late: self.late.load(Relaxed),
+            missed: self.missed.load(Relaxed),
+            overruns: self.overruns.load(Relaxed),
+            max_ns: self.duration.max_ns.load(Relaxed),
+        }
     }
 
     pub fn snapshot(&self) -> Snapshot {
@@ -660,6 +697,75 @@ mod tests {
         );
         assert_eq!(s.interval.total(), 4);
         assert_eq!(t.callbacks(), WARMUP + 4);
+    }
+
+    #[test]
+    fn counters_are_the_snapshots_counts_without_histograms() {
+        let t = Telemetry::new(32, 96_000.0);
+        assert_eq!(t.counters(), Counters::default());
+        let mut at = 1_000;
+        for _ in 0..WARMUP {
+            t.on_callback(at, None);
+            at += P;
+        }
+        t.on_callback(at, None); // on time
+        at += P * 3 / 2 + 1;
+        t.on_callback(at, None); // late
+        at += 2 * P;
+        t.on_callback(at, None); // missed
+        at += 2 * P;
+        t.on_callback(at, None); // missed
+        t.on_done(P + 1); // overrun
+        t.on_done(7_000);
+        let c = t.counters();
+        assert_eq!(
+            c,
+            Counters {
+                callbacks: WARMUP + 4,
+                late: 1,
+                missed: 2,
+                overruns: 1,
+                max_ns: P + 1,
+            }
+        );
+        let s = t.snapshot();
+        assert_eq!(
+            (c.callbacks, c.late, c.missed, c.overruns, c.max_ns),
+            (s.callbacks, s.late, s.missed, s.overruns, s.duration.max_ns)
+        );
+    }
+
+    #[test]
+    fn counters_add_up_across_reopens_and_keep_the_longest_callback() {
+        let first = Counters {
+            callbacks: 100,
+            late: 1,
+            missed: 2,
+            overruns: 3,
+            max_ns: 900,
+        };
+        let later = Counters {
+            callbacks: 40,
+            late: 5,
+            missed: 7,
+            overruns: 11,
+            max_ns: 400,
+        };
+        let sum = Counters {
+            callbacks: 140,
+            late: 6,
+            missed: 9,
+            overruns: 14,
+            max_ns: 900,
+        };
+        assert_eq!(first.plus(later), sum);
+        assert_eq!(later.plus(first), sum);
+        assert_eq!(Counters::default().plus(later), later);
+        let full = Counters {
+            callbacks: u64::MAX,
+            ..Counters::default()
+        };
+        assert_eq!(full.plus(first).callbacks, u64::MAX);
     }
 
     #[test]
