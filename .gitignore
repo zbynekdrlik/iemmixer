@@ -13,6 +13,8 @@ Thumbs.db
 *.swp
 # Harness-local Claude Code settings (never shared)
 .claude/settings.local.json
+# In-session worker worktrees (temporary branches, integrated into dev)
+.claude/worktrees/
 # Runtime data and secrets are created on the PC, never committed
 # (exact file names: a `pepper.*` glob would also hide src/pepper.rs)
 secrets/
