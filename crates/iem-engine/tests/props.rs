@@ -394,7 +394,15 @@ fn random_command_groups_render_finite_bounded_output() {
     };
     let state = common::open_state(&g);
     let mut core = Core::new(Arc::clone(&g), &state, 0, flags);
-    let (mut p, mut h) = Processor::new(Arc::clone(&g), &state, &[], Options { fade_in_ms: 0.0 });
+    let (mut p, mut h) = Processor::new(
+        Arc::clone(&g),
+        &state,
+        &[],
+        Options {
+            fade_in_ms: 0.0,
+            hold: false,
+        },
+    );
     let mut input = Planar::new(g.rx.len(), 97);
     for k in 0..blocks {
         for _ in 0..rng.below(3) {

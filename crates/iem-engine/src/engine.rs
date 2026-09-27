@@ -439,6 +439,7 @@ pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
         settings: Settings {
             solo_grace: cfg.solo_grace,
             block: u32::try_from(cfg.block).unwrap_or(u32::MAX),
+            hold: false,
         },
     });
     let exit = control.run(&rx);
@@ -488,8 +489,15 @@ pub fn render(a: &RenderArgs) -> Result<(), EngineError> {
     if !(1..=MAX_BLOCK).contains(&a.block) {
         return Err(EngineError::Usage(format!("block must be 1…{MAX_BLOCK}")));
     }
-    let (mut p, _handles) =
-        Processor::new(Arc::clone(&topo), &state, &[], Options { fade_in_ms: 0.0 });
+    let (mut p, _handles) = Processor::new(
+        Arc::clone(&topo),
+        &state,
+        &[],
+        Options {
+            fade_in_ms: 0.0,
+            hold: false,
+        },
+    );
     let run = Offline { block: a.block }.run(&mut p, &audio, topo.tx.len());
     if let Some(f) = run.fault {
         return Err(EngineError::Fault {

@@ -7,7 +7,7 @@ use crate::site::parse;
 use crate::topology::compile;
 use iem_audio_io::{Offline, Planar};
 use iem_dsp::pan::gains;
-use iem_engine_proto::{Cmd, EqTarget, GroupId, InputId, MixId, Source};
+use iem_engine_proto::{Cmd, EqTarget, ErrCode, GroupId, InputId, MixId, Source};
 use std::time::Duration;
 
 /// RX: mono 0, st 1/2, tb 3, gs 4/5 (in the stems group).
@@ -126,7 +126,15 @@ fn rig_with(site: &str, cmds: &[Cmd], flags: Flags, opts: Options) -> Rig {
 }
 
 fn rig(cmds: &[Cmd]) -> Rig {
-    rig_with(SITE, cmds, Flags::default(), Options { fade_in_ms: 0.0 })
+    rig_with(
+        SITE,
+        cmds,
+        Flags::default(),
+        Options {
+            fade_in_ms: 0.0,
+            hold: false,
+        },
+    )
 }
 
 impl Rig {
@@ -488,7 +496,10 @@ fn a_test_signal_caps_every_tx_and_ends_after_its_ttl() {
             level("tr", src_in("mono"), 0.0),
         ],
         flags,
-        Options { fade_in_ms: 0.0 },
+        Options {
+            fade_in_ms: 0.0,
+            hold: false,
+        },
     );
     r.at(
         0,
@@ -522,7 +533,10 @@ fn a_test_signal_caps_every_tx_and_ends_after_its_ttl() {
         SITE,
         &[level("eng", src_in("st"), 0.0)],
         flags,
-        Options { fade_in_ms: 0.0 },
+        Options {
+            fade_in_ms: 0.0,
+            hold: false,
+        },
     );
     probe.at(
         0,
@@ -660,8 +674,15 @@ fn meters_publish_every_3200_samples() {
     core.apply(&level("m1", src_in("mono"), 0.0)).unwrap();
     let mut counters = vec![0; topo.mixes.len()];
     counters[m] = 1000;
-    let (mut p, mut h) =
-        Processor::new(topo, &core.state(), &counters, Options { fade_in_ms: 0.0 });
+    let (mut p, mut h) = Processor::new(
+        topo,
+        &core.state(),
+        &counters,
+        Options {
+            fade_in_ms: 0.0,
+            hold: false,
+        },
+    );
     let run = Offline { block: 3200 }.run(&mut p, &rx(&[2.0], 3200), 5);
     assert!(run.fault.is_none());
     let f = h.meters.read().clone();
@@ -928,7 +949,10 @@ fn the_test_sine_starts_upwards_and_fades_out_after_its_ttl() {
         SITE,
         &[level("eng", src_in("st"), 0.0)],
         flags,
-        Options { fade_in_ms: 0.0 },
+        Options {
+            fade_in_ms: 0.0,
+            hold: false,
+        },
     );
     r.at(
         0,
@@ -957,4 +981,162 @@ fn the_test_sine_starts_upwards_and_fades_out_after_its_ttl() {
     let tail = y[5300..5760].iter().fold(0.0f64, |m, v| m.max(v.abs()));
     assert!(tail > 0.0 && tail < 0.02 * amp, "{tail} vs {amp}");
     assert!(y[5760..].iter().all(|v| *v == 0.0), "silent after the end");
+}
+
+/// `--hold` (S6 design note §4).
+const HELD: Options = Options {
+    fade_in_ms: 500.0,
+    hold: true,
+};
+
+#[test]
+fn hold_keeps_outputs_silent_until_arm() {
+    let mut r = rig_with(
+        SITE,
+        &[level("m1", src_in("mono"), 0.0)],
+        Flags::default(),
+        HELD,
+    );
+    let full = 0.25 * g0() * g0();
+    let out = r.run(&rx(&[0.25], 9_600), 32);
+    for ch in 0..out.channels() {
+        assert!(out.channel(ch).iter().all(|y| *y == 0.0), "held: TX {ch}");
+    }
+    // Arm: the 500 ms fade-in from silence.
+    assert!(push_group(&mut r.h.cmds, 0, &[RtOp::Arm]));
+    let out = r.run(&rx(&[0.25], 50_000), 32);
+    let y = out.channel(M1_L);
+    assert!(y[0] > 0.0 && y[0] < full * 1e-3, "{}", y[0]);
+    assert!(close(y[24_000], full * 0.5, 1e-3), "{}", y[24_000]);
+    assert!(close(y[49_999], full, 1e-15));
+    // A second Arm leaves the level alone.
+    assert!(push_group(&mut r.h.cmds, 0, &[RtOp::Arm]));
+    let out = r.run(&rx(&[0.25], 512), 32);
+    assert!(out.channel(M1_L).iter().all(|y| close(*y, full, 1e-15)));
+    // Faded out while held: an Arm brings nothing back.
+    let mut r = rig_with(
+        SITE,
+        &[level("m1", src_in("mono"), 0.0)],
+        Flags::default(),
+        HELD,
+    );
+    assert!(push_group(&mut r.h.cmds, 0, &[RtOp::FadeOut, RtOp::Arm]));
+    let out = r.run(&rx(&[0.25], 50_000), 32);
+    assert!(out.channel(M1_L).iter().all(|y| *y == 0.0));
+    assert!(r.h.status.faded_out.load(Ordering::Acquire));
+}
+
+#[test]
+fn discontinuity_restarts_the_fade_in() {
+    let open = [level("m1", src_in("mono"), 0.0)];
+    let mut r = rig_with(SITE, &open, Flags::default(), Options::default());
+    let full = 0.25 * g0() * g0();
+    let out = r.run(&rx(&[0.25], 50_000), 32);
+    assert!(close(out.channel(M1_L)[49_999], full, 1e-15));
+    // After a driver reopen the output fades in again over 500 ms.
+    r.p.discontinuity();
+    let out = r.run(&rx(&[0.25], 50_000), 32);
+    let y = out.channel(M1_L);
+    assert!(y[0] > 0.0 && y[0] < full * 1e-3, "{}", y[0]);
+    assert!(close(y[24_000], full * 0.5, 1e-3), "{}", y[24_000]);
+    assert!(close(y[49_999], full, 1e-15));
+    // Held: a reopen does not arm it.
+    let mut r = rig_with(SITE, &open, Flags::default(), HELD);
+    r.p.discontinuity();
+    let out = r.run(&rx(&[0.25], 9_600), 32);
+    assert!(out.channel(M1_L).iter().all(|y| *y == 0.0));
+    // Faded out (a shutdown): a reopen does not bring the sound back.
+    let mut r = rig(&open);
+    assert!(push_group(&mut r.h.cmds, 0, &[RtOp::FadeOut]));
+    r.run(&rx(&[0.25], 9_600), 32);
+    r.p.discontinuity();
+    let out = r.run(&rx(&[0.25], 9_600), 32);
+    assert!(out.channel(M1_L).iter().all(|y| *y == 0.0));
+}
+
+#[test]
+fn hil_test_signal_reaches_only_masked_outputs() {
+    let flags = Flags {
+        test_signal: true,
+        fault_injection: false,
+    };
+    let site = crate::test_support::test_site_text();
+    let mut r = rig_with(
+        &site,
+        &[
+            level("member1", src_in("mic1"), 0.0),
+            level("member2", src_in("mic1"), 0.0),
+            level("member3", src_in("mic2"), 0.0),
+        ],
+        flags,
+        Options {
+            fade_in_ms: 0.0,
+            hold: false,
+        },
+    );
+    let topo = Arc::clone(&r.p.topo);
+    let slot = |ch: u16| topo.tx.iter().position(|c| *c == ch).unwrap();
+    let mixn = |m: &str| topo.mix_index(&mix(m)).unwrap();
+    let hil = |dbfs: f64| Cmd::HilTestSignal {
+        input: input("mic1"),
+        hz: 1000.0,
+        dbfs,
+        ttl_s: 0.1,
+        card_tx: vec![72],
+    };
+    // Above the test-signal cap (−20 dBFS): refused.
+    assert_eq!(
+        r.core.apply(&hil(-19.0)).unwrap_err().code,
+        ErrCode::BadValue
+    );
+    r.at(0, &hil(-30.0));
+    // mic1 (RX index 0) is silent on the card: only the sine replaces it.
+    // mic2 (RX index 1) carries 0.3 into member3.
+    let mut first = Planar::new(topo.rx.len(), 6_400);
+    first.channel_mut(1).fill(0.3);
+    let out1 = r.run(&first, 256);
+    // Inside the engine every mix that hears mic1 carries the sine.
+    let amp = 10f64.powf(-1.5) * g0() * g0();
+    let f = r.h.meters.read().clone();
+    for m in ["member1", "member2"] {
+        assert!(
+            close(f.mixes[mixn(m)][0], amp, 1e-4),
+            "{m}: {:?}",
+            f.mixes[mixn(m)]
+        );
+    }
+    assert!(close(f.mixes[mixn("member3")][0], 0.3 * g0() * g0(), 1e-12));
+    assert_eq!(f.mixes[mixn("member4")], [0.0, 0.0]);
+    let mut rest = Planar::new(topo.rx.len(), 23_600);
+    rest.channel_mut(1).fill(0.3);
+    let out2 = r.run(&rest, 256);
+    // TTL 9 600 samples, then the 50 ms fade-out: 14 400 samples of mask.
+    let end = 9_600 + 4_800;
+    let carried = slot(72);
+    for ch in 0..topo.tx.len() {
+        let during = out1
+            .channel(ch)
+            .iter()
+            .chain(&out2.channel(ch)[..end - 6_400]);
+        if ch == carried {
+            let peak = during.fold(0.0f64, |m, v| m.max(v.abs()));
+            assert!(close(peak, amp, 1e-4), "{peak} vs {amp}");
+        } else {
+            assert!(
+                during.copied().all(|v| v == 0.0),
+                "TX slot {ch} sounded during the HIL signal"
+            );
+        }
+    }
+    // Then the outputs are the mixes again.
+    let after = end - 6_400 + 1_000;
+    let normal = 0.3 * g0() * g0();
+    for ch in [slot(75), slot(76)] {
+        assert!(
+            close(out2.channel(ch)[after], normal, 1e-12),
+            "{}",
+            out2.channel(ch)[after]
+        );
+    }
+    assert_eq!(out2.channel(carried)[after], 0.0, "mic1 is silent again");
 }

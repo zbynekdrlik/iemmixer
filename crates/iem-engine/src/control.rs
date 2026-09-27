@@ -62,6 +62,8 @@ pub struct Settings {
     /// X2: solos clear this long after the controller left.
     pub solo_grace: Duration,
     pub block: u32,
+    /// Started with `--hold`: silent until the supervisor's `Arm`.
+    pub hold: bool,
 }
 
 struct Peer {
@@ -535,6 +537,7 @@ impl Control {
             tap_overruns: self.status.tap_overruns.load(Ordering::Relaxed),
             talkback_dropped: self.talkback_dropped.load(Ordering::Relaxed),
             cmd_backlog: self.pending.iter().map(|g| g.len() as u64).sum(),
+            ..Status::default()
         }
     }
 
@@ -670,12 +673,16 @@ mod tests {
 
     /// A control loop on the test site with the processor's ends in hand.
     fn rig() -> Rig {
-        let dir = tempfile::tempdir().unwrap();
-        let topo = Arc::new(crate::test_support::test_site());
         let flags = crate::core::Flags {
             test_signal: true,
             fault_injection: false,
         };
+        rig_with(flags, false)
+    }
+
+    fn rig_with(flags: crate::core::Flags, hold: bool) -> Rig {
+        let dir = tempfile::tempdir().unwrap();
+        let topo = Arc::new(crate::test_support::test_site());
         let core = Core::new(
             Arc::clone(&topo),
             &iem_engine_proto::MixState::default(),
@@ -698,6 +705,7 @@ mod tests {
             settings: Settings {
                 solo_grace: Duration::from_secs(10),
                 block: 32,
+                hold,
             },
         });
         Rig {
@@ -781,6 +789,32 @@ mod tests {
     }
 
     #[test]
+    fn status_carries_the_measured_period_the_stream_counters_and_the_hold() {
+        let r = rig_with(crate::core::Flags::default(), true);
+        let st = StreamStats {
+            frames: 32,
+            callbacks: 7,
+            missed: 2,
+            overruns: 3,
+            resets: 4,
+            parked: true,
+            running: true,
+            ..StreamStats::default()
+        };
+        let s = r.c.status_msg(&st);
+        assert_eq!((s.frames, s.missed, s.overruns, s.resets), (32, 2, 3, 4));
+        assert!(s.parked, "parked");
+        assert!(s.held, "held until Arm");
+        assert!(!s.lock_failed);
+        let s = rig().c.status_msg(&StreamStats {
+            frames: 64,
+            ..StreamStats::default()
+        });
+        assert_eq!((s.frames, s.missed, s.overruns, s.resets), (64, 0, 0, 0));
+        assert!(!s.parked && !s.held);
+    }
+
+    #[test]
     fn only_new_sanitiser_trips_raise_an_alarm() {
         let mut r = rig();
         let now = Instant::now();
@@ -801,7 +835,7 @@ mod tests {
     mod peers {
         use super::*;
         use crate::pipe::{control_name, listen};
-        use iem_engine_proto::{InputId, MixState, read_frame};
+        use iem_engine_proto::{InputId, MixId, MixState, read_frame};
         use interprocess::local_socket::Stream;
         use interprocess::local_socket::prelude::*;
 
@@ -809,7 +843,15 @@ mod tests {
 
         /// The engine's end and the client's end of one connection.
         fn peer(dir: &std::path::Path) -> (Conn, Stream) {
-            let path = dir.join("ctl.sock").to_string_lossy().into_owned();
+            peer_named(dir, "ctl")
+        }
+
+        /// One connection through its own socket `<name>.sock`.
+        fn peer_named(dir: &std::path::Path, name: &str) -> (Conn, Stream) {
+            let path = dir
+                .join(format!("{name}.sock"))
+                .to_string_lossy()
+                .into_owned();
             let listener = listen(control_name(&path).unwrap()).unwrap();
             let client = Stream::connect(control_name(&path).unwrap()).unwrap();
             client.set_recv_timeout(Some(WAIT)).unwrap();
@@ -858,6 +900,239 @@ mod tests {
                 origin: None,
                 cmd,
             })
+        }
+
+        /// A frame from connection `conn`.
+        fn frame_from(conn: u64, msg: &ClientMsg) -> CtlMsg {
+            CtlMsg::Frame {
+                id: conn,
+                bytes: serde_json::to_vec(msg).unwrap(),
+            }
+        }
+
+        fn hello_as(conn: u64, role: Role) -> CtlMsg {
+            frame_from(
+                conn,
+                &ClientMsg::Hello {
+                    proto: PROTO,
+                    role,
+                    client: "test".into(),
+                },
+            )
+        }
+
+        fn request_from(conn: u64, id: u64, cmd: Cmd) -> CtlMsg {
+            frame_from(
+                conn,
+                &ClientMsg::Request {
+                    id,
+                    origin: None,
+                    cmd,
+                },
+            )
+        }
+
+        /// The error code of every reply (None: accepted), by request id.
+        fn codes(msgs: &[EngineMsg]) -> BTreeMap<u64, Option<ErrCode>> {
+            msgs.iter()
+                .filter_map(|m| match m {
+                    EngineMsg::Reply(r) => Some((r.id, r.error.as_ref().map(|e| e.code))),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        fn superseded(msgs: &[EngineMsg]) -> usize {
+            msgs.iter()
+                .filter(|m| matches!(m, EngineMsg::Superseded))
+                .count()
+        }
+
+        fn hil() -> Cmd {
+            Cmd::HilTestSignal {
+                input: InputId::new("mic1"),
+                hz: 1000.0,
+                dbfs: -30.0,
+                ttl_s: 60.0,
+                card_tx: vec![72],
+            }
+        }
+
+        fn set_mix() -> Cmd {
+            Cmd::SetMix {
+                mix: MixId::new("member1"),
+                volume_db: Some(-3.0),
+                muted: None,
+            }
+        }
+
+        #[test]
+        fn the_supervisor_may_stop_save_arm_and_test_but_never_mix() {
+            let mut r = rig_with(
+                crate::core::Flags {
+                    test_signal: true,
+                    fault_injection: false,
+                },
+                true,
+            );
+            let (ctl, ctl_client) = peer_named(r.dir.path(), "ctl");
+            let (sup, sup_client) = peer_named(r.dir.path(), "sup");
+            let (obs, obs_client) = peer_named(r.dir.path(), "obs");
+            let (ctl_got, sup_got, obs_got) =
+                (reader(ctl_client), reader(sup_client), reader(obs_client));
+            for (id, conn) in [(1, ctl), (2, sup), (3, obs)] {
+                r.c.handle(CtlMsg::Connected { id, conn });
+            }
+            r.c.handle(hello_as(1, Role::Control));
+            r.c.handle(hello_as(2, Role::Supervisor));
+            r.c.handle(hello_as(3, Role::Observe));
+            // The supervisor's own commands, the reads, the save and the test
+            // signals (under their flags); never a mix change.
+            r.c.handle(request_from(2, 10, hil()));
+            assert!(r.c.test_deadline.is_some(), "the HIL signal ends by itself");
+            assert!(r.c.status_msg(&StreamStats::default()).held);
+            r.c.handle(request_from(2, 11, Cmd::Arm));
+            assert!(!r.c.status_msg(&StreamStats::default()).held, "armed");
+            let start = Cmd::StartTestSignal {
+                input: InputId::new("mic2"),
+                hz: 500.0,
+                dbfs: -40.0,
+                ttl_s: 1.0,
+            };
+            let supervisor: [(u64, Cmd, Option<ErrCode>); 10] = [
+                (12, Cmd::Ping, None),
+                (13, Cmd::GetState, None),
+                (14, Cmd::GetTopology, None),
+                (15, Cmd::SaveNow, None),
+                (16, start, None),
+                (17, Cmd::StopTestSignal, None),
+                (18, Cmd::InjectFault, Some(ErrCode::Forbidden)),
+                (19, set_mix(), Some(ErrCode::NotController)),
+                (
+                    20,
+                    Cmd::Batch {
+                        ops: vec![set_mix()],
+                    },
+                    Some(ErrCode::NotController),
+                ),
+                (
+                    21,
+                    Cmd::ImportState {
+                        state: MixState::default(),
+                        baseline: false,
+                    },
+                    Some(ErrCode::NotController),
+                ),
+            ];
+            for (id, cmd, _) in &supervisor {
+                r.c.handle(request_from(2, *id, cmd.clone()));
+            }
+            // The controller may not arm or start the HIL signal; an observer
+            // may do neither either.
+            r.c.handle(request_from(1, 30, Cmd::Arm));
+            r.c.handle(request_from(1, 31, hil()));
+            r.c.handle(request_from(1, 32, set_mix()));
+            r.c.handle(request_from(3, 40, Cmd::Arm));
+            r.c.handle(request_from(3, 41, hil()));
+            // The supervisor reads the meters like everyone.
+            r.meters.input_buffer_mut().seq = 5;
+            r.meters.publish();
+            assert!(r.c.tick(Instant::now()).is_none());
+            r.c.handle(request_from(2, 50, Cmd::Shutdown));
+            assert!(r.c.shutdown, "the supervisor stops the engine");
+            drop(r);
+            let sup = sup_got.join().unwrap();
+            assert!(
+                matches!(&sup[0], EngineMsg::Hello(h) if h.role == Role::Supervisor),
+                "{:?}",
+                sup[0]
+            );
+            let got = codes(&sup);
+            assert_eq!((got[&10], got[&11], got[&50]), (None, None, None));
+            for (id, cmd, want) in &supervisor {
+                assert_eq!(got[id], *want, "{cmd:?}");
+            }
+            assert!(
+                sup.iter()
+                    .any(|m| matches!(m, EngineMsg::Meters(f) if f.seq == 5)),
+                "meters"
+            );
+            let ctl = codes(&ctl_got.join().unwrap());
+            assert_eq!(
+                (ctl[&30], ctl[&31], ctl[&32]),
+                (
+                    Some(ErrCode::NotSupervisor),
+                    Some(ErrCode::NotSupervisor),
+                    None
+                )
+            );
+            let obs = codes(&obs_got.join().unwrap());
+            assert_eq!(
+                (obs[&40], obs[&41]),
+                (Some(ErrCode::NotController), Some(ErrCode::NotController))
+            );
+        }
+
+        #[test]
+        fn the_test_signals_stay_under_their_flag_for_the_supervisor() {
+            let mut r = rig_with(crate::core::Flags::default(), false);
+            let (sup, sup_client) = peer_named(r.dir.path(), "sup");
+            let got = reader(sup_client);
+            r.c.handle(CtlMsg::Connected { id: 2, conn: sup });
+            r.c.handle(hello_as(2, Role::Supervisor));
+            r.c.handle(request_from(2, 1, hil()));
+            r.c.handle(request_from(
+                2,
+                2,
+                Cmd::StartTestSignal {
+                    input: InputId::new("mic2"),
+                    hz: 500.0,
+                    dbfs: -40.0,
+                    ttl_s: 1.0,
+                },
+            ));
+            assert_eq!(r.c.test_deadline, None);
+            drop(r);
+            let got = codes(&got.join().unwrap());
+            assert_eq!(
+                (got[&1], got[&2]),
+                (Some(ErrCode::Forbidden), Some(ErrCode::Forbidden))
+            );
+        }
+
+        #[test]
+        fn a_second_supervisor_replaces_the_first_and_leaves_the_controller() {
+            let mut r = rig();
+            let mut clients = Vec::new();
+            for (id, name) in [(1, "c1"), (2, "s1"), (3, "s2"), (4, "c2")] {
+                let (conn, client) = peer_named(r.dir.path(), name);
+                clients.push(reader(client));
+                r.c.handle(CtlMsg::Connected { id, conn });
+            }
+            r.c.handle(hello_as(1, Role::Control));
+            r.c.handle(hello_as(2, Role::Supervisor));
+            r.c.handle(hello_as(3, Role::Supervisor));
+            assert!(!r.c.peers.contains_key(&2), "the first supervisor is gone");
+            assert!(r.c.peers.contains_key(&3));
+            assert_eq!(r.c.controller, Some(1), "the controller stays");
+            r.c.handle(request_from(1, 5, set_mix()));
+            r.c.handle(request_from(3, 6, Cmd::Arm));
+            // A new controller leaves the supervisor alone.
+            r.c.handle(hello_as(4, Role::Control));
+            assert_eq!(r.c.controller, Some(4));
+            assert!(r.c.peers.contains_key(&3), "the supervisor stays");
+            assert!(!r.c.peers.contains_key(&1));
+            r.c.handle(request_from(3, 7, Cmd::Ping));
+            drop(r);
+            let got: Vec<Vec<EngineMsg>> = clients.into_iter().map(|c| c.join().unwrap()).collect();
+            let [c1, s1, s2, c2] = [&got[0], &got[1], &got[2], &got[3]];
+            assert_eq!(superseded(s1), 1);
+            assert_eq!(superseded(s2), 0);
+            assert_eq!(superseded(c1), 1, "by the second controller only");
+            assert_eq!(superseded(c2), 0);
+            assert_eq!(codes(c1)[&5], None, "set before the new controller");
+            let s2 = codes(s2);
+            assert_eq!((s2[&6], s2[&7]), (None, None));
         }
 
         #[test]

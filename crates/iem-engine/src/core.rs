@@ -709,6 +709,9 @@ impl Core {
             Cmd::SaveNow => Ok(Partial::effect(Effect::Save)),
             Cmd::Shutdown => Ok(Partial::effect(Effect::Shutdown)),
             Cmd::Ping => Ok(Partial::default()),
+            Cmd::Arm | Cmd::HilTestSignal { .. } => {
+                Err(CmdError::new(ErrCode::Unsupported, "not implemented yet"))
+            }
         }
     }
 

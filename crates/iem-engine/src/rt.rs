@@ -45,11 +45,17 @@ pub const FADE_MS: f64 = 50.0;
 pub struct Options {
     /// Output fade-in after start (§4.4: 500 ms); 0 starts at full level.
     pub fade_in_ms: f64,
+    /// `--hold` (S6 design note §4): every output stays silent until
+    /// `RtOp::Arm`, then fades in.
+    pub hold: bool,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { fade_in_ms: 500.0 }
+        Self {
+            fade_in_ms: 500.0,
+            hold: false,
+        }
     }
 }
 
@@ -600,7 +606,10 @@ impl Processor {
                     self.listen_lim.reset();
                 }
             }
-            RtOp::TestSignal { i, hz, amp, ttl } => {
+            RtOp::TestSignal { i, hz, amp, ttl }
+            | RtOp::HilTestSignal {
+                i, hz, amp, ttl, ..
+            } => {
                 let len = samples(FADE_MS, sr);
                 let mut fade = Ramp::new(0.0, len);
                 fade.set(1.0);
@@ -633,6 +642,7 @@ impl Processor {
                 self.fading_out = true;
             }
             RtOp::Panic => Self::inject_fault(),
+            RtOp::Arm => {}
         }
     }
 

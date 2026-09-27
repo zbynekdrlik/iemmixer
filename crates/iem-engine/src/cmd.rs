@@ -7,6 +7,14 @@ use iem_dsp::eq::EqParams;
 
 use crate::params::InputParams;
 
+/// Engine outputs (topology TX slots) a HIL test signal can name (S6).
+pub const MAX_TX: usize = 128;
+
+/// The engine outputs a HIL test signal may sound on, by TX slot: a fixed
+/// array, so it travels through the command ring and lives in the processor
+/// without allocation.
+pub type TxMask = [bool; MAX_TX];
+
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub enum RtOp {
     #[default]
@@ -68,10 +76,21 @@ pub enum RtOp {
         amp: f64,
         ttl: u64,
     },
+    /// The HIL test signal (S6): a test signal, and while it runs only the
+    /// outputs in `mask` carry sound; every other output is zero.
+    HilTestSignal {
+        i: u16,
+        hz: f64,
+        amp: f64,
+        ttl: u64,
+        mask: TxMask,
+    },
     StopTestSignal,
     FadeOut,
     /// Fault injection (the `--fault-injection` launch flag only).
     Panic,
+    /// A held processor (`Options::hold`) starts its fade-in.
+    Arm,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
