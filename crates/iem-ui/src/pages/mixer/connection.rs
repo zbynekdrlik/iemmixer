@@ -14,7 +14,7 @@ use iem_core::Channel;
 use crate::components::eq_modal::EqBandState;
 use crate::components::talk_button::TalkState;
 
-use super::helpers::{MAX_WS_FAILURES, WsClosureStore, WsFailCounter};
+use super::helpers::{ReconnectStep, WsClosureStore, WsFailCounter, reconnect_step};
 use super::state::MixerState;
 
 /// Set up all background tasks (WS connect, reconnect, watchdog, token-expiry)
@@ -119,13 +119,16 @@ pub(super) fn setup_connection(
             return;
         }
 
-        // Exponential backoff gate: skip this tick if the scheduled delay
-        // hasn't elapsed since the last reconnect attempt. reaperiem#153
+        // Exponential backoff gate (reaperiem#153) and the token check after
+        // MAX_WS_FAILURES failed sockets in a row: `reconnect_step`.
         let now_ms = js_sys::Date::now();
-        let attempt = reconnect_attempt_tick.get();
-        let delay_ms = crate::lifecycle::backoff_delay_ms(attempt) as f64;
-        let last_attempt = last_reconnect_attempt_at_tick.get();
-        if last_attempt > 0.0 && (now_ms - last_attempt) < delay_ms {
+        let step = reconnect_step(
+            now_ms,
+            last_reconnect_attempt_at_tick.get(),
+            reconnect_attempt_tick.get(),
+            ws_fail_count.get(),
+        );
+        if step == ReconnectStep::Wait {
             return;
         }
 
@@ -142,8 +145,10 @@ pub(super) fn setup_connection(
                 return;
             }
 
-            // After MAX_WS_FAILURES consecutive failures, check if token is invalid
-            if ws_fail_count.get() >= MAX_WS_FAILURES {
+            if matches!(
+                step,
+                ReconnectStep::CheckToken | ReconnectStep::ConnectAndCheckToken
+            ) {
                 let nav = navigate_auth_fail.clone();
                 let m = member.clone();
                 wasm_bindgen_futures::spawn_local(async move {
@@ -154,6 +159,8 @@ pub(super) fn setup_connection(
                         nav(&url, Default::default());
                     }
                 });
+            }
+            if step == ReconnectStep::CheckToken {
                 return;
             }
 

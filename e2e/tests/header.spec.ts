@@ -1,6 +1,7 @@
 import type { WebSocketRoute } from "@playwright/test";
 import { test, expect } from "./support/fixtures";
-import { openMixer } from "./support/session";
+import { openMixer, strip } from "./support/session";
+import { PageSocket } from "./support/wire";
 
 // The page headers (F10) against the real engine: the landing title, the
 // mixer header's version and build date, the connection dot and the
@@ -78,31 +79,43 @@ test.describe("Header (F10)", () => {
 
   test("a lost connection shows the amber Reconnecting banner; the reconnect hides it", async ({
     page,
+    baseURL,
   }) => {
     // The page's mixer socket goes through a route: while the "server" is
-    // gone, the page's reconnect attempts are closed at once. The page gives up
-    // after three failed attempts in a row (MAX_WS_FAILURES), so the server
-    // comes back before its second retry (8 s backoff). Giving up while the
-    // token is valid is an inherited defect; this test holds either way.
+    // gone, the page's reconnect attempts are closed at once. It stays gone
+    // for MAX_WS_FAILURES (3) failed sockets in a row — the drop and two
+    // refused retries (the next 2 s tick, then 8 s later), where the page
+    // used to give up while its token was still valid — and comes back
+    // before the next retry, 15 s later, which also asks whether the token
+    // holds. About 30 s from the drop to the reconnect.
+    test.setTimeout(90_000);
     let serverGone = false;
+    let refused = 0;
     let live: WebSocketRoute | undefined;
     await page.routeWebSocket(/\/ws\/member3\?/, async (ws) => {
       if (serverGone) {
+        refused += 1;
         await ws.close({ code: 1000, reason: "server gone (test)" });
         return;
       }
       ws.connectToServer();
       live = ws;
     });
-    await openMixer(page, "member3");
+    // The token check after MAX_WS_FAILURES (the page's only GET of its mixer).
+    const tokenChecks: number[] = [];
+    page.on("request", (r) => {
+      if (r.method() === "GET" && new URL(r.url()).pathname === "/api/mixer/member3") tokenChecks.push(Date.now());
+    });
+    const auth = await openMixer(page, "member3");
     const banner = page.locator(".disconnected-banner");
     const dot = page.locator(".mixer-header .status-dot");
     await expect(dot).toHaveClass(/\bconnected\b/);
     await expect(banner).toHaveCount(0);
     expect(live, "the mixer socket went through the route").toBeDefined();
+    const dropped = live!;
 
     serverGone = true;
-    await live!.close({ code: 1000, reason: "server gone (test)" });
+    await dropped.close({ code: 1000, reason: "server gone (test)" });
     await expect(dot).toHaveClass(/disconnected/);
     // Debounced: a short drop shows nothing.
     await page.waitForTimeout(1_500);
@@ -124,9 +137,39 @@ test.describe("Header (F10)", () => {
     const green = Number(/rgba?\(\d+,\s*(\d+)/.exec(colors.banner)?.[1]);
     expect(green, "amber has a strong green channel; the mute red has not").toBeGreaterThan(150);
 
+    // Two refused retries: three failed sockets in a row with the drop.
+    await expect.poll(() => refused, { timeout: 20_000 }).toBe(2);
+    const backAt = Date.now();
     serverGone = false;
-    await expect(banner).toHaveCount(0, { timeout: 15_000 });
+    await expect(banner).toHaveCount(0, { timeout: 25_000 });
     await expect(dot).toHaveClass(/\bconnected\b/);
+    expect(live, "the page opened a new socket").not.toBe(dropped);
+    expect(
+      tokenChecks.filter((at) => at >= backAt).length,
+      "the retry after three failed sockets asked whether the token holds",
+    ).toBeGreaterThan(0);
+    // The token still holds: the page stays, it is not sent to the login.
+    await expect(page).toHaveURL(/\/member3$/);
+
+    // A mixer change made elsewhere arrives through the new socket.
+    const other = await PageSocket.open(baseURL, "member3", auth.token);
+    const state = await other.next("State");
+    const mic3 = state.channels.find((c: { id: string }) => c.id === "mic3");
+    expect(mic3, "member3's own channel").toBeDefined();
+    const own = strip(page, "mic3");
+    const showsMuted = async (muted: boolean) => {
+      if (muted) await expect(own).toHaveClass(/\bmuted\b/);
+      else await expect(own).not.toHaveClass(/\bmuted\b/);
+    };
+    await showsMuted(mic3.muted);
+    other.send({ cmd: "SetMute", id: "mic3", muted: !mic3.muted });
+    await other.applied();
+    await showsMuted(!mic3.muted);
+    // Put it back (member3's mix is shared by the mixer-page specs).
+    other.send({ cmd: "SetMute", id: "mic3", muted: mic3.muted });
+    await other.applied();
+    await showsMuted(mic3.muted);
+    other.close();
   });
 
   test("a connected mixer never shows the Reconnecting banner", async ({ page }) => {

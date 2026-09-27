@@ -132,8 +132,42 @@ pub(super) type WsClosureStore = std::rc::Rc<std::cell::RefCell<Option<WsClosure
 /// Shared across connect_websocket calls via Rc<Cell<>>.
 pub(super) type WsFailCounter = std::rc::Rc<std::cell::Cell<u32>>;
 
-/// Max consecutive WS failures before redirecting to login
+/// Failed sockets in a row after which the page asks the server whether its
+/// token still holds (an invalid one goes to the login).
 pub(super) const MAX_WS_FAILURES: u32 = 3;
+
+/// What the page's reconnect tick does with a closed socket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReconnectStep {
+    /// The backoff delay since the last attempt has not passed yet.
+    Wait,
+    /// Open a new socket.
+    Connect,
+    /// Only ask the server whether the token still holds, and open no socket
+    /// (inherited: the page stops retrying).
+    CheckToken,
+    /// Open a new socket and ask the server whether the token still holds.
+    ConnectAndCheckToken,
+}
+
+/// The reconnect tick's step at `now_ms` for a closed socket, given the
+/// last attempt (`0.0`: none yet), the backoff attempt and the failed
+/// sockets in a row.
+pub(super) fn reconnect_step(
+    now_ms: f64,
+    last_attempt_ms: f64,
+    attempt: u32,
+    failures: u32,
+) -> ReconnectStep {
+    let delay_ms = f64::from(crate::lifecycle::backoff_delay_ms(attempt));
+    if last_attempt_ms > 0.0 && now_ms - last_attempt_ms < delay_ms {
+        ReconnectStep::Wait
+    } else if failures >= MAX_WS_FAILURES {
+        ReconnectStep::CheckToken
+    } else {
+        ReconnectStep::Connect
+    }
+}
 
 /// Parse track name into main and type parts
 pub(super) fn parse_track_name(name: &str) -> (String, String) {
@@ -272,6 +306,60 @@ mod tests {
         assert_eq!(
             mute_click("keys", true, &solo, &pre),
             MuteClick::Masked(true)
+        );
+    }
+
+    #[test]
+    fn the_reconnect_tick_waits_out_the_backoff_delay() {
+        // No attempt yet: the first tick after the drop reconnects.
+        assert_eq!(reconnect_step(1_000.0, 0.0, 1, 1), ReconnectStep::Connect);
+        // Second attempt: 8 s after the first.
+        assert_eq!(
+            reconnect_step(17_999.0, 10_000.0, 2, 2),
+            ReconnectStep::Wait
+        );
+        assert_eq!(
+            reconnect_step(18_000.0, 10_000.0, 2, 2),
+            ReconnectStep::Connect
+        );
+        // Third: 15 s.
+        assert_eq!(
+            reconnect_step(24_999.0, 10_000.0, 3, 2),
+            ReconnectStep::Wait
+        );
+        assert_eq!(
+            reconnect_step(25_000.0, 10_000.0, 3, 2),
+            ReconnectStep::Connect
+        );
+    }
+
+    #[test]
+    fn a_page_keeps_retrying_after_max_failures_and_checks_its_token() {
+        // The third failed socket in a row: the next attempt still opens a
+        // socket, and asks whether the token holds (an invalid one goes to
+        // the login). A server outage longer than the backoff's first steps
+        // (a restart, a mode switch) never leaves the page stuck.
+        assert_eq!(
+            reconnect_step(25_000.0, 10_000.0, 3, MAX_WS_FAILURES),
+            ReconnectStep::ConnectAndCheckToken
+        );
+        // Every 30 s from then on, however long the outage.
+        assert_eq!(
+            reconnect_step(39_999.0, 10_000.0, 9, 9),
+            ReconnectStep::Wait
+        );
+        assert_eq!(
+            reconnect_step(40_000.0, 10_000.0, 9, 9),
+            ReconnectStep::ConnectAndCheckToken
+        );
+        assert_eq!(
+            reconnect_step(1_000.0, 0.0, 40, 40),
+            ReconnectStep::ConnectAndCheckToken
+        );
+        // Below the limit no token check.
+        assert_eq!(
+            reconnect_step(40_000.0, 10_000.0, 9, MAX_WS_FAILURES - 1),
+            ReconnectStep::Connect
         );
     }
 
