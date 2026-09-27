@@ -499,6 +499,17 @@ function Invoke-IemTuningApply { param([string]$ProfilePath, [int]$Tier) return 
     Assert ((Test-IemHilInputs -Sha $S -Branch 'dev' -JobRun '4242' -Out 'r.json' -ScriptDir $hilDir).Count -eq 0) 'hil-inputs-valid'
     Assert ((Test-IemHilInputs -Sha $S -Branch 'feature' -JobRun '42a' -Out '' -ScriptDir (Join-Path $base 'elsewhere')).Count -eq 4) 'hil-inputs-branch-run-out-and-place'
     Assert ((Test-IemHilInputs -Sha $S.ToUpperInvariant() -Branch 'main' -JobRun '1' -Out 'r.json' -ScriptDir $hilDir).Count -eq 2) 'hil-inputs-an-uppercase-sha-and-its-folder'
+    $hi = @{ Sha = $S; Branch = 'dev'; JobRun = '1'; Out = 'r.json'; ScriptDir = $hilDir }
+    Assert ((Test-IemHilInputs @hi -TestDbfs (-20) -TestTtl 120).Count -eq 0) 'hil-inputs-the-test-signal-at-its-limits'
+    Assert ((Test-IemHilInputs @hi -TestDbfs (-120) -TestTtl 0.001).Count -eq 0) 'hil-inputs-a-quiet-short-test-signal'
+    foreach ($db in @(-19.9, 0, 6, [double]::NaN, [double]::PositiveInfinity, [double]::NegativeInfinity)) {
+        $bad = Test-IemHilInputs @hi -TestDbfs $db -TestTtl 10
+        Assert ($bad.Count -eq 1 -and $bad[0] -like 'TestDbfs:*') "hil-inputs-refuse-the-level [$db]"
+    }
+    foreach ($ttl in @(0, -1, 120.001, [double]::NaN)) {
+        $bad = Test-IemHilInputs @hi -TestDbfs (-30) -TestTtl $ttl
+        Assert ($bad.Count -eq 1 -and $bad[0] -like 'TestTtl:*') "hil-inputs-refuse-the-ttl [$ttl]"
+    }
     $m = Invoke-IemMode -Exe (Join-Path $base 'no-such-iemmode.exe') -Arguments @('status')
     Assert ($null -eq $m.exit -and $null -eq $m.reply -and -not (Test-IemModeOk -Result $m)) 'iemmode-that-does-not-start'
 
@@ -535,11 +546,11 @@ if ($ok) { exit 0 }
 exit 1
 '@
     [IO.File]::WriteAllText($fake, $fakeText)
-    function Invoke-HilRun([string]$scenario, [string]$branch = 'dev') {
+    function Invoke-HilRun([string]$scenario, [string]$branch = 'dev', [string]$ttl = '0.2') {
         [IO.File]::WriteAllText((Join-Path $hb 'scenario.json'), $scenario)
         foreach ($f in @('calls.log', 'result.json')) { Remove-Item -LiteralPath (Join-Path $hb $f) -ErrorAction SilentlyContinue }
         & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $hdir 'hil-v1.ps1') -Sha $S -Branch $branch `
-            -JobRun 4242 -Out (Join-Path $hb 'result.json') -Iemmode $fake -Local 'http://127.0.0.1:9' -CardSeconds 1 -TestTtl 0.2 | Out-Null
+            -JobRun 4242 -Out (Join-Path $hb 'result.json') -Iemmode $fake -Local 'http://127.0.0.1:9' -CardSeconds 1 -TestTtl $ttl | Out-Null
         $code = $LASTEXITCODE
         $calls = @()
         if (Test-Path -LiteralPath (Join-Path $hb 'calls.log')) { $calls = @(Get-Content -LiteralPath (Join-Path $hb 'calls.log')) }
@@ -581,6 +592,9 @@ exit 1
 
     $h6 = Invoke-HilRun ('{"sha":"' + $S + '","refuse":[],"silent":[],"event_after":0}') 'feature'
     Assert ($h6.exit -eq 1 -and (CheckFailed $h6.result 'inputs') -and $h6.calls.Count -eq 0) 'hil-run-refuses-bad-inputs-before-any-call'
+
+    $h8 = Invoke-HilRun ('{"sha":"' + $S + '","refuse":[],"silent":[],"event_after":0}') 'dev' '0'
+    Assert ($h8.exit -eq 1 -and (CheckFailed $h8.result 'inputs') -and $h8.calls.Count -eq 0) 'hil-run-refuses-a-zero-ttl-before-any-call'
 
     $h7 = Invoke-HilRun ('{"sha":"' + $S + '","refuse":["inject-fault"],"silent":[],"event_after":0}')
     Assert ($h7.exit -eq 1 -and (CheckFailed $h7.result 'panic') -and (CheckOk $h7.result 'alarm-push')) 'hil-run-a-refused-fault-injection-fails-the-panic-check'

@@ -1241,13 +1241,18 @@ function Get-IemJson {
 function Test-IemHilInputs {
     # hil.yml's inputs (validated there too) and the script's own place: the
     # verified bundles\<sha>\ directory. Returns the problems.
-    param([string]$Sha = '', [string]$Branch = '', [string]$JobRun = '', [string]$Out = '', [string]$ScriptDir = '')
+    param([string]$Sha = '', [string]$Branch = '', [string]$JobRun = '', [string]$Out = '', [string]$ScriptDir = '',
+          [double]$TestDbfs = -30, [double]$TestTtl = 10)
     $p = @()
     if ($Sha -cnotmatch '^[0-9a-f]{40}$') { $p += 'Sha: 40 lowercase hex digits' }
     if ($Branch -cnotmatch '^(dev|main)$') { $p += 'Branch: dev or main' }
     if ($JobRun -cnotmatch '^[0-9]{1,20}$') { $p += 'JobRun: the run id (digits)' }
     if (-not $Out) { $p += 'Out: the result.json path' }
     if (-not $ScriptDir -or (Split-Path -Leaf $ScriptDir) -cne $Sha) { $p += 'hil-v1.ps1 runs only from the verified bundles\<sha>\ directory' }
+    # The test signal (design section 7): at most -20 dBFS (the engine caps it
+    # there too), for a TTL within the engine's (0, 120] s.
+    if ([double]::IsNaN($TestDbfs) -or [double]::IsInfinity($TestDbfs) -or $TestDbfs -gt -20) { $p += 'TestDbfs: a level of at most -20 dBFS' }
+    if ([double]::IsNaN($TestTtl) -or $TestTtl -le 0 -or $TestTtl -gt 120) { $p += 'TestTtl: more than 0 and at most 120 seconds' }
     return ,$p
 }
 

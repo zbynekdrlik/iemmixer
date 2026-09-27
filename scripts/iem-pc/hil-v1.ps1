@@ -220,7 +220,7 @@ function Invoke-HilChecks {
 
 $started = (Get-Date).ToUniversalTime().ToString('o')
 $begun = $false
-$problems = Test-IemHilInputs -Sha $Sha -Branch $Branch -JobRun $JobRun -Out $Out -ScriptDir $PSScriptRoot
+$problems = Test-IemHilInputs -Sha $Sha -Branch $Branch -JobRun $JobRun -Out $Out -ScriptDir $PSScriptRoot -TestDbfs $TestDbfs -TestTtl $TestTtl
 if ($Out) {
     Write-IemJsonFile -Path $Out -Value (New-IemHilResult -Conclusion 'failure' -Summary 'HIL v1 did not finish' -Sha $Sha -Branch $Branch -JobRun $JobRun -Started $started)
 }
