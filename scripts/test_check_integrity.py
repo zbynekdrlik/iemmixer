@@ -127,10 +127,10 @@ class IntegrityTests(unittest.TestCase):
             self.assertEqual(ci.violations(self.root), want, line)
 
     def test_the_s6_crates_and_scripts_are_scanned(self) -> None:
-        self.put("crates/iem-guard/src/daemon.rs", "#[test]\n#[ignore]\nfn skipped() {}\n")
+        self.put("crates/iem-guard/src/daemon.rs", "#[test]\n#" + "[ignore]\nfn skipped() {}\n")
         self.put("scripts/iem-pc/stop.cmd", "taskkill /im iem-engine.exe\n")
         self.assertEqual(ci.violations(self.root), [
-            "crates/iem-guard/src/daemon.rs:2: #[ignore] test",
+            "crates/iem-guard/src/daemon.rs:2: #" + "[ignore] test",
             "scripts/iem-pc/stop.cmd:1: force-kill command (program spec I8)",
         ])
 
