@@ -934,6 +934,54 @@ mod named_pipes {
         );
     }
 
+    fn accept(listener: &interprocess::local_socket::Listener) -> Stream {
+        use interprocess::local_socket::traits::Listener as _;
+        let start = Instant::now();
+        loop {
+            match listener.accept() {
+                Ok(s) => return s,
+                Err(e) => {
+                    assert!(start.elapsed() < WAIT, "accept: {e}");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_gone_listeners_name_is_free_once_its_last_client_lets_go() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = pipe_name(&dir);
+        let first = listen(control_name(&name).unwrap()).unwrap();
+        let n = name.clone();
+        let client = connect(move || control_name(&n));
+        drop(accept(&first));
+        drop(first);
+        // A pipe name lives while any end of an instance is open: the
+        // client's stream keeps it from a new listener (a respawned
+        // engine), which tries for about 2 s and then reports it taken.
+        let start = Instant::now();
+        let taken = listen(control_name(&name).unwrap()).unwrap_err();
+        let took = start.elapsed();
+        assert_eq!(taken.kind(), std::io::ErrorKind::AddrInUse, "{taken}");
+        assert!(
+            taken.to_string().starts_with("pipe name taken ("),
+            "{taken}"
+        );
+        assert!(
+            took >= Duration::from_millis(1900) && took < WAIT,
+            "{took:?}"
+        );
+        // A client that lets go within those 2 s frees the name for it.
+        let lets_go = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            drop(client);
+        });
+        let again = listen(control_name(&name).unwrap());
+        lets_go.join().unwrap();
+        assert!(again.is_ok(), "{:?}", again.err());
+    }
+
     #[test]
     fn a_second_engine_on_a_held_pipe_stops_with_an_io_error() {
         let e = Engine::start(Flags::default(), InputSignal::Silence);
