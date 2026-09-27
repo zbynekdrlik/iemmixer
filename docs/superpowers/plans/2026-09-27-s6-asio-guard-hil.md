@@ -10,20 +10,20 @@
 - HIL v1 runs through the private ops repo (ticket #9, program #1).
 
 **Architecture:**
-- **`iem-win`** (new): safe Windows glue, stubs elsewhere.
+- **`iem-win`** (new): safe Windows glue, stubs elsewhere, plus the portable `prefwin` (shared by engine and guard, so the guard never links the ASIO host).
 - **`iem-audio-io`:**
-  - portable `channels.rs`, `prefwin.rs`, `reset.rs`, `rtpanic.rs`;
-  - `asio.rs` grows into `AsioStream<P>`.
-- **`iem-engine`:** the ASIO backend, `[card]`, exit 3, `--hold`/`Arm`, role `supervisor`, Windows pipe hardening, `interlock` and `check-site`.
+  - portable `channels.rs`, `reset.rs`, `rtpanic.rs` (+ `tests/rt.rs` with an allocation-disabling harness);
+  - `asio.rs` grows into `AsioStream<P>` (measured period, `RELEASED` flag, crash-dialog suppression, `VirtualLock`).
+- **`iem-engine`:** the ASIO backend, `[card]`, exit 3 (any driver-module holder, measured period ≠ 32), `--hold`/`Arm`, role `supervisor`, the card-masked HIL test signal, Windows pipe hardening, `interlock` and `check-site`.
 - **`iem-guard`** (new):
-  - a pure core: planner, crash loop, bundles, verdicts, protocol;
-  - `Pc` effects: `WinPc` on Windows, `FakePc` in tests;
-  - the daemon and the `iemmode` CLI.
-- **`iem-server`:** stage-only band activity, graceful stop, alarm link.
+  - a pure core: planner, event error policy, crash loop, bundles, verdicts, protocol, reboot mode reset;
+  - `Pc` effects with a cancel token: `WinPc` on Windows, `FakePc` in tests;
+  - the daemon, the `iemmode` CLI and its `--direct` fallback.
+- **`iem-server`:** stage-only band activity, graceful stop, alarm link and alarm recipients, `pin_changes = false`, `CF-Connecting-IP` from the host's own addresses.
 - **`iem-tray`:** without a server.
-- **CI:** `bundle`, `attest`, `hil-dispatch`.
-- **Ops repo:** `hil.yml`, the site tables, the PC runbook.
-- **Dev box:** `scripts/iem-pc/iempc.py` (ssh control with the EVENT-NOW discipline) and `IemPc.psm1` (bootstrap on the PC).
+- **CI:** `bundle` (with `install --verify-only`) and `attest`. No dispatch job: the dev box dispatches HIL.
+- **Ops repo:** `hil.yml` (validated inputs; `verify` → `pc` without secrets → `report`), the site tables, the PC runbook.
+- **Dev box:** `scripts/iem-pc/iempc.py` (ssh control with the EVENT-NOW discipline, `dispatch-hil`, the `--direct` fallback) and `IemPc.psm1` (bootstrap on the PC).
 
 **Tech Stack:**
 - Rust 1.98.1 (edition 2024). Crates already locked: azo 0.2.1, `windows-sys` 0.61, `windows-registry` 0.100.0 (already in the closure via azo), interprocess 2.4.4, tokio, serde, toml.
@@ -49,18 +49,20 @@
 
 - **The PC only in dev time:**
   - No PC step runs unless the owner's latest signal in this conversation is "event skončil" and `~/.config/iemmixer/EVENT-NOW` does not exist.
-  - On "ide event" the session first writes the flag (`date -Iseconds > ~/.config/iemmixer/EVENT-NOW`), then runs `iempc event` (from Task 14 on; before that, the event runbook). Then it confirms to the owner.
+  - On "ide event" the session first writes the flag (`date -Iseconds > ~/.config/iemmixer/EVENT-NOW`), then runs the interim switch until Task 16 Step 3 (guard installed) and `iempc event` from Task 16 Step 3 on — one rule, used everywhere in this plan. `iempc event` itself first runs `spike_window.py preempt` when an S1a/S1c window is open, and falls back to `iemmode event --direct` when the guard is unreachable (exit 4). Then it confirms to the owner.
   - Never infer an event, never ask whether one runs, never switch on your own. A switch drill without an owner signal is switching: not allowed.
 - **Nothing is force-ended (I8, P4):**
-  - REAPER quits by 40004 after 40026; the predecessor app exits through its tray Exit command (design §5.3); the engine through `Shutdown`; the server and runner through Ctrl-Break to their own process group; the tray through `Quit`.
+  - REAPER quits by 40004 after 40026 (and only after the app is gone, design §5.2 step 3–4); the predecessor app exits through its tray Exit command (design §5.3); the engine through `Shutdown`; the server and runner through Ctrl-Break delivered to their own console (`iem_win::console::ctrl_break`, design §5.5); the tray through `Quit`.
+  - A crash dialog never holds the card: the engine suppresses Windows error UI at start (design §3).
   - The integrity scan's force-kill words never appear in `crates/`, `scripts/`, `.github/`, `e2e/` — comments included. Write "force-end" in prose.
 - **The card:**
-  - Only 96 kHz and preferred 32 for iemmixer (`format::admit`). The preference holds 32 only inside the open window (design §3). REAPER never starts unless the preference reads back as the recorded original.
+  - Only 96 kHz and preferred 32 for iemmixer (`format::admit`), and a **measured** period of 32 (design §3). The preference holds 32 only inside the open window (design §3). REAPER never starts unless the preference reads back as the recorded original — the one exception is the `[guard] on_pref_fail` choice after three failed restores at an event, recorded on #9 in Task 13 Step 2 (design §5.2 step 4).
   - `set_sample_rate`, `set_clock_source`, `open_control_panel` never appear (integrity). Every output is zeroed (A1). Dante is never touched.
-- **I3:** the engine refuses while `reaper.exe` exists; the guard never starts REAPER while an engine process exists or the driver module has any holder.
-- **G7:** the predecessor's code, config, deployment and autostarts stay untouched. We start it only through our own `\iemmixer\iemmixer-StartApp` (its exe directly), never its launcher script.
-- **P5/G8:** only a bundle zip from a green hosted `push` run on `dev`/`main`, attested by digest, reaches the PC. The first one is installed by hand after `gh attestation verify` on the dev box; later ones through `hil.yml`. `live --build` needs `main` + green `hil/iem-pc`.
-- **P6:** no site value in this repository. That covers driver name, registry key, task paths other than our own `\iemmixer\…`, the predecessor's process/log names and exit command id, channel numbers, track counts, hosts, users and paths. They live in the ops `site.toml` (`[card]`, `[guard]`) and `~/.config/iemmixer/iem-pc.env`. Tests use synthetic values (driver `Test Card`, RX 101–132, TX 71–93, exit id 4242).
+- **I3:** the engine refuses while any process holds the driver module (`[card] module`; no process names — purpose-built); the guard never starts REAPER while an engine process exists or the driver module has any holder.
+- **G7:** the predecessor's code, config, deployment and autostarts stay untouched, and so does the shared tunnel's ingress (read back only). We start the app only through our own `\iemmixer\iemmixer-StartApp` (its exe directly), never its launcher script.
+- **P9 data:** every `dev`/`live` entry refreshes the band's identity data from the stopped predecessor (`iem-migrate band`); the server refuses PIN set/reset before cutover (`pin_changes = false`).
+- **P5/G8:** only a bundle zip from a green hosted `push` run on `dev`/`main`, attested by digest, reaches the PC. The first one is installed by hand after `gh attestation verify` on the dev box; later ones through `hil.yml`. `live --build` needs `main` + green `hil/iem-pc`; `live --trial` also needs `[guard] pc_tests_passed = true`.
+- **P6:** no site value in this repository. That covers driver name and module, registry key, task paths other than our own `\iemmixer\…`, the predecessor's process/log names, log line and exit command id, the app exe hash, channel numbers, track counts, hosts, users and paths. They live in the ops `site.toml` (`[card]`, `[guard]`) and `~/.config/iemmixer/iem-pc.env`. The predecessor's image, log file and log line are code identifiers already public through the import provenance (`docs/provenance/`, the S0 plan), so they are configuration, not denylist terms; the denylist keeps names, hosts, channels and credentials (ROZHODNUTÉ on #9, 2026-09-27). Tests use synthetic values (driver `Test Card`, module `testcard.dll`, RX 101–132, TX 71–93, exit id 4242).
 - **Tier 0:** no local cargo compilation. Locally only `cargo fmt`, `cargo metadata`, `cargo tree`, `cargo update -p`, Python and `git`. Everything Rust and PowerShell is proven in hosted CI:
   - one push per cycle, one fix commit per failing cycle;
   - foreground bounded waits (≤ 9 min per Bash call), never `run_in_background`.
@@ -79,33 +81,39 @@
 
 1. **REAPER's buffer.**
    - Expected: `prefwin::enter` refuses unless the store holds the original, and writes 32 with the original's kind. `leave` writes the original. Both read back.
-   - `AsioStream` calls `leave` right after `createBuffers`, on every open, success or failure. The guard's `PrefCheck` step precedes `ReaperStart` in every plan.
-   - Tests: `prefwin::tests`, `plan::tests::every_event_plan_checks_the_preference_before_reaper`.
+   - `AsioStream` calls `leave` right after `createBuffers`, on every open, success or failure. The guard's `PrefCheck` step precedes `ReaperStart` in every plan; a failed `PrefCheck` follows `[guard] on_pref_fail` only after three restore attempts.
+   - Tests: `prefwin::tests`, `plan::tests::every_event_plan_checks_the_preference_before_reaper`, `daemon::tests::a_failed_pref_check_follows_on_pref_fail`.
 2. **Sound on the band's channels.**
-   - Expected: every card output is zeroed each callback. TX gets processor output only after `Arm` (hold) or on respawn. The test signal cap is unchanged. Unknown RX/TX refuse the stream.
-   - Tests: `channels::tests`, engine `hold_keeps_outputs_silent_until_arm`, HIL `test-signal`.
+   - Expected: every card output is zeroed each callback. TX gets processor output only after `Arm` (hold) or on respawn. The test signal cap is unchanged; the HIL test signal reaches only the card-masked outputs, and a HIL job starts only after 5 min of band quiet plus a 60 s stage-peak check. Unknown RX/TX refuse the stream.
+   - Tests: `channels::tests`, engine `hold_keeps_outputs_silent_until_arm`, `hil_test_signal_reaches_only_masked_outputs`, `daemon::tests::job_begin_needs_a_quiet_stage`, HIL `test-signal`.
 3. **Nothing force-ended.**
    - Expected: no kill path in the guard. Every stop is a request plus a bounded wait, then an alarm.
    - Tests: integrity scan; `crash::tests` (no respawn after exit 2/3 or at session end); `FakePc` records no force verb (there is none to record).
 4. **"ide event" at any moment.**
-   - Expected: `event` pre-empts after the current bounded step. A guard restart mid-switch re-plans to `event`, and HIL jobs are refused once the switch starts.
-   - Tests: `daemon::tests::event_preempts_a_running_dev_switch`, `plan::tests::a_failed_dev_switch_unwinds_to_event`.
-5. **Meter bridge.**
-   - Expected: triggered exactly once, only while its state is empty; any other value refuses.
-   - Tests: `handover::tests::bridge_*`.
-6. **Predecessor exit.**
-   - Expected: the guard posts only the configured command to a window of the configured class owned by the app's PID. Success needs the log line, process gone, ports free and no newer temp file. Anything else aborts the switch and restarts REAPER.
+   - Expected: `event` pre-empts within 1 s during any waiting step (cancel token), after a mutating step otherwise. A guard restart mid-switch re-plans to `event`; after a reboot the mode is `event`; HIL jobs are refused once the switch starts; without a guard `iemmode event --direct` runs the same planner.
+   - Tests: `daemon::tests::{event_preempts_a_running_dev_switch, preempt_during_interlock_starts_event_within_1s, a_reboot_resets_the_mode_to_event, direct_event_runs_without_a_guard}`, `plan::tests::a_failed_dev_switch_unwinds_to_event`.
+5. **Never silence the band by our own hand.**
+   - Expected: a failed engine release at "ide event" keeps a healthy iemmixer serving and never stops the server or tray or starts the app without REAPER; a dead or parked engine stops the plan and the owner gets the prepared ❓. A REAPER or app that runs but does not serve is restarted.
+   - Tests: `plan::tests::{failed_engine_stop_never_starts_the_app_without_reaper, a_stale_reaper_is_restarted, an_app_that_does_not_serve_is_restarted}`, `daemon::tests::a_healthy_engine_keeps_serving_when_release_times_out`.
+6. **Dev entry order.**
+   - Expected: the interlock runs whenever REAPER or the app runs (any `from`); `AppStop` precedes `ReaperSaveQuit`; a dialog after 40026 aborts before 40004.
+   - Tests: `plan::tests::{dev_entry_with_reaper_running_always_runs_the_interlock, the_app_stops_before_reaper_saves}`.
+7. **Meter bridge and fingerprint.**
+   - Expected: the bridge is triggered exactly once, only while its state is empty; any other value refuses. Every event plan ends with the S1c fingerprint (alarm only).
+   - Tests: `handover::tests::bridge_*`, `plan::tests::every_event_plan_ends_with_the_fingerprint`.
+8. **Predecessor exit.**
+   - Expected: the precheck refuses a changed app exe hash before REAPER is touched. The guard posts only the configured command to a window of the configured class owned by the app's PID, waits on a process handle opened before the post, and needs exit code 0, ports free and no newer temp file; the log line only corroborates. Anything else aborts the switch and restarts REAPER.
    - Tests: `handover::tests::app_exit_*`, `plan::tests`.
-7. **Provenance (P5/G8).**
-   - Expected: `install` verifies `SHA256SUMS` and `manifest.sha` equal to the directory name and never overwrites. `live` refuses non-`main` or non-green.
-   - Tests: `bundle::tests`.
-8. **Pipes.**
-   - Expected: remote clients refused, the first instance only, DACL user + SYSTEM, non-blocking readers that close a superseded connection. The guard pipe is the same.
-   - Tests: `pipes.rs` now on Windows too; `pipe::tests::sddl_*`.
-9. **RT safety of the backend.**
-   - Expected: `on_buffer` touches only preallocated buffers. The panic hook on RT threads writes atomics only.
-   - Tests: `rtpanic::tests::the_rt_hook_does_not_allocate` (`assert_no_alloc` dev-dependency), code review.
-10. **P6:** no site value in the diff; the pre-push denylist and CI `secrets`.
+9. **Provenance (P5/G8) and HIL.**
+   - Expected: `install` verifies `SHA256SUMS` (itself exempt) and `manifest.sha` equal to the directory name and never overwrites; CI runs `install --verify-only` on every zip. `live` refuses non-`main` or non-green. `hil.yml` validates every input from `env:`; the `pc` job holds no secret.
+   - Tests: `bundle::tests`, the `bundle` job's verify step.
+10. **Pipes and mutex.**
+    - Expected: remote clients refused, the first instance only, DACL user + SYSTEM, non-blocking readers that close a superseded connection. The guard pipe is the same; the guard mutex is `Global\iemmixer-guard`.
+    - Tests: `pipes.rs` now on Windows too; `pipe::tests::sddl_*`.
+11. **RT safety of the backend.**
+    - Expected: `on_buffer` touches only preallocated buffers and marks its thread RT on every entry. The panic hook on RT threads writes atomics only.
+    - Tests: `crates/iem-audio-io/tests/rt.rs` (`AllocDisabler`, a positive control), code review.
+12. **P6:** no site value in the diff; the pre-push denylist and CI `secrets`.
 
 ## Shell variables (paste at the start of every task)
 
@@ -126,39 +134,43 @@ export P="python3 $WORK/scripts/iem-pc/iempc.py"
 ## File Structure
 
 ```
-Cargo.toml                                   members + iem-win, iem-guard; version bump
+Cargo.toml                                   members + iem-win, iem-guard; version bump (computed from main)
 crates/iem-win/{Cargo.toml,src/lib.rs}       safe Windows glue; non-Windows stubs return Unsupported
-crates/iem-win/src/{process,window,console,token,power,spawn,registry}.rs  (cfg(windows) bodies)
+crates/iem-win/src/{process,window,console,token,power,spawn,registry,errmode,sync}.rs  (cfg(windows) bodies)
+crates/iem-win/src/prefwin.rs                preferred-buffer window (PrefStore trait, enter/leave) — portable, mutated
 crates/iem-audio-io/src/channels.rs          topology card numbers → card indices
-crates/iem-audio-io/src/prefwin.rs           preferred-buffer window (PrefStore trait, enter/leave)
 crates/iem-audio-io/src/reset.rs             ResetBudget, stall rule
 crates/iem-audio-io/src/rtpanic.rs           RT-thread panic record (atomics only)
-crates/iem-audio-io/src/asio.rs              AsioStream<P>: owner thread, callback, reopen, SEH, session end
-crates/iem-audio-io/src/lib.rs               Process::discontinuity; StreamStats += missed, overruns, resets, parked
-crates/iem-engine/src/site.rs                [card] table
+crates/iem-audio-io/src/period.rs            measured frames from sample positions
+crates/iem-audio-io/tests/rt.rs              AllocDisabler harness for rtpanic (+ positive control)
+crates/iem-audio-io/src/asio.rs              AsioStream<P>: owner thread, callback, reopen, SEH + RELEASED, session end, VirtualLock
+crates/iem-audio-io/src/lib.rs               Process::discontinuity; StreamStats += frames, missed, overruns, resets, parked
+crates/iem-engine/src/site.rs                [card] table (driver, module, pref, frames)
 crates/iem-engine/src/engine.rs              --backend asio, --hold, interlock, check-site, exit 3
-crates/iem-engine/src/control.rs             supervisor role handling, Arm, Status fields
+crates/iem-engine/src/control.rs             supervisor role handling, Arm, HIL test signal mask, Status fields
 crates/iem-engine/src/pipe.rs                Windows listener options, SDDL, non-blocking readers
-crates/iem-engine/src/rt.rs                  hold gate, discontinuity → fade-in
-crates/iem-engine-proto/src/msg.rs           Role::Supervisor, Cmd::Arm, Status fields (additive)
+crates/iem-engine/src/rt.rs                  hold gate, discontinuity → fade-in, card-output mask
+crates/iem-engine-proto/src/msg.rs           Role::Supervisor, Cmd::Arm, Cmd::HilTestSignal, Status fields (additive)
 crates/iem-server/src/{activity,console}.rs  watch [activity] inputs only (RED/GREEN)
 crates/iem-server/src/bin/server.rs          graceful stop (Ctrl-Break / SIGTERM); alarm-link
-crates/iem-server/src/alarm_link.rs (+route) one-time alarm subscription link
-crates/iem-core/src/config.rs                ActivityConfig.inputs
-crates/iem-guard/src/{lib,plan,crash,bundle,handover,proto,state,alarms}.rs   pure core
+crates/iem-server/src/alarm_link.rs (+route) one-time alarm subscription link → alarm recipients
+crates/iem-server/src/{auth,login_guard}.rs  pin_changes = false; CF-Connecting-IP from the host's own addresses only
+crates/iem-core/src/config.rs                ActivityConfig.inputs; ServerConfig.pin_changes
+crates/iem-guard/src/{lib,plan,crash,bundle,handover,proto,state,alarms,cancel}.rs   pure core (plan.rs carries the error policy)
 crates/iem-guard/src/pc.rs                   Pc trait + FakePc (tests)
 crates/iem-guard/src/win/{mod,reaper,app,card,tasks,procs}.rs                  WinPc (Windows)
-crates/iem-guard/src/daemon.rs               request loop, switch runner, watches, adoption
+crates/iem-guard/src/daemon.rs               request loop, run_switch, watches, adoption, reboot reset, --direct
 crates/iem-guard/src/bin/{iemmixer-guard,iemmode}.rs
 crates/iem-tray/src/{lib,tray}.rs            no server; guard status, Quit
 scripts/iem-pc/IemPc.psm1, Test-IemPc.ps1    PC bootstrap functions + self-test
-scripts/iem-pc/iempc.py (+test_iempc.py)     dev-box control with EVENT-NOW discipline
+scripts/iem-pc/hil-v1.ps1                    HIL v1 steps (ships in the bundle, run from bundles\<sha>\)
+scripts/iem-pc/iempc.py (+test_iempc.py)     dev-box control with EVENT-NOW discipline, dispatch-hil, --direct fallback
 scripts/check_integrity.py (+test)           I8 words in comments too; new crate dirs covered
 scripts/engine-deps-allow.txt                + iem-win (+ its closure)
-.cargo/mutants.toml                          exclude Windows effect modules with reasons
-.github/workflows/ci.yml                     windows job widened; bundle, attest, hil-dispatch
+.cargo/mutants.toml                          exclude Windows effect modules with reasons (prefwin stays mutated)
+.github/workflows/ci.yml                     windows job widened; bundle (+ verify-only), attest
 .claude/rules/guard.md                       playbook rule (paths: crates/iem-guard/**, crates/iem-win/**, scripts/iem-pc/**)
-CLAUDE.md                                    router line; "ide event" = iempc event
+CLAUDE.md                                    router line; "ide event" = iempc event from Task 16 Step 3
 docs/superpowers/specs/2026-09-27-s6-asio-guard-hil-design.md, plans/2026-09-27-s6-asio-guard-hil.md
 private: $OPS/site/site.toml ([card], [guard], server tables), $OPS/.github/workflows/hil.yml,
          $OPS/docs/s6-pc-runbook.md, $PC_ENV, $PRIV/event-runbook.md, ops CLAUDE.md
@@ -176,18 +188,22 @@ private: $OPS/site/site.toml ([card], [guard], server tables), $OPS/.github/work
 cd "$WORK" && gh pr view 24 -R "$REPO" --json state --jq .state
 git fetch origin && git checkout dev && git merge --ff-only origin/dev && git status -sb
 python3 scripts/check_version.py || echo "BUMP NEEDED"
+MAINV=$(git show origin/main:Cargo.toml | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)
+DEVV=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1); echo "main $MAINV dev $DEVV"
 ```
 
-If `main` now carries `2.0.0-dev.8`, set `[workspace.package].version = "2.0.0-dev.9"` as the first commit: `chore: bump version to 2.0.0-dev.9`.
+If `dev` is not strictly above `main`, the first commit sets `[workspace.package].version` to `main`'s `2.0.0-dev.N` + 1 (computed from `$MAINV`, never a hard-coded number): `chore: bump version to 2.0.0-dev.<N+1>`.
 
-- [ ] **Step 2: Commit the design note and this plan** (`docs(s6): design note and implementation plan`). Before committing, run the denylist scan over both files (the pre-push hook does it again).
+- [ ] **Step 2: Commit the design note and this plan** (`docs(s6): design note and implementation plan`). Run the denylist scan over both files first (the pre-push hook does it again). The predecessor's image, log file and log line stay out of the denylist: they are public code identifiers (Global Constraints, P6); a Slovak word that collides with a denylist name is reworded.
 
 - [ ] **Step 3: Design summary on #9** (Slovak, plain). Write `$WP/s6-design-comment.md` covering:
   - the switch sequences;
   - the predecessor exit through its tray command;
   - the preference window;
-  - the HIL decision;
-  - the five approval-gated tests (listed, not asked).
+  - the HIL decision (dispatched from the dev box, no public dispatch token);
+  - the two owner steps, stated honestly: the one-time alarm link before the first switch, and the five approval-gated tests asked right after HIL v1 is green (listed here, not asked);
+  - the no-agent fallbacks (the engineer's "Späť na REAPER" button, a reboot);
+  - the declared spec deviations (design §11).
 
   Then post it: `gh issue comment 9 -R "$REPO" --body-file "$WP/s6-design-comment.md"`.
 
@@ -208,19 +224,20 @@ grep -n '^name = "ureq"\|^name = "zip"\|^name = "rustls"' Cargo.lock
   - that `PipeListenerOptions` refuses remote clients by default, takes an SDDL descriptor, and sets the first-instance flag on the first instance;
   - the `windows-registry` value API (kind-preserving read/write for DWORD and string);
   - `tokio::signal::windows::ctrl_break`;
-  - whether `ureq`/`zip`/`rustls` are already locked.
+  - whether `ureq`/`zip`/`rustls` are already locked;
+  - the `windows-sys` 0.61 feature that carries each new call (`SetErrorMode`, `WerSetFlags`, `GetExtendedTcpTable`, `AttachConsole`/`FreeConsole`/`SetConsoleCtrlHandler`, `VirtualLock`, `CreateMutexW`, `GetExitCodeProcess`): `grep -rln 'pub fn <Name>' $R/windows-sys-0.61*/src/Windows/` — the Task 2 feature list follows these paths.
 
   If `windows-registry` 0.100 cannot read the value kind, use `windows-sys` `RegQueryValueExW` inside `iem-win::registry` instead (the only change). Findings go on #9 the moment they land.
 
 ---
 
-### Task 2: `iem-win` — safe Windows glue
+### Task 2: `iem-win` — safe Windows glue and the portable preference window
 
 **Files:**
-- Create: `crates/iem-win/Cargo.toml`, `crates/iem-win/src/lib.rs` and one module per area.
+- Create: `crates/iem-win/Cargo.toml`, `crates/iem-win/src/lib.rs`, one module per area, and `crates/iem-win/src/prefwin.rs` (portable).
 - Modify: `Cargo.toml` (members), `scripts/engine-deps-allow.txt`, `.cargo/mutants.toml`.
 
-- [ ] **Step 1: The crate skeleton.** `Cargo.toml`:
+- [ ] **Step 1: The crate skeleton.** `Cargo.toml` (the feature list is checked against the Task 1 Step 4 paths; add any feature a call needs there):
 
 ```toml
 [package]
@@ -229,34 +246,39 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "iemmixer's Windows glue (S6): safe wrappers; every function returns Unsupported off Windows"
+description = "iemmixer's Windows glue (S6): safe wrappers (Unsupported off Windows) and the portable preferred-buffer window"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading",
-  "Win32_System_ProcessStatus", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Console",
-  "Win32_System_JobObjects", "Win32_UI_WindowsAndMessaging", "Win32_System_Memory",
-  "Win32_System_Power", "Win32_System_SystemInformation" ] }
+  "Win32_System_ProcessStatus", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Diagnostics_Debug",
+  "Win32_System_ErrorReporting", "Win32_System_Console", "Win32_System_JobObjects",
+  "Win32_UI_WindowsAndMessaging", "Win32_System_Memory", "Win32_System_Power",
+  "Win32_System_SystemInformation", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock" ] }
 windows-registry = "=0.100.0"
 ```
 
 `src/lib.rs`:
 
 ```rust
-//! Safe Windows glue for the engine and the guard (S6 design note §3). Every
-//! function has a portable signature; off Windows it returns `Unsupported`, so
-//! callers keep their decisions testable on Linux. The only unsafe code of the
-//! workspace besides `iem_audio_io::asio` lives in the `cfg(windows)` modules.
+//! Safe Windows glue for the engine and the guard (S6 design note §3), plus the
+//! portable preferred-buffer window both of them use. Every effect has a
+//! portable signature; off Windows it returns `Unsupported`, so callers keep
+//! their decisions testable on Linux. The only unsafe code of the workspace
+//! besides `iem_audio_io::asio` lives in the `cfg(windows)` modules.
 
 #![cfg_attr(not(windows), forbid(unsafe_code))]
 
 use std::io;
 
 pub mod console;
+pub mod errmode;
 pub mod power;
+pub mod prefwin;
 pub mod process;
 pub mod registry;
 pub mod spawn;
+pub mod sync;
 pub mod token;
 pub mod window;
 
@@ -269,36 +291,125 @@ pub(crate) fn unsupported<T>() -> io::Result<T> {
 
 | Module | Functions |
 |---|---|
-| `process` | `exists(image: &str) -> io::Result<bool>`; `pids(image: &str) -> io::Result<Vec<u32>>`; `module_holders(module: &str) -> io::Result<Vec<(u32, String)>>` (Toolhelp32 snapshots of every process's modules; access-denied processes are skipped and counted); `start_time(pid) -> io::Result<u64>`; `image_path(pid) -> io::Result<String>`; `wait_gone(pid, Duration) -> io::Result<bool>`; `listening(port: u16) -> io::Result<Option<u32>>` (GetExtendedTcpTable, owning pid) |
-| `power` | `set_high_priority()`, `disable_power_throttling()` (EXECUTION_SPEED and IGNORE_TIMER_RESOLUTION), `set_cpu_sets(ids: &[u32])`, `lock_min_working_set(extra_mb: usize)` (QUOTA_LIMITS_HARDWS_MIN_ENABLE, current + extra) |
+| `process` | `exists(image: &str) -> io::Result<bool>`; `pids(image: &str) -> io::Result<Vec<u32>>` (a process-list snapshot only — the guard's once-a-second read); `module_holders(module: &str) -> io::Result<Vec<(u32, String)>>` (Toolhelp32 module snapshots of every process; access-denied processes are skipped and counted; switch steps only); `start_time(pid) -> io::Result<u64>`; `image_path(pid) -> io::Result<String>`; `Handle::open_waitable(pid) -> io::Result<Handle>` (`SYNCHRONIZE \| PROCESS_QUERY_LIMITED_INFORMATION`); `Handle::wait(Duration) -> io::Result<Option<u32>>` (the exit code via `GetExitCodeProcess` once signalled, `None` on timeout); `listening(port: u16) -> io::Result<Option<u32>>` (GetExtendedTcpTable, owning pid); `boot_time() -> io::Result<SystemTime>` |
+| `power` | `set_high_priority()`, `disable_power_throttling()` (EXECUTION_SPEED and IGNORE_TIMER_RESOLUTION), `set_cpu_sets(ids: &[u32])`, `lock_min_working_set(extra_mb: usize)` (QUOTA_LIMITS_HARDWS_MIN_ENABLE, current + extra), `virtual_lock(ptr: *const u8, len: usize)` (after the working set is raised; S1c hand-off) |
+| `errmode` | `quiet_crashes()`: `SetErrorMode(SEM_FAILCRITICALERRORS \| SEM_NOGPFAULTERRORBOX)` and `WerSetFlags(WER_FAULT_REPORTING_NO_UI)`, so a crash never leaves a dialog holding the card |
 | `token` | `current_user_sid() -> io::Result<String>` (ConvertSidToStringSidW) |
-| `window` | `find_owned(class: &str, pid: u32) -> io::Result<Option<isize>>` (EnumWindows, GetClassNameW, GetWindowThreadProcessId); `post_command(hwnd: isize, id: u16) -> io::Result<()>` (PostMessageW WM_COMMAND, wParam = id); `has_dialog(pid) -> io::Result<bool>` (a visible top-level `#32770` window owned by pid); `SessionEndWindow` (a hidden window on the calling thread that sets an `Arc<AtomicBool>` on WM_ENDSESSION(TRUE), answers WM_QUERYENDSESSION TRUE, and holds a `ShutdownBlockReasonCreate` text while a supplied closure runs) |
-| `console` | `ctrl_break(pid: u32) -> io::Result<()>` (GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) for a child started with CREATE_NEW_PROCESS_GROUP on our console) |
+| `window` | `find_owned(class: &str, pid: u32) -> io::Result<Option<isize>>` (EnumWindows, GetClassNameW, GetWindowThreadProcessId); `post_command(hwnd: isize, id: u16) -> io::Result<()>` (PostMessageW WM_COMMAND, wParam = id); `has_dialog(pid) -> io::Result<bool>` (a visible top-level `#32770` window owned by pid); `SessionEndWindow` — a **hidden top-level** window on the calling thread (never `HWND_MESSAGE`: message-only windows never receive `WM_QUERYENDSESSION`) that sets an `Arc<AtomicBool>` on WM_ENDSESSION(TRUE), answers WM_QUERYENDSESSION TRUE, and holds a `ShutdownBlockReasonCreate` text while a supplied closure runs |
+| `console` | `ctrl_break(pid: u32) -> io::Result<()>`. Children run with `CREATE_NO_WINDOW`, so each has its own console, and the guard has none; under a process-wide `Mutex<()>`: `FreeConsole()` → `AttachConsole(pid)` → `SetConsoleCtrlHandler(None, TRUE)` → `GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid)` → `FreeConsole()` → `SetConsoleCtrlHandler(None, FALSE)`. The handler is restored on every path (a drop guard) |
 | `spawn` | `spawn_detached(cmd: &mut std::process::Command, new_group: bool) -> io::Result<std::process::Child>` (`CommandExt::creation_flags`: `CREATE_BREAKAWAY_FROM_JOB`, plus `CREATE_NEW_PROCESS_GROUP` when `new_group`, plus `CREATE_NO_WINDOW`). When the job forbids breakaway it returns the error; the caller alarms and does not start the child |
-| `registry` | `Hkcu::read(key, name) -> io::Result<(Kind, String)>`, `Hkcu::write(key, name, Kind, &str)`, `Kind { Dword, Text }` |
+| `sync` | `GlobalMutex::try_take(name: &str) -> io::Result<Option<GlobalMutex>>` (`CreateMutexW` on `Global\<name>`; `None` when another session holds it; released on drop) |
+| `registry` | `Hkcu::read(key, name) -> io::Result<(Kind, String)>`, `Hkcu::write(key, name, Kind, &str)`, `Kind { Dword, Text }`; `HkcuPref { key, name }` implements `prefwin::PrefStore` |
 
 No function in `iem-win` ends another process in any form.
 
-- [ ] **Step 3: Tests.**
-  - Portable: every stub returns `Unsupported` (one test per module on Linux).
+- [ ] **Step 3: `prefwin.rs`** (portable, mutation-tested; the engine's backend and the guard's `PrefCheck` both use it, so the guard never depends on `iem-audio-io`):
+
+```rust
+//! The driver's preferred buffer holds 32 only while the driver opens (S6
+//! design note §3): REAPER's value stays in the registry at every other moment,
+//! so a crash or power loss in dev never leaves REAPER at 32. The driver reads
+//! the value when it is opened (S1a). Kind (DWORD or text) is always kept.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Dword,
+    Text,
+}
+
+/// A registry value as read: its kind and its decimal text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pref {
+    pub kind: Kind,
+    pub raw: String,
+}
+
+pub trait PrefStore {
+    fn read(&mut self) -> Result<Pref, String>;
+    fn write(&mut self, value: &Pref) -> Result<(), String>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrefError {
+    Read(String),
+    Write(String),
+    /// The store does not hold the original: an earlier window did not close.
+    NotOriginal { found: Pref },
+    ReadBack { wrote: Pref, read: Pref },
+}
+
+fn write_checked(store: &mut impl PrefStore, want: &Pref) -> Result<(), PrefError> {
+    store.write(want).map_err(PrefError::Write)?;
+    let got = store.read().map_err(PrefError::Read)?;
+    if got == *want {
+        Ok(())
+    } else {
+        Err(PrefError::ReadBack { wrote: want.clone(), read: got })
+    }
+}
+
+/// Opens the window: refuses unless the store holds `original`, then writes
+/// `frames` with the original's kind and reads it back.
+pub fn enter(store: &mut impl PrefStore, original: &Pref, frames: u32) -> Result<(), PrefError> {
+    let now = store.read().map_err(PrefError::Read)?;
+    if now != *original {
+        return Err(PrefError::NotOriginal { found: now });
+    }
+    write_checked(store, &Pref { kind: original.kind, raw: frames.to_string() })
+}
+
+/// Closes the window: the original back, read back.
+pub fn leave(store: &mut impl PrefStore, original: &Pref) -> Result<(), PrefError> {
+    write_checked(store, original)
+}
+
+/// The guard's restore (design §5.2 step 4): up to `attempts` writes of the
+/// original, each read back; Ok as soon as the store holds the original.
+pub fn restore(store: &mut impl PrefStore, original: &Pref, attempts: u32) -> Result<u32, PrefError> {
+    let mut last = PrefError::Read("no attempt".into());
+    for n in 1..=attempts {
+        match store.read() {
+            Ok(now) if now == *original => return Ok(n - 1),
+            _ => {}
+        }
+        match leave(store, original) {
+            Ok(()) => return Ok(n),
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
+}
+```
+
+  Tests (`FakeStore` holding a `Pref`, counting writes, optionally failing or corrupting the n-th write):
+  - `enter` writes `"32"` with kind `Dword` when the original is a DWORD `"64"`, and `Text` for a text original;
+  - `enter` refuses `NotOriginal` without writing when the store holds `"32"`, and also for the same digits with the other kind;
+  - a corrupting store yields `ReadBack`;
+  - `leave` restores byte-for-byte (`" 64"` stays `" 64"`);
+  - a write error is `Write`;
+  - `restore` writes nothing when the original is already there (returns 0), succeeds on the second attempt after one failed write (returns 2), and fails after exactly 3 failing attempts.
+- [ ] **Step 4: Tests.**
+  - Portable: every effect stub returns `Unsupported` (one test per module on Linux); `prefwin` as above.
   - Windows (the `windows` job):
     - `current_user_sid` starts with `S-1-5-21-`;
     - `exists("definitely-not-running.exe")` is false;
     - `listening` finds a `TcpListener` bound by the test;
     - `module_holders("kernel32.dll")` contains our own pid;
-    - `registry` round-trips a DWORD and a string under `HKCU\Software\iemmixer-test\<uuid>`, which the test then deletes with `windows-registry` (it removes only its own test key).
-    - `spawn_detached` + `ctrl_break` stops a child that waits on `tokio::signal::windows::ctrl_break`: `tests/ctrl_break.rs` with a helper bin `iem-win-ctrlbreak-helper` (dev only, `[[bin]] required-features = ["test-helper"]`).
-- [ ] **Step 4: Allowlist and mutation scope.**
+    - `registry` round-trips a DWORD and a string under `HKCU\Software\iemmixer-test\<uuid>`, which the test then deletes with `windows-registry` (it removes only its own test key);
+    - `GlobalMutex::try_take` twice in one test: the second is `None`;
+    - `Handle::open_waitable` on a helper that exits 0 returns `Some(0)`;
+    - `spawn_detached` (so the child has `CREATE_NO_WINDOW` and its own console, exactly as on the PC) + `ctrl_break` stops a child that waits on `tokio::signal::windows::ctrl_break`, and the test process itself survives: `tests/ctrl_break.rs` with a helper bin `iem-win-ctrlbreak-helper` (dev only, `[[bin]] required-features = ["test-helper"]`).
+- [ ] **Step 5: Allowlist and mutation scope.**
   - `iem-win` joins the engine closure: add `iem-win` and every new name from `cargo tree -p iem-engine --target x86_64-pc-windows-msvc -e normal,build --prefix none | sort -u` to `scripts/engine-deps-allow.txt`.
-  - In `.cargo/mutants.toml` `exclude_globs`: `crates/iem-win/src/**` with the reason "Windows FFI wrappers, not compiled on Linux; the windows job runs their tests; decisions live in callers".
+  - In `.cargo/mutants.toml` `exclude_globs`: `crates/iem-win/src/{console,errmode,power,process,registry,spawn,sync,token,window}.rs` with the reason "Windows FFI wrappers, not compiled on Linux; the windows job runs their tests; decisions live in callers". `prefwin.rs` and `lib.rs` stay mutated.
 
 ---
 
 ### Task 3: Portable backend pieces in `iem-audio-io`
 
 **Files:**
-- Create: `crates/iem-audio-io/src/{channels,prefwin,reset,rtpanic}.rs`.
-- Modify: `crates/iem-audio-io/src/lib.rs` (module list; `Process::discontinuity`; `StreamStats` fields), `crates/iem-audio-io/src/nullrt.rs` (new fields default 0).
+- Create: `crates/iem-audio-io/src/{channels,period,reset,rtpanic}.rs`, `crates/iem-audio-io/tests/{rt,rtpanic_hook}.rs`.
+- Modify: `crates/iem-audio-io/src/lib.rs` (module list; `Process::discontinuity`; `StreamStats` fields), `crates/iem-audio-io/src/nullrt.rs` (new fields default 0), `crates/iem-audio-io/Cargo.toml` (`assert_no_alloc` dev-dependency, `iem-win`).
 
 - [ ] **Step 1: `channels.rs`.**
 
@@ -377,73 +488,40 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: `prefwin.rs`.**
+- [ ] **Step 2: `period.rs`** (the measured period, design §3; the preference window moved to `iem_win::prefwin`, Task 2).
 
 ```rust
-//! The driver's preferred buffer holds 32 only while the driver opens (S6
-//! design note §3): REAPER's value stays in the registry at every other moment,
-//! so a crash or power loss in dev never leaves REAPER at 32. The driver reads
-//! the value when it is opened (S1a). Kind (DWORD or text) is always kept.
+//! The period the driver really delivers, measured from the first callbacks'
+//! sample positions (S6 design note §3). The driver re-reads its preference at
+//! open, so the configured 32 is a request, not a fact: `Status.frames` carries
+//! this measurement and anything but the expected size refuses the stream.
+
+/// Sample positions of consecutive callbacks → the frames per callback, once
+/// `need` consecutive deltas agree. `None` while undecided or inconsistent.
+pub fn measured(positions: &[u64], need: usize) -> Option<u32> {
+    let deltas: Vec<u64> = positions.windows(2).map(|w| w[1].saturating_sub(w[0])).collect();
+    let tail = deltas.len().checked_sub(need).map(|s| &deltas[s..])?;
+    let first = *tail.first()?;
+    (first > 0 && tail.iter().all(|d| *d == first)).then(|| u32::try_from(first).ok()).flatten()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Kind {
-    Dword,
-    Text,
+pub enum PeriodVerdict {
+    Undecided,
+    Ok(u32),
+    Wrong { expected: u32, measured: u32 },
 }
 
-/// A registry value as read: its kind and its decimal text.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Pref {
-    pub kind: Kind,
-    pub raw: String,
-}
-
-pub trait PrefStore {
-    fn read(&mut self) -> Result<Pref, String>;
-    fn write(&mut self, value: &Pref) -> Result<(), String>;
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PrefError {
-    Read(String),
-    Write(String),
-    /// The store does not hold the original: an earlier window did not close.
-    NotOriginal { found: Pref },
-    ReadBack { wrote: Pref, read: Pref },
-}
-
-fn write_checked(store: &mut impl PrefStore, want: &Pref) -> Result<(), PrefError> {
-    store.write(want).map_err(PrefError::Write)?;
-    let got = store.read().map_err(PrefError::Read)?;
-    if got == *want {
-        Ok(())
-    } else {
-        Err(PrefError::ReadBack { wrote: want.clone(), read: got })
+pub fn verdict(positions: &[u64], need: usize, expected: u32) -> PeriodVerdict {
+    match measured(positions, need) {
+        None => PeriodVerdict::Undecided,
+        Some(m) if m == expected => PeriodVerdict::Ok(m),
+        Some(m) => PeriodVerdict::Wrong { expected, measured: m },
     }
-}
-
-/// Opens the window: refuses unless the store holds `original`, then writes
-/// `frames` with the original's kind and reads it back.
-pub fn enter(store: &mut impl PrefStore, original: &Pref, frames: u32) -> Result<(), PrefError> {
-    let now = store.read().map_err(PrefError::Read)?;
-    if now != *original {
-        return Err(PrefError::NotOriginal { found: now });
-    }
-    write_checked(store, &Pref { kind: original.kind, raw: frames.to_string() })
-}
-
-/// Closes the window: the original back, read back.
-pub fn leave(store: &mut impl PrefStore, original: &Pref) -> Result<(), PrefError> {
-    write_checked(store, original)
 }
 ```
 
-  Tests (`FakeStore` holding a `Pref`, counting writes, optionally failing or corrupting the n-th write):
-  - `enter` writes `"32"` with kind `Dword` when the original is a DWORD `"64"`, and `Text` for a text original;
-  - `enter` refuses `NotOriginal` without writing when the store holds `"32"`, and also for the same digits with the other kind;
-  - a corrupting store yields `ReadBack`;
-  - `leave` restores byte-for-byte (`" 64"` stays `" 64"`);
-  - a write error is `Write`.
+  The owner thread (not the callback) collects the first 16 positions from an atomic the callback writes and decides; `Wrong` is an open failure (exit 3). Tests: steady 32-sample steps → `Ok(32)`; steady 64 → `Wrong`; a jittered start that settles → decided only on the settled tail; too few positions → `Undecided`; a zero delta → `Undecided`.
 
 - [ ] **Step 3: `reset.rs`.**
 
@@ -536,8 +614,9 @@ static COL: AtomicU32 = AtomicU32::new(0);
 static FILE_LEN: AtomicUsize = AtomicUsize::new(0);
 static FILE: [AtomicU8; FILE_MAX] = [const { AtomicU8::new(0) }; FILE_MAX];
 
-/// Marks the calling thread real-time (the callback does this on entry; a
-/// const thread-local, so no allocation on first use).
+/// Marks the calling thread real-time. The callback calls it on every entry:
+/// after a reopen the driver may call back on a new thread (a const
+/// thread-local, so no allocation on first use and one store per call).
 pub fn mark_rt_thread() {
     RT.with(|f| f.set(true));
 }
@@ -601,15 +680,47 @@ pub fn latest() -> Option<RtPanic> {
 ```
 
   Tests:
-  - `record` keeps the last 96 bytes of a long path, and `latest` returns them with the count;
-  - `the_rt_hook_does_not_allocate`: a test thread calls `mark_rt_thread`, then `assert_no_alloc::assert_no_alloc(|| record(file!(), line!(), column!()))`. Add `assert_no_alloc` as a dev-dependency (already locked for `iem-engine`), and note `rtpanic` in the crate's `#[global_allocator]` test harness;
-  - `install` + a panic caught by `catch_unwind` on a marked thread increments the count and prints nothing (run in its own test binary, `tests/rtpanic_hook.rs`, since the hook is global).
+  - unit: `record` keeps the last 96 bytes of a long path, and `latest` returns them with the count;
+  - `crates/iem-audio-io/tests/rt.rs`, following `crates/iem-dsp/tests/rt.rs` (the crate has no allocation harness today, and `assert_no_alloc` in warn mode never fails on its own):
+
+```rust
+use assert_no_alloc::{AllocDisabler, assert_no_alloc, reset_violation_count, violation_count};
+use iem_audio_io::rtpanic::{mark_rt_thread, record};
+
+#[global_allocator]
+static ALLOCATOR: AllocDisabler = AllocDisabler;
+
+#[test]
+fn the_detector_sees_an_allocation() {
+    reset_violation_count();
+    let v = assert_no_alloc(|| vec![0u8; 8]);
+    assert!(violation_count() > 0);
+    assert_eq!(v.len(), 8);
+}
+
+#[test]
+fn marking_and_recording_on_the_rt_thread_do_not_allocate() {
+    std::thread::spawn(|| {
+        reset_violation_count();
+        assert_no_alloc(|| {
+            mark_rt_thread();
+            record(file!(), line!(), column!());
+        });
+        assert_eq!(violation_count(), 0, "the RT panic path allocated");
+    })
+    .join()
+    .unwrap();
+}
+```
+
+    `assert_no_alloc` becomes a dev-dependency (already locked for `iem-dsp`/`iem-engine`, same features);
+  - `tests/rtpanic_hook.rs` (its own binary, since the hook is global): `install` + a panic caught by `catch_unwind` on a marked thread increments the count and prints nothing.
 
 - [ ] **Step 5: `lib.rs`.** Add the modules, then:
   - `Process::discontinuity(&mut self) {}` with the doc "called on the callback thread before the first block after a reopen; the engine restarts its fade-in";
-  - to `StreamStats`: `missed`, `overruns`, `resets: u64`, `parked: bool` (NullRt keeps them 0/false).
+  - to `StreamStats`: `frames: u32` (measured; NullRt reports its block size), `missed`, `overruns`, `resets: u64`, `parked: bool` (NullRt keeps them 0/false).
 
-  Update the module doc: S6 backend, preference window.
+  Update the module doc: S6 backend, measured period (the preference window lives in `iem_win::prefwin`).
 
 ---
 
@@ -622,8 +733,9 @@ pub fn latest() -> Option<RtPanic> {
 ```rust
 pub struct CardConfig {
     pub driver: String,
-    pub frames: i32,                          // 32 (I2)
-    pub pref: Option<(String, String, Pref)>, // (key, value name, original); None only in tests
+    pub module: String,                       // the driver DLL: any other holder refuses (I3)
+    pub frames: i32,                          // 32 (I2); the measured period must match
+    pub pref: Option<(String, String, iem_win::prefwin::Pref)>, // (key, value name, original); None only in tests
 }
 
 pub struct AsioStream<P: Process + 'static> { /* owner thread handle, shared atomics */ }
@@ -631,21 +743,22 @@ pub struct AsioStream<P: Process + 'static> { /* owner thread handle, shared ato
 impl<P: Process + 'static> AsioStream<P> {
     /// Starts the owner thread; returns once the first callback ran or the open failed.
     pub fn start(card: CardConfig, rx: Vec<u16>, tx: Vec<u16>, processor: P) -> Result<Self, AsioError>;
-    pub fn stats(&self) -> StreamStats;   // callbacks, late, missed, overruns, resets, parked, faulted, max_process_ns, fault
+    pub fn stats(&self) -> StreamStats;   // frames (measured), callbacks, late, missed, overruns, resets, parked, faulted, max_process_ns, fault
     pub fn session_ending(&self) -> bool; // WM_ENDSESSION seen on the owner thread
     pub fn force_reopen(&self);           // dev-only flag path (HIL); goes through ResetBudget
+    pub fn lock_buffers(&self) -> io::Result<()>; // VirtualLock of inbuf/outbuf (after the engine raised its working set)
     pub fn stop(self) -> StopOutcome;     // Released | Parked
 }
 ```
 
 - [ ] **Step 2: The owner thread** (the only thread calling the driver):
-  1. `rtpanic` is already installed by the engine. Create a `SessionEndWindow` on this thread.
+  1. `rtpanic` and `errmode::quiet_crashes` are already installed by the engine. Create a `SessionEndWindow` (hidden top-level, never `HWND_MESSAGE`) on this thread.
   2. `open()`:
      - `prefwin::enter(store, original, 32)`, then `Host::open(driver)`, `info()`;
      - `ChannelMap::new(rx, tx, info.inputs, info.outputs)`;
      - `format::admit(rate, preferred, 32, types)`;
      - `create_buffers` for every card channel, then `prefwin::leave(store, original)`. `leave` runs on every exit of `open()` after a successful `enter`, success or not (a guard struct whose `Drop` calls `leave` and records a failure in an atomic the control loop turns into `Alarm{pref}` and exit 3).
-     - Then `start()`.
+     - Then `start()`, and decide the period from the first 16 callbacks' sample positions (`period::verdict(.., need = 8, expected = 32)`, ≤ 1 s): `Wrong`, or still `Undecided` after 1 s → `finish` and `AsioError::Refused("period")` (exit 3); `Ok(n)` → `stats.frames = n`. The module-holder check (I3) runs before `enter`, never after our own open.
   3. Loop every 5 ms:
      - pump messages;
      - if a reset or size request is flagged, or `reset::stalled(...)`, ask `ResetBudget`: `Reopen` → `finish` + `open` again with the processor carried over, then `processor.discontinuity()` before the first new block (a flag the callback consumes); `Fault` → faulted.
@@ -654,10 +767,10 @@ impl<P: Process + 'static> AsioStream<P> {
   4. `finish`:
      - stop, clear `STREAM`, wait until `IN_FLIGHT == 0` (bounded `STOP_WAIT`, pumping);
      - on timeout set `parked`, leak the stream (never free under a callback), and keep the thread alive pumping messages;
-     - otherwise dispose, release, and return the processor.
+     - otherwise dispose, release, drop the host, **then** set `RELEASED` (a static `AtomicBool`; cleared at the next `open`), and return the processor.
 - [ ] **Step 3: The callback** (`on_buffer`, extending the spike's):
-  1. `mark_rt_thread()` on the first entry (a flag in the stream).
-  2. Telemetry.
+  1. `mark_rt_thread()` on **every** entry (one thread-local store; a reopen may bring a new driver thread, which would otherwise fall back to the allocating default hook).
+  2. Telemetry, including the sample position into the period ring for the owner thread (first 16 callbacks only).
   3. Zero every output half.
   4. Unless faulted:
      - for each `k`, `format.decode(read(input[map.rx[k]]), &mut self.inbuf[k*frames..])`;
@@ -667,12 +780,13 @@ impl<P: Process + 'static> AsioStream<P> {
 
   The processor lives in an `UnsafeCell` inside the stream. ASIO callbacks never overlap, and the owner thread touches the processor only after `IN_FLIGHT == 0` (`// SAFETY:` note). `inbuf`/`outbuf` are preallocated `Vec<f64>` sized at open.
 - [ ] **Step 4: SEH filter** (installed once by the engine, `iem_audio_io::asio::install_seh_filter()`):
-  - on an exception it sets a `SEH` atomic that the owner thread sees (it stops the driver);
-  - it waits ≤ 1 s for `STREAM` to be null, then returns `EXCEPTION_CONTINUE_SEARCH`;
-  - if the stream is still set, the faulting thread sleeps forever (parked).
+  - on an exception it sets a `SEH` atomic that the owner thread sees (it runs `finish`);
+  - it waits ≤ 1 s for `RELEASED` (set only after `dispose` and after the host is dropped — `STREAM` is cleared earlier, so waiting on it would let the process end with the driver still held), then returns `EXCEPTION_CONTINUE_SEARCH`;
+  - if `RELEASED` is still false, the faulting thread sleeps forever (parked);
+  - with `quiet_crashes` in force, the ending process shows no Windows Error Reporting dialog that could keep the card held in session 1.
 
   Only the owner-approved `seh_ctl` test exercises it (design §10); the code carries no test hook beyond `--fault-injection`'s panic.
-- [ ] **Step 5: `.cargo/mutants.toml`:** `asio.rs` stays excluded. The CI `windows` job runs `cargo clippy -p iem-audio-io --all-targets -D warnings` and `cargo test -p iem-audio-io`. `AsioStream::start` with driver `No Such Card` returns `AsioError::NotFound` — a test on the hosted runner, which has no ASIO driver (`NoDrivers` or `NotFound` both pass).
+- [ ] **Step 5: `.cargo/mutants.toml`:** `asio.rs` stays excluded. The CI `windows` job runs `cargo clippy -p iem-audio-io --all-targets -D warnings` and `cargo test -p iem-audio-io`. `AsioStream::start` with driver `No Such Card` returns `AsioError::NotFound` — a test on the hosted runner, which has no ASIO driver (`NoDrivers` or `NotFound` both pass). `period.rs` carries the portable decision and stays mutated.
 
 ---
 
@@ -682,26 +796,29 @@ impl<P: Process + 'static> AsioStream<P> {
 
 - [ ] **Step 1 (RED): proto and control tests first.**
   - `Role::Supervisor` round-trips as `"supervisor"`.
-  - A supervisor may `Shutdown`, `SaveNow`, `Arm`, `GetState`, `Ping`, and the test-signal and fault ops (still refused without their flags). It gets `NotController` for mix changes.
+  - A supervisor may `Shutdown`, `SaveNow`, `Arm`, `GetState`, `Ping`, `HilTestSignal`, and the test-signal and fault ops (still refused without their flags), and it receives the `Meters` events. It gets `NotController` for mix changes; a `control` client gets `NotSupervisor` for `Arm` and `HilTestSignal`.
   - A second supervisor replaces the first (the first gets `Superseded`); `control` is untouched.
   - `hold_keeps_outputs_silent_until_arm`: `Offline` with `Options { hold: true }` renders zeros until an `RtOp::Arm`, then fades in over 500 ms.
   - `discontinuity_restarts_the_fade_in`.
-  - `Status` serialises `missed`, `overruns`, `resets`, `parked`, and an old client ignores them (additive).
+  - `hil_test_signal_reaches_only_masked_outputs`: `Offline` with a `HilTestSignal { input, hz, dbfs, ttl_s, card_tx: [72] }` → the mix meters of every TX whose mix routes that input show the signal (internal routing), the rendered card output 72 carries it, every other card output is exactly zero until the TTL ends, then normal output resumes; `dbfs` above the existing test-signal cap is refused.
+  - `Status` serialises `frames`, `missed`, `overruns`, `resets`, `parked`, and an old client ignores them (additive).
 
-  Commit: `test(engine): [red] supervisor role, hold until arm, discontinuity fade-in`.
+  Commit: `test(engine): [red] supervisor role, hold until arm, discontinuity fade-in, HIL output mask`.
 - [ ] **Step 2 (GREEN): implement.**
-  - `Role::Supervisor`; `Cmd::Arm` (add `"arm"` to `OPS`); `Cmd::is_supervisor(&self)`.
+  - `Role::Supervisor`; `Cmd::Arm`, `Cmd::HilTestSignal { input, hz, dbfs, ttl_s, card_tx: Vec<u16> }` (add `"arm"`, `"hil_test_signal"` to `OPS`); `Cmd::is_supervisor(&self)`.
   - `Control` keeps `supervisor: Option<u64>`.
   - `rt::Options { hold }`: the fade stays at 0 until `RtOp::Arm`. `Processor::discontinuity` restarts the fade-in.
-  - `Status` fields filled from `StreamStats`.
+  - `rt`: a preallocated card-output mask (a fixed `[bool; MAX_TX]`, set through `RtOp`, no allocation) zeroes every unmasked output slot at encode while the HIL TTL runs; the existing test-signal generator and cap are reused.
+  - `Status` fields filled from `StreamStats` (`frames` = the measured period).
 
-  Commit: `feat(engine): [green] supervisor role, hold until arm, discontinuity fade-in`.
+  Commit: `feat(engine): [green] supervisor role, hold until arm, discontinuity fade-in, HIL output mask`.
 - [ ] **Step 3: `[card]` in the site** (`site.rs`, `deny_unknown_fields` like `[engine]`):
 
 ```toml
 # config/test-site.toml (synthetic)
 [card]
 driver = "Test Card"
+module = "testcard.dll"
 frames = 32
 pref_key = 'Software\ASIO\Test Card'
 pref_name = "PrefBuffSize"
@@ -710,9 +827,9 @@ pref_original = { kind = "dword", raw = "64" }
 
   `frames` must be 32 (I2; anything else is a site error). The table is optional for `nullrt` and required for `--backend asio`.
 - [ ] **Step 4: `run --backend asio|nullrt [--hold]`** (Windows only for `asio`; elsewhere a usage error).
-  - `run` starts with `rtpanic::install()`, `asio::install_seh_filter()`, and `iem_win::power::{set_high_priority, disable_power_throttling}` (+ CPU Sets from `[card] cpu_sets` when present, S1c).
-  - After 5 s of streaming it calls `lock_min_working_set(64)`.
-  - Refusals map to the new `EngineError::Card(String)` → exit 3: `iem_win::process::exists("reaper.exe")` (I3), `AsioError::{NoDrivers, NotFound, Refused}`, `ChannelMap` errors, `PrefError`.
+  - `run` starts with `iem_win::errmode::quiet_crashes()`, `rtpanic::install()`, `asio::install_seh_filter()`, and `iem_win::power::{set_high_priority, disable_power_throttling}` (+ CPU Sets from `[card] cpu_sets` when present, S1c).
+  - After 5 s of streaming it calls `lock_min_working_set(64)`, then `AsioStream::lock_buffers()` (`VirtualLock` of the preallocated RT buffers; a failure is logged and reported in `Status`, never fatal).
+  - Refusals map to the new `EngineError::Card(String)` → exit 3: any holder of `[card] module` (`iem_win::process::module_holders`, I3 — purpose-built, no process names; this also covers a spike window), `AsioError::{NoDrivers, NotFound, Refused}` (incl. a measured period ≠ 32), `ChannelMap` errors, `PrefError`.
   - `AsioDriver` implements `control::Driver`; `Control::tick` also exits through the shutdown path when `session_ending()`.
   - Update `USAGE` and the exit-code line: `0 shut down, 1 i/o, 2 usage or site, 3 card refused, 70 RT fault`.
 - [ ] **Step 5: `interlock --site <site.toml> --seconds 60`** (Windows):
@@ -753,9 +870,9 @@ fn sddl_for(sid: &str) -> String {
 
 ---
 
-### Task 7: Server — stage-only band activity, graceful stop, alarm link
+### Task 7: Server — stage-only band activity, graceful stop, alarm link and recipients, PIN freeze, tunnel peer
 
-**Files:** `crates/iem-core/src/config.rs`, `crates/iem-server/src/{activity,console}.rs`, `crates/iem-server/src/bin/server.rs`, `crates/iem-server/src/lib.rs`, `crates/iem-server/src/alarm_link.rs`, `crates/iem-ui` (alarm page), `config/test-site.toml`, `e2e/`.
+**Files:** `crates/iem-core/src/config.rs`, `crates/iem-server/src/{activity,console,auth,login_guard,notify}.rs`, `crates/iem-server/src/bin/server.rs`, `crates/iem-server/src/lib.rs`, `crates/iem-server/src/alarm_link.rs`, `crates/iem-ui` (alarm page), `config/test-site.toml`, `e2e/`.
 
 - [ ] **Step 1 (RED): band activity ignores non-stage inputs** (S1a finding).
   - `ActivityConfig` gains `inputs: Vec<String>` (engine input ids; default empty = every input with category `mics`).
@@ -768,7 +885,7 @@ fn sddl_for(sid: &str) -> String {
   - Unix: SIGTERM or SIGINT; Windows: `tokio::signal::windows::ctrl_break()` or `ctrl_c()`;
   - then `axum::serve(...).with_graceful_shutdown(...)` with a 5 s bound; the backup daemon and the engine client close; exit 0.
 
-  Test (Unix): spawn the server binary with a temp config, send SIGTERM, expect exit 0 within 6 s and the port free. The Windows variant is in the `windows` job with `iem_win::spawn` + `ctrl_break`.
+  Test (Unix): spawn the server binary with a temp config, send SIGTERM, expect exit 0 within 6 s and the port free. The Windows variant is in the `windows` job: the server is started with `iem_win::spawn::spawn_detached` (so `CREATE_NO_WINDOW`, its own console — the PC's exact shape) and stopped with `iem_win::console::ctrl_break`.
 - [ ] **Step 4: Alarm link.**
   - `iem-server alarm-link [--ttl-h 24]` writes one random 128-bit token (hash only) to `alarm_link.json` next to the config and prints `https://<https_domain>/alarms?t=<token>`.
   - `POST /api/alarms/subscribe {token, subscription}` accepts it once, unexpired, appends the subscription to `alarm_subscriptions.json` (atomic write) and deletes the token.
@@ -776,25 +893,38 @@ fn sddl_for(sid: &str) -> String {
   - Tests: unit (token single use, expiry, bad token 403 without a timing difference beyond the hash compare), E2E (mock push subscription, zero console errors).
 
   Commit: `feat(server): one-time alarm subscription link for the owner (S6 bootstrap)`.
-- [ ] **Step 5:** verify `notify::run_cli` only reads subscriptions (no write). If it prunes expired ones, keep that — it is the same atomic write the server uses — and document it in `server-engine.md`.
+- [ ] **Step 5: Alarm recipients vs the engineer** (P9, design §5.4; deviation from spec §4.2 recorded in the design note).
+  - `iem-server notify --to alarm|band-activity <title> <body>`: `alarm` sends only to `alarm_subscriptions.json` (exit 3 when it is empty, so the guard's precheck and its alarm path can see it); `band-activity` sends only to the engineer's subscriptions. No other audience exists.
+  - `iem-server notify --count alarm` prints the number of alarm recipients (the guard's precheck gate, ≥ 1).
+  - Verify `notify::run_cli` only reads subscriptions (no write). If it prunes expired ones, keep that — it is the same atomic write the server uses — and document it in `server-engine.md`.
+  - Tests: an alarm with engineer subscriptions only reaches nobody and exits 3; a band-activity notice never reaches an alarm recipient.
+- [ ] **Step 6: PIN changes frozen before cutover** (P9, design §5.4).
+  - `ServerConfig.pin_changes: bool` (default `true` for the library; the guard writes `false` into every `dev`/trial config).
+  - `auth`: with `pin_changes = false`, the change and reset routes answer 409 with the Slovak text "PIN sa zatiaľ mení v pôvodnej aplikácii" and change nothing.
+  - Tests (RED first): `pin_change_is_refused_while_frozen`, `pin_reset_is_refused_while_frozen`, `login_still_works_while_frozen`; an E2E case that the UI shows the text and no console error.
+- [ ] **Step 7: The tunnel peer** (design §6; the ingress itself is never edited).
+  - `login_guard` keys attempts by the socket peer. Only when the peer is one of the host's own interface addresses (read at start: loopback plus the host's own IPs) does it take `CF-Connecting-IP` as the client address; from any other peer the header is ignored.
+  - Tests: a loopback peer with `CF-Connecting-IP: 198.51.100.7` is limited per that address; a peer `192.0.2.50` (not the host) sending the same header is limited per `192.0.2.50` (the forged header changes nothing); a malformed header falls back to the peer.
+
+  Commit per step, RED before GREEN for Steps 1–2 and 6.
 
 ---
 
 ### Task 8: `iem-guard` — the pure core
 
-**Files:** create `crates/iem-guard/{Cargo.toml,src/lib.rs,src/plan.rs,src/crash.rs,src/bundle.rs,src/handover.rs,src/proto.rs,src/state.rs,src/alarms.rs}`.
+**Files:** create `crates/iem-guard/{Cargo.toml,src/lib.rs,src/plan.rs,src/crash.rs,src/bundle.rs,src/handover.rs,src/proto.rs,src/state.rs,src/alarms.rs,src/cancel.rs}`.
 
 - [ ] **Step 1: `Cargo.toml`.**
-  - Permissive; deps: `serde`, `serde_json`, `toml`, `sha2`, `thiserror`, `tracing`, `iem-win`, `iem-audio-io` (for `prefwin`), `interprocess` (guard pipe, sync), `zip` (deflate), `ureq`.
+  - Permissive; deps: `serde`, `serde_json`, `toml`, `sha2`, `thiserror`, `tracing`, `iem-win` (effects and `prefwin` — never `iem-audio-io`, so the guard does not link the ASIO host or azo), `interprocess` (guard pipe, sync), `zip` (deflate), `ureq`.
   - Two bins: `iemmixer-guard`, `iemmode`.
   - Not in the engine closure: `check_engine_deps.py` is unaffected.
-- [ ] **Step 2: `plan.rs`.**
+- [ ] **Step 2: `plan.rs`** — the planner and the event error policy.
 
 ```rust
-//! The switch planner (S6 design note §5.2). Pure: facts in, ordered steps out.
-//! Every step is conditional on facts re-read before it runs, so re-running a
-//! plan is safe; a failed or interrupted switch into dev/live unwinds with
-//! `plan(current, Mode::Event, facts)`.
+//! The switch planner and its error policy (S6 design note §5.2). Pure: facts
+//! in, ordered steps out. Every step re-reads its own facts before it acts, so
+//! re-running a plan is safe; a failed or interrupted switch into dev/live
+//! unwinds with `plan(current, Mode::Event, facts)`.
 
 use serde::{Deserialize, Serialize};
 
@@ -811,8 +941,8 @@ pub enum Mode {
 pub enum Step {
     Precheck,
     Interlock,
-    ReaperSaveQuit,
     AppStop,
+    ReaperSaveQuit,
     TuningEnter,
     Data,
     EngineStart,
@@ -824,16 +954,22 @@ pub enum Step {
     JobsCancel,
     RunnerStop,
     EngineStop,
+    /// Inserted by the runner after a failed `EngineStop` (never planned).
+    EngineHealth,
     ServerStop,
     TrayStop,
     TuningExit,
     PrefCheck,
+    HolderGone,
     ReaperStart,
     ReaperHandover,
     AppStart,
     AppHandover,
+    Fingerprint,
 }
 
+/// Read once per plan (module holders and ports included); the once-a-second
+/// watch reads the process list only (design §5.1, P10).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Facts {
     pub reaper: bool,
@@ -842,10 +978,38 @@ pub struct Facts {
     pub server: bool,
     pub tray: bool,
     pub runner: bool,
+    /// REAPER holds the driver module: it opened the card.
+    pub reaper_holds_module: bool,
+    /// The app owns ports 80/443 (the listening pid is the app's).
+    pub app_serves: bool,
+    /// A process other than REAPER and our engine holds the driver module.
+    pub other_module_holder: bool,
     /// `live` before cutover (a rehearsal): the band is there on purpose.
     pub trial: bool,
     /// Owner-instructed `--force`: skips the interlock only.
     pub force: bool,
+}
+
+pub const FACT_BITS: u32 = 11;
+
+impl Facts {
+    /// Every combination for the exhaustive tests (2^11 = 2048).
+    pub fn from_bits(b: u32) -> Self {
+        let bit = |n: u32| b & (1 << n) != 0;
+        Self {
+            reaper: bit(0),
+            app: bit(1),
+            engine: bit(2),
+            server: bit(3),
+            tray: bit(4),
+            runner: bit(5),
+            reaper_holds_module: bit(6),
+            app_serves: bit(7),
+            other_module_holder: bit(8),
+            trial: bit(9),
+            force: bit(10),
+        }
+    }
 }
 
 fn stop_iemmixer(f: &Facts, out: &mut Vec<Step>) {
@@ -869,27 +1033,47 @@ pub fn plan(from: Mode, to: Mode, f: &Facts) -> Vec<Step> {
         Mode::Event => {
             stop_iemmixer(f, &mut out);
             out.extend([Step::TuningExit, Step::PrefCheck]);
-            if !f.reaper {
+            if f.other_module_holder {
+                out.push(Step::HolderGone);
+            }
+            // A REAPER that runs without the card (its time trigger, or a start
+            // while our engine held it) is saved, quit and started again.
+            let reaper_ok = f.reaper && f.reaper_holds_module;
+            if f.reaper && !reaper_ok {
+                out.push(Step::ReaperSaveQuit);
+            }
+            if !reaper_ok {
                 out.push(Step::ReaperStart);
             }
             out.push(Step::ReaperHandover);
-            if !f.app {
+            // An app that runs but does not serve (redeployed while iem-server
+            // held the ports) is stopped through its tray command and started again.
+            let app_ok = f.app && f.app_serves;
+            if f.app && !app_ok {
+                out.push(Step::AppStop);
+            }
+            if !app_ok {
                 out.push(Step::AppStart);
             }
-            out.push(Step::AppHandover);
+            out.extend([Step::AppHandover, Step::Fingerprint]);
         }
         Mode::Dev | Mode::Live => {
             out.push(Step::Precheck);
             let band_there = to == Mode::Live && f.trial;
-            let from_band = from == Mode::Event || (from == Mode::Live && to == Mode::Dev);
+            // A running REAPER or app means the band's system is up, whatever
+            // the saved mode says (a reboot restores `event`, spec §4.1).
+            let from_band =
+                f.reaper || f.app || from == Mode::Event || (from == Mode::Live && to == Mode::Dev);
             if from_band && !band_there && !f.force {
                 out.push(Step::Interlock);
             }
-            if f.reaper {
-                out.push(Step::ReaperSaveQuit);
-            }
+            // The app first: after it nothing writes to REAPER, so the save
+            // cannot be dirtied before the quit (deviation from spec §4.3).
             if f.app {
                 out.push(Step::AppStop);
+            }
+            if f.reaper {
+                out.push(Step::ReaperSaveQuit);
             }
             stop_iemmixer(f, &mut out);
             out.extend([
@@ -908,15 +1092,137 @@ pub fn plan(from: Mode, to: Mode, f: &Facts) -> Vec<Step> {
     }
     out
 }
+
+/// `[guard] on_pref_fail` — required in the site, decided on #9 (Task 16).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrefFail {
+    StartReaperWithAlarm,
+    KeepReaperDown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Health {
+    Healthy,
+    Dead,
+    Parked,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnError {
+    /// Into dev/live: alarm, then the event plan.
+    Unwind,
+    /// Event plan: alarm and go on with the next step.
+    Continue,
+    /// Event plan: alarm and drop these later steps (they would act on a stale process).
+    Skip(&'static [Step]),
+    /// Event plan: iemmixer keeps serving the band; alarm; the plan ends here.
+    KeepServing,
+    /// Event plan: alarm, the plan ends here, the agent sends the prepared ❓.
+    StopAskOwner,
+}
+
+/// What a failed step means. `health` is read only after a failed `EngineStop`.
+pub fn on_error(to: Mode, step: Step, health: Option<Health>, pref_fail: PrefFail) -> OnError {
+    if to != Mode::Event {
+        return OnError::Unwind;
+    }
+    match step {
+        Step::EngineStop | Step::EngineHealth => match health {
+            Some(Health::Healthy) => OnError::KeepServing,
+            _ => OnError::StopAskOwner,
+        },
+        Step::PrefCheck => match pref_fail {
+            PrefFail::StartReaperWithAlarm => OnError::Continue,
+            PrefFail::KeepReaperDown => OnError::StopAskOwner,
+        },
+        Step::HolderGone | Step::ReaperSaveQuit | Step::ReaperStart => OnError::StopAskOwner,
+        Step::AppStop => OnError::Skip(&[Step::AppStart]),
+        _ => OnError::Continue,
+    }
+}
 ```
 
-  Tests:
-  - `every_event_plan_checks_the_preference_before_reaper`: for all 64 fact combinations × 3 `from` modes, `PrefCheck` precedes `ReaperStart`/`ReaperHandover`, and `EngineStop` precedes `PrefCheck`;
-  - `event_to_dev_quits_reaper_and_the_app_after_the_interlock`;
+  Tests (exact bodies for the safety-critical ones):
+
+```rust
+fn at(p: &[Step], s: Step) -> Option<usize> {
+    p.iter().position(|x| *x == s)
+}
+
+fn every(mut check: impl FnMut(Mode, Facts, Vec<Step>)) {
+    for bits in 0..(1u32 << FACT_BITS) {
+        let f = Facts::from_bits(bits);
+        for from in [Mode::Event, Mode::Dev, Mode::Live] {
+            check(from, f, plan(from, Mode::Event, &f));
+        }
+    }
+}
+
+#[test]
+fn every_event_plan_checks_the_preference_before_reaper() {
+    every(|from, f, p| {
+        let pref = at(&p, Step::PrefCheck).expect("PrefCheck in every event plan");
+        for s in [Step::ReaperStart, Step::ReaperHandover, Step::AppStart] {
+            if let Some(i) = at(&p, s) {
+                assert!(pref < i, "{from:?} {f:?}: {s:?} before PrefCheck");
+            }
+        }
+        if let Some(e) = at(&p, Step::EngineStop) {
+            assert!(e < pref, "{from:?} {f:?}: EngineStop after PrefCheck");
+        }
+    });
+}
+
+#[test]
+fn every_event_plan_ends_with_the_fingerprint() {
+    every(|_, _, p| assert_eq!(p.last(), Some(&Step::Fingerprint)));
+}
+
+#[test]
+fn failed_engine_stop_never_starts_the_app_without_reaper() {
+    for pf in [PrefFail::StartReaperWithAlarm, PrefFail::KeepReaperDown] {
+        for h in [None, Some(Health::Healthy), Some(Health::Dead), Some(Health::Parked)] {
+            let e = on_error(Mode::Event, Step::EngineStop, h, pf);
+            assert!(matches!(e, OnError::KeepServing | OnError::StopAskOwner), "{h:?}: {e:?}");
+        }
+    }
+    assert_eq!(
+        on_error(Mode::Event, Step::EngineStop, Some(Health::Healthy), PrefFail::KeepReaperDown),
+        OnError::KeepServing
+    );
+}
+
+#[test]
+fn dev_entry_with_reaper_running_always_runs_the_interlock() {
+    for from in [Mode::Event, Mode::Dev, Mode::Live] {
+        for f in [Facts { reaper: true, ..Facts::default() }, Facts { app: true, ..Facts::default() }] {
+            let p = plan(from, Mode::Dev, &f);
+            assert!(at(&p, Step::Interlock).is_some(), "{from:?} {f:?}");
+        }
+    }
+}
+
+#[test]
+fn the_app_stops_before_reaper_saves() {
+    let f = Facts { reaper: true, app: true, reaper_holds_module: true, app_serves: true, ..Facts::default() };
+    let p = plan(Mode::Event, Mode::Dev, &f);
+    let (i, a, r) = (at(&p, Step::Interlock).unwrap(), at(&p, Step::AppStop).unwrap(), at(&p, Step::ReaperSaveQuit).unwrap());
+    assert!(i < a && a < r, "{p:?}");
+}
+```
+
+  And (bodies follow the same shape):
   - `a_trial_skips_the_interlock`; `force_skips_only_the_interlock`;
-  - `live_to_dev_runs_the_interlock`; `dev_to_live_does_not`;
+  - `live_to_dev_runs_the_interlock`; `dev_to_live_does_not` (REAPER and app down);
   - `the_runner_starts_only_in_dev`;
-  - `event_in_event_only_checks` (`[TuningExit, PrefCheck, ReaperHandover, AppHandover]`);
+  - `event_in_event_only_checks`: REAPER and app up and serving → `[TuningExit, PrefCheck, ReaperHandover, AppHandover, Fingerprint]`;
+  - `a_stale_reaper_is_restarted`: `reaper` without `reaper_holds_module` → `ReaperSaveQuit` then `ReaperStart`, both after `PrefCheck`;
+  - `an_app_that_does_not_serve_is_restarted`: `app` without `app_serves` → `AppStop` then `AppStart`;
+  - `another_holder_blocks_reaper`: `other_module_holder` → `HolderGone` before any REAPER step, and `on_error(Event, HolderGone, ..) == StopAskOwner`;
+  - `a_failed_pref_check_follows_the_choice`: `Continue` for `StartReaperWithAlarm`, `StopAskOwner` for `KeepReaperDown`;
+  - `a_failed_app_stop_skips_the_app_start`;
+  - `every_dev_or_live_error_unwinds`: `on_error(Dev|Live, s, ..) == Unwind` for every step;
   - `a_failed_dev_switch_unwinds_to_event`: the facts after a failure at `EngineStart` (REAPER and app down, no engine) → the event plan starts REAPER, then the app.
 - [ ] **Step 3: `crash.rs`.**
 
@@ -991,11 +1297,12 @@ pub fn after_exit(code: Option<i32>, mode: Mode, prod: bool, session_ending: boo
   - `Record { sha, branch, run, installed_at, hil: Hil }`, with `Hil::{Pending, Green, Red}`;
   - `valid_sha` (40 lowercase hex);
   - `parse_sums(text) -> Result<Vec<(String, String)>, String>` (the `sha256  name` lines of `SHA256SUMS`; names without `/`, `\`, or `..`);
-  - `verify(dir_files: &[(name, sha256)], sums, manifest, dir_sha)` — every summed file present and equal, no unsummed file, `manifest.sha == dir_sha`;
+  - `verify(dir_files: &[(name, sha256)], sums, manifest, dir_sha)` — every summed file present and equal, no unsummed file except `SHA256SUMS` itself (it cannot sum itself), `manifest.sha == dir_sha`;
+  - `REQUIRED`: the bundle must contain `iem-engine.exe`, `iem-server.exe`, `iemmixer-guard.exe`, `iemmode.exe`, `iem-tray.exe`, `iem-migrate.exe`, `hil-v1.ps1`, `IemPc.psm1`, `manifest.json`;
   - `may_go_live(&Record) -> Result<(), String>` (`main` + `Green`);
   - `Pins { current: Option<String>, previous: Option<String> }` with `promote(sha)` and `revert()`.
 
-  Tests cover each refusal plus path traversal in sums. The zip extraction (Task 10) uses `zip` with `enclosed_name()` and refuses any entry outside the directory.
+  Tests cover each refusal, a missing required file, `SHA256SUMS` present but unsummed (accepted), any other unsummed file (refused), plus path traversal in sums. The zip extraction (Task 10) uses `zip` with `enclosed_name()` and refuses any entry outside the directory; it accepts both separators `Compress-Archive` may write.
 - [ ] **Step 5: `handover.rs`.**
 
 ```rust
@@ -1057,26 +1364,41 @@ pub fn reaper_handover(f: &ReaperFacts) -> Result<Audio, Vec<String>> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AppExit {
-    pub logged: bool,
-    pub gone: bool,
+    /// From a handle opened before the post: `None` = not signalled within 30 s.
+    pub exit_code: Option<u32>,
     pub ports_free: bool,
     pub newer_temp: bool,
+    /// Corroboration only: the app's buffered logger may never flush this line.
+    pub logged: bool,
 }
 
 pub fn app_exit(f: AppExit) -> Result<(), Vec<&'static str>> {
     let mut bad = Vec::new();
-    if !f.logged { bad.push("no tray-exit log line after the command"); }
-    if !f.gone { bad.push("the app did not exit within 30 s"); }
+    match f.exit_code {
+        None => bad.push("the app did not exit within 30 s"),
+        Some(0) => {}
+        Some(_) => bad.push("the app exited with a non-zero code: not the tray Exit path"),
+    }
     if !f.ports_free { bad.push("ports 80/443 still held"); }
     if f.newer_temp { bad.push("a temp file newer than the command: a write was cut"); }
     if bad.is_empty() { Ok(()) } else { Err(bad) }
+}
+
+/// The precheck's binary identity (design §5.3): refuse before REAPER is quit.
+pub fn app_binary(recorded: &str, now: &str) -> Result<(), String> {
+    if recorded.eq_ignore_ascii_case(now) {
+        Ok(())
+    } else {
+        Err(format!("predecessor exe changed ({now}); the exit id must be re-derived"))
+    }
 }
 ```
 
   Tests:
   - `bridge_*`: `"1"`, `""`, `"0"`, `"2"`;
   - every single failure of `reaper_handover` is named, all −∞ → `Unconfirmed`, one stage at −40 → `Confirmed`;
-  - every `app_exit` field on its own.
+  - every `app_exit` field on its own; `logged == false` alone still passes (corroboration only); exit code 1 fails;
+  - `app_binary`: equal (case-insensitive) passes, different refuses.
 - [ ] **Step 6: `proto.rs`:** guard pipe messages (u32 LE length + JSON ≤ 64 KiB, like the engine).
 
 ```rust
@@ -1089,14 +1411,23 @@ pub enum Request {
     Live { build: String, trial: bool, dry_run: bool },
     Install { zip: String },
     Activate { sha: String },
+    /// Card-masked to `[guard] hil_tx` by the guard (design §4); `card_tx` from the
+    /// request is ignored.
     TestSignal { input: String, dbfs: f64, ttl_s: f64 },
     Report { sha: String, hil: String, detail: String },
+    /// Refused unless dev, not switching, band activity quiet for 5 min and a
+    /// 60 s stage-input peak check from the engine's meters is quiet.
     JobBegin { run: u64 },
     JobEnd { run: u64 },
     InstallSite { path: String },
     ForceReopen,
     /// Dev only: stop the idle runner (bootstrap check, Task 16).
     RunnerStop,
+    /// Dev only: start `\iemmixer\iemmixer-probe` from the guard (Task 16, design §5.1).
+    ProbeTask,
+    /// Dev only: the teardown half of the event plan without REAPER, then back
+    /// into dev (Task 17; never starts REAPER, so it is not a switch).
+    RehearseTeardown,
     AlarmTest,
     AlarmAck { id: u64 },
     Quit,
@@ -1106,9 +1437,21 @@ pub enum Request {
 
   Replies are `{ok, mode, switching, alarms, detail}`. Tests: round trip of every variant; oversize and garbage frames are refused.
 - [ ] **Step 7: `state.rs`, `alarms.rs`.**
-  - The persistent guard state: `mode`, `switching: Option<{from, to, done: Vec<Step>, started}>`, `pids`, `bundles`, `pins`, `app_exit_hashes`. It is written atomically (temp, fsync, rename) and loaded with defaults.
-  - Alarms: an append-only list with ids, ack, and the newest 50 kept.
-  - Tests: round trip; a corrupt file → defaults + an alarm "guard state unreadable".
+  - The persistent guard state: `mode`, `switching: Option<{from, to, done: Vec<Step>, started}>`, `written_at` (seconds since the epoch), `pids`, `bundles`, `pins`, `interlock_retry: Option<{target, refusals, next_at}>`. It is written atomically (temp, fsync, rename) and loaded with defaults.
+  - The reboot rule (design §5.2, spec §4.1):
+
+```rust
+/// Whether a starting guard must forget its saved mode: after a reboot, or
+/// when the band's system is up without our engine, the PC is in `event`.
+pub fn reset_to_event(st: &GuardState, boot_time: u64, reaper_or_app: bool, engine: bool) -> bool {
+    boot_time > st.written_at || (reaper_or_app && !engine)
+}
+```
+
+    The daemon applies it before anything else: `mode = Event`, `switching = None`, `interlock_retry = None`, then the event plan runs (checks, plus a start of anything that runs but does not serve).
+  - Alarms: an append-only list with ids, ack, and the newest 50 kept; each carries `notified: bool` (sent to the alarm recipients) and `owner_question: bool` (the agent must send the prepared ❓).
+  - `cancel.rs`: `Cancel` (an `Arc<AtomicBool>`): `preempt`, `preempted`, `clear`, and `sleep(d) -> Result<(), Preempted>` in ≤ 100 ms slices, so every wait ends ≤ 1 s after a pre-emption.
+  - Tests: round trip; a corrupt file → defaults + an alarm "guard state unreadable"; `a_reboot_resets_the_mode_to_event` (saved `dev`, boot later than `written_at` → reset; boot earlier, REAPER up, no engine → reset; boot earlier, engine up → keep); `cancel_sleep_returns_within_a_slice`.
 
   Commit: `feat(guard): pure core — planner, crash loop, bundles, handover verdicts, protocol (S6)`.
 
@@ -1118,61 +1461,86 @@ pub enum Request {
 
 **Files:** `crates/iem-guard/src/pc.rs`, `crates/iem-guard/src/win/{mod,reaper,app,card,tasks,procs}.rs`.
 
-- [ ] **Step 1: The trait** (every method bounded in time; no method ends a process):
+- [ ] **Step 1: The trait.** Every method is bounded in time, no method ends a process, and every method that waits takes the cancel token and returns `Err(Preempted)` within 1 s of a pre-emption (design §5.2). Mutating calls finish their mutation first (a save, a quit command, a registry write), then honour the token.
 
 ```rust
+pub type R<T> = Result<T, StepError>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StepError {
+    Preempted,
+    Failed(String),
+}
+
 pub trait Pc {
+    /// Once a second: the process list only (P10) — the pids of REAPER, the app,
+    /// engine, server, tray and runner.
+    fn procs(&mut self) -> Procs;
+    /// Once per plan: processes, driver-module holders, port owners (design §5.1).
     fn facts(&mut self) -> Facts;
-    fn reaper_meters(&mut self, seconds: u32) -> Result<Vec<f64>, String>;   // stage tracks, max dBFS each
-    fn engine_interlock(&mut self, seconds: u32) -> Result<(bool, String), String>;
-    fn reaper_save_quit(&mut self) -> Result<(), String>;      // 40026, mtime changed ≤ 15 s; 40004; gone ≤ 30 s; module unheld
-    fn app_stop(&mut self) -> Result<AppExit, String>;         // post the tray command, observe
-    fn tuning(&mut self, verb: &str) -> Result<String, String>;// the elevated task; "absent" when no module
-    fn pref_check(&mut self) -> Result<(), String>;            // read; restore original if not (read back)
-    fn data(&mut self, mode: Mode) -> Result<String, String>;  // recover, shadow report / import
-    fn engine_start(&mut self, hold: bool) -> Result<u32, String>;
-    fn engine_ready(&mut self, secs: u32) -> Result<Status, String>; // supervisor pipe; missed == 0 for secs
-    fn engine_arm(&mut self) -> Result<(), String>;
-    fn engine_stop(&mut self) -> Result<(), String>;           // Shutdown, DriverReleased ≤ 10 s, gone ≤ 5 s
-    fn server_start(&mut self, mode: Mode) -> Result<u32, String>;
-    fn server_stop(&mut self) -> Result<(), String>;           // ctrl-break, gone ≤ 10 s, ports free
-    fn tray_start(&mut self) -> Result<(), String>;
-    fn tray_stop(&mut self) -> Result<(), String>;             // Quit over the guard pipe
-    fn identity(&mut self, sha: &str) -> Result<(), String>;   // LAN 80/443 + public host /api/version, tunnel ready
-    fn runner_start(&mut self) -> Result<(), String>;
-    fn runner_stop(&mut self) -> Result<(), String>;           // only when idle; ctrl-break
-    fn reaper_start(&mut self) -> Result<(), String>;          // \iemmixer\iemmixer-StartREAPER; refuses with an engine or a module holder
-    fn reaper_facts(&mut self) -> Result<ReaperFacts, String>; // ≤ 120 s wait for the track count; bridge once
-    fn app_start(&mut self) -> Result<(), String>;             // \iemmixer\iemmixer-StartApp
-    fn app_answers(&mut self) -> Result<(), String>;           // /api/version, /api/members count, public host
-    fn notify(&mut self, title: &str, body: &str) -> Result<i32, String>;
+    fn precheck(&mut self, to: Mode, trial: bool) -> R<()>;           // bundle, HIL, pc_tests_passed (trial), ≥ 1 alarm recipient, no engine, app exe hash
+    fn reaper_meters(&mut self, seconds: u32, c: &Cancel) -> R<Vec<f64>>; // stage tracks, max dBFS each
+    fn engine_interlock(&mut self, seconds: u32, c: &Cancel) -> R<(bool, String)>;
+    fn reaper_save_quit(&mut self, c: &Cancel) -> R<()>;              // 40026; mtime changed ≤ 15 s; no dialog; 40004; gone ≤ 30 s; module unheld
+    fn app_stop(&mut self, c: &Cancel) -> R<AppExit>;                 // handle first, post the tray command, observe
+    fn tuning(&mut self, verb: &str, c: &Cancel) -> R<String>;        // the elevated task; "absent" when no module
+    fn tuning_drift(&mut self) -> R<Option<String>>;                  // native reads (plan GUID, service state); mode change + hourly
+    fn pref_check(&mut self) -> R<u32>;                               // prefwin::restore(.., 3): attempts used
+    fn data(&mut self, mode: Mode, c: &Cancel) -> R<String>;          // iem-migrate band, recover, shadow report / import
+    fn engine_start(&mut self, hold: bool) -> R<u32>;
+    fn engine_ready(&mut self, secs: u32, c: &Cancel) -> R<Status>;   // frames 32 measured, missed == 0 for secs; one restart of the window
+    fn engine_arm(&mut self) -> R<()>;
+    fn engine_stop(&mut self, c: &Cancel) -> R<()>;                   // Shutdown, DriverReleased ≤ 10 s, gone ≤ 5 s
+    fn engine_health(&mut self) -> R<Health>;                         // supervisor Status twice 1 s apart: callbacks advancing, !faulted, !parked
+    fn engine_stage_peaks(&mut self, seconds: u32, c: &Cancel) -> R<Vec<f64>>; // from the Meters events; no card reopen
+    fn server_start(&mut self, mode: Mode) -> R<u32>;                 // config with pin_changes = false before cutover
+    fn server_stop(&mut self, c: &Cancel) -> R<()>;                   // console::ctrl_break, gone ≤ 10 s, ports free
+    fn band_quiet_for(&mut self) -> R<Duration>;                      // the server's band-activity state
+    fn tray_start(&mut self) -> R<()>;
+    fn tray_stop(&mut self, c: &Cancel) -> R<()>;                     // Quit over the guard pipe
+    fn identity(&mut self, sha: &str, c: &Cancel) -> R<()>;           // LAN 80/443 + public host /api/version, tunnel ready
+    fn runner_start(&mut self) -> R<()>;
+    fn runner_stop(&mut self, c: &Cancel) -> R<()>;                   // only when idle; console::ctrl_break
+    fn holder_gone(&mut self, c: &Cancel) -> R<()>;                   // ≤ 30 s for a foreign module holder to leave
+    fn reaper_start(&mut self) -> R<()>;                              // our task (or the direct spawn, design §5.1); refuses with an engine or a module holder
+    fn reaper_facts(&mut self, c: &Cancel) -> R<ReaperFacts>;         // ≤ 120 s wait for the track count; bridge once
+    fn app_start(&mut self) -> R<()>;
+    fn app_answers(&mut self, c: &Cancel) -> R<()>;                   // /api/version, /api/members count, public host
+    fn fingerprint(&mut self) -> R<()>;                               // S1c REAPER-mode fingerprint via the tuning task (`state`)
+    fn probe_task(&mut self) -> R<()>;                                // \iemmixer\iemmixer-probe from the guard
+    fn notify(&mut self, audience: Audience, title: &str, body: &str) -> R<()>; // Audience::{Alarm, BandActivity}
 }
 ```
 
-  `FakePc` records calls and has scripted results. `daemon` tests use it.
+  `FakePc` records `(Step or call, Instant)`, has scripted results per call, and can block a waiting call until its `Cancel` fires (the way `WinPc` waits). `daemon` tests use it.
 - [ ] **Step 2: `WinPc`.** Settings come from `[guard]` and `[card]` of the site plus `$LOCALAPPDATA\iemmixer\guard\pc.toml` (paths).
+  - **Facts (`win/procs.rs`):** `procs()` = `process::pids` for the configured images only. `facts()` adds `module_holders([card] module)` (→ `reaper_holds_module`, `other_module_holder`) and `listening(80/443)` compared with the app's pid (→ `app_serves`).
   - **REAPER edge (`win/reaper.rs`):**
     - `ureq` against the configured control URL (`/_/40026`, `/_/40004`, `/_/NTRACK`, `/_/GET/EXTSTATE/<section>/<key>`, `/_/<action>`, `/_/TRACK` for peaks of the stage tracks);
     - the project file's mtime;
-    - `iem_win::window::has_dialog(pid)`;
+    - `iem_win::window::has_dialog(pid)` right after 40026: a dialog aborts before 40004 (alarm with the dialog's presence; the app is already down, so nothing new can dirty the project);
     - `iem_win::process::module_holders`.
 
     The parser for REAPER's tab lines is a portable function with tests, a port of `ConvertFrom-SpikeReaperLine`.
   - **App edge (`win/app.rs`):**
     1. `pids(app_image)` → exactly one, else error;
-    2. `find_owned(tray_class, pid)` → hwnd;
-    3. note the time, `post_command(hwnd, exit_id)`;
-    4. `wait_gone(pid, 30 s)`;
-    5. read the app's newest log file for `exit_log_line` with a timestamp ≥ the post (a portable parser, tested);
+    2. `find_owned(tray_class, pid)` → hwnd (the tray library's top-level window);
+    3. `Handle::open_waitable(pid)` **before** the post (a recycled pid can never answer for it);
+    4. note the time, `post_command(hwnd, exit_id)`;
+    5. `handle.wait(30 s)` in 1 s slices (cancel) → the exit code; success needs `Some(0)`;
     6. `listening(80)`/`listening(443)` = None;
     7. no `*.tmp` newer than the post under the app data dir;
-    8. record the exe's SHA-256 in the state.
-  - **Card edge (`win/card.rs`):** `PrefStore` over `iem_win::registry` for `prefwin::leave` (restore) and read; holders.
-  - **Tasks (`win/tasks.rs`):** `schtasks.exe /Run /TN <name>` (argv, no shell); `/Query /TN <name> /FO CSV /V` for status (a portable parser).
+    8. read the app's newest log file for `exit_log_line` with a timestamp ≥ the post (a portable parser, tested) — recorded as corroboration, never required.
+
+    `precheck` computes the exe's SHA-256 and compares it with `[guard] app_exe_sha256` (`handover::app_binary`); a mismatch refuses the switch before REAPER is touched.
+  - **Card edge (`win/card.rs`):** `iem_win::registry::HkcuPref` for `prefwin::restore(.., 3)` (each attempt read back); holders.
+  - **Tasks (`win/tasks.rs`):** `schtasks.exe /Run /TN <name>` (argv, no shell); `/Query /TN <name> /FO CSV /V` for status (a portable parser). When `[guard] start_direct = true` (the probe task was refused at bootstrap, design §5.1), `reaper_start`/`app_start` use `spawn_detached` of the configured exe with its working directory instead.
   - **Processes (`win/procs.rs`):**
     - `spawn_detached` for engine/server/tray/runner, with `CREATE_NEW_PROCESS_GROUP` for server and runner;
+    - stops through `iem_win::console::ctrl_break(pid)` (attach to the child's console, design §5.5);
     - pid files and adoption (pid + image path + start time must match);
-    - the supervisor pipe client (sync `interprocess`, hello `role: supervisor`).
+    - the supervisor pipe client (sync `interprocess`, hello `role: supervisor`), which also collects `Meters` for `engine_stage_peaks`.
+  - **Drift (`tuning_drift`):** the active power plan GUID and the service start types S1c records, read natively (no PowerShell, no elevation).
 - [ ] **Step 3:** `.cargo/mutants.toml` excludes `crates/iem-guard/src/win/**` (reason: Windows effects, not compiled on Linux; decisions are in `plan`/`crash`/`bundle`/`handover`/parsers). The portable parsers stay mutated. Commit: `feat(guard): PC effects behind the Pc trait (Windows) and a fake for tests`.
 
 ---
@@ -1182,50 +1550,211 @@ pub trait Pc {
 **Files:** `crates/iem-guard/src/daemon.rs`, `crates/iem-guard/src/bin/{iemmixer-guard,iemmode}.rs`, `crates/iem-guard/src/install.rs`.
 
 - [ ] **Step 1: Daemon loop** (`iemmixer-guard run`):
-  - Take the single-instance mutex `Local\iemmixer-guard`; if taken, exit 0 with "already running".
-  - Load state; adopt children; if `switching` is set, re-plan to `Event` unless the recorded target was `Event` (then resume it).
-  - Open the guard pipe: the same hardening as the engine (Task 6), name `iemmixer-guard`.
-  - A `SessionEndWindow`: on session end, stop respawning, wait ≤ 10 s for the engine's own exit, and stop the server and tray.
-  - Every 1 s:
+  - Take `iem_win::sync::GlobalMutex::try_take("iemmixer-guard")` (`Global\`, so a session-0 `run` over ssh meets the same mutex); if taken, exit 0 with "already running".
+  - Load state. Apply `state::reset_to_event(..)` with `process::boot_time()` and `procs()` first (design §5.2: after a reboot the PC is in `event`); then adopt children; if `switching` is still set, re-plan to `Event` unless the recorded target was `Event` (then resume it).
+  - Open the guard pipe: the same hardening as the engine (Task 6), name `iemmixer-guard`. CLI mutations (`install`, `activate`, switches) run only through this pipe; `iemmixer-guard install <zip>` without a running guard takes the same global mutex.
+  - A `SessionEndWindow` (hidden top-level): on session end, stop respawning, wait ≤ 10 s for the engine's own exit, and stop the server and tray.
+  - Every 1 s: `procs()` only (the process list — P10):
     - watch the children and apply `crash::after_exit`;
     - watch for `reaper.exe` or the app appearing in `dev`/`live` (alarm once per appearance);
-    - poll tuning `state` every 60 s (drift → alarm).
-- [ ] **Step 2: Switch runner.**
-  - One worker thread runs `plan(...)` step by step, persisting `switching.done` before each step. Each step is one `Pc` call.
+    - a due `interlock_retry` starts its switch again (below).
+  - On each mode change and hourly: `tuning_drift()` (native reads; drift → alarm). Module holders and ports are read only by `facts()` inside a switch.
+- [ ] **Step 2: Switch runner — exact code of the error policy** (design §5.2; `plan::on_error`):
+
+```rust
+/// How a switch ended; the mode is in `g.state.mode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    Done,
+    /// "ide event" found a healthy engine that did not release: iemmixer keeps serving.
+    KeptServing,
+    /// The plan stopped; the owner gets the prepared ❓ (alarm flagged `owner_question`).
+    NeedsOwner,
+}
+
+pub fn run_switch(pc: &mut dyn Pc, g: &mut Guard, from: Mode, to: Mode) -> Outcome {
+    let steps = plan(from, to, &pc.facts());
+    g.begin(from, to, &steps); // persists `switching`
+    let mut skip: Vec<Step> = Vec::new();
+    for step in steps {
+        if skip.contains(&step) {
+            continue;
+        }
+        if to != Mode::Event && g.cancel.preempted() {
+            return back_to_event(pc, g, "pre-empted by event");
+        }
+        g.persist_before(step);
+        match run_step(pc, g, step, to) {
+            Ok(()) => g.done(step),
+            Err(StepError::Preempted) if to != Mode::Event => {
+                return back_to_event(pc, g, "pre-empted by event");
+            }
+            Err(e) => {
+                let why = match &e {
+                    StepError::Failed(s) => s.clone(),
+                    StepError::Preempted => "pre-empted inside the event plan".into(),
+                };
+                let health = (to == Mode::Event && step == Step::EngineStop).then(|| {
+                    g.persist_before(Step::EngineHealth);
+                    pc.engine_health().unwrap_or(Health::Dead)
+                });
+                match on_error(to, step, health, g.site.on_pref_fail) {
+                    OnError::Unwind => {
+                        g.alarm(step, &why, false);
+                        return back_to_event(pc, g, &why);
+                    }
+                    OnError::Continue => g.alarm(step, &why, false),
+                    OnError::Skip(later) => {
+                        g.alarm(step, &why, false);
+                        skip.extend_from_slice(later);
+                    }
+                    OnError::KeepServing => {
+                        g.alarm(step, &format!("{why}; engine healthy, iemmixer keeps serving"), true);
+                        return g.finish(Outcome::KeptServing, from);
+                    }
+                    OnError::StopAskOwner => {
+                        g.alarm(step, &format!("{why}; health {health:?}"), true);
+                        return g.finish(Outcome::NeedsOwner, Mode::Event);
+                    }
+                }
+            }
+        }
+    }
+    g.finish(Outcome::Done, to)
+}
+
+fn back_to_event(pc: &mut dyn Pc, g: &mut Guard, why: &str) -> Outcome {
+    g.cancel.clear();
+    g.info(&format!("unwinding to event: {why}"));
+    let now = g.state.mode;
+    run_switch(pc, g, now, Mode::Event)
+}
+```
+
+  `run_step` maps each `Step` to exactly one `Pc` call with `&g.cancel` (`AppStop` also applies `handover::app_exit`; `Interlock` uses `reaper_meters` when REAPER runs, else `engine_interlock`; `EngineArm` = `engine_ready(10)` then `engine_arm`; `ReaperHandover` = `reaper_facts` + `handover::reaper_handover`; `Fingerprint` = `fingerprint`). `g.alarm(.., owner_question)` writes the alarm file and sends `notify(Audience::Alarm, ..)`; the agent turns an `owner_question` alarm into the prepared Slovak ❓ (ops runbook texts). `g.finish` sets `mode`, clears `switching`, persists, and runs `tuning_drift` once.
   - Requests arriving meanwhile:
-    - `Event` → sets `preempt`; the runner stops after the current step and runs `plan(current, Event, facts())`;
+    - `Event` → `g.cancel.preempt()`; a waiting step returns `Preempted` within 1 s, a mutating step finishes first; then `back_to_event`. During an event plan `Event` is answered `already switching to event` and never touches the token;
     - `Status` is answered;
-    - `JobBegin`, `Install`, `Activate`, `TestSignal` and `Report` are refused with `switching`;
+    - `JobBegin`, `Install`, `Activate`, `TestSignal`, `Report`, `ProbeTask`, `RehearseTeardown` are refused with `switching`;
     - `Dev`/`Live` get `busy`.
-  - Any step error → alarm with the step name, then the event plan (for a dev/live target). An error in the event plan → alarm (`G3`: fail loudly), continue with the remaining steps whose preconditions hold, and never start REAPER after a failed `PrefCheck` or `EngineStop`.
-  - `--dry-run` prints the plan and runs read-only checks only (facts, preference read, bundle record, subscriptions).
-- [ ] **Step 3: `install.rs`** (`iemmixer-guard install <zip>`; the same code behind `Request::Install`):
-  - extract into `bundles\<sha>.partial` (`enclosed_name`), verify (`bundle::verify`), rename;
+  - **Interlock refusals** (activity, not an error of the check): `interlock_retry = {target, refusals + 1, next_at = now + 15 min}`; on the fourth refusal one `Alarm` notice to the owner ("na pódiu je signál, prepnutie čaká"); after the eighth the retry is dropped and `iemmode status` says so; "ide event" or a new request clears it.
+  - **`engine_ready`**: one warm-up miss restarts the 10 s window once; a second miss fails the step.
+  - **`JobBegin`**: refused unless `mode == Dev`, not switching, `band_quiet_for() ≥ 5 min`, and `engine_stage_peaks(60)` all below −50 dBFS.
+  - **`TestSignal`**: sent to the engine as `HilTestSignal` with `card_tx = [guard] hil_tx`.
+  - **`RehearseTeardown`** (dev only): `EngineStop` → `ServerStop` → `TrayStop` → `TuningExit` → `PrefCheck` with the event error policy, then asserts `facts()` shows no module holder, `prefwin` reads the original, and ports 80/443 are free, then `run_switch(pc, g, Mode::Dev, Mode::Dev)`. It never plans a REAPER or app step.
+  - `--dry-run` prints the plan and runs read-only checks only (facts, preference read, bundle record, alarm recipients).
+- [ ] **Step 3: `install.rs`** (`iemmixer-guard install <zip> [--verify-only]`; the same code behind `Request::Install`):
+  - extract into `bundles\<sha>.partial` (`enclosed_name`), verify (`bundle::verify`, `REQUIRED`), rename; `--verify-only` extracts into a temp directory, verifies and deletes only that temp directory (CI's check, Task 12);
   - an existing `<sha>` with identical sums is a no-op; different sums → refuse (alarm);
-  - `activate` copies `iemmixer-guard.exe` and `iemmode.exe` into `bin\`: rename the running file to `*.old-<sha>`, copy, and delete old copies at the next start;
+  - `activate` copies `iemmixer-guard.exe` and `iemmode.exe` into `bin\`: rename the running file to `*.old-<sha>`, copy, and delete old copies at the next start; it asks `\iemmixer\iemmixer-exclude` for the new SHA's Defender process exclusions (design §5.1);
   - the guard then hands over: it spawns the new `bin\iemmixer-guard.exe run` detached and exits 0 after releasing the mutex (the new one waits ≤ 10 s for it).
 - [ ] **Step 4: `iemmode`.**
   - Connect to the guard pipe; if absent, `schtasks /Run /TN \iemmixer\iemmixer-guard` and retry for ≤ 15 s.
+  - `event --direct`: when no guard answers, take the global mutex (free only when no guard runs), load the state, and run `run_switch(WinPc, .., Event)` in this process; if the mutex is taken, exit 1 ("a guard runs; use the pipe"). `iempc event` uses it on exit 4.
   - Subcommands:
 
     ```
-    iemmode status | event [--dry-run] | dev [--build SHA] [--force] [--dry-run]
+    iemmode status | event [--dry-run] [--direct] | dev [--build SHA] [--force] [--dry-run]
     iemmode live --build SHA [--trial] [--dry-run] | install <zip> | activate <sha>
     iemmode test-signal <input> <dbfs> <ttl> | report <sha> <green|red> <detail>
     iemmode job-begin <run> | job-end <run> | install-site <file> | force-reopen | runner-stop
-    iemmode alarm-test | alarm-ack <id> | quit
+    iemmode probe-task | rehearse-teardown | alarm-test | alarm-ack <id> | quit
     ```
 
   - Output: one JSON reply, and the alarms list on every call (spec §4.2). Exit 0 ok, 1 refused/failed, 2 usage, 4 guard unreachable.
-- [ ] **Step 5: Tests** (`FakePc`, a temp state dir, the Unix socket variant of the guard pipe):
-  - `event_preempts_a_running_dev_switch` (a blocked `EngineStart` fake step, then `Event` → after it the event plan runs);
+- [ ] **Step 5: Tests** (`FakePc`, a temp state dir, the Unix socket variant of the guard pipe). Exact bodies for the safety-critical ones:
+
+```rust
+fn band_up() -> Facts {
+    Facts { reaper: true, app: true, reaper_holds_module: true, app_serves: true, ..Facts::default() }
+}
+
+fn iemmixer_up() -> Facts {
+    Facts { engine: true, server: true, tray: true, ..Facts::default() }
+}
+
+#[test]
+fn preempt_during_interlock_starts_event_within_1s() {
+    let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
+    pc.block_until_cancel(Call::ReaperMeters);
+    let c = g.cancel.clone();
+    let fired = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        c.preempt();
+        Instant::now()
+    });
+    run_switch(&mut pc, &mut g, Mode::Event, Mode::Dev);
+    let at = fired.join().unwrap();
+    assert!(!pc.called(Call::AppStop) && !pc.called(Call::ReaperSaveQuit));
+    let first_event_call = pc.first_after(at).expect("the event plan ran");
+    assert!(first_event_call.1.duration_since(at) < Duration::from_secs(1));
+    assert_eq!(g.state.mode, Mode::Event);
+}
+
+#[test]
+fn event_preempts_a_running_dev_switch() {
+    let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Event));
+    pc.delay(Call::EngineStart, Duration::from_millis(300)); // a mutating step finishes
+    let c = g.cancel.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        c.preempt();
+    });
+    run_switch(&mut pc, &mut g, Mode::Event, Mode::Dev);
+    assert!(pc.called(Call::EngineStart));
+    assert!(!pc.called(Call::EngineArm));
+    assert!(pc.index(Call::EngineStop) > pc.index(Call::EngineStart));
+    assert!(pc.called(Call::ReaperStart) && pc.called(Call::AppStart));
+}
+
+#[test]
+fn a_healthy_engine_keeps_serving_when_release_times_out() {
+    let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
+    pc.fail(Call::EngineStop, "no DriverReleased within 10 s");
+    pc.health(Health::Healthy);
+    assert_eq!(run_switch(&mut pc, &mut g, Mode::Dev, Mode::Event), Outcome::KeptServing);
+    for c in [Call::ServerStop, Call::TrayStop, Call::ReaperStart, Call::AppStart] {
+        assert!(!pc.called(c), "{c:?} after a failed release");
+    }
+    assert_eq!(g.state.mode, Mode::Dev);
+    assert!(g.alarms.last().unwrap().owner_question);
+}
+
+#[test]
+fn a_parked_engine_stops_the_plan_and_asks_the_owner() {
+    let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
+    pc.fail(Call::EngineStop, "no DriverReleased within 10 s");
+    pc.health(Health::Parked);
+    assert_eq!(run_switch(&mut pc, &mut g, Mode::Dev, Mode::Event), Outcome::NeedsOwner);
+    assert_eq!(pc.calls_after(Call::EngineHealth), Vec::<Call>::new());
+}
+
+#[test]
+fn a_failed_pref_check_follows_on_pref_fail() {
+    for (choice, starts) in [(PrefFail::KeepReaperDown, false), (PrefFail::StartReaperWithAlarm, true)] {
+        let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
+        g.site.on_pref_fail = choice;
+        pc.fail(Call::PrefCheck, "3 restores failed");
+        run_switch(&mut pc, &mut g, Mode::Dev, Mode::Event);
+        assert_eq!(pc.called(Call::ReaperStart), starts, "{choice:?}");
+        assert!(g.alarms.iter().any(|a| a.step == Some(Step::PrefCheck)));
+    }
+}
+```
+
+  And (bodies in the same shape):
   - `a_restarted_guard_unwinds_a_half_done_dev_switch`;
-  - `jobs_are_refused_while_switching`;
+  - `a_reboot_resets_the_mode_to_event` (daemon start with saved `dev`, boot later than `written_at` → mode `event`, `switching` dropped, the event plan's checks ran);
+  - `direct_event_runs_without_a_guard` (the `--direct` path with `FakePc` runs the same event plan; with the mutex taken it refuses);
+  - `jobs_are_refused_while_switching`; `job_begin_needs_a_quiet_stage` (4 min quiet refused; 5 min quiet but a −30 dBFS stage peak refused; quiet both → accepted);
+  - `interlock_refusals_retry_every_15_min_and_alarm_once`;
+  - `engine_ready_restarts_its_window_once`;
+  - `rehearse_teardown_never_starts_reaper` (and it re-enters dev);
   - `session_end_stops_respawning`;
   - `dry_run_changes_nothing` (the fake records no mutating call);
-  - install happy path, tampered file, traversal entry, existing SHA with different sums.
+  - install happy path, tampered file, traversal entry, missing required file, existing SHA with different sums, `--verify-only` leaves no bundle directory.
 
-  Commit: `feat(guard): daemon, switch runner with pre-emption, install/activate, iemmode CLI`.
+  Commit: `feat(guard): daemon, switch runner with pre-emption and error policy, install/activate, iemmode CLI`.
 
 ---
 
@@ -1239,14 +1768,14 @@ pub trait Pc {
 
 ---
 
-### Task 12: CI — windows job, bundle, attest, dispatch; integrity; rule
+### Task 12: CI — windows job, bundle, attest; integrity; PC bootstrap module; rule
 
-**Files:** `.github/workflows/ci.yml`, `scripts/check_integrity.py` (+test), `scripts/iem-pc/IemPc.psm1`, `scripts/iem-pc/Test-IemPc.ps1`, `.claude/rules/guard.md`, `CLAUDE.md`.
+**Files:** `.github/workflows/ci.yml`, `scripts/check_integrity.py` (+test), `scripts/iem-pc/IemPc.psm1`, `scripts/iem-pc/Test-IemPc.ps1`, `scripts/iem-pc/hil-v1.ps1`, `.claude/rules/guard.md`, `CLAUDE.md`.
 
 - [ ] **Step 1: `windows` job.**
   - Add `cargo clippy --locked -p iem-win -p iem-guard --all-targets -- -D warnings`.
   - Add `cargo test --locked -p iem-win -p iem-guard -p iem-audio-io` and `cargo test --locked -p iem-engine --test pipes`.
-  - Run `powershell -NoProfile -File scripts/iem-pc/Test-IemPc.ps1` (Windows PowerShell 5.1).
+  - Run `powershell -NoProfile -File scripts/iem-pc/Test-IemPc.ps1` (Windows PowerShell 5.1) and a parse check of `hil-v1.ps1` (`[System.Management.Automation.Language.Parser]::ParseFile`, zero errors).
 - [ ] **Step 2: `bundle` job** (windows-2025; `needs: [windows]`; every push and PR, but uploads only on `push` to `dev`/`main`).
 
 ```yaml
@@ -1265,13 +1794,14 @@ pub trait Pc {
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Build (release)
-        run: cargo build --locked --release -p iem-engine -p iem-server -p iem-guard -p iem-tray
+        run: cargo build --locked --release -p iem-engine -p iem-server -p iem-guard -p iem-tray -p iem-migrate
       - name: Zip with manifest and sums
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $b = Join-Path $env:RUNNER_TEMP 'bundle'; New-Item -ItemType Directory -Force -Path $b | Out-Null
-          Copy-Item target/release/iem-engine.exe, target/release/iem-server.exe, target/release/iemmixer-guard.exe, target/release/iemmode.exe, target/release/iem-tray.exe -Destination $b
+          Copy-Item target/release/iem-engine.exe, target/release/iem-server.exe, target/release/iemmixer-guard.exe, target/release/iemmode.exe, target/release/iem-tray.exe, target/release/iem-migrate.exe -Destination $b
+          Copy-Item scripts/iem-pc/hil-v1.ps1, scripts/iem-pc/IemPc.psm1 -Destination $b
           Copy-Item crates/iem-engine/LICENSE -Destination (Join-Path $b 'LICENSE-iem-engine')
           if (Test-Path scripts/pc-tuning) { Copy-Item -Recurse scripts/pc-tuning (Join-Path $b 'tuning') }
           $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
@@ -1280,6 +1810,12 @@ pub trait Pc {
           $lines = Get-ChildItem -LiteralPath $b -File -Recurse | Sort-Object FullName | ForEach-Object { '{0}  {1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.FullName.Substring($b.Length + 1).Replace('\','/') }
           [IO.File]::WriteAllText((Join-Path $b 'SHA256SUMS'), (($lines -join "`n") + "`n"))
           Compress-Archive -Path (Join-Path $b '*') -DestinationPath (Join-Path $env:RUNNER_TEMP "iemmixer-$env:GITHUB_SHA.zip")
+      - name: Verify the zip with the code that installs it
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & target/release/iemmixer-guard.exe install --verify-only (Join-Path $env:RUNNER_TEMP "iemmixer-$env:GITHUB_SHA.zip")
+          if ($LASTEXITCODE -ne 0) { throw "bundle verify failed ($LASTEXITCODE)" }
       - name: Upload (dev/main pushes only, P5)
         if: github.event_name == 'push'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -1291,7 +1827,7 @@ pub trait Pc {
 ```
 
   `bundle.rs` must accept `/`-separated names in sums for the `tuning/` subdirectory: adjust `parse_sums` to allow one level of `tuning/<name>` and still refuse `..` and absolute paths (test).
-- [ ] **Step 3: `attest` and `hil-dispatch`.** Resolve the pins first; the integrity scan requires full SHAs:
+- [ ] **Step 3: `attest`** (no dispatch job: the agent dispatches HIL from the dev box, design §7). Resolve the pins first; the integrity scan requires full SHAs:
 
 ```bash
 for a in actions/download-artifact actions/attest-build-provenance; do
@@ -1322,50 +1858,39 @@ for a in actions/download-artifact actions/attest-build-provenance; do
         with:
           subject-name: iemmixer-${{ github.sha }}.zip
           subject-digest: ${{ steps.d.outputs.digest }}
-
-  hil-dispatch:
-    name: hil-dispatch
-    if: github.event_name == 'push'
-    needs: [attest]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions: {}
-    steps:
-      - name: Dispatch the ops HIL workflow (its only dispatchable workflow)
-        env:
-          GH_TOKEN: ${{ secrets.HIL_DISPATCH_TOKEN }}
-          DIGEST: ${{ needs.attest.outputs.digest }}
-        run: |
-          set -euo pipefail
-          gh workflow run hil.yml -R zbynekdrlik/iemmixer-ops -f sha="$GITHUB_SHA" -f branch="${GITHUB_REF#refs/heads/}" -f run="$GITHUB_RUN_ID" -f digest="$DIGEST"
 ```
 
-  `HIL_DISPATCH_TOKEN` is a fine-grained token with `actions: write` on the ops repo only. The owner's account creates it; the agent stores it with `gh secret set` via `airuleset.py secret exec`, never in chat. The ops repo has one `workflow_dispatch` workflow, so the token can trigger nothing else (spec §5.2). The `asio-spike` job stays (S1c uses it).
+  No secret is added to the public repository; the owner creates no token. `iempc dispatch-hil` (Task 14) dispatches ops `hil.yml` with the green run's SHA, branch, run id and the `attest` digest (read from the run's job output via `gh run view --json`), using the dev box's existing `gh` authentication. Deviation from spec §5.2, recorded in the design note (§7, §11). The `asio-spike` job stays (S1c uses it).
 - [ ] **Step 4: Integrity.**
   - `check_integrity.py` scans the new crate directories (already covered by `crates/`).
   - It now also fails on `CREATE_BREAKAWAY_FROM_JOB` outside `crates/iem-win/`.
   - Test: `test_force_kill_words_in_comments_are_refused` (already true — assert it for the new crates).
 - [ ] **Step 5: `IemPc.psm1`** (bootstrap on the PC; runs elevated over ssh; every function idempotent with a read-back). Exports:
-  - `Register-IemTasks` (guard, StartREAPER unchanged, StartApp, tuning (Highest), logon (Highest, at logon of the user): Interactive, no time limit `PT0S`, `IgnoreNew`, no idle/battery stop);
+  - `Register-IemTasks` (guard, StartREAPER unchanged, StartApp, probe (`cmd /c exit 0`), tuning (Highest), exclude (Highest), logon (Highest, at logon of the user): Interactive, no time limit `PT0S`, `IgnoreNew`, no idle/battery stop, **restart on failure** 3 × `PT1M` (spec §2.1)). Every task is registered through `Schedule.Service` → `RegisterTaskDefinition(path, def, 6 /* create or update */, $user, $null, 3 /* interactive token */, $sddl)` (Highest tasks: their own run level and principal, same SDDL) with `$sddl = "D:(A;;GRGX;;;$userSid)(A;;FA;;;BA)(A;;FA;;;SY)"`, so the Limited guard may run it; the read-back compares `GetSecurityDescriptor(4)` with that string;
   - `Set-IemRootAcl` (protected DACL: user, SYSTEM, Administrators; inheritance on);
   - `Add-IemFirewallRule` (TCP 80,443 inbound, private/domain profiles, named `iemmixer-http`);
   - `Test-IemServiceRight` / `Grant-IemServiceRight -Service <name>` (adds `RPWPLO` for the user SID to the service SDDL; prints before/after);
-  - `Add-IemDefenderExclusion -Path` (S1c G4; the root only);
-  - `Register-IemRunner` (unzip the pinned runner, `config.cmd --unattended --url https://github.com/zbynekdrlik/iemmixer-ops --labels iem-pc --work _work --replace` with a one-time registration token passed via stdin, never on the command line);
+  - `Set-IemDefenderExclusion -Sha <40 hex>` (S1c G4, run by the `exclude` task): re-verifies `bundles\<sha>\SHA256SUMS` itself, adds **process** exclusions for exactly that directory's `*.exe` (full paths), removes those of SHAs that are neither `current` nor `previous`; never a folder exclusion on the user-writable root;
+  - `Register-IemRunner` (unzip the pinned runner, `config.cmd --unattended --url https://github.com/zbynekdrlik/iemmixer-ops --labels iem-pc --work _work --replace` with the one-time registration token in the process environment variable `ACTIONS_RUNNER_INPUT_TOKEN`, never on the command line, removed right after);
+  - `Get-IemTunnelOrigin` (read-only: the tunnel's configured origin host and port as the connector reports it; no write);
+  - `Get-IemPredecessorFacts` (read-only: the `StartREAPER` task's triggers and whether any can fire outside events, the app's version resource and exe SHA-256);
   - `Get-IemBootstrapState`.
 
-  `Test-IemPc.ps1` runs them against an HKCU test root, a test task folder `\iemmixer-test\`, a temp directory, and a disabled test firewall rule, then removes only its own test objects.
-- [ ] **Step 6: Playbook rule `.claude/rules/guard.md`** (`paths:` `crates/iem-guard/**`, `crates/iem-win/**`, `scripts/iem-pc/**`, `crates/iem-audio-io/src/{asio,prefwin,channels,reset,rtpanic}.rs`):
-  - the preference window;
-  - the stop verbs;
-  - the planner invariants;
-  - the predecessor exit path and its verification;
+  `Test-IemPc.ps1` runs them against an HKCU test root, a test task folder `\iemmixer-test\` (the SDDL read-back included), a temp directory, and a disabled test firewall rule, then removes only its own test objects. The Defender and runner functions run in `-WhatIf` mode there (the hosted runner has no Defender service to change and no ops token).
+
+  `hil-v1.ps1` (public, no site values; reads everything through `iemmode status`) is written here and ships in the bundle: `job-begin`, `activate` (the `pc` job already installed the verified zip, which is how this script's own directory exists), the design §7 checks through `iemmode`/HTTP, `result.json`, `report`, `job-end`. It never talks to GitHub.
+- [ ] **Step 6: Playbook rule `.claude/rules/guard.md`** (`paths:` `crates/iem-guard/**`, `crates/iem-win/**`, `scripts/iem-pc/**`, `crates/iem-audio-io/src/{asio,period,channels,reset,rtpanic}.rs`):
+  - the preference window (and `on_pref_fail`);
+  - the stop verbs, Ctrl-Break through an attached console;
+  - the planner invariants (app before REAPER on entry; the interlock whenever REAPER or the app runs; `PrefCheck` before REAPER; the fingerprint last; stale REAPER/app restarted) and the error policy (a failed release never tears down a healthy iemmixer);
+  - the reboot mode reset and the cancel token (every wait ≤ 1 s behind a pre-emption);
+  - the predecessor exit path and its verification (handle before the post, exit code 0, the exe hash at the precheck);
   - that site values live in `[card]`/`[guard]` and the env;
-  - the EVENT-NOW discipline for `iempc`.
+  - the EVENT-NOW discipline for `iempc`, the one switch-over rule, the `--direct` fallback.
 
-  In the CLAUDE.md router add: "Guard, iemmode, PC install → `.claude/rules/guard.md`". The always-apply event line becomes: "'ide event' → `iempc event` (after S6 Task 14)".
+  In the CLAUDE.md router add: "Guard, iemmode, PC install → `.claude/rules/guard.md`". The always-apply event line becomes: "'ide event' → `iempc event` once the guard is installed (S6 Task 16 Step 3); before that the interim switch".
 
-  Commit: `ci(s6): bundle, attest, HIL dispatch; PC bootstrap module; guard playbook rule`.
+  Commit: `ci(s6): bundle with verify, attest; PC bootstrap module; guard playbook rule`.
 
 ---
 
@@ -1375,21 +1900,34 @@ for a in actions/download-artifact actions/attest-build-provenance; do
 - `site/site.toml`: `[card]`, `[guard]`, `[activity] inputs`, server tables;
 - `.github/workflows/hil.yml`;
 - `docs/s6-pc-runbook.md`;
+- `security/denylist-terms.txt` only if a new name-like site value appears (+ `$PRIV/denylist.txt` and the public repo's `DENYLIST` secret in the same session, per the ops `CLAUDE.md`);
 - `CLAUDE.md` (router, event section);
 - `$PC_ENV`, `$PRIV/event-runbook.md`.
 
 - [ ] **Step 1: `site.toml`.**
-  - `[card]`: the real driver name, preference key/name, original `{kind = "dword", raw = "64"}` — from the S1a env.
+  - `[card]`: the real driver name, the driver module (DLL name), preference key/name, original `{kind = "dword", raw = "64"}` — from the S1a env.
   - `[guard]`:
     - the REAPER control URL, the project path, the expected track count, the stage track indices;
     - the meter-bridge state/heartbeat/action keys;
-    - the predecessor image name, tray class, exit command id, log directory and exit line, data directory, member count, start task;
-    - the public host.
+    - the predecessor image name, tray class, exit command id, `app_exe_sha256`, log directory and exit line, data directory, member count, start task;
+    - the public host;
+    - `hil_tx` (the D5(b) loopback pair or a spare TX — the only card outputs a HIL test signal may reach);
+    - `pc_tests_passed = false` (set to `true` only after the owner-approved tests pass, design §10);
+    - `start_direct = false` (set by Task 16 Step 4 if the probe task is refused);
+    - `on_pref_fail` (Step 2 below).
   - `[activity] inputs`: the stage input ids (`mic1`…`mic10`, `hand1`…`hand3`, `eng_mic`).
-  - The server tables the S5 hand-off asked for: `[[members]]`, `[[inputs]]` with categories, `back_to_reaper = ['<bin>\iemmode.exe', 'event']`. These are the S8 hand-off's items that S6 needs to run the server on the PC.
-  - **The exit command id:** computed from the pinned tray code (`git -C "$PRED" show $PIN_PRED:iem-mixer/src-tauri/src/tray.rs` and the locked menu library's creation-order numbering). Record the derivation in the ops runbook only. It is confirmed at the first real stop (Task 17).
-  - **Validation:** `tools/check_import.sh` as today, plus `iem-engine check-site` from the Task 15 bundle, run on the PC (`$P` over ssh). It is a CI binary, not a local build (Tier 0).
-- [ ] **Step 2: `hil.yml`.**
+  - The server tables the S5 hand-off asked for: `[[members]]`, `[[inputs]]` with categories, `back_to_reaper = ['<bin>\iemmode.exe', 'event']`, `pin_changes = false`. These are the S8 hand-off's items that S6 needs to run the server on the PC.
+  - **The exit command id** (design §5.3). The deployed app is newer than the pin, so the id comes from the deployed commit, read-only in `$PRED`:
+    1. find the commit of the deployed version (its tag or the version bump in `git log`), `DEP=<sha>`;
+    2. `git -C "$PRED" diff --quiet $PIN_PRED $DEP -- iem-mixer/src-tauri/src/tray.rs iem-mixer/src-tauri/src/lib.rs` and the same for `iem-mixer/src-tauri/Cargo.lock` restricted to the `muda`, `tray-icon` and `tauri` entries (`git show $DEP:…/Cargo.lock | grep -A2 '^name = "\(muda\|tray-icon\|tauri\)"'` on both sides);
+    3. if all equal: the menu library numbers items from its counter's start in creation order, so the id is the counter start plus the Exit item's position among the created items (the review read it from the locked sources); if anything differs, re-derive from `$DEP`'s sources the same way;
+    4. `app_exe_sha256` is filled in Task 16 Step 1 from the PC (read-only) and re-checked against the deployed version.
+
+    Record the derivation in the ops runbook only. It is confirmed at the first real stop (Task 17).
+  - **Validation:** `tools/check_import.sh` as today. The `iem-engine check-site` run needs the Task 15 bundle on the PC and moves to Task 16 Step 3.
+- [ ] **Step 2: Decide `on_pref_fail` and record it on #9** (design §5.2 step 4; this is the agent's own rule, not an owner ruling, so the agent decides and records it before Task 18). The choice after three failed restores at an event is between silence (REAPER down) and REAPER possibly at 32 with an alarm. **Decision: `start_reaper_with_alarm`** — silence is the one failure the band certainly notices (P9); REAPER at an unexpected buffer still plays, the handover checks still run, and the owner is told at once. Post it on #9 as `ROZHODNUTÉ:` with this reasoning, then write the value into `[guard]`.
+- [ ] **Step 3: Denylist terms** (P6). Add any `[guard]` value written now that is a name (not a number or hash) to the same three places in the same session, and re-run the denylist scan over the committed design note and plan.
+- [ ] **Step 4: `hil.yml`.** Every input is read from `env:` and validated before any use (no `${{ inputs.* }}` inside a script); the self-hosted `pc` job holds no secret and no token.
 
 ```yaml
 name: hil
@@ -1412,53 +1950,93 @@ jobs:
     outputs:
       head: ${{ steps.h.outputs.head }}
     steps:
-      - id: app
-        uses: actions/create-github-app-token@<sha> # <tag>
-        with: { app-id: ${{ vars.OPS_APP_ID }}, private-key: ${{ secrets.OPS_APP_KEY }}, owner: zbynekdrlik, repositories: iemmixer }
-      - id: h
-        env: { GH_TOKEN: ${{ steps.app.outputs.token }} }
+      - name: Validate inputs
+        env: { SHA: "${{ inputs.sha }}", BRANCH: "${{ inputs.branch }}", RUN: "${{ inputs.run }}", DIGEST: "${{ inputs.digest }}" }
         run: |
           set -euo pipefail
-          case "${{ inputs.branch }}" in dev|main) ;; *) echo "not a branch head"; exit 1;; esac
-          head=$(gh api repos/zbynekdrlik/iemmixer/git/ref/heads/${{ inputs.branch }} --jq .object.sha)
-          echo "head=$([ "$head" = "${{ inputs.sha }}" ] && echo yes || echo no)" >> "$GITHUB_OUTPUT"
-          gh run download "${{ inputs.run }}" -R zbynekdrlik/iemmixer -n "iemmixer-bundle-${{ inputs.sha }}"
-          test "sha256:$(sha256sum iemmixer-${{ inputs.sha }}.zip | cut -d' ' -f1)" = "${{ inputs.digest }}"
-          gh attestation verify "iemmixer-${{ inputs.sha }}.zip" -R zbynekdrlik/iemmixer \
-            --signer-workflow zbynekdrlik/iemmixer/.github/workflows/ci.yml --source-ref "refs/heads/${{ inputs.branch }}" --deny-self-hosted-runners
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] && [[ "$BRANCH" =~ ^(dev|main)$ ]] && [[ "$RUN" =~ ^[0-9]+$ ]] && [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+      - id: app
+        uses: actions/create-github-app-token@<sha> # <tag>
+        with: { app-id: "${{ vars.OPS_APP_ID }}", private-key: "${{ secrets.OPS_APP_KEY }}", owner: zbynekdrlik, repositories: iemmixer }
+      - id: h
+        env: { GH_TOKEN: "${{ steps.app.outputs.token }}", SHA: "${{ inputs.sha }}", BRANCH: "${{ inputs.branch }}", RUN: "${{ inputs.run }}", DIGEST: "${{ inputs.digest }}" }
+        run: |
+          set -euo pipefail
+          head=$(gh api "repos/zbynekdrlik/iemmixer/git/ref/heads/$BRANCH" --jq .object.sha)
+          if [ "$head" != "$SHA" ]; then echo "head=no" >> "$GITHUB_OUTPUT"; exit 0; fi
+          gh run download "$RUN" -R zbynekdrlik/iemmixer -n "iemmixer-bundle-$SHA"
+          test "sha256:$(sha256sum "iemmixer-$SHA.zip" | cut -d' ' -f1)" = "$DIGEST"
+          gh attestation verify "iemmixer-$SHA.zip" -R zbynekdrlik/iemmixer \
+            --signer-workflow zbynekdrlik/iemmixer/.github/workflows/ci.yml --source-ref "refs/heads/$BRANCH" --deny-self-hosted-runners
+          echo "head=yes" >> "$GITHUB_OUTPUT"
+      - if: steps.h.outputs.head == 'yes'
+        uses: actions/upload-artifact@<sha> # <tag>
+        with: { name: verified-bundle, path: "iemmixer-${{ inputs.sha }}.zip", retention-days: 7, if-no-files-found: error }
   pc:
     needs: verify
     if: needs.verify.outputs.head == 'yes'
     runs-on: [self-hosted, iem-pc]
     timeout-minutes: 30
+    permissions: {}
     steps:
-      - id: app
-        uses: actions/create-github-app-token@<sha> # <tag>
-        with: { app-id: ${{ vars.OPS_APP_ID }}, private-key: ${{ secrets.OPS_APP_KEY }}, owner: zbynekdrlik, repositories: iemmixer }
+      - uses: actions/download-artifact@<sha> # <tag>
+        with: { name: verified-bundle }
       - name: HIL v1
         shell: powershell
-        env: { GH_TOKEN: ${{ steps.app.outputs.token }} }
+        env: { SHA: "${{ inputs.sha }}", BRANCH: "${{ inputs.branch }}", DIGEST: "${{ inputs.digest }}", JOBRUN: "${{ github.run_id }}" }
         run: |
           $ErrorActionPreference = 'Stop'
-          . "$env:LOCALAPPDATA\iemmixer\bin\hil-v1.ps1" -Sha '${{ inputs.sha }}' -Branch '${{ inputs.branch }}' -Run '${{ inputs.run }}' -Digest '${{ inputs.digest }}' -JobRun '${{ github.run_id }}'
+          '{"conclusion":"failure","summary":"HIL did not finish"}' | Set-Content -Encoding ascii -Path result.json
+          if ($env:SHA -notmatch '^[0-9a-f]{40}$' -or $env:DIGEST -notmatch '^sha256:[0-9a-f]{64}$' -or $env:BRANCH -notmatch '^(dev|main)$') { throw 'bad input' }
+          $zip = Join-Path $PWD "iemmixer-$env:SHA.zip"
+          if (('sha256:' + (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()) -ne $env:DIGEST) { throw 'digest mismatch' }
+          & "$env:LOCALAPPDATA\iemmixer\bin\iemmode.exe" install $zip
+          if ($LASTEXITCODE -ne 0) { throw "install refused ($LASTEXITCODE)" }
+          & "$env:LOCALAPPDATA\iemmixer\bundles\$env:SHA\hil-v1.ps1" -Sha $env:SHA -Branch $env:BRANCH -JobRun $env:JOBRUN -Out (Join-Path $PWD 'result.json')
+      - if: always()
+        uses: actions/upload-artifact@<sha> # <tag>
+        with: { name: hil-result, path: result.json, if-no-files-found: warn }
+  report:
+    needs: [verify, pc]
+    if: always() && needs.verify.outputs.head == 'yes'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@<sha> # <tag>
+        with: { name: hil-result }
+      - id: app
+        uses: actions/create-github-app-token@<sha> # <tag>
+        with: { app-id: "${{ vars.OPS_APP_ID }}", private-key: "${{ secrets.OPS_APP_KEY }}", owner: zbynekdrlik, repositories: iemmixer }
+      - name: Post hil/iem-pc
+        env: { GH_TOKEN: "${{ steps.app.outputs.token }}", SHA: "${{ inputs.sha }}", PC: "${{ needs.pc.result }}" }
+        run: |
+          set -euo pipefail
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]]
+          c=$(jq -r '.conclusion' result.json 2>/dev/null || echo failure)
+          [ "$PC" = success ] || c=$([ "$PC" = cancelled ] && echo cancelled || echo failure)
+          case "$c" in success|failure|cancelled) ;; *) c=failure;; esac
+          gh api "repos/zbynekdrlik/iemmixer/check-runs" -f name=hil/iem-pc -f head_sha="$SHA" -f status=completed -f conclusion="$c" \
+            -f "output[title]=HIL v1" -f "output[summary]=$(jq -r '.summary // "no result"' result.json 2>/dev/null | head -c 60000)"
 ```
 
-  `hil-v1.ps1` ships in the bundle (`scripts/iem-pc/hil-v1.ps1`, public, no site values; it reads everything through `iemmode status`). It runs:
-  1. `iemmode job-begin`;
-  2. the artifact download (`gh` on the PC with the App token) and digest check;
-  3. `iemmode install` and `activate` (the guard switches the bundle in dev);
-  4. the checks of design §7 through `iemmode`/HTTP;
-  5. the `hil/iem-pc` check run posted with `gh api repos/zbynekdrlik/iemmixer/check-runs -f name=hil/iem-pc -f head_sha=… -f conclusion=…`;
-  6. `iemmode report`;
-  7. `iemmode job-end`.
+  Pin every action to a full SHA with the Task 12 Step 3 loop (add `actions/create-github-app-token`, `actions/upload-artifact`, `actions/download-artifact`). The `pc` job writes a failure `result.json` before anything else, so every started job reports; a job that never started (no runner, the guard refused) leaves no artifact, the report job fails loudly and the missing `hil/iem-pc` counts as not green, which is what `live --build` needs.
+
+  `hil-v1.ps1` (Task 12, shipped in the bundle, run from the verified `bundles\<sha>\`) runs:
+  1. `iemmode job-begin` (refused unless dev, not switching, band quiet 5 min, stage peaks quiet 60 s);
+  2. `iemmode activate` (the guard switches the bundle in dev);
+  3. the checks of design §7 through `iemmode`/HTTP (measured frames 32; the card-masked test signal on `hil_tx` with per-TX routing from the engine's meters);
+  4. `result.json` (`conclusion`, `summary`, the numbers);
+  5. `iemmode report`;
+  6. `iemmode job-end`.
 
   Any refused `iemmode` (a switch to `event` started) ends the job as `cancelled`, never as success.
-- [ ] **Step 3: `docs/s6-pc-runbook.md`.**
+- [ ] **Step 5: `docs/s6-pc-runbook.md`.**
   - The env keys (`$PC_ENV`: `PC_SSH`, `PC_BIN`, `PC_ROOT`, the public host).
-  - The bootstrap sequence (Task 16), "ide event" / "event skončil" with `iempc`, and the fallback (S1a `spike_window.py preempt`, then the event runbook's manual steps).
-  - The alarm texts in Slovak, and the five approval-gated tests (not run).
+  - The bootstrap sequence (Task 16), "ide event" / "event skončil" with `iempc` (from Task 16 Step 3), the `--direct` fallback, and the fallback before that (S1a `spike_window.py preempt`, then the event runbook's manual steps).
+  - The alarm texts in Slovak, and the **prepared owner ❓ blocks** (Slovak, self-contained, one decision each) for the three stop cases: the engine did not release but plays (iemmixer keeps serving — information plus "chceš REAPER hneď? = reštart PC"), the engine is dead or parked (reboot offer), REAPER could not start (holder / start / save-quit failure).
+  - The five approval-gated tests (asked in Task 17, not run before approval).
 
-  Update `$PRIV/event-runbook.md` and the ops `CLAUDE.md` event section to point at `iempc event` / `iempc dev` from Task 17 on.
+  Update `$PRIV/event-runbook.md` and the ops `CLAUDE.md` event section to point at `iempc event` / `iempc dev` from Task 16 Step 3 on (the one switch-over rule of the Global Constraints).
 
 ---
 
@@ -1467,24 +2045,26 @@ jobs:
 **Files:** `scripts/iem-pc/iempc.py`, `scripts/iem-pc/test_iempc.py`.
 
 - [ ] **Step 1: Commands.**
-  - `status`, `event [--dry-run]`, `dev [--build SHA] [--dry-run]` — ssh `"$PC_BIN\iemmode.exe" …`, JSON out;
+  - `status`, `event [--dry-run]`, `dev [--build SHA] [--dry-run]`, `rehearse-teardown`, `probe-task` — ssh `"$PC_BIN\iemmode.exe" …`, JSON out;
+  - `event` first runs `spike_window.py preempt` when an S1a/S1c spike window is open (its state file), then `iemmode event`; on exit 4 (guard unreachable) it runs `iemmode event --direct`;
   - `fetch-bundle --sha` — the green `push` run's artifact, digest check, `gh attestation verify`;
   - `bootstrap <step>` — PowerShell `IemPc.psm1` functions over ssh;
   - `install --sha` — scp the verified zip, then `iemmode install`;
-  - `dispatch-hil` — the newest `dev` and `main` heads, once per dev entry, recorded in `$STATE`;
+  - `dispatch-hil [--sha SHA]` — dispatches ops `hil.yml` with the dev box's `gh` authentication (no token in the public repo, design §7): the SHA must be the head of `dev`/`main` with a green `push` run; branch, run id and the `attest` job's digest come from that run; once per SHA per dev entry, recorded in `$STATE`;
   - `handover-s1a` — marks the S1a window closed when the card is free, no spike runs and the preference reads the original (read-only checks, then the S1a state file updated).
 - [ ] **Step 2: EVENT-NOW discipline** (from `spike_window.py`'s `guarded()`):
   - every wait polls the flag every 2 s;
   - a read-only call is abandoned;
-  - `dev`/`install` refuse when the flag exists;
+  - `dev`/`install`/`dispatch-hil`/`rehearse-teardown` refuse when the flag exists;
   - with the flag present, `event` runs even if another command is running (it is the pre-emption).
-- [ ] **Step 3: Tests** (fake ssh runner):
+- [ ] **Step 3: Tests** (fake ssh runner, fake `gh`):
   - the flag refuses `dev` and lets `event` through;
+  - `event` pre-empts an open spike window first, and falls back to `--direct` on exit 4 only;
   - parsing of the `iemmode` JSON, `fetch-bundle` digest mismatch refused;
-  - `dispatch-hil` fires once per dev entry;
+  - `dispatch-hil` refuses a SHA that is not a branch head or has no green run, and fires once per SHA per dev entry;
   - no site value in the module (reads `$PC_ENV`).
 
-  Add to the CI `integrity` job: `python3 -m unittest discover -s scripts/iem-pc -p 'test_*.py' -v`. Commit: `feat(iem-pc): dev-box control with the event pre-emption`.
+  Add to the CI `integrity` job: `python3 -m unittest discover -s scripts/iem-pc -p 'test_*.py' -v`. Commit: `feat(iem-pc): dev-box control with the event pre-emption and HIL dispatch`.
 
 ---
 
@@ -1497,11 +2077,10 @@ cd "$WORK" && git fetch origin && git merge --ff-only origin/dev && git status -
 cargo fmt --all -- --check && python3 scripts/check_integrity.py && python3 scripts/check_engine_deps.py && python3 scripts/check_version.py
 python3 -m unittest discover -s scripts -p 'test_*.py' 2>&1 | tail -1
 python3 -m unittest discover -s scripts/iem-pc -p 'test_*.py' 2>&1 | tail -1
-cargo mutants --list --in-diff <(git diff origin/main...HEAD) | wc -l    # shard budget (ci-rust-toolchain rule)
-git push origin dev
+git push origin dev    # the shard budget comes from CI's mutants-list job (cargo mutants runs in CI only)
 ```
 
-- [ ] **Step 2: Wait for every job** with one foreground bounded loop per Bash call. It includes `windows`, `bundle`, `attest`, `hil-dispatch`, `supply-chain`, `mutants-list`, `integrity`:
+- [ ] **Step 2: Wait for every job** with one foreground bounded loop per Bash call. It includes `windows`, `bundle` (with its verify step), `attest`, `supply-chain`, `mutants-list`, `integrity`:
 
 ```bash
 RUN=$(gh run list -R "$REPO" --branch dev --event push --limit 1 --json databaseId --jq '.[0].databaseId'); echo "$RUN"
@@ -1509,45 +2088,47 @@ for i in $(seq 1 53); do s=$(gh run view "$RUN" -R "$REPO" --json status,conclus
 gh run view "$RUN" -R "$REPO" --json jobs --jq '.jobs[] | .name+": "+(.conclusion // .status)'
 ```
 
-  On failure: `gh run view "$RUN" -R "$REPO" --log-failed`, ONE fix commit, push, wait again. `hil-dispatch` fails until the token exists: create it before this push (Task 12 Step 3).
-- [ ] **Step 3:** the ops `hil.yml` run for this SHA shows `verify` green and `pc` queued (no runner yet). Record the run ids on #9. Download the bundle on the dev box with `$P fetch-bundle --sha "$(git rev-parse HEAD)"`.
+  On failure: `gh run view "$RUN" -R "$REPO" --log-failed`, ONE fix commit, push, wait again.
+- [ ] **Step 3:** after every job is green: `$P dispatch-hil --sha "$(git rev-parse HEAD)"`. The ops `hil.yml` run for this SHA shows `verify` green (inputs validated, attestation verified, `verified-bundle` uploaded) and `pc` queued (no runner yet). Record the run ids on #9. Download the bundle on the dev box with `$P fetch-bundle --sha "$(git rev-parse HEAD)"`.
 
 ---
 
 ### Task 16: PC bootstrap (dev time only; main session)
 
-**Precondition:** the owner's latest signal is "event skončil", and `EVENT-NOW` does not exist. On "ide event" at any step: write the flag, then the event runbook (the guard is not active yet) or `$P event` from Step 5 on. Each step's output (no site values) goes to #9.
+**Precondition:** the owner's latest signal is "event skončil", and `EVENT-NOW` does not exist. On "ide event" at any step: write the flag, then the interim switch (the event runbook, `spike_window.py preempt` when a window is open) until Step 3 is done, and `$P event` from Step 3 on — the one switch-over rule of the Global Constraints. Each step's output (no site values) goes to #9.
 
-- [ ] **Step 1: Read-only state.** `$P bootstrap Get-IemBootstrapState`. It shows:
-  - REAPER running or not, the app running, the driver module holders, the preference;
-  - whether our tasks exist, and the S1a window state (`spike_window.py status`).
-- [ ] **Step 2: Elevated setup, idempotent, with read-back:** `Set-IemRootAcl`, `Register-IemTasks`, `Add-IemFirewallRule`, `Test-IemServiceRight` (→ `Grant-IemServiceRight` if missing), `Add-IemDefenderExclusion`.
-- [ ] **Step 3: First bundle by hand** (spec §5.2):
+- [ ] **Step 1: Read-only state and facts.**
+  - `$P bootstrap Get-IemBootstrapState`: REAPER running or not, the app running, the driver module holders, the preference, whether our tasks exist, and the S1a window state (`spike_window.py status`).
+  - `$P bootstrap Get-IemTunnelOrigin`: the origin host and port (read only; the ingress is never edited, G7). Record on #9 whether the origin peer is loopback; if not, the Task 7 Step 7 `CF-Connecting-IP` path is the one that applies.
+  - `$P bootstrap Get-IemPredecessorFacts`: the `StartREAPER` task's triggers — record on #9 whether any can fire in dev time (design §5.2: a REAPER started without the card is restarted at "ide event"); the deployed app version and exe SHA-256 → `[guard] app_exe_sha256` (ops PR), and the version is the one the Task 13 exit-id derivation used — else re-derive before any switch.
+- [ ] **Step 2: Elevated setup, idempotent, with read-back:** `Set-IemRootAcl`, `Register-IemTasks` (security descriptors, restart on failure), `Add-IemFirewallRule`, `Test-IemServiceRight` (→ `Grant-IemServiceRight` if missing). Defender exclusions come per bundle with Step 3.
+- [ ] **Step 3: First bundle by hand** (spec §5.2), then the site check:
 
 ```bash
 $P fetch-bundle --sha "$SHA"     # includes gh attestation verify on the dev box
-$P install --sha "$SHA"
+$P install --sha "$SHA"          # the guard verifies; activation asks the exclude task for this SHA's process exclusions
 $P status                        # mode event (or dev time with REAPER down), bundle recorded, pending HIL
 ```
 
+  Then the site validation moved here from Task 13: the ops `site.toml` copied to the PC's private config and `iem-engine check-site` from the installed bundle (`$P` over ssh; a CI binary, not a local build — Tier 0). **From the end of this step "ide event" means `$P event`** (the guard is installed; `iemmode` starts it, `--direct` covers a guard that cannot start).
 - [ ] **Step 4: The UNVERIFIED items**, one at a time, read-only or self-contained:
-  - `iemmode dev --dry-run` (plan printed; facts; preference read = original);
+  - `iemmode dev --dry-run` and `iemmode event --dry-run` (plans printed; facts; preference read = original);
+  - `$P probe-task`: the guard (Limited, session 1) starts `\iemmixer\iemmixer-probe`. Refused → `[guard] start_direct = true` (ops PR) and record on #9 that REAPER and the app are started by the guard's detached spawn;
   - a Limited `schtasks /Run` of the tuning task with verb `state` (or "absent" before S1c);
   - breakaway: `iemmode status` reports `breakaway: ok` from a test spawn of `iemmode.exe --version`;
-  - `Register-IemRunner` with a one-time token, then a Ctrl-Break stop of the idle runner through the guard (`iemmode runner-stop`, dev only) — the process exits within 10 s;
-  - `iem-server alarm-link` → the link for the owner (sent with the first report in Task 18, not as a question).
+  - `Register-IemRunner` with a one-time token in `ACTIONS_RUNNER_INPUT_TOKEN`, then a Ctrl-Break stop of the idle runner through the guard (`iemmode runner-stop`, dev only; the attach-console path) — the process exits within 10 s.
 
   Findings go on #9.
-- [ ] **Step 5:** from here on "ide event" means `$P event`.
+- [ ] **Step 5: The owner's alarm link** (the first of the two owner steps named in the design summary). `iem-server alarm-link` → a Slovak ❓ owner-action block (`needs-owner-action` on #9): what the link is, that he opens it once on his phone and taps "Povoliť upozornenia", and why (the guard can warn him; the first switch needs ≥ 1 alarm recipient). The link's TTL is 24 h; a new one is made if it expires. Task 17 waits for `iem-server notify --count alarm` ≥ 1; answer-independent work continues meanwhile.
 
 ---
 
-### Task 17: First `iemmode dev`, HIL v1 green (dev time; main session)
+### Task 17: First `iemmode dev`, HIL v1 green, rehearsal, the owner's test question (dev time; main session)
 
-- [ ] **Step 1: Take the card.**
+- [ ] **Step 1: Take the card** (after the alarm link is used).
   - If the S1a window is still open with the card free, run `$P handover-s1a` first.
-  - Then run `$P dev --build "$SHA"`. It prints each step. With REAPER already down (the dev-time case) the plan is: interlock through `iem-engine interlock`, app stop, tuning enter, data, engine held, arm, server, tray, identity, runner.
-  - **Expected:** app stop verdict ok — the log line, gone, ports free, no newer temp: record "predecessor exit path verified" on #9 (S1a acceptance item); engine `Status` frames 32, `missed` 0 after 10 s; the preference reads back 64 while the engine runs (the window closed); LAN and public host answer `/api/version` = SHA.
+  - Then run `$P dev --build "$SHA"`. It prints each step. With REAPER already down (the dev-time case) the plan is: precheck (incl. the app exe hash), interlock through `iem-engine interlock` (the app runs, so the interlock always runs), app stop, tuning enter, data (`iem-migrate band` + recover), engine held, arm, server, tray, identity, runner.
+  - **Expected:** app stop verdict ok — exit code 0 on the handle, ports free, no newer temp; the log line noted as corroboration: record "predecessor exit path verified on the deployed binary" on #9 (S1a acceptance item); engine `Status` measured frames 32, `missed` 0 after 10 s; the preference reads back 64 while the engine runs (the window closed); LAN and public host answer `/api/version` = SHA.
   - Any failure unwinds to event by itself: report it, fix, retry only in dev time.
 - [ ] **Step 2: HIL.** `$P dispatch-hil` (or the queued run from Task 15) → the runner takes the job → wait for `hil/iem-pc` on the SHA:
 
@@ -1555,31 +2136,37 @@ $P status                        # mode event (or dev time with REAPER down), bu
 for i in $(seq 1 53); do c=$(gh api repos/$REPO/commits/$SHA/check-runs --jq '.check_runs[] | select(.name=="hil/iem-pc") | .status+" "+(.conclusion // "")'); echo "$(date +%T) $c"; case "$c" in completed*) break;; esac; sleep 10; done
 ```
 
-  Every HIL v1 check (design §7) green. Record its numbers on #9: callbacks, missed, resets, callback CPU p50/p99.9, fault callback duration, reopen gap, pipe DACL.
+  Every HIL v1 check (design §7) green. Record its numbers on #9: measured frames, callbacks, missed, resets, callback CPU p50/p99.9, fault callback duration, reopen gap, pipe DACL, the masked test signal's per-TX meter readings.
 - [ ] **Step 3: F30 in HIL** (a synthetic `install-site` change and revert) green.
+- [ ] **Step 4: Rehearse the event path** (before the first real "ide event"; not a switch):
+  - `$P event --dry-run`: the plan printed ends with `Fingerprint`; no mutating call;
+  - `$P rehearse-teardown`: engine stop, server Ctrl-Break, tray stop, tuning exit, preference check; asserted: module unheld, preference = original, ports 80/443 free; then back in `dev` with the same SHA. It never starts REAPER;
+  - `$P probe-task` from the running guard once more.
+
+  Record the timings on #9. A failure is fixed and rehearsed again in dev time before anything else.
+- [ ] **Step 5: The owner's test question — asked now** (design §10: before any long unattended engine run, and dev mode is one). Load the `user-questions-slovak` skill, then post the one self-contained Slovak `❓` block: the five tests in plain words, one decision — approve a ~45 min dev-time session with the owner at the PC for the hard kill (D5(b) loopback included). Track it on #9 (`needs-answer` + the question). Until the tests pass, `[guard] pc_tests_passed` stays `false`, so `live --trial` is refused; dev work continues.
 
 ---
 
 ### Task 18: First `iemmode event` on the owner's signal; report; hand-offs (main session)
 
 - [ ] **Step 1:** on the owner's next "ide event": write the flag, then run `$P event`.
-  - **Expected:** jobs cancelled, runner stopped, engine released ≤ 10 s, server and tray stopped, tuning exit, preference = original, REAPER through our task, the handover checks (tracks, no dialog, bridge once, heartbeat, module held by REAPER, peaks or `UNCONFIRMED-AUDIO`), the app through our task answering with the member count, public host 200.
+  - **Expected:** jobs cancelled, runner stopped, engine released ≤ 10 s, server and tray stopped, tuning exit, preference = original, no other module holder, REAPER through our task (a REAPER already running without the card is saved, quit and restarted), the handover checks (tracks, no dialog, bridge once, heartbeat, module held by REAPER, peaks or `UNCONFIRMED-AUDIO`), the app through our task answering with the member count (an app that runs without serving is restarted), public host 200, the S1c fingerprint (alarm only).
   - Confirm to the owner (✅, Slovak, one line).
-  - On any failure: alarm (❓) with the failing check, then the fallback: the event runbook's manual steps (never force).
-- [ ] **Step 2:** on the next "event skončil": `$P dev --build <latest green dev SHA>`, the full event → dev path including the REAPER save/quit and the interlock through REAPER's meters. **Acceptance box 1 is met only after both directions pass on real signals.**
+  - A release timeout with a healthy engine: iemmixer keeps serving; send the prepared ❓ (Task 13 Step 5). A dead or parked engine, or a REAPER that cannot start: the prepared ❓ with the reboot offer. Never force.
+- [ ] **Step 2:** on the next "event skončil": `$P dev --build <latest green dev SHA>`, the full event → dev path: the interlock through REAPER's meters, the app stopped first, then REAPER's save (no dialog) and quit, the data refresh. **Acceptance box 1 is met only after both directions pass on real signals.**
 - [ ] **Step 3: Report on #9** (Slovak, plain, numbers):
-  - both switches with their checks and durations;
-  - HIL v1;
+  - both switches with their checks and durations (the handover time against the ≤ 120 s bound and spec §4.3's 90 s);
+  - HIL v1 and the rehearsal;
   - the predecessor exit path;
   - the preference window read-backs;
   - the UNVERIFIED items resolved.
 
   Add `## 12. Results` to the design note (`docs(s6): results`). Tick the acceptance boxes only on evidence.
 - [ ] **Step 4: Hand-offs** (comments):
-  - **#10 (S7):** runner, `hil.yml`, `iemmode report`, the soak inputs;
-  - **#11 (S8):** `live --build`, pins, the site tables, the cutover pieces;
-  - **#15 (S1c):** the guard's tuning calls.
-- [ ] **Step 5: The owner question — prepared, not asked now.** Write `$WP/s6-owner-tests-question.md` with the one `❓` block for the five tests in design §10 (one proposal, one decision: approve a ~45 min dev-time session with the owner at the PC for the hard kill; D5(b) loopback included). Post it only when the program reaches that point (before S7's long soak). Record on #9 that it is prepared. The alarm link goes to the owner as information with the report.
+  - **#10 (S7):** runner, `hil.yml`, `iemmode report`, the soak inputs, the measured handover time;
+  - **#11 (S8):** `live --build`, pins, the site tables, the cutover pieces, `pin_changes` on at cutover, the `pc_tests_passed` gate;
+  - **#15 (S1c):** the guard's tuning calls, drift checks and fingerprint call.
 
 ---
 
@@ -1590,11 +2177,10 @@ for i in $(seq 1 53); do c=$(gh api repos/$REPO/commits/$SHA/check-runs --jq '.c
 
 ## Hand-off to later sub-projects
 
-- **S7 (#10):** the runner and `hil.yml`, `iemmode report` for soak summaries, the switch timing (target ≤ 60 s silence), live Playwright against the PC, band-activity thresholds on real signal, S1c W6 (8 h at 32 with engine, server and stream).
+- **S7 (#10):** the runner and `hil.yml`, `iemmode report` for soak summaries, the switch timing (target ≤ 60 s silence; tighten the ≤ 120 s handover bound toward spec §4.3's 90 s), live Playwright against the PC, band-activity thresholds on real signal, S1c W6 (8 h at 32 with engine, server and stream).
 - **S8 (#11):**
-  - `live --build` (G8) and the trial crash loop to `event`;
+  - `live --build` (G8) and the trial crash loop to `event`; trials need `pc_tests_passed`;
   - pins and revert;
   - the server site tables in the ops repo;
-  - cutover pieces not built here: guard task at logon, the predecessor's autostarts disabled with values exported, the tunnel repair switch;
-  - the owner question on the five tests (prepared in Task 18).
-- **S1c (#15):** the guard calls `enter`/`exit`/`state` through the elevated task; logon reconciliation; L5 through `iem-win`.
+  - cutover pieces not built here: guard task at logon, the predecessor's autostarts disabled with values exported, the tunnel repair switch, PIN changes enabled (`pin_changes = true`).
+- **S1c (#15):** the guard calls `enter`/`exit`/`state` and the fingerprint through the elevated task; drift on mode change and hourly (native reads); logon reconciliation; L5 through `iem-win`.

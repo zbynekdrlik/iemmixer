@@ -5,12 +5,15 @@
 ## Zhrnutie pre vlastníka
 
 - S6 prenesie iemmixer na iem PC: zvukový engine na karte pri 32 vzorkách, strážca `iemmode` a automatické testy na PC.
-- Riadia to len tvoje dve správy. „Event skončil“ → uložím a ukončím REAPER, korektne ukončím aplikáciu predchodcu, spustím iemmixer. „Ide event“ → zastavím iemmixer, spustím REAPER, potom aplikáciu, overím odovzdanie a potvrdím ti to.
+- Riadia to len tvoje dve správy. „Event skončil“ → korektne ukončím aplikáciu predchodcu, potom uložím a ukončím REAPER a spustím iemmixer. „Ide event“ → zastavím iemmixer, spustím REAPER, potom aplikáciu, overím odovzdanie a potvrdím ti to.
 - Aplikáciu predchodcu ukončím tou istou cestou ako jej položka „Exit“ v tray menu, len bez klikania. Nič sa nezabíja.
-- REAPER si vždy nechá svoj buffer 64. Hodnota 32 je zapísaná len na okamih, keď iemmixer otvára kartu, takže REAPER nájde svoju hodnotu aj po výpadku prúdu.
-- Kým iemmixer beží, drží bežnú adresu kapely (v sieti aj verejnú). Kapela nič nerieši.
-- Po reštarte je PC vždy v režime REAPER. Testy na PC bežia len vo vývojovom čase; „ide event“ ich korektne zruší.
-- Teraz od teba nič netreba. Neskôr ti jednou otázkou pošlem na schválenie päť testov: reštart, zaseknutý engine, tvrdé ukončenie, chyba ovládača a meranie oneskorenia cez slučku Dante.
+- REAPER si vždy nechá svoj buffer 64. Hodnota 32 je zapísaná len na okamih, keď iemmixer otvára kartu, takže REAPER ostane na 64 aj po výpadku prúdu.
+- Kým iemmixer beží, drží bežnú adresu kapely (v sieti aj verejnú) s tými istými PIN-mi. PIN-y sa až do ostrého prechodu menia len v aplikácii predchodcu; iemmixer si ich pri každom prepnutí načíta znova. Kapela nič nerieši.
+- Po reštarte je PC vždy v režime REAPER. Testy na PC bežia len vo vývojovom čase, keď je na pódiu ticho; „ide event“ ich korektne zruší.
+- Keby agent nebol dostupný, ostávajú dve cesty späť na REAPER: tlačidlo „Späť na REAPER“ v aplikácii zvukára a reštart PC.
+- Od teba budú treba dve veci, každá neskôr jednou správou:
+  1. jednorazový odkaz na upozornenia v mobile — otvoríš ho raz pred prvým prepnutím, aby ťa strážca vedel varovať;
+  2. hneď keď prejdú testy na PC, schválenie piatich testov: reštart, zaseknutý engine, tvrdé ukončenie, chyba ovládača a meranie oneskorenia cez slučku Dante.
 
 ## 1. Goal and acceptance
 
@@ -18,25 +21,29 @@ iemmixer runs on the IEM PC: the ASIO backend at 32 samples, the guard (`iemmixe
 
 ## 2. Constraints
 
-D2 (owner messages only; reboot = `event`; PC work in dev time, EVENT-NOW pre-empts), I2 (32 for iemmixer, REAPER keeps its value), I3, I8/P4 (nothing force-ended; the integrity scan covers the new crates, comments included), G7, P5/G8, P6, P7, P9, P10, Tier 0. Hardening is the agent's job (owner, 2026-09-24).
+D2 (owner messages only; reboot = `event`; PC work in dev time, EVENT-NOW pre-empts), I2 (32 for iemmixer, REAPER keeps its value), I3, I8/P4 (nothing force-ended; the integrity scan covers the new crates, comments included), G7 (the predecessor and the shared tunnel's ingress stay untouched), P5/G8, P6, P7, P9, P10, Tier 0. Hardening is the agent's job (owner, 2026-09-24).
 
 ## 3. ASIO backend (`iem-audio-io`)
 
 `asio.rs` grows from the spike host into `AsioStream<P: Process>`.
 
-- **Threads.** An owner thread creates the driver (COM STA), makes every driver call, pumps messages and runs the stall watchdog. The callback zeroes every output (A1), decodes the topology's RX channels via `format`, calls `process` in `catch_unwind` and encodes the TX channels. After a panic the outputs stay zero and the processor is never called again.
+- **Threads.** An owner thread creates the driver (COM STA), makes every driver call, pumps messages and runs the stall watchdog. The callback marks its thread real-time on every entry (a reopen may bring a new driver thread), zeroes every output (A1), decodes the topology's RX channels via `format`, calls `process` in `catch_unwind` and encodes the TX channels. After a panic the outputs stay zero and the processor is never called again.
 - **Channel map** (portable): topology card numbers → card indices, checked against the driver's counts. `format::admit` expects 32 (and 96 kHz).
-- **Preference window** (deviation, §11). The driver reads `PrefBuffSize` at open (S1a). Before each open the backend writes 32 (registry kind kept, read back); right after `createBuffers` it writes the original back (read back). The registry holds REAPER's value at every other moment, so a crash, power loss or OS restart in dev never leaves REAPER at 32. Key, name and original come from `[card]` (ops); a mismatch refuses the stream (exit 3). Decisions in a portable `prefwin.rs`; writes via `windows-registry` (already in the closure).
+- **Measured period.** `Status.frames` is measured, never copied from the configuration: the sample-position delta and the interval of the first callbacks give the frame count. Anything but 32 faults the open (exit 3), and HIL asserts the measured value.
+- **Preference window** (deviation, §11). The driver reads `PrefBuffSize` at open (S1a). Before each open the backend writes 32 (registry kind kept, read back); right after `createBuffers` it writes the original back (read back). The registry holds REAPER's value at every other moment, so a crash, power loss or OS restart in dev never leaves REAPER at 32. Key, name and original come from `[card]` (ops); a mismatch refuses the stream (exit 3). The decisions sit in a portable `iem_win::prefwin` (mutation-tested), writes via `windows-registry` (already in the closure). The guard uses the same module, so it never links the ASIO host.
 - **Reset/reopen** on a driver request or a stall (no callback for 2 s): stop, dispose, release, reopen (~104 ms, S1a), processor kept, `Process::discontinuity()` restarts the 500 ms fade-in. Budget ≤ 1 per 5 min and ≤ 3 per process (§4.4); beyond = fault (exit 70). A callback still in flight 2 s after `stop()` leaks the stream (R6): the engine reports `parked` and the guard alarms.
 - **Panic hook** (S1a: 4.29 ms per panic): on the RT thread it stores only the location and a counter in atomics — no formatting, allocation or stderr lock.
-- **SEH filter:** asks the owner thread to release the driver, waits ≤ 1 s, then lets the process end or parks the faulting thread (§2.4); proven only by the owner-approved test (§10). **Session end:** a hidden window on the owner thread; the engine saves, fades out and stops the driver first.
-- **`iem-win`** (new, MIT/Apache, the only unsafe outside `asio.rs`), shared with the guard: priority HIGH, power throttling off, CPU Set (S1c L5), locked minimum working set, user SID, process and module-holder queries, window messages, console control events, breakaway spawn. Non-Windows returns `Unsupported`.
+- **Crashes release the card first.** At start the engine sets `SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX)` and `WerSetFlags(WER_FAULT_REPORTING_NO_UI)`, so no Windows crash dialog in session 1 keeps the driver held. The SEH filter asks the owner thread to release the driver and waits ≤ 1 s for a `RELEASED` flag, set only after `dispose` and after the host is dropped; then it lets the process end, or parks the faulting thread (§2.4). Proven only by the owner-approved test (§10).
+- **Session end:** a hidden top-level window on the owner thread (never a message-only `HWND_MESSAGE` window, which never receives `WM_QUERYENDSESSION`); the engine saves, fades out and stops the driver first.
+- **Memory:** after 5 s of streaming the engine raises its minimum working set and `VirtualLock`s the preallocated RT buffers (S1c hand-off).
+- **`iem-win`** (new, MIT/Apache, the only unsafe outside `asio.rs`), shared with the guard: priority HIGH, power throttling off, CPU Set (S1c L5), locked minimum working set and `VirtualLock`, crash-dialog suppression, user SID, process, exit-code and module-holder queries, window messages, console control events, breakaway spawn, and the portable `prefwin`. Non-Windows returns `Unsupported` for the effects.
 
 ## 4. Engine (`iem-engine`, `iem-engine-proto`)
 
-- **`run --backend asio`** with `[card]` (driver name, preference key/name/original, `frames = 32`). New exit 3 = card refused (`reaper.exe` exists — I3, no driver, `admit`); the guard never respawns after 2 or 3.
+- **`run --backend asio`** with `[card]` (driver name, driver module, preference key/name/original, `frames = 32`). New exit 3 = card refused: any process holds the driver module (I3, purpose-built — no process names), no driver, `admit`, or a measured period other than 32. The guard never respawns after 2 or 3.
 - **`--hold`:** silent until the guard sends `Arm`, after 10 s with 0 missed periods (§4.3). Respawns start unheld.
-- **Role `supervisor`** (additive, `PROTO` stays 1): one connection that may send `Shutdown`, `SaveNow`, `Arm`, test signal and fault injection (under their launch flags); it never supersedes `control`. `Status` gains `missed`, `overruns`, `resets`, `parked`.
+- **Role `supervisor`** (additive, `PROTO` stays 1): one connection that may send `Shutdown`, `SaveNow`, `Arm`, test signal and fault injection (under their launch flags), and reads the `Meters` events; it never supersedes `control`. `Status` gains `frames` (measured), `missed`, `overruns`, `resets`, `parked`.
+- **HIL test signal with a card mask** (supervisor only): the engine renders every mix as usual (its internal meters prove per-TX routing), but while the TTL runs it encodes only the listed card outputs — the D5(b) loopback pair or a spare TX; every other card output stays zero.
 - **Windows pipes** (interprocess 2.4.4): remote clients refused, first-instance flag, a DACL for the user and SYSTEM; non-blocking streams polled every 10 ms, so a superseded connection closes; pipe tests join the `windows` job.
 - **`interlock --seconds 60`:** card open, outputs silent, stage inputs only; exit 0 quiet / 5 activity. **`check-site`** validates a site (I4, F30).
 
@@ -44,23 +51,28 @@ D2 (owner messages only; reboot = `event`; PC work in dev time, EVENT-NOW pre-em
 
 ### 5.1 Processes and control path
 
-- **Guard:** Interactive task `\iemmixer\iemmixer-guard` (logged-on user, Limited, no time limit, IgnoreNew), single-instance mutex; not started at boot before cutover. Its children (engine, server, tray, runner) start with job breakaway, so a guard restart never touches audio (I9); a restarted guard re-adopts them.
-- **`iemmode`** is the only client: the agent over ssh (pipes are global, so session 0 reaches the session-1 guard; `iemmode` starts the guard task if needed), the engineer's button (`back_to_reaper` = `bin\iemmode.exe event`), HIL jobs, the tray.
-- **Elevated work** (S1c tuning) only through `\iemmixer\iemmixer-tuning` (RunLevel Highest), which accepts four verbs from a request file (`enter`, `exit`, `state`, `apply-tier2`).
+- **Guard:** Interactive task `\iemmixer\iemmixer-guard` (logged-on user, Limited, no time limit, IgnoreNew, restart on failure 3 × 1 min — spec §2.1), single-instance mutex `Global\iemmixer-guard` (one guard across sessions); not started at boot before cutover. Its children (engine, server, tray, runner) start with job breakaway, so a guard restart never touches audio (I9); a restarted guard re-adopts them.
+- **`iemmode`** is the only client: the agent over ssh (pipes are global, so session 0 reaches the session-1 guard; `iemmode` starts the guard task if needed), the engineer's button (`back_to_reaper` = `bin\iemmode.exe event`), HIL jobs, the tray. Every mutation goes through the guard pipe; `iemmixer-guard install`/`run` from an ssh session meet the same global mutex.
+- **Without a guard:** `iemmode event --direct` takes the guard mutex (free only when no guard runs) and runs the same planner with the real effects in its own process. `iempc event` falls back to it when `iemmode` reports the guard unreachable (exit 4). The owner's reboot (G3) stays the last resort.
+- **Tasks the Limited guard starts.** Our tasks are registered from an elevated session, so each carries an explicit security descriptor that grants the logged-on user read and execute (`D:(A;;GRGX;;;<user SID>)(A;;FA;;;BA)(A;;FA;;;SY)`). Bootstrap proves it with a probe task (`\iemmixer\iemmixer-probe`, `cmd /c exit 0`) started by the guard. If the probe is refused, the session-1 guard starts REAPER and the app itself with a detached spawn, and the tasks stay for ssh callers only.
+- **Elevated work** (S1c tuning) only through `\iemmixer\iemmixer-tuning` (RunLevel Highest), which accepts four verbs from a request file (`enter`, `exit`, `state`, `apply-tier2`). Defender process exclusions for a verified bundle go through `\iemmixer\iemmixer-exclude` (RunLevel Highest, one input: a 40-hex SHA whose directory re-verifies against its sums).
+- **Load on the appliance (P10).** Once a second the guard reads the process list only. Driver-module holders and ports are read only by switch steps. Tuning drift is checked on each mode change and hourly with native reads (power plan GUID, service state), never by an elevated PowerShell poll.
 
 ### 5.2 Modes and switching
 
-A pure planner turns (from, to, facts) into steps with undos, persisted before each step, so a guard restart or "ide event" resumes or unwinds (S1a's `undo_plan`). `event` pre-empts after the current bounded step.
+A pure planner turns (from, to, facts) into steps with undos, persisted before each step, so a guard restart or "ide event" resumes or unwinds (S1a's `undo_plan`). Every waiting step takes a cancel token and gives up within 1 s of a pre-emption; only mutating steps (a save, a quit, a registry write) finish first.
+
+**The mode after a reboot.** At start the guard sets the mode to `event` and drops a pending switch whenever the boot time is later than the state file, or REAPER or the predecessor app runs without an engine (spec §4.1: `dev` is never restored after a reboot). The planner also treats a running REAPER or app as "the band's system is up": entering `dev` from any mode then runs the interlock.
 
 **Into `dev` / `live`:**
 
-1. Precheck: bundle installed (`live`: `main` + green HIL), ≥ 1 alarm subscription, no engine.
-2. 60 s interlock on the stage inputs (REAPER's stage-track meters, or `iem-engine interlock` without REAPER): activity refuses and alarms; `--force` only on the owner's word; trials skip it.
-3. REAPER saves (project mtime changes) and quits; gone ≤ 30 s, driver module unheld.
-4. Predecessor app stopped gracefully (§5.3); ports 80/443 free.
+1. Precheck: bundle installed (`live`: `main` + green HIL; `live --trial` also needs `[guard] pc_tests_passed = true`, §10), ≥ 1 alarm recipient (§5.4), no engine, the app's exe hash equals the recorded one (§5.3).
+2. 60 s interlock on the stage inputs (REAPER's stage-track meters, or `iem-engine interlock` without REAPER): activity refuses and alarms; the guard retries every 15 min and alarms the owner once after the fourth refusal; "ide event" cancels the retries. `--force` only on the owner's word; trials skip it.
+3. Predecessor app stopped gracefully (§5.3); ports 80/443 free. From here nothing can write to REAPER any more.
+4. REAPER saves (40026; project mtime changes; no dialog window) and quits (40004); gone ≤ 30 s, driver module unheld. (Deviation from spec §4.3's order: the app goes first, so a phone cannot dirty the project between save and quit and leave a "Save changes?" dialog. The owner fixed only the return order.)
 5. Tuning `enter` (S1c; a missing module is reported, not fatal, until S1c ships it).
-6. `iem_migrate::stage::recover`; `dev` = shadow-import report + dev data directory, `live` = fresh import.
-7. Engine `--hold`: `Hello.engine_build` = bundle SHA, callbacks advancing, 10 s with 0 missed → `Arm`.
+6. Data: `iem-migrate band` from the predecessor's closed files on every entry (members, PIN hashes still marked imported, JWT secret, VAPID keys, push subscriptions, certificate), then `iem_migrate::stage::recover`; `dev` = shadow-import report + dev data directory, `live` = fresh import.
+7. Engine `--hold`: `Hello.engine_build` = bundle SHA, callbacks advancing, measured frames 32, 10 s with 0 missed (one warm-up miss restarts the 10 s window once) → `Arm`.
 8. Server (`IEMMIXER_MODE`) and tray; LAN 80/443 and the public host answer `/api/version` with the SHA; tunnel `/ready` > 0.
 
 Any failure unwinds to `event`.
@@ -68,75 +80,94 @@ Any failure unwinds to `event`.
 **Back to `event`:**
 
 1. Cancel HIL jobs; stop the idle runner.
-2. Engine `Shutdown` → `DriverReleased` ≤ 10 s (timeout: alarm, REAPER stays down) → process gone.
-3. Server: Ctrl-Break to its process group (graceful shutdown); tray: `Quit`; ports free.
-4. Tuning `exit` (failures alarm, never block); the preference reads back as the original, else restore (a failed restore keeps REAPER down).
-5. No module holder; REAPER through `\iemmixer\iemmixer-StartREAPER`.
-6. Handover checks, ≤ 120 s: track count loaded; no REAPER dialog window; meter bridge triggered exactly once and only while its state is empty (#9 lesson); heartbeat advancing; `reaper.exe` holds the driver module; input peaks not all −∞, else `UNCONFIRMED-AUDIO`.
-7. Predecessor app through `\iemmixer\iemmixer-StartApp` (its exe directly, never its force-ending launcher script); it answers `/api/version`, its member list (read from REAPER) has the expected count, the public host answers.
-8. The agent confirms (✅) or an alarm goes out.
+2. Engine `Shutdown` → `DriverReleased` ≤ 10 s → process gone. **On a timeout the guard reads the engine's health** over the supervisor pipe (callbacks advancing, not faulted, not parked):
+   - healthy → it stops here and keeps iemmixer serving the band (engine, server, tray untouched), alarms, and the agent tells the owner;
+   - dead or parked → it stops here too (no REAPER while the card may be held, no app without REAPER) and the agent sends the owner a prepared Slovak ❓ offering a reboot (= `event`).
+3. Server: Ctrl-Break delivered to its own console (§5.5); tray: `Quit`; ports free.
+4. Tuning `exit` (failures alarm, never block); the preference reads back as the original, else it is restored (3 attempts, each read back). If all three fail, the guard follows `[guard] on_pref_fail`, the agent's own recorded choice (on #9 before the first event switch; plan Task 13): **start REAPER with an alarm** that it may run at 32 rather than keep it down — silence is the one failure the band certainly notices (P9), and the owner is told at once.
+5. No other module holder (e.g. an S1a/S1c spike window; `iempc event` pre-empts those first).
+6. REAPER through `\iemmixer\iemmixer-StartREAPER`. A REAPER that already runs but does not hold the driver module (its time-triggered task or a restart hit a held card) is saved, quit and started again.
+7. Handover checks, ≤ 120 s: track count loaded; no REAPER dialog window; meter bridge triggered exactly once and only while its state is empty (#9 lesson); heartbeat advancing; REAPER holds the driver module; input peaks not all −∞, else `UNCONFIRMED-AUDIO`.
+8. Predecessor app through `\iemmixer\iemmixer-StartApp` (its exe directly, never its force-ending launcher script). An app that already runs but does not own ports 80/443 (its runner redeployed it during dev time) is stopped through its tray command and started again. It answers `/api/version`, its member list (read from REAPER) has the expected count, the public host answers.
+9. S1c's REAPER-mode fingerprint (S1c §5.1); a failure alarms and never blocks.
+10. The agent confirms (✅) or an alarm goes out.
 
-In `event`, `iemmode event` only runs the checks.
+In `event`, `iemmode event` only runs the checks (and restarts a REAPER or app that runs but does not serve).
 
 ### 5.3 The predecessor app
 
 The pinned source: closing its window only hides it; there is no shutdown route; its tray menu's Exit calls `exit(0)`; data files are written temp-then-rename. Rejected: session-end messages (they end its event loop and leave the process to Windows) and a second instance (arguments are ignored).
 
-**Chosen:** the guard (same user, session 1) finds the tray library's message window owned by the app and posts the `WM_COMMAND` the menu posts when Exit is clicked — the owner's click path, no input simulation. The id follows from the pinned source (items numbered in creation order) and stays in the private env.
+**Chosen:** the guard (same user, session 1) finds the tray library's top-level window owned by the app and posts the `WM_COMMAND` the menu posts when Exit is clicked — the owner's click path, no input simulation. The id follows from the menu library's creation-order numbering, read from the **deployed** commit's source (the deployed app is newer than the pin): the tray and app sources and the menu/Tauri lock entries must equal the pin's, else the id is re-derived. The id and the deployed exe's SHA-256 stay in the private `[guard]`.
 
-**Verified every time:** the app's "exit requested from tray" log line after the post, process gone ≤ 30 s, ports 80/443 free, no newer temp file in its data directory. A wrong id is ignored or opens the window/copies the URL — harmless: the switch aborts, REAPER restarts, alarm. A changed binary hash is an informational alarm.
+**Verified every time:** before the post the guard opens a handle to the app's process (synchronize + limited query) and waits on the handle, not on the pid; success needs exit code 0 ≤ 30 s, ports 80/443 free and no newer temp file in its data directory. Its tray-exit log line is corroboration only (the app's buffered logger may never flush it). A wrong id is ignored or opens the window/copies the URL — harmless: the switch aborts, REAPER keeps running, alarm. A changed exe hash refuses the switch at the precheck, before REAPER is touched.
 
 ### 5.4 Safety net
 
 - **Crash loop** (3 abnormal exits in 10 min): trial or `dev` → alarm and `event`; prod → the previous pin's engine (§4.1). Backoff 1 → 10 s.
-- **Alarms:** a persistent file (shown by `iemmode` and the tray) plus `iem-server notify`. A `reaper.exe` or predecessor process appearing in `dev`/`live` (e.g. a predecessor deployment) alarms; nothing is ended.
+- **Alarms:** a persistent file (shown by `iemmode` and the tray) plus `iem-server notify` to the **alarm recipients** only (the owner's subscription from the one-time link). The engineer gets only the band-activity notice, never a technical alarm (P9; deviation from spec §4.2, which names the engineer). A `reaper.exe` or predecessor process appearing in `dev`/`live` (e.g. a predecessor deployment) alarms; nothing is ended.
 - **Session end / logon:** the guard stops respawning while the engine releases itself; the elevated logon task `\iemmixer\iemmixer-logon` runs tuning `exit` and checks the preference (G1).
 - **Band activity (S5 server):** must watch only `[activity] inputs` — the program input carries signal while the band is silent (S1a). Fixed here, RED/GREEN.
+- **PIN changes before cutover:** the server refuses PIN set/reset while `pin_changes = false` (every `dev` and trial run). The predecessor stays the only place PINs change, and step 6 of every entry brings them over.
 
-### 5.5 Bundles, pin, revert
+### 5.5 Bundles, pin, revert, children
 
-- A bundle is one SHA (engine, server, guard, `iemmode`, tray, tuning module, `manifest.json`, `SHA256SUMS`), zipped and attested by digest.
-- `iemmixer-guard install <zip>`: unpack into `bundles\<sha>.partial`, verify, rename, never overwrite. `activate <sha>` (dev only); `live` activates the pin; `current`/`previous` pointers are replaced atomically. Guard and `iemmode` run from `bin\` copies (a running exe is renamed, then replaced), so paths never change.
+- A bundle is one SHA (engine, server, guard, `iemmode`, tray, `iem-migrate`, tuning module, `hil-v1.ps1`, `IemPc.psm1`, `manifest.json`, `SHA256SUMS`), zipped and attested by digest. CI runs the fresh guard's `install --verify-only` on the zip before upload.
+- `iemmixer-guard install <zip>`: unpack into `bundles\<sha>.partial`, verify (every file summed except `SHA256SUMS` itself), rename, never overwrite. `activate <sha>` (dev only); `live` activates the pin; `current`/`previous` pointers are replaced atomically. Guard and `iemmode` run from `bin\` copies (a running exe is renamed, then replaced), so paths never change; everything else, HIL scripts included, runs from the verified `bundles\<sha>\`.
 - Per bundle {sha, branch, run, HIL result}; `live --build` refuses unless `main` + green (G8); `revert` = previous pin.
+- **Stopping children without force.** Children run without a console window, so each has its own console. Ctrl-Break reaches the server and runner only through their console: under a process-wide lock the guard detaches from any console, attaches to the child's, ignores Ctrl events itself, sends `CTRL_BREAK_EVENT` to the child's group, detaches and restores its handler.
 
 ## 6. PC layout, identity, tunnel, bootstrap
 
 - **Layout:** `%LOCALAPPDATA%\iemmixer\` with a protected, inherited DACL (user, SYSTEM, Administrators), so `band`'s staging copies need no ACL work (#20); `secrets\` keeps the pepper apart from the PIN hashes (S0).
-- **P9:** `iem-server` binds 0.0.0.0:80/443 with the migrated certificate, JWT secret, VAPID keys and PIN hashes; one port-based firewall rule.
-- **Tunnel:** ingress unchanged; only the running app repairs it (predecessor in `event`, `iem-server` otherwise). Bootstrap grants the right to stop/start the tunnel service if missing (S0 hand-off 7). HIL proves the server sees tunnel requests from a loopback peer (S0 hand-off 1); a non-loopback ingress is our own security fix (same port, loopback form), proved at the next event handover.
-- **Bootstrap** (dev time, agent over ssh, elevated): tasks, root DACL, firewall rule, service right, Defender exclusion (S1c G4), runner registration, the first bundle after a manual `gh attestation verify`. PINs come from `iem-migrate band` (P9). The owner's only step: a one-time alarm-subscription link on his phone (`iem-server alarm-link`); the engineer's imported subscriptions meet the ≥ 1 gate meanwhile.
+- **P9:** `iem-server` binds 0.0.0.0:80/443 with the migrated certificate, JWT secret, VAPID keys and PIN hashes, refreshed at every entry (§5.2 step 6); one port-based firewall rule.
+- **Tunnel:** the ingress is remotely managed and shared with the predecessor, so S6 never edits it (G7). Bootstrap reads the origin back read-only (host, and whether it targets :80 or :443). Only the running app repairs the tunnel (predecessor in `event`, `iem-server` otherwise). If the origin's peer is not loopback, `login_guard` also trusts `CF-Connecting-IP` from the host's own interface addresses (a local process only); a forged header from any other address is refused (tested). Identity is checked in dev time only. Bootstrap grants the right to stop/start the tunnel service if missing (S0 hand-off 7).
+- **Bootstrap** (dev time, agent over ssh, elevated): tasks (with their security descriptors and restart on failure), root DACL, firewall rule, service right, Defender process exclusions for the verified bundle's executables only (S1c G4; never a user-writable folder), runner registration, the first bundle after a manual `gh attestation verify`. Read-only facts recorded on #9: the tunnel origin, the schedule of the predecessor's time-triggered REAPER task (can it fire in dev time?), the deployed app version and exe hash. PINs come from `iem-migrate band` (P9). The owner's first step: the alarm-subscription link on his phone (`iem-server alarm-link`), sent as one message before the first switch; the precheck needs ≥ 1 alarm recipient. (His second: the test question, §10.)
 
 ## 7. HIL (decision)
 
-**Chosen: a runner registered on the private ops repo, on the PC, started by the guard only in `dev` after a quiet interlock (G5).** It matches §2.1/§5.2, keeps the App key and dispatch token on GitHub's side, and brings logs and checks (framework first). **Rejected:** a pull agent in the guard (re-implements job orchestration, App key on the PC); a runner on the dev box driving the PC over ssh (HIL would depend on another machine).
+**Chosen: a runner registered on the private ops repo, on the PC, started by the guard only in `dev` after a quiet interlock (G5).** It matches §2.1/§5.2, keeps the App key on GitHub's hosted side, and brings logs and checks (framework first). **Rejected:** a pull agent in the guard (re-implements job orchestration, App key on the PC); a runner on the dev box driving the PC over ssh (HIL would depend on another machine).
 
-- **Public CI:** `bundle` (Windows, no `id-token`); `attest` (by digest, no checkout or build); `hil-dispatch` (`dev`/`main` pushes) dispatches ops `hil.yml` with sha, branch, run id and digest, using a token that can dispatch nothing else.
-- **`hil.yml`:** a hosted job runs `gh attestation verify` and skips a SHA that is no longer its branch head. The PC job (label `iem-pc`, concurrency 1) downloads the zip, checks the verified digest, acts only through `iemmode install|activate|test-signal|report`, and posts `hil/iem-pc` through the ops App. Entering `dev` dispatches the newest `dev` and `main` heads once.
-- **HIL v1** (at 32): versions = SHA; 120 s on the card, 0 missed and 0 resets; server ↔ engine over Windows pipes (DACL, first-instance); LAN, public host, tunnel from loopback; test signal ≤ −20 dBFS on every TX meter within its TTL; panic → exit 70, release, respawn, fade-in, fault callback < 1 ms; forced reopen ≈ 100 ms; alarm push; F30.
+- **Public CI:** `bundle` (Windows, no `id-token`); `attest` (by digest, no checkout or build). No dispatch job and no dispatch secret in the public repo: the agent dispatches ops `hil.yml` from the dev box (`iempc dispatch-hil`) after CI is green (deviation from spec §5.2 — a smaller attack surface, no owner-created token).
+- **`hil.yml`:** inputs are read from `env:` and validated (`sha` 40 hex, `branch` `dev|main`, `run` digits, `digest` `sha256:` + 64 hex) before use.
+  - `verify` (hosted) mints the App token, skips a SHA that is no longer its branch head, downloads the zip, checks the digest, runs `gh attestation verify`, and uploads the verified zip as an ops-run artifact.
+  - `pc` (label `iem-pc`, concurrency 1, **no secrets**) downloads that artifact, re-checks the digest, acts only through `iemmode install|activate|job-begin|test-signal|report|job-end`, runs `hil-v1.ps1` from the verified bundle directory and uploads `result.json`.
+  - `report` (hosted, `needs: pc`, `if: always()`) mints the App token and posts `hil/iem-pc`.
+- **Before a job** (`JobBegin`): dev mode, the server's band-activity state quiet for 5 min, and a 60 s stage-input peak check from the engine's meters (no card reopen).
+- **HIL v1** (at 32): versions = SHA; 120 s on the card, measured frames 32, 0 missed and 0 resets; server ↔ engine over Windows pipes (DACL, first-instance); LAN, public host, tunnel peer; test signal ≤ −20 dBFS, card-masked to the loopback pair or a spare TX, with per-TX routing proved from the engine's internal meters within its TTL; panic → exit 70, release, respawn, fade-in, fault callback < 1 ms; forced reopen ≈ 100 ms; alarm push; F30.
 - **F30:** after an owner-merged `[engine]` change, `iemmode install-site` runs `check-site`, reports dropped/added ids and restarts engine (dev only) and server. HIL applies and reverts a synthetic change (a muted mix on a spare TX, a rename).
 
 ## 8. Proof
 
-Unit- and mutation-tested on Linux: channel map, preference window, reset budget, panic record, planner, crash loop, bundles and pin, handover and exit verdicts, guard protocol. Windows effects sit behind a `Pc` trait with a fake; the hosted `windows` job builds everything and runs the pipe and `iem-win` tests. The PC runs HIL only.
+Unit- and mutation-tested on Linux: channel map, preference window, reset budget, panic record (with an allocation-disabling test harness), planner (every fact combination), the event error policy, crash loop, bundles and pin, handover and exit verdicts, guard protocol, reboot mode reset. Windows effects sit behind a `Pc` trait with a fake; the hosted `windows` job builds everything and runs the pipe, `iem-win` (Ctrl-Break to a console-less child included) and bundle-verify tests. The PC runs HIL and, before the first real "ide event", a dev-time rehearsal of the teardown half (§11).
 
 ## 9. Hand-offs
 
 - **S7 (#10):** runner, `hil.yml`, `iemmode report` for the ≥ 8 h soak (S1c W6); switch timing (≤ 60 s silence); live Playwright; activity thresholds on real signal.
-- **S8 (#11):** `live --build`, pin/revert, crash-loop fallbacks, the server site tables written in S6; cutover pieces (guard at logon, old autostarts off).
-- **S1c (#15):** the guard owns `enter`/`exit`/`state`, drift alarm and logon reconciliation; L5 via `iem-win`.
+- **S8 (#11):** `live --build`, pin/revert, crash-loop fallbacks, the server site tables written in S6; cutover pieces (guard at logon, old autostarts off, PIN changes enabled).
+- **S1c (#15):** the guard owns `enter`/`exit`/`state`, drift checks (mode change + hourly, native reads), logon reconciliation and the REAPER-mode fingerprint call; L5 via `iem-win`.
 
-## 10. Tests awaiting the owner's approval (one future question)
+## 10. Tests awaiting the owner's approval (one question)
 
-Asked once, when HIL v1 is green and before long unattended engine runs, as one ~45 min dev-time session:
+Asked right after HIL v1 is green, before any long unattended engine run (dev mode is one), as one ~45 min dev-time session. `live --trial` is refused until `[guard] pc_tests_passed = true`.
 
 1. **OS restart with the engine running** — proves the session-end path; needed early, since the owner shuts the PC down after events.
-2. **Reboot with the engine parked** — does it delay or block the restart; fixes the owner's recovery (R6). Before trials.
-3. **Hard kill** (once, owner at the PC) — does the driver open again without a reboot. Before trials.
-4. **SEH injection (`seh_ctl`)** — release ≤ 1 s or park; `catch_unwind` cannot catch it. Before trials.
+2. **Reboot with the engine parked** — does it delay or block the restart; fixes the owner's recovery (R6, G3).
+3. **Hard kill** (once, owner at the PC) — does the driver open again without a reboot.
+4. **SEH injection (`seh_ctl`)** — release ≤ 1 s or park; `catch_unwind` cannot catch it.
 5. **Round-trip latency over the D5(b) loopback** — real in→out latency and a first look at our output on the wire. For S8 sign-off.
 
 ## 11. Deviations, risks, UNVERIFIED
 
-- **Deviations:** the preference holds 32 only while the driver opens (I2 wording); OS glue in `iem-win`, not `iem_audio_io::os` (S1c §10); additive exit 3, role `supervisor`, `Arm`.
-- **UNVERIFIED** (checked at bootstrap or first use): the driver reads the preference only at open (else `admit` refuses; fallback: 32 while iemmixer holds the card, plus a logon restore); Ctrl-Break stops the server and an idle runner (else alarm); breakaway from the task job; a Limited guard starting the elevated task; the exit id.
-- **Risks:** the first real `iemmode event` happens at an event — `--dry-run` first, S1a's `spike_window.py preempt` stays the fallback until one round trip passes, last resort the owner's reboot (= `event`).
+- **Deviations:**
+  - the preference holds 32 only while the driver opens (I2 wording);
+  - OS glue and `prefwin` in `iem-win`, not `iem_audio_io::os` (S1c §10);
+  - additive exit 3, role `supervisor`, `Arm`, the card-masked HIL test signal;
+  - dev entry stops the app before REAPER (spec §4.3 order);
+  - handover checks ≤ 120 s instead of spec §4.3's 90 s (REAPER's load time and the meter-bridge wait are not yet measured on this PC; S6 records them at the first real switch and S7's switch-timing work tightens the bound);
+  - HIL dispatched from the dev box, no public dispatch job (spec §5.2);
+  - guard alarms only to alarm recipients, never the engineer (spec §4.2);
+  - Defender exclusions per verified executable instead of the root (S1c G4);
+  - REAPER may start after three failed preference restores (`on_pref_fail`), an exception to "REAPER starts only at its original buffer".
+- **UNVERIFIED** (checked at bootstrap or first use): the driver reads the preference only at open (else `admit` refuses; fallback: 32 while iemmixer holds the card, plus a logon restore); Ctrl-Break through an attached console stops the server and an idle runner (else alarm); breakaway from the task job; a Limited guard starting our tasks (the probe task; else the direct spawn); the exit id on the deployed binary.
+- **Risks:** the first real `iemmode event` happens at an event. Before it, in dev time: `iemmode event --dry-run`, and `iemmode rehearse-teardown` (engine stop, server Ctrl-Break, tray stop, tuning exit, preference check; asserts the module unheld, the preference original, the ports free, then re-enters `dev` — it never starts REAPER, so it is not a switch). S1a's `spike_window.py preempt` stays the fallback until one round trip passes; `iemmode event --direct` covers a missing guard; last resort the owner's reboot (= `event`).
