@@ -138,7 +138,7 @@ private: $PRIV/asio-spike.env, $OPS/docs/s1a-pc-runbook.md, $PRIV/event-runbook.
 
 **Files:** none new (the design note and this plan are already committed on `dev`).
 
-- [ ] **Step 1: Sync and check the version.**
+- [x] **Step 1: Sync and check the version.**
 
 ```bash
 cd "$WORK" && git fetch origin && git status -sb && git log --oneline origin/main..origin/dev
@@ -150,7 +150,7 @@ Expected:
 - only `chore: bump version to 2.0.0-dev.8` plus the docs commit ahead of `main`;
 - `check_version.py` passes. `2.0.0-dev.8` > main's `2.0.0-dev.7`; no new bump is needed.
 
-- [ ] **Step 2: Design summary on #3 (Slovak, plain).** Write `$WP/s1a-design-comment.md` (work-product dir, not `/tmp`) with:
+- [x] **Step 2: Design summary on #3 (Slovak, plain).** Write `$WP/s1a-design-comment.md` (work-product dir, not `/tmp`) with:
   - what gets measured (§1 of the note);
   - that REAPER's buffer is restored with read-back;
   - the EVENT-NOW flag;
@@ -164,7 +164,7 @@ Expected:
 gh issue comment 3 -R "$REPO" --body-file "$WP/s1a-design-comment.md"
 ```
 
-- [ ] **Step 3: S0 hand-offs.**
+- [x] **Step 3: S0 hand-offs.**
   - `gh issue view 1 -R zbynekdrlik/iemmixer-ops --json state` must still be `OPEN`; it is done in Task 12 Step 3.
   - Hand-off (1), the interim runbook, is replaced in Task 10.
 
@@ -176,7 +176,7 @@ gh issue comment 3 -R "$REPO" --body-file "$WP/s1a-design-comment.md"
 - Create: `crates/iem-audio-io/src/format.rs`
 - Modify: `crates/iem-audio-io/src/lib.rs` (module list)
 
-- [ ] **Step 1: Write the module with its tests.** Create `crates/iem-audio-io/src/format.rs`:
+- [x] **Step 1: Write the module with its tests.** Create `crates/iem-audio-io/src/format.rs`:
 
 ```rust
 //! Sample formats of an ASIO card and their conversion to and from f64 (S1a
@@ -602,7 +602,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Declare it.** In `crates/iem-audio-io/src/lib.rs`, replace
+- [x] **Step 2: Declare it.** In `crates/iem-audio-io/src/lib.rs`, replace
 
 ```rust
 pub mod nullrt;
@@ -619,7 +619,7 @@ pub mod offline;
 pub mod wav;
 ```
 
-- [ ] **Step 3: Format and commit** (the tests run in CI at Task 11).
+- [x] **Step 3: Format and commit** (the tests run in CI at Task 11).
 
 ```bash
 cd "$WORK" && cargo fmt --all -- --check
@@ -639,7 +639,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Create: `crates/iem-audio-io/src/telemetry.rs`
 - Modify: `crates/iem-audio-io/src/lib.rs`
 
-- [ ] **Step 1: Write the module with its tests.** Create `crates/iem-audio-io/src/telemetry.rs`:
+- [x] **Step 1: Write the module with its tests.** Create `crates/iem-audio-io/src/telemetry.rs`:
 
 ```rust
 //! Callback telemetry of a real-time audio stream (S1a design note §4). The
@@ -1286,9 +1286,9 @@ Notes for the reviewer:
 - `dbfs` and `on_input_peak` avoid a `>`/`>=` on 0, which would be an equivalent mutant.
 - The callback thread is the only writer, so `Relaxed` is enough. The snapshot is a statistic, not a consistent cut.
 
-- [ ] **Step 2: Declare it.** In `lib.rs` add `pub mod telemetry;` after `pub mod offline;`.
+- [x] **Step 2: Declare it.** In `lib.rs` add `pub mod telemetry;` after `pub mod offline;`.
 
-- [ ] **Step 3: Format and commit.**
+- [x] **Step 3: Format and commit.**
 
 ```bash
 cd "$WORK" && cargo fmt --all -- --check
@@ -1308,7 +1308,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Modify: `crates/iem-audio-io/Cargo.toml`, `Cargo.lock`, `scripts/engine-deps-allow.txt`, `.cargo/mutants.toml`
 - Modify: `scripts/check_integrity.py`, `scripts/test_check_integrity.py`
 
-- [ ] **Step 1: Manifest.** Replace `crates/iem-audio-io/Cargo.toml` with:
+- [x] **Step 1: Manifest.** Replace `crates/iem-audio-io/Cargo.toml` with:
 
 ```toml
 [package]
@@ -1338,7 +1338,7 @@ name = "asio_spike"
 test = true
 ```
 
-- [ ] **Step 2: Lockfile (resolution only, no compilation).**
+- [x] **Step 2: Lockfile (resolution only, no compilation).**
 
 ```bash
 cd "$WORK" && cargo metadata --format-version 1 > /dev/null && git diff Cargo.lock | grep -E '^[+-](name|version) ' | sort | uniq -c
@@ -1351,7 +1351,7 @@ Expected additions:
 
 No other package may change. If one does, stop and investigate.
 
-- [ ] **Step 3: Engine dependency allowlist.** `iem-audio-io` is in the engine's closure, so the Windows target adds twelve names. Insert them into `scripts/engine-deps-allow.txt` in alphabetical order:
+- [x] **Step 3: Engine dependency allowlist.** `iem-audio-io` is in the engine's closure, so the Windows target adds twelve names. Insert them into `scripts/engine-deps-allow.txt` in alphabetical order:
 
 ```
 azo
@@ -1378,7 +1378,7 @@ Expected: `engine dependencies: <n> crates, all allowlisted`.
 
 Licences are all MIT or MIT OR Apache-2.0, which `deny.toml` already allows. `windows-bindgen` and `windows-metadata` are build-time only (azo's `build.rs`).
 
-- [ ] **Step 4: Mutation scope.** In `.cargo/mutants.toml`, append to `exclude_globs` (after the `iem-tray` entry):
+- [x] **Step 4: Mutation scope.** In `.cargo/mutants.toml`, append to `exclude_globs` (after the `iem-tray` entry):
 
 ```toml
   # Windows-only ASIO host (unsafe FFI, S1a): not compiled on the Linux
@@ -1389,7 +1389,7 @@ Licences are all MIT or MIT OR Apache-2.0, which `deny.toml` already allows. `wi
   "crates/iem-audio-io/examples/**",
 ```
 
-- [ ] **Step 5: The I2 integrity guard (test first).** Append to `IntegrityTests` in `scripts/test_check_integrity.py`:
+- [x] **Step 5: The I2 integrity guard (test first).** Append to `IntegrityTests` in `scripts/test_check_integrity.py`:
 
 ```python
     def test_asio_setting_calls_are_refused(self) -> None:
@@ -1425,7 +1425,7 @@ python3 -m unittest scripts/test_check_integrity.py && python3 scripts/check_int
 
 Expected: all tests pass and `integrity: clean`.
 
-- [ ] **Step 6: Commit.**
+- [x] **Step 6: Commit.**
 
 ```bash
 git add crates/iem-audio-io/Cargo.toml Cargo.lock scripts/engine-deps-allow.txt .cargo/mutants.toml scripts/check_integrity.py scripts/test_check_integrity.py
@@ -1444,7 +1444,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Create: `crates/iem-audio-io/src/asio.rs`
 - Modify: `crates/iem-audio-io/src/lib.rs` (lint, module, crate doc)
 
-- [ ] **Step 1: Write the host.** Create `crates/iem-audio-io/src/asio.rs`:
+- [x] **Step 1: Write the host.** Create `crates/iem-audio-io/src/asio.rs`:
 
 ```rust
 //! ASIO host on azo 0.2.1 (S1a spike; the S6 backend grows from it; design
@@ -2006,7 +2006,7 @@ Facts this relies on (azo 0.2.1 and windows-* 0.100 sources, read 2026-09-27):
 - `Callbacks` holds four `unsafe extern "system"` fn pointers, with no user pointer.
 - `output_ready()` returns `NOT_PRESENT` on drivers that do not need it.
 
-- [ ] **Step 2: Lint and module.** In `crates/iem-audio-io/src/lib.rs`:
+- [x] **Step 2: Lint and module.** In `crates/iem-audio-io/src/lib.rs`:
   - replace `#![forbid(unsafe_code)]` with `#![deny(unsafe_code)]`;
   - put the module list in this order:
 
@@ -2032,7 +2032,7 @@ pub mod wav;
 
   - change the doc's last sentence to "The ASIO host (`asio`, Windows) follows the same contract in S6."
 
-- [ ] **Step 3: Format and commit.**
+- [x] **Step 3: Format and commit.**
 
 ```bash
 cd "$WORK" && cargo fmt --all -- --check
@@ -2051,7 +2051,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 **Files:**
 - Create: `crates/iem-audio-io/examples/asio_spike.rs`
 
-- [ ] **Step 1: Write the program.** Create `crates/iem-audio-io/examples/asio_spike.rs`:
+- [x] **Step 1: Write the program.** Create `crates/iem-audio-io/examples/asio_spike.rs`:
 
 ```rust
 //! S1a ASIO spike on the real card (design note
@@ -2586,7 +2586,7 @@ Behaviour to check in review:
 - **A driver reset request:** finish, release, open, `info()` again. The next `start()` re-runs `admit` on the fresh facts.
 - **`--panic-at K`:** the fault is caught in callback K; the run continues 2 s and reports `callbacks_after_fault`.
 
-- [ ] **Step 2: Format and commit.**
+- [x] **Step 2: Format and commit.**
 
 ```bash
 cd "$WORK" && cargo fmt --all -- --check
@@ -2605,7 +2605,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 **Files:**
 - Create: `scripts/asio-spike/SpikePc.psm1`, `scripts/asio-spike/spike-task.ps1`, `scripts/asio-spike/Test-SpikePc.ps1`
 
-- [ ] **Step 1: The module.** Create `scripts/asio-spike/SpikePc.psm1`:
+- [x] **Step 1: The module.** Create `scripts/asio-spike/SpikePc.psm1`:
 
 ```powershell
 #Requires -Version 5.1
@@ -2805,7 +2805,7 @@ function Invoke-SpikeBringBack {
 Export-ModuleMember -Function *-Spike*
 ```
 
-- [ ] **Step 2: The task entry point.** Create `scripts/asio-spike/spike-task.ps1`:
+- [x] **Step 2: The task entry point.** Create `scripts/asio-spike/spike-task.ps1`:
 
 ```powershell
 #Requires -Version 5.1
@@ -2826,7 +2826,7 @@ try {
 }
 ```
 
-- [ ] **Step 3: The self-test** (Windows PowerShell 5.1 in the CI job `asio-spike`). Create `scripts/asio-spike/Test-SpikePc.ps1`:
+- [x] **Step 3: The self-test** (Windows PowerShell 5.1 in the CI job `asio-spike`). Create `scripts/asio-spike/Test-SpikePc.ps1`:
 
 ```powershell
 #Requires -Version 5.1
@@ -2917,7 +2917,7 @@ Remove-Item -LiteralPath $base -Recurse -Force
 Write-Host 'Test-SpikePc: all passed'
 ```
 
-- [ ] **Step 4: Integrity scan and commit.**
+- [x] **Step 4: Integrity scan and commit.**
 
 ```bash
 cd "$WORK" && python3 scripts/check_integrity.py
@@ -2936,7 +2936,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 **Files:**
 - Create: `scripts/asio-spike/spike_window.py`, `scripts/asio-spike/test_spike_window.py`
 
-- [ ] **Step 1: Tests first.** Create `scripts/asio-spike/test_spike_window.py`:
+- [x] **Step 1: Tests first.** Create `scripts/asio-spike/test_spike_window.py`:
 
 ```python
 """Tests for scripts/asio-spike/spike_window.py (pure parts and the event
@@ -3166,7 +3166,7 @@ if __name__ == "__main__":
 
 Run `python3 -m unittest discover -s scripts/asio-spike -p 'test_*.py'`. Expected: an import error (the module does not exist yet).
 
-- [ ] **Step 2: The driver.** Create `scripts/asio-spike/spike_window.py`:
+- [x] **Step 2: The driver.** Create `scripts/asio-spike/spike_window.py`:
 
 ```python
 #!/usr/bin/env python3
@@ -3684,7 +3684,7 @@ if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))
 ```
 
-- [ ] **Step 3: Run the tests.**
+- [x] **Step 3: Run the tests.**
 
 ```bash
 cd "$WORK" && python3 -m unittest discover -s scripts/asio-spike -p 'test_*.py' -v 2>&1 | tail -3
@@ -3693,7 +3693,7 @@ python3 scripts/check_integrity.py
 
 Expected: `Ran 28 tests … OK` and `integrity: clean`. The `ResourceWarning`s for the abandoned child processes are expected: the guard never kills.
 
-- [ ] **Step 4: Commit.**
+- [x] **Step 4: Commit.**
 
 ```bash
 chmod +x scripts/asio-spike/spike_window.py
@@ -3712,13 +3712,13 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 **Files:**
 - Modify: `.github/workflows/ci.yml`
 
-- [ ] **Step 1: The integrity job runs the driver tests.** In the step `Script self-tests`, after the first `unittest discover` line, add:
+- [x] **Step 1: The integrity job runs the driver tests.** In the step `Script self-tests`, after the first `unittest discover` line, add:
 
 ```yaml
           python3 -m unittest discover -s scripts/asio-spike -p 'test_*.py' -v
 ```
 
-- [ ] **Step 2: The job.** Insert after the `windows` job (before `supply-chain:`):
+- [x] **Step 2: The job.** Insert after the `windows` job (before `supply-chain:`):
 
 ```yaml
   asio-spike:
@@ -3772,7 +3772,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 The `windows` job keeps its engine clippy and tests, which include `iem-audio-io --lib`. The new job adds the example, the release build, the PC self-test and the bundle. It does not wait for `wasm`.
 
-- [ ] **Step 3: Check and commit.**
+- [x] **Step 3: Check and commit.**
 
 ```bash
 cd "$WORK" && python3 scripts/check_integrity.py && python3 -m unittest scripts/test_check_integrity.py
@@ -3792,7 +3792,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Private: `$PRIV/asio-spike.env` (chmod 600), `$OPS/docs/s1a-pc-runbook.md`, `$PRIV/event-runbook.md`, `$OPS/CLAUDE.md`
 - Public: `.claude/rules/asio-spike.md`, `CLAUDE.md`
 
-- [ ] **Step 1: The private env.** Write `$PRIV/asio-spike.env` (never committed anywhere public), with values from the private sources in the plan header:
+- [x] **Step 1: The private env.** Write `$PRIV/asio-spike.env` (never committed anywhere public), with values from the private sources in the plan header:
 
 | Key | Value source |
 |---|---|
@@ -3817,7 +3817,7 @@ import sys; sys.path.insert(0, '$WORK/scripts/asio-spike'); import spike_window 
 print(sorted(s.load_env(pathlib.Path('$PRIV/asio-spike.env'))))"
 ```
 
-- [ ] **Step 2: The ops runbook.** Write `$OPS/docs/s1a-pc-runbook.md` (PRIVATE) with:
+- [x] **Step 2: The ops runbook.** Write `$OPS/docs/s1a-pc-runbook.md` (PRIVATE) with:
   - the rules of the Global Constraints;
   - the env keys with their real values and where each was read;
   - the window command sequence of Task 12 with the real task path, key and module;
@@ -3826,12 +3826,12 @@ print(sorted(s.load_env(pathlib.Path('$PRIV/asio-spike.env'))))"
 
   Commit it in the ops repo (`docs(s1a): PC runbook for the ASIO spike`) and push the ops repo's default branch per its own CLAUDE.md.
 
-- [ ] **Step 3: The event runbook.**
+- [x] **Step 3: The event runbook.**
   - In `$PRIV/event-runbook.md`, "ide event" section, first step: `date -Iseconds > ~/.config/iemmixer/EVENT-NOW`. Then, if `$S status` shows a window that is not closed, run `$S preempt`; then the existing checks.
   - "event skončil": `rm -f ~/.config/iemmixer/EVENT-NOW`; development continues. A spike window starts only when Task 12 runs.
   - Mirror the same text into `$OPS/CLAUDE.md` (the S0 Task 13 copy) and commit it in the ops repo.
 
-- [ ] **Step 4: Playbook rule.** Create `.claude/rules/asio-spike.md`:
+- [x] **Step 4: Playbook rule.** Create `.claude/rules/asio-spike.md`:
 
 ```markdown
 ---
@@ -3855,7 +3855,7 @@ paths:
 - Site values (driver name, registry key, task names, handover values) only in `~/.config/iemmixer/asio-spike.env` and the ops runbook `docs/s1a-pc-runbook.md`.
 ```
 
-- [ ] **Step 5: Router and interim switch.** In `CLAUDE.md`:
+- [x] **Step 5: Router and interim switch.** In `CLAUDE.md`:
   - add to "Playbook router": `- ASIO host, the S1a spike, the PC window driver → .claude/rules/asio-spike.md`;
   - replace the paragraph starting `**Until S1a's interim switch script (S6: `iemmode`)**` with:
 
@@ -3863,7 +3863,7 @@ paths:
 **Until S6's `iemmode`** the interim switch is `scripts/asio-spike/spike_window.py` with the private `~/.config/iemmixer/asio-spike.env`: "ide event" → create `~/.config/iemmixer/EVENT-NOW`, then `preempt` if a window is open, then the event runbook's checks (`~/.config/iemmixer/event-runbook.md`); "event skončil" → remove the flag; `to-dev` / `to-event` switch only inside a window of a running task.
 ```
 
-- [ ] **Step 6: Scan and commit.**
+- [x] **Step 6: Scan and commit.**
 
 ```bash
 cd "$WORK" && git add .claude/rules/asio-spike.md CLAUDE.md
@@ -3881,7 +3881,7 @@ Expected: the scan prints no finding.
 
 ### Task 11: First push, CI green, the bundle (main session)
 
-- [ ] **Step 1: Pre-push checks, then push.**
+- [x] **Step 1: Pre-push checks, then push.**
 
 ```bash
 cd "$WORK" && git fetch origin && git merge --ff-only origin/dev && git status -sb
@@ -3892,7 +3892,7 @@ git push origin dev
 
 The pre-push hook runs gitleaks and the denylist.
 
-- [ ] **Step 2: Wait for every job** in one foreground bounded loop per Bash call (≤ 9 min). Repeat the call until the run is terminal, never with `run_in_background`:
+- [x] **Step 2: Wait for every job** in one foreground bounded loop per Bash call (≤ 9 min). Repeat the call until the run is terminal, never with `run_in_background`:
 
 ```bash
 RUN=$(gh run list -R "$REPO" --branch dev --event push --limit 1 --json databaseId --jq '.[0].databaseId'); echo "$RUN"
@@ -3910,12 +3910,12 @@ Likely first-cycle items:
 - rustfmt;
 - `mutants-list` over the shard budget, which means resizing the `shard:` matrix. This is `ci-rust-toolchain.md`; never raise a timeout.
 
-- [ ] **Step 3: Coverage and mutation outlook.**
+- [x] **Step 3: Coverage and mutation outlook.**
   - Read the `test` job's `line coverage` line. It must stay ≥ the floor.
   - Record the `mutants-list` count on #3.
   - Survivors appear only in the PR's mutation gate (Task 14). Kill each with a test in `format.rs`/`telemetry.rs`, or exclude a proven equivalent mutant with a reason.
 
-- [ ] **Step 4: Fetch the bundle of the green head** (dev box only; the PC is not touched):
+- [x] **Step 4: Fetch the bundle of the green head** (dev box only; the PC is not touched):
 
 ```bash
 SHA=$(git rev-parse HEAD); $S fetch-bundle --sha "$SHA"
@@ -3928,6 +3928,8 @@ Expected: `{"bundle": ".../asio-spike/bundles/<sha>", "run": <id>, "files": ["Go
 ---
 
 ### Task 12: The PC window (dev time only; main session)
+
+> **Status 2026-09-27:** not started — PC window, after the event ("event skončil"). Tasks 1–11 are done: CI run 36297231771 on `c5a40c9` green, bundle fetched and verified on the dev box.
 
 **Precondition:** the owner's "event skončil" is in this conversation after the last "ide event", and `~/.config/iemmixer/EVENT-NOW` does not exist. Quote the owner's message with its time in `new --signal`. Every step's JSON output goes to #3 (numbers only, no site values). Runtime: about 90 min.
 
