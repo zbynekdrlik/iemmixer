@@ -470,6 +470,20 @@ mod tests {
             "AudioStatus",
         );
         assert!(!status.contains("target"));
+        // A listen stream names whose mix it plays (reaperiem
+        // `test_server_msg_audio_status_with_target`).
+        let listening = round_trip_server(
+            ServerMsg::AudioStatus {
+                status: "listening".into(),
+                target: Some("member3".into()),
+            },
+            "AudioStatus",
+        );
+        assert!(
+            listening.contains(r#""status":"listening""#)
+                && listening.contains(r#""target":"member3""#),
+            "{listening}"
+        );
         round_trip_server(
             ServerMsg::EqParams {
                 target: "mic3".into(),
@@ -586,6 +600,24 @@ mod tests {
                 can_switch: true,
             },
             "BandActivity",
+        );
+    }
+
+    /// A `LimiterParams` without `active_seconds` (an older server) still
+    /// reads, as 0 s (reaperiem `test_server_msg_limiter_params_active_seconds_default`).
+    #[test]
+    fn limiter_params_without_active_seconds_read_as_zero() {
+        let json = r#"{"event":"LimiterParams","data":{"mix":"member1","track_name":"IEM VOL","limit_db":-6.0,"limit_norm":0.0,"enabled":true}}"#;
+        assert_eq!(
+            serde_json::from_str::<ServerMsg>(json).unwrap(),
+            ServerMsg::LimiterParams {
+                mix: "member1".into(),
+                track_name: "IEM VOL".into(),
+                limit_db: -6.0,
+                limit_norm: 0.0,
+                enabled: true,
+                active_seconds: 0.0,
+            }
         );
     }
 
