@@ -2,3 +2,11 @@
 # "<sha256>  <path> — reviewed ordinary prose, not site data"
 # Key: python3 scripts/denylist_scan.py --hash <path> <line>. Prefer rewording the
 # line; the reason never names or hints at the term; never a real private value.
+1c6d3523e070177798eb131d8c97c513865a8c45bb4d68bcc50b39518cc497cc  crates/iem-server/src/backup_capture.rs — S0 import history (file removed in S5); the value is scrubbed from every later commit
+2a57a49ff363d541c52ec012143b5e3f414bff04fcf3f6b721260245a87d4cfb  crates/iem-server/src/backup_restore.rs — S0 import history (file removed in S5); the value is scrubbed from every later commit
+458d533b9affa0f6e1e7d622ef19147a6f1bd3b313d6d6ffef2f33a0a5222804  crates/iem-server/src/backup_capture.rs — S0 import history (file removed in S5); the value is scrubbed from every later commit
+536de4b39a04fd1cae603b3c43b3a9fb107316d7ef39a069e4b2ec332a523450  crates/iem-server/src/backup_capture.rs — S0 import history (file removed in S5); the value is scrubbed from every later commit
+6f013d6ea1dbc030ee70a1d508a54ae940d743e76205038b6751d256ce3b7a31  crates/iem-server/src/backup_restore.rs — S0 import history (file removed in S5); the value is scrubbed from every later commit
+6f11f82488ec6d4d756fb784e593fd0d4f759a81655ea5b182549b4b6001e11b  crates/iem-server/src/backup_restore.rs — S0 import history (file removed in S5); the value is scrubbed from every later commit
+f36c95ee1fd72ebcd243b23a07daafa08e000a9733c14da47918e9476a9bf83e  crates/iem-server/src/backup_capture.rs — S0 import history (file removed in S5); the value is scrubbed from every later commit
+fb2eb215182391395e0b5955e876582b4e87198df5cb2cf04e777214f872904e  crates/iem-server/src/backup_capture.rs — S0 import history (file removed in S5); the value is scrubbed from every later commit
