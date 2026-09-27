@@ -20,6 +20,11 @@ exclude_globs = [
   "crates/iem-audio-io/src/asio.rs",
   # The S1a spike program (a Windows-only main; its parser is tested).
   "crates/iem-audio-io/examples/**",
+  # The Windows side of the engine's pipes (S6): not compiled on Linux; the
+  # windows job runs tests/pipes.rs over it. Its decisions are pipe.rs's
+  # sddl_for, dacl_sids, sddl_is_private, name_taken and polled_read, which
+  # stay mutated.
+  "crates/iem-engine/src/pipe/win.rs",
   # Windows FFI wrappers (S6), not compiled on Linux; the windows job runs
   # their tests; decisions live in callers and in iem-win's portable decide.rs,
   # which stays mutated with prefwin.rs and lib.rs.

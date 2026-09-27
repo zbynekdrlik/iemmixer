@@ -2655,6 +2655,7 @@ dependencies = [
  "iem-dsp",
  "iem-engine-proto",
  "iem-limiter-mga",
+ "iem-win",
  "interprocess",
  "rtrb",
  "serde",
@@ -2666,6 +2667,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "triple_buffer",
+ "widestring",
 ]
 
 [[package]]

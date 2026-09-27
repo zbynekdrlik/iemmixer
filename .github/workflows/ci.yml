@@ -372,8 +372,10 @@ jobs:
         run: "cargo test --locked -p iem-server --all-features --lib pepper::"
       - name: Clippy (engine crates on the engine's target OS)
         run: cargo clippy --locked -p iem-engine-proto -p iem-audio-io -p iem-engine --all-targets -- -D warnings
-      - name: Engine crate tests (library; the pipe integration tests need socket timeouts, Unix-only until S6)
+      - name: Engine crate tests (library)
         run: cargo test --locked -p iem-engine-proto -p iem-audio-io -p iem-engine --lib
+      - name: Engine pipe tests on named pipes (private DACL, first instance, peeking readers)
+        run: cargo test --locked -p iem-engine --test pipes
       - name: Clippy (Windows glue iem-win, with its Ctrl-Break test helper)
         run: cargo clippy --locked -p iem-win --all-targets --features test-helper -- -D warnings
       - name: Windows glue tests (processes, ports, windows, registry under a test key, Ctrl-Break to a child)
