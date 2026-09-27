@@ -392,6 +392,18 @@ pub trait Pc {
     /// `\iemmixer\iemmixer-probe` started by the guard (design §5.1).
     fn probe_task(&mut self) -> R<()>;
     fn notify(&mut self, audience: Audience, title: &str, body: &str) -> R<()>;
+    /// The HIL test signal (design §4, §7): `HilTestSignal` over the
+    /// supervisor pipe, encoded only on `card_tx` (`[guard] hil_tx`).
+    fn engine_hil_signal(&mut self, input: &str, dbfs: f64, ttl_s: f64, card_tx: &[u16]) -> R<()>;
+    /// A forced reopen of the driver (HIL, design §7); the engine's reset
+    /// budget applies.
+    fn engine_force_reopen(&mut self) -> R<()>;
+    /// F30 (design §7): `iem-engine check-site` of the new site file, then
+    /// it replaces the site; returns the old and the new check report.
+    fn install_site(&mut self, path: &str) -> R<String>;
+    /// `\iemmixer\iemmixer-exclude`: Defender process exclusions for the
+    /// verified bundle `sha` (design §5.1).
+    fn exclude(&mut self, sha: &str) -> R<()>;
 }
 
 /// A scripted PC for the daemon's tests.
@@ -442,6 +454,10 @@ pub mod fake {
         Fingerprint,
         ProbeTask,
         Notify,
+        HilSignal,
+        ForceReopen,
+        InstallSite,
+        Exclude,
     }
 
     impl Call {
@@ -470,6 +486,10 @@ pub mod fake {
                     | Call::Fingerprint
                     | Call::ProbeTask
                     | Call::Notify
+                    | Call::HilSignal
+                    | Call::ForceReopen
+                    | Call::InstallSite
+                    | Call::Exclude
             )
         }
     }
@@ -477,6 +497,9 @@ pub mod fake {
     /// How long a blocked call waits for its token before it fails (a test
     /// that never pre-empts must not hang).
     pub const BLOCK_LIMIT: Duration = Duration::from_secs(10);
+
+    /// One HIL test signal as sent: input, dBFS, TTL, card outputs.
+    pub type SentSignal = (String, f64, f64, Vec<u16>);
 
     /// A scripted PC. Every call is recorded with the instant it began.
     /// Starts and stops change `facts` the way the real ones change the PC,
@@ -499,6 +522,12 @@ pub mod fake {
         pub notices: Vec<(Audience, String, String)>,
         pub bundle: Option<String>,
         pub kids: Children,
+        /// The windows `engine_ready` was asked for, in order.
+        pub ready_secs: Vec<u32>,
+        /// Every HIL test signal sent: (input, dBFS, TTL, card outputs).
+        pub hil_signals: Vec<SentSignal>,
+        /// The site files installed.
+        pub sites: Vec<String>,
         calls: Vec<(Call, Instant)>,
         fails: HashMap<Call, String>,
         blocked: Vec<Call>,
@@ -543,6 +572,9 @@ pub mod fake {
                 notices: Vec::new(),
                 bundle: None,
                 kids: Children::default(),
+                ready_secs: Vec::new(),
+                hil_signals: Vec::new(),
+                sites: Vec::new(),
                 calls: Vec::new(),
                 fails: HashMap::new(),
                 blocked: Vec::new(),
@@ -747,7 +779,8 @@ pub mod fake {
             Ok(self.pid())
         }
 
-        fn engine_ready(&mut self, _secs: u32, c: &Cancel) -> R<Status> {
+        fn engine_ready(&mut self, secs: u32, c: &Cancel) -> R<Status> {
+            self.ready_secs.push(secs);
             self.enter(Call::EngineReady, Some(c))?;
             Ok(self.status.clone())
         }
@@ -859,6 +892,33 @@ pub mod fake {
             self.notices
                 .push((audience, title.to_owned(), body.to_owned()));
             Ok(())
+        }
+
+        fn engine_hil_signal(
+            &mut self,
+            input: &str,
+            dbfs: f64,
+            ttl_s: f64,
+            card_tx: &[u16],
+        ) -> R<()> {
+            self.enter(Call::HilSignal, None)?;
+            self.hil_signals
+                .push((input.to_owned(), dbfs, ttl_s, card_tx.to_vec()));
+            Ok(())
+        }
+
+        fn engine_force_reopen(&mut self) -> R<()> {
+            self.enter(Call::ForceReopen, None)
+        }
+
+        fn install_site(&mut self, path: &str) -> R<String> {
+            self.enter(Call::InstallSite, None)?;
+            self.sites.push(path.to_owned());
+            Ok(format!("{path}: checked and installed"))
+        }
+
+        fn exclude(&mut self, _sha: &str) -> R<()> {
+            self.enter(Call::Exclude, None)
         }
     }
 }
@@ -1387,6 +1447,31 @@ mod tests {
         assert_eq!(pc.children(), saved);
         assert!(pc.called(Call::Notify));
         assert!(!pc.called(Call::AppStop));
+        pc.engine_ready(10, &Cancel::default()).unwrap();
+        assert_eq!(pc.ready_secs, [10]);
+        pc.engine_hil_signal("mic1", -30.0, 5.0, &[72]).unwrap();
+        assert_eq!(pc.hil_signals, [("mic1".to_owned(), -30.0, 5.0, vec![72])]);
+        pc.engine_force_reopen().unwrap();
+        assert_eq!(
+            pc.install_site("site.toml").unwrap(),
+            "site.toml: checked and installed"
+        );
+        assert_eq!(pc.sites, ["site.toml"]);
+        pc.exclude("a").unwrap();
+        for c in [
+            Call::HilSignal,
+            Call::ForceReopen,
+            Call::InstallSite,
+            Call::Exclude,
+        ] {
+            assert!(pc.called(c) && c.mutates(), "{c:?}");
+        }
+        pc.fail(Call::InstallSite, "check-site exit 2");
+        assert!(pc.install_site("bad.toml").is_err());
+        assert_eq!(pc.sites, ["site.toml"]);
+        pc.fail(Call::HilSignal, "refused");
+        assert!(pc.engine_hil_signal("mic2", -30.0, 5.0, &[72]).is_err());
+        assert_eq!(pc.hil_signals.len(), 1);
     }
 
     #[test]

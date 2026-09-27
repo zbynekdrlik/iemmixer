@@ -23,10 +23,16 @@ mod reaper;
 mod tasks;
 mod web;
 
+use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::mpsc;
+use std::thread;
 use std::time::Duration;
 
-use tracing::warn;
+use iem_win::window::{self, SessionEndWindow};
+use tracing::{info, warn};
 
 use crate::cancel::Cancel;
 use crate::handover::{AppExit, ReaperFacts};
@@ -269,6 +275,69 @@ impl Pc for WinPc {
     fn notify(&mut self, audience: Audience, title: &str, body: &str) -> R<()> {
         procs::notify(self, audience, title, body)
     }
+
+    fn engine_hil_signal(&mut self, input: &str, dbfs: f64, ttl_s: f64, card_tx: &[u16]) -> R<()> {
+        engine::hil_signal(self, input, dbfs, ttl_s, card_tx)
+    }
+
+    fn engine_force_reopen(&mut self) -> R<()> {
+        engine::force_reopen(self)
+    }
+
+    fn install_site(&mut self, path: &str) -> R<String> {
+        engine::install_site(self, path)
+    }
+
+    fn exclude(&mut self, sha: &str) -> R<()> {
+        tasks::exclude(self, sha)
+    }
+}
+
+/// Starts the guard's task (`iemmode`, when nothing answers on the pipe).
+pub fn start_guard_task() -> Result<(), String> {
+    tasks::run_task(crate::effects::tasks::GUARD).map_err(|e| e.to_string())
+}
+
+/// How often the session window's thread looks at its messages.
+const SESSION_PUMP: Duration = Duration::from_millis(50);
+
+/// The hidden top-level window for the end of the Windows session (design
+/// §5.4), on a thread of its own that pumps its messages. At the end of the
+/// session it sets `ended` and runs `wait` (the daemon stops respawning,
+/// gives the engine its time and stops the server and tray) while Windows
+/// shows why the session waits.
+pub fn watch_session_end(
+    ended: Arc<AtomicBool>,
+    wait: impl FnOnce() + Send + 'static,
+) -> io::Result<()> {
+    let (tx, rx) = mpsc::channel();
+    thread::Builder::new()
+        .name("iemmixer-guard-session".to_owned())
+        .spawn(move || {
+            let window = match SessionEndWindow::create("iemmixer stops its processes", ended, wait)
+            {
+                Ok(w) => w,
+                Err(e) => {
+                    let _ = tx.send(Err(e));
+                    return;
+                }
+            };
+            let _ = tx.send(Ok(()));
+            info!("the session window is {:#x}", window.hwnd());
+            loop {
+                match window::pump() {
+                    Ok(false) => thread::sleep(SESSION_PUMP),
+                    Ok(true) => break,
+                    Err(e) => {
+                        warn!("the session window's messages: {e}");
+                        break;
+                    }
+                }
+            }
+            drop(window);
+        })?;
+    rx.recv()
+        .map_err(|_| io::Error::other("the session window's thread ended"))?
 }
 
 #[cfg(test)]

@@ -33,6 +33,8 @@ const TUNING_LIMIT: Duration = Duration::from_secs(120);
 const DATA_LIMIT: Duration = Duration::from_secs(120);
 /// The probe task's `cmd /c exit 0` ends within this.
 const PROBE_LIMIT: Duration = Duration::from_secs(15);
+/// The exclude task re-sums the bundle, then adds the exclusions.
+const EXCLUDE_LIMIT: Duration = Duration::from_secs(120);
 
 fn schtasks(args: &[&str]) -> R<Output> {
     let mut cmd = Command::new(procs::system_exe("schtasks.exe"));
@@ -92,6 +94,42 @@ pub(super) fn probe() -> R<()> {
         Probe::Wait => Err(StepError::failed(format!(
             "the probe task did not end within {} s",
             PROBE_LIMIT.as_secs()
+        ))),
+    }
+}
+
+/// The Defender process exclusions of the verified bundle `sha` through
+/// `\iemmixer\iemmixer-exclude` (design §5.1): its request file names the
+/// bundle, the task re-verifies it against its sums; its result must be 0.
+pub(super) fn exclude(pc: &WinPc, sha: &str) -> R<()> {
+    if !bundle::valid_sha(sha) {
+        return Err(StepError::failed(format!("not a bundle SHA: {sha:?}")));
+    }
+    let dir = pc.s.guard_dir();
+    fs::create_dir_all(&dir).map_err(|e| procs::failed("the guard directory", e))?;
+    state::write_atomic(
+        &dir.join(tasks::EXCLUDE_REQUEST),
+        tasks::exclude_request(sha).as_bytes(),
+    )
+    .map_err(|e| procs::failed("the exclude request", e))?;
+    let mut watch = ProbeWatch::new(query(tasks::EXCLUDE)?.as_ref());
+    run_task(tasks::EXCLUDE)?;
+    let mut verdict = Probe::Wait;
+    procs::poll(EXCLUDE_LIMIT, &Cancel::default(), || {
+        verdict = watch.observe(query(tasks::EXCLUDE)?.as_ref());
+        Ok(verdict != Probe::Wait)
+    })?;
+    match verdict {
+        Probe::Passed => {
+            info!("Defender exclusions added for {sha}");
+            Ok(())
+        }
+        Probe::Failed(why) => Err(StepError::failed(format!(
+            "the exclude task for {sha} failed ({why})"
+        ))),
+        Probe::Wait => Err(StepError::failed(format!(
+            "the exclude task did not end within {} s",
+            EXCLUDE_LIMIT.as_secs()
         ))),
     }
 }

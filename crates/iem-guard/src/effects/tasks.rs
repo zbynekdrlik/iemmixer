@@ -13,6 +13,19 @@ pub const APP: &str = r"\iemmixer\iemmixer-StartApp";
 pub const TUNING: &str = r"\iemmixer\iemmixer-tuning";
 /// Proves a Limited guard may start our tasks (`cmd /c exit 0`).
 pub const PROBE: &str = r"\iemmixer\iemmixer-probe";
+/// Adds the Defender process exclusions of a verified bundle's executables
+/// (RunLevel Highest, design §5.1); its one input is the bundle's SHA in
+/// [`EXCLUDE_REQUEST`] under the guard directory.
+pub const EXCLUDE: &str = r"\iemmixer\iemmixer-exclude";
+/// The exclude task's input file.
+pub const EXCLUDE_REQUEST: &str = "exclude-request.txt";
+/// The guard itself: `iemmode` starts it when its pipe does not answer.
+pub const GUARD: &str = r"\iemmixer\iemmixer-guard";
+
+/// The exclude task's input: one line, the bundle's SHA.
+pub fn exclude_request(sha: &str) -> String {
+    format!("{sha}\n")
+}
 
 /// `SCHED_S_TASK_RUNNING` as a `Last Result`.
 pub const RUNNING: i64 = 0x41301;
@@ -146,6 +159,19 @@ mod tests {
         );
         assert_eq!(RUNNING, 267_009);
         assert_eq!(NOT_RUN, 267_011);
+        assert_eq!(
+            run_args(EXCLUDE),
+            ["/Run", "/TN", "\\iemmixer\\iemmixer-exclude"]
+        );
+        assert_eq!(
+            run_args(GUARD),
+            ["/Run", "/TN", "\\iemmixer\\iemmixer-guard"]
+        );
+        assert_eq!(EXCLUDE_REQUEST, "exclude-request.txt");
+        assert_eq!(
+            exclude_request("0123456789abcdef0123456789abcdef01234567"),
+            "0123456789abcdef0123456789abcdef01234567\n"
+        );
     }
 
     #[test]

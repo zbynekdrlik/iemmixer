@@ -5,7 +5,9 @@
 //! guard, and the steps read that inbox. The engine ends only by its own
 //! `Shutdown`.
 
+use std::fs;
 use std::io::Write;
+use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
@@ -23,6 +25,7 @@ use crate::effects::engine::{self as proto, Msg, Quiet, Ready, ReadyWindow, Shut
 use crate::pc::{Kid, R, Status, StepError};
 use crate::plan::Health;
 use crate::site::ENGINE_EXE;
+use crate::state;
 
 /// After a start the engine's pipe appears within this.
 const CONNECT_AFTER_START: Duration = Duration::from_secs(30);
@@ -33,6 +36,8 @@ const HELLO: Duration = Duration::from_secs(10);
 /// `Status` comes once a second.
 const STATUS_GAP: Duration = Duration::from_secs(3);
 const REPLY: Duration = Duration::from_secs(5);
+/// `iem-engine check-site` loads and compiles a site in well under this.
+const CHECK_SITE: Duration = Duration::from_secs(60);
 /// `Shutdown` → `DriverReleased` (design §5.2), then the process ends.
 const RELEASE: Duration = Duration::from_secs(10);
 const GONE: Duration = Duration::from_secs(5);
@@ -208,7 +213,17 @@ impl Supervisor {
     /// Sends `op` and waits up to [`REPLY`] for its answer.
     fn request(&mut self, op: &str) -> Result<(), String> {
         let id = self.fresh_id();
-        self.send(&proto::request(id, op))?;
+        self.exchange(op, id, &proto::request(id, op))
+    }
+
+    /// Sends a whole command and waits up to [`REPLY`] for its answer.
+    fn command(&mut self, what: &str, cmd: Value) -> Result<(), String> {
+        let id = self.fresh_id();
+        self.exchange(what, id, &proto::request_cmd(id, cmd))
+    }
+
+    fn exchange(&mut self, op: &str, id: u64, msg: &Value) -> Result<(), String> {
+        self.send(msg)?;
         let start = Instant::now();
         loop {
             {
@@ -454,4 +469,60 @@ pub(super) fn quiet_for(pc: &mut WinPc) -> R<Duration> {
     let inbox = lock(&sup.inbox);
     inbox.stage_known().map_err(StepError::Failed)?;
     Ok(inbox.quiet.quiet_for(Instant::now()))
+}
+
+/// The HIL test signal (design §4, §7): `HilTestSignal`, encoded only on
+/// `card_tx`; the engine refuses it above its test-signal cap.
+pub(super) fn hil_signal(
+    pc: &mut WinPc,
+    input: &str,
+    dbfs: f64,
+    ttl_s: f64,
+    card_tx: &[u16],
+) -> R<()> {
+    let sup = supervisor(pc, CONNECT, &Cancel::default())?;
+    sup.command(
+        "hil_test_signal",
+        proto::hil_test_signal(input, dbfs, ttl_s, card_tx),
+    )
+    .map_err(StepError::Failed)
+}
+
+/// A forced driver reopen (HIL, design §7); the engine's reset budget
+/// applies.
+pub(super) fn force_reopen(pc: &mut WinPc) -> R<()> {
+    let sup = supervisor(pc, CONNECT, &Cancel::default())?;
+    sup.request("force_reopen").map_err(StepError::Failed)
+}
+
+/// `iem-engine check-site --site <file>` from the bundle: its report.
+fn check_site(pc: &WinPc, site: &Path) -> R<String> {
+    let dir = pc.bundle_dir()?;
+    let mut cmd = Command::new(dir.join(ENGINE_EXE));
+    cmd.arg("check-site")
+        .arg("--site")
+        .arg(site)
+        .current_dir(&dir);
+    let out = procs::run(
+        "iem-engine check-site",
+        &mut cmd,
+        CHECK_SITE,
+        &Cancel::default(),
+        procs::OnCancel::Finish,
+    )?;
+    proto::check_site_result(out.code, &out.stdout, &out.stderr).map_err(StepError::Failed)
+}
+
+/// F30 (design §7): the new site must pass `check-site`; then it replaces
+/// the site file (atomically). The guard's own settings are read again at
+/// its next start.
+pub(super) fn install_site(pc: &WinPc, path: &str) -> R<String> {
+    let new = Path::new(path);
+    let now = check_site(pc, new)?;
+    let site = pc.s.pc.site.clone();
+    let before = check_site(pc, &site).unwrap_or_else(|e| format!("unreadable ({e})"));
+    let text = fs::read(new).map_err(|e| procs::failed(path, e))?;
+    state::write_atomic(&site, &text).map_err(|e| procs::failed(&site.display().to_string(), e))?;
+    info!("the site {} replaced {}", new.display(), site.display());
+    Ok(format!("site before: {before}; site now: {now}"))
 }

@@ -36,9 +36,30 @@ pub fn hello() -> Value {
     json!({"type": "hello", "proto": PROTO, "role": "supervisor", "client": "iemmixer-guard"})
 }
 
-/// A request without arguments (`arm`, `shutdown`, `ping`).
+/// A request without arguments (`arm`, `shutdown`, `force_reopen`).
 pub fn request(id: u64, op: &str) -> Value {
-    json!({"type": "request", "id": id, "cmd": {"op": op}})
+    request_cmd(id, json!({"op": op}))
+}
+
+/// A request carrying a whole command (`hil_test_signal`).
+pub fn request_cmd(id: u64, cmd: Value) -> Value {
+    json!({"type": "request", "id": id, "cmd": cmd})
+}
+
+/// The HIL test tone's frequency (design §7).
+pub const HIL_HZ: f64 = 1000.0;
+
+/// `HilTestSignal` (design §4): the engine renders every mix as usual but
+/// encodes only the card outputs `card_tx` while the TTL runs.
+pub fn hil_test_signal(input: &str, dbfs: f64, ttl_s: f64, card_tx: &[u16]) -> Value {
+    json!({
+        "op": "hil_test_signal",
+        "input": input,
+        "hz": HIL_HZ,
+        "dbfs": dbfs,
+        "ttl_s": ttl_s,
+        "card_tx": card_tx,
+    })
 }
 
 /// Reads one frame's body; `Ok(None)` when the stream ends cleanly before a
@@ -363,6 +384,24 @@ impl Quiet {
     }
 }
 
+/// `iem-engine check-site` (design §4, F30): exit 0 and its report (the
+/// last JSON line); anything else refuses the site.
+pub fn check_site_result(code: Option<i32>, stdout: &str, stderr: &str) -> Result<String, String> {
+    let report = stdout
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|l| l.starts_with('{'))
+        .unwrap_or_default();
+    match code {
+        Some(0) => Ok(report.to_owned()),
+        other => Err(format!(
+            "check-site ended with {other:?}: {}",
+            super::tail(stderr, 300)
+        )),
+    }
+}
+
 /// `iem-engine interlock` (design §4): exit 0 quiet, 5 activity; anything
 /// else is a failed check. Its report is the last JSON line it printed.
 pub fn interlock_result(code: Option<i32>, stdout: &str) -> Result<(bool, String), String> {
@@ -444,6 +483,47 @@ mod tests {
             request(7, "arm"),
             json!({"type": "request", "id": 7, "cmd": {"op": "arm"}})
         );
+        assert_eq!(
+            request_cmd(8, json!({"op": "x", "n": 1})),
+            json!({"type": "request", "id": 8, "cmd": {"op": "x", "n": 1}})
+        );
+    }
+
+    #[test]
+    fn check_site_passes_only_with_exit_0() {
+        let out = "loading\n{\"topology\": \"ab\", \"inputs\": 32}\n";
+        assert_eq!(
+            check_site_result(Some(0), out, ""),
+            Ok(r#"{"topology": "ab", "inputs": 32}"#.to_owned())
+        );
+        assert_eq!(
+            check_site_result(Some(0), "no report", ""),
+            Ok(String::new())
+        );
+        assert_eq!(
+            check_site_result(Some(2), out, "  unknown input mic9\n"),
+            Err("check-site ended with Some(2): unknown input mic9".to_owned())
+        );
+        assert_eq!(
+            check_site_result(None, "", ""),
+            Err("check-site ended with None: ".to_owned())
+        );
+    }
+
+    #[test]
+    fn the_hil_test_signal_names_its_card_outputs() {
+        assert_eq!(
+            hil_test_signal("mic1", -24.5, 30.0, &[71, 72]),
+            json!({
+                "op": "hil_test_signal",
+                "input": "mic1",
+                "hz": 1000.0,
+                "dbfs": -24.5,
+                "ttl_s": 30.0,
+                "card_tx": [71, 72],
+            })
+        );
+        assert_eq!(HIL_HZ, 1000.0);
     }
 
     #[test]
