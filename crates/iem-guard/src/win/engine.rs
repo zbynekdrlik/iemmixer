@@ -558,8 +558,7 @@ pub(super) fn seen(pc: &mut WinPc) -> Option<EngineSeen> {
         },
     };
     let inbox = lock(&sup.inbox);
-    let mut status = inbox.status.clone().unwrap_or_default();
-    status.build = inbox.build.clone().unwrap_or_default();
+    let status = proto::seen_status(inbox.build.as_deref(), inbox.status.as_ref())?;
     Some(EngineSeen {
         status,
         pipe_private: private,

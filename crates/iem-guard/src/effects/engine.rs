@@ -193,6 +193,14 @@ pub fn commit_of(build: &str) -> &str {
     build.rsplit_once('+').map_or(build, |(_, commit)| commit)
 }
 
+/// The running engine's status as the guard shows it (`Pc::engine_seen`):
+/// the newest `Status` of the supervisor connection with the hello's build.
+pub fn seen_status(build: Option<&str>, status: Option<&Status>) -> Option<Status> {
+    let mut seen = status.cloned().unwrap_or_default();
+    seen.build = build.unwrap_or_default().to_owned();
+    Some(seen)
+}
+
 /// The guard's `Reply.engine` (design §7, what HIL v1 reads through
 /// `iemmode status`): the engine as the supervisor connection saw it, its
 /// build as the bare commit (the bundle's SHA), with the engine starts of
