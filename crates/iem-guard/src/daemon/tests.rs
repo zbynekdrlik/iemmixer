@@ -1961,31 +1961,43 @@ fn drift_is_read_hourly_and_after_each_switch() {
 
 #[test]
 fn drift_is_read_after_every_mode_change() {
-    // A dev → event plan that stopped for the owner changed the mode.
+    // A dev → event plan that stopped for the owner changed the mode: the
+    // watch reads the drift at its next tick (the stopped plan itself makes
+    // no call after the health read).
     let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
+    let at = Instant::now();
+    tick(&mut pc, &mut g, at);
+    assert_eq!(pc.count(Call::TuningDrift), 1);
     pc.fail(Call::EngineStop, "no DriverReleased within 10 s");
     pc.health(Health::Parked);
     assert_eq!(
         run_switch(&mut pc, &mut g, Mode::Dev, Mode::Event),
         Outcome::NeedsOwner
     );
-    assert_eq!(pc.count(Call::TuningDrift), 1);
-    // A kept-serving engine and a refused entry changed nothing.
+    assert_eq!(pc.calls_after(Call::EngineHealth), Vec::<Call>::new());
+    tick(&mut pc, &mut g, at + TICK);
+    assert_eq!(pc.count(Call::TuningDrift), 2);
+    // A kept-serving engine and a refused entry changed nothing: the drift
+    // waits for its hour.
     let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
+    tick(&mut pc, &mut g, at);
     pc.fail(Call::EngineStop, "no DriverReleased within 10 s");
     pc.health(Health::Healthy);
     assert_eq!(
         run_switch(&mut pc, &mut g, Mode::Dev, Mode::Event),
         Outcome::KeptServing
     );
-    assert!(!pc.called(Call::TuningDrift));
+    tick(&mut pc, &mut g, at + TICK);
+    assert_eq!(pc.count(Call::TuningDrift), 1);
     let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Event));
+    tick(&mut pc, &mut g, at);
     pc.interlock = (false, "activity on mic1".into());
     assert_eq!(
         run_switch(&mut pc, &mut g, Mode::Event, Mode::Dev),
         Outcome::Refused
     );
-    assert!(!pc.called(Call::TuningDrift));
+    tick(&mut pc, &mut g, at + TICK);
+    assert_eq!(pc.count(Call::TuningDrift), 1);
 }
 
 // ---- the loop ----
