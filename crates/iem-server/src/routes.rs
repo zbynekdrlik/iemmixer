@@ -1432,8 +1432,10 @@ mod api_tests {
         assert_eq!(json["ok"], true);
         // A site without a switch has no button to press.
         let dir2 = tempfile::tempdir().unwrap();
-        let mut config = iem_core::Config::default();
-        config.jwt_secret = SECRET.into();
+        let config = iem_core::Config {
+            jwt_secret: SECRET.into(),
+            ..Default::default()
+        };
         let bare = AppState::new(config, dir2.path());
         let app2 = api_routes(bare.clone())
             .with_state(bare)

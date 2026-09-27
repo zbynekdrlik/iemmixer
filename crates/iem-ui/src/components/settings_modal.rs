@@ -320,8 +320,12 @@ pub fn SettingsModal(
                                 crate::pages::mixer::push::unsubscribe_from_push();
                                 // Clear auth state
                                 crate::auth::clear_auth();
-                                // Navigate to landing page
-                                navigate("/", Default::default());
+                                // Navigate to the landing page once this click has
+                                // finished bubbling through the modal it unmounts.
+                                let navigate = navigate.clone();
+                                crate::components::after_event(move || {
+                                    navigate("/", Default::default());
+                                });
                             }
                         }>
                             "Logout"

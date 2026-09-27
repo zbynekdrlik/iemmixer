@@ -55,6 +55,14 @@ pub fn ActivityBanner(
         });
     };
 
+    // Closing unmounts the dialog: after the click has finished bubbling.
+    let cancel = move || {
+        crate::components::after_event(move || {
+            let _ = set_pin.try_set(String::new());
+            let _ = set_state.try_set(SwitchState::Idle);
+        });
+    };
+
     let active = move || activity.get().0;
     let can_switch = move || activity.get().1;
     let asking = move || {
@@ -82,7 +90,7 @@ pub fn ActivityBanner(
             </div>
         </Show>
         <Show when=asking fallback=|| ()>
-            <div class="pin-modal-overlay" on:click=move |_| { let _ = set_state.try_set(SwitchState::Idle); }>
+            <div class="pin-modal-overlay" on:click=move |_| cancel()>
                 <div class="pin-modal" on:click=move |e| e.stop_propagation()>
                     <h2>"Späť na REAPER?"</h2>
                     <p>"iemmixer sa zastaví a spustí sa REAPER. Potvrď PIN-om inžiniera."</p>
@@ -109,10 +117,7 @@ pub fn ActivityBanner(
                     <div class="confirm-actions">
                         <button
                             class="settings-action-btn"
-                            on:click=move |_| {
-                                let _ = set_pin.try_set(String::new());
-                                let _ = set_state.try_set(SwitchState::Idle);
-                            }
+                            on:click=move |_| cancel()
                         >
                             "Zrušiť"
                         </button>

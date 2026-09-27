@@ -993,7 +993,11 @@ fn EqSlider(
                 let _ = doc_cleanup
                     .remove_event_listener_with_callback("mousemove", mc.as_ref().unchecked_ref());
             }
-            mu_cleanup.borrow_mut().take();
+            // Off the document before it is dropped (see fader.rs).
+            if let Some(uc) = mu_cleanup.borrow_mut().take() {
+                let _ = doc_cleanup
+                    .remove_event_listener_with_callback("mouseup", uc.as_ref().unchecked_ref());
+            }
 
             if was_active {
                 on_drag_end.run(());

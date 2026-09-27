@@ -476,7 +476,6 @@ pub(super) fn StemsVolumeFader(
 type StripKey = (&'static str, u8);
 const LEVEL: u8 = 0;
 const PAN: u8 = 1;
-const MUTE: u8 = 2;
 
 /// Channel list component to handle individual channel rendering
 #[component]
@@ -710,7 +709,9 @@ pub(super) fn ChannelList(
                         set_guard((id, PAN));
                     });
 
-                    // Mute toggle handler with cancellable guard
+                    // Mute toggle. No touch guard: the server never echoes this
+                    // page's own change back, and a guard would drop a genuine
+                    // update from elsewhere (a preset load) arriving right after.
                     let on_mute_click = move |_| {
                         if !connected.get() {
                             return;
@@ -721,9 +722,6 @@ pub(super) fn ChannelList(
                         });
                         let new_muted = match click {
                             MuteClick::Toggle(m) => {
-                                let _ = set_fader_touched.try_update(|t| {
-                                    t.insert(id.to_string(), true);
-                                });
                                 let _ = set_channels.try_update(|chs| {
                                     if let Some(ch) = chs.iter_mut().find(|c| c.id == id) {
                                         ch.muted = m;
@@ -746,8 +744,6 @@ pub(super) fn ChannelList(
                                 muted: new_muted,
                             },
                         );
-                        // Cancellable post-release guard
-                        set_guard((id, MUTE));
                     };
 
                     // Solo toggle handler (exclusive solo, F6)

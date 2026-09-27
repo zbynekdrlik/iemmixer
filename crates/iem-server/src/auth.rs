@@ -1156,15 +1156,13 @@ mod login_tests {
         for _ in 0..3 {
             let r = verify_engineer_pin(&state, peer, &headers, MEMBER_PIN)
                 .await
-                .err()
-                .expect("a member PIN is not the engineer PIN")
+                .expect_err("a member PIN is not the engineer PIN")
                 .into_response();
             assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
         }
         let r = verify_engineer_pin(&state, peer, &headers, ENGINEER_PIN)
             .await
-            .err()
-            .expect("throttled after three failures")
+            .expect_err("throttled after three failures")
             .into_response();
         assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(state.login_guard.stats().lan_failures, 3);

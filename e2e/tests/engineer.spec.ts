@@ -11,9 +11,12 @@ import { openMixer, strip, tab } from "./support/session";
 test.describe.configure({ mode: "serial" });
 
 test.describe("Engineer", () => {
-  // The engineer page subscribes to Web Push; headless Chromium has no push
-  // service, so the subscription's `[push] …` warnings are expected here.
-  test.use({ allowedConsole: [/^\[push\] /] });
+  // The engineer page subscribes to Web Push; Playwright's browser contexts
+  // are incognito, where Chrome has no Push API: its error and the page's
+  // `[push] …` warnings are expected here.
+  test.use({
+    allowedConsole: [[/^\[push\] /, /does not support the Push API in incognito mode/], { scope: "test" }],
+  });
 
   test("a backup restore shows its changes first and puts them back (F31)", async ({ page }) => {
     const auth = await openMixer(page, "engineer", { engineer: true });

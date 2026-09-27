@@ -400,7 +400,7 @@ mod tests {
         assert!((d.peak_db + 20.0).abs() < 0.1, "{}", d.peak_db);
         assert!(d.last_frame_size_bytes > 0);
         assert!(!link.connected());
-        assert_eq!(MediaLink::detached().diagnostics().receiving_oiem, false);
+        assert!(!MediaLink::detached().diagnostics().receiving_oiem);
     }
 
     #[tokio::test]

@@ -173,7 +173,11 @@ mod tests {
             json.starts_with(r#"{"format":"iemmixer-backup","version":2,"timestamp":"2026-09-27T13:00:00Z","rev":42,"state":"#),
             "{json}"
         );
-        assert!(!json.contains("pin"), "{json}");
+        // No PIN material ("pinned" is the customization's pin list).
+        assert!(
+            !json.contains("\"pin\"") && !json.contains("pin_hash"),
+            "{json}"
+        );
         assert_eq!(MixerBackup::parse(&json).unwrap(), b);
         assert_eq!(b.level_count(), 2);
     }

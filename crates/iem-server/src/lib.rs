@@ -102,6 +102,9 @@ impl RunMode {
     }
 }
 
+/// The site view built for one topology (keyed by its hash).
+type SiteCacheEntry = (String, Arc<SiteView>);
+
 /// Talkback runtime metrics (`GET /api/talkback/diagnostics`, F28).
 #[cfg(feature = "audio")]
 #[derive(Debug, Default)]
@@ -141,7 +144,7 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     /// The engine's control pipe and the mirror
     pub engine: EngineClient,
-    site_cache: Arc<Mutex<Option<(String, Arc<SiteView>)>>>,
+    site_cache: Arc<Mutex<Option<SiteCacheEntry>>>,
     /// UI events that do not come from the engine (SOS, pins, talk, tunnel)
     pub event_tx: broadcast::Sender<(To, ServerMsg)>,
     /// Merged meters every 100 ms

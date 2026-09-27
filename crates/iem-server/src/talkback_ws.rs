@@ -115,11 +115,11 @@ async fn session(mut socket: WebSocket, state: AppState, id: String) {
 /// receiver is now the engine's media pipe.
 pub fn diagnostics(state: &AppState) -> serde_json::Value {
     let m = &state.talkback_metrics;
-    let receiver = state
-        .media
-        .connected()
-        .then(|| serde_json::Value::String(format!("{}.media", state.media.pipe())))
-        .unwrap_or(serde_json::Value::Null);
+    let receiver = if state.media.connected() {
+        serde_json::Value::String(format!("{}.media", state.media.pipe()))
+    } else {
+        serde_json::Value::Null
+    };
     let talker = lock(&state.talk)
         .holder()
         .map(|h| serde_json::Value::String(h.to_string()))

@@ -32,3 +32,15 @@ pub(crate) type CallbackSlot =
 pub(crate) type MouseCallbackSlot = std::rc::Rc<
     std::cell::RefCell<Option<wasm_bindgen::closure::Closure<dyn FnMut(web_sys::MouseEvent)>>>,
 >;
+
+/// Runs `f` in the next macrotask, after the current event has finished its
+/// dispatch. A click that unmounts the component it bubbles through (closing
+/// a modal, navigating away) must defer that change: dropping the handlers
+/// of the elements the event still has to reach makes it call freed closures.
+pub(crate) fn after_event(f: impl FnOnce() + 'static) {
+    use wasm_bindgen::JsCast;
+    let cb = wasm_bindgen::closure::Closure::once_into_js(f);
+    if let Some(w) = web_sys::window() {
+        let _ = w.set_timeout_with_callback(cb.unchecked_ref());
+    }
+}

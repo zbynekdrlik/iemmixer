@@ -405,6 +405,12 @@ fn connect_websocket(
     let set_talk_id = state.talk_id.1;
     let set_band_activity = state.band_activity.1;
     let set_console = state.console.1;
+    // Without a valid token the page is on its way to the login (the auth
+    // guard redirects); a socket now would only be refused.
+    if crate::auth::is_token_expired() {
+        return;
+    }
+
     // Close previous WebSocket if exists (prevents closure leak on reconnect)
     if let Some(Some(old_ws)) = ws.try_get_untracked() {
         old_ws.set_onmessage(None);

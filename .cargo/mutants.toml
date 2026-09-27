@@ -46,6 +46,8 @@ exclude_re = [
   "iem-ui/src/.* in [A-Z][A-Za-z]*$",
   # Browser-only fetches of the preset modal (the server side is tested).
   "iem-ui/src/components/preset_modal\\.rs.*\\b(fetch_presets|save_preset_api|update_preset_api|restore_preset_api|delete_preset_api|server_message)\\b",
+  # The next-macrotask deferral (window.setTimeout).
+  "iem-ui/src/components/mod\\.rs.*after_event",
   # The console's socket send (a no-op off the browser).
   "iem-ui/src/components/console_section\\.rs.*replace send with \\(\\)",
   # The handshake's localStorage and location.reload().

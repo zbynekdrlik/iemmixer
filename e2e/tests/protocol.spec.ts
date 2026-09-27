@@ -119,8 +119,9 @@ test.describe("Listen (F17, X11)", () => {
     expect(await worklet.text()).toContain("registerProcessor('listen-limiter'");
 
     await page.goto("/");
-    // A tap first: an AudioContext starts with a user gesture.
-    await page.locator("body").click();
+    // A key press first (a user gesture that navigates nowhere): an
+    // AudioContext starts with a user gesture.
+    await page.keyboard.press("a");
     const ready = await page.evaluate(async () => {
       const player = await import("/audio_player.js");
       player.initAudioPlayer();

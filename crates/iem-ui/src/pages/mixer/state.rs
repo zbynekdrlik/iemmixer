@@ -3,15 +3,14 @@
 //! Bundles all signal pairs into a single struct so that
 //! `connect_websocket` can take one reference instead of 44 parameters.
 
-use leptos::prelude::*;
-use std::collections::{HashMap, HashSet};
-use wasm_bindgen::prelude::*;
-
 use crate::api::Channel;
+use crate::components::after_event;
 use crate::components::category_tabs::Category;
 use crate::components::eq_modal::EqBandState;
 use crate::components::settings_modal::UserSettings;
 use crate::components::talk_button::TalkState;
+use leptos::prelude::*;
+use std::collections::{HashMap, HashSet};
 
 /// A read/write signal pair as returned by `signal()`. Named so the fields
 /// below stay readable (and under clippy's `type_complexity` threshold).
@@ -83,25 +82,39 @@ impl MixerState {
         let _ = self.preset_modal_visible.1.try_set(true);
     }
     pub fn close_preset_modal(&self) {
-        let _ = self.preset_modal_visible.1.try_set(false);
+        let set = self.preset_modal_visible.1;
+        after_event(move || {
+            let _ = set.try_set(false);
+        });
     }
     pub fn open_snapshot_modal(&self) {
         let _ = self.snapshot_modal_visible.1.try_set(true);
     }
     pub fn close_snapshot_modal(&self) {
-        let _ = self.snapshot_modal_visible.1.try_set(false);
+        let set = self.snapshot_modal_visible.1;
+        after_event(move || {
+            let _ = set.try_set(false);
+        });
     }
     pub fn open_settings_modal(&self) {
         let _ = self.settings_modal_visible.1.try_set(true);
     }
+    /// Deferred: the settings modal unmounts, and the click that closes it
+    /// still bubbles through its elements.
     pub fn close_settings_modal(&self) {
-        let _ = self.settings_modal_visible.1.try_set(false);
+        let set = self.settings_modal_visible.1;
+        after_event(move || {
+            let _ = set.try_set(false);
+        });
     }
     pub fn open_pin_change_modal(&self) {
         let _ = self.pin_modal_visible.1.try_set(true);
     }
     pub fn close_pin_change_modal(&self) {
-        let _ = self.pin_modal_visible.1.try_set(false);
+        let set = self.pin_modal_visible.1;
+        after_event(move || {
+            let _ = set.try_set(false);
+        });
     }
 
     // --- Category ---
@@ -135,14 +148,10 @@ impl MixerState {
     pub fn close_eq(&self) {
         let set_eq_open = self.eq_open.1;
         let set_eq_bands = self.eq_bands.1;
-        let cb = wasm_bindgen::closure::Closure::once_into_js(move || {
+        after_event(move || {
             let _ = set_eq_open.try_set(None);
             let _ = set_eq_bands.try_set(Vec::new());
         });
-        web_sys::window()
-            .unwrap()
-            .set_timeout_with_callback(cb.as_ref().unchecked_ref())
-            .unwrap();
     }
 
     // --- Limiter ---
@@ -163,13 +172,9 @@ impl MixerState {
 
     pub fn close_limiter(&self) {
         let set_limiter_open = self.limiter_open.1;
-        let cb = wasm_bindgen::closure::Closure::once_into_js(move || {
+        after_event(move || {
             let _ = set_limiter_open.try_set(None);
         });
-        web_sys::window()
-            .unwrap()
-            .set_timeout_with_callback(cb.as_ref().unchecked_ref())
-            .unwrap();
     }
 
     pub fn new(member_id: &str) -> Self {
