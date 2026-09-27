@@ -148,6 +148,36 @@ mod tests {
     }
 
     #[test]
+    fn two_backups_of_the_same_second_are_two_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BackupStore::new(dir.path());
+        let of_rev = |rev: u64| {
+            let mut b = backup("2026-09-27T13:00:00Z");
+            b.rev = rev;
+            b
+        };
+        let names: Vec<String> = (1..=3)
+            .map(|rev| store.save(&of_rev(rev)).unwrap())
+            .collect();
+        // Never an overwrite: each save gets a name of its own, and every
+        // backup reads back as it was saved.
+        assert_eq!(
+            names,
+            [
+                "20260927_130000.json",
+                "20260927_130000_2.json",
+                "20260927_130000_3.json"
+            ]
+        );
+        for (rev, name) in (1..=3).zip(&names) {
+            assert_eq!(store.load(name).unwrap(), of_rev(rev), "{name}");
+        }
+        let listed: Vec<String> = store.list().into_iter().map(|i| i.filename).collect();
+        let newest_first: Vec<String> = names.iter().rev().cloned().collect();
+        assert_eq!(listed, newest_first);
+    }
+
+    #[test]
     fn path_traversal_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let store = BackupStore::new(dir.path());
