@@ -74,14 +74,25 @@ Set-Content -LiteralPath (Join-Path $sums 'SHA256SUMS') -Value ''
 Throws { Test-SpikeSums -Bin $sums } 'sums-refuse-an-empty-list'
 
 # Spike arguments from a request.
-$req = [pscustomobject]@{ id = 'spike-1'; mode = 'duplex'; driver = 'Some Card'; frames = 32; seconds = 600; burn_us = 100; stress = 4; panic_at = 0; cycles = 5 }
+$req = [pscustomobject]@{ id = 'spike-1'; mode = 'duplex'; driver = 'Some Card'; frames = 32; seconds = 600; burn_us = 100; stress = 4; panic_at = 0; cycles = 5
+                          activity_channels = '101-110,121-124' }
 $a = New-SpikeArguments -Request $req -Root 'C:\x y'
 Assert ($a[0] -eq 'duplex' -and $a[2] -eq '"Some Card"' -and $a[4] -eq '"C:\x y\status\spike-1.report.json"' -and $a[8] -eq '"C:\x y\queue\stop"') 'arguments-quote-paths-and-driver'
-Assert (($a -join ' ') -like '*--frames 32 --seconds 600 --burn-us 100 --stress 4 --panic-at 0') 'arguments-duplex-options'
+Assert (($a -join ' ') -like '*--frames 32 --seconds 600 --burn-us 100 --stress 4 --panic-at 0 --activity-channels 101-110,121-124') 'arguments-duplex-options'
 $req.mode = 'probe'
 Assert ((New-SpikeArguments -Request $req -Root 'C:\r').Count -eq 9) 'arguments-probe-has-no-options'
 $req.mode = 'reopen'
-Assert (((New-SpikeArguments -Request $req -Root 'C:\r') -join ' ') -like '*--frames 32 --cycles 5') 'arguments-reopen-options'
+Assert (((New-SpikeArguments -Request $req -Root 'C:\r') -join ' ') -like '*--frames 32 --cycles 5 --activity-channels 101-110,121-124') 'arguments-reopen-options'
+$req.activity_channels = 'all'
+Assert (((New-SpikeArguments -Request $req -Root 'C:\r') -join ' ') -like '*--activity-channels all') 'arguments-watch-all-inputs-only-when-asked'
+foreach ($bad in @('', '3; calc', '3 4', 'ALL', '"3"')) {
+    $req.activity_channels = $bad
+    Throws { New-SpikeArguments -Request $req -Root 'C:\r' } "arguments-refuse-activity-channels [$bad]"
+}
+$none = [pscustomobject]@{ id = 'spike-2'; mode = 'duplex'; driver = 'Some Card'; frames = 32; seconds = 600; burn_us = 0; stress = 0; panic_at = 0; cycles = 5 }
+$e = ErrorOf { New-SpikeArguments -Request $none -Root 'C:\r' }
+Assert ($e -like '*activity_channels*') "arguments-need-the-watched-inputs ($e)"
+$req.activity_channels = '101-110,121-124'
 $req.frames = 16
 Throws { New-SpikeArguments -Request $req -Root 'C:\r' } 'arguments-refuse-frames-16'
 $req.mode = 'record'

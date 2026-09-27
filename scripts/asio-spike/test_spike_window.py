@@ -12,7 +12,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import spike_window as sw  # noqa: E402
 
-FULL = "\n".join(f"{k}=v" for k in sw.REQUIRED if k not in ("PC_BUFFER_ORIGINAL", "PC_NTRACK")) + "\nPC_BUFFER_ORIGINAL=64\nPC_NTRACK=9\n"
+NUMERIC = {"PC_BUFFER_ORIGINAL": "64", "PC_NTRACK": "9", "PC_ACTIVITY_CHANNELS": "101-110,121-124"}
+FULL = "\n".join(f"{k}=v" for k in sw.REQUIRED if k not in NUMERIC) + "\n" + "".join(f"{k}={v}\n" for k, v in NUMERIC.items())
 
 
 def write(text: str, name: str = "asio-spike.env") -> Path:
@@ -34,6 +35,15 @@ class EnvTests(unittest.TestCase):
         with self.assertRaisesRegex(sw.StepError, "PC_BUFFER_ORIGINAL must be a whole number"):
             sw.load_env(write(FULL.replace("PC_BUFFER_ORIGINAL=64", "PC_BUFFER_ORIGINAL=sixty")))
 
+    def test_the_guard_watches_the_configured_stage_inputs_or_explicitly_all(self) -> None:
+        self.assertEqual(sw.load_env(write(FULL))["PC_ACTIVITY_CHANNELS"], "101-110,121-124")
+        with self.assertRaisesRegex(sw.StepError, "missing PC_ACTIVITY_CHANNELS"):
+            sw.load_env(write(FULL.replace("PC_ACTIVITY_CHANNELS=101-110,121-124\n", "")))
+        self.assertEqual(sw.load_env(write(FULL.replace("=101-110,121-124", "=all")))["PC_ACTIVITY_CHANNELS"], "all")
+        for bad in ("101-110, 121-124", "3;4", "0", "3-", "-3", "5-3", "All", "3,,4", "1-1025"):
+            with self.assertRaisesRegex(sw.StepError, "PC_ACTIVITY_CHANNELS", msg=bad):
+                sw.load_env(write(FULL.replace("=101-110,121-124", "=" + bad)))
+
     def test_missing_file(self) -> None:
         with self.assertRaisesRegex(sw.StepError, "missing"):
             sw.load_env(Path(tempfile.mkdtemp()) / "absent.env")
@@ -51,6 +61,15 @@ class RequestTests(unittest.TestCase):
 
     def test_timeouts(self) -> None:
         self.assertEqual([sw.run_timeout("probe", 600, 5), sw.run_timeout("duplex", 600, 5), sw.run_timeout("reopen", 600, 5)], [60, 660, 210])
+
+    def test_the_request_carries_the_watched_inputs(self) -> None:
+        env = {"PC_ASIO_DRIVER": "D", "PC_ASIO_MODULE": "M", "PC_ACTIVITY_CHANNELS": "101-110,121-124"}
+        args = type("A", (), {"mode": "duplex", "frames": 64, "seconds": 20, "burn_us": 0, "stress": 0, "panic_at": 0, "cycles": 5})()
+        self.assertEqual(sw.run_fields(env, args),
+                         {"mode": "duplex", "driver": "D", "module": "M", "frames": 64, "seconds": 20, "burn_us": 0, "stress": 0,
+                          "panic_at": 0, "cycles": 5, "activity_channels": "101-110,121-124", "timeout": 80})
+        args.mode, args.frames = "probe", None
+        self.assertEqual((sw.run_fields(env, args)["frames"], sw.run_fields(env, args)["timeout"]), (0, 60))
 
     def test_request_hashtable_quotes_text_and_keeps_numbers(self) -> None:
         self.assertEqual(sw.ps_hashtable({"mode": "duplex", "driver": "It's a card", "frames": 32}),
@@ -334,6 +353,16 @@ class VerdictTests(unittest.TestCase):
                   self.report(messages={"buffer_size_changes": 1}), self.report("stopped"),
                   {"outcome": "done", "segments": []}):
             self.assertFalse(sw.verdict(r)["stable"], r)
+
+    def test_the_hot_inputs_and_the_watched_ones_are_reported(self) -> None:
+        r = self.report("band-activity")
+        r["activity_channels"] = [101, 102]
+        r["loudest_inputs"] = [{"channel": 125, "index": 124, "dbfs": -2.4}]
+        v = sw.verdict(r)
+        self.assertEqual((v["activity_channels"], v["loudest_inputs"], v["stable"]),
+                         ([101, 102], [{"channel": 125, "index": 124, "dbfs": -2.4}], False))
+        v = sw.verdict(self.report())
+        self.assertEqual((v["activity_channels"], v["loudest_inputs"]), (None, []))
 
     def test_segments_add_up(self) -> None:
         r = self.report()

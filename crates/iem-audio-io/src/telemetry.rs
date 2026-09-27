@@ -607,18 +607,88 @@ mod tests {
     }
 
     #[test]
-    fn input_peaks_keep_the_maximum_until_taken() {
-        let t = Telemetry::new(32, 96_000.0);
-        assert_eq!(t.take_input_peak(), 0.0);
-        t.on_input_peak(0.25);
-        t.on_input_peak(0.5);
-        t.on_input_peak(0.125);
-        t.on_input_peak(f64::NAN);
-        assert_eq!(t.take_input_peak(), 0.5);
-        assert_eq!(t.take_input_peak(), 0.0);
-        t.on_input_peak(-0.75);
-        t.on_input_peak(f64::INFINITY);
-        assert_eq!(t.take_input_peak(), 0.75);
+    fn input_peaks_keep_each_inputs_maximum_until_taken() {
+        let p = InputPeaks::new(3);
+        assert_eq!(p.take(), [0.0, 0.0, 0.0]);
+        p.record(0, 0.25);
+        p.record(0, 0.5);
+        p.record(0, 0.125);
+        p.record(0, f64::NAN);
+        p.record(2, 0.0625);
+        p.record(3, 1.0); // the card has no fourth input
+        assert_eq!(p.take(), [0.5, 0.0, 0.0625]);
+        assert_eq!(p.take(), [0.0, 0.0, 0.0]);
+        p.record(1, -0.75);
+        p.record(1, f64::INFINITY);
+        assert_eq!(p.take(), [0.0, 0.75, 0.0]);
+        assert!(InputPeaks::new(0).take().is_empty());
+    }
+
+    #[test]
+    fn watched_inputs_are_card_numbers_from_one() {
+        assert_eq!(Watched::parse("all"), Ok(Watched::All));
+        assert_eq!(Watched::parse("3"), Ok(Watched::Inputs(vec![2])));
+        assert_eq!(
+            Watched::parse("121-124,103-105,104,101"),
+            Ok(Watched::Inputs(vec![
+                100, 102, 103, 104, 120, 121, 122, 123
+            ]))
+        );
+        assert_eq!(Watched::parse("7-7"), Ok(Watched::Inputs(vec![6])));
+        assert_eq!(
+            Watched::parse(&MAX_INPUT.to_string()),
+            Ok(Watched::Inputs(vec![MAX_INPUT - 1]))
+        );
+        for bad in [
+            "", "ALL", "0", "3,", ",3", "3-", "-3", "5-3", "3-4-5", "x", "3 4", "1-1025",
+        ] {
+            assert!(Watched::parse(bad).is_err(), "{bad:?}");
+        }
+        assert!(Watched::parse(&(MAX_INPUT + 1).to_string()).is_err());
+    }
+
+    #[test]
+    fn watched_inputs_must_exist_on_the_card() {
+        let w = Watched::parse("101-110,121-124").unwrap();
+        assert_eq!(w.check(124), Ok(()));
+        assert!(w.check(123).is_err());
+        assert_eq!(Watched::All.check(0), Ok(()));
+        assert_eq!(Watched::Inputs(vec![]).check(0), Ok(()));
+    }
+
+    #[test]
+    fn the_guard_hears_only_the_watched_inputs() {
+        let loud_unused = [0.0, 0.76, 0.001, 0.002];
+        let stage = Watched::parse("3-4").unwrap();
+        assert_eq!(stage.peak(&loud_unused), 0.002);
+        assert_eq!(Watched::All.peak(&loud_unused), 0.76);
+        assert_eq!(Watched::parse("9").unwrap().peak(&loud_unused), 0.0);
+        assert_eq!(Watched::All.peak(&[]), 0.0);
+        assert_eq!(
+            stage.numbers(),
+            Some(vec![3, 4]),
+            "the report names card inputs from 1"
+        );
+        assert_eq!(Watched::All.numbers(), None);
+    }
+
+    #[test]
+    fn the_loudest_inputs_are_listed_loudest_first() {
+        let mut l = Loudest::default();
+        assert_eq!((l.max(), l.top(5)), (0.0, vec![]));
+        l.observe(&[0.0, 0.5, 0.25]);
+        l.observe(&[0.125, 0.0625, 0.25, 0.75, 0.0, 0.5]);
+        l.observe(&[0.0]);
+        assert_eq!(l.max(), 0.75);
+        assert_eq!(
+            l.top(5),
+            [(3, 0.75), (1, 0.5), (5, 0.5), (2, 0.25), (0, 0.125)]
+        );
+        assert_eq!(l.top(2), [(3, 0.75), (1, 0.5)]);
+        // Silent inputs are not listed.
+        let mut quiet = Loudest::default();
+        quiet.observe(&[0.0, 0.0, 1e-9]);
+        assert_eq!(quiet.top(5), [(2, 1e-9)]);
     }
 
     #[test]

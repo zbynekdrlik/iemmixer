@@ -614,50 +614,114 @@ mod tests {
     fn the_watch_stops_on_the_stop_file_a_rate_change_and_band_activity() {
         let t0 = Instant::now();
         let s = Duration::from_secs(1);
-        let mut w = Watch::new(t0);
-        assert_eq!(w.poll(t0, true, true, || 0.01), Some(End::Stopped));
-        assert_eq!(w.poll(t0, false, true, || 0.01), Some(End::RateChanged));
-        // The peak is read once a second; three loud seconds in a row are band activity.
-        let reads = Cell::new(0);
-        let peak = || {
-            reads.set(reads.get() + 1);
-            0.01
-        };
-        assert_eq!(w.poll(t0 + s / 2, false, false, peak), None);
-        assert_eq!(reads.get(), 0);
-        assert_eq!(w.poll(t0 + s, false, false, peak), None);
-        assert_eq!(w.poll(t0 + s, false, false, peak), None);
-        assert_eq!(reads.get(), 1);
-        assert_eq!(w.poll(t0 + 2 * s, false, false, peak), None);
+        let mut w = Watch::new(t0, Watched::All);
+        assert_eq!(w.poll(t0, true, true, || vec![0.01]), Some(End::Stopped));
         assert_eq!(
-            w.poll(t0 + 3 * s, false, false, peak),
+            w.poll(t0, false, true, || vec![0.01]),
+            Some(End::RateChanged)
+        );
+        // The peaks are read once a second; three loud seconds in a row are band activity.
+        let reads = Cell::new(0);
+        let peaks = || {
+            reads.set(reads.get() + 1);
+            vec![0.0, 0.01]
+        };
+        assert_eq!(w.poll(t0 + s / 2, false, false, peaks), None);
+        assert_eq!(reads.get(), 0);
+        assert_eq!(w.poll(t0 + s, false, false, peaks), None);
+        assert_eq!(w.poll(t0 + s, false, false, peaks), None);
+        assert_eq!(reads.get(), 1);
+        assert_eq!(w.poll(t0 + 2 * s, false, false, peaks), None);
+        assert_eq!(
+            w.poll(t0 + 3 * s, false, false, peaks),
             Some(End::BandActivity)
         );
-        assert_eq!((reads.get(), w.loudest()), (3, 0.01));
+        assert_eq!(reads.get(), 3);
     }
 
     #[test]
     fn a_quiet_second_resets_the_band_guard_and_a_late_poll_reads_once() {
         let t0 = Instant::now();
         let s = Duration::from_secs(1);
-        let mut w = Watch::new(t0);
-        assert_eq!(w.poll(t0 + s, false, false, || 0.5), None);
-        assert_eq!(w.poll(t0 + 2 * s, false, false, || 0.0), None);
-        assert_eq!(w.poll(t0 + 3 * s, false, false, || 0.5), None);
+        let mut w = Watch::new(t0, Watched::All);
+        assert_eq!(w.poll(t0 + s, false, false, || vec![0.5]), None);
+        assert_eq!(w.poll(t0 + 2 * s, false, false, || vec![0.0]), None);
+        assert_eq!(w.poll(t0 + 3 * s, false, false, || vec![0.5]), None);
         // A pause of 10 s (a reopen): one read, the next one a second later.
         let reads = Cell::new(0);
-        let peak = || {
+        let peaks = || {
             reads.set(reads.get() + 1);
-            0.5
+            vec![0.5]
         };
-        assert_eq!(w.poll(t0 + 13 * s, false, false, peak), None);
-        assert_eq!(w.poll(t0 + 13 * s, false, false, peak), None);
+        assert_eq!(w.poll(t0 + 13 * s, false, false, peaks), None);
+        assert_eq!(w.poll(t0 + 13 * s, false, false, peaks), None);
         assert_eq!(reads.get(), 1);
         assert_eq!(
-            w.poll(t0 + 14 * s, false, false, peak),
+            w.poll(t0 + 14 * s, false, false, peaks),
             Some(End::BandActivity)
         );
-        assert_eq!(w.loudest(), 0.5);
+    }
+
+    #[test]
+    fn a_loud_input_outside_the_stage_inputs_does_not_stop_the_run_but_is_reported() {
+        let t0 = Instant::now();
+        let s = Duration::from_secs(1);
+        // Stage inputs 2 and 3 (card numbers); input 1 carries program material.
+        let mut w = Watch::new(t0, Watched::parse("2-3").unwrap());
+        for k in 1..=10 {
+            assert_eq!(
+                w.poll(t0 + k * s, false, false, || vec![0.76, 0.001, 0.0, 0.02]),
+                None,
+                "second {k}"
+            );
+        }
+        let mut report = serde_json::json!({ "tool": "asio_spike" });
+        w.record_levels(&mut report);
+        assert_eq!(report["loudest_input_dbfs"], dbfs(0.76));
+        assert_eq!(report["loudest_watched_dbfs"], dbfs(0.001));
+        assert_eq!(
+            report["loudest_inputs"],
+            serde_json::json!([
+                { "channel": 1, "index": 0, "dbfs": dbfs(0.76) },
+                { "channel": 4, "index": 3, "dbfs": dbfs(0.02) },
+                { "channel": 2, "index": 1, "dbfs": dbfs(0.001) },
+            ])
+        );
+        assert_eq!(report["activity_channels"], serde_json::json!([2, 3]));
+        // The stage inputs get loud: three seconds in a row stop the run.
+        for k in 11..=12 {
+            assert_eq!(
+                w.poll(t0 + k * s, false, false, || vec![0.0, 0.0, 0.5]),
+                None
+            );
+        }
+        assert_eq!(
+            w.poll(t0 + 13 * s, false, false, || vec![0.0, 0.0, 0.5]),
+            Some(End::BandActivity)
+        );
+    }
+
+    #[test]
+    fn the_levels_list_the_five_loudest_inputs_and_all_when_every_input_is_watched() {
+        let t0 = Instant::now();
+        let mut w = Watch::new(t0, Watched::All);
+        let peaks: Vec<f64> = (0..8).map(|i| f64::from(i) / 8.0).collect();
+        assert_eq!(
+            w.poll(t0 + Duration::from_secs(1), false, false, || peaks),
+            None
+        );
+        let mut progress = serde_json::json!({ "elapsed_s": 5 });
+        w.record_levels(&mut progress);
+        let listed: Vec<u64> = progress["loudest_inputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["channel"].as_u64().unwrap())
+            .collect();
+        assert_eq!(listed, [8, 7, 6, 5, 4]);
+        assert_eq!(progress["activity_channels"], "all");
+        assert_eq!(progress["loudest_watched_dbfs"], dbfs(7.0 / 8.0));
+        assert_eq!(progress["elapsed_s"], 5);
     }
 
     #[test]
@@ -687,7 +751,7 @@ mod tests {
     #[test]
     fn parses_a_duplex_run_under_load() {
         let a = parse(&argv(
-            "duplex --driver D1 --report r.json --stop-file stop --progress p.json --frames 32 --seconds 600 --burn-us 100 --stress 4 --panic-at 7 --cycles 3",
+            "duplex --driver D1 --report r.json --stop-file stop --progress p.json --frames 32 --seconds 600 --burn-us 100 --stress 4 --panic-at 7 --cycles 3 --activity-channels 101-110,121-124",
         ))
         .unwrap();
         assert_eq!(
@@ -704,6 +768,7 @@ mod tests {
                 stress: 4,
                 panic_at: 7,
                 cycles: 3,
+                watched: Watched::parse("101-110,121-124").unwrap(),
             }
         );
     }
@@ -715,14 +780,11 @@ mod tests {
             (a.mode, a.frames, a.seconds, a.cycles, a.progress),
             (Mode::Probe, 0, 600, 5, None)
         );
-        assert_eq!(
-            parse(&argv(
-                "reopen --driver D1 --report r --stop-file s --frames 48"
-            ))
-            .unwrap()
-            .mode,
-            Mode::Reopen
-        );
+        let r = parse(&argv(
+            "reopen --driver D1 --report r --stop-file s --frames 48 --activity-channels all",
+        ))
+        .unwrap();
+        assert_eq!((r.mode, r.watched), (Mode::Reopen, Watched::All));
     }
 
     #[test]
@@ -736,6 +798,10 @@ mod tests {
             "probe --driver D1 --stop-file s",
             "probe --driver D1 --report r",
             "duplex --driver D1 --report r --stop-file s",
+            "duplex --driver D1 --report r --stop-file s --frames 64",
+            "reopen --driver D1 --report r --stop-file s --frames 64",
+            "duplex --driver D1 --report r --stop-file s --frames 64 --activity-channels 0",
+            "duplex --driver D1 --report r --stop-file s --frames 64 --activity-channels 5-3",
             "duplex --driver D1 --report r --stop-file s --frames 16",
             "duplex --driver D1 --report r --stop-file s --frames 32x",
             "duplex --driver D1 --report r --stop-file s --frames 32 --seconds 0",
@@ -747,6 +813,6 @@ mod tests {
         ] {
             assert!(parse(&argv(bad)).is_err(), "{bad:?}");
         }
-        assert!(parse(&argv("duplex --driver D1 --report r --stop-file s --frames 64 --seconds 3600 --burn-us 300 --stress 8")).is_ok());
+        assert!(parse(&argv("duplex --driver D1 --report r --stop-file s --frames 64 --seconds 3600 --burn-us 300 --stress 8 --activity-channels all")).is_ok());
     }
 }
