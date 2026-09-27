@@ -798,8 +798,9 @@ mod tests {
         assert_eq!(r.c.alarms[1].detail, "sanitiser trips: 3");
     }
 
-    /// Connections need a socket; the pipe tests run on Linux only (engine
-    /// rule: no timeouts on Windows named pipes).
+    /// Connections need a socket pair. Unix only: the harness's client
+    /// reads with a socket receive timeout, which Windows pipes do not have;
+    /// `tests/pipes.rs` runs the engine's pipes on Windows.
     #[cfg(unix)]
     mod peers {
         use super::*;

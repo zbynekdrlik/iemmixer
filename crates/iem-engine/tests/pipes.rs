@@ -1014,6 +1014,8 @@ mod named_pipes {
         e.client().hello(Role::Observe);
         let user = current_user_sid().unwrap();
         let written = sddl_sid(&user).unwrap();
+        // No media client is connected: reading the media pipe's DACL
+        // connects as one for a moment (`pipe_sddl`), superseding nobody.
         for name in [e.pipe.clone(), format!("{}.media", e.pipe)] {
             let dacl = read_dacl(&name);
             assert!(
@@ -1021,6 +1023,8 @@ mod named_pipes {
                 "{name}: {dacl} (user {user}, written {written})"
             );
             assert!(dacl.contains(";;;SY)"), "{name}: {dacl}");
+            // Protected: nothing is inherited into it.
+            assert!(dacl.starts_with("D:P("), "{name}: {dacl}");
         }
         e.shutdown();
     }

@@ -14,6 +14,13 @@ pub fn current_user_sid() -> io::Result<String> {
 /// well-known accounts by their alias (`SY`). Reading it opens the pipe
 /// with `READ_CONTROL` only, as a client for that moment; a pipe with no
 /// free instance answers `ERROR_PIPE_BUSY`.
+///
+/// The listener takes that moment for a connection. On a live engine's
+/// control pipe the probe counts toward its connection cap until it closes;
+/// on the `.media` pipe it supersedes, and so closes, the current media
+/// client (the server's listen and talkback stream). HIL reads the control
+/// pipe's DACL, and the media pipe's only while no media client is
+/// connected or where dropping that stream for a moment is acceptable.
 pub fn pipe_sddl(name: &str) -> io::Result<String> {
     imp::pipe_sddl(name)
 }
