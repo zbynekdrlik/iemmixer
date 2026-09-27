@@ -83,7 +83,11 @@ class IntegrityTests(unittest.TestCase):
                      "TerminateJobObject(job, 1)", "JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE", "$p.Kill()",
                      "proc.terminate()", "Invoke-CimMethod -InputObject $p -MethodName Terminate",
                      "Invoke-CimMethod $p -MethodName 'Terminate'", "shutdown.exe /f /r",
-                     "nt::NtTerminateProcess(h, 0)"):
+                     "nt::NtTerminateProcess(h, 0)", "Invoke-CimMethod -InputObject $p -Name Terminate",
+                     "Invoke-WmiMethod -Path $w -Name Terminate", "Invoke-WmiMethod -Name 'terminate' -Path $w",
+                     "wmic process where processid=1 call terminate", "wmic process where name='x' delete",
+                     "tskill 1234", "pskill -t engine", "Get-Process x | ForEach-Object Kill",
+                     "Get-Process x | % Kill", "Get-Process x | ForEach-Object -MemberName Kill"):
             self.put("crates/a/src/lib.rs", f"fn f() {{ {body}; }}\n")
             self.assertEqual(ci.violations(self.root), ["crates/a/src/lib.rs:1: force-kill command (program spec I8)"], body)
 
@@ -91,7 +95,9 @@ class IntegrityTests(unittest.TestCase):
         for body in ('Command::new("kill").args(["-TERM", &pid])', "signal::kill(pid, Signal::SIGTERM)",
                      "self.killed = true", "skill(x)", "let force_ended = false",
                      "console::ctrl_break(pid)", "tasklist /m testcard.dll", "Invoke-CimMethod -MethodName Create",
-                     "// the guard never force-ends a process"):
+                     "// the guard never force-ends a process", "a skill and a skills list", "the job Terminated",
+                     "Invoke-CimMethod -Name GetOwner", "wmic os get caption", "delete the temp file",
+                     "ForEach-Object Killed", "% Killer", "$exit = 'terminated'"):
             self.put("crates/a/src/lib.rs", f"fn f() {{ {body}; }}\n")
             self.assertEqual(ci.violations(self.root), [], body)
 
