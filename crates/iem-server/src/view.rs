@@ -1314,6 +1314,33 @@ mod tests {
     }
 
     #[test]
+    fn a_gain_change_leaves_a_disabled_high_pass_off() {
+        // The high-pass has no gain (the engine ignores it): neither a gain
+        // drag nor Reset (gain 0) may switch on an audible low cut.
+        let eq = Eq::default();
+        assert_eq!(
+            (eq.bands[0].kind, eq.bands[0].enabled),
+            (BandKind::HighPass, false)
+        );
+        for gain in [0.0_f32, 3.0] {
+            let moved = apply_band(&eq, 0, "gain_db", gain).unwrap();
+            assert_eq!(
+                (moved.bands[0].gain_db, moved.bands[0].enabled),
+                (f64::from(gain), false),
+                "{gain}"
+            );
+        }
+        // Its own switch still works, and a gain change leaves it on.
+        let on = apply_band(&eq, 0, "enabled", 1.0).unwrap();
+        assert!(apply_band(&on, 0, "gain_db", 3.0).unwrap().bands[0].enabled);
+        // Every band with a gain switches on, Reset's gain 0 included.
+        for band in 1..5_u8 {
+            let reset = apply_band(&eq, band, "gain_db", 0.0).unwrap();
+            assert!(reset.bands[usize::from(band)].enabled, "band {band}");
+        }
+    }
+
+    #[test]
     fn a_gain_change_enables_a_disabled_band() {
         // ReaEQ's behaviour, kept from gen1 (P9: the band notices nothing):
         // moving the gain of a disabled band switches the band on.
