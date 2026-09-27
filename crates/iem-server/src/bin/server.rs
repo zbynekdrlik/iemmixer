@@ -5,6 +5,7 @@
 //!   iem-server pin set-engineer     read a PIN from stdin, store its hash as the engineer PIN
 //!   iem-server pin set-member <id>  read a PIN from stdin, store its hash for member <id>
 //!   iem-server notify <title> <body>  push one alarm to the engineer's and owner's devices
+//!   iem-server alarm-link [--ttl-h N]  print the owner's one-time alarm link (default 24 h)
 //!
 //! The site config is `$IEMMIXER_CONFIG` (default `iemmixer.toml`); runtime
 //! data and secrets live next to it. `IEMMIXER_ENGINE_PIPE` overrides the
@@ -21,7 +22,7 @@ use iem_core::Config;
 use iem_server::provision::{self, PinTarget, ProvisionError};
 use iem_server::{RunMode, ServerConfig};
 
-const USAGE: &str = "usage: iem-server [pin set-engineer | pin set-member <member-id> | notify <title> <body>]   (a PIN is read from stdin)";
+const USAGE: &str = "usage: iem-server [pin set-engineer | pin set-member <member-id> | notify <title> <body> | alarm-link [--ttl-h <hours>]]   (a PIN is read from stdin)";
 
 fn config_path() -> PathBuf {
     PathBuf::from(std::env::var("IEMMIXER_CONFIG").unwrap_or_else(|_| "iemmixer.toml".to_string()))
@@ -41,6 +42,7 @@ fn main() -> ExitCode {
         ["pin", "set-engineer"] => pin_command(PinTarget::Engineer),
         ["pin", "set-member", member] => pin_command(PinTarget::Member((*member).to_string())),
         ["notify", title, body] => notify_command(title, body),
+        ["alarm-link", rest @ ..] => alarm_link_command(rest),
         _ => {
             eprintln!("{USAGE}");
             ExitCode::from(2)
@@ -82,6 +84,28 @@ fn notify_command(title: &str, body: &str) -> ExitCode {
         }
         Ok(n) => {
             eprintln!("iem-server: alarm sent to {n} device(s)");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("iem-server: {e:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Prints the link on stdout (exit 0); 2 for bad arguments, 1 on an error.
+fn alarm_link_command(args: &[&str]) -> ExitCode {
+    let ttl_h = match iem_server::alarm_link::parse_ttl(args) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("iem-server: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    match iem_server::alarm_link::run_cli(&config_path(), ttl_h) {
+        Ok(url) => {
+            println!("{url}");
+            eprintln!("iem-server: the link works once within {ttl_h} h");
             ExitCode::SUCCESS
         }
         Err(e) => {

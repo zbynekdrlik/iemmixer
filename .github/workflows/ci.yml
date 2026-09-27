@@ -302,6 +302,10 @@ jobs:
           for member in $members; do
             printf '%s\n' "$mem" | ./target/release/iem-server pin set-member "$member"
           done
+          # The owner's one-time alarm link (alarm-link.spec.ts takes it once).
+          link="$(./target/release/iem-server alarm-link --ttl-h 1)"
+          echo "::add-mask::${link##*t=}"
+          echo "E2E_ALARM_LINK=$link" >> "$GITHUB_ENV"
       - name: Start the engine (NullRt, 1 kHz test sine) and the server
         env:
           RUST_LOG: info

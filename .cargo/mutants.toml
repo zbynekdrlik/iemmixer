@@ -93,6 +93,10 @@ exclude_re = [
   "iem-ui/src/pages/mixer/helpers\\.rs.*ws_send",
   # Push subscription through the service worker's PushManager.
   "iem-ui/src/pages/mixer/push\\.rs.*subscribe_to_push",
+  # The alarm link page's browser steps (permission, service worker,
+  # PushManager, fetches) and their console log; covered by
+  # e2e/tests/alarm-link.spec.ts, the pure parts are tested helpers.
+  "iem-ui/src/pages/alarms\\.rs.*\\b(enable_alarms|vapid_key|failed)\\b",
   # Engine (S3): effects with no observable outcome through the engine's API.
   # fsync of the state directory: durability shows only across a power loss.
   "iem-engine/src/persist\\.rs.*replace sync_dir -> ",

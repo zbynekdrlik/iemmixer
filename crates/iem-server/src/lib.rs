@@ -6,6 +6,7 @@
 //! history, backups, photos, push, SOS, tunnel health).
 
 pub mod activity;
+pub mod alarm_link;
 pub mod auth;
 pub mod backup;
 pub mod backup_daemon;

@@ -134,6 +134,49 @@ fn no_arguments_run_the_server_which_needs_the_site_config() {
 }
 
 #[test]
+fn alarm_link_prints_a_one_time_url_and_stores_only_its_hash() {
+    let dir = site_dir();
+    let site = dir.path().join("iemmixer.toml");
+    std::fs::write(
+        &site,
+        format!("https_domain = \"mixer.example.org\"\n{SITE}"),
+    )
+    .unwrap();
+    let out = run_pin(dir.path(), &["alarm-link", "--ttl-h", "2"], "");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(out.status.success(), "stderr: {stderr}");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let token = stdout
+        .trim_end()
+        .strip_prefix("https://mixer.example.org/alarms?t=")
+        .unwrap_or_else(|| panic!("stdout: {stdout}"));
+    assert_eq!(token.len(), 22);
+    let stored = std::fs::read_to_string(dir.path().join("alarm_link.json")).unwrap();
+    assert!(!stored.contains(token), "only the hash is stored");
+    assert!(stderr.contains("once within 2 h"), "stderr: {stderr}");
+}
+
+#[test]
+fn alarm_link_refuses_bad_arguments_and_a_site_without_an_address() {
+    let dir = site_dir();
+    for args in [
+        &["alarm-link", "--ttl-h", "0"][..],
+        &["alarm-link", "--ttl-h", "169"][..],
+        &["alarm-link", "24"][..],
+    ] {
+        assert_eq!(
+            run_pin(dir.path(), args, "").status.code(),
+            Some(2),
+            "{args:?}"
+        );
+    }
+    let out = run_pin(dir.path(), &["alarm-link"], "");
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no address"));
+    assert!(!dir.path().join("alarm_link.json").exists());
+}
+
+#[test]
 fn notify_without_a_subscription_exits_3() {
     let dir = site_dir();
     let out = run_pin(dir.path(), &["notify", "Kapela hrá", "test"], "");
