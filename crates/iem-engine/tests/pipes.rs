@@ -949,6 +949,7 @@ fn off_windows_the_binary_refuses_the_card_as_usage() {
     ]);
     assert_eq!(asio.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&asio.stderr).contains("Windows"));
+}
 
 /// Windows named pipes only (S6 design note §4): the private DACL, the
 /// first-instance flag and writes bounded like the Unix send timeout.
