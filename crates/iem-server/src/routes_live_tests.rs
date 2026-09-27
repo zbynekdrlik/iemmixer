@@ -39,6 +39,17 @@ fn set_level(mix: &str, input: &str, gain_db: f64) -> Cmd {
     }
 }
 
+/// A level's gain and its pan in the engine's domain (−1…1).
+fn set_send(mix: &str, input: &str, gain_db: f64, pan: f64) -> Cmd {
+    Cmd::SetLevel {
+        mix: MixId::new(mix),
+        source: Source::Input(InputId::new(input)),
+        gain_db: Some(gain_db),
+        pan: Some(pan),
+        muted: None,
+    }
+}
+
 #[tokio::test]
 async fn a_backup_is_captured_listed_previewed_and_restored() {
     let h = EngineHarness::start();
@@ -113,7 +124,9 @@ async fn a_capture_answers_with_its_backup_and_never_overwrites_one() {
     };
     let t0 = now();
     let capture = "/api/backups/capture";
-    // Two captures of one moment (a double click, the daemon's slot).
+    // Two captures in a row (a double click, the daemon's slot) are two
+    // files, listed newest first. The names carry the milliseconds; two
+    // backups of one moment are told apart by a number (forced below).
     let (status, a) = call(&app, Method::POST, capture, Some(&eng), None).await;
     assert_eq!(status, StatusCode::OK, "{a}");
     let (status, b) = call(&app, Method::POST, capture, Some(&eng), None).await;
@@ -141,13 +154,45 @@ async fn a_capture_answers_with_its_backup_and_never_overwrites_one() {
         .iter()
         .map(|i| i["filename"].as_str().unwrap())
         .collect();
+    let (a_name, b_name) = (
+        a["filename"].as_str().unwrap(),
+        b["filename"].as_str().unwrap(),
+    );
+    assert_eq!(names, [b_name, a_name], "newest first");
+
+    // A backup of the first one's very moment (the daemon's slot and a
+    // manual capture in one millisecond) takes the next free number; the
+    // backup that has the name stays as it was.
+    let first = s.backup_store.load(a_name).unwrap();
+    let mut same_moment = first.clone();
+    same_moment.rev += 1;
+    let numbered = s.backup_store.save(&same_moment).unwrap();
+    let stem = a_name.strip_suffix(".json").unwrap();
+    // `_2`, unless the second capture fell in the same millisecond and took it.
+    let free = (2..)
+        .map(|n| format!("{stem}_{n}.json"))
+        .find(|name| name.as_str() != b_name)
+        .unwrap();
+    assert_eq!(numbered, free);
     assert_eq!(
-        names,
-        [
-            b["filename"].as_str().unwrap(),
-            a["filename"].as_str().unwrap()
-        ],
-        "newest first"
+        s.backup_store.load(a_name).unwrap(),
+        first,
+        "not overwritten"
+    );
+    assert_eq!(s.backup_store.load(&numbered).unwrap(), same_moment);
+    let (status, list) = call(&app, Method::GET, "/api/backups", Some(&eng), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let listed: Vec<&str> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["filename"].as_str().unwrap())
+        .collect();
+    let at = |name: &str| listed.iter().position(|l| *l == name);
+    assert_eq!(listed.len(), 3, "{listed:?}");
+    assert!(
+        at(numbered.as_str()).unwrap() < at(a_name).unwrap(),
+        "{listed:?}: the numbered one is listed before the first"
     );
 }
 
@@ -348,33 +393,39 @@ async fn a_backup_restores_a_muted_input_as_muted() {
     assert_eq!((l.gain_db, l.muted), (-6.0, true));
 }
 
-/// Member `a` restores a history entry: `a`'s mix goes back to it, while
-/// `b`'s mix — and every other mix and input — stays exactly as it was.
+/// Member `a` restores a history entry: `a`'s mix goes back to it, gains and
+/// pans as they were — reaperiem#203: a pan written in the UI's 0…1 instead
+/// of the engine's −1…1 moved every send right — while `b`'s mix, and every
+/// other mix and input, stays exactly as it was.
 async fn restore_is_isolated(a: &str, b: &str) {
     let h = EngineHarness::start();
     let (_d, s, app) = live(&h).await;
     let ta = token(a, false);
-    let keys = Source::Input(InputId::new("keys"));
-    for (mix, gain) in [(a, -6.0), (b, -12.0)] {
-        s.engine
-            .request_applied(set_level(mix, "keys", gain), None)
-            .await
-            .unwrap();
-        s.engine
-            .request_applied(set_level(mix, "mic2", gain - 1.0), None)
-            .await
-            .unwrap();
+    let (keys, mic2) = (
+        Source::Input(InputId::new("keys")),
+        Source::Input(InputId::new("mic2")),
+    );
+    // Off-centre pans on both sides, so a pan in the wrong domain shows.
+    for (mix, gain, pan) in [(a, -6.0, 0.25), (b, -12.0, -0.25)] {
+        for cmd in [
+            set_send(mix, "keys", gain, pan),
+            set_send(mix, "mic2", gain - 1.0, -2.0 * pan),
+        ] {
+            s.engine.request_applied(cmd, None).await.unwrap();
+        }
     }
     let history = format!("/api/snapshots/{a}");
     let label = Some(r#"{"label":"isolation"}"#);
     let (status, created) = call(&app, Method::POST, &history, Some(&ta), label).await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
     let ts = created["timestamp"].as_i64().unwrap();
+    let (ma, mb) = (MixId::new(a), MixId::new(b));
+    let entry = s.engine.mirror().state.mixes[&ma].clone();
 
-    // Both mixes change after the entry was taken.
-    for (mix, gain) in [(a, -20.0), (b, -3.0)] {
+    // Both mixes change after the entry was taken: gain and pan.
+    for (mix, gain, pan) in [(a, -20.0, -0.75), (b, -3.0, 0.75)] {
         s.engine
-            .request_applied(set_level(mix, "keys", gain), None)
+            .request_applied(set_send(mix, "keys", gain, pan), None)
             .await
             .unwrap();
     }
@@ -384,15 +435,22 @@ async fn restore_is_isolated(a: &str, b: &str) {
     assert_eq!(status, StatusCode::OK, "{r}");
     let after = s.engine.mirror().state.clone();
 
-    let a_keys = s.engine.mirror().level(&MixId::new(a), &keys);
-    assert_eq!(a_keys.gain_db, -6.0, "{a}'s mix is back at its entry");
+    // `a`'s own mix: the changed level back at its entry, the unchanged one
+    // (a round trip through the history) where it was, pans included.
+    let send = |mix: &MixId, src: &Source| {
+        let l = s.engine.mirror().level(mix, src);
+        (l.gain_db, l.pan)
+    };
+    assert_eq!(send(&ma, &keys), (-6.0, 0.25), "{a}'s keys at its entry");
+    assert_eq!(send(&ma, &mic2), (-7.0, -0.5), "{a}'s mic2 as it was");
+    assert_eq!(after.mixes[&ma], entry, "{a}'s whole mix is its entry");
     assert_eq!(
         after.inputs, before.inputs,
         "{a} restored: inputs untouched"
     );
     assert_eq!(after.mixes.len(), before.mixes.len());
     for (id, mix) in &before.mixes {
-        if id.0 != a {
+        if id != &ma {
             assert_eq!(
                 after.mixes.get(id),
                 Some(mix),
@@ -401,10 +459,11 @@ async fn restore_is_isolated(a: &str, b: &str) {
         }
     }
     assert_eq!(
-        s.engine.mirror().level(&MixId::new(b), &keys).gain_db,
-        -3.0,
+        send(&mb, &keys),
+        (-3.0, 0.75),
         "{b} keeps its own later change"
     );
+    assert_eq!(send(&mb, &mic2), (-13.0, 0.5), "{b}'s mic2 untouched");
 }
 
 #[tokio::test]

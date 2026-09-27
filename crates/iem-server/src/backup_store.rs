@@ -233,6 +233,21 @@ mod tests {
     }
 
     #[test]
+    fn a_save_that_fails_answers_with_its_own_error() {
+        // Only a taken name moves on to the next number. Any other failure
+        // comes back at once, as it is: here the name of a timestamp with
+        // '/' (never a server's own) points into a folder that is not there.
+        let dir = tempfile::tempdir().unwrap();
+        let store = BackupStore::new(dir.path());
+        let e = store.save(&backup("2026/09/27T13:00:00Z")).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::NotFound, "{e}");
+        let written = std::fs::read_dir(dir.path().join("backups"))
+            .unwrap()
+            .count();
+        assert_eq!(written, 0, "nothing written");
+    }
+
+    #[test]
     fn names_carry_the_milliseconds_and_a_number_after_the_first() {
         let name = timestamp_to_filename;
         assert_eq!(name("2026-09-27T13:00:00.123Z"), "20260927_130000_123.json");
