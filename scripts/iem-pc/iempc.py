@@ -1,20 +1,43 @@
 #!/usr/bin/env python3
-"""Dev-box control of the IEM PC (S6, design note §5.1, §5.5, §7).
+"""Dev-box control of the IEM PC (S6, design note §5.1, §5.5, §6, §7).
 
 `iemmode` over ssh with the EVENT-NOW discipline, attested bundles from CI
 (fetch, install), HIL dispatch on the private ops repo, PC bootstrap through
-the bundle's IemPc.psm1, and the hand-over of an open S1a window.
+the bundle's IemPc.psm1 (dev time only), and the hand-over of an open S1a
+window.
 
-"ide event": the flag file (~/.config/iemmixer/EVENT-NOW) exists — `event`
-writes it first when it is missing — and `event` pre-empts an open S1a/S1c
-spike window (spike_window.py preempt), then runs `iemmode event`, and
-`iemmode event --direct` when the guard is unreachable (exit 4). Commands
-that change the PC refuse while the flag exists. Every wait sees a new flag
-within 2 s: a read-only call is abandoned, a changing call completes first,
-then the command runs the event path itself (exit 10). `event` never waits
-for another command. Site values come only from the private env file
-($PC_ENV, default ~/.config/iemmixer/iem-pc.env). Nothing is ever ended by
-force."""
+"ide event": the flag file (~/.config/iemmixer/EVENT-NOW) exists. `event`
+writes it first when it is missing (a flag it cannot write is a warning,
+never a stop), pre-empts an open S1a/S1c spike window (spike_window.py
+preempt), then runs `iemmode event`, and `iemmode event --direct` when the
+guard is unreachable (exit 4). The event path has one budget that fits one
+Bash call (EVENT_BUDGET_S): the spike preempt gets SPIKE_SHARE_S of it, no
+`iemmode` call starts while the preempt still runs, and none starts with
+less than SWITCH_MIN_S left. `event` never waits for another command.
+
+Every other PC step waits for dev time: commands that change the PC refuse
+while the flag exists, and `status` then reports this box only (`--pc`
+asks the guard anyway). Every PC wait sees a new flag within 2 s: a
+read-only call or a switch the guard owns is abandoned (the guard pre-empts
+itself), a change the call makes itself completes first; then the command
+runs the event path itself (exit 10). `dev`, `rehearse-teardown` and
+`install` (except `--first`) refuse while an S1a/S1c window is open:
+`handover-s1a` hands the card over first. `dispatch-hil` checks the flag
+again right before it dispatches.
+
+Site values come only from the private env file ($PC_ENV, default
+~/.config/iemmixer/iem-pc.env): PC_SSH (the ssh destination), PC_ROOT (the
+root folder on the PC, Windows form), PC_ROOT_SCP (the same folder as scp
+names it) and PC_BIN (optional, default: bin under PC_ROOT). Nothing is ever
+ended by force.
+
+Known limits (S6 Task 16): `iemmode event --direct` runs the switch inside
+the ssh session, so a session cut before it ends (a Bash timeout) stops it
+half-way; the next `iemmode event` resumes from the guard state. A
+pre-emption inside another command adds a whole event budget to that
+command's own time. The dev-entry count behind `dispatch-hil` sees only
+`iempc dev`, not a dev entry the guard makes by itself (an interlock retry,
+rehearse-teardown's re-entry)."""
 from __future__ import annotations
 
 import argparse
@@ -30,6 +53,7 @@ import subprocess
 import sys
 import time
 import zipfile
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterator
@@ -68,9 +92,17 @@ SWITCH_S = 540
 INSTALL_S = 540
 BOOTSTRAP_S = 540
 SCP_S = 540
-SPIKE_S = 540
+# The event path, all of it: one Bash call ends at 10 min, the plan's waits stay within 9.
+EVENT_BUDGET_S = 540
+# spike_window.py preempt's part of it (its bring-back starts REAPER itself).
+SPIKE_SHARE_S = 360
+# An iemmode call of the event path never starts with less than this left.
+SWITCH_MIN_S = 120
 GH_S = 120
 DOWNLOAD_S = 540
+# What reading a zip member can raise besides StepError: bad JSON or UTF-8, a
+# CRC error, a cut or corrupt deflate stream, an unknown compression method.
+UNREADABLE = (ValueError, EOFError, NotImplementedError, zipfile.BadZipFile, zlib.error)
 EVENT_NOW = Path(os.environ.get("IEMMIXER_EVENT_NOW", str(Path.home() / ".config/iemmixer/EVENT-NOW")))
 STATE_DIR = Path(os.environ.get("IEMPC_STATE", str(Path.home() / ".local/share/iemmixer/iem-pc")))
 SPIKE_STATE = Path(os.environ.get("SPIKE_STATE", str(Path.home() / ".local/state/iemmixer/spike-window.json")))
@@ -85,6 +117,10 @@ class StepError(Exception):
 
 class Refused(StepError):
     """Refused before anything was touched (no event path follows)."""
+
+
+class StillRunning(StepError):
+    """A call outlived its bound and was left running (never force-ended)."""
 
 
 class EventNow(Exception):
@@ -136,6 +172,20 @@ def ensure_flag() -> bool:
     return True
 
 
+def write_flag() -> None:
+    """`event` writes the flag first; a flag it cannot write (no folder, a
+    full or read-only disk) is a warning, never a stop of the event path."""
+    try:
+        written = ensure_flag()
+    except OSError as e:
+        print(f"iempc: WARNING: the flag {EVENT_NOW} was not written ({e}); the event path goes on; write the flag by "
+              "hand so no dev-time command runs", file=sys.stderr, flush=True)
+        emit({"flag": str(EVENT_NOW), "written": False, "error": str(e)})
+        return
+    if written:
+        emit({"flag": str(EVENT_NOW), "written": True})
+
+
 def now_iso() -> str:
     return dt.datetime.now().astimezone().isoformat(timespec="seconds")
 
@@ -157,7 +207,9 @@ def guarded(cmd: list[str], stdin: str, timeout: float, event: str) -> str:
     event="abandon": a read-only call is left to end by itself and EventNow
     is raised at once; "finish": a changing call completes, then EventNow;
     "ignore": the pre-emption itself, or a read-only call started while the
-    flag already existed. Never ends anything by force."""
+    flag already existed. A flag seen once counts even when it is gone by the
+    end. Past `timeout` the call is left running and StillRunning is raised.
+    Never ends anything by force."""
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                             encoding="utf-8", errors="replace")
     deadline = time.monotonic() + timeout
@@ -174,8 +226,8 @@ def guarded(cmd: list[str], stdin: str, timeout: float, event: str) -> str:
                 if event == "abandon":
                     raise EventNow() from None
             if time.monotonic() > deadline:
-                raise StepError(f"{Path(cmd[0]).name} still running after {timeout} s (bounded on the PC; "
-                                "check 'iempc status', never force-end)") from None
+                raise StillRunning(f"{Path(cmd[0]).name} still running after {timeout} s (bounded on the PC; "
+                                   "check 'iempc status', never force-end)") from None
     if proc.returncode != 0:
         raise StepError(f"{Path(cmd[0]).name} failed (exit {proc.returncode}): {err.strip()[-1500:]}")
     if event != "ignore" and (seen or event_now()):
@@ -189,12 +241,16 @@ class Ctx:
     args: argparse.Namespace
     flag_at_start: bool
 
-    def watch(self, read_only: bool) -> str:
+    def watch(self, abandon: bool) -> str:
         """How a wait reacts to the flag: only a flag that appears after the
-        command started pre-empts it (changing commands refuse an existing one)."""
+        command started pre-empts it (changing commands refuse an existing
+        one). "abandon" for a read-only call or a switch the guard owns (the
+        guard goes on without its client and pre-empts itself within 1 s when
+        `iemmode event` arrives); "finish" for a change the call makes itself
+        (a copy, an install, a bootstrap step)."""
         if self.flag_at_start:
             return "ignore"
-        return "abandon" if read_only else "finish"
+        return "abandon" if abandon else "finish"
 
 
 # ---- the PC: ssh, scp, PowerShell ----
@@ -404,7 +460,11 @@ def state_lock(take: bool) -> Iterator[None]:
 
 
 def current_entry() -> int:
-    """The dev entry: counted up by every successful `dev` (0 before the first)."""
+    """The dev entry: counted up by every successful `iempc dev` (0 before
+    the first). Known limit: the guard also enters dev by itself (a due
+    interlock retry, rehearse-teardown's re-entry), which this box never
+    sees, so "once per SHA per dev entry" means per `iempc dev` until the
+    guard's status exposes a dev-entry id to key the dispatch record on."""
     return int(read_json(state_dir() / "entry.json", {}).get("entry", 0))
 
 
@@ -424,6 +484,13 @@ def spike_window_open() -> bool:
     except (OSError, ValueError):
         return True
     return not (isinstance(state, dict) and state.get("closed") is True)
+
+
+def refuse_open_window(cmd: str) -> None:
+    """The card goes to the guard only after the S1a/S1c window handed it over."""
+    if spike_window_open():
+        raise Refused(f"an S1a/S1c spike window is open ({SPIKE_STATE}): '{cmd}' waits until 'iempc handover-s1a' "
+                      "has handed the card over")
 
 
 # ---- bundles (P5: a green push run on dev/main, attested by digest) ----
@@ -471,33 +538,40 @@ def verify_zip(path: Path, sha: str, branch: str, run: int) -> dict[str, str]:
         zf = zipfile.ZipFile(path)
     except zipfile.BadZipFile as e:
         raise StepError(f"{path.name}: not a zip ({e})") from None
+    member = "the directory"
     with zf:
-        members: dict[str, zipfile.ZipInfo] = {}
-        for info in zf.infolist():
-            name = info.filename.replace("\\", "/")
-            if name.endswith("/"):
-                continue
-            if check_member(name) in members:
-                raise StepError(f"{path.name}: {name} appears twice")
-            members[name] = info
-        if "SHA256SUMS" not in members:
-            raise StepError(f"{path.name}: no SHA256SUMS")
-        sums = parse_sums(zf.read(members["SHA256SUMS"]).decode("utf-8-sig"))
-        present = set(members) - {"SHA256SUMS"}
-        if set(sums) != present:
-            raise StepError(f"{path.name}: listed but absent {sorted(set(sums) - present)}, "
-                            f"present but unlisted {sorted(present - set(sums))}")
-        absent = [n for n in BUNDLE_REQUIRED if n not in sums]
-        if absent:
-            raise StepError(f"{path.name}: required files missing: {absent}")
-        for name, want in sorted(sums.items()):
-            h = hashlib.sha256()
-            with zf.open(members[name]) as f:
-                for chunk in iter(lambda: f.read(1 << 20), b""):
-                    h.update(chunk)
-            if h.hexdigest() != want:
-                raise StepError(f"{path.name}: {name} does not match SHA256SUMS")
-        manifest = json.loads(zf.read(members["manifest.json"]).decode("utf-8-sig"))
+        try:
+            members: dict[str, zipfile.ZipInfo] = {}
+            for info in zf.infolist():
+                name = info.filename.replace("\\", "/")
+                if name.endswith("/"):
+                    continue
+                if check_member(name) in members:
+                    raise StepError(f"{path.name}: {name} appears twice")
+                members[name] = info
+            if "SHA256SUMS" not in members:
+                raise StepError(f"{path.name}: no SHA256SUMS")
+            member = "SHA256SUMS"
+            sums = parse_sums(zf.read(members["SHA256SUMS"]).decode("utf-8-sig"))
+            present = set(members) - {"SHA256SUMS"}
+            if set(sums) != present:
+                raise StepError(f"{path.name}: listed but absent {sorted(set(sums) - present)}, "
+                                f"present but unlisted {sorted(present - set(sums))}")
+            absent = [n for n in BUNDLE_REQUIRED if n not in sums]
+            if absent:
+                raise StepError(f"{path.name}: required files missing: {absent}")
+            for name, want in sorted(sums.items()):
+                member = name
+                h = hashlib.sha256()
+                with zf.open(members[name]) as f:
+                    for chunk in iter(lambda: f.read(1 << 20), b""):
+                        h.update(chunk)
+                if h.hexdigest() != want:
+                    raise StepError(f"{path.name}: {name} does not match SHA256SUMS")
+            member = "manifest.json"
+            manifest = json.loads(zf.read(members["manifest.json"]).decode("utf-8-sig"))
+        except UNREADABLE as e:
+            raise StepError(f"{path.name}: {member} is unreadable ({type(e).__name__}: {str(e)[:300]})") from None
     if not isinstance(manifest, dict):
         raise StepError(f"{path.name}: manifest.json is not an object")
     check_manifest(manifest, sha, branch, run)
@@ -633,8 +707,8 @@ def fetch_bundle(sha: str, branch: str | None = None) -> tuple[dict, bool]:
         sums = verify_zip(z, sha, run_branch, run)
         gh(["attestation", "verify", str(z), "-R", REPO, "--signer-workflow", f"{REPO}/.github/workflows/{CI_WORKFLOW}",
             "--source-ref", f"refs/heads/{run_branch}", "--deny-self-hosted-runners"])
-    except StepError:
-        shutil.rmtree(partial)  # a refused download is never kept
+    except BaseException:
+        shutil.rmtree(partial)  # a refused or cut download is never kept
         raise
     rec = {"sha": sha, "branch": run_branch, "run": run, "digest": digest, "sums": sums, "fetched_at": now_iso()}
     write_json(partial / "fetch.json", rec)
@@ -644,41 +718,75 @@ def fetch_bundle(sha: str, branch: str | None = None) -> tuple[dict, bool]:
 
 # ---- commands ----
 
+def box_state() -> dict:
+    return {"event_now": event_now(), "spike_window_open": spike_window_open(), "dev_entry": current_entry()}
+
+
 def cmd_status(ctx: Ctx) -> int:
-    code, reply, raw = iemmode(ctx.env, ["status"], STATUS_S, ctx.watch(read_only=True))
+    """The guard's status and this box's. While the flag exists only this
+    box's, unless --pc: `iemmode status` may start the guard, and a guard's
+    start runs the event plan's checks (and restarts what does not serve)."""
+    if ctx.flag_at_start and not ctx.args.pc:
+        emit({"iemmode": None, "skipped": f"{EVENT_NOW} exists: no PC step during an event ('status --pc' asks the "
+                                          "guard anyway)", **box_state()})
+        return 0
+    code, reply, raw = iemmode(ctx.env, ["status"], STATUS_S, ctx.watch(abandon=True))
     out = result("iemmode", ["status"], code, reply, raw)
-    out.update({"event_now": event_now(), "spike_window_open": spike_window_open(), "dev_entry": current_entry()})
+    out.update(box_state())
     emit(out)
     return code
 
 
-def spike_preempt() -> dict:
-    """spike_window.py preempt in its own process: whatever it does, the
-    event path goes on."""
+def spike_preempt(timeout: float) -> dict:
+    """spike_window.py preempt in its own process, bounded by its share of
+    the event budget. A failure lets the event path go on; a preempt still
+    running at the end of its share is reported as `running`."""
     try:
-        out = guarded([sys.executable, str(SPIKE), "preempt"], "", SPIKE_S, "ignore")
+        out = guarded([sys.executable, str(SPIKE), "preempt"], "", timeout, "ignore")
+    except StillRunning as e:
+        print(f"iempc: spike preempt: {e}", file=sys.stderr, flush=True)
+        return {"ok": False, "running": True, "error": str(e)[-1500:]}
     except StepError as e:
         print(f"iempc: spike preempt: {e}", file=sys.stderr, flush=True)
         return {"ok": False, "error": str(e)[-1500:]}
     return {"ok": True, "output": out[-4000:]}
 
 
+def switch_timeout(deadline: float) -> float:
+    """What an iemmode call of the event path may take: the rest of the one
+    budget. It never starts with less than SWITCH_MIN_S left, since a cut
+    `--direct` session stops its switch half-way."""
+    left = deadline - time.monotonic()
+    if left < SWITCH_MIN_S:
+        raise StepError(f"the event path has {max(left, 0):.0f} s of its {EVENT_BUDGET_S} s budget left, less than the "
+                        f"{SWITCH_MIN_S} s an iemmode call gets: run 'iempc event' again (a new budget)")
+    return left
+
+
 def cmd_event(ctx: Ctx) -> int:
+    """The flag, the spike preempt when a window is open, then `iemmode
+    event` (and `--direct` on exit 4), all within EVENT_BUDGET_S."""
     dry = bool(getattr(ctx.args, "dry_run", False))
-    if not dry and ensure_flag():
-        emit({"flag": str(EVENT_NOW), "written": True})
+    deadline = time.monotonic() + EVENT_BUDGET_S
+    if not dry:
+        write_flag()
     if spike_window_open():
         if dry:
             emit({"spike_window": "open", "plan": "spike_window.py preempt"})
         else:
-            emit({"spike_preempt": spike_preempt()})
+            pre = spike_preempt(SPIKE_SHARE_S)
+            emit({"spike_preempt": pre})
+            if pre.get("running"):
+                raise StepError(f"spike_window.py preempt still runs after its {SPIKE_SHARE_S} s share of the event "
+                                "budget: no iemmode call while it may still be bringing REAPER back (one meter-bridge "
+                                "trigger, the #9 lesson); run 'iempc event' again once it has ended "
+                                "(spike_window.py status)")
     args = ["event", "--dry-run"] if dry else ["event"]
-    timeout = STATUS_S if dry else SWITCH_S
-    code, reply, raw = iemmode(ctx.env, args, timeout, "ignore")
+    code, reply, raw = iemmode(ctx.env, args, switch_timeout(deadline), "ignore")
     emit(result("iemmode", args, code, reply, raw))
     if code == GUARD_UNREACHABLE:
         args = [*args, "--direct"]
-        code, reply, raw = iemmode(ctx.env, args, timeout, "ignore")
+        code, reply, raw = iemmode(ctx.env, args, switch_timeout(deadline), "ignore")
         emit(result("iemmode", args, code, reply, raw))
     if code != 0 and not dry:
         print(OWNER_ALARM, file=sys.stderr, flush=True)
@@ -686,13 +794,16 @@ def cmd_event(ctx: Ctx) -> int:
 
 
 def cmd_dev(ctx: Ctx) -> int:
+    """The guard owns the switch: a new flag abandons this client at once and
+    the event path pre-empts the switch."""
+    refuse_open_window("dev")
     args = ["dev"]
     if ctx.args.build:
         args += ["--build", check_sha(ctx.args.build)]
     dry = bool(ctx.args.dry_run)
     if dry:
         args.append("--dry-run")
-    code, reply, raw = iemmode(ctx.env, args, STATUS_S if dry else SWITCH_S, ctx.watch(read_only=dry))
+    code, reply, raw = iemmode(ctx.env, args, STATUS_S if dry else SWITCH_S, ctx.watch(abandon=True))
     out = result("iemmode", args, code, reply, raw)
     if code == 0 and not dry:
         out["dev_entry"] = next_entry(ctx.args.build)
@@ -701,13 +812,14 @@ def cmd_dev(ctx: Ctx) -> int:
 
 
 def cmd_rehearse_teardown(ctx: Ctx) -> int:
-    code, reply, raw = iemmode(ctx.env, ["rehearse-teardown"], SWITCH_S, ctx.watch(read_only=False))
+    refuse_open_window("rehearse-teardown")
+    code, reply, raw = iemmode(ctx.env, ["rehearse-teardown"], SWITCH_S, ctx.watch(abandon=True))
     emit(result("iemmode", ["rehearse-teardown"], code, reply, raw))
     return code
 
 
 def cmd_probe_task(ctx: Ctx) -> int:
-    code, reply, raw = iemmode(ctx.env, ["probe-task"], STATUS_S, ctx.watch(read_only=False))
+    code, reply, raw = iemmode(ctx.env, ["probe-task"], STATUS_S, ctx.watch(abandon=False))
     emit(result("iemmode", ["probe-task"], code, reply, raw))
     return code
 
@@ -727,11 +839,15 @@ def pc_mkdir(ctx: Ctx, rel: str, event: str) -> None:
 def cmd_install(ctx: Ctx) -> int:
     """The verified zip to the PC, then the guard installs it: `iemmode
     install`, or for the first bundle (no iemmode on the PC yet) the zip's
-    own `iemmixer-guard install`, which takes the guard mutex itself."""
+    own `iemmixer-guard install`, which takes the guard mutex itself. Only
+    the first bundle goes in while an S1a/S1c window is open: it starts no
+    guard and touches no card, while `iemmode` may start the guard."""
     env, sha = ctx.env, check_sha(ctx.args.sha)
+    if not ctx.args.first:
+        refuse_open_window("install")
     rec = need_record(sha)
     z = check_local_zip(sha, rec)
-    mode = ctx.watch(read_only=False)
+    mode = ctx.watch(abandon=False)
     zip_rel = f"incoming/iemmixer-{sha}.zip"
     pc_zip = pc_join(env["PC_ROOT"], zip_rel)
     pc_mkdir(ctx, "incoming", mode)
@@ -774,6 +890,8 @@ def cmd_dispatch_hil(ctx: Ctx) -> int:
         raise StepError(f"bundle {sha} was fetched from run {rec['run']}, the green run is {run}: remove the local "
                         "bundle and fetch again")
     check_local_zip(sha, rec)
+    if event_now():  # "ide event" during the gh waits above: HIL is dev-time work
+        raise Refused(f"{EVENT_NOW} appeared: no HIL dispatch during an event (nothing was dispatched)")
     gh(["workflow", "run", HIL_WORKFLOW, "-R", OPS_REPO, "-f", f"sha={sha}", "-f", f"branch={branch}",
         "-f", f"run={run}", "-f", f"digest={rec['digest']}"])
     record = {"sha": sha, "branch": branch, "run": run, "digest": rec["digest"], "entry": entry, "at": now_iso()}
@@ -803,7 +921,10 @@ def ps_params(params: list[str]) -> str:
 
 def cmd_bootstrap(ctx: Ctx) -> int:
     """An IemPc.psm1 function over ssh, from the fetched and verified bundle
-    (the module's sha256 is checked on the PC before it is imported)."""
+    (the module's sha256 is checked on the PC before it is imported). Dev
+    time only, read-only functions too (design §6): each run makes a folder,
+    copies the module and runs it elevated on the PC. A new flag abandons a
+    read-only function and lets a changing one finish."""
     env, fn = ctx.env, ctx.args.step
     if not FUNCTION.fullmatch(fn):
         raise Refused(f"not an IemPc function: {fn!r}")
@@ -819,7 +940,7 @@ def cmd_bootstrap(ctx: Ctx) -> int:
             raise StepError("the runner registration token has an unexpected form")
         pre = f"$env:ACTIONS_RUNNER_INPUT_TOKEN = {ps_quote(token)} ; "
         fin = "Remove-Item -Path 'Env:\\ACTIONS_RUNNER_INPUT_TOKEN' -ErrorAction SilentlyContinue"
-    mode = ctx.watch(read_only=read_only_function(fn))
+    mode = ctx.watch(abandon=read_only_function(fn))
     rel = f"bootstrap/{sha}"
     pc_mkdir(ctx, rel, mode)
     scp(str(local), remote(env, f"{rel}/IemPc.psm1"), mode)
@@ -871,7 +992,7 @@ def cmd_handover_s1a(ctx: Ctx) -> int:
                 "[pscustomobject]@{ pref = $p.value; holders = @($h); "
                 "spike = @(Get-Process -Name asio_spike -ErrorAction SilentlyContinue).Count; "
                 "task = [bool]($t -and $t.State -eq 'Running') }")
-        r = sw.ps(spike_env, body, timeout=STATUS_S, event=ctx.watch(read_only=True))
+        r = sw.ps(spike_env, body, timeout=STATUS_S, event=ctx.watch(abandon=True))
     except sw.EventNow:
         raise EventNow() from None
     except sw.StepError as e:
@@ -910,18 +1031,13 @@ COMMANDS: dict[str, Spec] = {
 }
 
 
-def spec_for(args: argparse.Namespace) -> Spec:
-    spec = COMMANDS[args.cmd]
-    if args.cmd == "bootstrap" and read_only_function(args.step):
-        return Spec(spec.fn, pc=True, dev_time=False, locked=False)
-    return spec
-
-
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="iempc", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("status", "rehearse-teardown", "probe-task", "handover-s1a"):
+    for name in ("rehearse-teardown", "probe-task", "handover-s1a"):
         sub.add_parser(name)
+    sub.add_parser("status").add_argument("--pc", action="store_true",
+                                          help="ask the guard even while the flag exists (it may start the guard)")
     sub.add_parser("event").add_argument("--dry-run", action="store_true")
     dev = sub.add_parser("dev")
     dev.add_argument("--build")
@@ -956,7 +1072,7 @@ def main(argv: list[str]) -> int:
     except StepError as e:
         print(f"iempc: {e}", file=sys.stderr)
         return 1
-    spec = spec_for(args)
+    spec = COMMANDS[args.cmd]
     try:
         if spec.dev_time and flag_at_start:
             raise Refused(f"{EVENT_NOW} exists: an event is on; '{args.cmd}' runs only in dev time")

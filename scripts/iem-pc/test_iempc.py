@@ -15,6 +15,7 @@ import sys
 import tempfile
 import time
 import unittest
+import warnings
 import zipfile
 from pathlib import Path
 from unittest import mock
@@ -22,7 +23,8 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import iempc as ip  # noqa: E402
 
-SHA = "1234567890abcdef1234567890abcdef12345678"
+REAL_GH = ip.gh  # Base puts a FakeGh in its place for every test
+SHA ="1234567890abcdef1234567890abcdef12345678"
 SHA2 = "abcdefabcdefabcdefabcdefabcdefabcdefabcd"
 RUN = 987654
 ENV = {"PC_SSH": "tester@pc.test", "PC_ROOT": "X:\\root", "PC_ROOT_SCP": "/X:/root", "PC_BIN": "X:\\root\\bin"}
@@ -35,12 +37,13 @@ def sha256(data: bytes) -> str:
 
 def make_zip(path: Path, *, sha: str = SHA, branch: str = "dev", run: int = RUN, drop: tuple[str, ...] = (),
              tamper: str | None = None, unlisted: str | None = None, rename: dict | None = None,
-             manifest: dict | None = None, sums_extra: str = "") -> Path:
+             manifest: dict | None = None, sums_extra: str = "", manifest_raw: bytes | None = None,
+             sums_raw: bytes | None = None) -> Path:
     """A bundle zip shaped like the CI `bundle` job's (plan Task 12)."""
     files = {n: f"synthetic {n}".encode() for n in ip.BUNDLE_REQUIRED if n != "manifest.json"}
     files["tuning/state.ps1"] = b"synthetic tuning"
     doc = manifest if manifest is not None else {"sha": sha, "branch": branch, "version": "2.0.0-dev.9", "run": run}
-    files["manifest.json"] = json.dumps(doc).encode()
+    files["manifest.json"] = json.dumps(doc).encode() if manifest_raw is None else manifest_raw
     for name in drop:
         files.pop(name)
     sums = "".join(f"{sha256(b)}  {n}\n" for n, b in sorted(files.items())) + sums_extra
@@ -53,7 +56,7 @@ def make_zip(path: Path, *, sha: str = SHA, branch: str = "dev", run: int = RUN,
         z.writestr("tuning/", b"")  # a directory entry, as Compress-Archive writes one
         for name, data in files.items():
             z.writestr((rename or {}).get(name, name), data)
-        z.writestr("SHA256SUMS", sums)
+        z.writestr("SHA256SUMS", sums if sums_raw is None else sums_raw)
     return path
 
 
@@ -70,10 +73,11 @@ class FakePc:
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, list[str], str]] = []
+        self.timeouts: list[float] = []
         self.native_scripts: list[str] = []
         self.modules: list[tuple[str, str]] = []
         self.scps: list[tuple[str, str, str]] = []
-        self.replies: dict = {}
+        self.replies: dict = {}  # args -> (exit, stdout[, stderr]) or a callable returning one
         self.module_result = "ok"
 
     def ssh_ps(self, env, script, timeout, event):
@@ -82,10 +86,11 @@ class FakePc:
             exe = unquote(m.group(1))
             args = [unquote(a) for a in re.findall(r"'(?:[^']|'')*'", m.group(2))]
             self.calls.append((exe.rsplit("\\", 1)[-1], args, event))
+            self.timeouts.append(timeout)
             self.native_scripts.append(script)
             reply = self.replies.get(tuple(args), (0, OK))
-            code, out = reply() if callable(reply) else reply
-            doc = {"exit": code, "out": out, "err": ""}
+            code, out, err = (*(reply() if callable(reply) else reply), "")[:3]
+            doc = {"exit": code, "out": out, "err": err}
         else:
             self.modules.append((script, event))
             r = self.module_result
@@ -108,6 +113,7 @@ class FakeGh:
         self.attest_ok = True
         self.runner_reply = "A" * 29
         self.on_list = None
+        self.on_download = None
 
     def __call__(self, args, timeout=ip.GH_S):
         args = list(args)
@@ -125,6 +131,8 @@ class FakeGh:
             dest = Path(args[args.index("-D") + 1])
             dest.mkdir(parents=True, exist_ok=True)
             shutil.copy(self.artifact, dest / self.artifact.name)
+            if self.on_download:
+                self.on_download()
             return ""
         if args[:2] == ["attestation", "verify"]:
             if not self.attest_ok:
@@ -141,7 +149,8 @@ class FakeGh:
 
 
 class Base(unittest.TestCase):
-    PATCHED = ("EVENT_NOW", "STATE_DIR", "SPIKE_STATE", "SPIKE", "POLL_S", "ssh_ps", "scp", "gh", "env_path")
+    PATCHED = ("EVENT_NOW", "STATE_DIR", "SPIKE_STATE", "SPIKE", "POLL_S", "ssh_ps", "scp", "gh", "env_path",
+               "EVENT_BUDGET_S", "SPIKE_SHARE_S", "SWITCH_MIN_S")
 
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp())
@@ -153,6 +162,7 @@ class Base(unittest.TestCase):
         ip.SPIKE_STATE = self.tmp / "spike-window.json"
         ip.POLL_S = 0.05
         self.spike_log = self.tmp / "spike.log"
+        self.spike_done = self.tmp / "spike.done"
         ip.SPIKE = self.write_spike(0)
         envfile = self.tmp / "iem-pc.env"
         envfile.write_text("".join(f"{k}={v}\n" for k, v in ENV.items()), encoding="utf-8")
@@ -168,11 +178,47 @@ class Base(unittest.TestCase):
         for name, value in saved.items():
             setattr(ip, name, value)
 
-    def write_spike(self, code: int) -> Path:
+    def write_spike(self, code: int, delay: float = 0.0) -> Path:
+        """A stand-in spike_window.py: logs its arguments at start, takes
+        `delay` seconds, marks its end in spike_done, exits with `code`."""
         p = self.tmp / "spike_window.py"
-        p.write_text(f"import sys\nopen({str(self.spike_log)!r}, 'a').write(' '.join(sys.argv[1:]) + '\\n')\n"
+        p.write_text(f"import sys, time\nopen({str(self.spike_log)!r}, 'a').write(' '.join(sys.argv[1:]) + '\\n')\n"
+                     f"time.sleep({delay})\nopen({str(self.spike_done)!r}, 'a').write('ended\\n')\n"
                      f"print('preempted')\nsys.exit({code})\n", encoding="utf-8")
         return p
+
+    def wait_for_spike_end(self) -> None:
+        """A spike stand-in left running ends by itself (never force-ended)."""
+        deadline = time.monotonic() + 15
+        while not self.spike_done.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(self.spike_done.exists(), "the spike stand-in never ended")
+
+    def route_to_real_gh(self, *prefix: str) -> None:
+        """gh calls starting with `prefix` go through the real wrapper (and a
+        stand-in gh program on PATH); every other call stays with FakeGh."""
+        fake = self.gh
+
+        def mixed(args, timeout=ip.GH_S):
+            if list(args[:len(prefix)]) == list(prefix):
+                return REAL_GH(args, timeout)
+            return fake(args, timeout)
+
+        ip.gh = mixed
+
+    def gh_program(self, body: str) -> None:
+        """A stand-in `gh` program first on PATH, running `body` (sys, time imported)."""
+        d = self.tmp / "bin"
+        d.mkdir(exist_ok=True)
+        p = d / "gh"
+        p.write_text(f"#!{sys.executable}\nimport sys, time\n{body}\n", encoding="utf-8")
+        p.chmod(0o755)
+        self.set_path(f"{d}{os.pathsep}{os.environ.get('PATH', '')}")
+
+    def set_path(self, path: str) -> None:
+        patcher = mock.patch.dict(os.environ, {"PATH": path})
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def flag(self) -> None:
         ip.EVENT_NOW.parent.mkdir(parents=True, exist_ok=True)
@@ -270,8 +316,22 @@ class GuardedTests(Base):
         self.assertEqual(ip.guarded(self.py("print('ok')"), "", 10, "ignore").strip(), "ok")
 
     def test_a_call_past_its_bound_is_reported_never_force_ended(self) -> None:
-        with self.assertRaisesRegex(ip.StepError, "never force-end"):
-            ip.guarded(self.py("import time; time.sleep(3)"), "", 0.3, "finish")
+        done = self.tmp / "bounded.done"
+        with self.assertRaisesRegex(ip.StillRunning, "still running after 0.3 s .*never force-end"):
+            ip.guarded(self.py(f"import time; time.sleep(1); open({str(done)!r}, 'w').close()"), "", 0.3, "finish")
+        self.assertFalse(done.exists())
+        deadline = time.monotonic() + 10
+        while not done.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(done.exists(), "the call was left to end by itself")
+
+    def test_a_flag_seen_during_a_finish_call_counts_even_when_gone_at_the_end(self) -> None:
+        flag = str(ip.EVENT_NOW)
+        code = (f"import pathlib, time; p = pathlib.Path({flag!r}); p.parent.mkdir(parents=True, exist_ok=True); "
+                "p.write_text('x'); time.sleep(0.5); p.unlink(); time.sleep(0.3)")
+        with self.assertRaises(ip.EventNow):
+            ip.guarded(self.py(code), "", 10, "finish")
+        self.assertFalse(ip.event_now())
 
     def test_only_a_flag_that_appears_after_the_start_preempts(self) -> None:
         args = type("A", (), {})()
@@ -365,6 +425,13 @@ class ReplyTests(Base):
         self.assertEqual((code, docs), (1, []))
         self.assertIn("not JSON", err)
 
+    def test_the_pcs_stderr_is_reported_only_when_there_is_some(self) -> None:
+        self.pc.replies[("status",)] = (0, OK, "a warning from the PC")
+        code, docs, _ = self.run_main("status")
+        self.assertEqual((code, docs[-1]["stderr"]), (0, "a warning from the PC"))
+        self.pc.replies[("status",)] = (0, OK, "")
+        self.assertNotIn("stderr", self.run_main("status")[1][-1])
+
 
 class StatusTests(Base):
     def test_status_reports_the_guard_and_this_box(self) -> None:
@@ -376,11 +443,19 @@ class StatusTests(Base):
                           "spike_window_open": True, "dev_entry": 0})
         self.assertEqual(self.pc.calls, [("iemmode.exe", ["status"], "abandon")])
 
-    def test_status_runs_during_an_event_and_passes_the_exit_through(self) -> None:
+    def test_during_an_event_status_reports_this_box_only(self) -> None:
+        self.flag()
+        code, docs, _ = self.run_main("status")
+        self.assertEqual((code, self.pc.calls, self.pc.modules), (0, [], []))
+        self.assertEqual({k: docs[-1][k] for k in ("iemmode", "event_now", "spike_window_open", "dev_entry")},
+                         {"iemmode": None, "event_now": True, "spike_window_open": False, "dev_entry": 0})
+        self.assertIn("EVENT-NOW exists: no PC step during an event", docs[-1]["skipped"])
+
+    def test_status_pc_asks_the_guard_during_an_event_and_passes_the_exit_through(self) -> None:
         self.flag()
         self.pc.replies[("status",)] = (4, OK)
-        code, docs, _ = self.run_main("status")
-        self.assertEqual((code, docs[-1]["event_now"]), (4, True))
+        code, docs, _ = self.run_main("status", "--pc")
+        self.assertEqual((code, docs[-1]["event_now"], "skipped" in docs[-1]), (4, True, False))
         self.assertEqual(self.pc.calls, [("iemmode.exe", ["status"], "ignore")])
 
     def test_the_spike_window_state(self) -> None:
@@ -404,8 +479,10 @@ class FlagTests(Base):
         self.fetched()
         self.flag()
         before = len(self.gh.calls)
-        for argv in (["install", "--sha", SHA], ["dispatch-hil", "--sha", SHA], ["rehearse-teardown"], ["probe-task"],
-                     ["handover-s1a"], ["bootstrap", "Register-IemTasks"], ["dev", "--dry-run"]):
+        for argv in (["install", "--sha", SHA], ["install", "--sha", SHA, "--first"], ["dispatch-hil", "--sha", SHA],
+                     ["rehearse-teardown"], ["probe-task"], ["handover-s1a"], ["bootstrap", "Register-IemTasks"],
+                     ["bootstrap", "Get-IemBootstrapState"], ["bootstrap", "Get-IemTunnelOrigin"],
+                     ["bootstrap", "Test-IemServiceRight"], ["dev", "--dry-run"]):
             code, docs, err = self.run_main(*argv)
             self.assertEqual((code, docs), (1, []), argv)
             self.assertIn("runs only in dev time", err, argv)
@@ -430,6 +507,20 @@ class FlagTests(Base):
         self.assertFalse(ip.ensure_flag())
         self.assertEqual(ip.EVENT_NOW.read_text(encoding="utf-8"), "2026-09-27T20:00:00+02:00\n")
 
+    def test_a_flag_that_cannot_be_written_never_stops_the_event_path(self) -> None:
+        blocker = self.tmp / "not-a-folder"
+        blocker.write_text("a file where the flag's folder should be", encoding="utf-8")
+        ip.EVENT_NOW = blocker / "EVENT-NOW"
+        self.open_window()
+        code, docs, err = self.run_main("event")
+        self.assertEqual(code, 0)
+        self.assertEqual({k: docs[0][k] for k in ("flag", "written")}, {"flag": str(ip.EVENT_NOW), "written": False})
+        self.assertIn("File exists", docs[0]["error"])
+        self.assertEqual(self.spike_log.read_text(encoding="utf-8"), "preempt\n")
+        self.assertEqual(self.pc.calls, [("iemmode.exe", ["event"], "ignore")])
+        self.assertIn("was not written", err)
+        self.assertNotIn("alarm the owner", err)
+
 
 class EventTests(Base):
     def test_an_open_spike_window_is_preempted_before_iemmode(self) -> None:
@@ -452,10 +543,56 @@ class EventTests(Base):
         self.open_window()
         ip.SPIKE = self.write_spike(3)
         code, docs, err = self.run_main("event")
-        self.assertEqual((code, docs[1]["spike_preempt"]["ok"]), (0, False))
+        self.assertEqual((code, docs[1]["spike_preempt"]["ok"], "running" in docs[1]["spike_preempt"]), (0, False, False))
         self.assertIn("exit 3", docs[1]["spike_preempt"]["error"])
         self.assertEqual(self.pc.calls, [("iemmode.exe", ["event"], "ignore")])
         self.assertIn("spike preempt", err)
+
+    def test_the_event_path_has_one_budget_that_fits_a_bash_call(self) -> None:
+        self.assertLessEqual(ip.EVENT_BUDGET_S, 540)  # a Bash call ends at 10 min; the plan's waits stay within 9
+        self.assertLessEqual(ip.SPIKE_SHARE_S + ip.SWITCH_MIN_S, ip.EVENT_BUDGET_S)
+        self.pc.replies[("event",)] = (4, OK)
+        self.assertEqual(self.run_main("event")[0], 0)
+        first, direct = self.pc.timeouts
+        self.assertLessEqual(first, ip.EVENT_BUDGET_S)
+        self.assertGreater(first, ip.EVENT_BUDGET_S - 10)
+        self.assertLess(direct, first)
+
+    def test_iemmode_event_gets_what_the_spike_preempt_left(self) -> None:
+        self.open_window()
+        ip.SPIKE = self.write_spike(0, delay=0.4)
+        self.assertEqual(self.run_main("event")[0], 0)
+        self.assertEqual(self.pc.calls, [("iemmode.exe", ["event"], "ignore")])
+        self.assertLessEqual(self.pc.timeouts[0], ip.EVENT_BUDGET_S - 0.4)
+        self.assertGreater(self.pc.timeouts[0], ip.EVENT_BUDGET_S - 10)
+
+    def test_no_iemmode_call_while_the_spike_preempt_outlives_its_share(self) -> None:
+        self.open_window()
+        ip.SPIKE = self.write_spike(0, delay=3)
+        ip.SPIKE_SHARE_S = 0.3
+        t = time.monotonic()
+        code, docs, err = self.run_main("event")
+        spike_still_runs = not self.spike_done.exists()
+        self.assertTrue(spike_still_runs)
+        self.assertLess(time.monotonic() - t, 2.0)
+        self.assertEqual((code, self.pc.calls), (1, []))
+        self.assertEqual((docs[1]["spike_preempt"]["ok"], docs[1]["spike_preempt"]["running"]), (False, True))
+        self.assertIn("preempt still runs after its 0.3 s share", err)
+        self.assertIn("alarm the owner now", err)
+        self.wait_for_spike_end()
+        self.assertEqual(self.pc.calls, [])
+
+    def test_an_iemmode_call_never_starts_with_less_than_its_minimum(self) -> None:
+        ip.EVENT_BUDGET_S, ip.SWITCH_MIN_S = 1.0, 0.5
+        self.pc.replies[("event",)] = lambda: (time.sleep(0.6), (4, OK))[1]
+        code, _, err = self.run_main("event")
+        self.assertEqual((code, [c[1] for c in self.pc.calls]), (1, [["event"]]))
+        self.assertIn("less than the 0.5 s an iemmode call gets: run 'iempc event' again", err)
+        self.assertIn("alarm the owner now", err)
+        self.pc.calls.clear()
+        self.pc.replies[("event",)] = lambda: (time.sleep(0.1), (4, OK))[1]
+        self.assertEqual(self.run_main("event")[0], 0)
+        self.assertEqual([c[1] for c in self.pc.calls], [["event"], ["event", "--direct"]])
 
     def test_an_unreachable_guard_falls_back_to_direct(self) -> None:
         self.pc.replies[("event",)] = (4, json.dumps({"error": "guard unreachable"}))
@@ -499,15 +636,27 @@ class EventTests(Base):
                                          ("iemmode.exe", ["event", "--dry-run", "--direct"], "ignore")])
         self.assertNotIn("alarm the owner", err)
 
+    def test_a_failed_dry_run_is_no_owner_alarm(self) -> None:
+        def down():
+            raise ip.StepError("ssh failed (exit 255): no route")
+
+        self.pc.replies[("event", "--dry-run")] = down
+        code, _, err = self.run_main("event", "--dry-run")
+        self.assertEqual((code, ip.event_now()), (1, False))
+        self.assertIn("no route", err)
+        self.assertNotIn("alarm the owner", err)
+
 
 class PreemptionTests(Base):
     """"ide event" while another command waits: the flag file appears."""
 
-    def test_a_new_flag_during_dev_completes_it_then_runs_the_event_path(self) -> None:
+    def test_a_new_flag_during_dev_abandons_the_client_and_runs_the_event_path(self) -> None:
+        """The guard owns the switch and pre-empts it itself: the client is
+        abandoned (a wait sees the flag within a poll, GuardedTests)."""
         self.pc.replies[("dev", "--build", SHA)] = lambda: (self.flag(), (0, OK))[1]
         code, docs, _ = self.run_main("dev", "--build", SHA)
         self.assertEqual(code, ip.PREEMPTED)
-        self.assertEqual(self.pc.calls, [("iemmode.exe", ["dev", "--build", SHA], "finish"), ("iemmode.exe", ["event"], "ignore")])
+        self.assertEqual(self.pc.calls, [("iemmode.exe", ["dev", "--build", SHA], "abandon"), ("iemmode.exe", ["event"], "ignore")])
         self.assertEqual(docs[0], {"event": "ide event (flag file)", "action": "iempc event"})
         self.assertEqual(ip.current_entry(), 0)
 
@@ -537,7 +686,7 @@ class PreemptionTests(Base):
             raise ip.StepError("ssh: timeout")
 
         self.pc.replies[("status",)] = fail
-        code, docs, _ = self.run_main("status")
+        code, docs, _ = self.run_main("status", "--pc")
         self.assertEqual((code, docs, len(self.pc.calls)), (1, [], 1))
 
     def test_a_dev_box_command_never_starts_the_event_path(self) -> None:
@@ -560,7 +709,19 @@ class DevTests(Base):
         code, docs, _ = self.run_main("dev", "--build", SHA)
         self.assertEqual((code, docs[-1]["dev_entry"], ip.current_entry()), (0, 1, 1))
         self.assertEqual(self.run_main("dev")[1][-1]["dev_entry"], 2)
-        self.assertEqual(self.pc.calls[-1], ("iemmode.exe", ["dev"], "finish"))
+        self.assertEqual(self.pc.calls[-1], ("iemmode.exe", ["dev"], "abandon"))
+        self.assertEqual(self.pc.timeouts, [ip.SWITCH_S, ip.SWITCH_S])
+
+    def test_an_open_spike_window_refuses_dev_and_the_rehearsal(self) -> None:
+        self.open_window()
+        for argv in (["dev", "--build", SHA], ["dev", "--dry-run"], ["rehearse-teardown"]):
+            code, docs, err = self.run_main(*argv)
+            self.assertEqual((code, docs), (1, []), argv)
+            self.assertIn("'iempc handover-s1a' has handed the card over", err, argv)
+        self.assertEqual(self.pc.calls, [])
+        self.open_window(closed=True)
+        self.assertEqual((self.run_main("dev", "--build", SHA)[0], self.run_main("rehearse-teardown")[0]), (0, 0))
+        self.assertEqual([c[1][0] for c in self.pc.calls], ["dev", "rehearse-teardown"])
 
     def test_a_refused_dev_or_a_dry_run_opens_none(self) -> None:
         self.pc.replies[("dev", "--build", SHA)] = (1, json.dumps({"error": "band activity"}))
@@ -569,6 +730,7 @@ class DevTests(Base):
         code, docs, _ = self.run_main("dev", "--build", SHA, "--dry-run")
         self.assertEqual((code, "dev_entry" in docs[-1], ip.current_entry()), (0, False, 0))
         self.assertEqual(self.pc.calls[-1], ("iemmode.exe", ["dev", "--build", SHA, "--dry-run"], "abandon"))
+        self.assertEqual(self.pc.timeouts[-1], ip.STATUS_S)
 
     def test_a_bad_build_is_refused_before_the_pc(self) -> None:
         for bad in ("1234", SHA.upper(), SHA + "0"):
@@ -579,7 +741,7 @@ class DevTests(Base):
         self.assertEqual(self.run_main("rehearse-teardown")[0], 0)
         self.pc.replies[("probe-task",)] = (1, json.dumps({"error": "refused"}))
         self.assertEqual(self.run_main("probe-task")[0], 1)
-        self.assertEqual(self.pc.calls, [("iemmode.exe", ["rehearse-teardown"], "finish"), ("iemmode.exe", ["probe-task"], "finish")])
+        self.assertEqual(self.pc.calls, [("iemmode.exe", ["rehearse-teardown"], "abandon"), ("iemmode.exe", ["probe-task"], "finish")])
 
 
 class BundleTests(Base):
@@ -621,6 +783,23 @@ class BundleTests(Base):
         for bad in ("a" * 64 + " one-space.exe", "xyz  a.exe", "a" * 64 + "  ../x.exe", ("a" * 64 + "  x\n") * 2):
             with self.assertRaises(ip.StepError, msg=bad):
                 ip.parse_sums(bad)
+
+    def test_an_unreadable_member_is_named(self) -> None:
+        for kw, member in (({"manifest_raw": b"{not json"}, "manifest.json"),
+                           ({"manifest_raw": b"\xff\xfe not utf-8"}, "manifest.json"),
+                           ({"sums_raw": b"\xff" * 70}, "SHA256SUMS")):
+            with self.assertRaisesRegex(ip.StepError, f"b.zip: {member} is unreadable", msg=str(kw)):
+                ip.verify_zip(self.zip(**kw), SHA, "dev", RUN)
+
+    def test_a_member_with_a_bad_crc_is_named(self) -> None:
+        p = self.zip()
+        with zipfile.ZipFile(p) as z:
+            info = z.getinfo("iemmode.exe")
+        data = bytearray(p.read_bytes())
+        data[info.header_offset + 30 + len(info.filename.encode()) + len(info.extra)] ^= 0xFF
+        p.write_bytes(bytes(data))
+        with self.assertRaisesRegex(ip.StepError, "b.zip: iemmode.exe is unreadable \\(BadZipFile: Bad CRC-32"):
+            ip.verify_zip(p, SHA, "dev", RUN)
 
     def test_a_file_that_is_no_zip_is_refused(self) -> None:
         p = self.tmp / "no.zip"
@@ -700,6 +879,34 @@ class FetchTests(Base):
         self.assertEqual(code, 1)
         self.assertIn(f"has no iemmixer-{SHA}.zip", err)
 
+    def test_a_malformed_manifest_is_a_message_and_keeps_nothing(self) -> None:
+        make_zip(self.artifact, manifest_raw=b"{not json")
+        code, docs, err = self.run_main("fetch-bundle", "--sha", SHA)
+        self.assertEqual((code, docs, self.gh.named("attestation")), (1, [], []))
+        self.assertIn(f"iemmixer-{SHA}.zip: manifest.json is unreadable (JSONDecodeError", err)
+        self.assertEqual(list((ip.STATE_DIR / "bundles").iterdir()), [])
+
+    def test_a_bundle_folder_without_a_fetch_record_is_refused(self) -> None:
+        ip.bundle_dir(SHA).mkdir(parents=True)
+        code, _, err = self.run_main("fetch-bundle", "--sha", SHA)
+        self.assertEqual((code, self.gh.named("run", "download")), (1, []))
+        self.assertIn("exists without a fetch record", err)
+
+    def test_a_stale_partial_download_is_replaced(self) -> None:
+        stale = ip.STATE_DIR / "bundles" / f"{SHA}.partial"
+        stale.mkdir(parents=True)
+        (stale / "left-over.zip").write_bytes(b"from a cut download")
+        self.fetched()
+        self.assertFalse(stale.exists())
+        self.assertEqual(sorted(p.name for p in ip.bundle_dir(SHA).iterdir()), ["fetch.json", f"iemmixer-{SHA}.zip"])
+
+    def test_a_fetched_bundle_is_reused_only_for_its_own_branch(self) -> None:
+        self.fetched()
+        with self.assertRaisesRegex(ip.StepError, "was fetched from dev, not main"):
+            ip.fetch_bundle(SHA, "main")
+        self.assertEqual(ip.fetch_bundle(SHA, "dev")[1], False)
+        self.assertEqual(len(self.gh.named("run", "download")), 1)
+
 
 class InstallTests(Base):
     def test_install_needs_a_fetched_bundle_with_its_digest(self) -> None:
@@ -735,6 +942,18 @@ class InstallTests(Base):
         self.assertEqual(self.pc.calls[0][0], f"iemmixer-guard-{SHA}.exe")
         self.assertIn(ip.hash_check(guard, sha256(b"synthetic iemmixer-guard.exe")), self.pc.native_scripts[0])
         self.assertEqual((docs[-1]["via"], docs[-1]["output"]), ("iemmixer-guard (first bundle)", "installed"))
+
+    def test_an_open_spike_window_refuses_install_but_not_the_first_bundle(self) -> None:
+        """`iemmode install` may start the guard; the first bundle's own guard
+        only installs files (no guard run, no card)."""
+        self.fetched()
+        self.open_window()
+        code, docs, err = self.run_main("install", "--sha", SHA)
+        self.assertEqual((code, docs, self.pc.scps, self.pc.calls, self.pc.modules), (1, [], [], [], []))
+        self.assertIn("'install' waits until 'iempc handover-s1a' has handed the card over", err)
+        self.pc.replies[("install", f"X:\\root\\incoming\\iemmixer-{SHA}.zip")] = (0, "installed")
+        self.assertEqual(self.run_main("install", "--sha", SHA, "--first")[0], 0)
+        self.assertEqual(self.pc.calls[0][0], f"iemmixer-guard-{SHA}.exe")
 
 
 class DispatchTests(Base):
@@ -786,6 +1005,34 @@ class DispatchTests(Base):
         self.assertEqual((code, self.gh.named("workflow")), (1, []))
         self.assertIn(f"fetched from run {RUN}", err)
 
+    def test_a_malformed_branch_head_is_refused(self) -> None:
+        for bad in ("", "not a sha", SHA.upper(), SHA + "0"):
+            self.gh.heads["dev"] = bad
+            code, _, err = self.run_main("dispatch-hil")
+            self.assertEqual(code, 1, bad)
+            self.assertIn(f"the head of dev reads {bad!r}", err, bad)
+        self.assertEqual(self.gh.named("workflow"), [])
+        self.gh.heads["dev"] = SHA
+        self.assertEqual(ip.branch_head("dev"), SHA)
+
+    def test_a_flag_that_appears_during_the_gh_waits_stops_the_dispatch(self) -> None:
+        self.gh.on_download = self.flag
+        code, docs, err = self.run_main("dispatch-hil", "--sha", SHA)
+        self.assertEqual((code, docs, self.gh.named("workflow"), self.pc.calls), (1, [], [], []))
+        self.assertIn("no HIL dispatch during an event (nothing was dispatched)", err)
+        self.assertEqual(ip.load_dispatches(), [])
+
+    def test_a_failed_workflow_dispatch_through_the_real_gh_is_not_recorded(self) -> None:
+        self.gh_program("sys.stderr.write('HTTP 422: Workflow does not have workflow_dispatch trigger'); sys.exit(1)")
+        self.route_to_real_gh("workflow", "run")
+        code, docs, err = self.run_main("dispatch-hil", "--sha", SHA)
+        self.assertEqual((code, docs), (1, []))
+        self.assertIn("gh workflow run failed (exit 1): HTTP 422", err)
+        self.assertEqual(ip.load_dispatches(), [])
+        ip.gh = self.gh  # gh works again: the same SHA and entry is no repeat
+        self.assertEqual(self.run_main("dispatch-hil", "--sha", SHA)[0], 0)
+        self.assertEqual(len(ip.load_dispatches()), 1)
+
 
 class BootstrapTests(Base):
     MODULE = f"X:\\root\\bootstrap\\{SHA}\\IemPc.psm1"
@@ -799,11 +1046,11 @@ class BootstrapTests(Base):
                                                                "Grant-IemServiceRight", "Register-IemTasks", "Get-Process")],
                          [True, True, False, False, False])
 
-    def test_read_only_steps_run_in_an_event_and_changing_ones_are_dev_time_and_locked(self) -> None:
-        ro = type("A", (), {"cmd": "bootstrap", "step": "Get-IemTunnelOrigin"})()
-        rw = type("A", (), {"cmd": "bootstrap", "step": "Set-IemRootAcl"})()
-        self.assertEqual((ip.spec_for(ro).dev_time, ip.spec_for(ro).locked), (False, False))
-        self.assertEqual((ip.spec_for(rw).dev_time, ip.spec_for(rw).locked), (True, True))
+    def test_every_bootstrap_step_is_dev_time_and_locked(self) -> None:
+        """Read-only functions too: each run makes a folder, copies the module
+        and runs it elevated on the PC (design §6, P10)."""
+        spec = ip.COMMANDS["bootstrap"]
+        self.assertEqual((spec.pc, spec.dev_time, spec.locked), (True, True, True))
 
     def test_the_verified_module_is_shipped_and_imported_by_its_hash(self) -> None:
         self.fetched()
@@ -818,11 +1065,19 @@ class BootstrapTests(Base):
                       "$r = & { Grant-IemServiceRight -Service 'svc name' }", script)
         self.assertEqual(docs[-1], {"bootstrap": "Grant-IemServiceRight", "sha": SHA, "result": {"reaper": 1}})
 
-    def test_a_read_only_step_runs_during_an_event(self) -> None:
+    def test_a_read_only_step_is_refused_during_an_event(self) -> None:
         self.fetched()
         self.flag()
+        for fn in ("Get-IemBootstrapState", "Get-IemPredecessorFacts", "Test-IemServiceRight"):
+            code, docs, err = self.run_main("bootstrap", fn)
+            self.assertEqual((code, docs), (1, []), fn)
+            self.assertIn("runs only in dev time", err, fn)
+        self.assertEqual((self.pc.modules, self.pc.scps, self.pc.calls), ([], [], []))
+
+    def test_a_new_flag_abandons_a_read_only_step(self) -> None:
+        self.fetched()
         self.assertEqual(self.run_main("bootstrap", "Get-IemBootstrapState")[0], 0)
-        self.assertEqual({m for _, m in self.pc.modules}, {"ignore"})
+        self.assertEqual(({m for _, m in self.pc.modules}, {s[2] for s in self.pc.scps}), ({"abandon"}, {"abandon"}))
 
     def test_the_runner_token_reaches_the_pc_on_stdin_only(self) -> None:
         self.fetched()
@@ -860,6 +1115,43 @@ class BootstrapTests(Base):
                 rec["fetched_at"] = at
                 ip.write_json(ip.bundle_dir(sha) / "fetch.json", rec)
             self.assertEqual(ip.latest_record_sha(), newer)
+
+
+class ExtractTests(Base):
+    """extract_member: one top-level file of the fetched zip, checked again."""
+
+    def test_only_a_listed_top_level_file_is_extracted(self) -> None:
+        self.fetched()
+        rec = ip.load_record(SHA)
+        for name in ("tuning/state.ps1", "absent.exe"):
+            with self.assertRaisesRegex(ip.StepError, "is not a listed top-level file", msg=name):
+                ip.extract_member(SHA, rec, name)
+        path, hexd = ip.extract_member(SHA, rec, "IemPc.psm1")
+        self.assertEqual((path, path.read_bytes(), hexd),
+                         (ip.bundle_dir(SHA) / "IemPc.psm1", b"synthetic IemPc.psm1", sha256(b"synthetic IemPc.psm1")))
+
+    def test_a_member_that_does_not_match_its_sum_is_refused(self) -> None:
+        self.fetched()
+        rec = ip.load_record(SHA)
+        rec["sums"]["IemPc.psm1"] = "0" * 64
+        with self.assertRaisesRegex(ip.StepError, f"IemPc.psm1 in iemmixer-{SHA}.zip does not match SHA256SUMS"):
+            ip.extract_member(SHA, rec, "IemPc.psm1")
+        self.assertFalse((ip.bundle_dir(SHA) / "IemPc.psm1").exists())
+
+    def test_a_member_absent_or_there_twice_is_refused(self) -> None:
+        want = sha256(b"synthetic iemmode.exe")
+        for copies in (0, 2):
+            z = ip.zip_path(SHA)
+            z.parent.mkdir(parents=True, exist_ok=True)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")  # zipfile warns about a duplicate name
+                with zipfile.ZipFile(z, "w") as zf:
+                    zf.writestr("other.exe", b"x")
+                    for _ in range(copies):
+                        zf.writestr("iemmode.exe", b"synthetic iemmode.exe")
+            rec = {"digest": "sha256:" + sha256(z.read_bytes()), "sums": {"iemmode.exe": want}}
+            with self.assertRaisesRegex(ip.StepError, f"iemmode.exe is not in iemmixer-{SHA}.zip exactly once", msg=copies):
+                ip.extract_member(SHA, rec, "iemmode.exe")
 
 
 class HandoverTests(Base):
@@ -934,14 +1226,61 @@ class LockTests(Base):
     def test_a_second_changing_command_is_refused_while_one_runs_but_event_never_waits(self) -> None:
         with open(ip.state_dir() / "iempc.lock", "a+", encoding="utf-8") as held:
             fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            code, _, err = self.run_main("probe-task")
-            self.assertEqual((code, self.pc.calls), (1, []))
-            self.assertIn("another iempc command runs", err)
+            for argv in (["probe-task"], ["bootstrap", "Get-IemBootstrapState"]):
+                code, _, err = self.run_main(*argv)
+                self.assertEqual((code, self.pc.calls, self.pc.modules), (1, [], []), argv)
+                self.assertIn("another iempc command runs", err, argv)
             self.assertEqual(self.run_main("status")[0], 0)
             self.assertEqual(self.run_main("event")[0], 0)
         ip.EVENT_NOW.unlink()  # "event skončil"
         self.assertEqual(self.run_main("probe-task")[0], 0)
         self.assertEqual([c[1] for c in self.pc.calls], [["status"], ["event"], ["probe-task"]])
+
+
+class GhTests(Base):
+    """The real gh wrapper, with a stand-in `gh` program first on PATH: the P5
+    gate rests on its exit-code check."""
+
+    def test_a_successful_call_returns_its_output(self) -> None:
+        self.gh_program("sys.stderr.write('unknown command in a warning'); sys.stdout.write('args: ' + ' '.join(sys.argv[1:]))")
+        self.assertEqual(REAL_GH(["run", "list", "--limit", "1"]), "args: run list --limit 1")
+
+    def test_a_failed_call_raises_with_its_exit_and_stderr(self) -> None:
+        self.gh_program("sys.stderr.write('HTTP 404: Not Found\\n'); sys.exit(1)")
+        with self.assertRaises(ip.StepError) as cm:
+            REAL_GH(["workflow", "run", "hil.yml"])
+        self.assertEqual(str(cm.exception), "gh workflow run failed (exit 1): HTTP 404: Not Found")
+
+    def test_a_gh_without_attestation_gets_the_hint(self) -> None:
+        self.gh_program("sys.stderr.write('unknown command \"attestation\" for \"gh\"'); sys.exit(1)")
+        with self.assertRaises(ip.StepError) as cm:
+            REAL_GH(["attestation", "verify", "x.zip"])
+        self.assertEqual(str(cm.exception), "gh attestation verify failed (exit 1) (this gh has no 'attestation' command: "
+                                            "install gh >= 2.49): unknown command \"attestation\" for \"gh\"")
+
+    def test_a_missing_gh_is_named(self) -> None:
+        empty = self.tmp / "empty-bin"
+        empty.mkdir()
+        self.set_path(str(empty))
+        with self.assertRaisesRegex(ip.StepError, "^gh is not installed on this box$"):
+            REAL_GH(["run", "list"])
+
+    def test_a_gh_that_does_not_answer_is_bounded(self) -> None:
+        self.gh_program("time.sleep(5)")
+        t = time.monotonic()
+        with self.assertRaisesRegex(ip.StepError, "^gh run download: no answer within 0.3 s$"):
+            REAL_GH(["run", "download", "1"], timeout=0.3)
+        self.assertLess(time.monotonic() - t, 3)
+
+    def test_a_failed_attestation_through_the_real_gh_keeps_nothing(self) -> None:
+        self.gh_program("sys.stderr.write('no attestation matched the bundle'); sys.exit(1)")
+        self.route_to_real_gh("attestation", "verify")
+        code, docs, err = self.run_main("fetch-bundle", "--sha", SHA)
+        self.assertEqual((code, docs), (1, []))
+        self.assertIn("gh attestation verify failed (exit 1): no attestation matched the bundle", err)
+        self.assertIsNone(ip.load_record(SHA))
+        self.assertEqual(list((ip.STATE_DIR / "bundles").iterdir()), [])
+        self.assertEqual(len(self.gh.named("run", "download")), 1)
 
 
 if __name__ == "__main__":
