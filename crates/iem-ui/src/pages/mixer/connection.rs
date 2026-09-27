@@ -38,7 +38,8 @@ pub(super) fn setup_connection(
     // Closure storage: keeps WS callbacks alive without Closure::forget() leak
     let ws_closures: WsClosureStore = std::rc::Rc::new(std::cell::RefCell::new(None));
 
-    // WS failure counter: tracks consecutive failures without receiving data
+    // Failed sockets in a row (reset when a socket opens): after
+    // MAX_WS_FAILURES the reconnect tick also checks the token.
     let ws_fail_count: WsFailCounter = std::rc::Rc::new(std::cell::Cell::new(0));
 
     // Track page visibility — skip meter updates when backgrounded.
@@ -145,10 +146,10 @@ pub(super) fn setup_connection(
                 return;
             }
 
-            if matches!(
-                step,
-                ReconnectStep::CheckToken | ReconnectStep::ConnectAndCheckToken
-            ) {
+            // After MAX_WS_FAILURES failed sockets in a row the page also
+            // asks whether its token still holds; it keeps retrying either
+            // way until the answer sends it to the login.
+            if step == ReconnectStep::ConnectAndCheckToken {
                 let nav = navigate_auth_fail.clone();
                 let m = member.clone();
                 wasm_bindgen_futures::spawn_local(async move {
@@ -159,9 +160,6 @@ pub(super) fn setup_connection(
                         nav(&url, Default::default());
                     }
                 });
-            }
-            if step == ReconnectStep::CheckToken {
-                return;
             }
 
             last_reconnect_attempt_at_tick.set(now_ms);
@@ -420,6 +418,7 @@ fn connect_websocket(
 
     // Close previous WebSocket if exists (prevents closure leak on reconnect)
     if let Some(Some(old_ws)) = ws.try_get_untracked() {
+        old_ws.set_onopen(None);
         old_ws.set_onmessage(None);
         old_ws.set_onclose(None);
         old_ws.set_onerror(None);
@@ -465,7 +464,7 @@ fn connect_websocket(
     let last_meter_time = std::cell::Cell::new(0.0_f64);
 
     // Clone fail counter for use in closures
-    let fail_count_msg = ws_fail_count.clone();
+    let fail_count_open = ws_fail_count.clone();
     let fail_count_close = ws_fail_count;
 
     let last_frame_at_msg = last_frame_at.clone();
@@ -559,8 +558,6 @@ fn connect_websocket(
                     stems_muted,
                     group,
                 } => {
-                    // Successfully received data — reset failure counter
-                    fail_count_msg.set(0);
                     let _ = set_channels.try_update(|chs| {
                         iem_core::merge_or_replace_channels(chs, new_chs, &touched);
                     });
@@ -753,6 +750,13 @@ fn connect_websocket(
     }) as Box<dyn FnMut(web_sys::MessageEvent)>);
     ws.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
 
+    // An open socket ends a run of failures: the server took the token (a
+    // refused one never opens), so no token check is due.
+    let onopen = Closure::wrap(Box::new(move || {
+        fail_count_open.set(0);
+    }) as Box<dyn FnMut()>);
+    ws.set_onopen(Some(onopen.as_ref().unchecked_ref()));
+
     let reconnect_attempt_close = reconnect_attempt.clone();
 
     // Handle close — mark disconnected and increment failure counter
@@ -774,7 +778,7 @@ fn connect_websocket(
 
     // Store closures so they stay alive (preventing JS callback invalidation)
     // and get dropped on next reconnect (preventing memory leak from Closure::forget)
-    *ws_closures.borrow_mut() = Some((onmessage, onclose));
+    *ws_closures.borrow_mut() = Some((onmessage, onclose, onopen));
 }
 
 #[cfg(test)]

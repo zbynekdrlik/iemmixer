@@ -125,11 +125,12 @@ pub(super) fn ws_send(ws: ReadSignal<Option<web_sys::WebSocket>>, cmd: &iem_core
 pub(super) type WsClosures = (
     Closure<dyn FnMut(web_sys::MessageEvent)>,
     Closure<dyn FnMut(web_sys::CloseEvent)>,
+    Closure<dyn FnMut()>,
 );
 pub(super) type WsClosureStore = std::rc::Rc<std::cell::RefCell<Option<WsClosures>>>;
 
-/// Counter for consecutive WebSocket failures without receiving data.
-/// Shared across connect_websocket calls via Rc<Cell<>>.
+/// Failed sockets in a row: counted at each close, reset when a socket
+/// opens. Shared across connect_websocket calls via Rc<Cell<>>.
 pub(super) type WsFailCounter = std::rc::Rc<std::cell::Cell<u32>>;
 
 /// Failed sockets in a row after which the page asks the server whether its
@@ -143,16 +144,15 @@ pub(super) enum ReconnectStep {
     Wait,
     /// Open a new socket.
     Connect,
-    /// Only ask the server whether the token still holds, and open no socket
-    /// (inherited: the page stops retrying).
-    CheckToken,
-    /// Open a new socket and ask the server whether the token still holds.
+    /// Open a new socket and ask the server whether the token still holds:
+    /// an invalid one goes to the login, a valid one keeps retrying.
     ConnectAndCheckToken,
 }
 
 /// The reconnect tick's step at `now_ms` for a closed socket, given the
 /// last attempt (`0.0`: none yet), the backoff attempt and the failed
-/// sockets in a row.
+/// sockets in a row. The page never stops retrying while its token holds:
+/// the failure count only decides whether the token is checked.
 pub(super) fn reconnect_step(
     now_ms: f64,
     last_attempt_ms: f64,
@@ -163,7 +163,7 @@ pub(super) fn reconnect_step(
     if last_attempt_ms > 0.0 && now_ms - last_attempt_ms < delay_ms {
         ReconnectStep::Wait
     } else if failures >= MAX_WS_FAILURES {
-        ReconnectStep::CheckToken
+        ReconnectStep::ConnectAndCheckToken
     } else {
         ReconnectStep::Connect
     }
