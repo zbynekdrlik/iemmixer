@@ -1299,6 +1299,25 @@ mod tests {
         assert!(hs.bands[0].enabled);
     }
 
+    /// The engine has four band kinds and the server names only those
+    /// ("highpass", "lowshelf", "band", "highshelf"). Any other type, such as
+    /// the predecessor's "lowpass" and "notch", is drawn as a peak with its
+    /// values, never as a low-pass or a notch (the importer refuses both, so
+    /// none reaches the page; iemmixer#25 §6).
+    #[test]
+    fn other_band_types_draw_as_peaks() {
+        let peak = engine_params(&[band("band", 5000.0, 6.0, 0.5)]).bands[0];
+        assert_eq!(peak.kind, BandKind::Peak);
+        for ty in ["lowpass", "notch", "bandpass", ""] {
+            let p = engine_params(&[band(ty, 5000.0, 6.0, 0.5)]).bands[0];
+            assert_eq!(p, peak, "{ty:?}");
+            let b = [band(ty, 5000.0, 6.0, 0.5)];
+            // A low-pass would cut 20 kHz, a notch would cut its centre.
+            assert!((curve_db(&b, 5000.0) - 6.0).abs() < 0.05, "{ty:?}");
+            assert!(curve_db(&b, 20_000.0).abs() < 1.0, "{ty:?}");
+        }
+    }
+
     #[test]
     fn test_snap_db_rounds_to_tenth() {
         assert!((snap_db(2.04) - 2.0).abs() < f32::EPSILON);

@@ -410,6 +410,23 @@ mod tests {
         }
     }
 
+    /// Only the four band types the site uses have a kind; ReaEQ's others
+    /// (low pass, notch, band pass, all pass, …) are refused by the project
+    /// reader, never read as a band (iemmixer#25 §6).
+    #[test]
+    fn only_the_four_site_band_codes_have_a_kind() {
+        for code in -1..=16 {
+            let kind = BandKind::from_code(code);
+            match code {
+                0 => assert_eq!(kind, Some(BandKind::LowShelf)),
+                1 => assert_eq!(kind, Some(BandKind::HighShelf)),
+                4 => assert_eq!(kind, Some(BandKind::HighPass)),
+                8 => assert_eq!(kind, Some(BandKind::Band)),
+                _ => assert_eq!(kind, None, "code {code}"),
+            }
+        }
+    }
+
     #[test]
     fn a_patch_changes_only_the_written_values() {
         let eq = ReaEq::standard_flat();

@@ -566,6 +566,23 @@ mod tests {
         assert_eq!(eq.bands[4].kind, EqKind::HighShelf);
     }
 
+    /// The predecessor's UI knew "lowpass" and "notch" bands; the engine has
+    /// four kinds. Both are refused by name, never read as a peak (iemmixer#25
+    /// §6), while "band" is the peak.
+    #[test]
+    fn lowpass_and_notch_bands_are_refused_not_read_as_peaks() {
+        let eq = legacy_eq(&five()).unwrap();
+        assert_eq!(eq.bands[3].kind, EqKind::Peak);
+        for ty in ["lowpass", "notch"] {
+            let mut bands = five();
+            bands[3].band_type = ty.into();
+            assert_eq!(
+                legacy_eq(&bands).unwrap_err(),
+                format!("EQ band type {ty:?} is not supported")
+            );
+        }
+    }
+
     #[test]
     fn presets_keep_db_and_stems_and_mark_archived_members() {
         let e = env();
