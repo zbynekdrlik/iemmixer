@@ -92,6 +92,22 @@ fn display_order(band_type: &str) -> u8 {
     }
 }
 
+/// The engine's kind of a band the server names `band_type`.
+fn kind_of(band_type: &str) -> BandKind {
+    match band_type {
+        "highpass" => BandKind::HighPass,
+        "lowshelf" => BandKind::LowShelf,
+        "highshelf" => BandKind::HighShelf,
+        _ => BandKind::Peak,
+    }
+}
+
+/// Whether a gain change switches the band on, as the server does (FG-2,
+/// `view::apply_band`): every band with a gain; the high-pass has none.
+fn gain_switches_on(band_type: &str) -> bool {
+    kind_of(band_type) != BandKind::HighPass
+}
+
 /// The engine's parameters of the displayed bands (at most five, in the
 /// server's order; missing bands are off). A gain at or below the engine's off
 /// value is a notch (linear gain 0).
@@ -99,12 +115,7 @@ fn engine_params(bands: &[EqBandState]) -> EqParams {
     let mut params = EqParams::standard_flat();
     for (slot, b) in params.bands.iter_mut().zip(bands) {
         *slot = Band {
-            kind: match b.band_type.as_str() {
-                "highpass" => BandKind::HighPass,
-                "lowshelf" => BandKind::LowShelf,
-                "highshelf" => BandKind::HighShelf,
-                _ => BandKind::Peak,
-            },
+            kind: kind_of(&b.band_type),
             enabled: b.enabled,
             freq_hz: f64::from(b.freq_hz),
             gain_lin: if b.gain_db <= -150.0 {
@@ -470,6 +481,7 @@ pub fn EQModal(
                                 let band_type = local.band_type.clone();
                                 let band_type_reset = band_type.clone();
                                 let color = band_color(&band_type).to_string();
+                                let gain_enables = gain_switches_on(&band_type);
 
                                 // Get the stable local signals for this band
                                 let freq_hz_sig = local.freq_hz;
@@ -514,10 +526,14 @@ pub fn EQModal(
                                                 on:click=move |_| {
                                                     let idx = band_idx_sv.get_value();
                                                     // Reset gain to 0dB via new gain_db protocol; a gain
-                                                    // change switches the band on in the server (ReaEQ's
-                                                    // behaviour under the predecessor, FG-2), so show it on.
+                                                    // change switches a band with a gain on in the server
+                                                    // (ReaEQ's behaviour under the predecessor, FG-2), so
+                                                    // show it on. The high-pass has no gain: its switch
+                                                    // stays as it is.
                                                     let _ = gain_db_sig.try_set(0.0);
-                                                    let _ = enabled_sig.try_set(true);
+                                                    if gain_enables {
+                                                        let _ = enabled_sig.try_set(true);
+                                                    }
                                                     on_param_change.run((idx, "gain_db".to_string(), 0.0));
                                                     // Reset freq to per-band default Hz (reaperiem#196)
                                                     let default_freq_hz: f32 = match band_type_reset.as_str() {
@@ -627,9 +643,11 @@ pub fn EQModal(
                                                         on_param_change.run((band_idx_sv.get_value(), "gain_db".to_string(), db));
                                                     }
                                                     let _ = gain_db_sig.try_set(db);
-                                                    // The server switches the band on with any gain
-                                                    // change (FG-2); the toggle shows it at once.
-                                                    let _ = enabled_sig.try_set(true);
+                                                    // The server switches a band with a gain on with
+                                                    // any gain change (FG-2); the toggle shows it at once.
+                                                    if gain_enables {
+                                                        let _ = enabled_sig.try_set(true);
+                                                    }
                                                     let _ = curve_trigger.try_update(|n| *n += 1);
                                                 })
                                                 on_drag_start=Callback::new(move |_: ()| {
@@ -1049,6 +1067,15 @@ fn EqSlider(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_gain_change_switches_on_every_band_but_the_high_pass() {
+        // The server's rule (view::apply_band, FG-2), shown by the toggle.
+        assert!(!gain_switches_on("highpass"));
+        for ty in ["lowshelf", "band", "highshelf"] {
+            assert!(gain_switches_on(ty), "{ty}");
+        }
+    }
 
     #[test]
     fn test_display_order() {
