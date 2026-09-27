@@ -2668,6 +2668,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "triple_buffer",
+ "widestring",
 ]
 
 [[package]]

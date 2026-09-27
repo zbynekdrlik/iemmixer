@@ -1,13 +1,18 @@
 //! Local-socket plumbing (program spec §2.3, I1; design note §3.6): names,
 //! listeners, and connections shared between one reader thread and the
-//! writing control or media thread. Linux (CI) uses Unix socket files; Windows
-//! uses named pipes (S6 adds reject-remote and the current-user DACL).
+//! writing control or media thread. Linux (CI) uses Unix socket files;
+//! Windows uses named pipes (S6 design note §4): a protected DACL for the
+//! logged-on user and SYSTEM ([`sddl_for`]), remote clients refused, and the
+//! first-instance flag, so a second listener on a held name fails ("pipe name
+//! taken").
 //!
 //! A connection is an `Arc<Stream>` (`&Stream` reads and writes); its reader
-//! polls with a short receive timeout so that dropping the connection (the
-//! `closed` flag) ends the reader and closes the socket for the peer.
+//! never waits long in a read ([`polled`]), so that dropping the connection
+//! (the `closed` flag) ends the reader and closes the socket for the peer,
+//! and its writers never wait long for the peer ([`Conn::writer`]): a peer
+//! that takes nothing for [`SEND_TIMEOUT`] fails the write and is dropped.
 
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -18,10 +23,30 @@ use interprocess::local_socket::{
     Listener, ListenerNonblockingMode, ListenerOptions, Name, Stream,
 };
 
-/// How often a blocked reader looks at its `closed` flag.
+#[cfg(windows)]
+mod win;
+
+/// The receive timeout of a Unix stream: how long a read waits for data.
 pub const POLL: Duration = Duration::from_millis(50);
-/// A peer that does not take a message within this long is dropped.
+/// How long a reader rests after a read found nothing, before it looks at
+/// its `closed` flag and reads again (Windows pipes have no receive timeout:
+/// their reads return at once, see [`polled`]).
+pub const IDLE: Duration = Duration::from_millis(10);
+/// A peer that does not take a message within this long is dropped: the
+/// Unix send timeout, and the bound of a Windows pipe write ([`bounded`]).
 pub const SEND_TIMEOUT: Duration = Duration::from_secs(1);
+/// How often a Windows listener tries again for a name that is still taken
+/// ([`until_free`]), `TAKEN_PAUSE` apart: about 2 s in all. A pipe name
+/// lives while any end of any of its instances is open, so a client that
+/// still holds a dead engine's stream keeps the name from its successor
+/// until it drops that stream.
+#[cfg_attr(not(windows), allow(dead_code))]
+const TAKEN_TRIES: u32 = 40;
+/// The rest before each of those tries.
+#[cfg_attr(not(windows), allow(dead_code))]
+const TAKEN_PAUSE: Duration = Duration::from_millis(50);
+/// SDDL's name for the SYSTEM account (`S-1-5-18`).
+const SYSTEM: &str = "SY";
 
 /// A socket path on Unix, a pipe name elsewhere.
 fn name(s: String) -> io::Result<Name<'static>> {
@@ -47,14 +72,164 @@ pub fn media_name(pipe: &str) -> io::Result<Name<'static>> {
     name(format!("{pipe}.media"))
 }
 
-/// A listener whose `accept` does not block (the acceptor polls a stop flag);
-/// a leftover socket file of a previous run is replaced.
+/// A listener whose `accept` does not block (the acceptor polls a stop flag).
+/// Unix: a leftover socket file of a previous run is replaced. Windows: the
+/// pipe admits only the logged-on user and SYSTEM ([`sddl_for`]) and no
+/// remote client, and a name that stays taken for about 2 s
+/// (`TAKEN_TRIES`) fails with `AddrInUse`, "pipe name taken" (the engine
+/// exits 1): another listener holds it, or a client still holds a stream of
+/// a listener that has gone.
 pub fn listen(name: Name<'_>) -> io::Result<Listener> {
+    #[cfg(windows)]
+    {
+        until_free(TAKEN_TRIES, TAKEN_PAUSE, || {
+            win::listen(listener_options(name.borrow()))
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        listener_options(name).create_sync()
+    }
+}
+
+fn listener_options(name: Name<'_>) -> ListenerOptions<'_> {
     ListenerOptions::new()
         .name(name)
         .nonblocking(ListenerNonblockingMode::Accept)
         .try_overwrite(true)
-        .create_sync()
+}
+
+/// Runs `attempt` until it gives anything but `AddrInUse`, at most
+/// `1 + tries` times, resting `pause` before each retry; the last answer
+/// stands.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn until_free<T>(
+    tries: u32,
+    pause: Duration,
+    mut attempt: impl FnMut() -> io::Result<T>,
+) -> io::Result<T> {
+    let mut left = tries;
+    loop {
+        match attempt() {
+            Err(e) if e.kind() == io::ErrorKind::AddrInUse && left > 0 => {
+                left -= 1;
+                std::thread::sleep(pause);
+            }
+            answer => return answer,
+        }
+    }
+}
+
+/// The pipes' security descriptor (S3 hand-off, program spec §2.3): a
+/// protected DACL that allows the user `user_sid` and SYSTEM, nobody else.
+pub fn sddl_for(user_sid: &str) -> String {
+    format!("D:P(A;;GA;;;{user_sid})(A;;GA;;;{SYSTEM})")
+}
+
+/// The accounts of a DACL written as SDDL (`D:<flags>(ace)(ace)…`), in
+/// order, when every ACE is a plain allow ACE (`A`, six fields); `None` for
+/// anything else: a deny, object or conditional ACE, an empty or null DACL,
+/// an owner or SACL part in the text.
+pub fn dacl_sids(sddl: &str) -> Option<Vec<&str>> {
+    let dacl = sddl.strip_prefix("D:")?;
+    let aces = dacl.get(dacl.find('(')?..)?;
+    let aces = aces.strip_prefix('(')?.strip_suffix(')')?;
+    aces.split(")(")
+        .map(|ace| match ace.split(';').collect::<Vec<_>>().as_slice() {
+            ["A", _, _, _, _, account] => Some(*account),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Whether a pipe's DACL (as `iem_win::token::pipe_sddl` reads it back)
+/// admits `user` and nobody but `user` and SYSTEM (HIL, the pipe tests).
+/// `user` is written the way SDDL writes it (`iem_win::token::sddl_sid`).
+pub fn sddl_is_private(sddl: &str, user: &str) -> bool {
+    dacl_sids(sddl).is_some_and(|accounts| {
+        accounts.contains(&user)
+            && accounts
+                .iter()
+                .all(|&account| account == user || account == SYSTEM)
+    })
+}
+
+/// Windows' answer to a listener whose name another listener holds: the
+/// first instance exists (`ERROR_ACCESS_DENIED` under
+/// `FILE_FLAG_FIRST_PIPE_INSTANCE`) or every instance is busy
+/// (`ERROR_PIPE_BUSY`). Other errors pass unchanged.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn name_taken(e: io::Error) -> io::Error {
+    const ERROR_ACCESS_DENIED: i32 = 5;
+    const ERROR_PIPE_BUSY: i32 = 231;
+    match e.raw_os_error() {
+        Some(ERROR_ACCESS_DENIED | ERROR_PIPE_BUSY) => {
+            io::Error::new(io::ErrorKind::AddrInUse, format!("pipe name taken ({e})"))
+        }
+        _ => e,
+    }
+}
+
+/// Whether a pipe error means that the other end has gone.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn gone(e: &io::Error) -> bool {
+    const ERROR_BROKEN_PIPE: i32 = 109;
+    const ERROR_NO_DATA: i32 = 232;
+    const ERROR_PIPE_NOT_CONNECTED: i32 = 233;
+    matches!(
+        e.raw_os_error(),
+        Some(ERROR_BROKEN_PIPE | ERROR_NO_DATA | ERROR_PIPE_NOT_CONNECTED)
+    )
+}
+
+/// One read of a Windows pipe that peeks first (`waiting` = the bytes the
+/// pipe holds): nothing waiting is `WouldBlock`, as a Unix receive timeout
+/// reports it; a peer that has gone is the end of the stream (`Ok(0)`);
+/// only when bytes wait does `read` run, so it returns at once.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn polled_read(
+    waiting: io::Result<u32>,
+    read: impl FnOnce() -> io::Result<usize>,
+) -> io::Result<usize> {
+    match waiting {
+        Ok(0) => Err(io::ErrorKind::WouldBlock.into()),
+        Ok(_) => read(),
+        Err(e) if gone(&e) => Ok(0),
+        Err(e) => Err(e),
+    }
+}
+
+/// A stream's reading side that never waits long: a Unix stream waits at
+/// most its receive timeout ([`POLL`], set by [`Conn::new`]) and then
+/// reports `WouldBlock`; a Windows pipe has no timeouts, so it is read only
+/// after a peek shows waiting bytes, else `WouldBlock` at once
+/// (`polled_read`). [`Framer::fill`] turns `WouldBlock` into "nothing yet".
+pub fn polled(stream: &Stream) -> impl Read + '_ {
+    #[cfg(windows)]
+    {
+        win::Polled(stream)
+    }
+    #[cfg(not(windows))]
+    {
+        stream
+    }
+}
+
+/// A stream's writing side that never waits long for the peer: a Unix
+/// stream waits at most its send timeout ([`SEND_TIMEOUT`], set by
+/// [`Conn::new`]); a Windows pipe has no timeouts, so each write is issued
+/// overlapped and cancelled when the peer has not taken it within
+/// [`SEND_TIMEOUT`] (`iem_win::pipe::write_within`). Either way the write
+/// then fails, and the caller drops the peer.
+pub fn bounded(stream: &Stream) -> impl Write + '_ {
+    #[cfg(windows)]
+    {
+        win::Bounded(stream)
+    }
+    #[cfg(not(windows))]
+    {
+        stream
+    }
 }
 
 /// One accepted connection.
@@ -65,8 +240,10 @@ pub struct Conn {
 }
 
 impl Conn {
-    /// Prepares an accepted stream: blocking reads with a poll timeout,
-    /// bounded writes. Timeouts a platform refuses are left at their default.
+    /// Prepares a stream: blocking reads with a poll timeout, bounded writes
+    /// (Unix). Windows pipes refuse both timeouts, which stay at their
+    /// default: their reads go through [`polled`], their writes through
+    /// [`bounded`].
     pub fn new(stream: Stream) -> Self {
         let _ = stream.set_nonblocking(false);
         let _ = stream.set_recv_timeout(Some(POLL));
@@ -83,6 +260,13 @@ impl Conn {
 
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
+    }
+
+    /// The connection's writing side ([`bounded`]): always write through it,
+    /// never through `&*stream`, whose Windows writes wait for the peer
+    /// without a bound.
+    pub fn writer(&self) -> impl Write + '_ {
+        bounded(&self.stream)
     }
 }
 
@@ -139,8 +323,9 @@ impl Framer {
         })
     }
 
-    /// Reads what is there: `Ok(false)` when the read timed out, `Closed`
-    /// when the peer is gone.
+    /// Reads what is there: `Ok(false)` when nothing came (the read timed
+    /// out, or a peek found nothing waiting: [`polled`]), `Closed` when the
+    /// peer is gone.
     pub fn fill(&mut self, mut r: impl Read) -> Result<bool, FrameError> {
         let mut chunk = [0u8; 16 * 1024];
         match r.read(&mut chunk) {
@@ -179,8 +364,10 @@ pub fn read_loop<T>(
         if conn.is_closed() {
             return FrameError::Closed;
         }
-        if let Err(e) = framer.fill(&*conn.stream) {
-            return e;
+        match framer.fill(polled(&conn.stream)) {
+            Ok(true) => {}
+            Ok(false) => std::thread::sleep(IDLE),
+            Err(e) => return e,
         }
     }
 }
@@ -277,5 +464,192 @@ mod tests {
         let m = media_name("/tmp/iem-test.sock").unwrap();
         assert_ne!(c, m);
         assert_eq!(m, media_name("/tmp/iem-test.sock").unwrap());
+    }
+
+    const USER: &str = "S-1-5-21-1-2-3-1001";
+
+    #[test]
+    fn sddl_for_allows_the_user_and_system_in_a_protected_dacl() {
+        assert_eq!(
+            sddl_for(USER),
+            "D:P(A;;GA;;;S-1-5-21-1-2-3-1001)(A;;GA;;;SY)"
+        );
+    }
+
+    #[test]
+    fn sddl_dacl_sids_lists_the_accounts_of_plain_allow_aces() {
+        assert_eq!(
+            dacl_sids("D:P(A;;FA;;;S-1-5-21-1-2-3-1001)(A;;FA;;;SY)"),
+            Some(vec![USER, "SY"])
+        );
+        assert_eq!(dacl_sids(&sddl_for(USER)), Some(vec![USER, "SY"]));
+        assert_eq!(dacl_sids("D:PAI(A;ID;0x1f01ff;;;LA)"), Some(vec!["LA"]));
+        assert_eq!(dacl_sids("D:(A;;GA;;;WD)"), Some(vec!["WD"]));
+        for other in [
+            "",
+            "D:",
+            "D:P",
+            "D:NO_ACCESS_CONTROL",
+            "O:SYD:P(A;;FA;;;SY)",
+            "S:(A;;FA;;;SY)",
+            "D:P(A;;FA;;;SY)S:(ML;;NW;;;LW)",
+            "D:P(D;;FA;;;WD)(A;;FA;;;SY)",
+            "D:P(A;;FA;;;SY)(D;;FA;;;WD)",
+            "D:P(AU;;FA;;;SY)",
+            "D:P(A;;FA;;SY)",
+            "D:P(A;;FA;;;SY;(x))",
+            "D:P(A;;FA;;;SY",
+            "D:PA;;FA;;;SY)",
+        ] {
+            assert_eq!(dacl_sids(other), None, "{other}");
+        }
+    }
+
+    #[test]
+    fn sddl_is_private_admits_the_user_and_at_most_system() {
+        let read_back = "D:P(A;;FA;;;S-1-5-21-1-2-3-1001)(A;;FA;;;SY)";
+        assert!(sddl_is_private(read_back, USER));
+        assert!(sddl_is_private(&sddl_for(USER), USER));
+        assert!(sddl_is_private("D:P(A;;FA;;;S-1-5-21-1-2-3-1001)", USER));
+        assert!(sddl_is_private("D:P(A;;FA;;;LA)(A;;FA;;;SY)", "LA"));
+        assert!(
+            !sddl_is_private("D:P(A;;FA;;;SY)", USER),
+            "without the user"
+        );
+        assert!(
+            !sddl_is_private(read_back, "S-1-5-21-1-2-3-1002"),
+            "another user's pipe"
+        );
+        assert!(
+            !sddl_is_private(&format!("{read_back}(A;;FA;;;WD)"), USER),
+            "everyone"
+        );
+        assert!(
+            !sddl_is_private("D:P(A;;FA;;;BA)(A;;FA;;;S-1-5-21-1-2-3-1001)", USER),
+            "administrators"
+        );
+        assert!(
+            !sddl_is_private("D:P(D;;FA;;;WD)(A;;FA;;;S-1-5-21-1-2-3-1001)", USER),
+            "a deny ACE is not this pipe's DACL"
+        );
+        assert!(!sddl_is_private("D:NO_ACCESS_CONTROL", USER), "a null DACL");
+        assert!(!sddl_is_private("D:P", USER), "an empty DACL");
+    }
+
+    #[test]
+    fn a_held_pipe_name_is_reported_as_taken() {
+        for code in [5, 231] {
+            let e = name_taken(io::Error::from_raw_os_error(code));
+            assert_eq!(e.kind(), io::ErrorKind::AddrInUse, "{code}");
+            assert_eq!(e.raw_os_error(), None, "{code}");
+            assert!(e.to_string().starts_with("pipe name taken ("), "{e}");
+        }
+        for code in [2, 4, 6, 230, 232] {
+            let e = name_taken(io::Error::from_raw_os_error(code));
+            assert_eq!(e.raw_os_error(), Some(code));
+        }
+        let other = name_taken(io::Error::other("no code"));
+        assert_eq!(
+            (other.kind(), other.raw_os_error()),
+            (io::ErrorKind::Other, None)
+        );
+    }
+
+    #[test]
+    fn a_taken_name_is_tried_again_at_most_tries_times() {
+        let taken = || io::Error::from(io::ErrorKind::AddrInUse);
+        // Free after two retries.
+        let mut calls = 0u32;
+        let got = until_free(2, Duration::ZERO, || {
+            calls += 1;
+            if calls <= 2 { Err(taken()) } else { Ok(calls) }
+        });
+        assert_eq!((got.unwrap(), calls), (3, 3));
+        // Still taken after the last retry: that answer stands.
+        let mut calls = 0u32;
+        let got = until_free(2, Duration::ZERO, || {
+            calls += 1;
+            if calls <= 3 { Err(taken()) } else { Ok(calls) }
+        });
+        assert_eq!(got.unwrap_err().kind(), io::ErrorKind::AddrInUse);
+        assert_eq!(calls, 3);
+        let mut calls = 0u32;
+        let got = until_free(0, Duration::ZERO, || {
+            calls += 1;
+            if calls == 1 { Err(taken()) } else { Ok(calls) }
+        });
+        assert_eq!(got.unwrap_err().kind(), io::ErrorKind::AddrInUse);
+        assert_eq!(calls, 1, "no retry");
+        // Any other answer is final at once.
+        let mut calls = 0u32;
+        let got = until_free(2, Duration::ZERO, || {
+            calls += 1;
+            if calls == 1 {
+                Err(io::Error::from(io::ErrorKind::PermissionDenied))
+            } else {
+                Ok(calls)
+            }
+        });
+        assert_eq!(got.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(calls, 1);
+        let mut calls = 0u32;
+        let got = until_free(2, Duration::ZERO, || {
+            calls += 1;
+            Ok::<_, io::Error>(calls)
+        });
+        assert_eq!((got.unwrap(), calls), (1, 1));
+    }
+
+    #[test]
+    fn a_windows_listener_waits_about_two_seconds_for_a_taken_name() {
+        assert_eq!(
+            TAKEN_PAUSE * TAKEN_TRIES,
+            Duration::from_secs(2),
+            "engine rule and the pipe tests rely on it"
+        );
+    }
+
+    #[test]
+    fn a_polled_read_reads_only_what_waits() {
+        let never = || -> io::Result<usize> { panic!("nothing waits: no read") };
+        assert_eq!(
+            polled_read(Ok(0), never).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert_eq!(polled_read(Ok(1), || Ok(7)).unwrap(), 7);
+        assert_eq!(polled_read(Ok(u32::MAX), || Ok(3)).unwrap(), 3);
+        let failed = polled_read(Ok(4), || Err(io::Error::from_raw_os_error(6)));
+        assert_eq!(failed.unwrap_err().raw_os_error(), Some(6));
+        for code in [109, 232, 233] {
+            let r = polled_read(Err(io::Error::from_raw_os_error(code)), never);
+            assert_eq!(r.unwrap(), 0, "the peer has gone: {code}");
+        }
+        for code in [5, 108, 110, 231, 234] {
+            let r = polled_read(Err(io::Error::from_raw_os_error(code)), never);
+            assert_eq!(r.unwrap_err().raw_os_error(), Some(code));
+        }
+        let r = polled_read(Err(io::Error::other("no code")), never);
+        assert_eq!(r.unwrap_err().kind(), io::ErrorKind::Other);
+    }
+
+    #[test]
+    fn nothing_waiting_is_not_an_error_for_the_framer() {
+        // A peek that finds nothing reads as a timeout; a gone peer as the
+        // end of the stream.
+        let mut f = Framer::new();
+        let empty = Probe(Some(Ok(0)));
+        assert!(!f.fill(empty).unwrap());
+        let peer_gone = Probe(Some(Err(io::Error::from_raw_os_error(109))));
+        assert!(matches!(f.fill(peer_gone), Err(FrameError::Closed)));
+    }
+
+    /// A reader that answers one read like a polled Windows pipe.
+    struct Probe(Option<io::Result<u32>>);
+
+    impl Read for Probe {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let waiting = self.0.take().expect("one read");
+            polled_read(waiting, || Ok(buf.len()))
+        }
     }
 }

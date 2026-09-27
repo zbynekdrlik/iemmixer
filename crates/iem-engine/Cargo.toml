@@ -28,6 +28,14 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 triple_buffer = "9"
 
+[target.'cfg(windows)'.dependencies]
+# The pipes (S6): the logged-on user's SID for their DACL, and the peek that
+# keeps a reader from waiting in a read.
+iem-win = { path = "../iem-win" }
+# SDDL text for interprocess's SecurityDescriptor (already in the closure
+# through interprocess, at the same version).
+widestring = "1"
+
 [dev-dependencies]
 assert_no_alloc = { version = "1.1.2", default-features = false, features = ["warn_debug", "warn_release"] }
 tempfile = "3"

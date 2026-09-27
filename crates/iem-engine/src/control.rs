@@ -264,12 +264,15 @@ impl Control {
         }
     }
 
+    /// A peer that takes nothing for `pipe::SEND_TIMEOUT` fails the write
+    /// (`Conn::writer`) and is dropped, so a stalled client never holds the
+    /// control thread for longer.
     fn write(&mut self, id: u64, bytes: &[u8]) {
         let failed = match self.peers.get(&id) {
-            Some(p) => (&*p.conn.stream)
-                .write_all(bytes)
-                .and_then(|()| (&*p.conn.stream).flush())
-                .err(),
+            Some(p) => {
+                let mut w = p.conn.writer();
+                w.write_all(bytes).and_then(|()| w.flush()).err()
+            }
             None => return,
         };
         if let Some(e) = failed {
@@ -996,8 +999,9 @@ mod tests {
         assert_eq!(r.c.alarms[1].detail, "sanitiser trips: 3");
     }
 
-    /// Connections need a socket; the pipe tests run on Linux only (engine
-    /// rule: no timeouts on Windows named pipes).
+    /// Connections need a socket pair. Unix only: the harness's client
+    /// reads with a socket receive timeout, which Windows pipes do not have;
+    /// `tests/pipes.rs` runs the engine's pipes on Windows.
     #[cfg(unix)]
     mod peers {
         use super::*;
