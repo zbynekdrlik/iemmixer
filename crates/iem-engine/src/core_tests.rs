@@ -729,6 +729,44 @@ fn the_hil_test_signal_needs_the_flag_stays_under_the_cap_and_names_known_output
     assert!(matches!(plain.rt[0], RtOp::TestSignal { i: 2, .. }));
 }
 
+/// While a HIL test signal runs (its TTL, S6 design note §4) a plain test
+/// signal may not replace it: that would lift the card mask and sound on
+/// every TX that hears the input. A stop ends it as usual, and after its end
+/// a plain one starts again (lane A review).
+#[test]
+fn a_plain_test_signal_never_lifts_a_running_hil_mask() {
+    let mut c = core(Flags {
+        test_signal: true,
+        fault_injection: false,
+    });
+    let hil = Cmd::HilTestSignal {
+        input: input("mic3"),
+        hz: 1000.0,
+        dbfs: -30.0,
+        ttl_s: 0.5,
+        card_tx: vec![72],
+    };
+    let plain = Cmd::StartTestSignal {
+        input: input("mic2"),
+        hz: 500.0,
+        dbfs: -30.0,
+        ttl_s: 0.5,
+    };
+    c.apply(&hil).unwrap();
+    assert_eq!(code(c.apply(&plain)), ErrCode::Forbidden);
+    assert_eq!(
+        c.transient().test_signal.map(|t| t.input),
+        Some(input("mic3"))
+    );
+    // The end of its TTL (the control loop's) frees it.
+    c.end_test_signal();
+    assert!(c.apply(&plain).is_ok());
+    // A HIL signal replaces a plain one; a stop frees it too.
+    c.apply(&hil).unwrap();
+    c.apply(&Cmd::StopTestSignal).unwrap();
+    assert!(c.apply(&plain).is_ok());
+}
+
 #[test]
 fn a_hil_output_beyond_the_mask_is_refused() {
     // 129 mono mixes and a stereo engineer: TX 1…129, 130/131.
