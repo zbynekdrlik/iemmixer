@@ -142,7 +142,7 @@ fn input_name(view: &SiteView, id: &InputId) -> String {
 fn not_in_backup(d: &mut Diff, view: &SiteView, current: &MixState, backup: &MixState) {
     let unknown_input = |i: &InputId| !backup.inputs.contains_key(i);
     let unknown_mix = |m: &MixId| !backup.mixes.contains_key(m);
-    for id in current.inputs.keys().filter(|i| unknown_input(*i)) {
+    for id in current.inputs.keys().filter(|i| unknown_input(i)) {
         d.keep(RestoreCategory::Input, input_name(view, id));
     }
     for (mix, cur) in &current.mixes {
@@ -154,7 +154,7 @@ fn not_in_backup(d: &mut Diff, view: &SiteView, current: &MixState, backup: &Mix
         for id in cur
             .inputs
             .keys()
-            .filter(|i| !old.inputs.contains_key(*i) && !unknown_input(*i))
+            .filter(|i| !old.inputs.contains_key(*i) && !unknown_input(i))
         {
             d.keep(
                 RestoreCategory::Level,
@@ -164,7 +164,7 @@ fn not_in_backup(d: &mut Diff, view: &SiteView, current: &MixState, backup: &Mix
         for m in cur
             .mixes
             .keys()
-            .filter(|m| !old.mixes.contains_key(*m) && !unknown_mix(*m))
+            .filter(|m| !old.mixes.contains_key(*m) && !unknown_mix(m))
         {
             d.keep(
                 RestoreCategory::Level,
