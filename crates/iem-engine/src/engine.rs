@@ -977,7 +977,10 @@ mod tests {
             format!("iem-engine-asio-test-{}", std::process::id()),
         );
         cfg.backend = Backend::Asio;
-        let e = run_bounded(cfg).unwrap_err();
+        // The first open scans every process's modules (I3) before the
+        // driver list; a hung driver call is refused after 15 s
+        // (`iem_audio_io::asio`'s open bound), so the bound is above it.
+        let e = run_bounded_for(cfg, Duration::from_secs(20)).unwrap_err();
         assert!(matches!(&e, EngineError::Card(_)), "{e}");
     }
 
@@ -1058,13 +1061,15 @@ mod tests {
 
     /// `run` in a thread, bounded: a refused start must return at once.
     fn run_bounded(cfg: RunConfig) -> Result<Exit, EngineError> {
+        run_bounded_for(cfg, Duration::from_secs(5))
+    }
+
+    /// `run` in a thread, refused within `limit`.
+    fn run_bounded_for(cfg: RunConfig, limit: Duration) -> Result<Exit, EngineError> {
         let handle = std::thread::spawn(move || run(cfg));
         let start = std::time::Instant::now();
         while !handle.is_finished() {
-            assert!(
-                start.elapsed() < Duration::from_secs(5),
-                "run did not refuse"
-            );
+            assert!(start.elapsed() < limit, "run did not refuse");
             std::thread::sleep(Duration::from_millis(10));
         }
         handle.join().unwrap()
