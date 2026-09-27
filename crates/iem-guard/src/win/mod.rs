@@ -25,16 +25,16 @@ mod web;
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use iem_win::window::{self, SessionEndWindow};
 use tracing::{info, warn};
 
 use crate::cancel::Cancel;
+use crate::effects::engine::Quiet;
 use crate::handover::{AppExit, ReaperFacts};
 use crate::pc::{self, Audience, EngineSeen, Images, Kid, Pc, Procs, R, Status, StepError};
 use crate::plan::{Facts, Health, Mode};
@@ -58,6 +58,9 @@ pub struct WinPc {
     sup: Option<engine::Supervisor>,
     /// The engine pid whose control pipe's DACL was read, and the verdict.
     dacl: Option<(u32, bool)>,
+    /// The band's quiet as the supervisor connections saw it: one for the
+    /// guard's life, fed by every connection and resumed by each new one.
+    quiet: Arc<Mutex<Quiet>>,
     tray_quit: Option<TrayQuit>,
 }
 
@@ -76,6 +79,7 @@ impl WinPc {
             http: ureq::Agent::new_with_config(config),
             sup: None,
             dacl: None,
+            quiet: Arc::new(Mutex::new(Quiet::new(Instant::now()))),
             tray_quit: None,
         }
     }

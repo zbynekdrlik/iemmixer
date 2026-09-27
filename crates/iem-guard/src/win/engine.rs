@@ -69,12 +69,13 @@ struct Inbox {
     replies: Vec<(u64, Option<String>)>,
     released: Option<String>,
     peaks: StagePeaks,
-    quiet: Quiet,
+    /// The guard's band quiet (`WinPc::quiet`), shared by every connection.
+    quiet: Arc<Mutex<Quiet>>,
     closed: Option<String>,
 }
 
 impl Inbox {
-    fn new(stage_ids: Vec<String>, now: Instant) -> Self {
+    fn new(stage_ids: Vec<String>, quiet: Arc<Mutex<Quiet>>) -> Self {
         Self {
             stage_ids,
             build: None,
@@ -86,7 +87,7 @@ impl Inbox {
             replies: Vec::new(),
             released: None,
             peaks: StagePeaks::default(),
-            quiet: Quiet::new(now),
+            quiet,
             closed: None,
         }
     }
@@ -107,8 +108,7 @@ impl Inbox {
             }
             Msg::Meters { inputs } => {
                 self.peaks.observe(&inputs, &self.stage);
-                self.quiet
-                    .observe(proto::stage_max(&inputs, &self.stage), now);
+                lock(&self.quiet).observe(proto::stage_max(&inputs, &self.stage), now);
             }
             Msg::Reply { id, error } => {
                 self.replies.push((id, error));
@@ -142,8 +142,8 @@ impl Inbox {
     }
 }
 
-fn lock(inbox: &Mutex<Inbox>) -> MutexGuard<'_, Inbox> {
-    inbox.lock().unwrap_or_else(PoisonError::into_inner)
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// The reply to `id`, taken out of the inbox: `Some(None)` accepted,
@@ -194,12 +194,18 @@ fn connect_pipe(pipe: &str) -> io::Result<Stream> {
 }
 
 impl Supervisor {
-    /// One attempt, at most [`CONNECT_ATTEMPT`] on a busy pipe.
-    fn connect(pipe: &str, stage_ids: Vec<String>) -> Result<Self, String> {
+    /// One attempt, at most [`CONNECT_ATTEMPT`] on a busy pipe. The new
+    /// connection resumes the guard's band quiet and feeds it.
+    fn connect(
+        pipe: &str,
+        stage_ids: Vec<String>,
+        quiet: &Arc<Mutex<Quiet>>,
+    ) -> Result<Self, String> {
         let stream =
             connect_pipe(pipe).map_err(|e| format!("connecting to the engine's pipe: {e}"))?;
         let stream = Arc::new(stream);
-        let inbox = Arc::new(Mutex::new(Inbox::new(stage_ids, Instant::now())));
+        lock(quiet).resume(Instant::now());
+        let inbox = Arc::new(Mutex::new(Inbox::new(stage_ids, Arc::clone(quiet))));
         let (reader, shared) = (Arc::clone(&stream), Arc::clone(&inbox));
         let _reader = thread::Builder::new()
             .name("iemmixer-guard-supervisor".to_owned())
@@ -309,7 +315,7 @@ fn supervisor<'a>(pc: &'a mut WinPc, limit: Duration, c: &Cancel) -> R<&'a mut S
         pc.sup = None;
         let start = Instant::now();
         loop {
-            match Supervisor::connect(&pc.s.pc.engine_pipe, pc.s.stage_inputs.clone()) {
+            match Supervisor::connect(&pc.s.pc.engine_pipe, pc.s.stage_inputs.clone(), &pc.quiet) {
                 Ok(sup) => {
                     pc.sup = Some(sup);
                     break;
@@ -499,14 +505,16 @@ pub(super) fn stage_peaks(pc: &mut WinPc, seconds: u32, c: &Cancel) -> R<Vec<f64
 }
 
 /// How long the stage inputs have been below the band-activity level, as
-/// far as this connection saw (a new one starts from zero).
+/// far as the guard's supervisor connections saw (`WinPc::quiet`: a new
+/// connection resumes it).
 pub(super) fn quiet_for(pc: &mut WinPc) -> R<Duration> {
     let c = Cancel::default();
     let sup = supervisor(pc, CONNECT, &c)?;
     wait_inbox(sup, HELLO, &c, |i| i.topology.then_some(()))?;
     let inbox = lock(&sup.inbox);
     inbox.stage_known().map_err(StepError::Failed)?;
-    Ok(inbox.quiet.quiet_for(Instant::now()))
+    let quiet = lock(&inbox.quiet).quiet_for(Instant::now());
+    Ok(quiet)
 }
 
 /// The HIL test signal (design §4, §7): `HilTestSignal`, encoded only on
@@ -559,7 +567,8 @@ fn pipe_private(pipe: &str) -> Result<bool, String> {
 pub(super) fn seen(pc: &mut WinPc) -> Option<EngineSeen> {
     let pid = pc.kids.pid(Kid::Engine)?;
     if !pc.sup.as_ref().is_some_and(Supervisor::open) {
-        pc.sup = Supervisor::connect(&pc.s.pc.engine_pipe, pc.s.stage_inputs.clone()).ok();
+        pc.sup =
+            Supervisor::connect(&pc.s.pc.engine_pipe, pc.s.stage_inputs.clone(), &pc.quiet).ok();
     }
     let sup = pc.sup.as_ref()?;
     let status = {
@@ -633,14 +642,14 @@ pub(super) fn install_site(pc: &WinPc, path: &str, c: &Cancel) -> R<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::mpsc;
+    use std::sync::{Arc, Mutex, mpsc};
     use std::thread;
     use std::time::{Duration, Instant};
 
     use interprocess::local_socket::prelude::*;
     use interprocess::local_socket::{GenericNamespaced, ListenerOptions, Stream};
 
-    use super::Supervisor;
+    use super::{Quiet, Supervisor};
 
     /// An engine pipe with no free instance (its acceptor stuck): an
     /// attempt to connect as its supervisor fails within a bound instead of
@@ -650,16 +659,17 @@ mod tests {
     #[test]
     fn a_busy_engine_pipe_fails_the_connect_within_a_bound() {
         let pipe = format!("iemmixer-guard-test-busy-{}", std::process::id());
+        let quiet = Arc::new(Mutex::new(Quiet::new(Instant::now())));
         let name = || pipe.clone().to_ns_name::<GenericNamespaced>().unwrap();
         let listener = ListenerOptions::new().name(name()).create_sync().unwrap();
         // The listener's one instance is taken and never accepted: the next
         // client finds no free instance (ERROR_PIPE_BUSY).
         let first = Stream::connect(name()).unwrap();
         let (tx, rx) = mpsc::channel();
-        let busy = pipe.clone();
+        let (busy, shared) = (pipe.clone(), Arc::clone(&quiet));
         thread::spawn(move || {
             let start = Instant::now();
-            let r = Supervisor::connect(&busy, Vec::new()).map(|_| ());
+            let r = Supervisor::connect(&busy, Vec::new(), &shared).map(|_| ());
             let _ = tx.send((r, start.elapsed()));
         });
         let (r, took) = rx
@@ -671,7 +681,7 @@ mod tests {
         drop(listener);
         // No pipe at all fails at once.
         let start = Instant::now();
-        assert!(Supervisor::connect(&format!("{pipe}-none"), Vec::new()).is_err());
+        assert!(Supervisor::connect(&format!("{pipe}-none"), Vec::new(), &quiet).is_err());
         assert!(start.elapsed() < Duration::from_secs(2));
     }
 }

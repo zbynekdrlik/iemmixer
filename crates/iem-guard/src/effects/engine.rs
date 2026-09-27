@@ -401,7 +401,8 @@ impl StagePeaks {
 }
 
 /// How long the stage has been quiet, from the meter frames the guard saw
-/// (a HIL job needs 5 min, design §7).
+/// (a HIL job needs 5 min, design §7). One for the guard's life: every
+/// supervisor connection feeds it and resumes it when it connects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Quiet {
     since: Instant,
@@ -411,6 +412,12 @@ impl Quiet {
     /// Quiet from `now` on: nothing earlier was seen.
     pub fn new(now: Instant) -> Self {
         Self { since: now }
+    }
+
+    /// A new supervisor connection at `now` (an engine start, a reconnect):
+    /// the quiet starts again.
+    pub fn resume(&mut self, now: Instant) {
+        self.since = now;
     }
 
     /// One frame's loudest stage peak (dBFS) at `now`.
