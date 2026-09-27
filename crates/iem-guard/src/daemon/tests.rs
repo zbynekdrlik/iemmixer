@@ -1008,24 +1008,27 @@ fn await_end_answers_when_the_switch_ended() {
 }
 
 #[test]
-fn the_tray_quits_only_with_a_subscriber() {
+fn a_tray_quit_waits_for_the_next_subscriber() {
     let shared = Shared::new(Cancel::default());
-    assert_eq!(
-        shared.tray_quit(),
-        Err("the tray is not subscribed to the guard".to_owned())
-    );
+    // Without a subscriber the quit waits: the tray may be in its 2 s retry.
+    assert_eq!(shared.tray_quit(), Ok(()));
+    assert!(shared.take_tray_quit());
+    assert!(!shared.take_tray_quit(), "a quit is delivered once");
     shared.add_subscriber();
     assert_eq!(shared.tray_quit(), Ok(()));
-    assert_eq!(shared.view().tray_quits, 1);
-    let seen = (shared.view().version, 0);
+    assert_eq!(shared.view().tray_quits, 2);
+    // It wakes the subscriber at once.
+    let seen = (shared.view().version, 1);
     let t = Instant::now();
     let v = shared.wait_change(seen, Duration::from_secs(5));
     assert!(t.elapsed() < Duration::from_secs(1));
-    assert_eq!(v.tray_quits, 1);
+    assert_eq!(v.tray_quits, 2);
+    // A tray start forgets a quit no tray took.
+    shared.clear_tray_quit();
+    assert!(!shared.take_tray_quit());
     shared.drop_subscriber();
     shared.drop_subscriber();
     assert_eq!(shared.view().subscribers, 0);
-    assert!(shared.tray_quit().is_err());
     // No change: the wait ends at its limit.
     let v = shared.view();
     let t = Instant::now();
