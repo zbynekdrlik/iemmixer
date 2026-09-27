@@ -121,6 +121,11 @@ pub struct Config {
     /// The engine's topology table (`[engine]`): read by `iem-engine` only.
     #[serde(default, skip_serializing)]
     pub engine: Option<serde::de::IgnoredAny>,
+
+    /// The engine's ASIO card (`[card]`, S6): read by `iem-engine` and the
+    /// guard only.
+    #[serde(default, skip_serializing)]
+    pub card: Option<serde::de::IgnoredAny>,
 }
 
 /// A member of the band (or the engineer): the id is the URL, the login
@@ -242,6 +247,7 @@ impl Default for Config {
             backup_retention_days: default_backup_retention_days(),
             tunnel_ready_url: default_tunnel_ready_url(),
             engine: None,
+            card: None,
         }
     }
 }
@@ -538,6 +544,8 @@ mod tests {
         assert_eq!(site.https_domain.as_deref(), Some("mixer.example.org"));
         assert!(site.engine.is_some(), "the [engine] table is accepted");
         assert!(Config::default().engine.is_none());
+        assert!(site.card.is_some(), "the [card] table is accepted");
+        assert!(Config::default().card.is_none());
         assert_eq!(
             site.member("engineer").map(|m| m.mix.as_str()),
             Some("engineer")

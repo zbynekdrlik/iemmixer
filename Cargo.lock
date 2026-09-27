@@ -2617,6 +2617,7 @@ version = "2.0.0-dev.9"
 dependencies = [
  "assert_no_alloc",
  "azo",
+ "iem-win",
  "serde_json",
  "windows-sys 0.61.2",
 ]
@@ -2655,6 +2656,7 @@ dependencies = [
  "iem-dsp",
  "iem-engine-proto",
  "iem-limiter-mga",
+ "iem-win",
  "interprocess",
  "rtrb",
  "serde",

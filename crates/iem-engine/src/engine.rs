@@ -1,13 +1,16 @@
 //! Engine start-up and the offline renderer (design note §1, §3.7): load the
-//! site and the state, start the backend, open the pipes, run the control
-//! loop; or render a WAV file through the processor with `Offline`.
+//! site and the state, start the backend (NullRt, or on Windows the ASIO
+//! card of the site's `[card]` table, S6), open the pipes, run the control
+//! loop; or render a WAV file through the processor with `Offline`; or, S6,
+//! check a site (`check-site`) and listen to the stage before a switch
+//! (`interlock`, Windows).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use iem_audio_io::{InputSignal, NullRt, NullRtConfig, Offline, StreamStats, wav};
 use iem_engine_proto::media::stream;
@@ -15,16 +18,18 @@ use iem_engine_proto::{Alarm, AlarmCode, MixState, write_media};
 use interprocess::local_socket::Listener;
 use interprocess::local_socket::traits::Listener as _;
 use rtrb::{Consumer, Producer};
+use serde::Serialize;
 use tracing::{error, info, warn};
 
 use crate::SAMPLE_RATE;
 use crate::control::{Control, CtlMsg, Driver, Exit, Parts, Settings};
 use crate::core::{Core, Flags};
+use crate::interlock::{self, Report, Verdict};
 use crate::media::{Frame, TalkbackFeed, TapFramer};
 use crate::persist::{Source, Store, decode};
 use crate::pipe::{Conn, Framer, control_name, listen, media_name, read_loop};
-use crate::rt::{Options, Processor, RtHandles};
-use crate::site::{SiteError, load};
+use crate::rt::{FADE_IN_MS, Options, Processor, RtHandles};
+use crate::site::{self, Card, SiteError, load, parse, parse_card, parse_stage};
 use crate::topology::compile;
 
 /// Largest block the engine accepts.
@@ -40,6 +45,20 @@ pub enum EngineError {
     Usage(String),
     #[error("the render faulted at frame {frame}: {message}")]
     Fault { frame: u64, message: String },
+    /// The card is refused (exit 3, S6 design note §4): a holder of the
+    /// driver module (I3), no such driver, a refused format or channel
+    /// map, the preference window, a measured period other than 32.
+    #[error("card refused: {0}")]
+    Card(String),
+}
+
+/// The audio backend of `run`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backend {
+    /// Paced real time with synthetic inputs (CI, E2E, soak).
+    NullRt,
+    /// The ASIO card of the site's `[card]` table (Windows).
+    Asio,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -52,6 +71,9 @@ pub struct RunConfig {
     pub signal: InputSignal,
     /// X2: solos clear this long after the controller left.
     pub solo_grace: Duration,
+    pub backend: Backend,
+    /// `--hold`: silent until the supervisor's `Arm` (S6).
+    pub hold: bool,
 }
 
 impl RunConfig {
@@ -64,6 +86,8 @@ impl RunConfig {
             flags: Flags::default(),
             signal: InputSignal::Silence,
             solo_grace: Duration::from_secs(10),
+            backend: Backend::NullRt,
+            hold: false,
         }
     }
 }
@@ -78,24 +102,46 @@ pub struct RenderArgs {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct InterlockArgs {
+    pub site: PathBuf,
+    pub seconds: u32,
+    /// The guard's pre-emption: the interlock stops once this file exists.
+    pub stop_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     Run(RunConfig),
     Render(RenderArgs),
+    Interlock(InterlockArgs),
+    CheckSite(PathBuf),
     Help,
 }
 
 pub const USAGE: &str = "\
 usage:
   iem-engine run --site <site.toml> --state-dir <dir> --pipe <name>
-                 [--block <frames>] [--sine <hz>] [--test-signal] [--fault-injection]
+                 [--backend nullrt|asio] [--hold] [--block <frames>] [--sine <hz>]
+                 [--test-signal] [--fault-injection]
   iem-engine render --site <site.toml> [--state <state.json>] --in <in.wav> --out <out.wav>
                  [--block <frames>]
+  iem-engine interlock --site <site.toml> [--seconds <1-600>] [--stop-file <path>]
+  iem-engine check-site --site <site.toml>
 
-run: the engine on the paced NullRt backend (96 kHz); --pipe is a socket path
-on Unix and a pipe name on Windows (the media pipe is <name>.media).
+run: the engine at 96 kHz on the paced NullRt backend (--block, --sine), or
+with --backend asio (Windows) on the card of the site's [card] table at its
+32 samples; --hold keeps every output silent until the supervisor's Arm.
+--pipe is a socket path on Unix and a pipe name on Windows (the media pipe
+is <name>.media).
 render: the input WAV must be 96 kHz with one channel per RX channel of the
 site; the output has one channel per TX channel.
-exit codes: 0 shut down, 1 i/o error, 2 usage or site error, 70 RT fault";
+interlock (Windows): opens the card, listens to the stage inputs ([activity]
+inputs, or every mics input) for --seconds (60) and writes nothing; prints
+{\"quiet\", \"stopped\", \"loudest\": [[channel, dBFS], ...]}; a --stop-file that
+appears ends it within 0.1 s.
+check-site: validates the site (I4) and prints its topology hash and counts.
+exit codes: 0 shut down (interlock: quiet), 1 i/o error, 2 usage or site
+error, 3 card refused, 5 stage activity, 6 interlock stopped, 70 RT fault";
 
 fn value<'a>(it: &mut impl Iterator<Item = &'a String>, flag: &str) -> Result<&'a String, String> {
     it.next().ok_or_else(|| format!("{flag} needs a value"))
@@ -108,19 +154,40 @@ fn block(v: &str) -> Result<usize, String> {
     }
 }
 
+fn backend(v: &str) -> Result<Backend, String> {
+    match v {
+        "nullrt" => Ok(Backend::NullRt),
+        "asio" => Ok(Backend::Asio),
+        _ => Err(format!("--backend is nullrt or asio, not {v:?}")),
+    }
+}
+
+fn seconds(v: &str) -> Result<u32, String> {
+    match v.parse::<u32>() {
+        Ok(n) if (1..=interlock::MAX_SECONDS).contains(&n) => Ok(n),
+        _ => Err(format!(
+            "--seconds must be 1…{}, not {v:?}",
+            interlock::MAX_SECONDS
+        )),
+    }
+}
+
 /// Parses the command line (without the program name).
 pub fn parse_args(args: &[String]) -> Result<Command, String> {
     let mut it = args.iter();
     let sub = match it.next().map(String::as_str) {
         None | Some("-h" | "--help" | "help") => return Ok(Command::Help),
-        Some(s @ ("run" | "render")) => s,
+        Some(s @ ("run" | "render" | "interlock" | "check-site")) => s,
         Some(other) => return Err(format!("unknown command {other:?}")),
     };
-    let mut paths: [Option<PathBuf>; 5] = Default::default();
+    let mut paths: [Option<PathBuf>; 6] = Default::default();
     let mut pipe = None;
-    let mut size = 32;
+    let mut size = None;
     let mut flags = Flags::default();
-    let mut signal = InputSignal::Silence;
+    let mut signal = None;
+    let mut chosen = Backend::NullRt;
+    let mut hold = false;
+    let mut listen_for = interlock::DEFAULT_SECONDS;
     while let Some(flag) = it.next() {
         let slot = match flag.as_str() {
             "--site" => Some(0),
@@ -128,6 +195,7 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
             "--state" => Some(2),
             "--in" => Some(3),
             "--out" => Some(4),
+            "--stop-file" => Some(5),
             _ => None,
         };
         if let Some(k) = slot {
@@ -139,7 +207,7 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
         }
         match flag.as_str() {
             "--pipe" => pipe = Some(value(&mut it, flag)?.clone()),
-            "--block" => size = block(value(&mut it, flag)?)?,
+            "--block" => size = Some(block(value(&mut it, flag)?)?),
             "--sine" => {
                 let v = value(&mut it, flag)?;
                 let hz: f64 = v
@@ -147,34 +215,64 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
                     .ok()
                     .filter(|hz: &f64| hz.is_finite() && *hz > 0.0 && *hz < 48_000.0)
                     .ok_or_else(|| format!("--sine needs a frequency below 48 kHz, not {v:?}"))?;
-                signal = InputSignal::Sine { hz, amp: 0.1 };
+                signal = Some(InputSignal::Sine { hz, amp: 0.1 });
             }
             "--test-signal" => flags.test_signal = true,
             "--fault-injection" => flags.fault_injection = true,
+            "--backend" => chosen = backend(value(&mut it, flag)?)?,
+            "--hold" => hold = true,
+            "--seconds" => listen_for = seconds(value(&mut it, flag)?)?,
             other => return Err(format!("unknown option {other:?}")),
         }
     }
-    let [site, state_dir, state, input, output] = paths;
+    let [site, state_dir, state, input, output, stop_file] = paths;
     let need = |p: Option<PathBuf>, flag: &str| p.ok_or_else(|| format!("{sub} needs {flag}"));
-    if sub == "run" {
-        let mut cfg = RunConfig::new(
-            need(site, "--site")?,
-            need(state_dir, "--state-dir")?,
-            pipe.ok_or_else(|| "run needs --pipe".to_owned())?,
-        );
-        cfg.block = size;
-        cfg.flags = flags;
-        cfg.signal = signal;
-        Ok(Command::Run(cfg))
-    } else {
-        Ok(Command::Render(RenderArgs {
+    match sub {
+        "run" => {
+            if chosen == Backend::Asio && (size.is_some() || signal.is_some()) {
+                return Err(
+                    "--block and --sine are for the nullrt backend: the card runs at its [card] frames"
+                        .to_owned(),
+                );
+            }
+            let mut cfg = RunConfig::new(
+                need(site, "--site")?,
+                need(state_dir, "--state-dir")?,
+                pipe.ok_or_else(|| "run needs --pipe".to_owned())?,
+            );
+            cfg.block = size.unwrap_or(32);
+            cfg.flags = flags;
+            cfg.signal = signal.unwrap_or(InputSignal::Silence);
+            cfg.backend = chosen;
+            cfg.hold = hold;
+            Ok(Command::Run(cfg))
+        }
+        "render" => Ok(Command::Render(RenderArgs {
             site: need(site, "--site")?,
             state,
             input: need(input, "--in")?,
             output: need(output, "--out")?,
-            block: size,
-        }))
+            block: size.unwrap_or(32),
+        })),
+        "interlock" => Ok(Command::Interlock(InterlockArgs {
+            site: need(site, "--site")?,
+            seconds: listen_for,
+            stop_file,
+        })),
+        _ => Ok(Command::CheckSite(need(site, "--site")?)),
     }
+}
+
+/// The ASIO backend locks its memory after this long of streaming (S1c
+/// hand-off): the working set has settled by then.
+pub const LOCK_AFTER: Duration = Duration::from_secs(5);
+/// How far it raises the minimum working set first (MiB).
+pub const LOCK_EXTRA_MB: usize = 64;
+
+/// Whether the memory lock is due: once, `LOCK_AFTER` after the stream
+/// started.
+pub fn lock_due(started: Instant, now: Instant, done: bool) -> bool {
+    !done && now.saturating_duration_since(started) >= LOCK_AFTER
 }
 
 struct NullRtDriver(NullRt<Processor>);
@@ -332,7 +430,22 @@ pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
     if !(1..=MAX_BLOCK).contains(&cfg.block) {
         return Err(EngineError::Usage(format!("block must be 1…{MAX_BLOCK}")));
     }
-    let topo = Arc::new(compile(&load(&cfg.site)?)?);
+    let text = site::read(&cfg.site)?;
+    let topo = Arc::new(compile(&parse(&text)?)?);
+    let card = match cfg.backend {
+        Backend::NullRt => None,
+        Backend::Asio => Some(parse_card(&text)?.ok_or(SiteError::NoCardTable)?),
+    };
+    #[cfg(not(windows))]
+    if card.is_some() {
+        return Err(EngineError::Usage(ASIO_ON_WINDOWS.to_owned()));
+    }
+    // Crash dialogs off, the RT panic hook and the SEH filter, priority and
+    // power throttling, before the card opens (S6 design note §3).
+    #[cfg(windows)]
+    if let Some(card) = &card {
+        crate::asio::prepare(card);
+    }
     info!(
         "site {}: {} inputs, {} groups, {} mixes, topology {}",
         cfg.site.display(),
@@ -382,7 +495,10 @@ pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
         Arc::clone(&topo),
         &loaded.persisted.state,
         &counters,
-        Options::default(),
+        Options {
+            fade_in_ms: FADE_IN_MS,
+            hold: cfg.hold,
+        },
     );
     let RtHandles {
         cmds,
@@ -393,20 +509,33 @@ pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
     } = handles;
     let control_listener = listen(control_name(&cfg.pipe)?)?;
     let media_listener = listen(media_name(&cfg.pipe)?)?;
-    let driver = NullRt::start(
-        NullRtConfig {
-            sample_rate: SAMPLE_RATE,
-            block: cfg.block,
-            inputs: topo.rx.len(),
-            outputs: topo.tx.len(),
-            signal: cfg.signal,
-        },
-        processor,
-    )?;
-    info!(
-        "NullRt running: 96 kHz, block {}, pipe {}",
-        cfg.block, cfg.pipe
-    );
+    let (driver, block): (Box<dyn Driver>, usize) = match card {
+        None => {
+            let nullrt = NullRt::start(
+                NullRtConfig {
+                    sample_rate: SAMPLE_RATE,
+                    block: cfg.block,
+                    inputs: topo.rx.len(),
+                    outputs: topo.tx.len(),
+                    signal: cfg.signal,
+                },
+                processor,
+            )?;
+            info!(
+                "NullRt running: 96 kHz, block {}, pipe {}",
+                cfg.block, cfg.pipe
+            );
+            let driver: Box<dyn Driver> = Box::new(NullRtDriver(nullrt));
+            (driver, cfg.block)
+        }
+        #[cfg(windows)]
+        Some(card) => crate::asio::start(&card, &topo, processor)?,
+        #[cfg(not(windows))]
+        Some(_) => return Err(EngineError::Usage(ASIO_ON_WINDOWS.to_owned())),
+    };
+    if cfg.hold {
+        info!("held: every output is silent until the supervisor's Arm");
+    }
     let stop = Arc::new(AtomicBool::new(false));
     let dropped = Arc::new(AtomicU64::new(0));
     let talk: Talk = Arc::new(Mutex::new((TalkbackFeed::new(), talkback)));
@@ -433,12 +562,13 @@ pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
         meters,
         status,
         talkback_dropped: dropped,
-        driver: Box::new(NullRtDriver(driver)),
+        driver,
         counters,
         alarms,
         settings: Settings {
             solo_grace: cfg.solo_grace,
-            block: u32::try_from(cfg.block).unwrap_or(u32::MAX),
+            block: u32::try_from(block).unwrap_or(u32::MAX),
+            hold: cfg.hold,
         },
     });
     let exit = control.run(&rx);
@@ -448,6 +578,69 @@ pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
     }
     info!("engine exit: {exit:?}");
     Ok(exit)
+}
+
+#[cfg(not(windows))]
+const ASIO_ON_WINDOWS: &str = "the asio backend runs on Windows only";
+
+/// What `check-site` prints (I4, F30).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SiteSummary {
+    pub topology: String,
+    pub inputs: usize,
+    pub groups: usize,
+    pub mixes: usize,
+    /// Whether the site has a (valid) `[card]` table.
+    pub card: bool,
+}
+
+/// Loads and compiles a site and checks its `[card]` table.
+pub fn check_site(path: &Path) -> Result<SiteSummary, EngineError> {
+    let text = site::read(path)?;
+    let topo = compile(&parse(&text)?)?;
+    let card = parse_card(&text)?;
+    Ok(SiteSummary {
+        topology: topo.hash,
+        inputs: topo.inputs.len(),
+        groups: topo.groups.len(),
+        mixes: topo.mixes.len(),
+        card: card.is_some(),
+    })
+}
+
+/// What the interlock needs from the site: the card and the stage's RX
+/// channels.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InterlockPlan {
+    pub card: Card,
+    pub channels: Vec<u16>,
+}
+
+pub fn interlock_plan(path: &Path) -> Result<InterlockPlan, EngineError> {
+    let text = site::read(path)?;
+    let topo = compile(&parse(&text)?)?;
+    let card = parse_card(&text)?.ok_or(SiteError::NoCardTable)?;
+    let channels = interlock::stage_channels(&topo, &parse_stage(&text)?)?;
+    Ok(InterlockPlan { card, channels })
+}
+
+/// Listens to the stage on the card (Windows): the verdict and the report.
+pub fn interlock(a: &InterlockArgs) -> Result<(Verdict, Report), EngineError> {
+    let plan = interlock_plan(&a.site)?;
+    #[cfg(windows)]
+    {
+        crate::asio::interlock(plan, a)
+    }
+    #[cfg(not(windows))]
+    {
+        info!(
+            "interlock of {} stage channels needs the card",
+            plan.channels.len()
+        );
+        Err(EngineError::Usage(
+            "interlock runs on Windows only (the ASIO card)".to_owned(),
+        ))
+    }
 }
 
 /// Reads a state file (the persisted format, or a plain `MixState` JSON).
@@ -488,8 +681,15 @@ pub fn render(a: &RenderArgs) -> Result<(), EngineError> {
     if !(1..=MAX_BLOCK).contains(&a.block) {
         return Err(EngineError::Usage(format!("block must be 1…{MAX_BLOCK}")));
     }
-    let (mut p, _handles) =
-        Processor::new(Arc::clone(&topo), &state, &[], Options { fade_in_ms: 0.0 });
+    let (mut p, _handles) = Processor::new(
+        Arc::clone(&topo),
+        &state,
+        &[],
+        Options {
+            fade_in_ms: 0.0,
+            hold: false,
+        },
+    );
     let run = Offline { block: a.block }.run(&mut p, &audio, topo.tx.len());
     if let Some(f) = run.fault {
         return Err(EngineError::Fault {
@@ -539,6 +739,244 @@ mod tests {
             (cfg.block, cfg.signal, cfg.flags),
             (32, InputSignal::Silence, Flags::default())
         );
+    }
+
+    #[test]
+    fn the_backend_the_hold_and_the_s6_commands_parse() {
+        let Command::Run(cfg) = parse_args(&args(
+            "run --site s --state-dir d --pipe p --backend asio --hold",
+        ))
+        .unwrap() else {
+            panic!()
+        };
+        assert_eq!(
+            (cfg.backend, cfg.hold, cfg.block, cfg.signal),
+            (Backend::Asio, true, 32, InputSignal::Silence)
+        );
+        let Command::Run(cfg) = parse_args(&args(
+            "run --site s --state-dir d --pipe p --backend nullrt --block 64 --sine 440",
+        ))
+        .unwrap() else {
+            panic!()
+        };
+        assert_eq!(
+            (cfg.backend, cfg.hold, cfg.block),
+            (Backend::NullRt, false, 64)
+        );
+        let Command::Run(cfg) = parse_args(&args("run --site s --state-dir d --pipe p")).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!((cfg.backend, cfg.hold), (Backend::NullRt, false));
+        let lock = |seconds: u32, stop_file: Option<&str>| {
+            Command::Interlock(InterlockArgs {
+                site: "s".into(),
+                seconds,
+                stop_file: stop_file.map(PathBuf::from),
+            })
+        };
+        assert_eq!(
+            parse_args(&args("interlock --site s")).unwrap(),
+            lock(60, None)
+        );
+        assert_eq!(
+            parse_args(&args("interlock --site s --seconds 1 --stop-file x/stop")).unwrap(),
+            lock(1, Some("x/stop"))
+        );
+        assert_eq!(
+            parse_args(&args("interlock --seconds 600 --site s")).unwrap(),
+            lock(600, None)
+        );
+        assert_eq!(
+            parse_args(&args("check-site --site s.toml")).unwrap(),
+            Command::CheckSite("s.toml".into())
+        );
+        for (line, want) in [
+            (
+                "run --site s --state-dir d --pipe p --backend alsa",
+                "--backend",
+            ),
+            (
+                "run --site s --state-dir d --pipe p --backend",
+                "needs a value",
+            ),
+            (
+                "run --site s --state-dir d --pipe p --backend asio --block 32",
+                "nullrt backend",
+            ),
+            (
+                "run --site s --state-dir d --pipe p --backend asio --sine 440",
+                "nullrt backend",
+            ),
+            ("interlock", "--site"),
+            ("interlock --site s --seconds 0", "--seconds"),
+            ("interlock --site s --seconds 601", "--seconds"),
+            ("interlock --site s --seconds x", "--seconds"),
+            ("check-site", "--site"),
+        ] {
+            let e = parse_args(&args(line)).unwrap_err();
+            assert!(e.contains(want), "{line}: {e}");
+        }
+    }
+
+    #[test]
+    fn the_memory_lock_is_due_once_five_seconds_in() {
+        assert_eq!((LOCK_AFTER, LOCK_EXTRA_MB), (Duration::from_secs(5), 64));
+        let t0 = Instant::now();
+        assert!(!lock_due(t0, t0, false));
+        assert!(!lock_due(
+            t0,
+            t0 + LOCK_AFTER - Duration::from_millis(1),
+            false
+        ));
+        assert!(lock_due(t0, t0 + LOCK_AFTER, false));
+        assert!(lock_due(t0, t0 + Duration::from_secs(60), false));
+        assert!(!lock_due(t0, t0 + LOCK_AFTER, true), "once");
+        assert!(!lock_due(t0 + LOCK_AFTER, t0, false));
+    }
+
+    /// The test site with `edit` applied, as a file in `dir`.
+    fn edited_site(dir: &Path, name: &str, edit: impl FnOnce(String) -> String) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, edit(crate::test_support::test_site_text())).unwrap();
+        path
+    }
+
+    /// The test site without its `[card]` table (the keys go to a table
+    /// nothing reads).
+    fn without_card(text: String) -> String {
+        text.replace("[card]", "[spare]")
+    }
+
+    #[test]
+    fn check_site_names_the_topology_and_the_card() {
+        let summary = check_site(&crate::test_support::test_site_path()).unwrap();
+        assert_eq!(
+            summary,
+            SiteSummary {
+                topology: crate::test_support::test_site().hash,
+                inputs: 24,
+                groups: 1,
+                mixes: 11,
+                card: true,
+            }
+        );
+        let json = serde_json::to_value(&summary).unwrap();
+        assert_eq!(json["topology"].as_str().map(str::len), Some(64));
+        assert_eq!(
+            (json["inputs"].as_u64(), json["card"].as_bool()),
+            (Some(24), Some(true))
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let bare = edited_site(dir.path(), "bare.toml", without_card);
+        assert!(!check_site(&bare).unwrap().card);
+        let bad_card = edited_site(dir.path(), "card.toml", |t| {
+            t.replace("frames = 32", "frames = 64")
+        });
+        assert!(matches!(
+            check_site(&bad_card),
+            Err(EngineError::Site(SiteError::CardFrames(64)))
+        ));
+        let bad_map = edited_site(dir.path(), "map.toml", |t| {
+            t.replace("tx = [93]", "tx = [92]")
+        });
+        assert!(matches!(
+            check_site(&bad_map),
+            Err(EngineError::Site(SiteError::ChannelReused { ch: 92 }))
+        ));
+        assert!(matches!(
+            check_site(&dir.path().join("missing.toml")),
+            Err(EngineError::Site(SiteError::Io(_)))
+        ));
+    }
+
+    #[test]
+    fn the_interlock_plan_is_the_card_and_the_stage_channels() {
+        let plan = interlock_plan(&crate::test_support::test_site_path()).unwrap();
+        assert_eq!(
+            (plan.card.driver.as_str(), plan.card.frames),
+            ("Test Card", 32)
+        );
+        // No `[activity] inputs` in the test site: every mics input.
+        let mut stage: Vec<u16> = (101..=110).collect();
+        stage.extend([115, 116]);
+        assert_eq!(plan.channels, stage);
+        let dir = tempfile::tempdir().unwrap();
+        let listed = edited_site(dir.path(), "listed.toml", |t| {
+            t.replace(
+                "[activity]\n",
+                "[activity]\ninputs = [\"hand1\", \"keys\"]\n",
+            )
+        });
+        assert_eq!(interlock_plan(&listed).unwrap().channels, [111, 115, 116]);
+        let bare = edited_site(dir.path(), "bare.toml", without_card);
+        assert!(matches!(
+            interlock_plan(&bare),
+            Err(EngineError::Site(SiteError::NoCardTable))
+        ));
+        let ghost = edited_site(dir.path(), "ghost.toml", |t| {
+            t.replace("[activity]\n", "[activity]\ninputs = [\"ghost\"]\n")
+        });
+        assert!(matches!(
+            interlock_plan(&ghost),
+            Err(EngineError::Site(SiteError::StageInput(id))) if id == "ghost"
+        ));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn off_windows_the_card_is_a_usage_error_before_any_state() {
+        let site = crate::test_support::test_site_path();
+        let e = interlock(&InterlockArgs {
+            site: site.clone(),
+            seconds: 60,
+            stop_file: None,
+        })
+        .unwrap_err();
+        assert!(
+            matches!(&e, EngineError::Usage(m) if m.contains("Windows")),
+            "{e}"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = RunConfig::new(
+            site,
+            dir.path().join("state"),
+            dir.path().join("p.sock").to_string_lossy().into_owned(),
+        );
+        cfg.backend = Backend::Asio;
+        let e = run_bounded(cfg).unwrap_err();
+        assert!(
+            matches!(&e, EngineError::Usage(m) if m.contains("Windows")),
+            "{e}"
+        );
+        assert!(
+            !dir.path().join("state").exists(),
+            "refused before the state"
+        );
+    }
+
+    /// The hosted Windows runner has no ASIO driver: the synthetic card of
+    /// the test site is refused (exit 3), by `run` and by the interlock.
+    #[cfg(windows)]
+    #[test]
+    fn without_the_driver_the_card_is_refused() {
+        let site = crate::test_support::test_site_path();
+        let e = interlock(&InterlockArgs {
+            site: site.clone(),
+            seconds: 60,
+            stop_file: None,
+        })
+        .unwrap_err();
+        assert!(matches!(&e, EngineError::Card(_)), "{e}");
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = RunConfig::new(
+            site,
+            dir.path().join("state"),
+            format!("iem-engine-asio-test-{}", std::process::id()),
+        );
+        cfg.backend = Backend::Asio;
+        let e = run_bounded(cfg).unwrap_err();
+        assert!(matches!(&e, EngineError::Card(_)), "{e}");
     }
 
     #[test]
@@ -651,8 +1089,15 @@ mod tests {
         cfg.block = 32;
         cfg.site = dir.path().join("missing.toml");
         assert!(matches!(
-            run_bounded(cfg),
+            run_bounded(cfg.clone()),
             Err(EngineError::Site(SiteError::Io(_)))
+        ));
+        // The asio backend needs the site's [card] table.
+        cfg.site = edited_site(dir.path(), "bare.toml", without_card);
+        cfg.backend = Backend::Asio;
+        assert!(matches!(
+            run_bounded(cfg),
+            Err(EngineError::Site(SiteError::NoCardTable))
         ));
     }
 

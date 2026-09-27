@@ -318,7 +318,15 @@ fn impulses(rx: usize) -> Planar {
 }
 
 fn render(topo: &Arc<Topology>, state: &MixState, input: &Planar, block: usize) -> Planar {
-    let (mut p, _h) = Processor::new(Arc::clone(topo), state, &[], Options { fade_in_ms: 0.0 });
+    let (mut p, _h) = Processor::new(
+        Arc::clone(topo),
+        state,
+        &[],
+        Options {
+            fade_in_ms: 0.0,
+            hold: false,
+        },
+    );
     let run = Offline { block }.run(&mut p, input, topo.tx.len());
     assert!(run.fault.is_none());
     run.output

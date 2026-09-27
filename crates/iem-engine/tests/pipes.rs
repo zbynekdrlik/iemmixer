@@ -151,11 +151,18 @@ impl Engine {
     }
 
     fn start_in(dir: tempfile::TempDir, flags: Flags, signal: InputSignal) -> Self {
+        Self::start_with(dir, |cfg| {
+            cfg.flags = flags;
+            cfg.signal = signal;
+        })
+    }
+
+    /// An engine with the test's changes to the default configuration.
+    fn start_with(dir: tempfile::TempDir, edit: impl FnOnce(&mut RunConfig)) -> Self {
         let pipe = pipe_name(&dir);
         let mut cfg = RunConfig::new(common::site_path(), dir.path().join("state"), pipe.clone());
-        cfg.flags = flags;
-        cfg.signal = signal;
         cfg.solo_grace = Duration::from_millis(400);
+        edit(&mut cfg);
         let handle = std::thread::spawn(move || run(cfg));
         Self {
             pipe,
@@ -786,4 +793,107 @@ fn the_binary_renders_offline() {
     let refused = run(&[]);
     assert_eq!(refused.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&refused.stderr).contains("96000"));
+}
+
+#[test]
+fn a_held_engine_sounds_after_its_supervisor_arms_it() {
+    let e = Engine::start_with(tempfile::tempdir().unwrap(), |cfg| cfg.hold = true);
+    let mut sup = e.client();
+    let (h, _, _) = sup.hello(Role::Supervisor);
+    assert_eq!((h.role, h.block), (Role::Supervisor, 32));
+    let status = |held: bool| {
+        move |m: &EngineMsg| match m {
+            EngineMsg::Status(s) if s.held == held => Some(s.clone()),
+            _ => None,
+        }
+    };
+    let before = sup.wait(status(true));
+    assert_eq!(
+        (before.frames, before.missed, before.parked),
+        (32, 0, false)
+    );
+    // Only the supervisor arms; the controller is told so.
+    let mut ctl = e.client();
+    ctl.hello(Role::Control);
+    let refused = ctl.request(1, Cmd::Arm).error.unwrap();
+    assert_eq!(refused.code, ErrCode::NotSupervisor);
+    assert_eq!(
+        ctl.request(2, set_mix("member1", -2.0)).error,
+        None,
+        "the controller still mixes"
+    );
+    assert_eq!(
+        sup.request(3, set_mix("member1", -4.0))
+            .error
+            .map(|b| b.code),
+        Some(ErrCode::NotController)
+    );
+    assert!(sup.request(4, Cmd::Arm).error.is_none());
+    let after = sup.wait(status(false));
+    assert_eq!(after.frames, 32);
+    e.shutdown();
+}
+
+#[test]
+fn the_binary_checks_a_site() {
+    let check = |site: &std::path::Path| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_iem-engine"))
+            .args(["check-site", "--site"])
+            .arg(site)
+            .output()
+            .unwrap()
+    };
+    let ok = check(common::site_path().as_path());
+    assert_eq!(
+        ok.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+    let summary: serde_json::Value = serde_json::from_slice(&ok.stdout).unwrap();
+    assert_eq!(summary["topology"], common::topology().hash.as_str());
+    assert_eq!(summary["inputs"], 24);
+    assert_eq!(summary["groups"], 1);
+    assert_eq!(summary["mixes"], 11);
+    assert_eq!(summary["card"], true);
+    let dir = tempfile::tempdir().unwrap();
+    let bad = dir.path().join("site.toml");
+    let text = std::fs::read_to_string(common::site_path()).unwrap();
+    std::fs::write(&bad, text.replace("frames = 32", "frames = 64")).unwrap();
+    let refused = check(bad.as_path());
+    assert_eq!(refused.status.code(), Some(2));
+    assert!(refused.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("frames must be 32"));
+}
+
+/// Off Windows the card cannot open: `run --backend asio` and `interlock`
+/// are usage errors (exit 2), never a card refusal (exit 3).
+#[cfg(not(windows))]
+#[test]
+fn off_windows_the_binary_refuses_the_card_as_usage() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = |args: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_iem-engine"))
+            .args(args)
+            .arg("--site")
+            .arg(common::site_path())
+            .output()
+            .unwrap()
+    };
+    let interlock = engine(&["interlock", "--seconds", "5"]);
+    assert_eq!(interlock.status.code(), Some(2));
+    assert!(interlock.stdout.is_empty());
+    let state = dir.path().join("state").to_string_lossy().into_owned();
+    let pipe = pipe_name(&dir);
+    let asio = engine(&[
+        "run",
+        "--backend",
+        "asio",
+        "--state-dir",
+        state.as_str(),
+        "--pipe",
+        pipe.as_str(),
+    ]);
+    assert_eq!(asio.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&asio.stderr).contains("Windows"));
 }

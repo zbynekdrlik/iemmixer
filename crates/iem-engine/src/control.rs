@@ -38,6 +38,27 @@ pub const FADE_WAIT: Duration = Duration::from_millis(500);
 pub trait Driver: Send {
     fn stats(&self) -> StreamStats;
     fn stop(self: Box<Self>);
+    /// Every control tick (never the RT thread): the backend's timed work,
+    /// e.g. the ASIO backend locks its memory after 5 s of streaming.
+    fn tick(&mut self, _now: Instant) {}
+    /// The backend's own reason to end the run, if any.
+    fn ending(&self) -> Option<Ending> {
+        None
+    }
+    /// Locking the real-time memory failed (logged by the backend).
+    fn lock_failed(&self) -> bool {
+        false
+    }
+}
+
+/// Why a backend ends the run (S6 design note §3, §4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ending {
+    /// The Windows session ends: save, fade out, release (the shutdown path).
+    Session,
+    /// The card must be refused (exit 3), e.g. a reopen left the preferred
+    /// buffer at 32 instead of REAPER's original.
+    Card(String),
 }
 
 /// Messages from the acceptor and reader threads.
@@ -55,6 +76,8 @@ pub enum Exit {
         faded: bool,
     },
     Fault(String),
+    /// The backend refused the card while running (exit 3).
+    Card(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +85,8 @@ pub struct Settings {
     /// X2: solos clear this long after the controller left.
     pub solo_grace: Duration,
     pub block: u32,
+    /// Started with `--hold`: silent until the supervisor's `Arm`.
+    pub hold: bool,
 }
 
 struct Peer {
@@ -82,6 +107,10 @@ pub struct Control {
     peers: BTreeMap<u64, Peer>,
     controller: Option<u64>,
     controller_lost: Option<Instant>,
+    /// The guard's connection (S6): one at a time, beside the controller.
+    supervisor: Option<u64>,
+    /// `--hold` until the supervisor's `Arm`.
+    held: bool,
     test_deadline: Option<Instant>,
     counters: Vec<u64>,
     alarms: Vec<Alarm>,
@@ -173,6 +202,8 @@ impl Control {
             peers: BTreeMap::new(),
             controller: None,
             controller_lost: None,
+            supervisor: None,
+            held: p.settings.hold,
             test_deadline: None,
             counters: p.counters,
             alarms: p.alarms,
@@ -314,6 +345,16 @@ impl Control {
             self.controller = Some(id);
             self.controller_lost = None;
         }
+        // A new supervisor (a restarted guard) replaces the old one only.
+        if role == Role::Supervisor
+            && let Some(old) = self.supervisor.filter(|old| *old != id)
+        {
+            self.send(old, &EngineMsg::Superseded);
+            self.drop_peer(old, "superseded by a new supervisor");
+        }
+        if role == Role::Supervisor {
+            self.supervisor = Some(id);
+        }
         match self.peers.get_mut(&id) {
             Some(p) => p.role = Some(role),
             None => return,
@@ -377,6 +418,23 @@ impl Control {
                     refuse(ErrCode::NotController, "an observer may only read"),
                 );
             }
+            Some(Role::Supervisor) if !cmd.supervisor_may() => {
+                return self.reply(
+                    id,
+                    request,
+                    refuse(
+                        ErrCode::NotController,
+                        "the supervisor never changes the mix",
+                    ),
+                );
+            }
+            Some(Role::Control) if cmd.is_supervisor() => {
+                return self.reply(
+                    id,
+                    request,
+                    refuse(ErrCode::NotSupervisor, "only the supervisor sends this"),
+                );
+            }
             _ => {}
         }
         let out = match self.core.apply(&cmd) {
@@ -384,7 +442,7 @@ impl Control {
             Err(e) => return self.reply(id, request, Some(e.into())),
         };
         match &cmd {
-            Cmd::StartTestSignal { .. } => {
+            Cmd::StartTestSignal { .. } | Cmd::HilTestSignal { .. } => {
                 self.test_deadline = self
                     .core
                     .transient()
@@ -392,6 +450,10 @@ impl Control {
                     .map(|t| Instant::now() + Duration::from_secs_f64(t.ttl_s));
             }
             Cmd::StopTestSignal => self.test_deadline = None,
+            Cmd::Arm => {
+                info!("armed (held until now: {})", self.held);
+                self.held = false;
+            }
             _ => {}
         }
         let effect = out.effect;
@@ -525,6 +587,15 @@ impl Control {
         Exit::Fault(why)
     }
 
+    /// The backend refused the card: save, stop without a fade (the card may
+    /// be in a wrong state), exit 3 — the guard never respawns after it.
+    fn card(&mut self, why: String) -> Exit {
+        error!("the card is refused: {why}");
+        self.save();
+        self.release("card refused");
+        Exit::Card(why)
+    }
+
     fn status_msg(&self, st: &StreamStats) -> Status {
         Status {
             callbacks: st.callbacks,
@@ -535,14 +606,32 @@ impl Control {
             tap_overruns: self.status.tap_overruns.load(Ordering::Relaxed),
             talkback_dropped: self.talkback_dropped.load(Ordering::Relaxed),
             cmd_backlog: self.pending.iter().map(|g| g.len() as u64).sum(),
+            frames: st.frames,
+            missed: st.missed,
+            overruns: st.overruns,
+            resets: st.resets,
+            parked: st.parked,
+            held: self.held,
+            lock_failed: self.driver.as_ref().is_some_and(|d| d.lock_failed()),
         }
     }
 
     fn tick(&mut self, now: Instant) -> Option<Exit> {
         self.flush_rt();
+        if let Some(d) = self.driver.as_mut() {
+            d.tick(now);
+        }
         let stats = self.driver.as_ref().map(|d| d.stats()).unwrap_or_default();
         if stats.faulted {
             return Some(self.fault(stats.fault.unwrap_or_else(|| "unknown".into())));
+        }
+        match self.driver.as_ref().and_then(|d| d.ending()) {
+            Some(Ending::Card(why)) => return Some(self.card(why)),
+            Some(Ending::Session) => {
+                info!("the Windows session ends");
+                self.shutdown = true;
+            }
+            None => {}
         }
         if self.shutdown {
             return Some(self.shutdown_now());
@@ -670,12 +759,16 @@ mod tests {
 
     /// A control loop on the test site with the processor's ends in hand.
     fn rig() -> Rig {
-        let dir = tempfile::tempdir().unwrap();
-        let topo = Arc::new(crate::test_support::test_site());
         let flags = crate::core::Flags {
             test_signal: true,
             fault_injection: false,
         };
+        rig_with(flags, false)
+    }
+
+    fn rig_with(flags: crate::core::Flags, hold: bool) -> Rig {
+        let dir = tempfile::tempdir().unwrap();
+        let topo = Arc::new(crate::test_support::test_site());
         let core = Core::new(
             Arc::clone(&topo),
             &iem_engine_proto::MixState::default(),
@@ -698,6 +791,7 @@ mod tests {
             settings: Settings {
                 solo_grace: Duration::from_secs(10),
                 block: 32,
+                hold,
             },
         });
         Rig {
@@ -781,6 +875,113 @@ mod tests {
     }
 
     #[test]
+    fn status_carries_the_measured_period_the_stream_counters_and_the_hold() {
+        let r = rig_with(crate::core::Flags::default(), true);
+        let st = StreamStats {
+            frames: 32,
+            callbacks: 7,
+            missed: 2,
+            overruns: 3,
+            resets: 4,
+            parked: true,
+            running: true,
+            ..StreamStats::default()
+        };
+        let s = r.c.status_msg(&st);
+        assert_eq!((s.frames, s.missed, s.overruns, s.resets), (32, 2, 3, 4));
+        assert!(s.parked, "parked");
+        assert!(s.held, "held until Arm");
+        assert!(!s.lock_failed);
+        let s = rig().c.status_msg(&StreamStats {
+            frames: 64,
+            ..StreamStats::default()
+        });
+        assert_eq!((s.frames, s.missed, s.overruns, s.resets), (64, 0, 0, 0));
+        assert!(!s.parked && !s.held);
+    }
+
+    /// A backend with scripted hooks: its ticks counted, an ending, a lock
+    /// failure.
+    struct Scripted {
+        ticks: Arc<AtomicU64>,
+        ending: Option<Ending>,
+        lock_failed: bool,
+    }
+
+    impl Driver for Scripted {
+        fn stats(&self) -> StreamStats {
+            StreamStats {
+                running: true,
+                ..StreamStats::default()
+            }
+        }
+
+        fn stop(self: Box<Self>) {}
+
+        fn tick(&mut self, _now: Instant) {
+            self.ticks.fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn ending(&self) -> Option<Ending> {
+            self.ending.clone()
+        }
+
+        fn lock_failed(&self) -> bool {
+            self.lock_failed
+        }
+    }
+
+    fn scripted(ending: Option<Ending>, lock_failed: bool) -> (Box<dyn Driver>, Arc<AtomicU64>) {
+        let ticks = Arc::new(AtomicU64::new(0));
+        let d = Scripted {
+            ticks: Arc::clone(&ticks),
+            ending,
+            lock_failed,
+        };
+        (Box::new(d), ticks)
+    }
+
+    #[test]
+    fn the_backend_is_ticked_and_its_lock_failure_is_reported() {
+        let mut r = rig();
+        let (d, ticks) = scripted(None, true);
+        r.c.driver = Some(d);
+        assert!(r.c.tick(Instant::now()).is_none());
+        assert!(r.c.tick(Instant::now()).is_none());
+        assert_eq!(ticks.load(Ordering::Relaxed), 2);
+        assert!(r.c.status_msg(&StreamStats::default()).lock_failed);
+        // NullRt (and any backend that does not say otherwise) locks nothing.
+        assert!(!rig().c.status_msg(&StreamStats::default()).lock_failed);
+        assert!(!Idle.lock_failed());
+        assert_eq!(Idle.ending(), None);
+    }
+
+    #[test]
+    fn a_session_end_takes_the_shutdown_path() {
+        let mut r = rig();
+        r.status.faded_out.store(true, Ordering::Release);
+        r.c.driver = Some(scripted(Some(Ending::Session), false).0);
+        assert_eq!(
+            r.c.tick(Instant::now()),
+            Some(Exit::Shutdown { faded: true })
+        );
+        assert!(r.dir.path().join("state/current.json").exists(), "saved");
+        assert!(r.c.driver.is_none(), "released");
+    }
+
+    #[test]
+    fn a_card_refused_while_running_ends_with_exit_3_and_no_fade() {
+        let mut r = rig();
+        let why = "the preferred buffer was not restored";
+        r.c.driver = Some(scripted(Some(Ending::Card(why.into())), false).0);
+        let t0 = Instant::now();
+        assert_eq!(r.c.tick(Instant::now()), Some(Exit::Card(why.into())));
+        assert!(t0.elapsed() < FADE_WAIT, "{:?}", t0.elapsed());
+        assert!(r.dir.path().join("state/current.json").exists(), "saved");
+        assert!(r.c.driver.is_none(), "released");
+    }
+
+    #[test]
     fn only_new_sanitiser_trips_raise_an_alarm() {
         let mut r = rig();
         let now = Instant::now();
@@ -801,7 +1002,7 @@ mod tests {
     mod peers {
         use super::*;
         use crate::pipe::{control_name, listen};
-        use iem_engine_proto::{InputId, MixState, read_frame};
+        use iem_engine_proto::{InputId, MixId, MixState, read_frame};
         use interprocess::local_socket::Stream;
         use interprocess::local_socket::prelude::*;
 
@@ -809,7 +1010,15 @@ mod tests {
 
         /// The engine's end and the client's end of one connection.
         fn peer(dir: &std::path::Path) -> (Conn, Stream) {
-            let path = dir.join("ctl.sock").to_string_lossy().into_owned();
+            peer_named(dir, "ctl")
+        }
+
+        /// One connection through its own socket `<name>.sock`.
+        fn peer_named(dir: &std::path::Path, name: &str) -> (Conn, Stream) {
+            let path = dir
+                .join(format!("{name}.sock"))
+                .to_string_lossy()
+                .into_owned();
             let listener = listen(control_name(&path).unwrap()).unwrap();
             let client = Stream::connect(control_name(&path).unwrap()).unwrap();
             client.set_recv_timeout(Some(WAIT)).unwrap();
@@ -858,6 +1067,239 @@ mod tests {
                 origin: None,
                 cmd,
             })
+        }
+
+        /// A frame from connection `conn`.
+        fn frame_from(conn: u64, msg: &ClientMsg) -> CtlMsg {
+            CtlMsg::Frame {
+                id: conn,
+                bytes: serde_json::to_vec(msg).unwrap(),
+            }
+        }
+
+        fn hello_as(conn: u64, role: Role) -> CtlMsg {
+            frame_from(
+                conn,
+                &ClientMsg::Hello {
+                    proto: PROTO,
+                    role,
+                    client: "test".into(),
+                },
+            )
+        }
+
+        fn request_from(conn: u64, id: u64, cmd: Cmd) -> CtlMsg {
+            frame_from(
+                conn,
+                &ClientMsg::Request {
+                    id,
+                    origin: None,
+                    cmd,
+                },
+            )
+        }
+
+        /// The error code of every reply (None: accepted), by request id.
+        fn codes(msgs: &[EngineMsg]) -> BTreeMap<u64, Option<ErrCode>> {
+            msgs.iter()
+                .filter_map(|m| match m {
+                    EngineMsg::Reply(r) => Some((r.id, r.error.as_ref().map(|e| e.code))),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        fn superseded(msgs: &[EngineMsg]) -> usize {
+            msgs.iter()
+                .filter(|m| matches!(m, EngineMsg::Superseded))
+                .count()
+        }
+
+        fn hil() -> Cmd {
+            Cmd::HilTestSignal {
+                input: InputId::new("mic1"),
+                hz: 1000.0,
+                dbfs: -30.0,
+                ttl_s: 60.0,
+                card_tx: vec![72],
+            }
+        }
+
+        fn set_mix() -> Cmd {
+            Cmd::SetMix {
+                mix: MixId::new("member1"),
+                volume_db: Some(-3.0),
+                muted: None,
+            }
+        }
+
+        #[test]
+        fn the_supervisor_may_stop_save_arm_and_test_but_never_mix() {
+            let mut r = rig_with(
+                crate::core::Flags {
+                    test_signal: true,
+                    fault_injection: false,
+                },
+                true,
+            );
+            let (ctl, ctl_client) = peer_named(r.dir.path(), "ctl");
+            let (sup, sup_client) = peer_named(r.dir.path(), "sup");
+            let (obs, obs_client) = peer_named(r.dir.path(), "obs");
+            let (ctl_got, sup_got, obs_got) =
+                (reader(ctl_client), reader(sup_client), reader(obs_client));
+            for (id, conn) in [(1, ctl), (2, sup), (3, obs)] {
+                r.c.handle(CtlMsg::Connected { id, conn });
+            }
+            r.c.handle(hello_as(1, Role::Control));
+            r.c.handle(hello_as(2, Role::Supervisor));
+            r.c.handle(hello_as(3, Role::Observe));
+            // The supervisor's own commands, the reads, the save and the test
+            // signals (under their flags); never a mix change.
+            r.c.handle(request_from(2, 10, hil()));
+            assert!(r.c.test_deadline.is_some(), "the HIL signal ends by itself");
+            assert!(r.c.status_msg(&StreamStats::default()).held);
+            r.c.handle(request_from(2, 11, Cmd::Arm));
+            assert!(!r.c.status_msg(&StreamStats::default()).held, "armed");
+            let start = Cmd::StartTestSignal {
+                input: InputId::new("mic2"),
+                hz: 500.0,
+                dbfs: -40.0,
+                ttl_s: 1.0,
+            };
+            let supervisor: [(u64, Cmd, Option<ErrCode>); 10] = [
+                (12, Cmd::Ping, None),
+                (13, Cmd::GetState, None),
+                (14, Cmd::GetTopology, None),
+                (15, Cmd::SaveNow, None),
+                (16, start, None),
+                (17, Cmd::StopTestSignal, None),
+                (18, Cmd::InjectFault, Some(ErrCode::Forbidden)),
+                (19, set_mix(), Some(ErrCode::NotController)),
+                (
+                    20,
+                    Cmd::Batch {
+                        ops: vec![set_mix()],
+                    },
+                    Some(ErrCode::NotController),
+                ),
+                (
+                    21,
+                    Cmd::ImportState {
+                        state: MixState::default(),
+                        baseline: false,
+                    },
+                    Some(ErrCode::NotController),
+                ),
+            ];
+            for (id, cmd, _) in &supervisor {
+                r.c.handle(request_from(2, *id, cmd.clone()));
+            }
+            // The controller may not arm or start the HIL signal; an observer
+            // may do neither either.
+            r.c.handle(request_from(1, 30, Cmd::Arm));
+            r.c.handle(request_from(1, 31, hil()));
+            r.c.handle(request_from(1, 32, set_mix()));
+            r.c.handle(request_from(3, 40, Cmd::Arm));
+            r.c.handle(request_from(3, 41, hil()));
+            // The supervisor reads the meters like everyone.
+            r.meters.input_buffer_mut().seq = 5;
+            r.meters.publish();
+            assert!(r.c.tick(Instant::now()).is_none());
+            r.c.handle(request_from(2, 50, Cmd::Shutdown));
+            assert!(r.c.shutdown, "the supervisor stops the engine");
+            drop(r);
+            let sup = sup_got.join().unwrap();
+            assert!(
+                matches!(&sup[0], EngineMsg::Hello(h) if h.role == Role::Supervisor),
+                "{:?}",
+                sup[0]
+            );
+            let got = codes(&sup);
+            assert_eq!((got[&10], got[&11], got[&50]), (None, None, None));
+            for (id, cmd, want) in &supervisor {
+                assert_eq!(got[id], *want, "{cmd:?}");
+            }
+            assert!(
+                sup.iter()
+                    .any(|m| matches!(m, EngineMsg::Meters(f) if f.seq == 5)),
+                "meters"
+            );
+            let ctl = codes(&ctl_got.join().unwrap());
+            assert_eq!(
+                (ctl[&30], ctl[&31], ctl[&32]),
+                (
+                    Some(ErrCode::NotSupervisor),
+                    Some(ErrCode::NotSupervisor),
+                    None
+                )
+            );
+            let obs = codes(&obs_got.join().unwrap());
+            assert_eq!(
+                (obs[&40], obs[&41]),
+                (Some(ErrCode::NotController), Some(ErrCode::NotController))
+            );
+        }
+
+        #[test]
+        fn the_test_signals_stay_under_their_flag_for_the_supervisor() {
+            let mut r = rig_with(crate::core::Flags::default(), false);
+            let (sup, sup_client) = peer_named(r.dir.path(), "sup");
+            let got = reader(sup_client);
+            r.c.handle(CtlMsg::Connected { id: 2, conn: sup });
+            r.c.handle(hello_as(2, Role::Supervisor));
+            r.c.handle(request_from(2, 1, hil()));
+            r.c.handle(request_from(
+                2,
+                2,
+                Cmd::StartTestSignal {
+                    input: InputId::new("mic2"),
+                    hz: 500.0,
+                    dbfs: -40.0,
+                    ttl_s: 1.0,
+                },
+            ));
+            assert_eq!(r.c.test_deadline, None);
+            drop(r);
+            let got = codes(&got.join().unwrap());
+            assert_eq!(
+                (got[&1], got[&2]),
+                (Some(ErrCode::Forbidden), Some(ErrCode::Forbidden))
+            );
+        }
+
+        #[test]
+        fn a_second_supervisor_replaces_the_first_and_leaves_the_controller() {
+            let mut r = rig();
+            let mut clients = Vec::new();
+            for (id, name) in [(1, "c1"), (2, "s1"), (3, "s2"), (4, "c2")] {
+                let (conn, client) = peer_named(r.dir.path(), name);
+                clients.push(reader(client));
+                r.c.handle(CtlMsg::Connected { id, conn });
+            }
+            r.c.handle(hello_as(1, Role::Control));
+            r.c.handle(hello_as(2, Role::Supervisor));
+            r.c.handle(hello_as(3, Role::Supervisor));
+            assert!(!r.c.peers.contains_key(&2), "the first supervisor is gone");
+            assert!(r.c.peers.contains_key(&3));
+            assert_eq!(r.c.controller, Some(1), "the controller stays");
+            r.c.handle(request_from(1, 5, set_mix()));
+            r.c.handle(request_from(3, 6, Cmd::Arm));
+            // A new controller leaves the supervisor alone.
+            r.c.handle(hello_as(4, Role::Control));
+            assert_eq!(r.c.controller, Some(4));
+            assert!(r.c.peers.contains_key(&3), "the supervisor stays");
+            assert!(!r.c.peers.contains_key(&1));
+            r.c.handle(request_from(3, 7, Cmd::Ping));
+            drop(r);
+            let got: Vec<Vec<EngineMsg>> = clients.into_iter().map(|c| c.join().unwrap()).collect();
+            let [c1, s1, s2, c2] = [&got[0], &got[1], &got[2], &got[3]];
+            assert_eq!(superseded(s1), 1);
+            assert_eq!(superseded(s2), 0);
+            assert_eq!(superseded(c1), 1, "by the second controller only");
+            assert_eq!(superseded(c2), 0);
+            assert_eq!(codes(c1)[&5], None, "set before the new controller");
+            let s2 = codes(s2);
+            assert_eq!((s2[&6], s2[&7]), (None, None));
         }
 
         #[test]
