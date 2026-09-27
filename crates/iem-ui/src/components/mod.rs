@@ -44,3 +44,37 @@ pub(crate) fn after_event(f: impl FnOnce() + 'static) {
         let _ = w.set_timeout_with_callback(cb.unchecked_ref());
     }
 }
+
+/// Keeps `value` (a callback the browser holds) alive while the current
+/// component is mounted.
+pub(crate) fn keep_while_mounted<T: 'static>(value: T) {
+    std::mem::forget(value);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use leptos::prelude::Owner;
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    /// Sets its flag when dropped.
+    struct Tracked(Rc<Cell<bool>>);
+
+    impl Drop for Tracked {
+        fn drop(&mut self) {
+            self.0.set(true);
+        }
+    }
+
+    #[test]
+    fn a_kept_value_lives_until_its_component_is_cleaned_up() {
+        let dropped = Rc::new(Cell::new(false));
+        let component = Owner::new();
+        component.with(|| keep_while_mounted(Tracked(Rc::clone(&dropped))));
+        assert!(!dropped.get(), "alive while mounted");
+        // Settings closed: the console section unmounts.
+        component.cleanup();
+        assert!(dropped.get(), "released when the component unmounts");
+    }
+}

@@ -65,7 +65,7 @@ pub fn ConsoleSection(
         )
         .ok()
     });
-    refresh.forget();
+    crate::components::keep_while_mounted(refresh);
     on_cleanup(move || {
         if let (Some(w), Some(id)) = (web_sys::window(), interval) {
             w.clear_interval_with_handle(id);
