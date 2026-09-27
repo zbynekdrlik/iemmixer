@@ -1,11 +1,13 @@
 //! Scheduling and memory of the calling process (S6 design note §3; S1c L5):
 //! HIGH priority class, power throttling off, a default CPU Set, a locked
 //! minimum working set and locked pages. Each call changes only the calling
-//! process.
+//! process. Plus one read of the system: the active power plan, which the
+//! guard's drift check compares with the tuning module's record (design
+//! §5.1, P10: a native read, no PowerShell).
 
 use std::io;
 
-pub use crate::decide::{MIB, working_set_target};
+pub use crate::decide::{MIB, guid_text, working_set_target};
 
 /// Sets the calling process to the HIGH priority class.
 pub fn set_high_priority() -> io::Result<()> {
@@ -42,9 +44,19 @@ pub fn virtual_lock(ptr: *const u8, len: usize) -> io::Result<()> {
     imp::virtual_lock(ptr, len)
 }
 
+/// The GUID of the active power plan (`PowerGetActiveScheme`) in lower case
+/// with hyphens and no braces, as `powercfg` prints it.
+pub fn active_scheme() -> io::Result<String> {
+    imp::active_scheme()
+}
+
 #[cfg(not(windows))]
 mod imp {
     use std::io;
+
+    pub(super) fn active_scheme() -> io::Result<String> {
+        crate::unsupported()
+    }
 
     pub(super) fn set_high_priority() -> io::Result<()> {
         crate::unsupported()
@@ -72,16 +84,19 @@ mod imp {
     use std::io;
     use std::ptr;
 
+    use windows_sys::Win32::Foundation::{ERROR_SUCCESS, LocalFree};
     use windows_sys::Win32::System::Memory::{
         QUOTA_LIMITS_HARDWS_MAX_DISABLE, QUOTA_LIMITS_HARDWS_MIN_ENABLE,
         SetProcessWorkingSetSizeEx, VirtualLock,
     };
+    use windows_sys::Win32::System::Power::PowerGetActiveScheme;
     use windows_sys::Win32::System::Threading::{
         GetCurrentProcess, GetProcessWorkingSetSize, HIGH_PRIORITY_CLASS,
         PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
         PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION, PROCESS_POWER_THROTTLING_STATE,
         ProcessPowerThrottling, SetPriorityClass, SetProcessDefaultCpuSets, SetProcessInformation,
     };
+    use windows_sys::core::GUID;
 
     use crate::win::check;
 
@@ -147,6 +162,27 @@ mod imp {
         // this process.
         check(unsafe { VirtualLock(ptr.cast(), len) })
     }
+
+    pub(super) fn active_scheme() -> io::Result<String> {
+        let mut guid: *mut GUID = ptr::null_mut();
+        // SAFETY: a null root key selects the system's power settings; on
+        // success the call stores the address of a GUID it allocated with
+        // LocalAlloc in `guid`.
+        let rc = unsafe { PowerGetActiveScheme(ptr::null_mut(), &mut guid) };
+        if rc != ERROR_SUCCESS {
+            return Err(io::Error::from_raw_os_error(rc as i32));
+        }
+        if guid.is_null() {
+            return Err(io::Error::other("the active power plan has no GUID"));
+        }
+        // SAFETY: a non-null GUID the call wrote.
+        let plan = unsafe { guid.read() };
+        // SAFETY: the call's LocalAlloc buffer, freed once, here.
+        unsafe { LocalFree(guid.cast()) };
+        Ok(crate::decide::guid_text(
+            plan.data1, plan.data2, plan.data3, plan.data4,
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -175,6 +211,22 @@ mod tests {
         assert_eq!(kind(lock_min_working_set(64)), Some(Unsupported));
         let buf = [0u8; 16];
         assert_eq!(kind(virtual_lock(buf.as_ptr(), 16)), Some(Unsupported));
+        assert_eq!(kind(active_scheme()), Some(Unsupported));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_active_power_plan_is_a_guid() {
+        let plan = active_scheme().unwrap();
+        assert_eq!(plan.len(), 36, "{plan}");
+        for (i, c) in plan.char_indices() {
+            if [8, 13, 18, 23].contains(&i) {
+                assert_eq!(c, '-', "{plan}");
+            } else {
+                assert!(c.is_ascii_hexdigit() && !c.is_ascii_uppercase(), "{plan}");
+            }
+        }
+        assert_eq!(active_scheme().unwrap(), plan);
     }
 
     #[cfg(windows)]

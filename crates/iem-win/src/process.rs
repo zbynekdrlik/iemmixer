@@ -20,6 +20,12 @@ pub struct ModuleScan {
     pub skipped: u32,
 }
 
+/// Every process as `(pid, image name)`, from one snapshot: the guard's
+/// once-a-second look at the process list (S6 design note §5.1, P10).
+pub fn list() -> io::Result<Vec<(u32, String)>> {
+    imp::list()
+}
+
 /// Whether a process with this image name (e.g. `reaper.exe`) exists.
 pub fn exists(image: &str) -> io::Result<bool> {
     imp::exists(image)
@@ -104,6 +110,10 @@ mod imp {
     use std::time::Duration;
 
     use super::ModuleScan;
+
+    pub(super) fn list() -> io::Result<Vec<(u32, String)>> {
+        crate::unsupported()
+    }
 
     pub(super) fn exists(_image: &str) -> io::Result<bool> {
         crate::unsupported()
@@ -210,6 +220,10 @@ mod imp {
         } else {
             Err(err)
         }
+    }
+
+    pub(super) fn list() -> io::Result<Vec<(u32, String)>> {
+        processes()
     }
 
     pub(super) fn exists(image: &str) -> io::Result<bool> {
@@ -443,6 +457,7 @@ mod tests {
         use crate::kind;
         use std::io::ErrorKind::Unsupported;
 
+        assert_eq!(kind(list()), Some(Unsupported));
         assert_eq!(kind(exists("reaper.exe")), Some(Unsupported));
         assert_eq!(kind(pids("reaper.exe")), Some(Unsupported));
         assert_eq!(kind(module_holders("test-card.dll")), Some(Unsupported));
@@ -475,6 +490,12 @@ mod tests {
         assert!(exists(&own_image()).unwrap());
         assert!(pids(&own_image()).unwrap().contains(&me));
         assert!(pids(&own_image().to_uppercase()).unwrap().contains(&me));
+        let all = list().unwrap();
+        assert!(
+            all.iter()
+                .any(|(pid, name)| *pid == me && name.eq_ignore_ascii_case(&own_image())),
+            "{all:?}"
+        );
     }
 
     #[cfg(windows)]
