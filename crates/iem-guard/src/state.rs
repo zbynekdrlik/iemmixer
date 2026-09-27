@@ -99,7 +99,7 @@ impl GuardState {
     /// Stamps `written_at` with `now` and saves atomically.
     pub fn save(&mut self, path: &Path, now: u64) -> io::Result<()> {
         self.written_at = now;
-        save_json(path, self)
+        save_json::<Self>(path, self)
     }
 }
 
