@@ -39,6 +39,7 @@ pub mod format;
 pub mod nullrt;
 pub mod offline;
 pub mod prefwin;
+pub mod reset;
 pub mod telemetry;
 pub mod wav;
 
