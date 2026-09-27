@@ -9,15 +9,103 @@ pub(super) const POST_RELEASE_GUARD_MS: i32 = 100;
 /// Limits to ~20 commands/sec to avoid overwhelming the server.
 pub(super) const THROTTLE_INTERVAL_MS: f64 = 50.0;
 
-/// Processed channel for display (handles stereo pairs)
+/// A channel strip as shown on the active tab.
 /// Note: level_db, pan, muted are read via derived signals from channels
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct DisplayChannel {
-    pub track_index: usize,
+    /// The engine id (input or heard mix).
+    pub id: String,
     pub display_name: String,
-    pub is_stereo: bool,
-    pub partner_index: Option<usize>,
+    /// The page member's own channel (the "more me" strip, first on Main).
     pub is_my_input: bool,
+    /// The viewer may open this channel's EQ.
+    pub eq: bool,
+}
+
+/// The strips of the active tab: Main = the own channel and the pinned ones
+/// (own first); Hidden = the hidden ones; a category tab = its channels
+/// without the hidden ones (stems: CLICK, then GUIDE, then the rest).
+pub(super) fn display_channels(
+    chs: &[iem_core::Channel],
+    active: crate::components::category_tabs::Category,
+    pinned: &[String],
+    hidden: &[String],
+) -> Vec<DisplayChannel> {
+    use crate::components::category_tabs::Category;
+    let mut result: Vec<DisplayChannel> = chs
+        .iter()
+        .filter(|ch| {
+            let is_pinned = pinned.contains(&ch.id);
+            let is_hidden = hidden.contains(&ch.id);
+            match active {
+                Category::Hidden => is_hidden,
+                // Hidden does NOT remove pinned channels from Main — only from category tabs
+                Category::Main => ch.own || is_pinned,
+                cat => cat.matches(&ch.category) && !is_hidden,
+            }
+        })
+        .map(|ch| DisplayChannel {
+            id: ch.id.clone(),
+            display_name: ch.name.clone(),
+            is_my_input: ch.own,
+            eq: ch.eq,
+        })
+        .collect();
+    match active {
+        Category::Stems => result.sort_by_key(|ch| match ch.display_name.to_uppercase().as_str() {
+            "CLICK" => 0,
+            "GUIDE" => 1,
+            _ => 2,
+        }),
+        Category::Main => result.sort_by_key(|ch| !ch.is_my_input),
+        _ => {}
+    }
+    result
+}
+
+/// What a mute click does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MuteClick {
+    /// Show and send the new mute.
+    Toggle(bool),
+    /// The channel is silenced by a solo on another channel: its own mute
+    /// changes (sent, and restored when the solo ends) but it stays silent
+    /// until then (S5 design note §9).
+    Masked(bool),
+}
+
+/// The mute click on channel `id` showing `shown_muted`, given the page's solo
+/// and the mutes the solo started from.
+pub(super) fn mute_click(
+    id: &str,
+    shown_muted: bool,
+    soloed: &std::collections::HashSet<String>,
+    pre_solo_mutes: &std::collections::HashMap<String, bool>,
+) -> MuteClick {
+    if !soloed.is_empty() && !soloed.contains(id) {
+        MuteClick::Masked(!pre_solo_mutes.get(id).copied().unwrap_or(false))
+    } else {
+        MuteClick::Toggle(!shown_muted)
+    }
+}
+
+/// The `&'static` copy of a channel id, so strip callbacks can capture it by
+/// copy. Ids are the site's (a few dozen), each interned once for the page's
+/// life.
+pub(super) fn intern(id: &str) -> &'static str {
+    thread_local! {
+        static IDS: std::cell::RefCell<std::collections::HashSet<&'static str>> =
+            std::cell::RefCell::new(std::collections::HashSet::new());
+    }
+    IDS.with(|ids| {
+        let mut ids = ids.borrow_mut();
+        if let Some(known) = ids.get(id) {
+            return *known;
+        }
+        let leaked: &'static str = Box::leak(id.to_string().into_boxed_str());
+        ids.insert(leaked);
+        leaked
+    })
 }
 
 /// Send a command via WebSocket (synchronous, non-blocking)
@@ -71,6 +159,121 @@ pub(super) fn format_db(db: f32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::components::category_tabs::Category;
+    use std::collections::{HashMap, HashSet};
+
+    fn ch(id: &str, name: &str, category: &str, own: bool) -> iem_core::Channel {
+        iem_core::Channel {
+            id: id.into(),
+            name: name.into(),
+            level_db: 0.0,
+            pan: 0.5,
+            muted: false,
+            category: category.into(),
+            eq: own,
+            own,
+        }
+    }
+
+    fn ids(list: &[DisplayChannel]) -> Vec<&str> {
+        list.iter().map(|c| c.id.as_str()).collect()
+    }
+
+    fn site() -> Vec<iem_core::Channel> {
+        vec![
+            ch("mic1", "MEMBER1 mic", "mics", false),
+            ch("mic3", "MEMBER3 mic", "mics", true),
+            ch("keys", "KEYS", "stems", false),
+            ch("guide", "GUIDE", "stems", false),
+            ch("click", "CLICK", "stems", false),
+            ch("hand1", "HAND1 mic", "tech", false),
+            ch("member2", "Member2", "mixes", false),
+        ]
+    }
+
+    #[test]
+    fn main_shows_the_own_channel_first_then_the_pinned_ones() {
+        let chs = site();
+        let pinned = vec!["keys".to_string(), "mic1".to_string()];
+        let hidden = vec!["keys".to_string()];
+        let main = display_channels(&chs, Category::Main, &pinned, &hidden);
+        assert_eq!(
+            ids(&main),
+            ["mic3", "mic1", "keys"],
+            "hidden stays on Main when pinned"
+        );
+        assert!(main[0].is_my_input && main[0].eq);
+        assert!(!main[1].is_my_input && !main[1].eq);
+    }
+
+    #[test]
+    fn category_tabs_filter_by_category_and_leave_out_hidden_channels() {
+        let chs = site();
+        let hidden = vec!["mic1".to_string()];
+        assert_eq!(
+            ids(&display_channels(&chs, Category::Mics, &[], &hidden)),
+            ["mic3"]
+        );
+        assert_eq!(
+            ids(&display_channels(&chs, Category::Tech, &[], &[])),
+            ["hand1"]
+        );
+        assert_eq!(
+            ids(&display_channels(&chs, Category::Mixes, &[], &[])),
+            ["member2"]
+        );
+        assert_eq!(
+            ids(&display_channels(&chs, Category::Hidden, &[], &hidden)),
+            ["mic1"]
+        );
+        assert!(display_channels(&chs, Category::Hidden, &[], &[]).is_empty());
+    }
+
+    #[test]
+    fn stems_start_with_click_then_guide() {
+        let chs = site();
+        assert_eq!(
+            ids(&display_channels(&chs, Category::Stems, &[], &[])),
+            ["click", "guide", "keys"]
+        );
+    }
+
+    #[test]
+    fn an_id_is_interned_once() {
+        let a = intern("mic7");
+        let b = intern(&String::from("mic7"));
+        assert_eq!(a, "mic7");
+        assert!(std::ptr::eq(a, b));
+        assert_ne!(intern("mic8"), a);
+    }
+
+    #[test]
+    fn a_mute_click_inside_a_solo_changes_the_hidden_mute_only() {
+        let none = HashSet::new();
+        let pre = HashMap::from([("mic1".to_string(), true)]);
+        assert_eq!(
+            mute_click("mic1", false, &none, &pre),
+            MuteClick::Toggle(true)
+        );
+        assert_eq!(
+            mute_click("mic1", true, &none, &pre),
+            MuteClick::Toggle(false)
+        );
+        let solo = HashSet::from(["mic3".to_string()]);
+        assert_eq!(
+            mute_click("mic3", false, &solo, &pre),
+            MuteClick::Toggle(true)
+        );
+        assert_eq!(
+            mute_click("mic1", true, &solo, &pre),
+            MuteClick::Masked(false)
+        );
+        assert_eq!(
+            mute_click("keys", true, &solo, &pre),
+            MuteClick::Masked(true)
+        );
+    }
 
     #[test]
     fn test_format_db_uses_proper_notation() {

@@ -9,85 +9,24 @@ use wasm_bindgen::JsCast;
 use crate::auth::get_token;
 use crate::components::confirm_dialog::ConfirmDialog;
 
-/// Preset data used by the mixer to apply channel states
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PresetData {
-    /// Track index -> channel state
-    pub channels: std::collections::HashMap<usize, ChannelState>,
-    /// Timestamp when preset was created (seconds since epoch)
-    #[serde(default)]
-    pub created_at: Option<i64>,
-    /// Timestamp when preset was last updated (seconds since epoch)
-    #[serde(default)]
-    pub updated_at: Option<i64>,
-    /// Stems bus volume in dB (None if no stems bus)
-    #[serde(default)]
-    pub stems_level_db: Option<f32>,
-    /// EQ band data per track (None if no EQ was loaded during this session)
-    #[serde(default)]
-    pub eq_bands: Option<std::collections::HashMap<usize, Vec<EqBandPreset>>>,
-}
-
-/// Channel state in a preset
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChannelState {
-    pub vol: f32,
-    pub mute: bool,
-    pub pan: f32,
-}
-
-/// Preset info from the server API
+/// Preset info from the server API (the mix itself stays on the server: it
+/// captures the page's mix on save and applies it as a 50 ms ramp on load)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PresetInfo {
     name: String,
+    #[serde(default)]
     channel_count: usize,
     created_at: i64,
     updated_at: i64,
+    /// Imported from the predecessor and read-only (loadable, never changed)
+    #[serde(default)]
+    archived: bool,
 }
 
-/// Full preset entry from the server API
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PresetEntry {
-    name: String,
-    channels: std::collections::HashMap<usize, ChannelState>,
-    created_at: i64,
-    updated_at: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    stems_level_db: Option<f32>,
-    /// EQ band data per track (reaperiem#205 — previously dropped on load).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    eq_bands: Option<std::collections::HashMap<usize, Vec<EqBandPreset>>>,
-}
-
-fn default_true() -> bool {
-    true
-}
-
-/// EQ band data for preset save (mirrors iem_core::EqBand)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EqBandPreset {
-    pub band_type: String,
-    pub freq_hz: f32,
-    pub gain_db: f32,
-    pub bw: f32,
-    pub freq_norm: f32,
-    pub gain_norm: f32,
-    pub bw_norm: f32,
-    /// Whether the band is enabled (reaperiem#205 — round-trips the disabled state so a
-    /// disabled band re-disables on load, matching the server restore path).
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-}
-
-/// Request to save a preset
+/// Request to save a preset (the server captures the current mix)
 #[derive(Serialize)]
 struct SavePresetRequest {
     name: String,
-    channels: std::collections::HashMap<usize, ChannelState>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    stems_level_db: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    eq_bands: Option<std::collections::HashMap<usize, Vec<EqBandPreset>>>,
 }
 
 /// Format timestamp for display in Slovak format (DD.MM. HH:MM)
@@ -119,87 +58,67 @@ async fn fetch_presets(member_id: &str) -> Result<Vec<PresetInfo>, String> {
     }
 }
 
-/// Get a specific preset from server
-async fn fetch_preset(member_id: &str, name: &str) -> Result<PresetEntry, String> {
+/// Save the current mix as a new preset
+async fn save_preset_api(member_id: &str, name: &str) -> Result<(), String> {
+    let token = get_token().ok_or("Not authenticated")?;
+    let url = format!("/api/presets/{}", member_id);
+
+    let resp = gloo_net::http::Request::post(&url)
+        .header("Authorization", &format!("Bearer {}", token))
+        .json(&SavePresetRequest {
+            name: name.to_string(),
+        })
+        .map_err(|e| format!("Request error: {}", e))?
+        .send()
+        .await
+        .map_err(|_| "Chyba siete — preset sa neuložil.".to_string())?;
+
+    if resp.ok() {
+        Ok(())
+    } else {
+        Err(preset_error_message(
+            resp.status(),
+            server_message(resp).await,
+        ))
+    }
+}
+
+/// Overwrite a preset with the current mix
+async fn update_preset_api(member_id: &str, name: &str) -> Result<(), String> {
     let token = get_token().ok_or("Not authenticated")?;
     let url = format!("/api/presets/{}/{}", member_id, encode_name(name));
 
-    let resp = gloo_net::http::Request::get(&url)
+    let resp = gloo_net::http::Request::put(&url)
+        .header("Authorization", &format!("Bearer {}", token))
+        .send()
+        .await
+        .map_err(|_| "Chyba siete — preset sa neuložil.".to_string())?;
+
+    if resp.ok() {
+        Ok(())
+    } else {
+        Err(preset_error_message(
+            resp.status(),
+            server_message(resp).await,
+        ))
+    }
+}
+
+/// Load a preset: the server ramps the page's mix to it (50 ms)
+async fn restore_preset_api(member_id: &str, name: &str) -> Result<(), String> {
+    let token = get_token().ok_or("Not authenticated")?;
+    let url = format!("/api/presets/{}/{}/restore", member_id, encode_name(name));
+
+    let resp = gloo_net::http::Request::post(&url)
         .header("Authorization", &format!("Bearer {}", token))
         .send()
         .await
         .map_err(|e| format!("Network error: {}", e))?;
 
     if resp.ok() {
-        resp.json().await.map_err(|e| format!("Parse error: {}", e))
+        Ok(())
     } else {
         Err(format!("Server error: {}", resp.status()))
-    }
-}
-
-/// Save a preset to server
-async fn save_preset_api(
-    member_id: &str,
-    name: &str,
-    channels: std::collections::HashMap<usize, ChannelState>,
-    stems_level_db: Option<f32>,
-    eq_bands: Option<std::collections::HashMap<usize, Vec<EqBandPreset>>>,
-) -> Result<(), String> {
-    let token = get_token().ok_or("Not authenticated")?;
-    let url = format!("/api/presets/{}", member_id);
-
-    let req = SavePresetRequest {
-        name: name.to_string(),
-        channels,
-        stems_level_db,
-        eq_bands,
-    };
-
-    let resp = gloo_net::http::Request::post(&url)
-        .header("Authorization", &format!("Bearer {}", token))
-        .json(&req)
-        .map_err(|e| format!("Request error: {}", e))?
-        .send()
-        .await
-        .map_err(|_| "Chyba siete — preset sa neuložil.".to_string())?;
-
-    if resp.ok() {
-        Ok(())
-    } else {
-        Err(preset_error_message(resp).await)
-    }
-}
-
-/// Update a preset on server
-async fn update_preset_api(
-    member_id: &str,
-    name: &str,
-    channels: std::collections::HashMap<usize, ChannelState>,
-    stems_level_db: Option<f32>,
-    eq_bands: Option<std::collections::HashMap<usize, Vec<EqBandPreset>>>,
-) -> Result<(), String> {
-    let token = get_token().ok_or("Not authenticated")?;
-    let url = format!("/api/presets/{}/{}", member_id, encode_name(name));
-
-    let req = SavePresetRequest {
-        name: name.to_string(),
-        channels,
-        stems_level_db,
-        eq_bands,
-    };
-
-    let resp = gloo_net::http::Request::put(&url)
-        .header("Authorization", &format!("Bearer {}", token))
-        .json(&req)
-        .map_err(|e| format!("Request error: {}", e))?
-        .send()
-        .await
-        .map_err(|_| "Chyba siete — preset sa neuložil.".to_string())?;
-
-    if resp.ok() {
-        Ok(())
-    } else {
-        Err(preset_error_message(resp).await)
     }
 }
 
@@ -221,23 +140,29 @@ async fn delete_preset_api(member_id: &str, name: &str) -> Result<(), String> {
     }
 }
 
-/// Turn a failed preset request into a human Slovak message (reaperiem#205 — the UI used
-/// to render the bare HTTP status, e.g. "Server error: 409" for the 20-preset
-/// limit). Reads the server's structured `ApiError` body for context.
-async fn preset_error_message(resp: gloo_net::http::Response) -> String {
+/// The server's `ApiError` message of a failed request, if any.
+async fn server_message(resp: gloo_net::http::Response) -> Option<String> {
     #[derive(Deserialize)]
     struct ApiErr {
         #[serde(default)]
         message: String,
     }
-    let status = resp.status();
-    let server_msg = resp.json::<ApiErr>().await.ok().map(|e| e.message);
+    resp.json::<ApiErr>().await.ok().map(|e| e.message)
+}
+
+/// Turn a failed preset request into a human Slovak message (reaperiem#205 — the UI used
+/// to render the bare HTTP status, e.g. "Server error: 409" for the 20-preset
+/// limit). `server_msg` is the server's `ApiError` message.
+fn preset_error_message(status: u16, server_msg: Option<String>) -> String {
     match status {
         409 => "Dosiahli ste maximum 20 presetov. Najprv niektorý zmažte.".to_string(),
         400 => server_msg
             .filter(|m| !m.is_empty())
             .unwrap_or_else(|| "Neplatná požiadavka.".to_string()),
-        401 | 403 => "Prihlásenie vypršalo. Obnovte stránku a skúste znova.".to_string(),
+        401 => "Prihlásenie vypršalo. Obnovte stránku a skúste znova.".to_string(),
+        403 => server_msg
+            .filter(|m| !m.is_empty())
+            .unwrap_or_else(|| "Prihlásenie vypršalo. Obnovte stránku a skúste znova.".to_string()),
         _ => format!("Chyba servera ({}). Skúste to znova.", status),
     }
 }
@@ -265,14 +190,10 @@ pub fn PresetModal(
     visible: ReadSignal<bool>,
     /// Member ID for preset storage
     member_id: String,
-    /// Whether the WebSocket to REAPER is connected (load is blocked otherwise, reaperiem#205)
+    /// Whether the mixer is connected (load is blocked otherwise, reaperiem#205)
     connected: ReadSignal<bool>,
     /// Called to close modal
     on_close: Callback<()>,
-    /// Called when a preset is loaded
-    on_load: Callback<PresetData>,
-    /// Called to get current channel states for saving
-    get_current_state: Callback<(), PresetData>,
 ) -> impl IntoView {
     let (presets, set_presets) = signal(Vec::<PresetInfo>::new());
     let (new_name, set_new_name) = signal(String::new());
@@ -287,20 +208,11 @@ pub fn PresetModal(
 
     // The actual overwrite/delete operations, callable from the confirm dialog.
     let do_overwrite = Callback::new(move |name: String| {
-        let state = get_current_state.run(());
         let member_id = member_id_stored.get_value();
         let _ = set_loading.try_set(true);
         let _ = set_error.try_set(None);
         wasm_bindgen_futures::spawn_local(async move {
-            match update_preset_api(
-                &member_id,
-                &name,
-                state.channels,
-                state.stems_level_db,
-                state.eq_bands,
-            )
-            .await
-            {
+            match update_preset_api(&member_id, &name).await {
                 Ok(()) => {
                     if let Ok(list) = fetch_presets(&member_id).await {
                         let _ = set_presets.try_set(list);
@@ -379,20 +291,11 @@ pub fn PresetModal(
             return;
         }
 
-        let state = get_current_state.run(());
         let member_id = member_id_stored.get_value();
         let _ = set_loading.try_set(true);
 
         wasm_bindgen_futures::spawn_local(async move {
-            match save_preset_api(
-                &member_id,
-                &name,
-                state.channels,
-                state.stems_level_db,
-                state.eq_bands,
-            )
-            .await
-            {
+            match save_preset_api(&member_id, &name).await {
                 Ok(()) => {
                     // Refresh list
                     if let Ok(list) = fetch_presets(&member_id).await {
@@ -462,6 +365,8 @@ pub fn PresetModal(
                                         let name_overwrite = info.name.clone();
                                         let name_delete = info.name.clone();
                                         let updated_at = info.updated_at;
+                                        // Archived presets are loadable, never changed (D8).
+                                        let editable = !info.archived;
 
                                         view! {
                                             <div class="preset-item">
@@ -484,18 +389,8 @@ pub fn PresetModal(
                                                             let member_id = member_id_stored.get_value();
                                                             let name = name_load.clone();
                                                             wasm_bindgen_futures::spawn_local(async move {
-                                                                match fetch_preset(&member_id, &name).await {
-                                                                    Ok(entry) => {
-                                                                        let data = PresetData {
-                                                                            channels: entry.channels.into_iter().map(|(k, v)| {
-                                                                                (k, ChannelState { vol: v.vol, mute: v.mute, pan: v.pan })
-                                                                            }).collect(),
-                                                                            created_at: Some(entry.created_at),
-                                                                            updated_at: Some(entry.updated_at),
-                                                                            stems_level_db: entry.stems_level_db,
-                                                                            eq_bands: entry.eq_bands,
-                                                                        };
-                                                                        on_load.run(data);
+                                                                match restore_preset_api(&member_id, &name).await {
+                                                                    Ok(()) => {
                                                                         on_close.run(());
                                                                     }
                                                                     Err(e) => {
@@ -509,6 +404,7 @@ pub fn PresetModal(
                                                     >
                                                         "Načítať"
                                                     </button>
+                                                    {editable.then(|| view! {
                                                     <button
                                                         class="update-preset"
                                                         on:click=move |_| {
@@ -539,6 +435,7 @@ pub fn PresetModal(
                                                     >
                                                         "Zmazať"
                                                     </button>
+                                                    })}
                                                 </div>
                                             </div>
                                         }
@@ -585,5 +482,44 @@ pub fn PresetModal(
             })
         />
         </>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preset_errors_read_as_slovak_sentences() {
+        assert!(preset_error_message(409, None).contains("maximum 20"));
+        assert_eq!(
+            preset_error_message(400, Some("Preset name cannot be empty".into())),
+            "Preset name cannot be empty"
+        );
+        assert_eq!(
+            preset_error_message(400, Some(String::new())),
+            "Neplatná požiadavka."
+        );
+        assert!(preset_error_message(401, None).starts_with("Prihlásenie vypršalo"));
+        assert_eq!(
+            preset_error_message(403, Some("Archived presets are read-only".into())),
+            "Archived presets are read-only"
+        );
+        assert!(preset_error_message(403, None).starts_with("Prihlásenie vypršalo"));
+        assert_eq!(
+            preset_error_message(500, None),
+            "Chyba servera (500). Skúste to znova."
+        );
+    }
+
+    #[test]
+    fn preset_info_reads_the_servers_list() {
+        let list: Vec<PresetInfo> = serde_json::from_str(
+            r#"[{"name":"Sunday","channel_count":24,"created_at":1,"updated_at":2,"archived":true},
+                {"name":"Old","created_at":1,"updated_at":2}]"#,
+        )
+        .unwrap();
+        assert!(list[0].archived && !list[1].archived);
+        assert_eq!(list[0].channel_count, 24);
     }
 }

@@ -126,12 +126,45 @@ async fn with_hasher<T: Send + 'static>(
 }
 
 async fn member_exists(state: &AppState, member: &str) -> bool {
-    state
-        .discovered_members
+    state.site_config.member(member).is_some()
+}
+
+/// Checks the engineer PIN like a login (admission before hashing, the
+/// hashing gate, failure budgets); the "Back to REAPER" switch needs it.
+pub async fn verify_engineer_pin(
+    state: &AppState,
+    peer: SocketAddr,
+    headers: &HeaderMap,
+    pin: &str,
+) -> Result<(), Rejection> {
+    let client = ClientKey::from_request(peer.ip(), headers);
+    let now = Instant::now();
+    if let Err(wait) = state.login_guard.check(&client, ENGINEER_ID, now) {
+        return Err(Rejection::from(too_many_attempts(wait)));
+    }
+    let hash = state
+        .pin_store
         .read()
         .await
-        .iter()
-        .any(|m| m.id() == member)
+        .engineer_hash()
+        .map(str::to_owned);
+    let pin = pin.to_string();
+    let ok = with_hasher(state, move |hasher| {
+        hasher.verify_optional(&pin, hash.as_deref())
+    })
+    .await?;
+    if ok {
+        state.login_guard.record_success(&client, ENGINEER_ID);
+        Ok(())
+    } else {
+        record_failure(state, &client, ENGINEER_ID, now);
+        tracing::warn!(origin = ?client.origin, "engineer PIN check failed");
+        Err(Rejection::from(error_response(
+            StatusCode::UNAUTHORIZED,
+            "INVALID_PIN",
+            "Invalid PIN",
+        )))
+    }
 }
 
 fn record_failure(state: &AppState, client: &ClientKey, member: &str, now: Instant) {
@@ -648,15 +681,11 @@ mod login_tests {
     const LAN: [u8; 4] = [10, 0, 0, 50];
     const LOOPBACK: [u8; 4] = [127, 0, 0, 1];
 
-    fn discovered(name: &str) -> iem_core::DiscoveredMember {
-        iem_core::DiscoveredMember {
-            name: name.to_string(),
-            track_index: 0,
-            dante_output_l: 71,
-            dante_output_r: 72,
-            send_index: 0,
-            mix_send_index: None,
-            mix_send_indices: std::collections::HashMap::new(),
+    fn member(id: &str) -> iem_core::SiteMember {
+        iem_core::SiteMember {
+            id: id.to_string(),
+            name: id.to_uppercase(),
+            mix: id.to_string(),
         }
     }
 
@@ -664,16 +693,11 @@ mod login_tests {
     async fn test_state(dir: &std::path::Path) -> AppState {
         let config = iem_core::Config {
             jwt_secret: SECRET.to_string(),
+            members: vec![member("member1"), member("member2"), member("engineer")],
             ..iem_core::Config::default()
         };
         let mut state = AppState::new(config, dir);
         state.pin_hasher = PinHasher::for_tests([5u8; PEPPER_LEN]);
-        {
-            let mut members = state.discovered_members.write().await;
-            members.push(discovered("MEMBER1"));
-            members.push(discovered("MEMBER2"));
-            members.push(discovered("ENGINEER"));
-        }
         let engineer_hash = state.pin_hasher.hash(ENGINEER_PIN);
         let member_hash = state.pin_hasher.hash(MEMBER_PIN);
         {
@@ -1116,5 +1140,31 @@ mod login_tests {
         )
         .await;
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn the_engineer_pin_check_is_a_guarded_login() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path()).await;
+        let peer = SocketAddr::from((LAN, 40000));
+        let headers = HeaderMap::new();
+        assert!(
+            verify_engineer_pin(&state, peer, &headers, ENGINEER_PIN)
+                .await
+                .is_ok()
+        );
+        for _ in 0..3 {
+            let r = verify_engineer_pin(&state, peer, &headers, MEMBER_PIN)
+                .await
+                .expect_err("a member PIN is not the engineer PIN")
+                .into_response();
+            assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        }
+        let r = verify_engineer_pin(&state, peer, &headers, ENGINEER_PIN)
+            .await
+            .expect_err("throttled after three failures")
+            .into_response();
+        assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(state.login_guard.stats().lan_failures, 3);
     }
 }

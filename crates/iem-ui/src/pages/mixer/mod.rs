@@ -1,7 +1,9 @@
 //! Mixer page with faders, meters, categories, and presets
 //!
-//! Uses WebSocket for real-time bidirectional communication with REAPER.
+//! Uses WebSocket for real-time bidirectional communication with the server
+//! (UI protocol v2: channels keyed by engine ids).
 
+use crate::components::activity_banner::ActivityBanner;
 use crate::components::alert_toast::AlertToast;
 use crate::components::category_tabs::{Category, CategoryTabs};
 use crate::components::eq_modal::EQModal;
@@ -119,7 +121,7 @@ pub fn MixerPage() -> impl IntoView {
     let (stems_level, set_stems_level) = state.stems_level;
     let (stems_muted, set_stems_muted) = state.stems_muted;
     let set_stems_touched = state.stems_touched.1;
-    let stems_bus_idx = state.stems_bus_idx.0;
+    let stems_group = state.stems_group.0;
     let (eq_open, set_eq_open) = state.eq_open;
     let (eq_bands, set_eq_bands) = state.eq_bands;
     let (eq_loading, set_eq_loading) = state.eq_loading;
@@ -132,11 +134,14 @@ pub fn MixerPage() -> impl IntoView {
     let (pinned_channels, set_pinned_channels) = state.pinned_channels;
     let (hidden_channels, set_hidden_channels) = state.hidden_channels;
     let network_mode = state.network_mode.0;
-    let output_track_idx = state.output_track_idx.0;
+    let page_mix = state.page_mix.0;
     let alert_data = state.alert_data.0;
     let alert_active = state.alert_active.0;
     let (talk_state, set_talk_state) = state.talk_state;
     let engineer_talking = state.engineer_talking.0;
+    let talk_id = state.talk_id.0;
+    let band_activity = state.band_activity.0;
+    let console = state.console.0;
     let tunnel = state.tunnel.0;
     let ws = state.ws.0;
 
@@ -170,21 +175,14 @@ pub fn MixerPage() -> impl IntoView {
         navigate_back("/", Default::default());
     };
 
-    // Process channels for display (handle stereo pairs, pin/hide)
+    // Process channels for display (tab, pin/hide)
     // Memoized to avoid recomputation on every meter update
     let display_channels = handlers::make_display_channels(
         channels,
-        member_id_signal,
         active_category,
         pinned_channels,
         hidden_channels,
     );
-
-    // Preset handlers
-    let get_current_state =
-        handlers::make_get_current_state(channels, stems_bus_idx, stems_level, eq_bands, eq_open);
-
-    let on_load_preset = handlers::make_on_load_preset(connected, set_channels, ws);
 
     // Toolbar callbacks
     // Show engineer toolbar (Mute All + Listen) on any page when logged in as engineer
@@ -243,7 +241,8 @@ pub fn MixerPage() -> impl IntoView {
                             }
                             // Optimistic UI: restore pre-solo mutes locally
                             state.clear_solo();
-                            // Send empty SetSolo — server restores REAPER mutes and broadcasts
+                            // Send empty SetSolo — the engine lifts the mask and the server
+                            // sends every channel's mute
                             ws_send(ws, &iem_core::ClientMsg::SetSolo { soloed: vec![] });
                         }
                     >
@@ -285,6 +284,9 @@ pub fn MixerPage() -> impl IntoView {
             {is_engineer.then(|| view! { <TunnelIndicator status=tunnel /> })}
             {(!is_engineer).then(|| view! { <TunnelBanner status=tunnel /> })}
 
+            // Band activity while developing (§4.2): banner + "Back to REAPER" (engineer)
+            {is_engineer.then(|| view! { <ActivityBanner activity=band_activity /> })}
+
             <CategoryTabs
                 active=active_category
                 on_select=move |cat| { state.select_category(cat); }
@@ -325,7 +327,7 @@ pub fn MixerPage() -> impl IntoView {
                                 connected=connected
                                 ws=ws
                                 meters=meters
-                                output_track_idx=output_track_idx
+                                page_mix=page_mix
                                 set_eq_open=set_eq_open
                                 set_eq_bands=set_eq_bands
                                 set_eq_loading=set_eq_loading
@@ -346,7 +348,7 @@ pub fn MixerPage() -> impl IntoView {
                                 connected=connected
                                 ws=ws
                                 meters=meters
-                                stems_bus_idx=stems_bus_idx
+                                stems_group=stems_group
                                 set_eq_open=set_eq_open
                                 set_eq_bands=set_eq_bands
                                 set_eq_loading=set_eq_loading
@@ -373,8 +375,6 @@ pub fn MixerPage() -> impl IntoView {
                             set_eq_open=set_eq_open
                             set_eq_bands=set_eq_bands
                             set_eq_loading=set_eq_loading
-                            member_id=member_id()
-                            is_engineer=is_engineer
                         />
                         <Show
                             when=move || active_category.get() == Category::Main
@@ -389,7 +389,7 @@ pub fn MixerPage() -> impl IntoView {
                                 connected=connected
                                 ws=ws
                                 meters=meters
-                                stems_bus_idx=stems_bus_idx
+                                stems_group=stems_group
                                 set_eq_open=set_eq_open
                                 set_eq_bands=set_eq_bands
                                 set_eq_loading=set_eq_loading
@@ -410,6 +410,7 @@ pub fn MixerPage() -> impl IntoView {
                 alert_active=alert_active
                 talk_state=talk_state
                 set_talk_state=set_talk_state
+                talk_id=talk_id
             />
 
             {is_engineer.then(|| view! {
@@ -426,8 +427,6 @@ pub fn MixerPage() -> impl IntoView {
                 member_id=member_id()
                 connected=connected
                 on_close=on_close_modal
-                on_load=on_load_preset
-                get_current_state=get_current_state
             />
 
             <SettingsModal
@@ -440,6 +439,8 @@ pub fn MixerPage() -> impl IntoView {
                 is_engineer=is_engineer_own_mixer
                 has_photo=has_photo.into()
                 set_has_photo=set_has_photo
+                console=console
+                ws=ws
             />
 
             <PinChangeModal
@@ -457,18 +458,18 @@ pub fn MixerPage() -> impl IntoView {
             // EQ Modal (full-screen, shown when eq_open is Some)
             <Show when=move || eq_open.get().is_some() fallback=|| ()>
                 {move || {
-                    let (track_idx, track_name) = eq_open.get().unwrap();
+                    let (target, track_name) = eq_open.get().unwrap();
                     let ws_for_eq = ws;
                     view! {
                         <EQModal
-                            track_index=track_idx
+                            target=target
                             track_name=track_name
                             bands=eq_bands
                             loading=eq_loading
                             on_param_change=Callback::new(move |(band, param, value): (u8, String, f32)| {
-                                if let Some((ti, _)) = eq_open.get_untracked() {
+                                if let Some((target, _)) = eq_open.get_untracked() {
                                     ws_send(ws_for_eq, &iem_core::ClientMsg::SetEqBand {
-                                        track_index: ti,
+                                        target,
                                         band,
                                         param,
                                         value,
@@ -490,7 +491,7 @@ pub fn MixerPage() -> impl IntoView {
             // Limiter Modal (reaperiem#72)
             <Show when=move || limiter_open.get().is_some() fallback=|| ()>
                 {move || {
-                    let (_track_idx, track_name) = limiter_open.get().unwrap();
+                    let track_name = limiter_open.get().unwrap();
                     let ws_for_lim = ws;
                     view! {
                         <LimiterModal
@@ -501,29 +502,25 @@ pub fn MixerPage() -> impl IntoView {
                             loading=limiter_loading
                             active_seconds=limiter_active_seconds
                             on_reset=Callback::new(move |_: ()| {
-                                if let Some((ti, _)) = limiter_open.get_untracked() {
-                                    ws_send(ws_for_lim, &iem_core::ClientMsg::ResetLimiterActivity {
-                                        track_index: ti,
-                                    });
+                                if limiter_open.get_untracked().is_some() {
+                                    ws_send(ws_for_lim, &iem_core::ClientMsg::ResetLimiterActivity);
                                     // Optimistic local update so the user sees "never" immediately.
                                     state.reset_limiter_activity();
                                 }
                             })
                             on_param_change=Callback::new(move |(param, value): (String, f32)| {
-                                if let Some((ti, _)) = limiter_open.get_untracked() {
+                                if limiter_open.get_untracked().is_some() {
                                     // Optimistic local update (no server echo)
                                     state.set_limiter_param(value);
                                     ws_send(ws_for_lim, &iem_core::ClientMsg::SetLimiterParam {
-                                        track_index: ti,
                                         param,
                                         value,
                                     });
                                 }
                             })
                             on_enabled_change=Callback::new(move |en: bool| {
-                                if let Some((ti, _)) = limiter_open.get_untracked() {
+                                if limiter_open.get_untracked().is_some() {
                                     ws_send(ws_for_lim, &iem_core::ClientMsg::SetLimiterEnabled {
-                                        track_index: ti,
                                         enabled: en,
                                     });
                                     state.set_limiter_enabled_state(en);

@@ -5,6 +5,7 @@
 pub mod api;
 pub mod auth;
 pub mod components;
+pub mod handshake;
 pub mod lifecycle;
 pub mod pages;
 pub mod router;

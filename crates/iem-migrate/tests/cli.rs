@@ -8,7 +8,7 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use iem_core::band::{CustomizationFile, PresetFile, SnapshotFile};
-use iem_core::{ChannelPreset, ChannelSnapshot, Customization, MixSnapshot, PresetEntry};
+use iem_core::legacy::{ChannelPreset, ChannelSnapshot, Customization, MixSnapshot, PresetEntry};
 use iem_engine::core::{reconcile, to_state};
 use iem_engine::persist::{Persisted, Source as Saved, Store};
 use iem_engine_proto::{GroupId, InputId, MixId, MixState, Source};

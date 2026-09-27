@@ -278,15 +278,15 @@ fn meter_update_due(now: f64, last_applied: f64) -> bool {
     now - last_applied >= METER_THROTTLE_MS
 }
 
-/// Whether a server `ChannelUpdate` for `track_index` applies: never while the
-/// user is touching that fader (their gesture wins).
-fn channel_update_applies(touched: &HashMap<usize, bool>, track_index: usize) -> bool {
-    !touched.get(&track_index).copied().unwrap_or(false)
+/// Whether a server `ChannelUpdate` for `id` applies: never while the user is
+/// touching that fader (their gesture wins).
+fn channel_update_applies(touched: &HashMap<String, bool>, id: &str) -> bool {
+    !touched.get(id).copied().unwrap_or(false)
 }
 
 /// Write a server `ChannelUpdate` into the matching channel.
-fn update_channel(chs: &mut [Channel], track_index: usize, level_db: f32, muted: bool, pan: f32) {
-    if let Some(ch) = chs.iter_mut().find(|c| c.track_index == track_index) {
+fn update_channel(chs: &mut [Channel], id: &str, level_db: f32, muted: bool, pan: f32) {
+    if let Some(ch) = chs.iter_mut().find(|c| c.id == id) {
         ch.level_db = level_db;
         ch.muted = muted;
         ch.pan = pan;
@@ -306,7 +306,7 @@ enum SoloChange {
     Switched,
 }
 
-fn solo_change(current: &HashSet<usize>, new: &HashSet<usize>) -> SoloChange {
+fn solo_change(current: &HashSet<String>, new: &HashSet<String>) -> SoloChange {
     if new == current {
         SoloChange::Unchanged
     } else if new.is_empty() {
@@ -319,10 +319,31 @@ fn solo_change(current: &HashSet<usize>, new: &HashSet<usize>) -> SoloChange {
 }
 
 /// Exclusive solo: every channel outside `soloed` shows as muted.
-fn show_exclusive_solo(chs: &mut [Channel], soloed: &HashSet<usize>) {
+fn show_exclusive_solo(chs: &mut [Channel], soloed: &HashSet<String>) {
     for c in chs.iter_mut() {
-        c.muted = !soloed.contains(&c.track_index);
+        c.muted = !soloed.contains(&c.id);
     }
+}
+
+/// The console after one input changed (F29).
+fn update_console_input(console: &mut iem_core::ConsoleInfo, input: iem_core::ConsoleInput) {
+    if let Some(i) = console.inputs.iter_mut().find(|i| i.id == input.id) {
+        *i = input;
+    }
+}
+
+/// The EQ modal's bands from the server's.
+fn eq_band_states(bands: Vec<iem_core::EqBand>) -> Vec<EqBandState> {
+    bands
+        .into_iter()
+        .map(|b| EqBandState {
+            band_type: b.band_type,
+            freq_hz: b.freq_hz,
+            gain_db: b.gain_db,
+            bw: b.bw,
+            enabled: b.enabled,
+        })
+        .collect()
 }
 
 /// Whether an `AlertCleared` for `cleared` removes the alert on screen.
@@ -360,7 +381,7 @@ fn connect_websocket(
     let set_hidden_channels = state.hidden_channels.1;
     let set_network_mode = state.network_mode.1;
     let set_tunnel = state.tunnel.1;
-    let set_output_track_idx = state.output_track_idx.1;
+    let set_page_mix = state.page_mix.1;
     let set_soloed = state.soloed.1;
     let set_pre_solo_mutes = state.pre_solo_mutes.1;
     let channels = state.channels.0;
@@ -368,7 +389,7 @@ fn connect_websocket(
     let set_stems_level = state.stems_level.1;
     let set_stems_muted = state.stems_muted.1;
     let stems_touched = state.stems_touched.0;
-    let set_stems_bus_idx = state.stems_bus_idx.1;
+    let set_stems_group = state.stems_group.1;
     let set_eq_bands = state.eq_bands.1;
     let set_eq_loading = state.eq_loading.1;
     let set_limiter_limit_db = state.limiter_limit_db.1;
@@ -381,6 +402,15 @@ fn connect_websocket(
     let set_alert_active = state.alert_active.1;
     let set_talk_state = state.talk_state.1;
     let set_engineer_talking = state.engineer_talking.1;
+    let set_talk_id = state.talk_id.1;
+    let set_band_activity = state.band_activity.1;
+    let set_console = state.console.1;
+    // Without a valid token the page is on its way to the login (the auth
+    // guard redirects); a socket now would only be refused.
+    if crate::auth::is_token_expired() {
+        return;
+    }
+
     // Close previous WebSocket if exists (prevents closure leak on reconnect)
     if let Some(Some(old_ws)) = ws.try_get_untracked() {
         old_ws.set_onmessage(None);
@@ -401,9 +431,9 @@ fn connect_websocket(
     } else {
         "ws"
     };
-    // Include JWT token in WebSocket URL for authentication
+    // The JWT authenticates the socket; `proto` is this page's UI protocol (§5.3).
     let token = crate::auth::get_token().unwrap_or_default();
-    let ws_url = format!("{}://{}/ws/{}?token={}", protocol, host, member, token);
+    let ws_url = crate::handshake::mixer_ws_url(protocol, &host, member, &token);
 
     let ws = match web_sys::WebSocket::new(&ws_url) {
         Ok(ws) => ws,
@@ -436,6 +466,36 @@ fn connect_websocket(
 
     let disposal_guard_msg = disposal_guard.clone();
 
+    // Handshake (§5.3): a socket open for HELLO_TIMEOUT_MS without the server's
+    // hello is a server that does not speak this protocol — reload once.
+    let hello_seen = std::rc::Rc::new(std::cell::Cell::new(false));
+    {
+        let hello_seen = hello_seen.clone();
+        let socket = ws.clone();
+        let guard = disposal_guard.clone();
+        let cb = Closure::once_into_js(move || {
+            if guard.load(std::sync::atomic::Ordering::Relaxed)
+                || hello_seen.get()
+                || socket.ready_state() != web_sys::WebSocket::OPEN
+            {
+                return;
+            }
+            let now = js_sys::Date::now();
+            if crate::handshake::on_missing_hello(now, crate::handshake::last_reload())
+                == crate::handshake::Decision::Reload
+            {
+                crate::handshake::reload(now, "no hello from the server");
+            }
+        });
+        if let Some(w) = web_sys::window() {
+            let _ = w.set_timeout_with_callback_and_timeout_and_arguments_0(
+                cb.unchecked_ref(),
+                crate::handshake::HELLO_TIMEOUT_MS as i32,
+            );
+        }
+    }
+    let hello_seen_msg = hello_seen.clone();
+
     // Handle incoming messages
     let onmessage = Closure::wrap(Box::new(move |e: web_sys::MessageEvent| {
         // Disposal guard: if the ConnectionManager has been dropped, no-op.
@@ -459,22 +519,43 @@ fn connect_websocket(
                 return;
             };
             match msg {
+                iem_core::ServerMsg::Hello {
+                    proto,
+                    build,
+                    min_client_proto,
+                } => {
+                    hello_seen_msg.set(true);
+                    let now = js_sys::Date::now();
+                    if crate::handshake::on_hello(
+                        crate::handshake::OUR_PROTO,
+                        proto,
+                        min_client_proto,
+                        now,
+                        crate::handshake::last_reload(),
+                    ) == crate::handshake::Decision::Reload
+                    {
+                        crate::handshake::reload(
+                            now,
+                            &format!(
+                                "server {build} serves UI protocol {min_client_proto}..={proto}"
+                            ),
+                        );
+                    }
+                }
                 iem_core::ServerMsg::State {
                     channels: new_chs,
                     connected: conn,
                     global_level_db,
                     global_muted,
-                    output_track_index,
+                    mix,
                     stems_level_db,
                     stems_muted,
-                    stems_bus_index,
+                    group,
                 } => {
                     // Successfully received data — reset failure counter
                     fail_count_msg.set(0);
                     let _ = set_channels.try_update(|chs| {
-                        let touched_snapshot: std::collections::HashMap<usize, bool> =
-                            touched.iter().map(|(k, v)| (*k, *v)).collect();
-                        iem_core::merge_or_replace_channels(chs, new_chs, &touched_snapshot);
+                        iem_core::merge_or_replace_channels(chs, new_chs, &touched);
                     });
                     // Update global volume from initial state
                     if let Some(lvl) = global_level_db {
@@ -483,8 +564,8 @@ fn connect_websocket(
                     if let Some(muted) = global_muted {
                         let _ = set_global_muted.try_set(muted);
                     }
-                    if let Some(idx) = output_track_index {
-                        let _ = set_output_track_idx.try_set(Some(idx));
+                    if let Some(mix) = mix {
+                        let _ = set_page_mix.try_set(Some(mix));
                     }
                     if let Some(lvl) = stems_level_db {
                         let _ = set_stems_level.try_set(lvl);
@@ -492,9 +573,8 @@ fn connect_websocket(
                     if let Some(muted) = stems_muted {
                         let _ = set_stems_muted.try_set(muted);
                     }
-                    if let Some(idx) = stems_bus_index {
-                        let _ = set_stems_bus_idx.try_set(Some(idx));
-                    }
+                    // The stems strip exists only on a mix that has the group.
+                    let _ = set_stems_group.try_set(group);
                     let _ = set_connected.try_set(conn);
                     let _ = set_loading.try_set(false);
                 }
@@ -516,14 +596,14 @@ fn connect_websocket(
                     }
                 }
                 iem_core::ServerMsg::ChannelUpdate {
-                    track_index,
+                    id,
                     level_db,
                     muted,
                     pan,
                 } => {
-                    if channel_update_applies(&touched, track_index) {
+                    if channel_update_applies(&touched, &id) {
                         let _ = set_channels.try_update(|chs| {
-                            update_channel(chs, track_index, level_db, muted, pan);
+                            update_channel(chs, &id, level_db, muted, pan);
                         });
                     }
                 }
@@ -553,7 +633,7 @@ fn connect_websocket(
                     let _ = set_tunnel.try_set(Some(info));
                 }
                 iem_core::ServerMsg::SoloUpdate { soloed: new_solo } => {
-                    let new_soloed: HashSet<usize> = new_solo.into_iter().collect();
+                    let new_soloed: HashSet<String> = new_solo.into_iter().collect();
                     let Some(current) = soloed.try_get_untracked() else {
                         return;
                     };
@@ -566,7 +646,7 @@ fn connect_websocket(
                             let chs = channels.try_get_untracked().unwrap_or_default();
                             let mut saved = HashMap::new();
                             for ch in &chs {
-                                saved.insert(ch.track_index, ch.muted);
+                                saved.insert(ch.id.clone(), ch.muted);
                             }
                             let _ = set_pre_solo_mutes.try_set(saved);
                         }
@@ -605,13 +685,15 @@ fn connect_websocket(
                             .try_set(Some((first.from_member.clone(), first.from_name.clone())));
                     }
                 }
-                iem_core::ServerMsg::TalkAcquired => {
+                iem_core::ServerMsg::TalkAcquired { talk_id } => {
+                    let _ = set_talk_id.try_set(Some(talk_id));
                     let _ = set_talk_state.try_set(TalkState::Live);
                 }
                 iem_core::ServerMsg::TalkBusy { .. } => {
                     let _ = set_talk_state.try_set(TalkState::InUse);
                 }
                 iem_core::ServerMsg::TalkReleased => {
+                    let _ = set_talk_id.try_set(None);
                     let _ = set_talk_state.try_set(TalkState::Idle);
                 }
                 iem_core::ServerMsg::EngineerTalking { active } => {
@@ -628,33 +710,25 @@ fn connect_websocket(
                     }
                     let _ = set_engineer_talking.try_set(active);
                 }
-                iem_core::ServerMsg::EqParams {
-                    track_index: _,
-                    track_name: _,
-                    bands,
-                } => {
-                    let _ = set_eq_bands.try_set(
-                        bands
-                            .into_iter()
-                            .map(|b| EqBandState {
-                                band_type: b.band_type,
-                                freq_hz: b.freq_hz,
-                                gain_db: b.gain_db,
-                                bw: b.bw,
-                                freq_norm: b.freq_norm,
-                                gain_norm: b.gain_norm,
-                                bw_norm: b.bw_norm,
-                                enabled: b.enabled,
-                            })
-                            .collect(),
-                    );
+                iem_core::ServerMsg::EqParams { bands, .. } => {
+                    let _ = set_eq_bands.try_set(eq_band_states(bands));
                     let _ = set_eq_loading.try_set(false);
                 }
-                iem_core::ServerMsg::EqParamsMulti { .. } => {
-                    // Handled by preset modal (future integration)
+                iem_core::ServerMsg::Console(info) => {
+                    let _ = set_console.try_set(Some(info));
+                }
+                iem_core::ServerMsg::InputUpdate(input) => {
+                    let _ = set_console.try_update(|c| {
+                        if let Some(c) = c {
+                            update_console_input(c, input);
+                        }
+                    });
+                }
+                iem_core::ServerMsg::BandActivity { active, can_switch } => {
+                    let _ = set_band_activity.try_set((active, can_switch));
                 }
                 iem_core::ServerMsg::LimiterParams {
-                    track_index: _,
+                    mix: _,
                     track_name: _,
                     limit_db,
                     limit_norm,
@@ -675,8 +749,17 @@ fn connect_websocket(
     let reconnect_attempt_close = reconnect_attempt.clone();
 
     // Handle close — mark disconnected and increment failure counter
-    let onclose = Closure::wrap(Box::new(move |_: web_sys::CloseEvent| {
+    let onclose = Closure::wrap(Box::new(move |e: web_sys::CloseEvent| {
         let _ = set_connected.try_set(false);
+        // The server refuses a page that does not speak a served protocol.
+        if e.code() == crate::handshake::CLOSE_RELOAD {
+            let now = js_sys::Date::now();
+            if crate::handshake::on_missing_hello(now, crate::handshake::last_reload())
+                == crate::handshake::Decision::Reload
+            {
+                crate::handshake::reload(now, "the server closed the socket for a reload");
+            }
+        }
         fail_count_close.set(fail_count_close.get() + 1);
         reconnect_attempt_close.set(reconnect_attempt_close.get() + 1);
     }) as Box<dyn FnMut(web_sys::CloseEvent)>);
@@ -691,21 +774,21 @@ fn connect_websocket(
 mod tests {
     use super::*;
 
-    fn channel(track_index: usize, muted: bool) -> Channel {
+    fn channel(id: &str, muted: bool) -> Channel {
         Channel {
-            track_index,
-            name: format!("In {track_index}"),
+            id: id.to_string(),
+            name: id.to_uppercase(),
             level_db: 0.0,
             pan: 0.5,
             muted,
             category: String::new(),
-            stereo_pair: None,
-            stereo_side: None,
+            eq: false,
+            own: false,
         }
     }
 
-    fn set(tracks: &[usize]) -> HashSet<usize> {
-        tracks.iter().copied().collect()
+    fn set(ids: &[&str]) -> HashSet<String> {
+        ids.iter().map(|s| s.to_string()).collect()
     }
 
     #[test]
@@ -717,17 +800,17 @@ mod tests {
 
     #[test]
     fn a_touched_fader_ignores_server_updates() {
-        let touched = HashMap::from([(3, true), (4, false)]);
-        assert!(!channel_update_applies(&touched, 3));
-        assert!(channel_update_applies(&touched, 4));
-        assert!(channel_update_applies(&touched, 5));
+        let touched = HashMap::from([("mic3".to_string(), true), ("mic4".to_string(), false)]);
+        assert!(!channel_update_applies(&touched, "mic3"));
+        assert!(channel_update_applies(&touched, "mic4"));
+        assert!(channel_update_applies(&touched, "mic5"));
     }
 
     #[test]
     fn a_channel_update_writes_only_its_channel() {
-        let mut chs = vec![channel(1, false), channel(2, false)];
-        update_channel(&mut chs, 2, -6.0, true, 0.25);
-        assert_eq!(chs[0], channel(1, false));
+        let mut chs = vec![channel("mic1", false), channel("mic2", false)];
+        update_channel(&mut chs, "mic2", -6.0, true, 0.25);
+        assert_eq!(chs[0], channel("mic1", false));
         assert_eq!(
             (chs[1].level_db, chs[1].muted, chs[1].pan),
             (-6.0, true, 0.25)
@@ -736,17 +819,23 @@ mod tests {
 
     #[test]
     fn solo_changes_are_classified() {
-        assert_eq!(solo_change(&set(&[2]), &set(&[2])), SoloChange::Unchanged);
+        assert_eq!(
+            solo_change(&set(&["a"]), &set(&["a"])),
+            SoloChange::Unchanged
+        );
         assert_eq!(solo_change(&set(&[]), &set(&[])), SoloChange::Unchanged);
-        assert_eq!(solo_change(&set(&[2]), &set(&[])), SoloChange::Cleared);
-        assert_eq!(solo_change(&set(&[]), &set(&[2])), SoloChange::Entered);
-        assert_eq!(solo_change(&set(&[2]), &set(&[3])), SoloChange::Switched);
+        assert_eq!(solo_change(&set(&["a"]), &set(&[])), SoloChange::Cleared);
+        assert_eq!(solo_change(&set(&[]), &set(&["a"])), SoloChange::Entered);
+        assert_eq!(
+            solo_change(&set(&["a"]), &set(&["b"])),
+            SoloChange::Switched
+        );
     }
 
     #[test]
     fn an_exclusive_solo_mutes_every_other_channel() {
-        let mut chs = vec![channel(1, false), channel(2, true), channel(3, false)];
-        show_exclusive_solo(&mut chs, &set(&[2]));
+        let mut chs = vec![channel("a", false), channel("b", true), channel("c", false)];
+        show_exclusive_solo(&mut chs, &set(&["b"]));
         let muted: Vec<bool> = chs.iter().map(|c| c.muted).collect();
         assert_eq!(muted, [true, false, true]);
     }
@@ -757,5 +846,59 @@ mod tests {
         assert!(clears_shown_alert(Some(&shown), "member1"));
         assert!(!clears_shown_alert(Some(&shown), "member2"));
         assert!(!clears_shown_alert(None, "member1"));
+    }
+
+    fn input(id: &str, trim_db: f32) -> iem_core::ConsoleInput {
+        iem_core::ConsoleInput {
+            id: id.into(),
+            name: id.to_uppercase(),
+            trim_db,
+            muted: false,
+            processing: true,
+        }
+    }
+
+    #[test]
+    fn a_console_input_update_replaces_only_that_input() {
+        let mut c = iem_core::ConsoleInfo {
+            inputs: vec![input("mic1", 0.0), input("keys", 0.0)],
+            ..Default::default()
+        };
+        update_console_input(&mut c, input("keys", 3.0));
+        update_console_input(&mut c, input("gone", 9.0));
+        let trims: Vec<f32> = c.inputs.iter().map(|i| i.trim_db).collect();
+        assert_eq!(trims, [0.0, 3.0]);
+    }
+
+    #[test]
+    fn eq_bands_arrive_in_the_engines_order_and_values() {
+        let bands = vec![
+            iem_core::EqBand {
+                band_type: "highpass".into(),
+                freq_hz: 80.0,
+                gain_db: 0.0,
+                bw: 2.0,
+                enabled: false,
+            },
+            iem_core::EqBand {
+                band_type: "band".into(),
+                freq_hz: 800.0,
+                gain_db: 6.0,
+                bw: 1.0,
+                enabled: true,
+            },
+        ];
+        let states = eq_band_states(bands);
+        assert_eq!(states.len(), 2);
+        assert_eq!(
+            (
+                states[1].band_type.as_str(),
+                states[1].freq_hz,
+                states[1].gain_db,
+                states[1].bw
+            ),
+            ("band", 800.0, 6.0, 1.0)
+        );
+        assert!(!states[0].enabled && states[1].enabled);
     }
 }

@@ -10,8 +10,9 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{AppState, Assets, auth, backup_routes, preset_routes, proxy, snapshot_routes};
+use crate::{AppState, Assets, auth, backup_routes, preset_routes, snapshot_routes};
 use axum::extract::State;
+use iem_core::ApiError;
 use rust_embed::RustEmbed;
 
 /// Version information for deployment verification
@@ -44,11 +45,6 @@ async fn get_site_links(State(state): State<AppState>) -> Json<iem_core::tunnel:
 }
 
 /// API routes
-///
-/// Auth middleware is NOT enforced on routes yet — the frontend needs
-/// to send Authorization headers and handle 401 responses before we
-/// can wire the middleware. Auth infrastructure (login, JWT, change-pin)
-/// is available for opt-in use.
 pub fn api_routes(_state: AppState) -> Router<AppState> {
     Router::new()
         // Version endpoint (used by CI for deployment verification)
@@ -57,94 +53,63 @@ pub fn api_routes(_state: AppState) -> Router<AppState> {
         .route("/api/site", get(get_site_links))
         // Auth login (returns JWT)
         .route("/api/auth", post(auth::login))
-        // Member list (needed for landing page)
+        // Member list (landing page)
         .route("/api/members", get(get_members))
-        // Change PIN (should be authenticated — TODO: wire auth)
         .route("/api/auth/change-pin", post(auth::change_pin))
-        // Mixer state
-        .route("/api/mixer/{member_id}", get(proxy::get_mixer_state))
-        // Polling endpoint (optimized for frequent calls)
-        .route("/api/mixer/{member_id}/poll", get(proxy::poll_mixer_state))
-        // Batch operations (Reset)
-        .route("/api/mixer/{member_id}/batch", post(proxy::batch_control))
-        // Mixer controls
-        .route(
-            "/api/mixer/{member_id}/track/{track_index}/level",
-            post(proxy::set_send_level),
-        )
-        .route(
-            "/api/mixer/{member_id}/track/{track_index}/pan",
-            post(proxy::set_send_pan),
-        )
-        .route(
-            "/api/mixer/{member_id}/track/{track_index}/mute",
-            post(proxy::set_send_mute),
-        )
+        // A page's mixer state (also the UI's token check)
+        .route("/api/mixer/{page}", get(get_mixer_state))
+        // Mute All (F15)
+        .route("/api/mixer/{page}/batch", post(batch_control))
         // Network mode detection (local LAN vs remote internet)
         .route("/api/network-mode", get(get_network_mode))
-        // Channel customization (pin/hide preferences)
-        .route(
-            "/api/mixer/{member_id}/customization",
-            get(get_customization),
-        )
-        .route(
-            "/api/mixer/{member_id}/customization",
-            put(put_customization),
-        )
-        // Member photo (profile picture) (reaperiem#16)
+        // Pins and hides (F8)
+        .route("/api/mixer/{page}/customization", get(get_customization))
+        .route("/api/mixer/{page}/customization", put(put_customization))
+        // Member photo (F22)
         .route("/api/members/{member_id}/photo", get(get_photo))
         .route("/api/members/{member_id}/photo", post(post_photo))
         .route("/api/members/{member_id}/photo", delete(delete_photo))
-        // Audio WebSocket (engineer-only audio streaming) — must be before /ws/{member_id}
+        // Listen (engineer) and talkback — before /ws/{page}
         .route("/ws/audio", get(ws_audio_handler))
-        // Talkback WebSocket (engineer push-to-talk) (reaperiem#123) — must be before /ws/{member_id}
         .route("/ws/talkback", get(ws_talkback_handler))
-        // Audio diagnostics (engineer-only)
         .route("/api/audio/diagnostics", get(audio_diagnostics_handler))
-        // Talkback diagnostics (reaperiem#123)
         .route(
             "/api/talkback/diagnostics",
             get(talkback_diagnostics_handler),
         )
-        // Web Push notification subscription (reaperiem#133)
+        // Web Push (F21)
         .route("/api/push/vapid-key", get(get_vapid_key))
         .route(
             "/api/client-error",
-            // 10_240 bytes = 10 KiB. Written as a plain literal (not 10 * 1024)
-            // so cargo-mutants has no binary operator to mutate. The exact
-            // value is pinned by router-layer integration tests in proxy.rs
-            // (`client_error_router_rejects_body_just_under_large` and
-            // `client_error_router_rejects_oversize_body`). reaperiem#153
-            post(proxy::client_error).layer(axum::extract::DefaultBodyLimit::max(10_240)),
+            // 10_240 bytes = 10 KiB, written as a literal so cargo-mutants has
+            // no operator to mutate; pinned by the router tests below.
+            post(client_error).layer(axum::extract::DefaultBodyLimit::max(10_240)),
         )
         .route("/api/push/subscribe", post(push_subscribe))
         .route("/api/push/unsubscribe", post(push_unsubscribe))
-        // WebSocket
-        .route("/ws/{member_id}", get(proxy::ws_mixer))
-        // Snapshot routes
+        // The engineer's "Back to REAPER" (§4.3)
+        .route("/api/mode/event", post(crate::console::back_to_reaper))
+        // The mixer page's WebSocket
+        .route("/ws/{page}", get(crate::mixer_ws::ws_mixer))
         .merge(snapshot_routes::snapshot_routes())
-        // Preset routes
         .merge(preset_routes::preset_routes())
-        // Backup routes (engineer-only)
         .merge(backup_routes::backup_routes())
-        // Tunnel (internet access) status (reaperiem#202)
         .merge(crate::tunnel_watch::tunnel_routes())
 }
 
-/// Get list of band members (discovered from REAPER)
-async fn get_members(
-    axum::extract::State(state): axum::extract::State<AppState>,
-) -> impl IntoResponse {
-    let discovered = state.discovered_members.read().await;
-    let members: Vec<MemberInfo> = discovered
+/// The site's members (the landing page's tiles).
+async fn get_members(State(state): State<AppState>) -> impl IntoResponse {
+    let members: Vec<MemberInfo> = state
+        .site_config
+        .members
         .iter()
         .map(|m| MemberInfo {
-            id: m.id(),
+            id: m.id.clone(),
             name: m.name.clone(),
-            has_photo: state.photo_store.exists(&m.id()),
+            has_photo: state.photo_store.exists(&m.id),
         })
         .collect();
-    axum::Json(members)
+    Json(members)
 }
 
 #[derive(serde::Serialize)]
@@ -152,6 +117,129 @@ struct MemberInfo {
     id: String,
     name: String,
     has_photo: bool,
+}
+
+type Reject = (StatusCode, Json<ApiError>);
+
+/// The page `page` if the request's token may open it.
+pub(crate) async fn page_for(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+    page: &str,
+) -> Result<(crate::site_view::Page, crate::view::Viewer), Reject> {
+    let claims = {
+        let config = state.config.read().await;
+        auth::verify_member_access(headers, page, &config.jwt_secret)?
+    };
+    let page = state
+        .page(page)
+        .ok_or((StatusCode::NOT_FOUND, Json(ApiError::not_found("Member"))))?;
+    if !crate::mixer_ws::may_open(&claims, &page) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ApiError::new("FORBIDDEN", "This page is the engineer's")),
+        ));
+    }
+    Ok((
+        page,
+        crate::view::Viewer {
+            sub: claims.sub,
+            engineer: claims.engineer,
+        },
+    ))
+}
+
+fn engine_unavailable() -> Reject {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(ApiError::new(
+            "ENGINE_UNAVAILABLE",
+            "The engine is not connected",
+        )),
+    )
+}
+
+/// `GET /api/mixer/{page}` — the page's channels.
+async fn get_mixer_state(
+    State(state): State<AppState>,
+    Path(page): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<iem_core::MixerState>, Reject> {
+    let (page, viewer) = page_for(&state, &headers, &page).await?;
+    let channels = match state.site() {
+        Some(site) => crate::view::channels(&site, &state.engine.mirror(), &page, &viewer),
+        None => Vec::new(),
+    };
+    Ok(Json(iem_core::MixerState {
+        member_id: page.id,
+        channels,
+    }))
+}
+
+/// `POST /api/mixer/{page}/batch` — Mute All (F15): one engine batch.
+async fn batch_control(
+    State(state): State<AppState>,
+    Path(page): Path<String>,
+    headers: axum::http::HeaderMap,
+    Json(payload): Json<iem_core::BatchControlRequest>,
+) -> Result<StatusCode, Reject> {
+    let (page, _) = page_for(&state, &headers, &page).await?;
+    let site = state.site().ok_or_else(engine_unavailable)?;
+    match payload.operation {
+        iem_core::BatchOperation::MuteAll => {
+            let cmd = crate::view::mute_all(&site, &page);
+            state.apply(&page, vec![cmd], None).await.map_err(|e| {
+                tracing::error!(page = %page.id, error = %e, "Mute All failed");
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(ApiError::new("ENGINE_ERROR", e.to_string())),
+                )
+            })?;
+            tracing::info!(page = %page.id, "Mute All");
+        }
+    }
+    Ok(StatusCode::OK)
+}
+
+/// Error report sent by the WASM client when a panic occurs.
+///
+/// All fields except `panic_message` are optional so that degraded clients
+/// (e.g. broken Leptos graph, missing window globals) can still send a report.
+#[derive(Debug, serde::Deserialize)]
+pub struct ClientErrorReport {
+    pub panic_message: String,
+    pub version: Option<String>,
+    pub git_hash: Option<String>,
+    pub url: Option<String>,
+    pub user_agent: Option<String>,
+    pub location: Option<String>,
+    pub backtrace: Option<String>,
+}
+
+/// POST /api/client-error — receive a client-side panic report and log it
+/// (F25). Public (panics may occur when auth itself is broken); the body is
+/// capped at 10 KiB by the route's `DefaultBodyLimit`.
+pub async fn client_error(
+    axum::Json(report): axum::Json<ClientErrorReport>,
+) -> axum::http::StatusCode {
+    tracing::warn!(
+        target: "iem_server::client_error",
+        version = report.version.as_deref().unwrap_or("?"),
+        git_hash = report.git_hash.as_deref().unwrap_or("?"),
+        url = report.url.as_deref().unwrap_or("?"),
+        user_agent = report.user_agent.as_deref().unwrap_or("?"),
+        location = report.location.as_deref().unwrap_or("?"),
+        panic = %report.panic_message,
+        "client_error",
+    );
+    if let Some(bt) = report.backtrace.as_deref() {
+        tracing::warn!(
+            target: "iem_server::client_error",
+            backtrace = %bt,
+            "client_error_backtrace",
+        );
+    }
+    axum::http::StatusCode::NO_CONTENT
 }
 
 /// Return the VAPID public key for browser push subscription (reaperiem#133).
@@ -353,52 +441,70 @@ fn is_private_ip(ip: &str) -> bool {
     }
 }
 
-/// Get channel customization for a member
+/// Get the pins and hides of a page's member (ids)
 async fn get_customization(
-    axum::extract::State(state): axum::extract::State<AppState>,
-    Path(member_id): Path<String>,
+    State(state): State<AppState>,
+    Path(page): Path<String>,
     headers: axum::http::HeaderMap,
-) -> Result<Json<iem_core::Customization>, (StatusCode, Json<iem_core::ApiError>)> {
-    let config = state.config.read().await;
-    crate::auth::verify_member_access(&headers, &member_id, &config.jwt_secret)?;
-    drop(config);
-    let cust = state.customization_store.load(&member_id);
-    Ok(Json(cust))
-}
-
-/// Update channel customization for a member
-#[derive(Deserialize)]
-struct CustomizationPayload {
-    pinned: Vec<usize>,
-    hidden: Vec<usize>,
-}
-
-async fn put_customization(
-    axum::extract::State(state): axum::extract::State<AppState>,
-    Path(member_id): Path<String>,
-    headers: axum::http::HeaderMap,
-    Json(payload): Json<CustomizationPayload>,
-) -> Result<(StatusCode, Json<iem_core::Customization>), (StatusCode, Json<iem_core::ApiError>)> {
-    let config = state.config.read().await;
-    crate::auth::verify_member_access(&headers, &member_id, &config.jwt_secret)?;
-    drop(config);
-    let cust = iem_core::Customization {
-        pinned: payload.pinned,
-        hidden: payload.hidden,
+) -> Result<Json<iem_core::Customization>, Reject> {
+    let (page, _) = page_for(&state, &headers, &page).await?;
+    let Some(member) = page.member else {
+        return Ok(Json(iem_core::Customization::default()));
     };
-    match state.customization_store.save(&member_id, &cust) {
-        Ok(()) => Ok((StatusCode::OK, Json(cust))),
-        Err(e) => {
-            tracing::error!("Failed to save customization: {}", e);
-            Err((
+    let c = state.band.customization(&member).map_err(|e| {
+        tracing::error!(%member, error = %e, "pins and hides unreadable");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError::new("IO_ERROR", "Pins and hides unreadable")),
+        )
+    })?;
+    Ok(Json(iem_core::Customization {
+        pinned: c.pinned.iter().map(ToString::to_string).collect(),
+        hidden: c.hidden.iter().map(ToString::to_string).collect(),
+    }))
+}
+
+/// Replace the pins and hides of a page's member (unknown ids are dropped)
+async fn put_customization(
+    State(state): State<AppState>,
+    Path(page): Path<String>,
+    headers: axum::http::HeaderMap,
+    Json(payload): Json<iem_core::Customization>,
+) -> Result<(StatusCode, Json<iem_core::Customization>), Reject> {
+    let (page, _) = page_for(&state, &headers, &page).await?;
+    let site = state.site().ok_or_else(engine_unavailable)?;
+    let Some(member) = page.member.clone() else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiError::bad_request("This page has no member")),
+        ));
+    };
+    let keep = |ids: &[String]| -> (Vec<String>, Vec<iem_engine_proto::Source>) {
+        ids.iter()
+            .filter_map(|id| crate::view::source(&site, &page, id).map(|s| (id.clone(), s)))
+            .unzip()
+    };
+    let (pinned, pinned_src) = keep(&payload.pinned);
+    let (hidden, hidden_src) = keep(&payload.hidden);
+    state
+        .band
+        .save_customization(&member, pinned_src, hidden_src)
+        .map_err(|e| {
+            tracing::error!(%member, error = %e, "saving pins and hides failed");
+            (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(iem_core::ApiError::new(
-                    "IO_ERROR",
-                    "Failed to save customization",
-                )),
-            ))
-        }
-    }
+                Json(ApiError::new("IO_ERROR", "Failed to save customization")),
+            )
+        })?;
+    let c = iem_core::Customization { pinned, hidden };
+    state.broadcast(
+        crate::To::Page(page.id.clone()),
+        iem_core::ServerMsg::CustomizationUpdate {
+            pinned: c.pinned.clone(),
+            hidden: c.hidden.clone(),
+        },
+    );
+    Ok((StatusCode::OK, Json(c)))
 }
 
 #[derive(Deserialize)]
@@ -485,14 +591,14 @@ async fn delete_photo(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-/// Audio WebSocket handler — delegates to proxy::ws_audio when audio feature is enabled
+/// Listen WebSocket (engineer)
 #[cfg(feature = "audio")]
 async fn ws_audio_handler(
     ws: axum::extract::ws::WebSocketUpgrade,
-    state: axum::extract::State<AppState>,
-    query: axum::extract::Query<proxy::WsQuery>,
-) -> Result<impl IntoResponse, (StatusCode, Json<iem_core::ApiError>)> {
-    proxy::ws_audio(ws, state, query).await
+    state: State<AppState>,
+    query: axum::extract::Query<crate::mixer_ws::WsQuery>,
+) -> Result<impl IntoResponse, Reject> {
+    crate::listen_ws::ws_audio(ws, state, query).await
 }
 
 #[cfg(not(feature = "audio"))]
@@ -503,14 +609,14 @@ async fn ws_audio_handler() -> impl IntoResponse {
     )
 }
 
-// Talkback WebSocket handler — delegates to proxy::ws_talkback (reaperiem#123)
+/// Talkback WebSocket (engineer, bound to the talk id)
 #[cfg(feature = "audio")]
 async fn ws_talkback_handler(
     ws: axum::extract::ws::WebSocketUpgrade,
-    state: axum::extract::State<AppState>,
-    query: axum::extract::Query<proxy::WsQuery>,
-) -> Result<impl IntoResponse, (StatusCode, Json<iem_core::ApiError>)> {
-    proxy::ws_talkback(ws, state, query).await
+    state: State<AppState>,
+    query: axum::extract::Query<crate::mixer_ws::WsQuery>,
+) -> Result<impl IntoResponse, Reject> {
+    crate::talkback_ws::ws_talkback(ws, state, query).await
 }
 
 #[cfg(not(feature = "audio"))]
@@ -518,83 +624,35 @@ async fn ws_talkback_handler() -> impl IntoResponse {
     (StatusCode::NOT_FOUND, "Talkback not available")
 }
 
-// Talkback diagnostics — runtime metrics for reaperiem#154 quality fix.
-// Engineer-only.
+/// The engineer's token from the Authorization header, or the rejection.
+pub async fn require_engineer(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+) -> Result<iem_core::AuthClaims, Reject> {
+    let token = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "));
+    let claims = {
+        let config = state.config.read().await;
+        crate::mixer_ws::claims_of(token, &config.jwt_secret)?
+    };
+    if !claims.engineer {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ApiError::new("FORBIDDEN", "Engineer only")),
+        ));
+    }
+    Ok(claims)
+}
+
 #[cfg(feature = "audio")]
 async fn talkback_diagnostics_handler(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
-) -> Result<axum::Json<serde_json::Value>, (StatusCode, axum::Json<iem_core::ApiError>)> {
-    use std::sync::atomic::Ordering;
-
-    // Engineer auth — same pattern as audio_diagnostics_handler.
-    let config = state.config.read().await;
-    let token = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer "))
-        .ok_or_else(|| {
-            (
-                StatusCode::UNAUTHORIZED,
-                axum::Json(iem_core::ApiError::unauthorized()),
-            )
-        })?;
-    let claims = crate::auth::extract_claims(token, &config.jwt_secret).ok_or_else(|| {
-        (
-            StatusCode::UNAUTHORIZED,
-            axum::Json(iem_core::ApiError::unauthorized()),
-        )
-    })?;
-    // Token expiry — match the check in ws_talkback for consistency.
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    if claims.exp < now {
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            axum::Json(iem_core::ApiError::new(
-                "TOKEN_EXPIRED",
-                "Token has expired",
-            )),
-        ));
-    }
-    if !claims.engineer {
-        return Err((
-            StatusCode::FORBIDDEN,
-            axum::Json(iem_core::ApiError::new(
-                "FORBIDDEN",
-                "Talkback diagnostics is engineer-only",
-            )),
-        ));
-    }
-    drop(config);
-
-    let tb = state.talkback_state.read().await;
-    let recv_vst_addr = tb
-        .recv_vst_addr
-        .map(|a| serde_json::Value::String(a.to_string()))
-        .unwrap_or(serde_json::Value::Null);
-    let active_talker = tb
-        .active_talker
-        .clone()
-        .map(serde_json::Value::String)
-        .unwrap_or(serde_json::Value::Null);
-    drop(tb);
-
-    let m = &state.talkback_metrics;
-    Ok(axum::Json(serde_json::json!({
-        "recv_vst_addr": recv_vst_addr,
-        "active_talker": active_talker,
-        "packets_in": m.packets_in.load(Ordering::Relaxed),
-        "packets_out": m.packets_out.load(Ordering::Relaxed),
-        "seq_gaps": m.seq_gaps.load(Ordering::Relaxed),
-        "buffer_fill_ms": m.buffer_fill_ms.load(Ordering::Relaxed),
-        "buffer_overflows": m.buffer_overflows.load(Ordering::Relaxed),
-        "last_packet_age_ms": m.last_packet_age_ms.load(Ordering::Relaxed),
-        "underruns": m.underruns.load(Ordering::Relaxed),
-        "bitrate_kbps": m.bitrate_kbps.load(Ordering::Relaxed),
-    })))
+) -> Result<Json<serde_json::Value>, Reject> {
+    require_engineer(&state, &headers).await?;
+    Ok(Json(crate::talkback_ws::diagnostics(&state)))
 }
 
 #[cfg(not(feature = "audio"))]
@@ -602,47 +660,13 @@ async fn talkback_diagnostics_handler() -> impl IntoResponse {
     Json(serde_json::json!({"error": "not available"}))
 }
 
-/// Audio diagnostics endpoint — returns pipeline health metrics (engineer-only)
 #[cfg(feature = "audio")]
 async fn audio_diagnostics_handler(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
-) -> Result<Json<crate::audio_stream::AudioDiagnostics>, (StatusCode, Json<iem_core::ApiError>)> {
-    // Require engineer auth
-    let config = state.config.read().await;
-    let token = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer "))
-        .ok_or_else(|| {
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(iem_core::ApiError::unauthorized()),
-            )
-        })?;
-    let claims = crate::auth::extract_claims(token, &config.jwt_secret).ok_or_else(|| {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(iem_core::ApiError::unauthorized()),
-        )
-    })?;
-    if !claims.engineer {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(iem_core::ApiError::new(
-                "FORBIDDEN",
-                "Audio diagnostics is engineer-only",
-            )),
-        ));
-    }
-    drop(config);
-
-    let diag = state
-        .audio_diagnostics
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
-    Ok(Json(diag))
+) -> Result<Json<crate::engine::media::AudioDiagnostics>, Reject> {
+    require_engineer(&state, &headers).await?;
+    Ok(Json(state.media.diagnostics()))
 }
 
 #[cfg(not(feature = "audio"))]
@@ -1132,6 +1156,301 @@ mod site_links_tests {
         assert_eq!(
             json,
             serde_json::json!({"lan_url": "http://10.0.0.10", "public_host": "mixer.example.org"})
+        );
+    }
+}
+
+/// The API as the browser sees it (also used by other modules' route tests).
+#[cfg(test)]
+pub(crate) mod api_tests {
+    use super::*;
+    use axum::extract::connect_info::MockConnectInfo;
+    use axum::http::{Method, Request};
+    use std::net::SocketAddr;
+    use tower::util::ServiceExt;
+
+    pub(crate) const SECRET: &str = "api-test-secret";
+
+    pub(crate) fn token(sub: &str, engineer: bool) -> String {
+        let claims = iem_core::AuthClaims {
+            sub: sub.into(),
+            engineer,
+            exp: u64::MAX / 2,
+            iat: 0,
+        };
+        jsonwebtoken::encode(
+            &jsonwebtoken::Header::default(),
+            &claims,
+            &jsonwebtoken::EncodingKey::from_secret(SECRET.as_bytes()),
+        )
+        .unwrap()
+    }
+
+    /// A state without an engine (tokens signed with [`SECRET`]) and its API.
+    pub(crate) fn app(dir: &std::path::Path) -> (AppState, Router) {
+        let mut config = crate::site_view::tests::test_config();
+        config.jwt_secret = SECRET.into();
+        let state = AppState::new(config, dir);
+        (state.clone(), router(state))
+    }
+
+    /// The API routes over `state`, reached from a LAN client.
+    pub(crate) fn router(state: AppState) -> Router {
+        api_routes(state.clone())
+            .with_state(state)
+            .layer(MockConnectInfo(SocketAddr::from(([10, 0, 0, 50], 40000))))
+    }
+
+    pub(crate) async fn call(
+        app: &Router,
+        method: Method,
+        uri: &str,
+        bearer: Option<&str>,
+        body: Option<&str>,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut req = Request::builder().method(method).uri(uri);
+        if let Some(t) = bearer {
+            req = req.header("authorization", format!("Bearer {t}"));
+        }
+        if body.is_some() {
+            req = req.header("content-type", "application/json");
+        }
+        let resp = app
+            .clone()
+            .oneshot(
+                req.body(Body::from(body.unwrap_or("").to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    #[tokio::test]
+    async fn members_are_the_sites() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_s, app) = app(dir.path());
+        let (status, json) = call(&app, Method::GET, "/api/members", None, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let list = json.as_array().unwrap();
+        assert_eq!(list.len(), 10);
+        assert_eq!(
+            list[0],
+            serde_json::json!({"id": "member1", "name": "Member1", "has_photo": false})
+        );
+        assert_eq!(list[9]["id"], "engineer");
+    }
+
+    #[tokio::test]
+    async fn the_mixer_state_is_guarded_per_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_s, app) = app(dir.path());
+        let m1 = token("member1", false);
+        let eng = token("engineer", true);
+        assert_eq!(
+            call(&app, Method::GET, "/api/mixer/member1", None, None)
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            call(&app, Method::GET, "/api/mixer/member2", Some(&m1), None)
+                .await
+                .0,
+            StatusCode::FORBIDDEN
+        );
+        let (status, json) = call(&app, Method::GET, "/api/mixer/member1", Some(&m1), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["member_id"], "member1");
+        assert_eq!(json["channels"], serde_json::json!([]), "no engine yet");
+        assert_eq!(
+            call(&app, Method::GET, "/api/mixer/member2", Some(&eng), None)
+                .await
+                .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            call(&app, Method::GET, "/api/mixer/nobody", Some(&eng), None)
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn mute_all_and_pins_need_the_engine() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_s, app) = app(dir.path());
+        let eng = token("engineer", true);
+        let (status, json) = call(
+            &app,
+            Method::POST,
+            "/api/mixer/engineer/batch",
+            Some(&eng),
+            Some(r#"{"operation":"mute_all"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(json["code"], "ENGINE_UNAVAILABLE");
+        assert_eq!(
+            call(
+                &app,
+                Method::POST,
+                "/api/mixer/engineer/batch",
+                Some(&eng),
+                Some(r#"{"operation":"reset"}"#)
+            )
+            .await
+            .0,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "the batch Reset is gone"
+        );
+        let m1 = token("member1", false);
+        let (status, json) = call(
+            &app,
+            Method::GET,
+            "/api/mixer/member1/customization",
+            Some(&m1),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json, serde_json::json!({"pinned": [], "hidden": []}));
+        assert_eq!(
+            call(
+                &app,
+                Method::PUT,
+                "/api/mixer/member1/customization",
+                Some(&m1),
+                Some(r#"{"pinned":["mic1"],"hidden":[]}"#)
+            )
+            .await
+            .0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            call(
+                &app,
+                Method::GET,
+                "/api/mixer/member2/customization",
+                Some(&m1),
+                None
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[tokio::test]
+    async fn client_errors_are_accepted_up_to_ten_kib() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_s, app) = app(dir.path());
+        let body = |n: usize| format!(r#"{{"panic_message":"{}"}}"#, "y".repeat(n));
+        let under = body(9 * 1024);
+        assert!(under.len() < 10_240);
+        assert_eq!(
+            call(&app, Method::POST, "/api/client-error", None, Some(&under))
+                .await
+                .0,
+            StatusCode::NO_CONTENT
+        );
+        let over = body(11 * 1024);
+        assert_eq!(
+            call(&app, Method::POST, "/api/client-error", None, Some(&over))
+                .await
+                .0,
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        let full = r#"{"panic_message":"boom","version":"2.0.0","git_hash":"abc","url":"/engineer","user_agent":"UA","location":"f:1:1","backtrace":"trace"}"#;
+        assert_eq!(
+            call(&app, Method::POST, "/api/client-error", None, Some(full))
+                .await
+                .0,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            call(
+                &app,
+                Method::POST,
+                "/api/client-error",
+                None,
+                Some(r#"{"version":"1"}"#)
+            )
+            .await
+            .0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+
+    #[tokio::test]
+    async fn the_switch_is_the_engineers_and_needs_the_engineer_pin() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, app) = app(dir.path());
+        let hash = state.pin_hasher.hash("2468");
+        state
+            .pin_store
+            .write()
+            .await
+            .set_engineer_hash(hash)
+            .unwrap();
+        let body = Some(r#"{"pin":"2468"}"#);
+        assert_eq!(
+            call(&app, Method::POST, "/api/mode/event", None, body)
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            call(
+                &app,
+                Method::POST,
+                "/api/mode/event",
+                Some(&token("member1", false)),
+                body
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        let eng = token("engineer", true);
+        assert_eq!(
+            call(
+                &app,
+                Method::POST,
+                "/api/mode/event",
+                Some(&eng),
+                Some(r#"{"pin":"1111"}"#)
+            )
+            .await
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+        let (status, json) = call(&app, Method::POST, "/api/mode/event", Some(&eng), body).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{json}");
+        assert_eq!(json["ok"], true);
+        // A site without a switch has no button to press.
+        let dir2 = tempfile::tempdir().unwrap();
+        let config = iem_core::Config {
+            jwt_secret: SECRET.into(),
+            ..Default::default()
+        };
+        let bare = AppState::new(config, dir2.path());
+        let app2 = api_routes(bare.clone())
+            .with_state(bare)
+            .layer(MockConnectInfo(SocketAddr::from(([10, 0, 0, 51], 40000))));
+        assert_eq!(
+            call(&app2, Method::POST, "/api/mode/event", Some(&eng), body)
+                .await
+                .0,
+            StatusCode::NOT_FOUND
         );
     }
 }

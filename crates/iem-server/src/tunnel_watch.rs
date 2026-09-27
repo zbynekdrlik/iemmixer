@@ -283,7 +283,7 @@ pub async fn watch_tick(state: &AppState, now: Instant) -> Decision {
         // status is also sent on connect and served at /api/tunnel.
         let receivers = state
             .event_tx
-            .send((String::new(), ServerMsg::TunnelStatus(next)))
+            .send((crate::To::All, ServerMsg::TunnelStatus(next)))
             .unwrap_or(0);
         tracing::debug!(receivers, state = ?next.state, "tunnel status broadcast");
     }
@@ -352,7 +352,7 @@ pub async fn record_restart(state: &AppState, ok: bool, now: Instant) {
     if changed {
         let receivers = state
             .event_tx
-            .send((String::new(), ServerMsg::TunnelStatus(status)))
+            .send((crate::To::All, ServerMsg::TunnelStatus(status)))
             .unwrap_or(0);
         tracing::debug!(receivers, ok, "tunnel restart result broadcast");
     }

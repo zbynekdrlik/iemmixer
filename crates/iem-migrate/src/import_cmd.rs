@@ -5,7 +5,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use iem_core::MixerBackup;
+use iem_core::legacy::MixerBackup;
 use iem_engine::core::{reconcile, to_state};
 use iem_engine::persist::{Persisted, Store};
 use iem_rpp::aliases::parse_aliases;

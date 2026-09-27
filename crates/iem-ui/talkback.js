@@ -22,7 +22,7 @@ export function isTalkbackSupported() {
 
 /**
  * Start talkback: capture mic, encode Opus, send binary frames via new WebSocket.
- * @param {string} wsUrl - WebSocket URL for talkback audio (e.g. wss://host/ws/talkback?token=...)
+ * @param {string} wsUrl - WebSocket URL for talkback audio (wss://host/ws/talkback?token=...&talk=<id>)
  * @returns {Promise<void>}
  */
 export async function startTalkback(wsUrl) {
@@ -30,7 +30,20 @@ export async function startTalkback(wsUrl) {
   _state = 'connecting';
 
   try {
-    // 1. Get mic stream (mono, 48kHz, echo/noise cancellation)
+    // 1. Open the dedicated talkback WebSocket first: it binds the held talk
+    //    lock by the talk id in its URL, which the server allows only briefly
+    //    after the lock was granted (X6).
+    _ws = new WebSocket(wsUrl);
+    _ws.binaryType = 'arraybuffer';
+
+    await new Promise((resolve, reject) => {
+      _ws.onopen = resolve;
+      _ws.onerror = () => reject(new Error('Talkback WS failed to connect'));
+      // Timeout after 5s
+      setTimeout(() => reject(new Error('Talkback WS connect timeout')), 5000);
+    });
+
+    // 2. Get mic stream (mono, 48kHz, echo/noise cancellation)
     _stream = await navigator.mediaDevices.getUserMedia({
       audio: {
         channelCount: 1,
@@ -42,19 +55,8 @@ export async function startTalkback(wsUrl) {
       video: false,
     });
 
-    // 2. AudioContext at 48kHz
+    // 3. AudioContext at 48kHz
     _audioCtx = new AudioContext({ sampleRate: 48000 });
-
-    // 3. Open dedicated talkback WebSocket
-    _ws = new WebSocket(wsUrl);
-    _ws.binaryType = 'arraybuffer';
-
-    await new Promise((resolve, reject) => {
-      _ws.onopen = resolve;
-      _ws.onerror = () => reject(new Error('Talkback WS failed to connect'));
-      // Timeout after 5s
-      setTimeout(() => reject(new Error('Talkback WS connect timeout')), 5000);
-    });
 
     // 4. WebCodecs AudioEncoder (Opus, 96 kbps mono — reaperiem#154 quality bump).
     _encoder = new AudioEncoder({

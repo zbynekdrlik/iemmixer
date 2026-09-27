@@ -65,8 +65,6 @@ version_check
 widestring
 windows-link
 windows-sys
-windows-targets
-windows_x86_64_msvc
 winnow
 zeroize
 zmij

@@ -432,8 +432,8 @@ async fn tick_healthy_broadcasts_once_per_change() {
             changed: true
         }
     );
-    let (mid, msg) = rx.try_recv().expect("first poll must broadcast");
-    assert!(mid.is_empty(), "tunnel status goes to every client");
+    let (to, msg) = rx.try_recv().expect("first poll must broadcast");
+    assert_eq!(to, crate::To::All, "tunnel status goes to every client");
     match msg {
         ServerMsg::TunnelStatus(info) => {
             assert_eq!(info.state, TunnelState::Ok);

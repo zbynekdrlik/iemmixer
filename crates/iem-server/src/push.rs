@@ -194,7 +194,7 @@ pub async fn send_push_to_engineers(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -253,7 +253,7 @@ mod tests {
     }
 
     /// Requests seen by the fake push service: (path, Authorization, Content-Encoding).
-    type Seen = std::sync::Arc<std::sync::Mutex<Vec<(String, String, String)>>>;
+    pub(crate) type Seen = std::sync::Arc<std::sync::Mutex<Vec<(String, String, String)>>>;
 
     /// Answers `POST /<status>` with that HTTP status and records the request.
     async fn answer_with_status(
@@ -278,7 +278,7 @@ mod tests {
 
     /// A stand-in for the browser vendor's push service (an external network
     /// service): `POST /<status>` answers with that HTTP status.
-    async fn fake_push_service() -> (String, Seen) {
+    pub(crate) async fn fake_push_service() -> (String, Seen) {
         let seen = Seen::default();
         let app = axum::Router::new()
             .route("/{status}", axum::routing::post(answer_with_status))
@@ -291,7 +291,7 @@ mod tests {
         (format!("http://{addr}"), seen)
     }
 
-    fn subscription(endpoint: String) -> PushSubscription {
+    pub(crate) fn subscription(endpoint: String) -> PushSubscription {
         let browser_key = p256::SecretKey::random(&mut rand_core::OsRng);
         PushSubscription {
             endpoint,
@@ -300,7 +300,7 @@ mod tests {
         }
     }
 
-    fn vapid_private_key() -> String {
+    pub(crate) fn vapid_private_key() -> String {
         B64.encode(p256::SecretKey::random(&mut rand_core::OsRng).to_bytes())
     }
 

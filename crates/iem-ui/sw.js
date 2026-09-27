@@ -8,7 +8,11 @@ const CACHE_NAME = 'iem-assets-v1';
 // have fewer than 16 digits (15 in about one build of 16).
 const HASH_RE = /\/iem-ui-[0-9a-f]{1,16}(_bg)?\.(js|wasm)$/;
 
+// Whether this worker replaces an older one (an upgrade, not a first visit).
+let upgrading = false;
+
 self.addEventListener("install", () => {
+  upgrading = !!self.registration.active;
   self.skipWaiting();
 });
 
@@ -24,7 +28,13 @@ self.addEventListener("activate", (event) => {
             .map((name) => caches.delete(name))
         )
       )
-      .then(() => self.clients.claim()),
+      .then(() => self.clients.claim())
+      // After an upgrade, open tabs reload into the new UI (program spec
+      // §5.3); a first visit is never reloaded.
+      .then(() => (upgrading ? self.clients.matchAll({ type: "window" }) : []))
+      .then((clients) =>
+        Promise.all(clients.map((c) => c.navigate(c.url).catch(() => null))),
+      ),
   );
 });
 
@@ -93,7 +103,17 @@ self.addEventListener("push", (event) => {
     data = {};
   }
 
-  if (data.type === "SOS") {
+  if (data.type === "ALARM") {
+    // Engine alarms and the band-activity notice (§4.2), and `iem-server notify`
+    event.waitUntil(
+      self.registration.showNotification(data.title || "IEM Mixer", {
+        body: data.body || "",
+        requireInteraction: true,
+        tag: "iem-alarm",
+        vibrate: [300, 100, 300],
+      }),
+    );
+  } else if (data.type === "SOS") {
     event.waitUntil(
       self.registration.showNotification(`IEM Alert: ${data.name || "Member"}`, {
         body: `${data.name || "Someone"} needs help!`,

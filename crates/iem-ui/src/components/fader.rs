@@ -556,8 +556,13 @@ pub fn Fader(
                 let _ = doc_cleanup
                     .remove_event_listener_with_callback("mousemove", mc.as_ref().unchecked_ref());
             }
-            // Mark mouseup closure for cleanup on next mousedown
-            mu_cleanup.borrow_mut().take();
+            // This mouseup listener goes too: off the document first, then
+            // dropped (freed once this call returns). Dropping it while still
+            // registered made the next mouseup anywhere call a freed closure.
+            if let Some(uc) = mu_cleanup.borrow_mut().take() {
+                let _ = doc_cleanup
+                    .remove_event_listener_with_callback("mouseup", uc.as_ref().unchecked_ref());
+            }
         }) as Box<dyn FnMut(web_sys::MouseEvent)>);
 
         let _ = doc_target.add_event_listener_with_callback("mouseup", uc.as_ref().unchecked_ref());

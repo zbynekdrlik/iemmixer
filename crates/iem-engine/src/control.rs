@@ -500,15 +500,21 @@ impl Control {
     fn shutdown_now(&mut self) -> Exit {
         info!("shutdown: saving, fading out, releasing the driver");
         self.save();
+        let faded = self.fade_out();
+        self.release("shutdown");
+        Exit::Shutdown { faded }
+    }
+
+    /// Asks the callback to fade out and waits for it, at most `FADE_WAIT`;
+    /// whether it faded.
+    fn fade_out(&mut self) -> bool {
         self.pending.push_back(vec![RtOp::FadeOut]);
         let t0 = Instant::now();
         while !self.status.faded_out.load(Ordering::Acquire) && t0.elapsed() < FADE_WAIT {
             self.flush_rt();
             std::thread::sleep(Duration::from_millis(5));
         }
-        let faded = self.status.faded_out.load(Ordering::Acquire);
-        self.release("shutdown");
-        Exit::Shutdown { faded }
+        self.status.faded_out.load(Ordering::Acquire)
     }
 
     fn fault(&mut self, why: String) -> Exit {
@@ -718,14 +724,13 @@ mod tests {
 
     #[test]
     fn shutdown_waits_for_the_fade_but_not_beyond_it() {
-        // Already faded: no wait.
+        // Already faded: saved, and the exit says so.
         let mut r = rig();
         r.status.faded_out.store(true, Ordering::Release);
         r.c.shutdown = true;
         let (_tx, rx) = std::sync::mpsc::channel();
-        let (exit, took) = run_bounded(r.c, rx);
+        let (exit, _) = run_bounded(r.c, rx);
         assert_eq!(exit, Exit::Shutdown { faded: true });
-        assert!(took < FADE_WAIT / 2, "{took:?}");
         assert!(r.dir.path().join("state/current.json").exists(), "saved");
         // Never faded: the driver is released after FADE_WAIT.
         let mut r = rig();
@@ -734,6 +739,20 @@ mod tests {
         let (exit, took) = run_bounded(r.c, rx);
         assert_eq!(exit, Exit::Shutdown { faded: false });
         assert!(took >= FADE_WAIT, "{took:?}");
+    }
+
+    #[test]
+    fn the_fade_wait_ends_at_the_fade_or_after_fade_wait() {
+        // Timed without the state save (its file I/O is slow on some hosts).
+        let mut r = rig();
+        r.status.faded_out.store(true, Ordering::Release);
+        let t0 = Instant::now();
+        assert!(r.c.fade_out());
+        assert!(t0.elapsed() < FADE_WAIT / 2, "{:?}", t0.elapsed());
+        let mut r = rig();
+        let t0 = Instant::now();
+        assert!(!r.c.fade_out());
+        assert!(t0.elapsed() >= FADE_WAIT, "{:?}", t0.elapsed());
     }
 
     #[test]

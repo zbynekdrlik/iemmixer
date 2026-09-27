@@ -1,10 +1,7 @@
 import { MEMBER_PIN } from "./support/pins";
-import { REAPER_ABSENT, test, expect } from "./support/fixtures";
+import { test, expect } from "./support/fixtures";
 
 test.describe("Issue #106 - PIN Keyboard Input", () => {
-  // REAPER absent in mock E2E until S5
-  test.use({ allowedConsole: REAPER_ABSENT });
-
   test("can enter PIN digits using keyboard number keys", async ({ page }) => {
     // Navigate to login page for a member
     const membersRes = await page.request.get("/api/members");

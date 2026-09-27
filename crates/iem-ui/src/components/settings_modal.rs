@@ -67,6 +67,12 @@ pub fn SettingsModal(
     /// Callback to update has_photo state after upload/delete (reaperiem#16)
     #[prop(optional)]
     set_has_photo: Option<WriteSignal<bool>>,
+    /// The engineer's console (F29; shown on the engineer's own page)
+    #[prop(optional)]
+    console: Option<ReadSignal<Option<iem_core::ConsoleInfo>>>,
+    /// The mixer socket (console commands)
+    #[prop(optional)]
+    ws: Option<ReadSignal<Option<web_sys::WebSocket>>>,
 ) -> impl IntoView {
     // StoredValue is Copy + Send + Sync — closures inside view! can use it freely
     let member_id = StoredValue::new(member_id);
@@ -278,6 +284,11 @@ pub fn SettingsModal(
                                 </div>
                             </div>
 
+                            // Console: inputs, limiters, pages, logins (F29, engineer-only)
+                            {console.zip(ws).map(|(console, ws)| view! {
+                                <crate::components::console_section::ConsoleSection console=console ws=ws />
+                            })}
+
                             // Backup & Restore (engineer-only)
                             <crate::components::backup_section::BackupSection />
                         })
@@ -309,8 +320,12 @@ pub fn SettingsModal(
                                 crate::pages::mixer::push::unsubscribe_from_push();
                                 // Clear auth state
                                 crate::auth::clear_auth();
-                                // Navigate to landing page
-                                navigate("/", Default::default());
+                                // Navigate to the landing page once this click has
+                                // finished bubbling through the modal it unmounts.
+                                let navigate = navigate.clone();
+                                crate::components::after_event(move || {
+                                    navigate("/", Default::default());
+                                });
                             }
                         }>
                             "Logout"

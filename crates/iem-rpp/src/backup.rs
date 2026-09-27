@@ -3,7 +3,7 @@
 //! the project's tracks; differing values are reported, never applied: the
 //! project saved at switch time is newer.
 
-use iem_core::{EqBandBackup, MixerBackup};
+use iem_core::legacy::{EqBandBackup, MixerBackup};
 use iem_engine_proto::{Level, Source, db_to_lin};
 
 use crate::import::{Imported, Place, Problems};
@@ -263,7 +263,7 @@ pub fn cross_check(backup: &MixerBackup, imp: &Imported) -> Result<Check, Proble
 mod tests {
     use std::collections::BTreeMap;
 
-    use iem_core::{LimiterBackup, SendBackup};
+    use iem_core::legacy::{LimiterBackup, SendBackup};
     use iem_engine_proto::{InputId, MixId};
 
     use super::*;

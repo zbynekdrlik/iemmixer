@@ -1,5 +1,5 @@
 import { ENGINEER_PIN, MEMBER_PIN } from "./support/pins";
-import { REAPER_ABSENT, test, expect, Page } from "./support/fixtures";
+import { test, expect, Page } from "./support/fixtures";
 
 // Helper to login and get a JWT token
 async function getToken(
@@ -33,9 +33,6 @@ async function loginAs(page: Page, member: string) {
 }
 
 test.describe("Cross-member access prevention (#77)", () => {
-  // REAPER absent in mock E2E until S5
-  test.use({ allowedConsole: REAPER_ABSENT });
-
   test("member cannot access another member's mixer API", async ({ page }) => {
     await page.goto("/");
 
@@ -69,13 +66,14 @@ test.describe("Cross-member access prevention (#77)", () => {
     const auth = await getToken(page, member);
     expect(auth).not.toBeNull();
 
-    // Access own mixer → should succeed (200 or other non-auth error, NOT 401/403)
+    // Access own mixer → 200 with the page's channels (the engine runs)
     const resp = await page.request.get(`/api/mixer/${member}`, {
       headers: { Authorization: `Bearer ${auth!.token}` },
     });
-    // Could be 200 or 502 (REAPER offline), but NOT 401 or 403
-    expect(resp.status()).not.toBe(401);
-    expect(resp.status()).not.toBe(403);
+    expect(resp.status()).toBe(200);
+    const body = await resp.json();
+    expect(body.member_id).toBe(member);
+    expect(body.channels.length).toBeGreaterThan(0);
   });
 
   test("no token returns 401 on protected endpoint", async ({ page }) => {
@@ -223,35 +221,27 @@ test.describe("Cross-member access prevention (#77)", () => {
     const authA = await getToken(page, memberA);
     expect(authA).not.toBeNull();
 
-    // Try to set level on member B's mixer → 403
-    const levelResp = await page.request.post(
-      `/api/mixer/${memberB}/track/1/level`,
-      {
-        headers: { Authorization: `Bearer ${authA!.token}` },
-        data: { level_db: -10 },
-      },
-    );
-    expect(levelResp.status()).toBe(403);
+    // Mute All on member B's mixer → 403 (the per-track REST controls are
+    // gone; every mix change goes through the mixer socket or a batch)
+    const batchResp = await page.request.post(`/api/mixer/${memberB}/batch`, {
+      headers: { Authorization: `Bearer ${authA!.token}` },
+      data: { operation: "mute_all" },
+    });
+    expect(batchResp.status()).toBe(403);
 
-    // Try to set mute on member B's mixer → 403
-    const muteResp = await page.request.post(
-      `/api/mixer/${memberB}/track/1/mute`,
-      {
-        headers: { Authorization: `Bearer ${authA!.token}` },
-        data: { muted: true },
-      },
-    );
-    expect(muteResp.status()).toBe(403);
+    // Pins and hides of member B → 403
+    const custResp = await page.request.put(`/api/mixer/${memberB}/customization`, {
+      headers: { Authorization: `Bearer ${authA!.token}` },
+      data: { pinned: ["mic1"], hidden: [] },
+    });
+    expect(custResp.status()).toBe(403);
 
-    // Try to set pan on member B's mixer → 403
-    const panResp = await page.request.post(
-      `/api/mixer/${memberB}/track/1/pan`,
-      {
-        headers: { Authorization: `Bearer ${authA!.token}` },
-        data: { pan: 0.5 },
-      },
-    );
-    expect(panResp.status()).toBe(403);
+    // The REAPER-era per-track routes no longer exist (no raw control path)
+    const levelResp = await page.request.post(`/api/mixer/${memberB}/track/1/level`, {
+      headers: { Authorization: `Bearer ${authA!.token}` },
+      data: { level_db: -10 },
+    });
+    expect([403, 404, 405]).toContain(levelResp.status());
   });
 
   test("frontend redirects to login page on cross-member access", async ({

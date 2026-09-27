@@ -1,13 +1,10 @@
-//! Preset types for saving and restoring mix configurations
-//!
-//! Presets store volume in dB (matching frontend convention), unlike snapshots
-//! which store REAPER linear scale values.
+//! The predecessor's presets (keyed by REAPER track number, volume in dB):
+//! read only by the importer (`iem-rpp::band`).
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Maximum number of presets per member
-pub const MAX_PRESETS: usize = 20;
+use super::EqBand;
 
 /// A single channel's preset settings
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -37,7 +34,7 @@ pub struct PresetEntry {
     pub stems_level_db: Option<f32>,
     /// EQ band data per track (None for presets saved before EQ feature)
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub eq_bands: Option<HashMap<usize, Vec<crate::EqBand>>>,
+    pub eq_bands: Option<HashMap<usize, Vec<EqBand>>>,
 }
 
 impl PresetEntry {
@@ -156,11 +153,6 @@ mod tests {
     }
 
     #[test]
-    fn test_max_presets_constant() {
-        assert_eq!(MAX_PRESETS, 20);
-    }
-
-    #[test]
     fn test_preset_entry_backwards_compat_without_eq_bands() {
         // Old presets without eq_bands should still deserialize
         let json = r#"{"name":"old","channels":{},"created_at":100,"updated_at":200}"#;
@@ -170,7 +162,6 @@ mod tests {
 
     #[test]
     fn test_preset_entry_with_eq_bands() {
-        use crate::EqBand;
         let mut eq = HashMap::new();
         eq.insert(
             1,

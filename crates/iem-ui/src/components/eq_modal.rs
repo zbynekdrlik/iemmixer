@@ -1,40 +1,19 @@
 //! Full-screen parametric EQ modal with SVG frequency response curve
 //!
-//! Loads EQ state on-demand from REAPER via GetEqParams, displays draggable
-//! band points on a log-frequency curve, and sends SetEqBand on slider changes.
+//! Loads the EQ of a target on demand (`GetEqParams{target}`: a channel id,
+//! the page's mix or its stems group), displays draggable band points on a
+//! log-frequency curve, and sends `SetEqBand{target, band, param, value}` in
+//! the engine's units (freq_hz, gain_db, bw_oct, enabled) on slider changes.
+//! The curve is the engine's own response (`iem_dsp::eq::response_db`).
 //!
-//! v1.104.0: Fix snap-back bug — EqSlider maintains local reactive state so
-//! parent re-renders don't destroy active drag gestures. Each band card owns
-//! its own signals, and on_change only sends WebSocket (no set_bands.set()).
-//!
-//! v1.107.0: Display values from REAPER (fh/gd/bo), double-tap to default,
-//! per-band on/off toggle and reset buttons.
-//!
-//! v1.108.0: Band ordering (HPF first), ±12dB gain range fix, HPF toggle via
-//! frequency, professional biquad curve rendering (Audio EQ Cookbook).
-//!
-//! ### EQ value precision (set→reopen drift fix, reaperiem#194 + reaperiem#196)
-//!
-//! Three layers protect the round-trip set→display→store→reopen against drift:
-//!
-//! 1. **ReaScript Newton refinement** (`scripts/reascripts/set_eq_param.lua`) —
-//!    after the initial 21-sample interpolation, the script reads REAPER's
-//!    actual stored value, estimates slope via finite difference, nudges the
-//!    norm by error/slope, repeats ≤5 iterations. Converges to within 0.05 dB
-//!    / 0.5 Hz / 0.005 oct of the requested value.
-//! 2. **UI snap to display granularity** (`snap_db` / `snap_hz` / `snap_oct`
-//!    in this file) — slider on_change rounds the projected value to the same
-//!    granularity the UI label uses (`{:.1} dB`, `format_freq`, `{:.2} oct`).
-//!    Sent value matches displayed value exactly.
-//! 3. **drag_end force-flush** — slider on_change is throttled to 50 ms,
-//!    which can drop the last position before drag-end. on_drag_end now
-//!    unconditionally sends the local sig value, guaranteeing the final
-//!    position reaches REAPER. The local sig already holds the snapped value
-//!    from on_change.
-//!
-//! Together these make sent = displayed = stored = reopened. Removing any
-//! layer reintroduces a drift surface.
+//! EqSlider keeps local reactive state so parent re-renders don't destroy
+//! active drag gestures; each band card owns its own signals and on_change
+//! only sends on the WebSocket. Slider values snap to the label's display
+//! granularity (`snap_db` / `snap_hz` / `snap_oct`), and drag-end always
+//! sends the final value past the 50 ms throttle, so sent = displayed =
+//! stored = reopened.
 
+use iem_dsp::eq::{Band, BandKind, EqParams, response_db};
 use leptos::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -46,22 +25,20 @@ const ACTIVATION_DELAY_MS: u32 = 150;
 /// Maximum time between taps for double-tap detection (ms)
 const DOUBLE_TAP_MS: f64 = 300.0;
 
-/// Sample rate for biquad filter calculations (Dante network rate)
-const SAMPLE_RATE: f32 = 96000.0;
+/// The engine's sample rate (the curve is its response at this rate)
+const SAMPLE_RATE: f64 = 96_000.0;
 
-/// UI-fixed visual range for the freq slider (Hz). REAPER's actual ReaEQ range is
-/// 20 Hz – ~24 kHz; we mirror that here for the slider's log-scale projection.
+/// UI-fixed visual range for the freq slider (Hz), log scale.
 const UI_FREQ_MIN_HZ: f32 = 20.0;
 const UI_FREQ_MAX_HZ: f32 = 24000.0;
 
-/// UI-fixed visual range for the bw slider (octaves). REAPER's typical ReaEQ bw is
-/// 0.01 – 4.00 oct (varies per band type, but UI displays this nominal range).
+/// UI-fixed visual range for the bw slider (octaves).
 const UI_BW_MIN_OCT: f32 = 0.01;
 const UI_BW_MAX_OCT: f32 = 4.00;
 
-/// UI-fixed visual range for the gain slider (dB). REAPER's actual gd range is
-/// -150 dB to +12 dB, but musical gains live in ±12 — UI clamps display to this
-/// range so the slider isn't squashed into the far-right 10%.
+/// UI-fixed visual range for the gain slider (dB). The engine's range goes down
+/// to its off value (a notch), but musical gains live in ±12 — UI clamps
+/// display to this range so the slider isn't squashed into the far-right 10%.
 const UI_GAIN_MIN_DB: f32 = -12.0;
 const UI_GAIN_MAX_DB: f32 = 12.0;
 
@@ -71,10 +48,8 @@ pub struct EqBandState {
     pub band_type: String,
     pub freq_hz: f32,
     pub gain_db: f32,
+    /// Bandwidth in octaves
     pub bw: f32,
-    pub freq_norm: f32,
-    pub gain_norm: f32,
-    pub bw_norm: f32,
     /// Whether this band is enabled (disabled bands should not affect the curve)
     pub enabled: bool,
 }
@@ -117,201 +92,51 @@ fn display_order(band_type: &str) -> u8 {
     }
 }
 
-// ─── Biquad filter coefficient functions (Audio EQ Cookbook) ───
-
-/// Convert bandwidth in octaves to Q factor for biquad filters
-fn bw_to_q(bw_oct: f32, w0: f32) -> f32 {
-    let sinh_val = (2.0_f32.ln() / 2.0 * bw_oct * w0 / w0.sin()).sinh();
-    if sinh_val > 0.0 {
-        1.0 / (2.0 * sinh_val)
-    } else {
-        0.707 // fallback to Butterworth Q
+/// The engine's parameters of the displayed bands (at most five, in the
+/// server's order; missing bands are off). A gain at or below the engine's off
+/// value is a notch (linear gain 0).
+fn engine_params(bands: &[EqBandState]) -> EqParams {
+    let mut params = EqParams::standard_flat();
+    for (slot, b) in params.bands.iter_mut().zip(bands) {
+        *slot = Band {
+            kind: match b.band_type.as_str() {
+                "highpass" => BandKind::HighPass,
+                "lowshelf" => BandKind::LowShelf,
+                "highshelf" => BandKind::HighShelf,
+                _ => BandKind::Peak,
+            },
+            enabled: b.enabled,
+            freq_hz: f64::from(b.freq_hz),
+            gain_lin: if b.gain_db <= -150.0 {
+                0.0
+            } else {
+                10f64.powf(f64::from(b.gain_db) / 20.0)
+            },
+            bw_oct: f64::from(b.bw),
+        };
     }
+    params
 }
 
-/// Biquad coefficients: (b0, b1, b2, a0, a1, a2)
-type BiquadCoeffs = (f32, f32, f32, f32, f32, f32);
-
-fn biquad_peaking(w0: f32, gain_db: f32, bw_oct: f32) -> BiquadCoeffs {
-    let a = 10.0_f32.powf(gain_db / 40.0);
-    let q = bw_to_q(bw_oct, w0);
-    let alpha = w0.sin() / (2.0 * q);
-    let cos_w0 = w0.cos();
-
-    let b0 = 1.0 + alpha * a;
-    let b1 = -2.0 * cos_w0;
-    let b2 = 1.0 - alpha * a;
-    let a0 = 1.0 + alpha / a;
-    let a1 = -2.0 * cos_w0;
-    let a2 = 1.0 - alpha / a;
-    (b0, b1, b2, a0, a1, a2)
-}
-
-fn biquad_low_shelf(w0: f32, gain_db: f32, bw_oct: f32) -> BiquadCoeffs {
-    let a = 10.0_f32.powf(gain_db / 40.0);
-    // Audio EQ Cookbook shelf-slope formula (NOT the peaking-Q formula).
-    // S is the shelf slope parameter. REAPER exposes a "bandwidth in
-    // octaves" for shelves; we map it to S = 1 / bw_oct and CLAMP to
-    // [0.01, 1.0] where 1.0 = Butterworth shelf (maximum S without
-    // overshoot). Above S = 1 the cookbook formula re-introduces
-    // resonance near the corner — the exact bug reaperiem#167 is trying to
-    // eliminate — so we forbid it. Narrow-bandwidth shelves render as
-    // Butterworth; wide-bandwidth shelves render as gentler slopes.
-    // This matches REAPER's ReaEQ display, which is always visually
-    // smooth regardless of user-set bandwidth.
-    let s = (1.0 / bw_oct.max(0.01)).clamp(0.01, 1.0);
-    let alpha = w0.sin() / 2.0 * ((a + 1.0 / a) * (1.0 / s - 1.0) + 2.0).max(0.0).sqrt();
-    let cos_w0 = w0.cos();
-    let two_sqrt_a_alpha = 2.0 * a.sqrt() * alpha;
-
-    let b0 = a * ((a + 1.0) - (a - 1.0) * cos_w0 + two_sqrt_a_alpha);
-    let b1 = 2.0 * a * ((a - 1.0) - (a + 1.0) * cos_w0);
-    let b2 = a * ((a + 1.0) - (a - 1.0) * cos_w0 - two_sqrt_a_alpha);
-    let a0 = (a + 1.0) + (a - 1.0) * cos_w0 + two_sqrt_a_alpha;
-    let a1 = -2.0 * ((a - 1.0) + (a + 1.0) * cos_w0);
-    let a2 = (a + 1.0) + (a - 1.0) * cos_w0 - two_sqrt_a_alpha;
-    (b0, b1, b2, a0, a1, a2)
-}
-
-fn biquad_high_shelf(w0: f32, gain_db: f32, bw_oct: f32) -> BiquadCoeffs {
-    let a = 10.0_f32.powf(gain_db / 40.0);
-    // Audio EQ Cookbook shelf-slope formula. See biquad_low_shelf comment.
-    let s = (1.0 / bw_oct.max(0.01)).clamp(0.01, 1.0);
-    let alpha = w0.sin() / 2.0 * ((a + 1.0 / a) * (1.0 / s - 1.0) + 2.0).max(0.0).sqrt();
-    let cos_w0 = w0.cos();
-    let two_sqrt_a_alpha = 2.0 * a.sqrt() * alpha;
-
-    let b0 = a * ((a + 1.0) + (a - 1.0) * cos_w0 + two_sqrt_a_alpha);
-    let b1 = -2.0 * a * ((a - 1.0) + (a + 1.0) * cos_w0);
-    let b2 = a * ((a + 1.0) + (a - 1.0) * cos_w0 - two_sqrt_a_alpha);
-    let a0 = (a + 1.0) - (a - 1.0) * cos_w0 + two_sqrt_a_alpha;
-    let a1 = 2.0 * ((a - 1.0) - (a + 1.0) * cos_w0);
-    let a2 = (a + 1.0) - (a - 1.0) * cos_w0 - two_sqrt_a_alpha;
-    (b0, b1, b2, a0, a1, a2)
-}
-
-fn biquad_hpf(w0: f32, bw_oct: f32) -> BiquadCoeffs {
-    let q = bw_to_q(bw_oct, w0);
-    let alpha = w0.sin() / (2.0 * q);
-    let cos_w0 = w0.cos();
-
-    let b0 = (1.0 + cos_w0) / 2.0;
-    let b1 = -(1.0 + cos_w0);
-    let b2 = (1.0 + cos_w0) / 2.0;
-    let a0 = 1.0 + alpha;
-    let a1 = -2.0 * cos_w0;
-    let a2 = 1.0 - alpha;
-    (b0, b1, b2, a0, a1, a2)
-}
-
-fn biquad_lpf(w0: f32, bw_oct: f32) -> BiquadCoeffs {
-    let q = bw_to_q(bw_oct, w0);
-    let alpha = w0.sin() / (2.0 * q);
-    let cos_w0 = w0.cos();
-
-    let b0 = (1.0 - cos_w0) / 2.0;
-    let b1 = 1.0 - cos_w0;
-    let b2 = (1.0 - cos_w0) / 2.0;
-    let a0 = 1.0 + alpha;
-    let a1 = -2.0 * cos_w0;
-    let a2 = 1.0 - alpha;
-    (b0, b1, b2, a0, a1, a2)
-}
-
-fn biquad_notch(w0: f32, bw_oct: f32) -> BiquadCoeffs {
-    let q = bw_to_q(bw_oct, w0);
-    let alpha = w0.sin() / (2.0 * q);
-    let cos_w0 = w0.cos();
-
-    let b0 = 1.0;
-    let b1 = -2.0 * cos_w0;
-    let b2 = 1.0;
-    let a0 = 1.0 + alpha;
-    let a1 = -2.0 * cos_w0;
-    let a2 = 1.0 - alpha;
-    (b0, b1, b2, a0, a1, a2)
-}
-
-/// Evaluate biquad frequency response magnitude in dB at a given frequency.
-/// Uses H(e^jω) = (b0 + b1·e^-jω + b2·e^-2jω) / (a0 + a1·e^-jω + a2·e^-2jω)
-fn eval_biquad_db(freq: f32, coeffs: BiquadCoeffs) -> f32 {
-    let (b0, b1, b2, a0, a1, a2) = coeffs;
-    let w = 2.0 * std::f32::consts::PI * freq / SAMPLE_RATE;
-    let cos_w = w.cos();
-    let cos_2w = (2.0 * w).cos();
-    let sin_w = w.sin();
-    let sin_2w = (2.0 * w).sin();
-
-    let num_re = b0 + b1 * cos_w + b2 * cos_2w;
-    let num_im = -(b1 * sin_w + b2 * sin_2w);
-    let den_re = a0 + a1 * cos_w + a2 * cos_2w;
-    let den_im = -(a1 * sin_w + a2 * sin_2w);
-
-    let num_mag_sq = num_re * num_re + num_im * num_im;
-    let den_mag_sq = den_re * den_re + den_im * den_im;
-
-    if den_mag_sq < 1e-20 {
-        return 0.0;
-    }
-    10.0 * (num_mag_sq / den_mag_sq).max(1e-10).log10()
-}
-
-/// Compute the gain contribution of a single band at a given frequency
-/// using proper biquad transfer function evaluation.
-fn compute_band_gain(freq: f32, band: &EqBandState) -> f32 {
-    let w0 = 2.0 * std::f32::consts::PI * band.freq_hz.max(20.0) / SAMPLE_RATE;
-    let bw = band.bw.max(0.01);
-
-    let coeffs = match band.band_type.as_str() {
-        "band" => {
-            if band.gain_db.abs() < 0.01 {
-                return 0.0;
-            }
-            biquad_peaking(w0, band.gain_db, bw)
-        }
-        "lowshelf" => {
-            if band.gain_db.abs() < 0.01 {
-                return 0.0;
-            }
-            biquad_low_shelf(w0, band.gain_db, bw)
-        }
-        "highshelf" => {
-            if band.gain_db.abs() < 0.01 {
-                return 0.0;
-            }
-            biquad_high_shelf(w0, band.gain_db, bw)
-        }
-        "highpass" => biquad_hpf(w0, bw),
-        "lowpass" => biquad_lpf(w0, bw),
-        "notch" => biquad_notch(w0, bw),
-        _ => return 0.0,
-    };
-
-    eval_biquad_db(freq, coeffs)
+/// The response of `bands` at `freq` in dB, as the engine applies it.
+#[cfg(test)]
+fn curve_db(bands: &[EqBandState], freq: f32) -> f32 {
+    response_db(&engine_params(bands), SAMPLE_RATE, f64::from(freq)) as f32
 }
 
 /// Generate the frequency response curve path as SVG "d" attribute.
-/// Sums biquad transfer function responses from all active bands.
 fn generate_curve_path(bands: &[EqBandState], width: f32, height: f32) -> String {
     let num_points = 200;
     let log_min = 20.0_f32.ln();
     let log_max = 20000.0_f32.ln();
+    let params = engine_params(bands);
     let mut path = String::with_capacity(num_points * 20);
 
     for i in 0..=num_points {
         let x = (i as f32 / num_points as f32) * width;
         let log_freq = log_min + (i as f32 / num_points as f32) * (log_max - log_min);
         let freq = log_freq.exp();
-
-        // Sum contributions from enabled bands only
-        let mut total_gain = 0.0_f32;
-        for band in bands {
-            if !band.enabled {
-                continue;
-            }
-            total_gain += compute_band_gain(freq, band);
-        }
-
+        let total_gain = response_db(&params, SAMPLE_RATE, f64::from(freq)) as f32;
         let y = gain_to_y(total_gain, height);
 
         if i == 0 {
@@ -335,7 +160,7 @@ fn format_freq(hz: f32) -> String {
 /// Snap a dB value to UI display granularity (0.1 dB).
 /// Ensures slider on_change sends exactly the value shown in the label,
 /// preventing reopen-drift caused by float-precision mismatch between
-/// displayed text (`{:.1} dB`) and the underlying float sent to ReaScript.
+/// displayed text (`{:.1} dB`) and the underlying float sent to the engine.
 fn snap_db(db: f32) -> f32 {
     (db * 10.0).round() / 10.0
 }
@@ -359,13 +184,10 @@ fn snap_oct(oct: f32) -> f32 {
 /// These are created once per band when the modal opens and persist until close.
 #[derive(Clone)]
 struct BandLocalState {
-    /// Original REAPER band index (0-4) — used for API calls
-    reaper_band_idx: u8,
+    /// The engine's band index (0-4) — used for API calls
+    band_idx: u8,
     band_type: String,
-    freq_norm: RwSignal<f32>,
-    gain_norm: RwSignal<f32>,
-    bw_norm: RwSignal<f32>,
-    /// REAPER-formatted display values (accurate, loaded from server)
+    /// The band's values (loaded from the server)
     freq_hz: RwSignal<f32>,
     gain_db: RwSignal<f32>,
     bw_oct: RwSignal<f32>,
@@ -376,20 +198,20 @@ struct BandLocalState {
 /// Full-screen EQ modal component
 #[component]
 pub fn EQModal(
-    /// Track index to show EQ for
-    track_index: usize,
+    /// The EQ target (a channel id, the page's mix or its stems group)
+    target: String,
     /// Track name for the header
     track_name: String,
     /// EQ bands data from server (synced to local signals when not dragging)
     bands: ReadSignal<Vec<EqBandState>>,
     /// Whether EQ data is loading
     loading: ReadSignal<bool>,
-    /// Callback when a band parameter changes (band_index, param_name, normalized_value)
+    /// Callback when a band parameter changes (band_index, param_name, value)
     on_param_change: Callback<(u8, String, f32)>,
     /// Callback to close the modal
     on_close: Callback<()>,
 ) -> impl IntoView {
-    let _ = track_index;
+    let _ = target;
     let track_name = StoredValue::new(track_name);
 
     // SVG dimensions
@@ -444,7 +266,7 @@ pub fn EQModal(
         // (which further writes signals) is skipped.
         if !local_state_created.try_get_untracked().unwrap_or(true) {
             // First time: create local signals, sorted by display order
-            // Build (reaper_index, band) pairs then sort for display
+            // Build (engine band index, band) pairs then sort for display
             let mut indexed: Vec<(usize, &EqBandState)> = parent.iter().enumerate().collect();
             indexed.sort_by(|a, b| {
                 let ord_a = display_order(&a.1.band_type);
@@ -458,12 +280,9 @@ pub fn EQModal(
 
             let locals: Vec<BandLocalState> = indexed
                 .iter()
-                .map(|(reaper_idx, b)| BandLocalState {
-                    reaper_band_idx: *reaper_idx as u8,
+                .map(|(idx, b)| BandLocalState {
+                    band_idx: *idx as u8,
                     band_type: b.band_type.clone(),
-                    freq_norm: RwSignal::new(b.freq_norm),
-                    gain_norm: RwSignal::new(b.gain_norm),
-                    bw_norm: RwSignal::new(b.bw_norm),
                     freq_hz: RwSignal::new(b.freq_hz),
                     gain_db: RwSignal::new(b.gain_db),
                     bw_oct: RwSignal::new(b.bw),
@@ -481,11 +300,8 @@ pub fn EQModal(
             // Subsequent: sync values then trigger display update
             let locals = stored_locals.get_value();
             for local in locals.iter() {
-                let ri = local.reaper_band_idx as usize;
+                let ri = local.band_idx as usize;
                 if let Some(parent_band) = parent.get(ri) {
-                    let _ = local.freq_norm.try_set(parent_band.freq_norm);
-                    let _ = local.gain_norm.try_set(parent_band.gain_norm);
-                    let _ = local.bw_norm.try_set(parent_band.bw_norm);
                     let _ = local.freq_hz.try_set(parent_band.freq_hz);
                     let _ = local.gain_db.try_set(parent_band.gain_db);
                     let _ = local.bw_oct.try_set(parent_band.bw);
@@ -514,7 +330,7 @@ pub fn EQModal(
 
                 // No EQ message
                 <Show when=move || !loading.get() && !local_state_created.get() fallback=|| ()>
-                    <div class="eq-no-eq">"No ReaEQ found on this track"</div>
+                    <div class="eq-no-eq">"No EQ on this channel"</div>
                 </Show>
 
                 // SVG Curve display + band controls
@@ -575,21 +391,18 @@ pub fn EQModal(
                                 let curve_memo = Memo::new(move |_| {
                                     curve_trigger.get(); // ONLY subscription
                                     let locals = stored_locals.get_value();
-                                    let states: Vec<EqBandState> = locals.iter().map(|l| {
-                                        let fn_ = l.freq_norm.get_untracked();
-                                        let gn_ = l.gain_norm.get_untracked();
-                                        let bn_ = l.bw_norm.get_untracked();
-                                        EqBandState {
+                                    // In the engine's band order (the display order differs).
+                                    let mut by_idx: Vec<(u8, EqBandState)> = locals.iter().map(|l| {
+                                        (l.band_idx, EqBandState {
                                             band_type: l.band_type.clone(),
                                             freq_hz: l.freq_hz.get_untracked(),
                                             gain_db: l.gain_db.get_untracked(),
                                             bw: l.bw_oct.get_untracked(),
-                                            freq_norm: fn_,
-                                            gain_norm: gn_,
-                                            bw_norm: bn_,
                                             enabled: l.enabled.get_untracked(),
-                                        }
+                                        })
                                     }).collect();
+                                    by_idx.sort_by_key(|(i, _)| *i);
+                                    let states: Vec<EqBandState> = by_idx.into_iter().map(|(_, b)| b).collect();
                                     generate_curve_path(&states, svg_width, svg_height)
                                 });
                                 view! {
@@ -650,7 +463,7 @@ pub fn EQModal(
                         {
                             let locals = stored_locals.get_value();
                             locals.iter().enumerate().map(|(i, local)| {
-                                let band_idx = local.reaper_band_idx;
+                                let band_idx = local.band_idx;
                                 // Store band_idx in Leptos StoredValue for robust access from
                                 // slider callbacks (where DOM data-attribute approach isn't possible).
                                 let band_idx_sv = StoredValue::new(band_idx);
@@ -710,7 +523,7 @@ pub fn EQModal(
                                                         "highshelf" => 8000.0,
                                                         "lowpass" => 12000.0,
                                                         _ => {
-                                                            // Parametric bands: use REAPER index
+                                                            // Parametric bands: by band index
                                                             if idx == 3 { 3000.0 } else { 800.0 }
                                                         }
                                                     };
@@ -731,9 +544,9 @@ pub fn EQModal(
                                             </button>
                                         </div>
 
-                                        // Frequency slider: derives position from REAPER's actual freq_hz
+                                        // Frequency slider: derives position from the engine's freq_hz
                                         // mapped onto a fixed UI log scale (20 Hz – 24 kHz). Single source
-                                        // of truth = REAPER (reaperiem#196).
+                                        // of truth = the engine (reaperiem#196).
                                         <div class="eq-param-row">
                                             <label class="eq-param-label">"Freq"</label>
                                             <EqSlider
@@ -763,12 +576,12 @@ pub fn EQModal(
                                                 on_drag_end=Callback::new(move |_: ()| {
                                                     let _ = any_dragging.try_set(false);
                                                     // Force-flush final value: 50 ms throttle in on_change
-                                                    // can drop the last position. Without this, REAPER
+                                                    // can drop the last position. Without this, the engine
                                                     // stores a value from up to 50 ms before drag-end
                                                     // and reopen reads that → drift (reaperiem#196).
                                                     // Always send (no last_send_* check) — extra send is
-                                                    // cheaper than missing the final position. ReaScript
-                                                    // Newton refinement is idempotent on duplicate writes.
+                                                    // cheaper than missing the final position; a duplicate
+                                                    // write of the same value changes nothing.
                                                     let final_hz = freq_hz_sig.get_untracked();
                                                     on_param_change.run((band_idx_sv.get_value(), "freq_hz".to_string(), final_hz));
                                                 })
@@ -783,17 +596,17 @@ pub fn EQModal(
                                             </span>
                                         </div>
 
-                                        // Gain slider: derives position from REAPER's actual gain_db
+                                        // Gain slider: derives position from the engine's gain_db
                                         // clamped to a fixed ±12 dB UI range for sensible UX.
-                                        // (REAPER's actual range is -150..+12 dB which would squash
+                                        // (the engine's range reaches down to its off value, which would squash
                                         // all musical gains into the far-right 10% of slider travel.)
                                         <div class="eq-param-row">
                                             <label class="eq-param-label">"Gain"</label>
                                             <EqSlider
                                                 value=Signal::derive(move || {
-                                                    // Single source of truth — REAPER's formatted dB.
+                                                    // Single source of truth — the engine's dB.
                                                     // Slider VISUAL range fixed at ±12 dB for UX
-                                                    // (REAPER's actual range is -150..+12 dB which would
+                                                    // (the engine's range reaches down to its off value, which would
                                                     // squash all musical gains into the far-right 10%
                                                     // of slider travel). Out-of-range values clamp.
                                                     let db = gain_db_sig.get().clamp(UI_GAIN_MIN_DB, UI_GAIN_MAX_DB);
@@ -803,7 +616,7 @@ pub fn EQModal(
                                                     // Project slider position 0-1 to dB, then snap to UI
                                                     // display granularity (0.1 dB). Without snapping, the
                                                     // displayed `{:.1}` rounds e.g. 2.04 → "+2.0 dB" while
-                                                    // ReaScript receives 2.04, REAPER stores ~2.04, and on
+                                                    // the engine receives 2.04, stores 2.04, and on
                                                     // reopen the display may round differently → drift.
                                                     let db = snap_db(UI_GAIN_MIN_DB + v * (UI_GAIN_MAX_DB - UI_GAIN_MIN_DB));
                                                     let now = js_sys::Date::now();
@@ -821,8 +634,8 @@ pub fn EQModal(
                                                     let _ = any_dragging.try_set(false);
                                                     // Force-flush final value past the 50 ms throttle (reaperiem#196).
                                                     // Always send (no last_send_* check) — extra send is
-                                                    // cheaper than missing the final position. ReaScript
-                                                    // Newton refinement is idempotent on duplicate writes.
+                                                    // cheaper than missing the final position; a duplicate
+                                                    // write of the same value changes nothing.
                                                     let final_db = gain_db_sig.get_untracked();
                                                     on_param_change.run((band_idx_sv.get_value(), "gain_db".to_string(), final_db));
                                                 })
@@ -840,9 +653,9 @@ pub fn EQModal(
                                             </span>
                                         </div>
 
-                                        // Bandwidth/Q slider: derives position from REAPER's actual bw_oct
+                                        // Bandwidth/Q slider: derives position from the engine's bw_oct
                                         // mapped onto a fixed UI linear scale (0.01 – 4.00 oct). Single
-                                        // source of truth = REAPER (reaperiem#196).
+                                        // source of truth = the engine (reaperiem#196).
                                         <div class="eq-param-row">
                                             <label class="eq-param-label">"BW"</label>
                                             <EqSlider
@@ -868,8 +681,8 @@ pub fn EQModal(
                                                     let _ = any_dragging.try_set(false);
                                                     // Force-flush final value past the 50 ms throttle (reaperiem#196).
                                                     // Always send (no last_send_* check) — extra send is
-                                                    // cheaper than missing the final position. ReaScript
-                                                    // Newton refinement is idempotent on duplicate writes.
+                                                    // cheaper than missing the final position; a duplicate
+                                                    // write of the same value changes nothing.
                                                     let final_oct = bw_oct_sig.get_untracked();
                                                     on_param_change.run((band_idx_sv.get_value(), "bw_oct".to_string(), final_oct));
                                                 })
@@ -1180,7 +993,11 @@ fn EqSlider(
                 let _ = doc_cleanup
                     .remove_event_listener_with_callback("mousemove", mc.as_ref().unchecked_ref());
             }
-            mu_cleanup.borrow_mut().take();
+            // Off the document before it is dropped (see fader.rs).
+            if let Some(uc) = mu_cleanup.borrow_mut().take() {
+                let _ = doc_cleanup
+                    .remove_event_listener_with_callback("mouseup", uc.as_ref().unchecked_ref());
+            }
 
             if was_active {
                 on_drag_end.run(());
@@ -1251,307 +1068,96 @@ mod tests {
         assert!((gain_to_y(-12.0, height) - height).abs() < 0.01);
     }
 
-    #[test]
-    fn test_biquad_peaking_at_center() {
-        let band = EqBandState {
-            band_type: "band".to_string(),
-            freq_hz: 1000.0,
-            gain_db: 6.0,
-            bw: 1.0,
-            freq_norm: 0.5,
-            gain_norm: 0.3,
-            bw_norm: 0.25,
-            enabled: true,
-        };
-        let gain_at_center = compute_band_gain(1000.0, &band);
-        // At center frequency, gain should approximately equal band gain_db
-        assert!(
-            (gain_at_center - 6.0).abs() < 0.5,
-            "Expected ~6dB at center, got {}",
-            gain_at_center
-        );
-    }
-
-    #[test]
-    fn test_biquad_peaking_far_from_center() {
-        let band = EqBandState {
-            band_type: "band".to_string(),
-            freq_hz: 1000.0,
-            gain_db: 12.0,
-            bw: 1.0,
-            freq_norm: 0.5,
-            gain_norm: 0.3,
-            bw_norm: 0.25,
-            enabled: true,
-        };
-        // At 10x the center frequency, gain should be near 0 dB
-        let gain_far = compute_band_gain(10000.0, &band);
-        assert!(
-            gain_far.abs() < 1.0,
-            "Expected ~0dB far from center, got {}",
-            gain_far
-        );
-    }
-
-    #[test]
-    fn test_biquad_hpf_rolloff() {
-        let band = EqBandState {
-            band_type: "highpass".to_string(),
-            freq_hz: 100.0,
-            gain_db: 0.0,
-            bw: 2.0,
-            freq_norm: 0.14,
-            gain_norm: 0.25,
-            bw_norm: 0.5,
-            enabled: true,
-        };
-        // Well above cutoff: should be ~0 dB
-        let gain_above = compute_band_gain(1000.0, &band);
-        assert!(
-            gain_above.abs() < 0.5,
-            "Expected ~0dB above HPF cutoff, got {}",
-            gain_above
-        );
-        // Well below cutoff: should be significantly negative
-        let gain_below = compute_band_gain(10.0, &band);
-        assert!(
-            gain_below < -6.0,
-            "Expected strong rolloff below HPF cutoff, got {}",
-            gain_below
-        );
-    }
-
-    #[test]
-    fn test_biquad_low_shelf() {
-        let band = EqBandState {
-            band_type: "lowshelf".to_string(),
-            freq_hz: 200.0,
-            gain_db: 6.0,
-            bw: 0.8,
-            freq_norm: 0.2,
-            gain_norm: 0.3,
-            bw_norm: 0.2,
-            enabled: true,
-        };
-        // Well below shelf: should be near shelf gain
-        let gain_low = compute_band_gain(20.0, &band);
-        assert!(
-            (gain_low - 6.0).abs() < 1.5,
-            "Expected ~6dB below low shelf, got {}",
-            gain_low
-        );
-        // Well above shelf: should be near 0 dB
-        let gain_high = compute_band_gain(5000.0, &band);
-        assert!(
-            gain_high.abs() < 0.5,
-            "Expected ~0dB above low shelf, got {}",
-            gain_high
-        );
-    }
-
-    #[test]
-    fn test_disabled_band_does_not_affect_curve() {
-        let disabled_hpf = EqBandState {
-            band_type: "highpass".to_string(),
-            freq_hz: 100.0,
-            gain_db: 0.0,
-            bw: 2.0,
-            freq_norm: 0.14,
-            gain_norm: 0.25,
-            bw_norm: 0.5,
-            enabled: false,
-        };
-        let bands = vec![disabled_hpf];
-        let path = generate_curve_path(&bands, 400.0, 300.0);
-
-        // A flat curve at 0dB should be a horizontal line at height/2
-        let flat_path = generate_curve_path(&[], 400.0, 300.0);
-        assert_eq!(
-            path, flat_path,
-            "Disabled HPF should produce flat curve identical to no bands"
-        );
-    }
-
-    #[test]
-    fn test_enabled_band_affects_curve() {
-        let enabled_hpf = EqBandState {
-            band_type: "highpass".to_string(),
-            freq_hz: 100.0,
-            gain_db: 0.0,
-            bw: 2.0,
-            freq_norm: 0.14,
-            gain_norm: 0.25,
-            bw_norm: 0.5,
-            enabled: true,
-        };
-        let bands = vec![enabled_hpf];
-        let path = generate_curve_path(&bands, 400.0, 300.0);
-        let flat_path = generate_curve_path(&[], 400.0, 300.0);
-        assert_ne!(
-            path, flat_path,
-            "Enabled HPF should produce a different curve than flat"
-        );
-    }
-
-    /// Helper: build an EqBandState with sensible defaults.
+    /// Helper: build an enabled EqBandState.
     fn band(ty: &str, freq_hz: f32, gain_db: f32, bw: f32) -> EqBandState {
         EqBandState {
             band_type: ty.to_string(),
             freq_hz,
             gain_db,
             bw,
-            freq_norm: 0.0,
-            gain_norm: 0.0,
-            bw_norm: 0.0,
             enabled: true,
         }
     }
 
-    /// Regression guard: peaking filter's magnitude at its center frequency
-    /// must equal the stated gain. This already passes on v1.146.0 — we
-    /// commit it so future changes can't break it.
+    /// The curve is the engine's response: a peak reads its gain at its centre.
     #[test]
-    fn test_peaking_exact_at_center_frequency() {
+    fn a_peak_reads_its_gain_at_its_centre() {
         for &gain in &[-12.0_f32, -6.0, -3.0, 0.0, 3.0, 6.0, 12.0] {
             for &bw in &[0.5_f32, 1.0, 2.0] {
-                let b = band("band", 1000.0, gain, bw);
-                let g = compute_band_gain(1000.0, &b);
+                let g = curve_db(&[band("band", 1000.0, gain, bw)], 1000.0);
                 assert!(
-                    (g - gain).abs() < 0.05,
-                    "peaking {gain} dB bw={bw}: got {g} at center freq"
+                    (g - gain).abs() < 0.1,
+                    "peaking {gain} dB bw={bw}: got {g} at the centre"
                 );
             }
         }
+        // Far from the centre the peak fades out.
+        let far = curve_db(&[band("band", 1000.0, 12.0, 1.0)], 10_000.0);
+        assert!(far.abs() < 1.0, "{far}");
     }
 
-    /// Lowshelf passband (well below corner) must equal stated gain.
     #[test]
-    fn test_lowshelf_passband_equals_gain() {
-        for &gain in &[-6.0_f32, -3.0, 3.0, 6.0] {
-            for &bw in &[0.5_f32, 1.0] {
-                let b = band("lowshelf", 500.0, gain, bw);
-                // Evaluate far below corner — should be full shelf gain.
-                let g = compute_band_gain(20.0, &b);
-                assert!(
-                    (g - gain).abs() < 0.3,
-                    "lowshelf 500 Hz {gain} dB bw={bw}: passband at 20 Hz = {g}"
-                );
-            }
-        }
-    }
-
-    /// Highshelf passband (well above corner) must equal stated gain.
-    #[test]
-    fn test_highshelf_passband_equals_gain() {
-        for &gain in &[-6.0_f32, -3.0, 3.0, 6.0] {
-            for &bw in &[0.5_f32, 1.0] {
-                let b = band("highshelf", 5000.0, gain, bw);
-                // Evaluate far above corner — should be full shelf gain.
-                let g = compute_band_gain(20000.0, &b);
-                assert!(
-                    (g - gain).abs() < 0.3,
-                    "highshelf 5 kHz {gain} dB bw={bw}: passband at 20 kHz = {g}"
-                );
-            }
-        }
-    }
-
-    /// Shelf response must not overshoot (positive gain) or undershoot
-    /// (negative gain) its passband — the curve must stay within the band's
-    /// [gain, 0] envelope across the entire 20 Hz .. 20 kHz range.
-    /// Covers BOTH positive and negative shelf gains (symmetric regression).
-    #[test]
-    fn test_shelf_no_overshoot_or_undershoot() {
-        // (band_type, corner_hz, gain_db)
-        let cases = &[
-            ("lowshelf", 500.0_f32, 6.0_f32),
-            ("lowshelf", 500.0, -6.0),
-            ("highshelf", 5000.0, 6.0),
-            ("highshelf", 5000.0, -6.0),
-        ];
-        for &(ty, corner, gain) in cases {
-            let b = band(ty, corner, gain, 0.5);
-            let mut max_gain = f32::NEG_INFINITY;
-            let mut min_gain = f32::INFINITY;
-            // Log-sweep 20 Hz .. 20 kHz in 400 steps.
-            for i in 0..=400 {
-                let t = i as f32 / 400.0;
-                let freq = 20.0 * (1000.0_f32).powf(t);
-                let g = compute_band_gain(freq, &b);
-                if g > max_gain {
-                    max_gain = g;
-                }
-                if g < min_gain {
-                    min_gain = g;
-                }
-            }
-            // 0.3 dB of slop covers the smooth transition region.
-            let (lo, hi) = if gain >= 0.0 {
-                (-0.3, gain + 0.3)
-            } else {
-                (gain - 0.3, 0.3)
-            };
-            assert!(
-                max_gain <= hi,
-                "{ty} {gain} dB bw=0.5: max={max_gain} > {hi}"
-            );
-            assert!(
-                min_gain >= lo,
-                "{ty} {gain} dB bw=0.5: min={min_gain} < {lo}"
-            );
-        }
-    }
-
-    /// reaperiem#167 regression: shelf immediately adjacent to peaking band does not
-    /// ring upward into the peaking band's region. The constants below are
-    /// a snapshot of MEMBER6 mic's EQ as of 2026-04-12 — if the engineer
-    /// changes MEMBER6's EQ in REAPER, these values drift but the test still
-    /// upholds the invariant (upper bound only). For a synthetic standalone
-    /// test of the same invariant, see `test_shelf_no_overshoot_or_undershoot`.
-    ///
-    /// With the pre-fix peaking-Q shelf math, summing these four bands
-    /// produced a peak of +5.73 dB at 640 Hz (+1.43 dB over b2's stated
-    /// +4.3 dB). With the fix the peak is ≤ +4.6 dB.
-    #[test]
-    fn test_shelf_adjacent_to_peaking_does_not_ring_167() {
-        let bands = vec![
-            // b0 highpass disabled — skip
-            band("lowshelf", 510.8, -2.1, 0.56),
-            band("band", 640.6, 4.3, 1.14),
-            band("band", 1473.3, -1.5, 0.92),
-            band("highshelf", 4448.1, 3.6, 0.80),
-        ];
-        // Sum responses at 640 Hz — must not overshoot b2's stated +4.3 dB.
-        // Real sum is lower than 4.3 because adjacent bands bleed negative
-        // contributions (lowshelf past corner ~-0.31 dB, peaking at 1473 Hz
-        // bleeding down). The reaperiem#167 bug made this sum ~+5.7 dB (shelf ringing
-        // adding instead of settling). Fix invariant: sum must stay ≤ +4.6 dB
-        // at the peaking band's center frequency.
-        let mut total = 0.0_f32;
-        for b in &bands {
-            total += compute_band_gain(640.6, b);
-        }
-        assert!(
-            total <= 4.6,
-            "fixture sum at 640 Hz = {total} dB, expected ≤ 4.6 (no overshoot)"
+    fn a_disabled_band_is_flat() {
+        let mut hpf = band("highpass", 100.0, 0.0, 2.0);
+        hpf.enabled = false;
+        let mut peak = band("band", 1000.0, 6.0, 1.0);
+        peak.enabled = false;
+        assert_eq!(curve_db(&[hpf.clone(), peak.clone()], 1000.0), 0.0);
+        assert_eq!(curve_db(&[hpf.clone(), peak], 30.0), 0.0);
+        assert_eq!(
+            generate_curve_path(&[hpf], 400.0, 300.0),
+            generate_curve_path(&[], 400.0, 300.0),
+            "a disabled HPF draws the flat curve"
         );
-        // And the whole curve max (scanned log-sweep) must not exceed +4.6 dB.
-        let mut curve_max = f32::NEG_INFINITY;
-        for i in 0..=400 {
-            let t = i as f32 / 400.0;
-            let freq = 20.0 * (1000.0_f32).powf(t);
-            let mut sum = 0.0;
-            for b in &bands {
-                sum += compute_band_gain(freq, b);
-            }
-            if sum > curve_max {
-                curve_max = sum;
-            }
-        }
-        assert!(
-            curve_max <= 4.6,
-            "fixture curve max = {curve_max} dB, expected ≤ 4.6 (no shelf ringing)"
+        let enabled = band("highpass", 100.0, 0.0, 2.0);
+        assert_ne!(
+            generate_curve_path(&[enabled], 400.0, 300.0),
+            generate_curve_path(&[], 400.0, 300.0)
         );
+    }
+
+    #[test]
+    fn a_high_pass_rolls_off_below_its_corner() {
+        let hpf = [band("highpass", 100.0, 0.0, 2.0)];
+        assert!(
+            curve_db(&hpf, 1000.0).abs() < 0.5,
+            "{}",
+            curve_db(&hpf, 1000.0)
+        );
+        assert!(curve_db(&hpf, 10.0) < -6.0, "{}", curve_db(&hpf, 10.0));
+    }
+
+    #[test]
+    fn shelves_reach_their_gain_in_the_passband() {
+        for &gain in &[-6.0_f32, 6.0] {
+            let low = curve_db(&[band("lowshelf", 500.0, gain, 1.0)], 20.0);
+            assert!((low - gain).abs() < 0.5, "lowshelf {gain}: {low}");
+            assert!(curve_db(&[band("lowshelf", 500.0, gain, 1.0)], 15_000.0).abs() < 0.5);
+            let high = curve_db(&[band("highshelf", 2000.0, gain, 1.0)], 20_000.0);
+            assert!((high - gain).abs() < 0.5, "highshelf {gain}: {high}");
+            assert!(curve_db(&[band("highshelf", 2000.0, gain, 1.0)], 30.0).abs() < 0.5);
+        }
+    }
+
+    #[test]
+    fn the_engine_off_gain_is_a_notch() {
+        let params = engine_params(&[band("band", 1000.0, -150.0, 1.0)]);
+        assert_eq!(params.bands[0].gain_lin, 0.0);
+        assert!(curve_db(&[band("band", 1000.0, -150.0, 1.0)], 1000.0) < -60.0);
+        // Bands map onto the engine's five in order; the rest stay off.
+        let two = engine_params(&[
+            band("highpass", 80.0, 0.0, 2.0),
+            band("lowshelf", 200.0, 3.0, 2.0),
+        ]);
+        assert_eq!(two.bands[0].kind, BandKind::HighPass);
+        assert_eq!(two.bands[1].kind, BandKind::LowShelf);
+        assert!((two.bands[1].gain_lin - 10f64.powf(3.0 / 20.0)).abs() < 1e-12);
+        assert!(!two.bands[2].enabled && !two.bands[4].enabled);
+        let hs = engine_params(&[band("highshelf", 8000.0, 0.0, 2.0)]);
+        assert_eq!(hs.bands[0].kind, BandKind::HighShelf);
+        assert_eq!(hs.bands[0].freq_hz, 8000.0);
+        assert_eq!(hs.bands[0].bw_oct, 2.0);
+        assert!(hs.bands[0].enabled);
     }
 
     #[test]
