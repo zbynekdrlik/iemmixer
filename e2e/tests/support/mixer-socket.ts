@@ -23,6 +23,15 @@ export type EqBand = {
 /** One channel of the page's state (`iem_core::Channel`). */
 export type Channel = { id: string; name: string; level_db: number; pan: number; muted: boolean };
 
+/** The page's state sent on connect (`iem_core::ws::ServerMsg::State`). */
+export type PageState = {
+  channels: Channel[];
+  connected: boolean;
+  /** The page mix's volume (IEM VOL); absent on a page without a mix. */
+  global_level_db?: number;
+  global_muted?: boolean;
+};
+
 /** One input on the engineer's console (`iem_core::ws::ConsoleInput`). */
 export type ConsoleInput = { id: string; name: string; trim_db: number; muted: boolean; processing: boolean };
 
@@ -101,10 +110,24 @@ export class MixerSocket {
     return this.eq(target);
   }
 
+  /** The page's state sent on connect. */
+  async state(): Promise<PageState> {
+    const m = await this.after(0, (e) => e.event === "State", "State");
+    return m.data as PageState;
+  }
+
   /** The channels of the page's state sent on connect. */
   async channels(): Promise<Channel[]> {
-    const m = await this.after(0, (e) => e.event === "State", "State");
-    return (m.data as { channels: Channel[] }).channels;
+    return (await this.state()).channels;
+  }
+
+  /**
+   * Waits until every command sent before it is in the engine: the server
+   * runs a socket's commands one at a time, each until the engine applied it,
+   * so the answer to a request sent last comes after all of them.
+   */
+  async applied(): Promise<void> {
+    await this.limiterActiveSeconds();
   }
 
   /** The page mix's limiter counter (`LimiterParams.active_seconds`). */

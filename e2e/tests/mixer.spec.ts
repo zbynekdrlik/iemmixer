@@ -1,6 +1,7 @@
 import type { Locator } from "@playwright/test";
 import { test, expect, Page } from "./support/fixtures";
-import { dbText, dragFader, menu, openMixer, strip, tab } from "./support/session";
+import { MixerSocket } from "./support/mixer-socket";
+import { dbText, dragFader, login, menu, openMixer, strip, tab } from "./support/session";
 
 // The mixer page against the real engine (NullRt, 1 kHz sine on every input).
 // Each describe uses its own member so the shared engine state never crosses
@@ -434,26 +435,41 @@ test.describe("IEM VOL (F7)", () => {
     await toZeroDb(page, vol);
   });
 
-  test("the IEM VOL mute toggles, reaches another tab and survives a reload", async ({ page }) => {
-    await openMixer(page, "member3");
-    const vol = page.getByTestId("global-volume-fader");
-    const second = await secondTab(page, "member3");
-    const other = second.page;
-    const otherVol = other.getByTestId("global-volume-fader");
-    await expect(vol).not.toHaveClass(/muted/);
-    await expect(vol.locator(".mute-btn")).toHaveClass(/off/);
+  test("the IEM VOL mute toggles, reaches another tab and survives a reload", async ({ page, baseURL }) => {
+    // A fresh engine mutes every output (no saved state: StateLost, engine.rs)
+    // and no other test unmutes member3's IEM VOL, so the test starts it
+    // unmuted from a second socket and puts back what it found.
+    const auth = await login(page, "member3");
+    const mix = await MixerSocket.open(baseURL, "member3", auth.token);
+    const found = (await mix.state()).global_muted;
+    if (typeof found !== "boolean") throw new Error("member3's state has no IEM VOL mute");
+    mix.send({ cmd: "SetGlobalMute", muted: false });
+    await mix.applied();
+    try {
+      await openMixer(page, "member3");
+      const vol = page.getByTestId("global-volume-fader");
+      const second = await secondTab(page, "member3");
+      const other = second.page;
+      const otherVol = other.getByTestId("global-volume-fader");
+      await expect(vol).not.toHaveClass(/muted/);
+      await expect(vol.locator(".mute-btn")).toHaveClass(/off/);
 
-    await vol.locator(".mute-btn").click();
-    await expect(vol.locator(".mute-btn")).toHaveClass(/\bon\b/);
-    await expect(vol).toHaveClass(/muted/);
-    await expect(otherVol).toHaveClass(/muted/);
-    await page.reload();
-    await expect(page.getByTestId("global-volume-fader")).toHaveClass(/muted/, { timeout: 15_000 });
+      await vol.locator(".mute-btn").click();
+      await expect(vol.locator(".mute-btn")).toHaveClass(/\bon\b/);
+      await expect(vol).toHaveClass(/muted/);
+      await expect(otherVol).toHaveClass(/muted/);
+      await page.reload();
+      await expect(page.getByTestId("global-volume-fader")).toHaveClass(/muted/, { timeout: 15_000 });
 
-    await page.getByTestId("global-volume-fader").locator(".mute-btn").click();
-    await expect(page.getByTestId("global-volume-fader")).not.toHaveClass(/muted/);
-    await expect(otherVol).not.toHaveClass(/muted/);
-    await second.close();
+      await page.getByTestId("global-volume-fader").locator(".mute-btn").click();
+      await expect(page.getByTestId("global-volume-fader")).not.toHaveClass(/muted/);
+      await expect(otherVol).not.toHaveClass(/muted/);
+      await second.close();
+    } finally {
+      mix.send({ cmd: "SetGlobalMute", muted: found });
+      await mix.applied();
+      await mix.close();
+    }
   });
 
   test("the IEM VOL fader holds its position after release (no snap-back)", async ({ page }) => {
