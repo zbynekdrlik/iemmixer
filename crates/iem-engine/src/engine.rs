@@ -950,6 +950,29 @@ mod tests {
         assert!(check_site(&listed).is_ok());
     }
 
+    /// HIL's test signal sounds only on the card outputs `[guard] hil_tx`
+    /// names, which the engine finds among the topology's TX channels
+    /// (`HilTestSignal`): a site whose hil_tx the topology cannot reach is
+    /// refused by check-site, so by `install-site` (F30), instead of every
+    /// HIL test signal failing with UnknownId (lane review). The guard's
+    /// other keys are its own.
+    #[test]
+    fn check_site_refuses_a_hil_tx_the_topology_cannot_reach() {
+        let dir = tempfile::tempdir().unwrap();
+        let with = |name: &str, tx: &str| {
+            edited_site(dir.path(), name, |t| {
+                format!("{t}\n[guard]\nreaper_url = \"http://127.0.0.1:8080\"\nhil_tx = {tx}\n")
+            })
+        };
+        assert!(check_site(&with("members.toml", "[72, 91]")).is_ok());
+        assert!(check_site(&with("none.toml", "[]")).is_ok());
+        let spare = check_site(&with("spare.toml", "[72, 150]")).unwrap_err();
+        assert_eq!(
+            spare.to_string(),
+            "[guard] hil_tx: card output 150 is not a TX channel of the site"
+        );
+    }
+
     #[cfg(not(windows))]
     #[test]
     fn off_windows_the_card_is_a_usage_error_before_any_state() {
