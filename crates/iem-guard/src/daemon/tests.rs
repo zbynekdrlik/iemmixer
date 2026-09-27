@@ -1416,6 +1416,38 @@ fn engine_and_runner_requests_in_dev() {
     );
 }
 
+/// A rehearsal ends by entering dev again, and a dev entry cancels the jobs
+/// and stops the runner: inside a HIL job that would stop the runner that
+/// runs the job, so it is refused before any step, as runner-stop is.
+#[test]
+fn rehearse_teardown_is_refused_inside_a_hil_job() {
+    let (mut pc, mut g) = (
+        FakePc::new(Facts {
+            runner: true,
+            ..iemmixer_up()
+        }),
+        Guard::for_test(Mode::Dev),
+    );
+    g.state.pins.current = Some(SHA.into());
+    g.state.job = Some(3);
+    let r = handle(&mut pc, &mut g, Request::RehearseTeardown, 0);
+    assert_eq!(
+        (r.ok, r.detail.as_str()),
+        (
+            false,
+            "HIL job 3 runs: the rehearsal's dev entry would stop its runner"
+        )
+    );
+    assert!(pc.mutating_calls().is_empty(), "{:?}", pc.mutating_calls());
+    assert_eq!((g.state.job, g.state.mode), (Some(3), Mode::Dev));
+    assert!(g.alarms.all().is_empty(), "{:?}", texts(&g));
+    // After the job the rehearsal runs.
+    g.state.job = None;
+    let r = handle(&mut pc, &mut g, Request::RehearseTeardown, 0);
+    assert!(r.ok, "{r:?}");
+    assert!(pc.called(Call::RunnerStop) && pc.called(Call::EngineStop));
+}
+
 // ---- HIL: the engine in the reply, the fault, the job's restarts ----
 
 /// The engine of `FakePc::seen` (build `2.0.0-dev.9+<SHA>`) as `Reply.engine`.
