@@ -169,6 +169,11 @@ mod tests {
         std::fs::write(dir.path().join("backups/manual.json"), "{}").unwrap();
         std::fs::write(dir.path().join("backups/20000101_000000.txt"), "{}").unwrap();
         assert_eq!(store.prune_before("20210101_000000"), 1);
+        assert_eq!(
+            store.prune_before("20990101_000000"),
+            0,
+            "a backup exactly at the cutoff is not older than it"
+        );
         assert_eq!(store.prune(60), 0);
         let mut left: Vec<String> = std::fs::read_dir(dir.path().join("backups"))
             .unwrap()

@@ -781,6 +781,27 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn a_closed_connection_releases_talk_and_starts_the_solo_grace() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(crate::site_view::tests::test_config(), dir.path());
+        let page = state.page("engineer").unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = state.event_tx.subscribe();
+        lock(&state.solo).connected("engineer");
+        let eng = viewer("engineer", true);
+        handle(&state, 7, &page, &eng, ClientMsg::TalkStart, &tx).await;
+        assert_eq!(answers(&mut rx).len(), 1, "TalkAcquired");
+        assert!(lock(&state.talk).holder().is_some());
+
+        cleanup(&state, &page, 7);
+        assert!(lock(&state.talk).holder().is_none(), "the lock is released");
+        let silent = ServerMsg::EngineerTalking { active: false };
+        assert!(events(&mut app).contains(&(To::All, silent)));
+        let later = Instant::now() + crate::solo::SOLO_GRACE;
+        assert_eq!(lock(&state.solo).due(later), ["engineer"]);
+    }
+
     #[test]
     fn alerts_catch_up_on_the_engineer_page_and_the_members_own() {
         let mut active = std::collections::HashMap::new();

@@ -162,6 +162,14 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_control_frame_of_the_largest_size_passes() {
+        let mut wire = (MAX_FRAME as u32).to_le_bytes().to_vec();
+        wire.resize(4 + MAX_FRAME, b' ');
+        let mut r = &wire[..];
+        assert_eq!(read_frame(&mut r).await.unwrap().len(), MAX_FRAME);
+    }
+
+    #[tokio::test]
     async fn a_frame_cut_inside_is_an_unexpected_eof() {
         let mut wire = Vec::new();
         iem_engine_proto::write_frame(&mut wire, &Cmd::Ping).unwrap();

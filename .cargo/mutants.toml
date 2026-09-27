@@ -134,6 +134,9 @@ exclude_re = [
   "iem-server/src/backup\\.rs:47:.*replace < with <= in pan$",
   # Unobservable (S5): the frame age `< 2 s` differs only at the exact nanosecond.
   "iem-server/src/engine/media\\.rs.*replace < with <= in MediaLink::diagnostics$",
+  # Unobservable (S5): Listen commands on the mixer socket are ignored either
+  # way; without the arm the default one refuses them and only logs a warning.
+  "iem-server/src/mixer_ws\\.rs.*delete match arm ClientMsg::ListenStart.* in handle$",
   # Unobservable (S5): the pruned count only decides whether it is logged.
   "iem-server/src/backup_daemon\\.rs.*replace > with (==|<|>=) in run$",
 ]

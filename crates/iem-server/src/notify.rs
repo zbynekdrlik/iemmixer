@@ -185,6 +185,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_sos_reaches_the_engineers_devices_and_drops_expired_ones() {
+        let (base, seen) = fake_push_service().await;
+        let dir = tempfile::tempdir().unwrap();
+        let config = iem_core::Config {
+            vapid_private_key: vapid_private_key(),
+            ..iem_core::Config::default()
+        };
+        let state = AppState::new(config, dir.path());
+        {
+            let mut store = state.push_store.write().await;
+            store.add(subscription(format!("{base}/201"))).unwrap();
+            store.add(subscription(format!("{base}/410"))).unwrap();
+        }
+        push_engineers(&state, b"sos").await;
+        assert_eq!(seen.lock().unwrap().len(), 2);
+        let left: Vec<String> = state
+            .push_store
+            .read()
+            .await
+            .all()
+            .iter()
+            .map(|s| s.endpoint.clone())
+            .collect();
+        assert_eq!(left, [format!("{base}/201")], "the expired one is gone");
+        // Without a VAPID key nothing is sent.
+        let bare = AppState::new(iem_core::Config::default(), dir.path());
+        push_engineers(&bare, b"sos").await;
+        assert_eq!(seen.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
     async fn notify_mode_sends_to_the_stored_subscriptions() {
         let (base, seen) = fake_push_service().await;
         let dir = tempfile::tempdir().unwrap();
