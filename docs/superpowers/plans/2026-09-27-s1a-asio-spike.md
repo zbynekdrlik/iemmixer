@@ -3929,7 +3929,7 @@ Expected: `{"bundle": ".../asio-spike/bundles/<sha>", "run": <id>, "files": ["Go
 
 ### Task 12: The PC window (dev time only; main session)
 
-> **Status 2026-09-27:** not started — PC window, after the event ("event skončil"). Tasks 1–11 are done: CI run 36297231771 on `c5a40c9` green, bundle fetched and verified on the dev box.
+> **Status 2026-09-27:** window `20260927T111244Z` (dev time, 13:12–14:22) ran steps 4 and 5 (48 is not offered by the driver); the switch back to REAPER (step 7) and ops issue 1 (step 3) were not run. Results: design note §9 and #3.
 
 **Precondition:** the owner's "event skončil" is in this conversation after the last "ide event", and `~/.config/iemmixer/EVENT-NOW` does not exist. Quote the owner's message with its time in `new --signal`. Every step's JSON output goes to #3 (numbers only, no site values). Runtime: about 90 min.
 

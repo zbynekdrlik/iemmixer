@@ -110,3 +110,37 @@ This driver is the interim switch script of #3: `to-dev` and `to-event` are "eve
 - **The driver may reject 48 or read the preference only at load:** findings; 32 and 64 decide.
 - **R6 (a hang in `stop()`):** no kill. A callback still in flight after 2 s ends the spike with exit 8 (the driver is not called again); `spike_window.py` prints an owner alarm (also for exit 5, band activity). The owner may reboot.
 - **A late "ide event":** the stop file within 2 s; REAPER back after the restore and the project load (≤ 2 min).
+
+## 9. Results (PC window 2026-09-27, 13:12–14:22 CEST, dev time)
+
+Window `20260927T111244Z`, opened with `new --dev-time` after the owner's "event skončil" (13:07; REAPER was already saved and quit, the predecessor app kept running). Bundles `87ee2f7` (run 36305530069) and, after the guard fix, `f154967` (run 36316042899). `EVENT-NOW` never existed during the window. Raw reports stay private (`RAW_DIR/asio-spike/<window>`, chmod 700).
+
+**Driver facts (probe):** 96 kHz, 128 inputs / 128 outputs, Int32LSB on every channel; buffer min 32, max 2048, power-of-two granularity (**48 is not a size this driver offers**, so step 6 of §6 was dropped); one clock source (PTP), current (read only). The driver reads `PrefBuffSize` when it is opened: after `set-buffer 32` the next probe reported preferred 32, after `set-buffer 64` again 64 — a buffer change needs a registry write and a reopen, no driver reload. Latencies read before `createBuffers` are meaningless (5 701 756 samples); the valid ones come from the running stream.
+
+**Band guard finding:** the first duplex (bundle `87ee2f7`) stopped after 3 s at −2.4 dBFS because the guard took the peak of all 128 inputs. The per-input report of bundle `f154967` showed that only the two channels of the stereo program input `CONTENT` carry signal (−1.0 … −4.5 dBFS over the window); every stage input (`MIC_1`…`MIC_10`, `HAND_1`…`HAND_3`, `ENG_MIC`) and every other input stayed at digital silence (−150 dBFS). The guard now listens only to the stage inputs (`--activity-channels`, the real channel list in the private env); the report and the progress file list the five loudest inputs.
+
+| | 64 samples (666.7 µs) | 32 samples (333.3 µs), idle | 32 samples, `--burn-us 100 --stress 4` |
+|---|---|---|---|
+| duplex length | 600 s | 600 s | 600 s |
+| callbacks | 900 025 | 1 800 040 | 1 800 036 |
+| late (> 1.5 periods) / missed (≥ 2) | 0 / 0 | 0 / 0 | 1 / 0 |
+| overruns / position gaps | 0 / 0 | 0 / 0 | 0 / 0 |
+| driver messages (reset, resync, overload, size, rate) | 0 | 0 | 0 |
+| interval p50 / p99 / p99.9 / max (µs) | 667 / 672 / 681 / 827.8 | 335 / 339 / 347 / 467.4 | 335 / 338 / 341 / 522.4 |
+| callback CPU p50 / p99 / p99.9 / max (µs) | 18 / 22 / 28 / 88.2 | 14 / 17 / 22 / 92.1 | 112 / 114 / 116 / 289.3 |
+| driver latency in / out | 96 / 96 samples (1.00 / 1.00 ms) | 64 / 64 samples (0.67 / 0.67 ms) | 64 / 64 |
+| card clock vs QPC | +25.1 ppm | +20.1 ppm | +19.9 ppm |
+| createBuffers / start / first callback | 203 µs / 28 µs / 1.28 ms | 153 µs / 26 µs / 1.02 ms | 230 µs / 20 µs / 1.02 ms |
+| stop / dispose | 100.2 ms / 72.5 µs | 100.1 ms / 65.8 µs | 100.1 ms / 63.5 µs |
+
+**Reopen (64, 5 cycles, 5 s each):** all 5 completed, no hang, no reset request, 0 missed per cycle. Median / max: stop 100.2 / 101.2 ms, dispose 75 / 75 µs, release 283 / 384 µs, open (create, init, info) 1.53 / 1.55 ms, createBuffers 171 / 192 µs, start 27 / 30 µs, first callback 1.38 / 1.52 ms — a full reopen takes about 104 ms, almost all of it the driver's `stop()`.
+
+**Fault run (64, `--panic-at 50000`):** exit 6 (`fault-caught`). The panic was caught inside the callback, the outputs stayed zeroed and the callbacks went on (3 008 in the 2 s after the fault); the stop was clean. The panicking callback took 4.29 ms (the default panic hook formats and locks stderr), which cost 1 overrun, 1 missed period and 1 position gap — S6 needs the non-allocating, non-locking hook (§7).
+
+**Decision: azo accepted** (§4): `probe`, `duplex` and `reopen` completed at the preferred buffer, at 64 and at 32; no crash, no hang. The driver sent no reset during the window, so the reset → reopen path ran only through `reopen` mode.
+
+**Stable buffer:** 32 (the driver's minimum) is stable for 10 min idle and under load (0 missed, overruns, gaps and resets; one late callback under load, 522 µs, is not a stability criterion). 64 is stable too. 32 stays the target; #15 tunes the PC until it holds for 8 h.
+
+**Not run (owner approval on #3):** OS restart with the engine running, reboot with the engine parked, hard kill, SEH injection, round-trip latency (D5 loopback). **Open:** the switch back to REAPER was not run in this window (dev time continues; the next "ide event" pre-empts the open window: stop file, buffer restore with read-back, REAPER with the handover checks); the predecessor app's graceful exit goes to S6 (#9); ops issue 1 (PC-only denylist credential) was not done in this window.
+
+**End state (14:22):** no spike and no spike task running, `PrefBuffSize` 64 (DWord) read back and reported by the driver, REAPER not running (dev time), the predecessor app running, no holder of the driver module, no stop file; the window stays open with the card free.
