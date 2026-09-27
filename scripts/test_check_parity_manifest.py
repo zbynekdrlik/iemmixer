@@ -50,15 +50,15 @@ mytest("not a test");
 
 PY = """\
 def helper():
-    pass
+    return 0
 
 
 def test_one():
-    pass
+    assert helper() == 0
 
 
     async def test_two(self):
-        pass
+        assert self is not None
 """
 
 
