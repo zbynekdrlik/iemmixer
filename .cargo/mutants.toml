@@ -20,6 +20,9 @@ exclude_globs = [
   "crates/iem-audio-io/src/asio.rs",
   # The S1a spike program (a Windows-only main; its parser is tested).
   "crates/iem-audio-io/examples/**",
+  # Windows FFI wrappers (S6), not compiled on Linux; the windows job runs
+  # their tests; decisions live in callers.
+  "crates/iem-win/src/**",
 ]
 
 exclude_re = [

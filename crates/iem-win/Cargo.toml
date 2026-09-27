@@ -1,0 +1,44 @@
+[package]
+name = "iem-win"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "iemmixer's Windows glue (S6): safe wrappers; every function returns Unsupported off Windows"
+# The one binary is the test helper below; nothing is discovered from src/bin.
+autobins = false
+
+[features]
+# Builds `iem-win-ctrlbreak-helper` for tests/ctrl_break.rs (Windows):
+# `cargo test -p iem-win --features test-helper`.
+test-helper = ["dep:tokio"]
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_NetworkManagement_IpHelper",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_System_Console",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_JobObjects",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Memory",
+  "Win32_System_Shutdown",
+  "Win32_System_Threading",
+  "Win32_UI_WindowsAndMessaging",
+] }
+# Kind-preserving HKCU reads and writes (the preference window); already in
+# the engine's closure through azo, pinned to the same version.
+windows-registry = "=0.100.0"
+# The test helper only (feature `test-helper`): it waits on tokio's
+# Ctrl-Break listener, as iem-server does.
+tokio = { version = "1", optional = true, features = ["rt", "signal", "time"] }
+
+[[bin]]
+name = "iem-win-ctrlbreak-helper"
+path = "src/bin/ctrlbreak_helper.rs"
+required-features = ["test-helper"]
+test = false
