@@ -231,16 +231,15 @@ fn self_signed_cert(config_home: &std::path::Path) {
     );
 }
 
-/// The HTTPS port (P9: the band's 443) closes with the HTTP one, while an
-/// open HTTP request still drains.
+/// The server with TLS on (a self-signed certificate) and its HTTPS port,
+/// once both ports listen.
 #[cfg(feature = "tls")]
-#[test]
-fn the_https_listener_closes_with_the_http_one() {
+fn start_https() -> (Server, u16) {
     let dir = tempfile::tempdir().unwrap();
     let config_home = dir.path().join("config");
     self_signed_cert(&config_home);
     let https_port = free_port_except(&[]);
-    let mut server = launch(
+    let server = launch(
         dir,
         &format!("tls = true\nhttps_port = {https_port}\n"),
         &[("XDG_CONFIG_HOME", config_home)],
@@ -256,6 +255,15 @@ fn the_https_listener_closes_with_the_http_one() {
         );
         std::thread::sleep(Duration::from_millis(100));
     }
+    (server, https_port)
+}
+
+/// The HTTPS port (P9: the band's 443) closes with the HTTP one, while an
+/// open HTTP request still drains.
+#[cfg(feature = "tls")]
+#[test]
+fn the_https_listener_closes_with_the_http_one() {
+    let (mut server, https_port) = start_https();
     let stuck = unfinished_request(server.port);
     let sent = request_stop(&server, "TERM");
     assert!(
@@ -268,5 +276,31 @@ fn the_https_listener_closes_with_the_http_one() {
     assert_eq!(status.code(), Some(0), "{log}");
     assert!(port_is_free(https_port) && port_is_free(server.port));
     assert!(log.contains("HTTPS server stopped"), "{log}");
+    drop(stuck);
+}
+
+/// An open HTTPS connection (a phone mid-handshake) gets the drain too: the
+/// process waits for it up to 5 s instead of cutting it after 1 s.
+#[cfg(feature = "tls")]
+#[test]
+fn an_open_https_connection_is_drained_not_cut() {
+    let (mut server, https_port) = start_https();
+    let stuck = TcpStream::connect(("127.0.0.1", https_port)).unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    let sent = request_stop(&server, "TERM");
+    assert!(
+        refused_within_2s(https_port, sent),
+        "the HTTPS listener stayed open: {}",
+        server.log()
+    );
+    let status = exit_within(&mut server, sent, Duration::from_secs(8));
+    let took = sent.elapsed();
+    assert_eq!(status.code(), Some(0), "{}", server.log());
+    assert!(
+        took >= Duration::from_secs(4),
+        "stopped after {took:?}: the open HTTPS connection got no drain: {}",
+        server.log()
+    );
+    assert!(port_is_free(https_port));
     drop(stuck);
 }
