@@ -324,7 +324,7 @@ mod imp {
         let mut size = 0u32;
         // The table may grow between the size query and the read: ask again.
         for _ in 0..8 {
-            let table = if buf.is_empty() {
+            let table: *mut core::ffi::c_void = if buf.is_empty() {
                 ptr::null_mut()
             } else {
                 buf.as_mut_ptr().cast()
