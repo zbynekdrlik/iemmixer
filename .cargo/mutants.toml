@@ -167,6 +167,10 @@ exclude_re = [
   "iem-server/src/mixer_ws\\.rs.*delete match arm ClientMsg::ListenStart.* in handle$",
   # Unobservable (S5): the pruned count only decides whether it is logged.
   "iem-server/src/backup_daemon\\.rs.*replace > with (==|<|>=) in run$",
+  # The backup daemon's endless 30 s loop on the wall clock (whole-body
+  # replacement only); its steps are tested functions (due, settle,
+  # RefusalAlarms, refusal_alarm).
+  "iem-server/src/backup_daemon\\.rs.*replace run with \\(\\)$",
   # Equivalent (S6): the creation flags are distinct bits, so `^` gives the
   # same value as `|`.
   "iem-win/src/decide\\.rs.*replace \\| with \\^ in creation_flags$",

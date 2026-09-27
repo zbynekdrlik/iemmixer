@@ -20,15 +20,48 @@ pub fn due(schedule: &[String], today: &str, hhmm: &str, done: &HashSet<String>)
         .filter(|key| !done.contains(key))
 }
 
-/// The refusal alarms already raised for scheduled captures.
+/// The alarm recipients hear of a refused scheduled capture once per
+/// distinct error, until a capture succeeds again: a refused slot is tried
+/// again at every tick of its minute and at the next slot, and each retry
+/// refused for the same reason is no news.
 #[derive(Debug, Default)]
 pub struct RefusalAlarms {
+    /// The refusals whose alarm reached a recipient since the last success.
     raised: HashSet<String>,
 }
 
+impl RefusalAlarms {
+    /// Whether a refusal with `error` still needs its alarm.
+    pub fn due(&self, error: &str) -> bool {
+        !self.raised.contains(error)
+    }
+
+    /// The alarm for `error` reached a recipient.
+    pub fn raised(&mut self, error: &str) {
+        self.raised.insert(error.to_owned());
+    }
+
+    /// A capture succeeded: every refusal alarms again.
+    pub fn succeeded(&mut self) {
+        self.raised.clear();
+    }
+}
+
+/// The alarm's title and body for a refusal at `slot` (the owner reads
+/// Slovak; the reason stays as the server logged it).
+pub fn refusal_alarm(slot: &str, error: &str) -> (&'static str, String) {
+    (
+        "Záloha zlyhala",
+        format!("Plánovaná záloha iemmixera o {slot} neprebehla: {error}"),
+    )
+}
+
 /// A scheduled capture's outcome at `slot` (HH:MM): `Ok` is the saved
-/// file, `Err` the refusal, which is logged (the slot is tried again at the
-/// next tick). Returns whether the slot is done.
+/// file, `Err` the refusal, which is logged and, once per distinct error
+/// until a capture succeeds, sent to the alarm recipients (never the
+/// engineer's devices). An alarm that reached nobody (no recipient yet, an
+/// unreadable recipient file, every push failed) is tried again at the next
+/// refusal. Returns whether the slot is done.
 pub async fn settle(
     state: &AppState,
     slot: &str,
@@ -38,10 +71,27 @@ pub async fn settle(
     match outcome {
         Ok(filename) => {
             tracing::info!(%filename, "Backup daemon: saved scheduled backup");
+            alarms.succeeded();
             true
         }
-        Err(e) => {
-            tracing::error!(error = %e, time = %slot, "Backup daemon: capture failed");
+        Err(error) => {
+            tracing::error!(%error, time = %slot, "Backup daemon: capture failed");
+            if alarms.due(&error) {
+                let (title, body) = refusal_alarm(slot, &error);
+                match crate::notify::push_alarm(state, title, &body).await {
+                    Ok(devices) if devices > 0 => {
+                        tracing::info!(devices, "Backup daemon: refusal alarm sent");
+                        alarms.raised(&error);
+                    }
+                    Ok(_) => tracing::error!(
+                        "Backup daemon: the refusal alarm reached no alarm recipient; tried again at the next refusal"
+                    ),
+                    Err(e) => tracing::error!(
+                        error = %e,
+                        "Backup daemon: alarm recipients unreadable; the refusal alarm is tried again at the next refusal"
+                    ),
+                }
+            }
             false
         }
     }
@@ -121,6 +171,16 @@ mod tests {
     }
 
     const UNREADABLE: &str = "the pins and hides of member3 are unreadable: Is a directory";
+
+    #[test]
+    fn the_refusal_alarm_names_the_slot_and_the_reason() {
+        let (title, body) = refusal_alarm("13:00", UNREADABLE);
+        assert_eq!(title, "Záloha zlyhala");
+        assert_eq!(
+            body,
+            format!("Plánovaná záloha iemmixera o 13:00 neprebehla: {UNREADABLE}")
+        );
+    }
 
     #[tokio::test]
     async fn a_refused_capture_alarms_once_per_error_until_a_capture_succeeds() {
