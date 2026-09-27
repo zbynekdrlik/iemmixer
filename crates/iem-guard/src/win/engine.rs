@@ -5,8 +5,9 @@
 //! guard, and the steps read that inbox. The engine ends only by its own
 //! `Shutdown`.
 
+use std::ffi::OsString;
 use std::fs;
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -14,8 +15,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use iem_win::process::Handle;
-use interprocess::local_socket::prelude::*;
-use interprocess::local_socket::{GenericNamespaced, Stream};
+use interprocess::ConnectWaitMode;
+use interprocess::local_socket::Stream;
+use interprocess::os::windows::named_pipe::local_socket::Stream as PipeStream;
+use interprocess::os::windows::named_pipe::{DuplexPipeStream, pipe_mode};
 use serde_json::Value;
 use tracing::{info, warn};
 
@@ -31,6 +34,10 @@ use crate::state;
 const CONNECT_AFTER_START: Duration = Duration::from_secs(30);
 /// A running engine's pipe answers within this.
 const CONNECT: Duration = Duration::from_secs(5);
+/// One attempt to connect waits at most this for a free pipe instance: a
+/// pipe whose acceptor is stuck fails the attempt (`seen` makes one per
+/// look, `supervisor` repeats them until its step's limit).
+const CONNECT_ATTEMPT: Duration = Duration::from_millis(200);
 /// `Hello` and `Topology` follow the hello at once.
 const HELLO: Duration = Duration::from_secs(10);
 /// `Status` comes once a second.
@@ -171,14 +178,26 @@ pub(super) struct Supervisor {
     next_id: u64,
 }
 
+/// The engine's pipe `\\.\pipe\<pipe>` (what `GenericNamespaced` names on
+/// Windows, as the engine listens), waiting at most [`CONNECT_ATTEMPT`] for a
+/// free instance. interprocess's local-socket connect waits for one without
+/// a limit (in 2.4 it passes no `ConnectOptions::wait_mode` to a named
+/// pipe: `named_pipe/local_socket/stream.rs`), so the pipe is opened with
+/// the named-pipe connect and its own wait mode.
+fn connect_pipe(pipe: &str) -> io::Result<Stream> {
+    let path = OsString::from(format!(r"\\.\pipe\{pipe}"));
+    let stream = DuplexPipeStream::<pipe_mode::Bytes>::connect_by_path_with_wait_mode(
+        path,
+        ConnectWaitMode::Timeout(CONNECT_ATTEMPT),
+    )?;
+    Ok(Stream::from(PipeStream::from(stream)))
+}
+
 impl Supervisor {
+    /// One attempt, at most [`CONNECT_ATTEMPT`] on a busy pipe.
     fn connect(pipe: &str, stage_ids: Vec<String>) -> Result<Self, String> {
-        let name = pipe
-            .to_owned()
-            .to_ns_name::<GenericNamespaced>()
-            .map_err(|e| format!("the engine's pipe name {pipe:?}: {e}"))?;
         let stream =
-            Stream::connect(name).map_err(|e| format!("connecting to the engine's pipe: {e}"))?;
+            connect_pipe(pipe).map_err(|e| format!("connecting to the engine's pipe: {e}"))?;
         let stream = Arc::new(stream);
         let inbox = Arc::new(Mutex::new(Inbox::new(stage_ids, Instant::now())));
         let (reader, shared) = (Arc::clone(&stream), Arc::clone(&inbox));
