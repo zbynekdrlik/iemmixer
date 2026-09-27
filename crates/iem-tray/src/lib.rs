@@ -2,15 +2,16 @@
 //! and a window on the mixer.
 //!
 //! The tray runs no server: `iem-server` is the guard's child (S6 design note
-//! §5.2 step 8), and the tray reads only the site config's links for Open
-//! Mixer and Copy URL. A background thread subscribes to the guard
-//! ([`guard`]): the mode and the alarms update the tooltip, a new alarm
-//! raises a notification, and the guard's `Quit` ends the tray. The menu's
-//! Exit ends the tray only, never the server or the engine.
+//! §5.2 step 8). Open Mixer opens that server on the PC
+//! (`http://localhost:<port>`), Copy URL copies the site's share URL. A
+//! background thread subscribes to the guard ([`guard`]): the mode and the
+//! alarms update the tooltip, a new alarm raises a notification, and the
+//! guard's `Quit` ends the tray. The menu's Exit ends the tray only, never
+//! the server or the engine.
 //!
 //! The site config is `$IEMMIXER_CONFIG` (default `iemmixer.toml`), as for
-//! `iem-server`; without a readable one the links fall back to the local
-//! server. The log is `%LOCALAPPDATA%\iemmixer\logs\iem-tray.log.<date>`.
+//! `iem-server`; without a readable one Open Mixer uses port 80 and Copy URL
+//! is disabled. The log is `%LOCALAPPDATA%\iemmixer\logs\iem-tray.log.<date>`.
 
 pub mod guard;
 pub mod tray;
@@ -70,7 +71,7 @@ pub fn run() {
             tracing::error!(
                 error = %e,
                 path = %path.display(),
-                "the site config did not load; the links fall back to the local server"
+                "the site config did not load; Open Mixer uses port 80, Copy URL is disabled"
             );
             Config::default()
         }

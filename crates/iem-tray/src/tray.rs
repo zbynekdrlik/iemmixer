@@ -11,7 +11,8 @@ const ICON_SIZE: u32 = 16;
 /// The site config's links (`iem_core::Config::mixer_url`, `share_url`).
 #[derive(Debug, Clone)]
 pub struct Links {
-    /// Open Mixer: the LAN URL, else the local server.
+    /// Open Mixer: the local server (`http://localhost:<port>`), a secure
+    /// context for Copy URL's clipboard write in the same window.
     pub mixer: String,
     /// Copy URL: the public host, else the LAN URL; `None` disables the item.
     pub share: Option<String>,
@@ -135,12 +136,18 @@ fn open_mixer(app: &AppHandle, url: &str) {
 }
 
 /// Copy the share URL to the clipboard (quoted as a JSON string literal).
+/// The main window shows the local server (`Links::mixer`), a secure context,
+/// so `navigator.clipboard` exists there.
 fn copy_url_to_clipboard(app: &AppHandle, url: &str) {
     tracing::info!(url, "copying the share URL to the clipboard");
-    if let Some(window) = app.get_webview_window("main") {
-        let quoted = serde_json::to_string(url).unwrap_or_else(|_| "\"\"".to_string());
-        let js = format!("navigator.clipboard.writeText({quoted})");
-        let _ = window.eval(js);
+    let Some(window) = app.get_webview_window("main") else {
+        tracing::warn!("no main window to copy the URL from");
+        return;
+    };
+    let quoted = serde_json::to_string(url).unwrap_or_else(|_| "\"\"".to_string());
+    let js = format!("navigator.clipboard.writeText({quoted})");
+    if let Err(e) = window.eval(js) {
+        tracing::warn!(error = %e, "the clipboard write did not run");
     }
 }
 

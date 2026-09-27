@@ -359,13 +359,14 @@ impl Config {
             .or_else(|| self.lan_url.clone())
     }
 
-    /// URL the tray's "Open Mixer" opens on the PC: the LAN URL, else the
-    /// local server on the site's port. The tray runs no server of its own
-    /// (F27): `iem-server` serves it.
+    /// URL the tray's "Open Mixer" opens on the PC: the local server on the
+    /// site's port, never the LAN URL. The tray runs no server of its own
+    /// (F27): `iem-server` serves it. Loopback always reaches it (the HTTPS
+    /// redirect applies to the public host only), and its origin is a secure
+    /// context, so Copy URL's `navigator.clipboard` works in the same window;
+    /// a plain-http LAN address has no clipboard API.
     pub fn mixer_url(&self) -> String {
-        self.lan_url
-            .clone()
-            .unwrap_or_else(|| format!("http://localhost:{}", self.port))
+        format!("http://localhost:{}", self.port)
     }
 }
 
