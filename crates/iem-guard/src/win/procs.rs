@@ -21,7 +21,7 @@ use tracing::{info, warn};
 use super::{WinPc, web};
 use crate::cancel::Cancel;
 use crate::effects::app::one_pid;
-use crate::effects::{self, argv, web as decide};
+use crate::effects::{argv, web as decide};
 use crate::pc::{Audience, Kid, Procs, R, StepError, adoptable};
 use crate::plan::Mode;
 use crate::site::{SERVER_EXE, TRAY_EXE};
@@ -390,7 +390,7 @@ fn piped(cmd: &mut Command) {
 }
 
 /// Runs a helper command without a window, inside the guard's job
-/// ([`effects::helper_flags`]: a job that refuses breakaway never refuses
+/// ([`spawn::helper_flags`]: a job that refuses breakaway never refuses
 /// a helper), and reads its output, for at most `limit`. Nothing is ended:
 /// after the limit, or a pre-emption of a waiting run, the command is left
 /// to finish by itself.
@@ -403,7 +403,7 @@ pub(super) fn run(
 ) -> R<Output> {
     piped(cmd);
     let child = cmd
-        .creation_flags(effects::helper_flags(on_cancel == OnCancel::Break))
+        .creation_flags(spawn::helper_flags(on_cancel == OnCancel::Break))
         .spawn()
         .map_err(|e| failed(what, e))?;
     finish(what, child, limit, c, on_cancel)

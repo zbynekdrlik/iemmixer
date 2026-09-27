@@ -11,7 +11,7 @@
 use std::io;
 use std::process::{Child, Command};
 
-pub use crate::decide::creation_flags;
+pub use crate::decide::{creation_flags, helper_flags};
 
 /// `CreateProcess` flags (winbase.h), portable so the choice is tested on
 /// every OS.

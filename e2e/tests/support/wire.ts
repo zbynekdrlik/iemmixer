@@ -31,7 +31,7 @@ export function upgradeStatus(url: string): Promise<number> {
   return new Promise((resolve, reject) => {
     const ws = new NodeWebSocket(url);
     const timer = setTimeout(() => {
-      ws.terminate();
+      ws.close();
       reject(new Error(`no answer to the upgrade of ${redact(url)}`));
     }, 5_000);
     ws.on("open", () => {

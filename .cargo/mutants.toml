@@ -199,8 +199,7 @@ exclude_re = [
   "iem-server/src/backup_daemon\\.rs.*replace run with \\(\\)$",
   # Equivalent (S6): the creation flags (the children's and the guard's
   # helpers') are distinct bits, so `^` gives the same value as `|`.
-  "iem-win/src/decide\\.rs.*replace \\| with \\^ in creation_flags$",
-  "iem-guard/src/effects/mod\\.rs.*replace \\| with \\^ in helper_flags$",
+  "iem-win/src/decide\\.rs.*replace \\| with \\^ in (creation_flags|helper_flags)$",
   # The guard pipe's Windows listener (private DACL, first instance, remote
   # refused) is not compiled on Linux; the windows job's pipe tests run it,
   # and its Unix twin of the same name serves every pipe test here.

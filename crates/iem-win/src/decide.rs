@@ -35,6 +35,18 @@ pub fn creation_flags(new_group: bool) -> u32 {
     CREATE_BREAKAWAY_FROM_JOB | CREATE_NO_WINDOW | group
 }
 
+/// The creation flags of a bounded helper command the guard runs (`schtasks`,
+/// `curl`, `iem-migrate`, `iem-server notify`): no console window, and for a
+/// waiting one (Ctrl-Break on "ide event") a process group of its own, so the
+/// Ctrl-Break reaches that helper only (S6 design note §5.5). Helpers stay in
+/// the caller's job: they are short, and a job that refuses breakaway must not
+/// refuse them. Only the long-lived children and the card's interlock leave
+/// it ([`creation_flags`], I9).
+pub fn helper_flags(waiting: bool) -> u32 {
+    let group = if waiting { CREATE_NEW_PROCESS_GROUP } else { 0 };
+    CREATE_NO_WINDOW | group
+}
+
 /// The new `(minimum, maximum)` working set for the current `(min, max)`:
 /// both grow by `extra_mb` MiB, so the gap between them stays as Windows
 /// accepted it; sums saturate.
@@ -148,6 +160,20 @@ mod tests {
     fn every_child_breaks_away_without_a_window_and_a_new_group_is_its_own() {
         assert_eq!(creation_flags(true), 0x0900_0200);
         assert_eq!(creation_flags(false), 0x0900_0000);
+    }
+
+    /// Helpers stay in the caller's job: a job that refuses breakaway
+    /// (UNVERIFIED on the PC) must not refuse a `curl` check. A waiting one
+    /// gets its own group, so Ctrl-Break reaches that helper only.
+    #[test]
+    fn helpers_stay_in_the_job_and_a_waiting_one_has_its_own_group() {
+        assert_eq!(helper_flags(false), 0x0800_0000);
+        assert_eq!(helper_flags(true), 0x0800_0200);
+        assert_eq!(helper_flags(true) & CREATE_BREAKAWAY_FROM_JOB, 0);
+        assert_eq!(
+            helper_flags(true),
+            CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
+        );
     }
 
     #[test]
