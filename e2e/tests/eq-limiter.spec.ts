@@ -567,12 +567,27 @@ test.describe("Limiter (F12)", () => {
       expect(await label.innerText()).toMatch(/^\d+\.\d sec limited$|^\d+ min \d+ sec limited$/);
       expect(await mix.limiterActiveSeconds()).toBeGreaterThanOrEqual(5);
 
-      // The sine away (the limiter lets go within its 50 ms release), then Reset.
+      // The drive away. The limiter lets go within its 50 ms release, but the
+      // counter follows the GR meter (X14: below −1 dB), which the JSFX lets
+      // climb back by a factor of e a second (~8.7 dB/s, `Mga::tick`): from
+      // this drive's ~20 dB of reduction it counted on for ~2.5 s in CI (run
+      // 36349014194: 0.9 s after a Reset 1.5 s after the restore). Reset once
+      // the counter holds still over half a second (the server refreshes it
+      // every 100 ms); the first read is also the barrier for the SetLevel.
       desk.send({ cmd: "SetInput", input: "mic4", trim_db: trim });
       mix.send({ cmd: "SetLevel", id: "mic4", level_db: level });
       expect((await desk.consoleInputs()).find((i) => i.id === "mic4")?.trim_db).toBe(trim);
-      await mix.limiterActiveSeconds();
-      await page.waitForTimeout(1_000);
+      let last = -1;
+      await expect
+        .poll(
+          async () => {
+            const was = last;
+            last = await mix.limiterActiveSeconds();
+            return last === was;
+          },
+          { message: "the counter stops once the sine is away", timeout: 15_000, intervals: [500] },
+        )
+        .toBe(true);
       await reopen();
       await modal.locator(".limiter-reset-btn").click();
       await expect(label).toHaveText("not limited yet");
