@@ -514,9 +514,10 @@ where
     {
         let config = state.config.read().await;
         if config.tls {
-            let config_dir = dirs::config_dir().unwrap_or_default().join("iemmixer");
-            let cert_path = config_dir.join(&config.tls_cert);
-            let key_path = config_dir.join(&config.tls_key);
+            // Next to the site file: `iem-migrate band` writes them into the
+            // server's config directory (S6 design note §6).
+            let cert_path = server_config.config_dir.join(&config.tls_cert);
+            let key_path = server_config.config_dir.join(&config.tls_key);
             let https_port = config.https_port;
             drop(config);
 

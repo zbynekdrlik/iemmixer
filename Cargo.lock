@@ -2749,7 +2749,6 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "chrono",
- "dirs",
  "hkdf",
  "iem-audio-io",
  "iem-core",

@@ -57,7 +57,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = tr
 # TLS support for HTTPS (PWA installability on phones)
 axum-server = { version = "0.8", features = ["tls-rustls"], optional = true }
 rustls = { version = "0.23", features = ["ring"], optional = true }
-dirs = { version = "6.0", optional = true }
 
 # Listen and talkback: Opus in the server (X4; the engine links no codec, I1)
 bytes = { version = "1", optional = true }
@@ -96,7 +95,7 @@ required-features = ["standalone"]
 [features]
 default = []
 standalone = ["tracing-subscriber", "tokio/signal"]
-tls = ["axum-server", "rustls", "dirs"]
+tls = ["axum-server", "rustls"]
 audio = ["dep:bytes", "dep:opus"]
 
 [dev-dependencies]
