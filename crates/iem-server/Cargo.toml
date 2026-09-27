@@ -29,9 +29,10 @@ reqwest = { version = "0.12", features = ["json"] }
 # JWT authentication
 jsonwebtoken = "9"
 
-# Serialization
+# Serialization (float_roundtrip: a backup, preset or snapshot reads back
+# with exactly the values that were written)
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde_json = { version = "1.0", features = ["float_roundtrip"] }
 
 # Embed WASM assets
 rust-embed = { version = "8", features = ["include-exclude"] }
@@ -103,6 +104,8 @@ tower = { version = "0.5", features = ["util"] }
 tempfile = "3"
 toml = "0.9"
 tracing-test = "0.2"
+# Property tests (tests/backup_roundtrip.rs); no fork/timeout runner needed
+proptest = { version = "1.11", default-features = false, features = ["std"] }
 # The real engine for the server's tests (never linked into the server)
 iem-engine = { path = "../iem-engine" }
 iem-audio-io = { path = "../iem-audio-io" }
