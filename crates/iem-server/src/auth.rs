@@ -137,7 +137,7 @@ pub async fn verify_engineer_pin(
     headers: &HeaderMap,
     pin: &str,
 ) -> Result<(), Rejection> {
-    let client = ClientKey::from_request(peer.ip(), headers);
+    let client = state.login_guard.client(peer.ip(), headers);
     let now = Instant::now();
     if let Err(wait) = state.login_guard.check(&client, ENGINEER_ID, now) {
         return Err(Rejection::from(too_many_attempts(wait)));
@@ -185,7 +185,7 @@ pub async fn login(
     headers: HeaderMap,
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, Rejection> {
-    let client = ClientKey::from_request(peer.ip(), &headers);
+    let client = state.login_guard.client(peer.ip(), &headers);
     let now = Instant::now();
     if let Err(wait) = state.login_guard.check(&client, &req.member, now) {
         tracing::info!(origin = ?client.origin, member = %req.member, wait_ms = wait.as_millis() as u64, "login throttled");
@@ -285,6 +285,9 @@ fn issue_token(
 ///   the engineer PIN with `member = "engineer"`.
 /// - **Members**: change their own PIN (`old_pin` required, `member` ignored);
 ///   a wrong current PIN counts against the login budgets.
+/// - **Before the cutover** (`pin_changes = false`, every `dev` and trial
+///   site; P9): 409 with [`iem_core::PIN_CHANGES_FROZEN`] for everyone, before
+///   any PIN is checked; nothing changes.
 pub async fn change_pin(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -296,6 +299,14 @@ pub async fn change_pin(
         extract_claims_from_header(&headers, &config.jwt_secret)
             .map_err(IntoResponse::into_response)?
     };
+    if !state.site_config.pin_changes {
+        tracing::info!(by = %claims.sub, "PIN change refused: PINs change in the predecessor until the cutover");
+        return Err(Rejection::from(error_response(
+            StatusCode::CONFLICT,
+            "PIN_CHANGES_FROZEN",
+            iem_core::PIN_CHANGES_FROZEN,
+        )));
+    }
     if !is_valid_pin_format(&req.new_pin) {
         return Err(Rejection::from(error_response(
             StatusCode::BAD_REQUEST,
@@ -325,7 +336,7 @@ pub async fn change_pin(
                 "Current PIN is required",
             )));
         }
-        let client = ClientKey::from_request(peer.ip(), &headers);
+        let client = state.login_guard.client(peer.ip(), &headers);
         let now = Instant::now();
         if let Err(wait) = state.login_guard.check(&client, &claims.sub, now) {
             return Err(Rejection::from(too_many_attempts(wait)));
@@ -664,7 +675,7 @@ mod tests {
 #[cfg(test)]
 mod login_tests {
     use super::*;
-    use crate::login_guard::{HashGate, Origin};
+    use crate::login_guard::{HashGate, HostAddrs, LoginGuard, Origin};
     use crate::pin_hash::{PEPPER_LEN, PinHasher};
     use axum::body::Body;
     use axum::extract::connect_info::MockConnectInfo;
@@ -691,9 +702,20 @@ mod login_tests {
 
     /// member1 (PIN set), member2 (no PIN yet), engineer; fast test hasher.
     async fn test_state(dir: &std::path::Path) -> AppState {
+        test_state_with(dir, true).await
+    }
+
+    /// [`test_state`] with PIN changes frozen, as every `dev` site is
+    /// before the cutover.
+    async fn frozen_state(dir: &std::path::Path) -> AppState {
+        test_state_with(dir, false).await
+    }
+
+    async fn test_state_with(dir: &std::path::Path, pin_changes: bool) -> AppState {
         let config = iem_core::Config {
             jwt_secret: SECRET.to_string(),
             members: vec![member("member1"), member("member2"), member("engineer")],
+            pin_changes,
             ..iem_core::Config::default()
         };
         let mut state = AppState::new(config, dir);
@@ -926,6 +948,51 @@ mod login_tests {
     }
 
     #[tokio::test]
+    async fn a_tunnel_on_the_hosts_own_address_is_keyed_by_its_client() {
+        // cloudflared's origin may target the host's LAN address instead of
+        // 127.0.0.1: its connections then come from that address.
+        const HOST: [u8; 4] = [192, 0, 2, 10];
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = test_state(dir.path()).await;
+        state.login_guard = Arc::new(LoginGuard::for_host(HostAddrs::new([
+            std::net::IpAddr::from(HOST),
+        ])));
+        let tunnel = app(state.clone(), HOST);
+        let first = [("cf-connecting-ip", "198.51.100.7")];
+        for _ in 0..3 {
+            assert_eq!(
+                login_as(&tunnel, "member1", WRONG_PIN, &first)
+                    .await
+                    .status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        assert_eq!(
+            login_as(&tunnel, "member1", MEMBER_PIN, &first)
+                .await
+                .status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "limited per 198.51.100.7"
+        );
+        let second = [("cf-connecting-ip", "198.51.100.8")];
+        assert_eq!(
+            login_as(&tunnel, "member1", MEMBER_PIN, &second)
+                .await
+                .status(),
+            StatusCode::OK,
+            "another client behind the tunnel"
+        );
+        assert_eq!(state.login_guard.stats().tunnel_failures, 3);
+        // A peer that is not the host: the same header changes nothing.
+        let lan = app(state.clone(), [192, 0, 2, 50]);
+        assert_eq!(
+            login_as(&lan, "member1", MEMBER_PIN, &first).await.status(),
+            StatusCode::OK,
+            "keyed by its own address, not by the header"
+        );
+    }
+
+    #[tokio::test]
     async fn success_resets_the_failure_streak() {
         let dir = tempfile::tempdir().unwrap();
         let app = app(test_state(dir.path()).await, LAN);
@@ -1140,6 +1207,79 @@ mod login_tests {
         )
         .await;
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    async fn assert_frozen(resp: Response) {
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let body = json_body(resp).await;
+        assert_eq!(body["code"], "PIN_CHANGES_FROZEN");
+        assert_eq!(body["message"], iem_core::PIN_CHANGES_FROZEN);
+    }
+
+    #[tokio::test]
+    async fn pin_change_is_refused_while_frozen() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = frozen_state(dir.path()).await;
+        let app = app(state.clone(), LAN);
+        let auth = bearer("member1", false);
+        let body = serde_json::json!({ "old_pin": MEMBER_PIN, "new_pin": NEW_PIN });
+        assert_frozen(change(&app, &auth, body).await).await;
+        // No PIN is checked while frozen: a wrong current PIN counts nothing.
+        let wrong = serde_json::json!({ "old_pin": WRONG_PIN, "new_pin": NEW_PIN });
+        assert_frozen(change(&app, &auth, wrong).await).await;
+        assert_eq!(state.login_guard.stats().lan_failures, 0);
+        assert_eq!(
+            login_as(&app, "member1", NEW_PIN, &[]).await.status(),
+            StatusCode::UNAUTHORIZED,
+            "the PIN did not change"
+        );
+        assert_eq!(
+            login_as(&app, "member1", MEMBER_PIN, &[]).await.status(),
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn pin_reset_is_refused_while_frozen() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app(frozen_state(dir.path()).await, LAN);
+        let engineer = bearer("engineer", true);
+        let reset = serde_json::json!({ "new_pin": NEW_PIN, "member": "member2" });
+        assert_frozen(change(&app, &engineer, reset).await).await;
+        let rotate = serde_json::json!({ "new_pin": NEW_PIN, "member": "engineer" });
+        assert_frozen(change(&app, &engineer, rotate).await).await;
+        assert_eq!(
+            login_as(&app, "member2", NEW_PIN, &[]).await.status(),
+            StatusCode::UNAUTHORIZED,
+            "member2 still has no PIN"
+        );
+        assert_eq!(
+            json_body(login_as(&app, "engineer", ENGINEER_PIN, &[]).await).await["engineer"],
+            true,
+            "the engineer PIN is unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn login_still_works_while_frozen() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = frozen_state(dir.path()).await;
+        let app = app(state.clone(), LAN);
+        assert_eq!(
+            json_body(login_as(&app, "member1", MEMBER_PIN, &[]).await).await["member"],
+            "member1"
+        );
+        assert_eq!(
+            json_body(login_as(&app, "member2", ENGINEER_PIN, &[]).await).await["engineer"],
+            true
+        );
+        let peer = SocketAddr::from((LAN, 40000));
+        assert!(
+            verify_engineer_pin(&state, peer, &HeaderMap::new(), ENGINEER_PIN)
+                .await
+                .is_ok(),
+            "the engineer's switch PIN check too"
+        );
     }
 
     #[tokio::test]

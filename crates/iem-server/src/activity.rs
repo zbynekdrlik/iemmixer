@@ -1,13 +1,44 @@
-//! The band-activity alarm while developing (program spec §4.2): input peaks
-//! above −50 dBFS for at least 120 s within the last 300 s turn it on; it
-//! shows a banner with "Back to REAPER" on engineer pages and pushes one
-//! alarm. Pure: fed with instants and the loudest input peak of each meter
-//! frame.
+//! The band-activity alarm while developing (program spec §4.2): peaks of the
+//! stage inputs above −50 dBFS for at least 120 s within the last 300 s turn
+//! it on; it shows a banner with "Back to REAPER" on engineer pages and
+//! pushes one notice to the engineer's devices (never to an alarm
+//! recipient). Pure: fed with instants and the loudest watched input peak of
+//! each meter frame.
 
 use std::collections::VecDeque;
 use std::time::Instant;
 
 use iem_core::ActivityConfig;
+
+use crate::site_view::SiteView;
+
+/// The inputs band activity watches, as indices into a meter frame's inputs
+/// (topology order): the site's `[activity] inputs`, or every input of
+/// category `mics` when that list is empty. The program input carries
+/// signal while the band is silent (S1a), so only the stage counts. Listed
+/// ids the topology does not have are returned second, to be reported, and
+/// are left out.
+pub fn watched_inputs(inputs: &[String], site: &SiteView) -> (Vec<usize>, Vec<String>) {
+    let watched = site
+        .inputs
+        .iter()
+        .enumerate()
+        .filter(|(_, i)| {
+            if inputs.is_empty() {
+                i.category == "mics"
+            } else {
+                inputs.contains(&i.id.0)
+            }
+        })
+        .map(|(k, _)| k)
+        .collect();
+    let unknown = inputs
+        .iter()
+        .filter(|id| site.input(id).is_none())
+        .cloned()
+        .collect();
+    (watched, unknown)
+}
 
 #[derive(Debug, Clone)]
 pub struct BandActivity {
@@ -63,13 +94,47 @@ impl BandActivity {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::site_view::tests::test_view;
     use std::time::Duration;
+
+    #[test]
+    fn the_mics_are_watched_by_default() {
+        let v = test_view();
+        let (watched, unknown) = watched_inputs(&[], &v);
+        let ids: Vec<&str> = watched.iter().map(|&k| v.inputs[k].id.0.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "mic1", "mic2", "mic3", "mic4", "mic5", "mic6", "mic7", "mic8", "mic9", "mic10",
+                "keys"
+            ]
+        );
+        assert!(unknown.is_empty());
+    }
+
+    #[test]
+    fn a_listed_set_is_watched_in_topology_order_and_unknown_ids_are_left_out() {
+        let v = test_view();
+        let pos = |id: &str| v.inputs.iter().position(|i| i.id.0 == id).unwrap();
+        let list = [
+            "content".to_string(),
+            "ghost".to_string(),
+            "mic2".to_string(),
+        ];
+        let (watched, unknown) = watched_inputs(&list, &v);
+        assert_eq!(watched, [pos("mic2"), pos("content")]);
+        assert_eq!(unknown, ["ghost"]);
+        let (none, unknown) = watched_inputs(&["ghost".to_string()], &v);
+        assert!(none.is_empty(), "never the mics default instead");
+        assert_eq!(unknown, ["ghost"]);
+    }
 
     fn cfg() -> ActivityConfig {
         ActivityConfig {
             threshold_dbfs: -50.0,
             window_s: 300,
             sustain_s: 120,
+            inputs: Vec::new(),
         }
     }
 
@@ -120,6 +185,7 @@ mod tests {
             threshold_dbfs: -50.0,
             window_s: 10,
             sustain_s: 2,
+            inputs: Vec::new(),
         };
         let mut a = BandActivity::new(&small, t);
         let at_threshold = 10f64.powf(-50.0 / 20.0) as f32;

@@ -53,6 +53,13 @@ pub struct Config {
     #[serde(default)]
     pub activity: ActivityConfig,
 
+    /// PIN changes in the web UI (P9, design note §5.4). Until the cutover
+    /// the predecessor is the only place a PIN changes and every entry into
+    /// `dev` brings its PINs over, so the guard writes `false` into every
+    /// `dev` and trial site: the change and reset route then answers 409.
+    #[serde(default = "default_pin_changes")]
+    pub pin_changes: bool,
+
     /// JWT signing key. Never read from the site file: the server loads it
     /// from `<config dir>/secrets/jwt_secret` (`iem_server::secrets`).
     #[serde(skip)]
@@ -145,14 +152,19 @@ pub struct SiteInputMeta {
     pub owner: Option<String>,
 }
 
-/// Band-activity alarm (§4.2): input peaks above `threshold_dbfs` for at
-/// least `sustain_s` seconds within the last `window_s` seconds.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+/// Band-activity alarm (§4.2): peaks of the watched inputs above
+/// `threshold_dbfs` for at least `sustain_s` seconds within the last
+/// `window_s` seconds.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct ActivityConfig {
     pub threshold_dbfs: f64,
     pub window_s: u64,
     pub sustain_s: u64,
+    /// The engine input ids that count: the stage. Empty (the default) means
+    /// every input of category `mics`. The program input carries signal
+    /// while the band is silent (S1a), so it never belongs here.
+    pub inputs: Vec<String>,
 }
 
 impl Default for ActivityConfig {
@@ -161,12 +173,17 @@ impl Default for ActivityConfig {
             threshold_dbfs: -50.0,
             window_s: 300,
             sustain_s: 120,
+            inputs: Vec::new(),
         }
     }
 }
 
 fn default_port() -> u16 {
     80
+}
+
+fn default_pin_changes() -> bool {
+    true
 }
 
 fn default_engine_pipe() -> String {
@@ -210,6 +227,7 @@ impl Default for Config {
             inputs: Vec::new(),
             back_to_reaper: Vec::new(),
             activity: ActivityConfig::default(),
+            pin_changes: default_pin_changes(),
             jwt_secret: String::new(),
             vapid_private_key: String::new(),
             tls: false,
@@ -285,6 +303,11 @@ impl Config {
         }
         if a.window_s == 0 || a.sustain_s == 0 || a.sustain_s > a.window_s {
             out.push("activity needs 0 < sustain_s <= window_s".to_string());
+        }
+        for id in &a.inputs {
+            if !iem_engine_proto::valid_id(id) {
+                out.push(format!("activity input '{id}' is not an input id"));
+            }
         }
         out
     }
@@ -418,7 +441,8 @@ mod tests {
             ActivityConfig {
                 threshold_dbfs: -50.0,
                 window_s: 300,
-                sustain_s: 120
+                sustain_s: 120,
+                inputs: Vec::new(),
             }
         );
         assert!(config.back_to_reaper.is_empty());
@@ -427,6 +451,21 @@ mod tests {
         assert_eq!(
             (custom.activity.window_s, custom.activity.sustain_s),
             (30, 5)
+        );
+        assert!(custom.activity.inputs.is_empty(), "empty: every mics input");
+        let stage: Config = toml::from_str("[activity]\ninputs = [\"mic1\", \"keys\"]\n").unwrap();
+        assert_eq!(stage.activity.inputs, ["mic1", "keys"]);
+        assert_eq!(stage.activity.sustain_s, 120);
+    }
+
+    #[test]
+    fn pin_changes_are_on_unless_the_site_freezes_them() {
+        assert!(Config::default().pin_changes);
+        assert!(toml::from_str::<Config>("port = 80\n").unwrap().pin_changes);
+        assert!(
+            !toml::from_str::<Config>("pin_changes = false\n")
+                .unwrap()
+                .pin_changes
         );
     }
 
@@ -509,9 +548,11 @@ mod tests {
         );
         assert!(site.member("translator").is_none());
         assert!(!site.back_to_reaper.is_empty());
+        assert!(!site.pin_changes, "the test site is a dev site: frozen");
         let example: Config = toml::from_str(include_str!("../../../config/iemmixer.example.toml"))
             .expect("config/iemmixer.example.toml");
         assert_eq!(example.members.len(), 2);
+        assert!(example.pin_changes);
         assert_eq!(example.problems(), Vec::<String>::new());
     }
 
@@ -536,6 +577,7 @@ mod tests {
                 threshold_dbfs: 0.0,
                 window_s: 10,
                 sustain_s: 11,
+                inputs: vec!["mic1".into(), "Stage Mic".into()],
             },
             ..Config::default()
         };
@@ -551,7 +593,12 @@ mod tests {
         assert!(has("owner 'nobody' is not a member"), "{p:?}");
         assert!(has("threshold_dbfs"), "{p:?}");
         assert!(has("sustain_s <= window_s"), "{p:?}");
-        assert_eq!(p.len(), 10, "{p:?}");
+        assert!(
+            has("activity input 'Stage Mic' is not an input id"),
+            "{p:?}"
+        );
+        assert!(!has("activity input 'mic1'"), "{p:?}");
+        assert_eq!(p.len(), 11, "{p:?}");
         assert!(matches!(config.validate(), Err(ConfigError::Invalid(_))));
         assert!(Config::default().validate().is_ok());
         let zero = Config {

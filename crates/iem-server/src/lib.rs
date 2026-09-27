@@ -6,6 +6,7 @@
 //! history, backups, photos, push, SOS, tunnel health).
 
 pub mod activity;
+pub mod alarm_link;
 pub mod auth;
 pub mod backup;
 pub mod backup_daemon;
@@ -208,6 +209,13 @@ impl AppState {
         let secrets_dir = config_dir.join(secrets::SECRETS_DIR);
         let pepper = pepper::load_or_create(&secrets_dir)?;
         let pin_store = pin_store::PinStore::load(&secrets_dir)?;
+        // The tunnel connector runs on this PC: CF-Connecting-IP counts only
+        // from loopback and this host's own addresses (design note §6).
+        let host = login_guard::HostAddrs::read();
+        tracing::info!(
+            ?host,
+            "CF-Connecting-IP is trusted from loopback and these host addresses"
+        );
         let (event_tx, _) = broadcast::channel(256);
         let (meters_tx, _) = broadcast::channel(16);
         Ok(Self {
@@ -233,7 +241,7 @@ impl AppState {
             auto_snapshots: Arc::new(Mutex::new(HashMap::new())),
             pin_store: Arc::new(RwLock::new(pin_store)),
             pin_hasher: pin_hash::PinHasher::new(pepper),
-            login_guard: Arc::new(login_guard::LoginGuard::new()),
+            login_guard: Arc::new(login_guard::LoginGuard::for_host(host)),
             hash_gate: Arc::new(login_guard::HashGate::new(
                 login_guard::HASH_CONCURRENCY,
                 login_guard::HASH_QUEUE,
@@ -428,11 +436,32 @@ fn app_router(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// Start the server, optionally signaling readiness via a oneshot channel
+/// How long a stop waits for open requests before the server returns anyway.
+pub const STOP_DRAIN: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Start the server, optionally signaling readiness via a oneshot channel;
+/// it runs until the process ends.
 pub async fn start_server(
     server_config: ServerConfig,
     ready_tx: Option<tokio::sync::oneshot::Sender<()>>,
 ) -> anyhow::Result<()> {
+    start_server_until(server_config, ready_tx, std::future::pending()).await
+}
+
+/// [`start_server`] until `stop` resolves (S6 graceful stop): then the HTTP
+/// and (with `tls`) the HTTPS listener close at once (the ports are free),
+/// idle connections close, open requests on either get up to [`STOP_DRAIN`]
+/// from the stop to finish, and it returns `Ok`. The caller's runtime still
+/// runs the background tasks (engine client, backup daemon, tunnel
+/// watchdog); shutting the runtime down ends them.
+pub async fn start_server_until<F>(
+    server_config: ServerConfig,
+    ready_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    stop: F,
+) -> anyhow::Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
     // Install rustls crypto provider (required when tls feature brings rustls into dep tree)
     #[cfg(feature = "tls")]
     {
@@ -477,7 +506,10 @@ pub async fn start_server(
 
     let app = app_router(state.clone());
 
-    // Spawn HTTPS server on port 443 (if TLS enabled and certs exist)
+    // Spawn HTTPS server on port 443 (if TLS enabled and certs exist). Its
+    // handle takes the same graceful stop as the HTTP server below.
+    #[cfg(feature = "tls")]
+    let mut https: Option<(axum_server::Handle<SocketAddr>, tokio::task::JoinHandle<()>)> = None;
     #[cfg(feature = "tls")]
     {
         let config = state.config.read().await;
@@ -495,9 +527,12 @@ pub async fn start_server(
                     Ok(rustls_config) => {
                         let https_addr = SocketAddr::from(([0, 0, 0, 0], https_port));
                         let https_app = app.clone();
-                        tokio::spawn(async move {
+                        let handle = axum_server::Handle::new();
+                        let server_handle = handle.clone();
+                        let task = tokio::spawn(async move {
                             tracing::info!(port = https_port, "HTTPS server listening");
                             if let Err(e) = axum_server::bind_rustls(https_addr, rustls_config)
+                                .handle(server_handle)
                                 .serve(
                                     https_app.into_make_service_with_connect_info::<SocketAddr>(),
                                 )
@@ -506,6 +541,7 @@ pub async fn start_server(
                                 tracing::error!("HTTPS server failed: {}", e);
                             }
                         });
+                        https = Some((handle, task));
                     }
                     Err(e) => {
                         tracing::error!("Failed to load TLS certificates: {}", e);
@@ -558,12 +594,50 @@ pub async fn start_server(
         let _ = tx.send(());
     }
 
-    axum::serve(
+    // The stop closes both listeners at once; open requests on either get
+    // STOP_DRAIN.
+    let stopping = Arc::new(tokio::sync::Notify::new());
+    let stop_seen = Arc::clone(&stopping);
+    #[cfg(feature = "tls")]
+    let https_handle = https.as_ref().map(|(handle, _)| handle.clone());
+    let serve = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .await?;
-
+    .with_graceful_shutdown(async move {
+        stop.await;
+        tracing::info!("stop requested: the listeners close, open requests get up to 5 s");
+        #[cfg(feature = "tls")]
+        {
+            if let Some(handle) = https_handle {
+                handle.graceful_shutdown(Some(STOP_DRAIN));
+            }
+        }
+        stop_seen.notify_one();
+    });
+    tokio::select! {
+        result = serve => result?,
+        () = async {
+            stopping.notified().await;
+            tokio::time::sleep(STOP_DRAIN).await;
+        } => tracing::warn!("HTTP requests still open 5 s after the stop: stopping without them"),
+    }
+    tracing::info!("HTTP server stopped");
+    #[cfg(feature = "tls")]
+    {
+        if let Some((_, task)) = https {
+            // It took the stop with the HTTP server, and axum-server ends
+            // its connections STOP_DRAIN after it; this bound is only the
+            // backstop.
+            match tokio::time::timeout(STOP_DRAIN, task).await {
+                Ok(Ok(())) => tracing::info!("HTTPS server stopped"),
+                Ok(Err(e)) => tracing::error!(error = %e, "HTTPS server task failed"),
+                Err(_) => tracing::warn!(
+                    "HTTPS requests still open 5 s after the stop: stopping without them"
+                ),
+            }
+        }
+    }
     Ok(())
 }
 

@@ -87,9 +87,14 @@ name = "pin_cli"
 path = "tests/pin_cli.rs"
 required-features = ["standalone"]
 
+[[test]]
+name = "graceful_stop"
+path = "tests/graceful_stop.rs"
+required-features = ["standalone"]
+
 [features]
 default = []
-standalone = ["tracing-subscriber"]
+standalone = ["tracing-subscriber", "tokio/signal"]
 tls = ["axum-server", "rustls", "dirs"]
 audio = ["dep:bytes", "dep:opus"]
 

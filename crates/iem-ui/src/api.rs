@@ -267,12 +267,19 @@ pub async fn change_pin(old_pin: &str, new_pin: &str, member: &str) -> Result<()
 
     if resp.ok() {
         Ok(())
-    } else if resp.status() == 401 {
-        Err("Wrong current PIN".to_string())
-    } else if resp.status() == 400 {
-        Err("PIN must be exactly 4 digits".to_string())
     } else {
-        Err(format!("Server error: {}", resp.status()))
+        Err(change_pin_error(resp.status()))
+    }
+}
+
+/// The PIN dialog's text for a refused change (`status` = HTTP status); 409
+/// is the freeze before the cutover (P9).
+pub fn change_pin_error(status: u16) -> String {
+    match status {
+        400 => "PIN must be exactly 4 digits".to_string(),
+        401 => "Wrong current PIN".to_string(),
+        409 => iem_core::PIN_CHANGES_FROZEN.to_string(),
+        other => format!("Server error: {other}"),
     }
 }
 
@@ -374,5 +381,16 @@ mod tests {
             "Too many attempts. Try again in 1 s"
         );
         assert_eq!(login_error_message(500, None), "Server error: 500");
+    }
+
+    #[test]
+    fn pin_change_errors_are_readable() {
+        assert_eq!(change_pin_error(400), "PIN must be exactly 4 digits");
+        assert_eq!(change_pin_error(401), "Wrong current PIN");
+        assert_eq!(
+            change_pin_error(409),
+            "PIN sa zatiaľ mení v pôvodnej aplikácii"
+        );
+        assert_eq!(change_pin_error(500), "Server error: 500");
     }
 }

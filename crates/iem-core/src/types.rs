@@ -2,6 +2,11 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Why a PIN change or reset is refused before the cutover (P9, design note
+/// §5.4): the predecessor is still the only place PINs change. The server
+/// sends it with 409, the PIN dialog shows it.
+pub const PIN_CHANGES_FROZEN: &str = "PIN sa zatiaľ mení v pôvodnej aplikácii";
+
 /// Mixer state for a band member
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MixerState {

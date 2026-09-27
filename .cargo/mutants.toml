@@ -59,9 +59,10 @@ exclude_re = [
   "restart_service_blocking",
   "sc_windows",
   # Browser-only fetches and context accessors in the UI; covered by
-  # e2e/tests/site-links.spec.ts, e2e/tests/login-protection.spec.ts and
-  # e2e/tests/engineer.spec.ts (the switch).
-  "iem-ui/src/api\\.rs.*replace (login|get_site_links|back_to_reaper) ",
+  # e2e/tests/site-links.spec.ts, e2e/tests/login-protection.spec.ts,
+  # e2e/tests/engineer.spec.ts (the switch) and e2e/tests/pin-freeze.spec.ts
+  # (the PIN change; its messages are the tested change_pin_error).
+  "iem-ui/src/api\\.rs.*replace (login|get_site_links|back_to_reaper|change_pin) ",
   # Leptos component bodies (S5): a PascalCase function is a component; its
   # body is DOM event closures and effects that native tests cannot mount. The
   # E2E suites drive them; their pure logic lives in tested helpers.
@@ -108,6 +109,11 @@ exclude_re = [
   "iem-ui/src/pages/mixer/helpers\\.rs.*ws_send",
   # Push subscription through the service worker's PushManager.
   "iem-ui/src/pages/mixer/push\\.rs.*subscribe_to_push",
+  # The alarm link page's browser steps (permission, service worker,
+  # PushManager, fetches, the user agent read) and their console log;
+  # covered by e2e/tests/alarm-link.spec.ts, the pure parts (ios_tab, …) are
+  # tested helpers.
+  "iem-ui/src/pages/alarms\\.rs.*\\b(enable_alarms|vapid_key|failed|in_ios_tab)\\b",
   # Engine (S3): effects with no observable outcome through the engine's API.
   # fsync of the state directory: durability shows only across a power loss.
   "iem-engine/src/persist\\.rs.*replace sync_dir -> ",
