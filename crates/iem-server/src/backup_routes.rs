@@ -203,8 +203,10 @@ async fn trigger_capture(
 
 #[cfg(test)]
 mod tests {
-    use crate::routes::api_tests::{app, call, token};
+    use crate::engine::client::fake;
+    use crate::routes::api_tests::{app, call, router, token};
     use axum::http::{Method, StatusCode};
+    use iem_engine_proto::{InputId, MixState};
 
     #[tokio::test]
     async fn backups_are_the_engineers_and_need_the_engine() {
@@ -254,5 +256,45 @@ mod tests {
             (status, json["code"].as_str()),
             (StatusCode::SERVICE_UNAVAILABLE, Some("ENGINE_UNAVAILABLE"))
         );
+    }
+
+    #[tokio::test]
+    async fn capture_is_refused_until_the_mirror_is_synced() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, _) = app(dir.path());
+        // The engine said hello and announced its topology, but its state has
+        // not arrived: a backup now would be empty or stale.
+        let (engine, mut peer) = fake::announced(crate::site_view::tests::test_topology()).await;
+        state.engine = engine;
+        let app = router(state.clone());
+        let eng = token("engineer", true);
+        let capture = "/api/backups/capture";
+        let (status, json) = call(&app, Method::POST, capture, Some(&eng), None).await;
+        assert_eq!(
+            (status, json["code"].as_str(), json["message"].as_str()),
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Some("CAPTURE_FAILED"),
+                Some("the engine state is not synced")
+            )
+        );
+        assert!(state.backup_store.list().is_empty(), "nothing was written");
+        assert!(!dir.path().join("backups").exists());
+
+        // Once the state is there, the same request captures it.
+        let mut running = MixState::default();
+        running
+            .inputs
+            .entry(InputId::new("keys"))
+            .or_default()
+            .trim_db = 4.0;
+        fake::sync(&state.engine, &mut peer, 7, running.clone()).await;
+        let (status, info) = call(&app, Method::POST, capture, Some(&eng), None).await;
+        assert_eq!(status, StatusCode::OK, "{info}");
+        let saved = state
+            .backup_store
+            .load(info["filename"].as_str().unwrap())
+            .unwrap();
+        assert_eq!((saved.rev, saved.state), (7, running));
     }
 }
