@@ -239,7 +239,7 @@ test.describe("Listen diagnostics (F28)", () => {
       const diag = await read();
       expect(diag.receiving_oiem).toBe(true);
       expect(diag.opus_frames_per_second).toBeGreaterThan(10);
-      expect(diag.peak_db).toBeGreaterThan(-40);
+      expect(diag.peak_db).toBeGreaterThan(-30);
       expect(typeof diag.sequence_gaps).toBe("number");
     } finally {
       await page.evaluate(() => {
