@@ -1496,6 +1496,31 @@ fn replies_carry_the_running_engine() {
     assert_eq!(g.shared.view().engine, None);
 }
 
+/// While the engine comes up (its pipe exists before its first Status) the
+/// reply has no engine, on a request and in the watch's view, rather than
+/// an empty build with zero counters (HIL v1 waits for it); then it shows
+/// the engine.
+#[test]
+fn an_engine_coming_up_is_absent_from_the_reply() {
+    let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
+    pc.engine_up = false;
+    let r = handle(&mut pc, &mut g, Request::Status, 0);
+    assert_eq!(r.engine, None);
+    tick(&mut pc, &mut g, Instant::now());
+    match g.shared.route(&Request::Status) {
+        Route::Now(r) => assert_eq!(r.engine, None),
+        other => panic!("{other:?}"),
+    }
+    pc.engine_up = true;
+    tick(&mut pc, &mut g, Instant::now());
+    match g.shared.route(&Request::Status) {
+        Route::Now(r) => assert_eq!(r.engine, Some(engine_of(0, None))),
+        other => panic!("{other:?}"),
+    }
+    let r = handle(&mut pc, &mut g, Request::Status, 0);
+    assert_eq!(r.engine, Some(engine_of(0, None)));
+}
+
 #[test]
 fn the_engines_hil_flags_are_for_a_dev_job_only() {
     // A dev entry without a job: held, no HIL flags.

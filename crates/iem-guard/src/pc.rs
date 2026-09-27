@@ -564,6 +564,9 @@ pub mod fake {
         /// What `engine_seen` reports while an engine runs (a read of what
         /// the connection holds: not a recorded call).
         pub seen: EngineSeen,
+        /// `false`: an engine runs, but its hello and first `Status` have
+        /// not come yet, so `engine_seen` answers `None` (as `WinPc` does).
+        pub engine_up: bool,
         calls: Vec<(Call, Instant)>,
         fails: HashMap<Call, String>,
         blocked: Vec<Call>,
@@ -623,6 +626,7 @@ pub mod fake {
                     },
                     pipe_private: true,
                 },
+                engine_up: true,
                 calls: Vec::new(),
                 fails: HashMap::new(),
                 blocked: Vec::new(),
@@ -965,7 +969,7 @@ pub mod fake {
         }
 
         fn engine_seen(&mut self) -> Option<EngineSeen> {
-            self.facts.engine.then(|| self.seen.clone())
+            (self.facts.engine && self.engine_up).then(|| self.seen.clone())
         }
 
         fn install_site(&mut self, path: &str, c: &Cancel) -> R<String> {
@@ -1535,6 +1539,10 @@ mod tests {
         assert_eq!(pc.engine_seen(), Some(pc.seen.clone()));
         assert!(pc.seen.pipe_private);
         assert_eq!(pc.seen.status.frames, 32);
+        // An engine coming up (no hello and Status yet) is not seen.
+        pc.engine_up = false;
+        assert_eq!(pc.engine_seen(), None);
+        pc.engine_up = true;
         assert_eq!(pc.calls().len(), calls);
         pc.fail(Call::InstallSite, "check-site exit 2");
         assert!(pc.install_site("bad.toml", &Cancel::default()).is_err());
