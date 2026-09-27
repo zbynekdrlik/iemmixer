@@ -38,5 +38,5 @@ pub mod state;
 pub use alarms::{Alarm, Alarms};
 pub use cancel::{Cancel, Preempted};
 pub use plan::{Facts, Health, Mode, OnError, PrefFail, Step};
-pub use proto::{Reply, Request};
+pub use proto::{EngineStatus, Reply, Request};
 pub use state::GuardState;

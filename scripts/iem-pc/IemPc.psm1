@@ -1312,6 +1312,30 @@ function Test-IemHilReopen {
     [pscustomobject]@{ ok = ($problems.Count -eq 0); detail = $detail; numbers = [pscustomobject]@{ resets = $resets; callbacks = $calls } }
 }
 
+function Test-IemHilPanic {
+    # An injected RT fault (design section 7): the engine exited 70, the guard
+    # started exactly one new engine, and that one streams at 32 (callbacks
+    # advancing from the first status after the respawn to the next), neither
+    # parked nor faulted. $Respawned is $null when no new engine came.
+    param($Before, $Respawned, $Later)
+    $gap = Get-IemHilEngineGap -Before $Before -After $Before -Fields @('spawns')
+    if (-not $gap -and $null -eq $Respawned) { $gap = 'no new engine within the wait' }
+    if (-not $gap) { $gap = Get-IemHilEngineGap -Before $Respawned -After $Later -Fields @('frames', 'callbacks', 'parked', 'faulted', 'spawns', 'last_exit') }
+    if ($gap) { return [pscustomobject]@{ ok = $false; detail = $gap; numbers = $null } }
+    $spawns = [int64]$Later.spawns - [int64]$Before.spawns
+    $calls = [int64]$Later.callbacks - [int64]$Respawned.callbacks
+    $problems = @()
+    if ($spawns -ne 1) { $problems += ('engine starts +{0} (expected +1)' -f $spawns) }
+    if ($null -eq $Later.last_exit -or [int64]$Later.last_exit -ne 70) { $problems += ('last exit {0} (expected 70)' -f $Later.last_exit) }
+    if ([int]$Later.frames -ne 32) { $problems += ('measured frames {0}' -f $Later.frames) }
+    if ($calls -le 0) { $problems += 'the new engine does not stream' }
+    if ([bool]$Later.parked) { $problems += 'parked' }
+    if ([bool]$Later.faulted) { $problems += 'faulted' }
+    $detail = 'exit 70, one respawn, frames 32, +{0} callbacks' -f $calls
+    if ($problems.Count -gt 0) { $detail = $problems -join '; ' }
+    [pscustomobject]@{ ok = ($problems.Count -eq 0); detail = $detail; numbers = [pscustomobject]@{ spawns = $spawns; callbacks = $calls } }
+}
+
 function New-IemHilCheck {
     param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][bool]$Ok, [string]$Detail = '', $Numbers = $null)
     [pscustomobject]@{ name = $Name; ok = $Ok; detail = $Detail; numbers = $Numbers }

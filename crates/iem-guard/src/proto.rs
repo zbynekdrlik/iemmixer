@@ -66,6 +66,11 @@ pub enum Request {
         path: String,
     },
     ForceReopen,
+    /// Dev with a HIL job only: the engine (started with `--fault-injection`
+    /// while the job runs) faults its RT callback on purpose; HIL v1 then
+    /// expects exit 70, the driver released, one respawn and the fade-in
+    /// (design §7), read back through [`Reply::engine`].
+    InjectFault,
     /// Dev only: stop the idle runner (bootstrap check, S6 plan Task 16).
     RunnerStop,
     /// Dev only: start `\iemmixer\iemmixer-probe` from the guard (design §5.1).
@@ -93,6 +98,32 @@ pub struct Reply {
     pub alarms: Vec<Alarm>,
     #[serde(default)]
     pub detail: String,
+    /// The running engine as the guard sees it; absent while none runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine: Option<EngineStatus>,
+}
+
+/// The engine in a [`Reply`] (design §7: HIL v1 reads it through `iemmode
+/// status`). The guard fills it from the supervisor connection's `Status` and
+/// `Hello`, the engine pipe's DACL read back, and its own respawn record.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EngineStatus {
+    /// `Hello.engine_build`: the bundle's commit SHA.
+    pub build: String,
+    /// Frames per period, measured from the driver's sample positions (design §3).
+    pub frames: u32,
+    pub callbacks: u64,
+    pub missed: u64,
+    pub resets: u64,
+    pub parked: bool,
+    pub faulted: bool,
+    /// The engine pipes' DACL, read back, holds only the user and SYSTEM.
+    pub pipe_private: bool,
+    /// Engine processes this guard started; a respawn adds one.
+    pub spawns: u64,
+    /// The exit code of the engine process before the running one, if any.
+    pub last_exit: Option<i32>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -205,6 +236,7 @@ mod tests {
                 path: "site.toml".into(),
             },
             Request::ForceReopen,
+            Request::InjectFault,
             Request::RunnerStop,
             Request::ProbeTask,
             Request::RehearseTeardown,
@@ -245,6 +277,7 @@ mod tests {
             json(&Request::RehearseTeardown),
             r#"{"cmd":"rehearse_teardown"}"#
         );
+        assert_eq!(json(&Request::InjectFault), r#"{"cmd":"inject_fault"}"#);
         assert_eq!(
             decode::<Request>(br#"{"cmd":"alarm_ack","id":3}"#).unwrap(),
             Request::AlarmAck { id: 3 }
@@ -271,11 +304,12 @@ mod tests {
             }),
             alarms: alarms.all().to_vec(),
             detail: "switching".into(),
+            engine: Some(an_engine()),
         };
         let mut wire = Vec::new();
         write_frame(&mut wire, &reply).unwrap();
         assert_eq!(read_msg::<Reply, _>(&mut wire.as_slice()).unwrap(), reply);
-        // Older or newer peers: missing lists and texts default.
+        // Older or newer peers: missing lists, texts and the engine default.
         assert_eq!(
             decode::<Reply>(br#"{"ok":true,"mode":"event","switching":null}"#).unwrap(),
             Reply {
@@ -284,8 +318,75 @@ mod tests {
                 switching: None,
                 alarms: Vec::new(),
                 detail: String::new(),
+                engine: None,
             }
         );
+    }
+
+    fn an_engine() -> EngineStatus {
+        EngineStatus {
+            build: "0123456789abcdef0123456789abcdef01234567".into(),
+            frames: 32,
+            callbacks: 360_000,
+            missed: 1,
+            resets: 2,
+            parked: false,
+            faulted: true,
+            pipe_private: true,
+            spawns: 3,
+            last_exit: Some(70),
+        }
+    }
+
+    #[test]
+    fn the_engine_carries_the_fields_hil_v1_reads() {
+        // hil-v1.ps1 reads these names from `iemmode status` (design §7).
+        let reply = Reply {
+            ok: true,
+            mode: Mode::Dev,
+            switching: None,
+            alarms: Vec::new(),
+            detail: String::new(),
+            engine: Some(an_engine()),
+        };
+        let v = serde_json::to_value(&reply).unwrap();
+        assert_eq!(
+            v["engine"],
+            serde_json::json!({
+                "build": "0123456789abcdef0123456789abcdef01234567",
+                "frames": 32,
+                "callbacks": 360_000,
+                "missed": 1,
+                "resets": 2,
+                "parked": false,
+                "faulted": true,
+                "pipe_private": true,
+                "spawns": 3,
+                "last_exit": 70,
+            })
+        );
+        // No engine: no key at all, so replies without one stay as before.
+        let idle = Reply {
+            engine: None,
+            ..reply
+        };
+        assert_eq!(
+            serde_json::to_string(&idle).unwrap(),
+            r#"{"ok":true,"mode":"dev","switching":null,"alarms":[],"detail":""}"#
+        );
+        // A partial engine (an older guard) defaults the rest; no exit yet is null.
+        assert_eq!(
+            decode::<Reply>(br#"{"ok":true,"mode":"dev","switching":null,"engine":{"frames":32}}"#)
+                .unwrap()
+                .engine,
+            Some(EngineStatus {
+                frames: 32,
+                ..EngineStatus::default()
+            })
+        );
+        let fresh = serde_json::to_value(EngineStatus::default()).unwrap();
+        assert_eq!(fresh["last_exit"], serde_json::Value::Null);
+        assert_eq!(fresh["spawns"], 0);
     }
 
     #[test]

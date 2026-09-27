@@ -454,6 +454,23 @@ function Invoke-IemTuningApply { param([string]$ProfilePath, [int]$Tier) return 
     Assert (-not (Test-IemHilReopen -Before (Eng 100 0 2) -After (Eng 200 0 4)).ok) 'hil-reopen-refuses-two-resets'
     Assert (-not (Test-IemHilReopen -Before (Eng 100 0 2) -After (Eng 100 0 3)).ok) 'hil-reopen-refuses-a-stalled-card'
     Assert (-not (Test-IemHilReopen -Before (Eng 100 0 2) -After (Eng 200 0 3 64)).ok) 'hil-reopen-refuses-a-measured-64'
+    function EngP($cb, $spawns, $last, $frames = 32, $parked = $false, $faulted = $false) {
+        [pscustomobject]@{ frames = $frames; callbacks = $cb; missed = 0; resets = 0; parked = $parked; faulted = $faulted; spawns = $spawns; last_exit = $last }
+    }
+    $p0 = EngP 5000 1 $null
+    $pOk = Test-IemHilPanic -Before $p0 -Respawned (EngP 10 2 70) -Later (EngP 11 2 70)
+    Assert ($pOk.ok -and $pOk.numbers.spawns -eq 1 -and $pOk.numbers.callbacks -eq 1) 'hil-panic-exit-70-one-respawn-streaming'
+    Assert (-not (Test-IemHilPanic -Before $p0 -Respawned (EngP 10 2 70) -Later (EngP 10 2 70)).ok) 'hil-panic-refuses-a-new-engine-that-does-not-stream'
+    Assert (-not (Test-IemHilPanic -Before $p0 -Respawned (EngP 10 2 1) -Later (EngP 6010 2 1)).ok) 'hil-panic-refuses-another-exit-code'
+    Assert (-not (Test-IemHilPanic -Before $p0 -Respawned (EngP 10 2 $null) -Later (EngP 6010 2 $null)).ok) 'hil-panic-refuses-no-exit-code'
+    Assert (-not (Test-IemHilPanic -Before $p0 -Respawned (EngP 10 3 70) -Later (EngP 6010 3 70)).ok) 'hil-panic-refuses-two-respawns'
+    Assert (-not (Test-IemHilPanic -Before $p0 -Respawned (EngP 10 2 70) -Later (EngP 6010 2 70 64)).ok) 'hil-panic-refuses-a-measured-64'
+    Assert (-not (Test-IemHilPanic -Before $p0 -Respawned (EngP 10 2 70) -Later (EngP 6010 2 70 32 $true)).ok) 'hil-panic-refuses-parked'
+    Assert (-not (Test-IemHilPanic -Before $p0 -Respawned (EngP 10 2 70) -Later (EngP 6010 2 70 32 $false $true)).ok) 'hil-panic-refuses-faulted'
+    $pn = Test-IemHilPanic -Before $p0 -Respawned $null -Later $null
+    Assert (-not $pn.ok -and $pn.detail -ceq 'no new engine within the wait') 'hil-panic-refuses-no-respawn'
+    $pg = Test-IemHilPanic -Before ([pscustomobject]@{ frames = 32 }) -Respawned (EngP 10 2 70) -Later (EngP 6010 2 70)
+    Assert (-not $pg.ok -and $pg.detail -like "*lacks 'spawns'*") 'hil-panic-refuses-a-status-without-spawns'
 
     $ok1 = New-IemHilCheck -Name 'a' -Ok $true
     $bad1 = New-IemHilCheck -Name 'b' -Ok $false -Detail 'no'
@@ -506,9 +523,12 @@ $mode = 'dev'
 if ($sc.event_after -gt 0 -and $n -gt $sc.event_after) { $mode = 'event' }
 $ok = -not (@($sc.refuse) -contains $cmd)
 $reply = [ordered]@{ ok = $ok; mode = $mode; switching = $null; alarms = @(); detail = ('fake ' + $cmd) }
+$faults = @(Get-Content -LiteralPath $log | Where-Object { $_ -eq 'inject-fault' }).Count
 if ($cmd -eq 'status') {
+    $last = $null
+    if ($faults -gt 0) { $last = 70 }
     $reply['engine'] = [ordered]@{ build = $sc.sha; frames = 32; callbacks = (3000 * $n); missed = 0; resets = $reopens
-                                   parked = $false; faulted = $false; pipe_private = $true }
+                                   parked = $false; faulted = $false; pipe_private = $true; spawns = (1 + $faults); last_exit = $last }
 }
 Write-Output (ConvertTo-Json -InputObject $reply -Depth 5 -Compress)
 if ($ok) { exit 0 }
@@ -533,11 +553,13 @@ exit 1
     $calls = $h1.calls
     Assert ($h1.exit -eq 1 -and $h1.result.conclusion -ceq 'failure' -and $h1.result.sha -ceq $S -and $h1.result.job_run -ceq '4242') "hil-run-with-the-server-down-fails (exit $($h1.exit))"
     Assert ($calls[0] -ceq 'job-begin 4242' -and $calls[1] -ceq "activate $S") "hil-run-begins-the-job-then-activates ($($calls -join ' | '))"
-    Assert ($calls -contains 'test-signal mic1 -30 0.2' -and $calls -contains 'force-reopen' -and $calls -contains 'alarm-test') 'hil-run-drives-the-signal-reopen-and-alarm'
+    Assert ($calls -contains 'test-signal mic1 -30 0.2' -and $calls -contains 'force-reopen' -and $calls -contains 'inject-fault' -and $calls -contains 'alarm-test') 'hil-run-drives-the-signal-reopen-fault-and-alarm'
     Assert ($calls[$calls.Count - 2] -ceq 'job-end 4242' -and $calls[$calls.Count - 1] -like "report $S red HIL v1 failure: *") 'hil-run-ends-the-job-then-reports-red'
-    foreach ($n in @('activate', 'engine-build', 'card', 'pipes', 'test-signal', 'reopen', 'alarm-push')) { Assert (CheckOk $h1.result $n) "hil-run-check-$n-passes" }
-    foreach ($n in @('server-version', 'site-links', 'lan', 'public-host', 'panic')) { Assert (CheckFailed $h1.result $n) "hil-run-check-$n-fails" }
-    Assert ($h1.result.summary -ceq 'HIL v1 failure: server-version, site-links, lan, public-host, panic (7 of 12 ok)') "hil-run-summary-names-checks-only ($($h1.result.summary))"
+    foreach ($n in @('activate', 'engine-build', 'card', 'pipes', 'test-signal', 'reopen', 'panic', 'alarm-push')) { Assert (CheckOk $h1.result $n) "hil-run-check-$n-passes" }
+    foreach ($n in @('server-version', 'site-links', 'lan', 'public-host')) { Assert (CheckFailed $h1.result $n) "hil-run-check-$n-fails" }
+    Assert ($h1.result.summary -ceq 'HIL v1 failure: server-version, site-links, lan, public-host (8 of 12 ok)') "hil-run-summary-names-checks-only ($($h1.result.summary))"
+    $panic = @($h1.result.checks | Where-Object { $_.name -eq 'panic' })[0]
+    Assert ($panic.numbers.spawns -eq 1 -and $panic.numbers.callbacks -gt 0) 'hil-run-panic-numbers-in-the-result'
     $card = @($h1.result.checks | Where-Object { $_.name -eq 'card' })[0]
     Assert ($card.numbers.frames -eq 32 -and $card.numbers.missed -eq 0 -and $card.numbers.resets -eq 0 -and $card.numbers.callbacks -ge 2850) 'hil-run-card-numbers-in-the-result'
 
@@ -559,6 +581,9 @@ exit 1
 
     $h6 = Invoke-HilRun ('{"sha":"' + $S + '","refuse":[],"silent":[],"event_after":0}') 'feature'
     Assert ($h6.exit -eq 1 -and (CheckFailed $h6.result 'inputs') -and $h6.calls.Count -eq 0) 'hil-run-refuses-bad-inputs-before-any-call'
+
+    $h7 = Invoke-HilRun ('{"sha":"' + $S + '","refuse":["inject-fault"],"silent":[],"event_after":0}')
+    Assert ($h7.exit -eq 1 -and (CheckFailed $h7.result 'panic') -and (CheckOk $h7.result 'alarm-push')) 'hil-run-a-refused-fault-injection-fails-the-panic-check'
 } finally {
     $sch = New-Object -ComObject 'Schedule.Service'
     $sch.Connect()

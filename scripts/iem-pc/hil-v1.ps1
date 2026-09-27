@@ -20,12 +20,19 @@ own text goes to `why` and the checks' details, both private.
 Exit 0 for success or cancelled, 1 for failure (the report job posts the
 conclusion from result.json).
 
-The engine checks read `engine` from the `iemmode status` reply: build (the
-bundle SHA), frames (measured), callbacks, missed, resets, parked, faulted and
-pipe_private (the engine pipes' DACL holds only the user and SYSTEM). A check
-whose data is missing fails. The RT-panic check fails until the guard can
-inject a panic (no iemmode command for it yet). F30 runs when -SiteChange and
--SiteRevert name the synthetic site change and its revert.
+The engine checks read `engine` from the `iemmode status` reply (the guard's
+Reply.engine): build (the bundle SHA), frames (measured), callbacks, missed,
+resets, parked, faulted, pipe_private (the engine pipes' DACL holds only the
+user and SYSTEM), spawns (engines the guard started) and last_exit. A check
+whose data is missing fails. The panic check drives `iemmode inject-fault` and
+wants exit 70, exactly one respawn and the new engine streaming at 32 within
+-PanicWait seconds. F30 runs when -SiteChange and -SiteRevert name the
+synthetic site change and its revert.
+
+Not in HIL v1 (the guard does not report them; S6 plan Task 12, HIL v1
+scope): the pipes' first-instance flag (proved by the windows CI job's pipe
+tests), the tunnel's peer address, the forced reopen's duration (about 100 ms)
+and the fault callback's time (under 1 ms).
 #>
 param(
     [string]$Sha = '',
@@ -38,6 +45,7 @@ param(
     [string]$TestInput = 'mic1',
     [double]$TestDbfs = -30,
     [double]$TestTtl = 10,
+    [double]$PanicWait = 30,
     [string]$SiteChange = '',
     [string]$SiteRevert = ''
 )
@@ -165,8 +173,33 @@ function Invoke-HilChecks {
     $ro = Test-IemHilReopen -Before (Get-IemProp $before 'engine') -After (Get-IemProp $after 'engine')
     Add-HilCheck 'reopen' ($reopened -and $ro.ok) ('{0}; {1}' -f (Get-IemModeText -Result $r), $ro.detail) $ro.numbers
 
-    # RT panic -> exit 70, release, respawn, fade-in (design section 7).
-    Add-HilCheck 'panic' $false 'no iemmode command injects an RT panic yet (the guard protocol has no fault request)'
+    # RT panic -> exit 70, release, respawn, fade-in (design section 7): the
+    # guard injects the fault (dev, this job); its engine start count and the
+    # last exit code show the respawn, and the new engine streams at 32.
+    $before = Get-HilStatus
+    if ($script:cancelled) { return }
+    $r = Invoke-Hil -A @('inject-fault')
+    if ($script:cancelled) { return }
+    $injected = Test-IemModeOk -Result $r
+    $respawned = $null
+    $later = $null
+    if ($injected) {
+        $s0 = [int64](Get-IemProp (Get-IemProp $before 'engine') 'spawns')
+        $clock = [Diagnostics.Stopwatch]::StartNew()
+        while ($clock.Elapsed.TotalSeconds -lt $PanicWait) {
+            Start-Sleep -Milliseconds 500
+            $st = Get-HilStatus
+            if ($script:cancelled) { return }
+            if ([int64](Get-IemProp (Get-IemProp $st 'engine') 'spawns') -gt $s0) { $respawned = $st; break }
+        }
+        if ($null -ne $respawned) {
+            Start-Sleep -Seconds 2
+            $later = Get-HilStatus
+            if ($script:cancelled) { return }
+        }
+    }
+    $pk = Test-IemHilPanic -Before (Get-IemProp $before 'engine') -Respawned (Get-IemProp $respawned 'engine') -Later (Get-IemProp $later 'engine')
+    Add-HilCheck 'panic' ($injected -and $pk.ok) ('{0}; {1}' -f (Get-IemModeText -Result $r), $pk.detail) $pk.numbers
 
     # The alarm push to the alarm recipients.
     $r = Invoke-Hil -A @('alarm-test')
