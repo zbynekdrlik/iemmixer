@@ -15,8 +15,10 @@ use std::time::{Duration, Instant};
 use crate::period::{self, PeriodVerdict};
 use crate::reset::{self, ResetBudget, Verdict};
 
-/// Sample positions the callback records per open: its first callbacks.
-pub const RING: usize = 16;
+/// Sample positions the callback records per open: its first callbacks
+/// (11 ms at 32 samples). Any two bad deltas among them (two missed buffers,
+/// or one late position) still leave [`NEED`] agreeing ones in a row.
+pub const RING: usize = 32;
 /// Agreeing consecutive deltas that decide the period.
 pub const NEED: usize = 8;
 /// An open whose period is still undecided this long after `start()` fails.
@@ -48,29 +50,50 @@ pub enum OpenPeriod {
     Refuse(PeriodVerdict),
 }
 
-/// The positions after the last callback that reported none (a negative
+/// The ring's runs of consecutive callbacks with a position (a negative
 /// position counts as none): only consecutive callbacks give deltas.
-fn tail(ring: &[Option<i64>]) -> Vec<u64> {
-    let mut tail: Vec<u64> = ring
+fn runs(ring: &[Option<i64>]) -> Vec<Vec<u64>> {
+    let valid: Vec<Option<u64>> = ring
         .iter()
-        .rev()
-        .map_while(|p| p.and_then(|v| u64::try_from(v).ok()))
+        .map(|p| p.and_then(|v| u64::try_from(v).ok()))
         .collect();
-    tail.reverse();
-    tail
+    valid
+        .split(Option::is_none)
+        .map(|run| run.iter().flatten().copied().collect())
+        .collect()
+}
+
+/// The period of every [`NEED`] consecutive agreeing deltas in the ring, in
+/// ring order.
+fn agreeing(ring: &[Option<i64>]) -> Vec<u32> {
+    let parts = runs(ring);
+    parts
+        .iter()
+        .flat_map(|run| run.windows(NEED + 1))
+        .filter_map(|w| period::measured(w, NEED))
+        .collect()
 }
 
 /// The open's period decision: `ring` holds the sample positions of the
 /// stream's first callbacks in order (`None` for a callback without one),
 /// `waited` is the time since `start()`.
+///
+/// [`NEED`] agreeing deltas anywhere in the ring decide at once when they
+/// give the expected period (a later miss never undoes that). Another
+/// period, or none, refuses only once the ring is full or [`DECIDE_WITHIN`]
+/// passed, since the expected period may still follow. So the verdict does
+/// not depend on when the owner thread looks.
 pub fn open_period(ring: &[Option<i64>], expected: u32, waited: Duration) -> OpenPeriod {
-    match period::verdict(&tail(ring), NEED, expected) {
-        PeriodVerdict::Ok(n) => OpenPeriod::Ok(n),
-        wrong @ PeriodVerdict::Wrong { .. } => OpenPeriod::Refuse(wrong),
-        PeriodVerdict::Undecided if ring.len() >= RING || waited >= DECIDE_WITHIN => {
-            OpenPeriod::Refuse(PeriodVerdict::Undecided)
-        }
-        PeriodVerdict::Undecided => OpenPeriod::Wait,
+    let found = agreeing(ring);
+    if found.contains(&expected) {
+        OpenPeriod::Ok(expected)
+    } else if ring.len() < RING && waited < DECIDE_WITHIN {
+        OpenPeriod::Wait
+    } else {
+        OpenPeriod::Refuse(match found.first() {
+            Some(&measured) => PeriodVerdict::Wrong { expected, measured },
+            None => PeriodVerdict::Undecided,
+        })
     }
 }
 
