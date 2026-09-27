@@ -4,6 +4,8 @@
 
 use std::io;
 
+pub use crate::decide::{SYSTEM, dacl_sids, sddl_is_private};
+
 /// The SID of the calling process's user as text (`S-1-5-21-…`).
 pub fn current_user_sid() -> io::Result<String> {
     imp::current_user_sid()

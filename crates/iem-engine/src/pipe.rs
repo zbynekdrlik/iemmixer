@@ -45,8 +45,9 @@ const TAKEN_TRIES: u32 = 40;
 /// The rest before each of those tries.
 #[cfg_attr(not(windows), allow(dead_code))]
 const TAKEN_PAUSE: Duration = Duration::from_millis(50);
-/// SDDL's name for the SYSTEM account (`S-1-5-18`).
-const SYSTEM: &str = "SY";
+// The DACL read back is judged by iem-win, which the guard shares (its
+// `Reply.engine.pipe_private` for HIL).
+pub use iem_win::token::{SYSTEM, dacl_sids, sddl_is_private};
 
 /// A socket path on Unix, a pipe name elsewhere.
 fn name(s: String) -> io::Result<Name<'static>> {
@@ -124,34 +125,6 @@ fn until_free<T>(
 /// protected DACL that allows the user `user_sid` and SYSTEM, nobody else.
 pub fn sddl_for(user_sid: &str) -> String {
     format!("D:P(A;;GA;;;{user_sid})(A;;GA;;;{SYSTEM})")
-}
-
-/// The accounts of a DACL written as SDDL (`D:<flags>(ace)(ace)…`), in
-/// order, when every ACE is a plain allow ACE (`A`, six fields); `None` for
-/// anything else: a deny, object or conditional ACE, an empty or null DACL,
-/// an owner or SACL part in the text.
-pub fn dacl_sids(sddl: &str) -> Option<Vec<&str>> {
-    let dacl = sddl.strip_prefix("D:")?;
-    let aces = dacl.get(dacl.find('(')?..)?;
-    let aces = aces.strip_prefix('(')?.strip_suffix(')')?;
-    aces.split(")(")
-        .map(|ace| match ace.split(';').collect::<Vec<_>>().as_slice() {
-            ["A", _, _, _, _, account] => Some(*account),
-            _ => None,
-        })
-        .collect()
-}
-
-/// Whether a pipe's DACL (as `iem_win::token::pipe_sddl` reads it back)
-/// admits `user` and nobody but `user` and SYSTEM (HIL, the pipe tests).
-/// `user` is written the way SDDL writes it (`iem_win::token::sddl_sid`).
-pub fn sddl_is_private(sddl: &str, user: &str) -> bool {
-    dacl_sids(sddl).is_some_and(|accounts| {
-        accounts.contains(&user)
-            && accounts
-                .iter()
-                .all(|&account| account == user || account == SYSTEM)
-    })
 }
 
 /// Windows' answer to a listener whose name another listener holds: the
@@ -476,64 +449,14 @@ mod tests {
         );
     }
 
+    /// iem-win decides whether a DACL read back is private
+    /// (`iem_win::token::sddl_is_private`, tested there); this pipe's own
+    /// DACL passes it.
     #[test]
-    fn sddl_dacl_sids_lists_the_accounts_of_plain_allow_aces() {
-        assert_eq!(
-            dacl_sids("D:P(A;;FA;;;S-1-5-21-1-2-3-1001)(A;;FA;;;SY)"),
-            Some(vec![USER, "SY"])
-        );
-        assert_eq!(dacl_sids(&sddl_for(USER)), Some(vec![USER, "SY"]));
-        assert_eq!(dacl_sids("D:PAI(A;ID;0x1f01ff;;;LA)"), Some(vec!["LA"]));
-        assert_eq!(dacl_sids("D:(A;;GA;;;WD)"), Some(vec!["WD"]));
-        for other in [
-            "",
-            "D:",
-            "D:P",
-            "D:NO_ACCESS_CONTROL",
-            "O:SYD:P(A;;FA;;;SY)",
-            "S:(A;;FA;;;SY)",
-            "D:P(A;;FA;;;SY)S:(ML;;NW;;;LW)",
-            "D:P(D;;FA;;;WD)(A;;FA;;;SY)",
-            "D:P(A;;FA;;;SY)(D;;FA;;;WD)",
-            "D:P(AU;;FA;;;SY)",
-            "D:P(A;;FA;;SY)",
-            "D:P(A;;FA;;;SY;(x))",
-            "D:P(A;;FA;;;SY",
-            "D:PA;;FA;;;SY)",
-        ] {
-            assert_eq!(dacl_sids(other), None, "{other}");
-        }
-    }
-
-    #[test]
-    fn sddl_is_private_admits_the_user_and_at_most_system() {
-        let read_back = "D:P(A;;FA;;;S-1-5-21-1-2-3-1001)(A;;FA;;;SY)";
-        assert!(sddl_is_private(read_back, USER));
+    fn sddl_the_engines_own_dacl_is_private() {
+        assert_eq!(dacl_sids(&sddl_for(USER)), Some(vec![USER, SYSTEM]));
         assert!(sddl_is_private(&sddl_for(USER), USER));
-        assert!(sddl_is_private("D:P(A;;FA;;;S-1-5-21-1-2-3-1001)", USER));
-        assert!(sddl_is_private("D:P(A;;FA;;;LA)(A;;FA;;;SY)", "LA"));
-        assert!(
-            !sddl_is_private("D:P(A;;FA;;;SY)", USER),
-            "without the user"
-        );
-        assert!(
-            !sddl_is_private(read_back, "S-1-5-21-1-2-3-1002"),
-            "another user's pipe"
-        );
-        assert!(
-            !sddl_is_private(&format!("{read_back}(A;;FA;;;WD)"), USER),
-            "everyone"
-        );
-        assert!(
-            !sddl_is_private("D:P(A;;FA;;;BA)(A;;FA;;;S-1-5-21-1-2-3-1001)", USER),
-            "administrators"
-        );
-        assert!(
-            !sddl_is_private("D:P(D;;FA;;;WD)(A;;FA;;;S-1-5-21-1-2-3-1001)", USER),
-            "a deny ACE is not this pipe's DACL"
-        );
-        assert!(!sddl_is_private("D:NO_ACCESS_CONTROL", USER), "a null DACL");
-        assert!(!sddl_is_private("D:P", USER), "an empty DACL");
+        assert!(!sddl_is_private(&sddl_for(USER), "S-1-5-21-1-2-3-1002"));
     }
 
     #[test]
