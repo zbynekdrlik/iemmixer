@@ -57,6 +57,14 @@ impl SessionEndWindow {
     }
 }
 
+/// Dispatches every window message waiting for the calling thread (a
+/// [`SessionEndWindow`]'s thread calls it in its loop, so the session-end
+/// messages reach the window). Returns true when `WM_QUIT` was among them;
+/// the messages after it stay queued.
+pub fn pump() -> io::Result<bool> {
+    imp::pump()
+}
+
 #[cfg(not(windows))]
 mod imp {
     use std::io;
@@ -72,6 +80,10 @@ mod imp {
     }
 
     pub(super) fn has_dialog(_pid: u32) -> io::Result<bool> {
+        crate::unsupported()
+    }
+
+    pub(super) fn pump() -> io::Result<bool> {
         crate::unsupported()
     }
 
@@ -110,10 +122,11 @@ mod imp {
         ShutdownBlockReasonCreate, ShutdownBlockReasonDestroy,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DefWindowProcW, DestroyWindow, EnumWindows, GWLP_USERDATA, GetClassNameW,
-        GetWindowLongPtrW, GetWindowThreadProcessId, IsWindowVisible, PostMessageW,
-        RegisterClassExW, SetWindowLongPtrW, WM_COMMAND, WM_ENDSESSION, WM_QUERYENDSESSION,
-        WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_OVERLAPPED,
+        CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, EnumWindows,
+        GWLP_USERDATA, GetClassNameW, GetWindowLongPtrW, GetWindowThreadProcessId, IsWindowVisible,
+        MSG, PM_REMOVE, PeekMessageW, PostMessageW, RegisterClassExW, SetWindowLongPtrW,
+        TranslateMessage, WM_COMMAND, WM_ENDSESSION, WM_QUERYENDSESSION, WM_QUIT, WNDCLASSEXW,
+        WS_EX_TOOLWINDOW, WS_OVERLAPPED,
     };
     use windows_sys::core::BOOL;
 
@@ -178,6 +191,23 @@ mod imp {
         Ok(top_level()?
             .iter()
             .any(|w| w.pid == pid && w.visible && same_name(&w.class, super::DIALOG_CLASS)))
+    }
+
+    pub(super) fn pump() -> io::Result<bool> {
+        let mut msg = MSG::default();
+        // SAFETY: a writable MSG; the null window takes every message of
+        // this thread (sent ones are dispatched inside the call).
+        while unsafe { PeekMessageW(&mut msg, ptr::null_mut(), 0, 0, PM_REMOVE) } != 0 {
+            if msg.message == WM_QUIT {
+                return Ok(true);
+            }
+            // SAFETY: the message PeekMessageW just filled in.
+            unsafe {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+        Ok(false)
     }
 
     const CLASS: &str = "iemmixer-session-end";
@@ -333,6 +363,7 @@ mod tests {
         assert_eq!(kind(post_command(0xFFFE, 7)), Some(Unsupported));
         assert_eq!(kind(post_command(0x1_0000, 7)), Some(Unsupported));
         assert_eq!(kind(has_dialog(4242)), Some(Unsupported));
+        assert_eq!(kind(pump()), Some(Unsupported));
         let ended = Arc::new(AtomicBool::new(false));
         assert_eq!(
             kind(SessionEndWindow::create("saving", ended, || {})),
@@ -368,6 +399,13 @@ mod tests {
         assert_eq!(find_owned("iemmixer-session-end", me + 1).unwrap(), None);
         assert!(!has_dialog(me).unwrap());
         post_command(window.hwnd(), 7).unwrap();
+        // The posted command is dispatched (to the default procedure), and
+        // a quit request ends the pump.
+        assert!(!pump().unwrap());
+        assert!(!pump().unwrap());
+        // SAFETY: posts WM_QUIT to this thread's own queue.
+        unsafe { windows_sys::Win32::UI::WindowsAndMessaging::PostQuitMessage(0) };
+        assert!(pump().unwrap());
 
         // SAFETY: our own window on this thread (SendMessageW calls its
         // procedure directly).

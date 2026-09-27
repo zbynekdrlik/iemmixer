@@ -10,10 +10,14 @@ description = "iemmixer guard (S6): switches the IEM PC between REAPER and iemmi
 autobins = false
 
 # Never iem-audio-io or iem-engine: the guard does not link the ASIO host (S6
-# design note §3) and stays outside the engine's dependency closure. The
-# Windows effects (Task 9) add iem-win.
+# design note §3) and stays outside the engine's dependency closure.
 [dependencies]
-# The guard pipe (sync): the daemon's listener and iemmode's client (Task 10).
+# The Windows effects (Task 9): processes, windows, consoles, the registry and
+# the preferred-buffer window (prefwin), all safe wrappers; Unsupported
+# elsewhere.
+iem-win = { path = "../iem-win" }
+# The guard pipe (sync; the daemon and iemmode, Task 10) and the engine's
+# supervisor pipe (the Windows effects, Task 9).
 interprocess = "2.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -23,11 +27,20 @@ thiserror = "2.0"
 # The site's [guard] and [card] tables (Task 9).
 toml = "0.9"
 tracing = "0.1"
-# REAPER's web control and the /api/version checks (Task 9); TLS is chosen
-# there, with the public-host check.
+# The binaries' logs: the daemon's file (its task has no console), iemmode's
+# stderr (its stdout is the JSON reply). As in iem-engine.
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Plain HTTP on the PC (REAPER's web control, /api/version on port 80,
+# cloudflared's /ready). No TLS here: the HTTPS checks (LAN 443, the public
+# host) run Windows' own curl.exe, schannel with the system's roots (Task 9).
 ureq = { version = "3.4", default-features = false }
 # Bundle install: deflate only (the zips come from Compress-Archive).
 zip = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+# The guard pipe's security descriptor (SDDL as UTF-16), as interprocess
+# takes it; already in the closure through interprocess.
+[target.'cfg(windows)'.dependencies]
+widestring = "1"
 
 [dev-dependencies]
 tempfile = "3"

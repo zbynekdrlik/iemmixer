@@ -405,9 +405,12 @@ class ReplyTests(Base):
                 ip.parse_reply(bad)
 
     def test_owner_questions_are_the_unacknowledged_owner_alarms(self) -> None:
-        reply = {"alarms": [{"id": 1, "owner_question": True}, {"id": 2, "owner_question": True, "ack": True},
-                            {"id": 3, "owner_question": False}, "text", {"id": 4}, {"id": 5, "owner_question": "yes"}]}
-        self.assertEqual(ip.owner_alarms(reply), [{"id": 1, "owner_question": True}])
+        # The guard's Alarm serializes `acked` (crates/iem-guard/src/alarms.rs).
+        reply = {"alarms": [{"id": 1, "owner_question": True}, {"id": 2, "owner_question": True, "acked": True},
+                            {"id": 3, "owner_question": False}, "text", {"id": 4}, {"id": 5, "owner_question": "yes"},
+                            {"id": 6, "owner_question": True, "acked": False}]}
+        self.assertEqual(ip.owner_alarms(reply), [{"id": 1, "owner_question": True},
+                                                  {"id": 6, "owner_question": True, "acked": False}])
         self.assertEqual((ip.owner_alarms(None), ip.owner_alarms({"alarms": "x"}), ip.owner_alarms({})), ([], [], []))
 
     def test_an_owner_question_is_printed_for_the_agent(self) -> None:

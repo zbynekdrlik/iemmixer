@@ -14,6 +14,23 @@
 //! - [`state`]: the persistent state and the reboot rule;
 //! - [`alarms`]: the kept alarms;
 //! - [`cancel`]: the pre-emption token of every waiting step.
+//!
+//! The daemon and its clients (S6 plan Task 10):
+//!
+//! - [`daemon`]: the switch runner with its error policy and pre-emption,
+//!   the requests, the watch, the start after a reboot, `event --direct`;
+//! - [`pipe`]: the guard pipe's listener, connections and client;
+//! - [`install`]: bundle install, `--verify-only` and the `bin\` copies;
+//! - [`cli`]: the command lines of `iemmode` and `iemmixer-guard`.
+//!
+//! The PC's effects (S6 plan Task 9):
+//!
+//! - [`pc`]: the [`Pc`] trait every switch step goes through, and a fake for
+//!   the daemon's tests;
+//! - [`site`]: the guard's settings (`[guard]`, `[card]`, `pc.toml`);
+//! - [`effects`]: the portable parsers and decisions of the effects;
+//! - `win`: `WinPc`, the effects on the PC (Windows only, built on
+//!   `iem-win`; excluded from mutation testing, its decisions are above).
 
 #![forbid(unsafe_code)]
 #![cfg_attr(
@@ -29,14 +46,25 @@
 pub mod alarms;
 pub mod bundle;
 pub mod cancel;
+pub mod cli;
 pub mod crash;
+pub mod daemon;
+pub mod effects;
 pub mod handover;
+pub mod install;
+pub mod pc;
+pub mod pipe;
 pub mod plan;
 pub mod proto;
+pub mod site;
 pub mod state;
+#[cfg(windows)]
+pub mod win;
 
 pub use alarms::{Alarm, Alarms};
 pub use cancel::{Cancel, Preempted};
+pub use pc::{Audience, Pc, R, StepError};
 pub use plan::{Facts, Health, Mode, OnError, PrefFail, Step};
 pub use proto::{Reply, Request};
+pub use site::Settings;
 pub use state::GuardState;

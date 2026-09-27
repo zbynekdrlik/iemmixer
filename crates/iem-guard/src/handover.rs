@@ -44,9 +44,15 @@ pub enum Audio {
 /// Peaks at or below this are silence (the meters' floor).
 pub const FLOOR_DB: f64 = -150.0;
 
+/// REAPER's project is loaded: it reports the expected track count. Until
+/// then the meter bridge is left alone (it may be another project).
+pub fn project_loaded(tracks: Option<u32>, expected: u32) -> bool {
+    tracks == Some(expected)
+}
+
 pub fn reaper_handover(f: &ReaperFacts) -> Result<Audio, Vec<String>> {
     let mut bad = Vec::new();
-    if f.tracks != Some(f.expected_tracks) {
+    if !project_loaded(f.tracks, f.expected_tracks) {
         bad.push(format!(
             "tracks {:?}, expected {}",
             f.tracks, f.expected_tracks
@@ -112,6 +118,16 @@ pub fn app_binary(recorded: &str, now: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_project_is_loaded_at_the_expected_track_count() {
+        assert!(project_loaded(Some(40), 40));
+        assert!(!project_loaded(Some(39), 40));
+        assert!(!project_loaded(Some(41), 40));
+        assert!(!project_loaded(None, 40));
+        assert!(!project_loaded(None, 0));
+        assert!(project_loaded(Some(0), 0));
+    }
 
     #[test]
     fn bridge_running_is_left_alone() {

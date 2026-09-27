@@ -107,6 +107,15 @@ pub(crate) fn boot_time(now: SystemTime, since_boot: Duration) -> io::Result<Sys
         .ok_or_else(|| io::Error::other("the system started before the clock's range"))
 }
 
+/// A GUID's parts as text, lower case with hyphens and no braces
+/// (`01234567-89ab-cdef-0001-020304050607`).
+pub fn guid_text(data1: u32, data2: u16, data3: u16, data4: [u8; 8]) -> String {
+    let [a, b, c, d, e, f, g, h] = data4;
+    format!(
+        "{data1:08x}-{data2:04x}-{data3:04x}-{a:02x}{b:02x}-{c:02x}{d:02x}{e:02x}{f:02x}{g:02x}{h:02x}"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,6 +232,22 @@ mod tests {
         assert_eq!(
             kind(boot_time(now, Duration::MAX)),
             Some(std::io::ErrorKind::Other)
+        );
+    }
+
+    #[test]
+    fn a_guid_is_zero_padded_lower_case_hex() {
+        assert_eq!(
+            guid_text(0x0123_4567, 0x89ab, 0xcdef, [0, 1, 2, 3, 4, 5, 6, 7]),
+            "01234567-89ab-cdef-0001-020304050607"
+        );
+        assert_eq!(
+            guid_text(1, 2, 3, [0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10]),
+            "00000001-0002-0003-fedc-ba9876543210"
+        );
+        assert_eq!(
+            guid_text(u32::MAX, u16::MAX, 0, [0xff; 8]),
+            "ffffffff-ffff-0000-ffff-ffffffffffff"
         );
     }
 }
