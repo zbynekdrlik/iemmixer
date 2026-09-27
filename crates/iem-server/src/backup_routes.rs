@@ -77,7 +77,7 @@ pub fn capture_now(state: &AppState) -> Result<(String, MixerBackup), String> {
         &state.engine.mirror(),
         &state.band,
         chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-    );
+    )?;
     let name = state.backup_store.save(&b).map_err(|e| e.to_string())?;
     Ok((name, b))
 }
@@ -296,5 +296,33 @@ mod tests {
             .load(info["filename"].as_str().unwrap())
             .unwrap();
         assert_eq!((saved.rev, saved.state), (7, running));
+    }
+
+    #[tokio::test]
+    async fn a_capture_with_unreadable_pins_is_refused_and_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, _) = app(dir.path());
+        let (engine, mut peer) = fake::announced(crate::site_view::tests::test_topology()).await;
+        state.engine = engine;
+        fake::sync(&state.engine, &mut peer, 3, MixState::default()).await;
+        let app = router(state.clone());
+        let eng = token("engineer", true);
+        let broken = dir.path().join("customizations").join("member3.json");
+        std::fs::create_dir_all(&broken).unwrap();
+        let capture = "/api/backups/capture";
+        let (status, json) = call(&app, Method::POST, capture, Some(&eng), None).await;
+        assert_eq!(
+            (status, json["code"].as_str()),
+            (StatusCode::SERVICE_UNAVAILABLE, Some("CAPTURE_FAILED")),
+            "{json}"
+        );
+        assert!(
+            json["message"].as_str().unwrap().contains("member3"),
+            "{json}"
+        );
+        assert!(state.backup_store.list().is_empty(), "no partial backup");
+        std::fs::remove_dir(&broken).unwrap();
+        let (status, info) = call(&app, Method::POST, capture, Some(&eng), None).await;
+        assert_eq!(status, StatusCode::OK, "{info}");
     }
 }

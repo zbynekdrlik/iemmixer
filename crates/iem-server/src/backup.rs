@@ -19,7 +19,7 @@ pub fn capture(
     mirror: &Mirror,
     store: &BandStore,
     timestamp: String,
-) -> MixerBackup {
+) -> Result<MixerBackup, String> {
     let mut b = MixerBackup::new(timestamp, mirror.rev, mirror.state.clone());
     for m in &view.members {
         match store.customization(&m.id) {
@@ -29,7 +29,7 @@ pub fn capture(
             Err(e) => tracing::warn!(member = %m.id, error = %e, "backup: pins and hides skipped"),
         }
     }
-    b
+    Ok(b)
 }
 
 fn db(v: f64) -> String {
@@ -380,12 +380,33 @@ mod tests {
             state: state.clone(),
             transient: Transient::default(),
         });
-        let b = capture(&v, &m, &store, "2026-09-27T13:00:00Z".into());
+        let b = capture(&v, &m, &store, "2026-09-27T13:00:00Z".into()).unwrap();
         assert_eq!((b.rev, &b.state), (9, &state));
         assert_eq!(b.customizations.len(), 10);
         assert_eq!(b.customizations["member1"].pinned.len(), 1);
         let json = serde_json::to_string(&b).unwrap();
         assert!(!json.to_lowercase().contains("pin_"), "no PIN field");
+    }
+
+    #[test]
+    fn capture_refuses_when_a_members_pins_cannot_be_read() {
+        let v = test_view();
+        let dir = tempfile::tempdir().unwrap();
+        let store = BandStore::new(dir.path());
+        store
+            .save_customization("member1", vec![Source::Input(InputId::new("mic1"))], vec![])
+            .unwrap();
+        // A folder where member3's file belongs: reading it fails (it is not
+        // "no pins"), and a backup without member3's pins is no backup.
+        let broken = dir.path().join("customizations").join("member3.json");
+        std::fs::create_dir_all(&broken).unwrap();
+        let err = capture(&v, &Mirror::default(), &store, "t".into()).unwrap_err();
+        assert!(err.contains("member3"), "{err}");
+        // Readable again: every member's pins are in.
+        std::fs::remove_dir(&broken).unwrap();
+        let b = capture(&v, &Mirror::default(), &store, "t".into()).unwrap();
+        assert_eq!(b.customizations.len(), 10);
+        assert_eq!(b.customizations["member1"].pinned.len(), 1);
     }
 
     #[test]
