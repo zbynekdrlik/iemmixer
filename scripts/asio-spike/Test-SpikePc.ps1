@@ -16,6 +16,9 @@ Copy-Item -LiteralPath (Join-Path $here 'SpikePc.psm1'), (Join-Path $here '..\go
 Import-Module (Join-Path $bin 'SpikePc.psm1') -Force
 function Assert($cond, $what) { if (-not $cond) { throw "FAILED: $what" } ; Write-Host "ok  $what" }
 function Throws([scriptblock]$b, $what) { $t = $false; try { & $b } catch { $t = $true }; Assert $t $what }
+function ErrorOf([scriptblock]$b) { try { & $b; return '' } catch { return "$_" } }
+$bringBack = @{ Http = 'http://127.0.0.1:9'; StartTaskPath = '\iemmixer-test\'; StartTask = 'iemmixer-no-such-task'; NTrack = 1
+                BridgeState = 's/b'; BridgeAction = '0'; Heartbeat = 's/h'; AsioModule = 'iemmixer-no-such-module.dll'; AppHttp = 'http://127.0.0.1:9' }
 
 # Driver preferred buffer: kind kept, read back, only 32/48/64 or the original.
 $key = 'HKCU:\Software\iemmixer-spike-test-' + [guid]::NewGuid()
@@ -35,6 +38,20 @@ try {
     [void](Set-SpikeBufferPref -Key $key -Name 'Text' -Value 48 -Original 64)
     $t = Get-SpikeBufferPref -Key $key -Name 'Text'
     Assert ($t.value -eq 48 -and $t.kind -eq 'String') 'buffer-pref-keeps-string-kind'
+    New-ItemProperty -LiteralPath $key -Name 'Padded' -Value '064' -PropertyType String | Out-Null
+    $p = Get-SpikeBufferPref -Key $key -Name 'Padded'
+    Assert ($p.value -eq 64 -and $p.raw -eq '064') 'buffer-pref-reads-the-raw-text'
+    [void](Set-SpikeBufferPref -Key $key -Name 'Padded' -Value 32 -Original 64)
+    [void](Set-SpikeBufferPref -Key $key -Name 'Padded' -Value 64 -Original 64 -Raw '064')
+    Assert ((Get-SpikeBufferPref -Key $key -Name 'Padded').raw -eq '064') 'buffer-pref-restores-the-raw-text'
+    Throws { Set-SpikeBufferPref -Key $key -Name 'Padded' -Value 64 -Original 64 -Raw '48' } 'buffer-pref-refuses-raw-text-of-another-value'
+    # REAPER comes back only at the recorded original (Pref holds 128 here).
+    $e = ErrorOf { Invoke-SpikeBringBack @bringBack -BufferKey $key -BufferName 'Pref' -Original 64 }
+    Assert ($e -like '*preferred buffer is 128*') "bring-back-refuses-a-changed-buffer ($e)"
+    $e = ErrorOf { Invoke-SpikeBringBack @bringBack -BufferKey $key -BufferName 'Padded' -Original 64 -Raw '64' }
+    Assert ($e -like "*preferred buffer is '064'*") "bring-back-refuses-changed-raw-text ($e)"
+    $e = ErrorOf { Invoke-SpikeBringBack @bringBack -BufferKey $key -BufferName 'Pref' -Original 128 }
+    Assert ($e -and $e -notlike '*preferred buffer*') "bring-back-passes-the-original-buffer ($e)"
     New-ItemProperty -LiteralPath $key -Name 'Blob' -Value ([byte[]](1, 2)) -PropertyType Binary | Out-Null
     Throws { Get-SpikeBufferPref -Key $key -Name 'Blob' } 'buffer-pref-refuses-binary'
 } finally {
@@ -81,6 +98,33 @@ Assert ((ConvertFrom-SpikeReaperLine -Text '' -Verb 'NTRACK').Count -eq 0) 'reap
 $b = Get-SpikeBlockers -AsioModule 'iemmixer-no-such-module.dll'
 Assert ($b.Count -eq 0) 'blockers-none-without-reaper-or-card'
 Assert ((Stop-SpikeGracefully -Root $base -Seconds 5).gone -and (Test-Path -LiteralPath (Join-Path $base 'queue\stop'))) 'stop-writes-the-stop-file'
+
+Assert (-not (Test-SpikeTaskBusy)) 'task-not-busy-when-not-registered'
+
+# A stop file already there (pre-empted before the task started the spike): refused before anything starts.
+$pre = [pscustomobject]@{ id = 'spike-20260927T120000000'; kind = 'spike'; mode = 'probe'; driver = 'No Such Card'
+                          module = 'iemmixer-no-such-module.dll'; frames = 0; seconds = 1; burn_us = 0; stress = 0; panic_at = 0; cycles = 1; timeout = 5 }
+Invoke-SpikeRun -Root $base -Request $pre
+$st = Get-Content -LiteralPath (Join-Path $base 'status\spike-20260927T120000000.json') -Raw | ConvertFrom-Json
+Assert ($st.state -eq 'refused' -and "$($st.results)" -like '*stop file*') 'run-refuses-after-a-stop'
+
+# spike-task.ps1: an unreadable request still leaves a status for the dev box.
+$tb = Join-Path $base 'task'
+New-Item -ItemType Directory -Force -Path (Join-Path $tb 'bin'), (Join-Path $tb 'queue'), (Join-Path $tb 'status') | Out-Null
+Copy-Item -LiteralPath (Join-Path $here 'spike-task.ps1'), (Join-Path $bin 'SpikePc.psm1'), (Join-Path $bin 'GoldenPc.psm1') -Destination (Join-Path $tb 'bin')
+function TaskStatus($json, $id) {
+    [IO.File]::WriteAllText((Join-Path $tb 'queue\request.json'), $json)
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $tb 'bin\spike-task.ps1') | Out-Null
+    $s = Join-Path $tb ("status\" + $id + '.json')
+    $state = if (Test-Path -LiteralPath $s) { (Get-Content -LiteralPath $s -Raw | ConvertFrom-Json).state } else { 'none' }
+    return "$LASTEXITCODE $state"
+}
+$r = TaskStatus '{ "id": "spike-20260927T120000001", "kind": ' 'spike-20260927T120000001'
+Assert ($r -eq '1 failed') "task-reports-an-unreadable-request ($r)"
+$r = TaskStatus '{ "id": "spike-20260927T120000002", "kind": "render" }' 'spike-20260927T120000002'
+Assert ($r -eq '1 failed') "task-reports-an-unknown-kind ($r)"
+$r = TaskStatus '{ "kind": "spike" }' 'request-unreadable'
+Assert ($r -eq '1 failed') "task-reports-a-request-without-an-id ($r)"
 
 Remove-Item -LiteralPath $base -Recurse -Force
 Write-Host 'Test-SpikePc: all passed'

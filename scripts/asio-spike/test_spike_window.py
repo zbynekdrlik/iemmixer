@@ -74,13 +74,111 @@ class UndoPlanTests(unittest.TestCase):
                          ["stop-spike", "restore-buffer", "bring-back"])
 
     def test_a_half_done_switch_still_brings_reaper_back(self) -> None:
-        self.assertEqual(sw.undo_plan(self.state(card="switching"), spike_running=False), ["bring-back"])
+        self.assertEqual(sw.undo_plan(self.state(card="switching"), spike_running=False), ["stop-spike", "bring-back"])
 
-    def test_a_restored_or_unchanged_buffer_is_not_written_again(self) -> None:
-        self.assertEqual(sw.undo_plan(self.state(card="free", pref_current=32, pref_restored=True), False), ["bring-back"])
-        self.assertEqual(sw.undo_plan(self.state(card="free", pref_current=64), False), ["bring-back"])
-        self.assertTrue(sw.buffer_changed(self.state(pref_current=48)))
-        self.assertFalse(sw.buffer_changed(self.state()))
+    def test_a_free_card_is_always_stopped_a_spike_may_be_starting(self) -> None:
+        # The task may not have started the spike yet when "ide event" comes.
+        self.assertEqual(sw.undo_plan(self.state(card="free"), spike_running=False), ["stop-spike", "bring-back"])
+        self.assertEqual(sw.undo_plan(self.state(), spike_running=True), ["stop-spike"])
+
+    def test_any_recorded_buffer_write_is_restored_with_read_back(self) -> None:
+        # set-buffer 32 succeeded, set-buffer 64 failed: the state says 64, the registry may hold 32.
+        self.assertEqual(sw.undo_plan(self.state(card="free", pref_current=64), False),
+                         ["stop-spike", "restore-buffer", "bring-back"])
+        self.assertEqual(sw.undo_plan(self.state(card="free", pref_current=32, pref_restored=True), False),
+                         ["stop-spike", "restore-buffer", "bring-back"])
+        self.assertTrue(sw.buffer_touched(self.state(pref_current=64)))
+        self.assertFalse(sw.buffer_touched(self.state()))
+
+
+class UnwindTests(unittest.TestCase):
+    """unwind() with the PC calls recorded instead of sent."""
+
+    def setUp(self) -> None:
+        d = Path(tempfile.mkdtemp())
+        self.saved = (sw.STATE, sw.ps)
+        sw.STATE = d / "spike-window.json"
+        self.calls: list[str] = []
+        self.gone = True
+
+        def fake_ps(env, body, timeout=300, event="finish"):
+            self.calls.append(body)
+            if body.startswith("(Stop-SpikeGracefully"):
+                return self.gone
+            return {"ok": body.split(" ", 1)[0]}
+
+        sw.ps = fake_ps
+        self.env = {"PC_ROOT": "R", "PC_BUFFER_KEY": "K", "PC_BUFFER_NAME": "N", "PC_REAPER_HTTP": "H",
+                    "PC_REAPER_START_TASK_PATH": "P", "PC_REAPER_START_TASK": "T", "PC_NTRACK": "9",
+                    "PC_METER_BRIDGE": "B", "PC_METER_ACTION": "A", "PC_METER_HEARTBEAT": "HB",
+                    "PC_ASIO_MODULE": "M", "PC_APP_HTTP": "AH"}
+
+    def tearDown(self) -> None:
+        sw.STATE, sw.ps = self.saved
+
+    def state(self, **kw) -> dict:
+        s = {"id": "w", "card": "free", "pref_original": 64, "pref_current": 64, "pref_restored": False, "closed": False}
+        s.update(kw)
+        return s
+
+    def test_the_buffer_is_restored_and_checked_again_before_reaper(self) -> None:
+        state = self.state()
+        done = sw.unwind(self.env, state, running=False)
+        self.assertEqual([next(iter(d)) for d in done], ["stop-spike", "restore-buffer", "bring-back"])
+        self.assertIn("-Value 64 -Original 64", self.calls[1])
+        self.assertTrue(self.calls[2].startswith("Invoke-SpikeBringBack "))
+        self.assertIn("-BufferKey 'K' -BufferName 'N' -Original 64", self.calls[2])
+        self.assertEqual((state["card"], state["closed"], state["pref_restored"]), ("reaper", True, True))
+
+    def test_a_text_value_is_written_back_as_it_was(self) -> None:
+        sw.unwind(self.env, self.state(preflight={"kind": "String", "raw": "064"}), running=False)
+        self.assertIn("-Raw '064'", self.calls[1])
+        self.assertIn("-Raw '064'", self.calls[2])
+
+    def test_a_spike_that_does_not_stop_keeps_reaper_away(self) -> None:
+        self.gone = False
+        state = self.state()
+        with self.assertRaisesRegex(sw.StepError, "did not stop"):
+            sw.unwind(self.env, state, running=False)
+        self.assertFalse(any(c.startswith("Invoke-SpikeBringBack") for c in self.calls))
+        self.assertFalse(state["closed"])
+
+
+class MainTests(unittest.TestCase):
+    """main(): an error while the event flag exists still brings REAPER back."""
+
+    def setUp(self) -> None:
+        d = Path(tempfile.mkdtemp())
+        self.flag = d / "EVENT-NOW"
+        self.saved = (sw.EVENT_NOW, sw.load_env, sw.cmd_run, sw.cmd_new, sw.cmd_preempt)
+        sw.EVENT_NOW = self.flag
+        sw.load_env = lambda path: {}
+        self.preempted = 0
+
+        def fail(env, args):
+            raise sw.StepError("ssh: connection reset")
+
+        def preempt(env, args=None):
+            self.preempted += 1
+
+        sw.cmd_run, sw.cmd_new, sw.cmd_preempt = fail, fail, preempt
+
+    def tearDown(self) -> None:
+        sw.EVENT_NOW, sw.load_env, sw.cmd_run, sw.cmd_new, sw.cmd_preempt = self.saved
+
+    def test_an_error_during_an_event_preempts(self) -> None:
+        self.flag.touch()
+        self.assertEqual(sw.main(["run", "--mode", "probe"]), 10)
+        self.assertEqual(self.preempted, 1)
+
+    def test_an_error_without_an_event_does_not(self) -> None:
+        self.assertEqual(sw.main(["run", "--mode", "probe"]), 1)
+        self.assertEqual(self.preempted, 0)
+
+    def test_a_refused_new_window_touches_nothing(self) -> None:
+        self.flag.touch()
+        self.assertEqual(sw.main(["new", "--signal", "x"]), 1)
+        self.assertEqual(self.preempted, 0)
 
 
 class PreflightTests(unittest.TestCase):
@@ -158,7 +256,9 @@ class VerdictTests(unittest.TestCase):
 
     def test_any_missed_overrun_gap_reset_or_early_end_is_unstable(self) -> None:
         for r in (self.report(missed=1), self.report(overruns=1), self.report(position_gaps=1),
-                  self.report(messages={"resets": 1}), self.report("stopped"), {"outcome": "done", "segments": []}):
+                  self.report(messages={"resets": 1}), self.report(messages={"overloads": 1}),
+                  self.report(messages={"buffer_size_changes": 1}), self.report("stopped"),
+                  {"outcome": "done", "segments": []}):
             self.assertFalse(sw.verdict(r)["stable"], r)
 
     def test_segments_add_up(self) -> None:
