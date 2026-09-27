@@ -130,8 +130,11 @@ fn backup() -> impl Strategy<Value = MixerBackup> {
 }
 
 proptest! {
+    // Shrinking is bounded (5 s), so a failure reports well inside the
+    // mutation profile's per-test bound; no regression files in the tree.
     #![proptest_config(ProptestConfig {
         cases: 256,
+        max_shrink_time: 5_000,
         failure_persistence: None,
         ..ProptestConfig::default()
     })]
