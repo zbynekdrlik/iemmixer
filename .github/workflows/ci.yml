@@ -378,6 +378,10 @@ jobs:
         run: cargo clippy --locked -p iem-win --all-targets --features test-helper -- -D warnings
       - name: Windows glue tests (processes, ports, windows, registry under a test key, Ctrl-Break to a child)
         run: cargo test --locked -p iem-win --features test-helper
+      - name: Guard clippy and tests (its Windows effects WinPc build here only; the pure core runs on Linux too)
+        run: |
+          cargo clippy --locked -p iem-guard --all-targets -- -D warnings
+          cargo test --locked -p iem-guard
       - name: Migration CLI clippy and tests (it runs on the PC; the PIN pepper is DPAPI here)
         run: |
           cargo clippy --locked -p iem-migrate --all-targets -- -D warnings

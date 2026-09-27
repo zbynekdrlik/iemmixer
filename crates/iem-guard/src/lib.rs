@@ -20,7 +20,9 @@
 //! - [`pc`]: the [`Pc`] trait every switch step goes through, and a fake for
 //!   the daemon's tests;
 //! - [`site`]: the guard's settings (`[guard]`, `[card]`, `pc.toml`);
-//! - [`effects`]: the portable parsers and decisions of the effects.
+//! - [`effects`]: the portable parsers and decisions of the effects;
+//! - `win`: `WinPc`, the effects on the PC (Windows only, built on
+//!   `iem-win`; excluded from mutation testing, its decisions are above).
 
 #![forbid(unsafe_code)]
 #![cfg_attr(
@@ -44,6 +46,8 @@ pub mod plan;
 pub mod proto;
 pub mod site;
 pub mod state;
+#[cfg(windows)]
+pub mod win;
 
 pub use alarms::{Alarm, Alarms};
 pub use cancel::{Cancel, Preempted};

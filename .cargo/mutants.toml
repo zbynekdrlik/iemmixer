@@ -35,6 +35,10 @@ exclude_globs = [
   "crates/iem-win/src/win.rs",
   # The Windows-only Ctrl-Break test helper (feature test-helper).
   "crates/iem-win/src/bin/**",
+  # The guard's Windows effects (WinPc, S6): not compiled on Linux; the
+  # windows job builds and tests them. Their decisions live in the mutated
+  # pc.rs, site.rs, effects/ and handover.rs (parsers included).
+  "crates/iem-guard/src/win/**",
 ]
 
 exclude_re = [
