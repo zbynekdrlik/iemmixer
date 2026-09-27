@@ -252,8 +252,11 @@ mod tests {
         }
     }
 
+    /// (file name, SHA-256 hex) pairs.
+    type Digests = Vec<(String, String)>;
+
     /// A complete bundle: (files in the directory, parsed sums).
-    fn bundle() -> (Vec<(String, String)>, Vec<(String, String)>) {
+    fn bundle() -> (Digests, Digests) {
         let mut names: Vec<&str> = REQUIRED.to_vec();
         names.extend(["LICENSE-iem-engine", "tuning/IemTuning.psm1"]);
         let sums: Vec<(String, String)> = names
