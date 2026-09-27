@@ -190,14 +190,76 @@ fn alarm_link_refuses_bad_arguments_and_a_site_without_an_address() {
 #[test]
 fn notify_without_a_subscription_exits_3() {
     let dir = site_dir();
-    let out = run_pin(dir.path(), &["notify", "Kapela hrá", "test"], "");
+    for to in ["alarm", "band-activity"] {
+        let out = run_pin(
+            dir.path(),
+            &["notify", "--to", to, "Kapela hrá", "test"],
+            "",
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(3), "{to}: {stderr}");
+        assert!(stderr.contains("no device"), "{to}: {stderr}");
+    }
+}
+
+#[test]
+fn an_alarm_with_only_engineer_subscriptions_exits_3() {
+    // The engineer's store holds a device; alarms go to alarm recipients
+    // only, and there are none.
+    let dir = site_dir();
+    std::fs::write(dir.path().join("push_subs_v2_migrated"), "").unwrap();
+    std::fs::write(
+        dir.path().join("push_subscriptions.json"),
+        r#"[{"endpoint":"https://push.example.org/engineer","p256dh":"k","auth":"a"}]"#,
+    )
+    .unwrap();
+    let out = run_pin(
+        dir.path(),
+        &["notify", "--to", "alarm", "Strážca", "test"],
+        "",
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(3), "stderr: {stderr}");
-    assert!(stderr.contains("no device"), "stderr: {stderr}");
-    assert_eq!(
-        run_pin(dir.path(), &["notify", "only a title"], "")
-            .status
-            .code(),
-        Some(2)
+    assert!(
+        stderr.contains("no device took the notice (Alarm)"),
+        "stderr: {stderr}"
     );
+}
+
+#[test]
+fn notify_knows_only_the_two_audiences() {
+    let dir = site_dir();
+    for args in [
+        &["notify", "only a title"][..],
+        &["notify", "Kapela hrá", "test"][..],
+        &["notify", "--to", "engineer", "T", "B"][..],
+        &["notify", "--to", "alarm", "T"][..],
+        &["notify", "--count", "band-activity"][..],
+        &["notify", "--count"][..],
+    ] {
+        assert_eq!(
+            run_pin(dir.path(), args, "").status.code(),
+            Some(2),
+            "{args:?}"
+        );
+    }
+}
+
+#[test]
+fn notify_count_prints_the_alarm_recipients() {
+    let dir = site_dir();
+    let count = |dir: &std::path::Path| {
+        let out = run_pin(dir, &["notify", "--count", "alarm"], "");
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        (out.status.code(), stdout)
+    };
+    assert_eq!(count(dir.path()), (Some(0), "0\n".to_string()));
+    std::fs::write(
+        dir.path().join("alarm_subscriptions.json"),
+        r#"[{"endpoint":"https://push.example.org/1","p256dh":"k","auth":"a"}]"#,
+    )
+    .unwrap();
+    assert_eq!(count(dir.path()), (Some(0), "1\n".to_string()));
+    std::fs::write(dir.path().join("alarm_subscriptions.json"), "[oops").unwrap();
+    assert_eq!(count(dir.path()), (Some(1), String::new()));
 }

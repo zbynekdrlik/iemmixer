@@ -256,25 +256,31 @@ async fn meter_task(state: AppState) {
     }
 }
 
-fn activity_changed(state: &AppState, on: bool) {
+/// The alarm turned on or off: engineer pages get the banner state, and when
+/// it turned on the engineer's devices get the band-activity notice — never
+/// an alarm recipient, who gets only the guard's technical alarms (P9,
+/// design note §5.4). Returns the push task.
+fn activity_changed(state: &AppState, on: bool) -> Option<tokio::task::JoinHandle<()>> {
     state
         .activity
         .store(on, std::sync::atomic::Ordering::Release);
-    if on {
-        tracing::warn!("band activity while developing: engineer banner and alarm");
+    let push = if on {
+        tracing::warn!("band activity while developing: engineer banner and notice");
         let payload = crate::notify::alarm_payload(
             "Kapela hrá",
             "iemmixer beží vo vývoji a na vstupoch je signál. Späť na REAPER?",
         );
         let s = state.clone();
-        tokio::spawn(async move {
-            let sent = crate::notify::push_alarm(&s, &payload).await;
-            tracing::info!(sent, "band-activity alarm pushed");
-        });
+        Some(tokio::spawn(async move {
+            crate::notify::push_engineers(&s, &payload).await;
+            tracing::info!("band-activity notice pushed to the engineer's devices");
+        }))
     } else {
         tracing::info!("band activity ended");
-    }
+        None
+    };
     state.broadcast(To::Engineers, activity_msg(state));
+    push
 }
 
 async fn janitor_task(state: AppState) {
@@ -594,6 +600,46 @@ mod tests {
         }
         // Second 0 (the first topology) and seconds 1 to 119: 120 seconds.
         assert_eq!(changes, ON_AT_119);
+    }
+
+    #[tokio::test]
+    async fn the_band_activity_notice_reaches_the_engineers_devices_only() {
+        use crate::push::tests::{fake_push_service, subscription, vapid_private_key};
+        let (base, seen) = fake_push_service().await;
+        let dir = tempfile::tempdir().unwrap();
+        let config = iem_core::Config {
+            vapid_private_key: vapid_private_key(),
+            ..iem_core::Config::default()
+        };
+        let s = AppState::new(config, dir.path());
+        s.push_store
+            .write()
+            .await
+            .add(subscription(format!("{base}/201")))
+            .unwrap();
+        std::fs::write(
+            dir.path().join(crate::notify::ALARM_SUBSCRIPTIONS_FILE),
+            serde_json::to_string(&vec![subscription(format!("{base}/202"))]).unwrap(),
+        )
+        .unwrap();
+        let push = activity_changed(&s, true).expect("a notice when it turns on");
+        tokio::time::timeout(Duration::from_secs(10), push)
+            .await
+            .expect("pushed within 10 s")
+            .unwrap();
+        let paths: Vec<String> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(path, _, _)| path.clone())
+            .collect();
+        assert_eq!(paths, ["/201"], "the engineer's device, no alarm recipient");
+        assert!(s.activity.load(std::sync::atomic::Ordering::Acquire));
+        assert!(
+            activity_changed(&s, false).is_none(),
+            "no notice when it ends"
+        );
+        assert!(!s.activity.load(std::sync::atomic::Ordering::Acquire));
     }
 
     #[tokio::test]

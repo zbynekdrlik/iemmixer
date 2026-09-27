@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::AppState;
-use crate::notify::ALARM_SUBSCRIPTIONS_FILE;
+use crate::notify::{ALARM_SUBSCRIPTIONS_FILE, load_alarm_recipients};
 use crate::push_store::PushSubscription;
 
 /// The pending link (the token's hash and its expiry), next to the site file.
@@ -143,13 +143,7 @@ fn removal_verdict(removed: io::Result<()>) -> Result<(), Refused> {
 /// how many there are. An unreadable file is an error, never overwritten.
 pub fn add_recipient(config_dir: &Path, sub: PushSubscription) -> io::Result<usize> {
     let path = config_dir.join(ALARM_SUBSCRIPTIONS_FILE);
-    let mut subs: Vec<PushSubscription> = match std::fs::read_to_string(&path) {
-        Ok(text) => serde_json::from_str(&text).map_err(|e| {
-            io::Error::new(ErrorKind::InvalidData, format!("{}: {e}", path.display()))
-        })?,
-        Err(e) if e.kind() == ErrorKind::NotFound => Vec::new(),
-        Err(e) => return Err(e),
-    };
+    let mut subs = load_alarm_recipients(config_dir)?;
     match subs.iter_mut().find(|s| s.endpoint == sub.endpoint) {
         Some(known) => *known = sub,
         None => subs.push(sub),
@@ -282,7 +276,7 @@ mod tests {
     }
 
     fn recipients(dir: &Path) -> Vec<PushSubscription> {
-        crate::notify::alarm_subscriptions(dir)
+        load_alarm_recipients(dir).unwrap()
     }
 
     fn body(token: &str, endpoint: &str) -> String {
