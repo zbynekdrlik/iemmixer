@@ -1,7 +1,56 @@
-//! Backup & Restore section for the Settings modal (engineer-only)
+//! Backup & Restore section for the Settings modal (engineer-only): the
+//! backups, a preview of what a restore changes (F31: before → after, in the
+//! UI's names), and the restore.
 
+use iem_core::{RestoreCategory, RestorePreview, RestoreResult};
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
+
+/// The heading of a restore category.
+fn category_label(c: RestoreCategory) -> &'static str {
+    match c {
+        RestoreCategory::Level => "Levels",
+        RestoreCategory::Group => "Stems",
+        RestoreCategory::Output => "Outputs",
+        RestoreCategory::Eq => "EQ",
+        RestoreCategory::Limiter => "Limiters",
+        RestoreCategory::Input => "Inputs",
+        RestoreCategory::Customization => "Pins and hides",
+    }
+}
+
+/// The preview's changes grouped by category (in category order), each as
+/// "what: before → after".
+fn preview_groups(p: &RestorePreview) -> Vec<(&'static str, Vec<String>)> {
+    let mut changes: Vec<_> = p.changes.iter().collect();
+    changes.sort_by_key(|c| c.category);
+    let mut out: Vec<(&'static str, Vec<String>)> = Vec::new();
+    for c in changes {
+        let label = category_label(c.category);
+        let line = format!(
+            "{}: {} \u{2192} {}",
+            c.description, c.current_value, c.backup_value
+        );
+        match out.last_mut() {
+            Some((l, lines)) if *l == label => lines.push(line),
+            _ => out.push((label, vec![line])),
+        }
+    }
+    out
+}
+
+/// The line shown after a restore.
+fn result_line(r: &RestoreResult) -> String {
+    if r.skipped.is_empty() {
+        format!("Restored {} values", r.restored_count)
+    } else {
+        format!(
+            "Restored {} values, {} skipped",
+            r.restored_count,
+            r.skipped.len()
+        )
+    }
+}
 
 /// Backup restore section shown in engineer Settings modal.
 /// Lists available backups, shows preview on click, allows restore.
@@ -49,13 +98,7 @@ pub fn BackupSection() -> impl IntoView {
             // Result display
             {move || result.get().map(|r| view! {
                 <div class="backup-result" style="color: #51cf66; padding: 8px; font-size: 0.85em;">
-                    {format!("Restored {} values", r.restored_count)}
-                    {if !r.skipped.is_empty() {
-                        format!(", {} skipped", r.skipped.len())
-                    } else {
-                        String::new()
-                    }}
-                    {if r.project_saved { " — project saved" } else { " — project NOT saved!" }}
+                    {result_line(&r)}
                 </div>
             })}
 
@@ -71,7 +114,7 @@ pub fn BackupSection() -> impl IntoView {
                         let filename_for_style = filename.clone();
                         let filename_for_click = filename.clone();
                         let display_time = b.timestamp.get(..16).unwrap_or(&b.timestamp).to_string();
-                        let meta = format!("{} sends", b.send_count);
+                        let meta = format!("{} levels, {} mixes", b.send_count, b.track_count);
                         view! {
                             <div
                                 class="settings-row"
@@ -143,35 +186,21 @@ pub fn BackupSection() -> impl IntoView {
                                     {format!("{} skipped (not found)", skipped_count)}
                                 </div>
                             })}
-                            {(p.estimated_seconds > 0 && change_count > 0).then(|| {
-                                let est = p.estimated_seconds;
-                                view! {
-                                    <div style="color: #aaa; margin-top: 4px;">
-                                        {format!("Estimated time: ~{}s", est)}
-                                    </div>
-                                }
-                            })}
-                            {(!p.tracks_in_reaper_not_in_backup.is_empty()).then(|| {
-                                let names = p.tracks_in_reaper_not_in_backup.clone();
-                                view! {
-                                    <div class="preview-panel preview-warning">
-                                        <div style="color: #f0ad4e; font-weight: bold; margin-top: 6px; margin-bottom: 2px;">
-                                            "⚠ Will NOT restore (tracks not in this backup)"
-                                        </div>
-                                        <ul style="margin: 0; padding-left: 1.4em; color: #c8a050; font-size: 0.85em;">
-                                            {names.into_iter().map(|name| view! {
-                                                <li>{name}" — its current state will be unchanged"</li>
-                                            }).collect_view()}
-                                        </ul>
-                                    </div>
-                                }
-                            })}
-                            {(!p.tracks_in_backup_not_in_reaper.is_empty()).then(|| {
-                                let names = p.tracks_in_backup_not_in_reaper.clone();
+                            // What the restore changes, before → after (F31)
+                            <div class="backup-diff" data-testid="backup-diff" style="max-height: 220px; overflow-y: auto; margin-top: 6px;">
+                                {preview_groups(&p).into_iter().map(|(label, lines)| view! {
+                                    <div style="color: #ddd; font-weight: bold; margin-top: 6px;">{label}</div>
+                                    <ul style="margin: 0; padding-left: 1.4em; color: #bbb; font-size: 0.85em;">
+                                        {lines.into_iter().map(|l| view! { <li>{l}</li> }).collect_view()}
+                                    </ul>
+                                }).collect_view()}
+                            </div>
+                            {(!p.skipped.is_empty()).then(|| {
+                                let names: Vec<String> = p.skipped.iter().map(|s| s.description.clone()).collect();
                                 view! {
                                     <div class="preview-panel preview-warning">
                                         <div style="color: #f0ad4e; font-weight: bold; margin-top: 6px; margin-bottom: 2px;">
-                                            "⚠ Will skip (tracks in backup but not in REAPER)"
+                                            "\u{26A0} Will skip (not in the current setup)"
                                         </div>
                                         <ul style="margin: 0; padding-left: 1.4em; color: #c8a050; font-size: 0.85em;">
                                             {names.into_iter().map(|name| view! {
@@ -250,5 +279,96 @@ pub fn BackupSection() -> impl IntoView {
                 }
             })}
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iem_core::{RestoreChange, SkippedEntry};
+
+    fn change(category: RestoreCategory, what: &str, from: &str, to: &str) -> RestoreChange {
+        RestoreChange {
+            category,
+            description: what.into(),
+            current_value: from.into(),
+            backup_value: to.into(),
+        }
+    }
+
+    #[test]
+    fn a_preview_groups_its_changes_by_category() {
+        let p = RestorePreview {
+            changes: vec![
+                change(
+                    RestoreCategory::Limiter,
+                    "Member1: limiter",
+                    "-1.0 dB",
+                    "-3.0 dB",
+                ),
+                change(
+                    RestoreCategory::Level,
+                    "MEMBER3 mic \u{2192} Member1",
+                    "-6.0 dB",
+                    "0.0 dB",
+                ),
+                change(
+                    RestoreCategory::Level,
+                    "KEYS \u{2192} Member1",
+                    "off",
+                    "-12.0 dB",
+                ),
+                change(RestoreCategory::Input, "KEYS: trim", "0.0 dB", "3.0 dB"),
+            ],
+            unchanged_count: 7,
+            skipped: vec![],
+        };
+        let groups = preview_groups(&p);
+        let labels: Vec<&str> = groups.iter().map(|(l, _)| *l).collect();
+        assert_eq!(labels, ["Levels", "Limiters", "Inputs"]);
+        assert_eq!(
+            groups[0].1,
+            [
+                "MEMBER3 mic \u{2192} Member1: -6.0 dB \u{2192} 0.0 dB",
+                "KEYS \u{2192} Member1: off \u{2192} -12.0 dB"
+            ]
+        );
+        assert_eq!(groups[2].1, ["KEYS: trim: 0.0 dB \u{2192} 3.0 dB"]);
+        assert!(preview_groups(&RestorePreview::default()).is_empty());
+    }
+
+    #[test]
+    fn every_category_has_a_heading() {
+        for c in [
+            RestoreCategory::Level,
+            RestoreCategory::Group,
+            RestoreCategory::Output,
+            RestoreCategory::Eq,
+            RestoreCategory::Limiter,
+            RestoreCategory::Input,
+            RestoreCategory::Customization,
+        ] {
+            assert!(!category_label(c).is_empty());
+        }
+        assert_eq!(category_label(RestoreCategory::Group), "Stems");
+        assert_eq!(
+            category_label(RestoreCategory::Customization),
+            "Pins and hides"
+        );
+    }
+
+    #[test]
+    fn the_result_line_counts_restored_and_skipped() {
+        let mut r = RestoreResult {
+            restored_count: 12,
+            skipped: vec![],
+        };
+        assert_eq!(result_line(&r), "Restored 12 values");
+        r.skipped.push(SkippedEntry {
+            category: RestoreCategory::Level,
+            description: "gone".into(),
+            reason: "not in the topology".into(),
+        });
+        assert_eq!(result_line(&r), "Restored 12 values, 1 skipped");
     }
 }

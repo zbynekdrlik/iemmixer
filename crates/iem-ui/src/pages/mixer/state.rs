@@ -21,21 +21,25 @@ pub(super) type SignalPair<T> = (ReadSignal<T>, WriteSignal<T>);
 #[derive(Clone, Copy)]
 pub(super) struct MixerState {
     pub channels: SignalPair<Vec<Channel>>,
-    pub meters: SignalPair<HashMap<usize, [f32; 2]>>,
+    /// Peak meters by id: inputs, mixes (the IEM VOL meter) and the stems strip.
+    pub meters: SignalPair<HashMap<String, [f32; 2]>>,
     pub connected: SignalPair<bool>,
     pub loading: SignalPair<bool>,
-    pub fader_touched: SignalPair<HashMap<usize, bool>>,
+    pub fader_touched: SignalPair<HashMap<String, bool>>,
     pub global_touched: SignalPair<bool>,
     pub stems_touched: SignalPair<bool>,
     pub global_level: SignalPair<f32>,
     pub global_muted: SignalPair<bool>,
     pub stems_level: SignalPair<f32>,
     pub stems_muted: SignalPair<bool>,
-    pub stems_bus_idx: SignalPair<Option<usize>>,
-    pub eq_open: SignalPair<Option<(usize, String)>>,
+    /// The stems strip's group id (its meter and EQ target).
+    pub stems_group: SignalPair<Option<String>>,
+    /// The open EQ: (target id, title).
+    pub eq_open: SignalPair<Option<(String, String)>>,
     pub eq_bands: SignalPair<Vec<EqBandState>>,
     pub eq_loading: SignalPair<bool>,
-    pub limiter_open: SignalPair<Option<(usize, String)>>,
+    /// The open limiter's title (always the page's mix).
+    pub limiter_open: SignalPair<Option<String>>,
     pub limiter_limit_db: SignalPair<f32>,
     pub limiter_limit_norm: SignalPair<f32>,
     pub limiter_enabled: SignalPair<bool>,
@@ -43,12 +47,13 @@ pub(super) struct MixerState {
     pub limiter_active_seconds: SignalPair<f64>,
     pub active_category: SignalPair<Category>,
     pub data_pulse: SignalPair<bool>,
-    pub pinned_channels: SignalPair<Vec<usize>>,
-    pub hidden_channels: SignalPair<Vec<usize>>,
+    pub pinned_channels: SignalPair<Vec<String>>,
+    pub hidden_channels: SignalPair<Vec<String>>,
     pub network_mode: SignalPair<String>,
-    pub output_track_idx: SignalPair<Option<usize>>,
-    pub soloed: SignalPair<HashSet<usize>>,
-    pub pre_solo_mutes: SignalPair<HashMap<usize, bool>>,
+    /// The page's mix id (IEM VOL meter, EQ and limiter).
+    pub page_mix: SignalPair<Option<String>>,
+    pub soloed: SignalPair<HashSet<String>>,
+    pub pre_solo_mutes: SignalPair<HashMap<String, bool>>,
     pub double_tap_fader: SignalPair<bool>,
     pub has_photo: SignalPair<bool>,
     pub preset_modal_visible: SignalPair<bool>,
@@ -58,6 +63,12 @@ pub(super) struct MixerState {
     pub alert_data: SignalPair<Option<(String, String)>>,
     pub alert_active: SignalPair<bool>,
     pub talk_state: SignalPair<TalkState>,
+    /// The talk id of the held talkback lock (X6): the talkback socket binds with it.
+    pub talk_id: SignalPair<Option<String>>,
+    /// Band activity while developing (§4.2): (active, the switch is configured).
+    pub band_activity: SignalPair<(bool, bool)>,
+    /// The engineer's console (F29), once requested.
+    pub console: SignalPair<Option<iem_core::ConsoleInfo>>,
     pub engineer_talking: SignalPair<bool>,
     /// Internet access (Cloudflare tunnel) status from the server (reaperiem#202);
     /// `None` until the first `TunnelStatus` message arrives.
@@ -111,7 +122,7 @@ impl MixerState {
         let saved = self.pre_solo_mutes.0.get();
         let _ = self.channels.1.try_update(|chs| {
             for c in chs.iter_mut() {
-                let should_be_muted = saved.get(&c.track_index).copied().unwrap_or(false);
+                let should_be_muted = saved.get(&c.id).copied().unwrap_or(false);
                 c.muted = should_be_muted;
             }
         });
@@ -175,7 +186,7 @@ impl MixerState {
             global_muted: signal(false),
             stems_level: signal(0.0),
             stems_muted: signal(false),
-            stems_bus_idx: signal(None),
+            stems_group: signal(None),
             eq_open: signal(None),
             eq_bands: signal(Vec::new()),
             eq_loading: signal(false),
@@ -190,7 +201,7 @@ impl MixerState {
             pinned_channels: signal(Vec::new()),
             hidden_channels: signal(Vec::new()),
             network_mode: signal(String::new()),
-            output_track_idx: signal(None),
+            page_mix: signal(None),
             soloed: signal(HashSet::new()),
             pre_solo_mutes: signal(HashMap::new()),
             double_tap_fader: signal(user_settings.double_tap_fader),
@@ -202,6 +213,9 @@ impl MixerState {
             alert_data: signal(None),
             alert_active: signal(false),
             talk_state: signal(TalkState::Idle),
+            talk_id: signal(None),
+            band_activity: signal((false, false)),
+            console: signal(None),
             engineer_talking: signal(false),
             tunnel: signal(None),
             ws: signal(None),

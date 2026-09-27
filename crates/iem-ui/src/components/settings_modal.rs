@@ -67,6 +67,12 @@ pub fn SettingsModal(
     /// Callback to update has_photo state after upload/delete (reaperiem#16)
     #[prop(optional)]
     set_has_photo: Option<WriteSignal<bool>>,
+    /// The engineer's console (F29; shown on the engineer's own page)
+    #[prop(optional)]
+    console: Option<ReadSignal<Option<iem_core::ConsoleInfo>>>,
+    /// The mixer socket (console commands)
+    #[prop(optional)]
+    ws: Option<ReadSignal<Option<web_sys::WebSocket>>>,
 ) -> impl IntoView {
     // StoredValue is Copy + Send + Sync — closures inside view! can use it freely
     let member_id = StoredValue::new(member_id);
@@ -277,6 +283,11 @@ pub fn SettingsModal(
                                     </div>
                                 </div>
                             </div>
+
+                            // Console: inputs, limiters, pages, logins (F29, engineer-only)
+                            {console.zip(ws).map(|(console, ws)| view! {
+                                <crate::components::console_section::ConsoleSection console=console ws=ws />
+                            })}
 
                             // Backup & Restore (engineer-only)
                             <crate::components::backup_section::BackupSection />

@@ -3,6 +3,7 @@
 
 let audioContext = null;
 let gainNode = null;
+let limiterNode = null;
 let nextStartTime = 0;
 let frameIndex = 0;
 let lastAudioLevel = -150;
@@ -45,7 +46,28 @@ export function initAudioPlayer() {
   audioContext = new AudioContext({ sampleRate: 48000 });
   gainNode = audioContext.createGain();
   gainNode.gain.value = 1.0;
-  gainNode.connect(audioContext.destination);
+  // X11: boost -> limiter (-1 dBFS) -> output. The gain reaches the output
+  // only through the limiter, so a boosted mix is never louder than -1 dBFS;
+  // until the worklet has loaded the player is silent rather than unlimited.
+  limiterNode = null;
+  const ctx = audioContext;
+  ctx.audioWorklet
+    .addModule("/listen-limiter-worklet.js")
+    .then(() => {
+      if (audioContext !== ctx || !gainNode) return;
+      limiterNode = new AudioWorkletNode(ctx, "listen-limiter", {
+        numberOfInputs: 1,
+        numberOfOutputs: 1,
+        outputChannelCount: [2],
+      });
+      gainNode.connect(limiterNode);
+      limiterNode.connect(ctx.destination);
+      console.log("[audio] listen limiter ready (-1 dBFS)");
+    })
+    .catch((e) => {
+      console.error("[audio] listen limiter failed to load:", e);
+      lastError = "Listen limiter failed: " + e.message;
+    });
   nextStartTime = 0;
   frameIndex = 0;
   lastAudioLevel = -150;
@@ -260,9 +282,10 @@ function scheduleAudioData(audioData) {
   lastAudioLevel = peak > 0.0001 ? 20 * Math.log10(peak) : -150;
 
   // Schedule playback with jitter buffer
+  if (!gainNode) return; // stopped: never play around the limiter (X11)
   const source = audioContext.createBufferSource();
   source.buffer = buffer;
-  source.connect(gainNode || audioContext.destination);
+  source.connect(gainNode);
 
   const now = audioContext.currentTime;
   scheduledFrameCount++;
@@ -299,6 +322,7 @@ export function stopAudioPlayer() {
   }
   pendingFrames = [];
   gainNode = null;
+  limiterNode = null;
   if (audioContext) {
     audioContext.onstatechange = null;
     audioContext.close();
@@ -400,5 +424,7 @@ if (typeof window !== "undefined") {
   window.__iem_audio_level = getAudioLevel;
   window.__iem_audio_error = getAudioError;
   window.__iem_audio_gain = getListenGain;
+  // X11: whether the listen limiter sits between the boost and the output.
+  window.__iem_listen_limiter = () => limiterNode !== null;
   window.__iem_stream_stats = getStreamStats;
 }

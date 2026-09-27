@@ -13,6 +13,8 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 # Core library (WASM-safe: no config/toml)
 iem-core = { path = "../iem-core", default-features = false }
+# The engine's EQ response (the curve shows exactly what the engine does, F11)
+iem-dsp = { path = "../iem-dsp" }
 
 # Leptos with CSR (client-side rendering)
 leptos = { version = "0.7", features = ["csr"] }

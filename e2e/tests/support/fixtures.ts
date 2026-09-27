@@ -41,15 +41,3 @@ export const test = base.extend<ConsoleGuard>({
 
 export { expect };
 export type { Page } from "@playwright/test";
-
-/**
- * REAPER is absent in mock E2E until S5 replaces the REAPER control plane
- * (.claude/rules/e2e.md): pages that load REAPER-era mixer state get exactly
- * these failures. Declare per describe with
- * `test.use({ allowedConsole: REAPER_ABSENT })` and the comment
- * `// REAPER absent in mock E2E until S5`. Every entry is an anchored exact
- * message copied from a CI log line; S5 deletes this list.
- */
-export const REAPER_ABSENT: RegExp[] = [
-  /^Failed to load resource: the server responded with a status of 502 \(Bad Gateway\)$/,
-];

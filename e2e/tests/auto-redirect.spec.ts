@@ -1,5 +1,5 @@
 import { ENGINEER_PIN, MEMBER_PIN } from "./support/pins";
-import { REAPER_ABSENT, test, expect, Page } from "./support/fixtures";
+import { test, expect, Page } from "./support/fixtures";
 
 // Helper to get a JWT token via API
 async function getToken(
@@ -17,9 +17,6 @@ async function getToken(
 }
 
 test.describe("Auto-redirect authenticated users (#84)", () => {
-  // REAPER absent in mock E2E until S5
-  test.use({ allowedConsole: REAPER_ABSENT });
-
   test("valid token + fresh session → redirects to member mixer", async ({
     page,
   }) => {

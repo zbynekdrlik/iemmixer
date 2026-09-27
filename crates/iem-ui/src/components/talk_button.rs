@@ -31,11 +31,17 @@ pub enum TalkState {
     Unsupported,
 }
 
+/// The talkback socket URL: bound to the held lock by its talk id (X6).
+pub fn talkback_url(ws_scheme: &str, host: &str, token: &str, talk_id: &str) -> String {
+    format!("{ws_scheme}//{host}/ws/talkback?token={token}&talk={talk_id}")
+}
+
 /// Push-to-talk button for engineer talkback.
 ///
 /// Hold to talk, release to stop. Uses pointer events for touch+mouse.
-/// Sends TalkStart/TalkStop via the mixer WebSocket; server responds with
-/// TalkAcquired/TalkBusy/TalkReleased to coordinate the lock.
+/// Sends TalkStart/TalkStop via the mixer WebSocket; the server answers
+/// TalkAcquired{talk_id}/TalkBusy/TalkReleased. The talkback socket opens
+/// with the acquired talk id (the server refuses one without it).
 #[component]
 pub fn TalkButton(
     /// Mixer WebSocket connection
@@ -44,7 +50,12 @@ pub fn TalkButton(
     state: ReadSignal<TalkState>,
     /// State setter (updated by mixer WS handler)
     set_state: WriteSignal<TalkState>,
+    /// The talk id of the held lock (set by the mixer WS handler)
+    talk_id: ReadSignal<Option<String>>,
 ) -> impl IntoView {
+    // Whether the button is held: a lock acquired after the release is let go.
+    let held = RwSignal::new(false);
+
     // Check browser support on mount
     Effect::new(move || {
         if !is_talkback_supported() {
@@ -113,20 +124,42 @@ pub fn TalkButton(
     });
 
     // Build the talkback WS URL (separate from mixer WS)
-    let build_talkback_ws_url = move || -> Option<String> {
+    let build_talkback_ws_url = move |talk: &str| -> Option<String> {
         let location = web_sys::window()?.location();
         let protocol = location.protocol().ok()?;
         let host = location.host().ok()?;
         let ws_protocol = if protocol == "https:" { "wss:" } else { "ws:" };
         let token = crate::auth::get_token()?;
-        Some(format!(
-            "{}//{}/ws/talkback?token={}",
-            ws_protocol, host, token
-        ))
+        Some(talkback_url(ws_protocol, &host, &token, talk))
     };
 
+    // The lock is ours: open the talkback socket with its id and start the mic.
+    //
+    // Use try_set on set_state to guard against disposal race — if the
+    // component unmounts while start_talkback is awaiting, writing to a
+    // disposed signal would panic. See reaperiem#153 follow-up.
+    Effect::new(move |_| {
+        let Some(id) = talk_id.get() else {
+            return;
+        };
+        if !held.try_get_untracked().unwrap_or(false) {
+            return;
+        }
+        if let Some(url) = build_talkback_ws_url(&id) {
+            wasm_bindgen_futures::spawn_local(async move {
+                if let Err(e) = start_talkback(&url).await {
+                    let msg = format!("{:?}", e);
+                    if msg.contains("NotAllowedError") || msg.contains("Permission") {
+                        let _ = set_state.try_set(TalkState::MicBlocked);
+                    } else {
+                        web_sys::console::error_1(&format!("[talk] start failed: {}", msg).into());
+                    }
+                }
+            });
+        }
+    });
+
     // Pointer down: request talk lock via mixer WS
-    let ws_url_builder = build_talkback_ws_url;
     let on_pointer_down = move |e: web_sys::PointerEvent| {
         e.prevent_default();
         // Capture pointer — prevents pointerleave from firing on slight finger movement
@@ -143,44 +176,20 @@ pub fn TalkButton(
             return;
         }
 
-        // Send TalkStart via mixer WS to acquire lock
+        // Send TalkStart via mixer WS to acquire lock; the mic starts when
+        // TalkAcquired brings the talk id (the Effect above).
+        let _ = held.try_set(true);
         if let Some(socket) = ws.get_untracked()
             && socket.ready_state() == web_sys::WebSocket::OPEN
             && let Ok(json) = serde_json::to_string(&iem_core::ClientMsg::TalkStart)
         {
             let _ = socket.send_with_str(&json);
         }
-
-        // Start mic capture (the WS handler will set state to Live on TalkAcquired,
-        // but we start capturing proactively to reduce latency).
-        //
-        // Use try_update on set_state to guard against disposal race — if the
-        // component unmounts while start_talkback is awaiting, writing to a
-        // disposed signal would panic. See reaperiem#153 follow-up.
-        if let Some(url) = ws_url_builder() {
-            let set_state = set_state;
-            wasm_bindgen_futures::spawn_local(async move {
-                match start_talkback(&url).await {
-                    Ok(()) => {
-                        // Mic is capturing; state will be set to Live by TalkAcquired handler
-                    }
-                    Err(e) => {
-                        let msg = format!("{:?}", e);
-                        if msg.contains("NotAllowedError") || msg.contains("Permission") {
-                            let _ = set_state.try_set(TalkState::MicBlocked);
-                        } else {
-                            web_sys::console::error_1(
-                                &format!("[talk] start failed: {}", msg).into(),
-                            );
-                        }
-                    }
-                }
-            });
-        }
     };
 
     // Release talk lock helper (shared by pointerup and pointerleave)
     let release_talk = move || {
+        let _ = held.try_set(false);
         let current = state.get_untracked();
         if current != TalkState::Live && current != TalkState::Idle {
             return;
@@ -247,5 +256,18 @@ pub fn TalkButton(
         >
             {btn_text}
         </button>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_talkback_url_carries_the_talk_id() {
+        assert_eq!(
+            talkback_url("wss:", "mixer.example.org", "tok", "ab12"),
+            "wss://mixer.example.org/ws/talkback?token=tok&talk=ab12"
+        );
     }
 }

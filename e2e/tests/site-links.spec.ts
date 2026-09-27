@@ -1,10 +1,7 @@
-import { REAPER_ABSENT, test, expect } from "./support/fixtures";
+import { test, expect } from "./support/fixtures";
 import { MEMBER_PIN } from "./support/pins";
 
 test.describe("Site links from the site config", () => {
-  // REAPER absent in mock E2E until S5 (the mixer page loads REAPER-era state)
-  test.use({ allowedConsole: REAPER_ABSENT });
-
   test("GET /api/site returns the test site's LAN URL and public host", async ({ request }) => {
     const site = await (await request.get("/api/site")).json();
     expect(site).toEqual({ lan_url: "http://10.0.0.10", public_host: "mixer.example.org" });

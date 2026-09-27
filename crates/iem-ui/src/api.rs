@@ -193,6 +193,26 @@ pub async fn batch_mute_all(member: &str) -> Result<(), String> {
     }
 }
 
+/// "Back to REAPER" (§4.2): the engineer's switch, confirmed with the engineer
+/// PIN; the server starts the site's switch command (202).
+pub async fn back_to_reaper(pin: &str) -> Result<(), String> {
+    let token = crate::auth::get_token().ok_or("Not authenticated")?;
+    let resp = Request::post(&format!("{}/mode/event", API_BASE))
+        .header("Authorization", &format!("Bearer {}", token))
+        .json(&serde_json::json!({ "pin": pin }))
+        .map_err(|e| format!("Request error: {}", e))?
+        .send()
+        .await
+        .map_err(|e| format!("Network error: {}", e))?;
+    if resp.ok() {
+        Ok(())
+    } else {
+        Err(crate::components::activity_banner::switch_error_message(
+            resp.status(),
+        ))
+    }
+}
+
 /// Check if the stored auth token is still valid by hitting a protected endpoint.
 /// Returns false if the server rejects the token (401) or if no token exists.
 pub async fn verify_token_valid(member: &str) -> bool {

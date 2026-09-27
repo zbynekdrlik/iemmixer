@@ -39,6 +39,9 @@ pub fn Toolbar(
     /// Talkback state setter (engineer only) (reaperiem#123)
     #[prop(optional)]
     set_talk_state: Option<WriteSignal<TalkState>>,
+    /// The held talkback lock's talk id (engineer only)
+    #[prop(optional)]
+    talk_id: Option<ReadSignal<Option<String>>>,
 ) -> impl IntoView {
     view! {
         <div class="toolbar">
@@ -59,12 +62,13 @@ pub fn Toolbar(
                     <ListenButton member_id=member_id.clone() />
                 }
             })}
-            {(is_engineer_own_mixer && talk_state.is_some() && set_talk_state.is_some() && ws.is_some()).then(|| {
+            {(is_engineer_own_mixer && talk_state.is_some() && set_talk_state.is_some() && ws.is_some() && talk_id.is_some()).then(|| {
                 let ts = talk_state.unwrap();
                 let set_ts = set_talk_state.unwrap();
                 let ws_sig = ws.unwrap();
+                let id = talk_id.unwrap();
                 view! {
-                    <TalkButton state=ts set_state=set_ts ws=ws_sig />
+                    <TalkButton state=ts set_state=set_ts ws=ws_sig talk_id=id />
                 }
             })}
             {(!is_engineer).then(|| {

@@ -12,8 +12,8 @@ use crate::components::meter::Meter;
 use crate::components::pan::PanKnob;
 
 use super::helpers::{
-    DisplayChannel, POST_RELEASE_GUARD_MS, THROTTLE_INTERVAL_MS, format_db, parse_track_name,
-    ws_send,
+    DisplayChannel, MuteClick, POST_RELEASE_GUARD_MS, THROTTLE_INTERVAL_MS, format_db, intern,
+    mute_click, parse_track_name, ws_send,
 };
 
 /// Global IEM volume fader rendered on the Main tab
@@ -26,12 +26,13 @@ pub(super) fn GlobalVolumeFader(
     set_global_touched: WriteSignal<bool>,
     connected: ReadSignal<bool>,
     ws: ReadSignal<Option<web_sys::WebSocket>>,
-    meters: ReadSignal<HashMap<usize, [f32; 2]>>,
-    output_track_idx: ReadSignal<Option<usize>>,
-    set_eq_open: WriteSignal<Option<(usize, String)>>,
+    meters: ReadSignal<HashMap<String, [f32; 2]>>,
+    /// The page's mix id (meter, EQ and limiter of IEM VOL)
+    page_mix: ReadSignal<Option<String>>,
+    set_eq_open: WriteSignal<Option<(String, String)>>,
     set_eq_bands: WriteSignal<Vec<EqBandState>>,
     set_eq_loading: WriteSignal<bool>,
-    set_limiter_open: WriteSignal<Option<(usize, String)>>,
+    set_limiter_open: WriteSignal<Option<String>>,
     set_limiter_loading: WriteSignal<bool>,
 ) -> impl IntoView {
     let (is_fader_active, set_is_fader_active) = signal(false);
@@ -160,17 +161,21 @@ pub(super) fn GlobalVolumeFader(
 
     let level_signal = Signal::derive(move || level.get());
 
-    // Derive meter levels from the output track's meter data
+    // The meter of the page's mix (post volume and mute)
     let meter_l = Signal::derive(move || {
-        output_track_idx
-            .get()
-            .and_then(|idx| meters.with(|m| m.get(&idx).map(|v| v[0])))
+        page_mix
+            .with(|mix| {
+                mix.as_ref()
+                    .and_then(|id| meters.with(|m| m.get(id).map(|v| v[0])))
+            })
             .unwrap_or(0.0)
     });
     let meter_r = Signal::derive(move || {
-        output_track_idx
-            .get()
-            .and_then(|idx| meters.with(|m| m.get(&idx).map(|v| v[1])))
+        page_mix
+            .with(|mix| {
+                mix.as_ref()
+                    .and_then(|id| meters.with(|m| m.get(id).map(|v| v[1])))
+            })
             .unwrap_or(0.0)
     });
 
@@ -212,14 +217,11 @@ pub(super) fn GlobalVolumeFader(
                 <button
                     class="eq-btn-small"
                     on:click=move |_| {
-                        if let Some(idx) = output_track_idx.get() {
+                        if let Some(mix) = page_mix.get() {
                             let _ = set_eq_bands.try_set(Vec::new());
                             let _ = set_eq_loading.try_set(true);
-                            let _ = set_eq_open.try_set(Some((idx, "IEM VOL".to_string())));
-                            ws_send(
-                                ws,
-                                &iem_core::ClientMsg::GetEqParams { track_index: idx },
-                            );
+                            let _ = set_eq_open.try_set(Some((mix.clone(), "IEM VOL".to_string())));
+                            ws_send(ws, &iem_core::ClientMsg::GetEqParams { target: mix });
                         }
                     }
                 >
@@ -228,13 +230,10 @@ pub(super) fn GlobalVolumeFader(
                 <button
                     class="limiter-btn-small"
                     on:click=move |_| {
-                        if let Some(idx) = output_track_idx.get() {
+                        if page_mix.get().is_some() {
                             let _ = set_limiter_loading.try_set(true);
-                            let _ = set_limiter_open.try_set(Some((idx, "IEM VOL".to_string())));
-                            ws_send(
-                                ws,
-                                &iem_core::ClientMsg::GetLimiterParams { track_index: idx },
-                            );
+                            let _ = set_limiter_open.try_set(Some("IEM VOL".to_string()));
+                            ws_send(ws, &iem_core::ClientMsg::GetLimiterParams);
                         }
                     }
                 >
@@ -261,9 +260,10 @@ pub(super) fn StemsVolumeFader(
     set_stems_touched: WriteSignal<bool>,
     connected: ReadSignal<bool>,
     ws: ReadSignal<Option<web_sys::WebSocket>>,
-    meters: ReadSignal<HashMap<usize, [f32; 2]>>,
-    stems_bus_idx: ReadSignal<Option<usize>>,
-    set_eq_open: WriteSignal<Option<(usize, String)>>,
+    meters: ReadSignal<HashMap<String, [f32; 2]>>,
+    /// The stems strip's group id (its meter and EQ); no strip without one
+    stems_group: ReadSignal<Option<String>>,
+    set_eq_open: WriteSignal<Option<(String, String)>>,
     set_eq_bands: WriteSignal<Vec<EqBandState>>,
     set_eq_loading: WriteSignal<bool>,
 ) -> impl IntoView {
@@ -391,20 +391,24 @@ pub(super) fn StemsVolumeFader(
     let level_signal = Signal::derive(move || level.get());
 
     let meter_l = Signal::derive(move || {
-        stems_bus_idx
-            .get()
-            .and_then(|idx| meters.with(|m| m.get(&idx).map(|v| v[0])))
+        stems_group
+            .with(|g| {
+                g.as_ref()
+                    .and_then(|id| meters.with(|m| m.get(id).map(|v| v[0])))
+            })
             .unwrap_or(0.0)
     });
     let meter_r = Signal::derive(move || {
-        stems_bus_idx
-            .get()
-            .and_then(|idx| meters.with(|m| m.get(&idx).map(|v| v[1])))
+        stems_group
+            .with(|g| {
+                g.as_ref()
+                    .and_then(|id| meters.with(|m| m.get(id).map(|v| v[1])))
+            })
             .unwrap_or(0.0)
     });
 
-    // Only render if stems bus exists
-    let has_stems_bus = Signal::derive(move || stems_bus_idx.get().is_some());
+    // Only render if the page's mix has the stems group
+    let has_stems_bus = Signal::derive(move || stems_group.with(Option::is_some));
 
     view! {
         <Show when=move || has_stems_bus.get() fallback=|| ()>
@@ -446,14 +450,11 @@ pub(super) fn StemsVolumeFader(
                     <button
                         class="eq-btn-small"
                         on:click=move |_| {
-                            if let Some(idx) = stems_bus_idx.get() {
+                            if let Some(group) = stems_group.get() {
                                 let _ = set_eq_bands.try_set(Vec::new());
                                 let _ = set_eq_loading.try_set(true);
-                                let _ = set_eq_open.try_set(Some((idx, "STEMS".to_string())));
-                                ws_send(
-                                    ws,
-                                    &iem_core::ClientMsg::GetEqParams { track_index: idx },
-                                );
+                                let _ = set_eq_open.try_set(Some((group.clone(), "STEMS".to_string())));
+                                ws_send(ws, &iem_core::ClientMsg::GetEqParams { target: group });
                             }
                         }
                     >
@@ -471,51 +472,47 @@ pub(super) fn StemsVolumeFader(
     }
 }
 
+/// Which control of a strip a guard or throttle entry belongs to.
+type StripKey = (&'static str, u8);
+const LEVEL: u8 = 0;
+const PAN: u8 = 1;
+const MUTE: u8 = 2;
+
 /// Channel list component to handle individual channel rendering
 #[component]
 pub(super) fn ChannelList(
     display_channels: Signal<Vec<DisplayChannel>>,
-    meters: ReadSignal<HashMap<usize, [f32; 2]>>,
+    meters: ReadSignal<HashMap<String, [f32; 2]>>,
     channels: ReadSignal<Vec<Channel>>,
     set_channels: WriteSignal<Vec<Channel>>,
-    set_fader_touched: WriteSignal<HashMap<usize, bool>>,
-    soloed: ReadSignal<std::collections::HashSet<usize>>,
-    set_soloed: WriteSignal<std::collections::HashSet<usize>>,
-    pre_solo_mutes: ReadSignal<HashMap<usize, bool>>,
-    set_pre_solo_mutes: WriteSignal<HashMap<usize, bool>>,
+    set_fader_touched: WriteSignal<HashMap<String, bool>>,
+    soloed: ReadSignal<std::collections::HashSet<String>>,
+    set_soloed: WriteSignal<std::collections::HashSet<String>>,
+    pre_solo_mutes: ReadSignal<HashMap<String, bool>>,
+    set_pre_solo_mutes: WriteSignal<HashMap<String, bool>>,
     connected: ReadSignal<bool>,
     ws: ReadSignal<Option<web_sys::WebSocket>>,
     double_tap_fader: ReadSignal<bool>,
-    pinned_channels: ReadSignal<Vec<usize>>,
-    set_pinned_channels: WriteSignal<Vec<usize>>,
-    hidden_channels: ReadSignal<Vec<usize>>,
-    set_hidden_channels: WriteSignal<Vec<usize>>,
+    pinned_channels: ReadSignal<Vec<String>>,
+    set_pinned_channels: WriteSignal<Vec<String>>,
+    hidden_channels: ReadSignal<Vec<String>>,
+    set_hidden_channels: WriteSignal<Vec<String>>,
     active_category: ReadSignal<Category>,
-    set_eq_open: WriteSignal<Option<(usize, String)>>,
+    set_eq_open: WriteSignal<Option<(String, String)>>,
     set_eq_bands: WriteSignal<Vec<EqBandState>>,
     set_eq_loading: WriteSignal<bool>,
-    /// Member ID for EQ access control (e.g., "oldmember1")
-    #[prop(into)]
-    member_id: String,
-    /// Whether the current user is an engineer (engineers can access all EQ)
-    #[prop(default = false)]
-    is_engineer: bool,
 ) -> impl IntoView {
-    // Guard timeout IDs as raw JS setTimeout handles (i32 = Copy + Send + Sync).
-    // Key scheme: track_idx for fader, track_idx+10000 for pan, track_idx+20000 for mute.
-    let (_guard_ids, set_guard_ids) = signal(HashMap::<usize, i32>::new());
+    // Guard timeout IDs as raw JS setTimeout handles (i32 = Copy + Send + Sync),
+    // keyed by (channel id, control).
+    let (_guard_ids, set_guard_ids) = signal(HashMap::<StripKey, i32>::new());
 
     // Throttle state signals — all Copy + Send + Sync for use in Callback::new closures.
-    let (last_send_times, set_last_send_times) = signal(HashMap::<usize, f64>::new());
-    let (pending_values, set_pending_values) = signal(HashMap::<usize, f32>::new());
-    let (_pending_timeouts, set_pending_timeouts) = signal(HashMap::<usize, i32>::new());
+    let (last_send_times, set_last_send_times) = signal(HashMap::<StripKey, f64>::new());
+    let (pending_values, set_pending_values) = signal(HashMap::<StripKey, f32>::new());
+    let (_pending_timeouts, set_pending_timeouts) = signal(HashMap::<StripKey, i32>::new());
 
     // Shared signal: which channel's kebab menu is open (None = all closed)
-    let (open_menu, set_open_menu) = signal(Option::<usize>::None);
-
-    // EQ access control: store member_id as StoredValue for use in closures
-    let eq_member_id = StoredValue::new(member_id.to_uppercase());
-    let eq_is_engineer = is_engineer;
+    let (open_menu, set_open_menu) = signal(Option::<&'static str>::None);
 
     // CRITICAL: Use <For> with stable key to preserve Fader component identity
     // across re-renders. Without this, optimistic updates cause all Faders to
@@ -527,28 +524,21 @@ pub(super) fn ChannelList(
         >
             <For
                 each=move || display_channels.get()
-                key=|ch| (ch.display_name.clone(), ch.track_index)
+                key=|ch| (ch.display_name.clone(), ch.id.clone())
                 children=move |ch| {
-                    let track_idx = ch.track_index;
-                    let partner_idx = ch.partner_index;
+                    let id: &'static str = intern(&ch.id);
                     let name = ch.display_name.clone();
                     let eq_name = StoredValue::new(name.clone()); // For EQ button closure (Copy)
-                    // EQ access: engineer can EQ any track; members only their own
-                    let show_eq = eq_is_engineer || {
-                        let mid = eq_member_id.get_value();
-                        let upper_name = name.to_uppercase();
-                        upper_name.starts_with(&mid)
-                    };
+                    // EQ access (X7): the server says whether this viewer may open it
+                    let show_eq = ch.eq;
                     let is_my = ch.is_my_input;
-                    let is_stereo = ch.is_stereo;
-                    let ch_is_pinned =
-                        move || pinned_channels.get().contains(&track_idx);
+                    let ch_is_pinned = move || pinned_channels.with(|p| p.iter().any(|x| x == id));
 
                     // Derived signals using .with() to avoid cloning entire collections
                     let level_signal = Signal::derive(move || {
                         channels.with(|chs| {
                             chs.iter()
-                                .find(|c| c.track_index == track_idx)
+                                .find(|c| c.id == id)
                                 .map(|c| c.level_db)
                                 .unwrap_or(-60.0)
                         })
@@ -557,7 +547,7 @@ pub(super) fn ChannelList(
                     let muted_signal = Signal::derive(move || {
                         channels.with(|chs| {
                             chs.iter()
-                                .find(|c| c.track_index == track_idx)
+                                .find(|c| c.id == id)
                                 .map(|c| c.muted)
                                 .unwrap_or(false)
                         })
@@ -566,20 +556,20 @@ pub(super) fn ChannelList(
                     let pan_signal = Signal::derive(move || {
                         channels.with(|chs| {
                             chs.iter()
-                                .find(|c| c.track_index == track_idx)
+                                .find(|c| c.id == id)
                                 .map(|c| c.pan)
                                 .unwrap_or(0.5)
                         })
                     });
 
-                    // Meters show raw input level — NOT scaled by send fader, pan, or mute.
-                    // This matches REAPER's own meter display: the meter shows what's
-                    // coming IN on the track, independent of where/how it's being sent.
+                    // Meters show the input's own level (post its mute) — NOT
+                    // scaled by this mix's fader, pan or mute; a heard mix shows
+                    // its output.
                     let meter_l = Signal::derive(move || {
-                        meters.with(|m| m.get(&track_idx).map(|v| v[0]).unwrap_or(0.0))
+                        meters.with(|m| m.get(id).map(|v| v[0]).unwrap_or(0.0))
                     });
                     let meter_r = Signal::derive(move || {
-                        meters.with(|m| m.get(&track_idx).map(|v| v[1]).unwrap_or(0.0))
+                        meters.with(|m| m.get(id).map(|v| v[1]).unwrap_or(0.0))
                     });
 
                     // Fader activation state for channel glow
@@ -587,259 +577,137 @@ pub(super) fn ChannelList(
 
                     // Helper: cancel a guard timeout by key.
                     // All captures are Copy + Send + Sync, so this closure is too.
-                    let cancel_guard = move |key: usize| {
+                    let cancel_guard = move |key: StripKey| {
                         let _ = set_guard_ids.try_update(|ids| {
-                            if let Some(id) = ids.remove(&key) && let Some(w) = web_sys::window() {
-                                    w.clear_timeout_with_handle(id);
+                            if let Some(t) = ids.remove(&key) && let Some(w) = web_sys::window() {
+                                    w.clear_timeout_with_handle(t);
                                 }
                         });
                     };
 
                     // Helper: set a post-release guard timeout that clears
                     // fader_touched after POST_RELEASE_GUARD_MS.
-                    let set_guard = move |key: usize| {
+                    let set_guard = move |key: StripKey| {
                         cancel_guard(key);
                         let cb = Closure::once_into_js(move || {
                             let _ = set_guard_ids.try_update(|ids| {
                                 ids.remove(&key);
                             });
                             let _ = set_fader_touched.try_update(|t| {
-                                t.remove(&track_idx);
-                                if let Some(p) = partner_idx {
-                                    t.remove(&p);
-                                }
+                                t.remove(id);
                             });
                         });
-                        if let Some(w) = web_sys::window() && let Ok(id) =
+                        if let Some(w) = web_sys::window() && let Ok(t) =
                                 w.set_timeout_with_callback_and_timeout_and_arguments_0(
                                     cb.unchecked_ref(),
                                     POST_RELEASE_GUARD_MS,
                                 ) {
                                 let _ = set_guard_ids.try_update(|ids| {
-                                    ids.insert(key, id);
+                                    ids.insert(key, t);
                                 });
                             }
                     };
 
-                    // Helper: cancel a pending throttle timeout for a track
-                    let cancel_pending_timeout = move |tidx: usize| {
+                    // Helper: cancel a pending throttle timeout
+                    let cancel_pending_timeout = move |key: StripKey| {
                         let _ = set_pending_timeouts.try_update(|m| {
-                            if let Some(id) = m.remove(&tidx) && let Some(w) = web_sys::window() {
-                                    w.clear_timeout_with_handle(id);
+                            if let Some(t) = m.remove(&key) && let Some(w) = web_sys::window() {
+                                    w.clear_timeout_with_handle(t);
                                 }
                         });
                     };
 
+                    // The command a throttled value becomes.
+                    let command = move |key: StripKey, value: f32| {
+                        if key.1 == PAN {
+                            iem_core::ClientMsg::SetPan { id: id.to_string(), pan: value }
+                        } else {
+                            iem_core::ClientMsg::SetLevel { id: id.to_string(), level_db: value }
+                        }
+                    };
+
+                    // Throttled send: at most one command per THROTTLE_INTERVAL_MS per
+                    // control; the last value of a burst is sent when the interval ends.
+                    let throttled_send = move |key: StripKey, value: f32| {
+                        let now = js_sys::Date::now();
+                        let last_time =
+                            last_send_times.with(|m| m.get(&key).copied().unwrap_or(0.0));
+                        if now - last_time >= THROTTLE_INTERVAL_MS {
+                            // Enough time has passed — send immediately
+                            let _ = set_last_send_times.try_update(|m| {
+                                m.insert(key, now);
+                            });
+                            let _ = set_pending_values.try_update(|m| {
+                                m.remove(&key);
+                            });
+                            cancel_pending_timeout(key);
+                            ws_send(ws, &command(key, value));
+                        } else {
+                            // Too soon — store as pending, schedule deferred send
+                            let _ = set_pending_values.try_update(|m| {
+                                m.insert(key, value);
+                            });
+                            cancel_pending_timeout(key);
+                            let cb = Closure::once_into_js(move || {
+                                let pending = pending_values
+                                    .try_with(|m| m.get(&key).copied())
+                                    .flatten();
+                                if let Some(val) = pending {
+                                    let _ = set_last_send_times.try_update(|m| {
+                                        m.insert(key, js_sys::Date::now());
+                                    });
+                                    let _ = set_pending_values.try_update(|m| {
+                                        m.remove(&key);
+                                    });
+                                    let _ = set_pending_timeouts.try_update(|m| {
+                                        m.remove(&key);
+                                    });
+                                    ws_send(ws, &command(key, val));
+                                }
+                            });
+                            if let Some(w) = web_sys::window() && let Ok(t) =
+                                    w.set_timeout_with_callback_and_timeout_and_arguments_0(
+                                        cb.unchecked_ref(),
+                                        THROTTLE_INTERVAL_MS as i32,
+                                    ) {
+                                    let _ = set_pending_timeouts.try_update(|m| {
+                                        m.insert(key, t);
+                                    });
+                                }
+                        }
+                    };
+
                     // Level change handler with throttling.
                     // Optimistic UI updates happen at full rate; WebSocket sends are
-                    // throttled to max ~20/sec per track to avoid server queue buildup.
+                    // throttled to max ~20/sec per channel to avoid server queue buildup.
                     let on_level_change = Callback::new(move |new_level: f32| {
                         if !connected.get() {
                             return;
                         }
-
-                        // Optimistic update at full rate
                         let _ = set_channels.try_update(|chs| {
-                            if let Some(ch) =
-                                chs.iter_mut().find(|c| c.track_index == track_idx)
-                            {
+                            if let Some(ch) = chs.iter_mut().find(|c| c.id == id) {
                                 ch.level_db = new_level;
                             }
-                            if let Some(partner) = partner_idx && let Some(ch) =
-                                    chs.iter_mut().find(|c| c.track_index == partner) {
-                                    ch.level_db = new_level;
-                                }
                         });
-
-                        // Throttled WebSocket send
-                        let now = js_sys::Date::now();
-                        let last_time =
-                            last_send_times.with(|m| m.get(&track_idx).copied().unwrap_or(0.0));
-
-                        if now - last_time >= THROTTLE_INTERVAL_MS {
-                            // Enough time has passed — send immediately
-                            let _ = set_last_send_times.try_update(|m| {
-                                m.insert(track_idx, now);
-                            });
-                            let _ = set_pending_values.try_update(|m| {
-                                m.remove(&track_idx);
-                            });
-                            cancel_pending_timeout(track_idx);
-
-                            ws_send(
-                                ws,
-                                &iem_core::ClientMsg::SetLevel {
-                                    track_index: track_idx,
-                                    level_db: new_level,
-                                },
-                            );
-                            if let Some(partner) = partner_idx {
-                                ws_send(
-                                    ws,
-                                    &iem_core::ClientMsg::SetLevel {
-                                        track_index: partner,
-                                        level_db: new_level,
-                                    },
-                                );
-                            }
-                        } else {
-                            // Too soon — store as pending, schedule deferred send
-                            let _ = set_pending_values.try_update(|m| {
-                                m.insert(track_idx, new_level);
-                            });
-                            cancel_pending_timeout(track_idx);
-
-                            let cb = Closure::once_into_js(move || {
-                                let pending =
-                                    pending_values.with(|m| m.get(&track_idx).copied());
-                                if let Some(val) = pending {
-                                    let _ = set_last_send_times.try_update(|m| {
-                                        m.insert(track_idx, js_sys::Date::now());
-                                    });
-                                    let _ = set_pending_values.try_update(|m| {
-                                        m.remove(&track_idx);
-                                    });
-                                    let _ = set_pending_timeouts.try_update(|m| {
-                                        m.remove(&track_idx);
-                                    });
-                                    ws_send(
-                                        ws,
-                                        &iem_core::ClientMsg::SetLevel {
-                                            track_index: track_idx,
-                                            level_db: val,
-                                        },
-                                    );
-                                    if let Some(partner) = partner_idx {
-                                        ws_send(
-                                            ws,
-                                            &iem_core::ClientMsg::SetLevel {
-                                                track_index: partner,
-                                                level_db: val,
-                                            },
-                                        );
-                                    }
-                                }
-                            });
-                            if let Some(w) = web_sys::window() && let Ok(id) =
-                                    w.set_timeout_with_callback_and_timeout_and_arguments_0(
-                                        cb.unchecked_ref(),
-                                        THROTTLE_INTERVAL_MS as i32,
-                                    ) {
-                                    let _ = set_pending_timeouts.try_update(|m| {
-                                        m.insert(track_idx, id);
-                                    });
-                                }
-                        }
+                        throttled_send((id, LEVEL), new_level);
                     });
 
                     // Pan change handler with throttling + cancellable guard
-                    // Uses pan_key = track_idx + 10000 to avoid collision with level keys
                     let on_pan_change = Callback::new(move |new_pan: f32| {
                         if !connected.get() {
                             return;
                         }
-
                         let _ = set_fader_touched.try_update(|t| {
-                            t.insert(track_idx, true);
-                            if let Some(partner) = partner_idx {
-                                t.insert(partner, true);
-                            }
+                            t.insert(id.to_string(), true);
                         });
-
-                        // Optimistic UI update at full rate
                         let _ = set_channels.try_update(|chs| {
-                            if let Some(ch) =
-                                chs.iter_mut().find(|c| c.track_index == track_idx)
-                            {
+                            if let Some(ch) = chs.iter_mut().find(|c| c.id == id) {
                                 ch.pan = new_pan;
                             }
-                            if let Some(partner) = partner_idx && let Some(ch) =
-                                    chs.iter_mut().find(|c| c.track_index == partner) {
-                                    ch.pan = 1.0 - new_pan;
-                                }
                         });
-
-                        // Throttled WebSocket send (same pattern as level)
-                        let pan_key = track_idx + 10000;
-                        let now = js_sys::Date::now();
-                        let last_time =
-                            last_send_times.with(|m| m.get(&pan_key).copied().unwrap_or(0.0));
-
-                        if now - last_time >= THROTTLE_INTERVAL_MS {
-                            let _ = set_last_send_times.try_update(|m| {
-                                m.insert(pan_key, now);
-                            });
-                            let _ = set_pending_values.try_update(|m| {
-                                m.remove(&pan_key);
-                            });
-                            cancel_pending_timeout(pan_key);
-
-                            ws_send(
-                                ws,
-                                &iem_core::ClientMsg::SetPan {
-                                    track_index: track_idx,
-                                    pan: new_pan,
-                                },
-                            );
-                            if let Some(partner) = partner_idx {
-                                ws_send(
-                                    ws,
-                                    &iem_core::ClientMsg::SetPan {
-                                        track_index: partner,
-                                        pan: 1.0 - new_pan,
-                                    },
-                                );
-                            }
-                        } else {
-                            let _ = set_pending_values.try_update(|m| {
-                                m.insert(pan_key, new_pan);
-                            });
-                            cancel_pending_timeout(pan_key);
-
-                            let cb = Closure::once_into_js(move || {
-                                let pending =
-                                    pending_values.with(|m| m.get(&pan_key).copied());
-                                if let Some(val) = pending {
-                                    let _ = set_last_send_times.try_update(|m| {
-                                        m.insert(pan_key, js_sys::Date::now());
-                                    });
-                                    let _ = set_pending_values.try_update(|m| {
-                                        m.remove(&pan_key);
-                                    });
-                                    let _ = set_pending_timeouts.try_update(|m| {
-                                        m.remove(&pan_key);
-                                    });
-                                    ws_send(
-                                        ws,
-                                        &iem_core::ClientMsg::SetPan {
-                                            track_index: track_idx,
-                                            pan: val,
-                                        },
-                                    );
-                                    if let Some(partner) = partner_idx {
-                                        ws_send(
-                                            ws,
-                                            &iem_core::ClientMsg::SetPan {
-                                                track_index: partner,
-                                                pan: 1.0 - val,
-                                            },
-                                        );
-                                    }
-                                }
-                            });
-                            if let Some(w) = web_sys::window() && let Ok(id) =
-                                    w.set_timeout_with_callback_and_timeout_and_arguments_0(
-                                        cb.unchecked_ref(),
-                                        THROTTLE_INTERVAL_MS as i32,
-                                    ) {
-                                    let _ = set_pending_timeouts.try_update(|m| {
-                                        m.insert(pan_key, id);
-                                    });
-                                }
-                        }
-
+                        throttled_send((id, PAN), new_pan);
                         // Cancellable post-release guard
-                        set_guard(pan_key);
+                        set_guard((id, PAN));
                     });
 
                     // Mute toggle handler with cancellable guard
@@ -847,128 +715,76 @@ pub(super) fn ChannelList(
                         if !connected.get() {
                             return;
                         }
-
-                        let current_muted = channels.with(|chs| {
-                            chs.iter()
-                                .find(|c| c.track_index == track_idx)
-                                .map(|c| c.muted)
-                                .unwrap_or(false)
+                        let shown = muted_signal.get_untracked();
+                        let click = soloed.with_untracked(|s| {
+                            pre_solo_mutes.with_untracked(|pre| mute_click(id, shown, s, pre))
                         });
-                        let new_muted = !current_muted;
-
-                        let _ = set_fader_touched.try_update(|t| {
-                            t.insert(track_idx, true);
-                            if let Some(partner) = partner_idx {
-                                t.insert(partner, true);
+                        let new_muted = match click {
+                            MuteClick::Toggle(m) => {
+                                let _ = set_fader_touched.try_update(|t| {
+                                    t.insert(id.to_string(), true);
+                                });
+                                let _ = set_channels.try_update(|chs| {
+                                    if let Some(ch) = chs.iter_mut().find(|c| c.id == id) {
+                                        ch.muted = m;
+                                    }
+                                });
+                                m
                             }
-                        });
-
-                        let _ = set_channels.try_update(|chs| {
-                            if let Some(ch) =
-                                chs.iter_mut().find(|c| c.track_index == track_idx)
-                            {
-                                ch.muted = new_muted;
+                            MuteClick::Masked(m) => {
+                                // Silent until the solo ends; restored then.
+                                let _ = set_pre_solo_mutes.try_update(|pre| {
+                                    pre.insert(id.to_string(), m);
+                                });
+                                m
                             }
-                            if let Some(partner) = partner_idx && let Some(ch) =
-                                    chs.iter_mut().find(|c| c.track_index == partner) {
-                                    ch.muted = new_muted;
-                                }
-                        });
-
+                        };
                         ws_send(
                             ws,
                             &iem_core::ClientMsg::SetMute {
-                                track_index: track_idx,
+                                id: id.to_string(),
                                 muted: new_muted,
                             },
                         );
-                        if let Some(partner) = partner_idx {
-                            ws_send(
-                                ws,
-                                &iem_core::ClientMsg::SetMute {
-                                    track_index: partner,
-                                    muted: new_muted,
-                                },
-                            );
-                        }
-
-                        // Cancellable post-release guard (mute key = track_idx + 20000)
-                        set_guard(track_idx + 20000);
+                        // Cancellable post-release guard
+                        set_guard((id, MUTE));
                     };
 
-                    // Solo toggle handler
+                    // Solo toggle handler (exclusive solo, F6)
                     let on_solo_click = move |_| {
                         if !connected.get() {
                             return;
                         }
 
-                        let all_channels = channels.get();
                         let current_soloed = soloed.get();
-                        let is_currently_soloed = current_soloed.contains(&track_idx);
-
-                        if is_currently_soloed {
-                            // UN-SOLO this track
-                            let mut new_soloed = current_soloed.clone();
-                            new_soloed.remove(&track_idx);
-                            if let Some(partner) = partner_idx {
-                                new_soloed.remove(&partner);
-                            }
-
-                            if new_soloed.is_empty() {
-                                // Restore pre-solo mutes (optimistic UI)
-                                let saved = pre_solo_mutes.get();
-                                let _ = set_channels.try_update(|chs| {
-                                    for c in chs.iter_mut() {
-                                        let should_be_muted = saved.get(&c.track_index).copied().unwrap_or(false);
-                                        c.muted = should_be_muted;
-                                    }
-                                });
-                                let _ = set_pre_solo_mutes.try_set(HashMap::new());
-                            } else {
-                                // Partial unsolo — mute the desoloed track(s)
-                                let _ = set_channels.try_update(|chs| {
-                                    if let Some(ch) = chs.iter_mut().find(|c| c.track_index == track_idx) {
-                                        ch.muted = true;
-                                    }
-                                    if let Some(partner) = partner_idx && let Some(ch) = chs.iter_mut().find(|c| c.track_index == partner) {
-                                            ch.muted = true;
-                                        }
-                                });
-                            }
-
-                            let soloed_vec: Vec<usize> = new_soloed.iter().copied().collect();
-                            let _ = set_soloed.try_set(new_soloed);
-                            ws_send(ws, &iem_core::ClientMsg::SetSolo { soloed: soloed_vec });
-                        } else {
-                            // SOLO this track
-                            let was_empty = current_soloed.is_empty();
-
-                            if was_empty {
-                                // Save pre-solo mutes for optimistic UI restore
-                                let mut saved_mutes = HashMap::new();
-                                for ch in &all_channels {
-                                    saved_mutes.insert(ch.track_index, ch.muted);
+                        if current_soloed.contains(id) {
+                            // UN-SOLO: the only soloed channel, so every mute
+                            // returns to what it was before the solo.
+                            let saved = pre_solo_mutes.get();
+                            let _ = set_channels.try_update(|chs| {
+                                for c in chs.iter_mut() {
+                                    c.muted = saved.get(&c.id).copied().unwrap_or(false);
                                 }
-                                let _ = set_pre_solo_mutes.try_set(saved_mutes);
+                            });
+                            let _ = set_pre_solo_mutes.try_set(HashMap::new());
+                            let _ = set_soloed.try_set(std::collections::HashSet::new());
+                            ws_send(ws, &iem_core::ClientMsg::SetSolo { soloed: vec![] });
+                        } else {
+                            if current_soloed.is_empty() {
+                                // Save pre-solo mutes for optimistic UI restore
+                                let saved: HashMap<String, bool> = channels.with(|chs| {
+                                    chs.iter().map(|c| (c.id.clone(), c.muted)).collect()
+                                });
+                                let _ = set_pre_solo_mutes.try_set(saved);
                             }
-
                             // Optimistic UI: mute everything except solo target
                             let _ = set_channels.try_update(|chs| {
                                 for c in chs.iter_mut() {
-                                    c.muted = c.track_index != track_idx
-                                        && partner_idx != Some(c.track_index);
+                                    c.muted = c.id != id;
                                 }
                             });
-
-                            // Build soloed set — exclusive (only new track + partner)
-                            let mut new_soloed = std::collections::HashSet::new();
-                            new_soloed.insert(track_idx);
-                            if let Some(partner) = partner_idx {
-                                new_soloed.insert(partner);
-                            }
-                            let soloed_vec: Vec<usize> = new_soloed.iter().copied().collect();
-                            let _ = set_soloed.try_set(new_soloed);
-                            ws_send(ws, &iem_core::ClientMsg::SetSolo { soloed: soloed_vec });
+                            let _ = set_soloed.try_set(std::collections::HashSet::from([id.to_string()]));
+                            ws_send(ws, &iem_core::ClientMsg::SetSolo { soloed: vec![id.to_string()] });
                         }
                     };
 
@@ -977,59 +793,41 @@ pub(super) fn ChannelList(
                     let on_touch_state = Callback::new(move |touching: bool| {
                         if touching {
                             // Cancel any pending release guard
-                            cancel_guard(track_idx);
+                            cancel_guard((id, LEVEL));
                             let _ = set_fader_touched.try_update(|t| {
-                                t.insert(track_idx, true);
-                                if let Some(partner) = partner_idx {
-                                    t.insert(partner, true);
-                                }
+                                t.insert(id.to_string(), true);
                             });
                         } else {
                             // Flush any pending throttled value immediately on release
-                            let pending =
-                                pending_values.with(|m| m.get(&track_idx).copied());
+                            let key = (id, LEVEL);
+                            let pending = pending_values.with(|m| m.get(&key).copied());
                             if let Some(val) = pending {
                                 let _ = set_last_send_times.try_update(|m| {
-                                    m.insert(track_idx, js_sys::Date::now());
+                                    m.insert(key, js_sys::Date::now());
                                 });
                                 let _ = set_pending_values.try_update(|m| {
-                                    m.remove(&track_idx);
+                                    m.remove(&key);
                                 });
-                                cancel_pending_timeout(track_idx);
-                                ws_send(
-                                    ws,
-                                    &iem_core::ClientMsg::SetLevel {
-                                        track_index: track_idx,
-                                        level_db: val,
-                                    },
-                                );
-                                if let Some(partner) = partner_idx {
-                                    ws_send(
-                                        ws,
-                                        &iem_core::ClientMsg::SetLevel {
-                                            track_index: partner,
-                                            level_db: val,
-                                        },
-                                    );
-                                }
+                                cancel_pending_timeout(key);
+                                ws_send(ws, &command(key, val));
                             }
 
                             // Cancellable post-release guard
-                            set_guard(track_idx);
+                            set_guard(key);
                         }
                     });
 
-                    let is_soloed = move || soloed.get().contains(&track_idx);
+                    let is_soloed = move || soloed.with(|s| s.contains(id));
                     let is_connected = move || connected.get();
                     let is_hidden_tab = move || active_category.get() == Category::Hidden;
 
-                    // Pin toggle: add/remove track from pinned list
+                    // Pin toggle: add/remove the channel from the pinned list
                     let on_pin_click = move |_| {
                         let mut pinned = pinned_channels.get();
-                        if pinned.contains(&track_idx) {
-                            pinned.retain(|&x| x != track_idx);
+                        if pinned.iter().any(|x| x == id) {
+                            pinned.retain(|x| x != id);
                         } else {
-                            pinned.push(track_idx);
+                            pinned.push(id.to_string());
                         }
                         let _ = set_pinned_channels.try_set(pinned.clone());
                         // Save to server via WS
@@ -1040,13 +838,13 @@ pub(super) fn ChannelList(
                         });
                     };
 
-                    // Hide/unhide toggle: add/remove track from hidden list
+                    // Hide/unhide toggle: add/remove the channel from the hidden list
                     let on_hide_click = move |_| {
                         let mut hidden = hidden_channels.get();
-                        if hidden.contains(&track_idx) {
-                            hidden.retain(|&x| x != track_idx);
+                        if hidden.iter().any(|x| x == id) {
+                            hidden.retain(|x| x != id);
                         } else {
-                            hidden.push(track_idx);
+                            hidden.push(id.to_string());
                         }
                         let _ = set_hidden_channels.try_set(hidden.clone());
                         // Save to server via WS
@@ -1063,19 +861,18 @@ pub(super) fn ChannelList(
                                 let mut classes = vec!["channel"];
                                 if muted_signal.get() { classes.push("muted"); }
                                 if is_my { classes.push("more-me"); }
-                                if is_stereo { classes.push("stereo-pair"); }
                                 if !is_connected() { classes.push("disconnected"); }
                                 if is_fader_active.get() { classes.push("fader-active"); }
-                                if open_menu.get() == Some(track_idx) { classes.push("menu-open"); }
+                                if open_menu.get() == Some(id) { classes.push("menu-open"); }
                                 classes.join(" ")
                             }
+                            data-channel=id
                             on:click=move |_| { let _ = set_open_menu.try_set(None); }
                         >
                             <div class="ch-label">
                                 <div class="ch-name">{parse_track_name(&name).0}</div>
                                 <div class="ch-type">
                                     {parse_track_name(&name).1}
-                                    {if is_stereo { " (st)" } else { "" }}
                                 </div>
                             </div>
 
@@ -1116,11 +913,11 @@ pub(super) fn ChannelList(
                             </div>
                             // Kebab menu button (⋮)
                             <button
-                                class=move || if open_menu.get() == Some(track_idx) { "ch-menu-btn open" } else { "ch-menu-btn" }
+                                class=move || if open_menu.get() == Some(id) { "ch-menu-btn open" } else { "ch-menu-btn" }
                                 on:click=move |ev: web_sys::MouseEvent| {
                                     ev.stop_propagation();
                                     let _ = set_open_menu.try_update(|v| {
-                                        *v = if *v == Some(track_idx) { None } else { Some(track_idx) };
+                                        *v = if *v == Some(id) { None } else { Some(id) };
                                     });
                                 }
                             >
@@ -1128,7 +925,7 @@ pub(super) fn ChannelList(
                             </button>
 
                             // Kebab menu popup (only when this channel's menu is open)
-                            <Show when=move || open_menu.get() == Some(track_idx) fallback=|| ()>
+                            <Show when=move || open_menu.get() == Some(id) fallback=|| ()>
                                 <div class="ch-menu-popup" on:click=move |ev: web_sys::MouseEvent| ev.stop_propagation()>
                                     <button
                                         class=move || if ch_is_pinned() { "ch-menu-item pinned" } else { "ch-menu-item" }
@@ -1152,9 +949,8 @@ pub(super) fn ChannelList(
                                                 let _ = set_open_menu.try_set(None);
                                                 let _ = set_eq_bands.try_set(Vec::new());
                                                 let _ = set_eq_loading.try_set(true);
-                                                let _ = set_eq_open.try_set(Some((track_idx, eq_name.get_value())));
-                                                // Request EQ params from REAPER
-                                                ws_send(ws, &iem_core::ClientMsg::GetEqParams { track_index: track_idx });
+                                                let _ = set_eq_open.try_set(Some((id.to_string(), eq_name.get_value())));
+                                                ws_send(ws, &iem_core::ClientMsg::GetEqParams { target: id.to_string() });
                                             }
                                         >
                                             <span class="menu-icon">"\u{2261}"</span>

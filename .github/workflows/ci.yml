@@ -233,6 +233,8 @@ jobs:
           set -euo pipefail
           test -f crates/iem-ui/dist/index.html
           ls crates/iem-ui/dist/*.wasm
+          # X11: the listen limiter worklet ships with the page
+          test -f crates/iem-ui/dist/listen-limiter-worklet.js
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: wasm-dist
@@ -256,8 +258,11 @@ jobs:
           name: wasm-dist
           path: crates/iem-ui/dist
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - name: Build the server
-        run: cargo build --locked --release -p iem-server --features standalone,audio
+      - name: Build the server and the engine
+        run: |
+          set -euo pipefail
+          cargo build --locked --release -p iem-server --features standalone,audio
+          cargo build --locked --release -p iem-engine
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
@@ -289,22 +294,32 @@ jobs:
             echo "E2E_MEMBER_PIN=$mem"
           } >> "$GITHUB_ENV"
           printf '%s\n' "$eng" | ./target/release/iem-server pin set-engineer
-          members="$(python3 -c 'import sys, tomllib; site = tomllib.load(open(sys.argv[1], "rb")); print(" ".join(m["name"].lower() for m in site["members"] if m["name"].lower() != "engineer"))' "$IEMMIXER_CONFIG")"
+          members="$(python3 -c 'import sys, tomllib; site = tomllib.load(open(sys.argv[1], "rb")); print(" ".join(m["id"] for m in site["members"] if m["id"] != "engineer"))' "$IEMMIXER_CONFIG")"
           for member in $members; do
             printf '%s\n' "$mem" | ./target/release/iem-server pin set-member "$member"
           done
-      - name: Start the server
+      - name: Start the engine (NullRt, 1 kHz test sine) and the server
         env:
           RUST_LOG: info
           PORT: "8080"
         run: |
           set -euo pipefail
-          nohup ./target/release/iem-server > "$RUNNER_TEMP/server.log" 2>&1 &
+          pipe="$RUNNER_TEMP/iem-engine.sock"
+          echo "IEMMIXER_ENGINE_PIPE=$pipe" >> "$GITHUB_ENV"
+          nohup ./target/release/iem-engine run --site "$IEMMIXER_CONFIG" \
+            --state-dir "$RUNNER_TEMP/engine-state" --pipe "$pipe" --sine 1000 \
+            > "$RUNNER_TEMP/engine.log" 2>&1 &
+          for i in $(seq 1 30); do
+            if [ -S "$pipe" ]; then echo "engine ready after ${i}s"; break; fi
+            if [ "$i" -eq 30 ]; then cat "$RUNNER_TEMP/engine.log"; exit 1; fi
+            sleep 1
+          done
+          IEMMIXER_ENGINE_PIPE="$pipe" nohup ./target/release/iem-server > "$RUNNER_TEMP/server.log" 2>&1 &
           for i in $(seq 1 30); do
             if curl -sf http://127.0.0.1:8080/api/version > /dev/null; then echo "server ready after ${i}s"; exit 0; fi
             sleep 1
           done
-          cat "$RUNNER_TEMP/server.log"
+          cat "$RUNNER_TEMP/engine.log" "$RUNNER_TEMP/server.log"
           exit 1
       - name: Playwright (mock E2E, clean console)
         working-directory: e2e
@@ -320,6 +335,7 @@ jobs:
           path: |
             e2e/test-results/
             ${{ runner.temp }}/server.log
+            ${{ runner.temp }}/engine.log
           retention-days: 7
 
   windows:

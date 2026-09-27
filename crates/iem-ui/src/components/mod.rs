@@ -1,11 +1,13 @@
 //! Reusable UI components
 
+pub mod activity_banner;
 pub mod alert_button;
 pub mod alert_toast;
 pub mod audio_player;
 pub mod backup_section;
 pub mod category_tabs;
 pub mod confirm_dialog;
+pub mod console_section;
 pub mod eq_modal;
 pub mod fader;
 pub mod limiter_modal;

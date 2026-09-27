@@ -20,22 +20,40 @@ exclude_re = [
   # WS client; the Playwright suite covers them (whole-body replacements only).
   "replace start_server -> ",
   "replace run_server -> ",
-  "replace handle_ws with \\(\\)",
-  "handle_talkback_ws",
-  "talkback_diagnostics_handler",
+  # WebSocket upgrades and per-connection loops (S5): socket reads, writes and
+  # timers; the message logic is in tested functions (view::command,
+  # updates_for, own_echo, addressed, alert_catchup, slot_of, TalkLock, the
+  # talkback decoder) and the E2E suites drive the sockets end to end.
+  "iem-server/src/mixer_ws\\.rs.*\\b(ws_mixer|session|close_reload)\\b",
+  "iem-server/src/listen_ws\\.rs.*\\b(ws_audio|session)\\b",
+  "iem-server/src/talkback_ws\\.rs.*\\b(ws_talkback|session)\\b",
+  # The console's background loops (100 ms meters, 250 ms janitor): their steps
+  # are tested functions (MeterMerge, BandActivity, SoloJanitor, TalkLock).
+  "iem-server/src/console\\.rs.*\\b(spawn_tasks|meter_task|janitor_task)\\b",
   # Test-only constructors.
   "new_for_test",
-  "make_test_state_with_bad_reaper",
-  # REAPER-era background loops (deleted in S5).
-  "poll_reaper_and_broadcast",
-  "try_persist_auto_snapshot",
   # Tunnel watchdog loop and the Windows sc.exe restart.
   "spawn_tunnel_watch",
   "restart_service_blocking",
   "sc_windows",
   # Browser-only fetches and context accessors in the UI; covered by
-  # e2e/tests/site-links.spec.ts and e2e/tests/login-protection.spec.ts.
-  "iem-ui/src/api\\.rs.*replace (login|get_site_links) ",
+  # e2e/tests/site-links.spec.ts, e2e/tests/login-protection.spec.ts and
+  # e2e/tests/engineer.spec.ts (the switch).
+  "iem-ui/src/api\\.rs.*replace (login|get_site_links|back_to_reaper) ",
+  # Leptos component bodies (S5): a PascalCase function is a component; its
+  # body is DOM event closures and effects that native tests cannot mount. The
+  # E2E suites drive them; their pure logic lives in tested helpers.
+  "iem-ui/src/.* in [A-Z][A-Za-z]*$",
+  # Browser-only fetches of the preset modal (the server side is tested).
+  "iem-ui/src/components/preset_modal\\.rs.*\\b(fetch_presets|save_preset_api|update_preset_api|restore_preset_api|delete_preset_api|server_message)\\b",
+  # The console's socket send (a no-op off the browser).
+  "iem-ui/src/components/console_section\\.rs.*replace send with \\(\\)",
+  # The handshake's localStorage and location.reload().
+  "iem-ui/src/handshake\\.rs.*\\b(last_reload|reload)\\b",
+  # Mixer page state: signal constructors and modal toggles (browser-only).
+  "iem-ui/src/pages/mixer/state\\.rs",
+  # The tab memo only wraps the tested display_channels.
+  "iem-ui/src/pages/mixer/handlers\\.rs.*make_display_channels",
   "iem-ui/src/components/tunnel_status\\.rs.*replace site_links ",
   # Leptos component bodies are DOM event closures and effects: native tests
   # cannot mount a component (web_sys panics off wasm). Their pure logic lives
@@ -89,7 +107,7 @@ exclude_re = [
   # waiting command; rendering in two pieces is bit-identical (block-size invariance tests).
   "iem-engine/src/rt\\.rs:963:.*replace > with >= in <impl Process for Processor>::process",
   # The fade wait's `elapsed < FADE_WAIT`: differs only at the exact nanosecond.
-  "iem-engine/src/control\\.rs.*replace < with <= in Control::shutdown_now",
+  "iem-engine/src/control\\.rs.*replace < with <= in Control::fade_out",
   # Unobservable (S3): the `!` only decides whether "solos cleared" is logged.
   "iem-engine/src/control\\.rs.*delete ! in Control::tick",
   # Equivalent (S4). The synthetic generator draws k/2^53; a draw equal to a

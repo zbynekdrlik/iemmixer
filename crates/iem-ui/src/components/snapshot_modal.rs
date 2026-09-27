@@ -15,7 +15,11 @@ pub struct SnapshotInfo {
     pub timestamp: i64,
     pub label: String,
     pub pinned: bool,
+    #[serde(default)]
     pub channel_count: usize,
+    /// Imported from the predecessor and read-only (restorable, never changed)
+    #[serde(default)]
+    pub archived: bool,
 }
 
 /// Slovak day names
@@ -331,6 +335,7 @@ pub fn SnapshotModal(
                                     {current.into_iter().map(|snap| {
                                         let timestamp = snap.timestamp;
                                         let is_pinned = snap.pinned;
+                                        let editable = !snap.archived;
                                         let label = snap.label.clone();
                                         let label_for_pin = snap.label.clone();
                                         let ts_label = format_timestamp_with_day(timestamp);
@@ -369,6 +374,7 @@ pub fn SnapshotModal(
                                                     >
                                                         "Obnoviť"
                                                     </button>
+                                                    {editable.then(|| view! {
                                                     <button
                                                         class=move || if is_pinned { "snapshot-pin-btn pinned" } else { "snapshot-pin-btn" }
                                                         on:click={
@@ -415,6 +421,7 @@ pub fn SnapshotModal(
                                                     >
                                                         "Zmazať"
                                                     </button>
+                                                    })}
                                                 </div>
                                             </div>
                                         }

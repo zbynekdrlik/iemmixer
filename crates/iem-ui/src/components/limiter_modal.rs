@@ -29,7 +29,7 @@ fn norm_to_db(norm: f32) -> f32 {
 ///   60.0 -> "1 min 0 sec limited"
 ///   83.5 -> "1 min 23 sec limited"
 ///   3661.0 -> "61 min 1 sec limited"
-fn format_active(secs: f64) -> String {
+pub(crate) fn format_active(secs: f64) -> String {
     if secs <= 0.0 {
         return "not limited yet".to_string();
     }

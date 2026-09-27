@@ -2753,6 +2753,7 @@ dependencies = [
  "gloo-storage",
  "gloo-timers",
  "iem-core",
+ "iem-dsp",
  "js-sys",
  "leptos",
  "leptos_router",
