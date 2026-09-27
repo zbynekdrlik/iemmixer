@@ -279,6 +279,7 @@ mod tests {
     use crate::daemon::{Guard, Outcome, handle};
     use crate::pc::fake::FakePc;
     use crate::plan::{Facts, Mode};
+    use crate::proto::Update;
 
     static NEXT: AtomicUsize = AtomicUsize::new(0);
 
@@ -485,37 +486,50 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_subscriber_gets_changes_and_the_trays_quit() {
-        let (s, _rx) = served();
-        assert_eq!(
-            s.shared.tray_quit(),
-            Err("the tray is not subscribed to the guard".to_owned())
-        );
+    /// The state frames of a subscription, as the tray reads them.
+    fn state(update: Update) -> Reply {
+        match update {
+            Update::State(reply) => reply,
+            Update::Quit => panic!("a quit, not a state"),
+        }
+    }
+
+    /// A tray's subscription on `s`, once the guard counts it.
+    fn subscribed(s: &Served) -> Stream {
         let stream = Stream::connect(pipe_name(&s.name).unwrap()).unwrap();
         let mut wire = &stream;
         proto::write_frame(&mut wire, &Request::Subscribe).unwrap();
-        let first: Reply = proto::read_msg(&mut wire).unwrap();
+        let first = state(proto::read_update(&mut wire).unwrap());
         assert!(first.ok);
         let t = Instant::now();
         while s.shared.view().subscribers == 0 {
             assert!(t.elapsed() < Duration::from_secs(5));
             thread::sleep(Duration::from_millis(10));
         }
+        stream
+    }
+
+    /// The tray's subscription (S6 plan Task 11): state frames, and the
+    /// guard's quit as `Update::Quit` (`{"cmd":"quit"}`), the frame the tray
+    /// exits on.
+    #[test]
+    fn a_subscriber_gets_changes_and_the_trays_quit() {
+        let (s, _rx) = served();
+        let stream = subscribed(&s);
+        let mut wire = &stream;
         let t = Instant::now();
         s.shared.update(|v| v.status = "mode dev".into());
-        let change: Reply = proto::read_msg(&mut wire).unwrap();
+        let change = state(proto::read_update(&mut wire).unwrap());
         assert_eq!(change.detail, "mode dev");
         // Well inside the subscriber's own poll: the change woke it.
         assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
         let t = Instant::now();
         s.shared.tray_quit().unwrap();
-        let quit: Reply = proto::read_msg(&mut wire).unwrap();
-        assert_eq!(quit.detail, proto::TRAY_QUIT);
+        assert_eq!(proto::read_update(&mut wire).unwrap(), Update::Quit);
         assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
         // A quit alone sends no status: the next frame is the next change.
         s.shared.update(|v| v.status = "mode event".into());
-        let next: Reply = proto::read_msg(&mut wire).unwrap();
+        let next = state(proto::read_update(&mut wire).unwrap());
         assert_eq!(next.detail, "mode event");
         drop(stream);
         // The subscriber leaves at its next write.
@@ -525,6 +539,25 @@ mod tests {
             assert!(t.elapsed() < Duration::from_secs(5), "never left");
             thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// The guard stops the tray while the tray waits to connect again (its
+    /// 2 s retry): the quit waits for the next subscription, which gets it
+    /// right after its first state.
+    #[test]
+    fn a_tray_that_subscribes_after_the_quit_gets_it_at_once() {
+        let (s, _rx) = served();
+        assert_eq!(s.shared.tray_quit(), Ok(()));
+        let stream = subscribed(&s);
+        let mut wire = &stream;
+        assert_eq!(proto::read_update(&mut wire).unwrap(), Update::Quit);
+        // Taken once: another subscription gets states only.
+        drop(stream);
+        let again = subscribed(&s);
+        let mut wire = &again;
+        s.shared.update(|v| v.status = "mode dev".into());
+        let next = state(proto::read_update(&mut wire).unwrap());
+        assert_eq!(next.detail, "mode dev");
     }
 
     #[test]
