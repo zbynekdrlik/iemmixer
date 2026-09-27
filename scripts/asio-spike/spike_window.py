@@ -120,17 +120,22 @@ def buffer_args(state: dict) -> str:
     return args
 
 
-def preflight_problems(r: dict, original: int) -> list[str]:
+def preflight_problems(r: dict, original: int, dev_time: bool = False) -> list[str]:
+    """dev_time: the window opens after REAPER was already saved and quit
+    ("event skončil" handled before the window), so REAPER must be gone and
+    nothing may hold the ASIO module; otherwise REAPER must hold it."""
     problems = []
     if r["pref"] != original:
         problems.append(f"the driver's preferred buffer is {r['pref']}, the recorded original is {original}: stop and tell the owner")
-    if not r["reaper"]:
+    if dev_time and r["reaper"]:
+        problems.append("REAPER runs (a dev-time window starts with REAPER saved and quit)")
+    if not dev_time and not r["reaper"]:
         problems.append("REAPER is not running (a window starts from the event state)")
     if not r["app"]:
         problems.append("the predecessor app is not running")
     if r["spike"]:
         problems.append("a spike already runs")
-    if any(not h.lower().startswith("reaper.exe:") for h in r["holders"] or []):
+    if any(dev_time or not h.lower().startswith("reaper.exe:") for h in r["holders"] or []):
         problems.append(f"unexpected ASIO module holders {r['holders']}")
     if not r["task"]:
         problems.append("the spike task is not registered (run setup)")
@@ -290,6 +295,13 @@ def open_state() -> dict:
     return state
 
 
+def need_preflight(state: dict) -> None:
+    """A dev-time window has a free card from the start: no buffer write
+    and no run before its preflight passed."""
+    if "preflight" not in state:
+        raise StepError("run preflight first")
+
+
 def spike_running(env: dict[str, str], event: str = "abandon") -> bool:
     return bool(ps(env, "@(Get-Process -Name asio_spike -ErrorAction SilentlyContinue).Count", timeout=60, event=event))
 
@@ -303,8 +315,11 @@ def cmd_new(env, args) -> None:
     if STATE.is_file() and not json.loads(STATE.read_text(encoding="utf-8")).get("closed"):
         raise StepError("the last window is still open: finish it (to-event) or run preempt")
     wid = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    save_state({"id": wid, "signal": args.signal, "card": "reaper", "pref_original": int(env["PC_BUFFER_ORIGINAL"]),
-                "pref_current": None, "pref_restored": False, "runs": [], "closed": False})
+    # --dev-time: REAPER was already saved and quit, so the card is free from the start and
+    # "ide event" (preempt, to-event) brings REAPER back with the handover checks.
+    save_state({"id": wid, "signal": args.signal, "card": "free" if args.dev_time else "reaper", "dev_time": bool(args.dev_time),
+                "pref_original": int(env["PC_BUFFER_ORIGINAL"]), "pref_current": None, "pref_restored": False,
+                "runs": [], "closed": False})
     print(wid)
 
 
@@ -344,8 +359,13 @@ def cmd_setup(env, args) -> None:
 
 def cmd_preflight(env, args) -> None:
     state = open_state()
-    if state["card"] != "reaper":
-        raise StepError("preflight belongs before to-dev")
+    dev_time = bool(state.get("dev_time"))
+    if dev_time:
+        early = state["card"] == "free" and state["pref_current"] is None and not state["runs"]
+    else:
+        early = state["card"] == "reaper"
+    if not early:
+        raise StepError("preflight belongs before to-dev (a dev-time window: before any set-buffer or run)")
     r = ps(env, " ; ".join([
         f"$p = Get-SpikeBufferPref -Key {ps_quote(env['PC_BUFFER_KEY'])} -Name {ps_quote(env['PC_BUFFER_NAME'])}",
         f"$h = Get-GoldenAsioHolders -Module {ps_quote(env['PC_ASIO_MODULE'])}",
@@ -356,7 +376,7 @@ def cmd_preflight(env, args) -> None:
         "spike = @(Get-Process -Name asio_spike -ErrorAction SilentlyContinue).Count; "
         f"task = [bool](Get-ScheduledTask {TASK} -ErrorAction SilentlyContinue); files = @($s).Count }}",
     ]), timeout=120, event="abandon")
-    problems = preflight_problems(r, state["pref_original"])
+    problems = preflight_problems(r, state["pref_original"], dev_time)
     if problems:
         raise StepError("; ".join(problems))
     state["preflight"] = r
@@ -382,6 +402,7 @@ def cmd_to_dev(env, args) -> None:
 
 def cmd_set_buffer(env, args) -> None:
     state = open_state()
+    need_preflight(state)
     if state["card"] != "free":
         raise StepError("the card is not free (run to-dev)")
     if args.frames not in FRAMES:
@@ -396,6 +417,7 @@ def cmd_set_buffer(env, args) -> None:
 
 def cmd_run(env, args) -> None:
     state = open_state()
+    need_preflight(state)
     if state["card"] != "free":
         raise StepError("the card is not free (run to-dev)")
     check_request(args.mode, args.frames, args.seconds, args.burn_us, args.stress, args.cycles)
@@ -505,7 +527,9 @@ WINDOW_STEPS = ("setup", "preflight", "to-dev", "set-buffer", "run", "to-event")
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("new").add_argument("--signal", required=True)
+    new = sub.add_parser("new")
+    new.add_argument("--signal", required=True)
+    new.add_argument("--dev-time", action="store_true", help="REAPER is already saved and quit: the card is free from the start")
     for name in ("fetch-bundle", "setup"):
         sub.add_parser(name).add_argument("--sha", required=True)
     for name in ("preflight", "to-dev", "to-event", "preempt", "status"):

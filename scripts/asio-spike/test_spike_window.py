@@ -197,6 +197,80 @@ class PreflightTests(unittest.TestCase):
             self.assertEqual(len(problems), 1, change)
             self.assertIn(words, problems[0])
 
+    def test_a_dev_time_window_needs_reaper_gone_and_the_module_free(self) -> None:
+        free = dict(self.GOOD, reaper=0, holders=[])
+        self.assertEqual(sw.preflight_problems(free, 64, dev_time=True), [])
+        self.assertEqual(sw.preflight_problems(dict(free, holders=None), 64, dev_time=True), [])
+        for change, words in (({"reaper": 1}, "REAPER runs"), ({"holders": ["reaper.exe:1"]}, "holders"),
+                              ({"pref": 32}, "preferred buffer is 32"), ({"app": 0}, "predecessor app"),
+                              ({"files": 3}, "3 verified")):
+            problems = sw.preflight_problems(dict(free, **change), 64, dev_time=True)
+            self.assertEqual(len(problems), 1, change)
+            self.assertIn(words, problems[0])
+
+
+class DevTimeWindowTests(unittest.TestCase):
+    """A window opened after REAPER was already saved and quit ("event skončil")."""
+
+    def setUp(self) -> None:
+        d = Path(tempfile.mkdtemp())
+        self.saved = (sw.STATE, sw.EVENT_NOW, sw.ps)
+        sw.STATE, sw.EVENT_NOW = d / "spike-window.json", d / "EVENT-NOW"
+        self.calls: list[str] = []
+        self.pc = {"pref": 64, "kind": "DWord", "raw": "64", "reaper": 0, "app": 1, "spike": 0, "holders": [],
+                   "task": True, "files": 4}
+
+        def fake_ps(env, body, timeout=300, event="finish"):
+            self.calls.append(body)
+            return dict(self.pc)
+
+        sw.ps = fake_ps
+        self.env = {"PC_BUFFER_ORIGINAL": "64", "PC_BUFFER_KEY": "K", "PC_BUFFER_NAME": "N", "PC_ASIO_MODULE": "M",
+                    "PC_ROOT": "R", "PC_APP_PROCESS": "A"}
+
+    def tearDown(self) -> None:
+        sw.STATE, sw.EVENT_NOW, sw.ps = self.saved
+
+    def args(self, **kw):
+        return type("Args", (), dict({"signal": "owner, 13:07: event skončil", "dev_time": True, "frames": 32}, **kw))()
+
+    def test_the_card_is_free_from_the_start_so_an_event_brings_reaper_back(self) -> None:
+        sw.cmd_new(self.env, self.args())
+        state = sw.load_state()
+        self.assertEqual((state["card"], state["dev_time"]), ("free", True))
+        self.assertEqual(sw.undo_plan(state, spike_running=False), ["stop-spike", "bring-back"])
+
+    def test_an_event_state_window_still_starts_with_reaper(self) -> None:
+        sw.cmd_new(self.env, self.args(dev_time=False))
+        self.assertEqual(sw.load_state()["card"], "reaper")
+        self.assertFalse(sw.load_state()["dev_time"])
+
+    def test_preflight_records_the_free_card_and_refuses_after_a_buffer_write(self) -> None:
+        sw.cmd_new(self.env, self.args())
+        sw.cmd_preflight(self.env, self.args())
+        state = sw.load_state()
+        self.assertEqual((state["card"], state["preflight"]["kind"]), ("free", "DWord"))
+        state["pref_current"] = 32
+        sw.save_state(state)
+        with self.assertRaisesRegex(sw.StepError, "preflight belongs before"):
+            sw.cmd_preflight(self.env, self.args())
+
+    def test_a_running_reaper_stops_a_dev_time_preflight(self) -> None:
+        self.pc["reaper"] = 1
+        sw.cmd_new(self.env, self.args())
+        with self.assertRaisesRegex(sw.StepError, "REAPER runs"):
+            sw.cmd_preflight(self.env, self.args())
+        self.assertNotIn("preflight", sw.load_state())
+
+    def test_no_buffer_write_or_run_before_the_preflight(self) -> None:
+        sw.cmd_new(self.env, self.args())
+        with self.assertRaisesRegex(sw.StepError, "run preflight first"):
+            sw.cmd_set_buffer(self.env, self.args())
+        run = self.args(mode="probe", seconds=60, burn_us=0, stress=0, cycles=1, panic_at=0)
+        with self.assertRaisesRegex(sw.StepError, "run preflight first"):
+            sw.cmd_run(self.env, run)
+        self.assertEqual(self.calls, [])
+
 
 class BundleTests(unittest.TestCase):
     def bundle(self) -> Path:
