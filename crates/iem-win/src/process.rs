@@ -1,13 +1,14 @@
-//! Process queries (S6 design note §3, §5.2): processes by image name, the
-//! holders of a module (the card's driver DLL), a process's start time and
-//! image path, waiting for a process to end, and the owner of a listening TCP
-//! port. Nothing here ends a process: a caller asks a process to stop by its
-//! own route and then watches it with [`wait_gone`].
+//! Process queries (S6 design note §3, §5.2, §5.3): processes by image name,
+//! the holders of a module (the card's driver DLL), a process's start time
+//! and image path, a handle to wait on a process and read its exit code, the
+//! owner of a listening TCP port, and the system's boot time. Nothing here
+//! ends a process: a caller opens a [`Handle`], asks the process to stop by
+//! its own route, and then waits on the handle.
 //!
 //! Image and module names compare without ASCII case.
 
 use std::io;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 /// The processes that have a module loaded (see [`module_scan`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -51,15 +52,50 @@ pub fn image_path(pid: u32) -> io::Result<String> {
     imp::image_path(pid)
 }
 
-/// Waits up to `timeout` for the process to end: `true` once it is gone
-/// (also when no process has this id), `false` when it still runs.
-pub fn wait_gone(pid: u32, timeout: Duration) -> io::Result<bool> {
-    imp::wait_gone(pid, timeout)
+/// A handle to one process, opened to wait for its end and read its exit
+/// code (`SYNCHRONIZE` and limited query access). Opened **before** the
+/// process is asked to stop, it names that process only: a pid that ends and
+/// is recycled can never answer for it (S6 design note §5.3).
+#[derive(Debug)]
+pub struct Handle {
+    pid: u32,
+    inner: imp::Handle,
+}
+
+impl Handle {
+    /// Opens the running process `pid`.
+    pub fn open_waitable(pid: u32) -> io::Result<Handle> {
+        Ok(Handle {
+            pid,
+            inner: imp::Handle::open_waitable(pid)?,
+        })
+    }
+
+    /// The process id the handle was opened for.
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    /// Waits up to `timeout` (whole milliseconds, never unbounded) for the
+    /// process to end: its exit code once it has ended, `None` while it
+    /// still runs.
+    pub fn wait(&self, timeout: Duration) -> io::Result<Option<u32>> {
+        self.inner.wait(crate::decide::wait_ms(timeout))
+    }
 }
 
 /// The pid that listens on this TCP port (IPv4 first, then IPv6), if any.
 pub fn listening(port: u16) -> io::Result<Option<u32>> {
     imp::listening(port)
+}
+
+/// When the system started: now minus the time since the start, sleep and
+/// hibernation included (`GetTickCount64`). A restart moves it; a shutdown
+/// with Fast Startup hibernates the kernel and may keep the earlier time,
+/// which is why the guard's reboot rule also looks at the processes that run
+/// (S6 design note §5.2).
+pub fn boot_time() -> io::Result<SystemTime> {
+    crate::decide::boot_time(SystemTime::now(), imp::since_boot()?)
 }
 
 #[cfg(not(windows))]
@@ -89,12 +125,26 @@ mod imp {
         crate::unsupported()
     }
 
-    pub(super) fn wait_gone(_pid: u32, _timeout: Duration) -> io::Result<bool> {
+    pub(super) fn listening(_port: u16) -> io::Result<Option<u32>> {
         crate::unsupported()
     }
 
-    pub(super) fn listening(_port: u16) -> io::Result<Option<u32>> {
+    pub(super) fn since_boot() -> io::Result<Duration> {
         crate::unsupported()
+    }
+
+    /// Never opened off Windows.
+    #[derive(Debug)]
+    pub(super) enum Handle {}
+
+    impl Handle {
+        pub(super) fn open_waitable(_pid: u32) -> io::Result<Self> {
+            crate::unsupported()
+        }
+
+        pub(super) fn wait(&self, _ms: u32) -> io::Result<Option<u32>> {
+            match *self {}
+        }
     }
 }
 
@@ -107,8 +157,8 @@ mod imp {
     use std::time::Duration;
 
     use windows_sys::Win32::Foundation::{
-        ERROR_BAD_LENGTH, ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_PARAMETER, ERROR_NO_MORE_FILES,
-        FALSE, FILETIME, WAIT_OBJECT_0, WAIT_TIMEOUT,
+        ERROR_BAD_LENGTH, ERROR_INSUFFICIENT_BUFFER, ERROR_NO_MORE_FILES, FALSE, FILETIME,
+        WAIT_OBJECT_0, WAIT_TIMEOUT,
     };
     use windows_sys::Win32::NetworkManagement::IpHelper::{
         GetExtendedTcpTable, MIB_TCP6ROW_OWNER_PID, MIB_TCP6TABLE_OWNER_PID, MIB_TCPROW_OWNER_PID,
@@ -119,10 +169,11 @@ mod imp {
         Process32FirstW, Process32NextW, TH32CS_SNAPMODULE, TH32CS_SNAPMODULE32,
         TH32CS_SNAPPROCESS,
     };
+    use windows_sys::Win32::System::SystemInformation::GetTickCount64;
     use windows_sys::Win32::System::Threading::{
-        GetProcessTimes, OpenProcess, PROCESS_ACCESS_RIGHTS, PROCESS_NAME_WIN32,
-        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, QueryFullProcessImageNameW,
-        WaitForSingleObject,
+        GetExitCodeProcess, GetProcessTimes, OpenProcess, PROCESS_ACCESS_RIGHTS,
+        PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+        QueryFullProcessImageNameW, WaitForSingleObject,
     };
 
     use super::ModuleScan;
@@ -270,28 +321,34 @@ mod imp {
         ))
     }
 
-    pub(super) fn wait_gone(pid: u32, timeout: Duration) -> io::Result<bool> {
-        // SAFETY: a plain call; null is its failure.
-        let raw = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, FALSE, pid) };
-        if raw.is_null() {
-            let err = io::Error::last_os_error();
-            // No process has this id (any more).
-            if err.raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32) {
-                return Ok(true);
+    #[derive(Debug)]
+    pub(super) struct Handle(OwnedHandle);
+
+    impl Handle {
+        pub(super) fn open_waitable(pid: u32) -> io::Result<Self> {
+            open(pid, PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION).map(Self)
+        }
+
+        /// `ms` is below INFINITE (`decide::wait_ms`), so the wait is bounded.
+        pub(super) fn wait(&self, ms: u32) -> io::Result<Option<u32>> {
+            // SAFETY: a valid process handle with SYNCHRONIZE access.
+            match unsafe { WaitForSingleObject(self.0.as_raw_handle(), ms) } {
+                WAIT_OBJECT_0 => {
+                    let mut code = 0u32;
+                    // SAFETY: a valid process handle with query access and a
+                    // writable code.
+                    check(unsafe { GetExitCodeProcess(self.0.as_raw_handle(), &mut code) })?;
+                    Ok(Some(code))
+                }
+                WAIT_TIMEOUT => Ok(None),
+                _ => Err(io::Error::last_os_error()),
             }
-            return Err(err);
         }
-        let process = owned(raw)?;
-        // Never INFINITE (u32::MAX): a wait is always bounded.
-        let ms = u32::try_from(timeout.as_millis())
-            .unwrap_or(u32::MAX)
-            .min(u32::MAX - 1);
-        // SAFETY: a valid process handle with SYNCHRONIZE access.
-        match unsafe { WaitForSingleObject(process.as_raw_handle(), ms) } {
-            WAIT_OBJECT_0 => Ok(true),
-            WAIT_TIMEOUT => Ok(false),
-            _ => Err(io::Error::last_os_error()),
-        }
+    }
+
+    pub(super) fn since_boot() -> io::Result<Duration> {
+        // SAFETY: a plain call without arguments.
+        Ok(Duration::from_millis(unsafe { GetTickCount64() }))
     }
 
     pub(super) fn listening(port: u16) -> io::Result<Option<u32>> {
@@ -392,11 +449,9 @@ mod tests {
         assert_eq!(kind(module_scan("test-card.dll")), Some(Unsupported));
         assert_eq!(kind(start_time(4242)), Some(Unsupported));
         assert_eq!(kind(image_path(4242)), Some(Unsupported));
-        assert_eq!(
-            kind(wait_gone(4242, Duration::from_millis(1))),
-            Some(Unsupported)
-        );
+        assert_eq!(kind(Handle::open_waitable(4242)), Some(Unsupported));
         assert_eq!(kind(listening(8080)), Some(Unsupported));
+        assert_eq!(kind(boot_time()), Some(Unsupported));
     }
 
     #[cfg(windows)]
@@ -459,16 +514,41 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn wait_gone_sees_a_running_and_an_ended_process() {
+    fn a_waitable_handle_times_out_on_a_running_process_and_reads_the_exit_code() {
         use super::*;
 
-        assert!(!wait_gone(std::process::id(), Duration::from_millis(10)).unwrap());
-        let mut child = std::process::Command::new("cmd")
-            .args(["/C", "exit 0"])
-            .spawn()
-            .unwrap();
-        assert!(wait_gone(child.id(), Duration::from_secs(10)).unwrap());
-        assert!(child.wait().unwrap().success());
+        let me = Handle::open_waitable(std::process::id()).unwrap();
+        assert_eq!(me.pid(), std::process::id());
+        assert_eq!(me.wait(Duration::from_millis(10)).unwrap(), None);
+        for code in [0u32, 7] {
+            // The Child keeps its own handle open, so the pid stays this
+            // process's until both handles are closed.
+            let exit = format!("exit {code}");
+            let mut child = std::process::Command::new("cmd")
+                .args(["/C", exit.as_str()])
+                .spawn()
+                .unwrap();
+            let handle = Handle::open_waitable(child.id()).unwrap();
+            assert_eq!(handle.pid(), child.id());
+            assert_eq!(handle.wait(Duration::from_secs(10)).unwrap(), Some(code));
+            assert_eq!(handle.wait(Duration::ZERO).unwrap(), Some(code));
+            assert_eq!(child.wait().unwrap().code(), Some(code as i32));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_boot_time_is_in_the_past_and_stable() {
+        use super::*;
+
+        let first = boot_time().unwrap();
+        assert!(first < SystemTime::now());
+        let second = boot_time().unwrap();
+        let apart = match second.duration_since(first) {
+            Ok(d) => d,
+            Err(e) => e.duration(),
+        };
+        assert!(apart < Duration::from_secs(1), "{apart:?}");
     }
 
     #[cfg(windows)]

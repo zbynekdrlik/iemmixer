@@ -6,9 +6,6 @@ use std::io;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-/// The `HWND_BROADCAST` value: a command is never posted to every window.
-const BROADCAST: isize = 0xFFFF;
-
 /// The class of standard dialog boxes.
 pub const DIALOG_CLASS: &str = "#32770";
 
@@ -21,12 +18,7 @@ pub fn find_owned(class: &str, pid: u32) -> io::Result<Option<isize>> {
 /// `hwnd`, as the window's own menu does when the item is clicked. Refuses
 /// the null window (a thread message) and the broadcast handle.
 pub fn post_command(hwnd: isize, id: u16) -> io::Result<()> {
-    if hwnd == 0 || hwnd == BROADCAST {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "post_command needs one window, not the null or broadcast handle",
-        ));
-    }
+    crate::decide::one_window(hwnd)?;
     imp::post_command(hwnd, id)
 }
 

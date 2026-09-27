@@ -3,9 +3,15 @@
 //! job, so ending the guard's task never touches audio. When the job forbids
 //! breakaway the start fails and the caller alarms; it never starts the child
 //! inside the job instead.
+//!
+//! Every child runs without a console window (design §5.5): it gets a console
+//! of its own, which no one can close and which the caller does not share, so
+//! a restarted guard still reaches it with [`crate::console::ctrl_break`].
 
 use std::io;
 use std::process::{Child, Command};
+
+pub use crate::decide::creation_flags;
 
 /// `CreateProcess` flags (winbase.h), portable so the choice is tested on
 /// every OS.
@@ -13,20 +19,8 @@ pub const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 pub const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
 pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-/// The creation flags of [`spawn_detached`]: always breakaway. A child in a
-/// new process group stays on the caller's console, because Ctrl-Break
-/// ([`crate::console::ctrl_break`]) reaches only a group on that console;
-/// any other child gets `CREATE_NO_WINDOW`. The caller of a new-group child
-/// therefore keeps a console of its own (hidden for the guard).
-pub fn creation_flags(new_group: bool) -> u32 {
-    if new_group {
-        CREATE_BREAKAWAY_FROM_JOB | CREATE_NEW_PROCESS_GROUP
-    } else {
-        CREATE_BREAKAWAY_FROM_JOB | CREATE_NO_WINDOW
-    }
-}
-
-/// Starts `cmd` outside the caller's job ([`creation_flags`]). A job without
+/// Starts `cmd` outside the caller's job, on a console of its own and in its
+/// own process group when `new_group` ([`creation_flags`]). A job without
 /// breakaway refuses the start (`PermissionDenied`).
 pub fn spawn_detached(cmd: &mut Command, new_group: bool) -> io::Result<Child> {
     imp::spawn(cmd, creation_flags(new_group))
@@ -104,9 +98,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_child_breaks_away_and_only_a_new_group_keeps_our_console() {
-        assert_eq!(creation_flags(true), 0x0100_0200);
-        assert_eq!(creation_flags(false), 0x0900_0000);
+    fn every_child_breaks_away_with_a_console_of_its_own() {
+        assert_eq!(
+            creation_flags(true),
+            CREATE_BREAKAWAY_FROM_JOB | CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
+        );
+        assert_eq!(
+            creation_flags(false),
+            CREATE_BREAKAWAY_FROM_JOB | CREATE_NO_WINDOW
+        );
     }
 
     #[cfg(not(windows))]

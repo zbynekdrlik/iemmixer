@@ -5,7 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "iemmixer's Windows glue (S6): safe wrappers; every function returns Unsupported off Windows"
+description = "iemmixer's Windows glue (S6): safe wrappers (Unsupported off Windows) and the portable preferred-buffer window"
 # The one binary is the test helper below; nothing is discovered from src/bin.
 autobins = false
 
@@ -22,11 +22,14 @@ windows-sys = { version = "0.61", features = [
   "Win32_Security",
   "Win32_Security_Authorization",
   "Win32_System_Console",
+  "Win32_System_Diagnostics_Debug",
   "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_ErrorReporting",
   "Win32_System_JobObjects",
   "Win32_System_LibraryLoader",
   "Win32_System_Memory",
   "Win32_System_Shutdown",
+  "Win32_System_SystemInformation",
   "Win32_System_Threading",
   "Win32_UI_WindowsAndMessaging",
 ] }

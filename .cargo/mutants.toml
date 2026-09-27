@@ -21,8 +21,20 @@ exclude_globs = [
   # The S1a spike program (a Windows-only main; its parser is tested).
   "crates/iem-audio-io/examples/**",
   # Windows FFI wrappers (S6), not compiled on Linux; the windows job runs
-  # their tests; decisions live in callers.
-  "crates/iem-win/src/**",
+  # their tests; decisions live in callers and in iem-win's portable decide.rs,
+  # which stays mutated with prefwin.rs and lib.rs.
+  "crates/iem-win/src/console.rs",
+  "crates/iem-win/src/errmode.rs",
+  "crates/iem-win/src/power.rs",
+  "crates/iem-win/src/process.rs",
+  "crates/iem-win/src/registry.rs",
+  "crates/iem-win/src/spawn.rs",
+  "crates/iem-win/src/sync.rs",
+  "crates/iem-win/src/token.rs",
+  "crates/iem-win/src/window.rs",
+  "crates/iem-win/src/win.rs",
+  # The Windows-only Ctrl-Break test helper (feature test-helper).
+  "crates/iem-win/src/bin/**",
 ]
 
 exclude_re = [
@@ -149,4 +161,7 @@ exclude_re = [
   "iem-server/src/mixer_ws\\.rs.*delete match arm ClientMsg::ListenStart.* in handle$",
   # Unobservable (S5): the pruned count only decides whether it is logged.
   "iem-server/src/backup_daemon\\.rs.*replace > with (==|<|>=) in run$",
+  # Equivalent (S6): the creation flags are distinct bits, so `^` gives the
+  # same value as `|`.
+  "iem-win/src/decide\\.rs.*replace \\| with \\^ in creation_flags$",
 ]

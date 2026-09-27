@@ -1,11 +1,11 @@
 //! Scheduling and memory of the calling process (S6 design note §3; S1c L5):
-//! HIGH priority class, power throttling off, a default CPU Set and a locked
-//! minimum working set. Each call changes only the calling process.
+//! HIGH priority class, power throttling off, a default CPU Set, a locked
+//! minimum working set and locked pages. Each call changes only the calling
+//! process.
 
 use std::io;
 
-/// One mebibyte, the unit of [`lock_min_working_set`].
-pub const MIB: usize = 1 << 20;
+pub use crate::decide::{MIB, working_set_target};
 
 /// Sets the calling process to the HIGH priority class.
 pub fn set_high_priority() -> io::Result<()> {
@@ -31,12 +31,15 @@ pub fn lock_min_working_set(extra_mb: usize) -> io::Result<()> {
     imp::lock_min_working_set(extra_mb)
 }
 
-/// The new `(minimum, maximum)` working set for the current `(min, max)`:
-/// both grow by `extra_mb` MiB, so the gap between them stays as Windows
-/// accepted it; sums saturate.
-pub fn working_set_target(min: usize, max: usize, extra_mb: usize) -> (usize, usize) {
-    let extra = extra_mb.saturating_mul(MIB);
-    (min.saturating_add(extra), max.saturating_add(extra))
+/// Locks the pages of `len` bytes at `ptr` (preallocated real-time buffers)
+/// into the calling process's working set (`VirtualLock`), after
+/// [`lock_min_working_set`] made room for them (S1c hand-off). The call only
+/// locks pages; it reads and writes no memory, and a range that is not
+/// committed memory of this process is an error. A null pointer or an empty
+/// range is `InvalidInput`.
+pub fn virtual_lock(ptr: *const u8, len: usize) -> io::Result<()> {
+    crate::decide::lock_range(ptr, len)?;
+    imp::virtual_lock(ptr, len)
 }
 
 #[cfg(not(windows))]
@@ -58,6 +61,10 @@ mod imp {
     pub(super) fn lock_min_working_set(_extra_mb: usize) -> io::Result<()> {
         crate::unsupported()
     }
+
+    pub(super) fn virtual_lock(_ptr: *const u8, _len: usize) -> io::Result<()> {
+        crate::unsupported()
+    }
 }
 
 #[cfg(windows)]
@@ -66,7 +73,8 @@ mod imp {
     use std::ptr;
 
     use windows_sys::Win32::System::Memory::{
-        QUOTA_LIMITS_HARDWS_MAX_DISABLE, QUOTA_LIMITS_HARDWS_MIN_ENABLE, SetProcessWorkingSetSizeEx,
+        QUOTA_LIMITS_HARDWS_MAX_DISABLE, QUOTA_LIMITS_HARDWS_MIN_ENABLE,
+        SetProcessWorkingSetSizeEx, VirtualLock,
     };
     use windows_sys::Win32::System::Threading::{
         GetCurrentProcess, GetProcessWorkingSetSize, HIGH_PRIORITY_CLASS,
@@ -132,6 +140,13 @@ mod imp {
             )
         })
     }
+
+    pub(super) fn virtual_lock(ptr: *const u8, len: usize) -> io::Result<()> {
+        // SAFETY: VirtualLock reads and writes no memory: the kernel checks
+        // the range and fails for anything that is not committed memory of
+        // this process.
+        check(unsafe { VirtualLock(ptr.cast(), len) })
+    }
 }
 
 #[cfg(test)]
@@ -139,20 +154,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_working_set_grows_by_whole_mebibytes_and_saturates() {
-        assert_eq!(
-            working_set_target(200 * 1024, 1380 * 1024, 64),
-            (200 * 1024 + 64 * MIB, 1380 * 1024 + 64 * MIB)
-        );
-        assert_eq!(working_set_target(10, 20, 0), (10, 20));
-        assert_eq!(
-            working_set_target(usize::MAX - 1, usize::MAX, 1),
-            (usize::MAX, usize::MAX)
-        );
-        assert_eq!(
-            working_set_target(0, 0, usize::MAX),
-            (usize::MAX, usize::MAX)
-        );
+    fn an_empty_range_is_never_locked() {
+        use crate::kind;
+        use std::io::ErrorKind::InvalidInput;
+
+        let buf = [0u8; 16];
+        assert_eq!(kind(virtual_lock(std::ptr::null(), 16)), Some(InvalidInput));
+        assert_eq!(kind(virtual_lock(buf.as_ptr(), 0)), Some(InvalidInput));
     }
 
     #[cfg(not(windows))]
@@ -165,6 +173,8 @@ mod tests {
         assert_eq!(kind(disable_power_throttling()), Some(Unsupported));
         assert_eq!(kind(set_cpu_sets(&[256, 257])), Some(Unsupported));
         assert_eq!(kind(lock_min_working_set(64)), Some(Unsupported));
+        let buf = [0u8; 16];
+        assert_eq!(kind(virtual_lock(buf.as_ptr(), 16)), Some(Unsupported));
     }
 
     #[cfg(windows)]
@@ -201,5 +211,9 @@ mod tests {
         assert_eq!(min2, min + 16 * MIB);
         assert_eq!(max2, max + 16 * MIB);
         assert_ne!(flags2 & QUOTA_LIMITS_HARDWS_MIN_ENABLE, 0);
+
+        // The working set now has room for a buffer's pages.
+        let buf = vec![0u8; 256 * 1024];
+        virtual_lock(buf.as_ptr(), buf.len()).unwrap();
     }
 }
