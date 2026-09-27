@@ -169,6 +169,28 @@ pub(super) fn reconnect_step(
     }
 }
 
+/// What a mixer page that is left does with its socket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LeaveClose {
+    /// Open: close it at once (the server ends this page's session).
+    Now,
+    /// Still connecting: close it when it opens. Closing it now makes
+    /// Chrome log "WebSocket is closed before the connection is
+    /// established", which the E2E console guard rejects.
+    WhenOpen,
+    /// Closing or closed already.
+    Nothing,
+}
+
+/// The socket's close when its page is left, by its `ready_state`.
+pub(super) fn leave_close(ready_state: u16) -> LeaveClose {
+    match ready_state {
+        web_sys::WebSocket::OPEN => LeaveClose::Now,
+        web_sys::WebSocket::CONNECTING => LeaveClose::WhenOpen,
+        _ => LeaveClose::Nothing,
+    }
+}
+
 /// Parse track name into main and type parts
 pub(super) fn parse_track_name(name: &str) -> (String, String) {
     let parts: Vec<&str> = name.split_whitespace().collect();
@@ -361,6 +383,20 @@ mod tests {
             reconnect_step(40_000.0, 10_000.0, 9, MAX_WS_FAILURES - 1),
             ReconnectStep::Connect
         );
+    }
+
+    #[test]
+    fn a_page_that_is_left_closes_an_open_socket_and_a_connecting_one_when_it_opens() {
+        assert_eq!(leave_close(web_sys::WebSocket::OPEN), LeaveClose::Now);
+        assert_eq!(
+            leave_close(web_sys::WebSocket::CONNECTING),
+            LeaveClose::WhenOpen
+        );
+        assert_eq!(
+            leave_close(web_sys::WebSocket::CLOSING),
+            LeaveClose::Nothing
+        );
+        assert_eq!(leave_close(web_sys::WebSocket::CLOSED), LeaveClose::Nothing);
     }
 
     #[test]

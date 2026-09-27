@@ -15,7 +15,9 @@ use iem_core::Channel;
 use crate::components::eq_modal::EqBandState;
 use crate::components::talk_button::TalkState;
 
-use super::helpers::{ReconnectStep, WsClosureStore, WsFailCounter, reconnect_step};
+use super::helpers::{
+    LeaveClose, ReconnectStep, WsClosureStore, WsFailCounter, leave_close, reconnect_step,
+};
 use super::state::MixerState;
 
 /// Set up all background tasks (WS connect, reconnect, watchdog, token-expiry)
@@ -260,7 +262,8 @@ pub(super) fn setup_connection(
     expiry_closure.forget();
 
     // Register cleanup: set the disposal guard, clear all JS intervals and
-    // close the mixer socket when the component scope is disposed.
+    // close the mixer socket (once it opens, if it is still connecting) when
+    // the component scope is disposed.
     // Arc<AtomicBool> is Send so it can be captured directly in the
     // on_cleanup closure; the `ws` signal is read before the scope's signals
     // are disposed (an owner runs its cleanups first).
@@ -274,13 +277,27 @@ pub(super) fn setup_connection(
         }
         // An in-app navigation keeps the document, and with it an open
         // socket: the server would keep this page's session. Its handlers
-        // go first, so the close reaches no reconnect logic.
+        // go first, so the close reaches no reconnect logic. A socket still
+        // connecting is closed when it opens (`leave_close`); its one-shot
+        // closer leaks if it never opens.
         if let Some(Some(socket)) = ws.try_get_untracked() {
             socket.set_onopen(None);
             socket.set_onmessage(None);
             socket.set_onclose(None);
             socket.set_onerror(None);
-            let _ = socket.close();
+            match leave_close(socket.ready_state()) {
+                LeaveClose::Now => {
+                    let _ = socket.close();
+                }
+                LeaveClose::WhenOpen => {
+                    let opened = socket.clone();
+                    let close_when_open = Closure::once_into_js(move || {
+                        let _ = opened.close();
+                    });
+                    socket.set_onopen(Some(close_when_open.unchecked_ref()));
+                }
+                LeaveClose::Nothing => {}
+            }
         }
     });
 }
