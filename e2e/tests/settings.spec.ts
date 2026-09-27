@@ -174,7 +174,7 @@ test.describe("Settings of the engineer", () => {
     });
     const pushLogs: string[] = [];
     page.on("console", (m) => {
-      if (m.text().startsWith("[push] unsubscribe")) pushLogs.push(m.text());
+      if (m.text().startsWith("[push] unsubscribe:")) pushLogs.push(m.text());
     });
     await openMixer(page, "engineer", { engineer: true });
     const modal = await openSettings(page);
