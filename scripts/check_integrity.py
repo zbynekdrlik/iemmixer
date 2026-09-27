@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Integrity gate: no ignored/skipped/focused tests, no continue-on-error,
 self-hosted runners or pull_request_target, every action pinned to a full
-commit SHA, and no force-kill command anywhere (program spec I8)."""
+commit SHA, no force-kill command anywhere (program spec I8), and no ASIO
+rate, clock or control-panel call (I2)."""
 from __future__ import annotations
 
 import re
@@ -16,6 +17,10 @@ WORKFLOW_FORBIDDEN = re.compile(r"continue-on-error|self-hosted|pull_request_tar
 USES = re.compile(r"^\s*-?\s*uses:\s*(\S+)")
 PINNED = re.compile(r"^[^@\s]+@[0-9a-f]{40}$")
 FORCE_KILL = re.compile(r"(?i)\btaskkill\b|terminateprocess|stop-process|\bshutdown(?:\.exe)?\s+/f\b")
+# Method calls, UFCS paths (`Driver::set_sample_rate(&d, ..)`) and turbofish
+# (`future::<T>(..)`) on azo's safe or raw interface (`as_raw().control_panel()`).
+ASIO_SETTINGS = re.compile(
+    r"(?:\.|::)\s*(?:set_sample_rate|set_clock_source|open_control_panel|control_panel|future)\s*(?:::\s*<[^>]*>\s*)?\(")
 CODE_SUFFIXES = (".rs", ".ts", ".js", ".py", ".sh", ".ps1", ".psm1", ".yml", ".yaml", ".toml")
 
 
@@ -35,6 +40,7 @@ def violations(root: Path) -> list[str]:
     for path in files(root, "crates", (".rs",)):
         rel = path.relative_to(root).as_posix()
         found += [f"{rel}:{n}: #[ignore] test" for n, line in lines(path) if RUST_IGNORE.search(line)]
+        found += [f"{rel}:{n}: the host never changes the card's rate, clock or panel (program spec I2)" for n, line in lines(path) if ASIO_SETTINGS.search(line)]
     for path in files(root, "e2e", (".ts",)):
         rel = path.relative_to(root).as_posix()
         found += [f"{rel}:{n}: skipped or focused E2E test" for n, line in lines(path) if E2E_SKIP.search(line)]

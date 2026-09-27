@@ -36,13 +36,24 @@ jobs:
           NEXTEST_PROFILE: mutants
         run: |
           set -uo pipefail
+          packages=(--package iem-core --package iem-server --package iem-ui --package iem-rpp --package iem-dsp --package iem-limiter-mga
+            --package iem-engine-proto --package iem-audio-io --package iem-engine --package iem-migrate)
           cargo mutants --baseline=skip --timeout 60 --jobs 2 --copy-target=true --shard "${{ matrix.shard }}/${{ strategy.job-total }}" \
-            --package iem-core --package iem-server --package iem-ui --package iem-rpp --package iem-dsp --package iem-limiter-mga --package iem-engine-proto --package iem-audio-io --package iem-engine --package iem-migrate --all-features -- --all-targets
+            "${packages[@]}" --all-features -- --all-targets
           code=$?
           if [ -f mutants.out/missed.txt ]; then echo "--- missed mutants ---"; cat mutants.out/missed.txt; fi
           case "$code" in
-            0|2|3) echo "cargo-mutants finished (exit $code)"; exit 0 ;;
+            0|2|3) echo "cargo-mutants finished (exit $code)" ;;
             *) echo "::error::cargo-mutants failed to run (exit $code)"; exit "$code" ;;
+          esac
+          # #23: catches by a timeout are tested again (mutants.out/recheck);
+          # its MISSED lines are survivors too.
+          python3 scripts/mutants_recheck.py --out mutants.out -- \
+            --baseline=skip --timeout 120 --jobs 1 --copy-target=true "${packages[@]}" --all-features -- --all-targets
+          code=$?
+          case "$code" in
+            0|2|3) echo "timeout recheck finished (exit $code)"; exit 0 ;;
+            *) echo "::error::the timeout recheck failed to run (exit $code)"; exit "$code" ;;
           esac
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

@@ -68,5 +68,17 @@ class IntegrityTests(unittest.TestCase):
             (root / "goldens" / "s1b" / "x.f64").write_bytes(b"\0" * (20 * 1024 * 1024 + 1))
             self.assertIn("goldens/: 20971521 bytes, over the 20 MB budget (spec §3.5)", ci.violations(root))
 
+    def test_asio_setting_calls_are_refused(self) -> None:
+        for call in ("driver.set_sample_rate(48000.0)", "d.set_clock_source(1)", "self.driver.open_control_panel()",
+                     "Driver::set_sample_rate(&d, 48000.0)", "azo::Driver::set_clock_source(&d, 1)",
+                     "d.as_raw().control_panel()", "d.as_raw().set_sample_rate(48000.0)",
+                     "d.future::<SetIoFormat>(&mut p)", "d.as_raw().future(sel, opt)"):
+            self.put("crates/a/src/lib.rs", f"fn f() {{ {call}; }}\n")
+            self.assertEqual(len(ci.violations(self.root)), 1, call)
+        self.put("crates/a/src/lib.rs", "// the host never calls set_sample_rate\nfn f() {}\n")
+        self.assertEqual(ci.violations(self.root), [])
+        self.put("crates/a/src/lib.rs", "fn f() { let futures = 1; let _ = futures; driver.sample_position(); }\n")
+        self.assertEqual(ci.violations(self.root), [])
+
 if __name__ == "__main__":
     unittest.main()

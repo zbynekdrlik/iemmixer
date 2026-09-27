@@ -31,6 +31,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest discover -s scripts -p 'test_*.py' -v
+          python3 -m unittest discover -s scripts/asio-spike -p 'test_*.py' -v
           python3 scripts/test_check_disposal_safety.py
       - name: Golden tooling self-tests (numpy venv)
         run: |
@@ -386,6 +387,54 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
+  asio-spike:
+    name: asio-spike
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Spike PC module self-test (Windows PowerShell 5.1, as on the PC)
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/asio-spike/Test-SpikePc.ps1
+      - name: Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Audio I/O clippy and tests on Windows (format, telemetry, the ASIO host builds, the spike's parser)
+        run: |
+          cargo clippy --locked -p iem-audio-io --all-targets -- -D warnings
+          cargo test --locked -p iem-audio-io
+      - name: Build the spike (release)
+        run: cargo build --locked --release -p iem-audio-io --example asio_spike
+      - name: Without an ASIO driver the spike reports no-driver and exits 3
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $report = Join-Path $env:RUNNER_TEMP 'probe.json'
+          & target/release/examples/asio_spike.exe probe --driver 'No Such Card' --report $report --stop-file (Join-Path $env:RUNNER_TEMP 'stop')
+          if ($LASTEXITCODE -ne 3) { throw "exit $LASTEXITCODE, expected 3" }
+          $r = Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
+          if ($r.outcome -ne 'no-driver') { throw "outcome $($r.outcome), expected no-driver" }
+          $global:LASTEXITCODE = 0
+      - name: Bundle (spike, PC scripts, SHA256SUMS)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $b = Join-Path $env:RUNNER_TEMP 'asio-spike'
+          New-Item -ItemType Directory -Force -Path $b | Out-Null
+          Copy-Item -LiteralPath target/release/examples/asio_spike.exe, scripts/asio-spike/SpikePc.psm1, scripts/asio-spike/spike-task.ps1, scripts/golden/GoldenPc.psm1 -Destination $b
+          $lines = Get-ChildItem -LiteralPath $b -File | Sort-Object Name | ForEach-Object { '{0}  {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name }
+          [IO.File]::WriteAllText((Join-Path $b 'SHA256SUMS'), (($lines -join "`n") + "`n"))
+      - name: Upload (dev pushes only — the only spike that may reach the PC, P5)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: asio-spike-${{ github.sha }}
+          path: ${{ runner.temp }}/asio-spike
+          retention-days: 14
+          if-no-files-found: error
+
   supply-chain:
     name: supply-chain
     runs-on: ubuntu-24.04
@@ -519,6 +568,25 @@ jobs:
           tool: cargo-nextest@0.9.146
       - name: Build the mutants profile once (the shards restore this cache)
         run: cargo nextest run --locked --cargo-profile mutants --no-run -p iem-core -p iem-server -p iem-ui -p iem-rpp -p iem-dsp -p iem-limiter-mga -p iem-engine-proto -p iem-audio-io -p iem-engine -p iem-migrate --all-features --all-targets
+      - name: Unmutated tests under the mutants profile (every test's duration; the shards skip the baseline)
+        env:
+          # A test that fails or times out here unmutated would make every
+          # mutant of its package look caught; the durations set the
+          # per-package bounds in .config/nextest.toml. One package per run,
+          # as cargo-mutants tests a mutant.
+          NEXTEST_PROFILE: mutants
+        run: |
+          set -euo pipefail
+          failed=()
+          for p in iem-core iem-server iem-ui iem-rpp iem-dsp iem-limiter-mga iem-engine-proto iem-audio-io iem-engine iem-migrate; do
+            echo "::group::$p"
+            cargo nextest run --locked --cargo-profile mutants --no-fail-fast -p "$p" --all-features --all-targets || failed+=("$p")
+            echo "::endgroup::"
+          done
+          if [ "${#failed[@]}" -ne 0 ]; then
+            echo "::error::unmutated tests fail under the mutants profile in: ${failed[*]}"
+            exit 1
+          fi
 
   mutation:
     name: mutation shard ${{ matrix.shard }}
@@ -560,10 +628,22 @@ jobs:
             echo "No Rust changes against ${{ github.base_ref }}: no mutants to test."
             exit 0
           fi
+          packages=(--package iem-core --package iem-server --package iem-ui --package iem-rpp
+            --package iem-dsp --package iem-limiter-mga --package iem-engine-proto --package iem-audio-io --package iem-engine --package iem-migrate)
           # --timeout: with --baseline=skip cargo-mutants has no measured test time
           # and would allow 300 s per mutant; the tests take ~6 s.
+          status=0
           cargo mutants --in-diff "$RUNNER_TEMP/pr.diff" --baseline=skip --timeout 60 --jobs 2 --copy-target=true \
-            --shard "${{ matrix.shard }}/${{ strategy.job-total }}" \
-            --package iem-core --package iem-server --package iem-ui --package iem-rpp \
-            --package iem-dsp --package iem-limiter-mga --package iem-engine-proto --package iem-audio-io --package iem-engine --package iem-migrate \
-            --all-features -- --all-targets
+            --shard "${{ matrix.shard }}/${{ strategy.job-total }}" "${packages[@]}" --all-features -- --all-targets || status=$?
+          case "$status" in
+            0|2|3) ;;
+            *) echo "::error::cargo-mutants failed to run (exit $status)"; exit "$status" ;;
+          esac
+          # #23: a mutant caught only by a timeout (not a failing test) is tested
+          # again, one at a time, with the mutants-recheck profile (60 s per
+          # test); a survivor fails the gate (exit 2).
+          recheck=0
+          python3 scripts/mutants_recheck.py --out mutants.out -- \
+            --baseline=skip --timeout 120 --jobs 1 --copy-target=true "${packages[@]}" --all-features -- --all-targets || recheck=$?
+          if [ "$status" -ne 0 ]; then exit "$status"; fi
+          exit "$recheck"

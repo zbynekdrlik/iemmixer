@@ -5,6 +5,21 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "iemmixer audio backends: the Process trait, deterministic Offline and paced NullRt (ASIO follows in S6)"
+description = "iemmixer audio backends: the Process trait, deterministic Offline, paced NullRt and the Windows ASIO host (S1a spike; S6 backend)"
 
 [dependencies]
+
+[target.'cfg(windows)'.dependencies]
+# ASIO host (S1a design note §3). Pinned exactly; fallbacks in program spec §2.2.
+azo = "=0.2.1"
+# The driver thread's message pump (PeekMessageW / DispatchMessageW).
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+
+[dev-dependencies]
+# The asio_spike example's JSON report.
+serde_json = "1"
+
+[[example]]
+name = "asio_spike"
+# Runs the argument-parser tests on every OS.
+test = true

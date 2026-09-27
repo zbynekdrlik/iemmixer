@@ -3,7 +3,8 @@
 # sweep in .github/workflows/mutation-full.yml (on demand). Both pass
 # --copy-target=true after a warm-up build and --timeout 60 (with
 # --baseline=skip there is no measured test time, so a hung mutant would
-# otherwise hold its job for 300 s). Tests run per package only.
+# otherwise hold its job for 300 s). Tests run per package only. A mutant
+# caught only by a timeout is tested again by scripts/mutants_recheck.py (#23).
 profile = "mutants"
 test_tool = "nextest"
 
@@ -13,6 +14,12 @@ exclude_globs = [
   "crates/iem-server/src/pepper/dpapi.rs",
   # Tauri tray shell: built and linted on Windows only.
   "crates/iem-tray/**",
+  # Windows-only ASIO host (unsafe FFI, S1a): not compiled on the Linux
+  # runners; the PC window exercises it. Its decisions live in the mutated
+  # format.rs and telemetry.rs.
+  "crates/iem-audio-io/src/asio.rs",
+  # The S1a spike program (a Windows-only main; its parser is tested).
+  "crates/iem-audio-io/examples/**",
 ]
 
 exclude_re = [
