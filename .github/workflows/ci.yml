@@ -42,6 +42,8 @@ jobs:
           "$RUNNER_TEMP/gvenv/bin/python" -m unittest discover -s scripts/golden -p 'test_*.py' -v
       - name: Leptos disposal safety
         run: python3 scripts/check_disposal_safety.py
+      - name: Gen 1 test parity manifest
+        run: python3 scripts/check_parity_manifest.py
       - name: Version consistency
         run: python3 scripts/check_version.py
       - name: Tray icons
