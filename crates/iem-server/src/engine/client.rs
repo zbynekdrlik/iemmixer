@@ -695,6 +695,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_superseded_client_waits_before_it_reconnects() {
+        let (client, mut peer, mut events, mut peers) = connected().await;
+        peer.send(&EngineMsg::Superseded).await;
+        assert!(matches!(
+            event(&mut events).await,
+            EngineEvent::Disconnected
+        ));
+        assert!(!client.connected());
+        // A dropped pipe is retried after 0.25 s; another controller took
+        // over here, so the client waits 5 s before it tries again.
+        let again = tokio::time::timeout(Duration::from_millis(1500), peers.recv()).await;
+        assert!(again.is_err(), "no reconnect within 1.5 s");
+    }
+
+    /// Like [`connector`], with the client's writer behind a buffer: a frame
+    /// reaches the engine only when the client flushes it.
+    fn buffered_connector() -> (Connector, mpsc::UnboundedReceiver<Peer>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let connector: Connector = Arc::new(move || -> ConnectFuture {
+            let tx = tx.clone();
+            Box::pin(async move {
+                let (client, engine) = tokio::io::duplex(1 << 20);
+                let (cr, cw) = tokio::io::split(client);
+                let (er, ew) = tokio::io::split(engine);
+                tx.send(Peer { r: er, w: ew })
+                    .map_err(|_| io::Error::other("test over"))?;
+                let writer = tokio::io::BufWriter::new(cw);
+                Ok((Box::new(cr) as Reader, Box::new(writer) as Writer))
+            })
+        });
+        (connector, rx)
+    }
+
+    #[tokio::test]
+    async fn every_frame_is_flushed_to_the_engine() {
+        let (c, mut peers) = buffered_connector();
+        let client = EngineClient::spawn_with(c, "t".into());
+        let mut events = client.subscribe();
+        let mut peer = next_peer(&mut peers).await;
+        assert!(matches!(peer.recv().await, ClientMsg::Hello { .. }));
+        peer.send(&hello()).await;
+        peer.send(&topo()).await;
+        peer.send(&state(3)).await;
+        assert!(matches!(event(&mut events).await, EngineEvent::Connected));
+        let c2 = client.clone();
+        let call = tokio::spawn(async move { c2.request(Cmd::Ping, None).await });
+        let ClientMsg::Request { id, cmd, .. } = peer.recv().await else {
+            panic!("expected a request");
+        };
+        assert_eq!(cmd, Cmd::Ping);
+        peer.send(&EngineMsg::Reply(Reply {
+            id,
+            rev: 3,
+            error: None,
+        }))
+        .await;
+        assert_eq!(call.await.unwrap(), Ok(3));
+    }
+
+    #[tokio::test]
     async fn a_detached_client_never_connects() {
         let c = EngineClient::detached();
         assert!(!c.connected());

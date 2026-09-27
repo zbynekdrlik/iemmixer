@@ -200,3 +200,59 @@ async fn trigger_capture(
         track_count: b.state.mixes.len(),
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::routes::api_tests::{app, call, token};
+    use axum::http::{Method, StatusCode};
+
+    #[tokio::test]
+    async fn backups_are_the_engineers_and_need_the_engine() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, app) = app(dir.path());
+        let eng = token("engineer", true);
+        // No token or a member's: forbidden (never a login prompt).
+        let (status, json) = call(&app, Method::GET, "/api/backups", None, None).await;
+        assert_eq!(
+            (status, json["code"].as_str()),
+            (StatusCode::FORBIDDEN, Some("FORBIDDEN"))
+        );
+        let member = token("member1", false);
+        let (status, _) = call(&app, Method::GET, "/api/backups", Some(&member), None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, json) = call(&app, Method::GET, "/api/backups", Some(&eng), None).await;
+        assert_eq!((status, json), (StatusCode::OK, serde_json::json!([])));
+        // A missing file, and a name that leaves the folder.
+        let missing = "/api/backups/20260101_000000.json";
+        let (status, json) = call(&app, Method::GET, missing, Some(&eng), None).await;
+        assert_eq!(
+            (status, json["code"].as_str()),
+            (StatusCode::NOT_FOUND, Some("NOT_FOUND"))
+        );
+        let (status, json) =
+            call(&app, Method::GET, "/api/backups/a..json", Some(&eng), None).await;
+        assert_eq!(
+            (status, json["code"].as_str()),
+            (StatusCode::BAD_REQUEST, Some("INVALID_FILENAME"))
+        );
+        // Without the engine there is nothing to capture or compare with.
+        let capture = "/api/backups/capture";
+        let (status, json) = call(&app, Method::POST, capture, Some(&eng), None).await;
+        assert_eq!(
+            (status, json["code"].as_str()),
+            (StatusCode::SERVICE_UNAVAILABLE, Some("CAPTURE_FAILED"))
+        );
+        let b = iem_core::backup::MixerBackup::new(
+            "2026-09-27T13:00:00Z".into(),
+            1,
+            Default::default(),
+        );
+        let name = state.backup_store.save(&b).unwrap();
+        let preview = format!("/api/backups/{name}/preview");
+        let (status, json) = call(&app, Method::POST, &preview, Some(&eng), None).await;
+        assert_eq!(
+            (status, json["code"].as_str()),
+            (StatusCode::SERVICE_UNAVAILABLE, Some("ENGINE_UNAVAILABLE"))
+        );
+    }
+}

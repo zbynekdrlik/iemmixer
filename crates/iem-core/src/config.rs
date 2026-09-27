@@ -563,6 +563,14 @@ mod tests {
             ..Config::default()
         };
         assert_eq!(zero.problems().len(), 1);
+        let no_sustain = Config {
+            activity: ActivityConfig {
+                sustain_s: 0,
+                ..ActivityConfig::default()
+            },
+            ..Config::default()
+        };
+        assert_eq!(no_sustain.problems().len(), 1, "sustain_s must be above 0");
         let nan = Config {
             activity: ActivityConfig {
                 threshold_dbfs: f64::NAN,

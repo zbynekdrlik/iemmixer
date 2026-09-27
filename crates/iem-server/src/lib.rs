@@ -36,10 +36,15 @@ pub mod talk;
 pub mod tunnel_watch;
 pub mod view;
 
-#[cfg(all(test, unix))]
+// Split cfgs: cargo-mutants skips a module only under a plain `#[cfg(test)]`.
+#[cfg(test)]
+#[cfg(unix)]
 mod engine_live_tests;
 #[cfg(feature = "audio")]
 pub mod listen_ws;
+#[cfg(test)]
+#[cfg(unix)]
+mod routes_live_tests;
 #[cfg(feature = "audio")]
 pub mod talkback_buffer;
 #[cfg(feature = "audio")]
@@ -814,6 +819,21 @@ mod startup_tests {
         assert_eq!(RunMode::parse(None), RunMode::Dev);
         assert_eq!(RunMode::default(), RunMode::Dev);
         assert_eq!(ServerConfig::default().mode, RunMode::Dev);
+    }
+
+    #[tokio::test]
+    async fn public_ip_detection_gives_up_when_no_service_answers() {
+        // Every request goes through a proxy on a closed local port.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let client = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all(format!("http://127.0.0.1:{port}")).unwrap())
+            .build()
+            .unwrap();
+        assert_eq!(detect_public_ip(&client).await, None);
     }
 
     #[tokio::test]

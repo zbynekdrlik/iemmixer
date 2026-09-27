@@ -875,6 +875,22 @@ mod tests {
     }
 
     #[test]
+    fn another_mixs_solo_changes_nothing_on_the_page() {
+        let v = test_view();
+        let m = mirror_with(|_, t| {
+            t.solo.push(iem_engine_proto::Solo {
+                mix: mix("member2"),
+                sources: vec![input("mic2")],
+            });
+        });
+        let solo = [Change::Solo {
+            mix: mix("member2"),
+            sources: vec![input("mic2")],
+        }];
+        assert!(updates_for(&v, &m, &page(&v, "member3"), &solo).is_empty());
+    }
+
+    #[test]
     fn ui_commands_become_engine_commands_on_the_page_mix() {
         let v = test_view();
         let m = Mirror::default();

@@ -1,0 +1,220 @@
+//! Backups, presets and history over HTTP against the real engine (S5 design
+//! note §6, §7): `iem-engine` on NullRt with the test site, the server's own
+//! routes, and what they leave behind — status codes, JSON bodies, the files
+//! written and the engine's state. Every wait is bounded (5 s).
+
+use axum::Router;
+use axum::http::{Method, StatusCode};
+use iem_core::backup::MixerBackup;
+use iem_engine_proto::{Cmd, InputId, MixId, Source};
+
+use crate::AppState;
+use crate::engine::testkit::EngineHarness;
+use crate::routes::api_tests::{SECRET, call, router, token};
+
+/// A state connected to `h`'s engine and its API (tokens from [`token`]).
+async fn live(h: &EngineHarness) -> (tempfile::TempDir, AppState, Router) {
+    let (dir, state) = h.state().await;
+    state.config.write().await.jwt_secret = SECRET.into();
+    let app = router(state.clone());
+    (dir, state, app)
+}
+
+fn set_input(input: &str, trim_db: f64, muted: bool) -> Cmd {
+    Cmd::SetInput {
+        input: InputId::new(input),
+        trim_db: Some(trim_db),
+        muted: Some(muted),
+        processing: None,
+    }
+}
+
+fn set_level(mix: &str, input: &str, gain_db: f64) -> Cmd {
+    Cmd::SetLevel {
+        mix: MixId::new(mix),
+        source: Source::Input(InputId::new(input)),
+        gain_db: Some(gain_db),
+        pan: None,
+        muted: None,
+    }
+}
+
+#[tokio::test]
+async fn a_backup_is_captured_listed_previewed_and_restored() {
+    let h = EngineHarness::start();
+    let (dir, s, app) = live(&h).await;
+    let eng = token("engineer", true);
+    s.engine
+        .request_applied(set_input("keys", 4.0, false), None)
+        .await
+        .unwrap();
+
+    // Capture: the file is written and described.
+    let (status, info) = call(&app, Method::POST, "/api/backups/capture", Some(&eng), None).await;
+    assert_eq!(status, StatusCode::OK, "{info}");
+    let name = info["filename"].as_str().unwrap().to_string();
+    let file = dir.path().join("backups").join(&name);
+    let size = std::fs::metadata(&file).unwrap().len();
+    assert_eq!(info["size_bytes"].as_u64(), Some(size));
+    assert_eq!(info["track_count"].as_u64(), Some(11));
+    let saved = s.backup_store.load(&name).unwrap();
+    assert_eq!(saved.state, s.engine.mirror().state, "the running state");
+    assert_eq!(saved.customizations.len(), 10, "every member's pins");
+
+    // Listed, and served whole.
+    let (status, list) = call(&app, Method::GET, "/api/backups", Some(&eng), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let names: Vec<&str> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["filename"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, [name.as_str()]);
+    let one = format!("/api/backups/{name}");
+    let (status, got) = call(&app, Method::GET, &one, Some(&eng), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(serde_json::from_value::<MixerBackup>(got).unwrap(), saved);
+
+    // After a change: the preview names it, the restore undoes it.
+    s.engine
+        .request_applied(set_input("keys", -2.0, true), None)
+        .await
+        .unwrap();
+    let preview = format!("/api/backups/{name}/preview");
+    let (status, p) = call(&app, Method::POST, &preview, Some(&eng), None).await;
+    assert_eq!(status, StatusCode::OK, "{p}");
+    let what: Vec<&str> = p["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["description"].as_str().unwrap())
+        .collect();
+    assert_eq!(what, ["KEYS: trim", "KEYS: mute"]);
+    let restore = format!("/api/backups/{name}/restore");
+    let (status, r) = call(&app, Method::POST, &restore, Some(&eng), None).await;
+    assert_eq!(
+        (status, r["restored_count"].as_u64()),
+        (StatusCode::OK, Some(2))
+    );
+    let keys = s.engine.mirror().input(&InputId::new("keys"));
+    assert_eq!((keys.trim_db, keys.muted), (4.0, false));
+}
+
+#[tokio::test]
+async fn a_preset_is_saved_listed_loaded_and_deleted() {
+    let h = EngineHarness::start();
+    let (_d, s, app) = live(&h).await;
+    let m6 = token("member6", false);
+    let (mix, keys) = (MixId::new("member6"), Source::Input(InputId::new("keys")));
+    s.engine
+        .request_applied(set_level("member6", "keys", -6.0), None)
+        .await
+        .unwrap();
+
+    let body = Some(r#"{"name":" rehearsal "}"#);
+    let (status, p) = call(&app, Method::POST, "/api/presets/member6", Some(&m6), body).await;
+    assert_eq!(status, StatusCode::CREATED, "{p}");
+    assert_eq!(p["name"], "rehearsal", "the name is trimmed");
+    let stored = s.band.preset("member6", "rehearsal").unwrap().unwrap();
+    let k = stored.sends.iter().find(|x| x.src == keys).unwrap();
+    assert_eq!(k.gain_db, -6.0, "the page mix as it was");
+    let (status, list) = call(&app, Method::GET, "/api/presets/member6", Some(&m6), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(list.as_array().map(Vec::len), Some(1));
+    assert_eq!(list[0]["name"], "rehearsal");
+
+    // Loading ramps the page mix back to the preset.
+    s.engine
+        .request_applied(set_level("member6", "keys", -20.0), None)
+        .await
+        .unwrap();
+    let load = "/api/presets/member6/rehearsal/restore";
+    let (status, r) = call(&app, Method::POST, load, Some(&m6), None).await;
+    assert_eq!(
+        (status, r["restored"].as_u64(), r["skipped"].as_u64()),
+        (StatusCode::OK, Some(1), Some(0))
+    );
+    assert_eq!(s.engine.mirror().level(&mix, &keys).gain_db, -6.0);
+
+    // Deleted once; a second time there is nothing to delete.
+    let one = "/api/presets/member6/rehearsal";
+    assert_eq!(
+        call(&app, Method::DELETE, one, Some(&m6), None).await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(s.band.preset("member6", "rehearsal").unwrap(), None);
+    assert_eq!(
+        call(&app, Method::DELETE, one, Some(&m6), None).await.0,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn a_history_entry_is_taken_pinned_unpinned_and_deleted() {
+    let h = EngineHarness::start();
+    let (_d, s, app) = live(&h).await;
+    let m6 = token("member6", false);
+    let label = Some(r#"{"label":"soundcheck"}"#);
+    let (status, created) = call(
+        &app,
+        Method::POST,
+        "/api/snapshots/member6",
+        Some(&m6),
+        label,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let ts = created["timestamp"].as_i64().unwrap();
+    let (status, list) = call(&app, Method::GET, "/api/snapshots/member6", Some(&m6), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(list.as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        (list[0]["timestamp"].as_i64(), &list[0]["label"]),
+        (Some(ts), &serde_json::json!("soundcheck"))
+    );
+
+    // Pinned with a label, then unpinned.
+    let pin = format!("/api/snapshots/member6/{ts}/pin");
+    let gig = Some(r#"{"label":"gig"}"#);
+    assert_eq!(
+        call(&app, Method::POST, &pin, Some(&m6), gig).await.0,
+        StatusCode::OK
+    );
+    let entry = s.band.snapshot("member6", ts).unwrap().unwrap();
+    assert_eq!((entry.pinned, entry.label.as_str()), (true, "gig"));
+    let unpin = format!("/api/snapshots/member6/{ts}/unpin");
+    assert_eq!(
+        call(&app, Method::POST, &unpin, Some(&m6), None).await.0,
+        StatusCode::OK
+    );
+    let entry = s.band.snapshot("member6", ts).unwrap().unwrap();
+    assert_eq!((entry.pinned, entry.label.as_str()), (false, "gig"));
+
+    // An unknown entry is not found.
+    let other = ts + 1;
+    let pin_other = format!("/api/snapshots/member6/{other}/pin");
+    assert_eq!(
+        call(&app, Method::POST, &pin_other, Some(&m6), gig).await.0,
+        StatusCode::NOT_FOUND
+    );
+    let unpin_other = format!("/api/snapshots/member6/{other}/unpin");
+    assert_eq!(
+        call(&app, Method::POST, &unpin_other, Some(&m6), None)
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+
+    // Deleted once; a second time there is nothing to delete.
+    let one = format!("/api/snapshots/member6/{ts}");
+    assert_eq!(
+        call(&app, Method::DELETE, &one, Some(&m6), None).await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(s.band.snapshot("member6", ts).unwrap(), None);
+    assert_eq!(
+        call(&app, Method::DELETE, &one, Some(&m6), None).await.0,
+        StatusCode::NOT_FOUND
+    );
+}

@@ -47,6 +47,32 @@ async fn the_engine_announces_the_test_site() {
 }
 
 #[tokio::test]
+async fn the_site_view_is_built_once_per_topology() {
+    let h = EngineHarness::start();
+    let (_d, s) = h.state().await;
+    let first = s.site().unwrap();
+    let again = s.site().unwrap();
+    assert!(std::sync::Arc::ptr_eq(&first, &again), "the cached view");
+}
+
+#[tokio::test]
+async fn limiter_seconds_come_from_the_latest_meters() {
+    let h = EngineHarness::start();
+    let (_d, s) = h.state().await;
+    let topo = s.engine.mirror().topology.clone().unwrap();
+    let e = topo
+        .mixes
+        .iter()
+        .position(|m| m.id.0 == "engineer")
+        .unwrap();
+    let mut active = vec![0.0; topo.mixes.len()];
+    active[e] = 42.0;
+    *s.active_s.lock().unwrap() = active;
+    assert_eq!(s.active_seconds(&MixId::new("engineer")), 42.0);
+    assert_eq!(s.active_seconds(&MixId::new("member1")), 0.0);
+}
+
+#[tokio::test]
 async fn a_ui_command_changes_the_engine_and_tells_the_other_sessions() {
     let h = EngineHarness::start();
     let (_d, s) = h.state().await;

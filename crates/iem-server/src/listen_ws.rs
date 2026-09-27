@@ -223,4 +223,54 @@ mod tests {
         assert_eq!(slot_of(&state, &MixId::new("engineer")), 1);
         assert_eq!(slot_of(&state, &MixId::new("member1")), 1);
     }
+
+    /// Listen taps against the real engine (NullRt).
+    #[cfg(unix)]
+    mod live {
+        use super::*;
+        use crate::engine::testkit::{EngineHarness, wait_until};
+
+        fn listeners(state: &AppState, mix: &MixId) -> Option<usize> {
+            state
+                .listeners
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(mix)
+                .copied()
+        }
+
+        /// The engine's listen slots as the mirror has them.
+        fn heard(state: &AppState) -> [Option<MixId>; 2] {
+            state.engine.mirror().transient.listen.clone()
+        }
+
+        #[tokio::test]
+        async fn listeners_share_a_tap_and_the_last_one_stops_it() {
+            let h = EngineHarness::start();
+            let (_d, s) = h.state().await;
+            let m1 = MixId::new("member1");
+            assert_eq!(slot_of(&s, &MixId::new("engineer")), 0);
+            assert_eq!(slot_of(&s, &m1), 1);
+
+            start(&s, &m1).await.unwrap();
+            start(&s, &m1).await.unwrap();
+            assert_eq!(listeners(&s, &m1), Some(2));
+            wait_until("the member tap", || heard(&s)[1] == Some(m1.clone())).await;
+
+            stop(&s, &m1).await;
+            assert_eq!(listeners(&s, &m1), Some(1));
+            // A later request is in the mirror, so a stop sent before it would show.
+            let later = Cmd::SetMix {
+                mix: m1.clone(),
+                volume_db: Some(-1.0),
+                muted: None,
+            };
+            s.engine.request_applied(later, None).await.unwrap();
+            assert_eq!(heard(&s)[1], Some(m1.clone()), "one listener is left");
+
+            stop(&s, &m1).await;
+            assert_eq!(listeners(&s, &m1), None);
+            wait_until("the tap to stop", || heard(&s)[1].is_none()).await;
+        }
+    }
 }

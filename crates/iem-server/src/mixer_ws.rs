@@ -41,12 +41,22 @@ type Reject = (StatusCode, Json<ApiError>);
 
 /// The token's claims if present, valid and unexpired.
 pub fn claims_of(token: Option<&str>, secret: &str) -> Result<iem_core::AuthClaims, Reject> {
-    let token = token.ok_or((StatusCode::UNAUTHORIZED, Json(ApiError::unauthorized())))?;
-    let claims = crate::auth::extract_claims(token, secret)
-        .ok_or((StatusCode::UNAUTHORIZED, Json(ApiError::unauthorized())))?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
+    claims_at(token, secret, now)
+}
+
+/// [`claims_of`] at the Unix time `now` (seconds): a token is valid through
+/// the second of its `exp`.
+pub fn claims_at(
+    token: Option<&str>,
+    secret: &str,
+    now: u64,
+) -> Result<iem_core::AuthClaims, Reject> {
+    let token = token.ok_or((StatusCode::UNAUTHORIZED, Json(ApiError::unauthorized())))?;
+    let claims = crate::auth::extract_claims(token, secret)
+        .ok_or((StatusCode::UNAUTHORIZED, Json(ApiError::unauthorized())))?;
     if claims.exp < now {
         return Err((
             StatusCode::UNAUTHORIZED,
@@ -551,6 +561,23 @@ mod tests {
         }
     }
 
+    fn viewer(sub: &str, engineer: bool) -> Viewer {
+        Viewer {
+            sub: sub.into(),
+            engineer,
+        }
+    }
+
+    /// What `handle` has answered this session so far.
+    fn answers(rx: &mut mpsc::UnboundedReceiver<ServerMsg>) -> Vec<ServerMsg> {
+        std::iter::from_fn(|| rx.try_recv().ok()).collect()
+    }
+
+    /// The app events broadcast so far.
+    fn events(rx: &mut broadcast::Receiver<(To, ServerMsg)>) -> Vec<(To, ServerMsg)> {
+        std::iter::from_fn(|| rx.try_recv().ok()).collect()
+    }
+
     #[test]
     fn members_open_their_own_page_the_engineer_any() {
         let v = test_view();
@@ -668,6 +695,90 @@ mod tests {
             (code, body.0.code.as_str()),
             (StatusCode::UNAUTHORIZED, "UNAUTHORIZED")
         );
+    }
+
+    #[test]
+    fn a_token_is_valid_through_its_expiry_second() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let exp = now + 3600;
+        let token = jsonwebtoken::encode(
+            &jsonwebtoken::Header::default(),
+            &iem_core::AuthClaims {
+                sub: "member1".into(),
+                engineer: false,
+                exp,
+                iat: 0,
+            },
+            &jsonwebtoken::EncodingKey::from_secret(b"s"),
+        )
+        .unwrap();
+        assert_eq!(
+            claims_at(Some(token.as_str()), "s", exp - 1).unwrap().exp,
+            exp
+        );
+        assert_eq!(claims_at(Some(token.as_str()), "s", exp).unwrap().exp, exp);
+        let (code, body) = claims_at(Some(token.as_str()), "s", exp + 1).unwrap_err();
+        assert_eq!(
+            (code, body.0.code.as_str()),
+            (StatusCode::UNAUTHORIZED, "TOKEN_EXPIRED")
+        );
+    }
+
+    #[tokio::test]
+    async fn sos_talk_and_limiter_commands_need_no_engine() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(crate::site_view::tests::test_config(), dir.path());
+        let m3_page = state.page("member3").unwrap();
+        let eng_page = state.page("engineer").unwrap();
+        let (m3, eng) = (viewer("member3", false), viewer("engineer", true));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = state.event_tx.subscribe();
+
+        // SOS: raised by the member, cleared by them.
+        handle(&state, 1, &m3_page, &m3, ClientMsg::CallEngineer, &tx).await;
+        assert!(lock(&state.alerts).contains_key("member3"));
+        let alert = ServerMsg::EngineerAlert {
+            from_member: "member3".into(),
+            from_name: "Member3".into(),
+        };
+        assert!(events(&mut app).contains(&(To::Page("engineer".into()), alert)));
+        handle(&state, 1, &m3_page, &m3, ClientMsg::ClearAlert, &tx).await;
+        assert!(lock(&state.alerts).is_empty());
+        let cleared = ServerMsg::AlertCleared {
+            member_id: "member3".into(),
+        };
+        assert!(events(&mut app).contains(&(To::Page("member3".into()), cleared)));
+
+        // Talkback: the engineer's only.
+        handle(&state, 1, &m3_page, &m3, ClientMsg::TalkStart, &tx).await;
+        assert!(answers(&mut rx).is_empty(), "a member cannot talk");
+        assert!(lock(&state.talk).holder().is_none());
+        handle(&state, 7, &eng_page, &eng, ClientMsg::TalkStart, &tx).await;
+        match answers(&mut rx).as_slice() {
+            [ServerMsg::TalkAcquired { talk_id }] => assert!(!talk_id.is_empty()),
+            other => panic!("{other:?}"),
+        }
+        let talking = ServerMsg::EngineerTalking { active: true };
+        assert!(events(&mut app).contains(&(To::All, talking)));
+        handle(&state, 7, &eng_page, &eng, ClientMsg::TalkStop, &tx).await;
+        assert_eq!(answers(&mut rx), vec![ServerMsg::TalkReleased]);
+
+        // The limiter's answer needs only the mirror.
+        handle(&state, 1, &m3_page, &m3, ClientMsg::GetLimiterParams, &tx).await;
+        match answers(&mut rx).as_slice() {
+            [
+                ServerMsg::LimiterParams {
+                    mix, track_name, ..
+                },
+            ] => assert_eq!(
+                (mix.as_str(), track_name.as_str()),
+                ("member3", view::OUT_NAME)
+            ),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
@@ -792,5 +903,152 @@ mod tests {
             },
             &m1
         ));
+    }
+
+    /// Commands, engine events and meters against the real engine (NullRt).
+    #[cfg(unix)]
+    mod live {
+        use super::*;
+        use crate::engine::testkit::EngineHarness;
+        use std::sync::Arc;
+
+        #[tokio::test]
+        async fn pins_hides_eq_and_the_console_are_answered_from_the_engine() {
+            let h = EngineHarness::start();
+            let (_d, s) = h.state().await;
+            let page = s.page("member2").unwrap();
+            let m2 = viewer("member2", false);
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let mut app = s.event_tx.subscribe();
+
+            // Pins and hides: unknown ids are left out, the rest saved and
+            // told to every connection of the page.
+            let pins = ClientMsg::UpdateCustomization {
+                pinned: vec!["mic1".into(), "nothing".into()],
+                hidden: vec!["keys".into()],
+            };
+            handle(&s, 1, &page, &m2, pins, &tx).await;
+            let c = s.band.customization("member2").unwrap();
+            assert_eq!(c.pinned, vec![Source::Input(InputId::new("mic1"))]);
+            assert_eq!(c.hidden, vec![Source::Input(InputId::new("keys"))]);
+            let told = ServerMsg::CustomizationUpdate {
+                pinned: vec!["mic1".into()],
+                hidden: vec!["keys".into()],
+            };
+            assert!(events(&mut app).contains(&(To::Page("member2".into()), told)));
+
+            let eq = ClientMsg::GetEqParams {
+                target: "member2".into(),
+            };
+            handle(&s, 1, &page, &m2, eq, &tx).await;
+            match answers(&mut rx).as_slice() {
+                [
+                    ServerMsg::EqParams {
+                        target,
+                        track_name,
+                        bands,
+                    },
+                ] => {
+                    assert_eq!(
+                        (target.as_str(), track_name.as_str()),
+                        ("member2", view::OUT_NAME)
+                    );
+                    assert!(!bands.is_empty());
+                }
+                other => panic!("{other:?}"),
+            }
+
+            // The console is the engineer's.
+            handle(&s, 1, &page, &m2, ClientMsg::GetConsole, &tx).await;
+            assert!(answers(&mut rx).is_empty(), "not a member's");
+            let eng_page = s.page("engineer").unwrap();
+            let eng = viewer("engineer", true);
+            handle(&s, 2, &eng_page, &eng, ClientMsg::GetConsole, &tx).await;
+            match answers(&mut rx).as_slice() {
+                [ServerMsg::Console(c)] => assert_eq!(c.inputs.len(), 24),
+                other => panic!("{other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn engine_events_and_meters_become_page_messages() {
+            let h = EngineHarness::start();
+            let (_d, s) = h.state().await;
+            let page = s.page("member2").unwrap();
+            let m2 = viewer("member2", false);
+            let out = engine_event(&s, 5, &page, &m2, EngineEvent::Connected);
+            assert!(
+                matches!(
+                    out.as_slice(),
+                    [
+                        ServerMsg::ConnectionChanged { connected: true },
+                        ServerMsg::State {
+                            connected: true,
+                            ..
+                        }
+                    ]
+                ),
+                "{out:?}"
+            );
+            assert_eq!(
+                engine_event(&s, 5, &page, &m2, EngineEvent::Disconnected),
+                vec![ServerMsg::ConnectionChanged { connected: false }]
+            );
+
+            // Session 5 changed a level: it hears nothing back, the others
+            // (and changes without a session) get the update.
+            let (mix, keys) = (MixId::new("member2"), Source::Input(InputId::new("keys")));
+            let set = Cmd::SetLevel {
+                mix: mix.clone(),
+                source: keys.clone(),
+                gain_db: Some(-6.0),
+                pan: None,
+                muted: None,
+            };
+            s.engine.request_applied(set, Some(5)).await.unwrap();
+            let level = s.engine.mirror().level(&mix, &keys);
+            let changes = Arc::new(vec![Change::Level {
+                mix,
+                source: keys,
+                level,
+            }]);
+            let changed = |origin| EngineEvent::Changed {
+                origin,
+                changes: Arc::clone(&changes),
+            };
+            assert!(
+                engine_event(&s, 5, &page, &m2, changed(Some(5))).is_empty(),
+                "its own change is not echoed"
+            );
+            let update = ServerMsg::ChannelUpdate {
+                id: "keys".into(),
+                level_db: -6.0,
+                muted: false,
+                pan: 0.5,
+            };
+            assert_eq!(
+                engine_event(&s, 5, &page, &m2, changed(Some(6))),
+                vec![update.clone()]
+            );
+            assert_eq!(engine_event(&s, 5, &page, &m2, changed(None)), vec![update]);
+
+            // Meters: inputs and mixes by id, and the page's stems strip.
+            let topo = s.engine.mirror().topology.clone().unwrap();
+            let merged = crate::meters::Merged {
+                inputs: vec![[0.5, 0.25]; topo.inputs.len()],
+                mixes: vec![[0.125, 0.125]; topo.mixes.len()],
+                groups: vec![[0.0, 0.0]; topo.mixes.len() * topo.groups.len()],
+                active_s: Vec::new(),
+            };
+            match meters_msg(&s, &page, &merged) {
+                Some(ServerMsg::Meters { meters }) => {
+                    assert_eq!(meters.len(), 24 + 11 + 1);
+                    assert_eq!(meters["keys"], [0.5, 0.25]);
+                    assert_eq!(meters["member2"], [0.125, 0.125]);
+                    assert_eq!(meters["stems"], [0.0, 0.0]);
+                }
+                other => panic!("{other:?}"),
+            }
+        }
     }
 }

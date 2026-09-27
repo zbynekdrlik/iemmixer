@@ -1160,17 +1160,18 @@ mod site_links_tests {
     }
 }
 
+/// The API as the browser sees it (also used by other modules' route tests).
 #[cfg(test)]
-mod api_tests {
+pub(crate) mod api_tests {
     use super::*;
     use axum::extract::connect_info::MockConnectInfo;
     use axum::http::{Method, Request};
     use std::net::SocketAddr;
     use tower::util::ServiceExt;
 
-    const SECRET: &str = "api-test-secret";
+    pub(crate) const SECRET: &str = "api-test-secret";
 
-    fn token(sub: &str, engineer: bool) -> String {
+    pub(crate) fn token(sub: &str, engineer: bool) -> String {
         let claims = iem_core::AuthClaims {
             sub: sub.into(),
             engineer,
@@ -1185,17 +1186,22 @@ mod api_tests {
         .unwrap()
     }
 
-    fn app(dir: &std::path::Path) -> (AppState, Router) {
+    /// A state without an engine (tokens signed with [`SECRET`]) and its API.
+    pub(crate) fn app(dir: &std::path::Path) -> (AppState, Router) {
         let mut config = crate::site_view::tests::test_config();
         config.jwt_secret = SECRET.into();
         let state = AppState::new(config, dir);
-        let router = api_routes(state.clone())
-            .with_state(state.clone())
-            .layer(MockConnectInfo(SocketAddr::from(([10, 0, 0, 50], 40000))));
-        (state, router)
+        (state.clone(), router(state))
     }
 
-    async fn call(
+    /// The API routes over `state`, reached from a LAN client.
+    pub(crate) fn router(state: AppState) -> Router {
+        api_routes(state.clone())
+            .with_state(state)
+            .layer(MockConnectInfo(SocketAddr::from(([10, 0, 0, 50], 40000))))
+    }
+
+    pub(crate) async fn call(
         app: &Router,
         method: Method,
         uri: &str,

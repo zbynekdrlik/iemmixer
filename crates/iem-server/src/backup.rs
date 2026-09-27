@@ -293,6 +293,35 @@ mod tests {
     }
 
     #[test]
+    fn a_pan_of_one_percent_is_off_centre() {
+        assert_eq!(pan(0.01), "R1");
+        assert_eq!(pan(-0.01), "L1");
+        assert_eq!(pan(0.0049), "C");
+    }
+
+    #[test]
+    fn preview_counts_every_value_that_already_matches() {
+        let v = test_view();
+        let current = state_with(|s| {
+            s.inputs.entry(InputId::new("keys")).or_default().trim_db = 2.0;
+        });
+        let mut b = MixerBackup::new("t".into(), 1, current.clone());
+        let pins =
+            CustomizationFile::new("member2", vec![Source::Input(InputId::new("keys"))], vec![]);
+        b.customizations.insert("member2".into(), pins.clone());
+        let p = preview(
+            &v,
+            &current,
+            &|m| (m == "member2").then(|| pins.clone()),
+            &b,
+        );
+        assert!(p.changes.is_empty(), "{:?}", p.changes);
+        assert!(p.skipped.is_empty());
+        // KEYS: trim, processing, mute and EQ; member2's pins and hides.
+        assert_eq!(p.unchanged_count, 4 + 1);
+    }
+
+    #[test]
     fn capture_takes_the_mirror_and_every_members_pins() {
         let v = test_view();
         let dir = tempfile::tempdir().unwrap();

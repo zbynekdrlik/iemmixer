@@ -31,9 +31,7 @@ pub struct MeterMerge {
 }
 
 fn merge(into: &mut Vec<[f32; 2]>, from: &[[f32; 2]]) {
-    if into.len() < from.len() {
-        into.resize(from.len(), [0.0, 0.0]);
-    }
+    into.resize(into.len().max(from.len()), [0.0, 0.0]);
     for (a, b) in into.iter_mut().zip(from) {
         a[0] = a[0].max(b[0]);
         a[1] = a[1].max(b[1]);
@@ -168,6 +166,33 @@ mod tests {
             [0.0, 0.0]
         );
         assert!(!page_meters(&merged, &topo, &p2, None).contains_key("stems"));
+    }
+
+    #[test]
+    fn a_strip_is_found_mix_major_among_several_groups() {
+        let mut topo = test_topology();
+        topo.groups.insert(
+            0,
+            iem_engine_proto::GroupInfo {
+                id: GroupId::new("extra"),
+                inputs: Vec::new(),
+            },
+        );
+        let v = test_view();
+        let p = v.page("member1").unwrap();
+        let m1 = topo.mixes.iter().position(|m| m.id.0 == "member1").unwrap();
+        assert!(m1 > 1, "member1 is declared late");
+        let mut groups = vec![[0.0, 0.0]; topo.mixes.len() * 2];
+        groups[m1 * 2 + 1] = [0.7, 0.6];
+        let merged = Merged {
+            groups,
+            ..Merged::default()
+        };
+        let stems = GroupId::new("stems");
+        assert_eq!(
+            page_meters(&merged, &topo, &p, Some(&stems))["stems"],
+            [0.7, 0.6]
+        );
     }
 
     #[test]

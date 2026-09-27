@@ -107,6 +107,11 @@ mod tests {
             Decision::Reload
         );
         assert_eq!(on_missing_hello(t, None), Decision::Reload);
+        assert_eq!(
+            on_missing_hello(t, Some(t)),
+            Decision::Keep,
+            "not twice in the same moment"
+        );
         // A clock that went backwards does not block reloads forever.
         assert_eq!(on_missing_hello(t, Some(t + 5_000.0)), Decision::Reload);
     }

@@ -160,6 +160,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_alarm_reaches_the_engineers_and_the_owners_subscriptions() {
+        let (base, seen) = fake_push_service().await;
+        let dir = tempfile::tempdir().unwrap();
+        let config = iem_core::Config {
+            vapid_private_key: vapid_private_key(),
+            vapid_subject: "mailto:ops@example.org".into(),
+            ..iem_core::Config::default()
+        };
+        let state = AppState::new(config, dir.path());
+        state
+            .push_store
+            .write()
+            .await
+            .add(subscription(format!("{base}/201")))
+            .unwrap();
+        std::fs::write(
+            dir.path().join(ALARM_SUBSCRIPTIONS_FILE),
+            serde_json::to_string(&vec![subscription(format!("{base}/201"))]).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(push_alarm(&state, &alarm_payload("T", "B")).await, 2);
+        assert_eq!(seen.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
     async fn notify_mode_sends_to_the_stored_subscriptions() {
         let (base, seen) = fake_push_service().await;
         let dir = tempfile::tempdir().unwrap();

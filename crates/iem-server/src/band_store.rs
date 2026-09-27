@@ -680,6 +680,23 @@ mod tests {
         assert_eq!(c.hidden, vec![Source::Mix(MixId::new("member2"))]);
     }
 
+    #[test]
+    fn a_missing_file_reads_as_its_members_empty_file() {
+        let (_dir, s) = store();
+        assert_eq!(
+            s.customization("member1").unwrap(),
+            CustomizationFile::new("member1", Vec::new(), Vec::new())
+        );
+    }
+
+    #[test]
+    fn an_unreadable_file_is_an_error_not_an_empty_one() {
+        let (dir, s) = store();
+        // A folder where the file should be: reading it fails, not "not found".
+        std::fs::create_dir_all(dir.path().join("customizations/member1.json")).unwrap();
+        assert!(matches!(s.customization("member1"), Err(StoreError::Io(_))));
+    }
+
     fn mirror(f: impl FnOnce(&mut MixState)) -> Mirror {
         let mut state = MixState::default();
         f(&mut state);
@@ -887,5 +904,42 @@ mod tests {
         assert!(none.is_empty());
         assert_eq!(lin_db(0.0), DB_OFF);
         assert_eq!(lin_db(1.0), 0.0);
+    }
+
+    #[test]
+    fn the_stems_fader_ramps_through_linear_amplitudes() {
+        let v = test_view();
+        let p = v.page("member1").unwrap();
+        let m = mirror(|s| {
+            s.mixes
+                .entry(MixId::new("member1"))
+                .or_default()
+                .groups
+                .insert(
+                    GroupId::new("stems"),
+                    MixGroup {
+                        gain_db: -6.0,
+                        ..MixGroup::default()
+                    },
+                );
+        });
+        let groups = BTreeMap::from([(GroupId::new("stems"), 6.0)]);
+        let (steps, skipped) = ramp(&v, &m, &p, &[], &groups);
+        assert_eq!((steps.len(), skipped), (RAMP_STEPS, 0));
+        let (a, b) = (db_to_lin(-6.0), db_to_lin(6.0));
+        for (k, step) in steps.iter().enumerate() {
+            let f = (k + 1) as f64 / RAMP_STEPS as f64;
+            let want = 20.0 * (a + (b - a) * f).log10();
+            match step.as_slice() {
+                [
+                    Cmd::SetGroup {
+                        gain_db: Some(g),
+                        muted: None,
+                        ..
+                    },
+                ] => assert!((g - want).abs() < 1e-9, "step {k}: {g} dB, not {want}"),
+                other => panic!("{other:?}"),
+            }
+        }
     }
 }

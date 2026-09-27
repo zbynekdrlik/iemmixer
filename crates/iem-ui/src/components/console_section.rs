@@ -9,16 +9,14 @@ use wasm_bindgen::prelude::*;
 
 /// The console is refreshed this often while it is shown (limiter seconds).
 const REFRESH_MS: i32 = 2_000;
-/// Trim range and step (dB).
+/// Trim range (dB); the buttons step it by whole decibels.
 pub const TRIM_MIN_DB: f32 = -24.0;
 pub const TRIM_MAX_DB: f32 = 24.0;
-pub const TRIM_STEP_DB: f32 = 1.0;
 
-/// The trim one step away from `current` (clamped to the range, rounded to
-/// the step so repeated clicks never drift).
+/// The trim `steps` decibels away from `current` (clamped to the range,
+/// rounded to a whole decibel so repeated clicks never drift).
 pub fn step_trim(current: f32, steps: f32) -> f32 {
-    let next = ((current + steps * TRIM_STEP_DB) / TRIM_STEP_DB).round() * TRIM_STEP_DB;
-    next.clamp(TRIM_MIN_DB, TRIM_MAX_DB)
+    (current + steps).round().clamp(TRIM_MIN_DB, TRIM_MAX_DB)
 }
 
 /// A trim for display ("+3 dB", "0 dB", "-4.5 dB").
@@ -199,6 +197,9 @@ mod tests {
         assert_eq!(format_trim(3.0), "+3 dB");
         assert_eq!(format_trim(-12.0), "-12 dB");
         assert_eq!(format_trim(-4.5), "-4.5 dB");
+        // 0.05 dB is no longer zero, and not a whole decibel either.
+        assert_eq!(format_trim(0.05), "+0.1 dB");
+        assert_eq!(format_trim(-0.05), "-0.1 dB");
     }
 
     #[test]

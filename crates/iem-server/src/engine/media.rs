@@ -111,10 +111,9 @@ impl Stats {
             self.in_window = 0;
             self.window_start = now;
         }
-        if let Some(Some(last)) = self.last_seq.get(slot)
-            && seq > last + 1
-        {
-            self.gaps += seq - last - 1;
+        if let Some(Some(last)) = self.last_seq.get(slot) {
+            // Frames skipped since the last one (none after an engine restart).
+            self.gaps += seq.saturating_sub(last + 1);
         }
         if let Some(s) = self.last_seq.get_mut(slot) {
             *s = Some(seq);
@@ -359,6 +358,54 @@ mod tests {
         assert_eq!(peak_db(&[0.0, 0.0]), -150.0);
         assert!((peak_db(&[0.5, -1.0]) - 0.0).abs() < 1e-6);
         assert!((peak_db(&[0.1]) + 20.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_peak_at_the_floor_is_silence() {
+        assert_eq!(peak_db(&[1e-7]), -150.0);
+        assert!(peak_db(&[2e-7]) > -150.0);
+    }
+
+    #[test]
+    fn the_frame_rate_is_measured_over_windows_of_a_second() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut s = Stats::new();
+        s.window_start = t0;
+        s.frame(0, 1, 100, -6.0, at(250));
+        s.frame(0, 2, 100, -6.0, at(500));
+        assert_eq!((s.in_window, s.per_second), (2, 0.0), "the window is open");
+        s.frame(0, 3, 120, -3.0, at(1500));
+        assert_eq!((s.in_window, s.per_second), (0, 2.0), "3 frames in 1.5 s");
+        assert_eq!(s.window_start, at(1500));
+        assert_eq!((s.last_size, s.peak_db, s.gaps), (120, -3.0, 0));
+        assert_eq!(s.last_frame, Some(at(1500)));
+    }
+
+    #[test]
+    fn sequence_gaps_count_the_frames_skipped_per_slot() {
+        let t0 = Instant::now();
+        let mut s = Stats::new();
+        s.frame(1, 5, 1, 0.0, t0);
+        s.frame(1, 6, 1, 0.0, t0);
+        assert_eq!(s.gaps, 0, "consecutive");
+        s.frame(0, 40, 1, 0.0, t0);
+        assert_eq!(s.gaps, 0, "the other slot counts on its own");
+        s.frame(1, 9, 1, 0.0, t0);
+        assert_eq!(s.gaps, 2, "7 and 8");
+        s.frame(1, 0, 1, 0.0, t0);
+        assert_eq!(s.gaps, 2, "a restarted engine counts from zero again");
+        assert_eq!(s.last_seq, [Some(40), Some(0)]);
+    }
+
+    #[tokio::test]
+    async fn a_spawned_link_names_its_pipe() {
+        let dir = tempfile::tempdir().unwrap();
+        let pipe = dir.path().join("none.sock").to_string_lossy().into_owned();
+        let link = MediaLink::spawn(pipe.clone());
+        assert_eq!(link.pipe(), pipe);
+        assert!(!link.connected());
+        assert_eq!(MediaLink::detached().pipe(), "");
     }
 
     #[tokio::test]

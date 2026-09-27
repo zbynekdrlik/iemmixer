@@ -6,7 +6,9 @@ pub mod client;
 #[cfg(feature = "audio")]
 pub mod media;
 pub mod mirror;
-#[cfg(all(test, unix))]
+// Split cfgs: cargo-mutants skips a module only under a plain `#[cfg(test)]`.
+#[cfg(test)]
+#[cfg(unix)]
 pub mod testkit;
 pub mod wire;
 

@@ -232,6 +232,21 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_media_frame_of_the_largest_size_passes() {
+        let (mut a, mut b) = tokio::io::duplex(1 << 20);
+        let h = MediaHeader {
+            stream: stream::ENGINEER_LISTEN,
+            channels: 4,
+            seq: 2,
+            frames: 960,
+        };
+        let samples: Vec<f32> = (0..MAX_SAMPLES).map(|i| i as f32).collect();
+        assert_eq!(samples.len(), 4 * 960);
+        write_media_frame(&mut a, &h, &samples).await.unwrap();
+        assert_eq!(read_media_frame(&mut b).await.unwrap(), (h, samples));
+    }
+
     #[test]
     fn the_media_pipe_is_beside_the_control_pipe() {
         assert_eq!(media_pipe("/run/iem.sock"), "/run/iem.sock.media");

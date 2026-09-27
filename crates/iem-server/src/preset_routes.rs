@@ -97,23 +97,30 @@ pub(crate) async fn apply_ramp(
     let (steps, skipped) = ramp(&site, &state.engine.mirror(), page, sends, groups);
     state.auto_snapshot(page);
     let changed = steps.first().map_or(0, Vec::len);
-    for (i, ops) in steps.into_iter().enumerate() {
-        if i > 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(RAMP_STEP_MS)).await;
-        }
-        state
-            .engine
-            .request_applied(Cmd::Batch { ops }, None)
-            .await
-            .map_err(|e| {
-                tracing::error!(page = %page.id, error = %e, "ramp step failed");
-                (
-                    StatusCode::BAD_GATEWAY,
-                    Json(ApiError::new("ENGINE_ERROR", e.to_string())),
-                )
-            })?;
+    let mut steps = steps.into_iter();
+    if let Some(first) = steps.next() {
+        ramp_step(state, page, first).await?;
+    }
+    for ops in steps {
+        tokio::time::sleep(std::time::Duration::from_millis(RAMP_STEP_MS)).await;
+        ramp_step(state, page, ops).await?;
     }
     Ok((changed, skipped))
+}
+
+/// One batch of the ramp, applied (in the mirror) before the next is sent.
+async fn ramp_step(state: &AppState, page: &Page, ops: Vec<Cmd>) -> Result<(), Reject> {
+    state
+        .engine
+        .request_applied(Cmd::Batch { ops }, None)
+        .await
+        .map_err(|e| {
+            tracing::error!(page = %page.id, error = %e, "ramp step failed");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ApiError::new("ENGINE_ERROR", e.to_string())),
+            )
+        })
 }
 
 async fn list_presets(

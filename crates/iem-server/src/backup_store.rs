@@ -181,4 +181,21 @@ mod tests {
         );
         assert_eq!(timestamp_to_filename("short"), "short.json");
     }
+
+    #[test]
+    fn retention_counts_back_from_now() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BackupStore::new(dir.path());
+        let days_ago = |days: i64| {
+            (chrono::Utc::now() - chrono::TimeDelta::try_days(days).unwrap())
+                .format("%Y-%m-%dT%H:%M:%SZ")
+                .to_string()
+        };
+        let recent = days_ago(1);
+        store.save(&backup(&recent)).unwrap();
+        store.save(&backup(&days_ago(61))).unwrap();
+        assert_eq!(store.prune(60), 1, "only the one older than 60 days");
+        let left: Vec<String> = store.list().into_iter().map(|i| i.timestamp).collect();
+        assert_eq!(left, [recent]);
+    }
 }
