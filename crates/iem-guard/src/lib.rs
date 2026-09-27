@@ -14,6 +14,13 @@
 //! - [`state`]: the persistent state and the reboot rule;
 //! - [`alarms`]: the kept alarms;
 //! - [`cancel`]: the pre-emption token of every waiting step.
+//!
+//! The PC's effects (S6 plan Task 9):
+//!
+//! - [`pc`]: the [`Pc`] trait every switch step goes through, and a fake for
+//!   the daemon's tests;
+//! - [`site`]: the guard's settings (`[guard]`, `[card]`, `pc.toml`);
+//! - [`effects`]: the portable parsers and decisions of the effects.
 
 #![forbid(unsafe_code)]
 #![cfg_attr(
@@ -30,13 +37,18 @@ pub mod alarms;
 pub mod bundle;
 pub mod cancel;
 pub mod crash;
+pub mod effects;
 pub mod handover;
+pub mod pc;
 pub mod plan;
 pub mod proto;
+pub mod site;
 pub mod state;
 
 pub use alarms::{Alarm, Alarms};
 pub use cancel::{Cancel, Preempted};
+pub use pc::{Audience, Pc, R, StepError};
 pub use plan::{Facts, Health, Mode, OnError, PrefFail, Step};
 pub use proto::{Reply, Request};
+pub use site::Settings;
 pub use state::GuardState;

@@ -2681,6 +2681,7 @@ dependencies = [
 name = "iem-guard"
 version = "2.0.0-dev.9"
 dependencies = [
+ "iem-win",
  "interprocess",
  "serde",
  "serde_json",
