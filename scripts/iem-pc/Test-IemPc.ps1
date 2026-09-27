@@ -1,5 +1,5 @@
 #Requires -Version 5.1
-# Self-test of the S6 PC module (IemPc.psm1) on Windows
+# Self-test of the S6 PC module (IemPc.psm1) and hil-v1.ps1 on Windows
 # PowerShell 5.1 (CI job windows, an ephemeral administrator runner), against
 # real backends: a test task folder \iemmixer-test\ (security descriptors read
 # back), a temp root, an HKCU test key, a disabled test firewall rule and a
@@ -370,6 +370,78 @@ try {
     $m = Invoke-IemMode -Exe (Join-Path $base 'no-such-iemmode.exe') -Arguments @('status')
     Assert ($null -eq $m.exit -and $null -eq $m.reply -and -not (Test-IemModeOk -Result $m)) 'iemmode-that-does-not-start'
 
+    # ---- hil-v1.ps1 end to end, against a stand-in for iemmode ----
+    # The bundle layout (bundles\<sha>\ with the module next to the script); the
+    # server is unreachable here (port 9), so the address checks fail.
+    $hb = Join-Path $base 'hil'
+    $hdir = Join-Path $hb "bundles\$S"
+    New-Item -ItemType Directory -Force -Path $hdir | Out-Null
+    Copy-Item -LiteralPath (Join-Path $here 'hil-v1.ps1'), (Join-Path $here 'IemPc.psm1') -Destination $hdir
+    $fake = Join-Path $hb 'fake-iemmode.ps1'
+    $fakeText = @'
+# A stand-in for iemmode.exe (Test-IemPc.ps1): replies as scenario.json says and logs every call.
+$sc = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'scenario.json')) | ConvertFrom-Json
+$log = Join-Path $PSScriptRoot 'calls.log'
+Add-Content -LiteralPath $log -Value ($args -join ' ')
+$cmd = [string]$args[0]
+$n = @(Get-Content -LiteralPath $log).Count
+if (@($sc.silent) -contains $cmd) { exit 4 }
+$reopens = @(Get-Content -LiteralPath $log | Where-Object { $_ -eq 'force-reopen' }).Count
+$mode = 'dev'
+if ($sc.event_after -gt 0 -and $n -gt $sc.event_after) { $mode = 'event' }
+$ok = -not (@($sc.refuse) -contains $cmd)
+$reply = [ordered]@{ ok = $ok; mode = $mode; switching = $null; alarms = @(); detail = ('fake ' + $cmd) }
+if ($cmd -eq 'status') {
+    $reply['engine'] = [ordered]@{ build = $sc.sha; frames = 32; callbacks = (3000 * $n); missed = 0; resets = $reopens
+                                   parked = $false; faulted = $false; pipe_private = $true }
+}
+Write-Output (ConvertTo-Json -InputObject $reply -Depth 5 -Compress)
+if ($ok) { exit 0 }
+exit 1
+'@
+    [IO.File]::WriteAllText($fake, $fakeText)
+    function Invoke-HilRun([string]$scenario, [string]$branch = 'dev') {
+        [IO.File]::WriteAllText((Join-Path $hb 'scenario.json'), $scenario)
+        foreach ($f in @('calls.log', 'result.json')) { Remove-Item -LiteralPath (Join-Path $hb $f) -ErrorAction SilentlyContinue }
+        & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $hdir 'hil-v1.ps1') -Sha $S -Branch $branch `
+            -JobRun 4242 -Out (Join-Path $hb 'result.json') -Iemmode $fake -Local 'http://127.0.0.1:9' -CardSeconds 1 -TestTtl 0.2 | Out-Null
+        $code = $LASTEXITCODE
+        $calls = @()
+        if (Test-Path -LiteralPath (Join-Path $hb 'calls.log')) { $calls = @(Get-Content -LiteralPath (Join-Path $hb 'calls.log')) }
+        $res = Get-Content -LiteralPath (Join-Path $hb 'result.json') -Raw | ConvertFrom-Json
+        return [pscustomobject]@{ exit = $code; result = $res; calls = $calls }
+    }
+    function CheckOk($res, [string]$name) { return @($res.checks | Where-Object { $_.name -eq $name -and $_.ok }).Count -eq 1 }
+    function CheckFailed($res, [string]$name) { return @($res.checks | Where-Object { $_.name -eq $name -and -not $_.ok }).Count -eq 1 }
+
+    $h1 = Invoke-HilRun ('{"sha":"' + $S + '","refuse":[],"silent":[],"event_after":0}')
+    $calls = $h1.calls
+    Assert ($h1.exit -eq 1 -and $h1.result.conclusion -ceq 'failure' -and $h1.result.sha -ceq $S -and $h1.result.job_run -ceq '4242') "hil-run-with-the-server-down-fails (exit $($h1.exit))"
+    Assert ($calls[0] -ceq 'job-begin 4242' -and $calls[1] -ceq "activate $S") "hil-run-begins-the-job-then-activates ($($calls -join ' | '))"
+    Assert ($calls -contains 'test-signal mic1 -30 0.2' -and $calls -contains 'force-reopen' -and $calls -contains 'alarm-test') 'hil-run-drives-the-signal-reopen-and-alarm'
+    Assert ($calls[$calls.Count - 2] -ceq 'job-end 4242' -and $calls[$calls.Count - 1] -like "report $S red HIL v1 failure: *") 'hil-run-ends-the-job-then-reports-red'
+    foreach ($n in @('activate', 'engine-build', 'card', 'pipes', 'test-signal', 'reopen', 'alarm-push')) { Assert (CheckOk $h1.result $n) "hil-run-check-$n-passes" }
+    foreach ($n in @('server-version', 'site-links', 'lan', 'public-host', 'panic')) { Assert (CheckFailed $h1.result $n) "hil-run-check-$n-fails" }
+    Assert ($h1.result.summary -ceq 'HIL v1 failure: server-version, site-links, lan, public-host, panic (7 of 12 ok)') "hil-run-summary-names-checks-only ($($h1.result.summary))"
+    $card = @($h1.result.checks | Where-Object { $_.name -eq 'card' })[0]
+    Assert ($card.numbers.frames -eq 32 -and $card.numbers.missed -eq 0 -and $card.numbers.resets -eq 0 -and $card.numbers.callbacks -ge 2850) 'hil-run-card-numbers-in-the-result'
+
+    $h2 = Invoke-HilRun ('{"sha":"' + $S + '","refuse":["job-begin"],"silent":[],"event_after":0}')
+    Assert ($h2.exit -eq 0 -and $h2.result.conclusion -ceq 'cancelled' -and $h2.result.summary -like 'HIL v1 cancelled: job-begin refused: fake job-begin*') 'hil-run-a-refused-job-begin-is-cancelled'
+    Assert ($h2.calls.Count -eq 1) "hil-run-a-refused-job-begin-touches-nothing-else ($($h2.calls -join ' | '))"
+
+    $h3 = Invoke-HilRun ('{"sha":"' + $S + '","refuse":[],"silent":[],"event_after":3}')
+    Assert ($h3.exit -eq 0 -and $h3.result.conclusion -ceq 'cancelled') "hil-run-a-switch-to-event-cancels (exit $($h3.exit))"
+    Assert (-not (@($h3.calls) -like 'report *') -and (@($h3.calls) -contains 'job-end 4242') -and -not (@($h3.calls) -contains 'force-reopen')) "hil-run-a-cancelled-job-reports-nothing ($($h3.calls -join ' | '))"
+
+    $h4 = Invoke-HilRun ('{"sha":"' + $S + '","refuse":[],"silent":["job-begin"],"event_after":0}')
+    Assert ($h4.exit -eq 1 -and $h4.result.conclusion -ceq 'failure' -and (CheckFailed $h4.result 'job-begin') -and $h4.calls.Count -eq 1) 'hil-run-an-unreachable-guard-fails'
+
+    $h5 = Invoke-HilRun ('{"sha":"' + $S + '","refuse":["report"],"silent":[],"event_after":0}')
+    Assert ($h5.exit -eq 1 -and (CheckFailed $h5.result 'report')) 'hil-run-a-refused-report-is-a-failure'
+
+    $h6 = Invoke-HilRun ('{"sha":"' + $S + '","refuse":[],"silent":[],"event_after":0}') 'feature'
+    Assert ($h6.exit -eq 1 -and (CheckFailed $h6.result 'inputs') -and $h6.calls.Count -eq 0) 'hil-run-refuses-bad-inputs-before-any-call'
 } finally {
     $sch = New-Object -ComObject 'Schedule.Service'
     $sch.Connect()
