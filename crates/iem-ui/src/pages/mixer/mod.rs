@@ -299,7 +299,7 @@ pub fn MixerPage() -> impl IntoView {
                 fallback=|| ()
             >
                 <div class="disconnected-banner">
-                    "Reconnecting to REAPER..."
+                    "Reconnecting to the mixer..."
                     <LanHint />
                 </div>
             </Show>

@@ -381,7 +381,7 @@ pub fn PresetModal(
                                                             // reaperiem#205: block load when disconnected, with a Slovak message.
                                                             if !connected.get() {
                                                                 let _ = set_error.try_set(Some(
-                                                                    "Nie ste pripojení k REAPERu — preset sa nedá načítať.".to_string(),
+                                                                    "Nie ste pripojení k mixéru — preset sa nedá načítať.".to_string(),
                                                                 ));
                                                                 return;
                                                             }
