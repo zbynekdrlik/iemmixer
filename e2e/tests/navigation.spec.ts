@@ -1,3 +1,4 @@
+import type { WebSocket, WebSocketRoute } from "@playwright/test";
 import { test, expect, Page } from "./support/fixtures";
 import { menu, openMixer, strip } from "./support/session";
 
@@ -77,14 +78,77 @@ test.describe("Leaving a mixer page (reaperiem#153)", () => {
   test("mixer → landing with the page's back button: no panic, no report, no reconnect", async ({ page }) => {
     const reports = await clientErrorReports(page);
     const opened = socketOpenings(page);
+    const sockets: WebSocket[] = [];
+    page.on("websocket", (ws) => {
+      if (/\/ws\/engineer\?/.test(ws.url())) sockets.push(ws);
+    });
     await openMixer(page, "engineer", { engineer: true });
     await waitForStreamingMixer(page);
+    // The in-app back keeps the document: only the page's cleanup can close
+    // its mixer socket, or the server keeps the old session.
+    const mixer = sockets.at(-1);
+    expect(mixer, "the mixer page's socket").toBeDefined();
+    expect(mixer!.isClosed()).toBe(false);
+    const closed = mixer!.waitForEvent("close", { timeout: 10_000 }).then(
+      () => true,
+      () => false,
+    );
 
     const left = Date.now();
     await page.locator(".app.mixer .back-btn").click();
     await expectLanding(page);
+    expect(await closed, "the old mixer socket is closed").toBe(true);
     await settleClean(page, reports);
     expect(mixerSocketsSince(opened, left)).toEqual([]);
+  });
+
+  test("leaving while a reconnect's socket is still connecting: it is closed once it opens, never before", async ({
+    page,
+  }) => {
+    // A socket still connecting when the page goes (a slow server, or a
+    // token check's redirect racing a new socket): closing it then makes
+    // Chrome log "WebSocket is closed before the connection is established",
+    // so the page closes it once it opens. The route holds the page's
+    // reconnect in CONNECTING until its handler returns (Playwright's
+    // page-side socket opens then).
+    const reports = await clientErrorReports(page);
+    let hold = false;
+    let first: WebSocketRoute | undefined;
+    let attempts = 0;
+    let opening = false;
+    const closes: string[] = [];
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => (release = resolve));
+    await page.routeWebSocket(/\/ws\/engineer\?/, async (ws) => {
+      if (!hold) {
+        ws.connectToServer();
+        first = ws;
+        return;
+      }
+      attempts += 1;
+      ws.onClose(() => closes.push(opening ? "after open" : "while connecting"));
+      await released;
+    });
+    await openMixer(page, "engineer", { engineer: true });
+    await waitForStreamingMixer(page);
+    expect(first, "the mixer socket went through the route").toBeDefined();
+
+    hold = true;
+    await first!.close({ code: 1000, reason: "server gone (test)" });
+    // The next 2 s tick opens a socket, and the route holds it connecting (a
+    // connecting socket is no reason for another attempt).
+    await expect.poll(() => attempts, { timeout: 10_000 }).toBe(1);
+
+    await page.locator(".app.mixer .back-btn").click();
+    await expectLanding(page);
+    await settleClean(page, reports);
+    expect(closes, "nothing closed the socket while it was connecting").toEqual([]);
+
+    // It opens: the page that left closes it, and opens nothing new.
+    opening = true;
+    release();
+    await expect.poll(() => closes, { timeout: 5_000 }).toEqual(["after open"]);
+    expect(attempts, "no reconnect after the page went").toBe(1);
   });
 
   test("mixer → another member's mixer: no panic, no report", async ({ page }) => {

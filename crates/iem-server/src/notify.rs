@@ -6,7 +6,8 @@
 //!   running server or `iem-server notify --to band-activity`;
 //! - the **alarm recipients** (`alarm_subscriptions.json` next to the site
 //!   file: the owner's phone through the one-time link, S6 bootstrap): the
-//!   guard's technical alarms, only through `iem-server notify --to alarm`.
+//!   guard's technical alarms through `iem-server notify --to alarm`, and
+//!   the running server's refused scheduled backup ([`push_alarm`]).
 //!
 //! Notify mode sends once and exits; `iem-server notify --count alarm`
 //! prints how many alarm recipients there are (the guard's precheck needs
@@ -102,6 +103,26 @@ pub async fn push_engineers(state: &AppState, payload: &[u8]) {
         payload,
     )
     .await;
+}
+
+/// To the alarm recipients from the running server (a scheduled backup it
+/// refused, `backup_daemon`): how many devices took it. Never the
+/// engineer's devices; an unreadable recipient file is an error, never
+/// "none", and nothing is pruned.
+pub async fn push_alarm(state: &AppState, title: &str, body: &str) -> io::Result<usize> {
+    let subs = load_alarm_recipients(&state.config_dir)?;
+    let (key, subject) = {
+        let c = state.config.read().await;
+        (c.vapid_private_key.clone(), c.vapid_subject.clone())
+    };
+    Ok(send_to(
+        &state.http_client,
+        &key,
+        &subject,
+        &subs,
+        &alarm_payload(title, body),
+    )
+    .await)
 }
 
 /// `iem-server notify --to <audience> <title> <body>`: one notice to that
@@ -309,6 +330,24 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn a_server_alarm_reaches_only_the_alarm_recipients() {
+        let (dir, _site, seen) = two_audiences().await;
+        let config = iem_core::Config {
+            vapid_private_key: vapid_private_key(),
+            ..iem_core::Config::default()
+        };
+        let state = AppState::new(config, dir.path());
+        assert_eq!(push_alarm(&state, "Záloha zlyhala", "B").await.unwrap(), 1);
+        assert_eq!(paths(&seen), ["/202"], "never the engineer's device");
+        std::fs::write(dir.path().join(ALARM_SUBSCRIPTIONS_FILE), "[oops").unwrap();
+        assert!(
+            push_alarm(&state, "T", "B").await.is_err(),
+            "an unreadable recipient file is not \"none\""
+        );
+        assert_eq!(paths(&seen), ["/202"]);
     }
 
     #[test]

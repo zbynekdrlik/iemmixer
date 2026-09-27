@@ -63,6 +63,10 @@ exclude_re = [
   # e2e/tests/engineer.spec.ts (the switch) and e2e/tests/pin-freeze.spec.ts
   # (the PIN change; its messages are the tested change_pin_error).
   "iem-ui/src/api\\.rs.*replace (login|get_site_links|back_to_reaper|change_pin) ",
+  # The token check's browser-only fetch; its verdict on the answer is the
+  # tested token_refused, and e2e/tests/header.spec.ts drives it (502 while
+  # the server is gone, 200 after the reconnect).
+  "iem-ui/src/api\\.rs.*\\bverify_token_valid\\b",
   # Leptos component bodies (S5): a PascalCase function is a component; its
   # body is DOM event closures and effects that native tests cannot mount. The
   # E2E suites drive them; their pure logic lives in tested helpers.
@@ -167,6 +171,10 @@ exclude_re = [
   "iem-server/src/mixer_ws\\.rs.*delete match arm ClientMsg::ListenStart.* in handle$",
   # Unobservable (S5): the pruned count only decides whether it is logged.
   "iem-server/src/backup_daemon\\.rs.*replace > with (==|<|>=) in run$",
+  # The backup daemon's endless 30 s loop on the wall clock (whole-body
+  # replacement only); its steps are tested functions (due, settle,
+  # RefusalAlarms, refusal_alarm).
+  "iem-server/src/backup_daemon\\.rs.*replace run with \\(\\)$",
   # Equivalent (S6): the creation flags are distinct bits, so `^` gives the
   # same value as `|`.
   "iem-win/src/decide\\.rs.*replace \\| with \\^ in creation_flags$",
