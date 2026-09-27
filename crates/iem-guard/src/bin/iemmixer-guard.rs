@@ -201,8 +201,15 @@ fn run() -> ExitCode {
     let tray = Arc::clone(&g.shared);
     pc.set_tray_quit(Box::new(move || tray.tray_quit()));
     // The pipe first: while the start runs its event plan, `iemmode`
-    // already sees it (and "ide event" waits for it).
-    let listener = match pipe::listen(proto::NAME) {
+    // already sees it (and "ide event" waits for it). After a hand-over the
+    // old guard's instances (its own, and a client's still open on them)
+    // live on until its process has ended: the first instance waits.
+    let listener = match pipe::retry(
+        "the guard pipe's first instance",
+        pipe::LISTEN_WAIT,
+        pipe::LISTEN_EVERY,
+        || pipe::listen(proto::NAME),
+    ) {
         Ok(l) => l,
         Err(e) => {
             eprintln!("iemmixer-guard: the guard pipe: {e}");
@@ -233,6 +240,11 @@ fn run() -> ExitCode {
     };
     daemon::start(&mut pc, &mut g, boot);
     daemon::serve_requests(&mut pc, &mut g, &requests);
+    // The last reply (quit, the activation that hands over) reaches its
+    // client before this process and its pipe end.
+    if !g.shared.await_replies(pipe::LAST_REPLY) {
+        warn!("the last reply was not written before the guard stops");
+    }
     stop.store(true, Ordering::SeqCst);
     let handover = g.handover.clone();
     // The new guard waits for the mutex: release it first.

@@ -495,8 +495,10 @@ pub(super) fn force_reopen(pc: &mut WinPc) -> R<()> {
     sup.request("force_reopen").map_err(StepError::Failed)
 }
 
-/// `iem-engine check-site --site <file>` from the bundle: its report.
-fn check_site(pc: &WinPc, site: &Path) -> R<String> {
+/// `iem-engine check-site --site <file>` from the bundle: its report. A
+/// read-only wait: "ide event" ends it at once (Ctrl-Break to its own
+/// process group; the command ends by itself).
+fn check_site(pc: &WinPc, site: &Path, c: &Cancel) -> R<String> {
     let dir = pc.bundle_dir()?;
     let mut cmd = Command::new(dir.join(ENGINE_EXE));
     cmd.arg("check-site")
@@ -507,22 +509,31 @@ fn check_site(pc: &WinPc, site: &Path) -> R<String> {
         "iem-engine check-site",
         &mut cmd,
         CHECK_SITE,
-        &Cancel::default(),
-        procs::OnCancel::Finish,
+        c,
+        procs::OnCancel::Break,
     )?;
     proto::check_site_result(out.code, &out.stdout, &out.stderr).map_err(StepError::Failed)
 }
 
-/// F30 (design §7): the new site must pass `check-site`; then it replaces
-/// the site file (atomically). The guard's own settings are read again at
-/// its next start.
-pub(super) fn install_site(pc: &WinPc, path: &str) -> R<String> {
+/// F30 (design §7): the new site must keep the guard's own tables (the
+/// guard reads them at every start: a site it cannot load would leave only
+/// a reboot as the way back to REAPER) and pass `check-site`; then it
+/// replaces the site file (atomically). The guard's own settings are read
+/// again at its next start. The checks are waits "ide event" ends.
+pub(super) fn install_site(pc: &WinPc, path: &str, c: &Cancel) -> R<String> {
     let new = Path::new(path);
-    let now = check_site(pc, new)?;
+    let text = fs::read_to_string(new).map_err(|e| procs::failed(path, e))?;
+    pc.s.check_new_site(&text)
+        .map_err(|why| StepError::Failed(format!("the guard's tables: {why}")))?;
+    let now = check_site(pc, new, c)?;
     let site = pc.s.pc.site.clone();
-    let before = check_site(pc, &site).unwrap_or_else(|e| format!("unreadable ({e})"));
-    let text = fs::read(new).map_err(|e| procs::failed(path, e))?;
-    state::write_atomic(&site, &text).map_err(|e| procs::failed(&site.display().to_string(), e))?;
+    let before = match check_site(pc, &site, c) {
+        Ok(report) => report,
+        Err(StepError::Preempted) => return Err(StepError::Preempted),
+        Err(e) => format!("unreadable ({e})"),
+    };
+    state::write_atomic(&site, text.as_bytes())
+        .map_err(|e| procs::failed(&site.display().to_string(), e))?;
     info!("the site {} replaced {}", new.display(), site.display());
     Ok(format!("site before: {before}; site now: {now}"))
 }

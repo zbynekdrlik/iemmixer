@@ -189,4 +189,10 @@ exclude_re = [
   # Equivalent (S6): the retry loop's `elapsed < limit` differs from `<=`
   # only at the exact nanosecond.
   "iem-guard/src/cli\\.rs.*replace < with <= in call_starting",
+  # Equivalent (S6): the session end's wait for the engine, `elapsed <
+  # session_wait`, differs from `<=` only at the exact nanosecond.
+  "iem-guard/src/daemon\\.rs.*replace < with <= in session_end$",
+  # Equivalent (S6): the first pipe instance's retry, `elapsed < limit`,
+  # differs from `<=` only at the exact nanosecond.
+  "iem-guard/src/pipe\\.rs.*replace < with <= in retry",
 ]

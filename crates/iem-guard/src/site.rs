@@ -382,8 +382,8 @@ impl Settings {
     /// with the engine, and the guard reads its own tables from it at every
     /// start, so a site the guard could not load is refused before it
     /// replaces the old one.
-    pub fn check_new_site(&self, _site_text: &str) -> Result<(), String> {
-        Ok(())
+    pub fn check_new_site(&self, site_text: &str) -> Result<(), String> {
+        Self::with_site(self.pc.clone(), site_text).map(|_| ())
     }
 
     /// The image names of the process list.

@@ -377,10 +377,13 @@ def parse_reply(text: str) -> dict:
 
 
 def owner_alarms(reply: dict | None) -> list[dict]:
-    """Alarms the agent turns into the prepared owner question (not yet acknowledged)."""
+    """Alarms the agent turns into the prepared owner question (not yet acknowledged).
+
+    The guard's Alarm serializes its acknowledgement as `acked`.
+    """
     if not reply or not isinstance(reply.get("alarms"), list):
         return []
-    return [a for a in reply["alarms"] if isinstance(a, dict) and a.get("owner_question") is True and not a.get("ack")]
+    return [a for a in reply["alarms"] if isinstance(a, dict) and a.get("owner_question") is True and not a.get("acked")]
 
 
 def call(env: dict[str, str], exe: str, args: list[str], timeout: float, event: str,

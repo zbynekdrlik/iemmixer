@@ -12,6 +12,13 @@
 //! [`Shared`] view while a switch runs ("ide event" pre-empts it through the
 //! [`Cancel`] token, everything else is refused) and hand every other
 //! request to the daemon thread.
+//!
+//! A request that is not a switch runs with no switch marked as running: an
+//! "ide event" meanwhile pre-empts the token and queues behind it. Its waits
+//! end at once (install-site's `check-site`, a HIL job's stage peaks, the
+//! runner's stop); its mutations finish first, and they bound the longest
+//! an "ide event" waits behind a request: activate's Defender exclusion task
+//! (≤ 120 s), a bundle's unzip (local files), the probe task (≤ 15 s).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -358,15 +365,43 @@ impl Shared {
         self.wait_while(limit, |v| !v.session_done).session_done
     }
 
+    /// Counts under the view's lock and wakes its waiters; not a change of
+    /// the view (subscribers stay asleep).
+    fn count(&self, f: impl FnOnce(&mut View)) {
+        let mut v = self.lock();
+        f(&mut v);
+        drop(v);
+        self.changed.notify_all();
+    }
+
     /// The daemon thread handed a reply to a pipe thread.
-    pub fn reply_sent(&self) {}
+    pub fn reply_sent(&self) {
+        self.count(|v| v.replies_sent += 1);
+    }
 
     /// A pipe thread wrote a reply it was handed (or found its client gone).
-    pub fn reply_done(&self) {}
+    pub fn reply_done(&self) {
+        self.count(|v| v.replies_done += 1);
+    }
 
     /// Waits up to `limit` until every reply handed to the pipe was written:
     /// the guard's last reply (quit, a hand-over) before its process ends.
-    pub fn await_replies(&self, _limit: Duration) -> bool {
+    pub fn await_replies(&self, limit: Duration) -> bool {
+        let v = self.wait_while(limit, |v| v.replies_done < v.replies_sent);
+        v.replies_done >= v.replies_sent
+    }
+
+    /// A switch into dev or live is about to end. Under the view's lock:
+    /// false when "ide event" pre-empted it (it goes back to event instead);
+    /// otherwise it stops counting as running, so a later "ide event" is
+    /// queued behind its end, as when no switch runs, and never pre-empts a
+    /// switch that no longer looks at the token.
+    pub fn end_unless_preempted(&self) -> bool {
+        let mut v = self.lock();
+        if self.cancel.preempted() {
+            return false;
+        }
+        v.running = None;
         true
     }
 }
@@ -424,7 +459,7 @@ impl Guard {
         root: Option<PathBuf>,
     ) -> Self {
         let cancel = Cancel::default();
-        let mut g = Self {
+        let g = Self {
             state,
             alarms,
             site,
@@ -580,8 +615,8 @@ impl Guard {
     }
 
     fn finish(&mut self, pc: &mut dyn Pc, outcome: Outcome, mode: Mode) -> Outcome {
+        let from = self.state.switching.take().map(|s| s.from);
         self.state.mode = mode;
-        self.state.switching = None;
         self.trial = false;
         self.force = false;
         self.build = None;
@@ -595,8 +630,13 @@ impl Guard {
             v.running = None;
             v.last = Some(outcome);
         });
+        // Tuning drift after every switch that ran. After any other change
+        // of the mode (a plan that stopped for the owner) the watch reads it
+        // at its next tick: nothing follows a stopped plan's last step.
         if outcome == Outcome::Done {
             self.drift(pc, Instant::now());
+        } else if from != Some(mode) {
+            self.last_drift = None;
         }
         outcome
     }
@@ -731,15 +771,17 @@ pub fn run_switch(pc: &mut dyn Pc, g: &mut Guard, from: Mode, to: Mode) -> Outco
                 }
                 let (why, health, policy) = failure(pc, g, to, step, &e);
                 match policy {
-                    OnError::Unwind if g.hold_unwind => {
-                        g.alarm(
-                            step,
-                            &format!("{why}; the rehearsal never starts REAPER"),
-                            true,
-                        );
-                        return g.finish(pc, Outcome::NeedsOwner, from);
-                    }
                     OnError::Unwind => {
+                        // The rehearsal's re-entry stops for the owner,
+                        // unless "ide event" came meanwhile.
+                        if g.hold_unwind && may_end(g, to) {
+                            g.alarm(
+                                step,
+                                &format!("{why}; the rehearsal never starts REAPER"),
+                                true,
+                            );
+                            return g.finish(pc, Outcome::NeedsOwner, from);
+                        }
                         g.alarm(step, &why, false);
                         return back_to_event(pc, g, &why);
                     }
@@ -764,7 +806,18 @@ pub fn run_switch(pc: &mut dyn Pc, g: &mut Guard, from: Mode, to: Mode) -> Outco
             }
         }
     }
+    if !may_end(g, to) {
+        return back_to_event(pc, g, "pre-empted by event");
+    }
     g.finish(pc, Outcome::Done, to)
+}
+
+/// Whether a switch into `to` may end as it is: an event plan always; one
+/// into dev or live unless "ide event" pre-empted it after its last look at
+/// the token (during a mutation that finishes first, or after the last
+/// step). From then on "ide event" queues behind its end.
+fn may_end(g: &Guard, to: Mode) -> bool {
+    to == Mode::Event || g.shared.end_unless_preempted()
 }
 
 fn back_to_event(pc: &mut dyn Pc, g: &mut Guard, why: &str) -> Outcome {
@@ -797,6 +850,9 @@ fn failure(
 /// The interlock heard the band: the entry waits for its retry in 15 min;
 /// the fourth refusal sends the owner one notice, the eighth drops it.
 fn refused(pc: &mut dyn Pc, g: &mut Guard, from: Mode, to: Mode, report: &str) -> Outcome {
+    if !may_end(g, to) {
+        return back_to_event(pc, g, "pre-empted by event");
+    }
     let refusals = g
         .state
         .interlock_retry
@@ -1087,20 +1143,38 @@ fn event_now(pc: &mut dyn Pc, g: &mut Guard) -> (bool, String) {
     )
 }
 
+/// Why the entry's build may not run: not installed, or (live) not a green
+/// `main` bundle.
+fn build_refusal(g: &Guard, e: &Entry) -> Option<String> {
+    let sha = e.build.as_ref()?;
+    let Some(rec) = g.state.bundles.get(sha) else {
+        return Some(format!("bundle {sha} is not installed"));
+    };
+    if e.to == Mode::Live {
+        bundle::may_go_live(rec).err()
+    } else {
+        None
+    }
+}
+
+/// Ends the wait of a refused entry: it ran, unwound, was pre-empted, or
+/// may no longer run. Otherwise the watch would enter again every second.
+fn drop_retry(g: &mut Guard) {
+    g.state.interlock_retry = None;
+    g.note = None;
+    g.save();
+}
+
 fn entry(pc: &mut dyn Pc, g: &mut Guard, e: Entry) -> (bool, String) {
     if !e.retry {
         g.state.interlock_retry = None;
         g.note = None;
     }
-    if let Some(sha) = &e.build {
-        let Some(rec) = g.state.bundles.get(sha) else {
-            return (false, format!("bundle {sha} is not installed"));
-        };
-        if e.to == Mode::Live
-            && let Err(why) = bundle::may_go_live(rec)
-        {
-            return (false, why);
+    if let Some(why) = build_refusal(g, &e) {
+        if e.retry {
+            drop_retry(g);
         }
+        return (false, why);
     }
     if e.dry_run {
         return dry_entry(pc, g, &e);
@@ -1114,6 +1188,10 @@ fn entry(pc: &mut dyn Pc, g: &mut Guard, e: Entry) -> (bool, String) {
     g.build.clone_from(&e.build);
     let from = g.state.mode;
     let out = run_switch(pc, g, from, e.to);
+    // Only a refusal waits for its retry (`refused` counted it).
+    if out != Outcome::Refused {
+        drop_retry(g);
+    }
     (
         out == Outcome::Done && g.state.mode == e.to,
         switch_text(e.to, out, g.state.mode),
@@ -1250,7 +1328,8 @@ fn activate(pc: &mut dyn Pc, g: &mut Guard, sha: &str) -> (bool, String) {
     )
 }
 
-/// The HIL test signal, card-masked to `[guard] hil_tx` (design §4).
+/// The HIL test signal, card-masked to `[guard] hil_tx` (design §4), only
+/// inside a begun HIL job (its band-quiet and stage checks, design §7).
 fn test_signal(
     pc: &mut dyn Pc,
     g: &mut Guard,
@@ -1260,6 +1339,12 @@ fn test_signal(
 ) -> (bool, String) {
     if let Err(why) = g.need_dev("test-signal") {
         return (false, why);
+    }
+    if g.job.is_none() {
+        return (
+            false,
+            "a test signal needs a begun HIL job (job-begin)".to_owned(),
+        );
     }
     if g.site.hil_tx.is_empty() {
         return (
@@ -1275,6 +1360,12 @@ fn test_signal(
     }
     if !ttl_s.is_finite() || ttl_s <= 0.0 {
         return (false, format!("a TTL of {ttl_s} s is not a positive time"));
+    }
+    if ttl_s > HIL_MAX_TTL_S {
+        return (
+            false,
+            format!("a TTL of {ttl_s} s is above the HIL limit of {HIL_MAX_TTL_S} s"),
+        );
     }
     let tx = g.site.hil_tx.clone();
     outcome(
@@ -1350,7 +1441,8 @@ fn install_site(pc: &mut dyn Pc, g: &mut Guard, path: &str) -> (bool, String) {
     if let Err(why) = g.need_dev("install-site") {
         return (false, why);
     }
-    match pc.install_site(path, &Cancel::default()) {
+    let c = g.cancel.clone();
+    match pc.install_site(path, &c) {
         Ok(r) => g.info(r),
         Err(e) => return (false, format!("site refused: {e}")),
     }
@@ -1391,7 +1483,8 @@ fn alarm_test(pc: &mut dyn Pc, g: &mut Guard) -> (bool, String) {
 /// The teardown half of the event plan without REAPER or the app (design
 /// §11): engine, server and tray stop, tuning `exit`, the preference check,
 /// each with the event error policy; then the module must be unheld and the
-/// preference original, and dev is entered again. Not a switch.
+/// preference original, and dev is entered again. Not a switch. Ports
+/// 80/443 are checked by `ServerStop` itself when a server ran.
 fn rehearse(pc: &mut dyn Pc, g: &mut Guard) -> (bool, String) {
     if let Err(why) = g.need_dev("rehearse-teardown") {
         return (false, why);
@@ -1445,7 +1538,7 @@ fn rehearse(pc: &mut dyn Pc, g: &mut Guard) -> (bool, String) {
         Err(e) => bad.push(format!("the preference: {e}")),
     }
     let verdict = if bad.is_empty() {
-        "teardown clean: module unheld, preference original, ports free".to_owned()
+        "teardown clean: module unheld, preference original".to_owned()
     } else {
         format!("teardown problems: {}", bad.join("; "))
     };
@@ -1669,15 +1762,18 @@ pub fn start(pc: &mut dyn Pc, g: &mut Guard, boot: u64) -> Option<Outcome> {
 
 /// The daemon's loop: requests one at a time, the watch once a second.
 /// Ends on `Quit`, after an activation that hands over, or when the pipe
-/// is gone.
+/// is gone; the caller then waits for the last reply to be written
+/// ([`Shared::await_replies`]) before the process ends.
 pub fn serve_requests(pc: &mut dyn Pc, g: &mut Guard, jobs: &Receiver<Job>) {
     let mut next = Instant::now();
     while !g.quit && g.handover.is_none() {
         match jobs.recv_timeout(next.saturating_duration_since(Instant::now())) {
             Ok(job) => {
                 let reply = handle(pc, g, job.req, job.epoch);
+                g.shared.reply_sent();
                 if job.reply.send(reply).is_err() {
                     info!("a client left before its reply");
+                    g.shared.reply_done();
                 }
             }
             Err(RecvTimeoutError::Timeout) => {}

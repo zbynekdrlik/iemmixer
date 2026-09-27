@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use interprocess::local_socket::prelude::*;
 use interprocess::local_socket::{
@@ -37,6 +37,13 @@ const ACCEPT_POLL: Duration = Duration::from_millis(50);
 pub const AWAIT_END: Duration = Duration::from_secs(600);
 /// A subscriber looks at the view at least this often.
 pub const SUBSCRIBER_POLL: Duration = Duration::from_secs(5);
+/// A new guard tries to create the pipe's first instance this long (the
+/// old guard's instances end with its process, after a hand-over)…
+pub const LISTEN_WAIT: Duration = Duration::from_secs(10);
+/// …this often.
+pub const LISTEN_EVERY: Duration = Duration::from_millis(250);
+/// A stopping guard waits this long for its last reply to be written.
+pub const LAST_REPLY: Duration = Duration::from_secs(5);
 
 /// A socket path on Unix, a pipe name on Windows.
 pub fn pipe_name(name: &str) -> io::Result<Name<'static>> {
@@ -98,8 +105,17 @@ pub fn retry<T>(
     every: Duration,
     mut f: impl FnMut() -> io::Result<T>,
 ) -> io::Result<T> {
-    let _ = (what, limit, every);
-    f()
+    let start = Instant::now();
+    loop {
+        match f() {
+            Ok(v) => return Ok(v),
+            Err(e) if start.elapsed() < limit => {
+                warn!("{what}: {e}; trying again");
+                thread::sleep(every);
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 /// Accepts connections until `stop`, each in a thread of its own.
@@ -172,18 +188,25 @@ fn connection(stream: &Stream, shared: &Shared, jobs: &Sender<Job>) {
                 return;
             }
         };
-        let reply = match shared.route(&req) {
-            Route::Now(reply) => reply,
-            Route::AwaitEnd(note) => shared.await_end(note, AWAIT_END),
-            Route::Queue(epoch) => {
-                ask(jobs, req, epoch).unwrap_or_else(|why| shared.view().reply(false, &why))
-            }
+        // A reply the daemon thread handed over is counted once written, so
+        // a stopping guard's last reply reaches its client first.
+        let (reply, handed) = match shared.route(&req) {
+            Route::Now(reply) => (reply, false),
+            Route::AwaitEnd(note) => (shared.await_end(note, AWAIT_END), false),
+            Route::Queue(epoch) => match ask(jobs, req, epoch) {
+                Ok(reply) => (reply, true),
+                Err(why) => (shared.view().reply(false, &why), false),
+            },
             Route::Subscribe => {
                 subscribe(stream, shared);
                 return;
             }
         };
-        if let Err(e) = proto::write_frame(&mut wire, &reply) {
+        let written = proto::write_frame(&mut wire, &reply);
+        if handed {
+            shared.reply_done();
+        }
+        if let Err(e) = written {
             info!("a guard pipe client left: {e}");
             return;
         }

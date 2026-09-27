@@ -284,8 +284,8 @@ impl Pc for WinPc {
         engine::force_reopen(self)
     }
 
-    fn install_site(&mut self, path: &str, _c: &Cancel) -> R<String> {
-        engine::install_site(self, path)
+    fn install_site(&mut self, path: &str, c: &Cancel) -> R<String> {
+        engine::install_site(self, path, c)
     }
 
     fn exclude(&mut self, sha: &str) -> R<()> {
