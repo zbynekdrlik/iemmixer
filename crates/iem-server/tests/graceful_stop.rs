@@ -208,14 +208,6 @@ fn an_unfinished_request_holds_the_stop_at_most_five_seconds() {
     drop(stuck);
 }
 
-/// A self-signed certificate for localhost in `<config_home>/iemmixer/`,
-/// where the server looks for `cert.pem` and `key.pem` (the platform config
-/// directory, `XDG_CONFIG_HOME` here), made with the `openssl` utility.
-#[cfg(feature = "tls")]
-fn self_signed_cert(config_home: &std::path::Path) {
-    cert_in(&config_home.join("iemmixer"));
-}
-
 /// A self-signed certificate for localhost, `cert.pem` and `key.pem` in
 /// `dir`, made with the `openssl` utility.
 #[cfg(feature = "tls")]
@@ -242,13 +234,12 @@ fn cert_in(dir: &std::path::Path) {
 #[cfg(feature = "tls")]
 fn start_https() -> (Server, u16) {
     let dir = tempfile::tempdir().unwrap();
-    let config_home = dir.path().join("config");
-    self_signed_cert(&config_home);
+    cert_in(dir.path());
     let https_port = free_port_except(&[]);
     let server = launch(
         dir,
         &format!("tls = true\nhttps_port = {https_port}\n"),
-        &[("XDG_CONFIG_HOME", config_home)],
+        &[],
         &[https_port],
     );
     let deadline = Instant::now() + Duration::from_secs(20);
