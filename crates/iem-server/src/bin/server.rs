@@ -9,9 +9,12 @@
 //! The site config is `$IEMMIXER_CONFIG` (default `iemmixer.toml`); runtime
 //! data and secrets live next to it. `IEMMIXER_ENGINE_PIPE` overrides the
 //! site's `engine_pipe`; `IEMMIXER_MODE` is `dev` (default) or `live`.
+//! SIGTERM or SIGINT (Windows: Ctrl-Break or Ctrl-C) stop the server
+//! gracefully: open requests get up to 5 s, then it exits 0.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use anyhow::Context as _;
 use iem_core::Config;
@@ -119,13 +122,55 @@ fn run_server() -> anyhow::Result<()> {
     };
     let config_dir = provision::config_dir_of(&path);
     let runtime = tokio::runtime::Runtime::new().context("creating the tokio runtime")?;
-    runtime.block_on(iem_server::start_server(
-        ServerConfig {
-            port,
-            config,
-            config_dir,
-            mode,
-        },
-        None,
-    ))
+    let served = runtime.block_on(async {
+        let stop = shutdown_signal().context("registering the stop signals")?;
+        iem_server::start_server_until(
+            ServerConfig {
+                port,
+                config,
+                config_dir,
+                mode,
+            },
+            None,
+            stop,
+        )
+        .await
+    });
+    // The engine client, the backup daemon and the tunnel watchdog are tasks
+    // of this runtime: shutting it down ends them and closes the engine pipes.
+    runtime.shutdown_timeout(Duration::from_secs(1));
+    served?;
+    tracing::info!("iem-server stopped");
+    Ok(())
+}
+
+/// The graceful stop request (S6): SIGTERM or SIGINT. The handlers are
+/// installed at the call, so a stop that arrives before the server listens
+/// is not lost; the future resolves on the first one.
+#[cfg(unix)]
+fn shutdown_signal() -> std::io::Result<impl std::future::Future<Output = ()> + Send + 'static> {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut term = signal(SignalKind::terminate())?;
+    let mut int = signal(SignalKind::interrupt())?;
+    Ok(async move {
+        tokio::select! {
+            _ = term.recv() => tracing::info!("SIGTERM: stopping"),
+            _ = int.recv() => tracing::info!("SIGINT: stopping"),
+        }
+    })
+}
+
+/// The graceful stop request (S6): Ctrl-Break (the guard delivers it to the
+/// server's own console) or Ctrl-C, installed at the call.
+#[cfg(windows)]
+fn shutdown_signal() -> std::io::Result<impl std::future::Future<Output = ()> + Send + 'static> {
+    use tokio::signal::windows::{ctrl_break, ctrl_c};
+    let mut brk = ctrl_break()?;
+    let mut c = ctrl_c()?;
+    Ok(async move {
+        tokio::select! {
+            _ = brk.recv() => tracing::info!("Ctrl-Break: stopping"),
+            _ = c.recv() => tracing::info!("Ctrl-C: stopping"),
+        }
+    })
 }

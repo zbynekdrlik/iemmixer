@@ -428,11 +428,31 @@ fn app_router(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// Start the server, optionally signaling readiness via a oneshot channel
+/// How long a stop waits for open requests before the server returns anyway.
+pub const STOP_DRAIN: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Start the server, optionally signaling readiness via a oneshot channel;
+/// it runs until the process ends.
 pub async fn start_server(
     server_config: ServerConfig,
     ready_tx: Option<tokio::sync::oneshot::Sender<()>>,
 ) -> anyhow::Result<()> {
+    start_server_until(server_config, ready_tx, std::future::pending()).await
+}
+
+/// [`start_server`] until `stop` resolves (S6 graceful stop): then the HTTP
+/// listener closes (the port is free), idle connections close, open requests
+/// get up to [`STOP_DRAIN`] to finish, and it returns `Ok`. The caller's
+/// runtime still runs the background tasks (engine client, backup daemon,
+/// tunnel watchdog); shutting the runtime down ends them.
+pub async fn start_server_until<F>(
+    server_config: ServerConfig,
+    ready_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    stop: F,
+) -> anyhow::Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
     // Install rustls crypto provider (required when tls feature brings rustls into dep tree)
     #[cfg(feature = "tls")]
     {
@@ -558,12 +578,25 @@ pub async fn start_server(
         let _ = tx.send(());
     }
 
-    axum::serve(
+    let stopping = Arc::new(tokio::sync::Notify::new());
+    let stop_seen = Arc::clone(&stopping);
+    let serve = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .await?;
-
+    .with_graceful_shutdown(async move {
+        stop.await;
+        tracing::info!("stop requested: the listener closes, open requests get up to 5 s");
+        stop_seen.notify_one();
+    });
+    tokio::select! {
+        result = serve => result?,
+        () = async {
+            stopping.notified().await;
+            tokio::time::sleep(STOP_DRAIN).await;
+        } => tracing::warn!("requests still open 5 s after the stop: stopping without them"),
+    }
+    tracing::info!("HTTP server stopped");
     Ok(())
 }
 
