@@ -213,8 +213,14 @@ fn an_unfinished_request_holds_the_stop_at_most_five_seconds() {
 /// directory, `XDG_CONFIG_HOME` here), made with the `openssl` utility.
 #[cfg(feature = "tls")]
 fn self_signed_cert(config_home: &std::path::Path) {
-    let dir = config_home.join("iemmixer");
-    std::fs::create_dir_all(&dir).unwrap();
+    cert_in(&config_home.join("iemmixer"));
+}
+
+/// A self-signed certificate for localhost, `cert.pem` and `key.pem` in
+/// `dir`, made with the `openssl` utility.
+#[cfg(feature = "tls")]
+fn cert_in(dir: &std::path::Path) {
+    std::fs::create_dir_all(dir).unwrap();
     let out = Command::new("openssl")
         .args(["req", "-x509", "-newkey", "ec", "-pkeyopt"])
         .args(["ec_paramgen_curve:prime256v1", "-nodes", "-days", "1"])
@@ -256,6 +262,40 @@ fn start_https() -> (Server, u16) {
         std::thread::sleep(Duration::from_millis(100));
     }
     (server, https_port)
+}
+
+/// The certificate lives next to the site file, in the server's config
+/// directory (S6 design note §6: `iem-migrate band` writes it into the band
+/// directory, the folder of the guard's `server_config`), whatever the
+/// platform's config directory holds.
+#[cfg(feature = "tls")]
+#[test]
+fn the_certificate_next_to_the_site_serves_https() {
+    let dir = tempfile::tempdir().unwrap();
+    cert_in(dir.path());
+    let elsewhere = dir.path().join("platform-config");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let https_port = free_port_except(&[]);
+    let server = launch(
+        dir,
+        &format!("tls = true\nhttps_port = {https_port}\n"),
+        &[("XDG_CONFIG_HOME", elsewhere)],
+        &[https_port],
+    );
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while TcpStream::connect(("127.0.0.1", https_port)).is_err() {
+        assert!(
+            Instant::now() < deadline,
+            "HTTPS never listened: {}",
+            server.log()
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        !server.log().contains("cert files not found"),
+        "{}",
+        server.log()
+    );
 }
 
 /// The HTTPS port (P9: the band's 443) closes with the HTTP one, while an
