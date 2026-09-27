@@ -36,13 +36,13 @@ SPEC = """\
 import { test, expect } from "@playwright/test";
 
 test.describe("A describe title", () => {
-  test("a plain title", async () => {});
+  test("a plain title", async () => { expect(1).toBe(1); });
   test(
     'a title; with a semicolon and ::colons',
-    async () => {},
+    async () => { expect(1).toBe(1); },
   );
-  test(`${member}: a template title`, async () => {});
-  test("it\\'s escaped", async () => {});
+  test(`${member}: a template title`, async () => { expect(1).toBe(1); });
+  test("it\\'s escaped", async () => { expect(1).toBe(1); });
 });
 function mytest(t: string) {}
 mytest("not a test");
