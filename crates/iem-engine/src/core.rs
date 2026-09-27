@@ -284,6 +284,9 @@ pub struct Core {
     solo: BTreeMap<usize, BTreeSet<usize>>,
     listen: [Option<usize>; 2],
     test: Option<TestSignal>,
+    /// The running test signal is the HIL one (card-masked): a plain one
+    /// may not replace it until it ends.
+    hil_test: bool,
     rev: u64,
     flags: Flags,
 }
@@ -297,6 +300,7 @@ impl Core {
             solo: BTreeMap::new(),
             listen: [None, None],
             test: None,
+            hil_test: false,
             rev,
             flags,
         }
@@ -646,6 +650,12 @@ impl Core {
                 ttl_s,
             } => {
                 self.test_flag()?;
+                if self.hil_test && self.test.is_some() {
+                    return Err(CmdError::new(
+                        ErrCode::Forbidden,
+                        "a HIL test signal runs until its TTL ends",
+                    ));
+                }
                 self.start_test(input, *hz, *dbfs, *ttl_s, None)
             }
             Cmd::HilTestSignal {
@@ -753,6 +763,7 @@ impl Core {
             ttl_s,
         };
         self.test = Some(signal.clone());
+        self.hil_test = mask.is_some();
         let amp = db_to_lin(dbfs);
         let ttl = (ttl_s * f64::from(SAMPLE_RATE)).round() as u64;
         let op = match mask {
