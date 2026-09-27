@@ -527,30 +527,54 @@ $sc = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'scenario.json')) | Conver
 $log = Join-Path $PSScriptRoot 'calls.log'
 Add-Content -LiteralPath $log -Value ($args -join ' ')
 $cmd = [string]$args[0]
-$n = @(Get-Content -LiteralPath $log).Count
+$lines = @(Get-Content -LiteralPath $log)
+$n = $lines.Count
 if (@($sc.silent) -contains $cmd) { exit 4 }
-$reopens = @(Get-Content -LiteralPath $log | Where-Object { $_ -eq 'force-reopen' }).Count
+# `cold` (optional): the guard while an engine comes up. After activate or inject-fault
+# (a new engine) that many statuses show no engine, then as many show its first Status
+# (frames 0, no callbacks); after force-reopen that many still show the old reset count.
+$cold = 0
+if ($null -ne $sc.PSObject.Properties['cold']) { $cold = [int]$sc.cold }
+function Get-StatusesSince([string[]]$Marks) {
+    # The status calls (this one included) after the last call named in $Marks; -1 without one.
+    $count = 0
+    for ($i = $lines.Count - 1; $i -ge 0; $i--) {
+        $l = [string]$lines[$i]
+        foreach ($m in $Marks) { if ($l -ceq $m -or $l.StartsWith($m + ' ')) { return $count } }
+        if ($l -ceq 'status') { $count++ }
+    }
+    return -1
+}
+$reopens = @($lines | Where-Object { $_ -eq 'force-reopen' }).Count
 $mode = 'dev'
 if ($sc.event_after -gt 0 -and $n -gt $sc.event_after) { $mode = 'event' }
 $ok = -not (@($sc.refuse) -contains $cmd)
 $reply = [ordered]@{ ok = $ok; mode = $mode; switching = $null; alarms = @(); detail = ('fake ' + $cmd) }
-$faults = @(Get-Content -LiteralPath $log | Where-Object { $_ -eq 'inject-fault' }).Count
+$faults = @($lines | Where-Object { $_ -eq 'inject-fault' }).Count
 if ($cmd -eq 'status') {
+    $started = Get-StatusesSince @('activate', 'inject-fault')
+    $reopened = Get-StatusesSince @('force-reopen')
+    if ($reopened -ge 0 -and $reopened -le $cold) { $reopens-- }
     $last = $null
     if ($faults -gt 0) { $last = 70 }
-    $reply['engine'] = [ordered]@{ build = $sc.sha; frames = 32; callbacks = (3000 * $n); missed = 0; resets = $reopens
-                                   parked = $false; faulted = $false; pipe_private = $true; spawns = (1 + $faults); last_exit = $last }
+    $frames = 32
+    $callbacks = 3000 * $n
+    if ($started -ge 0 -and $started -le 2 * $cold) { $frames = 0; $callbacks = 0 }
+    if ($started -lt 0 -or $started -gt $cold) {
+        $reply['engine'] = [ordered]@{ build = $sc.sha; frames = $frames; callbacks = $callbacks; missed = 0; resets = $reopens
+                                       parked = $false; faulted = $false; pipe_private = $true; spawns = (1 + $faults); last_exit = $last }
+    }
 }
 Write-Output (ConvertTo-Json -InputObject $reply -Depth 5 -Compress)
 if ($ok) { exit 0 }
 exit 1
 '@
     [IO.File]::WriteAllText($fake, $fakeText)
-    function Invoke-HilRun([string]$scenario, [string]$branch = 'dev', [string]$ttl = '0.2') {
+    function Invoke-HilRun([string]$scenario, [string]$branch = 'dev', [string]$ttl = '0.2', [string[]]$more = @()) {
         [IO.File]::WriteAllText((Join-Path $hb 'scenario.json'), $scenario)
         foreach ($f in @('calls.log', 'result.json')) { Remove-Item -LiteralPath (Join-Path $hb $f) -ErrorAction SilentlyContinue }
         & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $hdir 'hil-v1.ps1') -Sha $S -Branch $branch `
-            -JobRun 4242 -Out (Join-Path $hb 'result.json') -Iemmode $fake -Local 'http://127.0.0.1:9' -CardSeconds 1 -TestTtl $ttl | Out-Null
+            -JobRun 4242 -Out (Join-Path $hb 'result.json') -Iemmode $fake -Local 'http://127.0.0.1:9' -CardSeconds 1 -TestTtl $ttl @more | Out-Null
         $code = $LASTEXITCODE
         $calls = @()
         if (Test-Path -LiteralPath (Join-Path $hb 'calls.log')) { $calls = @(Get-Content -LiteralPath (Join-Path $hb 'calls.log')) }
@@ -559,6 +583,7 @@ exit 1
     }
     function CheckOk($res, [string]$name) { return @($res.checks | Where-Object { $_.name -eq $name -and $_.ok }).Count -eq 1 }
     function CheckFailed($res, [string]$name) { return @($res.checks | Where-Object { $_.name -eq $name -and -not $_.ok }).Count -eq 1 }
+    function CheckDetail($res, [string]$name) { return (@($res.checks | Where-Object { $_.name -eq $name }) | ForEach-Object { $_.detail }) -join ' | ' }
 
     $h1 = Invoke-HilRun ('{"sha":"' + $S + '","refuse":[],"silent":[],"event_after":0}')
     $calls = $h1.calls
@@ -598,6 +623,15 @@ exit 1
 
     $h7 = Invoke-HilRun ('{"sha":"' + $S + '","refuse":["inject-fault"],"silent":[],"event_after":0}')
     Assert ($h7.exit -eq 1 -and (CheckFailed $h7.result 'panic') -and (CheckOk $h7.result 'alarm-push')) 'hil-run-a-refused-fault-injection-fails-the-panic-check'
+
+    # The guard while the engine comes up (activate, the respawn after the fault): no
+    # engine in its reply, then the engine's first Status (frames 0), and a forced
+    # reopen's reset shows a few statuses late. HIL v1 waits for the engine it expects.
+    $h9 = Invoke-HilRun ('{"sha":"' + $S + '","refuse":[],"silent":[],"event_after":0,"cold":2}')
+    foreach ($n in @('activate', 'engine-build', 'card', 'pipes', 'test-signal', 'reopen', 'panic', 'alarm-push')) {
+        Assert (CheckOk $h9.result $n) "hil-run-waits-for-the-engine-check-$n-passes ($(CheckDetail $h9.result $n))"
+    }
+    Assert ($h9.result.summary -ceq $h1.result.summary) "hil-run-waits-for-the-engine-same-summary ($($h9.result.summary))"
 } finally {
     $sch = New-Object -ComObject 'Schedule.Service'
     $sch.Connect()
