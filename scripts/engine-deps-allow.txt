@@ -2,6 +2,9 @@
 # and Linux targets). A new crate needs a reviewed line here (program spec §5.2);
 # scripts/check_engine_deps.py compares this list with cargo metadata --locked.
 aho-corasick
+azo
+azo-sys
+bitflags
 block-buffer
 cfg-if
 const-oid
@@ -63,7 +66,16 @@ typenum
 unicode-ident
 version_check
 widestring
+windows-bindgen
+windows-core
+windows-default
+windows-implement
+windows-interface
 windows-link
+windows-metadata
+windows-registry
+windows-result
+windows-strings
 windows-sys
 winnow
 zeroize
