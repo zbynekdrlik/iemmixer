@@ -707,20 +707,20 @@ mod tests {
     }
 
     #[test]
-    fn test_mixer_url_is_the_lan_url_else_the_local_server() {
+    fn test_mixer_url_is_the_local_server_on_the_site_port() {
         let both = Config {
             lan_url: Some("http://10.0.0.10".to_string()),
             https_domain: Some("mixer.example.org".to_string()),
             port: 8080,
             ..Config::default()
         };
-        assert_eq!(both.mixer_url(), "http://10.0.0.10");
-        let none = Config {
-            https_domain: Some("mixer.example.org".to_string()),
-            port: 8080,
+        assert_eq!(both.mixer_url(), "http://localhost:8080");
+        let https_lan = Config {
+            lan_url: Some("https://10.0.0.10".to_string()),
+            port: 8081,
             ..Config::default()
         };
-        assert_eq!(none.mixer_url(), "http://localhost:8080");
+        assert_eq!(https_lan.mixer_url(), "http://localhost:8081");
         assert_eq!(Config::default().mixer_url(), "http://localhost:80");
     }
 
