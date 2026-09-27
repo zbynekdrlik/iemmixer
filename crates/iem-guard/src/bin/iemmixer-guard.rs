@@ -219,10 +219,13 @@ fn run() -> ExitCode {
     };
     let (jobs, requests) = mpsc::channel();
     let stop = Arc::new(AtomicBool::new(false));
-    if let Err(e) = pipe::serve(listener, Arc::clone(&g.shared), jobs, Arc::clone(&stop)) {
-        warn!("the guard pipe's thread: {e}");
-        return ExitCode::from(cli::EXIT_REFUSED);
-    }
+    let acceptor = match pipe::serve(listener, Arc::clone(&g.shared), jobs, Arc::clone(&stop)) {
+        Ok(thread) => thread,
+        Err(e) => {
+            warn!("the guard pipe's thread: {e}");
+            return ExitCode::from(cli::EXIT_REFUSED);
+        }
+    };
     let waiter = Arc::clone(&g.shared);
     if let Err(e) = win::watch_session_end(Arc::clone(&g.session_ending), move || {
         if !waiter.await_session_done(Duration::from_secs(20)) {
@@ -246,6 +249,12 @@ fn run() -> ExitCode {
         warn!("the last reply was not written before the guard stops");
     }
     stop.store(true, Ordering::SeqCst);
+    // The listener and its waiting instance end with the acceptor (one
+    // poll, 50 ms) before the mutex is released: a new guard then waits
+    // only for this process's open connections.
+    if acceptor.join().is_err() {
+        warn!("the guard pipe's thread panicked");
+    }
     let handover = g.handover.clone();
     // The new guard waits for the mutex: release it first.
     drop(lock);
