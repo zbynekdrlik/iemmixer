@@ -276,7 +276,9 @@ fn accept_media(
     }
 }
 
-/// Drains the listen taps into 48 kHz frames for the current media client.
+/// Drains the listen taps into 48 kHz frames for the current media client;
+/// a client that takes nothing for `pipe::SEND_TIMEOUT` is dropped
+/// (`Conn::writer`), so `run`, which joins this thread, still returns.
 fn media_pump(mut taps: [Consumer<f32>; 2], conns: mpsc::Receiver<Conn>, stop: Arc<AtomicBool>) {
     let mut framers = [
         TapFramer::new(stream::ENGINEER_LISTEN),
@@ -300,7 +302,7 @@ fn media_pump(mut taps: [Consumer<f32>; 2], conns: mpsc::Receiver<Conn>, stop: A
         let mut failed = false;
         if let Some(c) = current.as_ref().filter(|c| !c.is_closed()) {
             for (h, samples) in &frames {
-                if write_media(&mut &*c.stream, h, samples).is_err() {
+                if write_media(&mut c.writer(), h, samples).is_err() {
                     failed = true;
                     break;
                 }

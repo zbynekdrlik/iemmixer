@@ -1,10 +1,11 @@
 //! The Windows side of the pipes (S6 design note §4): the listener's
-//! security descriptor and a reader that peeks before it reads. Not compiled
-//! on Linux, so it stays outside mutation testing (`.cargo/mutants.toml`);
-//! its decisions are the parent module's portable `sddl_for`, `name_taken`
-//! and `polled_read`, and `tests/pipes.rs` runs on it in the `windows` job.
+//! security descriptor, a reader that peeks before it reads and a writer
+//! that gives the peer [`SEND_TIMEOUT`] to take a message. Not compiled on
+//! Linux, so it stays outside mutation testing (`.cargo/mutants.toml`); its
+//! decisions are the parent module's portable `sddl_for`, `name_taken` and
+//! `polled_read`, and `tests/pipes.rs` runs on it in the `windows` job.
 
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::os::windows::io::AsHandle;
 
 use interprocess::local_socket::{Listener, ListenerOptions, Stream};
@@ -12,7 +13,7 @@ use interprocess::os::windows::local_socket::ListenerOptionsExt;
 use interprocess::os::windows::security_descriptor::SecurityDescriptor;
 use widestring::U16CString;
 
-use super::{name_taken, polled_read, sddl_for};
+use super::{SEND_TIMEOUT, name_taken, polled_read, sddl_for};
 
 /// Creates the pipe's first instance (interprocess sets
 /// `FILE_FLAG_FIRST_PIPE_INSTANCE` on it and `PIPE_REJECT_REMOTE_CLIENTS` on
@@ -41,5 +42,35 @@ impl Read for Polled<'_> {
             let mut reader = stream;
             reader.read(buf)
         })
+    }
+}
+
+/// A pipe stream whose writes the peer must take within [`SEND_TIMEOUT`]
+/// (`iem_win::pipe::write_within`): a write still pending then is
+/// cancelled and fails with `TimedOut`.
+pub(super) struct Bounded<'a>(pub(super) &'a Stream);
+
+impl Write for Bounded<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let Stream::NamedPipe(pipe) = self.0;
+        let pipe = pipe.inner();
+        match iem_win::pipe::write_within(pipe.as_handle(), buf, SEND_TIMEOUT) {
+            Ok(n) => {
+                // As interprocess's own write does: a normal close lets the
+                // peer read what was written first (its flush on drop).
+                pipe.mark_dirty();
+                Ok(n)
+            }
+            Err(e) => {
+                // A peer that took nothing is dropped at once: no flush on
+                // drop that would wait for it.
+                pipe.assume_flushed();
+                Err(e)
+            }
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }

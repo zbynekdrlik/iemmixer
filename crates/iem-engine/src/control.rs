@@ -233,12 +233,15 @@ impl Control {
         }
     }
 
+    /// A peer that takes nothing for `pipe::SEND_TIMEOUT` fails the write
+    /// (`Conn::writer`) and is dropped, so a stalled client never holds the
+    /// control thread for longer.
     fn write(&mut self, id: u64, bytes: &[u8]) {
         let failed = match self.peers.get(&id) {
-            Some(p) => (&*p.conn.stream)
-                .write_all(bytes)
-                .and_then(|()| (&*p.conn.stream).flush())
-                .err(),
+            Some(p) => {
+                let mut w = p.conn.writer();
+                w.write_all(bytes).and_then(|()| w.flush()).err()
+            }
             None => return,
         };
         if let Some(e) = failed {

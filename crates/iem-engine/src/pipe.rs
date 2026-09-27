@@ -8,9 +8,11 @@
 //!
 //! A connection is an `Arc<Stream>` (`&Stream` reads and writes); its reader
 //! never waits long in a read ([`polled`]), so that dropping the connection
-//! (the `closed` flag) ends the reader and closes the socket for the peer.
+//! (the `closed` flag) ends the reader and closes the socket for the peer,
+//! and its writers never wait long for the peer ([`Conn::writer`]): a peer
+//! that takes nothing for [`SEND_TIMEOUT`] fails the write and is dropped.
 
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -30,8 +32,8 @@ pub const POLL: Duration = Duration::from_millis(50);
 /// its `closed` flag and reads again (Windows pipes have no receive timeout:
 /// their reads return at once, see [`polled`]).
 pub const IDLE: Duration = Duration::from_millis(10);
-/// A peer that does not take a message within this long is dropped (Unix;
-/// Windows pipes have no send timeout).
+/// A peer that does not take a message within this long is dropped: the
+/// Unix send timeout, and the bound of a Windows pipe write ([`bounded`]).
 pub const SEND_TIMEOUT: Duration = Duration::from_secs(1);
 /// SDDL's name for the SYSTEM account (`S-1-5-18`).
 const SYSTEM: &str = "SY";
@@ -175,6 +177,23 @@ pub fn polled(stream: &Stream) -> impl Read + '_ {
     }
 }
 
+/// A stream's writing side that never waits long for the peer: a Unix
+/// stream waits at most its send timeout ([`SEND_TIMEOUT`], set by
+/// [`Conn::new`]); a Windows pipe has no timeouts, so each write is issued
+/// overlapped and cancelled when the peer has not taken it within
+/// [`SEND_TIMEOUT`] (`iem_win::pipe::write_within`). Either way the write
+/// then fails, and the caller drops the peer.
+pub fn bounded(stream: &Stream) -> impl Write + '_ {
+    #[cfg(windows)]
+    {
+        win::Bounded(stream)
+    }
+    #[cfg(not(windows))]
+    {
+        stream
+    }
+}
+
 /// One accepted connection.
 #[derive(Debug, Clone)]
 pub struct Conn {
@@ -185,7 +204,8 @@ pub struct Conn {
 impl Conn {
     /// Prepares a stream: blocking reads with a poll timeout, bounded writes
     /// (Unix). Windows pipes refuse both timeouts, which stay at their
-    /// default: their reads go through [`polled`], their writes block.
+    /// default: their reads go through [`polled`], their writes through
+    /// [`bounded`].
     pub fn new(stream: Stream) -> Self {
         let _ = stream.set_nonblocking(false);
         let _ = stream.set_recv_timeout(Some(POLL));
@@ -202,6 +222,13 @@ impl Conn {
 
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
+    }
+
+    /// The connection's writing side ([`bounded`]): always write through it,
+    /// never through `&*stream`, whose Windows writes wait for the peer
+    /// without a bound.
+    pub fn writer(&self) -> impl Write + '_ {
+        bounded(&self.stream)
     }
 }
 
