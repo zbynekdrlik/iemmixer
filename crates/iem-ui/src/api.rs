@@ -214,14 +214,18 @@ pub async fn back_to_reaper(pin: &str) -> Result<(), String> {
 }
 
 /// Whether the answer to the token check (`GET /api/mixer/<page>`) is the
-/// server refusing the token, which sends the page to the login.
+/// server refusing the token, which sends the page to the login: 401 (an
+/// invalid or expired token) or 403 (a token not for this page). Any other
+/// answer is no verdict on the token — cloudflared's 502 while the server
+/// restarts or 530 with the tunnel down, a 5xx, a page the site lacks
+/// (404) — so the page keeps its token and keeps retrying.
 pub fn token_refused(status: u16) -> bool {
-    !(200..=299).contains(&status)
+    matches!(status, 401 | 403)
 }
 
 /// Whether the stored token still holds, asked of a protected endpoint:
 /// false without a token or when the server refuses it ([`token_refused`]);
-/// a network error keeps it.
+/// a network error or an answer that is no verdict keeps it.
 pub async fn verify_token_valid(member: &str) -> bool {
     let token = match crate::auth::get_token() {
         Some(t) => t,
