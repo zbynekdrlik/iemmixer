@@ -1,7 +1,8 @@
 //! The server's part of the site file (`site.toml`): who the members are and
 //! which engine mix each hears, how the engine's inputs are shown, and the
 //! web, push, backup and tunnel settings (S5 design note §3). The engine
-//! reads the `[engine]` table itself; the server ignores it.
+//! reads the `[engine]` and `[card]` tables itself, the guard `[guard]`
+//! (S6); the server ignores them.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -126,6 +127,10 @@ pub struct Config {
     /// guard only.
     #[serde(default, skip_serializing)]
     pub card: Option<serde::de::IgnoredAny>,
+
+    /// The guard's own table (`[guard]`, S6): read by `iemmixer-guard` only.
+    #[serde(default, skip_serializing)]
+    pub guard: Option<serde::de::IgnoredAny>,
 }
 
 /// A member of the band (or the engineer): the id is the URL, the login
@@ -248,6 +253,7 @@ impl Default for Config {
             tunnel_ready_url: default_tunnel_ready_url(),
             engine: None,
             card: None,
+            guard: None,
         }
     }
 }
