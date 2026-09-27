@@ -172,7 +172,18 @@ fn alarm_link_refuses_bad_arguments_and_a_site_without_an_address() {
     }
     let out = run_pin(dir.path(), &["alarm-link"], "");
     assert_eq!(out.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("no address"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no https address"));
+    assert!(!dir.path().join("alarm_link.json").exists());
+    // Phones take Web Push only over https: a plain-http LAN URL is no address.
+    std::fs::write(
+        dir.path().join("iemmixer.toml"),
+        format!("lan_url = \"http://10.0.0.10\"\n{SITE}"),
+    )
+    .unwrap();
+    let out = run_pin(dir.path(), &["alarm-link"], "");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(1), "stderr: {stderr}");
+    assert!(stderr.contains("only over https"), "stderr: {stderr}");
     assert!(!dir.path().join("alarm_link.json").exists());
 }
 

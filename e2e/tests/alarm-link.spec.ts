@@ -64,3 +64,22 @@ test.describe("The owner's alarm link", () => {
     await expect(page.getByTestId("alarm-enable")).toHaveCount(0);
   });
 });
+
+// iOS gives Web Push only to a web app opened from the Home Screen, and a
+// link from a message always opens in Safari: on an iPhone the page explains
+// that instead of a button that could only fail.
+test.describe("The alarm link on an iPhone", () => {
+  test.use({
+    userAgent:
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
+  });
+
+  test("a Safari tab gets the Home Screen hint and no button", async ({ page }) => {
+    // A well-formed but unused token: the page never posts it.
+    await page.goto("/alarms?t=AAAAAAAAAAAAAAAAAAAAAA");
+    await expect(page.getByTestId("alarm-ios-hint")).toHaveText(
+      "Na iPhone prídu upozornenia len do aplikácie pridanej na plochu, nie do Safari. Odpíš na správu s odkazom, že máš iPhone, a pošlem ti iný postup.",
+    );
+    await expect(page.getByTestId("alarm-enable")).toHaveCount(0);
+  });
+});

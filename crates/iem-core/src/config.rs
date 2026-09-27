@@ -292,6 +292,11 @@ impl Config {
         if a.window_s == 0 || a.sustain_s == 0 || a.sustain_s > a.window_s {
             out.push("activity needs 0 < sustain_s <= window_s".to_string());
         }
+        for id in &a.inputs {
+            if !iem_engine_proto::valid_id(id) {
+                out.push(format!("activity input '{id}' is not an input id"));
+            }
+        }
         out
     }
 
@@ -547,7 +552,7 @@ mod tests {
                 threshold_dbfs: 0.0,
                 window_s: 10,
                 sustain_s: 11,
-                inputs: Vec::new(),
+                inputs: vec!["mic1".into(), "Stage Mic".into()],
             },
             ..Config::default()
         };
@@ -563,7 +568,12 @@ mod tests {
         assert!(has("owner 'nobody' is not a member"), "{p:?}");
         assert!(has("threshold_dbfs"), "{p:?}");
         assert!(has("sustain_s <= window_s"), "{p:?}");
-        assert_eq!(p.len(), 10, "{p:?}");
+        assert!(
+            has("activity input 'Stage Mic' is not an input id"),
+            "{p:?}"
+        );
+        assert!(!has("activity input 'mic1'"), "{p:?}");
+        assert_eq!(p.len(), 11, "{p:?}");
         assert!(matches!(config.validate(), Err(ConfigError::Invalid(_))));
         assert!(Config::default().validate().is_ok());
         let zero = Config {

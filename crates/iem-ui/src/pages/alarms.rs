@@ -10,6 +10,9 @@ use wasm_bindgen_futures::JsFuture;
 
 const NO_PUSH: &str = "Tento prehliadač nevie prijímať upozornenia.";
 const DONE: &str = "Hotovo: tento telefón dostane upozornenia.";
+/// iOS gives Web Push only to a web app opened from the Home Screen, and a
+/// link from a message always opens in Safari.
+const IOS_TAB: &str = "Na iPhone prídu upozornenia len do aplikácie pridanej na plochu, nie do Safari. Odpíš na správu s odkazom, že máš iPhone, a pošlem ti iný postup.";
 
 #[derive(Debug, Clone, PartialEq)]
 enum Step {
@@ -26,6 +29,30 @@ pub fn subscribe_error_message(status: u16) -> String {
         403 => "Odkaz je neplatný, vypršal alebo už bol použitý. Požiadaj o nový.".to_string(),
         other => format!("Povolenie zlyhalo ({other})."),
     }
+}
+
+/// Whether this page runs in a browser tab on an iPhone or iPad (not in a
+/// Home Screen app), where iOS offers no Web Push.
+pub fn ios_tab(user_agent: &str, standalone: bool) -> bool {
+    !standalone
+        && ["iPhone", "iPad", "iPod"]
+            .iter()
+            .any(|device| user_agent.contains(device))
+}
+
+/// [`ios_tab`] for this browser: its user agent and iOS's
+/// `navigator.standalone`. Browser only.
+fn in_ios_tab() -> bool {
+    let Some(window) = web_sys::window() else {
+        return false;
+    };
+    let navigator = window.navigator();
+    let user_agent = navigator.user_agent().unwrap_or_default();
+    let standalone = js_sys::Reflect::get(&navigator, &JsValue::from_str("standalone"))
+        .ok()
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    ios_tab(&user_agent, standalone)
 }
 
 /// Whether the answer of `Notification.requestPermission()` allows push.
@@ -46,6 +73,7 @@ pub fn AlarmsPage() -> impl IntoView {
     let query = use_query_map();
     let token = move || query.get_untracked().get("t").filter(|t| !t.is_empty());
     let has_token = token().is_some();
+    let ios = in_ios_tab();
     let (step, set_step) = signal(Step::Ready);
 
     let enable = move |_| {
@@ -72,15 +100,19 @@ pub fn AlarmsPage() -> impl IntoView {
                     <div class="login-box">
                         <h2>"Upozornenia iemmixera"</h2>
                         <p class="subtitle">"Tento telefón bude dostávať upozornenia strážcu iemmixera."</p>
-                        {if has_token {
+                        {if !has_token {
+                            view! {
+                                <p class="login-error">"Odkaz je neúplný. Otvor celý odkaz zo správy."</p>
+                            }.into_any()
+                        } else if ios {
+                            view! {
+                                <p class="login-error" data-testid="alarm-ios-hint">{IOS_TAB}</p>
+                            }.into_any()
+                        } else {
                             view! {
                                 <button class="btn" data-testid="alarm-enable" disabled=busy on:click=enable>
                                     "Povoliť upozornenia"
                                 </button>
-                            }.into_any()
-                        } else {
-                            view! {
-                                <p class="login-error">"Odkaz je neúplný. Otvor celý odkaz zo správy."</p>
                             }.into_any()
                         }}
                         {move || match step.get() {
@@ -195,6 +227,18 @@ mod tests {
         assert!(subscribe_error_message(403).starts_with("Odkaz je neplatný"));
         assert!(subscribe_error_message(400).contains("úplné údaje"));
         assert_eq!(subscribe_error_message(500), "Povolenie zlyhalo (500).");
+    }
+
+    #[test]
+    fn only_an_ios_browser_tab_lacks_push() {
+        const IPHONE: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
+        const IPAD: &str = "Mozilla/5.0 (iPad; CPU OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
+        const ANDROID: &str = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36";
+        assert!(ios_tab(IPHONE, false));
+        assert!(ios_tab(IPAD, false));
+        assert!(!ios_tab(IPHONE, true), "a Home Screen app takes push");
+        assert!(!ios_tab(ANDROID, false));
+        assert!(!ios_tab(ANDROID, true));
     }
 
     #[test]

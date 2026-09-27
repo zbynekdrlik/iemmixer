@@ -86,6 +86,13 @@ pub fn create(config_dir: &Path, ttl_h: u64, now: u64) -> io::Result<String> {
     Ok(token)
 }
 
+/// The address a link starts with: the public host (`https://<https_domain>`)
+/// or else an `https://` LAN URL. Phones take Web Push only in a secure
+/// context, so a link to an `http://` address could never subscribe.
+pub fn link_base(config: &iem_core::Config) -> Option<String> {
+    config.share_url().filter(|url| url.starts_with("https://"))
+}
+
 /// The link the owner opens: `<base>/alarms?t=<token>` (the token is
 /// base64url, so it needs no escaping).
 pub fn link_url(base: &str, token: &str) -> String {
@@ -118,7 +125,14 @@ pub fn redeem(config_dir: &Path, token: &str, now: u64) -> Result<(), Refused> {
     if !link.is_some_and(|l| accepts(&l, token, now)) {
         return Err(Refused::Link);
     }
-    match std::fs::remove_file(&path) {
+    removal_verdict(std::fs::remove_file(&path))
+}
+
+/// The outcome of removing the link file: removed → taken; already gone (a
+/// concurrent post took it first) → refused like a used link; any other
+/// error → [`Refused::Io`].
+fn removal_verdict(removed: io::Result<()>) -> Result<(), Refused> {
+    match removed {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == ErrorKind::NotFound => Err(Refused::Link),
         Err(e) => Err(Refused::Io(e.to_string())),
@@ -149,8 +163,10 @@ pub fn add_recipient(config_dir: &Path, sub: PushSubscription) -> io::Result<usi
 /// for `ttl_h` hours; the URL to send the owner.
 pub fn run_cli(config_path: &Path, ttl_h: u64) -> anyhow::Result<String> {
     let config = iem_core::Config::load(config_path)?;
-    let Some(base) = config.share_url() else {
-        anyhow::bail!("the site has neither https_domain nor lan_url: no address for the link");
+    let Some(base) = link_base(&config) else {
+        anyhow::bail!(
+            "the site has no https address for the link (https_domain, or an https:// lan_url): phones take alarms only over https"
+        );
     };
     let token = create(
         &crate::provision::config_dir_of(config_path),
@@ -343,6 +359,17 @@ mod tests {
         assert_eq!(redeem(dir.path(), &token, NOW), Err(Refused::Link));
     }
 
+    #[test]
+    fn a_link_removed_by_a_concurrent_post_is_refused_like_a_used_one() {
+        assert_eq!(removal_verdict(Ok(())), Ok(()));
+        assert_eq!(
+            removal_verdict(Err(io::Error::from(ErrorKind::NotFound))),
+            Err(Refused::Link)
+        );
+        let denied = removal_verdict(Err(io::Error::from(ErrorKind::PermissionDenied)));
+        assert!(matches!(denied, Err(Refused::Io(_))), "{denied:?}");
+    }
+
     // Unix permissions: a link file that cannot be removed is not taken.
     #[cfg(unix)]
     #[test]
@@ -392,6 +419,53 @@ mod tests {
     }
 
     #[test]
+    fn a_recipient_file_that_cannot_be_read_is_an_error_and_never_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(ALARM_SUBSCRIPTIONS_FILE);
+        std::fs::create_dir(&path).unwrap();
+        let sub = PushSubscription {
+            endpoint: "https://p/1".into(),
+            p256dh: "k".into(),
+            auth: "a".into(),
+        };
+        assert!(add_recipient(dir.path(), sub).is_err());
+        assert!(path.is_dir(), "left as it was");
+        assert!(
+            !path.with_extension("tmp").exists(),
+            "nothing was written in its place"
+        );
+    }
+
+    // Unix permissions: a recipient file nobody may read.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_recipient_file_keeps_its_recipients() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(ALARM_SUBSCRIPTIONS_FILE);
+        std::fs::write(
+            &path,
+            r#"[{"endpoint":"https://p/1","p256dh":"k","auth":"a"}]"#,
+        )
+        .unwrap();
+        let mode = |m: u32| std::fs::Permissions::from_mode(m);
+        std::fs::set_permissions(&path, mode(0o000)).unwrap();
+        let sub = PushSubscription {
+            endpoint: "https://p/2".into(),
+            p256dh: "k".into(),
+            auth: "b".into(),
+        };
+        let added = add_recipient(dir.path(), sub);
+        std::fs::set_permissions(&path, mode(0o600)).unwrap();
+        let err = added.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::PermissionDenied);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            r#"[{"endpoint":"https://p/1","p256dh":"k","auth":"a"}]"#
+        );
+    }
+
+    #[test]
     fn the_ttl_argument_is_one_hour_to_one_week() {
         assert_eq!(parse_ttl(&[]), Ok(24));
         assert_eq!(parse_ttl(&["--ttl-h", "1"]), Ok(1));
@@ -416,6 +490,25 @@ mod tests {
     }
 
     #[test]
+    fn a_link_needs_an_https_address() {
+        let site = |https_domain: Option<&str>, lan_url: Option<&str>| iem_core::Config {
+            https_domain: https_domain.map(str::to_string),
+            lan_url: lan_url.map(str::to_string),
+            ..iem_core::Config::default()
+        };
+        assert_eq!(
+            link_base(&site(Some("mixer.example.org"), Some("http://10.0.0.10"))),
+            Some("https://mixer.example.org".to_string())
+        );
+        assert_eq!(
+            link_base(&site(None, Some("https://10.0.0.10"))),
+            Some("https://10.0.0.10".to_string())
+        );
+        assert_eq!(link_base(&site(None, Some("http://10.0.0.10"))), None);
+        assert_eq!(link_base(&site(None, None)), None);
+    }
+
+    #[test]
     fn the_cli_prints_a_link_for_the_sites_address() {
         let dir = tempfile::tempdir().unwrap();
         let site = dir.path().join("iemmixer.toml");
@@ -428,6 +521,14 @@ mod tests {
         assert_eq!(link.sha256, token_hash(token));
         let now = unix_now();
         assert!(link.expires_at > now + 3600 && link.expires_at <= now + 7200);
+        std::fs::remove_file(dir.path().join(ALARM_LINK_FILE)).unwrap();
+        std::fs::write(&site, "lan_url = \"http://10.0.0.10\"\n").unwrap();
+        let err = run_cli(&site, 2).unwrap_err();
+        assert!(format!("{err:#}").contains("no https address"), "{err:#}");
+        assert!(
+            !dir.path().join(ALARM_LINK_FILE).exists(),
+            "no link without an https address"
+        );
         std::fs::write(&site, "port = 8080\n").unwrap();
         assert!(run_cli(&site, 2).is_err(), "no address");
     }

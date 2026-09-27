@@ -566,6 +566,36 @@ mod tests {
         assert_eq!(play(&cfg, "mic1", 300), NONE);
     }
 
+    #[test]
+    fn a_new_topology_resolves_the_watched_inputs_again() {
+        // Only mic2 counts. The engine then announces a topology with the
+        // inputs in reverse order: mic2 sits at another index of the frame.
+        let cfg = ActivityConfig {
+            inputs: vec!["mic2".into()],
+            ..ActivityConfig::default()
+        };
+        let first = Arc::new(test_view());
+        let mut reversed = test_view();
+        reversed.inputs.reverse();
+        let second = Arc::new(reversed);
+        let t = Instant::now();
+        let mut watch = ActivityWatch::new(&cfg, t);
+        assert_eq!(
+            watch.observe(Some(&first), t, &frame_with(&first, "mic2")),
+            None
+        );
+        let loud = frame_with(&second, "mic2");
+        let mut changes = Vec::new();
+        for s in 1..=120 {
+            let now = t + Duration::from_secs(s);
+            if let Some(on) = watch.observe(Some(&second), now, &loud) {
+                changes.push((s, on));
+            }
+        }
+        // Second 0 (the first topology) and seconds 1 to 119: 120 seconds.
+        assert_eq!(changes, ON_AT_119);
+    }
+
     #[tokio::test]
     async fn the_banner_reports_activity_and_the_switch() {
         let (_d, s) = state();
