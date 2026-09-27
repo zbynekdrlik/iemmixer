@@ -2785,17 +2785,16 @@ dependencies = [
 name = "iem-tray"
 version = "2.0.0-dev.9"
 dependencies = [
- "anyhow",
  "dirs",
  "iem-core",
- "iem-server",
- "serde",
+ "iem-guard",
+ "iem-win",
+ "interprocess",
  "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-shell",
  "tauri-plugin-single-instance",
- "tokio",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",

@@ -100,6 +100,40 @@ pub struct Reply {
     pub detail: String,
 }
 
+/// One frame of a subscription ([`Request::Subscribe`], the tray): the
+/// guard's [`Reply`] at once and after every change of mode, switch or
+/// alarms, and `{"cmd":"quit"}` ([`Request::Quit`]) when the guard stops the
+/// subscriber (its tray stop, S6 plan Task 9): the subscriber then exits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Update {
+    State(Reply),
+    Quit,
+}
+
+impl Update {
+    /// Parses a subscription frame's body: `{"cmd":"quit"}` or a [`Reply`];
+    /// anything else (another request included) is [`FrameError::Bad`].
+    pub fn decode(body: &[u8]) -> Result<Self, FrameError> {
+        match decode::<Request>(body) {
+            Ok(Request::Quit) => Ok(Self::Quit),
+            _ => decode::<Reply>(body).map(Self::State),
+        }
+    }
+}
+
+/// Writes one subscription frame (the guard's side).
+pub fn write_update<W: Write>(w: &mut W, update: &Update) -> Result<(), FrameError> {
+    match update {
+        Update::State(reply) => write_frame(w, reply),
+        Update::Quit => write_frame(w, &Request::Quit),
+    }
+}
+
+/// Reads one subscription frame (the subscriber's side).
+pub fn read_update<R: Read>(r: &mut R) -> Result<Update, FrameError> {
+    Update::decode(&read_frame(r)?)
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum FrameError {
     #[error("guard pipe i/o: {0}")]
@@ -291,6 +325,76 @@ mod tests {
                 detail: String::new(),
             }
         );
+    }
+
+    fn a_state(mode: Mode) -> Reply {
+        let mut alarms = Alarms::default();
+        alarms.raise(1_790_000_000, None, "tuning drift", false);
+        Reply {
+            ok: true,
+            mode,
+            switching: None,
+            alarms: alarms.all().to_vec(),
+            detail: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_subscription_carries_states_and_a_quit() {
+        let (dev, event) = (a_state(Mode::Dev), a_state(Mode::Event));
+        let mut wire = Vec::new();
+        write_update(&mut wire, &Update::State(dev.clone())).unwrap();
+        write_update(&mut wire, &Update::State(event.clone())).unwrap();
+        write_update(&mut wire, &Update::Quit).unwrap();
+        let mut r = wire.as_slice();
+        assert_eq!(read_update(&mut r).unwrap(), Update::State(dev));
+        assert_eq!(read_update(&mut r).unwrap(), Update::State(event));
+        assert_eq!(read_update(&mut r).unwrap(), Update::Quit);
+        assert!(matches!(read_update(&mut r), Err(FrameError::Closed)));
+    }
+
+    #[test]
+    fn the_quit_of_a_subscription_is_the_quit_request() {
+        let mut wire = Vec::new();
+        write_update(&mut wire, &Update::Quit).unwrap();
+        assert_eq!(&wire[4..], br#"{"cmd":"quit"}"#);
+        assert_eq!(Update::decode(br#"{"cmd":"quit"}"#).unwrap(), Update::Quit);
+        let mut state = Vec::new();
+        write_update(&mut state, &Update::State(a_state(Mode::Live))).unwrap();
+        let mut plain = Vec::new();
+        write_frame(&mut plain, &a_state(Mode::Live)).unwrap();
+        assert_eq!(state, plain);
+        assert_eq!(
+            Update::decode(br#"{"ok":true,"mode":"dev","switching":null}"#).unwrap(),
+            Update::State(Reply {
+                ok: true,
+                mode: Mode::Dev,
+                switching: None,
+                alarms: Vec::new(),
+                detail: String::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_subscription_refuses_other_requests_and_garbage() {
+        for body in [
+            &br#"{"cmd":"status"}"#[..],
+            &br#"{"cmd":"subscribe"}"#[..],
+            &br#"{"cmd":"event","dry_run":false}"#[..],
+            &b"not json"[..],
+            &b""[..],
+        ] {
+            match Update::decode(body) {
+                Err(FrameError::Bad(_)) => {}
+                other => panic!("{body:?}: {other:?}"),
+            }
+        }
+        let mut short = &[9u8, 0, 0][..];
+        match read_update(&mut short) {
+            Err(FrameError::Io(e)) => assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

@@ -54,15 +54,36 @@ pub(crate) fn dword(text: &str) -> io::Result<u32> {
         .map_err(|_| invalid(format!("not a decimal DWORD: {text:?}")))
 }
 
-/// A window command goes to one window: never the null handle (a thread
-/// message) and never the broadcast handle.
+/// A window command or notification goes to one window: never the null
+/// handle (a thread message) and never the broadcast handle.
 pub(crate) fn one_window(hwnd: isize) -> io::Result<()> {
     if hwnd == 0 || hwnd == BROADCAST {
         return Err(invalid(
-            "post_command needs one window, not the null or broadcast handle".to_string(),
+            "a window call needs one window, not the null or broadcast handle".to_string(),
         ));
     }
     Ok(())
+}
+
+/// `text` as NUL-terminated UTF-16 in a buffer of `N` units, the shape of
+/// the shell's fixed text fields: cut after at most `N - 1` units, never
+/// inside a surrogate pair; every unit after the text is 0.
+pub(crate) fn fixed_wide<const N: usize>(text: &str) -> [u16; N] {
+    let mut out = [0u16; N];
+    let room = N.saturating_sub(1);
+    let mut used = 0;
+    for ch in text.chars() {
+        let mut units = [0u16; 2];
+        let encoded = ch.encode_utf16(&mut units);
+        if used + encoded.len() > room {
+            break;
+        }
+        for (slot, unit) in out.iter_mut().skip(used).zip(encoded.iter()) {
+            *slot = *unit;
+        }
+        used += encoded.len();
+    }
+    out
 }
 
 /// Ctrl-Break goes to one process group: never group 0, which is every
@@ -175,6 +196,42 @@ mod tests {
         assert!(one_window(0x1234).is_ok());
         assert!(one_window(0xFFFE).is_ok());
         assert!(one_window(0x1_0000).is_ok());
+    }
+
+    #[test]
+    fn fixed_wide_text_is_cut_whole_and_ends_in_nul() {
+        let w = |s: &str| s.encode_utf16().collect::<Vec<u16>>();
+        // Fits with room to spare: the rest is zero.
+        let mut expect = [0u16; 6];
+        expect[..3].copy_from_slice(&w("abc"));
+        assert_eq!(fixed_wide::<6>("abc"), expect);
+        // Exactly N - 1 units: kept whole, the last unit is the NUL.
+        let mut expect = [0u16; 6];
+        expect[..5].copy_from_slice(&w("abcde"));
+        assert_eq!(fixed_wide::<6>("abcde"), expect);
+        // One unit too many: cut to N - 1.
+        assert_eq!(fixed_wide::<6>("abcdef"), expect);
+        assert_eq!(fixed_wide::<6>("abcdefghij"), expect);
+        // A surrogate pair that would end on the NUL is left out whole ...
+        let mut expect = [0u16; 4];
+        expect[..2].copy_from_slice(&w("ab"));
+        assert_eq!(fixed_wide::<4>("ab\u{1F3A7}"), expect);
+        // ... and one that fits is kept whole, after other text.
+        let mut expect = [0u16; 4];
+        expect[..3].copy_from_slice(&w("a\u{1F3A7}"));
+        assert_eq!(fixed_wide::<4>("a\u{1F3A7}"), expect);
+        assert_eq!(fixed_wide::<4>("a\u{1F3A7}b"), expect);
+        // Text outside ASCII but below the surrogates: one unit a character.
+        let mut expect = [0u16; 8];
+        expect[..7].copy_from_slice(&w("strážca"));
+        assert_eq!(fixed_wide::<8>("strážca — x"), expect);
+        let mut expect = [0u16; 7];
+        expect[..6].copy_from_slice(&w("strážc"));
+        assert_eq!(fixed_wide::<7>("strážca"), expect);
+        // Nothing fits in a buffer of one unit, and nothing in none.
+        assert_eq!(fixed_wide::<1>("abc"), [0u16; 1]);
+        assert_eq!(fixed_wide::<0>("abc"), [0u16; 0]);
+        assert_eq!(fixed_wide::<3>(""), [0u16; 3]);
     }
 
     #[test]

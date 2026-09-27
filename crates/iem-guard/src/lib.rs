@@ -13,7 +13,8 @@
 //! - [`proto`]: the guard pipe's requests, replies and frames;
 //! - [`state`]: the persistent state and the reboot rule;
 //! - [`alarms`]: the kept alarms;
-//! - [`cancel`]: the pre-emption token of every waiting step.
+//! - [`cancel`]: the pre-emption token of every waiting step;
+//! - [`view`]: what the tray shows (tooltip, alarm notices).
 //!
 //! The daemon and its clients (S6 plan Task 10):
 //!
@@ -58,6 +59,7 @@ pub mod plan;
 pub mod proto;
 pub mod site;
 pub mod state;
+pub mod view;
 #[cfg(windows)]
 pub mod win;
 
@@ -65,6 +67,6 @@ pub use alarms::{Alarm, Alarms};
 pub use cancel::{Cancel, Preempted};
 pub use pc::{Audience, Pc, R, StepError};
 pub use plan::{Facts, Health, Mode, OnError, PrefFail, Step};
-pub use proto::{Reply, Request};
+pub use proto::{Reply, Request, Update};
 pub use site::Settings;
 pub use state::GuardState;

@@ -405,7 +405,9 @@ jobs:
       - name: Migration CLI tests on Windows
         run: cargo test --locked -p iem-migrate
       - name: Build release binaries
-        run: cargo build --locked --release -p iem-server -p iem-tray -p iem-migrate --features iem-server/standalone
+        # The tray no longer links the server (F27): its TLS and audio
+        # features are named here.
+        run: cargo build --locked --release -p iem-server -p iem-tray -p iem-migrate --features iem-server/standalone,iem-server/tls,iem-server/audio
       - name: Upload the binaries (push runs only — pull requests, forks included, never yield binaries)
         if: github.event_name == 'push'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

@@ -364,6 +364,16 @@ impl Config {
             .map(|domain| format!("https://{domain}"))
             .or_else(|| self.lan_url.clone())
     }
+
+    /// URL the tray's "Open Mixer" opens on the PC: the local server on the
+    /// site's port, never the LAN URL. The tray runs no server of its own
+    /// (F27): `iem-server` serves it. Loopback always reaches it (the HTTPS
+    /// redirect applies to the public host only), and its origin is a secure
+    /// context, so Copy URL's `navigator.clipboard` works in the same window;
+    /// a plain-http LAN address has no clipboard API.
+    pub fn mixer_url(&self) -> String {
+        format!("http://localhost:{}", self.port)
+    }
 }
 
 /// Validate that a member_id is safe for use in filesystem paths.
@@ -703,6 +713,24 @@ mod tests {
         };
         assert_eq!(lan_only.share_url().as_deref(), Some("http://10.0.0.10"));
         assert_eq!(Config::default().share_url(), None);
+    }
+
+    #[test]
+    fn test_mixer_url_is_the_local_server_on_the_site_port() {
+        let both = Config {
+            lan_url: Some("http://10.0.0.10".to_string()),
+            https_domain: Some("mixer.example.org".to_string()),
+            port: 8080,
+            ..Config::default()
+        };
+        assert_eq!(both.mixer_url(), "http://localhost:8080");
+        let https_lan = Config {
+            lan_url: Some("https://10.0.0.10".to_string()),
+            port: 8081,
+            ..Config::default()
+        };
+        assert_eq!(https_lan.mixer_url(), "http://localhost:8081");
+        assert_eq!(Config::default().mixer_url(), "http://localhost:80");
     }
 
     #[test]

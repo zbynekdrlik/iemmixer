@@ -1,6 +1,7 @@
 //! Window messages (S6 design note §3, §5.3): a window of a class owned by a
-//! process, the owner's menu command posted to it, a dialog check, and the
-//! session-end window of the engine's owner thread.
+//! process, the owner's menu command posted to it, a dialog check, the
+//! session-end window of the engine's owner thread, and the notification on
+//! the tray's icon (S6 plan Task 11).
 
 use std::io;
 use std::sync::Arc;
@@ -25,6 +26,27 @@ pub fn post_command(hwnd: isize, id: u16) -> io::Result<()> {
 /// Whether `pid` owns a visible top-level dialog box (class `#32770`).
 pub fn has_dialog(pid: u32) -> io::Result<bool> {
     imp::has_dialog(pid)
+}
+
+/// The icon ids [`balloon`] tries.
+pub const ICON_IDS: u32 = 64;
+
+/// Shows a notification (a balloon; a toast on Windows 10 and later) with a
+/// warning icon on the notification-area icon of `hwnd`, the window the
+/// tray library created for that icon. `title` and `text` are cut to the
+/// shell's 63 and 255 UTF-16 units.
+///
+/// The tray library keeps its icon's id private, so the ids 1 to
+/// [`ICON_IDS`] are tried in turn: the window holds one icon, and the shell
+/// refuses an id the window does not hold without changing anything.
+/// `NotFound` when no id matched (no icon, or no shell).
+pub fn balloon(hwnd: isize, title: &str, text: &str) -> io::Result<()> {
+    crate::decide::one_window(hwnd)?;
+    imp::balloon(
+        hwnd,
+        &crate::decide::fixed_wide::<64>(title),
+        &crate::decide::fixed_wide::<256>(text),
+    )
 }
 
 /// A hidden top-level window on the calling thread for the end of the
@@ -87,6 +109,10 @@ mod imp {
         crate::unsupported()
     }
 
+    pub(super) fn balloon(_hwnd: isize, _title: &[u16; 64], _text: &[u16; 256]) -> io::Result<()> {
+        crate::unsupported()
+    }
+
     /// Never created off Windows.
     #[derive(Debug)]
     pub(super) enum SessionEndWindow {}
@@ -120,6 +146,9 @@ mod imp {
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::System::Shutdown::{
         ShutdownBlockReasonCreate, ShutdownBlockReasonDestroy,
+    };
+    use windows_sys::Win32::UI::Shell::{
+        NIF_INFO, NIIF_WARNING, NIM_MODIFY, NOTIFYICONDATAW, Shell_NotifyIconW,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, EnumWindows,
@@ -208,6 +237,31 @@ mod imp {
             }
         }
         Ok(false)
+    }
+
+    pub(super) fn balloon(hwnd: isize, title: &[u16; 64], text: &[u16; 256]) -> io::Result<()> {
+        let mut data = NOTIFYICONDATAW {
+            cbSize: size_of::<NOTIFYICONDATAW>() as u32,
+            hWnd: hwnd as HWND,
+            uFlags: NIF_INFO,
+            szInfo: *text,
+            szInfoTitle: *title,
+            dwInfoFlags: NIIF_WARNING,
+            ..Default::default()
+        };
+        for id in 1..=super::ICON_IDS {
+            data.uID = id;
+            // SAFETY: a complete NOTIFYICONDATAW carrying its own size, with
+            // NUL-terminated texts; the shell reads it during the call and
+            // changes only the balloon of the icon (hwnd, id), if one exists.
+            if unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) } != 0 {
+                return Ok(());
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "the window holds no notification-area icon",
+        ))
     }
 
     const CLASS: &str = "iemmixer-session-end";
@@ -353,6 +407,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_balloon_never_goes_to_the_null_or_broadcast_handle() {
+        assert_eq!(
+            kind(balloon(0, "iemmixer", "alarm")),
+            Some(io::ErrorKind::InvalidInput)
+        );
+        assert_eq!(
+            kind(balloon(0xFFFF, "iemmixer", "alarm")),
+            Some(io::ErrorKind::InvalidInput)
+        );
+    }
+
+    /// A made-up handle holds no notification-area icon, with or without a
+    /// shell in the session: no id matches and nothing is shown.
+    #[cfg(windows)]
+    #[test]
+    fn a_window_without_an_icon_gets_no_balloon() {
+        assert_eq!(
+            kind(balloon(0x1234, "iemmixer", "alarm")),
+            Some(io::ErrorKind::NotFound)
+        );
+    }
+
     #[cfg(not(windows))]
     #[test]
     fn every_window_call_is_unsupported_off_windows() {
@@ -363,6 +440,10 @@ mod tests {
         assert_eq!(kind(post_command(0xFFFE, 7)), Some(Unsupported));
         assert_eq!(kind(post_command(0x1_0000, 7)), Some(Unsupported));
         assert_eq!(kind(has_dialog(4242)), Some(Unsupported));
+        assert_eq!(
+            kind(balloon(0x1234, "iemmixer", "alarm")),
+            Some(Unsupported)
+        );
         assert_eq!(kind(pump()), Some(Unsupported));
         let ended = Arc::new(AtomicBool::new(false));
         assert_eq!(
