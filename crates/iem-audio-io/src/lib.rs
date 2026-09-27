@@ -24,6 +24,7 @@
 use core::any::Any;
 use core::ops::Range;
 
+pub mod format;
 pub mod nullrt;
 pub mod offline;
 pub mod wav;
