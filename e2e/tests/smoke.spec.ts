@@ -57,6 +57,42 @@ test.describe("Smoke Tests - Must All Pass", () => {
     await page.waitForLoadState("networkidle");
   });
 
+  test("unknown routes return the app (SPA fallback)", async ({ page }) => {
+    // One segment is a member route to the router; without a token the app
+    // takes it to the login.
+    const single = await page.goto("/unknown-route-12345");
+    expect(single?.status()).toBe(200);
+    expect(single?.headers()["content-type"]).toContain("text/html");
+    await expect(page.locator(".app").first()).toBeVisible();
+
+    // A deeper path is the router's not-found page, still served as the app.
+    const nested = await page.goto("/unknown/route-12345");
+    expect(nested?.status()).toBe(200);
+    expect(nested?.headers()["content-type"]).toContain("text/html");
+    await expect(page.locator(".login-box h2")).toHaveText("Page Not Found");
+    await expect(page.getByRole("link", { name: "Go Home" })).toHaveAttribute("href", "/");
+  });
+
+  test("the version endpoint names the build, its commit and its time", async ({ request }) => {
+    const response = await request.get("/api/version");
+    expect(response.status()).toBe(200);
+    const v = await response.json();
+    expect(v.version).toMatch(/^\d+\.\d+\.\d+/);
+    // build.rs ran: a real 7-character commit hash, never "unknown".
+    expect(v.git_hash).not.toBe("unknown");
+    expect(v.git_hash).toMatch(/^[a-f0-9]{7}$/);
+    expect(typeof v.branch).toBe("string");
+    expect(v.branch.length).toBeGreaterThan(0);
+    // Unix seconds, and the two readable forms show that same moment (UTC).
+    expect(v.build_time).toMatch(/^[1-9]\d{9}$/);
+    const at = new Date(Number(v.build_time) * 1000);
+    const two = (n: number) => String(n).padStart(2, "0");
+    const [d, mo, y] = [two(at.getUTCDate()), two(at.getUTCMonth() + 1), at.getUTCFullYear()];
+    const [h, mi, s] = [two(at.getUTCHours()), two(at.getUTCMinutes()), two(at.getUTCSeconds())];
+    expect(v.full_version).toBe(`${v.version} (${d}.${mo}.${y} ${h}:${mi})`);
+    expect(v.deployed_at).toBe(`${y}-${mo}-${d} ${h}:${mi}:${s} UTC`);
+  });
+
   test("non-hashed assets have no-cache headers", async ({ request }) => {
     // audio_player.js (in snippets/) has no content hash in filename
     // and must NOT be long-cached — stale CDN cache causes SRI failures

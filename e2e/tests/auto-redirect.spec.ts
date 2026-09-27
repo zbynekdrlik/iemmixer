@@ -96,6 +96,35 @@ test.describe("Auto-redirect authenticated users (#84)", () => {
     expect(url).toContain(`next=/${member}`);
   });
 
+  test("expired token opened directly on a mixer → login for that member, no socket", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    // A JWT whose exp (1000) is long past; the page never trusts it.
+    await page.evaluate(() => {
+      const b64url = (o: object) =>
+        btoa(JSON.stringify(o)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+      const token = `${b64url({ alg: "HS256", typ: "JWT" })}.${b64url({
+        sub: "member1",
+        engineer: false,
+        exp: 1000,
+        iat: 900,
+      })}.fakesignature`;
+      localStorage.setItem("iem_token", JSON.stringify({ token, member: "member1", engineer: false }));
+    });
+    const sockets: string[] = [];
+    page.on("websocket", (ws) => sockets.push(ws.url()));
+
+    await page.goto("/member1");
+    await page.waitForURL(/\/login/, { timeout: 5000 });
+    const url = page.url();
+    expect(url).toContain("/login");
+    expect(url).toContain("member=member1");
+    expect(url).toContain("next=/member1");
+    // The mixer did not try its socket with the dead token.
+    expect(sockets.filter((u) => u.includes("/ws/"))).toEqual([]);
+  });
+
   test("no token → stays on landing page", async ({ page }) => {
     // Ensure no auth state
     await page.goto("/");
