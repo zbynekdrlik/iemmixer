@@ -256,6 +256,22 @@ pub fn health(first: &Status, second: &Status) -> Health {
     }
 }
 
+/// Where a `Shutdown` request stands (design §5.2 "back to event" step 2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Shutdown {
+    /// `DriverReleased` came, with its reason.
+    Released(String),
+    /// The engine refused the request (its reply carried an error).
+    Refused(String),
+}
+
+/// `released`: the reason of a `DriverReleased`; `reply`: the request's
+/// reply, `None` not yet, `Some(None)` accepted, `Some(Some(error))`
+/// refused. `None`: wait on.
+pub fn shutdown(released: Option<&str>, _reply: Option<Option<String>>) -> Option<Shutdown> {
+    released.map(|reason| Shutdown::Released(reason.to_owned()))
+}
+
 /// The stage inputs' positions in the topology's input order, and the ids
 /// the topology lacks.
 pub fn stage_indices(topology: &[String], stage: &[String]) -> (Vec<usize>, Vec<String>) {
@@ -373,6 +389,35 @@ mod tests {
             faulted: false,
             parked: false,
         }
+    }
+
+    #[test]
+    fn a_shutdown_waits_for_the_release() {
+        assert_eq!(shutdown(None, None), None);
+        assert_eq!(shutdown(None, Some(None)), None);
+        assert_eq!(
+            shutdown(Some("shutdown"), None),
+            Some(Shutdown::Released("shutdown".into()))
+        );
+        assert_eq!(
+            shutdown(Some("shutdown"), Some(None)),
+            Some(Shutdown::Released("shutdown".into()))
+        );
+        // The release wins over a late refusal.
+        assert_eq!(
+            shutdown(Some("shutdown"), Some(Some("forbidden".into()))),
+            Some(Shutdown::Released("shutdown".into()))
+        );
+    }
+
+    /// A refused `Shutdown` ends the wait at once: "ide event" goes on to
+    /// the engine's health instead of waiting out the 10 s release.
+    #[test]
+    fn a_refused_shutdown_ends_the_wait_at_once() {
+        assert_eq!(
+            shutdown(None, Some(Some("forbidden: not the supervisor".into()))),
+            Some(Shutdown::Refused("forbidden: not the supervisor".into()))
+        );
     }
 
     #[test]

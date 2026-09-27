@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use iem_win::prefwin::{Kind, Pref};
 use serde::Deserialize;
 
+use crate::effects::argv;
 use crate::pc::Images;
 use crate::plan::{Mode, PrefFail};
 
@@ -410,6 +411,16 @@ impl Settings {
         }
     }
 
+    /// The engine's arguments for the bundle in `bundle`: `engine_args`
+    /// with its placeholders, and `--hold` on request.
+    pub fn engine_argv(&self, bundle: &Path, hold: bool) -> Result<Vec<String>, String> {
+        let mut args = argv::expand(&self.pc.engine_args, &self.vars(bundle))?;
+        if hold {
+            args.push("--hold".to_owned());
+        }
+        Ok(args)
+    }
+
     /// The placeholders of command arguments, for the bundle in `bundle`.
     pub fn vars(&self, bundle: &Path) -> Vec<(&'static str, String)> {
         let text = |p: &Path| p.to_string_lossy().into_owned();
@@ -430,7 +441,7 @@ pub(crate) mod tests {
 root = 'C:\IEM\iemmixer'
 site = 'C:\IEM\iemmixer\site\site.toml'
 server_config = 'C:\IEM\iemmixer\server\iemmixer.toml'
-engine_args = ["run", "--backend", "asio", "--site", "{site}"]
+engine_args = ["run", "--backend", "asio", "--site", "{site}", "--state-dir", "{root}\\engine"]
 reaper_exe = 'C:\Programs\REAPER\reaper.exe'
 app_exe = 'C:\Programs\App\app.exe'
 runner = ['C:\IEM\runner\bin\Runner.Listener.exe', "run"]
@@ -861,6 +872,73 @@ threshold_dbfs = -50.0
         }
     }
 
+    /// `iem-engine run` needs `--site` and `--state-dir`; the pipe name is
+    /// `engine_pipe` alone (the supervisor and the server use it too), so
+    /// the guard adds `--pipe` itself, and `--hold` on request.
+    #[test]
+    fn engine_args_name_the_state_and_leave_pipe_and_hold_to_the_guard() {
+        let good = settings().pc;
+        let args = |a: &[&str]| PcToml {
+            engine_args: a.iter().map(|s| (*s).to_owned()).collect(),
+            ..good.clone()
+        };
+        let adds = "pc.toml: engine_args must not name --pipe or --hold: the guard adds them";
+        let needs = "pc.toml: engine_args must name --site and --state-dir (iem-engine run)";
+        assert_eq!(
+            args(&["run", "--site", "s", "--state-dir", "d"]).problems(),
+            Vec::<String>::new()
+        );
+        assert_eq!(args(&["run", "--site", "s"]).problems(), [needs]);
+        assert_eq!(args(&["run", "--state-dir", "d"]).problems(), [needs]);
+        assert_eq!(
+            args(&["run", "--site", "s", "--state-dir", "d", "--pipe", "p"]).problems(),
+            [adds]
+        );
+        assert_eq!(
+            args(&["run", "--site", "s", "--state-dir", "d", "--hold"]).problems(),
+            [adds]
+        );
+        assert_eq!(args(&["run", "--hold"]).problems(), [adds, needs]);
+        // An empty list is named once.
+        assert_eq!(args(&[]).problems(), ["pc.toml: engine_args is empty"]);
+    }
+
+    #[test]
+    fn the_engine_gets_the_one_pipe_name_and_hold_on_request() {
+        let s = settings();
+        let bundle = s.bundle_dir("b");
+        let base = [
+            "run",
+            "--backend",
+            "asio",
+            "--site",
+            "C:\\IEM\\iemmixer\\site\\site.toml",
+            "--state-dir",
+            "C:\\IEM\\iemmixer\\engine",
+            "--pipe",
+            "iemmixer-engine",
+        ];
+        assert_eq!(s.engine_argv(&bundle, false).unwrap(), base);
+        let mut held = base.to_vec();
+        held.push("--hold");
+        assert_eq!(s.engine_argv(&bundle, true).unwrap(), held);
+        let mut other = s.clone();
+        other.pc.engine_pipe = "iemmixer-engine-2".into();
+        assert_eq!(
+            other
+                .engine_argv(&bundle, false)
+                .unwrap()
+                .last()
+                .map(String::as_str),
+            Some("iemmixer-engine-2")
+        );
+        other.pc.engine_args.push("{nope}".into());
+        assert_eq!(
+            other.engine_argv(&bundle, true).unwrap_err(),
+            "unknown placeholder {nope} in \"{nope}\""
+        );
+    }
+
     #[test]
     fn settings_problems_join_the_tables_and_check_the_app() {
         let mut s = settings();
@@ -877,10 +955,17 @@ threshold_dbfs = -50.0
                 "pc.toml: app_exe is not [guard] app_image",
             ]
         );
-        let bad_pc = PC.replace(
-            "engine_args = [\"run\", \"--backend\", \"asio\", \"--site\", \"{site}\"]",
-            "engine_args = []",
-        );
+        let bad_pc: String = PC
+            .lines()
+            .map(|l| {
+                if l.starts_with("engine_args") {
+                    "engine_args = []"
+                } else {
+                    l
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         assert_eq!(
             Settings::parse(&bad_pc, SITE).unwrap_err(),
             "pc.toml: engine_args is empty"

@@ -2,7 +2,8 @@
 //! arguments only (no shell). The `/Query /V /FO CSV` columns keep their
 //! order in every Windows language while their headers and status words do
 //! not, so the task's row is found by its name (2nd column) and read by its
-//! numeric `Last Result` (7th column).
+//! `Last Run Time` (6th column, compared as text) and numeric `Last Result`
+//! (7th column).
 
 /// Starts REAPER (its exe directly, with its project).
 pub const REAPER: &str = r"\iemmixer\iemmixer-StartREAPER";
@@ -48,12 +49,31 @@ pub fn csv_fields(line: &str) -> Vec<String> {
     out
 }
 
+/// The task's row of `schtasks /Query /FO CSV /V`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Row {
+    /// `Last Run Time` as schtasks prints it (its format is the locale's).
+    pub last_run: String,
+    /// `Last Result`; `None` when it is not a number.
+    pub last_result: Option<i64>,
+}
+
+/// The task's row from `schtasks /Query /FO CSV /V` output, found by its
+/// name.
+pub fn row(csv: &str, task: &str) -> Option<Row> {
+    let fields = csv
+        .lines()
+        .map(csv_fields)
+        .find(|f| f.get(1).is_some_and(|name| name.eq_ignore_ascii_case(task)))?;
+    Some(Row {
+        last_run: fields.get(5)?.trim().to_owned(),
+        last_result: fields.get(6).and_then(|v| v.trim().parse().ok()),
+    })
+}
+
 /// The task's `Last Result` from `schtasks /Query /FO CSV /V` output.
 pub fn last_result(csv: &str, task: &str) -> Option<i64> {
-    csv.lines()
-        .map(csv_fields)
-        .find(|f| f.get(1).is_some_and(|name| name.eq_ignore_ascii_case(task)))
-        .and_then(|f| f.get(6).and_then(|v| v.trim().parse().ok()))
+    row(csv, task).and_then(|r| r.last_result)
 }
 
 /// Where the probe task stands.
@@ -69,6 +89,26 @@ pub fn probe(last: Option<i64>) -> Probe {
         Some(0) => Probe::Passed,
         None | Some(RUNNING | NOT_RUN) => Probe::Wait,
         Some(code) => Probe::Failed(format!("the probe task ended with {code}")),
+    }
+}
+
+/// The probe task's run after our `/Run`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProbeWatch {
+    before: Option<String>,
+}
+
+impl ProbeWatch {
+    /// `before`: the task's row read just before `/Run` (`None`: no row).
+    pub fn new(before: Option<&Row>) -> Self {
+        Self {
+            before: before.map(|r| r.last_run.clone()),
+        }
+    }
+
+    /// Where the probe stands after one `/Query` (`None`: no row).
+    pub fn observe(&mut self, now: Option<&Row>) -> Probe {
+        probe(now.and_then(|r| r.last_result))
     }
 }
 
@@ -113,24 +153,103 @@ mod tests {
         )
     }
 
+    fn row_of(last_run: &str, last_result: Option<i64>) -> Row {
+        Row {
+            last_run: last_run.into(),
+            last_result,
+        }
+    }
+
     #[test]
-    fn the_last_result_is_read_from_the_tasks_row() {
-        assert_eq!(last_result(&query(PROBE, "0"), PROBE), Some(0));
-        assert_eq!(last_result(&query(PROBE, "267011"), PROBE), Some(NOT_RUN));
+    fn the_row_is_found_by_the_tasks_name() {
+        let at = "27.09.2026 12:00:00";
+        assert_eq!(row(&query(PROBE, "0"), PROBE), Some(row_of(at, Some(0))));
         assert_eq!(
-            last_result(&query(PROBE, " -2147024894 "), PROBE),
-            Some(-2_147_024_894)
+            row(&query(PROBE, "267011"), PROBE),
+            Some(row_of(at, Some(NOT_RUN)))
         );
         assert_eq!(
-            last_result(&query("\\IEMMIXER\\iemmixer-PROBE", "1"), PROBE),
-            Some(1)
+            row(&query(PROBE, " -2147024894 "), PROBE),
+            Some(row_of(at, Some(-2_147_024_894)))
         );
-        assert_eq!(last_result(&query(TUNING, "0"), PROBE), None);
-        assert_eq!(last_result(&query(PROBE, "n/a"), PROBE), None);
-        assert_eq!(last_result("", PROBE), None);
         assert_eq!(
-            last_result("\"PC\",\"\\iemmixer\\iemmixer-probe\"", PROBE),
-            None
+            row(&query("\\IEMMIXER\\iemmixer-PROBE", "1"), PROBE),
+            Some(row_of(at, Some(1)))
+        );
+        assert_eq!(row(&query(TUNING, "0"), PROBE), None);
+        assert_eq!(row(&query(PROBE, "n/a"), PROBE), Some(row_of(at, None)));
+        assert_eq!(row("", PROBE), None);
+        assert_eq!(row("\"PC\",\"\\iemmixer\\iemmixer-probe\"", PROBE), None);
+        // The run time is trimmed; a missing result reads as none.
+        assert_eq!(
+            row(
+                "\"PC\",\"\\iemmixer\\iemmixer-probe\",\"\",\"\",\"\",\" N/A \",\"0\"",
+                PROBE
+            ),
+            Some(row_of("N/A", Some(0)))
+        );
+        assert_eq!(
+            row(
+                "\"PC\",\"\\iemmixer\\iemmixer-probe\",\"\",\"\",\"\",\"N/A\"",
+                PROBE
+            ),
+            Some(row_of("N/A", None))
+        );
+    }
+
+    /// Right after `/Run` schtasks may still show the previous run: its
+    /// result, success or failure, is not this run's.
+    #[test]
+    fn the_probe_counts_only_a_run_after_ours() {
+        let before = row_of("27.09.2026 12:00:00", Some(0));
+        let mut w = ProbeWatch::new(Some(&before));
+        assert_eq!(w.observe(Some(&before)), Probe::Wait);
+        assert_eq!(w.observe(None), Probe::Wait);
+        assert_eq!(
+            w.observe(Some(&row_of("27.09.2026 12:05:00", Some(0)))),
+            Probe::Passed
+        );
+        let mut w = ProbeWatch::new(Some(&before));
+        assert_eq!(
+            w.observe(Some(&row_of("27.09.2026 12:05:00", Some(1)))),
+            Probe::Failed("the probe task ended with 1".into())
+        );
+        let failed = row_of("27.09.2026 12:00:00", Some(1));
+        let mut w = ProbeWatch::new(Some(&failed));
+        assert_eq!(w.observe(Some(&failed)), Probe::Wait);
+        assert_eq!(
+            w.observe(Some(&row_of("27.09.2026 12:05:00", Some(0)))),
+            Probe::Passed
+        );
+    }
+
+    /// A run seen running is ours even when it started within the second
+    /// of the previous one (the run time has whole seconds).
+    #[test]
+    fn a_run_seen_running_counts_within_the_same_second() {
+        let before = row_of("27.09.2026 12:00:00", Some(0));
+        let mut w = ProbeWatch::new(Some(&before));
+        assert_eq!(
+            w.observe(Some(&row_of("27.09.2026 12:00:00", Some(RUNNING)))),
+            Probe::Wait
+        );
+        assert_eq!(w.observe(Some(&before)), Probe::Passed);
+    }
+
+    #[test]
+    fn a_task_that_never_ran_counts_its_first_run() {
+        let never = row_of("N/A", Some(NOT_RUN));
+        let mut w = ProbeWatch::new(Some(&never));
+        assert_eq!(w.observe(Some(&never)), Probe::Wait);
+        assert_eq!(
+            w.observe(Some(&row_of("27.09.2026 12:05:00", Some(0)))),
+            Probe::Passed
+        );
+        // No row before /Run: any row after it is the new run's.
+        let mut w = ProbeWatch::new(None);
+        assert_eq!(
+            w.observe(Some(&row_of("27.09.2026 12:05:00", Some(0)))),
+            Probe::Passed
         );
     }
 

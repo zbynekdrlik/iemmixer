@@ -12,6 +12,14 @@ pub fn one_pid(pids: &[u32], what: &str) -> Result<u32, String> {
     }
 }
 
+/// Whether every running app process was started from the configured exe
+/// (design §5.3: the exe hash identifies the binary that runs). `images`:
+/// each process's full image path, or why it could not be read. None
+/// running is fine: the configured exe is the one our task starts.
+pub fn running_from(_configured: &str, _images: &[Result<String, String>]) -> Result<(), String> {
+    Ok(())
+}
+
 /// `pid`s and images for a message: `a.exe (12), b.exe (13)`.
 pub fn holders_text(holders: &[(u32, String)]) -> String {
     holders
@@ -104,6 +112,52 @@ pub fn newer_temp(files: &[(String, u64)], after_ms: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_running_app_must_be_the_configured_exe() {
+        let exe = "C:\\Programs\\App\\app.exe";
+        assert_eq!(running_from(exe, &[]), Ok(()));
+        assert_eq!(running_from(exe, &[Ok(exe.to_owned())]), Ok(()));
+        assert_eq!(
+            running_from(exe, &[Ok(exe.to_owned()), Ok(exe.to_owned())]),
+            Ok(())
+        );
+        assert_eq!(
+            running_from(exe, &[Ok("C:\\Other\\app.exe".to_owned())]),
+            Err(
+                "the predecessor app runs from C:\\Other\\app.exe, not from pc.toml app_exe".into()
+            )
+        );
+        assert_eq!(
+            running_from(
+                exe,
+                &[Ok(exe.to_owned()), Ok("C:\\Programs\\App\\app2.exe".to_owned())]
+            ),
+            Err(
+                "the predecessor app runs from C:\\Programs\\App\\app2.exe, not from pc.toml app_exe"
+                    .into()
+            )
+        );
+        assert_eq!(
+            running_from(exe, &[Err("access denied".to_owned())]),
+            Err("the predecessor app's image: access denied".into())
+        );
+    }
+
+    /// Windows compares paths without case and takes either separator.
+    #[test]
+    fn the_image_compares_without_case_or_separator_style() {
+        let exe = "C:\\Programy\\Aplikácia\\app.exe";
+        assert_eq!(
+            running_from(exe, &[Ok("c:/PROGRAMY/APLIKÁCIA/App.EXE".to_owned())]),
+            Ok(())
+        );
+        assert_eq!(
+            running_from("C:/Programy/Aplikácia/app.exe", &[Ok(exe.to_owned())]),
+            Ok(())
+        );
+        assert!(running_from(exe, &[Ok("C:\\Programy\\Aplikacia\\app.exe".to_owned())]).is_err());
+    }
 
     #[test]
     fn exactly_one_process() {
