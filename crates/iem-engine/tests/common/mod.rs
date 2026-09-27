@@ -3,8 +3,9 @@
 //! site with every level open, hot inputs driving the limiters, a command
 //! group every block (volume, input/mix/group EQ, processing, levels of an
 //! input and a heard mix, a group strip, solo, listen, limiter raise and
-//! lower, test signal, a full import), talkback, both taps, meter reads and a
-//! sanitiser trip every 1000 blocks.
+//! lower, test signal, the HIL test signal with its output mask, an Arm, a
+//! full import), talkback, both taps, meter reads, a sanitiser trip every
+//! 1000 blocks and a driver reopen's `discontinuity` every 1000 blocks.
 #![allow(dead_code)]
 
 use std::path::PathBuf;
@@ -154,6 +155,14 @@ pub fn scenario() -> Scenario {
             dbfs: -30.0,
             ttl_s: 0.01,
         },
+        Cmd::HilTestSignal {
+            input: input("mic6"),
+            hz: 1000.0,
+            dbfs: -30.0,
+            ttl_s: 0.01,
+            card_tx: vec![72, 91, 93],
+        },
+        Cmd::Arm,
         level("member1", Source::Input(input("mic1")), -6.0, 0.3),
         level("member1", heard.clone(), -6.0, -0.3),
         Cmd::SetGroup {
@@ -252,6 +261,9 @@ pub fn drive(s: &mut Scenario, b: &mut Buffers, blocks: usize) {
         }
         let _ = s.handles.talkback.push_partial_slice(&b.talk);
         let src = if k % 1000 == 999 { &b.bad } else { &b.input };
+        if k % 1000 == 500 {
+            s.processor.discontinuity();
+        }
         let mut block = Block::new(BLOCK, src, &mut b.output);
         s.processor.process(&mut block);
         for tap in &mut s.handles.taps {

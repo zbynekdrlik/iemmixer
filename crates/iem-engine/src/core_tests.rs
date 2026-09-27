@@ -662,6 +662,122 @@ fn test_signal_needs_the_flag_and_is_capped() {
 }
 
 #[test]
+fn the_hil_test_signal_needs_the_flag_stays_under_the_cap_and_names_known_outputs() {
+    let hil = |dbfs: f64, card_tx: Vec<u16>| Cmd::HilTestSignal {
+        input: input("mic3"),
+        hz: 1000.0,
+        dbfs,
+        ttl_s: 0.5,
+        card_tx,
+    };
+    let mut off = core(Flags::default());
+    assert_eq!(code(off.apply(&hil(-30.0, vec![72]))), ErrCode::Forbidden);
+    assert_eq!(code(off.apply(&hil(-10.0, vec![]))), ErrCode::Forbidden);
+    let mut c = core(Flags {
+        test_signal: true,
+        fault_injection: false,
+    });
+    // Above the −20 dBFS cap it is refused, never lowered; the cap itself is fine.
+    assert_eq!(code(c.apply(&hil(-19.9, vec![72]))), ErrCode::BadValue);
+    assert_eq!(code(c.apply(&hil(f64::NAN, vec![72]))), ErrCode::BadValue);
+    assert_eq!(code(c.apply(&hil(-30.0, vec![]))), ErrCode::BadValue);
+    assert_eq!(code(c.apply(&hil(-30.0, vec![72, 94]))), ErrCode::UnknownId);
+    assert_eq!(
+        code(c.apply(&hil(-30.0, vec![101]))),
+        ErrCode::UnknownId,
+        "an RX"
+    );
+    assert!(
+        c.transient().test_signal.is_none(),
+        "a refusal changes nothing"
+    );
+    assert_eq!(c.rev(), 0);
+    let out = c.apply(&hil(-20.0, vec![72, 93, 72])).unwrap();
+    assert_eq!(out.rev, 1);
+    let RtOp::HilTestSignal {
+        i,
+        hz,
+        amp,
+        ttl,
+        mask,
+    } = out.rt[0]
+    else {
+        panic!("{:?}", out.rt)
+    };
+    assert_eq!((i, hz, ttl), (2, 1000.0, 48_000));
+    assert!((amp - 0.1).abs() < 1e-15, "{amp}");
+    let topo = test_site();
+    let slot = |ch: u16| topo.tx.iter().position(|c| *c == ch).unwrap();
+    let on: Vec<usize> = (0..MAX_TX).filter(|k| mask[*k]).collect();
+    assert_eq!(on, vec![slot(72), slot(93)]);
+    assert_eq!(on, vec![17, 20]);
+    let t = c.transient().test_signal.unwrap();
+    assert_eq!((t.input, t.dbfs, t.ttl_s), (input("mic3"), -20.0, 0.5));
+    // It is the test signal: StopTestSignal ends it like any other.
+    let stop = c.apply(&Cmd::StopTestSignal).unwrap();
+    assert_eq!(stop.rt, vec![RtOp::StopTestSignal]);
+    // The plain test signal carries no mask.
+    let plain = c
+        .apply(&Cmd::StartTestSignal {
+            input: input("mic3"),
+            hz: 1000.0,
+            dbfs: -30.0,
+            ttl_s: 0.5,
+        })
+        .unwrap();
+    assert!(matches!(plain.rt[0], RtOp::TestSignal { i: 2, .. }));
+}
+
+#[test]
+fn a_hil_output_beyond_the_mask_is_refused() {
+    // 129 mono mixes and a stereo engineer: TX 1…129, 130/131.
+    let mut site = String::from("[engine]\nchannels = 200\nengineer = \"eng\"\n");
+    site.push_str("[[engine.inputs]]\nid = \"mic\"\nrx = [1]\n");
+    for k in 1..=129 {
+        site.push_str(&format!("[[engine.mixes]]\nid = \"m{k}\"\ntx = [{k}]\n"));
+    }
+    site.push_str("[[engine.mixes]]\nid = \"eng\"\ntx = [130, 131]\n");
+    let topo = crate::topology::compile(&crate::site::parse(&site).unwrap()).unwrap();
+    let flags = Flags {
+        test_signal: true,
+        fault_injection: false,
+    };
+    let mut c = Core::new(Arc::new(topo), &MixState::default(), 0, flags);
+    let hil = |ch: u16| Cmd::HilTestSignal {
+        input: input("mic"),
+        hz: 1000.0,
+        dbfs: -30.0,
+        ttl_s: 0.5,
+        card_tx: vec![ch],
+    };
+    // TX 128 is slot 127, the last one the mask holds; TX 129 is slot 128.
+    let out = c.apply(&hil(128)).unwrap();
+    let RtOp::HilTestSignal { mask, .. } = out.rt[0] else {
+        panic!("{:?}", out.rt)
+    };
+    assert!(mask[MAX_TX - 1]);
+    assert_eq!(mask.iter().filter(|b| **b).count(), 1);
+    assert_eq!(code(c.apply(&hil(129))), ErrCode::BadValue);
+}
+
+#[test]
+fn arm_reaches_the_processor_without_a_revision() {
+    let mut c = core(Flags::default());
+    let out = c.apply(&Cmd::Arm).unwrap();
+    assert_eq!(
+        (out.rev, out.rt, out.changes.len(), out.effect),
+        (0, vec![RtOp::Arm], 0, Effect::None)
+    );
+    assert_eq!(
+        code(c.apply(&Cmd::Batch {
+            ops: vec![Cmd::Arm]
+        })),
+        ErrCode::BadRequest,
+        "not a state edit"
+    );
+}
+
+#[test]
 fn fault_injection_needs_the_flag() {
     let mut off = core(Flags::default());
     assert_eq!(code(off.apply(&Cmd::InjectFault)), ErrCode::Forbidden);

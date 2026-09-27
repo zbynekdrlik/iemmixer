@@ -24,7 +24,7 @@ use iem_engine_proto::{MixState, db_to_lin};
 use iem_limiter_mga::{DISABLE_MS, Limiter, Mga, Sliders};
 use rtrb::{Consumer, Producer, RingBuffer};
 
-use crate::cmd::{RtCmd, RtOp};
+use crate::cmd::{RtCmd, RtOp, TxMask};
 use crate::core::reconcile;
 use crate::params::{eq_params, input_params};
 use crate::topology::Topology;
@@ -216,6 +216,18 @@ fn push_tap(
     }
 }
 
+/// The output fade from silence to full level over `len` samples; at once
+/// when `len` is 0.
+fn rise(len: u32) -> Ramp {
+    let mut fade = Ramp::new(0.0, len);
+    if len > 0 {
+        fade.set(1.0);
+    } else {
+        fade.jump(1.0);
+    }
+    fade
+}
+
 /// The Q1 safety stage: the MGA core at 0 dB, fully linked.
 fn safety(sr: f64) -> Mga {
     Mga::new(
@@ -325,6 +337,8 @@ struct TestRt {
     fade: Ramp,
     /// Sample time after which it is silent and the caps lift.
     end: u64,
+    /// The HIL signal's outputs: until `end` every other output is zero.
+    mask: Option<TxMask>,
 }
 
 impl TestRt {
@@ -367,6 +381,10 @@ pub struct Processor {
     listen_lim: Limiter,
     test: Option<TestRt>,
     fade: Ramp,
+    /// The fade-in's length in samples; 0 starts at full level.
+    fade_in: u32,
+    /// False while `Options::hold` keeps the output silent (until `Arm`).
+    armed: bool,
     fading_out: bool,
     time: u64,
     since_meter: u64,
@@ -452,12 +470,17 @@ impl Processor {
         let (tap1, tap1_rx) = RingBuffer::new(TAP_RING);
         let (talk_tx, talk) = RingBuffer::new(TALK_RING);
         let status = Arc::new(RtStatus::default());
-        let mut fade = Ramp::new(0.0, samples(opts.fade_in_ms, sr));
-        if opts.fade_in_ms > 0.0 {
-            fade.set(1.0);
+        let fade_in = if opts.fade_in_ms > 0.0 {
+            samples(opts.fade_in_ms, sr)
         } else {
-            fade.jump(1.0);
-        }
+            0
+        };
+        // Held: silent until `Arm` starts the fade-in.
+        let fade = if opts.hold {
+            Ramp::new(0.0, 1)
+        } else {
+            rise(fade_in)
+        };
         let processor = Self {
             talkback_input: topo.inputs.iter().position(|n| n.talkback),
             topo,
@@ -481,6 +504,8 @@ impl Processor {
             listen_lim: Limiter::new(sr, 0.0),
             test: None,
             fade,
+            fade_in,
+            armed: !opts.hold,
             fading_out: false,
             time: 0,
             since_meter: 0,
@@ -606,24 +631,14 @@ impl Processor {
                     self.listen_lim.reset();
                 }
             }
-            RtOp::TestSignal { i, hz, amp, ttl }
-            | RtOp::HilTestSignal {
-                i, hz, amp, ttl, ..
-            } => {
-                let len = samples(FADE_MS, sr);
-                let mut fade = Ramp::new(0.0, len);
-                fade.set(1.0);
-                self.test = Some(TestRt {
-                    input: usize::from(i),
-                    phase: 0.0,
-                    inc: hz / sr,
-                    amp: amp.min(TEST_CAP),
-                    left: ttl,
-                    fade,
-                    end: self.time.saturating_add(ttl).saturating_add(u64::from(len)),
-                });
-                self.set_caps(true);
-            }
+            RtOp::TestSignal { i, hz, amp, ttl } => self.start_test(i, hz, amp, ttl, None),
+            RtOp::HilTestSignal {
+                i,
+                hz,
+                amp,
+                ttl,
+                mask,
+            } => self.start_test(i, hz, amp, ttl, Some(mask)),
             RtOp::StopTestSignal => {
                 let now = self.time;
                 if let Some(t) = self.test.as_mut() {
@@ -642,7 +657,39 @@ impl Processor {
                 self.fading_out = true;
             }
             RtOp::Panic => Self::inject_fault(),
-            RtOp::Arm => {}
+            RtOp::Arm => {
+                if !self.armed {
+                    self.armed = true;
+                    self.restart_fade();
+                }
+            }
+        }
+    }
+
+    /// X13: a sine replaces input `i` for `ttl` samples and then fades out;
+    /// every TX is capped meanwhile. With `mask` (the HIL signal) only those
+    /// outputs sound until it ended.
+    fn start_test(&mut self, i: u16, hz: f64, amp: f64, ttl: u64, mask: Option<TxMask>) {
+        let len = samples(FADE_MS, self.sr);
+        let mut fade = Ramp::new(0.0, len);
+        fade.set(1.0);
+        self.test = Some(TestRt {
+            input: usize::from(i),
+            phase: 0.0,
+            inc: hz / self.sr,
+            amp: amp.min(TEST_CAP),
+            left: ttl,
+            fade,
+            end: self.time.saturating_add(ttl).saturating_add(u64::from(len)),
+            mask,
+        });
+        self.set_caps(true);
+    }
+
+    /// The fade-in from silence, unless the output is fading out for good.
+    fn restart_fade(&mut self) {
+        if !self.fading_out {
+            self.fade = rise(self.fade_in);
         }
     }
 
@@ -788,8 +835,11 @@ impl Processor {
             listen_buf,
             fade_buf,
             status,
+            test,
             ..
         } = self;
+        // The HIL signal's outputs; every other one is zero while it runs.
+        let mask = test.as_ref().and_then(|t| t.mask.as_ref());
         let heard_from = topo.inputs.len();
         let mut trips = 0;
         for (m, spec) in topo.mixes.iter().enumerate() {
@@ -892,7 +942,11 @@ impl Processor {
                     continue;
                 };
                 if let Some(out) = block.output(ch).get_mut(off..off + n) {
-                    copy(out, src);
+                    if mask.is_some_and(|m| !m.get(ch).copied().unwrap_or(false)) {
+                        out.fill(0.0);
+                    } else {
+                        copy(out, src);
+                    }
                 }
             }
         }
@@ -949,6 +1003,15 @@ impl Processor {
 }
 
 impl Process for Processor {
+    /// A driver reopen (S6): the output fades in again (not while held or
+    /// fading out).
+    #[cfg_attr(iem_rtsan, sanitize(realtime = "nonblocking"))]
+    fn discontinuity(&mut self) {
+        if self.armed {
+            self.restart_fade();
+        }
+    }
+
     #[cfg_attr(iem_rtsan, sanitize(realtime = "nonblocking"))]
     fn process(&mut self, block: &mut Block<'_>) {
         let frames = block.frames();

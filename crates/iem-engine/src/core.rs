@@ -12,7 +12,7 @@ use iem_engine_proto::{
     MixId, MixOut, MixState, Solo, Source, TestSignal, Transient, db_to_lin,
 };
 
-use crate::cmd::RtOp;
+use crate::cmd::{MAX_TX, RtOp, TxMask};
 use crate::params::{
     FADER_DB, LIMIT_DB, PAN, Range, TEST_DBFS, TEST_HZ, TEST_TTL_S, TRIM_DB, cap, cap_eq,
     cap_group, cap_input, cap_level, cap_out, eq_is_finite, eq_params, input_params,
@@ -643,34 +643,27 @@ impl Core {
                 dbfs,
                 ttl_s,
             } => {
-                if !self.flags.test_signal {
+                self.test_flag()?;
+                self.start_test(input, *hz, *dbfs, *ttl_s, None)
+            }
+            Cmd::HilTestSignal {
+                input,
+                hz,
+                dbfs,
+                ttl_s,
+                card_tx,
+            } => {
+                self.test_flag()?;
+                // Refused above the X13 cap, never lowered: HIL checks the
+                // level it asked for.
+                if *dbfs > TEST_DBFS.1 {
                     return Err(CmdError::new(
-                        ErrCode::Forbidden,
-                        "the engine runs without the test-signal flag",
+                        ErrCode::BadValue,
+                        "dbfs is above the test-signal cap of -20 dBFS",
                     ));
                 }
-                let i = self.input(input)?;
-                let hz = capped(*hz, TEST_HZ, "hz")?;
-                let dbfs = capped(*dbfs, TEST_DBFS, "dbfs")?;
-                let ttl_s = capped(*ttl_s, TEST_TTL_S, "ttl_s")?;
-                let signal = TestSignal {
-                    input: input.clone(),
-                    hz,
-                    dbfs,
-                    ttl_s,
-                };
-                self.test = Some(signal.clone());
-                Ok(Partial::changed(
-                    vec![Change::TestSignal {
-                        signal: Some(signal),
-                    }],
-                    vec![RtOp::TestSignal {
-                        i: ix(i),
-                        hz,
-                        amp: db_to_lin(dbfs),
-                        ttl: (ttl_s * f64::from(SAMPLE_RATE)).round() as u64,
-                    }],
-                ))
+                let mask = self.tx_mask(card_tx)?;
+                self.start_test(input, *hz, *dbfs, *ttl_s, Some(mask))
             }
             Cmd::StopTestSignal => Ok(if self.test.take().is_some() {
                 Partial::changed(
@@ -709,10 +702,91 @@ impl Core {
             Cmd::SaveNow => Ok(Partial::effect(Effect::Save)),
             Cmd::Shutdown => Ok(Partial::effect(Effect::Shutdown)),
             Cmd::Ping => Ok(Partial::default()),
-            Cmd::Arm | Cmd::HilTestSignal { .. } => {
-                Err(CmdError::new(ErrCode::Unsupported, "not implemented yet"))
-            }
+            // Neither state nor revision: the processor's fade-in starts.
+            Cmd::Arm => Ok(Partial {
+                rt: vec![RtOp::Arm],
+                ..Partial::default()
+            }),
         }
+    }
+
+    fn test_flag(&self) -> Result<(), CmdError> {
+        if self.flags.test_signal {
+            Ok(())
+        } else {
+            Err(CmdError::new(
+                ErrCode::Forbidden,
+                "the engine runs without the test-signal flag",
+            ))
+        }
+    }
+
+    /// X13: a sine replaces `input` for `ttl_s`, every TX capped; with
+    /// `mask` (the HIL signal) only those outputs sound meanwhile.
+    fn start_test(
+        &mut self,
+        input: &InputId,
+        hz: f64,
+        dbfs: f64,
+        ttl_s: f64,
+        mask: Option<TxMask>,
+    ) -> Result<Partial, CmdError> {
+        let i = ix(self.input(input)?);
+        let hz = capped(hz, TEST_HZ, "hz")?;
+        let dbfs = capped(dbfs, TEST_DBFS, "dbfs")?;
+        let ttl_s = capped(ttl_s, TEST_TTL_S, "ttl_s")?;
+        let signal = TestSignal {
+            input: input.clone(),
+            hz,
+            dbfs,
+            ttl_s,
+        };
+        self.test = Some(signal.clone());
+        let amp = db_to_lin(dbfs);
+        let ttl = (ttl_s * f64::from(SAMPLE_RATE)).round() as u64;
+        let op = match mask {
+            None => RtOp::TestSignal { i, hz, amp, ttl },
+            Some(mask) => RtOp::HilTestSignal {
+                i,
+                hz,
+                amp,
+                ttl,
+                mask,
+            },
+        };
+        Ok(Partial::changed(
+            vec![Change::TestSignal {
+                signal: Some(signal),
+            }],
+            vec![op],
+        ))
+    }
+
+    /// The HIL signal's outputs: the TX slots of the listed card channels.
+    fn tx_mask(&self, card_tx: &[u16]) -> Result<TxMask, CmdError> {
+        if card_tx.is_empty() {
+            return Err(CmdError::new(
+                ErrCode::BadValue,
+                "the HIL test signal names no card output",
+            ));
+        }
+        let mut mask = [false; MAX_TX];
+        for ch in card_tx {
+            let slot = self.topo.tx.iter().position(|c| c == ch).ok_or_else(|| {
+                CmdError::new(
+                    ErrCode::UnknownId,
+                    format!("card output {ch} is not a TX channel of the site"),
+                )
+            })?;
+            let bit = mask.get_mut(slot).ok_or_else(|| {
+                CmdError::new(
+                    ErrCode::BadValue,
+                    format!("card output {ch} is beyond the first {MAX_TX} engine outputs"),
+                )
+            })?;
+            *bit = true;
+        }
+        Ok(mask)
     }
 
     fn set_input(&mut self, i: usize, new: InputState) -> Partial {

@@ -148,6 +148,27 @@ impl Cmd {
     pub fn is_read_only(&self) -> bool {
         matches!(self, Self::GetState | Self::GetTopology | Self::Ping)
     }
+
+    /// Commands only the supervisor may send (S6 design note §4).
+    pub fn is_supervisor(&self) -> bool {
+        matches!(self, Self::Arm | Self::HilTestSignal { .. })
+    }
+
+    /// Commands a supervisor connection may send: reads, its own commands,
+    /// `Shutdown`, `SaveNow`, the test signal and fault injection (their
+    /// launch flags still apply); never a change of the mix.
+    pub fn supervisor_may(&self) -> bool {
+        self.is_read_only()
+            || self.is_supervisor()
+            || matches!(
+                self,
+                Self::Shutdown
+                    | Self::SaveNow
+                    | Self::StartTestSignal { .. }
+                    | Self::StopTestSignal
+                    | Self::InjectFault
+            )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -928,5 +949,35 @@ mod tests {
         assert!(Cmd::GetTopology.is_read_only());
         assert!(Cmd::Ping.is_read_only());
         assert!(!Cmd::SaveNow.is_read_only());
+    }
+
+    /// The ops of the commands `pick` accepts, in `OPS` order.
+    fn ops_where(pick: fn(&Cmd) -> bool) -> Vec<&'static str> {
+        every_cmd()
+            .iter()
+            .zip(OPS)
+            .filter(|(cmd, _)| pick(cmd))
+            .map(|(_, op)| op)
+            .collect()
+    }
+
+    #[test]
+    fn the_supervisor_sends_its_own_commands_reads_stops_and_tests_but_no_mix_change() {
+        assert_eq!(ops_where(Cmd::is_supervisor), ["arm", "hil_test_signal"]);
+        assert_eq!(
+            ops_where(Cmd::supervisor_may),
+            [
+                "start_test_signal",
+                "stop_test_signal",
+                "get_state",
+                "get_topology",
+                "save_now",
+                "shutdown",
+                "inject_fault",
+                "ping",
+                "arm",
+                "hil_test_signal"
+            ]
+        );
     }
 }

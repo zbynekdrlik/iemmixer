@@ -84,6 +84,10 @@ pub struct Control {
     peers: BTreeMap<u64, Peer>,
     controller: Option<u64>,
     controller_lost: Option<Instant>,
+    /// The guard's connection (S6): one at a time, beside the controller.
+    supervisor: Option<u64>,
+    /// `--hold` until the supervisor's `Arm`.
+    held: bool,
     test_deadline: Option<Instant>,
     counters: Vec<u64>,
     alarms: Vec<Alarm>,
@@ -175,6 +179,8 @@ impl Control {
             peers: BTreeMap::new(),
             controller: None,
             controller_lost: None,
+            supervisor: None,
+            held: p.settings.hold,
             test_deadline: None,
             counters: p.counters,
             alarms: p.alarms,
@@ -316,6 +322,16 @@ impl Control {
             self.controller = Some(id);
             self.controller_lost = None;
         }
+        // A new supervisor (a restarted guard) replaces the old one only.
+        if role == Role::Supervisor
+            && let Some(old) = self.supervisor.filter(|old| *old != id)
+        {
+            self.send(old, &EngineMsg::Superseded);
+            self.drop_peer(old, "superseded by a new supervisor");
+        }
+        if role == Role::Supervisor {
+            self.supervisor = Some(id);
+        }
         match self.peers.get_mut(&id) {
             Some(p) => p.role = Some(role),
             None => return,
@@ -379,6 +395,23 @@ impl Control {
                     refuse(ErrCode::NotController, "an observer may only read"),
                 );
             }
+            Some(Role::Supervisor) if !cmd.supervisor_may() => {
+                return self.reply(
+                    id,
+                    request,
+                    refuse(
+                        ErrCode::NotController,
+                        "the supervisor never changes the mix",
+                    ),
+                );
+            }
+            Some(Role::Control) if cmd.is_supervisor() => {
+                return self.reply(
+                    id,
+                    request,
+                    refuse(ErrCode::NotSupervisor, "only the supervisor sends this"),
+                );
+            }
             _ => {}
         }
         let out = match self.core.apply(&cmd) {
@@ -386,7 +419,7 @@ impl Control {
             Err(e) => return self.reply(id, request, Some(e.into())),
         };
         match &cmd {
-            Cmd::StartTestSignal { .. } => {
+            Cmd::StartTestSignal { .. } | Cmd::HilTestSignal { .. } => {
                 self.test_deadline = self
                     .core
                     .transient()
@@ -394,6 +427,10 @@ impl Control {
                     .map(|t| Instant::now() + Duration::from_secs_f64(t.ttl_s));
             }
             Cmd::StopTestSignal => self.test_deadline = None,
+            Cmd::Arm => {
+                info!("armed (held until now: {})", self.held);
+                self.held = false;
+            }
             _ => {}
         }
         let effect = out.effect;
@@ -537,7 +574,13 @@ impl Control {
             tap_overruns: self.status.tap_overruns.load(Ordering::Relaxed),
             talkback_dropped: self.talkback_dropped.load(Ordering::Relaxed),
             cmd_backlog: self.pending.iter().map(|g| g.len() as u64).sum(),
-            ..Status::default()
+            frames: st.frames,
+            missed: st.missed,
+            overruns: st.overruns,
+            resets: st.resets,
+            parked: st.parked,
+            held: self.held,
+            lock_failed: false,
         }
     }
 
