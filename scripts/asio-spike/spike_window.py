@@ -6,8 +6,9 @@ A window opens only with the owner's quoted "event skončil" and never while
 the "ide event" flag file exists. Every wait checks that flag every 2 s; when
 it appears the driver stops the spike through its stop file, restores the
 driver's preferred buffer (read back) and brings REAPER back with the handover
-checks (`preempt`). PC work runs in SpikePc.psm1 over ssh; site values come
-only from the private env file ($SPIKE_ENV). Nothing is ever ended by force."""
+checks (`preempt`); a step that fails while the flag exists pre-empts too
+(exit 10). PC work runs in SpikePc.psm1 over ssh; site values come only from
+the private env file ($SPIKE_ENV). Nothing is ever ended by force."""
 from __future__ import annotations
 
 import argparse
@@ -37,6 +38,11 @@ REPO = "zbynekdrlik/iemmixer"
 BUNDLE_FILES = ("GoldenPc.psm1", "SpikePc.psm1", "asio_spike.exe", "spike-task.ps1")
 TASK = "-TaskPath '\\iemmixer\\' -TaskName 'iemmixer-asio-spike'"
 STATE = Path(os.environ.get("SPIKE_STATE", str(Path.home() / ".local/state/iemmixer/spike-window.json")))
+# Spike exit codes the owner must hear about at once (asio_spike.rs).
+ALARMS = {
+    5: "band activity on the inputs during the spike: the band may be playing; tell the owner now, no further run",
+    8: "a callback did not leave the stream within the stop wait (R6): tell the owner now, no further run",
+}
 EVENT_NOW = Path(os.environ.get("IEMMIXER_EVENT_NOW", str(Path.home() / ".config/iemmixer/EVENT-NOW")))
 
 
@@ -83,20 +89,35 @@ def run_timeout(mode: str, seconds: int, cycles: int) -> int:
     return {"probe": 60, "duplex": seconds + 60, "reopen": 30 * cycles + 60}[mode]
 
 
-def buffer_changed(state: dict) -> bool:
-    return state.get("pref_current") not in (None, state.get("pref_original")) and not state.get("pref_restored")
+def buffer_touched(state: dict) -> bool:
+    """A set-buffer was recorded (before its write, which may have failed
+    half-way): the registry value is unknown, so it is written back and read
+    back whatever the recorded value says."""
+    return state.get("pref_current") is not None
 
 
 def undo_plan(state: dict, spike_running: bool) -> list[str]:
-    """What leaving the window (or "ide event") must do, in order."""
+    """What leaving the window (or "ide event") must do, in order. While the
+    card is free a spike may be starting (the task has not launched it yet),
+    so the graceful stop always runs; it is harmless when none runs."""
     plan: list[str] = []
-    if spike_running:
+    card_away = state.get("card") in ("switching", "free")
+    if spike_running or card_away:
         plan.append("stop-spike")
-    if buffer_changed(state):
+    if buffer_touched(state):
         plan.append("restore-buffer")
-    if state.get("card") in ("switching", "free"):
+    if card_away:
         plan.append("bring-back")
     return plan
+
+
+def buffer_args(state: dict) -> str:
+    """-Original (and the original text of a String value, from preflight)."""
+    args = f"-Original {state['pref_original']}"
+    pre = state.get("preflight") or {}
+    if pre.get("kind") == "String" and pre.get("raw"):
+        args += f" -Raw {ps_quote(str(pre['raw']))}"
+    return args
 
 
 def preflight_problems(r: dict, original: int) -> list[str]:
@@ -159,14 +180,14 @@ def pick_run(runs: list[dict], sha: str) -> int:
 
 def verdict(report: dict) -> dict:
     """Stable = ended as planned with no missed period, no overrun, no
-    position gap and no driver reset."""
+    position gap and no driver reset, overload or buffer-size message."""
     tel = [s.get("telemetry") or {} for s in report.get("segments", [])]
     total = {k: sum(t.get(k, 0) for t in tel) for k in ("callbacks", "late", "missed", "overruns", "position_gaps")}
-    resets = sum((t.get("messages") or {}).get("resets", 0) for t in tel)
+    messages = {k: sum((t.get("messages") or {}).get(k, 0) for t in tel) for k in ("resets", "overloads", "buffer_size_changes")}
     worst = max(((t.get("interval_us") or {}).get("p999", 0.0) for t in tel), default=0.0)
-    stable = report.get("outcome") == "done" and bool(tel) and resets == 0 and all(
+    stable = report.get("outcome") == "done" and bool(tel) and all(v == 0 for v in messages.values()) and all(
         total[k] == 0 for k in ("missed", "overruns", "position_gaps"))
-    return {"outcome": report.get("outcome"), "stable": stable, "resets": resets, "interval_p999_us": worst, **total}
+    return {"outcome": report.get("outcome"), "stable": stable, **messages, "interval_p999_us": worst, **total}
 
 
 def guarded(cmd: list[str], stdin: str, timeout: float, event: str) -> str:
@@ -329,7 +350,7 @@ def cmd_preflight(env, args) -> None:
         f"$p = Get-SpikeBufferPref -Key {ps_quote(env['PC_BUFFER_KEY'])} -Name {ps_quote(env['PC_BUFFER_NAME'])}",
         f"$h = Get-GoldenAsioHolders -Module {ps_quote(env['PC_ASIO_MODULE'])}",
         f"$s = Test-SpikeSums -Bin {pc(env, 'bin')}",
-        "[pscustomobject]@{ pref = $p.value; kind = $p.kind; holders = @($h); "
+        "[pscustomobject]@{ pref = $p.value; kind = $p.kind; raw = $p.raw; holders = @($h); "
         "reaper = @(Get-Process reaper -ErrorAction SilentlyContinue).Count; "
         f"app = @(Get-Process -Name {ps_quote(env['PC_APP_PROCESS'])} -ErrorAction SilentlyContinue).Count; "
         "spike = @(Get-Process -Name asio_spike -ErrorAction SilentlyContinue).Count; "
@@ -418,11 +439,15 @@ def cmd_run(env, args) -> None:
     v = verdict(report)
     state["runs"][-1]["verdict"] = v
     save_state(state)
-    print(json.dumps({"run": rid, "exit": st["status"]["results"][0]["exit"], "verdict": v}))
+    code = st["status"]["results"][0]["exit"]
+    print(json.dumps({"run": rid, "exit": code, "verdict": v}), flush=True)
+    if code in ALARMS:
+        print(f"OWNER ALARM: {ALARMS[code]}", file=sys.stderr, flush=True)
 
 
 def unwind(env: dict[str, str], state: dict, running: bool) -> list:
-    """Stop the spike, restore the buffer (read back), bring REAPER back."""
+    """Stop the spike, restore the buffer (read back), bring REAPER back
+    (which reads the buffer again and refuses while a spike or its task runs)."""
     done = []
     gone = True
     for step in undo_plan(state, running):
@@ -431,7 +456,7 @@ def unwind(env: dict[str, str], state: dict, running: bool) -> list:
             done.append({"stop-spike": gone})
         elif step == "restore-buffer":
             r = ps(env, f"Set-SpikeBufferPref -Key {ps_quote(env['PC_BUFFER_KEY'])} -Name {ps_quote(env['PC_BUFFER_NAME'])} "
-                        f"-Value {state['pref_original']} -Original {state['pref_original']}", event="ignore")
+                        f"-Value {state['pref_original']} {buffer_args(state)}", event="ignore")
             state["pref_current"], state["pref_restored"] = state["pref_original"], True
             save_state(state)
             done.append({"restore-buffer": r})
@@ -445,6 +470,7 @@ def unwind(env: dict[str, str], state: dict, running: bool) -> list:
                 f"-NTrack {int(env['PC_NTRACK'])} -BridgeState {ps_quote(env['PC_METER_BRIDGE'])}",
                 f"-BridgeAction {ps_quote(env['PC_METER_ACTION'])} -Heartbeat {ps_quote(env['PC_METER_HEARTBEAT'])}",
                 f"-AsioModule {ps_quote(env['PC_ASIO_MODULE'])} -AppHttp {ps_quote(env['PC_APP_HTTP'])}",
+                f"-BufferKey {ps_quote(env['PC_BUFFER_KEY'])} -BufferName {ps_quote(env['PC_BUFFER_NAME'])} {buffer_args(state)}",
             ]), timeout=240, event="ignore")
             state["card"] = "reaper"
             save_state(state)
@@ -472,6 +498,10 @@ def cmd_preempt(env, args=None) -> None:
     print(json.dumps({"done": unwind(env, state, running)}))
 
 
+# Steps inside an open window: an error in one while the flag exists pre-empts.
+WINDOW_STEPS = ("setup", "preflight", "to-dev", "set-buffer", "run", "to-event")
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -497,16 +527,26 @@ def main(argv: list[str]) -> int:
                 "to-dev": cmd_to_dev, "set-buffer": cmd_set_buffer, "run": cmd_run, "to-event": cmd_to_event, "preempt": cmd_preempt}
     try:
         env = load_env(Path(os.environ.get("SPIKE_ENV", str(Path.home() / ".config/iemmixer/asio-spike.env"))))
-        try:
-            handlers[args.cmd](env, args)
-        except EventNow:
-            print(json.dumps({"event": "ide event (flag file)", "action": "preempt"}), flush=True)
-            cmd_preempt(env)
-            return 10
-        return 0
     except StepError as e:
         print(f"spike_window: {e}", file=sys.stderr)
         return 1
+    try:
+        handlers[args.cmd](env, args)
+        return 0
+    except EventNow:
+        print(json.dumps({"event": "ide event (flag file)", "action": "preempt"}), flush=True)
+    except StepError as e:
+        print(f"spike_window: {e}", file=sys.stderr, flush=True)
+        # A hung save/quit or an ssh error while "ide event" is on must still bring REAPER back.
+        if args.cmd not in WINDOW_STEPS or not event_now():
+            return 1
+        print(json.dumps({"event": "ide event (flag file) after a failed step", "action": "preempt"}), flush=True)
+    try:
+        cmd_preempt(env)
+    except StepError as e:
+        print(f"spike_window: preempt: {e}", file=sys.stderr)
+        return 1
+    return 10
 
 
 if __name__ == "__main__":
