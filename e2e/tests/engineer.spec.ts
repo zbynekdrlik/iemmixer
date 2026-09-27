@@ -131,4 +131,102 @@ test.describe("Engineer", () => {
     expect((await answer).status()).toBe(202);
     await expect(banner).toContainText("Prepína sa na REAPER");
   });
+
+  test("after Mute All one channel can be unmuted, the rest stay muted (F15)", async ({ page }) => {
+    const auth = await openMixer(page, "engineer", { engineer: true });
+    const mixState = async () => {
+      const resp = await page.request.get("/api/mixer/engineer", {
+        headers: { Authorization: `Bearer ${auth.token}` },
+      });
+      expect(resp.status()).toBe(200);
+      return (await resp.json()).channels as { id: string; muted: boolean }[];
+    };
+    await page.locator(".toolbar-btn-mute-all").click();
+    await expect
+      .poll(async () => (await mixState()).filter((c) => !c.muted).map((c) => c.id), { timeout: 5_000 })
+      .toEqual([]);
+
+    await tab(page, "Mics");
+    const mic1 = strip(page, "mic1");
+    await expect(mic1).toHaveClass(/muted/);
+    await mic1.locator(".mute-btn").click();
+    await expect(mic1).not.toHaveClass(/muted/);
+    await expect.poll(async () => (await mixState()).filter((c) => !c.muted).map((c) => c.id)).toEqual(["mic1"]);
+    const channels = await mixState();
+    expect(channels.length).toBeGreaterThan(1);
+    expect(channels.filter((c) => c.id !== "mic1").every((c) => c.muted)).toBe(true);
+
+    // Back to all muted, as Mute All left it.
+    await mic1.locator(".mute-btn").click();
+    await expect(mic1).toHaveClass(/muted/);
+    await expect.poll(async () => (await mixState()).filter((c) => !c.muted).map((c) => c.id)).toEqual([]);
+  });
+
+  test("an SOS stays on the engineer's page until dismissed (F20)", async ({ page, browser }) => {
+    await openMixer(page, "engineer", { engineer: true });
+    // A tap first: the alert's chime and vibration need a user gesture.
+    await tab(page, "Mics");
+
+    const ctx = await browser.newContext();
+    const member = await ctx.newPage();
+    await openMixer(member, "member7");
+    const sos = member.locator(".alert-btn");
+    await expect(sos).toHaveText("SOS");
+    await sos.click();
+    await expect(sos).toHaveText("SOS Active");
+
+    const toast = page.locator(".alert-toast");
+    await expect(toast).toContainText("Member7 needs help!", { timeout: 5_000 });
+    // No auto-dismiss: still there after 6 s.
+    await page.waitForTimeout(6_000);
+    await expect(toast).toBeVisible();
+    await expect(toast).toContainText("Member7 needs help!");
+    await expect(sos).toHaveText("SOS Active");
+
+    await toast.locator(".alert-toast-dismiss").click();
+    await expect(toast).toHaveCount(0);
+    await expect(sos).toHaveText("SOS", { timeout: 5_000 });
+    await expect(sos).not.toHaveClass(/active/);
+    await ctx.close();
+  });
+
+  test("an SOS vibrates the engineer's phone in one [500, 1000] × 30 pattern (F20)", async ({ page, browser }) => {
+    // Every vibrate call of the engineer's page, as the page made it.
+    await page.addInitScript(() => {
+      const calls: unknown[] = [];
+      (window as unknown as { __vibrateCalls: unknown[] }).__vibrateCalls = calls;
+      Object.defineProperty(navigator, "vibrate", {
+        configurable: true,
+        value: (pattern: unknown) => {
+          calls.push(Array.isArray(pattern) ? [...pattern] : pattern);
+          return true;
+        },
+      });
+    });
+    await openMixer(page, "engineer", { engineer: true });
+    // A tap first: the alert's chime needs a user gesture.
+    await tab(page, "Mics");
+
+    const ctx = await browser.newContext();
+    const member = await ctx.newPage();
+    await openMixer(member, "member7");
+    const sos = member.locator(".alert-btn");
+    await expect(sos).toHaveText("SOS");
+    await sos.click();
+
+    const toast = page.locator(".alert-toast");
+    await expect(toast).toContainText("Member7 needs help!", { timeout: 5_000 });
+    const calls = () => page.evaluate(() => (window as unknown as { __vibrateCalls: unknown[] }).__vibrateCalls);
+    await expect.poll(async () => (await calls()).filter(Array.isArray).length).toBeGreaterThanOrEqual(1);
+    const all = await calls();
+    const pattern = Array.from({ length: 30 }, () => [500, 1000]).flat();
+    expect(all.filter(Array.isArray)[0]).toEqual(pattern);
+    // No single pulses (a 0 that cancels a vibration is allowed).
+    expect(all.filter((c) => !Array.isArray(c) && c !== 0)).toEqual([]);
+
+    await toast.locator(".alert-toast-dismiss").click();
+    await expect(toast).toHaveCount(0);
+    await expect(sos).toHaveText("SOS", { timeout: 5_000 });
+    await ctx.close();
+  });
 });
