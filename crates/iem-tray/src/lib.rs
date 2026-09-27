@@ -17,6 +17,7 @@ pub mod guard;
 pub mod tray;
 
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use iem_core::Config;
 use tauri::{Manager, RunEvent, WindowEvent};
@@ -28,6 +29,12 @@ fn config_path() -> PathBuf {
 
 /// Run the tray until the menu's Exit or the guard's `Quit`.
 pub fn run() {
+    // Alarms raised from here on are announced (and those of a switch in
+    // progress: `iem_guard::view::Seen`).
+    let started = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+
     std::panic::set_hook(Box::new(|info| {
         tracing::error!("PANIC: {}", info);
     }));
@@ -109,7 +116,7 @@ pub fn run() {
             };
             let hwnd = icon.as_ref().and_then(tray::icon_window);
             // Even without an icon the guard's Quit must reach this process.
-            guard::spawn(handle, icon, hwnd);
+            guard::spawn(handle, icon, hwnd, started);
             Ok(())
         })
         .build(tauri::generate_context!())

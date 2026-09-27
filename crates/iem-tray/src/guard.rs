@@ -29,18 +29,19 @@ enum Ended {
 
 /// Starts the subscription thread. `icon` shows the tooltip, `hwnd` (the
 /// icon's window) the alarm notifications; either may be missing, the guard's
-/// `Quit` still ends the tray.
-pub fn spawn(app: AppHandle, icon: Option<TrayIcon>, hwnd: Option<isize>) {
-    let started = thread::Builder::new()
+/// `Quit` still ends the tray. `started`: the tray's start (seconds since the
+/// epoch), from which alarms are announced ([`Seen::new`]).
+pub fn spawn(app: AppHandle, icon: Option<TrayIcon>, hwnd: Option<isize>, started: u64) {
+    let spawned = thread::Builder::new()
         .name("guard-subscription".into())
-        .spawn(move || run(&app, icon.as_ref(), hwnd));
-    if let Err(e) = started {
+        .spawn(move || run(&app, icon.as_ref(), hwnd, started));
+    if let Err(e) = spawned {
         tracing::error!(error = %e, "the guard subscription did not start: no status in the tray");
     }
 }
 
-fn run(app: &AppHandle, icon: Option<&TrayIcon>, hwnd: Option<isize>) {
-    let mut seen = Seen::default();
+fn run(app: &AppHandle, icon: Option<&TrayIcon>, hwnd: Option<isize>, started: u64) {
+    let mut seen = Seen::new(started);
     // Whether the current outage is logged already: one line per outage, not
     // one per attempt. Only a connection that delivered an update ends an
     // outage, so a guard that accepts and closes at once (a second
