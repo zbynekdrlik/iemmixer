@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use crate::{Block, Process, panic_message};
+use crate::{Block, Process, StreamStats, panic_message};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum InputSignal {
@@ -30,17 +30,6 @@ pub struct NullRtConfig {
     pub inputs: usize,
     pub outputs: usize,
     pub signal: InputSignal,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct StreamStats {
-    pub callbacks: u64,
-    /// Callbacks that finished more than one period after their deadline.
-    pub late: u64,
-    pub faulted: bool,
-    pub running: bool,
-    pub max_process_ns: u64,
-    pub fault: Option<String>,
 }
 
 #[derive(Default)]
@@ -80,6 +69,11 @@ impl<P: Process + 'static> NullRt<P> {
         StreamStats {
             callbacks: s.callbacks.load(Ordering::Acquire),
             late: s.late.load(Ordering::Acquire),
+            // No card: no missed periods, overruns, resets or parked stream.
+            missed: 0,
+            overruns: 0,
+            resets: 0,
+            parked: false,
             faulted: s.faulted.load(Ordering::Acquire),
             running: s.running.load(Ordering::Acquire),
             max_process_ns: s.max_ns.load(Ordering::Acquire),
@@ -243,6 +237,10 @@ mod tests {
         let during = rt.stats();
         assert!(during.running);
         assert!(!during.faulted);
+        assert_eq!(
+            (during.missed, during.overruns, during.resets, during.parked),
+            (0, 0, 0, false)
+        );
         let p = rt.stop().unwrap();
         let expected = t0.elapsed().as_secs_f64() * f64::from(SR) / 32.0;
         let calls = p.calls as f64;

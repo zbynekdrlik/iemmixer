@@ -764,6 +764,10 @@ mod tests {
         let st = StreamStats {
             callbacks: 7,
             late: 1,
+            missed: 0,
+            overruns: 0,
+            resets: 0,
+            parked: false,
             faulted: false,
             running: true,
             max_process_ns: 2_500_000,
