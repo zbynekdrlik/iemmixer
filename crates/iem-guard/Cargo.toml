@@ -27,12 +27,20 @@ thiserror = "2.0"
 # The site's [guard] and [card] tables (Task 9).
 toml = "0.9"
 tracing = "0.1"
+# The binaries' logs: the daemon's file (its task has no console), iemmode's
+# stderr (its stdout is the JSON reply). As in iem-engine.
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Plain HTTP on the PC (REAPER's web control, /api/version on port 80,
 # cloudflared's /ready). No TLS here: the HTTPS checks (LAN 443, the public
 # host) run Windows' own curl.exe, schannel with the system's roots (Task 9).
 ureq = { version = "3.4", default-features = false }
 # Bundle install: deflate only (the zips come from Compress-Archive).
 zip = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+# The guard pipe's security descriptor (SDDL as UTF-16), as interprocess
+# takes it; already in the closure through interprocess.
+[target.'cfg(windows)'.dependencies]
+widestring = "1"
 
 [dev-dependencies]
 tempfile = "3"

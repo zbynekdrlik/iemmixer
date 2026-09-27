@@ -39,6 +39,10 @@ exclude_globs = [
   # windows job builds and tests them. Their decisions live in the mutated
   # pc.rs, site.rs, effects/ and handover.rs (parsers included).
   "crates/iem-guard/src/win/**",
+  # The guard's two mains (S6 Task 10): Windows effects (the mutex, WinPc,
+  # the session window, the detached hand-over) around the mutated
+  # iem_guard::{cli, daemon, install, pipe}, which hold every decision.
+  "crates/iem-guard/src/bin/**",
 ]
 
 exclude_re = [
@@ -175,4 +179,14 @@ exclude_re = [
   # helpers') are distinct bits, so `^` gives the same value as `|`.
   "iem-win/src/decide\\.rs.*replace \\| with \\^ in creation_flags$",
   "iem-guard/src/effects/mod\\.rs.*replace \\| with \\^ in helper_flags$",
+  # The guard pipe's Windows listener (private DACL, first instance, remote
+  # refused) is not compiled on Linux; the windows job's pipe tests run it,
+  # and its Unix twin of the same name serves every pipe test here.
+  "iem-guard/src/pipe\\.rs.*replace listen -> ",
+  # Unobservable (S6): the accept error kind only decides whether it is
+  # logged; both paths wait the same poll.
+  "iem-guard/src/pipe\\.rs.*replace != with == in serve",
+  # Equivalent (S6): the retry loop's `elapsed < limit` differs from `<=`
+  # only at the exact nanosecond.
+  "iem-guard/src/cli\\.rs.*replace < with <= in call_starting",
 ]

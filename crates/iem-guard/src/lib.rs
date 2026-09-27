@@ -15,6 +15,14 @@
 //! - [`alarms`]: the kept alarms;
 //! - [`cancel`]: the pre-emption token of every waiting step.
 //!
+//! The daemon and its clients (S6 plan Task 10):
+//!
+//! - [`daemon`]: the switch runner with its error policy and pre-emption,
+//!   the requests, the watch, the start after a reboot, `event --direct`;
+//! - [`pipe`]: the guard pipe's listener, connections and client;
+//! - [`install`]: bundle install, `--verify-only` and the `bin\` copies;
+//! - [`cli`]: the command lines of `iemmode` and `iemmixer-guard`.
+//!
 //! The PC's effects (S6 plan Task 9):
 //!
 //! - [`pc`]: the [`Pc`] trait every switch step goes through, and a fake for
@@ -38,10 +46,14 @@
 pub mod alarms;
 pub mod bundle;
 pub mod cancel;
+pub mod cli;
 pub mod crash;
+pub mod daemon;
 pub mod effects;
 pub mod handover;
+pub mod install;
 pub mod pc;
+pub mod pipe;
 pub mod plan;
 pub mod proto;
 pub mod site;

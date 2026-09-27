@@ -19,6 +19,10 @@ pub const NAME: &str = "iemmixer-guard";
 /// Largest frame body in bytes.
 pub const MAX_FRAME: usize = 64 * 1024;
 
+/// The `detail` of the update that asks a subscribed tray to quit (the
+/// guard's `tray_stop`).
+pub const TRAY_QUIT: &str = "quit";
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Request {
@@ -68,7 +72,8 @@ pub enum Request {
     ForceReopen,
     /// Dev only: stop the idle runner (bootstrap check, S6 plan Task 16).
     RunnerStop,
-    /// Dev only: start `\iemmixer\iemmixer-probe` from the guard (design §5.1).
+    /// Starts `\iemmixer\iemmixer-probe` from the guard (design §5.1); any
+    /// mode, it runs `cmd /c exit 0` only.
     ProbeTask,
     /// Dev only: the teardown half of the event plan without REAPER, then
     /// back into dev (never starts REAPER, so it is not a switch).
@@ -411,5 +416,6 @@ mod tests {
         let io: FrameError = io::Error::other("boom").into();
         assert_eq!(io.to_string(), "guard pipe i/o: boom");
         assert_eq!(NAME, "iemmixer-guard");
+        assert_eq!(TRAY_QUIT, "quit");
     }
 }
