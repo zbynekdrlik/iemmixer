@@ -18,6 +18,7 @@ Gen 2 of the band's in-ear-monitor mixer: a native Rust audio engine replacing R
 - ASIO host, the S1a spike, the PC window driver → `.claude/rules/asio-spike.md`
 - Importer, exporter, band data migration (`iem-migrate`, iem-rpp import/export) → `.claude/rules/migration.md`
 - DSP kernels, EQ/pan/limiter parity, golden tolerances → `.claude/rules/dsp-parity.md`
+- Gen 1 test parity manifest (`docs/parity/gen1-tests.tsv`, its CI check, cutover gate) → `.claude/rules/parity.md`
 - Golden renders on the IEM PC (generator, window driver, analysis) → `.claude/rules/golden-renders.md`
 
 ## Always-apply rules
