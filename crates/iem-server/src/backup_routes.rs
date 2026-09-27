@@ -76,7 +76,9 @@ pub fn capture_now(state: &AppState) -> Result<(String, MixerBackup), String> {
         &site,
         &state.engine.mirror(),
         &state.band,
-        chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+        chrono::Utc::now()
+            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+            .to_string(),
     )?;
     let name = state.backup_store.save(&b).map_err(|e| e.to_string())?;
     Ok((name, b))
