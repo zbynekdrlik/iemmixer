@@ -322,6 +322,44 @@ mod tests {
     }
 
     #[test]
+    fn a_level_from_a_missing_source_is_skipped() {
+        let v = test_view();
+        let backup_state = state_with(|s| {
+            let m = s.mixes.entry(MixId::new("member1")).or_default();
+            m.inputs.insert(InputId::new("gone"), Level::default());
+            m.inputs.insert(
+                InputId::new("mic3"),
+                Level {
+                    gain_db: -3.0,
+                    ..Level::default()
+                },
+            );
+            m.mixes.insert(MixId::new("oldmix"), Level::default());
+            m.groups
+                .insert(GroupId::new("oldgroup"), MixGroup::default());
+        });
+        let b = MixerBackup::new("t".into(), 1, backup_state);
+        let p = preview(&v, &MixState::default(), &|_| None, &b);
+        let skipped: Vec<(RestoreCategory, &str, &str)> = p
+            .skipped
+            .iter()
+            .map(|s| (s.category, s.description.as_str(), s.reason.as_str()))
+            .collect();
+        let why = "not in the running topology";
+        assert_eq!(
+            skipped,
+            [
+                (RestoreCategory::Level, "gone → Member1", why),
+                (RestoreCategory::Level, "oldmix → Member1", why),
+                (RestoreCategory::Group, "oldgroup → Member1", why),
+            ]
+        );
+        // The source the topology has is compared; the others are not.
+        let changed: Vec<&str> = p.changes.iter().map(|c| c.description.as_str()).collect();
+        assert_eq!(changed, ["MEMBER3 mic → Member1"]);
+    }
+
+    #[test]
     fn capture_takes_the_mirror_and_every_members_pins() {
         let v = test_view();
         let dir = tempfile::tempdir().unwrap();

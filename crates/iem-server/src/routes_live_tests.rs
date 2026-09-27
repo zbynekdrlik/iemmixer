@@ -102,6 +102,133 @@ async fn a_backup_is_captured_listed_previewed_and_restored() {
 }
 
 #[tokio::test]
+async fn a_backup_restores_a_muted_input_as_muted() {
+    let h = EngineHarness::start();
+    let (_dir, s, app) = live(&h).await;
+    let eng = token("engineer", true);
+    let (m3, mic1) = (MixId::new("member3"), Source::Input(InputId::new("mic1")));
+    let level_mute = |muted: bool| Cmd::SetLevel {
+        mix: m3.clone(),
+        source: mic1.clone(),
+        gain_db: Some(-6.0),
+        pan: None,
+        muted: Some(muted),
+    };
+    // Muted when the backup is taken: the program input everywhere, and one
+    // level in one mix.
+    for cmd in [set_input("content", 0.0, true), level_mute(true)] {
+        s.engine.request_applied(cmd, None).await.unwrap();
+    }
+    let (status, info) = call(&app, Method::POST, "/api/backups/capture", Some(&eng), None).await;
+    assert_eq!(status, StatusCode::OK, "{info}");
+    let name = info["filename"].as_str().unwrap().to_string();
+
+    // Both unmuted afterwards.
+    for cmd in [set_input("content", 0.0, false), level_mute(false)] {
+        s.engine.request_applied(cmd, None).await.unwrap();
+    }
+    let preview = format!("/api/backups/{name}/preview");
+    let (status, p) = call(&app, Method::POST, &preview, Some(&eng), None).await;
+    assert_eq!(status, StatusCode::OK, "{p}");
+    let changes: Vec<(&str, &str, &str)> = p["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| {
+            (
+                c["description"].as_str().unwrap(),
+                c["current_value"].as_str().unwrap(),
+                c["backup_value"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        changes,
+        [
+            ("CONTENT: mute", "off", "on"),
+            ("MEMBER1 mic → Member3", "-6.0 dB C", "-6.0 dB C muted"),
+        ]
+    );
+
+    let restore = format!("/api/backups/{name}/restore");
+    let (status, r) = call(&app, Method::POST, &restore, Some(&eng), None).await;
+    assert_eq!(
+        (status, r["restored_count"].as_u64()),
+        (StatusCode::OK, Some(2))
+    );
+    let m = s.engine.mirror();
+    assert!(m.input(&InputId::new("content")).muted, "muted again");
+    let l = m.level(&m3, &mic1);
+    assert_eq!((l.gain_db, l.muted), (-6.0, true));
+}
+
+/// Member `a` restores a history entry: `a`'s mix goes back to it, while
+/// `b`'s mix — and every other mix and input — stays exactly as it was.
+async fn restore_is_isolated(a: &str, b: &str) {
+    let h = EngineHarness::start();
+    let (_d, s, app) = live(&h).await;
+    let ta = token(a, false);
+    let keys = Source::Input(InputId::new("keys"));
+    for (mix, gain) in [(a, -6.0), (b, -12.0)] {
+        s.engine
+            .request_applied(set_level(mix, "keys", gain), None)
+            .await
+            .unwrap();
+        s.engine
+            .request_applied(set_level(mix, "mic2", gain - 1.0), None)
+            .await
+            .unwrap();
+    }
+    let history = format!("/api/snapshots/{a}");
+    let label = Some(r#"{"label":"isolation"}"#);
+    let (status, created) = call(&app, Method::POST, &history, Some(&ta), label).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let ts = created["timestamp"].as_i64().unwrap();
+
+    // Both mixes change after the entry was taken.
+    for (mix, gain) in [(a, -20.0), (b, -3.0)] {
+        s.engine
+            .request_applied(set_level(mix, "keys", gain), None)
+            .await
+            .unwrap();
+    }
+    let before = s.engine.mirror().state.clone();
+    let restore = format!("/api/snapshots/{a}/{ts}/restore");
+    let (status, r) = call(&app, Method::POST, &restore, Some(&ta), None).await;
+    assert_eq!(status, StatusCode::OK, "{r}");
+    let after = s.engine.mirror().state.clone();
+
+    let a_keys = s.engine.mirror().level(&MixId::new(a), &keys);
+    assert_eq!(a_keys.gain_db, -6.0, "{a}'s mix is back at its entry");
+    assert_eq!(
+        after.inputs, before.inputs,
+        "{a} restored: inputs untouched"
+    );
+    assert_eq!(after.mixes.len(), before.mixes.len());
+    for (id, mix) in &before.mixes {
+        if id.0 != a {
+            assert_eq!(
+                after.mixes.get(id),
+                Some(mix),
+                "{a} restored: {id} untouched"
+            );
+        }
+    }
+    assert_eq!(
+        s.engine.mirror().level(&MixId::new(b), &keys).gain_db,
+        -3.0,
+        "{b} keeps its own later change"
+    );
+}
+
+#[tokio::test]
+async fn a_restore_leaves_other_mixes_untouched() {
+    // member1 hears member2's mix (the Mixes tab): both directions.
+    restore_is_isolated("member1", "member2").await;
+    restore_is_isolated("member2", "member1").await;
+}
+
+#[tokio::test]
 async fn a_preset_is_saved_listed_loaded_and_deleted() {
     let h = EngineHarness::start();
     let (_d, s, app) = live(&h).await;
