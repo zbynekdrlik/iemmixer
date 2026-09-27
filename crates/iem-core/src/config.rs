@@ -358,6 +358,15 @@ impl Config {
             .map(|domain| format!("https://{domain}"))
             .or_else(|| self.lan_url.clone())
     }
+
+    /// URL the tray's "Open Mixer" opens on the PC: the LAN URL, else the
+    /// local server on the site's port. The tray runs no server of its own
+    /// (F27): `iem-server` serves it.
+    pub fn mixer_url(&self) -> String {
+        self.lan_url
+            .clone()
+            .unwrap_or_else(|| format!("http://localhost:{}", self.port))
+    }
 }
 
 /// Validate that a member_id is safe for use in filesystem paths.
@@ -695,6 +704,24 @@ mod tests {
         };
         assert_eq!(lan_only.share_url().as_deref(), Some("http://10.0.0.10"));
         assert_eq!(Config::default().share_url(), None);
+    }
+
+    #[test]
+    fn test_mixer_url_is_the_lan_url_else_the_local_server() {
+        let both = Config {
+            lan_url: Some("http://10.0.0.10".to_string()),
+            https_domain: Some("mixer.example.org".to_string()),
+            port: 8080,
+            ..Config::default()
+        };
+        assert_eq!(both.mixer_url(), "http://10.0.0.10");
+        let none = Config {
+            https_domain: Some("mixer.example.org".to_string()),
+            port: 8080,
+            ..Config::default()
+        };
+        assert_eq!(none.mixer_url(), "http://localhost:8080");
+        assert_eq!(Config::default().mixer_url(), "http://localhost:80");
     }
 
     #[test]
