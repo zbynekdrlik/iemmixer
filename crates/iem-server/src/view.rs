@@ -1309,6 +1309,54 @@ mod tests {
     }
 
     #[test]
+    fn a_gain_change_enables_a_disabled_band() {
+        // ReaEQ's behaviour, kept from gen1 (P9: the band notices nothing):
+        // moving the gain of a disabled band switches the band on.
+        let eq = Eq::default();
+        assert!(!eq.bands[1].enabled);
+        let moved = apply_band(&eq, 1, "gain_db", 3.0).unwrap();
+        assert_eq!(
+            (moved.bands[1].gain_db, moved.bands[1].enabled),
+            (3.0, true)
+        );
+        // Only the gain does: frequency and width leave the switch alone.
+        assert!(!apply_band(&eq, 1, "freq_hz", 250.0).unwrap().bands[1].enabled);
+        assert!(!apply_band(&eq, 1, "bw_oct", 0.5).unwrap().bands[1].enabled);
+        // An enabled band stays on; the other bands are untouched.
+        let again = apply_band(&moved, 1, "gain_db", -2.0).unwrap();
+        assert_eq!(
+            (again.bands[1].gain_db, again.bands[1].enabled),
+            (-2.0, true)
+        );
+        assert_eq!(again.bands[..1], eq.bands[..1]);
+        assert_eq!(again.bands[2..], eq.bands[2..]);
+        // The page command sends the band switched on to the engine.
+        let v = test_view();
+        let m = Mirror::default();
+        let p1 = page(&v, "member1");
+        let cmds = command(
+            &v,
+            &m,
+            &p1,
+            &member("member1"),
+            &ClientMsg::SetEqBand {
+                target: "member1".into(),
+                band: 1,
+                param: "gain_db".into(),
+                value: 3.0,
+            },
+        )
+        .unwrap();
+        match cmds.as_slice() {
+            [Cmd::SetEq { target, eq }] => {
+                assert_eq!(target, &EqTarget::Mix(mix("member1")));
+                assert_eq!((eq.bands[1].gain_db, eq.bands[1].enabled), (3.0, true));
+            }
+            other => panic!("one SetEq, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn eq_and_limiter_messages_read_the_mirror() {
         let v = test_view();
         let m = mirror_with(|s, _| {
