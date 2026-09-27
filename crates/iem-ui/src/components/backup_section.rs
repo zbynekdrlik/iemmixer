@@ -210,6 +210,22 @@ pub fn BackupSection() -> impl IntoView {
                                     </div>
                                 }
                             })}
+                            // Added after the backup was taken: the restore leaves it as it is (FG-1).
+                            {(!p.not_in_backup.is_empty()).then(|| {
+                                let names: Vec<String> = p.not_in_backup.iter().map(|s| s.description.clone()).collect();
+                                view! {
+                                    <div class="preview-panel preview-kept" data-testid="backup-kept">
+                                        <div style="color: #8ab4f8; font-weight: bold; margin-top: 6px; margin-bottom: 2px;">
+                                            "Not in this backup (stays as it is)"
+                                        </div>
+                                        <ul style="margin: 0; padding-left: 1.4em; color: #9fb8d8; font-size: 0.85em;">
+                                            {names.into_iter().map(|name| view! {
+                                                <li>{name}</li>
+                                            }).collect_view()}
+                                        </ul>
+                                    </div>
+                                }
+                            })}
                         </div>
                         <button
                             class="settings-action-btn"

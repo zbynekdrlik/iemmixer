@@ -131,11 +131,13 @@ async fn restore_backup(
     engineer(&state, &headers).await?;
     let b = load(&state, &filename)?;
     let preview = preview_of(&state, &b)?;
+    // What the backup lacks (added to the topology after it) stays as it is.
+    let import = crate::backup::keep_running(&b.state, &state.engine.mirror().state);
     state
         .engine
         .request_applied(
             Cmd::ImportState {
-                state: b.state.clone(),
+                state: import,
                 baseline: false,
             },
             None,

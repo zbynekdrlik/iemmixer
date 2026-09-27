@@ -1,12 +1,12 @@
 //! Backups v2 (F19) and restore with preview (F31; S5 design note §6): a
 //! backup is the engine's state from the mirror plus every member's pins and
 //! hides; the preview is a diff of the running state and the backup in the
-//! UI's names; the restore is one `ImportState` (the engine applies it
-//! atomically with its ramps) plus the pins and hides.
+//! UI's names; the restore is one `ImportState` of the backup completed from
+//! the running state (FG-1), applied atomically, plus the pins and hides.
 
 use iem_core::backup::{MixerBackup, RestoreCategory, RestoreChange, RestorePreview, SkippedEntry};
 use iem_core::band::CustomizationFile;
-use iem_engine_proto::{Eq, InputState, Level, MixState, Source};
+use iem_engine_proto::{Eq, InputId, InputState, Level, MixId, MixState, Source};
 
 use crate::band_store::BandStore;
 use crate::engine::mirror::Mirror;
@@ -120,6 +120,90 @@ impl Diff {
             reason: "not in the running topology".into(),
         });
     }
+
+    fn keep(&mut self, cat: RestoreCategory, what: String) {
+        self.p.not_in_backup.push(SkippedEntry {
+            category: cat,
+            description: what,
+            reason: "not in the backup; stays as it is".into(),
+        });
+    }
+}
+
+fn input_name(view: &SiteView, id: &InputId) -> String {
+    view.input(&id.0)
+        .map_or_else(|| id.0.clone(), |i| i.name.clone())
+}
+
+/// Lists what the running state has and the backup lacks (the topology grew
+/// after the capture, FG-1): one line for each input or mix the backup does
+/// not know at all — its levels in the mixes go with it — and one for each
+/// other missing level or group strip. [`keep_running`] keeps them all.
+fn not_in_backup(d: &mut Diff, view: &SiteView, current: &MixState, backup: &MixState) {
+    let unknown_input = |i: &InputId| !backup.inputs.contains_key(i);
+    let unknown_mix = |m: &MixId| !backup.mixes.contains_key(m);
+    for id in current.inputs.keys().filter(|i| unknown_input(*i)) {
+        d.keep(RestoreCategory::Input, input_name(view, id));
+    }
+    for (mix, cur) in &current.mixes {
+        let name = view.mix_name(mix);
+        let Some(old) = backup.mixes.get(mix) else {
+            d.keep(RestoreCategory::Output, name);
+            continue;
+        };
+        for id in cur
+            .inputs
+            .keys()
+            .filter(|i| !old.inputs.contains_key(*i) && !unknown_input(*i))
+        {
+            d.keep(
+                RestoreCategory::Level,
+                format!("{} → {name}", input_name(view, id)),
+            );
+        }
+        for m in cur
+            .mixes
+            .keys()
+            .filter(|m| !old.mixes.contains_key(*m) && !unknown_mix(*m))
+        {
+            d.keep(
+                RestoreCategory::Level,
+                format!("{} → {name}", view.mix_name(m)),
+            );
+        }
+        for g in cur.groups.keys().filter(|g| !old.groups.contains_key(*g)) {
+            let group = if view.group.as_ref() == Some(g) {
+                GROUP_NAME.to_string()
+            } else {
+                g.0.clone()
+            };
+            d.keep(RestoreCategory::Group, format!("{group} → {name}"));
+        }
+    }
+}
+
+/// The state a restore imports: `backup`'s, with every input, mix, level and
+/// group strip it lacks taken from the running `current` state, so the
+/// restore changes only what the backup holds (FG-1). An import is the whole
+/// state: the engine gives any id missing from it its default (a level off).
+pub fn keep_running(backup: &MixState, current: &MixState) -> MixState {
+    let mut s = backup.clone();
+    for (id, input) in &current.inputs {
+        s.inputs.entry(id.clone()).or_insert(*input);
+    }
+    for (id, cur) in &current.mixes {
+        let mix = s.mixes.entry(id.clone()).or_insert_with(|| cur.clone());
+        for (i, l) in &cur.inputs {
+            mix.inputs.entry(i.clone()).or_insert(*l);
+        }
+        for (m, l) in &cur.mixes {
+            mix.mixes.entry(m.clone()).or_insert(*l);
+        }
+        for (g, strip) in &cur.groups {
+            mix.groups.entry(g.clone()).or_insert(*strip);
+        }
+    }
+    s
 }
 
 fn input_diff(d: &mut Diff, name: &str, cur: &InputState, new: &InputState) {
@@ -252,6 +336,7 @@ pub fn preview(
             });
         }
     }
+    not_in_backup(&mut d, view, current, &backup.state);
     d.p
 }
 
@@ -429,6 +514,64 @@ mod tests {
                 .not_in_backup
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn a_restore_state_keeps_the_running_values_the_backup_lacks() {
+        let lvl = |gain_db: f64| Level {
+            gain_db,
+            ..Level::default()
+        };
+        let trim = |trim_db: f64| InputState {
+            trim_db,
+            ..InputState::default()
+        };
+        let (keys, mic1) = (InputId::new("keys"), InputId::new("mic1"));
+        let (m1, m2, m3) = (
+            MixId::new("member1"),
+            MixId::new("member2"),
+            MixId::new("member3"),
+        );
+        let stems = GroupId::new("stems");
+        let current = state_with(|s| {
+            s.inputs.insert(keys.clone(), trim(3.0));
+            s.inputs.insert(mic1.clone(), trim(1.0));
+            let mix = s.mixes.entry(m1.clone()).or_default();
+            mix.inputs.insert(keys.clone(), lvl(-6.0));
+            mix.inputs.insert(mic1.clone(), lvl(-9.0));
+            mix.mixes.insert(m2.clone(), lvl(-12.0));
+            mix.groups.insert(
+                stems.clone(),
+                MixGroup {
+                    gain_db: -2.0,
+                    ..MixGroup::default()
+                },
+            );
+            mix.out.volume_db = -5.0;
+            s.mixes.entry(m3.clone()).or_default().out.volume_db = -4.0;
+        });
+        let backup = state_with(|s| {
+            s.inputs.insert(mic1.clone(), trim(5.0));
+            let mix = s.mixes.entry(m1.clone()).or_default();
+            mix.inputs.insert(mic1.clone(), lvl(-1.0));
+            mix.out.volume_db = -7.0;
+        });
+        // The backup's values where it has them, the running ones elsewhere.
+        let want = state_with(|s| {
+            s.inputs.insert(keys.clone(), trim(3.0));
+            s.inputs.insert(mic1.clone(), trim(5.0));
+            let mix = s.mixes.entry(m1.clone()).or_default();
+            mix.inputs.insert(keys.clone(), lvl(-6.0));
+            mix.inputs.insert(mic1.clone(), lvl(-1.0));
+            mix.mixes.insert(m2.clone(), lvl(-12.0));
+            mix.groups
+                .insert(stems.clone(), current.mixes[&m1].groups[&stems]);
+            mix.out.volume_db = -7.0;
+            s.mixes.insert(m3.clone(), current.mixes[&m3].clone());
+        });
+        assert_eq!(keep_running(&backup, &current), want);
+        assert_eq!(keep_running(&backup, &MixState::default()), backup);
+        assert_eq!(keep_running(&current, &backup).inputs[&keys], trim(3.0));
     }
 
     #[test]
