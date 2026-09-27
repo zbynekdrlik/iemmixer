@@ -1537,6 +1537,7 @@ pub trait Pc {
   - **Tasks (`win/tasks.rs`):** `schtasks.exe /Run /TN <name>` (argv, no shell); `/Query /TN <name> /FO CSV /V` for status (a portable parser). When `[guard] start_direct = true` (the probe task was refused at bootstrap, design §5.1), `reaper_start`/`app_start` use `spawn_detached` of the configured exe with its working directory instead.
   - **Processes (`win/procs.rs`):**
     - `spawn_detached` for engine/server/tray/runner, with `CREATE_NEW_PROCESS_GROUP` for server and runner;
+    - `tray_start` (hand-off from Task 11) sets `IEMMIXER_CONFIG` to the server's site file and starts the tray in the server's working directory: the tray reads `port` and `https_domain`/`lan_url` from it. Without it Open Mixer falls back to port 80 and Copy URL is disabled;
     - stops through `iem_win::console::ctrl_break(pid)` (attach to the child's console, design §5.5);
     - pid files and adoption (pid + image path + start time must match);
     - the supervisor pipe client (sync `interprocess`, hello `role: supervisor`), which also collects `Meters` for `engine_stage_peaks`.
@@ -1554,6 +1555,7 @@ pub trait Pc {
   - Load state. Apply `state::reset_to_event(..)` with `process::boot_time()` and `procs()` first (design §5.2: after a reboot the PC is in `event`); then adopt children; if `switching` is still set, re-plan to `Event` unless the recorded target was `Event` (then resume it).
   - Open the guard pipe: the same hardening as the engine (Task 6), name `iemmixer-guard`. CLI mutations (`install`, `activate`, switches) run only through this pipe; `iemmixer-guard install <zip>` without a running guard takes the same global mutex.
   - A `SessionEndWindow` (hidden top-level): on session end, stop respawning, wait ≤ 10 s for the engine's own exit, and stop the server and tray.
+  - **Subscriptions (the tray; hand-off from Task 11):** a `Request::Subscribe` connection gets a `State` frame (`proto::Update::State`) at once and after every change of mode, switch or alarms. `TrayStop` delivers `Update::Quit` also to a tray that (re)subscribes during the stop wait: the tray may be in its 2 s retry sleep when `TrayStop` runs. `switching` (with `started`) stays set until `g.finish`, so the tray started at step 8 announces the entry's own alarms (`view::Seen`).
   - Every 1 s: `procs()` only (the process list — P10):
     - watch the children and apply `crash::after_exit`;
     - watch for `reaper.exe` or the app appearing in `dev`/`live` (alarm once per appearance);
@@ -1765,6 +1767,9 @@ fn a_failed_pref_check_follows_on_pref_fail() {
 - [ ] **Step 1:** remove the embedded server (runtime, `start_server`, config dir); the tray reads `lan_url`/`https_domain` from the site config for Open Mixer / Copy URL.
 - [ ] **Step 2:** a background thread subscribes to the guard (`Request::Subscribe`): mode and alarms update the tooltip ("iemmixer — dev", "… 2 alarmy") and raise a notification for a new alarm. `Quit` from the guard → `app.exit(0)`. The menu Exit exits the tray only (F27).
 - [ ] **Step 3:** the `windows` job builds and lints it (as today); the portable tooltip-text function is tested. Commit: `feat(tray): tray without a server — status and alarms from the guard (F27)`.
+- Decided in review (2026-09-27):
+  - Open Mixer opens the local server, `http://localhost:<port>` (`Config::mixer_url`), as the predecessor and the old tray did, never the LAN URL. Loopback always reaches the server (the HTTPS redirect applies to the public host only), and Copy URL runs `navigator.clipboard` in the same window, which exists only in a secure context (a plain-http LAN address has none). Copy URL copies `share_url()` (the public host, else the LAN URL).
+  - The tray's first reply announces the unacknowledged alarms raised since the tray started, or since the start of the switch in progress when that is earlier (the guard starts the tray at dev-entry step 8, after the entry's own alarms). Older unacknowledged alarms are only counted in the tooltip; they also reach the owner's phone through `iem-server notify`. A guard that lost its state (the newest alarm seen is no longer in its list) has only new alarms.
 
 ---
 
@@ -1794,7 +1799,9 @@ fn a_failed_pref_check_follows_on_pref_fail() {
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Build (release)
-        run: cargo build --locked --release -p iem-engine -p iem-server -p iem-guard -p iem-tray -p iem-migrate
+        # iem-server.exe needs `standalone`; the tray no longer pulls in tls
+        # and audio (Task 11, F27).
+        run: cargo build --locked --release -p iem-engine -p iem-server -p iem-guard -p iem-tray -p iem-migrate --features iem-server/standalone,iem-server/tls,iem-server/audio
       - name: Zip with manifest and sums
         shell: pwsh
         run: |
