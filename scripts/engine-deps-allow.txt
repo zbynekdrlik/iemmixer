@@ -21,6 +21,7 @@ iem-audio-io
 iem-dsp
 iem-engine-proto
 iem-limiter-mga
+iem-win
 indexmap
 interprocess
 itoa

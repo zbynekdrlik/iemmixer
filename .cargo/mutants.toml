@@ -14,9 +14,10 @@ exclude_globs = [
   "crates/iem-server/src/pepper/dpapi.rs",
   # Tauri tray shell: built and linted on Windows only.
   "crates/iem-tray/**",
-  # Windows-only ASIO host (unsafe FFI, S1a): not compiled on the Linux
-  # runners; the PC window exercises it. Its decisions live in the mutated
-  # format.rs and telemetry.rs.
+  # Windows-only ASIO host and backend (unsafe FFI, S1a/S6): not compiled on
+  # the Linux runners; the windows jobs build and lint it, HIL exercises it on
+  # the PC. Its decisions live in the mutated format.rs, telemetry.rs,
+  # channels.rs, period.rs, reset.rs, owner.rs and iem-win's prefwin.rs.
   "crates/iem-audio-io/src/asio.rs",
   # The S1a spike program (a Windows-only main; its parser is tested).
   "crates/iem-audio-io/examples/**",

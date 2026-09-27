@@ -157,6 +157,7 @@ name = "iem-audio-io"
 version = "2.0.0-dev.9"
 dependencies = [
  "azo",
+ "iem-win",
  "windows-sys",
 ]
 
@@ -204,6 +205,14 @@ dependencies = [
 [[package]]
 name = "iem-limiter-mga"
 version = "2.0.0-dev.9"
+
+[[package]]
+name = "iem-win"
+version = "2.0.0-dev.9"
+dependencies = [
+ "windows-registry",
+ "windows-sys",
+]
 
 [[package]]
 name = "indexmap"

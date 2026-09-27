@@ -5,15 +5,24 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "iemmixer audio backends: the Process trait, deterministic Offline, paced NullRt and the Windows ASIO host (S1a spike; S6 backend)"
+description = "iemmixer audio backends: the Process trait, deterministic Offline, paced NullRt and the Windows ASIO host (S1a spike) and backend (S6)"
 
 [dependencies]
 
 [target.'cfg(windows)'.dependencies]
 # ASIO host (S1a design note §3). Pinned exactly; fallbacks in program spec §2.2.
 azo = "=0.2.1"
-# The driver thread's message pump (PeekMessageW / DispatchMessageW).
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+# The S6 backend's Windows glue: the preference window (prefwin + the HKCU
+# store), the session-end window, the driver-module holders (I3), VirtualLock.
+iem-win = { path = "../iem-win" }
+# The owner thread's message pump (PeekMessageW / DispatchMessageW) and the
+# SEH filter (SetUnhandledExceptionFilter needs Win32_System_Kernel).
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_System_Diagnostics_Debug",
+  "Win32_System_Kernel",
+  "Win32_UI_WindowsAndMessaging",
+] }
 
 [dev-dependencies]
 # tests/rt.rs: the RT panic record neither allocates nor frees (that binary
