@@ -11,8 +11,9 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use crate::handover::FLOOR_DB;
-use crate::pc::Status;
+use crate::pc::{EngineSeen, Status};
 use crate::plan::Health;
+use crate::proto::EngineStatus;
 use crate::site::FRAMES;
 
 /// The engine protocol the guard speaks.
@@ -36,7 +37,7 @@ pub fn hello() -> Value {
     json!({"type": "hello", "proto": PROTO, "role": "supervisor", "client": "iemmixer-guard"})
 }
 
-/// A request without arguments (`arm`, `shutdown`, `force_reopen`).
+/// A request without arguments (`arm`, `shutdown`, `inject_fault`).
 pub fn request(id: u64, op: &str) -> Value {
     request_cmd(id, json!({"op": op}))
 }
@@ -156,6 +157,7 @@ pub fn parse(body: &[u8]) -> Result<Msg, String> {
                 frames: u32::try_from(number(&v, "frames")).unwrap_or(0),
                 callbacks: number(&v, "callbacks"),
                 missed: number(&v, "missed"),
+                resets: number(&v, "resets"),
                 faulted: flag(&v, "faulted"),
                 parked: flag(&v, "parked"),
             }),
@@ -183,6 +185,32 @@ pub fn parse(body: &[u8]) -> Result<Msg, String> {
             _ => Msg::Other,
         },
     )
+}
+
+/// The commit of `Hello.engine_build` (`<version>+<commit>`); a build
+/// without a `+` is its own text.
+pub fn commit_of(build: &str) -> &str {
+    build.rsplit_once('+').map_or(build, |(_, commit)| commit)
+}
+
+/// The guard's `Reply.engine` (design §7, what HIL v1 reads through
+/// `iemmode status`): the engine as the supervisor connection saw it, its
+/// build as the bare commit (the bundle's SHA), with the engine starts of
+/// this guard and the exit code of the engine before the running one.
+pub fn engine_status(seen: &EngineSeen, spawns: u64, last_exit: Option<i32>) -> EngineStatus {
+    let s = &seen.status;
+    EngineStatus {
+        build: commit_of(&s.build).to_owned(),
+        frames: s.frames,
+        callbacks: s.callbacks,
+        missed: s.missed,
+        resets: s.resets,
+        parked: s.parked,
+        faulted: s.faulted,
+        pipe_private: seen.pipe_private,
+        spawns,
+        last_exit,
+    }
 }
 
 /// `Hello.engine_build` (`<version>+<commit>`) names the bundle's commit.
@@ -403,7 +431,8 @@ pub fn check_site_result(code: Option<i32>, stdout: &str, stderr: &str) -> Resul
 }
 
 /// `iem-engine interlock` (design §4): exit 0 quiet, 5 activity; anything
-/// else is a failed check. Its report is the last JSON line it printed.
+/// else is a failed check (6: its stop file ended it). Its report is the
+/// last JSON line it printed.
 pub fn interlock_result(code: Option<i32>, stdout: &str) -> Result<(bool, String), String> {
     let report = stdout
         .lines()
@@ -416,6 +445,9 @@ pub fn interlock_result(code: Option<i32>, stdout: &str) -> Result<(bool, String
         Some(0) => Ok((true, report)),
         Some(5) => Ok((false, report)),
         Some(3) => Err(format!("the card refused the interlock: {report}")),
+        Some(6) => Err(format!(
+            "the interlock was stopped by its stop file: {report}"
+        )),
         other => Err(format!("the interlock ended with {other:?}: {report}")),
     }
 }
@@ -430,6 +462,7 @@ mod tests {
             frames,
             callbacks,
             missed,
+            resets: 0,
             faulted: false,
             parked: false,
         }
@@ -606,13 +639,14 @@ mod tests {
         );
         assert_eq!(
             p(
-                json!({"type": "status", "callbacks": 3000, "frames": 32, "missed": 2, "faulted": true, "parked": true, "late": 1})
+                json!({"type": "status", "callbacks": 3000, "frames": 32, "missed": 2, "resets": 1, "faulted": true, "parked": true, "late": 1})
             ),
             Msg::Status(Status {
                 build: String::new(),
                 frames: 32,
                 callbacks: 3000,
                 missed: 2,
+                resets: 1,
                 faulted: true,
                 parked: true,
             })
@@ -672,6 +706,53 @@ mod tests {
             parse(b"{not json")
                 .unwrap_err()
                 .starts_with("bad engine message: ")
+        );
+    }
+
+    #[test]
+    fn the_reply_names_the_engine_by_its_commit() {
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        assert_eq!(commit_of(&format!("2.0.0-dev.9+{sha}")), sha);
+        assert_eq!(commit_of("2.0.0+a+b"), "b");
+        assert_eq!(commit_of("local"), "local");
+        assert_eq!(commit_of(""), "");
+        let seen = EngineSeen {
+            status: Status {
+                build: format!("2.0.0-dev.9+{sha}"),
+                frames: 32,
+                callbacks: 360_000,
+                missed: 1,
+                resets: 2,
+                faulted: true,
+                parked: true,
+            },
+            pipe_private: true,
+        };
+        assert_eq!(
+            engine_status(&seen, 3, Some(70)),
+            EngineStatus {
+                build: sha.to_owned(),
+                frames: 32,
+                callbacks: 360_000,
+                missed: 1,
+                resets: 2,
+                parked: true,
+                faulted: true,
+                pipe_private: true,
+                spawns: 3,
+                last_exit: Some(70),
+            }
+        );
+        let quiet = EngineSeen {
+            pipe_private: false,
+            ..EngineSeen::default()
+        };
+        assert_eq!(
+            engine_status(&quiet, 0, None),
+            EngineStatus {
+                build: String::new(),
+                ..EngineStatus::default()
+            }
         );
     }
 
@@ -881,6 +962,10 @@ mod tests {
         assert_eq!(
             interlock_result(Some(3), ""),
             Err("the card refused the interlock: ".into())
+        );
+        assert_eq!(
+            interlock_result(Some(6), "{\"stopped\": true}"),
+            Err("the interlock was stopped by its stop file: {\"stopped\": true}".into())
         );
         assert_eq!(
             interlock_result(Some(1), "{}"),

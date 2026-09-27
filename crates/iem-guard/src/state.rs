@@ -69,6 +69,10 @@ pub struct GuardState {
     pub bundles: BTreeMap<String, Record>,
     pub pins: Pins,
     pub interlock_retry: Option<InterlockRetry>,
+    /// The HIL job that began and has not ended (its run id). Kept here so
+    /// a guard that hands over to a new exe inside the job (HIL activates
+    /// the bundle it tests) or restarts still serves the job (design §7).
+    pub job: Option<u64>,
 }
 
 /// Whether a starting guard must forget its saved mode: after a reboot, or
@@ -78,12 +82,13 @@ pub fn reset_to_event(st: &GuardState, boot_time: u64, reaper_or_app: bool, engi
 }
 
 impl GuardState {
-    /// The mode after [`reset_to_event`]: `event`, no switch in progress and
-    /// no pending interlock retry.
+    /// The mode after [`reset_to_event`]: `event`, no switch in progress, no
+    /// pending interlock retry and no HIL job.
     pub fn reset(&mut self) {
         self.mode = Mode::Event;
         self.switching = None;
         self.interlock_retry = None;
+        self.job = None;
     }
 
     /// Loads the state. A missing file gives the defaults (mode `event`); an
@@ -179,6 +184,7 @@ mod tests {
                 refusals: 2,
                 next_at: 1_790_000_900,
             }),
+            job: Some(4242),
         }
     }
 
@@ -281,6 +287,7 @@ mod tests {
         assert_eq!(st.mode, Mode::Event);
         assert_eq!(st.switching, None);
         assert_eq!(st.interlock_retry, None);
+        assert_eq!(st.job, None, "no HIL job after a reboot");
         // Everything else stays: bundles, pins and children are facts.
         let before = sample();
         assert_eq!(st.bundles, before.bundles);

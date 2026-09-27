@@ -151,6 +151,7 @@ mod tests {
             switching: None,
             alarms: alarms.all().to_vec(),
             detail: String::new(),
+            engine: None,
         }
     }
 

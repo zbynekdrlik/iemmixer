@@ -22,7 +22,7 @@ use tracing::{info, warn};
 use super::{WinPc, procs};
 use crate::cancel::Cancel;
 use crate::effects::engine::{self as proto, Msg, Quiet, Ready, ReadyWindow, Shutdown, StagePeaks};
-use crate::pc::{Kid, R, Status, StepError};
+use crate::pc::{EngineSeen, Kid, R, Status, StepError};
 use crate::plan::Health;
 use crate::site::ENGINE_EXE;
 use crate::state;
@@ -42,6 +42,8 @@ const CHECK_SITE: Duration = Duration::from_secs(60);
 const RELEASE: Duration = Duration::from_secs(10);
 const GONE: Duration = Duration::from_secs(5);
 const INBOX_POLL: Duration = Duration::from_millis(50);
+/// The interlock's stop file under the guard directory (`--stop-file`).
+const INTERLOCK_STOP: &str = "interlock.stop";
 const MAX_REPLIES: usize = 64;
 
 /// What the reader thread kept.
@@ -304,34 +306,48 @@ fn supervisor<'a>(pc: &'a mut WinPc, limit: Duration, c: &Cancel) -> R<&'a mut S
 }
 
 /// The engine from the bundle, with `pc.toml`'s arguments, `--pipe` from
-/// `engine_pipe` (the supervisor's and the server's pipe) and `--hold` on
-/// request (`Settings::engine_argv`).
-pub(super) fn start(pc: &mut WinPc, hold: bool) -> R<u32> {
+/// `engine_pipe` (the supervisor's and the server's pipe), `--hold` on
+/// request and the HIL flags inside a HIL job (`Settings::engine_argv`).
+pub(super) fn start(pc: &mut WinPc, hold: bool, hil: bool) -> R<u32> {
     if !procs::list(pc).engine.is_empty() {
         return Err(StepError::failed("an engine already runs"));
     }
     let dir = pc.bundle_dir()?;
-    let args = pc.s.engine_argv(&dir, hold).map_err(StepError::Failed)?;
+    let args =
+        pc.s.engine_argv(&dir, hold, hil)
+            .map_err(StepError::Failed)?;
     let mut cmd = Command::new(dir.join(ENGINE_EXE));
     cmd.args(args).current_dir(dir);
     pc.sup = None;
+    pc.dacl = None;
     procs::start_kid(pc, Kid::Engine, &mut cmd, false)
 }
 
-/// `iem-engine interlock` (design §4): a wait, so "ide event" asks it to
-/// stop (Ctrl-Break) and returns at once. It opens the card, so it runs
-/// outside the guard's job like the engine.
+/// `iem-engine interlock` (design §4): a wait, so "ide event" creates its
+/// stop file, which it sees within 0.1 s: it releases the card and exits 6
+/// (never Ctrl-Break: its default handler would end it with the card open).
+/// It opens the card, so it runs outside the guard's job like the engine.
 pub(super) fn interlock(pc: &WinPc, seconds: u32, c: &Cancel) -> R<(bool, String)> {
     let dir = pc.bundle_dir()?;
+    let guard = pc.s.guard_dir();
+    fs::create_dir_all(&guard).map_err(|e| procs::failed("the guard directory", e))?;
+    let stop = guard.join(INTERLOCK_STOP);
+    match fs::remove_file(&stop) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(procs::failed("the interlock's old stop file", e)),
+    }
     let mut cmd = Command::new(dir.join(ENGINE_EXE));
     cmd.arg("interlock")
         .arg("--site")
         .arg(&pc.s.pc.site)
         .arg("--seconds")
         .arg(seconds.to_string())
+        .arg("--stop-file")
+        .arg(&stop)
         .current_dir(dir);
     let limit = Duration::from_secs(u64::from(seconds) + 30);
-    let out = procs::run_outside_job("iem-engine interlock", &mut cmd, limit, c)?;
+    let out = procs::run_outside_job("iem-engine interlock", &mut cmd, limit, c, &stop)?;
     proto::interlock_result(out.code, &out.stdout).map_err(StepError::Failed)
 }
 
@@ -416,13 +432,16 @@ pub(super) fn stop(pc: &mut WinPc, c: &Cancel) -> R<()> {
         }
     };
     info!("the engine released the driver: {reason}");
+    // Our end of the supervisor pipe goes now: a client still holding the
+    // stream keeps the pipe's name from the next engine (engine.md, Pipes).
+    pc.sup = None;
     if procs::wait_exit(&handle, GONE, c)?.is_none() {
         return Err(StepError::failed(format!(
             "the engine released the driver but did not end within {} s",
             GONE.as_secs()
         )));
     }
-    pc.sup = None;
+    pc.dacl = None;
     pc.kids.forget(Kid::Engine);
     Ok(())
 }
@@ -493,6 +512,58 @@ pub(super) fn hil_signal(
 pub(super) fn force_reopen(pc: &mut WinPc) -> R<()> {
     let sup = supervisor(pc, CONNECT, &Cancel::default())?;
     sup.request("force_reopen").map_err(StepError::Failed)
+}
+
+/// HIL's RT panic (design §7): `InjectFault` over the supervisor pipe. The
+/// engine refuses it without its fault-injection flag; with it the RT
+/// callback faults and the engine exits 70, which the watch sees.
+pub(super) fn inject_fault(pc: &mut WinPc) -> R<()> {
+    let sup = supervisor(pc, CONNECT, &Cancel::default())?;
+    sup.request("inject_fault").map_err(StepError::Failed)
+}
+
+/// Whether the engine's control pipe admits only this user and SYSTEM, read
+/// back through its DACL (HIL, design §7). Reading connects to the pipe for
+/// a moment, so it is read once per engine process.
+fn pipe_private(pipe: &str) -> Result<bool, String> {
+    let user = iem_win::token::current_user_sid().map_err(|e| format!("the user's SID: {e}"))?;
+    let user = iem_win::token::sddl_sid(&user).map_err(|e| format!("the user's SDDL name: {e}"))?;
+    let sddl = iem_win::token::pipe_sddl(pipe).map_err(|e| format!("the pipe's DACL: {e}"))?;
+    Ok(iem_win::token::sddl_is_private(&sddl, &user))
+}
+
+/// What the supervisor connection holds of our running engine (the guard's
+/// `Reply.engine`): one attempt to connect when there is no connection,
+/// never a wait.
+pub(super) fn seen(pc: &mut WinPc) -> Option<EngineSeen> {
+    let pid = pc.kids.pid(Kid::Engine)?;
+    if !pc.sup.as_ref().is_some_and(Supervisor::open) {
+        pc.sup = Supervisor::connect(&pc.s.pc.engine_pipe, pc.s.stage_inputs.clone()).ok();
+    }
+    let sup = pc.sup.as_ref()?;
+    // Read once per engine process, and again at the next look after a
+    // failed read.
+    let cached = pc.dacl;
+    let private = match cached {
+        Some((of, private)) if of == pid => private,
+        _ => match pipe_private(&pc.s.pc.engine_pipe) {
+            Ok(private) => {
+                pc.dacl = Some((pid, private));
+                private
+            }
+            Err(why) => {
+                warn!("the engine pipe's DACL: {why}");
+                false
+            }
+        },
+    };
+    let inbox = lock(&sup.inbox);
+    let mut status = inbox.status.clone().unwrap_or_default();
+    status.build = inbox.build.clone().unwrap_or_default();
+    Some(EngineSeen {
+        status,
+        pipe_private: private,
+    })
 }
 
 /// `iem-engine check-site --site <file>` from the bundle: its report. A

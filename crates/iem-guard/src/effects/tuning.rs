@@ -1,31 +1,36 @@
-//! The elevated tuning task (S6 design note §5.1; S1c design §7) and the
-//! drift check.
+//! The elevated tasks' files (S6 design note §5.1; `IemPc.psm1`
+//! `Invoke-IemTaskRequest`, `.claude/rules/guard.md`) and the drift check.
 //!
-//! The guard runs Limited; S1c's tuning module needs elevation, so it runs
-//! only as `\iemmixer\iemmixer-tuning` (RunLevel Highest), which reads one
-//! verb from a request file the guard writes and answers in a result file:
+//! The guard runs Limited; S1c's tuning module and Defender's exclusions
+//! need elevation, so they run only as `\iemmixer\iemmixer-tuning` and
+//! `\iemmixer\iemmixer-exclude` (RunLevel Highest). Each reads one request
+//! the guard writes in the user's root and answers in the elevated root,
+//! which the user may only read (an elevated process never writes into the
+//! user's root):
 //!
-//! - `guard\tuning\request.json`: `{"id": "<id>", "verb": "enter"}`;
-//! - `guard\tuning\result.json`: `{"id": "<id>", "ok": true, "detail": "…"}`;
-//! - `guard\tuning\expect.json`: what the module applied for the current
-//!   mode, `{"plan": "<power plan GUID>", "services": {"<name>": <start>}}`,
-//!   which the guard's drift check compares with native reads (P10: no
-//!   PowerShell poll, no elevation).
+//! - `<root>\guard\tasks\<kind>.request.json`: tuning `{"id", "verb"}`,
+//!   exclude `{"id", "sha", "keep"}`;
+//! - `<elevated root>\tasks\out\<kind>.result.json`: `{"kind", "id", "ok",
+//!   "at", "result", "error"}`;
+//! - `<elevated root>\tuning\expect.json` (S1c's module): what it applied for
+//!   the current mode, `{"plan": "<power plan GUID>", "services": {"<name>":
+//!   <start>}}`, which the guard's drift check compares with native reads
+//!   (P10: no PowerShell poll, no elevation).
 //!
-//! Each file is written whole (temp, then rename); a UTF-8 byte-order mark
-//! (Windows PowerShell) is skipped.
+//! Windows PowerShell writes a UTF-8 byte-order mark: it is skipped.
 
 use std::collections::BTreeMap;
 
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-pub const REQUEST: &str = "request.json";
-pub const RESULT: &str = "result.json";
+/// The tasks' kinds: the request and result files' names.
+pub const TUNING: &str = "tuning";
+pub const EXCLUDE: &str = "exclude";
 pub const EXPECT: &str = "expect.json";
 
-/// What `tuning` answers when the bundle carries no tuning module (S1c has
-/// not shipped it): reported, never fatal.
+/// What `tuning` answers when S1c's module is not installed: reported,
+/// never fatal.
 pub const ABSENT: &str = "absent";
 
 /// The task's verbs (design §5.1).
@@ -35,31 +40,54 @@ pub fn valid_verb(verb: &str) -> bool {
     VERBS.contains(&verb)
 }
 
-pub fn request(id: &str, verb: &str) -> String {
+/// `<kind>.request.json`.
+pub fn request_name(kind: &str) -> String {
+    format!("{kind}.request.json")
+}
+
+/// `<kind>.result.json`.
+pub fn result_name(kind: &str) -> String {
+    format!("{kind}.result.json")
+}
+
+pub fn tuning_request(id: &str, verb: &str) -> String {
     json!({"id": id, "verb": verb}).to_string()
+}
+
+/// The exclusions of bundle `sha`; those of `keep` (the other pin) stay,
+/// every other bundle's go (`Set-IemDefenderExclusion`).
+pub fn exclude_request(id: &str, sha: &str, keep: &[String]) -> String {
+    json!({"id": id, "sha": sha, "keep": keep}).to_string()
 }
 
 fn without_bom(text: &str) -> &str {
     text.strip_prefix('\u{feff}').unwrap_or(text)
 }
 
-/// The task's answer to request `id`: `None` while there is none (no file
-/// yet, another request's answer, or a file being written).
-pub fn result_for(text: &str, id: &str) -> Option<Result<String, String>> {
+/// The task's answer to request `id` of `kind`: `None` while there is none
+/// (no file yet, another request's answer, or a file being written). A
+/// `result` that is not text is given as its JSON.
+pub fn result_for(text: &str, kind: &str, id: &str) -> Option<Result<String, String>> {
     let v: Value = serde_json::from_str(without_bom(text)).ok()?;
-    if v.get("id").and_then(Value::as_str) != Some(id) {
+    if v.get("kind").and_then(Value::as_str) != Some(kind)
+        || v.get("id").and_then(Value::as_str) != Some(id)
+    {
         return None;
     }
-    let detail = v
-        .get("detail")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
-    Some(if v.get("ok").and_then(Value::as_bool) == Some(true) {
-        Ok(detail)
+    if v.get("ok").and_then(Value::as_bool) == Some(true) {
+        Some(Ok(match v.get("result") {
+            None | Some(Value::Null) => String::new(),
+            Some(Value::String(s)) => s.clone(),
+            Some(other) => other.to_string(),
+        }))
     } else {
-        Err(detail)
-    })
+        let error = v.get("error").and_then(Value::as_str).unwrap_or_default();
+        Some(Err(if error.is_empty() {
+            "the task did not succeed".to_owned()
+        } else {
+            error.to_owned()
+        }))
+    }
 }
 
 /// `expect.json`.
@@ -120,32 +148,74 @@ mod tests {
     }
 
     #[test]
-    fn a_request_names_its_id_and_verb() {
-        assert_eq!(request("r1", "exit"), r#"{"id":"r1","verb":"exit"}"#);
+    fn requests_name_their_id_and_what_they_ask() {
+        assert_eq!(tuning_request("r1", "exit"), r#"{"id":"r1","verb":"exit"}"#);
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let keep = vec!["89abcdef0123456789abcdef0123456789abcdef".to_owned()];
+        let parsed = |text: String| serde_json::from_str::<Value>(&text).unwrap();
+        assert_eq!(
+            parsed(exclude_request("r2", sha, &keep)),
+            json!({"id": "r2", "sha": sha, "keep": keep})
+        );
+        assert_eq!(
+            parsed(exclude_request("r3", sha, &[])),
+            json!({"id": "r3", "sha": sha, "keep": []})
+        );
+        assert_eq!(request_name(TUNING), "tuning.request.json");
+        assert_eq!(result_name(EXCLUDE), "exclude.result.json");
+        assert_eq!(
+            (TUNING, EXCLUDE, EXPECT),
+            ("tuning", "exclude", "expect.json")
+        );
     }
 
     #[test]
     fn only_the_answer_to_our_request_counts() {
+        let ok = r#"{"kind":"tuning","id":"r1","ok":true,"at":"x","result":"entered","error":""}"#;
+        assert_eq!(result_for(ok, TUNING, "r1"), Some(Ok("entered".into())));
+        assert_eq!(result_for(ok, EXCLUDE, "r1"), None, "another kind's");
+        assert_eq!(result_for(ok, TUNING, "r0"), None, "another request's");
         assert_eq!(
-            result_for(r#"{"id":"r1","ok":true,"detail":"entered"}"#, "r1"),
-            Some(Ok("entered".into()))
-        );
-        assert_eq!(
-            result_for("\u{feff}{\"id\":\"r1\",\"ok\":true}", "r1"),
+            result_for(
+                "\u{feff}{\"kind\":\"tuning\",\"id\":\"r1\",\"ok\":true,\"result\":null}",
+                TUNING,
+                "r1"
+            ),
             Some(Ok(String::new()))
         );
+        let object = result_for(
+            r#"{"kind":"exclude","id":"r1","ok":true,"result":{"sha":"a","add":[]}}"#,
+            EXCLUDE,
+            "r1",
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(
-            result_for(r#"{"id":"r1","ok":false,"detail":"exit failed"}"#, "r1"),
+            serde_json::from_str::<Value>(&object).unwrap(),
+            json!({"sha": "a", "add": []})
+        );
+        assert_eq!(
+            result_for(
+                r#"{"kind":"tuning","id":"r1","ok":false,"error":"exit failed"}"#,
+                TUNING,
+                "r1"
+            ),
             Some(Err("exit failed".into()))
         );
         assert_eq!(
-            result_for(r#"{"id":"r1","detail":"no ok"}"#, "r1"),
-            Some(Err("no ok".into()))
+            result_for(r#"{"kind":"tuning","id":"r1","result":"x"}"#, TUNING, "r1"),
+            Some(Err("the task did not succeed".into()))
         );
-        assert_eq!(result_for(r#"{"id":"r0","ok":true}"#, "r1"), None);
-        assert_eq!(result_for(r#"{"ok":true}"#, "r1"), None);
-        assert_eq!(result_for(r#"{"id":"r1","ok":tr"#, "r1"), None);
-        assert_eq!(result_for("", "r1"), None);
+        assert_eq!(result_for(r#"{"id":"r1","ok":true}"#, TUNING, "r1"), None);
+        assert_eq!(
+            result_for(r#"{"kind":"tuning","ok":true}"#, TUNING, "r1"),
+            None
+        );
+        assert_eq!(
+            result_for(r#"{"kind":"tuning","id":"r1","ok":tr"#, TUNING, "r1"),
+            None
+        );
+        assert_eq!(result_for("", TUNING, "r1"), None);
     }
 
     fn expect() -> Expect {

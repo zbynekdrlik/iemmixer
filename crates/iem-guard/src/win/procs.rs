@@ -374,14 +374,22 @@ pub(super) struct Output {
 
 /// What a bounded run does on "ide event".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum OnCancel {
+pub(super) enum OnCancel<'a> {
     /// A mutation (a data command, a task start, a notice): it finishes
     /// first, the token is not looked at.
     Finish,
     /// A wait (an HTTPS check): Ctrl-Break to the command's own process
     /// group, then `Preempted` at once; the command ends by itself.
     Break,
+    /// A wait that holds the card (`iem-engine interlock`): the guard creates
+    /// this stop file (`--stop-file`), which the interlock sees within 0.1 s;
+    /// it releases the card and exits 6. The guard waits up to
+    /// [`STOP_FILE_WAIT`] for that, then `Preempted`.
+    StopFile(&'a Path),
 }
+
+/// How long a pre-empted interlock gets to release the card and end.
+const STOP_FILE_WAIT: Duration = Duration::from_millis(900);
 
 fn piped(cmd: &mut Command) {
     cmd.stdin(Stdio::null())
@@ -399,7 +407,7 @@ pub(super) fn run(
     cmd: &mut Command,
     limit: Duration,
     c: &Cancel,
-    on_cancel: OnCancel,
+    on_cancel: OnCancel<'_>,
 ) -> R<Output> {
     piped(cmd);
     let child = cmd
@@ -411,17 +419,18 @@ pub(super) fn run(
 
 /// [`run`] for `iem-engine interlock`, which opens the card: it starts
 /// outside the guard's job like the engine (design §5.1, I9), so the end of
-/// the guard's task never ends a holder of the card. A wait: Ctrl-Break on
-/// "ide event".
+/// the guard's task never ends a holder of the card. A wait: on "ide event"
+/// the guard creates `stop` (its `--stop-file`).
 pub(super) fn run_outside_job(
     what: &str,
     cmd: &mut Command,
     limit: Duration,
     c: &Cancel,
+    stop: &Path,
 ) -> R<Output> {
     piped(cmd);
     let child = spawn::spawn_detached(cmd, true).map_err(|e| failed(what, e))?;
-    finish(what, child, limit, c, OnCancel::Break)
+    finish(what, child, limit, c, OnCancel::StopFile(stop))
 }
 
 fn drain<S: Read + Send + 'static>(stream: Option<S>) -> Option<JoinHandle<String>> {
@@ -445,7 +454,7 @@ fn finish(
     mut child: Child,
     limit: Duration,
     c: &Cancel,
-    on_cancel: OnCancel,
+    on_cancel: OnCancel<'_>,
 ) -> R<Output> {
     let out = drain(child.stdout.take());
     let err = drain(child.stderr.take());
@@ -458,12 +467,28 @@ fn finish(
                 stderr: joined(err),
             });
         }
-        let preempted = on_cancel == OnCancel::Break && c.preempted();
+        let preempted = on_cancel != OnCancel::Finish && c.preempted();
         if preempted || start.elapsed() >= limit {
-            if on_cancel == OnCancel::Break
-                && let Err(e) = console::ctrl_break(child.id())
-            {
-                warn!("Ctrl-Break to {what}: {e}");
+            match on_cancel {
+                OnCancel::Finish => {}
+                OnCancel::Break => {
+                    if let Err(e) = console::ctrl_break(child.id()) {
+                        warn!("Ctrl-Break to {what}: {e}");
+                    }
+                }
+                OnCancel::StopFile(stop) => {
+                    if let Err(e) = fs::write(stop, b"stop") {
+                        warn!("the stop file of {what} ({}): {e}", stop.display());
+                    }
+                    let asked = Instant::now();
+                    while asked.elapsed() < STOP_FILE_WAIT {
+                        if child.try_wait().map_err(|e| failed(what, e))?.is_some() {
+                            info!("{what} stopped at its stop file");
+                            break;
+                        }
+                        thread::sleep(Cancel::SLICE);
+                    }
+                }
             }
             return Err(if preempted {
                 StepError::Preempted

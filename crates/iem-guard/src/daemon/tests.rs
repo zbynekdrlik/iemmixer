@@ -593,10 +593,10 @@ fn the_jobs_are_cancelled_before_the_runner_stops() {
         }),
         Guard::for_test(Mode::Dev),
     );
-    g.job = Some(4242);
+    g.state.job = Some(4242);
     let r = handle(&mut pc, &mut g, Request::Event { dry_run: false }, 0);
     assert!(r.ok, "{r:?}");
-    assert_eq!(g.job, None);
+    assert_eq!(g.state.job, None);
     assert!(r.detail.contains("HIL job 4242 cancelled"), "{}", r.detail);
     assert!(pc.index(Call::RunnerStop) < pc.index(Call::EngineStop));
 }
@@ -874,6 +874,7 @@ fn jobs_are_refused_while_switching() {
             path: "site.toml".into(),
         },
         Request::ForceReopen,
+        Request::InjectFault,
         Request::RunnerStop,
         Request::ProbeTask,
         Request::RehearseTeardown,
@@ -910,7 +911,7 @@ fn jobs_are_refused_while_switching() {
     g.shared.update(|v| v.epoch += 1);
     let r = handle(&mut pc, &mut g, Request::JobBegin { run: 4242 }, epoch);
     assert_eq!((r.ok, r.detail.as_str()), (false, "switching"));
-    assert_eq!(g.job, None);
+    assert_eq!(g.state.job, None);
     let r = handle(&mut pc, &mut g, dev(), epoch);
     assert_eq!((r.ok, r.detail.as_str()), (false, "busy"));
     assert!(pc.calls().is_empty());
@@ -1191,11 +1192,11 @@ fn job_begin_needs_a_quiet_stage() {
         (r.ok, r.detail.as_str()),
         (false, "stage peaks [-90.0, -30.0] dBFS: not quiet")
     );
-    assert_eq!(g.job, None);
+    assert_eq!(g.state.job, None);
     pc.stage_peaks = vec![-90.0, -50.0];
     let r = handle(&mut pc, &mut g, begin.clone(), 0);
     assert_eq!((r.ok, r.detail.as_str()), (true, "HIL job 7 began"));
-    assert_eq!(g.job, Some(7));
+    assert_eq!(g.state.job, Some(7));
     assert_eq!(JOB_PEAKS_S, 60);
     let r = handle(&mut pc, &mut g, Request::JobBegin { run: 8 }, 0);
     assert_eq!(r.detail, "HIL job 7 has not ended");
@@ -1204,7 +1205,7 @@ fn job_begin_needs_a_quiet_stage() {
     assert_eq!((r.ok, r.detail.as_str()), (false, "HIL job 7 runs, not 8"));
     let r = handle(&mut pc, &mut g, Request::JobEnd { run: 7 }, 0);
     assert_eq!((r.ok, r.detail.as_str()), (true, "HIL job 7 ended"));
-    assert_eq!(g.job, None);
+    assert_eq!(g.state.job, None);
     let r = handle(&mut pc, &mut g, Request::JobEnd { run: 7 }, 0);
     assert_eq!(
         (r.ok, r.detail.as_str()),
@@ -1226,7 +1227,7 @@ fn job_begin_needs_a_quiet_stage() {
 #[test]
 fn the_test_signal_goes_only_to_the_hil_outputs() {
     let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
-    g.job = Some(7);
+    g.state.job = Some(7);
     let signal = |dbfs: f64, ttl_s: f64| Request::TestSignal {
         input: "mic1".into(),
         dbfs,
@@ -1295,7 +1296,7 @@ fn a_test_signal_needs_a_begun_job_and_at_most_60_s() {
         (false, "a test signal needs a begun HIL job (job-begin)")
     );
     assert!(!pc.called(Call::HilSignal));
-    g.job = Some(7);
+    g.state.job = Some(7);
     let r = handle(&mut pc, &mut g, signal(60.0), 0);
     assert!(r.ok, "{r:?}");
     let r = handle(&mut pc, &mut g, signal(60.5), 0);
@@ -1340,6 +1341,7 @@ fn a_hil_report_records_the_result() {
 fn dev_only_requests_are_refused_elsewhere() {
     for (req, what) in [
         (Request::ForceReopen, "force-reopen"),
+        (Request::InjectFault, "inject-fault"),
         (Request::RunnerStop, "runner-stop"),
         (Request::RehearseTeardown, "rehearse-teardown"),
         (Request::Activate { sha: SHA.into() }, "activate"),
@@ -1374,11 +1376,11 @@ fn engine_and_runner_requests_in_dev() {
         (r.ok, r.detail.as_str()),
         (true, "the engine reopened the driver")
     );
-    g.job = Some(3);
+    g.state.job = Some(3);
     let r = handle(&mut pc, &mut g, Request::RunnerStop, 0);
     assert_eq!(r.detail, "HIL job 3 runs: the runner is not idle");
     assert!(!pc.called(Call::RunnerStop));
-    g.job = None;
+    g.state.job = None;
     let r = handle(&mut pc, &mut g, Request::RunnerStop, 0);
     assert_eq!((r.ok, r.detail.as_str()), (true, "the runner stopped"));
     pc.fail(Call::ForceReopen, "the reset budget is spent");
@@ -1394,6 +1396,250 @@ fn engine_and_runner_requests_in_dev() {
         (r.ok, r.detail.as_str()),
         (true, "the probe task ended with 0")
     );
+}
+
+// ---- HIL: the engine in the reply, the fault, the job's restarts ----
+
+/// The engine of `FakePc::seen` (build `2.0.0-dev.9+<SHA>`) as `Reply.engine`.
+fn engine_of(spawns: u64, last_exit: Option<i32>) -> EngineStatus {
+    EngineStatus {
+        build: SHA.to_owned(),
+        frames: 32,
+        callbacks: 30_000,
+        pipe_private: true,
+        spawns,
+        last_exit,
+        ..EngineStatus::default()
+    }
+}
+
+#[test]
+fn replies_carry_the_running_engine() {
+    let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Dev));
+    let r = handle(&mut pc, &mut g, Request::Status, 0);
+    assert_eq!(r.engine, None, "no engine runs");
+    pc.facts.engine = true;
+    pc.seen.status.missed = 1;
+    pc.seen.status.resets = 2;
+    let r = handle(&mut pc, &mut g, Request::Status, 0);
+    assert_eq!(
+        r.engine,
+        Some(EngineStatus {
+            missed: 1,
+            resets: 2,
+            ..engine_of(0, None)
+        })
+    );
+    // A status answered by the pipe's threads shows what the watch saw.
+    let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
+    tick(&mut pc, &mut g, Instant::now());
+    match g.shared.route(&Request::Status) {
+        Route::Now(r) => assert_eq!(r.engine, Some(engine_of(0, None))),
+        other => panic!("{other:?}"),
+    }
+    pc.facts.engine = false;
+    tick(&mut pc, &mut g, Instant::now());
+    match g.shared.route(&Request::Status) {
+        Route::Now(r) => assert_eq!(r.engine, None),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(g.shared.view().engine, None);
+}
+
+#[test]
+fn the_engines_hil_flags_are_for_a_dev_job_only() {
+    // A dev entry without a job: held, no HIL flags.
+    let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Event));
+    g.state.pins.current = Some(SHA.into());
+    run_switch(&mut pc, &mut g, Mode::Event, Mode::Dev);
+    assert_eq!(pc.engine_starts, [(true, false)]);
+    assert_eq!(g.spawns, 1);
+    // A live entry never carries them, even with a job left over.
+    let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Event));
+    g.state.pins.current = Some(SHA.into());
+    g.state.job = Some(7);
+    run_switch(&mut pc, &mut g, Mode::Event, Mode::Live);
+    assert_eq!(pc.engine_starts, [(true, false)]);
+    // A respawn in dev inside a job carries them; outside a job it does not.
+    for (job, hil) in [(Some(7), true), (None, false)] {
+        let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Dev));
+        g.state.job = job;
+        pc.exited.push((Kid::Engine, Some(70)));
+        let at = Instant::now();
+        tick(&mut pc, &mut g, at);
+        tick(&mut pc, &mut g, at + Duration::from_secs(1));
+        assert_eq!(pc.engine_starts, [(false, hil)], "{job:?}");
+    }
+}
+
+#[test]
+fn inject_fault_is_refused_outside_a_dev_job() {
+    let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Event));
+    let r = handle(&mut pc, &mut g, Request::InjectFault, 0);
+    assert_eq!(
+        (r.ok, r.detail.as_str()),
+        (false, "inject-fault is for dev; the mode is event")
+    );
+    g.state.mode = Mode::Dev;
+    let r = handle(&mut pc, &mut g, Request::InjectFault, 0);
+    assert_eq!(
+        (r.ok, r.detail.as_str()),
+        (false, "a fault needs a begun HIL job (job-begin)")
+    );
+    assert!(!pc.called(Call::InjectFault));
+    // Inside a job it goes to the engine, whose refusal is the answer.
+    g.state.job = Some(7);
+    pc.fail(
+        Call::InjectFault,
+        "inject_fault: the engine runs without the fault-injection flag",
+    );
+    let r = handle(&mut pc, &mut g, Request::InjectFault, 0);
+    assert_eq!(
+        (r.ok, r.detail.as_str()),
+        (
+            false,
+            "inject_fault: the engine runs without the fault-injection flag"
+        )
+    );
+    assert_eq!(pc.count(Call::InjectFault), 1);
+}
+
+#[test]
+fn an_injected_fault_is_respawned_once_and_reported() {
+    let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
+    g.state.job = Some(7);
+    let r = handle(&mut pc, &mut g, Request::InjectFault, 0);
+    assert_eq!(
+        (r.ok, r.detail.as_str()),
+        (
+            true,
+            "the engine faults its RT callback; the watch starts it again"
+        )
+    );
+    assert_eq!(r.engine, Some(engine_of(0, None)));
+    // The engine exits 70 (its RT fault); the watch starts it again after
+    // the first backoff, with the job's flags, exactly once.
+    pc.facts.engine = false;
+    pc.exited.push((Kid::Engine, Some(70)));
+    let at = Instant::now();
+    tick(&mut pc, &mut g, at);
+    assert!(!pc.called(Call::EngineStart));
+    let r = handle(&mut pc, &mut g, Request::Status, 0);
+    assert_eq!(r.engine, None, "no engine between the exit and the respawn");
+    tick(&mut pc, &mut g, at + Duration::from_secs(1));
+    tick(&mut pc, &mut g, at + Duration::from_secs(5));
+    assert_eq!(pc.engine_starts, [(false, true)]);
+    let r = handle(&mut pc, &mut g, Request::Status, 0);
+    assert_eq!(r.engine, Some(engine_of(1, Some(70))));
+    assert_eq!(g.state.mode, Mode::Dev);
+    assert!(g.alarms.all().is_empty(), "{:?}", texts(&g));
+}
+
+#[test]
+fn activate_in_a_job_restarts_the_engine_and_the_server() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut g = Guard::open(dir.path(), SiteConf::default(), fixed(T0));
+    g.state.mode = Mode::Dev;
+    g.state.job = Some(7);
+    let mut pc = FakePc::new(Facts {
+        runner: true,
+        ..iemmixer_up()
+    });
+    let zip = install::tests::good_zip(dir.path(), SHA);
+    assert!(install_bundle(&mut g, &zip).0);
+    // The pin before this one keeps its Defender exclusions.
+    g.state.pins.current = Some(OTHER.into());
+    let r = handle(&mut pc, &mut g, Request::Activate { sha: SHA.into() }, 0);
+    assert_eq!(pc.excluded, [(SHA.to_owned(), vec![OTHER.to_owned()])]);
+    assert_eq!(
+        (r.ok, r.detail.clone()),
+        (
+            true,
+            format!(
+                "activated {SHA}; the engine and the server run it; the guard hands over to its \
+                 new exe; engine started, held, with its HIL flags (pid 1001); engine ready: 32 \
+                 frames, 30000 callbacks, 0 missed; server started (pid 1002)"
+            )
+        )
+    );
+    assert_eq!(
+        steps(&pc)
+            .into_iter()
+            .filter(|c| c.mutates() || *c == Call::EngineReady)
+            .collect::<Vec<_>>(),
+        [
+            Call::Exclude,
+            Call::EngineStop,
+            Call::ServerStop,
+            Call::EngineStart,
+            Call::EngineReady,
+            Call::EngineArm,
+            Call::ServerStart,
+        ]
+    );
+    assert_eq!(pc.engine_starts, [(true, true)]);
+    assert_eq!(g.state.job, Some(7), "the job goes on");
+    // The job is in the state: the guard the activation hands over to serves it.
+    let back = Guard::open(dir.path(), SiteConf::default(), fixed(T0));
+    assert_eq!(back.state.job, Some(7));
+    // Outside a job the engine is not touched.
+    let mut pc = FakePc::new(iemmixer_up());
+    g.state.job = None;
+    let r = handle(&mut pc, &mut g, Request::Activate { sha: SHA.into() }, 0);
+    assert_eq!((r.ok, r.detail.clone()), (true, format!("activated {SHA}")));
+    assert!(!pc.called(Call::EngineStop) && !pc.called(Call::EngineStart));
+}
+
+#[test]
+fn install_site_in_a_job_restarts_only_the_engine_and_the_server() {
+    let (mut pc, mut g) = (
+        FakePc::new(Facts {
+            runner: true,
+            ..iemmixer_up()
+        }),
+        Guard::for_test(Mode::Dev),
+    );
+    g.state.pins.current = Some(SHA.into());
+    g.state.job = Some(7);
+    let site = Request::InstallSite {
+        path: "site.toml".into(),
+    };
+    let r = handle(&mut pc, &mut g, site.clone(), 0);
+    assert_eq!(
+        (r.ok, r.detail.as_str()),
+        (
+            true,
+            "site installed; the engine and the server run it (HIL job); site.toml: checked and installed; engine started, held, with its HIL flags (pid 1001); engine ready: 32 frames, 30000 callbacks, 0 missed; server started (pid 1002)"
+        )
+    );
+    for c in [
+        Call::RunnerStop,
+        Call::TrayStop,
+        Call::Data,
+        Call::Tuning,
+        Call::RunnerStart,
+    ] {
+        assert!(!pc.called(c), "{c:?}: no dev entry inside a job");
+    }
+    assert_eq!(pc.engine_starts, [(true, true)]);
+    assert_eq!(g.state.job, Some(7));
+    // A failed start unwinds to event, as a failed dev entry does.
+    let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
+    g.state.pins.current = Some(SHA.into());
+    g.state.job = Some(7);
+    pc.fail(Call::ServerStart, "ports 80/443 are still held");
+    let r = handle(&mut pc, &mut g, site, 0);
+    assert!(!r.ok);
+    assert!(
+        r.detail
+            .starts_with("site installed; ServerStart: ports 80/443 are still held; event: done"),
+        "{}",
+        r.detail
+    );
+    assert_eq!(g.state.mode, Mode::Event);
+    assert!(pc.called(Call::ReaperStart));
+    assert_eq!(texts(&g)[0], "ServerStart: ports 80/443 are still held");
+    assert_eq!(g.state.job, None, "no HIL job outside dev");
 }
 
 #[test]
@@ -1673,7 +1919,7 @@ fn status_names_everything_that_waits() {
     let mut g = Guard::for_test(Mode::Dev);
     assert_eq!(status_text(&g), "mode dev; no bundle");
     g.state.pins.current = Some(SHA.into());
-    g.job = Some(4242);
+    g.state.job = Some(4242);
     g.state.interlock_retry = Some(InterlockRetry {
         target: Mode::Live,
         build: None,

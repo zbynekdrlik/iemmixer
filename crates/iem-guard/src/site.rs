@@ -25,6 +25,10 @@ pub const TRAY_EXE: &str = "iem-tray.exe";
 /// The card's period for iemmixer (I2).
 pub const FRAMES: u32 = 32;
 
+/// The engine's flags for a HIL job (design §7): its test signals and its
+/// fault injection. Only in dev while a job runs, never in live.
+pub const HIL_FLAGS: [&str; 2] = ["--test-signal", "--fault-injection"];
+
 /// Where `pc.toml` lives: `<LOCALAPPDATA>\iemmixer\guard\pc.toml`.
 pub fn pc_toml_path(local_app_data: &Path) -> PathBuf {
     local_app_data
@@ -247,6 +251,10 @@ fn default_tunnel_ready() -> String {
     "http://127.0.0.1:20241/ready".to_owned()
 }
 
+fn default_elevated_root() -> PathBuf {
+    PathBuf::from(r"C:\ProgramData\iemmixer")
+}
+
 /// `pc.toml`: where things are on this PC (written at bootstrap). Command
 /// arguments may name `{root}`, `{bundle}`, `{site}` and `{server_config}`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -261,8 +269,8 @@ pub struct PcToml {
     #[serde(default = "default_engine_pipe")]
     pub engine_pipe: String,
     /// The engine's arguments after its exe (`run`, `--site`,
-    /// `--state-dir`, …); the guard appends `--pipe <engine_pipe>`, and
-    /// `--hold` on request.
+    /// `--state-dir`, …); the guard appends `--pipe <engine_pipe>`, `--hold`
+    /// on request, and the HIL flags inside a HIL job only.
     pub engine_args: Vec<String>,
     pub reaper_exe: PathBuf,
     pub app_exe: PathBuf,
@@ -277,6 +285,12 @@ pub struct PcToml {
     /// cloudflared's readiness URL (the tunnel watchdog's).
     #[serde(default = "default_tunnel_ready")]
     pub tunnel_ready: String,
+    /// The elevated tasks' root (`Register-IemTasks -ElevatedRoot`: the
+    /// ProgramData known folder + `iemmixer`, only Administrators and SYSTEM
+    /// may change it): their results and S1c's tuning record. From here,
+    /// never from an environment variable the user could change.
+    #[serde(default = "default_elevated_root")]
+    pub elevated_root: PathBuf,
 }
 
 impl PcToml {
@@ -299,6 +313,10 @@ impl PcToml {
             "engine_args must not name --pipe or --hold: the guard adds them",
         );
         check(
+            !HIL_FLAGS.iter().any(|f| names(f)),
+            "engine_args must not name the HIL flags: the guard adds them inside a HIL job only",
+        );
+        check(
             self.engine_args.is_empty() || (names("--site") && names("--state-dir")),
             "engine_args must name --site and --state-dir (iem-engine run)",
         );
@@ -317,6 +335,10 @@ impl PcToml {
         check(
             self.tunnel_ready.starts_with("http://"),
             "tunnel_ready must be plain http://",
+        );
+        check(
+            !self.elevated_root.as_os_str().is_empty() && self.elevated_root != self.root,
+            "elevated_root must be the elevated tasks' own folder",
         );
         bad
     }
@@ -416,9 +438,22 @@ impl Settings {
         self.pc.root.join("logs")
     }
 
-    /// The tuning task's request, result and record files.
-    pub fn tuning_dir(&self) -> PathBuf {
-        self.guard_dir().join("tuning")
+    /// Where the guard writes the elevated tasks' requests (the user's root).
+    pub fn requests_dir(&self) -> PathBuf {
+        self.guard_dir().join("tasks")
+    }
+
+    /// Where the elevated tasks answer (the elevated root; read only).
+    pub fn results_dir(&self) -> PathBuf {
+        self.pc.elevated_root.join("tasks").join("out")
+    }
+
+    /// S1c's record of what its tuning applied (the drift check).
+    pub fn tuning_record(&self) -> PathBuf {
+        self.pc
+            .elevated_root
+            .join("tuning")
+            .join(crate::effects::tuning::EXPECT)
     }
 
     /// The data commands of an entry into `mode` (none for `event`).
@@ -432,12 +467,16 @@ impl Settings {
 
     /// The engine's arguments for the bundle in `bundle`: `engine_args`
     /// with its placeholders, then `--pipe <engine_pipe>` (the one name the
-    /// supervisor client and the server use too) and `--hold` on request.
-    pub fn engine_argv(&self, bundle: &Path, hold: bool) -> Result<Vec<String>, String> {
+    /// supervisor client and the server use too), `--hold` on request and
+    /// [`HIL_FLAGS`] inside a HIL job (`hil`).
+    pub fn engine_argv(&self, bundle: &Path, hold: bool, hil: bool) -> Result<Vec<String>, String> {
         let mut args = argv::expand(&self.pc.engine_args, &self.vars(bundle))?;
         args.extend(["--pipe".to_owned(), self.pc.engine_pipe.clone()]);
         if hold {
             args.push("--hold".to_owned());
+        }
+        if hil {
+            args.extend(HIL_FLAGS.map(str::to_owned));
         }
         Ok(args)
     }
@@ -918,6 +957,20 @@ threshold_dbfs = -50.0
                 },
                 "tunnel_ready must be plain http://",
             ),
+            (
+                PcToml {
+                    elevated_root: PathBuf::new(),
+                    ..good.clone()
+                },
+                "elevated_root must be the elevated tasks' own folder",
+            ),
+            (
+                PcToml {
+                    elevated_root: good.root.clone(),
+                    ..good.clone()
+                },
+                "elevated_root must be the elevated tasks' own folder",
+            ),
         ];
         for (p, want) in cases {
             assert_eq!(p.problems(), [format!("pc.toml: {want}")], "{want}");
@@ -951,6 +1004,15 @@ threshold_dbfs = -50.0
             [adds]
         );
         assert_eq!(args(&["run", "--hold"]).problems(), [adds, needs]);
+        let hil = "pc.toml: engine_args must not name the HIL flags: the guard adds them inside a \
+                   HIL job only";
+        for flag in HIL_FLAGS {
+            assert_eq!(
+                args(&["run", "--site", "s", "--state-dir", "d", flag]).problems(),
+                [hil],
+                "{flag}"
+            );
+        }
         // An empty list is named once.
         assert_eq!(args(&[]).problems(), ["pc.toml: engine_args is empty"]);
     }
@@ -970,15 +1032,22 @@ threshold_dbfs = -50.0
             "--pipe",
             "iemmixer-engine",
         ];
-        assert_eq!(s.engine_argv(&bundle, false).unwrap(), base);
+        assert_eq!(s.engine_argv(&bundle, false, false).unwrap(), base);
         let mut held = base.to_vec();
         held.push("--hold");
-        assert_eq!(s.engine_argv(&bundle, true).unwrap(), held);
+        assert_eq!(s.engine_argv(&bundle, true, false).unwrap(), held);
+        // Inside a HIL job: the test signals and the fault injection.
+        let mut job = held.clone();
+        job.extend(["--test-signal", "--fault-injection"]);
+        assert_eq!(s.engine_argv(&bundle, true, true).unwrap(), job);
+        let mut respawn = base.to_vec();
+        respawn.extend(["--test-signal", "--fault-injection"]);
+        assert_eq!(s.engine_argv(&bundle, false, true).unwrap(), respawn);
         let mut other = s.clone();
         other.pc.engine_pipe = "iemmixer-engine-2".into();
         assert_eq!(
             other
-                .engine_argv(&bundle, false)
+                .engine_argv(&bundle, false, false)
                 .unwrap()
                 .last()
                 .map(String::as_str),
@@ -986,7 +1055,7 @@ threshold_dbfs = -50.0
         );
         other.pc.engine_args.push("{nope}".into());
         assert_eq!(
-            other.engine_argv(&bundle, true).unwrap_err(),
+            other.engine_argv(&bundle, true, false).unwrap_err(),
             "unknown placeholder {nope} in \"{nope}\""
         );
     }
@@ -1056,7 +1125,14 @@ threshold_dbfs = -50.0
         assert_eq!(s.bundle_dir(&sha), root.join("bundles").join(&sha));
         assert_eq!(s.guard_dir(), root.join("guard"));
         assert_eq!(s.logs_dir(), root.join("logs"));
-        assert_eq!(s.tuning_dir(), root.join("guard").join("tuning"));
+        assert_eq!(s.requests_dir(), root.join("guard").join("tasks"));
+        let elevated = PathBuf::from("C:\\ProgramData\\iemmixer");
+        assert_eq!(s.pc.elevated_root, elevated);
+        assert_eq!(s.results_dir(), elevated.join("tasks").join("out"));
+        assert_eq!(
+            s.tuning_record(),
+            elevated.join("tuning").join("expect.json")
+        );
         assert_eq!(
             pc_toml_path(Path::new("C:\\Local")),
             Path::new("C:\\Local")

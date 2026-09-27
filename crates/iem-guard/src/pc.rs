@@ -301,9 +301,22 @@ pub struct Status {
     pub callbacks: u64,
     /// Missed periods since the start.
     pub missed: u64,
+    /// Driver reopens since the start (a reset request, a stall, a forced
+    /// reopen).
+    pub resets: u64,
     pub faulted: bool,
     /// A stream is parked (a callback still in flight after a stop, R6).
     pub parked: bool,
+}
+
+/// The running engine as the guard's supervisor connection saw it last
+/// (the guard's `Reply.engine`, design §7): the hello's build in
+/// `status.build`, the newest status, and whether the engine's control
+/// pipe's DACL reads back private (the user and SYSTEM only).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EngineSeen {
+    pub status: Status,
+    pub pipe_private: bool,
 }
 
 /// The PC as the guard sees and changes it. No method ends a process.
@@ -348,7 +361,10 @@ pub trait Pc {
     /// started command finishes (a mutation); "ide event" stops the refresh
     /// between two commands and after the last.
     fn data(&mut self, mode: Mode, c: &Cancel) -> R<String>;
-    fn engine_start(&mut self, hold: bool) -> R<u32>;
+    /// `hold`: silent until `Arm`. `hil`: with the engine's test-signal and
+    /// fault-injection flags, only in dev while a HIL job runs (design §7,
+    /// never in live).
+    fn engine_start(&mut self, hold: bool, hil: bool) -> R<u32>;
     /// Hello names the bundle; measured frames 32, callbacks advancing, no
     /// missed period for `secs` (one warm-up miss restarts the window once).
     fn engine_ready(&mut self, secs: u32, c: &Cancel) -> R<Status>;
@@ -398,14 +414,23 @@ pub trait Pc {
     /// A forced reopen of the driver (HIL, design §7); the engine's reset
     /// budget applies.
     fn engine_force_reopen(&mut self) -> R<()>;
+    /// `InjectFault` over the supervisor pipe (HIL, design §7): the engine,
+    /// started with its fault-injection flag, faults its RT callback and
+    /// exits 70; the engine refuses it without the flag.
+    fn engine_inject_fault(&mut self) -> R<()>;
+    /// What the supervisor connection holds of the running engine; `None`
+    /// while no engine of ours runs. Never waits: at most one attempt to
+    /// connect, and the pipe's DACL is read once per engine process.
+    fn engine_seen(&mut self) -> Option<EngineSeen>;
     /// F30 (design §7): `iem-engine check-site` of the new site file and
     /// the guard's own tables, then it replaces the site; returns the old
     /// and the new check report. The checks are waits: "ide event" ends
     /// them through `c`.
     fn install_site(&mut self, path: &str, c: &Cancel) -> R<String>;
     /// `\iemmixer\iemmixer-exclude`: Defender process exclusions for the
-    /// verified bundle `sha` (design §5.1).
-    fn exclude(&mut self, sha: &str) -> R<()>;
+    /// verified bundle `sha` (design §5.1); `keep`'s (the other pin) stay,
+    /// every other bundle's go.
+    fn exclude(&mut self, sha: &str, keep: &[String]) -> R<()>;
 }
 
 /// A scripted PC for the daemon's tests.
@@ -458,6 +483,7 @@ pub mod fake {
         Notify,
         HilSignal,
         ForceReopen,
+        InjectFault,
         InstallSite,
         Exclude,
     }
@@ -490,6 +516,7 @@ pub mod fake {
                     | Call::Notify
                     | Call::HilSignal
                     | Call::ForceReopen
+                    | Call::InjectFault
                     | Call::InstallSite
                     | Call::Exclude
             )
@@ -530,6 +557,13 @@ pub mod fake {
         pub hil_signals: Vec<SentSignal>,
         /// The site files installed.
         pub sites: Vec<String>,
+        /// Every engine start: (hold, hil).
+        pub engine_starts: Vec<(bool, bool)>,
+        /// Every exclusion request: (bundle, the bundles kept).
+        pub excluded: Vec<(String, Vec<String>)>,
+        /// What `engine_seen` reports while an engine runs (a read of what
+        /// the connection holds: not a recorded call).
+        pub seen: EngineSeen,
         calls: Vec<(Call, Instant)>,
         fails: HashMap<Call, String>,
         blocked: Vec<Call>,
@@ -563,6 +597,7 @@ pub mod fake {
                     frames: 32,
                     callbacks: 30_000,
                     missed: 0,
+                    resets: 0,
                     faulted: false,
                     parked: false,
                 },
@@ -577,6 +612,17 @@ pub mod fake {
                 ready_secs: Vec::new(),
                 hil_signals: Vec::new(),
                 sites: Vec::new(),
+                engine_starts: Vec::new(),
+                excluded: Vec::new(),
+                seen: EngineSeen {
+                    status: Status {
+                        build: "2.0.0-dev.9+0123456789abcdef0123456789abcdef01234567".into(),
+                        frames: 32,
+                        callbacks: 30_000,
+                        ..Status::default()
+                    },
+                    pipe_private: true,
+                },
                 calls: Vec::new(),
                 fails: HashMap::new(),
                 blocked: Vec::new(),
@@ -775,8 +821,9 @@ pub mod fake {
             Ok(format!("{mode:?} data refreshed"))
         }
 
-        fn engine_start(&mut self, _hold: bool) -> R<u32> {
+        fn engine_start(&mut self, hold: bool, hil: bool) -> R<u32> {
             self.enter(Call::EngineStart, None)?;
+            self.engine_starts.push((hold, hil));
             self.facts.engine = true;
             Ok(self.pid())
         }
@@ -913,14 +960,24 @@ pub mod fake {
             self.enter(Call::ForceReopen, None)
         }
 
+        fn engine_inject_fault(&mut self) -> R<()> {
+            self.enter(Call::InjectFault, None)
+        }
+
+        fn engine_seen(&mut self) -> Option<EngineSeen> {
+            self.facts.engine.then(|| self.seen.clone())
+        }
+
         fn install_site(&mut self, path: &str, c: &Cancel) -> R<String> {
             self.enter(Call::InstallSite, Some(c))?;
             self.sites.push(path.to_owned());
             Ok(format!("{path}: checked and installed"))
         }
 
-        fn exclude(&mut self, _sha: &str) -> R<()> {
-            self.enter(Call::Exclude, None)
+        fn exclude(&mut self, sha: &str, keep: &[String]) -> R<()> {
+            self.enter(Call::Exclude, None)?;
+            self.excluded.push((sha.to_owned(), keep.to_vec()));
+            Ok(())
         }
     }
 }
@@ -1378,7 +1435,7 @@ mod tests {
         assert_eq!(pc.facts, Facts::default());
         assert!(pc.tuning("enter", &c).unwrap().starts_with("enter"));
         assert!(pc.data(Mode::Dev, &c).unwrap().starts_with("Dev"));
-        let engine = pc.engine_start(true).unwrap();
+        let engine = pc.engine_start(true, false).unwrap();
         pc.engine_ready(10, &c).unwrap();
         pc.engine_arm().unwrap();
         let server = pc.server_start(Mode::Dev).unwrap();
@@ -1454,20 +1511,31 @@ mod tests {
         pc.engine_hil_signal("mic1", -30.0, 5.0, &[72]).unwrap();
         assert_eq!(pc.hil_signals, [("mic1".to_owned(), -30.0, 5.0, vec![72])]);
         pc.engine_force_reopen().unwrap();
+        pc.engine_inject_fault().unwrap();
         assert_eq!(
             pc.install_site("site.toml", &Cancel::default()).unwrap(),
             "site.toml: checked and installed"
         );
         assert_eq!(pc.sites, ["site.toml"]);
-        pc.exclude("a").unwrap();
+        pc.exclude("a", &["b".to_owned()]).unwrap();
+        assert_eq!(pc.excluded, [("a".to_owned(), vec!["b".to_owned()])]);
         for c in [
             Call::HilSignal,
             Call::ForceReopen,
+            Call::InjectFault,
             Call::InstallSite,
             Call::Exclude,
         ] {
             assert!(pc.called(c) && c.mutates(), "{c:?}");
         }
+        // The engine is seen only while one runs; the look is no call.
+        let calls = pc.calls().len();
+        assert_eq!(pc.engine_seen(), None);
+        pc.facts.engine = true;
+        assert_eq!(pc.engine_seen(), Some(pc.seen.clone()));
+        assert!(pc.seen.pipe_private);
+        assert_eq!(pc.seen.status.frames, 32);
+        assert_eq!(pc.calls().len(), calls);
         pc.fail(Call::InstallSite, "check-site exit 2");
         assert!(pc.install_site("bad.toml", &Cancel::default()).is_err());
         assert_eq!(pc.sites, ["site.toml"]);
@@ -1514,7 +1582,10 @@ mod tests {
         assert!(t < at);
         // A call without a token cannot block.
         pc.block_until_cancel(Call::EngineStart);
-        assert!(matches!(pc.engine_start(false), Err(StepError::Failed(_))));
+        assert!(matches!(
+            pc.engine_start(false, false),
+            Err(StepError::Failed(_))
+        ));
         assert!(!pc.facts.engine);
     }
 
@@ -1525,7 +1596,7 @@ mod tests {
         let c = Cancel::default();
         c.preempt();
         let t = Instant::now();
-        assert!(pc.engine_start(false).is_ok());
+        assert!(pc.engine_start(false, true).is_ok());
         assert!(t.elapsed() >= Duration::from_millis(200));
         assert!(pc.facts.engine);
         assert!(c.preempted());

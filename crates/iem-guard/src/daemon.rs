@@ -37,9 +37,9 @@ use crate::crash::{self, After, CrashLoop};
 use crate::effects::engine::ACTIVE_DB;
 use crate::handover::{self, Audio};
 use crate::install::{self, InstallError};
-use crate::pc::{Audience, Kid, Pc, Procs, R, StepError};
+use crate::pc::{Audience, EngineSeen, Kid, Pc, Procs, R, StepError};
 use crate::plan::{Facts, Health, Mode, OnError, PrefFail, Step, on_error, plan};
-use crate::proto::{Reply, Request};
+use crate::proto::{EngineStatus, Reply, Request};
 use crate::site::GuardSite;
 use crate::state::{self, GuardState, InterlockRetry, Switching};
 
@@ -208,6 +208,8 @@ pub struct View {
     pub subscribers: u32,
     /// The session ended and the guard stopped what it stops.
     pub session_done: bool,
+    /// The running engine (`Reply.engine`), refreshed by the watch.
+    pub engine: Option<EngineStatus>,
     /// Replies the daemon thread handed to the pipe's threads…
     pub replies_sent: u64,
     /// …and those the pipe's threads have written (or found their client
@@ -223,6 +225,7 @@ impl View {
             switching: self.switching.clone(),
             alarms: self.alarms.clone(),
             detail: cut(detail, DETAIL_CHARS),
+            engine: self.engine.clone(),
         }
     }
 
@@ -374,6 +377,13 @@ impl Shared {
         self.changed.notify_all();
     }
 
+    /// The engine as the watch saw it last; not a change of the view (a
+    /// status answer reads it, subscribers stay asleep: its counters move
+    /// every second).
+    pub fn set_engine(&self, engine: Option<EngineStatus>) {
+        self.count(|v| v.engine = engine);
+    }
+
     /// The daemon thread handed a reply to a pipe thread.
     pub fn reply_sent(&self) {
         self.count(|v| v.replies_sent += 1);
@@ -417,8 +427,6 @@ pub struct Guard {
     pub shared: Arc<Shared>,
     /// Set by the session window's thread at the end of the session.
     pub session_ending: Arc<AtomicBool>,
-    /// The HIL job that began and has not ended.
-    pub job: Option<u64>,
     /// `Quit`: the daemon stops, its children keep running.
     pub quit: bool,
     /// After an activation that changed the guard's exe: hand over to it.
@@ -448,6 +456,12 @@ pub struct Guard {
     session_done: bool,
     /// The newest alarm whose notice was tried.
     noticed: u64,
+    /// The running engine as the supervisor connection saw it last.
+    seen: Option<EngineSeen>,
+    /// Engine processes this guard started (a respawn adds one).
+    spawns: u64,
+    /// The exit code of the engine that ended last (the watch's).
+    last_exit: Option<i32>,
 }
 
 impl Guard {
@@ -466,7 +480,6 @@ impl Guard {
             shared: Arc::new(Shared::new(cancel.clone())),
             cancel,
             session_ending: Arc::new(AtomicBool::new(false)),
-            job: None,
             quit: false,
             handover: None,
             session_wait: SESSION_ENGINE_WAIT,
@@ -485,6 +498,9 @@ impl Guard {
             last_drift: None,
             session_done: false,
             noticed: 0,
+            seen: None,
+            spawns: 0,
+            last_exit: None,
         };
         g.publish(|_| {});
         g
@@ -538,13 +554,36 @@ impl Guard {
 
     fn publish(&self, extra: impl FnOnce(&mut View)) {
         let status = status_text(self);
+        let engine = self.engine_status();
         self.shared.update(|v| {
             v.mode = self.state.mode;
             v.switching.clone_from(&self.state.switching);
             v.alarms = self.alarms.all().to_vec();
             v.status = status;
+            v.engine = engine;
             extra(v);
         });
+    }
+
+    /// The running engine as `Reply.engine` shows it (design §7: HIL v1
+    /// reads it through `iemmode status`); `None` while none runs.
+    pub fn engine_status(&self) -> Option<EngineStatus> {
+        self.seen
+            .as_ref()
+            .map(|seen| crate::effects::engine::engine_status(seen, self.spawns, self.last_exit))
+    }
+
+    /// Looks at what the supervisor connection holds of the engine (no
+    /// wait, no process read) for the next replies.
+    fn look(&mut self, pc: &mut dyn Pc) {
+        self.seen = pc.engine_seen();
+        self.shared.set_engine(self.engine_status());
+    }
+
+    /// The engine's HIL flags (test signal, fault injection): only in dev
+    /// while a HIL job runs, never in live (design §7).
+    fn hil_engine(&self, to: Mode) -> bool {
+        to == Mode::Dev && self.state.job.is_some()
     }
 
     /// Writes the state and the alarms (when the guard has files).
@@ -617,6 +656,11 @@ impl Guard {
     fn finish(&mut self, pc: &mut dyn Pc, outcome: Outcome, mode: Mode) -> Outcome {
         let from = self.state.switching.take().map(|s| s.from);
         self.state.mode = mode;
+        // A HIL job lives in dev only (an event plan without a runner has
+        // no JobsCancel step).
+        if mode != Mode::Dev {
+            self.state.job = None;
+        }
         self.trial = false;
         self.force = false;
         self.build = None;
@@ -666,6 +710,7 @@ impl Guard {
             switching: self.state.switching.clone(),
             alarms: self.alarms.all().to_vec(),
             detail: cut(&text, DETAIL_CHARS),
+            engine: self.engine_status(),
         }
     }
 
@@ -695,7 +740,7 @@ pub fn status_text(g: &Guard) -> String {
         Some(sha) => format!("bundle {sha}"),
         None => "no bundle".to_owned(),
     });
-    if let Some(run) = g.job {
+    if let Some(run) = g.state.job {
         parts.push(format!("HIL job {run}"));
     }
     if let Some(r) = &g.state.interlock_retry {
@@ -905,8 +950,16 @@ fn run_step(pc: &mut dyn Pc, g: &mut Guard, step: Step, to: Mode, facts: &Facts)
             Ok(())
         }
         Step::EngineStart => {
-            let pid = pc.engine_start(true)?;
-            g.info(format!("engine started, held (pid {pid})"));
+            let hil = g.hil_engine(to);
+            let pid = pc.engine_start(true, hil)?;
+            g.spawns += 1;
+            if hil {
+                g.info(format!(
+                    "engine started, held, with its HIL flags (pid {pid})"
+                ));
+            } else {
+                g.info(format!("engine started, held (pid {pid})"));
+            }
             Ok(())
         }
         Step::EngineArm => {
@@ -934,7 +987,7 @@ fn run_step(pc: &mut dyn Pc, g: &mut Guard, step: Step, to: Mode, facts: &Facts)
         }
         Step::RunnerStart => pc.runner_start(),
         Step::JobsCancel => {
-            if let Some(run) = g.job.take() {
+            if let Some(run) = g.state.job.take() {
                 g.info(format!("HIL job {run} cancelled"));
             }
             Ok(())
@@ -1087,6 +1140,7 @@ pub fn handle(pc: &mut dyn Pc, g: &mut Guard, req: Request, epoch: u64) -> Reply
             Ok(()) => outcome(pc.engine_force_reopen(), "the engine reopened the driver"),
             Err(why) => (false, why),
         },
+        Request::InjectFault => inject_fault(pc, g),
         Request::RunnerStop => runner_stop(pc, g),
         Request::ProbeTask => outcome(pc.probe_task(), "the probe task ended with 0"),
         Request::RehearseTeardown => rehearse(pc, g),
@@ -1108,6 +1162,7 @@ pub fn handle(pc: &mut dyn Pc, g: &mut Guard, req: Request, epoch: u64) -> Reply
         }
     };
     send_notices(pc, g);
+    g.look(pc);
     g.reply(ok, &detail)
 }
 
@@ -1299,7 +1354,9 @@ pub fn activate_files(g: &mut Guard, sha: &str) -> Result<bool, String> {
 }
 
 /// `activate <sha>` (dev only): bin copies, the pin, the bundle's Defender
-/// exclusions, then the hand-over to a changed guard exe.
+/// exclusions; inside a HIL job the engine and the server then run the new
+/// bundle (HIL checks their versions, design §7); last the hand-over to a
+/// changed guard exe (the job is in the state, so the new guard serves it).
 fn activate(pc: &mut dyn Pc, g: &mut Guard, sha: &str) -> (bool, String) {
     if let Err(why) = g.need_dev("activate") {
         return (false, why);
@@ -1312,11 +1369,27 @@ fn activate(pc: &mut dyn Pc, g: &mut Guard, sha: &str) -> (bool, String) {
         Err(why) => return (false, format!("activation failed: {why}")),
     };
     pc.set_bundle(Some(sha));
-    if let Err(e) = pc.exclude(sha) {
+    // The other pin keeps its exclusions (a revert needs them).
+    let keep: Vec<String> = g
+        .state
+        .pins
+        .previous
+        .iter()
+        .filter(|p| p.as_str() != sha)
+        .cloned()
+        .collect();
+    if let Err(e) = pc.exclude(sha, &keep) {
         g.raise(None, &format!("Defender exclusions for {sha}: {e}"), false);
     }
+    let mut detail = format!("activated {sha}");
+    if g.state.job.is_some() {
+        match restart_in_job(pc, g) {
+            Ok(()) => detail.push_str("; the engine and the server run it"),
+            Err(why) => return (false, format!("{detail}; {why}")),
+        }
+    }
     if !changed {
-        return (true, format!("activated {sha}"));
+        return (true, detail);
     }
     g.handover = g
         .root
@@ -1324,8 +1397,41 @@ fn activate(pc: &mut dyn Pc, g: &mut Guard, sha: &str) -> (bool, String) {
         .map(|r| install::bin_dir(r).join(install::GUARD_EXE));
     (
         true,
-        format!("activated {sha}; the guard hands over to its new exe"),
+        format!("{detail}; the guard hands over to its new exe"),
     )
+}
+
+/// Inside a HIL job: the engine and the server start again from the active
+/// bundle and site, the engine with the job's HIL flags. The runner (it runs
+/// the job) and the tray keep running, so this is no dev entry. A failure
+/// alarms and unwinds to event, as a failed dev entry does; "ide event"
+/// ends a wait and is served next.
+fn restart_in_job(pc: &mut dyn Pc, g: &mut Guard) -> Result<(), String> {
+    let f = pc.facts();
+    let mut steps = Vec::new();
+    if f.engine {
+        steps.push(Step::EngineStop);
+    }
+    if f.server {
+        steps.push(Step::ServerStop);
+    }
+    steps.extend([Step::EngineStart, Step::EngineArm, Step::ServerStart]);
+    for step in steps {
+        match run_step(pc, g, step, Mode::Dev, &f) {
+            Ok(()) => {}
+            Err(StepError::Preempted) => return Err("pre-empted by event".to_owned()),
+            Err(StepError::Failed(why)) => {
+                g.alarm(step, &why, false);
+                let from = g.state.mode;
+                let out = run_switch(pc, g, from, Mode::Event);
+                return Err(format!(
+                    "{step:?}: {why}; {}",
+                    switch_text(Mode::Event, out, g.state.mode)
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The HIL test signal, card-masked to `[guard] hil_tx` (design §4), only
@@ -1340,7 +1446,7 @@ fn test_signal(
     if let Err(why) = g.need_dev("test-signal") {
         return (false, why);
     }
-    if g.job.is_none() {
+    if g.state.job.is_none() {
         return (
             false,
             "a test signal needs a begun HIL job (job-begin)".to_owned(),
@@ -1395,7 +1501,7 @@ fn job_begin(pc: &mut dyn Pc, g: &mut Guard, run: u64) -> (bool, String) {
     if let Err(why) = g.need_dev("a HIL job") {
         return (false, why);
     }
-    if let Some(other) = g.job {
+    if let Some(other) = g.state.job {
         return (false, format!("HIL job {other} has not ended"));
     }
     let quiet = match pc.band_quiet_for() {
@@ -1420,14 +1526,16 @@ fn job_begin(pc: &mut dyn Pc, g: &mut Guard, run: u64) -> (bool, String) {
     if !stage_quiet(&peaks) {
         return (false, format!("stage peaks {peaks:?} dBFS: not quiet"));
     }
-    g.job = Some(run);
+    g.state.job = Some(run);
+    g.save();
     (true, format!("HIL job {run} began"))
 }
 
 fn job_end(g: &mut Guard, run: u64) -> (bool, String) {
-    match g.job {
+    match g.state.job {
         Some(r) if r == run => {
-            g.job = None;
+            g.state.job = None;
+            g.save();
             (true, format!("HIL job {run} ended"))
         }
         Some(r) => (false, format!("HIL job {r} runs, not {run}")),
@@ -1436,7 +1544,9 @@ fn job_end(g: &mut Guard, run: u64) -> (bool, String) {
 }
 
 /// F30: the new site checked and installed, then dev entered again (the
-/// engine and the server restart with it).
+/// engine and the server restart with it). Inside a HIL job (HIL applies
+/// and reverts a synthetic change, design §7) only the engine and the
+/// server restart: a dev entry would stop the runner that runs the job.
 fn install_site(pc: &mut dyn Pc, g: &mut Guard, path: &str) -> (bool, String) {
     if let Err(why) = g.need_dev("install-site") {
         return (false, why);
@@ -1445,6 +1555,15 @@ fn install_site(pc: &mut dyn Pc, g: &mut Guard, path: &str) -> (bool, String) {
     match pc.install_site(path, &c) {
         Ok(r) => g.info(r),
         Err(e) => return (false, format!("site refused: {e}")),
+    }
+    if g.state.job.is_some() {
+        return match restart_in_job(pc, g) {
+            Ok(()) => (
+                true,
+                "site installed; the engine and the server run it (HIL job)".to_owned(),
+            ),
+            Err(why) => (false, format!("site installed; {why}")),
+        };
     }
     let out = run_switch(pc, g, Mode::Dev, Mode::Dev);
     (
@@ -1456,12 +1575,32 @@ fn install_site(pc: &mut dyn Pc, g: &mut Guard, path: &str) -> (bool, String) {
     )
 }
 
+/// HIL's RT panic (design §7): dev, inside a begun HIL job, forwarded to
+/// the engine (started with its fault-injection flag for the job, which
+/// refuses it otherwise); its exit 70 is the watch's, which starts it again
+/// after the backoff (`crash::after_exit`, the fade-in on the new stream).
+fn inject_fault(pc: &mut dyn Pc, g: &mut Guard) -> (bool, String) {
+    if let Err(why) = g.need_dev("inject-fault") {
+        return (false, why);
+    }
+    if g.state.job.is_none() {
+        return (
+            false,
+            "a fault needs a begun HIL job (job-begin)".to_owned(),
+        );
+    }
+    outcome(
+        pc.engine_inject_fault(),
+        "the engine faults its RT callback; the watch starts it again",
+    )
+}
+
 /// Ctrl-Break to the idle runner (bootstrap check).
 fn runner_stop(pc: &mut dyn Pc, g: &mut Guard) -> (bool, String) {
     if let Err(why) = g.need_dev("runner-stop") {
         return (false, why);
     }
-    if let Some(run) = g.job {
+    if let Some(run) = g.state.job {
         return (false, format!("HIL job {run} runs: the runner is not idle"));
     }
     let c = g.cancel.clone();
@@ -1563,6 +1702,7 @@ pub fn tick(pc: &mut dyn Pc, g: &mut Guard, at: Instant) {
     // What the watch did is logged; no request reads it.
     g.report.clear();
     let p = pc.procs();
+    g.look(pc);
     for (kid, code) in &p.exited {
         exited(pc, g, *kid, *code, at);
     }
@@ -1598,6 +1738,7 @@ fn exited(pc: &mut dyn Pc, g: &mut Guard, kid: Kid, code: Option<i32>, at: Insta
 }
 
 fn engine_exited(pc: &mut dyn Pc, g: &mut Guard, code: Option<i32>, at: Instant, session: bool) {
+    g.last_exit = code;
     let abnormal = !session && !matches!(code, Some(0 | 2 | 3));
     let looped = abnormal && g.crash.record(at);
     let mode = g.state.mode;
@@ -1645,8 +1786,10 @@ fn respawn(pc: &mut dyn Pc, g: &mut Guard) {
     if g.state.mode == Mode::Event {
         return;
     }
-    match pc.engine_start(false) {
+    let hil = g.hil_engine(g.state.mode);
+    match pc.engine_start(false, hil) {
         Ok(pid) => {
+            g.spawns += 1;
             info!("the engine was started again, unheld (pid {pid})");
             g.state.pids = pc.children();
             g.save();
@@ -1750,6 +1893,7 @@ pub fn start(pc: &mut dyn Pc, g: &mut Guard, boot: u64) -> Option<Outcome> {
     let saved = g.state.pids.clone();
     g.state.pids = pc.adopt(&saved);
     pc.set_bundle(g.state.pins.current.as_deref());
+    g.look(pc);
     g.save();
     let resume = g.state.switching.is_some();
     let out = (reset || resume).then(|| {
@@ -1803,6 +1947,7 @@ pub fn direct_event<L>(pc: &mut dyn Pc, g: &mut Guard, lock: Option<L>, dry_run:
         event_now(pc, g)
     };
     send_notices(pc, g);
+    g.look(pc);
     g.reply(ok, &format!("direct: {detail}"))
 }
 

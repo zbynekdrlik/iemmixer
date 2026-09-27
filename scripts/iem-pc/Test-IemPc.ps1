@@ -500,13 +500,13 @@ function Invoke-IemTuningApply { param([string]$ProfilePath, [int]$Tier) return 
     Assert ((Test-IemHilInputs -Sha $S -Branch 'feature' -JobRun '42a' -Out '' -ScriptDir (Join-Path $base 'elsewhere')).Count -eq 4) 'hil-inputs-branch-run-out-and-place'
     Assert ((Test-IemHilInputs -Sha $S.ToUpperInvariant() -Branch 'main' -JobRun '1' -Out 'r.json' -ScriptDir $hilDir).Count -eq 2) 'hil-inputs-an-uppercase-sha-and-its-folder'
     $hi = @{ Sha = $S; Branch = 'dev'; JobRun = '1'; Out = 'r.json'; ScriptDir = $hilDir }
-    Assert ((Test-IemHilInputs @hi -TestDbfs (-20) -TestTtl 120).Count -eq 0) 'hil-inputs-the-test-signal-at-its-limits'
+    Assert ((Test-IemHilInputs @hi -TestDbfs (-20) -TestTtl 60).Count -eq 0) 'hil-inputs-the-test-signal-at-its-limits'
     Assert ((Test-IemHilInputs @hi -TestDbfs (-120) -TestTtl 0.001).Count -eq 0) 'hil-inputs-a-quiet-short-test-signal'
     foreach ($db in @(-19.9, 0, 6, [double]::NaN, [double]::PositiveInfinity, [double]::NegativeInfinity)) {
         $bad = Test-IemHilInputs @hi -TestDbfs $db -TestTtl 10
         Assert ($bad.Count -eq 1 -and $bad[0] -like 'TestDbfs:*') "hil-inputs-refuse-the-level [$db]"
     }
-    foreach ($ttl in @(0, -1, 120.001, [double]::NaN)) {
+    foreach ($ttl in @(0, -1, 60.001, [double]::NaN)) {
         $bad = Test-IemHilInputs @hi -TestDbfs (-30) -TestTtl $ttl
         Assert ($bad.Count -eq 1 -and $bad[0] -like 'TestTtl:*') "hil-inputs-refuse-the-ttl [$ttl]"
     }

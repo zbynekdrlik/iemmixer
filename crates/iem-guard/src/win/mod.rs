@@ -36,7 +36,7 @@ use tracing::{info, warn};
 
 use crate::cancel::Cancel;
 use crate::handover::{AppExit, ReaperFacts};
-use crate::pc::{self, Audience, Images, Kid, Pc, Procs, R, Status, StepError};
+use crate::pc::{self, Audience, EngineSeen, Images, Kid, Pc, Procs, R, Status, StepError};
 use crate::plan::{Facts, Health, Mode};
 use crate::site::{self, Settings};
 use crate::state::Children;
@@ -56,6 +56,8 @@ pub struct WinPc {
     kids: procs::Kids,
     http: ureq::Agent,
     sup: Option<engine::Supervisor>,
+    /// The engine pid whose control pipe's DACL was read, and the verdict.
+    dacl: Option<(u32, bool)>,
     tray_quit: Option<TrayQuit>,
 }
 
@@ -73,6 +75,7 @@ impl WinPc {
             kids: procs::Kids::default(),
             http: ureq::Agent::new_with_config(config),
             sup: None,
+            dacl: None,
             tray_quit: None,
         }
     }
@@ -104,6 +107,12 @@ impl Pc for WinPc {
     fn procs(&mut self) -> Procs {
         let mut p = procs::list(self);
         p.exited = self.kids.reap();
+        if p.exited.iter().any(|(kid, _)| *kid == Kid::Engine) {
+            // A dead engine's stream is dropped at once: while a client
+            // holds it the pipe's name stays taken for the respawn.
+            self.sup = None;
+            self.dacl = None;
+        }
         p
     }
 
@@ -188,8 +197,8 @@ impl Pc for WinPc {
         tasks::data(self, mode, c)
     }
 
-    fn engine_start(&mut self, hold: bool) -> R<u32> {
-        engine::start(self, hold)
+    fn engine_start(&mut self, hold: bool, hil: bool) -> R<u32> {
+        engine::start(self, hold, hil)
     }
 
     fn engine_ready(&mut self, secs: u32, c: &Cancel) -> R<Status> {
@@ -284,12 +293,20 @@ impl Pc for WinPc {
         engine::force_reopen(self)
     }
 
+    fn engine_inject_fault(&mut self) -> R<()> {
+        engine::inject_fault(self)
+    }
+
+    fn engine_seen(&mut self) -> Option<EngineSeen> {
+        engine::seen(self)
+    }
+
     fn install_site(&mut self, path: &str, c: &Cancel) -> R<String> {
         engine::install_site(self, path, c)
     }
 
-    fn exclude(&mut self, sha: &str) -> R<()> {
-        tasks::exclude(self, sha)
+    fn exclude(&mut self, sha: &str, keep: &[String]) -> R<()> {
+        tasks::exclude(self, sha, keep)
     }
 }
 
@@ -358,7 +375,9 @@ mod tests {
         assert!(!f.trial && !f.force);
         assert_eq!(pc.children(), Children::default());
         let failed = |r: R<u32>| matches!(r, Err(StepError::Failed(_)));
-        assert!(failed(pc.engine_start(true)));
+        assert!(failed(pc.engine_start(true, false)));
+        // No engine of ours runs: nothing to see, nothing connected.
+        assert_eq!(pc.engine_seen(), None);
         assert!(failed(pc.server_start(Mode::Dev)));
         assert!(matches!(
             pc.notify(Audience::Alarm, "t", "b"),

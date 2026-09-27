@@ -1250,9 +1250,9 @@ function Test-IemHilInputs {
     if (-not $Out) { $p += 'Out: the result.json path' }
     if (-not $ScriptDir -or (Split-Path -Leaf $ScriptDir) -cne $Sha) { $p += 'hil-v1.ps1 runs only from the verified bundles\<sha>\ directory' }
     # The test signal (design section 7): at most -20 dBFS (the engine caps it
-    # there too), for a TTL within the engine's (0, 120] s.
+    # there too), for a TTL within the guard's (0, 60] s (HIL_MAX_TTL_S).
     if ([double]::IsNaN($TestDbfs) -or [double]::IsInfinity($TestDbfs) -or $TestDbfs -gt -20) { $p += 'TestDbfs: a level of at most -20 dBFS' }
-    if ([double]::IsNaN($TestTtl) -or $TestTtl -le 0 -or $TestTtl -gt 120) { $p += 'TestTtl: more than 0 and at most 120 seconds' }
+    if ([double]::IsNaN($TestTtl) -or $TestTtl -le 0 -or $TestTtl -gt 60) { $p += 'TestTtl: more than 0 and at most 60 seconds' }
     return ,$p
 }
 

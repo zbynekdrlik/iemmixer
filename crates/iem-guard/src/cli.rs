@@ -27,7 +27,7 @@ pub const IEMMODE_USAGE: &str = "usage: iemmode status | event [--dry-run] [--di
   | dev [--build SHA] [--force] [--dry-run] | live --build SHA [--trial] [--dry-run]
   | install <zip> | activate <sha> | test-signal <input> <dbfs> <ttl>
   | report <sha> <green|red> <detail> | job-begin <run> | job-end <run>
-  | install-site <file> | force-reopen | runner-stop | probe-task
+  | install-site <file> | force-reopen | inject-fault | runner-stop | probe-task
   | rehearse-teardown | alarm-test | alarm-ack <id> | quit";
 
 pub const GUARD_USAGE: &str = "usage: iemmixer-guard run | install <zip> [--verify-only]";
@@ -202,6 +202,7 @@ pub fn parse(args: &[String]) -> Result<Cli, String> {
             ask(Request::AlarmAck { id: whole(id)? })
         }
         "force-reopen" => bare(Request::ForceReopen),
+        "inject-fault" => bare(Request::InjectFault),
         "runner-stop" => bare(Request::RunnerStop),
         "probe-task" => bare(Request::ProbeTask),
         "rehearse-teardown" => bare(Request::RehearseTeardown),
@@ -394,6 +395,7 @@ mod tests {
         assert_eq!(ask(&["alarm-ack", "7"]), Request::AlarmAck { id: 7 });
         for (word, req) in [
             ("force-reopen", Request::ForceReopen),
+            ("inject-fault", Request::InjectFault),
             ("runner-stop", Request::RunnerStop),
             ("probe-task", Request::ProbeTask),
             ("rehearse-teardown", Request::RehearseTeardown),
@@ -556,6 +558,7 @@ mod tests {
             switching: None,
             alarms: Vec::new(),
             detail: "d".into(),
+            engine: None,
         }
     }
 

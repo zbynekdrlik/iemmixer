@@ -98,45 +98,71 @@ pub(super) fn probe() -> R<()> {
     }
 }
 
-/// The Defender process exclusions of the verified bundle `sha` through
-/// `\iemmixer\iemmixer-exclude` (design §5.1): its request file names the
-/// bundle, the task re-verifies it against its sums; its result must be 0.
-pub(super) fn exclude(pc: &WinPc, sha: &str) -> R<()> {
-    if !bundle::valid_sha(sha) {
-        return Err(StepError::failed(format!("not a bundle SHA: {sha:?}")));
-    }
-    let dir = pc.s.guard_dir();
-    fs::create_dir_all(&dir).map_err(|e| procs::failed("the guard directory", e))?;
+/// One request to an elevated task (design §5.1; `IemPc.psm1`
+/// `Invoke-IemTaskRequest`): the request file in the user's root, the task,
+/// then its answer with our id in the elevated root. The task changes the
+/// PC, so its answer is awaited without the token (a mutation finishes
+/// first).
+fn elevated(
+    pc: &WinPc,
+    kind: &str,
+    task: &str,
+    id: &str,
+    request: &str,
+    limit: Duration,
+) -> R<String> {
+    let requests = pc.s.requests_dir();
+    fs::create_dir_all(&requests).map_err(|e| procs::failed("the requests directory", e))?;
     state::write_atomic(
-        &dir.join(tasks::EXCLUDE_REQUEST),
-        tasks::exclude_request(sha).as_bytes(),
+        &requests.join(tuning::request_name(kind)),
+        request.as_bytes(),
     )
-    .map_err(|e| procs::failed("the exclude request", e))?;
-    let mut watch = ProbeWatch::new(query(tasks::EXCLUDE)?.as_ref());
-    run_task(tasks::EXCLUDE)?;
-    let mut verdict = Probe::Wait;
-    procs::poll(EXCLUDE_LIMIT, &Cancel::default(), || {
-        verdict = watch.observe(query(tasks::EXCLUDE)?.as_ref());
-        Ok(verdict != Probe::Wait)
+    .map_err(|e| procs::failed(&format!("the {kind} request"), e))?;
+    run_task(task)?;
+    let result = pc.s.results_dir().join(tuning::result_name(kind));
+    let mut answer = None;
+    procs::poll(limit, &Cancel::default(), || {
+        answer = fs::read_to_string(&result)
+            .ok()
+            .and_then(|text| tuning::result_for(&text, kind, id));
+        Ok(answer.is_some())
     })?;
-    match verdict {
-        Probe::Passed => {
-            info!("Defender exclusions added for {sha}");
-            Ok(())
-        }
-        Probe::Failed(why) => Err(StepError::failed(format!(
-            "the exclude task for {sha} failed ({why})"
-        ))),
-        Probe::Wait => Err(StepError::failed(format!(
-            "the exclude task did not end within {} s",
-            EXCLUDE_LIMIT.as_secs()
+    match answer {
+        Some(Ok(detail)) => Ok(detail),
+        Some(Err(why)) => Err(StepError::failed(format!("the {kind} task: {why}"))),
+        None => Err(StepError::failed(format!(
+            "the {kind} task did not answer within {} s",
+            limit.as_secs()
         ))),
     }
 }
 
-/// One verb through the elevated tuning task: the request file, the task,
-/// then its answer. The task changes the PC, so its answer is awaited
-/// without the token (a mutation finishes first).
+/// The Defender process exclusions of the verified bundle `sha` through
+/// `\iemmixer\iemmixer-exclude` (design §5.1): the task re-verifies the
+/// bundle against its sums; `keep`'s exclusions stay, every other bundle's
+/// go.
+pub(super) fn exclude(pc: &WinPc, sha: &str, keep: &[String]) -> R<()> {
+    if !bundle::valid_sha(sha) || !keep.iter().all(|k| bundle::valid_sha(k)) {
+        return Err(StepError::failed(format!(
+            "not a bundle SHA: {sha:?} (keep {keep:?})"
+        )));
+    }
+    let id = format!("{}-exclude", procs::now_ms());
+    let request = tuning::exclude_request(&id, sha, keep);
+    let detail = elevated(
+        pc,
+        tuning::EXCLUDE,
+        tasks::EXCLUDE,
+        &id,
+        &request,
+        EXCLUDE_LIMIT,
+    )?;
+    info!("Defender exclusions for {sha}: {detail}");
+    Ok(())
+}
+
+/// One verb through the elevated tuning task; "absent" while the bundle
+/// ships no tuning module (S1c).
 pub(super) fn tuning(pc: &WinPc, verb: &str) -> R<String> {
     if !tuning::valid_verb(verb) {
         return Err(StepError::failed(format!("not a tuning verb: {verb:?}")));
@@ -145,34 +171,18 @@ pub(super) fn tuning(pc: &WinPc, verb: &str) -> R<String> {
         warn!("the bundle has no tuning module: tuning {verb} is reported absent");
         return Ok(tuning::ABSENT.to_owned());
     }
-    let dir = pc.s.tuning_dir();
-    fs::create_dir_all(&dir).map_err(|e| procs::failed("the tuning directory", e))?;
     let id = format!("{}-{verb}", procs::now_ms());
-    state::write_atomic(
-        &dir.join(tuning::REQUEST),
-        tuning::request(&id, verb).as_bytes(),
-    )
-    .map_err(|e| procs::failed("the tuning request", e))?;
-    run_task(tasks::TUNING)?;
-    let result = dir.join(tuning::RESULT);
-    let mut answer = None;
-    procs::poll(TUNING_LIMIT, &Cancel::default(), || {
-        answer = fs::read_to_string(&result)
-            .ok()
-            .and_then(|text| tuning::result_for(&text, &id));
-        Ok(answer.is_some())
-    })?;
-    match answer {
-        Some(Ok(detail)) => {
-            info!("tuning {verb}: {detail}");
-            Ok(detail)
-        }
-        Some(Err(detail)) => Err(StepError::failed(format!("tuning {verb}: {detail}"))),
-        None => Err(StepError::failed(format!(
-            "tuning {verb}: no answer within {} s",
-            TUNING_LIMIT.as_secs()
-        ))),
-    }
+    let request = tuning::tuning_request(&id, verb);
+    let detail = elevated(
+        pc,
+        tuning::TUNING,
+        tasks::TUNING,
+        &id,
+        &request,
+        TUNING_LIMIT,
+    )?;
+    info!("tuning {verb}: {detail}");
+    Ok(detail)
 }
 
 /// S1c's REAPER-mode fingerprint through the tuning task (`state`); a
@@ -196,7 +206,7 @@ fn service_start(name: &str) -> Result<u32, String> {
 /// The tuning module's record against native reads (P10): the active power
 /// plan and the recorded services' start types. No record, no drift.
 pub(super) fn drift(pc: &WinPc) -> R<Option<String>> {
-    let path = pc.s.tuning_dir().join(tuning::EXPECT);
+    let path = pc.s.tuning_record();
     let text = match fs::read_to_string(&path) {
         Ok(text) => text,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
