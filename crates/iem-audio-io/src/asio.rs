@@ -104,6 +104,9 @@ pub enum AsioError {
     Period(PeriodVerdict),
     /// The stream's owner thread did not start or ended without an answer.
     Thread(String),
+    /// The Windows session ended while the card opened: the open stopped
+    /// and the driver was released.
+    SessionEnd,
 }
 
 impl fmt::Display for AsioError {
@@ -153,6 +156,7 @@ impl fmt::Display for AsioError {
                 f.write_str("the driver's period could not be measured from its first callbacks")
             }
             Self::Thread(e) => write!(f, "the stream's owner thread: {e}"),
+            Self::SessionEnd => f.write_str("the Windows session ended while the card opened"),
         }
     }
 }
@@ -996,12 +1000,15 @@ struct PrefWindow {
     store: HkcuPref,
     original: Pref,
     open: bool,
+    /// Where a close that failed in `Drop` is noted.
+    shared: Arc<Shared>,
 }
 
 impl PrefWindow {
     fn enter(
         (key, name, original): &(String, String, Pref),
         frames: u32,
+        shared: &Arc<Shared>,
     ) -> Result<Self, PrefError> {
         let mut store = HkcuPref {
             key: key.clone(),
@@ -1012,6 +1019,7 @@ impl PrefWindow {
             store,
             original: original.clone(),
             open: true,
+            shared: Arc::clone(shared),
         })
     }
 
@@ -1023,8 +1031,19 @@ impl PrefWindow {
 
 impl Drop for PrefWindow {
     fn drop(&mut self) {
-        if self.open {
-            let _ = prefwin::leave(&mut self.store, &self.original);
+        // Still open only while a driver call unwinds. A failed close is
+        // noted where the engine finds it: `pref_failure` on a live stream
+        // (Alarm{pref}, exit 3), `start`'s refusal when the first open died.
+        if self.open
+            && let Err(error) = prefwin::leave(&mut self.store, &self.original)
+        {
+            let text = AsioError::PrefLeave {
+                error: error.clone(),
+                after: None,
+            }
+            .to_string();
+            note(&self.shared.pref_failure, text);
+            note(&self.shared.pref_leave, error);
         }
     }
 }
@@ -1074,6 +1093,13 @@ struct Shared {
     resets: AtomicU64,
     fault: Mutex<Option<String>>,
     pref_failure: Mutex<Option<String>>,
+    /// The close that a preference window's `Drop` could not do (a driver
+    /// call panicked while it was open).
+    pref_leave: Mutex<Option<PrefError>>,
+    /// The session-end handler ran while the owner thread was inside an
+    /// open or a finish, so it could not reach the owner: the owner stops
+    /// that open and releases the driver for good as soon as it returns.
+    release_pending: AtomicBool,
     /// `(address, bytes)` of the preallocated buffers.
     ranges: Mutex<Vec<(usize, usize)>>,
 }
@@ -1090,12 +1116,12 @@ impl Shared {
     }
 }
 
-/// Keeps the first text written to `slot`.
-fn note(slot: &Mutex<Option<String>>, text: String) {
+/// Keeps the first value written to `slot`.
+fn note<T>(slot: &Mutex<Option<T>>, value: T) {
     if let Ok(mut s) = slot.lock()
         && s.is_none()
     {
-        *s = Some(text);
+        *s = Some(value);
     }
 }
 
@@ -1169,7 +1195,7 @@ impl Owner {
             .card
             .pref
             .as_ref()
-            .map(|pref| PrefWindow::enter(pref, self.frames))
+            .map(|pref| PrefWindow::enter(pref, self.frames, &self.shared))
             .transpose()
             .map_err(AsioError::Pref)?;
         let prepared = self.prepare_card();
@@ -1298,6 +1324,11 @@ impl Owner {
         loop {
             // A driver may need this thread's messages to call back.
             pump_messages();
+            if self.shared.release_pending.load(Ordering::SeqCst) {
+                // The session ended meanwhile (`session_end`): no stream.
+                self.carry = self.finish(live);
+                return Err(AsioError::SessionEnd);
+            }
             // SAFETY: the stream is live: only `finish` frees it.
             let ring = unsafe { &*raw }.positions();
             match owner::open_period(&ring, self.frames, started.elapsed()) {
@@ -1334,6 +1365,9 @@ impl Owner {
         let wait = Instant::now();
         while BACKEND_IN_FLIGHT.load(Ordering::SeqCst) != 0 {
             if wait.elapsed() >= STOP_WAIT {
+                // SAFETY: a parked stream is never freed, so its counters
+                // stay readable; `stats` keeps counting its callbacks.
+                self.base = self.base.plus(unsafe { &*backend }.telemetry.counters());
                 core::mem::forget(card);
                 self.shared.parked.store(true, Ordering::SeqCst);
                 self.done = Some(StopOutcome::Parked);
@@ -1410,7 +1444,15 @@ impl Owner {
         let Some(carry) = self.finish(live) else {
             return;
         };
-        if let Err(e) = self.open(carry, false) {
+        if self.shared.release_pending.load(Ordering::SeqCst) {
+            // The session ended during the finish: no new open (the next
+            // tick releases for good).
+            self.carry = Some(carry);
+            return;
+        }
+        if let Err(e) = self.open(carry, false)
+            && !matches!(e, AsioError::SessionEnd)
+        {
             if matches!(e, AsioError::PrefLeave { .. }) {
                 note(&self.shared.pref_failure, e.to_string());
             }
@@ -1421,6 +1463,10 @@ impl Owner {
     fn tick(&mut self, now: Instant) -> Next {
         if SEH.load(Ordering::SeqCst) && self.done.is_none() {
             self.fault("a structured exception reached the filter".to_owned());
+            self.release_for_good();
+        }
+        if self.shared.release_pending.load(Ordering::SeqCst) && self.done.is_none() {
+            // The session-end handler could not reach the owner.
             self.release_for_good();
         }
         if self.shared.stop.load(Ordering::SeqCst) {
@@ -1466,12 +1512,13 @@ impl Owner {
             .store(u64::from(self.budget.used()), Ordering::Release);
     }
 
-    /// The owner thread ends with the driver released: the buffers go.
+    /// The owner thread ends with the driver released: the processor and
+    /// its buffers go.
     fn close(&mut self) {
         if let Ok(mut r) = self.shared.ranges.lock() {
             r.clear();
         }
-        self.carry = None;
+        drop(self.carry.take());
     }
 }
 
@@ -1575,17 +1622,24 @@ fn park(_window: &SessionEndWindow) -> ! {
 /// `WM_ENDSESSION` on the owner thread's window: the engine sees
 /// `session_ending`, saves, fades out and asks the stream to stop; the
 /// driver is released here, before the handler returns and Windows may end
-/// the process (after [`owner::SESSION_END_WAIT`] at the latest). While the
-/// owner thread is itself inside an open or a finish, it finishes that on its
-/// own.
+/// the process (after [`owner::SESSION_END_WAIT`] at the latest).
+///
+/// Dispatched from the pump inside an open or a finish (the owner is
+/// borrowed), it cannot reach the driver: it sets `release_pending` and
+/// returns, and the owner thread stops that open and releases for good right
+/// after. Windows may end the process in between (a short residual window,
+/// only when the session ends during an open or a reopen).
 fn session_end(state: &RefCell<Owner>, shared: &Shared) {
     let started = Instant::now();
     while !owner::session_end_release(shared.stop.load(Ordering::SeqCst), started.elapsed()) {
         pump_messages();
         thread::sleep(TICK);
     }
-    if let Ok(mut o) = state.try_borrow_mut() {
-        o.release_for_good();
+    match state.try_borrow_mut() {
+        Ok(mut o) => {
+            o.release_for_good();
+        }
+        Err(_) => shared.release_pending.store(true, Ordering::SeqCst),
     }
 }
 
@@ -1668,9 +1722,19 @@ impl<P: Process + 'static> AsioStream<P> {
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 let _ = thread.join();
-                Err(AsioError::Thread(
-                    "the owner thread ended before the stream opened".to_owned(),
-                ))
+                let ended =
+                    AsioError::Thread("the owner thread ended before the stream opened".to_owned());
+                // A driver call panicked inside the preference window and
+                // its drop could not close it: the refusal says so.
+                Err(
+                    match shared.pref_leave.lock().ok().and_then(|p| p.clone()) {
+                        Some(error) => AsioError::PrefLeave {
+                            error,
+                            after: Some(Box::new(ended)),
+                        },
+                        None => ended,
+                    },
+                )
             }
         }
     }
@@ -1904,6 +1968,10 @@ mod tests {
         assert_eq!(
             AsioError::Channels(MapError::Zero { side: "rx" }).to_string(),
             "the topology does not fit the card: rx channel 0: card channels count from 1"
+        );
+        assert_eq!(
+            AsioError::SessionEnd.to_string(),
+            "the Windows session ended while the card opened"
         );
     }
 }
