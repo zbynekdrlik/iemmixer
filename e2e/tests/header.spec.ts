@@ -5,7 +5,8 @@ import { PageSocket } from "./support/wire";
 
 // The page headers (F10) against the real engine: the landing title, the
 // mixer header's version and build date, the connection dot and the
-// reconnect banner. member3's page, read-only: nothing here changes a mix.
+// reconnect banner. member3's page: only the reconnect test changes its mix
+// (mic3's mute, from a second socket), and it puts the mute back.
 
 /** The average of a computed `rgb(r, g, b)` colour's channels. */
 function channelAverage(color: string): number {
