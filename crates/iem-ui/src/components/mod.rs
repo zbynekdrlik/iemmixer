@@ -46,9 +46,11 @@ pub(crate) fn after_event(f: impl FnOnce() + 'static) {
 }
 
 /// Keeps `value` (a callback the browser holds) alive while the current
-/// component is mounted.
+/// component is mounted, and drops it when the component unmounts — after
+/// its `on_cleanup`, which stops the browser from calling it. A
+/// `Closure::forget` instead would leak one callback per mount.
 pub(crate) fn keep_while_mounted<T: 'static>(value: T) {
-    std::mem::forget(value);
+    let _ = leptos::prelude::StoredValue::new_local(value);
 }
 
 #[cfg(test)]
