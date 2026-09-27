@@ -353,7 +353,12 @@ try {
     Assert ((Get-IemHilConclusion -Checks @($ok1) -Cancelled) -ceq 'cancelled') 'hil-conclusion-cancelled-wins'
     Assert ((Get-IemHilSummary -Conclusion 'failure' -Checks @($ok1, $bad1)) -ceq 'HIL v1 failure: b (1 of 2 ok)') 'hil-summary-names-the-failed-checks-only'
     Assert ((Get-IemHilSummary -Conclusion 'success' -Checks @($ok1, $ok1)) -ceq 'HIL v1 success: 2 checks ok') 'hil-summary-success'
-    Assert ((Get-IemHilSummary -Conclusion 'cancelled' -Why ('x' * 300)).Length -eq 218) 'hil-summary-cancelled-reason-is-capped'
+    # The summary is public (hil/iem-pc on the public repo, P6): a cancelled
+    # job names a fixed reason, never the guard's free text.
+    Assert ((Get-IemHilSummary -Conclusion 'cancelled' -Reason 'left-dev') -ceq 'HIL v1 cancelled: the guard left dev') 'hil-summary-cancelled-left-dev-is-a-fixed-phrase'
+    Assert ((Get-IemHilSummary -Conclusion 'cancelled' -Reason 'not-free') -ceq 'HIL v1 cancelled: the PC was not free (job-begin refused)') 'hil-summary-cancelled-not-free-is-a-fixed-phrase'
+    Throws { Get-IemHilSummary -Conclusion 'cancelled' -Reason 'input mic7 refused in C:\Users\member1' } 'hil-summary-cancelled-takes-a-reason-code-never-text'
+    Assert ((Get-IemHilSummary -Conclusion 'failure' -Checks @($ok1, $bad1) -Reason 'left-dev') -ceq 'HIL v1 failure: b (1 of 2 ok)') 'hil-summary-a-reason-never-changes-a-failure'
 
     Assert ((ConvertFrom-IemReply -Text '{"ok":true,"mode":"dev"}').mode -ceq 'dev') 'reply-compact'
     Assert ((ConvertFrom-IemReply -Text "{`n  `"ok`": false,`n  `"mode`": `"event`"`n}").mode -ceq 'event') 'reply-indented'
@@ -427,11 +432,13 @@ exit 1
     Assert ($card.numbers.frames -eq 32 -and $card.numbers.missed -eq 0 -and $card.numbers.resets -eq 0 -and $card.numbers.callbacks -ge 2850) 'hil-run-card-numbers-in-the-result'
 
     $h2 = Invoke-HilRun ('{"sha":"' + $S + '","refuse":["job-begin"],"silent":[],"event_after":0}')
-    Assert ($h2.exit -eq 0 -and $h2.result.conclusion -ceq 'cancelled' -and $h2.result.summary -like 'HIL v1 cancelled: job-begin refused: fake job-begin*') 'hil-run-a-refused-job-begin-is-cancelled'
+    Assert ($h2.exit -eq 0 -and $h2.result.conclusion -ceq 'cancelled' -and $h2.result.summary -ceq 'HIL v1 cancelled: the PC was not free (job-begin refused)') "hil-run-a-refused-job-begin-is-cancelled ($($h2.result.summary))"
+    Assert ($h2.result.why -like 'job-begin refused: fake job-begin*' -and $h2.result.summary -notlike '*fake*') 'hil-run-the-guards-detail-stays-in-why-never-in-the-public-summary'
     Assert ($h2.calls.Count -eq 1) "hil-run-a-refused-job-begin-touches-nothing-else ($($h2.calls -join ' | '))"
 
     $h3 = Invoke-HilRun ('{"sha":"' + $S + '","refuse":[],"silent":[],"event_after":3}')
-    Assert ($h3.exit -eq 0 -and $h3.result.conclusion -ceq 'cancelled') "hil-run-a-switch-to-event-cancels (exit $($h3.exit))"
+    Assert ($h3.exit -eq 0 -and $h3.result.conclusion -ceq 'cancelled' -and $h3.result.summary -ceq 'HIL v1 cancelled: the guard left dev') "hil-run-a-switch-to-event-cancels (exit $($h3.exit), $($h3.result.summary))"
+    Assert ($h3.result.why -like '*the guard left dev*' -and $h3.result.summary -notlike '*fake*') 'hil-run-a-cancelled-switch-keeps-its-text-in-why'
     Assert (-not (@($h3.calls) -like 'report *') -and (@($h3.calls) -contains 'job-end 4242') -and -not (@($h3.calls) -contains 'force-reopen')) "hil-run-a-cancelled-job-reports-nothing ($($h3.calls -join ' | '))"
 
     $h4 = Invoke-HilRun ('{"sha":"' + $S + '","refuse":[],"silent":["job-begin"],"event_after":0}')
