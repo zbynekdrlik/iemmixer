@@ -530,12 +530,62 @@ mod tests {
     }
 
     #[test]
-    fn drift_comes_from_the_first_and_last_positions() {
-        let t = Telemetry::new(32, 96_000.0);
+    fn drift_is_anchored_after_the_warmup_burst() {
+        // 48 samples at 96 kHz: exactly 500 µs. The priming callbacks arrive
+        // in a burst inside start(); the card then runs exactly on time.
+        const Q: u64 = 500_000;
+        let t = Telemetry::new(48, 96_000.0);
         assert_eq!(t.snapshot().drift_ppm, None);
-        t.on_callback(1_000, Some(0));
-        t.on_callback(2_000_001_000, Some(192_000));
+        let mut pos = 0;
+        for i in 0..WARMUP {
+            t.on_callback(1_000 + i, Some(pos));
+            pos += 48;
+        }
+        assert_eq!(t.snapshot().drift_ppm, None);
+        for k in 0..=2_000 {
+            t.on_callback(1_007 + (k + 1) * Q, Some(pos));
+            pos += 48;
+        }
+        let s = t.snapshot();
+        assert_eq!(
+            (s.drift_ppm, s.position_gaps, s.late, s.missed),
+            (Some(0.0), 0, 0, 0)
+        );
+        // Callbacks without a position leave the drift's end where it was.
+        t.on_callback(1_007 + 2_002 * Q, None);
         assert_eq!(t.snapshot().drift_ppm, Some(0.0));
+    }
+
+    #[test]
+    fn a_missing_position_is_not_a_gap_but_a_jump_after_warmup_is() {
+        let t = Telemetry::new(32, 96_000.0);
+        let mut at = 1_000;
+        let mut pos = 0;
+        for _ in 0..WARMUP {
+            t.on_callback(at, Some(pos));
+            at += P;
+            pos += 32;
+        }
+        // The first judged callback jumps by two buffers: one gap.
+        t.on_callback(at, Some(pos + 32));
+        pos += 64;
+        at += P;
+        assert_eq!(t.snapshot().position_gaps, 1);
+        t.on_callback(at, Some(pos));
+        pos += 32;
+        at += P;
+        // One callback without a position: the next one has nothing to compare with.
+        t.on_callback(at, None);
+        pos += 32;
+        at += P;
+        t.on_callback(at, Some(pos));
+        pos += 32;
+        at += P;
+        t.on_callback(at, Some(pos));
+        assert_eq!(t.snapshot().position_gaps, 1);
+        at += P;
+        t.on_callback(at, Some(pos + 96));
+        assert_eq!(t.snapshot().position_gaps, 2);
     }
 
     #[test]

@@ -449,6 +449,98 @@ mod spike {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn outcomes_have_their_exit_codes() {
+        assert_eq!(
+            [
+                "done",
+                "stopped",
+                "band-activity",
+                "fault-caught",
+                "rate-changed",
+                "stop-hung"
+            ]
+            .map(code_of),
+            [0, 0, 5, 6, 7, 8]
+        );
+        assert_eq!(
+            [End::Stopped, End::RateChanged, End::BandActivity].map(End::outcome),
+            ["stopped", "rate-changed", "band-activity"]
+        );
+    }
+
+    #[test]
+    fn the_watch_stops_on_the_stop_file_a_rate_change_and_band_activity() {
+        let t0 = Instant::now();
+        let s = Duration::from_secs(1);
+        let mut w = Watch::new(t0);
+        assert_eq!(w.poll(t0, true, true, || 0.01), Some(End::Stopped));
+        assert_eq!(w.poll(t0, false, true, || 0.01), Some(End::RateChanged));
+        // The peak is read once a second; three loud seconds in a row are band activity.
+        let reads = Cell::new(0);
+        let peak = || {
+            reads.set(reads.get() + 1);
+            0.01
+        };
+        assert_eq!(w.poll(t0 + s / 2, false, false, peak), None);
+        assert_eq!(reads.get(), 0);
+        assert_eq!(w.poll(t0 + s, false, false, peak), None);
+        assert_eq!(w.poll(t0 + s, false, false, peak), None);
+        assert_eq!(reads.get(), 1);
+        assert_eq!(w.poll(t0 + 2 * s, false, false, peak), None);
+        assert_eq!(
+            w.poll(t0 + 3 * s, false, false, peak),
+            Some(End::BandActivity)
+        );
+        assert_eq!((reads.get(), w.loudest()), (3, 0.01));
+    }
+
+    #[test]
+    fn a_quiet_second_resets_the_band_guard_and_a_late_poll_reads_once() {
+        let t0 = Instant::now();
+        let s = Duration::from_secs(1);
+        let mut w = Watch::new(t0);
+        assert_eq!(w.poll(t0 + s, false, false, || 0.5), None);
+        assert_eq!(w.poll(t0 + 2 * s, false, false, || 0.0), None);
+        assert_eq!(w.poll(t0 + 3 * s, false, false, || 0.5), None);
+        // A pause of 10 s (a reopen): one read, the next one a second later.
+        let reads = Cell::new(0);
+        let peak = || {
+            reads.set(reads.get() + 1);
+            0.5
+        };
+        assert_eq!(w.poll(t0 + 13 * s, false, false, peak), None);
+        assert_eq!(w.poll(t0 + 13 * s, false, false, peak), None);
+        assert_eq!(reads.get(), 1);
+        assert_eq!(
+            w.poll(t0 + 14 * s, false, false, peak),
+            Some(End::BandActivity)
+        );
+        assert_eq!(w.loudest(), 0.5);
+    }
+
+    #[test]
+    fn measurements_are_kept_as_they_complete() {
+        let mut r = serde_json::json!({ "tool": "asio_spike" });
+        push(&mut r, "segments", serde_json::json!({ "seconds": 1 }));
+        push(&mut r, "segments", serde_json::json!({ "seconds": 2 }));
+        assert_eq!(
+            r,
+            serde_json::json!({ "tool": "asio_spike", "segments": [{ "seconds": 1 }, { "seconds": 2 }] })
+        );
+    }
+
+    #[test]
+    fn stress_threads_stop_when_dropped() {
+        let s = Stress::start(2);
+        let flag = std::sync::Arc::clone(&s.stop);
+        assert_eq!(s.threads.len(), 2);
+        drop(s);
+        assert!(flag.load(Ordering::Relaxed));
+    }
 
     fn argv(s: &str) -> Vec<String> {
         s.split_whitespace().map(str::to_owned).collect()
