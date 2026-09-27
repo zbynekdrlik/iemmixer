@@ -27,7 +27,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::format::{self, Refusal, SampleFormat};
-use crate::telemetry::{self, Snapshot, Telemetry};
+use crate::telemetry::{self, InputPeaks, Snapshot, Telemetry};
 
 #[derive(Debug)]
 pub enum AsioError {
@@ -264,6 +264,7 @@ impl Host {
             inputs: inputs.to_vec(),
             outputs: outputs.to_vec(),
             telemetry: Telemetry::new(frames, info.rate),
+            peaks: InputPeaks::new(inputs.len()),
             base: Instant::now(),
             burn: Duration::from_micros(u64::from(cfg.burn_us)),
             panic_at: cfg.panic_at,
@@ -332,8 +333,9 @@ impl Running<'_> {
             .is_some_and(|s| s.telemetry.rate_changes() > 0)
     }
 
-    pub fn take_input_peak(&self) -> f64 {
-        self.stream().map_or(0.0, |s| s.telemetry.take_input_peak())
+    /// Each input's peak since the last call (index from 0).
+    pub fn take_input_peaks(&self) -> Vec<f64> {
+        self.stream().map_or_else(Vec::new, |s| s.peaks.take())
     }
 
     pub fn take_reopen(&self) -> bool {
@@ -434,6 +436,7 @@ struct Stream {
     inputs: Vec<[*mut c_void; 2]>,
     outputs: Vec<[*mut c_void; 2]>,
     telemetry: Telemetry,
+    peaks: InputPeaks,
     base: Instant,
     burn: Duration,
     panic_at: u64,
@@ -545,11 +548,10 @@ impl Stream {
         if self.panic_at != 0 && n == self.panic_at {
             inject_fault(n);
         }
-        let mut peak = 0.0_f64;
-        for ch in &self.inputs {
-            peak = peak.max(self.format.peak(read(half(ch, second), self.bytes)));
+        for (i, ch) in self.inputs.iter().enumerate() {
+            self.peaks
+                .record(i, self.format.peak(read(half(ch, second), self.bytes)));
         }
-        self.telemetry.on_input_peak(peak);
         if !self.burn.is_zero() {
             let t = Instant::now();
             while t.elapsed() < self.burn {

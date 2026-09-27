@@ -93,6 +93,14 @@ function New-SpikeArguments {
         }
         default { throw "unknown mode $($Request.mode)" }
     }
+    if ($Request.mode -ne 'probe') {
+        # The inputs the band guard listens to: the site's stage inputs (card numbers from 1), or "all" when asked.
+        $w = $Request.PSObject.Properties['activity_channels']
+        if (-not $w) { throw 'the request has no activity_channels (the stage inputs, or all)' }
+        $v = [string]$w.Value
+        if ($v -cnotmatch '^(all|[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*)\z') { throw "activity_channels '$v' refused" }
+        $a += @('--activity-channels', $v)
+    }
     return ,([string[]]$a)
 }
 

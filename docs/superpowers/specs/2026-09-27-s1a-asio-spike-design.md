@@ -30,7 +30,7 @@ Measured, per buffer size the driver accepts (32, 48, 64 at 96 kHz):
 In `iem-audio-io`:
 
 - **`format.rs` (portable, tested):** the little-endian ASIO sample types to and from f64, with clipping and non-finite values as silence; `peak`; `admit(rate, preferred, expected, types)`, which enforces the refusals above.
-- **`telemetry.rs` (portable, tested):** lock-free 1 µs histograms (0–5 ms plus overflow), counters, `classify`, drift, the `asioMessage` reply policy and its counters, and the activity guard (3 consecutive seconds above −50 dBFS). The callback is the only writer; it never allocates or locks.
+- **`telemetry.rs` (portable, tested):** lock-free 1 µs histograms (0–5 ms plus overflow), counters, `classify`, drift, the `asioMessage` reply policy and its counters, and the activity guard (3 consecutive seconds above −50 dBFS) over the watched inputs (`--activity-channels`: the site's stage inputs from the private env, `all` only when asked), with per-input peaks so the report names the five loudest inputs. The callback is the only writer; it never allocates or locks.
 - **`asio.rs` (Windows only, the crate's only unsafe code):**
   - `Host` is `!Send`: the thread that creates the driver (COM STA) makes every driver call and pumps its window messages.
   - Callbacks carry no user pointer, so one global slot holds the stream (one stream per process, claimed with `compare_exchange`). `Running::finish` stops the driver, clears the slot, waits until no callback is in flight, disposes the buffers, then frees the stream. The wait pumps messages and is bounded (2 s): a callback that never leaves is reported as hung, and the stream and buffers are leaked, never freed under it (R6).

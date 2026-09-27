@@ -30,8 +30,13 @@ REQUIRED = (
     "PC_BUFFER_KEY", "PC_BUFFER_NAME", "PC_BUFFER_ORIGINAL",
     "PC_REAPER_HTTP", "PC_MAIN_PROJECT", "PC_REAPER_START_TASK_PATH", "PC_REAPER_START_TASK",
     "PC_NTRACK", "PC_METER_BRIDGE", "PC_METER_HEARTBEAT", "PC_METER_ACTION",
-    "PC_APP_PROCESS", "PC_APP_HTTP", "RAW_DIR",
+    "PC_APP_PROCESS", "PC_APP_HTTP", "PC_ACTIVITY_CHANNELS", "RAW_DIR",
 )
+# The inputs the spike's band guard listens to: the site's stage inputs as card
+# numbers from 1 ("101-110,121-124"), or "all" only when asked (program inputs may
+# carry signal while the band is silent).
+ACTIVITY_CHANNELS = re.compile(r"all|[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*")
+MAX_INPUT = 1024
 FRAMES = (32, 48, 64)
 POLL_S = 2.0
 REPO = "zbynekdrlik/iemmixer"
@@ -40,7 +45,7 @@ TASK = "-TaskPath '\\iemmixer\\' -TaskName 'iemmixer-asio-spike'"
 STATE = Path(os.environ.get("SPIKE_STATE", str(Path.home() / ".local/state/iemmixer/spike-window.json")))
 # Spike exit codes the owner must hear about at once (asio_spike.rs).
 ALARMS = {
-    5: "band activity on the inputs during the spike: the band may be playing; tell the owner now, no further run",
+    5: "band activity on the stage inputs during the spike (loudest_inputs in the verdict): the band may be playing; tell the owner now, no further run",
     8: "a callback did not leave the stream within the stop wait (R6): tell the owner now, no further run",
 }
 EVENT_NOW = Path(os.environ.get("IEMMIXER_EVENT_NOW", str(Path.home() / ".config/iemmixer/EVENT-NOW")))
@@ -68,7 +73,20 @@ def load_env(path: Path) -> dict[str, str]:
     for k in ("PC_BUFFER_ORIGINAL", "PC_NTRACK"):
         if not env[k].isdigit():
             raise StepError(f"{path}: {k} must be a whole number")
+    check_channels(env["PC_ACTIVITY_CHANNELS"], path)
     return env
+
+
+def check_channels(text: str, path: Path) -> None:
+    """The spike refuses the same lists (telemetry.rs `Watched::parse`)."""
+    ok = ACTIVITY_CHANNELS.fullmatch(text) is not None
+    if ok and text != "all":
+        for part in text.split(","):
+            first, _, last = part.partition("-")
+            lo, hi = int(first), int(last or first)
+            ok = ok and 1 <= lo <= hi <= MAX_INPUT
+    if not ok:
+        raise StepError(f"{path}: PC_ACTIVITY_CHANNELS must be 'all' or card inputs from 1 like 101-110,121-124 (got {text!r})")
 
 
 def event_now() -> bool:
@@ -82,6 +100,14 @@ def check_request(mode: str, frames: int | None, seconds: int, burn_us: int, str
         raise StepError(f"--frames must be one of {FRAMES}")
     if not (1 <= seconds <= 3600 and 0 <= burn_us <= 300 and 0 <= stress <= 8 and 1 <= cycles <= 20):
         raise StepError("limits: seconds 1..3600, burn-us 0..300, stress 0..8, cycles 1..20")
+
+
+def run_fields(env: dict[str, str], args) -> dict:
+    """The request the PC task hands to the spike."""
+    return {"mode": args.mode, "driver": env["PC_ASIO_DRIVER"], "module": env["PC_ASIO_MODULE"], "frames": args.frames or 0,
+            "seconds": args.seconds, "burn_us": args.burn_us, "stress": args.stress, "panic_at": args.panic_at,
+            "cycles": args.cycles, "activity_channels": env["PC_ACTIVITY_CHANNELS"],
+            "timeout": run_timeout(args.mode, args.seconds, args.cycles)}
 
 
 def run_timeout(mode: str, seconds: int, cycles: int) -> int:
@@ -192,7 +218,8 @@ def verdict(report: dict) -> dict:
     worst = max(((t.get("interval_us") or {}).get("p999", 0.0) for t in tel), default=0.0)
     stable = report.get("outcome") == "done" and bool(tel) and all(v == 0 for v in messages.values()) and all(
         total[k] == 0 for k in ("missed", "overruns", "position_gaps"))
-    return {"outcome": report.get("outcome"), "stable": stable, **messages, "interval_p999_us": worst, **total}
+    return {"outcome": report.get("outcome"), "stable": stable, **messages, "interval_p999_us": worst, **total,
+            "activity_channels": report.get("activity_channels"), "loudest_inputs": report.get("loudest_inputs", [])}
 
 
 def guarded(cmd: list[str], stdin: str, timeout: float, event: str) -> str:
@@ -424,9 +451,7 @@ def cmd_run(env, args) -> None:
     current = state["pref_current"] if state["pref_current"] is not None else state["pref_original"]
     if args.mode != "probe" and args.frames != current:
         raise StepError(f"the driver's preferred buffer is {current}: run set-buffer --frames {args.frames} first")
-    fields = {"mode": args.mode, "driver": env["PC_ASIO_DRIVER"], "module": env["PC_ASIO_MODULE"], "frames": args.frames or 0,
-              "seconds": args.seconds, "burn_us": args.burn_us, "stress": args.stress, "panic_at": args.panic_at,
-              "cycles": args.cycles, "timeout": run_timeout(args.mode, args.seconds, args.cycles)}
+    fields = run_fields(env, args)
     rid = ps(env, f"Remove-Item -LiteralPath {pc(env, 'queue/stop')} -ErrorAction SilentlyContinue ; "
                   f"$id = Write-GoldenRequest -Root {ps_quote(env['PC_ROOT'])} -Kind 'spike' -Fields {ps_hashtable(fields)} ; Start-SpikeTask ; $id")
     state["runs"].append({"request": rid, **fields})

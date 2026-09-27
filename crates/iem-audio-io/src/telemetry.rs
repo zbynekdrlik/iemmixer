@@ -226,7 +226,6 @@ pub struct Telemetry {
     overloads: AtomicU64,
     rate_changes: AtomicU64,
     reopen: AtomicBool,
-    input_peak: AtomicU64,
 }
 
 impl Telemetry {
@@ -256,7 +255,6 @@ impl Telemetry {
             overloads: AtomicU64::new(0),
             rate_changes: AtomicU64::new(0),
             reopen: AtomicBool::new(false),
-            input_peak: AtomicU64::new(0),
         }
     }
 
@@ -310,19 +308,6 @@ impl Telemetry {
         if duration_ns > self.period_ns {
             self.overruns.fetch_add(1, Relaxed);
         }
-    }
-
-    /// The largest input |sample| of one callback (linear, 0..=1).
-    pub fn on_input_peak(&self, peak: f64) {
-        if peak.is_finite() {
-            // Non-negative finite f64 bit patterns order like their values.
-            self.input_peak.fetch_max(peak.abs().to_bits(), Relaxed);
-        }
-    }
-
-    /// The largest input peak since the last call.
-    pub fn take_input_peak(&self) -> f64 {
-        f64::from_bits(self.input_peak.swap(0, Relaxed))
     }
 
     /// Counts one `asioMessage` and answers it ([`reply`]).
@@ -387,6 +372,149 @@ impl Telemetry {
             duration: self.duration.snapshot(),
             drift_ppm: drift,
         }
+    }
+}
+
+/// The largest |sample| of every card input since the last take (linear,
+/// 0..=1). The callback thread records each input's peak without locks or
+/// allocation; the owner thread takes all of them once a second.
+pub struct InputPeaks {
+    peaks: Box<[AtomicU64]>,
+}
+
+impl InputPeaks {
+    pub fn new(inputs: usize) -> Self {
+        Self {
+            peaks: (0..inputs).map(|_| AtomicU64::new(0)).collect(),
+        }
+    }
+
+    /// One callback's peak of input `index` (from 0). Non-finite peaks and
+    /// inputs the card does not have are ignored.
+    pub fn record(&self, index: usize, peak: f64) {
+        if let Some(slot) = self.peaks.get(index)
+            && peak.is_finite()
+        {
+            // Non-negative finite f64 bit patterns order like their values.
+            slot.fetch_max(peak.abs().to_bits(), Relaxed);
+        }
+    }
+
+    /// Every input's peak since the last call; each starts again from 0.
+    pub fn take(&self) -> Vec<f64> {
+        self.peaks
+            .iter()
+            .map(|p| f64::from_bits(p.swap(0, Relaxed)))
+            .collect()
+    }
+}
+
+/// The highest card input number `--activity-channels` accepts.
+pub const MAX_INPUT: usize = 1024;
+
+/// The card inputs the band guard listens to: the site's stage inputs
+/// (microphones, handhelds, the engineer's microphone), or every input as
+/// the explicit fallback. Other inputs (program material, stems) may carry
+/// signal while the band is silent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Watched {
+    All,
+    /// Input indices from 0, ascending, without duplicates.
+    Inputs(Vec<usize>),
+}
+
+impl Watched {
+    /// `all`, or card input numbers from 1 as a comma list of numbers and
+    /// ranges (`101-110,121-124`).
+    pub fn parse(text: &str) -> Result<Self, String> {
+        if text == "all" {
+            return Ok(Self::All);
+        }
+        let number = |s: &str| match s.parse::<usize>() {
+            Ok(n) if (1..=MAX_INPUT).contains(&n) => Ok(n),
+            _ => Err(format!(
+                "activity channel {s:?}: expected a card input 1..={MAX_INPUT}"
+            )),
+        };
+        let mut inputs = Vec::new();
+        for part in text.split(',') {
+            let (first, last) = part.split_once('-').unwrap_or((part, part));
+            let (first, last) = (number(first)?, number(last)?);
+            if first > last {
+                return Err(format!(
+                    "activity channels {part:?}: the range runs backwards"
+                ));
+            }
+            inputs.extend(first - 1..last);
+        }
+        inputs.sort_unstable();
+        inputs.dedup();
+        Ok(Self::Inputs(inputs))
+    }
+
+    /// Refuses inputs beyond the card's `inputs`.
+    pub fn check(&self, inputs: usize) -> Result<(), String> {
+        match self {
+            Self::Inputs(list) if list.last().is_some_and(|&i| i >= inputs) => Err(format!(
+                "activity channels beyond the card's {inputs} inputs"
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    /// The loudest watched input of one set of per-input peaks (0 if none).
+    pub fn peak(&self, peaks: &[f64]) -> f64 {
+        match self {
+            Self::All => peaks.iter().copied().fold(0.0, f64::max),
+            Self::Inputs(list) => list
+                .iter()
+                .filter_map(|&i| peaks.get(i))
+                .copied()
+                .fold(0.0, f64::max),
+        }
+    }
+
+    /// The watched card inputs numbered from 1 (`None`: all of them).
+    pub fn numbers(&self) -> Option<Vec<usize>> {
+        match self {
+            Self::All => None,
+            Self::Inputs(list) => Some(list.iter().map(|&i| i + 1).collect()),
+        }
+    }
+}
+
+/// The loudest one-second peak of each card input over a run (report).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Loudest {
+    peaks: Vec<f64>,
+}
+
+impl Loudest {
+    pub fn observe(&mut self, peaks: &[f64]) {
+        self.peaks.resize(self.peaks.len().max(peaks.len()), 0.0);
+        for (m, &p) in self.peaks.iter_mut().zip(peaks) {
+            *m = m.max(p);
+        }
+    }
+
+    /// The loudest input of all (linear).
+    pub fn max(&self) -> f64 {
+        self.peaks.iter().copied().fold(0.0, f64::max)
+    }
+
+    /// The `n` loudest inputs that carried any signal as (index from 0,
+    /// linear peak): loudest first, equal peaks by index.
+    pub fn top(&self, n: usize) -> Vec<(usize, f64)> {
+        let mut hot: Vec<(usize, f64)> = self
+            .peaks
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|&(_, p)| p > 0.0)
+            .collect();
+        hot.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        hot.truncate(n);
+        hot
     }
 }
 
