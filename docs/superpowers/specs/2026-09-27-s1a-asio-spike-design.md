@@ -33,11 +33,11 @@ In `iem-audio-io`:
 - **`telemetry.rs` (portable, tested):** lock-free 1 µs histograms (0–5 ms plus overflow), counters, `classify`, drift, the `asioMessage` reply policy and its counters, and the activity guard (3 consecutive seconds above −50 dBFS). The callback is the only writer; it never allocates or locks.
 - **`asio.rs` (Windows only, the crate's only unsafe code):**
   - `Host` is `!Send`: the thread that creates the driver (COM STA) makes every driver call and pumps its window messages.
-  - Callbacks carry no user pointer, so one global slot holds the stream. `Running::finish` stops the driver, clears the slot, waits until no callback is in flight, disposes the buffers, then frees the stream.
+  - Callbacks carry no user pointer, so one global slot holds the stream (one stream per process, claimed with `compare_exchange`). `Running::finish` stops the driver, clears the slot, waits until no callback is in flight, disposes the buffers, then frees the stream. The wait pumps messages and is bounded (2 s): a callback that never leaves is reported as hung, and the stream and buffers are leaked, never freed under it (R6).
   - The callback body runs inside `catch_unwind`; after a panic the outputs stay zeroed.
   - A reset or a buffer-size request sets a flag; the owner thread releases and recreates the driver.
   - The crate lint becomes `deny(unsafe_code)`, allowed only on this module.
-- **`examples/asio_spike.rs`:** modes `probe`, `duplex` and `reopen`; a JSON report, a progress file every 5 s; it stops on the stop file, the time limit, band activity, a caught fault or a rate change (distinct exit codes, tested argument parser).
+- **`examples/asio_spike.rs`:** modes `probe`, `duplex` and `reopen`; a JSON report, a progress file every 5 s; `duplex` and `reopen` share the guards and stop on the stop file, band activity or a rate change, `duplex` also on the time limit or a caught fault (distinct exit codes; 8 = a hung stop). Every segment, reset and reopen cycle enters the report as it completes, so a failed run still reports what it measured. A stop file present at the start keeps the card closed.
 
 **Dependencies:** `azo = "=0.2.1"` (MIT; builds `windows-bindgen` 0.100 at build time) and `windows-sys` features for the message pump, both for Windows targets only. Twelve crate names join `scripts/engine-deps-allow.txt`, and `bitflags` moves to 2.13.2. `asio.rs` and the example are excluded from mutation testing (like `dpapi.rs`): their decisions live in the two tested modules.
 
@@ -60,7 +60,7 @@ In `iem-audio-io`:
    - the bundle on the PC verifies.
 4. **`to-dev`:** 60 s input interlock (below −50 dBFS), then REAPER saves (40026, project file changed) and quits (40004); the driver module is released. The predecessor app keeps running: its graceful exit is still open (§7).
 5. **Runs:** `set-buffer --frames N` writes the preferred buffer with its registry kind kept and reads it back. `run --mode …` writes a request file and starts the task; the task checks hashes and I3, starts the spike at HIGH priority and ends only through the stop file. The report and stderr go to the raw directory, and the dev box prints a verdict per run.
-6. **`to-event` / `preempt`:** stop the spike gracefully (60 s), restore the preferred buffer with read-back, then start REAPER through our own task (`\iemmixer\iemmixer-StartREAPER`, no 72 h limit) and run the handover checks:
+6. **`to-event` / `preempt`:** while the card is free, always stop gracefully (60 s): the stop waits for the spike and its task, and a task that has not started the spike yet refuses on the stop file. Restore the preferred buffer with read-back whenever a `set-buffer` was recorded (a failed second write leaves the registry unknown). Then start REAPER through our own task (`\iemmixer\iemmixer-StartREAPER`, no 72 h limit); it refuses while a spike or the spike task runs and unless the preference reads back as the original. A failed step while the EVENT-NOW flag exists pre-empts too. Then the handover checks:
    - the project is loaded (track count);
    - the meter-bridge state is read, and the bridge is triggered once, only while that state is empty;
    - the heartbeat advances;
@@ -99,6 +99,8 @@ This driver is the interim switch script of #3: `to-dev` and `to-event` are "eve
 
 **Open:**
 
+- For the fork / S6: azo-sys 0.2.1 `I64Split` has no `#[repr(C)]` (it sits in the `#[repr(C)]` `TimeInfo` and is `getSamplePosition`'s out-parameter; rustc keeps its two `u32` in order today), and the fault run's panic hook allocates and locks stderr inside the callback (S6 needs a hook that does neither). The drift uses the callback entry time, not `TimeInfo.system_time` (a few ppm over 10 min).
+
 - The graceful exit of the predecessor app (acceptance of #3). It is verified only when its tray Exit is reachable through the PC's remote-desktop MCP; otherwise it is handed to S6 on #9.
 - The PC-only credential for the private denylist (ops issue 1): add it in the first window.
 
@@ -106,5 +108,5 @@ This driver is the interim switch script of #3: `to-dev` and `to-event` are "eve
 
 - **R1 (azo fails on this driver):** the fallbacks are in §4.
 - **The driver may reject 48 or read the preference only at load:** findings; 32 and 64 decide.
-- **R6 (a hang in `stop()`):** no kill. Alarm the owner; the owner may reboot.
+- **R6 (a hang in `stop()`):** no kill. A callback still in flight after 2 s ends the spike with exit 8 (the driver is not called again); `spike_window.py` prints an owner alarm (also for exit 5, band activity). The owner may reboot.
 - **A late "ide event":** the stop file within 2 s; REAPER back after the restore and the project load (≤ 2 min).
