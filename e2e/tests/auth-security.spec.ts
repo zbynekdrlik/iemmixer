@@ -1,5 +1,6 @@
 import { ENGINEER_PIN, MEMBER_PIN } from "./support/pins";
 import { test, expect, Page } from "./support/fixtures";
+import { upgradeStatus, wsBase } from "./support/wire";
 
 // Helper to login and get a JWT token
 async function getToken(
@@ -242,6 +243,23 @@ test.describe("Cross-member access prevention (#77)", () => {
       data: { level_db: -10 },
     });
     expect([403, 404, 405]).toContain(levelResp.status());
+  });
+
+  test("a member's token cannot open another member's mixer socket (W6)", async ({ page, baseURL }) => {
+    await page.goto("/");
+    const member2 = await getToken(page, "member2");
+    expect(member2).not.toBeNull();
+    const engineer = await getToken(page, "engineer", ENGINEER_PIN);
+    expect(engineer).not.toBeNull();
+    // Opened from the test runner: it sees the upgrade's status, a page only "failed".
+    const socket = (mixerPage: string, token: string) =>
+      `${wsBase(baseURL)}/ws/${mixerPage}?token=${token}&proto=2`;
+
+    expect(await upgradeStatus(socket("member3", member2!.token))).toBe(403);
+    // The same token opens its own page, and the engineer's opens member3's:
+    // the refusal is the page's owner, not the token or the route.
+    expect(await upgradeStatus(socket("member2", member2!.token))).toBe(101);
+    expect(await upgradeStatus(socket("member3", engineer!.token))).toBe(101);
   });
 
   test("frontend redirects to login page on cross-member access", async ({
