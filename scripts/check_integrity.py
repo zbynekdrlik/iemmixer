@@ -19,13 +19,16 @@ USES = re.compile(r"^\s*-?\s*uses:\s*(\S+)(.*)$")
 PINNED = re.compile(r"^[^@\s]+@[0-9a-f]{40}$")
 # The pin's release, e.g. `# v7.0.1` (ci-rust-toolchain.md).
 VERSION_COMMENT = re.compile(r"^\s+#\s*v\d+(?:\.\d+)*\s*$")
-# Force-end verbs (I8): Windows' own, PowerShell's, WMI/CIM's Terminate, a
-# job whose closing ends its processes, and the Rust/tokio/Python/.NET
-# process handles' kill methods. A request plus a bounded wait is the only stop.
+# Force-end verbs (I8): Windows' own (taskkill, tskill, Sysinternals pskill),
+# PowerShell's, WMI/CIM's Terminate (-MethodName or its alias -Name; wmic's
+# call terminate and delete), a job whose closing ends its processes, and the
+# Rust/tokio/Python/.NET process handles' kill methods (called, or named in
+# ForEach-Object). A request plus a bounded wait is the only stop.
 FORCE_KILL = re.compile(
-    r"(?i)\btaskkill\b|terminateprocess|terminatejobobject|kill_on_job_close|stop-process"
+    r"(?i)\btaskkill\b|\btskill\b|\bpskill\b|terminateprocess|terminatejobobject|kill_on_job_close|stop-process"
     r"|\bshutdown(?:\.exe)?\s+/f\b|\.kill\s*\(|\bstart_kill\b|\bkill_on_drop\b|\.terminate\s*\("
-    r"|-methodname\s+['\"]?terminate\b")
+    r"|-(?:method)?name\s+['\"]?terminate\b|\bwmic\b.*\b(?:call\s+terminate|delete)\b"
+    r"|(?:\bforeach-object|%)\s+(?:-membername\s+)?['\"]?kill\b")
 # Children leave the guard's job only through iem-win's spawn glue (S6 design note §5.1).
 BREAKAWAY = re.compile(r"CREATE_BREAKAWAY_FROM_JOB")
 BREAKAWAY_HOME = "crates/iem-win/"
