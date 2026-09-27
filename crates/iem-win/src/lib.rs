@@ -24,6 +24,10 @@
 pub mod console;
 mod decide;
 pub mod errmode;
+// Windows only: its one function takes a Windows handle (the engine's pipe
+// reader peeks through it).
+#[cfg(windows)]
+pub mod pipe;
 pub mod power;
 pub mod prefwin;
 pub mod process;
