@@ -54,6 +54,9 @@ pub const JOB_QUIET: Duration = Duration::from_secs(300);
 pub const JOB_PEAKS_S: u32 = 60;
 /// The HIL test signal's ceiling (design §7).
 pub const HIL_MAX_DBFS: f64 = -20.0;
+/// The longest HIL test signal (s): the routing proof needs seconds, and the
+/// engine's own cap is 120 s.
+pub const HIL_MAX_TTL_S: f64 = 60.0;
 /// The watch's period (P10: the process list only).
 pub const TICK: Duration = Duration::from_secs(1);
 /// Tuning drift is read this often, besides after every switch.
@@ -198,6 +201,11 @@ pub struct View {
     pub subscribers: u32,
     /// The session ended and the guard stopped what it stops.
     pub session_done: bool,
+    /// Replies the daemon thread handed to the pipe's threads…
+    pub replies_sent: u64,
+    /// …and those the pipe's threads have written (or found their client
+    /// gone).
+    pub replies_done: u64,
 }
 
 impl View {
@@ -348,6 +356,18 @@ impl Shared {
     /// what it stops at the end of the session.
     pub fn await_session_done(&self, limit: Duration) -> bool {
         self.wait_while(limit, |v| !v.session_done).session_done
+    }
+
+    /// The daemon thread handed a reply to a pipe thread.
+    pub fn reply_sent(&self) {}
+
+    /// A pipe thread wrote a reply it was handed (or found its client gone).
+    pub fn reply_done(&self) {}
+
+    /// Waits up to `limit` until every reply handed to the pipe was written:
+    /// the guard's last reply (quit, a hand-over) before its process ends.
+    pub fn await_replies(&self, _limit: Duration) -> bool {
+        true
     }
 }
 
@@ -1330,7 +1350,7 @@ fn install_site(pc: &mut dyn Pc, g: &mut Guard, path: &str) -> (bool, String) {
     if let Err(why) = g.need_dev("install-site") {
         return (false, why);
     }
-    match pc.install_site(path) {
+    match pc.install_site(path, &Cancel::default()) {
         Ok(r) => g.info(r),
         Err(e) => return (false, format!("site refused: {e}")),
     }

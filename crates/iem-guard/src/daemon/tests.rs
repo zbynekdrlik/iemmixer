@@ -389,6 +389,93 @@ fn a_preempted_token_sends_a_dev_switch_back_before_its_first_step() {
     assert!(pc.called(Call::Fingerprint));
 }
 
+/// Pre-empts from another thread 50 ms after `step` was published as done.
+fn preempt_after(g: &Guard, step: Step) -> std::thread::JoinHandle<()> {
+    let (c, shared) = (g.cancel.clone(), Arc::clone(&g.shared));
+    std::thread::spawn(move || {
+        let t = Instant::now();
+        while !shared
+            .view()
+            .switching
+            .is_some_and(|s| s.done.contains(&step))
+        {
+            assert!(t.elapsed() < Duration::from_secs(5), "{step:?} never done");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+        c.preempt();
+    })
+}
+
+#[test]
+fn ide_event_during_the_last_step_of_a_dev_switch_goes_to_event() {
+    let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Event));
+    g.state.pins.current = Some(SHA.into());
+    // The last step is a mutation: it ignores the token and finishes.
+    pc.delay(Call::RunnerStart, Duration::from_millis(300));
+    let fired = preempt_after(&g, Step::IdentityCheck);
+    let out = run_switch(&mut pc, &mut g, Mode::Event, Mode::Dev);
+    fired.join().unwrap();
+    assert_eq!(out, Outcome::Done);
+    assert!(pc.index(Call::ReaperStart) > pc.index(Call::RunnerStart));
+    assert!(pc.index(Call::AppStart) > pc.index(Call::ReaperStart));
+    assert_eq!(g.state.mode, Mode::Event);
+    assert_eq!(g.state.switching, None);
+    assert!(!g.cancel.preempted());
+    let v = g.shared.view();
+    assert_eq!(
+        (v.mode, v.running, v.last),
+        (Mode::Event, None, Some(Outcome::Done))
+    );
+    // The rehearsal's re-entry into dev failing after "ide event" came:
+    // REAPER starts (the owner said event), no owner question.
+    let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
+    g.state.pins.current = Some(SHA.into());
+    pc.delay(Call::ServerStart, Duration::from_millis(300));
+    pc.fail(Call::ServerStart, "ports 80/443 are still held");
+    let fired = preempt_after(&g, Step::EngineArm);
+    let r = handle(&mut pc, &mut g, Request::RehearseTeardown, 0);
+    fired.join().unwrap();
+    assert!(!r.ok);
+    assert!(
+        r.detail.contains("dev: not entered; unwound to event"),
+        "{}",
+        r.detail
+    );
+    assert_eq!(g.state.mode, Mode::Event);
+    assert!(pc.called(Call::ReaperStart) && pc.called(Call::AppStart));
+    assert!(!g.cancel.preempted());
+    assert!(
+        g.alarms.iter().all(|a| !a.owner_question),
+        "{:?}",
+        texts(&g)
+    );
+}
+
+#[test]
+fn ide_event_while_the_interlock_hears_the_band_goes_to_event() {
+    let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Event));
+    pc.interlock = (false, "activity on mic1".into());
+    // The interlock ends with activity just as "ide event" comes.
+    pc.delay(Call::EngineInterlock, Duration::from_millis(300));
+    let fired = preempt_after(&g, Step::Precheck);
+    let r = handle(&mut pc, &mut g, dev(), 0);
+    fired.join().unwrap();
+    assert!(!r.ok);
+    assert!(
+        r.detail.starts_with(
+            "dev: not entered; unwound to event; unwinding to event: pre-empted by event"
+        ),
+        "{}",
+        r.detail
+    );
+    assert_eq!(g.state.mode, Mode::Event);
+    assert_eq!(g.state.interlock_retry, None);
+    assert!(pc.called(Call::Fingerprint));
+    assert!(!g.cancel.preempted());
+    assert!(g.alarms.all().is_empty(), "{:?}", texts(&g));
+}
+
 #[test]
 fn an_event_plan_clears_the_token_as_it_begins() {
     let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
@@ -603,6 +690,86 @@ fn ide_event_or_a_new_request_clears_the_retry() {
     let before = pc.count(Call::EngineInterlock);
     tick(&mut pc, &mut g, Instant::now());
     assert_eq!(pc.count(Call::EngineInterlock), before);
+}
+
+#[test]
+fn a_retry_that_enters_dev_is_not_tried_again() {
+    let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Event));
+    g.state.pins.current = Some(SHA.into());
+    pc.interlock = (false, "activity on mic1".into());
+    handle(&mut pc, &mut g, dev(), 0);
+    let due = g.state.interlock_retry.as_ref().unwrap().next_at;
+    // The stage is quiet at the retry: dev is entered.
+    pc.interlock = (true, "quiet".into());
+    g.set_now(due);
+    tick(&mut pc, &mut g, Instant::now());
+    assert_eq!(g.state.mode, Mode::Dev);
+    assert_eq!(g.state.interlock_retry, None);
+    assert_eq!(
+        (pc.count(Call::EngineInterlock), pc.count(Call::EngineStart)),
+        (2, 1)
+    );
+    for t in [due + 1, due + RETRY_S, due + 10 * RETRY_S] {
+        g.set_now(t);
+        tick(&mut pc, &mut g, Instant::now());
+    }
+    assert_eq!(
+        (pc.count(Call::EngineInterlock), pc.count(Call::EngineStart)),
+        (2, 1)
+    );
+    assert!(!pc.called(Call::EngineStop));
+    assert_eq!(g.state.mode, Mode::Dev);
+    assert!(!status_text(&g).contains("waits"), "{}", status_text(&g));
+}
+
+#[test]
+fn a_retry_that_unwinds_or_may_no_longer_run_is_dropped() {
+    let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Event));
+    pc.interlock = (false, "activity on mic1".into());
+    handle(&mut pc, &mut g, dev(), 0);
+    let due = g.state.interlock_retry.as_ref().unwrap().next_at;
+    // Quiet at the retry, but the data refresh fails: back to event.
+    pc.interlock = (true, "quiet".into());
+    pc.fail(Call::Data, "iem-migrate band ended with Some(1)");
+    g.set_now(due);
+    tick(&mut pc, &mut g, Instant::now());
+    assert_eq!(g.state.mode, Mode::Event);
+    assert_eq!(g.state.interlock_retry, None);
+    assert_eq!(pc.count(Call::ReaperStart), 1);
+    for t in [due + 1, due + RETRY_S] {
+        g.set_now(t);
+        tick(&mut pc, &mut g, Instant::now());
+    }
+    assert_eq!(
+        (pc.count(Call::EngineInterlock), pc.count(Call::ReaperStart)),
+        (2, 1)
+    );
+    // A live retry whose bundle turned red meanwhile is dropped, not
+    // refused again every second.
+    let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Event));
+    g.state
+        .bundles
+        .insert(SHA.into(), record(SHA, "main", Hil::Green));
+    pc.interlock = (false, "activity on mic1".into());
+    let live = Request::Live {
+        build: SHA.into(),
+        trial: false,
+        dry_run: false,
+    };
+    assert!(!handle(&mut pc, &mut g, live, 0).ok);
+    let due = g.state.interlock_retry.as_ref().unwrap().next_at;
+    let red = Request::Report {
+        sha: SHA.into(),
+        hil: "red".into(),
+        detail: "loopback silent".into(),
+    };
+    assert!(handle(&mut pc, &mut g, red, 0).ok);
+    assert!(g.state.interlock_retry.is_some());
+    g.set_now(due);
+    tick(&mut pc, &mut g, Instant::now());
+    assert_eq!(g.state.interlock_retry, None);
+    assert_eq!(pc.count(Call::EngineInterlock), 1);
+    assert_eq!(g.state.mode, Mode::Event);
 }
 
 #[test]
@@ -1059,6 +1226,7 @@ fn job_begin_needs_a_quiet_stage() {
 #[test]
 fn the_test_signal_goes_only_to_the_hil_outputs() {
     let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
+    g.job = Some(7);
     let signal = |dbfs: f64, ttl_s: f64| Request::TestSignal {
         input: "mic1".into(),
         dbfs,
@@ -1110,6 +1278,33 @@ fn the_test_signal_goes_only_to_the_hil_outputs() {
     let r = handle(&mut pc, &mut g, signal(-30.0, 1.0), 0);
     assert_eq!(r.detail, "test-signal is for dev; the mode is event");
     assert_eq!(HIL_MAX_DBFS, -20.0);
+}
+
+#[test]
+fn a_test_signal_needs_a_begun_job_and_at_most_60_s() {
+    let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
+    let signal = |ttl_s: f64| Request::TestSignal {
+        input: "mic1".into(),
+        dbfs: -30.0,
+        ttl_s,
+    };
+    // Without JobBegin's band-quiet and stage checks: refused.
+    let r = handle(&mut pc, &mut g, signal(5.0), 0);
+    assert_eq!(
+        (r.ok, r.detail.as_str()),
+        (false, "a test signal needs a begun HIL job (job-begin)")
+    );
+    assert!(!pc.called(Call::HilSignal));
+    g.job = Some(7);
+    let r = handle(&mut pc, &mut g, signal(60.0), 0);
+    assert!(r.ok, "{r:?}");
+    let r = handle(&mut pc, &mut g, signal(60.5), 0);
+    assert_eq!(
+        (r.ok, r.detail.as_str()),
+        (false, "a TTL of 60.5 s is above the HIL limit of 60 s")
+    );
+    assert_eq!(pc.hil_signals, [("mic1".to_owned(), -30.0, 60.0, vec![72])]);
+    assert_eq!(HIL_MAX_TTL_S, 60.0);
 }
 
 #[test]
@@ -1244,15 +1439,45 @@ fn install_site_checks_the_site_and_enters_dev_again() {
 }
 
 #[test]
+fn ide_event_ends_the_site_check_at_once() {
+    let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
+    g.state.pins.current = Some(SHA.into());
+    pc.block_until_cancel(Call::InstallSite);
+    let shared = Arc::clone(&g.shared);
+    let fired = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(200));
+        // No switch runs: "ide event" pre-empts the token and queues.
+        let route = shared.route(&Request::Event { dry_run: false });
+        (route, Instant::now())
+    });
+    let r = handle(
+        &mut pc,
+        &mut g,
+        Request::InstallSite {
+            path: "site.toml".into(),
+        },
+        0,
+    );
+    let (route, at) = fired.join().unwrap();
+    assert_eq!(route, Route::Queue(0));
+    assert!(at.elapsed() < Duration::from_secs(1), "{:?}", at.elapsed());
+    assert_eq!(
+        (r.ok, r.detail.as_str()),
+        (false, "site refused: pre-empted by event")
+    );
+    assert!(pc.sites.is_empty());
+    assert!(!pc.called(Call::EngineStop));
+}
+
+#[test]
 fn rehearse_teardown_never_starts_reaper() {
     let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
     g.state.pins.current = Some(SHA.into());
     let r = handle(&mut pc, &mut g, Request::RehearseTeardown, 0);
     assert!(r.ok, "{r:?}");
     assert!(
-        r.detail.starts_with(
-            "teardown clean: module unheld, preference original, ports free; dev: done"
-        ),
+        r.detail
+            .starts_with("teardown clean: module unheld, preference original; dev: done"),
         "{}",
         r.detail
     );
@@ -1734,6 +1959,35 @@ fn drift_is_read_hourly_and_after_each_switch() {
     assert_eq!(g.alarms.all().len(), 2);
 }
 
+#[test]
+fn drift_is_read_after_every_mode_change() {
+    // A dev → event plan that stopped for the owner changed the mode.
+    let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
+    pc.fail(Call::EngineStop, "no DriverReleased within 10 s");
+    pc.health(Health::Parked);
+    assert_eq!(
+        run_switch(&mut pc, &mut g, Mode::Dev, Mode::Event),
+        Outcome::NeedsOwner
+    );
+    assert_eq!(pc.count(Call::TuningDrift), 1);
+    // A kept-serving engine and a refused entry changed nothing.
+    let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
+    pc.fail(Call::EngineStop, "no DriverReleased within 10 s");
+    pc.health(Health::Healthy);
+    assert_eq!(
+        run_switch(&mut pc, &mut g, Mode::Dev, Mode::Event),
+        Outcome::KeptServing
+    );
+    assert!(!pc.called(Call::TuningDrift));
+    let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Event));
+    pc.interlock = (false, "activity on mic1".into());
+    assert_eq!(
+        run_switch(&mut pc, &mut g, Mode::Event, Mode::Dev),
+        Outcome::Refused
+    );
+    assert!(!pc.called(Call::TuningDrift));
+}
+
 // ---- the loop ----
 
 #[test]
@@ -1766,6 +2020,48 @@ fn the_loop_answers_requests_and_ends_on_quit() {
     g.handover = Some(PathBuf::from("iemmixer-guard.exe"));
     serve_requests(&mut pc, &mut g, &rx);
     assert!(pc.calls().is_empty());
+}
+
+#[test]
+fn the_guard_waits_for_its_last_reply_to_be_written() {
+    let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Dev));
+    let (tx, rx) = mpsc::channel();
+    let (rtx, rrx) = mpsc::sync_channel(1);
+    tx.send(Job {
+        req: Request::Quit,
+        epoch: 0,
+        reply: rtx,
+    })
+    .unwrap();
+    serve_requests(&mut pc, &mut g, &rx);
+    // Handed to the pipe's thread, not yet written.
+    let v = g.shared.view();
+    assert_eq!((v.replies_sent, v.replies_done), (1, 0));
+    let t = Instant::now();
+    assert!(!g.shared.await_replies(Duration::from_millis(100)));
+    assert!(t.elapsed() >= Duration::from_millis(100));
+    // The pipe's thread writes it, then counts it.
+    let shared = Arc::clone(&g.shared);
+    let writer = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(rrx.recv().unwrap().ok);
+        shared.reply_done();
+    });
+    let t = Instant::now();
+    assert!(g.shared.await_replies(Duration::from_secs(5)));
+    assert!(
+        t.elapsed() >= Duration::from_millis(150),
+        "{:?}",
+        t.elapsed()
+    );
+    assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
+    writer.join().unwrap();
+    assert_eq!(g.shared.view().replies_done, 1);
+    // Nothing handed over: nothing to wait for.
+    let idle = Shared::new(Cancel::default());
+    let t = Instant::now();
+    assert!(idle.await_replies(Duration::from_secs(5)));
+    assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
 }
 
 #[test]

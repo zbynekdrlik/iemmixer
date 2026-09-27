@@ -89,6 +89,19 @@ pub fn listen(name: &str) -> io::Result<Listener> {
         .create_sync()
 }
 
+/// `f` until it succeeds, every `every`, for up to `limit`; then its last
+/// error. After a hand-over the old guard's pipe instances live on until
+/// its process has ended, so the new guard's first instance waits for them.
+pub fn retry<T>(
+    what: &str,
+    limit: Duration,
+    every: Duration,
+    mut f: impl FnMut() -> io::Result<T>,
+) -> io::Result<T> {
+    let _ = (what, limit, every);
+    f()
+}
+
 /// Accepts connections until `stop`, each in a thread of its own.
 pub fn serve(
     listener: Listener,
@@ -328,6 +341,75 @@ mod tests {
         assert!(!reply.ok);
         assert_eq!(reply.detail, "no alarm 99");
         assert_eq!(answer.join().unwrap(), 0);
+    }
+
+    #[test]
+    fn a_queued_reply_is_counted_once_written() {
+        let (s, rx) = served();
+        let answer = thread::spawn(move || {
+            let job = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            let mut pc = FakePc::new(Facts::default());
+            let mut g = Guard::for_test(Mode::Event);
+            let epoch = job.epoch;
+            job.reply
+                .send(handle(&mut pc, &mut g, job.req, epoch))
+                .unwrap();
+        });
+        // Answered from the view: nothing to count.
+        assert!(call(&s.name, &Request::Status).unwrap().ok);
+        let reply = call(&s.name, &Request::AlarmAck { id: 99 }).unwrap();
+        answer.join().unwrap();
+        assert_eq!(reply.detail, "no alarm 99");
+        let t = Instant::now();
+        while s.shared.view().replies_done == 0 {
+            assert!(t.elapsed() < Duration::from_secs(5), "never counted");
+            thread::sleep(Duration::from_millis(10));
+        }
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(s.shared.view().replies_done, 1);
+    }
+
+    #[test]
+    fn a_busy_pipe_name_is_tried_again_until_the_limit() {
+        let mut tries = 0;
+        let t = Instant::now();
+        let got = retry(
+            "the guard pipe",
+            Duration::from_secs(5),
+            Duration::from_millis(20),
+            || {
+                tries += 1;
+                if tries < 3 {
+                    Err(io::Error::other("access denied"))
+                } else {
+                    Ok(tries)
+                }
+            },
+        );
+        assert_eq!(got.unwrap(), 3);
+        assert!(
+            t.elapsed() >= Duration::from_millis(40),
+            "{:?}",
+            t.elapsed()
+        );
+        // The limit ends it with the last error.
+        let mut tries = 0;
+        let t = Instant::now();
+        let got: io::Result<()> = retry(
+            "the guard pipe",
+            Duration::from_millis(100),
+            Duration::from_millis(30),
+            || {
+                tries += 1;
+                Err(io::Error::other(format!("access denied ({tries})")))
+            },
+        );
+        let took = t.elapsed();
+        let why = got.unwrap_err().to_string();
+        assert_eq!(why, format!("access denied ({tries})"));
+        assert!(tries >= 2, "{tries}");
+        assert!(took >= Duration::from_millis(100), "{took:?}");
+        assert!(took < Duration::from_secs(2), "{took:?}");
     }
 
     #[test]

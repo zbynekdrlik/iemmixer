@@ -398,9 +398,11 @@ pub trait Pc {
     /// A forced reopen of the driver (HIL, design §7); the engine's reset
     /// budget applies.
     fn engine_force_reopen(&mut self) -> R<()>;
-    /// F30 (design §7): `iem-engine check-site` of the new site file, then
-    /// it replaces the site; returns the old and the new check report.
-    fn install_site(&mut self, path: &str) -> R<String>;
+    /// F30 (design §7): `iem-engine check-site` of the new site file and
+    /// the guard's own tables, then it replaces the site; returns the old
+    /// and the new check report. The checks are waits: "ide event" ends
+    /// them through `c`.
+    fn install_site(&mut self, path: &str, c: &Cancel) -> R<String>;
     /// `\iemmixer\iemmixer-exclude`: Defender process exclusions for the
     /// verified bundle `sha` (design §5.1).
     fn exclude(&mut self, sha: &str) -> R<()>;
@@ -911,8 +913,8 @@ pub mod fake {
             self.enter(Call::ForceReopen, None)
         }
 
-        fn install_site(&mut self, path: &str) -> R<String> {
-            self.enter(Call::InstallSite, None)?;
+        fn install_site(&mut self, path: &str, c: &Cancel) -> R<String> {
+            self.enter(Call::InstallSite, Some(c))?;
             self.sites.push(path.to_owned());
             Ok(format!("{path}: checked and installed"))
         }
@@ -1453,7 +1455,7 @@ mod tests {
         assert_eq!(pc.hil_signals, [("mic1".to_owned(), -30.0, 5.0, vec![72])]);
         pc.engine_force_reopen().unwrap();
         assert_eq!(
-            pc.install_site("site.toml").unwrap(),
+            pc.install_site("site.toml", &Cancel::default()).unwrap(),
             "site.toml: checked and installed"
         );
         assert_eq!(pc.sites, ["site.toml"]);
@@ -1467,7 +1469,7 @@ mod tests {
             assert!(pc.called(c) && c.mutates(), "{c:?}");
         }
         pc.fail(Call::InstallSite, "check-site exit 2");
-        assert!(pc.install_site("bad.toml").is_err());
+        assert!(pc.install_site("bad.toml", &Cancel::default()).is_err());
         assert_eq!(pc.sites, ["site.toml"]);
         pc.fail(Call::HilSignal, "refused");
         assert!(pc.engine_hil_signal("mic2", -30.0, 5.0, &[72]).is_err());

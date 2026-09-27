@@ -378,6 +378,14 @@ impl Settings {
         bad
     }
 
+    /// A new site for this PC (`install-site`, F30): the site file is shared
+    /// with the engine, and the guard reads its own tables from it at every
+    /// start, so a site the guard could not load is refused before it
+    /// replaces the old one.
+    pub fn check_new_site(&self, _site_text: &str) -> Result<(), String> {
+        Ok(())
+    }
+
     /// The image names of the process list.
     pub fn images(&self) -> Images {
         let name = |p: &Path| file_name(&p.to_string_lossy()).to_owned();
@@ -575,6 +583,37 @@ threshold_dbfs = -50.0
                 .unwrap_err()
                 .starts_with("pc.toml: ")
         );
+    }
+
+    #[test]
+    fn a_new_site_must_keep_the_guards_own_tables() {
+        let s = settings();
+        assert_eq!(s.check_new_site(SITE), Ok(()));
+        for (site, why) in [
+            (
+                SITE.replace("[guard]", "[not_guard]"),
+                "the site has no [guard] table",
+            ),
+            (
+                SITE.replace("[card]", "[not_card]"),
+                "the site has no [card] table",
+            ),
+            (
+                SITE.replace(r#"inputs = ["mic1", "mic2", "mic3"]"#, "inputs = []"),
+                "[activity] inputs is empty: the guard needs the stage inputs",
+            ),
+            (
+                SITE.replace(r#"app_image = "app.exe""#, r#"app_image = "other.exe""#),
+                "pc.toml: app_exe is not [guard] app_image",
+            ),
+        ] {
+            assert_eq!(s.check_new_site(&site), Err(why.to_owned()), "{why}");
+        }
+        let broken = s.check_new_site("[guard").unwrap_err();
+        assert!(broken.starts_with("site: "), "{broken}");
+        // A table the guard does not read may change freely.
+        let engine = SITE.replace(r#"pipe = "iemmixer-engine""#, r#"pipe = "other-engine""#);
+        assert_eq!(s.check_new_site(&engine), Ok(()));
     }
 
     #[test]
