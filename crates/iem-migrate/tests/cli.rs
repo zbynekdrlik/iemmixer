@@ -862,6 +862,69 @@ fn an_engineer_pin_that_is_not_4_digits_fails() {
     );
 }
 
+/// Default PINs for member and engineer, written after `band_args` wrote its
+/// member-only file (it rewrites that file on every call).
+fn with_engineer_default(w: &World) {
+    std::fs::write(w.path("defaults.txt"), "member=2468\nengineer=7531\n").unwrap();
+}
+
+/// The predecessor checked its config's engineer PIN and fell back to its
+/// compiled-in default only without one (reaperiem
+/// `test_engineer_pin_config_overrides_default`): a default must never
+/// replace the engineer's real PIN at the cutover.
+#[test]
+fn the_engineer_pin_from_the_config_wins_over_the_default() {
+    let w = World::new(16);
+    let (l, eras) = legacy(&w);
+    let out = w.path("band");
+    let a = band_args(&w, &l, &eras, &out, &[]);
+    with_engineer_default(&w);
+    let report = run(&a).unwrap();
+    assert!(
+        report.contains("\nengineer PIN from the predecessor's config\n"),
+        "{report}"
+    );
+    assert!(!report.contains("7531"), "the report shows a PIN");
+    let (h, store) = hasher(&out);
+    let engineer = store.engineer_hash().unwrap();
+    assert!(h.verify("8642", engineer), "the config's PIN");
+    assert!(!h.verify("7531", engineer), "the default must not verify");
+}
+
+/// Without a config PIN the predecessor's default is the engineer's PIN
+/// (reaperiem `test_engineer_pin_default_<PIN>`); without either there is no
+/// engineer PIN to import.
+#[test]
+fn the_engineer_falls_back_to_the_predecessors_default_pin() {
+    let w = World::new(17);
+    let (l, eras) = legacy(&w);
+    edit(&l.join("config.yaml"), "engineer_pin: \"8642\"\n", "");
+    let out = w.path("band");
+    let e = run(&band_args(&w, &l, &eras, &out, &["--dry-run"])).unwrap_err();
+    assert_eq!(e.code, EXIT_INPUT);
+    assert!(
+        e.msg.contains(
+            "  - the engineer PIN (config engineer_pin or --legacy-default-pins engineer=…) is missing"
+        ),
+        "{}",
+        e.msg
+    );
+    assert!(!out.exists(), "nothing written");
+    let a = band_args(&w, &l, &eras, &out, &[]);
+    with_engineer_default(&w);
+    let report = run(&a).unwrap();
+    assert!(
+        report.contains("\nengineer PIN from the predecessor's default\n"),
+        "{report}"
+    );
+    assert!(!report.contains("7531"), "the report shows a PIN");
+    let (h, store) = hasher(&out);
+    let engineer = store.engineer_hash().unwrap();
+    assert!(h.verify("7531", engineer), "the default PIN");
+    assert!(!h.verify("8642", engineer));
+    assert!(store.member_hash("engineer").is_none());
+}
+
 #[test]
 fn a_missing_or_placeholder_jwt_secret_fails() {
     let w = World::new(18);

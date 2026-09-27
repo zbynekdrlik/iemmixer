@@ -1111,14 +1111,52 @@ mod tests {
         }
     }
 
-    /// The curve is the engine's response: a peak reads its gain at its centre.
+    /// The drawn curve in dB: the points of `generate_curve_path`'s SVG path
+    /// read back through the inverse of `gain_to_y`. At 2400 px high, the
+    /// path's 0.1 px is 0.001 dB.
+    fn drawn_db(bands: &[EqBandState]) -> Vec<f32> {
+        const HEIGHT: f32 = 2400.0;
+        let path = generate_curve_path(bands, 400.0, HEIGHT);
+        let db: Vec<f32> = path
+            .split(['M', 'L'])
+            .filter(|p| !p.trim().is_empty())
+            .map(|p| {
+                let (_, y) = p.trim().split_once(',').unwrap();
+                12.0 - y.parse::<f32>().unwrap() / HEIGHT * 24.0
+            })
+            .collect();
+        assert_eq!(db.len(), 201, "{path}");
+        db
+    }
+
+    /// The response over reaperiem's sweep: 401 log steps from 20 Hz to 20 kHz.
+    fn swept_db(bands: &[EqBandState]) -> Vec<f32> {
+        (0..=400)
+            .map(|i| {
+                let t = i as f32 / 400.0;
+                curve_db(bands, 20.0 * 1000.0_f32.powf(t))
+            })
+            .collect()
+    }
+
+    fn max(v: &[f32]) -> f32 {
+        v.iter().copied().fold(f32::NEG_INFINITY, f32::max)
+    }
+
+    fn min(v: &[f32]) -> f32 {
+        v.iter().copied().fold(f32::INFINITY, f32::min)
+    }
+
+    /// The curve is the engine's response: a peak reads its gain at its centre
+    /// within reaperiem's 0.05 dB (`test_peaking_exact_at_center_frequency`;
+    /// the engine's design is exact at the centre).
     #[test]
     fn a_peak_reads_its_gain_at_its_centre() {
         for &gain in &[-12.0_f32, -6.0, -3.0, 0.0, 3.0, 6.0, 12.0] {
             for &bw in &[0.5_f32, 1.0, 2.0] {
                 let g = curve_db(&[band("band", 1000.0, gain, bw)], 1000.0);
                 assert!(
-                    (g - gain).abs() < 0.1,
+                    (g - gain).abs() < 0.05,
                     "peaking {gain} dB bw={bw}: got {g} at the centre"
                 );
             }
@@ -1159,15 +1197,116 @@ mod tests {
         assert!(curve_db(&hpf, 10.0) < -6.0, "{}", curve_db(&hpf, 10.0));
     }
 
+    /// reaperiem's grid (`test_lowshelf_passband_equals_gain`,
+    /// `test_highshelf_passband_equals_gain`): ±3 and ±6 dB at bw 0.5 and 1.0
+    /// reach their gain in the passband within 0.3 dB (worst offline: 0.037 dB,
+    /// the 5 kHz high shelf at bw 0.5) and stay flat on the far side.
     #[test]
     fn shelves_reach_their_gain_in_the_passband() {
-        for &gain in &[-6.0_f32, 6.0] {
-            let low = curve_db(&[band("lowshelf", 500.0, gain, 1.0)], 20.0);
-            assert!((low - gain).abs() < 0.5, "lowshelf {gain}: {low}");
-            assert!(curve_db(&[band("lowshelf", 500.0, gain, 1.0)], 15_000.0).abs() < 0.5);
-            let high = curve_db(&[band("highshelf", 2000.0, gain, 1.0)], 20_000.0);
-            assert!((high - gain).abs() < 0.5, "highshelf {gain}: {high}");
-            assert!(curve_db(&[band("highshelf", 2000.0, gain, 1.0)], 30.0).abs() < 0.5);
+        for &gain in &[-6.0_f32, -3.0, 3.0, 6.0] {
+            for &bw in &[0.5_f32, 1.0] {
+                let low = [band("lowshelf", 500.0, gain, bw)];
+                let g = curve_db(&low, 20.0);
+                assert!(
+                    (g - gain).abs() < 0.3,
+                    "lowshelf 500 Hz {gain} dB bw={bw}: passband at 20 Hz = {g}"
+                );
+                let far = curve_db(&low, 15_000.0);
+                assert!(
+                    far.abs() < 0.3,
+                    "lowshelf {gain} dB bw={bw}: {far} at 15 kHz"
+                );
+                let high = [band("highshelf", 5000.0, gain, bw)];
+                let g = curve_db(&high, 20_000.0);
+                assert!(
+                    (g - gain).abs() < 0.3,
+                    "highshelf 5 kHz {gain} dB bw={bw}: passband at 20 kHz = {g}"
+                );
+                let far = curve_db(&high, 30.0);
+                assert!(
+                    far.abs() < 0.3,
+                    "highshelf {gain} dB bw={bw}: {far} at 30 Hz"
+                );
+            }
+            // A 2 kHz high shelf at bw 1 as well.
+            let high = [band("highshelf", 2000.0, gain, 1.0)];
+            assert!((curve_db(&high, 20_000.0) - gain).abs() < 0.3);
+            assert!(curve_db(&high, 30.0).abs() < 0.3);
+        }
+        // reaperiem `test_biquad_low_shelf`: 200 Hz, +6 dB, bw 0.8.
+        let low = [band("lowshelf", 200.0, 6.0, 0.8)];
+        let g = curve_db(&low, 20.0);
+        assert!((g - 6.0).abs() < 1.5, "~6 dB below the low shelf, got {g}");
+        let g = curve_db(&low, 5000.0);
+        assert!(g.abs() < 0.5, "~0 dB above the low shelf, got {g}");
+    }
+
+    /// A shelf stays inside its [gain, 0] envelope from 20 Hz to 20 kHz with
+    /// reaperiem's 0.3 dB of slop for the transition
+    /// (`test_shelf_no_overshoot_or_undershoot`; the engine's bw 0.5 shelf,
+    /// slope capped at 1.2, overshoots 0.046 dB), in the swept response and in
+    /// the drawn curve, and reaches its gain.
+    #[test]
+    fn a_shelf_neither_overshoots_nor_undershoots() {
+        for &(ty, corner, gain) in &[
+            ("lowshelf", 500.0_f32, 6.0_f32),
+            ("lowshelf", 500.0, -6.0),
+            ("highshelf", 5000.0, 6.0),
+            ("highshelf", 5000.0, -6.0),
+        ] {
+            let b = [band(ty, corner, gain, 0.5)];
+            let (lo, hi) = if gain >= 0.0 {
+                (-0.3, gain + 0.3)
+            } else {
+                (gain - 0.3, 0.3)
+            };
+            for (what, db) in [("swept", swept_db(&b)), ("drawn", drawn_db(&b))] {
+                let (top, bottom) = (max(&db), min(&db));
+                assert!(top <= hi, "{ty} {gain} dB bw=0.5 {what}: max={top} > {hi}");
+                assert!(
+                    bottom >= lo,
+                    "{ty} {gain} dB bw=0.5 {what}: min={bottom} < {lo}"
+                );
+                let reached = if gain >= 0.0 { top } else { bottom };
+                assert!(
+                    (reached - gain).abs() < 0.3,
+                    "{ty} {gain} dB bw=0.5 {what}: reaches {reached}"
+                );
+            }
+        }
+    }
+
+    /// reaperiem#167: a shelf next to a peak must not ring upward into the
+    /// peak's region. The fixture is the predecessor's regression EQ (a
+    /// disabled high-pass, a low shelf, two peaks, a high shelf); its first
+    /// curve maths, a peaking Q on the shelves, summed it to +5.73 dB at
+    /// 640 Hz, over the +4.3 dB peak. The bound stays reaperiem's +4.6 dB at
+    /// the peak's centre, over the swept response and over the drawn curve
+    /// (offline: 3.63 dB).
+    #[test]
+    fn a_shelf_next_to_a_peak_does_not_ring_167() {
+        let mut hpf = band("highpass", 80.0, 0.0, 2.0);
+        hpf.enabled = false;
+        let bands = [
+            hpf,
+            band("lowshelf", 510.8, -2.1, 0.56),
+            band("band", 640.6, 4.3, 1.14),
+            band("band", 1473.3, -1.5, 0.92),
+            band("highshelf", 4448.1, 3.6, 0.80),
+        ];
+        let at_peak = curve_db(&bands, 640.6);
+        assert!(
+            at_peak <= 4.6,
+            "fixture at 640 Hz = {at_peak} dB, expected ≤ 4.6 (no overshoot)"
+        );
+        for (what, db) in [("swept", swept_db(&bands)), ("drawn", drawn_db(&bands))] {
+            let top = max(&db);
+            assert!(
+                top <= 4.6,
+                "fixture {what} max = {top} dB, expected ≤ 4.6 (no shelf ringing)"
+            );
+            // The bands are heard: the peak lifts the curve well above flat.
+            assert!(top > 3.0, "fixture {what} max = {top} dB");
         }
     }
 
@@ -1190,6 +1329,25 @@ mod tests {
         assert_eq!(hs.bands[0].freq_hz, 8000.0);
         assert_eq!(hs.bands[0].bw_oct, 2.0);
         assert!(hs.bands[0].enabled);
+    }
+
+    /// The engine has four band kinds and the server names only those
+    /// ("highpass", "lowshelf", "band", "highshelf"). Any other type, such as
+    /// the predecessor's "lowpass" and "notch", is drawn as a peak with its
+    /// values, never as a low-pass or a notch (the importer refuses both, so
+    /// none reaches the page; iemmixer#25 §6).
+    #[test]
+    fn other_band_types_draw_as_peaks() {
+        let peak = engine_params(&[band("band", 5000.0, 6.0, 0.5)]).bands[0];
+        assert_eq!(peak.kind, BandKind::Peak);
+        for ty in ["lowpass", "notch", "bandpass", ""] {
+            let p = engine_params(&[band(ty, 5000.0, 6.0, 0.5)]).bands[0];
+            assert_eq!(p, peak, "{ty:?}");
+            let b = [band(ty, 5000.0, 6.0, 0.5)];
+            // A low-pass would cut 20 kHz, a notch would cut its centre.
+            assert!((curve_db(&b, 5000.0) - 6.0).abs() < 0.05, "{ty:?}");
+            assert!(curve_db(&b, 20_000.0).abs() < 1.0, "{ty:?}");
+        }
     }
 
     #[test]

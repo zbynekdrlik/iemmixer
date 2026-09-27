@@ -479,6 +479,43 @@ mod tests {
         assert_eq!(eq_type("band"), Some(K::Peak));
         assert_eq!(eq_type("highshelf"), Some(K::HighShelf));
         assert_eq!(eq_type("notch"), None);
+        assert_eq!(eq_type("lowpass"), None);
+    }
+
+    /// A predecessor backup's "lowpass" or "notch" band has no engine kind: it
+    /// is reported as a different type even on a peak band whose values all
+    /// agree, never compared as a peak (iemmixer#25 §6).
+    #[test]
+    fn lowpass_and_notch_backup_bands_are_reported_not_read_as_peaks() {
+        let imp = setup();
+        let p = imp.state.mixes[&MixId::new("member1")].out.eq.bands[2];
+        assert_eq!(p.kind, iem_engine_proto::BandKind::Peak);
+        let differing = |band_type: &str| {
+            let mut b = agreeing(&imp);
+            b.eq.get_mut(&track_name("member1"))
+                .unwrap()
+                .push(EqBandBackup {
+                    band: 2,
+                    band_type: band_type.into(),
+                    freq_norm: 0.0,
+                    gain_norm: 0.0,
+                    bw_norm: 0.0,
+                    freq_hz: p.freq_hz as f32,
+                    gain_db: p.gain_db as f32,
+                    bw_oct: p.bw_oct as f32,
+                    enabled: p.enabled,
+                });
+            cross_check(&b, &imp).unwrap().differing
+        };
+        assert_eq!(differing("band"), Vec::<String>::new());
+        for ty in ["lowpass", "notch"] {
+            assert_eq!(
+                differing(ty),
+                vec![format!(
+                    "mix member1 EQ band 3: type {ty} in the backup, Peak in the project"
+                )]
+            );
+        }
     }
 
     #[test]
