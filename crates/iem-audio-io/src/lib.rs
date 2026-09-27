@@ -38,6 +38,7 @@ pub mod channels;
 pub mod format;
 pub mod nullrt;
 pub mod offline;
+pub mod prefwin;
 pub mod telemetry;
 pub mod wav;
 
