@@ -50,6 +50,7 @@ test.describe("Channel strip layout", () => {
 
   test("the controls sit above the fader (the finger never covers the dB)", async ({ page }) => {
     await openMixer(page, "member3");
+    await expect(strip(page, "mic3")).toBeVisible();
     for (const s of [page.getByTestId("global-volume-fader"), strip(page, "mic3")]) {
       const db = await s.locator(".db-display").boundingBox();
       const fader = await s.locator(".fader-track").boundingBox();
@@ -75,6 +76,7 @@ test.describe("Channel strip layout", () => {
   test("the kebab menu button is left of the channel name", async ({ page }) => {
     await openMixer(page, "member3");
     const own = strip(page, "mic3");
+    await expect(own).toBeVisible();
     const menuBtn = await own.locator(".ch-menu-btn").boundingBox();
     const label = await own.locator(".ch-label").boundingBox();
     expect(menuBtn).not.toBeNull();
@@ -94,6 +96,7 @@ test.describe("Channel strip layout", () => {
 
   test("a strip is a three-row grid: controls, meter, fader", async ({ page }) => {
     await openMixer(page, "member3");
+    await expect(strip(page, "mic3")).toBeVisible();
     for (const s of [page.getByTestId("global-volume-fader"), strip(page, "mic3")]) {
       const rows = await s.evaluate((el) => getComputedStyle(el).gridTemplateRows);
       expect(rows.split(" ")).toHaveLength(3);
@@ -107,6 +110,7 @@ test.describe("Channel strip layout", () => {
 
   test("the stereo meter is two thin bars above the fader", async ({ page }) => {
     await openMixer(page, "member3");
+    await expect(strip(page, "mic3")).toBeVisible();
     for (const s of [page.getByTestId("global-volume-fader"), strip(page, "mic3")]) {
       const meter = s.locator(".meter-stereo");
       await expect(meter).toBeAttached();
@@ -168,5 +172,9 @@ test.describe("Channel strip layout", () => {
     await expect(strip(page, "mic3")).toBeVisible();
     await expect(page.locator(".main-section-label")).toHaveCount(0);
     await expect(page.getByText("MY MIC", { exact: true })).toHaveCount(0);
+    await expect(page.locator(".channels-grid > .channel[data-channel]").first()).toHaveAttribute(
+      "data-channel",
+      "mic3",
+    );
   });
 });
