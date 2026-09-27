@@ -378,14 +378,17 @@ jobs:
         run: cargo clippy --locked -p iem-win --all-targets --features test-helper -- -D warnings
       - name: Windows glue tests (processes, ports, windows, registry under a test key, Ctrl-Break to a child)
         run: cargo test --locked -p iem-win --features test-helper
-      - name: Guard clippy and tests (its Windows effects WinPc build here only; the pure core runs on Linux too)
-        run: |
-          cargo clippy --locked -p iem-guard --all-targets -- -D warnings
-          cargo test --locked -p iem-guard
-      - name: Migration CLI clippy and tests (it runs on the PC; the PIN pepper is DPAPI here)
-        run: |
-          cargo clippy --locked -p iem-migrate --all-targets -- -D warnings
-          cargo test --locked -p iem-migrate
+      # One cargo command per step: the pwsh wrapper stops only on the last
+      # command's exit code, so a lint-only clippy failure followed by green
+      # tests would pass the step.
+      - name: Guard clippy (its Windows effects WinPc build here only; the pure core runs on Linux too)
+        run: cargo clippy --locked -p iem-guard --all-targets -- -D warnings
+      - name: Guard tests on Windows
+        run: cargo test --locked -p iem-guard
+      - name: Migration CLI clippy (it runs on the PC; the PIN pepper is DPAPI here)
+        run: cargo clippy --locked -p iem-migrate --all-targets -- -D warnings
+      - name: Migration CLI tests on Windows
+        run: cargo test --locked -p iem-migrate
       - name: Build release binaries
         run: cargo build --locked --release -p iem-server -p iem-tray -p iem-migrate --features iem-server/standalone
       - name: Upload the binaries (push runs only — pull requests, forks included, never yield binaries)
@@ -414,10 +417,12 @@ jobs:
       - name: Rust toolchain (rust-toolchain.toml)
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - name: Audio I/O clippy and tests on Windows (format, telemetry, the ASIO host builds, the spike's parser)
-        run: |
-          cargo clippy --locked -p iem-audio-io --all-targets -- -D warnings
-          cargo test --locked -p iem-audio-io
+      # One cargo command per step (the pwsh wrapper stops only on the last
+      # command's exit code).
+      - name: Audio I/O clippy on Windows (format, telemetry, the ASIO host builds, the spike's parser)
+        run: cargo clippy --locked -p iem-audio-io --all-targets -- -D warnings
+      - name: Audio I/O tests on Windows
+        run: cargo test --locked -p iem-audio-io
       - name: Build the spike (release)
         run: cargo build --locked --release -p iem-audio-io --example asio_spike
       - name: Without an ASIO driver the spike reports no-driver and exits 3
