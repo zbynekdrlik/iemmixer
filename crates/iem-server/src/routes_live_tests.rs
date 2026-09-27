@@ -102,6 +102,114 @@ async fn a_backup_is_captured_listed_previewed_and_restored() {
 }
 
 #[tokio::test]
+async fn a_capture_answers_with_its_backup_and_never_overwrites_one() {
+    let h = EngineHarness::start();
+    let (_dir, s, app) = live(&h).await;
+    let eng = token("engineer", true);
+    let now = || {
+        chrono::Utc::now()
+            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+            .to_string()
+    };
+    let t0 = now();
+    let capture = "/api/backups/capture";
+    // Two captures of one moment (a double click, the daemon's slot).
+    let (status, a) = call(&app, Method::POST, capture, Some(&eng), None).await;
+    assert_eq!(status, StatusCode::OK, "{a}");
+    let (status, b) = call(&app, Method::POST, capture, Some(&eng), None).await;
+    assert_eq!(status, StatusCode::OK, "{b}");
+    let t1 = now();
+    assert_ne!(a["filename"], b["filename"], "two files");
+    for info in [&a, &b] {
+        let name = info["filename"].as_str().unwrap();
+        let saved = s.backup_store.load(name).unwrap();
+        let ts = saved.timestamp.as_str();
+        assert_eq!(info["timestamp"].as_str(), Some(ts));
+        assert!(ts.len() == 24 && ts.ends_with('Z'), "{ts}");
+        assert!(t0.as_str() <= ts && ts <= t1.as_str(), "{t0} ≤ {ts} ≤ {t1}");
+        // Every level of every mix: 11 mixes × 24 inputs, and the mixes
+        // member1 (8) and the engineer (9) hear.
+        assert_eq!(info["send_count"].as_u64(), Some(11 * 24 + 8 + 9));
+        assert_eq!(saved.level_count(), 11 * 24 + 8 + 9);
+        assert_eq!(info["track_count"].as_u64(), Some(11));
+    }
+    let (status, list) = call(&app, Method::GET, "/api/backups", Some(&eng), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let names: Vec<&str> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["filename"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            b["filename"].as_str().unwrap(),
+            a["filename"].as_str().unwrap()
+        ],
+        "newest first"
+    );
+}
+
+#[tokio::test]
+async fn a_stale_backups_restore_names_what_it_skipped() {
+    let h = EngineHarness::start();
+    let (_dir, s, app) = live(&h).await;
+    let eng = token("engineer", true);
+    let (status, info) = call(&app, Method::POST, "/api/backups/capture", Some(&eng), None).await;
+    assert_eq!(status, StatusCode::OK, "{info}");
+    // The backup of an older site: an input, a mix and a member that are
+    // gone now, and one value that still applies.
+    let mut old = s
+        .backup_store
+        .load(info["filename"].as_str().unwrap())
+        .unwrap();
+    let gone = InputId::new("gone");
+    old.state.inputs.insert(gone.clone(), Default::default());
+    old.state
+        .mixes
+        .get_mut(&MixId::new("member1"))
+        .unwrap()
+        .inputs
+        .insert(gone.clone(), Default::default());
+    old.state
+        .mixes
+        .insert(MixId::new("oldmix"), Default::default());
+    old.customizations.insert(
+        "ghost".into(),
+        iem_core::band::CustomizationFile::new("ghost", vec![], vec![]),
+    );
+    old.state
+        .inputs
+        .get_mut(&InputId::new("keys"))
+        .unwrap()
+        .trim_db = 2.5;
+    old.timestamp = "2026-01-01T00:00:00.000Z".into();
+    let name = s.backup_store.save(&old).unwrap();
+
+    let restore = format!("/api/backups/{name}/restore");
+    let (status, r) = call(&app, Method::POST, &restore, Some(&eng), None).await;
+    assert_eq!(status, StatusCode::OK, "{r}");
+    let why = "not in the running topology";
+    assert_eq!(
+        r,
+        serde_json::json!({
+            "restored_count": 1,
+            "skipped": [
+                {"category": "Input", "description": "gone", "reason": why},
+                {"category": "Level", "description": "gone → Member1", "reason": why},
+                {"category": "Output", "description": "oldmix", "reason": why},
+                {"category": "Customization", "description": "ghost", "reason": why},
+            ]
+        })
+    );
+    let m = s.engine.mirror();
+    assert_eq!(m.input(&InputId::new("keys")).trim_db, 2.5, "applied");
+    assert!(!m.state.inputs.contains_key(&gone));
+    assert!(!m.state.mixes.contains_key(&MixId::new("oldmix")));
+}
+
+#[tokio::test]
 async fn a_restore_keeps_what_the_backup_does_not_have() {
     let h = EngineHarness::start();
     let (_dir, s, app) = live(&h).await;
