@@ -1,7 +1,7 @@
 import type { Locator } from "@playwright/test";
 import { test, expect, Page } from "./support/fixtures";
-import { EqBand, withSocket } from "./support/mixer-socket";
-import { menu, openMixer, strip, tab } from "./support/session";
+import { EqBand, MixerSocket, withSocket } from "./support/mixer-socket";
+import { login, menu, openMixer, strip, tab } from "./support/session";
 
 // EQ (F11) and limiter (F12) against the real engine; member4 owns mic4 and
 // mic5 (X7: a member may edit the EQ of their own inputs).
@@ -476,4 +476,88 @@ test.describe("Limiter (F12)", () => {
     await expect(page.locator(".limiter-modal .limiter-activity-label")).toContainText("limited");
     await page.locator(".limiter-modal .limiter-close-btn").click();
   });
+
+  // The CI half of gen1 live/limiter-activity.spec.ts (the card half runs on
+  // the PC in S7): the engine's sine (−20 dBFS) with mic4's trim at +24 dB
+  // and its level in member4's mix at +12 dB is far above the −6 dB limit.
+  test("the counter adds up while the limiter holds the sine down, and Reset zeros it (X14)", async ({
+    page,
+    baseURL,
+  }) => {
+    test.setTimeout(90_000);
+    const member = await openMixer(page, "member4");
+    const engineer = await login(page, "engineer", true);
+    const lim = page.getByTestId("global-volume-fader").locator(".limiter-btn-small");
+    const modal = page.locator(".limiter-modal");
+    const label = modal.locator(".limiter-activity-label");
+
+    /** Opens the modal afresh (the counter comes with LimiterParams) and returns the counter's text. */
+    const reopen = async (): Promise<string> => {
+      if ((await modal.count()) > 0) {
+        await modal.locator(".limiter-close-btn").click();
+        await expect(modal).toHaveCount(0);
+      }
+      await lim.click();
+      await expect(label).toBeVisible();
+      return (await label.innerText()).trim();
+    };
+
+    const mix = await MixerSocket.open(baseURL, "member4", member.token);
+    const desk = await MixerSocket.open(baseURL, "engineer", engineer.token);
+    const level = (await mix.channels()).find((c) => c.id === "mic4")?.level_db;
+    const trim = (await desk.consoleInputs()).find((i) => i.id === "mic4")?.trim_db;
+    expect(level, "mic4's level in member4's mix").toBeDefined();
+    expect(trim, "mic4's trim").toBeDefined();
+    try {
+      // Start from zero: the limiter is on and its counter reset.
+      await reopen();
+      await expect(modal.locator(".limiter-toggle-btn")).toHaveText("ON");
+      await modal.locator(".limiter-reset-btn").click();
+      await expect.poll(reopen, { timeout: 10_000 }).toBe("not limited yet");
+
+      desk.send({ cmd: "SetInput", input: "mic4", trim_db: 24 });
+      mix.send({ cmd: "SetLevel", id: "mic4", level_db: 12 });
+      expect((await desk.consoleInputs()).find((i) => i.id === "mic4")?.trim_db).toBe(24);
+
+      await expect
+        .poll(async () => activeSeconds(await reopen()), {
+          message: "the counter reaches 5 s while the limiter holds the sine down",
+          timeout: 30_000,
+          intervals: [1_000],
+        })
+        .toBeGreaterThanOrEqual(5);
+      expect(await label.innerText()).toMatch(/^\d+\.\d sec limited$|^\d+ min \d+ sec limited$/);
+      expect(await mix.limiterActiveSeconds()).toBeGreaterThanOrEqual(5);
+
+      // The sine away (the limiter lets go within its 50 ms release), then Reset.
+      desk.send({ cmd: "SetInput", input: "mic4", trim_db: trim });
+      mix.send({ cmd: "SetLevel", id: "mic4", level_db: level });
+      expect((await desk.consoleInputs()).find((i) => i.id === "mic4")?.trim_db).toBe(trim);
+      await mix.limiterActiveSeconds();
+      await page.waitForTimeout(1_000);
+      await reopen();
+      await modal.locator(".limiter-reset-btn").click();
+      await expect(label).toHaveText("not limited yet");
+      await expect.poll(reopen, { timeout: 10_000 }).toBe("not limited yet");
+      expect(await mix.limiterActiveSeconds()).toBe(0);
+      await modal.locator(".limiter-close-btn").click();
+    } finally {
+      desk.send({ cmd: "SetInput", input: "mic4", trim_db: trim });
+      mix.send({ cmd: "SetLevel", id: "mic4", level_db: level });
+      await desk.consoleInputs();
+      await mix.limiterActiveSeconds();
+      await desk.close();
+      await mix.close();
+    }
+  });
 });
+
+/** Seconds from the limiter counter's text (`format_active` in limiter_modal.rs). */
+function activeSeconds(text: string): number {
+  if (text === "not limited yet") return 0;
+  const secs = /^(\d+(?:\.\d+)?) sec limited$/.exec(text);
+  if (secs) return Number(secs[1]);
+  const minSecs = /^(\d+) min (\d+) sec limited$/.exec(text);
+  if (minSecs) return Number(minSecs[1]) * 60 + Number(minSecs[2]);
+  throw new Error(`unreadable limiter counter "${text}"`);
+}
