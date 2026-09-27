@@ -67,6 +67,6 @@ pub use alarms::{Alarm, Alarms};
 pub use cancel::{Cancel, Preempted};
 pub use pc::{Audience, Pc, R, StepError};
 pub use plan::{Facts, Health, Mode, OnError, PrefFail, Step};
-pub use proto::{Reply, Request, Update};
+pub use proto::{EngineStatus, Reply, Request, Update};
 pub use site::Settings;
 pub use state::GuardState;

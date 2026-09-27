@@ -20,11 +20,12 @@ Gen 2 of the band's in-ear-monitor mixer: a native Rust audio engine replacing R
 - DSP kernels, EQ/pan/limiter parity, golden tolerances → `.claude/rules/dsp-parity.md`
 - Gen 1 test parity manifest (`docs/parity/gen1-tests.tsv`, its CI check, cutover gate) → `.claude/rules/parity.md`
 - Golden renders on the IEM PC (generator, window driver, analysis) → `.claude/rules/golden-renders.md`
+- Guard, iemmode, PC install → `.claude/rules/guard.md`
 
 ## Always-apply rules
 
 **Owner event signals (D2).** "ide event" (an event is coming) → immediately stop everything iemmixer on the IEM PC, start REAPER and the predecessor app, verify the handover, and confirm back to the owner. "event skončil" (the event ended) → save and quit REAPER, stop the predecessor app gracefully, start iemmixer, continue development. Never switch on your own and never ask whether an event is running. A reboot always comes back in event mode. Nothing is ever force-killed.
-**Until S6's `iemmode`** the interim switch is `scripts/asio-spike/spike_window.py` with the private `~/.config/iemmixer/asio-spike.env`: "ide event" → create `~/.config/iemmixer/EVENT-NOW`, then `preempt` if a window is open, then the event runbook's checks (`~/.config/iemmixer/event-runbook.md`); "event skončil" → remove the flag; `to-dev` / `to-event` switch only inside a window of a running task.
+**The switch: one rule, two phases.** Once the guard is installed on the PC (S6 plan Task 16 Step 3, recorded on #9): "ide event" → `python3 scripts/iem-pc/iempc.py event` (it writes `~/.config/iemmixer/EVENT-NOW` first, pre-empts an open S1a/S1c window, runs `iemmode event`, and `iemmode event --direct` when the guard is unreachable); "event skončil" → remove the flag, then `iempc.py dev`. **Before that** the interim switch applies: `scripts/asio-spike/spike_window.py` with the private `~/.config/iemmixer/asio-spike.env`: "ide event" → create `~/.config/iemmixer/EVENT-NOW`, then `preempt` if a window is open, then the event runbook's checks (`~/.config/iemmixer/event-runbook.md`); "event skončil" → remove the flag; `to-dev` / `to-event` switch only inside a window of a running task.
 
 **Predecessor boundary.** Never push to `zbynekdrlik/reaperiem`, never change its code, config or deployment; read it only through `~/devel/reaperiem` at a pinned SHA.
 

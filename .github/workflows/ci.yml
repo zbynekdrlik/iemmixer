@@ -372,6 +372,9 @@ jobs:
       - name: Golden PC module self-test (Windows PowerShell 5.1, as on the PC)
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/golden/Test-GoldenPc.ps1
+      - name: Guard PC module and HIL v1 script self-test, parse check included (Windows PowerShell 5.1, as on the PC)
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/iem-pc/Test-IemPc.ps1
       - name: Rust toolchain (rust-toolchain.toml)
         run: rustup toolchain install
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -404,21 +407,125 @@ jobs:
         run: cargo clippy --locked -p iem-migrate --all-targets -- -D warnings
       - name: Migration CLI tests on Windows
         run: cargo test --locked -p iem-migrate
-      - name: Build release binaries
-        # The tray no longer links the server (F27): its TLS and audio
-        # features are named here.
-        run: cargo build --locked --release -p iem-server -p iem-tray -p iem-migrate --features iem-server/standalone,iem-server/tls,iem-server/audio
-      - name: Upload the binaries (push runs only — pull requests, forks included, never yield binaries)
+
+  bundle:
+    name: bundle
+    # The one bundle that may reach the PC (P5, S6 design note section 5.5): built
+    # on every push and pull request, verified by the guard's own install code,
+    # uploaded only from a push to dev or main, then attested by digest.
+    needs: [windows]
+    runs-on: windows-2025
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: wasm-dist
+          path: crates/iem-ui/dist
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Build (release; the server as the PC runs it, with TLS and the audio paths)
+        run: cargo build --locked --release -p iem-engine -p iem-server -p iem-guard -p iem-tray -p iem-migrate --features iem-server/standalone,iem-server/tls,iem-server/audio
+      - name: Zip with manifest and sums
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $b = Join-Path $env:RUNNER_TEMP 'bundle'
+          New-Item -ItemType Directory -Force -Path $b | Out-Null
+          $exes = 'iem-engine', 'iem-server', 'iemmixer-guard', 'iemmode', 'iem-tray', 'iem-migrate' | ForEach-Object { "target/release/$_.exe" }
+          Copy-Item -LiteralPath $exes -Destination $b
+          Copy-Item -LiteralPath scripts/iem-pc/hil-v1.ps1, scripts/iem-pc/IemPc.psm1 -Destination $b
+          Copy-Item -LiteralPath crates/iem-engine/LICENSE -Destination (Join-Path $b 'LICENSE-iem-engine')
+          # The S1c tuning modules, one level deep (bundle names allow tuning/<name> only).
+          if (Test-Path -LiteralPath scripts/pc-tuning) {
+            New-Item -ItemType Directory -Force -Path (Join-Path $b 'tuning') | Out-Null
+            Copy-Item -Path scripts/pc-tuning/*.psm1 -Destination (Join-Path $b 'tuning')
+          }
+          # [workspace.package].version, read from its own table (never the first version line).
+          $version = ''
+          $inPackage = $false
+          foreach ($line in Get-Content -LiteralPath Cargo.toml) {
+            if ($line -match '^\s*\[') { $inPackage = ($line.Trim() -ceq '[workspace.package]'); continue }
+            if ($inPackage -and $line -match '^\s*version\s*=\s*"([^"]+)"') { $version = $Matches[1]; break }
+          }
+          if (-not $version) { throw 'no [workspace.package] version in Cargo.toml' }
+          $branch = if ($env:GITHUB_REF -like 'refs/heads/*') { $env:GITHUB_REF.Substring(11) } else { 'pr' }
+          [ordered]@{ sha = $env:GITHUB_SHA; branch = $branch; version = $version; run = [int64]$env:GITHUB_RUN_ID } | ConvertTo-Json |
+            Set-Content -Encoding utf8NoBOM -LiteralPath (Join-Path $b 'manifest.json')
+          $lines = Get-ChildItem -LiteralPath $b -File -Recurse | Sort-Object FullName | ForEach-Object {
+            '{0}  {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.FullName.Substring($b.Length + 1).Replace('\', '/')
+          }
+          [IO.File]::WriteAllText((Join-Path $b 'SHA256SUMS'), (($lines -join "`n") + "`n"))
+          Get-Content -LiteralPath (Join-Path $b 'SHA256SUMS')
+          Compress-Archive -Path (Join-Path $b '*') -DestinationPath (Join-Path $env:RUNNER_TEMP "iemmixer-$env:GITHUB_SHA.zip")
+      - name: Verify the zip with the code that installs it; a tampered copy is refused
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = Join-Path $env:RUNNER_TEMP "iemmixer-$env:GITHUB_SHA.zip"
+          & target/release/iemmixer-guard.exe install $zip --verify-only
+          if ($LASTEXITCODE -ne 0) { throw "bundle verify failed ($LASTEXITCODE)" }
+          $t = Join-Path $env:RUNNER_TEMP 'tampered'
+          Copy-Item -Recurse -LiteralPath (Join-Path $env:RUNNER_TEMP 'bundle') -Destination $t
+          Add-Content -LiteralPath (Join-Path $t 'hil-v1.ps1') -Value '# tampered after the sums'
+          $out = New-Item -ItemType Directory -Force -Path (Join-Path $env:RUNNER_TEMP 'tampered-zip')
+          $bad = Join-Path $out.FullName "iemmixer-$env:GITHUB_SHA.zip"
+          Compress-Archive -Path (Join-Path $t '*') -DestinationPath $bad
+          # The refusal must name the tampered file's sum, not fail for another reason.
+          $ErrorActionPreference = 'Continue'
+          $said = (& target/release/iemmixer-guard.exe install $bad --verify-only 2>&1 | ForEach-Object { "$_" }) -join "`n"
+          $code = $LASTEXITCODE
+          $ErrorActionPreference = 'Stop'
+          Write-Output $said
+          if ($code -eq 0) { throw 'install --verify-only accepted a tampered bundle' }
+          if ($said -cnotmatch 'hil-v1\.ps1: sha256 [0-9a-f]{64}, SHA256SUMS says [0-9a-f]{64}') {
+            throw "install --verify-only refused the tampered bundle ($code) without naming hil-v1.ps1's sum"
+          }
+          $global:LASTEXITCODE = 0
+      - name: Upload (dev/main pushes only, P5)
         if: github.event_name == 'push'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: windows-binaries
-          path: |
-            target/release/iem-server.exe
-            target/release/iem-tray.exe
-            target/release/iem-migrate.exe
-          retention-days: 7
+          name: iemmixer-bundle-${{ github.sha }}
+          path: ${{ runner.temp }}/iemmixer-${{ github.sha }}.zip
+          retention-days: 30
           if-no-files-found: error
+
+  attest:
+    name: attest
+    # Provenance of the zip by digest: no checkout, no build. The dev box reads
+    # this run's jobs and dispatches the private ops repo's HIL itself (iempc
+    # dispatch-hil); no dispatch job and no token live here (design section 7).
+    if: github.event_name == 'push'
+    needs: [bundle]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      id-token: write
+      attestations: write
+      contents: read
+    outputs:
+      digest: ${{ steps.d.outputs.digest }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: iemmixer-bundle-${{ github.sha }}
+      - name: Digest of the zip
+        id: d
+        run: |
+          set -euo pipefail
+          sum="$(sha256sum "iemmixer-${GITHUB_SHA}.zip" | cut -d' ' -f1)"
+          [[ "$sum" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::no digest for iemmixer-${GITHUB_SHA}.zip"; exit 1; }
+          echo "digest=sha256:$sum" >> "$GITHUB_OUTPUT"
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: iemmixer-${{ github.sha }}.zip
+          subject-digest: ${{ steps.d.outputs.digest }}
 
   asio-spike:
     name: asio-spike

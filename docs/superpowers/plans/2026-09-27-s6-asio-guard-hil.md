@@ -1659,7 +1659,7 @@ fn back_to_event(pc: &mut dyn Pc, g: &mut Guard, why: &str) -> Outcome {
     iemmode status | event [--dry-run] [--direct] | dev [--build SHA] [--force] [--dry-run]
     iemmode live --build SHA [--trial] [--dry-run] | install <zip> | activate <sha>
     iemmode test-signal <input> <dbfs> <ttl> | report <sha> <green|red> <detail>
-    iemmode job-begin <run> | job-end <run> | install-site <file> | force-reopen | runner-stop
+    iemmode job-begin <run> | job-end <run> | install-site <file> | force-reopen | inject-fault | runner-stop
     iemmode probe-task | rehearse-teardown | alarm-test | alarm-ack <id> | quit
     ```
 
@@ -1755,6 +1755,13 @@ fn a_failed_pref_check_follows_on_pref_fail() {
   - `session_end_stops_respawning`;
   - `dry_run_changes_nothing` (the fake records no mutating call);
   - install happy path, tampered file, traversal entry, missing required file, existing SHA with different sums, `--verify-only` leaves no bundle directory.
+
+- [ ] **Step 6: What HIL v1 needs from the guard** (amended after the Task 12 review, 2026-09-27; `hil-v1.ps1` already relies on it):
+  - `Request::InjectFault` / `iemmode inject-fault` (in `proto.rs` since Task 12): refused unless `dev`, not switching and a HIL job is active. The guard starts the engine with `--fault-injection` only in `dev` while a job is active (`activate` inside the job restarts it so; never in `live`) and forwards `Cmd::InjectFault` over the supervisor connection. The engine's exit 70 goes through `crash::after_exit` (respawn after the backoff, the fade-in by `Process::discontinuity`). Test: `inject_fault_is_refused_outside_a_dev_job` and, with `FakePc`, one exit 70 → exactly one respawn, `spawns` + 1, `last_exit = Some(70)`.
+  - `Reply.engine: Option<EngineStatus>` (in `proto.rs` since Task 12) on every reply while an engine runs: `build` (`Hello.engine_build`), `frames`, `callbacks`, `missed`, `resets`, `parked`, `faulted` (the supervisor `Status`, Task 5's fields), `pipe_private` (the engine pipe's DACL read back through `iem_win`: only the user and SYSTEM), `spawns` (engines this guard started) and `last_exit`. `None` while no engine runs.
+  - `iemmixer-guard install <zip> --verify-only` prints every `bundle::verify` problem, one per line on stderr, and exits non-zero; CI's tampered-bundle check requires the line `hil-v1.ps1: sha256 <64 hex>, SHA256SUMS says <64 hex>`.
+  - The elevated tasks answer in `%ProgramData%\iemmixer\tasks\out\<kind>.result.json` (admin-only; the user reads it), not in the user's root; the requests stay `<root>\guard\tasks\<kind>.request.json` (`IemPc.psm1`, `.claude/rules/guard.md`). The guard resolves `%ProgramData%` from the known folder.
+  - HIL v1 scope: the pipes' first-instance flag (the `windows` job's pipe tests prove it), the tunnel's peer address, the forced reopen's duration (≈ 100 ms) and the fault callback's time (< 1 ms) are not reported by the guard and not checked by HIL v1; S7 (#10) picks them up with the switch-timing work.
 
   Commit: `feat(guard): daemon, switch runner with pre-emption and error policy, install/activate, iemmode CLI`.
 
