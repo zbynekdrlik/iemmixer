@@ -16,7 +16,7 @@ use axum::{
     response::IntoResponse,
 };
 use iem_core::{ApiError, ClientMsg, MIN_CLIENT_PROTO, ServerMsg, UI_PROTO};
-use iem_engine_proto::{Cmd, EqTarget, MixId, Source};
+use iem_engine_proto::{Change, Cmd, EqTarget, MixId, Source};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::engine::client::EngineEvent;
@@ -374,7 +374,7 @@ fn engine_event(
                 return Vec::new();
             };
             let mut out = if origin == Some(session) {
-                Vec::new()
+                own_echo(&site, &state.engine.mirror(), page, &changes)
             } else {
                 view::updates_for(&site, &state.engine.mirror(), page, &changes)
             };
@@ -385,6 +385,26 @@ fn engine_event(
         }
         EngineEvent::Meters(_) | EngineEvent::Status(_) | EngineEvent::Alarm(_) => Vec::new(),
     }
+}
+
+/// What a session hears back from its own change: nothing (it applied the
+/// change optimistically), except the channel mutes a solo change shows (the
+/// mask is the server's view; the page cannot know every level's own mute).
+pub fn own_echo(
+    site: &crate::site_view::SiteView,
+    mirror: &crate::engine::mirror::Mirror,
+    page: &Page,
+    changes: &[Change],
+) -> Vec<ServerMsg> {
+    let solo: Vec<Change> = changes
+        .iter()
+        .filter(|c| matches!(c, Change::Solo { .. }))
+        .cloned()
+        .collect();
+    view::updates_for(site, mirror, page, &solo)
+        .into_iter()
+        .filter(|m| matches!(m, ServerMsg::ChannelUpdate { .. }))
+        .collect()
 }
 
 /// Whether `cmd` persistently changes the mix of `mix`'s page (the daily
@@ -544,6 +564,55 @@ mod tests {
             !may_open(&claims("translator", false), &t),
             "no member owns it"
         );
+    }
+
+    #[test]
+    fn a_session_hears_back_only_the_mutes_its_solo_shows() {
+        use crate::engine::mirror::Mirror;
+        use iem_engine_proto::{EngineMsg, MixState, Solo, Transient};
+        let v = test_view();
+        let page = v.page("member2").unwrap();
+        let mic2 = Source::Input(InputId::new("mic2"));
+        let mut m = Mirror::default();
+        let mut transient = Transient::default();
+        transient.solo.push(Solo {
+            mix: MixId::new("member2"),
+            sources: vec![mic2.clone()],
+        });
+        m.apply(&EngineMsg::State {
+            rev: 1,
+            state: MixState::default(),
+            transient,
+        });
+        let level = Change::Level {
+            mix: MixId::new("member2"),
+            source: mic2.clone(),
+            level: Default::default(),
+        };
+        assert!(own_echo(&v, &m, &page, std::slice::from_ref(&level)).is_empty());
+        let echo = own_echo(
+            &v,
+            &m,
+            &page,
+            &[
+                level,
+                Change::Solo {
+                    mix: MixId::new("member2"),
+                    sources: vec![mic2],
+                },
+            ],
+        );
+        assert_eq!(echo.len(), 24, "every channel, no SoloUpdate");
+        let audible: Vec<&str> = echo
+            .iter()
+            .filter_map(|u| match u {
+                ServerMsg::ChannelUpdate {
+                    id, muted: false, ..
+                } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(audible, ["mic2"]);
     }
 
     #[test]

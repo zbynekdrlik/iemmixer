@@ -247,7 +247,7 @@ impl AppState {
     }
 
     /// Test constructor: panics where `try_new` returns an error.
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(test)]
     pub fn new(config: Config, config_dir: &std::path::Path) -> Self {
         Self::try_new(config, config_dir, RunMode::Dev)
             .expect("test AppState: pepper and PIN store")

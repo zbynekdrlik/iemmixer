@@ -268,7 +268,7 @@ pub async fn back_to_reaper(
     ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     Json(req): Json<SwitchRequest>,
-) -> Result<impl IntoResponse, axum::response::Response> {
+) -> Result<impl IntoResponse, crate::auth::Rejection> {
     let claims = {
         let config = state.config.read().await;
         crate::auth::verify_member_access(
@@ -283,7 +283,8 @@ pub async fn back_to_reaper(
             StatusCode::FORBIDDEN,
             Json(ApiError::new("FORBIDDEN", "The switch is the engineer's")),
         )
-            .into_response());
+            .into_response()
+            .into());
     }
     let argv = state.site_config.back_to_reaper.clone();
     let Some((program, args)) = argv.split_first() else {
@@ -291,7 +292,8 @@ pub async fn back_to_reaper(
             StatusCode::NOT_FOUND,
             Json(ApiError::new("NOT_CONFIGURED", "No switch on this site")),
         )
-            .into_response());
+            .into_response()
+            .into());
     };
     crate::auth::verify_engineer_pin(&state, peer, &headers, &req.pin).await?;
     let child = std::process::Command::new(program)
@@ -319,7 +321,8 @@ pub async fn back_to_reaper(
                     "The switch could not be started",
                 )),
             )
-                .into_response())
+                .into_response()
+                .into())
         }
     }
 }
