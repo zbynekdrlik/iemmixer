@@ -354,6 +354,39 @@ mod tests {
     }
 
     #[test]
+    fn audio_diagnostics_keep_the_predecessors_json_keys() {
+        // `GET /api/audio/diagnostics` is read by name (F28, the E2E suite):
+        // every key, with its value, exactly as the predecessor served it.
+        let d = AudioDiagnostics {
+            receiving_oiem: true,
+            receiving_vban: false,
+            packets_per_second: 50.5,
+            opus_frames_per_second: 49.5,
+            last_frame_size_bytes: 321,
+            peak_db: -12.5,
+            last_sequence: 7,
+            sequence_gaps: 3,
+            frames_forwarded: 42,
+        };
+        assert_eq!(
+            serde_json::to_value(&d).unwrap(),
+            serde_json::json!({
+                "receiving_oiem": true,
+                "receiving_vban": false,
+                "packets_per_second": 50.5,
+                "opus_frames_per_second": 49.5,
+                "last_frame_size_bytes": 321,
+                "peak_db": -12.5,
+                "last_sequence": 7,
+                "sequence_gaps": 3,
+                "frames_forwarded": 42
+            })
+        );
+        let json = serde_json::to_string(&d).unwrap();
+        assert!(json.contains(r#""frames_forwarded":42"#), "{json}");
+    }
+
+    #[test]
     fn peaks_are_in_dbfs() {
         assert_eq!(peak_db(&[0.0, 0.0]), -150.0);
         assert!((peak_db(&[0.5, -1.0]) - 0.0).abs() < 1e-6);

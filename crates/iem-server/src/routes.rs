@@ -1397,6 +1397,127 @@ pub(crate) mod api_tests {
         );
     }
 
+    /// The report the UI's panic hook posts (`iem-ui/src/lifecycle.rs`),
+    /// every field set.
+    const FULL_REPORT: &str = r#"{"panic_message":"marker-full","version":"9.9.9","git_hash":"deadbee","url":"/trace-test","user_agent":"TraceUA","location":"trace.rs:1:1","backtrace":"marker-backtrace"}"#;
+
+    #[test]
+    fn client_error_reports_parse_every_field() {
+        let r: ClientErrorReport = serde_json::from_str(FULL_REPORT).unwrap();
+        assert_eq!(
+            (
+                r.panic_message.as_str(),
+                r.version.as_deref(),
+                r.git_hash.as_deref(),
+                r.url.as_deref(),
+                r.user_agent.as_deref(),
+                r.location.as_deref(),
+                r.backtrace.as_deref()
+            ),
+            (
+                "marker-full",
+                Some("9.9.9"),
+                Some("deadbee"),
+                Some("/trace-test"),
+                Some("TraceUA"),
+                Some("trace.rs:1:1"),
+                Some("marker-backtrace")
+            )
+        );
+        let min: ClientErrorReport = serde_json::from_str(r#"{"panic_message":"boom"}"#).unwrap();
+        assert_eq!(min.panic_message, "boom");
+        assert!(
+            min.version.is_none()
+                && min.git_hash.is_none()
+                && min.url.is_none()
+                && min.user_agent.is_none()
+                && min.location.is_none()
+                && min.backtrace.is_none()
+        );
+        assert!(
+            serde_json::from_str::<ClientErrorReport>(r#"{"version":"1.2.3"}"#).is_err(),
+            "a report without its panic message"
+        );
+    }
+
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn client_errors_are_logged_with_their_fields_and_backtrace() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_s, app) = app(dir.path());
+        let post = |body: &'static str| {
+            let app = app.clone();
+            async move {
+                call(&app, Method::POST, "/api/client-error", None, Some(body))
+                    .await
+                    .0
+            }
+        };
+        // A degraded client sends only the message: "?" for the rest, and
+        // no backtrace line.
+        assert_eq!(
+            post(r#"{"panic_message":"marker-min"}"#).await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(post(FULL_REPORT).await, StatusCode::NO_CONTENT);
+        logs_assert(|lines: &[&str]| {
+            let one = |marker: &str| -> Result<String, String> {
+                match lines
+                    .iter()
+                    .filter(|l| l.contains(marker))
+                    .collect::<Vec<_>>()
+                    .as_slice()
+                {
+                    [l] => Ok(l.to_string()),
+                    other => Err(format!("one line with {marker}, got {other:?}")),
+                }
+            };
+            let min = one("panic=marker-min")?;
+            let full = one("panic=marker-full")?;
+            let bt = one("client_error_backtrace")?;
+            let wants: [(&String, &[&str]); 3] = [
+                (
+                    &min,
+                    &[
+                        " WARN ",
+                        "iem_server::client_error: client_error ",
+                        r#"version="?""#,
+                        r#"git_hash="?""#,
+                        r#"url="?""#,
+                        r#"user_agent="?""#,
+                        r#"location="?""#,
+                    ],
+                ),
+                (
+                    &full,
+                    &[
+                        " WARN ",
+                        "iem_server::client_error: client_error ",
+                        r#"version="9.9.9""#,
+                        r#"git_hash="deadbee""#,
+                        r#"url="/trace-test""#,
+                        r#"user_agent="TraceUA""#,
+                        r#"location="trace.rs:1:1""#,
+                    ],
+                ),
+                (
+                    &bt,
+                    &[
+                        " WARN ",
+                        "iem_server::client_error: client_error_backtrace ",
+                        "backtrace=marker-backtrace",
+                    ],
+                ),
+            ];
+            for (line, parts) in wants {
+                if let Some(p) = parts.iter().find(|p| !line.contains(**p)) {
+                    return Err(format!("{p:?} missing in {line:?}"));
+                }
+            }
+            Ok(())
+        });
+    }
+
     #[tokio::test]
     async fn the_switch_is_the_engineers_and_needs_the_engineer_pin() {
         let dir = tempfile::tempdir().unwrap();

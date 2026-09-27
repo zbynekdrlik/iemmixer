@@ -681,6 +681,34 @@ mod tests {
     }
 
     #[test]
+    fn customizations_are_per_member_and_a_save_replaces_them() {
+        let (_dir, s) = store();
+        let mic = |n: u32| Source::Input(InputId::new(format!("mic{n}")));
+        s.save_customization("member1", vec![mic(1)], vec![])
+            .unwrap();
+        s.save_customization("member2", vec![], vec![mic(5)])
+            .unwrap();
+        let one = s.customization("member1").unwrap();
+        let two = s.customization("member2").unwrap();
+        assert_eq!((one.pinned, one.hidden), (vec![mic(1)], vec![]));
+        assert_eq!((two.pinned, two.hidden), (vec![], vec![mic(5)]));
+        // A save is the member's whole list, not an addition to it.
+        s.save_customization("member1", vec![mic(5)], vec![])
+            .unwrap();
+        let one = s.customization("member1").unwrap();
+        assert_eq!((one.pinned, one.hidden), (vec![mic(5)], vec![]));
+        s.save_customization("member1", vec![], vec![]).unwrap();
+        let one = s.customization("member1").unwrap();
+        assert!(one.pinned.is_empty() && one.hidden.is_empty());
+        assert_eq!(one.member, "member1");
+        assert_eq!(
+            s.customization("member2").unwrap().hidden,
+            vec![mic(5)],
+            "the other member's file is untouched"
+        );
+    }
+
+    #[test]
     fn a_missing_file_reads_as_its_members_empty_file() {
         let (_dir, s) = store();
         assert_eq!(

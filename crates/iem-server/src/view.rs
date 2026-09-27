@@ -1123,6 +1123,32 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_pan_names_its_value() {
+        let v = test_view();
+        let m = Mirror::default();
+        let p2 = page(&v, "member2");
+        let refused = |pan: f32| {
+            command(
+                &v,
+                &m,
+                &p2,
+                &member("member2"),
+                &ClientMsg::SetPan {
+                    id: "mic1".into(),
+                    pan,
+                },
+            )
+            .unwrap_err()
+            .to_string()
+        };
+        // The UI pan is 0…1; the refusal (logged) names what was sent.
+        assert_eq!(refused(1.5), "bad value: pan 1.5");
+        assert_eq!(refused(-0.25), "bad value: pan -0.25");
+        assert_eq!(refused(f32::NAN), "bad value: pan NaN");
+        assert_eq!(refused(1.0001), "bad value: pan 1.0001");
+    }
+
+    #[test]
     fn engineer_only_commands_work_for_the_engineer() {
         let v = test_view();
         let m = Mirror::default();

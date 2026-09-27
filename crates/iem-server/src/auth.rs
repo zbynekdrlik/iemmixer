@@ -844,6 +844,21 @@ mod login_tests {
     }
 
     #[tokio::test]
+    async fn an_empty_pin_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app(test_state(dir.path()).await, LAN);
+        // member1 and the engineer have PINs, member2 has none yet: an empty
+        // PIN opens none of them.
+        for member in ["member1", "engineer", "member2"] {
+            let resp = login_as(&app, member, "", &[]).await;
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{member}");
+            let body = json_body(resp).await;
+            assert_eq!(body["code"], "INVALID_PIN", "{member}");
+            assert!(body.get("token").is_none(), "{member}: {body}");
+        }
+    }
+
+    #[tokio::test]
     async fn member_without_a_pin_cannot_log_in() {
         let dir = tempfile::tempdir().unwrap();
         let app = app(test_state(dir.path()).await, LAN);
