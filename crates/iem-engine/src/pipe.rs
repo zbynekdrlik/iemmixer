@@ -412,7 +412,7 @@ mod tests {
     }
 
     #[test]
-    fn dacl_sids_lists_the_accounts_of_plain_allow_aces() {
+    fn sddl_dacl_sids_lists_the_accounts_of_plain_allow_aces() {
         assert_eq!(
             dacl_sids("D:P(A;;FA;;;S-1-5-21-1-2-3-1001)(A;;FA;;;SY)"),
             Some(vec![USER, "SY"])
@@ -441,7 +441,7 @@ mod tests {
     }
 
     #[test]
-    fn a_private_dacl_admits_the_user_and_at_most_system() {
+    fn sddl_is_private_admits_the_user_and_at_most_system() {
         let read_back = "D:P(A;;FA;;;S-1-5-21-1-2-3-1001)(A;;FA;;;SY)";
         assert!(sddl_is_private(read_back, USER));
         assert!(sddl_is_private(&sddl_for(USER), USER));
@@ -520,8 +520,8 @@ mod tests {
         let mut f = Framer::new();
         let empty = Probe(Some(Ok(0)));
         assert!(!f.fill(empty).unwrap());
-        let gone = Probe(Some(Err(io::Error::from_raw_os_error(109))));
-        assert!(matches!(f.fill(gone), Err(FrameError::Closed)));
+        let peer_gone = Probe(Some(Err(io::Error::from_raw_os_error(109))));
+        assert!(matches!(f.fill(peer_gone), Err(FrameError::Closed)));
     }
 
     /// A reader that answers one read like a polled Windows pipe.
