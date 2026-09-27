@@ -20,9 +20,9 @@ use iem_core::{
 use iem_engine_proto::{Change, Cmd, Meters, MixId};
 use tokio::sync::broadcast;
 
-use crate::activity::BandActivity;
+use crate::activity::{BandActivity, watched_inputs};
 use crate::engine::client::EngineEvent;
-use crate::meters::{METER_PERIOD_MS, MeterMerge, max_input_peak};
+use crate::meters::{METER_PERIOD_MS, MeterMerge, max_watched_peak};
 use crate::site_view::{Page, SiteView};
 use crate::{AppState, RunMode, To};
 
@@ -166,27 +166,56 @@ pub fn clear_alert(state: &AppState, page: &Page) {
     }
 }
 
-/// The band-activity alarm fed with the engine's meter frames (§4.2).
+/// The band-activity alarm fed with the engine's meter frames (§4.2): only
+/// the stage inputs count ([`watched_inputs`]), resolved again whenever the
+/// engine announces another topology.
 pub struct ActivityWatch {
     activity: BandActivity,
+    inputs: Vec<String>,
+    /// The site view the watched inputs were resolved for, and those inputs.
+    resolved: Option<(Arc<SiteView>, Vec<usize>)>,
 }
 
 impl ActivityWatch {
     pub fn new(cfg: &ActivityConfig, start: Instant) -> Self {
         Self {
             activity: BandActivity::new(cfg, start),
+            inputs: cfg.inputs.clone(),
+            resolved: None,
         }
     }
 
     /// One meter frame at `now`, with the site view of the engine's
-    /// topology; `Some` when the alarm turned on (`true`) or off (`false`).
+    /// topology (none yet: the frame is ignored); `Some` when the alarm
+    /// turned on (`true`) or off (`false`).
     pub fn observe(
         &mut self,
-        _site: Option<&Arc<SiteView>>,
+        site: Option<&Arc<SiteView>>,
         now: Instant,
         m: &Meters,
     ) -> Option<bool> {
-        self.activity.observe(now, max_input_peak(m))
+        let site = site?;
+        let seen = self
+            .resolved
+            .as_ref()
+            .is_some_and(|(view, _)| Arc::ptr_eq(view, site));
+        if !seen {
+            let (watched, unknown) = watched_inputs(&self.inputs, site);
+            for id in &unknown {
+                tracing::error!(input = %id, "[activity] inputs: the engine has no such input; left out");
+            }
+            if watched.is_empty() {
+                tracing::error!("band activity watches no input: its alarm cannot turn on");
+            } else {
+                tracing::info!(
+                    inputs = watched.len(),
+                    "band activity watches the stage inputs"
+                );
+            }
+            self.resolved = Some((Arc::clone(site), watched));
+        }
+        let (_, watched) = self.resolved.as_ref()?;
+        self.activity.observe(now, max_watched_peak(m, watched))
     }
 }
 

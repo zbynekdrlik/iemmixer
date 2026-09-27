@@ -13,7 +13,8 @@ backup_retention_days = 60
 back_to_reaper = ["true"]
 
 # E2E-length band-activity windows (the site default is 300 s / 120 s): the
-# E2E engine plays a sine on every input, so the banner shows after 5 s.
+# E2E engine plays a sine on every input, so the banner shows after 5 s. No
+# `inputs` list: the mics count, never `content` (the program input).
 [activity]
 threshold_dbfs = -50.0
 window_s = 30

@@ -32,12 +32,15 @@ backup_retention_days = 60
 # absent: no button.
 back_to_reaper = ["iemmode", "event"]
 
-# Band-activity alarm while developing (§4.2): input peaks above the threshold
-# for sustain_s seconds within window_s seconds.
+# Band-activity alarm while developing (§4.2): peaks of the stage inputs above
+# the threshold for sustain_s seconds within window_s seconds. `inputs` names
+# the engine inputs that count; empty or absent: every input of category mics.
+# Never the program input: it carries signal while the band is silent.
 [activity]
 threshold_dbfs = -50.0
 window_s = 300
 sustain_s = 120
+inputs = ["mic1"]
 
 # Band members and the engineer (login grid). `id` is the URL and the login
 # (keep the predecessor's ids: tokens stay valid), `name` the tile label,
