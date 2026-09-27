@@ -102,6 +102,84 @@ async fn a_backup_is_captured_listed_previewed_and_restored() {
 }
 
 #[tokio::test]
+async fn a_restore_keeps_what_the_backup_does_not_have() {
+    let h = EngineHarness::start();
+    let (_dir, s, app) = live(&h).await;
+    let eng = token("engineer", true);
+    let keys = InputId::new("keys");
+    // keys away from its defaults: its strip and its level in two mixes.
+    for cmd in [
+        set_input("keys", 3.0, false),
+        set_level("member2", "keys", -6.0),
+        set_level("engineer", "keys", -9.0),
+    ] {
+        s.engine.request_applied(cmd, None).await.unwrap();
+    }
+    let (status, info) = call(&app, Method::POST, "/api/backups/capture", Some(&eng), None).await;
+    assert_eq!(status, StatusCode::OK, "{info}");
+    let name = info["filename"].as_str().unwrap().to_string();
+    let fresh = format!("/api/backups/{name}/preview");
+    let (status, p) = call(&app, Method::POST, &fresh, Some(&eng), None).await;
+    assert_eq!(status, StatusCode::OK, "{p}");
+    assert_eq!(p["not_in_backup"], serde_json::json!([]), "a fresh backup");
+
+    // The same backup as if taken before keys was added to the site: no
+    // strip and no level of it anywhere (a topology change after capture).
+    let mut old = s.backup_store.load(&name).unwrap();
+    old.state.inputs.remove(&keys);
+    for mix in old.state.mixes.values_mut() {
+        mix.inputs.remove(&keys);
+    }
+    old.timestamp = "2026-01-01T00:00:00.000Z".into();
+    let old_name = s.backup_store.save(&old).unwrap();
+    // One value the old backup does put back.
+    s.engine
+        .request_applied(set_input("mic1", 5.0, false), None)
+        .await
+        .unwrap();
+
+    let preview = format!("/api/backups/{old_name}/preview");
+    let (status, p) = call(&app, Method::POST, &preview, Some(&eng), None).await;
+    assert_eq!(status, StatusCode::OK, "{p}");
+    assert_eq!(
+        p["not_in_backup"],
+        serde_json::json!([{
+            "category": "Input",
+            "description": "KEYS",
+            "reason": "not in the backup; stays as it is"
+        }])
+    );
+    let before = s.engine.mirror().state.clone();
+    let restore = format!("/api/backups/{old_name}/restore");
+    let (status, r) = call(&app, Method::POST, &restore, Some(&eng), None).await;
+    assert_eq!(
+        (status, r["restored_count"].as_u64()),
+        (StatusCode::OK, Some(1)),
+        "{r}"
+    );
+    let after = s.engine.mirror().state.clone();
+    assert_eq!(after.inputs[&InputId::new("mic1")].trim_db, 0.0, "restored");
+    // keys is not in the backup: its strip and every level of it stay.
+    assert_eq!(after.inputs[&keys], before.inputs[&keys]);
+    assert_eq!(after.inputs[&keys].trim_db, 3.0);
+    for (id, mix) in &after.mixes {
+        assert_eq!(
+            mix.inputs.get(&keys),
+            before.mixes[id].inputs.get(&keys),
+            "keys → {id}"
+        );
+    }
+    assert_eq!(
+        after.mixes[&MixId::new("member2")].inputs[&keys].gain_db,
+        -6.0
+    );
+    assert_eq!(
+        after.mixes[&MixId::new("engineer")].inputs[&keys].gain_db,
+        -9.0
+    );
+}
+
+#[tokio::test]
 async fn a_backup_restores_a_muted_input_as_muted() {
     let h = EngineHarness::start();
     let (_dir, s, app) = live(&h).await;

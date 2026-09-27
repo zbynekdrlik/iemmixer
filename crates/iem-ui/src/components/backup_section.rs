@@ -322,6 +322,7 @@ mod tests {
             ],
             unchanged_count: 7,
             skipped: vec![],
+            not_in_backup: vec![],
         };
         let groups = preview_groups(&p);
         let labels: Vec<&str> = groups.iter().map(|(l, _)| *l).collect();
