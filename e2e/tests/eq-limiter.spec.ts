@@ -11,7 +11,10 @@ async function closeEq(page: Page): Promise<void> {
   await expect(page.locator(".eq-modal")).toHaveCount(0);
 }
 
-/** The EQ the slider tests work on: member4's second input. */
+/**
+ * The EQ the slider tests work on: member4's second input. Main shows one own
+ * channel (mic4, `view::channels`); mic5 is on the Mics tab.
+ */
 const EQ_TARGET = "mic5";
 
 type SentEqBand = { cmd: string; target: string; band: number; param: string; value: number };
@@ -34,8 +37,9 @@ async function sentEq(page: Page): Promise<SentEqBand[]> {
   );
 }
 
-/** Opens the EQ of `EQ_TARGET` from its strip on Main; resolves once its five bands show. */
+/** Opens the EQ of `EQ_TARGET` from its strip on the Mics tab; resolves once its five bands show. */
 async function openEq(page: Page): Promise<Locator> {
+  await tab(page, "Mics");
   await menu(strip(page, EQ_TARGET), "EQ");
   const modal = page.locator(".eq-modal");
   await expect(modal.locator(".eq-title")).toHaveText("EQ: MEMBER4 gtr");
@@ -144,7 +148,7 @@ test.describe("EQ (F11)", () => {
   });
 });
 
-// The predecessor's EQ checks (gen1 live/eq.spec.ts), on member4's mic5. A
+// The predecessor's EQ checks (gen1 live/eq.spec.ts), on member4's mic5 (Mics tab). A
 // second socket (support/mixer-socket.ts) seeds values and reads the server's
 // EQ back; every test starts from the bands it found and puts them back.
 test.describe("EQ sliders, values and reset (F11)", () => {
