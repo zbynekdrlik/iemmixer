@@ -2,30 +2,36 @@
 
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
-use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager};
 
 /// Icon size in pixels
 const ICON_SIZE: u32 = 16;
 
-/// Set up the tray icon with menu
-pub fn setup_tray(
-    app: &AppHandle,
-    port: u16,
-    share_url: Option<String>,
-) -> Result<(), Box<dyn std::error::Error>> {
+/// The site config's links (`iem_core::Config::mixer_url`, `share_url`).
+#[derive(Debug, Clone)]
+pub struct Links {
+    /// Open Mixer: the LAN URL, else the local server.
+    pub mixer: String,
+    /// Copy URL: the public host, else the LAN URL; `None` disables the item.
+    pub share: Option<String>,
+}
+
+/// Set up the tray icon with its menu. The tooltip says that no guard has
+/// answered yet; the guard subscription ([`crate::guard`]) replaces it.
+pub fn setup_tray(app: &AppHandle, links: Links) -> tauri::Result<TrayIcon> {
     // Display full version with git hash for unique deploy identification
     let version_label = format!("IEM Mixer v{}", iem_core::full_version());
     let version_item = MenuItem::with_id(app, "version", version_label, false, None::<&str>)?;
 
     let separator1 = PredefinedMenuItem::separator(app)?;
 
-    // Simple "Open Mixer" that opens the landing page
+    // "Open Mixer" opens the mixer's landing page in the main window.
     let open_mixer_item = MenuItem::with_id(app, "open_mixer", "Open Mixer", true, None::<&str>)?;
 
     // Combined URL display + copy (click to copy); disabled without a
     // configured public host or LAN URL.
-    let (copy_label, copy_enabled) = match &share_url {
+    let (copy_label, copy_enabled) = match &links.share {
         Some(url) => (format!("📋 {url}"), true),
         None => ("No public URL configured".to_string(), false),
     };
@@ -33,6 +39,8 @@ pub fn setup_tray(
 
     let separator2 = PredefinedMenuItem::separator(app)?;
 
+    // Exit ends this tray only (F27): the server and the engine are the
+    // guard's children and keep running.
     let quit_item = MenuItem::with_id(app, "quit", "Exit", true, None::<&str>)?;
 
     let menu = Menu::with_items(
@@ -49,25 +57,23 @@ pub fn setup_tray(
 
     let icon = make_tray_icon();
 
-    let port_copy = port;
-
     TrayIconBuilder::with_id("main")
         .icon(icon)
-        .tooltip("IEM Mixer")
+        .tooltip(iem_guard::view::tooltip(None))
         .menu(&menu)
         .on_menu_event(move |app, event| {
             let id = event.id.as_ref();
             match id {
                 "open_mixer" => {
-                    open_mixer(app, port_copy);
+                    open_mixer(app, &links.mixer);
                 }
                 "copy_url" => {
-                    if let Some(url) = &share_url {
+                    if let Some(url) = &links.share {
                         copy_url_to_clipboard(app, url);
                     }
                 }
                 "quit" => {
-                    tracing::info!("Exit requested from tray");
+                    tracing::info!("Exit requested from the tray menu (the tray only)");
                     app.exit(0);
                 }
                 _ => {}
@@ -86,19 +92,46 @@ pub fn setup_tray(
                 let _ = window.set_focus();
             }
         })
-        .build(app)?;
+        .build(app)
+}
 
-    Ok(())
+/// The window the tray library created for the icon: the alarm
+/// notification goes to its icon (`iem_win::window::balloon`).
+#[cfg(windows)]
+pub fn icon_window(icon: &TrayIcon) -> Option<isize> {
+    match icon.with_inner_tray_icon(|inner| inner.window_handle() as isize) {
+        Ok(hwnd) => Some(hwnd),
+        Err(e) => {
+            tracing::warn!(error = %e, "no window for the tray icon: alarms show in the tooltip only");
+            None
+        }
+    }
+}
+
+/// Off Windows there is no icon window (the tray is built on Windows only).
+#[cfg(not(windows))]
+pub fn icon_window(_icon: &TrayIcon) -> Option<isize> {
+    None
 }
 
 /// Open the mixer landing page in the main window
-fn open_mixer(app: &AppHandle, port: u16) {
-    tracing::info!("Opening mixer");
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.navigate(format!("http://localhost:{}", port).parse().unwrap());
-        let _ = window.show();
-        let _ = window.set_focus();
+fn open_mixer(app: &AppHandle, url: &str) {
+    tracing::info!(url, "Opening mixer");
+    let Some(window) = app.get_webview_window("main") else {
+        tracing::warn!("no main window to open the mixer in");
+        return;
+    };
+    match url.parse::<tauri::Url>() {
+        Ok(parsed) => {
+            let _ = window.navigate(parsed);
+        }
+        Err(e) => {
+            tracing::error!(url, error = %e, "the mixer URL does not parse");
+            return;
+        }
     }
+    let _ = window.show();
+    let _ = window.set_focus();
 }
 
 /// Copy the share URL to the clipboard (quoted as a JSON string literal).

@@ -5,25 +5,29 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "iemmixer Windows tray shell (Tauri 2)"
+description = "iemmixer Windows tray shell (Tauri 2): the guard's status and alarms, no server (F27)"
 default-run = "iem-tray"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+# No iem-server: the server runs as the guard's child (S6 plan Task 11, F27).
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-shell = "2"
 tauri-plugin-single-instance = "2"
-iem-server = { path = "../iem-server", features = ["tls", "audio"] }
+# The site config's links (Open Mixer, Copy URL) and the version label.
 iem-core = { path = "../iem-core" }
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+# The guard pipe's frames and what the tray shows of them (iem_guard::view).
+iem-guard = { path = "../iem-guard" }
+# The alarm notification on the tray icon (iem_win::window::balloon).
+iem-win = { path = "../iem-win" }
+# The guard pipe (sync client on the subscription thread).
+interprocess = "2.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tracing-appender = "0.2"
 dirs = "6.0"
-anyhow = "1.0"
-serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 [[bin]]
