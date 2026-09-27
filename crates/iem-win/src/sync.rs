@@ -56,7 +56,10 @@ mod imp {
 
     /// The open mutex; closing it releases the name.
     #[derive(Debug)]
-    pub(super) struct Held(OwnedHandle);
+    pub(super) struct Held(
+        // Never read: dropping it closes the handle.
+        #[allow(dead_code)] OwnedHandle,
+    );
 
     pub(super) fn try_take(full: &str) -> io::Result<Option<Held>> {
         let name = wide(full);
