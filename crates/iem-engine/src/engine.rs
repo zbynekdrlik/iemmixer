@@ -596,11 +596,13 @@ pub struct SiteSummary {
     pub card: bool,
 }
 
-/// Loads and compiles a site and checks its `[card]` table.
+/// Loads and compiles a site, checks its `[card]` table and the stage the
+/// interlock listens to (every `[activity] inputs` id is an input).
 pub fn check_site(path: &Path) -> Result<SiteSummary, EngineError> {
     let text = site::read(path)?;
     let topo = compile(&parse(&text)?)?;
     let card = parse_card(&text)?;
+    interlock::stage_channels(&topo, &parse_stage(&text)?)?;
     Ok(SiteSummary {
         topology: topo.hash,
         inputs: topo.inputs.len(),
