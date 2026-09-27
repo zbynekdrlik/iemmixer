@@ -1152,16 +1152,21 @@ function Get-IemHilConclusion {
     return 'success'
 }
 
+# Why a HIL job was cancelled, as the public summary says it (P6: fixed
+# phrases only; the guard's own text goes to result.json's `why`).
+$script:HilCancelPhrases = @{ 'left-dev' = 'the guard left dev'; 'not-free' = 'the PC was not free (job-begin refused)' }
+
 function Get-IemHilSummary {
-    # The public check-run text (hil/iem-pc on the public repo): the conclusion
-    # and the failed checks' names only; details stay in result.json (ops repo).
-    param([Parameter(Mandatory)][string]$Conclusion, [object[]]$Checks = @(), [string]$Why = '')
+    # The public check-run text (hil/iem-pc on the public repo, P6): the
+    # conclusion, the failed checks' names, or a cancel reason's fixed phrase;
+    # never free text. Details stay in result.json (the ops artifact).
+    param([Parameter(Mandatory)][string]$Conclusion, [object[]]$Checks = @(), [string]$Reason = '')
     $all = @($Checks)
     if ($Conclusion -ceq 'success') { return ('HIL v1 success: {0} checks ok' -f $all.Count) }
     if ($Conclusion -ceq 'cancelled') {
-        $w = $Why
-        if ($w.Length -gt 200) { $w = $w.Substring(0, 200) }
-        return ('HIL v1 cancelled: {0}' -f $w)
+        if (-not $Reason) { return 'HIL v1 cancelled' }
+        if (@($script:HilCancelPhrases.Keys) -cnotcontains $Reason) { throw 'cancel reason refused (a code: left-dev or not-free)' }
+        return ('HIL v1 cancelled: {0}' -f $script:HilCancelPhrases[$Reason])
     }
     $failed = @($all | Where-Object { -not $_.ok } | ForEach-Object { $_.name })
     $okCount = @($all | Where-Object { $_.ok }).Count
@@ -1169,9 +1174,11 @@ function Get-IemHilSummary {
 }
 
 function New-IemHilResult {
+    # result.json: `summary` is public (the report job posts it), `why` (a
+    # cancelled job's own text) and `checks` stay in the private ops artifact.
     param([Parameter(Mandatory)][string]$Conclusion, [Parameter(Mandatory)][string]$Summary, [string]$Sha = '', [string]$Branch = '',
-          [string]$JobRun = '', [string]$Started = '', [object[]]$Checks = @())
-    [pscustomobject]@{ conclusion = $Conclusion; summary = $Summary; sha = $Sha; branch = $Branch; job_run = $JobRun
+          [string]$JobRun = '', [string]$Started = '', [object[]]$Checks = @(), [string]$Why = '')
+    [pscustomobject]@{ conclusion = $Conclusion; summary = $Summary; why = $Why; sha = $Sha; branch = $Branch; job_run = $JobRun
                        started = $Started; finished = (Get-Date).ToUniversalTime().ToString('o'); checks = @($Checks) }
 }
 

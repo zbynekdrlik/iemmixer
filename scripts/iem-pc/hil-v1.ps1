@@ -11,9 +11,12 @@ local server's /api/site, and never talks to GitHub.
 Order: `iemmode job-begin` (the guard refuses unless dev, not switching, the
 band quiet 5 min and the stage quiet 60 s) -> `iemmode activate` -> the checks
 -> `iemmode job-end` -> `iemmode report <sha> green|red <summary>` ->
-result.json {conclusion, summary, checks}. Once a switch to event started (the
-guard left dev or runs a switch) the job ends as cancelled, never success, and
-reports no result; a refused job-begin is cancelled too (the PC is not free).
+result.json {conclusion, summary, why, checks}. Once a switch to event started
+(the guard left dev or runs a switch) the job ends as cancelled, never success,
+and reports no result; a refused job-begin is cancelled too (the PC is not
+free). The summary is public (the ops report job posts it as the hil/iem-pc
+check run, P6): check names, counts and fixed cancel phrases only; the guard's
+own text goes to `why` and the checks' details, both private.
 Exit 0 for success or cancelled, 1 for failure (the report job posts the
 conclusion from result.json).
 
@@ -45,6 +48,8 @@ Import-Module (Join-Path $PSScriptRoot 'IemPc.psm1') -Force
 if (-not $Iemmode) { $Iemmode = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'bin\iemmode.exe' }
 $script:checks = New-Object System.Collections.ArrayList
 $script:cancelled = $false
+# A cancel's reason code (the public summary's fixed phrase) and its text (result.json `why`, private).
+$script:reason = ''
 $script:why = ''
 $inv = [Globalization.CultureInfo]::InvariantCulture
 
@@ -59,7 +64,8 @@ function Invoke-Hil {
     $r = Invoke-IemMode -Exe $Iemmode -Arguments $A
     if (-not (Test-IemModeOk -Result $r) -and (Test-IemHilSwitchStarted -Reply $r.reply)) {
         $script:cancelled = $true
-        $script:why = ('iemmode {0}: a switch to event started ({1})' -f $A[0], (Get-IemModeText -Result $r))
+        $script:reason = 'left-dev'
+        $script:why = ('iemmode {0}: the guard left dev ({1})' -f $A[0], (Get-IemModeText -Result $r))
     }
     return $r
 }
@@ -70,6 +76,7 @@ function Get-HilStatus {
     if (-not (Test-IemModeOk -Result $r)) { return $null }
     if (Test-IemHilSwitchStarted -Reply $r.reply) {
         $script:cancelled = $true
+        $script:reason = 'left-dev'
         $script:why = 'status: the guard left dev (a switch to event started)'
         return $null
     }
@@ -194,6 +201,7 @@ if ($problems.Count -gt 0) {
             Invoke-HilChecks
         } elseif ($null -ne $r.reply) {
             $script:cancelled = $true
+            $script:reason = 'not-free'
             $script:why = 'job-begin refused: ' + (Get-IemModeText -Result $r)
         } else {
             Add-HilCheck 'job-begin' $false (Get-IemModeText -Result $r)
@@ -207,7 +215,7 @@ if ($begun) {
     if (-not $script:cancelled -and -not (Test-IemModeOk -Result $r)) { Add-HilCheck 'job-end' $false (Get-IemModeText -Result $r) }
 }
 $conclusion = Get-IemHilConclusion -Checks $script:checks.ToArray() -Cancelled:$script:cancelled
-$summary = Get-IemHilSummary -Conclusion $conclusion -Checks $script:checks.ToArray() -Why $script:why
+$summary = Get-IemHilSummary -Conclusion $conclusion -Checks $script:checks.ToArray() -Reason $script:reason
 if ($begun -and $conclusion -ne 'cancelled') {
     $hil = 'red'
     if ($conclusion -eq 'success') { $hil = 'green' }
@@ -218,7 +226,8 @@ if ($begun -and $conclusion -ne 'cancelled') {
         $summary = Get-IemHilSummary -Conclusion $conclusion -Checks $script:checks.ToArray()
     }
 }
-$result = New-IemHilResult -Conclusion $conclusion -Summary $summary -Sha $Sha -Branch $Branch -JobRun $JobRun -Started $started -Checks $script:checks.ToArray()
+$result = New-IemHilResult -Conclusion $conclusion -Summary $summary -Sha $Sha -Branch $Branch -JobRun $JobRun -Started $started `
+    -Checks $script:checks.ToArray() -Why $script:why
 if ($Out) { Write-IemJsonFile -Path $Out -Value $result }
 Write-Output (ConvertTo-Json -InputObject $result -Depth 8)
 if ($conclusion -eq 'failure') { exit 1 }
