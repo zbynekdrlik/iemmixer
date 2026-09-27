@@ -70,6 +70,7 @@ mod tests {
             threshold_dbfs: -50.0,
             window_s: 300,
             sustain_s: 120,
+            inputs: Vec::new(),
         }
     }
 
@@ -120,6 +121,7 @@ mod tests {
             threshold_dbfs: -50.0,
             window_s: 10,
             sustain_s: 2,
+            inputs: Vec::new(),
         };
         let mut a = BandActivity::new(&small, t);
         let at_threshold = 10f64.powf(-50.0 / 20.0) as f32;

@@ -145,14 +145,19 @@ pub struct SiteInputMeta {
     pub owner: Option<String>,
 }
 
-/// Band-activity alarm (§4.2): input peaks above `threshold_dbfs` for at
-/// least `sustain_s` seconds within the last `window_s` seconds.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+/// Band-activity alarm (§4.2): peaks of the watched inputs above
+/// `threshold_dbfs` for at least `sustain_s` seconds within the last
+/// `window_s` seconds.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct ActivityConfig {
     pub threshold_dbfs: f64,
     pub window_s: u64,
     pub sustain_s: u64,
+    /// The engine input ids that count: the stage. Empty (the default) means
+    /// every input of category `mics`. The program input carries signal
+    /// while the band is silent (S1a), so it never belongs here.
+    pub inputs: Vec<String>,
 }
 
 impl Default for ActivityConfig {
@@ -161,6 +166,7 @@ impl Default for ActivityConfig {
             threshold_dbfs: -50.0,
             window_s: 300,
             sustain_s: 120,
+            inputs: Vec::new(),
         }
     }
 }
@@ -418,7 +424,8 @@ mod tests {
             ActivityConfig {
                 threshold_dbfs: -50.0,
                 window_s: 300,
-                sustain_s: 120
+                sustain_s: 120,
+                inputs: Vec::new(),
             }
         );
         assert!(config.back_to_reaper.is_empty());
@@ -428,6 +435,10 @@ mod tests {
             (custom.activity.window_s, custom.activity.sustain_s),
             (30, 5)
         );
+        assert!(custom.activity.inputs.is_empty(), "empty: every mics input");
+        let stage: Config = toml::from_str("[activity]\ninputs = [\"mic1\", \"keys\"]\n").unwrap();
+        assert_eq!(stage.activity.inputs, ["mic1", "keys"]);
+        assert_eq!(stage.activity.sustain_s, 120);
     }
 
     #[test]
@@ -536,6 +547,7 @@ mod tests {
                 threshold_dbfs: 0.0,
                 window_s: 10,
                 sustain_s: 11,
+                inputs: Vec::new(),
             },
             ..Config::default()
         };

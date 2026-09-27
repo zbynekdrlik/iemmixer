@@ -14,9 +14,10 @@ use axum::{
     response::IntoResponse,
 };
 use iem_core::{
-    ApiError, ConsoleInfo, ConsoleInput, ConsoleMix, LoginFailures, PageLink, ServerMsg,
+    ActivityConfig, ApiError, ConsoleInfo, ConsoleInput, ConsoleMix, LoginFailures, PageLink,
+    ServerMsg,
 };
-use iem_engine_proto::{Change, Cmd, MixId};
+use iem_engine_proto::{Change, Cmd, Meters, MixId};
 use tokio::sync::broadcast;
 
 use crate::activity::BandActivity;
@@ -165,6 +166,30 @@ pub fn clear_alert(state: &AppState, page: &Page) {
     }
 }
 
+/// The band-activity alarm fed with the engine's meter frames (§4.2).
+pub struct ActivityWatch {
+    activity: BandActivity,
+}
+
+impl ActivityWatch {
+    pub fn new(cfg: &ActivityConfig, start: Instant) -> Self {
+        Self {
+            activity: BandActivity::new(cfg, start),
+        }
+    }
+
+    /// One meter frame at `now`, with the site view of the engine's
+    /// topology; `Some` when the alarm turned on (`true`) or off (`false`).
+    pub fn observe(
+        &mut self,
+        _site: Option<&Arc<SiteView>>,
+        now: Instant,
+        m: &Meters,
+    ) -> Option<bool> {
+        self.activity.observe(now, max_input_peak(m))
+    }
+}
+
 /// Starts the meter merger, the activity alarm and the janitor.
 pub fn spawn_tasks(state: AppState) {
     tokio::spawn(meter_task(state.clone()));
@@ -174,7 +199,7 @@ pub fn spawn_tasks(state: AppState) {
 async fn meter_task(state: AppState) {
     let mut rx = state.engine.subscribe();
     let mut merge = MeterMerge::default();
-    let mut activity = BandActivity::new(&state.site_config.activity, Instant::now());
+    let mut activity = ActivityWatch::new(&state.site_config.activity, Instant::now());
     let mut tick = tokio::time::interval(Duration::from_millis(METER_PERIOD_MS));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -183,7 +208,8 @@ async fn meter_task(state: AppState) {
                 Ok(EngineEvent::Meters(m)) => {
                     merge.push(&m);
                     if state.mode == RunMode::Dev
-                        && let Some(on) = activity.observe(Instant::now(), max_input_peak(&m))
+                        && let Some(on) =
+                            activity.observe(state.site().as_ref(), Instant::now(), &m)
                     {
                         activity_changed(&state, on);
                     }
@@ -442,6 +468,73 @@ mod tests {
                 member_id: "member2".into()
             }
         );
+    }
+
+    /// One meter frame of the test site: `loud` at −1 dBFS, every other input
+    /// silent.
+    fn frame_with(v: &SiteView, loud: &str) -> Meters {
+        let peak = 10f32.powf(-1.0 / 20.0);
+        Meters {
+            inputs: v
+                .inputs
+                .iter()
+                .map(|i| {
+                    if i.id.0 == loud {
+                        [peak, peak]
+                    } else {
+                        [0.0, 0.0]
+                    }
+                })
+                .collect(),
+            ..Meters::default()
+        }
+    }
+
+    const NONE: Vec<(u64, bool)> = Vec::new();
+    /// The 120th loud second (second 119) turns the alarm on, once.
+    const ON_AT_119: [(u64, bool); 1] = [(119, true)];
+
+    /// Three frames a second for `secs` seconds; every change of the alarm
+    /// with the second it happened in.
+    fn play(cfg: &ActivityConfig, loud: &str, secs: u64) -> Vec<(u64, bool)> {
+        let site = Arc::new(test_view());
+        let m = frame_with(&site, loud);
+        let t = Instant::now();
+        let mut watch = ActivityWatch::new(cfg, t);
+        let mut changes = Vec::new();
+        for s in 0..secs {
+            for ms in [0, 333, 666] {
+                let now = t + Duration::from_secs(s) + Duration::from_millis(ms);
+                if let Some(on) = watch.observe(Some(&site), now, &m) {
+                    changes.push((s, on));
+                }
+            }
+        }
+        changes
+    }
+
+    #[test]
+    fn program_input_signal_does_not_raise_band_activity() {
+        // S1a: the program input (`content`, category tech) carries signal
+        // while the band is silent; five minutes of it are no band.
+        assert_eq!(play(&ActivityConfig::default(), "content", 300), NONE);
+    }
+
+    #[test]
+    fn stage_input_activity_still_raises_it() {
+        assert_eq!(play(&ActivityConfig::default(), "mic1", 300), ON_AT_119);
+        // An input without a category is a mic too.
+        assert_eq!(play(&ActivityConfig::default(), "keys", 300), ON_AT_119);
+    }
+
+    #[test]
+    fn an_explicit_input_list_replaces_the_mics_default() {
+        let cfg = ActivityConfig {
+            inputs: vec!["content".into()],
+            ..ActivityConfig::default()
+        };
+        assert_eq!(play(&cfg, "content", 300), ON_AT_119);
+        assert_eq!(play(&cfg, "mic1", 300), NONE);
     }
 
     #[tokio::test]
