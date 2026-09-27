@@ -925,6 +925,29 @@ mod tests {
         ));
     }
 
+    /// F30: a site whose stage the interlock cannot hear (an `[activity]
+    /// inputs` id the topology lacks) is refused by check-site, before
+    /// `install-site` replaces the site, not at the next dev entry's
+    /// interlock (lane A review).
+    #[test]
+    fn check_site_refuses_a_stage_the_interlock_cannot_hear() {
+        let dir = tempfile::tempdir().unwrap();
+        let ghost = edited_site(dir.path(), "ghost.toml", |t| {
+            t.replace("[activity]\n", "[activity]\ninputs = [\"ghost\"]\n")
+        });
+        assert!(matches!(
+            check_site(&ghost),
+            Err(EngineError::Site(SiteError::StageInput(id))) if id == "ghost"
+        ));
+        let listed = edited_site(dir.path(), "listed.toml", |t| {
+            t.replace(
+                "[activity]\n",
+                "[activity]\ninputs = [\"hand1\", \"keys\"]\n",
+            )
+        });
+        assert!(check_site(&listed).is_ok());
+    }
+
     #[cfg(not(windows))]
     #[test]
     fn off_windows_the_card_is_a_usage_error_before_any_state() {
