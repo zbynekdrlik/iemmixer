@@ -21,6 +21,13 @@ $script:SidAdmins = 'S-1-5-32-544'
 $script:SidSystem = 'S-1-5-18'
 # Task Scheduler: TASK_LOGON_INTERACTIVE_TOKEN, TASK_RUNLEVEL_LUA / _HIGHEST.
 $script:LogonInteractive = 3
+# RegisterTaskDefinition flags: TASK_CREATE_OR_UPDATE (6), TASK_UPDATE (4), and
+# TASK_DONT_ADD_PRINCIPAL_ACE (0x10): without it the service adds its own allow
+# ACE for the task's user next to ours, and the read-back (exactly our three
+# ACEs, design section 5.1) refuses the task.
+$script:TaskDontAddPrincipalAce = 0x10
+$script:TaskCreateOrUpdate = 6 -bor $script:TaskDontAddPrincipalAce
+$script:TaskUpdate = 4 -bor $script:TaskDontAddPrincipalAce
 $script:RunLevelLimited = 0
 $script:RunLevelHighest = 1
 # Access masks as unsigned values: GRGX and FRFX (read and execute), GA and FA (full).
@@ -133,11 +140,9 @@ function Connect-IemScheduler {
 }
 
 function Get-IemTaskFolder {
-    # The folder, or $null when it does not exist (unless -Create).
-    param([Parameter(Mandatory)]$Scheduler, [Parameter(Mandatory)][string]$Path, [switch]$Create)
-    $p = '\' + $Path.Trim('\')
-    try { return $Scheduler.GetFolder($p) } catch { if (-not $Create) { return $null } }
-    return $Scheduler.GetFolder('\').CreateFolder($p.TrimStart('\'))
+    # The folder, or $null when it does not exist.
+    param([Parameter(Mandatory)]$Scheduler, [Parameter(Mandatory)][string]$Path)
+    try { return $Scheduler.GetFolder('\' + $Path.Trim('\')) } catch { return $null }
 }
 
 function Get-IemRegisteredTask {
@@ -310,7 +315,7 @@ function Register-IemTasks {
     foreach ($s in $specs) {
         $d = New-IemTaskDefinition -Scheduler $sch -User $u.name -RunLevel $s.level -Exe $s.exe -Arguments $s.args `
             -WorkDir $s.dir -Description ('iemmixer S6: ' + $s.name) -AtLogon:$s.logon
-        [void]$f.RegisterTaskDefinition($s.name, $d, 6, $u.name, $null, $script:LogonInteractive, $sddl)
+        [void]$f.RegisterTaskDefinition($s.name, $d, $script:TaskCreateOrUpdate, $u.name, $null, $script:LogonInteractive, $sddl)
         $rep = Get-IemTaskReport -Task $f.GetTask($s.name) -UserSid $u.sid
         $bad = Test-IemTaskReport -Report $rep -RunLevel $s.level
         $want = [pscustomobject]@{ path = $s.exe; arguments = $s.args; workdir = $s.dir }
@@ -325,7 +330,7 @@ function Register-IemTasks {
     # StartREAPER: the same definition, now with our descriptor (TASK_UPDATE).
     $reaperUser = [string]$reaperDef.Principal.UserId
     if (-not $reaperUser) { $reaperUser = $u.name }
-    [void]$f.RegisterTaskDefinition('iemmixer-StartREAPER', $reaperDef, 4, $reaperUser, $null, $script:LogonInteractive, $sddl)
+    [void]$f.RegisterTaskDefinition('iemmixer-StartREAPER', $reaperDef, $script:TaskUpdate, $reaperUser, $null, $script:LogonInteractive, $sddl)
     $rep = Get-IemTaskReport -Task $f.GetTask('iemmixer-StartREAPER') -UserSid $u.sid
     $bad = @()
     if (-not $rep.sddl_ok) { $bad += ('security descriptor ' + $rep.sddl) }
