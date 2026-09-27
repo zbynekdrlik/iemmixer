@@ -1,5 +1,7 @@
 # cargo-nextest configuration. Both mutation workflows select the `mutants`
 # profile (NEXTEST_PROFILE=mutants); the other jobs use the default profile.
+# scripts/mutants_recheck.py tests a mutant again with `mutants-recheck` when
+# its catch was a timeout (#23).
 
 [profile.mutants]
 # A mutant is caught at its first failing test: stop there and end the tests
@@ -12,6 +14,37 @@ fail-fast = { max-fail = 1, terminate = "immediate" }
 # ends the run and catches the mutant. Without it, a mutant that makes every
 # `process` call loop forever fills all test threads with hung tests, the
 # bounded ones (`rt_tests::run_bounded`) never get a thread, and cargo-mutants
-# reports TIMEOUT. The slowest tests take ~3 s (tests/pipes.rs, instrumented
-# debug build in the coverage job); give a slower test its own override here.
+# reports TIMEOUT. A catch by a timeout is only provisional: the post-check
+# tests that mutant again with `mutants-recheck` below. Give a slower package
+# or test its own override here, from its measured time (the mutation-warmup
+# job prints every test's duration under this profile).
 slow-timeout = { period = "5s", terminate-after = 2, grace-period = "2s" }
+
+# The dedicated bounded tests start first: a mutant that makes `process`,
+# `Control::run`, the refused start or a boundary search loop forever fails
+# their 5 s assertion (a real FAIL) before any hung test reaches its timeout.
+# Add a new bounded test here; scripts/test_mutants_recheck.py checks that
+# every name still exists.
+[[profile.mutants.overrides]]
+filter = 'test(=rt::tests::process_returns_after_its_block_even_when_a_group_waits) | test(=control::tests::shutdown_waits_for_the_fade_but_not_beyond_it) | test(=control::tests::nothing_after_a_shutdown_request_is_handled) | test(=engine::tests::run_refuses_a_bad_block_and_a_bad_site) | test(=core::tests::unknown_ids_are_unknown_id_with_short_messages) | test(=msg::tests::error_messages_are_bounded)'
+priority = 100
+
+# iem-server: its whole suite took 2–10 s (once 18 s) under a loaded mutation
+# shard (the MISSED lines of the PR runs up to #22), so a single test had no
+# headroom under 10 s; the five false catches of #23 were iem-server mutants.
+# 30 s stays well inside cargo-mutants' 60 s timeout.
+[[profile.mutants.overrides]]
+filter = 'package(iem-server)'
+slow-timeout = { period = "10s", terminate-after = 3, grace-period = "2s" }
+
+[profile.mutants-recheck]
+# One mutant at a time (--jobs 1), every test bounded at 60 s: a test that is
+# merely slow passes; a mutant caught again by a timeout here hangs.
+# cargo-mutants' --timeout for the recheck (120 s) covers it. The `all()`
+# override is needed: an override of the inherited profile (iem-server's
+# 30 s) would win over a base value.
+inherits = "mutants"
+
+[[profile.mutants-recheck.overrides]]
+filter = 'all()'
+slow-timeout = { period = "30s", terminate-after = 2, grace-period = "2s" }
