@@ -240,6 +240,17 @@ jobs:
           ls crates/iem-ui/dist/*.wasm
           # X11: the listen limiter worklet ships with the page
           test -f crates/iem-ui/dist/listen-limiter-worklet.js
+          # The app loader is ours (Trunk.toml pattern_script): every
+          # placeholder filled in, and not Trunk's default top-level init.
+          grep -q 'WebAssembly.compileStreaming' crates/iem-ui/dist/index.html
+          if grep -qE '\{(base|js|wasm)\}' crates/iem-ui/dist/index.html; then
+            echo "::error::dist/index.html has an unfilled loader placeholder"
+            exit 1
+          fi
+          if grep -q 'const wasm = await init(' crates/iem-ui/dist/index.html; then
+            echo "::error::dist/index.html has Trunk's default loader"
+            exit 1
+          fi
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: wasm-dist
