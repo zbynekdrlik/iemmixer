@@ -1641,6 +1641,9 @@ fn install_site_in_a_job_restarts_only_the_engine_and_the_server() {
     }
     assert_eq!(pc.engine_starts, [(true, true)]);
     assert_eq!(g.state.job, Some(7));
+    // The children are saved after the last step too (a guard that takes
+    // over adopts the new engine and server).
+    assert_eq!(pc.calls_after(Call::ServerStart), [Call::Children]);
     // A failed start unwinds to event, as a failed dev entry does.
     let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
     g.state.pins.current = Some(SHA.into());

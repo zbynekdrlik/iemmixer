@@ -1435,7 +1435,9 @@ fn restart_in_job(pc: &mut dyn Pc, g: &mut Guard) -> Result<(), String> {
     steps.extend([Step::EngineStart, Step::EngineArm, Step::ServerStart]);
     for step in steps {
         match run_step(pc, g, step, Mode::Dev, &f) {
-            Ok(()) => {}
+            // The children are saved after every step, so the guard an
+            // activation hands over to adopts the new engine and server.
+            Ok(()) => g.done(pc, step),
             Err(StepError::Preempted) => return Err("pre-empted by event".to_owned()),
             Err(StepError::Failed(why)) => {
                 g.alarm(step, &why, false);
