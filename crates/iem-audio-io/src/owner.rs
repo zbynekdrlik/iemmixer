@@ -182,9 +182,21 @@ mod tests {
         (0..n as i64).map(|i| Some(start + i * step)).collect()
     }
 
+    /// A full ring of 32-sample steps whose deltas at `bad` are 64 (missed
+    /// buffers).
+    fn missed(bad: &[usize]) -> Vec<Option<i64>> {
+        let mut at = 0;
+        let mut ring = vec![Some(at)];
+        for d in 0..RING - 1 {
+            at += if bad.contains(&d) { 64 } else { 32 };
+            ring.push(Some(at));
+        }
+        ring
+    }
+
     #[test]
     fn the_constants_are_the_design_values() {
-        assert_eq!((RING, NEED), (16, 8));
+        assert_eq!((RING, NEED), (32, 8));
         assert_eq!(DECIDE_WITHIN, ms(1_000));
         assert_eq!(SESSION_END_WAIT, ms(3_000));
         assert_eq!(SEH_WAIT, ms(1_000));
@@ -216,32 +228,79 @@ mod tests {
     }
 
     #[test]
-    fn another_period_refuses_at_once() {
+    fn another_period_refuses_once_the_ring_is_full_or_a_second_passed() {
+        let wrong = OpenPeriod::Refuse(PeriodVerdict::Wrong {
+            expected: 32,
+            measured: 64,
+        });
+        assert_eq!(open_period(&steps(0, 64, 32), 32, ms(0)), wrong);
+        // Until then the expected period may still follow.
+        assert_eq!(open_period(&steps(0, 64, 31), 32, ms(0)), OpenPeriod::Wait);
+        assert_eq!(open_period(&steps(0, 64, 9), 32, ms(999)), OpenPeriod::Wait);
+        assert_eq!(open_period(&steps(0, 64, 9), 32, ms(1_000)), wrong);
+        // Eleven deltas of 64, then the expected period: the open is fine.
+        let mut settles = steps(0, 64, 12);
+        settles.extend(steps(736, 32, 20));
+        assert_eq!(open_period(&settles[..12], 32, ms(0)), OpenPeriod::Wait);
+        assert_eq!(open_period(&settles, 32, ms(0)), OpenPeriod::Ok(32));
+        // Two other periods: the refusal names the first.
+        let mut two = steps(0, 64, 9);
+        two.extend(steps(528, 16, 23));
+        assert_eq!(open_period(&two, 32, ms(0)), wrong);
+    }
+
+    #[test]
+    fn two_bad_deltas_anywhere_in_a_full_ring_still_decide() {
+        assert_eq!(missed(&[]).len(), 32);
+        for a in 0..RING - 1 {
+            for b in a..RING - 1 {
+                assert_eq!(
+                    open_period(&missed(&[a, b]), 32, ms(0)),
+                    OpenPeriod::Ok(32),
+                    "missed buffers at deltas {a} and {b}"
+                );
+            }
+        }
+        // One late position: the delta before it grows, the one after it
+        // shrinks.
+        for late in 1..RING - 1 {
+            let mut ring = steps(0, 32, RING);
+            ring[late] = ring[late].map(|p| p + 5);
+            assert_eq!(
+                open_period(&ring, 32, ms(0)),
+                OpenPeriod::Ok(32),
+                "late position {late}"
+            );
+        }
+        // Three misses eight deltas apart leave seven agreeing ones in a row
+        // at most; eight in a row decide.
         assert_eq!(
-            open_period(&steps(0, 64, 9), 32, ms(0)),
-            OpenPeriod::Refuse(PeriodVerdict::Wrong {
-                expected: 32,
-                measured: 64
-            })
+            open_period(&missed(&[7, 15, 23]), 32, ms(0)),
+            OpenPeriod::Refuse(PeriodVerdict::Undecided)
+        );
+        assert_eq!(
+            open_period(&missed(&[7, 16, 24]), 32, ms(0)),
+            OpenPeriod::Ok(32)
         );
     }
 
     #[test]
     fn an_undecided_period_waits_until_the_ring_is_full_or_a_second_passed() {
         // Deltas alternate: never eight agreeing ones.
-        let jitter: Vec<Option<i64>> = (0..15).map(|i: i64| Some(i * 32 + (i % 2) * 5)).collect();
-        assert_eq!(open_period(&jitter, 32, ms(999)), OpenPeriod::Wait);
+        let jitter =
+            |n: i64| -> Vec<Option<i64>> { (0..n).map(|i| Some(i * 32 + (i % 2) * 5)).collect() };
+        assert_eq!(open_period(&jitter(15), 32, ms(999)), OpenPeriod::Wait);
         assert_eq!(
-            open_period(&jitter, 32, ms(1_000)),
+            open_period(&jitter(15), 32, ms(1_000)),
             OpenPeriod::Refuse(PeriodVerdict::Undecided)
         );
         assert_eq!(
-            open_period(&jitter, 32, ms(5_000)),
+            open_period(&jitter(15), 32, ms(5_000)),
             OpenPeriod::Refuse(PeriodVerdict::Undecided)
         );
-        let full: Vec<Option<i64>> = (0..16).map(|i: i64| Some(i * 32 + (i % 2) * 5)).collect();
+        assert_eq!(open_period(&jitter(31), 32, ms(0)), OpenPeriod::Wait);
         assert_eq!(
-            open_period(&full, 32, ms(0)),
+            open_period(&jitter(32), 32, ms(0)),
             OpenPeriod::Refuse(PeriodVerdict::Undecided)
         );
         // Too few positions after a second refuse too.
@@ -257,32 +316,43 @@ mod tests {
     }
 
     #[test]
-    fn a_callback_without_a_position_restarts_the_count() {
-        // Nine good positions, a gap, then three: only the three count.
+    fn a_callback_without_a_position_splits_the_count() {
+        // Nine good positions decide; a later gap does not undo that.
         let mut ring = steps(0, 32, 9);
         ring.push(None);
         ring.extend(steps(1_000, 32, 3));
+        assert_eq!(open_period(&ring, 32, ms(0)), OpenPeriod::Ok(32));
+        // Five and five around a gap never make nine in a row, even where
+        // the positions line up across it.
+        let mut ring = steps(0, 32, 5);
+        ring.push(None);
+        ring.extend(steps(160, 32, 5));
         assert_eq!(open_period(&ring, 32, ms(0)), OpenPeriod::Wait);
-        // Nine good positions after the gap decide.
+        // A negative position is no position either.
+        let mut ring = steps(0, 32, 5);
+        ring.push(Some(-32));
+        ring.extend(steps(160, 32, 5));
+        assert_eq!(open_period(&ring, 32, ms(0)), OpenPeriod::Wait);
+        // Nine good positions after a gap decide.
         let mut ring = vec![Some(0), None];
         ring.extend(steps(64, 32, 9));
         assert_eq!(open_period(&ring, 32, ms(0)), OpenPeriod::Ok(32));
-        // A negative position is no position either.
-        let mut ring = steps(0, 32, 9);
-        ring.push(Some(-32));
-        ring.extend(steps(1_000, 32, 3));
-        assert_eq!(open_period(&ring, 32, ms(0)), OpenPeriod::Wait);
-        // A gap straight after the tail's start: the tail is the part after it.
         let mut ring = steps(0, 64, 4);
         ring.push(None);
         ring.extend(steps(500, 32, 9));
         assert_eq!(open_period(&ring, 32, ms(0)), OpenPeriod::Ok(32));
+        // A full ring with a gap every ninth callback: runs of eight
+        // positions (seven deltas) never decide; every tenth: runs of nine do.
+        let gaps = |every: i64| -> Vec<Option<i64>> {
+            (0..32)
+                .map(|i| (i % every != every - 1).then_some(i * 32))
+                .collect()
+        };
         assert_eq!(
-            tail(&ring),
-            (0..9).map(|i| 500 + i * 32).collect::<Vec<u64>>()
+            open_period(&gaps(9), 32, ms(0)),
+            OpenPeriod::Refuse(PeriodVerdict::Undecided)
         );
-        assert_eq!(tail(&[Some(5), None]), Vec::<u64>::new());
-        assert_eq!(tail(&[Some(5), Some(7)]), vec![5, 7]);
+        assert_eq!(open_period(&gaps(10), 32, ms(0)), OpenPeriod::Ok(32));
     }
 
     #[test]
