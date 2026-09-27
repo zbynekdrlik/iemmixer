@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, UNIX_EPOCH};
 
-use iem_win::process::Handle;
+use iem_win::process::{self, Handle};
 use iem_win::window;
 use tracing::{info, warn};
 
@@ -210,10 +210,19 @@ fn recipients(pc: &WinPc) -> Option<u32> {
 
 /// Bundle installed, `pc_tests_passed` (trial), ≥ 1 alarm recipient, no
 /// foreign engine, the predecessor's exe as recorded (design §5.2 step 1).
+/// The hash is of `pc.toml app_exe`, and a running app must have been
+/// started from that file, so the hash is the running binary's.
 pub(super) fn precheck(pc: &WinPc, to: Mode, trial: bool) -> R<()> {
     let bundle = pc.bundle_dir().is_ok_and(|d| d.join(ENGINE_EXE).is_file());
-    let engines = procs::list(pc).engine;
-    let app_binary = exe_sha256(&pc.s.pc.app_exe)
+    let running = procs::list(pc);
+    let images: Vec<Result<String, String>> = running
+        .app
+        .iter()
+        .map(|&pid| process::image_path(pid).map_err(|e| e.to_string()))
+        .collect();
+    let app_exe = &pc.s.pc.app_exe;
+    let app_binary = decide::running_from(&app_exe.to_string_lossy(), &images)
+        .and_then(|()| exe_sha256(app_exe))
         .and_then(|now| handover::app_binary(&pc.s.guard.app_exe_sha256, &now));
     verdict(&PrecheckFacts {
         to,
@@ -221,7 +230,7 @@ pub(super) fn precheck(pc: &WinPc, to: Mode, trial: bool) -> R<()> {
         bundle,
         pc_tests_passed: pc.s.guard.pc_tests_passed,
         recipients: recipients(pc),
-        foreign_engine: foreign_engine(&engines, pc.kids.pid(Kid::Engine)),
+        foreign_engine: foreign_engine(&running.engine, pc.kids.pid(Kid::Engine)),
         app_binary,
     })
 }

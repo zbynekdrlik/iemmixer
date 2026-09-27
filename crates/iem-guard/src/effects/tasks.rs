@@ -71,11 +71,6 @@ pub fn row(csv: &str, task: &str) -> Option<Row> {
     })
 }
 
-/// The task's `Last Result` from `schtasks /Query /FO CSV /V` output.
-pub fn last_result(csv: &str, task: &str) -> Option<i64> {
-    row(csv, task).and_then(|r| r.last_result)
-}
-
 /// Where the probe task stands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Probe {
@@ -92,10 +87,14 @@ pub fn probe(last: Option<i64>) -> Probe {
     }
 }
 
-/// The probe task's run after our `/Run`.
+/// The probe task's run after our `/Run` (design §5.1). Right after `/Run`
+/// schtasks may still show the previous run's result, so a result counts
+/// only for a newer run: a `Last Run Time` other than the one read before
+/// `/Run`, or once the task was seen running (a run time has whole seconds).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProbeWatch {
     before: Option<String>,
+    running_seen: bool,
 }
 
 impl ProbeWatch {
@@ -103,12 +102,24 @@ impl ProbeWatch {
     pub fn new(before: Option<&Row>) -> Self {
         Self {
             before: before.map(|r| r.last_run.clone()),
+            running_seen: false,
         }
     }
 
     /// Where the probe stands after one `/Query` (`None`: no row).
     pub fn observe(&mut self, now: Option<&Row>) -> Probe {
-        probe(now.and_then(|r| r.last_result))
+        let Some(row) = now else {
+            return Probe::Wait;
+        };
+        if row.last_result == Some(RUNNING) {
+            self.running_seen = true;
+        }
+        let newer = self.running_seen || self.before.as_deref() != Some(row.last_run.as_str());
+        if newer {
+            probe(row.last_result)
+        } else {
+            Probe::Wait
+        }
     }
 }
 

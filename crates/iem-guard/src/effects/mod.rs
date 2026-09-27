@@ -20,17 +20,18 @@ pub mod tasks;
 pub mod tuning;
 pub mod web;
 
-use iem_win::spawn::{CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
+use iem_win::spawn::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
 
 /// The creation flags of a bounded helper command (`schtasks`, `curl`,
 /// `iem-migrate`, `iem-server notify`): no console window, and for a
-/// waiting one (Ctrl-Break on "ide event") a process group of its own.
+/// waiting one (Ctrl-Break on "ide event") a process group of its own, so
+/// the Ctrl-Break reaches that helper only (S6 design note §5.5). Helpers
+/// stay in the guard's job: they are short, and a job that refuses
+/// breakaway must not refuse them. Only the long-lived children and the
+/// card's interlock leave it (`iem_win::spawn::spawn_detached`, I9).
 pub fn helper_flags(waiting: bool) -> u32 {
-    if waiting {
-        CREATE_BREAKAWAY_FROM_JOB | CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
-    } else {
-        CREATE_NO_WINDOW
-    }
+    let group = if waiting { CREATE_NEW_PROCESS_GROUP } else { 0 };
+    CREATE_NO_WINDOW | group
 }
 
 /// The last `n` characters of `text`, trimmed: the end of a command's
@@ -45,6 +46,8 @@ pub fn tail(text: &str, n: usize) -> &str {
 
 #[cfg(test)]
 mod tests {
+    use iem_win::spawn::CREATE_BREAKAWAY_FROM_JOB;
+
     use super::*;
 
     /// Helpers stay in the guard's job: a job that refuses breakaway

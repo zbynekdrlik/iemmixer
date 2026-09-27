@@ -16,8 +16,25 @@ pub fn one_pid(pids: &[u32], what: &str) -> Result<u32, String> {
 /// (design §5.3: the exe hash identifies the binary that runs). `images`:
 /// each process's full image path, or why it could not be read. None
 /// running is fine: the configured exe is the one our task starts.
-pub fn running_from(_configured: &str, _images: &[Result<String, String>]) -> Result<(), String> {
+pub fn running_from(configured: &str, images: &[Result<String, String>]) -> Result<(), String> {
+    for image in images {
+        match image {
+            Ok(path) if same_path(path, configured) => {}
+            Ok(path) => {
+                return Err(format!(
+                    "the predecessor app runs from {path}, not from pc.toml app_exe"
+                ));
+            }
+            Err(e) => return Err(format!("the predecessor app's image: {e}")),
+        }
+    }
     Ok(())
+}
+
+/// Two Windows paths name the same file: case and separator style aside.
+fn same_path(a: &str, b: &str) -> bool {
+    let plain = |p: &str| p.replace('/', "\\").to_lowercase();
+    plain(a) == plain(b)
 }
 
 /// `pid`s and images for a message: `a.exe (12), b.exe (13)`.

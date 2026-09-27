@@ -68,6 +68,10 @@ fn holders(pc: &WinPc) -> R<Vec<(u32, String)>> {
         .map_err(|e| procs::failed("the driver module's holders", e))
 }
 
+fn has_dialog(pid: u32) -> R<bool> {
+    window::has_dialog(pid).map_err(|e| procs::failed("REAPER's windows", e))
+}
+
 /// The loudest reading of each stage track over `seconds`;
 /// `f64::NEG_INFINITY` for a track that gave none.
 fn sample(pc: &WinPc, seconds: u32, c: &Cancel) -> R<Vec<f64>> {
@@ -118,14 +122,27 @@ pub(super) fn save_quit(pc: &WinPc, c: &Cancel) -> R<()> {
     let project = &pc.s.guard.reaper_project;
     let before = mtime(project)?;
     action(pc, SAVE);
-    if !procs::poll(Duration::from_secs(15), c, || Ok(mtime(project)? != before))? {
+    // A dialog during the save (a save error, a prompt) holds it and needs
+    // a person: the step fails at once and says so; 40004 is never sent.
+    let saved = procs::poll(Duration::from_secs(15), c, || {
+        if mtime(project)? != before {
+            return Ok(true);
+        }
+        if has_dialog(pid)? {
+            return Err(StepError::failed(
+                "a REAPER dialog is open during the save: REAPER is not quit",
+            ));
+        }
+        Ok(false)
+    })?;
+    if !saved {
         return Err(StepError::failed(
             "REAPER did not save the project within 15 s",
         ));
     }
     // A dialog after the save needs a person; quitting now would leave it
     // up (the 2026-09-27 lesson on #9).
-    if window::has_dialog(pid).map_err(|e| procs::failed("REAPER's windows", e))? {
+    if has_dialog(pid)? {
         return Err(StepError::failed(
             "a REAPER dialog is open after the save: REAPER is not quit",
         ));
@@ -173,18 +190,34 @@ pub(super) fn start(pc: &WinPc) -> R<()> {
 
 /// ≤ 120 s for the track count; the meter bridge at most once and only
 /// while its state is empty (the 2026-09-27 lesson); the heartbeat; the
-/// driver module; a few seconds of stage meters.
+/// driver module; a few seconds of stage meters. A project that never
+/// reaches the track count (another project, still loading) leaves the
+/// bridge alone: the facts say so and the verdict fails on the tracks.
 pub(super) fn facts(pc: &WinPc, c: &Cancel) -> R<ReaperFacts> {
     let g = &pc.s.guard;
     let mut tracks = None;
-    procs::poll(LOAD, c, || {
+    let loaded = procs::poll(LOAD, c, || {
         if let Ok(body) = get(pc, "NTRACK") {
             tracks = reaper::ntrack(&body);
         }
-        Ok(tracks == Some(g.reaper_tracks))
+        Ok(handover::project_loaded(tracks, g.reaper_tracks))
     })?;
     let pid = reaper_pid(pc)?;
-    let dialog = window::has_dialog(pid).map_err(|e| procs::failed("REAPER's windows", e))?;
+    let dialog = has_dialog(pid)?;
+    if !loaded {
+        warn!(
+            "REAPER reports {tracks:?} tracks, not {}: the meter bridge is left alone",
+            g.reaper_tracks
+        );
+        return Ok(ReaperFacts {
+            tracks,
+            expected_tracks: g.reaper_tracks,
+            dialog,
+            heartbeat_advanced: false,
+            holds_module: module_held_by(pc, pid)?,
+            peaks: Vec::new(),
+        });
+    }
     match handover::bridge(&extstate(pc, &g.bridge_state)?) {
         Bridge::Running => info!("the meter bridge runs"),
         Bridge::TriggerOnce => action(pc, &g.bridge_action),
@@ -194,7 +227,7 @@ pub(super) fn facts(pc: &WinPc, c: &Cancel) -> R<ReaperFacts> {
     let heartbeat_advanced = procs::poll(HEARTBEAT, c, || {
         Ok(extstate(pc, &g.bridge_heartbeat)? != first)
     })?;
-    let holds_module = holders(pc)?.iter().any(|(holder, _)| *holder == pid);
+    let holds_module = module_held_by(pc, pid)?;
     let peaks = sample(pc, 3, c)?;
     Ok(ReaperFacts {
         tracks,
@@ -204,4 +237,9 @@ pub(super) fn facts(pc: &WinPc, c: &Cancel) -> R<ReaperFacts> {
         holds_module,
         peaks,
     })
+}
+
+/// Whether REAPER (`pid`) holds the driver module.
+fn module_held_by(pc: &WinPc, pid: u32) -> R<bool> {
+    Ok(holders(pc)?.iter().any(|(holder, _)| *holder == pid))
 }

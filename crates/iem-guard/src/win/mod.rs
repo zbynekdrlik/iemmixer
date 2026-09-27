@@ -176,9 +176,10 @@ impl Pc for WinPc {
         card::pref_check(self)
     }
 
-    /// A mutation of the guard's own data: it finishes first.
-    fn data(&mut self, mode: Mode, _c: &Cancel) -> R<String> {
-        tasks::data(self, mode)
+    /// A started command finishes (it writes the guard's own data); "ide
+    /// event" stops the refresh between two commands and after the last.
+    fn data(&mut self, mode: Mode, c: &Cancel) -> R<String> {
+        tasks::data(self, mode, c)
     }
 
     fn engine_start(&mut self, hold: bool) -> R<u32> {

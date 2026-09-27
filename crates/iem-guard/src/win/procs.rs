@@ -15,13 +15,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use iem_win::console;
 use iem_win::process::{self, Handle};
-use iem_win::spawn::{self, CREATE_NO_WINDOW};
+use iem_win::spawn;
 use tracing::{info, warn};
 
 use super::{WinPc, web};
 use crate::cancel::Cancel;
 use crate::effects::app::one_pid;
-use crate::effects::{argv, web as decide};
+use crate::effects::{self, argv, web as decide};
 use crate::pc::{Audience, Kid, Procs, R, StepError, adoptable};
 use crate::plan::Mode;
 use crate::site::{SERVER_EXE, TRAY_EXE};
@@ -375,18 +375,25 @@ pub(super) struct Output {
 /// What a bounded run does on "ide event".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum OnCancel {
-    /// A mutation (a data refresh, a task start, a notice): it finishes
+    /// A mutation (a data command, a task start, a notice): it finishes
     /// first, the token is not looked at.
     Finish,
-    /// A wait (the interlock, an HTTPS check): Ctrl-Break to the command's
-    /// own process group, then `Preempted` at once; the command ends by
-    /// itself.
+    /// A wait (an HTTPS check): Ctrl-Break to the command's own process
+    /// group, then `Preempted` at once; the command ends by itself.
     Break,
 }
 
-/// Runs a helper command without a window and reads its output, for at
-/// most `limit`. Nothing is ended: after the limit, or a pre-emption of a
-/// waiting run, the command is left to finish by itself.
+fn piped(cmd: &mut Command) {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+}
+
+/// Runs a helper command without a window, inside the guard's job
+/// ([`effects::helper_flags`]: a job that refuses breakaway never refuses
+/// a helper), and reads its output, for at most `limit`. Nothing is ended:
+/// after the limit, or a pre-emption of a waiting run, the command is left
+/// to finish by itself.
 pub(super) fn run(
     what: &str,
     cmd: &mut Command,
@@ -394,15 +401,27 @@ pub(super) fn run(
     c: &Cancel,
     on_cancel: OnCancel,
 ) -> R<Output> {
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let child = match on_cancel {
-        OnCancel::Break => spawn::spawn_detached(cmd, true),
-        OnCancel::Finish => cmd.creation_flags(CREATE_NO_WINDOW).spawn(),
-    }
-    .map_err(|e| failed(what, e))?;
+    piped(cmd);
+    let child = cmd
+        .creation_flags(effects::helper_flags(on_cancel == OnCancel::Break))
+        .spawn()
+        .map_err(|e| failed(what, e))?;
     finish(what, child, limit, c, on_cancel)
+}
+
+/// [`run`] for `iem-engine interlock`, which opens the card: it starts
+/// outside the guard's job like the engine (design §5.1, I9), so the end of
+/// the guard's task never ends a holder of the card. A wait: Ctrl-Break on
+/// "ide event".
+pub(super) fn run_outside_job(
+    what: &str,
+    cmd: &mut Command,
+    limit: Duration,
+    c: &Cancel,
+) -> R<Output> {
+    piped(cmd);
+    let child = spawn::spawn_detached(cmd, true).map_err(|e| failed(what, e))?;
+    finish(what, child, limit, c, OnCancel::Break)
 }
 
 fn drain<S: Read + Send + 'static>(stream: Option<S>) -> Option<JoinHandle<String>> {

@@ -260,7 +260,9 @@ pub struct PcToml {
     pub server_config: PathBuf,
     #[serde(default = "default_engine_pipe")]
     pub engine_pipe: String,
-    /// The engine's arguments after its exe; `--hold` is appended on request.
+    /// The engine's arguments after its exe (`run`, `--site`,
+    /// `--state-dir`, …); the guard appends `--pipe <engine_pipe>`, and
+    /// `--hold` on request.
     pub engine_args: Vec<String>,
     pub reaper_exe: PathBuf,
     pub app_exe: PathBuf,
@@ -290,7 +292,16 @@ impl PcToml {
             !self.engine_pipe.is_empty() && !self.engine_pipe.contains('\\'),
             "engine_pipe must be a plain name",
         );
+        let names = |flag: &str| self.engine_args.iter().any(|a| a == flag);
         check(!self.engine_args.is_empty(), "engine_args is empty");
+        check(
+            !names("--pipe") && !names("--hold"),
+            "engine_args must not name --pipe or --hold: the guard adds them",
+        );
+        check(
+            self.engine_args.is_empty() || (names("--site") && names("--state-dir")),
+            "engine_args must name --site and --state-dir (iem-engine run)",
+        );
         check(!self.runner.is_empty(), "runner is empty");
         check(
             !self.data_dev.is_empty(),
@@ -412,9 +423,11 @@ impl Settings {
     }
 
     /// The engine's arguments for the bundle in `bundle`: `engine_args`
-    /// with its placeholders, and `--hold` on request.
+    /// with its placeholders, then `--pipe <engine_pipe>` (the one name the
+    /// supervisor client and the server use too) and `--hold` on request.
     pub fn engine_argv(&self, bundle: &Path, hold: bool) -> Result<Vec<String>, String> {
         let mut args = argv::expand(&self.pc.engine_args, &self.vars(bundle))?;
+        args.extend(["--pipe".to_owned(), self.pc.engine_pipe.clone()]);
         if hold {
             args.push("--hold".to_owned());
         }

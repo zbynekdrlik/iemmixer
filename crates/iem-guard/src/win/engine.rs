@@ -17,11 +17,9 @@ use interprocess::local_socket::{GenericNamespaced, Stream};
 use serde_json::Value;
 use tracing::{info, warn};
 
-use super::WinPc;
-use super::procs::{self, OnCancel};
+use super::{WinPc, procs};
 use crate::cancel::Cancel;
-use crate::effects::argv;
-use crate::effects::engine::{self as proto, Msg, Quiet, Ready, ReadyWindow, StagePeaks};
+use crate::effects::engine::{self as proto, Msg, Quiet, Ready, ReadyWindow, Shutdown, StagePeaks};
 use crate::pc::{Kid, R, Status, StepError};
 use crate::plan::Health;
 use crate::site::ENGINE_EXE;
@@ -290,16 +288,15 @@ fn supervisor<'a>(pc: &'a mut WinPc, limit: Duration, c: &Cancel) -> R<&'a mut S
         .ok_or_else(|| StepError::failed("no supervisor connection"))
 }
 
+/// The engine from the bundle, with `pc.toml`'s arguments, `--pipe` from
+/// `engine_pipe` (the supervisor's and the server's pipe) and `--hold` on
+/// request (`Settings::engine_argv`).
 pub(super) fn start(pc: &mut WinPc, hold: bool) -> R<u32> {
     if !procs::list(pc).engine.is_empty() {
         return Err(StepError::failed("an engine already runs"));
     }
     let dir = pc.bundle_dir()?;
-    let mut args =
-        argv::expand(&pc.s.pc.engine_args, &pc.s.vars(&dir)).map_err(StepError::Failed)?;
-    if hold {
-        args.push("--hold".to_owned());
-    }
+    let args = pc.s.engine_argv(&dir, hold).map_err(StepError::Failed)?;
     let mut cmd = Command::new(dir.join(ENGINE_EXE));
     cmd.args(args).current_dir(dir);
     pc.sup = None;
@@ -307,7 +304,8 @@ pub(super) fn start(pc: &mut WinPc, hold: bool) -> R<u32> {
 }
 
 /// `iem-engine interlock` (design §4): a wait, so "ide event" asks it to
-/// stop (Ctrl-Break) and returns at once.
+/// stop (Ctrl-Break) and returns at once. It opens the card, so it runs
+/// outside the guard's job like the engine.
 pub(super) fn interlock(pc: &WinPc, seconds: u32, c: &Cancel) -> R<(bool, String)> {
     let dir = pc.bundle_dir()?;
     let mut cmd = Command::new(dir.join(ENGINE_EXE));
@@ -318,7 +316,7 @@ pub(super) fn interlock(pc: &WinPc, seconds: u32, c: &Cancel) -> R<(bool, String
         .arg(seconds.to_string())
         .current_dir(dir);
     let limit = Duration::from_secs(u64::from(seconds) + 30);
-    let out = procs::run("iem-engine interlock", &mut cmd, limit, c, OnCancel::Break)?;
+    let out = procs::run_outside_job("iem-engine interlock", &mut cmd, limit, c)?;
     proto::interlock_result(out.code, &out.stdout).map_err(StepError::Failed)
 }
 
@@ -374,7 +372,8 @@ pub(super) fn arm(pc: &mut WinPc) -> R<()> {
     sup.request("arm").map_err(StepError::Failed)
 }
 
-/// `Shutdown`, `DriverReleased` ≤ 10 s, the process gone ≤ 5 s.
+/// `Shutdown`, `DriverReleased` ≤ 10 s, the process gone ≤ 5 s; a refused
+/// `Shutdown` ends the wait at once (`effects::engine::shutdown`).
 pub(super) fn stop(pc: &mut WinPc, c: &Cancel) -> R<()> {
     let pid = procs::running_pid(pc, Kid::Engine)?;
     let handle = Handle::open_waitable(pid).map_err(|e| procs::failed("the engine", e))?;
@@ -383,13 +382,23 @@ pub(super) fn stop(pc: &mut WinPc, c: &Cancel) -> R<()> {
     let id = sup.fresh_id();
     sup.send(&proto::request(id, "shutdown"))
         .map_err(StepError::Failed)?;
-    let released = wait_inbox(sup, RELEASE, c, |i| i.released.clone())?;
-    let Some(reason) = released else {
-        let refused = take_reply(&mut lock(&sup.inbox), id).flatten();
-        return Err(StepError::failed(match refused {
-            Some(e) => format!("the engine refused Shutdown: {e}"),
-            None => format!("no DriverReleased within {} s", RELEASE.as_secs()),
-        }));
+    let outcome = wait_inbox(sup, RELEASE, c, |i| {
+        let reply = take_reply(i, id);
+        proto::shutdown(i.released.as_deref(), reply)
+    })?;
+    let reason = match outcome {
+        Some(Shutdown::Released(reason)) => reason,
+        Some(Shutdown::Refused(e)) => {
+            return Err(StepError::failed(format!(
+                "the engine refused Shutdown: {e}"
+            )));
+        }
+        None => {
+            return Err(StepError::failed(format!(
+                "no DriverReleased within {} s",
+                RELEASE.as_secs()
+            )));
+        }
     };
     info!("the engine released the driver: {reason}");
     if procs::wait_exit(&handle, GONE, c)?.is_none() {

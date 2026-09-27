@@ -267,9 +267,14 @@ pub enum Shutdown {
 
 /// `released`: the reason of a `DriverReleased`; `reply`: the request's
 /// reply, `None` not yet, `Some(None)` accepted, `Some(Some(error))`
-/// refused. `None`: wait on.
-pub fn shutdown(released: Option<&str>, _reply: Option<Option<String>>) -> Option<Shutdown> {
-    released.map(|reason| Shutdown::Released(reason.to_owned()))
+/// refused. The release ends the wait, and so does a refusal; an accepted
+/// request waits on for the release (`None`).
+pub fn shutdown(released: Option<&str>, reply: Option<Option<String>>) -> Option<Shutdown> {
+    match (released, reply) {
+        (Some(reason), _) => Some(Shutdown::Released(reason.to_owned())),
+        (None, Some(Some(error))) => Some(Shutdown::Refused(error)),
+        (None, Some(None) | None) => None,
+    }
 }
 
 /// The stage inputs' positions in the topology's input order, and the ids

@@ -16,7 +16,8 @@ use super::WinPc;
 use super::procs::{self, OnCancel, Output};
 use crate::bundle;
 use crate::cancel::Cancel;
-use crate::effects::tasks::{self, Probe};
+use crate::effects::data::refresh;
+use crate::effects::tasks::{self, Probe, ProbeWatch, Row};
 use crate::effects::{self, argv, tuning};
 use crate::pc::{R, StepError};
 use crate::plan::Mode;
@@ -25,8 +26,11 @@ use crate::state;
 
 /// The tuning task answers within this.
 const TUNING_LIMIT: Duration = Duration::from_secs(120);
-/// One data command (`iem-migrate band`, …) finishes within this.
-const DATA_LIMIT: Duration = Duration::from_secs(600);
+/// One data command (`iem-migrate band`, …) reads small files and writes
+/// the guard's own data: it finishes within this. A started one is not
+/// pre-empted (a mutation), so this bound is also the longest "ide event"
+/// can wait on the refresh.
+const DATA_LIMIT: Duration = Duration::from_secs(120);
 /// The probe task's `cmd /c exit 0` ends within this.
 const PROBE_LIMIT: Duration = Duration::from_secs(15);
 
@@ -57,10 +61,11 @@ pub(super) fn run_task(task: &str) -> R<()> {
     }
 }
 
-fn last_result(task: &str) -> R<Option<i64>> {
+/// The task's row of `schtasks /Query` (`None`: no row for it).
+fn query(task: &str) -> R<Option<Row>> {
     let out = schtasks(&tasks::query_args(task))?;
     if out.code == Some(0) {
-        Ok(tasks::last_result(&out.stdout, task))
+        Ok(tasks::row(&out.stdout, task))
     } else {
         Err(StepError::failed(format!(
             "schtasks /Query {task} ended with {:?}: {}",
@@ -71,12 +76,14 @@ fn last_result(task: &str) -> R<Option<i64>> {
 }
 
 /// The guard (Limited, session 1) starts `\iemmixer\iemmixer-probe`, which
-/// must end with 0 (design §5.1).
+/// must end with 0 (design §5.1). The row read before `/Run` tells this
+/// run's result from the previous one's.
 pub(super) fn probe() -> R<()> {
+    let mut watch = ProbeWatch::new(query(tasks::PROBE)?.as_ref());
     run_task(tasks::PROBE)?;
     let mut verdict = Probe::Wait;
     procs::poll(PROBE_LIMIT, &Cancel::default(), || {
-        verdict = tasks::probe(last_result(tasks::PROBE)?);
+        verdict = watch.observe(query(tasks::PROBE)?.as_ref());
         Ok(verdict != Probe::Wait)
     })?;
     match verdict {
@@ -168,32 +175,20 @@ pub(super) fn drift(pc: &WinPc) -> R<Option<String>> {
 }
 
 /// The data refresh of an entry into `mode` (P9): `pc.toml`'s commands in
-/// order, each with exit 0. It writes the guard's own data, so it finishes
-/// first.
-pub(super) fn data(pc: &WinPc, mode: Mode) -> R<String> {
+/// order, each with exit 0 (`effects::data::refresh`). A started command
+/// writes the guard's own data, so it finishes; "ide event" stops the
+/// refresh between two commands and after the last.
+pub(super) fn data(pc: &WinPc, mode: Mode, c: &Cancel) -> R<String> {
     let dir = pc.bundle_dir()?;
-    let commands = pc.s.data_commands(mode);
-    if commands.is_empty() {
-        return Err(StepError::failed(format!(
-            "pc.toml has no data commands for {mode:?}"
-        )));
-    }
     let vars = pc.s.vars(&dir);
-    let mut done = Vec::new();
-    for template in commands {
+    refresh(mode, pc.s.data_commands(mode), c, |template| {
         let command = argv::expand(template, &vars).map_err(StepError::Failed)?;
         let Some((exe, args)) = command.split_first() else {
             return Err(StepError::failed("pc.toml has an empty data command"));
         };
         let mut cmd = Command::new(exe);
         cmd.args(args).current_dir(&dir);
-        let out = procs::run(
-            exe,
-            &mut cmd,
-            DATA_LIMIT,
-            &Cancel::default(),
-            OnCancel::Finish,
-        )?;
+        let out = procs::run(exe, &mut cmd, DATA_LIMIT, c, OnCancel::Finish)?;
         let name = site::file_name(exe);
         if out.code != Some(0) {
             return Err(StepError::failed(format!(
@@ -202,7 +197,6 @@ pub(super) fn data(pc: &WinPc, mode: Mode) -> R<String> {
                 effects::tail(&out.stderr, 300)
             )));
         }
-        done.push(format!("{name}: {}", effects::tail(&out.stdout, 200)));
-    }
-    Ok(done.join("; "))
+        Ok(format!("{name}: {}", effects::tail(&out.stdout, 200)))
+    })
 }

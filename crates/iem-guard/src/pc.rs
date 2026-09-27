@@ -344,14 +344,17 @@ pub trait Pc {
     fn tuning_drift(&mut self) -> R<Option<String>>;
     /// `prefwin::restore(.., 3)`: the writes it took (each read back).
     fn pref_check(&mut self) -> R<u32>;
-    /// The band's data refresh of an entry (`iem-migrate band`, …).
+    /// The band's data refresh of an entry (`iem-migrate band`, …): a
+    /// started command finishes (a mutation); "ide event" stops the refresh
+    /// between two commands and after the last.
     fn data(&mut self, mode: Mode, c: &Cancel) -> R<String>;
     fn engine_start(&mut self, hold: bool) -> R<u32>;
     /// Hello names the bundle; measured frames 32, callbacks advancing, no
     /// missed period for `secs` (one warm-up miss restarts the window once).
     fn engine_ready(&mut self, secs: u32, c: &Cancel) -> R<Status>;
     fn engine_arm(&mut self) -> R<()>;
-    /// `Shutdown`, `DriverReleased` ≤ 10 s, gone ≤ 5 s.
+    /// `Shutdown`, `DriverReleased` ≤ 10 s, gone ≤ 5 s; a refused
+    /// `Shutdown` fails at once.
     fn engine_stop(&mut self, c: &Cancel) -> R<()>;
     /// Two statuses about 1 s apart: callbacks advancing, not faulted, not
     /// parked.

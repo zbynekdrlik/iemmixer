@@ -171,7 +171,8 @@ exclude_re = [
   "iem-server/src/mixer_ws\\.rs.*delete match arm ClientMsg::ListenStart.* in handle$",
   # Unobservable (S5): the pruned count only decides whether it is logged.
   "iem-server/src/backup_daemon\\.rs.*replace > with (==|<|>=) in run$",
-  # Equivalent (S6): the creation flags are distinct bits, so `^` gives the
-  # same value as `|`.
+  # Equivalent (S6): the creation flags (the children's and the guard's
+  # helpers') are distinct bits, so `^` gives the same value as `|`.
   "iem-win/src/decide\\.rs.*replace \\| with \\^ in creation_flags$",
+  "iem-guard/src/effects/mod\\.rs.*replace \\| with \\^ in helper_flags$",
 ]

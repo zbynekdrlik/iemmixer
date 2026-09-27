@@ -1,17 +1,20 @@
 //! The data refresh of a `dev`/`live` entry (P9, S6 design note §5.2 step
 //! 6): `pc.toml`'s commands in order, each with exit 0. A command that has
-//! started changes the guard's own data, so it finishes (a mutation).
+//! started changes the guard's own data, so it finishes (a mutation); "ide
+//! event" is honoured before each command and once the last one has
+//! finished, so an event plan never waits on the commands after it.
 
 use crate::cancel::Cancel;
 use crate::pc::{R, StepError};
 use crate::plan::Mode;
 
 /// Runs `run` on each of `commands` in order and joins what they report
-/// (`; `). None configured fails; the first failure stops the rest.
+/// (`; `). None configured fails; the first failure stops the rest; a
+/// pre-emption stops the refresh between two commands and after the last.
 pub fn refresh<T>(
     mode: Mode,
     commands: &[T],
-    _c: &Cancel,
+    c: &Cancel,
     mut run: impl FnMut(&T) -> R<String>,
 ) -> R<String> {
     if commands.is_empty() {
@@ -21,7 +24,13 @@ pub fn refresh<T>(
     }
     let mut done = Vec::with_capacity(commands.len());
     for command in commands {
+        if c.preempted() {
+            return Err(StepError::Preempted);
+        }
         done.push(run(command)?);
+    }
+    if c.preempted() {
+        return Err(StepError::Preempted);
     }
     Ok(done.join("; "))
 }
