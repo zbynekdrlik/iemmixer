@@ -136,9 +136,11 @@ pub trait Process: Send {
 pub struct StreamStats {
     pub callbacks: u64,
     /// Late callbacks: NullRt counts those finished more than one period
-    /// after their deadline, the ASIO backend intervals over 1.5 periods.
+    /// after their deadline, the ASIO backend callback intervals over 1.5 and
+    /// under 2 periods (`telemetry::classify`).
     pub late: u64,
-    /// Whole periods without a callback (ASIO; NullRt 0).
+    /// Callback intervals of 2 periods or more: a period passed without a
+    /// callback (ASIO; NullRt 0).
     pub missed: u64,
     /// Callbacks that took longer than one period (ASIO; NullRt 0).
     pub overruns: u64,
