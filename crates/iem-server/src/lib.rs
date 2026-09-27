@@ -209,6 +209,13 @@ impl AppState {
         let secrets_dir = config_dir.join(secrets::SECRETS_DIR);
         let pepper = pepper::load_or_create(&secrets_dir)?;
         let pin_store = pin_store::PinStore::load(&secrets_dir)?;
+        // The tunnel connector runs on this PC: CF-Connecting-IP counts only
+        // from loopback and this host's own addresses (design note §6).
+        let host = login_guard::HostAddrs::read();
+        tracing::info!(
+            ?host,
+            "CF-Connecting-IP is trusted from loopback and these host addresses"
+        );
         let (event_tx, _) = broadcast::channel(256);
         let (meters_tx, _) = broadcast::channel(16);
         Ok(Self {
@@ -234,7 +241,7 @@ impl AppState {
             auto_snapshots: Arc::new(Mutex::new(HashMap::new())),
             pin_store: Arc::new(RwLock::new(pin_store)),
             pin_hasher: pin_hash::PinHasher::new(pepper),
-            login_guard: Arc::new(login_guard::LoginGuard::new()),
+            login_guard: Arc::new(login_guard::LoginGuard::for_host(host)),
             hash_gate: Arc::new(login_guard::HashGate::new(
                 login_guard::HASH_CONCURRENCY,
                 login_guard::HASH_QUEUE,

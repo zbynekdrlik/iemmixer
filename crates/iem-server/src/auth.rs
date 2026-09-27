@@ -137,7 +137,7 @@ pub async fn verify_engineer_pin(
     headers: &HeaderMap,
     pin: &str,
 ) -> Result<(), Rejection> {
-    let client = ClientKey::from_request(peer.ip(), headers);
+    let client = state.login_guard.client(peer.ip(), headers);
     let now = Instant::now();
     if let Err(wait) = state.login_guard.check(&client, ENGINEER_ID, now) {
         return Err(Rejection::from(too_many_attempts(wait)));
@@ -185,7 +185,7 @@ pub async fn login(
     headers: HeaderMap,
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, Rejection> {
-    let client = ClientKey::from_request(peer.ip(), &headers);
+    let client = state.login_guard.client(peer.ip(), &headers);
     let now = Instant::now();
     if let Err(wait) = state.login_guard.check(&client, &req.member, now) {
         tracing::info!(origin = ?client.origin, member = %req.member, wait_ms = wait.as_millis() as u64, "login throttled");
@@ -336,7 +336,7 @@ pub async fn change_pin(
                 "Current PIN is required",
             )));
         }
-        let client = ClientKey::from_request(peer.ip(), &headers);
+        let client = state.login_guard.client(peer.ip(), &headers);
         let now = Instant::now();
         if let Err(wait) = state.login_guard.check(&client, &claims.sub, now) {
             return Err(Rejection::from(too_many_attempts(wait)));
@@ -675,7 +675,7 @@ mod tests {
 #[cfg(test)]
 mod login_tests {
     use super::*;
-    use crate::login_guard::{HashGate, Origin};
+    use crate::login_guard::{HashGate, HostAddrs, LoginGuard, Origin};
     use crate::pin_hash::{PEPPER_LEN, PinHasher};
     use axum::body::Body;
     use axum::extract::connect_info::MockConnectInfo;
@@ -945,6 +945,51 @@ mod login_tests {
         )
         .await;
         assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn a_tunnel_on_the_hosts_own_address_is_keyed_by_its_client() {
+        // cloudflared's origin may target the host's LAN address instead of
+        // 127.0.0.1: its connections then come from that address.
+        const HOST: [u8; 4] = [192, 0, 2, 10];
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = test_state(dir.path()).await;
+        state.login_guard = Arc::new(LoginGuard::for_host(HostAddrs::new([
+            std::net::IpAddr::from(HOST),
+        ])));
+        let tunnel = app(state.clone(), HOST);
+        let first = [("cf-connecting-ip", "198.51.100.7")];
+        for _ in 0..3 {
+            assert_eq!(
+                login_as(&tunnel, "member1", WRONG_PIN, &first)
+                    .await
+                    .status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        assert_eq!(
+            login_as(&tunnel, "member1", MEMBER_PIN, &first)
+                .await
+                .status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "limited per 198.51.100.7"
+        );
+        let second = [("cf-connecting-ip", "198.51.100.8")];
+        assert_eq!(
+            login_as(&tunnel, "member1", MEMBER_PIN, &second)
+                .await
+                .status(),
+            StatusCode::OK,
+            "another client behind the tunnel"
+        );
+        assert_eq!(state.login_guard.stats().tunnel_failures, 3);
+        // A peer that is not the host: the same header changes nothing.
+        let lan = app(state.clone(), [192, 0, 2, 50]);
+        assert_eq!(
+            login_as(&lan, "member1", MEMBER_PIN, &first).await.status(),
+            StatusCode::OK,
+            "keyed by its own address, not by the header"
+        );
     }
 
     #[tokio::test]

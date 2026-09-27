@@ -2,9 +2,12 @@
 //! injected, plus a bounded gate for argon2id work:
 //!
 //! - budgets count failures only, separately for LAN and tunnel clients;
-//! - `CF-Connecting-IP` is trusted only from a loopback peer (the tunnel
-//!   connector on the same PC); an IPv6 client is keyed by its /64, so it
-//!   cannot rotate addresses within its prefix to reset its budgets;
+//! - `CF-Connecting-IP` is trusted only from a peer that is this host
+//!   (loopback, or one of its own addresses read at start): the tunnel
+//!   connector runs on the same PC, whichever of its addresses its origin
+//!   targets (design note §6). From any other peer the header is ignored;
+//!   an IPv6 client is keyed by its /64, so it cannot rotate addresses
+//!   within its prefix to reset its budgets;
 //! - per (client, member): three free failures, then 1, 2, 4 … s;
 //! - per client: 20 failures in 10 minutes → 60 s spacing;
 //! - engineer budget per origin: the engineer PIN works from any member login,
@@ -12,7 +15,7 @@
 //! - every delay ≤ 60 s — never a lockout; the caller answers 429 +
 //!   `Retry-After` before any hashing.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv6Addr};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -73,12 +76,46 @@ fn budget_ip(ip: IpAddr) -> IpAddr {
     }
 }
 
-impl ClientKey {
-    /// `CF-Connecting-IP` counts only when the TCP peer is loopback; every
-    /// other peer is a LAN client keyed by its own address.
-    pub fn from_request(peer: IpAddr, headers: &HeaderMap) -> Self {
+/// This host's own addresses: a TCP peer with one of them is a process on
+/// this PC — the tunnel connector, whether its origin targets 127.0.0.1 or
+/// the host's LAN address. Loopback always counts. No other machine can use
+/// them as its peer address: a TCP connection needs the handshake back.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HostAddrs(HashSet<IpAddr>);
+
+impl HostAddrs {
+    /// Loopback and `addrs` (in canonical form).
+    pub fn new(addrs: impl IntoIterator<Item = IpAddr>) -> Self {
+        Self(addrs.into_iter().map(|ip| ip.to_canonical()).collect())
+    }
+
+    /// This host's interface addresses, read once at start; loopback only
+    /// when they cannot be read.
+    pub fn read() -> Self {
+        match local_ip_address::list_afinet_netifas() {
+            Ok(interfaces) => Self::new(interfaces.into_iter().map(|(_, ip)| ip)),
+            Err(e) => {
+                tracing::warn!(error = %e, "the host's addresses are unreadable: CF-Connecting-IP counts from loopback only");
+                Self::default()
+            }
+        }
+    }
+
+    /// Whether `peer` is this host.
+    pub fn contains(&self, peer: IpAddr) -> bool {
         let peer = peer.to_canonical();
-        if peer.is_loopback()
+        peer.is_loopback() || self.0.contains(&peer)
+    }
+}
+
+impl ClientKey {
+    /// `CF-Connecting-IP` counts only when the TCP peer is this host (the
+    /// tunnel connector); every other peer is a LAN client keyed by its own
+    /// address, whatever header it sends. A header that is no address falls
+    /// back to the peer.
+    pub fn from_request(peer: IpAddr, headers: &HeaderMap, host: &HostAddrs) -> Self {
+        let peer = peer.to_canonical();
+        if host.contains(peer)
             && let Some(ip) = headers
                 .get("cf-connecting-ip")
                 .and_then(|v| v.to_str().ok())
@@ -189,11 +226,27 @@ fn evict_oldest_client(map: &mut HashMap<ClientKey, VecDeque<Instant>>) {
 #[derive(Debug, Default)]
 pub struct LoginGuard {
     inner: Mutex<Inner>,
+    /// Where `CF-Connecting-IP` is trusted from.
+    host: HostAddrs,
 }
 
 impl LoginGuard {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A guard that trusts `CF-Connecting-IP` from `host`'s addresses and
+    /// loopback ([`LoginGuard::new`]: loopback only).
+    pub fn for_host(host: HostAddrs) -> Self {
+        Self {
+            inner: Mutex::default(),
+            host,
+        }
+    }
+
+    /// The budget key of a request from `peer` with `headers`.
+    pub fn client(&self, peer: IpAddr, headers: &HeaderMap) -> ClientKey {
+        ClientKey::from_request(peer, headers, &self.host)
     }
 
     /// Admission before any hashing. `Err(wait)` → answer 429 with `Retry-After`.
@@ -714,7 +767,11 @@ mod tests {
     fn cf_header_is_trusted_only_from_loopback() {
         let loopback: IpAddr = "127.0.0.1".parse().unwrap();
         assert_eq!(
-            ClientKey::from_request(loopback, &headers(Some("203.0.113.5"))),
+            ClientKey::from_request(
+                loopback,
+                &headers(Some("203.0.113.5")),
+                &HostAddrs::default()
+            ),
             ClientKey {
                 origin: Origin::Tunnel,
                 ip: "203.0.113.5".parse().unwrap()
@@ -722,7 +779,11 @@ mod tests {
         );
         let lan_peer: IpAddr = "10.0.0.20".parse().unwrap();
         assert_eq!(
-            ClientKey::from_request(lan_peer, &headers(Some("203.0.113.5"))),
+            ClientKey::from_request(
+                lan_peer,
+                &headers(Some("203.0.113.5")),
+                &HostAddrs::default()
+            ),
             ClientKey {
                 origin: Origin::Lan,
                 ip: lan_peer
@@ -730,11 +791,107 @@ mod tests {
         );
     }
 
+    const HOST: &str = "192.0.2.10";
+
+    /// A host with one LAN address besides loopback.
+    fn host() -> HostAddrs {
+        HostAddrs::new([HOST.parse().unwrap()])
+    }
+
+    #[test]
+    fn cf_header_is_trusted_only_from_the_host() {
+        let guard = LoginGuard::for_host(host());
+        let cf = headers(Some("198.51.100.7"));
+        let tunnel = ClientKey {
+            origin: Origin::Tunnel,
+            ip: "198.51.100.7".parse().unwrap(),
+        };
+        assert_eq!(guard.client("127.0.0.1".parse().unwrap(), &cf), tunnel);
+        assert_eq!(
+            guard.client(HOST.parse().unwrap(), &cf),
+            tunnel,
+            "the connector on the host's LAN address"
+        );
+        let outsider: IpAddr = "192.0.2.50".parse().unwrap();
+        assert_eq!(
+            guard.client(outsider, &cf),
+            ClientKey {
+                origin: Origin::Lan,
+                ip: outsider
+            },
+            "a forged header from another machine changes nothing"
+        );
+        let host_ip: IpAddr = HOST.parse().unwrap();
+        assert_eq!(
+            LoginGuard::new().client(host_ip, &cf),
+            ClientKey {
+                origin: Origin::Lan,
+                ip: host_ip
+            },
+            "without the host's addresses only loopback counts"
+        );
+        assert_eq!(
+            guard.client(host_ip, &headers(Some("not-an-ip"))),
+            ClientKey {
+                origin: Origin::Lan,
+                ip: host_ip
+            },
+            "a malformed header falls back to the peer"
+        );
+    }
+
+    #[test]
+    fn a_forged_header_limits_only_its_sender() {
+        let guard = LoginGuard::for_host(host());
+        let t0 = Instant::now();
+        let outsider: IpAddr = "192.0.2.50".parse().unwrap();
+        let forged = guard.client(outsider, &headers(Some("198.51.100.7")));
+        for _ in 0..3 {
+            guard.record_failure(&forged, "member1", t0);
+        }
+        let plain = guard.client(outsider, &headers(None));
+        assert_eq!(
+            guard.check(&plain, "member1", t0),
+            Err(secs(1)),
+            "limited per 192.0.2.50"
+        );
+        let named = guard.client("127.0.0.1".parse().unwrap(), &headers(Some("198.51.100.7")));
+        assert_eq!(
+            guard.check(&named, "member1", t0),
+            Ok(()),
+            "the address in the header is untouched"
+        );
+    }
+
+    #[test]
+    fn the_host_is_loopback_and_its_listed_addresses() {
+        let h = HostAddrs::new([HOST.parse().unwrap(), "::ffff:192.0.2.11".parse().unwrap()]);
+        assert!(h.contains("127.0.0.1".parse().unwrap()));
+        assert!(h.contains("::1".parse().unwrap()));
+        assert!(h.contains(HOST.parse().unwrap()));
+        assert!(h.contains("::ffff:192.0.2.10".parse().unwrap()));
+        assert!(h.contains("192.0.2.11".parse().unwrap()), "canonical form");
+        assert!(!h.contains("192.0.2.50".parse().unwrap()));
+        assert!(!HostAddrs::default().contains(HOST.parse().unwrap()));
+        assert!(HostAddrs::default().contains("127.0.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn the_host_addresses_are_its_interfaces() {
+        let listed: Vec<IpAddr> = local_ip_address::list_afinet_netifas()
+            .expect("the interface list")
+            .into_iter()
+            .map(|(_, ip)| ip)
+            .collect();
+        assert!(!listed.is_empty());
+        assert_eq!(HostAddrs::read(), HostAddrs::new(listed));
+    }
+
     #[test]
     fn loopback_without_header_is_a_local_lan_client() {
         let loopback: IpAddr = "127.0.0.1".parse().unwrap();
         assert_eq!(
-            ClientKey::from_request(loopback, &headers(None)),
+            ClientKey::from_request(loopback, &headers(None), &HostAddrs::default()),
             ClientKey {
                 origin: Origin::Lan,
                 ip: loopback
@@ -746,7 +903,8 @@ mod tests {
     fn ipv4_mapped_loopback_counts_as_loopback() {
         let mapped: IpAddr = "::ffff:127.0.0.1".parse().unwrap();
         assert_eq!(
-            ClientKey::from_request(mapped, &headers(Some("203.0.113.6"))).origin,
+            ClientKey::from_request(mapped, &headers(Some("203.0.113.6")), &HostAddrs::default())
+                .origin,
             Origin::Tunnel
         );
     }
@@ -755,7 +913,7 @@ mod tests {
     fn garbage_header_falls_back_to_the_peer() {
         let loopback: IpAddr = "127.0.0.1".parse().unwrap();
         assert_eq!(
-            ClientKey::from_request(loopback, &headers(Some("not-an-ip"))),
+            ClientKey::from_request(loopback, &headers(Some("not-an-ip")), &HostAddrs::default()),
             ClientKey {
                 origin: Origin::Lan,
                 ip: loopback
@@ -766,14 +924,29 @@ mod tests {
     #[test]
     fn ipv6_clients_share_a_budget_per_64_prefix() {
         let loopback: IpAddr = "127.0.0.1".parse().unwrap();
-        let a = ClientKey::from_request(loopback, &headers(Some("2001:db8:1:2:aaaa::1")));
-        let b =
-            ClientKey::from_request(loopback, &headers(Some("2001:db8:1:2:bbbb:cccc:dddd:eeee")));
-        let other = ClientKey::from_request(loopback, &headers(Some("2001:db8:1:3::1")));
+        let a = ClientKey::from_request(
+            loopback,
+            &headers(Some("2001:db8:1:2:aaaa::1")),
+            &HostAddrs::default(),
+        );
+        let b = ClientKey::from_request(
+            loopback,
+            &headers(Some("2001:db8:1:2:bbbb:cccc:dddd:eeee")),
+            &HostAddrs::default(),
+        );
+        let other = ClientKey::from_request(
+            loopback,
+            &headers(Some("2001:db8:1:3::1")),
+            &HostAddrs::default(),
+        );
         assert_eq!(a, b, "one /64 is one client");
         assert_ne!(a, other);
         assert_eq!(a.ip, "2001:db8:1:2::".parse::<IpAddr>().unwrap());
-        let v4 = ClientKey::from_request(loopback, &headers(Some("203.0.113.8")));
+        let v4 = ClientKey::from_request(
+            loopback,
+            &headers(Some("203.0.113.8")),
+            &HostAddrs::default(),
+        );
         assert_eq!(
             v4.ip,
             "203.0.113.8".parse::<IpAddr>().unwrap(),
@@ -795,7 +968,12 @@ mod tests {
     fn header_value_is_trimmed() {
         let loopback: IpAddr = "127.0.0.1".parse().unwrap();
         assert_eq!(
-            ClientKey::from_request(loopback, &headers(Some(" 203.0.113.7 "))).ip,
+            ClientKey::from_request(
+                loopback,
+                &headers(Some(" 203.0.113.7 ")),
+                &HostAddrs::default()
+            )
+            .ip,
             "203.0.113.7".parse::<IpAddr>().unwrap()
         );
     }
