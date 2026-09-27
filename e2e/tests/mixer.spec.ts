@@ -280,8 +280,7 @@ test.describe("Fader safety (F5)", () => {
     // 40 % of the track to the left: the fill shrinks by about that much.
     expect(atActivation - (await fillPx(own))).toBeGreaterThan(f.box.width * 0.3);
     await page.mouse.up();
-    await page.waitForTimeout(50);
-    expect(await track(own).getAttribute("class")).not.toMatch(/\bactive\b/);
+    await expect(track(own)).not.toHaveClass(/\bactive\b/);
     await expect(own).not.toHaveClass(/fader-active/);
   });
 
@@ -304,8 +303,7 @@ test.describe("Fader safety (F5)", () => {
     expect((await fillPx(own)) / f.box.width).toBeGreaterThan(0.95);
     expect(await dbText(own)).toBe("+12.0dB");
     await page.mouse.up();
-    await page.waitForTimeout(50);
-    expect(await track(own).getAttribute("class")).not.toMatch(/\bactive\b/);
+    await expect(track(own)).not.toHaveClass(/\bactive\b/);
     await expect(own).not.toHaveClass(/fader-active/);
   });
 
@@ -331,7 +329,7 @@ test.describe("Fader safety (F5)", () => {
     await expect.poll(() => dbText(strip(page, "mic3"))).toBe(label);
   });
 
-  test("a fast back-and-forth drag ends where the finger stopped", async ({ page }) => {
+  test("a fast back-and-forth drag ends stable at the value shown at release", async ({ page }) => {
     await openMixer(page, "member3");
     const own = strip(page, "mic3");
     await toZeroDb(page, own);
@@ -345,6 +343,12 @@ test.describe("Fader safety (F5)", () => {
       await page.mouse.move(f.x(0.7), f.y);
       await page.waitForTimeout(30);
     }
+    // The last step goes down from the top end. A step that crosses an
+    // integer dB shows the first integer it crosses, and a step down from an
+    // integer shows no change (crossed_integer), so the level ends near
+    // +12 dB, not where the finger stopped (about +5 dB). The test holds
+    // gen1's check: no stutter or drift after release, and the engine keeps
+    // the value shown at release.
     await page.mouse.move(f.x(0.6), f.y);
     await page.waitForTimeout(50);
     const atEnd = await fillPx(own);
@@ -353,7 +357,7 @@ test.describe("Fader safety (F5)", () => {
     await page.waitForTimeout(500);
     expect(Math.abs((await fillPx(own)) - atEnd)).toBeLessThan(f.box.width * 0.05);
     expect(await dbText(own)).toBe(label);
-    // The last value of the burst reached the engine.
+    // The value shown at release reached the engine.
     await page.reload();
     await expect(strip(page, "mic3")).toBeVisible({ timeout: 15_000 });
     await expect.poll(() => dbText(strip(page, "mic3"))).toBe(label);
@@ -370,8 +374,7 @@ test.describe("Fader safety (F5)", () => {
     expect(start).toBeLessThan(-30);
 
     await track(own).dblclick();
-    await page.waitForTimeout(100);
-    expect(await track(own).getAttribute("class")).toContain("animating");
+    await expect(track(own)).toHaveClass(/animating/);
     // On its way: a level between the start and 0 dB.
     await expect
       .poll(
@@ -559,12 +562,18 @@ test.describe("Pan (F5)", () => {
     await expect.poll(async () => Number(await otherPan.inputValue())).toBeLessThan(20);
     const before = Number(await pan.inputValue());
 
-    // A double-click on the thumb (the value stays) starts the animation.
+    // A double-click on the thumb (the value stays) starts the animation. On
+    // its way: a value between the start and the centre (2 per 50 ms tick).
     await pan.dblclick({ position: left });
-    await page.waitForTimeout(200);
-    const mid = Number(await pan.inputValue());
-    expect(mid).toBeGreaterThan(before);
-    expect(mid).toBeLessThan(50);
+    await expect
+      .poll(
+        async () => {
+          const v = Number(await pan.inputValue());
+          return v > before && v < 50;
+        },
+        { timeout: 2_000, intervals: [50] },
+      )
+      .toBe(true);
     await expect.poll(async () => Number(await pan.inputValue()), { timeout: 3_000 }).toBe(50);
     await expect(pan).toHaveClass(/centered/);
     // The engine holds the centre: the other tab shows it.
@@ -581,17 +590,28 @@ test.describe("Menu, hide and solo (F6, F8)", () => {
     const popup = own.locator(".ch-menu-popup");
     await expect(popup).toBeVisible();
     await expect(own).toHaveClass(/menu-open/);
-    // Over the tab bar, far from the strip: the backdrop takes the click.
-    const tabs = await page.locator(".category-tabs").boundingBox();
-    expect(tabs).not.toBeNull();
-    await page
-      .locator(".ch-menu-backdrop")
-      .click({ position: { x: tabs!.x + tabs!.width - 10, y: tabs!.y + tabs!.height / 2 } });
+    // On the middle of the Mics tab, far from the strip: the backdrop covers
+    // the tab and takes the click (Playwright checks that it is the element
+    // hit at that point).
+    const mainTab = page.locator(".category-tab.main");
+    const micsTab = page.locator(".category-tab.mics");
+    await expect(mainTab).toHaveClass(/\bactive\b/);
+    await expect(micsTab).not.toHaveClass(/\bactive\b/);
+    const backdrop = page.locator(".ch-menu-backdrop");
+    const mics = await micsTab.boundingBox();
+    const cover = await backdrop.boundingBox();
+    expect(mics).not.toBeNull();
+    expect(cover).not.toBeNull();
+    await backdrop.click({
+      position: { x: mics!.x + mics!.width / 2 - cover!.x, y: mics!.y + mics!.height / 2 - cover!.y },
+    });
     await expect(popup).toHaveCount(0);
-    await expect(page.locator(".ch-menu-backdrop")).toHaveCount(0);
+    await expect(backdrop).toHaveCount(0);
     await expect(own).not.toHaveClass(/menu-open/);
-    // Only the menu closed: the tab under the click did not switch.
-    await expect(page.locator(".category-tab.main")).toHaveClass(/active/);
+    // Only the menu closed: the Mics tab under the click did not switch.
+    await expect(mainTab).toHaveClass(/\bactive\b/);
+    await expect(micsTab).not.toHaveClass(/\bactive\b/);
+    await expect(strip(page, "mic1")).toHaveCount(0);
   });
 
   test("a muted channel can be hidden (reaperiem#78)", async ({ page }) => {

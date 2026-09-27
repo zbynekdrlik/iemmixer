@@ -82,7 +82,8 @@ test.describe("Header (F10)", () => {
     // The page's mixer socket goes through a route: while the "server" is
     // gone, the page's reconnect attempts are closed at once. The page gives up
     // after three failed attempts in a row (MAX_WS_FAILURES), so the server
-    // comes back before its second retry (8 s backoff).
+    // comes back before its second retry (8 s backoff). Giving up while the
+    // token is valid is an inherited defect; this test holds either way.
     let serverGone = false;
     let live: WebSocketRoute | undefined;
     await page.routeWebSocket(/\/ws\/member3\?/, async (ws) => {
