@@ -145,6 +145,13 @@ impl Driver for AsioDriver {
     fn lock_failed(&self) -> bool {
         self.lock_failed
     }
+
+    /// HIL's forced reopen: the owner thread reopens through the reset
+    /// budget (`Status.resets` counts it; the fade-in restarts).
+    fn force_reopen(&self) -> bool {
+        self.stream.force_reopen();
+        true
+    }
 }
 
 /// Opens the card for `run --backend asio` with the topology's channels:

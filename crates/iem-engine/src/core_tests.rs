@@ -380,6 +380,7 @@ fn batches_are_atomic_and_bounded() {
         Cmd::SaveNow,
         Cmd::GetState,
         Cmd::InjectFault,
+        Cmd::ForceReopen,
         Cmd::ImportState {
             state: MixState::default(),
             baseline: false,
@@ -788,6 +789,20 @@ fn fault_injection_needs_the_flag() {
     let out = on.apply(&Cmd::InjectFault).unwrap();
     assert_eq!((out.rev, out.rt), (0, vec![RtOp::Panic]));
     assert!(on.flags().fault_injection);
+}
+
+#[test]
+fn a_forced_reopen_needs_the_fault_flag_and_changes_nothing() {
+    let mut off = core(Flags::default());
+    assert_eq!(code(off.apply(&Cmd::ForceReopen)), ErrCode::Forbidden);
+    let mut on = core(Flags {
+        test_signal: false,
+        fault_injection: true,
+    });
+    let out = on.apply(&Cmd::ForceReopen).unwrap();
+    assert_eq!(out.effect, Effect::Reopen);
+    assert_eq!((out.rev, out.rt, out.changes), (0, vec![], vec![]));
+    assert_eq!(on.rev(), 0);
 }
 
 #[test]

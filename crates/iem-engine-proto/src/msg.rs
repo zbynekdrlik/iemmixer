@@ -115,10 +115,15 @@ pub enum Cmd {
         ttl_s: f64,
         card_tx: Vec<u16>,
     },
+    /// HIL's forced reopen of the driver (S6 design note §7): the backend
+    /// stops, releases and opens the card again (its reset budget applies;
+    /// the outputs fade in again). Supervisor only, under the
+    /// fault-injection flag.
+    ForceReopen,
 }
 
 /// Every `op` tag, for telling an unknown command from a malformed one.
-pub const OPS: [&str; 22] = [
+pub const OPS: [&str; 23] = [
     "set_input",
     "set_mix",
     "set_level",
@@ -141,6 +146,7 @@ pub const OPS: [&str; 22] = [
     "ping",
     "arm",
     "hil_test_signal",
+    "force_reopen",
 ];
 
 impl Cmd {
@@ -151,7 +157,10 @@ impl Cmd {
 
     /// Commands only the supervisor may send (S6 design note §4).
     pub fn is_supervisor(&self) -> bool {
-        matches!(self, Self::Arm | Self::HilTestSignal { .. })
+        matches!(
+            self,
+            Self::Arm | Self::HilTestSignal { .. } | Self::ForceReopen
+        )
     }
 
     /// Commands a supervisor connection may send: reads, its own commands,
@@ -561,6 +570,7 @@ mod tests {
                 ttl_s: 10.0,
                 card_tx: vec![72],
             },
+            Cmd::ForceReopen,
         ]
     }
 
@@ -963,7 +973,10 @@ mod tests {
 
     #[test]
     fn the_supervisor_sends_its_own_commands_reads_stops_and_tests_but_no_mix_change() {
-        assert_eq!(ops_where(Cmd::is_supervisor), ["arm", "hil_test_signal"]);
+        assert_eq!(
+            ops_where(Cmd::is_supervisor),
+            ["arm", "hil_test_signal", "force_reopen"]
+        );
         assert_eq!(
             ops_where(Cmd::supervisor_may),
             [
@@ -976,7 +989,8 @@ mod tests {
                 "inject_fault",
                 "ping",
                 "arm",
-                "hil_test_signal"
+                "hil_test_signal",
+                "force_reopen"
             ]
         );
     }

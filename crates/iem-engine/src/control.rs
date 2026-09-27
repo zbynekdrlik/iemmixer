@@ -49,6 +49,11 @@ pub trait Driver: Send {
     fn lock_failed(&self) -> bool {
         false
     }
+    /// HIL's forced reopen (`Cmd::ForceReopen`): whether the backend took it
+    /// (the ASIO card reopens through its reset budget; NullRt has no card).
+    fn force_reopen(&self) -> bool {
+        false
+    }
 }
 
 /// Why a backend ends the run (S6 design note §3, §4).
@@ -474,6 +479,13 @@ impl Control {
             }
             Effect::Save => self.save(),
             Effect::Shutdown => self.shutdown = true,
+            Effect::Reopen => {
+                if self.driver.as_ref().is_some_and(|d| d.force_reopen()) {
+                    info!("a forced reopen of the card was asked for");
+                } else {
+                    warn!("a forced reopen was asked for, but the backend has no card");
+                }
+            }
             Effect::Imported { baseline } => {
                 let state = self.state_msg();
                 self.broadcast(&state);
@@ -903,8 +915,8 @@ mod tests {
         assert!(!s.parked && !s.held);
     }
 
-    /// A backend with scripted hooks: its ticks counted, an ending, a lock
-    /// failure.
+    /// A backend with scripted hooks: its ticks and forced reopens counted,
+    /// an ending, a lock failure.
     struct Scripted {
         ticks: Arc<AtomicU64>,
         ending: Option<Ending>,
@@ -932,7 +944,17 @@ mod tests {
         fn lock_failed(&self) -> bool {
             self.lock_failed
         }
+
+        /// Counted with the ticks, [`REOPEN`] apiece, so one counter shows
+        /// both.
+        fn force_reopen(&self) -> bool {
+            self.ticks.fetch_add(REOPEN, Ordering::Relaxed);
+            true
+        }
     }
+
+    /// What one forced reopen adds to a scripted backend's counter.
+    const REOPEN: u64 = 1 << 32;
 
     fn scripted(ending: Option<Ending>, lock_failed: bool) -> (Box<dyn Driver>, Arc<AtomicU64>) {
         let ticks = Arc::new(AtomicU64::new(0));
@@ -1242,6 +1264,44 @@ mod tests {
                 (obs[&40], obs[&41]),
                 (Some(ErrCode::NotController), Some(ErrCode::NotController))
             );
+        }
+
+        /// HIL's forced reopen (S6 design note §7): the supervisor's, under
+        /// the fault-injection flag, reaches the backend; the controller's is
+        /// refused, and so is one without the flag.
+        #[test]
+        fn a_forced_reopen_reaches_the_backend_from_the_supervisor_only() {
+            for (fault_injection, reopens, sup_code) in
+                [(true, REOPEN, None), (false, 0, Some(ErrCode::Forbidden))]
+            {
+                let mut r = rig_with(
+                    crate::core::Flags {
+                        test_signal: false,
+                        fault_injection,
+                    },
+                    false,
+                );
+                let (d, count) = scripted(None, false);
+                r.c.driver = Some(d);
+                let (ctl, ctl_client) = peer_named(r.dir.path(), "ctl");
+                let (sup, sup_client) = peer_named(r.dir.path(), "sup");
+                let (ctl_got, sup_got) = (reader(ctl_client), reader(sup_client));
+                r.c.handle(CtlMsg::Connected { id: 1, conn: ctl });
+                r.c.handle(CtlMsg::Connected { id: 2, conn: sup });
+                r.c.handle(hello_as(1, Role::Control));
+                r.c.handle(hello_as(2, Role::Supervisor));
+                r.c.handle(request_from(1, 7, Cmd::ForceReopen));
+                assert_eq!(count.load(Ordering::Relaxed), 0, "the controller's");
+                r.c.handle(request_from(2, 8, Cmd::ForceReopen));
+                assert_eq!(count.load(Ordering::Relaxed), reopens);
+                drop(r);
+                let ctl = codes(&ctl_got.join().unwrap());
+                assert_eq!(ctl[&7], Some(ErrCode::NotSupervisor));
+                let sup = codes(&sup_got.join().unwrap());
+                assert_eq!(sup[&8], sup_code, "fault injection {fault_injection}");
+            }
+            // NullRt has no card: the request is answered, nothing reopens.
+            assert!(!Idle.force_reopen());
         }
 
         #[test]

@@ -39,6 +39,8 @@ pub enum Effect {
     Imported {
         baseline: bool,
     },
+    /// HIL's forced reopen: the backend reopens the card.
+    Reopen,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -684,6 +686,15 @@ impl Core {
                     rt: vec![RtOp::Panic],
                     ..Partial::default()
                 })
+            }
+            Cmd::ForceReopen => {
+                if !self.flags.fault_injection {
+                    return Err(CmdError::new(
+                        ErrCode::Forbidden,
+                        "the engine runs without the fault-injection flag",
+                    ));
+                }
+                Ok(Partial::effect(Effect::Reopen))
             }
             Cmd::Batch { .. } => Err(CmdError::new(ErrCode::BadRequest, "nested batch")),
             Cmd::ImportState { state, baseline } => {
