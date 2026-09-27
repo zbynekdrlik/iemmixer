@@ -1,10 +1,16 @@
-import WebSocket from "ws";
+import NodeWebSocket from "ws";
 import type { Page } from "@playwright/test";
 
 // Sockets opened from the test runner (Node), not from a page: they see the
 // server's answer to an upgrade (a browser only sees "failed") and they
 // watch or set a mix without a page of their own. Nothing here writes to a
 // page's console.
+//
+// The Node socket is imported as `NodeWebSocket`, never as `WebSocket`: the
+// test transpiler rewrites every reference to an import, also inside a
+// function handed to `page.evaluate`, which then runs in the browser as
+// `new _ws.default(…)` ("_ws is not defined", run 36349014194). Code for the
+// page (`probeListen`) uses the browser's own `WebSocket`.
 
 /** The ws:// form of the run's base URL. */
 export function wsBase(baseURL: string | undefined): string {
@@ -23,7 +29,7 @@ function redact(url: string): string {
  */
 export function upgradeStatus(url: string): Promise<number> {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(url);
+    const ws = new NodeWebSocket(url);
     const timer = setTimeout(() => {
       ws.terminate();
       reject(new Error(`no answer to the upgrade of ${redact(url)}`));
@@ -53,7 +59,7 @@ export class PageSocket {
   /** Every JSON event received, in order, with its arrival time (ms). */
   readonly events: Received[] = [];
 
-  private constructor(private readonly ws: WebSocket) {
+  private constructor(private readonly ws: NodeWebSocket) {
     ws.on("message", (data, isBinary) => {
       if (isBinary) return;
       const msg = JSON.parse(data.toString());
@@ -64,7 +70,7 @@ export class PageSocket {
   /** Opens `/ws/<page>` with `token` and waits for the page's state. */
   static async open(baseURL: string | undefined, page: string, token: string): Promise<PageSocket> {
     const url = `${wsBase(baseURL)}/ws/${page}?token=${token}&proto=2`;
-    const socket = new WebSocket(url);
+    const socket = new NodeWebSocket(url);
     // Listening from the start: the hello and the state follow the upgrade at once.
     const s = new PageSocket(socket);
     await new Promise<void>((resolve, reject) => {

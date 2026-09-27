@@ -1,4 +1,5 @@
-import WebSocket from "ws";
+// Imported as NodeWebSocket, never WebSocket: see support/wire.ts.
+import NodeWebSocket from "ws";
 
 /**
  * A second device on a mixer page: the page's socket (`/ws/<page>`, UI
@@ -42,7 +43,7 @@ export class MixerSocket {
   private failure: string | null = null;
   private closed = false;
 
-  private constructor(private readonly ws: WebSocket) {
+  private constructor(private readonly ws: NodeWebSocket) {
     // Text frames arrive as a Buffer.
     ws.on("message", (data: { toString(): string }) => {
       this.events.push(JSON.parse(data.toString()) as ServerEvent);
@@ -63,7 +64,7 @@ export class MixerSocket {
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
     url.searchParams.set("token", token);
     url.searchParams.set("proto", "2");
-    const socket = new MixerSocket(new WebSocket(url.toString()));
+    const socket = new MixerSocket(new NodeWebSocket(url.toString()));
     await socket.after(0, (m) => m.event === "Hello", "Hello");
     return socket;
   }
