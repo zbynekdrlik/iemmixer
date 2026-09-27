@@ -764,6 +764,32 @@ mod tests {
         );
     }
 
+    /// The engine's pipe exists before its card opens: until the connection
+    /// holds the hello's build and a `Status`, the guard shows no engine
+    /// (`Reply.engine` absent), never an empty build with zero counters that
+    /// HIL v1 would read as a failed check (lane review).
+    #[test]
+    fn an_engine_is_seen_only_with_its_hello_and_a_status() {
+        let build = "2.0.0-dev.9+0123456789abcdef0123456789abcdef01234567";
+        let status = Status {
+            frames: 32,
+            callbacks: 9_000,
+            missed: 1,
+            resets: 2,
+            ..Status::default()
+        };
+        assert_eq!(seen_status(None, None), None, "a bare connection");
+        assert_eq!(seen_status(Some(build), None), None, "hello, no status yet");
+        assert_eq!(seen_status(None, Some(&status)), None, "no hello");
+        assert_eq!(
+            seen_status(Some(build), Some(&status)),
+            Some(Status {
+                build: build.to_owned(),
+                ..status
+            })
+        );
+    }
+
     #[test]
     fn the_build_must_name_the_bundle() {
         let sha = "0123456789abcdef0123456789abcdef01234567";
