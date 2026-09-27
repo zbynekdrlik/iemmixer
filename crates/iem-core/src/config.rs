@@ -53,6 +53,13 @@ pub struct Config {
     #[serde(default)]
     pub activity: ActivityConfig,
 
+    /// PIN changes in the web UI (P9, design note §5.4). Until the cutover
+    /// the predecessor is the only place a PIN changes and every entry into
+    /// `dev` brings its PINs over, so the guard writes `false` into every
+    /// `dev` and trial site: the change and reset route then answers 409.
+    #[serde(default = "default_pin_changes")]
+    pub pin_changes: bool,
+
     /// JWT signing key. Never read from the site file: the server loads it
     /// from `<config dir>/secrets/jwt_secret` (`iem_server::secrets`).
     #[serde(skip)]
@@ -175,6 +182,10 @@ fn default_port() -> u16 {
     80
 }
 
+fn default_pin_changes() -> bool {
+    true
+}
+
 fn default_engine_pipe() -> String {
     "iemmixer-engine".to_string()
 }
@@ -216,6 +227,7 @@ impl Default for Config {
             inputs: Vec::new(),
             back_to_reaper: Vec::new(),
             activity: ActivityConfig::default(),
+            pin_changes: default_pin_changes(),
             jwt_secret: String::new(),
             vapid_private_key: String::new(),
             tls: false,
@@ -444,6 +456,17 @@ mod tests {
         let stage: Config = toml::from_str("[activity]\ninputs = [\"mic1\", \"keys\"]\n").unwrap();
         assert_eq!(stage.activity.inputs, ["mic1", "keys"]);
         assert_eq!(stage.activity.sustain_s, 120);
+    }
+
+    #[test]
+    fn pin_changes_are_on_unless_the_site_freezes_them() {
+        assert!(Config::default().pin_changes);
+        assert!(toml::from_str::<Config>("port = 80\n").unwrap().pin_changes);
+        assert!(
+            !toml::from_str::<Config>("pin_changes = false\n")
+                .unwrap()
+                .pin_changes
+        );
     }
 
     #[test]
