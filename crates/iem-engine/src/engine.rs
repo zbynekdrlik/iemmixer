@@ -29,7 +29,7 @@ use crate::media::{Frame, TalkbackFeed, TapFramer};
 use crate::persist::{Source, Store, decode};
 use crate::pipe::{Conn, Framer, control_name, listen, media_name, read_loop};
 use crate::rt::{FADE_IN_MS, Options, Processor, RtHandles};
-use crate::site::{self, Card, SiteError, load, parse, parse_card, parse_stage};
+use crate::site::{self, Card, SiteError, load, parse, parse_card, parse_hil_tx, parse_stage};
 use crate::topology::compile;
 
 /// Largest block the engine accepts.
@@ -139,7 +139,8 @@ interlock (Windows): opens the card, listens to the stage inputs ([activity]
 inputs, or every mics input) for --seconds (60) and writes nothing; prints
 {\"quiet\", \"stopped\", \"loudest\": [[channel, dBFS], ...]}; a --stop-file that
 appears ends it within 0.1 s.
-check-site: validates the site (I4) and prints its topology hash and counts.
+check-site: validates the site (I4; [card], the interlock's stage and
+[guard] hil_tx too) and prints its topology hash and counts.
 exit codes: 0 shut down (interlock: quiet), 1 i/o error, 2 usage or site
 error, 3 card refused, 5 stage activity, 6 interlock stopped, 70 RT fault";
 
@@ -596,13 +597,20 @@ pub struct SiteSummary {
     pub card: bool,
 }
 
-/// Loads and compiles a site, checks its `[card]` table and the stage the
-/// interlock listens to (every `[activity] inputs` id is an input).
+/// Loads and compiles a site, checks its `[card]` table, the stage the
+/// interlock listens to (every `[activity] inputs` id is an input) and
+/// HIL's card outputs (every `[guard] hil_tx` channel is a TX channel of the
+/// topology within the first `MAX_TX`, as `HilTestSignal` masks them).
 pub fn check_site(path: &Path) -> Result<SiteSummary, EngineError> {
     let text = site::read(path)?;
     let topo = compile(&parse(&text)?)?;
     let card = parse_card(&text)?;
     interlock::stage_channels(&topo, &parse_stage(&text)?)?;
+    // HIL's card outputs must be TX channels the engine can mask (S6).
+    let hil_tx = parse_hil_tx(&text)?;
+    if !hil_tx.is_empty() {
+        crate::core::hil_tx_mask(&topo.tx, &hil_tx).map_err(|e| SiteError::HilTx(e.msg))?;
+    }
     Ok(SiteSummary {
         topology: topo.hash,
         inputs: topo.inputs.len(),

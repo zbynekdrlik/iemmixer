@@ -191,6 +191,8 @@ pub enum SiteError {
     StageInput(String),
     #[error("no stage input to listen to ([activity] inputs, or inputs of category mics)")]
     NoStage,
+    #[error("[guard] hil_tx: {0}")]
+    HilTx(String),
 }
 
 #[derive(Deserialize)]
@@ -224,6 +226,21 @@ struct StageFile {
     inputs: Vec<InputMeta>,
 }
 
+/// The guard's `[guard]` table as the engine reads it: only `hil_tx`, the
+/// card outputs HIL's test signal may reach (S6 design note §4, §7); the
+/// guard's other keys are its own.
+#[derive(Default, Deserialize)]
+struct GuardTable {
+    #[serde(default)]
+    hil_tx: Vec<u16>,
+}
+
+#[derive(Deserialize)]
+struct GuardFile {
+    #[serde(default)]
+    guard: GuardTable,
+}
+
 fn toml_error(e: &toml::de::Error) -> SiteError {
     SiteError::Toml(e.to_string())
 }
@@ -255,6 +272,12 @@ pub fn parse_stage(text: &str) -> Result<Stage, SiteError> {
             .map(|i| (i.id, i.category))
             .collect(),
     })
+}
+
+/// `[guard] hil_tx` of a site file: HIL's card outputs (empty without it).
+pub fn parse_hil_tx(text: &str) -> Result<Vec<u16>, SiteError> {
+    let file: GuardFile = toml::from_str(text).map_err(|e| toml_error(&e))?;
+    Ok(file.guard.hil_tx)
 }
 
 /// The text of a site file.

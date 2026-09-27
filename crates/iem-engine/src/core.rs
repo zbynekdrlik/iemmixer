@@ -20,6 +20,37 @@ use crate::params::{
 use crate::topology::Topology;
 use crate::{MAX_BATCH, MAX_CMDS_PER_BLOCK, MAX_SOLO, SAMPLE_RATE};
 
+/// The HIL signal's outputs (`HilTestSignal.card_tx`, S6 design note §4):
+/// the slots of the listed card channels among the topology's TX channels
+/// `tx`, each within the first [`MAX_TX`]. `check-site` runs it on the
+/// site's `[guard] hil_tx`, so a site whose HIL outputs the topology cannot
+/// reach is refused before any HIL.
+pub fn hil_tx_mask(tx: &[u16], card_tx: &[u16]) -> Result<TxMask, CmdError> {
+    if card_tx.is_empty() {
+        return Err(CmdError::new(
+            ErrCode::BadValue,
+            "the HIL test signal names no card output",
+        ));
+    }
+    let mut mask = [false; MAX_TX];
+    for ch in card_tx {
+        let slot = tx.iter().position(|c| c == ch).ok_or_else(|| {
+            CmdError::new(
+                ErrCode::UnknownId,
+                format!("card output {ch} is not a TX channel of the site"),
+            )
+        })?;
+        let bit = mask.get_mut(slot).ok_or_else(|| {
+            CmdError::new(
+                ErrCode::BadValue,
+                format!("card output {ch} is beyond the first {MAX_TX} engine outputs"),
+            )
+        })?;
+        *bit = true;
+    }
+    Ok(mask)
+}
+
 /// Per-run launch flags (§2.3: test signal and fault injection are `dev`-only).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Flags {
@@ -786,29 +817,7 @@ impl Core {
 
     /// The HIL signal's outputs: the TX slots of the listed card channels.
     fn tx_mask(&self, card_tx: &[u16]) -> Result<TxMask, CmdError> {
-        if card_tx.is_empty() {
-            return Err(CmdError::new(
-                ErrCode::BadValue,
-                "the HIL test signal names no card output",
-            ));
-        }
-        let mut mask = [false; MAX_TX];
-        for ch in card_tx {
-            let slot = self.topo.tx.iter().position(|c| c == ch).ok_or_else(|| {
-                CmdError::new(
-                    ErrCode::UnknownId,
-                    format!("card output {ch} is not a TX channel of the site"),
-                )
-            })?;
-            let bit = mask.get_mut(slot).ok_or_else(|| {
-                CmdError::new(
-                    ErrCode::BadValue,
-                    format!("card output {ch} is beyond the first {MAX_TX} engine outputs"),
-                )
-            })?;
-            *bit = true;
-        }
-        Ok(mask)
+        hil_tx_mask(&self.topo.tx, card_tx)
     }
 
     fn set_input(&mut self, i: usize, new: InputState) -> Partial {
