@@ -34,6 +34,7 @@ use core::ops::Range;
     reason = "ASIO FFI: azo buffers and callbacks (S1a design note §3)"
 )]
 pub mod asio;
+pub mod channels;
 pub mod format;
 pub mod nullrt;
 pub mod offline;
