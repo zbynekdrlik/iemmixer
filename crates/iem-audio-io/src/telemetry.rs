@@ -3,7 +3,10 @@
 //! allocation; any other thread reads snapshots. Portable: the ASIO host
 //! (Windows) feeds it, the tests run everywhere.
 
-use core::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering::Relaxed};
+use core::sync::atomic::{
+    AtomicBool, AtomicI64, AtomicU64,
+    Ordering::{Acquire, Relaxed, Release},
+};
 
 /// Histogram resolution: 1 µs buckets up to 5 ms, then one overflow bucket.
 pub const BUCKETS: usize = 5_001;
@@ -55,6 +58,8 @@ pub fn period_ns(frames: u32, rate: f64) -> u64 {
 
 /// The card clock against the host clock over (host ns, sample position)
 /// pairs, in ppm: positive when the card runs fast. `None` below 1 s of data.
+/// The host time is the callback's entry, not the driver's
+/// `TimeInfo.system_time`: a few ppm of entry jitter over a 10 min run.
 pub fn drift_ppm(first: (u64, i64), last: (u64, i64), rate: f64) -> Option<f64> {
     let elapsed = last.0.checked_sub(first.0)? as f64 / 1e9;
     if elapsed < 1.0 {
@@ -206,6 +211,10 @@ pub struct Telemetry {
     position_gaps: AtomicU64,
     first_ns: AtomicU64,
     last_ns: AtomicU64,
+    /// The previous callback's position, for the gap check (none after a
+    /// callback without one).
+    prev_pos: AtomicI64,
+    /// The drift's anchor and end: positions after the warm-up only.
     first_pos: AtomicI64,
     first_pos_ns: AtomicU64,
     last_pos: AtomicI64,
@@ -235,6 +244,7 @@ impl Telemetry {
             position_gaps: AtomicU64::new(0),
             first_ns: AtomicU64::new(0),
             last_ns: AtomicU64::new(0),
+            prev_pos: AtomicI64::new(NO_POSITION),
             first_pos: AtomicI64::new(NO_POSITION),
             first_pos_ns: AtomicU64::new(0),
             last_pos: AtomicI64::new(NO_POSITION),
@@ -259,7 +269,10 @@ impl Telemetry {
     }
 
     /// At the entry of callback: `entry_ns` on the host clock (> 0), the
-    /// driver's sample position when it reported one.
+    /// driver's sample position when it reported one. Positions count only
+    /// after the warm-up (the drift is anchored there, not on the priming
+    /// burst); a callback without one leaves nothing to compare the next
+    /// position with, so no gap is judged across it.
     pub fn on_callback(&self, entry_ns: u64, position: Option<i64>) {
         let n = self.callbacks.fetch_add(1, Relaxed);
         let prev = self.last_ns.swap(entry_ns, Relaxed);
@@ -274,14 +287,19 @@ impl Telemetry {
                 Gap::OnTime => 0,
             };
         }
-        if let Some(pos) = position {
-            let before = self.last_pos.swap(pos, Relaxed);
-            self.last_pos_ns.store(entry_ns, Relaxed);
-            if before == NO_POSITION {
-                self.first_pos.store(pos, Relaxed);
-                self.first_pos_ns.store(entry_ns, Relaxed);
-            } else if n >= WARMUP && pos.wrapping_sub(before) != self.frames {
+        let before = self.prev_pos.swap(position.unwrap_or(NO_POSITION), Relaxed);
+        if n >= WARMUP
+            && let Some(pos) = position
+        {
+            if before != NO_POSITION && pos.wrapping_sub(before) != self.frames {
                 self.position_gaps.fetch_add(1, Relaxed);
+            }
+            // The end first: a reader that sees the anchor also sees an end.
+            self.last_pos_ns.store(entry_ns, Relaxed);
+            self.last_pos.store(pos, Relaxed);
+            if self.first_pos.load(Relaxed) == NO_POSITION {
+                self.first_pos_ns.store(entry_ns, Relaxed);
+                self.first_pos.store(pos, Release);
             }
         }
     }
@@ -341,7 +359,7 @@ impl Telemetry {
     }
 
     pub fn snapshot(&self) -> Snapshot {
-        let first_pos = self.first_pos.load(Relaxed);
+        let first_pos = self.first_pos.load(Acquire);
         let drift = if first_pos == NO_POSITION {
             None
         } else {

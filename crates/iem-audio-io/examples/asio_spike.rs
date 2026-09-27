@@ -6,10 +6,22 @@
 //!
 //! Exit codes: 0 done or stopped, 1 other error, 2 usage, 3 driver missing,
 //! 4 refused (rate, buffer, format), 5 band activity, 6 fault caught
-//! (`--panic-at`), 7 the driver changed the sample rate.
+//! (`--panic-at`), 7 the driver changed the sample rate, 8 a callback did not
+//! leave the stream within the stop wait (R6: reported, the driver is left
+//! alone, nothing is killed).
+//!
+//! The report keeps every segment, reset and reopen cycle as it completes,
+//! so a run that fails half-way still reports what it measured.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+
+use iem_audio_io::telemetry::ActivityGuard;
+use serde_json::Value;
 
 const USAGE: &str = "usage: asio_spike probe|duplex|reopen --driver <name> --report <file> --stop-file <file> \
 [--progress <file>] [--frames 32|48|64] [--seconds S] [--burn-us U] [--stress T] [--panic-at K] [--cycles C]";
@@ -97,6 +109,142 @@ fn parse(argv: &[String]) -> Result<Args, String> {
     Ok(a)
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
+const ACTIVITY_SECONDS: u32 = 3;
+#[cfg_attr(not(windows), allow(dead_code))]
+const ONE_SECOND: Duration = Duration::from_secs(1);
+
+/// Why a run ends before its time (checked on every poll of duplex and reopen).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(windows), allow(dead_code))]
+enum End {
+    Stopped,
+    RateChanged,
+    BandActivity,
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+impl End {
+    fn outcome(self) -> &'static str {
+        match self {
+            Self::Stopped => "stopped",
+            Self::RateChanged => "rate-changed",
+            Self::BandActivity => "band-activity",
+        }
+    }
+}
+
+/// The exit code of a run's outcome (module header).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn code_of(outcome: &str) -> u8 {
+    match outcome {
+        "band-activity" => 5,
+        "fault-caught" => 6,
+        "rate-changed" => 7,
+        "stop-hung" => 8,
+        _ => 0,
+    }
+}
+
+/// The run guards duplex and reopen share (design note §3): the stop file,
+/// a rate change, and once a second the input peak for band activity.
+#[cfg_attr(not(windows), allow(dead_code))]
+struct Watch {
+    guard: ActivityGuard,
+    next_second: Instant,
+    loudest: f64,
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+impl Watch {
+    fn new(now: Instant) -> Self {
+        Self {
+            guard: ActivityGuard::new(ACTIVITY_SECONDS),
+            next_second: now + ONE_SECOND,
+            loudest: 0.0,
+        }
+    }
+
+    /// The loudest one-second input peak seen (linear).
+    fn loudest(&self) -> f64 {
+        self.loudest
+    }
+
+    /// One poll. `peak` empties the stream's peak, so it is read at most
+    /// once a second; after a pause (a reopen) the next read is a second
+    /// later, never a burst of catch-up reads.
+    fn poll(
+        &mut self,
+        now: Instant,
+        stop_file: bool,
+        rate_changed: bool,
+        peak: impl FnOnce() -> f64,
+    ) -> Option<End> {
+        if stop_file {
+            return Some(End::Stopped);
+        }
+        if rate_changed {
+            return Some(End::RateChanged);
+        }
+        if now < self.next_second {
+            return None;
+        }
+        self.next_second = now + ONE_SECOND;
+        let p = peak();
+        self.loudest = self.loudest.max(p);
+        self.guard.observe(p).then_some(End::BandActivity)
+    }
+}
+
+/// Appends `item` to the report's list `key`: measurements are kept as they
+/// complete.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn push(report: &mut Value, key: &str, item: Value) {
+    if let Some(obj) = report.as_object_mut()
+        && let Some(list) = obj
+            .entry(key)
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+    {
+        list.push(item);
+    }
+}
+
+/// Busy threads at normal priority standing in for the server and the
+/// stream. They stop and are joined on drop, so every path ends them.
+#[cfg_attr(not(windows), allow(dead_code))]
+struct Stress {
+    stop: Arc<AtomicBool>,
+    threads: Vec<JoinHandle<()>>,
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+impl Stress {
+    fn start(n: u32) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let threads = (0..n)
+            .map(|_| {
+                let stop = Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        std::hint::spin_loop();
+                    }
+                })
+            })
+            .collect();
+        Self { stop, threads }
+    }
+}
+
+impl Drop for Stress {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        for t in self.threads.drain(..) {
+            let _ = t.join();
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     match parse(&argv) {
@@ -123,24 +271,20 @@ fn platform(args: &Args) -> ExitCode {
 mod spike {
     use std::collections::BTreeMap;
     use std::path::Path;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::thread::JoinHandle;
     use std::time::{Duration, Instant};
 
     use iem_audio_io::asio::{
         self, AsioError, DriverInfo, Host, Running, StopTimings, StreamConfig,
     };
     use iem_audio_io::format::SampleFormat;
-    use iem_audio_io::telemetry::{ActivityGuard, Snapshot, dbfs};
+    use iem_audio_io::telemetry::{Snapshot, dbfs};
     use serde_json::{Value, json};
 
-    use super::{Args, ExitCode, Mode};
+    use super::{Args, ExitCode, Mode, Stress, Watch, code_of, push};
 
     const FIRST_CALLBACK_WAIT: Duration = Duration::from_secs(2);
     const AFTER_FAULT: Duration = Duration::from_secs(2);
     const REOPEN_RUN: Duration = Duration::from_secs(5);
-    const ACTIVITY_SECONDS: u32 = 3;
 
     pub fn main(a: &Args) -> ExitCode {
         let mut report = json!({
@@ -174,6 +318,11 @@ mod spike {
     }
 
     fn run(a: &Args, report: &mut Value) -> Result<u8, AsioError> {
+        // Pre-empted before the start: the card is never opened.
+        if a.stop_file.exists() {
+            report["outcome"] = json!("stopped");
+            return Ok(0);
+        }
         let host = Host::open(&a.driver)?;
         let info = host.info()?;
         report["driver"] = info_json(&info);
@@ -187,6 +336,21 @@ mod spike {
         }
     }
 
+    /// Releases the driver and creates it again on this thread, recording
+    /// both times (or the failed open) under `entry`.
+    fn recreate(a: &Args, host: Host, entry: &mut Value) -> Result<(Host, DriverInfo), AsioError> {
+        let t = Instant::now();
+        drop(host);
+        entry["release_us"] = json!(us(t.elapsed()));
+        let t = Instant::now();
+        let opened = Host::open(&a.driver).and_then(|h| h.info().map(|i| (h, i)));
+        match &opened {
+            Ok(_) => entry["open_us"] = json!(us(t.elapsed())),
+            Err(e) => entry["open_error"] = json!(e.to_string()),
+        }
+        opened
+    }
+
     fn duplex(
         a: &Args,
         mut host: Host,
@@ -198,27 +362,29 @@ mod spike {
             burn_us: a.burn_us,
             panic_at: a.panic_at,
         };
-        let stress = Stress::start(a.stress);
+        let _stress = Stress::start(a.stress);
         let deadline = Instant::now() + Duration::from_secs(a.seconds);
-        let mut guard = ActivityGuard::new(ACTIVITY_SECONDS);
-        let mut segments = Vec::new();
-        let mut resets = Vec::new();
-        let mut loudest = 0.0_f64;
+        let mut watch = Watch::new(Instant::now());
         let mut fault: Option<(Instant, u64)> = None;
         let mut outcome = "done";
+        report["segments"] = json!([]);
+        report["resets_handled"] = json!([]);
         loop {
             let running = host.start(&info, cfg)?;
             let first = wait_first_callback(&running)?;
             let latency = host.latencies()?;
             let t0 = Instant::now();
-            let mut next_second = t0 + Duration::from_secs(1);
             let mut next_progress = t0 + Duration::from_secs(5);
             let reopen = loop {
                 asio::pump_messages();
                 std::thread::sleep(Duration::from_millis(10));
                 let now = Instant::now();
-                if a.stop_file.exists() {
-                    outcome = "stopped";
+                if let Some(end) =
+                    watch.poll(now, a.stop_file.exists(), running.rate_changed(), || {
+                        running.take_input_peak()
+                    })
+                {
+                    outcome = end.outcome();
                     break false;
                 }
                 if now >= deadline {
@@ -226,10 +392,6 @@ mod spike {
                 }
                 if running.take_reopen() {
                     break true;
-                }
-                if running.rate_changed() {
-                    outcome = "rate-changed";
-                    break false;
                 }
                 if running.faulted() {
                     match fault {
@@ -241,19 +403,10 @@ mod spike {
                         Some(_) => {}
                     }
                 }
-                if now >= next_second {
-                    next_second += Duration::from_secs(1);
-                    let peak = running.take_input_peak();
-                    loudest = loudest.max(peak);
-                    if guard.observe(peak) {
-                        outcome = "band-activity";
-                        break false;
-                    }
-                }
                 if now >= next_progress {
                     next_progress += Duration::from_secs(5);
                     if let (Some(path), Some(s)) = (&a.progress, running.snapshot()) {
-                        let _ = write_json(path, &progress_json(t0.elapsed(), &s, loudest));
+                        let _ = write_json(path, &progress_json(t0.elapsed(), &s, watch.loudest()));
                     }
                 }
             };
@@ -262,35 +415,34 @@ mod spike {
             if let (Some((_, at)), Some(s)) = (fault, &snap) {
                 report["callbacks_after_fault"] = json!(s.callbacks.saturating_sub(at));
             }
-            segments.push(json!({
-                "latency_in": latency.0, "latency_out": latency.1,
-                "create_buffers_us": us(first.0.create_buffers), "start_us": us(first.0.start),
-                "first_callback_us": us(first.1), "seconds": seconds,
-                "telemetry": snap.as_ref().map(telemetry_json), "stop": stop_json(stop),
-            }));
+            push(
+                report,
+                "segments",
+                json!({
+                    "latency_in": latency.0, "latency_out": latency.1,
+                    "create_buffers_us": us(first.0.create_buffers), "start_us": us(first.0.start),
+                    "first_callback_us": us(first.1), "seconds": seconds,
+                    "telemetry": snap.as_ref().map(telemetry_json), "stop": stop_json(stop),
+                }),
+            );
+            report["loudest_input_dbfs"] = json!(dbfs(watch.loudest()));
+            if stop.hung {
+                // R6: a callback is still inside the driver; never call it again.
+                outcome = "stop-hung";
+                std::mem::forget(host);
+                break;
+            }
             if !reopen {
                 break;
             }
             // The driver asked for a reset: release it and create it again on this thread.
-            let t = Instant::now();
-            drop(host);
-            let release = t.elapsed();
-            let t = Instant::now();
-            host = Host::open(&a.driver)?;
-            info = host.info()?;
-            resets.push(json!({ "release_us": us(release), "open_us": us(t.elapsed()) }));
+            let mut entry = json!({});
+            let recreated = recreate(a, host, &mut entry);
+            push(report, "resets_handled", entry);
+            (host, info) = recreated?;
         }
-        stress.stop();
-        report["segments"] = json!(segments);
-        report["resets_handled"] = json!(resets);
-        report["loudest_input_dbfs"] = json!(dbfs(loudest));
         report["outcome"] = json!(outcome);
-        Ok(match outcome {
-            "band-activity" => 5,
-            "fault-caught" => 6,
-            "rate-changed" => 7,
-            _ => 0,
-        })
+        Ok(code_of(outcome))
     }
 
     fn reopen(
@@ -304,40 +456,57 @@ mod spike {
             burn_us: 0,
             panic_at: 0,
         };
-        let mut cycles = Vec::new();
+        let mut watch = Watch::new(Instant::now());
         let mut outcome = "done";
+        report["cycles"] = json!([]);
         for cycle in 0..a.cycles {
-            if a.stop_file.exists() {
-                outcome = "stopped";
-                break;
-            }
             let running = host.start(&info, cfg)?;
             let (timings, first) = wait_first_callback(&running)?;
             let t = Instant::now();
-            while t.elapsed() < REOPEN_RUN && !a.stop_file.exists() {
+            let mut reset_requested = false;
+            let mut end = None;
+            while t.elapsed() < REOPEN_RUN {
                 asio::pump_messages();
                 std::thread::sleep(Duration::from_millis(10));
+                // A reset request needs no action here: every cycle recreates the driver.
+                reset_requested |= running.take_reopen();
+                end = watch.poll(
+                    Instant::now(),
+                    a.stop_file.exists(),
+                    running.rate_changed(),
+                    || running.take_input_peak(),
+                );
+                if end.is_some() {
+                    break;
+                }
             }
             let (snap, stop) = running.finish();
-            let t = Instant::now();
-            drop(host);
-            let release = t.elapsed();
-            let t = Instant::now();
-            host = Host::open(&a.driver)?;
-            let open = t.elapsed();
-            info = host.info()?;
-            cycles.push(json!({
+            let mut entry = json!({
                 "cycle": cycle,
                 "create_buffers_us": us(timings.create_buffers), "start_us": us(timings.start),
                 "first_callback_us": us(first), "stop": stop_json(stop),
-                "release_us": us(release), "open_us": us(open),
+                "reset_requested": reset_requested,
                 "callbacks": snap.as_ref().map_or(0, |s| s.callbacks),
                 "missed": snap.as_ref().map_or(0, |s| s.missed),
-            }));
+            });
+            report["loudest_input_dbfs"] = json!(dbfs(watch.loudest()));
+            if stop.hung {
+                push(report, "cycles", entry);
+                outcome = "stop-hung";
+                std::mem::forget(host);
+                break;
+            }
+            if let Some(end) = end {
+                push(report, "cycles", entry);
+                outcome = end.outcome();
+                break;
+            }
+            let recreated = recreate(a, host, &mut entry);
+            push(report, "cycles", entry);
+            (host, info) = recreated?;
         }
-        report["cycles"] = json!(cycles);
         report["outcome"] = json!(outcome);
-        Ok(0)
+        Ok(code_of(outcome))
     }
 
     /// Pumps messages until the first callback; the start timings and the wait.
@@ -356,36 +525,6 @@ mod spike {
             "start",
             format!("no callback within {FIRST_CALLBACK_WAIT:?}"),
         ))
-    }
-
-    /// Busy threads at normal priority standing in for the server and the stream.
-    struct Stress {
-        stop: Arc<AtomicBool>,
-        threads: Vec<JoinHandle<()>>,
-    }
-
-    impl Stress {
-        fn start(n: u32) -> Self {
-            let stop = Arc::new(AtomicBool::new(false));
-            let threads = (0..n)
-                .map(|_| {
-                    let stop = Arc::clone(&stop);
-                    std::thread::spawn(move || {
-                        while !stop.load(Ordering::Relaxed) {
-                            std::hint::spin_loop();
-                        }
-                    })
-                })
-                .collect();
-            Self { stop, threads }
-        }
-
-        fn stop(self) {
-            self.stop.store(true, Ordering::Relaxed);
-            for t in self.threads {
-                let _ = t.join();
-            }
-        }
     }
 
     fn us(d: Duration) -> f64 {
@@ -435,7 +574,7 @@ mod spike {
     }
 
     fn stop_json(t: StopTimings) -> Value {
-        json!({ "stop_us": us(t.stop), "dispose_us": us(t.dispose), "stop_ok": t.stop_ok, "dispose_ok": t.dispose_ok })
+        json!({ "stop_us": us(t.stop), "dispose_us": us(t.dispose), "stop_ok": t.stop_ok, "dispose_ok": t.dispose_ok, "hung": t.hung })
     }
 
     /// Writes `value` next to `path` and renames it into place.
@@ -450,7 +589,6 @@ mod spike {
 mod tests {
     use super::*;
     use std::cell::Cell;
-    use std::sync::atomic::Ordering;
 
     #[test]
     fn outcomes_have_their_exit_codes() {
@@ -536,7 +674,7 @@ mod tests {
     #[test]
     fn stress_threads_stop_when_dropped() {
         let s = Stress::start(2);
-        let flag = std::sync::Arc::clone(&s.stop);
+        let flag = Arc::clone(&s.stop);
         assert_eq!(s.threads.len(), 2);
         drop(s);
         assert!(flag.load(Ordering::Relaxed));

@@ -119,7 +119,14 @@ pub struct StopTimings {
     pub dispose: Duration,
     pub stop_ok: bool,
     pub dispose_ok: bool,
+    /// A callback did not leave the stream within [`STOP_WAIT`] (R6): the
+    /// stream and the buffers are left alone (leaked, never freed under the
+    /// callback) and no further stream starts in this process.
+    pub hung: bool,
 }
+
+/// How long `finish` waits for the last callback to leave the stream.
+pub const STOP_WAIT: Duration = Duration::from_secs(2);
 
 /// A driver instance, created, used and released on this thread.
 pub struct Host {
@@ -219,7 +226,12 @@ impl Host {
                 expected: cfg.frames,
             })
         })?;
-        if !STREAM.load(Ordering::SeqCst).is_null() {
+        // One stream per process, claimed atomically; released by `finish`
+        // (never after a hung stop) or below when createBuffers fails.
+        if BUSY
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
             return Err(AsioError::Busy);
         }
         let channels: Vec<ChannelId> = (0..info.inputs)
@@ -233,10 +245,16 @@ impl Host {
         // SAFETY: CALLBACKS is a static, so it outlives the buffers. The
         // pointers are dereferenced only by callbacks of this stream, which
         // end before `Running::finish` disposes the buffers.
-        let buffers: Vec<[*mut c_void; 2]> =
+        let created =
             unsafe { d.create_buffers(channels.iter().copied(), cfg.frames, &raw const CALLBACKS) }
-                .map_err(self.call("createBuffers"))?
-                .collect();
+                .map_err(self.call("createBuffers"));
+        let buffers: Vec<[*mut c_void; 2]> = match created {
+            Ok(b) => b.collect(),
+            Err(e) => {
+                BUSY.store(false, Ordering::SeqCst);
+                return Err(e);
+            }
+        };
         let create_buffers = t.elapsed();
         let split = usize::try_from(info.inputs).unwrap_or(0).min(buffers.len());
         let (inputs, outputs) = buffers.split_at(split);
@@ -343,7 +361,25 @@ impl Running<'_> {
         let stopped = d.stop();
         let stop = t.elapsed();
         STREAM.store(ptr::null_mut(), Ordering::SeqCst);
+        // Bounded, and pumping: a driver may need this thread's messages to
+        // finish a callback (R6: a hang is reported, never killed).
+        let wait = Instant::now();
         while IN_FLIGHT.load(Ordering::SeqCst) != 0 {
+            if wait.elapsed() >= STOP_WAIT {
+                // SAFETY: the stream is never freed from here on (leaked), so
+                // the callback still inside it keeps a valid reference.
+                let snapshot = unsafe { &*raw }.telemetry.snapshot();
+                return (
+                    Some(snapshot),
+                    StopTimings {
+                        stop,
+                        stop_ok: stopped.is_ok(),
+                        hung: true,
+                        ..StopTimings::default()
+                    },
+                );
+            }
+            pump_messages();
             std::thread::yield_now();
         }
         // SAFETY: the slot no longer points to the stream and no callback is
@@ -354,6 +390,7 @@ impl Running<'_> {
         let disposed = d.dispose_all_buffers();
         let dispose = t.elapsed();
         drop(stream);
+        BUSY.store(false, Ordering::SeqCst);
         (
             Some(snapshot),
             StopTimings {
@@ -361,6 +398,7 @@ impl Running<'_> {
                 dispose,
                 stop_ok: stopped.is_ok(),
                 dispose_ok: disposed.is_ok(),
+                hung: false,
             },
         )
     }
@@ -405,6 +443,8 @@ struct Stream {
 }
 
 static STREAM: AtomicPtr<Stream> = AtomicPtr::new(ptr::null_mut());
+/// A stream is claimed (from `start` until `finish` freed it).
+static BUSY: AtomicBool = AtomicBool::new(false);
 static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 static CALLBACKS: Callbacks = Callbacks {
     buffer_switch: on_buffer_switch,
@@ -435,6 +475,10 @@ unsafe extern "system" fn on_buffer_switch_time_info(
     _direct: Bool,
 ) -> *mut Time {
     // SAFETY: the driver passes a valid Time for this call, or null.
+    // Note for the fork / S6: azo-sys 0.2.1 `I64Split` (inside `#[repr(C)]
+    // TimeInfo`, and the out-parameter of getSamplePosition) has no
+    // `#[repr(C)]` of its own; it works because rustc keeps two `u32` fields
+    // in order. The PC window's position-gap counts would show a break.
     let position = unsafe { params.as_ref() }
         .filter(|t| {
             t.time_info
@@ -515,6 +559,9 @@ impl Stream {
     }
 }
 
+/// The default panic hook formats the message and locks stderr inside the
+/// callback: acceptable for the spike's `--panic-at`, but S6 installs a
+/// hook that neither allocates nor locks on the callback thread.
 #[allow(
     clippy::panic,
     reason = "fault injection (program spec §2.4), a dev-only flag"
