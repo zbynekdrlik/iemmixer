@@ -1642,10 +1642,18 @@ fn alarm_test(pc: &mut dyn Pc, g: &mut Guard) -> (bool, String) {
 /// §11): engine, server and tray stop, tuning `exit`, the preference check,
 /// each with the event error policy; then the module must be unheld and the
 /// preference original, and dev is entered again. Not a switch. Ports
-/// 80/443 are checked by `ServerStop` itself when a server ran.
+/// 80/443 are checked by `ServerStop` itself when a server ran. Refused
+/// inside a HIL job: the dev re-entry cancels the jobs and stops the runner
+/// that runs the job (as `runner-stop` is refused).
 fn rehearse(pc: &mut dyn Pc, g: &mut Guard) -> (bool, String) {
     if let Err(why) = g.need_dev("rehearse-teardown") {
         return (false, why);
+    }
+    if let Some(run) = g.state.job {
+        return (
+            false,
+            format!("HIL job {run} runs: the rehearsal's dev entry would stop its runner"),
+        );
     }
     let f = pc.facts();
     let mut steps = Vec::new();
