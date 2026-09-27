@@ -548,9 +548,11 @@ mod tests {
         );
         assert!(site.member("translator").is_none());
         assert!(!site.back_to_reaper.is_empty());
+        assert!(!site.pin_changes, "the test site is a dev site: frozen");
         let example: Config = toml::from_str(include_str!("../../../config/iemmixer.example.toml"))
             .expect("config/iemmixer.example.toml");
         assert_eq!(example.members.len(), 2);
+        assert!(example.pin_changes);
         assert_eq!(example.problems(), Vec::<String>::new());
     }
 

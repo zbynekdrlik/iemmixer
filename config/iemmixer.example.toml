@@ -31,6 +31,10 @@ backup_retention_days = 60
 # server starts (no shell) after the engineer PIN and a confirmation. Empty or
 # absent: no button.
 back_to_reaper = ["iemmode", "event"]
+# PIN changes in the web UI (P9). Until the cutover PINs change only in the
+# predecessor app: the guard writes `false` into every dev and trial site
+# and the PIN dialog then shows why. Absent: true.
+pin_changes = true
 
 # Band-activity alarm while developing (§4.2): peaks of the stage inputs above
 # the threshold for sustain_s seconds within window_s seconds. `inputs` names
