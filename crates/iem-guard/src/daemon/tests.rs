@@ -1439,6 +1439,31 @@ fn install_site_checks_the_site_and_enters_dev_again() {
 }
 
 #[test]
+fn an_install_site_whose_dev_entry_unwinds_is_no_success() {
+    let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
+    g.state.pins.current = Some(SHA.into());
+    pc.fail(Call::ServerStart, "ports 80/443 are still held");
+    let r = handle(
+        &mut pc,
+        &mut g,
+        Request::InstallSite {
+            path: "site.toml".into(),
+        },
+        0,
+    );
+    assert!(!r.ok);
+    assert!(
+        r.detail
+            .starts_with("site installed; dev: not entered; unwound to event"),
+        "{}",
+        r.detail
+    );
+    assert_eq!(pc.sites, ["site.toml"]);
+    assert_eq!(g.state.mode, Mode::Event);
+    assert!(pc.index(Call::ReaperStart) > pc.index(Call::ServerStart));
+}
+
+#[test]
 fn ide_event_ends_the_site_check_at_once() {
     let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
     g.state.pins.current = Some(SHA.into());
@@ -1837,6 +1862,39 @@ fn clean_and_hopeless_engine_exits_stay_down() {
         let want: Vec<String> = alarm.map(str::to_owned).into_iter().collect();
         assert_eq!(texts(&g), want, "{code:?}");
     }
+}
+
+#[test]
+fn clean_and_session_end_exits_are_no_crashes() {
+    // A clean exit, then two crashes within 10 min: no crash loop, and the
+    // respawn after the second crash waits 2 s (not the third's 4 s).
+    let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Dev));
+    pc.exited = vec![
+        (Kid::Engine, Some(0)),
+        (Kid::Engine, Some(70)),
+        (Kid::Engine, Some(70)),
+    ];
+    let at = Instant::now();
+    tick(&mut pc, &mut g, at);
+    assert_eq!(g.state.mode, Mode::Dev);
+    assert!(!pc.called(Call::ReaperStart));
+    assert!(g.alarms.all().is_empty(), "{:?}", texts(&g));
+    tick(&mut pc, &mut g, at + Duration::from_millis(1999));
+    assert!(!pc.called(Call::EngineStart));
+    tick(&mut pc, &mut g, at + Duration::from_secs(2));
+    assert_eq!(pc.count(Call::EngineStart), 1);
+    // An exit while the session ends counts neither: two crashes after it
+    // make no loop.
+    let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Dev));
+    g.session_ending.store(true, Ordering::SeqCst);
+    pc.exited = vec![(Kid::Engine, Some(70))];
+    tick(&mut pc, &mut g, at);
+    g.session_ending.store(false, Ordering::SeqCst);
+    pc.exited = vec![(Kid::Engine, Some(70)), (Kid::Engine, Some(70))];
+    tick(&mut pc, &mut g, at + Duration::from_secs(1));
+    assert_eq!(g.state.mode, Mode::Dev);
+    assert!(!pc.called(Call::ReaperStart));
+    assert!(g.alarms.all().is_empty(), "{:?}", texts(&g));
 }
 
 #[test]
