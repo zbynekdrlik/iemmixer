@@ -22,8 +22,9 @@ const RETRY: Duration = Duration::from_secs(2);
 enum Ended {
     /// The guard asked the tray to quit.
     Quit,
-    /// The guard closed the pipe (it stopped or hands over to a new guard).
-    Closed,
+    /// The guard closed the pipe: it stopped, hands over to a new guard, or
+    /// refused this subscriber. `answered`: an update came first.
+    Closed { answered: bool },
 }
 
 /// Starts the subscription thread. `icon` shows the tooltip, `hwnd` (the
@@ -40,8 +41,10 @@ pub fn spawn(app: AppHandle, icon: Option<TrayIcon>, hwnd: Option<isize>) {
 
 fn run(app: &AppHandle, icon: Option<&TrayIcon>, hwnd: Option<isize>) {
     let mut seen = Seen::default();
-    // Whether the current outage is logged already (one line per outage, not
-    // one per attempt).
+    // Whether the current outage is logged already: one line per outage, not
+    // one per attempt. Only a connection that delivered an update ends an
+    // outage, so a guard that accepts and closes at once (a second
+    // subscriber, a guard stopping) is still one outage.
     let mut logged = false;
     loop {
         match subscribe(icon, hwnd, &mut seen, &mut logged) {
@@ -50,9 +53,17 @@ fn run(app: &AppHandle, icon: Option<&TrayIcon>, hwnd: Option<isize>) {
                 app.exit(0);
                 return;
             }
-            Ok(Ended::Closed) => {
-                tracing::warn!("the guard closed the subscription; reconnecting");
-                logged = true;
+            Ok(Ended::Closed { answered }) => {
+                if !logged {
+                    if answered {
+                        tracing::warn!("the guard closed the subscription; reconnecting");
+                    } else {
+                        tracing::warn!(
+                            "the guard closed the subscription before its first update; retrying every 2 s"
+                        );
+                    }
+                    logged = true;
+                }
             }
             Err(e) => {
                 if !logged {
@@ -68,7 +79,8 @@ fn run(app: &AppHandle, icon: Option<&TrayIcon>, hwnd: Option<isize>) {
 
 /// One subscription: connect, subscribe, then show every update until the
 /// guard quits the tray or closes the pipe. An error before the first
-/// update is a missing guard; one after it a broken pipe.
+/// update is a missing guard; one after it a broken pipe. The first update
+/// ends the outage (`logged` = false), so the next one is logged again.
 fn subscribe(
     icon: Option<&TrayIcon>,
     hwnd: Option<isize>,
@@ -78,13 +90,19 @@ fn subscribe(
     let name = proto::NAME.to_ns_name::<GenericNamespaced>()?;
     let mut pipe = Stream::connect(name)?;
     proto::write_frame(&mut pipe, &Request::Subscribe)?;
-    tracing::info!("subscribed to the guard");
-    *logged = false;
+    let mut answered = false;
     loop {
         match proto::read_update(&mut pipe) {
             Ok(Update::Quit) => return Ok(Ended::Quit),
-            Ok(Update::State(reply)) => show(icon, hwnd, seen, &reply),
-            Err(FrameError::Closed) => return Ok(Ended::Closed),
+            Ok(Update::State(reply)) => {
+                if !answered {
+                    answered = true;
+                    *logged = false;
+                    tracing::info!("subscribed to the guard");
+                }
+                show(icon, hwnd, seen, &reply);
+            }
+            Err(FrameError::Closed) => return Ok(Ended::Closed { answered }),
             Err(e) => return Err(e),
         }
     }
