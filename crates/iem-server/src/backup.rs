@@ -13,7 +13,8 @@ use crate::engine::mirror::Mirror;
 use crate::site_view::SiteView;
 use crate::view::GROUP_NAME;
 
-/// A backup of the mirror's state at `timestamp` (RFC 3339).
+/// A backup of the mirror's state at `timestamp` (RFC 3339), refused when
+/// a member's pins and hides cannot be read: never a partial backup.
 pub fn capture(
     view: &SiteView,
     mirror: &Mirror,
@@ -22,12 +23,10 @@ pub fn capture(
 ) -> Result<MixerBackup, String> {
     let mut b = MixerBackup::new(timestamp, mirror.rev, mirror.state.clone());
     for m in &view.members {
-        match store.customization(&m.id) {
-            Ok(c) => {
-                b.customizations.insert(m.id.clone(), c);
-            }
-            Err(e) => tracing::warn!(member = %m.id, error = %e, "backup: pins and hides skipped"),
-        }
+        let c = store
+            .customization(&m.id)
+            .map_err(|e| format!("the pins and hides of {} are unreadable: {e}", m.id))?;
+        b.customizations.insert(m.id.clone(), c);
     }
     Ok(b)
 }

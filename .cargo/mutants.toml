@@ -159,7 +159,7 @@ exclude_re = [
   # Equivalent (S5). At exactly −60 dB both branches of the fader domain give −60.
   "iem-server/src/view\\.rs.*replace > with >= in ui_db$",
   # Equivalent (S5). p = ±0 rounds to 0 % and is "C" before the side is chosen.
-  "iem-server/src/backup\\.rs:47:.*replace < with <= in pan$",
+  "iem-server/src/backup\\.rs:46:.*replace < with <= in pan$",
   # Unobservable (S5): the frame age `< 2 s` differs only at the exact nanosecond.
   "iem-server/src/engine/media\\.rs.*replace < with <= in MediaLink::diagnostics$",
   # Unobservable (S5): Listen commands on the mixer socket are ignored either
