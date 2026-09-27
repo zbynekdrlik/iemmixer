@@ -382,36 +382,31 @@ mod tests {
         assert_eq!(&serde_json::from_str::<T>(json).unwrap(), msg, "{json}");
     }
 
-    /// Every command's tag. The match has no wildcard: a new command does not
-    /// compile until it is named here, and then `client_json_shapes_are_stable`
-    /// counts one command short until it has a literal shape.
-    fn command_tag(m: &ClientMsg) -> &'static str {
-        match m {
-            ClientMsg::SetLevel { .. } => "SetLevel",
-            ClientMsg::SetMute { .. } => "SetMute",
-            ClientMsg::SetPan { .. } => "SetPan",
-            ClientMsg::SetGlobalLevel { .. } => "SetGlobalLevel",
-            ClientMsg::SetGlobalMute { .. } => "SetGlobalMute",
-            ClientMsg::SetStemsLevel { .. } => "SetStemsLevel",
-            ClientMsg::SetStemsMute { .. } => "SetStemsMute",
-            ClientMsg::UpdateCustomization { .. } => "UpdateCustomization",
-            ClientMsg::SetSolo { .. } => "SetSolo",
-            ClientMsg::ListenStart { .. } => "ListenStart",
-            ClientMsg::ListenStop => "ListenStop",
-            ClientMsg::GetEqParams { .. } => "GetEqParams",
-            ClientMsg::SetEqBand { .. } => "SetEqBand",
-            ClientMsg::CallEngineer => "CallEngineer",
-            ClientMsg::ClearAlert => "ClearAlert",
-            ClientMsg::TalkStart => "TalkStart",
-            ClientMsg::TalkStop => "TalkStop",
-            ClientMsg::GetLimiterParams => "GetLimiterParams",
-            ClientMsg::SetLimiterParam { .. } => "SetLimiterParam",
-            ClientMsg::SetLimiterEnabled { .. } => "SetLimiterEnabled",
-            ClientMsg::ResetLimiterActivity => "ResetLimiterActivity",
-            ClientMsg::GetConsole => "GetConsole",
-            ClientMsg::SetInput { .. } => "SetInput",
-            ClientMsg::ResetLimiterStats { .. } => "ResetLimiterStats",
-        }
+    /// Every variant name serde reads for `T`, from its refusal of an unknown
+    /// `tag` value: the shape tables below must cover each one, so a new
+    /// message fails them until it has a literal shape.
+    fn variants<T>(tag: &str) -> std::collections::BTreeSet<String>
+    where
+        T: serde::de::DeserializeOwned + std::fmt::Debug,
+    {
+        let err = serde_json::from_str::<T>(&format!(r#"{{"{tag}":"NoSuchMessage"}}"#))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.starts_with("unknown variant `NoSuchMessage`, expected one of `"),
+            "{err}"
+        );
+        err.split('`')
+            .skip(3)
+            .step_by(2)
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// The tag of a literal message (`cmd` or `event`).
+    fn tag_of(json: &str, tag: &str) -> String {
+        let v: serde_json::Value = serde_json::from_str(json).unwrap();
+        v[tag].as_str().unwrap().to_owned()
     }
 
     /// Every command's JSON, field names included. The predecessor asserted
@@ -540,15 +535,10 @@ mod tests {
         let mut tags = std::collections::BTreeSet::new();
         for (msg, json) in &cases {
             assert_shape(msg, json);
-            let tag = command_tag(msg);
-            assert!(json.starts_with(&format!(r#"{{"cmd":"{tag}""#)), "{json}");
-            tags.insert(tag);
+            tags.insert(tag_of(json, "cmd"));
         }
-        assert_eq!(
-            tags.len(),
-            24,
-            "a literal shape for every command: {tags:?}"
-        );
+        let all = variants::<ClientMsg>("cmd");
+        assert_eq!(tags, all, "a literal shape for every command");
         let set_input: ClientMsg =
             serde_json::from_str(r#"{"cmd":"SetInput","input":"keys","muted":true}"#).unwrap();
         assert_eq!(
@@ -767,36 +757,6 @@ mod tests {
             },
             "BandActivity",
         );
-    }
-
-    /// Every server event's tag (no wildcard, like `command_tag`).
-    fn event_tag(m: &ServerMsg) -> &'static str {
-        match m {
-            ServerMsg::Hello { .. } => "Hello",
-            ServerMsg::State { .. } => "State",
-            ServerMsg::Meters { .. } => "Meters",
-            ServerMsg::ChannelUpdate { .. } => "ChannelUpdate",
-            ServerMsg::GlobalVolumeUpdate { .. } => "GlobalVolumeUpdate",
-            ServerMsg::StemsVolumeUpdate { .. } => "StemsVolumeUpdate",
-            ServerMsg::ConnectionChanged { .. } => "ConnectionChanged",
-            ServerMsg::CustomizationUpdate { .. } => "CustomizationUpdate",
-            ServerMsg::NetworkMode { .. } => "NetworkMode",
-            ServerMsg::SoloUpdate { .. } => "SoloUpdate",
-            ServerMsg::AudioStatus { .. } => "AudioStatus",
-            ServerMsg::EqParams { .. } => "EqParams",
-            ServerMsg::EngineerAlert { .. } => "EngineerAlert",
-            ServerMsg::AlertCleared { .. } => "AlertCleared",
-            ServerMsg::ActiveAlerts { .. } => "ActiveAlerts",
-            ServerMsg::TalkAcquired { .. } => "TalkAcquired",
-            ServerMsg::TalkBusy { .. } => "TalkBusy",
-            ServerMsg::TalkReleased => "TalkReleased",
-            ServerMsg::EngineerTalking { .. } => "EngineerTalking",
-            ServerMsg::LimiterParams { .. } => "LimiterParams",
-            ServerMsg::TunnelStatus(_) => "TunnelStatus",
-            ServerMsg::Console(_) => "Console",
-            ServerMsg::InputUpdate(_) => "InputUpdate",
-            ServerMsg::BandActivity { .. } => "BandActivity",
-        }
     }
 
     /// Every event's JSON, field names included (W4 of the gen1 test parity
@@ -1067,11 +1027,10 @@ mod tests {
         let mut tags = std::collections::BTreeSet::new();
         for (msg, json) in &cases {
             assert_shape(msg, json);
-            let tag = event_tag(msg);
-            assert!(json.starts_with(&format!(r#"{{"event":"{tag}""#)), "{json}");
-            tags.insert(tag);
+            tags.insert(tag_of(json, "event"));
         }
-        assert_eq!(tags.len(), 24, "a literal shape for every event: {tags:?}");
+        let all = variants::<ServerMsg>("event");
+        assert_eq!(tags, all, "a literal shape for every event");
         // Several meters read as one [L,R] pair per id (object order is free).
         let two = r#"{"event":"Meters","data":{"meters":{"mic1":[0.5,0.3],"member2":[0.0,1.0]}}}"#;
         assert_eq!(
