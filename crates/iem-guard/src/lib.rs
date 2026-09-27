@@ -13,7 +13,8 @@
 //! - [`proto`]: the guard pipe's requests, replies and frames;
 //! - [`state`]: the persistent state and the reboot rule;
 //! - [`alarms`]: the kept alarms;
-//! - [`cancel`]: the pre-emption token of every waiting step.
+//! - [`cancel`]: the pre-emption token of every waiting step;
+//! - [`view`]: what the tray shows (tooltip, alarm notices).
 
 #![forbid(unsafe_code)]
 #![cfg_attr(
@@ -34,9 +35,10 @@ pub mod handover;
 pub mod plan;
 pub mod proto;
 pub mod state;
+pub mod view;
 
 pub use alarms::{Alarm, Alarms};
 pub use cancel::{Cancel, Preempted};
 pub use plan::{Facts, Health, Mode, OnError, PrefFail, Step};
-pub use proto::{Reply, Request};
+pub use proto::{Reply, Request, Update};
 pub use state::GuardState;
