@@ -40,8 +40,22 @@ pub mod nullrt;
 pub mod offline;
 pub mod prefwin;
 pub mod reset;
+pub mod rtpanic;
 pub mod telemetry;
 pub mod wav;
+
+/// The unit tests run on the allocation detector, so `rtpanic::tests` can
+/// prove that the RT panic record neither allocates nor frees. It counts only
+/// inside `assert_no_alloc` (warn mode); everything else allocates as usual.
+#[cfg(test)]
+#[allow(
+    unsafe_code,
+    reason = "the #[global_allocator] expansion, in test builds only"
+)]
+mod alloc_detector {
+    #[global_allocator]
+    static ALLOCATOR: assert_no_alloc::AllocDisabler = assert_no_alloc::AllocDisabler;
+}
 
 pub use nullrt::{InputSignal, NullRt, NullRtConfig, StreamStats};
 pub use offline::{Offline, OfflineRun};
