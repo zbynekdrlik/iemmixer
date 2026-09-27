@@ -1,8 +1,9 @@
 //! WebSocket connection manager with deterministic disposal.
 //!
-//! Owns all background tasks (reconnect, watchdog, token-expiry intervals)
-//! and tears them down via `on_cleanup`. Background closures check
-//! `disposal_guard` (an `Arc<AtomicBool>`) before touching reactive state.
+//! Owns the mixer socket and all background tasks (reconnect, watchdog,
+//! token-expiry intervals) and tears them down via `on_cleanup`. Background
+//! closures check `disposal_guard` (an `Arc<AtomicBool>`) before touching
+//! reactive state.
 
 use leptos::prelude::*;
 use leptos_router::hooks::use_navigate;
@@ -18,8 +19,8 @@ use super::helpers::{ReconnectStep, WsClosureStore, WsFailCounter, reconnect_ste
 use super::state::MixerState;
 
 /// Set up all background tasks (WS connect, reconnect, watchdog, token-expiry)
-/// and register an `on_cleanup` callback that tears them all down when the
-/// component scope is disposed.
+/// and register an `on_cleanup` callback that tears them all down, and closes
+/// the socket, when the component scope is disposed.
 ///
 /// Background closures (`Closure::forget`) check `disposal_guard` before
 /// touching any reactive state — once cleanup fires, they no-op.
@@ -258,9 +259,11 @@ pub(super) fn setup_connection(
         .unwrap();
     expiry_closure.forget();
 
-    // Register cleanup: set the disposal guard and clear all JS intervals
-    // when the component scope is disposed. Arc<AtomicBool> is Send so it
-    // can be captured directly in the on_cleanup closure.
+    // Register cleanup: set the disposal guard, clear all JS intervals and
+    // close the mixer socket when the component scope is disposed.
+    // Arc<AtomicBool> is Send so it can be captured directly in the
+    // on_cleanup closure; the `ws` signal is read before the scope's signals
+    // are disposed (an owner runs its cleanups first).
     let guard_for_cleanup = disposal_guard.clone();
     on_cleanup(move || {
         guard_for_cleanup.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -268,6 +271,16 @@ pub(super) fn setup_connection(
             w.clear_interval_with_handle(reconnect_interval_id);
             w.clear_interval_with_handle(watchdog_interval_id);
             w.clear_interval_with_handle(expiry_interval_id);
+        }
+        // An in-app navigation keeps the document, and with it an open
+        // socket: the server would keep this page's session. Its handlers
+        // go first, so the close reaches no reconnect logic.
+        if let Some(Some(socket)) = ws.try_get_untracked() {
+            socket.set_onopen(None);
+            socket.set_onmessage(None);
+            socket.set_onclose(None);
+            socket.set_onerror(None);
+            let _ = socket.close();
         }
     });
 }
