@@ -112,7 +112,7 @@ mod tests {
 
     #[test]
     fn a_dword_must_be_decimal_before_anything_is_written() {
-        for bad in ["", "x32", "-1", "4294967296", "0x20", "32 "] {
+        for bad in ["", "+32", "x32", "-1", "4294967296", "0x20", "32 "] {
             assert_eq!(
                 kind(Hkcu::write("Software\\Test", "Frames", Kind::Dword, bad)),
                 Some(io::ErrorKind::InvalidInput),
