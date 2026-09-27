@@ -1,0 +1,522 @@
+//! S1a ASIO spike on the real card (design note
+//! `docs/superpowers/specs/2026-09-27-s1a-asio-spike-design.md`). It runs
+//! only on the IEM PC in dev time, started by the Interactive task from a
+//! request file (`scripts/asio-spike/`). Outputs stay silent; the card's
+//! rate, clock and buffer are never changed from here.
+//!
+//! Exit codes: 0 done or stopped, 1 other error, 2 usage, 3 driver missing,
+//! 4 refused (rate, buffer, format), 5 band activity, 6 fault caught
+//! (`--panic-at`), 7 the driver changed the sample rate.
+
+use std::path::PathBuf;
+use std::process::ExitCode;
+
+const USAGE: &str = "usage: asio_spike probe|duplex|reopen --driver <name> --report <file> --stop-file <file> \
+[--progress <file>] [--frames 32|48|64] [--seconds S] [--burn-us U] [--stress T] [--panic-at K] [--cycles C]";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(windows), allow(dead_code))]
+enum Mode {
+    /// Read-only driver facts; no buffers.
+    Probe,
+    /// Duplex with silent outputs for `seconds`, optionally under load.
+    Duplex,
+    /// `cycles` × (start, 5 s, stop, release, open), timing every phase.
+    Reopen,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(windows), allow(dead_code))]
+struct Args {
+    mode: Mode,
+    driver: String,
+    report: PathBuf,
+    progress: Option<PathBuf>,
+    stop_file: PathBuf,
+    frames: i32,
+    seconds: u64,
+    burn_us: u32,
+    stress: u32,
+    panic_at: u64,
+    cycles: u32,
+}
+
+fn parse(argv: &[String]) -> Result<Args, String> {
+    let mut it = argv.iter();
+    let mode = match it.next().map(String::as_str) {
+        Some("probe") => Mode::Probe,
+        Some("duplex") => Mode::Duplex,
+        Some("reopen") => Mode::Reopen,
+        other => return Err(format!("unknown mode {other:?}")),
+    };
+    let mut a = Args {
+        mode,
+        driver: String::new(),
+        report: PathBuf::new(),
+        progress: None,
+        stop_file: PathBuf::new(),
+        frames: 0,
+        seconds: 600,
+        burn_us: 0,
+        stress: 0,
+        panic_at: 0,
+        cycles: 5,
+    };
+    while let Some(flag) = it.next() {
+        let value = it.next().ok_or_else(|| format!("{flag} needs a value"))?;
+        let num = |max: u64| match value.parse::<u64>() {
+            Ok(n) if n <= max => Ok(n),
+            _ => Err(format!(
+                "{flag}: expected a number up to {max}, got {value:?}"
+            )),
+        };
+        match flag.as_str() {
+            "--driver" => a.driver.clone_from(value),
+            "--report" => a.report = value.into(),
+            "--progress" => a.progress = Some(value.into()),
+            "--stop-file" => a.stop_file = value.into(),
+            "--frames" => a.frames = i32::try_from(num(4096)?).unwrap_or(0),
+            "--seconds" => a.seconds = num(3600)?,
+            "--burn-us" => a.burn_us = u32::try_from(num(300)?).unwrap_or(0),
+            "--stress" => a.stress = u32::try_from(num(8)?).unwrap_or(0),
+            "--panic-at" => a.panic_at = num(u64::MAX)?,
+            "--cycles" => a.cycles = u32::try_from(num(20)?).unwrap_or(0),
+            other => return Err(format!("unknown flag {other}")),
+        }
+    }
+    if a.driver.is_empty() || a.report.as_os_str().is_empty() || a.stop_file.as_os_str().is_empty()
+    {
+        return Err("--driver, --report and --stop-file are required".to_owned());
+    }
+    if a.mode != Mode::Probe && ![32, 48, 64].contains(&a.frames) {
+        return Err("--frames must be 32, 48 or 64".to_owned());
+    }
+    if a.seconds == 0 || a.cycles == 0 {
+        return Err("--seconds and --cycles must be positive".to_owned());
+    }
+    Ok(a)
+}
+
+fn main() -> ExitCode {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    match parse(&argv) {
+        Ok(args) => platform(&args),
+        Err(e) => {
+            eprintln!("asio_spike: {e}\n{USAGE}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn platform(_: &Args) -> ExitCode {
+    eprintln!("asio_spike: Windows only (the card is on the IEM PC)");
+    ExitCode::from(2)
+}
+
+#[cfg(windows)]
+fn platform(args: &Args) -> ExitCode {
+    spike::main(args)
+}
+
+#[cfg(windows)]
+mod spike {
+    use std::collections::BTreeMap;
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread::JoinHandle;
+    use std::time::{Duration, Instant};
+
+    use iem_audio_io::asio::{
+        self, AsioError, DriverInfo, Host, Running, StopTimings, StreamConfig,
+    };
+    use iem_audio_io::format::SampleFormat;
+    use iem_audio_io::telemetry::{ActivityGuard, Snapshot, dbfs};
+    use serde_json::{Value, json};
+
+    use super::{Args, ExitCode, Mode};
+
+    const FIRST_CALLBACK_WAIT: Duration = Duration::from_secs(2);
+    const AFTER_FAULT: Duration = Duration::from_secs(2);
+    const REOPEN_RUN: Duration = Duration::from_secs(5);
+    const ACTIVITY_SECONDS: u32 = 3;
+
+    pub fn main(a: &Args) -> ExitCode {
+        let mut report = json!({
+            "tool": "asio_spike",
+            "version": env!("CARGO_PKG_VERSION"),
+            "build_sha": option_env!("GITHUB_SHA"),
+            "mode": format!("{:?}", a.mode).to_lowercase(),
+            "frames": a.frames, "seconds": a.seconds, "burn_us": a.burn_us,
+            "stress": a.stress, "panic_at": a.panic_at, "cycles": a.cycles,
+        });
+        let code = match run(a, &mut report) {
+            Ok(code) => code,
+            Err(e) => {
+                let (outcome, code) = match e {
+                    AsioError::NoDrivers(_) | AsioError::NotFound { .. } => ("no-driver", 3),
+                    AsioError::Refused(_) => ("refused", 4),
+                    _ => ("error", 1),
+                };
+                report["outcome"] = json!(outcome);
+                report["error"] = json!(e.to_string());
+                code
+            }
+        };
+        match write_json(&a.report, &report) {
+            Ok(()) => ExitCode::from(code),
+            Err(e) => {
+                eprintln!("asio_spike: writing {}: {e}", a.report.display());
+                ExitCode::from(1)
+            }
+        }
+    }
+
+    fn run(a: &Args, report: &mut Value) -> Result<u8, AsioError> {
+        let host = Host::open(&a.driver)?;
+        let info = host.info()?;
+        report["driver"] = info_json(&info);
+        match a.mode {
+            Mode::Probe => {
+                report["outcome"] = json!("done");
+                Ok(0)
+            }
+            Mode::Duplex => duplex(a, host, info, report),
+            Mode::Reopen => reopen(a, host, info, report),
+        }
+    }
+
+    fn duplex(
+        a: &Args,
+        mut host: Host,
+        mut info: DriverInfo,
+        report: &mut Value,
+    ) -> Result<u8, AsioError> {
+        let cfg = StreamConfig {
+            frames: a.frames,
+            burn_us: a.burn_us,
+            panic_at: a.panic_at,
+        };
+        let stress = Stress::start(a.stress);
+        let deadline = Instant::now() + Duration::from_secs(a.seconds);
+        let mut guard = ActivityGuard::new(ACTIVITY_SECONDS);
+        let mut segments = Vec::new();
+        let mut resets = Vec::new();
+        let mut loudest = 0.0_f64;
+        let mut fault: Option<(Instant, u64)> = None;
+        let mut outcome = "done";
+        loop {
+            let running = host.start(&info, cfg)?;
+            let first = wait_first_callback(&running)?;
+            let latency = host.latencies()?;
+            let t0 = Instant::now();
+            let mut next_second = t0 + Duration::from_secs(1);
+            let mut next_progress = t0 + Duration::from_secs(5);
+            let reopen = loop {
+                asio::pump_messages();
+                std::thread::sleep(Duration::from_millis(10));
+                let now = Instant::now();
+                if a.stop_file.exists() {
+                    outcome = "stopped";
+                    break false;
+                }
+                if now >= deadline {
+                    break false;
+                }
+                if running.take_reopen() {
+                    break true;
+                }
+                if running.rate_changed() {
+                    outcome = "rate-changed";
+                    break false;
+                }
+                if running.faulted() {
+                    match fault {
+                        None => fault = Some((now, running.callbacks())),
+                        Some((at, _)) if now.duration_since(at) >= AFTER_FAULT => {
+                            outcome = "fault-caught";
+                            break false;
+                        }
+                        Some(_) => {}
+                    }
+                }
+                if now >= next_second {
+                    next_second += Duration::from_secs(1);
+                    let peak = running.take_input_peak();
+                    loudest = loudest.max(peak);
+                    if guard.observe(peak) {
+                        outcome = "band-activity";
+                        break false;
+                    }
+                }
+                if now >= next_progress {
+                    next_progress += Duration::from_secs(5);
+                    if let (Some(path), Some(s)) = (&a.progress, running.snapshot()) {
+                        let _ = write_json(path, &progress_json(t0.elapsed(), &s, loudest));
+                    }
+                }
+            };
+            let seconds = t0.elapsed().as_secs_f64();
+            let (snap, stop) = running.finish();
+            if let (Some((_, at)), Some(s)) = (fault, &snap) {
+                report["callbacks_after_fault"] = json!(s.callbacks.saturating_sub(at));
+            }
+            segments.push(json!({
+                "latency_in": latency.0, "latency_out": latency.1,
+                "create_buffers_us": us(first.0.create_buffers), "start_us": us(first.0.start),
+                "first_callback_us": us(first.1), "seconds": seconds,
+                "telemetry": snap.as_ref().map(telemetry_json), "stop": stop_json(stop),
+            }));
+            if !reopen {
+                break;
+            }
+            // The driver asked for a reset: release it and create it again on this thread.
+            let t = Instant::now();
+            drop(host);
+            let release = t.elapsed();
+            let t = Instant::now();
+            host = Host::open(&a.driver)?;
+            info = host.info()?;
+            resets.push(json!({ "release_us": us(release), "open_us": us(t.elapsed()) }));
+        }
+        stress.stop();
+        report["segments"] = json!(segments);
+        report["resets_handled"] = json!(resets);
+        report["loudest_input_dbfs"] = json!(dbfs(loudest));
+        report["outcome"] = json!(outcome);
+        Ok(match outcome {
+            "band-activity" => 5,
+            "fault-caught" => 6,
+            "rate-changed" => 7,
+            _ => 0,
+        })
+    }
+
+    fn reopen(
+        a: &Args,
+        mut host: Host,
+        mut info: DriverInfo,
+        report: &mut Value,
+    ) -> Result<u8, AsioError> {
+        let cfg = StreamConfig {
+            frames: a.frames,
+            burn_us: 0,
+            panic_at: 0,
+        };
+        let mut cycles = Vec::new();
+        let mut outcome = "done";
+        for cycle in 0..a.cycles {
+            if a.stop_file.exists() {
+                outcome = "stopped";
+                break;
+            }
+            let running = host.start(&info, cfg)?;
+            let (timings, first) = wait_first_callback(&running)?;
+            let t = Instant::now();
+            while t.elapsed() < REOPEN_RUN && !a.stop_file.exists() {
+                asio::pump_messages();
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let (snap, stop) = running.finish();
+            let t = Instant::now();
+            drop(host);
+            let release = t.elapsed();
+            let t = Instant::now();
+            host = Host::open(&a.driver)?;
+            let open = t.elapsed();
+            info = host.info()?;
+            cycles.push(json!({
+                "cycle": cycle,
+                "create_buffers_us": us(timings.create_buffers), "start_us": us(timings.start),
+                "first_callback_us": us(first), "stop": stop_json(stop),
+                "release_us": us(release), "open_us": us(open),
+                "callbacks": snap.as_ref().map_or(0, |s| s.callbacks),
+                "missed": snap.as_ref().map_or(0, |s| s.missed),
+            }));
+        }
+        report["cycles"] = json!(cycles);
+        report["outcome"] = json!(outcome);
+        Ok(0)
+    }
+
+    /// Pumps messages until the first callback; the start timings and the wait.
+    fn wait_first_callback(
+        running: &Running<'_>,
+    ) -> Result<(asio::StartTimings, Duration), AsioError> {
+        let t = Instant::now();
+        while t.elapsed() < FIRST_CALLBACK_WAIT {
+            asio::pump_messages();
+            if running.callbacks() > 0 {
+                return Ok((running.timings, t.elapsed()));
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        Err(AsioError::Call(
+            "start",
+            format!("no callback within {FIRST_CALLBACK_WAIT:?}"),
+        ))
+    }
+
+    /// Busy threads at normal priority standing in for the server and the stream.
+    struct Stress {
+        stop: Arc<AtomicBool>,
+        threads: Vec<JoinHandle<()>>,
+    }
+
+    impl Stress {
+        fn start(n: u32) -> Self {
+            let stop = Arc::new(AtomicBool::new(false));
+            let threads = (0..n)
+                .map(|_| {
+                    let stop = Arc::clone(&stop);
+                    std::thread::spawn(move || {
+                        while !stop.load(Ordering::Relaxed) {
+                            std::hint::spin_loop();
+                        }
+                    })
+                })
+                .collect();
+            Self { stop, threads }
+        }
+
+        fn stop(self) {
+            self.stop.store(true, Ordering::Relaxed);
+            for t in self.threads {
+                let _ = t.join();
+            }
+        }
+    }
+
+    fn us(d: Duration) -> f64 {
+        d.as_secs_f64() * 1e6
+    }
+
+    fn info_json(i: &DriverInfo) -> Value {
+        let mut types: BTreeMap<String, usize> = BTreeMap::new();
+        for &t in &i.sample_types {
+            let name = SampleFormat::from_asio(t)
+                .map_or_else(|| format!("unsupported:{t}"), |f| f.name().to_owned());
+            *types.entry(name).or_default() += 1;
+        }
+        json!({
+            "name": i.name, "version": i.version, "inputs": i.inputs, "outputs": i.outputs,
+            "buffer": { "min": i.buffer_min, "max": i.buffer_max, "preferred": i.buffer_preferred, "granularity": i.buffer_granularity },
+            "rate": i.rate, "can_96k": i.can_96k,
+            "latency_at_preferred": { "in": i.latency_in, "out": i.latency_out },
+            "clocks": i.clocks.iter().map(|c| json!({ "index": c.index, "name": c.name, "current": c.current })).collect::<Vec<_>>(),
+            "sample_types": types,
+        })
+    }
+
+    fn telemetry_json(s: &Snapshot) -> Value {
+        let q = |v: [f64; 4]| json!({ "p50": v[0], "p99": v[1], "p999": v[2], "max": v[3] });
+        json!({
+            "period_us": s.period_ns as f64 / 1e3,
+            "callbacks": s.callbacks, "late": s.late, "missed": s.missed,
+            "overruns": s.overruns, "position_gaps": s.position_gaps,
+            "first_callback_us": s.first_callback_ns as f64 / 1e3,
+            "messages": {
+                "resets": s.resets, "resyncs": s.resyncs, "latency_changes": s.latency_changes,
+                "buffer_size_changes": s.buffer_size_changes, "overloads": s.overloads, "rate_changes": s.rate_changes,
+            },
+            "interval_us": q(s.interval.summary_us()),
+            "duration_us": q(s.duration.summary_us()),
+            "drift_ppm": s.drift_ppm,
+        })
+    }
+
+    fn progress_json(elapsed: Duration, s: &Snapshot, loudest: f64) -> Value {
+        json!({
+            "elapsed_s": elapsed.as_secs(), "callbacks": s.callbacks, "late": s.late, "missed": s.missed,
+            "overruns": s.overruns, "position_gaps": s.position_gaps, "resets": s.resets,
+            "loudest_input_dbfs": dbfs(loudest),
+        })
+    }
+
+    fn stop_json(t: StopTimings) -> Value {
+        json!({ "stop_us": us(t.stop), "dispose_us": us(t.dispose), "stop_ok": t.stop_ok, "dispose_ok": t.dispose_ok })
+    }
+
+    /// Writes `value` next to `path` and renames it into place.
+    fn write_json(path: &Path, value: &Value) -> std::io::Result<()> {
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, serde_json::to_vec_pretty(value)?)?;
+        std::fs::rename(&tmp, path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn argv(s: &str) -> Vec<String> {
+        s.split_whitespace().map(str::to_owned).collect()
+    }
+
+    #[test]
+    fn parses_a_duplex_run_under_load() {
+        let a = parse(&argv(
+            "duplex --driver D1 --report r.json --stop-file stop --progress p.json --frames 32 --seconds 600 --burn-us 100 --stress 4 --panic-at 7 --cycles 3",
+        ))
+        .unwrap();
+        assert_eq!(
+            a,
+            Args {
+                mode: Mode::Duplex,
+                driver: "D1".into(),
+                report: "r.json".into(),
+                progress: Some("p.json".into()),
+                stop_file: "stop".into(),
+                frames: 32,
+                seconds: 600,
+                burn_us: 100,
+                stress: 4,
+                panic_at: 7,
+                cycles: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn probe_needs_no_frames_and_has_defaults() {
+        let a = parse(&argv("probe --driver D1 --report r --stop-file s")).unwrap();
+        assert_eq!(
+            (a.mode, a.frames, a.seconds, a.cycles, a.progress),
+            (Mode::Probe, 0, 600, 5, None)
+        );
+        assert_eq!(
+            parse(&argv(
+                "reopen --driver D1 --report r --stop-file s --frames 48"
+            ))
+            .unwrap()
+            .mode,
+            Mode::Reopen
+        );
+    }
+
+    #[test]
+    fn bad_input_is_refused() {
+        for bad in [
+            "",
+            "record --driver D1 --report r --stop-file s",
+            "probe --driver",
+            "probe --driver D1 --report r --stop-file s --colour red",
+            "probe --report r --stop-file s",
+            "probe --driver D1 --stop-file s",
+            "probe --driver D1 --report r",
+            "duplex --driver D1 --report r --stop-file s",
+            "duplex --driver D1 --report r --stop-file s --frames 16",
+            "duplex --driver D1 --report r --stop-file s --frames 32x",
+            "duplex --driver D1 --report r --stop-file s --frames 32 --seconds 0",
+            "duplex --driver D1 --report r --stop-file s --frames 32 --seconds 3601",
+            "duplex --driver D1 --report r --stop-file s --frames 32 --burn-us 301",
+            "duplex --driver D1 --report r --stop-file s --frames 32 --stress 9",
+            "reopen --driver D1 --report r --stop-file s --frames 32 --cycles 0",
+            "reopen --driver D1 --report r --stop-file s --frames 32 --cycles 21",
+        ] {
+            assert!(parse(&argv(bad)).is_err(), "{bad:?}");
+        }
+        assert!(parse(&argv("duplex --driver D1 --report r --stop-file s --frames 64 --seconds 3600 --burn-us 300 --stress 8")).is_ok());
+    }
+}
