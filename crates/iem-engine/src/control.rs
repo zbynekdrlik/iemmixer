@@ -762,8 +762,13 @@ mod tests {
         r.c.pending.push_back(vec![RtOp::Nop; 2]);
         r.status.trips.store(4, Ordering::Relaxed);
         let st = StreamStats {
+            frames: 32,
             callbacks: 7,
             late: 1,
+            missed: 0,
+            overruns: 0,
+            resets: 0,
+            parked: false,
             faulted: false,
             running: true,
             max_process_ns: 2_500_000,

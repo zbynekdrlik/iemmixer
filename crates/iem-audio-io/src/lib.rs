@@ -5,14 +5,22 @@
 //! - [`Offline`]: deterministic, any block size — the parity harness;
 //! - [`NullRt`]: paced real time with synthetic inputs — E2E and soak runs.
 //!
-//! For the card (S1a design note §3): [`format`] (ASIO sample types ↔ f64,
-//! the I2 refusals), [`telemetry`] (lock-free callback statistics) and, on
-//! Windows only, `asio` — the crate's only unsafe code.
+//! For the card (S1a design note §3; S6 design note §3): [`format`] (ASIO
+//! sample types ↔ f64, the I2 refusals), [`telemetry`] (lock-free callback
+//! statistics), [`channels`] (topology card channels → card indices),
+//! [`period`] (the period the driver really delivers, measured from sample
+//! positions), [`reset`] (the reopen budget and the stall rule), [`rtpanic`]
+//! (panics on the real-time thread, recorded in atomics) and, on Windows
+//! only, `asio` — the crate's only unsafe code, the S6 backend. The
+//! preference window (the driver's preferred buffer holds 32 only while the
+//! driver opens) lives in `iem_win::prefwin`, which the guard shares.
 //!
-//! Buffers are f64 and channel-major. Both backends call `process()` inside
+//! Buffers are f64 and channel-major. Every backend calls `process()` inside
 //! `catch_unwind`: a panic zeroes that block's outputs, the processor is never
-//! called again and the fault is reported (§2.4 crash model). The ASIO host
-//! (`asio`, Windows) follows the same contract in S6.
+//! called again and the fault is reported (§2.4 crash model). After a driver
+//! reopen the ASIO backend calls [`Process::discontinuity`] before the next
+//! block, and [`StreamStats`] carries the measured period, missed periods,
+//! overruns, resets and a parked stream.
 
 #![deny(unsafe_code)]
 #![cfg_attr(
@@ -34,13 +42,17 @@ use core::ops::Range;
     reason = "ASIO FFI: azo buffers and callbacks (S1a design note §3)"
 )]
 pub mod asio;
+pub mod channels;
 pub mod format;
 pub mod nullrt;
 pub mod offline;
+pub mod period;
+pub mod reset;
+pub mod rtpanic;
 pub mod telemetry;
 pub mod wav;
 
-pub use nullrt::{InputSignal, NullRt, NullRtConfig, StreamStats};
+pub use nullrt::{InputSignal, NullRt, NullRtConfig};
 pub use offline::{Offline, OfflineRun};
 
 fn span(ch: usize, frames: usize) -> Option<Range<usize>> {
@@ -101,6 +113,39 @@ impl<'a> Block<'a> {
 /// syscalls or log (I7).
 pub trait Process: Send {
     fn process(&mut self, block: &mut Block<'_>);
+
+    /// Called on the callback thread before the first block after a reopen;
+    /// the engine restarts its fade-in. The same rules as `process` (I7).
+    fn discontinuity(&mut self) {}
+}
+
+/// A running stream's statistics, read by the control thread.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StreamStats {
+    /// The period the driver really delivers, in frames per callback: the
+    /// ASIO backend measures it from the first callbacks' sample positions
+    /// ([`period`]); NullRt reports its block size.
+    pub frames: u32,
+    pub callbacks: u64,
+    /// Late callbacks: NullRt counts those finished more than one period
+    /// after their deadline, the ASIO backend callback intervals over 1.5 and
+    /// under 2 periods (`telemetry::classify`).
+    pub late: u64,
+    /// Callback intervals of 2 periods or more: a period passed without a
+    /// callback (ASIO; NullRt 0).
+    pub missed: u64,
+    /// Callbacks that took longer than one period (ASIO; NullRt 0).
+    pub overruns: u64,
+    /// Driver reopens after a reset request or a stall (ASIO; NullRt 0).
+    pub resets: u64,
+    /// A callback was still in flight after the stop wait: the stream is
+    /// left allocated, never freed under a callback, and the guard alarms
+    /// (ASIO; NullRt false).
+    pub parked: bool,
+    pub faulted: bool,
+    pub running: bool,
+    pub max_process_ns: u64,
+    pub fault: Option<String>,
 }
 
 /// Multichannel audio, channel-major.

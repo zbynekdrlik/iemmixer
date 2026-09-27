@@ -2608,6 +2608,7 @@ dependencies = [
 name = "iem-audio-io"
 version = "2.0.0-dev.9"
 dependencies = [
+ "assert_no_alloc",
  "azo",
  "serde_json",
  "windows-sys 0.61.2",
