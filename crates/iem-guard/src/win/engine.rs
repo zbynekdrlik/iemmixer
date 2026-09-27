@@ -506,13 +506,23 @@ pub(super) fn stage_peaks(pc: &mut WinPc, seconds: u32, c: &Cancel) -> R<Vec<f64
 
 /// How long the stage inputs have been below the band-activity level, as
 /// far as the guard's supervisor connections saw (`WinPc::quiet`: a new
-/// connection resumes it).
+/// connection resumes it, across a gap of up to `QUIET_GAP`). Read once
+/// this connection heard the stage, so a band that played during the gap
+/// has ended the quiet by then.
 pub(super) fn quiet_for(pc: &mut WinPc) -> R<Duration> {
     let c = Cancel::default();
     let sup = supervisor(pc, CONNECT, &c)?;
-    wait_inbox(sup, HELLO, &c, |i| i.topology.then_some(()))?;
+    let heard = wait_inbox(sup, HELLO, &c, |i| {
+        (i.topology && lock(&i.quiet).heard()).then_some(())
+    })?;
     let inbox = lock(&sup.inbox);
     inbox.stage_known().map_err(StepError::Failed)?;
+    if heard.is_none() {
+        return Err(StepError::failed(format!(
+            "no meter frame within {} s",
+            HELLO.as_secs()
+        )));
+    }
     let quiet = lock(&inbox.quiet).quiet_for(Instant::now());
     Ok(quiet)
 }

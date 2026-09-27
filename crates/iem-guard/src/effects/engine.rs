@@ -400,31 +400,60 @@ impl StagePeaks {
     }
 }
 
+/// How long the stage may go unheard between two supervisor connections
+/// (an engine restart, a reconnect) and still count as quiet throughout.
+pub const QUIET_GAP: Duration = Duration::from_secs(60);
+
 /// How long the stage has been quiet, from the meter frames the guard saw
 /// (a HIL job needs 5 min, design §7). One for the guard's life: every
-/// supervisor connection feeds it and resumes it when it connects.
+/// supervisor connection feeds it and resumes it when it connects, so an
+/// engine restart does not start it again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Quiet {
     since: Instant,
+    /// The newest meter frame, over all connections.
+    last: Option<Instant>,
+    /// The current connection has heard a meter frame.
+    heard: bool,
 }
 
 impl Quiet {
     /// Quiet from `now` on: nothing earlier was seen.
     pub fn new(now: Instant) -> Self {
-        Self { since: now }
+        Self {
+            since: now,
+            last: None,
+            heard: false,
+        }
     }
 
     /// A new supervisor connection at `now` (an engine start, a reconnect):
-    /// the quiet starts again.
+    /// the quiet goes on when the last frame came at most [`QUIET_GAP`]
+    /// before; else (nothing heard yet, or unheard for longer, when the
+    /// band may have played on REAPER) it starts again now.
     pub fn resume(&mut self, now: Instant) {
-        self.since = now;
+        self.heard = false;
+        let lately = self
+            .last
+            .is_some_and(|last| now.saturating_duration_since(last) <= QUIET_GAP);
+        if !lately {
+            self.since = now;
+        }
     }
 
     /// One frame's loudest stage peak (dBFS) at `now`.
     pub fn observe(&mut self, loudest_db: f64, now: Instant) {
+        self.last = Some(now);
+        self.heard = true;
         if loudest_db > ACTIVE_DB {
             self.since = now;
         }
+    }
+
+    /// The current connection has heard the stage: a quiet carried over a
+    /// gap is read only once the new engine's meters could have ended it.
+    pub fn heard(&self) -> bool {
+        self.heard
     }
 
     pub fn quiet_for(&self, now: Instant) -> Duration {
@@ -1018,6 +1047,23 @@ mod tests {
         let mut fresh = Quiet::new(t0);
         fresh.resume(at(5));
         assert_eq!(fresh.quiet_for(at(8)), Duration::from_secs(3));
+    }
+
+    #[test]
+    fn a_connection_reads_the_quiet_only_once_it_heard_the_stage() {
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let mut q = Quiet::new(t0);
+        assert!(!q.heard());
+        q.resume(at(0));
+        assert!(!q.heard());
+        q.observe(-90.0, at(1));
+        assert!(q.heard());
+        q.resume(at(2));
+        assert!(!q.heard(), "a new connection has heard nothing yet");
+        q.observe(-10.0, at(3));
+        assert!(q.heard());
+        assert_eq!(QUIET_GAP, Duration::from_secs(60));
     }
 
     #[test]
