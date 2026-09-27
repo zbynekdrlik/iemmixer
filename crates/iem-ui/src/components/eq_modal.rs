@@ -513,8 +513,11 @@ pub fn EQModal(
                                                 title="Reset band"
                                                 on:click=move |_| {
                                                     let idx = band_idx_sv.get_value();
-                                                    // Reset gain to 0dB via new gain_db protocol
+                                                    // Reset gain to 0dB via new gain_db protocol; a gain
+                                                    // change switches the band on in the server (ReaEQ's
+                                                    // behaviour under the predecessor, FG-2), so show it on.
                                                     let _ = gain_db_sig.try_set(0.0);
+                                                    let _ = enabled_sig.try_set(true);
                                                     on_param_change.run((idx, "gain_db".to_string(), 0.0));
                                                     // Reset freq to per-band default Hz (reaperiem#196)
                                                     let default_freq_hz: f32 = match band_type_reset.as_str() {
@@ -536,7 +539,6 @@ pub fn EQModal(
                                                     on_param_change.run((idx, "freq_hz".to_string(), default_freq_hz));
                                                     let _ = bw_oct_sig.try_set(default_bw_oct);
                                                     on_param_change.run((idx, "bw_oct".to_string(), default_bw_oct));
-                                                    // Enable/disable state NOT changed — reset only affects parameters
                                                     let _ = curve_trigger.try_update(|n| *n += 1);
                                                 }
                                             >
@@ -625,6 +627,9 @@ pub fn EQModal(
                                                         on_param_change.run((band_idx_sv.get_value(), "gain_db".to_string(), db));
                                                     }
                                                     let _ = gain_db_sig.try_set(db);
+                                                    // The server switches the band on with any gain
+                                                    // change (FG-2); the toggle shows it at once.
+                                                    let _ = enabled_sig.try_set(true);
                                                     let _ = curve_trigger.try_update(|n| *n += 1);
                                                 })
                                                 on_drag_start=Callback::new(move |_: ()| {

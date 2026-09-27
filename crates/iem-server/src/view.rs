@@ -442,7 +442,9 @@ pub fn eq_bands(eq: &Eq) -> Vec<EqBand> {
         .collect()
 }
 
-/// `eq` with one band value set; `param` is freq_hz, gain_db, bw_oct or enabled.
+/// `eq` with one band value set; `param` is freq_hz, gain_db, bw_oct or
+/// enabled. A gain change also switches the band on, as ReaEQ did under the
+/// predecessor (FG-2, P9: the band must not notice the switch).
 pub fn apply_band(eq: &Eq, band: u8, param: &str, value: f32) -> Result<Eq, ViewError> {
     if !value.is_finite() {
         return Err(ViewError::BadValue(format!("{param} {value}")));
@@ -455,7 +457,10 @@ pub fn apply_band(eq: &Eq, band: u8, param: &str, value: f32) -> Result<Eq, View
     let v = f64::from(value);
     match param {
         "freq_hz" => b.freq_hz = v,
-        "gain_db" => b.gain_db = v,
+        "gain_db" => {
+            b.gain_db = v;
+            b.enabled = true;
+        }
         "bw_oct" => b.bw_oct = v,
         "enabled" => b.enabled = value >= 0.5,
         other => return Err(ViewError::BadValue(format!("EQ parameter {other:?}"))),
