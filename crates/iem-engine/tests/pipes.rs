@@ -841,13 +841,67 @@ fn the_binary_renders_offline() {
     assert!(String::from_utf8_lossy(&refused.stderr).contains("96000"));
 }
 
-/// Windows named pipes only (S6 design note §4): the private DACL and the
-/// first-instance flag.
+/// Windows named pipes only (S6 design note §4): the private DACL, the
+/// first-instance flag and writes bounded like the Unix send timeout.
 #[cfg(windows)]
 mod named_pipes {
     use super::*;
     use iem_engine::pipe::{listen, sddl_is_private};
     use iem_win::token::{current_user_sid, pipe_sddl, sddl_sid};
+
+    #[test]
+    fn a_client_that_stops_reading_is_dropped_and_the_engine_keeps_serving() {
+        let e = Engine::start(
+            Flags::default(),
+            InputSignal::Sine {
+                hz: 1000.0,
+                amp: 0.1,
+            },
+        );
+        let mut ctl = e.client();
+        ctl.hello(Role::Control);
+        let engineer = Cmd::StartListen {
+            mix: MixId::new("engineer"),
+        };
+        assert!(ctl.request(1, engineer).error.is_none());
+        // Two clients that never read: the engine's writes to them (the
+        // topology and meters; listen frames) outgrow their pipes' 512-byte
+        // buffers and wait for them.
+        let pipe = e.pipe.clone();
+        let stalled = connect(move || control_name(&pipe));
+        let hello = ClientMsg::Hello {
+            proto: PROTO,
+            role: Role::Observe,
+            client: "stalled".into(),
+        };
+        write_frame(&mut &stalled, &hello).unwrap();
+        let pipe = e.pipe.clone();
+        let stalled_media = connect(move || media_name(&pipe));
+        let start = Instant::now();
+        // The control thread gives the stalled client SEND_TIMEOUT (1 s) and
+        // then drops it: the controller's replies keep coming.
+        for id in 2..=6 {
+            let asked = Instant::now();
+            assert!(ctl.request(id, Cmd::Ping).error.is_none());
+            let took = asked.elapsed();
+            assert!(took < Duration::from_secs(2), "reply {id} after {took:?}");
+        }
+        // The media pump dropped its stalled client too: a new one is served.
+        let media = media_client(&e.pipe);
+        let (h, samples) = media.try_recv().unwrap();
+        assert_eq!((h.channels, samples.len()), (2, 2 * FRAME_48K));
+        // The stalled control client is gone: reading it now shows at most
+        // what fitted its pipe before the drop, then the end.
+        std::thread::sleep(Duration::from_secs(2).saturating_sub(start.elapsed()));
+        let mut dropped = Client {
+            r: Reader::start(stalled, Framer::next_frame),
+        };
+        assert!(dropped.closed(), "the stalled client was dropped");
+        drop(stalled_media);
+        drop(media);
+        // `run` joins the media pump: the shutdown still ends it within 5 s.
+        e.shutdown();
+    }
 
     /// `ERROR_PIPE_BUSY`: every instance is taken for a moment.
     const BUSY: i32 = 231;
