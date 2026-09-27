@@ -195,10 +195,15 @@ pub fn commit_of(build: &str) -> &str {
 
 /// The running engine's status as the guard shows it (`Pc::engine_seen`):
 /// the newest `Status` of the supervisor connection with the hello's build.
+/// `None` until the connection holds both: the engine's pipe exists before
+/// its card opens and its first `Status` follows about 1 s later, and a
+/// reply then shows no engine rather than an empty build and zero counters.
 pub fn seen_status(build: Option<&str>, status: Option<&Status>) -> Option<Status> {
-    let mut seen = status.cloned().unwrap_or_default();
-    seen.build = build.unwrap_or_default().to_owned();
-    Some(seen)
+    let (build, status) = (build?, status?);
+    Some(Status {
+        build: build.to_owned(),
+        ..status.clone()
+    })
 }
 
 /// The guard's `Reply.engine` (design §7, what HIL v1 reads through

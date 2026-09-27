@@ -534,13 +534,19 @@ fn pipe_private(pipe: &str) -> Result<bool, String> {
 
 /// What the supervisor connection holds of our running engine (the guard's
 /// `Reply.engine`): one attempt to connect when there is no connection,
-/// never a wait.
+/// never a wait. `None` until the connection holds the engine's hello and
+/// a `Status` (`effects::engine::seen_status`): an engine coming up is
+/// absent from the reply, not zeroed.
 pub(super) fn seen(pc: &mut WinPc) -> Option<EngineSeen> {
     let pid = pc.kids.pid(Kid::Engine)?;
     if !pc.sup.as_ref().is_some_and(Supervisor::open) {
         pc.sup = Supervisor::connect(&pc.s.pc.engine_pipe, pc.s.stage_inputs.clone()).ok();
     }
     let sup = pc.sup.as_ref()?;
+    let status = {
+        let inbox = lock(&sup.inbox);
+        proto::seen_status(inbox.build.as_deref(), inbox.status.as_ref())?
+    };
     // Read once per engine process, and again at the next look after a
     // failed read.
     let cached = pc.dacl;
@@ -557,8 +563,6 @@ pub(super) fn seen(pc: &mut WinPc) -> Option<EngineSeen> {
             }
         },
     };
-    let inbox = lock(&sup.inbox);
-    let status = proto::seen_status(inbox.build.as_deref(), inbox.status.as_ref())?;
     Some(EngineSeen {
         status,
         pipe_private: private,
