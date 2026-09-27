@@ -5,7 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "iemmixer's Windows glue (S6): safe wrappers; every function returns Unsupported off Windows"
+description = "iemmixer's Windows glue (S6): safe wrappers (Unsupported off Windows) and the portable preferred-buffer window"
 # The one binary is the test helper below; nothing is discovered from src/bin.
 autobins = false
 

@@ -21,8 +21,11 @@ exclude_globs = [
   # The S1a spike program (a Windows-only main; its parser is tested).
   "crates/iem-audio-io/examples/**",
   # Windows FFI wrappers (S6), not compiled on Linux; the windows job runs
-  # their tests; decisions live in callers.
-  "crates/iem-win/src/**",
+  # their tests; decisions live in callers. The portable prefwin.rs and
+  # lib.rs stay mutated.
+  "crates/iem-win/src/{console,errmode,power,process,registry,spawn,sync,token,win,window}.rs",
+  # The Ctrl-Break test helper (a dev-only binary behind a feature).
+  "crates/iem-win/src/bin/**",
 ]
 
 exclude_re = [

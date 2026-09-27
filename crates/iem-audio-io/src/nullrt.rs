@@ -46,11 +46,14 @@ struct Shared {
 pub struct NullRt<P: Process + 'static> {
     thread: JoinHandle<P>,
     shared: Arc<Shared>,
+    /// The frames per callback the pacing thread delivers.
+    frames: u32,
 }
 
 impl<P: Process + 'static> NullRt<P> {
     /// Starts the pacing thread; the processor comes back from [`NullRt::stop`].
     pub fn start(cfg: NullRtConfig, mut p: P) -> io::Result<Self> {
+        let frames = u32::try_from(cfg.block.max(1)).unwrap_or(u32::MAX);
         let shared = Arc::new(Shared::default());
         shared.running.store(true, Ordering::Release);
         let s = Arc::clone(&shared);
@@ -61,12 +64,18 @@ impl<P: Process + 'static> NullRt<P> {
                 s.running.store(false, Ordering::Release);
                 p
             })?;
-        Ok(Self { thread, shared })
+        Ok(Self {
+            thread,
+            shared,
+            frames,
+        })
     }
 
     pub fn stats(&self) -> StreamStats {
         let s = &self.shared;
         StreamStats {
+            // No card to measure: the configured block is what it delivers.
+            frames: self.frames,
             callbacks: s.callbacks.load(Ordering::Acquire),
             late: s.late.load(Ordering::Acquire),
             // No card: no missed periods, overruns, resets or parked stream.
@@ -238,8 +247,14 @@ mod tests {
         assert!(during.running);
         assert!(!during.faulted);
         assert_eq!(
-            (during.missed, during.overruns, during.resets, during.parked),
-            (0, 0, 0, false)
+            (
+                during.frames,
+                during.missed,
+                during.overruns,
+                during.resets,
+                during.parked
+            ),
+            (32, 0, 0, 0, false)
         );
         let p = rt.stop().unwrap();
         let expected = t0.elapsed().as_secs_f64() * f64::from(SR) / 32.0;

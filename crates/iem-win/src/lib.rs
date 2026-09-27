@@ -1,5 +1,6 @@
-//! Safe Windows glue for the engine and the guard (S6 design note §3). Every
-//! function has a portable signature; off Windows it returns `Unsupported`, so
+//! Safe Windows glue for the engine and the guard (S6 design note §3), plus the
+//! portable preferred-buffer window both of them use ([`prefwin`]). Every
+//! effect has a portable signature; off Windows it returns `Unsupported`, so
 //! callers keep their decisions testable on Linux. The only unsafe code of the
 //! workspace besides `iem_audio_io::asio` lives in the `cfg(windows)` modules.
 //!
@@ -19,6 +20,7 @@
 
 pub mod console;
 pub mod power;
+pub mod prefwin;
 pub mod process;
 pub mod registry;
 pub mod spawn;

@@ -19,8 +19,9 @@ static COL: AtomicU32 = AtomicU32::new(0);
 static FILE_LEN: AtomicUsize = AtomicUsize::new(0);
 static FILE: [AtomicU8; FILE_MAX] = [const { AtomicU8::new(0) }; FILE_MAX];
 
-/// Marks the calling thread real-time (the callback does this on entry; a
-/// const thread-local, so no allocation on first use).
+/// Marks the calling thread real-time. The callback calls it on every entry:
+/// after a reopen the driver may call back on a new thread (a const
+/// thread-local, so no allocation on first use and one store per call).
 pub fn mark_rt_thread() {
     RT.with(|f| f.set(true));
 }
@@ -88,30 +89,16 @@ pub fn latest() -> Option<RtPanic> {
 }
 
 // `install` is tested in its own binary (`tests/rtpanic_hook.rs`): the hook
-// is process-global.
+// is process-global. That marking and recording do not allocate is proven in
+// `tests/rt.rs`, the binary that runs on the allocation detector.
 #[cfg(test)]
 mod tests {
-    use std::sync::{Mutex, MutexGuard, PoisonError};
-
-    use assert_no_alloc::{assert_no_alloc, reset_violation_count, violation_count};
-
     use super::*;
 
-    /// The record is process-global: its tests take turns.
-    static SERIAL: Mutex<()> = Mutex::new(());
-
-    fn serial() -> MutexGuard<'static, ()> {
-        SERIAL.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    fn count() -> u64 {
-        latest().map_or(0, |p| p.count)
-    }
-
+    // The only unit test that records: the process-global count is its own.
     #[test]
     fn record_keeps_the_last_96_bytes_of_the_path() {
-        let _turn = serial();
-        let before = count();
+        let before = latest().map_or(0, |p| p.count);
         let long = format!("{}/src/rt.rs", "d".repeat(100));
         record(&long, 12, 34);
         assert_eq!(
@@ -155,32 +142,5 @@ mod tests {
         .unwrap();
         let fresh = std::thread::spawn(is_rt_thread).join().unwrap();
         assert_eq!((other, marked, fresh), (false, (false, true), false));
-    }
-
-    #[test]
-    fn the_detector_sees_an_allocation() {
-        reset_violation_count();
-        let v = assert_no_alloc(|| vec![1u8; 4]);
-        assert!(violation_count() > 0);
-        assert_eq!(v.len(), 4);
-    }
-
-    #[test]
-    fn the_rt_hook_does_not_allocate() {
-        let _turn = serial();
-        let before = count();
-        let (marked, violations) = std::thread::spawn(|| {
-            reset_violation_count();
-            let marked = assert_no_alloc(|| {
-                mark_rt_thread();
-                record(file!(), line!(), column!());
-                is_rt_thread()
-            });
-            (marked, violation_count())
-        })
-        .join()
-        .unwrap();
-        assert_eq!((marked, violations), (true, 0), "the RT path allocated");
-        assert_eq!(count(), before + 1);
     }
 }

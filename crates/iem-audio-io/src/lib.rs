@@ -8,18 +8,19 @@
 //! For the card (S1a design note §3; S6 design note §3): [`format`] (ASIO
 //! sample types ↔ f64, the I2 refusals), [`telemetry`] (lock-free callback
 //! statistics), [`channels`] (topology card channels → card indices),
-//! [`prefwin`] (the preference window: the driver's preferred buffer holds 32
-//! only while the driver opens, REAPER's value at every other moment),
-//! [`reset`] (the reopen budget and the stall rule), [`rtpanic`] (panics on
-//! the real-time thread, recorded in atomics) and, on Windows only, `asio` —
-//! the crate's only unsafe code, the S6 backend.
+//! [`period`] (the period the driver really delivers, measured from sample
+//! positions), [`reset`] (the reopen budget and the stall rule), [`rtpanic`]
+//! (panics on the real-time thread, recorded in atomics) and, on Windows
+//! only, `asio` — the crate's only unsafe code, the S6 backend. The
+//! preference window (the driver's preferred buffer holds 32 only while the
+//! driver opens) lives in `iem_win::prefwin`, which the guard shares.
 //!
 //! Buffers are f64 and channel-major. Every backend calls `process()` inside
 //! `catch_unwind`: a panic zeroes that block's outputs, the processor is never
 //! called again and the fault is reported (§2.4 crash model). After a driver
 //! reopen the ASIO backend calls [`Process::discontinuity`] before the next
-//! block, and [`StreamStats`] carries its missed periods, overruns, resets and
-//! a parked stream.
+//! block, and [`StreamStats`] carries the measured period, missed periods,
+//! overruns, resets and a parked stream.
 
 #![deny(unsafe_code)]
 #![cfg_attr(
@@ -45,24 +46,11 @@ pub mod channels;
 pub mod format;
 pub mod nullrt;
 pub mod offline;
-pub mod prefwin;
+pub mod period;
 pub mod reset;
 pub mod rtpanic;
 pub mod telemetry;
 pub mod wav;
-
-/// The unit tests run on the allocation detector, so `rtpanic::tests` can
-/// prove that the RT panic record neither allocates nor frees. It counts only
-/// inside `assert_no_alloc` (warn mode); everything else allocates as usual.
-#[cfg(test)]
-#[allow(
-    unsafe_code,
-    reason = "the #[global_allocator] expansion, in test builds only"
-)]
-mod alloc_detector {
-    #[global_allocator]
-    static ALLOCATOR: assert_no_alloc::AllocDisabler = assert_no_alloc::AllocDisabler;
-}
 
 pub use nullrt::{InputSignal, NullRt, NullRtConfig};
 pub use offline::{Offline, OfflineRun};
@@ -134,6 +122,10 @@ pub trait Process: Send {
 /// A running stream's statistics, read by the control thread.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StreamStats {
+    /// The period the driver really delivers, in frames per callback: the
+    /// ASIO backend measures it from the first callbacks' sample positions
+    /// ([`period`]); NullRt reports its block size.
+    pub frames: u32,
     pub callbacks: u64,
     /// Late callbacks: NullRt counts those finished more than one period
     /// after their deadline, the ASIO backend callback intervals over 1.5 and

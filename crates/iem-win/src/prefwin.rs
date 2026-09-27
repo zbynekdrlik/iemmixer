@@ -2,14 +2,17 @@
 //! design note §3): REAPER's value stays in the registry at every other moment,
 //! so a crash or power loss in dev never leaves REAPER at 32. The driver reads
 //! the value when it is opened (S1a). Kind (DWORD or text) is always kept.
+//!
+//! Portable and mutation-tested: the engine's ASIO backend opens and closes
+//! the window, the guard's preference check restores the original before
+//! REAPER starts. Both use this module, so the guard never links the ASIO
+//! host. On the PC the store is the registry ([`crate::registry`]).
 
 use core::fmt;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Kind {
-    Dword,
-    Text,
-}
+/// The kind of the registry value (the one [`crate::registry::Hkcu`] reads
+/// and writes).
+pub use crate::registry::Kind;
 
 /// A registry value as read: its kind and its decimal text.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,6 +103,28 @@ pub fn leave(store: &mut impl PrefStore, original: &Pref) -> Result<(), PrefErro
     write_checked(store, original)
 }
 
+/// The guard's restore (design note §5.2 step 4): up to `attempts` writes of
+/// the original, each read back; Ok as soon as the store holds the original,
+/// with the number of writes it took (0 when it already held it). After the
+/// last failed attempt, that attempt's error.
+pub fn restore(
+    store: &mut impl PrefStore,
+    original: &Pref,
+    attempts: u32,
+) -> Result<u32, PrefError> {
+    let mut last = PrefError::Read("no attempt".into());
+    for n in 1..=attempts {
+        if store.read().is_ok_and(|now| now == *original) {
+            return Ok(n - 1);
+        }
+        match leave(store, original) {
+            Ok(()) => return Ok(n),
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,14 +136,15 @@ mod tests {
         }
     }
 
-    /// Holds one value; the n-th read or write (from 1) can fail, and the n-th
-    /// write can store "48" instead of what it was given.
+    /// Holds one value; the n-th read (from 1) can fail, the writes numbered
+    /// in `fail_writes` fail, and the n-th write can store "48" instead of
+    /// what it was given.
     struct FakeStore {
         value: Pref,
         reads: u32,
         writes: u32,
         fail_read: Option<u32>,
-        fail_write: Option<u32>,
+        fail_writes: Vec<u32>,
         corrupt_write: Option<u32>,
     }
 
@@ -129,7 +155,7 @@ mod tests {
                 reads: 0,
                 writes: 0,
                 fail_read: None,
-                fail_write: None,
+                fail_writes: Vec::new(),
                 corrupt_write: None,
             }
         }
@@ -146,7 +172,7 @@ mod tests {
 
         fn write(&mut self, value: &Pref) -> Result<(), String> {
             self.writes += 1;
-            if self.fail_write == Some(self.writes) {
+            if self.fail_writes.contains(&self.writes) {
                 return Err("access denied".into());
             }
             self.value = if self.corrupt_write == Some(self.writes) {
@@ -226,14 +252,14 @@ mod tests {
     fn store_errors_are_reported() {
         let original = pref(Kind::Dword, "64");
         let mut s = FakeStore::holding(original.clone());
-        s.fail_write = Some(1);
+        s.fail_writes = vec![1];
         assert_eq!(
             enter(&mut s, &original, 32),
             Err(PrefError::Write("access denied".into()))
         );
         assert_eq!(s.value, original);
         let mut s = FakeStore::holding(pref(Kind::Dword, "32"));
-        s.fail_write = Some(1);
+        s.fail_writes = vec![1];
         assert_eq!(
             leave(&mut s, &original),
             Err(PrefError::Write("access denied".into()))
@@ -253,6 +279,61 @@ mod tests {
             Err(PrefError::Read("key not found".into()))
         );
         assert_eq!(s.writes, 1);
+    }
+
+    #[test]
+    fn restore_writes_nothing_when_the_original_is_there() {
+        let original = pref(Kind::Dword, "64");
+        let mut s = FakeStore::holding(original.clone());
+        assert_eq!(restore(&mut s, &original, 3), Ok(0));
+        assert_eq!((s.value, s.reads, s.writes), (original, 1, 0));
+    }
+
+    #[test]
+    fn restore_tries_again_after_a_failed_write() {
+        let original = pref(Kind::Dword, "64");
+        let mut s = FakeStore::holding(pref(Kind::Dword, "32"));
+        s.fail_writes = vec![1];
+        assert_eq!(restore(&mut s, &original, 3), Ok(2));
+        assert_eq!((s.value, s.writes), (original.clone(), 2));
+        // A write whose read-back failed still counts: the next attempt finds
+        // the original (the same digits as text were not it) and writes no more.
+        let mut s = FakeStore::holding(pref(Kind::Text, "64"));
+        s.fail_read = Some(2);
+        assert_eq!(restore(&mut s, &original, 3), Ok(1));
+        assert_eq!((s.value, s.reads, s.writes), (original, 3, 1));
+    }
+
+    #[test]
+    fn restore_gives_up_after_exactly_the_attempts() {
+        let original = pref(Kind::Dword, "64");
+        let mut s = FakeStore::holding(pref(Kind::Dword, "32"));
+        s.fail_writes = vec![1, 2, 3, 4];
+        assert_eq!(
+            restore(&mut s, &original, 3),
+            Err(PrefError::Write("access denied".into()))
+        );
+        assert_eq!((s.value, s.writes), (pref(Kind::Dword, "32"), 3));
+        // The last attempt's error comes back: here a value that does not
+        // read back, after two failed writes.
+        let mut s = FakeStore::holding(pref(Kind::Dword, "32"));
+        s.fail_writes = vec![1, 2];
+        s.corrupt_write = Some(3);
+        assert_eq!(
+            restore(&mut s, &original, 3),
+            Err(PrefError::ReadBack {
+                wrote: original.clone(),
+                read: pref(Kind::Dword, "48"),
+            })
+        );
+        assert_eq!(s.writes, 3);
+        // No attempt: nothing is read or written.
+        let mut s = FakeStore::holding(pref(Kind::Dword, "32"));
+        assert_eq!(
+            restore(&mut s, &original, 0),
+            Err(PrefError::Read("no attempt".into()))
+        );
+        assert_eq!((s.reads, s.writes), (0, 0));
     }
 
     #[test]
