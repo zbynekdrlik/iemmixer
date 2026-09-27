@@ -491,9 +491,15 @@ mod tests {
         }
     }
 
-    /// A tray's subscription on `s`, once the guard counts it.
+    /// A tray's subscription on `s`, once the guard counts it. Its reads
+    /// end after 5 s instead of hanging on a frame that never comes (Unix;
+    /// Windows pipes have no timeout).
     fn subscribed(s: &Served) -> Stream {
         let stream = Stream::connect(pipe_name(&s.name).unwrap()).unwrap();
+        #[cfg(unix)]
+        stream
+            .set_recv_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
         let mut wire = &stream;
         proto::write_frame(&mut wire, &Request::Subscribe).unwrap();
         let first = state(proto::read_update(&mut wire).unwrap());
