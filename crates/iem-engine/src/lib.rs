@@ -10,7 +10,9 @@
 //! - [`resample`], [`media`]: 96 ↔ 48 kHz for listen taps and talkback (X3, X4);
 //! - [`persist`]: atomic checksummed saves, generations, baseline, load chain;
 //! - [`pipe`], [`control`], [`engine`]: local-socket pipes, the control loop,
-//!   start-up, the crash model without the driver and the offline renderer.
+//!   start-up, the crash model without the driver and the offline renderer;
+//! - [`interlock`] (S6): the stage check before a switch; on Windows the
+//!   private `asio` module starts the ASIO backend and the interlock's card.
 //!
 //! GPL-3.0-or-later: the engine links the MGA limiter port (D1).
 
@@ -28,10 +30,13 @@
     )
 )]
 
+#[cfg(windows)]
+mod asio;
 pub mod cmd;
 pub mod control;
 pub mod core;
 pub mod engine;
+pub mod interlock;
 pub mod media;
 pub mod params;
 pub mod persist;

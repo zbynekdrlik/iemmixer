@@ -21,6 +21,13 @@ exclude_globs = [
   "crates/iem-audio-io/src/asio.rs",
   # The S1a spike program (a Windows-only main; its parser is tested).
   "crates/iem-audio-io/examples/**",
+  # The engine's ASIO start-up and interlock card (S6): Windows effects, not
+  # compiled on the Linux runners; the windows job lints it and runs its
+  # no-driver refusal. Its decisions live in the mutated engine.rs
+  # (lock_due, the parser, check_site, interlock_plan), control.rs (Ending,
+  # the lock report), interlock.rs (stage, loop, verdict, report, health)
+  # and site.rs ([card]).
+  "crates/iem-engine/src/asio.rs",
   # Windows FFI wrappers (S6), not compiled on Linux; the windows job runs
   # their tests; decisions live in callers and in iem-win's portable decide.rs,
   # which stays mutated with prefwin.rs and lib.rs.

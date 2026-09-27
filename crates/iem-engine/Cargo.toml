@@ -13,6 +13,10 @@ iem-audio-io = { path = "../iem-audio-io" }
 iem-dsp = { path = "../iem-dsp" }
 iem-engine-proto = { path = "../iem-engine-proto" }
 iem-limiter-mga = { path = "../iem-limiter-mga" }
+# The [card] table's preference value (portable prefwin types); on Windows
+# the ASIO start-up's crash dialogs, priority, power throttling, CPU Sets
+# and memory locking (S6). Already in the closure through iem-audio-io.
+iem-win = { path = "../iem-win" }
 interprocess = "2.4"
 rtrb = "0.4"
 serde = { version = "1.0", features = ["derive"] }

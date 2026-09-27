@@ -38,6 +38,27 @@ pub const FADE_WAIT: Duration = Duration::from_millis(500);
 pub trait Driver: Send {
     fn stats(&self) -> StreamStats;
     fn stop(self: Box<Self>);
+    /// Every control tick (never the RT thread): the backend's timed work,
+    /// e.g. the ASIO backend locks its memory after 5 s of streaming.
+    fn tick(&mut self, _now: Instant) {}
+    /// The backend's own reason to end the run, if any.
+    fn ending(&self) -> Option<Ending> {
+        None
+    }
+    /// Locking the real-time memory failed (logged by the backend).
+    fn lock_failed(&self) -> bool {
+        false
+    }
+}
+
+/// Why a backend ends the run (S6 design note §3, §4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ending {
+    /// The Windows session ends: save, fade out, release (the shutdown path).
+    Session,
+    /// The card must be refused (exit 3), e.g. a reopen left the preferred
+    /// buffer at 32 instead of REAPER's original.
+    Card(String),
 }
 
 /// Messages from the acceptor and reader threads.
@@ -55,6 +76,8 @@ pub enum Exit {
         faded: bool,
     },
     Fault(String),
+    /// The backend refused the card while running (exit 3).
+    Card(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -564,6 +587,15 @@ impl Control {
         Exit::Fault(why)
     }
 
+    /// The backend refused the card: save, stop without a fade (the card may
+    /// be in a wrong state), exit 3 — the guard never respawns after it.
+    fn card(&mut self, why: String) -> Exit {
+        error!("the card is refused: {why}");
+        self.save();
+        self.release("card refused");
+        Exit::Card(why)
+    }
+
     fn status_msg(&self, st: &StreamStats) -> Status {
         Status {
             callbacks: st.callbacks,
@@ -580,15 +612,26 @@ impl Control {
             resets: st.resets,
             parked: st.parked,
             held: self.held,
-            lock_failed: false,
+            lock_failed: self.driver.as_ref().is_some_and(|d| d.lock_failed()),
         }
     }
 
     fn tick(&mut self, now: Instant) -> Option<Exit> {
         self.flush_rt();
+        if let Some(d) = self.driver.as_mut() {
+            d.tick(now);
+        }
         let stats = self.driver.as_ref().map(|d| d.stats()).unwrap_or_default();
         if stats.faulted {
             return Some(self.fault(stats.fault.unwrap_or_else(|| "unknown".into())));
+        }
+        match self.driver.as_ref().and_then(|d| d.ending()) {
+            Some(Ending::Card(why)) => return Some(self.card(why)),
+            Some(Ending::Session) => {
+                info!("the Windows session ends");
+                self.shutdown = true;
+            }
+            None => {}
         }
         if self.shutdown {
             return Some(self.shutdown_now());
@@ -855,6 +898,87 @@ mod tests {
         });
         assert_eq!((s.frames, s.missed, s.overruns, s.resets), (64, 0, 0, 0));
         assert!(!s.parked && !s.held);
+    }
+
+    /// A backend with scripted hooks: its ticks counted, an ending, a lock
+    /// failure.
+    struct Scripted {
+        ticks: Arc<AtomicU64>,
+        ending: Option<Ending>,
+        lock_failed: bool,
+    }
+
+    impl Driver for Scripted {
+        fn stats(&self) -> StreamStats {
+            StreamStats {
+                running: true,
+                ..StreamStats::default()
+            }
+        }
+
+        fn stop(self: Box<Self>) {}
+
+        fn tick(&mut self, _now: Instant) {
+            self.ticks.fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn ending(&self) -> Option<Ending> {
+            self.ending.clone()
+        }
+
+        fn lock_failed(&self) -> bool {
+            self.lock_failed
+        }
+    }
+
+    fn scripted(ending: Option<Ending>, lock_failed: bool) -> (Box<dyn Driver>, Arc<AtomicU64>) {
+        let ticks = Arc::new(AtomicU64::new(0));
+        let d = Scripted {
+            ticks: Arc::clone(&ticks),
+            ending,
+            lock_failed,
+        };
+        (Box::new(d), ticks)
+    }
+
+    #[test]
+    fn the_backend_is_ticked_and_its_lock_failure_is_reported() {
+        let mut r = rig();
+        let (d, ticks) = scripted(None, true);
+        r.c.driver = Some(d);
+        assert!(r.c.tick(Instant::now()).is_none());
+        assert!(r.c.tick(Instant::now()).is_none());
+        assert_eq!(ticks.load(Ordering::Relaxed), 2);
+        assert!(r.c.status_msg(&StreamStats::default()).lock_failed);
+        // NullRt (and any backend that does not say otherwise) locks nothing.
+        assert!(!rig().c.status_msg(&StreamStats::default()).lock_failed);
+        assert!(!Idle.lock_failed());
+        assert_eq!(Idle.ending(), None);
+    }
+
+    #[test]
+    fn a_session_end_takes_the_shutdown_path() {
+        let mut r = rig();
+        r.status.faded_out.store(true, Ordering::Release);
+        r.c.driver = Some(scripted(Some(Ending::Session), false).0);
+        assert_eq!(
+            r.c.tick(Instant::now()),
+            Some(Exit::Shutdown { faded: true })
+        );
+        assert!(r.dir.path().join("state/current.json").exists(), "saved");
+        assert!(r.c.driver.is_none(), "released");
+    }
+
+    #[test]
+    fn a_card_refused_while_running_ends_with_exit_3_and_no_fade() {
+        let mut r = rig();
+        let why = "the preferred buffer was not restored";
+        r.c.driver = Some(scripted(Some(Ending::Card(why.into())), false).0);
+        let t0 = Instant::now();
+        assert_eq!(r.c.tick(Instant::now()), Some(Exit::Card(why.into())));
+        assert!(t0.elapsed() < FADE_WAIT, "{:?}", t0.elapsed());
+        assert!(r.dir.path().join("state/current.json").exists(), "saved");
+        assert!(r.c.driver.is_none(), "released");
     }
 
     #[test]

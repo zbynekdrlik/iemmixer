@@ -23,6 +23,18 @@ threshold_dbfs = -50.0
 window_s = 30
 sustain_s = 5
 
+# The ASIO card (S6, `iem-engine run --backend asio`, `interlock`): synthetic
+# driver, DLL and registry key, never the real ones (P6: those live in the
+# ops site). The driver's preferred buffer holds 32 only while the engine
+# opens it; REAPER's original is restored right after.
+[card]
+driver = "Test Card"
+module = "testcard.dll"
+frames = 32
+pref_key = 'Software\ASIO\Test Card'
+pref_name = "PrefBuffSize"
+pref_original = { kind = "dword", raw = "64" }
+
 [[members]]
 id = "member1"
 name = "Member1"

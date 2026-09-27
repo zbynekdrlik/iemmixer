@@ -40,6 +40,8 @@ pub const TAP_RING: usize = 2 * 19_200;
 pub const TALK_RING: usize = 11_520;
 /// Engine fade-out on `Shutdown`, and the test signal's fades.
 pub const FADE_MS: f64 = 50.0;
+/// The output fade-in at start, after `Arm` and after a reopen (§4.4).
+pub const FADE_IN_MS: f64 = 500.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Options {
@@ -53,7 +55,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
-            fade_in_ms: 500.0,
+            fade_in_ms: FADE_IN_MS,
             hold: false,
         }
     }
