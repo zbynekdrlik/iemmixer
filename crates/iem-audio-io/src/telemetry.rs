@@ -666,10 +666,20 @@ mod tests {
     fn overruns_are_longer_than_a_period() {
         let t = Telemetry::new(32, 96_000.0);
         t.on_done(P);
+        assert_eq!(
+            t.snapshot().overruns,
+            0,
+            "exactly one period is not an overrun"
+        );
         t.on_done(P + 1);
+        assert_eq!(
+            t.snapshot().overruns,
+            1,
+            "longer than a period is an overrun"
+        );
         t.on_done(10);
         let s = t.snapshot();
-        assert_eq!(s.overruns, 1);
+        assert_eq!(s.overruns, 1, "a short callback is not an overrun");
         assert_eq!(s.duration.total(), 3);
         assert_eq!(s.period_ns, P);
         assert_eq!(t.period_ns(), P);
