@@ -990,6 +990,36 @@ mod tests {
         assert_eq!(q.quiet_for(at(3000)), Duration::ZERO);
     }
 
+    /// Every engine restart (a HIL job's activate, a respawn) or reconnect
+    /// makes a new supervisor connection. A job needs 300 s of band quiet,
+    /// so a quiet that started again at each connection refused every HIL
+    /// within 5 min of the last one's activate (lane review). The quiet goes
+    /// on across a gap of up to 60 s since the last frame heard; after a
+    /// longer one (the band may have played unheard, e.g. on REAPER) it
+    /// starts again at the new connection.
+    #[test]
+    fn the_band_quiet_goes_on_across_a_short_gap_between_connections() {
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let mut q = Quiet::new(t0);
+        q.resume(at(0));
+        q.observe(-90.0, at(100));
+        // The restart: the next connection 60 s after the last frame.
+        q.resume(at(160));
+        assert_eq!(q.quiet_for(at(170)), Duration::from_secs(170));
+        // A loud frame on the new connection starts it again, as always.
+        q.observe(-10.0, at(170));
+        assert_eq!(q.quiet_for(at(180)), Duration::from_secs(10));
+        // 61 s unheard: the quiet starts at the new connection.
+        q.observe(-90.0, at(200));
+        q.resume(at(261));
+        assert_eq!(q.quiet_for(at(271)), Duration::from_secs(10));
+        // Nothing heard before the first connection: it starts there.
+        let mut fresh = Quiet::new(t0);
+        fresh.resume(at(5));
+        assert_eq!(fresh.quiet_for(at(8)), Duration::from_secs(3));
+    }
+
     #[test]
     fn the_interlock_reports_quiet_activity_or_failure() {
         let out = "starting\n{\"quiet\": true, \"loudest\": []}\n";
