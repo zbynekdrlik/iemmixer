@@ -75,7 +75,7 @@ export class PageSocket {
     const s = new PageSocket(socket);
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
-        socket.terminate();
+        socket.close();
         reject(new Error(`${redact(url)} did not open`));
       }, 5_000);
       socket.on("open", () => {
