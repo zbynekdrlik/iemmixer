@@ -444,6 +444,40 @@ test.describe("EQ sliders, values and reset (F11)", () => {
     await expect.poll(shadow).not.toMatch(/4px\s+inset/);
   });
 
+  // gen1 live/eq.spec.ts "gain change on disabled band re-enables it (ReaEQ
+  // behavior)"; ruled on #25 (FG-2): the band keeps the predecessor's
+  // behaviour, so a gain the band member drags is heard.
+  test("a gain drag on a disabled band enables it (FG-2)", async ({ page, baseURL }) => {
+    const modal = await openEq(page);
+    const band = card(modal, 1);
+    const toggle = band.locator(".eq-band-toggle");
+    if (saved[1].enabled) {
+      await toggle.click();
+      await expect.poll(async () => (await serverEq(baseURL))[1].enabled).toBe(false);
+    }
+    await expect(toggle).toHaveClass(/\boff\b/);
+
+    const gain = row(band, "Gain");
+    const before = await gain.locator(".eq-param-value").innerText();
+    const box = await gain.locator(".eq-slider-track").boundingBox();
+    if (!box) throw new Error("EQ slider not laid out");
+    await dragSlider(page, gain.locator(".eq-slider-track"), box.width * 0.35, 0.25);
+    await expect(gain.locator(".eq-param-value")).not.toHaveText(before);
+    const set = parseFloat(await gain.locator(".eq-param-value").innerText());
+    await closeEq(page);
+
+    await expect
+      .poll(async () => {
+        const b = (await serverEq(baseURL))[1];
+        return { enabled: b.enabled, gain_db: b.gain_db };
+      })
+      .toEqual({ enabled: true, gain_db: expect.closeTo(set, 4) });
+    const again = await openEq(page);
+    await expect(card(again, 1).locator(".eq-band-toggle")).toHaveClass(/\bon\b/);
+    await expect(row(card(again, 1), "Gain").locator(".eq-param-value")).toHaveText(gainLabel(set));
+    await closeEq(page);
+  });
+
   test("the parameter labels are readable (#bbb or brighter, never #555)", async ({ page }) => {
     const modal = await openEq(page);
     const color = await modal.locator(".eq-param-label").first().evaluate((el) => getComputedStyle(el).color);
