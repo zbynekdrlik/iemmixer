@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use iem_engine::engine::{RunConfig, run};
-use iem_engine_proto::{ClientMsg, Cmd, PROTO, Role};
+use iem_engine_proto::{ClientMsg, Cmd, EngineMsg, PROTO, Role};
 
 use crate::AppState;
 use crate::engine::EngineClient;
@@ -81,22 +81,28 @@ impl EngineHarness {
         thread
     }
 
-    /// Waits for an engine that was told to shut down, then starts a new
-    /// one on the same pipe and state directory.
+    /// Waits (≤ 10 s) for an engine that was told to shut down, then starts
+    /// a new one on the same pipe and state directory.
     pub fn start_again(&mut self) {
         if let Some(t) = self.thread.take() {
-            let _ = t.join();
+            assert!(
+                join_within(t, Duration::from_secs(10)),
+                "the engine stopped"
+            );
         }
         self.thread = Some(Self::spawn(&self.pipe, &self.state_dir, |_| {}));
     }
 
-    /// `Shutdown` through a controller connection of its own; waits for the
-    /// engine thread (bounded by the engine's 500 ms fade wait).
+    /// `Shutdown` through a controller connection of its own, read until the
+    /// engine answered it (the engine drops a peer whose socket closed before
+    /// its hello was answered, and would never see the request); then waits
+    /// ≤ 10 s for the engine thread — never forever.
     pub fn shutdown(&mut self) {
         let Some(thread) = self.thread.take() else {
             return;
         };
         if let Ok(mut s) = std::os::unix::net::UnixStream::connect(&self.pipe) {
+            let _ = s.set_read_timeout(Some(Duration::from_secs(1)));
             let hello = ClientMsg::Hello {
                 proto: PROTO,
                 role: Role::Control,
@@ -109,8 +115,22 @@ impl EngineHarness {
             };
             let _ = iem_engine_proto::write_frame(&mut s, &hello);
             let _ = iem_engine_proto::write_frame(&mut s, &bye);
+            let t0 = Instant::now();
+            let mut buf = Vec::new();
+            while t0.elapsed() < Duration::from_secs(5)
+                && iem_engine_proto::read_frame(&mut s, &mut buf).is_ok()
+            {
+                if matches!(
+                    serde_json::from_slice::<EngineMsg>(&buf),
+                    Ok(EngineMsg::Reply(r)) if r.id == 1
+                ) {
+                    break;
+                }
+            }
         }
-        let _ = thread.join();
+        if !join_within(thread, Duration::from_secs(10)) {
+            eprintln!("the test engine did not stop within 10 s; left running");
+        }
     }
 
     /// An app state connected to this engine (control and media pipes).
@@ -129,6 +149,19 @@ impl EngineHarness {
         wait_until("the engine connection", || engine.connected()).await;
         (config_dir, state)
     }
+}
+
+/// Joins `thread` if it ends within `limit`; otherwise leaves it running.
+fn join_within(thread: std::thread::JoinHandle<()>, limit: Duration) -> bool {
+    let t0 = Instant::now();
+    while !thread.is_finished() {
+        if t0.elapsed() > limit {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let _ = thread.join();
+    true
 }
 
 impl Drop for EngineHarness {
