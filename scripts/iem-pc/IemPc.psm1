@@ -1274,6 +1274,24 @@ function Get-IemHilEngineGap {
     return ''
 }
 
+function Test-IemHilEngineUp {
+    # The engine status a HIL v1 wait looks for (design section 7): measured frames 32 and
+    # callbacks above -Callbacks; with -Sha its build names that bundle, with -Resets its
+    # reset count is above that. $false while the guard shows no engine (it comes up: the
+    # guard shows one only after its hello and first Status) or a status without the fields.
+    param($Engine, [int64]$Callbacks = 0, [string]$Sha = '', $Resets = $null)
+    if ($null -eq $Engine) { return $false }
+    foreach ($f in @('frames', 'callbacks')) { if ($null -eq $Engine.PSObject.Properties[$f]) { return $false } }
+    if ([int64]$Engine.frames -ne 32) { return $false }
+    if ([int64]$Engine.callbacks -le $Callbacks) { return $false }
+    if ($Sha -and ([string](Get-IemProp $Engine 'build') -cne $Sha)) { return $false }
+    if ($null -ne $Resets) {
+        $r = Get-IemProp $Engine 'resets'
+        if (($null -eq $r) -or ([int64]$r -le [int64]$Resets)) { return $false }
+    }
+    return $true
+}
+
 function Test-IemHilCard {
     # The engine on the card over a window (design section 7): measured frames 32,
     # callbacks advancing at 96 kHz / 32 (3000 a second, 95 % at least), no

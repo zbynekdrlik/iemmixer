@@ -24,10 +24,15 @@ The engine checks read `engine` from the `iemmode status` reply (the guard's
 Reply.engine): build (the bundle SHA), frames (measured), callbacks, missed,
 resets, parked, faulted, pipe_private (the engine pipes' DACL holds only the
 user and SYSTEM), spawns (engines the guard started) and last_exit. A check
-whose data is missing fails. The panic check drives `iemmode inject-fault` and
-wants exit 70, exactly one respawn and the new engine streaming at 32 within
--PanicWait seconds. F30 runs when -SiteChange and -SiteRevert name the
-synthetic site change and its revert.
+whose data is missing fails. While an engine comes up the guard shows none
+(until its hello and first Status; after a hand-over to a new guard exe, until
+that guard looked at it), so after activate, a forced reopen and the respawn
+the script polls `iemmode status` for at most -EngineWait seconds until the
+engine it expects shows (Test-IemHilEngineUp), then the check judges the last
+status. The panic check drives `iemmode inject-fault` and wants exit 70,
+exactly one respawn within -PanicWait seconds and the new engine streaming at
+32. F30 runs when -SiteChange and -SiteRevert name the synthetic site change
+and its revert.
 
 Not in HIL v1 (the guard does not report them; S6 plan Task 12, HIL v1
 scope): the pipes' first-instance flag (proved by the windows CI job's pipe
@@ -46,6 +51,7 @@ param(
     [double]$TestDbfs = -30,
     [double]$TestTtl = 10,
     [double]$PanicWait = 30,
+    [double]$EngineWait = 30,
     [string]$SiteChange = '',
     [string]$SiteRevert = ''
 )
@@ -91,6 +97,24 @@ function Get-HilStatus {
     return $r.reply
 }
 
+function Wait-HilEngine {
+    # Polls `iemmode status` every 500 ms for at most -EngineWait seconds until the guard
+    # shows the engine a check expects (Test-IemHilEngineUp: frames 32 and callbacks above
+    # -Callbacks; with -Build this bundle's build; with -Resets more resets than that).
+    # Returns the last status (the check judges it), or $null once the job is cancelled.
+    param([int64]$Callbacks = 0, [switch]$Build, $Resets = $null)
+    $want = ''
+    if ($Build) { $want = $Sha }
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    while ($true) {
+        $st = Get-HilStatus
+        if ($script:cancelled) { return $null }
+        if (Test-IemHilEngineUp -Engine (Get-IemProp $st 'engine') -Callbacks $Callbacks -Sha $want -Resets $Resets) { return $st }
+        if ($clock.Elapsed.TotalSeconds -ge $EngineWait) { return $st }
+        Start-Sleep -Milliseconds 500
+    }
+}
+
 function Invoke-HilUrlCheck {
     # An address the server names answers /api/version with this bundle.
     param([Parameter(Mandatory)][string]$Name, [string]$Base = '')
@@ -109,8 +133,10 @@ function Invoke-HilChecks {
     if (-not (Test-IemModeOk -Result $r)) { Add-HilCheck 'activate' $false (Get-IemModeText -Result $r); return }
     Add-HilCheck 'activate' $true ('bundle {0} active' -f $Sha)
 
-    # Versions: the engine's build and the server's /api/version name this SHA.
-    $st = Get-HilStatus
+    # Versions: the engine's build and the server's /api/version name this SHA. The
+    # guard shows the new engine once it said hello and sent a Status (after a hand-over,
+    # once the new guard exe looked at it): wait for this build streaming at 32.
+    $st = Wait-HilEngine -Build
     if ($script:cancelled) { return }
     $build = [string](Get-IemProp (Get-IemProp $st 'engine') 'build')
     Add-HilCheck 'engine-build' ($build -ceq $Sha) ("engine build '{0}'" -f $build)
@@ -167,15 +193,22 @@ function Invoke-HilChecks {
     $r = Invoke-Hil -A @('force-reopen')
     if ($script:cancelled) { return }
     $reopened = Test-IemModeOk -Result $r
-    Start-Sleep -Seconds 2
-    $after = Get-HilStatus
+    # The reset shows once the engine's next Status reached the guard: wait for it.
+    $b0 = Get-IemProp $before 'engine'
+    if ($reopened) {
+        $after = Wait-HilEngine -Callbacks ([int64](Get-IemProp $b0 'callbacks')) -Resets ([int64](Get-IemProp $b0 'resets'))
+    } else {
+        $after = Get-HilStatus
+    }
     if ($script:cancelled) { return }
     $ro = Test-IemHilReopen -Before (Get-IemProp $before 'engine') -After (Get-IemProp $after 'engine')
     Add-HilCheck 'reopen' ($reopened -and $ro.ok) ('{0}; {1}' -f (Get-IemModeText -Result $r), $ro.detail) $ro.numbers
 
     # RT panic -> exit 70, release, respawn, fade-in (design section 7): the
     # guard injects the fault (dev, this job); its engine start count and the
-    # last exit code show the respawn, and the new engine streams at 32.
+    # last exit code show the respawn (the first status that shows the new
+    # engine), and the new engine streams at 32 (a later status with callbacks
+    # above that first one's).
     $before = Get-HilStatus
     if ($script:cancelled) { return }
     $r = Invoke-Hil -A @('inject-fault')
@@ -193,8 +226,7 @@ function Invoke-HilChecks {
             if ([int64](Get-IemProp (Get-IemProp $st 'engine') 'spawns') -gt $s0) { $respawned = $st; break }
         }
         if ($null -ne $respawned) {
-            Start-Sleep -Seconds 2
-            $later = Get-HilStatus
+            $later = Wait-HilEngine -Callbacks ([int64](Get-IemProp (Get-IemProp $respawned 'engine') 'callbacks'))
             if ($script:cancelled) { return }
         }
     }

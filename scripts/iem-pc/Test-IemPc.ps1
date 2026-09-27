@@ -471,6 +471,24 @@ function Invoke-IemTuningApply { param([string]$ProfilePath, [int]$Tier) return 
     Assert (-not $pn.ok -and $pn.detail -ceq 'no new engine within the wait') 'hil-panic-refuses-no-respawn'
     $pg = Test-IemHilPanic -Before ([pscustomobject]@{ frames = 32 }) -Respawned (EngP 10 2 70) -Later (EngP 6010 2 70)
     Assert (-not $pg.ok -and $pg.detail -like "*lacks 'spawns'*") 'hil-panic-refuses-a-status-without-spawns'
+    # What HIL v1's waits look for: the guard shows no engine until its hello and first
+    # Status, and that first Status may come before the card streams (frames 0).
+    function EngU($cb, $frames = 32, $resets = 2, $build = $S) {
+        [pscustomobject]@{ build = $build; frames = $frames; callbacks = $cb; resets = $resets }
+    }
+    Assert (Test-IemHilEngineUp -Engine (EngU 3000)) 'hil-engine-up-streaming-at-32'
+    Assert (-not (Test-IemHilEngineUp -Engine $null)) 'hil-engine-up-refuses-no-engine'
+    Assert (-not (Test-IemHilEngineUp -Engine (EngU 0 0 0))) 'hil-engine-up-refuses-the-first-status-before-the-card'
+    Assert (-not (Test-IemHilEngineUp -Engine (EngU 3000 64))) 'hil-engine-up-refuses-a-measured-64'
+    Assert (-not (Test-IemHilEngineUp -Engine ([pscustomobject]@{ frames = 32 }))) 'hil-engine-up-refuses-a-status-without-callbacks'
+    Assert (Test-IemHilEngineUp -Engine (EngU 3000) -Sha $S) 'hil-engine-up-names-the-bundle'
+    Assert (-not (Test-IemHilEngineUp -Engine (EngU 3000 32 2 ('f' + $S.Substring(1))) -Sha $S)) 'hil-engine-up-refuses-another-build'
+    Assert (-not (Test-IemHilEngineUp -Engine (EngU 3000 32 2 '') -Sha $S)) 'hil-engine-up-refuses-an-empty-build'
+    Assert (Test-IemHilEngineUp -Engine (EngU 3000) -Callbacks 2999) 'hil-engine-up-callbacks-above'
+    Assert (-not (Test-IemHilEngineUp -Engine (EngU 3000) -Callbacks 3000)) 'hil-engine-up-refuses-callbacks-not-above'
+    Assert (Test-IemHilEngineUp -Engine (EngU 3000) -Resets 1) 'hil-engine-up-resets-above'
+    Assert (-not (Test-IemHilEngineUp -Engine (EngU 3000) -Resets 2)) 'hil-engine-up-refuses-resets-not-above'
+    Assert (-not (Test-IemHilEngineUp -Engine ([pscustomobject]@{ frames = 32; callbacks = 3000 }) -Resets 0)) 'hil-engine-up-refuses-a-status-without-resets'
 
     $ok1 = New-IemHilCheck -Name 'a' -Ok $true
     $bad1 = New-IemHilCheck -Name 'b' -Ok $false -Detail 'no'
@@ -632,6 +650,16 @@ exit 1
         Assert (CheckOk $h9.result $n) "hil-run-waits-for-the-engine-check-$n-passes ($(CheckDetail $h9.result $n))"
     }
     Assert ($h9.result.summary -ceq $h1.result.summary) "hil-run-waits-for-the-engine-same-summary ($($h9.result.summary))"
+
+    # An engine that never shows: every wait ends after -EngineWait (-PanicWait for the
+    # respawn) and its checks fail on what the guard showed.
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    $h10 = Invoke-HilRun ('{"sha":"' + $S + '","refuse":[],"silent":[],"event_after":0,"cold":1000}') 'dev' '0.2' @('-EngineWait', '1', '-PanicWait', '1')
+    $took = $clock.Elapsed.TotalSeconds
+    $eb = CheckDetail $h10.result 'engine-build'
+    Assert (($h10.exit -eq 1) -and (CheckFailed $h10.result 'engine-build') -and ($eb -ceq "engine build ''")) "hil-run-an-engine-that-never-shows-fails-engine-build ($eb)"
+    foreach ($n in @('card', 'reopen', 'panic')) { Assert (CheckFailed $h10.result $n) "hil-run-an-engine-that-never-shows-fails-$n" }
+    Assert ($took -lt 60) "hil-run-the-engine-waits-are-bounded ($took s)"
 } finally {
     $sch = New-Object -ComObject 'Schedule.Service'
     $sch.Connect()
