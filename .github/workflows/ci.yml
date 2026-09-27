@@ -31,6 +31,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest discover -s scripts -p 'test_*.py' -v
+          python3 -m unittest discover -s scripts/asio-spike -p 'test_*.py' -v
           python3 scripts/test_check_disposal_safety.py
       - name: Golden tooling self-tests (numpy venv)
         run: |
@@ -384,6 +385,54 @@ jobs:
             target/release/iem-tray.exe
             target/release/iem-migrate.exe
           retention-days: 7
+          if-no-files-found: error
+
+  asio-spike:
+    name: asio-spike
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Spike PC module self-test (Windows PowerShell 5.1, as on the PC)
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/asio-spike/Test-SpikePc.ps1
+      - name: Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Audio I/O clippy and tests on Windows (format, telemetry, the ASIO host builds, the spike's parser)
+        run: |
+          cargo clippy --locked -p iem-audio-io --all-targets -- -D warnings
+          cargo test --locked -p iem-audio-io
+      - name: Build the spike (release)
+        run: cargo build --locked --release -p iem-audio-io --example asio_spike
+      - name: Without an ASIO driver the spike reports no-driver and exits 3
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $report = Join-Path $env:RUNNER_TEMP 'probe.json'
+          & target/release/examples/asio_spike.exe probe --driver 'No Such Card' --report $report --stop-file (Join-Path $env:RUNNER_TEMP 'stop')
+          if ($LASTEXITCODE -ne 3) { throw "exit $LASTEXITCODE, expected 3" }
+          $r = Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
+          if ($r.outcome -ne 'no-driver') { throw "outcome $($r.outcome), expected no-driver" }
+          $global:LASTEXITCODE = 0
+      - name: Bundle (spike, PC scripts, SHA256SUMS)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $b = Join-Path $env:RUNNER_TEMP 'asio-spike'
+          New-Item -ItemType Directory -Force -Path $b | Out-Null
+          Copy-Item -LiteralPath target/release/examples/asio_spike.exe, scripts/asio-spike/SpikePc.psm1, scripts/asio-spike/spike-task.ps1, scripts/golden/GoldenPc.psm1 -Destination $b
+          $lines = Get-ChildItem -LiteralPath $b -File | Sort-Object Name | ForEach-Object { '{0}  {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name }
+          [IO.File]::WriteAllText((Join-Path $b 'SHA256SUMS'), (($lines -join "`n") + "`n"))
+      - name: Upload (dev pushes only — the only spike that may reach the PC, P5)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: asio-spike-${{ github.sha }}
+          path: ${{ runner.temp }}/asio-spike
+          retention-days: 14
           if-no-files-found: error
 
   supply-chain:
