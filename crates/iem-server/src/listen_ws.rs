@@ -116,6 +116,20 @@ async fn stop(state: &AppState, mix: &MixId) {
     }
 }
 
+/// The next listen frame to send: a listener more than [`MAX_BEHIND`] frames
+/// behind (a slow connection) skips the older ones and goes on from the
+/// newest, so it hears the band late by at most that many frames.
+async fn next_frame(
+    rx: &mut broadcast::Receiver<bytes::Bytes>,
+) -> Result<bytes::Bytes, broadcast::error::RecvError> {
+    loop {
+        let frame = rx.recv().await?;
+        if rx.len() <= MAX_BEHIND {
+            return Ok(frame);
+        }
+    }
+}
+
 async fn session(mut socket: WebSocket, state: AppState) {
     tracing::info!("Audio WebSocket connected");
     let mut current: Option<(MixId, String)> = None;
@@ -173,12 +187,9 @@ async fn session(mut socket: WebSocket, state: AppState) {
                 Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
                 Some(Ok(_)) => {}
             },
-            frame = async { match rx.as_mut() { Some(r) => r.recv().await, None => std::future::pending().await } }, if listening => {
+            frame = async { match rx.as_mut() { Some(r) => next_frame(r).await, None => std::future::pending().await } }, if listening => {
                 match frame {
                     Ok(data) => {
-                        if rx.as_ref().is_some_and(|r| r.len() > MAX_BEHIND) {
-                            continue;
-                        }
                         last_audio = Instant::now();
                         if socket.send(Message::Binary(data)).await.is_err() {
                             break;
@@ -222,6 +233,55 @@ mod tests {
         // No topology yet: every mix is taken as another mix's.
         assert_eq!(slot_of(&state, &MixId::new("engineer")), 1);
         assert_eq!(slot_of(&state, &MixId::new("member1")), 1);
+    }
+
+    /// `frames` frames queued for one listener.
+    fn queued(frames: u8) -> broadcast::Receiver<bytes::Bytes> {
+        let (tx, rx) = broadcast::channel(64);
+        for k in 0..frames {
+            tx.send(bytes::Bytes::from(vec![k])).unwrap();
+        }
+        rx
+    }
+
+    /// The frames `next_frame` hands out until none is left (each wait
+    /// bounded: a skip that never ends fails here, not by hanging).
+    async fn sent(rx: &mut broadcast::Receiver<bytes::Bytes>) -> Vec<u8> {
+        let mut out = Vec::new();
+        while !rx.is_empty() {
+            let frame = tokio::time::timeout(Duration::from_secs(5), next_frame(rx))
+                .await
+                .expect("a frame within 5 s")
+                .expect("an open channel");
+            out.push(frame[0]);
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn a_slow_listener_skips_to_the_newest_frames() {
+        // 20 frames behind: the oldest are skipped, the newest five sent in order.
+        let mut rx = queued(20);
+        assert_eq!(sent(&mut rx).await, [15, 16, 17, 18, 19]);
+        // Exactly MAX_BEHIND frames behind the one it takes: nothing skipped.
+        let mut rx = queued(MAX_BEHIND as u8 + 1);
+        assert_eq!(sent(&mut rx).await, [0, 1, 2, 3, 4]);
+        // A lagged receiver reports it (the session logs and goes on).
+        let (tx, mut rx) = broadcast::channel(2);
+        for k in 0..3u8 {
+            tx.send(bytes::Bytes::from(vec![k])).unwrap();
+        }
+        assert_eq!(
+            next_frame(&mut rx).await,
+            Err(broadcast::error::RecvError::Lagged(1))
+        );
+        assert_eq!(next_frame(&mut rx).await.unwrap()[0], 1);
+        drop(tx);
+        assert_eq!(rx.recv().await.unwrap()[0], 2);
+        assert_eq!(
+            next_frame(&mut rx).await,
+            Err(broadcast::error::RecvError::Closed)
+        );
     }
 
     /// Listen taps against the real engine (NullRt).
