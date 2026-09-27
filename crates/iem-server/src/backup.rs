@@ -507,10 +507,16 @@ mod tests {
         );
         assert!(p.skipped.is_empty(), "{:?}", p.skipped);
         assert!(p.changes.is_empty(), "{:?}", p.changes);
-        // A backup of the running state lacks nothing.
+        // A backup of the running state lacks nothing; nor does any backup
+        // when nothing is running.
         let same = MixerBackup::new("t".into(), 1, current.clone());
         assert!(
             preview(&v, &current, &|_| None, &same)
+                .not_in_backup
+                .is_empty()
+        );
+        assert!(
+            preview(&v, &MixState::default(), &|_| None, &b)
                 .not_in_backup
                 .is_empty()
         );
