@@ -88,7 +88,7 @@ pub enum Request {
 }
 
 /// Every answer, and every update a subscriber gets.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Reply {
     pub ok: bool,
     pub mode: Mode,
@@ -107,7 +107,7 @@ pub struct Reply {
 /// The engine in a [`Reply`] (design §7: HIL v1 reads it through `iemmode
 /// status`). The guard fills it from the supervisor connection's `Status` and
 /// `Hello`, the engine pipe's DACL read back, and its own respawn record.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EngineStatus {
     /// `Hello.engine_build`: the bundle's commit SHA.
@@ -125,13 +125,26 @@ pub struct EngineStatus {
     pub spawns: u64,
     /// The exit code of the engine process before the running one, if any.
     pub last_exit: Option<i32>,
+    /// HIL's spare card outputs (`[guard] hil_tx`, opened by an engine with
+    /// the test-signal flag) and each one's peak since the engine's previous
+    /// `Status`: HIL v1 proves its test signal with them (design §7).
+    pub hil: Vec<HilOut>,
+}
+
+/// One of HIL's spare card outputs as the engine's `Status` reports it: its
+/// card channel and its peak (linear) since the previous `Status`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HilOut {
+    pub tx: u16,
+    pub peak: f64,
 }
 
 /// One frame of a subscription ([`Request::Subscribe`], the tray): the
 /// guard's [`Reply`] at once and after every change of mode, switch or
 /// alarms, and `{"cmd":"quit"}` ([`Request::Quit`]) when the guard stops the
 /// subscriber (its tray stop, S6 plan Task 9): the subscriber then exits.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Update {
     State(Reply),
     Quit,
@@ -370,6 +383,13 @@ mod tests {
             pipe_private: true,
             spawns: 3,
             last_exit: Some(70),
+            hil: vec![
+                HilOut {
+                    tx: 94,
+                    peak: 0.0316,
+                },
+                HilOut { tx: 95, peak: 0.0 },
+            ],
         }
     }
 
@@ -398,6 +418,7 @@ mod tests {
                 "pipe_private": true,
                 "spawns": 3,
                 "last_exit": 70,
+                "hil": [{"tx": 94, "peak": 0.0316}, {"tx": 95, "peak": 0.0}],
             })
         );
         // No engine: no key at all, so replies without one stay as before.
@@ -422,6 +443,7 @@ mod tests {
         let fresh = serde_json::to_value(EngineStatus::default()).unwrap();
         assert_eq!(fresh["last_exit"], serde_json::Value::Null);
         assert_eq!(fresh["spawns"], 0);
+        assert_eq!(fresh["hil"], serde_json::json!([]));
     }
 
     fn a_state(mode: Mode) -> Reply {
