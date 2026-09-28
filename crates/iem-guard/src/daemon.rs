@@ -1916,8 +1916,20 @@ fn rehearse(pc: &mut dyn Pc, g: &mut Guard) -> (bool, String) {
         Ok(PrefSeen::Held(held)) => bad.push(format!("the preference: {}", held.text())),
         Err(e) => bad.push(format!("the preference: {e}")),
     }
+    match pc.web_ports() {
+        Ok((None, None)) => {}
+        Ok((http, https)) => {
+            let pid = |p: Option<u32>| p.map_or_else(|| "free".to_owned(), |p| p.to_string());
+            bad.push(format!(
+                "ports 80/443 are still held (80: {}, 443: {})",
+                pid(http),
+                pid(https)
+            ));
+        }
+        Err(e) => bad.push(format!("ports 80/443: {e}")),
+    }
     let verdict = if bad.is_empty() {
-        "teardown clean: module unheld, preference original".to_owned()
+        "teardown clean: module unheld, preference original, ports 80/443 free".to_owned()
     } else {
         format!("teardown problems: {}", bad.join("; "))
     };

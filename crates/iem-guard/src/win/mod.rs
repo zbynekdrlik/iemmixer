@@ -38,7 +38,7 @@ use crate::cancel::Cancel;
 use crate::effects::engine::Quiet;
 use crate::handover::{AppExit, ReaperFacts};
 use crate::pc::{
-    self, Audience, EngineSeen, Images, Kid, Pc, PrefSeen, Procs, R, Status, StepError,
+    self, Audience, EngineSeen, Images, Kid, Pc, Ports, PrefSeen, Procs, R, Status, StepError,
 };
 use crate::plan::{Facts, Health, Mode};
 use crate::site::{self, Settings};
@@ -311,6 +311,10 @@ impl Pc for WinPc {
 
     fn install_site(&mut self, path: &str, c: &Cancel) -> R<String> {
         engine::install_site(self, path, c)
+    }
+
+    fn web_ports(&mut self) -> R<Ports> {
+        web::ports()
     }
 
     fn exclude(&mut self, sha: &str, keep: &[String]) -> R<()> {

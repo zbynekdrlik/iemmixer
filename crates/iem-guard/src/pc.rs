@@ -586,6 +586,9 @@ pub trait Pc {
     /// (`effects::tuning::logon_result`); `None`: no result or an unreadable
     /// one. Never waits.
     fn logon(&mut self) -> Option<Logon>;
+    /// The listening pids of ports 80 and 443: the rehearsal's check that
+    /// the predecessor could bind them after the teardown. Never waits.
+    fn web_ports(&mut self) -> R<Ports>;
 }
 
 /// A scripted PC for the daemon's tests.
@@ -739,6 +742,8 @@ pub mod fake {
         /// What a passing `identity` names about the LAN certificate (its
         /// validity; #9 2026-09-28).
         pub lan_note: Option<String>,
+        /// What `web_ports` reads (a read: not a recorded call).
+        pub ports: Result<Ports, String>,
         calls: Vec<(Call, Instant)>,
         fails: HashMap<Call, String>,
         blocked: Vec<Call>,
@@ -806,6 +811,7 @@ pub mod fake {
                 job: Ok(Placement::NoJob),
                 logon: None,
                 lan_note: None,
+                ports: Ok((None, None)),
                 calls: Vec::new(),
                 fails: HashMap::new(),
                 blocked: Vec::new(),
@@ -1202,6 +1208,10 @@ pub mod fake {
 
         fn job(&mut self) -> Result<Placement, String> {
             self.job.clone()
+        }
+
+        fn web_ports(&mut self) -> R<Ports> {
+            self.ports.clone().map_err(StepError::Failed)
         }
 
         fn logon(&mut self) -> Option<Logon> {
