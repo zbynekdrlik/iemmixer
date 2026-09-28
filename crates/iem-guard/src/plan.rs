@@ -702,6 +702,7 @@ mod tests {
                 Step::ReaperSaveQuit,
                 Step::TuningEnter,
                 Step::Data,
+                Step::PrefCheck,
                 Step::EngineStart,
                 Step::EngineArm,
                 Step::ServerStart,
@@ -710,6 +711,95 @@ mod tests {
                 Step::RunnerStart,
             ]
         );
+    }
+
+    /// An engine that ended while it held the card (a hard kill, a power
+    /// loss) left 32, and a new engine refuses the card unless it finds
+    /// REAPER's original (#9 2026-09-28). So every entry restores the
+    /// preference right before the engine starts: once, after REAPER quit
+    /// and after our own engine stopped (no open driver sees the write),
+    /// never while REAPER may hold the card.
+    #[test]
+    fn every_entry_restores_the_preference_right_before_the_engine_starts() {
+        every_entry(|from, to, f, p| {
+            let why = format!("{from:?}→{to:?} {f:?}: {p:?}");
+            let pref = at(&p, Step::PrefCheck).expect("PrefCheck in every entry");
+            assert_eq!(
+                p.iter().filter(|s| **s == Step::PrefCheck).count(),
+                1,
+                "{why}"
+            );
+            assert_eq!(at(&p, Step::EngineStart), Some(pref + 1), "{why}");
+            for s in [
+                Step::Interlock,
+                Step::AppStop,
+                Step::ReaperSaveQuit,
+                Step::EngineStop,
+                Step::TuningEnter,
+                Step::Data,
+            ] {
+                if let Some(i) = at(&p, s) {
+                    assert!(i < pref, "{why}: {s:?} after PrefCheck");
+                }
+            }
+        });
+        assert_eq!(
+            plan(Mode::Event, Mode::Live, &band_up()),
+            [
+                Step::Precheck,
+                Step::Interlock,
+                Step::AppStop,
+                Step::ReaperSaveQuit,
+                Step::TuningEnter,
+                Step::Data,
+                Step::PrefCheck,
+                Step::EngineStart,
+                Step::EngineArm,
+                Step::ServerStart,
+                Step::TrayStart,
+                Step::IdentityCheck,
+            ]
+        );
+        // Our own engine stops (and restores the preference as it releases
+        // the card) before the check.
+        assert_eq!(
+            plan(Mode::Dev, Mode::Dev, &iemmixer_up()),
+            [
+                Step::Precheck,
+                Step::JobsCancel,
+                Step::RunnerStop,
+                Step::EngineStop,
+                Step::ServerStop,
+                Step::TrayStop,
+                Step::TuningEnter,
+                Step::Data,
+                Step::PrefCheck,
+                Step::EngineStart,
+                Step::EngineArm,
+                Step::ServerStart,
+                Step::TrayStart,
+                Step::IdentityCheck,
+                Step::RunnerStart,
+            ]
+        );
+    }
+
+    /// A restore that fails before the engine starts unwinds to event like
+    /// any entry step; the event plan's own `PrefCheck` then follows
+    /// `on_pref_fail` as before.
+    #[test]
+    fn a_failed_pref_check_in_an_entry_unwinds_to_event() {
+        for to in [Mode::Dev, Mode::Live] {
+            for pf in [PrefFail::StartReaperWithAlarm, PrefFail::KeepReaperDown] {
+                assert_eq!(
+                    on_error(to, Step::PrefCheck, None, pf),
+                    OnError::Unwind,
+                    "{to:?} {pf:?}"
+                );
+            }
+        }
+        let back = plan(Mode::Dev, Mode::Event, &Facts::default());
+        assert!(has(&back, Step::PrefCheck), "{back:?}");
     }
 
     #[test]
@@ -758,14 +848,14 @@ mod tests {
             if let Some(i) = at(&p, Step::Interlock) {
                 assert_eq!(i, 1, "{why}: the interlock comes right after the precheck");
             }
-            // Nothing of the band's system is started, and no event-only step runs.
+            // Nothing of the band's system is started, and no event-only step
+            // runs (`PrefCheck` runs in both: right before the engine here).
             for s in [
                 Step::ReaperStart,
                 Step::ReaperHandover,
                 Step::AppStart,
                 Step::AppHandover,
                 Step::TuningExit,
-                Step::PrefCheck,
                 Step::HolderGone,
                 Step::Fingerprint,
                 Step::EngineHealth,

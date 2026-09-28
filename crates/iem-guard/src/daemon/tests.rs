@@ -283,6 +283,7 @@ fn a_dev_entry_runs_the_whole_plan_and_serves() {
             Call::ReaperSaveQuit,
             Call::Tuning,
             Call::Data,
+            Call::PrefCheck,
             Call::EngineStart,
             Call::EngineReady,
             Call::EngineArm,
@@ -304,6 +305,62 @@ fn a_dev_entry_runs_the_whole_plan_and_serves() {
         (Mode::Dev, None, Some(Outcome::Done))
     );
     assert_eq!(v.epoch, 1);
+}
+
+/// An engine that ended while it held the card (a hard kill, a power loss)
+/// left 32, and a new engine refuses the card unless it finds REAPER's
+/// original (#9 2026-09-28): the dev entry restores it right before the
+/// engine starts. A restore that fails unwinds to event like any entry
+/// step, and the event plan's own check follows `on_pref_fail`.
+#[test]
+fn a_dev_entry_restores_the_preference_right_before_the_engine_starts() {
+    let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
+    g.state.pins.current = Some(SHA.into());
+    pc.meters = vec![-60.0];
+    pc.pref_attempts = 1;
+    let r = handle(&mut pc, &mut g, dev(), 0);
+    assert!(r.ok, "{r:?}");
+    assert!(
+        r.detail
+            .contains("the preferred buffer was restored (1 writes)"),
+        "{}",
+        r.detail
+    );
+    let order = steps(&pc);
+    let first = |c: Call| order.iter().position(|x| *x == c).unwrap();
+    assert!(
+        first(Call::ReaperSaveQuit) < first(Call::PrefCheck),
+        "{order:?}"
+    );
+    assert_eq!(
+        first(Call::PrefCheck) + 1,
+        first(Call::EngineStart),
+        "{order:?}"
+    );
+    assert_eq!(pc.count(Call::PrefCheck), 1);
+    assert_eq!(g.state.mode, Mode::Dev);
+    assert!(g.alarms.all().is_empty(), "{:?}", texts(&g));
+
+    let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
+    g.state.pins.current = Some(SHA.into());
+    pc.meters = vec![-60.0];
+    pc.fail(Call::PrefCheck, "3 restores failed");
+    let r = handle(&mut pc, &mut g, dev(), 0);
+    assert!(!r.ok, "{r:?}");
+    assert!(!pc.called(Call::EngineStart));
+    // The entry's check, then the event plan's (REAPER with an alarm).
+    assert_eq!(pc.count(Call::PrefCheck), 2);
+    assert!(pc.called(Call::ReaperStart) && pc.called(Call::AppStart));
+    assert_eq!(g.state.mode, Mode::Event);
+    assert_eq!(
+        g.alarms
+            .iter()
+            .filter(|a| a.step == Some(Step::PrefCheck))
+            .count(),
+        2,
+        "{:?}",
+        texts(&g)
+    );
 }
 
 #[test]
@@ -1198,8 +1255,9 @@ fn dry_run_changes_nothing() {
     );
     assert_eq!(
         r.detail,
-        "dry run: Precheck, Interlock, AppStop, ReaperSaveQuit, TuningEnter, Data, EngineStart, \
-         EngineArm, ServerStart, TrayStart, IdentityCheck, RunnerStart; bundle none; precheck ok"
+        "dry run: Precheck, Interlock, AppStop, ReaperSaveQuit, TuningEnter, Data, PrefCheck, \
+         EngineStart, EngineArm, ServerStart, TrayStart, IdentityCheck, RunnerStart; bundle none; \
+         precheck ok"
     );
     pc.fail(Call::Precheck, "an engine the guard did not start runs");
     let r = handle(
@@ -2399,7 +2457,9 @@ fn rehearse_teardown_never_starts_reaper() {
     assert!(first(Call::ServerStop) < first(Call::TrayStop));
     assert!(first(Call::TrayStop) < first(Call::Tuning));
     assert!(first(Call::Tuning) < first(Call::PrefCheck));
-    assert_eq!(pc.count(Call::PrefCheck), 2);
+    // The teardown's, the rehearsal's own check, and the dev re-entry's
+    // right before the engine starts.
+    assert_eq!(pc.count(Call::PrefCheck), 3);
     assert!(pc.index(Call::EngineStart) > pc.index(Call::EngineStop));
     assert_eq!(g.state.mode, Mode::Dev);
     assert!(g.alarms.all().is_empty());
