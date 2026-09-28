@@ -21,13 +21,14 @@ $script:SidAdmins = 'S-1-5-32-544'
 $script:SidSystem = 'S-1-5-18'
 # Task Scheduler: TASK_LOGON_INTERACTIVE_TOKEN, TASK_RUNLEVEL_LUA / _HIGHEST.
 $script:LogonInteractive = 3
-# RegisterTaskDefinition flags: TASK_CREATE_OR_UPDATE (6), TASK_UPDATE (4), and
+# RegisterTaskDefinition flags: TASK_CREATE_OR_UPDATE (6) and
 # TASK_DONT_ADD_PRINCIPAL_ACE (0x10): without it the service adds its own allow
 # ACE for the task's user next to ours, and the read-back (exactly our three
-# ACEs, design section 5.1) refuses the task.
+# explicit ACEs, design section 5.1) refuses the task. An update keeps the
+# task's old descriptor (CI run 36360472125: StartREAPER), so every task then
+# gets ours through IRegisteredTask.SetSecurityDescriptor with the same 0x10.
 $script:TaskDontAddPrincipalAce = 0x10
 $script:TaskCreateOrUpdate = 6 -bor $script:TaskDontAddPrincipalAce
-$script:TaskUpdate = 4 -bor $script:TaskDontAddPrincipalAce
 $script:RunLevelLimited = 0
 $script:RunLevelHighest = 1
 # Access masks as unsigned values: GRGX and FRFX (read and execute), GA and FA (full).
@@ -117,9 +118,15 @@ function Get-IemTaskSddl {
 }
 
 function Test-IemTaskSddl {
-    # A task's DACL read back: allow ACEs for exactly the user (read and execute,
-    # never write), Administrators and SYSTEM (full). Task Scheduler may print the
-    # rights in generic form (GRGX, GA) or file form (FRFX, FA); both are accepted.
+    # A task's DACL read back (design section 5.1: the user may read and run the
+    # task, never change it; only Administrators and SYSTEM have more). Its
+    # explicit ACEs are exactly ours, one allow ACE per SID: the user read and
+    # execute, Administrators and SYSTEM full. Task Scheduler may print the
+    # rights in generic form (GRGX, GA) or file form (FRFX, FA); both are
+    # accepted. ACEs inherited from the task folder (ID) are accepted only for
+    # Administrators and SYSTEM, whatever their rights (our explicit ACEs give
+    # them full control anyway); an inherited ACE for anyone else (the user,
+    # Users, Everyone) refuses. Deny and object ACEs refuse, inherited or not.
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Sddl, [Parameter(Mandatory)][string]$UserSid)
     try { $sd = New-Object System.Security.AccessControl.RawSecurityDescriptor $Sddl } catch { return $false }
     if ($null -eq $sd.DiscretionaryAcl) { return $false }
@@ -132,6 +139,10 @@ function Test-IemTaskSddl {
         if ($ace -isnot [System.Security.AccessControl.CommonAce]) { return $false }
         if ($ace.AceQualifier -ne [System.Security.AccessControl.AceQualifier]::AccessAllowed) { return $false }
         $sid = $ace.SecurityIdentifier.Value
+        if ($ace.IsInherited) {
+            if (@($script:SidAdmins, $script:SidSystem) -cnotcontains $sid) { return $false }
+            continue
+        }
         if (-not $want.ContainsKey($sid) -or $seen.ContainsKey($sid)) { return $false }
         $mask = ([int64]$ace.AccessMask) -band [int64]4294967295
         if ($want[$sid] -notcontains $mask) { return $false }
@@ -278,7 +289,8 @@ function Register-IemTasks {
     # from the known folder and passed on the command line, so the elevated
     # process never reads an environment variable for it); only Administrators
     # and SYSTEM may change that root. Read back; any difference throws after
-    # every task was tried.
+    # every task was tried. Each task's descriptor is then set explicitly
+    # (SetSecurityDescriptor): an update keeps a task's old one.
     param(
         [Parameter(Mandatory)][string]$Root,
         [Parameter(Mandatory)][string]$AppExe,
@@ -341,6 +353,7 @@ function Register-IemTasks {
         $d = New-IemTaskDefinition -Scheduler $sch -User $u.name -RunLevel $s.level -Exe $s.exe -Arguments $s.args `
             -WorkDir $s.dir -Description ('iemmixer S6: ' + $s.name) -AtLogon:$s.logon
         [void]$f.RegisterTaskDefinition($s.name, $d, $script:TaskCreateOrUpdate, $u.name, $null, $script:LogonInteractive, $sddl)
+        [void]$f.GetTask($s.name).SetSecurityDescriptor($sddl, $script:TaskDontAddPrincipalAce)
         $rep = Get-IemTaskReport -Task $f.GetTask($s.name) -UserSid $u.sid
         $bad = Test-IemTaskReport -Report $rep -RunLevel $s.level
         $want = [pscustomobject]@{ path = $s.exe; arguments = $s.args; workdir = $s.dir }
@@ -352,10 +365,9 @@ function Register-IemTasks {
         $reports += [pscustomobject]@{ task = $s.name; run_level = $rep.run_level; sddl_ok = $rep.sddl_ok; actions = $rep.actions; triggers = $rep.triggers; problems = $bad }
     }
 
-    # StartREAPER: the same definition, now with our descriptor (TASK_UPDATE).
-    $reaperUser = [string]$reaperDef.Principal.UserId
-    if (-not $reaperUser) { $reaperUser = $u.name }
-    [void]$f.RegisterTaskDefinition('iemmixer-StartREAPER', $reaperDef, $script:TaskUpdate, $reaperUser, $null, $script:LogonInteractive, $sddl)
+    # StartREAPER: its definition untouched (never registered again), only our
+    # descriptor (a TASK_UPDATE registration kept its old one).
+    [void]$f.GetTask('iemmixer-StartREAPER').SetSecurityDescriptor($sddl, $script:TaskDontAddPrincipalAce)
     $rep = Get-IemTaskReport -Task $f.GetTask('iemmixer-StartREAPER') -UserSid $u.sid
     $bad = @()
     if (-not $rep.sddl_ok) { $bad += ('security descriptor ' + $rep.sddl) }
@@ -405,6 +417,8 @@ function Set-IemDirectoryAcl {
 
 function Test-IemDirectoryAcl {
     # The DACL read back against Set-IemDirectoryAcl; returns the differences.
+    # Exact: that DACL is protected, so it inherits nothing, and an inherited
+    # rule (whoever it names) is a difference like any other.
     param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][hashtable]$Rights)
     $acl = Get-Acl -LiteralPath $Path
     $bad = @()
@@ -461,8 +475,9 @@ function Test-IemElevatedItem {
     # no junction or link, owned by Administrators or SYSTEM, and a DACL that
     # grants exactly Get-IemElevatedRights (the user reads only): nothing
     # denied, nobody else. A folder carries its own protected rules (as
-    # Set-IemDirectoryAcl writes them); a file inherits its folder's. Returns
-    # the differences.
+    # Set-IemDirectoryAcl writes them, inherited ones refused); a file inherits
+    # its folder's, so a file's rules count inherited or explicit, and either
+    # way they must be exactly those. Returns the differences.
     param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$UserSid)
     if (Test-IemReparsePoint -Path $Path) { return ,@("$Path is a junction or a link") }
     if (-not (Test-Path -LiteralPath $Path)) { return ,@("$Path does not exist") }
@@ -636,7 +651,10 @@ function Get-IemServiceSddl {
 }
 
 function Test-IemServiceGrant {
-    # Whether a service DACL lets $Sid itself start, stop and query it (allowed, none denied).
+    # Whether a service DACL lets $Sid itself start, stop and query it (allowed,
+    # none denied). A grant check, not an exact read-back: a service DACL has no
+    # parent to inherit from; an inherit-only ACE (IO) does not apply to the
+    # service and is skipped, every other ACE for $Sid counts.
     param([Parameter(Mandatory)][string]$Sddl, [Parameter(Mandatory)][string]$Sid)
     $sd = New-Object System.Security.AccessControl.RawSecurityDescriptor $Sddl
     $allow = 0
