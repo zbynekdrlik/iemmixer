@@ -14,6 +14,8 @@
 
 use std::path::Path;
 
+use sha2::{Digest, Sha256};
+
 use crate::AppState;
 use crate::push_store::{PushStore, PushSubscription};
 
@@ -36,9 +38,18 @@ impl Audience {
 }
 
 /// The push payload of an alarm or notice (the service worker shows title
-/// and body).
+/// and body). Its tag comes from the text: the same notice again replaces
+/// itself on the phone, a different one shows on its own (the band-activity
+/// notice and the guard's alarms reach the same devices).
 pub fn alarm_payload(title: &str, body: &str) -> Vec<u8> {
-    serde_json::json!({ "type": "ALARM", "title": title, "body": body })
+    let mut hasher = Sha256::new();
+    hasher.update(title.len().to_le_bytes());
+    hasher.update(title.as_bytes());
+    hasher.update(body.as_bytes());
+    let digest = hasher.finalize();
+    let hex: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+    let tag = format!("iem-alarm-{hex}");
+    serde_json::json!({ "type": "ALARM", "title": title, "body": body, "tag": tag })
         .to_string()
         .into_bytes()
 }
