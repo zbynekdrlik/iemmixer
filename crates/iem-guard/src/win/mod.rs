@@ -37,7 +37,9 @@ use tracing::{info, warn};
 use crate::cancel::Cancel;
 use crate::effects::engine::Quiet;
 use crate::handover::{AppExit, ReaperFacts};
-use crate::pc::{self, Audience, EngineSeen, Images, Kid, Pc, Procs, R, Status, StepError};
+use crate::pc::{
+    self, Audience, EngineSeen, Images, Kid, Pc, PrefSeen, Procs, R, Status, StepError,
+};
 use crate::plan::{Facts, Health, Mode};
 use crate::site::{self, Settings};
 use crate::state::Children;
@@ -193,7 +195,7 @@ impl Pc for WinPc {
         tasks::drift(self)
     }
 
-    fn pref_check(&mut self) -> R<u32> {
+    fn pref_check(&mut self) -> R<PrefSeen> {
         card::pref_check(self)
     }
 

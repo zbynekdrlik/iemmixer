@@ -73,6 +73,12 @@ pub struct GuardState {
     /// a guard that hands over to a new exe inside the job (HIL activates
     /// the bundle it tests) or restarts still serves the job (design §7).
     pub job: Option<u64>,
+    /// What the last `PrefCheck` found and left alone: the preference not
+    /// REAPER's original while the driver module was held (REAPER started
+    /// at 32 after a power loss in dev time; #9 2026-09-28). Alarmed once,
+    /// named in the status, dropped when a check finds or restores the
+    /// original. A fact of the registry: a reset keeps it.
+    pub pref_held: Option<String>,
 }
 
 /// Whether a starting guard must forget its saved mode: after a reboot, or
@@ -83,7 +89,8 @@ pub fn reset_to_event(st: &GuardState, boot_time: u64, reaper_or_app: bool, engi
 
 impl GuardState {
     /// The mode after [`reset_to_event`]: `event`, no switch in progress, no
-    /// pending interlock retry and no HIL job.
+    /// pending interlock retry and no HIL job (`pref_held` stays: the next
+    /// check reads the preference again).
     pub fn reset(&mut self) {
         self.mode = Mode::Event;
         self.switching = None;

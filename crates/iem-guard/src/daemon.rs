@@ -37,7 +37,7 @@ use crate::crash::{self, After, CrashLoop};
 use crate::effects::engine::ACTIVE_DB;
 use crate::handover::{self, Audio};
 use crate::install::{self, InstallError};
-use crate::pc::{Audience, EngineSeen, Kid, Pc, Procs, R, StepError, job_note};
+use crate::pc::{Audience, EngineSeen, Kid, Pc, PrefSeen, Procs, R, StepError, job_note};
 use crate::plan::{
     Activation, Busy, Facts, Health, Mode, OnError, PrefFail, Step, activation, on_error, plan,
 };
@@ -789,6 +789,9 @@ pub fn status_text(g: &Guard) -> String {
     if g.reaper_notice {
         parts.push(handover::NOTICE_REPORT.to_owned());
     }
+    if let Some(n) = &g.state.pref_held {
+        parts.push(n.clone());
+    }
     if let Some(n) = &g.recipients_note {
         parts.push(n.clone());
     }
@@ -1059,15 +1062,7 @@ fn run_step(pc: &mut dyn Pc, g: &mut Guard, step: Step, to: Mode, facts: &Facts)
             g.info(format!("tuning exit: {r}"));
             Ok(())
         }
-        Step::PrefCheck => {
-            let writes = pc.pref_check()?;
-            if writes > 0 {
-                g.info(format!(
-                    "the preferred buffer was restored ({writes} writes)"
-                ));
-            }
-            Ok(())
-        }
+        Step::PrefCheck => pref_step(pc, g, to),
         Step::HolderGone => pc.holder_gone(&c),
         Step::ReaperStart => pc.reaper_start(),
         Step::ReaperHandover => {
@@ -1092,6 +1087,41 @@ fn run_step(pc: &mut dyn Pc, g: &mut Guard, step: Step, to: Mode, facts: &Facts)
         Step::AppStart => pc.app_start(),
         Step::AppHandover => pc.app_answers(&c),
         Step::Fingerprint => pc.fingerprint(),
+    }
+}
+
+/// `PrefCheck` (design §5.2; #9 2026-09-28): REAPER's original, or restored
+/// while nothing holds the driver module. Nothing is ever written while
+/// something holds it (its driver would most likely ask it for a reset):
+/// the guard remembers what it left (`GuardState::pref_held`, named in the
+/// status). In the event plan that is no failure: it alarms once and goes
+/// on (REAPER keeps its sound; the check after REAPER's quit restores it).
+/// Before an engine start (`to` dev or live) it fails the step: the engine
+/// would refuse the card.
+fn pref_step(pc: &mut dyn Pc, g: &mut Guard, to: Mode) -> R<()> {
+    match pc.pref_check()? {
+        PrefSeen::Original(writes) => {
+            if writes > 0 {
+                g.info(format!(
+                    "the preferred buffer was restored ({writes} writes)"
+                ));
+            }
+            g.state.pref_held = None;
+            Ok(())
+        }
+        PrefSeen::Held(held) => {
+            let text = held.text();
+            let new = g.state.pref_held.as_deref() != Some(text.as_str());
+            g.state.pref_held = Some(text.clone());
+            if to != Mode::Event {
+                return Err(StepError::Failed(text));
+            }
+            g.info(text.clone());
+            if new {
+                g.alarm(Step::PrefCheck, &text, false);
+            }
+            Ok(())
+        }
     }
 }
 
@@ -1822,8 +1852,11 @@ fn rehearse(pc: &mut dyn Pc, g: &mut Guard) -> (bool, String) {
         bad.push("the driver module is held".to_owned());
     }
     match pc.pref_check() {
-        Ok(0) => {}
-        Ok(writes) => bad.push(format!("the preference needed {writes} writes")),
+        Ok(PrefSeen::Original(0)) => {}
+        Ok(PrefSeen::Original(writes)) => {
+            bad.push(format!("the preference needed {writes} writes"));
+        }
+        Ok(PrefSeen::Held(held)) => bad.push(format!("the preference: {}", held.text())),
         Err(e) => bad.push(format!("the preference: {e}")),
     }
     let verdict = if bad.is_empty() {

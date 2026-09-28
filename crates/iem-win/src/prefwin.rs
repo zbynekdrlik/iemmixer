@@ -10,9 +10,11 @@
 //! text) is always kept.
 //!
 //! Portable and mutation-tested: the engine's backend holds a [`Window`];
-//! the guard's `PrefCheck` [`restore`]s the original before REAPER starts
-//! (design §5.2 step 4), also after an engine that ended while it held the
-//! card (a crash, a power loss); both through a [`PrefStore`] (on the PC
+//! the guard's `PrefCheck` [`check`]s the original before REAPER starts
+//! (design §5.2 "back to event" step 5) and before every engine start, and
+//! restores it, also after an engine that ended while it held the card (a
+//! crash, a power loss), but never while a process holds the driver's
+//! module; both through a [`PrefStore`] (on the PC
 //! [`crate::registry::HkcuPref`]).
 
 /// The kind of a registry value; a write names it, so a value read as a
@@ -202,11 +204,12 @@ impl Window {
     }
 }
 
-/// The guard's restore (design §5.2 step 4): up to `attempts` writes of the
-/// original, each read back; Ok as soon as the store holds the original, with
-/// the number of writes it took (0: it already did). Whatever the store holds
-/// otherwise is overwritten: an engine's frames left by a crash or a power
-/// loss while it held the card are a restore, never a refusal.
+/// The guard's restore ([`check`]'s, design §5.2 step 5): up to `attempts`
+/// writes of the original, each read back; Ok as soon as the store holds the
+/// original, with the number of writes it took (0: it already did). Whatever
+/// the store holds otherwise is overwritten: an engine's frames left by a
+/// crash or a power loss while it held the card are a restore, never a
+/// refusal. [`check`] calls it only while no process holds the driver.
 pub fn restore(
     store: &mut impl PrefStore,
     original: &Pref,
@@ -224,6 +227,41 @@ pub fn restore(
         }
     }
     Err(last)
+}
+
+/// What [`check`] found and did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Checked<H> {
+    /// The store holds the original, after this many writes (each read
+    /// back; 0: it already did).
+    Original(u32),
+    /// The store holds `found` (`None`: unreadable), not the original, while
+    /// `by` holds the driver's module: nothing was written.
+    Open { found: Option<Pref>, by: H },
+}
+
+/// The guard's `PrefCheck` (design §5.2; #9 2026-09-28): one read; the
+/// original → [`Checked::Original`]`(0)` and `holders` is not asked.
+/// Anything else is [`restore`]d with `attempts` only while `holders` finds
+/// no process with the driver's module. While one holds it, nothing is
+/// written: its driver most likely asks it for a reset when the value
+/// changes while it is open (a REAPER that runs at an event: a dropout).
+/// It keeps the value it opened with until it quits, and the check after
+/// that restores it.
+pub fn check<H>(
+    store: &mut impl PrefStore,
+    original: &Pref,
+    attempts: u32,
+    holders: impl FnOnce() -> Option<H>,
+) -> Result<Checked<H>, PrefError> {
+    let now = store.read().ok();
+    if now.as_ref() == Some(original) {
+        return Ok(Checked::Original(0));
+    }
+    match holders() {
+        Some(by) => Ok(Checked::Open { found: now, by }),
+        None => restore(store, original, attempts).map(Checked::Original),
+    }
 }
 
 #[cfg(test)]

@@ -15,9 +15,11 @@
 use std::fmt;
 use std::time::Duration;
 
+use iem_win::prefwin::Checked;
 use iem_win::spawn::Placement;
 
 use crate::cancel::{Cancel, Preempted};
+use crate::effects::app::holders_text;
 use crate::handover::{AppExit, ReaperFacts};
 use crate::plan::{Facts, Health, Mode};
 use crate::proto::HilOut;
@@ -220,13 +222,98 @@ pub fn facts_from(p: &Procs, holders: Option<&[(u32, String)]>, ports: Option<Po
 }
 
 /// The driver module's holders other than REAPER: they must leave before
-/// REAPER starts (design §5.2 "back to event" step 5, I3).
+/// REAPER starts (design §5.2 "back to event" step 4, I3).
 pub fn foreign_holders(holders: &[(u32, String)], reaper: &[u32]) -> Vec<(u32, String)> {
     holders
         .iter()
         .filter(|(pid, _)| !reaper.contains(pid))
         .cloned()
         .collect()
+}
+
+/// `PrefCheck`'s restore: up to this many writes, each read back.
+pub const PREF_ATTEMPTS: u32 = 3;
+
+/// Who holds the driver module when `PrefCheck` finds something other than
+/// REAPER's original (#9 2026-09-28).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CardHolders {
+    /// REAPER is one of them.
+    pub reaper: bool,
+    /// Every holder: image and pid.
+    pub names: String,
+}
+
+/// The holders `PrefCheck` must not write under; `None` while nothing holds
+/// the driver module (the restore may write). Anything counts, our engine
+/// too. An unreadable list assumes that a running REAPER holds it (as
+/// [`facts_from`] does), so a failed read never writes under a REAPER that
+/// may hold the card.
+pub fn card_holders(holders: Option<&[(u32, String)]>, reaper: &[u32]) -> Option<CardHolders> {
+    let assumed: Vec<(u32, String)> = match holders {
+        Some(_) => Vec::new(),
+        None => reaper
+            .iter()
+            .map(|pid| (*pid, "REAPER".to_owned()))
+            .collect(),
+    };
+    let list = holders.unwrap_or(&assumed);
+    (!list.is_empty()).then(|| CardHolders {
+        reaper: list.iter().any(|(pid, _)| reaper.contains(pid)),
+        names: holders_text(list),
+    })
+}
+
+/// A preference that is not REAPER's original while the driver module is
+/// held: `PrefCheck` wrote nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrefHeld {
+    /// What the preference reads (`None`: unreadable).
+    pub value: Option<String>,
+    pub by: CardHolders,
+}
+
+impl PrefHeld {
+    /// The alarm, the report line and the status line.
+    pub fn text(&self) -> String {
+        let at = self
+            .value
+            .as_ref()
+            .map_or_else(|| "unreadable".to_owned(), |v| format!("at {v}"));
+        if self.by.reaper {
+            format!(
+                "REAPER runs with the preferred buffer {at}; it is restored at REAPER's next start"
+            )
+        } else {
+            format!(
+                "the driver module is held by {} with the preferred buffer {at}; nothing was \
+                 written",
+                self.by.names
+            )
+        }
+    }
+}
+
+/// What `PrefCheck` found (design §5.2; #9 2026-09-28).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrefSeen {
+    /// REAPER's original is there, after this many writes (each read back;
+    /// 0: it already was).
+    Original(u32),
+    /// Not the original while the driver module is held: nothing written.
+    Held(PrefHeld),
+}
+
+impl From<Checked<CardHolders>> for PrefSeen {
+    fn from(c: Checked<CardHolders>) -> Self {
+        match c {
+            Checked::Original(writes) => Self::Original(writes),
+            Checked::Open { found, by } => Self::Held(PrefHeld {
+                value: found.map(|p| p.raw),
+                by,
+            }),
+        }
+    }
 }
 
 /// Whether an engine runs that is not the guard's own child (`ours`).
@@ -401,8 +488,11 @@ pub trait Pc {
     /// Native reads (power plan, service start types) against the tuning
     /// module's record; `Some` describes a drift. On mode changes and hourly.
     fn tuning_drift(&mut self) -> R<Option<String>>;
-    /// `prefwin::restore(.., 3)`: the writes it took (each read back).
-    fn pref_check(&mut self) -> R<u32>;
+    /// `prefwin::check(.., PREF_ATTEMPTS, ..)` with [`card_holders`]:
+    /// REAPER's original, or restored (the writes it took, each read back)
+    /// while nothing holds the driver module; never a write while something
+    /// does ([`PrefSeen::Held`]).
+    fn pref_check(&mut self) -> R<PrefSeen>;
     /// The band's data refresh of an entry (`iem-migrate band`, …): a
     /// started command finishes (a mutation); "ide event" stops the refresh
     /// between two commands and after the last.
@@ -596,7 +686,13 @@ pub mod fake {
         pub status: Status,
         pub quiet_for: Duration,
         pub stage_peaks: Vec<f64>,
+        /// The writes a restore takes; 0: the preference holds REAPER's
+        /// original. A script: every check finds it so again.
         pub pref_attempts: u32,
+        /// What the preference reads while it is not the original.
+        pub pref_value: String,
+        /// Every write the checks made (none under a holder).
+        pub pref_writes: u32,
         pub drift: Option<String>,
         /// Handed out (and emptied) by the next `procs()`.
         pub exited: Vec<(Kid, Option<i32>)>,
@@ -665,6 +761,8 @@ pub mod fake {
                 quiet_for: Duration::from_secs(600),
                 stage_peaks: vec![-90.0],
                 pref_attempts: 0,
+                pref_value: "32".into(),
+                pref_writes: 0,
                 drift: None,
                 exited: Vec::new(),
                 notices: Vec::new(),
@@ -885,9 +983,35 @@ pub mod fake {
             Ok(self.drift.clone())
         }
 
-        fn pref_check(&mut self) -> R<u32> {
+        /// The PC's decision over the facts: REAPER (pid 1), a foreign
+        /// holder (99) or an engine (2) holds the driver module.
+        fn pref_check(&mut self) -> R<PrefSeen> {
             self.enter(Call::PrefCheck, None)?;
-            Ok(self.pref_attempts)
+            if self.pref_attempts == 0 {
+                return Ok(PrefSeen::Original(0));
+            }
+            let f = self.facts;
+            let mut holders = Vec::new();
+            if f.reaper_holds_module {
+                holders.push((1, "reaper.exe".to_owned()));
+            }
+            if f.other_module_holder {
+                holders.push((99, "spike.exe".to_owned()));
+            }
+            if f.engine {
+                holders.push((2, "iem-engine.exe".to_owned()));
+            }
+            let reaper: Vec<u32> = if f.reaper { vec![1] } else { Vec::new() };
+            Ok(match card_holders(Some(holders.as_slice()), &reaper) {
+                Some(by) => PrefSeen::Held(PrefHeld {
+                    value: Some(self.pref_value.clone()),
+                    by,
+                }),
+                None => {
+                    self.pref_writes += self.pref_attempts;
+                    PrefSeen::Original(self.pref_attempts)
+                }
+            })
         }
 
         fn data(&mut self, mode: Mode, c: &Cancel) -> R<String> {

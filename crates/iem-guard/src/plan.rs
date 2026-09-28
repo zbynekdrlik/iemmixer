@@ -148,10 +148,15 @@ pub fn plan(from: Mode, to: Mode, f: &Facts) -> Vec<Step> {
     match to {
         Mode::Event => {
             stop_iemmixer(f, &mut out);
-            out.extend([Step::TuningExit, Step::PrefCheck]);
+            out.push(Step::TuningExit);
+            // Every other holder of the driver module leaves before the
+            // preference is checked: the check never writes while a process
+            // has the driver open (#9 2026-09-28), so it must not find one
+            // the plan could have waited for.
             if f.other_module_holder {
                 out.push(Step::HolderGone);
             }
+            out.push(Step::PrefCheck);
             // A REAPER that runs without the card (its time trigger, or a start
             // while our engine held it) is saved, quit and started again.
             let reaper_ok = f.reaper && f.reaper_holds_module;
