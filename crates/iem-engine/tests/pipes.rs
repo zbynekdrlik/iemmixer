@@ -1059,7 +1059,7 @@ mod named_pipes {
     }
 
     #[test]
-    fn a_gone_listeners_name_is_free_once_its_last_client_lets_go() {
+    fn a_gone_listeners_name_is_free_while_its_client_still_holds_its_end() {
         let dir = tempfile::tempdir().unwrap();
         let name = pipe_name(&dir);
         let first = listen(control_name(&name).unwrap()).unwrap();
@@ -1067,29 +1067,31 @@ mod named_pipes {
         let client = connect(move || control_name(&n));
         drop(accept(&first));
         drop(first);
-        // A pipe name lives while any end of an instance is open: the
-        // client's stream keeps it from a new listener (a respawned
-        // engine), which tries for about 2 s and then reports it taken.
-        let start = Instant::now();
-        let taken = listen(control_name(&name).unwrap()).unwrap_err();
-        let took = start.elapsed();
-        assert_eq!(taken.kind(), std::io::ErrorKind::AddrInUse, "{taken}");
+        // Every server end of the name is closed, as when an engine's
+        // process has ended; its client still holds its end. A client's end
+        // does not hold the name: a new listener (the respawned engine)
+        // creates the first instance while the client is still there
+        // (Windows CI run 36371298924 refuted the opposite).
+        let again = listen(control_name(&name).unwrap())
+            .unwrap_or_else(|e| panic!("the gone listener's client held the name: {e}"));
+        // That client is no client of the new listener: its end reads the
+        // end of the stream.
+        let mut old = Client {
+            r: Reader::start(client, Framer::next_frame),
+        };
+        assert!(old.closed(), "the gone listener's client reads the end");
+        // A new client is the new listener's, which holds the name against
+        // another listener.
+        let n = name.clone();
+        let fresh = connect(move || control_name(&n));
+        drop(accept(&again));
+        let squatter = listen(control_name(&name).unwrap()).unwrap_err();
+        assert_eq!(squatter.kind(), std::io::ErrorKind::AddrInUse, "{squatter}");
         assert!(
-            taken.to_string().starts_with("pipe name taken ("),
-            "{taken}"
+            squatter.to_string().starts_with("pipe name taken ("),
+            "{squatter}"
         );
-        assert!(
-            took >= Duration::from_millis(1900) && took < WAIT,
-            "{took:?}"
-        );
-        // A client that lets go within those 2 s frees the name for it.
-        let lets_go = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(300));
-            drop(client);
-        });
-        let again = listen(control_name(&name).unwrap());
-        lets_go.join().unwrap();
-        assert!(again.is_ok(), "{:?}", again.err());
+        drop(fresh);
     }
 
     #[test]
