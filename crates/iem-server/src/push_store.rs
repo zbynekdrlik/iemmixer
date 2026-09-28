@@ -251,7 +251,8 @@ mod tests {
         let one = serde_json::to_string(&vec![sub.clone()]).unwrap();
         // Nothing at all: none, and neither marker nor file is made.
         assert!(PushStore::read(dir.path()).unwrap().is_empty());
-        assert!(!marker.exists() && !file.exists());
+        assert!(!marker.exists());
+        assert!(!file.exists());
         // A list without the marker is emptied by the server's first start:
         // none, and the list stays as it is.
         std::fs::write(&file, &one).unwrap();
@@ -262,10 +263,11 @@ mod tests {
         std::fs::write(&marker, b"").unwrap();
         assert_eq!(PushStore::read(dir.path()).unwrap(), vec![sub.clone()]);
         assert_eq!(PushStore::load(dir.path()).all(), [sub]);
-        // The marker without the file: none.
+        // The marker without the file: none, and neither is touched.
         std::fs::remove_file(&file).unwrap();
         assert!(PushStore::read(dir.path()).unwrap().is_empty());
         assert!(!file.exists());
+        assert!(marker.exists());
     }
 
     #[test]
