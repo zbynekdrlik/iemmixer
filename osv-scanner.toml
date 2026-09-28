@@ -1,0 +1,40 @@
+# osv-scanner (supply-chain job): GitHub and RustSec advisories for every
+# package in Cargo.lock, fuzz/Cargo.lock and e2e/package-lock.json. cargo-deny reads RustSec
+# only, and several GitHub advisories never reach it (openssl 2026). Each
+# entry below names why it cannot affect a shipped binary.
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0429"
+reason = "glib < 0.20 only via Tauri's Linux GTK stack; the tray ships for Windows only (deny.toml, #12)"
+
+[[IgnoredVulns]]
+id = "GHSA-wrw7-89jp-8q8g"
+reason = "alias of RUSTSEC-2024-0429 (glib, Linux GTK stack only)"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2023-0071"
+reason = "rsa (Marvin timing attack, no fixed release) only via jsonwebtoken's rust_crypto backend; iem-server uses HS256 and ES256 only and never builds an RSA key (deny.toml)"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0097"
+reason = "rand 0.7.3 only in tauri-utils' build-time codegen (phf_generator 0.8 via kuchikiki); the unsoundness needs rand::rng() with a custom logger, which rand 0.7 does not have"
+
+[[IgnoredVulns]]
+id = "GHSA-cq8v-f236-94qc"
+reason = "alias of RUSTSEC-2026-0097 (rand 0.7.3, build-time codegen only)"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0057"
+reason = "fxhash unmaintained (no vulnerability); only in tauri-utils' build-time HTML handling (selectors 0.24 via kuchikiki)"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0436"
+reason = "paste unmaintained (no vulnerability); a proc-macro used by Leptos and others, it runs only at build time"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0370"
+reason = "proc-macro-error unmaintained (no vulnerability); a proc-macro dependency, it runs only at build time"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0173"
+reason = "proc-macro-error2 unmaintained (no vulnerability); a proc-macro dependency, it runs only at build time"

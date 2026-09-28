@@ -27,7 +27,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"
 reqwest = { version = "0.12", features = ["json"] }
 
 # JWT authentication
-jsonwebtoken = "9"
+# rust_crypto: pure-Rust HS256 (auth) and ES256 (VAPID); RSA is never used
+jsonwebtoken = { version = "11.1", features = ["rust_crypto"] }
 
 # Serialization (float_roundtrip: a backup, preset or snapshot reads back
 # with exactly the values that were written)

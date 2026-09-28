@@ -590,9 +590,11 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - uses: taiki-e/install-action@7623a79cdfecb99d681017af368ca353d9f49bb5 # v2.87.19
         with:
-          tool: cargo-deny@0.20.2
+          tool: cargo-deny@0.20.2,osv-scanner@2.6.0
       - name: cargo-deny (advisories, bans, licences, sources)
         run: cargo deny --locked check advisories bans licenses sources
+      - name: osv-scanner (GitHub and RustSec advisories, every lockfile)
+        run: osv-scanner scan source --config osv-scanner.toml -L Cargo.lock -L fuzz/Cargo.lock -L e2e/package-lock.json
       - name: Engine dependency allowlist (program spec 5.2)
         run: python3 scripts/check_engine_deps.py
 
