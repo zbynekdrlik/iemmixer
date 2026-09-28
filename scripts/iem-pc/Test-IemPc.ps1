@@ -176,6 +176,23 @@ try {
     Set-Acl -LiteralPath $root -AclObject $acl
     $childRules = @((Get-Acl -LiteralPath (Join-Path $root 'bundles\x.txt')).GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
     Assert (@($childRules | Where-Object { $_.IdentityReference.Value -eq 'S-1-1-0' }).Count -eq 1) 'root-acl-precondition-everyone-reaches-a-child'
+    # Items that hold rules of their own: a folder that inherits nothing (its own
+    # protected rules, Everyone among them) and, created inside it, a file with
+    # its own rule for Everyone.
+    $everyone = New-Object System.Security.Principal.SecurityIdentifier 'S-1-1-0'
+    $own = Join-Path $root 'bundles\own'
+    $ownFile = Join-Path $own 'y.txt'
+    New-Item -ItemType Directory -Force -Path $own | Out-Null
+    $ownRights = Get-IemRootRights -UserSid $me.sid
+    $ownRights['S-1-1-0'] = [System.Security.AccessControl.FileSystemRights]::ReadAndExecute
+    Set-IemDirectoryAcl -Path $own -Rights $ownRights
+    Set-Content -LiteralPath $ownFile -Value 'y'
+    $ownFileAcl = [IO.File]::GetAccessControl($ownFile)
+    $ownFileAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($everyone, 'Read', 'Allow')))
+    [IO.File]::SetAccessControl($ownFile, $ownFileAcl)
+    $ownAcl = Get-Acl -LiteralPath $own
+    $ownFileRules = @((Get-Acl -LiteralPath $ownFile).GetAccessRules($true, $false, [System.Security.Principal.SecurityIdentifier]))
+    Assert ($ownAcl.AreAccessRulesProtected -and $ownFileRules.Count -eq 1 -and $ownFileRules[0].IdentityReference.Value -eq 'S-1-1-0') 'root-acl-precondition-items-with-rules-of-their-own'
     $a1 = Set-IemRootAcl -Root $root
     Assert $a1.changed 'root-acl-changes-an-open-root'
     $ra = Get-Acl -LiteralPath $root
@@ -183,10 +200,85 @@ try {
     Assert ($ra.AreAccessRulesProtected -and $rules.Count -eq 3) 'root-acl-protected-with-three-rules'
     Assert ((Sorted ($rules | ForEach-Object { $_.IdentityReference.Value })) -eq (Sorted @($me.sid, 'S-1-5-18', 'S-1-5-32-544'))) 'root-acl-user-system-administrators'
     Assert (@($rules | Where-Object { [int]$_.FileSystemRights -ne 2032127 -or [int]$_.InheritanceFlags -ne 3 -or $_.IsInherited }).Count -eq 0) 'root-acl-full-control-inherited-below'
-    $childRules = @((Get-Acl -LiteralPath (Join-Path $root 'bundles\x.txt')).GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
-    Assert ($childRules.Count -eq 3 -and @($childRules | Where-Object { -not $_.IsInherited -or $_.IdentityReference.Value -eq 'S-1-1-0' }).Count -eq 0) 'root-acl-reaches-existing-children'
+    $childAcl = Get-Acl -LiteralPath (Join-Path $root 'bundles\x.txt')
+    $childRules = @($childAcl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
+    Assert ($childRules.Count -eq 3 -and @($childRules | Where-Object { -not $_.IsInherited -or $_.IdentityReference.Value -eq 'S-1-1-0' }).Count -eq 0) "root-acl-reaches-existing-children ($($childAcl.GetSecurityDescriptorSddlForm('Access')))"
+    # Windows' own propagation never takes rules of its own from an item, so
+    # these two are always reset by Set-IemRootAcl itself.
+    Assert ((@($a1.reset) -contains 'bundles\own') -and (@($a1.reset) -contains 'bundles\own\y.txt')) "root-acl-resets-the-items-with-rules-of-their-own ($(@($a1.reset) -join ', '); $(@($a1.differed) -join '; '))"
+    # What each item reset held, read after the root's DACL was set: y.txt only
+    # its own rule for Everyone (own, reset before it, passes on the root's rules).
+    $yHeld = @($a1.differed | Where-Object { $_ -like '*\own\y.txt:*' })
+    Assert ($yHeld.Count -eq 1 -and $yHeld[0] -like '*\own\y.txt: a rule of its own for S-1-1-0') "root-acl-reports-what-each-reset-item-held ($(@($a1.differed) -join '; '))"
+    foreach ($p in @($own, $ownFile)) {
+        $pa = Get-Acl -LiteralPath $p
+        $pr = @($pa.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
+        Assert (-not $pa.AreAccessRulesProtected -and $pr.Count -eq 3 -and @($pr | Where-Object { -not $_.IsInherited }).Count -eq 0 -and
+                (Sorted ($pr | ForEach-Object { $_.IdentityReference.Value })) -eq (Sorted @($me.sid, 'S-1-5-18', 'S-1-5-32-544'))) "root-acl-an-item-with-rules-of-its-own-inherits-only-the-root [$p] ($($pa.GetSecurityDescriptorSddlForm('Access')))"
+    }
     $a2 = Set-IemRootAcl -Root $root
     Assert (-not $a2.changed) 'root-acl-second-run-changes-nothing'
+    # A junction below the root is refused before anything is written: setting
+    # a folder's DACL makes Windows propagate it to what lies below, and whether
+    # that goes through a junction is not relied on. Each case would otherwise
+    # write: (a) a loosened root, (b) the junction's folder with a rule of its
+    # own. Neither the root, the junction's folder nor the folder the junction
+    # points to (outside the root) and its file change.
+    $outside = Join-Path $base 'outside'
+    $outsideFile = Join-Path $outside 'z.txt'
+    New-Item -ItemType Directory -Force -Path $outside | Out-Null
+    Set-Content -LiteralPath $outsideFile -Value 'z'
+    $zAcl = [IO.File]::GetAccessControl($outsideFile)
+    $zAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($everyone, 'Read', 'Allow')))
+    [IO.File]::SetAccessControl($outsideFile, $zAcl)
+    function OutsideSddl { return ([IO.Directory]::GetAccessControl($outside).GetSecurityDescriptorSddlForm('Access') + ' ' + [IO.File]::GetAccessControl($outsideFile).GetSecurityDescriptorSddlForm('Access')) }
+    function DirSddl($p) { return [IO.Directory]::GetAccessControl($p).GetSecurityDescriptorSddlForm('Access') }
+    $outsideBefore = OutsideSddl
+    $bundles = Join-Path $root 'bundles'
+    $link = Join-Path $bundles 'link'
+    # (a) The root loosened as above (set before the junction exists, so the
+    # set-up itself passes nothing through it), then the junction.
+    $acl = Get-Acl -LiteralPath $root
+    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule('Everyone', 'Read', 'ContainerInherit, ObjectInherit', 'None', 'Allow')))
+    Set-Acl -LiteralPath $root -AclObject $acl
+    $pre = Test-IemDirectoryAcl -Path $root -Rights (Get-IemRootRights -UserSid $me.sid)
+    Assert ($pre.Count -gt 0) "root-acl-precondition-a-loosened-root ($($pre -join '; '))"
+    New-Item -ItemType Junction -Path $link -Value $outside | Out-Null
+    $rootBefore = DirSddl $root
+    $bundlesBefore = DirSddl $bundles
+    $e = ErrorOf { Set-IemRootAcl -Root $root }
+    Assert ($e -like '*junction or a link*' -and $e.Contains('bundles\link')) "root-acl-refuses-a-junction-below-a-loosened-root ($e)"
+    Assert ((DirSddl $root) -ceq $rootBefore -and (DirSddl $bundles) -ceq $bundlesBefore) "root-acl-writes-nothing-with-a-junction-below-a-loosened-root ($(DirSddl $root) / $(DirSddl $bundles))"
+    Assert ((OutsideSddl) -ceq $outsideBefore) "root-acl-never-writes-through-a-junction-below-a-loosened-root ($(OutsideSddl))"
+    [IO.Directory]::Delete($link)
+    $r = Set-IemRootAcl -Root $root
+    Assert ($r.changed -and @($r.before).Count -gt 0) "root-acl-without-the-junction-closes-the-loosened-root ($(@($r.reset) -join ', '); $(@($r.differed) -join '; '))"
+    # (b) The junction's folder with a rule of its own, for that folder alone
+    # (so setting it passes nothing on below), then the junction.
+    $bAcl = [IO.Directory]::GetAccessControl($bundles)
+    $bAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($everyone, 'Read', 'None', 'None', 'Allow')))
+    [IO.Directory]::SetAccessControl($bundles, $bAcl)
+    $pre = Test-IemInheritedItem -Path $bundles -Rights (Get-IemRootRights -UserSid $me.sid)
+    Assert ($pre.Count -gt 0) "root-acl-precondition-the-junctions-folder-with-a-rule-of-its-own ($($pre -join '; '))"
+    New-Item -ItemType Junction -Path $link -Value $outside | Out-Null
+    $rootBefore = DirSddl $root
+    $bundlesBefore = DirSddl $bundles
+    $e = ErrorOf { Set-IemRootAcl -Root $root }
+    Assert ($e -like '*junction or a link*' -and $e.Contains('bundles\link')) "root-acl-refuses-a-junction-in-a-folder-with-a-rule-of-its-own ($e)"
+    Assert ((DirSddl $root) -ceq $rootBefore -and (DirSddl $bundles) -ceq $bundlesBefore) "root-acl-writes-nothing-with-a-junction-in-a-folder-with-a-rule-of-its-own ($(DirSddl $root) / $(DirSddl $bundles))"
+    Assert ((OutsideSddl) -ceq $outsideBefore) "root-acl-never-writes-through-a-junction-in-a-folder-with-a-rule-of-its-own ($(OutsideSddl))"
+    # A reset checks every part from the root down to the item right before it
+    # writes (by path): an item reached through a junction, or named outside
+    # the root, is refused and nothing outside the root changes.
+    $e = ErrorOf { Reset-IemInheritedItem -Root $root -Rel 'bundles\link\z.txt' }
+    Assert ($e -like '*junction or a link*' -and $e.Contains('bundles\link')) "root-acl-reset-refuses-an-item-through-a-junction ($e)"
+    $e = ErrorOf { Reset-IemInheritedItem -Root $root -Rel '..\outside\z.txt' }
+    Assert ($e -like '*not an item below the root*') "root-acl-reset-refuses-an-item-outside-the-root ($e)"
+    Assert ((OutsideSddl) -ceq $outsideBefore) "root-acl-reset-never-writes-outside-the-root ($(OutsideSddl))"
+    [IO.Directory]::Delete($link)
+    $r = Set-IemRootAcl -Root $root
+    Assert ((@($r.reset) -join ',') -ceq 'bundles') "root-acl-without-the-junction-resets-its-folder ($(@($r.reset) -join ','))"
+    Assert (-not (Set-IemRootAcl -Root $root).changed) 'root-acl-without-the-junction-changes-nothing'
 
     # ---- firewall rule (disabled here) ----
     $f1 = Add-IemFirewallRule -Name $ruleName -Disabled
@@ -459,7 +551,17 @@ function Invoke-IemTuningApply { param([string]$ProfilePath, [int]$Tier) return 
     $bs = Get-IemBootstrapState -Root $root -Module 'iemmixer-no-such-module.dll' -PrefKey $regKey -PrefName 'Pref' -AppImage 'iemmixer-no-such-app.exe' -Folder $folder -FirewallRule $ruleName
     Assert ($bs.holders.Count -eq 0 -and $bs.app -eq 0 -and $bs.reaper -eq 0 -and $bs.pref.value -eq 64) 'bootstrap-state-holders-processes-and-preference'
     Assert (@($bs.tasks | Where-Object { -not $_.exists -or -not $_.sddl_ok }).Count -eq 0 -and @($bs.tasks).Count -eq 7) 'bootstrap-state-our-tasks-with-their-descriptors'
-    Assert ($bs.root.acl_ok -and $bs.firewall.present -and -not $bs.firewall.ok) 'bootstrap-state-root-and-the-disabled-test-rule'
+    Assert ($bs.root.acl_ok -and $bs.firewall.present -and -not $bs.firewall.ok) "bootstrap-state-root-and-the-disabled-test-rule ($(@($bs.root.problems) -join '; '))"
+    # An item below the root with a rule of its own: the state sees it, and the
+    # next Set-IemRootAcl resets that item only.
+    $loose = Join-Path $root 'bundles\x.txt'
+    $looseAcl = [IO.File]::GetAccessControl($loose)
+    $looseAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($everyone, 'Read', 'Allow')))
+    [IO.File]::SetAccessControl($loose, $looseAcl)
+    $bs = Get-IemBootstrapState -Root $root -Module 'iemmixer-no-such-module.dll' -PrefKey $regKey -PrefName 'Pref' -AppImage 'iemmixer-no-such-app.exe' -Folder $folder -FirewallRule $ruleName
+    Assert (-not $bs.root.acl_ok -and @($bs.root.problems | Where-Object { $_ -like '*x.txt*S-1-1-0*' }).Count -eq 1) "bootstrap-state-sees-an-item-below-the-root-with-a-rule-of-its-own ($(@($bs.root.problems) -join '; '))"
+    $fix = Set-IemRootAcl -Root $root
+    Assert ($fix.changed -and (@($fix.reset) -join ',') -ceq 'bundles\x.txt') "root-acl-resets-only-the-item-that-differs ($(@($fix.reset) -join ','))"
     Assert ((Get-IemModuleHolders -Module 'kernel32.dll').Count -gt 1) 'module-holders-lists-processes'
     Throws { Get-IemModuleHolders -Module 'a|b.dll' } 'module-holders-refuse-a-bad-name'
 
