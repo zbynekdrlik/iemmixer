@@ -733,6 +733,7 @@ mod tests {
             gr_db: vec![-3.0, 0.0],
             active: vec![96_000, 48_000],
             trips: 2,
+            hil: vec![0.25],
         };
         let m = meters_msg(&f);
         assert_eq!(m.seq, 3);
