@@ -1013,6 +1013,84 @@ mod named_pipes {
         e.shutdown();
     }
 
+    /// The engine closes a connection at once, even while its peer has not
+    /// read what the engine wrote last, so a peer that never reads holds up
+    /// no other close. interprocess's flush on drop (limbo) would keep the
+    /// engine's end open on the process's one linger thread until the peer
+    /// has read everything, and every stream dropped later in the process
+    /// would wait behind it, unclosed (Windows CI run 36373563262: two
+    /// clients never read the end the engine gave them, and the engine
+    /// never saw a controller leave). The peer still reads what came before
+    /// the close, then the end.
+    #[test]
+    fn a_peer_that_does_not_read_holds_up_no_close() {
+        use iem_win::pipe::{available, write_within};
+        use std::os::windows::io::AsHandle;
+
+        let e = Engine::start(Flags::default(), InputSignal::Silence);
+        let pipe = e.pipe.clone();
+        let mute = connect(move || control_name(&pipe));
+        // Refused at its hello: a short reply that fits the pipe, then the
+        // engine drops the connection. Nobody reads that reply yet.
+        let hello = ClientMsg::Hello {
+            proto: 0,
+            role: Role::Observe,
+            client: "mute".into(),
+        };
+        write_frame(&mut &mute, &hello).unwrap();
+        let gone = {
+            let Stream::NamedPipe(end) = &mute;
+            let end = end.inner().as_handle();
+            let start = Instant::now();
+            while available(end).unwrap() == 0 {
+                assert!(start.elapsed() < WAIT, "no reply to the refused hello");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            // Once the engine's end is closed, a byte the client writes
+            // finds the pipe closing; while it stays open, each byte waits
+            // in the pipe (a few dozen fit its 512 bytes).
+            let start = Instant::now();
+            loop {
+                match write_within(end, &[0], Duration::from_millis(100)) {
+                    Err(gone) => break Some(gone),
+                    Ok(_) if start.elapsed() < Duration::from_secs(2) => {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    Ok(_) => break None,
+                }
+            }
+        };
+        // Meanwhile a controller superseded by a new one reads the end of
+        // its stream.
+        let mut first = e.client();
+        first.hello(Role::Control);
+        let mut second = e.client();
+        second.hello(Role::Control);
+        first.wait(|m| matches!(m, EngineMsg::Superseded).then_some(()));
+        let later_closed = first.closed();
+        // The refused client reads the reply the engine wrote before it
+        // closed, then the end (reading it also frees whatever waited for
+        // it, before any assertion below can fail).
+        let mut late = Client {
+            r: Reader::start(mute, Framer::next_frame),
+        };
+        let reply = late.wait(|m| match m {
+            EngineMsg::Reply(r) => Some(r.clone()),
+            _ => None,
+        });
+        assert_eq!(reply.error.map(|b| b.code), Some(ErrCode::Unsupported));
+        assert!(late.closed(), "the refused client reads the end");
+        let Some(gone) = gone else {
+            panic!("the engine kept a closed connection open until its peer read it");
+        };
+        assert!(
+            matches!(gone.raw_os_error(), Some(109 | 232 | 233)),
+            "{gone}"
+        );
+        assert!(later_closed, "a close waited for a peer that does not read");
+        e.shutdown();
+    }
+
     /// `ERROR_PIPE_BUSY`: every instance is taken for a moment.
     const BUSY: i32 = 231;
 
