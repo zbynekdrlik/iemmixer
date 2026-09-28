@@ -2093,6 +2093,129 @@ fn every_reply_names_the_guard_s_build() {
     );
 }
 
+/// The offline refusal of a saved mode other than event.
+fn offline_mode_refusal(mode: &str) -> String {
+    format!("the saved mode is {mode}: without a guard only an idle event activates")
+}
+
+/// `iemmixer-guard activate <sha>` while no guard runs (#9 2026-09-28): the
+/// way to a guard too old to activate in event (its own code refuses it).
+/// Under the guard's mutex, the same rule on the saved state and the
+/// process list; then the bins, the pin and the exclusions, saved. It
+/// starts no guard: the next `iemmode` call starts the guard's task, which
+/// runs the new exe from `bin\`.
+#[test]
+fn activate_offline_in_an_idle_event_copies_pins_and_starts_no_guard() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut g = installed_in_event(dir.path());
+    let mut pc = FakePc::new(band_up());
+    let r = activate_offline(&mut pc, &mut g, Some(()), SHA);
+    assert_eq!(
+        (r.ok, r.detail.clone()),
+        (
+            true,
+            format!(
+                "activated {SHA} without a guard; the next iemmode call starts the guard from bin"
+            )
+        )
+    );
+    assert_eq!(pc.calls(), [Call::Facts, Call::SetBundle, Call::Exclude]);
+    assert_eq!(pc.excluded, [(SHA.to_owned(), vec![OTHER.to_owned()])]);
+    let bin = install::bin_dir(dir.path());
+    assert!(bin.join(install::GUARD_EXE).is_file());
+    assert!(bin.join(install::IEMMODE_EXE).is_file());
+    assert_eq!(g.handover, None, "no guard is started or handed over to");
+    assert_eq!(
+        (r.mode, r.guard_build.as_deref()),
+        (Mode::Event, Some(GUARD_BUILD))
+    );
+    // Saved: the guard the next iemmode call starts finds the pin.
+    let back = Guard::open(dir.path(), SiteConf::default(), fixed(T0));
+    assert_eq!(
+        (back.state.mode, back.state.pins.current.as_deref()),
+        (Mode::Event, Some(SHA))
+    );
+    // Exclusions that fail alarm (the alarm is kept for the next guard);
+    // the activation stands.
+    let dir = tempfile::tempdir().unwrap();
+    let mut g = installed_in_event(dir.path());
+    let mut pc = FakePc::new(band_up());
+    pc.fail(Call::Exclude, "the exclude task ended with 1");
+    let r = activate_offline(&mut pc, &mut g, Some(()), SHA);
+    assert!(r.ok, "{r:?}");
+    let back = Guard::open(dir.path(), SiteConf::default(), fixed(T0));
+    assert_eq!(
+        texts(&back),
+        [format!(
+            "Defender exclusions for {SHA}: the exclude task ended with 1"
+        )]
+    );
+    assert_eq!(back.state.pins.current.as_deref(), Some(SHA));
+}
+
+#[test]
+fn activate_offline_is_refused_while_a_guard_runs_or_the_event_is_not_idle() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut g = installed_in_event(dir.path());
+    let bin_guard = install::bin_dir(dir.path()).join(install::GUARD_EXE);
+    // A guard holds the mutex: nothing is read.
+    let mut pc = FakePc::new(band_up());
+    let r = activate_offline::<()>(&mut pc, &mut g, None, SHA);
+    assert_eq!(
+        (r.ok, r.detail.as_str()),
+        (false, "a guard runs; use iemmode activate")
+    );
+    assert!(pc.calls().is_empty(), "{:?}", pc.calls());
+    // Dev and live by the saved mode: a guard serves them.
+    for (mode, name) in [(Mode::Dev, "dev"), (Mode::Live, "live")] {
+        g.state.mode = mode;
+        let r = activate_offline(&mut pc, &mut g, Some(()), SHA);
+        assert_eq!((r.ok, r.detail), (false, offline_mode_refusal(name)));
+    }
+    assert!(pc.calls().is_empty(), "{:?}", pc.calls());
+    g.state.mode = Mode::Event;
+    // A process of iemmixer's runs.
+    let mut pc = FakePc::new(Facts {
+        engine: true,
+        ..band_up()
+    });
+    let r = activate_offline(&mut pc, &mut g, Some(()), SHA);
+    assert_eq!(
+        (r.ok, r.detail.as_str()),
+        (
+            false,
+            "activate in event needs no iemmixer process; running: engine"
+        )
+    );
+    // A switch waits for its interlock retry.
+    g.state.interlock_retry = Some(InterlockRetry {
+        target: Mode::Dev,
+        build: None,
+        refusals: 2,
+        next_at: T0 + RETRY_S,
+    });
+    let mut pc = FakePc::new(band_up());
+    let r = activate_offline(&mut pc, &mut g, Some(()), SHA);
+    assert!(!r.ok);
+    assert!(
+        r.detail
+            .starts_with("the dev switch waits for its interlock retry"),
+        "{}",
+        r.detail
+    );
+    g.state.interlock_retry = None;
+    // A bundle that is not installed.
+    let r = activate_offline(&mut pc, &mut g, Some(()), OTHER);
+    assert_eq!(
+        (r.ok, r.detail),
+        (false, format!("bundle {OTHER} is not installed"))
+    );
+    // Nothing was copied, pinned or excluded.
+    assert!(steps(&pc).is_empty(), "{:?}", pc.calls());
+    assert!(!bin_guard.exists());
+    assert_eq!(g.state.pins.current.as_deref(), Some(OTHER));
+}
+
 #[test]
 fn install_site_in_a_job_restarts_only_the_engine_and_the_server() {
     let (mut pc, mut g) = (

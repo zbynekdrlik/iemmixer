@@ -551,6 +551,33 @@ mod tests {
         );
     }
 
+    /// `activate <sha>` without a guard (#9 2026-09-28), from a bundle's
+    /// own exe: the way to a guard too old to activate in event.
+    #[test]
+    fn the_guard_activates_a_bundle_while_no_guard_runs() {
+        assert_eq!(
+            parse_guard(&args(&["activate", SHA])),
+            Ok(GuardCli::Activate { sha: SHA.into() })
+        );
+        assert_eq!(
+            parse_guard(&args(&["activate"])),
+            Err("1 arguments expected, 0 given".to_owned())
+        );
+        assert_eq!(
+            parse_guard(&args(&["activate", SHA, SHA])),
+            Err("1 arguments expected, 2 given".to_owned())
+        );
+        let upper = SHA.to_uppercase();
+        assert_eq!(
+            parse_guard(&args(&["activate", upper.as_str()])),
+            Err(format!("{upper:?} is not a 40-digit lowercase commit SHA"))
+        );
+        assert_eq!(
+            GUARD_USAGE,
+            "usage: iemmixer-guard run | install <zip> [--verify-only] | activate <sha>"
+        );
+    }
+
     fn reply(ok: bool) -> Reply {
         Reply {
             ok,
