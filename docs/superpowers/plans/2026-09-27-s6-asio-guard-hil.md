@@ -86,6 +86,7 @@
 2. **Sound on the band's channels.**
    - Expected: every card output is zeroed each callback. TX gets processor output only after `Arm` (hold) or on respawn. The test signal cap is unchanged; the HIL test signal reaches only the card-masked outputs, and a HIL job starts only after 5 min of band quiet plus a 60 s stage-peak check. Unknown RX/TX refuse the stream.
    - Tests: `channels::tests`, engine `hold_keeps_outputs_silent_until_arm`, `hil_test_signal_reaches_only_masked_outputs`, `daemon::tests::job_begin_needs_a_quiet_stage`, HIL `test-signal`.
+   - Superseded on #9 (owner, 2026-09-28): the HIL signal goes only to spare card outputs no mix uses (`[guard] hil_tx`, opened after the topology's TX), every mix's TX and both listen taps stay silent while it runs; the test is now `hil_test_signal_reaches_only_the_masked_spare_outputs` (with `a_hil_signal_leaves_the_listen_taps_silent`). The Task 5 steps below keep the original card_tx [72] / per-TX mask as a record.
 3. **Nothing force-ended.**
    - Expected: no kill path in the guard. Every stop is a request plus a bounded wait, then an alarm.
    - Tests: integrity scan; `crash::tests` (no respawn after exit 2/3 or at session end); `FakePc` records no force verb (there is none to record).
@@ -800,7 +801,7 @@ impl<P: Process + 'static> AsioStream<P> {
   - A second supervisor replaces the first (the first gets `Superseded`); `control` is untouched.
   - `hold_keeps_outputs_silent_until_arm`: `Offline` with `Options { hold: true }` renders zeros until an `RtOp::Arm`, then fades in over 500 ms.
   - `discontinuity_restarts_the_fade_in`.
-  - `hil_test_signal_reaches_only_masked_outputs`: `Offline` with a `HilTestSignal { input, hz, dbfs, ttl_s, card_tx: [72] }` → the mix meters of every TX whose mix routes that input show the signal (internal routing), the rendered card output 72 carries it, every other card output is exactly zero until the TTL ends, then normal output resumes; `dbfs` above the existing test-signal cap is refused.
+  - `hil_test_signal_reaches_only_masked_outputs` (superseded on #9, 2026-09-28: spare outputs only, see the rule under "Sound on the band's channels"): `Offline` with a `HilTestSignal { input, hz, dbfs, ttl_s, card_tx: [72] }` → the mix meters of every TX whose mix routes that input show the signal (internal routing), the rendered card output 72 carries it, every other card output is exactly zero until the TTL ends, then normal output resumes; `dbfs` above the existing test-signal cap is refused.
   - `Status` serialises `frames`, `missed`, `overruns`, `resets`, `parked`, and an old client ignores them (additive).
 
   Commit: `test(engine): [red] supervisor role, hold until arm, discontinuity fade-in, HIL output mask`.
