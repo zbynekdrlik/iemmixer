@@ -81,14 +81,16 @@ try {
     foreach ($bad in $badInherited) { Assert (-not (Test-IemTaskSddl -Sddl $bad -UserSid $userSid)) "task-sddl-read-back-refuses [$bad]" }
 
     # ---- Register-IemTasks on the real Task Scheduler ----
-    $prefArgs = @{ PrefKey = $regKey; PrefName = 'Pref'; PrefOriginal = '64' }
+    $prefArgs = @{ PrefKey = $regKey; PrefName = 'Pref'; PrefOriginal = '64'; Module = 'testcard.dll' }
     $sch = New-Object -ComObject 'Schedule.Service'
     $sch.Connect()
     $e = ErrorOf { Register-IemTasks -Root $root -AppExe $appExe -Folder '\iemmixer-test-none' -ElevatedRoot $elevated @prefArgs }
     Assert ($e -like '*iemmixer-StartREAPER is missing*') "tasks-need-the-existing-start-reaper-task ($e)"
     Throws { $sch.GetFolder('\iemmixer-test-none') } 'tasks-refused-before-any-folder-exists'
     Assert (-not (Test-Path -LiteralPath $elevated)) 'tasks-refused-before-the-elevated-folder'
-    Throws { Register-IemTasks -Root $root -AppExe $appExe -Folder $folder -ElevatedRoot $elevated -PrefKey $regKey -PrefName 'Pref' -PrefOriginal '64x' } 'tasks-refuse-a-non-numeric-original'
+    Throws { Register-IemTasks -Root $root -AppExe $appExe -Folder $folder -ElevatedRoot $elevated -PrefKey $regKey -PrefName 'Pref' -PrefOriginal '64x' -Module 'testcard.dll' } 'tasks-refuse-a-non-numeric-original'
+    $e = ErrorOf { Register-IemTasks -Root $root -AppExe $appExe -Folder '\iemmixer-test-none' -ElevatedRoot $elevated -PrefKey $regKey -PrefName 'Pref' -PrefOriginal '64' -Module 'a|b.dll' }
+    Assert ($e -like "*module name 'a|b.dll' refused*") "tasks-refuse-a-bad-driver-module-name ($e)"
     Throws { Register-IemTasks -Root ($root + '"') -AppExe $appExe -Folder $folder -ElevatedRoot $elevated @prefArgs } 'tasks-refuse-a-quote-in-a-path'
 
     Register-ScheduledTask -TaskPath '\iemmixer-test\' -TaskName 'iemmixer-StartREAPER' `
@@ -123,7 +125,7 @@ try {
     $eout = Join-Path $etasks 'out'
     $etuning = Join-Path $elevated 'tuning'
     $entry = Join-Path $etasks 'iem-task.ps1'
-    Assert ($l.Actions[0].Arguments -like "*-File `"$entry`" -Root `"$root`" -TuningDir `"$etuning`" -Kind logon -PrefKey `"$regKey`" -PrefName `"Pref`" -PrefOriginal `"64`"") "tasks-logon-runs-the-elevated-entry ($($l.Actions[0].Arguments))"
+    Assert ($l.Actions[0].Arguments -like "*-File `"$entry`" -Root `"$root`" -TuningDir `"$etuning`" -Kind logon -PrefKey `"$regKey`" -PrefName `"Pref`" -PrefOriginal `"64`" -Module `"testcard.dll`"") "tasks-logon-runs-the-elevated-entry ($($l.Actions[0].Arguments))"
     $tu = Get-ScheduledTask -TaskPath '\iemmixer-test\' -TaskName 'iemmixer-tuning'
     Assert ($tu.Actions[0].Arguments -like "*-File `"$entry`" -Root `"$root`" -TuningDir `"$etuning`" -Kind tuning" -and $tu.Actions[0].Execute -like '*\WindowsPowerShell\v1.0\powershell.exe' -and $tu.Actions[0].WorkingDirectory -eq $etasks) 'tasks-tuning-runs-the-elevated-entry-with-its-tuning-folder'
     $sr = Get-ScheduledTask -TaskPath '\iemmixer-test\' -TaskName 'iemmixer-StartREAPER'
@@ -417,24 +419,56 @@ try {
     Assert (Test-IemTriggersMayFire -Enabled $true -Triggers $trig) 'triggers-an-idle-trigger-may-fire'
     Assert (-not (Test-IemTriggersMayFire -Enabled $true -Triggers @())) 'triggers-none-never-fire'
 
+    # ---- the preference check's decision (pure): the guard's PrefCheck rule (#9 2026-09-28) ----
+    $pa = Get-IemPrefAction -IsOriginal $true -Holders @('reaper.exe:11')
+    Assert ($pa.action -ceq 'none' -and @($pa.holders).Count -eq 0) 'pref-action-at-the-original-is-none-whoever-holds-the-driver'
+    $pa = Get-IemPrefAction -IsOriginal $true -Holders $null -Reaper @('reaper:11')
+    Assert ($pa.action -ceq 'none' -and @($pa.holders).Count -eq 0) 'pref-action-at-the-original-is-none-with-unreadable-holders'
+    $pa = Get-IemPrefAction -IsOriginal $false -Holders @()
+    Assert ($pa.action -ceq 'restore' -and @($pa.holders).Count -eq 0) 'pref-action-restores-while-nothing-holds-the-driver'
+    $pa = Get-IemPrefAction -IsOriginal $false -Holders @('reaper.exe:11')
+    Assert ($pa.action -ceq 'held' -and (@($pa.holders) -join ',') -ceq 'reaper.exe:11') 'pref-action-never-writes-under-reaper'
+    $pa = Get-IemPrefAction -IsOriginal $false -Holders @('spike.exe:99', 'reaper.exe:11')
+    Assert ($pa.action -ceq 'held' -and (@($pa.holders) -join ',') -ceq 'spike.exe:99,reaper.exe:11') 'pref-action-never-writes-under-any-holder'
+    $pa = Get-IemPrefAction -IsOriginal $false -Holders $null -Reaper @('reaper:11')
+    Assert ($pa.action -ceq 'held' -and (@($pa.holders) -join ',') -ceq 'reaper:11') 'pref-action-assumes-a-running-reaper-holds-when-the-holders-are-unreadable'
+    $pa = Get-IemPrefAction -IsOriginal $false -Holders $null
+    Assert ($pa.action -ceq 'restore' -and @($pa.holders).Count -eq 0) 'pref-action-restores-unreadable-holders-without-reaper'
+
     # ---- the preference and the elevated tasks' body ----
+    # A driver module no process holds, and one every process holds.
+    $free = 'iemmixer-free-' + $id + '.dll'
+    $everyone = 'kernel32.dll'
     New-ItemProperty -LiteralPath $regKey -Name 'Pref' -Value 32 -PropertyType DWord | Out-Null
     $noTuning = Join-Path $base 'no-tuning'
-    $lg = Invoke-IemTaskRequest -Kind logon -Root $root -OutDir $eout -TuningDir $noTuning -PrefKey $regKey -PrefName 'Pref' -PrefOriginal '64'
+    $lg = Invoke-IemTaskRequest -Kind logon -Root $root -OutDir $eout -TuningDir $noTuning -PrefKey $regKey -PrefName 'Pref' -PrefOriginal '64' -Module $free
     $pv = Get-IemPref -Key $regKey -Name 'Pref'
-    Assert ($lg.ok -and $pv.value -eq 64 -and $pv.kind -eq 'DWord' -and $lg.result.pref.attempts -eq 1 -and $lg.result.tuning -eq 'absent') 'logon-restores-the-preference-keeping-its-kind'
+    Assert ($lg.ok -and $pv.value -eq 64 -and $pv.kind -eq 'DWord' -and $lg.result.pref.attempts -eq 1 -and $lg.result.pref.action -ceq 'restore' -and $lg.result.tuning -eq 'absent') 'logon-restores-the-preference-keeping-its-kind'
     Assert ((Get-Content -LiteralPath (Join-Path $eout 'logon.result.json') -Raw | ConvertFrom-Json).ok) 'logon-writes-its-result-in-the-admin-only-folder'
     Assert (-not (Test-Path -LiteralPath (Join-Path $root 'guard'))) 'the-elevated-task-writes-nothing-in-the-users-root'
-    $r0 = Restore-IemPref -Key $regKey -Name 'Pref' -Original '64'
-    Assert ($r0.ok -and $r0.attempts -eq 0) 'pref-at-its-original-is-not-written'
+    $r0 = Restore-IemPref -Key $regKey -Name 'Pref' -Original '64' -Module $everyone
+    Assert ($r0.ok -and $r0.attempts -eq 0 -and $r0.action -ceq 'none') 'pref-at-its-original-is-not-written'
+    # Not the original while a process holds the driver module (REAPER started
+    # at 32 after a power loss): never written, the value and the holders named.
+    Set-ItemProperty -LiteralPath $regKey -Name 'Pref' -Value 32 -Type DWord
+    $ph = Restore-IemPref -Key $regKey -Name 'Pref' -Original '64' -Module $everyone
+    Assert ($ph.action -ceq 'held' -and -not $ph.ok -and $ph.attempts -eq 0 -and $ph.before -ceq '32' -and $ph.after -ceq '32' -and @($ph.holders).Count -gt 1 -and (Get-IemPref -Key $regKey -Name 'Pref').value -eq 32) 'pref-never-written-while-a-process-holds-the-driver-module'
+    $lh = Invoke-IemTaskRequest -Kind logon -Root $root -OutDir $eout -TuningDir $noTuning -PrefKey $regKey -PrefName 'Pref' -PrefOriginal '64' -Module $everyone
+    $lj = Get-Content -LiteralPath (Join-Path $eout 'logon.result.json') -Raw | ConvertFrom-Json
+    Assert ($lh.ok -and $lj.ok -and $lj.kind -ceq 'logon' -and $lj.at -and $lj.result.pref.action -ceq 'held' -and $lj.result.pref.before -ceq '32' -and @($lj.result.pref.holders).Count -gt 1 -and (Get-IemPref -Key $regKey -Name 'Pref').value -eq 32) 'logon-leaves-a-held-preference-and-names-it-for-the-guard'
+    Set-ItemProperty -LiteralPath $regKey -Name 'Pref' -Value 64 -Type DWord
     New-ItemProperty -LiteralPath $regKey -Name 'Text' -Value '32' -PropertyType String | Out-Null
-    $rt = Restore-IemPref -Key $regKey -Name 'Text' -Original '064'
+    $rt = Restore-IemPref -Key $regKey -Name 'Text' -Original '064' -Module $free
     $tv = Get-IemPref -Key $regKey -Name 'Text'
-    Assert ($rt.ok -and $tv.raw -ceq '064' -and $tv.kind -eq 'String') 'pref-restores-the-raw-text-of-a-string'
-    Throws { Restore-IemPref -Key $regKey -Name 'Pref' -Original '6 4' } 'pref-refuses-a-non-numeric-original'
+    Assert ($rt.ok -and $rt.action -ceq 'restore' -and $tv.raw -ceq '064' -and $tv.kind -eq 'String') 'pref-restores-the-raw-text-of-a-string'
+    Throws { Restore-IemPref -Key $regKey -Name 'Pref' -Original '6 4' -Module $free } 'pref-refuses-a-non-numeric-original'
+    $e = ErrorOf { Restore-IemPref -Key $regKey -Name 'Pref' -Original '64' -Module 'a|b.dll' }
+    Assert ($e -like "*module name 'a|b.dll' refused*") "pref-refuses-a-bad-driver-module-name ($e)"
     Assert ((ConvertTo-IemHkcuPath -Key 'Software\ASIO\Test Card') -ceq 'HKCU:\Software\ASIO\Test Card') 'pref-site-key-is-under-hkcu'
-    $nk = Invoke-IemTaskRequest -Kind logon -Root $root -OutDir $eout -TuningDir $noTuning -PrefKey $regKey -PrefName 'NoSuchValue' -PrefOriginal '64'
+    $nk = Invoke-IemTaskRequest -Kind logon -Root $root -OutDir $eout -TuningDir $noTuning -PrefKey $regKey -PrefName 'NoSuchValue' -PrefOriginal '64' -Module $free
     Assert (-not $nk.ok -and $nk.error) 'logon-reports-a-missing-value'
+    $nm = Invoke-IemTaskRequest -Kind logon -Root $root -OutDir $eout -TuningDir $noTuning -PrefKey $regKey -PrefName 'Pref' -PrefOriginal '64'
+    Assert (-not $nm.ok -and $nm.error -like '*-Module*') "logon-needs-the-driver-module ($($nm.error))"
 
     $td = Join-Path $root 'guard\tasks'
     New-Item -ItemType Directory -Force -Path $td | Out-Null

@@ -10,9 +10,10 @@ use iem_win::spawn::Placement;
 use super::*;
 use crate::bundle::Pins;
 use crate::effects::engine::{Ready, ReadyWindow};
+use crate::effects::tuning::{Logon, LogonPref};
 use crate::install;
-use crate::pc::Status;
 use crate::pc::fake::{Call, FakePc};
+use crate::pc::{CardHolders, PrefHeld, Status};
 use crate::proto::GUARD_BUILD;
 
 const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
@@ -528,6 +529,105 @@ fn a_dev_entry_never_writes_the_preference_under_another_holder() {
     assert_eq!(pc.pref_writes, 1);
     assert!(pc.index(Call::HolderGone) < pc.index(Call::ReaperStart));
     assert_eq!(g.state.pref_held, None);
+}
+
+/// The logon task's run of `at` that left the preference at 32 under a
+/// REAPER that holds the card.
+fn logon_held(at: &str) -> Logon {
+    Logon {
+        at: at.into(),
+        pref: LogonPref::Held(PrefHeld {
+            value: Some("32".into()),
+            by: CardHolders {
+                reaper: true,
+                names: "reaper.exe (11)".into(),
+            },
+        }),
+    }
+}
+
+/// The elevated logon task (G1) never writes the preference under a holder
+/// of the driver module either (#9 2026-09-28): what it left is in its
+/// result, which the guard takes once per run (its `at`), at its start and
+/// hourly: remembered, named in the status and alarmed once, with the text
+/// of `PrefCheck`; a later run at the original drops it; a failed run
+/// changes nothing.
+#[test]
+fn the_guard_takes_what_the_logon_task_left() {
+    const RUN1: &str = "2026-09-28T06:00:00.0000000Z";
+    let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Event));
+    pc.logon = Some(logon_held(RUN1));
+    assert_eq!(start(&mut pc, &mut g, 0), None);
+    assert_eq!(texts(&g), [format!("logon task: {HELD}")]);
+    assert!(!g.alarms.last().unwrap().owner_question);
+    assert_eq!(g.state.pref_held.as_deref(), Some(HELD));
+    assert_eq!(g.state.logon_seen.as_deref(), Some(RUN1));
+    assert_eq!(
+        status_text(&g),
+        format!("mode event; no bundle; {HELD}; 1 unacknowledged alarms")
+    );
+    // The same run is not taken twice (a guard restart), also after a check
+    // of the guard's own dropped what it remembered.
+    g.state.pref_held = None;
+    assert_eq!(start(&mut pc, &mut g, 0), None);
+    assert_eq!(g.state.pref_held, None);
+    assert_eq!(g.alarms.all().len(), 1);
+    // A failed run is logged and changes nothing but the run seen.
+    const RUN2: &str = "2026-09-29T06:00:00.0000000Z";
+    g.state.pref_held = Some(HELD.into());
+    pc.logon = Some(Logon {
+        at: RUN2.into(),
+        pref: LogonPref::Failed("the preference was not restored: it reads 32".into()),
+    });
+    assert_eq!(start(&mut pc, &mut g, 0), None);
+    assert_eq!(g.state.pref_held.as_deref(), Some(HELD));
+    assert_eq!(g.state.logon_seen.as_deref(), Some(RUN2));
+    assert_eq!(g.alarms.all().len(), 1);
+    // A run that found or restored the original drops it.
+    pc.logon = Some(Logon {
+        at: "2026-09-30T06:00:00.0000000Z".into(),
+        pref: LogonPref::Original,
+    });
+    assert_eq!(start(&mut pc, &mut g, 0), None);
+    assert_eq!(g.state.pref_held, None);
+    assert_eq!(g.alarms.all().len(), 1);
+    // A run that came while the guard runs is taken by the hourly look.
+    pc.logon = Some(Logon {
+        at: "2026-10-01T06:00:00.0000000Z".into(),
+        pref: LogonPref::Held(PrefHeld {
+            value: Some("32".into()),
+            by: CardHolders {
+                reaper: false,
+                names: "spike.exe (99)".into(),
+            },
+        }),
+    });
+    tick(&mut pc, &mut g, Instant::now());
+    assert_eq!(g.alarms.all().len(), 2);
+    assert_eq!(
+        g.alarms.last().unwrap().text,
+        "logon task: the driver module is held by spike.exe (99) with the preferred buffer at \
+         32; nothing was written"
+    );
+}
+
+/// After a reboot with REAPER holding the card at 32, the logon task's run
+/// and the event plan's check find the same: one alarm, nothing written,
+/// REAPER left alone.
+#[test]
+fn the_logon_task_and_the_event_plan_alarm_once_for_the_same_value() {
+    let mut g = Guard::for_test(Mode::Dev);
+    g.state.written_at = 1_000;
+    let mut pc = FakePc::new(band_up());
+    pc.pref_attempts = 1;
+    pc.logon = Some(logon_held("2026-09-28T06:00:00.0000000Z"));
+    assert_eq!(start(&mut pc, &mut g, 5_000), Some(Outcome::Done));
+    assert_eq!(g.state.mode, Mode::Event);
+    assert!(pc.called(Call::PrefCheck));
+    assert_eq!(pc.pref_writes, 0);
+    assert!(!pc.called(Call::ReaperStart) && !pc.called(Call::ReaperSaveQuit));
+    assert_eq!(texts(&g), [format!("logon task: {HELD}")]);
+    assert_eq!(g.state.pref_held.as_deref(), Some(HELD));
 }
 
 #[test]

@@ -196,6 +196,7 @@ mod tests {
                 "REAPER runs with the preferred buffer at 32; it is restored at REAPER's next start"
                     .into(),
             ),
+            logon_seen: Some("2026-09-28T06:00:00.1234567Z".into()),
         }
     }
 
@@ -307,5 +308,6 @@ mod tests {
         assert_eq!(st.pins, before.pins);
         assert_eq!(st.pids, before.pids);
         assert_eq!(st.pref_held, before.pref_held);
+        assert_eq!(st.logon_seen, before.logon_seen);
     }
 }
