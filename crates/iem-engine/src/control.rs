@@ -1197,8 +1197,9 @@ mod tests {
                 (13, Cmd::GetState, None),
                 (14, Cmd::GetTopology, None),
                 (15, Cmd::SaveNow, None),
-                (16, start, None),
-                (17, Cmd::StopTestSignal, None),
+                // A running HIL signal refuses a plain one: stop it first.
+                (16, Cmd::StopTestSignal, None),
+                (17, start, None),
                 (18, Cmd::InjectFault, Some(ErrCode::Forbidden)),
                 (19, set_mix(), Some(ErrCode::NotController)),
                 (
