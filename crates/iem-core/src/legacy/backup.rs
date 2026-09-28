@@ -28,7 +28,10 @@ pub struct MixerBackup {
     pub limiter: HashMap<String, LimiterBackup>,
     /// Per-member UI customizations: member ID → prefs
     pub customizations: HashMap<String, Customization>,
-    /// Per-member PINs: member ID → PIN string
+    /// Per-member PINs: member ID → PIN string. The predecessor's real
+    /// backups do not carry pins (they live apart), so the field is optional
+    /// (iemmixer#9 2026-09-28: a required `pins` broke `import --backup`).
+    #[serde(default)]
     pub pins: HashMap<String, String>,
     /// Track-level mute state for inear/stems tracks: track name → muted
     #[serde(default)]
