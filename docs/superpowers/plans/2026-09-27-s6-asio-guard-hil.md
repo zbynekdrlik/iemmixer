@@ -202,7 +202,7 @@ If `dev` is not strictly above `main`, the first commit sets `[workspace.package
   - the predecessor exit through its tray command;
   - the preference window;
   - the HIL decision (dispatched from the dev box, no public dispatch token);
-  - the two owner steps, stated honestly: the one-time alarm link before the first switch, and the five approval-gated tests asked right after HIL v1 is green (listed here, not asked);
+  - the two owner steps, stated honestly: the one-time alarm link right after the first dev entry (iem-server serves it only in dev and live), and the five approval-gated tests asked right after HIL v1 is green (listed here, not asked);
   - the no-agent fallbacks (the engineer's "Späť na REAPER" button, a reboot);
   - the declared spec deviations (design §11).
 
@@ -896,7 +896,7 @@ fn sddl_for(sid: &str) -> String {
   Commit: `feat(server): one-time alarm subscription link for the owner (S6 bootstrap)`.
 - [ ] **Step 5: Alarm recipients vs the engineer** (P9, design §5.4; deviation from spec §4.2 recorded in the design note).
   - `iem-server notify --to alarm|band-activity <title> <body>`: `alarm` sends only to `alarm_subscriptions.json` (exit 3 when it is empty, so the guard's precheck and its alarm path can see it); `band-activity` sends only to the engineer's subscriptions. No other audience exists.
-  - `iem-server notify --count alarm` prints the number of alarm recipients (the guard's precheck gate, ≥ 1).
+  - `iem-server notify --count alarm` prints the number of alarm recipients (the guard's precheck gate for `live` and trials, ≥ 1; a `dev` entry only names a missing one, #9 2026-09-28).
   - Verify `notify::run_cli` only reads subscriptions (no write). If it prunes expired ones, keep that — it is the same atomic write the server uses — and document it in `server-engine.md`.
   - Tests: an alarm with engineer subscriptions only reaches nobody and exits 3; a band-activity notice never reaches an alarm recipient.
 - [ ] **Step 6: PIN changes frozen before cutover** (P9, design §5.4).
@@ -1479,7 +1479,7 @@ pub trait Pc {
     fn procs(&mut self) -> Procs;
     /// Once per plan: processes, driver-module holders, port owners (design §5.1).
     fn facts(&mut self) -> Facts;
-    fn precheck(&mut self, to: Mode, trial: bool) -> R<()>;           // bundle, HIL, pc_tests_passed (trial), ≥ 1 alarm recipient, no engine, app exe hash
+    fn precheck(&mut self, to: Mode, trial: bool) -> R<Option<String>>; // bundle, HIL, pc_tests_passed (trial), ≥ 1 alarm recipient (live and trials; dev: Some(note)), no engine, app exe hash
     fn reaper_meters(&mut self, seconds: u32, c: &Cancel) -> R<Vec<f64>>; // stage tracks, max dBFS each
     fn engine_interlock(&mut self, seconds: u32, c: &Cancel) -> R<(bool, String)>;
     fn reaper_save_quit(&mut self, c: &Cancel) -> R<()>;              // 40026; mtime changed ≤ 15 s; no dialog; 40004; gone ≤ 30 s; module unheld
@@ -2134,17 +2134,18 @@ $P status                        # mode event (or dev time with REAPER down), bu
   - `Register-IemRunner` with a one-time token in `ACTIONS_RUNNER_INPUT_TOKEN`, then a Ctrl-Break stop of the idle runner through the guard (`iemmode runner-stop`, dev only; the attach-console path) — the process exits within 10 s.
 
   Findings go on #9.
-- [ ] **Step 5: The owner's alarm link** (the first of the two owner steps named in the design summary). `iem-server alarm-link` → a Slovak ❓ owner-action block (`needs-owner-action` on #9): what the link is, that he opens it once on his phone and taps "Povoliť upozornenia", and why (the guard can warn him; the first switch needs ≥ 1 alarm recipient). The link's TTL is 24 h; a new one is made if it expires. Task 17 waits for `iem-server notify --count alarm` ≥ 1; answer-independent work continues meanwhile.
+- [ ] **Step 5: The owner's alarm link — sent after the first dev entry** (the first of the two owner steps named in the design summary). The link (`/alarms`) is served by iem-server, which runs only in dev and live; in event the predecessor holds the band's address, so the owner cannot open it before the first `iemmode dev` (found on the PC, #9 2026-09-28). `dev` needs no alarm recipient (its precheck names a missing one in the switch report and `iemmode status`; the alarms stay in the guard's alarm file, which the agent reads); `live` and `live --trial` need ≥ 1. So nothing waits for the link here: it is made and sent in Task 17 Step 1, right after the first dev entry is done. There: `iem-server alarm-link` → a Slovak ❓ owner-action block (`needs-owner-action` on #9): what the link is, that he opens it once on his phone and taps "Povoliť upozornenia", and why (the guard can warn him; `live` needs ≥ 1 alarm recipient). The link's TTL is 24 h; a new one is made if it expires. Once `iem-server notify --count alarm` ≥ 1, `iemmode alarm-test` proves the path (the status then drops the note); every `live` entry waits for it; answer-independent work continues meanwhile.
 
 ---
 
 ### Task 17: First `iemmode dev`, HIL v1 green, rehearsal, the owner's test question (dev time; main session)
 
-- [ ] **Step 1: Take the card** (after the alarm link is used).
+- [ ] **Step 1: Take the card** (no alarm recipient needed yet: the precheck names a missing one, #9 2026-09-28).
   - If the S1a window is still open with the card free, run `$P handover-s1a` first.
   - Then run `$P dev --build "$SHA"`. It prints each step. With REAPER already down (the dev-time case) the plan is: precheck (incl. the app exe hash), interlock through `iem-engine interlock` (the app runs, so the interlock always runs), app stop, tuning enter, data (`iem-migrate band` + recover), engine held, arm, server, tray, identity, runner.
   - **Expected:** app stop verdict ok — exit code 0 on the handle, ports free, no newer temp; the log line noted as corroboration: record "predecessor exit path verified on the deployed binary" on #9 (S1a acceptance item); engine `Status` measured frames 32, `missed` 0 after 10 s; the preference reads back 64 while the engine runs (the window closed); LAN and public host answer `/api/version` = SHA.
   - Any failure unwinds to event by itself: report it, fix, retry only in dev time.
+  - Right after the entry is done, while iem-server serves the band's address: the owner's alarm link (Task 16 Step 5), then `iemmode alarm-test` once he has opened it.
 - [ ] **Step 2: HIL.** `$P dispatch-hil` (or the queued run from Task 15) → the runner takes the job → wait for `hil/iem-pc` on the SHA:
 
 ```bash
