@@ -1412,33 +1412,61 @@ pub fn activate_files(g: &mut Guard, sha: &str) -> Result<bool, String> {
     Ok(changed)
 }
 
-/// `activate <sha>` in dev, or in an idle event (`plan::activation`; #9
-/// 2026-09-28): bin copies, the pin, the bundle's Defender exclusions;
-/// inside a HIL job the engine and the server then run the new bundle (HIL
-/// checks their versions, design §7); last the hand-over to a changed
-/// guard exe (the job is in the state, so the new guard serves it). In
-/// event nothing else happens: REAPER and the app are not touched, and the
-/// new guard starts as after any restart (in event, the event plan's
-/// checks). So a guard fix reaches a guard in event, whose own code may
-/// refuse the dev entry.
-fn activate(pc: &mut dyn Pc, g: &mut Guard, sha: &str) -> (bool, String) {
+/// `plan::activation` on this guard's state and the process list.
+fn activation_now(pc: &mut dyn Pc, g: &Guard) -> Activation {
     let busy = Busy {
         switching: g.state.switching.is_some(),
         job: g.state.job,
         retry: g.state.interlock_retry.as_ref().map(|r| r.target),
     };
-    let restart_job = match activation(g.state.mode, &pc.facts(), busy) {
+    activation(g.state.mode, &pc.facts(), busy)
+}
+
+/// `activate <sha>` in dev, or in an idle event (`plan::activation`; #9
+/// 2026-09-28): [`activate_bundle`], then the hand-over to a changed guard
+/// exe (a HIL job is in the state, so the new guard serves it). In event
+/// nothing else happens: REAPER and the app are not touched, and the new
+/// guard starts as after any restart (in event, the event plan's checks).
+/// So a guard fix reaches a guard in event, whose own code may refuse the
+/// dev entry.
+fn activate(pc: &mut dyn Pc, g: &mut Guard, sha: &str) -> (bool, String) {
+    let restart_job = match activation_now(pc, g) {
         Activation::Files => false,
         Activation::FilesThenJobRestart => true,
         Activation::Refused(why) => return (false, why),
     };
-    if !g.state.bundles.contains_key(sha) {
-        return (false, format!("bundle {sha} is not installed"));
+    match activate_bundle(pc, g, sha, restart_job) {
+        Ok((detail, false)) => (true, detail),
+        Ok((detail, true)) => {
+            g.handover = g
+                .root
+                .as_ref()
+                .map(|r| install::bin_dir(r).join(install::GUARD_EXE));
+            (
+                true,
+                format!("{detail}; the guard hands over to its new exe"),
+            )
+        }
+        Err(why) => (false, why),
     }
-    let changed = match activate_files(g, sha) {
-        Ok(changed) => changed,
-        Err(why) => return (false, format!("activation failed: {why}")),
-    };
+}
+
+/// The activation `plan::activation` allowed: the bundle's guard and
+/// `iemmode` into `bin\`, the pin, its Defender exclusions (a failure
+/// alarms, the activation stands); with `restart_job` (dev, inside a HIL
+/// job) the engine and the server then run the new bundle (HIL checks
+/// their versions, design §7). The detail and whether the guard's exe
+/// changed.
+fn activate_bundle(
+    pc: &mut dyn Pc,
+    g: &mut Guard,
+    sha: &str,
+    restart_job: bool,
+) -> Result<(String, bool), String> {
+    if !g.state.bundles.contains_key(sha) {
+        return Err(format!("bundle {sha} is not installed"));
+    }
+    let changed = activate_files(g, sha).map_err(|why| format!("activation failed: {why}"))?;
     pc.set_bundle(Some(sha));
     // The other pin keeps its exclusions (a revert needs them).
     let keep: Vec<String> = g
@@ -1456,20 +1484,54 @@ fn activate(pc: &mut dyn Pc, g: &mut Guard, sha: &str) -> (bool, String) {
     if restart_job {
         match restart_in_job(pc, g) {
             Ok(()) => detail.push_str("; the engine and the server run it"),
-            Err(why) => return (false, format!("{detail}; {why}")),
+            Err(why) => return Err(format!("{detail}; {why}")),
         }
     }
-    if !changed {
-        return (true, detail);
+    Ok((detail, changed))
+}
+
+/// `iemmixer-guard activate <sha>` while no guard runs (#9 2026-09-28),
+/// from a bundle's own exe: the way to a guard too old to activate in
+/// event (its own code refuses it). `lock` is the guard's mutex, held for
+/// the whole run (`None`: a guard holds it). Only in an idle event: the
+/// saved mode must be event, then the same `plan::activation` on the saved
+/// state and the process list; then `activate_bundle` (the bins, the pin,
+/// the exclusions through the elevated task as online; the state and any
+/// alarm are saved). It starts no guard: the next `iemmode` call starts
+/// the guard's task, which runs the new exe from `bin\`.
+pub fn activate_offline<L>(pc: &mut dyn Pc, g: &mut Guard, lock: Option<L>, sha: &str) -> Reply {
+    let Some(_held) = lock else {
+        return g.reply(false, "a guard runs; use iemmode activate");
+    };
+    g.report.clear();
+    let (ok, detail) = offline_activation(pc, g, sha);
+    g.reply(ok, &detail)
+}
+
+fn offline_activation(pc: &mut dyn Pc, g: &mut Guard, sha: &str) -> (bool, String) {
+    if g.state.mode != Mode::Event {
+        return (
+            false,
+            format!(
+                "the saved mode is {}: without a guard only an idle event activates",
+                mode_name(g.state.mode)
+            ),
+        );
     }
-    g.handover = g
-        .root
-        .as_ref()
-        .map(|r| install::bin_dir(r).join(install::GUARD_EXE));
-    (
-        true,
-        format!("{detail}; the guard hands over to its new exe"),
-    )
+    match activation_now(pc, g) {
+        Activation::Refused(why) => (false, why),
+        Activation::Files | Activation::FilesThenJobRestart => {
+            match activate_bundle(pc, g, sha, false) {
+                Ok((detail, _)) => (
+                    true,
+                    format!(
+                        "{detail} without a guard; the next iemmode call starts the guard from bin"
+                    ),
+                ),
+                Err(why) => (false, why),
+            }
+        }
+    }
 }
 
 /// Inside a HIL job: the engine and the server start again from the active

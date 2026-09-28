@@ -7,6 +7,9 @@
 //! - `install <zip>`: without a running guard (the mutex), installs a bundle;
 //!   the very first one is also activated into `bin\`.
 //! - `install <zip> --verify-only`: CI's check of a bundle zip, nothing kept.
+//! - `activate <sha>`: without a running guard (the mutex), from a bundle's
+//!   own exe, activates an installed bundle in an idle event (a guard too
+//!   old to activate in event, #9 2026-09-28); it starts no guard.
 //!
 //! The decisions are `iem_guard::{daemon, install, cli}`.
 
@@ -29,6 +32,7 @@ fn main() -> ExitCode {
             zip,
             verify_only: false,
         }) => install_offline(&zip),
+        Ok(GuardCli::Activate { sha }) => activate_offline(&sha),
         Err(why) => {
             eprintln!("iemmixer-guard: {why}\n{}", cli::GUARD_USAGE);
             ExitCode::from(cli::EXIT_USAGE)
@@ -103,6 +107,49 @@ fn install_offline(zip: &str) -> ExitCode {
 #[cfg(not(windows))]
 fn install_offline(_zip: &str) -> ExitCode {
     eprintln!("iemmixer-guard install: installs on the PC only (--verify-only runs anywhere)");
+    ExitCode::from(cli::EXIT_REFUSED)
+}
+
+/// `activate <sha>` while no guard runs, from a bundle's own exe (#9
+/// 2026-09-28): the guard's mutex for the whole run (a guard that holds it
+/// refuses it: `iemmode activate`), the saved state, the process list
+/// through `WinPc`, then `daemon::activate_offline`; one JSON line. It
+/// never starts a guard: the next `iemmode` call starts the guard's task.
+#[cfg(windows)]
+fn activate_offline(sha: &str) -> ExitCode {
+    use iem_guard::daemon::{self, Clock, Guard, SiteConf};
+    use iem_guard::proto;
+    use iem_guard::win::WinPc;
+    use iem_win::sync::GlobalMutex;
+
+    let refuse = |why: String| {
+        println!("{}", serde_json::json!({"ok": false, "detail": why}));
+        ExitCode::from(cli::EXIT_REFUSED)
+    };
+    // Nothing is read or written while a guard runs.
+    let lock = match GlobalMutex::try_take(proto::NAME) {
+        Ok(Some(lock)) => lock,
+        Ok(None) => return refuse("a guard runs; use iemmode activate".to_owned()),
+        Err(e) => return refuse(format!("the guard's mutex: {e}")),
+    };
+    let mut pc = match WinPc::load() {
+        Ok(pc) => pc,
+        Err(e) => return refuse(format!("the guard's settings: {e}")),
+    };
+    let root = pc.settings().pc.root.clone();
+    let site = SiteConf::from_site(&pc.settings().guard);
+    let mut g = Guard::open(&root, site, Clock::System);
+    let reply = daemon::activate_offline(&mut pc, &mut g, Some(lock), sha);
+    println!("{}", cli::reply_json(&reply));
+    ExitCode::from(cli::exit_code(&reply))
+}
+
+#[cfg(not(windows))]
+fn activate_offline(_sha: &str) -> ExitCode {
+    println!(
+        "{}",
+        serde_json::json!({"ok": false, "detail": "iemmixer-guard activate runs on the PC only"})
+    );
     ExitCode::from(cli::EXIT_REFUSED)
 }
 

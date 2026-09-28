@@ -30,7 +30,8 @@ pub const IEMMODE_USAGE: &str = "usage: iemmode status | event [--dry-run] [--di
   | install-site <file> | force-reopen | inject-fault | runner-stop | probe-task
   | rehearse-teardown | alarm-test | alarm-ack <id> | quit";
 
-pub const GUARD_USAGE: &str = "usage: iemmixer-guard run | install <zip> [--verify-only]";
+pub const GUARD_USAGE: &str =
+    "usage: iemmixer-guard run | install <zip> [--verify-only] | activate <sha>";
 
 /// What `iemmode` does.
 #[derive(Debug, Clone, PartialEq)]
@@ -216,7 +217,14 @@ pub fn parse(args: &[String]) -> Result<Cli, String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GuardCli {
     Run,
-    Install { zip: String, verify_only: bool },
+    Install {
+        zip: String,
+        verify_only: bool,
+    },
+    /// While no guard runs, from a bundle's own exe: `daemon::activate_offline`.
+    Activate {
+        sha: String,
+    },
 }
 
 /// `iemmixer-guard`'s arguments (the program name excluded).
@@ -244,6 +252,10 @@ pub fn parse_guard(args: &[String]) -> Result<GuardCli, String> {
                 zip: zip.to_owned(),
                 verify_only,
             })
+        }
+        "activate" => {
+            let [s] = exactly(&rest)?;
+            Ok(GuardCli::Activate { sha: sha(s)? })
         }
         other => Err(format!("unknown command {other:?}")),
     }
