@@ -113,7 +113,13 @@ The pinned source: closing its window only hides it; there is no shutdown route;
 ### 5.5 Bundles, pin, revert, children
 
 - A bundle is one SHA (engine, server, guard, `iemmode`, tray, `iem-migrate`, tuning module, `hil-v1.ps1`, `IemPc.psm1`, `manifest.json`, `SHA256SUMS`), zipped and attested by digest. CI runs the fresh guard's `install --verify-only` on the zip before upload.
-- `iemmixer-guard install <zip>`: unpack into `bundles\<sha>.partial`, verify (every file summed except `SHA256SUMS` itself), rename, never overwrite. `activate <sha>` (dev only); `live` activates the pin; `current`/`previous` pointers are replaced atomically. Guard and `iemmode` run from `bin\` copies (a running exe is renamed, then replaced), so paths never change; everything else, HIL scripts included, runs from the verified `bundles\<sha>\`.
+- `iemmixer-guard install <zip>`: unpack into `bundles\<sha>.partial`, verify (every file summed except `SHA256SUMS` itself), rename, never overwrite. `current`/`previous` pointers are replaced atomically.
+- **`activate <sha>` per mode** (`plan::activation`; #9, 2026-09-28): the bundle's guard and `iemmode` into `bin\`, the pin, its Defender exclusions, then the hand-over to a changed guard exe.
+  - `dev` as before; inside a HIL job the engine and the server first start again from the new bundle.
+  - `event` only while the guard runs none of iemmixer's processes (engine, server, tray, runner; in event there are none) and no switch, HIL job or interlock retry waits (a hand-over's new guard starts in event and would drop the retry). It then does only the above: REAPER and the predecessor app are never touched (in event the guard only reads them), and the new guard starts as after any guard restart (the event plan's checks). This is how a guard fix reaches a guard in event: its own code runs the dev entry's precheck, so a guard that refuses the dev entry could otherwise never be replaced (found on the PC, 2026-09-28).
+  - `live` refused: `live --build` activates the pin.
+  - Every reply names the build of the guard that answered (`Reply.guard_build`, the `GITHUB_SHA` CI built it with), so `iempc activate` verifies the hand-over by polling `iemmode status`. A guard built before this rule refuses `activate` in event.
+- Guard and `iemmode` run from `bin\` copies (a running exe is renamed, then replaced), so paths never change; everything else, HIL scripts included, runs from the verified `bundles\<sha>\`.
 - Per bundle {sha, branch, run, HIL result}; `live --build` refuses unless `main` + green (G8); `revert` = previous pin.
 - **Stopping children without force.** Children run without a console window, so each has its own console. Ctrl-Break reaches the server and runner only through their console: under a process-wide lock the guard detaches from any console, attaches to the child's, ignores Ctrl events itself, sends `CTRL_BREAK_EVENT` to the child's group, detaches and restores its handler.
 
