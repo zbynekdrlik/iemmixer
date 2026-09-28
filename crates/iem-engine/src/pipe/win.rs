@@ -2,9 +2,8 @@
 //! security descriptor, a reader that peeks before it reads and a writer
 //! that gives the peer [`SEND_TIMEOUT`] to take a message. Not compiled on
 //! Linux, so it stays outside mutation testing (`.cargo/mutants.toml`); its
-//! decisions are the parent module's portable `sddl_for`, `name_taken`,
-//! `polled_read` and `until_free`, and `tests/pipes.rs` runs on it in the
-//! `windows` job.
+//! decisions are the parent module's portable `sddl_for`, `name_taken` and
+//! `polled_read`, and `tests/pipes.rs` runs on it in the `windows` job.
 
 use std::io::{self, Read, Write};
 use std::os::windows::io::AsHandle;

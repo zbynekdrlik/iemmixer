@@ -35,16 +35,6 @@ pub const IDLE: Duration = Duration::from_millis(10);
 /// A peer that does not take a message within this long is dropped: the
 /// Unix send timeout, and the bound of a Windows pipe write ([`bounded`]).
 pub const SEND_TIMEOUT: Duration = Duration::from_secs(1);
-/// How often a Windows listener tries again for a name that is still taken
-/// ([`until_free`]), `TAKEN_PAUSE` apart: about 2 s in all. A pipe name
-/// lives while any end of any of its instances is open, so a client that
-/// still holds a dead engine's stream keeps the name from its successor
-/// until it drops that stream.
-#[cfg_attr(not(windows), allow(dead_code))]
-const TAKEN_TRIES: u32 = 40;
-/// The rest before each of those tries.
-#[cfg_attr(not(windows), allow(dead_code))]
-const TAKEN_PAUSE: Duration = Duration::from_millis(50);
 // The DACL read back is judged by iem-win, which the guard shares (its
 // `Reply.engine.pipe_private` for HIL).
 pub use iem_win::token::{SYSTEM, dacl_sids, sddl_is_private};
@@ -76,16 +66,14 @@ pub fn media_name(pipe: &str) -> io::Result<Name<'static>> {
 /// A listener whose `accept` does not block (the acceptor polls a stop flag).
 /// Unix: a leftover socket file of a previous run is replaced. Windows: the
 /// pipe admits only the logged-on user and SYSTEM ([`sddl_for`]) and no
-/// remote client, and a name that stays taken for about 2 s
-/// (`TAKEN_TRIES`) fails with `AddrInUse`, "pipe name taken" (the engine
-/// exits 1): another listener holds it, or a client still holds a stream of
-/// a listener that has gone.
+/// remote client, and a name another listener holds fails at once with
+/// `AddrInUse`, "pipe name taken" (the engine exits 1): waiting would not
+/// free it. A gone listener's name is free as soon as its process has
+/// ended, even while a client still holds its stream (`tests/pipes.rs`).
 pub fn listen(name: Name<'_>) -> io::Result<Listener> {
     #[cfg(windows)]
     {
-        until_free(TAKEN_TRIES, TAKEN_PAUSE, || {
-            win::listen(listener_options(name.borrow()))
-        })
+        win::listen(listener_options(name))
     }
     #[cfg(not(windows))]
     {
@@ -98,27 +86,6 @@ fn listener_options(name: Name<'_>) -> ListenerOptions<'_> {
         .name(name)
         .nonblocking(ListenerNonblockingMode::Accept)
         .try_overwrite(true)
-}
-
-/// Runs `attempt` until it gives anything but `AddrInUse`, at most
-/// `1 + tries` times, resting `pause` before each retry; the last answer
-/// stands.
-#[cfg_attr(not(windows), allow(dead_code))]
-fn until_free<T>(
-    tries: u32,
-    pause: Duration,
-    mut attempt: impl FnMut() -> io::Result<T>,
-) -> io::Result<T> {
-    let mut left = tries;
-    loop {
-        match attempt() {
-            Err(e) if e.kind() == io::ErrorKind::AddrInUse && left > 0 => {
-                left -= 1;
-                std::thread::sleep(pause);
-            }
-            answer => return answer,
-        }
-    }
 }
 
 /// The pipes' security descriptor (S3 hand-off, program spec §2.3): a
@@ -475,60 +442,6 @@ mod tests {
         assert_eq!(
             (other.kind(), other.raw_os_error()),
             (io::ErrorKind::Other, None)
-        );
-    }
-
-    #[test]
-    fn a_taken_name_is_tried_again_at_most_tries_times() {
-        let taken = || io::Error::from(io::ErrorKind::AddrInUse);
-        // Free after two retries.
-        let mut calls = 0u32;
-        let got = until_free(2, Duration::ZERO, || {
-            calls += 1;
-            if calls <= 2 { Err(taken()) } else { Ok(calls) }
-        });
-        assert_eq!((got.unwrap(), calls), (3, 3));
-        // Still taken after the last retry: that answer stands.
-        let mut calls = 0u32;
-        let got = until_free(2, Duration::ZERO, || {
-            calls += 1;
-            if calls <= 3 { Err(taken()) } else { Ok(calls) }
-        });
-        assert_eq!(got.unwrap_err().kind(), io::ErrorKind::AddrInUse);
-        assert_eq!(calls, 3);
-        let mut calls = 0u32;
-        let got = until_free(0, Duration::ZERO, || {
-            calls += 1;
-            if calls == 1 { Err(taken()) } else { Ok(calls) }
-        });
-        assert_eq!(got.unwrap_err().kind(), io::ErrorKind::AddrInUse);
-        assert_eq!(calls, 1, "no retry");
-        // Any other answer is final at once.
-        let mut calls = 0u32;
-        let got = until_free(2, Duration::ZERO, || {
-            calls += 1;
-            if calls == 1 {
-                Err(io::Error::from(io::ErrorKind::PermissionDenied))
-            } else {
-                Ok(calls)
-            }
-        });
-        assert_eq!(got.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
-        assert_eq!(calls, 1);
-        let mut calls = 0u32;
-        let got = until_free(2, Duration::ZERO, || {
-            calls += 1;
-            Ok::<_, io::Error>(calls)
-        });
-        assert_eq!((got.unwrap(), calls), (1, 1));
-    }
-
-    #[test]
-    fn a_windows_listener_waits_about_two_seconds_for_a_taken_name() {
-        assert_eq!(
-            TAKEN_PAUSE * TAKEN_TRIES,
-            Duration::from_secs(2),
-            "engine rule and the pipe tests rely on it"
         );
     }
 

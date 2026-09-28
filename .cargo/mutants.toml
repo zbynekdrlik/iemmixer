@@ -30,8 +30,8 @@ exclude_globs = [
   "crates/iem-engine/src/asio.rs",
   # The Windows side of the engine's pipes (S6): not compiled on Linux; the
   # windows job runs tests/pipes.rs over it. Its decisions are pipe.rs's
-  # sddl_for, dacl_sids, sddl_is_private, name_taken, polled_read and
-  # until_free, which stay mutated.
+  # sddl_for, dacl_sids, sddl_is_private, name_taken and polled_read, which
+  # stay mutated.
   "crates/iem-engine/src/pipe/win.rs",
   # Windows FFI wrappers (S6), not compiled on Linux; the windows job runs
   # their tests; decisions live in callers and in iem-win's portable decide.rs,
