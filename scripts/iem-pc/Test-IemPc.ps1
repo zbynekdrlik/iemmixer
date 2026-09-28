@@ -583,9 +583,14 @@ if (@($sc.silent) -contains $cmd) { exit 4 }
 $cold = 0
 if ($null -ne $sc.PSObject.Properties['cold']) { $cold = [int]$sc.cold }
 # `heard` (optional, default 1): after test-signal that many statuses show both spare
-# outputs (engine.hil) at the asked level, the call's third argument; later ones silence.
+# outputs (engine.hil) at the asked level, the call's third argument, from the status
+# `heard_from` (optional, default 1) on; the others silence. The engine's Status carries
+# the peaks since its previous one, so a short TTL's signal may show only in a status
+# that arrives after the TTL (heard_from above 1).
 $heard = 1
 if ($null -ne $sc.PSObject.Properties['heard']) { $heard = [int]$sc.heard }
+$heardFrom = 1
+if ($null -ne $sc.PSObject.Properties['heard_from']) { $heardFrom = [int]$sc.heard_from }
 function Get-StatusesSince([string[]]$Marks) {
     # The status calls (this one included) after the last call named in $Marks; -1 without one.
     $count = 0
@@ -614,7 +619,7 @@ if ($cmd -eq 'status') {
     $peak = 0.0
     $signals = @($lines | Where-Object { $_ -like 'test-signal *' })
     $sinceSignal = Get-StatusesSince @('test-signal')
-    if ($signals.Count -gt 0 -and $sinceSignal -ge 1 -and $sinceSignal -le $heard) {
+    if ($signals.Count -gt 0 -and $sinceSignal -ge $heardFrom -and $sinceSignal -lt $heardFrom + $heard) {
         $asked = [double]::Parse(([string]$signals[$signals.Count - 1]).Split(' ')[2], [Globalization.CultureInfo]::InvariantCulture)
         $peak = [math]::Pow(10, $asked / 20)
     }
@@ -662,7 +667,7 @@ exit 1
 
     # HIL's spare outputs that never reach the asked level, or still sound after the TTL
     # (the silence wait ends after -EngineWait), fail the test-signal check alone.
-    $h11 = Invoke-HilRun ('{"sha":"' + $S + '","refuse":[],"silent":[],"event_after":0,"heard":0}')
+    $h11 = Invoke-HilRun ('{"sha":"' + $S + '","refuse":[],"silent":[],"event_after":0,"heard":0}') 'dev' '0.2' @('-EngineWait', '1')
     $d11 = CheckDetail $h11.result 'test-signal'
     Assert ((CheckFailed $h11.result 'test-signal') -and ($d11 -like '*peaked at -150.0 dBFS*')) "hil-run-a-signal-never-heard-fails ($d11)"
     $h12 = Invoke-HilRun ('{"sha":"' + $S + '","refuse":[],"silent":[],"event_after":0,"heard":1000}') 'dev' '0.2' @('-EngineWait', '1')
@@ -671,6 +676,15 @@ exit 1
     foreach ($n in @('card', 'reopen', 'panic', 'alarm-push')) {
         foreach ($h in @($h11, $h12)) { Assert (CheckOk $h.result $n) "hil-run-a-failed-signal-leaves-$n ($(CheckDetail $h.result $n))" }
     }
+    # A short TTL's signal may show only in a status that arrives after the TTL (the engine
+    # sends Status about once a second, with the peaks since its previous one): every status
+    # read before the silence that follows the signal counts, so the level on the third
+    # status after test-signal, the first two silent, passes.
+    $h13 = Invoke-HilRun ('{"sha":"' + $S + '","refuse":[],"silent":[],"event_after":0,"heard_from":3}')
+    $d13 = CheckDetail $h13.result 'test-signal'
+    Assert (CheckOk $h13.result 'test-signal') "hil-run-a-signal-heard-only-after-the-ttl-passes ($d13)"
+    $ts13 = @($h13.result.checks | Where-Object { $_.name -eq 'test-signal' })[0]
+    Assert ($ts13.numbers.outputs -eq 2 -and $ts13.numbers.after -eq 0 -and [math]::Abs($ts13.numbers.lowest_dbfs + 30) -lt 0.01) "hil-run-a-signal-heard-only-after-the-ttl-numbers ($d13)"
 
     $h2 = Invoke-HilRun ('{"sha":"' + $S + '","refuse":["job-begin"],"silent":[],"event_after":0}')
     Assert ($h2.exit -eq 0 -and $h2.result.conclusion -ceq 'cancelled' -and $h2.result.summary -ceq 'HIL v1 cancelled: the PC was not free (job-begin refused)') "hil-run-a-refused-job-begin-is-cancelled ($($h2.result.summary))"
