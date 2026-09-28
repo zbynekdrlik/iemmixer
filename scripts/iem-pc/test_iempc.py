@@ -959,6 +959,137 @@ class InstallTests(Base):
         self.assertEqual(self.pc.calls[0][0], f"iemmixer-guard-{SHA}.exe")
 
 
+class ActivateTests(Base):
+    """`activate` (#9 2026-09-28): `iemmode activate`, then the hand-over,
+    verified by the `guard_build` of the guard that answers `iemmode status`."""
+
+    ACTIVATED = (0, json.dumps({"ok": True, "mode": "event", "alarms": [],
+                                "detail": f"activated {SHA}; the guard hands over to its new exe"}))
+    UNREACHABLE = (4, json.dumps({"ok": False, "detail": "the guard is unreachable: no pipe"}))
+
+    def setUp(self) -> None:
+        super().setUp()
+        saved = (ip.HANDOVER_S, ip.HANDOVER_POLL_S)
+        self.addCleanup(self.restore_handover, saved)
+        ip.HANDOVER_S, ip.HANDOVER_POLL_S = 10.0, 0.01
+        self.pc.replies[("activate", SHA)] = self.ACTIVATED
+
+    @staticmethod
+    def restore_handover(saved: tuple[float, float]) -> None:
+        ip.HANDOVER_S, ip.HANDOVER_POLL_S = saved
+
+    @staticmethod
+    def status(build: str | None) -> tuple[int, str]:
+        doc = {"ok": True, "mode": "event", "alarms": [], "detail": "mode event; bundle " + SHA}
+        if build is not None:
+            doc["guard_build"] = build
+        return 0, json.dumps(doc)
+
+    def statuses(self, *answers) -> None:
+        """`iemmode status` gives these in turn, then the last one again; a
+        callable is called (it may raise or write the flag)."""
+        queue = list(answers)
+
+        def answer():
+            a = queue.pop(0) if len(queue) > 1 else queue[0]
+            return a() if callable(a) else a
+
+        self.pc.replies[("status",)] = answer
+
+    def test_activate_waits_until_the_guard_that_answers_names_the_sha(self) -> None:
+        # The old guard (no guard_build: older than the field, or SHA2's), the gap, the new one.
+        self.statuses(self.status(None), self.status(SHA2), self.UNREACHABLE, self.status(SHA))
+        code, docs, err = self.run_main("activate", "--sha", SHA)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.pc.calls, [("iemmode.exe", ["activate", SHA], "finish")]
+                         + [("iemmode.exe", ["status"], "abandon")] * 4)
+        self.assertEqual(self.pc.timeouts, [ip.SWITCH_S] + [ip.STATUS_S] * 4)
+        self.assertEqual({k: docs[0][k] for k in ("iemmode", "exit")}, {"iemmode": ["activate", SHA], "exit": 0})
+        self.assertEqual(docs[0]["reply"]["detail"], f"activated {SHA}; the guard hands over to its new exe")
+        self.assertEqual(docs[1], {"handover": {"guard_build": SHA, "reads": 4, "mode": "event",
+                                                "detail": "mode event; bundle " + SHA}})
+
+    def test_a_guard_already_on_the_sha_is_read_once(self) -> None:
+        self.statuses(self.status(SHA))
+        code, docs, _ = self.run_main("activate", "--sha", SHA)
+        self.assertEqual((code, docs[-1]["handover"]["reads"]), (0, 1))
+        self.assertEqual(len(self.pc.calls), 2)
+
+    def test_a_status_read_that_fails_is_read_again(self) -> None:
+        def ssh_cut():
+            raise ip.StepError("ssh: connection reset")
+
+        self.statuses(ssh_cut, self.status(SHA))
+        code, docs, err = self.run_main("activate", "--sha", SHA)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(docs[-1]["handover"]["reads"], 2)
+
+    def test_a_hand_over_that_never_names_the_sha_fails_within_its_bound(self) -> None:
+        ip.HANDOVER_S = 0.2
+        self.statuses(self.status(SHA2))
+        start = time.monotonic()
+        code, docs, err = self.run_main("activate", "--sha", SHA)
+        self.assertLess(time.monotonic() - start, 5)
+        self.assertEqual((code, len(docs)), (1, 1))
+        self.assertIn(f"the guard did not name build {SHA} within 0.2 s", err)
+        self.assertIn(f"the last: exit 0, guard_build '{SHA2}'", err)
+        self.assertIn("never force-end", err)
+        self.assertGreater(len(self.pc.calls), 2)
+        self.assertEqual({c[1][0] for c in self.pc.calls[1:]}, {"status"})
+
+    def test_a_refused_activation_waits_for_no_hand_over(self) -> None:
+        self.pc.replies[("activate", SHA)] = (1, json.dumps({
+            "ok": False, "mode": "event", "alarms": [],
+            "detail": "activate in event needs no iemmixer process; running: engine"}))
+        code, docs, _ = self.run_main("activate", "--sha", SHA)
+        self.assertEqual((code, len(docs), docs[0]["exit"]), (1, 1, 1))
+        self.assertIn("running: engine", docs[0]["reply"]["detail"])
+        self.assertEqual(self.pc.calls, [("iemmode.exe", ["activate", SHA], "finish")])
+
+    def test_activate_is_dev_time_and_one_at_a_time(self) -> None:
+        self.assertEqual((ip.COMMANDS["activate"].pc, ip.COMMANDS["activate"].dev_time,
+                          ip.COMMANDS["activate"].locked), (True, True, True))
+        self.flag()
+        code, docs, err = self.run_main("activate", "--sha", SHA)
+        self.assertEqual((code, docs, self.pc.calls, self.pc.modules), (1, [], [], []))
+        self.assertIn("runs only in dev time", err)
+
+    def test_an_open_spike_window_refuses_activate(self) -> None:
+        self.open_window()
+        code, docs, err = self.run_main("activate", "--sha", SHA)
+        self.assertEqual((code, docs, self.pc.calls), (1, [], []))
+        self.assertIn("'activate' waits until 'iempc handover-s1a' has handed the card over", err)
+
+    def test_a_bad_sha_is_refused_before_the_pc(self) -> None:
+        for bad in ("1234", SHA.upper(), SHA + "0"):
+            code, _, err = self.run_main("activate", "--sha", bad)
+            self.assertEqual(code, 1, bad)
+            self.assertIn("not a full commit SHA", err, bad)
+        self.assertEqual(self.pc.calls, [])
+
+    def test_a_new_flag_during_the_activation_lets_it_finish_then_runs_the_event_path(self) -> None:
+        self.pc.replies[("activate", SHA)] = lambda: (self.flag(), self.ACTIVATED)[1]
+        code, docs, _ = self.run_main("activate", "--sha", SHA)
+        self.assertEqual(code, ip.PREEMPTED)
+        self.assertEqual(self.pc.calls, [("iemmode.exe", ["activate", SHA], "finish"), ("iemmode.exe", ["event"], "ignore")])
+        self.assertEqual(docs[0], {"event": "ide event (flag file)", "action": "iempc event"})
+
+    def test_a_new_flag_during_a_status_read_abandons_it_and_runs_the_event_path(self) -> None:
+        self.statuses(lambda: (self.flag(), self.status(SHA2))[1])
+        code, _, _ = self.run_main("activate", "--sha", SHA)
+        self.assertEqual(code, ip.PREEMPTED)
+        self.assertEqual([(c[1][0], c[2]) for c in self.pc.calls],
+                         [("activate", "finish"), ("status", "abandon"), ("event", "ignore")])
+
+    def test_a_new_flag_between_two_reads_runs_the_event_path(self) -> None:
+        ip.HANDOVER_POLL_S = 1.0
+        self.statuses(self.status(SHA2))
+        with mock.patch.object(ip.time, "sleep", side_effect=lambda _s: self.flag()):
+            code, _, _ = self.run_main("activate", "--sha", SHA)
+        self.assertEqual(code, ip.PREEMPTED)
+        self.assertEqual([c[1][0] for c in self.pc.calls], ["activate", "status", "event"])
+
+
 class DispatchTests(Base):
     def test_a_sha_that_is_no_branch_head_is_refused(self) -> None:
         self.gh.heads = {"dev": SHA2, "main": SHA2}

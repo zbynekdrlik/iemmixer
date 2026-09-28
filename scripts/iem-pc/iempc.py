@@ -2,7 +2,7 @@
 """Dev-box control of the IEM PC (S6, design note §5.1, §5.5, §6, §7).
 
 `iemmode` over ssh with the EVENT-NOW discipline, attested bundles from CI
-(fetch, install), HIL dispatch on the private ops repo, PC bootstrap through
+(fetch, install, activate), HIL dispatch on the private ops repo, PC bootstrap through
 the bundle's IemPc.psm1 (dev time only), and the hand-over of an open S1a
 window.
 
@@ -20,10 +20,20 @@ while the flag exists, and `status` then reports this box only (`--pc`
 asks the guard anyway). Every PC wait sees a new flag within 2 s: a
 read-only call or a switch the guard owns is abandoned (the guard pre-empts
 itself), a change the call makes itself completes first; then the command
-runs the event path itself (exit 10). `dev`, `rehearse-teardown` and
-`install` (except `--first`) refuse while an S1a/S1c window is open:
-`handover-s1a` hands the card over first. `dispatch-hil` checks the flag
-again right before it dispatches.
+runs the event path itself (exit 10). `dev`, `rehearse-teardown`,
+`install` (except `--first`) and `activate` refuse while an S1a/S1c window
+is open: `handover-s1a` hands the card over first. `dispatch-hil` checks
+the flag again right before it dispatches.
+
+`activate --sha` runs `iemmode activate`, which the guard allows in dev
+and in an idle event (#9 2026-09-28: none of iemmixer's processes runs, no
+switch, HIL job or interlock retry waits; REAPER and the predecessor app
+are not touched). It is how a guard fix reaches a guard in event, whose
+own code may refuse the dev entry: after `install`, `activate` in event,
+then `dev`. It then waits for the hand-over: `iemmode status` until the
+guard that answers names the SHA as its `guard_build` (the GITHUB_SHA its
+exe was built with), at most HANDOVER_S; a status read that fails meanwhile
+is read again.
 
 Site values come only from the private env file ($PC_ENV, default
 ~/.config/iemmixer/iem-pc.env): PC_SSH (the ssh destination), PC_ROOT (the
@@ -100,6 +110,11 @@ SPIKE_SHARE_S = 360
 SWITCH_MIN_S = 120
 GH_S = 120
 DOWNLOAD_S = 540
+# After `iemmode activate`: the old guard's last reply and exit, the new exe's mutex (<= 10 s) and pipe
+# (<= 10 s), and iemmode's own start of the guard task (<= 15 s) when it reads in between.
+HANDOVER_S = 90
+# Between two status reads of the hand-over (each read has its own STATUS_S bound).
+HANDOVER_POLL_S = 2.0
 # What reading a zip member can raise besides StepError: bad JSON or UTF-8, a
 # CRC error, a cut or corrupt deflate stream, an unknown compression method.
 UNREADABLE = (ValueError, EOFError, NotImplementedError, zipfile.BadZipFile, zlib.error)
@@ -871,6 +886,69 @@ def cmd_install(ctx: Ctx) -> int:
     return code
 
 
+def pause(ctx: Ctx, seconds: float) -> None:
+    """Waits `seconds`, looking at the flag every POLL_S: a flag that
+    appeared after the command started pre-empts (EventNow), as in `guarded`."""
+    end = time.monotonic() + seconds
+    while True:
+        if ctx.watch(abandon=True) != "ignore" and event_now():
+            raise EventNow()
+        left = end - time.monotonic()
+        if left <= 0:
+            return
+        time.sleep(min(POLL_S, left))
+
+
+def await_guard_build(ctx: Ctx, sha: str) -> dict:
+    """Reads `iemmode status` every HANDOVER_POLL_S until the guard that
+    answers names `sha` as its own build (`guard_build`, the GITHUB_SHA its
+    exe was built with), at most HANDOVER_S. A read that fails in between
+    (the old guard has ended, the new one's pipe is not up yet: exit 4, an
+    ssh error) is read again; the reads are read-only, so a new flag
+    abandons them. Past the bound the hand-over is unverified: StepError."""
+    deadline = time.monotonic() + HANDOVER_S
+    reads = 0
+    last = "no read"
+    while True:
+        reads += 1
+        try:
+            code, reply, _ = iemmode(ctx.env, ["status"], STATUS_S, ctx.watch(abandon=True))
+        except StillRunning:
+            raise
+        except StepError as e:
+            last = f"the read failed: {str(e)[-300:]}"
+        else:
+            build = reply.get("guard_build") if isinstance(reply, dict) else None
+            if code == 0 and build == sha:
+                return {"guard_build": build, "reads": reads, "mode": reply.get("mode"), "detail": reply.get("detail")}
+            last = f"exit {code}, guard_build {build!r}"
+        if time.monotonic() >= deadline:
+            raise StepError(f"the guard did not name build {sha} within {HANDOVER_S} s after 'iemmode activate' "
+                            f"({reads} status reads, the last: {last}): the hand-over is unverified; check 'iempc "
+                            "status' and the guard's log on the PC (logs\\guard.log under PC_ROOT), never force-end")
+        pause(ctx, HANDOVER_POLL_S)
+
+
+def cmd_activate(ctx: Ctx) -> int:
+    """`iemmode activate <sha>`, then the hand-over: `iemmode status` until
+    the guard that answers names the SHA as its build. The guard allows it
+    in dev and in an idle event (#9 2026-09-28: none of iemmixer's processes
+    runs, no switch, HIL job or interlock retry waits; REAPER and the app
+    are not touched), which is how a guard fix reaches a guard in event.
+    The guard makes the change itself: a new flag lets the activation finish
+    (then the event path runs, so "ide event" is not queued behind it on the
+    guard that is about to hand over) and abandons the status reads."""
+    env, sha = ctx.env, check_sha(ctx.args.sha)
+    refuse_open_window("activate")
+    args = ["activate", sha]
+    code, reply, raw = iemmode(env, args, SWITCH_S, ctx.watch(abandon=False))
+    emit(result("iemmode", args, code, reply, raw))
+    if code != 0:
+        return code
+    emit({"handover": await_guard_build(ctx, sha)})
+    return 0
+
+
 def load_dispatches() -> list[dict]:
     return list(read_json(state_dir() / "dispatch.json", {}).get("dispatches", []))
 
@@ -1028,6 +1106,7 @@ COMMANDS: dict[str, Spec] = {
     "probe-task": Spec(cmd_probe_task, pc=True, dev_time=True, locked=True),
     "fetch-bundle": Spec(cmd_fetch_bundle, pc=False, dev_time=False, locked=True),
     "install": Spec(cmd_install, pc=True, dev_time=True, locked=True),
+    "activate": Spec(cmd_activate, pc=True, dev_time=True, locked=True),
     "dispatch-hil": Spec(cmd_dispatch_hil, pc=False, dev_time=True, locked=True),
     "bootstrap": Spec(cmd_bootstrap, pc=True, dev_time=True, locked=True),
     "handover-s1a": Spec(cmd_handover_s1a, pc=True, dev_time=True, locked=True),
@@ -1049,6 +1128,7 @@ def build_parser() -> argparse.ArgumentParser:
     install = sub.add_parser("install")
     install.add_argument("--sha", required=True)
     install.add_argument("--first", action="store_true", help="no iemmode on the PC yet: the zip's own guard installs it")
+    sub.add_parser("activate").add_argument("--sha", required=True, help="an installed bundle (dev, or an idle event)")
     sub.add_parser("dispatch-hil").add_argument("--sha")
     boot = sub.add_parser("bootstrap")
     boot.add_argument("--sha", help="the fetched bundle whose IemPc.psm1 runs (default: the newest fetched)")
