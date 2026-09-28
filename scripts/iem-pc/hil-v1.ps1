@@ -118,15 +118,26 @@ function Wait-HilEngine {
 }
 
 function Wait-HilSilence {
-    # Polls `iemmode status` every 500 ms for at most -EngineWait seconds until the engine
-    # shows every HIL spare output silent (Test-IemHilSilent). Returns the last status (the
-    # check judges it), or $null once the job is cancelled.
+    # Polls `iemmode status` every 500 ms from the test signal's start: until its -Ttl ran
+    # out and then, for at most -EngineWait seconds more, until the engine shows every HIL
+    # spare output silent (Test-IemHilSilent) after a status that carried the signal
+    # (Test-IemHilHeard). A silent status before that proves nothing (it may cover the time
+    # before the signal). Every status read until then is added to $Seen: the engine's
+    # Status carries the peaks since its previous one (about once a second), so a short
+    # TTL's signal may show only in a status that arrives after the TTL. Returns the last
+    # status (the check judges it), or $null once the job is cancelled.
+    param([Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.ArrayList]$Seen, [Parameter(Mandatory)][double]$Ttl)
+    $heard = $false
     $clock = [Diagnostics.Stopwatch]::StartNew()
     while ($true) {
         $st = Get-HilStatus
         if ($script:cancelled) { return $null }
-        if (Test-IemHilSilent -Engine (Get-IemProp $st 'engine')) { return $st }
-        if ($clock.Elapsed.TotalSeconds -ge $EngineWait) { return $st }
+        $engine = Get-IemProp $st 'engine'
+        $t = $clock.Elapsed.TotalSeconds
+        if ($heard -and $t -ge $Ttl -and (Test-IemHilSilent -Engine $engine)) { return $st }
+        [void]$Seen.Add($engine)
+        if (Test-IemHilHeard -Engine $engine) { $heard = $true }
+        if ($t -ge $Ttl + $EngineWait) { return $st }
         Start-Sleep -Milliseconds 500
     }
 }
@@ -193,25 +204,16 @@ function Invoke-HilChecks {
 
     # The test signal on HIL's spare card outputs (the guard sends it to [guard] hil_tx,
     # outputs no mix uses, so it never reaches a band member; #9, 2026-09-28). The engine's
-    # Status carries each spare output's peak since the previous Status (engine.hil): while
-    # the TTL runs every spare output reaches the asked level, after it they are silent.
+    # Status carries each spare output's peak since the previous Status (engine.hil): every
+    # spare output reaches the asked level in some status read from the signal's start
+    # until the first silent one that follows it after the TTL, and that one is silent.
     $r = Invoke-Hil -A @('test-signal', $TestInput, $TestDbfs.ToString($inv), $TestTtl.ToString($inv))
     if ($script:cancelled) { return }
     $sent = Test-IemModeOk -Result $r
     $detail = Get-IemModeText -Result $r
     $during = New-Object System.Collections.ArrayList
-    $clock = [Diagnostics.Stopwatch]::StartNew()
-    while ($sent) {
-        $st = Get-HilStatus
-        if ($script:cancelled) { return }
-        [void]$during.Add((Get-IemProp $st 'engine'))
-        if ($clock.Elapsed.TotalSeconds -ge $TestTtl) { break }
-        Start-Sleep -Milliseconds 500
-    }
-    # The TTL, its 50 ms fade-out and a margin, then a Status that covers only silence.
-    $left = $TestTtl + 1 - $clock.Elapsed.TotalSeconds
-    if ($left -gt 0) { Start-Sleep -Milliseconds ([int]($left * 1000)) }
-    $after = Wait-HilSilence
+    $after = $null
+    if ($sent) { $after = Wait-HilSilence -Seen $during -Ttl $TestTtl } else { $after = Get-HilStatus }
     if ($script:cancelled) { return }
     $engine = Get-IemProp $after 'engine'
     $faulted = Get-IemProp $engine 'faulted'

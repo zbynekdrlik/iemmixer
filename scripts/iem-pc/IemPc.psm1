@@ -1382,12 +1382,24 @@ function Test-IemHilSilent {
     return $true
 }
 
+function Test-IemHilHeard {
+    # Some HIL spare output of the engine status carried a signal (a peak above 0 since the
+    # previous Status); $false without spare outputs or without the field.
+    param($Engine)
+    $peaks = Get-IemHilPeaks -Engine $Engine
+    if ($null -eq $peaks) { return $false }
+    foreach ($p in $peaks.Values) { if ($p -gt 0) { return $true } }
+    return $false
+}
+
 function Test-IemHilSignal {
     # The HIL test signal (design section 7; the owner's decision on #9, 2026-09-28: it goes
     # only to spare card outputs no mix uses, [guard] hil_tx). The engine's Status carries each
     # spare output with its peak since the previous Status (engine.hil). $During are the engine
     # statuses read while the TTL ran: each spare output's loudest peak there is the asked
     # level within 0.5 dB. $After is the status after the TTL: every spare output silent.
+    # $During holds every status read from the signal's start until $After, those after
+    # the TTL too: a short TTL's signal may show only in a Status that arrives after it.
     param([object[]]$During = @(), $After, [Parameter(Mandatory)][double]$Dbfs)
     $end = Get-IemHilPeaks -Engine $After
     if ($null -eq $end) { return [pscustomobject]@{ ok = $false; detail = "the engine status lacks 'hil'"; numbers = $null } }
