@@ -489,6 +489,35 @@ function Invoke-IemTuningApply { param([string]$ProfilePath, [int]$Tier) return 
     Assert (Test-IemHilEngineUp -Engine (EngU 3000) -Resets 1) 'hil-engine-up-resets-above'
     Assert (-not (Test-IemHilEngineUp -Engine (EngU 3000) -Resets 2)) 'hil-engine-up-refuses-resets-not-above'
     Assert (-not (Test-IemHilEngineUp -Engine ([pscustomobject]@{ frames = 32; callbacks = 3000 }) -Resets 0)) 'hil-engine-up-refuses-a-status-without-resets'
+    # The test signal on HIL's spare outputs (engine.hil: each spare card output and its
+    # peak since the engine's previous Status; #9, 2026-09-28).
+    function EngH([double[]]$peaks) {
+        $outs = @()
+        $tx = 94
+        foreach ($p in $peaks) { $outs += [pscustomobject]@{ tx = $tx; peak = $p }; $tx++ }
+        [pscustomobject]@{ frames = 32; callbacks = 3000; faulted = $false; hil = $outs }
+    }
+    $lvl = [math]::Pow(10, -30 / 20)
+    Assert (Test-IemHilSilent -Engine (EngH @(0, 0))) 'hil-silent-every-spare-output-at-zero'
+    Assert (-not (Test-IemHilSilent -Engine (EngH @(0, 0.001)))) 'hil-silent-refuses-one-that-sounds'
+    Assert (-not (Test-IemHilSilent -Engine (EngH @()))) 'hil-silent-refuses-no-spare-output'
+    Assert (-not (Test-IemHilSilent -Engine (EngU 3000))) 'hil-silent-refuses-a-status-without-hil'
+    Assert (-not (Test-IemHilSilent -Engine $null)) 'hil-silent-refuses-no-engine'
+    $quietAfter = EngH @(0, 0)
+    $sg = Test-IemHilSignal -During @((EngH @(0, 0)), (EngH @($lvl, ($lvl * 0.99))), $null) -After $quietAfter -Dbfs (-30)
+    Assert ($sg.ok -and $sg.numbers.outputs -eq 2 -and $sg.numbers.after -eq 0 -and [math]::Abs($sg.numbers.highest_dbfs + 30) -lt 1e-9) "hil-signal-heard-at-the-level-then-silent ($($sg.detail))"
+    Assert ($sg.detail -ceq '2 spare output(s) at -30.1 dBFS (asked -30.0), silent after the TTL') "hil-signal-detail ($($sg.detail))"
+    $sg = Test-IemHilSignal -During @((EngH @($lvl, 0))) -After $quietAfter -Dbfs (-30)
+    Assert (-not $sg.ok -and $sg.detail -like '*peaked at -150.0 dBFS*') "hil-signal-refuses-a-spare-output-never-heard ($($sg.detail))"
+    foreach ($p in @(($lvl * 0.9), ($lvl * 1.1), 0.1)) {
+        $sg = Test-IemHilSignal -During @((EngH @($p, $p))) -After $quietAfter -Dbfs (-30)
+        Assert (-not $sg.ok) "hil-signal-refuses-another-level [$p]"
+    }
+    $sg = Test-IemHilSignal -During @((EngH @($lvl, $lvl))) -After (EngH @(0, $lvl)) -Dbfs (-30)
+    Assert (-not $sg.ok -and $sg.numbers.after -eq 1 -and $sg.detail -like '*1 spare output(s) still sound after the TTL*') "hil-signal-refuses-one-still-sounding ($($sg.detail))"
+    Assert (-not (Test-IemHilSignal -During @() -After $quietAfter -Dbfs (-30)).ok) 'hil-signal-refuses-no-status-during-the-ttl'
+    Assert ((Test-IemHilSignal -During @((EngH @($lvl))) -After (EngU 3000) -Dbfs (-30)).detail -ceq "the engine status lacks 'hil'") 'hil-signal-refuses-a-status-without-hil'
+    Assert ((Test-IemHilSignal -During @() -After (EngH @()) -Dbfs (-30)).detail -ceq 'the engine opened no HIL output ([guard] hil_tx)') 'hil-signal-refuses-an-engine-without-spare-outputs'
 
     $ok1 = New-IemHilCheck -Name 'a' -Ok $true
     $bad1 = New-IemHilCheck -Name 'b' -Ok $false -Detail 'no'
@@ -553,6 +582,10 @@ if (@($sc.silent) -contains $cmd) { exit 4 }
 # (frames 0, no callbacks); after force-reopen that many still show the old reset count.
 $cold = 0
 if ($null -ne $sc.PSObject.Properties['cold']) { $cold = [int]$sc.cold }
+# `heard` (optional, default 1): after test-signal that many statuses show both spare
+# outputs (engine.hil) at the asked level, the call's third argument; later ones silence.
+$heard = 1
+if ($null -ne $sc.PSObject.Properties['heard']) { $heard = [int]$sc.heard }
 function Get-StatusesSince([string[]]$Marks) {
     # The status calls (this one included) after the last call named in $Marks; -1 without one.
     $count = 0
@@ -578,9 +611,17 @@ if ($cmd -eq 'status') {
     $frames = 32
     $callbacks = 3000 * $n
     if ($started -ge 0 -and $started -le 2 * $cold) { $frames = 0; $callbacks = 0 }
+    $peak = 0.0
+    $signals = @($lines | Where-Object { $_ -like 'test-signal *' })
+    $sinceSignal = Get-StatusesSince @('test-signal')
+    if ($signals.Count -gt 0 -and $sinceSignal -ge 1 -and $sinceSignal -le $heard) {
+        $asked = [double]::Parse(([string]$signals[$signals.Count - 1]).Split(' ')[2], [Globalization.CultureInfo]::InvariantCulture)
+        $peak = [math]::Pow(10, $asked / 20)
+    }
     if ($started -lt 0 -or $started -gt $cold) {
         $reply['engine'] = [ordered]@{ build = $sc.sha; frames = $frames; callbacks = $callbacks; missed = 0; resets = $reopens
-                                       parked = $false; faulted = $false; pipe_private = $true; spawns = (1 + $faults); last_exit = $last }
+                                       parked = $false; faulted = $false; pipe_private = $true; spawns = (1 + $faults); last_exit = $last
+                                       hil = @([ordered]@{ tx = 94; peak = $peak }, [ordered]@{ tx = 95; peak = $peak }) }
     }
 }
 Write-Output (ConvertTo-Json -InputObject $reply -Depth 5 -Compress)
@@ -616,6 +657,20 @@ exit 1
     Assert ($panic.numbers.spawns -eq 1 -and $panic.numbers.callbacks -gt 0) 'hil-run-panic-numbers-in-the-result'
     $card = @($h1.result.checks | Where-Object { $_.name -eq 'card' })[0]
     Assert ($card.numbers.frames -eq 32 -and $card.numbers.missed -eq 0 -and $card.numbers.resets -eq 0 -and $card.numbers.callbacks -ge 2850) 'hil-run-card-numbers-in-the-result'
+    $ts = @($h1.result.checks | Where-Object { $_.name -eq 'test-signal' })[0]
+    Assert ($ts.numbers.outputs -eq 2 -and $ts.numbers.after -eq 0 -and [math]::Abs($ts.numbers.lowest_dbfs + 30) -lt 0.01) "hil-run-test-signal-numbers-in-the-result ($($ts.detail))"
+
+    # HIL's spare outputs that never reach the asked level, or still sound after the TTL
+    # (the silence wait ends after -EngineWait), fail the test-signal check alone.
+    $h11 = Invoke-HilRun ('{"sha":"' + $S + '","refuse":[],"silent":[],"event_after":0,"heard":0}')
+    $d11 = CheckDetail $h11.result 'test-signal'
+    Assert ((CheckFailed $h11.result 'test-signal') -and ($d11 -like '*peaked at -150.0 dBFS*')) "hil-run-a-signal-never-heard-fails ($d11)"
+    $h12 = Invoke-HilRun ('{"sha":"' + $S + '","refuse":[],"silent":[],"event_after":0,"heard":1000}') 'dev' '0.2' @('-EngineWait', '1')
+    $d12 = CheckDetail $h12.result 'test-signal'
+    Assert ((CheckFailed $h12.result 'test-signal') -and ($d12 -like '*2 spare output(s) still sound after the TTL*')) "hil-run-a-signal-that-stays-fails ($d12)"
+    foreach ($n in @('card', 'reopen', 'panic', 'alarm-push')) {
+        foreach ($h in @($h11, $h12)) { Assert (CheckOk $h.result $n) "hil-run-a-failed-signal-leaves-$n ($(CheckDetail $h.result $n))" }
+    }
 
     $h2 = Invoke-HilRun ('{"sha":"' + $S + '","refuse":["job-begin"],"silent":[],"event_after":0}')
     Assert ($h2.exit -eq 0 -and $h2.result.conclusion -ceq 'cancelled' -and $h2.result.summary -ceq 'HIL v1 cancelled: the PC was not free (job-begin refused)') "hil-run-a-refused-job-begin-is-cancelled ($($h2.result.summary))"
