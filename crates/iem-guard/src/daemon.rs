@@ -1125,6 +1125,38 @@ fn pref_step(pc: &mut dyn Pc, g: &mut Guard, to: Mode) -> R<()> {
     }
 }
 
+/// What the elevated logon task (G1) left, taken once per run of it (its
+/// `at`, `GuardState::logon_seen`), at the guard's start and hourly (#9
+/// 2026-09-28). The task follows `PrefCheck`'s rule, so a preference it did
+/// not write under a holder of the driver module is remembered and alarmed
+/// once with `PrefCheck`'s text (the event plan's check that finds the same
+/// adds no alarm); a run at REAPER's original drops what was remembered; a
+/// failed run is logged (the next plan's `PrefCheck` reads the preference).
+fn take_logon(pc: &mut dyn Pc, g: &mut Guard) {
+    let Some(logon) = pc.logon() else {
+        return;
+    };
+    if g.state.logon_seen.as_deref() == Some(logon.at.as_str()) {
+        return;
+    }
+    info!("the logon task's run of {}: {:?}", logon.at, logon.pref);
+    g.state.logon_seen = Some(logon.at);
+    match logon.pref {
+        crate::effects::tuning::LogonPref::Original => g.state.pref_held = None,
+        crate::effects::tuning::LogonPref::Held(held) => {
+            let text = held.text();
+            if g.state.pref_held.as_deref() != Some(text.as_str()) {
+                g.state.pref_held = Some(text.clone());
+                g.raise(None, &format!("logon task: {text}"), false);
+            }
+        }
+        crate::effects::tuning::LogonPref::Failed(why) => {
+            warn!("the logon task did not restore the preference: {why}");
+        }
+    }
+    g.save();
+}
+
 /// 60 s on the stage inputs: REAPER's meters while REAPER runs, else
 /// `iem-engine interlock`. Activity is not an error of the check: the
 /// report goes to [`refused`].
@@ -1910,6 +1942,7 @@ pub fn tick(pc: &mut dyn Pc, g: &mut Guard, at: Instant) {
         .is_none_or(|t| at.saturating_duration_since(t) >= DRIFT_EVERY)
     {
         g.drift(pc, at);
+        take_logon(pc, g);
     }
     send_notices(pc, g);
 }
@@ -2108,6 +2141,8 @@ pub fn start(pc: &mut dyn Pc, g: &mut Guard, boot: u64) -> Option<Outcome> {
     g.state.pids = pc.adopt(&saved);
     pc.set_bundle(g.state.pins.current.as_deref());
     g.look(pc);
+    // Before the event plan: its check then adds no alarm for the same value.
+    take_logon(pc, g);
     g.save();
     let resume = g.state.switching.is_some();
     let out = (reset || resume).then(|| {

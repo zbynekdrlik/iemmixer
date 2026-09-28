@@ -11,7 +11,9 @@
 //! - `<root>\guard\tasks\<kind>.request.json`: tuning `{"id", "verb"}`,
 //!   exclude `{"id", "sha", "keep"}`;
 //! - `<elevated root>\tasks\out\<kind>.result.json`: `{"kind", "id", "ok",
-//!   "at", "result", "error"}`;
+//!   "at", "result", "error"}`; the logon task (`\iemmixer\iemmixer-logon`,
+//!   G1) needs no request and writes `logon.result.json` at every logon,
+//!   which the guard reads ([`logon_result`]);
 //! - `<elevated root>\tuning\expect.json` (S1c's module): what it applied for
 //!   the current mode, `{"plan": "<power plan GUID>", "services": {"<name>":
 //!   <start>}}`, which the guard's drift check compares with native reads
@@ -24,9 +26,13 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::pc::{CardHolders, PrefHeld};
+
 /// The tasks' kinds: the request and result files' names.
 pub const TUNING: &str = "tuning";
 pub const EXCLUDE: &str = "exclude";
+/// The logon task (G1): no request, its result only (`logon_result`).
+pub const LOGON: &str = "logon";
 pub const EXPECT: &str = "expect.json";
 
 /// What `tuning` answers when S1c's module is not installed: reported,
@@ -90,6 +96,117 @@ pub fn result_for(text: &str, kind: &str, id: &str) -> Option<Result<String, Str
     }
 }
 
+/// What the logon task (G1) found of the preference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LogonPref {
+    /// REAPER's original was there, or the task restored it.
+    Original,
+    /// Not the original while the driver module was held: not written
+    /// (`Restore-IemPref`, the guard's `PrefCheck` rule; #9 2026-09-28).
+    Held(PrefHeld),
+    /// The task failed, or its restore did not read back.
+    Failed(String),
+}
+
+/// One run of the logon task; `at` (its UTC time as the task wrote it)
+/// tells one run from the next.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Logon {
+    pub at: String,
+    pub pref: LogonPref,
+}
+
+/// A JSON string or number as text.
+fn scalar_text(v: &Value) -> Option<String> {
+    match v {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+/// An image name without a trailing ".exe", in any case.
+fn bare_image(image: &str) -> &str {
+    match image
+        .len()
+        .checked_sub(4)
+        .and_then(|cut| image.split_at_checked(cut))
+    {
+        Some((stem, ext)) if ext.eq_ignore_ascii_case(".exe") => stem,
+        _ => image,
+    }
+}
+
+/// A holder as `Get-IemModuleHolders` names it (`image:pid`), in the
+/// guard's form (`image (pid)`), and whether it is REAPER's image.
+fn holder(entry: &str, reaper: &str) -> (String, bool) {
+    let (image, name) = match entry.rsplit_once(':') {
+        Some((image, pid)) if !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()) => {
+            (image, format!("{image} ({pid})"))
+        }
+        _ => (entry, entry.to_owned()),
+    };
+    (
+        name,
+        bare_image(image).eq_ignore_ascii_case(bare_image(reaper)),
+    )
+}
+
+/// The held preference of a `pref` object whose action is `held`.
+fn held_of(pref: &Value, reaper: &str) -> PrefHeld {
+    let holders: Vec<(String, bool)> = pref
+        .get("holders")
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(Value::as_str)
+                .map(|entry| holder(entry, reaper))
+                .collect()
+        })
+        .unwrap_or_default();
+    PrefHeld {
+        value: pref.get("before").and_then(scalar_text),
+        by: CardHolders {
+            reaper: holders.iter().any(|(_, is_reaper)| *is_reaper),
+            names: holders
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+        },
+    }
+}
+
+/// `logon.result.json` (`Invoke-IemTaskRequest -Kind logon`, G1; #9
+/// 2026-09-28): `None` unless it is the logon task's, with its `at`.
+/// `reaper` is REAPER's image (`pc.toml` `reaper_exe`): a holder with it,
+/// in any case and with or without ".exe" (an unreadable holder list names a
+/// running REAPER by its process name), is REAPER.
+pub fn logon_result(text: &str, reaper: &str) -> Option<Logon> {
+    let v: Value = serde_json::from_str(without_bom(text)).ok()?;
+    if v.get("kind").and_then(Value::as_str) != Some(LOGON) {
+        return None;
+    }
+    let at = v.get("at").and_then(Value::as_str)?.to_owned();
+    let pref = v.get("result").and_then(|r| r.get("pref"));
+    let action = pref.and_then(|p| p.get("action")).and_then(Value::as_str);
+    let restored = pref.and_then(|p| p.get("ok")).and_then(Value::as_bool) == Some(true);
+    let error = v.get("error").and_then(Value::as_str).unwrap_or_default();
+    let pref = match (pref, action) {
+        (Some(p), Some("held")) => LogonPref::Held(held_of(p, reaper)),
+        (Some(_), Some("none" | "restore")) if restored => LogonPref::Original,
+        _ if !error.is_empty() => LogonPref::Failed(error.to_owned()),
+        (Some(p), Some(_)) => LogonPref::Failed(format!(
+            "the preference was not restored: it reads {}",
+            p.get("after")
+                .and_then(scalar_text)
+                .unwrap_or_else(|| "nothing readable".to_owned())
+        )),
+        _ => LogonPref::Failed("the logon task did not check the preference".to_owned()),
+    };
+    Some(Logon { at, pref })
+}
+
 /// `expect.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Expect {
@@ -134,7 +251,6 @@ pub fn drift(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pc::{CardHolders, PrefHeld};
 
     const PLAN: &str = "01234567-89ab-cdef-0001-020304050607";
 
@@ -275,8 +391,11 @@ mod tests {
             held(Some("32"), false, "spike.exe (99)")
         );
         // A holder without a pid is named as read; an unreadable value is none.
-        let odd = logon_json(r#"{"before":null,"action":"held","holders":["odd"]}"#);
-        assert_eq!(logon_result(&odd, "reaper.exe"), held(None, false, "odd"));
+        let odd = logon_json(r#"{"before":null,"action":"held","holders":["odd","odd:x","x:"]}"#);
+        assert_eq!(
+            logon_result(&odd, "reaper.exe"),
+            held(None, false, "odd, odd:x, x:")
+        );
         // "reaperx.exe" is not REAPER.
         let near = logon_json(r#"{"before":"32","action":"held","holders":["reaperx.exe:5"]}"#);
         assert_eq!(

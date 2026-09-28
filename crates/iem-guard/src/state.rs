@@ -79,6 +79,9 @@ pub struct GuardState {
     /// named in the status, dropped when a check finds or restores the
     /// original. A fact of the registry: a reset keeps it.
     pub pref_held: Option<String>,
+    /// The `at` of the logon task's last result the guard took (G1): each
+    /// run of it is taken once, also across guard restarts; a reset keeps it.
+    pub logon_seen: Option<String>,
 }
 
 /// Whether a starting guard must forget its saved mode: after a reboot, or
@@ -89,8 +92,8 @@ pub fn reset_to_event(st: &GuardState, boot_time: u64, reaper_or_app: bool, engi
 
 impl GuardState {
     /// The mode after [`reset_to_event`]: `event`, no switch in progress, no
-    /// pending interlock retry and no HIL job (`pref_held` stays: the next
-    /// check reads the preference again).
+    /// pending interlock retry and no HIL job (`pref_held` and `logon_seen`
+    /// stay: the next check reads the preference again).
     pub fn reset(&mut self) {
         self.mode = Mode::Event;
         self.switching = None;

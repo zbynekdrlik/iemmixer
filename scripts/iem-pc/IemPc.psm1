@@ -53,7 +53,7 @@ $script:TaskEntry = @'
 # <elevated root>\tasks\out\<kind>.result.json, which the user may only read.
 param([Parameter(Mandatory)][string]$Kind, [Parameter(Mandatory)][string]$Root,
       [Parameter(Mandatory)][string]$TuningDir,
-      [string]$PrefKey = '', [string]$PrefName = '', [string]$PrefOriginal = '')
+      [string]$PrefKey = '', [string]$PrefName = '', [string]$PrefOriginal = '', [string]$Module = '')
 # This process runs elevated: modules load only from Windows PowerShell's own
 # folders, never from the user's Documents or an HKCU environment's path.
 $pinned = [IO.Path]::Combine($PSHOME, 'Modules') + ';' + [IO.Path]::Combine([Environment]::GetFolderPath('ProgramFiles'), 'WindowsPowerShell\Modules')
@@ -62,7 +62,7 @@ $ErrorActionPreference = 'Stop'
 try {
     Import-Module ([IO.Path]::Combine($PSScriptRoot, 'IemPc.psm1')) -Force
     $out = [IO.Path]::Combine($PSScriptRoot, 'out')
-    $r = Invoke-IemTaskRequest -Kind $Kind -Root $Root -OutDir $out -TuningDir $TuningDir -PrefKey $PrefKey -PrefName $PrefName -PrefOriginal $PrefOriginal
+    $r = Invoke-IemTaskRequest -Kind $Kind -Root $Root -OutDir $out -TuningDir $TuningDir -PrefKey $PrefKey -PrefName $PrefName -PrefOriginal $PrefOriginal -Module $Module
     if ($r.ok) { exit 0 }
     exit 1
 } catch {
@@ -297,6 +297,7 @@ function Register-IemTasks {
         [Parameter(Mandatory)][string]$PrefKey,
         [Parameter(Mandatory)][string]$PrefName,
         [Parameter(Mandatory)][string]$PrefOriginal,
+        [Parameter(Mandatory)][string]$Module,
         [string]$Folder = '\iemmixer',
         [string]$User = '',
         [string]$ElevatedRoot = ''
@@ -314,7 +315,10 @@ function Register-IemTasks {
         throw "the elevated root $ElevatedRoot and the user's root $Root must not contain each other"
     }
     if ($PrefOriginal -cnotmatch '^[0-9]{1,5}$') { throw "PrefOriginal '$PrefOriginal' refused (the recorded buffer, digits)" }
-    foreach ($v in @($Root, $AppExe, $PrefKey, $PrefName, $ElevatedRoot)) { [void](Format-IemArg -Value $v) }
+    # The driver module ([card] module): the logon task never writes the
+    # preference while a process holds it (#9 2026-09-28).
+    if ($Module -cnotmatch '^[^\\/:*?"<>|]+\.dll$') { throw "module name '$Module' refused" }
+    foreach ($v in @($Root, $AppExe, $PrefKey, $PrefName, $ElevatedRoot, $Module)) { [void](Format-IemArg -Value $v) }
     if (-not (Test-Path -LiteralPath $AppExe -PathType Leaf)) { throw "the app exe $AppExe does not exist" }
     $u = Resolve-IemUser -User $User
     $sddl = Get-IemTaskSddl -UserSid $u.sid
@@ -338,7 +342,7 @@ function Register-IemTasks {
         (Format-IemArg (Join-Path $tasksDir 'iem-task.ps1')) + ' -Root ' + (Format-IemArg $Root) +
         ' -TuningDir ' + (Format-IemArg (Join-Path $ElevatedRoot 'tuning'))
     $logonArgs = $common + ' -Kind logon -PrefKey ' + (Format-IemArg $PrefKey) + ' -PrefName ' + (Format-IemArg $PrefName) +
-        ' -PrefOriginal ' + (Format-IemArg $PrefOriginal)
+        ' -PrefOriginal ' + (Format-IemArg $PrefOriginal) + ' -Module ' + (Format-IemArg $Module)
     $specs = @(
         @{ name = 'iemmixer-guard'; level = $script:RunLevelLimited; exe = (Join-Path $Root 'bin\iemmixer-guard.exe'); args = 'run'; dir = $Root; logon = $false },
         @{ name = 'iemmixer-StartApp'; level = $script:RunLevelLimited; exe = $AppExe; args = ''; dir = (Split-Path -Parent $AppExe); logon = $false },
@@ -1145,23 +1149,63 @@ function Test-IemPrefIsOriginal {
     return ($Pref.value -eq [int]$Original)
 }
 
+function Get-IemPrefAction {
+    # The preference check's decision, the guard's PrefCheck rule (design
+    # section 5.2 step 5; #9 2026-09-28): the original -> 'none'; not the
+    # original and no process holds the driver module -> 'restore'; not the
+    # original while any process holds it -> 'held', never written (its driver
+    # would most likely ask it for a reset: a REAPER at an event would drop
+    # out). -Holders: the module's holders as read ("image:pid"), $null when
+    # they could not be read; then a running REAPER (-Reaper, "image:pid") is
+    # assumed to hold it, as the guard assumes. Returns the action and the
+    # holders it went by.
+    param([Parameter(Mandatory)][bool]$IsOriginal, $Holders = $null, [string[]]$Reaper = @())
+    if ($IsOriginal) { return [pscustomobject]@{ action = 'none'; holders = @() } }
+    $seen = @($Reaper)
+    if ($null -ne $Holders) { $seen = @($Holders) }
+    if ($seen.Count -gt 0) { return [pscustomobject]@{ action = 'held'; holders = $seen } }
+    return [pscustomobject]@{ action = 'restore'; holders = @() }
+}
+
 function Restore-IemPref {
-    # The preferred buffer back to its recorded original: kind kept, each write
-    # read back, three attempts at most (design section 5.2 step 5; G1 at logon).
-    param([Parameter(Mandatory)][string]$Key, [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$Original)
+    # The preferred buffer back to its recorded original by the guard's
+    # PrefCheck rule (Get-IemPrefAction; design section 5.2 step 5; G1 at
+    # logon; #9 2026-09-28): at the original nothing is read or written;
+    # otherwise the driver module's holders are read, and only while none
+    # holds it is the original written (kind kept, each write read back, three
+    # attempts at most). While one holds it nothing is written: 'held', with
+    # the value and the holders. An unreadable holder list assumes a running
+    # REAPER (-ReaperImage) holds it.
+    param([Parameter(Mandatory)][string]$Key, [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$Original,
+          [Parameter(Mandatory)][string]$Module, [string]$ReaperImage = 'reaper')
     if ($Original -cnotmatch '^[0-9]{1,5}$') { throw "original '$Original' refused (digits)" }
+    if ($Module -cnotmatch '^[^\\/:*?"<>|]+\.dll$') { throw "module name '$Module' refused" }
     $path = ConvertTo-IemHkcuPath -Key $Key
     $before = Get-IemPref -Key $Key -Name $Name
+    $isOriginal = Test-IemPrefIsOriginal -Pref $before -Original $Original
+    $holders = $null
+    $reaper = @()
+    $holdersError = ''
+    if (-not $isOriginal) {
+        try { $holders = Get-IemModuleHolders -Module $Module } catch {
+            $holdersError = $_.Exception.Message
+            $reaper = @(Get-Process -Name $ReaperImage -ErrorAction SilentlyContinue | ForEach-Object { '{0}:{1}' -f $_.ProcessName, $_.Id })
+        }
+    }
+    $decision = Get-IemPrefAction -IsOriginal $isOriginal -Holders $holders -Reaper $reaper
     $now = $before
     $attempts = 0
-    while (-not (Test-IemPrefIsOriginal -Pref $now -Original $Original) -and $attempts -lt 3) {
-        $attempts++
-        $data = [int]$Original
-        if ($now.kind -eq 'String') { $data = $Original }
-        Set-ItemProperty -LiteralPath $path -Name $Name -Value $data -Type $now.kind
-        $now = Get-IemPref -Key $Key -Name $Name
+    if ($decision.action -eq 'restore') {
+        while (-not (Test-IemPrefIsOriginal -Pref $now -Original $Original) -and $attempts -lt 3) {
+            $attempts++
+            $data = [int]$Original
+            if ($now.kind -eq 'String') { $data = $Original }
+            Set-ItemProperty -LiteralPath $path -Name $Name -Value $data -Type $now.kind
+            $now = Get-IemPref -Key $Key -Name $Name
+        }
     }
     [pscustomobject]@{ before = $before.raw; after = $now.raw; kind = $now.kind; attempts = $attempts
+                       action = $decision.action; holders = @($decision.holders); holders_error = $holdersError
                        ok = (Test-IemPrefIsOriginal -Pref $now -Original $Original) }
 }
 
@@ -1279,10 +1323,12 @@ function Invoke-IemTaskRequest {
     # "id", "ok", "at", "result", "error"}; -OutDir is <elevated root>\tasks\out,
     # which only Administrators and SYSTEM may change, so the elevated write
     # never lands in the user's root). logon (at the user's logon, G1): tuning
-    # exit, then the preference back to its original.
+    # exit, then the preference back to its original, never while a process
+    # holds the driver module -Module (Restore-IemPref; a value left under a
+    # holder is named in the result, which the guard reads).
     param([Parameter(Mandatory)][ValidateSet('tuning', 'exclude', 'logon')][string]$Kind, [Parameter(Mandatory)][string]$Root,
           [Parameter(Mandatory)][string]$OutDir, [string]$TuningDir = '', [string]$PrefKey = '', [string]$PrefName = '',
-          [string]$PrefOriginal = '')
+          [string]$PrefOriginal = '', [string]$Module = '')
     $outBad = Test-IemElevatedItem -Path $OutDir -UserSid (Get-IemTaskUserSid)
     if ($outBad.Count -gt 0) { throw ('the result folder is refused (not admin-only): ' + ($outBad -join '; ')) }
     $outFile = Join-Path $OutDir ($Kind + '.result.json')
@@ -1307,10 +1353,14 @@ function Invoke-IemTaskRequest {
                 $result.id = 'logon'
                 $tuning = ''
                 try { $tuning = Invoke-IemTuningVerb -Verb 'exit' -TuningDir $TuningDir } catch { $tuning = 'failed: ' + $_.Exception.Message }
-                if (-not $PrefKey -or -not $PrefName -or -not $PrefOriginal) { throw 'the logon task needs -PrefKey, -PrefName and -PrefOriginal' }
-                $pref = Restore-IemPref -Key $PrefKey -Name $PrefName -Original $PrefOriginal
+                if (-not $PrefKey -or -not $PrefName -or -not $PrefOriginal -or -not $Module) {
+                    throw 'the logon task needs -PrefKey, -PrefName, -PrefOriginal and -Module'
+                }
+                $pref = Restore-IemPref -Key $PrefKey -Name $PrefName -Original $PrefOriginal -Module $Module
                 $result.result = [pscustomobject]@{ tuning = $tuning; pref = $pref }
-                $result.ok = [bool]$pref.ok
+                # A value left under a holder is no failure of the task: the
+                # result names it (action held), the guard reads it (#9 2026-09-28).
+                $result.ok = [bool]($pref.ok -or $pref.action -eq 'held')
             }
         }
     } catch {

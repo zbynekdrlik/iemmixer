@@ -20,6 +20,7 @@ use iem_win::spawn::Placement;
 
 use crate::cancel::{Cancel, Preempted};
 use crate::effects::app::holders_text;
+use crate::effects::tuning::Logon;
 use crate::handover::{AppExit, ReaperFacts};
 use crate::plan::{Facts, Health, Mode};
 use crate::proto::HilOut;
@@ -573,6 +574,11 @@ pub trait Pc {
     /// guard's start for its log and status ([`job_note`]); every start
     /// reads the job again. Never waits.
     fn job(&mut self) -> Result<Placement, String>;
+    /// The elevated logon task's last result (`<elevated root>\tasks\out\
+    /// logon.result.json`, G1): what it found of the preference
+    /// (`effects::tuning::logon_result`); `None`: no result or an unreadable
+    /// one. Never waits.
+    fn logon(&mut self) -> Option<Logon>;
 }
 
 /// A scripted PC for the daemon's tests.
@@ -720,6 +726,8 @@ pub mod fake {
         /// What `job` reads (a fixed fact of the process: not a recorded
         /// call).
         pub job: Result<Placement, String>,
+        /// What `logon` reads (a file read: not a recorded call).
+        pub logon: Option<Logon>,
         calls: Vec<(Call, Instant)>,
         fails: HashMap<Call, String>,
         blocked: Vec<Call>,
@@ -785,6 +793,7 @@ pub mod fake {
                 engine_up: true,
                 recipients: Some(1),
                 job: Ok(Placement::NoJob),
+                logon: None,
                 calls: Vec::new(),
                 fails: HashMap::new(),
                 blocked: Vec::new(),
@@ -1180,6 +1189,10 @@ pub mod fake {
 
         fn job(&mut self) -> Result<Placement, String> {
             self.job.clone()
+        }
+
+        fn logon(&mut self) -> Option<Logon> {
+            self.logon.clone()
         }
     }
 }

@@ -317,6 +317,24 @@ impl Pc for WinPc {
         tasks::exclude(self, sha, keep)
     }
 
+    /// `logon.result.json` in the elevated root's `tasks\out`; no file is
+    /// no run yet.
+    fn logon(&mut self) -> Option<crate::effects::tuning::Logon> {
+        use crate::effects::tuning;
+        let path = self
+            .s
+            .results_dir()
+            .join(tuning::result_name(tuning::LOGON));
+        match std::fs::read_to_string(&path) {
+            Ok(text) => tuning::logon_result(&text, &self.images.reaper),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(e) => {
+                warn!("{}: {e}", path.display());
+                None
+            }
+        }
+    }
+
     /// The job's limits go to the log with the placement they give.
     fn job(&mut self) -> Result<Placement, String> {
         let limits = spawn::job_limits().map_err(|e| e.to_string())?;
