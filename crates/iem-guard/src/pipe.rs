@@ -602,6 +602,23 @@ mod tests {
         assert_eq!(reply.detail, "the guard dropped the request");
     }
 
+    /// The first-instance flag: while a guard listens, a second guard or a
+    /// squatter never gets the pipe's name; once that listener has gone
+    /// (the old guard's process ended after a hand-over) the name is free.
+    #[cfg(windows)]
+    #[test]
+    fn a_held_guard_pipe_name_is_refused_until_its_listener_has_gone() {
+        const ERROR_ACCESS_DENIED: i32 = 5;
+        let dir = tempfile::tempdir().unwrap();
+        let name = test_name(dir.path());
+        let first = listen(&name).unwrap();
+        let second = listen(&name).unwrap_err();
+        assert_eq!(second.raw_os_error(), Some(ERROR_ACCESS_DENIED), "{second}");
+        drop(first);
+        let again = listen(&name);
+        assert!(again.is_ok(), "{:?}", again.err());
+    }
+
     #[test]
     fn nothing_on_the_pipe_is_a_connect_error() {
         let dir = tempfile::tempdir().unwrap();
