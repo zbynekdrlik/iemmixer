@@ -2090,6 +2090,7 @@ fn activate_in_a_job_restarts_the_engine_and_the_server() {
             Call::Exclude,
             Call::EngineStop,
             Call::ServerStop,
+            Call::PrefCheck,
             Call::EngineStart,
             Call::EngineReady,
             Call::EngineArm,
@@ -2499,6 +2500,81 @@ fn install_site_in_a_job_restarts_only_the_engine_and_the_server() {
     assert!(pc.called(Call::ReaperStart));
     assert_eq!(texts(&g)[0], "ServerStart: ports 80/443 are still held");
     assert_eq!(g.state.job, None, "no HIL job outside dev");
+}
+
+/// Inside a HIL job the engine starts without a plan (`restart_in_job`,
+/// for activate and install-site): an engine that ended holding the card
+/// left 32, and the new one refuses the card unless it finds REAPER's
+/// original (exit 3, #9 2026-09-28). So the same check runs right before
+/// the start, after the old engine stopped. A failed restore starts
+/// nothing, alarms and unwinds to event, as any failed step there.
+#[test]
+fn a_job_restart_restores_the_preference_right_before_the_engine_starts() {
+    let (mut pc, mut g) = (
+        FakePc::new(Facts {
+            runner: true,
+            ..iemmixer_up()
+        }),
+        Guard::for_test(Mode::Dev),
+    );
+    g.state.pins.current = Some(SHA.into());
+    g.state.job = Some(7);
+    pc.pref_attempts = 1;
+    let site = Request::InstallSite {
+        path: "site.toml".into(),
+    };
+    let r = handle(&mut pc, &mut g, site.clone(), 0);
+    assert!(r.ok, "{r:?}");
+    assert!(
+        r.detail
+            .contains("; the preferred buffer was restored (1 writes); engine started"),
+        "{}",
+        r.detail
+    );
+    assert_eq!(
+        steps(&pc)
+            .into_iter()
+            .filter(|c| c.mutates())
+            .collect::<Vec<_>>(),
+        [
+            Call::InstallSite,
+            Call::EngineStop,
+            Call::ServerStop,
+            Call::PrefCheck,
+            Call::EngineStart,
+            Call::EngineArm,
+            Call::ServerStart,
+        ]
+    );
+    assert_eq!(pc.pref_writes, 1);
+    assert_eq!(pc.engine_starts, [(true, true)]);
+    assert_eq!(g.state.job, Some(7));
+
+    let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
+    g.state.pins.current = Some(SHA.into());
+    g.state.job = Some(7);
+    pc.fail(
+        Call::PrefCheck,
+        "writing the preferred buffer failed: access denied",
+    );
+    let r = handle(&mut pc, &mut g, site, 0);
+    assert!(!r.ok);
+    assert!(
+        r.detail.starts_with(
+            "site installed; PrefCheck: writing the preferred buffer failed: access denied; \
+             event: done"
+        ),
+        "{}",
+        r.detail
+    );
+    assert!(!pc.called(Call::EngineStart));
+    assert_eq!(
+        texts(&g)[0],
+        "PrefCheck: writing the preferred buffer failed: access denied"
+    );
+    assert_eq!(g.state.mode, Mode::Event);
+    assert!(pc.called(Call::ReaperStart));
+    assert_eq!(g.state.job, None);
 }
 
 #[test]
@@ -2973,6 +3049,64 @@ fn an_engine_exit_respawns_after_the_backoff() {
     tick(&mut pc, &mut g, at);
     tick(&mut pc, &mut g, at + Duration::from_secs(5));
     assert!(!pc.called(Call::EngineStart));
+}
+
+/// An engine that ended while it held the card (a hard kill, a crash) left
+/// 32, and a new engine refuses the card unless it finds REAPER's original
+/// (exit 3, #9 2026-09-28). The crash watch's respawn starts an engine
+/// without a plan, so it runs the same check right before the start (the
+/// old engine is gone: nothing holds the driver). A failed restore starts
+/// nothing and alarms, as a failed start does; a held driver is never
+/// written under.
+#[test]
+fn a_respawn_restores_the_preference_right_before_the_engine_starts() {
+    let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Dev));
+    pc.pref_attempts = 1;
+    pc.exited.push((Kid::Engine, Some(70)));
+    let at = Instant::now();
+    tick(&mut pc, &mut g, at);
+    assert!(!pc.called(Call::PrefCheck));
+    tick(&mut pc, &mut g, at + Duration::from_secs(1));
+    assert_eq!(
+        pc.calls_after(Call::Procs),
+        [Call::PrefCheck, Call::EngineStart, Call::Children]
+    );
+    assert_eq!(pc.pref_writes, 1);
+    assert_eq!(pc.engine_starts, [(false, false)]);
+    assert!(g.alarms.all().is_empty(), "{:?}", texts(&g));
+
+    let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Dev));
+    pc.fail(
+        Call::PrefCheck,
+        "writing the preferred buffer failed: access denied",
+    );
+    pc.exited.push((Kid::Engine, Some(70)));
+    tick(&mut pc, &mut g, at);
+    tick(&mut pc, &mut g, at + Duration::from_secs(1));
+    tick(&mut pc, &mut g, at + Duration::from_secs(20));
+    assert_eq!(pc.count(Call::PrefCheck), 1);
+    assert!(!pc.called(Call::EngineStart));
+    assert_eq!(
+        texts(&g),
+        [
+            "the engine could not be started again: writing the preferred buffer failed: access \
+          denied"
+        ]
+    );
+    assert_eq!(g.state.mode, Mode::Dev);
+
+    // REAPER started meanwhile and holds the card at 32: nothing written,
+    // no engine, an alarm names it.
+    let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Dev));
+    pc.pref_attempts = 1;
+    pc.exited.push((Kid::Engine, Some(70)));
+    tick(&mut pc, &mut g, at);
+    tick(&mut pc, &mut g, at + Duration::from_secs(1));
+    assert!(pc.called(Call::PrefCheck));
+    assert!(!pc.called(Call::EngineStart));
+    assert_eq!(pc.pref_writes, 0);
+    let want = format!("the engine could not be started again: {HELD}");
+    assert!(texts(&g).contains(&want), "{:?}", texts(&g));
 }
 
 #[test]
