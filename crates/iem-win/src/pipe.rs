@@ -2,9 +2,9 @@
 //! interprocess has no timeouts on Windows pipes, so the engine's reader
 //! asks how many bytes wait before it reads ([`available`]) and looks at its
 //! connection's `closed` flag in between instead of sitting in a read that
-//! nothing ends, and its writers give a peer a bounded time to take a
-//! message ([`write_within`]) instead of waiting for it forever. Windows
-//! only: the argument is a Windows handle.
+//! nothing ends, and the engine's and the guard pipe's writers give a peer a
+//! bounded time to take a message ([`write_within`]) instead of waiting for
+//! it forever. Windows only: the argument is a Windows handle.
 
 use std::io;
 use std::os::windows::io::{AsRawHandle, BorrowedHandle};
@@ -50,6 +50,11 @@ pub fn available(pipe: BorrowedHandle<'_>) -> io::Result<u32> {
 /// landed, so nothing of it reaches the peer later; it then fails with
 /// `TimedOut`. Other failures (the peer has gone: `ERROR_NO_DATA` and kin)
 /// pass unchanged. Returns the bytes written.
+///
+/// It writes on the handle itself, so an interprocess stream written only
+/// through it is never marked for interprocess's flush on drop (limbo):
+/// dropping the stream closes its handle at once, and the peer still reads
+/// what was written, then the end of the stream.
 pub fn write_within(pipe: BorrowedHandle<'_>, buf: &[u8], limit: Duration) -> io::Result<usize> {
     let handle = pipe.as_raw_handle();
     // SAFETY: no attributes and no name: a new unnamed manual-reset event,

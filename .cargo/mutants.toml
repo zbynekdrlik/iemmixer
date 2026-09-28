@@ -53,6 +53,11 @@ exclude_globs = [
   # windows job builds and tests them. Their decisions live in the mutated
   # pc.rs, site.rs, effects/ and handover.rs (parsers included).
   "crates/iem-guard/src/win/**",
+  # The Windows side of the guard pipe's writes (the bounded, clean writer
+  # over iem-win's write_within): not compiled on Linux; the windows job runs
+  # the guard's pipe tests over it. pipe.rs, its Unix twin included, stays
+  # mutated.
+  "crates/iem-guard/src/pipe/win.rs",
   # The guard's two mains (S6 Task 10): Windows effects (the mutex, WinPc,
   # the session window, the detached hand-over) around the mutated
   # iem_guard::{cli, daemon, install, pipe}, which hold every decision.

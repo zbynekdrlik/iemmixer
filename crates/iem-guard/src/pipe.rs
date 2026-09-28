@@ -12,9 +12,15 @@
 //! for it and everything else but `Status` is refused; otherwise the
 //! request goes to the daemon thread. `Subscribe` turns the connection into
 //! a stream of [`Update`]s (the tray): the state, and the tray's quit.
+//!
+//! The guard never waits long for a client: every reply and update goes out
+//! through `bounded`, so a client that takes nothing for [`SEND_TIMEOUT`]
+//! fails the write and its connection ends, and on Windows the guard's end
+//! closes as it is dropped, whether or not the client read what came last
+//! (`iem_win::pipe::write_within`, the engine's writer too).
 
 use std::fmt;
-use std::io;
+use std::io::{self, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
@@ -30,6 +36,9 @@ use tracing::{info, warn};
 use crate::daemon::{Job, Route, Shared};
 use crate::proto::{self, FrameError, Reply, Request, Update};
 
+#[cfg(windows)]
+mod win;
+
 /// An idle listener looks for a new connection this often.
 const ACCEPT_POLL: Duration = Duration::from_millis(50);
 /// "ide event" waits at most this long for the switch in progress.
@@ -43,6 +52,10 @@ pub const LISTEN_WAIT: Duration = Duration::from_secs(10);
 pub const LISTEN_EVERY: Duration = Duration::from_millis(250);
 /// A stopping guard waits this long for its last reply to be written.
 pub const LAST_REPLY: Duration = Duration::from_secs(5);
+/// A client that takes nothing for this long fails the write and its
+/// connection ends (`bounded`): well inside [`LAST_REPLY`], so a stopping
+/// guard's last reply is written or given up before that wait ends.
+pub const SEND_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// A socket path on Unix, a pipe name on Windows.
 pub fn pipe_name(name: &str) -> io::Result<Name<'static>> {
@@ -142,8 +155,35 @@ pub fn serve(
         })
 }
 
+/// A connection's writing side, which never waits long for the client: a
+/// Unix stream waits at most its send timeout ([`SEND_TIMEOUT`], set at
+/// accept); a Windows pipe has no timeouts, so each write is issued
+/// overlapped and cancelled when the client has not taken it within
+/// [`SEND_TIMEOUT`] (`iem_win::pipe::write_within`). Either way the write
+/// then fails and the connection ends. A Windows write through it also
+/// leaves the stream out of interprocess's flush on drop, whose one thread
+/// per process waits for each client to read everything before it closes
+/// the next stream: the guard's end closes as it is dropped. Always write
+/// through it, never through `&Stream`.
+fn bounded(stream: &Stream) -> impl Write + '_ {
+    #[cfg(windows)]
+    {
+        win::Bounded(stream)
+    }
+    #[cfg(not(windows))]
+    {
+        stream
+    }
+}
+
 fn spawn_connection(stream: Stream, shared: &Arc<Shared>, jobs: &Sender<Job>) {
     if let Err(e) = stream.set_nonblocking(false) {
+        warn!("a guard pipe connection: {e}");
+        return;
+    }
+    // A Windows pipe refuses timeouts: its writes are bounded by `bounded`.
+    #[cfg(unix)]
+    if let Err(e) = stream.set_send_timeout(Some(SEND_TIMEOUT)) {
         warn!("a guard pipe connection: {e}");
         return;
     }
@@ -171,13 +211,14 @@ fn ask(jobs: &Sender<Job>, req: Request, epoch: u64) -> Result<Reply, String> {
 
 fn connection(stream: &Stream, shared: &Shared, jobs: &Sender<Job>) {
     let mut wire = stream;
+    let mut out = bounded(stream);
     loop {
         let req: Request = match proto::read_msg(&mut wire) {
             Ok(req) => req,
             Err(FrameError::Closed) => return,
             Err(FrameError::Bad(why)) => {
                 let reply = shared.view().reply(false, &format!("bad request: {why}"));
-                if let Err(e) = proto::write_frame(&mut wire, &reply) {
+                if let Err(e) = proto::write_frame(&mut out, &reply) {
                     info!("a guard pipe client: {e}");
                 }
                 return;
@@ -201,7 +242,7 @@ fn connection(stream: &Stream, shared: &Shared, jobs: &Sender<Job>) {
                 return;
             }
         };
-        let written = proto::write_frame(&mut wire, &reply);
+        let written = proto::write_frame(&mut out, &reply);
         if handed {
             shared.reply_done();
         }
@@ -217,7 +258,7 @@ fn connection(stream: &Stream, shared: &Shared, jobs: &Sender<Job>) {
 /// the first state when the quit came while no tray was subscribed.
 fn subscribe(stream: &Stream, shared: &Shared) {
     shared.add_subscriber();
-    let mut wire = stream;
+    let mut wire = bounded(stream);
     let first = shared.view();
     let mut seen = (first.version, first.tray_quits);
     let state = |v: &crate::daemon::View| Update::State(v.reply(true, &v.status));

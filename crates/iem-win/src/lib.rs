@@ -3,8 +3,8 @@
 //! effect but the pipe reads and writes has a portable signature; off
 //! Windows it returns `Unsupported`, so callers keep their decisions
 //! testable on Linux. `pipe` is the one Windows-only module: its functions
-//! take a Windows handle, and the engine's own `cfg(windows)` pipe code is
-//! their only caller. The wrappers' own
+//! take a Windows handle, and the engine's and the guard's own
+//! `cfg(windows)` pipe code are their only callers. The wrappers' own
 //! decisions live in the portable `decide` module. The only unsafe code of
 //! the workspace besides `iem_audio_io::asio` lives in the `cfg(windows)`
 //! modules.
@@ -28,7 +28,8 @@ pub mod console;
 mod decide;
 pub mod errmode;
 // Windows only: its functions take a Windows handle (the engine's pipe
-// reader peeks through it, its writers bound their writes with it).
+// reader peeks through it; the engine's and the guard pipe's writers bound
+// their writes with it).
 #[cfg(windows)]
 pub mod pipe;
 pub mod power;
