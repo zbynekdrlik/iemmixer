@@ -353,11 +353,13 @@ mod tests {
             alarms: alarms.all().to_vec(),
             detail: "switching".into(),
             engine: Some(an_engine()),
+            guard_build: Some("89abcdef0123456789abcdef0123456789abcdef".into()),
         };
         let mut wire = Vec::new();
         write_frame(&mut wire, &reply).unwrap();
         assert_eq!(read_msg::<Reply, _>(&mut wire.as_slice()).unwrap(), reply);
-        // Older or newer peers: missing lists, texts and the engine default.
+        // Older or newer peers: missing lists, texts, the engine and the
+        // guard's build default.
         assert_eq!(
             decode::<Reply>(br#"{"ok":true,"mode":"event","switching":null}"#).unwrap(),
             Reply {
@@ -367,8 +369,41 @@ mod tests {
                 alarms: Vec::new(),
                 detail: String::new(),
                 engine: None,
+                guard_build: None,
             }
         );
+    }
+
+    /// The guard's own build (#9 2026-09-28): after `activate` hands over
+    /// to a new exe, `iempc activate` waits until `iemmode status` names
+    /// the bundle's SHA here. CI builds every bundle with `GITHUB_SHA`.
+    #[test]
+    fn a_reply_names_the_build_of_the_guard_that_answered() {
+        match option_env!("GITHUB_SHA") {
+            Some(sha) => assert_eq!(GUARD_BUILD, sha),
+            None => assert_eq!(GUARD_BUILD, "local"),
+        }
+        let reply = Reply {
+            guard_build: Some("0123456789abcdef0123456789abcdef01234567".into()),
+            ..a_state(Mode::Event)
+        };
+        let v = serde_json::to_value(&reply).unwrap();
+        assert_eq!(
+            v["guard_build"],
+            serde_json::json!("0123456789abcdef0123456789abcdef01234567")
+        );
+        assert_eq!(
+            decode::<Reply>(
+                br#"{"ok":true,"mode":"event","switching":null,"guard_build":"0123456789abcdef0123456789abcdef01234567"}"#
+            )
+            .unwrap()
+            .guard_build
+            .as_deref(),
+            Some("0123456789abcdef0123456789abcdef01234567")
+        );
+        // A reply without one (an older guard's) has no key at all.
+        let v = serde_json::to_value(a_state(Mode::Event)).unwrap();
+        assert_eq!(v.get("guard_build"), None);
     }
 
     fn an_engine() -> EngineStatus {
@@ -403,6 +438,7 @@ mod tests {
             alarms: Vec::new(),
             detail: String::new(),
             engine: Some(an_engine()),
+            guard_build: None,
         };
         let v = serde_json::to_value(&reply).unwrap();
         assert_eq!(
@@ -456,6 +492,7 @@ mod tests {
             alarms: alarms.all().to_vec(),
             detail: String::new(),
             engine: None,
+            guard_build: None,
         }
     }
 
@@ -493,6 +530,7 @@ mod tests {
                 alarms: Vec::new(),
                 detail: String::new(),
                 engine: None,
+                guard_build: None,
             })
         );
     }

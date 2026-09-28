@@ -11,6 +11,7 @@ use crate::effects::engine::{Ready, ReadyWindow};
 use crate::install;
 use crate::pc::Status;
 use crate::pc::fake::{Call, FakePc};
+use crate::proto::GUARD_BUILD;
 
 const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
 const OTHER: &str = "89abcdef0123456789abcdef0123456789abcdef";
@@ -1576,7 +1577,6 @@ fn dev_only_requests_are_refused_elsewhere() {
         (Request::InjectFault, "inject-fault"),
         (Request::RunnerStop, "runner-stop"),
         (Request::RehearseTeardown, "rehearse-teardown"),
-        (Request::Activate { sha: SHA.into() }, "activate"),
         (
             Request::InstallSite {
                 path: "site.toml".into(),
@@ -1877,6 +1877,220 @@ fn activate_in_a_job_restarts_the_engine_and_the_server() {
     let r = handle(&mut pc, &mut g, Request::Activate { sha: SHA.into() }, 0);
     assert_eq!((r.ok, r.detail.clone()), (true, format!("activated {SHA}")));
     assert!(!pc.called(Call::EngineStop) && !pc.called(Call::EngineStart));
+}
+
+/// A guard with bundle `SHA` installed (its files under `dir`), in event,
+/// `OTHER` pinned (the running guard's bundle).
+fn installed_in_event(dir: &Path) -> Guard {
+    let mut g = Guard::open(dir, SiteConf::default(), fixed(T0));
+    assert_eq!(g.state.mode, Mode::Event);
+    let zip = install::tests::good_zip(dir, SHA);
+    assert!(install_bundle(&mut g, &zip).0);
+    g.state.pins.current = Some(OTHER.into());
+    g
+}
+
+/// Every call to REAPER or the predecessor app, reads included.
+const BAND_CALLS: [Call; 9] = [
+    Call::ReaperMeters,
+    Call::EngineInterlock,
+    Call::ReaperSaveQuit,
+    Call::AppStop,
+    Call::HolderGone,
+    Call::ReaperStart,
+    Call::ReaperFacts,
+    Call::AppStart,
+    Call::AppAnswers,
+];
+
+/// A guard fix reaches a guard in event (#9 2026-09-28): a guard that
+/// refuses the dev entry could never enter dev to take it. In an idle
+/// event `activate` copies the bins, pins, sets the exclusions and hands
+/// over, with no call to REAPER or the app. The new exe's guard starts as
+/// after any guard restart: in event its start runs the event plan's
+/// checks, which read REAPER and the app and neither stop nor start them.
+#[test]
+fn activate_in_an_idle_event_hands_over_and_leaves_reaper_and_the_app_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut g = installed_in_event(dir.path());
+    let mut pc = FakePc::new(band_up());
+    let r = handle(&mut pc, &mut g, Request::Activate { sha: SHA.into() }, 0);
+    assert_eq!(
+        (r.ok, r.detail.clone()),
+        (
+            true,
+            format!("activated {SHA}; the guard hands over to its new exe")
+        )
+    );
+    assert_eq!(pc.calls(), [Call::Facts, Call::SetBundle, Call::Exclude]);
+    for c in BAND_CALLS {
+        assert!(!pc.called(c), "{c:?}");
+    }
+    assert_eq!(pc.excluded, [(SHA.to_owned(), vec![OTHER.to_owned()])]);
+    assert_eq!(pc.bundle.as_deref(), Some(SHA));
+    assert_eq!(
+        (g.state.mode, g.state.pins.current.as_deref()),
+        (Mode::Event, Some(SHA))
+    );
+    assert_eq!(
+        g.handover,
+        Some(install::bin_dir(dir.path()).join(install::GUARD_EXE))
+    );
+    assert!(g.alarms.all().is_empty(), "{:?}", texts(&g));
+    assert_eq!(r.guard_build.as_deref(), Some(GUARD_BUILD));
+    // The new exe's guard: the pin it finds, event kept, REAPER and the
+    // app neither stopped nor started.
+    let mut g = Guard::open(dir.path(), SiteConf::default(), fixed(T0));
+    let mut pc = FakePc::new(band_up());
+    assert_eq!(start(&mut pc, &mut g, 0), Some(Outcome::Done));
+    assert_eq!(
+        (g.state.mode, g.state.pins.current.as_deref()),
+        (Mode::Event, Some(SHA))
+    );
+    assert_eq!(pc.bundle.as_deref(), Some(SHA));
+    for c in [
+        Call::ReaperSaveQuit,
+        Call::AppStop,
+        Call::ReaperStart,
+        Call::AppStart,
+        Call::EngineStart,
+    ] {
+        assert!(!pc.called(c), "{c:?}");
+    }
+}
+
+#[test]
+fn activate_in_event_is_refused_while_the_guard_is_not_idle() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut g = installed_in_event(dir.path());
+    let bin_guard = install::bin_dir(dir.path()).join(install::GUARD_EXE);
+    let activate = || Request::Activate { sha: SHA.into() };
+    // A process of iemmixer's runs.
+    let mut pc = FakePc::new(Facts {
+        engine: true,
+        tray: true,
+        ..band_up()
+    });
+    let r = handle(&mut pc, &mut g, activate(), 0);
+    assert_eq!(
+        (r.ok, r.detail.as_str()),
+        (
+            false,
+            "activate in event needs no iemmixer process; running: engine, tray"
+        )
+    );
+    assert!(steps(&pc).is_empty(), "{:?}", pc.calls());
+    // A switch waits for its interlock retry (a hand-over's new guard
+    // would drop it).
+    g.state.interlock_retry = Some(InterlockRetry {
+        target: Mode::Dev,
+        build: Some(SHA.into()),
+        refusals: 1,
+        next_at: T0 + RETRY_S,
+    });
+    let mut pc = FakePc::new(band_up());
+    let r = handle(&mut pc, &mut g, activate(), 0);
+    assert_eq!(
+        (r.ok, r.detail.as_str()),
+        (
+            false,
+            "the dev switch waits for its interlock retry: activate waits until it ran or was \
+             dropped"
+        )
+    );
+    assert_eq!(
+        g.state.interlock_retry.as_ref().map(|r| r.refusals),
+        Some(1)
+    );
+    g.state.interlock_retry = None;
+    // A switch persisted as unfinished.
+    g.state.switching = Some(Switching {
+        from: Mode::Event,
+        to: Mode::Dev,
+        done: vec![Step::Precheck],
+        started: T0,
+    });
+    let r = handle(&mut pc, &mut g, activate(), 0);
+    assert_eq!(
+        (r.ok, r.detail.as_str()),
+        (false, "a switch is in progress: activate waits for its end")
+    );
+    g.state.switching = None;
+    // A HIL job that did not end.
+    g.state.job = Some(7);
+    let r = handle(&mut pc, &mut g, activate(), 0);
+    assert_eq!(
+        (r.ok, r.detail.as_str()),
+        (false, "HIL job 7 runs: activate waits for its end")
+    );
+    // Nothing was copied, pinned, excluded or handed over.
+    assert!(steps(&pc).is_empty(), "{:?}", pc.calls());
+    assert!(!bin_guard.exists());
+    assert_eq!(
+        (g.state.pins.current.as_deref(), g.handover.as_ref()),
+        (Some(OTHER), None)
+    );
+    // Idle again: a bundle that is not installed is named.
+    g.state.job = None;
+    let missing = "f".repeat(40);
+    let r = handle(
+        &mut pc,
+        &mut g,
+        Request::Activate {
+            sha: missing.clone(),
+        },
+        0,
+    );
+    assert_eq!(
+        (r.ok, r.detail),
+        (false, format!("bundle {missing} is not installed"))
+    );
+    assert!(steps(&pc).is_empty(), "{:?}", pc.calls());
+}
+
+/// Live activates its bundle through `live --build`.
+#[test]
+fn activate_in_live_is_refused() {
+    let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Live));
+    g.state
+        .bundles
+        .insert(SHA.into(), record(SHA, "main", Hil::Green));
+    let r = handle(&mut pc, &mut g, Request::Activate { sha: SHA.into() }, 0);
+    assert_eq!(
+        (r.ok, r.detail.as_str()),
+        (
+            false,
+            "activate is for dev and an idle event; the mode is live (live --build activates its \
+             bundle)"
+        )
+    );
+    assert!(steps(&pc).is_empty(), "{:?}", pc.calls());
+    assert!(pc.excluded.is_empty());
+    assert_eq!(g.state.pins.current, None);
+}
+
+/// Every reply names the build of the guard that answered, so a hand-over
+/// to a new exe is verifiable (`iempc activate` waits for it).
+#[test]
+fn every_reply_names_the_guard_s_build() {
+    let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
+    let r = ask(&mut pc, &mut g, Request::Status);
+    assert_eq!(r.guard_build.as_deref(), Some(GUARD_BUILD));
+    let r = ask(&mut pc, &mut g, Request::ProbeTask);
+    assert_eq!(r.guard_build.as_deref(), Some(GUARD_BUILD));
+    // The pipe answers a status (and a refusal while switching) from the view.
+    match g.shared.route(&Request::Status) {
+        Route::Now(r) => assert_eq!(r.guard_build.as_deref(), Some(GUARD_BUILD)),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        g.shared
+            .view()
+            .reply(false, "switching")
+            .guard_build
+            .as_deref(),
+        Some(GUARD_BUILD)
+    );
 }
 
 #[test]

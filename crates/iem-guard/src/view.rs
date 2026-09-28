@@ -152,6 +152,7 @@ mod tests {
             alarms: alarms.all().to_vec(),
             detail: String::new(),
             engine: None,
+            guard_build: None,
         }
     }
 

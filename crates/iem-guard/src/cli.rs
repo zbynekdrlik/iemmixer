@@ -559,6 +559,7 @@ mod tests {
             alarms: Vec::new(),
             detail: "d".into(),
             engine: None,
+            guard_build: None,
         }
     }
 
