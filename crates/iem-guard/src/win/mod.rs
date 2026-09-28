@@ -112,8 +112,9 @@ impl Pc for WinPc {
         let mut p = procs::list(self);
         p.exited = self.kids.reap();
         if p.exited.iter().any(|(kid, _)| *kid == Kid::Engine) {
-            // A dead engine's stream is dropped at once: while a client
-            // holds it the pipe's name stays taken for the respawn.
+            // A dead engine's stream is dropped at once: it only reads the
+            // end, and the next look connects to the respawned engine and
+            // reads its DACL again.
             self.sup = None;
             self.dacl = None;
         }

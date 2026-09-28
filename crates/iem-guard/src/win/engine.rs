@@ -457,8 +457,8 @@ pub(super) fn stop(pc: &mut WinPc, c: &Cancel) -> R<()> {
         }
     };
     info!("the engine released the driver: {reason}");
-    // Our end of the supervisor pipe goes now: a client still holding the
-    // stream keeps the pipe's name from the next engine (engine.md, Pipes).
+    // Our end of the supervisor pipe goes now: this engine is going, and
+    // the next step connects to the next one.
     pc.sup = None;
     if procs::wait_exit(&handle, GONE, c)?.is_none() {
         return Err(StepError::failed(format!(

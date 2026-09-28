@@ -202,8 +202,8 @@ fn run() -> ExitCode {
     pc.set_tray_quit(Box::new(move || tray.tray_quit()));
     // The pipe first: while the start runs its event plan, `iemmode`
     // already sees it (and "ide event" waits for it). After a hand-over the
-    // old guard's instances (its own, and a client's still open on them)
-    // live on until its process has ended: the first instance waits.
+    // old guard's instances live on until its process has ended: the first
+    // instance waits.
     let listener = match pipe::retry(
         "the guard pipe's first instance",
         pipe::LISTEN_WAIT,
