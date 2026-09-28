@@ -251,9 +251,16 @@ fn digest_of(path: &Path) -> Option<String> {
         .and_then(|f| bundle::sha256_read(f).ok())
 }
 
+/// How many names `<exe>.old-<sha>[.<n>]` an activation tries for a
+/// replaced exe before it gives up.
+const OLD_NAMES: usize = 16;
+
 /// Copies the guard and `iemmode` of the bundle in `bundle_dir` into `bin`.
-/// A present exe is renamed to `<exe>.old-<sha>` first (Windows renames a
-/// running exe but never replaces it). Returns whether the guard's exe
+/// An exe already equal to the bundle's stays untouched (it may be the
+/// running guard's). Any other present exe goes aside first (Windows renames
+/// a running exe but never replaces it), under the first of
+/// `<exe>.old-<sha>`, `<exe>.old-<sha>.1`, … that is free or can be deleted:
+/// an old copy still running never blocks. Returns whether the guard's exe
 /// changed (the guard then hands over to the new one).
 pub fn activate_bins(bundle_dir: &Path, bin: &Path, sha: &str) -> Result<bool, String> {
     fs::create_dir_all(bin).map_err(|e| format!("{}: {e}", bin.display()))?;
@@ -263,18 +270,41 @@ pub fn activate_bins(bundle_dir: &Path, bin: &Path, sha: &str) -> Result<bool, S
         if !src.is_file() {
             return Err(format!("{}: missing", src.display()));
         }
+        let want = digest_of(&src).ok_or_else(|| format!("{}: unreadable", src.display()))?;
         let dst = bin.join(exe);
         if dst.exists() {
-            let old = bin.join(format!("{exe}{OLD_MARK}{sha}"));
-            if old.exists() {
-                fs::remove_file(&old).map_err(|e| format!("{}: {e}", old.display()))?;
+            if digest_of(&dst).as_ref() == Some(&want) {
+                continue;
             }
+            let old = free_old_name(bin, exe, sha)?;
             fs::rename(&dst, &old).map_err(|e| format!("{}: {e}", dst.display()))?;
         }
         fs::copy(&src, &dst).map_err(|e| format!("{}: {e}", dst.display()))?;
     }
     let after = digest_of(&bin.join(GUARD_EXE));
     Ok(before != after)
+}
+
+/// The first of `<exe>.old-<sha>`, `<exe>.old-<sha>.1`, … in `bin` that is
+/// free, deleting a present one when it can.
+fn free_old_name(bin: &Path, exe: &str, sha: &str) -> Result<PathBuf, String> {
+    let mut last = String::new();
+    for n in 0..OLD_NAMES {
+        let name = if n == 0 {
+            format!("{exe}{OLD_MARK}{sha}")
+        } else {
+            format!("{exe}{OLD_MARK}{sha}.{n}")
+        };
+        let old = bin.join(name);
+        if !old.exists() {
+            return Ok(old);
+        }
+        match fs::remove_file(&old) {
+            Ok(()) => return Ok(old),
+            Err(e) => last = format!("{}: {e}", old.display()),
+        }
+    }
+    Err(last)
 }
 
 /// Deletes the replaced exes (`*.old-*`) in `bin` at a start; returns the
