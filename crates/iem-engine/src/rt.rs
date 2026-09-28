@@ -97,7 +97,8 @@ pub struct RtStatus {
 pub struct RtHandles {
     pub cmds: Producer<RtCmd>,
     pub meters: triple_buffer::Output<MeterFrame>,
-    /// Interleaved stereo 96 kHz: slot 0 the engineer, slot 1 one other mix (X3).
+    /// Interleaved stereo 96 kHz: slot 0 the engineer, slot 1 one other mix
+    /// (X3); silence while a HIL signal runs (S6).
     pub taps: [Consumer<f32>; 2],
     /// Mono 96 kHz talkback into the talkback input (A4).
     pub talkback: Producer<f32>,
@@ -202,9 +203,14 @@ fn copy(dst: &mut [f64], src: &[f64]) {
     }
 }
 
+/// Pushes a segment of a listen tap (X3) as interleaved stereo, or as many
+/// silent frames when `silent` (a HIL signal runs: the tap keeps its
+/// cadence, and the test sine never reaches a web listener; #9,
+/// 2026-09-28).
 fn push_tap(
     p: &mut Producer<f32>,
     (l, r): (&[f64], &[f64]),
+    silent: bool,
     scratch: &mut [f32],
     overruns: &AtomicU64,
 ) {
@@ -215,7 +221,11 @@ fn push_tap(
         .iter_mut()
         .zip(l.iter().zip(r))
     {
-        *pair = [*a as f32, *b as f32];
+        *pair = if silent {
+            [0.0, 0.0]
+        } else {
+            [*a as f32, *b as f32]
+        };
         used += 2;
     }
     let (_, rest) = p.push_partial_slice(scratch.get(..used).unwrap_or_default());
@@ -879,8 +889,10 @@ impl Processor {
             test,
             ..
         } = self;
-        // While a HIL signal runs no mix's TX carries anything: it sounds
-        // only on HIL's spare outputs (`render_hil`), never to a band member.
+        // While a HIL signal runs no mix's TX and no listen tap carries
+        // anything: it sounds only on HIL's spare outputs (`render_hil`),
+        // never to a band member or a web listener. The mixes still render
+        // and meter, and the listen limiter still follows its mix.
         let hil = test.as_ref().is_some_and(|t| t.mask.is_some());
         let heard_from = topo.inputs.len();
         let mut trips = 0;
@@ -946,7 +958,7 @@ impl Processor {
             }
             limiter.process(l, r);
             if listen[0] == Some(m) {
-                push_tap(&mut taps[0], (&*l, &*r), tap_buf, &status.tap_overruns);
+                push_tap(&mut taps[0], (&*l, &*r), hil, tap_buf, &status.tap_overruns);
             }
             stereo_gain(fader, l, r);
             if mix_trips.check([&mut *l, &mut *r]) {
@@ -960,7 +972,13 @@ impl Processor {
                 copy(ll, l);
                 copy(lr, r);
                 listen_lim.process(ll, lr);
-                push_tap(&mut taps[1], (&*ll, &*lr), tap_buf, &status.tap_overruns);
+                push_tap(
+                    &mut taps[1],
+                    (&*ll, &*lr),
+                    hil,
+                    tap_buf,
+                    &status.tap_overruns,
+                );
             }
             let (tl, tr) = tx.get_mut(n);
             let fade = fade_buf.get(..n).unwrap_or_default();
