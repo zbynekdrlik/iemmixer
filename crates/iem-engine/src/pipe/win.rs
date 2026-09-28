@@ -1,6 +1,7 @@
 //! The Windows side of the pipes (S6 design note §4): the listener's
 //! security descriptor, a reader that peeks before it reads and a writer
-//! that gives the peer [`SEND_TIMEOUT`] to take a message. Not compiled on
+//! that gives the peer [`SEND_TIMEOUT`] to take a message and leaves the
+//! stream to be closed at once when it is dropped. Not compiled on
 //! Linux, so it stays outside mutation testing (`.cargo/mutants.toml`); its
 //! decisions are the parent module's portable `sddl_for`, `name_taken` and
 //! `polled_read`, and `tests/pipes.rs` runs on it in the `windows` job.
@@ -48,26 +49,22 @@ impl Read for Polled<'_> {
 /// A pipe stream whose writes the peer must take within [`SEND_TIMEOUT`]
 /// (`iem_win::pipe::write_within`): a write still pending then is
 /// cancelled and fails with `TimedOut`.
+///
+/// Its writes leave the stream clean, unlike interprocess's own, which mark
+/// it for the flush on drop (limbo): a dirty stream is dropped onto the
+/// process's one linger thread, whose `FlushFileBuffers` waits until the
+/// peer has read everything, so one peer that stops reading would keep that
+/// end open, and every written stream dropped after it in the process would
+/// wait behind it (Windows CI run 36373563262). A clean stream's handle is
+/// closed as it is dropped; what was written stays in the pipe, and the
+/// peer reads it before the end of the stream (`tests/pipes.rs`
+/// `a_peer_that_does_not_read_holds_up_no_close`).
 pub(super) struct Bounded<'a>(pub(super) &'a Stream);
 
 impl Write for Bounded<'_> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let Stream::NamedPipe(pipe) = self.0;
-        let pipe = pipe.inner();
-        match iem_win::pipe::write_within(pipe.as_handle(), buf, SEND_TIMEOUT) {
-            Ok(n) => {
-                // As interprocess's own write does: a normal close lets the
-                // peer read what was written first (its flush on drop).
-                pipe.mark_dirty();
-                Ok(n)
-            }
-            Err(e) => {
-                // A peer that took nothing is dropped at once: no flush on
-                // drop that would wait for it.
-                pipe.assume_flushed();
-                Err(e)
-            }
-        }
+        iem_win::pipe::write_within(pipe.inner().as_handle(), buf, SEND_TIMEOUT)
     }
 
     fn flush(&mut self) -> io::Result<()> {

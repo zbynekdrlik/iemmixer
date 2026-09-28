@@ -11,6 +11,9 @@
 //! (the `closed` flag) ends the reader and closes the socket for the peer,
 //! and its writers never wait long for the peer ([`Conn::writer`]): a peer
 //! that takes nothing for [`SEND_TIMEOUT`] fails the write and is dropped.
+//! The close never waits for the peer either: the peer reads what was
+//! written before it, then the end of the stream, and one peer that does
+//! not read holds up no other close ([`bounded`]).
 
 use std::io::{self, Read, Write};
 use std::sync::Arc;
@@ -160,7 +163,10 @@ pub fn polled(stream: &Stream) -> impl Read + '_ {
 /// [`Conn::new`]); a Windows pipe has no timeouts, so each write is issued
 /// overlapped and cancelled when the peer has not taken it within
 /// [`SEND_TIMEOUT`] (`iem_win::pipe::write_within`). Either way the write
-/// then fails, and the caller drops the peer.
+/// then fails, and the caller drops the peer. A Windows write through it
+/// also leaves the stream out of interprocess's flush on drop, whose one
+/// thread per process waits for each peer to read everything before it
+/// closes the next stream: the engine's end closes as it is dropped.
 pub fn bounded(stream: &Stream) -> impl Write + '_ {
     #[cfg(windows)]
     {
@@ -204,7 +210,7 @@ impl Conn {
 
     /// The connection's writing side ([`bounded`]): always write through it,
     /// never through `&*stream`, whose Windows writes wait for the peer
-    /// without a bound.
+    /// without a bound and leave the stream to interprocess's flush on drop.
     pub fn writer(&self) -> impl Write + '_ {
         bounded(&self.stream)
     }
