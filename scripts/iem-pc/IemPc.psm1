@@ -288,9 +288,9 @@ function Register-IemTasks {
     # from -ElevatedRoot\tuning (default %ProgramData%\iemmixer, resolved here
     # from the known folder and passed on the command line, so the elevated
     # process never reads an environment variable for it); only Administrators
-    # and SYSTEM may change that root. Read back; any difference throws after
-    # every task was tried. Each task's descriptor is then set explicitly
-    # (SetSecurityDescriptor): an update keeps a task's old one.
+    # and SYSTEM may change that root. Each task's descriptor is set explicitly
+    # (SetSecurityDescriptor) before its read-back, because an update keeps a
+    # task's old one; any difference throws after every task was tried.
     param(
         [Parameter(Mandatory)][string]$Root,
         [Parameter(Mandatory)][string]$AppExe,
