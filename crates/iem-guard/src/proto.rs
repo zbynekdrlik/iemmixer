@@ -159,6 +159,9 @@ pub struct HilOut {
 /// guard's [`Reply`] at once and after every change of mode, switch or
 /// alarms, and `{"cmd":"quit"}` ([`Request::Quit`]) when the guard stops the
 /// subscriber (its tray stop, S6 plan Task 9): the subscriber then exits.
+// One `Update` per change of mode, switch or alarms, never on a hot path:
+// the size difference to `Quit` costs nothing (as the engine's `ClientMsg`).
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Update {
     State(Reply),
