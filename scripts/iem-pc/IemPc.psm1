@@ -473,17 +473,20 @@ function Test-IemInheritedItem {
 function Test-IemRootTree {
     # Every file and folder below the root (design section 6), parents before
     # their children, read back with Test-IemInheritedItem. A junction or a
-    # link is a difference and is never followed or read through: the
-    # elevated bootstrap changes nothing outside the root. Returns one row per
-    # item that differs: {path, rel (below the root), directory, link, problems}.
-    param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][hashtable]$Rights)
+    # link is a difference and is never followed or read through (Set-IemRootAcl
+    # refuses one before it writes anything). Returns one row per item that
+    # differs: {path, rel (below the root), directory, link, problems}.
+    # -LinksOnly reads no DACL and returns only the junctions and links.
+    param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][hashtable]$Rights, [switch]$LinksOnly)
     $base = (Resolve-Path -LiteralPath $Root).ProviderPath.TrimEnd('\')
     $rows = @()
     $dirs = New-Object System.Collections.ArrayList
     [void]$dirs.Add($base)
     for ($i = 0; $i -lt $dirs.Count; $i++) {
         foreach ($item in @(Get-ChildItem -LiteralPath ([string]$dirs[$i]) -Force)) {
-            $path = $item.FullName
+            # Built from the root's own spelling, so `rel` is exactly the part
+            # below it (Reset-IemInheritedItem builds the path back from it).
+            $path = ([string]$dirs[$i]) + '\' + $item.Name
             $isDir = [bool]$item.PSIsContainer
             $row = [pscustomobject]@{ path = $path; rel = $path.Substring($base.Length + 1); directory = $isDir; link = $false; problems = @() }
             if (Test-IemReparsePoint -Path $path) {
@@ -494,8 +497,10 @@ function Test-IemRootTree {
             }
             # Gone since the listing (another process removed or renamed it).
             if (-not (Test-Path -LiteralPath $path)) { continue }
-            $bad = Test-IemInheritedItem -Path $path -Rights $Rights
-            if ($bad.Count -gt 0) { $row.problems = $bad; $rows += $row }
+            if (-not $LinksOnly) {
+                $bad = Test-IemInheritedItem -Path $path -Rights $Rights
+                if ($bad.Count -gt 0) { $row.problems = $bad; $rows += $row }
+            }
             if ($isDir) { [void]$dirs.Add($path) }
         }
     }
@@ -506,12 +511,25 @@ function Reset-IemInheritedItem {
     # A file or folder below the root keeps nothing of its own and inherits its
     # folder's rules again (icacls /reset for this one item): 'D:' is an empty
     # DACL, present and not protected, so what SetAccessControl leaves on the
-    # item is exactly what it inherits. Never through a junction or a link.
-    param([Parameter(Mandatory)][string]$Path, [switch]$Directory)
-    if (Test-IemReparsePoint -Path $Path) { throw "$Path is a junction or a link: refused" }
+    # item is exactly what it inherits. $Rel is the item below $Root, as
+    # Test-IemRootTree gives it. SetAccessControl goes by path, so right before
+    # it every part from the root down to the item is checked for a junction
+    # or a link, as the elevated reads in the user's root do
+    # (Read-IemTaskRequest): a folder swapped for a junction since the walk is
+    # refused, never written through. That narrows the race to the moment of
+    # use; a path-based write cannot close it.
+    param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][string]$Rel, [switch]$Directory)
+    $names = $Rel.Split('\')
+    if (@($names | Where-Object { $_ -eq '' -or $_ -eq '.' -or $_ -eq '..' -or $_.Contains(':') -or $_.Contains('/') }).Count -gt 0) {
+        throw "not an item below the root: '$Rel'"
+    }
+    $path = (Resolve-Path -LiteralPath $Root).ProviderPath.TrimEnd('\')
+    $parts = @($path)
+    foreach ($n in $names) { $path = $path + '\' + $n; $parts += $path }
+    foreach ($p in $parts) { if (Test-IemReparsePoint -Path $p) { throw "$p is a junction or a link: refused" } }
     if ($Directory) { $sec = New-Object System.Security.AccessControl.DirectorySecurity } else { $sec = New-Object System.Security.AccessControl.FileSecurity }
     $sec.SetSecurityDescriptorSddlForm('D:', [System.Security.AccessControl.AccessControlSections]::Access)
-    if ($Directory) { [IO.Directory]::SetAccessControl($Path, $sec) } else { [IO.File]::SetAccessControl($Path, $sec) }
+    if ($Directory) { [IO.Directory]::SetAccessControl($path, $sec) } else { [IO.File]::SetAccessControl($path, $sec) }
 }
 
 function Set-IemRootAcl {
@@ -519,19 +537,24 @@ function Set-IemRootAcl {
     # user, SYSTEM and Administrators that everything below inherits, so the
     # staging copies of `iem-migrate band` need no ACL work (#20). Setting the
     # root's DACL is not enough for what already exists below it: on the CI
-    # runner (run 36366619573) a file that existed before did not read back
-    # with only the root's rules afterwards, and Windows' propagation never
-    # takes away the rules an item holds of its own nor touches a protected
-    # item. So every item below is read back (Test-IemRootTree) and each one
-    # that differs is reset to inherit only (Reset-IemInheritedItem), parents
-    # first, then all of it is read back. The root or anything below it that
-    # is a junction or a link is refused and never followed. `reset` lists the
-    # items reset, relative to the root.
+    # runner (run 36366619573) a file that existed before failed its read-back
+    # afterwards (the log does not show its rules), and by design Windows'
+    # propagation keeps the rules an item holds of its own and passes nothing
+    # into a protected item. So every item below is read back
+    # (Test-IemRootTree) and each one that differs is reset to inherit only
+    # (Reset-IemInheritedItem), parents first, then all of it is read back.
+    # Setting the root's DACL or resetting a folder makes Windows propagate to
+    # what lies below, and whether that goes through a junction is not relied
+    # on: a root that is a junction or a link, or any junction or link below
+    # it, is refused before anything is written, and never followed. `reset`
+    # lists the items reset, relative to the root.
     param([Parameter(Mandatory)][string]$Root, [string]$User = '')
     $u = Resolve-IemUser -User $User
     if (Test-IemReparsePoint -Path $Root) { throw "$Root is a junction or a link: refused" }
     if (-not (Test-Path -LiteralPath $Root -PathType Container)) { New-Item -ItemType Directory -Force -Path $Root | Out-Null }
     $rights = Get-IemRootRights -UserSid $u.sid
+    $links = Test-IemRootTree -Root $Root -Rights $rights -LinksOnly
+    if ($links.Count -gt 0) { throw ('a junction or a link below the root, refused before any write: ' + (@($links | ForEach-Object { $_.path }) -join ', ')) }
     $before = Test-IemDirectoryAcl -Path $Root -Rights $rights
     if ($before.Count -gt 0) { Set-IemDirectoryAcl -Path $Root -Rights $rights }
     $after = Test-IemDirectoryAcl -Path $Root -Rights $rights
@@ -543,7 +566,7 @@ function Set-IemRootAcl {
         # A folder reset before it may have brought it back already.
         if (-not (Test-Path -LiteralPath $it.path)) { continue }
         if ((Test-IemInheritedItem -Path $it.path -Rights $rights).Count -eq 0) { continue }
-        Reset-IemInheritedItem -Path $it.path -Directory:$it.directory
+        Reset-IemInheritedItem -Root $Root -Rel $it.rel -Directory:$it.directory
         $reset += $it.rel
     }
     $left = Test-IemRootTree -Root $Root -Rights $rights
