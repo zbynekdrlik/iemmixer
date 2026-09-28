@@ -1032,16 +1032,30 @@ mod named_pipes {
     }
 
     #[test]
-    fn a_second_listener_on_a_held_name_is_refused() {
+    fn a_second_listener_on_a_held_name_is_refused_at_once() {
         let dir = tempfile::tempdir().unwrap();
         let name = pipe_name(&dir);
-        let _first = listen(control_name(&name).unwrap()).unwrap();
+        let first = listen(control_name(&name).unwrap()).unwrap();
+        // A live listener holds the name as long as it lives (a gone one's
+        // client does not, below), so waiting cannot free it: a second
+        // engine or a squatter is refused at once.
+        let start = Instant::now();
         let second = listen(control_name(&name).unwrap()).unwrap_err();
+        let took = start.elapsed();
         assert_eq!(second.kind(), std::io::ErrorKind::AddrInUse, "{second}");
         assert!(
             second.to_string().starts_with("pipe name taken ("),
             "{second}"
         );
+        assert!(took < Duration::from_secs(1), "{took:?}");
+        // So it stays while the listener serves: a connection accepted and
+        // dropped, its next instance listening.
+        let n = name.clone();
+        let client = connect(move || control_name(&n));
+        drop(accept(&first));
+        let third = listen(control_name(&name).unwrap()).unwrap_err();
+        assert_eq!(third.kind(), std::io::ErrorKind::AddrInUse, "{third}");
+        drop(client);
     }
 
     fn accept(listener: &interprocess::local_socket::Listener) -> Stream {
