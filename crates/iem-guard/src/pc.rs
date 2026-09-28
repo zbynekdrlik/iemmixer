@@ -599,6 +599,9 @@ pub mod fake {
         pub engine_up: bool,
         /// The alarm recipients the precheck reads (`None`: unreadable).
         pub recipients: Option<u32>,
+        /// What `job` reads (a fixed fact of the process: not a recorded
+        /// call).
+        pub job: Result<Placement, String>,
         calls: Vec<(Call, Instant)>,
         fails: HashMap<Call, String>,
         blocked: Vec<Call>,
@@ -661,6 +664,7 @@ pub mod fake {
                 },
                 engine_up: true,
                 recipients: Some(1),
+                job: Ok(Placement::NoJob),
                 calls: Vec::new(),
                 fails: HashMap::new(),
                 blocked: Vec::new(),
@@ -1026,6 +1030,10 @@ pub mod fake {
             self.enter(Call::Exclude, None)?;
             self.excluded.push((sha.to_owned(), keep.to_vec()));
             Ok(())
+        }
+
+        fn job(&mut self) -> Result<Placement, String> {
+            self.job.clone()
         }
     }
 }
@@ -1722,5 +1730,33 @@ mod tests {
         assert!(t.elapsed() >= Duration::from_millis(200));
         assert!(pc.facts.engine);
         assert!(c.preempted());
+    }
+
+    /// The PC's task job allows no breakaway (#9 2026-09-28). Children that
+    /// stay in a job that does not end its processes when it closes are
+    /// named in `iemmode status`; every other reading names nothing (a
+    /// refusal is each start's step error, an unreadable job is logged).
+    #[test]
+    fn only_children_that_stay_in_the_guards_job_are_named() {
+        assert_eq!(
+            JOB_NOTE,
+            "children stay in the guard task's job (no breakaway)"
+        );
+        assert_eq!(job_note(&Ok(Placement::InJob)), Some(JOB_NOTE));
+        for other in [
+            Ok(Placement::Breakaway),
+            Ok(Placement::NoJob),
+            Ok(Placement::Refuse("the job ends its processes")),
+            Err("the job could not be read".to_owned()),
+        ] {
+            assert_eq!(job_note(&other), None, "{other:?}");
+        }
+        // The fake reads no job unless a test sets one, and never records
+        // the read.
+        let mut pc = FakePc::new(Facts::default());
+        assert_eq!(pc.job(), Ok(Placement::NoJob));
+        pc.job = Ok(Placement::InJob);
+        assert_eq!(pc.job(), Ok(Placement::InJob));
+        assert!(pc.calls().is_empty());
     }
 }

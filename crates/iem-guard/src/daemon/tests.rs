@@ -5,6 +5,8 @@
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use iem_win::spawn::Placement;
+
 use super::*;
 use crate::bundle::Pins;
 use crate::effects::engine::{Ready, ReadyWindow};
@@ -2570,6 +2572,41 @@ fn status_names_everything_that_waits() {
         [Mode::Event, Mode::Dev, Mode::Live].map(mode_name),
         ["event", "dev", "live"]
     );
+}
+
+/// On the PC the guard's task job allows no breakaway (#9 2026-09-28): a
+/// guard whose children stay in its job (one that does not end its
+/// processes when it closes) names it in `iemmode status` and the tray's
+/// view from its start on, for its whole life; any other reading of the
+/// job names nothing (a refusal is each start's step error).
+#[test]
+fn a_guard_whose_children_stay_in_its_job_names_it() {
+    const NOTE: &str = "children stay in the guard task's job (no breakaway)";
+    let mut g = Guard::for_test(Mode::Dev);
+    let mut pc = FakePc::new(iemmixer_up());
+    pc.job = Ok(Placement::InJob);
+    assert_eq!(start(&mut pc, &mut g, 0), None);
+    assert_eq!(status_text(&g), format!("mode dev; no bundle; {NOTE}"));
+    assert_eq!(g.shared.view().status, status_text(&g));
+    g.note = Some("a note".into());
+    g.raise(None, "one", false);
+    assert_eq!(
+        status_text(&g),
+        format!("mode dev; no bundle; a note; {NOTE}; 1 unacknowledged alarms")
+    );
+    for job in [
+        Ok(Placement::Breakaway),
+        Ok(Placement::NoJob),
+        Ok(Placement::Refuse("the job ends its processes")),
+        Err("the job could not be read".to_owned()),
+    ] {
+        let mut g = Guard::for_test(Mode::Dev);
+        let mut pc = FakePc::new(iemmixer_up());
+        pc.job = job.clone();
+        assert_eq!(start(&mut pc, &mut g, 0), None, "{job:?}");
+        assert_eq!(status_text(&g), "mode dev; no bundle", "{job:?}");
+        assert_eq!(g.shared.view().status, status_text(&g), "{job:?}");
+    }
 }
 
 #[test]
