@@ -782,15 +782,26 @@ mod tests {
         rig_with(flags, false)
     }
 
+    /// HIL's spare outputs of the test site (`[guard] hil_tx`).
+    const SPARE: [u16; 2] = [94, 95];
+
+    /// Like `run`, the engine opens HIL's spare outputs under the
+    /// test-signal flag only.
     fn rig_with(flags: crate::core::Flags, hold: bool) -> Rig {
         let dir = tempfile::tempdir().unwrap();
         let topo = Arc::new(crate::test_support::test_site());
+        let hil = if flags.test_signal {
+            SPARE.to_vec()
+        } else {
+            Vec::new()
+        };
         let core = Core::new(
             Arc::clone(&topo),
             &iem_engine_proto::MixState::default(),
             0,
             flags,
-        );
+        )
+        .with_hil(hil);
         let (cmds, ring) = rtrb::RingBuffer::new(crate::rt::CMD_RING);
         let (meters_in, meters) = triple_buffer::triple_buffer(&MeterFrame::default());
         let status = Arc::new(RtStatus::default());
@@ -1142,13 +1153,15 @@ mod tests {
                 .count()
         }
 
+        /// The HIL signal on a spare output: never a mix's TX (the owner's
+        /// decision on #9 of 2026-09-28).
         fn hil() -> Cmd {
             Cmd::HilTestSignal {
                 input: InputId::new("mic1"),
                 hz: 1000.0,
                 dbfs: -30.0,
                 ttl_s: 60.0,
-                card_tx: vec![72],
+                card_tx: vec![SPARE[1]],
             }
         }
 
