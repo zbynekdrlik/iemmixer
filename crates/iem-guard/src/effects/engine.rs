@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use crate::handover::FLOOR_DB;
 use crate::pc::{EngineSeen, Status};
 use crate::plan::Health;
-use crate::proto::EngineStatus;
+use crate::proto::{EngineStatus, HilOut};
 use crate::site::FRAMES;
 
 /// The engine protocol the guard speaks.
@@ -132,6 +132,22 @@ fn flag(v: &Value, key: &str) -> bool {
     v.get(key).and_then(Value::as_bool).unwrap_or(false)
 }
 
+/// `Status.hil`: each spare output's card channel and peak; an entry
+/// without them reads 0.
+fn hil_outs(v: &Value) -> Vec<HilOut> {
+    v.get("hil")
+        .and_then(Value::as_array)
+        .map(|outs| {
+            outs.iter()
+                .map(|o| HilOut {
+                    tx: u16::try_from(number(o, "tx")).unwrap_or(0),
+                    peak: o.get("peak").and_then(Value::as_f64).unwrap_or(0.0),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn louder(pair: &Value) -> f64 {
     pair.as_array()
         .map(|ch| ch.iter().filter_map(Value::as_f64).fold(0.0, f64::max))
@@ -160,6 +176,7 @@ pub fn parse(body: &[u8]) -> Result<Msg, String> {
                 resets: number(&v, "resets"),
                 faulted: flag(&v, "faulted"),
                 parked: flag(&v, "parked"),
+                hil: hil_outs(&v),
             }),
             "meters" => Msg::Meters {
                 inputs: inputs
@@ -223,6 +240,7 @@ pub fn engine_status(seen: &EngineSeen, spawns: u64, last_exit: Option<i32>) -> 
         pipe_private: seen.pipe_private,
         spawns,
         last_exit,
+        hil: s.hil.clone(),
     }
 }
 
@@ -514,6 +532,7 @@ mod tests {
             resets: 0,
             faulted: false,
             parked: false,
+            hil: Vec::new(),
         }
     }
 
@@ -595,14 +614,14 @@ mod tests {
     #[test]
     fn the_hil_test_signal_names_its_card_outputs() {
         assert_eq!(
-            hil_test_signal("mic1", -24.5, 30.0, &[71, 72]),
+            hil_test_signal("mic1", -24.5, 30.0, &[94, 95]),
             json!({
                 "op": "hil_test_signal",
                 "input": "mic1",
                 "hz": 1000.0,
                 "dbfs": -24.5,
                 "ttl_s": 30.0,
-                "card_tx": [71, 72],
+                "card_tx": [94, 95],
             })
         );
         assert_eq!(HIL_HZ, 1000.0);
@@ -698,8 +717,35 @@ mod tests {
                 resets: 1,
                 faulted: true,
                 parked: true,
+                hil: Vec::new(),
             })
         );
+        // HIL's spare outputs with their peaks (design §7); a partial or
+        // out-of-range entry reads 0, anything but a list none.
+        let hil = |outs: serde_json::Value| match p(json!({"type": "status", "hil": outs})) {
+            Msg::Status(s) => s.hil,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            hil(json!([{"tx": 94, "peak": 0.0316}, {"tx": 95, "peak": 0.0}])),
+            vec![
+                HilOut {
+                    tx: 94,
+                    peak: 0.0316
+                },
+                HilOut { tx: 95, peak: 0.0 }
+            ]
+        );
+        assert_eq!(
+            hil(json!([{"tx": 94}, {"peak": 0.5}, {"tx": 70_000, "peak": "x"}])),
+            vec![
+                HilOut { tx: 94, peak: 0.0 },
+                HilOut { tx: 0, peak: 0.5 },
+                HilOut { tx: 0, peak: 0.0 }
+            ]
+        );
+        assert!(hil(json!("x")).is_empty());
+        assert!(hil(json!([])).is_empty());
         // An engine before S6: no measured period.
         assert_eq!(
             p(json!({"type": "status", "callbacks": 3000, "faulted": false})),
@@ -765,6 +811,13 @@ mod tests {
         assert_eq!(commit_of("2.0.0+a+b"), "b");
         assert_eq!(commit_of("local"), "local");
         assert_eq!(commit_of(""), "");
+        let spare = vec![
+            HilOut {
+                tx: 94,
+                peak: 0.0316,
+            },
+            HilOut { tx: 95, peak: 0.0 },
+        ];
         let seen = EngineSeen {
             status: Status {
                 build: format!("2.0.0-dev.9+{sha}"),
@@ -774,6 +827,7 @@ mod tests {
                 resets: 2,
                 faulted: true,
                 parked: true,
+                hil: spare.clone(),
             },
             pipe_private: true,
         };
@@ -790,6 +844,7 @@ mod tests {
                 pipe_private: true,
                 spawns: 3,
                 last_exit: Some(70),
+                hil: spare,
             }
         );
         let quiet = EngineSeen {

@@ -7,13 +7,16 @@ use iem_dsp::eq::EqParams;
 
 use crate::params::InputParams;
 
-/// Engine outputs (topology TX slots) a HIL test signal can name (S6).
-pub const MAX_TX: usize = 128;
+/// HIL's spare card outputs an engine opens at most (S6, `[guard] hil_tx`):
+/// the D5(b) loopback pair or an unused TX, with room to spare.
+pub const MAX_HIL: usize = 8;
 
-/// The engine outputs a HIL test signal may sound on, by TX slot: a fixed
-/// array, so it travels through the command ring and lives in the processor
-/// without allocation.
-pub type TxMask = [bool; MAX_TX];
+/// The spare outputs a HIL test signal sounds on, by HIL slot (the
+/// engine's outputs after the topology's TX, in `[guard] hil_tx` order): a
+/// fixed array, so it travels through the command ring and lives in the
+/// processor without allocation. It holds no mix's TX, so the HIL signal
+/// can never reach a band member.
+pub type HilMask = [bool; MAX_HIL];
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub enum RtOp {
@@ -76,14 +79,15 @@ pub enum RtOp {
         amp: f64,
         ttl: u64,
     },
-    /// The HIL test signal (S6): a test signal, and while it runs only the
-    /// outputs in `mask` carry sound; every other output is zero.
+    /// The HIL test signal (S6): a test signal whose sine, while it runs,
+    /// sounds only on the spare outputs in `mask`; every mix's TX and every
+    /// other spare output is zero meanwhile.
     HilTestSignal {
         i: u16,
         hz: f64,
         amp: f64,
         ttl: u64,
-        mask: TxMask,
+        mask: HilMask,
     },
     StopTestSignal,
     FadeOut,

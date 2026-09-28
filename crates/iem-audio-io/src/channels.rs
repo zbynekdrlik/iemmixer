@@ -76,7 +76,8 @@ impl ChannelMap {
         &self.rx
     }
 
-    /// Card output index of engine output slot `k`, in `Topology::tx` order.
+    /// Card output index of engine output slot `k`: `Topology::tx` order,
+    /// then HIL's spare outputs (S6).
     pub fn tx(&self) -> &[usize] {
         &self.tx
     }

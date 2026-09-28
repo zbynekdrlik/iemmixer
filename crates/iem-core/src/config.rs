@@ -585,9 +585,14 @@ mod tests {
     /// both, so a guard-started `iem-server` loads the same file.
     #[test]
     fn a_site_with_the_guard_and_card_tables_loads() {
-        let text = format!(
-            "{}\n[guard]\nreaper_url = \"http://127.0.0.1:8080\"\nstage_tracks = [1, 2, 3]\nhil_tx = [89, 90]\non_pref_fail = \"start_reaper_with_alarm\"\n",
-            include_str!("../../../config/test-site.toml")
+        // The test site carries the engine's key of `[guard]` (hil_tx, S6);
+        // the guard's own keys join that table.
+        let site_text = include_str!("../../../config/test-site.toml");
+        assert!(site_text.contains("\n[guard]"), "the test site's [guard]");
+        let text = site_text.replacen(
+            "\n[guard]",
+            "\n[guard]\nreaper_url = \"http://127.0.0.1:8080\"\nstage_tracks = [1, 2, 3]\non_pref_fail = \"start_reaper_with_alarm\"",
+            1,
         );
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("site.toml");
@@ -595,6 +600,7 @@ mod tests {
         let site = Config::load(&path).expect("a site with [guard] and [card] loads");
         assert!(site.card.is_some(), "the [card] table is accepted");
         assert!(site.engine.is_some(), "the [engine] table is accepted");
+        assert!(site.guard.is_some(), "the [guard] table is accepted");
         assert_eq!(site.members.len(), 10);
         // Never written back: the tables belong to the engine and the guard.
         let written = serde_json::to_string(&site).unwrap();

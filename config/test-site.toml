@@ -35,6 +35,14 @@ pref_key = 'Software\ASIO\Test Card'
 pref_name = "PrefBuffSize"
 pref_original = { kind = "dword", raw = "64" }
 
+# HIL's spare card outputs (S6; the owner's decision on #9, 2026-09-28): card
+# channels no mix uses, so the HIL test signal never reaches a band member.
+# The engine opens them after the topology's TX under --test-signal. It reads
+# only this key of the guard's table; the guard's other keys live in the ops
+# site (iem-guard's tests carry their own).
+[guard]
+hil_tx = [94, 95]
+
 [[members]]
 id = "member1"
 name = "Member1"
@@ -206,7 +214,8 @@ name = "BGVS"
 # the group); member1 and the engineer also hear other members' mixes (the
 # Mixes tab), so member1 is declared after the mixes it hears.
 # Synthetic channels: RX 101-132, TX 71-88 (members), 91/92 (engineer),
-# 93 (translator), in a synthetic 160-channel map.
+# 93 (translator), in a synthetic 160-channel map; TX 94/95 are HIL's spare
+# outputs (above).
 [engine]
 channels = 160
 engineer = "engineer"

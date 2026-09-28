@@ -544,7 +544,7 @@ impl Guard {
             ..GuardState::default()
         };
         let site = SiteConf {
-            hil_tx: vec![72],
+            hil_tx: vec![94],
             ..SiteConf::default()
         };
         let clock = Clock::Fixed(Arc::new(AtomicU64::new(1_790_000_000)));

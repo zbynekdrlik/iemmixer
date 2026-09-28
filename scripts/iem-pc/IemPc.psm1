@@ -1377,6 +1377,79 @@ function Test-IemHilPanic {
     [pscustomobject]@{ ok = ($problems.Count -eq 0); detail = $detail; numbers = [pscustomobject]@{ spawns = $spawns; callbacks = $calls } }
 }
 
+function Get-IemHilPeaks {
+    # engine.hil of an engine status as a hashtable: card output (as text) -> peak (linear)
+    # since the engine's previous Status. $null when the status carries no 'hil'.
+    param($Engine)
+    if ($null -eq $Engine -or $null -eq $Engine.PSObject.Properties['hil']) { return $null }
+    $peaks = @{}
+    foreach ($o in @(Get-IemProp $Engine 'hil')) {
+        if ($null -eq $o) { continue }
+        $peaks[[string](Get-IemProp $o 'tx')] = [double](Get-IemProp $o 'peak')
+    }
+    return $peaks
+}
+
+function Test-IemHilSilent {
+    # Every HIL spare output of the engine status is silent (peak 0 since the previous
+    # Status); $false without spare outputs or without the field.
+    param($Engine)
+    $peaks = Get-IemHilPeaks -Engine $Engine
+    if ($null -eq $peaks -or $peaks.Count -eq 0) { return $false }
+    foreach ($p in $peaks.Values) { if ($p -ne 0) { return $false } }
+    return $true
+}
+
+function Test-IemHilHeard {
+    # Some HIL spare output of the engine status carried a signal (a peak above 0 since the
+    # previous Status); $false without spare outputs or without the field.
+    param($Engine)
+    $peaks = Get-IemHilPeaks -Engine $Engine
+    if ($null -eq $peaks) { return $false }
+    foreach ($p in $peaks.Values) { if ($p -gt 0) { return $true } }
+    return $false
+}
+
+function Test-IemHilSignal {
+    # The HIL test signal (design section 7; the owner's decision on #9, 2026-09-28: it goes
+    # only to spare card outputs no mix uses, [guard] hil_tx). The engine's Status carries each
+    # spare output with its peak since the previous Status (engine.hil). $During are the engine
+    # statuses read while the TTL ran: each spare output's loudest peak there is the asked
+    # level within 0.5 dB. $After is the status after the TTL: every spare output silent.
+    # $During holds every status read from the signal's start until $After, those after
+    # the TTL too: a short TTL's signal may show only in a Status that arrives after it.
+    param([object[]]$During = @(), $After, [Parameter(Mandatory)][double]$Dbfs)
+    $end = Get-IemHilPeaks -Engine $After
+    if ($null -eq $end) { return [pscustomobject]@{ ok = $false; detail = "the engine status lacks 'hil'"; numbers = $null } }
+    if ($end.Count -eq 0) { return [pscustomobject]@{ ok = $false; detail = 'the engine opened no HIL output ([guard] hil_tx)'; numbers = $null } }
+    $loudest = @{}
+    foreach ($e in @($During)) {
+        $peaks = Get-IemHilPeaks -Engine $e
+        if ($null -eq $peaks) { continue }
+        foreach ($tx in $peaks.Keys) {
+            if (-not $loudest.ContainsKey($tx) -or $peaks[$tx] -gt $loudest[$tx]) { $loudest[$tx] = $peaks[$tx] }
+        }
+    }
+    $inv = [Globalization.CultureInfo]::InvariantCulture
+    $problems = @()
+    $levels = @()
+    $still = 0
+    foreach ($tx in $end.Keys) {
+        $db = -150.0
+        if ($loudest.ContainsKey($tx) -and $loudest[$tx] -gt 0) { $db = 20 * [math]::Log10($loudest[$tx]) }
+        $levels += $db
+        if ([math]::Abs($db - $Dbfs) -gt 0.5) { $problems += [string]::Format($inv, 'a spare output peaked at {0:0.0} dBFS', $db) }
+        if ($end[$tx] -ne 0) { $still++ }
+    }
+    if ($still -gt 0) { $problems += ('{0} spare output(s) still sound after the TTL' -f $still) }
+    $low = ($levels | Measure-Object -Minimum).Minimum
+    $high = ($levels | Measure-Object -Maximum).Maximum
+    $numbers = [pscustomobject]@{ outputs = $end.Count; dbfs = $Dbfs; lowest_dbfs = $low; highest_dbfs = $high; after = $still }
+    $detail = [string]::Format($inv, '{0} spare output(s) at {1:0.0} dBFS (asked {2:0.0}), silent after the TTL', $end.Count, $low, $Dbfs)
+    if ($problems.Count -gt 0) { $detail = [string]::Format($inv, 'asked {0:0.0} dBFS: {1}', $Dbfs, ($problems -join '; ')) }
+    [pscustomobject]@{ ok = ($problems.Count -eq 0); detail = $detail; numbers = $numbers }
+}
+
 function New-IemHilCheck {
     param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][bool]$Ok, [string]$Detail = '', $Numbers = $null)
     [pscustomobject]@{ name = $Name; ok = $Ok; detail = $Detail; numbers = $Numbers }

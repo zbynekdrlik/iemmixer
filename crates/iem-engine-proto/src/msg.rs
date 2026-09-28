@@ -104,10 +104,12 @@ pub enum Cmd {
     Arm,
     /// The HIL test signal (S6 design note §4, §7): the test signal on
     /// `input` (under the test-signal flag, capped like `StartTestSignal`;
-    /// `dbfs` above the cap is refused), and while it runs only the card
-    /// outputs `card_tx` (TX channels of the site) carry sound; every other
-    /// output of the engine stays zero. The mixes render as usual, so their
-    /// meters show the routing. Supervisor only.
+    /// `dbfs` above the cap is refused), whose sine, while it runs, sounds
+    /// only on the card outputs `card_tx`: spare outputs no mix uses (the
+    /// site's `[guard] hil_tx`, which the engine opens under the flag); a
+    /// mix's TX is refused, so it never reaches a band member. Every mix's
+    /// TX stays zero meanwhile; the mixes render as usual, so their meters
+    /// show the routing. Supervisor only.
     HilTestSignal {
         input: InputId,
         hz: f64,
@@ -377,6 +379,20 @@ pub struct Status {
     pub held: bool,
     /// Locking the real-time memory failed (logged, never fatal).
     pub lock_failed: bool,
+    /// S6, additive: HIL's spare card outputs (the engine opens the site's
+    /// `[guard] hil_tx` under the test-signal flag), in that order; empty
+    /// otherwise. HIL v1 reads them to prove its test signal reached them,
+    /// at its level, and left them.
+    pub hil: Vec<HilOut>,
+}
+
+/// One of HIL's spare card outputs in a [`Status`] (S6): its card channel
+/// and its peak since the previous `Status` (linear).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HilOut {
+    pub tx: u16,
+    pub peak: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -679,6 +695,31 @@ mod tests {
                 ..Status::default()
             }
         );
+    }
+
+    /// HIL's spare outputs in `Status` (S6): additive both ways, a partial
+    /// entry reads with its defaults.
+    #[test]
+    fn the_hil_outputs_in_status_are_additive() {
+        let status = Status {
+            hil: vec![HilOut { tx: 94, peak: 0.25 }, HilOut { tx: 95, peak: 0.0 }],
+            ..Status::default()
+        };
+        let json = serde_json::to_value(&status).unwrap();
+        assert_eq!(
+            json["hil"],
+            serde_json::json!([{"tx": 94, "peak": 0.25}, {"tx": 95, "peak": 0.0}])
+        );
+        assert_eq!(
+            serde_json::from_value::<Status>(json.clone()).unwrap(),
+            status
+        );
+        let old: OldStatus = serde_json::from_value(json).unwrap();
+        assert_eq!(old.callbacks, 0);
+        let from_old: Status = serde_json::from_str(r#"{"callbacks":4}"#).unwrap();
+        assert!(from_old.hil.is_empty());
+        let partial: Status = serde_json::from_str(r#"{"hil":[{"tx":94}]}"#).unwrap();
+        assert_eq!(partial.hil, vec![HilOut { tx: 94, peak: 0.0 }]);
     }
 
     #[test]

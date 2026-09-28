@@ -23,7 +23,9 @@ conclusion from result.json).
 The engine checks read `engine` from the `iemmode status` reply (the guard's
 Reply.engine): build (the bundle SHA), frames (measured), callbacks, missed,
 resets, parked, faulted, pipe_private (the engine pipes' DACL holds only the
-user and SYSTEM), spawns (engines the guard started) and last_exit. A check
+user and SYSTEM), spawns (engines the guard started), last_exit and hil (each
+of HIL's spare card outputs, [guard] hil_tx, with its peak since the engine's
+previous Status: the test signal's level during its TTL, silence after). A check
 whose data is missing fails. While an engine comes up the guard shows none
 (until its hello and first Status; after a hand-over to a new guard exe, until
 that guard looked at it), so after activate, a forced reopen and the respawn
@@ -115,6 +117,31 @@ function Wait-HilEngine {
     }
 }
 
+function Wait-HilSilence {
+    # Polls `iemmode status` every 500 ms from the test signal's start: until its -Ttl ran
+    # out and then, for at most -EngineWait seconds more, until the engine shows every HIL
+    # spare output silent (Test-IemHilSilent) after a status that carried the signal
+    # (Test-IemHilHeard). A silent status before that proves nothing (it may cover the time
+    # before the signal). Every status read until then is added to $Seen: the engine's
+    # Status carries the peaks since its previous one (about once a second), so a short
+    # TTL's signal may show only in a status that arrives after the TTL. Returns the last
+    # status (the check judges it), or $null once the job is cancelled.
+    param([Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.ArrayList]$Seen, [Parameter(Mandatory)][double]$Ttl)
+    $heard = $false
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    while ($true) {
+        $st = Get-HilStatus
+        if ($script:cancelled) { return $null }
+        $engine = Get-IemProp $st 'engine'
+        $t = $clock.Elapsed.TotalSeconds
+        if ($heard -and $t -ge $Ttl -and (Test-IemHilSilent -Engine $engine)) { return $st }
+        [void]$Seen.Add($engine)
+        if (Test-IemHilHeard -Engine $engine) { $heard = $true }
+        if ($t -ge $Ttl + $EngineWait) { return $st }
+        Start-Sleep -Milliseconds 500
+    }
+}
+
 function Invoke-HilUrlCheck {
     # An address the server names answers /api/version with this bundle.
     param([Parameter(Mandatory)][string]$Name, [string]$Base = '')
@@ -175,17 +202,23 @@ function Invoke-HilChecks {
     $pipesPrivate = Get-IemProp (Get-IemProp $b 'engine') 'pipe_private'
     Add-HilCheck 'pipes' ($pipesPrivate -eq $true) ('engine pipes private: {0}' -f $pipesPrivate)
 
-    # The card-masked test signal (the guard masks it to [guard] hil_tx and proves
-    # the per-TX routing from the engine's meters within its TTL).
+    # The test signal on HIL's spare card outputs (the guard sends it to [guard] hil_tx,
+    # outputs no mix uses, so it never reaches a band member; #9, 2026-09-28). The engine's
+    # Status carries each spare output's peak since the previous Status (engine.hil): every
+    # spare output reaches the asked level in some status read from the signal's start
+    # until the first silent one that follows it after the TTL, and that one is silent.
     $r = Invoke-Hil -A @('test-signal', $TestInput, $TestDbfs.ToString($inv), $TestTtl.ToString($inv))
     if ($script:cancelled) { return }
     $sent = Test-IemModeOk -Result $r
     $detail = Get-IemModeText -Result $r
-    Start-Sleep -Milliseconds ([int](($TestTtl + 1) * 1000))
-    $after = Get-HilStatus
+    $during = New-Object System.Collections.ArrayList
+    $after = $null
+    if ($sent) { $after = Wait-HilSilence -Seen $during -Ttl $TestTtl } else { $after = Get-HilStatus }
     if ($script:cancelled) { return }
-    $faulted = Get-IemProp (Get-IemProp $after 'engine') 'faulted'
-    Add-HilCheck 'test-signal' ($sent -and $faulted -eq $false) ('{0}; faulted after the TTL: {1}' -f $detail, $faulted)
+    $engine = Get-IemProp $after 'engine'
+    $faulted = Get-IemProp $engine 'faulted'
+    $sig = Test-IemHilSignal -During $during.ToArray() -After $engine -Dbfs $TestDbfs
+    Add-HilCheck 'test-signal' ($sent -and $faulted -eq $false -and $sig.ok) ('{0}; {1}; faulted after the TTL: {2}' -f $detail, $sig.detail, $faulted) $sig.numbers
 
     # A forced reopen: one more reset, the card back at 32 and streaming.
     $before = Get-HilStatus

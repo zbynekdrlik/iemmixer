@@ -154,27 +154,27 @@ impl Driver for AsioDriver {
     }
 }
 
-/// Opens the card for `run --backend asio` with the topology's channels:
-/// the driver and the block size (the card's frames).
+/// Opens the card for `run --backend asio` with the topology's channels
+/// and, after its TX, HIL's spare outputs `hil` (S6, empty without the
+/// test-signal flag; a channel the card lacks refuses the stream): the
+/// driver and the block size (the card's frames).
 pub(crate) fn start(
     card: &Card,
     topo: &Topology,
+    hil: &[u16],
     processor: Processor,
 ) -> Result<(Box<dyn Driver>, usize), EngineError> {
-    let stream = AsioStream::start(
-        card_config(card),
-        topo.rx.clone(),
-        topo.tx.clone(),
-        processor,
-    )
-    .map_err(refusal)?;
+    let outputs: Vec<u16> = topo.tx.iter().chain(hil).copied().collect();
+    let stream = AsioStream::start(card_config(card), topo.rx.clone(), outputs, processor)
+        .map_err(refusal)?;
     info!(
-        "ASIO running: {} at {} samples (measured {}), {} RX, {} TX",
+        "ASIO running: {} at {} samples (measured {}), {} RX, {} TX, {} HIL",
         card.driver,
         card.frames,
         stream.stats().frames,
         topo.rx.len(),
-        topo.tx.len()
+        topo.tx.len(),
+        hil.len()
     );
     let driver: Box<dyn Driver> = Box::new(AsioDriver {
         stream,

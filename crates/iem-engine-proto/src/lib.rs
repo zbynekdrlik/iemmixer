@@ -32,7 +32,8 @@ pub use ids::{EqTarget, GroupId, InputId, MAX_ID_LEN, MixId, Source, valid_id};
 pub use media::{FRAME_48K, MEDIA_HEADER, MediaHeader, read_media, write_media};
 pub use msg::{
     Alarm, AlarmCode, Change, ClientMsg, Cmd, EngineMsg, ErrCode, ErrorBody, GroupInfo, Hello,
-    InputInfo, Meters, MixInfo, PROTO, Reply, Role, Status, TopologyInfo, negotiate, parse_client,
+    HilOut, InputInfo, Meters, MixInfo, PROTO, Reply, Role, Status, TopologyInfo, negotiate,
+    parse_client,
 };
 pub use state::{
     BandKind, DB_OFF, Eq, EqBand, InputState, Level, Limiter, Mix, MixGroup, MixOut, MixState,

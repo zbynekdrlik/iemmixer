@@ -18,6 +18,7 @@ use std::time::Duration;
 use crate::cancel::{Cancel, Preempted};
 use crate::handover::{AppExit, ReaperFacts};
 use crate::plan::{Facts, Health, Mode};
+use crate::proto::HilOut;
 use crate::state::{Child, Children};
 
 pub type R<T> = Result<T, StepError>;
@@ -292,7 +293,7 @@ pub fn precheck(f: &PrecheckFacts) -> R<()> {
 }
 
 /// The engine as its supervisor pipe reports it (`Hello` and `Status`).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Status {
     /// `Hello.engine_build`: `<version>+<commit>`.
     pub build: String,
@@ -307,13 +308,15 @@ pub struct Status {
     pub faulted: bool,
     /// A stream is parked (a callback still in flight after a stop, R6).
     pub parked: bool,
+    /// HIL's spare outputs and their peaks since the previous `Status`.
+    pub hil: Vec<HilOut>,
 }
 
 /// The running engine as the guard's supervisor connection saw it last
 /// (the guard's `Reply.engine`, design §7): the hello's build in
 /// `status.build`, the newest status, and whether the engine's control
 /// pipe's DACL reads back private (the user and SYSTEM only).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct EngineSeen {
     pub status: Status,
     pub pipe_private: bool,
@@ -603,6 +606,7 @@ pub mod fake {
                     resets: 0,
                     faulted: false,
                     parked: false,
+                    hil: Vec::new(),
                 },
                 quiet_for: Duration::from_secs(600),
                 stage_peaks: vec![-90.0],
@@ -1512,8 +1516,8 @@ mod tests {
         assert!(!pc.called(Call::AppStop));
         pc.engine_ready(10, &Cancel::default()).unwrap();
         assert_eq!(pc.ready_secs, [10]);
-        pc.engine_hil_signal("mic1", -30.0, 5.0, &[72]).unwrap();
-        assert_eq!(pc.hil_signals, [("mic1".to_owned(), -30.0, 5.0, vec![72])]);
+        pc.engine_hil_signal("mic1", -30.0, 5.0, &[94]).unwrap();
+        assert_eq!(pc.hil_signals, [("mic1".to_owned(), -30.0, 5.0, vec![94])]);
         pc.engine_force_reopen().unwrap();
         pc.engine_inject_fault().unwrap();
         assert_eq!(
@@ -1548,7 +1552,7 @@ mod tests {
         assert!(pc.install_site("bad.toml", &Cancel::default()).is_err());
         assert_eq!(pc.sites, ["site.toml"]);
         pc.fail(Call::HilSignal, "refused");
-        assert!(pc.engine_hil_signal("mic2", -30.0, 5.0, &[72]).is_err());
+        assert!(pc.engine_hil_signal("mic2", -30.0, 5.0, &[94]).is_err());
         assert_eq!(pc.hil_signals.len(), 1);
     }
 

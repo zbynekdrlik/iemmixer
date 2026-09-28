@@ -12,7 +12,7 @@ use iem_engine_proto::{
     MixId, MixOut, MixState, Solo, Source, TestSignal, Transient, db_to_lin,
 };
 
-use crate::cmd::{MAX_TX, RtOp, TxMask};
+use crate::cmd::{HilMask, MAX_HIL, RtOp};
 use crate::params::{
     FADER_DB, LIMIT_DB, PAN, Range, TEST_DBFS, TEST_HZ, TEST_TTL_S, TRIM_DB, cap, cap_eq,
     cap_group, cap_input, cap_level, cap_out, eq_is_finite, eq_params, input_params,
@@ -20,30 +20,35 @@ use crate::params::{
 use crate::topology::Topology;
 use crate::{MAX_BATCH, MAX_CMDS_PER_BLOCK, MAX_SOLO, SAMPLE_RATE};
 
-/// The HIL signal's outputs (`HilTestSignal.card_tx`, S6 design note §4):
-/// the slots of the listed card channels among the topology's TX channels
-/// `tx`, each within the first [`MAX_TX`]. `check-site` runs it on the
-/// site's `[guard] hil_tx`, so a site whose HIL outputs the topology cannot
-/// reach is refused before any HIL.
-pub fn hil_tx_mask(tx: &[u16], card_tx: &[u16]) -> Result<TxMask, CmdError> {
+/// The HIL signal's outputs (`HilTestSignal.card_tx`; S6 design note §4,
+/// the owner's decision on #9 of 2026-09-28): the HIL slots of the listed
+/// card channels among the engine's spare outputs `hil` (the site's
+/// `[guard] hil_tx`, `Topology::hil_outputs`), each within the first
+/// [`MAX_HIL`]. A mix's TX is refused first, whatever `hil` holds: the HIL
+/// signal goes only to spare outputs, never to a channel a band member
+/// hears.
+pub fn hil_mask(topo: &Topology, hil: &[u16], card_tx: &[u16]) -> Result<HilMask, CmdError> {
     if card_tx.is_empty() {
         return Err(CmdError::new(
             ErrCode::BadValue,
             "the HIL test signal names no card output",
         ));
     }
-    let mut mask = [false; MAX_TX];
-    for ch in card_tx {
-        let slot = tx.iter().position(|c| c == ch).ok_or_else(|| {
+    let mut mask = [false; MAX_HIL];
+    for &ch in card_tx {
+        if let Some(why) = topo.mix_tx_refusal(ch) {
+            return Err(CmdError::new(ErrCode::Forbidden, why));
+        }
+        let slot = hil.iter().position(|&c| c == ch).ok_or_else(|| {
             CmdError::new(
                 ErrCode::UnknownId,
-                format!("card output {ch} is not a TX channel of the site"),
+                format!("card output {ch} is not a HIL output of this engine ([guard] hil_tx)"),
             )
         })?;
         let bit = mask.get_mut(slot).ok_or_else(|| {
             CmdError::new(
                 ErrCode::BadValue,
-                format!("card output {ch} is beyond the first {MAX_TX} engine outputs"),
+                format!("card output {ch} is beyond the first {MAX_HIL} HIL outputs"),
             )
         })?;
         *bit = true;
@@ -318,6 +323,9 @@ pub struct Core {
     /// The running test signal is the HIL one (card-masked): a plain one
     /// may not replace it until it ends.
     hil_test: bool,
+    /// HIL's spare card outputs the engine opened after the topology's TX
+    /// (S6): the HIL slots of `HilTestSignal`'s mask.
+    hil: Vec<u16>,
     rev: u64,
     flags: Flags,
 }
@@ -332,9 +340,23 @@ impl Core {
             listen: [None, None],
             test: None,
             hil_test: false,
+            hil: Vec::new(),
             rev,
             flags,
         }
+    }
+
+    /// The core of an engine that opened HIL's spare card outputs `hil`
+    /// (S6, checked by `Topology::hil_outputs`) after the topology's TX, in
+    /// that order.
+    pub fn with_hil(mut self, hil: Vec<u16>) -> Self {
+        self.hil = hil;
+        self
+    }
+
+    /// HIL's spare card outputs (empty unless the engine opened them).
+    pub fn hil(&self) -> &[u16] {
+        &self.hil
     }
 
     pub fn topology(&self) -> &Arc<Topology> {
@@ -705,7 +727,7 @@ impl Core {
                         "dbfs is above the test-signal cap of -20 dBFS",
                     ));
                 }
-                let mask = self.tx_mask(card_tx)?;
+                let mask = hil_mask(&self.topo, &self.hil, card_tx)?;
                 self.start_test(input, *hz, *dbfs, *ttl_s, Some(mask))
             }
             Cmd::StopTestSignal => Ok(if self.test.take().is_some() {
@@ -774,14 +796,15 @@ impl Core {
     }
 
     /// X13: a sine replaces `input` for `ttl_s`, every TX capped; with
-    /// `mask` (the HIL signal) only those outputs sound meanwhile.
+    /// `mask` (the HIL signal) it sounds only on those spare outputs
+    /// meanwhile, and no mix's TX carries anything.
     fn start_test(
         &mut self,
         input: &InputId,
         hz: f64,
         dbfs: f64,
         ttl_s: f64,
-        mask: Option<TxMask>,
+        mask: Option<HilMask>,
     ) -> Result<Partial, CmdError> {
         let i = ix(self.input(input)?);
         let hz = capped(hz, TEST_HZ, "hz")?;
@@ -813,11 +836,6 @@ impl Core {
             }],
             vec![op],
         ))
-    }
-
-    /// The HIL signal's outputs: the TX slots of the listed card channels.
-    fn tx_mask(&self, card_tx: &[u16]) -> Result<TxMask, CmdError> {
-        hil_tx_mask(&self.topo.tx, card_tx)
     }
 
     fn set_input(&mut self, i: usize, new: InputState) -> Partial {

@@ -804,7 +804,8 @@ struct Carry {
     processor: Box<dyn Process>,
     /// Engine inputs, channel-major, in `Topology::rx` order.
     inbuf: Vec<f64>,
-    /// Engine outputs, channel-major, in `Topology::tx` order.
+    /// Engine outputs, channel-major: `Topology::tx` order, then HIL's spare
+    /// outputs.
     outbuf: Vec<f64>,
 }
 
@@ -1646,8 +1647,9 @@ fn session_end(state: &RefCell<Owner>, shared: &Shared) {
 /// The S6 backend (S6 design note §3): the card at the configured buffer,
 /// driven by an owner thread that makes every driver call, pumps its
 /// messages and watches the stream. The engine's inputs are the topology's
-/// RX card channels and its outputs the TX ones; every other card output is
-/// zero on every callback (A1).
+/// RX card channels and its outputs the TX ones, then HIL's spare outputs
+/// under the test-signal flag (S6); every other card output is zero on every
+/// callback (A1).
 pub struct AsioStream<P: Process + 'static> {
     thread: Option<JoinHandle<()>>,
     shared: Arc<Shared>,
@@ -1657,7 +1659,8 @@ pub struct AsioStream<P: Process + 'static> {
 impl<P: Process + 'static> AsioStream<P> {
     /// Opens the card and starts the owner thread; returns once the period
     /// was measured from the first callbacks, or with the open's refusal.
-    /// `rx`/`tx` are the topology's card channels (numbered from 1).
+    /// `rx`/`tx` are the engine's card channels (numbered from 1): the
+    /// topology's, and after its TX HIL's spare outputs.
     ///
     /// The first open checks the driver module's holders (I3), opens the
     /// preference window (32 while the driver opens, REAPER's original right

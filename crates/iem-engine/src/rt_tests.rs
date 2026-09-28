@@ -116,12 +116,20 @@ struct Rig {
 }
 
 fn rig_with(site: &str, cmds: &[Cmd], flags: Flags, opts: Options) -> Rig {
+    rig_hil(site, cmds, flags, opts, Vec::new())
+}
+
+/// `rig_with` on an engine that opened the spare card outputs `hil` for
+/// HIL (S6): the core knows them, and the processor's outputs after the
+/// topology's TX are theirs.
+fn rig_hil(site: &str, cmds: &[Cmd], flags: Flags, opts: Options, hil: Vec<u16>) -> Rig {
     let topo = Arc::new(compile(&parse(site).unwrap()).unwrap());
-    let mut core = Core::new(Arc::clone(&topo), &MixState::default(), 0, flags);
+    let spare = hil.len();
+    let mut core = Core::new(Arc::clone(&topo), &MixState::default(), 0, flags).with_hil(hil);
     for c in cmds {
         core.apply(c).unwrap();
     }
-    let (p, h) = Processor::new(topo, &core.state(), &[], opts);
+    let (p, h) = Processor::with_hil(topo, &core.state(), &[], opts, spare);
     Rig { core, p, h }
 }
 
@@ -145,7 +153,7 @@ impl Rig {
     }
 
     fn run(&mut self, input: &Planar, block: usize) -> Planar {
-        let outs = self.p.topo.tx.len();
+        let outs = self.p.outputs();
         let run = Offline { block }.run(&mut self.p, input, outs);
         assert!(run.fault.is_none());
         run.output
@@ -1054,81 +1062,123 @@ fn discontinuity_restarts_the_fade_in() {
     assert!(out.channel(M1_L).iter().all(|y| *y == 0.0));
 }
 
+/// HIL's spare outputs of the test site (`[guard] hil_tx`), as `run` opens
+/// them under the test-signal flag.
+const SPARE: [u16; 2] = [94, 95];
+
+const TEST_FLAG: Flags = Flags {
+    test_signal: true,
+    fault_injection: false,
+};
+
+/// Unity fade-in: the output at full level from the first sample.
+const AT_ONCE: Options = Options {
+    fade_in_ms: 0.0,
+    hold: false,
+};
+
+/// The HIL signal (S6; the owner's decision on #9 of 2026-09-28) sounds
+/// only on the engine's spare outputs after the topology's TX: on the
+/// masked ones its sine itself, capped at the test-signal level, while it
+/// runs (TTL and fade-out); zero on the others. Every mix renders and
+/// meters as usual, but no mix's TX carries anything meanwhile: the signal
+/// never reaches a band member. Afterwards the mixes are back and the spare
+/// outputs zero again (A1). Their peaks reach the meter frame.
 #[test]
-fn hil_test_signal_reaches_only_masked_outputs() {
-    let flags = Flags {
-        test_signal: true,
-        fault_injection: false,
-    };
+fn hil_test_signal_reaches_only_the_masked_spare_outputs() {
     let site = crate::test_support::test_site_text();
-    let mut r = rig_with(
+    let mut r = rig_hil(
         &site,
         &[
             level("member1", src_in("mic1"), 0.0),
             level("member2", src_in("mic1"), 0.0),
             level("member3", src_in("mic2"), 0.0),
         ],
-        flags,
-        Options {
-            fade_in_ms: 0.0,
-            hold: false,
-        },
+        TEST_FLAG,
+        AT_ONCE,
+        SPARE.to_vec(),
     );
     let topo = Arc::clone(&r.p.topo);
+    let tx = topo.tx.len();
+    assert_eq!(r.p.outputs(), tx + 2);
     let slot = |ch: u16| topo.tx.iter().position(|c| *c == ch).unwrap();
     let mixn = |m: &str| topo.mix_index(&mix(m)).unwrap();
-    let hil = |dbfs: f64| Cmd::HilTestSignal {
+    let hil = |dbfs: f64, card_tx: Vec<u16>| Cmd::HilTestSignal {
         input: input("mic1"),
         hz: 1000.0,
         dbfs,
         ttl_s: 0.1,
-        card_tx: vec![72],
+        card_tx,
     };
-    // Above the test-signal cap (−20 dBFS): refused.
+    // Above the test-signal cap (−20 dBFS), or naming a mix's TX: refused.
     assert_eq!(
-        r.core.apply(&hil(-19.0)).unwrap_err().code,
+        r.core.apply(&hil(-19.0, vec![95])).unwrap_err().code,
         ErrCode::BadValue
     );
-    r.at(0, &hil(-30.0));
+    assert_eq!(
+        r.core.apply(&hil(-30.0, vec![95, 72])).unwrap_err().code,
+        ErrCode::Forbidden
+    );
+    r.at(0, &hil(-30.0, vec![95]));
     // mic1 (RX index 0) is silent on the card: only the sine replaces it.
     // mic2 (RX index 1) carries 0.3 into member3.
     let mut first = Planar::new(topo.rx.len(), 6_400);
     first.channel_mut(1).fill(0.3);
     let out1 = r.run(&first, 256);
+    let amp = 10f64.powf(-1.5);
     // Inside the engine every mix that hears mic1 carries the sine.
-    let amp = 10f64.powf(-1.5) * g0() * g0();
     let f = r.h.meters.read().clone();
     for m in ["member1", "member2"] {
         assert!(
-            close(f.mixes[mixn(m)][0], amp, 1e-4),
+            close(f.mixes[mixn(m)][0], amp * g0() * g0(), 1e-4),
             "{m}: {:?}",
             f.mixes[mixn(m)]
         );
     }
     assert!(close(f.mixes[mixn("member3")][0], 0.3 * g0() * g0(), 1e-12));
     assert_eq!(f.mixes[mixn("member4")], [0.0, 0.0]);
+    // The spare outputs' peaks: the masked one at the signal's level.
+    assert_eq!(f.hil.len(), 2);
+    assert!(close(f.hil[1], amp, 1e-4), "{:?}", f.hil);
+    assert_eq!(f.hil[0], 0.0);
+    // The masked output carries the sine itself: 96 samples a period at
+    // 1 kHz from phase 0, faded in over 50 ms (4 800 samples).
+    let y = out1.channel(tx + 1);
+    let sine = |k: usize| (std::f64::consts::TAU * k as f64 / 96.0).sin();
+    assert_eq!(y[0], 0.0);
+    assert!(
+        close(y[2_424], amp * 2_425.0 / 4_800.0, 1e-9),
+        "{}",
+        y[2_424]
+    );
+    for k in [4_824, 5_000, 6_000, 6_399] {
+        assert!(close(y[k], amp * sine(k), 1e-9), "{k}: {}", y[k]);
+    }
     let mut rest = Planar::new(topo.rx.len(), 23_600);
     rest.channel_mut(1).fill(0.3);
     let out2 = r.run(&rest, 256);
-    // TTL 9 600 samples, then the 50 ms fade-out: 14 400 samples of mask.
+    // TTL 9 600 samples, then the 50 ms fade-out: 14 400 samples.
     let end = 9_600 + 4_800;
-    let carried = slot(72);
-    for ch in 0..topo.tx.len() {
-        let during = out1
-            .channel(ch)
+    let during = |ch: usize| -> Vec<f64> {
+        out1.channel(ch)
             .iter()
-            .chain(&out2.channel(ch)[..end - 6_400]);
-        if ch == carried {
-            let peak = during.fold(0.0f64, |m, v| m.max(v.abs()));
-            assert!(close(peak, amp, 1e-4), "{peak} vs {amp}");
-        } else {
-            assert!(
-                during.copied().all(|v| v == 0.0),
-                "TX slot {ch} sounded during the HIL signal"
-            );
-        }
+            .chain(&out2.channel(ch)[..end - 6_400])
+            .copied()
+            .collect()
+    };
+    for ch in 0..tx {
+        assert!(
+            during(ch).iter().all(|v| *v == 0.0),
+            "TX slot {ch} sounded during the HIL signal"
+        );
     }
-    // Then the outputs are the mixes again.
+    assert!(
+        during(tx).iter().all(|v| *v == 0.0),
+        "the unmasked spare output"
+    );
+    let peak = during(tx + 1).iter().fold(0.0f64, |m, v| m.max(v.abs()));
+    assert!(close(peak, amp, 1e-4), "{peak} vs {amp}");
+    // Then the outputs are the mixes again and the spare outputs zero.
     let after = end - 6_400 + 1_000;
     let normal = 0.3 * g0() * g0();
     for ch in [slot(75), slot(76)] {
@@ -1138,5 +1188,172 @@ fn hil_test_signal_reaches_only_masked_outputs() {
             out2.channel(ch)[after]
         );
     }
-    assert_eq!(out2.channel(carried)[after], 0.0, "mic1 is silent again");
+    assert_eq!(out2.channel(slot(72))[after], 0.0, "mic1 is silent again");
+    for ch in [tx, tx + 1] {
+        assert!(
+            out2.channel(ch)[end - 6_400..].iter().all(|v| *v == 0.0),
+            "spare output {ch} after the end"
+        );
+    }
+    assert_eq!(r.h.meters.read().hil, [0.0, 0.0]);
+}
+
+/// Without a HIL signal the spare outputs are zero (A1): none yet, or a
+/// plain test signal, which reaches the mixes only. And they follow the
+/// output's own fade like every TX: a held engine (`--hold`, before Arm)
+/// keeps them silent while a HIL signal runs.
+#[test]
+fn the_spare_outputs_are_silent_without_a_hil_signal_and_while_held() {
+    let site = crate::test_support::test_site_text();
+    let open = [level("member1", src_in("mic1"), 0.0)];
+    let mut r = rig_hil(&site, &open, TEST_FLAG, AT_ONCE, SPARE.to_vec());
+    let (tx, rxn) = (r.p.topo.tx.len(), r.p.topo.rx.len());
+    let m1 = r.p.topo.tx.iter().position(|c| *c == 71).unwrap();
+    r.at(
+        0,
+        &Cmd::StartTestSignal {
+            input: input("mic1"),
+            hz: 1000.0,
+            dbfs: -30.0,
+            ttl_s: 0.05,
+        },
+    );
+    let out = r.run(&Planar::new(rxn, 9_600), 97);
+    assert!(
+        out.channel(m1).iter().any(|v| v.abs() > 0.01),
+        "member1 hears the plain signal"
+    );
+    for ch in [tx, tx + 1] {
+        assert!(
+            out.channel(ch).iter().all(|v| *v == 0.0),
+            "spare output {ch}"
+        );
+    }
+    assert_eq!(r.h.meters.read().hil, [0.0, 0.0]);
+    // Held: the HIL signal runs, and every output stays silent until Arm.
+    let held = Options {
+        fade_in_ms: 0.0,
+        hold: true,
+    };
+    let mut r = rig_hil(&site, &open, TEST_FLAG, held, SPARE.to_vec());
+    r.at(
+        0,
+        &Cmd::HilTestSignal {
+            input: input("mic1"),
+            hz: 1000.0,
+            dbfs: -30.0,
+            ttl_s: 0.05,
+            card_tx: SPARE.to_vec(),
+        },
+    );
+    let out = r.run(&Planar::new(rxn, 6_400), 97);
+    for ch in 0..tx + 2 {
+        assert!(out.channel(ch).iter().all(|v| *v == 0.0), "held: {ch}");
+    }
+    // Armed while it runs: the spare outputs carry it, both at once.
+    assert!(push_group(&mut r.h.cmds, 0, &[RtOp::Arm]));
+    let out = r.run(&Planar::new(rxn, 1_000), 97);
+    for ch in [tx, tx + 1] {
+        assert!(
+            out.channel(ch).iter().any(|v| v.abs() > 1e-3),
+            "armed: {ch}"
+        );
+    }
+    assert_eq!(out.channel(tx), out.channel(tx + 1));
+    // An engine without spare outputs renders the topology's TX only.
+    let r = rig_with(&site, &open, TEST_FLAG, AT_ONCE);
+    assert_eq!(r.p.outputs(), tx);
+}
+
+/// While a HIL signal runs the listen taps carry silence (the owner's
+/// decision on #9 of 2026-09-28: the signal never reaches a channel a band
+/// member hears). The sine replaces an input, so every mix that hears it
+/// carries it, and the taps (X3: slot 0 the engineer, slot 1 one other mix)
+/// go on to the server's media stream and a web listener. The taps keep
+/// their cadence, one stereo frame a sample, and once the signal ended they
+/// carry the mixes again, as on an engine that never ran it.
+#[test]
+fn a_hil_signal_leaves_the_listen_taps_silent() {
+    let site = crate::test_support::test_site_text();
+    let open = [
+        level("engineer", src_in("mic1"), 0.0),
+        level("engineer", src_in("mic2"), 0.0),
+        level("member1", src_in("mic1"), 0.0),
+        level("member1", src_in("mic2"), 0.0),
+    ];
+    let listened = || {
+        let mut r = rig_hil(&site, &open, TEST_FLAG, AT_ONCE, SPARE.to_vec());
+        r.at(
+            0,
+            &Cmd::StartListen {
+                mix: mix("engineer"),
+            },
+        );
+        r.at(
+            0,
+            &Cmd::StartListen {
+                mix: mix("member1"),
+            },
+        );
+        r
+    };
+    let mut hil = listened();
+    let mut plain = listened();
+    hil.at(
+        0,
+        &Cmd::HilTestSignal {
+            input: input("mic1"),
+            hz: 1000.0,
+            dbfs: -30.0,
+            ttl_s: 0.05,
+            card_tx: SPARE.to_vec(),
+        },
+    );
+    // mic2 carries 0.3 into both mixes; the sine replaces mic1 for the TTL
+    // (4 800 samples) and the 50 ms fade-out: 9 600 samples.
+    let (tx, rxn) = (hil.p.topo.tx.len(), hil.p.topo.rx.len());
+    let mut first = Planar::new(rxn, 9_600);
+    first.channel_mut(1).fill(0.3);
+    let out = hil.run(&first, 97);
+    assert!(
+        out.channel(tx).iter().any(|v| v.abs() > 1e-3),
+        "the HIL signal ran on its spare output"
+    );
+    plain.run(&first, 97);
+    for slot in 0..2 {
+        let mut during = vec![1.0f32; 2 * 9_600];
+        hil.h.taps[slot].pop_entire_slice(&mut during).unwrap();
+        assert_eq!(
+            hil.h.taps[slot].slots(),
+            0,
+            "tap {slot}: one frame a sample"
+        );
+        assert!(
+            during.iter().all(|x| *x == 0.0),
+            "tap {slot} carried the mix during the HIL signal"
+        );
+        let mut heard = vec![0.0f32; 2 * 9_600];
+        plain.h.taps[slot].pop_entire_slice(&mut heard).unwrap();
+        assert!(
+            heard.iter().all(|x| x.abs() > 0.1),
+            "tap {slot} of an engine without the HIL signal"
+        );
+    }
+    let mut rest = Planar::new(rxn, 1_000);
+    rest.channel_mut(1).fill(0.3);
+    hil.run(&rest, 97);
+    plain.run(&rest, 97);
+    for slot in 0..2 {
+        let mut after = vec![0.0f32; 2_000];
+        let mut want = vec![0.0f32; 2_000];
+        hil.h.taps[slot].pop_entire_slice(&mut after).unwrap();
+        plain.h.taps[slot].pop_entire_slice(&mut want).unwrap();
+        for (k, (a, w)) in after.iter().zip(&want).enumerate() {
+            assert!(
+                (a - w).abs() < 1e-6 && w.abs() > 0.1,
+                "tap {slot} after the HIL signal, {k}: {a} vs {w}"
+            );
+        }
+    }
+    assert_eq!(hil.h.status.tap_overruns.load(Ordering::Relaxed), 0);
 }

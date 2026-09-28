@@ -23,7 +23,9 @@ fuzz_target!(|data: &[u8]| {
         test_signal: true,
         fault_injection: true,
     };
-    let mut core = Core::new(Arc::clone(topo), &MixState::default(), 0, flags);
+    // Like `run` under the test-signal flag: the test site's spare HIL outputs.
+    let mut core =
+        Core::new(Arc::clone(topo), &MixState::default(), 0, flags).with_hil(vec![94, 95]);
     for line in data.split(|b| *b == b'\n') {
         if let Ok(ClientMsg::Request { cmd, .. }) = parse_client(line) {
             let before = core.rev();
