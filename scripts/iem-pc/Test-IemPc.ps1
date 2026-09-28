@@ -52,6 +52,33 @@ try {
         "D:(A;;GRGX;;;$userSid)(A;;GRGX;;;$userSid)(A;;FA;;;BA)(A;;FA;;;SY)",
         'not an sddl', '')
     foreach ($bad in $badSddl) { Assert (-not (Test-IemTaskSddl -Sddl $bad -UserSid $userSid)) "task-sddl-read-back-refuses [$bad]" }
+    # As the real Task Scheduler reads a task back (the windows runner, CI run
+    # 36360472125): our three explicit ACEs (the user's GRGX as 0x1200a9, FRFX)
+    # and ACEs inherited (ID) from the task folder for Administrators and SYSTEM.
+    # The user is the synthetic SID: 'LA' would resolve to this machine's
+    # administrator.
+    $inherited = '(A;ID;0x1f019f;;;BA)(A;ID;0x1f019f;;;SY)(A;ID;FA;;;BA)'
+    $real = "D:AI(A;;0x1200a9;;;$userSid)(A;;FA;;;BA)(A;;FA;;;SY)" + $inherited
+    Assert (Test-IemTaskSddl -Sddl $real -UserSid $userSid) 'task-sddl-read-back-with-administrators-and-system-inherited-from-the-folder'
+    Assert (Test-IemTaskSddl -Sddl ("D:AI(A;;FA;;;SY)(A;ID;FR;;;SY)(A;;GRGX;;;$userSid)(A;ID;GA;;;BA)(A;;GA;;;BA)") -UserSid $userSid) 'task-sddl-read-back-inherited-any-order-any-rights'
+    $badInherited = @(
+        ($real + '(A;ID;FRFX;;;BU)'),
+        ($real + '(A;ID;FR;;;WD)'),
+        ($real + '(A;ID;FRFX;;;AU)'),
+        ($real + "(A;ID;FRFX;;;$userSid)"),
+        ($real + "(A;ID;FA;;;$userSid)"),
+        ($real + '(D;ID;FA;;;BU)'),
+        ($real + '(D;ID;FA;;;BA)'),
+        ($real + '(OA;ID;FA;00000000-0000-0000-0000-000000000001;;BA)'),
+        ("D:AI(A;;0x1200a9;;;$userSid)(A;;FA;;;SY)" + $inherited),
+        ("D:AI(A;;0x1200a9;;;$userSid)(A;;FA;;;BA)" + $inherited),
+        ('D:AI(A;;FA;;;BA)(A;;FA;;;SY)' + $inherited),
+        ("D:AI(A;;0x1200a9;;;$userSid)(A;;FA;;;BA)(A;;FA;;;BA)(A;;FA;;;SY)" + $inherited),
+        ("D:AI(A;;0x1200a9;;;$userSid)(A;;FA;;;BA)(A;;FA;;;SY)(A;;FA;;;SY)" + $inherited),
+        ("D:AI(A;;0x1200a9;;;$userSid)(A;;0x1200a9;;;$userSid)(A;;FA;;;BA)(A;;FA;;;SY)" + $inherited),
+        ("D:AI(A;;FA;;;$userSid)(A;;FA;;;BA)(A;;FA;;;SY)" + $inherited),
+        ("D:(A;ID;0x1f019f;;;BA)(A;ID;0x1f019f;;;SY)(A;ID;FA;;;BA)(A;;FR;;;$userSid)"))
+    foreach ($bad in $badInherited) { Assert (-not (Test-IemTaskSddl -Sddl $bad -UserSid $userSid)) "task-sddl-read-back-refuses [$bad]" }
 
     # ---- Register-IemTasks on the real Task Scheduler ----
     $prefArgs = @{ PrefKey = $regKey; PrefName = 'Pref'; PrefOriginal = '64' }
@@ -130,8 +157,16 @@ try {
     Assert ($eb.Count -eq 0) "elevated-root-reads-back ($($eb -join '; '))"
     Throws { Register-IemTasks -Root $root -AppExe $appExe -Folder $folder -ElevatedRoot (Join-Path $root 'elevated') @prefArgs } 'tasks-refuse-an-elevated-root-inside-the-users-root'
     Throws { Register-IemTasks -Root $root -AppExe $appExe -Folder $folder -ElevatedRoot 'relative\elevated' @prefArgs } 'tasks-refuse-a-relative-elevated-root'
+    # A descriptor loosened after registration (here Users may run the guard's
+    # task) is put back by the next run: an update keeps a task's old descriptor,
+    # so Register-IemTasks sets ours on every task, as it does on StartREAPER.
+    $sch.GetFolder($folder).GetTask('iemmixer-guard').SetSecurityDescriptor("D:(A;;GRGX;;;$($me.sid))(A;;FA;;;BA)(A;;FA;;;SY)(A;;GRGX;;;BU)", 16)
+    $sd = $sch.GetFolder($folder).GetTask('iemmixer-guard').GetSecurityDescriptor(4)
+    Assert (-not (Test-IemTaskSddl -Sddl $sd -UserSid $me.sid)) "tasks-precondition-the-guard-task-loosened ($sd)"
     $again = Register-IemTasks -Root $root -AppExe $appExe -Folder $folder -ElevatedRoot $elevated @prefArgs
     Assert ($again.Count -eq 7) 'tasks-register-again-idempotent'
+    $sd = $sch.GetFolder($folder).GetTask('iemmixer-guard').GetSecurityDescriptor(4)
+    Assert (Test-IemTaskSddl -Sddl $sd -UserSid $me.sid) "tasks-register-again-restores-a-loosened-descriptor ($sd)"
 
     # ---- the root's DACL ----
     New-Item -ItemType Directory -Force -Path (Join-Path $root 'bundles') | Out-Null
