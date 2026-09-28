@@ -200,8 +200,13 @@ mod tests {
                 .starts_with("the peer took nothing for 500ms ("),
             "{late}"
         );
+        // The wait can return a hair early: `WaitForSingleObject`'s timer and
+        // `Instant` are different clocks, and a 500 ms wait was once measured
+        // at 499.6 ms (CI run 36473998179). Allow one timer tick (16 ms) of
+        // slack on the lower bound; the upper bound stays tight.
+        let slack = Duration::from_millis(16);
         assert!(
-            took >= LIMIT && took < LIMIT + Duration::from_secs(2),
+            took + slack >= LIMIT && took < LIMIT + Duration::from_secs(2),
             "{took:?}"
         );
         // Nothing of the cancelled write is left for the peer.
