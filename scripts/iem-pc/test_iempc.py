@@ -1090,6 +1090,146 @@ class ActivateTests(Base):
         self.assertEqual([c[1][0] for c in self.pc.calls], ["activate", "status", "event"])
 
 
+class OfflineActivateTests(Base):
+    """`activate --offline` (#9 2026-09-28): a guard too old to activate in
+    event is quit gracefully, the bundle's own guard exe activates while no
+    guard runs, and the hand-over is verified as online."""
+
+    EXE = f"X:\\root\\bundles\\{SHA}\\iemmixer-guard.exe"
+    QUIT = (0, json.dumps({"ok": True, "mode": "event", "alarms": [],
+                           "detail": "the guard stops; its children keep running"}))
+    OFFLINE = (0, json.dumps({"ok": True, "mode": "event", "alarms": [], "guard_build": SHA,
+                              "detail": f"activated {SHA} without a guard; the next iemmode call starts the guard "
+                                        "from bin"}))
+
+    def setUp(self) -> None:
+        super().setUp()
+        saved = (ip.HANDOVER_S, ip.HANDOVER_POLL_S, ip.QUIT_S)
+        self.addCleanup(self.restore_bounds, saved)
+        ip.HANDOVER_S, ip.HANDOVER_POLL_S, ip.QUIT_S = 10.0, 0.01, 10.0
+        self.fetched()
+        self.pc.replies[("quit",)] = self.QUIT
+        self.pc.replies[("activate", SHA)] = self.OFFLINE
+        self.pc.replies[("status",)] = ActivateTests.status(SHA)
+        self.guards(1, 1, 0)
+
+    @staticmethod
+    def restore_bounds(saved: tuple[float, float, float]) -> None:
+        ip.HANDOVER_S, ip.HANDOVER_POLL_S, ip.QUIT_S = saved
+
+    def guards(self, *counts: int) -> None:
+        """The guard processes the PC reads in turn, then the last again."""
+        queue = list(counts)
+        self.pc.module_result = lambda: queue.pop(0) if len(queue) > 1 else queue[0]
+
+    def reads(self) -> list[str]:
+        return [event for script, event in self.pc.modules if "Get-Process -Name 'iemmixer-guard'" in script]
+
+    def test_the_old_guard_quits_the_bundle_s_own_guard_activates_and_the_new_one_answers(self) -> None:
+        code, docs, err = self.run_main("activate", "--sha", SHA, "--offline")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.pc.calls, [("iemmode.exe", ["quit"], "finish"),
+                                         ("iemmixer-guard.exe", ["activate", SHA], "finish"),
+                                         ("iemmode.exe", ["status"], "abandon")])
+        self.assertEqual(self.reads(), ["abandon"] * 3)
+        guard_run = self.pc.native_scripts[1]
+        self.assertIn(ip.hash_check(self.EXE, sha256(b"synthetic iemmixer-guard.exe")) + " ; $x = " + ip.ps_quote(self.EXE),
+                      guard_run)
+        self.assertEqual(self.pc.timeouts, [ip.STATUS_S, ip.INSTALL_S, ip.STATUS_S])
+        self.assertEqual([next(iter(d)) for d in docs], ["iemmode", "guard_stopped", "iemmixer-guard", "handover"])
+        self.assertEqual(docs[1], {"guard_stopped": {"reads": 2}})
+        self.assertEqual((docs[2]["iemmixer-guard"], docs[2]["exit"]), (["activate", SHA], 0))
+        self.assertEqual(docs[3]["handover"]["guard_build"], SHA)
+
+    def test_without_a_running_guard_nothing_is_quit(self) -> None:
+        self.guards(0)
+        code, docs, err = self.run_main("activate", "--sha", SHA, "--offline")
+        self.assertEqual(code, 0, err)
+        self.assertEqual([c[0] for c in self.pc.calls], ["iemmixer-guard.exe", "iemmode.exe"])
+        self.assertEqual(self.reads(), ["abandon"])
+
+    def test_a_refused_offline_activation_starts_the_guard_again(self) -> None:
+        self.pc.replies[("activate", SHA)] = (1, json.dumps({
+            "ok": False, "mode": "event", "alarms": [],
+            "detail": "activate in event needs no iemmixer process; running: engine"}))
+        self.pc.replies[("status",)] = ActivateTests.status(SHA2)
+        code, docs, _ = self.run_main("activate", "--sha", SHA, "--offline")
+        self.assertEqual(code, 1)
+        self.assertEqual([c[1][0] for c in self.pc.calls], ["quit", "activate", "status"])
+        self.assertIn("running: engine", docs[2]["reply"]["detail"])
+        self.assertEqual((docs[-1]["iemmode"], docs[-1]["reply"]["guard_build"]), (["status"], SHA2))
+        self.assertNotIn("handover", docs[-1])
+
+    def test_an_offline_guard_that_did_not_run_starts_the_guard_again(self) -> None:
+        self.pc.replies[("activate", SHA)] = (None, "", "sha256 mismatch: " + self.EXE)
+        code, docs, err = self.run_main("activate", "--sha", SHA, "--offline")
+        self.assertEqual(code, 1)
+        self.assertIn("iemmixer-guard.exe did not run on the PC: sha256 mismatch", err)
+        self.assertEqual([c[1][0] for c in self.pc.calls], ["quit", "activate", "status"])
+        self.assertEqual(docs[-1]["iemmode"], ["status"])
+
+    def test_a_refused_quit_activates_nothing(self) -> None:
+        self.pc.replies[("quit",)] = (1, json.dumps({"ok": False, "mode": "dev", "alarms": [], "detail": "switching"}))
+        code, docs, _ = self.run_main("activate", "--sha", SHA, "--offline")
+        self.assertEqual((code, len(docs)), (1, 1))
+        self.assertEqual([c[1][0] for c in self.pc.calls], ["quit"])
+
+    def test_a_guard_that_does_not_end_is_waited_for_within_a_bound_never_forced(self) -> None:
+        ip.QUIT_S = 0.2
+        self.guards(1)
+        start = time.monotonic()
+        code, _, err = self.run_main("activate", "--sha", SHA, "--offline")
+        self.assertLess(time.monotonic() - start, 5)
+        self.assertEqual(code, 1)
+        self.assertIn("iemmixer-guard process(es) still run 0.2 s after 'iemmode quit': nothing was activated", err)
+        self.assertIn("never force-end", err)
+        self.assertEqual([c[1][0] for c in self.pc.calls], ["quit"])
+        self.assertGreater(len(self.reads()), 2)
+
+    def test_it_needs_this_box_s_fetch_record_before_any_pc_step(self) -> None:
+        shutil.rmtree(ip.bundle_dir(SHA))
+        code, docs, err = self.run_main("activate", "--sha", SHA, "--offline")
+        self.assertEqual((code, docs, self.pc.calls, self.pc.modules), (1, [], [], []))
+        self.assertIn("is not fetched", err)
+
+    def test_the_flag_or_an_open_window_refuses_it_before_the_pc(self) -> None:
+        self.open_window()
+        code, _, err = self.run_main("activate", "--sha", SHA, "--offline")
+        self.assertEqual(code, 1)
+        self.assertIn("'activate' waits until 'iempc handover-s1a'", err)
+        self.open_window(closed=True)
+        self.flag()
+        code, _, err = self.run_main("activate", "--sha", SHA, "--offline")
+        self.assertEqual(code, 1)
+        self.assertIn("runs only in dev time", err)
+        self.assertEqual((self.pc.calls, self.pc.modules), ([], []))
+
+    def test_a_new_flag_during_the_quit_lets_it_finish_then_runs_the_event_path(self) -> None:
+        self.pc.replies[("quit",)] = lambda: (self.flag(), self.QUIT)[1]
+        code, _, _ = self.run_main("activate", "--sha", SHA, "--offline")
+        self.assertEqual(code, ip.PREEMPTED)
+        self.assertEqual(self.pc.calls, [("iemmode.exe", ["quit"], "finish"), ("iemmode.exe", ["event"], "ignore")])
+
+    def test_a_new_flag_during_the_offline_step_lets_it_finish_then_runs_the_event_path(self) -> None:
+        self.pc.replies[("activate", SHA)] = lambda: (self.flag(), self.OFFLINE)[1]
+        code, _, _ = self.run_main("activate", "--sha", SHA, "--offline")
+        self.assertEqual(code, ip.PREEMPTED)
+        self.assertEqual([(c[0], c[1][0], c[2]) for c in self.pc.calls],
+                         [("iemmode.exe", "quit", "finish"), ("iemmixer-guard.exe", "activate", "finish"),
+                          ("iemmode.exe", "event", "ignore")])
+
+    def test_a_new_flag_while_the_guard_ends_runs_the_event_path(self) -> None:
+        def count():
+            if len(self.reads()) == 2:  # the read after the quit
+                self.flag()
+            return 1
+
+        self.pc.module_result = count
+        code, _, _ = self.run_main("activate", "--sha", SHA, "--offline")
+        self.assertEqual(code, ip.PREEMPTED)
+        self.assertEqual([c[1][0] for c in self.pc.calls], ["quit", "event"])
+
+
 class DispatchTests(Base):
     def test_a_sha_that_is_no_branch_head_is_refused(self) -> None:
         self.gh.heads = {"dev": SHA2, "main": SHA2}

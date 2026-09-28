@@ -33,7 +33,14 @@ own code may refuse the dev entry: after `install`, `activate` in event,
 then `dev`. It then waits for the hand-over: `iemmode status` until the
 guard that answers names the SHA as its `guard_build` (the GITHUB_SHA its
 exe was built with), at most HANDOVER_S; a status read that fails meanwhile
-is read again.
+is read again. A guard built before that rule refuses it in event:
+`activate --offline` then quits it gracefully (`iemmode quit`, then its
+processes read until none runs, QUIT_S), runs the bundle's own
+`bundles\\<sha>\\iemmixer-guard.exe activate <sha>` (its sha256 checked on
+the PC; it takes the guard's mutex and activates an idle event only) and
+waits for the hand-over the same way; the first status read starts the
+guard's task, which runs the new exe. A refused offline step starts the
+guard again.
 
 Site values come only from the private env file ($PC_ENV, default
 ~/.config/iemmixer/iem-pc.env): PC_SSH (the ssh destination), PC_ROOT (the
@@ -115,6 +122,9 @@ DOWNLOAD_S = 540
 HANDOVER_S = 90
 # Between two status reads of the hand-over (each read has its own STATUS_S bound).
 HANDOVER_POLL_S = 2.0
+# The guard's process name, and how long `iemmode quit` may take to end it (its last reply <= 5 s, its pipe, its exit).
+GUARD_IMAGE = "iemmixer-guard"
+QUIT_S = 60
 # What reading a zip member can raise besides StepError: bad JSON or UTF-8, a
 # CRC error, a cut or corrupt deflate stream, an unknown compression method.
 UNREADABLE = (ValueError, EOFError, NotImplementedError, zipfile.BadZipFile, zlib.error)
@@ -929,6 +939,82 @@ def await_guard_build(ctx: Ctx, sha: str) -> dict:
         pause(ctx, HANDOVER_POLL_S)
 
 
+def guard_processes(ctx: Ctx) -> int:
+    """How many guard processes run on the PC (a read; a new flag abandons it)."""
+    r = run_module(ctx.env, f"@(Get-Process -Name {ps_quote(GUARD_IMAGE)} -ErrorAction SilentlyContinue).Count",
+                   STATUS_S, ctx.watch(abandon=True))
+    if isinstance(r, bool) or not isinstance(r, int) or r < 0:
+        raise StepError(f"the PC's count of guard processes reads {r!r}")
+    return r
+
+
+def await_guard_gone(ctx: Ctx) -> int:
+    """After `iemmode quit`: the guard's processes every HANDOVER_POLL_S
+    until none runs, at most QUIT_S. Nothing is ever ended by force."""
+    deadline = time.monotonic() + QUIT_S
+    reads = 0
+    while True:
+        reads += 1
+        n = guard_processes(ctx)
+        if n == 0:
+            return reads
+        if time.monotonic() >= deadline:
+            raise StepError(f"{n} {GUARD_IMAGE} process(es) still run {QUIT_S} s after 'iemmode quit': nothing was "
+                            "activated; the next iemmode call finds the guard or starts one; never force-end")
+        pause(ctx, HANDOVER_POLL_S)
+
+
+def bring_guard_back(ctx: Ctx) -> None:
+    """After a failed offline activation no guard runs: one `iemmode status`
+    starts the guard's task (bin\\ as it stands), so the PC is not left
+    without one. Its own failure is reported, never raised over the first."""
+    try:
+        code, reply, raw = iemmode(ctx.env, ["status"], STATUS_S, ctx.watch(abandon=True))
+    except StepError as e:
+        emit({"guard_restart": None, "error": str(e)[-800:]})
+        return
+    emit(result("iemmode", ["status"], code, reply, raw))
+
+
+def activate_offline(ctx: Ctx, sha: str) -> int:
+    """`activate --offline` (#9 2026-09-28), for a guard too old to activate
+    in event: a graceful `iemmode quit` of the running guard (skipped when
+    none runs), the guard's processes read until none runs (QUIT_S), then the
+    bundle's own `bundles\\<sha>\\iemmixer-guard.exe activate <sha>` (its
+    sha256 from this box's fetch record checked on the PC first), which
+    takes the guard's mutex and activates in an idle event only; then the
+    hand-over as online (the first `iemmode status` starts the guard's task,
+    which runs the new exe from bin\\). A refused or failed offline step
+    starts the guard again (`iemmode status`). The quit and the offline step
+    are changes: a new flag lets each finish, then the event path runs (it
+    starts a guard); the reads are abandoned."""
+    env = ctx.env
+    want = (need_record(sha).get("sums") or {}).get("iemmixer-guard.exe")
+    if not want:
+        raise StepError(f"bundle {sha}'s fetch record lists no iemmixer-guard.exe: fetch it again")
+    exe = pc_join(env["PC_ROOT"], f"bundles/{sha}/iemmixer-guard.exe")
+    if guard_processes(ctx):
+        code, reply, raw = iemmode(env, ["quit"], STATUS_S, ctx.watch(abandon=False))
+        emit(result("iemmode", ["quit"], code, reply, raw))
+        if code != 0:
+            return code
+        emit({"guard_stopped": {"reads": await_guard_gone(ctx)}})
+    args = ["activate", sha]
+    try:
+        code, reply, raw = call(env, exe, args, INSTALL_S, ctx.watch(abandon=False), (hash_check(exe, want),))
+    except StillRunning:
+        raise  # it may still hold the guard's mutex: a guard started now would only wait for it
+    except StepError:
+        bring_guard_back(ctx)
+        raise
+    emit(result("iemmixer-guard", args, code, reply, raw))
+    if code != 0:
+        bring_guard_back(ctx)
+        return code
+    emit({"handover": await_guard_build(ctx, sha)})
+    return 0
+
+
 def cmd_activate(ctx: Ctx) -> int:
     """`iemmode activate <sha>`, then the hand-over: `iemmode status` until
     the guard that answers names the SHA as its build. The guard allows it
@@ -937,9 +1023,12 @@ def cmd_activate(ctx: Ctx) -> int:
     are not touched), which is how a guard fix reaches a guard in event.
     The guard makes the change itself: a new flag lets the activation finish
     (then the event path runs, so "ide event" is not queued behind it on the
-    guard that is about to hand over) and abandons the status reads."""
+    guard that is about to hand over) and abandons the status reads.
+    `--offline`: `activate_offline`, for a guard too old for that."""
     env, sha = ctx.env, check_sha(ctx.args.sha)
     refuse_open_window("activate")
+    if ctx.args.offline:
+        return activate_offline(ctx, sha)
     args = ["activate", sha]
     code, reply, raw = iemmode(env, args, SWITCH_S, ctx.watch(abandon=False))
     emit(result("iemmode", args, code, reply, raw))
@@ -1128,7 +1217,10 @@ def build_parser() -> argparse.ArgumentParser:
     install = sub.add_parser("install")
     install.add_argument("--sha", required=True)
     install.add_argument("--first", action="store_true", help="no iemmode on the PC yet: the zip's own guard installs it")
-    sub.add_parser("activate").add_argument("--sha", required=True, help="an installed bundle (dev, or an idle event)")
+    activate = sub.add_parser("activate")
+    activate.add_argument("--sha", required=True, help="an installed bundle (dev, or an idle event)")
+    activate.add_argument("--offline", action="store_true",
+                          help="a guard too old to activate in event: quit it, activate with the bundle's own guard")
     sub.add_parser("dispatch-hil").add_argument("--sha")
     boot = sub.add_parser("bootstrap")
     boot.add_argument("--sha", help="the fetched bundle whose IemPc.psm1 runs (default: the newest fetched)")
