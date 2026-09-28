@@ -1305,25 +1305,93 @@ mod tests {
 
     #[test]
     fn a_complete_precheck_passes() {
-        assert_eq!(precheck(&ready()), Ok(()));
+        assert_eq!(precheck(&ready()), Ok(None));
         // A live entry that is not a trial needs no PC tests.
         let live = PrecheckFacts {
             to: Mode::Live,
             ..ready()
         };
-        assert_eq!(precheck(&live), Ok(()));
+        assert_eq!(precheck(&live), Ok(None));
         let trial = PrecheckFacts {
             to: Mode::Live,
             trial: true,
             pc_tests_passed: true,
             ..ready()
         };
-        assert_eq!(precheck(&trial), Ok(()));
+        assert_eq!(precheck(&trial), Ok(None));
         let many = PrecheckFacts {
             recipients: Some(3),
             ..ready()
         };
-        assert_eq!(precheck(&many), Ok(()));
+        assert_eq!(precheck(&many), Ok(None));
+    }
+
+    /// The alarm link is served by iem-server, which runs only in dev and
+    /// live: in event the predecessor holds the band's address, so the owner
+    /// can open it only after the first dev entry (#9, 2026-09-28). A
+    /// recipient is required for live and live trials; dev goes on and names
+    /// what is missing, the alarms stay in the guard's alarm file.
+    #[test]
+    fn alarm_recipients_are_required_for_live_and_named_for_dev() {
+        let dev = |recipients| PrecheckFacts {
+            recipients,
+            ..ready()
+        };
+        assert_eq!(
+            precheck(&dev(Some(0))),
+            Ok(Some(
+                "no alarm recipient: the alarm link was not opened \
+                 (not needed for dev: the alarms stay in the guard's alarm file)"
+                    .to_owned()
+            ))
+        );
+        assert_eq!(
+            precheck(&dev(None)),
+            Ok(Some(
+                "the alarm recipients cannot be read \
+                 (not needed for dev: the alarms stay in the guard's alarm file)"
+                    .to_owned()
+            ))
+        );
+        assert_eq!(precheck(&dev(Some(1))), Ok(None));
+        // Another refusal of a dev entry takes precedence over the note.
+        let unbundled = PrecheckFacts {
+            bundle: false,
+            ..dev(Some(0))
+        };
+        assert_eq!(
+            precheck(&unbundled),
+            Err(StepError::Failed("no installed bundle is active".into()))
+        );
+        // Live and live trials refuse as before.
+        let live = |recipients| PrecheckFacts {
+            to: Mode::Live,
+            recipients,
+            ..ready()
+        };
+        let trial = |recipients| PrecheckFacts {
+            trial: true,
+            pc_tests_passed: true,
+            ..live(recipients)
+        };
+        for f in [live(Some(0)), trial(Some(0))] {
+            assert_eq!(
+                precheck(&f),
+                Err(StepError::Failed(
+                    "no alarm recipient: the alarm link was not opened".into()
+                )),
+                "{f:?}"
+            );
+        }
+        for f in [live(None), trial(None)] {
+            assert_eq!(
+                precheck(&f),
+                Err(StepError::Failed(
+                    "the alarm recipients cannot be read".into()
+                )),
+                "{f:?}"
+            );
+        }
     }
 
     #[test]
@@ -1361,6 +1429,7 @@ mod tests {
             ),
             (
                 PrecheckFacts {
+                    to: Mode::Live,
                     recipients: None,
                     ..ready()
                 },
@@ -1368,6 +1437,7 @@ mod tests {
             ),
             (
                 PrecheckFacts {
+                    to: Mode::Live,
                     recipients: Some(0),
                     ..ready()
                 },

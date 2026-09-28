@@ -1198,10 +1198,7 @@ fn dry_run_changes_nothing() {
         "dry run: Precheck, Interlock, AppStop, ReaperSaveQuit, TuningEnter, Data, EngineStart, \
          EngineArm, ServerStart, TrayStart, IdentityCheck, RunnerStart; bundle none; precheck ok"
     );
-    pc.fail(
-        Call::Precheck,
-        "no alarm recipient: the alarm link was not opened",
-    );
+    pc.fail(Call::Precheck, "an engine the guard did not start runs");
     let r = handle(
         &mut pc,
         &mut g,
@@ -1214,9 +1211,8 @@ fn dry_run_changes_nothing() {
     );
     assert!(!r.ok);
     assert!(
-        r.detail.ends_with(
-            "RunnerStart; bundle none; precheck no alarm recipient: the alarm link was not opened"
-        ),
+        r.detail
+            .ends_with("RunnerStart; bundle none; precheck an engine the guard did not start runs"),
         "{}",
         r.detail
     );
@@ -1226,6 +1222,118 @@ fn dry_run_changes_nothing() {
         r.detail,
         "dry run: TuningExit, PrefCheck, ReaperHandover, AppHandover, Fingerprint"
     );
+}
+
+/// The dev note of a missing alarm recipient (`pc::precheck`).
+const NO_RECIPIENT: &str = "no alarm recipient: the alarm link was not opened \
+     (not needed for dev: the alarms stay in the guard's alarm file)";
+
+/// The alarm link is served by iem-server, which runs only in dev and live,
+/// so the owner can open it only after the first dev entry (#9,
+/// 2026-09-28): a dev entry without a recipient goes on and names it, in
+/// its report and in the status until an alarm reaches a phone.
+#[test]
+fn a_dev_entry_without_an_alarm_recipient_goes_on_and_names_it() {
+    let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
+    g.state.pins.current = Some(SHA.into());
+    pc.meters = vec![-60.0];
+    pc.recipients = Some(0);
+    let r = ask(&mut pc, &mut g, dev());
+    assert!(r.ok, "{r:?}");
+    assert!(
+        r.detail
+            .starts_with(&format!("dev: done; {NO_RECIPIENT}; interlock quiet: ")),
+        "{}",
+        r.detail
+    );
+    assert_eq!(g.state.mode, Mode::Dev);
+    assert!(g.alarms.all().is_empty(), "{:?}", texts(&g));
+    assert_eq!(
+        status_reply(&g),
+        format!("mode dev; bundle {SHA}; {NO_RECIPIENT}")
+    );
+    assert_eq!(
+        ask(&mut pc, &mut g, Request::Status).detail,
+        format!("mode dev; bundle {SHA}; {NO_RECIPIENT}")
+    );
+    // Its dry run passes and names it too.
+    let dry = Request::Dev {
+        build: None,
+        force: false,
+        dry_run: true,
+    };
+    let r = ask(&mut pc, &mut g, dry);
+    assert!(r.ok, "{r:?}");
+    assert!(
+        r.detail
+            .ends_with(&format!("; bundle {SHA}; precheck ok; {NO_RECIPIENT}")),
+        "{}",
+        r.detail
+    );
+    // An alarm that does not reach a phone keeps it named.
+    pc.fail(Call::Notify, "no device took the notice");
+    let r = ask(&mut pc, &mut g, Request::AlarmTest);
+    assert!(!r.ok, "{r:?}");
+    assert!(
+        status_reply(&g).contains(NO_RECIPIENT),
+        "{}",
+        status_reply(&g)
+    );
+    // The owner opens the link (iem-server now serves it) and the alarm
+    // test reaches the phone: the status no longer names it.
+    let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
+    g.state.pins.current = Some(SHA.into());
+    pc.meters = vec![-60.0];
+    pc.recipients = Some(0);
+    assert!(ask(&mut pc, &mut g, dev()).ok);
+    pc.recipients = Some(1);
+    let r = ask(&mut pc, &mut g, Request::AlarmTest);
+    assert!(r.ok, "{r:?}");
+    assert!(
+        !status_reply(&g).contains("no alarm recipient"),
+        "{}",
+        status_reply(&g)
+    );
+    // With a recipient the entry names nothing.
+    let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
+    g.state.pins.current = Some(SHA.into());
+    pc.meters = vec![-60.0];
+    let r = ask(&mut pc, &mut g, dev());
+    assert!(r.ok, "{r:?}");
+    assert!(!r.detail.contains("alarm recipient"), "{}", r.detail);
+    assert_eq!(status_reply(&g), format!("mode dev; bundle {SHA}"));
+}
+
+#[test]
+fn a_live_entry_without_an_alarm_recipient_is_refused() {
+    let live = |trial, dry_run| Request::Live {
+        build: SHA.into(),
+        trial,
+        dry_run,
+    };
+    for trial in [false, true] {
+        let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Event));
+        g.state
+            .bundles
+            .insert(SHA.into(), record(SHA, "main", Hil::Green));
+        pc.recipients = Some(0);
+        let r = ask(&mut pc, &mut g, live(trial, true));
+        assert!(!r.ok, "{r:?}");
+        assert!(
+            r.detail
+                .ends_with("precheck no alarm recipient: the alarm link was not opened"),
+            "{}",
+            r.detail
+        );
+        let r = ask(&mut pc, &mut g, live(trial, false));
+        assert!(!r.ok, "{r:?}");
+        assert_eq!(g.state.mode, Mode::Event);
+        assert!(!pc.called(Call::EngineStart));
+        assert_eq!(
+            texts(&g),
+            ["Precheck: no alarm recipient: the alarm link was not opened"]
+        );
+    }
 }
 
 #[test]
