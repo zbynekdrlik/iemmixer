@@ -636,17 +636,11 @@ pub(crate) mod tests {
         // The first activation: no guard before, so it changed.
         assert_eq!(activate_bins(&bundle_a, &bin, "a"), Ok(true));
         assert_eq!(names(&bin), [GUARD_EXE, IEMMODE_EXE]);
-        // The same bundle again: the guard is the same exe.
+        // The same bundle again moves nothing: the running guard's exe stays
+        // where it is (#9 2026-09-28: HIL's second activation of the active
+        // bundle met the first one's renamed, still running exe).
         assert_eq!(activate_bins(&bundle_a, &bin, "a"), Ok(false));
-        assert_eq!(
-            names(&bin),
-            [
-                GUARD_EXE.to_owned(),
-                format!("{GUARD_EXE}.old-a"),
-                IEMMODE_EXE.to_owned(),
-                format!("{IEMMODE_EXE}.old-a"),
-            ]
-        );
+        assert_eq!(names(&bin), [GUARD_EXE, IEMMODE_EXE]);
         assert_eq!(activate_bins(&bundle_b, &bin, "b"), Ok(true));
         assert_eq!(
             fs::read_to_string(bin.join(GUARD_EXE)).unwrap(),
@@ -666,6 +660,41 @@ pub(crate) mod tests {
         assert_eq!(names(&bin), [GUARD_EXE, IEMMODE_EXE]);
         // No bin directory yet: nothing to clean.
         assert!(clean_old_bins(&tmp.path().join("nothing")).is_empty());
+    }
+
+    #[test]
+    fn an_old_exe_that_cannot_go_never_blocks_an_activation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("b");
+        fs::create_dir_all(&bundle).unwrap();
+        for exe in BIN_EXES {
+            fs::write(bundle.join(exe), format!("{exe} b")).unwrap();
+        }
+        let bin = tmp.path().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        for exe in BIN_EXES {
+            fs::write(bin.join(exe), format!("{exe} a")).unwrap();
+        }
+        // An old copy of the same name that cannot be deleted (on the PC an
+        // exe still running from it; here a folder, which no file removal
+        // takes): the replaced exe goes aside under the next free name.
+        let stuck = bin.join(format!("{GUARD_EXE}.old-b"));
+        fs::create_dir_all(stuck.join("x")).unwrap();
+        fs::write(bin.join(format!("{GUARD_EXE}.old-b.1")), b"").unwrap();
+        assert_eq!(activate_bins(&bundle, &bin, "b"), Ok(true));
+        assert_eq!(
+            fs::read_to_string(bin.join(GUARD_EXE)).unwrap(),
+            "iemmixer-guard.exe b"
+        );
+        assert!(stuck.join("x").is_dir());
+        assert_eq!(
+            fs::read_to_string(bin.join(format!("{GUARD_EXE}.old-b.1"))).unwrap(),
+            "iemmixer-guard.exe a"
+        );
+        assert_eq!(
+            fs::read_to_string(bin.join(format!("{IEMMODE_EXE}.old-b"))).unwrap(),
+            "iemmode.exe a"
+        );
     }
 
     #[test]
