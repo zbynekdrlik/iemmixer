@@ -37,7 +37,7 @@ use crate::crash::{self, After, CrashLoop};
 use crate::effects::engine::ACTIVE_DB;
 use crate::handover::{self, Audio};
 use crate::install::{self, InstallError};
-use crate::pc::{Audience, EngineSeen, Kid, Pc, Procs, R, StepError};
+use crate::pc::{Audience, EngineSeen, Kid, Pc, Procs, R, StepError, job_note};
 use crate::plan::{
     Activation, Busy, Facts, Health, Mode, OnError, PrefFail, Step, activation, on_error, plan,
 };
@@ -470,6 +470,9 @@ pub struct Guard {
     /// an alarm recipient, #9 2026-09-28); dropped by the next precheck and
     /// once an alarm reaches a recipient.
     recipients_note: Option<String>,
+    /// The children stay in the guard task's job (`pc::job_note`, read at
+    /// the start; #9 2026-09-28).
+    job_note: Option<&'static str>,
     /// REAPER's evaluation notice was open at the last handover check
     /// (`handover::dialogs`); dropped when the guard quits REAPER and while
     /// a check cannot read REAPER.
@@ -518,6 +521,7 @@ impl Guard {
             report: Vec::new(),
             note: None,
             recipients_note: None,
+            job_note: None,
             reaper_notice: false,
             crash: CrashLoop::default(),
             respawn_at: None,
@@ -787,6 +791,9 @@ pub fn status_text(g: &Guard) -> String {
     }
     if let Some(n) = &g.recipients_note {
         parts.push(n.clone());
+    }
+    if let Some(n) = g.job_note {
+        parts.push(n.to_owned());
     }
     let open = g.alarms.unacked();
     if open > 0 {
@@ -2023,10 +2030,20 @@ pub fn session_end(pc: &mut dyn Pc, g: &mut Guard) {
 
 // ---- start, loop, direct ----
 
-/// A starting guard (design §5.2): the reboot rule first, then the children
-/// a previous guard started, then an unfinished switch unwinds to event (or
-/// resumes, when it was one). The outcome of an event plan that ran.
+/// A starting guard (design §5.2): the job its children start in (logged,
+/// and named in the status while they stay in it, §5.1), the reboot rule,
+/// then the children a previous guard started, then an unfinished switch
+/// unwinds to event (or resumes, when it was one). The outcome of an event
+/// plan that ran.
 pub fn start(pc: &mut dyn Pc, g: &mut Guard, boot: u64) -> Option<Outcome> {
+    let job = pc.job();
+    if let Err(e) = &job {
+        warn!("the guard's job could not be read: {e}");
+    }
+    g.job_note = job_note(&job);
+    if let Some(n) = g.job_note {
+        info!("{n}");
+    }
     let p = pc.procs();
     let reset = state::reset_to_event(&g.state, boot, p.band_up(), !p.engine.is_empty());
     if reset {

@@ -1,8 +1,8 @@
 //! Processes (S6 design note §5.1, §5.5): the once-a-second list, our
-//! children (started outside the guard's job on consoles of their own,
-//! adopted after a guard restart, watched through handles), stops by
-//! request (Ctrl-Break on the child's own console, the tray's Quit) and
-//! bounded helper commands. Nothing here ends a process.
+//! children (placed by the guard's job as `iem_win::spawn` reads it, on
+//! consoles of their own, adopted after a guard restart, watched through
+//! handles), stops by request (Ctrl-Break on the child's own console, the
+//! tray's Quit) and bounded helper commands. Nothing here ends a process.
 
 use std::fmt::Display;
 use std::fs::{self, OpenOptions};
@@ -221,8 +221,11 @@ pub(super) fn running_pid(pc: &WinPc, kid: Kid) -> R<u32> {
     }
 }
 
-/// Starts `kid` outside the guard's job on a console of its own (design
-/// §5.1, §5.5), its output appended to `logs\<kid>.log`, and watches it.
+/// Starts `kid` placed by the guard's job (out of it where it allows
+/// breakaway, else inside a job that does not end its processes when it
+/// closes; a job that does refuses the start: this step's error) on a
+/// console of its own (design §5.1, §5.5), its output appended to
+/// `logs\<kid>.log`, and watches it.
 pub(super) fn start_kid(pc: &mut WinPc, kid: Kid, cmd: &mut Command, new_group: bool) -> R<u32> {
     let dir = pc.s.logs_dir();
     fs::create_dir_all(&dir).map_err(|e| failed("the log directory", e))?;
@@ -241,8 +244,8 @@ pub(super) fn start_kid(pc: &mut WinPc, kid: Kid, cmd: &mut Command, new_group: 
 }
 
 /// Starts a program of the band's system directly (`[guard] start_direct`,
-/// design §5.1), outside the guard's job, in its own directory. The guard
-/// does not watch it: the handover checks do.
+/// design §5.1), placed by the guard's job like our children, in its own
+/// directory. The guard does not watch it: the handover checks do.
 pub(super) fn start_detached(exe: &Path) -> R<()> {
     let mut cmd = Command::new(exe);
     if let Some(dir) = exe.parent() {
@@ -421,11 +424,11 @@ pub(super) fn run(
     finish(what, child, limit, c, on_cancel)
 }
 
-/// [`run`] for `iem-engine interlock`, which opens the card: it starts
-/// outside the guard's job like the engine (design §5.1, I9), so the end of
-/// the guard's task never ends a holder of the card. A wait: on "ide event"
+/// [`run`] for `iem-engine interlock`, which opens the card: it is placed
+/// by the guard's job like the engine (design §5.1, I9), so the end of the
+/// guard's process never ends a holder of the card. A wait: on "ide event"
 /// the guard creates `stop` (its `--stop-file`).
-pub(super) fn run_outside_job(
+pub(super) fn run_detached(
     what: &str,
     cmd: &mut Command,
     limit: Duration,

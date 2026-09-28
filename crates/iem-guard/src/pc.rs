@@ -15,6 +15,8 @@
 use std::fmt;
 use std::time::Duration;
 
+use iem_win::spawn::Placement;
+
 use crate::cancel::{Cancel, Preempted};
 use crate::handover::{AppExit, ReaperFacts};
 use crate::plan::{Facts, Health, Mode};
@@ -316,6 +318,21 @@ pub fn precheck(f: &PrecheckFacts) -> R<Option<String>> {
     }
 }
 
+/// `iemmode status` names a guard whose children stay in its task's job
+/// (#9 2026-09-28: the PC's task job allows no breakaway). A restart of the
+/// guard still leaves them running: the job lives on while any of them
+/// runs.
+pub const JOB_NOTE: &str = "children stay in the guard task's job (no breakaway)";
+
+/// The status note of the guard's job as [`Pc::job`] read it: only
+/// [`Placement::InJob`] names one. A job that ends its processes when it
+/// closes refuses each start instead (that step's error, then the error
+/// policy); a job that cannot be read is logged, and every start reads it
+/// again.
+pub fn job_note(job: &Result<Placement, String>) -> Option<&'static str> {
+    matches!(job, Ok(Placement::InJob)).then_some(JOB_NOTE)
+}
+
 /// The engine as its supervisor pipe reports it (`Hello` and `Status`).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Status {
@@ -461,6 +478,11 @@ pub trait Pc {
     /// verified bundle `sha` (design §5.1); `keep`'s (the other pin) stay,
     /// every other bundle's go.
     fn exclude(&mut self, sha: &str, keep: &[String]) -> R<()>;
+    /// Where this process's long-lived children start (design §5.1, I9):
+    /// `iem_win::spawn::placement` of the job it runs in, read once at the
+    /// guard's start for its log and status ([`job_note`]); every start
+    /// reads the job again. Never waits.
+    fn job(&mut self) -> Result<Placement, String>;
 }
 
 /// A scripted PC for the daemon's tests.

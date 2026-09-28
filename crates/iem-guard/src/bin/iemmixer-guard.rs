@@ -317,6 +317,9 @@ fn run() -> ExitCode {
     if let Some(exe) = handover {
         let mut cmd = Command::new(&exe);
         cmd.arg("run");
+        // Placed by this guard's job like its children (design §5.1): a job
+        // that would end it when it closes refuses it, and the next
+        // `iemmode` call starts the guard's task instead.
         match iem_win::spawn::spawn_detached(&mut cmd, false) {
             Ok(child) => info!("handed over to {} (pid {})", exe.display(), child.id()),
             Err(e) => warn!("starting {}: {e}", exe.display()),

@@ -30,6 +30,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use iem_win::spawn::{self, Placement};
 use iem_win::window::{self, SessionEndWindow};
 use tracing::{info, warn};
 
@@ -312,6 +313,14 @@ impl Pc for WinPc {
 
     fn exclude(&mut self, sha: &str, keep: &[String]) -> R<()> {
         tasks::exclude(self, sha, keep)
+    }
+
+    /// The job's limits go to the log with the placement they give.
+    fn job(&mut self) -> Result<Placement, String> {
+        let limits = spawn::job_limits().map_err(|e| e.to_string())?;
+        let placed = spawn::placement(limits);
+        info!("the guard's job: {limits:?}; its children: {placed:?}");
+        Ok(placed)
     }
 }
 

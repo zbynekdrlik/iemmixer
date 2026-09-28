@@ -370,7 +370,8 @@ pub(super) fn start(pc: &mut WinPc, hold: bool, hil: bool) -> R<u32> {
 /// `iem-engine interlock` (design §4): a wait, so "ide event" creates its
 /// stop file, which it sees within 0.1 s: it releases the card and exits 6
 /// (never Ctrl-Break: its default handler would end it with the card open).
-/// It opens the card, so it runs outside the guard's job like the engine.
+/// It opens the card, so it is placed by the guard's job like the engine
+/// (design §5.1).
 pub(super) fn interlock(pc: &WinPc, seconds: u32, c: &Cancel) -> R<(bool, String)> {
     let dir = pc.bundle_dir()?;
     let guard = pc.s.guard_dir();
@@ -391,7 +392,7 @@ pub(super) fn interlock(pc: &WinPc, seconds: u32, c: &Cancel) -> R<(bool, String
         .arg(&stop)
         .current_dir(dir);
     let limit = Duration::from_secs(u64::from(seconds) + 30);
-    let out = procs::run_outside_job("iem-engine interlock", &mut cmd, limit, c, &stop)?;
+    let out = procs::run_detached("iem-engine interlock", &mut cmd, limit, c, &stop)?;
     proto::interlock_result(out.code, &out.stdout).map_err(StepError::Failed)
 }
 
