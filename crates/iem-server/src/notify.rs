@@ -140,13 +140,18 @@ pub async fn run_cli(
         Audience::Alarm => load_alarm_recipients(&dir)?,
         Audience::BandActivity => crate::push_store::PushStore::load(&dir).all().to_vec(),
     };
-    let secrets = crate::secrets::load_or_create(&dir.join(crate::secrets::SECRETS_DIR))?;
+    if subs.is_empty() {
+        return Ok(0);
+    }
+    // Read only: a notice never creates the runtime secrets (see
+    // `secrets::load_vapid`).
+    let vapid_private_key = crate::secrets::load_vapid(&dir.join(crate::secrets::SECRETS_DIR))?;
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()?;
     Ok(send_to(
         &client,
-        &secrets.vapid_private_key,
+        &vapid_private_key,
         &config.vapid_subject,
         &subs,
         &alarm_payload(title, body),

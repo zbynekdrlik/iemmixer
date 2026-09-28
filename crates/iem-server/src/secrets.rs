@@ -42,6 +42,29 @@ pub fn load_or_create(dir: &Path) -> io::Result<Secrets> {
     })
 }
 
+/// The VAPID private key from `dir`, read only: a missing key is an error,
+/// never made here. Only the server's start (and the band import) create
+/// the secrets; a notice sent before the first import must leave the
+/// directory as it is, so the predecessor's keys can still be taken.
+pub fn load_vapid(dir: &Path) -> io::Result<String> {
+    let path = dir.join(VAPID_PRIVATE_FILE);
+    match std::fs::read_to_string(&path) {
+        Ok(text) if !text.trim().is_empty() => Ok(text.trim().to_string()),
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{} is empty", path.display()),
+        )),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "no vapid key yet ({}): the server has not run and no band import has",
+                path.display()
+            ),
+        )),
+        Err(e) => Err(e),
+    }
+}
+
 fn new_jwt_secret() -> String {
     let mut key = [0u8; 32];
     OsRng.fill_bytes(&mut key);
