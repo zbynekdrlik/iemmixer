@@ -617,8 +617,9 @@ fn run_hil(flags: Flags, text: &str, topo: &Topology) -> Result<Vec<u16>, SiteEr
 
 /// Loads and compiles a site, checks its `[card]` table, the stage the
 /// interlock listens to (every `[activity] inputs` id is an input) and
-/// HIL's spare outputs (`[guard] hil_tx`: card channels within the card's
-/// map that no mix uses, `Topology::hil_outputs`).
+/// HIL's spare outputs (`[guard] hil_tx`: card channels from 1 that no mix
+/// uses, `Topology::hil_outputs`; the card's own output count is checked
+/// when the stream opens).
 pub fn check_site(path: &Path) -> Result<SiteSummary, EngineError> {
     let text = site::read(path)?;
     let topo = compile(&parse(&text)?)?;

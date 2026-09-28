@@ -58,9 +58,6 @@ pub struct Topology {
     pub rx: Vec<u16>,
     /// Card TX channels in the order the backend expects them.
     pub tx: Vec<u16>,
-    /// The card's channel map (`[engine] channels`): RX and TX channels are
-    /// 1…=channels.
-    pub channels: u16,
     pub engineer: usize,
     pub hash: String,
     input_index: HashMap<InputId, usize>,
@@ -243,7 +240,6 @@ pub fn compile(site: &Site) -> Result<Topology, SiteError> {
         direct,
         rx,
         tx,
-        channels: site.channels,
         engineer,
         hash: String::new(),
     };
@@ -306,10 +302,14 @@ impl Topology {
     }
 
     /// HIL's spare card outputs (`[guard] hil_tx`; S6 design note §4, the
-    /// owner's decision on #9 of 2026-09-28): card channels within the
-    /// card's map that no mix uses, each named once, at most [`MAX_HIL`].
-    /// `run` opens them after the topology's TX under the test-signal flag;
-    /// `check-site` refuses a site whose `hil_tx` breaks the rule.
+    /// owner's decision on #9 of 2026-09-28): card channels from 1 that no
+    /// mix uses, each named once, at most [`MAX_HIL`]. `run` opens them
+    /// after the topology's TX under the test-signal flag; `check-site`
+    /// refuses a site whose `hil_tx` breaks the rule. `[engine] channels`
+    /// is no bound (the highest channel the topology uses, not the card's
+    /// output count, which `[card]` does not hold): the card's own count is
+    /// checked when the stream opens (`ChannelMap`, a channel the card lacks
+    /// refuses it, exit 3).
     pub fn hil_outputs(&self, hil_tx: &[u16]) -> Result<Vec<u16>, SiteError> {
         if hil_tx.len() > MAX_HIL {
             return Err(SiteError::HilTx(format!(
@@ -319,10 +319,9 @@ impl Topology {
         }
         let mut outputs = Vec::with_capacity(hil_tx.len());
         for &ch in hil_tx {
-            if ch == 0 || ch > self.channels {
+            if ch == 0 {
                 return Err(SiteError::HilTx(format!(
-                    "card output {ch} is outside the card's {} outputs",
-                    self.channels
+                    "card output {ch}: card channels count from 1"
                 )));
             }
             if let Some(why) = self.mix_tx_refusal(ch) {
