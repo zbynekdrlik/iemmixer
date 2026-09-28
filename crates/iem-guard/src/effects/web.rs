@@ -130,6 +130,8 @@ pub fn notify_result(code: Option<i32>, stderr: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
+
     use super::*;
 
     const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
@@ -224,10 +226,12 @@ mod tests {
         );
     }
 
+    /// Only the public host goes through curl, validated (Cloudflare's
+    /// certificate); LAN 443 is `tls::check` (#9 2026-09-28).
     #[test]
-    fn curl_checks_https_with_the_public_certificate() {
+    fn curl_checks_the_public_host_with_a_validated_certificate() {
         assert_eq!(
-            curl_args("mixer.example.org", "/api/version", false, 10),
+            curl_args("mixer.example.org", "/api/version", 10),
             [
                 "--silent",
                 "--show-error",
@@ -238,17 +242,54 @@ mod tests {
             ]
         );
         assert_eq!(
-            curl_args("mixer.example.org", "/api/version", true, 5),
+            curl_args("mixer.example.org", "/api/members", 5),
             [
                 "--silent",
                 "--show-error",
                 "--fail",
                 "--max-time",
                 "5",
-                "--resolve",
-                "mixer.example.org:443:127.0.0.1",
-                "https://mixer.example.org/api/version"
+                "https://mixer.example.org/api/members"
             ]
+        );
+    }
+
+    /// The certificate LAN 443 must serve: the server config's `tls_cert`
+    /// next to that config, as iem-server reads it.
+    #[test]
+    fn the_servers_certificate_is_next_to_its_config() {
+        let config = Path::new("/site/server/iemmixer.toml");
+        assert_eq!(
+            server_cert(config, "port = 80\n"),
+            Ok(PathBuf::from("/site/server/cert.pem"))
+        );
+        assert_eq!(
+            server_cert(config, "tls_cert = \"lan.pem\"\n"),
+            Ok(PathBuf::from("/site/server/lan.pem"))
+        );
+        // A rooted name replaces the directory, as iem-server's join does.
+        assert_eq!(
+            server_cert(config, "tls_cert = \"/other/lan.pem\"\n"),
+            Ok(PathBuf::from("/other/lan.pem"))
+        );
+        // A config named without a directory: the working directory.
+        assert_eq!(
+            server_cert(Path::new("iemmixer.toml"), ""),
+            Ok(PathBuf::from(".").join("cert.pem"))
+        );
+        assert_eq!(
+            server_cert(config, "tls_cert = 1\n"),
+            Err("server config: tls_cert is not a string".to_owned())
+        );
+        // A table of that name is not the setting.
+        assert_eq!(
+            server_cert(config, "[x]\ntls_cert = \"lan.pem\"\n"),
+            Ok(PathBuf::from("/site/server/cert.pem"))
+        );
+        assert!(
+            server_cert(config, "= broken")
+                .unwrap_err()
+                .starts_with("server config: ")
         );
     }
 

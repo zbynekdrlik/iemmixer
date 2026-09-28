@@ -30,6 +30,8 @@
 //!   the daemon's tests;
 //! - [`site`]: the guard's settings (`[guard]`, `[card]`, `pc.toml`);
 //! - [`effects`]: the portable parsers and decisions of the effects;
+//! - [`tls`]: the LAN 443 identity, a TLS client pinned to the server's own
+//!   certificate (identity, not validity);
 //! - `win`: `WinPc`, the effects on the PC (Windows only, built on
 //!   `iem-win`; excluded from mutation testing, its decisions are above).
 
@@ -59,6 +61,7 @@ pub mod plan;
 pub mod proto;
 pub mod site;
 pub mod state;
+pub mod tls;
 pub mod view;
 #[cfg(windows)]
 pub mod win;

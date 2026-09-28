@@ -624,6 +624,9 @@ pub mod fake {
         /// What `job` reads (a fixed fact of the process: not a recorded
         /// call).
         pub job: Result<Placement, String>,
+        /// What a passing `identity` names about the LAN certificate (its
+        /// validity; #9 2026-09-28).
+        pub lan_note: Option<String>,
         calls: Vec<(Call, Instant)>,
         fails: HashMap<Call, String>,
         blocked: Vec<Call>,
@@ -687,6 +690,7 @@ pub mod fake {
                 engine_up: true,
                 recipients: Some(1),
                 job: Ok(Placement::NoJob),
+                lan_note: None,
                 calls: Vec::new(),
                 fails: HashMap::new(),
                 blocked: Vec::new(),
@@ -957,8 +961,9 @@ pub mod fake {
             Ok(())
         }
 
-        fn identity(&mut self, _sha: &str, c: &Cancel) -> R<()> {
-            self.enter(Call::Identity, Some(c))
+        fn identity(&mut self, _sha: &str, c: &Cancel) -> R<Option<String>> {
+            self.enter(Call::Identity, Some(c))?;
+            Ok(self.lan_note.clone())
         }
 
         fn runner_start(&mut self) -> R<()> {
@@ -1589,7 +1594,7 @@ mod tests {
         let server = pc.server_start(Mode::Dev).unwrap();
         assert!(server > engine);
         pc.tray_start().unwrap();
-        pc.identity("a", &c).unwrap();
+        assert_eq!(pc.identity("a", &c), Ok(None));
         pc.runner_start().unwrap();
         let f = pc.facts;
         assert!(f.engine && f.server && f.tray && f.runner && !f.reaper && !f.app);
