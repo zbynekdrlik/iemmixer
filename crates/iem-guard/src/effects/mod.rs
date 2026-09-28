@@ -7,7 +7,8 @@
 //! - [`reaper`]: REAPER's web-control lines and meters;
 //! - [`app`]: the predecessor app's exit (one process, its log, temp files);
 //! - [`engine`]: the engine's supervisor pipe, readiness and health;
-//! - [`web`]: `/api/version`, the tunnel, `iem-server`'s CLI, HTTPS via curl;
+//! - [`web`]: `/api/version`, the tunnel, `iem-server`'s CLI and the
+//!   certificate it serves, the public host's HTTPS via curl;
 //! - [`tasks`]: our scheduled tasks through `schtasks.exe`;
 //! - [`tuning`]: the elevated tuning task's files and the drift check.
 

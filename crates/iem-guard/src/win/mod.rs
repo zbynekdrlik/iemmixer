@@ -249,7 +249,7 @@ impl Pc for WinPc {
         procs::tray_stop(self, c)
     }
 
-    fn identity(&mut self, sha: &str, c: &Cancel) -> R<()> {
+    fn identity(&mut self, sha: &str, c: &Cancel) -> R<Option<String>> {
         web::identity(self, sha, c)
     }
 

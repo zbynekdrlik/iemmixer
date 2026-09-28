@@ -1499,7 +1499,7 @@ pub trait Pc {
     fn band_quiet_for(&mut self) -> R<Duration>;                      // the server's band-activity state
     fn tray_start(&mut self) -> R<()>;
     fn tray_stop(&mut self, c: &Cancel) -> R<()>;                     // Quit over the guard pipe
-    fn identity(&mut self, sha: &str, c: &Cancel) -> R<()>;           // LAN 80/443 + public host /api/version, tunnel ready
+    fn identity(&mut self, sha: &str, c: &Cancel) -> R<Option<String>>; // LAN 80/443 + public host /api/version, tunnel ready; LAN 443 = tls::check, the server's own cert (identity, not validity; Some(note) outside its validity)
     fn runner_start(&mut self) -> R<()>;
     fn runner_stop(&mut self, c: &Cancel) -> R<()>;                   // only when idle; console::ctrl_break
     fn holder_gone(&mut self, c: &Cancel) -> R<()>;                   // ≤ 30 s for a foreign module holder to leave

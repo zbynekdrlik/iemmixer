@@ -30,9 +30,15 @@ tracing = "0.1"
 # The binaries' logs: the daemon's file (its task has no console), iemmode's
 # stderr (its stdout is the JSON reply). As in iem-engine.
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# The LAN 443 identity (tls.rs; #9 2026-09-28): a TLS client that proves the
+# served certificate is the server's own cert.pem (byte-equal, its key proven
+# by the handshake), not that it is valid: the certificate the band's phones
+# know expired, and the predecessor serves the same one. ring, as iem-server;
+# already in the lockfile.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 # Plain HTTP on the PC (REAPER's web control, /api/version on port 80,
-# cloudflared's /ready). No TLS here: the HTTPS checks (LAN 443, the public
-# host) run Windows' own curl.exe, schannel with the system's roots (Task 9).
+# cloudflared's /ready). The public host's HTTPS check runs Windows' own
+# curl.exe, schannel with the system's roots (Task 9).
 ureq = { version = "3.4", default-features = false }
 # Bundle install: deflate only (the zips come from Compress-Archive).
 zip = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
@@ -43,6 +49,9 @@ zip = { version = "8.6", default-features = false, features = ["deflate-flate2-z
 widestring = "1"
 
 [dev-dependencies]
+# The LAN 443 tests' certificates: Ed25519 keys and signatures, built in the
+# test (no key material in the repository).
+ring = "0.17"
 tempfile = "3"
 
 [[bin]]

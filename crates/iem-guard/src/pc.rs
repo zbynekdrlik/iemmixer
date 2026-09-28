@@ -524,9 +524,12 @@ pub trait Pc {
     fn tray_start(&mut self) -> R<()>;
     /// `Quit` over the guard pipe, gone ≤ 10 s.
     fn tray_stop(&mut self, c: &Cancel) -> R<()>;
-    /// LAN 80/443 and the public host answer `/api/version` with `sha`; the
-    /// tunnel has a ready connection.
-    fn identity(&mut self, sha: &str, c: &Cancel) -> R<()>;
+    /// LAN 80 and the public host answer `/api/version` with `sha`, LAN 443
+    /// too while serving the server's own certificate (`tls::check`:
+    /// identity, not validity); the tunnel has a ready connection. `Some`:
+    /// what it names about the LAN certificate without failing (outside its
+    /// validity; #9 2026-09-28).
+    fn identity(&mut self, sha: &str, c: &Cancel) -> R<Option<String>>;
     fn runner_start(&mut self) -> R<()>;
     /// Ctrl-Break on its own console (the daemon stops only an idle runner).
     fn runner_stop(&mut self, c: &Cancel) -> R<()>;
@@ -728,6 +731,9 @@ pub mod fake {
         pub job: Result<Placement, String>,
         /// What `logon` reads (a file read: not a recorded call).
         pub logon: Option<Logon>,
+        /// What a passing `identity` names about the LAN certificate (its
+        /// validity; #9 2026-09-28).
+        pub lan_note: Option<String>,
         calls: Vec<(Call, Instant)>,
         fails: HashMap<Call, String>,
         blocked: Vec<Call>,
@@ -794,6 +800,7 @@ pub mod fake {
                 recipients: Some(1),
                 job: Ok(Placement::NoJob),
                 logon: None,
+                lan_note: None,
                 calls: Vec::new(),
                 fails: HashMap::new(),
                 blocked: Vec::new(),
@@ -1090,8 +1097,9 @@ pub mod fake {
             Ok(())
         }
 
-        fn identity(&mut self, _sha: &str, c: &Cancel) -> R<()> {
-            self.enter(Call::Identity, Some(c))
+        fn identity(&mut self, _sha: &str, c: &Cancel) -> R<Option<String>> {
+            self.enter(Call::Identity, Some(c))?;
+            Ok(self.lan_note.clone())
         }
 
         fn runner_start(&mut self) -> R<()> {
@@ -1726,7 +1734,7 @@ mod tests {
         let server = pc.server_start(Mode::Dev).unwrap();
         assert!(server > engine);
         pc.tray_start().unwrap();
-        pc.identity("a", &c).unwrap();
+        assert_eq!(pc.identity("a", &c), Ok(None));
         pc.runner_start().unwrap();
         let f = pc.facts;
         assert!(f.engine && f.server && f.tray && f.runner && !f.reaper && !f.app);

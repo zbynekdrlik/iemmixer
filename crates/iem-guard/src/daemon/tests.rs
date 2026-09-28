@@ -1635,6 +1635,70 @@ fn a_dev_entry_without_an_alarm_recipient_goes_on_and_names_it() {
     assert_eq!(status_reply(&g), format!("mode dev; bundle {SHA}"));
 }
 
+/// What `tls::check` names on the PC (#9 2026-09-28): LAN 443 serves the
+/// certificate `iem-migrate band` took over, and the predecessor serves the
+/// same one, expired months ago.
+const LAN_NOTE: &str =
+    "the LAN certificate expired on 2026-03-01; the predecessor serves the same one";
+
+/// The identity check proves identity, not validity: a certificate outside
+/// its validity is named once in the entry's report and in the status
+/// until the next check, never an alarm.
+#[test]
+fn an_expired_lan_certificate_is_named_and_never_an_alarm() {
+    let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
+    g.state.pins.current = Some(SHA.into());
+    pc.meters = vec![-60.0];
+    pc.lan_note = Some(LAN_NOTE.into());
+    let r = ask(&mut pc, &mut g, dev());
+    assert!(r.ok, "{r:?}");
+    assert_eq!(g.state.mode, Mode::Dev);
+    assert_eq!(r.detail.matches(LAN_NOTE).count(), 1, "{}", r.detail);
+    assert!(r.detail.contains(&format!("; {LAN_NOTE}")), "{}", r.detail);
+    // Reported where the check ran: after the server started.
+    assert!(
+        r.detail.find("server started") < r.detail.find(LAN_NOTE),
+        "{}",
+        r.detail
+    );
+    assert!(g.alarms.all().is_empty(), "{:?}", texts(&g));
+    assert_eq!(
+        status_reply(&g),
+        format!("mode dev; bundle {SHA}; {LAN_NOTE}")
+    );
+    assert_eq!(
+        ask(&mut pc, &mut g, Request::Status).detail,
+        format!("mode dev; bundle {SHA}; {LAN_NOTE}")
+    );
+    // Back in event the predecessor serves the same certificate: still
+    // named.
+    assert!(ask(&mut pc, &mut g, Request::Event { dry_run: false }).ok);
+    assert!(status_reply(&g).contains(LAN_NOTE), "{}", status_reply(&g));
+    // The next check that names nothing drops it.
+    pc.lan_note = None;
+    pc.meters = vec![-60.0];
+    let r = ask(&mut pc, &mut g, dev());
+    assert!(r.ok, "{r:?}");
+    assert!(!r.detail.contains("LAN certificate"), "{}", r.detail);
+    assert_eq!(status_reply(&g), format!("mode dev; bundle {SHA}"));
+    // A failed check does not repeat an old note.
+    pc.lan_note = Some(LAN_NOTE.into());
+    assert!(ask(&mut pc, &mut g, Request::Event { dry_run: false }).ok);
+    assert!(ask(&mut pc, &mut g, dev()).ok);
+    assert!(status_reply(&g).contains(LAN_NOTE), "{}", status_reply(&g));
+    assert!(ask(&mut pc, &mut g, Request::Event { dry_run: false }).ok);
+    pc.fail(Call::Identity, "LAN 443: serves another certificate");
+    let r = ask(&mut pc, &mut g, dev());
+    assert!(!r.ok, "{r:?}");
+    assert_eq!(g.state.mode, Mode::Event);
+    assert!(!r.detail.contains(LAN_NOTE), "{}", r.detail);
+    assert!(
+        !status_reply(&g).contains("LAN certificate"),
+        "{}",
+        status_reply(&g)
+    );
+}
+
 #[test]
 fn a_live_entry_without_an_alarm_recipient_is_refused() {
     let live = |trial, dry_run| Request::Live {

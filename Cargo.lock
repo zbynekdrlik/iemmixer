@@ -2687,6 +2687,8 @@ version = "2.0.0-dev.9"
 dependencies = [
  "iem-win",
  "interprocess",
+ "ring",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",

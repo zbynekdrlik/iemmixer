@@ -174,7 +174,7 @@ fn app_problems(pc: &WinPc, c: &Cancel) -> R<Vec<String>> {
         Ok((status, _)) => bad.push(format!("/api/members: HTTP {status}")),
         Err(e) => bad.push(e),
     }
-    match web::get_tls(&g.public_host, "/api/version", false, c) {
+    match web::get_tls(&g.public_host, "/api/version", c) {
         Ok(_) => {}
         Err(StepError::Preempted) => return Err(StepError::Preempted),
         Err(StepError::Failed(why)) => bad.push(format!("public host: {why}")),
