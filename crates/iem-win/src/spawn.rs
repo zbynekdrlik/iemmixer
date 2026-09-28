@@ -1,8 +1,14 @@
-//! Children that outlive a restart of their parent (S6 design note §5.1,
-//! I9): the guard starts the engine, server, tray and runner outside its own
-//! job, so ending the guard's task never touches audio. When the job forbids
-//! breakaway the start fails and the caller alarms; it never starts the child
-//! inside the job instead.
+//! Children that outlive a restart of their starter (S6 design note §5.1,
+//! I9): the guard starts the engine, server, tray, runner, the card's
+//! interlock and a hand-over's new guard so that the end of the guard's
+//! process never ends them. Where they start follows the job the guard runs
+//! in, as read ([`job_limits`], [`placement`]), never found by trying: out of
+//! a job that allows breakaway; without the flag where the job lets every
+//! child out silently or there is none; inside a job that allows no
+//! breakaway and does not end its processes when it closes (it lives on
+//! while any of them runs); and nowhere in a job that does: the start fails
+//! and the caller alarms. The PC's task job allows no breakaway (#9
+//! 2026-09-28).
 //!
 //! Every child runs without a console window (design §5.5): it gets a console
 //! of its own, which no one can close and which the caller does not share, so
@@ -11,7 +17,7 @@
 use std::io;
 use std::process::{Child, Command};
 
-pub use crate::decide::{creation_flags, helper_flags};
+pub use crate::decide::{JobLimits, Placement, creation_flags, helper_flags, placement};
 
 /// `CreateProcess` flags (winbase.h), portable so the choice is tested on
 /// every OS.
@@ -19,18 +25,31 @@ pub const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 pub const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
 pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-/// Starts `cmd` outside the caller's job, on a console of its own and in its
-/// own process group when `new_group` ([`creation_flags`]). A job without
-/// breakaway refuses the start (`PermissionDenied`).
+/// A job's `LimitFlags` bits (winnt.h), portable so the reading is tested on
+/// every OS ([`JobLimits::from_flags`]).
+pub const JOB_BREAKAWAY_OK: u32 = 0x0000_0800;
+pub const JOB_SILENT_BREAKAWAY_OK: u32 = 0x0000_1000;
+/// The limit under which closing a job's last handle ends every process in
+/// it. Its winnt.h name is one of the force-end verbs the integrity scan
+/// refuses in code, so only its value is written here.
+pub const JOB_ENDS_ON_CLOSE: u32 = 0x0000_2000;
+
+/// Starts `cmd` as a long-lived child (the module's rule): placed by this
+/// process's job ([`job_limits`], [`placement`]), on a console of its own
+/// and in its own process group when `new_group` ([`creation_flags`]). A job
+/// that allows no breakaway and ends its processes when it closes refuses
+/// the start (`PermissionDenied`, [`Placement::Refuse`]'s reason); a job
+/// that cannot be read fails it.
 pub fn spawn_detached(cmd: &mut Command, new_group: bool) -> io::Result<Child> {
-    imp::spawn(cmd, creation_flags(new_group))
+    let flags = creation_flags(new_group, placement(job_limits()?))?;
+    imp::spawn(cmd, flags)
 }
 
-/// Whether a child of the calling process can leave its job: true when the
-/// process is in no job, or its immediate job allows breakaway (a nested
-/// job's parents are then left as far as they allow it).
-pub fn breakaway_allowed() -> io::Result<bool> {
-    imp::breakaway_allowed()
+/// The job this process runs in: none, or the limits of its immediate job
+/// (the parents of a nested job are not read). [`spawn_detached`] reads it
+/// at every start.
+pub fn job_limits() -> io::Result<JobLimits> {
+    imp::job_limits()
 }
 
 #[cfg(not(windows))]
@@ -38,11 +57,13 @@ mod imp {
     use std::io;
     use std::process::{Child, Command};
 
+    use super::JobLimits;
+
     pub(super) fn spawn(_cmd: &mut Command, _flags: u32) -> io::Result<Child> {
         crate::unsupported()
     }
 
-    pub(super) fn breakaway_allowed() -> io::Result<bool> {
+    pub(super) fn job_limits() -> io::Result<JobLimits> {
         crate::unsupported()
     }
 }
@@ -55,26 +76,26 @@ mod imp {
     use std::ptr;
 
     use windows_sys::Win32::System::JobObjects::{
-        IsProcessInJob, JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK,
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+        IsProcessInJob, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
         QueryInformationJobObject,
     };
     use windows_sys::Win32::System::Threading::GetCurrentProcess;
     use windows_sys::core::BOOL;
 
+    use super::JobLimits;
     use crate::win::check;
 
     pub(super) fn spawn(cmd: &mut Command, flags: u32) -> io::Result<Child> {
         cmd.creation_flags(flags).spawn()
     }
 
-    pub(super) fn breakaway_allowed() -> io::Result<bool> {
+    pub(super) fn job_limits() -> io::Result<JobLimits> {
         let mut in_job: BOOL = 0;
         // SAFETY: the current-process pseudo handle; a null job handle asks
         // about any job.
         check(unsafe { IsProcessInJob(GetCurrentProcess(), ptr::null_mut(), &mut in_job) })?;
         if in_job == 0 {
-            return Ok(true);
+            return Ok(JobLimits::default());
         }
         let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
         // SAFETY: a null job handle queries the calling process's immediate
@@ -88,8 +109,7 @@ mod imp {
                 ptr::null_mut(),
             )
         })?;
-        let breakaway = JOB_OBJECT_LIMIT_BREAKAWAY_OK | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
-        Ok((info.BasicLimitInformation.LimitFlags & breakaway) != 0)
+        Ok(JobLimits::from_flags(info.BasicLimitInformation.LimitFlags))
     }
 }
 

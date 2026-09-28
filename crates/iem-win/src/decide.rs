@@ -1,14 +1,17 @@
-//! The portable decisions of the Windows wrappers: which flags a child gets,
-//! which handles and groups a message may go to, how a working set grows,
-//! what a DWORD's text may be. They live here, apart from the wrapper
-//! modules, so mutation testing reaches them on Linux: the wrapper modules
-//! are excluded from it, because their `cfg(windows)` bodies do not compile
-//! there (`.cargo/mutants.toml`).
+//! The portable decisions of the Windows wrappers: where a child starts and
+//! which flags it gets, which handles and groups a message may go to, how a
+//! working set grows, what a DWORD's text may be. They live here, apart from
+//! the wrapper modules, so mutation testing reaches them on Linux: the
+//! wrapper modules are excluded from it, because their `cfg(windows)` bodies
+//! do not compile there (`.cargo/mutants.toml`).
 
 use std::io;
 use std::time::{Duration, SystemTime};
 
-use crate::spawn::{CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
+use crate::spawn::{
+    CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, JOB_BREAKAWAY_OK,
+    JOB_ENDS_ON_CLOSE, JOB_SILENT_BREAKAWAY_OK,
+};
 
 /// The `HWND_BROADCAST` value: a command is never posted to every window.
 const BROADCAST: isize = 0xFFFF;
@@ -20,19 +23,102 @@ fn invalid(message: String) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
 }
 
-/// The creation flags of [`crate::spawn::spawn_detached`]: every child
-/// breaks away from the caller's job and runs without a console window, so
-/// it has a console of its own that no one can close and that the caller
-/// does not share (S6 design note §5.5). `new_group` adds
-/// `CREATE_NEW_PROCESS_GROUP`: Ctrl-Break then reaches exactly that child's
-/// group ([`crate::console::ctrl_break`]).
-pub fn creation_flags(new_group: bool) -> u32 {
+/// The job a process runs in, as far as its children care
+/// ([`crate::spawn::job_limits`]): whether there is one, and the limits of
+/// the immediate one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct JobLimits {
+    /// The process runs in a job.
+    pub in_job: bool,
+    /// A child may leave the job with `CREATE_BREAKAWAY_FROM_JOB`
+    /// ([`JOB_BREAKAWAY_OK`]).
+    pub breakaway_ok: bool,
+    /// Every child starts outside the job, without the flag
+    /// ([`JOB_SILENT_BREAKAWAY_OK`]).
+    pub silent_breakaway_ok: bool,
+    /// Closing the job's last handle ends every process in it
+    /// ([`JOB_ENDS_ON_CLOSE`]).
+    pub kill_on_close: bool,
+}
+
+impl JobLimits {
+    /// The limits of a job from its `LimitFlags`; every other limit (a
+    /// working set, a process count) changes nothing for a child's start.
+    pub fn from_flags(flags: u32) -> Self {
+        Self {
+            in_job: true,
+            breakaway_ok: (flags & JOB_BREAKAWAY_OK) != 0,
+            silent_breakaway_ok: (flags & JOB_SILENT_BREAKAWAY_OK) != 0,
+            kill_on_close: (flags & JOB_ENDS_ON_CLOSE) != 0,
+        }
+    }
+}
+
+/// Why no long-lived child starts in a job that allows no breakaway and ends
+/// its processes when it closes.
+pub const ENDS_WITH_THE_JOB: &str = "this process's job allows no breakaway and ends its \
+    processes when it closes, which may come with this process's end: a child started in \
+    it could end with it (S6 design note §5.1, I9)";
+
+/// Where a long-lived child starts ([`crate::spawn::spawn_detached`]), so
+/// that the end of its starter never ends it (S6 design note §5.1, I9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Placement {
+    /// Outside any job of the starter's, without the breakaway flag: the
+    /// starter runs in no job, or its job lets every child out silently.
+    NoJob,
+    /// Out of the starter's job with `CREATE_BREAKAWAY_FROM_JOB`: the job
+    /// allows it.
+    Breakaway,
+    /// Inside the starter's job, which allows no breakaway and does not end
+    /// its processes when it closes: the job lives on while any of them
+    /// runs, so the child outlives its starter.
+    InJob,
+    /// Not started: the job allows no breakaway and ends its processes when
+    /// it closes. The reason.
+    Refuse(&'static str),
+}
+
+/// Where a long-lived child of a process in `job` starts: read from the
+/// job's limits, never found by trying (#9 2026-09-28: the PC's task job
+/// allows no breakaway).
+pub fn placement(job: JobLimits) -> Placement {
+    match (
+        job.in_job,
+        job.breakaway_ok,
+        job.silent_breakaway_ok,
+        job.kill_on_close,
+    ) {
+        (false, ..) => Placement::NoJob,
+        (true, true, ..) => Placement::Breakaway,
+        (true, false, true, _) => Placement::NoJob,
+        (true, false, false, true) => Placement::Refuse(ENDS_WITH_THE_JOB),
+        (true, false, false, false) => Placement::InJob,
+    }
+}
+
+/// The creation flags of [`crate::spawn::spawn_detached`] for a child
+/// placed by `placed`: no console window, so it has a console of its own
+/// that no one can close and that the starter does not share (S6 design
+/// note §5.5); `CREATE_BREAKAWAY_FROM_JOB` only for
+/// [`Placement::Breakaway`]. `new_group` adds `CREATE_NEW_PROCESS_GROUP`:
+/// Ctrl-Break then reaches exactly that child's group
+/// ([`crate::console::ctrl_break`]). [`Placement::Refuse`] starts nothing:
+/// its reason, as `PermissionDenied`.
+pub fn creation_flags(new_group: bool, placed: Placement) -> io::Result<u32> {
+    let breakaway = match placed {
+        Placement::Breakaway => CREATE_BREAKAWAY_FROM_JOB,
+        Placement::NoJob | Placement::InJob => 0,
+        Placement::Refuse(why) => {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, why));
+        }
+    };
     let group = if new_group {
         CREATE_NEW_PROCESS_GROUP
     } else {
         0
     };
-    CREATE_BREAKAWAY_FROM_JOB | CREATE_NO_WINDOW | group
+    Ok(breakaway | CREATE_NO_WINDOW | group)
 }
 
 /// The creation flags of a bounded helper command the guard runs (`schtasks`,
@@ -40,8 +126,8 @@ pub fn creation_flags(new_group: bool) -> u32 {
 /// waiting one (Ctrl-Break on "ide event") a process group of its own, so the
 /// Ctrl-Break reaches that helper only (S6 design note §5.5). Helpers stay in
 /// the caller's job: they are short, and a job that refuses breakaway must not
-/// refuse them. Only the long-lived children and the card's interlock leave
-/// it ([`creation_flags`], I9).
+/// refuse them. Only the long-lived children and the card's interlock are
+/// placed by the job ([`placement`], [`creation_flags`], I9).
 pub fn helper_flags(waiting: bool) -> u32 {
     let group = if waiting { CREATE_NEW_PROCESS_GROUP } else { 0 };
     CREATE_NO_WINDOW | group
@@ -224,8 +310,6 @@ mod tests {
     /// child starts, every other limit changes nothing.
     #[test]
     fn a_jobs_limits_are_read_from_its_flags() {
-        use crate::spawn::{JOB_BREAKAWAY_OK, JOB_ENDS_ON_CLOSE, JOB_SILENT_BREAKAWAY_OK};
-
         assert_eq!(
             (JOB_BREAKAWAY_OK, JOB_SILENT_BREAKAWAY_OK, JOB_ENDS_ON_CLOSE),
             (0x0800, 0x1000, 0x2000)
