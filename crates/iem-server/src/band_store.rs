@@ -635,6 +635,53 @@ mod tests {
         assert_eq!(all.len(), MAX_SNAPSHOTS + 2);
     }
 
+    /// A history entry's timestamp is its id (restore, pin, delete), so two
+    /// entries of one second — the day's auto-snapshot and a manual save, a
+    /// double tap on "Uložiť teraz" — must not share it: E2E run 36371298924
+    /// saved two entries of member6 as 1790564273, and pinning, restoring or
+    /// deleting the newer one reached the older.
+    #[test]
+    fn entries_of_one_second_keep_their_own_ids() {
+        let (_dir, s) = store();
+        let at = |label: &str| Snapshot {
+            timestamp: 1_700_000_000,
+            label: label.into(),
+            ..Snapshot::default()
+        };
+        s.add_snapshot("member1", at(AUTO_LABEL)).unwrap();
+        s.add_snapshot("member1", at("manual")).unwrap();
+        s.add_snapshot("member1", at("tap")).unwrap();
+        let ids = |s: &BandStore| {
+            s.snapshots("member1")
+                .unwrap()
+                .into_iter()
+                .map(|x| (x.timestamp, x.label, x.pinned))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ids(&s),
+            vec![
+                (1_700_000_002, "tap".to_string(), false),
+                (1_700_000_001, "manual".to_string(), false),
+                (1_700_000_000, AUTO_LABEL.to_string(), false),
+            ],
+            "each entry gets the next free second, newest first"
+        );
+        // Each id reaches its own entry.
+        assert!(
+            s.pin_snapshot("member1", 1_700_000_001, true, None)
+                .unwrap()
+        );
+        assert!(s.delete_snapshot("member1", 1_700_000_000).unwrap());
+        assert_eq!(
+            ids(&s),
+            vec![
+                (1_700_000_002, "tap".to_string(), false),
+                (1_700_000_001, "manual".to_string(), true),
+            ]
+        );
+    }
+
     #[test]
     fn the_daily_auto_snapshot_is_found_by_its_utc_day() {
         let (_dir, s) = store();
