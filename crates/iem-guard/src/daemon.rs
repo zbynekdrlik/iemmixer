@@ -38,8 +38,10 @@ use crate::effects::engine::ACTIVE_DB;
 use crate::handover::{self, Audio};
 use crate::install::{self, InstallError};
 use crate::pc::{Audience, EngineSeen, Kid, Pc, Procs, R, StepError};
-use crate::plan::{Facts, Health, Mode, OnError, PrefFail, Step, on_error, plan};
-use crate::proto::{EngineStatus, Reply, Request};
+use crate::plan::{
+    Activation, Busy, Facts, Health, Mode, OnError, PrefFail, Step, activation, on_error, plan,
+};
+use crate::proto::{self, EngineStatus, Reply, Request};
 use crate::site::GuardSite;
 use crate::state::{self, GuardState, InterlockRetry, Switching};
 
@@ -229,6 +231,7 @@ impl View {
             alarms: self.alarms.clone(),
             detail: cut(detail, DETAIL_CHARS),
             engine: self.engine.clone(),
+            guard_build: Some(proto::GUARD_BUILD.to_owned()),
         }
     }
 
@@ -735,6 +738,7 @@ impl Guard {
             alarms: self.alarms.all().to_vec(),
             detail: cut(&text, DETAIL_CHARS),
             engine: self.engine_status(),
+            guard_build: Some(proto::GUARD_BUILD.to_owned()),
         }
     }
 
@@ -1408,14 +1412,26 @@ pub fn activate_files(g: &mut Guard, sha: &str) -> Result<bool, String> {
     Ok(changed)
 }
 
-/// `activate <sha>` (dev only): bin copies, the pin, the bundle's Defender
-/// exclusions; inside a HIL job the engine and the server then run the new
-/// bundle (HIL checks their versions, design §7); last the hand-over to a
-/// changed guard exe (the job is in the state, so the new guard serves it).
+/// `activate <sha>` in dev, or in an idle event (`plan::activation`; #9
+/// 2026-09-28): bin copies, the pin, the bundle's Defender exclusions;
+/// inside a HIL job the engine and the server then run the new bundle (HIL
+/// checks their versions, design §7); last the hand-over to a changed
+/// guard exe (the job is in the state, so the new guard serves it). In
+/// event nothing else happens: REAPER and the app are not touched, and the
+/// new guard starts as after any restart (in event, the event plan's
+/// checks). So a guard fix reaches a guard in event, whose own code may
+/// refuse the dev entry.
 fn activate(pc: &mut dyn Pc, g: &mut Guard, sha: &str) -> (bool, String) {
-    if let Err(why) = g.need_dev("activate") {
-        return (false, why);
-    }
+    let busy = Busy {
+        switching: g.state.switching.is_some(),
+        job: g.state.job,
+        retry: g.state.interlock_retry.as_ref().map(|r| r.target),
+    };
+    let restart_job = match activation(g.state.mode, &pc.facts(), busy) {
+        Activation::Files => false,
+        Activation::FilesThenJobRestart => true,
+        Activation::Refused(why) => return (false, why),
+    };
     if !g.state.bundles.contains_key(sha) {
         return (false, format!("bundle {sha} is not installed"));
     }
@@ -1437,7 +1453,7 @@ fn activate(pc: &mut dyn Pc, g: &mut Guard, sha: &str) -> (bool, String) {
         g.raise(None, &format!("Defender exclusions for {sha}: {e}"), false);
     }
     let mut detail = format!("activated {sha}");
-    if g.state.job.is_some() {
+    if restart_job {
         match restart_in_job(pc, g) {
             Ok(()) => detail.push_str("; the engine and the server run it"),
             Err(why) => return (false, format!("{detail}; {why}")),

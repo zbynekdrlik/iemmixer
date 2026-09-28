@@ -19,6 +19,16 @@ pub const NAME: &str = "iemmixer-guard";
 /// Largest frame body in bytes.
 pub const MAX_FRAME: usize = 64 * 1024;
 
+/// The commit this exe was built from: CI builds every bundle with
+/// `GITHUB_SHA` (the bundle's SHA, as in the engine's `Hello.engine_build`),
+/// "local" outside CI. Every reply names it ([`Reply::guard_build`]), so a
+/// hand-over to a new guard exe is verifiable (`iempc activate`, #9
+/// 2026-09-28).
+pub const GUARD_BUILD: &str = match option_env!("GITHUB_SHA") {
+    Some(sha) => sha,
+    None => "local",
+};
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Request {
@@ -102,6 +112,11 @@ pub struct Reply {
     /// The running engine as the guard sees it; absent while none runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine: Option<EngineStatus>,
+    /// The build of the guard that answered ([`GUARD_BUILD`]; `iemmode
+    /// event --direct`: iemmode's own, the plan runs in that process);
+    /// absent from a guard older than it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard_build: Option<String>,
 }
 
 /// The engine in a [`Reply`] (design §7: HIL v1 reads it through `iemmode
