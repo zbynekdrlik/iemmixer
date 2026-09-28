@@ -3131,6 +3131,23 @@ fn notices_go_to_the_engineers_devices_once() {
     assert_eq!(notified, 2);
 }
 
+/// A guard that starts again (a hand-over, a restart) reads the alarm file
+/// and tries the alarms that never reached a device: only the open ones. An
+/// acknowledged alarm never goes to a phone (#9 2026-09-28: a new guard sent
+/// six acknowledged alarms from the morning once a device existed).
+#[test]
+fn an_acknowledged_alarm_is_never_sent() {
+    let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Dev));
+    g.raise(None, "old, acknowledged", false);
+    let old = g.alarms.last().unwrap().id;
+    assert!(g.alarms.ack(old));
+    g.raise(None, "old, open", false);
+    send_notices(&mut pc, &mut g);
+    let sent: Vec<&str> = pc.notices.iter().map(|n| n.2.as_str()).collect();
+    assert_eq!(sent, ["old, open"]);
+    assert!(!g.alarms.iter().find(|a| a.id == old).unwrap().notified);
+}
+
 // ---- the watch ----
 
 #[test]
