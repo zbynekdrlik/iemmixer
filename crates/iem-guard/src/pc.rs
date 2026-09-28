@@ -257,8 +257,30 @@ pub struct PrecheckFacts {
     pub app_binary: Result<(), String>,
 }
 
-pub fn precheck(f: &PrecheckFacts) -> R<()> {
+/// Why the guard's alarms would reach no phone (design §5.4); `None`: at
+/// least one alarm recipient.
+fn no_recipient(recipients: Option<u32>) -> Option<&'static str> {
+    match recipients {
+        None => Some("the alarm recipients cannot be read"),
+        Some(0) => Some("no alarm recipient: the alarm link was not opened"),
+        Some(_) => None,
+    }
+}
+
+/// How a dev entry's note goes on after [`no_recipient`].
+const DEV_WITHOUT_RECIPIENT: &str =
+    " (not needed for dev: the alarms stay in the guard's alarm file)";
+
+/// The precheck's verdict: `Err` refuses the entry with every problem;
+/// `Ok(Some(note))` lets it go on and names what it found. An alarm
+/// recipient is required for live and live trials only: the alarm link is
+/// served by iem-server, which runs only in dev and live (in event the
+/// predecessor holds the band's address), so the owner can open it only
+/// after the first dev entry (#9, 2026-09-28). Dev without one names it,
+/// and the alarms stay in the guard's alarm file.
+pub fn precheck(f: &PrecheckFacts) -> R<Option<String>> {
     let mut bad = Vec::new();
+    let mut note = None;
     if f.to == Mode::Event {
         bad.push("the precheck is for dev and live".to_owned());
     }
@@ -274,10 +296,12 @@ pub fn precheck(f: &PrecheckFacts) -> R<()> {
                 .to_owned(),
         );
     }
-    match f.recipients {
-        None => bad.push("the alarm recipients cannot be read".to_owned()),
-        Some(0) => bad.push("no alarm recipient: the alarm link was not opened".to_owned()),
-        Some(_) => {}
+    if let Some(why) = no_recipient(f.recipients) {
+        if f.to == Mode::Live || f.trial {
+            bad.push(why.to_owned());
+        } else {
+            note = Some(format!("{why}{DEV_WITHOUT_RECIPIENT}"));
+        }
     }
     if f.foreign_engine {
         bad.push("an engine the guard did not start runs".to_owned());
@@ -286,7 +310,7 @@ pub fn precheck(f: &PrecheckFacts) -> R<()> {
         bad.push(e.clone());
     }
     if bad.is_empty() {
-        Ok(())
+        Ok(note)
     } else {
         Err(StepError::Failed(bad.join("; ")))
     }
@@ -339,9 +363,10 @@ pub trait Pc {
     /// The bundle every start runs from (the current pin); `None`: none, so
     /// every start and the precheck refuse.
     fn set_bundle(&mut self, sha: Option<&str>);
-    /// Bundle installed, `pc_tests_passed` (trial), ≥ 1 alarm recipient, no
-    /// foreign engine, the app's exe hash.
-    fn precheck(&mut self, to: Mode, trial: bool) -> R<()>;
+    /// Bundle installed, `pc_tests_passed` (trial), ≥ 1 alarm recipient
+    /// (live and trials; dev only names a missing one), no foreign engine,
+    /// the app's exe hash. `Some`: what it names without refusing.
+    fn precheck(&mut self, to: Mode, trial: bool) -> R<Option<String>>;
     /// REAPER's stage tracks for `seconds`: the loudest peak of each (dBFS).
     fn reaper_meters(&mut self, seconds: u32, c: &Cancel) -> R<Vec<f64>>;
     /// `iem-engine interlock`: (quiet, its report).
@@ -572,6 +597,8 @@ pub mod fake {
         /// `false`: an engine runs, but its hello and first `Status` have
         /// not come yet, so `engine_seen` answers `None` (as `WinPc` does).
         pub engine_up: bool,
+        /// The alarm recipients the precheck reads (`None`: unreadable).
+        pub recipients: Option<u32>,
         calls: Vec<(Call, Instant)>,
         fails: HashMap<Call, String>,
         blocked: Vec<Call>,
@@ -633,6 +660,7 @@ pub mod fake {
                     pipe_private: true,
                 },
                 engine_up: true,
+                recipients: Some(1),
                 calls: Vec::new(),
                 fails: HashMap::new(),
                 blocked: Vec::new(),
@@ -781,8 +809,18 @@ pub mod fake {
             self.bundle = sha.map(str::to_owned);
         }
 
-        fn precheck(&mut self, _to: Mode, _trial: bool) -> R<()> {
-            self.enter(Call::Precheck, None)
+        fn precheck(&mut self, to: Mode, trial: bool) -> R<Option<String>> {
+            self.enter(Call::Precheck, None)?;
+            // The real verdict over `recipients`; every other fact passes.
+            precheck(&PrecheckFacts {
+                to,
+                trial,
+                bundle: true,
+                pc_tests_passed: true,
+                recipients: self.recipients,
+                foreign_engine: false,
+                app_binary: Ok(()),
+            })
         }
 
         fn reaper_meters(&mut self, _seconds: u32, c: &Cancel) -> R<Vec<f64>> {

@@ -463,6 +463,10 @@ pub struct Guard {
     report: Vec<String>,
     /// A status line (a dropped retry).
     note: Option<String>,
+    /// What the last precheck named without refusing (a dev entry without
+    /// an alarm recipient, #9 2026-09-28); dropped by the next precheck and
+    /// once an alarm reaches a recipient.
+    recipients_note: Option<String>,
     /// REAPER's evaluation notice was open at the last handover check
     /// (`handover::dialogs`); dropped when the guard quits REAPER and while
     /// a check cannot read REAPER.
@@ -510,6 +514,7 @@ impl Guard {
             activity: None,
             report: Vec::new(),
             note: None,
+            recipients_note: None,
             reaper_notice: false,
             crash: CrashLoop::default(),
             respawn_at: None,
@@ -776,6 +781,9 @@ pub fn status_text(g: &Guard) -> String {
     if g.reaper_notice {
         parts.push(handover::NOTICE_REPORT.to_owned());
     }
+    if let Some(n) = &g.recipients_note {
+        parts.push(n.clone());
+    }
     let open = g.alarms.unacked();
     if open > 0 {
         parts.push(format!("{open} unacknowledged alarms"));
@@ -801,6 +809,8 @@ pub fn send_notices(pc: &mut dyn Pc, g: &mut Guard) {
         }
     }
     if sent {
+        // A phone took it: the guard has an alarm recipient now.
+        g.recipients_note = None;
         g.save();
     }
 }
@@ -954,7 +964,14 @@ fn refused(pc: &mut dyn Pc, g: &mut Guard, from: Mode, to: Mode, report: &str) -
 fn run_step(pc: &mut dyn Pc, g: &mut Guard, step: Step, to: Mode, facts: &Facts) -> R<()> {
     let c = g.cancel.clone();
     match step {
-        Step::Precheck => pc.precheck(to, facts.trial),
+        Step::Precheck => {
+            g.recipients_note = None;
+            g.recipients_note = pc.precheck(to, facts.trial)?;
+            if let Some(n) = g.recipients_note.clone() {
+                g.info(n);
+            }
+            Ok(())
+        }
         Step::Interlock => interlock(pc, g, facts, &c),
         Step::AppStop => {
             let exit = pc.app_stop(&c)?;
@@ -1306,7 +1323,8 @@ fn dry_entry(pc: &mut dyn Pc, g: &mut Guard, e: &Entry) -> (bool, String) {
         .unwrap_or_else(|| "none".to_owned());
     let check = pc.precheck(e.to, e.trial);
     let verdict = match &check {
-        Ok(()) => "ok".to_owned(),
+        Ok(None) => "ok".to_owned(),
+        Ok(Some(note)) => format!("ok; {note}"),
         Err(why) => why.to_string(),
     };
     (

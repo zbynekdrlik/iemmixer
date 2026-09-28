@@ -163,7 +163,7 @@ impl Pc for WinPc {
         self.bundle = sha.map(str::to_owned);
     }
 
-    fn precheck(&mut self, to: Mode, trial: bool) -> R<()> {
+    fn precheck(&mut self, to: Mode, trial: bool) -> R<Option<String>> {
         app::precheck(self, to, trial)
     }
 

@@ -208,11 +208,12 @@ fn recipients(pc: &WinPc) -> Option<u32> {
     }
 }
 
-/// Bundle installed, `pc_tests_passed` (trial), ≥ 1 alarm recipient, no
-/// foreign engine, the predecessor's exe as recorded (design §5.2 step 1).
-/// The hash is of `pc.toml app_exe`, and a running app must have been
-/// started from that file, so the hash is the running binary's.
-pub(super) fn precheck(pc: &WinPc, to: Mode, trial: bool) -> R<()> {
+/// Bundle installed, `pc_tests_passed` (trial), ≥ 1 alarm recipient (live
+/// and trials; dev only names a missing one), no foreign engine, the
+/// predecessor's exe as recorded (design §5.2 step 1). The hash is of
+/// `pc.toml app_exe`, and a running app must have been started from that
+/// file, so the hash is the running binary's.
+pub(super) fn precheck(pc: &WinPc, to: Mode, trial: bool) -> R<Option<String>> {
     let bundle = pc.bundle_dir().is_ok_and(|d| d.join(ENGINE_EXE).is_file());
     let running = procs::list(pc);
     let images: Vec<Result<String, String>> = running
