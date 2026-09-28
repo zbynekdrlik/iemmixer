@@ -136,10 +136,19 @@ fn activate_offline(sha: &str) -> ExitCode {
         Ok(pc) => pc,
         Err(e) => return refuse(format!("the guard's settings: {e}")),
     };
+    // The guard's log (no guard writes it while the mutex is held): the
+    // exclude task's answer and this activation stay readable on the PC.
+    init_logging(&pc.settings().logs_dir());
+    tracing::info!(
+        "iemmixer-guard {} ({}) activates {sha} without a guard",
+        env!("CARGO_PKG_VERSION"),
+        proto::GUARD_BUILD
+    );
     let root = pc.settings().pc.root.clone();
     let site = SiteConf::from_site(&pc.settings().guard);
     let mut g = Guard::open(&root, site, Clock::System);
     let reply = daemon::activate_offline(&mut pc, &mut g, Some(lock), sha);
+    tracing::info!("activate {sha} without a guard: {}", reply.detail);
     println!("{}", cli::reply_json(&reply));
     ExitCode::from(cli::exit_code(&reply))
 }
