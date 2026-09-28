@@ -441,19 +441,114 @@ function Test-IemDirectoryAcl {
     return ,$bad
 }
 
+function Test-IemInheritedItem {
+    # A file or folder below the root read back against the root's DACL (design
+    # section 6): it holds nothing of its own (no explicit rule, not protected)
+    # and inherits exactly $Rights, one allow rule per SID (a folder's rules
+    # pass on to its own children). Returns the differences.
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][hashtable]$Rights)
+    $acl = Get-Acl -LiteralPath $Path
+    $flags = 0
+    if ($acl -is [System.Security.AccessControl.DirectorySecurity]) { $flags = 3 }
+    $bad = @()
+    if ($acl.AreAccessRulesProtected) { $bad += "${Path}: inherits nothing from its folder" }
+    $seen = @{}
+    foreach ($r in @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))) {
+        $sid = $r.IdentityReference.Value
+        if (-not $r.IsInherited) { $bad += "${Path}: a rule of its own for $sid"; continue }
+        if (-not $Rights.ContainsKey($sid)) { $bad += "${Path}: an inherited rule for $sid"; continue }
+        if ("$($r.AccessControlType)" -ne 'Allow') { $bad += "${Path}: a deny rule for $sid"; continue }
+        # An allow rule always carries Synchronize (1048576).
+        $want = ([int]$Rights[$sid]) -bor 1048576
+        if ([int]$r.FileSystemRights -ne $want -or [int]$r.InheritanceFlags -ne $flags -or [int]$r.PropagationFlags -ne 0) {
+            $bad += ('{0}: {1}: {2} ({3}, {4})' -f $Path, $sid, $r.FileSystemRights, $r.InheritanceFlags, $r.PropagationFlags)
+        }
+        if ($seen.ContainsKey($sid)) { $bad += "${Path}: two rules for $sid" }
+        $seen[$sid] = $true
+    }
+    foreach ($sid in $Rights.Keys) { if (-not $seen.ContainsKey($sid)) { $bad += "${Path}: no rule for $sid" } }
+    return ,$bad
+}
+
+function Test-IemRootTree {
+    # Every file and folder below the root (design section 6), parents before
+    # their children, read back with Test-IemInheritedItem. A junction or a
+    # link is a difference and is never followed or read through: the
+    # elevated bootstrap changes nothing outside the root. Returns one row per
+    # item that differs: {path, rel (below the root), directory, link, problems}.
+    param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][hashtable]$Rights)
+    $base = (Resolve-Path -LiteralPath $Root).ProviderPath.TrimEnd('\')
+    $rows = @()
+    $dirs = New-Object System.Collections.ArrayList
+    [void]$dirs.Add($base)
+    for ($i = 0; $i -lt $dirs.Count; $i++) {
+        foreach ($item in @(Get-ChildItem -LiteralPath ([string]$dirs[$i]) -Force)) {
+            $path = $item.FullName
+            $isDir = [bool]$item.PSIsContainer
+            $row = [pscustomobject]@{ path = $path; rel = $path.Substring($base.Length + 1); directory = $isDir; link = $false; problems = @() }
+            if (Test-IemReparsePoint -Path $path) {
+                $row.link = $true
+                $row.problems = @("$path is a junction or a link")
+                $rows += $row
+                continue
+            }
+            # Gone since the listing (another process removed or renamed it).
+            if (-not (Test-Path -LiteralPath $path)) { continue }
+            $bad = Test-IemInheritedItem -Path $path -Rights $Rights
+            if ($bad.Count -gt 0) { $row.problems = $bad; $rows += $row }
+            if ($isDir) { [void]$dirs.Add($path) }
+        }
+    }
+    return ,$rows
+}
+
+function Reset-IemInheritedItem {
+    # A file or folder below the root keeps nothing of its own and inherits its
+    # folder's rules again (icacls /reset for this one item): 'D:' is an empty
+    # DACL, present and not protected, so what SetAccessControl leaves on the
+    # item is exactly what it inherits. Never through a junction or a link.
+    param([Parameter(Mandatory)][string]$Path, [switch]$Directory)
+    if (Test-IemReparsePoint -Path $Path) { throw "$Path is a junction or a link: refused" }
+    if ($Directory) { $sec = New-Object System.Security.AccessControl.DirectorySecurity } else { $sec = New-Object System.Security.AccessControl.FileSecurity }
+    $sec.SetSecurityDescriptorSddlForm('D:', [System.Security.AccessControl.AccessControlSections]::Access)
+    if ($Directory) { [IO.Directory]::SetAccessControl($Path, $sec) } else { [IO.File]::SetAccessControl($Path, $sec) }
+}
+
 function Set-IemRootAcl {
     # The PC root (%LOCALAPPDATA%\iemmixer, design section 6): a protected DACL for the
     # user, SYSTEM and Administrators that everything below inherits, so the
-    # staging copies of `iem-migrate band` need no ACL work (#20).
+    # staging copies of `iem-migrate band` need no ACL work (#20). Setting the
+    # root's DACL is not enough for what already exists below it: on the CI
+    # runner (run 36366619573) a file that existed before did not read back
+    # with only the root's rules afterwards, and Windows' propagation never
+    # takes away the rules an item holds of its own nor touches a protected
+    # item. So every item below is read back (Test-IemRootTree) and each one
+    # that differs is reset to inherit only (Reset-IemInheritedItem), parents
+    # first, then all of it is read back. The root or anything below it that
+    # is a junction or a link is refused and never followed. `reset` lists the
+    # items reset, relative to the root.
     param([Parameter(Mandatory)][string]$Root, [string]$User = '')
     $u = Resolve-IemUser -User $User
+    if (Test-IemReparsePoint -Path $Root) { throw "$Root is a junction or a link: refused" }
     if (-not (Test-Path -LiteralPath $Root -PathType Container)) { New-Item -ItemType Directory -Force -Path $Root | Out-Null }
     $rights = Get-IemRootRights -UserSid $u.sid
     $before = Test-IemDirectoryAcl -Path $Root -Rights $rights
     if ($before.Count -gt 0) { Set-IemDirectoryAcl -Path $Root -Rights $rights }
     $after = Test-IemDirectoryAcl -Path $Root -Rights $rights
     if ($after.Count -gt 0) { throw ('root ACL read-back: ' + ($after -join '; ')) }
-    [pscustomobject]@{ root = $Root; user = $u.name; changed = ($before.Count -gt 0); before = $before }
+    $reset = @()
+    $items = Test-IemRootTree -Root $Root -Rights $rights
+    foreach ($it in $items) {
+        if ($it.link) { continue }
+        # A folder reset before it may have brought it back already.
+        if (-not (Test-Path -LiteralPath $it.path)) { continue }
+        if ((Test-IemInheritedItem -Path $it.path -Rights $rights).Count -eq 0) { continue }
+        Reset-IemInheritedItem -Path $it.path -Directory:$it.directory
+        $reset += $it.rel
+    }
+    $left = Test-IemRootTree -Root $Root -Rights $rights
+    if ($left.Count -gt 0) { throw ('root ACL read-back below the root: ' + (@($left | ForEach-Object { $_.problems }) -join '; ')) }
+    [pscustomobject]@{ root = $Root; user = $u.name; changed = ($before.Count -gt 0 -or $reset.Count -gt 0); before = $before; reset = $reset }
 }
 
 function Test-IemReparsePoint {
@@ -1045,7 +1140,8 @@ function Restore-IemPref {
 function Get-IemBootstrapState {
     # Read-only (plan Task 16 Step 1): REAPER and the app running, the driver
     # module's holders, the preference, our tasks and their descriptors, the
-    # root's DACL, the firewall rule, the network categories, Defender.
+    # root's DACL and every item below it, the firewall rule, the network
+    # categories, Defender.
     param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][string]$Module, [Parameter(Mandatory)][string]$PrefKey,
           [Parameter(Mandatory)][string]$PrefName, [Parameter(Mandatory)][string]$AppImage, [string]$ReaperImage = 'reaper',
           [string]$Folder = '\iemmixer', [string]$FirewallRule = 'iemmixer-http', [string]$User = '')
@@ -1064,7 +1160,17 @@ function Get-IemBootstrapState {
     try { $pref = Get-IemPref -Key $PrefKey -Name $PrefName } catch { $prefError = $_.Exception.Message }
     $rootExists = Test-Path -LiteralPath $Root -PathType Container
     $rootBad = @()
-    if ($rootExists) { $rootBad = Test-IemDirectoryAcl -Path $Root -Rights (Get-IemRootRights -UserSid $u.sid) }
+    if ($rootExists) {
+        if (Test-IemReparsePoint -Path $Root) {
+            $rootBad = @("$Root is a junction or a link")
+        } else {
+            # The root's DACL and every item below it (what Set-IemRootAcl sets).
+            $rootRights = Get-IemRootRights -UserSid $u.sid
+            $rootBad = Test-IemDirectoryAcl -Path $Root -Rights $rootRights
+            $below = Test-IemRootTree -Root $Root -Rights $rootRights
+            $rootBad = @($rootBad) + @($below | ForEach-Object { $_.problems })
+        }
+    }
     $fw = Get-IemFirewallRule -Name $FirewallRule
     $defender = 'available'
     try { $null = Get-MpComputerStatus } catch { $defender = 'unavailable: ' + $_.Exception.Message }
