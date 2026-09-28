@@ -168,6 +168,28 @@ fn import_writes_current_and_baseline_with_the_program_counts() {
 }
 
 #[test]
+fn seed_if_absent_writes_current_only_when_it_is_missing() {
+    // A data command runs `import --seed-if-absent` on every dev entry: the
+    // first seeds current.json + baseline.json; a re-seed keeps the band's
+    // live current.json and only refreshes baseline.json (iemmixer#9).
+    let w = World::new(1);
+    let dir = w.path("state");
+    let mut a = import_args(&w, &["--seed-if-absent"]);
+    a.extend(["--state-dir".into(), s(&dir)]);
+    let r1 = run(&a).unwrap();
+    assert!(r1.contains("baseline.json, current.json"), "{r1}");
+    assert!(dir.join("current.json").exists() && dir.join("baseline.json").exists());
+    // A live change to current.json and a removed baseline: the re-seed keeps
+    // the live current.json byte for byte and writes baseline.json again.
+    std::fs::write(dir.join("current.json"), b"LIVE").unwrap();
+    std::fs::remove_file(dir.join("baseline.json")).unwrap();
+    let r2 = run(&a).unwrap();
+    assert!(r2.contains("current.json kept (--seed-if-absent)"), "{r2}");
+    assert_eq!(std::fs::read(dir.join("current.json")).unwrap(), b"LIVE");
+    assert!(dir.join("baseline.json").exists());
+}
+
+#[test]
 fn a_wrong_count_an_unknown_name_or_no_state_dir_fail() {
     let w = World::new(2);
     let e = run(&import_args(&w, &["--dry-run", "--expect", "tracks=44"])).unwrap_err();
