@@ -8,7 +8,7 @@
 //! Also the two pure halves of presets and snapshots: `capture` (the page
 //! mix from the mirror) and `ramp` (applying one as a 50 ms ramp).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -218,13 +218,28 @@ impl BandStore {
             .find(|s| s.timestamp == ts))
     }
 
-    /// Adds a snapshot and prunes the oldest unpinned beyond 50.
-    pub fn add_snapshot(&self, member: &str, snapshot: Snapshot) -> Result<(), StoreError> {
+    /// Adds a snapshot and prunes the oldest unpinned beyond 50; returns the
+    /// timestamp it is stored under. The timestamp is the entry's id
+    /// (restore, pin, delete), so an entry whose second is taken moves to the
+    /// next free second.
+    pub fn add_snapshot(&self, member: &str, mut snapshot: Snapshot) -> Result<i64, StoreError> {
         let _g = self.guard();
         let mut file = self.read::<SnapshotFile>("snapshots", member)?;
+        // Steps over the taken seconds from the entry's own on: the set is
+        // sorted and holds each second once (an older file may hold one
+        // twice), so the walk ends at the first gap.
+        let taken: BTreeSet<i64> = file.snapshots.iter().map(|s| s.timestamp).collect();
+        for &t in taken.range(snapshot.timestamp..) {
+            if t != snapshot.timestamp {
+                break;
+            }
+            snapshot.timestamp += 1;
+        }
+        let id = snapshot.timestamp;
         file.snapshots.push(snapshot);
         prune(&mut file.snapshots);
-        self.write("snapshots", member, &file)
+        self.write("snapshots", member, &file)?;
+        Ok(id)
     }
 
     pub fn delete_snapshot(&self, member: &str, ts: i64) -> Result<bool, StoreError> {
