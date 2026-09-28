@@ -2849,8 +2849,9 @@ fn rehearse_teardown_never_starts_reaper() {
     let r = handle(&mut pc, &mut g, Request::RehearseTeardown, 0);
     assert!(r.ok, "{r:?}");
     assert!(
-        r.detail
-            .starts_with("teardown clean: module unheld, preference original; dev: done"),
+        r.detail.starts_with(
+            "teardown clean: module unheld, preference original, ports 80/443 free; dev: done"
+        ),
         "{}",
         r.detail
     );
@@ -2899,6 +2900,35 @@ fn a_rehearsal_that_finds_problems_says_so() {
         ["rehearsal: teardown problems: the preference needed 1 writes"]
     );
     assert!(pc.called(Call::EngineStart));
+    // Ports 80/443 still held after the teardown: the predecessor could not
+    // serve the band (#9 2026-09-28); an unreadable owner is named too.
+    for (ports, named) in [
+        (
+            Ok((Some(4242), None)),
+            "ports 80/443 are still held (80: 4242, 443: free)",
+        ),
+        (
+            Ok((None, Some(77))),
+            "ports 80/443 are still held (80: free, 443: 77)",
+        ),
+        (Err("no table".to_owned()), "ports 80/443: no table"),
+    ] {
+        let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
+        g.state.pins.current = Some(SHA.into());
+        pc.ports = ports;
+        let r = ask(&mut pc, &mut g, Request::RehearseTeardown);
+        assert!(!r.ok);
+        assert!(
+            r.detail
+                .starts_with(&format!("teardown problems: {named}; dev: done")),
+            "{}",
+            r.detail
+        );
+        assert_eq!(
+            texts(&g),
+            [format!("rehearsal: teardown problems: {named}")]
+        );
+    }
     // A holder that stays and processes that stay are named; the re-entry
     // that then fails stops and asks the owner, never starting REAPER.
     let (mut pc, mut g) = (
