@@ -547,7 +547,9 @@ function Set-IemRootAcl {
     # what lies below, and whether that goes through a junction is not relied
     # on: a root that is a junction or a link, or any junction or link below
     # it, is refused before anything is written, and never followed. `reset`
-    # lists the items reset, relative to the root.
+    # lists the items reset, relative to the root; `differed` what they held,
+    # read right before each reset (after the root's DACL was set), the record
+    # of what the root's DACL alone did not fix.
     param([Parameter(Mandatory)][string]$Root, [string]$User = '')
     $u = Resolve-IemUser -User $User
     if (Test-IemReparsePoint -Path $Root) { throw "$Root is a junction or a link: refused" }
@@ -560,18 +562,21 @@ function Set-IemRootAcl {
     $after = Test-IemDirectoryAcl -Path $Root -Rights $rights
     if ($after.Count -gt 0) { throw ('root ACL read-back: ' + ($after -join '; ')) }
     $reset = @()
+    $differed = @()
     $items = Test-IemRootTree -Root $Root -Rights $rights
     foreach ($it in $items) {
         if ($it.link) { continue }
         # A folder reset before it may have brought it back already.
         if (-not (Test-Path -LiteralPath $it.path)) { continue }
-        if ((Test-IemInheritedItem -Path $it.path -Rights $rights).Count -eq 0) { continue }
+        $bad = Test-IemInheritedItem -Path $it.path -Rights $rights
+        if ($bad.Count -eq 0) { continue }
         Reset-IemInheritedItem -Root $Root -Rel $it.rel -Directory:$it.directory
         $reset += $it.rel
+        $differed += $bad
     }
     $left = Test-IemRootTree -Root $Root -Rights $rights
     if ($left.Count -gt 0) { throw ('root ACL read-back below the root: ' + (@($left | ForEach-Object { $_.problems }) -join '; ')) }
-    [pscustomobject]@{ root = $Root; user = $u.name; changed = ($before.Count -gt 0 -or $reset.Count -gt 0); before = $before; reset = $reset }
+    [pscustomobject]@{ root = $Root; user = $u.name; changed = ($before.Count -gt 0 -or $reset.Count -gt 0); before = $before; reset = $reset; differed = $differed }
 }
 
 function Test-IemReparsePoint {

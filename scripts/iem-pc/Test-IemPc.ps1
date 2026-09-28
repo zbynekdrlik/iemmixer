@@ -205,7 +205,11 @@ try {
     Assert ($childRules.Count -eq 3 -and @($childRules | Where-Object { -not $_.IsInherited -or $_.IdentityReference.Value -eq 'S-1-1-0' }).Count -eq 0) "root-acl-reaches-existing-children ($($childAcl.GetSecurityDescriptorSddlForm('Access')))"
     # Windows' own propagation never takes rules of its own from an item, so
     # these two are always reset by Set-IemRootAcl itself.
-    Assert ((@($a1.reset) -contains 'bundles\own') -and (@($a1.reset) -contains 'bundles\own\y.txt')) "root-acl-resets-the-items-with-rules-of-their-own ($(@($a1.reset) -join ', '))"
+    Assert ((@($a1.reset) -contains 'bundles\own') -and (@($a1.reset) -contains 'bundles\own\y.txt')) "root-acl-resets-the-items-with-rules-of-their-own ($(@($a1.reset) -join ', '); $(@($a1.differed) -join '; '))"
+    # What each item reset held, read after the root's DACL was set: y.txt only
+    # its own rule for Everyone (own, reset before it, passes on the root's rules).
+    $yHeld = @($a1.differed | Where-Object { $_ -like '*\own\y.txt:*' })
+    Assert ($yHeld.Count -eq 1 -and $yHeld[0] -like '*\own\y.txt: a rule of its own for S-1-1-0') "root-acl-reports-what-each-reset-item-held ($(@($a1.differed) -join '; '))"
     foreach ($p in @($own, $ownFile)) {
         $pa = Get-Acl -LiteralPath $p
         $pr = @($pa.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
@@ -248,7 +252,7 @@ try {
     Assert ((OutsideSddl) -ceq $outsideBefore) "root-acl-never-writes-through-a-junction-below-a-loosened-root ($(OutsideSddl))"
     [IO.Directory]::Delete($link)
     $r = Set-IemRootAcl -Root $root
-    Assert ($r.changed -and @($r.before).Count -gt 0) "root-acl-without-the-junction-closes-the-loosened-root ($(@($r.reset) -join ', '))"
+    Assert ($r.changed -and @($r.before).Count -gt 0) "root-acl-without-the-junction-closes-the-loosened-root ($(@($r.reset) -join ', '); $(@($r.differed) -join '; '))"
     # (b) The junction's folder with a rule of its own, for that folder alone
     # (so setting it passes nothing on below), then the junction.
     $bAcl = [IO.Directory]::GetAccessControl($bundles)
