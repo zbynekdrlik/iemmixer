@@ -503,6 +503,14 @@ function Invoke-IemTuningApply { param([string]$ProfilePath, [int]$Tier) return 
     Assert (-not (Test-IemHilSilent -Engine (EngH @()))) 'hil-silent-refuses-no-spare-output'
     Assert (-not (Test-IemHilSilent -Engine (EngU 3000))) 'hil-silent-refuses-a-status-without-hil'
     Assert (-not (Test-IemHilSilent -Engine $null)) 'hil-silent-refuses-no-engine'
+    # A status that carried the signal on some spare output: HIL v1's silence wait takes a
+    # silent status as "after" only once one of these was read.
+    Assert (Test-IemHilHeard -Engine (EngH @(0, 0.001))) 'hil-heard-one-spare-output-that-sounds'
+    Assert (Test-IemHilHeard -Engine (EngH @($lvl, $lvl))) 'hil-heard-every-spare-output-at-the-level'
+    Assert (-not (Test-IemHilHeard -Engine (EngH @(0, 0)))) 'hil-heard-refuses-silence'
+    Assert (-not (Test-IemHilHeard -Engine (EngH @()))) 'hil-heard-refuses-no-spare-output'
+    Assert (-not (Test-IemHilHeard -Engine (EngU 3000))) 'hil-heard-refuses-a-status-without-hil'
+    Assert (-not (Test-IemHilHeard -Engine $null)) 'hil-heard-refuses-no-engine'
     $quietAfter = EngH @(0, 0)
     $sg = Test-IemHilSignal -During @((EngH @(0, 0)), (EngH @($lvl, ($lvl * 0.99))), $null) -After $quietAfter -Dbfs (-30)
     Assert ($sg.ok -and $sg.numbers.outputs -eq 2 -and $sg.numbers.after -eq 0 -and [math]::Abs($sg.numbers.highest_dbfs + 30) -lt 1e-9) "hil-signal-heard-at-the-level-then-silent ($($sg.detail))"
