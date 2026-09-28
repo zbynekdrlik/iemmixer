@@ -6,7 +6,6 @@
 //! history, backups, photos, push, SOS, tunnel health).
 
 pub mod activity;
-pub mod alarm_link;
 pub mod auth;
 pub mod backup;
 pub mod backup_daemon;
@@ -144,7 +143,7 @@ pub struct AppState {
     pub config: Arc<RwLock<Config>>,
     /// The site as loaded at start (members and inputs never change at runtime)
     pub site_config: Arc<Config>,
-    /// The directory of the site file (stores, secrets, alarm subscriptions)
+    /// The directory of the site file (stores, secrets, push subscriptions)
     pub config_dir: Arc<std::path::PathBuf>,
     /// HTTP client (Web Push, public-IP detection)
     pub http_client: reqwest::Client,

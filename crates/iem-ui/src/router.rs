@@ -7,8 +7,7 @@ use leptos_router::path;
 use wasm_bindgen_futures::spawn_local;
 
 use crate::pages::{
-    alarms::AlarmsPage, landing::LandingPage, login::LoginPage, mixer::MixerPage,
-    not_found::NotFoundPage,
+    landing::LandingPage, login::LoginPage, mixer::MixerPage, not_found::NotFoundPage,
 };
 
 /// Main application component with routing
@@ -33,8 +32,6 @@ pub fn App() -> impl IntoView {
             <Routes fallback=|| view! { <NotFoundPage /> }>
                 <Route path=path!("/") view=LandingPage />
                 <Route path=path!("/login") view=LoginPage />
-                // The owner's one-time alarm link (S6); before `/:member`.
-                <Route path=path!("/alarms") view=AlarmsPage />
                 <Route path=path!("/:member") view=MixerPage />
             </Routes>
         </Router>

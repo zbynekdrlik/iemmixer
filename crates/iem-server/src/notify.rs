@@ -1,42 +1,35 @@
-//! Web Push to two audiences that never mix (P9; design note §5.4, a
-//! deviation from spec §4.2, which names the engineer for alarms):
-//!
-//! - the **engineer's** devices (`push_subscriptions.json`, subscribed in
-//!   the mixer UI): SOS (F20) and the band-activity notice (§4.2), from the
-//!   running server or `iem-server notify --to band-activity`;
-//! - the **alarm recipients** (`alarm_subscriptions.json` next to the site
-//!   file: the owner's phone through the one-time link, S6 bootstrap): the
-//!   guard's technical alarms through `iem-server notify --to alarm`, and
-//!   the running server's refused scheduled backup ([`push_alarm`]).
+//! Web Push to the engineer's devices: the mixer app (the PWA) on the
+//! engineer page subscribes them (`push_subscriptions.json`), and
+//! `iem-migrate band` carries the predecessor's over with its VAPID keys.
+//! They are the one audience, the one the predecessor's alerts reached
+//! (owner decision, #9 2026-09-28: "I added the PWA, allowed notifications
+//! and everything worked"): SOS (F20), the band-activity notice (§4.2) and
+//! the technical alarms — the guard's through `iem-server notify --to
+//! alarm`, the running server's refused scheduled backup through
+//! [`push_alarm`].
 //!
 //! Notify mode sends once and exits; `iem-server notify --count alarm`
-//! prints how many alarm recipients there are (the guard's precheck needs
-//! at least one).
+//! prints how many subscriptions an alarm would go to (the guard's precheck
+//! needs at least one for `live` and trials). Both only read.
 
-use std::io::{self, ErrorKind};
 use std::path::Path;
 
 use crate::AppState;
-use crate::push_store::PushSubscription;
+use crate::push_store::{PushStore, PushSubscription};
 
-/// The alarm recipients (same format as the engineer store).
-pub const ALARM_SUBSCRIPTIONS_FILE: &str = "alarm_subscriptions.json";
-
-/// Whom a notice from the command line reaches; there is no other audience.
+/// What a notice from the command line is. It goes to the engineer's
+/// devices, the one audience.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Audience {
-    /// The alarm recipients only: the guard's technical alarms.
+    /// A technical alarm (the guard's).
     Alarm,
-    /// The engineer's devices only: the band-activity notice.
-    BandActivity,
 }
 
 impl Audience {
-    /// `alarm` or `band-activity`.
+    /// `alarm`.
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "alarm" => Some(Self::Alarm),
-            "band-activity" => Some(Self::BandActivity),
             _ => None,
         }
     }
@@ -48,19 +41,6 @@ pub fn alarm_payload(title: &str, body: &str) -> Vec<u8> {
     serde_json::json!({ "type": "ALARM", "title": title, "body": body })
         .to_string()
         .into_bytes()
-}
-
-/// The alarm recipients; none without the file. A file that cannot be read
-/// or parsed is an error: never taken for "none", never overwritten.
-pub fn load_alarm_recipients(config_dir: &Path) -> io::Result<Vec<PushSubscription>> {
-    let path = config_dir.join(ALARM_SUBSCRIPTIONS_FILE);
-    match std::fs::read_to_string(&path) {
-        Ok(text) => serde_json::from_str(&text).map_err(|e| {
-            io::Error::new(ErrorKind::InvalidData, format!("{}: {e}", path.display()))
-        }),
-        Err(e) if e.kind() == ErrorKind::NotFound => Ok(Vec::new()),
-        Err(e) => Err(io::Error::new(e.kind(), format!("{}: {e}", path.display()))),
-    }
 }
 
 /// Sends `payload` to every subscription; returns how many took it.
@@ -85,15 +65,17 @@ pub async fn send_to(
     sent
 }
 
-/// To the engineer's devices: SOS (F20, F21) and the band-activity notice.
-/// Expired subscriptions are dropped from the engineer store.
-pub async fn push_engineers(state: &AppState, payload: &[u8]) {
+/// To the engineer's devices from the running server: SOS (F20, F21), the
+/// band-activity notice and [`push_alarm`]. Expired subscriptions are
+/// dropped from the store. Returns how many devices took it (0 without a
+/// VAPID key).
+pub async fn push_engineers(state: &AppState, payload: &[u8]) -> usize {
     let (key, subject) = {
         let c = state.config.read().await;
         (c.vapid_private_key.clone(), c.vapid_subject.clone())
     };
     if key.is_empty() {
-        return;
+        return 0;
     }
     crate::push::send_push_to_engineers(
         &state.http_client,
@@ -102,32 +84,19 @@ pub async fn push_engineers(state: &AppState, payload: &[u8]) {
         &state.push_store,
         payload,
     )
-    .await;
+    .await
 }
 
-/// To the alarm recipients from the running server (a scheduled backup it
-/// refused, `backup_daemon`): how many devices took it. Never the
-/// engineer's devices; an unreadable recipient file is an error, never
-/// "none", and nothing is pruned.
-pub async fn push_alarm(state: &AppState, title: &str, body: &str) -> io::Result<usize> {
-    let subs = load_alarm_recipients(&state.config_dir)?;
-    let (key, subject) = {
-        let c = state.config.read().await;
-        (c.vapid_private_key.clone(), c.vapid_subject.clone())
-    };
-    Ok(send_to(
-        &state.http_client,
-        &key,
-        &subject,
-        &subs,
-        &alarm_payload(title, body),
-    )
-    .await)
+/// A technical alarm from the running server (a scheduled backup it
+/// refused, `backup_daemon`) to the engineer's devices: how many took it.
+pub async fn push_alarm(state: &AppState, title: &str, body: &str) -> usize {
+    push_engineers(state, &alarm_payload(title, body)).await
 }
 
-/// `iem-server notify --to <audience> <title> <body>`: one notice to that
-/// audience of the site at `config_path`, without a running server. Returns
-/// how many devices took it.
+/// `iem-server notify --to <audience> <title> <body>`: one notice to the
+/// engineer's devices of the site at `config_path`, without a running
+/// server. Returns how many devices took it. It only reads: an expired
+/// subscription is logged, never dropped (the running server does that).
 pub async fn run_cli(
     config_path: &Path,
     to: Audience,
@@ -137,8 +106,7 @@ pub async fn run_cli(
     let config = iem_core::Config::load(config_path)?;
     let dir = crate::provision::config_dir_of(config_path);
     let subs = match to {
-        Audience::Alarm => load_alarm_recipients(&dir)?,
-        Audience::BandActivity => crate::push_store::PushStore::load(&dir).all().to_vec(),
+        Audience::Alarm => PushStore::read(&dir)?,
     };
     if subs.is_empty() {
         return Ok(0);
@@ -159,12 +127,12 @@ pub async fn run_cli(
     .await)
 }
 
-/// `iem-server notify --count alarm`: how many alarm recipients the site at
-/// `config_path` has. It only reads.
+/// `iem-server notify --count alarm`: how many subscriptions an alarm to
+/// the site at `config_path` would go to. It only reads.
 pub fn count_cli(config_path: &Path) -> anyhow::Result<usize> {
     iem_core::Config::load(config_path)?;
     let dir = crate::provision::config_dir_of(config_path);
-    Ok(load_alarm_recipients(&dir)?.len())
+    Ok(PushStore::read(&dir)?.len())
 }
 
 #[cfg(test)]
@@ -181,39 +149,14 @@ mod tests {
         );
     }
 
+    /// The predecessor had one push audience, the engineer's devices, and no
+    /// other kind of notice from the command line (#9 2026-09-28).
     #[test]
-    fn there_are_two_audiences_and_no_other() {
+    fn alarm_is_the_only_notice_from_the_command_line() {
         assert_eq!(Audience::parse("alarm"), Some(Audience::Alarm));
-        assert_eq!(
-            Audience::parse("band-activity"),
-            Some(Audience::BandActivity)
-        );
-        for other in ["engineer", "owner", "all", "Alarm", ""] {
+        for other in ["band-activity", "engineer", "owner", "all", "Alarm", ""] {
             assert_eq!(Audience::parse(other), None, "{other}");
         }
-    }
-
-    #[test]
-    fn alarm_recipients_are_optional_but_never_guessed() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(ALARM_SUBSCRIPTIONS_FILE);
-        assert!(load_alarm_recipients(dir.path()).unwrap().is_empty());
-        std::fs::write(&path, "not json").unwrap();
-        assert_eq!(
-            load_alarm_recipients(dir.path()).unwrap_err().kind(),
-            ErrorKind::InvalidData
-        );
-        let sub = PushSubscription {
-            endpoint: "https://push.example/x".into(),
-            p256dh: "k".into(),
-            auth: "a".into(),
-        };
-        std::fs::write(&path, serde_json::to_string(&vec![sub.clone()]).unwrap()).unwrap();
-        assert_eq!(load_alarm_recipients(dir.path()).unwrap(), vec![sub]);
-        // Something that is not a readable file is an error, not "none".
-        std::fs::remove_file(&path).unwrap();
-        std::fs::create_dir(&path).unwrap();
-        assert!(load_alarm_recipients(dir.path()).is_err());
     }
 
     #[tokio::test]
@@ -237,21 +180,37 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn an_sos_reaches_the_engineers_devices_and_drops_expired_ones() {
-        let (base, seen) = fake_push_service().await;
-        let dir = tempfile::tempdir().unwrap();
+    fn paths(seen: &Seen) -> Vec<String> {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .map(|(path, _, _)| path.clone())
+            .collect()
+    }
+
+    /// The running server's state for a site in `dir` whose engineer store
+    /// holds `endpoints`, with a VAPID key.
+    async fn server(dir: &Path, endpoints: &[String]) -> AppState {
         let config = iem_core::Config {
             vapid_private_key: vapid_private_key(),
             ..iem_core::Config::default()
         };
-        let state = AppState::new(config, dir.path());
+        let state = AppState::new(config, dir);
         {
             let mut store = state.push_store.write().await;
-            store.add(subscription(format!("{base}/201"))).unwrap();
-            store.add(subscription(format!("{base}/410"))).unwrap();
+            for e in endpoints {
+                store.add(subscription(e.clone())).unwrap();
+            }
         }
-        push_engineers(&state, b"sos").await;
+        state
+    }
+
+    #[tokio::test]
+    async fn an_sos_reaches_the_engineers_devices_and_drops_expired_ones() {
+        let (base, seen) = fake_push_service().await;
+        let dir = tempfile::tempdir().unwrap();
+        let state = server(dir.path(), &[format!("{base}/201"), format!("{base}/410")]).await;
+        assert_eq!(push_engineers(&state, b"sos").await, 1);
         assert_eq!(seen.lock().unwrap().len(), 2);
         let left: Vec<String> = state
             .push_store
@@ -264,75 +223,85 @@ mod tests {
         assert_eq!(left, [format!("{base}/201")], "the expired one is gone");
         // Without a VAPID key nothing is sent.
         let bare = AppState::new(iem_core::Config::default(), dir.path());
-        push_engineers(&bare, b"sos").await;
+        assert_eq!(push_engineers(&bare, b"sos").await, 0);
         assert_eq!(seen.lock().unwrap().len(), 2);
     }
 
-    /// A site in a temp directory whose engineer store holds `/201` and
-    /// whose alarm recipients are `/202` (both answered 2xx by the fake push
-    /// service, so the path tells the audience).
-    async fn two_audiences() -> (tempfile::TempDir, std::path::PathBuf, Seen) {
+    #[tokio::test]
+    async fn a_server_alarm_reaches_the_engineers_devices() {
         let (base, seen) = fake_push_service().await;
+        let dir = tempfile::tempdir().unwrap();
+        let state = server(dir.path(), &[format!("{base}/201"), format!("{base}/410")]).await;
+        assert_eq!(push_alarm(&state, "Záloha zlyhala", "B").await, 1);
+        assert_eq!(paths(&seen), ["/201", "/410"]);
+        assert_eq!(
+            state.push_store.read().await.all().len(),
+            1,
+            "the expired one is gone"
+        );
+        let empty = tempfile::tempdir().unwrap();
+        let none = server(empty.path(), &[]).await;
+        assert_eq!(push_alarm(&none, "T", "B").await, 0, "no subscription");
+        assert_eq!(paths(&seen).len(), 2);
+    }
+
+    /// A site in a temp directory whose server has run (its runtime secrets
+    /// exist: a notice only reads them) and whose engineer store holds
+    /// `endpoints` (the store's own write: marker and file).
+    fn cli_site(endpoints: &[String]) -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let site = dir.path().join("iemmixer.toml");
         std::fs::write(&site, "port = 8080\n").unwrap();
-        // A site whose server has run: its runtime secrets exist (a notice
-        // only reads them).
         crate::secrets::load_or_create(&dir.path().join(crate::secrets::SECRETS_DIR)).unwrap();
-        crate::push_store::PushStore::load(dir.path())
-            .add(subscription(format!("{base}/201")))
-            .unwrap();
-        std::fs::write(
-            dir.path().join(ALARM_SUBSCRIPTIONS_FILE),
-            serde_json::to_string(&vec![subscription(format!("{base}/202"))]).unwrap(),
-        )
-        .unwrap();
-        (dir, site, seen)
-    }
-
-    fn paths(seen: &Seen) -> Vec<String> {
-        seen.lock()
-            .unwrap()
-            .iter()
-            .map(|(path, _, _)| path.clone())
-            .collect()
+        let mut store = PushStore::load(dir.path());
+        for e in endpoints {
+            store.add(subscription(e.clone())).unwrap();
+        }
+        (dir, site)
     }
 
     #[tokio::test]
-    async fn an_alarm_reaches_only_the_alarm_recipients() {
-        let (_dir, site, seen) = two_audiences().await;
+    async fn an_alarm_reaches_the_engineers_devices_and_prunes_nothing() {
+        let (base, seen) = fake_push_service().await;
+        let (dir, site) = cli_site(&[format!("{base}/201"), format!("{base}/410")]);
         assert_eq!(
             run_cli(&site, Audience::Alarm, "Strážca", "B")
                 .await
                 .unwrap(),
             1
         );
-        assert_eq!(paths(&seen), ["/202"]);
-    }
-
-    #[tokio::test]
-    async fn a_band_activity_notice_never_reaches_an_alarm_recipient() {
-        let (_dir, site, seen) = two_audiences().await;
+        assert_eq!(paths(&seen), ["/201", "/410"]);
         assert_eq!(
-            run_cli(&site, Audience::BandActivity, "Kapela hrá", "B")
-                .await
-                .unwrap(),
-            1
+            PushStore::read(dir.path()).unwrap().len(),
+            2,
+            "notify mode only reads: the expired one stays"
         );
-        assert_eq!(paths(&seen), ["/201"]);
     }
 
     #[tokio::test]
-    async fn an_alarm_with_only_engineer_subscriptions_reaches_nobody() {
-        let (dir, site, seen) = two_audiences().await;
-        std::fs::remove_file(dir.path().join(ALARM_SUBSCRIPTIONS_FILE)).unwrap();
+    async fn an_alarm_without_a_subscription_reaches_nobody() {
+        let (base, seen) = fake_push_service().await;
+        let (dir, site) = cli_site(&[]);
         assert_eq!(
             run_cli(&site, Audience::Alarm, "Strážca", "B")
                 .await
                 .unwrap(),
             0
         );
-        assert!(paths(&seen).is_empty(), "the engineer got nothing");
+        // A list the server's first start would empty (no marker) is none.
+        std::fs::remove_file(dir.path().join("push_subs_v2_migrated")).unwrap();
+        std::fs::write(
+            dir.path().join("push_subscriptions.json"),
+            serde_json::to_string(&vec![subscription(format!("{base}/201"))]).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            run_cli(&site, Audience::Alarm, "Strážca", "B")
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(paths(&seen).is_empty());
         assert!(
             run_cli(&dir.path().join("missing.toml"), Audience::Alarm, "T", "B")
                 .await
@@ -341,21 +310,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_server_alarm_reaches_only_the_alarm_recipients() {
-        let (dir, _site, seen) = two_audiences().await;
-        let config = iem_core::Config {
-            vapid_private_key: vapid_private_key(),
-            ..iem_core::Config::default()
-        };
-        let state = AppState::new(config, dir.path());
-        assert_eq!(push_alarm(&state, "Záloha zlyhala", "B").await.unwrap(), 1);
-        assert_eq!(paths(&seen), ["/202"], "never the engineer's device");
-        std::fs::write(dir.path().join(ALARM_SUBSCRIPTIONS_FILE), "[oops").unwrap();
+    async fn an_unreadable_subscription_list_is_an_error() {
+        let (dir, site) = cli_site(&[]);
+        std::fs::write(dir.path().join("push_subscriptions.json"), "[oops").unwrap();
         assert!(
-            push_alarm(&state, "T", "B").await.is_err(),
-            "an unreadable recipient file is not \"none\""
+            run_cli(&site, Audience::Alarm, "T", "B").await.is_err(),
+            "an unreadable list is not \"none\""
         );
-        assert_eq!(paths(&seen), ["/202"]);
+        assert!(count_cli(&site).is_err());
     }
 
     /// A notice never creates the runtime secrets: before the first band
@@ -368,17 +330,22 @@ mod tests {
         let site = dir.path().join("iemmixer.toml");
         std::fs::write(&site, "port = 8080\n").unwrap();
         let secrets = dir.path().join(crate::secrets::SECRETS_DIR);
-        // No recipient: nothing to send, nothing read or written.
+        // No subscription: nothing to send, nothing read or written.
         assert_eq!(run_cli(&site, Audience::Alarm, "T", "B").await.unwrap(), 0);
-        assert!(!secrets.exists(), "no recipient: no secret made");
-        // A recipient but no VAPID key yet: an error, still nothing made.
+        assert!(!secrets.exists(), "no subscription: no secret made");
+        assert!(
+            !dir.path().join("push_subs_v2_migrated").exists(),
+            "no marker made"
+        );
+        // A subscription but no VAPID key yet: an error, still nothing made.
+        std::fs::write(dir.path().join("push_subs_v2_migrated"), b"").unwrap();
         let sub = PushSubscription {
             endpoint: "https://push.example/1".into(),
             p256dh: "k".into(),
             auth: "a".into(),
         };
         std::fs::write(
-            dir.path().join(ALARM_SUBSCRIPTIONS_FILE),
+            dir.path().join("push_subscriptions.json"),
             serde_json::to_string(&vec![sub]).unwrap(),
         )
         .unwrap();
@@ -388,7 +355,7 @@ mod tests {
     }
 
     #[test]
-    fn the_count_is_the_number_of_alarm_recipients() {
+    fn the_count_is_the_number_of_the_engineers_subscriptions() {
         let dir = tempfile::tempdir().unwrap();
         let site = dir.path().join("iemmixer.toml");
         std::fs::write(&site, "port = 8080\n").unwrap();
@@ -398,18 +365,23 @@ mod tests {
             p256dh: "k".into(),
             auth: "a".into(),
         };
-        std::fs::write(
-            dir.path().join(ALARM_SUBSCRIPTIONS_FILE),
-            serde_json::to_string(&vec![sub(1), sub(2)]).unwrap(),
-        )
-        .unwrap();
+        let two = serde_json::to_string(&vec![sub(1), sub(2)]).unwrap();
+        std::fs::write(dir.path().join("push_subscriptions.json"), &two).unwrap();
+        assert_eq!(
+            count_cli(&site).unwrap(),
+            0,
+            "no marker: the server's first start empties the list"
+        );
+        std::fs::write(dir.path().join("push_subs_v2_migrated"), b"").unwrap();
         assert_eq!(count_cli(&site).unwrap(), 2);
-        std::fs::write(dir.path().join(ALARM_SUBSCRIPTIONS_FILE), "[oops").unwrap();
-        assert!(count_cli(&site).is_err(), "unreadable is not zero");
         assert!(count_cli(&dir.path().join("missing.toml")).is_err());
         assert!(
             !dir.path().join(crate::secrets::SECRETS_DIR).exists(),
             "counting writes nothing"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("push_subscriptions.json")).unwrap(),
+            two
         );
     }
 }

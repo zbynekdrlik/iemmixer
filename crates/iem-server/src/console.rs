@@ -257,9 +257,8 @@ async fn meter_task(state: AppState) {
 }
 
 /// The alarm turned on or off: engineer pages get the banner state, and when
-/// it turned on the engineer's devices get the band-activity notice — never
-/// an alarm recipient, who gets only the guard's technical alarms (P9,
-/// design note §5.4). Returns the push task.
+/// it turned on the engineer's devices get the band-activity notice (design
+/// note §5.4). Returns the push task.
 fn activity_changed(state: &AppState, on: bool) -> Option<tokio::task::JoinHandle<()>> {
     state
         .activity
@@ -603,7 +602,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_band_activity_notice_reaches_the_engineers_devices_only() {
+    async fn the_band_activity_notice_reaches_the_engineers_devices() {
         use crate::push::tests::{fake_push_service, subscription, vapid_private_key};
         let (base, seen) = fake_push_service().await;
         let dir = tempfile::tempdir().unwrap();
@@ -617,11 +616,6 @@ mod tests {
             .await
             .add(subscription(format!("{base}/201")))
             .unwrap();
-        std::fs::write(
-            dir.path().join(crate::notify::ALARM_SUBSCRIPTIONS_FILE),
-            serde_json::to_string(&vec![subscription(format!("{base}/202"))]).unwrap(),
-        )
-        .unwrap();
         let push = activity_changed(&s, true).expect("a notice when it turns on");
         tokio::time::timeout(Duration::from_secs(10), push)
             .await
@@ -633,7 +627,7 @@ mod tests {
             .iter()
             .map(|(path, _, _)| path.clone())
             .collect();
-        assert_eq!(paths, ["/201"], "the engineer's device, no alarm recipient");
+        assert_eq!(paths, ["/201"], "the engineer's device");
         assert!(s.activity.load(std::sync::atomic::Ordering::Acquire));
         assert!(
             activity_changed(&s, false).is_none(),
