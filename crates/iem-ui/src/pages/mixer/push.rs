@@ -375,7 +375,7 @@ pub(crate) fn unsubscribe_from_push() {
 /// Decode the server's VAPID public key: base64url without padding, as the
 /// server encodes it (`Config::vapid_public_key_base64url`). Pure Rust, so it
 /// needs no browser `atob` and is tested natively.
-pub(crate) fn base64url_decode(input: &str) -> Option<Vec<u8>> {
+fn base64url_decode(input: &str) -> Option<Vec<u8>> {
     use base64::Engine as _;
     base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(input)

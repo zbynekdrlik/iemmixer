@@ -133,86 +133,24 @@ fn no_arguments_run_the_server_which_needs_the_site_config() {
     assert!(!stderr.contains("usage"), "stderr: {stderr}");
 }
 
-#[test]
-fn alarm_link_prints_a_one_time_url_and_stores_only_its_hash() {
-    let dir = site_dir();
-    let site = dir.path().join("iemmixer.toml");
+/// The engineer's push store as the server leaves it (its one-time cleanup
+/// marker and the list), holding `endpoints`.
+fn engineer_subscriptions(dir: &std::path::Path, endpoints: &[&str]) {
+    std::fs::write(dir.join("push_subs_v2_migrated"), "").unwrap();
+    let subs: Vec<serde_json::Value> = endpoints
+        .iter()
+        .map(|e| serde_json::json!({"endpoint": e, "p256dh": "k", "auth": "a"}))
+        .collect();
     std::fs::write(
-        &site,
-        format!("https_domain = \"mixer.example.org\"\n{SITE}"),
+        dir.join("push_subscriptions.json"),
+        serde_json::to_string(&subs).unwrap(),
     )
     .unwrap();
-    let out = run_pin(dir.path(), &["alarm-link", "--ttl-h", "2"], "");
-    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-    assert!(out.status.success(), "stderr: {stderr}");
-    let stdout = String::from_utf8(out.stdout).unwrap();
-    let token = stdout
-        .trim_end()
-        .strip_prefix("https://mixer.example.org/alarms?t=")
-        .unwrap_or_else(|| panic!("stdout: {stdout}"));
-    assert_eq!(token.len(), 22);
-    let stored = std::fs::read_to_string(dir.path().join("alarm_link.json")).unwrap();
-    assert!(!stored.contains(token), "only the hash is stored");
-    assert!(stderr.contains("once within 2 h"), "stderr: {stderr}");
-}
-
-#[test]
-fn alarm_link_refuses_bad_arguments_and_a_site_without_an_address() {
-    let dir = site_dir();
-    for args in [
-        &["alarm-link", "--ttl-h", "0"][..],
-        &["alarm-link", "--ttl-h", "169"][..],
-        &["alarm-link", "24"][..],
-    ] {
-        assert_eq!(
-            run_pin(dir.path(), args, "").status.code(),
-            Some(2),
-            "{args:?}"
-        );
-    }
-    let out = run_pin(dir.path(), &["alarm-link"], "");
-    assert_eq!(out.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("no https address"));
-    assert!(!dir.path().join("alarm_link.json").exists());
-    // Phones take Web Push only over https: a plain-http LAN URL is no address.
-    std::fs::write(
-        dir.path().join("iemmixer.toml"),
-        format!("lan_url = \"http://10.0.0.10\"\n{SITE}"),
-    )
-    .unwrap();
-    let out = run_pin(dir.path(), &["alarm-link"], "");
-    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-    assert_eq!(out.status.code(), Some(1), "stderr: {stderr}");
-    assert!(stderr.contains("only over https"), "stderr: {stderr}");
-    assert!(!dir.path().join("alarm_link.json").exists());
 }
 
 #[test]
 fn notify_without_a_subscription_exits_3() {
     let dir = site_dir();
-    for to in ["alarm", "band-activity"] {
-        let out = run_pin(
-            dir.path(),
-            &["notify", "--to", to, "Kapela hrá", "test"],
-            "",
-        );
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert_eq!(out.status.code(), Some(3), "{to}: {stderr}");
-        assert!(stderr.contains("no device"), "{to}: {stderr}");
-    }
-}
-
-#[test]
-fn an_alarm_with_only_engineer_subscriptions_exits_3() {
-    // The engineer's store holds a device; alarms go to alarm recipients
-    // only, and there are none.
-    let dir = site_dir();
-    std::fs::write(dir.path().join("push_subs_v2_migrated"), "").unwrap();
-    std::fs::write(
-        dir.path().join("push_subscriptions.json"),
-        r#"[{"endpoint":"https://push.example.org/engineer","p256dh":"k","auth":"a"}]"#,
-    )
-    .unwrap();
     let out = run_pin(
         dir.path(),
         &["notify", "--to", "alarm", "Strážca", "test"],
@@ -226,16 +164,36 @@ fn an_alarm_with_only_engineer_subscriptions_exits_3() {
     );
 }
 
+/// The guard's alarms go to the engineer's subscriptions (#9 2026-09-28):
+/// with one, the notice gets as far as the VAPID key, which a notice never
+/// creates (exit 1, no secret made).
 #[test]
-fn notify_knows_only_the_two_audiences() {
+fn an_alarm_goes_to_the_engineers_subscriptions() {
+    let dir = site_dir();
+    engineer_subscriptions(dir.path(), &["https://push.example.org/engineer"]);
+    let out = run_pin(
+        dir.path(),
+        &["notify", "--to", "alarm", "Strážca", "test"],
+        "",
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "stderr: {stderr}");
+    assert!(stderr.contains("vapid"), "stderr: {stderr}");
+    assert!(!dir.path().join("secrets").exists());
+}
+
+#[test]
+fn notify_knows_only_alarms() {
     let dir = site_dir();
     for args in [
         &["notify", "only a title"][..],
         &["notify", "Kapela hrá", "test"][..],
         &["notify", "--to", "engineer", "T", "B"][..],
+        &["notify", "--to", "band-activity", "T", "B"][..],
         &["notify", "--to", "alarm", "T"][..],
         &["notify", "--count", "band-activity"][..],
         &["notify", "--count"][..],
+        &["alarm-link"][..],
     ] {
         assert_eq!(
             run_pin(dir.path(), args, "").status.code(),
@@ -246,7 +204,7 @@ fn notify_knows_only_the_two_audiences() {
 }
 
 #[test]
-fn notify_count_prints_the_alarm_recipients() {
+fn notify_count_prints_the_engineers_subscriptions() {
     let dir = site_dir();
     let count = |dir: &std::path::Path| {
         let out = run_pin(dir, &["notify", "--count", "alarm"], "");
@@ -254,12 +212,11 @@ fn notify_count_prints_the_alarm_recipients() {
         (out.status.code(), stdout)
     };
     assert_eq!(count(dir.path()), (Some(0), "0\n".to_string()));
-    std::fs::write(
-        dir.path().join("alarm_subscriptions.json"),
-        r#"[{"endpoint":"https://push.example.org/1","p256dh":"k","auth":"a"}]"#,
-    )
-    .unwrap();
-    assert_eq!(count(dir.path()), (Some(0), "1\n".to_string()));
-    std::fs::write(dir.path().join("alarm_subscriptions.json"), "[oops").unwrap();
+    engineer_subscriptions(
+        dir.path(),
+        &["https://push.example.org/1", "https://push.example.org/2"],
+    );
+    assert_eq!(count(dir.path()), (Some(0), "2\n".to_string()));
+    std::fs::write(dir.path().join("push_subscriptions.json"), "[oops").unwrap();
     assert_eq!(count(dir.path()), (Some(1), String::new()));
 }

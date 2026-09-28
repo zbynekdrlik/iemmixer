@@ -1,6 +1,5 @@
 //! Page components
 
-pub mod alarms;
 pub mod landing;
 pub mod login;
 pub mod mixer;

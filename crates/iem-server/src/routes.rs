@@ -87,13 +87,6 @@ pub fn api_routes(_state: AppState) -> Router<AppState> {
         )
         .route("/api/push/subscribe", post(push_subscribe))
         .route("/api/push/unsubscribe", post(push_unsubscribe))
-        // The owner's one-time alarm link (S6): public, the token is the
-        // credential; 4_096 bytes hold a browser subscription (pinned by
-        // the alarm_link tests).
-        .route(
-            "/api/alarms/subscribe",
-            post(crate::alarm_link::subscribe).layer(axum::extract::DefaultBodyLimit::max(4_096)),
-        )
         // The engineer's "Back to REAPER" (§4.3)
         .route("/api/mode/event", post(crate::console::back_to_reaper))
         // The mixer page's WebSocket

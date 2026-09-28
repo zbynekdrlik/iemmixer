@@ -266,7 +266,8 @@ function Invoke-HilChecks {
     $pk = Test-IemHilPanic -Before (Get-IemProp $before 'engine') -Respawned (Get-IemProp $respawned 'engine') -Later (Get-IemProp $later 'engine')
     Add-HilCheck 'panic' ($injected -and $pk.ok) ('{0}; {1}' -f (Get-IemModeText -Result $r), $pk.detail) $pk.numbers
 
-    # The alarm push to the alarm recipients.
+    # The alarm push: iemmode alarm-test must reach at least one of the
+    # engineer's devices (the PWA's notification subscriptions).
     $r = Invoke-Hil -A @('alarm-test')
     if ($script:cancelled) { return }
     Add-HilCheck 'alarm-push' (Test-IemModeOk -Result $r) (Get-IemModeText -Result $r)

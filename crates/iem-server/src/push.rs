@@ -149,27 +149,26 @@ pub async fn send_push(
     }
 }
 
-/// Send push to all engineer subscriptions. Removes expired ones.
+/// Send push to all engineer subscriptions. Removes expired ones. Returns
+/// how many took it.
 pub async fn send_push_to_engineers(
     client: &reqwest::Client,
     vapid_key: &str,
     subject: &str,
     push_store: &std::sync::Arc<tokio::sync::RwLock<crate::push_store::PushStore>>,
     payload: &[u8],
-) {
+) -> usize {
     let subs = {
         let store = push_store.read().await;
         store.all().to_vec()
     };
 
-    if subs.is_empty() {
-        return;
-    }
-
+    let mut sent = 0;
     let mut expired = Vec::new();
     for sub in &subs {
         match send_push(client, vapid_key, subject, sub, payload).await {
             Ok(true) => {
+                sent += 1;
                 tracing::debug!(
                     "push sent to {}",
                     &sub.endpoint[..50.min(sub.endpoint.len())]
@@ -191,6 +190,7 @@ pub async fn send_push_to_engineers(
             store.remove_endpoint(&endpoint);
         }
     }
+    sent
 }
 
 #[cfg(test)]
@@ -342,7 +342,7 @@ pub(crate) mod tests {
             s.add(live.clone()).unwrap();
             s.add(gone).unwrap();
         }
-        send_push_to_engineers(
+        let sent = send_push_to_engineers(
             &reqwest::Client::new(),
             &vapid_private_key(),
             SUBJECT,
@@ -350,6 +350,7 @@ pub(crate) mod tests {
             b"alert",
         )
         .await;
+        assert_eq!(sent, 1, "only the live one took it");
         assert_eq!(
             seen.lock().unwrap().len(),
             2,

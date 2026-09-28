@@ -467,9 +467,9 @@ pub struct Guard {
     /// A status line (a dropped retry).
     note: Option<String>,
     /// What the last precheck named without refusing (a dev entry without
-    /// an alarm recipient, #9 2026-09-28); dropped by the next precheck and
-    /// once an alarm reaches a recipient.
-    recipients_note: Option<String>,
+    /// a PWA notification subscription, #9 2026-09-28); dropped by the next
+    /// precheck and once an alarm reaches a device.
+    subscriptions_note: Option<String>,
     /// What the last identity check named about the LAN certificate
     /// without failing (outside its validity, `tls::note`; #9 2026-09-28);
     /// dropped by the next check.
@@ -524,7 +524,7 @@ impl Guard {
             activity: None,
             report: Vec::new(),
             note: None,
-            recipients_note: None,
+            subscriptions_note: None,
             lan_note: None,
             job_note: None,
             reaper_notice: false,
@@ -644,7 +644,7 @@ impl Guard {
     }
 
     /// Raises an alarm: kept in the alarm file and shown on every reply.
-    /// Its notice to the alarm recipients goes out with [`send_notices`]
+    /// Its notice to the engineer's devices goes out with [`send_notices`]
     /// once the request or the watch is done, so a notice never delays
     /// REAPER. Returns its id.
     pub fn raise(&mut self, step: Option<Step>, text: &str, owner_question: bool) -> u64 {
@@ -797,7 +797,7 @@ pub fn status_text(g: &Guard) -> String {
     if let Some(n) = &g.state.pref_held {
         parts.push(n.clone());
     }
-    if let Some(n) = &g.recipients_note {
+    if let Some(n) = &g.subscriptions_note {
         parts.push(n.clone());
     }
     if let Some(n) = &g.lan_note {
@@ -814,7 +814,8 @@ pub fn status_text(g: &Guard) -> String {
 }
 
 /// Sends the notices of the alarms raised since the last try, once each, to
-/// the alarm recipients only (design §5.4).
+/// the engineer's devices: the PWA's notification subscriptions (design
+/// §5.4, #9 2026-09-28).
 pub fn send_notices(pc: &mut dyn Pc, g: &mut Guard) {
     let due: Vec<(u64, String)> = g
         .alarms
@@ -831,8 +832,8 @@ pub fn send_notices(pc: &mut dyn Pc, g: &mut Guard) {
         }
     }
     if sent {
-        // A phone took it: the guard has an alarm recipient now.
-        g.recipients_note = None;
+        // A phone took it: the guard has a PWA notification subscription now.
+        g.subscriptions_note = None;
         g.save();
     }
 }
@@ -987,9 +988,9 @@ fn run_step(pc: &mut dyn Pc, g: &mut Guard, step: Step, to: Mode, facts: &Facts)
     let c = g.cancel.clone();
     match step {
         Step::Precheck => {
-            g.recipients_note = None;
-            g.recipients_note = pc.precheck(to, facts.trial)?;
-            if let Some(n) = g.recipients_note.clone() {
+            g.subscriptions_note = None;
+            g.subscriptions_note = pc.precheck(to, facts.trial)?;
+            if let Some(n) = g.subscriptions_note.clone() {
                 g.info(n);
             }
             Ok(())
@@ -1395,7 +1396,8 @@ fn entry(pc: &mut dyn Pc, g: &mut Guard, e: Entry) -> (bool, String) {
 }
 
 /// `dev|live --dry-run`: the plan and the read-only checks (the precheck's
-/// bundle, alarm recipients, foreign engine and app exe), nothing changed.
+/// bundle, PWA notification subscriptions, foreign engine and app exe),
+/// nothing changed.
 fn dry_entry(pc: &mut dyn Pc, g: &mut Guard, e: &Entry) -> (bool, String) {
     let facts = Facts {
         trial: e.trial,
@@ -1838,7 +1840,7 @@ fn alarm_test(pc: &mut dyn Pc, g: &mut Guard) -> (bool, String) {
     send_notices(pc, g);
     let sent = g.alarms.iter().any(|a| a.id == id && a.notified);
     let text = if sent {
-        "the test alarm reached the alarm recipients"
+        "the test alarm reached the engineer's devices"
     } else {
         "the test alarm was not delivered"
     };

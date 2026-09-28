@@ -187,8 +187,9 @@ fn exe_sha256(path: &Path) -> Result<String, String> {
     bundle::sha256_read(file).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// `iem-server notify --count alarm` from the bundle.
-fn recipients(pc: &WinPc) -> Option<u32> {
+/// `iem-server notify --count alarm` from the bundle: the PWA notification
+/// subscriptions an alarm goes to.
+fn subscriptions(pc: &WinPc) -> Option<u32> {
     let exe = pc.bundle_dir().ok()?.join(SERVER_EXE);
     let mut cmd = Command::new(exe);
     cmd.args(["notify", "--count", "alarm"])
@@ -200,16 +201,17 @@ fn recipients(pc: &WinPc) -> Option<u32> {
         &Cancel::default(),
         OnCancel::Finish,
     ) {
-        Ok(out) => http::recipients(out.code, &out.stdout),
+        Ok(out) => http::subscriptions(out.code, &out.stdout),
         Err(e) => {
-            warn!("the alarm recipients: {e}");
+            warn!("the PWA notification subscriptions: {e}");
             None
         }
     }
 }
 
-/// Bundle installed, `pc_tests_passed` (trial), ≥ 1 alarm recipient (live
-/// and trials; dev only names a missing one), no foreign engine, the
+/// Bundle installed, `pc_tests_passed` (trial), ≥ 1 PWA notification
+/// subscription (live and trials; dev only names a missing one), no foreign
+/// engine, the
 /// predecessor's exe as recorded (design §5.2 step 1). The hash is of
 /// `pc.toml app_exe`, and a running app must have been started from that
 /// file, so the hash is the running binary's.
@@ -230,7 +232,7 @@ pub(super) fn precheck(pc: &WinPc, to: Mode, trial: bool) -> R<Option<String>> {
         trial,
         bundle,
         pc_tests_passed: pc.s.guard.pc_tests_passed,
-        recipients: recipients(pc),
+        subscriptions: subscriptions(pc),
         foreign_engine: foreign_engine(&running.engine, pc.kids.pid(Kid::Engine)),
         app_binary,
     })

@@ -5,11 +5,9 @@
 //!   iem-server pin set-engineer     read a PIN from stdin, store its hash as the engineer PIN
 //!   iem-server pin set-member <id>  read a PIN from stdin, store its hash for member <id>
 //!   iem-server notify --to alarm <title> <body>
-//!                                   push a technical alarm to the alarm recipients only
-//!   iem-server notify --to band-activity <title> <body>
-//!                                   push the band-activity notice to the engineer's devices only
-//!   iem-server notify --count alarm print the number of alarm recipients
-//!   iem-server alarm-link [--ttl-h N]  print the owner's one-time alarm link (default 24 h)
+//!                                   push a technical alarm to the engineer's devices
+//!                                   (the mixer app's notification subscriptions)
+//!   iem-server notify --count alarm print the number of those subscriptions
 //!
 //! The site config is `$IEMMIXER_CONFIG` (default `iemmixer.toml`); runtime
 //! data and secrets live next to it. `IEMMIXER_ENGINE_PIPE` overrides the
@@ -27,7 +25,7 @@ use iem_server::notify::Audience;
 use iem_server::provision::{self, PinTarget, ProvisionError};
 use iem_server::{RunMode, ServerConfig};
 
-const USAGE: &str = "usage: iem-server [pin set-engineer | pin set-member <member-id> | notify --to alarm|band-activity <title> <body> | notify --count alarm | alarm-link [--ttl-h <hours>]]   (a PIN is read from stdin)";
+const USAGE: &str = "usage: iem-server [pin set-engineer | pin set-member <member-id> | notify --to alarm <title> <body> | notify --count alarm]   (a PIN is read from stdin)";
 
 fn config_path() -> PathBuf {
     PathBuf::from(std::env::var("IEMMIXER_CONFIG").unwrap_or_else(|_| "iemmixer.toml".to_string()))
@@ -51,7 +49,6 @@ fn main() -> ExitCode {
             None => usage(),
         },
         ["notify", "--count", "alarm"] => count_command(),
-        ["alarm-link", rest @ ..] => alarm_link_command(rest),
         _ => usage(),
     }
 }
@@ -80,8 +77,8 @@ fn pin_command(target: PinTarget) -> ExitCode {
     }
 }
 
-/// Exit 0 when a device took the notice, 3 when none did (no recipient of
-/// that audience, or every push failed), 1 on an error.
+/// Exit 0 when a device took the notice, 3 when none did (no subscription,
+/// or every push failed), 1 on an error.
 fn notify_command(to: Audience, title: &str, body: &str) -> ExitCode {
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(r) => r,
@@ -106,33 +103,12 @@ fn notify_command(to: Audience, title: &str, body: &str) -> ExitCode {
     }
 }
 
-/// Prints the number of alarm recipients on stdout (exit 0); 1 on an error.
+/// Prints the number of the engineer's push subscriptions on stdout (exit
+/// 0); 1 on an error.
 fn count_command() -> ExitCode {
     match iem_server::notify::count_cli(&config_path()) {
         Ok(n) => {
             println!("{n}");
-            ExitCode::SUCCESS
-        }
-        Err(e) => {
-            eprintln!("iem-server: {e:#}");
-            ExitCode::FAILURE
-        }
-    }
-}
-
-/// Prints the link on stdout (exit 0); 2 for bad arguments, 1 on an error.
-fn alarm_link_command(args: &[&str]) -> ExitCode {
-    let ttl_h = match iem_server::alarm_link::parse_ttl(args) {
-        Ok(h) => h,
-        Err(e) => {
-            eprintln!("iem-server: {e}");
-            return ExitCode::from(2);
-        }
-    };
-    match iem_server::alarm_link::run_cli(&config_path(), ttl_h) {
-        Ok(url) => {
-            println!("{url}");
-            eprintln!("iem-server: the link works once within {ttl_h} h");
             ExitCode::SUCCESS
         }
         Err(e) => {

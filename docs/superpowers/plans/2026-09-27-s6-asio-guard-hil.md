@@ -19,7 +19,7 @@
   - a pure core: planner, event error policy, crash loop, bundles, verdicts, protocol, reboot mode reset;
   - `Pc` effects with a cancel token: `WinPc` on Windows, `FakePc` in tests;
   - the daemon, the `iemmode` CLI and its `--direct` fallback.
-- **`iem-server`:** stage-only band activity, graceful stop, alarm link and alarm recipients, `pin_changes = false`, `CF-Connecting-IP` from the host's own addresses.
+- **`iem-server`:** stage-only band activity, graceful stop, the guard's alarms to the engineer's PWA notification subscriptions (owner decision, #9 2026-09-28; the alarm link and its separate recipients were removed), `pin_changes = false`, `CF-Connecting-IP` from the host's own addresses.
 - **`iem-tray`:** without a server.
 - **CI:** `bundle` (with `install --verify-only`) and `attest`. No dispatch job: the dev box dispatches HIL.
 - **Ops repo:** `hil.yml` (validated inputs; `verify` → `pc` without secrets → `report`), the site tables, the PC runbook.
@@ -153,8 +153,8 @@ crates/iem-engine/src/pipe.rs                Windows listener options, SDDL, non
 crates/iem-engine/src/rt.rs                  hold gate, discontinuity → fade-in, card-output mask
 crates/iem-engine-proto/src/msg.rs           Role::Supervisor, Cmd::Arm, Cmd::HilTestSignal, Status fields (additive)
 crates/iem-server/src/{activity,console}.rs  watch [activity] inputs only (RED/GREEN)
-crates/iem-server/src/bin/server.rs          graceful stop (Ctrl-Break / SIGTERM); alarm-link
-crates/iem-server/src/alarm_link.rs (+route) one-time alarm subscription link → alarm recipients
+crates/iem-server/src/bin/server.rs          graceful stop (Ctrl-Break / SIGTERM); notify --to alarm, --count alarm
+crates/iem-server/src/notify.rs              alarms → the engineer's PWA notification subscriptions (read only)
 crates/iem-server/src/{auth,login_guard}.rs  pin_changes = false; CF-Connecting-IP from the host's own addresses only
 crates/iem-core/src/config.rs                ActivityConfig.inputs; ServerConfig.pin_changes
 crates/iem-guard/src/{lib,plan,crash,bundle,handover,proto,state,alarms,cancel}.rs   pure core (plan.rs carries the error policy)
@@ -202,7 +202,7 @@ If `dev` is not strictly above `main`, the first commit sets `[workspace.package
   - the predecessor exit through its tray command;
   - the preference window;
   - the HIL decision (dispatched from the dev box, no public dispatch token);
-  - the two owner steps, stated honestly: the one-time alarm link right after the first dev entry (iem-server serves it only in dev and live), and the five approval-gated tests asked right after HIL v1 is green (listed here, not asked);
+  - the one owner step, stated honestly: the five approval-gated tests asked right after HIL v1 is green (listed here, not asked); the alarms need none, they reach the engineer's PWA like the predecessor's alerts (owner decision, #9 2026-09-28);
   - the no-agent fallbacks (the engineer's "Späť na REAPER" button, a reboot);
   - the declared spec deviations (design §11).
 
@@ -871,9 +871,9 @@ fn sddl_for(sid: &str) -> String {
 
 ---
 
-### Task 7: Server — stage-only band activity, graceful stop, alarm link and recipients, PIN freeze, tunnel peer
+### Task 7: Server — stage-only band activity, graceful stop, where alarms go, PIN freeze, tunnel peer
 
-**Files:** `crates/iem-core/src/config.rs`, `crates/iem-server/src/{activity,console,auth,login_guard,notify}.rs`, `crates/iem-server/src/bin/server.rs`, `crates/iem-server/src/lib.rs`, `crates/iem-server/src/alarm_link.rs`, `crates/iem-ui` (alarm page), `config/test-site.toml`, `e2e/`.
+**Files:** `crates/iem-core/src/config.rs`, `crates/iem-server/src/{activity,console,auth,login_guard,notify,push,push_store,backup_daemon}.rs`, `crates/iem-server/src/bin/server.rs`, `crates/iem-server/src/lib.rs`, `config/test-site.toml`, `e2e/`.
 
 - [ ] **Step 1 (RED): band activity ignores non-stage inputs** (S1a finding).
   - `ActivityConfig` gains `inputs: Vec<String>` (engine input ids; default empty = every input with category `mics`).
@@ -887,18 +887,12 @@ fn sddl_for(sid: &str) -> String {
   - then `axum::serve(...).with_graceful_shutdown(...)` with a 5 s bound; the backup daemon and the engine client close; exit 0.
 
   Test (Unix): spawn the server binary with a temp config, send SIGTERM, expect exit 0 within 6 s and the port free. The Windows variant is in the `windows` job: the server is started with `iem_win::spawn::spawn_detached` (so `CREATE_NO_WINDOW`, its own console — the PC's exact shape) and stopped with `iem_win::console::ctrl_break`.
-- [ ] **Step 4: Alarm link.**
-  - `iem-server alarm-link [--ttl-h 24]` writes one random 128-bit token (hash only) to `alarm_link.json` next to the config and prints `https://<https_domain>/alarms?t=<token>`.
-  - `POST /api/alarms/subscribe {token, subscription}` accepts it once, unexpired, appends the subscription to `alarm_subscriptions.json` (atomic write) and deletes the token.
-  - UI route `/alarms`: one button "Povoliť upozornenia" → push permission → POST, with a result message.
-  - Tests: unit (token single use, expiry, bad token 403 without a timing difference beyond the hash compare), E2E (mock push subscription, zero console errors).
-
-  Commit: `feat(server): one-time alarm subscription link for the owner (S6 bootstrap)`.
-- [ ] **Step 5: Alarm recipients vs the engineer** (P9, design §5.4; deviation from spec §4.2 recorded in the design note).
-  - `iem-server notify --to alarm|band-activity <title> <body>`: `alarm` sends only to `alarm_subscriptions.json` (exit 3 when it is empty, so the guard's precheck and its alarm path can see it); `band-activity` sends only to the engineer's subscriptions. No other audience exists.
-  - `iem-server notify --count alarm` prints the number of alarm recipients (the guard's precheck gate for `live` and trials, ≥ 1; a `dev` entry only names a missing one, #9 2026-09-28).
-  - Verify `notify::run_cli` only reads subscriptions (no write). If it prunes expired ones, keep that — it is the same atomic write the server uses — and document it in `server-engine.md`.
-  - Tests: an alarm with engineer subscriptions only reaches nobody and exits 3; a band-activity notice never reaches an alarm recipient.
+- **Step 4: ~~Alarm link~~ — dropped** (owner decision, #9 2026-09-28: the alarms go to the PWA like the predecessor's alerts, no link to confirm). The one-time link (`iem-server alarm-link`, `POST /api/alarms/subscribe`, `alarm_subscriptions.json`, the UI page `/alarms`, `alarm-link.spec.ts`) was built (`041d447`) and then removed completely.
+- [ ] **Step 5: Where alarms go** (design §5.4; owner decision, #9 2026-09-28).
+  - `iem-server notify --to alarm <title> <body>` sends to the engineer's PWA notification subscriptions (`push_subscriptions.json`: the engineer page subscribes them, `iem-migrate band` carries the predecessor's over with the VAPID keys), the audience the predecessor's alerts (SOS) reached; exit 3 when no device took it, so the guard's precheck and its alarm path can see it. `alarm` is the only `--to`: the predecessor had one push audience, and the band-activity notice goes from the running server to the same devices.
+  - `iem-server notify --count alarm` prints the number of those subscriptions (the guard's precheck gate for `live` and trials, ≥ 1; a `dev` entry only names a missing one, #9 2026-09-28).
+  - Notify mode only reads: `PushStore::read` (no marker = none, an unreadable list is an error), never the store's one-time cleanup write, never a secret, never a prune. The running server's refused scheduled backup goes through `push_engineers` (which prunes and counts).
+  - Tests: an alarm reaches the engineer's device and prunes nothing; no subscription (or a list without the marker) → 0 and exit 3; `--to band-activity` and `alarm-link` are usage errors; the backup daemon's refusal alarm reaches the engineer's device once per error and is tried again when it reached nobody.
 - [ ] **Step 6: PIN changes frozen before cutover** (P9, design §5.4).
   - `ServerConfig.pin_changes: bool` (default `true` for the library; the guard writes `false` into every `dev`/trial config).
   - `auth`: with `pin_changes = false`, the change and reset routes answer 409 with the Slovak text "PIN sa zatiaľ mení v pôvodnej aplikácii" and change nothing.
@@ -1450,7 +1444,7 @@ pub fn reset_to_event(st: &GuardState, boot_time: u64, reaper_or_app: bool, engi
 ```
 
     The daemon applies it before anything else: `mode = Event`, `switching = None`, `interlock_retry = None`, then the event plan runs (checks, plus a start of anything that runs but does not serve).
-  - Alarms: an append-only list with ids, ack, and the newest 50 kept; each carries `notified: bool` (sent to the alarm recipients) and `owner_question: bool` (the agent must send the prepared ❓).
+  - Alarms: an append-only list with ids, ack, and the newest 50 kept; each carries `notified: bool` (sent to the engineer's PWA notification subscriptions) and `owner_question: bool` (the agent must send the prepared ❓).
   - `cancel.rs`: `Cancel` (an `Arc<AtomicBool>`): `preempt`, `preempted`, `clear`, and `sleep(d) -> Result<(), Preempted>` in ≤ 100 ms slices, so every wait ends ≤ 1 s after a pre-emption.
   - Tests: round trip; a corrupt file → defaults + an alarm "guard state unreadable"; `a_reboot_resets_the_mode_to_event` (saved `dev`, boot later than `written_at` → reset; boot earlier, REAPER up, no engine → reset; boot earlier, engine up → keep); `cancel_sleep_returns_within_a_slice`.
 
@@ -1479,7 +1473,7 @@ pub trait Pc {
     fn procs(&mut self) -> Procs;
     /// Once per plan: processes, driver-module holders, port owners (design §5.1).
     fn facts(&mut self) -> Facts;
-    fn precheck(&mut self, to: Mode, trial: bool) -> R<Option<String>>; // bundle, HIL, pc_tests_passed (trial), ≥ 1 alarm recipient (live and trials; dev: Some(note)), no engine, app exe hash
+    fn precheck(&mut self, to: Mode, trial: bool) -> R<Option<String>>; // bundle, HIL, pc_tests_passed (trial), ≥ 1 PWA notification subscription (live and trials; dev: Some(note)), no engine, app exe hash
     fn reaper_meters(&mut self, seconds: u32, c: &Cancel) -> R<Vec<f64>>; // stage tracks, max dBFS each
     fn engine_interlock(&mut self, seconds: u32, c: &Cancel) -> R<(bool, String)>;
     fn reaper_save_quit(&mut self, c: &Cancel) -> R<()>;              // 40026; mtime changed ≤ 15 s; no dialog; 40004; gone ≤ 30 s; module unheld
@@ -1509,7 +1503,7 @@ pub trait Pc {
     fn app_answers(&mut self, c: &Cancel) -> R<()>;                   // /api/version, /api/members count, public host
     fn fingerprint(&mut self) -> R<()>;                               // S1c REAPER-mode fingerprint via the tuning task (`state`)
     fn probe_task(&mut self) -> R<()>;                                // \iemmixer\iemmixer-probe from the guard
-    fn notify(&mut self, audience: Audience, title: &str, body: &str) -> R<()>; // Audience::{Alarm, BandActivity}
+    fn notify(&mut self, audience: Audience, title: &str, body: &str) -> R<()>; // Audience::Alarm → the engineer's PWA subscriptions
 }
 ```
 
@@ -1645,7 +1639,7 @@ fn back_to_event(pc: &mut dyn Pc, g: &mut Guard, why: &str) -> Outcome {
   - **`JobBegin`**: refused unless `mode == Dev`, not switching, `band_quiet_for() ≥ 5 min`, and `engine_stage_peaks(60)` all below −50 dBFS.
   - **`TestSignal`**: sent to the engine as `HilTestSignal` with `card_tx = [guard] hil_tx`.
   - **`RehearseTeardown`** (dev only): `EngineStop` → `ServerStop` → `TrayStop` → `TuningExit` → `PrefCheck` with the event error policy, then asserts `facts()` shows no module holder, `prefwin` reads the original, and ports 80/443 are free, then `run_switch(pc, g, Mode::Dev, Mode::Dev)`. It never plans a REAPER or app step.
-  - `--dry-run` prints the plan and runs read-only checks only (facts, preference read, bundle record, alarm recipients).
+  - `--dry-run` prints the plan and runs read-only checks only (facts, preference read, bundle record, PWA notification subscriptions).
 - [ ] **Step 3: `install.rs`** (`iemmixer-guard install <zip> [--verify-only]`; the same code behind `Request::Install`):
   - extract into `bundles\<sha>.partial` (`enclosed_name`), verify (`bundle::verify`, `REQUIRED`), rename; `--verify-only` extracts into a temp directory, verifies and deletes only that temp directory (CI's check, Task 12);
   - an existing `<sha>` with identical sums is a no-op; different sums → refuse (alarm);
@@ -2134,19 +2128,19 @@ $P status                        # mode event (or dev time with REAPER down), bu
   - `Register-IemRunner` with a one-time token in `ACTIONS_RUNNER_INPUT_TOKEN`, then a Ctrl-Break stop of the idle runner through the guard (`iemmode runner-stop`, dev only; the attach-console path) — the process exits within 10 s.
 
   Findings go on #9.
-- [ ] **Step 5: The owner's alarm link — sent after the first dev entry** (the first of the two owner steps named in the design summary). The link (`/alarms`) is served by iem-server, which runs only in dev and live; in event the predecessor holds the band's address, so the owner cannot open it before the first `iemmode dev` (found on the PC, #9 2026-09-28). `dev` needs no alarm recipient (its precheck names a missing one in the switch report and `iemmode status`; the alarms stay in the guard's alarm file, which the agent reads); `live` and `live --trial` need ≥ 1. So nothing waits for the link here: it is made and sent in Task 17 Step 1, right after the first dev entry is done. There: `iem-server alarm-link` → a Slovak ❓ owner-action block (`needs-owner-action` on #9): what the link is, that he opens it once on his phone and taps "Povoliť upozornenia", and why (the guard can warn him; `live` needs ≥ 1 alarm recipient). The link's TTL is 24 h; a new one is made if it expires. Once `iem-server notify --count alarm` ≥ 1, `iemmode alarm-test` proves the path (the status then drops the note); every `live` entry waits for it; answer-independent work continues meanwhile.
+- [ ] **Step 5: Where the alarms go — checked after the first dev entry, no owner step** (owner decision, #9 2026-09-28: the alarms reach the PWA like the predecessor's alerts; the one-time alarm link is gone). The guard's alarms go to the engineer's PWA notification subscriptions, which `iem-migrate band` imports with the VAPID keys at every entry (the data step, after the precheck). So the first dev entry's precheck may name a missing one (`dev` goes on and names it in the switch report and `iemmode status`; the alarms stay in the guard's alarm file, which the agent reads); `live` and `live --trial` need ≥ 1. Nothing waits here: in Task 17 Step 1, right after the first dev entry, `iem-server notify --count alarm` (the server config) must show ≥ 1, then `iemmode alarm-test` proves the path (the status then drops the note). Only if the count stays 0 (the predecessor had no subscription to carry over) does the owner get one Slovak ❓ (`needs-owner-action` on #9): open the mixer app's engineer page on his phone while iemmixer serves it and allow notifications, as he did for the predecessor; no link. Every `live` entry waits for ≥ 1; answer-independent work continues meanwhile.
 
 ---
 
 ### Task 17: First `iemmode dev`, HIL v1 green, rehearsal, the owner's test question (dev time; main session)
 
-- [ ] **Step 1: Take the card** (no alarm recipient needed yet: the precheck names a missing one, #9 2026-09-28).
+- [ ] **Step 1: Take the card** (no PWA notification subscription needed yet: the precheck names a missing one, #9 2026-09-28).
   - If the S1a window is still open with the card free, run `$P handover-s1a` first.
   - The dev entry's precheck is the running guard's code, so the guard on the PC runs `$SHA`'s build first (#9, 2026-09-28; design §5.5): after the first bundle (Task 16 Step 3, activated offline) `$P install --sha "$SHA"`, then, still in event, `$P activate --sha "$SHA"`. The guard allows it while none of iemmixer's processes runs and no switch, HIL job or interlock retry waits; it copies the bins, pins, sets the exclusions and hands over, and touches neither REAPER nor the app. `$P activate` waits until `iemmode status` names `$SHA` as `guard_build` (≤ 90 s); a refusal or a timeout is reported on #9 and nothing else runs. A guard built before this rule refuses `activate` in event (`activate is for dev; the mode is event`); for such a guard (the PC's first one) run `$P activate --sha "$SHA" --offline` instead: a graceful `iemmode quit`, its processes read until none runs (≤ 60 s, never forced), then the bundle's own `bundles\<sha>\iemmixer-guard.exe activate <sha>` (it holds the guard's mutex, activates an idle event only: bins, pin, exclusions, saved; it starts no guard), then the same wait for `guard_build` (the first `iemmode status` starts the new guard). A refused offline step starts the old guard again; report it on #9.
   - Then run `$P dev --build "$SHA"`. It prints each step. With REAPER already down (the dev-time case) the plan is: precheck (incl. the app exe hash), interlock through `iem-engine interlock` (the app runs, so the interlock always runs), app stop, tuning enter, data (`iem-migrate band` + recover), engine held, arm, server, tray, identity, runner.
   - **Expected:** app stop verdict ok — exit code 0 on the handle, ports free, no newer temp; the log line noted as corroboration: record "predecessor exit path verified on the deployed binary" on #9 (S1a acceptance item); engine `Status` measured frames 32, `missed` 0 after 10 s; the preference reads back 64 while the engine runs (the window closed); LAN and public host answer `/api/version` = SHA.
   - Any failure unwinds to event by itself: report it, fix, retry only in dev time.
-  - Right after the entry is done, while iem-server serves the band's address: the owner's alarm link (Task 16 Step 5), then `iemmode alarm-test` once he has opened it.
+  - Right after the entry is done: `iem-server notify --count alarm` ≥ 1 (the subscriptions the band import carried over), then `iemmode alarm-test` (Task 16 Step 5); record both on #9.
 - [ ] **Step 2: HIL.** `$P dispatch-hil` (or the queued run from Task 15) → the runner takes the job → wait for `hil/iem-pc` on the SHA:
 
 ```bash

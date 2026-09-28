@@ -59,13 +59,13 @@ impl fmt::Display for StepError {
 
 impl std::error::Error for StepError {}
 
-/// Who a notice goes to (`iem-server notify --to`, design §5.4).
+/// What a notice is (`iem-server notify --to`, design §5.4). It goes to the
+/// engineer's devices: the mixer app's (the PWA's) notification
+/// subscriptions, as the predecessor's alerts did (#9 2026-09-28).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Audience {
-    /// The alarm recipients only (the owner's subscription).
+    /// A technical alarm of the guard.
     Alarm,
-    /// The engineer's devices: the band-activity notice only.
-    BandActivity,
 }
 
 impl Audience {
@@ -73,7 +73,6 @@ impl Audience {
     pub fn arg(self) -> &'static str {
         match self {
             Self::Alarm => "alarm",
-            Self::BandActivity => "band-activity",
         }
     }
 }
@@ -339,8 +338,9 @@ pub struct PrecheckFacts {
     pub bundle: bool,
     /// `[guard] pc_tests_passed` (design §10).
     pub pc_tests_passed: bool,
-    /// Alarm recipients (`iem-server notify --count alarm`); `None`: unreadable.
-    pub recipients: Option<u32>,
+    /// The PWA notification subscriptions an alarm goes to (`iem-server
+    /// notify --count alarm`); `None`: unreadable.
+    pub subscriptions: Option<u32>,
     /// An engine the guard did not start runs (ours is stopped by the plan).
     pub foreign_engine: bool,
     /// `handover::app_binary` of the predecessor's exe.
@@ -348,26 +348,29 @@ pub struct PrecheckFacts {
 }
 
 /// Why the guard's alarms would reach no phone (design §5.4); `None`: at
-/// least one alarm recipient.
-fn no_recipient(recipients: Option<u32>) -> Option<&'static str> {
-    match recipients {
-        None => Some("the alarm recipients cannot be read"),
-        Some(0) => Some("no alarm recipient: the alarm link was not opened"),
+/// least one PWA notification subscription.
+fn no_subscription(subscriptions: Option<u32>) -> Option<&'static str> {
+    match subscriptions {
+        None => Some("the PWA notification subscriptions cannot be read"),
+        Some(0) => {
+            Some("no PWA notification subscription: no engineer device allowed notifications")
+        }
         Some(_) => None,
     }
 }
 
-/// How a dev entry's note goes on after [`no_recipient`].
-const DEV_WITHOUT_RECIPIENT: &str =
+/// How a dev entry's note goes on after [`no_subscription`].
+const DEV_WITHOUT_SUBSCRIPTION: &str =
     " (not needed for dev: the alarms stay in the guard's alarm file)";
 
 /// The precheck's verdict: `Err` refuses the entry with every problem;
-/// `Ok(Some(note))` lets it go on and names what it found. An alarm
-/// recipient is required for live and live trials only: the alarm link is
-/// served by iem-server, which runs only in dev and live (in event the
-/// predecessor holds the band's address), so the owner can open it only
-/// after the first dev entry (#9, 2026-09-28). Dev without one names it,
-/// and the alarms stay in the guard's alarm file.
+/// `Ok(Some(note))` lets it go on and names what it found. A PWA
+/// notification subscription (the engineer's, where the alarms go, #9
+/// 2026-09-28) is required for live and live trials only: the predecessor's
+/// arrive with the band import, a later step of the entry, and a new one
+/// only through iem-server, which runs only in dev and live (in event the
+/// predecessor holds the band's address). Dev without one names it, and
+/// the alarms stay in the guard's alarm file.
 pub fn precheck(f: &PrecheckFacts) -> R<Option<String>> {
     let mut bad = Vec::new();
     let mut note = None;
@@ -386,11 +389,11 @@ pub fn precheck(f: &PrecheckFacts) -> R<Option<String>> {
                 .to_owned(),
         );
     }
-    if let Some(why) = no_recipient(f.recipients) {
+    if let Some(why) = no_subscription(f.subscriptions) {
         if f.to == Mode::Live || f.trial {
             bad.push(why.to_owned());
         } else {
-            note = Some(format!("{why}{DEV_WITHOUT_RECIPIENT}"));
+            note = Some(format!("{why}{DEV_WITHOUT_SUBSCRIPTION}"));
         }
     }
     if f.foreign_engine {
@@ -468,9 +471,10 @@ pub trait Pc {
     /// The bundle every start runs from (the current pin); `None`: none, so
     /// every start and the precheck refuse.
     fn set_bundle(&mut self, sha: Option<&str>);
-    /// Bundle installed, `pc_tests_passed` (trial), ≥ 1 alarm recipient
-    /// (live and trials; dev only names a missing one), no foreign engine,
-    /// the app's exe hash. `Some`: what it names without refusing.
+    /// Bundle installed, `pc_tests_passed` (trial), ≥ 1 PWA notification
+    /// subscription (live and trials; dev only names a missing one), no
+    /// foreign engine, the app's exe hash. `Some`: what it names without
+    /// refusing.
     fn precheck(&mut self, to: Mode, trial: bool) -> R<Option<String>>;
     /// REAPER's stage tracks for `seconds`: the loudest peak of each (dBFS).
     fn reaper_meters(&mut self, seconds: u32, c: &Cancel) -> R<Vec<f64>>;
@@ -724,8 +728,9 @@ pub mod fake {
         /// `false`: an engine runs, but its hello and first `Status` have
         /// not come yet, so `engine_seen` answers `None` (as `WinPc` does).
         pub engine_up: bool,
-        /// The alarm recipients the precheck reads (`None`: unreadable).
-        pub recipients: Option<u32>,
+        /// The PWA notification subscriptions the precheck reads (`None`:
+        /// unreadable).
+        pub subscriptions: Option<u32>,
         /// What `job` reads (a fixed fact of the process: not a recorded
         /// call).
         pub job: Result<Placement, String>,
@@ -797,7 +802,7 @@ pub mod fake {
                     pipe_private: true,
                 },
                 engine_up: true,
-                recipients: Some(1),
+                subscriptions: Some(1),
                 job: Ok(Placement::NoJob),
                 logon: None,
                 lan_note: None,
@@ -951,13 +956,13 @@ pub mod fake {
 
         fn precheck(&mut self, to: Mode, trial: bool) -> R<Option<String>> {
             self.enter(Call::Precheck, None)?;
-            // The real verdict over `recipients`; every other fact passes.
+            // The real verdict over `subscriptions`; every other fact passes.
             precheck(&PrecheckFacts {
                 to,
                 trial,
                 bundle: true,
                 pc_tests_passed: true,
-                recipients: self.recipients,
+                subscriptions: self.subscriptions,
                 foreign_engine: false,
                 app_binary: Ok(()),
             })
@@ -1261,7 +1266,6 @@ mod tests {
     #[test]
     fn audiences_and_kids_have_their_names() {
         assert_eq!(Audience::Alarm.arg(), "alarm");
-        assert_eq!(Audience::BandActivity.arg(), "band-activity");
         let ids: Vec<&str> = Kid::ALL.iter().map(|k| k.id()).collect();
         assert_eq!(ids, ["engine", "server", "tray", "runner"]);
     }
@@ -1510,7 +1514,7 @@ mod tests {
             trial: false,
             bundle: true,
             pc_tests_passed: false,
-            recipients: Some(1),
+            subscriptions: Some(1),
             foreign_engine: false,
             app_binary: Ok(()),
         }
@@ -1533,38 +1537,41 @@ mod tests {
         };
         assert_eq!(precheck(&trial), Ok(None));
         let many = PrecheckFacts {
-            recipients: Some(3),
+            subscriptions: Some(3),
             ..ready()
         };
         assert_eq!(precheck(&many), Ok(None));
     }
 
-    /// The alarm link is served by iem-server, which runs only in dev and
-    /// live: in event the predecessor holds the band's address, so the owner
-    /// can open it only after the first dev entry (#9, 2026-09-28). A
-    /// recipient is required for live and live trials; dev goes on and names
-    /// what is missing, the alarms stay in the guard's alarm file.
+    /// The precheck's texts for the PWA notification subscriptions.
+    const NO_SUBSCRIPTION: &str =
+        "no PWA notification subscription: no engineer device allowed notifications";
+    const SUBSCRIPTIONS_UNREADABLE: &str = "the PWA notification subscriptions cannot be read";
+
+    /// The alarms go to the engineer's PWA notification subscriptions (#9
+    /// 2026-09-28). The predecessor's arrive with the band import, a later
+    /// step of the entry, and a new one only through iem-server, which runs
+    /// only in dev and live: one is required for live and live trials; dev
+    /// goes on and names what is missing, the alarms stay in the guard's
+    /// alarm file.
     #[test]
-    fn alarm_recipients_are_required_for_live_and_named_for_dev() {
-        let dev = |recipients| PrecheckFacts {
-            recipients,
+    fn a_pwa_subscription_is_required_for_live_and_named_for_dev() {
+        let dev = |subscriptions| PrecheckFacts {
+            subscriptions,
             ..ready()
         };
         assert_eq!(
             precheck(&dev(Some(0))),
-            Ok(Some(
-                "no alarm recipient: the alarm link was not opened \
-                 (not needed for dev: the alarms stay in the guard's alarm file)"
-                    .to_owned()
-            ))
+            Ok(Some(format!(
+                "{NO_SUBSCRIPTION} (not needed for dev: the alarms stay in the guard's alarm file)"
+            )))
         );
         assert_eq!(
             precheck(&dev(None)),
-            Ok(Some(
-                "the alarm recipients cannot be read \
+            Ok(Some(format!(
+                "{SUBSCRIPTIONS_UNREADABLE} \
                  (not needed for dev: the alarms stay in the guard's alarm file)"
-                    .to_owned()
-            ))
+            )))
         );
         assert_eq!(precheck(&dev(Some(1))), Ok(None));
         // Another refusal of a dev entry takes precedence over the note.
@@ -1577,31 +1584,27 @@ mod tests {
             Err(StepError::Failed("no installed bundle is active".into()))
         );
         // Live and live trials refuse as before.
-        let live = |recipients| PrecheckFacts {
+        let live = |subscriptions| PrecheckFacts {
             to: Mode::Live,
-            recipients,
+            subscriptions,
             ..ready()
         };
-        let trial = |recipients| PrecheckFacts {
+        let trial = |subscriptions| PrecheckFacts {
             trial: true,
             pc_tests_passed: true,
-            ..live(recipients)
+            ..live(subscriptions)
         };
         for f in [live(Some(0)), trial(Some(0))] {
             assert_eq!(
                 precheck(&f),
-                Err(StepError::Failed(
-                    "no alarm recipient: the alarm link was not opened".into()
-                )),
+                Err(StepError::Failed(NO_SUBSCRIPTION.into())),
                 "{f:?}"
             );
         }
         for f in [live(None), trial(None)] {
             assert_eq!(
                 precheck(&f),
-                Err(StepError::Failed(
-                    "the alarm recipients cannot be read".into()
-                )),
+                Err(StepError::Failed(SUBSCRIPTIONS_UNREADABLE.into())),
                 "{f:?}"
             );
         }
@@ -1643,18 +1646,18 @@ mod tests {
             (
                 PrecheckFacts {
                     to: Mode::Live,
-                    recipients: None,
+                    subscriptions: None,
                     ..ready()
                 },
-                "the alarm recipients cannot be read",
+                SUBSCRIPTIONS_UNREADABLE,
             ),
             (
                 PrecheckFacts {
                     to: Mode::Live,
-                    recipients: Some(0),
+                    subscriptions: Some(0),
                     ..ready()
                 },
-                "no alarm recipient: the alarm link was not opened",
+                NO_SUBSCRIPTION,
             ),
             (
                 PrecheckFacts {
@@ -1679,17 +1682,16 @@ mod tests {
             trial: true,
             bundle: false,
             pc_tests_passed: false,
-            recipients: Some(0),
+            subscriptions: Some(0),
             foreign_engine: true,
             app_binary: Err("changed".into()),
         };
         assert_eq!(
             precheck(&all),
-            Err(StepError::Failed(
-                "no installed bundle is active; a trial is a live switch; no alarm recipient: \
-                 the alarm link was not opened; an engine the guard did not start runs; changed"
-                    .into()
-            ))
+            Err(StepError::Failed(format!(
+                "no installed bundle is active; a trial is a live switch; {NO_SUBSCRIPTION}; \
+                 an engine the guard did not start runs; changed"
+            )))
         );
     }
 

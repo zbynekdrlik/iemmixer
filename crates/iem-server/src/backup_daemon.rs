@@ -20,13 +20,13 @@ pub fn due(schedule: &[String], today: &str, hhmm: &str, done: &HashSet<String>)
         .filter(|key| !done.contains(key))
 }
 
-/// The alarm recipients hear of a refused scheduled capture once per
+/// The engineer's devices hear of a refused scheduled capture once per
 /// distinct error, until a capture succeeds again: a refused slot is tried
 /// again at every tick of its minute and at the next slot, and each retry
 /// refused for the same reason is no news.
 #[derive(Debug, Default)]
 pub struct RefusalAlarms {
-    /// The refusals whose alarm reached a recipient since the last success.
+    /// The refusals whose alarm reached a device since the last success.
     raised: HashSet<String>,
 }
 
@@ -36,7 +36,7 @@ impl RefusalAlarms {
         !self.raised.contains(error)
     }
 
-    /// The alarm for `error` reached a recipient.
+    /// The alarm for `error` reached a device.
     pub fn raised(&mut self, error: &str) {
         self.raised.insert(error.to_owned());
     }
@@ -58,9 +58,9 @@ pub fn refusal_alarm(slot: &str, error: &str) -> (&'static str, String) {
 
 /// A scheduled capture's outcome at `slot` (HH:MM): `Ok` is the saved
 /// file, `Err` the refusal, which is logged and, once per distinct error
-/// until a capture succeeds, sent to the alarm recipients (never the
-/// engineer's devices). An alarm that reached nobody (no recipient yet, an
-/// unreadable recipient file, every push failed) is tried again at the next
+/// until a capture succeeds, sent to the engineer's devices (the PWA's
+/// notification subscriptions, #9 2026-09-28). An alarm that reached nobody
+/// (no subscription yet, every push failed) is tried again at the next
 /// refusal. Returns whether the slot is done.
 pub async fn settle(
     state: &AppState,
@@ -78,18 +78,14 @@ pub async fn settle(
             tracing::error!(%error, time = %slot, "Backup daemon: capture failed");
             if alarms.due(&error) {
                 let (title, body) = refusal_alarm(slot, &error);
-                match crate::notify::push_alarm(state, title, &body).await {
-                    Ok(devices) if devices > 0 => {
-                        tracing::info!(devices, "Backup daemon: refusal alarm sent");
-                        alarms.raised(&error);
-                    }
-                    Ok(_) => tracing::error!(
-                        "Backup daemon: the refusal alarm reached no alarm recipient; tried again at the next refusal"
-                    ),
-                    Err(e) => tracing::error!(
-                        error = %e,
-                        "Backup daemon: alarm recipients unreadable; the refusal alarm is tried again at the next refusal"
-                    ),
+                let devices = crate::notify::push_alarm(state, title, &body).await;
+                if devices > 0 {
+                    tracing::info!(devices, "Backup daemon: refusal alarm sent");
+                    alarms.raised(&error);
+                } else {
+                    tracing::error!(
+                        "Backup daemon: the refusal alarm reached no device; tried again at the next refusal"
+                    );
                 }
             }
             false
@@ -128,13 +124,11 @@ async fn run(state: AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::notify::ALARM_SUBSCRIPTIONS_FILE;
     use crate::push::tests::{Seen, fake_push_service, subscription, vapid_private_key};
 
-    /// A site in a temp directory whose engineer's device is `/201` (the
-    /// band-activity and SOS audience) and, with `recipient`, whose alarm
-    /// recipient is `/202`; both answered 2xx by the fake push service.
-    async fn site(recipient: bool) -> (tempfile::TempDir, AppState, String, Seen) {
+    /// A site in a temp directory with a VAPID key and, with `subscribed`,
+    /// the engineer's device `/201` (answered 2xx by the fake push service).
+    async fn site(subscribed: bool) -> (tempfile::TempDir, AppState, String, Seen) {
         let (base, seen) = fake_push_service().await;
         let dir = tempfile::tempdir().unwrap();
         let config = iem_core::Config {
@@ -142,24 +136,20 @@ mod tests {
             ..iem_core::Config::default()
         };
         let state = AppState::new(config, dir.path());
+        if subscribed {
+            subscribe(&state, &base).await;
+        }
+        (dir, state, base, seen)
+    }
+
+    /// The engineer allows notifications in the mixer app.
+    async fn subscribe(state: &AppState, base: &str) {
         state
             .push_store
             .write()
             .await
             .add(subscription(format!("{base}/201")))
             .unwrap();
-        if recipient {
-            add_recipient(dir.path(), &base);
-        }
-        (dir, state, base, seen)
-    }
-
-    fn add_recipient(dir: &std::path::Path, base: &str) {
-        std::fs::write(
-            dir.join(ALARM_SUBSCRIPTIONS_FILE),
-            serde_json::to_string(&vec![subscription(format!("{base}/202"))]).unwrap(),
-        )
-        .unwrap();
     }
 
     fn paths(seen: &Seen) -> Vec<String> {
@@ -187,38 +177,35 @@ mod tests {
         let (_dir, state, _base, seen) = site(true).await;
         let mut alarms = RefusalAlarms::default();
         // Refused at 13:00 and again at the retry 30 s later: one alarm, to
-        // the alarm recipient only (never the engineer's device).
+        // the engineer's device.
         assert!(!settle(&state, "13:00", Err(UNREADABLE.into()), &mut alarms).await);
         assert!(!settle(&state, "13:00", Err(UNREADABLE.into()), &mut alarms).await);
-        assert_eq!(paths(&seen), ["/202"]);
+        assert_eq!(paths(&seen), ["/201"]);
         // Another reason is news.
         let unsynced = "the engine state is not synced";
         assert!(!settle(&state, "21:00", Err(unsynced.into()), &mut alarms).await);
         assert!(!settle(&state, "21:00", Err(UNREADABLE.into()), &mut alarms).await);
-        assert_eq!(paths(&seen), ["/202", "/202"]);
+        assert_eq!(paths(&seen), ["/201", "/201"]);
         // A saved backup re-arms every alarm.
         assert!(settle(&state, "13:00", Ok("backup.json".into()), &mut alarms).await);
         assert_eq!(paths(&seen).len(), 2, "a success alarms nobody");
         assert!(!settle(&state, "21:00", Err(UNREADABLE.into()), &mut alarms).await);
-        assert_eq!(paths(&seen), ["/202", "/202", "/202"]);
+        assert_eq!(paths(&seen), ["/201", "/201", "/201"]);
         assert!(!settle(&state, "21:00", Err(UNREADABLE.into()), &mut alarms).await);
         assert_eq!(paths(&seen).len(), 3);
     }
 
     #[tokio::test]
     async fn a_refusal_alarm_that_reached_nobody_is_tried_again() {
-        let (dir, state, base, seen) = site(false).await;
+        let (_dir, state, base, seen) = site(false).await;
         let mut alarms = RefusalAlarms::default();
         assert!(!settle(&state, "13:00", Err(UNREADABLE.into()), &mut alarms).await);
-        assert!(
-            paths(&seen).is_empty(),
-            "no recipient, and never the engineer"
-        );
-        // The owner subscribes; the next refusal reaches the phone, once.
-        add_recipient(dir.path(), &base);
+        assert!(paths(&seen).is_empty(), "no subscription yet");
+        // The engineer subscribes; the next refusal reaches the phone, once.
+        subscribe(&state, &base).await;
         assert!(!settle(&state, "13:00", Err(UNREADABLE.into()), &mut alarms).await);
         assert!(!settle(&state, "21:00", Err(UNREADABLE.into()), &mut alarms).await);
-        assert_eq!(paths(&seen), ["/202"]);
+        assert_eq!(paths(&seen), ["/201"]);
     }
 
     #[test]

@@ -1,8 +1,9 @@
 //! The guard's alarms (S6 design note §5.4).
 //!
 //! A persistent list, shown by `iemmode` and the tray on every call and sent
-//! to the alarm recipients only (never the engineer). The newest
-//! [`Alarms::KEEP`] are kept; ids are never reused.
+//! to the engineer's devices: the mixer app's (the PWA's) notification
+//! subscriptions, where the predecessor's alerts went (#9 2026-09-28). The
+//! newest [`Alarms::KEEP`] are kept; ids are never reused.
 
 use serde::{Deserialize, Serialize};
 
@@ -19,7 +20,7 @@ pub struct Alarm {
     pub text: String,
     #[serde(default)]
     pub acked: bool,
-    /// Sent to the alarm recipients (`iem-server notify --to alarm`).
+    /// Sent to the engineer's devices (`iem-server notify --to alarm`).
     #[serde(default)]
     pub notified: bool,
     /// The agent must send the owner the prepared question (a plan stopped).
@@ -78,7 +79,7 @@ impl Alarms {
         }
     }
 
-    /// Records that the alarm reached the alarm recipients; false when no
+    /// Records that the alarm reached the engineer's devices; false when no
     /// alarm with that id is kept.
     pub fn mark_notified(&mut self, id: u64) -> bool {
         match self.find(id) {
