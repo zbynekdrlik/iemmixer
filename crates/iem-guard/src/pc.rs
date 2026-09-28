@@ -346,8 +346,9 @@ pub trait Pc {
     fn reaper_meters(&mut self, seconds: u32, c: &Cancel) -> R<Vec<f64>>;
     /// `iem-engine interlock`: (quiet, its report).
     fn engine_interlock(&mut self, seconds: u32, c: &Cancel) -> R<(bool, String)>;
-    /// 40026; project mtime changed ≤ 15 s; no dialog; 40004; gone ≤ 30 s;
-    /// driver module unheld.
+    /// 40026; project mtime changed ≤ 15 s; no dialog but REAPER's
+    /// evaluation notice (`handover::dialogs`); 40004; gone ≤ 30 s; driver
+    /// module unheld.
     fn reaper_save_quit(&mut self, c: &Cancel) -> R<()>;
     /// A handle first, then the tray's Exit command, then observe (design
     /// §5.3); the verdict is `handover::app_exit`.
@@ -401,7 +402,8 @@ pub trait Pc {
     /// Our task (or the direct start, `[guard] start_direct`); refuses with
     /// an engine or a driver-module holder.
     fn reaper_start(&mut self) -> R<()>;
-    /// ≤ 120 s for the track count; the meter bridge at most once.
+    /// ≤ 120 s for the track count; the meter bridge at most once; the
+    /// titles of REAPER's visible dialogs.
     fn reaper_facts(&mut self, c: &Cancel) -> R<ReaperFacts>;
     fn app_start(&mut self) -> R<()>;
     /// `/api/version`, the member count and the public host.
@@ -593,7 +595,7 @@ pub mod fake {
                 reaper: ReaperFacts {
                     tracks: Some(40),
                     expected_tracks: 40,
-                    dialog: false,
+                    dialogs: Vec::new(),
                     heartbeat_advanced: true,
                     holds_module: true,
                     peaks: vec![-40.0],

@@ -463,6 +463,10 @@ pub struct Guard {
     report: Vec<String>,
     /// A status line (a dropped retry).
     note: Option<String>,
+    /// REAPER's evaluation notice was open at the last handover check
+    /// (`handover::dialogs`); dropped when the guard quits REAPER and while
+    /// a check cannot read REAPER.
+    reaper_notice: bool,
     crash: CrashLoop,
     respawn_at: Option<Instant>,
     band_seen: bool,
@@ -506,6 +510,7 @@ impl Guard {
             activity: None,
             report: Vec::new(),
             note: None,
+            reaper_notice: false,
             crash: CrashLoop::default(),
             respawn_at: None,
             band_seen: false,
@@ -768,6 +773,9 @@ pub fn status_text(g: &Guard) -> String {
     if let Some(n) = &g.note {
         parts.push(n.clone());
     }
+    if g.reaper_notice {
+        parts.push(handover::NOTICE_REPORT.to_owned());
+    }
     let open = g.alarms.unacked();
     if open > 0 {
         parts.push(format!("{open} unacknowledged alarms"));
@@ -952,7 +960,11 @@ fn run_step(pc: &mut dyn Pc, g: &mut Guard, step: Step, to: Mode, facts: &Facts)
             let exit = pc.app_stop(&c)?;
             handover::app_exit(exit).map_err(|bad| StepError::Failed(bad.join("; ")))
         }
-        Step::ReaperSaveQuit => pc.reaper_save_quit(&c),
+        Step::ReaperSaveQuit => {
+            pc.reaper_save_quit(&c)?;
+            g.reaper_notice = false;
+            Ok(())
+        }
         Step::TuningEnter => {
             let r = pc.tuning("enter", &c)?;
             g.info(format!("tuning enter: {r}"));
@@ -1031,7 +1043,15 @@ fn run_step(pc: &mut dyn Pc, g: &mut Guard, step: Step, to: Mode, facts: &Facts)
         Step::HolderGone => pc.holder_gone(&c),
         Step::ReaperStart => pc.reaper_start(),
         Step::ReaperHandover => {
+            // Unknown until this check has read REAPER's dialogs.
+            g.reaper_notice = false;
             let f = pc.reaper_facts(&c)?;
+            // REAPER's evaluation notice is named, never an alarm and never
+            // closed (#9, 2026-09-28); every other dialog fails the verdict.
+            g.reaper_notice = handover::dialogs(&f.dialogs).notice;
+            if g.reaper_notice {
+                g.info(handover::NOTICE_REPORT);
+            }
             match handover::reaper_handover(&f) {
                 Ok(Audio::Confirmed) => Ok(()),
                 Ok(Audio::Unconfirmed) => {

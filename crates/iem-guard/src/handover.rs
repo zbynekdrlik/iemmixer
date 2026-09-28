@@ -21,11 +21,48 @@ pub fn bridge(state: &str) -> Bridge {
     }
 }
 
+/// The start of the title of REAPER's evaluation-license notice ("About
+/// REAPER v7.65/win64 rev …"), REAPER's own UI text. An unlicensed REAPER
+/// shows it at every start and runs normally with it open (audio on the
+/// card, the web control, the save and quit actions), so it is no blocking
+/// dialog: the guard names it and never closes it (#9, 2026-09-28).
+pub const EVALUATION_NOTICE: &str = "About REAPER";
+
+/// How the handover's report and `iemmode status` name the notice.
+pub const NOTICE_REPORT: &str = r#"reaper_notice: "evaluation""#;
+
+/// REAPER's visible dialogs, sorted by what they mean.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Dialogs {
+    /// Every dialog but the notice, by title: each needs a person, so the
+    /// handover fails on it and the save never goes on to the quit.
+    pub blocking: Vec<String>,
+    /// REAPER's evaluation notice is among them.
+    pub notice: bool,
+}
+
+/// Sorts the titles of REAPER's visible dialogs
+/// (`iem_win::window::dialog_titles`): only a title that starts with
+/// [`EVALUATION_NOTICE`] is the notice; the words anywhere else, or in
+/// another case, do not make one.
+pub fn dialogs(titles: &[String]) -> Dialogs {
+    let mut out = Dialogs::default();
+    for title in titles {
+        if title.starts_with(EVALUATION_NOTICE) {
+            out.notice = true;
+        } else {
+            out.blocking.push(title.clone());
+        }
+    }
+    out
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReaperFacts {
     pub tracks: Option<u32>,
     pub expected_tracks: u32,
-    pub dialog: bool,
+    /// The titles of REAPER's visible dialogs, sorted by [`dialogs`].
+    pub dialogs: Vec<String>,
     pub heartbeat_advanced: bool,
     pub holds_module: bool,
     /// Stage-input peaks in dBFS (REAPER meters).
@@ -58,7 +95,7 @@ pub fn reaper_handover(f: &ReaperFacts) -> Result<Audio, Vec<String>> {
             f.tracks, f.expected_tracks
         ));
     }
-    if f.dialog {
+    if !dialogs(&f.dialogs).blocking.is_empty() {
         bad.push("a REAPER dialog is open".into());
     }
     if !f.heartbeat_advanced {

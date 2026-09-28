@@ -68,8 +68,23 @@ fn holders(pc: &WinPc) -> R<Vec<(u32, String)>> {
         .map_err(|e| procs::failed("the driver module's holders", e))
 }
 
-fn has_dialog(pid: u32) -> R<bool> {
-    window::has_dialog(pid).map_err(|e| procs::failed("REAPER's windows", e))
+/// The titles of REAPER's visible dialogs (`pid`).
+fn dialog_titles(pid: u32) -> R<Vec<String>> {
+    window::dialog_titles(pid).map_err(|e| procs::failed("REAPER's windows", e))
+}
+
+/// Fails with `why` while REAPER shows a dialog other than its evaluation
+/// notice (`handover::dialogs`): that dialog needs a person, and quitting
+/// would leave it up. The notice is left open and never stops the save or
+/// the quit (#9, 2026-09-28). The titles go to the log only.
+fn no_blocking_dialog(pid: u32, why: &str) -> R<()> {
+    let blocking = handover::dialogs(&dialog_titles(pid)?).blocking;
+    if blocking.is_empty() {
+        Ok(())
+    } else {
+        warn!("REAPER's dialogs that need a person: {blocking:?}");
+        Err(StepError::failed(why))
+    }
 }
 
 /// The loudest reading of each stage track over `seconds`;
@@ -114,8 +129,8 @@ pub(super) fn meters(pc: &WinPc, seconds: u32, c: &Cancel) -> R<Vec<f64>> {
     }
 }
 
-/// 40026; the project's mtime changes ≤ 15 s; no dialog; 40004; gone
-/// ≤ 30 s; the driver module unheld.
+/// 40026; the project's mtime changes ≤ 15 s; no dialog but the evaluation
+/// notice; 40004; gone ≤ 30 s; the driver module unheld.
 pub(super) fn save_quit(pc: &WinPc, c: &Cancel) -> R<()> {
     let pid = reaper_pid(pc)?;
     let handle = Handle::open_waitable(pid).map_err(|e| procs::failed("REAPER", e))?;
@@ -128,11 +143,10 @@ pub(super) fn save_quit(pc: &WinPc, c: &Cancel) -> R<()> {
         if mtime(project)? != before {
             return Ok(true);
         }
-        if has_dialog(pid)? {
-            return Err(StepError::failed(
-                "a REAPER dialog is open during the save: REAPER is not quit",
-            ));
-        }
+        no_blocking_dialog(
+            pid,
+            "a REAPER dialog is open during the save: REAPER is not quit",
+        )?;
         Ok(false)
     })?;
     if !saved {
@@ -142,11 +156,10 @@ pub(super) fn save_quit(pc: &WinPc, c: &Cancel) -> R<()> {
     }
     // A dialog after the save needs a person; quitting now would leave it
     // up (the 2026-09-27 lesson on #9).
-    if has_dialog(pid)? {
-        return Err(StepError::failed(
-            "a REAPER dialog is open after the save: REAPER is not quit",
-        ));
-    }
+    no_blocking_dialog(
+        pid,
+        "a REAPER dialog is open after the save: REAPER is not quit",
+    )?;
     action(pc, QUIT);
     if procs::wait_exit(&handle, Duration::from_secs(30), c)?.is_none() {
         return Err(StepError::failed("REAPER did not quit within 30 s"));
@@ -188,9 +201,10 @@ pub(super) fn start(pc: &WinPc) -> R<()> {
     }
 }
 
-/// ≤ 120 s for the track count; the meter bridge at most once and only
-/// while its state is empty (the 2026-09-27 lesson); the heartbeat; the
-/// driver module; a few seconds of stage meters. A project that never
+/// ≤ 120 s for the track count; REAPER's visible dialogs by title (the
+/// verdict sorts out its evaluation notice); the meter bridge at most once
+/// and only while its state is empty (the 2026-09-27 lesson); the
+/// heartbeat; the driver module; a few seconds of stage meters. A project that never
 /// reaches the track count (another project, still loading) leaves the
 /// bridge alone: the facts say so and the verdict fails on the tracks.
 pub(super) fn facts(pc: &WinPc, c: &Cancel) -> R<ReaperFacts> {
@@ -203,7 +217,10 @@ pub(super) fn facts(pc: &WinPc, c: &Cancel) -> R<ReaperFacts> {
         Ok(handover::project_loaded(tracks, g.reaper_tracks))
     })?;
     let pid = reaper_pid(pc)?;
-    let dialog = has_dialog(pid)?;
+    let dialogs = dialog_titles(pid)?;
+    if !dialogs.is_empty() {
+        info!("REAPER's dialogs: {dialogs:?}");
+    }
     if !loaded {
         warn!(
             "REAPER reports {tracks:?} tracks, not {}: the meter bridge is left alone",
@@ -212,7 +229,7 @@ pub(super) fn facts(pc: &WinPc, c: &Cancel) -> R<ReaperFacts> {
         return Ok(ReaperFacts {
             tracks,
             expected_tracks: g.reaper_tracks,
-            dialog,
+            dialogs,
             heartbeat_advanced: false,
             holds_module: module_held_by(pc, pid)?,
             peaks: Vec::new(),
@@ -232,7 +249,7 @@ pub(super) fn facts(pc: &WinPc, c: &Cancel) -> R<ReaperFacts> {
     Ok(ReaperFacts {
         tracks,
         expected_tracks: g.reaper_tracks,
-        dialog,
+        dialogs,
         heartbeat_advanced,
         holds_module,
         peaks,

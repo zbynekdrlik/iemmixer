@@ -1,5 +1,5 @@
 //! Window messages (S6 design note §3, §5.3): a window of a class owned by a
-//! process, the owner's menu command posted to it, a dialog check, the
+//! process, the owner's menu command posted to it, a process's dialogs, the
 //! session-end window of the engine's owner thread, and the notification on
 //! the tray's icon (S6 plan Task 11).
 
@@ -23,10 +23,23 @@ pub fn post_command(hwnd: isize, id: u16) -> io::Result<()> {
     imp::post_command(hwnd, id)
 }
 
-/// Whether `pid` owns a visible top-level dialog box (class `#32770`).
-pub fn has_dialog(pid: u32) -> io::Result<bool> {
-    imp::has_dialog(pid)
+/// The titles of the visible top-level dialog boxes (class `#32770`)
+/// owned by `pid`, in the order Windows lists them. A title is cut to
+/// [`TITLE_UNITS`] − 1 UTF-16 units; a dialog without one gives ""; a
+/// dialog that closes while it is read is left out. The caller decides
+/// which of them block (the guard: `iem_guard::handover::dialogs`).
+///
+/// For another process's window the title is the caption Windows keeps:
+/// no message is sent, so a hung process cannot hold the caller. For a
+/// window of the calling process `GetWindowTextW` sends `WM_GETTEXT` and
+/// waits for the window's thread, so a process asks for its own dialogs
+/// only on the thread that owns them (the test).
+pub fn dialog_titles(pid: u32) -> io::Result<Vec<String>> {
+    imp::dialog_titles(pid)
 }
+
+/// The UTF-16 units a title is read into, its NUL included.
+pub const TITLE_UNITS: usize = 512;
 
 /// The icon ids [`balloon`] tries.
 pub const ICON_IDS: u32 = 64;
@@ -101,7 +114,7 @@ mod imp {
         crate::unsupported()
     }
 
-    pub(super) fn has_dialog(_pid: u32) -> io::Result<bool> {
+    pub(super) fn dialog_titles(_pid: u32) -> io::Result<Vec<String>> {
         crate::unsupported()
     }
 
@@ -152,10 +165,10 @@ mod imp {
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, EnumWindows,
-        GWLP_USERDATA, GetClassNameW, GetWindowLongPtrW, GetWindowThreadProcessId, IsWindowVisible,
-        MSG, PM_REMOVE, PeekMessageW, PostMessageW, RegisterClassExW, SetWindowLongPtrW,
-        TranslateMessage, WM_COMMAND, WM_ENDSESSION, WM_QUERYENDSESSION, WM_QUIT, WNDCLASSEXW,
-        WS_EX_TOOLWINDOW, WS_OVERLAPPED,
+        GWLP_USERDATA, GetClassNameW, GetWindowLongPtrW, GetWindowTextW, GetWindowThreadProcessId,
+        IsWindow, IsWindowVisible, MSG, PM_REMOVE, PeekMessageW, PostMessageW, RegisterClassExW,
+        SetWindowLongPtrW, TranslateMessage, WM_COMMAND, WM_ENDSESSION, WM_QUERYENDSESSION,
+        WM_QUIT, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_OVERLAPPED,
     };
     use windows_sys::core::BOOL;
 
@@ -216,10 +229,29 @@ mod imp {
         check(unsafe { PostMessageW(hwnd as HWND, WM_COMMAND, WPARAM::from(id), 0) })
     }
 
-    pub(super) fn has_dialog(pid: u32) -> io::Result<bool> {
+    pub(super) fn dialog_titles(pid: u32) -> io::Result<Vec<String>> {
         Ok(top_level()?
-            .iter()
-            .any(|w| w.pid == pid && w.visible && same_name(&w.class, super::DIALOG_CLASS)))
+            .into_iter()
+            .filter(|w| w.pid == pid && w.visible && same_name(&w.class, super::DIALOG_CLASS))
+            .filter_map(|w| title(w.hwnd))
+            .collect())
+    }
+
+    /// The title of `hwnd` (see `dialog_titles`); `None` once the window is
+    /// gone.
+    fn title(hwnd: HWND) -> Option<String> {
+        let mut buf = [0u16; super::TITLE_UNITS];
+        // SAFETY: `buf` holds TITLE_UNITS units and the call writes at most
+        // that many, its NUL included. For another process's window it
+        // copies the caption Windows keeps and sends no message; for one of
+        // this process it sends WM_GETTEXT (the caller's thread owns it).
+        let len = unsafe { GetWindowTextW(hwnd, buf.as_mut_ptr(), super::TITLE_UNITS as i32) };
+        // SAFETY: IsWindow only looks the handle up; a handle that closed
+        // after the enumeration is no window any more.
+        if len == 0 && unsafe { IsWindow(hwnd) } == 0 {
+            return None;
+        }
+        Some(from_wide(&buf))
     }
 
     pub(super) fn pump() -> io::Result<bool> {
