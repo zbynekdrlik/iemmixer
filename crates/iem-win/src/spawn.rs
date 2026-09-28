@@ -98,14 +98,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_child_breaks_away_with_a_console_of_its_own() {
+    fn a_child_has_a_console_of_its_own_and_leaves_only_a_job_that_allows_it() {
         assert_eq!(
-            creation_flags(true),
+            creation_flags(true, Placement::Breakaway).unwrap(),
             CREATE_BREAKAWAY_FROM_JOB | CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
         );
         assert_eq!(
-            creation_flags(false),
-            CREATE_BREAKAWAY_FROM_JOB | CREATE_NO_WINDOW
+            creation_flags(false, Placement::InJob).unwrap(),
+            CREATE_NO_WINDOW
+        );
+        assert_eq!(
+            placement(JobLimits::default()),
+            Placement::NoJob,
+            "a process in no job"
         );
     }
 
@@ -123,16 +128,34 @@ mod tests {
             kind(spawn_detached(&mut Command::new("true"), false)),
             Some(Unsupported)
         );
-        assert_eq!(kind(breakaway_allowed()), Some(Unsupported));
+        assert_eq!(kind(job_limits()), Some(Unsupported));
     }
 
     #[cfg(windows)]
     #[test]
     fn the_flags_are_the_win32_values() {
+        use windows_sys::Win32::System::JobObjects as j;
         use windows_sys::Win32::System::Threading as t;
 
         assert_eq!(CREATE_NEW_PROCESS_GROUP, t::CREATE_NEW_PROCESS_GROUP);
         assert_eq!(CREATE_BREAKAWAY_FROM_JOB, t::CREATE_BREAKAWAY_FROM_JOB);
         assert_eq!(CREATE_NO_WINDOW, t::CREATE_NO_WINDOW);
+        assert_eq!(JOB_BREAKAWAY_OK, j::JOB_OBJECT_LIMIT_BREAKAWAY_OK);
+        assert_eq!(
+            JOB_SILENT_BREAKAWAY_OK,
+            j::JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK
+        );
+        // JOB_ENDS_ON_CLOSE is winnt.h's 0x2000 (decide's tests): its
+        // windows-sys name is a force-end verb for the integrity scan.
+    }
+
+    /// This process's job reads, whatever it is (the test runner may start
+    /// the tests in a job of its own).
+    #[cfg(windows)]
+    #[test]
+    fn the_job_of_this_process_reads() {
+        let limits = job_limits().expect("the job query");
+        let placed = placement(limits);
+        eprintln!("this process's job: {limits:?}; a child: {placed:?}");
     }
 }

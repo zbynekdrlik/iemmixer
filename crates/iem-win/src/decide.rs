@@ -188,15 +188,157 @@ mod tests {
     use std::io::ErrorKind::InvalidInput;
     use std::time::UNIX_EPOCH;
 
+    /// Every child runs without a window, in a group of its own when asked;
+    /// only a job that allows breakaway gets the flag, and a refusal starts
+    /// nothing and names why.
     #[test]
-    fn every_child_breaks_away_without_a_window_and_a_new_group_is_its_own() {
-        assert_eq!(creation_flags(true), 0x0900_0200);
-        assert_eq!(creation_flags(false), 0x0900_0000);
+    fn a_child_breaks_away_only_where_its_job_allows_it() {
+        assert_eq!(
+            creation_flags(true, Placement::Breakaway).unwrap(),
+            0x0900_0200
+        );
+        assert_eq!(
+            creation_flags(false, Placement::Breakaway).unwrap(),
+            0x0900_0000
+        );
+        for placed in [Placement::InJob, Placement::NoJob] {
+            assert_eq!(
+                creation_flags(true, placed).unwrap(),
+                0x0800_0200,
+                "{placed:?}"
+            );
+            assert_eq!(
+                creation_flags(false, placed).unwrap(),
+                0x0800_0000,
+                "{placed:?}"
+            );
+        }
+        for new_group in [false, true] {
+            let e = creation_flags(new_group, Placement::Refuse("the reason")).unwrap_err();
+            assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied);
+            assert_eq!(e.to_string(), "the reason");
+        }
     }
 
-    /// Helpers stay in the caller's job: a job that refuses breakaway
-    /// (UNVERIFIED on the PC) must not refuse a `curl` check. A waiting one
-    /// gets its own group, so Ctrl-Break reaches that helper only.
+    /// A job's `LimitFlags` (winnt.h values): the three that decide where a
+    /// child starts, every other limit changes nothing.
+    #[test]
+    fn a_jobs_limits_are_read_from_its_flags() {
+        use crate::spawn::{JOB_BREAKAWAY_OK, JOB_ENDS_ON_CLOSE, JOB_SILENT_BREAKAWAY_OK};
+
+        assert_eq!(
+            (JOB_BREAKAWAY_OK, JOB_SILENT_BREAKAWAY_OK, JOB_ENDS_ON_CLOSE),
+            (0x0800, 0x1000, 0x2000)
+        );
+        let plain = JobLimits {
+            in_job: true,
+            breakaway_ok: false,
+            silent_breakaway_ok: false,
+            kill_on_close: false,
+        };
+        assert_eq!(JobLimits::from_flags(0), plain);
+        // A working-set and an active-process limit.
+        assert_eq!(JobLimits::from_flags(0x0000_0001 | 0x0000_0008), plain);
+        assert_eq!(
+            JobLimits::from_flags(0x0800),
+            JobLimits {
+                breakaway_ok: true,
+                ..plain
+            }
+        );
+        assert_eq!(
+            JobLimits::from_flags(0x1000),
+            JobLimits {
+                silent_breakaway_ok: true,
+                ..plain
+            }
+        );
+        assert_eq!(
+            JobLimits::from_flags(0x2000),
+            JobLimits {
+                kill_on_close: true,
+                ..plain
+            }
+        );
+        assert_eq!(
+            JobLimits::from_flags(0x3809),
+            JobLimits {
+                in_job: true,
+                breakaway_ok: true,
+                silent_breakaway_ok: true,
+                kill_on_close: true,
+            }
+        );
+        assert_eq!(
+            JobLimits::default(),
+            JobLimits {
+                in_job: false,
+                ..plain
+            }
+        );
+    }
+
+    /// Where a long-lived child starts, for every reading of its starter's
+    /// job (S6 design note §5.1, I9; #9 2026-09-28: the PC's task job allows
+    /// no breakaway): all five cases, every flag on both sides.
+    #[test]
+    fn the_job_as_read_decides_where_a_child_starts() {
+        let job = |in_job, breakaway_ok, silent_breakaway_ok, kill_on_close| JobLimits {
+            in_job,
+            breakaway_ok,
+            silent_breakaway_ok,
+            kill_on_close,
+        };
+        let both = [false, true];
+        for breakaway in both {
+            for silent in both {
+                for kill in both {
+                    // In no job: nothing to leave, whatever the flags say.
+                    assert_eq!(
+                        placement(job(false, breakaway, silent, kill)),
+                        Placement::NoJob,
+                        "{breakaway} {silent} {kill}"
+                    );
+                }
+            }
+        }
+        for silent in both {
+            for kill in both {
+                // Breakaway allowed: the child leaves the job, as before.
+                assert_eq!(
+                    placement(job(true, true, silent, kill)),
+                    Placement::Breakaway,
+                    "{silent} {kill}"
+                );
+            }
+        }
+        for kill in both {
+            // Silent breakaway: every child starts outside the job anyway.
+            assert_eq!(
+                placement(job(true, false, true, kill)),
+                Placement::NoJob,
+                "{kill}"
+            );
+        }
+        // Neither: inside a job that lives on while any of its processes
+        // runs, so the child outlives its starter ...
+        assert_eq!(placement(job(true, false, false, false)), Placement::InJob);
+        // ... and nothing where the job's close would end the child.
+        assert_eq!(
+            placement(job(true, false, false, true)),
+            Placement::Refuse(ENDS_WITH_THE_JOB)
+        );
+        assert!(
+            ENDS_WITH_THE_JOB.contains("allows no breakaway")
+                && ENDS_WITH_THE_JOB.contains("ends its processes when it closes"),
+            "{ENDS_WITH_THE_JOB}"
+        );
+    }
+
+    /// Helpers stay in the caller's job: a job that refuses breakaway (the
+    /// PC's task job, #9 2026-09-28) must not refuse a `curl` check. A
+    /// waiting one gets its own group, so Ctrl-Break reaches that helper
+    /// only.
     #[test]
     fn helpers_stay_in_the_job_and_a_waiting_one_has_its_own_group() {
         assert_eq!(helper_flags(false), 0x0800_0000);
