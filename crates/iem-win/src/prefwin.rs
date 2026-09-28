@@ -595,6 +595,93 @@ mod tests {
         assert_eq!(next.enter(&mut store), Ok(Entered::Wrote));
     }
 
+    /// The guard's `PrefCheck` (#9 2026-09-28): the original is there → no
+    /// write, and nobody is asked who holds the driver.
+    #[test]
+    fn check_writes_nothing_and_asks_nobody_when_the_original_is_there() {
+        for original in [dword("64"), text(" 64")] {
+            let mut store = FakeStore::holding(original.clone());
+            let mut asked = false;
+            let got = check(&mut store, &original, 3, || {
+                asked = true;
+                Some("reaper.exe (11)")
+            });
+            assert_eq!(got, Ok(Checked::Original(0)));
+            assert!(!asked, "{original:?}");
+            assert_eq!((store.reads, store.writes), (1, 0));
+        }
+    }
+
+    /// Not the original and no process holds the driver's module: restored
+    /// with read-back, as `restore` does.
+    #[test]
+    fn check_restores_while_nothing_holds_the_driver() {
+        let mut store = FakeStore::holding(dword("32"));
+        let mut asked = 0;
+        let got = check(&mut store, &dword("64"), 3, || {
+            asked += 1;
+            None::<&str>
+        });
+        assert_eq!(got, Ok(Checked::Original(1)));
+        assert_eq!(asked, 1);
+        assert_eq!((store.value.clone(), store.writes), (dword("64"), 1));
+
+        // The same digits in the other kind are not the original either.
+        let mut store = FakeStore::holding(text("64"));
+        let got = check(&mut store, &dword("64"), 3, || None::<&str>);
+        assert_eq!(got, Ok(Checked::Original(1)));
+        assert_eq!(store.value, dword("64"));
+
+        // A failed write is tried again, up to the attempts given.
+        let mut store = FakeStore::holding(dword("32"));
+        store.bad_writes = vec![1];
+        let got = check(&mut store, &dword("64"), 3, || None::<&str>);
+        assert_eq!(got, Ok(Checked::Original(2)));
+        let mut store = FakeStore::holding(dword("32"));
+        store.bad_writes = vec![1, 2, 3];
+        assert_eq!(
+            check(&mut store, &dword("64"), 3, || None::<&str>),
+            Err(PrefError::Write("write 3 failed".into()))
+        );
+        assert_eq!((store.value.clone(), store.writes), (dword("32"), 3));
+
+        // An unreadable value with nothing holding the driver is restored.
+        let mut store = FakeStore::holding(dword("32"));
+        store.bad_reads = vec![1];
+        let got = check(&mut store, &dword("64"), 3, || None::<&str>);
+        assert_eq!(got, Ok(Checked::Original(1)));
+        assert_eq!(store.value, dword("64"));
+    }
+
+    /// Not the original while a process holds the driver's module (REAPER
+    /// autostarted at 32 after a power loss in dev time): nothing is
+    /// written, since the driver most likely asks its host for a reset when
+    /// the value changes while it is open (a dropout mid-event). The check
+    /// names what it found and who holds it.
+    #[test]
+    fn check_never_writes_while_a_process_holds_the_driver() {
+        let mut store = FakeStore::holding(dword("32"));
+        let got = check(&mut store, &dword("64"), 3, || Some("reaper.exe (11)"));
+        assert_eq!(
+            got,
+            Ok(Checked::Open {
+                found: Some(dword("32")),
+                by: "reaper.exe (11)"
+            })
+        );
+        assert_eq!(
+            (store.value.clone(), store.reads, store.writes),
+            (dword("32"), 1, 0)
+        );
+
+        // An unreadable value is not written under a holder either.
+        let mut store = FakeStore::holding(dword("32"));
+        store.bad_reads = vec![1];
+        let got = check(&mut store, &dword("64"), 3, || Some(7_u32));
+        assert_eq!(got, Ok(Checked::Open { found: None, by: 7 }));
+        assert_eq!(store.writes, 0);
+    }
+
     #[test]
     fn errors_read_as_sentences() {
         assert_eq!(

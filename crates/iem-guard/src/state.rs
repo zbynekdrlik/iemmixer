@@ -185,6 +185,10 @@ mod tests {
                 next_at: 1_790_000_900,
             }),
             job: Some(4242),
+            pref_held: Some(
+                "REAPER runs with the preferred buffer at 32; it is restored at REAPER's next start"
+                    .into(),
+            ),
         }
     }
 
@@ -288,10 +292,13 @@ mod tests {
         assert_eq!(st.switching, None);
         assert_eq!(st.interlock_retry, None);
         assert_eq!(st.job, None, "no HIL job after a reboot");
-        // Everything else stays: bundles, pins and children are facts.
+        // Everything else stays: bundles, pins and children are facts, and
+        // so is a preference left alone under a holder (#9 2026-09-28): the
+        // next check reads it again.
         let before = sample();
         assert_eq!(st.bundles, before.bundles);
         assert_eq!(st.pins, before.pins);
         assert_eq!(st.pids, before.pids);
+        assert_eq!(st.pref_held, before.pref_held);
     }
 }
