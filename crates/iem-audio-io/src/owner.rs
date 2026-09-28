@@ -6,10 +6,12 @@
 //! - [`open_period`]: the period an open measures from its first callbacks'
 //!   sample positions ([`crate::period`]);
 //! - [`Watchdog`] and [`reset_step`]: the stall clock and the reopen request
-//!   put to the [`ResetBudget`] ([`crate::reset`]);
+//!   put to the [`ResetBudget`] ([`crate::reset`]), its reasons ([`Asked`])
+//!   logged with the verdict;
 //! - [`session_end_release`], [`seh_step`] and [`stop_step`]: the bounded
 //!   waits that end in a released (or parked) driver.
 
+use std::fmt;
 use std::time::{Duration, Instant};
 
 use crate::period::{self, PeriodVerdict};
@@ -124,18 +126,56 @@ impl Watchdog {
     }
 }
 
+/// What asks the owner thread for a reopen in one tick; the log names it with
+/// the budget's verdict (#9 2026-09-28).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Asked {
+    /// The driver's reset request (`kAsioResetRequest`).
+    pub reset: bool,
+    /// The driver's buffer size change (`kAsioBufferSizeChange`).
+    pub buffer_size: bool,
+    /// The driver reported a new sample rate.
+    pub rate: bool,
+    /// HIL's forced reopen.
+    pub forced: bool,
+    /// No callback for [`reset::STALL`].
+    pub stalled: bool,
+}
+
+impl Asked {
+    /// Anything asks.
+    pub fn any(self) -> bool {
+        self.reset || self.buffer_size || self.rate || self.forced || self.stalled
+    }
+}
+
+/// The reasons as a list, "nothing" when none.
+impl fmt::Display for Asked {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let reasons: Vec<&str> = [
+            (self.reset, "the driver's reset request"),
+            (self.buffer_size, "the driver's buffer size change"),
+            (self.rate, "the driver's sample-rate change"),
+            (self.forced, "a forced reopen (HIL)"),
+            (self.stalled, "a stall (no callback for 2 s)"),
+        ]
+        .into_iter()
+        .filter_map(|(asked, why)| asked.then_some(why))
+        .collect();
+        if reasons.is_empty() {
+            f.write_str("nothing")
+        } else {
+            f.write_str(&reasons.join(", "))
+        }
+    }
+}
+
 /// One tick's reopen question: the driver asked (a reset request, a buffer
 /// size or a rate change), a reopen was forced (HIL) or the stream stalled.
 /// `None` when nothing asks (the budget is untouched), else the budget's
 /// verdict.
-pub fn reset_step(
-    driver: bool,
-    forced: bool,
-    stalled: bool,
-    budget: &mut ResetBudget,
-    now: Instant,
-) -> Option<Verdict> {
-    (driver || forced || stalled).then(|| budget.ask(now))
+pub fn reset_step(asked: Asked, budget: &mut ResetBudget, now: Instant) -> Option<Verdict> {
+    asked.any().then(|| budget.ask(now))
 }
 
 /// Whether the session-end handler releases the driver now: once the engine

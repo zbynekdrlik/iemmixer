@@ -15,6 +15,10 @@ azo = "=0.2.1"
 # The S6 backend's Windows glue: the preference window (prefwin + the HKCU
 # store), the session-end window, the driver-module holders (I3), VirtualLock.
 iem-win = { path = "../iem-win" }
+# The backend's owner thread logs the driver's messages, the preference
+# window and every reopen with its reason (#9 2026-09-28); never the
+# callback. Already in the engine's closure, the engine's subscriber prints it.
+tracing = "0.1"
 # The owner thread's message pump (PeekMessageW / DispatchMessageW) and the
 # SEH filter (SetUnhandledExceptionFilter needs Win32_System_Kernel).
 windows-sys = { version = "0.61", features = [

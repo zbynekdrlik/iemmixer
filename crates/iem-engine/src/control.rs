@@ -61,8 +61,8 @@ pub trait Driver: Send {
 pub enum Ending {
     /// The Windows session ends: save, fade out, release (the shutdown path).
     Session,
-    /// The card must be refused (exit 3), e.g. a reopen left the preferred
-    /// buffer at 32 instead of REAPER's original.
+    /// The card must be refused (exit 3), e.g. a release could not write
+    /// REAPER's preferred buffer back.
     Card(String),
 }
 

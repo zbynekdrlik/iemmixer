@@ -15,9 +15,10 @@
 //!   buffer but the driver's preferred one (I2).
 //! - The backend's callback allocates, locks, logs and makes syscalls never
 //!   (I7), apart from the driver's own `getSamplePosition` and `outputReady`;
-//!   its decisions live in the portable, mutation-tested `format`,
-//!   `telemetry`, `channels`, `period`, `reset`, `owner` and
-//!   `iem_win::prefwin`.
+//!   so do its driver-message handlers, which may run on any thread: they
+//!   count, and the owner thread logs. Its decisions live in the portable,
+//!   mutation-tested `format`, `telemetry`, `channels`, `period`, `reset`,
+//!   `owner`, `messages` and `iem_win::prefwin`.
 
 use core::cell::{Cell, RefCell, UnsafeCell};
 use core::ffi::{CStr, c_long, c_void};
@@ -31,7 +32,7 @@ use std::io;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 use std::sync::mpsc::{self, SyncSender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -42,6 +43,7 @@ use azo::utils::com::InitGuard;
 pub use iem_win::prefwin::{self, Pref, PrefError};
 use iem_win::registry::HkcuPref;
 use iem_win::window::SessionEndWindow;
+use tracing::{error, info, warn};
 use windows_sys::Win32::System::Diagnostics::Debug::{
     EXCEPTION_CONTINUE_SEARCH, EXCEPTION_POINTERS, SetUnhandledExceptionFilter,
 };
@@ -51,8 +53,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 use crate::channels::{ChannelMap, MapError};
 use crate::format::{self, Refusal, SampleFormat};
+use crate::messages::{self, Messages, TOPICS};
 pub use crate::owner::StopOutcome;
-use crate::owner::{self, OpenPeriod, SehStep, Watchdog};
+use crate::owner::{self, Asked, OpenPeriod, SehStep, Watchdog};
 use crate::period::PeriodVerdict;
 use crate::reset::{ResetBudget, Verdict};
 use crate::rtpanic;
@@ -740,6 +743,24 @@ static RELEASED: AtomicBool = AtomicBool::new(true);
 static SEH: AtomicBool = AtomicBool::new(false);
 /// The filter parked a faulting thread (the driver was not released in time).
 static SEH_PARKED: AtomicBool = AtomicBool::new(false);
+/// Every driver message since the process started: counted by the handlers
+/// on whatever thread the driver calls them, logged by the owner thread
+/// (`crate::messages`; #9 2026-09-28).
+static MESSAGES: Messages = Messages::new();
+/// The owner thread's clock, set before its first driver exists: the
+/// messages' times and the owner's log lines read it.
+static BASE: OnceLock<Instant> = OnceLock::new();
+
+/// Now on the owner thread's clock (0 before it started): an atomic load
+/// and the performance counter, no allocation or lock (the handlers).
+fn clock_ns() -> u64 {
+    BASE.get().map_or(0, |base| nanos(base.elapsed()))
+}
+
+/// Now on the owner thread's clock, for a log line.
+fn when() -> String {
+    messages::stamp(clock_ns())
+}
 
 thread_local! {
     /// How deep this thread is inside the backend's callbacks: the SEH filter
@@ -788,13 +809,17 @@ unsafe extern "system" fn backend_message(
     _message: *const c_void,
     _opt: *const f64,
 ) -> c_long {
-    // Asked while createBuffers runs, before the stream exists: answered
-    // without counting.
+    // Any thread (azo passes our callbacks to the driver as they are):
+    // counted in atomics for the owner thread's log, also while no stream
+    // exists (asked while createBuffers runs, or between a stream's finish
+    // and the next open), where the stream's telemetry cannot count.
+    MESSAGES.message(sel.0, value, clock_ns());
     with_backend(|b| b.telemetry.driver_message(sel.0, value))
         .unwrap_or_else(|| telemetry::reply(sel.0, value))
 }
 
-unsafe extern "system" fn backend_rate_change(_rate: SampleRate) {
+unsafe extern "system" fn backend_rate_change(rate: SampleRate) {
+    MESSAGES.rate_change(rate, clock_ns());
     with_backend(|b| b.telemetry.on_rate_change());
 }
 
@@ -973,7 +998,8 @@ impl Drop for ReleaseMark {
 
 /// The backend's driver instance. The host is boxed, so the callbacks'
 /// driver pointer stays valid when the card moves; it is dropped (released)
-/// before the mark sets `RELEASED`.
+/// before the mark sets `RELEASED` (`Owner::release_card` closes the
+/// preference window in between).
 struct Card {
     host: Box<Host>,
     _released: ReleaseMark,
@@ -994,57 +1020,63 @@ impl Card {
     }
 }
 
-/// The preference window (S6 design note §3): open while the driver opens,
-/// closed right after `createBuffers` on every path; dropping it closes it
-/// too (a panicking driver call).
+/// The preference window on the PC's registry (S6 design note §3; #9
+/// 2026-09-28): 32 written before the first open, kept (read, never written)
+/// by every reopen, REAPER's original written back when the card is released
+/// and no open follows. `prefwin::Window` decides; dropping a window that
+/// still holds the card (the owner thread unwinds) closes it too.
 struct PrefWindow {
     store: HkcuPref,
-    original: Pref,
-    open: bool,
+    window: prefwin::Window,
     /// Where a close that failed in `Drop` is noted.
     shared: Arc<Shared>,
 }
 
 impl PrefWindow {
-    fn enter(
+    fn new(
         (key, name, original): &(String, String, Pref),
         frames: u32,
         shared: &Arc<Shared>,
-    ) -> Result<Self, PrefError> {
-        let mut store = HkcuPref {
-            key: key.clone(),
-            name: name.clone(),
-        };
-        prefwin::enter(&mut store, original, frames)?;
-        Ok(Self {
-            store,
-            original: original.clone(),
-            open: true,
+    ) -> Self {
+        Self {
+            store: HkcuPref {
+                key: key.clone(),
+                name: name.clone(),
+            },
+            window: prefwin::Window::new(original.clone(), frames),
             shared: Arc::clone(shared),
-        })
-    }
-
-    fn close(mut self) -> Result<(), PrefError> {
-        self.open = false;
-        prefwin::leave(&mut self.store, &self.original)
+        }
     }
 }
 
 impl Drop for PrefWindow {
     fn drop(&mut self) {
-        // Still open only while a driver call unwinds. A failed close is
-        // noted where the engine finds it: `pref_failure` on a live stream
-        // (Alarm{pref}, exit 3), `start`'s refusal when the first open died.
-        if self.open
-            && let Err(error) = prefwin::leave(&mut self.store, &self.original)
-        {
-            let text = AsioError::PrefLeave {
-                error: error.clone(),
-                after: None,
+        // Still held only when the owner thread unwinds (a panicking driver
+        // call) before a release closed the window. A failed close is noted
+        // where the engine finds it: `pref_failure` on a live stream (exit
+        // 3), `start`'s refusal when the first open died.
+        if self.window.state() != prefwin::State::Held {
+            return;
+        }
+        match self.window.leave(&mut self.store) {
+            Ok(_) => warn!(
+                "[{}] the preferred buffer is back at REAPER's {} (the owner thread ended while it held the card)",
+                when(),
+                self.window.original().raw
+            ),
+            Err(error) => {
+                let text = AsioError::PrefLeave {
+                    error: error.clone(),
+                    after: None,
+                }
+                .to_string();
+                error!(
+                    "[{}] {text} (the owner thread ended while it held the card)",
+                    when()
+                );
+                note(&self.shared.pref_failure, text);
+                note(&self.shared.pref_leave, error);
             }
-            .to_string();
-            note(&self.shared.pref_failure, text);
-            note(&self.shared.pref_leave, error);
         }
     }
 }
@@ -1060,10 +1092,13 @@ struct Prepared {
     buffers: Vec<[*mut c_void; 2]>,
 }
 
-impl Prepared {
-    fn release(self) {
-        let _ = self.card.driver().dispose_all_buffers();
-    }
+/// What follows a finished stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Then {
+    /// Another open (a reopen): the preference window stays held.
+    Reopen,
+    /// Nothing: the card is released for good and the window closes.
+    Release,
 }
 
 /// The started stream, owned by the owner thread.
@@ -1170,12 +1205,53 @@ struct Owner {
     /// Finished for good: by a stop, the session end or a structured
     /// exception, or parked.
     done: Option<StopOutcome>,
+    /// The opens so far, the first included (the log numbers them).
+    opens: u32,
+    /// The driver messages already logged, per topic.
+    seen: [u64; TOPICS],
+    /// The preference window (`None` only in tests). Last: when the owner
+    /// thread unwinds, the live card is dropped first, then the window's
+    /// `Drop` writes REAPER's value back.
+    pref: Option<PrefWindow>,
 }
 
 impl Owner {
     /// Opens the card and starts a stream with `carry`. On failure the carry
-    /// is back in `self.carry` (none when a stuck callback parked it).
+    /// is back in `self.carry` (none when a stuck callback parked it); the
+    /// preference window stays as it is, the caller closes it when no open
+    /// follows.
     fn open(&mut self, carry: Carry, first: bool) -> Result<(), AsioError> {
+        self.opens = self.opens.saturating_add(1);
+        let began = Instant::now();
+        info!(
+            "[{}] open {} of the card{}",
+            when(),
+            self.opens,
+            if first { "" } else { " (a reopen)" }
+        );
+        let opened = self.open_card(carry, first);
+        // What the driver sent meanwhile (it asks questions while
+        // createBuffers runs; a reset request may come any time).
+        self.log_messages();
+        match &opened {
+            Ok(()) => info!(
+                "[{}] open {} ready after {} ms: the driver delivers {} samples per callback",
+                when(),
+                self.opens,
+                began.elapsed().as_millis(),
+                self.shared.frames.load(Ordering::SeqCst)
+            ),
+            Err(e) => warn!(
+                "[{}] open {} failed after {} ms: {e}",
+                when(),
+                self.opens,
+                began.elapsed().as_millis()
+            ),
+        }
+        opened
+    }
+
+    fn open_card(&mut self, carry: Carry, first: bool) -> Result<(), AsioError> {
         // I3, before the preference window and never after our own open.
         if first && let Err(e) = holders(&self.card.module) {
             self.carry = Some(carry);
@@ -1190,28 +1266,88 @@ impl Owner {
         }
     }
 
-    /// The preference window around the driver's open and `createBuffers`.
-    fn prepare(&self) -> Result<Prepared, AsioError> {
-        let window = self
-            .card
-            .pref
-            .as_ref()
-            .map(|pref| PrefWindow::enter(pref, self.frames, &self.shared))
-            .transpose()
-            .map_err(AsioError::Pref)?;
-        let prepared = self.prepare_card();
-        let left = window.map_or(Ok(()), PrefWindow::close);
-        match (prepared, left) {
-            (Ok(p), Ok(())) => Ok(p),
-            (Ok(p), Err(error)) => {
-                p.release();
-                Err(AsioError::PrefLeave { error, after: None })
+    /// The preference window (32 written on the first open, kept on a
+    /// reopen), then the driver's open and `createBuffers`. The window stays
+    /// held after `createBuffers` (#9 2026-09-28): a write while the driver
+    /// is open makes it ask for a reset.
+    fn prepare(&mut self) -> Result<Prepared, AsioError> {
+        self.enter_pref().map_err(AsioError::Pref)?;
+        self.prepare_card()
+    }
+
+    /// Before every open: the window's `enter`, logged.
+    fn enter_pref(&mut self) -> Result<(), PrefError> {
+        let Some(p) = self.pref.as_mut() else {
+            return Ok(());
+        };
+        match p.window.enter(&mut p.store) {
+            Ok(prefwin::Entered::Wrote) => {
+                info!(
+                    "[{}] the preferred buffer holds {} (written, read back) while iemmixer holds the card",
+                    when(),
+                    p.window.held().raw
+                );
+                Ok(())
             }
-            (Err(e), Ok(())) => Err(e),
-            (Err(e), Err(error)) => Err(AsioError::PrefLeave {
-                error,
-                after: Some(Box::new(e)),
-            }),
+            Ok(prefwin::Entered::Kept) => {
+                info!(
+                    "[{}] the preferred buffer still holds {} (read, not written again)",
+                    when(),
+                    p.window.held().raw
+                );
+                Ok(())
+            }
+            Err(e) => {
+                warn!("[{}] the preference window refuses the open: {e}", when());
+                Err(e)
+            }
+        }
+    }
+
+    /// The card is released and no open follows: REAPER's original goes
+    /// back (read back), logged. A failure is logged and noted in
+    /// `pref_failure` (the window stays held, so a later release writes
+    /// again; the guard's `PrefCheck` restores it before REAPER starts).
+    /// Nothing happens when the window holds nothing.
+    fn leave_pref(&mut self) -> Result<(), PrefError> {
+        let Some(p) = self.pref.as_mut() else {
+            return Ok(());
+        };
+        match p.window.leave(&mut p.store) {
+            Ok(prefwin::Left::Restored) => {
+                info!(
+                    "[{}] the preferred buffer is back at REAPER's {} (written, read back): the card is released",
+                    when(),
+                    p.window.original().raw
+                );
+                Ok(())
+            }
+            Ok(prefwin::Left::Untouched) => Ok(()),
+            Err(error) => {
+                let text = AsioError::PrefLeave {
+                    error: error.clone(),
+                    after: None,
+                }
+                .to_string();
+                error!(
+                    "[{}] {text} at the card's release (the guard restores it before REAPER starts)",
+                    when()
+                );
+                note(&self.shared.pref_failure, text);
+                Err(error)
+            }
+        }
+    }
+
+    /// Logs the driver's messages since the last look: the handlers only
+    /// count them. Those that ask for a reopen are warnings.
+    fn log_messages(&mut self) {
+        for arrived in MESSAGES.since(&mut self.seen) {
+            if arrived.topic.asks_reopen() {
+                warn!("[{}] {arrived}", when());
+            } else {
+                info!("[{}] {arrived}", when());
+            }
         }
     }
 
@@ -1258,6 +1394,8 @@ impl Owner {
     }
 
     /// Zeroed outputs, `start()`, then the period from the first callbacks.
+    /// A failure here ends the open with the card released for good: no open
+    /// follows (a first open is refused, a reopen faults).
     fn start_stream(
         &mut self,
         prepared: Prepared,
@@ -1318,7 +1456,7 @@ impl Owner {
         };
         if let Err(e) = live.card.driver().start() {
             let err = live.card.host.call("start")(e);
-            self.carry = self.finish(live);
+            self.carry = self.finish(live, Then::Release);
             return Err(err);
         }
         let started = Instant::now();
@@ -1327,7 +1465,7 @@ impl Owner {
             pump_messages();
             if self.shared.release_pending.load(Ordering::SeqCst) {
                 // The session ended meanwhile (`session_end`): no stream.
-                self.carry = self.finish(live);
+                self.carry = self.finish(live, Then::Release);
                 return Err(AsioError::SessionEnd);
             }
             // SAFETY: the stream is live: only `finish` frees it.
@@ -1339,7 +1477,7 @@ impl Owner {
                     break;
                 }
                 OpenPeriod::Refuse(verdict) => {
-                    self.carry = self.finish(live);
+                    self.carry = self.finish(live, Then::Release);
                     return Err(AsioError::Period(verdict));
                 }
             }
@@ -1355,10 +1493,12 @@ impl Owner {
 
     /// Stops the stream, waits until no callback is inside it (bounded by
     /// [`STOP_WAIT`], pumping), disposes the buffers and releases the driver
-    /// (`RELEASED` is set after that); returns the carry. `None` when a
+    /// ([`Owner::release_card`]: with `Then::Release` the preference window
+    /// closes before `RELEASED` is set); returns the carry. `None` when a
     /// callback stayed inside (R6): the stream and the driver are left alone,
-    /// never freed under a callback, and the owner is done (parked).
-    fn finish(&mut self, live: Live) -> Option<Carry> {
+    /// never freed under a callback, the preference window stays held (the
+    /// card may be), and the owner is done (parked).
+    fn finish(&mut self, live: Live, then: Then) -> Option<Carry> {
         let Live { card, backend, .. } = live;
         let _ = card.driver().stop();
         BACKEND.store(ptr::null_mut(), Ordering::SeqCst);
@@ -1372,6 +1512,13 @@ impl Owner {
                 core::mem::forget(card);
                 self.shared.parked.store(true, Ordering::SeqCst);
                 self.done = Some(StopOutcome::Parked);
+                error!(
+                    "[{}] a callback is still in the stream {} s after stop(): the stream is parked \
+                     and may hold the card; the preferred buffer keeps the engine's value until \
+                     the guard restores it",
+                    when(),
+                    STOP_WAIT.as_secs()
+                );
                 return None;
             }
             pump_messages();
@@ -1383,20 +1530,48 @@ impl Owner {
         self.base = self.base.plus(stream.telemetry.counters());
         let _ = card.driver().dispose_all_buffers();
         let Backend { carry, .. } = *stream;
-        drop(card);
+        self.release_card(card, then);
         Some(carry.into_inner())
     }
 
+    /// Drops the driver instance (the driver is released), then, when no open
+    /// follows, closes the preference window, and only then sets `RELEASED`.
+    /// After the driver's release, so no open driver of ours sees the write;
+    /// before `RELEASED`, since the SEH filter lets the process end once it
+    /// is set: a structured exception still writes REAPER's value back first
+    /// (one registry write and read, well inside `owner::SEH_WAIT`).
+    fn release_card(&mut self, card: Card, then: Then) {
+        let Card {
+            host,
+            _released: mark,
+        } = card;
+        drop(host);
+        if then == Then::Release {
+            // A failure is logged and noted in `pref_failure`; the release
+            // goes on.
+            let _ = self.leave_pref();
+        }
+        drop(mark);
+    }
+
     /// Ends the stream for good (a stop, the session end, a structured
-    /// exception).
+    /// exception): the card released and the preference window closed,
+    /// unless a stuck callback parked the stream.
     fn release_for_good(&mut self) -> StopOutcome {
         if let Some(outcome) = self.done {
             return outcome;
         }
         if let Some(live) = self.live.take() {
-            self.carry = self.finish(live);
+            self.carry = self.finish(live, Then::Release);
         }
         let outcome = self.done.unwrap_or(StopOutcome::Released);
+        if outcome == StopOutcome::Released {
+            // Without a live stream (a failed reopen, or one the session end
+            // stopped) the window may still be held; after a failed close in
+            // `finish` this is the second try.
+            let _ = self.leave_pref();
+        }
+        self.log_messages();
         self.done = Some(outcome);
         self.publish();
         outcome
@@ -1414,8 +1589,8 @@ impl Owner {
     }
 
     /// One look at the live stream: a panic in the callback, then the reopen
-    /// question.
-    fn watch(&mut self, live: &mut Live, now: Instant) -> Option<Verdict> {
+    /// question and its reasons.
+    fn watch(&mut self, live: &mut Live, now: Instant) -> Option<(Asked, Verdict)> {
         // SAFETY: the stream is live.
         let b = unsafe { &*live.backend };
         if b.faulted.load(Ordering::Acquire) {
@@ -1424,44 +1599,46 @@ impl Owner {
             }
             return None;
         }
-        let asked = b.telemetry.take_reopen();
+        let requested = b.telemetry.take_requests();
         let rate_changes = b.telemetry.rate_changes();
-        let rate_changed = rate_changes != live.rate_changes;
+        let rate = rate_changes != live.rate_changes;
         live.rate_changes = rate_changes;
-        let forced = self.shared.reopen.swap(false, Ordering::SeqCst);
-        let stalled = live.watchdog.stalled(b.telemetry.callbacks(), now);
-        owner::reset_step(
-            asked || rate_changed,
-            forced,
-            stalled,
-            &mut self.budget,
-            now,
-        )
+        let asked = Asked {
+            reset: requested.reset,
+            buffer_size: requested.buffer_size,
+            rate,
+            forced: self.shared.reopen.swap(false, Ordering::SeqCst),
+            stalled: live.watchdog.stalled(b.telemetry.callbacks(), now),
+        };
+        owner::reset_step(asked, &mut self.budget, now).map(|verdict| (asked, verdict))
     }
 
     /// Finish, then open again with the same processor; its first block
-    /// after the reopen follows `Process::discontinuity`.
+    /// after the reopen follows `Process::discontinuity`. The preference
+    /// window stays held across it (nothing is written); when the reopen
+    /// fails no open follows, and it closes.
     fn reopen(&mut self, live: Live) {
-        let Some(carry) = self.finish(live) else {
+        let Some(carry) = self.finish(live, Then::Reopen) else {
             return;
         };
         if self.shared.release_pending.load(Ordering::SeqCst) {
             // The session ended during the finish: no new open (the next
-            // tick releases for good).
+            // tick releases for good and closes the window).
             self.carry = Some(carry);
             return;
         }
-        if let Err(e) = self.open(carry, false)
-            && !matches!(e, AsioError::SessionEnd)
-        {
-            if matches!(e, AsioError::PrefLeave { .. }) {
-                note(&self.shared.pref_failure, e.to_string());
+        if let Err(e) = self.open(carry, false) {
+            // The card is released and no open follows: REAPER's value goes
+            // back now (a failure is noted in `pref_failure`).
+            let _ = self.leave_pref();
+            if !matches!(e, AsioError::SessionEnd) {
+                self.fault(format!("the reopen failed: {e}"));
             }
-            self.fault(format!("the reopen failed: {e}"));
         }
     }
 
     fn tick(&mut self, now: Instant) -> Next {
+        self.log_messages();
         if SEH.load(Ordering::SeqCst) && self.done.is_none() {
             self.fault("a structured exception reached the filter".to_owned());
             self.release_for_good();
@@ -1483,13 +1660,23 @@ impl Owner {
         {
             match self.watch(&mut live, now) {
                 None => self.live = Some(live),
-                Some(Verdict::Reopen) => self.reopen(live),
-                Some(Verdict::Fault) => {
-                    self.live = Some(live);
-                    self.fault(
-                        "the driver needed more reopens than the budget allows (program spec §4.4)"
-                            .to_owned(),
+                Some((asked, Verdict::Reopen)) => {
+                    warn!(
+                        "[{}] reopening the card for {asked} ({})",
+                        when(),
+                        self.budget.state()
                     );
+                    self.reopen(live);
+                }
+                Some((asked, Verdict::Fault)) => {
+                    self.live = Some(live);
+                    let why = format!(
+                        "the driver needed more reopens than the budget allows (program spec §4.4): \
+                         {asked}; {}",
+                        self.budget.state()
+                    );
+                    error!("[{}] {why}", when());
+                    self.fault(why);
                 }
             }
         }
@@ -1542,6 +1729,18 @@ fn owner_main(start: Start, ready: SyncSender<Result<(), AsioError>>) {
         processor,
         shared,
     } = start;
+    // The clock of the messages' times and the owner's log lines, before
+    // any driver exists.
+    let _ = BASE.get_or_init(Instant::now);
+    info!(
+        "[{}] the ASIO owner thread starts: {} at {frames} samples",
+        when(),
+        card.driver
+    );
+    let pref = card
+        .pref
+        .as_ref()
+        .map(|p| PrefWindow::new(p, frames, &shared));
     let state = Rc::new(RefCell::new(Owner {
         card,
         frames,
@@ -1553,6 +1752,9 @@ fn owner_main(start: Start, ready: SyncSender<Result<(), AsioError>>) {
         live: None,
         carry: None,
         done: None,
+        opens: 0,
+        seen: [0; TOPICS],
+        pref,
     }));
     // A hidden top-level window (never message-only: those never see the
     // session end) on this thread, which pumps its messages.
@@ -1585,14 +1787,26 @@ fn owner_main(start: Start, ready: SyncSender<Result<(), AsioError>>) {
     let opened = state.borrow_mut().open(carry, true);
     if let Err(e) = opened {
         if state.borrow().done == Some(StopOutcome::Parked) {
+            // The card may be held: the preference window stays held too.
             shared.set_outcome(StopOutcome::Parked);
             let _ = ready.send(Err(e));
             park(&window);
         }
+        // The card is released and no open follows: REAPER's value goes
+        // back before the refusal (usually done already by the failed
+        // open's release; this is then a no-op, or the second try).
+        let left = state.borrow_mut().leave_pref();
         state.borrow_mut().close();
         shared.set_outcome(StopOutcome::Released);
         BUSY.store(false, Ordering::SeqCst);
-        let _ = ready.send(Err(e));
+        let refusal = match left {
+            Ok(()) => e,
+            Err(error) => AsioError::PrefLeave {
+                error,
+                after: Some(Box::new(e)),
+            },
+        };
+        let _ = ready.send(Err(refusal));
         return;
     }
     state.borrow().publish();
@@ -1663,9 +1877,10 @@ impl<P: Process + 'static> AsioStream<P> {
     /// topology's, and after its TX HIL's spare outputs.
     ///
     /// The first open checks the driver module's holders (I3), opens the
-    /// preference window (32 while the driver opens, REAPER's original right
-    /// after `createBuffers`), admits the driver (96 kHz, preferred buffer =
-    /// `frames`, one sample type) and maps the channels.
+    /// preference window (32 from before the first open until the card is
+    /// released for good, kept by every reopen, then REAPER's original: #9
+    /// 2026-09-28), admits the driver (96 kHz, preferred buffer = `frames`,
+    /// one sample type) and maps the channels.
     pub fn start(
         card: CardConfig,
         rx: Vec<u16>,
@@ -1727,8 +1942,8 @@ impl<P: Process + 'static> AsioStream<P> {
                 let _ = thread.join();
                 let ended =
                     AsioError::Thread("the owner thread ended before the stream opened".to_owned());
-                // A driver call panicked inside the preference window and
-                // its drop could not close it: the refusal says so.
+                // A driver call panicked while the preference window was
+                // held and its drop could not close it: the refusal says so.
                 Err(
                     match shared.pref_leave.lock().ok().and_then(|p| p.clone()) {
                         Some(error) => AsioError::PrefLeave {
@@ -1790,8 +2005,10 @@ impl<P: Process + 'static> AsioStream<P> {
         Ok(())
     }
 
-    /// A reopen could not close the preference window: the preferred buffer
-    /// may not hold REAPER's original (the engine alarms and exits 3).
+    /// A release could not close the preference window (after a failed
+    /// reopen, or the owner thread unwound): the preferred buffer may not
+    /// hold REAPER's original (the engine alarms and exits 3 unless the
+    /// stream faulted; the guard restores it before REAPER starts).
     pub fn pref_failure(&self) -> Option<String> {
         self.shared.pref_failure.lock().ok().and_then(|f| f.clone())
     }

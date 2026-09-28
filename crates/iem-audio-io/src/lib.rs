@@ -11,10 +11,12 @@
 //! [`period`] (the period the driver really delivers, measured from sample
 //! positions), [`reset`] (the reopen budget and the stall rule), [`rtpanic`]
 //! (panics on the real-time thread, recorded in atomics), [`owner`] (the
-//! decisions of the backend's owner thread) and, on Windows only, `asio` —
-//! the crate's only unsafe code: the S1a spike host and the S6 backend
-//! `AsioStream`. The preference window (the driver's preferred buffer holds
-//! 32 only while the driver opens) lives in `iem_win::prefwin`, which the
+//! decisions of the backend's owner thread), [`messages`] (the driver's
+//! messages, counted on any thread and logged by the owner thread) and, on
+//! Windows only, `asio` — the crate's only unsafe code: the S1a spike host
+//! and the S6 backend `AsioStream`. The preference window (the driver's
+//! preferred buffer holds 32 while the engine holds the card, REAPER's
+//! original at every other moment) lives in `iem_win::prefwin`, which the
 //! guard shares.
 //!
 //! Buffers are f64 and channel-major. Every backend calls `process()` inside

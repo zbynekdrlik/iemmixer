@@ -1,5 +1,226 @@
 //! The driver's messages to the host (#9 2026-09-28), counted where the
 //! driver sends them and logged by the ASIO backend's owner thread.
+//!
+//! The driver calls `asioMessage` and `sampleRateDidChange` on a thread of
+//! its own choosing: azo 0.2.1 hands the host's `Callbacks` to
+//! `createBuffers` unchanged, so a message may come on the audio callback's
+//! thread, on a thread of the driver, or on the owner thread inside
+//! `createBuffers`. The handler therefore only counts, in atomics (no
+//! allocation, lock or log: I7), also while no stream exists, when the
+//! per-stream [`crate::telemetry`] cannot count; the owner thread, which may
+//! log, reads what came since its last look ([`Messages::since`]). Portable
+//! and mutation-tested; `asio.rs` holds the process's one [`Messages`].
+
+use core::fmt;
+use core::sync::atomic::{
+    AtomicI64, AtomicU64,
+    Ordering::{Acquire, Relaxed, Release},
+};
+
+use crate::telemetry::selector;
+
+/// The number of [`Topic`]s.
+pub const TOPICS: usize = 7;
+
+/// A driver message the owner thread logs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Topic {
+    /// `kAsioResetRequest`: the driver asks the host to reopen it.
+    ResetRequest,
+    /// `kAsioBufferSizeChange` (answered 0: the driver then asks for a reset).
+    BufferSizeChange,
+    /// `kAsioResyncRequest`.
+    ResyncRequest,
+    /// `kAsioLatenciesChanged`.
+    LatenciesChanged,
+    /// `kAsioOverload`.
+    Overload,
+    /// `sampleRateDidChange` (the host never sets a rate).
+    RateChange,
+    /// Any other selector but the driver's questions; its value is the
+    /// selector.
+    Other,
+}
+
+impl Topic {
+    pub const ALL: [Topic; TOPICS] = [
+        Topic::ResetRequest,
+        Topic::BufferSizeChange,
+        Topic::ResyncRequest,
+        Topic::LatenciesChanged,
+        Topic::Overload,
+        Topic::RateChange,
+        Topic::Other,
+    ];
+
+    /// The topic of an `asioMessage` selector; `None` for the driver's
+    /// questions (selector supported, engine version, time info and time
+    /// code), which it asks while `createBuffers` runs and the host answers
+    /// without a log line.
+    pub fn of(sel: i32) -> Option<Topic> {
+        match sel {
+            selector::RESET_REQUEST => Some(Topic::ResetRequest),
+            selector::BUFFER_SIZE_CHANGE => Some(Topic::BufferSizeChange),
+            selector::RESYNC_REQUEST => Some(Topic::ResyncRequest),
+            selector::LATENCIES_CHANGED => Some(Topic::LatenciesChanged),
+            selector::OVERLOAD => Some(Topic::Overload),
+            selector::SELECTOR_SUPPORTED
+            | selector::ENGINE_VERSION
+            | selector::SUPPORTS_TIME_INFO
+            | selector::SUPPORTS_TIME_CODE => None,
+            _ => Some(Topic::Other),
+        }
+    }
+
+    /// Singular and plural, for the log.
+    pub fn names(self) -> (&'static str, &'static str) {
+        match self {
+            Topic::ResetRequest => ("reset request", "reset requests"),
+            Topic::BufferSizeChange => ("buffer size change", "buffer size changes"),
+            Topic::ResyncRequest => ("resync request", "resync requests"),
+            Topic::LatenciesChanged => ("latency change", "latency changes"),
+            Topic::Overload => ("overload", "overloads"),
+            Topic::RateChange => ("sample-rate change", "sample-rate changes"),
+            Topic::Other => ("other message", "other messages"),
+        }
+    }
+
+    /// The owner thread asks its reopen budget for it: a reset request, a
+    /// buffer size change or a sample-rate change (logged as a warning).
+    pub fn asks_reopen(self) -> bool {
+        matches!(
+            self,
+            Topic::ResetRequest | Topic::BufferSizeChange | Topic::RateChange
+        )
+    }
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// Per topic: how many came, and the last one's value and time.
+pub struct Messages {
+    count: [AtomicU64; TOPICS],
+    value: [AtomicI64; TOPICS],
+    at_ns: [AtomicU64; TOPICS],
+}
+
+impl Default for Messages {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Messages {
+    pub const fn new() -> Self {
+        Self {
+            count: [const { AtomicU64::new(0) }; TOPICS],
+            value: [const { AtomicI64::new(0) }; TOPICS],
+            at_ns: [const { AtomicU64::new(0) }; TOPICS],
+        }
+    }
+
+    /// One message, on any thread (the audio callback's too): atomics only.
+    /// `value` is the message's (the selector for [`Topic::Other`], the rate
+    /// in Hz for [`Topic::RateChange`]); `at_ns` its time on the owner
+    /// thread's clock.
+    pub fn record(&self, topic: Topic, value: i64, at_ns: u64) {
+        let i = topic.index();
+        if let (Some(count), Some(last), Some(at)) =
+            (self.count.get(i), self.value.get(i), self.at_ns.get(i))
+        {
+            last.store(value, Relaxed);
+            at.store(at_ns, Relaxed);
+            // A reader that sees the new count sees its value and time.
+            count.fetch_add(1, Release);
+        }
+    }
+
+    /// An `asioMessage`: counted under its topic, none for the driver's
+    /// questions; [`Topic::Other`] keeps the selector.
+    pub fn message(&self, sel: i32, value: i32, at_ns: u64) {
+        if let Some(topic) = Topic::of(sel) {
+            let kept = if topic == Topic::Other { sel } else { value };
+            self.record(topic, i64::from(kept), at_ns);
+        }
+    }
+
+    /// `sampleRateDidChange`: the new rate, in whole Hz.
+    pub fn rate_change(&self, rate: f64, at_ns: u64) {
+        self.record(Topic::RateChange, rate.round() as i64, at_ns);
+    }
+
+    /// The messages of `topic` so far.
+    pub fn count(&self, topic: Topic) -> u64 {
+        self.count.get(topic.index()).map_or(0, |c| c.load(Acquire))
+    }
+
+    /// What came since the owner thread's last look `seen` (one entry per
+    /// topic with new messages, in [`Topic::ALL`] order); `seen` moves up.
+    pub fn since(&self, seen: &mut [u64; TOPICS]) -> Vec<Arrived> {
+        let mut out = Vec::new();
+        for (topic, last) in Topic::ALL.into_iter().zip(seen.iter_mut()) {
+            let total = self.count(topic);
+            if total > *last {
+                let i = topic.index();
+                out.push(Arrived {
+                    topic,
+                    new: total - *last,
+                    total,
+                    value: self.value.get(i).map_or(0, |v| v.load(Relaxed)),
+                    at_ns: self.at_ns.get(i).map_or(0, |t| t.load(Relaxed)),
+                });
+                *last = total;
+            }
+        }
+        out
+    }
+}
+
+/// What came of one topic since the owner thread's last look.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Arrived {
+    pub topic: Topic,
+    /// Since the last look.
+    pub new: u64,
+    /// Since the process started.
+    pub total: u64,
+    /// The last one's value (see [`Messages::record`]).
+    pub value: i64,
+    /// When the last one came, on the owner thread's clock.
+    pub at_ns: u64,
+}
+
+impl fmt::Display for Arrived {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (one, many) = self.topic.names();
+        let (name, last) = if self.new == 1 {
+            (one, "")
+        } else {
+            (many, "the last: ")
+        };
+        let what = if self.topic == Topic::Other {
+            "selector"
+        } else {
+            "value"
+        };
+        write!(
+            f,
+            "the driver sent {} {name} ({last}{what} {}, at {}); {} so far",
+            self.new,
+            self.value,
+            stamp(self.at_ns),
+            self.total
+        )
+    }
+}
+
+/// A time on the owner thread's clock, for the log: seconds to the
+/// microsecond.
+pub fn stamp(ns: u64) -> String {
+    format!("t={:.6} s", ns as f64 / 1e9)
+}
 
 #[cfg(test)]
 mod tests {

@@ -1,11 +1,19 @@
-//! The driver's preferred buffer holds 32 only while the driver opens (S6
-//! design note §3): REAPER's value stays in the registry at every other moment,
-//! so a crash or power loss in dev never leaves REAPER at 32. The driver reads
-//! the value when it is opened (S1a). Kind (DWORD or text) is always kept.
+//! The driver's preferred buffer holds the engine's frames (32) for as long
+//! as the engine holds the card, and REAPER's original at every other moment
+//! (S6 design note §3, #9 2026-09-28). The driver reads the value when it is
+//! opened (S1a). The engine's first run on the PC faulted on its reopen budget
+//! ~110 ms after the open while the original was written back right after
+//! `createBuffers`: most likely the driver asks for a reset when the value
+//! changes while it is open. So a [`Window`] writes the frames once, before
+//! the first open, keeps them through every reopen without writing, and
+//! writes the original back when the engine releases the card. Kind (DWORD or
+//! text) is always kept.
 //!
-//! Portable and mutation-tested: the engine's backend opens and closes the
-//! window, the guard's `PrefCheck` restores it (design §5.2 step 4), both
-//! through a [`PrefStore`] (on the PC [`crate::registry::HkcuPref`]).
+//! Portable and mutation-tested: the engine's backend holds a [`Window`];
+//! the guard's `PrefCheck` [`restore`]s the original before REAPER starts
+//! (design §5.2 step 4), also after an engine that ended while it held the
+//! card (a crash, a power loss); both through a [`PrefStore`] (on the PC
+//! [`crate::registry::HkcuPref`]).
 
 /// The kind of a registry value; a write names it, so a value read as a
 /// DWORD is written back as a DWORD and a string as a string.
@@ -34,9 +42,16 @@ pub trait PrefStore {
 pub enum PrefError {
     Read(String),
     Write(String),
-    /// The store does not hold the original: an earlier window did not close.
+    /// A first open found no original in the store: an engine ended while
+    /// it held the card (a crash, a power loss), or another program wrote it.
     NotOriginal {
         found: Pref,
+    },
+    /// A reopen found the store without the frames this window wrote:
+    /// another program wrote it while the card was held.
+    NotHeld {
+        found: Pref,
+        held: Pref,
     },
     ReadBack {
         wrote: Pref,
@@ -51,7 +66,13 @@ impl std::fmt::Display for PrefError {
             Self::Write(e) => write!(f, "writing the preferred buffer failed: {e}"),
             Self::NotOriginal { found } => write!(
                 f,
-                "the preferred buffer holds {found:?}, not the original (an earlier window did not close)"
+                "the preferred buffer holds {found:?}, not the original \
+                 (an engine ended while it held the card, or another program wrote it)"
+            ),
+            Self::NotHeld { found, held } => write!(
+                f,
+                "the preferred buffer holds {found:?}, not {held:?}, which this engine wrote \
+                 for the card it holds (another program wrote it)"
             ),
             Self::ReadBack { wrote, read } => write!(
                 f,
@@ -76,30 +97,116 @@ fn write_checked(store: &mut impl PrefStore, want: &Pref) -> Result<(), PrefErro
     }
 }
 
-/// Opens the window: refuses unless the store holds `original`, then writes
-/// `frames` with the original's kind and reads it back.
-pub fn enter(store: &mut impl PrefStore, original: &Pref, frames: u32) -> Result<(), PrefError> {
-    let now = store.read().map_err(PrefError::Read)?;
-    if now != *original {
-        return Err(PrefError::NotOriginal { found: now });
-    }
-    write_checked(
-        store,
-        &Pref {
-            kind: original.kind,
-            raw: frames.to_string(),
-        },
-    )
+/// Where a [`Window`] stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum State {
+    /// The store holds REAPER's original as far as the window knows: nothing
+    /// was written yet, or its restore read back.
+    Original,
+    /// The window wrote its frames: the card is held (or opening) at them,
+    /// and the release owes the original. Also after a write that failed or
+    /// read back wrong, so the release restores whatever that write left.
+    Held,
 }
 
-/// Closes the window: the original back, read back.
-pub fn leave(store: &mut impl PrefStore, original: &Pref) -> Result<(), PrefError> {
-    write_checked(store, original)
+/// What [`Window::enter`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Entered {
+    /// Original → Held: the frames written and read back (the first open).
+    Wrote,
+    /// Held → Held: the store still holds the frames, read and not written
+    /// again (a reopen).
+    Kept,
+}
+
+/// What [`Window::leave`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Left {
+    /// Held → Original: the original written and read back.
+    Restored,
+    /// The window held nothing: no read, no write.
+    Untouched,
+}
+
+/// The preference window of one engine: [`Window::enter`] before every open
+/// of the card, [`Window::leave`] at every release that no open follows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Window {
+    original: Pref,
+    held: Pref,
+    state: State,
+}
+
+impl Window {
+    /// A window for REAPER's `original`, not yet held; it holds `frames` in
+    /// the original's kind.
+    pub fn new(original: Pref, frames: u32) -> Self {
+        let held = Pref {
+            kind: original.kind,
+            raw: frames.to_string(),
+        };
+        Self {
+            original,
+            held,
+            state: State::Original,
+        }
+    }
+
+    pub fn state(&self) -> State {
+        self.state
+    }
+
+    /// REAPER's value.
+    pub fn original(&self) -> &Pref {
+        &self.original
+    }
+
+    /// The engine's frames in the original's kind.
+    pub fn held(&self) -> &Pref {
+        &self.held
+    }
+
+    /// Before an open. Original → Held: the store must hold the original;
+    /// the frames are written and read back. Held → Held (a reopen): the
+    /// store must still hold the frames, and nothing is written, since the
+    /// driver may ask for a reset when the value changes while it is open.
+    /// Anything else refuses without a write.
+    pub fn enter(&mut self, store: &mut impl PrefStore) -> Result<Entered, PrefError> {
+        let now = store.read().map_err(PrefError::Read)?;
+        match self.state {
+            State::Held if now == self.held => Ok(Entered::Kept),
+            State::Held => Err(PrefError::NotHeld {
+                found: now,
+                held: self.held.clone(),
+            }),
+            State::Original if now == self.original => {
+                // From the write on the release owes the original, also
+                // when the write or its read-back fails.
+                self.state = State::Held;
+                write_checked(store, &self.held).map(|()| Entered::Wrote)
+            }
+            State::Original => Err(PrefError::NotOriginal { found: now }),
+        }
+    }
+
+    /// At a release that no open follows. Held → Original: the original is
+    /// written and read back; after a failure the window stays Held, so the
+    /// next release writes again. Original: nothing to do, nothing touched.
+    pub fn leave(&mut self, store: &mut impl PrefStore) -> Result<Left, PrefError> {
+        if self.state == State::Original {
+            return Ok(Left::Untouched);
+        }
+        write_checked(store, &self.original)?;
+        self.state = State::Original;
+        Ok(Left::Restored)
+    }
 }
 
 /// The guard's restore (design §5.2 step 4): up to `attempts` writes of the
 /// original, each read back; Ok as soon as the store holds the original, with
-/// the number of writes it took (0: it already did).
+/// the number of writes it took (0: it already did). Whatever the store holds
+/// otherwise is overwritten: an engine's frames left by a crash or a power
+/// loss while it held the card are a restore, never a refusal.
 pub fn restore(
     store: &mut impl PrefStore,
     original: &Pref,
@@ -111,7 +218,7 @@ pub fn restore(
         if store.read().is_ok_and(|now| now == *original) {
             return Ok(n - 1);
         }
-        match leave(store, original) {
+        match write_checked(store, original) {
             Ok(()) => return Ok(n),
             Err(e) => last = e,
         }

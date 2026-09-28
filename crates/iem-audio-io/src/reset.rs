@@ -3,6 +3,7 @@
 //! callback for 2 s while the stream should run.
 
 use std::collections::VecDeque;
+use std::fmt;
 use std::time::{Duration, Instant};
 
 pub const STALL: Duration = Duration::from_secs(2);
@@ -60,6 +61,43 @@ impl ResetBudget {
     /// Reopens granted so far.
     pub fn used(&self) -> u32 {
         self.used
+    }
+
+    /// The numbers the owner thread logs with a reopen or a fault.
+    pub fn state(&self) -> BudgetState {
+        BudgetState {
+            used: self.used,
+            per_process: self.per_process,
+            recent: self.recent.len(),
+            per_window: self.per_window,
+            window: self.window,
+        }
+    }
+}
+
+/// A [`ResetBudget`]'s numbers, for the log (#9 2026-09-28).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BudgetState {
+    /// Reopens granted in this process.
+    pub used: u32,
+    pub per_process: u32,
+    /// Reopens granted within the window, as of the last ask.
+    pub recent: usize,
+    pub per_window: usize,
+    pub window: Duration,
+}
+
+impl fmt::Display for BudgetState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "reopens {} of {} per process, {} of {} within {} s",
+            self.used,
+            self.per_process,
+            self.recent,
+            self.per_window,
+            self.window.as_secs()
+        )
     }
 }
 

@@ -4,7 +4,7 @@
 //! (Windows) feeds it, the tests run everywhere.
 
 use core::sync::atomic::{
-    AtomicBool, AtomicI64, AtomicU64,
+    AtomicI64, AtomicU8, AtomicU64,
     Ordering::{Acquire, Relaxed, Release},
 };
 
@@ -17,6 +17,9 @@ pub const WARMUP: u64 = 8;
 /// −50 dBFS, the band-activity threshold (program spec §4.2).
 pub const ACTIVITY_THRESHOLD: f64 = 0.003_162_277_660_168_379;
 const NO_POSITION: i64 = i64::MIN;
+/// [`Telemetry::take_requests`]: a reset request and a buffer size change.
+const RESET_BIT: u8 = 1;
+const SIZE_BIT: u8 = 2;
 
 /// ASIO driver-to-host message selectors (asio.h `kAsio…`).
 pub mod selector {
@@ -93,6 +96,23 @@ pub fn reply(sel: i32, value: i32) -> i32 {
         ENGINE_VERSION => 2,
         RESET_REQUEST | RESYNC_REQUEST | LATENCIES_CHANGED | SUPPORTS_TIME_INFO => 1,
         _ => 0,
+    }
+}
+
+/// What the driver asked a reopen for since the last take
+/// ([`Telemetry::take_requests`]); the owner thread logs it (#9 2026-09-28).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Requested {
+    /// `kAsioResetRequest`.
+    pub reset: bool,
+    /// `kAsioBufferSizeChange` (answered 0: the driver then asks for a reset).
+    pub buffer_size: bool,
+}
+
+impl Requested {
+    /// Either asks for a reopen.
+    pub fn any(self) -> bool {
+        self.reset || self.buffer_size
     }
 }
 
@@ -251,7 +271,8 @@ pub struct Telemetry {
     buffer_size_changes: AtomicU64,
     overloads: AtomicU64,
     rate_changes: AtomicU64,
-    reopen: AtomicBool,
+    /// The reopen requests since the last take: `RESET_BIT`, `SIZE_BIT`.
+    reopen: AtomicU8,
 }
 
 impl Telemetry {
@@ -280,7 +301,7 @@ impl Telemetry {
             buffer_size_changes: AtomicU64::new(0),
             overloads: AtomicU64::new(0),
             rate_changes: AtomicU64::new(0),
-            reopen: AtomicBool::new(false),
+            reopen: AtomicU8::new(0),
         }
     }
 
@@ -349,9 +370,12 @@ impl Telemetry {
         if let Some(c) = counter {
             c.fetch_add(1, Relaxed);
         }
-        if matches!(sel, selector::RESET_REQUEST | selector::BUFFER_SIZE_CHANGE) {
-            self.reopen.store(true, Relaxed);
-        }
+        let request = match sel {
+            selector::RESET_REQUEST => RESET_BIT,
+            selector::BUFFER_SIZE_CHANGE => SIZE_BIT,
+            _ => 0,
+        };
+        self.reopen.fetch_or(request, Relaxed);
         reply(sel, value)
     }
 
@@ -366,7 +390,16 @@ impl Telemetry {
 
     /// True once after the driver asked for a reset (or a buffer resize).
     pub fn take_reopen(&self) -> bool {
-        self.reopen.swap(false, Relaxed)
+        self.take_requests().any()
+    }
+
+    /// Which reopen requests came since the last take (once each).
+    pub fn take_requests(&self) -> Requested {
+        let bits = self.reopen.swap(0, Relaxed);
+        Requested {
+            reset: (bits & RESET_BIT) != 0,
+            buffer_size: (bits & SIZE_BIT) != 0,
+        }
     }
 
     /// The polled counters (no allocation, unlike [`Telemetry::snapshot`]).
