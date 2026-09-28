@@ -1,9 +1,11 @@
 //! The band's address (design §5.2 step 8, §6): `/api/version` naming the
 //! bundle, cloudflared's `/ready`, the app's member list; `iem-server`'s
-//! CLI (`notify`, the PIN freeze of its config); and HTTPS checks through
-//! Windows' own `curl.exe` (schannel with the system's roots), so the guard
-//! carries no TLS stack of its own. Plain HTTP on this PC goes through
-//! `ureq`.
+//! CLI (`notify`, the PIN freeze of its config) and the certificate it
+//! serves on LAN 443 (`server_cert`, which `tls::check` pins); and the
+//! public host's HTTPS check through Windows' own `curl.exe` (schannel with
+//! the system's roots). Plain HTTP on this PC goes through `ureq`.
+
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
@@ -68,23 +70,36 @@ pub fn members_problem(body: &str, expected: u32) -> Option<String> {
     }
 }
 
-/// Windows' curl for an HTTPS GET: silent but for errors, failing on an
-/// HTTP error status, bounded in time. `local` resolves the public host to
-/// this PC, so the LAN's port 443 is checked with the public certificate.
-pub fn curl_args(host: &str, path: &str, local: bool, max_s: u32) -> Vec<String> {
-    let mut args = vec![
+/// Windows' curl for the public host's HTTPS GET: silent but for errors,
+/// failing on an HTTP error status, bounded in time, the certificate
+/// validated (Cloudflare's). LAN 443 is `tls::check`: identity, not
+/// validity (#9 2026-09-28).
+pub fn curl_args(host: &str, path: &str, max_s: u32) -> Vec<String> {
+    vec![
         "--silent".to_owned(),
         "--show-error".to_owned(),
         "--fail".to_owned(),
         "--max-time".to_owned(),
         max_s.to_string(),
-    ];
-    if local {
-        args.push("--resolve".to_owned());
-        args.push(format!("{host}:443:127.0.0.1"));
-    }
-    args.push(https_url(host, path));
-    args
+        https_url(host, path),
+    ]
+}
+
+/// The certificate iem-server serves on LAN 443: its config's `tls_cert`
+/// (default `cert.pem`) in the config's directory, as the server joins it
+/// (`provision::config_dir_of`; `iem-migrate band` writes it there).
+pub fn server_cert(config_path: &Path, config: &str) -> Result<PathBuf, String> {
+    let t: toml::Table = toml::from_str(config).map_err(|e| format!("server config: {e}"))?;
+    let name = match t.get("tls_cert") {
+        None => "cert.pem",
+        Some(toml::Value::String(name)) => name.as_str(),
+        Some(_) => return Err("server config: tls_cert is not a string".to_owned()),
+    };
+    let dir = config_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    Ok(dir.join(name))
 }
 
 /// `IEMMIXER_MODE` of the server.

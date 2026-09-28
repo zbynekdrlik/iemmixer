@@ -470,6 +470,10 @@ pub struct Guard {
     /// an alarm recipient, #9 2026-09-28); dropped by the next precheck and
     /// once an alarm reaches a recipient.
     recipients_note: Option<String>,
+    /// What the last identity check named about the LAN certificate
+    /// without failing (outside its validity, `tls::note`; #9 2026-09-28);
+    /// dropped by the next check.
+    lan_note: Option<String>,
     /// The children stay in the guard task's job (`pc::job_note`, read at
     /// the start; #9 2026-09-28).
     job_note: Option<&'static str>,
@@ -521,6 +525,7 @@ impl Guard {
             report: Vec::new(),
             note: None,
             recipients_note: None,
+            lan_note: None,
             job_note: None,
             reaper_notice: false,
             crash: CrashLoop::default(),
@@ -792,6 +797,9 @@ pub fn status_text(g: &Guard) -> String {
     if let Some(n) = &g.recipients_note {
         parts.push(n.clone());
     }
+    if let Some(n) = &g.lan_note {
+        parts.push(n.clone());
+    }
     if let Some(n) = g.job_note {
         parts.push(n.to_owned());
     }
@@ -1034,13 +1042,19 @@ fn run_step(pc: &mut dyn Pc, g: &mut Guard, step: Step, to: Mode, facts: &Facts)
             pc.tray_start()
         }
         Step::IdentityCheck => {
+            // Only what this check names stays named.
+            g.lan_note = None;
             let sha = g
                 .state
                 .pins
                 .current
                 .clone()
                 .ok_or_else(|| StepError::failed("no active bundle"))?;
-            pc.identity(&sha, &c)
+            g.lan_note = pc.identity(&sha, &c)?;
+            if let Some(n) = g.lan_note.clone() {
+                g.info(n);
+            }
+            Ok(())
         }
         Step::RunnerStart => pc.runner_start(),
         Step::JobsCancel => {

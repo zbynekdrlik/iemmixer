@@ -433,9 +433,12 @@ pub trait Pc {
     fn tray_start(&mut self) -> R<()>;
     /// `Quit` over the guard pipe, gone ≤ 10 s.
     fn tray_stop(&mut self, c: &Cancel) -> R<()>;
-    /// LAN 80/443 and the public host answer `/api/version` with `sha`; the
-    /// tunnel has a ready connection.
-    fn identity(&mut self, sha: &str, c: &Cancel) -> R<()>;
+    /// LAN 80 and the public host answer `/api/version` with `sha`, LAN 443
+    /// too while serving the server's own certificate (`tls::check`:
+    /// identity, not validity); the tunnel has a ready connection. `Some`:
+    /// what it names about the LAN certificate without failing (outside its
+    /// validity; #9 2026-09-28).
+    fn identity(&mut self, sha: &str, c: &Cancel) -> R<Option<String>>;
     fn runner_start(&mut self) -> R<()>;
     /// Ctrl-Break on its own console (the daemon stops only an idle runner).
     fn runner_stop(&mut self, c: &Cancel) -> R<()>;

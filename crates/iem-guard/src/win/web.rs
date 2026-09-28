@@ -1,8 +1,11 @@
 //! The band's address (design §5.2 step 8, §6): plain HTTP on this PC
-//! through `ureq`, HTTPS through Windows' own `curl.exe` (schannel with the
-//! system's roots; the guard carries no TLS stack), the owners of ports
-//! 80/443, and the identity check of a dev/live entry.
+//! through `ureq`, LAN 443 through `tls::check` (identity, not validity:
+//! the served certificate is the server's own `cert.pem`; #9 2026-09-28),
+//! the public host through Windows' own `curl.exe` (schannel with the
+//! system's roots, a validated certificate), the owners of ports 80/443,
+//! and the identity check of a dev/live entry.
 
+use std::fs;
 use std::process::Command;
 use std::time::Duration;
 
@@ -13,6 +16,7 @@ use super::procs::{self, OnCancel};
 use crate::cancel::Cancel;
 use crate::effects::{self, web as decide};
 use crate::pc::{Ports, R, StepError};
+use crate::tls;
 
 /// curl's own bound for one HTTPS request.
 const CURL_MAX_S: u32 = 10;
@@ -34,11 +38,11 @@ pub(super) fn get(pc: &WinPc, url: &str) -> Result<(u16, String), String> {
     Ok((status, body))
 }
 
-/// An HTTPS GET through curl: the body, or why not. A wait: "ide event"
-/// asks curl to stop (Ctrl-Break) and returns at once.
-pub(super) fn get_tls(host: &str, path: &str, local: bool, c: &Cancel) -> R<String> {
+/// The public host's HTTPS GET through curl: the body, or why not. A wait:
+/// "ide event" asks curl to stop (Ctrl-Break) and returns at once.
+pub(super) fn get_tls(host: &str, path: &str, c: &Cancel) -> R<String> {
     let mut cmd = Command::new(procs::system_exe("curl.exe"));
-    cmd.args(decide::curl_args(host, path, local, CURL_MAX_S));
+    cmd.args(decide::curl_args(host, path, CURL_MAX_S));
     let limit = Duration::from_secs(u64::from(CURL_MAX_S) + 5);
     let out = procs::run("curl", &mut cmd, limit, c, OnCancel::Break)?;
     if out.code == Some(0) {
@@ -60,22 +64,26 @@ pub(super) fn ports() -> R<Ports> {
     Ok((http, https))
 }
 
-/// LAN 80/443 and the public host answer `/api/version` with `sha`; the
-/// tunnel has a ready connection. Checked until all hold or 90 s passed.
-pub(super) fn identity(pc: &WinPc, sha: &str, c: &Cancel) -> R<()> {
+/// LAN 80/443 and the public host answer `/api/version` with `sha`, LAN
+/// 443 with the server's own certificate; the tunnel has a ready
+/// connection. Checked until all hold or 90 s passed; `Some`: the note of
+/// the passing check on the LAN certificate's validity.
+pub(super) fn identity(pc: &WinPc, sha: &str, c: &Cancel) -> R<Option<String>> {
     let mut problems = Vec::new();
+    let mut note = None;
     let named = procs::poll(IDENTITY_LIMIT, c, || {
-        problems = identity_problems(pc, sha, c)?;
+        (problems, note) = identity_problems(pc, sha, c)?;
         Ok(problems.is_empty())
     })?;
     if named {
-        Ok(())
+        Ok(note)
     } else {
         Err(StepError::failed(problems.join("; ")))
     }
 }
 
-fn identity_problems(pc: &WinPc, sha: &str, c: &Cancel) -> R<Vec<String>> {
+/// What does not hold yet, and LAN 443's note.
+fn identity_problems(pc: &WinPc, sha: &str, c: &Cancel) -> R<(Vec<String>, Option<String>)> {
     let host = &pc.s.guard.public_host;
     let mut bad = Vec::new();
     match get(pc, &decide::local_url("/api/version")) {
@@ -87,16 +95,22 @@ fn identity_problems(pc: &WinPc, sha: &str, c: &Cancel) -> R<Vec<String>> {
         Ok((status, _)) => bad.push(format!("LAN 80: HTTP {status}")),
         Err(e) => bad.push(format!("LAN 80: {e}")),
     }
-    for (label, local) in [("LAN 443", true), ("public host", false)] {
-        match get_tls(host, "/api/version", local, c) {
-            Ok(body) => {
-                if let Err(e) = decide::version_matches(&body, sha) {
-                    bad.push(format!("{label}: {e}"));
-                }
-            }
-            Err(StepError::Preempted) => return Err(StepError::Preempted),
-            Err(StepError::Failed(why)) => bad.push(format!("{label}: {why}")),
+    let note = match lan_443(pc, sha, c) {
+        Ok(note) => note,
+        Err(StepError::Preempted) => return Err(StepError::Preempted),
+        Err(StepError::Failed(why)) => {
+            bad.push(format!("LAN 443: {why}"));
+            None
         }
+    };
+    match get_tls(host, "/api/version", c) {
+        Ok(body) => {
+            if let Err(e) = decide::version_matches(&body, sha) {
+                bad.push(format!("public host: {e}"));
+            }
+        }
+        Err(StepError::Preempted) => return Err(StepError::Preempted),
+        Err(StepError::Failed(why)) => bad.push(format!("public host: {why}")),
     }
     match get(pc, &pc.s.pc.tunnel_ready) {
         Ok((_, body)) => {
@@ -106,5 +120,22 @@ fn identity_problems(pc: &WinPc, sha: &str, c: &Cancel) -> R<Vec<String>> {
         }
         Err(e) => bad.push(format!("tunnel: {e}")),
     }
-    Ok(bad)
+    Ok((bad, note))
+}
+
+/// LAN 443 against the certificate the server's config names.
+fn lan_443(pc: &WinPc, sha: &str, c: &Cancel) -> R<Option<String>> {
+    let config_path = &pc.s.pc.server_config;
+    let config = fs::read_to_string(config_path)
+        .map_err(|e| StepError::failed(format!("{}: {e}", config_path.display())))?;
+    let cert = decide::server_cert(config_path, &config).map_err(StepError::Failed)?;
+    let lan = tls::Lan {
+        addr: tls::LAN_443,
+        host: &pc.s.guard.public_host,
+        cert: &cert,
+        sha,
+        limit: tls::LIMIT,
+    };
+    let now = i64::try_from(procs::now_ms() / 1000).unwrap_or(i64::MAX);
+    tls::check(&lan, now, c)
 }
