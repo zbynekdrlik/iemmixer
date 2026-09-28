@@ -813,14 +813,15 @@ pub fn status_text(g: &Guard) -> String {
     parts.join("; ")
 }
 
-/// Sends the notices of the alarms raised since the last try, once each, to
-/// the engineer's devices: the PWA's notification subscriptions (design
-/// §5.4, #9 2026-09-28).
+/// Sends the notices of the open alarms raised since the last try, once
+/// each, to the engineer's devices: the PWA's notification subscriptions
+/// (design §5.4, #9 2026-09-28). An acknowledged alarm is never sent (a new
+/// guard reads the alarm file and tries again what reached no device).
 pub fn send_notices(pc: &mut dyn Pc, g: &mut Guard) {
     let due: Vec<(u64, String)> = g
         .alarms
         .iter()
-        .filter(|a| a.id > g.noticed && !a.notified)
+        .filter(|a| a.id > g.noticed && !a.notified && !a.acked)
         .map(|a| (a.id, a.text.clone()))
         .collect();
     let mut sent = false;
