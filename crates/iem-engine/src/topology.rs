@@ -438,6 +438,64 @@ mod tests {
     }
 
     #[test]
+    fn every_tx_channel_names_its_mix() {
+        let t = test_site();
+        assert_eq!(t.channels, 160);
+        let on = |ch: u16| t.mix_on_tx(ch).map(|m| m.id.0.as_str());
+        for (ch, id) in [
+            (71, "member1"),
+            (72, "member1"),
+            (73, "member2"),
+            (88, "member9"),
+            (91, "engineer"),
+            (92, "engineer"),
+            (93, "translator"),
+        ] {
+            assert_eq!(on(ch), Some(id), "{ch}");
+        }
+        for ch in [0, 1, 70, 89, 90, 94, 95, 101, 160, 161] {
+            assert_eq!(on(ch), None, "{ch}");
+        }
+    }
+
+    /// HIL's spare outputs (`[guard] hil_tx`; the owner's decision on #9 of
+    /// 2026-09-28): card channels within the card's map that no mix uses,
+    /// each once, at most a HIL mask's worth, so the HIL signal never
+    /// reaches a band member.
+    #[test]
+    fn hil_outputs_are_spare_card_channels() {
+        let t = test_site();
+        assert_eq!(t.hil_outputs(&[94, 95]), Ok(vec![94, 95]));
+        assert_eq!(t.hil_outputs(&[160, 1, 89]), Ok(vec![160, 1, 89]));
+        assert_eq!(t.hil_outputs(&[]), Ok(Vec::new()));
+        let eight: Vec<u16> = (94..102).collect();
+        assert_eq!(t.hil_outputs(&eight), Ok(eight.clone()));
+        let refused = |tx: &[u16]| match t.hil_outputs(tx) {
+            Err(SiteError::HilTx(why)) => why,
+            other => panic!("{tx:?}: {other:?}"),
+        };
+        assert_eq!(
+            refused(&[94, 71]),
+            "card output 71 is mix member1's TX: the HIL signal goes only to spare outputs"
+        );
+        assert_eq!(
+            refused(&[93]),
+            "card output 93 is mix translator's TX: the HIL signal goes only to spare outputs"
+        );
+        assert_eq!(
+            refused(&[161]),
+            "card output 161 is outside the card's 160 outputs"
+        );
+        assert_eq!(
+            refused(&[0, 94]),
+            "card output 0 is outside the card's 160 outputs"
+        );
+        assert_eq!(refused(&[95, 94, 95]), "card output 95 is listed twice");
+        let nine: Vec<u16> = (94..103).collect();
+        assert_eq!(refused(&nine), "9 card outputs: at most 8");
+    }
+
+    #[test]
     fn hash_is_stable_and_topology_sensitive() {
         let a = test_site();
         assert_eq!(a.hash, test_site().hash);

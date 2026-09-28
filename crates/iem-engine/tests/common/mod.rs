@@ -3,7 +3,7 @@
 //! site with every level open, hot inputs driving the limiters, a command
 //! group every block (volume, input/mix/group EQ, processing, levels of an
 //! input and a heard mix, a group strip, solo, listen, limiter raise and
-//! lower, test signal, the HIL test signal with its output mask, an Arm, a
+//! lower, test signal, the HIL test signal on both spare outputs, an Arm, a
 //! full import), talkback, both taps, meter reads, a sanitiser trip every
 //! 1000 blocks and a driver reopen's `discontinuity` every 1000 blocks.
 #![allow(dead_code)]
@@ -22,6 +22,10 @@ use iem_engine_proto::{
 };
 
 pub const BLOCK: usize = 32;
+
+/// HIL's spare outputs of the test site (`[guard] hil_tx`), opened after
+/// the topology's TX as `run` does under the test-signal flag (S6).
+pub const HIL: [u16; 2] = [94, 95];
 
 pub fn site_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config/test-site.toml")
@@ -104,7 +108,7 @@ pub fn scenario() -> Scenario {
         test_signal: true,
         fault_injection: false,
     };
-    let mut core = Core::new(Arc::clone(&topo), &state, 0, flags);
+    let mut core = Core::new(Arc::clone(&topo), &state, 0, flags).with_hil(HIL.to_vec());
     let mut eq = Eq::default();
     for b in &mut eq.bands {
         b.enabled = true;
@@ -160,7 +164,7 @@ pub fn scenario() -> Scenario {
             hz: 1000.0,
             dbfs: -30.0,
             ttl_s: 0.01,
-            card_tx: vec![72, 91, 93],
+            card_tx: HIL.to_vec(),
         },
         Cmd::Arm,
         level("member1", Source::Input(input("mic1")), -6.0, 0.3),
@@ -224,7 +228,13 @@ pub fn scenario() -> Scenario {
         .map(|c| core.apply(c).unwrap().rt)
         .filter(|rt| !rt.is_empty())
         .collect();
-    let (processor, handles) = Processor::new(Arc::clone(&topo), &state, &[], Options::default());
+    let (processor, handles) = Processor::with_hil(
+        Arc::clone(&topo),
+        &state,
+        &[],
+        Options::default(),
+        HIL.len(),
+    );
     Scenario {
         topo,
         groups,
@@ -247,7 +257,7 @@ pub fn buffers(topo: &Topology) -> Buffers {
     Buffers {
         input: vec![0.3; topo.rx.len() * BLOCK],
         bad,
-        output: vec![0.0; topo.tx.len() * BLOCK],
+        output: vec![0.0; (topo.tx.len() + HIL.len()) * BLOCK],
         talk: vec![0.25; BLOCK],
         drain: vec![0.0; 8192],
     }

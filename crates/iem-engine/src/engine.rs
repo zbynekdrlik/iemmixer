@@ -958,27 +958,86 @@ mod tests {
         assert!(check_site(&listed).is_ok());
     }
 
-    /// HIL's test signal sounds only on the card outputs `[guard] hil_tx`
-    /// names, which the engine finds among the topology's TX channels
-    /// (`HilTestSignal`): a site whose hil_tx the topology cannot reach is
-    /// refused by check-site, so by `install-site` (F30), instead of every
-    /// HIL test signal failing with UnknownId (lane review). The guard's
-    /// other keys are its own.
+    /// HIL's test signal goes only to spare card outputs outside the
+    /// topology (`[guard] hil_tx`; the owner's decision on #9 of
+    /// 2026-09-28): the D5(b) loopback pair or an unused TX, never a channel
+    /// a band member hears. check-site, so `install-site` (F30), takes card
+    /// outputs within the card's channels that no mix uses and refuses a
+    /// mix's TX, a channel outside the card, one named twice and more than
+    /// a HIL mask holds, instead of every HIL test signal failing later.
     #[test]
-    fn check_site_refuses_a_hil_tx_the_topology_cannot_reach() {
+    fn check_site_takes_spare_hil_outputs_and_refuses_a_mixs_tx() {
         let dir = tempfile::tempdir().unwrap();
         let with = |name: &str, tx: &str| {
             edited_site(dir.path(), name, |t| {
-                format!("{t}\n[guard]\nreaper_url = \"http://127.0.0.1:8080\"\nhil_tx = {tx}\n")
+                t.replace("hil_tx = [94, 95]", &format!("hil_tx = {tx}"))
             })
         };
-        assert!(check_site(&with("members.toml", "[72, 91]")).is_ok());
-        assert!(check_site(&with("none.toml", "[]")).is_ok());
-        let spare = check_site(&with("spare.toml", "[72, 150]")).unwrap_err();
-        assert_eq!(
-            spare.to_string(),
-            "[guard] hil_tx: card output 150 is not a TX channel of the site"
-        );
+        // The test site's pair (94/95), TX 89/90 between the members and the
+        // engineer, the card's first and last channels, none at all.
+        assert!(check_site(&crate::test_support::test_site_path()).is_ok());
+        for spare in ["[89, 90]", "[1, 160]", "[]"] {
+            assert!(check_site(&with("spare.toml", spare)).is_ok(), "{spare}");
+        }
+        let mix_tx = |ch: u16, mix: &str| {
+            format!("card output {ch} is mix {mix}'s TX: the HIL signal goes only to spare outputs")
+        };
+        for (tx, why) in [
+            ("[94, 72]", mix_tx(72, "member1")),
+            ("[88]", mix_tx(88, "member9")),
+            ("[92, 94]", mix_tx(92, "engineer")),
+            ("[93]", mix_tx(93, "translator")),
+            (
+                "[161]",
+                "card output 161 is outside the card's 160 outputs".to_owned(),
+            ),
+            (
+                "[0]",
+                "card output 0 is outside the card's 160 outputs".to_owned(),
+            ),
+            ("[94, 95, 94]", "card output 94 is listed twice".to_owned()),
+            (
+                "[94, 95, 96, 97, 98, 99, 100, 101, 102]",
+                "9 card outputs: at most 8".to_owned(),
+            ),
+        ] {
+            let e = check_site(&with("bad.toml", tx)).unwrap_err();
+            assert!(
+                matches!(&e, EngineError::Site(SiteError::HilTx(_))),
+                "{tx}: {e}"
+            );
+            assert_eq!(e.to_string(), format!("[guard] hil_tx: {why}"), "{tx}");
+        }
+    }
+
+    /// `run` opens HIL's spare outputs only with the test-signal flag (a
+    /// HIL job's engine): without it no HIL signal can start, so a live
+    /// engine never reads `[guard] hil_tx` and opens no card output outside
+    /// the topology.
+    #[test]
+    fn a_run_opens_the_hil_outputs_only_with_the_test_signal_flag() {
+        let text = crate::test_support::test_site_text();
+        let topo = crate::test_support::test_site();
+        let on = Flags {
+            test_signal: true,
+            fault_injection: false,
+        };
+        assert_eq!(run_hil(on, &text, &topo), Ok(vec![94, 95]));
+        assert_eq!(run_hil(Flags::default(), &text, &topo), Ok(Vec::new()));
+        let mix_tx = text.replace("hil_tx = [94, 95]", "hil_tx = [72]");
+        assert!(matches!(
+            run_hil(on, &mix_tx, &topo),
+            Err(SiteError::HilTx(m)) if m.contains("member1")
+        ));
+        assert_eq!(run_hil(Flags::default(), &mix_tx, &topo), Ok(Vec::new()));
+        let unread = text.replace("hil_tx = [94, 95]", "hil_tx = \"x\"");
+        assert!(matches!(
+            run_hil(on, &unread, &topo),
+            Err(SiteError::Toml(_))
+        ));
+        assert_eq!(run_hil(Flags::default(), &unread, &topo), Ok(Vec::new()));
+        let none = text.replace("hil_tx = [94, 95]", "");
+        assert_eq!(run_hil(on, &none, &topo), Ok(Vec::new()));
     }
 
     #[cfg(not(windows))]
@@ -1159,9 +1218,25 @@ mod tests {
         cfg.site = edited_site(dir.path(), "bare.toml", without_card);
         cfg.backend = Backend::Asio;
         assert!(matches!(
-            run_bounded(cfg),
+            run_bounded(cfg.clone()),
             Err(EngineError::Site(SiteError::NoCardTable))
         ));
+        // With the test-signal flag the run opens the site's HIL outputs:
+        // a hil_tx that names a mix's TX stops it before any state or pipe
+        // (the owner's decision on #9, 2026-09-28).
+        cfg.backend = Backend::NullRt;
+        cfg.flags.test_signal = true;
+        cfg.site = edited_site(dir.path(), "mix-tx.toml", |t| {
+            t.replace("hil_tx = [94, 95]", "hil_tx = [94, 72]")
+        });
+        assert!(matches!(
+            run_bounded(cfg),
+            Err(EngineError::Site(SiteError::HilTx(m))) if m.contains("member1")
+        ));
+        assert!(
+            !dir.path().join("state").exists(),
+            "refused before the state"
+        );
     }
 
     #[test]
