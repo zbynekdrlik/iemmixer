@@ -563,6 +563,163 @@ mod tests {
         assert_eq!(next.detail, "mode dev");
     }
 
+    /// A tray that stays connected but stops reading is dropped within a
+    /// bound: a write to it gives up after a while, so no client holds a
+    /// guard thread in a write. Each state here is larger than a Windows
+    /// pipe's buffer (512 bytes); a Unix socket's fills after a few dozen.
+    #[test]
+    fn a_subscriber_that_does_not_read_is_dropped_within_a_bound() {
+        let (s, _rx) = served();
+        let stream = subscribed(&s);
+        let big = "x".repeat(4000);
+        let t = Instant::now();
+        let mut n = 0u32;
+        while s.shared.view().subscribers > 0 {
+            assert!(
+                t.elapsed() < Duration::from_secs(10),
+                "a subscriber that does not read held its guard thread"
+            );
+            n += 1;
+            s.shared.update(|v| v.status = format!("{n} {big}"));
+            thread::sleep(Duration::from_millis(10));
+        }
+        drop(stream);
+    }
+
+    /// The guard closes a connection as it drops it, even while its client
+    /// has not read the reply the guard wrote last, so a client that never
+    /// reads holds up no later close. interprocess's flush on drop (limbo)
+    /// would keep the guard's end open on the process's one linger thread
+    /// until that client had read everything, and every connection the
+    /// guard dropped after it would wait there behind it, unclosed: a leak
+    /// in a process that runs for months (the engine's pipes met it in
+    /// Windows CI run 36373563262). The client still reads the reply, then
+    /// the end.
+    #[cfg(windows)]
+    #[test]
+    fn a_client_that_does_not_read_holds_up_no_close() {
+        use iem_win::pipe::write_within;
+
+        let (s, _rx) = served();
+        // Refused at its first frame: a short reply that fits the pipe,
+        // then the guard drops the connection. Nobody reads that reply yet.
+        let mute = refused(&s);
+        // Once the guard's end is closed, a byte the client writes finds
+        // the pipe closing; while it stays open, each byte waits in the
+        // pipe (a few dozen fit its 512 bytes).
+        let gone = {
+            let start = Instant::now();
+            loop {
+                match write_within(end(&mute), &[0], Duration::from_millis(100)) {
+                    Err(gone) => break Some(gone),
+                    Ok(_) if start.elapsed() < Duration::from_secs(2) => {
+                        thread::sleep(Duration::from_millis(20));
+                    }
+                    Ok(_) => break None,
+                }
+            }
+        };
+        // Meanwhile a later connection the guard drops the same way: its
+        // client reads the reply, then the end.
+        let later = refused(&s);
+        let later_reply = reply_of(&later);
+        let later_closed = ends(&later, Duration::from_secs(2));
+        // The silent client reads the reply the guard wrote before it
+        // closed, then the end (reading it also frees whatever waited for
+        // it, before any assertion below can fail).
+        let late_reply = reply_of(&mute);
+        let late_closed = ends(&mute, Duration::from_secs(5));
+        for reply in [&later_reply, &late_reply] {
+            assert!(!reply.ok);
+            assert!(
+                reply.detail.starts_with("bad request: "),
+                "{}",
+                reply.detail
+            );
+        }
+        assert!(late_closed, "the silent client reads the end");
+        let Some(gone) = gone else {
+            panic!("the guard kept a dropped connection open until its client read it");
+        };
+        assert!(
+            matches!(gone.raw_os_error(), Some(BROKEN | CLOSING | NOT_CONNECTED)),
+            "{gone}"
+        );
+        assert!(
+            later_closed,
+            "a close waited for a client that does not read"
+        );
+    }
+
+    /// `ERROR_BROKEN_PIPE`.
+    #[cfg(windows)]
+    const BROKEN: i32 = 109;
+    /// `ERROR_NO_DATA`: the pipe is being closed.
+    #[cfg(windows)]
+    const CLOSING: i32 = 232;
+    /// `ERROR_PIPE_NOT_CONNECTED`.
+    #[cfg(windows)]
+    const NOT_CONNECTED: i32 = 233;
+
+    /// The client's end of `stream`.
+    #[cfg(windows)]
+    fn end(stream: &Stream) -> std::os::windows::io::BorrowedHandle<'_> {
+        use std::os::windows::io::AsHandle;
+        let Stream::NamedPipe(pipe) = stream;
+        pipe.inner().as_handle()
+    }
+
+    /// A connection whose first frame is no request (`{}`): the guard
+    /// answers "bad request" and drops it. Returns once that reply waits in
+    /// the pipe. The frame goes out through `write_within`, which leaves
+    /// this end out of the flush on drop, so it never waits in limbo itself.
+    #[cfg(windows)]
+    fn refused(s: &Served) -> Stream {
+        let stream = Stream::connect(pipe_name(&s.name).unwrap()).unwrap();
+        let body = b"{}";
+        let mut frame = (body.len() as u32).to_le_bytes().to_vec();
+        frame.extend_from_slice(body);
+        let wrote =
+            iem_win::pipe::write_within(end(&stream), &frame, Duration::from_secs(5)).unwrap();
+        assert_eq!(wrote, frame.len());
+        let t = Instant::now();
+        while iem_win::pipe::available(end(&stream)).unwrap() == 0 {
+            assert!(
+                t.elapsed() < Duration::from_secs(5),
+                "no reply to a bad request"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        stream
+    }
+
+    /// The reply that waits in the pipe.
+    #[cfg(windows)]
+    fn reply_of(stream: &Stream) -> Reply {
+        let mut wire = stream;
+        proto::read_msg(&mut wire).unwrap()
+    }
+
+    /// Whether the guard's end of `stream` is closed within `limit`, once
+    /// everything it wrote was read: a peek then fails.
+    #[cfg(windows)]
+    fn ends(stream: &Stream, limit: Duration) -> bool {
+        let t = Instant::now();
+        loop {
+            match iem_win::pipe::available(end(stream)) {
+                Err(e) => {
+                    assert!(
+                        matches!(e.raw_os_error(), Some(BROKEN | CLOSING | NOT_CONNECTED)),
+                        "{e}"
+                    );
+                    return true;
+                }
+                Ok(_) if t.elapsed() < limit => thread::sleep(Duration::from_millis(10)),
+                Ok(_) => return false,
+            }
+        }
+    }
+
     #[test]
     fn garbage_is_answered_and_the_connection_closed() {
         let (s, _rx) = served();
