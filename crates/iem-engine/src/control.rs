@@ -14,8 +14,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use iem_audio_io::StreamStats;
 use iem_engine_proto::{
-    Alarm, AlarmCode, ClientMsg, Cmd, EngineMsg, ErrCode, ErrorBody, Hello, Meters, PROTO, Reply,
-    Role, Status, negotiate, parse_client, write_frame,
+    Alarm, AlarmCode, ClientMsg, Cmd, EngineMsg, ErrCode, ErrorBody, Hello, HilOut, Meters, PROTO,
+    Reply, Role, Status, negotiate, parse_client, write_frame,
 };
 use rtrb::Producer;
 use tracing::{error, info, warn};
@@ -124,6 +124,9 @@ pub struct Control {
     shutdown: bool,
     /// Sanitiser trips already alarmed.
     trips_seen: u64,
+    /// HIL's spare outputs (S6, `Core::hil` order): the largest peak of the
+    /// meter frames since the last `Status`.
+    hil_peaks: Vec<f64>,
 }
 
 /// Everything `Control` needs from the engine's start-up.
@@ -194,6 +197,7 @@ fn meters_msg(f: &MeterFrame) -> Meters {
 
 impl Control {
     pub fn new(p: Parts) -> Self {
+        let hil_peaks = vec![0.0; p.core.hil().len()];
         Self {
             core: p.core,
             store: p.store,
@@ -216,6 +220,7 @@ impl Control {
             settings: p.settings,
             shutdown: false,
             trips_seen: 0,
+            hil_peaks,
         }
     }
 
@@ -628,7 +633,32 @@ impl Control {
             parked: st.parked,
             held: self.held,
             lock_failed: self.driver.as_ref().is_some_and(|d| d.lock_failed()),
+            hil: self
+                .core
+                .hil()
+                .iter()
+                .zip(&self.hil_peaks)
+                .map(|(&tx, &peak)| HilOut {
+                    tx,
+                    peak: peak as f32,
+                })
+                .collect(),
         }
+    }
+
+    /// A meter frame's peaks of HIL's spare outputs join those since the
+    /// last `Status` (S6).
+    fn note_hil(&mut self, peaks: &[f64]) {
+        for (held, &p) in self.hil_peaks.iter_mut().zip(peaks) {
+            *held = held.max(p);
+        }
+    }
+
+    /// The `Status` to broadcast now; HIL's peaks start again after it.
+    fn next_status(&mut self, st: &StreamStats) -> Status {
+        let status = self.status_msg(st);
+        self.hil_peaks.fill(0.0);
+        status
     }
 
     fn tick(&mut self, now: Instant) -> Option<Exit> {
@@ -661,11 +691,12 @@ impl Control {
                 );
             }
             self.counters.clone_from(&frame.active);
+            self.note_hil(&frame.hil);
             self.broadcast(&EngineMsg::Meters(meters_msg(&frame)));
         }
         if now.saturating_duration_since(self.last_status) >= Duration::from_secs(1) {
             self.last_status = now;
-            let status = self.status_msg(&stats);
+            let status = self.next_status(&stats);
             self.broadcast(&EngineMsg::Status(status));
         }
         if self.controller.is_none()
@@ -925,6 +956,38 @@ mod tests {
         });
         assert_eq!((s.frames, s.missed, s.overruns, s.resets), (64, 0, 0, 0));
         assert!(!s.parked && !s.held);
+    }
+
+    /// HIL v1 proves the test signal from the engine (S6): each `Status`
+    /// carries every spare output's peak since the previous one, the
+    /// largest of the meter frames between them, which starts again after
+    /// it; an engine without spare outputs lists none.
+    #[test]
+    fn status_carries_the_hil_outputs_peaks_since_the_previous_status() {
+        let mut r = rig();
+        let st = StreamStats::default();
+        let out = |tx: u16, peak: f32| HilOut { tx, peak };
+        assert_eq!(r.c.status_msg(&st).hil, vec![out(94, 0.0), out(95, 0.0)]);
+        r.c.note_hil(&[0.01, 0.0]);
+        r.c.note_hil(&[0.03, 0.02]);
+        r.c.note_hil(&[0.02, 0.01]);
+        r.c.note_hil(&[0.5]);
+        assert_eq!(r.c.next_status(&st).hil, vec![out(94, 0.5), out(95, 0.02)]);
+        assert_eq!(r.c.next_status(&st).hil, vec![out(94, 0.0), out(95, 0.0)]);
+        // The control loop feeds them from each meter frame it reads and
+        // starts again after each Status it sends.
+        let t0 = Instant::now();
+        r.meters.write(MeterFrame {
+            hil: vec![0.04, 0.001],
+            ..MeterFrame::default()
+        });
+        assert!(r.c.tick(t0).is_none());
+        assert_eq!(r.c.hil_peaks, [0.04, 0.001]);
+        assert!(r.c.tick(t0 + Duration::from_secs(2)).is_none());
+        assert_eq!(r.c.hil_peaks, [0.0, 0.0]);
+        let quiet = rig_with(crate::core::Flags::default(), false);
+        assert!(quiet.c.status_msg(&st).hil.is_empty());
+        assert!(quiet.c.hil_peaks.is_empty());
     }
 
     /// A backend with scripted hooks: its ticks and forced reopens counted,
