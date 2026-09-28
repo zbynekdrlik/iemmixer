@@ -214,8 +214,12 @@ try {
     }
     $a2 = Set-IemRootAcl -Root $root
     Assert (-not $a2.changed) 'root-acl-second-run-changes-nothing'
-    # A junction below the root is refused and never followed: the folder it
-    # points to (outside the root) and its file keep their rules.
+    # A junction below the root is refused before anything is written: setting
+    # a folder's DACL makes Windows propagate it to what lies below, and whether
+    # that goes through a junction is not relied on. Each case would otherwise
+    # write: (a) a loosened root, (b) the junction's folder with a rule of its
+    # own. Neither the root, the junction's folder nor the folder the junction
+    # points to (outside the root) and its file change.
     $outside = Join-Path $base 'outside'
     $outsideFile = Join-Path $outside 'z.txt'
     New-Item -ItemType Directory -Force -Path $outside | Out-Null
@@ -224,13 +228,52 @@ try {
     $zAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($everyone, 'Read', 'Allow')))
     [IO.File]::SetAccessControl($outsideFile, $zAcl)
     function OutsideSddl { return ([IO.Directory]::GetAccessControl($outside).GetSecurityDescriptorSddlForm('Access') + ' ' + [IO.File]::GetAccessControl($outsideFile).GetSecurityDescriptorSddlForm('Access')) }
+    function DirSddl($p) { return [IO.Directory]::GetAccessControl($p).GetSecurityDescriptorSddlForm('Access') }
     $outsideBefore = OutsideSddl
-    $link = Join-Path $root 'bundles\link'
+    $bundles = Join-Path $root 'bundles'
+    $link = Join-Path $bundles 'link'
+    # (a) The root loosened as above (set before the junction exists, so the
+    # set-up itself passes nothing through it), then the junction.
+    $acl = Get-Acl -LiteralPath $root
+    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule('Everyone', 'Read', 'ContainerInherit, ObjectInherit', 'None', 'Allow')))
+    Set-Acl -LiteralPath $root -AclObject $acl
+    $pre = Test-IemDirectoryAcl -Path $root -Rights (Get-IemRootRights -UserSid $me.sid)
+    Assert ($pre.Count -gt 0) "root-acl-precondition-a-loosened-root ($($pre -join '; '))"
     New-Item -ItemType Junction -Path $link -Value $outside | Out-Null
+    $rootBefore = DirSddl $root
+    $bundlesBefore = DirSddl $bundles
     $e = ErrorOf { Set-IemRootAcl -Root $root }
-    Assert ($e -like '*junction or a link*') "root-acl-refuses-a-junction-below-the-root ($e)"
-    Assert ((OutsideSddl) -ceq $outsideBefore) 'root-acl-never-follows-a-junction'
+    Assert ($e -like '*junction or a link*' -and $e.Contains('bundles\link')) "root-acl-refuses-a-junction-below-a-loosened-root ($e)"
+    Assert ((DirSddl $root) -ceq $rootBefore -and (DirSddl $bundles) -ceq $bundlesBefore) "root-acl-writes-nothing-with-a-junction-below-a-loosened-root ($(DirSddl $root) / $(DirSddl $bundles))"
+    Assert ((OutsideSddl) -ceq $outsideBefore) "root-acl-never-writes-through-a-junction-below-a-loosened-root ($(OutsideSddl))"
     [IO.Directory]::Delete($link)
+    $r = Set-IemRootAcl -Root $root
+    Assert ($r.changed -and @($r.before).Count -gt 0) "root-acl-without-the-junction-closes-the-loosened-root ($(@($r.reset) -join ', '))"
+    # (b) The junction's folder with a rule of its own, for that folder alone
+    # (so setting it passes nothing on below), then the junction.
+    $bAcl = [IO.Directory]::GetAccessControl($bundles)
+    $bAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($everyone, 'Read', 'None', 'None', 'Allow')))
+    [IO.Directory]::SetAccessControl($bundles, $bAcl)
+    $pre = Test-IemInheritedItem -Path $bundles -Rights (Get-IemRootRights -UserSid $me.sid)
+    Assert ($pre.Count -gt 0) "root-acl-precondition-the-junctions-folder-with-a-rule-of-its-own ($($pre -join '; '))"
+    New-Item -ItemType Junction -Path $link -Value $outside | Out-Null
+    $rootBefore = DirSddl $root
+    $bundlesBefore = DirSddl $bundles
+    $e = ErrorOf { Set-IemRootAcl -Root $root }
+    Assert ($e -like '*junction or a link*' -and $e.Contains('bundles\link')) "root-acl-refuses-a-junction-in-a-folder-with-a-rule-of-its-own ($e)"
+    Assert ((DirSddl $root) -ceq $rootBefore -and (DirSddl $bundles) -ceq $bundlesBefore) "root-acl-writes-nothing-with-a-junction-in-a-folder-with-a-rule-of-its-own ($(DirSddl $root) / $(DirSddl $bundles))"
+    Assert ((OutsideSddl) -ceq $outsideBefore) "root-acl-never-writes-through-a-junction-in-a-folder-with-a-rule-of-its-own ($(OutsideSddl))"
+    # A reset checks every part from the root down to the item right before it
+    # writes (by path): an item reached through a junction, or named outside
+    # the root, is refused and nothing outside the root changes.
+    $e = ErrorOf { Reset-IemInheritedItem -Root $root -Rel 'bundles\link\z.txt' }
+    Assert ($e -like '*junction or a link*' -and $e.Contains('bundles\link')) "root-acl-reset-refuses-an-item-through-a-junction ($e)"
+    $e = ErrorOf { Reset-IemInheritedItem -Root $root -Rel '..\outside\z.txt' }
+    Assert ($e -like '*not an item below the root*') "root-acl-reset-refuses-an-item-outside-the-root ($e)"
+    Assert ((OutsideSddl) -ceq $outsideBefore) "root-acl-reset-never-writes-outside-the-root ($(OutsideSddl))"
+    [IO.Directory]::Delete($link)
+    $r = Set-IemRootAcl -Root $root
+    Assert ((@($r.reset) -join ',') -ceq 'bundles') "root-acl-without-the-junction-resets-its-folder ($(@($r.reset) -join ','))"
     Assert (-not (Set-IemRootAcl -Root $root).changed) 'root-acl-without-the-junction-changes-nothing'
 
     # ---- firewall rule (disabled here) ----
