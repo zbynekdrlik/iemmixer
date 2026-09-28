@@ -212,6 +212,9 @@ try {
     Assert (-not (Test-IemServiceGrant -Sddl "D:(A;;RPLO;;;$userSid)" -Sid $userSid)) 'service-grant-needs-stop-too'
     Assert (-not (Test-IemServiceGrant -Sddl "D:(A;;RPWPLO;;;$userSid)(D;;WP;;;$userSid)" -Sid $userSid)) 'service-grant-refuses-a-deny'
     Assert (-not (Test-IemServiceGrant -Sddl "D:(A;;RPWPLO;;;BA)" -Sid $userSid)) 'service-grant-needs-the-users-own-ace'
+    # An inherit-only ACE does not apply to the service itself; a deny counts, inherited or not.
+    Assert (-not (Test-IemServiceGrant -Sddl "D:(A;CIIO;RPWPLO;;;$userSid)" -Sid $userSid)) 'service-grant-skips-an-inherit-only-ace'
+    Assert (-not (Test-IemServiceGrant -Sddl "D:(A;;RPWPLO;;;$userSid)(D;ID;WP;;;$userSid)" -Sid $userSid)) 'service-grant-refuses-an-inherited-deny'
 
     # ---- bundle sums and Defender exclusions ----
     $sha = '0123456789abcdef0123456789abcdef01234567'
