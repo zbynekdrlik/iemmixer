@@ -158,6 +158,7 @@ version = "2.0.0-dev.9"
 dependencies = [
  "azo",
  "iem-win",
+ "tracing",
  "windows-sys",
 ]
 
