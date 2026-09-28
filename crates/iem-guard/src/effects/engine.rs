@@ -614,14 +614,14 @@ mod tests {
     #[test]
     fn the_hil_test_signal_names_its_card_outputs() {
         assert_eq!(
-            hil_test_signal("mic1", -24.5, 30.0, &[71, 72]),
+            hil_test_signal("mic1", -24.5, 30.0, &[94, 95]),
             json!({
                 "op": "hil_test_signal",
                 "input": "mic1",
                 "hz": 1000.0,
                 "dbfs": -24.5,
                 "ttl_s": 30.0,
-                "card_tx": [71, 72],
+                "card_tx": [94, 95],
             })
         );
         assert_eq!(HIL_HZ, 1000.0);

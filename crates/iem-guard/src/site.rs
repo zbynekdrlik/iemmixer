@@ -530,7 +530,7 @@ app_exit_line = "tray exit"
 app_data_dir = 'C:\Programs\App\data'
 app_members = 9
 public_host = "mixer.example.org"
-hil_tx = [71, 72]
+hil_tx = [94, 95]
 on_pref_fail = "start_reaper_with_alarm"
 
 [card]
@@ -556,7 +556,7 @@ threshold_dbfs = -50.0
         assert_eq!(s.guard.reaper_tracks, 40);
         assert_eq!(s.guard.stage_tracks, [1, 2, 3]);
         assert_eq!(s.guard.app_exit_id, 4242);
-        assert_eq!(s.guard.hil_tx, [71, 72]);
+        assert_eq!(s.guard.hil_tx, [94, 95]);
         assert!(!s.guard.pc_tests_passed && !s.guard.start_direct);
         assert_eq!(s.guard.on_pref_fail, PrefFail::StartReaperWithAlarm);
         assert_eq!(s.card.module, "testcard.dll");

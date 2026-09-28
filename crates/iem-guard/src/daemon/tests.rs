@@ -1256,10 +1256,10 @@ fn the_test_signal_goes_only_to_the_hil_outputs() {
         (r.ok, r.detail.as_str()),
         (
             true,
-            "test signal on mic1 at -20 dBFS for 5 s on card outputs [72]"
+            "test signal on mic1 at -20 dBFS for 5 s on card outputs [94]"
         )
     );
-    assert_eq!(pc.hil_signals, [("mic1".to_owned(), -20.0, 5.0, vec![72])]);
+    assert_eq!(pc.hil_signals, [("mic1".to_owned(), -20.0, 5.0, vec![94])]);
     for (dbfs, ttl, why) in [
         (
             -19.9,
@@ -1322,7 +1322,7 @@ fn a_test_signal_needs_a_begun_job_and_at_most_60_s() {
         (r.ok, r.detail.as_str()),
         (false, "a TTL of 60.5 s is above the HIL limit of 60 s")
     );
-    assert_eq!(pc.hil_signals, [("mic1".to_owned(), -30.0, 60.0, vec![72])]);
+    assert_eq!(pc.hil_signals, [("mic1".to_owned(), -30.0, 60.0, vec![94])]);
     assert_eq!(HIL_MAX_TTL_S, 60.0);
 }
 
@@ -2851,7 +2851,7 @@ fn site_settings_and_clocks() {
         SiteConf::from_site(&s.guard),
         SiteConf {
             on_pref_fail: PrefFail::StartReaperWithAlarm,
-            hil_tx: vec![71, 72],
+            hil_tx: vec![94, 95],
             prod: false,
         }
     );
