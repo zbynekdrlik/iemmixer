@@ -28,7 +28,7 @@ pub mod console;
 mod decide;
 pub mod errmode;
 // Windows only: its functions take a Windows handle (the engine's pipe
-// reader peeks through it; the engine's and the guard pipe's writers bound
+// reader peeks through it; the engine's and the guard's pipe writers bound
 // their writes with it).
 #[cfg(windows)]
 pub mod pipe;

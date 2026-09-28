@@ -38,6 +38,10 @@ use crate::proto::{self, FrameError, Reply, Request, Update};
 
 #[cfg(windows)]
 mod win;
+// The bounded, clean writer on Windows: the supervisor connection's sends
+// to the engine use it too (`win::engine`).
+#[cfg(windows)]
+pub(crate) use win::Bounded;
 
 /// An idle listener looks for a new connection this often.
 const ACCEPT_POLL: Duration = Duration::from_millis(50);
@@ -168,7 +172,7 @@ pub fn serve(
 fn bounded(stream: &Stream) -> impl Write + '_ {
     #[cfg(windows)]
     {
-        win::Bounded(stream)
+        Bounded::new(stream, SEND_TIMEOUT)
     }
     #[cfg(not(windows))]
     {

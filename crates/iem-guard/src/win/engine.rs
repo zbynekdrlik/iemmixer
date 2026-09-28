@@ -2,8 +2,11 @@
 //! supervisor pipe. One connection says hello as `supervisor`; a reader
 //! thread keeps what the engine sends (`Hello`, `Topology`, `Status`,
 //! `Meters`, replies, `DriverReleased`) so the engine never waits on the
-//! guard, and the steps read that inbox. The engine ends only by its own
-//! `Shutdown`.
+//! guard, and the steps read that inbox. The guard never waits long on the
+//! engine either: every send must be taken within [`SEND`], else it fails,
+//! the connection counts as closed and the step fails into the plan's error
+//! policy (a hung engine at "ide event": `EngineStop`, then `EngineHealth`).
+//! The engine ends only by its own `Shutdown`.
 
 use std::ffi::OsString;
 use std::fs;
@@ -47,6 +50,11 @@ const REPLY: Duration = Duration::from_secs(5);
 const CHECK_SITE: Duration = Duration::from_secs(60);
 /// `Shutdown` → `DriverReleased` (design §5.2), then the process ends.
 const RELEASE: Duration = Duration::from_secs(10);
+/// The engine takes a sent frame within this (its readers look every
+/// 10 ms), or the send fails (`crate::pipe::Bounded`): a hung engine never
+/// holds the daemon thread in a write, and "ide event" waits at most this
+/// for a send of the step it pre-empts.
+const SEND: Duration = Duration::from_secs(1);
 const GONE: Duration = Duration::from_secs(5);
 const INBOX_POLL: Duration = Duration::from_millis(50);
 /// The interlock's stop file under the guard directory (`--stop-file`).
@@ -225,10 +233,21 @@ impl Supervisor {
         lock(&self.inbox).closed.is_none()
     }
 
+    /// One frame to the engine, which must take it within [`SEND`]
+    /// (`crate::pipe::Bounded`, never `&*self.stream`: interprocess's own
+    /// writes wait for the engine without a bound). A failed send may have
+    /// left part of a frame in the pipe, so the connection counts as closed
+    /// from then on: the next step connects again.
     fn send(&self, msg: &Value) -> Result<(), String> {
-        (&*self.stream)
-            .write_all(&proto::frame(msg))
-            .map_err(|e| format!("the supervisor pipe: {e}"))
+        let sent = crate::pipe::Bounded::new(&self.stream, SEND).write_all(&proto::frame(msg));
+        sent.map_err(|e| {
+            let why = format!("the supervisor pipe: {e}");
+            let mut inbox = lock(&self.inbox);
+            if inbox.closed.is_none() {
+                inbox.closed = Some(why.clone());
+            }
+            why
+        })
     }
 
     fn fresh_id(&mut self) -> u64 {

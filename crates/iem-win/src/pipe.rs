@@ -2,7 +2,8 @@
 //! interprocess has no timeouts on Windows pipes, so the engine's reader
 //! asks how many bytes wait before it reads ([`available`]) and looks at its
 //! connection's `closed` flag in between instead of sitting in a read that
-//! nothing ends, and the engine's and the guard pipe's writers give a peer a
+//! nothing ends, and the engine's and the guard's writers (the guard pipe's
+//! replies, the supervisor connection's sends to the engine) give a peer a
 //! bounded time to take a message ([`write_within`]) instead of waiting for
 //! it forever. Windows only: the argument is a Windows handle.
 
