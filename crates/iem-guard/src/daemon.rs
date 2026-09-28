@@ -1284,6 +1284,7 @@ pub fn handle(pc: &mut dyn Pc, g: &mut Guard, req: Request, epoch: u64) -> Reply
             Err(why) => (false, why),
         },
         Request::InjectFault => inject_fault(pc, g),
+        Request::InjectSeh => inject_seh(pc, g),
         Request::RunnerStop => runner_stop(pc, g),
         Request::ProbeTask => outcome(pc.probe_task(), "the probe task ended with 0"),
         Request::RehearseTeardown => rehearse(pc, g),
@@ -1821,6 +1822,28 @@ fn inject_fault(pc: &mut dyn Pc, g: &mut Guard) -> (bool, String) {
     outcome(
         pc.engine_inject_fault(),
         "the engine faults its RT callback; the watch starts it again",
+    )
+}
+
+/// The owner-approved SEH test (design §10): dev, inside a begun HIL job,
+/// forwarded to the engine (started with its fault-injection flag for the
+/// job). The engine raises a structured exception on its RT callback; the
+/// SEH filter releases the driver within its bound or parks the stream, and
+/// the watch starts the engine again.
+fn inject_seh(pc: &mut dyn Pc, g: &mut Guard) -> (bool, String) {
+    if let Err(why) = g.need_dev("inject-seh") {
+        return (false, why);
+    }
+    if g.state.job.is_none() {
+        return (
+            false,
+            "an SEH test needs a begun HIL job (job-begin)".to_owned(),
+        );
+    }
+    outcome(
+        pc.engine_inject_seh(),
+        "the engine raises a structured exception on its RT callback; \
+         the SEH filter releases the driver or parks, and the watch starts it again",
     )
 }
 

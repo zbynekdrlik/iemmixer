@@ -1311,6 +1311,7 @@ fn jobs_are_refused_while_switching() {
         },
         Request::ForceReopen,
         Request::InjectFault,
+        Request::InjectSeh,
         Request::RunnerStop,
         Request::ProbeTask,
         Request::RehearseTeardown,
@@ -1972,6 +1973,7 @@ fn dev_only_requests_are_refused_elsewhere() {
     for (req, what) in [
         (Request::ForceReopen, "force-reopen"),
         (Request::InjectFault, "inject-fault"),
+        (Request::InjectSeh, "inject-seh"),
         (Request::RunnerStop, "runner-stop"),
         (Request::RehearseTeardown, "rehearse-teardown"),
         (
@@ -2188,6 +2190,38 @@ fn inject_fault_is_refused_outside_a_dev_job() {
         )
     );
     assert_eq!(pc.count(Call::InjectFault), 1);
+}
+
+#[test]
+fn inject_seh_is_refused_outside_a_dev_job() {
+    let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Event));
+    let r = handle(&mut pc, &mut g, Request::InjectSeh, 0);
+    assert_eq!(
+        (r.ok, r.detail.as_str()),
+        (false, "inject-seh is for dev; the mode is event")
+    );
+    g.state.mode = Mode::Dev;
+    let r = handle(&mut pc, &mut g, Request::InjectSeh, 0);
+    assert_eq!(
+        (r.ok, r.detail.as_str()),
+        (false, "an SEH test needs a begun HIL job (job-begin)")
+    );
+    assert!(!pc.called(Call::InjectSeh));
+    // Inside a job it goes to the engine, whose refusal is the answer.
+    g.state.job = Some(7);
+    pc.fail(
+        Call::InjectSeh,
+        "inject_seh: the engine runs without the fault-injection flag",
+    );
+    let r = handle(&mut pc, &mut g, Request::InjectSeh, 0);
+    assert_eq!(
+        (r.ok, r.detail.as_str()),
+        (
+            false,
+            "inject_seh: the engine runs without the fault-injection flag"
+        )
+    );
+    assert_eq!(pc.count(Call::InjectSeh), 1);
 }
 
 #[test]

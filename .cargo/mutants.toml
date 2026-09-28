@@ -80,6 +80,10 @@ exclude_re = [
   # The console's background loops (100 ms meters, 250 ms janitor): their steps
   # are tested functions (MeterMerge, BandActivity, SoloJanitor, TalkLock).
   "iem-server/src/console\\.rs.*\\b(spawn_tasks|meter_task|janitor_task)\\b",
+  # The owner-approved SEH test's raise (design §10): it raises an uncatchable
+  # structured exception (Windows) or aborts (else), so no test can execute it;
+  # its correctness is the SEH filter's, exercised only on the PC.
+  "iem-engine/src/rt\\.rs.*\\binject_seh\\b",
   # Test-only constructors.
   "new_for_test",
   # Tunnel watchdog loop and the Windows sc.exe restart.

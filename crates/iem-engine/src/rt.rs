@@ -590,6 +590,19 @@ impl Processor {
         panic!("fault injection: panic on the RT thread");
     }
 
+    /// The owner-approved SEH test (`--fault-injection` only, design §10): a
+    /// structured exception on the RT thread that `catch_unwind` cannot
+    /// catch, so the process's SEH filter runs (Windows). Off Windows there
+    /// is no such filter, so it aborts (equally uncatchable). It never
+    /// returns; no test runs it (it ends the process), and it is excluded
+    /// from mutation.
+    fn inject_seh() {
+        #[cfg(windows)]
+        iem_audio_io::asio::raise_test_seh();
+        #[cfg(not(windows))]
+        std::process::abort();
+    }
+
     fn apply(&mut self, op: RtOp) {
         let sr = self.sr;
         match op {
@@ -705,6 +718,7 @@ impl Processor {
                 self.fading_out = true;
             }
             RtOp::Panic => Self::inject_fault(),
+            RtOp::Seh => Self::inject_seh(),
             RtOp::Arm => {
                 if !self.armed {
                     self.armed = true;

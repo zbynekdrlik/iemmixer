@@ -563,6 +563,11 @@ pub trait Pc {
     /// started with its fault-injection flag, faults its RT callback and
     /// exits 70; the engine refuses it without the flag.
     fn engine_inject_fault(&mut self) -> R<()>;
+    /// `InjectSeh` over the supervisor pipe (the owner-approved SEH test,
+    /// design §10): the engine raises a structured exception on its RT
+    /// callback; the SEH filter releases the driver or parks, and the watch
+    /// starts it again. Under the fault-injection flag, like the fault.
+    fn engine_inject_seh(&mut self) -> R<()>;
     /// What the supervisor connection holds of the running engine; `None`
     /// while no engine of ours runs. Never waits: at most one attempt to
     /// connect, and the pipe's DACL is read once per engine process.
@@ -642,6 +647,7 @@ pub mod fake {
         HilSignal,
         ForceReopen,
         InjectFault,
+        InjectSeh,
         InstallSite,
         Exclude,
     }
@@ -675,6 +681,7 @@ pub mod fake {
                     | Call::HilSignal
                     | Call::ForceReopen
                     | Call::InjectFault
+                    | Call::InjectSeh
                     | Call::InstallSite
                     | Call::Exclude
             )
@@ -1188,6 +1195,10 @@ pub mod fake {
 
         fn engine_inject_fault(&mut self) -> R<()> {
             self.enter(Call::InjectFault, None)
+        }
+
+        fn engine_inject_seh(&mut self) -> R<()> {
+            self.enter(Call::InjectSeh, None)
         }
 
         fn engine_seen(&mut self) -> Option<EngineSeen> {
@@ -1817,6 +1828,7 @@ mod tests {
         assert_eq!(pc.hil_signals, [("mic1".to_owned(), -30.0, 5.0, vec![94])]);
         pc.engine_force_reopen().unwrap();
         pc.engine_inject_fault().unwrap();
+        pc.engine_inject_seh().unwrap();
         assert_eq!(
             pc.install_site("site.toml", &Cancel::default()).unwrap(),
             "site.toml: checked and installed"
@@ -1828,6 +1840,7 @@ mod tests {
             Call::HilSignal,
             Call::ForceReopen,
             Call::InjectFault,
+            Call::InjectSeh,
             Call::InstallSite,
             Call::Exclude,
         ] {

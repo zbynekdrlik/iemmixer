@@ -305,6 +305,10 @@ impl Pc for WinPc {
         engine::inject_fault(self)
     }
 
+    fn engine_inject_seh(&mut self) -> R<()> {
+        engine::inject_seh(self)
+    }
+
     fn engine_seen(&mut self) -> Option<EngineSeen> {
         engine::seen(self)
     }

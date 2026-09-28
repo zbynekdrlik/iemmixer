@@ -93,6 +93,10 @@ pub enum RtOp {
     FadeOut,
     /// Fault injection (the `--fault-injection` launch flag only).
     Panic,
+    /// A structured exception on the RT thread (the `--fault-injection` flag
+    /// only, the owner-approved SEH test, design §10): `catch_unwind` cannot
+    /// catch it, so the SEH filter releases the driver or parks the stream.
+    Seh,
     /// A held processor (`Options::hold`) starts its fade-in.
     Arm,
 }

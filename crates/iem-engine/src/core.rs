@@ -750,6 +750,18 @@ impl Core {
                     ..Partial::default()
                 })
             }
+            Cmd::InjectSeh => {
+                if !self.flags.fault_injection {
+                    return Err(CmdError::new(
+                        ErrCode::Forbidden,
+                        "the engine runs without the fault-injection flag",
+                    ));
+                }
+                Ok(Partial {
+                    rt: vec![RtOp::Seh],
+                    ..Partial::default()
+                })
+            }
             Cmd::ForceReopen => {
                 if !self.flags.fault_injection {
                     return Err(CmdError::new(

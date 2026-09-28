@@ -579,6 +579,15 @@ pub(super) fn inject_fault(pc: &mut WinPc) -> R<()> {
     sup.request("inject_fault").map_err(StepError::Failed)
 }
 
+/// The owner-approved SEH test (design §10): `InjectSeh` over the supervisor
+/// pipe. The engine refuses it without its fault-injection flag; with it the
+/// RT callback raises a structured exception, the SEH filter releases the
+/// driver or parks, and the engine exits, which the watch sees.
+pub(super) fn inject_seh(pc: &mut WinPc) -> R<()> {
+    let sup = supervisor(pc, CONNECT, &Cancel::default())?;
+    sup.request("inject_seh").map_err(StepError::Failed)
+}
+
 /// Whether the engine's control pipe admits only this user and SYSTEM, read
 /// back through its DACL (HIL, design §7). Reading connects to the pipe for
 /// a moment, so it is read once per engine process.

@@ -45,7 +45,7 @@ use iem_win::registry::HkcuPref;
 use iem_win::window::SessionEndWindow;
 use tracing::{error, info, warn};
 use windows_sys::Win32::System::Diagnostics::Debug::{
-    EXCEPTION_CONTINUE_SEARCH, EXCEPTION_POINTERS, SetUnhandledExceptionFilter,
+    EXCEPTION_CONTINUE_SEARCH, EXCEPTION_POINTERS, RaiseException, SetUnhandledExceptionFilter,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage,
@@ -2071,6 +2071,23 @@ pub fn install_seh_filter() {
     // engine installs this filter only, so the previous one is not chained.
     unsafe {
         SetUnhandledExceptionFilter(Some(seh_filter));
+    }
+}
+
+/// Raises a non-continuable structured exception on the calling thread for
+/// the owner-approved SEH test (design §10, `--fault-injection` only). Unlike
+/// a Rust panic, `catch_unwind` cannot catch it, so the installed SEH filter
+/// runs: it releases the driver within its bound or parks the stream. The
+/// code is an application-defined value (top bit set, customer bit set).
+pub fn raise_test_seh() {
+    // Application-defined code (severity error bit 31, customer bit 29 set)
+    // spelling "IEM"; non-continuable flag 0x1.
+    const IEM_SEH_TEST: u32 = 0xE049_454D;
+    const NON_CONTINUABLE: u32 = 0x1;
+    // SAFETY: RaiseException with a private, non-continuable code; it does not
+    // return (the SEH filter ends the process or parks the thread).
+    unsafe {
+        RaiseException(IEM_SEH_TEST, NON_CONTINUABLE, 0, std::ptr::null::<usize>());
     }
 }
 

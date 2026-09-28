@@ -81,6 +81,10 @@ pub enum Request {
     /// expects exit 70, the driver released, one respawn and the fade-in
     /// (design §7), read back through [`Reply::engine`].
     InjectFault,
+    /// Dev with a HIL job only: the owner-approved SEH test (design §10) —
+    /// the engine raises a structured exception on its RT callback, the SEH
+    /// filter releases the driver or parks, and the watch starts it again.
+    InjectSeh,
     /// Dev only: stop the idle runner (bootstrap check, S6 plan Task 16).
     RunnerStop,
     /// Starts `\iemmixer\iemmixer-probe` from the guard (design §5.1); any
@@ -303,6 +307,7 @@ mod tests {
             },
             Request::ForceReopen,
             Request::InjectFault,
+            Request::InjectSeh,
             Request::RunnerStop,
             Request::ProbeTask,
             Request::RehearseTeardown,
@@ -344,6 +349,7 @@ mod tests {
             r#"{"cmd":"rehearse_teardown"}"#
         );
         assert_eq!(json(&Request::InjectFault), r#"{"cmd":"inject_fault"}"#);
+        assert_eq!(json(&Request::InjectSeh), r#"{"cmd":"inject_seh"}"#);
         assert_eq!(
             decode::<Request>(br#"{"cmd":"alarm_ack","id":3}"#).unwrap(),
             Request::AlarmAck { id: 3 }

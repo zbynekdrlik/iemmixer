@@ -98,6 +98,10 @@ pub enum Cmd {
     SaveNow,
     Shutdown,
     InjectFault,
+    /// Owner-approved SEH test (design §10): a structured exception on the
+    /// RT thread, under the fault-injection flag. Supervisor-may, like
+    /// `InjectFault`.
+    InjectSeh,
     Ping,
     /// The supervisor lets an engine started with `--hold` sound (S6 design
     /// note §4): the outputs fade in over 500 ms.
@@ -125,7 +129,7 @@ pub enum Cmd {
 }
 
 /// Every `op` tag, for telling an unknown command from a malformed one.
-pub const OPS: [&str; 23] = [
+pub const OPS: [&str; 24] = [
     "set_input",
     "set_mix",
     "set_level",
@@ -145,6 +149,7 @@ pub const OPS: [&str; 23] = [
     "save_now",
     "shutdown",
     "inject_fault",
+    "inject_seh",
     "ping",
     "arm",
     "hil_test_signal",
@@ -178,6 +183,7 @@ impl Cmd {
                     | Self::StartTestSignal { .. }
                     | Self::StopTestSignal
                     | Self::InjectFault
+                    | Self::InjectSeh
             )
     }
 }
@@ -577,6 +583,7 @@ mod tests {
             Cmd::SaveNow,
             Cmd::Shutdown,
             Cmd::InjectFault,
+            Cmd::InjectSeh,
             Cmd::Ping,
             Cmd::Arm,
             Cmd::HilTestSignal {
@@ -1028,6 +1035,7 @@ mod tests {
                 "save_now",
                 "shutdown",
                 "inject_fault",
+                "inject_seh",
                 "ping",
                 "arm",
                 "hil_test_signal",

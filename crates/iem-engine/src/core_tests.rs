@@ -896,6 +896,20 @@ fn fault_injection_needs_the_flag() {
 }
 
 #[test]
+fn seh_injection_needs_the_flag() {
+    // The owner-approved SEH test (design §10): a structured exception on the
+    // RT thread, only under the fault-injection flag, like InjectFault.
+    let mut off = core(Flags::default());
+    assert_eq!(code(off.apply(&Cmd::InjectSeh)), ErrCode::Forbidden);
+    let mut on = core(Flags {
+        test_signal: false,
+        fault_injection: true,
+    });
+    let out = on.apply(&Cmd::InjectSeh).unwrap();
+    assert_eq!((out.rev, out.rt), (0, vec![RtOp::Seh]));
+}
+
+#[test]
 fn a_forced_reopen_needs_the_fault_flag_and_changes_nothing() {
     let mut off = core(Flags::default());
     assert_eq!(code(off.apply(&Cmd::ForceReopen)), ErrCode::Forbidden);
