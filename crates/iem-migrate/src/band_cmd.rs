@@ -4,7 +4,7 @@
 //! with `--dry-run`). The output is transactional: it is written into a
 //! staging copy of the band directory and swapped in whole ([`crate::stage`]).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -12,7 +12,9 @@ use iem_core::band::{CustomizationFile, Preset, PresetFile, Snapshot, SnapshotFi
 use iem_core::legacy::{Customization, MixSnapshot, PresetEntry};
 use iem_engine_proto::MixId;
 use iem_rpp::aliases::{Aliases, Eras, MemberAlias, parse_aliases, parse_eras};
-use iem_rpp::band::{Ctx, Stats, rekey_customization, rekey_presets, rekey_snapshots};
+use iem_rpp::band::{
+    Ctx, Stats, rekey_customization, rekey_presets, rekey_snapshot, rekey_snapshots,
+};
 use iem_rpp::topology::Topology;
 use iem_server::band_import::{
     DefaultPins, FileOutcome, LegacyConfig, PinOutcome, PinRequest, check_jwt_secret, check_vapid,
@@ -186,10 +188,29 @@ impl<'a> Plan<'a> {
     }
 
     fn snapshots(&mut self) {
-        let Some(files) = self.list("snapshots", "json") else {
-            self.report.push("snapshots: none".into());
-            return;
-        };
+        // How many snapshots each `eras.toml` `[[skip]]` entry matched.
+        let mut matched = vec![0usize; self.eras.skip.len()];
+        match self.list("snapshots", "json") {
+            Some(files) => self.snapshot_files(files, &mut matched),
+            None => self.report.push("snapshots: none".into()),
+        }
+        let eras: &'a Eras = self.eras;
+        for (s, n) in eras.skip.iter().zip(matched) {
+            let entry = format!("eras.toml skip {} {:?} {}", s.file, s.name, s.timestamp);
+            match n {
+                1 => {}
+                0 => self.problems.push(format!(
+                    "{entry}: no such snapshot (remove or correct the entry)"
+                )),
+                n => self.problems.push(format!(
+                    "{entry}: matches {n} snapshots (a skip names exactly one)"
+                )),
+            }
+        }
+    }
+
+    fn snapshot_files(&mut self, files: Vec<(String, PathBuf)>, matched: &mut [usize]) {
+        let eras: &'a Eras = self.eras;
         let mut by_member: BTreeMap<String, (Vec<Snapshot>, Stats)> = BTreeMap::new();
         for (legacy, path) in files {
             let file = format!("snapshots/{legacy}.json");
@@ -199,7 +220,32 @@ impl<'a> Plan<'a> {
             let Some(list) = self.read_json::<Vec<MixSnapshot>>(&path) else {
                 continue;
             };
-            match rekey_snapshots(&list, &ctx(self, &legacy, m)) {
+            let c = ctx(self, &legacy, m);
+            let mut skip = BTreeSet::new();
+            for (s, n) in eras.skip.iter().zip(matched.iter_mut()) {
+                let hits: Vec<usize> = list
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, x)| s.matches(&file, &x.label, x.timestamp))
+                    .map(|(i, _)| i)
+                    .collect();
+                *n += hits.len();
+                skip.extend(hits.iter().copied());
+                if let &[i] = hits.as_slice()
+                    && let Some(x) = list.get(i)
+                {
+                    let how = if rekey_snapshot(i, x, &c).is_ok() {
+                        " (mappable, skipped as listed)"
+                    } else {
+                        ""
+                    };
+                    self.report.push(format!(
+                        "skipped (eras.toml): {file} {:?} {}: {}{how}",
+                        s.name, s.timestamp, s.reason
+                    ));
+                }
+            }
+            match rekey_snapshots(&list, &skip, &c) {
                 Ok((list, st)) => {
                     let slot = by_member.entry(m.id.clone()).or_default();
                     slot.0.extend(list);

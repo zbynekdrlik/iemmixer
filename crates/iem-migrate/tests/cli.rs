@@ -744,6 +744,260 @@ fn missing_or_unmappable_band_data_fails_loudly() {
     assert!(e.msg.contains("snapshots/m2.json: snapshot 1"), "{}", e.msg);
 }
 
+/// A snapshot saved at `t`, full level on every key.
+fn snapshot(t: i64, label: &str, keys: &[usize]) -> MixSnapshot {
+    MixSnapshot {
+        timestamp: t,
+        label: label.into(),
+        pinned: false,
+        channels: keys
+            .iter()
+            .map(|k| {
+                (
+                    *k,
+                    ChannelSnapshot {
+                        vol: 1.0,
+                        mute: false,
+                        pan: 0.5,
+                    },
+                )
+            })
+            .collect(),
+        eq_bands: None,
+    }
+}
+
+/// An `eras.toml` `[[skip]]` entry.
+fn skip(file: &str, name: &str, timestamp: i64, reason: &str) -> String {
+    format!(
+        "[[skip]]\nfile = {file:?}\nname = {name:?}\ntimestamp = {timestamp}\nreason = {reason:?}\n"
+    )
+}
+
+/// `eras` as `legacy` wrote it plus `entries`.
+fn with_skips(eras: &Path, base: &str, entries: &[String]) {
+    std::fs::write(eras, format!("{base}{}", entries.concat())).unwrap();
+}
+
+/// Member m2 holds a snapshot whose layout the eras cannot map (key 999, as
+/// an automatic snapshot of a never-saved layout) and one that maps.
+fn unmappable_m2(l: &Path) {
+    json(
+        &l.join("snapshots/m2.json"),
+        &[snapshot(1500, "auto", &[999]), snapshot(1600, "auto", &[1])],
+    );
+}
+
+const UNMAPPABLE: &str = "  - snapshots/m2.json: snapshot 1 (\"auto\", 1500): unmappable for member m2 (era 1: keys [999])";
+
+#[test]
+fn a_listed_unmappable_snapshot_is_skipped_reported_and_the_rest_imports() {
+    let w = World::new(24);
+    let (l, eras) = legacy(&w);
+    let base = std::fs::read_to_string(&eras).unwrap();
+    let out = w.path("band");
+    unmappable_m2(&l);
+    // Without [[skip]] the importer refuses to guess, as before.
+    let e = run(&band_args(&w, &l, &eras, &out, &[])).unwrap_err();
+    assert_eq!(e.code, EXIT_INPUT);
+    assert!(e.msg.contains(UNMAPPABLE), "{}", e.msg);
+    assert!(!out.exists(), "nothing written");
+    with_skips(
+        &eras,
+        &base,
+        &[skip(
+            "snapshots/m2.json",
+            "auto",
+            1500,
+            "layout never saved",
+        )],
+    );
+    let dry = run(&band_args(&w, &l, &eras, &out, &["--dry-run"])).unwrap();
+    let line = "\nskipped (eras.toml): snapshots/m2.json \"auto\" 1500: layout never saved\n";
+    assert!(dry.contains(line), "{dry}");
+    assert!(!out.exists(), "a dry run writes nothing");
+    let report = run(&band_args(&w, &l, &eras, &out, &[])).unwrap();
+    assert!(report.contains(line), "{report}");
+    assert!(!report.contains("mappable, skipped as listed"), "{report}");
+    assert_eq!(report.matches("skipped (eras.toml)").count(), 1, "{report}");
+    for want in [
+        "\nsnapshots member2: 1 (sends 1, ",
+        "\nsnapshots member1: 3 (sends 6, ",
+    ] {
+        assert!(report.contains(want), "{report}");
+    }
+    let snaps: SnapshotFile =
+        serde_json::from_str(&std::fs::read_to_string(out.join("snapshots/member2.json")).unwrap())
+            .unwrap();
+    assert_eq!(snaps.snapshots.len(), 1);
+    assert_eq!(snaps.snapshots[0].timestamp, 1600);
+    assert_eq!(
+        snaps.snapshots[0].sends[0].src,
+        Source::Input(InputId::new("mic1"))
+    );
+}
+
+/// The list is explicit: an item that would import is still left out, and
+/// the report says so.
+#[test]
+fn a_listed_mappable_snapshot_is_skipped_as_listed() {
+    let w = World::new(25);
+    let (l, eras) = legacy(&w);
+    let base = std::fs::read_to_string(&eras).unwrap();
+    let out = w.path("band");
+    with_skips(
+        &eras,
+        &base,
+        &[skip("snapshots/m1.json", "auto", 1200, "a stray auto save")],
+    );
+    let report = run(&band_args(&w, &l, &eras, &out, &[])).unwrap();
+    assert!(
+        report.contains(
+            "\nskipped (eras.toml): snapshots/m1.json \"auto\" 1200: a stray auto save (mappable, skipped as listed)\n"
+        ),
+        "{report}"
+    );
+    assert!(
+        report.contains("\nsnapshots member1: 2 (sends 4, "),
+        "{report}"
+    );
+    let snaps: SnapshotFile =
+        serde_json::from_str(&std::fs::read_to_string(out.join("snapshots/member1.json")).unwrap())
+            .unwrap();
+    let times: Vec<i64> = snaps.snapshots.iter().map(|s| s.timestamp).collect();
+    assert_eq!(times, vec![1300, 1100], "m1's 1300, then old1's 1100");
+}
+
+/// Every entry must name exactly one snapshot (file, name and timestamp): a
+/// near miss hides nothing and fails the run.
+#[test]
+fn a_skip_that_names_no_snapshot_is_a_problem() {
+    let w = World::new(26);
+    let (l, eras) = legacy(&w);
+    let base = std::fs::read_to_string(&eras).unwrap();
+    let out = w.path("band");
+    unmappable_m2(&l);
+    for (file, name, t) in [
+        ("snapshots/m2.json", "auto", 1501),
+        ("snapshots/m2.json", "auto", 1499),
+        ("snapshots/m2.json", "Auto", 1500),
+        ("snapshots/m2.json", "manual", 1500),
+        ("snapshots/m1.json", "auto", 1500),
+        ("snapshots/nobody.json", "auto", 1500),
+    ] {
+        with_skips(&eras, &base, &[skip(file, name, t, "r")]);
+        let e = run(&band_args(&w, &l, &eras, &out, &[])).unwrap_err();
+        assert_eq!(e.code, EXIT_INPUT);
+        assert!(
+            e.msg.contains(&format!(
+                "  - eras.toml skip {file} {name:?} {t}: no such snapshot (remove or correct the entry)"
+            )),
+            "{}",
+            e.msg
+        );
+        assert!(e.msg.contains(UNMAPPABLE), "nothing hidden: {}", e.msg);
+        assert!(!e.msg.contains("skipped (eras.toml)"), "{}", e.msg);
+        assert!(!out.exists(), "nothing written");
+    }
+    // A stale entry next to a correct one still fails the run.
+    with_skips(
+        &eras,
+        &base,
+        &[
+            skip("snapshots/m2.json", "auto", 1500, "r"),
+            skip("snapshots/m2.json", "auto", 1700, "r"),
+        ],
+    );
+    let e = run(&band_args(&w, &l, &eras, &out, &["--partial"])).unwrap_err();
+    assert_eq!(e.code, EXIT_INPUT);
+    assert!(
+        e.msg
+            .starts_with("1 problem(s), nothing written:\n  - eras.toml skip snapshots/m2.json \"auto\" 1700: no such snapshot"),
+        "{}",
+        e.msg
+    );
+    assert!(!out.exists(), "nothing written");
+    // Without a snapshots directory every entry is stale.
+    std::fs::remove_dir_all(l.join("snapshots")).unwrap();
+    with_skips(
+        &eras,
+        &base,
+        &[skip("snapshots/m1.json", "auto", 1200, "r")],
+    );
+    let e = run(&band_args(&w, &l, &eras, &out, &["--dry-run"])).unwrap_err();
+    assert!(
+        e.msg
+            .contains("  - eras.toml skip snapshots/m1.json \"auto\" 1200: no such snapshot"),
+        "{}",
+        e.msg
+    );
+}
+
+#[test]
+fn a_skip_matching_two_snapshots_or_listed_twice_is_refused() {
+    let w = World::new(27);
+    let (l, eras) = legacy(&w);
+    let base = std::fs::read_to_string(&eras).unwrap();
+    let out = w.path("band");
+    json(
+        &l.join("snapshots/m2.json"),
+        &[snapshot(1500, "auto", &[999]), snapshot(1500, "auto", &[1])],
+    );
+    let entry = skip("snapshots/m2.json", "auto", 1500, "r");
+    with_skips(&eras, &base, std::slice::from_ref(&entry));
+    let e = run(&band_args(&w, &l, &eras, &out, &[])).unwrap_err();
+    assert_eq!(e.code, EXIT_INPUT);
+    assert_eq!(
+        e.msg,
+        "1 problem(s), nothing written:\n  - eras.toml skip snapshots/m2.json \"auto\" 1500: matches 2 snapshots (a skip names exactly one)"
+    );
+    assert!(!out.exists(), "nothing written");
+    unmappable_m2(&l);
+    with_skips(&eras, &base, &[entry.clone(), entry]);
+    let e = run(&band_args(&w, &l, &eras, &out, &[])).unwrap_err();
+    assert_eq!(e.code, EXIT_INPUT);
+    assert_eq!(e.msg, "eras: skip 2 repeats an earlier entry");
+    assert!(!out.exists(), "nothing written");
+}
+
+/// Snapshots only, reviewed entries only: anything else in `[[skip]]` stops
+/// the run before it reads the predecessor's data.
+#[test]
+fn a_skip_entry_with_an_unknown_key_or_not_a_snapshot_fails_parsing() {
+    let w = World::new(28);
+    let (l, eras) = legacy(&w);
+    let base = std::fs::read_to_string(&eras).unwrap();
+    let out = w.path("band");
+    for (entry, why) in [
+        (
+            format!(
+                "{}kind = \"preset\"\n",
+                skip("snapshots/m1.json", "auto", 1200, "r")
+            ),
+            "unknown field `kind`",
+        ),
+        (
+            skip("presets/m1.json", "rehearsal", 1500, "r"),
+            "eras: skip 1: file \"presets/m1.json\" is not snapshots/<member>.json (a skip names a snapshot only)",
+        ),
+        (
+            skip("customizations/m1.json", "auto", 1200, "r"),
+            "is not snapshots/<member>.json",
+        ),
+        (
+            skip("snapshots/m1.json", "auto", 1200, ""),
+            "eras: skip 1: no reason",
+        ),
+    ] {
+        with_skips(&eras, &base, &[entry]);
+        let e = run(&band_args(&w, &l, &eras, &out, &["--dry-run"])).unwrap_err();
+        assert_eq!(e.code, EXIT_INPUT);
+        assert!(e.msg.contains(why), "{why}: {}", e.msg);
+        assert!(!e.msg.contains("problem(s)"), "{}", e.msg);
+    }
+    assert!(!out.exists());
+}
+
 fn edit(path: &Path, from: &str, to: &str) {
     let text = std::fs::read_to_string(path).unwrap();
     assert!(text.contains(from), "{text}");

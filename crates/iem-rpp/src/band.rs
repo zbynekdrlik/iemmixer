@@ -279,58 +279,76 @@ pub fn rekey_presets(
     }
 }
 
-/// A member's snapshots (the predecessor's file: a list), in file order.
+/// One snapshot of a member's file; `i` is its 0-based position there (the
+/// problem names it 1-based).
+pub fn rekey_snapshot(
+    i: usize,
+    s: &MixSnapshot,
+    ctx: &Ctx<'_>,
+) -> Result<(Snapshot, Stats), String> {
+    let label = format!("snapshot {} ({:?}, {})", i + 1, s.label, s.timestamp);
+    let (map, between) =
+        ctx.map_keys(s.timestamp, &keys(&s.channels, s.eq_bands.as_ref()), &label)?;
+    let mut st = Stats {
+        items: 1,
+        between_eras: usize::from(between),
+        ..Stats::default()
+    };
+    let mut sends = Vec::new();
+    let mut ch: Vec<_> = s.channels.iter().collect();
+    ch.sort_by_key(|(k, _)| **k);
+    for (k, c) in ch {
+        let src = map
+            .get(k)
+            .cloned()
+            .ok_or_else(|| format!("{label}: key {k}"))?;
+        sends.push(MixSend {
+            src,
+            gain_db: lin_to_db(f64::from(c.vol)),
+            pan: pan(c.pan).map_err(|x| format!("{label}: key {k}: {x}"))?,
+            muted: c.mute,
+        });
+    }
+    st.sends = sends.len();
+    let input_eq = ctx
+        .eqs(s.eq_bands.as_ref(), &map, &mut st)
+        .map_err(|x| format!("{label}: {x}"))?;
+    let (archived, legacy_member) = ctx.archive();
+    Ok((
+        Snapshot {
+            timestamp: s.timestamp,
+            label: s.label.clone(),
+            pinned: s.pinned,
+            sends,
+            groups: BTreeMap::new(),
+            input_eq,
+            archived,
+            legacy_member,
+        },
+        st,
+    ))
+}
+
+/// A member's snapshots (the predecessor's file: a list), in file order,
+/// without the positions in `skip` (the `eras.toml` `[[skip]]` entries the
+/// caller matched). Problems keep the snapshot's position in the file.
 pub fn rekey_snapshots(
     list: &[MixSnapshot],
+    skip: &BTreeSet<usize>,
     ctx: &Ctx<'_>,
 ) -> Result<(Vec<Snapshot>, Stats), Problems> {
     let mut out = Vec::new();
     let mut stats = Stats::default();
     let mut problems = Vec::new();
     for (i, s) in list.iter().enumerate() {
-        let label = format!("snapshot {} ({:?}, {})", i + 1, s.label, s.timestamp);
-        let mut one = || -> Result<Snapshot, String> {
-            let (map, between) =
-                ctx.map_keys(s.timestamp, &keys(&s.channels, s.eq_bands.as_ref()), &label)?;
-            let mut st = Stats {
-                items: 1,
-                between_eras: usize::from(between),
-                ..Stats::default()
-            };
-            let mut sends = Vec::new();
-            let mut ch: Vec<_> = s.channels.iter().collect();
-            ch.sort_by_key(|(k, _)| **k);
-            for (k, c) in ch {
-                let src = map
-                    .get(k)
-                    .cloned()
-                    .ok_or_else(|| format!("{label}: key {k}"))?;
-                sends.push(MixSend {
-                    src,
-                    gain_db: lin_to_db(f64::from(c.vol)),
-                    pan: pan(c.pan).map_err(|x| format!("{label}: key {k}: {x}"))?,
-                    muted: c.mute,
-                });
+        if skip.contains(&i) {
+            continue;
+        }
+        match rekey_snapshot(i, s, ctx) {
+            Ok((x, st)) => {
+                out.push(x);
+                stats += st;
             }
-            st.sends = sends.len();
-            let input_eq = ctx
-                .eqs(s.eq_bands.as_ref(), &map, &mut st)
-                .map_err(|x| format!("{label}: {x}"))?;
-            let (archived, legacy_member) = ctx.archive();
-            stats += st;
-            Ok(Snapshot {
-                timestamp: s.timestamp,
-                label: s.label.clone(),
-                pinned: s.pinned,
-                sends,
-                groups: BTreeMap::new(),
-                input_eq,
-                archived,
-                legacy_member,
-            })
-        };
-        match one() {
-            Ok(x) => out.push(x),
             Err(x) => problems.push(x),
         }
     }
@@ -493,11 +511,54 @@ mod tests {
         Source::Input(InputId::new(id))
     }
 
+    /// Every snapshot of the list (no `[[skip]]`).
+    fn every(list: &[MixSnapshot], c: &Ctx<'_>) -> Result<(Vec<Snapshot>, Stats), Problems> {
+        rekey_snapshots(list, &BTreeSet::new(), c)
+    }
+
+    /// Skipped positions are left out, not counted, and the others keep their
+    /// position in the file in problems.
+    #[test]
+    fn skipped_positions_are_left_out_and_numbering_is_kept() {
+        let e = env();
+        let c = ctx(&e, &e.member);
+        let list = [
+            snap(150, &[(1, 1.0)]),
+            snap(150, &[(9, 1.0)]),
+            snap(350, &[(1, 0.5)]),
+        ];
+        let err = every(&list, &c).unwrap_err();
+        assert_eq!(err.0.len(), 1);
+        assert!(
+            err.0[0].starts_with("snapshot 2 (\"auto\", 150): unmappable"),
+            "{err}"
+        );
+        let (s, st) = rekey_snapshots(&list, &BTreeSet::from([1]), &c).unwrap();
+        assert_eq!(s.len(), 2);
+        assert_eq!(st.items, 2);
+        assert_eq!(st.sends, 2);
+        assert_eq!(s[0].sends[0].src, src_in("mic1"));
+        assert_eq!(s[1].sends[0].src, src_in("mic2"), "era 2");
+        // Skipping another position keeps the unmappable one's number.
+        let err = rekey_snapshots(&list, &BTreeSet::from([0]), &c).unwrap_err();
+        assert!(err.0[0].starts_with("snapshot 2 ("), "{err}");
+        let (s, st) = rekey_snapshots(&list, &BTreeSet::from([0, 1, 2]), &c).unwrap();
+        assert!(s.is_empty());
+        assert_eq!(st, Stats::default());
+        // One snapshot alone, named by its position.
+        let err = rekey_snapshot(6, &list[1], &c).unwrap_err();
+        assert!(err.starts_with("snapshot 7 (\"auto\", 150)"), "{err}");
+        let (one, st) = rekey_snapshot(0, &list[2], &c).unwrap();
+        assert_eq!(one.sends[0].src, src_in("mic2"));
+        assert_eq!(st.items, 1);
+        assert_eq!(st.sends, 1);
+    }
+
     #[test]
     fn keys_follow_the_era_of_the_item() {
         let e = env();
         let c = ctx(&e, &e.member);
-        let (s, st) = rekey_snapshots(
+        let (s, st) = every(
             &[
                 snap(150, &[(1, 1.0), (2, 0.5)]),
                 snap(350, &[(1, 1.0), (2, 0.0)]),
@@ -525,25 +586,25 @@ mod tests {
         let c = ctx(&e, &e.member);
         // Keys 3 (drums, an input of the stems group) and 4 (another member's
         // mix: member3 does not hear it) — neither era maps key 4.
-        let err = rekey_snapshots(&[snap(250, &[(4, 1.0)])], &c).unwrap_err();
+        let err = every(&[snap(250, &[(4, 1.0)])], &c).unwrap_err();
         assert!(err.0[0].contains("unmappable for member legacy3"), "{err}");
         assert!(
             err.0[0].contains("era 1: keys [4]; era 2: keys [4]"),
             "{err}"
         );
         // Key 3 is drums in both eras: they agree.
-        let (s, st) = rekey_snapshots(&[snap(250, &[(3, 1.0)])], &c).unwrap();
+        let (s, st) = every(&[snap(250, &[(3, 1.0)])], &c).unwrap();
         assert_eq!(s[0].sends[0].src, src_in("drums"));
         assert_eq!(st.between_eras, 1);
         // Key 1 differs between era 1 and 2: ambiguous.
-        let err = rekey_snapshots(&[snap(250, &[(1, 1.0)])], &c).unwrap_err();
+        let err = every(&[snap(250, &[(1, 1.0)])], &c).unwrap_err();
         assert!(err.0[0].contains("ambiguous between eras [1, 2]"), "{err}");
         // Key 2 exists in era 3 only as the unaliased spare: era 2 wins.
-        let (s, _) = rekey_snapshots(&[snap(450, &[(2, 1.0)])], &c).unwrap();
+        let (s, _) = every(&[snap(450, &[(2, 1.0)])], &c).unwrap();
         assert_eq!(s[0].sends[0].src, src_in("mic1"));
         // Out of range keys never map.
-        assert!(rekey_snapshots(&[snap(150, &[(0, 1.0)])], &c).is_err());
-        assert!(rekey_snapshots(&[snap(150, &[(9, 1.0)])], &c).is_err());
+        assert!(every(&[snap(150, &[(0, 1.0)])], &c).is_err());
+        assert!(every(&[snap(150, &[(9, 1.0)])], &c).is_err());
     }
 
     #[test]
@@ -555,7 +616,7 @@ mod tests {
         eq.insert(1, five());
         eq.insert(4, five());
         s.eq_bands = Some(eq);
-        let (out, st) = rekey_snapshots(&[s], &c).unwrap();
+        let (out, st) = every(&[s], &c).unwrap();
         assert_eq!(out[0].sends[1].src, Source::Mix(MixId::new("member2")));
         assert_eq!(st.input_eqs, 1);
         assert_eq!(st.dropped_mix_eqs, 1);
@@ -687,12 +748,12 @@ mod tests {
         let mut eq = HashMap::new();
         eq.insert(1, five()[..4].to_vec());
         s.eq_bands = Some(eq);
-        let err = rekey_snapshots(&[s.clone()], &c).unwrap_err();
+        let err = every(&[s.clone()], &c).unwrap_err();
         assert!(err.0[0].contains("EQ has 4 bands"), "{err}");
         let mut bad = five();
         bad[0].band_type = "notch".into();
         s.eq_bands = Some(HashMap::from([(1, bad)]));
-        let err = rekey_snapshots(&[s], &c).unwrap_err();
+        let err = every(&[s], &c).unwrap_err();
         assert!(err.0[0].contains("\"notch\" is not supported"), "{err}");
     }
 
@@ -719,7 +780,10 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.0[0].contains("keys [2, 4]"), "{err}");
-        let none = Eras { era: vec![] };
+        let none = Eras {
+            era: vec![],
+            skip: vec![],
+        };
         let c2 = Ctx {
             eras: &none,
             ..ctx(&e, &e.member)
