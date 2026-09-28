@@ -141,12 +141,34 @@ mod tests {
     use crate::push::tests::{Seen, fake_push_service, subscription, vapid_private_key};
 
     #[test]
-    fn the_payload_carries_type_title_and_body() {
+    fn the_payload_carries_type_title_body_and_tag() {
         let v: serde_json::Value = serde_json::from_slice(&alarm_payload("T", "B")).unwrap();
+        let tag = v["tag"].as_str().unwrap().to_owned();
         assert_eq!(
             v,
-            serde_json::json!({"type": "ALARM", "title": "T", "body": "B"})
+            serde_json::json!({"type": "ALARM", "title": "T", "body": "B", "tag": tag})
         );
+    }
+
+    /// The engineer's phone shows every different notice on its own (the
+    /// band-activity notice and the guard's alarms reach the same devices,
+    /// #9 2026-09-28); the same notice again replaces itself.
+    #[test]
+    fn each_different_notice_has_its_own_tag() {
+        let tag = |t: &str, b: &str| {
+            let v: serde_json::Value = serde_json::from_slice(&alarm_payload(t, b)).unwrap();
+            v["tag"].as_str().unwrap().to_owned()
+        };
+        let a = tag("Guard", "the engine stopped");
+        assert!(a.starts_with("iem-alarm-"), "{a}");
+        let hex = &a["iem-alarm-".len()..];
+        assert_eq!(hex.len(), 16, "{a}");
+        assert!(hex.bytes().all(|c| c.is_ascii_hexdigit()), "{a}");
+        assert_eq!(a, tag("Guard", "the engine stopped"));
+        assert_ne!(a, tag("Guard", "the engine started"));
+        assert_ne!(a, tag("Guards", "the engine stopped"));
+        // Title and body are kept apart: moving text between them changes it.
+        assert_ne!(tag("ab", "c"), tag("a", "bc"));
     }
 
     /// The predecessor had one push audience, the engineer's devices, and no
