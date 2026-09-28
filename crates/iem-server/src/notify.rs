@@ -271,6 +271,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let site = dir.path().join("iemmixer.toml");
         std::fs::write(&site, "port = 8080\n").unwrap();
+        // A site whose server has run: its runtime secrets exist (a notice
+        // only reads them).
+        crate::secrets::load_or_create(&dir.path().join(crate::secrets::SECRETS_DIR)).unwrap();
         crate::push_store::PushStore::load(dir.path())
             .add(subscription(format!("{base}/201")))
             .unwrap();
