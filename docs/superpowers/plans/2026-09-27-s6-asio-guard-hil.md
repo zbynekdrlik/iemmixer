@@ -786,7 +786,7 @@ impl<P: Process + 'static> AsioStream<P> {
   - if `RELEASED` is still false, the faulting thread sleeps forever (parked);
   - with `quiet_crashes` in force, the ending process shows no Windows Error Reporting dialog that could keep the card held in session 1.
 
-  Only the owner-approved `seh_ctl` test exercises it (design §10); the code carries no test hook beyond `--fault-injection`'s panic.
+  Exercised by the owner-approved SEH test `iemmode inject-seh` (added #9 2026-09-28): under `--fault-injection` in a HIL job it raises a structured exception on the RT thread (`iem_audio_io::asio::raise_test_seh`).
 - [ ] **Step 5: `.cargo/mutants.toml`:** `asio.rs` stays excluded. The CI `windows` job runs `cargo clippy -p iem-audio-io --all-targets -D warnings` and `cargo test -p iem-audio-io`. `AsioStream::start` with driver `No Such Card` returns `AsioError::NotFound` — a test on the hosted runner, which has no ASIO driver (`NoDrivers` or `NotFound` both pass). `period.rs` carries the portable decision and stays mutated.
 
 ---

@@ -2065,7 +2065,8 @@ impl<P: Process + 'static> Drop for AsioStream<P> {
 /// `iem_win::errmode::quiet_crashes` in force, without a dialog that could
 /// keep the card held in session 1. If the driver is still held, the
 /// faulting thread sleeps for good (the stream is parked; the guard alarms).
-/// Only the owner-approved `seh_ctl` test exercises it (design §10).
+/// Exercised by the owner-approved SEH test: `iemmode inject-seh` in a HIL
+/// job drives `raise_test_seh` on the RT thread (design §10).
 pub fn install_seh_filter() {
     // SAFETY: registers a function of the documented filter signature; the
     // engine installs this filter only, so the previous one is not chained.

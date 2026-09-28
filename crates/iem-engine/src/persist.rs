@@ -166,6 +166,17 @@ impl Store {
         self.dir.join(format!("gen-{seq:010}.json"))
     }
 
+    /// Whether any saved live state exists — `current.json` or a generation.
+    /// A generation can be the newest state on its own: `save` renames
+    /// `current.json` to a generation before writing the new one, so a crash
+    /// between those two renames leaves the latest state only as a generation
+    /// (iemmixer#9 2026-09-28: `import --seed-if-absent` must not re-seed over
+    /// it). Ignores `baseline.json` (a seed is not live state).
+    pub fn has_state(&self) -> bool {
+        self.dir.join(CURRENT).exists()
+            || self.generations().map(|g| !g.is_empty()).unwrap_or(false)
+    }
+
     /// Generation files, oldest first.
     pub fn generations(&self) -> io::Result<Vec<(u64, PathBuf)>> {
         let mut gens: Vec<(u64, PathBuf)> = fs::read_dir(&self.dir)?

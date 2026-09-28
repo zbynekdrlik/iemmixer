@@ -149,7 +149,9 @@ pub fn run(args: &[String]) -> Result<String, Failure> {
     };
     let io = |e: std::io::Error| Failure::io(format!("{}: {e}", dir.display()));
     store.save_baseline(&persisted).map_err(io)?;
-    let keep_current = seed_if_absent && dir.join("current.json").exists();
+    // Keep any existing live state (current.json OR a lone generation left by a
+    // crash mid-save); only seed current.json when there is none.
+    let keep_current = seed_if_absent && store.has_state();
     if !keep_current {
         store.save(&persisted).map_err(io)?;
     }

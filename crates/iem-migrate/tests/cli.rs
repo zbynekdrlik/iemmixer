@@ -187,6 +187,18 @@ fn seed_if_absent_writes_current_only_when_it_is_missing() {
     assert!(r2.contains("current.json kept (--seed-if-absent)"), "{r2}");
     assert_eq!(std::fs::read(dir.join("current.json")).unwrap(), b"LIVE");
     assert!(dir.join("baseline.json").exists());
+    // A lone generation (a crash left the newest state only as gen-N, no
+    // current.json) is live state too: the re-seed must keep it, not overwrite
+    // from the project (iemmixer#9). Simulate it and re-seed.
+    std::fs::remove_file(dir.join("current.json")).unwrap();
+    std::fs::write(dir.join("gen-0000000001.json"), b"LIVE-GEN").unwrap();
+    let r3 = run(&a).unwrap();
+    assert!(r3.contains("current.json kept (--seed-if-absent)"), "{r3}");
+    assert!(!dir.join("current.json").exists());
+    assert_eq!(
+        std::fs::read(dir.join("gen-0000000001.json")).unwrap(),
+        b"LIVE-GEN"
+    );
 }
 
 #[test]
