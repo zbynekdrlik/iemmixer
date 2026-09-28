@@ -123,7 +123,7 @@ pub fn pins_frozen(config: &str) -> Result<(), String> {
 }
 
 /// `iem-server notify --count alarm`: the number it printed (exit 0).
-pub fn recipients(code: Option<i32>, stdout: &str) -> Option<u32> {
+pub fn subscriptions(code: Option<i32>, stdout: &str) -> Option<u32> {
     if code == Some(0) {
         stdout.trim().parse().ok()
     } else {
@@ -333,11 +333,11 @@ mod tests {
 
     #[test]
     fn the_cli_answers_are_read() {
-        assert_eq!(recipients(Some(0), "2\n"), Some(2));
-        assert_eq!(recipients(Some(0), "0"), Some(0));
-        assert_eq!(recipients(Some(1), "2"), None);
-        assert_eq!(recipients(None, "2"), None);
-        assert_eq!(recipients(Some(0), "two"), None);
+        assert_eq!(subscriptions(Some(0), "2\n"), Some(2));
+        assert_eq!(subscriptions(Some(0), "0"), Some(0));
+        assert_eq!(subscriptions(Some(1), "2"), None);
+        assert_eq!(subscriptions(None, "2"), None);
+        assert_eq!(subscriptions(Some(0), "two"), None);
         assert_eq!(notify_result(Some(0), ""), Ok(()));
         assert_eq!(
             notify_result(Some(3), "no device took the notice (Alarm)\n"),

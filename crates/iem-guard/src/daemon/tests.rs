@@ -1555,25 +1555,30 @@ fn dry_run_changes_nothing() {
     );
 }
 
-/// The dev note of a missing alarm recipient (`pc::precheck`).
-const NO_RECIPIENT: &str = "no alarm recipient: the alarm link was not opened \
-     (not needed for dev: the alarms stay in the guard's alarm file)";
+/// The precheck's text for a missing PWA notification subscription.
+const NO_SUBSCRIPTION: &str =
+    "no PWA notification subscription: no engineer device allowed notifications";
+/// Its dev note (`pc::precheck`).
+const NO_SUBSCRIPTION_NOTE: &str = "no PWA notification subscription: no engineer device \
+     allowed notifications (not needed for dev: the alarms stay in the guard's alarm file)";
 
-/// The alarm link is served by iem-server, which runs only in dev and live,
-/// so the owner can open it only after the first dev entry (#9,
-/// 2026-09-28): a dev entry without a recipient goes on and names it, in
-/// its report and in the status until an alarm reaches a phone.
+/// The alarms go to the engineer's PWA notification subscriptions (#9
+/// 2026-09-28); the predecessor's arrive with the band import, a later step
+/// of the entry, and a new one only through iem-server (dev and live): a
+/// dev entry without one goes on and names it, in its report and in the
+/// status until an alarm reaches a phone.
 #[test]
-fn a_dev_entry_without_an_alarm_recipient_goes_on_and_names_it() {
+fn a_dev_entry_without_a_pwa_subscription_goes_on_and_names_it() {
     let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
     g.state.pins.current = Some(SHA.into());
     pc.meters = vec![-60.0];
-    pc.recipients = Some(0);
+    pc.subscriptions = Some(0);
     let r = ask(&mut pc, &mut g, dev());
     assert!(r.ok, "{r:?}");
     assert!(
-        r.detail
-            .starts_with(&format!("dev: done; {NO_RECIPIENT}; interlock quiet: ")),
+        r.detail.starts_with(&format!(
+            "dev: done; {NO_SUBSCRIPTION_NOTE}; interlock quiet: "
+        )),
         "{}",
         r.detail
     );
@@ -1581,11 +1586,11 @@ fn a_dev_entry_without_an_alarm_recipient_goes_on_and_names_it() {
     assert!(g.alarms.all().is_empty(), "{:?}", texts(&g));
     assert_eq!(
         status_reply(&g),
-        format!("mode dev; bundle {SHA}; {NO_RECIPIENT}")
+        format!("mode dev; bundle {SHA}; {NO_SUBSCRIPTION_NOTE}")
     );
     assert_eq!(
         ask(&mut pc, &mut g, Request::Status).detail,
-        format!("mode dev; bundle {SHA}; {NO_RECIPIENT}")
+        format!("mode dev; bundle {SHA}; {NO_SUBSCRIPTION_NOTE}")
     );
     // Its dry run passes and names it too.
     let dry = Request::Dev {
@@ -1596,8 +1601,9 @@ fn a_dev_entry_without_an_alarm_recipient_goes_on_and_names_it() {
     let r = ask(&mut pc, &mut g, dry);
     assert!(r.ok, "{r:?}");
     assert!(
-        r.detail
-            .ends_with(&format!("; bundle {SHA}; precheck ok; {NO_RECIPIENT}")),
+        r.detail.ends_with(&format!(
+            "; bundle {SHA}; precheck ok; {NO_SUBSCRIPTION_NOTE}"
+        )),
         "{}",
         r.detail
     );
@@ -1606,32 +1612,33 @@ fn a_dev_entry_without_an_alarm_recipient_goes_on_and_names_it() {
     let r = ask(&mut pc, &mut g, Request::AlarmTest);
     assert!(!r.ok, "{r:?}");
     assert!(
-        status_reply(&g).contains(NO_RECIPIENT),
+        status_reply(&g).contains(NO_SUBSCRIPTION_NOTE),
         "{}",
         status_reply(&g)
     );
-    // The owner opens the link (iem-server now serves it) and the alarm
-    // test reaches the phone: the status no longer names it.
+    // The engineer allows notifications in the mixer app (iem-server now
+    // serves it) and the alarm test reaches the phone: the status no
+    // longer names it.
     let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
     g.state.pins.current = Some(SHA.into());
     pc.meters = vec![-60.0];
-    pc.recipients = Some(0);
+    pc.subscriptions = Some(0);
     assert!(ask(&mut pc, &mut g, dev()).ok);
-    pc.recipients = Some(1);
+    pc.subscriptions = Some(1);
     let r = ask(&mut pc, &mut g, Request::AlarmTest);
     assert!(r.ok, "{r:?}");
     assert!(
-        !status_reply(&g).contains("no alarm recipient"),
+        !status_reply(&g).contains(NO_SUBSCRIPTION),
         "{}",
         status_reply(&g)
     );
-    // With a recipient the entry names nothing.
+    // With a subscription the entry names nothing.
     let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
     g.state.pins.current = Some(SHA.into());
     pc.meters = vec![-60.0];
     let r = ask(&mut pc, &mut g, dev());
     assert!(r.ok, "{r:?}");
-    assert!(!r.detail.contains("alarm recipient"), "{}", r.detail);
+    assert!(!r.detail.contains("PWA notification"), "{}", r.detail);
     assert_eq!(status_reply(&g), format!("mode dev; bundle {SHA}"));
 }
 
@@ -1700,7 +1707,7 @@ fn an_expired_lan_certificate_is_named_and_never_an_alarm() {
 }
 
 #[test]
-fn a_live_entry_without_an_alarm_recipient_is_refused() {
+fn a_live_entry_without_a_pwa_subscription_is_refused() {
     let live = |trial, dry_run| Request::Live {
         build: SHA.into(),
         trial,
@@ -1711,12 +1718,11 @@ fn a_live_entry_without_an_alarm_recipient_is_refused() {
         g.state
             .bundles
             .insert(SHA.into(), record(SHA, "main", Hil::Green));
-        pc.recipients = Some(0);
+        pc.subscriptions = Some(0);
         let r = ask(&mut pc, &mut g, live(trial, true));
         assert!(!r.ok, "{r:?}");
         assert!(
-            r.detail
-                .ends_with("precheck no alarm recipient: the alarm link was not opened"),
+            r.detail.ends_with(&format!("precheck {NO_SUBSCRIPTION}")),
             "{}",
             r.detail
         );
@@ -1724,10 +1730,7 @@ fn a_live_entry_without_an_alarm_recipient_is_refused() {
         assert!(!r.ok, "{r:?}");
         assert_eq!(g.state.mode, Mode::Event);
         assert!(!pc.called(Call::EngineStart));
-        assert_eq!(
-            texts(&g),
-            ["Precheck: no alarm recipient: the alarm link was not opened"]
-        );
+        assert_eq!(texts(&g), [format!("Precheck: {NO_SUBSCRIPTION}")]);
     }
 }
 
@@ -2973,7 +2976,7 @@ fn alarm_test_ack_status_quit_and_subscribe() {
     let r = handle(&mut pc, &mut g, Request::AlarmTest, 0);
     assert_eq!(
         (r.ok, r.detail.as_str()),
-        (true, "the test alarm reached the alarm recipients")
+        (true, "the test alarm reached the engineer's devices")
     );
     assert_eq!(
         pc.notices,
@@ -2993,7 +2996,7 @@ fn alarm_test_ack_status_quit_and_subscribe() {
     assert!(r.alarms[0].acked);
     let r = handle(&mut pc, &mut g, Request::AlarmAck { id: 99 }, 0);
     assert_eq!((r.ok, r.detail.as_str()), (false, "no alarm 99"));
-    pc.fail(Call::Notify, "no recipients");
+    pc.fail(Call::Notify, "no device took the notice");
     let r = handle(&mut pc, &mut g, Request::AlarmTest, 0);
     assert_eq!(
         (r.ok, r.detail.as_str()),
@@ -3097,7 +3100,7 @@ fn texts_are_cut_to_fit_one_frame() {
 }
 
 #[test]
-fn notices_go_to_the_alarm_recipients_once() {
+fn notices_go_to_the_engineers_devices_once() {
     let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Event));
     g.raise(None, "x", false);
     send_notices(&mut pc, &mut g);
