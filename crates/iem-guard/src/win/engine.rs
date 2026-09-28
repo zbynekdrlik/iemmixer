@@ -694,4 +694,43 @@ mod tests {
         assert!(Supervisor::connect(&format!("{pipe}-none"), Vec::new(), &quiet).is_err());
         assert!(start.elapsed() < Duration::from_secs(2));
     }
+
+    /// An engine that stopped reading (hung): a supervisor send to it fails
+    /// within a bound instead of holding the daemon thread for good (the
+    /// "ide event" plan sends `Shutdown` this way, and its error policy
+    /// takes a failed `EngineStop` from there), and the connection counts
+    /// as closed, so the next step connects again. On the CI's Windows
+    /// runner.
+    #[test]
+    fn a_send_to_an_engine_that_does_not_read_fails_within_a_bound() {
+        let pipe = format!("iemmixer-guard-test-mute-{}", std::process::id());
+        let quiet = Arc::new(Mutex::new(Quiet::new(Instant::now())));
+        let name = pipe.clone().to_ns_name::<GenericNamespaced>().unwrap();
+        // The engine's end: its one instance takes the connection and
+        // nothing ever reads it.
+        let listener = ListenerOptions::new().name(name).create_sync().unwrap();
+        // The hello fits the pipe's 512 bytes.
+        let sup = Supervisor::connect(&pipe, Vec::new(), &quiet).unwrap();
+        assert!(sup.open());
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            // Larger than the pipe: it waits for a read that never comes.
+            let big = serde_json::json!({
+                "type": "request",
+                "id": 1,
+                "cmd": {"op": "x".repeat(4096)},
+            });
+            let start = Instant::now();
+            let sent = sup.send(&big);
+            let _ = tx.send((sent, start.elapsed(), sup.open()));
+        });
+        let (sent, took, open) = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a send to an engine that does not read returned within 5 s");
+        let why = sent.unwrap_err();
+        assert!(why.starts_with("the supervisor pipe: "), "{why}");
+        assert!(took < Duration::from_secs(3), "{took:?}");
+        assert!(!open, "a failed send leaves the connection open");
+        drop(listener);
+    }
 }
