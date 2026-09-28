@@ -439,7 +439,7 @@ mod tests {
         assert_eq!(kind(post_command(0x1234, 7)), Some(Unsupported));
         assert_eq!(kind(post_command(0xFFFE, 7)), Some(Unsupported));
         assert_eq!(kind(post_command(0x1_0000, 7)), Some(Unsupported));
-        assert_eq!(kind(has_dialog(4242)), Some(Unsupported));
+        assert_eq!(kind(dialog_titles(4242)), Some(Unsupported));
         assert_eq!(
             kind(balloon(0x1234, "iemmixer", "alarm")),
             Some(Unsupported)
@@ -478,7 +478,6 @@ mod tests {
             Some(window.hwnd())
         );
         assert_eq!(find_owned("iemmixer-session-end", me + 1).unwrap(), None);
-        assert!(!has_dialog(me).unwrap());
         post_command(window.hwnd(), 7).unwrap();
         // The posted command is dispatched (to the default procedure), and
         // a quit request ends the pump.
@@ -508,5 +507,63 @@ mod tests {
         drop(window);
         assert_eq!(find_owned("iemmixer-session-end", me).unwrap(), None);
         assert!(post_command(handle, 7).is_err());
+    }
+
+    /// Dialogs of our own (REAPER's evaluation notice at the first guard
+    /// start on the PC, #9 2026-09-28): the visible ones are listed by
+    /// title, a hidden one is not, and a destroyed one is gone. They are
+    /// created and read on this thread: the title read sends `WM_GETTEXT` to
+    /// a window of the calling process, and this thread's windows answer it
+    /// at once. No other test of the process creates a dialog.
+    #[cfg(windows)]
+    #[test]
+    fn the_visible_dialogs_of_a_process_are_listed_by_title() {
+        use windows_sys::Win32::Foundation::HWND;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, WS_POPUP, WS_VISIBLE,
+        };
+
+        use crate::win::wide;
+
+        let me = std::process::id();
+        assert_eq!(dialog_titles(me).unwrap(), Vec::<String>::new());
+        let class = wide(DIALOG_CLASS);
+        let create = |title: &str, style: u32| -> HWND {
+            let title = wide(title);
+            // SAFETY: the system's dialog class and a NUL-terminated title;
+            // no parent, so the window is top-level; destroyed below on
+            // this thread.
+            let hwnd = unsafe {
+                CreateWindowExW(
+                    0,
+                    class.as_ptr(),
+                    title.as_ptr(),
+                    style,
+                    0,
+                    0,
+                    0,
+                    0,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                )
+            };
+            assert!(!hwnd.is_null(), "{}", io::Error::last_os_error());
+            hwnd
+        };
+        let notice = create("About REAPER v0.00/test", WS_POPUP | WS_VISIBLE);
+        let prompt = create("Save changes? (test)", WS_POPUP | WS_VISIBLE);
+        let hidden = create("Hidden (test)", WS_POPUP);
+
+        let mut titles = dialog_titles(me).unwrap();
+        titles.sort();
+        assert_eq!(titles, ["About REAPER v0.00/test", "Save changes? (test)"]);
+
+        for hwnd in [notice, prompt, hidden] {
+            // SAFETY: our own windows, on the thread that created them.
+            assert_ne!(unsafe { DestroyWindow(hwnd) }, 0);
+        }
+        assert_eq!(dialog_titles(me).unwrap(), Vec::<String>::new());
     }
 }

@@ -528,7 +528,7 @@ fn event_plan_failures_follow_the_policy() {
     assert_eq!(texts(&g), ["AppStop: the app did not exit within 30 s"]);
     // A REAPER handover that fails alarms and goes on to the app.
     let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Dev));
-    pc.reaper.dialog = true;
+    pc.reaper.dialogs = vec!["Save changes?".into()];
     pc.reaper.heartbeat_advanced = false;
     assert_eq!(
         run_switch(&mut pc, &mut g, Mode::Dev, Mode::Event),
@@ -591,6 +591,102 @@ fn the_handover_reports_what_it_saw() {
     let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
     let r = handle(&mut pc, &mut g, Request::Event { dry_run: false }, 0);
     assert_eq!(r.detail, "event: done; tuning exit: exit: ok");
+}
+
+/// REAPER's evaluation notice as the first guard start on the PC saw it
+/// (#9, 2026-09-28): REAPER shows it at every start and runs normally with
+/// it open.
+const NOTICE: &str = "About REAPER v7.65/win64 rev 0a1b2c";
+
+/// What `iemmode status` gets: the view's reply, answered by the pipe.
+fn status_reply(g: &Guard) -> String {
+    match g.shared.route(&Request::Status) {
+        Route::Now(r) => r.detail,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn reapers_evaluation_notice_is_reported_and_never_an_alarm() {
+    let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
+    pc.reaper.dialogs = vec![NOTICE.into()];
+    let r = ask(&mut pc, &mut g, Request::Event { dry_run: false });
+    assert!(r.ok, "{r:?}");
+    assert_eq!(
+        r.detail,
+        r#"event: done; tuning exit: exit: ok; reaper_notice: "evaluation""#
+    );
+    assert!(g.alarms.all().is_empty(), "{:?}", texts(&g));
+    assert_eq!(
+        status_reply(&g),
+        r#"mode event; no bundle; reaper_notice: "evaluation""#
+    );
+    assert_eq!(
+        ask(&mut pc, &mut g, Request::Status).detail,
+        r#"mode event; no bundle; reaper_notice: "evaluation""#
+    );
+    // Any other dialog beside it fails the handover as before; the report
+    // still names the notice.
+    pc.reaper.dialogs.push("Save changes?".into());
+    let r = ask(&mut pc, &mut g, Request::Event { dry_run: false });
+    assert_eq!(texts(&g), ["ReaperHandover: a REAPER dialog is open"]);
+    assert!(
+        r.detail.contains(r#"; reaper_notice: "evaluation""#),
+        "{}",
+        r.detail
+    );
+    // Without it the report and the status do not name it.
+    pc.reaper.dialogs.clear();
+    let r = ask(&mut pc, &mut g, Request::Event { dry_run: false });
+    assert!(!r.detail.contains("reaper_notice"), "{}", r.detail);
+    assert!(
+        !status_reply(&g).contains("reaper_notice"),
+        "{}",
+        status_reply(&g)
+    );
+}
+
+#[test]
+fn the_status_names_the_notice_only_as_the_last_handover_saw_it() {
+    // A dev entry saves and quits REAPER: the notice goes with it.
+    let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
+    g.state.pins.current = Some(SHA.into());
+    pc.reaper.dialogs = vec![NOTICE.into()];
+    assert!(ask(&mut pc, &mut g, Request::Event { dry_run: false }).ok);
+    assert!(
+        status_reply(&g).contains("reaper_notice"),
+        "{}",
+        status_reply(&g)
+    );
+    pc.meters = vec![-60.0];
+    let r = ask(&mut pc, &mut g, dev());
+    assert!(r.ok, "{r:?}");
+    assert!(
+        !status_reply(&g).contains("reaper_notice"),
+        "{}",
+        status_reply(&g)
+    );
+    assert!(
+        !status_text(&g).contains("reaper_notice"),
+        "{}",
+        status_text(&g)
+    );
+    // A handover that cannot read REAPER does not repeat an old notice.
+    let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
+    pc.reaper.dialogs = vec![NOTICE.into()];
+    assert!(ask(&mut pc, &mut g, Request::Event { dry_run: false }).ok);
+    pc.fail(Call::ReaperFacts, "REAPER's windows: access denied");
+    let r = ask(&mut pc, &mut g, Request::Event { dry_run: false });
+    assert!(!r.detail.contains("reaper_notice"), "{}", r.detail);
+    assert_eq!(
+        texts(&g),
+        ["ReaperHandover: REAPER's windows: access denied"]
+    );
+    assert!(
+        !status_reply(&g).contains("reaper_notice"),
+        "{}",
+        status_reply(&g)
+    );
 }
 
 #[test]

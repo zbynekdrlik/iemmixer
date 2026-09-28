@@ -160,7 +160,7 @@ mod tests {
         ReaperFacts {
             tracks: Some(40),
             expected_tracks: 40,
-            dialog: false,
+            dialogs: Vec::new(),
             heartbeat_advanced: true,
             holds_module: true,
             peaks: vec![f64::NEG_INFINITY, -40.0],
@@ -213,7 +213,7 @@ mod tests {
             ),
             (
                 ReaperFacts {
-                    dialog: true,
+                    dialogs: titles(&["Save changes?"]),
                     ..good()
                 },
                 "a REAPER dialog is open",
@@ -243,7 +243,7 @@ mod tests {
         let f = ReaperFacts {
             tracks: Some(1),
             expected_tracks: 2,
-            dialog: true,
+            dialogs: titles(&[NOTICE, "REAPER"]),
             heartbeat_advanced: false,
             holds_module: false,
             peaks: vec![-3.0],
@@ -257,6 +257,125 @@ mod tests {
                 "REAPER does not hold the driver module".to_owned(),
             ])
         );
+    }
+
+    /// REAPER's evaluation notice as the first guard start on the PC saw it
+    /// (#9, 2026-09-28): REAPER shows it at every start and runs normally
+    /// with it open.
+    const NOTICE: &str = "About REAPER v7.65/win64 rev 0a1b2c";
+
+    fn titles(t: &[&str]) -> Vec<String> {
+        t.iter().map(|&s| s.to_owned()).collect()
+    }
+
+    #[test]
+    fn the_notice_is_known_by_reapers_own_title_and_named_in_one_way() {
+        assert_eq!(EVALUATION_NOTICE, "About REAPER");
+        assert_eq!(NOTICE_REPORT, r#"reaper_notice: "evaluation""#);
+    }
+
+    #[test]
+    fn no_dialog_is_clear() {
+        assert_eq!(
+            dialogs(&[]),
+            Dialogs {
+                blocking: Vec::new(),
+                notice: false
+            }
+        );
+    }
+
+    #[test]
+    fn the_evaluation_notice_alone_blocks_nothing_and_is_named() {
+        assert_eq!(
+            dialogs(&titles(&[NOTICE])),
+            Dialogs {
+                blocking: Vec::new(),
+                notice: true
+            }
+        );
+        // The bare prefix is the notice too; so are two of them (REAPER's
+        // Help > About shows the same window).
+        assert_eq!(
+            dialogs(&titles(&["About REAPER", NOTICE])),
+            Dialogs {
+                blocking: Vec::new(),
+                notice: true
+            }
+        );
+    }
+
+    #[test]
+    fn a_dialog_beside_the_notice_blocks_in_either_order() {
+        for t in [
+            titles(&["Save changes?", NOTICE]),
+            titles(&[NOTICE, "Save changes?"]),
+        ] {
+            assert_eq!(
+                dialogs(&t),
+                Dialogs {
+                    blocking: titles(&["Save changes?"]),
+                    notice: true
+                },
+                "{t:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_other_dialog_blocks() {
+        for t in [
+            "Save changes?",
+            "REAPER",
+            "ReaScript: error",
+            "",
+            // The words elsewhere than at the start, or in another case,
+            // are not the notice.
+            "Save changes? (About REAPER project)",
+            "REAPER - About REAPER",
+            " About REAPER v7.65/win64",
+            "about REAPER v7.65/win64",
+            "About Reaper v7.65/win64",
+        ] {
+            assert_eq!(
+                dialogs(&titles(&[t])),
+                Dialogs {
+                    blocking: titles(&[t]),
+                    notice: false
+                },
+                "{t:?}"
+            );
+        }
+        assert_eq!(
+            dialogs(&titles(&["ReaScript: error", "Save changes?"])),
+            Dialogs {
+                blocking: titles(&["ReaScript: error", "Save changes?"]),
+                notice: false
+            }
+        );
+    }
+
+    #[test]
+    fn the_notice_passes_the_handover_and_every_other_dialog_fails_it() {
+        let with = |t: &[&str]| ReaperFacts {
+            dialogs: titles(t),
+            ..good()
+        };
+        let open = || Err(vec!["a REAPER dialog is open".to_owned()]);
+        assert_eq!(reaper_handover(&with(&[])), Ok(Audio::Confirmed));
+        assert_eq!(reaper_handover(&with(&[NOTICE])), Ok(Audio::Confirmed));
+        assert_eq!(reaper_handover(&with(&[NOTICE, "Save changes?"])), open());
+        assert_eq!(reaper_handover(&with(&["Save changes?"])), open());
+        assert_eq!(
+            reaper_handover(&with(&["Save changes? (About REAPER project)"])),
+            open()
+        );
+        // The notice with a silent stage: still no failure, still unconfirmed.
+        let silent = ReaperFacts {
+            peaks: vec![f64::NEG_INFINITY],
+            ..with(&[NOTICE])
+        };
+        assert_eq!(reaper_handover(&silent), Ok(Audio::Unconfirmed));
     }
 
     fn clean() -> AppExit {
