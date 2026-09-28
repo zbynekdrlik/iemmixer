@@ -65,6 +65,15 @@ fn texts(g: &Guard) -> Vec<String> {
     g.alarms.iter().map(|a| a.text.clone()).collect()
 }
 
+/// A request sent after the one before it was answered: the pipe queues it
+/// with the switch generation of that moment (`Shared::route`). A literal
+/// generation after a switch began (a request, a retry of the watch) is a
+/// request queued before that switch, answered as during it (`stale`).
+fn ask(pc: &mut FakePc, g: &mut Guard, req: Request) -> Reply {
+    let epoch = g.shared.epoch();
+    handle(pc, g, req, epoch)
+}
+
 // ---- the plan's exact tests ----
 
 #[test]
@@ -674,16 +683,16 @@ fn interlock_refusals_retry_every_15_min_and_alarm_once() {
 fn ide_event_or_a_new_request_clears_the_retry() {
     let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Event));
     pc.interlock = (false, "activity".into());
-    handle(&mut pc, &mut g, dev(), 0);
+    ask(&mut pc, &mut g, dev());
     let due = g.state.interlock_retry.as_ref().unwrap().next_at;
     g.set_now(due);
     tick(&mut pc, &mut g, Instant::now());
     assert_eq!(g.state.interlock_retry.as_ref().unwrap().refusals, 2);
     // A new request starts counting again.
-    handle(&mut pc, &mut g, dev(), 0);
+    ask(&mut pc, &mut g, dev());
     assert_eq!(g.state.interlock_retry.as_ref().unwrap().refusals, 1);
     // "ide event" drops it.
-    let r = handle(&mut pc, &mut g, Request::Event { dry_run: false }, 0);
+    let r = ask(&mut pc, &mut g, Request::Event { dry_run: false });
     assert!(r.ok, "{r:?}");
     assert_eq!(g.state.interlock_retry, None);
     g.set_now(due + 10 * RETRY_S);
@@ -726,7 +735,7 @@ fn a_retry_that_enters_dev_is_not_tried_again() {
 fn a_retry_that_unwinds_or_may_no_longer_run_is_dropped() {
     let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Event));
     pc.interlock = (false, "activity on mic1".into());
-    handle(&mut pc, &mut g, dev(), 0);
+    ask(&mut pc, &mut g, dev());
     let due = g.state.interlock_retry.as_ref().unwrap().next_at;
     // Quiet at the retry, but the data refresh fails: back to event.
     pc.interlock = (true, "quiet".into());
@@ -756,14 +765,15 @@ fn a_retry_that_unwinds_or_may_no_longer_run_is_dropped() {
         trial: false,
         dry_run: false,
     };
-    assert!(!handle(&mut pc, &mut g, live, 0).ok);
+    assert!(!ask(&mut pc, &mut g, live).ok);
     let due = g.state.interlock_retry.as_ref().unwrap().next_at;
     let red = Request::Report {
         sha: SHA.into(),
         hil: "red".into(),
         detail: "loopback silent".into(),
     };
-    assert!(handle(&mut pc, &mut g, red, 0).ok);
+    let r = ask(&mut pc, &mut g, red);
+    assert!(r.ok, "{r:?}");
     assert!(g.state.interlock_retry.is_some());
     g.set_now(due);
     tick(&mut pc, &mut g, Instant::now());
@@ -824,7 +834,7 @@ fn stage_quiet_needs_every_peak_at_or_below_the_level() {
 fn force_skips_the_interlock() {
     let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
     g.state.pins.current = Some(SHA.into());
-    let r = handle(
+    let r = ask(
         &mut pc,
         &mut g,
         Request::Dev {
@@ -832,14 +842,14 @@ fn force_skips_the_interlock() {
             force: true,
             dry_run: false,
         },
-        0,
     );
     assert!(r.ok, "{r:?}");
     assert!(!pc.called(Call::ReaperMeters));
     // The flags end with the switch: the next one checks the stage again.
     pc.facts = band_up();
-    handle(&mut pc, &mut g, Request::Event { dry_run: false }, 0);
-    let r = handle(&mut pc, &mut g, dev(), 0);
+    let r = ask(&mut pc, &mut g, Request::Event { dry_run: false });
+    assert!(r.ok, "{r:?}");
+    let r = ask(&mut pc, &mut g, dev());
     assert!(!r.ok);
     assert!(pc.called(Call::ReaperMeters));
 }
@@ -1860,7 +1870,7 @@ fn a_rehearsal_that_finds_problems_says_so() {
     let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
     g.state.pins.current = Some(SHA.into());
     pc.pref_attempts = 1;
-    let r = handle(&mut pc, &mut g, Request::RehearseTeardown, 0);
+    let r = ask(&mut pc, &mut g, Request::RehearseTeardown);
     assert!(!r.ok);
     assert!(
         r.detail
@@ -1885,7 +1895,7 @@ fn a_rehearsal_that_finds_problems_says_so() {
     g.state.pins.current = Some(SHA.into());
     pc.fail(Call::TrayStop, "the tray did not quit within 10 s");
     pc.fail(Call::PrefCheck, "the registry is locked");
-    let r = handle(&mut pc, &mut g, Request::RehearseTeardown, 0);
+    let r = ask(&mut pc, &mut g, Request::RehearseTeardown);
     assert!(!r.ok);
     assert!(
         r.detail.starts_with(
@@ -1909,14 +1919,14 @@ fn a_rehearsal_that_finds_problems_says_so() {
     assert!(!pc.called(Call::ReaperStart) && !pc.called(Call::AppStart));
     assert_eq!(g.state.mode, Mode::Dev);
     // The flag ends with the rehearsal: a failed dev entry unwinds again.
-    let r = handle(&mut pc, &mut g, dev(), 0);
+    let r = ask(&mut pc, &mut g, dev());
     assert!(!r.ok);
     assert!(pc.called(Call::ReaperStart));
     // A healthy engine that does not release stops the rehearsal.
     let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
     pc.fail(Call::EngineStop, "no DriverReleased within 10 s");
     pc.health(Health::Healthy);
-    let r = handle(&mut pc, &mut g, Request::RehearseTeardown, 0);
+    let r = ask(&mut pc, &mut g, Request::RehearseTeardown);
     assert_eq!(
         (r.ok, r.detail.as_str()),
         (
@@ -1935,7 +1945,7 @@ fn a_rehearsal_that_finds_problems_says_so() {
     // A dead one too, asking the owner.
     let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
     pc.fail(Call::EngineStop, "refused");
-    let r = handle(&mut pc, &mut g, Request::RehearseTeardown, 0);
+    let r = ask(&mut pc, &mut g, Request::RehearseTeardown);
     assert!(!r.ok);
     assert_eq!(
         g.alarms.last().unwrap().text,
