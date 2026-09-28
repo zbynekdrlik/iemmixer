@@ -1,9 +1,8 @@
 //! The band-activity alarm while developing (program spec §4.2): peaks of the
 //! stage inputs above −50 dBFS for at least 120 s within the last 300 s turn
 //! it on; it shows a banner with "Back to REAPER" on engineer pages and
-//! pushes one notice to the engineer's devices (never to an alarm
-//! recipient). Pure: fed with instants and the loudest watched input peak of
-//! each meter frame.
+//! pushes one notice to the engineer's devices. Pure: fed with instants and
+//! the loudest watched input peak of each meter frame.
 
 use std::collections::VecDeque;
 use std::time::Instant;
