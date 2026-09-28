@@ -195,6 +195,13 @@ pub fn plan(from: Mode, to: Mode, f: &Facts) -> Vec<Step> {
             out.extend([
                 Step::TuningEnter,
                 Step::Data,
+                // REAPER's preferred buffer back (read back) right before the
+                // engine opens the card: an engine that ended while it held
+                // the card (a hard kill, a power loss) left 32, and a new one
+                // refuses the card unless it finds the original (#9
+                // 2026-09-28). REAPER has quit and our engine stopped here,
+                // so no open driver sees the write.
+                Step::PrefCheck,
                 Step::EngineStart,
                 Step::EngineArm,
                 Step::ServerStart,
@@ -243,6 +250,8 @@ pub enum OnError {
 }
 
 /// What a failed step means. `health` is read only after a failed `EngineStop`.
+/// Every failure of a dev or live entry unwinds, its `PrefCheck` before the
+/// engine included; `on_pref_fail` is the event plan's rule only.
 pub fn on_error(to: Mode, step: Step, health: Option<Health>, pref_fail: PrefFail) -> OnError {
     if to != Mode::Event {
         return OnError::Unwind;
