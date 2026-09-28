@@ -1,9 +1,36 @@
+import type { Locator } from "@playwright/test";
 import { test, expect, Page } from "./support/fixtures";
 import { openMixer, strip } from "./support/session";
 
 // Presets (F13) and mix history (F14) of member6 (own channel mic7): the
 // server captures the mix, keeps it in the band files and loads it as a
 // 50 ms ramp.
+//
+// member6's history is shared by these tests (the preset loads take the
+// day's auto-snapshot): a test counts from the server's list and deletes the
+// entries it saves, by the id (timestamp) the server answered.
+
+const HISTORY = "/api/snapshots/member6";
+
+type Entry = { timestamp: number; label: string; pinned: boolean };
+
+/** member6's history as the server lists it, newest first. */
+async function listed(page: Page, headers: Record<string, string>): Promise<Entry[]> {
+  const r = await page.request.get(HISTORY, { headers });
+  expect(r.status()).toBe(200);
+  return (await r.json()) as Entry[];
+}
+
+/** Clicks "Uložiť teraz" and returns the id the server stored the entry under. */
+async function saveNow(page: Page, history: Locator): Promise<number> {
+  const posted = page.waitForResponse(
+    (r) => r.request().method() === "POST" && new URL(r.url()).pathname === HISTORY,
+  );
+  await history.locator(".snapshot-save-btn").click();
+  const r = await posted;
+  expect(r.status()).toBe(201);
+  return ((await r.json()) as { timestamp: number }).timestamp;
+}
 
 async function openPresets(page: Page) {
   await page.locator(".toolbar-btn", { hasText: "Presets" }).click();
@@ -97,6 +124,7 @@ test.describe("Presets (F13)", () => {
     const one = `/api/presets/member6/${encodeURIComponent(probe)}`;
     const created = await page.request.post("/api/presets/member6", { headers, data: { name: probe } });
     expect(created.status()).toBe(201);
+    let saved: number | undefined;
     try {
       const updatedAt = async (): Promise<number> => {
         const r = await page.request.get(one, { headers });
@@ -138,14 +166,12 @@ test.describe("Presets (F13)", () => {
 
       // History: Slovak title, buttons and a row's verbs.
       await modal.locator(".modal-close").click();
-      const listed = await page.request.get("/api/snapshots/member6", { headers });
-      expect(listed.status()).toBe(200);
-      const before = ((await listed.json()) as unknown[]).length;
+      const before = (await listed(page, headers)).length;
       await page.locator(".toolbar-btn", { hasText: "History" }).click();
       const history = page.locator(".modal-overlay.visible .snapshot-modal");
       await expect(history.locator("h2")).toHaveText("História mixu");
       await expect(history.locator(".snapshot-save-btn")).toHaveText("Uložiť teraz");
-      await history.locator(".snapshot-save-btn").click();
+      saved = await saveNow(page, history);
       await expect(history.locator(".snapshot-item")).toHaveCount(before + 1);
       const first = history.locator(".snapshot-item").first();
       await expect(first.locator(".restore-btn")).toHaveText("Obnoviť");
@@ -154,27 +180,51 @@ test.describe("Presets (F13)", () => {
       await expect(first.locator(".snapshot-pin-btn")).toHaveText(/^(Pripnúť|Odopnúť)$/);
     } finally {
       await page.request.delete(one, { headers });
+      if (saved !== undefined) await page.request.delete(`${HISTORY}/${saved}`, { headers });
     }
+    expect((await listed(page, headers)).some((e) => e.timestamp === saved)).toBe(false);
   });
 });
 
 test.describe("History (F14)", () => {
+  // The modal fetches the list when it opens, so right after its title shows
+  // the list can still be empty (run 36371298924 counted 0 of 2): the count
+  // comes from the server, and the list must show it before the save.
   test("save now, pin, restore", async ({ page }) => {
-    await openMixer(page, "member6");
+    const auth = await openMixer(page, "member6");
+    const headers = { Authorization: `Bearer ${auth.token}` };
+    const before = (await listed(page, headers)).length;
     await page.locator(".toolbar-btn", { hasText: "History" }).click();
     const modal = page.locator(".modal-overlay.visible .snapshot-modal");
     await expect(modal.locator("h2")).toHaveText("História mixu");
-    const before = await modal.locator(".snapshot-item").count();
-    await modal.locator(".snapshot-save-btn").click();
-    await expect(modal.locator(".snapshot-item")).toHaveCount(before + 1);
-    const manual = modal.locator(".snapshot-item", { hasText: "manual" }).first();
-    await expect(manual).toBeVisible();
+    await expect(modal.locator(".snapshot-item")).toHaveCount(before);
 
-    await manual.locator(".snapshot-pin-btn").click();
-    await expect(modal.locator(".snapshot-item.pinned").first()).toBeVisible();
-    await expect(modal.locator(".snapshot-item.pinned .snapshot-pin-btn").first()).toHaveText("Odopnúť");
+    const saved = await saveNow(page, modal);
+    try {
+      await expect(modal.locator(".snapshot-item")).toHaveCount(before + 1);
+      const entry = async () => (await listed(page, headers)).find((e) => e.timestamp === saved);
+      expect(await entry()).toMatchObject({ label: "manual", pinned: false });
 
-    await modal.locator(".snapshot-item.pinned .restore-btn").first().click();
-    await expect(page.locator(".modal-overlay.visible")).toHaveCount(0);
+      // Newest first: the entry just saved leads the list.
+      const own = modal.locator(".snapshot-item").first();
+      await expect(own.locator(".snapshot-type")).toHaveText("manual");
+      await own.locator(".snapshot-pin-btn").click();
+      await expect(own).toHaveClass(/pinned/);
+      await expect(own.locator(".snapshot-pin-btn")).toHaveText("Odopnúť");
+      expect(await entry()).toMatchObject({ pinned: true });
+
+      // Restore loads this entry (its id in the request) and closes the modal.
+      const restored = page.waitForResponse(
+        (r) =>
+          r.request().method() === "POST" &&
+          new URL(r.url()).pathname === `${HISTORY}/${saved}/restore`,
+      );
+      await own.locator(".restore-btn").click();
+      expect((await restored).status()).toBe(200);
+      await expect(page.locator(".modal-overlay.visible")).toHaveCount(0);
+    } finally {
+      await page.request.delete(`${HISTORY}/${saved}`, { headers });
+    }
+    expect((await listed(page, headers)).some((e) => e.timestamp === saved)).toBe(false);
   });
 });
