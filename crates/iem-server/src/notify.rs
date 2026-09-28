@@ -350,6 +350,35 @@ mod tests {
         assert_eq!(paths(&seen), ["/202"]);
     }
 
+    /// A notice never creates the runtime secrets: before the first band
+    /// import the site has none, and a JWT or VAPID key made here would stop
+    /// `iem-migrate band` from taking the predecessor's (P9; found on the
+    /// PC on 2026-09-28, when the guard's first alarm ran this).
+    #[tokio::test]
+    async fn a_notice_never_creates_the_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let site = dir.path().join("iemmixer.toml");
+        std::fs::write(&site, "port = 8080\n").unwrap();
+        let secrets = dir.path().join(crate::secrets::SECRETS_DIR);
+        // No recipient: nothing to send, nothing read or written.
+        assert_eq!(run_cli(&site, Audience::Alarm, "T", "B").await.unwrap(), 0);
+        assert!(!secrets.exists(), "no recipient: no secret made");
+        // A recipient but no VAPID key yet: an error, still nothing made.
+        let sub = PushSubscription {
+            endpoint: "https://push.example/1".into(),
+            p256dh: "k".into(),
+            auth: "a".into(),
+        };
+        std::fs::write(
+            dir.path().join(ALARM_SUBSCRIPTIONS_FILE),
+            serde_json::to_string(&vec![sub]).unwrap(),
+        )
+        .unwrap();
+        let err = run_cli(&site, Audience::Alarm, "T", "B").await.unwrap_err();
+        assert!(err.to_string().contains("vapid"), "{err}");
+        assert!(!secrets.exists(), "a missing key is not made by a notice");
+    }
+
     #[test]
     fn the_count_is_the_number_of_alarm_recipients() {
         let dir = tempfile::tempdir().unwrap();
