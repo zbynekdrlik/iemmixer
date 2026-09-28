@@ -2,7 +2,9 @@
 //! I7; S3 design note §3.2, §3.4; #20 design note §3, §6): one callback runs
 //! the fixed pipeline — the inputs, then every mix in declaration order (its
 //! inputs directly or through their group's strip, the mixes it hears, then
-//! EQ → limiter → volume/mute → Q1 safety → clamp → TX).
+//! EQ → limiter → volume/mute → Q1 safety → clamp → TX), then HIL's spare
+//! outputs after the topology's TX (S6: the HIL test signal's sine while one
+//! runs, zero otherwise).
 //!
 //! A block is cut into segments of at most [`SEG`] samples at every command
 //! timestamp and test-signal end, and every ramp steps per sample, so the
@@ -24,7 +26,7 @@ use iem_engine_proto::{MixState, db_to_lin};
 use iem_limiter_mga::{DISABLE_MS, Limiter, Mga, Sliders};
 use rtrb::{Consumer, Producer, RingBuffer};
 
-use crate::cmd::{RtCmd, RtOp, TxMask};
+use crate::cmd::{HilMask, MAX_HIL, RtCmd, RtOp};
 use crate::core::reconcile;
 use crate::params::{eq_params, input_params};
 use crate::topology::Topology;
@@ -62,8 +64,9 @@ impl Default for Options {
 }
 
 /// One meter frame: peaks since the previous frame (inputs after their mute,
-/// mixes after volume and mute, group strips after their fader, mix-major),
-/// limiter GR in dB and X14 active samples per mix.
+/// mixes after volume and mute, group strips after their fader, mix-major,
+/// HIL's spare outputs as written), limiter GR in dB and X14 active samples
+/// per mix.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MeterFrame {
     pub seq: u64,
@@ -73,6 +76,9 @@ pub struct MeterFrame {
     pub gr_db: Vec<f64>,
     pub active: Vec<u64>,
     pub trips: u64,
+    /// HIL's spare outputs (S6), in the order the engine opened them: what
+    /// HIL v1 reads to prove the signal reached them, and left them.
+    pub hil: Vec<f64>,
 }
 
 /// Counters the control loop reads.
@@ -339,22 +345,23 @@ struct TestRt {
     fade: Ramp,
     /// Sample time after which it is silent and the caps lift.
     end: u64,
-    /// The HIL signal's outputs: until `end` every other output is zero.
-    mask: Option<TxMask>,
+    /// The HIL signal's spare outputs, by HIL slot: until `end` they carry
+    /// the sine and every mix's TX is zero.
+    mask: Option<HilMask>,
 }
 
 impl TestRt {
-    fn render(&mut self, l: &mut [f64], r: &mut [f64]) {
-        for (a, b) in l.iter_mut().zip(r.iter_mut()) {
+    /// The sine of the next `out.len()` samples: the fade-in, the level,
+    /// the fade-out once the TTL ran out.
+    fn render(&mut self, out: &mut [f64]) {
+        for y in out.iter_mut() {
             if self.left == 0 {
                 self.fade.set(0.0);
             } else {
                 self.left -= 1;
             }
-            let x = self.amp * self.fade.tick() * (core::f64::consts::TAU * self.phase).sin();
+            *y = self.amp * self.fade.tick() * (core::f64::consts::TAU * self.phase).sin();
             self.phase = (self.phase + self.inc).fract();
-            *a = x;
-            *b = x;
         }
     }
 }
@@ -382,6 +389,12 @@ pub struct Processor {
     listen: [Option<usize>; 2],
     listen_lim: Limiter,
     test: Option<TestRt>,
+    /// The test sine of the current segment: the input it replaces and HIL's
+    /// spare outputs read it.
+    test_buf: Vec<f64>,
+    /// HIL's spare outputs (S6), the engine's outputs after the topology's
+    /// TX: their peaks since the last meter frame.
+    hil_peaks: Vec<PeakMeter<1>>,
     fade: Ramp,
     /// The fade-in's length in samples; 0 starts at full level.
     fade_in: u32,
@@ -404,6 +417,21 @@ impl Processor {
         counters: &[u64],
         opts: Options,
     ) -> (Self, RtHandles) {
+        Self::with_hil(topo, state, counters, opts, 0)
+    }
+
+    /// [`Processor::new`] with `hil` of HIL's spare card outputs (S6, at
+    /// most [`MAX_HIL`]) as the engine's outputs after the topology's TX:
+    /// they carry the HIL test signal's sine while one runs and zero
+    /// otherwise (A1).
+    pub fn with_hil(
+        topo: Arc<Topology>,
+        state: &MixState,
+        counters: &[u64],
+        opts: Options,
+        hil: usize,
+    ) -> (Self, RtHandles) {
+        let hil = hil.min(MAX_HIL);
         let sr = f64::from(SAMPLE_RATE);
         let r = reconcile(&topo, state).0;
         let inputs = r
@@ -465,6 +493,7 @@ impl Processor {
             gr_db: vec![0.0; topo.mixes.len()],
             active: vec![0; topo.mixes.len()],
             trips: 0,
+            hil: vec![0.0; hil],
         };
         let (meter_in, meters) = triple_buffer::triple_buffer(&frame);
         let (cmd_tx, cmds) = RingBuffer::new(CMD_RING);
@@ -505,6 +534,8 @@ impl Processor {
             listen: [None, None],
             listen_lim: Limiter::new(sr, 0.0),
             test: None,
+            test_buf: vec![0.0; SEG],
+            hil_peaks: vec![PeakMeter::new(); hil],
             fade,
             fade_in,
             armed: !opts.hold,
@@ -528,6 +559,11 @@ impl Processor {
     /// Samples rendered so far.
     pub fn time(&self) -> u64 {
         self.time
+    }
+
+    /// The engine's outputs: the topology's TX, then HIL's spare outputs.
+    pub fn outputs(&self) -> usize {
+        self.topo.tx.len() + self.hil_peaks.len()
     }
 
     /// X13: every mix hears every input, so a test signal caps every TX.
@@ -669,9 +705,10 @@ impl Processor {
     }
 
     /// X13: a sine replaces input `i` for `ttl` samples and then fades out;
-    /// every TX is capped meanwhile. With `mask` (the HIL signal) only those
-    /// outputs sound until it ended.
-    fn start_test(&mut self, i: u16, hz: f64, amp: f64, ttl: u64, mask: Option<TxMask>) {
+    /// every TX is capped meanwhile. With `mask` (the HIL signal) the sine
+    /// sounds only on those spare outputs until it ended, and every mix's TX
+    /// is zero.
+    fn start_test(&mut self, i: u16, hz: f64, amp: f64, ttl: u64, mask: Option<HilMask>) {
         let len = samples(FADE_MS, self.sr);
         let mut fade = Ramp::new(0.0, len);
         fade.set(1.0);
@@ -773,8 +810,10 @@ impl Processor {
                 node.eq.reset();
                 tripped = true;
             }
-            if let Some(t) = self.test.as_mut().filter(|t| t.input == i) {
-                t.render(l, r);
+            if self.test.as_ref().is_some_and(|t| t.input == i) {
+                let sine = self.test_buf.get(..n).unwrap_or_default();
+                copy(l, sine);
+                copy(r, sine);
             }
             let mix = &mut node.proc_mix;
             let dry = !mix.is_moving() && mix.value() == 0.0;
@@ -840,8 +879,9 @@ impl Processor {
             test,
             ..
         } = self;
-        // The HIL signal's outputs; every other one is zero while it runs.
-        let mask = test.as_ref().and_then(|t| t.mask.as_ref());
+        // While a HIL signal runs no mix's TX carries anything: it sounds
+        // only on HIL's spare outputs (`render_hil`), never to a band member.
+        let hil = test.as_ref().is_some_and(|t| t.mask.is_some());
         let heard_from = topo.inputs.len();
         let mut trips = 0;
         for (m, spec) in topo.mixes.iter().enumerate() {
@@ -944,7 +984,7 @@ impl Processor {
                     continue;
                 };
                 if let Some(out) = block.output(ch).get_mut(off..off + n) {
-                    if mask.is_some_and(|m| !m.get(ch).copied().unwrap_or(false)) {
+                    if hil {
                         out.fill(0.0);
                     } else {
                         copy(out, src);
@@ -958,6 +998,30 @@ impl Processor {
         }
     }
 
+    /// HIL's spare outputs after the topology's TX (S6): while a HIL signal
+    /// runs, the masked ones carry its sine, capped at the test-signal level
+    /// and faded like every output; otherwise, and the others, zero (A1).
+    /// Their peaks go to the meter frame.
+    fn render_hil(&mut self, block: &mut Block<'_>, off: usize, n: usize) {
+        let first = self.topo.tx.len();
+        let mask = self.test.as_ref().and_then(|t| t.mask.as_ref());
+        let sine = self.test_buf.get(..n).unwrap_or_default();
+        let fade = self.fade_buf.get(..n).unwrap_or_default();
+        for (k, peak) in self.hil_peaks.iter_mut().enumerate() {
+            let Some(out) = block.output(first + k).get_mut(off..off + n) else {
+                continue;
+            };
+            if mask.is_some_and(|m| m.get(k).copied().unwrap_or(false)) {
+                for ((y, s), f) in out.iter_mut().zip(sine).zip(fade) {
+                    *y = s.clamp(-TEST_CAP, TEST_CAP) * f;
+                }
+            } else {
+                out.fill(0.0);
+            }
+            peak.observe([&*out]);
+        }
+    }
+
     fn render(&mut self, block: &mut Block<'_>, off: usize, n: usize) {
         if self.test.as_ref().is_some_and(|t| t.end <= self.time) {
             self.test = None;
@@ -967,8 +1031,13 @@ impl Processor {
         for f in fade.iter_mut() {
             *f = self.fade.tick();
         }
+        // The test sine of this segment, before the input it replaces (X13).
+        if let Some(t) = self.test.as_mut() {
+            t.render(self.test_buf.get_mut(..n).unwrap_or_default());
+        }
         self.render_inputs(block, off, n);
         self.render_mixes(block, off, n);
+        self.render_hil(block, off, n);
         // After `FadeOut` the fade's target is 0: at rest it is silent.
         if self.fading_out && !self.fade.is_moving() {
             self.status.faded_out.store(true, Ordering::Release);
@@ -999,6 +1068,10 @@ impl Processor {
             .zip(self.mixes.iter_mut().flat_map(|mix| mix.groups.iter_mut()))
         {
             *d = strip.peak.take();
+        }
+        for (d, peak) in f.hil.iter_mut().zip(self.hil_peaks.iter_mut()) {
+            let [p] = peak.take();
+            *d = p;
         }
         self.meter_in.publish();
     }

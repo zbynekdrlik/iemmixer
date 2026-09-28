@@ -30,7 +30,7 @@ use crate::persist::{Source, Store, decode};
 use crate::pipe::{Conn, Framer, control_name, listen, media_name, read_loop};
 use crate::rt::{FADE_IN_MS, Options, Processor, RtHandles};
 use crate::site::{self, Card, SiteError, load, parse, parse_card, parse_hil_tx, parse_stage};
-use crate::topology::compile;
+use crate::topology::{Topology, compile};
 
 /// Largest block the engine accepts.
 pub const MAX_BLOCK: usize = 4096;
@@ -443,6 +443,7 @@ pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
     if card.is_some() {
         return Err(EngineError::Usage(ASIO_ON_WINDOWS.to_owned()));
     }
+    let hil = run_hil(cfg.flags, &text, &topo)?;
     // Crash dialogs off, the RT panic hook and the SEH filter, priority and
     // power throttling, before the card opens (S6 design note §3).
     #[cfg(windows)]
@@ -457,6 +458,9 @@ pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
         topo.mixes.len(),
         topo.hash
     );
+    if !hil.is_empty() {
+        info!("HIL's spare card outputs {hil:?} after the topology's TX");
+    }
     let store = Store::open(&cfg.state_dir)?;
     let loaded = store.load(&topo);
     for (path, why) in &loaded.rejected {
@@ -493,8 +497,9 @@ pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
         &loaded.persisted.state,
         loaded.persisted.rev,
         cfg.flags,
-    );
-    let (processor, handles) = Processor::new(
+    )
+    .with_hil(hil.clone());
+    let (processor, handles) = Processor::with_hil(
         Arc::clone(&topo),
         &loaded.persisted.state,
         &counters,
@@ -502,7 +507,9 @@ pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
             fade_in_ms: FADE_IN_MS,
             hold: cfg.hold,
         },
+        hil.len(),
     );
+    let outputs = processor.outputs();
     let RtHandles {
         cmds,
         meters,
@@ -519,7 +526,7 @@ pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
                     sample_rate: SAMPLE_RATE,
                     block: cfg.block,
                     inputs: topo.rx.len(),
-                    outputs: topo.tx.len(),
+                    outputs,
                     signal: cfg.signal,
                 },
                 processor,
@@ -532,7 +539,7 @@ pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
             (driver, cfg.block)
         }
         #[cfg(windows)]
-        Some(card) => crate::asio::start(&card, &topo, processor)?,
+        Some(card) => crate::asio::start(&card, &topo, &hil, processor)?,
         #[cfg(not(windows))]
         Some(_) => return Err(EngineError::Usage(ASIO_ON_WINDOWS.to_owned())),
     };
@@ -597,20 +604,29 @@ pub struct SiteSummary {
     pub card: bool,
 }
 
+/// HIL's spare outputs for `run` (S6): the site's `[guard] hil_tx`, checked
+/// by `Topology::hil_outputs`, with the test-signal flag only. Without it
+/// no HIL signal can start, so a live engine never reads the key and opens
+/// no card output outside the topology.
+fn run_hil(flags: Flags, text: &str, topo: &Topology) -> Result<Vec<u16>, SiteError> {
+    if !flags.test_signal {
+        return Ok(Vec::new());
+    }
+    topo.hil_outputs(&parse_hil_tx(text)?)
+}
+
 /// Loads and compiles a site, checks its `[card]` table, the stage the
 /// interlock listens to (every `[activity] inputs` id is an input) and
-/// HIL's card outputs (every `[guard] hil_tx` channel is a TX channel of the
-/// topology within the first `MAX_TX`, as `HilTestSignal` masks them).
+/// HIL's spare outputs (`[guard] hil_tx`: card channels within the card's
+/// map that no mix uses, `Topology::hil_outputs`).
 pub fn check_site(path: &Path) -> Result<SiteSummary, EngineError> {
     let text = site::read(path)?;
     let topo = compile(&parse(&text)?)?;
     let card = parse_card(&text)?;
     interlock::stage_channels(&topo, &parse_stage(&text)?)?;
-    // HIL's card outputs must be TX channels the engine can mask (S6).
-    let hil_tx = parse_hil_tx(&text)?;
-    if !hil_tx.is_empty() {
-        crate::core::hil_tx_mask(&topo.tx, &hil_tx).map_err(|e| SiteError::HilTx(e.msg))?;
-    }
+    // The HIL signal goes only to spare outputs, never to a band member
+    // (the owner's decision on #9 of 2026-09-28).
+    topo.hil_outputs(&parse_hil_tx(&text)?)?;
     Ok(SiteSummary {
         topology: topo.hash,
         inputs: topo.inputs.len(),

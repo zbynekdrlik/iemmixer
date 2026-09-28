@@ -15,6 +15,7 @@ use iem_engine_proto::{
 use sha2::{Digest, Sha256};
 
 use crate::SAMPLE_RATE;
+use crate::cmd::MAX_HIL;
 use crate::site::{Site, SiteError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,6 +58,9 @@ pub struct Topology {
     pub rx: Vec<u16>,
     /// Card TX channels in the order the backend expects them.
     pub tx: Vec<u16>,
+    /// The card's channel map (`[engine] channels`): RX and TX channels are
+    /// 1…=channels.
+    pub channels: u16,
     pub engineer: usize,
     pub hash: String,
     input_index: HashMap<InputId, usize>,
@@ -239,6 +243,7 @@ pub fn compile(site: &Site) -> Result<Topology, SiteError> {
         direct,
         rx,
         tx,
+        channels: site.channels,
         engineer,
         hash: String::new(),
     };
@@ -280,6 +285,57 @@ impl Topology {
                 Some(self.inputs.len() + k)
             }
         }
+    }
+
+    /// The mix whose TX is card channel `ch`, if any.
+    pub fn mix_on_tx(&self, ch: u16) -> Option<&MixNode> {
+        let slot = self.tx.iter().position(|&c| c == ch)?;
+        self.mixes.iter().find(|m| m.tx.contains(&Some(slot)))
+    }
+
+    /// Why card channel `ch` may not carry the HIL signal because a mix
+    /// sends on it (S6; the owner's decision on #9 of 2026-09-28: the HIL
+    /// signal never reaches a channel a band member hears).
+    pub fn mix_tx_refusal(&self, ch: u16) -> Option<String> {
+        self.mix_on_tx(ch).map(|m| {
+            format!(
+                "card output {ch} is mix {}'s TX: the HIL signal goes only to spare outputs",
+                m.id
+            )
+        })
+    }
+
+    /// HIL's spare card outputs (`[guard] hil_tx`; S6 design note §4, the
+    /// owner's decision on #9 of 2026-09-28): card channels within the
+    /// card's map that no mix uses, each named once, at most [`MAX_HIL`].
+    /// `run` opens them after the topology's TX under the test-signal flag;
+    /// `check-site` refuses a site whose `hil_tx` breaks the rule.
+    pub fn hil_outputs(&self, hil_tx: &[u16]) -> Result<Vec<u16>, SiteError> {
+        if hil_tx.len() > MAX_HIL {
+            return Err(SiteError::HilTx(format!(
+                "{} card outputs: at most {MAX_HIL}",
+                hil_tx.len()
+            )));
+        }
+        let mut outputs = Vec::with_capacity(hil_tx.len());
+        for &ch in hil_tx {
+            if ch == 0 || ch > self.channels {
+                return Err(SiteError::HilTx(format!(
+                    "card output {ch} is outside the card's {} outputs",
+                    self.channels
+                )));
+            }
+            if let Some(why) = self.mix_tx_refusal(ch) {
+                return Err(SiteError::HilTx(why));
+            }
+            if outputs.contains(&ch) {
+                return Err(SiteError::HilTx(format!(
+                    "card output {ch} is listed twice"
+                )));
+            }
+            outputs.push(ch);
+        }
+        Ok(outputs)
     }
 
     /// The source of level slot `k` in mix `m`.

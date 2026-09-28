@@ -104,10 +104,12 @@ pub enum Cmd {
     Arm,
     /// The HIL test signal (S6 design note §4, §7): the test signal on
     /// `input` (under the test-signal flag, capped like `StartTestSignal`;
-    /// `dbfs` above the cap is refused), and while it runs only the card
-    /// outputs `card_tx` (TX channels of the site) carry sound; every other
-    /// output of the engine stays zero. The mixes render as usual, so their
-    /// meters show the routing. Supervisor only.
+    /// `dbfs` above the cap is refused), whose sine, while it runs, sounds
+    /// only on the card outputs `card_tx`: spare outputs no mix uses (the
+    /// site's `[guard] hil_tx`, which the engine opens under the flag); a
+    /// mix's TX is refused, so it never reaches a band member. Every mix's
+    /// TX stays zero meanwhile; the mixes render as usual, so their meters
+    /// show the routing. Supervisor only.
     HilTestSignal {
         input: InputId,
         hz: f64,
