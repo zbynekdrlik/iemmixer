@@ -978,9 +978,11 @@ mod tests {
     /// topology (`[guard] hil_tx`; the owner's decision on #9 of
     /// 2026-09-28): the D5(b) loopback pair or an unused TX, never a channel
     /// a band member hears. check-site, so `install-site` (F30), takes card
-    /// outputs within the card's channels that no mix uses and refuses a
-    /// mix's TX, a channel outside the card, one named twice and more than
-    /// a HIL mask holds, instead of every HIL test signal failing later.
+    /// outputs from 1 that no mix uses, above `[engine] channels` too (the
+    /// highest channel the topology uses, not the card's output count: the
+    /// card's own count is checked when the stream opens), and refuses a
+    /// mix's TX, channel 0, one named twice and more than a HIL mask holds,
+    /// instead of every HIL test signal failing later.
     #[test]
     fn check_site_takes_spare_hil_outputs_and_refuses_a_mixs_tx() {
         let dir = tempfile::tempdir().unwrap();
@@ -990,9 +992,10 @@ mod tests {
             })
         };
         // The test site's pair (94/95), TX 89/90 between the members and the
-        // engineer, the card's first and last channels, none at all.
+        // engineer, the map's first and last channels, channels above
+        // `[engine] channels` (160), none at all.
         assert!(check_site(&crate::test_support::test_site_path()).is_ok());
-        for spare in ["[89, 90]", "[1, 160]", "[]"] {
+        for spare in ["[89, 90]", "[1, 160]", "[161, 500]", "[]"] {
             assert!(check_site(&with("spare.toml", spare)).is_ok(), "{spare}");
         }
         let mix_tx = |ch: u16, mix: &str| {
@@ -1004,12 +1007,8 @@ mod tests {
             ("[92, 94]", mix_tx(92, "engineer")),
             ("[93]", mix_tx(93, "translator")),
             (
-                "[161]",
-                "card output 161 is outside the card's 160 outputs".to_owned(),
-            ),
-            (
                 "[0]",
-                "card output 0 is outside the card's 160 outputs".to_owned(),
+                "card output 0: card channels count from 1".to_owned(),
             ),
             ("[94, 95, 94]", "card output 94 is listed twice".to_owned()),
             (

@@ -496,7 +496,6 @@ mod tests {
     #[test]
     fn every_tx_channel_names_its_mix() {
         let t = test_site();
-        assert_eq!(t.channels, 160);
         let on = |ch: u16| t.mix_on_tx(ch).map(|m| m.id.0.as_str());
         for (ch, id) in [
             (71, "member1"),
@@ -515,14 +514,19 @@ mod tests {
     }
 
     /// HIL's spare outputs (`[guard] hil_tx`; the owner's decision on #9 of
-    /// 2026-09-28): card channels within the card's map that no mix uses,
-    /// each once, at most a HIL mask's worth, so the HIL signal never
-    /// reaches a band member.
+    /// 2026-09-28): card channels from 1 that no mix uses, each once, at
+    /// most a HIL mask's worth, so the HIL signal never reaches a band
+    /// member. `[engine] channels` is no bound: it is the highest channel
+    /// the topology uses, not the card's output count, and the D5(b) pair
+    /// may lie above it; the card's own count is checked when the stream
+    /// opens (`ChannelMap`, exit 3).
     #[test]
     fn hil_outputs_are_spare_card_channels() {
         let t = test_site();
         assert_eq!(t.hil_outputs(&[94, 95]), Ok(vec![94, 95]));
         assert_eq!(t.hil_outputs(&[160, 1, 89]), Ok(vec![160, 1, 89]));
+        assert_eq!(t.hil_outputs(&[161, 500]), Ok(vec![161, 500]));
+        assert_eq!(t.hil_outputs(&[u16::MAX]), Ok(vec![u16::MAX]));
         assert_eq!(t.hil_outputs(&[]), Ok(Vec::new()));
         let eight: Vec<u16> = (94..102).collect();
         assert_eq!(t.hil_outputs(&eight), Ok(eight.clone()));
@@ -539,12 +543,8 @@ mod tests {
             "card output 93 is mix translator's TX: the HIL signal goes only to spare outputs"
         );
         assert_eq!(
-            refused(&[161]),
-            "card output 161 is outside the card's 160 outputs"
-        );
-        assert_eq!(
-            refused(&[0, 94]),
-            "card output 0 is outside the card's 160 outputs"
+            refused(&[94, 0]),
+            "card output 0: card channels count from 1"
         );
         assert_eq!(refused(&[95, 94, 95]), "card output 95 is listed twice");
         let nine: Vec<u16> = (94..103).collect();
