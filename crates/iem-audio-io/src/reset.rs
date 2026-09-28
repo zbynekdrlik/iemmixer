@@ -122,6 +122,68 @@ mod tests {
         assert_eq!(b.used(), 5);
     }
 
+    /// What the owner thread logs with every reopen and with an over-budget
+    /// fault (#9 2026-09-28).
+    #[test]
+    fn the_budget_names_its_numbers() {
+        let t0 = Instant::now();
+        let mut b = ResetBudget::default();
+        let fresh = BudgetState {
+            used: 0,
+            per_process: 3,
+            recent: 0,
+            per_window: 1,
+            window: secs(300),
+        };
+        assert_eq!(b.state(), fresh);
+        assert_eq!(
+            fresh.to_string(),
+            "reopens 0 of 3 per process, 0 of 1 within 300 s"
+        );
+        assert_eq!(b.ask(t0), Reopen);
+        assert_eq!(
+            b.state(),
+            BudgetState {
+                used: 1,
+                recent: 1,
+                ..fresh
+            }
+        );
+        // Refused: nothing more is counted.
+        assert_eq!(b.ask(t0 + secs(1)), Fault);
+        assert_eq!(
+            b.state().to_string(),
+            "reopens 1 of 3 per process, 1 of 1 within 300 s"
+        );
+        // The first has left the window at the next ask.
+        assert_eq!(b.ask(t0 + secs(300)), Reopen);
+        assert_eq!(
+            b.state(),
+            BudgetState {
+                used: 2,
+                recent: 1,
+                ..fresh
+            }
+        );
+        let mut b = ResetBudget::new(secs(10), 2, 5);
+        assert_eq!([b.ask(t0), b.ask(t0 + secs(1))], [Reopen; 2]);
+        assert_eq!(
+            b.state().to_string(),
+            "reopens 2 of 5 per process, 2 of 2 within 10 s"
+        );
+        assert_eq!(b.ask(t0 + secs(12)), Reopen);
+        assert_eq!(
+            b.state(),
+            BudgetState {
+                used: 3,
+                per_process: 5,
+                recent: 1,
+                per_window: 2,
+                window: secs(10)
+            }
+        );
+    }
+
     #[test]
     fn a_stall_is_two_seconds_without_a_callback_while_running() {
         assert_eq!(STALL, secs(2));

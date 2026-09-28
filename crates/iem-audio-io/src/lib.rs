@@ -46,6 +46,7 @@ use core::ops::Range;
 pub mod asio;
 pub mod channels;
 pub mod format;
+pub mod messages;
 pub mod nullrt;
 pub mod offline;
 pub mod owner;

@@ -403,43 +403,102 @@ mod tests {
         assert!(w.stalled(9, t0 + ms(3_500)));
     }
 
+    /// Each reason alone.
+    fn each_reason() -> [Asked; 5] {
+        let none = Asked::default();
+        [
+            Asked {
+                reset: true,
+                ..none
+            },
+            Asked {
+                buffer_size: true,
+                ..none
+            },
+            Asked { rate: true, ..none },
+            Asked {
+                forced: true,
+                ..none
+            },
+            Asked {
+                stalled: true,
+                ..none
+            },
+        ]
+    }
+
+    /// Every reason at once.
+    const EVERY: Asked = Asked {
+        reset: true,
+        buffer_size: true,
+        rate: true,
+        forced: true,
+        stalled: true,
+    };
+
     #[test]
-    fn only_a_request_or_a_stall_asks_the_budget() {
+    fn only_a_request_a_forced_reopen_or_a_stall_asks_the_budget() {
         let t0 = Instant::now();
         let mut b = ResetBudget::default();
-        assert_eq!(reset_step(false, false, false, &mut b, t0), None);
+        assert!(!Asked::default().any());
+        assert_eq!(reset_step(Asked::default(), &mut b, t0), None);
         assert_eq!(b.used(), 0);
-        assert_eq!(
-            reset_step(true, false, false, &mut b, t0),
-            Some(Verdict::Reopen)
-        );
-        assert_eq!(b.used(), 1);
-        // Within five minutes the next one is over budget.
-        assert_eq!(
-            reset_step(false, true, false, &mut b, t0 + ms(1)),
-            Some(Verdict::Fault)
-        );
-        assert_eq!(
-            reset_step(false, false, true, &mut b, t0 + ms(2)),
-            Some(Verdict::Fault)
-        );
-        assert_eq!(b.used(), 1);
+        for asked in each_reason() {
+            assert!(asked.any(), "{asked:?}");
+            let mut b = ResetBudget::default();
+            assert_eq!(
+                reset_step(asked, &mut b, t0),
+                Some(Verdict::Reopen),
+                "{asked:?}"
+            );
+            assert_eq!(b.used(), 1);
+            // Within five minutes the next one is over budget.
+            assert_eq!(
+                reset_step(asked, &mut b, t0 + ms(1)),
+                Some(Verdict::Fault),
+                "{asked:?}"
+            );
+            assert_eq!(b.used(), 1);
+            // Nothing asks: the budget is not asked either.
+            assert_eq!(reset_step(Asked::default(), &mut b, t0 + ms(2)), None);
+        }
+        assert!(EVERY.any());
         let mut b = ResetBudget::default();
-        assert_eq!(
-            reset_step(false, true, false, &mut b, t0),
-            Some(Verdict::Reopen)
-        );
-        let mut b = ResetBudget::default();
-        assert_eq!(
-            reset_step(false, false, true, &mut b, t0),
-            Some(Verdict::Reopen)
-        );
-        let mut b = ResetBudget::default();
-        assert_eq!(
-            reset_step(true, true, true, &mut b, t0),
-            Some(Verdict::Reopen)
-        );
+        assert_eq!(reset_step(EVERY, &mut b, t0), Some(Verdict::Reopen));
         assert_eq!(b.used(), 1);
+    }
+
+    /// Every reopen and an over-budget fault name their reasons in the log
+    /// (#9 2026-09-28).
+    #[test]
+    fn the_reasons_for_a_reopen_read_as_a_list() {
+        let texts: Vec<String> = each_reason().iter().map(Asked::to_string).collect();
+        assert_eq!(
+            texts,
+            [
+                "the driver's reset request",
+                "the driver's buffer size change",
+                "the driver's sample-rate change",
+                "a forced reopen (HIL)",
+                "a stall (no callback for 2 s)",
+            ]
+        );
+        assert_eq!(
+            EVERY.to_string(),
+            "the driver's reset request, the driver's buffer size change, \
+             the driver's sample-rate change, a forced reopen (HIL), \
+             a stall (no callback for 2 s)"
+        );
+        assert_eq!(
+            Asked {
+                reset: true,
+                stalled: true,
+                ..Asked::default()
+            }
+            .to_string(),
+            "the driver's reset request, a stall (no callback for 2 s)"
+        );
+        assert_eq!(Asked::default().to_string(), "nothing");
     }
 
     #[test]

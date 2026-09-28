@@ -286,12 +286,15 @@ mod tests {
         assert!(CURRENT_USER.open(&missing).is_err());
     }
 
+    /// The engine's window holds 32 from its first open until its release,
+    /// a reopen keeps it; the guard's restore takes back what an engine that
+    /// ended holding the card left (#9 2026-09-28).
     #[cfg(windows)]
     #[test]
-    fn the_preference_window_opens_and_closes_on_the_registry() {
-        use crate::prefwin::{self, Pref, PrefError};
+    fn the_preference_window_holds_the_frames_until_the_release_on_the_registry() {
+        use crate::prefwin::{self, Entered, Left, Pref, PrefError, State, Window};
         use std::time::{SystemTime, UNIX_EPOCH};
-        use windows_registry::CURRENT_USER;
+        use windows_registry::{CURRENT_USER, Type};
 
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -312,27 +315,56 @@ mod tests {
             name: "Frames".into(),
         };
 
-        prefwin::enter(&mut store, &original, 32).unwrap();
+        let held = Pref {
+            kind: Kind::Dword,
+            raw: "32".into(),
+        };
+
+        let mut window = Window::new(original.clone(), 32);
+        assert_eq!(window.enter(&mut store), Ok(Entered::Wrote));
         assert_eq!(raw.get_u32("Frames").unwrap(), 32);
+        // A reopen reads the frames and keeps them.
+        assert_eq!(window.enter(&mut store), Ok(Entered::Kept));
+        assert_eq!(raw.get_u32("Frames").unwrap(), 32);
+        assert_eq!(raw.get_type("Frames").unwrap(), Type::U32);
+        // Another engine's first open finds no original.
         assert_eq!(
-            prefwin::enter(&mut store, &original, 32),
+            Window::new(original.clone(), 32).enter(&mut store),
             Err(PrefError::NotOriginal {
-                found: Pref {
-                    kind: Kind::Dword,
-                    raw: "32".into()
-                }
+                found: held.clone()
             })
         );
-        prefwin::leave(&mut store, &original).unwrap();
+        assert_eq!(window.leave(&mut store), Ok(Left::Restored));
+        assert_eq!(window.state(), State::Original);
         assert_eq!(raw.get_u32("Frames").unwrap(), 64);
         assert_eq!(prefwin::restore(&mut store, &original, 3), Ok(0));
+
+        // An engine that ended while it held the card: the guard restores.
+        let mut ended = Window::new(original.clone(), 32);
+        assert_eq!(ended.enter(&mut store), Ok(Entered::Wrote));
+        assert_eq!(prefwin::restore(&mut store, &original, 3), Ok(1));
+        assert_eq!(raw.get_u32("Frames").unwrap(), 64);
+
+        // Written by someone else while the card is held: the reopen refuses.
+        let mut window = Window::new(original.clone(), 32);
+        assert_eq!(window.enter(&mut store), Ok(Entered::Wrote));
+        raw.set_u32("Frames", 64).unwrap();
+        assert_eq!(
+            window.enter(&mut store),
+            Err(PrefError::NotHeld {
+                found: original.clone(),
+                held
+            })
+        );
+        assert_eq!(window.leave(&mut store), Ok(Left::Restored));
+        assert_eq!(raw.get_u32("Frames").unwrap(), 64);
 
         let mut missing = HkcuPref {
             key: key.0.clone(),
             name: "Missing".into(),
         };
         assert!(matches!(
-            prefwin::enter(&mut missing, &original, 32),
+            Window::new(original, 32).enter(&mut missing),
             Err(PrefError::Read(_))
         ));
     }

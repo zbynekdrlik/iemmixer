@@ -189,97 +189,230 @@ mod tests {
         }
     }
 
+    /// REAPER's DWORD 64 at 32 frames, and a store holding it.
+    fn at_64() -> (Window, FakeStore) {
+        (
+            Window::new(dword("64"), 32),
+            FakeStore::holding(dword("64")),
+        )
+    }
+
     #[test]
-    fn enter_writes_the_frames_with_the_originals_kind() {
-        let mut store = FakeStore::holding(dword("64"));
-        assert_eq!(enter(&mut store, &dword("64"), 32), Ok(()));
+    fn a_new_window_is_original_and_holds_the_frames_in_the_originals_kind() {
+        let w = Window::new(dword("64"), 32);
+        assert_eq!(w.state(), State::Original);
+        assert_eq!(w.original(), &dword("64"));
+        assert_eq!(w.held(), &dword("32"));
+
+        let w = Window::new(text(" 64"), 48);
+        assert_eq!(w.state(), State::Original);
+        assert_eq!(w.original(), &text(" 64"));
+        assert_eq!(w.held(), &text("48"));
+    }
+
+    /// Original → Held (#9 2026-09-28): the first open writes the frames with
+    /// the original's kind and reads them back.
+    #[test]
+    fn the_first_enter_writes_the_frames_and_holds_them() {
+        let (mut w, mut store) = at_64();
+        assert_eq!(w.enter(&mut store), Ok(Entered::Wrote));
         assert_eq!(store.value, dword("32"));
         assert_eq!((store.reads, store.writes), (2, 1));
+        assert_eq!(w.state(), State::Held);
 
+        let mut w = Window::new(text("64"), 32);
         let mut store = FakeStore::holding(text("64"));
-        assert_eq!(enter(&mut store, &text("64"), 32), Ok(()));
+        assert_eq!(w.enter(&mut store), Ok(Entered::Wrote));
         assert_eq!(store.value, text("32"));
-        assert_eq!((store.reads, store.writes), (2, 1));
-
-        let mut store = FakeStore::holding(text("64"));
-        assert_eq!(enter(&mut store, &text("64"), 48), Ok(()));
-        assert_eq!(store.value, text("48"));
+        assert_eq!(w.state(), State::Held);
     }
 
+    /// Held → Held: a reopen reads the frames and writes nothing (the driver
+    /// may ask for a reset when the value changes while it is open).
     #[test]
-    fn enter_refuses_without_writing_unless_the_store_holds_the_original() {
-        let mut store = FakeStore::holding(dword("32"));
-        assert_eq!(
-            enter(&mut store, &dword("64"), 32),
-            Err(PrefError::NotOriginal { found: dword("32") })
-        );
-        assert_eq!((store.value.clone(), store.writes), (dword("32"), 0));
+    fn a_reopen_keeps_the_frames_without_writing() {
+        let (mut w, mut store) = at_64();
+        assert_eq!(w.enter(&mut store), Ok(Entered::Wrote));
+        for reads in [3, 4] {
+            assert_eq!(w.enter(&mut store), Ok(Entered::Kept));
+            assert_eq!((store.reads, store.writes), (reads, 1));
+            assert_eq!(store.value, dword("32"));
+            assert_eq!(w.state(), State::Held);
+        }
+    }
 
+    /// The first open refuses anything but the original, without a write: an
+    /// engine that ended while it held the card (a crash, a power loss) left
+    /// its frames, or another program wrote the value. The window stays
+    /// Original, so its release touches nothing.
+    #[test]
+    fn the_first_enter_refuses_anything_but_the_original_without_writing() {
         // The same digits with the other kind are not the original either.
-        let mut store = FakeStore::holding(text("64"));
-        assert_eq!(
-            enter(&mut store, &dword("64"), 32),
-            Err(PrefError::NotOriginal { found: text("64") })
-        );
-        assert_eq!((store.value.clone(), store.writes), (text("64"), 0));
+        for found in [dword("32"), text("64"), dword("128")] {
+            let mut w = Window::new(dword("64"), 32);
+            let mut store = FakeStore::holding(found.clone());
+            assert_eq!(
+                w.enter(&mut store),
+                Err(PrefError::NotOriginal {
+                    found: found.clone()
+                })
+            );
+            assert_eq!((store.value.clone(), store.writes), (found, 0));
+            assert_eq!(w.state(), State::Original);
+            assert_eq!(w.leave(&mut store), Ok(Left::Untouched));
+            assert_eq!((store.reads, store.writes), (1, 0));
+        }
+    }
+
+    /// A reopen refuses anything but its own frames, without a write: another
+    /// program wrote the value while the card was held (REAPER's original
+    /// included). The window stays Held, so the release still writes the
+    /// original.
+    #[test]
+    fn a_reopen_refuses_anything_but_the_frames_without_writing() {
+        for found in [dword("64"), text("32"), dword("48")] {
+            let (mut w, mut store) = at_64();
+            assert_eq!(w.enter(&mut store), Ok(Entered::Wrote));
+            store.value = found.clone();
+            assert_eq!(
+                w.enter(&mut store),
+                Err(PrefError::NotHeld {
+                    found: found.clone(),
+                    held: dword("32")
+                })
+            );
+            assert_eq!((store.value.clone(), store.writes), (found, 1));
+            assert_eq!(w.state(), State::Held);
+            assert_eq!(w.leave(&mut store), Ok(Left::Restored));
+            assert_eq!(store.value, dword("64"));
+        }
+    }
+
+    /// Held → Original at the release: the original back byte for byte and
+    /// read back; a second release has nothing to do and touches nothing.
+    #[test]
+    fn the_release_restores_the_original_once() {
+        let mut w = Window::new(text(" 64"), 32);
+        let mut store = FakeStore::holding(text(" 64"));
+        assert_eq!(w.enter(&mut store), Ok(Entered::Wrote));
+        assert_eq!(w.leave(&mut store), Ok(Left::Restored));
+        assert_eq!(store.value, text(" 64"));
+        assert_eq!((store.reads, store.writes), (3, 2));
+        assert_eq!(w.state(), State::Original);
+        assert_eq!(w.leave(&mut store), Ok(Left::Untouched));
+        assert_eq!((store.reads, store.writes), (3, 2));
     }
 
     #[test]
-    fn a_write_that_reads_back_different_is_a_readback_error() {
-        let mut store = FakeStore::holding(dword("64"));
+    fn a_window_that_never_held_the_card_touches_nothing_at_its_release() {
+        let (mut w, mut store) = at_64();
+        store.bad_reads = vec![1];
+        store.bad_writes = vec![1];
+        assert_eq!(w.leave(&mut store), Ok(Left::Untouched));
+        assert_eq!((store.reads, store.writes), (0, 0));
+        assert_eq!(w.state(), State::Original);
+    }
+
+    /// The state machine has no dead end: after its release a window opens
+    /// again like a new one.
+    #[test]
+    fn a_released_window_opens_again() {
+        let (mut w, mut store) = at_64();
+        assert_eq!(w.enter(&mut store), Ok(Entered::Wrote));
+        assert_eq!(w.leave(&mut store), Ok(Left::Restored));
+        assert_eq!(w.enter(&mut store), Ok(Entered::Wrote));
+        assert_eq!((store.value.clone(), store.writes), (dword("32"), 3));
+        assert_eq!(w.state(), State::Held);
+    }
+
+    /// A write that failed or read back wrong may have left anything: the
+    /// window is Held from the write on, so the release restores the
+    /// original.
+    #[test]
+    fn a_failed_first_write_still_owes_the_original() {
+        let (mut w, mut store) = at_64();
+        store.bad_writes = vec![1];
+        assert_eq!(
+            w.enter(&mut store),
+            Err(PrefError::Write("write 1 failed".into()))
+        );
+        assert_eq!(store.value, dword("64"));
+        assert_eq!(w.state(), State::Held);
+        assert_eq!(w.leave(&mut store), Ok(Left::Restored));
+        assert_eq!((store.value.clone(), store.writes), (dword("64"), 2));
+        assert_eq!(w.state(), State::Original);
+
+        let (mut w, mut store) = at_64();
         store.corrupt_writes = vec![1];
         assert_eq!(
-            enter(&mut store, &dword("64"), 32),
+            w.enter(&mut store),
             Err(PrefError::ReadBack {
                 wrote: dword("32"),
                 read: dword("320")
             })
         );
+        assert_eq!(w.state(), State::Held);
+        assert_eq!(w.leave(&mut store), Ok(Left::Restored));
+        assert_eq!(store.value, dword("64"));
 
-        let mut store = FakeStore::holding(dword("32"));
-        store.corrupt_writes = vec![1];
+        // The read-back after the write failed.
+        let (mut w, mut store) = at_64();
+        store.bad_reads = vec![2];
         assert_eq!(
-            leave(&mut store, &dword("64")),
+            w.enter(&mut store),
+            Err(PrefError::Read("read 2 failed".into()))
+        );
+        assert_eq!(w.state(), State::Held);
+    }
+
+    /// A read that fails before anything is written changes nothing.
+    #[test]
+    fn a_failed_first_read_changes_nothing() {
+        let (mut w, mut store) = at_64();
+        store.bad_reads = vec![1];
+        assert_eq!(
+            w.enter(&mut store),
+            Err(PrefError::Read("read 1 failed".into()))
+        );
+        assert_eq!(store.writes, 0);
+        assert_eq!(w.state(), State::Original);
+
+        // At a reopen: still Held, nothing written.
+        let (mut w, mut store) = at_64();
+        assert_eq!(w.enter(&mut store), Ok(Entered::Wrote));
+        store.bad_reads = vec![3];
+        assert_eq!(
+            w.enter(&mut store),
+            Err(PrefError::Read("read 3 failed".into()))
+        );
+        assert_eq!((store.value.clone(), store.writes), (dword("32"), 1));
+        assert_eq!(w.state(), State::Held);
+    }
+
+    /// A release that failed keeps the window Held: the next one writes
+    /// again.
+    #[test]
+    fn a_failed_release_keeps_the_window_held() {
+        let (mut w, mut store) = at_64();
+        assert_eq!(w.enter(&mut store), Ok(Entered::Wrote));
+        store.bad_writes = vec![2];
+        assert_eq!(
+            w.leave(&mut store),
+            Err(PrefError::Write("write 2 failed".into()))
+        );
+        assert_eq!((store.value.clone(), w.state()), (dword("32"), State::Held));
+        store.corrupt_writes = vec![3];
+        assert_eq!(
+            w.leave(&mut store),
             Err(PrefError::ReadBack {
                 wrote: dword("64"),
                 read: dword("640")
             })
         );
-    }
-
-    #[test]
-    fn leave_restores_the_original_byte_for_byte() {
-        let mut store = FakeStore::holding(text("32"));
-        assert_eq!(leave(&mut store, &text(" 64")), Ok(()));
-        assert_eq!(store.value, text(" 64"));
-        assert_eq!((store.reads, store.writes), (1, 1));
-    }
-
-    #[test]
-    fn store_errors_say_which_step_failed() {
-        let mut store = FakeStore::holding(dword("64"));
-        store.bad_writes = vec![1];
-        assert_eq!(
-            enter(&mut store, &dword("64"), 32),
-            Err(PrefError::Write("write 1 failed".into()))
-        );
-        assert_eq!(store.value, dword("64"));
-
-        let mut store = FakeStore::holding(dword("64"));
-        store.bad_reads = vec![1];
-        assert_eq!(
-            enter(&mut store, &dword("64"), 32),
-            Err(PrefError::Read("read 1 failed".into()))
-        );
-        assert_eq!(store.writes, 0);
-
-        // The read-back after the write.
-        let mut store = FakeStore::holding(dword("64"));
-        store.bad_reads = vec![2];
-        assert_eq!(
-            enter(&mut store, &dword("64"), 32),
-            Err(PrefError::Read("read 2 failed".into()))
-        );
+        assert_eq!(w.state(), State::Held);
+        assert_eq!(w.leave(&mut store), Ok(Left::Restored));
+        assert_eq!((store.value.clone(), store.writes), (dword("64"), 4));
+        assert_eq!(w.state(), State::Original);
     }
 
     #[test]
@@ -336,6 +469,25 @@ mod tests {
         assert_eq!((store.reads, store.writes), (0, 0));
     }
 
+    /// An engine that ended while it held the card (a crash, a power loss)
+    /// left its frames (#9 2026-09-28): the next engine's first open refuses
+    /// them, and the guard's `PrefCheck` before REAPER starts restores the
+    /// original — a restore, never a refusal. After it the next open works.
+    #[test]
+    fn restore_takes_back_the_frames_of_an_engine_that_ended_holding_the_card() {
+        let (mut ended, mut store) = at_64();
+        assert_eq!(ended.enter(&mut store), Ok(Entered::Wrote));
+        // The engine ends here, without its release.
+        let mut next = Window::new(dword("64"), 32);
+        assert_eq!(
+            next.enter(&mut store),
+            Err(PrefError::NotOriginal { found: dword("32") })
+        );
+        assert_eq!(restore(&mut store, ended.original(), 3), Ok(1));
+        assert_eq!(store.value, dword("64"));
+        assert_eq!(next.enter(&mut store), Ok(Entered::Wrote));
+    }
+
     #[test]
     fn errors_read_as_sentences() {
         assert_eq!(
@@ -349,7 +501,17 @@ mod tests {
         assert_eq!(
             PrefError::NotOriginal { found: dword("32") }.to_string(),
             "the preferred buffer holds Pref { kind: Dword, raw: \"32\" }, not the original \
-             (an earlier window did not close)"
+             (an engine ended while it held the card, or another program wrote it)"
+        );
+        assert_eq!(
+            PrefError::NotHeld {
+                found: dword("64"),
+                held: dword("32")
+            }
+            .to_string(),
+            "the preferred buffer holds Pref { kind: Dword, raw: \"64\" }, not \
+             Pref { kind: Dword, raw: \"32\" }, which this engine wrote for the card it holds \
+             (another program wrote it)"
         );
         assert_eq!(
             PrefError::ReadBack {

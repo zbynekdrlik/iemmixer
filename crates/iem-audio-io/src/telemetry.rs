@@ -969,6 +969,61 @@ mod tests {
         assert_eq!(answers, [2, 1, 0, 1, 1, 1, 0, 0, 0]);
     }
 
+    /// The owner thread logs why it reopens (#9 2026-09-28): a reset request
+    /// and a buffer size change are told apart, and taken once.
+    #[test]
+    fn a_reopen_request_says_which_message_asked() {
+        use selector::*;
+        let t = Telemetry::new(32, 96_000.0);
+        let reset = Requested {
+            reset: true,
+            buffer_size: false,
+        };
+        let size = Requested {
+            reset: false,
+            buffer_size: true,
+        };
+        assert_eq!(t.take_requests(), Requested::default());
+        t.driver_message(RESET_REQUEST, 0);
+        assert_eq!(t.take_requests(), reset);
+        assert_eq!(t.take_requests(), Requested::default());
+        t.driver_message(BUFFER_SIZE_CHANGE, 64);
+        assert_eq!(t.take_requests(), size);
+        t.driver_message(RESET_REQUEST, 0);
+        t.driver_message(BUFFER_SIZE_CHANGE, 64);
+        t.driver_message(RESET_REQUEST, 0);
+        assert_eq!(
+            t.take_requests(),
+            Requested {
+                reset: true,
+                buffer_size: true
+            }
+        );
+        // Nothing else asks for a reopen.
+        for sel in [
+            SELECTOR_SUPPORTED,
+            ENGINE_VERSION,
+            RESYNC_REQUEST,
+            LATENCIES_CHANGED,
+            SUPPORTS_TIME_INFO,
+            SUPPORTS_TIME_CODE,
+            OVERLOAD,
+            0,
+            99,
+        ] {
+            t.driver_message(sel, RESET_REQUEST);
+        }
+        t.on_rate_change();
+        assert_eq!(t.take_requests(), Requested::default());
+        // `take_reopen` is either of them, taken once too.
+        t.driver_message(BUFFER_SIZE_CHANGE, 64);
+        assert!(t.take_reopen());
+        assert_eq!(t.take_requests(), Requested::default());
+        assert!(!Requested::default().any());
+        assert!(reset.any());
+        assert!(size.any());
+    }
+
     #[test]
     fn driver_messages_are_counted_and_resets_request_a_reopen() {
         use selector::*;
