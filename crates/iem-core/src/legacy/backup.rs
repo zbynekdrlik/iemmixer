@@ -201,6 +201,18 @@ mod tests {
     }
 
     #[test]
+    fn a_backup_without_pins_parses() {
+        // The predecessor's real backups carry no `pins` field (pins live
+        // apart); the reader must default it, not require it (iemmixer#9
+        // 2026-09-28, the shape seen on the PC).
+        let json = r#"{"version":1,"timestamp":"t","track_layout":{},"sends":[],
+            "track_volumes":{},"eq":{},"limiter":{},"customizations":{},"track_mutes":{}}"#;
+        let b: MixerBackup = serde_json::from_str(json).unwrap();
+        assert!(b.pins.is_empty());
+        assert_eq!(b.version, 1);
+    }
+
+    #[test]
     fn test_eq_band_backup_from_eq_band() {
         let eq_band = EqBand {
             band_type: "highshelf".to_string(),
