@@ -1572,10 +1572,11 @@ fn offline_activation(pc: &mut dyn Pc, g: &mut Guard, sha: &str) -> (bool, Strin
 }
 
 /// Inside a HIL job: the engine and the server start again from the active
-/// bundle and site, the engine with the job's HIL flags. The runner (it runs
-/// the job) and the tray keep running, so this is no dev entry. A failure
-/// alarms and unwinds to event, as a failed dev entry does; "ide event"
-/// ends a wait and is served next.
+/// bundle and site, the engine with the job's HIL flags, after `PrefCheck`
+/// (REAPER's original back, as before every engine start). The runner (it
+/// runs the job) and the tray keep running, so this is no dev entry. A
+/// failure alarms and unwinds to event, as a failed dev entry does; "ide
+/// event" ends a wait and is served next.
 fn restart_in_job(pc: &mut dyn Pc, g: &mut Guard) -> Result<(), String> {
     let f = pc.facts();
     let mut steps = Vec::new();
@@ -1585,7 +1586,14 @@ fn restart_in_job(pc: &mut dyn Pc, g: &mut Guard) -> Result<(), String> {
     if f.server {
         steps.push(Step::ServerStop);
     }
-    steps.extend([Step::EngineStart, Step::EngineArm, Step::ServerStart]);
+    // REAPER's original back right before the engine starts, as in every
+    // entry (#9 2026-09-28): the old engine stopped above.
+    steps.extend([
+        Step::PrefCheck,
+        Step::EngineStart,
+        Step::EngineArm,
+        Step::ServerStart,
+    ]);
     for step in steps {
         match run_step(pc, g, step, Mode::Dev, &f) {
             // The children are saved after every step, so the guard an
@@ -1969,7 +1977,20 @@ fn respawn(pc: &mut dyn Pc, g: &mut Guard) {
     if g.state.mode == Mode::Event {
         return;
     }
-    let hil = g.hil_engine(g.state.mode);
+    // An engine that ended while it held the card left 32, and the new one
+    // refuses the card unless REAPER's original is back (#9 2026-09-28).
+    // The old engine is gone, so nothing of ours holds the driver; a failed
+    // restore (or a holder) starts nothing, as a failed start.
+    let mode = g.state.mode;
+    if let Err(e) = pref_step(pc, g, mode) {
+        g.raise(
+            None,
+            &format!("the engine could not be started again: {e}"),
+            false,
+        );
+        return;
+    }
+    let hil = g.hil_engine(mode);
     match pc.engine_start(false, hil) {
         Ok(pid) => {
             g.spawns += 1;
