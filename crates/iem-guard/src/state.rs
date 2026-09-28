@@ -73,6 +73,15 @@ pub struct GuardState {
     /// a guard that hands over to a new exe inside the job (HIL activates
     /// the bundle it tests) or restarts still serves the job (design §7).
     pub job: Option<u64>,
+    /// What the last `PrefCheck` found and left alone: the preference not
+    /// REAPER's original while the driver module was held (REAPER started
+    /// at 32 after a power loss in dev time; #9 2026-09-28). Alarmed once,
+    /// named in the status, dropped when a check finds or restores the
+    /// original. A fact of the registry: a reset keeps it.
+    pub pref_held: Option<String>,
+    /// The `at` of the logon task's last result the guard took (G1): each
+    /// run of it is taken once, also across guard restarts; a reset keeps it.
+    pub logon_seen: Option<String>,
 }
 
 /// Whether a starting guard must forget its saved mode: after a reboot, or
@@ -83,7 +92,8 @@ pub fn reset_to_event(st: &GuardState, boot_time: u64, reaper_or_app: bool, engi
 
 impl GuardState {
     /// The mode after [`reset_to_event`]: `event`, no switch in progress, no
-    /// pending interlock retry and no HIL job.
+    /// pending interlock retry and no HIL job (`pref_held` and `logon_seen`
+    /// stay: the next check reads the preference again).
     pub fn reset(&mut self) {
         self.mode = Mode::Event;
         self.switching = None;
@@ -185,6 +195,11 @@ mod tests {
                 next_at: 1_790_000_900,
             }),
             job: Some(4242),
+            pref_held: Some(
+                "REAPER runs with the preferred buffer at 32; it is restored at REAPER's next start"
+                    .into(),
+            ),
+            logon_seen: Some("2026-09-28T06:00:00.1234567Z".into()),
         }
     }
 
@@ -288,10 +303,14 @@ mod tests {
         assert_eq!(st.switching, None);
         assert_eq!(st.interlock_retry, None);
         assert_eq!(st.job, None, "no HIL job after a reboot");
-        // Everything else stays: bundles, pins and children are facts.
+        // Everything else stays: bundles, pins and children are facts, and
+        // so is a preference left alone under a holder (#9 2026-09-28): the
+        // next check reads it again.
         let before = sample();
         assert_eq!(st.bundles, before.bundles);
         assert_eq!(st.pins, before.pins);
         assert_eq!(st.pids, before.pids);
+        assert_eq!(st.pref_held, before.pref_held);
+        assert_eq!(st.logon_seen, before.logon_seen);
     }
 }

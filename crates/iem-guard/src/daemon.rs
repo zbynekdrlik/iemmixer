@@ -37,7 +37,7 @@ use crate::crash::{self, After, CrashLoop};
 use crate::effects::engine::ACTIVE_DB;
 use crate::handover::{self, Audio};
 use crate::install::{self, InstallError};
-use crate::pc::{Audience, EngineSeen, Kid, Pc, Procs, R, StepError, job_note};
+use crate::pc::{Audience, EngineSeen, Kid, Pc, PrefSeen, Procs, R, StepError, job_note};
 use crate::plan::{
     Activation, Busy, Facts, Health, Mode, OnError, PrefFail, Step, activation, on_error, plan,
 };
@@ -789,6 +789,9 @@ pub fn status_text(g: &Guard) -> String {
     if g.reaper_notice {
         parts.push(handover::NOTICE_REPORT.to_owned());
     }
+    if let Some(n) = &g.state.pref_held {
+        parts.push(n.clone());
+    }
     if let Some(n) = &g.recipients_note {
         parts.push(n.clone());
     }
@@ -1059,15 +1062,7 @@ fn run_step(pc: &mut dyn Pc, g: &mut Guard, step: Step, to: Mode, facts: &Facts)
             g.info(format!("tuning exit: {r}"));
             Ok(())
         }
-        Step::PrefCheck => {
-            let writes = pc.pref_check()?;
-            if writes > 0 {
-                g.info(format!(
-                    "the preferred buffer was restored ({writes} writes)"
-                ));
-            }
-            Ok(())
-        }
+        Step::PrefCheck => pref_step(pc, g, to),
         Step::HolderGone => pc.holder_gone(&c),
         Step::ReaperStart => pc.reaper_start(),
         Step::ReaperHandover => {
@@ -1093,6 +1088,73 @@ fn run_step(pc: &mut dyn Pc, g: &mut Guard, step: Step, to: Mode, facts: &Facts)
         Step::AppHandover => pc.app_answers(&c),
         Step::Fingerprint => pc.fingerprint(),
     }
+}
+
+/// `PrefCheck` (design §5.2; #9 2026-09-28): REAPER's original, or restored
+/// while nothing holds the driver module. Nothing is ever written while
+/// something holds it (its driver would most likely ask it for a reset):
+/// the guard remembers what it left (`GuardState::pref_held`, named in the
+/// status). In the event plan that is no failure: it alarms once and goes
+/// on (REAPER keeps its sound; the check after REAPER's quit restores it).
+/// Before an engine start (`to` dev or live) it fails the step: the engine
+/// would refuse the card.
+fn pref_step(pc: &mut dyn Pc, g: &mut Guard, to: Mode) -> R<()> {
+    match pc.pref_check()? {
+        PrefSeen::Original(writes) => {
+            if writes > 0 {
+                g.info(format!(
+                    "the preferred buffer was restored ({writes} writes)"
+                ));
+            }
+            g.state.pref_held = None;
+            Ok(())
+        }
+        PrefSeen::Held(held) => {
+            let text = held.text();
+            let new = g.state.pref_held.as_deref() != Some(text.as_str());
+            g.state.pref_held = Some(text.clone());
+            if to != Mode::Event {
+                return Err(StepError::Failed(text));
+            }
+            g.info(text.clone());
+            if new {
+                g.alarm(Step::PrefCheck, &text, false);
+            }
+            Ok(())
+        }
+    }
+}
+
+/// What the elevated logon task (G1) left, taken once per run of it (its
+/// `at`, `GuardState::logon_seen`), at the guard's start and hourly (#9
+/// 2026-09-28). The task follows `PrefCheck`'s rule, so a preference it did
+/// not write under a holder of the driver module is remembered and alarmed
+/// once with `PrefCheck`'s text (the event plan's check that finds the same
+/// adds no alarm); a run at REAPER's original drops what was remembered; a
+/// failed run is logged (the next plan's `PrefCheck` reads the preference).
+fn take_logon(pc: &mut dyn Pc, g: &mut Guard) {
+    let Some(logon) = pc.logon() else {
+        return;
+    };
+    if g.state.logon_seen.as_deref() == Some(logon.at.as_str()) {
+        return;
+    }
+    info!("the logon task's run of {}: {:?}", logon.at, logon.pref);
+    g.state.logon_seen = Some(logon.at);
+    match logon.pref {
+        crate::effects::tuning::LogonPref::Original => g.state.pref_held = None,
+        crate::effects::tuning::LogonPref::Held(held) => {
+            let text = held.text();
+            if g.state.pref_held.as_deref() != Some(text.as_str()) {
+                g.state.pref_held = Some(text.clone());
+                g.raise(None, &format!("logon task: {text}"), false);
+            }
+        }
+        crate::effects::tuning::LogonPref::Failed(why) => {
+            warn!("the logon task did not restore the preference: {why}");
+        }
+    }
+    g.save();
 }
 
 /// 60 s on the stage inputs: REAPER's meters while REAPER runs, else
@@ -1542,10 +1604,11 @@ fn offline_activation(pc: &mut dyn Pc, g: &mut Guard, sha: &str) -> (bool, Strin
 }
 
 /// Inside a HIL job: the engine and the server start again from the active
-/// bundle and site, the engine with the job's HIL flags. The runner (it runs
-/// the job) and the tray keep running, so this is no dev entry. A failure
-/// alarms and unwinds to event, as a failed dev entry does; "ide event"
-/// ends a wait and is served next.
+/// bundle and site, the engine with the job's HIL flags, after `PrefCheck`
+/// (REAPER's original back, as before every engine start). The runner (it
+/// runs the job) and the tray keep running, so this is no dev entry. A
+/// failure alarms and unwinds to event, as a failed dev entry does; "ide
+/// event" ends a wait and is served next.
 fn restart_in_job(pc: &mut dyn Pc, g: &mut Guard) -> Result<(), String> {
     let f = pc.facts();
     let mut steps = Vec::new();
@@ -1555,7 +1618,14 @@ fn restart_in_job(pc: &mut dyn Pc, g: &mut Guard) -> Result<(), String> {
     if f.server {
         steps.push(Step::ServerStop);
     }
-    steps.extend([Step::EngineStart, Step::EngineArm, Step::ServerStart]);
+    // REAPER's original back right before the engine starts, as in every
+    // entry (#9 2026-09-28): the old engine stopped above.
+    steps.extend([
+        Step::PrefCheck,
+        Step::EngineStart,
+        Step::EngineArm,
+        Step::ServerStart,
+    ]);
     for step in steps {
         match run_step(pc, g, step, Mode::Dev, &f) {
             // The children are saved after every step, so the guard an
@@ -1822,8 +1892,11 @@ fn rehearse(pc: &mut dyn Pc, g: &mut Guard) -> (bool, String) {
         bad.push("the driver module is held".to_owned());
     }
     match pc.pref_check() {
-        Ok(0) => {}
-        Ok(writes) => bad.push(format!("the preference needed {writes} writes")),
+        Ok(PrefSeen::Original(0)) => {}
+        Ok(PrefSeen::Original(writes)) => {
+            bad.push(format!("the preference needed {writes} writes"));
+        }
+        Ok(PrefSeen::Held(held)) => bad.push(format!("the preference: {}", held.text())),
         Err(e) => bad.push(format!("the preference: {e}")),
     }
     let verdict = if bad.is_empty() {
@@ -1869,6 +1942,7 @@ pub fn tick(pc: &mut dyn Pc, g: &mut Guard, at: Instant) {
         .is_none_or(|t| at.saturating_duration_since(t) >= DRIFT_EVERY)
     {
         g.drift(pc, at);
+        take_logon(pc, g);
     }
     send_notices(pc, g);
 }
@@ -1936,7 +2010,20 @@ fn respawn(pc: &mut dyn Pc, g: &mut Guard) {
     if g.state.mode == Mode::Event {
         return;
     }
-    let hil = g.hil_engine(g.state.mode);
+    // An engine that ended while it held the card left 32, and the new one
+    // refuses the card unless REAPER's original is back (#9 2026-09-28).
+    // The old engine is gone, so nothing of ours holds the driver; a failed
+    // restore (or a holder) starts nothing, as a failed start.
+    let mode = g.state.mode;
+    if let Err(e) = pref_step(pc, g, mode) {
+        g.raise(
+            None,
+            &format!("the engine could not be started again: {e}"),
+            false,
+        );
+        return;
+    }
+    let hil = g.hil_engine(mode);
     match pc.engine_start(false, hil) {
         Ok(pid) => {
             g.spawns += 1;
@@ -2054,6 +2141,8 @@ pub fn start(pc: &mut dyn Pc, g: &mut Guard, boot: u64) -> Option<Outcome> {
     g.state.pids = pc.adopt(&saved);
     pc.set_bundle(g.state.pins.current.as_deref());
     g.look(pc);
+    // Before the event plan: its check then adds no alarm for the same value.
+    take_logon(pc, g);
     g.save();
     let resume = g.state.switching.is_some();
     let out = (reset || resume).then(|| {

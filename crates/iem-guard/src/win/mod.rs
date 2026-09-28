@@ -37,7 +37,9 @@ use tracing::{info, warn};
 use crate::cancel::Cancel;
 use crate::effects::engine::Quiet;
 use crate::handover::{AppExit, ReaperFacts};
-use crate::pc::{self, Audience, EngineSeen, Images, Kid, Pc, Procs, R, Status, StepError};
+use crate::pc::{
+    self, Audience, EngineSeen, Images, Kid, Pc, PrefSeen, Procs, R, Status, StepError,
+};
 use crate::plan::{Facts, Health, Mode};
 use crate::site::{self, Settings};
 use crate::state::Children;
@@ -193,7 +195,7 @@ impl Pc for WinPc {
         tasks::drift(self)
     }
 
-    fn pref_check(&mut self) -> R<u32> {
+    fn pref_check(&mut self) -> R<PrefSeen> {
         card::pref_check(self)
     }
 
@@ -313,6 +315,24 @@ impl Pc for WinPc {
 
     fn exclude(&mut self, sha: &str, keep: &[String]) -> R<()> {
         tasks::exclude(self, sha, keep)
+    }
+
+    /// `logon.result.json` in the elevated root's `tasks\out`; no file is
+    /// no run yet.
+    fn logon(&mut self) -> Option<crate::effects::tuning::Logon> {
+        use crate::effects::tuning;
+        let path = self
+            .s
+            .results_dir()
+            .join(tuning::result_name(tuning::LOGON));
+        match std::fs::read_to_string(&path) {
+            Ok(text) => tuning::logon_result(&text, &self.images.reaper),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(e) => {
+                warn!("{}: {e}", path.display());
+                None
+            }
+        }
     }
 
     /// The job's limits go to the log with the placement they give.

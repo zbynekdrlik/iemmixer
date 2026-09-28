@@ -345,6 +345,24 @@ mod tests {
         assert_eq!(prefwin::restore(&mut store, &original, 3), Ok(1));
         assert_eq!(raw.get_u32("Frames").unwrap(), 64);
 
+        // The guard's check writes nothing while a process holds the driver
+        // (REAPER started at 32), and restores once none does.
+        let mut ended = Window::new(original.clone(), 32);
+        assert_eq!(ended.enter(&mut store), Ok(Entered::Wrote));
+        assert_eq!(
+            prefwin::check(&mut store, &original, 3, || Some("reaper.exe (11)")),
+            Ok(prefwin::Checked::Open {
+                found: Some(held.clone()),
+                by: "reaper.exe (11)"
+            })
+        );
+        assert_eq!(raw.get_u32("Frames").unwrap(), 32);
+        assert_eq!(
+            prefwin::check(&mut store, &original, 3, || None::<&str>),
+            Ok(prefwin::Checked::Original(1))
+        );
+        assert_eq!(raw.get_u32("Frames").unwrap(), 64);
+
         // Written by someone else while the card is held: the reopen refuses.
         let mut window = Window::new(original.clone(), 32);
         assert_eq!(window.enter(&mut store), Ok(Entered::Wrote));

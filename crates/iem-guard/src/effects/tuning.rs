@@ -11,7 +11,9 @@
 //! - `<root>\guard\tasks\<kind>.request.json`: tuning `{"id", "verb"}`,
 //!   exclude `{"id", "sha", "keep"}`;
 //! - `<elevated root>\tasks\out\<kind>.result.json`: `{"kind", "id", "ok",
-//!   "at", "result", "error"}`;
+//!   "at", "result", "error"}`; the logon task (`\iemmixer\iemmixer-logon`,
+//!   G1) needs no request and writes `logon.result.json` at every logon,
+//!   which the guard reads ([`logon_result`]);
 //! - `<elevated root>\tuning\expect.json` (S1c's module): what it applied for
 //!   the current mode, `{"plan": "<power plan GUID>", "services": {"<name>":
 //!   <start>}}`, which the guard's drift check compares with native reads
@@ -24,9 +26,13 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::pc::{CardHolders, PrefHeld};
+
 /// The tasks' kinds: the request and result files' names.
 pub const TUNING: &str = "tuning";
 pub const EXCLUDE: &str = "exclude";
+/// The logon task (G1): no request, its result only (`logon_result`).
+pub const LOGON: &str = "logon";
 pub const EXPECT: &str = "expect.json";
 
 /// What `tuning` answers when S1c's module is not installed: reported,
@@ -88,6 +94,117 @@ pub fn result_for(text: &str, kind: &str, id: &str) -> Option<Result<String, Str
             error.to_owned()
         }))
     }
+}
+
+/// What the logon task (G1) found of the preference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LogonPref {
+    /// REAPER's original was there, or the task restored it.
+    Original,
+    /// Not the original while the driver module was held: not written
+    /// (`Restore-IemPref`, the guard's `PrefCheck` rule; #9 2026-09-28).
+    Held(PrefHeld),
+    /// The task failed, or its restore did not read back.
+    Failed(String),
+}
+
+/// One run of the logon task; `at` (its UTC time as the task wrote it)
+/// tells one run from the next.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Logon {
+    pub at: String,
+    pub pref: LogonPref,
+}
+
+/// A JSON string or number as text.
+fn scalar_text(v: &Value) -> Option<String> {
+    match v {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+/// An image name without a trailing ".exe", in any case.
+fn bare_image(image: &str) -> &str {
+    match image
+        .len()
+        .checked_sub(4)
+        .and_then(|cut| image.split_at_checked(cut))
+    {
+        Some((stem, ext)) if ext.eq_ignore_ascii_case(".exe") => stem,
+        _ => image,
+    }
+}
+
+/// A holder as `Get-IemModuleHolders` names it (`image:pid`), in the
+/// guard's form (`image (pid)`), and whether it is REAPER's image.
+fn holder(entry: &str, reaper: &str) -> (String, bool) {
+    let (image, name) = match entry.rsplit_once(':') {
+        Some((image, pid)) if !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()) => {
+            (image, format!("{image} ({pid})"))
+        }
+        _ => (entry, entry.to_owned()),
+    };
+    (
+        name,
+        bare_image(image).eq_ignore_ascii_case(bare_image(reaper)),
+    )
+}
+
+/// The held preference of a `pref` object whose action is `held`.
+fn held_of(pref: &Value, reaper: &str) -> PrefHeld {
+    let holders: Vec<(String, bool)> = pref
+        .get("holders")
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(Value::as_str)
+                .map(|entry| holder(entry, reaper))
+                .collect()
+        })
+        .unwrap_or_default();
+    PrefHeld {
+        value: pref.get("before").and_then(scalar_text),
+        by: CardHolders {
+            reaper: holders.iter().any(|(_, is_reaper)| *is_reaper),
+            names: holders
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+        },
+    }
+}
+
+/// `logon.result.json` (`Invoke-IemTaskRequest -Kind logon`, G1; #9
+/// 2026-09-28): `None` unless it is the logon task's, with its `at`.
+/// `reaper` is REAPER's image (`pc.toml` `reaper_exe`): a holder with it,
+/// in any case and with or without ".exe" (an unreadable holder list names a
+/// running REAPER by its process name), is REAPER.
+pub fn logon_result(text: &str, reaper: &str) -> Option<Logon> {
+    let v: Value = serde_json::from_str(without_bom(text)).ok()?;
+    if v.get("kind").and_then(Value::as_str) != Some(LOGON) {
+        return None;
+    }
+    let at = v.get("at").and_then(Value::as_str)?.to_owned();
+    let pref = v.get("result").and_then(|r| r.get("pref"));
+    let action = pref.and_then(|p| p.get("action")).and_then(Value::as_str);
+    let restored = pref.and_then(|p| p.get("ok")).and_then(Value::as_bool) == Some(true);
+    let error = v.get("error").and_then(Value::as_str).unwrap_or_default();
+    let pref = match (pref, action) {
+        (Some(p), Some("held")) => LogonPref::Held(held_of(p, reaper)),
+        (Some(_), Some("none" | "restore")) if restored => LogonPref::Original,
+        _ if !error.is_empty() => LogonPref::Failed(error.to_owned()),
+        (Some(p), Some(_)) => LogonPref::Failed(format!(
+            "the preference was not restored: it reads {}",
+            p.get("after")
+                .and_then(scalar_text)
+                .unwrap_or_else(|| "nothing readable".to_owned())
+        )),
+        _ => LogonPref::Failed("the logon task did not check the preference".to_owned()),
+    };
+    Some(Logon { at, pref })
 }
 
 /// `expect.json`.
@@ -216,6 +333,125 @@ mod tests {
             None
         );
         assert_eq!(result_for("", TUNING, "r1"), None);
+    }
+
+    const AT: &str = "2026-09-28T06:00:00.1234567Z";
+
+    /// `logon.result.json` as `Invoke-IemTaskRequest -Kind logon` writes it.
+    fn logon_json(pref: &str) -> String {
+        format!(
+            r#"{{"kind":"logon","id":"logon","ok":true,"at":"{AT}","result":{{"tuning":"absent","pref":{pref}}},"error":""}}"#
+        )
+    }
+
+    fn logon(pref: LogonPref) -> Option<Logon> {
+        Some(Logon {
+            at: AT.into(),
+            pref,
+        })
+    }
+
+    fn held(value: Option<&str>, reaper: bool, names: &str) -> Option<Logon> {
+        logon(LogonPref::Held(PrefHeld {
+            value: value.map(str::to_owned),
+            by: CardHolders {
+                reaper,
+                names: names.into(),
+            },
+        }))
+    }
+
+    /// The logon task (G1) follows the guard's PrefCheck rule (#9
+    /// 2026-09-28): a preference it did not write under a holder of the
+    /// driver module is named, and REAPER among the holders is known by
+    /// `pc.toml`'s image (any case, ".exe" or not: an unreadable holder list
+    /// names a running REAPER by its process name).
+    #[test]
+    fn the_logon_result_names_a_preference_left_under_a_holder() {
+        assert_eq!(LOGON, "logon");
+        assert_eq!(result_name(LOGON), "logon.result.json");
+        let both = logon_json(
+            r#"{"before":"32","after":"32","kind":"DWord","attempts":0,"action":"held","holders":["reaper.exe:11","spike.exe:99"],"ok":false}"#,
+        );
+        assert_eq!(
+            logon_result(&both, "reaper.exe"),
+            held(Some("32"), true, "reaper.exe (11), spike.exe (99)")
+        );
+        let assumed = logon_json(r#"{"before":"32","action":"held","holders":["REAPER:11"]}"#);
+        for image in ["reaper.exe", "Reaper.EXE", "reaper"] {
+            assert_eq!(
+                logon_result(&assumed, image),
+                held(Some("32"), true, "REAPER (11)"),
+                "{image}"
+            );
+        }
+        let spike = logon_json(r#"{"before":32,"action":"held","holders":["spike.exe:99"]}"#);
+        assert_eq!(
+            logon_result(&spike, "reaper.exe"),
+            held(Some("32"), false, "spike.exe (99)")
+        );
+        // A holder without a pid is named as read; an unreadable value is none.
+        let odd = logon_json(r#"{"before":null,"action":"held","holders":["odd","odd:x","x:"]}"#);
+        assert_eq!(
+            logon_result(&odd, "reaper.exe"),
+            held(None, false, "odd, odd:x, x:")
+        );
+        // "reaperx.exe" is not REAPER.
+        let near = logon_json(r#"{"before":"32","action":"held","holders":["reaperx.exe:5"]}"#);
+        assert_eq!(
+            logon_result(&near, "reaper.exe"),
+            held(Some("32"), false, "reaperx.exe (5)")
+        );
+        // Windows PowerShell's byte-order mark is skipped.
+        assert_eq!(
+            logon_result(&format!("\u{feff}{both}"), "reaper.exe"),
+            held(Some("32"), true, "reaper.exe (11), spike.exe (99)")
+        );
+    }
+
+    #[test]
+    fn the_logon_result_at_the_original_or_failed() {
+        for action in ["none", "restore"] {
+            let text = logon_json(&format!(
+                r#"{{"before":"32","after":"64","attempts":1,"action":"{action}","holders":[],"ok":true}}"#
+            ));
+            assert_eq!(
+                logon_result(&text, "reaper.exe"),
+                logon(LogonPref::Original),
+                "{action}"
+            );
+        }
+        let failed = |why: &str| logon(LogonPref::Failed(why.into()));
+        let not_restored = logon_json(
+            r#"{"before":"32","after":"32","attempts":3,"action":"restore","holders":[],"ok":false}"#,
+        );
+        assert_eq!(
+            logon_result(&not_restored, "reaper.exe"),
+            failed("the preference was not restored: it reads 32")
+        );
+        let error = format!(
+            r#"{{"kind":"logon","id":"logon","ok":false,"at":"{AT}","result":null,"error":"the logon task needs -PrefKey, -PrefName, -PrefOriginal and -Module"}}"#
+        );
+        assert_eq!(
+            logon_result(&error, "reaper.exe"),
+            failed("the logon task needs -PrefKey, -PrefName, -PrefOriginal and -Module")
+        );
+        let silent = format!(r#"{{"kind":"logon","ok":false,"at":"{AT}"}}"#);
+        assert_eq!(
+            logon_result(&silent, "reaper.exe"),
+            failed("the logon task did not check the preference")
+        );
+        // Not the logon task's, without its time, or unparsable: none.
+        let other = format!(
+            r#"{{"kind":"tuning","id":"t","ok":true,"at":"{AT}","result":{{"pref":{{"action":"held","holders":["reaper.exe:11"]}}}}}}"#
+        );
+        assert_eq!(logon_result(&other, "reaper.exe"), None);
+        assert_eq!(
+            logon_result(r#"{"kind":"logon","ok":true,"result":null}"#, "reaper.exe"),
+            None
+        );
+        assert_eq!(logon_result(r#"{"kind":"logon","at":"#, "reaper.exe"), None);
+        assert_eq!(logon_result("", "reaper.exe"), None);
     }
 
     fn expect() -> Expect {

@@ -15,9 +15,12 @@
 use std::fmt;
 use std::time::Duration;
 
+use iem_win::prefwin::Checked;
 use iem_win::spawn::Placement;
 
 use crate::cancel::{Cancel, Preempted};
+use crate::effects::app::holders_text;
+use crate::effects::tuning::Logon;
 use crate::handover::{AppExit, ReaperFacts};
 use crate::plan::{Facts, Health, Mode};
 use crate::proto::HilOut;
@@ -220,13 +223,98 @@ pub fn facts_from(p: &Procs, holders: Option<&[(u32, String)]>, ports: Option<Po
 }
 
 /// The driver module's holders other than REAPER: they must leave before
-/// REAPER starts (design §5.2 "back to event" step 5, I3).
+/// REAPER starts (design §5.2 "back to event" step 4, I3).
 pub fn foreign_holders(holders: &[(u32, String)], reaper: &[u32]) -> Vec<(u32, String)> {
     holders
         .iter()
         .filter(|(pid, _)| !reaper.contains(pid))
         .cloned()
         .collect()
+}
+
+/// `PrefCheck`'s restore: up to this many writes, each read back.
+pub const PREF_ATTEMPTS: u32 = 3;
+
+/// Who holds the driver module when `PrefCheck` finds something other than
+/// REAPER's original (#9 2026-09-28).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CardHolders {
+    /// REAPER is one of them.
+    pub reaper: bool,
+    /// Every holder: image and pid.
+    pub names: String,
+}
+
+/// The holders `PrefCheck` must not write under; `None` while nothing holds
+/// the driver module (the restore may write). Anything counts, our engine
+/// too. An unreadable list assumes that a running REAPER holds it (as
+/// [`facts_from`] does), so a failed read never writes under a REAPER that
+/// may hold the card.
+pub fn card_holders(holders: Option<&[(u32, String)]>, reaper: &[u32]) -> Option<CardHolders> {
+    let assumed: Vec<(u32, String)> = match holders {
+        Some(_) => Vec::new(),
+        None => reaper
+            .iter()
+            .map(|pid| (*pid, "REAPER".to_owned()))
+            .collect(),
+    };
+    let list = holders.unwrap_or(&assumed);
+    (!list.is_empty()).then(|| CardHolders {
+        reaper: list.iter().any(|(pid, _)| reaper.contains(pid)),
+        names: holders_text(list),
+    })
+}
+
+/// A preference that is not REAPER's original while the driver module is
+/// held: `PrefCheck` wrote nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrefHeld {
+    /// What the preference reads (`None`: unreadable).
+    pub value: Option<String>,
+    pub by: CardHolders,
+}
+
+impl PrefHeld {
+    /// The alarm, the report line and the status line.
+    pub fn text(&self) -> String {
+        let at = self
+            .value
+            .as_ref()
+            .map_or_else(|| "unreadable".to_owned(), |v| format!("at {v}"));
+        if self.by.reaper {
+            format!(
+                "REAPER runs with the preferred buffer {at}; it is restored at REAPER's next start"
+            )
+        } else {
+            format!(
+                "the driver module is held by {} with the preferred buffer {at}; nothing was \
+                 written",
+                self.by.names
+            )
+        }
+    }
+}
+
+/// What `PrefCheck` found (design §5.2; #9 2026-09-28).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrefSeen {
+    /// REAPER's original is there, after this many writes (each read back;
+    /// 0: it already was).
+    Original(u32),
+    /// Not the original while the driver module is held: nothing written.
+    Held(PrefHeld),
+}
+
+impl From<Checked<CardHolders>> for PrefSeen {
+    fn from(c: Checked<CardHolders>) -> Self {
+        match c {
+            Checked::Original(writes) => Self::Original(writes),
+            Checked::Open { found, by } => Self::Held(PrefHeld {
+                value: found.map(|p| p.raw),
+                by,
+            }),
+        }
+    }
 }
 
 /// Whether an engine runs that is not the guard's own child (`ours`).
@@ -401,8 +489,11 @@ pub trait Pc {
     /// Native reads (power plan, service start types) against the tuning
     /// module's record; `Some` describes a drift. On mode changes and hourly.
     fn tuning_drift(&mut self) -> R<Option<String>>;
-    /// `prefwin::restore(.., 3)`: the writes it took (each read back).
-    fn pref_check(&mut self) -> R<u32>;
+    /// `prefwin::check(.., PREF_ATTEMPTS, ..)` with [`card_holders`]:
+    /// REAPER's original, or restored (the writes it took, each read back)
+    /// while nothing holds the driver module; never a write while something
+    /// does ([`PrefSeen::Held`]).
+    fn pref_check(&mut self) -> R<PrefSeen>;
     /// The band's data refresh of an entry (`iem-migrate band`, …): a
     /// started command finishes (a mutation); "ide event" stops the refresh
     /// between two commands and after the last.
@@ -483,6 +574,11 @@ pub trait Pc {
     /// guard's start for its log and status ([`job_note`]); every start
     /// reads the job again. Never waits.
     fn job(&mut self) -> Result<Placement, String>;
+    /// The elevated logon task's last result (`<elevated root>\tasks\out\
+    /// logon.result.json`, G1): what it found of the preference
+    /// (`effects::tuning::logon_result`); `None`: no result or an unreadable
+    /// one. Never waits.
+    fn logon(&mut self) -> Option<Logon>;
 }
 
 /// A scripted PC for the daemon's tests.
@@ -596,7 +692,13 @@ pub mod fake {
         pub status: Status,
         pub quiet_for: Duration,
         pub stage_peaks: Vec<f64>,
+        /// The writes a restore takes; 0: the preference holds REAPER's
+        /// original. A script: every check finds it so again.
         pub pref_attempts: u32,
+        /// What the preference reads while it is not the original.
+        pub pref_value: String,
+        /// Every write the checks made (none under a holder).
+        pub pref_writes: u32,
         pub drift: Option<String>,
         /// Handed out (and emptied) by the next `procs()`.
         pub exited: Vec<(Kid, Option<i32>)>,
@@ -624,6 +726,8 @@ pub mod fake {
         /// What `job` reads (a fixed fact of the process: not a recorded
         /// call).
         pub job: Result<Placement, String>,
+        /// What `logon` reads (a file read: not a recorded call).
+        pub logon: Option<Logon>,
         calls: Vec<(Call, Instant)>,
         fails: HashMap<Call, String>,
         blocked: Vec<Call>,
@@ -665,6 +769,8 @@ pub mod fake {
                 quiet_for: Duration::from_secs(600),
                 stage_peaks: vec![-90.0],
                 pref_attempts: 0,
+                pref_value: "32".into(),
+                pref_writes: 0,
                 drift: None,
                 exited: Vec::new(),
                 notices: Vec::new(),
@@ -687,6 +793,7 @@ pub mod fake {
                 engine_up: true,
                 recipients: Some(1),
                 job: Ok(Placement::NoJob),
+                logon: None,
                 calls: Vec::new(),
                 fails: HashMap::new(),
                 blocked: Vec::new(),
@@ -885,9 +992,35 @@ pub mod fake {
             Ok(self.drift.clone())
         }
 
-        fn pref_check(&mut self) -> R<u32> {
+        /// The PC's decision over the facts: REAPER (pid 1), a foreign
+        /// holder (99) or an engine (2) holds the driver module.
+        fn pref_check(&mut self) -> R<PrefSeen> {
             self.enter(Call::PrefCheck, None)?;
-            Ok(self.pref_attempts)
+            if self.pref_attempts == 0 {
+                return Ok(PrefSeen::Original(0));
+            }
+            let f = self.facts;
+            let mut holders = Vec::new();
+            if f.reaper_holds_module {
+                holders.push((1, "reaper.exe".to_owned()));
+            }
+            if f.other_module_holder {
+                holders.push((99, "spike.exe".to_owned()));
+            }
+            if f.engine {
+                holders.push((2, "iem-engine.exe".to_owned()));
+            }
+            let reaper: Vec<u32> = if f.reaper { vec![1] } else { Vec::new() };
+            Ok(match card_holders(Some(holders.as_slice()), &reaper) {
+                Some(by) => PrefSeen::Held(PrefHeld {
+                    value: Some(self.pref_value.clone()),
+                    by,
+                }),
+                None => {
+                    self.pref_writes += self.pref_attempts;
+                    PrefSeen::Original(self.pref_attempts)
+                }
+            })
         }
 
         fn data(&mut self, mode: Mode, c: &Cancel) -> R<String> {
@@ -1056,6 +1189,10 @@ pub mod fake {
 
         fn job(&mut self) -> Result<Placement, String> {
             self.job.clone()
+        }
+
+        fn logon(&mut self) -> Option<Logon> {
+            self.logon.clone()
         }
     }
 }
@@ -1628,7 +1765,7 @@ mod tests {
         assert_eq!(pc.engine_interlock(60, &c).unwrap(), (true, "quiet".into()));
         assert_eq!(pc.engine_stage_peaks(60, &c).unwrap(), [-90.0]);
         assert_eq!(pc.band_quiet_for().unwrap(), Duration::from_secs(600));
-        assert_eq!(pc.pref_check().unwrap(), 0);
+        assert_eq!(pc.pref_check().unwrap(), PrefSeen::Original(0));
         assert_eq!(pc.tuning_drift().unwrap(), None);
         assert_eq!(pc.engine_health().unwrap(), Health::Dead);
         pc.health(Health::Healthy);
@@ -1694,6 +1831,157 @@ mod tests {
         pc.fail(Call::HilSignal, "refused");
         assert!(pc.engine_hil_signal("mic2", -30.0, 5.0, &[94]).is_err());
         assert_eq!(pc.hil_signals.len(), 1);
+    }
+
+    fn holders(list: &[(u32, &str)]) -> Vec<(u32, String)> {
+        list.iter()
+            .map(|(pid, n)| (*pid, (*n).to_owned()))
+            .collect()
+    }
+
+    fn by(reaper: bool, names: &str) -> CardHolders {
+        CardHolders {
+            reaper,
+            names: names.to_owned(),
+        }
+    }
+
+    /// `PrefCheck` never writes while a process holds the driver module
+    /// (#9 2026-09-28): who holds it, as read; anything counts, REAPER is
+    /// named. An unreadable list assumes that a running REAPER holds it (as
+    /// `facts_from` does), so a failed read never writes under a REAPER that
+    /// may hold the card.
+    #[test]
+    fn pref_check_names_whatever_holds_the_driver() {
+        let reaper = [11];
+        assert_eq!(card_holders(Some(NO_HOLDER), &reaper), None);
+        assert_eq!(card_holders(Some(NO_HOLDER), &[]), None);
+        let one = holders(&[(11, "reaper.exe")]);
+        assert_eq!(
+            card_holders(Some(one.as_slice()), &reaper),
+            Some(by(true, "reaper.exe (11)"))
+        );
+        let spike = holders(&[(99, "spike.exe")]);
+        assert_eq!(
+            card_holders(Some(spike.as_slice()), &reaper),
+            Some(by(false, "spike.exe (99)"))
+        );
+        let both = holders(&[(99, "spike.exe"), (11, "reaper.exe")]);
+        assert_eq!(
+            card_holders(Some(both.as_slice()), &reaper),
+            Some(by(true, "spike.exe (99), reaper.exe (11)"))
+        );
+        // An engine holds it too.
+        let engine = holders(&[(13, "iem-engine.exe")]);
+        assert_eq!(
+            card_holders(Some(engine.as_slice()), &[]),
+            Some(by(false, "iem-engine.exe (13)"))
+        );
+        // Unreadable: a running REAPER is assumed to hold it, nobody else.
+        assert_eq!(card_holders(None, &reaper), Some(by(true, "REAPER (11)")));
+        assert_eq!(card_holders(None, &[]), None);
+    }
+
+    #[test]
+    fn a_held_preference_reads_as_a_sentence() {
+        let held = |value: Option<&str>, by: CardHolders| PrefHeld {
+            value: value.map(str::to_owned),
+            by,
+        };
+        assert_eq!(
+            held(Some("32"), by(true, "reaper.exe (11)")).text(),
+            "REAPER runs with the preferred buffer at 32; it is restored at REAPER's next start"
+        );
+        assert_eq!(
+            held(None, by(true, "REAPER (11)")).text(),
+            "REAPER runs with the preferred buffer unreadable; it is restored at REAPER's next \
+             start"
+        );
+        assert_eq!(
+            held(Some("128"), by(false, "spike.exe (99)")).text(),
+            "the driver module is held by spike.exe (99) with the preferred buffer at 128; \
+             nothing was written"
+        );
+        assert_eq!(
+            held(None, by(false, "spike.exe (99), iem-engine.exe (13)")).text(),
+            "the driver module is held by spike.exe (99), iem-engine.exe (13) with the preferred \
+             buffer unreadable; nothing was written"
+        );
+    }
+
+    #[test]
+    fn a_check_becomes_what_pref_check_reports() {
+        use iem_win::prefwin::{Checked, Kind, Pref};
+        assert_eq!(PrefSeen::from(Checked::Original(0)), PrefSeen::Original(0));
+        assert_eq!(PrefSeen::from(Checked::Original(2)), PrefSeen::Original(2));
+        let found = Pref {
+            kind: Kind::Dword,
+            raw: "32".into(),
+        };
+        assert_eq!(
+            PrefSeen::from(Checked::Open {
+                found: Some(found),
+                by: by(true, "reaper.exe (11)")
+            }),
+            PrefSeen::Held(PrefHeld {
+                value: Some("32".into()),
+                by: by(true, "reaper.exe (11)")
+            })
+        );
+        assert_eq!(
+            PrefSeen::from(Checked::Open {
+                found: None,
+                by: by(false, "spike.exe (99)")
+            }),
+            PrefSeen::Held(PrefHeld {
+                value: None,
+                by: by(false, "spike.exe (99)")
+            })
+        );
+        assert_eq!(PREF_ATTEMPTS, 3);
+    }
+
+    /// The fake decides with `card_holders` over its facts: REAPER, a
+    /// foreign holder or an engine holds the driver.
+    #[test]
+    fn the_fake_never_writes_the_preference_under_a_holder() {
+        let mut pc = FakePc::new(Facts::default());
+        assert_eq!(pc.pref_value, "32");
+        pc.pref_attempts = 2;
+        assert_eq!(pc.pref_check().unwrap(), PrefSeen::Original(2));
+        assert_eq!(pc.pref_writes, 2);
+        for (f, holder) in [
+            (up(), by(true, "reaper.exe (1)")),
+            (
+                Facts {
+                    other_module_holder: true,
+                    ..Facts::default()
+                },
+                by(false, "spike.exe (99)"),
+            ),
+            (
+                Facts {
+                    engine: true,
+                    ..Facts::default()
+                },
+                by(false, "iem-engine.exe (2)"),
+            ),
+        ] {
+            let mut pc = FakePc::new(f);
+            pc.pref_attempts = 1;
+            assert_eq!(
+                pc.pref_check().unwrap(),
+                PrefSeen::Held(PrefHeld {
+                    value: Some("32".into()),
+                    by: holder
+                }),
+                "{f:?}"
+            );
+            assert_eq!(pc.pref_writes, 0, "{f:?}");
+            // The original is there: nothing to hold back.
+            pc.pref_attempts = 0;
+            assert_eq!(pc.pref_check().unwrap(), PrefSeen::Original(0));
+        }
     }
 
     #[test]

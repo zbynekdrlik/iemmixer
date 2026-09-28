@@ -148,10 +148,15 @@ pub fn plan(from: Mode, to: Mode, f: &Facts) -> Vec<Step> {
     match to {
         Mode::Event => {
             stop_iemmixer(f, &mut out);
-            out.extend([Step::TuningExit, Step::PrefCheck]);
+            out.push(Step::TuningExit);
+            // Every other holder of the driver module leaves before the
+            // preference is checked: the check never writes while a process
+            // has the driver open (#9 2026-09-28), so it must not find one
+            // the plan could have waited for.
             if f.other_module_holder {
                 out.push(Step::HolderGone);
             }
+            out.push(Step::PrefCheck);
             // A REAPER that runs without the card (its time trigger, or a start
             // while our engine held it) is saved, quit and started again.
             let reaper_ok = f.reaper && f.reaper_holds_module;
@@ -543,6 +548,12 @@ mod tests {
             if let Some(e) = at(&p, Step::EngineStop) {
                 assert!(e < pref, "{from:?} {f:?}: EngineStop after PrefCheck");
             }
+            // Every other holder of the driver module has left: the check
+            // never writes while a process has the driver open (#9
+            // 2026-09-28), so it must not find one it could have waited for.
+            if let Some(h) = at(&p, Step::HolderGone) {
+                assert!(h < pref, "{from:?} {f:?}: HolderGone after PrefCheck");
+            }
         });
     }
 
@@ -608,8 +619,9 @@ mod tests {
             before(Step::EngineStop, Step::ServerStop);
             before(Step::ServerStop, Step::TrayStop);
             before(Step::TrayStop, Step::TuningExit);
+            before(Step::TuningExit, Step::HolderGone);
             before(Step::TuningExit, Step::PrefCheck);
-            before(Step::PrefCheck, Step::HolderGone);
+            before(Step::HolderGone, Step::PrefCheck);
             before(Step::HolderGone, Step::ReaperSaveQuit);
             before(Step::HolderGone, Step::ReaperStart);
             before(Step::ReaperSaveQuit, Step::ReaperStart);
@@ -1049,6 +1061,21 @@ mod tests {
         let p = plan(Mode::Dev, Mode::Event, &f);
         let gone = at(&p, Step::HolderGone).expect("HolderGone");
         assert!(gone < at(&p, Step::ReaperStart).unwrap(), "{p:?}");
+        // The holder leaves before the preference is checked: the check
+        // never writes while a process has the driver open (#9 2026-09-28).
+        assert_eq!(
+            p,
+            [
+                Step::TuningExit,
+                Step::HolderGone,
+                Step::PrefCheck,
+                Step::ReaperStart,
+                Step::ReaperHandover,
+                Step::AppStart,
+                Step::AppHandover,
+                Step::Fingerprint,
+            ]
+        );
         for pf in [PrefFail::StartReaperWithAlarm, PrefFail::KeepReaperDown] {
             assert_eq!(
                 on_error(Mode::Event, Step::HolderGone, None, pf),
