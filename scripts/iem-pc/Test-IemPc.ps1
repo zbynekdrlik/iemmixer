@@ -438,7 +438,7 @@ try {
     # ---- the preference and the elevated tasks' body ----
     # A driver module no process holds, and one every process holds.
     $free = 'iemmixer-free-' + $id + '.dll'
-    $everyone = 'kernel32.dll'
+    $heldModule = 'kernel32.dll'
     New-ItemProperty -LiteralPath $regKey -Name 'Pref' -Value 32 -PropertyType DWord | Out-Null
     $noTuning = Join-Path $base 'no-tuning'
     $lg = Invoke-IemTaskRequest -Kind logon -Root $root -OutDir $eout -TuningDir $noTuning -PrefKey $regKey -PrefName 'Pref' -PrefOriginal '64' -Module $free
@@ -446,14 +446,14 @@ try {
     Assert ($lg.ok -and $pv.value -eq 64 -and $pv.kind -eq 'DWord' -and $lg.result.pref.attempts -eq 1 -and $lg.result.pref.action -ceq 'restore' -and $lg.result.tuning -eq 'absent') 'logon-restores-the-preference-keeping-its-kind'
     Assert ((Get-Content -LiteralPath (Join-Path $eout 'logon.result.json') -Raw | ConvertFrom-Json).ok) 'logon-writes-its-result-in-the-admin-only-folder'
     Assert (-not (Test-Path -LiteralPath (Join-Path $root 'guard'))) 'the-elevated-task-writes-nothing-in-the-users-root'
-    $r0 = Restore-IemPref -Key $regKey -Name 'Pref' -Original '64' -Module $everyone
+    $r0 = Restore-IemPref -Key $regKey -Name 'Pref' -Original '64' -Module $heldModule
     Assert ($r0.ok -and $r0.attempts -eq 0 -and $r0.action -ceq 'none') 'pref-at-its-original-is-not-written'
     # Not the original while a process holds the driver module (REAPER started
     # at 32 after a power loss): never written, the value and the holders named.
     Set-ItemProperty -LiteralPath $regKey -Name 'Pref' -Value 32 -Type DWord
-    $ph = Restore-IemPref -Key $regKey -Name 'Pref' -Original '64' -Module $everyone
+    $ph = Restore-IemPref -Key $regKey -Name 'Pref' -Original '64' -Module $heldModule
     Assert ($ph.action -ceq 'held' -and -not $ph.ok -and $ph.attempts -eq 0 -and $ph.before -ceq '32' -and $ph.after -ceq '32' -and @($ph.holders).Count -gt 1 -and (Get-IemPref -Key $regKey -Name 'Pref').value -eq 32) 'pref-never-written-while-a-process-holds-the-driver-module'
-    $lh = Invoke-IemTaskRequest -Kind logon -Root $root -OutDir $eout -TuningDir $noTuning -PrefKey $regKey -PrefName 'Pref' -PrefOriginal '64' -Module $everyone
+    $lh = Invoke-IemTaskRequest -Kind logon -Root $root -OutDir $eout -TuningDir $noTuning -PrefKey $regKey -PrefName 'Pref' -PrefOriginal '64' -Module $heldModule
     $lj = Get-Content -LiteralPath (Join-Path $eout 'logon.result.json') -Raw | ConvertFrom-Json
     Assert ($lh.ok -and $lj.ok -and $lj.kind -ceq 'logon' -and $lj.at -and $lj.result.pref.action -ceq 'held' -and $lj.result.pref.before -ceq '32' -and @($lj.result.pref.holders).Count -gt 1 -and (Get-IemPref -Key $regKey -Name 'Pref').value -eq 32) 'logon-leaves-a-held-preference-and-names-it-for-the-guard'
     Set-ItemProperty -LiteralPath $regKey -Name 'Pref' -Value 64 -Type DWord
