@@ -56,7 +56,7 @@
   - A crash dialog never holds the card: the engine suppresses Windows error UI at start (design §3).
   - The integrity scan's force-kill words never appear in `crates/`, `scripts/`, `.github/`, `e2e/` — comments included. Write "force-end" in prose.
 - **The card:**
-  - Only 96 kHz and preferred 32 for iemmixer (`format::admit`), and a **measured** period of 32 (design §3). The preference holds 32 only inside the open window (design §3). REAPER never starts unless the preference reads back as the recorded original — the one exception is the `[guard] on_pref_fail` choice after three failed restores at an event, recorded on #9 in Task 13 Step 2 (design §5.2 step 4).
+  - Only 96 kHz and preferred 32 for iemmixer (`format::admit`), and a **measured** period of 32 (design §3). The preference holds 32 only inside the open window (design §3). REAPER never starts unless the preference reads back as the recorded original — the one exception is the `[guard] on_pref_fail` choice after three failed restores at an event, recorded on #9 in Task 13 Step 2 (design §5.2 step 5).
   - `set_sample_rate`, `set_clock_source`, `open_control_panel` never appear (integrity). Every output is zeroed (A1). Dante is never touched.
 - **I3:** the engine refuses while any process holds the driver module (`[card] module`; no process names — purpose-built); the guard never starts REAPER while an engine process exists or the driver module has any holder.
 - **G7:** the predecessor's code, config, deployment and autostarts stay untouched, and so does the shared tunnel's ingress (read back only). We start the app only through our own `\iemmixer\iemmixer-StartApp` (its exe directly), never its launcher script.
@@ -364,7 +364,7 @@ pub fn leave(store: &mut impl PrefStore, original: &Pref) -> Result<(), PrefErro
     write_checked(store, original)
 }
 
-/// The guard's restore (design §5.2 step 4): up to `attempts` writes of the
+/// The guard's restore (design §5.2 step 5): up to `attempts` writes of the
 /// original, each read back; Ok as soon as the store holds the original.
 pub fn restore(store: &mut impl PrefStore, original: &Pref, attempts: u32) -> Result<u32, PrefError> {
     let mut last = PrefError::Read("no attempt".into());
@@ -1940,7 +1940,7 @@ for a in actions/download-artifact actions/attest-build-provenance; do
 
     Record the derivation in the ops runbook only. It is confirmed at the first real stop (Task 17).
   - **Validation:** `tools/check_import.sh` as today. The `iem-engine check-site` run needs the Task 15 bundle on the PC and moves to Task 16 Step 3.
-- [ ] **Step 2: Decide `on_pref_fail` and record it on #9** (design §5.2 step 4; this is the agent's own rule, not an owner ruling, so the agent decides and records it before Task 18). The choice after three failed restores at an event is between silence (REAPER down) and REAPER possibly at 32 with an alarm. **Decision: `start_reaper_with_alarm`** — silence is the one failure the band certainly notices (P9); REAPER at an unexpected buffer still plays, the handover checks still run, and the owner is told at once. Post it on #9 as `ROZHODNUTÉ:` with this reasoning, then write the value into `[guard]`.
+- [ ] **Step 2: Decide `on_pref_fail` and record it on #9** (design §5.2 step 5; this is the agent's own rule, not an owner ruling, so the agent decides and records it before Task 18). The choice after three failed restores at an event is between silence (REAPER down) and REAPER possibly at 32 with an alarm. **Decision: `start_reaper_with_alarm`** — silence is the one failure the band certainly notices (P9); REAPER at an unexpected buffer still plays, the handover checks still run, and the owner is told at once. Post it on #9 as `ROZHODNUTÉ:` with this reasoning, then write the value into `[guard]`.
 - [ ] **Step 3: Denylist terms** (P6). Add any `[guard]` value written now that is a name (not a number or hash) to the same three places in the same session, and re-run the denylist scan over the committed design note and plan.
 - [ ] **Step 4: `hil.yml`.** Every input is read from `env:` and validated before any use (no `${{ inputs.* }}` inside a script); the self-hosted `pc` job holds no secret and no token.
 

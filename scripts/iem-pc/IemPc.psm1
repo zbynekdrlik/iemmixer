@@ -1147,7 +1147,7 @@ function Test-IemPrefIsOriginal {
 
 function Restore-IemPref {
     # The preferred buffer back to its recorded original: kind kept, each write
-    # read back, three attempts at most (design section 5.2 step 4; G1 at logon).
+    # read back, three attempts at most (design section 5.2 step 5; G1 at logon).
     param([Parameter(Mandatory)][string]$Key, [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$Original)
     if ($Original -cnotmatch '^[0-9]{1,5}$') { throw "original '$Original' refused (digits)" }
     $path = ConvertTo-IemHkcuPath -Key $Key
