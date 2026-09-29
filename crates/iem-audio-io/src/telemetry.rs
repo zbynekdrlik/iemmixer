@@ -1105,4 +1105,151 @@ mod tests {
         let mut now = ActivityGuard::new(1);
         assert!(now.observe(ACTIVITY_THRESHOLD * 1.001));
     }
+
+    fn g(kind: GlitchKind, at_ns: u64, value: u64) -> Glitch {
+        Glitch { kind, at_ns, value }
+    }
+
+    #[test]
+    fn glitch_log_keeps_its_capacity_and_counts_drops() {
+        let log = GlitchLog::new(3);
+        for i in 0..4 {
+            log.push(g(GlitchKind::Late, i, 10 + i));
+        }
+        let mut out = Vec::new();
+        log.drain(&mut out);
+        assert_eq!(out.iter().map(|x| x.at_ns).collect::<Vec<_>>(), [0, 1, 2]);
+        assert_eq!(log.dropped(), 1);
+        // After a drain the ring takes three more and wraps around its slots.
+        for i in 10..13 {
+            log.push(g(GlitchKind::Missed, i, i));
+        }
+        out.clear();
+        log.drain(&mut out);
+        assert_eq!(
+            out.iter().map(|x| x.at_ns).collect::<Vec<_>>(),
+            [10, 11, 12]
+        );
+        out.clear();
+        log.drain(&mut out);
+        assert!(out.is_empty());
+        assert_eq!(log.dropped(), 1);
+    }
+
+    #[test]
+    fn glitch_kinds_and_large_values_round_trip() {
+        let log = GlitchLog::new(8);
+        let all = [
+            g(GlitchKind::Late, 1, 500_001),
+            g(GlitchKind::Missed, 2, 700_000),
+            g(GlitchKind::Overrun, 3, 400_000),
+            g(GlitchKind::PositionGap, 4, 64),
+        ];
+        for x in all {
+            log.push(x);
+        }
+        log.push(g(GlitchKind::Missed, 5, u64::MAX));
+        let mut out = Vec::new();
+        log.drain(&mut out);
+        assert_eq!(&out[..4], &all);
+        assert_eq!(out[4], g(GlitchKind::Missed, 5, (1 << 62) - 1));
+        assert_eq!(
+            [
+                GlitchKind::Late,
+                GlitchKind::Missed,
+                GlitchKind::Overrun,
+                GlitchKind::PositionGap
+            ]
+            .map(GlitchKind::name),
+            ["late", "missed", "overrun", "position-gap"]
+        );
+    }
+
+    #[test]
+    fn judged_glitches_enter_the_log_with_their_times() {
+        let t = Telemetry::new(32, 96_000.0);
+        let mut at = 1_000;
+        let mut pos = 0;
+        for _ in 0..WARMUP {
+            t.on_callback(at, Some(pos));
+            at += P;
+            pos += 32;
+        }
+        let prev = at - P;
+        let late_at = prev + P * 3 / 2 + 1;
+        t.on_callback(late_at, Some(pos));
+        let missed_at = late_at + 2 * P;
+        t.on_callback(missed_at, Some(pos + 32 + 64));
+        t.on_done(P + 1);
+        t.on_done(P);
+        let mut out = Vec::new();
+        t.drain_glitches(&mut out);
+        assert_eq!(
+            out,
+            [
+                g(GlitchKind::Late, late_at, P * 3 / 2 + 1),
+                g(GlitchKind::Missed, missed_at, 2 * P),
+                g(GlitchKind::PositionGap, missed_at, 96),
+                g(GlitchKind::Overrun, missed_at, P + 1),
+            ]
+        );
+        assert_eq!(t.snapshot().glitches_dropped, 0);
+    }
+
+    #[test]
+    fn warmup_callbacks_leave_no_glitch() {
+        let t = Telemetry::new(32, 96_000.0);
+        for i in 0..WARMUP {
+            t.on_callback(1_000 + i * 10 * P, Some(i as i64 * 7));
+        }
+        let mut out = Vec::new();
+        t.drain_glitches(&mut out);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn callback_cpus_and_thread_switches_are_counted() {
+        let t = Telemetry::new(32, 96_000.0);
+        t.on_thread(14, 900);
+        t.on_thread(14, 900);
+        t.on_thread(3, 900);
+        t.on_thread(63, 900);
+        t.on_thread(64, 901);
+        let s = t.snapshot();
+        assert_eq!(s.callback_cpus, [(3, 1), (14, 2), (63, 1)]);
+        assert_eq!(
+            (s.cpu_other, s.callback_thread, s.thread_switches),
+            (1, 900, 1)
+        );
+        let fresh = Telemetry::new(32, 96_000.0).snapshot();
+        assert_eq!(
+            (
+                fresh.callback_cpus.len(),
+                fresh.callback_thread,
+                fresh.thread_switches
+            ),
+            (0, 0, 0)
+        );
+    }
+
+    #[test]
+    fn gap_scan_counts_gaps_at_the_threshold_and_keeps_the_largest() {
+        let mut s = GapScan::new(10_000);
+        s.observe(0, 9_999);
+        s.observe(9_999, 19_999);
+        assert_eq!((s.summary().reads, s.summary().over), (2, 1));
+        for i in 0..40_u64 {
+            s.observe(1_000_000 * i, 1_000_000 * i + 20_000 + i);
+        }
+        let sum = s.summary();
+        assert_eq!((sum.reads, sum.over, sum.gaps.total()), (42, 41, 41));
+        assert_eq!(sum.largest.len(), LARGEST);
+        assert_eq!(sum.largest[0], (39_000_000, 20_039));
+        assert_eq!(sum.largest[LARGEST - 1], (8_000_000, 20_008));
+        assert!(sum.largest.windows(2).all(|w| w[0].1 >= w[1].1));
+        // A gap smaller than, or equal to, the smallest kept one changes nothing.
+        s.observe(0, 10_001);
+        s.observe(5, 5 + 20_008);
+        assert_eq!(s.summary().largest, sum.largest);
+    }
 }
