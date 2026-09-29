@@ -534,6 +534,9 @@ jobs:
       - name: Spike PC module self-test (Windows PowerShell 5.1, as on the PC)
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/asio-spike/Test-SpikePc.ps1
+      - name: Tuning module self-test (Windows PowerShell 5.1, real backends on the ephemeral runner)
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/pc-tuning/Test-IemTuning.ps1
       - name: Rust toolchain (rust-toolchain.toml)
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -561,7 +564,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $b = Join-Path $env:RUNNER_TEMP 'asio-spike'
           New-Item -ItemType Directory -Force -Path $b | Out-Null
-          Copy-Item -LiteralPath target/release/examples/asio_spike.exe, scripts/asio-spike/SpikePc.psm1, scripts/asio-spike/spike-task.ps1, scripts/golden/GoldenPc.psm1 -Destination $b
+          Copy-Item -LiteralPath target/release/examples/asio_spike.exe, scripts/asio-spike/SpikePc.psm1, scripts/asio-spike/spike-task.ps1, scripts/golden/GoldenPc.psm1, scripts/pc-tuning/IemTuning.psm1, scripts/pc-tuning/IemMeasure.psm1 -Destination $b
           $lines = Get-ChildItem -LiteralPath $b -File | Sort-Object Name | ForEach-Object { '{0}  {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name }
           [IO.File]::WriteAllText((Join-Path $b 'SHA256SUMS'), (($lines -join "`n") + "`n"))
       - name: Upload (dev pushes only — the only spike that may reach the PC, P5)
