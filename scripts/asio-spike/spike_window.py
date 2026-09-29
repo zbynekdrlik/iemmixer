@@ -36,11 +36,13 @@ REQUIRED = (
 # numbers from 1 ("101-110,121-124"), or "all" only when asked (program inputs may
 # carry signal while the band is silent).
 ACTIVITY_CHANNELS = re.compile(r"all|[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*")
+CPU_LIST = re.compile(r"[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*")
 MAX_INPUT = 1024
 FRAMES = (32, 48, 64)
+MAX_SECONDS = 36_000     # an 8 h soak with margin (S1c design note §8 W4)
 POLL_S = 2.0
 REPO = "zbynekdrlik/iemmixer"
-BUNDLE_FILES = ("GoldenPc.psm1", "SpikePc.psm1", "asio_spike.exe", "spike-task.ps1")
+BUNDLE_FILES = ("GoldenPc.psm1", "IemMeasure.psm1", "IemTuning.psm1", "SpikePc.psm1", "asio_spike.exe", "spike-task.ps1")
 TASK = "-TaskPath '\\iemmixer\\' -TaskName 'iemmixer-asio-spike'"
 STATE = Path(os.environ.get("SPIKE_STATE", str(Path.home() / ".local/state/iemmixer/spike-window.json")))
 # Spike exit codes the owner must hear about at once (asio_spike.rs).
@@ -93,26 +95,35 @@ def event_now() -> bool:
     return EVENT_NOW.exists()
 
 
-def check_request(mode: str, frames: int | None, seconds: int, burn_us: int, stress: int, cycles: int) -> None:
-    if mode not in ("probe", "duplex", "reopen"):
+def check_request(mode: str, frames: int | None, seconds: int, burn_us: int, stress: int, cycles: int,
+                  cpu: int | None = None, threshold_us: int = 10, audio_cpus: str = "", stress_cpus: str = "") -> None:
+    if mode not in ("probe", "duplex", "reopen", "hwlat"):
         raise StepError(f"unknown mode {mode}")
-    if mode != "probe" and frames not in FRAMES:
+    if mode in ("duplex", "reopen") and frames not in FRAMES:
         raise StepError(f"--frames must be one of {FRAMES}")
-    if not (1 <= seconds <= 3600 and 0 <= burn_us <= 300 and 0 <= stress <= 8 and 1 <= cycles <= 20):
-        raise StepError("limits: seconds 1..3600, burn-us 0..300, stress 0..8, cycles 1..20")
+    if mode == "hwlat" and not (cpu is not None and 0 <= cpu <= 63 and 1 <= threshold_us <= 1000):
+        raise StepError("hwlat needs --cpu 0..63 and --threshold-us 1..1000")
+    if not (1 <= seconds <= MAX_SECONDS and 0 <= burn_us <= 300 and 0 <= stress <= 8 and 1 <= cycles <= 20):
+        raise StepError(f"limits: seconds 1..{MAX_SECONDS}, burn-us 0..300, stress 0..8, cycles 1..20")
+    for text in (audio_cpus, stress_cpus):
+        if text and not CPU_LIST.fullmatch(text):
+            raise StepError("CPU lists look like 14 or 0,1,6-13")
 
 
 def run_fields(env: dict[str, str], args) -> dict:
     """The request the PC task hands to the spike."""
     return {"mode": args.mode, "driver": env["PC_ASIO_DRIVER"], "module": env["PC_ASIO_MODULE"], "frames": args.frames or 0,
             "seconds": args.seconds, "burn_us": args.burn_us, "stress": args.stress, "panic_at": args.panic_at,
-            "cycles": args.cycles, "activity_channels": env["PC_ACTIVITY_CHANNELS"],
+            "cycles": args.cycles,
+            "cpu": -1 if getattr(args, "cpu", None) is None else args.cpu, "threshold_us": getattr(args, "threshold_us", 10),
+            "audio_cpus": getattr(args, "audio_cpus", "") or "", "stress_cpus": getattr(args, "stress_cpus", "") or "",
+            "activity_channels": env["PC_ACTIVITY_CHANNELS"],
             "timeout": run_timeout(args.mode, args.seconds, args.cycles)}
 
 
 def run_timeout(mode: str, seconds: int, cycles: int) -> int:
     """Seconds after which the PC task writes the stop file itself."""
-    return {"probe": 60, "duplex": seconds + 60, "reopen": 30 * cycles + 60}[mode]
+    return {"probe": 60, "duplex": seconds + 60, "reopen": 30 * cycles + 60, "hwlat": seconds + 60}[mode]
 
 
 def buffer_touched(state: dict) -> bool:
@@ -125,15 +136,23 @@ def buffer_touched(state: dict) -> bool:
 def undo_plan(state: dict, spike_running: bool) -> list[str]:
     """What leaving the window (or "ide event") must do, in order. While the
     card is free a spike may be starting (the task has not launched it yet),
-    so the graceful stop always runs; it is harmless when none runs."""
+    so the graceful stop always runs; it is harmless when none runs. A kernel
+    trace stops and the S1c mode levers revert before the buffer and REAPER
+    (S1c design note §5.2); the fingerprint is read after REAPER is back."""
     plan: list[str] = []
     card_away = state.get("card") in ("switching", "free")
     if spike_running or card_away:
         plan.append("stop-spike")
+    if state.get("trace"):
+        plan.append("trace-stop")
+    if state.get("tuning_mode"):
+        plan.append("tuning-exit")
     if buffer_touched(state):
         plan.append("restore-buffer")
     if card_away:
         plan.append("bring-back")
+        if state.get("fingerprint"):
+            plan.append("fingerprint")
     return plan
 
 
@@ -442,14 +461,16 @@ def cmd_set_buffer(env, args) -> None:
     print(json.dumps({"set-buffer": r}))
 
 
-def cmd_run(env, args) -> None:
+def cmd_run(env, args, on_poll=None) -> dict:
     state = open_state()
     need_preflight(state)
     if state["card"] != "free":
         raise StepError("the card is not free (run to-dev)")
-    check_request(args.mode, args.frames, args.seconds, args.burn_us, args.stress, args.cycles)
+    check_request(args.mode, args.frames, args.seconds, args.burn_us, args.stress, args.cycles,
+                  getattr(args, "cpu", None), getattr(args, "threshold_us", 10),
+                  getattr(args, "audio_cpus", "") or "", getattr(args, "stress_cpus", "") or "")
     current = state["pref_current"] if state["pref_current"] is not None else state["pref_original"]
-    if args.mode != "probe" and args.frames != current:
+    if args.mode in ("duplex", "reopen") and args.frames != current:
         raise StepError(f"the driver's preferred buffer is {current}: run set-buffer --frames {args.frames} first")
     fields = run_fields(env, args)
     rid = ps(env, f"Remove-Item -LiteralPath {pc(env, 'queue/stop')} -ErrorAction SilentlyContinue ; "
@@ -468,6 +489,8 @@ def cmd_run(env, args) -> None:
         if time.monotonic() >= next_pc:
             next_pc = time.monotonic() + 10
             st = ps(env, watch, timeout=60, event="abandon")
+            if on_poll is not None:
+                on_poll(st)
             if st.get("progress"):
                 print(json.dumps({"progress": st["progress"]}), flush=True)
             phase = (st.get("status") or {}).get("state")
@@ -483,24 +506,82 @@ def cmd_run(env, args) -> None:
     scp(remote(env, f"status/{rid}.report.json"), str(out / f"{rid}.report.json"))
     scp(remote(env, f"status/{rid}.stderr.txt"), str(out / f"{rid}.stderr.txt"))
     report = json.loads((out / f"{rid}.report.json").read_text(encoding="utf-8"))
-    v = verdict(report)
+    v = verdict(report) if args.mode != "hwlat" else None
     state["runs"][-1]["verdict"] = v
     save_state(state)
     code = st["status"]["results"][0]["exit"]
     print(json.dumps({"run": rid, "exit": code, "verdict": v}), flush=True)
     if code in ALARMS:
         print(f"OWNER ALARM: {ALARMS[code]}", file=sys.stderr, flush=True)
+    return {"run": rid, "exit": code, "verdict": v, "report": str(out / f"{rid}.report.json")}
 
 
-def unwind(env: dict[str, str], state: dict, running: bool) -> list:
-    """Stop the spike, restore the buffer (read back), bring REAPER back
-    (which reads the buffer again and refuses while a spike or its task runs)."""
+def tuning_body(env: dict[str, str], body: str) -> str:
+    """A PC body that loads the S1c modules from the verified bundle first."""
+    for k in ("PC_TUNING_ROOT", "PC_XPERF"):
+        if not env.get(k):
+            raise StepError(f"{k} missing in the private env (S1c plan Task 12)")
+    return (f"Import-Module (Join-Path {ps_quote(env['PC_ROOT'])} 'bin\\IemMeasure.psm1') -Force -Global ; {body}")
+
+
+def tuning_profile(env: dict[str, str]) -> str:
+    return ps_quote(env["PC_TUNING_ROOT"] + "\\profile.json")
+
+
+def bring_back(env: dict[str, str], state: dict) -> dict:
+    """REAPER through our own start task (only if it does not run), then the
+    S1a handover checks."""
+    return ps(env, "Invoke-SpikeBringBack " + " ".join([
+        f"-Http {ps_quote(env['PC_REAPER_HTTP'])}",
+        f"-StartTaskPath {ps_quote(env['PC_REAPER_START_TASK_PATH'])} -StartTask {ps_quote(env['PC_REAPER_START_TASK'])}",
+        f"-NTrack {int(env['PC_NTRACK'])} -BridgeState {ps_quote(env['PC_METER_BRIDGE'])}",
+        f"-BridgeAction {ps_quote(env['PC_METER_ACTION'])} -Heartbeat {ps_quote(env['PC_METER_HEARTBEAT'])}",
+        f"-AsioModule {ps_quote(env['PC_ASIO_MODULE'])} -AppHttp {ps_quote(env['PC_APP_HTTP'])}",
+        f"-BufferKey {ps_quote(env['PC_BUFFER_KEY'])} -BufferName {ps_quote(env['PC_BUFFER_NAME'])} {buffer_args(state)}",
+    ]), timeout=240, event="ignore")
+
+
+def fingerprint_diff(baseline: dict, current: dict) -> list[dict]:
+    keys = sorted(set(baseline) | set(current))
+    return [{"key": k, "baseline": baseline.get(k, "<absent>"), "current": current.get(k, "<absent>")}
+            for k in keys if str(baseline.get(k, "<absent>")) != str(current.get(k, "<absent>"))]
+
+
+def alarm(text: str) -> None:
+    print(f"OWNER ALARM: {text}", file=sys.stderr, flush=True)
+
+
+def unwind(env: dict[str, str], state: dict, running: bool, bring_back_reaper: bool = True) -> list:
+    """Stop the spike, stop a trace, revert the S1c mode levers, restore the
+    buffer (read back), bring REAPER back (it reads the buffer again and
+    refuses while a spike or its task runs), compare the fingerprint. A failed
+    trace stop, tuning exit or fingerprint alarms the owner and never holds
+    REAPER back (S1c design note §5.2). Without bring_back_reaper (before an
+    approved reboot) the card stays free and the window stays open."""
     done = []
     gone = True
     for step in undo_plan(state, running):
         if step == "stop-spike":
             gone = bool(ps(env, f"(Stop-SpikeGracefully -Root {ps_quote(env['PC_ROOT'])} -Seconds 60).gone", timeout=120, event="ignore"))
             done.append({"stop-spike": gone})
+        elif step == "trace-stop":
+            try:
+                r = ps(env, tuning_body(env, f"Stop-IemTrace -Xperf {ps_quote(env['PC_XPERF'])} -Dir {ps_quote(state['trace'])}"), timeout=120, event="ignore")
+                state["trace"] = None
+                save_state(state)
+                done.append({"trace-stop": r})
+            except StepError as e:
+                alarm(f"the kernel trace did not stop ({e}); stop it with xperf -stop -stop IemMarkers")
+                done.append({"trace-stop": {"error": str(e)}})
+        elif step == "tuning-exit":
+            try:
+                r = ps(env, tuning_body(env, f"Exit-IemTuningMode -ProfilePath {tuning_profile(env)}"), timeout=240, event="ignore")
+                state["tuning_mode"] = False
+                save_state(state)
+                done.append({"tuning-exit": r})
+            except StepError as e:
+                alarm(f"the S1c mode levers were not all reverted ({e}); REAPER still comes back")
+                done.append({"tuning-exit": {"error": str(e)}})
         elif step == "restore-buffer":
             r = ps(env, f"Set-SpikeBufferPref -Key {ps_quote(env['PC_BUFFER_KEY'])} -Name {ps_quote(env['PC_BUFFER_NAME'])} "
                         f"-Value {state['pref_original']} {buffer_args(state)}", event="ignore")
@@ -508,22 +589,28 @@ def unwind(env: dict[str, str], state: dict, running: bool) -> list:
             save_state(state)
             done.append({"restore-buffer": r})
         elif step == "bring-back":
+            if not bring_back_reaper:
+                break
             if not gone:
                 raise StepError("the spike did not stop within 60 s, so REAPER cannot start (I3): alarm the owner now; "
                                 "the last resort is the owner's reboot, which comes back in event mode")
-            r = ps(env, "Invoke-SpikeBringBack " + " ".join([
-                f"-Http {ps_quote(env['PC_REAPER_HTTP'])}",
-                f"-StartTaskPath {ps_quote(env['PC_REAPER_START_TASK_PATH'])} -StartTask {ps_quote(env['PC_REAPER_START_TASK'])}",
-                f"-NTrack {int(env['PC_NTRACK'])} -BridgeState {ps_quote(env['PC_METER_BRIDGE'])}",
-                f"-BridgeAction {ps_quote(env['PC_METER_ACTION'])} -Heartbeat {ps_quote(env['PC_METER_HEARTBEAT'])}",
-                f"-AsioModule {ps_quote(env['PC_ASIO_MODULE'])} -AppHttp {ps_quote(env['PC_APP_HTTP'])}",
-                f"-BufferKey {ps_quote(env['PC_BUFFER_KEY'])} -BufferName {ps_quote(env['PC_BUFFER_NAME'])} {buffer_args(state)}",
-            ]), timeout=240, event="ignore")
+            r = bring_back(env, state)
             state["card"] = "reaper"
             save_state(state)
             done.append({"bring-back": r})
-    state["closed"] = True
-    save_state(state)
+        elif step == "fingerprint":
+            try:
+                current = ps(env, tuning_body(env, f"Get-IemReaperFingerprint -ProfilePath {tuning_profile(env)}"), timeout=120, event="ignore")
+                diff = fingerprint_diff(json.loads(Path(state["fingerprint"]).read_text(encoding="utf-8")), current)
+                if diff:
+                    alarm(f"REAPER mode differs from the baseline: {json.dumps(diff)}")
+                done.append({"fingerprint": diff})
+            except (StepError, OSError, ValueError) as e:
+                alarm(f"the fingerprint could not be read ({e})")
+                done.append({"fingerprint": {"error": str(e)}})
+    if bring_back_reaper:
+        state["closed"] = True
+        save_state(state)
     return done
 
 
@@ -561,13 +648,17 @@ def main(argv: list[str]) -> int:
         sub.add_parser(name)
     sub.add_parser("set-buffer").add_argument("--frames", type=int, required=True)
     run = sub.add_parser("run")
-    run.add_argument("--mode", required=True, choices=("probe", "duplex", "reopen"))
+    run.add_argument("--mode", required=True, choices=("probe", "duplex", "reopen", "hwlat"))
     run.add_argument("--frames", type=int)
     run.add_argument("--seconds", type=int, default=600)
     run.add_argument("--burn-us", type=int, default=0)
     run.add_argument("--stress", type=int, default=0)
     run.add_argument("--panic-at", type=int, default=0)
     run.add_argument("--cycles", type=int, default=5)
+    run.add_argument("--cpu", type=int)
+    run.add_argument("--threshold-us", type=int, default=10)
+    run.add_argument("--audio-cpus", default="")
+    run.add_argument("--stress-cpus", default="")
     args = ap.parse_args(argv)
     if args.cmd == "status":
         print(json.dumps({"event_now": event_now(), "state": load_state() if STATE.is_file() else None}, indent=1))
