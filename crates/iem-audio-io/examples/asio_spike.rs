@@ -1086,7 +1086,7 @@ mod tests {
             "duplex --driver D1 --report r --stop-file s --frames 16",
             "duplex --driver D1 --report r --stop-file s --frames 32x",
             "duplex --driver D1 --report r --stop-file s --frames 32 --seconds 0",
-            "duplex --driver D1 --report r --stop-file s --frames 32 --seconds 36001",
+            "duplex --driver D1 --report r --stop-file s --frames 32 --activity-channels all --seconds 36001",
             "duplex --driver D1 --report r --stop-file s --frames 32 --burn-us 301",
             "duplex --driver D1 --report r --stop-file s --frames 32 --stress 9",
             "reopen --driver D1 --report r --stop-file s --frames 32 --cycles 0",
@@ -1095,8 +1095,8 @@ mod tests {
             "hwlat --report r --stop-file s --cpu 64",
             "hwlat --report r --stop-file s --cpu 3 --threshold-us 0",
             "hwlat --report r --stop-file s --cpu 3 --threshold-us 1001",
-            "duplex --driver D1 --report r --stop-file s --frames 32 --audio-cpus 1,1",
-            "duplex --driver D1 --report r --stop-file s --frames 32 --stress-cpus 70",
+            "duplex --driver D1 --report r --stop-file s --frames 32 --activity-channels all --audio-cpus 1,1",
+            "duplex --driver D1 --report r --stop-file s --frames 32 --activity-channels all --stress-cpus 70",
         ] {
             assert!(parse(&argv(bad)).is_err(), "{bad:?}");
         }
