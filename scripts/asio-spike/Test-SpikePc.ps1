@@ -98,7 +98,7 @@ Throws { New-SpikeArguments -Request $req -Root 'C:\r' } 'arguments-refuse-frame
 $req.mode = 'record'
 Throws { New-SpikeArguments -Request $req -Root 'C:\r' } 'arguments-refuse-an-unknown-mode'
 
-# S1c: CPU Sets and hwlat. (duplex carries activity_channels since 7c78cb8; the
+# S1c: CPU Sets and hwlat. (duplex carries activity_channels since f154967; the
 # CPU-set flags are appended in the duplex branch, before --activity-channels.
 # hwlat is a clock-read loop with no audio stream, so it takes no watched inputs.)
 $req = [pscustomobject]@{ id = 'spike-2'; mode = 'duplex'; driver = 'Some Card'; frames = 32; seconds = 28800; burn_us = 40; stress = 4; panic_at = 0; cycles = 5; activity_channels = '101-110,121-124'; audio_cpus = '14'; stress_cpus = '6-13' }

@@ -15,7 +15,7 @@ foreach ($f in (Get-ChildItem -LiteralPath $here -File | Where-Object { @('.ps1'
 Import-Module (Join-Path $here 'IemMeasure.psm1') -Force
 function Assert($cond, $what) { if (-not $cond) { throw "FAILED: $what" }; Write-Host "ok  $what" }
 function Throws([scriptblock]$b, $what) { $t = $false; try { & $b } catch { $t = $true }; Assert $t $what }
-function Rows($rows, $action) { @($rows | Where-Object { $_.action -eq $action }) }
+function Rows($rows, $action) { ,@($rows | Where-Object { $_.action -eq $action }) }
 # Read-IemJournal is exported (every *-Iem* function is); the test reads the flag the module wrote.
 function Read-IemJournalState($profilePath) { $p = Read-IemProfile -Path $profilePath; (Read-IemJournal -Path $p.journal).entered }
 
@@ -122,7 +122,7 @@ try {
     Assert ((Exit-IemTuningMode -ProfilePath $pp).Count -eq 0) 'exit-twice-is-harmless'
 
     # A placed process that ended is skipped; a reused pid is refused.
-    $short = Start-Process -FilePath $ping -ArgumentList '-n', '2', '127.0.0.1' -PassThru -WindowStyle Hidden
+    $short = Start-Process -FilePath $ping -ArgumentList '-n', '5', '127.0.0.1' -PassThru -WindowStyle Hidden
     [void](Enter-IemTuningMode -ProfilePath $pp -Only @('placement'))
     $short.WaitForExit(10000) | Out-Null
     $x = Exit-IemTuningMode -ProfilePath $pp

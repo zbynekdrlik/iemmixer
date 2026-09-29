@@ -93,6 +93,7 @@ public static class IemCpuSets {
         } finally { CloseHandle(h); }
     }
     public static void Set(int pid, uint[] ids) {
+        if (ids == null) ids = new uint[0];
         IntPtr h = Open(pid, SetLimited);
         try {
             if (!SetProcessDefaultCpuSets(h, ids.Length == 0 ? null : ids, (uint)ids.Length)) throw new Win32Exception();
@@ -299,7 +300,10 @@ function Set-IemValue {
         'defender-process' { if ($Value -eq 'present') { Add-MpPreference -ExclusionProcess $a.value } else { Remove-MpPreference -ExclusionProcess $a.value } }
         'cpusets' {
             Assert-IemSameProcess -Arguments $a
-            $ids = if ([string]::IsNullOrEmpty([string]$Value)) { [uint32[]]@() } else { [uint32[]]@(([string]$Value) -split ',' | ForEach-Object { [uint32]$_ }) }
+            # A typed variable initialised to @() keeps an empty array; the result
+            # of an `if` unrolls to $null and would crash IemCpuSets.Set (S1c review).
+            [uint32[]]$ids = @()
+            if (-not [string]::IsNullOrEmpty([string]$Value)) { $ids = @(([string]$Value) -split ',' | ForEach-Object { [uint32]$_ }) }
             [IemCpuSets]::Set([int]$a.pid, $ids)
         }
         default { throw "unknown item kind '$($Item.kind)'" }
