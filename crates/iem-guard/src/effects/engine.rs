@@ -177,6 +177,7 @@ pub fn parse(body: &[u8]) -> Result<Msg, String> {
                 faulted: flag(&v, "faulted"),
                 parked: flag(&v, "parked"),
                 hil: hil_outs(&v),
+                loopback_samples: number(&v, "loopback_samples"),
             }),
             "meters" => Msg::Meters {
                 inputs: inputs
@@ -241,6 +242,8 @@ pub fn engine_status(seen: &EngineSeen, spawns: u64, last_exit: Option<i32>) -> 
         spawns,
         last_exit,
         hil: s.hil.clone(),
+        loopback_samples: s.loopback_samples,
+        loopback_ms: s.loopback_samples as f64 * 1000.0 / 96_000.0,
     }
 }
 
@@ -533,6 +536,7 @@ mod tests {
             faulted: false,
             parked: false,
             hil: Vec::new(),
+            loopback_samples: 0,
         }
     }
 
@@ -718,6 +722,7 @@ mod tests {
                 faulted: true,
                 parked: true,
                 hil: Vec::new(),
+                loopback_samples: 0,
             })
         );
         // HIL's spare outputs with their peaks (design §7); a partial or
@@ -828,6 +833,7 @@ mod tests {
                 faulted: true,
                 parked: true,
                 hil: spare.clone(),
+                loopback_samples: 0,
             },
             pipe_private: true,
         };
@@ -845,6 +851,8 @@ mod tests {
                 spawns: 3,
                 last_exit: Some(70),
                 hil: spare,
+                loopback_samples: 0,
+                loopback_ms: 0.0,
             }
         );
         let quiet = EngineSeen {

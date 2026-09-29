@@ -442,6 +442,9 @@ pub struct Status {
     pub parked: bool,
     /// HIL's spare outputs and their peaks since the previous `Status`.
     pub hil: Vec<HilOut>,
+    /// The D5(b) loopback round-trip in samples, once measured (S6 test 5); 0
+    /// while none.
+    pub loopback_samples: u64,
 }
 
 /// The running engine as the guard's supervisor connection saw it last
@@ -788,6 +791,7 @@ pub mod fake {
                     faulted: false,
                     parked: false,
                     hil: Vec::new(),
+                    loopback_samples: 0,
                 },
                 quiet_for: Duration::from_secs(600),
                 stage_peaks: vec![-90.0],

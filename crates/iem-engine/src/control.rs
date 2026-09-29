@@ -643,6 +643,7 @@ impl Control {
                     peak: peak as f32,
                 })
                 .collect(),
+            loopback_samples: self.status.loopback_samples.load(Ordering::Relaxed),
         }
     }
 

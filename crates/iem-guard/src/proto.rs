@@ -148,6 +148,11 @@ pub struct EngineStatus {
     /// the test-signal flag) and each one's peak since the engine's previous
     /// `Status`: HIL v1 proves its test signal with them (design §7).
     pub hil: Vec<HilOut>,
+    /// The D5(b) loopback round-trip in samples, once measured (S6 test 5); 0
+    /// while none.
+    pub loopback_samples: u64,
+    /// The same round-trip in milliseconds (`loopback_samples` / 96 kHz).
+    pub loopback_ms: f64,
 }
 
 /// One of HIL's spare card outputs as the engine's `Status` reports it: its

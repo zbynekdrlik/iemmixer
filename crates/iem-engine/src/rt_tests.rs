@@ -129,7 +129,20 @@ fn rig_hil(site: &str, cmds: &[Cmd], flags: Flags, opts: Options, hil: Vec<u16>)
     for c in cmds {
         core.apply(c).unwrap();
     }
-    let (p, h) = Processor::with_hil(topo, &core.state(), &[], opts, spare);
+    let (p, h) = Processor::with_hil(topo, &core.state(), &[], opts, spare, 0);
+    Rig { core, p, h }
+}
+
+/// `rig_hil` that also opens the D5(b) loopback return (S6 test 5): one
+/// return input per spare output, after the topology's rx.
+fn rig_loopback(site: &str, cmds: &[Cmd], flags: Flags, opts: Options, hil: Vec<u16>) -> Rig {
+    let topo = Arc::new(compile(&parse(site).unwrap()).unwrap());
+    let spare = hil.len();
+    let mut core = Core::new(Arc::clone(&topo), &MixState::default(), 0, flags).with_hil(hil);
+    for c in cmds {
+        core.apply(c).unwrap();
+    }
+    let (p, h) = Processor::with_hil(topo, &core.state(), &[], opts, spare, spare);
     Rig { core, p, h }
 }
 
@@ -1065,6 +1078,80 @@ fn discontinuity_restarts_the_fade_in() {
 /// HIL's spare outputs of the test site (`[guard] hil_tx`), as `run` opens
 /// them under the test-signal flag.
 const SPARE: [u16; 2] = [94, 95];
+/// The D5(b) loopback round-trip (S6 test 5): the HIL sine leaves on the
+/// spare outputs; a synthetic loopback returns it on the spare inputs one
+/// block later; the probe measures exactly that delay, and it clears when a
+/// new signal starts.
+#[test]
+fn the_loopback_round_trip_is_measured() {
+    use iem_audio_io::{Block, Process};
+    let site = crate::test_support::test_site_text();
+    let mut r = rig_loopback(&site, &[], TEST_FLAG, AT_ONCE, SPARE.to_vec());
+    let topo = Arc::clone(&r.p.topo);
+    let tx = topo.tx.len();
+    let rxn = topo.rx.len();
+    // Return inputs sit after the topology's rx; outputs are tx + the 2 spares.
+    let ins = rxn + 2;
+    let outs = r.p.outputs();
+    assert_eq!(outs, tx + 2);
+    // A HIL signal on both spares, long enough to travel and return.
+    r.at(
+        0,
+        &Cmd::HilTestSignal {
+            input: input("mic1"),
+            hz: 1000.0,
+            dbfs: -6.0,
+            ttl_s: 0.1,
+            card_tx: SPARE.to_vec(),
+        },
+    );
+    const N: usize = 256;
+    const DELAY: u64 = N as u64; // one block of loopback delay
+    let mut prev_hil = vec![0.0f64; 2 * N]; // last block's spare outputs
+    let mut ibuf = vec![0.0f64; ins * N];
+    let mut obuf = vec![0.0f64; outs * N];
+    for _ in 0..8 {
+        ibuf.iter_mut().for_each(|x| *x = 0.0);
+        // The return inputs carry the previous block's spare outputs.
+        for j in 0..2 {
+            let dst = &mut ibuf[(rxn + j) * N..(rxn + j + 1) * N];
+            dst.copy_from_slice(&prev_hil[j * N..(j + 1) * N]);
+        }
+        obuf.iter_mut().for_each(|x| *x = 0.0);
+        let mut b = Block::new(N, &ibuf, &mut obuf);
+        r.p.process(&mut b);
+        // Keep this block's spare outputs for the next block's return.
+        for j in 0..2 {
+            let src = &obuf[(tx + j) * N..(tx + j + 1) * N];
+            prev_hil[j * N..(j + 1) * N].copy_from_slice(src);
+        }
+    }
+    let samples =
+        r.h.status
+            .loopback_samples
+            .load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(samples, DELAY, "round-trip should be one block of delay");
+    // A new signal clears the measurement.
+    r.at(
+        DELAY,
+        &Cmd::HilTestSignal {
+            input: input("mic1"),
+            hz: 1000.0,
+            dbfs: -6.0,
+            ttl_s: 0.1,
+            card_tx: SPARE.to_vec(),
+        },
+    );
+    let mut b = Block::new(N, &vec![0.0; ins * N], &mut obuf);
+    r.p.process(&mut b);
+    assert_eq!(
+        r.h.status
+            .loopback_samples
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "a new signal restarts the measurement"
+    );
+}
 
 const TEST_FLAG: Flags = Flags {
     test_signal: true,

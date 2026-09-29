@@ -499,6 +499,10 @@ pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
         cfg.flags,
     )
     .with_hil(hil.clone());
+    // The D5(b) loopback return (S6 test 5): under `--test-signal` the engine
+    // also opens the spare card inputs the HIL spare outputs loop back to, so
+    // it can measure the round-trip. One return per HIL output.
+    let hil_rx = hil.len();
     let (processor, handles) = Processor::with_hil(
         Arc::clone(&topo),
         &loaded.persisted.state,
@@ -508,6 +512,7 @@ pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
             hold: cfg.hold,
         },
         hil.len(),
+        hil_rx,
     );
     let outputs = processor.outputs();
     let RtHandles {
@@ -525,7 +530,7 @@ pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
                 NullRtConfig {
                     sample_rate: SAMPLE_RATE,
                     block: cfg.block,
-                    inputs: topo.rx.len(),
+                    inputs: topo.rx.len() + hil_rx,
                     outputs,
                     signal: cfg.signal,
                 },

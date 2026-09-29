@@ -8,6 +8,11 @@ use core::fmt;
 pub struct ChannelMap {
     rx: Vec<usize>,
     tx: Vec<usize>,
+    /// Card input indices of the D5(b) loopback return (S6 test 5): the spare
+    /// card inputs the HIL spare outputs loop back to. Empty unless the engine
+    /// opened them (`--test-signal`). They sit in the input buffer after the
+    /// topology's `rx`, in this order.
+    hil_rx: Vec<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,12 +73,35 @@ impl ChannelMap {
         Ok(Self {
             rx: indices("rx", rx, card_in)?,
             tx: indices("tx", tx, card_out)?,
+            hil_rx: Vec::new(),
         })
+    }
+
+    /// Opens the D5(b) loopback return (S6 test 5): `hil_rx` are the spare card
+    /// input channels (numbered from 1, on the card), added after the
+    /// topology's `rx`. A channel the card lacks refuses the stream, exactly
+    /// like `rx`.
+    pub fn with_hil_return(mut self, hil_rx: &[u16], card_in: usize) -> Result<Self, MapError> {
+        self.hil_rx = indices("hil-return rx", hil_rx, card_in)?;
+        Ok(self)
     }
 
     /// Card input index of engine input slot `k`, in `Topology::rx` order.
     pub fn rx(&self) -> &[usize] {
         &self.rx
+    }
+
+    /// Card input indices of the loopback return, after the topology's `rx`.
+    pub fn hil_rx(&self) -> &[usize] {
+        &self.hil_rx
+    }
+
+    /// Every card input the stream reads: the topology's `rx` then the
+    /// loopback return, in the input buffer's order.
+    pub fn all_rx(&self) -> Vec<usize> {
+        let mut all = self.rx.clone();
+        all.extend_from_slice(&self.hil_rx);
+        all
     }
 
     /// Card output index of engine output slot `k`: `Topology::tx` order,
@@ -91,6 +119,36 @@ mod tests {
     // TX 71–93 end exactly on the last channel).
     const IN: usize = 132;
     const OUT: usize = 93;
+
+    #[test]
+    fn the_loopback_return_follows_the_topology_rx() {
+        let m = ChannelMap::new(&[101, 102], &[71], IN, OUT)
+            .unwrap()
+            .with_hil_return(&[110, 111], IN)
+            .unwrap();
+        // Return card inputs come after the topology's rx, in order.
+        assert_eq!(m.rx(), &[100, 101]);
+        assert_eq!(m.hil_rx(), &[109, 110]);
+        assert_eq!(m.all_rx(), vec![100, 101, 109, 110]);
+        // A return channel the card lacks refuses the stream, like rx.
+        assert_eq!(
+            ChannelMap::new(&[101], &[71], IN, OUT)
+                .unwrap()
+                .with_hil_return(&[133], IN),
+            Err(MapError::Missing {
+                side: "hil-return rx",
+                channel: 133,
+                card: IN,
+            })
+        );
+        // No return by default.
+        assert!(
+            ChannelMap::new(&[101], &[71], IN, OUT)
+                .unwrap()
+                .hil_rx()
+                .is_empty()
+        );
+    }
 
     #[test]
     fn card_numbers_count_from_one() {

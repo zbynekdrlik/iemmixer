@@ -1195,6 +1195,8 @@ struct Owner {
     frames: u32,
     rx: Vec<u16>,
     tx: Vec<u16>,
+    /// The D5(b) loopback return card inputs (S6 test 5), opened after `rx`.
+    hil_rx: Vec<u16>,
     shared: Arc<Shared>,
     budget: ResetBudget,
     /// The counters of the streams already closed.
@@ -1356,6 +1358,7 @@ impl Owner {
         let info = card.host.info()?;
         let inputs = count(info.inputs);
         let map = ChannelMap::new(&self.rx, &self.tx, inputs, count(info.outputs))
+            .and_then(|m| m.with_hil_return(&self.hil_rx, inputs))
             .map_err(AsioError::Channels)?;
         let format = format::admit(
             info.rate,
@@ -1413,9 +1416,8 @@ impl Owner {
         let frames = self.frames as usize;
         // The same sizes at every reopen: no reallocation, the pages stay.
         carry.inbuf.clear();
-        carry
-            .inbuf
-            .resize(map.rx().len().saturating_mul(frames), 0.0);
+        let all_rx = map.all_rx();
+        carry.inbuf.resize(all_rx.len().saturating_mul(frames), 0.0);
         carry.outbuf.clear();
         carry
             .outbuf
@@ -1429,7 +1431,7 @@ impl Owner {
             bytes: frames.saturating_mul(format.bytes()),
             inputs: card_inputs.to_vec(),
             outputs: card_outputs.to_vec(),
-            rx: map.rx().to_vec(),
+            rx: all_rx,
             tx: map.tx().to_vec(),
             carry: UnsafeCell::new(carry),
             telemetry: Telemetry::new(self.frames, rate),
@@ -1716,6 +1718,7 @@ struct Start {
     frames: u32,
     rx: Vec<u16>,
     tx: Vec<u16>,
+    hil_rx: Vec<u16>,
     processor: Box<dyn Process>,
     shared: Arc<Shared>,
 }
@@ -1726,6 +1729,7 @@ fn owner_main(start: Start, ready: SyncSender<Result<(), AsioError>>) {
         frames,
         rx,
         tx,
+        hil_rx,
         processor,
         shared,
     } = start;
@@ -1746,6 +1750,7 @@ fn owner_main(start: Start, ready: SyncSender<Result<(), AsioError>>) {
         frames,
         rx,
         tx,
+        hil_rx,
         shared: Arc::clone(&shared),
         budget: ResetBudget::default(),
         base: Counters::default(),
@@ -1885,6 +1890,7 @@ impl<P: Process + 'static> AsioStream<P> {
         card: CardConfig,
         rx: Vec<u16>,
         tx: Vec<u16>,
+        hil_rx: Vec<u16>,
         processor: P,
     ) -> Result<Self, AsioError> {
         let frames = owner::frames(card.frames).ok_or(AsioError::Frames(card.frames))?;
@@ -1902,6 +1908,7 @@ impl<P: Process + 'static> AsioStream<P> {
             frames,
             rx,
             tx,
+            hil_rx,
             processor: Box::new(processor),
             shared: Arc::clone(&shared),
         };
@@ -2148,6 +2155,7 @@ mod tests {
                 card("No Such Card", 32),
                 (101..=132).collect(),
                 (71..=93).collect(),
+                Vec::new(),
                 Silent,
             );
             assert!(
@@ -2163,7 +2171,13 @@ mod tests {
     #[test]
     fn a_buffer_that_is_no_sample_count_is_refused_first() {
         for frames in [0, -32] {
-            let r = AsioStream::start(card("No Such Card", frames), vec![101], vec![71], Silent);
+            let r = AsioStream::start(
+                card("No Such Card", frames),
+                vec![101],
+                vec![71],
+                Vec::new(),
+                Silent,
+            );
             assert!(
                 matches!(r, Err(AsioError::Frames(f)) if f == frames),
                 "{:?}",

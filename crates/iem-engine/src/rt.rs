@@ -28,6 +28,7 @@ use rtrb::{Consumer, Producer, RingBuffer};
 
 use crate::cmd::{HilMask, MAX_HIL, RtCmd, RtOp};
 use crate::core::reconcile;
+use crate::latency::{self, LatencyProbe};
 use crate::params::{eq_params, input_params};
 use crate::topology::Topology;
 use crate::{MAX_CMDS_PER_BLOCK, SAMPLE_RATE, SEG, TALKBACK_GAIN, TEST_CAP};
@@ -91,6 +92,10 @@ pub struct RtStatus {
     /// Blocks that left commands for the next block (the 512 budget): a
     /// command due in the block that it did not apply. Counted once per block.
     pub deferred: AtomicU64,
+    /// The D5(b) loopback round-trip, in samples, once measured (S6 test 5):
+    /// 0 while no measurement (a loopback is never 0 samples). Cleared when a
+    /// new HIL test signal starts.
+    pub loopback_samples: AtomicU64,
 }
 
 /// The non-RT ends of the processor's rings.
@@ -405,6 +410,11 @@ pub struct Processor {
     /// HIL's spare outputs (S6), the engine's outputs after the topology's
     /// TX: their peaks since the last meter frame.
     hil_peaks: Vec<PeakMeter<1>>,
+    /// How many D5(b) loopback-return inputs the engine opened (S6 test 5),
+    /// after the topology's `rx` in the input buffer; 0 unless opened.
+    hil_rx: usize,
+    /// The loopback round-trip measurement (test 5).
+    latency: LatencyProbe,
     fade: Ramp,
     /// The fade-in's length in samples; 0 starts at full level.
     fade_in: u32,
@@ -427,7 +437,7 @@ impl Processor {
         counters: &[u64],
         opts: Options,
     ) -> (Self, RtHandles) {
-        Self::with_hil(topo, state, counters, opts, 0)
+        Self::with_hil(topo, state, counters, opts, 0, 0)
     }
 
     /// [`Processor::new`] with `hil` of HIL's spare card outputs (S6, at
@@ -440,6 +450,7 @@ impl Processor {
         counters: &[u64],
         opts: Options,
         hil: usize,
+        hil_rx: usize,
     ) -> (Self, RtHandles) {
         let hil = hil.min(MAX_HIL);
         let sr = f64::from(SAMPLE_RATE);
@@ -546,6 +557,8 @@ impl Processor {
             test: None,
             test_buf: vec![0.0; SEG],
             hil_peaks: vec![PeakMeter::new(); hil],
+            hil_rx,
+            latency: LatencyProbe::new(),
             fade,
             fade_in,
             armed: !opts.hold,
@@ -733,6 +746,11 @@ impl Processor {
     /// sounds only on those spare outputs until it ended, and every mix's TX
     /// is zero.
     fn start_test(&mut self, i: u16, hz: f64, amp: f64, ttl: u64, mask: Option<HilMask>) {
+        // A new HIL signal restarts the loopback measurement (S6 test 5).
+        if mask.is_some() {
+            self.latency.reset();
+            self.status.loopback_samples.store(0, Ordering::Relaxed);
+        }
         let len = samples(FADE_MS, self.sr);
         let mut fade = Ramp::new(0.0, len);
         fade.set(1.0);
@@ -1054,6 +1072,42 @@ impl Processor {
         }
     }
 
+    /// The D5(b) loopback round-trip (S6 test 5): while the HIL signal sounds,
+    /// records the first hil-output sample at or above the onset threshold as
+    /// the emit, scans the loopback-return inputs (after the topology's rx)
+    /// for the first return at or above it as the arrival, and stores the
+    /// delay in samples once both are known. No-op unless the return is open.
+    fn probe_latency(&mut self, block: &mut Block<'_>, off: usize, n: usize) {
+        if self.hil_rx == 0 {
+            return;
+        }
+        let out_first = self.topo.tx.len();
+        let mut emit: Option<usize> = None;
+        for k in 0..self.hil_peaks.len() {
+            let out = block.output(out_first + k);
+            if let Some(seg) = out.get(off..off + n)
+                && let Some(i) = seg.iter().position(|y| y.abs() >= latency::ONSET)
+            {
+                emit = Some(emit.map_or(i, |e| e.min(i)));
+            }
+        }
+        if let Some(i) = emit {
+            self.latency.emitted(self.time.saturating_add(i as u64));
+        }
+        let in_first = self.topo.rx.len();
+        for j in 0..self.hil_rx {
+            let ret = block.input(in_first + j);
+            if let Some(seg) = ret.get(off..off + n) {
+                self.latency.feed(seg, self.time);
+            }
+        }
+        if let Some(samples) = self.latency.samples() {
+            self.status
+                .loopback_samples
+                .store(samples, Ordering::Relaxed);
+        }
+    }
+
     fn render(&mut self, block: &mut Block<'_>, off: usize, n: usize) {
         if self.test.as_ref().is_some_and(|t| t.end <= self.time) {
             self.test = None;
@@ -1070,6 +1124,7 @@ impl Processor {
         self.render_inputs(block, off, n);
         self.render_mixes(block, off, n);
         self.render_hil(block, off, n);
+        self.probe_latency(block, off, n);
         // After `FadeOut` the fade's target is 0: at rest it is silent.
         if self.fading_out && !self.fade.is_moving() {
             self.status.faded_out.store(true, Ordering::Release);

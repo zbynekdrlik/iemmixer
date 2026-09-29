@@ -390,6 +390,10 @@ pub struct Status {
     /// otherwise. HIL v1 reads them to prove its test signal reached them,
     /// at its level, and left them.
     pub hil: Vec<HilOut>,
+    /// S6 test 5, additive: the D5(b) loopback round-trip, in samples, once
+    /// measured (the HIL signal on a spare output, looped back to the matching
+    /// spare input in Dante); 0 while none. `loopback_ms` derives the time.
+    pub loopback_samples: u64,
 }
 
 /// One of HIL's spare card outputs in a [`Status`] (S6): its card channel

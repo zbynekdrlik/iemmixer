@@ -165,8 +165,14 @@ pub(crate) fn start(
     processor: Processor,
 ) -> Result<(Box<dyn Driver>, usize), EngineError> {
     let outputs: Vec<u16> = topo.tx.iter().chain(hil).copied().collect();
-    let stream = AsioStream::start(card_config(card), topo.rx.clone(), outputs, processor)
-        .map_err(refusal)?;
+    let stream = AsioStream::start(
+        card_config(card),
+        topo.rx.clone(),
+        outputs,
+        hil.to_vec(),
+        processor,
+    )
+    .map_err(refusal)?;
     info!(
         "ASIO running: {} at {} samples (measured {}), {} RX, {} TX, {} HIL",
         card.driver,
@@ -198,6 +204,7 @@ pub(crate) fn interlock(
     let stream = AsioStream::start(
         card_config(&plan.card),
         plan.channels.clone(),
+        Vec::new(),
         Vec::new(),
         tap,
     )
