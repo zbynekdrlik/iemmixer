@@ -372,6 +372,23 @@ mod tests {
     }
 
     #[test]
+    fn has_state_sees_current_and_generations_independently() {
+        let (_d, s) = store();
+        // A fresh store holds no live state.
+        assert!(!s.has_state());
+        // `current.json` alone is live state.
+        std::fs::write(s.dir().join(CURRENT), b"{}").unwrap();
+        assert!(s.has_state());
+        // A generation ALONE, with no `current.json`, is also live state: a
+        // crash between `save`'s two renames can leave the newest state only as
+        // a generation (iemmixer#9). This pins the `||` (either source counts)
+        // and the `!generations.is_empty()` (a present generation is state).
+        std::fs::remove_file(s.dir().join(CURRENT)).unwrap();
+        std::fs::write(s.dir().join("gen-0000000001.json"), b"{}").unwrap();
+        assert!(s.has_state());
+    }
+
+    #[test]
     fn save_then_load_is_lossless() {
         let (_d, s) = store();
         let g = test_site();

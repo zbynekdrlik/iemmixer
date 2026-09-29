@@ -201,4 +201,40 @@ mod tests {
         assert_ne!(err.kind(), io::ErrorKind::AlreadyExists, "{err}");
         assert!(path.is_dir());
     }
+
+    #[test]
+    fn load_vapid_reads_and_trims_a_present_key() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(VAPID_PRIVATE_FILE), "  the-key\n").unwrap();
+        assert_eq!(load_vapid(dir.path()).unwrap(), "the-key");
+    }
+
+    #[test]
+    fn load_vapid_rejects_an_empty_or_whitespace_key() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(VAPID_PRIVATE_FILE), "   \n\t ").unwrap();
+        let err = load_vapid(dir.path()).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("is empty"), "{err}");
+    }
+
+    #[test]
+    fn load_vapid_reports_a_missing_key_as_not_found_with_guidance() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = load_vapid(dir.path()).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        assert!(err.to_string().contains("no vapid key yet"), "{err}");
+    }
+
+    #[test]
+    fn load_vapid_passes_through_a_non_not_found_read_error() {
+        // The key path is a directory: `read_to_string` fails with an error
+        // whose kind is NOT NotFound, and load_vapid must pass it through
+        // rather than report "no vapid key yet".
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(VAPID_PRIVATE_FILE)).unwrap();
+        let err = load_vapid(dir.path()).unwrap_err();
+        assert_ne!(err.kind(), io::ErrorKind::NotFound, "{err}");
+        assert!(!err.to_string().contains("no vapid key yet"), "{err}");
+    }
 }

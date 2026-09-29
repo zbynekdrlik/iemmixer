@@ -4071,3 +4071,63 @@ fn site_settings_and_clocks() {
     assert!((now..=now + 5).contains(&sys), "{sys} {now}");
     assert_eq!(fixed(42).now(), 42);
 }
+
+#[test]
+fn a_live_trial_dry_run_takes_trial_from_the_request_not_the_facts() {
+    // dry_entry builds the plan's facts from `Entry` (`trial: e.trial`), not
+    // from `pc.facts()`. A Live trial enters with the band up on purpose, so
+    // its plan skips the interlock; a non-trial Live from the same state plans
+    // it. If the `trial` field were dropped it would fall back to the PC facts
+    // (trial = false), and even the trial would plan the interlock.
+    let live = |trial| Request::Live {
+        build: SHA.into(),
+        trial,
+        dry_run: true,
+    };
+    let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
+    g.state
+        .bundles
+        .insert(SHA.into(), record(SHA, "main", Hil::Green));
+    let r = ask(&mut pc, &mut g, live(true));
+    assert!(r.ok, "{r:?}");
+    assert!(r.detail.starts_with("dry run: "), "{}", r.detail);
+    assert!(
+        !r.detail.contains("Interlock"),
+        "a trial skips the interlock: {}",
+        r.detail
+    );
+    // The contrast: a non-trial Live from the same band-up state DOES plan it.
+    let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
+    g.state
+        .bundles
+        .insert(SHA.into(), record(SHA, "main", Hil::Green));
+    let r = ask(&mut pc, &mut g, live(false));
+    assert!(
+        r.detail.contains("Interlock"),
+        "a non-trial live plans the interlock: {}",
+        r.detail
+    );
+}
+
+#[test]
+fn a_rehearsal_names_a_single_process_that_stays_up() {
+    // The teardown's after-check ORs engine/server/tray: a lone stubborn
+    // process (here only the server, whose stop is refused) must still be
+    // reported. If the first `||` were `&&` it would take TWO up to report any.
+    let (mut pc, mut g) = (
+        FakePc::new(Facts {
+            server: true,
+            ..Facts::default()
+        }),
+        Guard::for_test(Mode::Dev),
+    );
+    g.state.pins.current = Some(SHA.into());
+    pc.fail(Call::ServerStop, "the server did not stop");
+    let r = ask(&mut pc, &mut g, Request::RehearseTeardown);
+    assert!(!r.ok, "{r:?}");
+    assert!(
+        r.detail.contains("iemmixer processes still run"),
+        "a lone server left up must still be named: {}",
+        r.detail
+    );
+}

@@ -616,6 +616,19 @@ mod tests {
     }
 
     #[test]
+    fn the_frame_cap_is_64_kib() {
+        // The existing frame tests all measure against MAX_FRAME symbolically,
+        // so a mutated cap (e.g. 64 + 1024 = 1088) still passes them. Pin the
+        // concrete value, and accept a body between the two (2 KiB) that only
+        // the real 64 KiB cap admits.
+        assert_eq!(MAX_FRAME, 65_536);
+        let body = "x".repeat(2_048); // > 1088, well under 65_536
+        let mut wire = u32::try_from(body.len()).unwrap().to_le_bytes().to_vec();
+        wire.extend_from_slice(body.as_bytes());
+        assert_eq!(read_frame(&mut wire.as_slice()).unwrap().len(), 2_048);
+    }
+
+    #[test]
     fn oversize_is_refused_before_the_body() {
         let mut wire = ((MAX_FRAME + 1) as u32).to_le_bytes().to_vec();
         wire.extend_from_slice(b"{}");

@@ -1534,4 +1534,16 @@ mod tests {
         s.observe(5, 5 + 20_008);
         assert_eq!(s.summary().largest, sum.largest);
     }
+
+    #[test]
+    fn gap_scan_ignores_a_gap_strictly_below_the_threshold() {
+        // A read gap of 9_999 ns is below the 10_000 ns threshold, so it is not
+        // a gap: the read is counted, `over` and the histogram are not. This
+        // pins `gap < threshold` against `gap == threshold` — the equal case is
+        // over (the test above), the strictly-under case is not.
+        let mut s = GapScan::new(10_000);
+        s.observe(0, 9_999);
+        let sum = s.summary();
+        assert_eq!((sum.reads, sum.over, sum.gaps.total()), (1, 0, 0));
+    }
 }

@@ -193,6 +193,25 @@ mod tests {
     }
 
     #[test]
+    fn an_arrival_before_the_emit_is_no_measurement() {
+        // The public API can only record an arrival after the emit, but the
+        // `a >= e` guard must still refuse an inverted pair rather than
+        // underflow. Constructed directly so `a < e`; `samples()` is None.
+        let p = LatencyProbe {
+            emitted_at: Some(100),
+            arrived_at: Some(50),
+        };
+        assert_eq!(p.samples(), None);
+        assert_eq!(p.ms(96_000), None);
+        // The equal edge: a zero round-trip is a valid measurement.
+        let p = LatencyProbe {
+            emitted_at: Some(100),
+            arrived_at: Some(100),
+        };
+        assert_eq!(p.samples(), Some(0));
+    }
+
+    #[test]
     fn ms_needs_a_positive_sample_rate() {
         let mut p = LatencyProbe::new();
         p.emitted(0);
