@@ -789,7 +789,7 @@ mod tests {
 
     #[test]
     fn stress_threads_stop_when_dropped() {
-        let s = Stress::start(2);
+        let s = Stress::start(2, &[]);
         let flag = Arc::clone(&s.stop);
         assert_eq!(s.threads.len(), 2);
         drop(s);
@@ -803,7 +803,7 @@ mod tests {
     #[test]
     fn parses_a_duplex_run_under_load() {
         let a = parse(&argv(
-            "duplex --driver D1 --report r.json --stop-file stop --progress p.json --frames 32 --seconds 600 --burn-us 100 --stress 4 --panic-at 7 --cycles 3 --activity-channels 101-110,121-124",
+            "duplex --driver D1 --report r.json --stop-file stop --progress p.json --frames 32 --seconds 600 --burn-us 100 --stress 4 --panic-at 7 --cycles 3 --activity-channels 101-110,121-124 --audio-cpus 14 --stress-cpus 6-13",
         ))
         .unwrap();
         assert_eq!(
@@ -820,6 +820,10 @@ mod tests {
                 stress: 4,
                 panic_at: 7,
                 cycles: 3,
+                audio_cpus: vec![14],
+                stress_cpus: vec![6, 7, 8, 9, 10, 11, 12, 13],
+                cpu: None,
+                threshold_us: 10,
                 watched: Watched::parse("101-110,121-124").unwrap(),
             }
         );
@@ -857,14 +861,69 @@ mod tests {
             "duplex --driver D1 --report r --stop-file s --frames 16",
             "duplex --driver D1 --report r --stop-file s --frames 32x",
             "duplex --driver D1 --report r --stop-file s --frames 32 --seconds 0",
-            "duplex --driver D1 --report r --stop-file s --frames 32 --seconds 3601",
+            "duplex --driver D1 --report r --stop-file s --frames 32 --seconds 36001",
             "duplex --driver D1 --report r --stop-file s --frames 32 --burn-us 301",
             "duplex --driver D1 --report r --stop-file s --frames 32 --stress 9",
             "reopen --driver D1 --report r --stop-file s --frames 32 --cycles 0",
             "reopen --driver D1 --report r --stop-file s --frames 32 --cycles 21",
+            "hwlat --report r --stop-file s",
+            "hwlat --report r --stop-file s --cpu 64",
+            "hwlat --report r --stop-file s --cpu 3 --threshold-us 0",
+            "hwlat --report r --stop-file s --cpu 3 --threshold-us 1001",
+            "duplex --driver D1 --report r --stop-file s --frames 32 --audio-cpus 1,1",
+            "duplex --driver D1 --report r --stop-file s --frames 32 --stress-cpus 70",
         ] {
             assert!(parse(&argv(bad)).is_err(), "{bad:?}");
         }
         assert!(parse(&argv("duplex --driver D1 --report r --stop-file s --frames 64 --seconds 3600 --burn-us 300 --stress 8 --activity-channels all")).is_ok());
+        assert!(parse(&argv("duplex --driver D1 --report r --stop-file s --frames 32 --activity-channels all --seconds 36000")).is_ok());
+        let h = parse(&argv(
+            "hwlat --report r --stop-file s --cpu 14 --seconds 30",
+        ))
+        .unwrap();
+        assert_eq!(
+            (
+                h.mode,
+                h.cpu,
+                h.threshold_us,
+                h.seconds,
+                h.driver.is_empty()
+            ),
+            (Mode::Hwlat, Some(14), 10, 30, true)
+        );
+    }
+
+    use iem_audio_io::telemetry::GlitchKind;
+
+    fn glitch(kind: GlitchKind, at_ns: u64, value: u64) -> Glitch {
+        Glitch { kind, at_ns, value }
+    }
+
+    #[test]
+    fn glitch_list_is_capped() {
+        let mut list = vec![glitch(GlitchKind::Late, 0, 1); GLITCH_REPORT_CAP - 2];
+        let new = [glitch(GlitchKind::Missed, 1, 2); 5];
+        assert_eq!(keep_glitches(&mut list, &new), 3);
+        assert_eq!(list.len(), GLITCH_REPORT_CAP);
+        assert_eq!(keep_glitches(&mut list, &new), 5);
+        let mut empty = Vec::new();
+        assert_eq!(keep_glitches(&mut empty, &new), 0);
+        assert_eq!(empty.len(), 5);
+    }
+
+    #[test]
+    fn glitch_times_convert_to_qpc_and_markers_carry_them() {
+        assert_eq!(glitch_qpc(1_000_000_000, 100, 10_000_000), 10_000_100);
+        assert_eq!(glitch_qpc(333_333, 0, 10_000_000), 3_333);
+        assert_eq!(glitch_qpc(5, 7, 0), 7);
+        assert_eq!(
+            marker_text(
+                &glitch(GlitchKind::Missed, 1_000_000_000, 700_000),
+                100,
+                10_000_000,
+                10_050_000
+            ),
+            "iemmixer-glitch kind=missed at_qpc=10000100 emit_qpc=10050000 freq=10000000 value=700000"
+        );
     }
 }
