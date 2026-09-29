@@ -1,6 +1,7 @@
 """Tests for scripts/pc-tuning/tuning_window.py (pure parts; ssh is the PC)."""
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 import tempfile
@@ -84,6 +85,69 @@ class PostBootTests(unittest.TestCase):
         self.assertEqual(tw.post_boot_verdict({**ok, "pending": ["irq:card:mask"]}), ["still pending after the reboot: irq:card:mask"])
         self.assertEqual(tw.post_boot_verdict({**ok, "booted_after_request": False}), ["the PC did not reboot after the request"])
         self.assertEqual(tw.post_boot_verdict({**ok, "handover": {"error": "no meters"}}), ["handover checks failed: no meters"])
+
+
+class UndoTests(unittest.TestCase):
+    """cmd_undo must fail loud when a Tier-3 revert item fails (I2,
+    script-failure-policy): a silent exit 0 hides an un-reverted global lever
+    (post_boot_verdict's failed_items can't see it — a failed revert stays
+    journaled but still matches its tuned value, so it counts ok). The PC calls
+    (tps) are mocked; only the failed-row handling is under test."""
+
+    def setUp(self) -> None:
+        self.saved = (tw.sw.open_state, tw.sw.save_state, tw.tps)
+        tw.sw.open_state = lambda: {"id": "w", "card": "free"}
+        tw.sw.save_state = lambda s: None
+        self.env = {"PC_TUNING_ROOT": "T"}
+        self.args = argparse.Namespace(tier=3, only="")
+
+    def tearDown(self) -> None:
+        tw.sw.open_state, tw.sw.save_state, tw.tps = self.saved
+
+    def test_a_clean_revert_succeeds(self) -> None:
+        tw.tps = lambda env, body, **kw: [{"key": "irq:card:policy", "action": "restored", "error": None}]
+        tw.cmd_undo(self.env, self.args)   # no raise on a clean revert
+
+    def test_a_failed_revert_row_raises(self) -> None:
+        tw.tps = lambda env, body, **kw: [{"key": "irq:card:policy", "action": "failed", "error": "Access is denied"},
+                                          {"key": "irq:nic:rss", "action": "restored", "error": None}]
+        with self.assertRaisesRegex(tw.StepError, "revert item.*irq:card:policy.*Access is denied"):
+            tw.cmd_undo(self.env, self.args)
+
+
+class RebootPrepareTests(unittest.TestCase):
+    """reboot-prepare prepares a reboot only over a cleanly preempted window
+    (I1): unwind(bring_back_reaper=False) breaks at bring-back before the
+    graceful-stop check, so a spike that did not stop still holds the card. A
+    graceful reboot must never be prepared over it — reboot-prepare refuses and
+    keeps the card free and the window open; the spike is never force-ended
+    (I8). The PC calls (unwind, spike_running, tps) are mocked."""
+
+    def setUp(self) -> None:
+        self.saved = (tw.sw.open_state, tw.sw.save_state, tw.sw.spike_running, tw.sw.unwind, tw.tps)
+        self.state = {"id": "w", "card": "free", "pref_original": 64, "pref_current": 64}
+        tw.sw.open_state = lambda: self.state
+        tw.sw.save_state = lambda s: None
+        tw.sw.spike_running = lambda env, **kw: False
+        tw.tps = lambda env, body, **kw: {"items": []} if "Get-IemTuningState" in body else "2026-01-01T00:00:00Z"
+        self.env = {"PC_TUNING_ROOT": "T"}
+        self.args = argparse.Namespace()
+
+    def tearDown(self) -> None:
+        tw.sw.open_state, tw.sw.save_state, tw.sw.spike_running, tw.sw.unwind, tw.tps = self.saved
+
+    def test_a_clean_unwind_prepares_the_reboot(self) -> None:
+        tw.sw.unwind = lambda env, state, running, bring_back_reaper=True: [{"stop-spike": True}, {"restore-buffer": {"ok": True}}]
+        tw.cmd_reboot_prepare(self.env, self.args)
+        self.assertEqual(self.state["card"], "rebooting")
+        self.assertIn("reboot", self.state)
+
+    def test_a_spike_that_did_not_stop_refuses_the_reboot(self) -> None:
+        tw.sw.unwind = lambda env, state, running, bring_back_reaper=True: [{"stop-spike": False}, {"restore-buffer": {"ok": True}}]
+        with self.assertRaisesRegex(tw.StepError, "did not stop"):
+            tw.cmd_reboot_prepare(self.env, self.args)
+        self.assertEqual(self.state["card"], "free")   # never entered the rebooting state
+        self.assertNotIn("reboot", self.state)          # no reboot prepared over a held card
 
 
 if __name__ == "__main__":
