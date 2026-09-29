@@ -1142,7 +1142,8 @@ fn the_loopback_round_trip_is_measured() {
             card_tx: SPARE.to_vec(),
         },
     );
-    let mut b = Block::new(N, &vec![0.0; ins * N], &mut obuf);
+    let silent = vec![0.0; ins * N];
+    let mut b = Block::new(N, &silent, &mut obuf);
     r.p.process(&mut b);
     assert_eq!(
         r.h.status
