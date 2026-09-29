@@ -234,6 +234,7 @@ pub fn scenario() -> Scenario {
         &[],
         Options::default(),
         HIL.len(),
+        0,
     );
     Scenario {
         topo,

@@ -692,6 +692,7 @@ fn hil_outputs_do_not_depend_on_the_block_size() {
             &[],
             Options::default(),
             common::HIL.len(),
+            0,
         );
         for (at, ops) in &schedule {
             assert!(push_group(&mut h.cmds, *at, ops));
