@@ -209,8 +209,11 @@ impl GlitchLog {
         let i = self.slot(head);
         if let (Some(at), Some(p)) = (self.at.get(i), self.packed.get(i)) {
             at.store(g.at_ns, Relaxed);
+            // `+`, not `|`: the kind occupies bits at/above 62 and the value is
+            // clamped below 2^62, so they never share a bit. `+` reads back
+            // identically and, unlike `|`, has no equivalent-mutant twin.
             p.store(
-                (g.kind.code() << VALUE_BITS) | g.value.min(VALUE_MASK),
+                (g.kind.code() << VALUE_BITS) + g.value.min(VALUE_MASK),
                 Relaxed,
             );
         }

@@ -9,7 +9,7 @@
 use assert_no_alloc::{AllocDisabler, assert_no_alloc, reset_violation_count, violation_count};
 use iem_audio_io::messages::{Messages, Topic};
 use iem_audio_io::rtpanic::{is_rt_thread, latest, mark_rt_thread, record};
-use iem_audio_io::telemetry::{Telemetry, selector};
+use iem_audio_io::telemetry::{GLITCH_CAPACITY, GapScan, Telemetry, selector};
 
 #[global_allocator]
 static ALLOCATOR: AllocDisabler = AllocDisabler;
@@ -73,4 +73,38 @@ fn counting_a_driver_message_does_not_allocate() {
         (LOG.count(Topic::ResetRequest), LOG.count(Topic::RateChange)),
         (1, 1)
     );
+}
+
+/// I7 (S1c): the callback records glitches, per-CPU and thread counters
+/// without allocating — including the ring-full drop path — and the hwlat
+/// scanner observes gaps without allocating after `new`. The glitch ring and
+/// the scanner's `largest` buffer are preallocated; nothing here may touch the
+/// allocator.
+#[test]
+fn callback_telemetry_and_the_gap_scan_do_not_allocate() {
+    let violations = std::thread::spawn(|| {
+        let t = Telemetry::new(32, 96_000.0);
+        let mut scan = GapScan::new(10_000);
+        reset_violation_count();
+        assert_no_alloc(|| {
+            let mut at = 1_000;
+            // More than the ring holds, so the drop path runs too. Each
+            // callback is missed (700 µs > 2 periods), its position jumps by
+            // two buffers, and the callback overruns: three glitches each.
+            for i in 0..GLITCH_CAPACITY as u64 + 100 {
+                t.on_thread((i % 70) as u32, 900 + (i % 2) as u32);
+                t.on_callback(at, Some(i as i64 * 64));
+                t.on_done(1_000_000);
+                at += 700_000;
+            }
+            // Fills and then only replaces the scanner's largest buffer.
+            for i in 0..100_u64 {
+                scan.observe(i * 1_000_000, i * 1_000_000 + 20_000 + i);
+            }
+        });
+        violation_count()
+    })
+    .join()
+    .unwrap();
+    assert_eq!(violations, 0, "the callback telemetry allocated");
 }
