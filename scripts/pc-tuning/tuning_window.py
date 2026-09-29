@@ -271,6 +271,13 @@ def cmd_undo(env, args) -> None:
     state.setdefault("tuning_steps", []).append({"undo": args.tier, "only": args.only, "at": stamp()})
     sw.save_state(state)
     print(json.dumps({"undo": rows}))
+    # Fail loud on any un-reverted item, like cmd_apply (I2, script-failure-policy):
+    # post_boot_verdict's failed_items cannot catch it (a failed revert stays
+    # journaled but still matches its tuned value → counts ok), so a silent
+    # exit 0 would hide a global lever left applied.
+    failed = [r for r in rows if r.get("action") == "failed"]
+    if failed:
+        raise StepError(f"{len(failed)} revert item(s) failed: " + "; ".join(f"{r['key']}: {r['error']}" for r in failed))
 
 
 def cmd_state(env, args) -> None:
@@ -360,6 +367,15 @@ def cmd_reboot_prepare(env, args) -> None:
     need_free(state)
     running = sw.spike_running(env)
     done = sw.unwind(env, state, running, bring_back_reaper=False)
+    # A reboot is prepared only over a cleanly preempted window (I1): unwind
+    # (bring_back_reaper=False) breaks at bring-back before its graceful-stop
+    # check, so a spike that did not stop still holds the card. Do not prepare a
+    # graceful reboot over a held card — refuse (the card stays free, the window
+    # stays open) and alarm the owner; the spike is never force-ended (I8, guard.md).
+    if any("stop-spike" in step and not step["stop-spike"] for step in done):
+        sw.alarm("a spike did not stop within 60 s, so it still holds the card: no reboot is prepared over it "
+                 "(the spike is never force-ended, I8); wait for it or preempt in a dev window")
+        raise StepError("the spike did not stop: the card is still held, no reboot prepared")
     st = tps(env, f"Get-IemTuningState -ProfilePath {sw.tuning_profile(env)}", timeout=120)
     state["card"] = "rebooting"
     state["reboot"] = {"prepared_at": tps(env, "Get-IemNow", timeout=60)}
