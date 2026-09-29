@@ -227,13 +227,15 @@ exclude_re = [
   # differs from `<=` only at the exact nanosecond.
   "iem-guard/src/pipe\\.rs.*replace < with <= in retry",
   # Unobservable (S6/S1c): `if !hil.is_empty()` in `run` only decides whether
-  # the "HIL's spare card outputs …" info line is logged — no state, no return
-  # value changes (like the excluded `delete ! in Control::tick`). `run` opens
-  # pipes and a driver and then blocks serving, so the log is unreachable by a
-  # unit test; the input sizing it neighbours is the tested `input_channels`.
-  # (`run$` end-anchor keeps the neighbouring `delete ! in run_hil`, which IS
-  # killed, out of this exclusion.)
-  "iem-engine/src/engine\\.rs.*delete ! in run$",
+  # the "HIL's spare card outputs …" info line is logged — no state and no
+  # return value change (like the excluded `delete ! in Control::tick`). `run`
+  # IS reachable from unit tests (run_bounded), but no test captures or asserts
+  # that log, so the mutant is unobservable. The `:461:` line anchor is
+  # essential: `run` also has a `delete ! in run` at :433: (the block-size
+  # guard `if !(1..=MAX_BLOCK).contains(&cfg.block)`), which is NOT equivalent
+  # and IS killed by `run_refuses_a_bad_block_and_a_bad_site`, and the
+  # `delete ! in run_hil` at :617: is killed too — both must stay mutated.
+  "iem-engine/src/engine\\.rs:461:.*delete ! in run$",
   # Equivalent (S6): the DER length fold `(n << 8) | usize::from(b)` shifts the
   # accumulator left by 8, so its low 8 bits are always zero; OR-ing in a byte
   # (0..=255) there equals XOR-ing it, so `| b` and `^ b` are identical (like
