@@ -54,12 +54,13 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use crate::channels::{ChannelMap, MapError};
 use crate::format::{self, Refusal, SampleFormat};
 use crate::messages::{self, Messages, TOPICS};
+use crate::os;
 pub use crate::owner::StopOutcome;
 use crate::owner::{self, Asked, OpenPeriod, SehStep, Watchdog};
 use crate::period::PeriodVerdict;
 use crate::reset::{ResetBudget, Verdict};
 use crate::rtpanic;
-use crate::telemetry::{self, Counters, InputPeaks, Snapshot, Telemetry};
+use crate::telemetry::{self, Counters, Glitch, InputPeaks, Snapshot, Telemetry};
 use crate::{Block, Process, StreamStats};
 
 #[derive(Debug)]
@@ -357,6 +358,9 @@ impl Host {
         let create_buffers = t.elapsed();
         let split = usize::try_from(info.inputs).unwrap_or(0).min(buffers.len());
         let (inputs, outputs) = buffers.split_at(split);
+        // The stream clock's zero and its QPC count, read back to back.
+        let base = Instant::now();
+        let (base_qpc, qpc_freq) = os::qpc().unwrap_or((0, 0));
         let stream = Box::new(Stream {
             format,
             bytes: (frames as usize).saturating_mul(format.bytes()),
@@ -364,7 +368,9 @@ impl Host {
             outputs: outputs.to_vec(),
             telemetry: Telemetry::new(frames, info.rate),
             peaks: InputPeaks::new(inputs.len()),
-            base: Instant::now(),
+            base,
+            base_qpc,
+            qpc_freq,
             burn: Duration::from_micros(u64::from(cfg.burn_us)),
             panic_at: cfg.panic_at,
             faulted: AtomicBool::new(false),
@@ -421,6 +427,18 @@ impl Running<'_> {
 
     pub fn snapshot(&self) -> Option<Snapshot> {
         self.stream().map(|s| s.telemetry.snapshot())
+    }
+
+    /// The QPC count at the stream clock's zero and the QPC frequency.
+    pub fn qpc_base(&self) -> Option<(i64, i64)> {
+        self.stream().map(|s| (s.base_qpc, s.qpc_freq))
+    }
+
+    /// Moves the glitches since the last call into `out` (owner thread only).
+    pub fn drain_glitches(&self, out: &mut Vec<Glitch>) {
+        if let Some(s) = self.stream() {
+            s.telemetry.drain_glitches(out);
+        }
     }
 
     pub fn callbacks(&self) -> u64 {
@@ -537,6 +555,10 @@ struct Stream {
     telemetry: Telemetry,
     peaks: InputPeaks,
     base: Instant,
+    /// The QPC count read right after `base` and the QPC frequency (glitch
+    /// times in QPC for the trace markers, S1c design note §4.1).
+    base_qpc: i64,
+    qpc_freq: i64,
     burn: Duration,
     panic_at: u64,
     faulted: AtomicBool,
@@ -611,6 +633,8 @@ unsafe extern "system" fn on_rate_change(_rate: SampleRate) {
 impl Stream {
     fn on_buffer(&self, second: bool, position: Option<i64>) {
         let entry = self.base.elapsed();
+        self.telemetry
+            .on_thread(os::current_processor(), os::current_thread_id());
         let position = position.or_else(|| {
             // SAFETY: the driver outlives the stream (Running borrows Host).
             unsafe { self.driver.as_ref() }
