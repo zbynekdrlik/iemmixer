@@ -3,6 +3,7 @@ guard; ssh is the PC)."""
 from __future__ import annotations
 
 import hashlib
+import json
 import sys
 import tempfile
 import time
@@ -186,6 +187,86 @@ class UnwindTests(unittest.TestCase):
             sw.unwind(self.env, state, running=False)
         self.assertFalse(any(c.startswith("Invoke-SpikeBringBack") for c in self.calls))
         self.assertFalse(state["closed"])
+
+
+class UnwindTuningTests(unittest.TestCase):
+    """The S1c unwind branches (trace-stop, tuning-exit, fingerprint) with the
+    PC calls recorded instead of sent (fake ps). Pins the design note §5.2
+    safety invariant: a failed trace-stop or tuning-exit alarms the owner but
+    REAPER still comes back, and reboot-prepare (bring_back_reaper=False) leaves
+    the card free and the window open."""
+
+    def setUp(self) -> None:
+        self.dir = Path(tempfile.mkdtemp())
+        self.saved = (sw.STATE, sw.ps)
+        sw.STATE = self.dir / "spike-window.json"
+        self.baseline = self.dir / "baseline.json"
+        self.baseline.write_text(json.dumps({"plan.active": "reaper", "affinity": "x"}), encoding="utf-8")
+        self.fail: set[str] = set()   # PowerShell verbs whose body should raise
+        self.calls: list[str] = []
+
+        def fake_ps(env, body, timeout=300, event="finish"):
+            self.calls.append(body)
+            for verb in self.fail:
+                if verb in body:
+                    raise sw.StepError(f"{verb} failed")
+            if "Stop-SpikeGracefully" in body:
+                return True
+            if "Get-IemReaperFingerprint" in body:
+                return {"plan.active": "spike", "affinity": "x"}   # differs from the baseline → alarm
+            return {"ok": True}
+
+        sw.ps = fake_ps
+        self.env = {"PC_ROOT": "R", "PC_TUNING_ROOT": "T", "PC_XPERF": "xperf.exe",
+                    "PC_BUFFER_KEY": "K", "PC_BUFFER_NAME": "N", "PC_REAPER_HTTP": "H",
+                    "PC_REAPER_START_TASK_PATH": "P", "PC_REAPER_START_TASK": "TK", "PC_NTRACK": "9",
+                    "PC_METER_BRIDGE": "B", "PC_METER_ACTION": "A", "PC_METER_HEARTBEAT": "HB",
+                    "PC_ASIO_MODULE": "M", "PC_APP_HTTP": "AH"}
+
+    def tearDown(self) -> None:
+        sw.STATE, sw.ps = self.saved
+
+    def state(self, **kw) -> dict:
+        s = {"id": "w", "card": "free", "pref_original": 64, "pref_current": 64, "pref_restored": False,
+             "trace": "C:\\t\\runs\\x", "tuning_mode": True, "fingerprint": str(self.baseline), "closed": False}
+        s.update(kw)
+        return s
+
+    def test_the_full_unwind_reverts_trace_and_tuning_before_the_buffer_and_reaper(self) -> None:
+        state = self.state()
+        done = sw.unwind(self.env, state, running=True)
+        self.assertEqual([next(iter(d)) for d in done],
+                         ["stop-spike", "trace-stop", "tuning-exit", "restore-buffer", "bring-back", "fingerprint"])
+        self.assertEqual((state["trace"], state["tuning_mode"], state["card"], state["closed"]), (None, False, "reaper", True))
+        # trace and tuning were reverted before restore-buffer and the bring-back
+        idx = {next(iter(d)): i for i, d in enumerate(done)}
+        self.assertLess(idx["trace-stop"], idx["restore-buffer"])
+        self.assertLess(idx["tuning-exit"], idx["bring-back"])
+
+    def test_a_failed_trace_or_tuning_exit_alarms_but_reaper_still_comes_back(self) -> None:
+        self.fail = {"Stop-IemTrace", "Exit-IemTuningMode"}
+        state = self.state()
+        done = sw.unwind(self.env, state, running=False)
+        steps = {next(iter(d)): list(d.values())[0] for d in done}
+        self.assertIn("error", steps["trace-stop"])
+        self.assertIn("error", steps["tuning-exit"])
+        self.assertTrue(any(c.startswith("Invoke-SpikeBringBack") for c in self.calls))   # REAPER still comes back
+        self.assertEqual((state["card"], state["closed"]), ("reaper", True))
+
+    def test_a_fingerprint_that_differs_is_recorded(self) -> None:
+        state = self.state()
+        done = sw.unwind(self.env, state, running=False)
+        fp = [d["fingerprint"] for d in done if "fingerprint" in d][0]
+        self.assertEqual([e["key"] for e in fp], ["plan.active"])   # baseline reaper vs current spike
+
+    def test_reboot_prepare_leaves_the_window_open_and_reaper_off(self) -> None:
+        state = self.state()
+        done = sw.unwind(self.env, state, running=False, bring_back_reaper=False)
+        steps = [next(iter(d)) for d in done]
+        self.assertNotIn("bring-back", steps)
+        self.assertNotIn("fingerprint", steps)
+        self.assertFalse(any(c.startswith("Invoke-SpikeBringBack") for c in self.calls))
+        self.assertEqual((state["card"], state.get("closed")), ("free", False))
 
 
 class MainTests(unittest.TestCase):
