@@ -254,6 +254,9 @@ pub fn while_switching(req: &Request) -> &'static str {
 
 /// Where the pipe sends a request.
 #[derive(Debug, Clone, PartialEq)]
+// `Now(Reply)` carries the whole engine status (control thread only, one at a
+// time): the size gap to the small variants is expected.
+#[allow(clippy::large_enum_variant)]
 pub enum Route {
     /// Answered at once from the view.
     Now(Reply),

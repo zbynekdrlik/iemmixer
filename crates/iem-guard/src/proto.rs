@@ -454,6 +454,8 @@ mod tests {
                 },
                 HilOut { tx: 95, peak: 0.0 },
             ],
+            loopback_samples: 0,
+            loopback_ms: 0.0,
         }
     }
 
