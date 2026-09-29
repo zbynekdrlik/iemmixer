@@ -32,6 +32,7 @@ jobs:
           set -euo pipefail
           python3 -m unittest discover -s scripts -p 'test_*.py' -v
           python3 -m unittest discover -s scripts/asio-spike -p 'test_*.py' -v
+          python3 -m unittest discover -s scripts/pc-tuning -p 'test_*.py' -v
           python3 -m unittest discover -s scripts/iem-pc -p 'test_*.py' -v
           python3 scripts/test_check_disposal_safety.py
       - name: Golden tooling self-tests (numpy venv)
@@ -564,7 +565,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $b = Join-Path $env:RUNNER_TEMP 'asio-spike'
           New-Item -ItemType Directory -Force -Path $b | Out-Null
-          Copy-Item -LiteralPath target/release/examples/asio_spike.exe, scripts/asio-spike/SpikePc.psm1, scripts/asio-spike/spike-task.ps1, scripts/golden/GoldenPc.psm1 -Destination $b
+          Copy-Item -LiteralPath target/release/examples/asio_spike.exe, scripts/asio-spike/SpikePc.psm1, scripts/asio-spike/spike-task.ps1, scripts/golden/GoldenPc.psm1, scripts/pc-tuning/IemTuning.psm1, scripts/pc-tuning/IemMeasure.psm1 -Destination $b
           $lines = Get-ChildItem -LiteralPath $b -File | Sort-Object Name | ForEach-Object { '{0}  {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name }
           [IO.File]::WriteAllText((Join-Path $b 'SHA256SUMS'), (($lines -join "`n") + "`n"))
       - name: Upload (dev pushes only — the only spike that may reach the PC, P5)
