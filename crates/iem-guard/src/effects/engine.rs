@@ -687,6 +687,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn read_frame_returns_a_persistent_error_instead_of_looping() {
+        // A bounded, deterministic catch for the match-guard -> `true` mutant of
+        // `Err(e) if e.kind() == io::ErrorKind::Interrupted` (effects/engine.rs:76).
+        // The real code retries only an Interrupted read and returns any other
+        // error at once; the mutant treats every error as Interrupted and loops
+        // forever on a reader that keeps failing. Run it on a thread and require
+        // it to end within a bound: the original returns the error in
+        // microseconds; the mutant never returns, so this fails its assertion in
+        // 3 s (a clean FAIL) instead of hanging until nextest's slow-timeout
+        // (#23, and it runs first under `priority = 100`).
+        struct Broken;
+        impl Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Err(io::ErrorKind::BrokenPipe.into())
+            }
+        }
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let kind = read_frame(&mut Broken)
+                .map(|o| o.map(|b| b.len()))
+                .map_err(|e| e.kind());
+            let _ = done_tx.send(kind);
+        });
+        match done_rx.recv_timeout(Duration::from_secs(3)) {
+            Ok(r) => assert_eq!(r, Err(io::ErrorKind::BrokenPipe)),
+            Err(_) => panic!("read_frame looped on a persistent non-Interrupted error"),
+        }
+    }
+
     fn p(v: Value) -> Msg {
         parse(v.to_string().as_bytes()).unwrap()
     }

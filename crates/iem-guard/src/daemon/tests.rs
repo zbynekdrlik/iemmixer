@@ -836,6 +836,45 @@ fn an_event_plan_clears_the_token_as_it_begins() {
 }
 
 #[test]
+fn an_event_unwind_does_not_recurse_when_a_step_is_preempted() {
+    // A bounded, deterministic catch for the `to != Mode::Event` -> `true`
+    // mutant of the preempted-step arm (daemon.rs:869). In an event plan
+    // (to == Event) the real code treats a preempted step as an ordinary
+    // event-plan failure and goes on, so `run_switch` returns Done after a
+    // single ReaperFacts read. The mutant makes the guard `true`, so the
+    // preempted ReaperHandover step sends the event switch to `back_to_event`,
+    // which re-runs the whole event plan; that re-run's ReaperHandover then
+    // blocks on ReaperFacts for `BLOCK_LIMIT` (10 s), the token never renewed.
+    // Run it on a thread and require it to end within a bound: the original
+    // returns in well under a second with one ReaperFacts read; the mutant does
+    // not, so this fails its assertion in 3 s (a clean FAIL) instead of hanging
+    // until nextest's slow-timeout (#23, and it runs first under
+    // `priority = 100`). The `(Done, 1)` shape also fails the mutant's second
+    // ReaperFacts read should `BLOCK_LIMIT` ever drop below the bound.
+    let (done_tx, done_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut pc = FakePc::new(band_up());
+        // The handover step waits on the token; a preemption ends its wait.
+        pc.block_until_cancel(Call::ReaperFacts);
+        let mut g = Guard::for_test(Mode::Event);
+        // Fire the single preemption only after PrefCheck (the step right
+        // before ReaperHandover in the event plan) is published as done, i.e.
+        // after `begin` cleared the token at the plan's start: a fixed delay
+        // could race a slow start and be erased by that clear.
+        let _fired = preempt_after(&g, Step::PrefCheck);
+        let out = run_switch(&mut pc, &mut g, Mode::Event, Mode::Event);
+        let _ = done_tx.send((out, pc.count(Call::ReaperFacts)));
+    });
+    assert_eq!(
+        done_rx.recv_timeout(Duration::from_secs(3)),
+        Ok((Outcome::Done, 1)),
+        "an event switch recursed into back_to_event on a preempted step \
+         instead of continuing the plan after one handover (or did not end \
+         within 3 s)"
+    );
+}
+
+#[test]
 fn event_plan_failures_follow_the_policy() {
     // A failed app stop skips the app start; the handover still runs.
     let (mut pc, mut g) = (
@@ -3266,6 +3305,34 @@ fn session_end_stops_respawning() {
     assert!(shared.await_session_done(Duration::from_secs(5)));
     assert!(t.elapsed() >= Duration::from_millis(150));
     done.join().unwrap();
+}
+
+#[test]
+fn session_end_does_not_wait_when_no_engine_is_left() {
+    // A bounded, deterministic catch for both loop-condition mutants of
+    // `while !p.engine.is_empty() && start.elapsed() < g.session_wait`
+    // (daemon.rs:2149). With no engine process left the real loop never runs
+    // and `session_end` returns at once. The `&&`->`||` mutant
+    // (`!p.engine.is_empty() || elapsed < wait`) and the `delete !` mutant
+    // (`p.engine.is_empty() && elapsed < wait`) both keep looping until the full
+    // session_wait even with an already-empty engine list. Give session_wait a
+    // long value and bound the call on a thread: the original returns in
+    // microseconds; either mutant waits ~60 s, so this fails its assertion in
+    // 3 s (a clean FAIL) instead of hanging until nextest's slow-timeout (#23,
+    // and it runs first under `priority = 100`).
+    let (done_tx, done_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        // Facts::default() -> the engine process list is empty.
+        let mut pc = FakePc::new(Facts::default());
+        let mut g = Guard::for_test(Mode::Dev);
+        g.session_wait = Duration::from_secs(60);
+        session_end(&mut pc, &mut g);
+        let _ = done_tx.send(());
+    });
+    assert!(
+        done_rx.recv_timeout(Duration::from_secs(3)).is_ok(),
+        "session_end waited on the engine although its process list was empty"
+    );
 }
 
 #[test]

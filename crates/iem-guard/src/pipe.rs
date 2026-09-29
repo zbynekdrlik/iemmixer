@@ -479,6 +479,32 @@ mod tests {
     }
 
     #[test]
+    fn retry_gives_up_at_the_limit_and_does_not_loop_forever() {
+        // A bounded, deterministic catch for the match-guard -> `true` mutant of
+        // `Err(e) if start.elapsed() < limit` (pipe.rs:128). The real code
+        // retries only while within the limit and then returns the last error;
+        // the mutant retries forever on a call that keeps failing. Run it on a
+        // thread and require it to end within a bound: the original returns Err
+        // just after the limit; the mutant never returns, so this fails its
+        // assertion in 3 s (a clean FAIL) instead of hanging until nextest's
+        // slow-timeout (#23, and it runs first under `priority = 100`).
+        let (done_tx, done_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let got: io::Result<()> = retry(
+                "the guard pipe",
+                Duration::from_millis(20),
+                Duration::from_millis(5),
+                || Err(io::Error::other("access denied")),
+            );
+            let _ = done_tx.send(got.is_err());
+        });
+        match done_rx.recv_timeout(Duration::from_secs(3)) {
+            Ok(was_err) => assert!(was_err, "retry returned Ok although the call always failed"),
+            Err(_) => panic!("retry looped past its limit instead of giving up within 3 s"),
+        }
+    }
+
+    #[test]
     fn a_request_while_switching_is_refused_at_the_pipe() {
         let (s, _rx) = served();
         s.shared.update(|v| v.running = Some(Mode::Dev));
