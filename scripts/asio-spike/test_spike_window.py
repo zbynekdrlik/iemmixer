@@ -52,22 +52,32 @@ class EnvTests(unittest.TestCase):
 class RequestTests(unittest.TestCase):
     def test_limits(self) -> None:
         sw.check_request("probe", None, 600, 0, 0, 5)
-        sw.check_request("duplex", 32, 3600, 300, 8, 20)
+        sw.check_request("duplex", 32, 36000, 300, 8, 20)
+        sw.check_request("hwlat", None, 30, 0, 0, 1, cpu=14, threshold_us=10)
+        sw.check_request("duplex", 32, 600, 40, 4, 5, audio_cpus="14", stress_cpus="0,1,6-13")
         for bad in (("record", 32, 600, 0, 0, 5), ("duplex", 16, 600, 0, 0, 5), ("reopen", None, 600, 0, 0, 5),
-                    ("duplex", 32, 0, 0, 0, 5), ("duplex", 32, 3601, 0, 0, 5), ("duplex", 32, 600, 301, 0, 5),
+                    ("duplex", 32, 0, 0, 0, 5), ("duplex", 32, 36001, 0, 0, 5), ("duplex", 32, 600, 301, 0, 5),
                     ("duplex", 32, 600, 0, 9, 5), ("reopen", 48, 600, 0, 0, 0), ("reopen", 48, 600, 0, 0, 21)):
             with self.assertRaises(sw.StepError, msg=str(bad)):
                 sw.check_request(*bad)
+        for kw in ({"cpu": None}, {"cpu": 64}, {"cpu": 3, "threshold_us": 0}, {"cpu": 3, "threshold_us": 1001}):
+            with self.assertRaises(sw.StepError, msg=str(kw)):
+                sw.check_request("hwlat", None, 30, 0, 0, 1, **kw)
+        for bad in ("14;x", "a", "1,,2"):
+            with self.assertRaises(sw.StepError, msg=bad):
+                sw.check_request("duplex", 32, 600, 0, 0, 5, audio_cpus=bad)
 
     def test_timeouts(self) -> None:
         self.assertEqual([sw.run_timeout("probe", 600, 5), sw.run_timeout("duplex", 600, 5), sw.run_timeout("reopen", 600, 5)], [60, 660, 210])
+        self.assertEqual(sw.run_timeout("hwlat", 30, 1), 90)
 
     def test_the_request_carries_the_watched_inputs(self) -> None:
         env = {"PC_ASIO_DRIVER": "D", "PC_ASIO_MODULE": "M", "PC_ACTIVITY_CHANNELS": "101-110,121-124"}
         args = type("A", (), {"mode": "duplex", "frames": 64, "seconds": 20, "burn_us": 0, "stress": 0, "panic_at": 0, "cycles": 5})()
         self.assertEqual(sw.run_fields(env, args),
                          {"mode": "duplex", "driver": "D", "module": "M", "frames": 64, "seconds": 20, "burn_us": 0, "stress": 0,
-                          "panic_at": 0, "cycles": 5, "activity_channels": "101-110,121-124", "timeout": 80})
+                          "panic_at": 0, "cycles": 5, "cpu": -1, "threshold_us": 10, "audio_cpus": "", "stress_cpus": "",
+                          "activity_channels": "101-110,121-124", "timeout": 80})
         args.mode, args.frames = "probe", None
         self.assertEqual((sw.run_fields(env, args)["frames"], sw.run_fields(env, args)["timeout"]), (0, 60))
 
@@ -108,6 +118,21 @@ class UndoPlanTests(unittest.TestCase):
                          ["stop-spike", "restore-buffer", "bring-back"])
         self.assertTrue(sw.buffer_touched(self.state(pref_current=64)))
         self.assertFalse(sw.buffer_touched(self.state()))
+
+    def test_trace_and_tuning_unwind_before_the_buffer_and_reaper(self) -> None:
+        state = {"card": "free", "pref_current": 32, "trace": "C:\\t\\runs\\x", "tuning_mode": True, "fingerprint": "/b.json"}
+        self.assertEqual(sw.undo_plan(state, spike_running=True),
+                         ["stop-spike", "trace-stop", "tuning-exit", "restore-buffer", "bring-back", "fingerprint"])
+
+    def test_no_fingerprint_without_bringing_reaper_back(self) -> None:
+        state = {"card": "reaper", "pref_current": None, "tuning_mode": True, "fingerprint": "/b.json"}
+        self.assertEqual(sw.undo_plan(state, spike_running=False), ["tuning-exit"])
+
+    def test_flags_recorded_before_the_action(self) -> None:
+        # tuning_window records the flag first; a flag alone (the action may have failed half-way) still unwinds.
+        self.assertIn("trace-stop", sw.undo_plan({"card": "free", "trace": "d"}, spike_running=False))
+        self.assertIn("tuning-exit", sw.undo_plan({"card": "free", "tuning_mode": True}, spike_running=False))
+        self.assertNotIn("trace-stop", sw.undo_plan({"card": "free", "trace": None}, spike_running=False))
 
 
 class UnwindTests(unittest.TestCase):
@@ -201,7 +226,7 @@ class MainTests(unittest.TestCase):
 
 
 class PreflightTests(unittest.TestCase):
-    GOOD = {"pref": 64, "reaper": 1, "app": 1, "spike": 0, "holders": ["reaper.exe:6496"], "task": True, "files": 4}
+    GOOD = {"pref": 64, "reaper": 1, "app": 1, "spike": 0, "holders": ["reaper.exe:6496"], "task": True, "files": 6}
 
     def test_good_state_passes(self) -> None:
         self.assertEqual(sw.preflight_problems(dict(self.GOOD), 64), [])
@@ -237,7 +262,7 @@ class DevTimeWindowTests(unittest.TestCase):
         sw.STATE, sw.EVENT_NOW = d / "spike-window.json", d / "EVENT-NOW"
         self.calls: list[str] = []
         self.pc = {"pref": 64, "kind": "DWord", "raw": "64", "reaper": 0, "app": 1, "spike": 0, "holders": [],
-                   "task": True, "files": 4}
+                   "task": True, "files": 6}
 
         def fake_ps(env, body, timeout=300, event="finish"):
             self.calls.append(body)
