@@ -12,9 +12,9 @@
 //! positions), [`reset`] (the reopen budget and the stall rule), [`rtpanic`]
 //! (panics on the real-time thread, recorded in atomics), [`owner`] (the
 //! decisions of the backend's owner thread), [`messages`] (the driver's
-//! messages, counted on any thread and logged by the owner thread) and, on
-//! Windows only, `asio` — the crate's only unsafe code: the S1a spike host
-//! and the S6 backend `AsioStream`. The preference window (the driver's
+//! messages, counted on any thread and logged by the owner thread)
+//! `cpuset` (CPU lists) and, on Windows only, `asio` and `os` — the crate's
+//! only unsafe code: the S1a spike host and the S6 backend `AsioStream`. The preference window (the driver's
 //! preferred buffer holds 32 while the engine holds the card, REAPER's
 //! original at every other moment) lives in `iem_win::prefwin`, which the
 //! guard shares.
@@ -52,6 +52,12 @@ pub mod format;
 pub mod messages;
 pub mod nullrt;
 pub mod offline;
+#[cfg(windows)]
+#[allow(
+    unsafe_code,
+    reason = "Windows placement, priority, clock and trace markers (S1c design note §6.2 L5)"
+)]
+pub mod os;
 pub mod owner;
 pub mod period;
 pub mod reset;

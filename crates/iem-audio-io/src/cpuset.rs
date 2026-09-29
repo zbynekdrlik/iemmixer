@@ -20,16 +20,42 @@ pub struct CpuSet {
 /// `a-b` ranges, each processor at most once, 0..=63. Empty text is an empty
 /// list. The result is ascending.
 pub fn parse_lps(text: &str) -> Result<Vec<u8>, String> {
-    // Stub: the real parser lands in the GREEN commit.
-    let _ = text;
-    Ok(Vec::new())
+    let mut out: Vec<u8> = Vec::new();
+    for part in text.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        let (lo, hi) = part.split_once('-').unwrap_or((part, part));
+        let num = |s: &str| {
+            s.trim()
+                .parse::<u8>()
+                .ok()
+                .filter(|&n| n < 64)
+                .ok_or_else(|| format!("{s:?} in {text:?} is not a processor 0..63"))
+        };
+        let (lo, hi) = (num(lo)?, num(hi)?);
+        if lo > hi {
+            return Err(format!("range {part:?} in {text:?} runs backwards"));
+        }
+        for lp in lo..=hi {
+            if out.contains(&lp) {
+                return Err(format!("{text:?} names processor {lp} twice"));
+            }
+            out.push(lp);
+        }
+    }
+    out.sort_unstable();
+    Ok(out)
 }
 
 /// The CPU Set IDs of `lps` in group 0; every processor must exist.
 pub fn ids_for(lps: &[u8], system: &[CpuSet]) -> Result<Vec<u32>, String> {
-    // Stub: the real mapping lands in the GREEN commit.
-    let _ = (lps, system);
-    Ok(Vec::new())
+    lps.iter()
+        .map(|&lp| {
+            system
+                .iter()
+                .find(|c| c.group == 0 && c.lp == lp)
+                .map(|c| c.id)
+                .ok_or_else(|| format!("logical processor {lp} is not in group 0 of this machine"))
+        })
+        .collect()
 }
 
 #[cfg(test)]

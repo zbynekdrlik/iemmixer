@@ -20,6 +20,9 @@ exclude_globs = [
   # channels.rs, period.rs, reset.rs, owner.rs, messages.rs and iem-win's
   # prefwin.rs.
   "crates/iem-audio-io/src/asio.rs",
+  # Windows-only placement/priority/clock/marker FFI (S1c): not compiled on
+  # the Linux runners; its decisions live in the mutated cpuset.rs.
+  "crates/iem-audio-io/src/os.rs",
   # The S1a spike program (a Windows-only main; its parser is tested).
   "crates/iem-audio-io/examples/**",
   # The engine's ASIO start-up and interlock card (S6): Windows effects, not

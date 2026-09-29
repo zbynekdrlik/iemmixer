@@ -20,11 +20,17 @@ iem-win = { path = "../iem-win" }
 # callback. Already in the engine's closure, the engine's subscriber prints it.
 tracing = "0.1"
 # The owner thread's message pump (PeekMessageW / DispatchMessageW) and the
-# SEH filter (SetUnhandledExceptionFilter needs Win32_System_Kernel).
+# SEH filter (SetUnhandledExceptionFilter needs Win32_System_Kernel). S1c
+# (src/os.rs): CPU Sets, power throttling, thread priority, QPC and trace
+# markers (Threading, SystemInformation, Performance, Diagnostics_Etw).
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_System_Diagnostics_Debug",
+  "Win32_System_Diagnostics_Etw",
   "Win32_System_Kernel",
+  "Win32_System_Performance",
+  "Win32_System_SystemInformation",
+  "Win32_System_Threading",
   "Win32_UI_WindowsAndMessaging",
 ] }
 
