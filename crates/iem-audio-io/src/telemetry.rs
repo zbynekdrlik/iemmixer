@@ -3,6 +3,7 @@
 //! allocation; any other thread reads snapshots. Portable: the ASIO host
 //! (Windows) feeds it, the tests run everywhere.
 
+use core::cmp::Reverse;
 use core::sync::atomic::{
     AtomicI64, AtomicU8, AtomicU64,
     Ordering::{Acquire, Relaxed, Release},
@@ -880,7 +881,7 @@ impl GapScan {
         } else {
             return;
         }
-        self.largest.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+        self.largest.sort_unstable_by_key(|&(_, gap)| Reverse(gap));
     }
 
     pub fn summary(&self) -> GapSummary {
