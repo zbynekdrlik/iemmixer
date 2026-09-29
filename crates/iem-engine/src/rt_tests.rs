@@ -1183,7 +1183,7 @@ fn the_loopback_probe_reads_each_spare_by_its_offset() {
     let outs = r.p.outputs();
     let ins = rxn + SPARE.len();
     const N: usize = 256;
-    const EMIT_AT: usize = 0;
+    const EMIT_AT: usize = 8;
     const ARRIVE_AT: usize = 100; // ≥ MIN_ROUND_TRIP past the emit
     let mut ibuf = vec![0.0f64; ins * N];
     let mut obuf = vec![0.0f64; outs * N];

@@ -796,10 +796,7 @@ fn read_chunk_classifies_a_read_of_the_answer() {
     assert!(raw.is_empty());
     // Bytes read append the first `n` of the buffer and continue.
     let mut raw = Vec::new();
-    assert_eq!(
-        read_chunk(Ok(2), &[b'h', b'i', b'x'], &mut raw, limit),
-        Ok(false)
-    );
+    assert_eq!(read_chunk(Ok(2), b"hix", &mut raw, limit), Ok(false));
     assert_eq!(raw, b"hi");
     // A close without TLS's close_notify (UnexpectedEof) ends the answer.
     let eof = io::Error::from(io::ErrorKind::UnexpectedEof);
