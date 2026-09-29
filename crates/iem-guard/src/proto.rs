@@ -486,6 +486,8 @@ mod tests {
                 "spawns": 3,
                 "last_exit": 70,
                 "hil": [{"tx": 94, "peak": 0.0316}, {"tx": 95, "peak": 0.0}],
+                "loopback_samples": 0,
+                "loopback_ms": 0.0,
             })
         );
         // No engine: no key at all, so replies without one stay as before.

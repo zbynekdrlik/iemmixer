@@ -1100,7 +1100,7 @@ fn the_loopback_round_trip_is_measured() {
         &Cmd::HilTestSignal {
             input: input("mic1"),
             hz: 1000.0,
-            dbfs: -6.0,
+            dbfs: -30.0,
             ttl_s: 0.1,
             card_tx: SPARE.to_vec(),
         },
@@ -1137,7 +1137,7 @@ fn the_loopback_round_trip_is_measured() {
         &Cmd::HilTestSignal {
             input: input("mic1"),
             hz: 1000.0,
-            dbfs: -6.0,
+            dbfs: -30.0,
             ttl_s: 0.1,
             card_tx: SPARE.to_vec(),
         },
