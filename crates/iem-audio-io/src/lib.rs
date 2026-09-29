@@ -47,6 +47,7 @@ use core::ops::Range;
 )]
 pub mod asio;
 pub mod channels;
+pub mod cpuset;
 pub mod format;
 pub mod messages;
 pub mod nullrt;
