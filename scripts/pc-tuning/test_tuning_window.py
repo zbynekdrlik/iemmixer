@@ -117,37 +117,70 @@ class UndoTests(unittest.TestCase):
 
 class RebootPrepareTests(unittest.TestCase):
     """reboot-prepare prepares a reboot only over a cleanly preempted window
-    (I1): unwind(bring_back_reaper=False) breaks at bring-back before the
-    graceful-stop check, so a spike that did not stop still holds the card. A
-    graceful reboot must never be prepared over it — reboot-prepare refuses and
-    keeps the card free and the window open; the spike is never force-ended
-    (I8). The PC calls (unwind, spike_running, tps) are mocked."""
+    (I1), exercised through the REAL sw.unwind so the `stop-spike` shape the I1
+    check depends on is genuinely covered: unwind(bring_back_reaper=False) breaks
+    at bring-back BEFORE its graceful-stop check, so a spike that did not stop
+    still holds the card. A graceful reboot must never be prepared over it —
+    reboot-prepare refuses (owner alarm + StepError), keeps the card free and the
+    window open; the spike is never force-ended (I8). Only sw.ps (the ssh
+    boundary) is faked; sw.STATE/sw.EVENT_NOW point at a temp dir."""
 
     def setUp(self) -> None:
-        self.saved = (tw.sw.open_state, tw.sw.save_state, tw.sw.spike_running, tw.sw.unwind, tw.tps)
-        self.state = {"id": "w", "card": "free", "pref_original": 64, "pref_current": 64}
-        tw.sw.open_state = lambda: self.state
-        tw.sw.save_state = lambda s: None
-        tw.sw.spike_running = lambda env, **kw: False
-        tw.tps = lambda env, body, **kw: {"items": []} if "Get-IemTuningState" in body else "2026-01-01T00:00:00Z"
-        self.env = {"PC_TUNING_ROOT": "T"}
+        self.dir = Path(tempfile.mkdtemp())
+        self.saved = (tw.sw.STATE, tw.sw.EVENT_NOW, tw.sw.ps, tw.sw.alarm)
+        tw.sw.STATE = self.dir / "spike-window.json"
+        tw.sw.EVENT_NOW = self.dir / "EVENT-NOW"   # absent → no "ide event"
+        self.gone = True
+        self.alarms: list[str] = []
+        tw.sw.alarm = lambda text: self.alarms.append(text)
+
+        def fake_ps(env, body, timeout=300, event="finish"):
+            if "Stop-SpikeGracefully" in body:
+                return self.gone
+            if "Get-IemTuningState" in body:
+                return {"items": []}
+            if "Get-IemNow" in body:
+                return "2026-01-01T00:00:00Z"
+            return {"ok": True}
+
+        tw.sw.ps = fake_ps   # tw.tps wraps sw.ps via sw.tuning_body — kept real
+        self.env = {"PC_ROOT": "R", "PC_TUNING_ROOT": "T", "PC_XPERF": "xperf.exe",
+                    "PC_BUFFER_KEY": "K", "PC_BUFFER_NAME": "N", "PC_REAPER_HTTP": "H",
+                    "PC_REAPER_START_TASK_PATH": "P", "PC_REAPER_START_TASK": "TK", "PC_NTRACK": "9",
+                    "PC_METER_BRIDGE": "B", "PC_METER_ACTION": "A", "PC_METER_HEARTBEAT": "HB",
+                    "PC_ASIO_MODULE": "M", "PC_APP_HTTP": "AH"}
         self.args = argparse.Namespace()
 
     def tearDown(self) -> None:
-        tw.sw.open_state, tw.sw.save_state, tw.sw.spike_running, tw.sw.unwind, tw.tps = self.saved
+        tw.sw.STATE, tw.sw.EVENT_NOW, tw.sw.ps, tw.sw.alarm = self.saved
 
-    def test_a_clean_unwind_prepares_the_reboot(self) -> None:
-        tw.sw.unwind = lambda env, state, running, bring_back_reaper=True: [{"stop-spike": True}, {"restore-buffer": {"ok": True}}]
+    def write_state(self) -> None:
+        tw.sw.save_state({"id": "w", "card": "free", "pref_original": 64, "pref_current": 64,
+                          "pref_restored": False, "closed": False})
+
+    def read_state(self) -> dict:
+        return json.loads((self.dir / "spike-window.json").read_text(encoding="utf-8"))
+
+    def test_a_clean_stop_prepares_the_reboot(self) -> None:
+        self.gone = True
+        self.write_state()
         tw.cmd_reboot_prepare(self.env, self.args)
-        self.assertEqual(self.state["card"], "rebooting")
-        self.assertIn("reboot", self.state)
+        st = self.read_state()
+        self.assertEqual(st["card"], "rebooting")
+        self.assertIn("reboot", st)
+        self.assertEqual(self.alarms, [])           # a clean stop raises no alarm
 
     def test_a_spike_that_did_not_stop_refuses_the_reboot(self) -> None:
-        tw.sw.unwind = lambda env, state, running, bring_back_reaper=True: [{"stop-spike": False}, {"restore-buffer": {"ok": True}}]
+        self.gone = False
+        self.write_state()
         with self.assertRaisesRegex(tw.StepError, "did not stop"):
             tw.cmd_reboot_prepare(self.env, self.args)
-        self.assertEqual(self.state["card"], "free")   # never entered the rebooting state
-        self.assertNotIn("reboot", self.state)          # no reboot prepared over a held card
+        st = self.read_state()
+        self.assertEqual(st["card"], "free")        # never entered the rebooting state
+        self.assertNotIn("reboot", st)               # no reboot prepared over a held card
+        self.assertFalse(st.get("closed"))           # the window stays open
+        self.assertEqual(len(self.alarms), 1)        # the owner is alarmed
+        self.assertIn("did not stop", self.alarms[0])
 
 
 if __name__ == "__main__":
