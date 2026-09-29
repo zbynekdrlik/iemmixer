@@ -3617,6 +3617,34 @@ fn the_loop_answers_requests_and_ends_on_quit() {
 }
 
 #[test]
+fn the_loop_ends_at_once_when_a_handover_is_already_set() {
+    // A bounded, deterministic catch for the `&&`->`||` mutant of the loop
+    // condition `while !g.quit && g.handover.is_none()` (daemon.rs:2217). With
+    // a handover already set and quit false the condition is
+    // `!false && Some.is_none()` = false, so `serve_requests` returns before
+    // running a step. The mutant makes it `!false || Some.is_none()` = true, so
+    // it loops forever. A sender is kept alive so `recv_timeout` never returns
+    // Disconnected (which would end the loop for either version), leaving the
+    // loop condition as the only way out. Run it on a thread and require it to
+    // end within a bound: the original returns in microseconds; the mutant
+    // never returns, so this fails its assertion in ~3 s (a clean FAIL) instead
+    // of hanging until nextest's slow-timeout (#23: a hang is only a provisional
+    // catch, and this bounded test runs first under `priority = 100`).
+    let (_keep, rx) = mpsc::channel::<Job>();
+    let (done_tx, done_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Event));
+        g.handover = Some(PathBuf::from("iemmixer-guard.exe"));
+        serve_requests(&mut pc, &mut g, &rx);
+        let _ = done_tx.send(());
+    });
+    assert!(
+        done_rx.recv_timeout(Duration::from_secs(3)).is_ok(),
+        "serve_requests did not return with a handover already set within 3 s"
+    );
+}
+
+#[test]
 fn the_guard_waits_for_its_last_reply_to_be_written() {
     let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Dev));
     let (tx, rx) = mpsc::channel();
