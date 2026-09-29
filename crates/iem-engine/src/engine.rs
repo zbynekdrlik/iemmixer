@@ -530,7 +530,7 @@ pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
                 NullRtConfig {
                     sample_rate: SAMPLE_RATE,
                     block: cfg.block,
-                    inputs: topo.rx.len() + hil_rx,
+                    inputs: processor.input_channels(),
                     outputs,
                     signal: cfg.signal,
                 },

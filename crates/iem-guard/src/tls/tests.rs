@@ -786,3 +786,27 @@ fn an_answer_is_read_once_complete() {
         Err(format!("an answer of more than {MAX_ANSWER} bytes"))
     );
 }
+
+#[test]
+fn read_chunk_classifies_a_read_of_the_answer() {
+    let limit = Duration::from_secs(3);
+    // A zero-length read is a clean end.
+    let mut raw = Vec::new();
+    assert_eq!(read_chunk(Ok(0), &[1, 2, 3], &mut raw, limit), Ok(true));
+    assert!(raw.is_empty());
+    // Bytes read append the first `n` of the buffer and continue.
+    let mut raw = Vec::new();
+    assert_eq!(
+        read_chunk(Ok(2), &[b'h', b'i', b'x'], &mut raw, limit),
+        Ok(false)
+    );
+    assert_eq!(raw, b"hi");
+    // A close without TLS's close_notify (UnexpectedEof) ends the answer.
+    let eof = io::Error::from(io::ErrorKind::UnexpectedEof);
+    let mut raw = Vec::new();
+    assert_eq!(read_chunk(Err(eof), &[], &mut raw, limit), Ok(true));
+    // Any other read error is fatal and passed through as an error.
+    let reset = io::Error::from(io::ErrorKind::ConnectionReset);
+    let mut raw = Vec::new();
+    assert!(read_chunk(Err(reset), &[], &mut raw, limit).is_err());
+}

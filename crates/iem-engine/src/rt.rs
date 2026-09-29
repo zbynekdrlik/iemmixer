@@ -589,6 +589,12 @@ impl Processor {
         self.topo.tx.len() + self.hil_peaks.len()
     }
 
+    /// The engine's inputs: the topology's RX, then the D5(b) loopback returns
+    /// (`hil_rx`, after the topology's rx). The driver opens exactly this many.
+    pub fn input_channels(&self) -> usize {
+        self.topo.rx.len() + self.hil_rx
+    }
+
     /// X13: every mix hears every input, so a test signal caps every TX.
     fn set_caps(&mut self, on: bool) {
         for mix in &mut self.mixes {

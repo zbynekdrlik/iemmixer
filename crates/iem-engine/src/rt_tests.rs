@@ -1155,6 +1155,53 @@ fn the_loopback_round_trip_is_measured() {
     );
 }
 
+#[test]
+fn input_channels_are_the_rx_then_the_loopback_returns() {
+    // The driver opens `topo.rx.len() + hil_rx` inputs. Pinned like `outputs`
+    // (topo.tx + spares) so the sizing engine::run hands the driver cannot slip.
+    let site = crate::test_support::test_site_text();
+    let r = rig_loopback(&site, &[], TEST_FLAG, AT_ONCE, SPARE.to_vec());
+    let rxn = r.p.topo.rx.len();
+    assert_eq!(r.p.input_channels(), rxn + SPARE.len());
+    // Without a loopback return the inputs are just the topology's rx.
+    let r = rig_hil(&site, &[], TEST_FLAG, AT_ONCE, SPARE.to_vec());
+    assert_eq!(r.p.input_channels(), rxn);
+}
+
+#[test]
+fn the_loopback_probe_reads_each_spare_by_its_offset() {
+    // probe_latency reads the emit from output `topo.tx.len() + k` and the
+    // arrival from input `topo.rx.len() + j`. Put the ONLY emit onset on the
+    // LAST spare output and the ONLY arrival onset on the LAST loopback return,
+    // so any wrong index (+ becoming - or *) reads a silent channel and
+    // measures nothing, while the correct offset measures the delay.
+    use iem_audio_io::Block;
+    let site = crate::test_support::test_site_text();
+    let mut r = rig_loopback(&site, &[], TEST_FLAG, AT_ONCE, SPARE.to_vec());
+    let tx = r.p.topo.tx.len();
+    let rxn = r.p.topo.rx.len();
+    let outs = r.p.outputs();
+    let ins = rxn + SPARE.len();
+    const N: usize = 256;
+    const EMIT_AT: usize = 0;
+    const ARRIVE_AT: usize = 100; // ≥ MIN_ROUND_TRIP past the emit
+    let mut ibuf = vec![0.0f64; ins * N];
+    let mut obuf = vec![0.0f64; outs * N];
+    // Emit onset ONLY on the last spare output (index tx + 1).
+    obuf[(tx + 1) * N + EMIT_AT] = 0.5;
+    // Arrival onset ONLY on the last loopback return (index rxn + 1).
+    ibuf[(rxn + 1) * N + ARRIVE_AT] = 0.5;
+    let mut b = Block::new(N, &ibuf, &mut obuf);
+    r.p.probe_latency(&mut b, 0, N);
+    assert_eq!(
+        r.h.status
+            .loopback_samples
+            .load(std::sync::atomic::Ordering::Relaxed),
+        (ARRIVE_AT - EMIT_AT) as u64,
+        "the probe must read the emit and arrival from the correct channel offset"
+    );
+}
+
 const TEST_FLAG: Flags = Flags {
     test_signal: true,
     fault_injection: false,

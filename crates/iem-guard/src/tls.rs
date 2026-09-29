@@ -386,19 +386,32 @@ fn fetch(
     let mut buf = [0; 4096];
     loop {
         left(&tls.sock, deadline, limit)?;
-        let ended = match tls.read(&mut buf) {
-            Ok(0) => true,
-            Ok(n) => {
-                raw.extend_from_slice(buf.get(..n).unwrap_or_default());
-                false
-            }
-            // A server that closes without TLS's close_notify.
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => true,
-            Err(e) => return Err(io_error("the answer", &e, limit)),
-        };
+        let read = tls.read(&mut buf);
+        let ended = read_chunk(read, &buf, &mut raw, limit)?;
         if let Some(a) = answer(&raw, ended)? {
             return Ok(a);
         }
+    }
+}
+
+/// Classifies one `read` of the answer: `Ok(true)` = the answer ended (a clean
+/// close, or a close without TLS's close_notify), `Ok(false)` = more to read
+/// (the `n` bytes are appended to `raw`), `Err` = a fatal read failure.
+fn read_chunk(
+    read: io::Result<usize>,
+    buf: &[u8],
+    raw: &mut Vec<u8>,
+    limit: Duration,
+) -> Result<bool, String> {
+    match read {
+        Ok(0) => Ok(true),
+        Ok(n) => {
+            raw.extend_from_slice(buf.get(..n).unwrap_or_default());
+            Ok(false)
+        }
+        // A server that closes without TLS's close_notify.
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => Ok(true),
+        Err(e) => Err(io_error("the answer", &e, limit)),
     }
 }
 
