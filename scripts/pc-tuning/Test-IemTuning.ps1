@@ -15,7 +15,10 @@ foreach ($f in (Get-ChildItem -LiteralPath $here -File | Where-Object { @('.ps1'
 Import-Module (Join-Path $here 'IemMeasure.psm1') -Force
 function Assert($cond, $what) { if (-not $cond) { throw "FAILED: $what" }; Write-Host "ok  $what" }
 function Throws([scriptblock]$b, $what) { $t = $false; try { & $b } catch { $t = $true }; Assert $t $what }
-function Rows($rows, $action) { ,@($rows | Where-Object { $_.action -eq $action }) }
+# Callers wrap this in @(...) so .Count and a ForEach pipe are array-safe under
+# StrictMode on PS 5.1 (a bare (Rows ...) would be $null for 0 matches; a ,@()
+# return would make @(Rows ...) iterate once over an empty array — S1c CI).
+function Rows($rows, $action) { @($rows | Where-Object { $_.action -eq $action }) }
 # Read-IemJournal is exported (every *-Iem* function is); the test reads the flag the module wrote.
 function Read-IemJournalState($profilePath) { $p = Read-IemProfile -Path $profilePath; (Read-IemJournal -Path $p.journal).entered }
 
@@ -67,16 +70,16 @@ $maint = "$root\HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\Maint
 try {
     # Tier 2: services, a task (plus an absent one), the maintenance switch, a Defender exclusion.
     $r = Invoke-IemTuningApply -ProfilePath $pp -Tier 2
-    Assert ((Rows $r 'failed').Count -eq 0) "tier2-apply-has-no-failure ($(@(Rows $r 'failed') | ForEach-Object { $_.error }))"
+    Assert (@(Rows $r 'failed').Count -eq 0) "tier2-apply-has-no-failure ($(@(Rows $r 'failed') | ForEach-Object { $_.error }))"
     Assert ((Get-Service Spooler).Status -eq 'Stopped' -and (Get-Item 'HKLM:\SYSTEM\CurrentControlSet\Services\Spooler').GetValue('Start') -eq 4) 'tier2-service-disabled-and-stopped'
     Assert ("$((Get-ScheduledTask -TaskPath $taskPath -TaskName $taskName).State)" -eq 'Disabled') 'tier2-task-disabled'
-    Assert ((Rows $r 'absent').Count -eq 1) 'tier2-a-missing-task-is-absent-not-an-error'
+    Assert (@(Rows $r 'absent').Count -eq 1) 'tier2-a-missing-task-is-absent-not-an-error'
     Assert ((Get-Item -LiteralPath $maint).GetValue('MaintenanceDisabled') -eq 1) 'tier2-maintenance-off'
     Assert (@((Get-MpPreference).ExclusionPath) -contains $dir) 'tier2-defender-exclusion'
     $again = Invoke-IemTuningApply -ProfilePath $pp -Tier 2
-    Assert ((Rows $again 'written').Count -eq 0 -and (Rows $again 'failed').Count -eq 0) 'tier2-apply-is-idempotent'
+    Assert (@(Rows $again 'written').Count -eq 0 -and @(Rows $again 'failed').Count -eq 0) 'tier2-apply-is-idempotent'
     $u = Undo-IemTuning -ProfilePath $pp -Tier 2
-    Assert ((Rows $u 'failed').Count -eq 0) 'tier2-undo-has-no-failure'
+    Assert (@(Rows $u 'failed').Count -eq 0) 'tier2-undo-has-no-failure'
     Assert ((Get-Service Spooler).Status -eq 'Running' -and (Get-Item 'HKLM:\SYSTEM\CurrentControlSet\Services\Spooler').GetValue('Start') -eq $spoolStart) 'tier2-undo-restores-the-original'
     Assert ("$((Get-ScheduledTask -TaskPath $taskPath -TaskName $taskName).State)" -ne 'Disabled') 'tier2-undo-enables-the-task'
     Assert ($null -eq (Get-Item -LiteralPath $maint).GetValue('MaintenanceDisabled', $null)) 'tier2-undo-deletes-absent-values'
@@ -87,21 +90,21 @@ try {
     Throws { Invoke-IemTuningApply -ProfilePath $bad -Tier 3 -Only @('irq') } 'tier3-refuses-a-mismatched-device'
     Assert (-not (Test-Path -LiteralPath "$enum\Device Parameters")) 'tier3-refusal-writes-nothing'
     $r3 = Invoke-IemTuningApply -ProfilePath $pp -Tier 3
-    Assert ((Rows $r3 'failed').Count -eq 0) 'tier3-apply-has-no-failure'
+    Assert (@(Rows $r3 'failed').Count -eq 0) 'tier3-apply-has-no-failure'
     $ap = Get-Item -LiteralPath "$enum\Device Parameters\Interrupt Management\Affinity Policy"
     Assert ($ap.GetValue('DevicePolicy') -eq 4 -and $ap.GetValue('AssignmentSetOverride') -eq 5) 'tier3-affinity-policy-and-mask'
     Assert ((Get-Item -LiteralPath $nic).GetValue('PowerSaving') -eq '0' -and (Get-Item -LiteralPath $nic).GetValue('*RssBaseProcNumber') -eq '4') 'tier3-nic-values'
     $st = Get-IemTuningState -ProfilePath $pp
     Assert (@($st.items | Where-Object { $_.tier -eq 3 -and -not $_.pending }).Count -eq 0) 'tier3-items-are-pending-until-a-reboot'
     $u3 = Undo-IemTuning -ProfilePath $pp -Tier 3
-    Assert ((Rows $u3 'failed').Count -eq 0) 'tier3-undo-has-no-failure'
+    Assert (@(Rows $u3 'failed').Count -eq 0) 'tier3-undo-has-no-failure'
     Assert ($null -eq $ap.GetValue('DevicePolicy', $null) -and (Get-Item -LiteralPath $nic).GetValue('PowerSaving') -eq '1') 'tier3-undo-deletes-absent-values'
     $st = Get-IemTuningState -ProfilePath $pp
     Assert (@($st.items | Where-Object { $_.key -eq 'irq:card:policy' -and $_.revert_pending }).Count -eq 1) 'tier3-undo-is-pending-until-a-reboot'
 
     # Mode levers: plan (C1 only), governor stand-in, placement.
     $e = Enter-IemTuningMode -ProfilePath $pp -Only @('plan', 'governor', 'placement') -Idle 'c1'
-    Assert ((Rows $e 'failed').Count -eq 0) "enter-has-no-failure ($(@(Rows $e 'failed') | ForEach-Object { $_.key + ': ' + $_.error }))"
+    Assert (@(Rows $e 'failed').Count -eq 0) "enter-has-no-failure ($(@(Rows $e 'failed') | ForEach-Object { $_.key + ': ' + $_.error }))"
     Assert ([IemPower]::Active() -eq $testPlan) 'enter-activates-the-plan'
     Assert ([IemPower]::Read($testPlan, '54533251-82be-4824-96c1-47b60b740d00', '9943e905-9a30-4ec1-9b99-44dd3b76f7a2') -eq 1) 'enter-limits-idle-to-c1'
     Assert ([IemPower]::Read($testPlan, '54533251-82be-4824-96c1-47b60b740d00', '893dee8e-2bef-41e0-89c6-b55d0929964c') -eq 100) 'enter-sets-processor-min-100'
@@ -109,7 +112,7 @@ try {
     $hk = [IemCpuSets]::Map()[0]
     Assert ((@([IemCpuSets]::Get($child.Id)) -join ',') -eq "$hk") 'enter-places-the-process'
     $e2 = Enter-IemTuningMode -ProfilePath $pp -Only @('plan', 'governor', 'placement') -Idle 'c1'
-    Assert ((Rows $e2 'written').Count -eq 0) 'enter-is-idempotent'
+    Assert (@(Rows $e2 'written').Count -eq 0) 'enter-is-idempotent'
     # A new session restores from the journal alone.
     Remove-Module IemMeasure, IemTuning
     Import-Module (Join-Path $here 'IemMeasure.psm1') -Force
@@ -126,7 +129,7 @@ try {
     [void](Enter-IemTuningMode -ProfilePath $pp -Only @('placement'))
     $short.WaitForExit(10000) | Out-Null
     $x = Exit-IemTuningMode -ProfilePath $pp
-    Assert ((Rows $x 'gone').Count -ge 1) 'exit-skips-a-process-that-ended'
+    Assert (@(Rows $x 'gone').Count -ge 1) 'exit-skips-a-process-that-ended'
     Throws { Set-IemValue -Item ([pscustomobject]@{ key = 'k'; kind = 'cpusets'; args = @{ pid = $child.Id; name = 'PING'; start = 1 } }) -Value '' } 'cpusets-refuse-a-reused-pid'
 
     # Fingerprint: stable, and a change is named.
