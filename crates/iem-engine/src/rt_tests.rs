@@ -1112,11 +1112,12 @@ fn the_loopback_round_trip_is_measured() {
     let mut obuf = vec![0.0f64; outs * N];
     for _ in 0..8 {
         ibuf.iter_mut().for_each(|x| *x = 0.0);
-        // The return inputs carry the previous block's spare outputs.
-        for j in 0..2 {
-            let dst = &mut ibuf[(rxn + j) * N..(rxn + j + 1) * N];
-            dst.copy_from_slice(&prev_hil[j * N..(j + 1) * N]);
-        }
+        // Asymmetric loopback: only return 0 carries the previous block's
+        // spare-0 output; return 1 stays silent. So the arrival can only be
+        // read from the correct return slot (rxn + 0), which pins the mapping
+        // (iemmixer#9 review: a wrong return slot would read silence and miss
+        // the echo).
+        ibuf[rxn * N..(rxn + 1) * N].copy_from_slice(&prev_hil[..N]);
         obuf.iter_mut().for_each(|x| *x = 0.0);
         let mut b = Block::new(N, &ibuf, &mut obuf);
         r.p.process(&mut b);

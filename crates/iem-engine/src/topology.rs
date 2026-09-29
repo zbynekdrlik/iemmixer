@@ -327,6 +327,14 @@ impl Topology {
             if let Some(why) = self.mix_tx_refusal(ch) {
                 return Err(SiteError::HilTx(why));
             }
+            // The loopback return opens the same-numbered card input (S6 test
+            // 5): it must not be a band input, or the round-trip probe would
+            // lock onto that input instead of the echo (iemmixer#9 review).
+            if self.rx.contains(&ch) {
+                return Err(SiteError::HilTx(format!(
+                    "card channel {ch} is a topology input: its loopback return would read the band"
+                )));
+            }
             if outputs.contains(&ch) {
                 return Err(SiteError::HilTx(format!(
                     "card output {ch} is listed twice"
@@ -527,7 +535,8 @@ mod tests {
         assert_eq!(t.hil_outputs(&[161, 500]), Ok(vec![161, 500]));
         assert_eq!(t.hil_outputs(&[u16::MAX]), Ok(vec![u16::MAX]));
         assert_eq!(t.hil_outputs(&[]), Ok(Vec::new()));
-        let eight: Vec<u16> = (94..102).collect();
+        // Eight spare outputs, none a topology input (101–132) or a mix TX.
+        let eight: Vec<u16> = vec![94, 95, 96, 97, 98, 99, 100, 160];
         assert_eq!(t.hil_outputs(&eight), Ok(eight.clone()));
         let refused = |tx: &[u16]| match t.hil_outputs(tx) {
             Err(SiteError::HilTx(why)) => why,
@@ -546,6 +555,11 @@ mod tests {
             "card output 0: card channels count from 1"
         );
         assert_eq!(refused(&[95, 94, 95]), "card output 95 is listed twice");
+        // A channel that is also a band input: the loopback return would read it.
+        assert_eq!(
+            refused(&[101]),
+            "card channel 101 is a topology input: its loopback return would read the band"
+        );
         let nine: Vec<u16> = (94..103).collect();
         assert_eq!(refused(&nine), "9 card outputs: at most 8");
     }

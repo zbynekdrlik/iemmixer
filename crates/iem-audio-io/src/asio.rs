@@ -827,7 +827,8 @@ unsafe extern "system" fn backend_rate_change(rate: SampleRate) {
 /// preallocated buffers (the same pages, so a `VirtualLock` holds).
 struct Carry {
     processor: Box<dyn Process>,
-    /// Engine inputs, channel-major, in `Topology::rx` order.
+    /// Engine inputs, channel-major: `Topology::rx` order, then the D5(b)
+    /// loopback return (S6 test 5).
     inbuf: Vec<f64>,
     /// Engine outputs, channel-major: `Topology::tx` order, then HIL's spare
     /// outputs.

@@ -833,7 +833,7 @@ mod tests {
                 faulted: true,
                 parked: true,
                 hil: spare.clone(),
-                loopback_samples: 0,
+                loopback_samples: 129,
             },
             pipe_private: true,
         };
@@ -851,8 +851,8 @@ mod tests {
                 spawns: 3,
                 last_exit: Some(70),
                 hil: spare,
-                loopback_samples: 0,
-                loopback_ms: 0.0,
+                loopback_samples: 129,
+                loopback_ms: 129.0 * 1000.0 / 96_000.0,
             }
         );
         let quiet = EngineSeen {
