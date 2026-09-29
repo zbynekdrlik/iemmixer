@@ -37,6 +37,7 @@ pub mod control;
 pub mod core;
 pub mod engine;
 pub mod interlock;
+pub mod latency;
 pub mod media;
 pub mod params;
 pub mod persist;
