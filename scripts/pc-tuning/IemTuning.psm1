@@ -806,6 +806,34 @@ function Assert-IemDeviceLps {
     }
 }
 
+function Assert-IemNicRss {
+    # Before a NIC write (review R4 follow-up): the RSS range nic.rss.base..max, the
+    # processors of the NIC's interrupts, is processor numbers with base <= max,
+    # never a card or audio processor (the card's ISR processor, the audio CPU),
+    # each inside layout.nic and present.
+    param([Parameter(Mandatory)]$Profile)
+    $b = @{}
+    foreach ($k in 'base', 'max') {
+        $v = $null
+        if ($Profile.nic.PSObject.Properties['rss'] -and $null -ne $Profile.nic.rss -and $Profile.nic.rss.PSObject.Properties[$k]) { $v = $Profile.nic.rss.$k }
+        $n = 0
+        if ($null -eq $v -or -not [int]::TryParse([string]$v, [ref]$n) -or $n -lt 0) { throw "nic.rss.${k} '$v' is not a processor number" }
+        $b[$k] = $n
+    }
+    if ($b['base'] -gt $b['max']) { throw "nic.rss: base $($b['base']) is above max $($b['max'])" }
+    $range = "$($b['base'])..$($b['max'])"
+    $card = Get-IemLayoutLps -Profile $Profile -Role 'card'
+    $audio = Get-IemLayoutLps -Profile $Profile -Role 'audio'
+    $nic = Get-IemLayoutLps -Profile $Profile -Role 'nic'
+    $reserved = @($card) + @($audio)
+    $present = @([IemCpuSets]::Map().Keys)
+    for ($lp = $b['base']; $lp -le $b['max']; $lp++) {
+        if ($reserved -contains $lp) { throw "nic.rss ${range}: processor $lp is a card or audio processor, which the NIC's interrupts must never use" }
+        if ($nic -notcontains $lp) { throw "nic.rss ${range}: processor $lp is not in layout.nic ($($nic -join ','))" }
+        if ($present -notcontains $lp) { throw "nic.rss ${range}: processor $lp is not present" }
+    }
+}
+
 function Get-IemNicKey {
     # The NIC's driver key: nic.key (tests), else the Class key whose
     # NetCfgInstanceId is the adapter's, both under registry_root. -Check (before
@@ -923,6 +951,7 @@ function Get-IemGlobalItems {
         }
         if (Select-IemGroup $Only 'nic') {
             $nk = Get-IemNicKey -Profile $Profile -Check:$Check
+            if ($Check) { Assert-IemNicRss -Profile $Profile }
             foreach ($p in $Profile.nic.properties.PSObject.Properties) {
                 $items += New-IemItem -Key "nic:$($p.Name)" -Kind 'reg' -Arguments @{ path = $nk; name = $p.Name; type = 'String' } -Desired $p.Value -Tier 3 -Group 'nic' -Reboot
             }
