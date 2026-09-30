@@ -571,6 +571,18 @@ function Select-IemGroup {
     return (@($Only).Count -eq 0) -or (@($Only) -contains $Group)
 }
 
+function Assert-IemOnly {
+    # Every -Only name must be a group of the tier (irq:<id> for a profile
+    # device, or one the journal holds for undo): a typo would otherwise apply
+    # or revert nothing and still succeed (A9).
+    param([Parameter(Mandatory)]$Profile, [Parameter(Mandatory)][int]$Tier, [string[]]$Only = @(), [string[]]$Also = @())
+    $known = @('services', 'updates', 'maintenance', 'defender')
+    if ($Tier -eq 3) { $known = @('irq', 'nic') + @(@($Profile.devices) | ForEach-Object { "irq:$($_.id)" }) }
+    $known = @($known) + @($Also)
+    $bad = @(@($Only) | Where-Object { $known -notcontains $_ })
+    if ($bad.Count -gt 0) { throw "-Only $($bad -join ', '): no tier $Tier group of that name (groups: $(@($known | Sort-Object -Unique) -join ', '))" }
+}
+
 function Get-IemGlobalItems {
     # Tier 2 (no reboot) and Tier 3 (reboot) items of the profile. -Check
     # verifies each device before its items are built (apply only).
@@ -679,13 +691,18 @@ function Get-IemModeItems {
 function Invoke-IemTuningApply {
     param([Parameter(Mandatory)][string]$ProfilePath, [Parameter(Mandatory)][ValidateSet(2, 3)][int]$Tier, [string[]]$Only = @())
     $profile = Read-IemProfile -Path $ProfilePath
+    Assert-IemOnly -Profile $profile -Tier $Tier -Only $Only
     $j = Read-IemJournal -Path $profile.journal
     $boot = Get-IemBootTime
     $rows = @(foreach ($item in (Get-IemGlobalItems -Profile $profile -Tier $Tier -Only $Only -Check)) {
         Invoke-IemItem -Item $item -Journal $j -Section 'global' -Path $profile.journal -Boot $boot
     })
-    $j.version = [int]$profile.version
-    Write-IemJournal -Path $profile.journal -Journal $j
+    # The journal names the profile version only after a complete apply without
+    # a failed row: a partial -Only or a failure keeps the version drift (A9).
+    if (@($Only).Count -eq 0 -and @($rows | Where-Object { $_.action -eq 'failed' }).Count -eq 0) {
+        $j.version = [int]$profile.version
+        Write-IemJournal -Path $profile.journal -Journal $j
+    }
     return ,$rows
 }
 
@@ -693,6 +710,8 @@ function Undo-IemTuning {
     param([Parameter(Mandatory)][string]$ProfilePath, [Parameter(Mandatory)][ValidateSet(2, 3)][int]$Tier, [string[]]$Only = @())
     $profile = Read-IemProfile -Path $ProfilePath
     $j = Read-IemJournal -Path $profile.journal
+    $held = @(foreach ($k in @($j.order.global)) { $e = $j.global[$k]; if ($null -ne $e -and [int]$e.tier -eq $Tier) { [string]$e.group } })
+    Assert-IemOnly -Profile $profile -Tier $Tier -Only $Only -Also $held
     $boot = Get-IemBootTime
     $keys = @($j.order.global); [array]::Reverse($keys)
     $rows = @()
