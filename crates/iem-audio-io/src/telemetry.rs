@@ -379,9 +379,9 @@ pub struct Snapshot {
     /// (logical processor, callbacks it ran), in processor order.
     pub callback_cpus: Vec<(u32, u64)>,
     pub cpu_other: u64,
-    /// The first callback's thread id (0 = none yet).
+    /// The thread id of the first callback after the warm-up (0 = none yet).
     pub callback_thread: u32,
-    /// Callbacks on a thread other than the first one.
+    /// Callbacks after the warm-up on a thread other than `callback_thread`.
     pub thread_switches: u64,
     pub glitches_dropped: u64,
 }
@@ -422,7 +422,7 @@ pub struct Telemetry {
     /// goes to `cpu_other`.
     cpus: Box<[AtomicU64]>,
     cpu_other: AtomicU64,
-    /// The first callback thread's id (0 = none yet).
+    /// The thread id of the first callback after the warm-up (0 = none yet).
     thread: AtomicU64,
     thread_switches: AtomicU64,
 }
@@ -539,13 +539,21 @@ impl Telemetry {
         }
     }
 
-    /// At the entry of a callback, from the host: the logical processor it
-    /// runs on and its thread id (both read without a system call).
+    /// At the entry of a callback, from the host, before
+    /// [`Telemetry::on_callback`] of the same callback: the logical processor
+    /// it runs on and its thread id (both read without a system call). Every
+    /// callback's processor is counted. The priming callbacks may run on the
+    /// thread that called `start()`, so the first callback after the warm-up
+    /// names the callback thread and only later ones count as switches.
     pub fn on_thread(&self, cpu: u32, thread_id: u32) {
         match usize::try_from(cpu).ok().and_then(|i| self.cpus.get(i)) {
             Some(c) => c.fetch_add(1, Relaxed),
             None => self.cpu_other.fetch_add(1, Relaxed),
         };
+        // The callbacks recorded before this one (`on_callback` comes next).
+        if self.callbacks.load(Relaxed) < WARMUP {
+            return;
+        }
         let id = u64::from(thread_id);
         if let Err(first) = self.thread.compare_exchange(0, id, Relaxed, Relaxed)
             && first != id
