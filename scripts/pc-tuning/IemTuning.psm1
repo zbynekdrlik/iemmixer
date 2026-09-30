@@ -444,7 +444,9 @@ function Read-IemJournalFile {
 
 function Read-IemJournal {
     param([Parameter(Mandatory)][string]$Path)
-    $j = @{ schema = $script:Schema; version = 0; entered = $false; global = @{}; mode = @{}; reverted = @{}; order = @{ global = @(); mode = @() } }
+    # applied: the profile version of each tier's last complete, clean apply (m2).
+    $j = @{ schema = $script:Schema; applied = @{ tier2 = 0; tier3 = 0 }; entered = $false; global = @{}; mode = @{}; reverted = @{}
+            order = @{ global = @(); mode = @() } }
     $o = Read-IemJournalFile -Path $Path
     if ($null -eq $o) {
         # A write that stopped between its flushed temp file and the swap leaves
@@ -458,7 +460,7 @@ function Read-IemJournal {
         }
     }
     if ([int]$o.schema -ne $script:Schema) { throw "journal ${Path}: schema $($o.schema), this module $($script:Schema)" }
-    $j.version = [int]$o.version
+    if ($o.PSObject.Properties['applied']) { foreach ($k in 'tier2', 'tier3') { $j.applied[$k] = [int]$o.applied.$k } }
     $j.entered = [bool]$o.entered
     foreach ($s in 'global', 'mode', 'reverted') {
         foreach ($p in $o.$s.PSObject.Properties) { $j[$s][$p.Name] = $p.Value }
@@ -792,10 +794,10 @@ function Invoke-IemTuningApply {
     $rows = @(foreach ($item in (Get-IemGlobalItems -Profile $profile -Tier $Tier -Only $Only -Check -AllocatedIrqs $AllocatedIrqs)) {
         Invoke-IemItem -Item $item -Journal $j -Section 'global' -Path $profile.journal -Boot $boot
     })
-    # The journal names the profile version only after a complete apply without
-    # a failed row: a partial -Only or a failure keeps the version drift (A9).
+    # The journal names the profile version of THIS tier only after its complete
+    # apply without a failed row: a partial -Only or a failure keeps the drift (A9, m2).
     if (@($Only).Count -eq 0 -and @($rows | Where-Object { $_.action -eq 'failed' }).Count -eq 0) {
-        $j.version = [int]$profile.version
+        $j.applied["tier$Tier"] = [int]$profile.version
         Write-IemJournal -Path $profile.journal -Journal $j
     }
     return ,$rows
@@ -896,9 +898,15 @@ function Get-IemTuningState {
             }
         }
     }
+    # A tier drifts when the journal holds its items and its last complete apply
+    # was of another profile version (m2).
+    $driftTiers = @(foreach ($tier in 2, 3) {
+        $held = @($j.global.Values | Where-Object { [int]$_.tier -eq $tier }).Count -gt 0
+        if ($held -and [int]$j.applied["tier$tier"] -ne [int]$profile.version) { $tier }
+    })
     [pscustomobject]@{
-        version = [int]$profile.version; applied_version = $j.version; boot = $boot
-        drift = [bool]($j.global.Count -gt 0 -and $j.version -ne [int]$profile.version)
+        version = [int]$profile.version; applied_version = [pscustomobject]@{ tier2 = $j.applied.tier2; tier3 = $j.applied.tier3 }; boot = $boot
+        drift = [bool]($driftTiers.Count -gt 0); drift_tiers = $driftTiers
         entered = $j.entered; mode_items = @($j.order.mode); items = $rows
     }
 }
