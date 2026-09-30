@@ -26,7 +26,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use iem_audio_io::cpuset;
-use iem_audio_io::telemetry::{ActivityGuard, Loudest, Watched, dbfs};
+use iem_audio_io::telemetry::{ActivityGuard, GapScan, GapSummary, Loudest, Watched, dbfs};
 use serde_json::{Value, json};
 
 const USAGE: &str =
@@ -357,6 +357,43 @@ impl Stress {
     }
 }
 
+/// Raises the calling thread to TIME_CRITICAL, or says why not
+/// (`os::set_thread_time_critical` on the PC).
+#[cfg_attr(not(windows), allow(dead_code))]
+type Raise = fn() -> Result<(), String>;
+
+/// The hwlat scanner's thread (S1c design note §4.1). `place` puts it on
+/// `cpu` and `raise` makes it TIME_CRITICAL; if either fails it never scans
+/// (it would measure another processor or priority than the report names)
+/// and returns why. Then it reads the clock in a tight loop until `end` or
+/// `stop`: every gap of at least `threshold_ns` is a stall of that
+/// processor. Returns the gaps and the CPU Set IDs applied.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn hwlat_scan(
+    cpu: u8,
+    threshold_ns: u64,
+    end: Duration,
+    stop: &AtomicBool,
+    place: Place,
+    raise: Raise,
+) -> Result<(GapSummary, Vec<u32>), String> {
+    let ids = place(&[cpu]).map_err(|e| format!("placing the scanner on CPU {cpu}: {e}"))?;
+    raise().map_err(|e| format!("raising the scanner to TIME_CRITICAL: {e}"))?;
+    let mut scan = GapScan::new(threshold_ns);
+    let t0 = Instant::now();
+    let mut prev = 0_u64;
+    loop {
+        let now = t0.elapsed();
+        let ns = u64::try_from(now.as_nanos()).unwrap_or(u64::MAX);
+        scan.observe(prev, ns);
+        prev = ns;
+        if now >= end || stop.load(Ordering::Relaxed) {
+            break;
+        }
+    }
+    Ok((scan.summary(), ids))
+}
+
 impl Drop for Stress {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
@@ -402,10 +439,10 @@ mod spike {
     use iem_audio_io::format::SampleFormat;
     use iem_audio_io::glitch_report::{keep_glitches, write_markers};
     use iem_audio_io::os;
-    use iem_audio_io::telemetry::{GapScan, Glitch, Snapshot};
+    use iem_audio_io::telemetry::{Glitch, Snapshot};
     use serde_json::{Value, json};
 
-    use super::{Args, ExitCode, Mode, Stress, Watch, code_of, push};
+    use super::{Args, ExitCode, Mode, Stress, Watch, code_of, hwlat_scan, push};
 
     const FIRST_CALLBACK_WAIT: Duration = Duration::from_secs(2);
     const AFTER_FAULT: Duration = Duration::from_secs(2);
@@ -518,9 +555,16 @@ mod spike {
         os::set_thread_cpus(cpus).map_err(|e| e.to_string())
     }
 
+    /// Makes the calling thread TIME_CRITICAL (the hwlat scanner only).
+    fn raise_thread() -> Result<(), String> {
+        os::set_thread_time_critical().map_err(|e| e.to_string())
+    }
+
     /// hwlat (S1c design note §4.1): one thread at TIME_CRITICAL on `--cpu`
-    /// reads the clock in a tight loop; every gap of at least the threshold
-    /// is a stall of that processor. The card is never opened.
+    /// reads the clock in a tight loop (`hwlat_scan`); every gap of at least
+    /// the threshold is a stall of that processor. A scanner that cannot be
+    /// placed or raised never scans: outcome "error", exit 1. The card is
+    /// never opened.
     fn hwlat(a: &Args, report: &mut Value) -> u8 {
         if a.stop_file.exists() {
             report["outcome"] = json!("stopped");
@@ -535,23 +579,7 @@ mod spike {
         let threshold_ns = a.threshold_us.saturating_mul(1_000);
         let end = Duration::from_secs(a.seconds);
         let scanner = std::thread::spawn(move || {
-            let placed =
-                os::set_thread_cpus(&[cpu]).map_or_else(|e| json!(e.to_string()), |ids| json!(ids));
-            let priority = os::set_thread_time_critical()
-                .map_or_else(|e| json!(e.to_string()), |()| json!("time-critical"));
-            let mut scan = GapScan::new(threshold_ns);
-            let t0 = Instant::now();
-            let mut prev = 0_u64;
-            loop {
-                let now = t0.elapsed();
-                let ns = u64::try_from(now.as_nanos()).unwrap_or(u64::MAX);
-                scan.observe(prev, ns);
-                prev = ns;
-                if now >= end || flag.load(Ordering::Relaxed) {
-                    break;
-                }
-            }
-            (scan.summary(), placed, priority)
+            hwlat_scan(cpu, threshold_ns, end, &flag, place_thread, raise_thread)
         });
         let mut outcome = "done";
         while !scanner.is_finished() {
@@ -562,20 +590,27 @@ mod spike {
             }
         }
         match scanner.join() {
-            Ok((s, placed, priority)) => {
+            Ok(Ok((s, ids))) => {
                 let q =
                     |v: [f64; 4]| json!({ "p50": v[0], "p99": v[1], "p999": v[2], "max": v[3] });
                 report["hwlat"] = json!({
-                    "cpu": cpu, "threshold_us": a.threshold_us, "placed": placed, "priority": priority,
+                    "cpu": cpu, "threshold_us": a.threshold_us, "placed": ids, "priority": "time-critical",
                     "reads": s.reads, "over": s.over, "gaps_us": q(s.gaps.summary_us()),
                     "largest": s.largest.iter().map(|&(at, gap)| json!({ "at_us": at as f64 / 1e3, "gap_us": gap as f64 / 1e3 })).collect::<Vec<_>>(),
                 });
                 report["outcome"] = json!(outcome);
-                0
+                code_of(outcome)
+            }
+            Ok(Err(e)) => {
+                report["hwlat"] = json!({ "cpu": cpu, "threshold_us": a.threshold_us, "error": e });
+                report["error"] = json!(e);
+                report["outcome"] = json!("error");
+                code_of("error")
             }
             Err(_) => {
+                report["error"] = json!("the hwlat scanner thread panicked");
                 report["outcome"] = json!("error");
-                1
+                code_of("error")
             }
         }
     }
