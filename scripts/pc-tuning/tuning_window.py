@@ -395,9 +395,10 @@ REBOOT_REQUEST = "& shutdown.exe /r /t 0 /d p:2:4 /c 'iemmixer S1c: owner-approv
 
 def cmd_reboot(env, args) -> None:
     """Records the owner's quoted approval; without --by-owner it also asks
-    Windows for an immediate, planned, graceful restart (REBOOT_REQUEST)."""
-    state = sw.load_state()
-    if state.get("closed") or state["card"] != "rebooting" or "reboot" not in state:
+    Windows for an immediate, planned, graceful restart (REBOOT_REQUEST).
+    Refused while the "ide event" flag exists (open_state; main pre-empts)."""
+    state = sw.open_state()
+    if state["card"] != "rebooting" or "reboot" not in state:
         raise StepError("run reboot-prepare first")
     check_approval(args.approval)
     state["reboot"]["approval"] = args.approval
