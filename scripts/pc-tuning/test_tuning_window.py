@@ -662,6 +662,23 @@ class MeasureTests(WindowHarness):
         self.assertIn("isr nicdrv.sys: above 2048 us (a full period is 333)", s["cuts"][0]["findings"])
         self.assertEqual(s["near_glitch"][0]["kind"], "missed")       # the final trace's view stays
 
+    # B11: the 10 s poll must not load the PC being measured with a C# compile or heavy WMI.
+    def test_the_poll_is_light_and_still_samples_the_sentinels(self) -> None:
+        tw.cmd_measure(self.env, self.args())
+        polls = [(b, e) for b, e in self.pc.calls if "Win32_PerfRawData_PerfOS_Processor" in b or "Get-IemPollSample" in b]
+        self.assertEqual(len(polls), 2)                                  # one per status poll
+        for body, event in polls:
+            self.assertNotIn("IemMeasure", body)          # importing the modules runs Add-Type (a C# compile) every time
+            self.assertNotIn("Get-IemPollSample", body)
+            self.assertNotIn("Win32_PerfFormattedData", body)            # the second, formatted WMI class is unused
+            self.assertEqual(body.count("Get-CimInstance"), 1)
+            self.assertIn("-Name 'gov'", body)                           # the governor from the local profile
+            self.assertEqual(event, "abandon")
+        self.assertIn("-Id 4242", polls[0][0])                           # the spike's pid from the running status
+        self.assertIn("-eq 4243", polls[0][0])                           # and its callback thread from the progress
+        self.assertNotIn("Get-Process", polls[1][0])                     # exited: no process to read
+        self.assertEqual(self.summary()["callback"]["priority"], {"base_min": 15, "base_max": 15, "current_min": 26, "current_max": 26})
+
     def test_a_dpc_trace_has_no_near_glitch_view(self) -> None:
         self.pc.progress = {"missed": 1, "overruns": 0, "position_gaps": 0, "callback_thread": 4243}
         tw.cmd_measure(self.env, self.args(circular_mb=1024))
