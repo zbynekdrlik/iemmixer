@@ -138,16 +138,22 @@ def undo_plan(state: dict, spike_running: bool) -> list[str]:
     card is free a spike may be starting (the task has not launched it yet),
     so the graceful stop always runs; it is harmless when none runs. A kernel
     trace stops and the S1c mode levers revert before the buffer and REAPER
-    (S1c design note §5.2); the fingerprint is read after REAPER is back."""
+    (S1c design note §5.2); the fingerprint is read after REAPER is back.
+    `rebooting` (tuning_window reboot-prepare) is card-away too: REAPER was
+    quit and comes back here unless the reboot already brought it. Its clean
+    unwind restored the buffer with read-back, and after the reboot REAPER may
+    hold the driver, so a verified restore is not written again there (the
+    bring-back reads it and refuses unless it is the original)."""
     plan: list[str] = []
-    card_away = state.get("card") in ("switching", "free")
+    card = state.get("card")
+    card_away = card in ("switching", "free", "rebooting")
     if spike_running or card_away:
         plan.append("stop-spike")
     if state.get("trace"):
         plan.append("trace-stop")
     if state.get("tuning_mode"):
         plan.append("tuning-exit")
-    if buffer_touched(state):
+    if buffer_touched(state) and not (card == "rebooting" and state.get("pref_restored")):
         plan.append("restore-buffer")
     if card_away:
         plan.append("bring-back")
