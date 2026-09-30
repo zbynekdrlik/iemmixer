@@ -59,8 +59,11 @@ EXIT_HIT = 1
 EXIT_USAGE = 2
 
 REDACTED = "[redacted]"
-# the other readings of bytes that are not valid UTF-8: Windows Central European, and Latin-1
-FALLBACK_CODECS = ("cp1250", "latin-1")
+# the other readings of bytes that are not valid UTF-8: Windows Central European, Latin-1, ISO
+# Central European (ISO-8859-2), DOS Central European (cp852)
+FALLBACK_CODECS = ("cp1250", "latin-1", "iso-8859-2", "cp852")
+# UTF-8 decoded as one of these and encoded again (double-encoded mojibake) is read back (unmojibake)
+MOJIBAKE_CODECS = ("cp1250", "latin-1")
 # In binary content random bytes form short words by chance: in this repository's f64 goldens 28 %
 # of all 3-letter and 0.5 % of all 4-letter words occur as words of their text runs, 0.003 % of the
 # 5-letter ones. So in a binary text run a term shorter than MIN_BINARY_TERM characters counts only
@@ -261,6 +264,29 @@ def unescape(text: str) -> str:
     return text
 
 
+def _mojibake_pattern(codec: str) -> re.Pattern[str]:
+    """UTF-8 sequences as a single-byte codec shows them: a lead byte's character followed by one,
+    two or three continuation bytes' characters."""
+    def chars(first: int, last: int) -> str:
+        return "[" + re.escape(bytes(range(first, last + 1)).decode(codec, errors="replace")) + "]"
+    cont = chars(0x80, 0xBF)
+    return re.compile(f"(?:{chars(0xC2, 0xDF)}{cont}|{chars(0xE0, 0xEF)}{cont}{{2}}|{chars(0xF0, 0xF4)}{cont}{{3}})+")
+
+
+_MOJIBAKE = {codec: _mojibake_pattern(codec) for codec in MOJIBAKE_CODECS}
+
+
+def unmojibake(text: str, codec: str) -> str:
+    """The text with each double-encoded stretch -- UTF-8 once decoded as `codec` and encoded again,
+    `ď` shown as `ÄŹ` -- read back as the UTF-8 it was; a stretch that is not valid UTF-8 stays."""
+    def undo(match: re.Match[str]) -> str:
+        try:
+            return match.group().encode(codec).decode("utf-8").replace(SEP, "\ufffd")
+        except UnicodeError:
+            return match.group()
+    return _MOJIBAKE[codec].sub(undo, text)
+
+
 def cp1250_from_git_latin1(text: str) -> str:
     """git stores a commit message or name that is not valid UTF-8 with each such byte converted
     as if it were Latin-1 (commit.c verify_utf8), so a cp1250 `ď` (0xEF) arrives as `ï`: read the
@@ -285,28 +311,37 @@ def fold(text: str) -> str:
 class Views:
     """The readings of a decoded text that the terms are matched against, each made on first need.
 
-    The text and the text with its escapes decoded (unescape) serve an ASCII term as they are: a
-    re-reading only turns lone surrogates -- non-word characters -- into letters or symbols, and NFC
-    only composes a letter with a following mark, so neither can add an ASCII term's match. Their
-    case folds pre-filter every term. A term with a non-ASCII character is matched in the NFC forms
-    of both and of their re-readings as cp1250 / Latin-1 (undecodable bytes only) -- made only when
-    the term's longest ASCII word occurs in a fold, since those readings keep every ASCII character."""
+    The text and the text with its escapes decoded (unescape), each also with any double-encoded
+    UTF-8 read back (unmojibake), serve an ASCII term as they are: a re-reading only turns lone
+    surrogates -- non-word characters -- into letters or symbols, and NFC only composes a letter
+    with a following mark, so neither can add an ASCII term's match. Their case folds pre-filter
+    every term. A term with a non-ASCII character is matched in their NFC forms and in the NFC
+    re-readings of the first two with FALLBACK_CODECS (undecodable bytes only) -- made only when the
+    term's longest ASCII word occurs in a fold, since those readings keep every ASCII character."""
 
     def __init__(self, text: str) -> None:
         decoded = unescape(text)
-        self.raw = [text] if decoded == text else [text, decoded]
+        self.bases = [text] if decoded == text else [text, decoded]
+        self.raw = list(self.bases)
+        for base in self.bases:
+            for codec in MOJIBAKE_CODECS:
+                fixed = unmojibake(base, codec)
+                if fixed not in self.raw:
+                    self.raw.append(fixed)
         self.folded = [fold(view) for view in self.raw]
         self._normal: list[str] | None = None
 
     def normal(self) -> list[str]:
         if self._normal is None:
+            readings = list(self.raw)
+            for base in self.bases:
+                if undecodable(base):
+                    readings += [reread(base, codec) for codec in FALLBACK_CODECS]
             found: list[str] = []
-            for base in self.raw:
-                readings = [base] + ([reread(base, codec) for codec in FALLBACK_CODECS] if undecodable(base) else [])
-                for reading in readings:
-                    form = nfc(reading)
-                    if form not in found:
-                        found.append(form)
+            for reading in readings:
+                form = nfc(reading)
+                if form not in found:
+                    found.append(form)
             self._normal = found
         return self._normal
 
@@ -392,17 +427,18 @@ class Scanner:
         return found
 
     def shown(self, path: str) -> str:
-        """The path as printed: each component holding a term (in any of its forms) or an
-        undecodable byte is redacted -- printed, the rest of a cp1250 term would follow its
-        replaced letter into the log -- and the others have their control characters escaped;
-        the whole path is redacted when a term spans components (a term without `/` always
-        matches inside one component) or the printed form holds one."""
+        """The path as printed: each component holding a term (in any reading) or any non-ASCII
+        character is redacted -- no set of readings can be proven complete, and printed in a
+        reading the scanner lacks, the ASCII tail of a term (`ĺˇqxwzy`, a cp1250 `\\xefqxwzy`)
+        would reach the log -- and the others have their control characters escaped; the whole
+        path is redacted when a term spans components (a term without `/` always matches inside
+        one component) or the printed form holds one."""
         whole = set(self.entries_in(path))
         parts = path.split("/")
         part_hits = [set(self.entries_in(part)) if whole else set() for part in parts]
         if not whole <= set().union(*part_hits):
             return REDACTED
-        kept = "/".join(REDACTED if hit or undecodable(part) else printable(part)
+        kept = "/".join(REDACTED if hit or not part.isascii() else printable(part)
                         for part, hit in zip(parts, part_hits, strict=True))
         return REDACTED if self.entries_in(kept) else kept
 
