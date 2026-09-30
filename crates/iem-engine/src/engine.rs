@@ -489,6 +489,21 @@ pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
             detail: "no usable state: every output is muted".into(),
         }),
     }
+    // #32: the directory holds what was loaded before the engine runs.
+    let recovery = store.recover(&loaded);
+    if let Some(to) = &recovery.quarantined {
+        warn!(
+            "the damaged current.json is moved aside to {}",
+            to.display()
+        );
+    }
+    if recovery.finished {
+        info!("the interrupted save is finished: save.tmp is current.json");
+    }
+    alarms.extend(recovery.failed.into_iter().map(|detail| Alarm {
+        code: AlarmCode::SaveFailed,
+        detail,
+    }));
     for a in &alarms {
         warn!("alarm {:?}: {}", a.code, a.detail);
     }

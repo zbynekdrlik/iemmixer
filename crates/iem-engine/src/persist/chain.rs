@@ -99,6 +99,25 @@ impl Store {
     }
 }
 
+/// What `Store::recover` did to the state directory at boot (#32).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Recovery {
+    /// Where a damaged `current.json` was moved aside to (never read again).
+    pub quarantined: Option<PathBuf>,
+    /// The interrupted save was finished: `save.tmp` is `current.json`.
+    pub finished: bool,
+    /// Steps that failed; the engine runs on the loaded state anyway.
+    pub failed: Vec<String>,
+}
+
+impl Store {
+    /// Normalizes the state directory to `loaded` before the engine runs
+    /// (#32). Not yet: it changes nothing.
+    pub fn recover(&self, _loaded: &Loaded) -> Recovery {
+        Recovery::default()
+    }
+}
+
 /// One state file, read and decoded.
 enum Read {
     Missing,

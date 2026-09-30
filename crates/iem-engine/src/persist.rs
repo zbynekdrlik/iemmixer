@@ -36,6 +36,8 @@ use crate::topology::Topology;
 
 mod chain;
 
+pub use chain::Recovery;
+
 pub const FORMAT: &str = "iemmixer-state";
 pub const GENERATIONS: usize = 20;
 const CURRENT: &str = "current.json";
@@ -224,15 +226,22 @@ impl Store {
     /// generation. Returns that generation's seq (0: there was none).
     pub fn save(&self, p: &Persisted) -> io::Result<u64> {
         let bytes = encode(p)?;
-        let tmp = self.dir.join(TMP);
-        write_synced(&tmp, &bytes)?;
+        write_synced(&self.dir.join(TMP), &bytes)?;
+        self.commit_tmp()
+    }
+
+    /// The renames that end a save: the previous `current.json` becomes the
+    /// newest generation and `save.tmp` (synced) becomes `current.json`;
+    /// keeps [`GENERATIONS`] and syncs the directory. Returns that
+    /// generation's seq (0: there was none).
+    fn commit_tmp(&self) -> io::Result<u64> {
         let current = self.dir.join(CURRENT);
         let mut seq = 0;
         if current.exists() {
             seq = self.generations()?.last().map_or(0, |g| g.0) + 1;
             fs::rename(&current, self.generation_path(seq))?;
         }
-        fs::rename(&tmp, &current)?;
+        fs::rename(self.dir.join(TMP), &current)?;
         let gens = self.generations()?;
         let excess = gens.len().saturating_sub(GENERATIONS);
         for (_, path) in gens.iter().take(excess) {
