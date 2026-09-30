@@ -88,6 +88,15 @@ fn s(p: &Path) -> String {
     p.to_str().unwrap().to_owned()
 }
 
+/// A valid state file at revision `rev`: live state the engine would load.
+fn live(rev: u64) -> Vec<u8> {
+    iem_engine::persist::encode(&Persisted {
+        rev,
+        ..Persisted::default()
+    })
+    .unwrap()
+}
+
 fn cmd(parts: &[&str]) -> Vec<String> {
     parts.iter().map(|x| (*x).to_owned()).collect()
 }
@@ -181,17 +190,17 @@ fn seed_if_absent_writes_current_only_when_it_is_missing() {
     assert!(dir.join("current.json").exists() && dir.join("baseline.json").exists());
     // A live change to current.json and a removed baseline: the re-seed keeps
     // the live current.json byte for byte and writes baseline.json again.
-    std::fs::write(dir.join("current.json"), b"LIVE").unwrap();
+    std::fs::write(dir.join("current.json"), live(7)).unwrap();
     std::fs::remove_file(dir.join("baseline.json")).unwrap();
     let r2 = run(&a).unwrap();
     assert!(r2.contains("current.json kept (--seed-if-absent)"), "{r2}");
-    assert_eq!(std::fs::read(dir.join("current.json")).unwrap(), b"LIVE");
+    assert_eq!(std::fs::read(dir.join("current.json")).unwrap(), live(7));
     assert!(dir.join("baseline.json").exists());
     // A lone generation (no current.json) is live state too: the re-seed
     // must keep it, not overwrite from the project (iemmixer#9), and the
     // report names it. Simulate it and re-seed.
     std::fs::remove_file(dir.join("current.json")).unwrap();
-    std::fs::write(dir.join("gen-0000000001.json"), b"LIVE-GEN").unwrap();
+    std::fs::write(dir.join("gen-0000000001.json"), live(8)).unwrap();
     let r3 = run(&a).unwrap();
     assert!(
         r3.contains("gen-0000000001.json kept (--seed-if-absent)"),
@@ -200,7 +209,7 @@ fn seed_if_absent_writes_current_only_when_it_is_missing() {
     assert!(!dir.join("current.json").exists());
     assert_eq!(
         std::fs::read(dir.join("gen-0000000001.json")).unwrap(),
-        b"LIVE-GEN"
+        live(8)
     );
 }
 
@@ -218,17 +227,17 @@ fn seed_if_absent_keeps_an_interrupted_save() {
     // A crash between save's renames: current.json already became a
     // generation, the newest state waits in save.tmp.
     std::fs::rename(dir.join("current.json"), dir.join("gen-0000000001.json")).unwrap();
-    std::fs::write(dir.join("save.tmp"), b"NEWEST").unwrap();
+    std::fs::write(dir.join("save.tmp"), live(1)).unwrap();
     let r = run(&a).unwrap();
     assert!(r.contains("save.tmp kept (--seed-if-absent)"), "{r}");
-    assert_eq!(std::fs::read(dir.join("save.tmp")).unwrap(), b"NEWEST");
+    assert_eq!(std::fs::read(dir.join("save.tmp")).unwrap(), live(1));
     assert!(!dir.join("current.json").exists());
     // A crash in the very first save, before any rename: save.tmp is the
     // only state there is.
     std::fs::remove_file(dir.join("gen-0000000001.json")).unwrap();
     let r = run(&a).unwrap();
     assert!(r.contains("save.tmp kept (--seed-if-absent)"), "{r}");
-    assert_eq!(std::fs::read(dir.join("save.tmp")).unwrap(), b"NEWEST");
+    assert_eq!(std::fs::read(dir.join("save.tmp")).unwrap(), live(1));
     assert!(!dir.join("current.json").exists());
     assert!(dir.join("baseline.json").exists());
 }

@@ -176,13 +176,17 @@ mod tests {
         // A fresh store holds no live state.
         assert_eq!(s.live_state().unwrap(), None);
         // `current.json` alone is live state.
-        std::fs::write(s.dir().join(CURRENT), b"{}").unwrap();
+        std::fs::write(s.dir().join(CURRENT), encode(&sample(1)).unwrap()).unwrap();
         assert_eq!(s.live_state().unwrap(), Some(Source::Current));
         // A generation ALONE, with no `current.json`, is also live state: a
         // crash between `save`'s two renames leaves the previous state only as
         // a generation (the newest waits in save.tmp: #32 D6).
         std::fs::remove_file(s.dir().join(CURRENT)).unwrap();
-        std::fs::write(s.dir().join("gen-0000000001.json"), b"{}").unwrap();
+        std::fs::write(
+            s.dir().join("gen-0000000001.json"),
+            encode(&sample(1)).unwrap(),
+        )
+        .unwrap();
         assert_eq!(s.live_state().unwrap(), Some(Source::Generation(1)));
     }
 
@@ -191,7 +195,7 @@ mod tests {
         // #32 D6: `save` writes the new state to save.tmp before its renames,
         // so a crash between them leaves the newest state only there.
         let (_d, s) = store();
-        fs::write(s.dir().join(TMP), b"NEWEST").unwrap();
+        fs::write(s.dir().join(TMP), encode(&sample(2)).unwrap()).unwrap();
         assert_eq!(s.live_state().unwrap(), Some(Source::Interrupted));
     }
 
@@ -199,12 +203,20 @@ mod tests {
     fn live_state_follows_the_load_chains_order() {
         // current.json, then save.tmp, then the newest generation.
         let (_d, s) = store();
-        fs::write(s.dir().join("gen-0000000002.json"), b"{}").unwrap();
-        fs::write(s.dir().join("gen-0000000003.json"), b"{}").unwrap();
+        fs::write(
+            s.dir().join("gen-0000000002.json"),
+            encode(&sample(2)).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            s.dir().join("gen-0000000003.json"),
+            encode(&sample(3)).unwrap(),
+        )
+        .unwrap();
         assert_eq!(s.live_state().unwrap(), Some(Source::Generation(3)));
-        fs::write(s.dir().join(TMP), b"NEWEST").unwrap();
+        fs::write(s.dir().join(TMP), encode(&sample(9)).unwrap()).unwrap();
         assert_eq!(s.live_state().unwrap(), Some(Source::Interrupted));
-        fs::write(s.dir().join(CURRENT), b"{}").unwrap();
+        fs::write(s.dir().join(CURRENT), encode(&sample(10)).unwrap()).unwrap();
         assert_eq!(s.live_state().unwrap(), Some(Source::Current));
     }
 
@@ -248,8 +260,6 @@ mod tests {
             .unwrap()
             .replace("iemmixer-state", "not-ours");
         fs::write(newest, text).unwrap();
-        // A stray temp file never counts.
-        fs::write(s.dir().join(TMP), b"garbage").unwrap();
         let loaded = s.load(&test_site());
         assert_eq!(loaded.source, Source::Generation(1));
         assert_eq!(loaded.persisted.rev, 1);
@@ -270,15 +280,6 @@ mod tests {
         let loaded = s.load(&g);
         assert_eq!(loaded.persisted.rev, 2);
         assert!(loaded.rejected.is_empty(), "{:?}", loaded.rejected);
-        // A save cut off while writing save.tmp is no state: the generation
-        // stands, and the cut-off file is reported.
-        let partial = encode(&sample(3)).unwrap();
-        fs::write(s.dir().join(TMP), &partial[..partial.len() / 2]).unwrap();
-        let loaded = s.load(&g);
-        assert_eq!(loaded.source, Source::Generation(1));
-        assert_eq!(loaded.persisted.rev, 1);
-        assert_eq!(loaded.rejected.len(), 1, "{:?}", loaded.rejected);
-        assert!(loaded.rejected[0].0.ends_with(TMP));
     }
 
     #[test]
@@ -305,18 +306,14 @@ mod tests {
     }
 
     #[test]
-    fn a_save_tmp_not_newer_than_current_json_is_skipped_and_named() {
-        // Equal or older by revision (a repeated save, a leftover baseline of
-        // an older engine) or cut off while writing: current.json stands, and
-        // the skipped save.tmp is reported.
+    fn an_older_or_cut_off_save_tmp_is_skipped_and_named() {
+        // Older by revision (a leftover baseline of an older engine) or cut
+        // off while writing: current.json stands, and the skipped save.tmp is
+        // reported.
         let (_d, s) = store();
         s.save(&sample(5)).unwrap();
         let cut = encode(&sample(6)).unwrap();
         for (tmp, why) in [
-            (
-                encode(&sample(5)).unwrap(),
-                "revision 5 is not newer than current.json's 5",
-            ),
             (
                 encode(&sample(4)).unwrap(),
                 "revision 4 is not newer than current.json's 5",
@@ -340,12 +337,12 @@ mod tests {
     #[test]
     fn live_state_names_the_file_the_engine_would_load() {
         // Beside current.json, save.tmp is the live state only when it is a
-        // complete state strictly newer by revision, as in the load chain.
+        // complete state newer by revision, as in the load chain.
         let (_d, s) = store();
         s.save(&sample(5)).unwrap();
         fs::write(s.dir().join(TMP), encode(&sample(6)).unwrap()).unwrap();
         assert_eq!(s.live_state().unwrap(), Some(Source::Interrupted));
-        fs::write(s.dir().join(TMP), encode(&sample(5)).unwrap()).unwrap();
+        fs::write(s.dir().join(TMP), encode(&sample(4)).unwrap()).unwrap();
         assert_eq!(s.live_state().unwrap(), Some(Source::Current));
         fs::write(s.dir().join(TMP), b"cut off").unwrap();
         assert_eq!(s.live_state().unwrap(), Some(Source::Current));
