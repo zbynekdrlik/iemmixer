@@ -185,7 +185,10 @@ $script:BootIdKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memo
 
 function Get-IemBootIdentity {
     # This boot: its time and Windows' BootId counter (PrefetchParameters\BootId,
-    # raised at every boot; $null where Windows keeps none) (m5).
+    # raised at every boot; $null where Windows keeps none) (m5). The counter lives
+    # in the prefetcher's registry area and may stop advancing once Tier 2 disables
+    # SysMain: harmless while 'pending' only reports, and Test-IemSameBoot's time
+    # rule still tells two boots apart then.
     $id = $null
     if (Test-Path -LiteralPath $script:BootIdKey) {
         $v = (Get-Item -LiteralPath $script:BootIdKey).GetValue('BootId', $null)
@@ -197,8 +200,10 @@ function Get-IemBootIdentity {
 function Test-IemSameBoot {
     # Two boot identities ({ time, id }) name the same boot when their BootId
     # counters, where both have one, are equal (a reboot raises it however quick,
-    # m5) AND their times lie within the tolerance (a clock step; and a counter
-    # that did not advance cannot merge two boots far apart, A13).
+    # m5) AND their times lie within 300 s (a clock step, A13). The time rule is
+    # the fallback: it decides alone without a counter, and it still separates two
+    # boots when the counter did not advance (it may freeze once SysMain is off);
+    # only a reboot within 300 s with a frozen counter would read as one boot.
     param([AllowNull()]$A, [AllowNull()]$B)
     if ($null -eq $A -or $null -eq $B) { return $false }
     $ta = [string]$A.time; $tb = [string]$B.time
