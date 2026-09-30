@@ -379,12 +379,17 @@ def _measure(env, args, profile: dict, state: dict, run_dir: str, since: str, tr
     out.mkdir(exist_ok=True)
     dpcisr_text = None
     if tracing:
-        extra = " ; Export-IemNearGlitch -Xperf {x} -Dir {d}".format(x=xperf(env), d=ps_quote(run_dir)) if args.trace == "diag" else ""
-        cuts = " ; ".join(f"Invoke-IemDpcIsr -Xperf {xperf(env)} -Dir {ps_quote(run_dir)} -Name 'cut-{i}.etl'" for i in range(1, cut["n"] + 1))
-        tps(env, f"Stop-IemTrace -Xperf {xperf(env)} -Dir {ps_quote(run_dir)} -Merge ; Invoke-IemDpcIsr -Xperf {xperf(env)} -Dir {ps_quote(run_dir)}"
-                 + (f" ; {cuts}" if cuts else "") + extra, timeout=1800)
+        # The stop (with its merge) changes the PC, so it completes even when
+        # "ide event" comes; then the trace is no longer recorded.
+        tps(env, f"Stop-IemTrace -Xperf {xperf(env)} -Dir {ps_quote(run_dir)} -Merge", timeout=1800, event="finish")
         state["trace"] = None
         sw.save_state(state)
+        # The xperf analysis only reads the stopped trace: "ide event" abandons
+        # it at once (bounded on the PC, it ends by itself) and never waits for it.
+        extra = " ; Export-IemNearGlitch -Xperf {x} -Dir {d}".format(x=xperf(env), d=ps_quote(run_dir)) if args.trace == "diag" else ""
+        cuts = " ; ".join(f"Invoke-IemDpcIsr -Xperf {xperf(env)} -Dir {ps_quote(run_dir)} -Name 'cut-{i}.etl'" for i in range(1, cut["n"] + 1))
+        tps(env, f"Invoke-IemDpcIsr -Xperf {xperf(env)} -Dir {ps_quote(run_dir)}" + (f" ; {cuts}" if cuts else "") + extra,
+            timeout=1800, event="abandon")
         scp_dir = env["PC_TUNING_ROOT_SCP"] + "/runs/" + out.name
         names = ["dpcisr.txt"] + [f"cut-{i}.dpcisr.txt" for i in range(1, cut["n"] + 1)] + (["near.txt"] if args.trace == "diag" else [])
         for name in names:
