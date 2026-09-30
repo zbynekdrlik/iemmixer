@@ -201,6 +201,35 @@ fn seed_if_absent_writes_current_only_when_it_is_missing() {
     );
 }
 
+/// #32 D6: `save` writes the new state to save.tmp before its two renames,
+/// so a crash in between leaves the newest state only there. The seed counts
+/// it as live state and never touches it (it used to write baseline.json
+/// through that same save.tmp).
+#[test]
+fn seed_if_absent_keeps_an_interrupted_save() {
+    let w = World::new(30);
+    let dir = w.path("state");
+    let mut a = import_args(&w, &["--seed-if-absent"]);
+    a.extend(["--state-dir".into(), s(&dir)]);
+    run(&a).unwrap();
+    // A crash between save's renames: current.json already became a
+    // generation, the newest state waits in save.tmp.
+    std::fs::rename(dir.join("current.json"), dir.join("gen-0000000001.json")).unwrap();
+    std::fs::write(dir.join("save.tmp"), b"NEWEST").unwrap();
+    let r = run(&a).unwrap();
+    assert!(r.contains("current.json kept (--seed-if-absent)"), "{r}");
+    assert_eq!(std::fs::read(dir.join("save.tmp")).unwrap(), b"NEWEST");
+    assert!(!dir.join("current.json").exists());
+    // A crash in the very first save, before any rename: save.tmp is the
+    // only state there is.
+    std::fs::remove_file(dir.join("gen-0000000001.json")).unwrap();
+    let r = run(&a).unwrap();
+    assert!(r.contains("current.json kept (--seed-if-absent)"), "{r}");
+    assert_eq!(std::fs::read(dir.join("save.tmp")).unwrap(), b"NEWEST");
+    assert!(!dir.join("current.json").exists());
+    assert!(dir.join("baseline.json").exists());
+}
+
 /// #32 D5: `Store::has_state` swallowed I/O errors (`Path::exists`, a
 /// failed `read_dir` read as "no generation"), so a state directory the seed
 /// could not read looked empty and was seeded over. The seed now fails

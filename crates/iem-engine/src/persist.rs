@@ -390,6 +390,25 @@ mod tests {
     }
 
     #[test]
+    fn an_interrupted_save_is_live_state() {
+        // #32 D6: `save` writes the new state to save.tmp before its renames,
+        // so a crash between them leaves the newest state only there.
+        let (_d, s) = store();
+        fs::write(s.dir().join(TMP), b"NEWEST").unwrap();
+        assert!(s.has_state().unwrap());
+    }
+
+    #[test]
+    fn a_baseline_write_leaves_an_interrupted_save_alone() {
+        let (_d, s) = store();
+        fs::write(s.dir().join(TMP), b"NEWEST").unwrap();
+        s.save_baseline(&sample(3)).unwrap();
+        assert_eq!(fs::read(s.dir().join(TMP)).unwrap(), b"NEWEST");
+        let baseline = fs::read(s.dir().join(BASELINE)).unwrap();
+        assert_eq!(decode(&baseline).unwrap().rev, 3);
+    }
+
+    #[test]
     fn has_state_fails_when_the_state_dir_cannot_be_read() {
         // #32 D5: an I/O error is not "no state" — the seed must never write
         // over state it could not look at.
