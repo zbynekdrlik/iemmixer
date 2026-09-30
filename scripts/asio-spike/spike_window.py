@@ -116,9 +116,23 @@ def check_request(mode: str, frames: int | None, seconds: int, burn_us: int, str
     for text in (audio_cpus, stress_cpus):
         if text and not CPU_LIST.fullmatch(text):
             raise StepError("CPU lists look like 14 or 0,1,6-13")
-    # The spike's own rule: busy threads next to a reserved audio CPU need their own CPUs.
+    # The spike's own rules: busy threads next to a reserved audio CPU need their
+    # own CPUs, and those never include an audio CPU (with or without threads).
     if stress > 0 and audio_cpus and not stress_cpus:
         raise StepError("--stress with --audio-cpus needs --stress-cpus (the busy threads' own CPUs)")
+    overlap = sorted(cpu_set(stress_cpus) & cpu_set(audio_cpus))
+    if overlap:
+        raise StepError(f"--stress-cpus and --audio-cpus overlap on processors {overlap} "
+                        "(a busy thread would run next to the audio callback)")
+
+
+def cpu_set(text: str) -> set[int]:
+    """The processors of a CPU list like 0,1,6-13 (checked by CPU_LIST)."""
+    out: set[int] = set()
+    for part in (p for p in text.split(",") if p):
+        first, _, last = part.partition("-")
+        out.update(range(int(first), int(last or first) + 1))
+    return out
 
 
 def run_fields(env: dict[str, str], args) -> dict:
