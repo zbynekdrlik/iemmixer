@@ -648,22 +648,24 @@ mod tests {
     }
 
     #[test]
-    fn a_quarantine_that_fails_is_reported_and_the_save_left_for_the_next_boot() {
-        // The engine must still start; the damaged file must not become a
-        // generation, so the interrupted save waits for the next boot.
+    fn a_quarantine_that_fails_is_reported_and_the_save_still_finished() {
+        // #32 P3: the engine still starts, and the interrupted save is
+        // finished anyway (a damaged file that becomes a generation is
+        // harmless: the chain skips generations that do not decode).
         let (_d, s) = damaged_current();
         fs::write(s.dir().join(TMP), encode(&sample(9)).unwrap()).unwrap();
         let loaded = s.load(&test_site());
         fs::remove_file(s.dir().join(CURRENT)).unwrap();
         let done = s.recover(&loaded);
-        assert_eq!((done.quarantined.clone(), done.finished), (None, false));
+        assert_eq!((done.quarantined.clone(), done.finished), (None, true));
         assert_eq!(done.failed.len(), 1, "{:?}", done.failed);
         assert!(
             done.failed[0].starts_with("the damaged current.json could not be moved aside"),
             "{:?}",
             done.failed
         );
-        assert!(s.dir().join(TMP).exists());
+        assert!(!s.dir().join(TMP).exists());
+        assert_eq!(rev_of(&s.dir().join(CURRENT)), 9);
     }
 
     #[test]

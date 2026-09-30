@@ -203,3 +203,36 @@ fn a_current_json_that_cannot_be_looked_at_is_never_replaced() {
         (Source::Interrupted, 6)
     );
 }
+
+#[test]
+fn a_damaged_current_json_that_cannot_be_moved_aside_becomes_a_skipped_generation() {
+    // #32 P3: the move aside fails (a failing rename), the interrupted save
+    // is finished anyway; the damaged file lands among the generations,
+    // where the chain skips it.
+    let g = test_site();
+    let (_d, faulty, s) = faulty_store();
+    s.save(&sample(7)).unwrap();
+    fs::write(s.dir().join(CURRENT), b"damaged").unwrap();
+    fs::write(s.dir().join(TMP), encode(&sample(9)).unwrap()).unwrap();
+    let loaded = s.load(&g);
+    assert_eq!(
+        (loaded.source, loaded.current_json),
+        (Source::Interrupted, FileState::Damaged)
+    );
+    faulty.fail_next("rename");
+    let done = s.recover(&loaded);
+    assert!(done.quarantined.is_none());
+    assert!(done.finished, "{done:?}");
+    assert_eq!(done.failed.len(), 1, "{done:?}");
+    assert_eq!(rev_of(&s.dir().join(CURRENT)), 9);
+    let gens = s.generations().unwrap();
+    assert_eq!(gens.len(), 2);
+    assert_eq!(fs::read(&gens[1].1).unwrap(), b"damaged");
+    // Without current.json the chain passes over the damaged generation.
+    fs::remove_file(s.dir().join(CURRENT)).unwrap();
+    let loaded = s.load(&g);
+    assert_eq!(
+        (loaded.source, loaded.persisted.rev),
+        (Source::Generation(1), 7)
+    );
+}
