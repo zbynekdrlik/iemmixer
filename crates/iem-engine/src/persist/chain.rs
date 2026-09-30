@@ -112,9 +112,34 @@ pub struct Recovery {
 
 impl Store {
     /// Normalizes the state directory to `loaded` before the engine runs
-    /// (#32). Not yet: it changes nothing.
-    pub fn recover(&self, _loaded: &Loaded) -> Recovery {
-        Recovery::default()
+    /// (#32 review). A boot on `save.tmp` finishes that save the way `save`
+    /// would have (`save.tmp` synced, the old `current.json` into the next
+    /// generation, `save.tmp` to `current.json`, the directory synced):
+    /// afterwards `current.json` is the loaded state and no `save.tmp`
+    /// remains, so the next save cannot truncate its only copy. Each step
+    /// is one rename: a crash in between leaves a layout the next boot's
+    /// load chain resolves to the same state, and this finishes it then. A
+    /// failed step is reported; the engine runs on the loaded state anyway.
+    pub fn recover(&self, loaded: &Loaded) -> Recovery {
+        let mut done = Recovery::default();
+        if loaded.source == Source::Interrupted {
+            match self.finish_interrupted() {
+                Ok(()) => done.finished = true,
+                Err(e) => done
+                    .failed
+                    .push(format!("finishing the interrupted save failed: {e}")),
+            }
+        }
+        done
+    }
+
+    fn finish_interrupted(&self) -> io::Result<()> {
+        // A handle with write access: Windows flushes only through one.
+        fs::OpenOptions::new()
+            .write(true)
+            .open(self.dir.join(TMP))?
+            .sync_all()?;
+        self.commit_tmp().map(drop)
     }
 }
 
