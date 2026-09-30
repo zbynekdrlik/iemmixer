@@ -318,6 +318,7 @@ class PostBootRunTests(unittest.TestCase):
         self.autostart = False     # REAPER started by itself after the boot
         self.started = False       # REAPER started by the bring-back
         self.bring_back_fails = False
+        self.event_at_poll = 0     # "ide event" comes during this autostart poll (0: never)
         self.calls: list[str] = []
 
         def fake_ps(env, body, timeout=300, event="finish"):
@@ -325,6 +326,8 @@ class PostBootRunTests(unittest.TestCase):
             if "Get-IemBootTime" in body:
                 return "2026-01-02T00:00:00Z"
             if "Get-Process reaper" in body:
+                if sum("Get-Process reaper" in c for c in self.calls) == self.event_at_poll:
+                    (self.dir / "EVENT-NOW").touch()
                 return 1 if (self.autostart or self.started) else 0
             if body.startswith("Invoke-SpikeBringBack"):
                 if self.bring_back_fails:
@@ -364,6 +367,18 @@ class PostBootRunTests(unittest.TestCase):
         st = tw.sw.load_state()
         self.assertEqual((st["card"], st["closed"]), ("reaper", True))
         self.assertIn("REAPER did not start by itself within 5 min", st["post_boot"]["problems"])
+
+    def test_an_event_during_the_autostart_wait_brings_reaper_back_at_once(self) -> None:
+        # Review m10: the flag is checked on every poll; the event path is the bring-back, now,
+        # without the remaining read-only checks.
+        self.event_at_poll = 2
+        with self.assertRaises(tw.sw.EventNow):
+            tw.cmd_post_boot(self.env, argparse.Namespace())
+        self.assertEqual(sum("Get-Process reaper" in c for c in self.calls), 2)
+        self.assertTrue(any(c.startswith("Invoke-SpikeBringBack") for c in self.calls))
+        self.assertFalse(any("Get-IemReaperFingerprint" in c or "Get-IemCpuSample" in c for c in self.calls))
+        st = tw.sw.load_state()
+        self.assertEqual((st["card"], st["closed"]), ("reaper", True))
 
     def test_a_failed_bring_back_keeps_the_window_open(self) -> None:
         self.bring_back_fails = True
