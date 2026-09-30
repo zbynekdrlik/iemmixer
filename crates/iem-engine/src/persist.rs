@@ -501,7 +501,7 @@ mod tests {
         let g = test_site();
         let mut p = sample(1);
         p.state = to_state(&g, &reconcile(&g, &p.state).0);
-        assert_eq!(s.save(&p).unwrap(), 0);
+        assert_eq!(s.save(&p).unwrap().generation, 0);
         let loaded = s.load(&g);
         assert_eq!(loaded.source, Source::Current);
         assert_eq!(loaded.persisted, p);
