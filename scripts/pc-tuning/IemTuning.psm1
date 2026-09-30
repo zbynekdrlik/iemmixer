@@ -184,10 +184,12 @@ function Test-IemSame {
 }
 
 function New-IemItem {
+    # -NoJournal: an item that is only ensured, never reverted (the iemmixer
+    # plan's existence and settings: it stays defined, design note 6.2 L2).
     param([Parameter(Mandatory)][string]$Key, [Parameter(Mandatory)][string]$Kind, [Parameter(Mandatory)][hashtable]$Arguments,
-          [AllowNull()]$Desired, [int]$Tier = 0, [string]$Group = '', [switch]$Reboot)
+          [AllowNull()]$Desired, [int]$Tier = 0, [string]$Group = '', [switch]$Reboot, [switch]$NoJournal)
     [pscustomobject]@{ key = $Key; kind = $Kind; args = $Arguments; tier = $Tier; group = $Group; reboot = [bool]$Reboot
-                       desired = $(if ($null -eq $Desired) { $null } else { [string]$Desired }) }
+                       journal = -not $NoJournal.IsPresent; desired = $(if ($null -eq $Desired) { $null } else { [string]$Desired }) }
 }
 
 function Test-IemPlan {
@@ -363,14 +365,10 @@ function Set-IemValue {
             else { throw "task state '$Value' refused" }
         }
         'plan-exists' {
-            if ($Value -eq 'present') {
-                $out = & powercfg.exe /duplicatescheme $a.source $a.guid 2>&1
-                if ($LASTEXITCODE -ne 0) { throw "powercfg /duplicatescheme: $($out -join ' ')" }
-            } else {
-                if ([IemPower]::Active() -eq $a.guid) { throw "plan $($a.guid) is active: not deleted" }
-                $out = & powercfg.exe /delete $a.guid 2>&1
-                if ($LASTEXITCODE -ne 0) { throw "powercfg /delete: $($out -join ' ')" }
-            }
+            # The plan is created once and stays defined (design note 6.2 L2): never deleted here.
+            if ($Value -ne 'present') { throw "plan $($a.guid): only 'present' is written" }
+            $out = & powercfg.exe /duplicatescheme $a.source $a.guid 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "powercfg /duplicatescheme: $($out -join ' ')" }
         }
         'plan-value' {
             if ($null -eq $Value) { throw 'a plan value cannot be removed' }
@@ -469,7 +467,9 @@ function Invoke-IemItem {
         if ($null -eq $before -and @('task', 'svc-start', 'svc-state', 'cpusets') -contains $Item.kind) { $row.action = 'absent'; return [pscustomobject]$row }
         if (Test-IemSame $before $Item.desired) { $row.action = 'kept'; $row.value = $before; return [pscustomobject]$row }
         $e = $Journal[$Section][$Item.key]
-        if ($null -eq $e) {
+        if (-not $Item.journal) {
+            # Ensured only: nothing to revert.
+        } elseif ($null -eq $e) {
             $e = @{ kind = $Item.kind; args = $Item.args; before = $before; tier = $Item.tier; group = $Item.group
                     reboot = $Item.reboot; at = (Get-Date).ToUniversalTime().ToString('o'); boot = $Boot }
             # The exact value for undo: its registry kind and data, not the text (A1).
@@ -660,12 +660,14 @@ function Get-IemModeItems {
     $items = @()
     $guid = $Profile.plan.guid
     if (@($Only) -contains 'plan') {
-        $items += New-IemItem -Key 'plan:exists' -Kind 'plan-exists' -Arguments @{ guid = $guid; source = $Profile.plan.source } -Desired 'present' -Group 'plan'
+        # The plan and its settings are ensured, not journaled: exit re-activates the
+        # journaled plan and leaves this one defined but inactive; enter reuses it (A6).
+        $items += New-IemItem -Key 'plan:exists' -Kind 'plan-exists' -Arguments @{ guid = $guid; source = $Profile.plan.source } -Desired 'present' -Group 'plan' -NoJournal
         $values = @($script:PlanSettings) + @(
             @{ name = 'idle-disable'; sub = $script:ProcessorSub; setting = $script:IdleDisable; value = $(if ($Idle -eq 'disable') { 1 } else { 0 }) },
             @{ name = 'idle-state-max'; sub = $script:ProcessorSub; setting = $script:IdleStateMax; value = $(if ($Idle -eq 'c1') { 1 } else { 0 }) })
         foreach ($s in $values) {
-            $items += New-IemItem -Key "plan:$($s.name)" -Kind 'plan-value' -Arguments @{ guid = $guid; sub = $s.sub; setting = $s.setting } -Desired $s.value -Group 'plan'
+            $items += New-IemItem -Key "plan:$($s.name)" -Kind 'plan-value' -Arguments @{ guid = $guid; sub = $s.sub; setting = $s.setting } -Desired $s.value -Group 'plan' -NoJournal
         }
         $items += New-IemItem -Key 'plan:active' -Kind 'plan-active' -Arguments @{} -Desired $guid -Group 'plan'
     }
