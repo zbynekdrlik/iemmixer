@@ -23,6 +23,11 @@ function ThrowsLike([scriptblock]$b, [string]$like, $what) {
     if ($m -notlike $like) { throw "FAILED: $what (threw '$m', expected '$like')" }
     Write-Host "ok  $what"
 }
+# The module's private readers of external state (a power-scheme name, the
+# interrupts Windows granted): the self-test replaces them inside the module;
+# no parameter lets a caller bypass them.
+function Get-TuningSeam([string]$Name) { & (Get-Module IemTuning) { param($n) Get-Variable -Scope Script -Name $n -ValueOnly -ErrorAction SilentlyContinue } $Name }
+function Set-TuningSeam([string]$Name, [scriptblock]$Value) { & (Get-Module IemTuning) { param($n, $v) Set-Variable -Scope Script -Name $n -Value $v } $Name $Value }
 # Callers wrap this in @(...) so .Count and a ForEach pipe are array-safe under
 # StrictMode on PS 5.1 (a bare (Rows ...) would be $null for 0 matches; a ,@()
 # return would make @(Rows ...) iterate once over an empty array; S1c CI).
@@ -353,6 +358,17 @@ try {
     Assert (@(Rows $ea 'failed').Count -eq 0 -and $ra.Count -eq 1 -and $ra[0].action -eq 'reactivated' -and [IemPower]::Active() -eq $testPlan -and [IemPower]::Read($testPlan, '54533251-82be-4824-96c1-47b60b740d00', '5d76a2ca-e8c0-402f-a133-2158492d58ad') -eq 1) 'enter-reactivates-the-active-plan-after-new-values'
     [void](Exit-IemTuningMode -ProfilePath $pp)
     Assert ([IemPower]::Active() -eq $activeBefore -and (@(& powercfg.exe /list) -match $testPlan)) 'exit-after-a-reuse-keeps-the-plan-inactive'
+    # A plan whose name cannot be read is never taken for "no such plan" (review
+    # 3.1): an existing plan without a readable name is refused before any write.
+    $savedName = Get-TuningSeam 'ReadPlanName'
+    Set-TuningSeam 'ReadPlanName' { param($g) $null }
+    ThrowsLike { Enter-IemTuningMode -ProfilePath $pp -Only @('plan') -Idle 'c1' } '*name cannot be read*' 'enter-refuses-an-existing-plan-without-a-readable-name'
+    Set-TuningSeam 'ReadPlanName' { param($g) throw 'simulated name read failure' }
+    ThrowsLike { Get-IemPlanName -Guid $testPlan } '*name cannot be read*' 'plan-name-read-failure-throws-for-an-existing-plan'
+    Assert ($null -eq (Get-IemPlanName -Guid ([guid]::NewGuid().ToString()))) 'plan-name-read-failure-of-a-missing-plan-is-null'
+    Set-TuningSeam 'ReadPlanName' $savedName
+    Assert ($null -eq (Get-IemPlanName -Guid ([guid]::NewGuid().ToString())) -and (Get-IemPlanName -Guid $testPlan) -ceq 'iemmixer') 'plan-name-reads-the-real-name'
+    Assert (-not (Read-IemJournalState $pp) -and [IemPower]::Active() -eq $activeBefore) 'plan-name-refusals-write-nothing'
 
     # A placed process that ended is skipped; a reused pid is refused.
     $short = Start-Process -FilePath $ping -ArgumentList '-n', '5', '127.0.0.1' -PassThru -WindowStyle Hidden
