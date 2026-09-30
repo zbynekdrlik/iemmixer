@@ -269,6 +269,11 @@ try {
     Assert ($ps.plan -eq $activeBefore -and $ps.governor -eq 'Running') 'poll-sample-reads-the-sentinels'
     [void](Get-IemSystemEvents -Since ((Get-Date).AddHours(-1).ToUniversalTime().ToString('o')))
     Write-Host 'ok  system-events-read'
+    # "No events found" is an empty result; any other query error throws, never
+    # reads as zero WHEA/driver-reset/power events (A10).
+    $none = Get-IemSystemEvents -Since ((Get-Date).AddDays(1).ToUniversalTime().ToString('o'))
+    Assert (@($none).Count -eq 0) 'system-events-none-found-is-empty'
+    Throws { Get-IemSystemEvents -Since ((Get-Date).AddHours(-1).ToUniversalTime().ToString('o')) -LogName "iemmixer-no-such-log-$id" } 'system-events-a-failing-query-throws'
 } finally {
     try { [void](Exit-IemTuningMode -ProfilePath $pp) } catch { Write-Host "cleanup exit: $_" }
     foreach ($t in 2, 3) { try { [void](Undo-IemTuning -ProfilePath $pp -Tier $t) } catch { Write-Host "cleanup undo: $_" } }
