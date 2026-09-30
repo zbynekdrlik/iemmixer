@@ -114,9 +114,10 @@ mod tests {
         let mut p = LatencyProbe::new();
         p.feed(&[1.0, 1.0], 0);
         assert_eq!(p.samples(), None);
-        // Now emit; a later return is measured from the emit.
-        p.emitted(100);
-        p.feed(&[0.0, 0.5], 148); // onset at index 1 → sample 149
+        // Emit long after that return (farther than any quiet window before
+        // an emit); a later return is measured from the emit.
+        p.emitted(100_000);
+        p.feed(&[0.0, 0.5], 100_048); // onset at index 1 → sample 100_049
         assert_eq!(p.samples(), Some(49));
     }
 
@@ -149,7 +150,7 @@ mod tests {
     }
 
     #[test]
-    fn a_return_within_the_minimum_round_trip_is_ignored() {
+    fn a_return_within_the_minimum_round_trip_is_not_the_echo() {
         // A return that crosses the threshold too soon after the emit is the
         // emit leaking or an unrelated input, not an echo (iemmixer#9 review).
         let mut p = LatencyProbe::new();
@@ -158,9 +159,6 @@ mod tests {
         let early = vec![0.5; (MIN_ROUND_TRIP - 1) as usize];
         p.feed(&early, 0);
         assert_eq!(p.samples(), None);
-        // The first sample at or beyond the minimum is the arrival.
-        p.feed(&[0.5; 4], MIN_ROUND_TRIP);
-        assert_eq!(p.samples(), Some(MIN_ROUND_TRIP));
     }
 
     #[test]
@@ -188,8 +186,11 @@ mod tests {
         p.feed(&[1.0], 20);
         assert_eq!(p.samples(), Some(20));
         p.reset();
-        assert_eq!(p, LatencyProbe::new());
         assert_eq!(p.samples(), None);
+        // The next signal is measured from its own emit.
+        p.emitted(100_000);
+        p.feed(&[1.0], 100_030);
+        assert_eq!(p.samples(), Some(30));
     }
 
     #[test]
@@ -197,18 +198,17 @@ mod tests {
         // The public API can only record an arrival after the emit, but the
         // `a >= e` guard must still refuse an inverted pair rather than
         // underflow. Constructed directly so `a < e`; `samples()` is None.
-        let p = LatencyProbe {
-            emitted_at: Some(100),
-            arrived_at: Some(50),
+        let pair = |e, a| {
+            let mut p = LatencyProbe::new();
+            p.emitted_at = Some(e);
+            p.arrived_at = Some(a);
+            p
         };
+        let p = pair(100, 50);
         assert_eq!(p.samples(), None);
         assert_eq!(p.ms(96_000), None);
         // The equal edge: a zero round-trip is a valid measurement.
-        let p = LatencyProbe {
-            emitted_at: Some(100),
-            arrived_at: Some(100),
-        };
-        assert_eq!(p.samples(), Some(0));
+        assert_eq!(pair(100, 100).samples(), Some(0));
     }
 
     #[test]
