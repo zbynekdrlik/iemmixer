@@ -224,6 +224,15 @@ class RebootTests(unittest.TestCase):
         self.assertNotRegex(body, r"[/-]t[\s:]+0*[1-9]")
         self.assertEqual(tw.sw.load_state()["reboot"]["by"], "agent")
 
+    def test_an_event_refuses_the_restart_and_records_nothing(self) -> None:
+        # Every command checks the "ide event" flag (#32 B2): main() then pre-empts.
+        (self.dir / "EVENT-NOW").touch()
+        for by_owner in (False, True):
+            with self.assertRaises(tw.sw.EventNow):
+                tw.cmd_reboot(ENV, argparse.Namespace(approval=self.args.approval, by_owner=by_owner))
+        self.assertEqual(self.calls, [])
+        self.assertNotIn("approval", tw.sw.load_state()["reboot"])
+
 
 if __name__ == "__main__":
     unittest.main()
