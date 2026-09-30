@@ -25,6 +25,8 @@ struct FaultState {
     /// Steps taken since the fault was armed.
     steps: usize,
     fault: Option<(usize, Mode)>,
+    /// The next step of this kind fails, once.
+    next: Option<&'static str>,
 }
 
 /// The real file system with injected failures. A failed write leaves half
@@ -47,17 +49,27 @@ impl Faulty {
         let mut s = self.state.lock().unwrap();
         s.steps = 0;
         s.fault = None;
+        s.next = None;
+    }
+
+    /// The next step of kind `what` ("write", "rename", "remove", …) fails.
+    pub(super) fn fail_next(&self, what: &'static str) {
+        self.state.lock().unwrap().next = Some(what);
     }
 
     fn step(&self, what: &str, path: &Path) -> io::Result<()> {
         let mut s = self.state.lock().unwrap();
         let at = s.steps;
         s.steps += 1;
-        let fails = match s.fault {
+        let mut fails = match s.fault {
             Some((n, Mode::Once)) => at == n,
             Some((n, Mode::From)) => at >= n,
             None => false,
         };
+        if s.next == Some(what) {
+            s.next = None;
+            fails = true;
+        }
         if fails {
             return Err(io::Error::other(format!(
                 "injected failure at step {at}: {what} {}",
@@ -138,4 +150,56 @@ fn a_save_never_writes_save_tmp_in_place() {
         assert_eq!(loaded.persisted.rev, 6, "{mode:?}");
         assert_eq!(loaded.source, Source::Interrupted, "{mode:?}");
     }
+}
+
+fn rev_of(path: &Path) -> u64 {
+    decode(&fs::read(path).unwrap()).unwrap().rev
+}
+
+#[test]
+fn a_pruning_failure_leaves_the_save_committed() {
+    // #32 P6: generations are pruned after the commit; a failed removal
+    // is reported apart and never makes a committed save a failure.
+    let g = test_site();
+    let (_d, faulty, s) = faulty_store();
+    for rev in 1..=21 {
+        s.save(&sample(rev)).unwrap();
+    }
+    faulty.fail_next("remove");
+    let committed = s.save(&sample(22)).unwrap();
+    assert_eq!(committed.generation, 21);
+    assert!(committed.pruning.is_some());
+    assert_eq!(s.load(&g).persisted.rev, 22);
+    // Nor does it make a recovery unfinished.
+    let (_d, faulty, s) = faulty_store();
+    for rev in 1..=21 {
+        s.save(&sample(rev)).unwrap();
+    }
+    fs::write(s.dir().join(TMP), encode(&sample(22)).unwrap()).unwrap();
+    let loaded = s.load(&g);
+    assert_eq!(loaded.source, Source::Interrupted);
+    faulty.fail_next("remove");
+    let done = s.recover(&loaded);
+    assert!(done.finished, "{done:?}");
+    assert!(done.failed.is_empty(), "{done:?}");
+    assert_eq!(done.warnings.len(), 1, "{done:?}");
+    assert_eq!(rev_of(&s.dir().join(CURRENT)), 22);
+}
+
+#[test]
+fn a_current_json_that_cannot_be_looked_at_is_never_replaced() {
+    // #32 P7: an error while asking whether current.json exists is not
+    // "absent": the save stops before save.tmp could replace it, and the
+    // newest state waits in save.tmp.
+    let (_d, faulty, s) = faulty_store();
+    s.save(&sample(5)).unwrap();
+    faulty.fail_next("exists");
+    assert!(s.save(&sample(6)).is_err());
+    assert_eq!(rev_of(&s.dir().join(CURRENT)), 5);
+    assert_eq!(rev_of(&s.dir().join(TMP)), 6);
+    let loaded = s.load(&test_site());
+    assert_eq!(
+        (loaded.source, loaded.persisted.rev),
+        (Source::Interrupted, 6)
+    );
 }
