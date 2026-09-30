@@ -237,6 +237,130 @@ fn rev_of(path: &Path) -> u64 {
     decode(&fs::read(path).unwrap()).unwrap().rev
 }
 
+/// `saved_unix_ms` of the session's saves in these tests: tells them apart
+/// from `sample`'s at the same revision.
+const SESSION: u64 = 42;
+
+/// The running engine's state at `rev`, told apart from `sample(rev)`.
+fn session(rev: u64) -> Persisted {
+    let mut p = sample(rev);
+    p.saved_unix_ms = SESSION;
+    p
+}
+
+/// Whether some file in `dir` holds exactly `bytes`.
+fn kept(dir: &Path, bytes: &[u8]) -> bool {
+    fs::read_dir(dir)
+        .unwrap()
+        .any(|e| fs::read(e.unwrap().path()).is_ok_and(|b| b == bytes))
+}
+
+// ---- a save.tmp this store did not write (#32 final review, MAJOR-1) ----
+
+/// current.json at 5 and, left by a crashed save, save.tmp at 6, which the
+/// next process's boot cannot read (another process holds it a moment):
+/// the store, its pending bytes.
+fn unread_save_tmp() -> (tempfile::TempDir, Arc<Faulty>, Store, Vec<u8>) {
+    let (d, faulty, s) = faulty_store();
+    s.save(&sample(5)).unwrap();
+    let pending = encode(&sample(6)).unwrap();
+    fs::write(s.dir().join(TMP), &pending).unwrap();
+    let s = reopen(s.dir(), &faulty);
+    faulty.set_unreadable(&s.dir().join(TMP), true);
+    let boot = s.load(&test_site());
+    assert_eq!(
+        (boot.source, boot.persisted.rev, boot.save_tmp),
+        (Source::Current, 5, FileState::Unreadable)
+    );
+    s.recover(&boot);
+    faulty.set_unreadable(&s.dir().join(TMP), false);
+    (d, faulty, s, pending)
+}
+
+#[test]
+fn a_save_moves_a_save_tmp_it_did_not_write_aside() {
+    // The review's MAJOR-1: the session's save renamed save.new over a
+    // save.tmp the boot could not read, the newest state lost.
+    let g = test_site();
+    let (_d, faulty, s, pending) = unread_save_tmp();
+    let committed = s.save(&session(6)).unwrap();
+    let orphan = s.dir().join("save.tmp.orphan-1");
+    assert_eq!(committed.orphaned, Some(orphan.clone()));
+    assert_eq!(fs::read(&orphan).unwrap(), pending);
+    // An orphan is kept for inspection and never loaded: the session's
+    // saves are what the band hears.
+    let again = reopen(s.dir(), &faulty).load(&g);
+    assert_eq!(
+        (again.source, again.persisted.saved_unix_ms),
+        (Source::Current, SESSION)
+    );
+    assert!(again.alarms.is_empty(), "{:?}", again.alarms);
+    // The store's own save.tmp (a save whose commit failed) is replaced
+    // without a move aside.
+    faulty.fail_next("exists");
+    assert!(s.save(&session(7)).is_err());
+    assert_eq!(rev_of(&s.dir().join(TMP)), 7);
+    assert_eq!(s.save(&session(8)).unwrap().orphaned, None);
+    assert!(!s.dir().join("save.tmp.orphan-2").exists());
+    assert_eq!(rev_of(&s.dir().join(CURRENT)), 8);
+}
+
+#[test]
+fn a_save_tmp_that_cannot_be_moved_aside_safely_fails_the_save() {
+    // The move aside is flushed before save.new may take save.tmp's name;
+    // if that fails, the save fails and nothing is lost.
+    let (_d, faulty, s, pending) = unread_save_tmp();
+    faulty.fail_next("sync_dir");
+    assert!(s.save(&session(6)).is_err());
+    assert!(kept(s.dir(), &pending));
+    assert_eq!(rev_of(&s.dir().join(CURRENT)), 5);
+    // Still held by another process: it cannot be moved, the save fails.
+    let (_d, faulty, s, pending) = unread_save_tmp();
+    faulty.set_locked(&s.dir().join(TMP), true);
+    assert!(s.save(&session(6)).is_err());
+    faulty.set_locked(&s.dir().join(TMP), false);
+    assert_eq!(fs::read(s.dir().join(TMP)).unwrap(), pending);
+    assert_eq!(rev_of(&s.dir().join(CURRENT)), 5);
+}
+
+#[test]
+fn every_save_tmp_the_boot_did_not_load_is_moved_aside_by_the_next_save() {
+    // Older than current.json (a leftover) or damaged: not the loaded
+    // state, so not the store's to replace.
+    let g = test_site();
+    for (what, bytes) in [
+        ("older", encode(&sample(4)).unwrap()),
+        ("damaged", b"cut off".to_vec()),
+    ] {
+        let (_d, faulty, s) = faulty_store();
+        s.save(&sample(5)).unwrap();
+        fs::write(s.dir().join(TMP), &bytes).unwrap();
+        let s = reopen(s.dir(), &faulty);
+        let boot = s.load(&g);
+        assert_eq!(boot.source, Source::Current, "{what}");
+        s.recover(&boot);
+        let orphan = s.dir().join("save.tmp.orphan-1");
+        assert_eq!(
+            s.save(&session(6)).unwrap().orphaned,
+            Some(orphan.clone()),
+            "{what}"
+        );
+        assert_eq!(fs::read(&orphan).unwrap(), bytes, "{what}");
+    }
+    // The loaded save.tmp is the store's: its recovery could not finish,
+    // the next save replaces it (the session's state includes it).
+    let (_d, faulty, s) = faulty_store();
+    s.save(&sample(5)).unwrap();
+    fs::write(s.dir().join(TMP), encode(&sample(6)).unwrap()).unwrap();
+    let s = reopen(s.dir(), &faulty);
+    let boot = s.load(&g);
+    assert_eq!(boot.source, Source::Interrupted);
+    faulty.fail_next("sync_file");
+    assert!(!s.recover(&boot).finished);
+    assert_eq!(s.save(&session(7)).unwrap().orphaned, None);
+    assert_eq!(rev_of(&s.dir().join(CURRENT)), 7);
+}
+
 #[test]
 fn a_pruning_failure_leaves_the_save_committed() {
     // #32 P6: generations are pruned after the commit; a failed removal
@@ -576,9 +700,10 @@ fn a_boot_whose_reads_fail_never_rolls_back_silently() {
     // load an older state, but never without an alarm (or a fallback
     // source, which the engine alarms on), and leave the files as they are.
     let g = test_site();
+    let pending = encode(&sample(22)).unwrap();
     let setup = |s: &Store| {
         filled(s);
-        fs::write(s.dir().join(TMP), encode(&sample(22)).unwrap()).unwrap();
+        fs::write(s.dir().join(TMP), &pending).unwrap();
     };
     let (_d, faulty, s) = faulty_store();
     setup(&s);
@@ -602,6 +727,29 @@ fn a_boot_whose_reads_fail_never_rolls_back_silently() {
             }
             faulty.count();
             assert_eq!(s.load(&g).persisted.rev, 22, "{mode:?} at step {at}");
+            // #32 minor-8: the engine then runs on the boot's state and
+            // saves its next edit. The next boot loads that save, and the
+            // newest state before the boot is still in the directory (a
+            // save.tmp the boot could not read is moved aside, never
+            // replaced).
+            s.recover(&boot);
+            let next = boot.persisted.rev + 1;
+            s.save(&session(next)).unwrap();
+            let again = reopen(s.dir(), &faulty).load(&g);
+            assert_eq!(
+                (
+                    again.source,
+                    again.persisted.rev,
+                    again.persisted.saved_unix_ms
+                ),
+                (Source::Current, next, SESSION),
+                "{mode:?} at step {at}: after the session's save"
+            );
+            assert!(again.alarms.is_empty(), "{mode:?} at {at}: {again:?}");
+            assert!(
+                kept(s.dir(), &pending),
+                "{mode:?} at step {at}: save.tmp lost"
+            );
         }
     }
 }
