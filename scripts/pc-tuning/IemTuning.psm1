@@ -22,6 +22,7 @@ public static class IemPower {
     [DllImport("powrprof.dll")] static extern uint PowerSetActiveScheme(IntPtr root, ref Guid scheme);
     [DllImport("powrprof.dll")] static extern uint PowerReadACValueIndex(IntPtr root, ref Guid scheme, ref Guid sub, ref Guid setting, out uint value);
     [DllImport("powrprof.dll")] static extern uint PowerWriteACValueIndex(IntPtr root, ref Guid scheme, ref Guid sub, ref Guid setting, uint value);
+    [DllImport("powrprof.dll")] static extern uint PowerReadFriendlyName(IntPtr root, ref Guid scheme, IntPtr sub, IntPtr setting, byte[] buffer, ref uint size);
     [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr p);
 
     public static string Active() {
@@ -45,6 +46,16 @@ public static class IemPower {
         Guid a = new Guid(scheme), b = new Guid(sub), c = new Guid(setting);
         uint rc = PowerWriteACValueIndex(IntPtr.Zero, ref a, ref b, ref c, value);
         if (rc != 0) throw new Win32Exception((int)rc);
+    }
+    // The scheme's friendly name (a language-neutral read), or null when the scheme does not exist.
+    public static string Name(string scheme) {
+        Guid g = new Guid(scheme);
+        uint size = 0;
+        if (PowerReadFriendlyName(IntPtr.Zero, ref g, IntPtr.Zero, IntPtr.Zero, null, ref size) != 0) return null;
+        byte[] buf = new byte[size];
+        uint rc = PowerReadFriendlyName(IntPtr.Zero, ref g, IntPtr.Zero, IntPtr.Zero, buf, ref size);
+        if (rc != 0) throw new Win32Exception((int)rc);
+        return System.Text.Encoding.Unicode.GetString(buf, 0, (int)size).TrimEnd((char)0);
     }
 }
 
@@ -131,6 +142,14 @@ $script:PlanSettings = @(
 $script:ProcessorSub = '54533251-82be-4824-96c1-47b60b740d00'
 $script:IdleDisable = '5d76a2ca-e8c0-402f-a133-2158492d58ad'
 $script:IdleStateMax = '9943e905-9a30-4ec1-9b99-44dd3b76f7a2'
+# iemmixer's own plan carries this name, set right after /duplicatescheme: an
+# existing plan is written into only when it has it (M2, m6).
+$script:PlanName = 'iemmixer'
+$script:PlanDescription = 'iemmixer tuning plan (S1c, design note 6.2 L2)'
+# Windows' built-in schemes (Balanced, High performance, Power saver, Ultimate
+# Performance): never iemmixer's plan.
+$script:BuiltinSchemes = @('381b4222-f694-41f0-9685-ff5bb260df2e', '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c',
+                           'a1841308-3541-4fab-bc81-f71556f20b4a', 'e9a42b02-d5df-448d-aa00-03f14749eb61')
 $script:NetClass = 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e972-e325-11ce-bfc1-08002be10318}'
 
 function Read-IemProfile {
@@ -385,9 +404,14 @@ function Set-IemValue {
             if ($Value -ne 'present') { throw "plan $($a.guid): only 'present' is written" }
             $r = Invoke-IemNative -FilePath 'powercfg.exe' -Arguments @('/duplicatescheme', $a.source, $a.guid)
             if ($r.code -ne 0) { throw "powercfg /duplicatescheme: $($r.out -join ' ')" }
+            # Named right away: an existing plan counts as iemmixer's only by this name (M2, m6).
+            $r = Invoke-IemNative -FilePath 'powercfg.exe' -Arguments @('/changename', $a.guid, $script:PlanName, $script:PlanDescription)
+            if ($r.code -ne 0) { throw "powercfg /changename: $($r.out -join ' ')" }
+            if ([IemPower]::Name([string]$a.guid) -cne $script:PlanName) { throw "plan $($a.guid): not named '$($script:PlanName)' after /changename" }
         }
         'plan-value' {
             if ($null -eq $Value) { throw 'a plan value cannot be removed' }
+            if ([IemPower]::Name([string]$a.guid) -cne $script:PlanName) { throw "plan $($a.guid) is not iemmixer's own plan: value not written (M2)" }
             [IemPower]::Write($a.guid, $a.sub, $a.setting, [uint32]$Value)
         }
         'plan-active' { [IemPower]::Activate([string]$Value) }
@@ -692,6 +716,19 @@ function New-IemTaskItem {
     New-IemItem -Key "task:$Task" -Kind 'task' -Arguments @{ path = $Task.Substring(0, $i + 1); name = $Task.Substring($i + 1) } -Desired 'disabled' -Tier 2 -Group $Group
 }
 
+function Assert-IemOwnPlan {
+    # Plan values are written only into iemmixer's own plan (M2): never the
+    # REAPER-mode plan it duplicates (plan.source), never a built-in scheme, and an
+    # existing plan only when it carries iemmixer's name.
+    param([Parameter(Mandatory)]$Profile)
+    $g = ([guid][string]$Profile.plan.guid).ToString()
+    $s = ([guid][string]$Profile.plan.source).ToString()
+    if ($g -eq $s) { throw "plan.guid $g is plan.source, the REAPER-mode plan: iemmixer never writes into it" }
+    if ($script:BuiltinSchemes -contains $g) { throw "plan.guid $g is a built-in Windows scheme: iemmixer writes only into its own plan" }
+    $name = [IemPower]::Name($g)
+    if ($null -ne $name -and $name -cne $script:PlanName) { throw "plan $g exists and is not iemmixer's (named '$name'): nothing written" }
+}
+
 function Get-IemModeItems {
     # Mode levers (design note 6.2) in apply order: L3 governor, L2 plan, L6 services,
     # L4 placement. The governor is paused first, so Process Lasso no longer owns the
@@ -703,6 +740,7 @@ function Get-IemModeItems {
         $items += New-IemItem -Key 'governor' -Kind 'svc-state' -Arguments @{ name = $Profile.governor } -Desired 'stopped' -Group 'governor'
     }
     if (@($Only) -contains 'plan') {
+        Assert-IemOwnPlan -Profile $Profile
         # The plan and its settings are ensured, not journaled: exit re-activates the
         # journaled plan and leaves this one defined but inactive; enter reuses it (A6).
         $items += New-IemItem -Key 'plan:exists' -Kind 'plan-exists' -Arguments @{ guid = $guid; source = $Profile.plan.source } -Desired 'present' -Group 'plan' -NoJournal
@@ -777,12 +815,14 @@ function Enter-IemTuningMode {
     param([Parameter(Mandatory)][string]$ProfilePath, [string[]]$Only = @('plan', 'governor', 'placement'),
           [ValidateSet('default', 'c1', 'disable')][string]$Idle = 'default')
     $profile = Read-IemProfile -Path $ProfilePath
+    # Built, and so checked (M2), before anything is written.
+    $items = Get-IemModeItems -Profile $profile -Only $Only -Idle $Idle
     $j = Read-IemJournal -Path $profile.journal
     $j.entered = $true
     Write-IemJournal -Path $profile.journal -Journal $j   # before any write: an exit after a crash finds it
     $boot = Get-IemBootTime
     $planWritten = $false
-    $rows = @(foreach ($item in (Get-IemModeItems -Profile $profile -Only $Only -Idle $Idle)) {
+    $rows = @(foreach ($item in $items) {
         $row = Invoke-IemItem -Item $item -Journal $j -Section 'mode' -Path $profile.journal -Boot $boot
         if ($item.kind -eq 'plan-value' -and $row.action -eq 'written') { $planWritten = $true }
         if ($item.kind -eq 'plan-active' -and $row.action -eq 'kept' -and $planWritten) {
