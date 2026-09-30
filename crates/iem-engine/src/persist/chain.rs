@@ -22,7 +22,16 @@
 //! when `current.json` is not Valid (a save.tmp that could not be compared
 //! because the generations cannot be listed loads only with an alarm).
 //! Otherwise a Valid `current.json`, then the newest Valid generation, then
-//! the baseline, then muted defaults.
+//! the baseline, then muted defaults. A Valid `save.tmp` passed over for a
+//! lower revision is only legitimate as a leftover: it is named in an
+//! alarm (and the next save moves it aside).
+//!
+//! **Past an Unreadable `current.json`** the state loaded (a generation,
+//! `save.tmp`, the baseline or the defaults) continues its revision
+//! `REV_JUMP` above its own, with an alarm (#32 MAJOR-3): the file may
+//! hold any revision the last session reached, recovery never moves it,
+//! and once it can be read again it must not outrank the saves made since
+//! this boot.
 //!
 //! **Recovery at boot**, before the engine writes (under `Store::lock`):
 //! a Damaged `current.json` is moved aside to `current.json.damaged-<n>`
@@ -46,6 +55,14 @@ use super::*;
 /// Names tried for a file moved aside (`current.json.damaged-<n>`,
 /// `save.tmp.orphan-<n>`): 1 up to this.
 const QUARANTINE_NAMES: u32 = 1000;
+
+/// How far the revision of a state loaded past an Unreadable
+/// `current.json` jumps (#32 MAJOR-3). The core's revision grows by one per
+/// changing request and is carried across restarts; a million requests is
+/// far beyond what one session (or years of them) reaches, so the
+/// session's saves outrank whatever that file holds. Each such boot jumps
+/// again; the `u64` revision cannot run out.
+const REV_JUMP: u64 = 1_000_000;
 
 /// Reads of a file that fail with an I/O error, the file pausing between
 /// them, before it counts as unreadable (#32 P2).
@@ -73,7 +90,23 @@ impl Store {
     /// be used; one that exists and does not, or cannot be read, is
     /// `rejected` with the reason, as is a `save.tmp` passed over for an
     /// older revision and a directory whose generations cannot be listed.
+    /// Past an Unreadable `current.json` the revision continues
+    /// `REV_JUMP` above the state loaded (#32 MAJOR-3).
     pub fn load(&self, topo: &Topology) -> Loaded {
+        let mut loaded = self.load_chain(topo);
+        if loaded.current_json == FileState::Unreadable {
+            let rev = loaded.persisted.rev.saturating_add(REV_JUMP);
+            loaded.persisted.rev = rev;
+            loaded.alarms.push(format!(
+                "{CURRENT} cannot be read, so the revision continues at {rev}, \
+                 above anything it can hold"
+            ));
+        }
+        loaded
+    }
+
+    /// The chain itself (see `load`).
+    fn load_chain(&self, topo: &Topology) -> Loaded {
         let mut pick = Pick::default();
         let live = self
             .pick_live(&mut pick, Reading::Tolerant)
@@ -128,6 +161,10 @@ impl Store {
                             tmp.rev, current.rev
                         ),
                     ));
+                    pick.alarms.push(format!(
+                        "{TMP} (revision {}) is older than {CURRENT}'s {} and is not loaded",
+                        tmp.rev, current.rev
+                    ));
                     (current, Source::Current)
                 }
                 Read::Missing | Read::Unreadable | Read::Damaged => (current, Source::Current),
@@ -163,6 +200,10 @@ impl Store {
                         "revision {} is not newer than generation {seq}'s {}",
                         tmp.rev, generation.rev
                     ),
+                ));
+                pick.alarms.push(format!(
+                    "{TMP} (revision {}) is older than generation {seq}'s {} and is not loaded",
+                    tmp.rev, generation.rev
                 ));
                 Some((generation, Source::Generation(seq)))
             }
@@ -413,13 +454,16 @@ struct Pick {
 ///
 /// A tie goes to `save.tmp` (#32 review m2). Since D6 only `save` writes
 /// it, so it is always a save that was cut off, never older than the file
-/// beside it; after a fallback boot the core restarts at an older
-/// generation's revision and edits can reach the lost file's revision
-/// again, and at that tie the stale file must lose (recovery also moves a
-/// damaged `current.json` aside, so it cannot come back). A lower revision
-/// never wins: an import's fresh count (0) and an older engine's leftover
-/// baseline never roll the saved state back (such a baseline at the same
-/// revision holds that revision's state).
+/// beside it. After a fallback boot the core restarts at an older state's
+/// revision, and the file it fell back from must never outrank the
+/// session's saves: a Damaged `current.json` is moved aside by the
+/// recovery (it cannot come back), and past an Unreadable one (which
+/// recovery never moves) the load continues the revision `REV_JUMP`
+/// above the state loaded (#32 MAJOR-3), so the session's saves outrank
+/// the file once it can be read again. A lower revision never wins: an
+/// import's fresh count (0) and an older engine's leftover baseline never
+/// roll the saved state back (such a baseline at the same revision holds
+/// that revision's state); such a `save.tmp` is named in an alarm.
 fn supersedes(interrupted: &Persisted, other: &Persisted) -> bool {
     interrupted.rev >= other.rev
 }
