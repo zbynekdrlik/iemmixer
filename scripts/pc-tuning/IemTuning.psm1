@@ -50,13 +50,16 @@ public static class IemPower {
         uint rc = PowerWriteACValueIndex(IntPtr.Zero, ref a, ref b, ref c, value);
         if (rc != 0) throw new Win32Exception((int)rc);
     }
-    // The scheme's friendly name (a language-neutral read), or null when the scheme does not exist.
+    // The scheme's friendly name (a language-neutral read); null only for
+    // ERROR_FILE_NOT_FOUND (no such scheme), any other failure throws.
     public static string Name(string scheme) {
         Guid g = new Guid(scheme);
         uint size = 0;
-        if (PowerReadFriendlyName(IntPtr.Zero, ref g, IntPtr.Zero, IntPtr.Zero, null, ref size) != 0) return null;
+        uint rc = PowerReadFriendlyName(IntPtr.Zero, ref g, IntPtr.Zero, IntPtr.Zero, null, ref size);
+        if (rc == 2) return null;
+        if (rc != 0) throw new Win32Exception((int)rc);
         byte[] buf = new byte[size];
-        uint rc = PowerReadFriendlyName(IntPtr.Zero, ref g, IntPtr.Zero, IntPtr.Zero, buf, ref size);
+        rc = PowerReadFriendlyName(IntPtr.Zero, ref g, IntPtr.Zero, IntPtr.Zero, buf, ref size);
         if (rc != 0) throw new Win32Exception((int)rc);
         return System.Text.Encoding.Unicode.GetString(buf, 0, (int)size).TrimEnd((char)0);
     }
@@ -427,11 +430,11 @@ function Set-IemValue {
             # Named right away: an existing plan counts as iemmixer's only by this name (M2, m6).
             $r = Invoke-IemNative -FilePath 'powercfg.exe' -Arguments @('/changename', $a.guid, $script:PlanName, $script:PlanDescription)
             if ($r.code -ne 0) { throw "powercfg /changename: $($r.out -join ' ')" }
-            if ([IemPower]::Name([string]$a.guid) -cne $script:PlanName) { throw "plan $($a.guid): not named '$($script:PlanName)' after /changename" }
+            if ((Get-IemPlanName -Guid ([string]$a.guid)) -cne $script:PlanName) { throw "plan $($a.guid): not named '$($script:PlanName)' after /changename" }
         }
         'plan-value' {
             if ($null -eq $Value) { throw 'a plan value cannot be removed' }
-            if ([IemPower]::Name([string]$a.guid) -cne $script:PlanName) { throw "plan $($a.guid) is not iemmixer's own plan: value not written (M2)" }
+            if ((Get-IemPlanName -Guid ([string]$a.guid)) -cne $script:PlanName) { throw "plan $($a.guid) is not iemmixer's own plan: value not written (M2)" }
             [IemPower]::Write($a.guid, $a.sub, $a.setting, [uint32]$Value)
         }
         'plan-active' { [IemPower]::Activate([string]$Value) }
@@ -787,6 +790,23 @@ function New-IemTaskItem {
     New-IemItem -Key "task:$Task" -Kind 'task' -Arguments @{ path = $Task.Substring(0, $i + 1); name = $Task.Substring($i + 1) } -Desired 'disabled' -Tier 2 -Group $Group
 }
 
+# The plan-name reader: module-private, so the self-test can replace it and no
+# caller can bypass it (review 3.1).
+$script:ReadPlanName = { param([string]$Guid) [IemPower]::Name($Guid) }
+
+function Get-IemPlanName {
+    # The plan's friendly name, or $null only when the plan does not exist: a name
+    # that cannot be read for an existing plan throws, never reads as "no plan".
+    param([Parameter(Mandatory)][string]$Guid)
+    try { $name = & $script:ReadPlanName $Guid }
+    catch {
+        if (Test-IemPlan -Guid $Guid) { throw "plan ${Guid}: exists, but its name cannot be read ($_)" }
+        return $null
+    }
+    if ($null -eq $name -and (Test-IemPlan -Guid $Guid)) { throw "plan ${Guid}: exists, but its name cannot be read" }
+    return $name
+}
+
 function Assert-IemOwnPlan {
     # Plan values are written only into iemmixer's own plan (M2): never the
     # REAPER-mode plan it duplicates (plan.source), never a built-in scheme, and an
@@ -796,7 +816,7 @@ function Assert-IemOwnPlan {
     $s = ([guid][string]$Profile.plan.source).ToString()
     if ($g -eq $s) { throw "plan.guid $g is plan.source, the REAPER-mode plan: iemmixer never writes into it" }
     if ($script:BuiltinSchemes -contains $g) { throw "plan.guid $g is a built-in Windows scheme: iemmixer writes only into its own plan" }
-    $name = [IemPower]::Name($g)
+    $name = Get-IemPlanName -Guid $g
     if ($null -ne $name -and $name -cne $script:PlanName) { throw "plan $g exists and is not iemmixer's (named '$name'): nothing written" }
 }
 
