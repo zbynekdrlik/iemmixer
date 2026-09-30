@@ -6,7 +6,7 @@ paths:
 
 # PC tuning window (S1c, #15)
 
-`scripts/pc-tuning/tuning_window.py` drives the PowerShell tuning/measure modules (`IemTuning.psm1`, `IemMeasure.psm1`) over ssh, on top of `spike_window.py`'s window, state, "ide event" guard and unwind. `latency_report.py` analyses the collected data. A window opens only through `spike_window.py new --signal`; every command checks the "ide event" flag and pre-empts like the spike window. Site values (driver/registry/task names, channel numbers, handover values, the tuning profile) come ONLY from the private `$SPIKE_ENV` (`~/.config/iemmixer/asio-spike.env`) and `$TUNING_PROFILE` (`~/.config/iemmixer/pc-tuning.json`) at run time; they and the runbooks live in the private ops repo, never here (P6). Tests use synthetic values (inputs 101–124, synthetic GUIDs, layout housekeeping/card/nic/audio).
+`scripts/pc-tuning/tuning_window.py` drives the PowerShell tuning/measure modules (`IemTuning.psm1`, `IemMeasure.psm1`) over ssh, on top of `spike_window.py`'s window, state, "ide event" guard and unwind. `latency_report.py` analyses the collected data. A window opens only through `spike_window.py new --signal`; every command checks the "ide event" flag and pre-empts like the spike window. Site values (driver/registry/task names, channel numbers, handover values, the tuning profile) come ONLY from the private `$SPIKE_ENV` (`~/.config/iemmixer/asio-spike.env`) and `$TUNING_PROFILE` (`~/.config/iemmixer/pc-tuning.json`) at run time; they and the runbooks live in the private ops repo, never here (P6). The profile's `nic.hwid` is the NIC's exact `MatchingDeviceId` and each `devices[].hwid` a full `PCI\VEN_xxxx&DEV_xxxx` id (the PowerShell side checks both before any write). Tests use synthetic values (inputs 101–124, synthetic GUIDs, layout housekeeping/card/nic/audio).
 
 - **Load-bearing import order.** `tuning_window`'s `from golden_window import StepError, ps_quote` resolves ONLY because `import spike_window` runs first and, as an import side effect, inserts `scripts/golden` on `sys.path`. Keep the `sys.path.insert(... "asio-spike")` + `import spike_window as sw` lines BEFORE the `from golden_window import ...` line (tuning_window.py top). Reordering them breaks the import on a clean interpreter.
 
@@ -14,17 +14,19 @@ paths:
 
 - **StrictMode 5.1 array idiom (PowerShell).** Under `Set-StrictMode -Version Latest` on Windows PowerShell 5.1, a helper that returns 0 or 1 rows unrolls to `$null` / a scalar, so a later `.Count` or index throws. Wrap a row-returning helper's result with the repo's `,@()` / `@(...)` pattern (see `Test-SpikePc` / `Test-IemTuning`), and build an empty typed array as `[uint32[]]$ids = @()` — an `$ids = if (...) { [uint32[]]@() }` unrolls the empty array to `$null`, and `IemCpuSets.Set` then hits `ids.Length` on null → `NullReferenceException` on the mode-EXIT (CPU-set clear / REAPER-restore) path.
 
-- **IemTuning/IemMeasure invariants (#32 A1–A14).**
+- **IemTuning/IemMeasure invariants (#32 A1–A14 and its review round).**
   - Registry undo writes back the journal's stored value KIND and data, never the item's declared type; a journal entry without a stored value is refused, not guessed.
   - Registry deletes go through `Remove-IemRegValue` (`RegistryKey.DeleteValue`, one literal name), never `Remove-ItemProperty -Name`, which treats the NDIS `*` keywords as wildcards.
-  - Native programs go through `Invoke-IemNative` (stderr captured as output, only the exit code decides), never `& exe 2>&1` under `$ErrorActionPreference='Stop'`.
+  - Native programs go through `Invoke-IemNative` (stderr captured as output, only the exit code decides), never `& exe 2>&1` under `$ErrorActionPreference='Stop'`. `Invoke-IemXperf` verifies xperf's Microsoft signature and minimum version once per process.
   - Event-log queries go through `Get-IemWinEvent`: only "no events found" is empty, any other error throws; never `-ErrorAction SilentlyContinue`.
-  - Boot comparisons use `Test-IemSameBoot` (300 s tolerance against clock steps).
+  - Boots are compared with `Test-IemSameBoot`: the PrefetchParameters `BootId` counter plus a 300 s time tolerance against clock steps; both must agree where present.
+  - Plan values are only ever written into the plan named `iemmixer` (it refuses `plan.source`, the built-in schemes and any foreign plan, checked before any write; the name is set with `/changename` after `/duplicatescheme`).
   - Mode order: enter pauses the governor first; exit reverts the plan and restores the governor last. The iemmixer power plan stays defined but inactive after exit; it is never journaled or deleted.
-  - The card's IRQ affinity (R1) is applied only when the card already uses MSI (`MSISupported = 1`); otherwise the row is `skipped` and nothing is written.
-  - The NIC driver key must match the profile's `nic.hwid` (`MatchingDeviceId` prefix), looked up under `registry_root`, before any write.
-  - The profile version is stamped only after a complete, clean apply; an `-Only` name that is not a group of the tier is an error.
-  - The journal is written through to disk and swapped with `File.Replace`; a missing, empty or unreadable journal falls back to a complete `.tmp`, else it is refused.
+  - The card's IRQ affinity (R1) is applied only when the card's MSI is flagged (`MSISupported = 1`) AND granted (`Win32_PnPAllocatedResource`); otherwise the row is `skipped` and nothing is written.
+  - The NIC driver key must match the profile's `nic.hwid` (exact `MatchingDeviceId`), looked up under `registry_root`, before any write.
+  - The applied version is stamped per tier, only after a complete, clean apply (state reports `drift_tiers`); an `-Only` name that is not a group of the tier is an error.
+  - The journal (schema 2; a schema-1 journal is converted only where exact, else refused naming the file) is written through to disk and swapped with `File.Replace`; a missing, empty or unreadable journal falls back to a complete `.tmp`, else it is refused.
+  - The read-only fingerprint and inventory functions live in `IemMeasure.psm1`; `Export-IemNearGlitch` takes `-Name`; `Get-IemPollSample` is gone (the poll is `poll_body`, below).
   - Rows may carry `skipped` (apply) and `reactivated` (enter); `cmd_apply`/`cmd_enter`/`cmd_undo` fail only on `failed`.
 
 - **reject-case shadowing (tests)** — the spike's `--activity-channels` case is in `asio-spike.md` (it loads alongside this rule on `scripts/asio-spike/**`).
