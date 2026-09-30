@@ -163,9 +163,10 @@ impl Store {
     /// Each step is one rename: a crash in between leaves a layout the next
     /// boot's load chain resolves to the same state, and this finishes it
     /// then. A failed step is reported and the engine runs on the loaded
-    /// state anyway; when the damaged file cannot be moved aside the save is
-    /// left for the next boot, so the damaged file never becomes a
-    /// generation.
+    /// state anyway. A damaged file that cannot be moved aside does not hold
+    /// the save back (#32 P3): the finish then rotates it into a
+    /// generation, which is harmless, as the chain skips generations that
+    /// do not decode.
     pub fn recover(&self, loaded: &Loaded) -> Recovery {
         let mut done = Recovery::default();
         let current = self.dir.join(CURRENT);
@@ -175,12 +176,9 @@ impl Store {
         ) {
             match self.quarantine(&current) {
                 Ok(aside) => done.quarantined = Some(aside),
-                Err(e) => {
-                    done.failed.push(format!(
-                        "the damaged {CURRENT} could not be moved aside: {e}"
-                    ));
-                    return done;
-                }
+                Err(e) => done.failed.push(format!(
+                    "the damaged {CURRENT} could not be moved aside: {e}"
+                )),
             }
         }
         if loaded.source == Source::Interrupted {
