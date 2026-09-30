@@ -28,18 +28,26 @@ function New-IemTraceArguments {
     return ,$a
 }
 
-function Invoke-IemXperf {
-    param([Parameter(Mandatory)][string]$Xperf, [Parameter(Mandatory)][string[]]$Arguments)
+function Invoke-XperfRun {
+    # Module-private (not exported): runs xperf. -Verify: it runs elevated, so only a
+    # Microsoft-signed, new-enough binary, checked once per process (m4); only the
+    # pre-emption stop runs without it (review 3.6). stderr is output, the exit code
+    # alone decides (A11).
+    param([Parameter(Mandatory)][string]$Xperf, [Parameter(Mandatory)][string[]]$Arguments, [switch]$Verify)
     if (-not (Test-Path -LiteralPath $Xperf)) { throw "xperf not found at $Xperf (run wpt-install)" }
-    # It runs elevated: only a Microsoft-signed, new-enough binary, checked once per process (m4).
-    if (-not $script:XperfChecked.ContainsKey($Xperf)) {
+    if ($Verify -and -not $script:XperfChecked.ContainsKey($Xperf)) {
         [void](Assert-IemXperf -Xperf $Xperf -MinVersion $script:XperfMinVersion)
         $script:XperfChecked[$Xperf] = $true
     }
-    # stderr is output; the exit code alone decides (A11).
     $r = Invoke-IemNative -FilePath $Xperf -Arguments $Arguments
     if ($r.code -ne 0) { throw "xperf $($Arguments -join ' ') (exit $($r.code)): $($r.out -join ' ')" }
     return ,@($r.out)
+}
+
+function Invoke-IemXperf {
+    param([Parameter(Mandatory)][string]$Xperf, [Parameter(Mandatory)][string[]]$Arguments)
+    $out = Invoke-XperfRun -Xperf $Xperf -Arguments $Arguments -Verify
+    return ,$out
 }
 
 function ConvertFrom-IemLoggers {
@@ -58,15 +66,41 @@ function Start-IemTrace {
 function Stop-IemTrace {
     # Stops whichever of the two sessions runs (none is fine: pre-emption may
     # come twice). -Merge merges both into -Name; without it the raw files stay.
+    # The stop without -Merge is the pre-emption path ("ide event") and must always
+    # work (review 3.6): xperf runs unchecked (it was checked when the trace
+    # started), and when xperf cannot run at all logman stops the sessions.
     param([Parameter(Mandatory)][string]$Xperf, [Parameter(Mandatory)][string]$Dir, [switch]$Merge, [string]$Name = 'trace.etl')
-    $running = ConvertFrom-IemLoggers -Text ((Invoke-IemXperf -Xperf $Xperf -Arguments @('-Loggers')) -join "`n")
-    $a = @()
-    if ($running -contains $script:KernelSession) { $a += '-stop' }
-    if ($running -contains $script:MarkerSession) { $a += @('-stop', $script:MarkerSession) }
-    if ($a.Count -eq 0) { return [pscustomobject]@{ stopped = @() } }
-    if ($Merge) { $a += @('-d', (Join-Path $Dir $Name)) }
-    [void](Invoke-IemXperf -Xperf $Xperf -Arguments $a)
-    [pscustomobject]@{ stopped = @($running | Where-Object { @($script:KernelSession, $script:MarkerSession) -contains $_ }) }
+    try {
+        $running = ConvertFrom-IemLoggers -Text ((Invoke-XperfRun -Xperf $Xperf -Arguments @('-Loggers') -Verify:$Merge) -join "`n")
+        $a = @()
+        if ($running -contains $script:KernelSession) { $a += '-stop' }
+        if ($running -contains $script:MarkerSession) { $a += @('-stop', $script:MarkerSession) }
+        if ($a.Count -eq 0) { return [pscustomobject]@{ stopped = @(); via = 'xperf' } }
+        if ($Merge) { $a += @('-d', (Join-Path $Dir $Name)) }
+        [void](Invoke-XperfRun -Xperf $Xperf -Arguments $a -Verify:$Merge)
+        return [pscustomobject]@{ stopped = @($running | Where-Object { @($script:KernelSession, $script:MarkerSession) -contains $_ }); via = 'xperf' }
+    } catch {
+        if ($Merge) { throw }
+        $why = "$_"
+        $stopped = Stop-IemTraceSessionsByLogman
+        return [pscustomobject]@{ stopped = $stopped; via = 'logman'; xperf_error = $why }
+    }
+}
+
+function Stop-IemTraceSessionsByLogman {
+    # The pre-emption stop without xperf: logman stops each of the two trace
+    # sessions that runs (an ETW session stop, graceful like xperf -stop) and
+    # returns their names; a session it cannot stop throws (review 3.6).
+    $q = Invoke-IemNative -FilePath 'logman.exe' -Arguments @('query', '-ets')
+    if ($q.code -ne 0) { throw "logman query -ets (exit $($q.code)): $($q.out -join ' ')" }
+    $stopped = @()
+    foreach ($s in @($script:KernelSession, $script:MarkerSession)) {
+        if (-not @(@($q.out) | Where-Object { $_ -match ('^\s*' + [regex]::Escape($s) + '\s') })) { continue }
+        $r = Invoke-IemNative -FilePath 'logman.exe' -Arguments @('stop', $s, '-ets')
+        if ($r.code -ne 0) { throw "logman stop $s (exit $($r.code)): $($r.out -join ' ')" }
+        $stopped += $s
+    }
+    return ,$stopped
 }
 
 function Invoke-IemDpcIsr {
