@@ -319,8 +319,9 @@ mod tests {
     fn the_bytes_are_installed_byte_for_byte() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("site.toml");
-        // Non-UTF-8 bytes with NULs, CRLF and high bytes: the write is verbatim,
-        // never re-encoded or newline-normalised (a fresh deploy copies source).
+        // Non-UTF-8 bytes with NULs, CRLF and high bytes prove write_atomic
+        // copies its input verbatim, never re-encoded or newline-normalised
+        // (the mechanism a fresh install-site deploy relies on to copy source).
         let bytes = b"\x00\xff\x01[engine]\r\nchannels = 160\n\xfe\x80";
         write_atomic(&path, bytes).unwrap();
         assert_eq!(fs::read(&path).unwrap(), bytes);
@@ -335,7 +336,8 @@ mod tests {
         write_atomic(&path, bytes).unwrap();
         let first = fs::read(&path).unwrap();
         // gen2 replaces the whole file (no per-key merge), so installing the
-        // same site again is a no-op in effect: byte-identical, no temp left.
+        // same site again is a no-op for the file's bytes: byte-identical, no
+        // temp left (install-site still re-enters dev; that is out of scope here).
         write_atomic(&path, bytes).unwrap();
         assert_eq!(fs::read(&path).unwrap(), first);
         assert_eq!(fs::read(&path).unwrap(), bytes);
