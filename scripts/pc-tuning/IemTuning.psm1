@@ -326,6 +326,7 @@ function Get-IemValue {
             return [string]$v
         }
         'plan-active' { return [IemPower]::Active() }
+        'skip' { return [string]$a.reason }   # a lever the profile names but the device state excludes
         'defender-path' { if ((Get-IemDefenderList -Name 'ExclusionPath') -contains $a.value) { return 'present' }; return $null }
         'defender-process' { if ((Get-IemDefenderList -Name 'ExclusionProcess') -contains $a.value) { return 'present' }; return $null }
         'cpusets' {
@@ -376,6 +377,7 @@ function Set-IemValue {
             [IemPower]::Write($a.guid, $a.sub, $a.setting, [uint32]$Value)
         }
         'plan-active' { [IemPower]::Activate([string]$Value) }
+        'skip' { throw "$($Item.key): a skipped lever is never written" }
         'defender-path' { if ($Value -eq 'present') { Add-MpPreference -ExclusionPath $a.value } else { Remove-MpPreference -ExclusionPath $a.value } }
         'defender-process' { if ($Value -eq 'present') { Add-MpPreference -ExclusionProcess $a.value } else { Remove-MpPreference -ExclusionProcess $a.value } }
         'cpusets' {
@@ -460,6 +462,7 @@ function Invoke-IemItem {
     param([Parameter(Mandatory)]$Item, [Parameter(Mandatory)][hashtable]$Journal, [Parameter(Mandatory)][string]$Section,
           [Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Boot)
     $row = [ordered]@{ key = $Item.key; tier = $Item.tier; group = $Item.group; action = ''; before = $null; value = $null; error = $null }
+    if ($Item.kind -eq 'skip') { $row.action = 'skipped'; $row.value = $Item.desired; return [pscustomobject]$row }
     try {
         $before = Get-IemValue -Item $Item
         $row.before = $before
@@ -589,7 +592,16 @@ function Get-IemGlobalItems {
             $wanted = (@($Only) -contains "irq:$($d.id)") -or ([bool]$d.enabled -and (Select-IemGroup $Only 'irq'))
             if (-not $wanted) { continue }
             if ($Check) { Assert-IemDevice -Profile $Profile -Device $d }
-            $key = Get-IemRegPath $Profile "HKLM:\SYSTEM\CurrentControlSet\Enum\$($d.instance)\Device Parameters\Interrupt Management\Affinity Policy"
+            $im = "HKLM:\SYSTEM\CurrentControlSet\Enum\$($d.instance)\Device Parameters\Interrupt Management"
+            $msi = Get-IemRegRaw -Path (Get-IemRegPath $Profile "$im\MessageSignaledInterruptProperties") -Name 'MSISupported'
+            if (-not ($msi.kind -eq 'DWord' -and $msi.data -eq '1')) {
+                # The affinity applies only while the device already uses MSI (design
+                # note 6.4 R1); enabling MSI is the owner's Tier 4 decision X3 (A7).
+                $why = "skipped: $($d.id) uses line-based interrupts (MSISupported is not 1)"
+                $items += New-IemItem -Key "irq:$($d.id)" -Kind 'skip' -Arguments @{ reason = $why } -Desired $why -Tier 3 -Group "irq:$($d.id)"
+                continue
+            }
+            $key = Get-IemRegPath $Profile "$im\Affinity Policy"
             $items += New-IemItem -Key "irq:$($d.id):policy" -Kind 'reg' -Arguments @{ path = $key; name = 'DevicePolicy'; type = 'DWord' } -Desired 4 -Tier 3 -Group "irq:$($d.id)" -Reboot
             $items += New-IemItem -Key "irq:$($d.id):mask" -Kind 'reg' -Arguments @{ path = $key; name = 'AssignmentSetOverride'; type = 'QWord' } -Desired (ConvertTo-IemMask @($d.lps)) -Tier 3 -Group "irq:$($d.id)" -Reboot
         }
