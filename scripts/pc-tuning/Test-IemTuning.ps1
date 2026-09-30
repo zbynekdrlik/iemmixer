@@ -271,6 +271,15 @@ try {
     Assert ($xo -match 'out-line' -and $xo -match 'err-line') 'xperf-stderr-with-exit-0-is-not-an-error'
     [IO.File]::WriteAllText($fx, "@echo off`r`necho bad-line 1>&2`r`nexit /b 3`r`n")
     Throws { Invoke-IemXperf -Xperf $fx -Arguments @('-Loggers') } 'xperf-a-nonzero-exit-throws'
+    # An existing xperf counts as installed only when Microsoft signed it and its
+    # version is new enough (A12); PING.EXE stands in for a signed binary.
+    $fakeX = Join-Path $dir 'xperf.exe'
+    [IO.File]::WriteAllText($fakeX, 'not a signed binary')
+    $noSetup = Join-Path $dir 'no-adksetup.exe'
+    Throws { Install-IemWpt -Setup $noSetup -Xperf $fakeX } 'wpt-refuses-an-unsigned-xperf'
+    $wo = Install-IemWpt -Setup $noSetup -Xperf $ping
+    Assert ($wo.installed -eq 'already' -and "$($wo.version)" -like '10.*') 'wpt-accepts-a-microsoft-signed-binary'
+    Throws { Install-IemWpt -Setup $noSetup -Xperf $ping -MinVersion '99.0' } 'wpt-refuses-an-older-version'
     $c = Get-IemCpuSample
     Assert ($c.cpus.Count -ge 1 -and $c.cpus[0].t100ns -gt 0) 'cpu-sample-reads-raw-counters'
     $ps = Get-IemPollSample -ProfilePath $pp
