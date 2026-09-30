@@ -546,6 +546,13 @@ function ConvertTo-IemMask {
     return $m
 }
 
+function ConvertTo-IemKaffinity {
+    # A mask as the REG_BINARY KAFFINITY the Interrupt Affinity page describes
+    # (design ref [11]): 8 bytes, little endian, as hex (M3).
+    param([Parameter(Mandatory)][long]$Mask)
+    return (@(for ($i = 0; $i -lt 8; $i++) { (($Mask -shr (8 * $i)) -band 0xFF).ToString('x2') }) -join '')
+}
+
 function Assert-IemDevice {
     param([Parameter(Mandatory)]$Profile, [Parameter(Mandatory)]$Device)
     $key = Get-IemRegPath $Profile "HKLM:\SYSTEM\CurrentControlSet\Enum\$($Device.instance)"
@@ -649,7 +656,9 @@ function Get-IemGlobalItems {
             }
             $key = Get-IemRegPath $Profile "$im\Affinity Policy"
             $items += New-IemItem -Key "irq:$($d.id):policy" -Kind 'reg' -Arguments @{ path = $key; name = 'DevicePolicy'; type = 'DWord' } -Desired 4 -Tier 3 -Group "irq:$($d.id)" -Reboot
-            $items += New-IemItem -Key "irq:$($d.id):mask" -Kind 'reg' -Arguments @{ path = $key; name = 'AssignmentSetOverride'; type = 'QWord' } -Desired (ConvertTo-IemMask @($d.lps)) -Tier 3 -Group "irq:$($d.id)" -Reboot
+            # REG_BINARY, the KAFFINITY's canonical form (M3); read back byte for byte.
+            $items += New-IemItem -Key "irq:$($d.id):mask" -Kind 'reg' -Arguments @{ path = $key; name = 'AssignmentSetOverride'; type = 'Binary' } `
+                -Desired (ConvertTo-IemKaffinity -Mask (ConvertTo-IemMask @($d.lps))) -Tier 3 -Group "irq:$($d.id)" -Reboot
         }
         if (Select-IemGroup $Only 'nic') {
             $nk = Get-IemNicKey -Profile $Profile -Check:$Check
