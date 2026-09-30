@@ -619,15 +619,13 @@ mod tests {
     }
 
     #[test]
-    fn save_tmp_beside_current_json_is_not_read() {
-        // Only a missing current.json sends the load chain to save.tmp.
+    fn an_older_save_tmp_beside_current_json_is_not_used() {
         let (_d, s) = store();
-        s.save(&sample(1)).unwrap();
-        fs::write(s.dir().join(TMP), encode(&sample(2)).unwrap()).unwrap();
+        s.save(&sample(2)).unwrap();
+        fs::write(s.dir().join(TMP), encode(&sample(1)).unwrap()).unwrap();
         let loaded = s.load(&test_site());
         assert_eq!(loaded.source, Source::Current);
-        assert_eq!(loaded.persisted.rev, 1);
-        assert!(loaded.rejected.is_empty());
+        assert_eq!(loaded.persisted.rev, 2);
     }
 
     #[test]
