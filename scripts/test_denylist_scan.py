@@ -600,6 +600,37 @@ class DenylistScanTests(unittest.TestCase):
         allow.write_text(out.getvalue().strip() + "  reviewed ordinary prose\n", encoding="utf-8")
         self.assertEqual(self.scan("--allow", str(allow), "--tree", "HEAD", "--commits", "HEAD")[0], 0)
 
+    # --- #32 E4: the identity check reads author and committer as separate fields ---
+
+    def commit_as(self, author_email: str, committer_email: str) -> None:
+        env = {**os.environ, "GIT_AUTHOR_EMAIL": author_email, "GIT_COMMITTER_EMAIL": committer_email}
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-q", "--allow-empty", "-m", "identity"],
+                       check=True, capture_output=True, env=env)
+
+    def test_a_line_separator_in_the_author_email_cannot_push_out_the_committer(self) -> None:
+        # `%ae%n%ce` split with str.splitlines() broke the author email at U+2028 into two allowed
+        # halves, and the committer email fell off the end unchecked
+        ids = self.tmp / "ids.txt"
+        ids.write_text("test@example.org\n", encoding="utf-8")
+        self.commit_as("test@example.org\u2028test@example.org", "outsider@example.net")
+        code, out = self.scan("--identities", str(ids), "--commits", "HEAD")
+        self.assertEqual(code, 1)
+        self.assertIn("author email is not an allowed identity", out)
+        self.assertIn("committer email is not an allowed identity", out)
+        self.assertNotIn("outsider", out)
+
+    def test_an_email_holding_a_line_separator_is_never_allowed(self) -> None:
+        ids = self.tmp / "ids.txt"
+        ids.write_text("test@example.org\n", encoding="utf-8")
+        # (git itself strips a trailing ASCII control such as VT from an email; these it keeps)
+        for separator in ("\u2028", "\u2029", "\x85"):
+            with self.subTest(separator=hex(ord(separator))):
+                self.commit_as(f"test@example.org{separator}", "test@example.org")
+                code, out = self.scan("--identities", str(ids), "--commits", "-1 HEAD")
+                self.assertEqual(code, 1)
+                self.assertIn("author email is not an allowed identity", out)
+                self.assertNotIn("committer email", out)
+
 
 if __name__ == "__main__":
     unittest.main()
