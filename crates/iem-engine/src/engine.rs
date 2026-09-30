@@ -489,6 +489,11 @@ pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
             detail: "no usable state: every output is muted".into(),
         }),
     }
+    // #32: why the state loaded may be older than one the directory holds.
+    alarms.extend(loaded.alarms.iter().map(|detail| Alarm {
+        code: AlarmCode::StateFallback,
+        detail: detail.clone(),
+    }));
     // #32: the directory holds what was loaded before the engine runs.
     let recovery = store.recover(&loaded);
     if let Some(to) = &recovery.quarantined {

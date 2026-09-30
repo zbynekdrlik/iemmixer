@@ -159,6 +159,10 @@ impl Files for Faulty {
         self.step("sync_dir", dir)?;
         OsFiles.sync_dir(dir)
     }
+
+    fn pause(&self) {
+        self.state.lock().unwrap().pauses += 1;
+    }
 }
 
 /// A store in a fresh directory whose file operations `Faulty` controls.

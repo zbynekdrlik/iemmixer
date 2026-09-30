@@ -19,6 +19,10 @@ use super::*;
 /// `current.json.damaged-1` up to this.
 const QUARANTINE_NAMES: u32 = 1000;
 
+/// Reads of a file that fail with an I/O error, the file pausing between
+/// them, before it counts as unreadable (#32 P2).
+const READ_TRIES: usize = 5;
+
 impl Store {
     /// The live state the seed must keep, if any: the file the load chain
     /// would use among `current.json`, `save.tmp` and the generations (a
@@ -101,6 +105,7 @@ impl Store {
         }
         // current.json missing or damaged (#32 m1): save.tmp against the
         // newest valid generation.
+        let mut unlisted = None;
         let gens = match self.generations() {
             Ok(gens) => gens,
             Err(e) if reading == Reading::Strict => return Err(e),
@@ -109,6 +114,7 @@ impl Store {
                     self.dir.clone(),
                     format!("the generations cannot be listed: {e}"),
                 ));
+                unlisted = Some(e);
                 Vec::new()
             }
         };
@@ -130,7 +136,16 @@ impl Store {
                 ));
                 Some((generation, Source::Generation(seq)))
             }
-            (Read::Valid(tmp), _) => Some((tmp, Source::Interrupted)),
+            (Read::Valid(tmp), _) => {
+                // #32 P8: compared with nothing when the listing failed.
+                if let Some(e) = unlisted {
+                    pick.alarms.push(format!(
+                        "save.tmp is loaded without comparing it with the \
+                         generations, which cannot be listed ({e})"
+                    ));
+                }
+                Some((tmp, Source::Interrupted))
+            }
             (_, Some((generation, seq))) => Some((generation, Source::Generation(seq))),
             (_, None) => None,
         })
@@ -170,10 +185,7 @@ impl Store {
     pub fn recover(&self, loaded: &Loaded) -> Recovery {
         let mut done = Recovery::default();
         let current = self.dir.join(CURRENT);
-        if matches!(
-            loaded.current_json,
-            FileState::Damaged | FileState::Unreadable
-        ) {
+        if loaded.current_json == FileState::Damaged {
             match self.quarantine(&current) {
                 Ok(aside) => done.quarantined = Some(aside),
                 Err(e) => done.failed.push(format!(
@@ -181,7 +193,14 @@ impl Store {
                 )),
             }
         }
-        if loaded.source == Source::Interrupted {
+        if loaded.source == Source::Interrupted && loaded.current_json == FileState::Unreadable {
+            // #32 P2: recovery never moves an unreadable file; the runtime's
+            // next save replaces save.tmp whole and rotates it then.
+            done.warnings.push(format!(
+                "the interrupted save stays in {TMP}: {CURRENT} cannot be read, \
+                 and recovery never moves it"
+            ));
+        } else if loaded.source == Source::Interrupted {
             match self.finish_interrupted() {
                 Ok(committed) => {
                     done.finished = true;
@@ -197,6 +216,24 @@ impl Store {
             }
         }
         done
+    }
+
+    /// The file's bytes (`None`: it does not exist). An I/O error is tried
+    /// again, `READ_TRIES` times in all with a pause between (a sharing
+    /// violation, a transient EIO), then it is the error (#32 P2).
+    fn read_tried(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
+        let mut last = None;
+        for attempt in 0..READ_TRIES {
+            if attempt > 0 {
+                self.files.pause();
+            }
+            match self.files.read(path) {
+                Ok(bytes) => return Ok(Some(bytes)),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+                Err(e) => last = Some(e),
+            }
+        }
+        Err(last.unwrap_or_else(|| io::Error::other("no read was tried")))
     }
 
     fn quarantine(&self, current: &Path) -> io::Result<PathBuf> {
@@ -222,11 +259,15 @@ impl Store {
     /// `rejected` with the reason; one that cannot be read too when
     /// `Tolerant`, and is the error when `Strict`.
     fn read_state(&self, path: &Path, pick: &mut Pick, reading: Reading) -> io::Result<Read> {
-        let bytes = match self.files.read(path) {
-            Ok(b) => b,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Read::Missing),
+        let bytes = match self.read_tried(path) {
+            Ok(Some(b)) => b,
+            Ok(None) => return Ok(Read::Missing),
             Err(e) if reading == Reading::Strict => return Err(e),
             Err(e) => {
+                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                pick.alarms.push(format!(
+                    "{name} cannot be read ({e}): the state loaded may be older"
+                ));
                 pick.rejected.push((path.to_path_buf(), e.to_string()));
                 return Ok(Read::Unreadable);
             }

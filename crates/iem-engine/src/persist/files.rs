@@ -7,6 +7,10 @@ use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+/// The pause between two tries of a read that failed with an I/O error.
+const READ_PAUSE: Duration = Duration::from_millis(200);
 
 /// A directory's entries (name, path), each or the error reading it.
 pub(crate) type Entries = Vec<io::Result<(OsString, PathBuf)>>;
@@ -24,6 +28,8 @@ pub(crate) trait Files: fmt::Debug + Send + Sync {
     fn list(&self, dir: &Path) -> io::Result<Entries>;
     /// Flushes the directory's entries (the renames) to the disk.
     fn sync_dir(&self, dir: &Path) -> io::Result<()>;
+    /// Waits before a read that failed is tried again.
+    fn pause(&self);
 }
 
 /// The file system itself.
@@ -72,5 +78,9 @@ impl Files for OsFiles {
     #[cfg(not(unix))]
     fn sync_dir(&self, _dir: &Path) -> io::Result<()> {
         Ok(())
+    }
+
+    fn pause(&self) {
+        std::thread::sleep(READ_PAUSE);
     }
 }
