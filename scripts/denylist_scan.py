@@ -44,15 +44,13 @@ in `.` such as `10.0.` hits `10.0.0.5`.
 from __future__ import annotations
 
 import argparse
-import bisect
 import hashlib
 import re
 import shlex
 import subprocess
 import sys
 import unicodedata
-from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Generator, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -69,14 +67,23 @@ FALLBACK_CODECS = ("cp1250", "latin-1")
 # when the run is LONG_TEXT_RUN or more bytes of valid UTF-8 -- text, which random bytes never form.
 MIN_BINARY_TERM = 5
 LONG_TEXT_RUN = 32
-# a text run of binary content: no control character but tab, so UTF-8 / cp1250 letters stay in it
-_BYTE_RUN = re.compile(rb"[\t\x20-\x7e\x80-\xff]+")
+# Content is scanned in batches of about CHUNK bytes, joined by SEP -- a private-use, non-word
+# character that no form creates or removes -- so CPU and memory stay bounded (#32 review m7).
+CHUNK = 1 << 18
+SEP = ""
+# a control byte ends a text run of binary content (a tab does not)
+_CONTROLS = bytes([*range(0x09), *range(0x0A, 0x20), 0x7F])
+_CONTROL = re.compile(b"[" + re.escape(_CONTROLS) + b"]")
+_CONTROL_TO_NUL = bytes.maketrans(_CONTROLS, bytes(len(_CONTROLS)))
+# a run shorter than MIN_BINARY_TERM after its NUL (a leading literal, so the regex engine skips
+# from NUL to NUL); the NUL that ends it is left for the next match
+_SHORT_RUN = re.compile(rb"\x00[^\x00]{1,%d}(?=\x00)" % (MIN_BINARY_TERM - 1))
+_NUL_RUN = re.compile(rb"\x00{2,}")
 # a UTF-16 string inside binary content (Windows wide strings: an .etl trace, a .lnk, PE resources):
 # a Latin character is its low byte next to a 0x00 (U+0000-00FF) or 0x01 (U+0100-017F) high byte
-_UTF16_RUNS = (
-    ("utf-16-le", re.compile(rb"(?:[\t\x20-\x7e\xa0-\xff]\x00|[\x00-\xff]\x01){2,}")),
-    ("utf-16-be", re.compile(rb"(?:\x00[\t\x20-\x7e\xa0-\xff]|\x01[\x00-\xff]){2,}")),
-)
+# (big-endian; a little-endian run is this pattern's match in the reversed bytes -- a leading 0x00 or
+# 0x01 lets the regex engine skip ahead, which the low byte first would not)
+_UTF16_RUN = re.compile(rb"(?:\x00[\t\x20-\x7e\xa0-\xff]|\x01[\x00-\xff]){2,}")
 GITLINK = b"160000"  # a submodule entry: its object is a commit, not a blob
 # a commit's metadata (`git show -s`), pinned against local config: --encoding=UTF-8 beats
 # i18n.logOutputEncoding (UTF-16 puts a NUL in every character, ISO-8859-2 re-encodes letters that
@@ -156,7 +163,7 @@ def load_allow(path: Path | None) -> set[str]:
 
 def nfc(text: str) -> str:
     """One form for letters with diacritics, so a decomposed `á` cannot hide a term."""
-    return unicodedata.normalize("NFC", text)
+    return text if unicodedata.is_normalized("NFC", text) else unicodedata.normalize("NFC", text)
 
 
 def printable(text: str) -> str:
@@ -169,7 +176,7 @@ def printable(text: str) -> str:
 def decode(data: bytes) -> str:
     """UTF-8, lossless: a byte that is not valid UTF-8 becomes a lone surrogate U+DC80-DCFF
     (surrogateescape), so a path or a line keeps its exact bytes -- for its allow key, for the
-    cp1250 / Latin-1 re-reading in forms(), and to redact an undecodable path component."""
+    cp1250 / Latin-1 re-reading in Views, and to redact an undecodable path component."""
     return data.decode("utf-8", errors="surrogateescape")
 
 
@@ -207,7 +214,7 @@ _LETTER_ESCAPES = {"a": 7, "b": 8, "f": 12, "n": 10, "r": 13, "t": 9, "v": 11, "
 
 def _escaped_char(match: re.Match[str]) -> str:
     value = int(match.group(1) or match.group(2), 16)
-    return chr(value) if value <= 0x10FFFF else match.group()
+    return match.group() if value > 0x10FFFF else "\ufffd" if value == ord(SEP) else chr(value)
 
 
 def _escaped_bytes(match: re.Match[str]) -> str:
@@ -220,14 +227,14 @@ def _escaped_bytes(match: re.Match[str]) -> str:
             out.append(int(octal, 8) & 0xFF)
         else:
             out.append(_LETTER_ESCAPES[letter])
-    return decode(bytes(out))
+    return decode(bytes(out)).replace(SEP, "\ufffd")  # an escape never makes a batch separator
 
 
 def unescape(text: str) -> str:
     """The text with its escapes decoded: `\\uXXXX` / `\\u{X}` (a UTF-16 surrogate pair joined), and
     each run of byte escapes (C / Rust / Python `\\xNN`, octal, `\\0`, the letter escapes, percent-
     encoding) as the bytes it stands for, decoded like raw bytes -- undecodable ones stay lone
-    surrogates that forms() re-reads as cp1250 / Latin-1."""
+    surrogates that Views re-reads as cp1250 / Latin-1."""
     if "\\u" in text:
         text = _UNICODE_ESCAPE.sub(_escaped_char, text)
         text = _SURROGATE_PAIR.sub(
@@ -244,56 +251,128 @@ def cp1250_from_git_latin1(text: str) -> str:
     return text.translate(_GIT_LATIN1_AS_CP1250)
 
 
-def forms(text: str) -> tuple[str, ...]:
-    """Every reading of a decoded text that is matched against the terms, NFC-normalized: the text
-    and the text with its escapes decoded (unescape), each also with its undecodable bytes re-read
-    as cp1250 and Latin-1."""
-    bases = [text]
-    decoded = unescape(text)
-    if decoded != text:
-        bases.append(decoded)
-    found: list[str] = []
-    for base in bases:
-        readings = [base] + ([reread(base, codec) for codec in FALLBACK_CODECS] if undecodable(base) else [])
-        for reading in readings:
-            form = nfc(reading)
-            if form not in found:
-                found.append(form)
-    return tuple(found)
+# re.IGNORECASE matches an ASCII letter against these non-ASCII characters too (checked against every
+# code point): İ and ı against i, ſ against s, the Kelvin sign against k
+_FOLD = (("İ", "i"), ("ı", "i"), ("ſ", "s"), ("K", "k"))
+_ASCII_WORD = re.compile("[a-z0-9]{2,}")
+
+
+def fold(text: str) -> str:
+    """The text case-folded so that `fold(term) in fold(text)` holds wherever re.IGNORECASE finds an
+    ASCII term (a C-level pre-filter, far faster than the regex)."""
+    for char, ascii_char in _FOLD:
+        text = text.replace(char, ascii_char)
+    return text.lower()
+
+
+class Views:
+    """The readings of a decoded text that the terms are matched against, each made on first need.
+
+    The text and the text with its escapes decoded (unescape) serve an ASCII term as they are: a
+    re-reading only turns lone surrogates -- non-word characters -- into letters or symbols, and NFC
+    only composes a letter with a following mark, so neither can add an ASCII term's match. Their
+    case folds pre-filter every term. A term with a non-ASCII character is matched in the NFC forms
+    of both and of their re-readings as cp1250 / Latin-1 (undecodable bytes only) -- made only when
+    the term's longest ASCII word occurs in a fold, since those readings keep every ASCII character."""
+
+    def __init__(self, text: str) -> None:
+        decoded = unescape(text)
+        self.raw = [text] if decoded == text else [text, decoded]
+        self.folded = [fold(view) for view in self.raw]
+        self._normal: list[str] | None = None
+
+    def normal(self) -> list[str]:
+        if self._normal is None:
+            found: list[str] = []
+            for base in self.raw:
+                readings = [base] + ([reread(base, codec) for codec in FALLBACK_CODECS] if undecodable(base) else [])
+                for reading in readings:
+                    form = nfc(reading)
+                    if form not in found:
+                        found.append(form)
+            self._normal = found
+        return self._normal
+
+    def for_term(self, term: Term) -> list[str]:
+        if term.ascii:
+            return [view for view, folded in zip(self.raw, self.folded, strict=True) if term.folded in folded]
+        if term.folded and not any(term.folded in folded for folded in self.folded):
+            return []
+        return self.normal()
+
+
+@dataclass(frozen=True)
+class Term:
+    entry: int
+    literal: re.Pattern[str]  # the bare term, same flags: searched ~15x faster than with lookarounds
+    pattern: re.Pattern[str]  # the term with its word boundaries, tried at each literal hit
+    short: bool               # under MIN_BINARY_TERM characters (see LONG_TEXT_RUN)
+    ascii: bool
+    folded: str               # an ASCII term folded; else its longest folded ASCII word, or ""
+
+    @classmethod
+    def of(cls, entry: int, term: str) -> Term:
+        term = nfc(term)
+        folded = fold(term) if term.isascii() else max(_ASCII_WORD.findall(fold(term)), key=len, default="")
+        return cls(entry, re.compile(re.escape(term), re.IGNORECASE), compile_term(term),
+                   len(term) < MIN_BINARY_TERM, term.isascii(), folded)
+
+    def starts(self, view: str) -> Iterator[int]:
+        """Every position the term matches at, overlapping occurrences included."""
+        found = self.literal.search(view)
+        while found:
+            if self.pattern.match(view, found.start()):
+                yield found.start()
+            found = self.literal.search(view, found.start() + 1)
 
 
 class Scanner:
     def __init__(self, terms: list[str], allow: set[str]) -> None:
-        self.patterns = [compile_term(nfc(term)) for term in terms]
-        # the bare term, same flags: a necessary condition for a match that the regex engine
-        # searches ~15x faster than the boundary lookarounds, so a clean text costs one fast pass
-        self.literals = [re.compile(re.escape(nfc(term)), re.IGNORECASE) for term in terms]
-        # a short term counts in a binary text run only when the run is long text (MIN_BINARY_TERM)
-        self.short = [len(nfc(term)) < MIN_BINARY_TERM for term in terms]
+        self.terms = [Term.of(entry, term) for entry, term in enumerate(terms, start=1)]
         self.allow = allow
 
     def entries_in(self, text: str) -> list[int]:
-        """The entries found in any of the text's forms (other encodings, escapes decoded)."""
-        readings = forms(text)
-        return [number for number, (literal, pattern) in enumerate(zip(self.literals, self.patterns), start=1)
-                if any(literal.search(form) and pattern.search(form) for form in readings)]
+        """The entries found in any reading of the text (other encodings, escapes decoded)."""
+        views = Views(text)
+        return [term.entry for term in self.terms
+                if any(next(term.starts(view), None) is not None for view in views.for_term(term))]
 
-    def unit_hits(self, path: str, units: Sequence[Unit]) -> list[tuple[int, int]]:
-        """(unit index, entry number) of every term in a unit that is not allowlisted, sorted.
+    def batch_hits(self, batch: Batch) -> list[tuple[int, int]]:
+        """(unit position in the batch, entry number) of every term found in a batch, sorted.
 
-        Every form of every unit is joined into one text, `\\n`-separated (no term holds a `\\n`,
-        so no match spans two forms, and a `\\n` is a word boundary like the end of a form), so each
-        term is one regex pass over the content rather than one per unit -- a binary file has 10^5
-        runs. A short term is searched only in the units it applies to."""
-        every = Joined(units, short_terms_only=False)
-        # only binary content has units a short term does not apply to
-        some = Joined(units, short_terms_only=True) if not all(unit.short_terms for unit in units) else every
+        One search per term and reading over the whole batch -- a binary file has ~10^5 runs per
+        MiB -- with each match mapped to its unit by the SEPs before it (no term holds a SEP, so no
+        match spans two units, and a SEP is a word boundary like the end of a unit)."""
+        views = Views(batch.text())
+        per_view: dict[int, tuple[str, list[tuple[int, int]]]] = {}
+        for term in self.terms:
+            for view in views.for_term(term):
+                starts = [(start, term.entry) for start in term.starts(view)]
+                if starts:
+                    per_view.setdefault(id(view), (view, []))[1].extend(starts)
         found: set[tuple[int, int]] = set()
-        for entry, (literal, pattern, short) in enumerate(zip(self.literals, self.patterns, self.short), start=1):
-            view = some if short else every
-            if literal.search(view.text):
-                found.update((view.owner_of(match.start()), entry) for match in pattern.finditer(view.text))
-        return sorted(hit for hit in found if line_key(path, units[hit[0]].key) not in self.allow)
+        for view, starts in per_view.values():
+            unit = last = 0
+            for start, entry in sorted(starts):
+                unit += view.count(SEP, last, start)
+                last = start
+                found.add((unit, entry))
+        if batch.runs and found:  # a short term counts only in a long text run (MIN_BINARY_TERM)
+            keys = batch.keys()
+            found = {(unit, entry) for unit, entry in found
+                     if not self.terms[entry - 1].short or long_text_run(keys[unit])}
+        return sorted(found)
+
+    def findings(self, path: str, batches: Iterable[Batch]) -> list[tuple[str, str, int]]:
+        """(unit label, unit key, entry number) of every term found and not allowlisted."""
+        found: list[tuple[str, str, int]] = []
+        for batch in batches:
+            hits = self.batch_hits(batch)
+            if hits:
+                keys = batch.keys()
+                found += [(f"{batch.label}{batch.first + unit}", keys[unit], entry) for unit, entry in hits
+                          if line_key(path, keys[unit]) not in self.allow]
+        return found
 
     def shown(self, path: str) -> str:
         """The path as printed: each component holding a term (in any of its forms) or an
@@ -319,41 +398,92 @@ def git(repo: Path, *args: str) -> bytes:
 
 
 @dataclass(frozen=True)
-class Unit:
-    """One scanned piece of content: a line of text, or a text run of binary content."""
-    key: str                  # the text its allow key is made of
-    texts: tuple[str, ...]    # every form of it matched against the terms
-    short_terms: bool = True  # False: only terms of MIN_BINARY_TERM or more characters count
+class Batch:
+    """Consecutive units of one blob or diff -- lines of text, or text runs of binary content --
+    scanned together. A batch holds about CHUNK of content, so memory stays bounded whatever the
+    size of the blob."""
+    source: str             # the units, decoded (decode), separated by `sep`, which no unit holds
+    sep: str
+    first: int              # the number of its first unit (`--hash` numbers units the same way)
+    label: str = ""         # a unit's label in a location: "" (line N) or "run " (text run N)
+    runs: bool = False      # byte runs of binary content: a short term needs a long text run
+
+    def keys(self) -> list[str]:
+        """Each unit's text, which its allow key is made of."""
+        return self.source.split(self.sep)
+
+    def text(self) -> str:
+        """The units joined by SEP; a unit's own U+E000 is read as U+FFFD, also a non-word character."""
+        return self.source.replace(SEP, "�").replace(self.sep, SEP)
 
 
-class Joined:
-    """The forms of units joined into one `\\n`-separated text; an offset maps back to its unit."""
-
-    def __init__(self, units: Sequence[Unit], short_terms_only: bool) -> None:
-        self.owner: list[int] = []
-        self.start: list[int] = []
-        pieces: list[str] = []
-        offset = 0
-        for index, unit in enumerate(units):
-            if short_terms_only and not unit.short_terms:
-                continue
-            for text in unit.texts:
-                self.owner.append(index)
-                self.start.append(offset)
-                pieces.append(text)
-                offset += len(text) + 1
-        self.text = "\n".join(pieces)
-
-    def owner_of(self, offset: int) -> int:
-        return self.owner[bisect.bisect_right(self.start, offset) - 1]
+def long_text_run(key: str) -> bool:
+    return not undecodable(key) and len(key.encode("utf-8")) >= LONG_TEXT_RUN
 
 
-def text_unit(text: str, short_terms: bool = True) -> Unit:
-    return Unit(text, forms(text), short_terms)
+def line_batches(data: bytes | str, first: int = 1) -> Iterator[Batch]:
+    """The lines of text (split on `\\n` only), a piece of about CHUNK at a time."""
+    newline = b"\n" if isinstance(data, bytes) else "\n"
+    start = 0
+    while True:
+        end = data.find(newline, start + CHUNK)
+        piece = data[start:] if end < 0 else data[start:end]
+        source = decode(piece) if isinstance(piece, bytes) else piece
+        yield Batch(source, "\n", first)
+        if end < 0:
+            return
+        first += source.count("\n") + 1
+        start = end + 1
 
 
-def byte_unit(raw: bytes, short_terms: bool = True) -> Unit:
-    return text_unit(decode(raw), short_terms)
+def run_batches(data: bytes, first: int) -> Generator[Batch, None, int]:
+    """The byte runs of binary content -- bytes without control characters, so a UTF-8 / cp1250
+    letter stays in its run -- of MIN_BINARY_TERM or more bytes (a shorter one can never count: a
+    short term needs a LONG_TEXT_RUN), NUL-separated, a piece of about CHUNK at a time: a piece ends
+    at a control byte, which no run holds, and no Python object is made per run. Returns the number
+    the next unit gets."""
+    start = 0
+    while start < len(data):
+        cut = _CONTROL.search(data, start + CHUNK)
+        end = cut.end() if cut else len(data)
+        piece = _SHORT_RUN.sub(b"\x00", b"\x00" + data[start:end].translate(_CONTROL_TO_NUL) + b"\x00")
+        piece = _NUL_RUN.sub(b"\x00", piece).strip(b"\x00")
+        start = end
+        if piece:
+            yield Batch(decode(piece), "\x00", first, "run ", runs=True)
+            first += piece.count(b"\x00") + 1
+    return first
+
+
+def wide_run_batches(data: bytes, first: int) -> Iterator[Batch]:
+    """The UTF-16 strings inside binary content (few: random bytes rarely form one)."""
+    little = [run[::-1].decode("utf-16-le", errors="replace") for run in reversed(_UTF16_RUN.findall(data[::-1]))]
+    runs = little + [run.decode("utf-16-be", errors="replace") for run in _UTF16_RUN.findall(data)]
+    if runs:  # a decoded UTF-16 run holds no NUL: its characters are U+0009 and U+0020-01FF
+        yield Batch("\x00".join(runs), "\x00", first, "run ")
+
+
+def batches(data: bytes) -> Iterator[Batch]:
+    """What of a blob is scanned: text as its lines; UTF-16 text as its decoded lines; other content
+    holding a NUL byte (binary) as its text runs -- byte runs, then UTF-16 strings -- numbered on
+    after the lines, labelled `run N`."""
+    codec = utf16_codec(data)
+    if codec is not None:
+        yield from line_batches(data.decode(codec, errors="replace"))
+    elif b"\0" not in data:
+        yield from line_batches(data)
+    else:
+        first = yield from run_batches(data, 1)
+        yield from wide_run_batches(data, first)
+
+
+def unit_key(data: bytes, number: int) -> str:
+    """The key of unit `number` of a blob, numbered as the scan numbers it (`--hash`)."""
+    for batch in batches(data):
+        keys = batch.keys()
+        if number < batch.first + len(keys):
+            return keys[number - batch.first]
+    raise IndexError(f"the content has no unit {number}")
 
 
 def utf16_codec(data: bytes) -> str | None:
@@ -374,33 +504,6 @@ def utf16_codec(data: bytes) -> str | None:
 def is_plain_text(data: bytes) -> bool:
     """Content git's line diff shows faithfully: no NUL byte and not UTF-16."""
     return b"\0" not in data and utf16_codec(data) is None
-
-
-def content_units(data: bytes) -> tuple[str, list[Unit]]:
-    """What of a blob is scanned, and the label of a unit number in a tree location.
-
-    Text: its lines (split on `\\n` only). UTF-16 text: its decoded lines. Other content holding a
-    NUL byte (binary): its text runs -- byte runs without control characters, then UTF-16 strings
-    -- numbered `run N`; a byte run shorter than MIN_BINARY_TERM can never count (a short term
-    needs a LONG_TEXT_RUN), so it is not a unit. `--hash` numbers units the same way."""
-    codec = utf16_codec(data)
-    if codec is not None:
-        return "", [text_unit(line) for line in data.decode(codec, errors="replace").split("\n")]
-    if b"\0" not in data:
-        return "", [byte_unit(line) for line in data.split(b"\n")]
-    units = [byte_unit(run, short_terms=len(run) >= LONG_TEXT_RUN and is_utf8(run))
-             for run in _BYTE_RUN.findall(data) if len(run) >= MIN_BINARY_TERM]
-    for codec, pattern in _UTF16_RUNS:
-        units += [text_unit(run.decode(codec, errors="replace")) for run in pattern.findall(data)]
-    return "run ", units
-
-
-def is_utf8(data: bytes) -> bool:
-    try:
-        data.decode("utf-8")
-    except UnicodeDecodeError:
-        return False
-    return True
 
 
 _OCTAL = frozenset(b"01234567")
@@ -467,11 +570,10 @@ def scan_tree(scanner: Scanner, repo: Path, rev: str) -> list[Hit]:
         if kind != b"blob":
             continue
         # the blob's own bytes: cat-file applies no .gitattributes (binary, -diff, textconv)
-        label, units = content_units(git(repo, "cat-file", "blob", decode(obj)))
-        found = scanner.unit_hits(path, units)
+        found = scanner.findings(path, batches(git(repo, "cat-file", "blob", decode(obj))))
         if found:
             shown = scanner.shown(path)
-            hits += [Hit(f"tree {shown}:{label}{index + 1}", entry) for index, entry in found]
+            hits += [Hit(f"tree {shown}:{label}", entry) for label, _key, entry in found]
     return hits
 
 
@@ -489,16 +591,14 @@ def changed_blobs(repo: Path, sha: str) -> list[tuple[bytes, str, bytes, str, by
     return changes
 
 
-def added_units(old: list[Unit], new: list[Unit]) -> list[Unit]:
-    """The units of `new` that `old` does not have (a multiset difference by allow-key text)."""
-    before = Counter(unit.key for unit in old)
-    added = []
-    for unit in new:
-        if before[unit.key]:
-            before[unit.key] -= 1
-        else:
-            added.append(unit)
-    return added
+def not_in(found: list[tuple[str, str, int]], old: bytes) -> list[tuple[str, str, int]]:
+    """The findings whose unit the old blob does not have: only those are the commit's own. The old
+    blob is read a batch at a time, and only the found keys are looked up."""
+    wanted = {key for _label, key, _entry in found}
+    present: set[str] = set()
+    for batch in batches(old):
+        present |= wanted.intersection(batch.keys())
+    return [finding for finding in found if finding[1] not in present]
 
 
 def scan_commit_blobs(scanner: Scanner, repo: Path, sha: str, seen: set[str]) -> tuple[list[Hit], set[str]]:
@@ -523,13 +623,12 @@ def scan_commit_blobs(scanner: Scanner, repo: Path, sha: str, seen: set[str]) ->
         if is_plain_text(data):
             continue
         blob_paths.add(path)
-        before = []
-        if old.strip("0") and old_mode != GITLINK:  # not an added path, not a submodule
-            before = content_units(git(repo, "cat-file", "blob", old))[1]
-        added = added_units(before, content_units(data)[1])
-        for index, entry in scanner.unit_hits(path, added):
-            if (path, added[index].key, entry) not in reported:  # a merge repeats it per parent
-                reported.add((path, added[index].key, entry))
+        found = scanner.findings(path, batches(data))
+        if found and old.strip("0") and old_mode != GITLINK:  # not an added path, not a submodule
+            found = not_in(found, git(repo, "cat-file", "blob", old))
+        for _label, key, entry in found:
+            if (path, key, entry) not in reported:  # a merge repeats it per parent
+                reported.add((path, key, entry))
                 hits.append(Hit(f"{short} {scanner.shown(path)}", entry))
     return hits, blob_paths
 
@@ -555,7 +654,7 @@ def scan_commit_diff(scanner: Scanner, repo: Path, sha: str, seen: set[str], blo
                "--dst-prefix=b/", "--no-relative", "--diff-merges=first-parent", "--root",
                "--no-show-signature", sha)
     hits: list[Hit] = []
-    added: dict[str, list[Unit]] = {}
+    added: dict[str, list[bytes]] = {}
     # `+++`/`---` count as headers only before a file's first hunk; inside a hunk an added line
     # beginning with `++ ` renders as `+++ ...` and is content, not a new header path
     path, in_hunk = "", False
@@ -568,14 +667,15 @@ def scan_commit_diff(scanner: Scanner, repo: Path, sha: str, seen: set[str], blo
             in_hunk = True
         elif in_hunk and line.startswith(b"+"):
             if path not in blob_paths:
-                added.setdefault(path, []).append(byte_unit(line[1:]))
+                added.setdefault(path, []).append(line[1:])
         elif not in_hunk and line.startswith(b"+++ "):
             path = diff_path(decode(line[4:]))
             if path not in seen:  # a type change or a path diff-tree did not list
                 seen.add(path)
                 hits += scanner.scan_path(path, f"{short} ")
-    for path, units in added.items():
-        hits += [Hit(f"{short} {scanner.shown(path)}", entry) for _index, entry in scanner.unit_hits(path, units)]
+    for path, lines in added.items():
+        found = scanner.findings(path, line_batches(b"\n".join(lines)))
+        hits += [Hit(f"{short} {scanner.shown(path)}", entry) for _label, _key, entry in found]
     return hits
 
 
@@ -627,8 +727,7 @@ def main(argv: list[str] | None = None) -> int:
         # the units scan_tree numbers, from the file's bytes: read_text() would translate CR / CRLF
         # to \n and diverge the allow key from the scanner; a UTF-16 line or a binary run (`run N`)
         # is keyed exactly as the scanner keys it
-        units = content_units((args.repo / path).read_bytes())[1]
-        print(line_key(path, units[int(number) - 1].key))
+        print(line_key(path, unit_key((args.repo / path).read_bytes(), int(number))))
         return EXIT_CLEAN
     if args.denylist is None or not (args.tree or args.commits):
         parser.error("--denylist and at least one --tree or --commits are required")
