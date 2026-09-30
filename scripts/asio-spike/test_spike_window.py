@@ -367,6 +367,56 @@ class MainTests(unittest.TestCase):
         self.assertEqual(self.preempted, 0)
 
 
+class RunTests(unittest.TestCase):
+    """cmd_run end to end with the PC faked at the ssh seam (sw.ps, sw.scp)
+    and the real window state in a temp dir."""
+
+    def setUp(self) -> None:
+        self.dir = Path(tempfile.mkdtemp())
+        self.saved = (sw.STATE, sw.EVENT_NOW, sw.ps, sw.scp, sw.POLL_S)
+        sw.STATE, sw.EVENT_NOW, sw.POLL_S = self.dir / "spike-window.json", self.dir / "EVENT-NOW", 0
+        self.report: dict = {"outcome": "done", "segments": [{"telemetry": {"callbacks": 10, "missed": 0, "overruns": 0, "position_gaps": 0}}]}
+        self.exit = 0
+
+        def fake_ps(env, body, timeout=300, event="finish"):
+            if "Write-GoldenRequest" in body:
+                return "spike-1"
+            if ".progress.json" in body:
+                return {"status": {"state": "exited", "results": [{"exit": self.exit}]}, "progress": None}
+            raise AssertionError(f"unexpected PC call: {body}")
+
+        def fake_scp(src, dst):
+            Path(dst).write_text(json.dumps(self.report) if dst.endswith(".report.json") else "", encoding="utf-8")
+
+        sw.ps, sw.scp = fake_ps, fake_scp
+        self.env = {"PC_ROOT": "R", "PC_ROOT_SCP": "/R", "PC_SSH": "u@pc", "PC_ASIO_DRIVER": "D", "PC_ASIO_MODULE": "M",
+                    "PC_ACTIVITY_CHANNELS": "101-110", "RAW_DIR": str(self.dir / "raw")}
+        sw.save_state({"id": "w", "card": "free", "preflight": {"pref": 64}, "pref_original": 64, "pref_current": 32,
+                       "pref_restored": False, "runs": [], "closed": False})
+
+    def tearDown(self) -> None:
+        sw.STATE, sw.EVENT_NOW, sw.ps, sw.scp, sw.POLL_S = self.saved
+
+    def args(self, **kw):
+        base = {"mode": "duplex", "frames": 32, "seconds": 60, "burn_us": 0, "stress": 0, "panic_at": 0, "cycles": 1,
+                "cpu": None, "threshold_us": 10, "audio_cpus": "", "stress_cpus": ""}
+        return type("Args", (), dict(base, **kw))()
+
+    def test_a_done_outcome_is_a_result(self) -> None:
+        r = sw.cmd_run(self.env, self.args())
+        self.assertEqual((r["exit"], r["verdict"]["stable"]), (0, True))
+
+    def test_an_error_outcome_is_a_failed_step_not_a_result(self) -> None:
+        # The spike ends with outcome "error", exit 1 when it could not set up what
+        # was asked (a stress thread or the hwlat scanner not placed, #32): nothing
+        # it reports measured the requested setup.
+        self.report = {"outcome": "error", "error": "stress thread 1 not placed: synthetic", "segments": []}
+        self.exit = 1
+        with self.assertRaisesRegex(sw.StepError, "failed.*stress thread 1 not placed"):
+            sw.cmd_run(self.env, self.args(stress=2, audio_cpus="14", stress_cpus="0,1"))
+        self.assertEqual(sw.load_state()["runs"][-1]["verdict"]["outcome"], "error")   # recorded, not used
+
+
 class PreflightTests(unittest.TestCase):
     GOOD = {"pref": 64, "reaper": 1, "app": 1, "spike": 0, "holders": ["reaper.exe:6496"], "task": True, "files": 6}
 
