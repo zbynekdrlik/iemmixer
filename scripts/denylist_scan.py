@@ -265,12 +265,12 @@ class Scanner:
         so no match spans two forms, and a `\\n` is a word boundary like the end of a form), so each
         term is one regex pass over the content rather than one per unit -- a binary file has 10^5
         runs. A short term is searched only in the units it applies to."""
-        views: dict[bool, Joined] = {}
+        every = Joined(units, short_terms_only=False)
+        # only binary content has units a short term does not apply to
+        some = Joined(units, short_terms_only=True) if not all(unit.short_terms for unit in units) else every
         found: set[tuple[int, int]] = set()
         for entry, (literal, pattern, short) in enumerate(zip(self.literals, self.patterns, self.short), start=1):
-            if short not in views:
-                views[short] = Joined(units, short_terms_only=short)
-            view = views[short]
+            view = some if short else every
             if literal.search(view.text):
                 found.update((view.owner_of(match.start()), entry) for match in pattern.finditer(view.text))
         return sorted(hit for hit in found if line_key(path, units[hit[0]].key) not in self.allow)
@@ -312,7 +312,7 @@ class Joined:
     def __init__(self, units: Sequence[Unit], short_terms_only: bool) -> None:
         self.owner: list[int] = []
         self.start: list[int] = []
-        forms: list[str] = []
+        pieces: list[str] = []
         offset = 0
         for index, unit in enumerate(units):
             if short_terms_only and not unit.short_terms:
@@ -320,9 +320,9 @@ class Joined:
             for text in unit.texts:
                 self.owner.append(index)
                 self.start.append(offset)
-                forms.append(text)
+                pieces.append(text)
                 offset += len(text) + 1
-        self.text = "\n".join(forms)
+        self.text = "\n".join(pieces)
 
     def owner_of(self, offset: int) -> int:
         return self.owner[bisect.bisect_right(self.start, offset) - 1]
