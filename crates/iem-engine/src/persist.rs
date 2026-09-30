@@ -561,6 +561,16 @@ mod tests {
     }
 
     #[test]
+    fn a_boot_on_save_tmp_is_named_interrupted() {
+        // The first save, cut off before its rename: save.tmp is the only state.
+        let (_d, s) = store();
+        fs::write(s.dir().join(TMP), encode(&sample(4)).unwrap()).unwrap();
+        let loaded = s.load(&test_site());
+        assert_eq!(loaded.source, Source::Interrupted);
+        assert_eq!(loaded.persisted.rev, 4);
+    }
+
+    #[test]
     fn save_tmp_beside_current_json_is_not_read() {
         // Only a missing current.json sends the load chain to save.tmp.
         let (_d, s) = store();
