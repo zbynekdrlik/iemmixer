@@ -212,6 +212,26 @@ fn a_seed_refuses_a_state_dir_a_running_engine_holds() {
     refused_while_held(&["--seed-if-absent"]);
 }
 
+/// #32 minor-4: the data step runs right after the engine ended, whose
+/// lock may outlive it a moment (a lock's release can lag the process
+/// end). The import waits for it, as the engine does, instead of failing
+/// the dev entry.
+#[test]
+fn an_import_waits_a_moment_for_the_state_dir() {
+    let w = World::new(26);
+    let dir = w.path("state");
+    let held = Store::open(&dir).unwrap().lock().unwrap();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        drop(held);
+    });
+    let mut a = import_args(&w, &["--seed-if-absent"]);
+    a.extend(["--state-dir".into(), s(&dir)]);
+    let report = run(&a).unwrap();
+    release.join().unwrap();
+    assert!(report.contains("baseline.json, current.json"), "{report}");
+}
+
 /// #32 P4: a plain import replaces the live state, but an interrupted
 /// save (save.tmp, the newest live state) is finished first, so it is kept
 /// as a generation instead of being overwritten.
