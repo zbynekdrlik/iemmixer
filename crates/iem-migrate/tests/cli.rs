@@ -178,33 +178,38 @@ fn import_writes_current_and_baseline_with_the_program_counts() {
 
 /// #32: the data step runs only after iemmixer stopped, so an import on a
 /// state directory a running engine holds (`engine.lock`) is a bug to
-/// surface: it stops at once (exit 1) and writes nothing, the seed too.
-#[test]
-fn an_import_refuses_a_state_dir_a_running_engine_holds() {
+/// surface: it stops (exit 1) and writes nothing, the seed too.
+fn refused_while_held(extra: &[&str]) {
     let w = World::new(32);
     let dir = w.path("state");
     let held = Store::open(&dir).unwrap().lock().unwrap();
-    for extra in [&[][..], &["--seed-if-absent"][..]] {
-        let mut a = import_args(&w, extra);
-        a.extend(["--state-dir".into(), s(&dir)]);
-        let e = run(&a).unwrap_err();
-        assert_eq!(e.code, EXIT_IO, "{}", e.msg);
-        assert!(
-            e.msg
-                .contains("the state directory is in use by a running engine; stop it first"),
-            "{}",
-            e.msg
-        );
-        let names: Vec<String> = std::fs::read_dir(&dir)
-            .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(names, ["engine.lock"], "nothing written");
-    }
-    drop(held);
-    let mut a = import_args(&w, &[]);
+    let mut a = import_args(&w, extra);
     a.extend(["--state-dir".into(), s(&dir)]);
+    let e = run(&a).unwrap_err();
+    assert_eq!(e.code, EXIT_IO, "{}", e.msg);
+    assert!(
+        e.msg
+            .contains("the state directory is in use by a running engine; stop it first"),
+        "{}",
+        e.msg
+    );
+    let names: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["engine.lock"], "nothing written");
+    drop(held);
     run(&a).unwrap();
+}
+
+#[test]
+fn an_import_refuses_a_state_dir_a_running_engine_holds() {
+    refused_while_held(&[]);
+}
+
+#[test]
+fn a_seed_refuses_a_state_dir_a_running_engine_holds() {
+    refused_while_held(&["--seed-if-absent"]);
 }
 
 /// #32 P4: a plain import replaces the live state, but an interrupted
