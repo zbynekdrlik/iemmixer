@@ -1492,13 +1492,23 @@ mod tests {
     #[test]
     fn callback_cpus_and_thread_switches_are_counted() {
         let t = Telemetry::new(32, 96_000.0);
-        t.on_thread(14, 900);
-        t.on_thread(14, 900);
-        t.on_thread(3, 900);
-        t.on_thread(63, 900);
-        t.on_thread(64, 901);
+        let mut at = 1_000;
+        // As the host calls them: the thread first, then the callback's entry.
+        let mut callback = |cpu: u32, thread: u32| {
+            t.on_thread(cpu, thread);
+            t.on_callback(at, None);
+            at += P;
+        };
+        for _ in 0..WARMUP {
+            callback(14, 900);
+        }
+        callback(14, 900);
+        callback(14, 900);
+        callback(3, 900);
+        callback(63, 900);
+        callback(64, 901);
         let s = t.snapshot();
-        assert_eq!(s.callback_cpus, [(3, 1), (14, 2), (63, 1)]);
+        assert_eq!(s.callback_cpus, [(3, 1), (14, WARMUP + 2), (63, 1)]);
         assert_eq!(
             (s.cpu_other, s.callback_thread, s.thread_switches),
             (1, 900, 1)
