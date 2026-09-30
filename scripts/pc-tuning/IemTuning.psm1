@@ -539,13 +539,31 @@ function Assert-IemDevice {
 }
 
 function Get-IemNicKey {
-    param([Parameter(Mandatory)]$Profile)
-    if ($Profile.nic.PSObject.Properties['key']) { return Get-IemRegPath $Profile $Profile.nic.key }
-    $guid = "$((Get-NetAdapter -Name $Profile.nic.adapter).InterfaceGuid)"
-    foreach ($k in Get-ChildItem -LiteralPath $script:NetClass -ErrorAction SilentlyContinue) {
-        if ("$($k.GetValue('NetCfgInstanceId', ''))" -eq $guid) { return $k.PSPath }
+    # The NIC's driver key: nic.key (tests), else the Class key whose
+    # NetCfgInstanceId is the adapter's, both under registry_root. -Check (before
+    # any write) refuses unless the key's MatchingDeviceId, the hardware id its
+    # driver matched, starts with the profile's nic.hwid (design note 7, A8).
+    param([Parameter(Mandatory)]$Profile, [switch]$Check)
+    if ($Profile.nic.PSObject.Properties['key']) { $key = Get-IemRegPath $Profile $Profile.nic.key }
+    else {
+        $ad = @(Get-NetAdapter | Where-Object { $_.Name -eq $Profile.nic.adapter })
+        if ($ad.Count -ne 1) { throw "adapter '$($Profile.nic.adapter)': $($ad.Count) adapters have this name" }
+        $guid = "$($ad[0].InterfaceGuid)"
+        $key = $null
+        foreach ($k in @(Get-ChildItem -LiteralPath (Get-IemRegPath $Profile $script:NetClass) -ErrorAction SilentlyContinue)) {
+            if ("$($k.GetValue('NetCfgInstanceId', ''))" -eq $guid) { $key = $k.PSPath; break }
+        }
+        if ($null -eq $key) { throw "adapter '$($Profile.nic.adapter)': driver key not found" }
     }
-    throw "adapter '$($Profile.nic.adapter)': driver key not found"
+    if ($Check) {
+        if (-not (Test-Path -LiteralPath $key)) { throw "nic: driver key not found (profile stale?)" }
+        $matched = "$((Get-Item -LiteralPath $key).GetValue('MatchingDeviceId', ''))"
+        $hwid = $(if ($Profile.nic.PSObject.Properties['hwid']) { [string]$Profile.nic.hwid } else { '' })
+        if ([string]::IsNullOrEmpty($hwid) -or [string]::IsNullOrEmpty($matched) -or $matched -notlike "$hwid*") {
+            throw "nic: hardware id does not match the profile (nic.hwid)"
+        }
+    }
+    return $key
 }
 
 function Select-IemGroup {
@@ -606,7 +624,7 @@ function Get-IemGlobalItems {
             $items += New-IemItem -Key "irq:$($d.id):mask" -Kind 'reg' -Arguments @{ path = $key; name = 'AssignmentSetOverride'; type = 'QWord' } -Desired (ConvertTo-IemMask @($d.lps)) -Tier 3 -Group "irq:$($d.id)" -Reboot
         }
         if (Select-IemGroup $Only 'nic') {
-            $nk = Get-IemNicKey -Profile $Profile
+            $nk = Get-IemNicKey -Profile $Profile -Check:$Check
             foreach ($p in $Profile.nic.properties.PSObject.Properties) {
                 $items += New-IemItem -Key "nic:$($p.Name)" -Kind 'reg' -Arguments @{ path = $nk; name = $p.Name; type = 'String' } -Desired $p.Value -Tier 3 -Group 'nic' -Reboot
             }
