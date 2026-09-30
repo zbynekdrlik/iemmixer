@@ -68,6 +68,22 @@ $pp = New-TestProfile 'PCI\VEN_TEST&DEV_0001'
 $maint = "$root\HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\Maintenance"
 
 try {
+    # Journal file: a flushed temp file swapped in; a stop in between leaves the
+    # journal missing or empty next to a complete .tmp, which the read uses (A14).
+    $jp = Join-Path (Join-Path $dir 'journal-file') 'journal.json'
+    $jj = @{ schema = 1; version = 7; entered = $true; global = @{}; mode = @{}; reverted = @{}; order = @{ global = @(); mode = @() } }
+    Write-IemJournal -Path $jp -Journal $jj
+    Assert ((Read-IemJournal -Path $jp).version -eq 7 -and -not (Test-Path -LiteralPath "$jp.tmp")) 'journal-write-leaves-no-temp-file'
+    $jj.version = 8
+    Write-IemJournal -Path $jp -Journal $jj
+    Assert ((Read-IemJournal -Path $jp).version -eq 8) 'journal-write-replaces-the-journal'
+    Move-Item -LiteralPath $jp -Destination "$jp.tmp"
+    Assert ((Read-IemJournal -Path $jp).version -eq 8) 'journal-read-falls-back-to-a-complete-temp-file'
+    [IO.File]::WriteAllText($jp, '')
+    Assert ((Read-IemJournal -Path $jp).version -eq 8) 'journal-read-falls-back-when-the-journal-is-empty'
+    Remove-Item -LiteralPath "$jp.tmp"
+    Throws { Read-IemJournal -Path $jp } 'journal-read-refuses-an-empty-journal-without-a-temp-file'
+
     # Tier 2: services, a task (plus an absent one), the maintenance switch, a Defender exclusion.
     $r = Invoke-IemTuningApply -ProfilePath $pp -Tier 2
     Assert (@(Rows $r 'failed').Count -eq 0) "tier2-apply-has-no-failure ($(@(Rows $r 'failed') | ForEach-Object { $_.error }))"
