@@ -339,5 +339,51 @@ class PostBootRunTests(unittest.TestCase):
         self.assertTrue(any("window stays open" in a for a in self.alarms))
 
 
+class TuningSetupTests(unittest.TestCase):
+    """tuning-setup creates the PC folder with a restricted ACL (#32 B12). Faked
+    at the ssh seam itself (sw.guarded runs the ssh process; sw.scp copies), so
+    the PowerShell script is checked exactly as the PC would receive it."""
+
+    def setUp(self) -> None:
+        self.dir = Path(tempfile.mkdtemp())
+        self.saved = (tw.sw.STATE, tw.sw.EVENT_NOW, tw.sw.guarded, tw.sw.scp, tw.PROFILE)
+        tw.sw.STATE = self.dir / "spike-window.json"
+        tw.sw.EVENT_NOW = self.dir / "EVENT-NOW"
+        tw.PROFILE = write(PROFILE)
+        self.scripts: list[str] = []
+        self.copies: list[tuple[str, str]] = []
+        self.icacls_fails = False
+
+        def fake_guarded(cmd, stdin, timeout, event):
+            self.scripts.append(stdin)
+            if "icacls" in stdin and self.icacls_fails:
+                return json.dumps({"ok": False, "error": "icacls exited 1332"}) + "\n"
+            return json.dumps({"ok": True, "r": 1}) + "\n"
+
+        tw.sw.guarded = fake_guarded
+        tw.sw.scp = lambda src, dst: self.copies.append((src, dst))
+        self.env = dict(ENV, PC_SSH="u@pc", PC_TUNING_ROOT="C:\\t", PC_TUNING_ROOT_SCP="/C:/t", RAW_DIR=str(self.dir / "raw"))
+        tw.sw.save_state({"id": "w", "card": "reaper", "closed": False})
+
+    def tearDown(self) -> None:
+        tw.sw.STATE, tw.sw.EVENT_NOW, tw.sw.guarded, tw.sw.scp, tw.PROFILE = self.saved
+
+    def acl_script(self) -> str:
+        return next(x for x in self.scripts if "icacls" in x)
+
+    def test_the_folder_script_stops_on_errors_and_checks_icacls(self) -> None:
+        tw.cmd_tuning_setup(self.env, argparse.Namespace())
+        script = self.acl_script()
+        self.assertIn("$ErrorActionPreference = 'Stop'", script)
+        self.assertRegex(script, r"icacls\.exe [^\n]*\$LASTEXITCODE")   # a native exit code never throws by itself
+        self.assertEqual(len(self.copies), 1)
+
+    def test_a_failed_acl_stops_the_setup_before_the_profile_is_copied(self) -> None:
+        self.icacls_fails = True
+        with self.assertRaisesRegex(tw.StepError, "icacls"):
+            tw.cmd_tuning_setup(self.env, argparse.Namespace())
+        self.assertEqual(self.copies, [])
+
+
 if __name__ == "__main__":
     unittest.main()
