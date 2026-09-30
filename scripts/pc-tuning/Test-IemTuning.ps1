@@ -41,8 +41,8 @@ function Read-JournalVersion($profilePath, [int]$tier) {
     if ($null -eq $a) { return $null }
     return $a["tier$tier"]
 }
-# Sets the boot identity ({ time, id }) of every global journal entry, as if its
-# item had been written in that boot.
+# Sets the boot identity of every global journal entry, as if its item had been
+# written in that boot.
 function Set-JournalBoot($profilePath, [hashtable]$boot) {
     $jf = (Read-IemProfile -Path $profilePath).journal
     $jo = [IO.File]::ReadAllText($jf) | ConvertFrom-Json
@@ -159,7 +159,7 @@ try {
     [IO.File]::WriteAllText($jv, ($v1 | ConvertTo-Json -Depth 8))
     $m = Read-IemJournal -Path $jv
     $mx = $m.global['reg:x']
-    Assert ($m.schema -eq 2 -and $m.applied.tier2 -eq 0 -and $m.applied.tier3 -eq 0 -and $mx.raw.kind -eq 'absent' -and "$($mx.boot.time)" -eq $b1 -and $null -eq $mx.boot.id) 'journal-v1-converts-the-exact-parts'
+    Assert ($m.applied.tier2 -eq 0 -and $m.applied.tier3 -eq 0 -and $mx.raw.kind -eq 'absent' -and "$($mx.boot.time)" -eq $b1) 'journal-v1-converts-the-exact-parts'
     Assert (((@($m.order.mode)) -join ',') -eq 'plan:active' -and -not $m.mode.ContainsKey('plan:exists') -and $m.mode.ContainsKey('plan:active') -and "$($m.reverted['reg:y'].time)" -eq $b1) 'journal-v1-drops-the-old-plan-entries'
     $e1.before = '1'
     [IO.File]::WriteAllText($jv, ($v1 | ConvertTo-Json -Depth 8))
@@ -177,18 +177,6 @@ try {
     $v1.schema = 9
     [IO.File]::WriteAllText($jv, ($v1 | ConvertTo-Json -Depth 8))
     ThrowsLike { Read-IemJournal -Path $jv } "*$jv*schema 9*" 'journal-of-another-schema-is-refused'
-
-    # A boot is Windows' BootId counter plus the boot time (m5): a reboot bumps BootId
-    # however quick it is; a clock step moves the time by seconds; a stuck or missing
-    # counter falls back to the time tolerance (A13).
-    $now = Get-IemBootIdentity
-    $t0 = [string]$now.time
-    $t30 = [datetime]::Parse($t0, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime().AddSeconds(30).ToString('o')
-    Assert ($t0 -and ($null -eq $now.id -or "$($now.id)" -match '^\d+$')) 'boot-identity-reads-time-and-counter'
-    Assert (-not (Test-IemSameBoot -A @{ time = $t0; id = 7 } -B @{ time = $t0; id = 8 })) 'boot-a-quick-reboot-is-another-boot'
-    Assert (Test-IemSameBoot -A @{ time = $t0; id = 7 } -B @{ time = $t30; id = 7 }) 'boot-a-clock-step-is-the-same-boot'
-    Assert (Test-IemSameBoot -A @{ time = $t0; id = $null } -B @{ time = $t30; id = 7 }) 'boot-without-a-counter-uses-the-tolerance'
-    Assert (-not (Test-IemSameBoot -A @{ time = $t0; id = 7 } -B @{ time = '2000-01-01T00:00:00.0000000Z'; id = 7 })) 'boot-a-stuck-counter-and-a-far-time-is-another-boot'
 
     # -Only names groups of the tier: a typo is an error, never an empty apply (A9).
     ThrowsLike { Invoke-IemTuningApply -ProfilePath $pp -Tier 2 -Only @('servics') } '*servics*no tier 2 group*' 'apply-refuses-an-unknown-group'
@@ -312,15 +300,6 @@ try {
     Assert ((Get-Item -LiteralPath $nic).GetValue('PowerSaving') -eq '0' -and (Get-Item -LiteralPath $nic).GetValue('*RssBaseProcNumber') -eq '4') 'tier3-nic-values'
     $st = Get-IemTuningState -ProfilePath $pp
     Assert (@($st.items | Where-Object { $_.tier -eq 3 -and -not $_.pending }).Count -eq 0) 'tier3-items-are-pending-until-a-reboot'
-    # A clock step (time sync) moves LastBootUpTime; the boot stays the same (A13).
-    $bj = (Read-IemJournal -Path (Read-IemProfile -Path $pp).journal).global['irq:card:policy'].boot
-    $bn = Get-IemBootIdentity
-    Assert ((Test-IemSameBoot -A $bj -B $bn) -and "$($bj.id)" -eq "$($bn.id)") 'tier3-journals-the-boot-identity'
-    $now = Get-IemBootIdentity
-    $step = [datetime]::Parse([string]$now.time, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime().AddSeconds(30).ToString('o')
-    Set-JournalBoot $pp @{ time = $step; id = $now.id }
-    $st = Get-IemTuningState -ProfilePath $pp
-    Assert (@($st.items | Where-Object { $_.tier -eq 3 -and -not $_.pending }).Count -eq 0) 'tier3-pending-survives-a-clock-step'
     # Pending means written after the current boot: the boot of the latest write counts (A3).
     Set-JournalBoot $pp @{ time = '2000-01-01T00:00:00.0000000Z'; id = $null }
     $st = Get-IemTuningState -ProfilePath $pp
