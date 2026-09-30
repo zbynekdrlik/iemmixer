@@ -92,9 +92,9 @@ New-ItemProperty -LiteralPath $mm -Name 'SystemResponsiveness' -PropertyType DWo
 $ping = "$env:SystemRoot\System32\PING.EXE"
 $child = Start-Process -FilePath $ping -ArgumentList '-n', '240', '127.0.0.1' -PassThru -WindowStyle Hidden
 
-function New-TestNic([string]$Hwid, [string]$Adapter = '') {
-    # The test NIC: its driver key HKLM:\NIC under the test root, or with -Adapter found by adapter name.
-    $n = [ordered]@{ adapter = 'unused'; key = 'HKLM:\NIC'; hwid = $Hwid; properties = [ordered]@{ PowerSaving = '0'; '*EEE' = '0'; IemDword = '0'; IemExpand = 'plain'
+function New-TestNic([string]$Hwid, [string]$Adapter = '', [string]$Key = 'HKLM:\NIC') {
+    # The test NIC: its driver key (HKLM:\NIC) under the test root, or with -Adapter found by adapter name.
+    $n = [ordered]@{ adapter = 'unused'; key = $Key; hwid = $Hwid; properties = [ordered]@{ PowerSaving = '0'; '*EEE' = '0'; IemDword = '0'; IemExpand = 'plain'
                                                                              IemQword = '8'; IemString = 'other'; IemMulti0 = 'x'; IemMulti1 = 'x' }
                      rss = [ordered]@{ base = 4; max = 5 }; pnp_capabilities = 24 }
     if ($Adapter) { $n.adapter = $Adapter; $n.Remove('key') }
@@ -310,6 +310,17 @@ try {
     Assert (@(Rows $r22 'failed').Count -eq 0 -and $s2.drift -and @($s2.drift_tiers) -contains 3 -and @($s2.drift_tiers) -notcontains 2) 'drift-is-per-tier'
     $u22 = Undo-IemTuning -ProfilePath $pv2 -Tier 2
     Assert (@(Rows $u22 'failed').Count -eq 0 -and (Get-Service Spooler).Status -eq 'Running') 'drift-test-undoes-its-tier2'
+    # A journal entry names its target: when the same key now points elsewhere (the
+    # NIC's driver key recreated, a card in another slot), the write is refused and
+    # the operator told to undo first; no before-value goes unjournaled (review 3.8).
+    $nic2 = "$root\HKLM\NIC2"
+    New-Item -Path $nic2 -Force | Out-Null
+    New-ItemProperty -LiteralPath $nic2 -Name 'MatchingDeviceId' -PropertyType String -Value 'pci\ven_fffe&dev_0002' | Out-Null
+    New-ItemProperty -LiteralPath $nic2 -Name 'PowerSaving' -PropertyType String -Value '1' | Out-Null
+    $pn2 = New-TestProfile $hw @{ nic = (New-TestNic 'PCI\VEN_FFFE&DEV_0002' '' 'HKLM:\NIC2') }
+    $rn2 = Invoke-IemTuningApply -ProfilePath $pn2 -Tier 3 -Only @('nic')
+    $fn2 = @(Rows $rn2 'failed')
+    Assert (@(Rows $rn2 'written').Count -eq 0 -and $fn2.Count -gt 0 -and "$($fn2[0].error)" -like '*undo*first*' -and (Get-Item -LiteralPath $nic2).GetValue('PowerSaving') -eq '1' -and $null -eq (Get-Item -LiteralPath $nic2).GetValue('*EEE', $null)) 'tier3-refuses-a-journaled-key-whose-target-moved'
     $u3 = Undo-IemTuning -ProfilePath $pp -Tier 3
     Assert (@(Rows $u3 'failed').Count -eq 0) 'tier3-undo-has-no-failure'
     Assert ($null -eq $ap.GetValue('DevicePolicy', $null) -and (Get-Item -LiteralPath $nic).GetValue('PowerSaving') -eq '1') 'tier3-undo-deletes-absent-values'
