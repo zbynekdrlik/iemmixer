@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import signal
+import subprocess
 import sys
 import tempfile
 import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import spike_window as sw  # noqa: E402
@@ -715,6 +718,24 @@ class ScpTests(unittest.TestCase):
             sw.scp("u@host.invalid:/C:/t/near.txt", str(self.dst), event="abandon")
         self.assertLess(time.monotonic() - t, 5)
         self.assertFalse(self.dst.exists())                    # no partial file is left
+
+    def test_the_copy_hears_ctrl_c_even_when_this_process_ignores_it(self) -> None:
+        # Review round 3, m3: an ignored SIGINT is inherited by the child, and the
+        # interrupt would then never end the copy; scp starts with SIGINT's default.
+        self.copier(SLOW_COPY)
+        saved = signal.signal(signal.SIGINT, signal.SIG_IGN)
+        try:
+            with mock.patch.object(sw.subprocess, "Popen", wraps=subprocess.Popen) as popen:
+                threading.Timer(0.5, self.flag.touch).start()
+                t = time.monotonic()
+                with self.assertRaises(sw.EventNow):
+                    sw.scp("u@host.invalid:/C:/t/near.txt", str(self.dst), event="abandon")
+                self.assertLess(time.monotonic() - t, 5)
+            restore = popen.call_args.kwargs["preexec_fn"]
+            restore()
+            self.assertEqual(signal.getsignal(signal.SIGINT), signal.SIG_DFL)
+        finally:
+            signal.signal(signal.SIGINT, saved)
 
     def test_a_plain_copy_runs_to_its_end_whatever_the_flag(self) -> None:
         self.flag.touch()
