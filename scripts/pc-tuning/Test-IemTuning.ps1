@@ -50,6 +50,9 @@ New-Item -Path $nic -Force | Out-Null
 New-ItemProperty -LiteralPath $nic -Name 'PowerSaving' -PropertyType String -Value '1' | Out-Null
 # A value whose name ends like the NDIS keyword *EEE: undoing *EEE must leave it (A2).
 New-ItemProperty -LiteralPath $nic -Name 'AdvancedEEE' -PropertyType String -Value '1' | Out-Null
+# Values of other kinds than the items write: undo restores their own kind and data (A1).
+New-ItemProperty -LiteralPath $nic -Name 'IemDword' -PropertyType DWord -Value 1 | Out-Null
+New-ItemProperty -LiteralPath $nic -Name 'IemExpand' -PropertyType ExpandString -Value '%SystemRoot%\iem' | Out-Null
 $mm = "$root\HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"
 New-Item -Path "$mm\Tasks\Pro Audio" -Force | Out-Null
 New-ItemProperty -LiteralPath $mm -Name 'SystemResponsiveness' -PropertyType DWord -Value 0 | Out-Null
@@ -66,7 +69,7 @@ function New-TestProfile([string]$Hwid) {
         maintenance = [ordered]@{ off = $true; tasks = @("$taskPath$taskName", '\iemmixer-test\no-such-task') }
         defender = [ordered]@{ paths = @($dir); processes = @() }
         devices = @([ordered]@{ id = 'card'; instance = 'PCI\VEN_TEST&DEV_0001\0'; hwid = $Hwid; lps = @(0, 2); enabled = $true })
-        nic = [ordered]@{ adapter = 'unused'; key = 'HKLM:\NIC'; properties = [ordered]@{ PowerSaving = '0'; '*EEE' = '0' }; rss = [ordered]@{ base = 4; max = 5 }; pnp_capabilities = 24 }
+        nic = [ordered]@{ adapter = 'unused'; key = 'HKLM:\NIC'; properties = [ordered]@{ PowerSaving = '0'; '*EEE' = '0'; IemDword = '0'; IemExpand = 'plain' }; rss = [ordered]@{ base = 4; max = 5 }; pnp_capabilities = 24 }
         fingerprint = [ordered]@{ files = @(); keys = @() }
     }
     $path = Join-Path $dir "profile-$([guid]::NewGuid().ToString('N')).json"
@@ -114,6 +117,10 @@ try {
     $bad = New-TestProfile 'PCI\VEN_OTHER'
     Throws { Invoke-IemTuningApply -ProfilePath $bad -Tier 3 -Only @('irq') } 'tier3-refuses-a-mismatched-device'
     Assert (-not (Test-Path -LiteralPath "$enum\Device Parameters")) 'tier3-refusal-writes-nothing'
+    # The card's mask exists as REG_BINARY (a KAFFINITY); the item writes a QWORD (A1).
+    $apKey = "$enum\Device Parameters\Interrupt Management\Affinity Policy"
+    New-Item -Path $apKey -Force | Out-Null
+    New-ItemProperty -LiteralPath $apKey -Name 'AssignmentSetOverride' -PropertyType Binary -Value ([byte[]](4, 0, 0, 0, 0, 0, 0, 0)) | Out-Null
     $r3 = Invoke-IemTuningApply -ProfilePath $pp -Tier 3
     Assert (@(Rows $r3 'failed').Count -eq 0) 'tier3-apply-has-no-failure'
     $ap = Get-Item -LiteralPath "$enum\Device Parameters\Interrupt Management\Affinity Policy"
@@ -141,6 +148,10 @@ try {
     Assert ($null -eq $ap.GetValue('DevicePolicy', $null) -and (Get-Item -LiteralPath $nic).GetValue('PowerSaving') -eq '1') 'tier3-undo-deletes-absent-values'
     $nk = Get-Item -LiteralPath $nic
     Assert ($null -eq $nk.GetValue('*EEE', $null) -and $nk.GetValue('AdvancedEEE') -eq '1') 'tier3-undo-deletes-exactly-the-literal-value'
+    $apv = Get-Item -LiteralPath $apKey
+    Assert ("$($apv.GetValueKind('AssignmentSetOverride'))" -eq 'Binary' -and (@($apv.GetValue('AssignmentSetOverride') | ForEach-Object { $_.ToString('x2') }) -join '') -eq '0400000000000000') 'tier3-undo-restores-a-binary-value'
+    Assert ("$($nk.GetValueKind('IemDword'))" -eq 'DWord' -and $nk.GetValue('IemDword') -eq 1) 'tier3-undo-restores-a-dword-value'
+    Assert ("$($nk.GetValueKind('IemExpand'))" -eq 'ExpandString' -and $nk.GetValue('IemExpand', $null, 'DoNotExpandEnvironmentNames') -eq '%SystemRoot%\iem') 'tier3-undo-restores-an-expand-string'
     $st = Get-IemTuningState -ProfilePath $pp
     Assert (@($st.items | Where-Object { $_.key -eq 'irq:card:policy' -and $_.revert_pending }).Count -eq 1) 'tier3-undo-is-pending-until-a-reboot'
 
