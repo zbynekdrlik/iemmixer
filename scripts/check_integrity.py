@@ -138,12 +138,13 @@ def bundle_copies(path: Path) -> tuple[int, list[str]]:
     return first, sorted(names)
 
 
-def bundle_violations(root: Path) -> list[str]:
+def bundle_violations(root: Path, required: bool = False) -> list[str]:
     """A drift between the two lists keeps CI green while fetch-bundle rejects
-    every artifact on the dev box (#32 E5)."""
+    every artifact on the dev box (#32 E5). A tree without spike_window.py
+    has nothing to compare, unless `required` (the repository itself)."""
     source = root / BUNDLE_SOURCE
     if not source.is_file():
-        return []
+        return [f"{BUNDLE_SOURCE}: missing (the spike bundle's file list)"] if required else []
     want = bundle_files(source)
     if want is None:
         return [f"{BUNDLE_SOURCE}: no BUNDLE_FILES"]
@@ -157,8 +158,10 @@ def bundle_violations(root: Path) -> list[str]:
     return []
 
 
-def violations(root: Path) -> list[str]:
-    found: list[str] = bundle_violations(root)
+def violations(root: Path, repository: bool = False) -> list[str]:
+    """Everything the gate refuses under `root`; `repository`: root is this
+    repository, whose required files must exist."""
+    found: list[str] = bundle_violations(root, required=repository)
     for path in files(root, "crates", (".rs",)):
         rel = path.relative_to(root).as_posix()
         found += [f"{rel}:{n}: #[ignore] test" for n, line in lines(path) if RUST_IGNORE.search(line)]
@@ -196,7 +199,7 @@ def violations(root: Path) -> list[str]:
 
 
 def main() -> int:
-    found = violations(ROOT)
+    found = violations(ROOT, repository=True)
     for item in found:
         print(f"::error::{item}")
     if found:
