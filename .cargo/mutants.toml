@@ -5,6 +5,10 @@
 # --baseline=skip there is no measured test time, so a hung mutant would
 # otherwise hold its job for 300 s). Tests run per package only. A mutant
 # caught only by a timeout is tested again by scripts/mutants_recheck.py (#23).
+# An exclude_re entry pinned to a line (`<path>\\.rs:<N>:` or
+# `<path>\\.rs:(<N>|<M>):`) carries one `# anchor <N>: <source text>` comment
+# per line right above it; scripts/check_mutants_anchors.py fails when that
+# line no longer reads so (#32): move the anchor with the code.
 profile = "mutants"
 test_tool = "nextest"
 
