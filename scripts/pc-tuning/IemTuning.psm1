@@ -397,10 +397,16 @@ function Invoke-IemItem {
         $row.before = $before
         if ($null -eq $before -and @('task', 'svc-start', 'svc-state', 'cpusets') -contains $Item.kind) { $row.action = 'absent'; return [pscustomobject]$row }
         if (Test-IemSame $before $Item.desired) { $row.action = 'kept'; $row.value = $before; return [pscustomobject]$row }
-        if (-not $Journal[$Section].ContainsKey($Item.key)) {
+        $e = $Journal[$Section][$Item.key]
+        if ($null -eq $e) {
             $Journal[$Section][$Item.key] = @{ kind = $Item.kind; args = $Item.args; before = $before; tier = $Item.tier; group = $Item.group
                                                reboot = $Item.reboot; at = (Get-Date).ToUniversalTime().ToString('o'); boot = $Boot }
             $Journal.order[$Section] = @($Journal.order[$Section]) + $Item.key
+            Write-IemJournal -Path $Path -Journal $Journal
+        } elseif ([string]$e.boot -ne $Boot) {
+            # The before-value stays the first one; the boot is the latest write's,
+            # so a value re-written after a reboot is pending again (A3).
+            $e.boot = $Boot
             Write-IemJournal -Path $Path -Journal $Journal
         }
         Set-IemValue -Item $Item -Value $Item.desired
