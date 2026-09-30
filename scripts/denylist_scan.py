@@ -290,9 +290,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.hash:
         path, number = args.hash
-        # split on `\n` only, matching scan_tree/scan_commits, so an allow key made here matches
-        # the key the scanner computes for a line containing CR/VT/FF/NEL/U+2028
-        lines = (args.repo / path).read_text(encoding="utf-8").split("\n")
+        # read bytes and split on `\n` only, byte-for-byte like scan_tree (which decodes the blob):
+        # read_text() would translate CR / CRLF to \n and diverge the allow key from the scanner
+        lines = decode((args.repo / path).read_bytes()).split("\n")
         print(line_key(path, lines[int(number) - 1]))
         return EXIT_CLEAN
     if args.denylist is None or not (args.tree or args.commits):
