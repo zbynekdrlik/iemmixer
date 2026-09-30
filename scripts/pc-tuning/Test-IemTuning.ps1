@@ -142,11 +142,13 @@ try {
     Remove-Item -LiteralPath "$jp.tmp"
     ThrowsLike { Read-IemJournal -Path $jp } '*empty or unreadable*' 'journal-read-refuses-an-empty-journal-without-a-temp-file'
 
-    # Journal schema 2 (m1). A schema-1 journal (written before this review) is read
-    # with the exact conversions only: an absent registry before-value becomes raw
-    # 'absent', the old plan-exists/plan-value mode entries go (the plan is never
-    # reverted now), boot strings become identities without a counter, and the one
-    # version becomes "no tier applied". Anything else is refused, naming the file.
+    # Journal schema 3 (m1, review R1). A schema-1 journal (written before this review)
+    # is read with the exact conversions only: an absent registry before-value becomes
+    # raw 'absent', the old plan-exists/plan-value mode entries go (the plan is never
+    # reverted now), boot strings become identities without a token (never this
+    # boot), and the one version becomes "no tier applied". Anything else is
+    # refused, naming the file.
+    $bootNow = Get-IemBootIdentity -Profile (Read-IemProfile -Path $pp)
     $jv = Join-Path (Join-Path $dir 'journal-v1') 'journal.json'
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $jv) | Out-Null
     $b1 = '2026-01-01T00:00:00.0000000Z'
@@ -159,7 +161,7 @@ try {
     [IO.File]::WriteAllText($jv, ($v1 | ConvertTo-Json -Depth 8))
     $m = Read-IemJournal -Path $jv
     $mx = $m.global['reg:x']
-    Assert ($m.applied.tier2 -eq 0 -and $m.applied.tier3 -eq 0 -and $mx.raw.kind -eq 'absent' -and "$($mx.boot.time)" -eq $b1) 'journal-v1-converts-the-exact-parts'
+    Assert ($m.schema -eq 3 -and $m.applied.tier2 -eq 0 -and $m.applied.tier3 -eq 0 -and $mx.raw.kind -eq 'absent' -and "$($mx.boot.time)" -eq $b1 -and $null -eq $mx.boot.token -and -not (Test-IemSameBoot -A $mx.boot -B $bootNow)) 'journal-v1-converts-the-exact-parts'
     Assert (((@($m.order.mode)) -join ',') -eq 'plan:active' -and -not $m.mode.ContainsKey('plan:exists') -and $m.mode.ContainsKey('plan:active') -and "$($m.reverted['reg:y'].time)" -eq $b1) 'journal-v1-drops-the-old-plan-entries'
     $e1.before = '1'
     [IO.File]::WriteAllText($jv, ($v1 | ConvertTo-Json -Depth 8))
@@ -177,6 +179,42 @@ try {
     $v1.schema = 9
     [IO.File]::WriteAllText($jv, ($v1 | ConvertTo-Json -Depth 8))
     ThrowsLike { Read-IemJournal -Path $jv } "*$jv*schema 9*" 'journal-of-another-schema-is-refused'
+    # A schema-2 journal's boot identities ({ time, id }: boot time and BootId counter)
+    # prove no boot: they become identities without a token, never this boot, so a
+    # value an older module wrote is never "pending" (review R1); nothing else changes.
+    $v2e = @{ kind = 'reg'; args = @{ path = 'HKLM:\X'; name = 'V'; type = 'DWord' }; before = $null; raw = @{ kind = 'absent' }; tier = 3; group = 'nic'; reboot = $true; at = $b1
+              boot = @{ time = [string]$bootNow.time; id = 7 } }
+    $v2 = @{ schema = 2; applied = @{ tier2 = 1; tier3 = 1 }; entered = $false; global = @{ 'reg:x' = $v2e }; mode = @{}; reverted = @{ 'reg:y' = @{ time = [string]$bootNow.time; id = 7 } }
+             order = @{ global = @('reg:x'); mode = @() } }
+    [IO.File]::WriteAllText($jv, ($v2 | ConvertTo-Json -Depth 8))
+    $m2 = Read-IemJournal -Path $jv
+    $m2x = $m2.global['reg:x']
+    Assert ($m2.schema -eq 3 -and $m2.applied.tier3 -eq 1 -and $m2x.raw.kind -eq 'absent' -and "$($m2x.boot.time)" -eq "$($bootNow.time)" -and $null -eq $m2x.boot.token -and -not (Test-IemSameBoot -A $m2x.boot -B $bootNow) -and -not (Test-IemSameBoot -A $m2.reverted['reg:y'] -B $bootNow)) 'journal-v2-boot-identities-name-no-boot'
+
+    # A boot is a token only that boot can show (review R1): a random GUID in a
+    # volatile registry key, which Windows discards at every reboot. No clock and no
+    # counter take part: a clock step changes nothing, and a reboot (the key gone) is
+    # always another boot, however quick. LastBootUpTime stays as information.
+    $prof = Read-IemProfile -Path $pp
+    $bootKey = "$root\HKLM\SOFTWARE\iemmixer\boot"
+    $b0 = Get-IemBootIdentity -Profile $prof
+    $g0 = [guid]::Empty
+    Assert ([guid]::TryParse([string]$b0.token, [ref]$g0) -and [string]$b0.time -and (Get-Item -LiteralPath $bootKey).GetValue('token') -eq $b0.token -and $b0.token -eq $bootNow.token) 'boot-identity-is-a-token-in-the-boot-key'
+    ThrowsLike { New-Item -Path "$bootKey\stable-child" | Out-Null } '*volatile*' 'boot-key-is-volatile'
+    Assert (-not (Test-Path -LiteralPath "$bootKey\stable-child") -and (Test-IemSameBoot -A $b0 -B (Get-IemBootIdentity -Profile $prof))) 'boot-token-is-stable-within-a-boot'
+    Assert ((Test-IemSameBoot -A @{ token = $b0.token; time = '2000-01-01T00:00:00.0000000Z' } -B $b0)) 'boot-a-clock-step-is-irrelevant'
+    Assert (-not (Test-IemSameBoot -A @{ token = $null; time = $b0.time } -B $b0) -and -not (Test-IemSameBoot -A @{ time = $b0.time; id = 7 } -B $b0) -and -not (Test-IemSameBoot -A $null -B $b0)) 'boot-without-a-token-is-never-this-boot'
+    Remove-Item -LiteralPath $bootKey   # what a reboot does to a volatile key
+    $b2 = Get-IemBootIdentity -Profile $prof
+    Assert ([string]$b2.token -and $b2.token -ne $b0.token -and -not (Test-IemSameBoot -A $b0 -B $b2)) 'boot-a-reboot-is-another-boot'
+    # A boot key that is not volatile would survive a reboot, so every Tier 3 value
+    # would read as pending for ever: it is refused, never trusted (review R1).
+    $stableRoot = "$root-stable"
+    New-Item -Path "$stableRoot\HKLM\SOFTWARE\iemmixer\boot" -Force | Out-Null
+    $ps = New-TestProfile $hw @{ registry_root = $stableRoot }
+    ThrowsLike { Get-IemBootIdentity -Profile (Read-IemProfile -Path $ps) } '*not volatile*' 'boot-key-that-is-not-volatile-is-refused'
+    Assert (@(Get-ChildItem -LiteralPath "$stableRoot\HKLM\SOFTWARE\iemmixer\boot").Count -eq 0) 'boot-key-check-leaves-no-probe'
+    Remove-Item -LiteralPath $stableRoot -Recurse
 
     # -Only names groups of the tier: a typo is an error, never an empty apply (A9).
     ThrowsLike { Invoke-IemTuningApply -ProfilePath $pp -Tier 2 -Only @('servics') } '*servics*no tier 2 group*' 'apply-refuses-an-unknown-group'
@@ -300,6 +338,17 @@ try {
     Assert ((Get-Item -LiteralPath $nic).GetValue('PowerSaving') -eq '0' -and (Get-Item -LiteralPath $nic).GetValue('*RssBaseProcNumber') -eq '4') 'tier3-nic-values'
     $st = Get-IemTuningState -ProfilePath $pp
     Assert (@($st.items | Where-Object { $_.tier -eq 3 -and -not $_.pending }).Count -eq 0) 'tier3-items-are-pending-until-a-reboot'
+    # The journal holds this boot's token; a clock step changes nothing, another
+    # token is another boot (review R1).
+    $bn = Get-IemBootIdentity -Profile (Read-IemProfile -Path $pp)
+    $bj = (Read-IemJournal -Path (Read-IemProfile -Path $pp).journal).global['irq:card:policy'].boot
+    Assert ((Test-IemSameBoot -A $bj -B $bn) -and "$($bj.token)" -eq "$($bn.token)" -and "$($st.boot_token)" -eq "$($bn.token)") 'tier3-journals-the-boot-token'
+    Set-JournalBoot $pp @{ token = $bn.token; time = '2000-01-01T00:00:00.0000000Z' }
+    $st = Get-IemTuningState -ProfilePath $pp
+    Assert (@($st.items | Where-Object { $_.tier -eq 3 -and -not $_.pending }).Count -eq 0) 'tier3-pending-survives-a-clock-step'
+    Set-JournalBoot $pp @{ token = [guid]::NewGuid().ToString(); time = [string]$bn.time }
+    $st = Get-IemTuningState -ProfilePath $pp
+    Assert (@($st.items | Where-Object { $_.tier -eq 3 -and $_.pending }).Count -eq 0) 'tier3-another-token-is-not-pending'
     # Pending means written after the current boot: the boot of the latest write counts (A3).
     Set-JournalBoot $pp @{ time = '2000-01-01T00:00:00.0000000Z'; id = $null }
     $st = Get-IemTuningState -ProfilePath $pp
@@ -552,5 +601,6 @@ try {
     if (@((Get-MpPreference).ExclusionPath) -contains $dir) { Remove-MpPreference -ExclusionPath $dir }
     try { [void](Invoke-IemNative -FilePath 'logman.exe' -Arguments @('stop', 'IemMarkers', '-ets')) } catch { Write-Host "cleanup logman: $_" }
     Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath "$root-stable" -Recurse -Force -ErrorAction SilentlyContinue
 }
 Write-Host 'Test-IemTuning: all passed'
