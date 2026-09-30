@@ -635,6 +635,31 @@ class DenylistScanTests(unittest.TestCase):
                 out = self.assert_found_in_both_modes_as({name: content}, "zyxname")
                 self.assertIn(f"tree {name}:2: denylist entry 1", out)
 
+    # --- #32 review m5: more single-byte readings, double-encoded UTF-8, non-ASCII path components ---
+
+    def test_iso_8859_2_cp852_and_double_encoded_terms_are_found(self) -> None:
+        # `š` is B9 in ISO-8859-2 and E7 in cp852 -- neither cp1250 (9A) nor Latin-1 reads it; UTF-8
+        # decoded as cp1250 or Latin-1 and encoded again (mojibake) spells it `Ĺˇ` / `Å¡`
+        self.add_terms("šqxwzy")
+        texts = {"l2.txt": "meno: šqxwzy\n".encode("iso-8859-2"), "dos.txt": "meno: šqxwzy\n".encode("cp852"),
+                 "moji1250.txt": "meno: " + "šqxwzy".encode().decode("cp1250") + "\n",
+                 "moji1.txt": "meno: " + "šqxwzy".encode().decode("latin-1") + "\n"}
+        for name, content in texts.items():
+            with self.subTest(name=name):
+                out = self.assert_found_in_both_modes_as({name: content}, "qxwzy")
+                self.assertIn(f"tree {name}:1: denylist entry 4", out)
+
+    def test_a_non_ascii_path_component_is_never_printed(self) -> None:
+        # a reading the scanner lacks (double-encoded UTF-8 here) left a valid UTF-8 component
+        # printed with the ASCII tail of a term in it; now any non-ASCII component is redacted
+        self.add_terms("šqxwzy")
+        moji = "šqxwzy".encode().decode("cp1250")
+        out = self.assert_found_in_both_modes_as({f"docs/{moji}-notes.md": "x zyxname\n"}, "qxwzy")
+        self.assertIn("tree docs/[redacted]:1: denylist entry 1", out)
+        self.assertIn("tree docs/[redacted]: path: denylist entry 4", out)
+        out = self.assert_found_in_both_modes_as({"docs/résumé/a.txt": "x zyxname\n"}, "sum")
+        self.assertIn("tree docs/[redacted]/a.txt:1: denylist entry 1", out)
+
     # --- #32 review m9: git-lfs content is not in the repository, so its use is a finding ---
 
     def test_a_git_lfs_filter_and_pointer_are_findings(self) -> None:
