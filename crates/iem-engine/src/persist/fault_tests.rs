@@ -27,6 +27,12 @@ struct FaultState {
     fault: Option<(usize, Mode)>,
     /// The next step of this kind fails, once.
     next: Option<&'static str>,
+    /// Paths every read of which fails (an I/O error, not a missing file).
+    unreadable: Vec<PathBuf>,
+    /// Read failures still to come per path; then its reads succeed.
+    flaky: Vec<(PathBuf, usize)>,
+    /// Pauses between read tries.
+    pauses: usize,
 }
 
 /// The real file system with injected failures. A failed write leaves half
@@ -57,6 +63,26 @@ impl Faulty {
         self.state.lock().unwrap().next = Some(what);
     }
 
+    /// Every read of `path` fails with an I/O error while `unreadable`.
+    pub(super) fn set_unreadable(&self, path: &Path, unreadable: bool) {
+        let mut s = self.state.lock().unwrap();
+        s.unreadable.retain(|p| p != path);
+        if unreadable {
+            s.unreadable.push(path.to_path_buf());
+        }
+    }
+
+    /// The next `times` reads of `path` fail, then they succeed.
+    pub(super) fn flaky(&self, path: &Path, times: usize) {
+        let mut s = self.state.lock().unwrap();
+        s.flaky.push((path.to_path_buf(), times));
+    }
+
+    /// Pauses between read tries so far.
+    pub(super) fn pauses(&self) -> usize {
+        self.state.lock().unwrap().pauses
+    }
+
     fn step(&self, what: &str, path: &Path) -> io::Result<()> {
         let mut s = self.state.lock().unwrap();
         let at = s.steps;
@@ -83,6 +109,16 @@ impl Faulty {
 impl Files for Faulty {
     fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
         self.step("read", path)?;
+        {
+            let mut s = self.state.lock().unwrap();
+            if s.unreadable.iter().any(|p| p == path) {
+                return Err(io::Error::other(format!("unreadable: {}", path.display())));
+            }
+            if let Some(f) = s.flaky.iter_mut().find(|(p, n)| p == path && *n > 0) {
+                f.1 -= 1;
+                return Err(io::Error::other(format!("flaky: {}", path.display())));
+            }
+        }
         OsFiles.read(path)
     }
 
@@ -235,5 +271,134 @@ fn a_damaged_current_json_that_cannot_be_moved_aside_becomes_a_skipped_generatio
     assert_eq!(
         (loaded.source, loaded.persisted.rev),
         (Source::Generation(1), 7)
+    );
+}
+
+/// A read of a file that keeps failing: tried `READ_TRIES` times.
+const TRIES: usize = 5;
+
+#[test]
+fn an_unreadable_current_json_is_never_moved_or_rotated() {
+    // #32 P2: an I/O error (a lock, no access, a failing disk) is no damage.
+    // The chain raises an alarm naming the file and loads the best valid
+    // state; recovery never moves the file aside, renames or rotates it.
+    let g = test_site();
+    let (_d, faulty, s) = faulty_store();
+    s.save(&sample(7)).unwrap();
+    s.save(&sample(8)).unwrap();
+    fs::write(s.dir().join(TMP), encode(&sample(9)).unwrap()).unwrap();
+    let current = s.dir().join(CURRENT);
+    let bytes = fs::read(&current).unwrap();
+    faulty.set_unreadable(&current, true);
+    let loaded = s.load(&g);
+    assert_eq!(
+        (loaded.source, loaded.persisted.rev),
+        (Source::Interrupted, 9)
+    );
+    assert_eq!(loaded.current_json, FileState::Unreadable);
+    assert_eq!(faulty.pauses(), TRIES - 1);
+    assert_eq!(loaded.alarms.len(), 1, "{:?}", loaded.alarms);
+    assert!(
+        loaded.alarms[0].starts_with("current.json cannot be read"),
+        "{:?}",
+        loaded.alarms
+    );
+    let done = s.recover(&loaded);
+    assert_eq!(
+        (done.quarantined.clone(), done.finished),
+        (None, false),
+        "{done:?}"
+    );
+    assert!(done.failed.is_empty(), "{done:?}");
+    assert_eq!(done.warnings.len(), 1, "{done:?}");
+    assert_eq!(fs::read(&current).unwrap(), bytes);
+    assert_eq!(rev_of(&s.dir().join(TMP)), 9);
+    // Once readable again, the runtime's next save rotates it into the
+    // generations like any current.json: kept in the history.
+    faulty.set_unreadable(&current, false);
+    s.save(&sample(10)).unwrap();
+    let gens = s.generations().unwrap();
+    assert_eq!(gens.len(), 2);
+    assert_eq!(fs::read(&gens[1].1).unwrap(), bytes);
+    assert_eq!(s.load(&g).persisted.rev, 10);
+}
+
+#[test]
+fn a_read_that_fails_briefly_is_tried_again() {
+    let g = test_site();
+    let (_d, faulty, s) = faulty_store();
+    s.save(&sample(5)).unwrap();
+    let current = s.dir().join(CURRENT);
+    faulty.flaky(&current, TRIES - 1);
+    let loaded = s.load(&g);
+    assert_eq!((loaded.source, loaded.persisted.rev), (Source::Current, 5));
+    assert!(
+        loaded.alarms.is_empty() && loaded.rejected.is_empty(),
+        "{loaded:?}"
+    );
+    assert_eq!(faulty.pauses(), TRIES - 1);
+    // The seed's strict pick tries again too; a file that stays unreadable
+    // fails it.
+    faulty.flaky(&current, TRIES - 1);
+    assert_eq!(s.live_state().unwrap(), Some(Source::Current));
+    faulty.set_unreadable(&current, true);
+    assert!(s.live_state().is_err());
+}
+
+#[test]
+fn an_unreadable_save_tmp_or_generation_is_named_in_an_alarm() {
+    let g = test_site();
+    let (_d, faulty, s) = faulty_store();
+    s.save(&sample(5)).unwrap();
+    fs::write(s.dir().join(TMP), encode(&sample(6)).unwrap()).unwrap();
+    faulty.set_unreadable(&s.dir().join(TMP), true);
+    let loaded = s.load(&g);
+    assert_eq!((loaded.source, loaded.persisted.rev), (Source::Current, 5));
+    assert_eq!(loaded.alarms.len(), 1, "{:?}", loaded.alarms);
+    assert!(
+        loaded.alarms[0].starts_with("save.tmp cannot be read"),
+        "{:?}",
+        loaded.alarms
+    );
+    // A generation passed over while looking for the newest valid one.
+    let (_d, faulty, s) = faulty_store();
+    for rev in 7..=9 {
+        s.save(&sample(rev)).unwrap();
+    }
+    fs::remove_file(s.dir().join(CURRENT)).unwrap();
+    faulty.set_unreadable(&s.dir().join("gen-0000000002.json"), true);
+    let loaded = s.load(&g);
+    assert_eq!(
+        (loaded.source, loaded.persisted.rev),
+        (Source::Generation(1), 7)
+    );
+    assert_eq!(loaded.alarms.len(), 1, "{:?}", loaded.alarms);
+    assert!(
+        loaded.alarms[0].starts_with("gen-0000000002.json cannot be read"),
+        "{:?}",
+        loaded.alarms
+    );
+}
+
+#[test]
+fn save_tmp_that_could_not_be_compared_is_loaded_only_with_an_alarm() {
+    // #32 P8: with current.json missing or damaged, save.tmp competes with
+    // the newest valid generation; if the generations cannot be listed its
+    // revision was compared with nothing.
+    let (_d, faulty, s) = faulty_store();
+    s.save(&sample(7)).unwrap();
+    fs::write(s.dir().join(CURRENT), b"damaged").unwrap();
+    fs::write(s.dir().join(TMP), encode(&sample(9)).unwrap()).unwrap();
+    faulty.fail_next("list");
+    let loaded = s.load(&test_site());
+    assert_eq!(
+        (loaded.source, loaded.persisted.rev),
+        (Source::Interrupted, 9)
+    );
+    assert_eq!(loaded.alarms.len(), 1, "{:?}", loaded.alarms);
+    assert!(
+        loaded.alarms[0].starts_with("save.tmp is loaded without comparing"),
+        "{:?}",
+        loaded.alarms
     );
 }
