@@ -143,7 +143,7 @@ function Assert-IemXperf {
     # The xperf at Xperf counts only with a valid Microsoft Authenticode signature
     # and a numeric file version of at least MinVersion (A12); returns that version.
     param([Parameter(Mandatory)][string]$Xperf, [Parameter(Mandatory)][version]$MinVersion)
-    $sig = Get-AuthenticodeSignature -LiteralPath $Xperf
+    try { $sig = Get-AuthenticodeSignature -LiteralPath $Xperf } catch { throw "xperf at ${Xperf}: signature unreadable ($_)" }
     if ("$($sig.Status)" -ne 'Valid') { throw "xperf at ${Xperf}: signature $($sig.Status), not a valid Microsoft signature" }
     if ("$($sig.SignerCertificate.Subject)" -notlike '*O=Microsoft Corporation*') { throw "xperf at ${Xperf}: signed by $($sig.SignerCertificate.Subject), not Microsoft" }
     $vi = (Get-Item -LiteralPath $Xperf).VersionInfo
