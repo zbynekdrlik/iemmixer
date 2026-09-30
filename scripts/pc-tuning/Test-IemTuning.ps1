@@ -47,6 +47,8 @@ New-Item -Path $enum -Force | Out-Null
 New-ItemProperty -LiteralPath $enum -Name 'HardwareID' -PropertyType MultiString -Value @('PCI\VEN_TEST&DEV_0001&SUBSYS_1', 'PCI\VEN_TEST&DEV_0001') | Out-Null
 $nic = "$root\HKLM\NIC"
 New-Item -Path $nic -Force | Out-Null
+# The NIC driver key names the hardware id its driver matched (A8).
+New-ItemProperty -LiteralPath $nic -Name 'MatchingDeviceId' -PropertyType String -Value 'pci\ven_test&dev_0002' | Out-Null
 New-ItemProperty -LiteralPath $nic -Name 'PowerSaving' -PropertyType String -Value '1' | Out-Null
 # A value whose name ends like the NDIS keyword *EEE: undoing *EEE must leave it (A2).
 New-ItemProperty -LiteralPath $nic -Name 'AdvancedEEE' -PropertyType String -Value '1' | Out-Null
@@ -59,7 +61,15 @@ New-ItemProperty -LiteralPath $mm -Name 'SystemResponsiveness' -PropertyType DWo
 $ping = "$env:SystemRoot\System32\PING.EXE"
 $child = Start-Process -FilePath $ping -ArgumentList '-n', '240', '127.0.0.1' -PassThru -WindowStyle Hidden
 
-function New-TestProfile([string]$Hwid) {
+function New-TestNic([string]$Hwid, [string]$Adapter = '') {
+    # The test NIC: its driver key HKLM:\NIC under the test root, or with -Adapter found by adapter name.
+    $n = [ordered]@{ adapter = 'unused'; key = 'HKLM:\NIC'; hwid = $Hwid; properties = [ordered]@{ PowerSaving = '0'; '*EEE' = '0'; IemDword = '0'; IemExpand = 'plain' }
+                     rss = [ordered]@{ base = 4; max = 5 }; pnp_capabilities = 24 }
+    if ($Adapter) { $n.adapter = $Adapter; $n.Remove('key') }
+    return $n
+}
+
+function New-TestProfile([string]$Hwid, [hashtable]$Set = @{}) {
     $p = [ordered]@{
         version = 1; journal = (Join-Path $dir 'journal.json'); registry_root = $root
         layout = [ordered]@{ housekeeping = @(0); card = @(0); nic = @(0); audio = @(0) }
@@ -69,9 +79,10 @@ function New-TestProfile([string]$Hwid) {
         maintenance = [ordered]@{ off = $true; tasks = @("$taskPath$taskName", '\iemmixer-test\no-such-task') }
         defender = [ordered]@{ paths = @($dir); processes = @() }
         devices = @([ordered]@{ id = 'card'; instance = 'PCI\VEN_TEST&DEV_0001\0'; hwid = $Hwid; lps = @(0, 2); enabled = $true })
-        nic = [ordered]@{ adapter = 'unused'; key = 'HKLM:\NIC'; properties = [ordered]@{ PowerSaving = '0'; '*EEE' = '0'; IemDword = '0'; IemExpand = 'plain' }; rss = [ordered]@{ base = 4; max = 5 }; pnp_capabilities = 24 }
+        nic = (New-TestNic 'PCI\VEN_TEST&DEV_0002')
         fingerprint = [ordered]@{ files = @(); keys = @() }
     }
+    foreach ($k in @($Set.Keys)) { $p[$k] = $Set[$k] }
     $path = Join-Path $dir "profile-$([guid]::NewGuid().ToString('N')).json"
     [IO.File]::WriteAllText($path, ($p | ConvertTo-Json -Depth 6))
     return $path
@@ -117,6 +128,19 @@ try {
     $bad = New-TestProfile 'PCI\VEN_OTHER'
     Throws { Invoke-IemTuningApply -ProfilePath $bad -Tier 3 -Only @('irq') } 'tier3-refuses-a-mismatched-device'
     Assert (-not (Test-Path -LiteralPath "$enum\Device Parameters")) 'tier3-refusal-writes-nothing'
+    # The NIC driver key is checked against the profile's hardware id before any write,
+    # and found under registry_root also by adapter name (design note 7, A8).
+    $badNic = New-TestProfile 'PCI\VEN_TEST&DEV_0001' @{ nic = (New-TestNic 'PCI\VEN_OTHER') }
+    Throws { Invoke-IemTuningApply -ProfilePath $badNic -Tier 3 -Only @('nic') } 'tier3-refuses-a-mismatched-nic'
+    $nk = Get-Item -LiteralPath $nic
+    Assert ($nk.GetValue('PowerSaving') -eq '1' -and $null -eq $nk.GetValue('*RssBaseProcNumber', $null)) 'tier3-nic-refusal-writes-nothing'
+    $an = @(Get-NetAdapter)[0]
+    $cls = "$root\HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e972-e325-11ce-bfc1-08002be10318}\0000"
+    New-Item -Path $cls -Force | Out-Null
+    New-ItemProperty -LiteralPath $cls -Name 'NetCfgInstanceId' -PropertyType String -Value "$($an.InterfaceGuid)" | Out-Null
+    New-ItemProperty -LiteralPath $cls -Name 'MatchingDeviceId' -PropertyType String -Value 'pci\ven_test&dev_0002' | Out-Null
+    $byName = Read-IemProfile -Path (New-TestProfile 'PCI\VEN_TEST&DEV_0001' @{ nic = (New-TestNic 'PCI\VEN_TEST&DEV_0002' $an.Name) })
+    Assert ("$(Get-IemNicKey -Profile $byName)" -like "*iemmixer-tuning-test-$id*") 'tier3-nic-by-adapter-name-stays-under-registry-root'
     # R1 applies only while the card already uses MSI (design note 6.4 R1): otherwise
     # it is skipped with its reason, and nothing is written (A7).
     $rs = Invoke-IemTuningApply -ProfilePath $pp -Tier 3 -Only @('irq')
