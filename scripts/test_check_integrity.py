@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import check_integrity as ci  # noqa: E402
@@ -240,6 +241,13 @@ class BundleSyncTests(unittest.TestCase):
 
     def test_the_repository_is_in_sync(self) -> None:
         self.assertEqual(ci.bundle_violations(ci.ROOT), [])
+
+    def test_the_real_repository_needs_its_spike_window(self) -> None:
+        # Review m8: a missing spike_window.py must not silence the check on the real tree.
+        self.assertEqual(ci.bundle_violations(self.root), [])            # a fixture tree without it
+        self.assertEqual(len(ci.bundle_violations(self.root, required=True)), 1)
+        with mock.patch.object(ci, "ROOT", self.root):                  # main() scans the real root: required
+            self.assertEqual(ci.main(), 1)
 
 
 if __name__ == "__main__":
