@@ -363,20 +363,29 @@ def cmd_hwlat(env, args) -> None:
     print(json.dumps({"hwlat": rows, "file": str(path)}))
 
 
+def unwind_failures(done: list[dict]) -> list[str]:
+    """The unwind steps that did not complete: a spike not confirmed gone, or
+    a step recorded with an error (unwind alarms and carries on past those)."""
+    return [name for step in done for name, r in step.items()
+            if (name == "stop-spike" and not r) or (isinstance(r, dict) and "error" in r)]
+
+
 def cmd_reboot_prepare(env, args) -> None:
     state = sw.open_state()
     need_free(state)
     running = sw.spike_running(env)
+    # A reboot is prepared only over a cleanly preempted window (I1). unwind
+    # raises (after an owner alarm) before the buffer write when the spike was
+    # not confirmed gone; a trace that did not stop or a mode lever not reverted
+    # would carry into the reboot and the event mode it comes back in. Refuse on
+    # any of them: the card stays free and the window open (preempt or to-event
+    # brings REAPER back); the spike is never force-ended (I8, guard.md).
     done = sw.unwind(env, state, running, bring_back_reaper=False)
-    # A reboot is prepared only over a cleanly preempted window (I1): unwind
-    # (bring_back_reaper=False) breaks at bring-back before its graceful-stop
-    # check, so a spike that did not stop still holds the card. Do not prepare a
-    # graceful reboot over a held card — refuse (the card stays free, the window
-    # stays open) and alarm the owner; the spike is never force-ended (I8, guard.md).
-    if any("stop-spike" in step and not step["stop-spike"] for step in done):
-        sw.alarm("a spike did not stop within 60 s, so it still holds the card: no reboot is prepared over it "
-                 "(the spike is never force-ended, I8); wait for it or preempt in a dev window")
-        raise StepError("the spike did not stop: the card is still held, no reboot prepared")
+    failed = unwind_failures(done)
+    if failed:
+        sw.alarm(f"the unwind before the reboot did not complete ({', '.join(failed)}): no reboot is prepared; "
+                 "the card stays free and the window open (preempt or to-event brings REAPER back)")
+        raise StepError(f"the unwind failed at {', '.join(failed)}: no reboot prepared")
     st = tps(env, f"Get-IemTuningState -ProfilePath {sw.tuning_profile(env)}", timeout=120)
     state["card"] = "rebooting"
     state["reboot"] = {"prepared_at": tps(env, "Get-IemNow", timeout=60)}
