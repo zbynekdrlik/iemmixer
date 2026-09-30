@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tuning_window as tw  # noqa: E402
@@ -261,6 +263,80 @@ class RebootTests(unittest.TestCase):
         with self.assertRaisesRegex(tw.StepError, "may be restarting.*post-boot"):
             tw.cmd_reboot(ENV, self.args)
         self.assertEqual(tw.sw.load_state()["reboot"]["approval"], self.args.approval)   # post-boot can run
+
+
+class PostBootRunTests(unittest.TestCase):
+    """post-boot after the approved reboot: the window closes only with REAPER
+    back (#32 B13). Only the ssh boundary is faked (sw.ps, and the reachability
+    probe's subprocess.run); the waits are skipped (time.sleep)."""
+
+    def setUp(self) -> None:
+        self.dir = Path(tempfile.mkdtemp())
+        self.saved = (tw.sw.STATE, tw.sw.EVENT_NOW, tw.sw.ps, tw.sw.alarm)
+        tw.sw.STATE = self.dir / "spike-window.json"
+        tw.sw.EVENT_NOW = self.dir / "EVENT-NOW"
+        self.alarms: list[str] = []
+        tw.sw.alarm = self.alarms.append
+        self.env = dict(ENV, PC_SSH="u@pc", RAW_DIR=str(self.dir / "raw"))
+        tw.baseline_path(self.env).parent.mkdir(parents=True)
+        tw.baseline_path(self.env).write_text(json.dumps({"plan.active": "reaper"}), encoding="utf-8")
+        self.autostart = False     # REAPER started by itself after the boot
+        self.started = False       # REAPER started by the bring-back
+        self.bring_back_fails = False
+        self.calls: list[str] = []
+
+        def fake_ps(env, body, timeout=300, event="finish"):
+            self.calls.append(body)
+            if "Get-IemBootTime" in body:
+                return "2026-01-02T00:00:00Z"
+            if "Get-Process reaper" in body:
+                return 1 if (self.autostart or self.started) else 0
+            if body.startswith("Invoke-SpikeBringBack"):
+                if self.bring_back_fails:
+                    raise tw.StepError("PC step failed: REAPER did not load the project within 120 s")
+                self.started = True
+                return {"asio": "reaper"}
+            if "Get-IemReaperFingerprint" in body:
+                return {"plan.active": "reaper"}
+            if "Get-IemTuningState" in body:
+                return {"items": []}
+            if "Get-IemCpuSample" in body:
+                return {"cpus": []}
+            raise AssertionError(f"unexpected PC call: {body}")
+
+        tw.sw.ps = fake_ps
+        for patch in (mock.patch.object(tw.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)),
+                      mock.patch.object(tw.time, "sleep")):
+            patch.start()
+            self.addCleanup(patch.stop)
+        tw.sw.save_state({"id": "w", "card": "rebooting", "pref_original": 64, "pref_current": 64, "pref_restored": True,
+                          "reboot": {"prepared_at": "2026-01-01T00:00:00Z", "approval": "owner, 14:05: áno, reštartuj", "by": "agent"},
+                          "closed": False})
+
+    def tearDown(self) -> None:
+        tw.sw.STATE, tw.sw.EVENT_NOW, tw.sw.ps, tw.sw.alarm = self.saved
+
+    def test_a_clean_return_closes_the_window(self) -> None:
+        self.autostart = True
+        tw.cmd_post_boot(self.env, argparse.Namespace())
+        st = tw.sw.load_state()
+        self.assertEqual((st["card"], st["closed"], st["post_boot"]["problems"]), ("reaper", True, []))
+
+    def test_reaper_that_did_not_autostart_is_brought_back_before_the_window_closes(self) -> None:
+        with self.assertRaisesRegex(tw.StepError, "post-boot checks failed"):
+            tw.cmd_post_boot(self.env, argparse.Namespace())
+        self.assertTrue(any(c.startswith("Invoke-SpikeBringBack") for c in self.calls))
+        st = tw.sw.load_state()
+        self.assertEqual((st["card"], st["closed"]), ("reaper", True))
+        self.assertIn("REAPER did not start by itself within 5 min", st["post_boot"]["problems"])
+
+    def test_a_failed_bring_back_keeps_the_window_open(self) -> None:
+        self.bring_back_fails = True
+        with self.assertRaises(tw.StepError):
+            tw.cmd_post_boot(self.env, argparse.Namespace())
+        st = tw.sw.load_state()
+        self.assertEqual((st["card"], st["closed"]), ("rebooting", False))   # preempt / to-event brings REAPER back
+        self.assertTrue(any("window stays open" in a for a in self.alarms))
 
 
 if __name__ == "__main__":
