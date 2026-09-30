@@ -31,6 +31,12 @@ fn process_is_realtime_safe() {
     common::drive(&mut s, &mut b, 3_000);
     assert_eq!(s.processor.time(), 3_000 * common::BLOCK as u64);
     assert!(b.output.iter().all(|y| y.is_finite() && y.abs() <= 1.0));
+    // The D5(b) loopback probe ran under the sanitizer: one block of loopback.
+    assert_eq!(
+        s.measured,
+        common::BLOCK as u64,
+        "the loopback probe measured"
+    );
 }
 
 /// Run by `rtsan_detects_a_violation` in a child process; on its own it only

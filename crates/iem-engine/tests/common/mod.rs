@@ -10,6 +10,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use iem_audio_io::{Block, Process};
 use iem_engine::cmd::{RtOp, push_group};
@@ -72,6 +73,9 @@ pub struct Scenario {
     pub groups: Vec<Vec<RtOp>>,
     pub processor: Processor,
     pub handles: RtHandles,
+    /// The largest D5(b) loopback round-trip (samples) the processor
+    /// reported during `drive`: 0 while the probe never measured.
+    pub measured: u64,
 }
 
 fn mix(s: &str) -> MixId {
@@ -241,6 +245,7 @@ pub fn scenario() -> Scenario {
         groups,
         processor,
         handles,
+        measured: 0,
     }
 }
 
@@ -277,6 +282,8 @@ pub fn drive(s: &mut Scenario, b: &mut Buffers, blocks: usize) {
         }
         let mut block = Block::new(BLOCK, src, &mut b.output);
         s.processor.process(&mut block);
+        let rt = s.handles.status.loopback_samples.load(Ordering::Relaxed);
+        s.measured = s.measured.max(rt);
         for tap in &mut s.handles.taps {
             let _ = tap.pop_partial_slice(&mut b.drain);
         }

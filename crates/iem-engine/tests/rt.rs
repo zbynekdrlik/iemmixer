@@ -37,4 +37,10 @@ fn process_does_not_allocate() {
     assert_eq!(s.processor.time(), 6_000 * common::BLOCK as u64);
     assert!(b.output.iter().all(|y| y.is_finite() && y.abs() <= 1.0));
     assert!(s.handles.meters.read().seq > 0);
+    // The D5(b) loopback probe ran under the detector: one block of loopback.
+    assert_eq!(
+        s.measured,
+        common::BLOCK as u64,
+        "the loopback probe measured"
+    );
 }
