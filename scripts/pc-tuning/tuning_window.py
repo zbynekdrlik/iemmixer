@@ -429,8 +429,11 @@ def _measure(env, args, profile: dict, state: dict, run_dir: str, since: str, tr
             tps(env, f"Stop-IemTrace -Xperf {xperf(env)} -Dir {ps_quote(run_dir)} -Merge -Name 'cut-{cut['n']}.etl' ; "
                      f"Start-IemTrace -Xperf {xperf(env)} -Dir {ps_quote(run_dir)}{opt}", timeout=300)
 
+    # The proxy load's busy threads run on the housekeeping CPUs unless told otherwise
+    # (design note §4.3); never next to the audio CPU (#32 C1).
+    stress_cpus = args.stress_cpus or ",".join(str(lp) for lp in sorted(profile["layout"]["housekeeping"]))
     run_args = argparse.Namespace(mode="duplex", frames=args.frames, seconds=args.seconds, burn_us=args.burn_us, stress=args.stress,
-                                  panic_at=0, cycles=5, cpu=None, threshold_us=10, audio_cpus=args.audio_cpus, stress_cpus=args.stress_cpus)
+                                  panic_at=0, cycles=5, cpu=None, threshold_us=10, audio_cpus=args.audio_cpus, stress_cpus=stress_cpus)
     result = sw.cmd_run(env, run_args, on_poll=on_poll)
     state = sw.load_state()   # cmd_run saved its own changes (the run list): never overwrite them
     out = raw(env, state) / Path(run_dir.replace("\\", "/")).name
