@@ -9,7 +9,8 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// The pause between two tries of a read that failed with an I/O error.
+/// The pause between two tries of a read that failed with an error that
+/// may pass (`chain` bounds how many one load takes).
 const READ_PAUSE: Duration = Duration::from_millis(200);
 
 /// A directory's entries (name, path), each or the error reading it.

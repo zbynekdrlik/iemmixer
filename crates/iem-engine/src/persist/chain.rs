@@ -11,8 +11,12 @@
 //! crash before the last rename leaves the newest state only in `save.tmp`.
 //!
 //! **Each file is Missing, Unreadable, Damaged or Valid.** Unreadable: an
-//! I/O error (a lock, no access, a failing disk) after `READ_TRIES` reads;
-//! the file is named in an alarm and the best Valid candidate loads.
+//! I/O error (a lock, no access, a failing disk); one that may pass (a
+//! sharing or lock violation, an interrupted or timed-out read) is tried
+//! again, up to `READ_TRIES` reads with a pause between and
+//! `READ_PAUSES` pauses per load in all, any other at once (#32
+//! minor-5). The file is named in an alarm and the best Valid candidate
+//! loads.
 //! Damaged: read fine but it does not decode (format, schema, SHA-256,
 //! parse). Valid carries its revision.
 //!
@@ -64,9 +68,31 @@ const QUARANTINE_NAMES: u32 = 1000;
 /// again; the `u64` revision cannot run out.
 const REV_JUMP: u64 = 1_000_000;
 
-/// Reads of a file that fail with an I/O error, the file pausing between
-/// them, before it counts as unreadable (#32 P2).
+/// Reads of a file that fail with an error that may pass, with a pause
+/// between them, before it counts as unreadable (#32 P2).
 const READ_TRIES: usize = 5;
+
+/// Pauses between read tries in one load, all files together (#32
+/// minor-5): 10 of `files::READ_PAUSE` (200 ms) are 2 s, so however many
+/// files stay locked the engine listens well within the guard's READY_S
+/// (10 s). A file read once they are spent still gets its one try.
+const READ_PAUSES: usize = 10;
+
+/// Windows' `ERROR_SHARING_VIOLATION` and `ERROR_LOCK_VIOLATION`: another
+/// process holds the file a moment.
+const SHARING_VIOLATION: i32 = 32;
+const LOCK_VIOLATION: i32 = 33;
+
+/// Whether a read that failed may succeed when tried again (#32 minor-5):
+/// an interrupted, would-block or timed-out read, or on Windows a sharing
+/// or lock violation. Anything else (a directory, no access, a path part
+/// that is no directory) is Unreadable at once.
+fn transient(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+    ) || (cfg!(windows) && matches!(e.raw_os_error(), Some(SHARING_VIOLATION | LOCK_VIOLATION)))
+}
 
 impl Store {
     /// The live state the seed must keep, if any: the file the load chain
@@ -296,22 +322,24 @@ impl Store {
         done
     }
 
-    /// The file's bytes (`None`: it does not exist). An I/O error is tried
-    /// again, `READ_TRIES` times in all with a pause between (a sharing
-    /// violation, a transient EIO), then it is the error (#32 P2).
-    fn read_tried(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
-        let mut last = None;
-        for attempt in 0..READ_TRIES {
-            if attempt > 0 {
-                self.files.pause();
-            }
+    /// The file's bytes (`None`: it does not exist). An error that may pass
+    /// ([`transient`]) is tried again, up to `READ_TRIES` reads with a
+    /// pause between, while the load's `paused` stays below `READ_PAUSES`;
+    /// then, or for any other error, it is the error (#32 P2, minor-5).
+    fn read_tried(&self, path: &Path, paused: &mut usize) -> io::Result<Option<Vec<u8>>> {
+        let mut tries = 1;
+        loop {
             match self.files.read(path) {
                 Ok(bytes) => return Ok(Some(bytes)),
                 Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-                Err(e) => last = Some(e),
+                Err(e) if transient(&e) && tries < READ_TRIES && *paused < READ_PAUSES => {
+                    tries += 1;
+                    *paused += 1;
+                    self.files.pause();
+                }
+                Err(e) => return Err(e),
             }
         }
-        Err(last.unwrap_or_else(|| io::Error::other("no read was tried")))
     }
 
     fn quarantine(&self, current: &Path) -> io::Result<PathBuf> {
@@ -369,7 +397,7 @@ impl Store {
     /// `Tolerant`, and is the error, naming the file, when `Strict`.
     fn read_state(&self, path: &Path, pick: &mut Pick, reading: Reading) -> io::Result<Read> {
         let name = path.file_name().unwrap_or_default().to_string_lossy();
-        let bytes = match self.read_tried(path) {
+        let bytes = match self.read_tried(path, &mut pick.paused) {
             Ok(Some(b)) => b,
             Ok(None) => return Ok(Read::Missing),
             Err(e) if reading == Reading::Strict => {
@@ -444,6 +472,8 @@ struct Pick {
     alarms: Vec<String>,
     current_json: FileState,
     save_tmp: FileState,
+    /// Pauses between read tries so far (`READ_PAUSES` at most).
+    paused: usize,
 }
 
 /// Whether an interrupted save (`save.tmp`) supersedes the state it
@@ -1072,6 +1102,25 @@ mod tests {
             loaded.alarms,
             ["save.tmp (revision 4) is older than generation 1's 5 and is not loaded"]
         );
+    }
+
+    #[test]
+    fn a_read_is_tried_again_only_for_an_error_that_may_pass() {
+        use io::ErrorKind::{
+            Interrupted, IsADirectory, NotADirectory, Other, PermissionDenied, TimedOut, WouldBlock,
+        };
+        for kind in [Interrupted, WouldBlock, TimedOut] {
+            assert!(transient(&io::Error::from(kind)), "{kind:?}");
+        }
+        for kind in [IsADirectory, NotADirectory, PermissionDenied, Other] {
+            assert!(!transient(&io::Error::from(kind)), "{kind:?}");
+        }
+        // Windows' sharing and lock violations; elsewhere these codes are
+        // other errors (EPIPE, EDOM on Linux).
+        for code in [SHARING_VIOLATION, LOCK_VIOLATION] {
+            let e = io::Error::from_raw_os_error(code);
+            assert_eq!(transient(&e), cfg!(windows), "{code}: {e}");
+        }
     }
 
     #[test]
