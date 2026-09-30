@@ -216,11 +216,17 @@ try {
     Import-Module (Join-Path $here 'IemMeasure.psm1') -Force
     $x = Exit-IemTuningMode -ProfilePath $pp
     Assert ([IemPower]::Active() -eq $activeBefore) 'exit-from-journal-in-a-new-session'
-    Assert (-not (@(& powercfg.exe /list) -match $testPlan)) 'exit-deletes-the-plan'
+    # The plan stays defined but inactive (design note 6.2 L2); the next enter reuses it (A6).
+    Assert (@(& powercfg.exe /list) -match $testPlan) 'exit-keeps-the-plan-defined'
     Assert ((Get-Service W32Time).Status -eq 'Running') 'exit-restarts-the-governor'
     Assert ((@([IemCpuSets]::Get($child.Id)) -join ',') -eq '') 'exit-clears-the-placement'
     Assert (-not (Read-IemJournalState $pp)) 'exit-clears-entered'
     Assert ((Exit-IemTuningMode -ProfilePath $pp).Count -eq 0) 'exit-twice-is-harmless'
+    $er = Enter-IemTuningMode -ProfilePath $pp -Only @('plan') -Idle 'c1'
+    $ew = @(Rows $er 'written' | ForEach-Object { $_.key })
+    Assert (@(Rows $er 'failed').Count -eq 0 -and @(Rows $er 'kept' | Where-Object { $_.key -eq 'plan:exists' }).Count -eq 1 -and $ew.Count -eq 1 -and $ew[0] -eq 'plan:active') 'enter-reuses-the-plan'
+    [void](Exit-IemTuningMode -ProfilePath $pp)
+    Assert ([IemPower]::Active() -eq $activeBefore -and (@(& powercfg.exe /list) -match $testPlan)) 'exit-after-a-reuse-keeps-the-plan-inactive'
 
     # A placed process that ended is skipped; a reused pid is refused.
     $short = Start-Process -FilePath $ping -ArgumentList '-n', '5', '127.0.0.1' -PassThru -WindowStyle Hidden
