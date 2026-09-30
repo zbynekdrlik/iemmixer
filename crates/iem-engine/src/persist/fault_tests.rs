@@ -212,6 +212,7 @@ fn a_damaged_current_json_that_cannot_be_moved_aside_becomes_a_skipped_generatio
     let g = test_site();
     let (_d, faulty, s) = faulty_store();
     s.save(&sample(7)).unwrap();
+    s.save(&sample(8)).unwrap();
     fs::write(s.dir().join(CURRENT), b"damaged").unwrap();
     fs::write(s.dir().join(TMP), encode(&sample(9)).unwrap()).unwrap();
     let loaded = s.load(&g);
