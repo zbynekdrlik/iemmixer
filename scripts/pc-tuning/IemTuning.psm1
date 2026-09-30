@@ -700,7 +700,8 @@ function Assert-IemDeviceLps {
     # is present (group 0 of the CPU Set map), and the card's are exactly the
     # layout's card role.
     param([Parameter(Mandatory)]$Profile, [Parameter(Mandatory)]$Device)
-    $lps = @(@($Device.lps) | ForEach-Object { [int]$_ } | Sort-Object)
+    # A null entry is no processor (@($null) has one element, which [int] makes 0, review R3).
+    $lps = @(@($Device.lps) | Where-Object { $null -ne $_ } | ForEach-Object { [int]$_ } | Sort-Object)
     if ($lps.Count -eq 0) { throw "device $($Device.id): no processors (lps)" }
     $present = @([IemCpuSets]::Map().Keys)
     foreach ($lp in $lps) { if ($present -notcontains $lp) { throw "device $($Device.id): processor $lp is not present" } }
