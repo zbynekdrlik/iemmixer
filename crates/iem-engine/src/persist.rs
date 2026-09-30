@@ -389,6 +389,16 @@ mod tests {
     }
 
     #[test]
+    fn has_state_fails_when_the_state_dir_cannot_be_read() {
+        // #32 D5: an I/O error is not "no state" — the seed must never write
+        // over state it could not look at.
+        let (_d, s) = store();
+        fs::remove_dir(s.dir()).unwrap();
+        fs::write(s.dir(), b"not a directory").unwrap();
+        assert!(s.has_state().is_err());
+    }
+
+    #[test]
     fn save_then_load_is_lossless() {
         let (_d, s) = store();
         let g = test_site();

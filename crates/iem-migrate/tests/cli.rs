@@ -201,6 +201,32 @@ fn seed_if_absent_writes_current_only_when_it_is_missing() {
     );
 }
 
+/// #32 D5: `Store::has_state` swallowed I/O errors (`Path::exists`, a
+/// failed `read_dir` read as "no generation"), so a state directory the seed
+/// could not read looked empty and was seeded over. The seed now fails
+/// (exit 1) before it writes anything.
+#[cfg(unix)]
+#[test]
+fn seed_if_absent_refuses_a_state_dir_it_cannot_read() {
+    let w = World::new(29);
+    let dir = w.path("state");
+    std::fs::create_dir_all(&dir).unwrap();
+    // A `current.json` whose lookup fails for any user: a link to itself.
+    std::os::unix::fs::symlink("current.json", dir.join("current.json")).unwrap();
+    let mut a = import_args(&w, &["--seed-if-absent"]);
+    a.extend(["--state-dir".into(), s(&dir)]);
+    let e = run(&a).unwrap_err();
+    assert_eq!(e.code, EXIT_IO, "{}", e.msg);
+    assert!(e.msg.contains(&s(&dir)), "{}", e.msg);
+    let kept = std::fs::symlink_metadata(dir.join("current.json")).unwrap();
+    assert!(kept.file_type().is_symlink());
+    let names: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["current.json"], "nothing written");
+}
+
 #[test]
 fn a_wrong_count_an_unknown_name_or_no_state_dir_fail() {
     let w = World::new(2);
