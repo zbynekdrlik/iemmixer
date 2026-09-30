@@ -1434,25 +1434,62 @@ mod tests {
             g(GlitchKind::Missed, 2, 700_000),
             g(GlitchKind::Overrun, 3, 400_000),
             g(GlitchKind::PositionGap, 4, 64),
+            g(GlitchKind::PositionBack, 5, 32),
         ];
         for x in all {
             log.push(x);
         }
-        log.push(g(GlitchKind::Missed, 5, u64::MAX));
+        log.push(g(GlitchKind::PositionBack, 6, u64::MAX));
         let mut out = Vec::new();
         log.drain(&mut out);
-        assert_eq!(&out[..4], &all);
-        assert_eq!(out[4], g(GlitchKind::Missed, 5, (1 << 62) - 1));
+        assert_eq!(&out[..5], &all);
+        // Five kinds take three bits: a value is clamped below 2^61.
+        assert_eq!(out[5], g(GlitchKind::PositionBack, 6, (1 << 61) - 1));
         assert_eq!(
             [
                 GlitchKind::Late,
                 GlitchKind::Missed,
                 GlitchKind::Overrun,
-                GlitchKind::PositionGap
+                GlitchKind::PositionGap,
+                GlitchKind::PositionBack
             ]
             .map(GlitchKind::name),
-            ["late", "missed", "overrun", "position-gap"]
+            ["late", "missed", "overrun", "position-gap", "position-back"]
         );
+    }
+
+    /// A step back keeps its direction: with only the magnitude, a step back
+    /// by one buffer would read like a normal advance.
+    #[test]
+    fn a_position_step_back_is_its_own_glitch_kind() {
+        let t = Telemetry::new(32, 96_000.0);
+        let mut at = 1_000;
+        let mut last = 1_000;
+        for _ in 0..WARMUP {
+            t.on_callback(at, Some(last));
+            at += P;
+            last += 32;
+        }
+        last -= 32; // the last priming callback's position
+        let mut times = Vec::new();
+        for pos in [last - 32, last - 32, last, last - 100, last + 64] {
+            t.on_callback(at, Some(pos));
+            times.push(at);
+            at += P;
+        }
+        let mut out = Vec::new();
+        t.drain_glitches(&mut out);
+        assert_eq!(
+            out,
+            [
+                g(GlitchKind::PositionBack, times[0], 32),
+                // Standing still is a gap of 0, not a step back.
+                g(GlitchKind::PositionGap, times[1], 0),
+                g(GlitchKind::PositionBack, times[3], 100),
+                g(GlitchKind::PositionGap, times[4], 164),
+            ]
+        );
+        assert_eq!(t.snapshot().position_gaps, 4);
     }
 
     #[test]
