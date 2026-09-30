@@ -4,16 +4,18 @@
 //! - `current.json`: the latest save;
 //! - `gen-<seq>.json`: the 20 previous saves (the newest has the highest seq);
 //! - `baseline.json`: written at each import (and, from S6, at `live` entry);
-//! - `save.tmp`: a save before its renames (a crash between them leaves the
-//!   newest state only in it: the load chain reads it when `current.json` is
-//!   missing, the seed keeps it, `Store::live_state`);
+//! - `save.tmp`: a save before its renames (a crash before the second one
+//!   leaves the newest state only in it: the load chain reads it when
+//!   `current.json` is missing or older by revision, the seed keeps it,
+//!   `Store::live_state`);
 //! - `baseline.tmp`: a baseline before its rename.
 //!
 //! A file is `{"format", "schema", "sha256", "payload"}`; the SHA-256 covers the
 //! payload's raw bytes, so a re-serialisation never matters. Readers ignore
 //! unknown fields and default missing ones (additive schemas). The load chain
-//! is current → `save.tmp` (only while `current.json` is missing) →
-//! generations (newest first) → baseline → defaults with every mix muted.
+//! is current (or `save.tmp` when it is newer by revision, or current is
+//! missing) → generations (newest first) → baseline → defaults with every
+//! mix muted.
 //! Files of an older schema (1: the REAPER-shaped graph before #20) are
 //! refused.
 
@@ -53,8 +55,8 @@ pub struct Persisted {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
     Current,
-    /// `save.tmp` with `current.json` missing: a save a crash cut off between
-    /// its two renames, the newest state there is (#32).
+    /// `save.tmp`: a save a crash cut off before its renames, the newest
+    /// state there is (`current.json` missing or older by revision, #32).
     Interrupted,
     Generation(u64),
     Baseline,
@@ -193,30 +195,31 @@ impl Store {
         self.dir.join(generation_name(seq))
     }
 
-    /// The live state the seed must keep, if any, in the load chain's order:
-    /// `current.json`, `save.tmp`, the newest generation. `save` writes the new state to `save.tmp` (synced), then
-    /// renames `current.json` to a generation and `save.tmp` to
-    /// `current.json`: a crash before the second rename leaves the newest
-    /// state only in `save.tmp`, the previous one maybe only as a generation.
-    /// The load chain reads `save.tmp` then, when it is complete (a save cut
-    /// off while writing fails its checksum), so `import --seed-if-absent`
-    /// must neither seed over it nor touch it (iemmixer#9 2026-09-28, #32).
-    /// It counts here whenever it exists, complete or not: the seed never
-    /// writes over what the engine may load. Ignores `baseline.json`
-    /// (a seed is not live state) and `baseline.tmp`. An I/O error while
-    /// looking is an error, never "no state" (#32 D5: the seed would write
-    /// over state it could not see).
+    /// The live state the seed must keep, if any, named as the load chain
+    /// would pick it: `current.json` (or `save.tmp` when it supersedes it),
+    /// else `save.tmp`, else the newest generation. `save` writes the new
+    /// state to `save.tmp` (synced), then renames `current.json` to a
+    /// generation and `save.tmp` to `current.json`: a crash before the
+    /// second rename leaves the newest state only in `save.tmp`, which the
+    /// load chain then reads when it is complete, so `import
+    /// --seed-if-absent` must neither seed over it nor touch it (iemmixer#9
+    /// 2026-09-28, #32). Any of these files counts whenever it exists,
+    /// complete or not: the seed never writes over what the engine may load.
+    /// Ignores `baseline.json` (a seed is not live state) and `baseline.tmp`.
+    /// An I/O error while looking is an error, never "no state" (#32 D5: the
+    /// seed would write over state it could not see).
     pub fn live_state(&self) -> io::Result<Option<Source>> {
-        if self.dir.join(CURRENT).try_exists()? {
-            return Ok(Some(Source::Current));
-        }
-        if self.dir.join(TMP).try_exists()? {
-            return Ok(Some(Source::Interrupted));
-        }
-        Ok(self
-            .generations()?
-            .last()
-            .map(|&(seq, _)| Source::Generation(seq)))
+        let current = self.dir.join(CURRENT);
+        let tmp = self.dir.join(TMP);
+        Ok(match (current.try_exists()?, tmp.try_exists()?) {
+            (true, true) if tmp_supersedes(&current, &tmp)? => Some(Source::Interrupted),
+            (true, _) => Some(Source::Current),
+            (false, true) => Some(Source::Interrupted),
+            (false, false) => self
+                .generations()?
+                .last()
+                .map(|&(seq, _)| Source::Generation(seq)),
+        })
     }
 
     /// Generation files, oldest first.
@@ -265,47 +268,50 @@ impl Store {
 
     /// The load chain. A file must pass `decode` (format, schema, the
     /// payload's SHA-256, then the payload's parse) to be used; one that
-    /// exists and does not is `rejected`. `save.tmp` is tried only while
-    /// `current.json` is missing (a crash between `save`'s renames: it holds
-    /// the newest state, and a save cut off while writing fails the
-    /// checksum); beside a `current.json` it is not read (#32).
+    /// exists and does not is `rejected`. `save.tmp` holds a save a crash cut
+    /// off before its renames (#32): it is used when `current.json` is
+    /// missing, or when it is complete and strictly newer than a valid
+    /// `current.json` by revision ([`supersedes`]); a `save.tmp` it does not
+    /// use beside a valid `current.json` is `rejected` with the reason.
     pub fn load(&self, topo: &Topology) -> Loaded {
-        let current = self.dir.join(CURRENT);
-        let interrupted = matches!(current.try_exists(), Ok(false));
-        let mut candidates = vec![(current, Source::Current)];
-        if interrupted {
-            candidates.push((self.dir.join(TMP), Source::Interrupted));
-        }
-        if let Ok(gens) = self.generations() {
-            candidates.extend(
-                gens.into_iter()
-                    .rev()
-                    .map(|(seq, path)| (path, Source::Generation(seq))),
-            );
-        }
-        candidates.push((self.dir.join(BASELINE), Source::Baseline));
         let mut rejected = Vec::new();
-        for (path, source) in candidates {
-            let bytes = match fs::read(&path) {
-                Ok(b) => b,
-                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-                Err(e) => {
-                    rejected.push((path, e.to_string()));
-                    continue;
+        let tmp = self.dir.join(TMP);
+        let first = match read_state(&self.dir.join(CURRENT), &mut rejected) {
+            Read::Found(current) => Some(match read_state(&tmp, &mut rejected) {
+                Read::Found(newer) if supersedes(&newer, &current) => (newer, Source::Interrupted),
+                Read::Found(older) => {
+                    rejected.push((
+                        tmp,
+                        format!(
+                            "revision {} is not newer than current.json's {}",
+                            older.rev, current.rev
+                        ),
+                    ));
+                    (current, Source::Current)
                 }
-            };
-            match decode(&bytes) {
-                Ok(mut persisted) => {
-                    let (r, dropped) = reconcile(topo, &persisted.state);
-                    persisted.state = to_state(topo, &r);
-                    return Loaded {
-                        persisted,
-                        source,
-                        rejected,
-                        dropped,
-                    };
-                }
-                Err(why) => rejected.push((path, why)),
+                Read::Missing | Read::Rejected => (current, Source::Current),
+            }),
+            Read::Missing => match read_state(&tmp, &mut rejected) {
+                Read::Found(interrupted) => Some((interrupted, Source::Interrupted)),
+                Read::Missing | Read::Rejected => None,
+            },
+            // A damaged current.json gives save.tmp no revision to beat.
+            Read::Rejected => None,
+        };
+        if let Some((persisted, source)) = first {
+            return settle(topo, persisted, source, rejected);
+        }
+        let mut rest: Vec<(PathBuf, Source)> = self
+            .generations()
+            .unwrap_or_default()
+            .into_iter()
+            .rev()
+            .map(|(seq, path)| (path, Source::Generation(seq)))
+            .collect();
+        rest.push((self.dir.join(BASELINE), Source::Baseline));
+        for (path, source) in rest {
+            if let Read::Found(persisted) = read_state(&path, &mut rejected) {
+                return settle(topo, persisted, source, rejected);
             }
         }
         Loaded {
@@ -318,6 +324,69 @@ impl Store {
             rejected,
             dropped: Vec::new(),
         }
+    }
+}
+
+/// One state file, read and decoded.
+enum Read {
+    Missing,
+    /// Present but unreadable or not a valid state file (in `rejected`).
+    Rejected,
+    Found(Persisted),
+}
+
+/// Reads and decodes `path`; an unreadable or invalid file goes to
+/// `rejected` with the reason.
+fn read_state(path: &Path, rejected: &mut Vec<(PathBuf, String)>) -> Read {
+    let bytes = match fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Read::Missing,
+        Err(e) => {
+            rejected.push((path.to_path_buf(), e.to_string()));
+            return Read::Rejected;
+        }
+    };
+    match decode(&bytes) {
+        Ok(persisted) => Read::Found(persisted),
+        Err(why) => {
+            rejected.push((path.to_path_buf(), why));
+            Read::Rejected
+        }
+    }
+}
+
+/// Whether an interrupted save (`save.tmp`) supersedes `current.json`: only
+/// when its revision is strictly higher. `rev` is the core's own monotonic
+/// revision (one per changing request, carried across restarts), so a
+/// repeated save of the same state, an import's fresh count (0) and a
+/// leftover baseline of an older engine never roll the saved state back.
+fn supersedes(interrupted: &Persisted, current: &Persisted) -> bool {
+    interrupted.rev > current.rev
+}
+
+/// [`supersedes`] on the files, for `Store::live_state`: an unreadable file
+/// is an error, an invalid one supersedes nothing and is superseded by none.
+fn tmp_supersedes(current: &Path, tmp: &Path) -> io::Result<bool> {
+    let (Ok(current), Ok(tmp)) = (decode(&fs::read(current)?), decode(&fs::read(tmp)?)) else {
+        return Ok(false);
+    };
+    Ok(supersedes(&tmp, &current))
+}
+
+/// A loaded state, reconciled against the topology.
+fn settle(
+    topo: &Topology,
+    mut persisted: Persisted,
+    source: Source,
+    rejected: Vec<(PathBuf, String)>,
+) -> Loaded {
+    let (r, dropped) = reconcile(topo, &persisted.state);
+    persisted.state = to_state(topo, &r);
+    Loaded {
+        persisted,
+        source,
+        rejected,
+        dropped,
     }
 }
 

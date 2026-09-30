@@ -474,7 +474,7 @@ pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
         Source::Current => info!("state rev {} loaded", loaded.persisted.rev),
         // The newest state: a crash cut its save off between the renames.
         Source::Interrupted => warn!(
-            "state rev {} loaded from save.tmp: its save was cut off before current.json",
+            "state rev {} loaded from save.tmp: a crash cut its save off before current.json",
             loaded.persisted.rev
         ),
         Source::Generation(_) | Source::Baseline => alarms.push(Alarm {
