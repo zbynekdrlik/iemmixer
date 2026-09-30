@@ -310,11 +310,33 @@ function Set-IemValue {
     }
 }
 
+function Read-IemJournalFile {
+    # The journal object in Path, or $null when the file is missing, empty or
+    # not complete JSON with a schema.
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
+    $text = [IO.File]::ReadAllText($Path, $script:Utf8NoBom)
+    if ([string]::IsNullOrWhiteSpace($text)) { return $null }
+    try { $o = $text | ConvertFrom-Json } catch { return $null }
+    if ($null -eq $o -or -not $o.PSObject.Properties['schema']) { return $null }
+    return $o
+}
+
 function Read-IemJournal {
     param([Parameter(Mandatory)][string]$Path)
     $j = @{ schema = $script:Schema; version = 0; entered = $false; global = @{}; mode = @{}; reverted = @{}; order = @{ global = @(); mode = @() } }
-    if (-not (Test-Path -LiteralPath $Path)) { return $j }
-    $o = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+    $o = Read-IemJournalFile -Path $Path
+    if ($null -eq $o) {
+        # A write that stopped between its flushed temp file and the swap leaves
+        # the journal missing or empty next to a complete .tmp (A14). A journal
+        # that exists but cannot be read, with no complete .tmp, is refused:
+        # reading it as empty would lose its before-values silently.
+        $o = Read-IemJournalFile -Path "$Path.tmp"
+        if ($null -eq $o) {
+            if (Test-Path -LiteralPath $Path) { throw "journal ${Path}: empty or unreadable, and no complete ${Path}.tmp" }
+            return $j
+        }
+    }
     if ([int]$o.schema -ne $script:Schema) { throw "journal ${Path}: schema $($o.schema), this module $($script:Schema)" }
     $j.version = [int]$o.version
     $j.entered = [bool]$o.entered
@@ -326,12 +348,19 @@ function Read-IemJournal {
 }
 
 function Write-IemJournal {
+    # The temp file is written through to the disk, then swapped in with
+    # File.Replace, which keeps journal.json under its name until the new one
+    # takes it (Move-Item -Force on 5.1 deletes it first). A stop in between
+    # leaves a complete .tmp that Read-IemJournal falls back to (A14).
     param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][hashtable]$Journal)
     $dir = Split-Path -Parent $Path
     if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
     $tmp = "$Path.tmp"
-    [IO.File]::WriteAllText($tmp, ($Journal | ConvertTo-Json -Depth 8), $script:Utf8NoBom)
-    Move-Item -LiteralPath $tmp -Destination $Path -Force
+    $bytes = $script:Utf8NoBom.GetBytes(($Journal | ConvertTo-Json -Depth 8))
+    $fs = New-Object -TypeName IO.FileStream -ArgumentList $tmp, ([IO.FileMode]::Create), ([IO.FileAccess]::Write), ([IO.FileShare]::None), 4096, ([IO.FileOptions]::WriteThrough)
+    try { $fs.Write($bytes, 0, $bytes.Length); $fs.Flush($true) } finally { $fs.Dispose() }
+    if (Test-Path -LiteralPath $Path) { [IO.File]::Replace($tmp, $Path, [System.Management.Automation.Language.NullString]::Value) }
+    else { [IO.File]::Move($tmp, $Path) }
 }
 
 function ConvertTo-IemItem {
