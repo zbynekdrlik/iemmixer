@@ -233,8 +233,10 @@ try {
         ThrowsLike { Invoke-IemTuningApply -ProfilePath $bp -Tier 3 -Only @('irq') } $c[1] "tier3-refuses-the-card-hwid '$($c[0])'"
     }
     # A device's processors must exist, and the card's must be the layout's card
-    # role, before its affinity is written (review 3.9).
-    foreach ($c in @(@(@(2, 62), @(2, 62), '*not present*'), @(@(2), @(2, 62), '*layout.card*'), @(@(), @(2), '*no processors*'))) {
+    # role, before its affinity is written (review 3.9); "lps": null is no
+    # processor, never processor 0 (review R3).
+    foreach ($c in @(@(@(2, 62), @(2, 62), '*not present*'), @(@(2), @(2, 62), '*layout.card*'), @(@(), @(2), '*no processors*'),
+                     @($null, @(2), '*no processors*'))) {
         $dv = @([ordered]@{ id = 'card'; instance = 'PCI\VEN_TEST&DEV_0001\0'; hwid = $hw; lps = $c[0]; enabled = $true })
         $bp = New-TestProfile $hw @{ devices = $dv; layout = [ordered]@{ housekeeping = @(0); nic = @(1); card = $c[1]; audio = @(3) } }
         ThrowsLike { Invoke-IemTuningApply -ProfilePath $bp -Tier 3 -Only @('irq') } $c[2] "tier3-refuses-card-processors '$($c[0] -join ',')'"
