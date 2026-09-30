@@ -695,19 +695,39 @@ function Assert-IemDevice {
     if (@($hw) -notcontains [string]$Device.hwid) { throw "${what}: hardware id does not match the profile" }
 }
 
+function Get-IemLayoutLps {
+    # A layout role's processors, sorted; an absent role or a null entry is none.
+    param([Parameter(Mandatory)]$Profile, [Parameter(Mandatory)][string]$Role)
+    if (-not $Profile.layout.PSObject.Properties[$Role]) { return ,([int[]]@()) }
+    return ,([int[]]@(@($Profile.layout.$Role) | Where-Object { $null -ne $_ } | ForEach-Object { [int]$_ } | Sort-Object))
+}
+
+function Test-IemCardDevice {
+    # The card is the device whose role is 'card', never found by its id (review R4).
+    param([Parameter(Mandatory)]$Device)
+    return [bool]($Device.PSObject.Properties['role'] -and [string]$Device.role -eq 'card')
+}
+
 function Assert-IemDeviceLps {
-    # Before an affinity write (review 3.9): the device names processors, each one
-    # is present (group 0 of the CPU Set map), and the card's are exactly the
-    # layout's card role.
+    # Before an affinity write (review 3.9, R4): the device names processors, each
+    # one is present (group 0 of the CPU Set map); the card's are exactly the
+    # layout's card role, and no other device's is a card or audio processor
+    # (design note 6.4 R3).
     param([Parameter(Mandatory)]$Profile, [Parameter(Mandatory)]$Device)
     # A null entry is no processor (@($null) has one element, which [int] makes 0, review R3).
     $lps = @(@($Device.lps) | Where-Object { $null -ne $_ } | ForEach-Object { [int]$_ } | Sort-Object)
     if ($lps.Count -eq 0) { throw "device $($Device.id): no processors (lps)" }
     $present = @([IemCpuSets]::Map().Keys)
     foreach ($lp in $lps) { if ($present -notcontains $lp) { throw "device $($Device.id): processor $lp is not present" } }
-    if ([string]$Device.id -eq 'card') {
-        $card = @(@($Profile.layout.card) | ForEach-Object { [int]$_ } | Sort-Object)
-        if (($lps -join ',') -ne ($card -join ',')) { throw "device card: lps $($lps -join ',') differ from layout.card $($card -join ',')" }
+    $card = Get-IemLayoutLps -Profile $Profile -Role 'card'
+    if (Test-IemCardDevice -Device $Device) {
+        if (($lps -join ',') -ne ($card -join ',')) { throw "device $($Device.id) (role card): lps $($lps -join ',') differ from layout.card $($card -join ',')" }
+        return
+    }
+    $audio = Get-IemLayoutLps -Profile $Profile -Role 'audio'
+    $reserved = @($card) + @($audio)
+    foreach ($lp in $lps) {
+        if ($reserved -contains $lp) { throw "device $($Device.id): processor $lp is a card or audio processor, which no other device's interrupts may use (design note 6.4 R3)" }
     }
 }
 
@@ -792,6 +812,10 @@ function Get-IemGlobalItems {
             foreach ($p in @($Profile.defender.processes)) { $items += New-IemItem -Key "defender:process:$p" -Kind 'defender-process' -Arguments @{ value = $p } -Desired 'present' -Tier 2 -Group 'defender' }
         }
     } elseif ($Tier -eq 3) {
+        if ($Check) {
+            $cards = @(@($Profile.devices) | Where-Object { $null -ne $_ -and (Test-IemCardDevice -Device $_) })
+            if ($cards.Count -gt 1) { throw "devices $(@($cards | ForEach-Object { [string]$_.id }) -join ', '): role card on $($cards.Count) devices, one card at most" }
+        }
         foreach ($d in @($Profile.devices)) {
             $wanted = (@($Only) -contains "irq:$($d.id)") -or ([bool]$d.enabled -and (Select-IemGroup $Only 'irq'))
             if (-not $wanted) { continue }
