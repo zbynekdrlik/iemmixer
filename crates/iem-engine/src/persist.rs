@@ -3,7 +3,11 @@
 //!
 //! - `current.json`: the latest save;
 //! - `gen-<seq>.json`: the 20 previous saves (the newest has the highest seq);
-//! - `baseline.json`: written at each import (and, from S6, at `live` entry).
+//! - `baseline.json`: written at each import (and, from S6, at `live` entry);
+//! - `save.tmp`: a save before its renames (a crash there may leave the
+//!   newest state only in it: the load chain does not read it, the seed
+//!   keeps it, `Store::has_state`);
+//! - `baseline.tmp`: a baseline before its rename.
 //!
 //! A file is `{"format", "schema", "sha256", "payload"}`; the SHA-256 covers the
 //! payload's raw bytes, so a re-serialisation never matters. Readers ignore
@@ -31,6 +35,7 @@ pub const GENERATIONS: usize = 20;
 const CURRENT: &str = "current.json";
 const BASELINE: &str = "baseline.json";
 const TMP: &str = "save.tmp";
+const BASELINE_TMP: &str = "baseline.tmp";
 
 /// What a state file carries.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -166,16 +171,21 @@ impl Store {
         self.dir.join(format!("gen-{seq:010}.json"))
     }
 
-    /// Whether any saved live state exists — `current.json` or a generation.
-    /// A generation can be the newest state on its own: `save` renames
-    /// `current.json` to a generation before writing the new one, so a crash
-    /// between those two renames leaves the latest state only as a generation
-    /// (iemmixer#9 2026-09-28: `import --seed-if-absent` must not re-seed over
-    /// it). Ignores `baseline.json` (a seed is not live state). An I/O error
-    /// while looking is an error, never "no state" (#32: the seed would write
+    /// Whether any live state exists: `current.json`, `save.tmp` or a
+    /// generation. `save` writes the new state to `save.tmp` (synced), then
+    /// renames `current.json` to a generation and `save.tmp` to
+    /// `current.json`: a crash before the second rename leaves the newest
+    /// state only in `save.tmp`, the previous one maybe only as a generation.
+    /// The load chain does not read `save.tmp` (it may also be a save cut off
+    /// while writing), but `import --seed-if-absent` must neither seed over it
+    /// nor touch it (iemmixer#9 2026-09-28, #32 D6). Ignores `baseline.json`
+    /// (a seed is not live state) and `baseline.tmp`. An I/O error while
+    /// looking is an error, never "no state" (#32 D5: the seed would write
     /// over state it could not see).
     pub fn has_state(&self) -> io::Result<bool> {
-        Ok(self.dir.join(CURRENT).try_exists()? || !self.generations()?.is_empty())
+        Ok(self.dir.join(CURRENT).try_exists()?
+            || self.dir.join(TMP).try_exists()?
+            || !self.generations()?.is_empty())
     }
 
     /// Generation files, oldest first.
@@ -213,8 +223,10 @@ impl Store {
         Ok(seq)
     }
 
+    /// Writes `baseline.json` through its own `baseline.tmp`, never
+    /// `save.tmp`, which may hold the only copy of an interrupted save (#32).
     pub fn save_baseline(&self, p: &Persisted) -> io::Result<()> {
-        let tmp = self.dir.join(TMP);
+        let tmp = self.dir.join(BASELINE_TMP);
         write_synced(&tmp, &encode(p)?)?;
         fs::rename(&tmp, self.dir.join(BASELINE))?;
         sync_dir(&self.dir)

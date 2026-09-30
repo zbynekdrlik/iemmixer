@@ -148,10 +148,11 @@ pub fn run(args: &[String]) -> Result<String, Failure> {
         ..Persisted::default()
     };
     let io = |e: std::io::Error| Failure::io(format!("{}: {e}", dir.display()));
-    // Keep any existing live state (current.json OR a lone generation left by a
-    // crash mid-save); only seed current.json when there is none. Looked at
-    // before anything is written: a directory it cannot read refuses the seed
-    // whole (#32).
+    // Keep any existing live state (current.json, a generation, or save.tmp
+    // left by a crash mid-save: `Store::has_state`); only seed current.json
+    // when there is none. Looked at before anything is written: a directory
+    // it cannot read refuses the seed whole (#32). The baseline goes through
+    // its own temp file, so an interrupted save stays untouched.
     let keep_current = seed_if_absent && store.has_state().map_err(io)?;
     store.save_baseline(&persisted).map_err(io)?;
     if !keep_current {
