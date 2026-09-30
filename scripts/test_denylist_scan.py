@@ -298,6 +298,44 @@ class DenylistScanTests(unittest.TestCase):
         self.assertNotIn("zyxname", out.lower())
         self.assertNotIn("\\302", out)
 
+    # --- #29: harden commit-mode DETECTION (empty/binary paths, non-LF splits, unquote_c) ---
+
+    def test_empty_added_file_path_with_a_term_is_caught_in_commit_mode(self) -> None:
+        # Vector 1: an added EMPTY file has no `+++` diff header, so commit mode never scanned its
+        # path; a term in the path must still be caught (via git diff-tree) and redacted, never
+        # printed.
+        self.commit({"base.txt": "base\n"})
+        (self.repo / "zyxname-empty.txt").write_bytes(b"")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "add an empty file named after a term")
+        code, out = self.scan("--commits", "HEAD~1..HEAD")
+        self.assertEqual(code, 1)
+        self.assertNotIn("zyxname", out.lower())
+        self.assertIn("[redacted]", out)
+        self.assertIn("denylist entry", out)
+
+    def test_binary_added_file_path_with_a_term_is_caught_in_commit_mode(self) -> None:
+        # Vector 1: an added BINARY file shows `Binary files … differ`, no `+++` header; its
+        # term-bearing path must still be caught and redacted in commit mode.
+        self.commit({"base.txt": "base\n"})
+        (self.repo / "zyxname.bin").write_bytes(b"\x00\x01\x02content")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "add a binary file named after a term")
+        code, out = self.scan("--commits", "HEAD~1..HEAD")
+        self.assertEqual(code, 1)
+        self.assertNotIn("zyxname", out.lower())
+        self.assertIn("[redacted]", out)
+
+    def test_a_text_added_path_is_reported_exactly_once_in_commit_mode(self) -> None:
+        # The added diff-tree path source must not double-report a text file already seen via its
+        # `+++` header (dedup guard).
+        self.commit({"base.txt": "base\n"})
+        self.commit({"zyxname-new.txt": "harmless\n"}, message="add a text file named after a term")
+        code, out = self.scan("--commits", "HEAD~1..HEAD")
+        self.assertEqual(code, 1)
+        path_findings = [ln for ln in out.splitlines() if ": path: denylist entry" in ln]
+        self.assertEqual(len(path_findings), 1, path_findings)
+
 
 if __name__ == "__main__":
     unittest.main()
