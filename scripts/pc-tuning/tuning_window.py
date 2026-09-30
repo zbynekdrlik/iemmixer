@@ -445,11 +445,19 @@ def cmd_post_boot(env, args) -> None:
             checks["reaper"] = True
             break
         time.sleep(10)
-    if checks["reaper"]:
-        try:
-            checks["handover"] = sw.bring_back(env, state)
-        except StepError as e:
-            checks["handover"] = {"error": str(e)}
+    # The window closes only with REAPER back (#32 B13): the bring-back starts it
+    # through the start task when it did not start by itself (still a problem:
+    # a reboot must come back in event mode) and runs the handover checks. A
+    # failed bring-back keeps the window open (card "rebooting"): preempt or
+    # to-event brings REAPER back later.
+    try:
+        checks["handover"] = sw.bring_back(env, state)
+    except StepError as e:
+        checks["handover"] = {"error": str(e)}
+    back = "error" not in checks["handover"]
+    if back:
+        state["card"], state["closed"] = "reaper", True
+    sw.save_state(state)
     current = tps(env, f"Get-IemReaperFingerprint -ProfilePath {sw.tuning_profile(env)}", timeout=120, event="ignore")
     checks["fingerprint"] = sw.fingerprint_diff(json.loads(baseline_path(env).read_text(encoding="utf-8")), current)
     st = tps(env, f"Get-IemTuningState -ProfilePath {sw.tuning_profile(env)}", timeout=120, event="ignore")
@@ -461,13 +469,13 @@ def cmd_post_boot(env, args) -> None:
     b = tps(env, "Get-IemCpuSample", timeout=60, event="ignore")
     checks["interrupts"] = lr.cpu_rates([a, b])
     problems = post_boot_verdict(checks)
-    state["card"], state["closed"] = "reaper", True
     state["post_boot"] = {"checks": checks, "problems": problems}
     sw.save_state(state)
     print(json.dumps({"post-boot": checks, "problems": problems}))
     if problems:
         sw.alarm("after the approved reboot: " + "; ".join(problems) + ". Revert: tuning_window undo --tier 3 in a dev window, "
-                 "then the pre-approved revert reboot.")
+                 "then the pre-approved revert reboot."
+                 + ("" if back else " REAPER is not back, so the window stays open: spike_window to-event brings it back."))
         raise StepError("post-boot checks failed")
 
 
