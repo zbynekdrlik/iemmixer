@@ -170,6 +170,22 @@ function Test-IemSameBoot {
     return [math]::Abs($d.TotalSeconds) -le $script:BootToleranceSeconds
 }
 
+function Invoke-IemNative {
+    # Runs a native program; returns its exit code and its stdout and stderr lines
+    # as text. Under 'Stop', Windows PowerShell 5.1 turns the first stderr line of
+    # a 2>&1 redirect into a terminating error before the exit code is known, so
+    # this scope continues on stderr and the exit code alone decides (A11).
+    param([Parameter(Mandatory)][string]$FilePath, [string[]]$Arguments = @())
+    if ([IO.Path]::IsPathRooted($FilePath)) {
+        if (-not (Test-Path -LiteralPath $FilePath -PathType Leaf)) { throw "$FilePath not found" }
+    } else { [void](Get-Command -Name $FilePath -CommandType Application -ErrorAction Stop) }
+    $ErrorActionPreference = 'Continue'
+    $out = @(& $FilePath @Arguments 2>&1 | ForEach-Object { "$_" })
+    $code = $LASTEXITCODE
+    $ErrorActionPreference = 'Stop'
+    return [pscustomobject]@{ code = $code; out = $out }
+}
+
 function Get-IemTextHash {
     param([AllowEmptyString()][string]$Text)
     $sha = [Security.Cryptography.SHA256]::Create()
@@ -350,8 +366,8 @@ function Set-IemValue {
         }
         'svc-start' {
             if (@('auto', 'delayed-auto', 'demand', 'disabled') -notcontains [string]$Value) { throw "service start type '$Value' refused for $($a.name)" }
-            $out = & sc.exe config $a.name start= ([string]$Value) 2>&1
-            if ($LASTEXITCODE -ne 0) { throw "sc.exe config $($a.name) start= ${Value}: $($out -join ' ')" }
+            $r = Invoke-IemNative -FilePath 'sc.exe' -Arguments @('config', $a.name, 'start=', [string]$Value)
+            if ($r.code -ne 0) { throw "sc.exe config $($a.name) start= ${Value}: $($r.out -join ' ')" }
         }
         'svc-state' {
             $s = Get-Service -Name $a.name
@@ -367,8 +383,8 @@ function Set-IemValue {
         'plan-exists' {
             # The plan is created once and stays defined (design note 6.2 L2): never deleted here.
             if ($Value -ne 'present') { throw "plan $($a.guid): only 'present' is written" }
-            $out = & powercfg.exe /duplicatescheme $a.source $a.guid 2>&1
-            if ($LASTEXITCODE -ne 0) { throw "powercfg /duplicatescheme: $($out -join ' ')" }
+            $r = Invoke-IemNative -FilePath 'powercfg.exe' -Arguments @('/duplicatescheme', $a.source, $a.guid)
+            if ($r.code -ne 0) { throw "powercfg /duplicatescheme: $($r.out -join ' ')" }
         }
         'plan-value' {
             if ($null -eq $Value) { throw 'a plan value cannot be removed' }

@@ -27,9 +27,10 @@ function New-IemTraceArguments {
 function Invoke-IemXperf {
     param([Parameter(Mandatory)][string]$Xperf, [Parameter(Mandatory)][string[]]$Arguments)
     if (-not (Test-Path -LiteralPath $Xperf)) { throw "xperf not found at $Xperf (run wpt-install)" }
-    $out = & $Xperf @Arguments 2>&1
-    if ($LASTEXITCODE -ne 0) { throw "xperf $($Arguments -join ' ') (exit $LASTEXITCODE): $($out -join ' ')" }
-    return ,@($out | ForEach-Object { "$_" })
+    # stderr is output; the exit code alone decides (A11).
+    $r = Invoke-IemNative -FilePath $Xperf -Arguments $Arguments
+    if ($r.code -ne 0) { throw "xperf $($Arguments -join ' ') (exit $($r.code)): $($r.out -join ' ')" }
+    return ,@($r.out)
 }
 
 function ConvertFrom-IemLoggers {
