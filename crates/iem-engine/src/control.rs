@@ -546,9 +546,12 @@ impl Control {
     fn save(&mut self) {
         self.schedule.saved();
         match self.store.save(&self.persisted()) {
-            Ok(generation) => {
+            Ok(committed) => {
                 let rev = self.core.rev();
-                self.broadcast(&EngineMsg::Saved { rev, generation });
+                self.broadcast(&EngineMsg::Saved {
+                    rev,
+                    generation: committed.generation,
+                });
             }
             Err(e) => self.alarm(
                 AlarmCode::SaveFailed,

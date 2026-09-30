@@ -144,6 +144,8 @@ pub struct Recovery {
     pub finished: bool,
     /// Steps that failed; the engine runs on the loaded state anyway.
     pub failed: Vec<String>,
+    /// What went wrong without undoing anything (old generations left).
+    pub warnings: Vec<String>,
 }
 
 impl Store {
@@ -178,7 +180,7 @@ impl Store {
         }
         if loaded.source == Source::Interrupted {
             match self.finish_interrupted() {
-                Ok(()) => done.finished = true,
+                Ok(_) => done.finished = true,
                 Err(e) => done
                     .failed
                     .push(format!("finishing the interrupted save failed: {e}")),
@@ -201,10 +203,9 @@ impl Store {
         )))
     }
 
-    fn finish_interrupted(&self) -> io::Result<()> {
+    fn finish_interrupted(&self) -> io::Result<Committed> {
         self.files.sync_file(&self.dir.join(TMP))?;
-        self.commit_tmp()?;
-        Ok(())
+        self.commit_tmp()
     }
 
     /// Reads and decodes `path`. A file that does not decode goes to
@@ -599,7 +600,7 @@ mod tests {
             Recovery {
                 quarantined: Some(s.dir().join("current.json.damaged-1")),
                 finished: true,
-                failed: Vec::new(),
+                ..Recovery::default()
             }
         );
         assert_eq!(rev_of(&s.dir().join(CURRENT)), 9);

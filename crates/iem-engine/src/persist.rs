@@ -188,6 +188,16 @@ fn generation_entries(
     Ok(gens)
 }
 
+/// A save that reached `current.json`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Committed {
+    /// The generation the previous `current.json` became (0: there was none).
+    pub generation: u64,
+    /// Removing generations beyond [`GENERATIONS`] failed, why: the save
+    /// itself stands.
+    pub pruning: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Store {
     dir: PathBuf,
@@ -234,13 +244,13 @@ impl Store {
     }
 
     /// Saves atomically; the previous `current.json` becomes the newest
-    /// generation. Returns that generation's seq (0: there was none). The
+    /// generation (its seq in the result, 0: there was none). The
     /// state is written and flushed to `save.new`, which then replaces
     /// `save.tmp` in one rename: `save.tmp` may hold the only copy of the
     /// newest state (an interrupted save not yet finished), so it is never
     /// truncated or written in place, only ever the previous complete save
     /// or the new one (#32 P1).
-    pub fn save(&self, p: &Persisted) -> io::Result<u64> {
+    pub fn save(&self, p: &Persisted) -> io::Result<Committed> {
         let bytes = encode(p)?;
         let new = self.dir.join(NEW);
         self.write_synced(&new, &bytes)?;
@@ -250,14 +260,14 @@ impl Store {
 
     /// The renames that end a save: the previous `current.json` becomes the
     /// newest generation and `save.tmp` (synced) becomes `current.json`;
-    /// keeps [`GENERATIONS`] and syncs the directory. Returns that
-    /// generation's seq (0: there was none).
-    fn commit_tmp(&self) -> io::Result<u64> {
+    /// keeps [`GENERATIONS`] and syncs the directory.
+    fn commit_tmp(&self) -> io::Result<Committed> {
         let current = self.dir.join(CURRENT);
-        let mut seq = 0;
+        let mut generation = 0;
         if self.files.exists(&current).unwrap_or(false) {
-            seq = self.generations()?.last().map_or(0, |g| g.0) + 1;
-            self.files.rename(&current, &self.generation_path(seq))?;
+            generation = self.generations()?.last().map_or(0, |g| g.0) + 1;
+            self.files
+                .rename(&current, &self.generation_path(generation))?;
         }
         self.files.rename(&self.dir.join(TMP), &current)?;
         let gens = self.generations()?;
@@ -266,7 +276,10 @@ impl Store {
             self.files.remove(path)?;
         }
         self.files.sync_dir(&self.dir)?;
-        Ok(seq)
+        Ok(Committed {
+            generation,
+            pruning: None,
+        })
     }
 
     /// Writes `baseline.json` through its own `baseline.tmp`, never
@@ -451,7 +464,7 @@ mod tests {
     fn a_save_rotates_current_into_a_generation_and_keeps_20() {
         let (_d, s) = store();
         for rev in 1..=25 {
-            assert_eq!(s.save(&sample(rev)).unwrap(), rev - 1);
+            assert_eq!(s.save(&sample(rev)).unwrap().generation, rev - 1);
         }
         let gens = s.generations().unwrap();
         assert_eq!(gens.len(), GENERATIONS);
