@@ -421,8 +421,9 @@ def long_text_run(key: str) -> bool:
     return not undecodable(key) and len(key.encode("utf-8")) >= LONG_TEXT_RUN
 
 
-def line_batches(data: bytes | str, first: int = 1) -> Iterator[Batch]:
-    """The lines of text (split on `\\n` only), a piece of about CHUNK at a time."""
+def line_batches(data: bytes | str, first: int = 1) -> Generator[Batch, None, int]:
+    """The lines of text (split on `\\n` only), a piece of about CHUNK at a time. Returns the
+    number the next unit gets."""
     newline = b"\n" if isinstance(data, bytes) else "\n"
     start = 0
     while True:
@@ -430,9 +431,9 @@ def line_batches(data: bytes | str, first: int = 1) -> Iterator[Batch]:
         piece = data[start:] if end < 0 else data[start:end]
         source = decode(piece) if isinstance(piece, bytes) else piece
         yield Batch(source, "\n", first)
-        if end < 0:
-            return
         first += source.count("\n") + 1
+        if end < 0:
+            return first
         start = end + 1
 
 
@@ -464,12 +465,15 @@ def wide_run_batches(data: bytes, first: int) -> Iterator[Batch]:
 
 
 def batches(data: bytes) -> Iterator[Batch]:
-    """What of a blob is scanned: text as its lines; UTF-16 text as its decoded lines; other content
-    holding a NUL byte (binary) as its text runs -- byte runs, then UTF-16 strings -- numbered on
-    after the lines, labelled `run N`."""
-    codec = utf16_codec(data)
+    """What of a blob is scanned, numbered on unit after unit: text as its lines; UTF-32 / UTF-16
+    text as its decoded lines and then its byte runs too (a binary may only look like it: quiet
+    16-bit PCM has a NUL high byte in nearly every sample, and any blob may start FF FE -- genuine
+    UTF-16 / UTF-32 Latin text has no byte run a term could match); other content holding a NUL
+    byte (binary) as its text runs -- byte runs, then UTF-16 strings. A run is labelled `run N`."""
+    codec = wide_codec(data)
     if codec is not None:
-        yield from line_batches(data.decode(codec, errors="replace"))
+        first = yield from line_batches(data.decode(codec, errors="replace"))
+        yield from run_batches(data, first)
     elif b"\0" not in data:
         yield from line_batches(data)
     else:
@@ -486,24 +490,33 @@ def unit_key(data: bytes, number: int) -> str:
     raise IndexError(f"the content has no unit {number}")
 
 
-def utf16_codec(data: bytes) -> str | None:
-    """The codec of UTF-16 text: from its byte-order mark, or -- without one -- from the NUL high
-    byte of nearly every character (Latin text) against almost no NUL low byte."""
+def wide_codec(data: bytes) -> str | None:
+    """The codec of UTF-32 or UTF-16 text: from its byte-order mark (UTF-32's FF FE 00 00 before
+    UTF-16's FF FE), or -- without one -- from the NUL bytes of Latin text: in UTF-32 the upper two
+    bytes of every character and the second of most, in UTF-16 the high byte of most, against
+    almost no NUL in the low byte."""
+    if data.startswith((b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")):
+        return "utf-32"
     if data.startswith((b"\xff\xfe", b"\xfe\xff")):
         return "utf-16"
-    if len(data) < 4:
+    if len(data) < 8:
         return None
-    even, odd = data[0::2], data[1::2]
-    if odd.count(0) >= len(odd) / 2 and even.count(0) <= len(even) / 20:
+    nul = [column.count(0) / len(column) for column in (data[offset::4] for offset in range(4))]
+    if nul[0] <= 0.05 and nul[1] >= 0.5 and min(nul[2:]) >= 0.95:
+        return "utf-32-le"
+    if min(nul[:2]) >= 0.95 and nul[2] >= 0.5 and nul[3] <= 0.05:
+        return "utf-32-be"
+    even, odd = (nul[0] + nul[2]) / 2, (nul[1] + nul[3]) / 2
+    if odd >= 0.5 and even <= 0.05:
         return "utf-16-le"
-    if even.count(0) >= len(even) / 2 and odd.count(0) <= len(odd) / 20:
+    if even >= 0.5 and odd <= 0.05:
         return "utf-16-be"
     return None
 
 
 def is_plain_text(data: bytes) -> bool:
-    """Content git's line diff shows faithfully: no NUL byte and not UTF-16."""
-    return b"\0" not in data and utf16_codec(data) is None
+    """Content git's line diff shows faithfully: no NUL byte and not UTF-16 / UTF-32."""
+    return b"\0" not in data and wide_codec(data) is None
 
 
 _OCTAL = frozenset(b"01234567")
