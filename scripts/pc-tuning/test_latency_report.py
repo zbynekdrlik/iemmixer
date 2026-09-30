@@ -3,8 +3,10 @@ xperf texts, the spike's report and the PC samples)."""
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import latency_report as lr  # noqa: E402
@@ -347,6 +349,34 @@ class NearGlitchTests(unittest.TestCase):
         near = lr.near_glitch(text, period_us=333)
         self.assertEqual((near[0]["kind"], near[0]["exact"]), ("unknown", False))
         self.assertEqual(len(near[0]["events"]), 4)
+
+    def near_file(self, filler: int = 0) -> Path:
+        path = Path(tempfile.mkdtemp()) / "near.txt"
+        rows = "".join(f"                    DPC,  {100_000 + i},      3,          1,  gpudrv.sys!0x40\n" for i in range(filler))
+        path.write_text(DUMPER + rows, encoding="utf-8")
+        return path
+
+    def test_a_near_dump_is_streamed_from_its_file(self) -> None:
+        # Review M3: a near dump can be hundreds of MB: two passes line by line, never the whole file.
+        path = self.near_file()
+        with mock.patch.object(Path, "read_text", side_effect=AssertionError("the whole file was read")):
+            near = lr.near_glitch(path, period_us=333)
+        self.assertEqual(near, lr.near_glitch(DUMPER, period_us=333))
+
+    def test_the_check_runs_while_reading_and_can_stop_it(self) -> None:
+        # The window checks "ide event" through `check` while a long dump is read.
+        calls: list[int] = []
+
+        class Stop(Exception):
+            pass
+
+        def check() -> None:
+            calls.append(1)
+            if len(calls) == 2:
+                raise Stop()
+
+        with self.assertRaises(Stop):
+            lr.near_glitch(self.near_file(filler=25_000), period_us=333, check=check)
 
 
 class SummaryTests(unittest.TestCase):
