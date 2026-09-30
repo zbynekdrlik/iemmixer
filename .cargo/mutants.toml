@@ -163,7 +163,9 @@ exclude_re = [
   # The fsync of a file and of the state directory (persist/files.rs, the
   # file system behind the #32 seam): durability shows only across a power
   # loss; the tests' fault seam fails them to prove the protocol instead.
-  "iem-engine/src/persist/files\\.rs.*\\b(sync_file|sync_dir)\\b",
+  # `pause` is the real 200 ms wait between read tries: only time shows it,
+  # and the fault seam counts the pauses to test the retry.
+  "iem-engine/src/persist/files\\.rs.*\\b(sync_file|sync_dir|pause)\\b",
   # The NullRt pacing thread's end after release; NullRt::stop itself is
   # tested in iem-audio-io (stop_ends_a_running_stream).
   "iem-engine/src/engine\\.rs.*replace <impl Driver for NullRtDriver>::stop with \\(\\)",
