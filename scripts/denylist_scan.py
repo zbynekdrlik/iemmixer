@@ -60,6 +60,8 @@ _UTF16_RUNS = (
     ("utf-16-be", re.compile(rb"(?:\x00[\t\x20-\x7e\xa0-\xff]|\x01[\x00-\xff]){2,}")),
 )
 GITLINK = b"160000"  # a submodule entry: its object is a commit, not a blob
+# every character str.splitlines() breaks a line at
+LINE_SEPARATORS = frozenset("\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029")
 # git's C-quoting of a path in a diff header (core.quotePath)
 C_ESCAPES = {"a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13, '"': 34, "\\": 92}
 
@@ -532,6 +534,20 @@ def scan_commit_diff(scanner: Scanner, repo: Path, sha: str, seen: set[str], blo
     return hits
 
 
+def identity_problems(repo: Path, sha: str, identities: set[str]) -> list[IdentityProblem]:
+    """The author and committer emails that are not exactly (case aside) an allowed identity.
+
+    The two emails are read NUL-terminated -- git never stores a NUL in an ident -- because a
+    line split cannot tell them apart: str.splitlines() also breaks at U+2028 / U+2029 / NEL, so an
+    author email "allowed<U+2028>allowed" would read as two allowed lines and push the committer
+    email out of the check. An email holding any such separator is never allowed, and there is no
+    strip(): a trailing separator is whitespace to strip() and would make a stranger's email equal
+    an allowed one."""
+    author, committer, _end = decode(git(repo, "show", "-s", "--format=%ae%x00%ce%x00", sha)).split("\0")
+    return [IdentityProblem(sha[:12], role) for role, email in (("author", author), ("committer", committer))
+            if LINE_SEPARATORS.intersection(email) or email.lower() not in identities]
+
+
 def scan_commits(
     scanner: Scanner, repo: Path, revlist_args: list[str], identities: set[str] | None = None
 ) -> list[Hit | IdentityProblem]:
@@ -542,10 +558,7 @@ def scan_commits(
         entries = set(scanner.entries_in(metadata)) | set(scanner.entries_in(cp1250_from_git_latin1(metadata)))
         hits += [Hit(f"{short} commit metadata", entry) for entry in sorted(entries)]
         if identities is not None:
-            emails = decode(git(repo, "show", "-s", "--format=%ae%n%ce", sha)).splitlines()
-            for role, email in zip(("author", "committer"), emails):
-                if email.strip().lower() not in identities:
-                    hits.append(IdentityProblem(short, role))
+            hits += identity_problems(repo, sha, identities)
         seen: set[str] = set()
         blob_hits, blob_paths = scan_commit_blobs(scanner, repo, sha, seen)
         hits += blob_hits
