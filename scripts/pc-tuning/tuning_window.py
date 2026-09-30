@@ -382,11 +382,14 @@ def set_aside(d: str, cut: int) -> str:
 def merge(x: str, d: str, base: str) -> str:
     """xperf -merge of one trace's raw session files (<base>kernel.etl and
     <base>markers.etl, the ones present) into its .etl — what a merging stop
-    (`xperf -stop ... -d`) does, as a separate, abandonable call."""
+    (`xperf -stop ... -d`) does, as a separate, abandonable call. The raw
+    files are deleted once the merge succeeded (a soak would otherwise double
+    its disk use); a failed merge throws first and keeps them."""
     out = f"{base[:-1]}.etl" if base else "trace.etl"
     return (f"$m = @(foreach ($n in @('{base}kernel.etl', '{base}markers.etl')) {{ $p = Join-Path {d} $n ; "
             f"if (Test-Path -LiteralPath $p) {{ $p }} }}) ; "
-            f"[void](Invoke-IemXperf -Xperf {x} -Arguments (@('-merge') + $m + @((Join-Path {d} '{out}'))))")
+            f"[void](Invoke-IemXperf -Xperf {x} -Arguments (@('-merge') + $m + @((Join-Path {d} '{out}')))) ; "
+            f"Remove-Item -LiteralPath $m")
 
 
 def analysis(x: str, d: str, cuts: int, diag: bool) -> list[tuple[str, str | None]]:
