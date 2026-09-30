@@ -865,6 +865,31 @@ class MeasureTests(WindowHarness):
         self.assertEqual(len(self.pc.bodies("Start-IemTrace")), 1)   # the first start only
         self.assertTrue(self.state()["trace"])                       # left to the preempt's trace-stop
 
+    # Review round 3, decision B: the analysis never competes with the event.
+    ANALYSIS = ("'-merge'", "Invoke-IemDpcIsr", "Export-IemNearGlitch")
+
+    def analysis_calls(self) -> list[tuple[str, str]]:
+        return [(b, e) for b, e in self.pc.calls if any(v in b for v in self.ANALYSIS)]
+
+    def test_each_analysis_step_is_its_own_idle_call_that_checks_the_stop_file(self) -> None:
+        self.pc.progress = {"missed": 1, "overruns": 0, "position_gaps": 0, "callback_thread": 4243}
+        tw.cmd_measure(self.env, self.args(trace="diag", circular_mb=1024))
+        calls = self.analysis_calls()
+        self.assertEqual(len(calls), 6)                                   # (trace + 1 cut) × (merge, dpcisr, near)
+        for body, event in calls:
+            self.assertEqual(sum(v in body for v in self.ANALYSIS), 1, body)
+            self.assertEqual(event, "abandon")
+            self.assertIn("(Get-Process -Id $PID).PriorityClass = 'Idle'", body)   # xperf inherits it
+            # A preempt writes the spike's stop file first: newer than the analysis start → no start.
+            self.assertRegex(body, r"queue\\stop'\) ; if \(\(Test-Path -LiteralPath \$s\) -and .*LastWriteTimeUtc -gt .*'2026-01-01T00:00:00Z'.*throw ")
+
+    def test_no_analysis_step_starts_once_the_flag_exists(self) -> None:
+        self.pc.progress = {"missed": 1, "overruns": 0, "position_gaps": 0, "callback_thread": 4243}
+        self.pc.on_call = lambda body: (self.dir / "EVENT-NOW").touch() if "Invoke-IemDpcIsr" in body else None
+        with self.assertRaises(tw.sw.EventNow):
+            tw.cmd_measure(self.env, self.args(trace="diag", circular_mb=1024))
+        self.assertEqual(len(self.analysis_calls()), 2)                  # the first merge, then the dpcisr during which it came
+
     # Review M3: the analysis downloads and parses give way to "ide event".
     def analysis_copies(self) -> list[tuple[str, str]]:
         return [(n, e) for n, e in self.pc.copies if not n.endswith((".report.json", ".stderr.txt"))]
