@@ -4,10 +4,13 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import random
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
+import tracemalloc
 import unicodedata
 import unittest
 from pathlib import Path
@@ -17,6 +20,13 @@ import denylist_scan as ds  # noqa: E402
 
 TERMS = ["zyxname", "10.9.", "ghost-host.example"]
 REDACTED_MARKER = "[redacted]"
+# #32 review m7: the stated budget for binary content (public-repo-hygiene.md) -- a 4 MiB blob of
+# pseudo-random bytes against 40 invented terms, in tree mode through main()
+BUDGET_BLOB = 4 << 20
+BUDGET_CPU_PER_MIB = 1.0          # seconds of this process's CPU per MiB of blob
+BUDGET_MEMORY_BEYOND_BLOB = 24 << 20  # peak Python allocation on top of two copies of the blob
+BUDGET_TERMS = ([f"qz{letter}xw{letter}k" for letter in "abcdefghijklmnopqrstuvwxyz"]  # 7 characters
+                + [f"ďq{letter}zyx" for letter in "abcdefgh"] + ["qxv", "zqk", "xwq", "qzzx", "kqxz", "zxqv"])
 
 
 def git(repo: Path, *args: str) -> None:
@@ -599,6 +609,27 @@ class DenylistScanTests(unittest.TestCase):
         allow = self.tmp / "allow.txt"
         allow.write_text(out.getvalue().strip() + "  reviewed ordinary prose\n", encoding="utf-8")
         self.assertEqual(self.scan("--allow", str(allow), "--tree", "HEAD", "--commits", "HEAD")[0], 0)
+
+    # --- #32 review m7: binary content is scanned in bounded CPU and memory ---
+
+    def test_a_large_binary_blob_stays_within_the_cpu_and_memory_budget(self) -> None:
+        # a 20 MB blob took ~65 s and ~1 GB: per-run objects cost ~50 B of RAM per input byte, so a
+        # blob of ~70 MB would time out the 10-minute CI secrets job
+        self.deny.write_text("\n".join(BUDGET_TERMS) + "\n", encoding="utf-8")
+        self.assertEqual(len(BUDGET_TERMS), 40)
+        self.commit({"noise.bin": random.Random(32).randbytes(BUDGET_BLOB)})
+        started = time.process_time()
+        code, out = self.scan("--tree", "HEAD")
+        cpu = time.process_time() - started
+        self.assertEqual(code, 0, out)
+        self.assertLess(cpu, BUDGET_CPU_PER_MIB * BUDGET_BLOB / (1 << 20), f"{cpu:.1f} s CPU")
+        tracemalloc.start()
+        try:
+            self.assertEqual(self.scan("--tree", "HEAD")[0], 0)
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        self.assertLess(peak, 2 * BUDGET_BLOB + BUDGET_MEMORY_BEYOND_BLOB, f"{peak / (1 << 20):.0f} MiB peak")
 
     # --- #32 review M1: a C-style escape right before a term, or spelling it, does not hide it ---
 
