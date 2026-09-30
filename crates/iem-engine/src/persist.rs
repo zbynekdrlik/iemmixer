@@ -11,7 +11,8 @@
 //!   finishes that save);
 //! - `baseline.tmp`: a baseline before its rename;
 //! - `current.json.damaged-<n>`: a damaged `current.json` the boot moved
-//!   aside, never read again.
+//!   aside, never read again;
+//! - `engine.lock`: the engine holding the directory (`Store::lock`).
 //!
 //! A file is `{"format", "schema", "sha256", "payload"}`; the SHA-256 covers the
 //! payload's raw bytes, so a re-serialisation never matters. Readers ignore
@@ -51,6 +52,7 @@ const CURRENT: &str = "current.json";
 const BASELINE: &str = "baseline.json";
 const TMP: &str = "save.tmp";
 const NEW: &str = "save.new";
+const LOCK: &str = "engine.lock";
 const BASELINE_TMP: &str = "baseline.tmp";
 
 /// What a state file carries.
@@ -194,6 +196,13 @@ fn generation_entries(
     Ok(gens)
 }
 
+/// The state directory taken by one engine (#32 P5): released when dropped
+/// (or when the process ends).
+#[derive(Debug)]
+pub struct StateLock {
+    _file: fs::File,
+}
+
 /// A save that reached `current.json`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Committed {
@@ -238,6 +247,30 @@ impl Store {
 
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    /// Takes the state directory for this engine, before anything in it is
+    /// read or written: the boot recovery moves files, so a second engine
+    /// on the same directory gets a `WouldBlock` error at once and stops
+    /// before it touches a state file (#32 P5). The lock is an OS file lock
+    /// on `engine.lock`, released with the lock or the process.
+    pub fn lock(&self) -> io::Result<StateLock> {
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(self.dir.join(LOCK))?;
+        match file.try_lock() {
+            Ok(()) => Ok(StateLock { _file: file }),
+            Err(fs::TryLockError::WouldBlock) => Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                format!(
+                    "the state directory {} is in use by another engine",
+                    self.dir.display()
+                ),
+            )),
+            Err(fs::TryLockError::Error(e)) => Err(e),
+        }
     }
 
     fn generation_path(&self, seq: u64) -> PathBuf {

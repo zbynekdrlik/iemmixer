@@ -462,6 +462,8 @@ pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
         info!("HIL's spare card outputs {hil:?} after the topology's TX");
     }
     let store = Store::open(&cfg.state_dir)?;
+    // Held until `run` returns: one engine per state directory (#32 P5).
+    let _state_lock = store.lock()?;
     let loaded = store.load(&topo);
     for (path, why) in &loaded.rejected {
         warn!("state file {} skipped: {why}", path.display());
