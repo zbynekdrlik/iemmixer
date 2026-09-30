@@ -327,11 +327,13 @@ fn seed_if_absent_refuses_a_state_dir_it_cannot_read() {
     assert!(e.msg.contains(&s(&dir)), "{}", e.msg);
     let kept = std::fs::symlink_metadata(dir.join("current.json")).unwrap();
     assert!(kept.file_type().is_symlink());
-    let names: Vec<String> = std::fs::read_dir(dir)
+    let mut names: Vec<String> = std::fs::read_dir(dir)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(names, ["current.json"], "nothing written");
+    names.sort();
+    // engine.lock is the import's lock on the directory, no state file.
+    assert_eq!(names, ["current.json", "engine.lock"], "nothing written");
 }
 
 #[test]
