@@ -620,8 +620,9 @@ def cmd_reboot(env, args) -> None:
         return
     try:
         code = sw.ps(env, REBOOT_REQUEST, timeout=60, event="ignore")
-    except StepError as e:
-        # The restart begins at once: the session may end before the exit code comes back.
+    except sw.NoReply as e:
+        # The restart begins at once: the session may end before the exit code
+        # comes back. An error REPLY (a plain StepError) propagates: nothing restarted.
         raise StepError(f"no answer to the restart request ({e}): the PC may be restarting; "
                         "run post-boot, which tells whether it rebooted") from None
     if int(code) != 0:

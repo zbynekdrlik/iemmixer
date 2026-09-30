@@ -58,6 +58,13 @@ class EventNow(Exception):
     """The owner said "ide event" (the flag file exists): pre-empt."""
 
 
+class NoReply(StepError):
+    """A PC call was sent but gave no reply: the ssh session ended (a non-zero
+    exit), the call outlived its bound, or its output held no complete JSON
+    reply. What happened on the PC is unknown — unlike a reply that reports
+    an error (a plain StepError)."""
+
+
 def load_env(path: Path) -> dict[str, str]:
     if not path.is_file():
         raise StepError(f"{path}: missing (private env, plan Task 10)")
@@ -271,9 +278,9 @@ def guarded(cmd: list[str], stdin: str, timeout: float, event: str) -> str:
                 if event == "abandon":
                     raise EventNow() from None
             if time.monotonic() > deadline:
-                raise StepError(f"PC call still running after {timeout} s (bounded on the PC; check it, never kill)") from None
+                raise NoReply(f"PC call still running after {timeout} s (bounded on the PC; check it, never kill)") from None
     if proc.returncode != 0:
-        raise StepError(f"PC command failed (exit {proc.returncode}): {err.strip()[-1500:]}")
+        raise NoReply(f"PC command failed (exit {proc.returncode}): {err.strip()[-1500:]}")
     if event != "ignore" and (seen or event_now()):
         raise EventNow()
     return out
@@ -288,7 +295,8 @@ def ssh_cmd(env: dict[str, str]) -> list[str]:
 
 def ps(env: dict[str, str], body: str, timeout: float = 300, event: str = "finish"):
     """Runs `body` after importing SpikePc (single-line statements: `-Command -`
-    reads stdin line by line); PC errors come back as {ok: false}."""
+    reads stdin line by line); PC errors come back as {ok: false} and raise
+    StepError, a call without a complete reply raises NoReply."""
     script = "\n".join([
         "$ErrorActionPreference = 'Stop'",
         "$ProgressPreference = 'SilentlyContinue'",
@@ -296,7 +304,12 @@ def ps(env: dict[str, str], body: str, timeout: float = 300, event: str = "finis
         f"catch {{ $o = [pscustomobject]@{{ ok = $false; error = \"$_\" }} }} ; ConvertTo-Json -InputObject $o -Depth 8 -Compress",
     ])
     out = [line for line in guarded(ssh_cmd(env), script + "\n", timeout, event).splitlines() if line.strip()]
-    doc = json.loads(out[-1]) if out else {"ok": False, "error": "no output from the PC"}
+    try:
+        doc = json.loads(out[-1]) if out else None
+    except ValueError:
+        doc = None
+    if not isinstance(doc, dict) or "ok" not in doc:
+        raise NoReply("no complete reply from the PC")
     if not doc["ok"]:
         raise StepError(f"PC step failed: {doc['error']}")
     return doc["r"]
