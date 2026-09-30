@@ -183,7 +183,11 @@ pub fn run(args: &[String]) -> Result<String, Failure> {
     }
     store.save_baseline(&persisted).map_err(io)?;
     if kept.is_none() {
-        store.save(&persisted).map_err(io)?;
+        let committed = store.save(&persisted).map_err(io)?;
+        // #32 MAJOR-1: a save.tmp that was no state is kept, never loaded.
+        if let Some(aside) = committed.orphaned {
+            report.push(format!("save.tmp moved aside to {}", aside.display()));
+        }
     }
     let also = kept.map_or_else(
         || ", current.json".to_owned(),
@@ -200,9 +204,19 @@ pub fn run(args: &[String]) -> Result<String, Failure> {
 /// (#32 P4): an interrupted save in `save.tmp` (the newest live state)
 /// becomes `current.json` first, so the import's save turns it into a
 /// generation instead of replacing it. Report lines, or why the import must
-/// not go on: the interrupted save could not be finished.
+/// not go on: the load raised an alarm (a state file it cannot read, a
+/// save.tmp it could not compare: #32 MAJOR-2; the engine boots past them
+/// with an alarm, an import has nobody to hear one, so it stops before the
+/// recovery or the save touch anything), or the interrupted save could not
+/// be finished.
 fn recover_before_save(store: &Store, topo: &Topology) -> Result<Vec<String>, String> {
     let loaded = store.load(topo);
+    if !loaded.alarms.is_empty() {
+        return Err(format!(
+            "the import cannot use the state directory as it is: {}",
+            loaded.alarms.join("; ")
+        ));
+    }
     let recovery = store.recover(&loaded);
     if loaded.source == Source::Interrupted && !recovery.finished {
         let why: Vec<String> = recovery

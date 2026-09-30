@@ -325,14 +325,19 @@ impl Store {
 
     /// Reads and decodes `path`. A file that does not decode goes to
     /// `rejected` with the reason; one that cannot be read too when
-    /// `Tolerant`, and is the error when `Strict`.
+    /// `Tolerant`, and is the error, naming the file, when `Strict`.
     fn read_state(&self, path: &Path, pick: &mut Pick, reading: Reading) -> io::Result<Read> {
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
         let bytes = match self.read_tried(path) {
             Ok(Some(b)) => b,
             Ok(None) => return Ok(Read::Missing),
-            Err(e) if reading == Reading::Strict => return Err(e),
+            Err(e) if reading == Reading::Strict => {
+                return Err(io::Error::new(
+                    e.kind(),
+                    format!("{name} cannot be read: {e}"),
+                ));
+            }
             Err(e) => {
-                let name = path.file_name().unwrap_or_default().to_string_lossy();
                 pick.alarms.push(format!(
                     "{name} cannot be read ({e}): the state loaded may be older"
                 ));
