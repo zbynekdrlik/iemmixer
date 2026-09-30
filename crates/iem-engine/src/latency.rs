@@ -20,6 +20,13 @@ pub const ONSET: f64 = 0.001; // ≈ −60 dBFS
 /// unrelated signal, not an echo, and is ignored (iemmixer#9 review).
 pub const MIN_ROUND_TRIP: u64 = 16;
 
+/// How long the return must have been quiet (below [`ONSET`]) right before
+/// the emit for a measurement, in samples: 100 ms at 96 kHz, far longer than
+/// any real loopback (the PC measured 129 samples; Dante's largest latency
+/// setting is 5 ms). A return that sounded within it may still carry that
+/// signal when the echo is due, so the run gives no measurement.
+pub const QUIET_BEFORE: u64 = 9_600;
+
 /// Measures the loopback round-trip. Fed the engine's continuous sample clock
 /// so the emit and the arrival share one timeline.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -158,6 +165,109 @@ mod tests {
         // Energy from sample 0 up to just below MIN_ROUND_TRIP is not the echo.
         let early = vec![0.5; (MIN_ROUND_TRIP - 1) as usize];
         p.feed(&early, 0);
+        assert_eq!(p.samples(), None);
+    }
+
+    /// An echo `delay` samples after `emit` on an otherwise quiet return.
+    fn echo(p: &mut LatencyProbe, emit: u64, delay: u64) {
+        p.feed(&[0.0; 4], emit);
+        p.feed(&[0.4; 4], emit + delay);
+    }
+
+    #[test]
+    fn a_return_already_sounding_at_the_emit_is_no_measurement() {
+        // #32 D3: an unrelated signal already on the return crossed the
+        // threshold at emit + MIN_ROUND_TRIP and read as a 16-sample echo.
+        let mut p = LatencyProbe::new();
+        p.feed(&[0.5; 32], 0);
+        p.emitted(32);
+        p.feed(&[0.5; 64], 32);
+        assert_eq!(p.samples(), None);
+        // A later, louder return is no echo of this run either.
+        p.feed(&[1.0; 8], 1_000);
+        assert_eq!(p.samples(), None);
+    }
+
+    #[test]
+    fn a_leak_within_the_minimum_round_trip_spoils_the_run() {
+        // A return above the threshold before the echo can have come back
+        // (the emit leaking, an unrelated input): the echo after it cannot be
+        // told apart, so the run gives no measurement.
+        let mut p = LatencyProbe::new();
+        p.emitted(0);
+        let mut leak = [0.0; 8];
+        leak[3] = 0.2;
+        p.feed(&leak, 0);
+        echo(&mut p, 0, 129);
+        assert_eq!(p.samples(), None);
+        // The window's last sample spoils too; its end is the first echo.
+        let mut p = LatencyProbe::new();
+        p.emitted(0);
+        p.feed(&[0.2], MIN_ROUND_TRIP - 1);
+        echo(&mut p, 0, 129);
+        assert_eq!(p.samples(), None);
+        let mut p = LatencyProbe::new();
+        p.emitted(0);
+        p.feed(&[0.2], MIN_ROUND_TRIP);
+        assert_eq!(p.samples(), Some(MIN_ROUND_TRIP));
+    }
+
+    #[test]
+    fn the_return_must_be_quiet_for_the_window_before_the_emit() {
+        // Loud QUIET_BEFORE samples before the emit: inside the window.
+        let mut p = LatencyProbe::new();
+        p.feed(&[0.3], 0);
+        p.emitted(QUIET_BEFORE);
+        echo(&mut p, QUIET_BEFORE, 129);
+        assert_eq!(p.samples(), None);
+        // One sample earlier is outside it: the echo is measured.
+        let mut p = LatencyProbe::new();
+        p.feed(&[0.3], 0);
+        p.emitted(QUIET_BEFORE + 1);
+        echo(&mut p, QUIET_BEFORE + 1, 129);
+        assert_eq!(p.samples(), Some(129));
+        // The latest loud sample counts, not the first.
+        let mut p = LatencyProbe::new();
+        p.feed(&[0.3, 0.0, 0.3], 0);
+        p.emitted(QUIET_BEFORE + 1);
+        echo(&mut p, QUIET_BEFORE + 1, 129);
+        assert_eq!(p.samples(), None);
+    }
+
+    #[test]
+    fn a_reset_keeps_what_the_return_carried() {
+        // A new signal right after the last one's echo: the return is not
+        // quiet before the new emit, so there is no clean measurement.
+        let mut p = LatencyProbe::new();
+        p.emitted(0);
+        p.feed(&[0.5; 64], 129);
+        assert_eq!(p.samples(), Some(129));
+        p.reset();
+        p.emitted(400);
+        echo(&mut p, 400, 129);
+        assert_eq!(p.samples(), None);
+    }
+
+    #[test]
+    fn the_returns_of_one_block_are_judged_together() {
+        // Each return is fed in turn for the same block. The earliest onset
+        // is the arrival, whichever return is fed first.
+        let mut p = LatencyProbe::new();
+        p.emitted(0);
+        let mut late = [0.0; 64];
+        late[50] = 0.3;
+        let mut early = [0.0; 64];
+        early[30] = 0.3;
+        p.feed(&late, 0);
+        p.feed(&early, 0);
+        assert_eq!(p.samples(), Some(30));
+        // A leak on a later-fed return spoils an arrival read on an earlier one.
+        let mut p = LatencyProbe::new();
+        p.emitted(0);
+        let mut leak = [0.0; 64];
+        leak[5] = 0.3;
+        p.feed(&late, 0);
+        p.feed(&leak, 0);
         assert_eq!(p.samples(), None);
     }
 

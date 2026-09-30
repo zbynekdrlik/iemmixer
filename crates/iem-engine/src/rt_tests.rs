@@ -1155,6 +1155,50 @@ fn the_loopback_round_trip_is_measured() {
     );
 }
 
+/// S6 test 5 (#32 D3): a return that already carries a signal when the HIL
+/// signal starts cannot tell its echo apart; the probe reports no
+/// round-trip, never the 16-sample minimum.
+#[test]
+fn a_busy_loopback_return_gives_no_round_trip() {
+    use iem_audio_io::{Block, Process};
+    let site = crate::test_support::test_site_text();
+    let mut r = rig_loopback(&site, &[], TEST_FLAG, AT_ONCE, SPARE.to_vec());
+    let rxn = r.p.topo.rx.len();
+    let outs = r.p.outputs();
+    const N: usize = 256;
+    let mut ibuf = vec![0.0f64; (rxn + SPARE.len()) * N];
+    // An unrelated signal on return 0, before and during the HIL signal.
+    ibuf[rxn * N..(rxn + 1) * N].fill(0.5);
+    let mut obuf = vec![0.0f64; outs * N];
+    r.p.process(&mut Block::new(N, &ibuf, &mut obuf));
+    r.at(
+        N as u64,
+        &Cmd::HilTestSignal {
+            input: input("mic1"),
+            hz: 1000.0,
+            dbfs: -30.0,
+            ttl_s: 0.1,
+            card_tx: SPARE.to_vec(),
+        },
+    );
+    for _ in 0..8 {
+        r.p.process(&mut Block::new(N, &ibuf, &mut obuf));
+    }
+    // The signal did sound on the spare outputs.
+    let tx = r.p.topo.tx.len();
+    assert!(
+        obuf[tx * N..(tx + 1) * N]
+            .iter()
+            .any(|y| y.abs() >= crate::latency::ONSET)
+    );
+    assert_eq!(
+        r.h.status
+            .loopback_samples
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
+}
+
 #[test]
 fn input_channels_are_the_rx_then_the_loopback_returns() {
     // The driver opens `topo.rx.len() + hil_rx` inputs. Pinned like `outputs`
