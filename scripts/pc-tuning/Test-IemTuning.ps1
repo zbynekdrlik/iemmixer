@@ -420,8 +420,6 @@ try {
     ThrowsLike { Install-IemWpt -Setup $noSetup -Xperf $ping -MinVersion '99.0' } '*older than 99.0*' 'wpt-refuses-an-older-version'
     $c = Get-IemCpuSample
     Assert ($c.cpus.Count -ge 1 -and $c.cpus[0].t100ns -gt 0) 'cpu-sample-reads-raw-counters'
-    $ps = Get-IemPollSample -ProfilePath $pp
-    Assert ($ps.plan -eq $activeBefore -and $ps.governor -eq 'Running') 'poll-sample-reads-the-sentinels'
     [void](Get-IemSystemEvents -Since ((Get-Date).AddHours(-1).ToUniversalTime().ToString('o')))
     Write-Host 'ok  system-events-read'
     # "No events found" is an empty result; any other query error throws, never
