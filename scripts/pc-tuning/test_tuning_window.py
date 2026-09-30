@@ -145,6 +145,40 @@ class UndoTests(unittest.TestCase):
         self.assertEqual(self.bodies, [])
 
 
+class ExitTests(unittest.TestCase):
+    """cmd_exit (lane F4's round 3): Exit-IemTuningMode reports a schema-1 journal
+    entry it could not convert as a row with action "problem"; the exit itself
+    completes, and the owner hears which entries. Only sw.ps is faked."""
+
+    def setUp(self) -> None:
+        self.dir = Path(tempfile.mkdtemp())
+        self.saved = (tw.sw.STATE, tw.sw.EVENT_NOW, tw.sw.ps, tw.sw.alarm)
+        tw.sw.STATE, tw.sw.EVENT_NOW = self.dir / "spike-window.json", self.dir / "EVENT-NOW"
+        tw.sw.save_state({"id": "w", "card": "free", "tuning_mode": True, "closed": False})
+        self.alarms: list[str] = []
+        tw.sw.alarm = self.alarms.append
+        self.rows: list[dict] = []
+        tw.sw.ps = lambda env, body, timeout=300, event="finish": self.rows
+        self.env = {"PC_ROOT": "R", "PC_TUNING_ROOT": "T", "PC_XPERF": "xperf.exe"}
+
+    def tearDown(self) -> None:
+        tw.sw.STATE, tw.sw.EVENT_NOW, tw.sw.ps, tw.sw.alarm = self.saved
+
+    def test_problem_rows_alarm_the_owner_and_the_exit_completes(self) -> None:
+        self.rows = [{"key": "plan:active", "action": "restored", "error": None},
+                     {"key": "global:nic-rss", "action": "problem", "error": "schema-1 entry not convertible (synthetic)"}]
+        tw.cmd_exit(self.env, argparse.Namespace())
+        self.assertFalse(tw.sw.load_state()["tuning_mode"])
+        self.assertEqual(len(self.alarms), 1)
+        self.assertIn("global:nic-rss", self.alarms[0])
+        self.assertNotIn("plan:active", self.alarms[0])
+
+    def test_a_clean_exit_raises_no_alarm(self) -> None:
+        self.rows = [{"key": "plan:active", "action": "restored", "error": None}]
+        tw.cmd_exit(self.env, argparse.Namespace())
+        self.assertEqual(self.alarms, [])
+
+
 class RebootPrepareTests(unittest.TestCase):
     """reboot-prepare prepares a reboot only over a cleanly preempted window
     (I1), exercised through the REAL sw.unwind: a spike that did not stop still

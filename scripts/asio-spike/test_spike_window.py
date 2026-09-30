@@ -412,6 +412,27 @@ class UnwindTuningTests(unittest.TestCase):
         self.assertFalse(any("Set-SpikeBufferPref" in c or c.startswith("Invoke-SpikeBringBack") for c in self.calls))
         self.assertEqual((state["trace"], state["tuning_mode"], state["pref_restored"], state["closed"]), (None, False, False, False))
 
+    def test_problem_rows_of_the_mode_exit_alarm_the_owner_and_reaper_still_comes_back(self) -> None:
+        # Lane F4's round 3: an unconvertible schema-1 journal entry is a "problem" row;
+        # the exit completes, the owner hears which entry, the unwind goes on.
+        alarms: list[str] = []
+        saved_alarm, saved_ps = sw.alarm, sw.ps
+        sw.alarm = alarms.append
+
+        def ps(env, body, timeout=300, event="finish"):
+            if "Exit-IemTuningMode" in body:
+                return [{"key": "global:nic-rss", "action": "problem", "error": "schema-1 entry not convertible (synthetic)"}]
+            return saved_ps(env, body, timeout, event)
+
+        sw.ps = ps
+        try:
+            state = self.state()
+            sw.unwind(self.env, state, running=False)
+        finally:
+            sw.alarm, sw.ps = saved_alarm, saved_ps
+        self.assertTrue(any("global:nic-rss" in a for a in alarms))
+        self.assertEqual((state["tuning_mode"], state["card"], state["closed"]), (False, "reaper", True))
+
     def test_a_fingerprint_that_differs_is_recorded(self) -> None:
         state = self.state()
         done = sw.unwind(self.env, state, running=False)
