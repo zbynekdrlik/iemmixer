@@ -3,12 +3,14 @@
 self-hosted runners or pull_request_target, every action pinned to a full
 commit SHA with its version comment, no force-kill verb anywhere, comments
 included (program spec I8), job breakaway only in iem-win's spawn glue (S6),
-and no ASIO rate, clock or control-panel call (I2)."""
+no ASIO rate, clock or control-panel call (I2), and the asio-spike bundle's
+Copy-Item list equal to spike_window.BUNDLE_FILES."""
 from __future__ import annotations
 
+import ast
 import re
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parent.parent
 SELF = {"scripts/check_integrity.py", "scripts/test_check_integrity.py"}
@@ -41,6 +43,14 @@ BREAKAWAY_HOME = "crates/iem-win/"
 ASIO_SETTINGS = re.compile(
     r"(?:\.|::)\s*(?:set_sample_rate|set_clock_source|open_control_panel|control_panel|future)\s*(?:::\s*<[^>]*>\s*)?\(")
 CODE_SUFFIXES = (".rs", ".ts", ".js", ".py", ".sh", ".ps1", ".psm1", ".psd1", ".cmd", ".bat", ".yml", ".yaml", ".toml")
+# The one spike bundle that reaches the PC: fetch-bundle accepts exactly
+# spike_window.BUNDLE_FILES, CI's asio-spike "Bundle" step copies its own list.
+BUNDLE_SOURCE = "scripts/asio-spike/spike_window.py"
+BUNDLE_WORKFLOW = ".github/workflows/ci.yml"
+BUNDLE_JOB = "asio-spike"
+JOB_KEY = re.compile(r"^  ([A-Za-z0-9_-]+):\s*$")
+STEP_NAME = re.compile(r"^\s*-\s*name:\s*(.+?)\s*$")
+COPY_ITEM = re.compile(r"\bCopy-Item\s+-LiteralPath\s+(.+?)\s+-Destination\b")
 
 
 def files(root: Path, base: str, suffixes: tuple[str, ...]) -> list[Path]:
@@ -54,8 +64,52 @@ def lines(path: Path) -> list[tuple[int, str]]:
     return list(enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1))
 
 
+def bundle_files(path: Path) -> list[str] | None:
+    """spike_window.BUNDLE_FILES, read without importing the module."""
+    for node in ast.parse(path.read_text(encoding="utf-8")).body:
+        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "BUNDLE_FILES" for t in node.targets):
+            return sorted(ast.literal_eval(node.value))
+    return None
+
+
+def bundle_copies(path: Path) -> tuple[int, list[str]]:
+    """The file names the asio-spike job's Bundle step copies, and the line of
+    its first Copy-Item (0: no such step)."""
+    job = step = None
+    first, names = 0, []
+    for n, line in lines(path):
+        if match := JOB_KEY.match(line):
+            job, step = match.group(1), None
+            continue
+        if match := STEP_NAME.match(line):
+            step = match.group(1)
+        if job == BUNDLE_JOB and step and step.startswith("Bundle") and (match := COPY_ITEM.search(line)):
+            first = first or n
+            names += [PurePosixPath(p.strip().strip("'\"").replace("\\", "/")).name for p in match.group(1).split(",")]
+    return first, sorted(names)
+
+
+def bundle_violations(root: Path) -> list[str]:
+    """A drift between the two lists keeps CI green while fetch-bundle rejects
+    every artifact on the dev box (#32 E5)."""
+    source = root / BUNDLE_SOURCE
+    if not source.is_file():
+        return []
+    want = bundle_files(source)
+    if want is None:
+        return [f"{BUNDLE_SOURCE}: no BUNDLE_FILES"]
+    workflow = root / BUNDLE_WORKFLOW
+    line, got = bundle_copies(workflow) if workflow.is_file() else (0, [])
+    if not line:
+        return [f"{BUNDLE_WORKFLOW}: no Copy-Item in the {BUNDLE_JOB} job's Bundle step (it must copy spike_window.BUNDLE_FILES)"]
+    if got != want:
+        return [f"{BUNDLE_WORKFLOW}:{line}: the {BUNDLE_JOB} Bundle step copies {got}, spike_window.BUNDLE_FILES lists {want} "
+                "(fetch-bundle would reject every artifact)"]
+    return []
+
+
 def violations(root: Path) -> list[str]:
-    found: list[str] = []
+    found: list[str] = bundle_violations(root)
     for path in files(root, "crates", (".rs",)):
         rel = path.relative_to(root).as_posix()
         found += [f"{rel}:{n}: #[ignore] test" for n, line in lines(path) if RUST_IGNORE.search(line)]
