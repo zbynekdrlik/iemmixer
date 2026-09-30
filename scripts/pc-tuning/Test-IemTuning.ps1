@@ -21,6 +21,7 @@ function Throws([scriptblock]$b, $what) { $t = $false; try { & $b } catch { $t =
 function Rows($rows, $action) { @($rows | Where-Object { $_.action -eq $action }) }
 # Read-IemJournal is exported (every *-Iem* function is); the test reads the flag the module wrote.
 function Read-IemJournalState($profilePath) { $p = Read-IemProfile -Path $profilePath; (Read-IemJournal -Path $p.journal).entered }
+function Read-JournalVersion($profilePath) { $p = Read-IemProfile -Path $profilePath; (Read-IemJournal -Path $p.journal).version }
 # Sets the boot of every global journal entry, as if its item had been written in that boot.
 function Set-JournalBoot($profilePath, [string]$boot) {
     $jf = (Read-IemProfile -Path $profilePath).journal
@@ -107,6 +108,13 @@ try {
     Remove-Item -LiteralPath "$jp.tmp"
     Throws { Read-IemJournal -Path $jp } 'journal-read-refuses-an-empty-journal-without-a-temp-file'
 
+    # -Only names groups of the tier: a typo is an error, never an empty apply (A9).
+    Throws { Invoke-IemTuningApply -ProfilePath $pp -Tier 2 -Only @('servics') } 'apply-refuses-an-unknown-group'
+    Throws { Undo-IemTuning -ProfilePath $pp -Tier 2 -Only @('servics') } 'undo-refuses-an-unknown-group'
+    # The profile version is stamped only after a complete apply without a failure (A9).
+    $rm = Invoke-IemTuningApply -ProfilePath $pp -Tier 2 -Only @('maintenance')
+    Assert (@(Rows $rm 'failed').Count -eq 0 -and (Read-JournalVersion $pp) -eq 0) 'apply-partial-does-not-stamp-the-version'
+
     # Tier 2: services, a task (plus an absent one), the maintenance switch, a Defender exclusion.
     $r = Invoke-IemTuningApply -ProfilePath $pp -Tier 2
     Assert (@(Rows $r 'failed').Count -eq 0) "tier2-apply-has-no-failure ($(@(Rows $r 'failed') | ForEach-Object { $_.error }))"
@@ -115,8 +123,13 @@ try {
     Assert (@(Rows $r 'absent').Count -eq 1) 'tier2-a-missing-task-is-absent-not-an-error'
     Assert ((Get-Item -LiteralPath $maint).GetValue('MaintenanceDisabled') -eq 1) 'tier2-maintenance-off'
     Assert (@((Get-MpPreference).ExclusionPath) -contains $dir) 'tier2-defender-exclusion'
+    Assert ((Read-JournalVersion $pp) -eq 1) 'apply-complete-stamps-the-version'
     $again = Invoke-IemTuningApply -ProfilePath $pp -Tier 2
     Assert (@(Rows $again 'written').Count -eq 0 -and @(Rows $again 'failed').Count -eq 0) 'tier2-apply-is-idempotent'
+    # An exclusion Defender cannot hold (an empty path) fails its row: version 2 is not stamped.
+    $pf = New-TestProfile 'PCI\VEN_TEST&DEV_0001' @{ version = 2; defender = [ordered]@{ paths = @($dir, ''); processes = @() } }
+    $rf = Invoke-IemTuningApply -ProfilePath $pf -Tier 2
+    Assert (@(Rows $rf 'failed').Count -eq 1 -and (Read-JournalVersion $pp) -eq 1) 'apply-with-a-failure-does-not-stamp-the-version'
     $u = Undo-IemTuning -ProfilePath $pp -Tier 2
     Assert (@(Rows $u 'failed').Count -eq 0) 'tier2-undo-has-no-failure'
     Assert ((Get-Service Spooler).Status -eq 'Running' -and (Get-Item 'HKLM:\SYSTEM\CurrentControlSet\Services\Spooler').GetValue('Start') -eq $spoolStart) 'tier2-undo-restores-the-original'
