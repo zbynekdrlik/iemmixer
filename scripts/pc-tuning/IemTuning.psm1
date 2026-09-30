@@ -646,8 +646,8 @@ function Assert-IemOnly {
 function Get-IemGlobalItems {
     # Tier 2 (no reboot) and Tier 3 (reboot) items of the profile. -Check
     # verifies each device before its items are built (apply only).
-    # -AllocatedIrqs (instance id -> granted IRQ numbers) stands in for
-    # Win32_PnPAllocatedResource in the self-test.
+    # -AllocatedIrqs (instance id -> granted IRQ numbers, default: read from
+    # Win32_PnPAllocatedResource when a write needs it) is for the self-test.
     param([Parameter(Mandatory)]$Profile, [Parameter(Mandatory)][int]$Tier, [string[]]$Only = @(), [switch]$Check,
           [hashtable]$AllocatedIrqs = $null)
     $items = @()
@@ -686,11 +686,22 @@ function Get-IemGlobalItems {
             if (-not $wanted) { continue }
             if ($Check) { Assert-IemDevice -Profile $Profile -Device $d }
             $im = "HKLM:\SYSTEM\CurrentControlSet\Enum\$($d.instance)\Device Parameters\Interrupt Management"
+            # The affinity applies only while the device already uses MSI (design note
+            # 6.4 R1); enabling MSI is the owner's Tier 4 decision X3 (A7). MSI is in use
+            # when the driver's MSISupported flag is 1 AND the interrupts the device holds
+            # now are message-signaled (m3); the grant is read only for a write (-Check).
             $msi = Get-IemRegRaw -Path (Get-IemRegPath $Profile "$im\MessageSignaledInterruptProperties") -Name 'MSISupported'
-            if (-not ($msi.kind -eq 'DWord' -and $msi.data -eq '1')) {
-                # The affinity applies only while the device already uses MSI (design
-                # note 6.4 R1); enabling MSI is the owner's Tier 4 decision X3 (A7).
-                $why = "skipped: $($d.id) uses line-based interrupts (MSISupported is not 1)"
+            $why = $null
+            if (-not ($msi.kind -eq 'DWord' -and $msi.data -eq '1')) { $why = 'uses line-based interrupts (MSISupported is not 1)' }
+            elseif ($Check) {
+                if ($null -eq $AllocatedIrqs) { $AllocatedIrqs = Get-IemAllocatedIrqs }
+                $granted = @()
+                if ($AllocatedIrqs.ContainsKey([string]$d.instance)) { $granted = @($AllocatedIrqs[[string]$d.instance]) }
+                if ($granted.Count -eq 0) { $why = 'has no interrupt granted now (MSI not confirmed)' }
+                elseif (@($granted | Where-Object { [int]$_ -ge 0 }).Count -gt 0) { $why = 'uses line-based interrupts (INTx granted although MSISupported is 1)' }
+            }
+            if ($why) {
+                $why = "skipped: $($d.id) $why"
                 $items += New-IemItem -Key "irq:$($d.id)" -Kind 'skip' -Arguments @{ reason = $why } -Desired $why -Tier 3 -Group "irq:$($d.id)"
                 continue
             }
@@ -962,17 +973,24 @@ function Get-IemWinEvent {
     return $ev
 }
 
+function Get-IemAllocatedIrqs {
+    # Instance id -> the IRQ numbers Windows granted the device now, signed: a
+    # negative number is a message-signaled interrupt (Win32_PnPAllocatedResource).
+    $irq = @{}
+    foreach ($r in @(Get-CimInstance -ClassName Win32_PnPAllocatedResource -ErrorAction Stop)) {
+        if ($r.Antecedent.CimSystemProperties.ClassName -ne 'Win32_IRQResource') { continue }
+        $id = [string]$r.Dependent.DeviceID
+        $n = [BitConverter]::ToInt32([BitConverter]::GetBytes([uint32]$r.Antecedent.IRQNumber), 0)
+        if (-not $irq.ContainsKey($id)) { $irq[$id] = @() }
+        $irq[$id] = @($irq[$id]) + $n
+    }
+    return $irq
+}
+
 function Get-IemDeviceInventory {
     # PCI devices: driver, MSI and affinity registry values, allocated IRQs
     # (a negative IRQ number is an MSI).
-    $irq = @{}
-    foreach ($r in @(Get-CimInstance -ClassName Win32_PnPAllocatedResource -ErrorAction SilentlyContinue)) {
-        if ($r.Antecedent.CimSystemProperties.ClassName -eq 'Win32_IRQResource') {
-            $id = [string]$r.Dependent.DeviceID
-            $n = [BitConverter]::ToInt32([BitConverter]::GetBytes([uint32]$r.Antecedent.IRQNumber), 0)
-            $irq[$id] = @($irq[$id] | Where-Object { $null -ne $_ }) + [string]$n
-        }
-    }
+    $irq = try { Get-IemAllocatedIrqs } catch { @{} }
     foreach ($d in @(Get-PnpDevice -PresentOnly | Where-Object { $_.InstanceId -like 'PCI\*' })) {
         $enum = "HKLM:\SYSTEM\CurrentControlSet\Enum\$($d.InstanceId)\Device Parameters\Interrupt Management"
         $read = { param($k, $n) if (Test-Path -LiteralPath $k) { (Get-Item -LiteralPath $k).GetValue($n, $null) } }
@@ -984,7 +1002,7 @@ function Get-IemDeviceInventory {
             msi_limit = & $read "$enum\MessageSignaledInterruptProperties" 'MessageNumberLimit'
             policy = & $read "$enum\Affinity Policy" 'DevicePolicy'
             mask = & $read "$enum\Affinity Policy" 'AssignmentSetOverride'
-            irqs = @($irq[$d.InstanceId] | Where-Object { $null -ne $_ })
+            irqs = @($irq[$d.InstanceId] | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ })
         }
     }
 }
