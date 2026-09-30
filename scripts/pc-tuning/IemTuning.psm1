@@ -602,11 +602,19 @@ function Invoke-IemItem {
             $Journal[$Section][$Item.key] = $e
             $Journal.order[$Section] = @($Journal.order[$Section]) + $Item.key
             Write-IemJournal -Path $Path -Journal $Journal
-        } elseif ([string]$e.boot.time -ne [string]$Boot.time -or [string]$e.boot.id -ne [string]$Boot.id) {
+        } else {
+            # The entry names its target: when the key now points elsewhere (a NIC
+            # driver key recreated, a card in another slot) the new target's value
+            # would go unjournaled, so the write is refused (review 3.8).
+            if ($Item.kind -eq 'reg' -and ([string]$e.args.path -ne [string]$Item.args.path -or [string]$e.args.name -ne [string]$Item.args.name)) {
+                throw "the journal holds '$($Item.key)' for $($e.args.path) $($e.args.name), the profile now names $($Item.args.path) $($Item.args.name): undo this tier first"
+            }
             # The before-value stays the first one; the boot is the latest write's,
             # so a value re-written after a reboot is pending again (A3).
-            $e.boot = $Boot
-            Write-IemJournal -Path $Path -Journal $Journal
+            if ([string]$e.boot.time -ne [string]$Boot.time -or [string]$e.boot.id -ne [string]$Boot.id) {
+                $e.boot = $Boot
+                Write-IemJournal -Path $Path -Journal $Journal
+            }
         }
         Set-IemValue -Item $Item -Value $Item.desired
         $after = Get-IemValue -Item $Item
