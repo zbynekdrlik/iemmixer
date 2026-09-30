@@ -61,6 +61,13 @@ class EventNow(Exception):
     """The owner said "ide event" (the flag file exists): pre-empt."""
 
 
+# ssh's own messages when it exits 255 before any session existed (refused,
+# timed out, name not resolved, not authorised, host key): nothing was sent.
+SSH_NOT_CONNECTED = re.compile(r"(?i)ssh: connect to host|could not resolve hostname|name or service not known|"
+                               r"temporary failure in name resolution|no route to host|network is unreachable|"
+                               r"permission denied|host key verification failed")
+
+
 class NoReply(StepError):
     """A PC call was sent but gave no reply: the ssh session ended (a non-zero
     exit), the call outlived its bound, or its output held no complete JSON
@@ -297,7 +304,10 @@ def guarded(cmd: list[str], stdin: str, timeout: float, event: str) -> str:
             if time.monotonic() > deadline:
                 raise NoReply(f"PC call still running after {timeout} s (bounded on the PC; check it, never kill)") from None
     if proc.returncode != 0:
-        raise NoReply(f"PC command failed (exit {proc.returncode}): {err.strip()[-1500:]}")
+        text = f"PC command failed (exit {proc.returncode}): {err.strip()[-1500:]}"
+        if proc.returncode == 255 and SSH_NOT_CONNECTED.search(err):
+            raise StepError(text + " (ssh never connected: nothing was sent)")
+        raise NoReply(text)
     if event != "ignore" and (seen or event_now()):
         raise EventNow()
     return out
