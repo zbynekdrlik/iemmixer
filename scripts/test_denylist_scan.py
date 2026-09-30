@@ -298,6 +298,130 @@ class DenylistScanTests(unittest.TestCase):
         self.assertNotIn("zyxname", out.lower())
         self.assertNotIn("\\302", out)
 
+    # --- #29: harden commit-mode DETECTION (empty/binary paths, non-LF splits, unquote_c) ---
+
+    def test_empty_added_file_path_with_a_term_is_caught_in_commit_mode(self) -> None:
+        # Vector 1: an added EMPTY file has no `+++` diff header, so commit mode never scanned its
+        # path; a term in the path must still be caught (via git diff-tree) and redacted, never
+        # printed.
+        self.commit({"base.txt": "base\n"})
+        (self.repo / "zyxname-empty.txt").write_bytes(b"")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "add an empty file named after a term")
+        code, out = self.scan("--commits", "HEAD~1..HEAD")
+        self.assertEqual(code, 1)
+        self.assertNotIn("zyxname", out.lower())
+        self.assertIn("[redacted]", out)
+        self.assertIn("denylist entry", out)
+
+    def test_binary_added_file_path_with_a_term_is_caught_in_commit_mode(self) -> None:
+        # Vector 1: an added BINARY file shows `Binary files … differ`, no `+++` header; its
+        # term-bearing path must still be caught and redacted in commit mode.
+        self.commit({"base.txt": "base\n"})
+        (self.repo / "zyxname.bin").write_bytes(b"\x00\x01\x02content")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "add a binary file named after a term")
+        code, out = self.scan("--commits", "HEAD~1..HEAD")
+        self.assertEqual(code, 1)
+        self.assertNotIn("zyxname", out.lower())
+        self.assertIn("[redacted]", out)
+
+    def test_a_text_added_path_is_reported_exactly_once_in_commit_mode(self) -> None:
+        # The added diff-tree path source must not double-report a text file already seen via its
+        # `+++` header (dedup guard).
+        self.commit({"base.txt": "base\n"})
+        self.commit({"zyxname-new.txt": "harmless\n"}, message="add a text file named after a term")
+        code, out = self.scan("--commits", "HEAD~1..HEAD")
+        self.assertEqual(code, 1)
+        path_findings = [ln for ln in out.splitlines() if ": path: denylist entry" in ln]
+        self.assertEqual(len(path_findings), 1, path_findings)
+
+    def test_non_lf_separators_do_not_hide_a_term_in_commit_mode(self) -> None:
+        # Vector 2: an added line with CR / VT / FF / NEL / U+2028 before a term. str.splitlines()
+        # breaks the diff line at that character, and the tail (holding the term) loses its `+`
+        # prefix and is skipped. Split on `\n` only → the whole added line is scanned, so the term
+        # is caught; and it is never printed (redaction contract).
+        self.commit({"note.txt": "base\n"})
+        for i, sep in enumerate(("\r", "\x0b", "\x0c", "\x85", " ")):
+            with self.subTest(sep=hex(ord(sep))):
+                (self.repo / "note.txt").write_text(f"safe{sep}ZyxName line {i}\n", encoding="utf-8")
+                git(self.repo, "commit", "-q", "-am", f"line with separator {i}")
+                code, out = self.scan("--commits", "HEAD~1..HEAD")
+                self.assertEqual(code, 1, f"term after {hex(ord(sep))} not caught")
+                self.assertNotIn("zyxname", out.lower())
+
+    def test_non_lf_separator_lines_share_one_allow_key_across_modes(self) -> None:
+        # Vector 2 (allow-key parity): a line containing VT must split identically (`\n` only) in
+        # tree, commit and --hash mode, so a single allow key covers all three. str.splitlines()
+        # would break it and the key would not match.
+        line = "keep\x0bzyxname here"
+        self.commit({"a.txt": line + "\n"})
+        allow = self.tmp / "allow.txt"
+        allow.write_text(ds.line_key("a.txt", line) + "  reviewed\n", encoding="utf-8")
+        self.assertEqual(self.scan("--allow", str(allow), "--tree", "HEAD", "--commits", "HEAD")[0], 0)
+
+    def test_unquote_c_is_robust_to_a_malformed_escape(self) -> None:
+        # Vector 3: a crafted / malformed C-quoted `+++` label must never crash the scan. A
+        # malformed backslash is kept literal (the well-formed octal / letter escapes are
+        # unchanged). Current code raises KeyError / ValueError.
+        self.assertEqual(ds.unquote_c(b'"trailing\\"'), b"trailing\\")   # lone trailing backslash
+        self.assertEqual(ds.unquote_c(b'"a\\zb"'), b"a\\zb")             # unknown escape letter
+        self.assertEqual(ds.unquote_c(b'"o\\9"'), b"o\\9")               # \9 is not octal
+        self.assertEqual(ds.unquote_c(b'"big\\777"'), b"big\\777")       # octal > 255, kept literal
+        # well-formed escapes still decode exactly (no regression)
+        self.assertEqual(ds.unquote_c(b'"b/\\303\\241"'), b"b/\xc3\xa1")
+        self.assertEqual(ds.unquote_c(b'"a\\tb\\\\c\\"d"'), b"a\tb\\c\"d")
+
+    def test_unquote_c_keeps_a_term_visible_after_a_malformed_escape(self) -> None:
+        # Vector 3: bytes after a malformed escape must survive so a term cannot hide behind it.
+        out = ds.unquote_c(b'"b/x\\qzyxname.txt"')  # \q is not a valid C-escape
+        self.assertIn(b"zyxname", out)
+
+    def test_a_malformed_quoted_label_still_exposes_and_redacts_a_term(self) -> None:
+        # Vector 3 end-to-end: a term behind a malformed escape in a `+++` label is still caught
+        # by the scanner and still redacted (never printed).
+        scanner = ds.Scanner(["zyxname"], set())
+        path = ds.diff_path('"b/dir\\qname/zyxname.txt"')  # \q malformed; term in its own component
+        self.assertTrue(scanner.entries_in(path))
+        self.assertIn("[redacted]", scanner.shown(path))
+        self.assertNotIn("zyxname", scanner.shown(path))
+
+    def test_hash_key_matches_the_scanner_for_a_line_containing_a_cr(self) -> None:
+        # Vector 2 regression: --hash must yield the SAME allow key the scanner computes for a line
+        # with a CR (and every line of a CRLF file). Path.read_text() translates \r / \r\n to \n,
+        # so the key diverges from tree/commit mode and the allowlist workflow silently fails.
+        self.commit({"a.txt": "keep\rzyxname here\n"})  # a CR inside the added line
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):  # the developer's --hash step
+            ds.main(["--repo", str(self.repo), "--hash", "a.txt", "1"])
+        allow = self.tmp / "allow.txt"
+        allow.write_text(out.getvalue().strip() + "  reviewed ordinary prose\n", encoding="utf-8")
+        self.assertEqual(self.scan("--allow", str(allow), "--tree", "HEAD", "--commits", "HEAD")[0], 0)
+
+    def test_empty_term_named_file_in_a_root_commit_is_caught(self) -> None:
+        # Vector 1 (root commit): the diff-tree scan passes --root, so a term-named empty file added
+        # in the very first commit (which has no parent and no `+++` header) is still caught.
+        self.commit({"zyxname-empty.txt": b""})  # the root commit itself
+        code, out = self.scan("--commits", "HEAD")
+        self.assertEqual(code, 1)
+        self.assertNotIn("zyxname", out.lower())
+        self.assertIn("[redacted]", out)
+
+    def test_empty_term_file_merged_from_a_side_branch_is_caught(self) -> None:
+        # Vector 1 (merge): -m makes diff-tree diff a merge against its parents, so a term-named
+        # empty file brought in by a merge is still caught in commit mode.
+        self.commit({"base.txt": "base\n"})
+        git(self.repo, "checkout", "-q", "-b", "feature")
+        (self.repo / "zyxname-merge.txt").write_bytes(b"")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "side branch adds an empty term-named file")
+        git(self.repo, "checkout", "-q", "main")
+        git(self.repo, "merge", "-q", "--no-ff", "-m", "merge feature", "feature")
+        code, out = self.scan("--commits", "-1 HEAD")  # just the merge commit
+        self.assertEqual(code, 1)
+        self.assertNotIn("zyxname", out.lower())
+        self.assertIn("[redacted]", out)
+
 
 if __name__ == "__main__":
     unittest.main()

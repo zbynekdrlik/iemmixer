@@ -10,8 +10,13 @@ component that holds a term is printed as `[redacted]` (the whole path when a
 term spans components), other components have their control characters escaped.
 
 Commit mode scans each commit's author/committer names and emails together
-with its message and added lines; with `--identities FILE` it also rejects
-every commit whose author or committer email is not listed there.
+with its message, its added lines and every added/modified path -- including an
+empty or binary file, whose path the unified diff omits, enumerated via
+`git diff-tree`; with `--identities FILE` it also rejects every commit whose
+author or committer email is not listed there. Lines are split on `\n` only (not
+str.splitlines()), so a term after a CR/VT/FF/NEL/U+2028 cannot slip past, and a
+malformed C-quoted path never crashes the scan (`unquote_c` keeps a bad escape
+literal rather than dropping the bytes that follow).
 
 Matching is case-insensitive. A term that starts (ends) with a letter or digit
 must not be preceded (followed) by one, where letters include diacritics and
@@ -149,19 +154,43 @@ def decode(data: bytes) -> str:
     return data.decode("utf-8", errors="replace")
 
 
+_OCTAL = frozenset(b"01234567")
+
+
 def unquote_c(quoted: bytes) -> bytes:
-    """A path git wrote C-quoted (`"b/Kl\\303\\241vor"`) back to its exact bytes."""
-    body, out, i = quoted[1:-1], bytearray(), 0
-    while i < len(body):
-        if body[i:i + 1] != b"\\":
-            out += body[i:i + 1]
+    """A path git wrote C-quoted (`"b/Kl\\303\\241vor"`) back to its exact bytes.
+
+    Defensive: a malformed escape (a lone trailing backslash, an unknown escape
+    letter, or an out-of-range octal such as `\\777`) never crashes and never
+    drops the bytes that follow — the backslash is kept literal so a term cannot
+    hide behind a crafted escape. Well-formed octal (`\\NNN`, and a 1-2 digit
+    leading run) and the letter escapes decode exactly as before.
+    """
+    body = quoted[1:-1] if len(quoted) >= 2 and quoted[:1] == b'"' and quoted[-1:] == b'"' else quoted
+    out, i, n = bytearray(), 0, len(body)
+    while i < n:
+        if body[i] != 0x5C:  # not a backslash
+            out.append(body[i])
             i += 1
-        elif body[i + 1:i + 2] in (b"0", b"1", b"2", b"3", b"4", b"5", b"6", b"7"):
-            out.append(int(body[i + 1:i + 4], 8))
-            i += 4
-        else:
-            out.append(C_ESCAPES[body[i + 1:i + 2].decode("ascii")])
+            continue
+        nxt = body[i + 1:i + 2]
+        if nxt and nxt[0] in _OCTAL:
+            j = i + 1  # the leading run of up to three octal digits (git emits exactly three)
+            while j < n and j < i + 4 and body[j] in _OCTAL:
+                j += 1
+            value = int(body[i + 1:j], 8)
+            if value <= 0xFF:
+                out.append(value)
+                i = j
+                continue
+        elif (letter := nxt.decode("ascii", "replace")) in C_ESCAPES:
+            out.append(C_ESCAPES[letter])
             i += 2
+            continue
+        # lone trailing backslash, unknown escape or out-of-range octal: keep the backslash literal
+        # so the bytes that follow are re-read and a term cannot hide behind a crafted escape
+        out.append(0x5C)
+        i += 1
     return bytes(out)
 
 
@@ -192,7 +221,9 @@ def scan_tree(scanner: Scanner, repo: Path, rev: str) -> list[Hit]:
         if b"\0" in data:
             continue
         shown = scanner.shown(path)
-        for number, line in enumerate(decode(data).splitlines(), start=1):
+        # split on `\n` only: str.splitlines() also breaks on CR/VT/FF/NEL/U+2028, which would let
+        # a term hide after such a char and diverge the allow key from commit/hash mode
+        for number, line in enumerate(decode(data).split("\n"), start=1):
             hits += scanner.scan_line(path, line, f"tree {shown}:{number}")
     return hits
 
@@ -218,7 +249,10 @@ def scan_commits(
         # `+++`/`---` count as headers only before a file's first hunk; inside a hunk an added
         # line beginning with `++ ` renders as `+++ ...` and is content, not a new header path
         path, in_hunk = "", False
-        for line in diff.splitlines():
+        seen: set[str] = set()
+        # split on `\n` only (as in scan_tree): str.splitlines() would break an added line at an
+        # embedded CR/VT/FF/NEL/U+2028, dropping its `+` prefix so the term-bearing tail is skipped
+        for line in diff.split("\n"):
             if line.startswith("diff --git "):
                 path, in_hunk = "", False
             elif line.startswith("@@"):
@@ -227,7 +261,23 @@ def scan_commits(
                 hits += scanner.scan_line(path, line[1:], f"{short} {scanner.shown(path)}")
             elif not in_hunk and line.startswith("+++ "):
                 path = diff_path(line[4:])
+                seen.add(path)
                 hits += scanner.scan_path(path, f"{short} ")
+        # an added/modified empty or binary file has no `+++` header, so the loop above never sees
+        # its path. Enumerate every added/modified path from the tree diff (raw bytes via -z, no
+        # quoting) and scan any the unified diff never surfaced, so a term hidden in an empty or
+        # binary file name cannot slip past the commit-mode path scan. --root covers a root commit;
+        # -m diffs a merge against every parent (a safe over-scan for a security tool -- it never
+        # misses a path any parent introduces), and `seen` dedups a path already scanned above or
+        # repeated across parents.
+        for raw_path in git(repo, "diff-tree", "--no-commit-id", "--name-only", "-z", "-r", "--root",
+                            "--no-renames", "-m", "--diff-filter=AM", sha).split(b"\0"):
+            if not raw_path:
+                continue
+            changed = decode(raw_path)
+            if changed not in seen:
+                seen.add(changed)
+                hits += scanner.scan_path(changed, f"{short} ")
     return hits
 
 
@@ -244,7 +294,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.hash:
         path, number = args.hash
-        lines = (args.repo / path).read_text(encoding="utf-8").splitlines()
+        # read bytes and split on `\n` only, byte-for-byte like scan_tree (which decodes the blob):
+        # read_text() would translate CR / CRLF to \n and diverge the allow key from the scanner
+        lines = decode((args.repo / path).read_bytes()).split("\n")
         print(line_key(path, lines[int(number) - 1]))
         return EXIT_CLEAN
     if args.denylist is None or not (args.tree or args.commits):
