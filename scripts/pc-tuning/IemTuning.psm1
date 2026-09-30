@@ -867,6 +867,19 @@ function Compare-IemFingerprint {
     return ,$diff
 }
 
+function Get-IemWinEvent {
+    # Get-WinEvent where "no events found" is an empty result and every other
+    # error (a missing log, access denied, a bad query) throws: a failing query
+    # never reads as "no events" (A10).
+    param([Parameter(Mandatory)][hashtable]$Filter)
+    try { $ev = @(Get-WinEvent -FilterHashtable $Filter -ErrorAction Stop) }
+    catch {
+        if ("$($_.FullyQualifiedErrorId)" -like 'NoMatchingEventsFound*') { return }
+        throw
+    }
+    return $ev
+}
+
 function Get-IemDeviceInventory {
     # PCI devices: driver, MSI and affinity registry values, allocated IRQs
     # (a negative IRQ number is an MSI).
@@ -907,6 +920,8 @@ function Get-IemInventory {
     $defender = try { $p = Get-MpPreference; [ordered]@{ exclusion_paths = @($p.ExclusionPath); exclusion_processes = @($p.ExclusionProcess)
                                                          scan_day = $p.ScanScheduleDay; realtime_off = $p.DisableRealtimeMonitoring } } catch { "$_" }
     $since = (Get-Date).AddDays(-365)
+    $installed = try { ,@(Get-IemWinEvent -Filter @{ LogName = 'System'; Id = 7045; StartTime = $since } | ForEach-Object {
+        [ordered]@{ at = $_.TimeCreated.ToUniversalTime().ToString('o'); service = "$($_.Properties[0].Value)" } }) } catch { "error: $_" }
     $cpusets = [ordered]@{}   # ConvertTo-Json needs string keys
     foreach ($k in ($map.Keys | Sort-Object)) { $cpusets["$k"] = $map[$k] }
     [ordered]@{
@@ -942,7 +957,7 @@ function Get-IemInventory {
         history = [ordered]@{
             hotfixes = @(Get-HotFix | ForEach-Object { [ordered]@{ id = $_.HotFixID; installed = "$($_.InstalledOn)" } })
             drivers = @(Get-CimInstance -ClassName Win32_PnPSignedDriver | Where-Object { $_.DriverDate } | ForEach-Object { [ordered]@{ device = $_.DeviceName; version = $_.DriverVersion; date = "$($_.DriverDate)" } })
-            services_installed = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; Id = 7045; StartTime = $since } -ErrorAction SilentlyContinue | ForEach-Object { [ordered]@{ at = $_.TimeCreated.ToUniversalTime().ToString('o'); service = "$($_.Properties[0].Value)" } })
+            services_installed = $installed
         }
     }
 }

@@ -117,10 +117,11 @@ function Get-IemPollSample {
 
 function Get-IemSystemEvents {
     # Warnings and errors of the System log since -Since, by provider and id
-    # (no message text: it can name hosts).
+    # (no message text: it can name hosts). A failing query throws (A10);
+    # -LogName exists for the self-test.
     param([Parameter(Mandatory)][string]$Since, [string]$LogName = 'System')
     $start = [datetime]::Parse($Since, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToLocalTime()
-    $ev = @(Get-WinEvent -FilterHashtable @{ LogName = $LogName; Level = 1, 2, 3; StartTime = $start } -ErrorAction SilentlyContinue)
+    $ev = @(Get-IemWinEvent -Filter @{ LogName = $LogName; Level = 1, 2, 3; StartTime = $start })
     return ,@($ev | Group-Object -Property ProviderName, Id | ForEach-Object { [pscustomobject]@{ provider = $_.Group[0].ProviderName; id = $_.Group[0].Id; count = $_.Count } })
 }
 
