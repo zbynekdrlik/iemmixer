@@ -402,6 +402,26 @@ class PostBootRunTests(unittest.TestCase):
         st = tw.sw.load_state()
         self.assertEqual((st["card"], st["closed"]), ("reaper", True))
 
+    def test_post_boot_never_reopens_a_window_a_preempt_closed(self) -> None:
+        # Review m5 (same class): a preempt in another process may close the window
+        # while post-boot runs; post-boot's own save never takes that back.
+        self.bring_back_fails = True
+        real = tw.sw.ps
+
+        def preempt_meanwhile(env, body, timeout=300, event="finish"):
+            if body.startswith("Invoke-SpikeBringBack"):
+                st = tw.sw.load_state()
+                st.update(card="reaper", closed=True)
+                tw.sw.save_state(st)
+            return real(env, body, timeout, event)
+
+        tw.sw.ps = preempt_meanwhile
+        with self.assertRaises(tw.StepError):
+            tw.cmd_post_boot(self.env, argparse.Namespace())
+        st = tw.sw.load_state()
+        self.assertEqual((st["card"], st["closed"]), ("reaper", True))
+        self.assertIn("post_boot", st)
+
     def test_a_failed_bring_back_keeps_the_window_open(self) -> None:
         self.bring_back_fails = True
         with self.assertRaises(tw.StepError):
