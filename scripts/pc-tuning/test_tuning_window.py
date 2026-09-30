@@ -233,6 +233,18 @@ class RebootTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
         self.assertNotIn("approval", tw.sw.load_state()["reboot"])
 
+    def test_a_lost_answer_to_the_immediate_restart_points_at_post_boot(self) -> None:
+        # The restart starts at once, so the ssh session may end before its answer:
+        # that is not "nothing restarts" — post-boot tells whether the PC rebooted.
+        def lost(env, body, timeout=300, event="finish"):
+            self.calls.append(body)
+            raise tw.StepError("PC command failed (exit 255): Connection reset")
+
+        tw.sw.ps = lost
+        with self.assertRaisesRegex(tw.StepError, "may be restarting.*post-boot"):
+            tw.cmd_reboot(ENV, self.args)
+        self.assertEqual(tw.sw.load_state()["reboot"]["approval"], self.args.approval)   # post-boot can run
+
 
 if __name__ == "__main__":
     unittest.main()
