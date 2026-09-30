@@ -354,16 +354,23 @@ def cmd_measure(env, args) -> None:
 
 
 def cmd_hwlat(env, args) -> None:
+    """One hwlat run per CPU. The rows are written after every CPU, so a failed
+    run (cmd_run refuses outcome "error"; a row that is no measurement of its
+    CPU fails here) keeps what was measured before it."""
     state = sw.open_state()
     need_free(state)
-    rows = []
+    path = raw(env, state) / f"hwlat-{stamp()}.json"
+    rows: list[dict] = []
     for lp in parse_lps(args.lps):
         ns = argparse.Namespace(mode="hwlat", frames=None, seconds=args.seconds, burn_us=0, stress=0, panic_at=0, cycles=1,
                                 cpu=lp, threshold_us=args.threshold_us, audio_cpus="", stress_cpus="")
         r = sw.cmd_run(env, ns)
-        rows.append(lr.hwlat_summary(json.loads(Path(r["report"]).read_text(encoding="utf-8"))))
-    path = raw(env, state) / f"hwlat-{stamp()}.json"
-    path.write_text(json.dumps(rows, indent=1), encoding="utf-8")
+        row = lr.hwlat_summary(json.loads(Path(r["report"]).read_text(encoding="utf-8")))
+        rows.append(row)
+        path.write_text(json.dumps(rows, indent=1), encoding="utf-8")
+        if row["failed"]:
+            raise StepError(f"hwlat on CPU {lp} measured nothing: outcome {row['outcome']}, placed {row['placed']!r}, "
+                            f"priority {row['priority']!r} (the rows so far: {path})")
     print(json.dumps({"hwlat": rows, "file": str(path)}))
 
 

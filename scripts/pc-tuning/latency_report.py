@@ -197,9 +197,16 @@ def sentinel_changes(polls: list[dict]) -> list[dict]:
 
 
 def hwlat_summary(report: dict) -> dict:
+    """One CPU's hwlat run. It measured that CPU only when it ended "done" with
+    the scanner placed there (`placed`: the CPU Set IDs applied) and raised to
+    TIME_CRITICAL; otherwise `failed` (the spike's outcome "error", or an
+    older spike's placement/priority error text next to "done")."""
     h = report.get("hwlat") or {}
     gaps = h.get("gaps_us") or {}
-    return {"cpu": h.get("cpu"), "outcome": report.get("outcome"), "reads": h.get("reads"), "over": h.get("over"),
+    placed, priority = h.get("placed"), h.get("priority")
+    failed = report.get("outcome") != "done" or not isinstance(placed, list) or priority != "time-critical"
+    return {"cpu": h.get("cpu"), "outcome": report.get("outcome"), "placed": placed, "priority": priority,
+            "error": report.get("error") or h.get("error"), "failed": failed, "reads": h.get("reads"), "over": h.get("over"),
             "max_us": gaps.get("max"), "p999_us": gaps.get("p999"), "largest_us": [x["gap_us"] for x in h.get("largest", [])[:5]]}
 
 
