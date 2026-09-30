@@ -49,6 +49,7 @@ foreach ($s in 'Spooler', 'W32Time') {
 $spoolStart = (Get-Item 'HKLM:\SYSTEM\CurrentControlSet\Services\Spooler').GetValue('Start')
 $activeBefore = [IemPower]::Active()
 $testPlan = [guid]::NewGuid().ToString()
+$foreignPlan = [guid]::NewGuid().ToString()   # an existing plan that is not iemmixer's (M2)
 $taskPath = '\iemmixer-test\'; $taskName = "t-$id"
 Register-ScheduledTask -TaskPath $taskPath -TaskName $taskName -Action (New-ScheduledTaskAction -Execute 'cmd.exe' -Argument '/c exit 0') | Out-Null
 $enum = "$root\HKLM\SYSTEM\CurrentControlSet\Enum\PCI\VEN_TEST&DEV_0001\0"
@@ -232,10 +233,24 @@ try {
     $st = Get-IemTuningState -ProfilePath $pp
     Assert (@($st.items | Where-Object { $_.key -eq 'irq:card:policy' -and $_.revert_pending }).Count -eq 1) 'tier3-undo-is-pending-until-a-reboot'
 
+    # Plan values go only into iemmixer's own plan (M2): the REAPER-mode plan
+    # (plan.source), a built-in scheme or another existing plan is refused before
+    # any write (no governor pause, no 'entered', no value in any plan).
+    $proc = '54533251-82be-4824-96c1-47b60b740d00'; $procMin = '893dee8e-2bef-41e0-89c6-b55d0929964c'
+    $builtin = @(@('381b4222-f694-41f0-9685-ff5bb260df2e', '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c', 'a1841308-3541-4fab-bc81-f71556f20b4a') | Where-Object { $_ -ne $activeBefore })[0]
+    [void](& powercfg.exe /duplicatescheme $activeBefore $foreignPlan)
+    $srcMin = [IemPower]::Read($activeBefore, $proc, $procMin); $foreignMin = [IemPower]::Read($foreignPlan, $proc, $procMin)
+    foreach ($c in @(@($activeBefore, '*REAPER-mode plan*'), @($builtin, '*built-in*'), @($foreignPlan, "*not iemmixer*"))) {
+        $bp = New-TestProfile $hw @{ plan = [ordered]@{ guid = $c[0]; source = $activeBefore } }
+        ThrowsLike { Enter-IemTuningMode -ProfilePath $bp -Only @('plan', 'governor') -Idle 'disable' } $c[1] "enter-refuses-the-plan $($c[0])"
+    }
+    Assert ([IemPower]::Active() -eq $activeBefore -and [IemPower]::Read($activeBefore, $proc, $procMin) -eq $srcMin -and [IemPower]::Read($foreignPlan, $proc, $procMin) -eq $foreignMin -and (Get-Service W32Time).Status -eq 'Running' -and -not (Read-IemJournalState $pp)) 'enter-plan-refusals-write-nothing'
+
     # Mode levers: plan (C1 only), governor stand-in, placement.
     $e = Enter-IemTuningMode -ProfilePath $pp -Only @('plan', 'governor', 'placement') -Idle 'c1'
     Assert (@(Rows $e 'failed').Count -eq 0) "enter-has-no-failure ($(@(Rows $e 'failed') | ForEach-Object { $_.key + ': ' + $_.error }))"
     Assert ([IemPower]::Active() -eq $testPlan) 'enter-activates-the-plan'
+    Assert (@(& powercfg.exe /list) -match "$testPlan.*\(iemmixer\)") 'enter-names-its-plan-iemmixer'
     Assert ([IemPower]::Read($testPlan, '54533251-82be-4824-96c1-47b60b740d00', '9943e905-9a30-4ec1-9b99-44dd3b76f7a2') -eq 1) 'enter-limits-idle-to-c1'
     Assert ([IemPower]::Read($testPlan, '54533251-82be-4824-96c1-47b60b740d00', '893dee8e-2bef-41e0-89c6-b55d0929964c') -eq 100) 'enter-sets-processor-min-100'
     Assert ((Get-Service W32Time).Status -eq 'Stopped') 'enter-pauses-the-governor'
@@ -327,7 +342,7 @@ try {
     try { [void](Exit-IemTuningMode -ProfilePath $pp) } catch { Write-Host "cleanup exit: $_" }
     foreach ($t in 2, 3) { try { [void](Undo-IemTuning -ProfilePath $pp -Tier $t) } catch { Write-Host "cleanup undo: $_" } }
     if ([IemPower]::Active() -ne $activeBefore) { [IemPower]::Activate($activeBefore) }
-    if (@(& powercfg.exe /list) -match $testPlan) { & powercfg.exe /delete $testPlan | Out-Null }
+    foreach ($g in $testPlan, $foreignPlan) { if (@(& powercfg.exe /list) -match $g) { & powercfg.exe /delete $g | Out-Null } }
     Unregister-ScheduledTask -TaskPath $taskPath -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
     if (@((Get-MpPreference).ExclusionPath) -contains $dir) { Remove-MpPreference -ExclusionPath $dir }
     Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
