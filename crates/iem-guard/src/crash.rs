@@ -189,6 +189,30 @@ mod tests {
     }
 
     #[test]
+    fn a_busy_state_directory_is_tried_again_after_2_s_without_a_crash() {
+        // #32 minor-4: exit 75 = the engine waited for its state directory
+        // (another engine's lock not yet released); no crash, so neither
+        // the backoff nor a loop applies. A session ending still wins.
+        for mode in MODES {
+            for prod in [false, true] {
+                for looped in [false, true] {
+                    for n in [0, 1, 3, 7] {
+                        assert_eq!(
+                            after_exit(Some(75), mode, prod, false, looped, n),
+                            After::Respawn(Duration::from_secs(2)),
+                            "{mode:?} {prod} {looped} {n}"
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            after_exit(Some(75), Mode::Dev, false, true, false, 1),
+            After::Stay { alarm: None }
+        );
+    }
+
+    #[test]
     fn other_exits_respawn_after_the_backoff() {
         for code in [None, Some(1), Some(70), Some(-1073741819)] {
             for mode in MODES {

@@ -99,6 +99,53 @@ fn inject_seh_aborts_the_binary_off_windows() {
     assert_eq!(status.code(), None, "{status:?}");
 }
 
+/// #32 minor-4: a state directory another process holds past the engine's
+/// wait (an engine that just ended may hold its lock a moment) ends the
+/// binary with exit 75, which the guard retries without counting a crash;
+/// no state file is touched. Should it keep waiting, the test frees the
+/// directory and asks it to shut down (never a forced end) before it fails.
+#[test]
+fn a_held_state_dir_ends_the_binary_with_exit_75() {
+    /// The engine waits 3 s; this bounds the test.
+    const BOUND: Duration = Duration::from_secs(8);
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let held = iem_engine::persist::Store::open(&state)
+        .unwrap()
+        .lock()
+        .unwrap();
+    let pipe = pipe_name(&dir);
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_iem-engine"))
+        .args(["run", "--site"])
+        .arg(common::site_path())
+        .arg("--state-dir")
+        .arg(&state)
+        .args(["--pipe", &pipe])
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let start = Instant::now();
+    let status = loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            break s;
+        }
+        if start.elapsed() >= BOUND {
+            drop(held);
+            let mut c = Client::new(&pipe);
+            c.hello(Role::Control);
+            let _ = c.request(1, Cmd::Shutdown);
+            panic!("the engine still waited for its state directory after {BOUND:?}");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(status.code(), Some(75), "{status:?}");
+    let names: Vec<String> = std::fs::read_dir(&state)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["engine.lock"], "no state file touched");
+}
+
 #[test]
 fn the_binary_renders_offline() {
     let dir = tempfile::tempdir().unwrap();

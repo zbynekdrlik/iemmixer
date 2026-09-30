@@ -800,6 +800,27 @@ fn a_second_engine_on_the_same_state_dir_leaves_it_alone() {
     e.shutdown();
 }
 
+/// #32 minor-4: an engine that just ended may hold the state directory's
+/// lock a moment after its exit (a lock's release can lag the process
+/// end), so the next engine waits for it (up to 3 s) instead of ending at
+/// once and counting as a crash.
+#[test]
+fn an_engine_waits_a_moment_for_its_state_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let held = iem_engine::persist::Store::open(&dir.path().join("state"))
+        .unwrap()
+        .lock()
+        .unwrap();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(500));
+        drop(held);
+    });
+    let e = Engine::start_in(dir, Flags::default(), InputSignal::Silence);
+    e.client().hello(Role::Observe);
+    release.join().unwrap();
+    e.shutdown();
+}
+
 #[test]
 fn fault_injection_releases_the_driver_and_exits() {
     let off = Engine::start(Flags::default(), InputSignal::Silence);
