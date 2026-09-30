@@ -668,8 +668,12 @@ def cmd_post_boot(env, args) -> None:
         checks["handover"] = {"error": str(e)}
     back = "error" not in checks["handover"]
     if back:
+        # On the state as saved now: a preempt in another process may have
+        # closed the window meanwhile, and a failed bring-back here never
+        # takes that back (review m5).
+        state = sw.load_state()
         state["card"], state["closed"] = "reaper", True
-    sw.save_state(state)
+        sw.save_state(state)
     if sw.event_now():
         # The read-only checks wait for a dev window; main() pre-empts (a window
         # still open because the bring-back failed gets another one there).
@@ -686,13 +690,14 @@ def cmd_post_boot(env, args) -> None:
     b = tps(env, "Get-IemCpuSample", timeout=60, event="ignore")
     checks["interrupts"] = lr.cpu_rates([a, b])
     problems = post_boot_verdict(checks)
+    state = sw.load_state()
     state["post_boot"] = {"checks": checks, "problems": problems}
     sw.save_state(state)
     print(json.dumps({"post-boot": checks, "problems": problems}))
     if problems:
         sw.alarm("after the approved reboot: " + "; ".join(problems) + ". Revert: tuning_window undo --tier 3 in a dev window, "
                  "then the pre-approved revert reboot."
-                 + ("" if back else " REAPER is not back, so the window stays open: spike_window to-event brings it back."))
+                 + ("" if state.get("closed") else " REAPER is not back, so the window stays open: spike_window to-event brings it back."))
         raise StepError("post-boot checks failed")
 
 
