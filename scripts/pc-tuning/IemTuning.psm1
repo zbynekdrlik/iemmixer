@@ -7,7 +7,10 @@
 # "absent". Nothing here ends a process, forces a service or restarts Windows.
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$script:Schema = 1
+# Journal schema 2 (#32 review): raw registry values, a version per tier, boot
+# identities, the iemmixer plan not journaled. Schema 1 is converted on read where
+# that is exact (Update-IemJournalV1), otherwise refused.
+$script:Schema = 2
 $script:Utf8NoBom = New-Object System.Text.UTF8Encoding $false
 
 if (-not ('IemPower' -as [type])) {
@@ -477,14 +480,49 @@ function Read-IemJournal {
             return $j
         }
     }
-    if ([int]$o.schema -ne $script:Schema) { throw "journal ${Path}: schema $($o.schema), this module $($script:Schema)" }
+    $schema = [int]$o.schema
+    if ($schema -ne $script:Schema -and $schema -ne 1) { throw "journal ${Path}: schema $schema, this module $($script:Schema): not read" }
     if ($o.PSObject.Properties['applied']) { foreach ($k in 'tier2', 'tier3') { $j.applied[$k] = [int]$o.applied.$k } }
     $j.entered = [bool]$o.entered
     foreach ($s in 'global', 'mode', 'reverted') {
         foreach ($p in $o.$s.PSObject.Properties) { $j[$s][$p.Name] = $p.Value }
     }
     foreach ($s in 'global', 'mode') { $j.order[$s] = @($o.order.$s | Where-Object { $_ }) }
+    if ($schema -eq 1) { Update-IemJournalV1 -Journal $j -Path $Path }
     return $j
+}
+
+function Update-IemJournalV1 {
+    # A schema-1 journal (before the #32 review) becomes schema 2 only where the
+    # conversion is exact (m1): its one 'version' is dropped, so both tiers stay at
+    # applied version 0 and every held tier reports drift until applied again (the
+    # tier it named is unknown); a boot time string becomes an identity without a
+    # counter (the A13 tolerance decides); a registry entry whose before-value was
+    # absent gets raw 'absent'; the plan-exists / plan-value mode entries are
+    # dropped (the plan stays defined and is never reverted now, A6/M2). A registry
+    # entry with a before-value but no kind cannot be restored exactly: the journal
+    # is refused, naming the file and the entry.
+    param([Parameter(Mandatory)][hashtable]$Journal, [Parameter(Mandatory)][string]$Path)
+    foreach ($s in 'global', 'mode') {
+        foreach ($k in @($Journal[$s].Keys)) {
+            $e = $Journal[$s][$k]
+            if ($s -eq 'mode' -and @('plan-exists', 'plan-value') -contains [string]$e.kind) {
+                $Journal[$s].Remove($k)
+                $Journal.order[$s] = @($Journal.order[$s] | Where-Object { $_ -ne $k })
+                continue
+            }
+            if ($e.boot -is [string]) { $e.boot = @{ time = $e.boot; id = $null } }
+            if ([string]$e.kind -eq 'reg' -and -not $e.PSObject.Properties['raw']) {
+                if ($null -ne $e.before) {
+                    throw "journal ${Path}: schema 1, entry '$k' holds a registry before-value without its kind, so it cannot be restored exactly: restore it by hand and remove the entry"
+                }
+                $e | Add-Member -NotePropertyName 'raw' -NotePropertyValue @{ kind = 'absent' }
+            }
+        }
+    }
+    foreach ($k in @($Journal.reverted.Keys)) {
+        if ($Journal.reverted[$k] -is [string]) { $Journal.reverted[$k] = @{ time = $Journal.reverted[$k]; id = $null } }
+    }
 }
 
 function Write-IemJournal {
