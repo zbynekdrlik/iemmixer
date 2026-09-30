@@ -610,6 +610,31 @@ class DenylistScanTests(unittest.TestCase):
         allow.write_text(out.getvalue().strip() + "  reviewed ordinary prose\n", encoding="utf-8")
         self.assertEqual(self.scan("--allow", str(allow), "--tree", "HEAD", "--commits", "HEAD")[0], 0)
 
+    # --- #32 review m3, m4: content read as UTF-16 keeps its byte runs; UTF-32 is decoded ---
+
+    def test_a_binary_that_looks_like_utf16_keeps_its_byte_runs(self) -> None:
+        # m3: quiet 16-bit PCM has a NUL high byte in nearly every sample, so the blob read as
+        # UTF-16LE text and its ASCII LIST/INFO chunk (artist, title) was never scanned; any blob
+        # starting FF FE read as UTF-16 the same way
+        samples = b"".join(bytes([1 + index % 3, 0]) for index in range(4000))
+        info = b"LIST\x1a\x00\x00\x00INFOIART\x0e\x00\x00\x00zyxname band\x00\x00"
+        wav = b"RIFF\x00\x00\x00\x00WAVEfmt \x10\x00\x00\x00" + bytes(16) + b"data\x40\x1f\x00\x00" + samples + info
+        for name, content in (("quiet.wav", wav), ("marked.bin", b"\xff\xfe\x00\x01\x02 zyxname here\x03\x04")):
+            with self.subTest(name=name):
+                out = self.assert_found_in_both_modes_as({name: content}, "zyxname")
+                self.assertIn(f"tree {name}:run ", out)
+
+    def test_utf32_text_is_decoded_and_scanned(self) -> None:
+        # m4: UTF-32 (with or without a byte-order mark) read as UTF-16 or as binary runs of one
+        # character, so no term was ever found in it
+        text = "first line\na zyxname line\n"
+        for name, content in (("bom.txt", text.encode("utf-32")),
+                              ("bom-be.txt", b"\x00\x00\xfe\xff" + text.encode("utf-32-be")),
+                              ("le.txt", text.encode("utf-32-le")), ("be.txt", text.encode("utf-32-be"))):
+            with self.subTest(name=name):
+                out = self.assert_found_in_both_modes_as({name: content}, "zyxname")
+                self.assertIn(f"tree {name}:2: denylist entry 1", out)
+
     # --- #32 review m7: binary content is scanned in bounded CPU and memory ---
 
     def test_a_large_binary_blob_stays_within_the_cpu_and_memory_budget(self) -> None:
