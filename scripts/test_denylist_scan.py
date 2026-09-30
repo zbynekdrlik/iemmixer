@@ -635,6 +635,33 @@ class DenylistScanTests(unittest.TestCase):
                 out = self.assert_found_in_both_modes_as({name: content}, "zyxname")
                 self.assertIn(f"tree {name}:2: denylist entry 1", out)
 
+    # --- #32 review m10: a finding only history holds can be located and allowlisted ---
+
+    def test_commit_mode_locates_a_binary_run_and_a_wide_line(self) -> None:
+        self.commit({"base.txt": "base\n"})
+        self.commit({"b.bin": b"\x00\x01keep zyxname\x00", "u.txt": "first\nkeep zyxname\n".encode("utf-16")})
+        code, out = self.scan("--commits", "HEAD~1..HEAD")
+        self.assertEqual(code, 1)
+        self.assertIn(" b.bin:run 1: denylist entry 1", out)
+        self.assertIn(" u.txt:2: denylist entry 1", out)
+
+    def test_hash_reads_a_blob_of_history_by_rev_and_path(self) -> None:
+        # the file is gone from the working tree, so a history-only finding needs `<rev>:<path>`
+        self.commit({"b.bin": b"\x00\x01keep zyxname\x00", "a.txt": "keep zyxname\n"})
+        git(self.repo, "rm", "-q", "b.bin", "a.txt")
+        git(self.repo, "commit", "-q", "-m", "remove them")
+        self.assertEqual(self.scan("--tree", "HEAD")[0], 0)
+        keys = []
+        for target, number in (("HEAD~1:b.bin", "run 1"), ("HEAD~1:a.txt", "1")):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(ds.main(["--repo", str(self.repo), "--hash", target, number]), 0)
+            keys.append(out.getvalue().strip() + "  reviewed ordinary prose")
+        self.assertEqual(self.scan("--commits", "HEAD")[0], 1)
+        allow = self.tmp / "allow.txt"
+        allow.write_text("\n".join(keys) + "\n", encoding="utf-8")
+        self.assertEqual(self.scan("--allow", str(allow), "--commits", "HEAD")[0], 0)
+
     # --- #32 review m7: binary content is scanned in bounded CPU and memory ---
 
     def test_a_large_binary_blob_stays_within_the_cpu_and_memory_budget(self) -> None:
