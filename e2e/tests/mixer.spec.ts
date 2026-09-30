@@ -818,7 +818,19 @@ test.describe("Mixer page, the remaining gaps (W7)", () => {
 
     await tab(page, "Tech");
     const content = strip(page, "content");
+    // One strip for the pair, with both sides metering the engine's sine (W7-6).
     await expect(content).toHaveCount(1);
+    await expect(content.locator(".meter-bar")).toHaveCount(2);
+    for (const side of [0, 1]) {
+      await expect
+        .poll(() => meterPct(content.locator(".meter-fill").nth(side)), { timeout: 10_000 })
+        .toBeGreaterThan(0);
+    }
+    const contentBefore = await dbText(content);
+    await content.scrollIntoViewIfNeeded();
+    await dragFader(page, content, 0.2);
+    await expect.poll(() => dbText(content)).not.toBe(contentBefore);
+    const contentSet = await dbText(content);
     await content.locator(".mute-btn").click();
     await expect(content).toHaveClass(/muted/);
 
@@ -830,9 +842,10 @@ test.describe("Mixer page, the remaining gaps (W7)", () => {
     await expect.poll(() => dbText(strip(other, "keys"))).toBe(set);
     await tab(other, "Tech");
     await expect(strip(other, "content")).toHaveClass(/muted/);
+    await expect.poll(() => dbText(strip(other, "content"))).toBe(contentSet);
     await second.close();
 
-    // Clean up: unmute both (the keys level stays).
+    // Clean up: unmute both (the dragged keys and content levels stay).
     await content.locator(".mute-btn").click();
     await expect(content).not.toHaveClass(/muted/);
     await tab(page, "Mics");
