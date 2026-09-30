@@ -627,6 +627,24 @@ class MeasureTests(WindowHarness):
         tw.cmd_trace_stop(self.env, argparse.Namespace())
         self.assertEqual(self.pc.calls, [])
 
+    # B6: "ide event" waits for the trace stop, never for the xperf analysis.
+    def test_the_trace_stop_is_its_own_call_and_the_analysis_is_abandonable(self) -> None:
+        seen: dict = {}
+
+        def on_call(body: str) -> None:
+            if "Invoke-IemDpcIsr" in body:
+                seen["trace"] = self.state()["trace"]
+
+        self.pc.on_call = on_call
+        tw.cmd_measure(self.env, self.args())
+        stops = [(b, e) for b, e in self.pc.calls if "Stop-IemTrace" in b]
+        self.assertEqual(len(stops), 1)
+        self.assertIn("-Merge", stops[0][0])
+        self.assertNotIn("Invoke-IemDpcIsr", stops[0][0])
+        self.assertEqual(stops[0][1], "finish")                      # the stop changes the PC: it completes
+        self.assertEqual([e for b, e in self.pc.calls if "Invoke-IemDpcIsr" in b], ["abandon"])
+        self.assertIsNone(seen["trace"])                             # recorded as stopped before the analysis
+
 
 if __name__ == "__main__":
     unittest.main()
