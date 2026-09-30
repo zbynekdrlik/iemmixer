@@ -25,7 +25,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use iem_audio_io::cpuset;
-use iem_audio_io::telemetry::{ActivityGuard, Glitch, Loudest, Watched, dbfs};
+use iem_audio_io::telemetry::{ActivityGuard, Loudest, Watched, dbfs};
 use serde_json::{Value, json};
 
 const USAGE: &str =
@@ -323,37 +323,6 @@ fn place_thread(cpus: &[u8]) {
     let _ = cpus;
 }
 
-/// The most glitches one segment's report lists; more are only counted.
-#[cfg_attr(not(windows), allow(dead_code))]
-const GLITCH_REPORT_CAP: usize = 10_000;
-
-/// Adds `new` to a segment's list up to the cap; returns how many did not fit.
-#[cfg_attr(not(windows), allow(dead_code))]
-fn keep_glitches(list: &mut Vec<Glitch>, new: &[Glitch]) -> usize {
-    let take = new.len().min(GLITCH_REPORT_CAP.saturating_sub(list.len()));
-    list.extend(new.iter().take(take).copied());
-    new.len() - take
-}
-
-/// A glitch's QPC count: the stream's QPC base plus its stream-clock time.
-#[cfg_attr(not(windows), allow(dead_code))]
-fn glitch_qpc(at_ns: u64, base: i64, freq: i64) -> i64 {
-    let ticks = u128::from(at_ns) * u128::try_from(freq).unwrap_or(0) / 1_000_000_000;
-    base.saturating_add(i64::try_from(ticks).unwrap_or(i64::MAX))
-}
-
-/// The trace marker of one glitch (`latency_report.py` parses it): the
-/// glitch's QPC, the QPC when the marker was written, the frequency, the value.
-#[cfg_attr(not(windows), allow(dead_code))]
-fn marker_text(g: &Glitch, base: i64, freq: i64, emit: i64) -> String {
-    format!(
-        "iemmixer-glitch kind={} at_qpc={} emit_qpc={emit} freq={freq} value={}",
-        g.kind.name(),
-        glitch_qpc(g.at_ns, base, freq),
-        g.value
-    )
-}
-
 impl Drop for Stress {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
@@ -397,11 +366,12 @@ mod spike {
         self, AsioError, DriverInfo, Host, Running, StopTimings, StreamConfig,
     };
     use iem_audio_io::format::SampleFormat;
+    use iem_audio_io::glitch_report::{keep_glitches, write_markers};
     use iem_audio_io::os;
     use iem_audio_io::telemetry::{GapScan, Glitch, Snapshot};
     use serde_json::{Value, json};
 
-    use super::{Args, ExitCode, Mode, Stress, Watch, code_of, keep_glitches, marker_text, push};
+    use super::{Args, ExitCode, Mode, Stress, Watch, code_of, push};
 
     const FIRST_CALLBACK_WAIT: Duration = Duration::from_secs(2);
     const AFTER_FAULT: Duration = Duration::from_secs(2);
@@ -582,10 +552,13 @@ mod spike {
         fresh.clear();
         running.drain_glitches(fresh);
         if let (Some(m), Some((base, freq))) = (markers, qpc) {
-            let emit = os::qpc().map_or(0, |q| q.0);
-            for g in fresh.iter() {
-                m.write(&marker_text(g, base, freq, emit));
-            }
+            write_markers(
+                fresh,
+                base,
+                freq,
+                || os::qpc().map_or(0, |q| q.0),
+                |text| m.write(text),
+            );
         }
         keep_glitches(kept, fresh)
     }
@@ -1115,40 +1088,6 @@ mod tests {
                 h.driver.is_empty()
             ),
             (Mode::Hwlat, Some(14), 10, 30, true)
-        );
-    }
-
-    use iem_audio_io::telemetry::GlitchKind;
-
-    fn glitch(kind: GlitchKind, at_ns: u64, value: u64) -> Glitch {
-        Glitch { kind, at_ns, value }
-    }
-
-    #[test]
-    fn glitch_list_is_capped() {
-        let mut list = vec![glitch(GlitchKind::Late, 0, 1); GLITCH_REPORT_CAP - 2];
-        let new = [glitch(GlitchKind::Missed, 1, 2); 5];
-        assert_eq!(keep_glitches(&mut list, &new), 3);
-        assert_eq!(list.len(), GLITCH_REPORT_CAP);
-        assert_eq!(keep_glitches(&mut list, &new), 5);
-        let mut empty = Vec::new();
-        assert_eq!(keep_glitches(&mut empty, &new), 0);
-        assert_eq!(empty.len(), 5);
-    }
-
-    #[test]
-    fn glitch_times_convert_to_qpc_and_markers_carry_them() {
-        assert_eq!(glitch_qpc(1_000_000_000, 100, 10_000_000), 10_000_100);
-        assert_eq!(glitch_qpc(333_333, 0, 10_000_000), 3_333);
-        assert_eq!(glitch_qpc(5, 7, 0), 7);
-        assert_eq!(
-            marker_text(
-                &glitch(GlitchKind::Missed, 1_000_000_000, 700_000),
-                100,
-                10_000_000,
-                10_050_000
-            ),
-            "iemmixer-glitch kind=missed at_qpc=10000100 emit_qpc=10050000 freq=10000000 value=700000"
         );
     }
 }
