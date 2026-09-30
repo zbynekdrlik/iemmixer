@@ -429,6 +429,12 @@ function Set-IemValue {
         'plan-exists' {
             # The plan is created once and stays defined (design note 6.2 L2): never deleted here.
             if ($Value -ne 'present') { throw "plan $($a.guid): only 'present' is written" }
+            # Enter's checks (Assert-IemOwnPlan), repeated by the writer itself (review
+            # R7): never plan.source, never a built-in scheme, never a plan that already
+            # exists, so /duplicatescheme and the cleanup /delete below can only touch
+            # the plan this call creates.
+            [void](Assert-IemPlanGuid -Guid ([string]$a.guid) -Source ([string]$a.source))
+            if (Test-IemPlan -Guid ([string]$a.guid)) { throw "plan $($a.guid) already exists: it is never duplicated over (review R7)" }
             $r = Invoke-IemNative -FilePath 'powercfg.exe' -Arguments @('/duplicatescheme', $a.source, $a.guid)
             if ($r.code -ne 0) { throw "powercfg /duplicatescheme: $($r.out -join ' ')" }
             # Named right away: an existing plan counts as iemmixer's only by this name
@@ -448,6 +454,7 @@ function Set-IemValue {
         }
         'plan-value' {
             if ($null -eq $Value) { throw 'a plan value cannot be removed' }
+            [void](Assert-IemPlanGuid -Guid ([string]$a.guid))
             if ((Get-IemPlanName -Guid ([string]$a.guid)) -cne $script:PlanName) { throw "plan $($a.guid) is not iemmixer's own plan: value not written (M2)" }
             [IemPower]::Write($a.guid, $a.sub, $a.setting, [uint32]$Value)
         }
@@ -882,15 +889,23 @@ function Get-IemPlanName {
     return $name
 }
 
+function Assert-IemPlanGuid {
+    # A GUID iemmixer may create or write into (M2, review R7): never plan.source
+    # (the REAPER-mode plan it duplicates; checked when -Source is given), never a
+    # built-in Windows scheme. Returns the GUID in canonical form.
+    param([Parameter(Mandatory)][string]$Guid, [string]$Source)
+    $g = ([guid]$Guid).ToString()
+    if ($PSBoundParameters.ContainsKey('Source') -and $g -eq ([guid]$Source).ToString()) { throw "plan.guid $g is plan.source, the REAPER-mode plan: iemmixer never writes into it" }
+    if ($script:BuiltinSchemes -contains $g) { throw "plan.guid $g is a built-in Windows scheme: iemmixer writes only into its own plan" }
+    return $g
+}
+
 function Assert-IemOwnPlan {
     # Plan values are written only into iemmixer's own plan (M2): never the
     # REAPER-mode plan it duplicates (plan.source), never a built-in scheme, and an
     # existing plan only when it carries iemmixer's name.
     param([Parameter(Mandatory)]$Profile)
-    $g = ([guid][string]$Profile.plan.guid).ToString()
-    $s = ([guid][string]$Profile.plan.source).ToString()
-    if ($g -eq $s) { throw "plan.guid $g is plan.source, the REAPER-mode plan: iemmixer never writes into it" }
-    if ($script:BuiltinSchemes -contains $g) { throw "plan.guid $g is a built-in Windows scheme: iemmixer writes only into its own plan" }
+    $g = Assert-IemPlanGuid -Guid ([string]$Profile.plan.guid) -Source ([string]$Profile.plan.source)
     $name = Get-IemPlanName -Guid $g
     if ($null -ne $name -and $name -cne $script:PlanName) { throw "plan $g exists and is not iemmixer's (named '$name'): nothing written" }
 }
