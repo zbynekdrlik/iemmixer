@@ -275,6 +275,73 @@ mod tests {
         assert!(write_atomic(&dir.path().join("no/such/dir/x.json"), b"x").is_err());
     }
 
+    // The F30 install-site path (win/engine.rs::install_site) writes the new
+    // site through write_atomic, so these pin its guarantees (gen1 parity:
+    // scripts/test_merge_deployed_config.py, #25). gen2 has no config-merge:
+    // the site file is replaced whole, so there is no per-key merge to test.
+
+    #[test]
+    fn write_atomic_leaves_no_tmp_sibling() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("site.toml");
+        write_atomic(&path, b"first").unwrap();
+        write_atomic(&path, b"second").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"second");
+        // The temp file write_atomic renamed from must not survive the rename.
+        assert!(
+            !path.with_extension("tmp").exists(),
+            "a .tmp sibling was left behind"
+        );
+        // Nothing but the target file is left in the directory.
+        let count = fs::read_dir(dir.path()).unwrap().count();
+        assert_eq!(count, 1, "only the site file should remain, no temp");
+    }
+
+    #[test]
+    fn a_failed_write_leaves_the_original_byte_for_byte() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("site.toml");
+        let original = b"the original site, kept whole";
+        fs::write(&path, original).unwrap();
+        // A directory at the temp path blocks write_atomic's temp file, so it
+        // fails before the atomic rename that would replace the site: the
+        // crash-before-replace guarantee leaves the site untouched.
+        fs::create_dir(path.with_extension("tmp")).unwrap();
+        assert!(write_atomic(&path, b"a new site that must not land").is_err());
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            original,
+            "the original site changed"
+        );
+    }
+
+    #[test]
+    fn the_bytes_are_installed_byte_for_byte() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("site.toml");
+        // Non-UTF-8 bytes with NULs, CRLF and high bytes: the write is verbatim,
+        // never re-encoded or newline-normalised (a fresh deploy copies source).
+        let bytes = b"\x00\xff\x01[engine]\r\nchannels = 160\n\xfe\x80";
+        write_atomic(&path, bytes).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert!(!path.with_extension("tmp").exists());
+    }
+
+    #[test]
+    fn an_unchanged_site_is_rewritten_byte_identical() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("site.toml");
+        let bytes = b"[engine]\nchannels = 160\n";
+        write_atomic(&path, bytes).unwrap();
+        let first = fs::read(&path).unwrap();
+        // gen2 replaces the whole file (no per-key merge), so installing the
+        // same site again is a no-op in effect: byte-identical, no temp left.
+        write_atomic(&path, bytes).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), first);
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert!(!path.with_extension("tmp").exists());
+    }
+
     #[test]
     fn a_reboot_resets_the_mode_to_event() {
         let st = GuardState {
