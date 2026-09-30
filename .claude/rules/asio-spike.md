@@ -6,6 +6,7 @@ paths:
   - "crates/iem-audio-io/src/format.rs"
   - "crates/iem-audio-io/src/glitch_report.rs"
   - "crates/iem-audio-io/src/telemetry.rs"
+  - "crates/iem-audio-io/src/telemetry_tests.rs"
   - "crates/iem-audio-io/src/owner.rs"
   - "crates/iem-audio-io/src/messages.rs"
   - "crates/iem-audio-io/examples/asio_spike/**"
