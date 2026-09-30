@@ -111,7 +111,7 @@ function New-TestProfile([string]$Hwid, [hashtable]$Set = @{}) {
         updates = [ordered]@{ services = @(); tasks = @() }
         maintenance = [ordered]@{ off = $true; tasks = @("$taskPath$taskName", '\iemmixer-test\no-such-task') }
         defender = [ordered]@{ paths = @($dir); processes = @() }
-        devices = @([ordered]@{ id = 'card'; instance = 'PCI\VEN_TEST&DEV_0001\0'; hwid = $Hwid; lps = @(2); enabled = $true })
+        devices = @([ordered]@{ id = 'card'; role = 'card'; instance = 'PCI\VEN_TEST&DEV_0001\0'; hwid = $Hwid; lps = @(2); enabled = $true })
         nic = (New-TestNic 'PCI\VEN_FFFE&DEV_0002')
         fingerprint = [ordered]@{ files = @(); keys = @() }
     }
@@ -237,9 +237,22 @@ try {
     # processor, never processor 0 (review R3).
     foreach ($c in @(@(@(2, 62), @(2, 62), '*not present*'), @(@(2), @(2, 62), '*layout.card*'), @(@(), @(2), '*no processors*'),
                      @($null, @(2), '*no processors*'))) {
-        $dv = @([ordered]@{ id = 'card'; instance = 'PCI\VEN_TEST&DEV_0001\0'; hwid = $hw; lps = $c[0]; enabled = $true })
+        $dv = @([ordered]@{ id = 'card'; role = 'card'; instance = 'PCI\VEN_TEST&DEV_0001\0'; hwid = $hw; lps = $c[0]; enabled = $true })
         $bp = New-TestProfile $hw @{ devices = $dv; layout = [ordered]@{ housekeeping = @(0); nic = @(1); card = $c[1]; audio = @(3) } }
         ThrowsLike { Invoke-IemTuningApply -ProfilePath $bp -Tier 3 -Only @('irq') } $c[2] "tier3-refuses-card-processors '$($c[0] -join ',')'"
+    }
+    # The card is the device with role 'card', whatever its id; no other device may
+    # sit on the card's or the audio processors (design note 6.4 R3); one card at
+    # most (review R4).
+    $ti = 'PCI\VEN_TEST&DEV_0001\0'
+    $dsp = [ordered]@{ id = 'dsp'; role = 'card'; instance = $ti; hwid = $hw; lps = @(1); enabled = $true }
+    $crd = [ordered]@{ id = 'card'; role = 'card'; instance = $ti; hwid = $hw; lps = @(2); enabled = $true }
+    $crd2 = [ordered]@{ id = 'card2'; role = 'card'; instance = $ti; hwid = $hw; lps = @(2); enabled = $true }
+    $usb2 = [ordered]@{ id = 'usb'; instance = $ti; hwid = $hw; lps = @(2); enabled = $true }
+    $usb3 = [ordered]@{ id = 'usb'; instance = $ti; hwid = $hw; lps = @(3); enabled = $true }
+    foreach ($c in @(@(@($dsp), '*layout.card*'), @(@($crd, $usb2), '*card or audio*'), @(@($crd, $usb3), '*card or audio*'), @(@($crd, $crd2), '*one card*'))) {
+        $bp = New-TestProfile $hw @{ devices = $c[0] }
+        ThrowsLike { Invoke-IemTuningApply -ProfilePath $bp -Tier 3 -Only @('irq') } $c[1] "tier3-refuses-device-roles $($c[1])"
     }
     Assert (-not (Test-Path -LiteralPath "$enum\Device Parameters")) 'tier3-refusal-writes-nothing'
     # The NIC driver key is checked against the profile's hardware id before any write,
