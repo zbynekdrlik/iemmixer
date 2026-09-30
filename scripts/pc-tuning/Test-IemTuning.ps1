@@ -104,7 +104,7 @@ function New-TestNic([string]$Hwid, [string]$Adapter = '', [string]$Key = 'HKLM:
 function New-TestProfile([string]$Hwid, [hashtable]$Set = @{}) {
     $p = [ordered]@{
         version = 1; journal = (Join-Path $dir 'journal.json'); registry_root = $root
-        layout = [ordered]@{ housekeeping = @(0); card = @(0); nic = @(0); audio = @(0) }
+        layout = [ordered]@{ housekeeping = @(0); card = @(0, 2); nic = @(0); audio = @(0) }
         plan = [ordered]@{ guid = $testPlan; source = $activeBefore }
         governor = 'W32Time'; placement = @('PING'); services_disable = @('Spooler'); services_mode = @()
         updates = [ordered]@{ services = @(); tasks = @() }
@@ -225,6 +225,13 @@ try {
                      @('PCI\VEN_FFFE', '*not a PCI VEN_/DEV_*'), @('PCI\VEN_FFFE&DEV_0002', '*hardware id does not match*'))) {
         $bp = New-TestProfile $c[0]
         ThrowsLike { Invoke-IemTuningApply -ProfilePath $bp -Tier 3 -Only @('irq') } $c[1] "tier3-refuses-the-card-hwid '$($c[0])'"
+    }
+    # A device's processors must exist, and the card's must be the layout's card
+    # role, before its affinity is written (review 3.9).
+    foreach ($c in @(@(@(0, 62), @(0, 62), '*not present*'), @(@(0, 2), @(0), '*layout.card*'), @(@(), @(), '*no processors*'))) {
+        $dv = @([ordered]@{ id = 'card'; instance = 'PCI\VEN_TEST&DEV_0001\0'; hwid = $hw; lps = $c[0]; enabled = $true })
+        $bp = New-TestProfile $hw @{ devices = $dv; layout = [ordered]@{ housekeeping = @(0); card = $c[1]; nic = @(0); audio = @(0) } }
+        ThrowsLike { Invoke-IemTuningApply -ProfilePath $bp -Tier 3 -Only @('irq') } $c[2] "tier3-refuses-card-processors '$($c[0] -join ',')'"
     }
     Assert (-not (Test-Path -LiteralPath "$enum\Device Parameters")) 'tier3-refusal-writes-nothing'
     # The NIC driver key is checked against the profile's hardware id before any write,
