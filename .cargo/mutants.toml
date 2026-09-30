@@ -57,6 +57,10 @@ exclude_globs = [
   # which stays mutated with prefwin.rs and lib.rs.
   "crates/iem-win/src/console.rs",
   "crates/iem-win/src/errmode.rs",
+  # The durable rename (#32 minor-7): the engine's OsFiles renames through
+  # it on Windows only; its Windows test and the engine's persistence tests
+  # run in the windows job.
+  "crates/iem-win/src/file.rs",
   "crates/iem-win/src/pipe.rs",
   "crates/iem-win/src/power.rs",
   "crates/iem-win/src/process.rs",
