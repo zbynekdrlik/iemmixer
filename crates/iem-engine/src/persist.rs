@@ -172,9 +172,9 @@ impl Store {
     /// between those two renames leaves the latest state only as a generation
     /// (iemmixer#9 2026-09-28: `import --seed-if-absent` must not re-seed over
     /// it). Ignores `baseline.json` (a seed is not live state).
-    pub fn has_state(&self) -> bool {
-        self.dir.join(CURRENT).exists()
-            || self.generations().map(|g| !g.is_empty()).unwrap_or(false)
+    pub fn has_state(&self) -> io::Result<bool> {
+        Ok(self.dir.join(CURRENT).exists()
+            || self.generations().map(|g| !g.is_empty()).unwrap_or(false))
     }
 
     /// Generation files, oldest first.
@@ -375,17 +375,17 @@ mod tests {
     fn has_state_sees_current_and_generations_independently() {
         let (_d, s) = store();
         // A fresh store holds no live state.
-        assert!(!s.has_state());
+        assert!(!s.has_state().unwrap());
         // `current.json` alone is live state.
         std::fs::write(s.dir().join(CURRENT), b"{}").unwrap();
-        assert!(s.has_state());
+        assert!(s.has_state().unwrap());
         // A generation ALONE, with no `current.json`, is also live state: a
         // crash between `save`'s two renames can leave the newest state only as
         // a generation (iemmixer#9). This pins the `||` (either source counts)
         // and the `!generations.is_empty()` (a present generation is state).
         std::fs::remove_file(s.dir().join(CURRENT)).unwrap();
         std::fs::write(s.dir().join("gen-0000000001.json"), b"{}").unwrap();
-        assert!(s.has_state());
+        assert!(s.has_state().unwrap());
     }
 
     #[test]

@@ -151,7 +151,7 @@ pub fn run(args: &[String]) -> Result<String, Failure> {
     store.save_baseline(&persisted).map_err(io)?;
     // Keep any existing live state (current.json OR a lone generation left by a
     // crash mid-save); only seed current.json when there is none.
-    let keep_current = seed_if_absent && store.has_state();
+    let keep_current = seed_if_absent && store.has_state().map_err(io)?;
     if !keep_current {
         store.save(&persisted).map_err(io)?;
     }
