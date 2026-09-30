@@ -1,7 +1,10 @@
 //! Windows process placement, priority, clock and trace markers (S1c design
-//! note §4.1, §6.2 L5) for the spike and, in S6, the engine. The driver's
-//! callback thread is never re-prioritised: it inherits the process's default
-//! CPU Set like every other thread of the process, nothing else.
+//! note §4.1, §6.2 L5) for the S1a spike only: the spike's `Host` path in
+//! `asio.rs` and `examples/asio_spike.rs`. The S6 engine places and
+//! prioritises itself through `iem_win::power` and never calls this module.
+//! The driver's callback thread is never re-prioritised: it inherits the
+//! process's default CPU Set like every other thread of the process, nothing
+//! else.
 
 use core::ffi::c_void;
 use core::ptr;
