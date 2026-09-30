@@ -53,7 +53,8 @@ impl Store {
             return settle(topo, persisted, source, rejected);
         }
         let baseline = self.dir.join(BASELINE);
-        if let Ok(Read::Found(persisted)) = read_state(&baseline, &mut rejected, Reading::Tolerant)
+        if let Ok(Read::Found(persisted)) =
+            self.read_state(&baseline, &mut rejected, Reading::Tolerant)
         {
             return settle(topo, persisted, Source::Baseline, rejected);
         }
@@ -78,8 +79,8 @@ impl Store {
         reading: Reading,
     ) -> io::Result<Option<(Persisted, Source)>> {
         let tmp_path = self.dir.join(TMP);
-        let current = read_state(&self.dir.join(CURRENT), rejected, reading)?;
-        let tmp = read_state(&tmp_path, rejected, reading)?;
+        let current = self.read_state(&self.dir.join(CURRENT), rejected, reading)?;
+        let tmp = self.read_state(&tmp_path, rejected, reading)?;
         if let Read::Found(current) = current {
             return Ok(Some(match tmp {
                 Read::Found(tmp) if supersedes(&tmp, &current) => (tmp, Source::Interrupted),
@@ -111,7 +112,7 @@ impl Store {
         };
         let mut newest = None;
         for (seq, path) in gens.into_iter().rev() {
-            if let Read::Found(generation) = read_state(&path, rejected, reading)? {
+            if let Read::Found(generation) = self.read_state(&path, rejected, reading)? {
                 newest = Some((generation, seq));
                 break;
             }
@@ -189,9 +190,9 @@ impl Store {
     fn quarantine(&self, current: &Path) -> io::Result<PathBuf> {
         for n in 1..=QUARANTINE_NAMES {
             let aside = self.dir.join(format!("{CURRENT}.damaged-{n}"));
-            if !aside.try_exists()? {
-                fs::rename(current, &aside)?;
-                sync_dir(&self.dir)?;
+            if !self.files.exists(&aside)? {
+                self.files.rename(current, &aside)?;
+                self.files.sync_dir(&self.dir)?;
                 return Ok(aside);
             }
         }
@@ -201,13 +202,36 @@ impl Store {
     }
 
     fn finish_interrupted(&self) -> io::Result<()> {
-        // A handle with write access: Windows flushes only through one.
-        fs::OpenOptions::new()
-            .write(true)
-            .open(self.dir.join(TMP))?
-            .sync_all()?;
+        self.files.sync_file(&self.dir.join(TMP))?;
         self.commit_tmp()?;
         Ok(())
+    }
+
+    /// Reads and decodes `path`. A file that does not decode goes to
+    /// `rejected` with the reason; one that cannot be read too when
+    /// `Tolerant`, and is the error when `Strict`.
+    fn read_state(
+        &self,
+        path: &Path,
+        rejected: &mut Vec<(PathBuf, String)>,
+        reading: Reading,
+    ) -> io::Result<Read> {
+        let bytes = match self.files.read(path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Read::Missing),
+            Err(e) if reading == Reading::Strict => return Err(e),
+            Err(e) => {
+                rejected.push((path.to_path_buf(), e.to_string()));
+                return Ok(Read::Rejected);
+            }
+        };
+        Ok(match decode(&bytes) {
+            Ok(persisted) => Read::Found(persisted),
+            Err(why) => {
+                rejected.push((path.to_path_buf(), why));
+                Read::Rejected
+            }
+        })
     }
 }
 
@@ -226,32 +250,6 @@ enum Read {
     /// Present but unreadable or not a valid state file (in `rejected`).
     Rejected,
     Found(Persisted),
-}
-
-/// Reads and decodes `path`. A file that does not decode goes to
-/// `rejected` with the reason; one that cannot be read too when
-/// `Tolerant`, and is the error when `Strict`.
-fn read_state(
-    path: &Path,
-    rejected: &mut Vec<(PathBuf, String)>,
-    reading: Reading,
-) -> io::Result<Read> {
-    let bytes = match fs::read(path) {
-        Ok(b) => b,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Read::Missing),
-        Err(e) if reading == Reading::Strict => return Err(e),
-        Err(e) => {
-            rejected.push((path.to_path_buf(), e.to_string()));
-            return Ok(Read::Rejected);
-        }
-    };
-    Ok(match decode(&bytes) {
-        Ok(persisted) => Read::Found(persisted),
-        Err(why) => {
-            rejected.push((path.to_path_buf(), why));
-            Read::Rejected
-        }
-    })
 }
 
 /// Whether an interrupted save (`save.tmp`) supersedes the state it

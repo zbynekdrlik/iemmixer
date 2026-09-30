@@ -20,9 +20,10 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::fs::{self, File};
-use std::io::{self, Write};
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use iem_engine_proto::{MixId, MixState, SCHEMA};
@@ -34,6 +35,9 @@ use crate::core::{defaults_muted, reconcile, to_state};
 use crate::topology::Topology;
 
 mod chain;
+mod files;
+
+use files::{Files, OsFiles};
 
 pub use chain::Recovery;
 
@@ -151,24 +155,6 @@ pub fn decode(bytes: &[u8]) -> Result<Persisted, String> {
     serde_json::from_str(file.payload.get()).map_err(|e| format!("payload: {e}"))
 }
 
-fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let mut f = File::create(path)?;
-    f.write_all(bytes)?;
-    f.sync_all()
-}
-
-#[cfg(unix)]
-fn sync_dir(dir: &Path) -> io::Result<()> {
-    File::open(dir)?.sync_all()
-}
-
-/// Windows has no directory handle to flush this way; the renames are
-/// `MoveFileExW` with replace (S6 may switch to `ReplaceFileW`).
-#[cfg(not(unix))]
-fn sync_dir(_dir: &Path) -> io::Result<()> {
-    Ok(())
-}
-
 fn generation_name(seq: u64) -> String {
     format!("gen-{seq:010}.json")
 }
@@ -200,6 +186,8 @@ fn generation_entries(
 #[derive(Debug, Clone)]
 pub struct Store {
     dir: PathBuf,
+    /// Every file operation goes through here (#32 P9).
+    files: Arc<dyn Files>,
 }
 
 impl Store {
@@ -207,7 +195,14 @@ impl Store {
         fs::create_dir_all(dir)?;
         Ok(Self {
             dir: dir.to_path_buf(),
+            files: Arc::new(OsFiles),
         })
+    }
+
+    /// Writes `bytes` to `path` and flushes it.
+    fn write_synced(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        self.files.write(path, bytes)?;
+        self.files.sync_file(path)
     }
 
     pub fn dir(&self) -> &Path {
@@ -220,14 +215,14 @@ impl Store {
 
     /// Generation files, oldest first.
     pub fn generations(&self) -> io::Result<Vec<(u64, PathBuf)>> {
-        generation_entries(fs::read_dir(&self.dir)?.map(|e| e.map(|e| (e.file_name(), e.path()))))
+        generation_entries(self.files.list(&self.dir)?.into_iter())
     }
 
     /// Saves atomically; the previous `current.json` becomes the newest
     /// generation. Returns that generation's seq (0: there was none).
     pub fn save(&self, p: &Persisted) -> io::Result<u64> {
         let bytes = encode(p)?;
-        write_synced(&self.dir.join(TMP), &bytes)?;
+        self.write_synced(&self.dir.join(TMP), &bytes)?;
         self.commit_tmp()
     }
 
@@ -238,17 +233,17 @@ impl Store {
     fn commit_tmp(&self) -> io::Result<u64> {
         let current = self.dir.join(CURRENT);
         let mut seq = 0;
-        if current.exists() {
+        if self.files.exists(&current).unwrap_or(false) {
             seq = self.generations()?.last().map_or(0, |g| g.0) + 1;
-            fs::rename(&current, self.generation_path(seq))?;
+            self.files.rename(&current, &self.generation_path(seq))?;
         }
-        fs::rename(self.dir.join(TMP), &current)?;
+        self.files.rename(&self.dir.join(TMP), &current)?;
         let gens = self.generations()?;
         let excess = gens.len().saturating_sub(GENERATIONS);
         for (_, path) in gens.iter().take(excess) {
-            fs::remove_file(path)?;
+            self.files.remove(path)?;
         }
-        sync_dir(&self.dir)?;
+        self.files.sync_dir(&self.dir)?;
         Ok(seq)
     }
 
@@ -256,9 +251,9 @@ impl Store {
     /// `save.tmp`, which may hold the only copy of an interrupted save (#32).
     pub fn save_baseline(&self, p: &Persisted) -> io::Result<()> {
         let tmp = self.dir.join(BASELINE_TMP);
-        write_synced(&tmp, &encode(p)?)?;
-        fs::rename(&tmp, self.dir.join(BASELINE))?;
-        sync_dir(&self.dir)
+        self.write_synced(&tmp, &encode(p)?)?;
+        self.files.rename(&tmp, &self.dir.join(BASELINE))?;
+        self.files.sync_dir(&self.dir)
     }
 }
 

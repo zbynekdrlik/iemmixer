@@ -160,8 +160,10 @@ exclude_re = [
   # Push subscription through the service worker's PushManager.
   "iem-ui/src/pages/mixer/push\\.rs.*subscribe_to_push",
   # Engine (S3): effects with no observable outcome through the engine's API.
-  # fsync of the state directory: durability shows only across a power loss.
-  "iem-engine/src/persist\\.rs.*replace sync_dir -> ",
+  # The fsync of a file and of the state directory (persist/files.rs, the
+  # file system behind the #32 seam): durability shows only across a power
+  # loss; the tests' fault seam fails them to prove the protocol instead.
+  "iem-engine/src/persist/files\\.rs.*\\b(sync_file|sync_dir)\\b",
   # The NullRt pacing thread's end after release; NullRt::stop itself is
   # tested in iem-audio-io (stop_ends_a_running_stream).
   "iem-engine/src/engine\\.rs.*replace <impl Driver for NullRtDriver>::stop with \\(\\)",
