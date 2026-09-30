@@ -3,7 +3,11 @@
 
 The denylist (one term per line, `#` comments) is private: a local file for
 the pre-push hook, the DENYLIST secret in CI. Output never contains a term, a
-matched line or an email address — only locations and the entry number.
+matched line or an email address — only locations and the entry number, each
+finding line starting with `tree` or a commit's short SHA (never with a path,
+so a path beginning `::` cannot read as a CI workflow command). A path
+component that holds a term is printed as `[redacted]` (the whole path when a
+term spans components), other components have their control characters escaped.
 
 Commit mode scans each commit's author/committer names and emails together
 with its message and added lines; with `--identities FILE` it also rejects
@@ -22,12 +26,17 @@ import re
 import shlex
 import subprocess
 import sys
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
 EXIT_CLEAN = 0
 EXIT_HIT = 1
 EXIT_USAGE = 2
+
+REDACTED = "[redacted]"
+# git's C-quoting of a path in a diff header (core.quotePath)
+C_ESCAPES = {"a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13, '"': 34, "\\": 92}
 
 
 @dataclass(frozen=True)
@@ -89,16 +98,41 @@ def load_allow(path: Path | None) -> set[str]:
     return keys
 
 
+def nfc(text: str) -> str:
+    """One form for letters with diacritics, so a decomposed `á` cannot hide a term."""
+    return unicodedata.normalize("NFC", text)
+
+
+def printable(text: str) -> str:
+    """Control characters escaped, so a path cannot inject lines (a CI `::error` command) into
+    the log."""
+    return "".join(char if char.isprintable() else f"\\x{ord(char):02x}" if ord(char) < 0x100
+                   else f"\\u{ord(char):04x}" for char in text)
+
+
 class Scanner:
     def __init__(self, terms: list[str], allow: set[str]) -> None:
-        self.patterns = [compile_term(term) for term in terms]
+        self.patterns = [compile_term(nfc(term)) for term in terms]
         self.allow = allow
 
     def entries_in(self, text: str) -> list[int]:
+        text = nfc(text)
         return [number for number, pattern in enumerate(self.patterns, start=1) if pattern.search(text)]
 
+    def shown(self, path: str) -> str:
+        """The path as printed: each component holding a term is redacted, the others have their
+        control characters escaped; the whole path is redacted when a term spans components (a
+        term without `/` always matches inside one component) or the printed form holds one."""
+        whole = set(self.entries_in(path))
+        parts = path.split("/")
+        part_hits = [set(self.entries_in(part)) if whole else set() for part in parts]
+        if not whole <= set().union(*part_hits):
+            return REDACTED
+        kept = "/".join(REDACTED if hit else printable(part) for part, hit in zip(parts, part_hits, strict=True))
+        return REDACTED if self.entries_in(kept) else kept
+
     def scan_path(self, path: str, prefix: str) -> list[Hit]:
-        return [Hit(f"{prefix}{path}: path", entry) for entry in self.entries_in(path)]
+        return [Hit(f"{prefix}{self.shown(path)}: path", entry) for entry in self.entries_in(path)]
 
     def scan_line(self, path: str, line: str, where: str) -> list[Hit]:
         entries = self.entries_in(line)
@@ -115,7 +149,35 @@ def decode(data: bytes) -> str:
     return data.decode("utf-8", errors="replace")
 
 
+def unquote_c(quoted: bytes) -> bytes:
+    """A path git wrote C-quoted (`"b/Kl\\303\\241vor"`) back to its exact bytes."""
+    body, out, i = quoted[1:-1], bytearray(), 0
+    while i < len(body):
+        if body[i:i + 1] != b"\\":
+            out += body[i:i + 1]
+            i += 1
+        elif body[i + 1:i + 2] in (b"0", b"1", b"2", b"3", b"4", b"5", b"6", b"7"):
+            out.append(int(body[i + 1:i + 4], 8))
+            i += 4
+        else:
+            out.append(C_ESCAPES[body[i + 1:i + 2].decode("ascii")])
+            i += 2
+    return bytes(out)
+
+
+def diff_path(label: str) -> str:
+    """The path of a `+++ ` header label: git adds a tab when the label has a space, and
+    C-quotes (core.quotePath) a label with a control or non-ASCII byte. Decode both back to
+    the real path, so a term hiding behind an octal escape or a trailing tab is still redacted."""
+    label = label.removesuffix("\t")
+    if label.startswith('"'):  # a C-quoted label is pure ASCII; unquote to the real bytes
+        return decode(unquote_c(label.encode("ascii")).removeprefix(b"b/"))
+    return label.removeprefix("b/")
+
+
 def scan_tree(scanner: Scanner, repo: Path, rev: str) -> list[Hit]:
+    # every location starts with a fixed word, never with a path: a path starting with `::`
+    # would otherwise read as a GitHub workflow command in the CI log
     hits: list[Hit] = []
     for entry in git(repo, "ls-tree", "-r", "-z", "--full-tree", rev).split(b"\0"):
         if not entry:
@@ -123,14 +185,15 @@ def scan_tree(scanner: Scanner, repo: Path, rev: str) -> list[Hit]:
         meta, _, raw_path = entry.partition(b"\t")
         _mode, kind, obj = meta.split()
         path = decode(raw_path)
-        hits += scanner.scan_path(path, "")
+        hits += scanner.scan_path(path, "tree ")
         if kind != b"blob":
             continue
         data = git(repo, "cat-file", "blob", decode(obj))
         if b"\0" in data:
             continue
+        shown = scanner.shown(path)
         for number, line in enumerate(decode(data).splitlines(), start=1):
-            hits += scanner.scan_line(path, line, f"{path}:{number}")
+            hits += scanner.scan_line(path, line, f"tree {shown}:{number}")
     return hits
 
 
@@ -147,16 +210,24 @@ def scan_commits(
             for role, email in zip(("author", "committer"), emails):
                 if email.strip().lower() not in identities:
                     hits.append(IdentityProblem(short, role))
-        diff = decode(git(repo, "show", "--format=", "--unified=0", "--no-color", "--no-ext-diff",
-                          "--no-renames", "-m", "--first-parent", sha))
-        path = ""
+        # force quotePath=true so a `+++ ` label is always pure-ASCII octal regardless of the
+        # local git config; diff_path/unquote_c decode it back (a raw non-ASCII byte in a quoted
+        # label under quotePath=false would otherwise fail encode("ascii"))
+        diff = decode(git(repo, "-c", "core.quotePath=true", "show", "--format=", "--unified=0",
+                          "--no-color", "--no-ext-diff", "--no-renames", "-m", "--first-parent", sha))
+        # `+++`/`---` count as headers only before a file's first hunk; inside a hunk an added
+        # line beginning with `++ ` renders as `+++ ...` and is content, not a new header path
+        path, in_hunk = "", False
         for line in diff.splitlines():
-            if line.startswith("+++ "):
-                target = line[4:]
-                path = target[2:] if target.startswith("b/") else target
+            if line.startswith("diff --git "):
+                path, in_hunk = "", False
+            elif line.startswith("@@"):
+                in_hunk = True
+            elif in_hunk and line.startswith("+"):
+                hits += scanner.scan_line(path, line[1:], f"{short} {scanner.shown(path)}")
+            elif not in_hunk and line.startswith("+++ "):
+                path = diff_path(line[4:])
                 hits += scanner.scan_path(path, f"{short} ")
-            elif line.startswith("+"):
-                hits += scanner.scan_line(path, line[1:], f"{short} {path}")
     return hits
 
 

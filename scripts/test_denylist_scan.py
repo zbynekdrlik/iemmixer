@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import unicodedata
 import unittest
 from pathlib import Path
 
@@ -14,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import denylist_scan as ds  # noqa: E402
 
 TERMS = ["zyxname", "10.9.", "ghost-host.example"]
+REDACTED_MARKER = "[redacted]"
 
 
 def git(repo: Path, *args: str) -> None:
@@ -156,6 +158,145 @@ class DenylistScanTests(unittest.TestCase):
             code = ds.main(["--repo", str(self.repo), "--hash", "a.txt", "2"])
         self.assertEqual(code, 0)
         self.assertEqual(out.getvalue().strip(), ds.line_key("a.txt", "two"))
+
+    # --- #27: the scan must never print a private term into the (public) CI log ---
+
+    def test_a_term_inside_a_path_component_is_redacted_not_printed(self) -> None:
+        # Vector 1: a file whose name holds a listed term must not put the term in the log.
+        self.commit({"docs/zyxname-notes.md": "x\n"})
+        code, out = self.scan("--tree", "HEAD")
+        self.assertEqual(code, 1)
+        self.assertNotIn("zyxname", out.lower())  # the leak the ticket is about
+        self.assertIn("[redacted]", out)          # the term-bearing component is redacted
+        self.assertIn("docs/", out)               # the clean component is still shown
+        self.assertIn("denylist entry", out)
+
+    def test_a_component_named_exactly_as_a_term_is_redacted(self) -> None:
+        self.commit({"zyxname/readme.md": "x\n"})
+        code, out = self.scan("--tree", "HEAD")
+        self.assertEqual(code, 1)
+        self.assertNotIn("zyxname", out.lower())
+        self.assertIn("[redacted]", out)
+
+    def test_a_finding_line_never_starts_with_a_raw_path(self) -> None:
+        # A path starting with `::` would read as a GitHub workflow command in the CI log;
+        # every finding location starts with a fixed word (`tree` / a commit SHA) instead.
+        self.commit({"zyxname.txt": "x\n"})
+        code, out = self.scan("--tree", "HEAD")
+        self.assertEqual(code, 1)
+        finding_lines = [ln for ln in out.splitlines() if "denylist entry" in ln]
+        self.assertTrue(finding_lines)
+        for ln in finding_lines:
+            self.assertTrue(ln.startswith("tree "), ln)
+
+    def test_an_added_line_rendered_as_a_plus_plus_header_does_not_leak(self) -> None:
+        # Vector 2: an added line whose content starts with `++ ` renders as `+++ ...` under
+        # --unified=0 and must be read as content, not a diff file-header, so its text (the
+        # private term) never reaches the log.
+        self.commit({"note.txt": "clean\n"})
+        (self.repo / "note.txt").write_text("++ zyxname secret marker\n", encoding="utf-8")
+        git(self.repo, "commit", "-q", "-am", "add a line beginning with ++")
+        code, out = self.scan("--commits", "HEAD~1..HEAD")
+        self.assertEqual(code, 1)
+        self.assertNotIn("zyxname", out.lower())    # the leak the ticket is about
+        self.assertNotIn("secret marker", out)      # no line content in the log at all
+        self.assertIn("note.txt", out)              # the real (clean) path is reported
+        self.assertIn("denylist entry", out)
+
+    def test_a_term_only_in_a_diff_header_path_is_redacted(self) -> None:
+        # Commit mode reports the added-file path; a term in it must be redacted, not printed.
+        self.commit({"a.txt": "clean\n"})
+        self.commit({"zyxname-new.txt": "harmless\n"}, message="add a file named after a term")
+        code, out = self.scan("--commits", "HEAD~1..HEAD")
+        self.assertEqual(code, 1)
+        self.assertNotIn("zyxname", out.lower())
+        self.assertIn("[redacted]", out)
+
+    # --- #27 round 2: commit-mode C-quoting, NFC, and shown() coverage ---
+
+    def test_a_c_quoted_commit_path_with_a_term_does_not_leak(self) -> None:
+        # git C-quotes a `+++` header path holding a non-ASCII byte (default core.quotePath):
+        # `note<U+00A0>zyxname.txt` -> `+++ "b/note\302\240zyxname.txt"`. A content hit prints
+        # the location, so the quoted path must be decoded and redacted, never printed raw.
+        self.commit({"base.txt": "base\n"})
+        name = "note zyxname.txt"  # no-break space before the term forces C-quoting
+        (self.repo / name).write_text("a line that also holds zyxname\n", encoding="utf-8")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "non-ascii path plus a content hit")
+        code, out = self.scan("--commits", "HEAD~1..HEAD")
+        self.assertEqual(code, 1)
+        self.assertNotIn("zyxname", out.lower())  # the leak this round fixes
+        self.assertNotIn("\\302", out)            # no octal-escaped bytes of the term either
+        self.assertIn("[redacted]", out)
+
+    def test_a_space_in_a_commit_path_aligns_with_the_tree_path(self) -> None:
+        # git appends a TAB to a `+++` label that has a space; the commit-mode path must equal
+        # the tree-mode path so one allowlist key (made with --hash) works in both modes.
+        self.commit({"my note.txt": "keep zyxname here\n"})
+        allow = self.tmp / "allow.txt"
+        allow.write_text(ds.line_key("my note.txt", "keep zyxname here") + "  reviewed\n", encoding="utf-8")
+        self.assertEqual(self.scan("--allow", str(allow), "--tree", "HEAD", "--commits", "HEAD")[0], 0)
+
+    def test_a_decomposed_diacritic_path_is_matched_and_redacted(self) -> None:
+        # A term with a diacritic and a path holding it in NFD (decomposed) form: NFC
+        # normalization must still match and redact it, so it cannot hide in the log.
+        term = "ďurica"  # 'ďurica' precomposed (NFC)
+        scanner = ds.Scanner([term], set())
+        nfd_path = unicodedata.normalize("NFD", f"docs/{term}-notes.md")
+        self.assertNotEqual(nfd_path, f"docs/{term}-notes.md")  # genuinely decomposed
+        self.assertEqual(scanner.shown(nfd_path), "docs/[redacted]")
+
+    def test_shown_redacts_a_component_that_holds_a_term(self) -> None:
+        scanner = ds.Scanner(["zyxname"], set())
+        self.assertEqual(scanner.shown("docs/zyxname-notes.md"), "docs/[redacted]")
+
+    def test_shown_redacts_the_whole_path_for_a_term_spanning_components(self) -> None:
+        scanner = ds.Scanner(["rack/mixer"], set())
+        self.assertEqual(scanner.shown("rack/mixer/config.txt"), REDACTED_MARKER)
+
+    def test_shown_escapes_control_chars_in_a_kept_component(self) -> None:
+        # a raw control char in a kept component could inject a log line / a CI ::command
+        scanner = ds.Scanner(["zyxname"], set())
+        self.assertEqual(scanner.shown("a\x01b/zyxname.txt"), "a\\x01b/[redacted]")
+
+    def test_shown_redacts_a_component_whose_redacted_form_still_matches(self) -> None:
+        # the post-redaction re-check: a term equal to the literal marker text
+        scanner = ds.Scanner(["redacted"], set())
+        self.assertEqual(scanner.shown("x/redacted/y"), REDACTED_MARKER)
+
+    def test_printable_escapes_control_and_non_ascii_characters(self) -> None:
+        self.assertEqual(ds.printable("a\x01b"), "a\\x01b")
+        self.assertEqual(ds.printable("x y"), "x\\u2028y")
+        self.assertEqual(ds.printable("plain-ok"), "plain-ok")
+
+    def test_commit_path_under_local_quotepath_false_does_not_crash(self) -> None:
+        # A developer's local core.quotePath=false leaves a non-ASCII byte raw inside a quoted
+        # label (git still quotes for the control char); the scan must force quotePath=true so
+        # the label is pure-ASCII octal and decode it, never crash on encode("ascii").
+        git(self.repo, "config", "core.quotePath", "false")
+        self.commit({"base.txt": "base\n"})
+        name = "n\x07ote zyxname.txt"  # a control char forces quoting; a non-ASCII byte too
+        (self.repo / name).write_text("content that also holds zyxname\n", encoding="utf-8")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "control + non-ascii path under quotePath=false")
+        code, out = self.scan("--commits", "HEAD~1..HEAD")
+        self.assertEqual(code, 1)
+        self.assertNotIn("zyxname", out.lower())
+        self.assertIn("[redacted]", out)
+
+    def test_commit_mode_redacts_tricky_path_shapes(self) -> None:
+        # git C-quotes a +++ label with a control char, backslash or quote, and TAB-suffixes a
+        # label with a space: every shape must decode and redact, with a content hit present.
+        names = ["y\x07zyxname.txt", "y\\zyxname.txt", 'y"zyxname.txt', "my zyxname.txt"]
+        self.commit({"base.txt": "base\n"})
+        for name in names:
+            (self.repo / name).write_text("body has zyxname in it\n", encoding="utf-8")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "tricky path shapes, each with a content hit")
+        code, out = self.scan("--commits", "HEAD~1..HEAD")
+        self.assertEqual(code, 1)
+        self.assertNotIn("zyxname", out.lower())
+        self.assertNotIn("\\302", out)
 
 
 if __name__ == "__main__":
