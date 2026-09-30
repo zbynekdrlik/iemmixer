@@ -62,6 +62,7 @@ $spoolStart = (Get-Item 'HKLM:\SYSTEM\CurrentControlSet\Services\Spooler').GetVa
 $activeBefore = [IemPower]::Active()
 $testPlan = [guid]::NewGuid().ToString()
 $foreignPlan = [guid]::NewGuid().ToString()   # an existing plan that is not iemmixer's (M2)
+$halfPlan = [guid]::NewGuid().ToString()      # a plan enter cannot name (review 3.3)
 $taskPath = '\iemmixer-test\'; $taskName = "t-$id"
 Register-ScheduledTask -TaskPath $taskPath -TaskName $taskName -Action (New-ScheduledTaskAction -Execute 'cmd.exe' -Argument '/c exit 0') | Out-Null
 $enum = "$root\HKLM\SYSTEM\CurrentControlSet\Enum\PCI\VEN_TEST&DEV_0001\0"
@@ -369,6 +370,16 @@ try {
     Set-TuningSeam 'ReadPlanName' $savedName
     Assert ($null -eq (Get-IemPlanName -Guid ([guid]::NewGuid().ToString())) -and (Get-IemPlanName -Guid $testPlan) -ceq 'iemmixer') 'plan-name-reads-the-real-name'
     Assert (-not (Read-IemJournalState $pp) -and [IemPower]::Active() -eq $activeBefore) 'plan-name-refusals-write-nothing'
+    # The plan enter creates is named at once; when the name does not read back, the
+    # plan this call just created is deleted and the row says so (review 3.3). This
+    # read-back is also the second M2 safety net (3.4).
+    $ph = New-TestProfile $hw @{ plan = [ordered]@{ guid = $halfPlan; source = $activeBefore } }
+    Set-TuningSeam 'ReadPlanName' { param($g) if (@(& powercfg.exe /list) -match $g) { 'not-iemmixer' } }
+    $eh = Enter-IemTuningMode -ProfilePath $ph -Only @('plan') -Idle 'c1'
+    Set-TuningSeam 'ReadPlanName' $savedName
+    $hx = @($eh | Where-Object { $_.key -eq 'plan:exists' })
+    Assert ($hx.Count -eq 1 -and $hx[0].action -eq 'failed' -and "$($hx[0].error)" -like '*just created was deleted*' -and -not (@(& powercfg.exe /list) -match $halfPlan) -and [IemPower]::Active() -eq $activeBefore) 'enter-deletes-a-plan-it-could-not-name'
+    [void](Exit-IemTuningMode -ProfilePath $ph)
 
     # A placed process that ended is skipped; a reused pid is refused.
     $short = Start-Process -FilePath $ping -ArgumentList '-n', '5', '127.0.0.1' -PassThru -WindowStyle Hidden
@@ -448,7 +459,7 @@ try {
     try { [void](Exit-IemTuningMode -ProfilePath $pp) } catch { Write-Host "cleanup exit: $_" }
     foreach ($t in 2, 3) { try { [void](Undo-IemTuning -ProfilePath $pp -Tier $t) } catch { Write-Host "cleanup undo: $_" } }
     if ([IemPower]::Active() -ne $activeBefore) { [IemPower]::Activate($activeBefore) }
-    foreach ($g in $testPlan, $foreignPlan) { if (@(& powercfg.exe /list) -match $g) { & powercfg.exe /delete $g | Out-Null } }
+    foreach ($g in $testPlan, $foreignPlan, $halfPlan) { if (@(& powercfg.exe /list) -match $g) { & powercfg.exe /delete $g | Out-Null } }
     Unregister-ScheduledTask -TaskPath $taskPath -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
     if (@((Get-MpPreference).ExclusionPath) -contains $dir) { Remove-MpPreference -ExclusionPath $dir }
     Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
