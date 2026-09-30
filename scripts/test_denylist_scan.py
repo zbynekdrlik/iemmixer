@@ -336,6 +336,30 @@ class DenylistScanTests(unittest.TestCase):
         path_findings = [ln for ln in out.splitlines() if ": path: denylist entry" in ln]
         self.assertEqual(len(path_findings), 1, path_findings)
 
+    def test_non_lf_separators_do_not_hide_a_term_in_commit_mode(self) -> None:
+        # Vector 2: an added line with CR / VT / FF / NEL / U+2028 before a term. str.splitlines()
+        # breaks the diff line at that character, and the tail (holding the term) loses its `+`
+        # prefix and is skipped. Split on `\n` only → the whole added line is scanned, so the term
+        # is caught; and it is never printed (redaction contract).
+        self.commit({"note.txt": "base\n"})
+        for i, sep in enumerate(("\r", "\x0b", "\x0c", "\x85", " ")):
+            with self.subTest(sep=hex(ord(sep))):
+                (self.repo / "note.txt").write_text(f"safe{sep}ZyxName line {i}\n", encoding="utf-8")
+                git(self.repo, "commit", "-q", "-am", f"line with separator {i}")
+                code, out = self.scan("--commits", "HEAD~1..HEAD")
+                self.assertEqual(code, 1, f"term after {hex(ord(sep))} not caught")
+                self.assertNotIn("zyxname", out.lower())
+
+    def test_non_lf_separator_lines_share_one_allow_key_across_modes(self) -> None:
+        # Vector 2 (allow-key parity): a line containing VT must split identically (`\n` only) in
+        # tree, commit and --hash mode, so a single allow key covers all three. str.splitlines()
+        # would break it and the key would not match.
+        line = "keep\x0bzyxname here"
+        self.commit({"a.txt": line + "\n"})
+        allow = self.tmp / "allow.txt"
+        allow.write_text(ds.line_key("a.txt", line) + "  reviewed\n", encoding="utf-8")
+        self.assertEqual(self.scan("--allow", str(allow), "--tree", "HEAD", "--commits", "HEAD")[0], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
