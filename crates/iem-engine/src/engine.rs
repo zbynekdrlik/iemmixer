@@ -472,6 +472,11 @@ pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
     let mut alarms = Vec::new();
     match loaded.source {
         Source::Current => info!("state rev {} loaded", loaded.persisted.rev),
+        // The newest state: a crash cut its save off between the renames.
+        Source::Interrupted => warn!(
+            "state rev {} loaded from save.tmp: its save was cut off before current.json",
+            loaded.persisted.rev
+        ),
         Source::Generation(_) | Source::Baseline => alarms.push(Alarm {
             code: AlarmCode::StateFallback,
             detail: format!(

@@ -4,17 +4,18 @@
 //! - `current.json`: the latest save;
 //! - `gen-<seq>.json`: the 20 previous saves (the newest has the highest seq);
 //! - `baseline.json`: written at each import (and, from S6, at `live` entry);
-//! - `save.tmp`: a save before its renames (a crash there may leave the
-//!   newest state only in it: the load chain does not read it, the seed
-//!   keeps it, `Store::has_state`);
+//! - `save.tmp`: a save before its renames (a crash between them leaves the
+//!   newest state only in it: the load chain reads it when `current.json` is
+//!   missing, the seed keeps it, `Store::has_state`);
 //! - `baseline.tmp`: a baseline before its rename.
 //!
 //! A file is `{"format", "schema", "sha256", "payload"}`; the SHA-256 covers the
 //! payload's raw bytes, so a re-serialisation never matters. Readers ignore
 //! unknown fields and default missing ones (additive schemas). The load chain
-//! is current → generations (newest first) → baseline → defaults with every
-//! mix muted. Files of an older schema (1: the REAPER-shaped graph before #20)
-//! are refused.
+//! is current → `save.tmp` (only while `current.json` is missing) →
+//! generations (newest first) → baseline → defaults with every mix muted.
+//! Files of an older schema (1: the REAPER-shaped graph before #20) are
+//! refused.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -52,6 +53,9 @@ pub struct Persisted {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
     Current,
+    /// `save.tmp` with `current.json` missing: a save a crash cut off between
+    /// its two renames, the newest state there is (#32).
+    Interrupted,
     Generation(u64),
     Baseline,
     Defaults,
@@ -176,9 +180,11 @@ impl Store {
     /// renames `current.json` to a generation and `save.tmp` to
     /// `current.json`: a crash before the second rename leaves the newest
     /// state only in `save.tmp`, the previous one maybe only as a generation.
-    /// The load chain does not read `save.tmp` (it may also be a save cut off
-    /// while writing), but `import --seed-if-absent` must neither seed over it
-    /// nor touch it (iemmixer#9 2026-09-28, #32 D6). Ignores `baseline.json`
+    /// The load chain reads `save.tmp` then, when it is complete (a save cut
+    /// off while writing fails its checksum), so `import --seed-if-absent`
+    /// must neither seed over it nor touch it (iemmixer#9 2026-09-28, #32).
+    /// It counts here whenever it exists, complete or not: the seed never
+    /// writes over what the engine may load. Ignores `baseline.json`
     /// (a seed is not live state) and `baseline.tmp`. An I/O error while
     /// looking is an error, never "no state" (#32 D5: the seed would write
     /// over state it could not see).
@@ -232,9 +238,19 @@ impl Store {
         sync_dir(&self.dir)
     }
 
-    /// The load chain.
+    /// The load chain. A file must pass `decode` (format, schema, the
+    /// payload's SHA-256, then the payload's parse) to be used; one that
+    /// exists and does not is `rejected`. `save.tmp` is tried only while
+    /// `current.json` is missing (a crash between `save`'s renames: it holds
+    /// the newest state, and a save cut off while writing fails the
+    /// checksum); beside a `current.json` it is not read (#32).
     pub fn load(&self, topo: &Topology) -> Loaded {
-        let mut candidates = vec![(self.dir.join(CURRENT), Source::Current)];
+        let current = self.dir.join(CURRENT);
+        let interrupted = matches!(current.try_exists(), Ok(false));
+        let mut candidates = vec![(current, Source::Current)];
+        if interrupted {
+            candidates.push((self.dir.join(TMP), Source::Interrupted));
+        }
         if let Ok(gens) = self.generations() {
             candidates.extend(
                 gens.into_iter()
