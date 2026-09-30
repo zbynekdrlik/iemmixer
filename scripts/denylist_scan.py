@@ -70,7 +70,7 @@ LONG_TEXT_RUN = 32
 # Content is scanned in batches of about CHUNK bytes, joined by SEP -- a private-use, non-word
 # character that no form creates or removes -- so CPU and memory stay bounded (#32 review m7).
 CHUNK = 1 << 18
-SEP = ""
+SEP = "\ue000"
 # a control byte ends a text run of binary content (a tab does not)
 _CONTROLS = bytes([*range(0x09), *range(0x0A, 0x20), 0x7F])
 _CONTROL = re.compile(b"[" + re.escape(_CONTROLS) + b"]")
@@ -270,7 +270,7 @@ def cp1250_from_git_latin1(text: str) -> str:
 
 # re.IGNORECASE matches an ASCII letter against these non-ASCII characters too (checked against every
 # code point): İ and ı against i, ſ against s, the Kelvin sign against k
-_FOLD = (("İ", "i"), ("ı", "i"), ("ſ", "s"), ("K", "k"))
+_FOLD = (("\u0130", "i"), ("\u0131", "i"), ("\u017f", "s"), ("\u212a", "k"))
 _ASCII_WORD = re.compile("[a-z0-9]{2,}")
 
 
@@ -431,7 +431,7 @@ class Batch:
 
     def text(self) -> str:
         """The units joined by SEP; a unit's own U+E000 is read as U+FFFD, also a non-word character."""
-        return self.source.replace(SEP, "�").replace(self.sep, SEP)
+        return self.source.replace(SEP, "\ufffd").replace(self.sep, SEP)
 
 
 def long_text_run(key: str) -> bool:
