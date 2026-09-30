@@ -200,6 +200,27 @@ class UnwindTests(unittest.TestCase):
         self.assertFalse(any(c.startswith("Invoke-SpikeBringBack") for c in self.calls))
         self.assertFalse(state["closed"])
 
+    def test_a_spike_not_confirmed_gone_never_gets_the_buffer_written(self) -> None:
+        # The driver may still be open: Set-SpikeBufferPref there is what set-buffer
+        # refuses (#32 B10). The unwind alarms the owner and stops, with or without
+        # the bring-back (reboot-prepare), and the window stays open.
+        self.gone = False
+        alarms: list[str] = []
+        saved = sw.alarm
+        sw.alarm = alarms.append
+        try:
+            for bring_back in (True, False):
+                state = self.state()
+                with self.assertRaisesRegex(sw.StepError, "did not stop"):
+                    sw.unwind(self.env, state, running=True, bring_back_reaper=bring_back)
+                self.assertFalse(state["closed"])
+                self.assertFalse(state["pref_restored"])
+        finally:
+            sw.alarm = saved
+        self.assertFalse(any("Set-SpikeBufferPref" in c for c in self.calls))
+        self.assertEqual(len(alarms), 2)
+        self.assertIn("did not stop", alarms[0])
+
     def test_a_prepared_reboot_window_closes_only_with_reaper_back(self) -> None:
         state = self.state(card="rebooting", pref_restored=True, reboot={"prepared_at": "t"})
         done = sw.unwind(self.env, state, running=False)
@@ -223,6 +244,7 @@ class UnwindTuningTests(unittest.TestCase):
         self.baseline.write_text(json.dumps({"plan.active": "reaper", "affinity": "x"}), encoding="utf-8")
         self.fail: set[str] = set()   # PowerShell verbs whose body should raise
         self.calls: list[str] = []
+        self.gone = True
 
         def fake_ps(env, body, timeout=300, event="finish"):
             self.calls.append(body)
@@ -230,7 +252,7 @@ class UnwindTuningTests(unittest.TestCase):
                 if verb in body:
                     raise sw.StepError(f"{verb} failed")
             if "Stop-SpikeGracefully" in body:
-                return True
+                return self.gone
             if "Get-IemReaperFingerprint" in body:
                 return {"plan.active": "spike", "affinity": "x"}   # differs from the baseline → alarm
             return {"ok": True}
@@ -271,6 +293,17 @@ class UnwindTuningTests(unittest.TestCase):
         self.assertIn("error", steps["tuning-exit"])
         self.assertTrue(any(c.startswith("Invoke-SpikeBringBack") for c in self.calls))   # REAPER still comes back
         self.assertEqual((state["card"], state["closed"]), ("reaper", True))
+
+    def test_a_spike_not_gone_still_stops_the_trace_and_the_mode_but_not_the_buffer(self) -> None:
+        # Neither touches the driver; the buffer write and REAPER wait for the spike (#32 B10).
+        self.gone = False
+        state = self.state()
+        with self.assertRaisesRegex(sw.StepError, "did not stop"):
+            sw.unwind(self.env, state, running=True)
+        self.assertTrue(any("Stop-IemTrace" in c for c in self.calls))
+        self.assertTrue(any("Exit-IemTuningMode" in c for c in self.calls))
+        self.assertFalse(any("Set-SpikeBufferPref" in c or c.startswith("Invoke-SpikeBringBack") for c in self.calls))
+        self.assertEqual((state["trace"], state["tuning_mode"], state["pref_restored"], state["closed"]), (None, False, False, False))
 
     def test_a_fingerprint_that_differs_is_recorded(self) -> None:
         state = self.state()
