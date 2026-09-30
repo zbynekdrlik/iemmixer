@@ -126,11 +126,26 @@ function Get-IemSystemEvents {
     return ,@($ev | Group-Object -Property ProviderName, Id | ForEach-Object { [pscustomobject]@{ provider = $_.Group[0].ProviderName; id = $_.Group[0].Id; count = $_.Count } })
 }
 
+function Assert-IemXperf {
+    # The xperf at Xperf counts only with a valid Microsoft Authenticode signature
+    # and a numeric file version of at least MinVersion (A12); returns that version.
+    param([Parameter(Mandatory)][string]$Xperf, [Parameter(Mandatory)][version]$MinVersion)
+    $sig = Get-AuthenticodeSignature -LiteralPath $Xperf
+    if ("$($sig.Status)" -ne 'Valid') { throw "xperf at ${Xperf}: signature $($sig.Status), not a valid Microsoft signature" }
+    if ("$($sig.SignerCertificate.Subject)" -notlike '*O=Microsoft Corporation*') { throw "xperf at ${Xperf}: signed by $($sig.SignerCertificate.Subject), not Microsoft" }
+    $vi = (Get-Item -LiteralPath $Xperf).VersionInfo
+    $v = New-Object -TypeName version -ArgumentList $vi.FileMajorPart, $vi.FileMinorPart, $vi.FileBuildPart, $vi.FilePrivatePart
+    if ($v -lt $MinVersion) { throw "xperf at ${Xperf}: version $v, older than $MinVersion" }
+    return "$v"
+}
+
 function Install-IemWpt {
     # The ADK bootstrapper (Microsoft-signed) installs only the Windows
-    # Performance Toolkit; no reboot, no service, no driver.
-    param([Parameter(Mandatory)][string]$Setup, [Parameter(Mandatory)][string]$Xperf)
-    if (Test-Path -LiteralPath $Xperf) { return [pscustomobject]@{ installed = 'already'; version = (Get-Item -LiteralPath $Xperf).VersionInfo.FileVersion } }
+    # Performance Toolkit; no reboot, no service, no driver. The xperf it finds
+    # or installs must be Microsoft-signed and WPT 10 or newer (the toolkit the
+    # report parsers read; -MinVersion raises the floor).
+    param([Parameter(Mandatory)][string]$Setup, [Parameter(Mandatory)][string]$Xperf, [version]$MinVersion = '10.0')
+    if (Test-Path -LiteralPath $Xperf) { return [pscustomobject]@{ installed = 'already'; version = (Assert-IemXperf -Xperf $Xperf -MinVersion $MinVersion) } }
     $sig = Get-AuthenticodeSignature -LiteralPath $Setup
     if ($sig.Status -ne 'Valid' -or "$($sig.SignerCertificate.Subject)" -notlike '*O=Microsoft Corporation*') {
         throw "adksetup signature: $($sig.Status) $($sig.SignerCertificate.Subject)"
@@ -138,7 +153,7 @@ function Install-IemWpt {
     $p = Start-Process -FilePath $Setup -ArgumentList '/quiet', '/norestart', '/ceip', 'off', '/features', 'OptionId.WindowsPerformanceToolkit' -PassThru -Wait
     if ($p.ExitCode -ne 0) { throw "adksetup exit $($p.ExitCode)" }
     if (-not (Test-Path -LiteralPath $Xperf)) { throw "xperf not found at $Xperf after the install" }
-    [pscustomobject]@{ installed = 'now'; version = (Get-Item -LiteralPath $Xperf).VersionInfo.FileVersion }
+    [pscustomobject]@{ installed = 'now'; version = (Assert-IemXperf -Xperf $Xperf -MinVersion $MinVersion) }
 }
 
 Export-ModuleMember -Function *-Iem*
