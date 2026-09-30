@@ -959,6 +959,78 @@ mod tests {
     }
 
     #[test]
+    fn a_boot_past_an_unreadable_current_json_continues_its_revision_above_it() {
+        // #32 MAJOR-3: current.json may hold any revision up to where the
+        // session left off, and recovery never moves it. So whatever loads
+        // instead (a generation, the baseline, the defaults) continues
+        // 1 000 000 above its own revision, with an alarm: the session's
+        // saves then outrank the file once it can be read again.
+        let g = test_site();
+        let (_d, s) = store();
+        s.save(&sample(7)).unwrap();
+        s.save(&sample(8)).unwrap();
+        fs::remove_file(s.dir().join(CURRENT)).unwrap();
+        fs::create_dir(s.dir().join(CURRENT)).unwrap();
+        let loaded = s.load(&g);
+        assert_eq!(
+            (loaded.source, loaded.persisted.rev),
+            (Source::Generation(1), 1_000_007)
+        );
+        let note = "current.json cannot be read, so the revision continues at 1000007";
+        assert!(
+            loaded.alarms.iter().any(|a| a.starts_with(note)),
+            "{:?}",
+            loaded.alarms
+        );
+        fs::remove_file(s.dir().join("gen-0000000001.json")).unwrap();
+        s.save_baseline(&sample(4)).unwrap();
+        let loaded = s.load(&g);
+        assert_eq!(
+            (loaded.source, loaded.persisted.rev),
+            (Source::Baseline, 1_000_004)
+        );
+        fs::remove_file(s.dir().join(BASELINE)).unwrap();
+        let loaded = s.load(&g);
+        assert_eq!(
+            (loaded.source, loaded.persisted.rev),
+            (Source::Defaults, 1_000_000)
+        );
+        // A readable current.json, damaged or not, moves nothing.
+        fs::remove_dir(s.dir().join(CURRENT)).unwrap();
+        fs::write(s.dir().join(CURRENT), b"damaged").unwrap();
+        assert_eq!(s.load(&g).persisted.rev, 0);
+    }
+
+    #[test]
+    fn an_older_save_tmp_raises_an_alarm_naming_it() {
+        // #32 MAJOR-3: a valid save.tmp older than the state it competes
+        // with is only legitimate as a leftover. It is not loaded, and not
+        // silently: an alarm names it (the next save moves it aside).
+        let g = test_site();
+        let (_d, s) = store();
+        s.save(&sample(5)).unwrap();
+        s.save(&sample(6)).unwrap();
+        fs::write(s.dir().join(TMP), encode(&sample(4)).unwrap()).unwrap();
+        let loaded = s.load(&g);
+        assert_eq!((loaded.source, loaded.persisted.rev), (Source::Current, 6));
+        assert_eq!(
+            loaded.alarms,
+            ["save.tmp (revision 4) is older than current.json's 6 and is not loaded"]
+        );
+        // Against the newest valid generation when current.json is damaged.
+        corrupt(&s.dir().join(CURRENT));
+        let loaded = s.load(&g);
+        assert_eq!(
+            (loaded.source, loaded.persisted.rev),
+            (Source::Generation(1), 5)
+        );
+        assert_eq!(
+            loaded.alarms,
+            ["save.tmp (revision 4) is older than generation 1's 5 and is not loaded"]
+        );
+    }
+
+    #[test]
     fn nothing_loadable_gives_muted_defaults() {
         let (_d, s) = store();
         let g = test_site();

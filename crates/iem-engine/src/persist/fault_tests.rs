@@ -306,6 +306,50 @@ fn a_save_moves_a_save_tmp_it_did_not_write_aside() {
 }
 
 #[test]
+fn a_boot_past_a_locked_current_json_keeps_the_sessions_edits() {
+    // The review's MAJOR-3: current.json at 100 is locked at boot, so
+    // generation 1 (97) loads. The session edits and saves while
+    // current.json stays locked (it cannot become a generation, so each
+    // save fails with its state in save.tmp). Once current.json can be
+    // read again, the session's newest save must win over it: the load
+    // continued the revision 1 000 000 above the state it loaded.
+    let g = test_site();
+    let (_d, faulty, s) = faulty_store();
+    s.save(&sample(97)).unwrap();
+    s.save(&sample(100)).unwrap();
+    let current = s.dir().join(CURRENT);
+    let s = reopen(s.dir(), &faulty);
+    faulty.set_locked(&current, true);
+    let boot = s.load(&g);
+    assert_eq!(
+        (boot.source, boot.persisted.rev),
+        (Source::Generation(1), 1_000_097)
+    );
+    assert!(
+        boot.alarms
+            .iter()
+            .any(|a| a.contains("the revision continues at 1000097")),
+        "{:?}",
+        boot.alarms
+    );
+    assert!(s.recover(&boot).failed.is_empty());
+    // Two edits, then the save.
+    let edited = boot.persisted.rev + 2;
+    assert!(s.save(&session(edited)).is_err());
+    faulty.set_locked(&current, false);
+    let again = reopen(s.dir(), &faulty).load(&g);
+    assert_eq!(
+        (
+            again.source,
+            again.persisted.rev,
+            again.persisted.saved_unix_ms
+        ),
+        (Source::Interrupted, edited, SESSION)
+    );
+    assert!(again.alarms.is_empty(), "{:?}", again.alarms);
+}
+
+#[test]
 fn a_save_tmp_that_cannot_be_moved_aside_safely_fails_the_save() {
     // The move aside is flushed before save.new may take save.tmp's name;
     // if that fails, the save fails and nothing is lost.
@@ -600,10 +644,12 @@ fn newest(dir: &Path) -> u64 {
 }
 
 /// Runs `op` after `setup` with each single failure it can meet: once (an
-/// error, the engine runs on and saves `next`) and from that step on (a
-/// crash: the next boot recovers, then saves `next`). After it, a boot
-/// loads the newest committed or pending state; after the save, `next`.
-fn every_failure<T>(what: &str, setup: impl Fn(&Store) -> T, op: impl Fn(&Store, &T), next: u64) {
+/// error, the engine runs on) and from that step on (a crash: the next
+/// process boots and recovers). After it, a boot loads the newest
+/// committed or pending state without an alarm; the engine then saves its
+/// next edit (the boot's revision + 1), which is the newest state on disk
+/// and what the next boot loads (#32 minor-8).
+fn every_failure<T>(what: &str, setup: impl Fn(&Store) -> T, op: impl Fn(&Store, &T)) {
     let g = test_site();
     let (_d, faulty, s) = faulty_store();
     let prepared = setup(&s);
@@ -619,6 +665,11 @@ fn every_failure<T>(what: &str, setup: impl Fn(&Store) -> T, op: impl Fn(&Store,
             op(&s, &prepared);
             faulty.count();
             let want = newest(s.dir());
+            // A crash ends the process: the boot is the next one's.
+            let s = match mode {
+                Mode::Once => s,
+                Mode::From => reopen(s.dir(), &faulty),
+            };
             let boot = s.load(&g);
             assert_eq!(
                 boot.persisted.rev, want,
@@ -629,11 +680,21 @@ fn every_failure<T>(what: &str, setup: impl Fn(&Store) -> T, op: impl Fn(&Store,
                 let done = s.recover(&boot);
                 assert!(done.failed.is_empty(), "{what}, {mode:?} at {at}: {done:?}");
             }
-            s.save(&sample(next)).unwrap();
-            let again = s.load(&g);
+            let next = boot.persisted.rev + 1;
+            s.save(&session(next)).unwrap();
             assert_eq!(
-                (again.source, again.persisted.rev),
-                (Source::Current, next),
+                newest(s.dir()),
+                next,
+                "{what}, {mode:?} at step {at}: the newest state after the save"
+            );
+            let again = reopen(s.dir(), &faulty).load(&g);
+            assert_eq!(
+                (
+                    again.source,
+                    again.persisted.rev,
+                    again.persisted.saved_unix_ms
+                ),
+                (Source::Current, next, SESSION),
                 "{what}, {mode:?} at step {at}: after the next save"
             );
             assert!(
@@ -647,14 +708,9 @@ fn every_failure<T>(what: &str, setup: impl Fn(&Store) -> T, op: impl Fn(&Store,
 
 #[test]
 fn a_save_survives_every_single_failure() {
-    every_failure(
-        "save",
-        filled,
-        |s, _| {
-            let _ = s.save(&sample(22));
-        },
-        23,
-    );
+    every_failure("save", filled, |s, _| {
+        let _ = s.save(&sample(22));
+    });
 }
 
 #[test]
@@ -671,7 +727,6 @@ fn a_recovery_survives_every_single_failure() {
         |s, loaded| {
             s.recover(loaded);
         },
-        23,
     );
 }
 
@@ -693,7 +748,6 @@ fn a_recovery_with_a_move_aside_survives_every_single_failure() {
         |s, loaded| {
             s.recover(loaded);
         },
-        23,
     );
 }
 
