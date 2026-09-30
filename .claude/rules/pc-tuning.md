@@ -14,6 +14,19 @@ paths:
 
 - **StrictMode 5.1 array idiom (PowerShell).** Under `Set-StrictMode -Version Latest` on Windows PowerShell 5.1, a helper that returns 0 or 1 rows unrolls to `$null` / a scalar, so a later `.Count` or index throws. Wrap a row-returning helper's result with the repo's `,@()` / `@(...)` pattern (see `Test-SpikePc` / `Test-IemTuning`), and build an empty typed array as `[uint32[]]$ids = @()` — an `$ids = if (...) { [uint32[]]@() }` unrolls the empty array to `$null`, and `IemCpuSets.Set` then hits `ids.Length` on null → `NullReferenceException` on the mode-EXIT (CPU-set clear / REAPER-restore) path.
 
+- **IemTuning/IemMeasure invariants (#32 A1–A14).**
+  - Registry undo writes back the journal's stored value KIND and data, never the item's declared type; a journal entry without a stored value is refused, not guessed.
+  - Registry deletes go through `Remove-IemRegValue` (`RegistryKey.DeleteValue`, one literal name), never `Remove-ItemProperty -Name`, which treats the NDIS `*` keywords as wildcards.
+  - Native programs go through `Invoke-IemNative` (stderr captured as output, only the exit code decides), never `& exe 2>&1` under `$ErrorActionPreference='Stop'`.
+  - Event-log queries go through `Get-IemWinEvent`: only "no events found" is empty, any other error throws; never `-ErrorAction SilentlyContinue`.
+  - Boot comparisons use `Test-IemSameBoot` (300 s tolerance against clock steps).
+  - Mode order: enter pauses the governor first; exit reverts the plan and restores the governor last. The iemmixer power plan stays defined but inactive after exit; it is never journaled or deleted.
+  - The card's IRQ affinity (R1) is applied only when the card already uses MSI (`MSISupported = 1`); otherwise the row is `skipped` and nothing is written.
+  - The NIC driver key must match the profile's `nic.hwid` (`MatchingDeviceId` prefix), looked up under `registry_root`, before any write.
+  - The profile version is stamped only after a complete, clean apply; an `-Only` name that is not a group of the tier is an error.
+  - The journal is written through to disk and swapped with `File.Replace`; a missing, empty or unreadable journal falls back to a complete `.tmp`, else it is refused.
+  - Rows may carry `skipped` (apply) and `reactivated` (enter); `cmd_apply`/`cmd_enter`/`cmd_undo` fail only on `failed`.
+
 - **reject-case shadowing (tests)** — the spike's `--activity-channels` case is in `asio-spike.md` (it loads alongside this rule on `scripts/asio-spike/**`).
 
 - **Nothing is force-ended (I8) — the reboot stays graceful.** `cmd_reboot` sends `REBOOT_REQUEST`: `shutdown.exe /r /t 0 /d p:2:4` (immediate, planned: OS reconfiguration) WITHOUT `/f`. Microsoft's `shutdown` docs: "If the timeout period is greater than 0, the /f parameter is implied" — so ANY `/t` above 0 is a forced restart (the first version's `/t 60` was one, #32 B1). Program-spec invariant I8 (`guard.md`): nothing is ever force-killed — services stop gracefully, processes are never ended, reboots are graceful. Without the force an app may veto the restart; post-boot then reports "the PC did not reboot after the request" and the blocking app is resolved in the physical owner-at-PC window (Task 16), never with a force. `scripts/check_integrity.py`'s FORCE_KILL scan bans a `shutdown` line carrying `/f`/`-f` anywhere or a `/t` above 0, `Restart-Computer`/`Stop-Computer -Force`, and every force-end verb EVERYWHERE, comments included, across `crates/**`, `e2e/**`, `scripts/**`, `.github/**` (CODE_SUFFIXES) — so in any tuning/spike code or comment write "force-end" in prose and never a kill verb, a force flag or a restart delay on a `shutdown` line. (`.md` rules like this one are not scanned.)
