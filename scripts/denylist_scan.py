@@ -43,6 +43,8 @@ EXIT_HIT = 1
 EXIT_USAGE = 2
 
 REDACTED = "[redacted]"
+# the other readings of bytes that are not valid UTF-8: Windows Central European, and Latin-1
+FALLBACK_CODECS = ("cp1250", "latin-1")
 # In binary content random bytes form short words by chance: in this repository's f64 goldens 28 %
 # of all 3-letter and 0.5 % of all 4-letter words occur as words of their text runs, 0.003 % of the
 # 5-letter ones. So in a binary text run a term shorter than MIN_BINARY_TERM characters counts only
@@ -107,7 +109,8 @@ def compile_term(term: str) -> re.Pattern[str]:
 
 
 def line_key(path: str, line: str) -> str:
-    return hashlib.sha256(f"{path}\n{line}".encode("utf-8")).hexdigest()
+    # surrogateescape: an undecodable byte (see decode) hashes as that exact byte
+    return hashlib.sha256(f"{path}\n{line}".encode("utf-8", "surrogateescape")).hexdigest()
 
 
 def load_allow(path: Path | None) -> set[str]:
@@ -133,6 +136,94 @@ def printable(text: str) -> str:
                    else f"\\u{ord(char):04x}" for char in text)
 
 
+def decode(data: bytes) -> str:
+    """UTF-8, lossless: a byte that is not valid UTF-8 becomes a lone surrogate U+DC80-DCFF
+    (surrogateescape), so a path or a line keeps its exact bytes -- for its allow key, for the
+    cp1250 / Latin-1 re-reading in forms(), and to redact an undecodable path component."""
+    return data.decode("utf-8", errors="surrogateescape")
+
+
+_UNDECODABLE = re.compile("[\udc80-\udcff]+")
+
+
+def undecodable(text: str) -> bool:
+    return _UNDECODABLE.search(text) is not None
+
+
+def _byte_table(first: int, codec: str) -> dict[int, str]:
+    """Code points first+0x80 .. first+0xFF -> byte 0x80..0xFF read in a single-byte codec."""
+    return {first + byte: bytes([byte]).decode(codec, "replace") for byte in range(0x80, 0x100)}
+
+
+_REREAD = {codec: _byte_table(0xDC00, codec) for codec in FALLBACK_CODECS}  # surrogateescape bytes
+_GIT_LATIN1_AS_CP1250 = _byte_table(0, "cp1250")  # U+0080-00FF, see cp1250_from_git_latin1
+
+
+def reread(text: str, codec: str) -> str:
+    """The text with each undecodable byte read in a single-byte codec instead; the valid UTF-8
+    around it stays as it is (re-reading valid UTF-8 would be mojibake that splits words: read as
+    Latin-1, the `č` of `čqxv` ends in a control character, leaving a word `qxv`)."""
+    return text.translate(_REREAD[codec])
+
+
+_UNICODE_ESCAPE = re.compile(r"\\u(?:([0-9A-Fa-f]{4})|\{([0-9A-Fa-f]{1,6})\})")  # JSON/JS/Python; Rust/JS
+_SURROGATE_PAIR = re.compile("[\ud800-\udbff][\udc00-\udfff]")
+_PERCENT = re.compile(r"(?:%[0-9A-Fa-f]{2})+")
+
+
+def _escaped_char(match: re.Match[str]) -> str:
+    value = int(match.group(1) or match.group(2), 16)
+    return chr(value) if value <= 0x10FFFF else match.group()
+
+
+def _percent_bytes(match: re.Match[str]) -> bytes:
+    return bytes.fromhex(match.group().replace("%", ""))
+
+
+def _percent_decoded(text: str, codec: str) -> str:
+    return _PERCENT.sub(lambda match: _percent_bytes(match).decode(codec, "replace"), text)
+
+
+def unescaped(text: str) -> list[str]:
+    """The text with its `\\uXXXX` / `\\u{X}` escapes decoded (a UTF-16 surrogate pair joined), and
+    that with its percent-encoding decoded as UTF-8 -- and, when some encoded bytes are not valid
+    UTF-8, as cp1250 and Latin-1 too (forms() drops a form equal to one it already has)."""
+    found = []
+    if "\\u" in text:
+        text = _UNICODE_ESCAPE.sub(_escaped_char, text)
+        text = _SURROGATE_PAIR.sub(
+            lambda pair: pair.group().encode("utf-16-le", "surrogatepass").decode("utf-16-le"), text)
+        found.append(text)
+    runs = [_percent_bytes(match) for match in _PERCENT.finditer(text)]
+    if runs:
+        codecs = ("utf-8",) if all(is_utf8(run) for run in runs) else ("utf-8", *FALLBACK_CODECS)
+        found += [_percent_decoded(text, codec) for codec in codecs]
+    return found
+
+
+def cp1250_from_git_latin1(text: str) -> str:
+    """git stores a commit message or name that is not valid UTF-8 with each such byte converted
+    as if it were Latin-1 (commit.c verify_utf8), so a cp1250 `ď` (0xEF) arrives as `ï`: read the
+    U+0080-00FF characters back as the cp1250 bytes they were."""
+    return text.translate(_GIT_LATIN1_AS_CP1250)
+
+
+def forms(text: str) -> tuple[str, ...]:
+    """Every reading of a decoded text that is matched against the terms, NFC-normalized: the text;
+    its cp1250 and Latin-1 re-readings when it holds undecodable bytes; and each of those with its
+    escapes decoded (unescaped)."""
+    readings = [text]
+    if undecodable(text):
+        readings += [reread(text, codec) for codec in FALLBACK_CODECS]
+    found: list[str] = []
+    for reading in readings:
+        for form in (reading, *unescaped(reading)):
+            form = nfc(form)
+            if form not in found:
+                found.append(form)
+    return tuple(found)
+
+
 class Scanner:
     def __init__(self, terms: list[str], allow: set[str]) -> None:
         self.patterns = [compile_term(nfc(term)) for term in terms]
@@ -144,17 +235,18 @@ class Scanner:
         self.allow = allow
 
     def entries_in(self, text: str) -> list[int]:
-        text = nfc(text)
+        """The entries found in any of the text's forms (other encodings, escapes decoded)."""
+        readings = forms(text)
         return [number for number, (literal, pattern) in enumerate(zip(self.literals, self.patterns), start=1)
-                if literal.search(text) and pattern.search(text)]
+                if any(literal.search(form) and pattern.search(form) for form in readings)]
 
     def unit_hits(self, path: str, units: Sequence[Unit]) -> list[tuple[int, int]]:
         """(unit index, entry number) of every term in a unit that is not allowlisted, sorted.
 
-        Every form of every unit is joined into one text, `\\n`-separated (no unit and no term
-        holds a `\\n`, and a `\\n` is a word boundary like the end of a unit), so each term is one
-        regex pass over the content rather than one per unit -- a binary file has 10^5 runs. A
-        short term is searched only in the units it applies to."""
+        Every form of every unit is joined into one text, `\\n`-separated (no term holds a `\\n`,
+        so no match spans two forms, and a `\\n` is a word boundary like the end of a form), so each
+        term is one regex pass over the content rather than one per unit -- a binary file has 10^5
+        runs. A short term is searched only in the units it applies to."""
         views: dict[bool, Joined] = {}
         found: set[tuple[int, int]] = set()
         for entry, (literal, pattern, short) in enumerate(zip(self.literals, self.patterns, self.short), start=1):
@@ -166,15 +258,18 @@ class Scanner:
         return sorted(hit for hit in found if line_key(path, units[hit[0]].key) not in self.allow)
 
     def shown(self, path: str) -> str:
-        """The path as printed: each component holding a term is redacted, the others have their
-        control characters escaped; the whole path is redacted when a term spans components (a
-        term without `/` always matches inside one component) or the printed form holds one."""
+        """The path as printed: each component holding a term (in any of its forms) or an
+        undecodable byte is redacted -- printed, the rest of a cp1250 term would follow its
+        replaced letter into the log -- and the others have their control characters escaped;
+        the whole path is redacted when a term spans components (a term without `/` always
+        matches inside one component) or the printed form holds one."""
         whole = set(self.entries_in(path))
         parts = path.split("/")
         part_hits = [set(self.entries_in(part)) if whole else set() for part in parts]
         if not whole <= set().union(*part_hits):
             return REDACTED
-        kept = "/".join(REDACTED if hit else printable(part) for part, hit in zip(parts, part_hits, strict=True))
+        kept = "/".join(REDACTED if hit or undecodable(part) else printable(part)
+                        for part, hit in zip(parts, part_hits, strict=True))
         return REDACTED if self.entries_in(kept) else kept
 
     def scan_path(self, path: str, prefix: str) -> list[Hit]:
@@ -183,10 +278,6 @@ class Scanner:
 
 def git(repo: Path, *args: str) -> bytes:
     return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True).stdout
-
-
-def decode(data: bytes) -> str:
-    return data.decode("utf-8", errors="replace")
 
 
 @dataclass(frozen=True)
@@ -220,7 +311,7 @@ class Joined:
 
 
 def text_unit(text: str, short_terms: bool = True) -> Unit:
-    return Unit(text, (nfc(text),), short_terms)
+    return Unit(text, forms(text), short_terms)
 
 
 def byte_unit(raw: bytes, short_terms: bool = True) -> Unit:
@@ -448,7 +539,8 @@ def scan_commits(
     for sha in decode(git(repo, "rev-list", *revlist_args)).split():
         short = sha[:12]
         metadata = decode(git(repo, "show", "-s", "--format=%an%n%ae%n%cn%n%ce%n%B", sha))
-        hits += [Hit(f"{short} commit metadata", entry) for entry in scanner.entries_in(metadata)]
+        entries = set(scanner.entries_in(metadata)) | set(scanner.entries_in(cp1250_from_git_latin1(metadata)))
+        hits += [Hit(f"{short} commit metadata", entry) for entry in sorted(entries)]
         if identities is not None:
             emails = decode(git(repo, "show", "-s", "--format=%ae%n%ce", sha)).splitlines()
             for role, email in zip(("author", "committer"), emails):
