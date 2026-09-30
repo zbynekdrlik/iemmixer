@@ -21,6 +21,13 @@ function Throws([scriptblock]$b, $what) { $t = $false; try { & $b } catch { $t =
 function Rows($rows, $action) { @($rows | Where-Object { $_.action -eq $action }) }
 # Read-IemJournal is exported (every *-Iem* function is); the test reads the flag the module wrote.
 function Read-IemJournalState($profilePath) { $p = Read-IemProfile -Path $profilePath; (Read-IemJournal -Path $p.journal).entered }
+# Sets the boot of every global journal entry, as if its item had been written in that boot.
+function Set-JournalBoot($profilePath, [string]$boot) {
+    $jf = (Read-IemProfile -Path $profilePath).journal
+    $jo = [IO.File]::ReadAllText($jf) | ConvertFrom-Json
+    foreach ($p in @($jo.global.PSObject.Properties)) { $p.Value.boot = $boot }
+    [IO.File]::WriteAllText($jf, ($jo | ConvertTo-Json -Depth 8))
+}
 
 $id = [guid]::NewGuid().ToString('N')
 $root = "HKCU:\Software\iemmixer-tuning-test-$id"
@@ -112,6 +119,11 @@ try {
     Assert ((Get-Item -LiteralPath $nic).GetValue('PowerSaving') -eq '0' -and (Get-Item -LiteralPath $nic).GetValue('*RssBaseProcNumber') -eq '4') 'tier3-nic-values'
     $st = Get-IemTuningState -ProfilePath $pp
     Assert (@($st.items | Where-Object { $_.tier -eq 3 -and -not $_.pending }).Count -eq 0) 'tier3-items-are-pending-until-a-reboot'
+    # A clock step (time sync) moves LastBootUpTime; the boot stays the same (A13).
+    $step = [datetime]::Parse((Get-IemBootTime), [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime().AddSeconds(30).ToString('o')
+    Set-JournalBoot $pp $step
+    $st = Get-IemTuningState -ProfilePath $pp
+    Assert (@($st.items | Where-Object { $_.tier -eq 3 -and -not $_.pending }).Count -eq 0) 'tier3-pending-survives-a-clock-step'
     $u3 = Undo-IemTuning -ProfilePath $pp -Tier 3
     Assert (@(Rows $u3 'failed').Count -eq 0) 'tier3-undo-has-no-failure'
     Assert ($null -eq $ap.GetValue('DevicePolicy', $null) -and (Get-Item -LiteralPath $nic).GetValue('PowerSaving') -eq '1') 'tier3-undo-deletes-absent-values'
