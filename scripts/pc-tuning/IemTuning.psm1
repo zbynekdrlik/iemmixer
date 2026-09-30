@@ -655,10 +655,15 @@ function New-IemTaskItem {
 }
 
 function Get-IemModeItems {
-    # Mode levers (design note §6.2): L2 plan, L3 governor, L6 services, L4 placement.
+    # Mode levers (design note 6.2) in apply order: L3 governor, L2 plan, L6 services,
+    # L4 placement. The governor is paused first, so Process Lasso no longer owns the
+    # power plan when the iemmixer plan activates (A5); exit restores it last.
     param([Parameter(Mandatory)]$Profile, [string[]]$Only = @('plan', 'governor', 'placement'), [ValidateSet('default', 'c1', 'disable')][string]$Idle = 'default')
     $items = @()
     $guid = $Profile.plan.guid
+    if (@($Only) -contains 'governor') {
+        $items += New-IemItem -Key 'governor' -Kind 'svc-state' -Arguments @{ name = $Profile.governor } -Desired 'stopped' -Group 'governor'
+    }
     if (@($Only) -contains 'plan') {
         # The plan and its settings are ensured, not journaled: exit re-activates the
         # journaled plan and leaves this one defined but inactive; enter reuses it (A6).
@@ -670,9 +675,6 @@ function Get-IemModeItems {
             $items += New-IemItem -Key "plan:$($s.name)" -Kind 'plan-value' -Arguments @{ guid = $guid; sub = $s.sub; setting = $s.setting } -Desired $s.value -Group 'plan' -NoJournal
         }
         $items += New-IemItem -Key 'plan:active' -Kind 'plan-active' -Arguments @{} -Desired $guid -Group 'plan'
-    }
-    if (@($Only) -contains 'governor') {
-        $items += New-IemItem -Key 'governor' -Kind 'svc-state' -Arguments @{ name = $Profile.governor } -Desired 'stopped' -Group 'governor'
     }
     if (@($Only) -contains 'services') {
         foreach ($n in @($Profile.services_mode)) { $items += New-IemItem -Key "mode-svc:$n" -Kind 'svc-state' -Arguments @{ name = $n } -Desired 'stopped' -Group 'services' }
@@ -754,6 +756,10 @@ function Exit-IemTuningMode {
     $profile = Read-IemProfile -Path $ProfilePath
     $j = Read-IemJournal -Path $profile.journal
     $keys = @($j.order.mode); [array]::Reverse($keys)
+    # The governor restarts only after the REAPER-mode plan is active again (A5),
+    # whatever order partial enters journaled the items in.
+    $gov = @($keys | Where-Object { $g = $j.mode[$_]; $null -ne $g -and [string]$g.group -eq 'governor' })
+    $keys = @(@($keys | Where-Object { $gov -notcontains $_ }) + $gov)
     $rows = @(); $failed = @()
     foreach ($k in $keys) {
         $e = $j.mode[$k]
