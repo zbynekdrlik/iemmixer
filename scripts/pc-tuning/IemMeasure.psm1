@@ -128,21 +128,6 @@ function Get-IemCpuSample {
     }
 }
 
-function Get-IemPollSample {
-    # One sentinel sample (design note 4.1 item 5): CPU counters, the active
-    # plan, the governor's state and, while a spike runs, the priority of its
-    # callback thread (read from outside; the driver's thread is never touched).
-    param([Parameter(Mandatory)][string]$ProfilePath, [int]$SpikePid = 0, [int]$ThreadId = 0)
-    $profile = Read-IemProfile -Path $ProfilePath
-    $gov = Get-Service -Name $profile.governor -ErrorAction SilentlyContinue
-    $thread = $null
-    if ($SpikePid -gt 0 -and $ThreadId -gt 0) {
-        $p = Get-Process -Id $SpikePid -ErrorAction SilentlyContinue
-        if ($p) { $t = @($p.Threads | Where-Object { $_.Id -eq $ThreadId }); if ($t.Count -eq 1) { $thread = [pscustomobject]@{ base = $t[0].BasePriority; current = $t[0].CurrentPriority } } }
-    }
-    [pscustomobject]@{ at = Get-IemNow; cpu = Get-IemCpuSample; plan = [IemPower]::Active(); governor = $(if ($gov) { "$($gov.Status)" } else { 'absent' }); thread = $thread }
-}
-
 function Get-IemSystemEvents {
     # Warnings and errors of the System log since -Since, by provider and id
     # (no message text: it can name hosts). A failing query throws (A10);
