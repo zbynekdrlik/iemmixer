@@ -620,6 +620,15 @@ function Invoke-IemItem {
             if ($Item.kind -eq 'reg' -and ([string]$e.args.path -ne [string]$Item.args.path -or [string]$e.args.name -ne [string]$Item.args.name)) {
                 throw "the journal holds '$($Item.key)' for $($e.args.path) $($e.args.name), the profile now names $($Item.args.path) $($Item.args.name): undo this tier first"
             }
+            # A placement entry is keyed name:pid, which a later process can reuse; the
+            # entry is that process's only while the start times match. Placing the
+            # later one under it would leave it placed, since the restore finds the
+            # entry's process gone (review R6).
+            if ($Item.kind -eq 'cpusets' -and [long]$e.args.start -ne [long]$Item.args.start) {
+                $startWas = (New-Object DateTime -ArgumentList ([long]$e.args.start)).ToString('yyyy-MM-dd HH:mm:ss')
+                $startNow = (New-Object DateTime -ArgumentList ([long]$Item.args.start)).ToString('yyyy-MM-dd HH:mm:ss')
+                throw "the journal holds '$($Item.key)' for an earlier process with this name and pid (started $startWas UTC, this one $startNow UTC): not placed; exit the mode to clear that entry"
+            }
             # The before-value stays the first one; the boot is the latest write's,
             # so a value re-written after a reboot is pending again (A3).
             if ([string]$e.boot.time -ne [string]$Boot.time -or [string]$e.boot.id -ne [string]$Boot.id) {
