@@ -272,6 +272,15 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(lr.hwlat_summary(r), {"cpu": 14, "outcome": "done", "placed": [270], "priority": "time-critical", "error": None,
                                                "failed": False, "reads": 10, "over": 3, "max_us": 55.5, "p999_us": 40.0, "largest_us": [55.5, 40.0]})
 
+    def test_new_glitch_kinds_and_the_process_block_pass_through(self) -> None:
+        # Lane F1 (#32): a position step back is its own glitch kind, and the report's
+        # process.stress_cpus is null, {lps, ids} or {lps, error}, no longer a list.
+        report = {"outcome": "done", "process": {"stress_cpus": {"lps": [6, 7], "ids": [262, 263]}},
+                  "segments": [{"telemetry": {}, "glitches": [{"kind": "position-back", "at_ns": 1, "value": 32}]}]}
+        s = lr.summarize("x", None, report, None, [], [], watch_lps=[2])
+        self.assertEqual(s["glitches"]["by_kind"], {"position-back": 1})
+        self.assertEqual(s["process"], {"stress_cpus": {"lps": [6, 7], "ids": [262, 263]}})
+
     def test_a_scanner_not_placed_or_not_raised_is_a_failed_measurement(self) -> None:
         # #32 C2: lane F1's spike ends with outcome "error" (its hwlat block carries the
         # error, no gaps); an older spike wrote the placement or priority error as text
