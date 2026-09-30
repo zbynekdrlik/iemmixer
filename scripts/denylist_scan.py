@@ -410,9 +410,12 @@ def scan_commit_diff(scanner: Scanner, repo: Path, sha: str, seen: set[str], blo
     short = sha[:12]
     # force quotePath=true so a `+++ ` label is always pure-ASCII octal regardless of the local git
     # config; diff_path/unquote_c decode it back (a raw non-ASCII byte in a quoted label under
-    # quotePath=false would otherwise fail encode("ascii"))
+    # quotePath=false would otherwise fail encode("ascii")). --text --no-textconv: a `binary` or
+    # `-diff` attribute would print "Binary files differ" and a textconv driver would replace the
+    # content, hiding the added lines; with --text a NUL file's lines appear too, but those paths
+    # are blob_paths, scanned from their blobs instead
     diff = git(repo, "-c", "core.quotePath=true", "show", "--format=", "--unified=0", "--no-color",
-               "--no-ext-diff", "--no-renames", "-m", "--first-parent", sha)
+               "--no-ext-diff", "--text", "--no-textconv", "--no-renames", "-m", "--first-parent", sha)
     hits: list[Hit] = []
     added: dict[str, list[Unit]] = {}
     # `+++`/`---` count as headers only before a file's first hunk; inside a hunk an added line
