@@ -68,6 +68,15 @@ class RequestTests(unittest.TestCase):
             with self.assertRaises(sw.StepError, msg=bad):
                 sw.check_request("duplex", 32, 600, 0, 0, 5, audio_cpus=bad)
 
+    def test_stress_next_to_audio_cpus_names_its_own_cpus(self) -> None:
+        # The spike refuses --stress with --audio-cpus but no --stress-cpus (the busy
+        # threads would share the audio CPU, #32): refused here, before the PC.
+        with self.assertRaisesRegex(sw.StepError, "--stress-cpus"):
+            sw.check_request("duplex", 32, 600, 40, 4, 5, audio_cpus="14")
+        sw.check_request("duplex", 32, 600, 40, 4, 5, audio_cpus="14", stress_cpus="0,1,6-13")
+        sw.check_request("duplex", 32, 600, 40, 4, 5)                  # no audio CPU: the threads run anywhere
+        sw.check_request("duplex", 32, 600, 40, 0, 5, audio_cpus="14")  # no stress
+
     def test_timeouts(self) -> None:
         self.assertEqual([sw.run_timeout("probe", 600, 5), sw.run_timeout("duplex", 600, 5), sw.run_timeout("reopen", 600, 5)], [60, 660, 210])
         self.assertEqual(sw.run_timeout("hwlat", 30, 1), 90)
