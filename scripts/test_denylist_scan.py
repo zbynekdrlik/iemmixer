@@ -672,6 +672,48 @@ class DenylistScanTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn(" side.txt: denylist entry 1", out)
 
+    def test_local_show_root_config_cannot_hide_the_root_commit(self) -> None:
+        # m1: with log.showRoot=false `git show` prints no diff for a root commit
+        git(self.repo, "config", "log.showRoot", "false")
+        self.commit({"a.txt": "zyxname\n"})
+        code, out = self.scan("--commits", "HEAD")
+        self.assertEqual(code, 1)
+        self.assertIn(" a.txt: denylist entry 1", out)
+
+    def test_local_output_encoding_cannot_hide_a_message_term_or_break_identities(self) -> None:
+        # m2: i18n.logOutputEncoding re-encodes the metadata git show prints: UTF-16LE put a NUL in
+        # every character (the identity split crashed), ISO-8859-2 turned `š` into a byte no reading
+        # of the scanner decoded back
+        self.add_terms("šqxwzy")
+        ids = self.tmp / "ids.txt"
+        ids.write_text("test@example.org\n", encoding="utf-8")
+        for number, encoding in enumerate(("UTF-16LE", "ISO-8859-2")):
+            with self.subTest(encoding=encoding):
+                git(self.repo, "config", "i18n.logOutputEncoding", encoding)
+                try:
+                    self.commit({"a.txt": f"clean {number}\n"}, message=f"fix for zyxname and šqxwzy {number}")
+                    code, out = self.scan("--identities", str(ids), "--commits", "-1 HEAD")
+                    self.assertEqual(code, 1)
+                    self.assertIn("commit metadata: denylist entry 1", out)
+                    self.assertIn("commit metadata: denylist entry 4", out)
+                    self.assertNotIn("identity", out)
+                finally:
+                    git(self.repo, "config", "--unset", "i18n.logOutputEncoding")
+
+    def test_local_show_signature_config_cannot_break_the_identity_check(self) -> None:
+        # m2: log.showSignature prints the signature check ("No signature") ahead of the format,
+        # inside the author field of a signed commit
+        key = self.tmp / "signing-key"
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)], check=True, capture_output=True)
+        git(self.repo, "config", "gpg.format", "ssh")
+        git(self.repo, "config", "user.signingkey", f"{key}.pub")
+        git(self.repo, "commit", "-q", "-S", "--allow-empty", "-m", "signed")
+        git(self.repo, "config", "log.showSignature", "true")
+        ids = self.tmp / "ids.txt"
+        ids.write_text("test@example.org\n", encoding="utf-8")
+        code, out = self.scan("--identities", str(ids), "--commits", "HEAD")
+        self.assertEqual((code, out.strip()), (0, "denylist: clean"))
+
     # --- #32 E4: the identity check reads author and committer as separate fields ---
 
     def commit_as(self, author_email: str, committer_email: str) -> None:
