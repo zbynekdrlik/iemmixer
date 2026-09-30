@@ -58,6 +58,11 @@ impl Faulty {
         s.next = None;
     }
 
+    /// Steps taken since `arm` or `count`.
+    pub(super) fn steps(&self) -> usize {
+        self.state.lock().unwrap().steps
+    }
+
     /// The next step of kind `what` ("write", "rename", "remove", …) fails.
     pub(super) fn fail_next(&self, what: &'static str) {
         self.state.lock().unwrap().next = Some(what);
@@ -405,4 +410,162 @@ fn save_tmp_that_could_not_be_compared_is_loaded_only_with_an_alarm() {
         "{:?}",
         loaded.alarms
     );
+}
+
+// ---- every single failure (#32 P9) ----
+
+/// A full directory: generations 1 to 20 at their revisions and
+/// current.json at 21, so a commit also prunes.
+fn filled(s: &Store) {
+    for rev in 1..=20 {
+        let name = format!("gen-{rev:010}.json");
+        fs::write(s.dir().join(name), encode(&sample(rev)).unwrap()).unwrap();
+    }
+    fs::write(s.dir().join(CURRENT), encode(&sample(21)).unwrap()).unwrap();
+}
+
+/// The newest state a boot must not lose: the higher revision of a valid
+/// current.json and a valid save.tmp (never save.new, never a generation).
+fn newest(dir: &Path) -> u64 {
+    [CURRENT, TMP]
+        .iter()
+        .filter_map(|name| fs::read(dir.join(name)).ok())
+        .filter_map(|bytes| decode(&bytes).ok())
+        .map(|p| p.rev)
+        .max()
+        .unwrap()
+}
+
+/// Runs `op` after `setup` with each single failure it can meet: once (an
+/// error, the engine runs on and saves `next`) and from that step on (a
+/// crash: the next boot recovers, then saves `next`). After it, a boot
+/// loads the newest committed or pending state; after the save, `next`.
+fn every_failure<T>(what: &str, setup: impl Fn(&Store) -> T, op: impl Fn(&Store, &T), next: u64) {
+    let g = test_site();
+    let (_d, faulty, s) = faulty_store();
+    let prepared = setup(&s);
+    faulty.count();
+    op(&s, &prepared);
+    let steps = faulty.steps();
+    assert!(steps > 3, "{what}: {steps} steps");
+    for mode in [Mode::Once, Mode::From] {
+        for at in 0..steps {
+            let (_d, faulty, s) = faulty_store();
+            let prepared = setup(&s);
+            faulty.arm(at, mode);
+            op(&s, &prepared);
+            faulty.count();
+            let want = newest(s.dir());
+            let boot = s.load(&g);
+            assert_eq!(
+                boot.persisted.rev, want,
+                "{what}, {mode:?} at step {at}: the first boot"
+            );
+            assert!(boot.alarms.is_empty(), "{what}, {mode:?} at {at}: {boot:?}");
+            if mode == Mode::From {
+                let done = s.recover(&boot);
+                assert!(done.failed.is_empty(), "{what}, {mode:?} at {at}: {done:?}");
+            }
+            s.save(&sample(next)).unwrap();
+            let again = s.load(&g);
+            assert_eq!(
+                (again.source, again.persisted.rev),
+                (Source::Current, next),
+                "{what}, {mode:?} at step {at}: after the next save"
+            );
+            assert!(
+                again.alarms.is_empty(),
+                "{what}, {mode:?} at {at}: {again:?}"
+            );
+            assert!(!s.dir().join(TMP).exists() && !s.dir().join(NEW).exists());
+        }
+    }
+}
+
+#[test]
+fn a_save_survives_every_single_failure() {
+    every_failure(
+        "save",
+        filled,
+        |s, _| {
+            let _ = s.save(&sample(22));
+        },
+        23,
+    );
+}
+
+#[test]
+fn a_recovery_survives_every_single_failure() {
+    every_failure(
+        "recover",
+        |s| {
+            filled(s);
+            fs::write(s.dir().join(TMP), encode(&sample(22)).unwrap()).unwrap();
+            let loaded = s.load(&test_site());
+            assert_eq!(loaded.source, Source::Interrupted);
+            loaded
+        },
+        |s, loaded| {
+            s.recover(loaded);
+        },
+        23,
+    );
+}
+
+#[test]
+fn a_recovery_with_a_move_aside_survives_every_single_failure() {
+    every_failure(
+        "quarantine",
+        |s| {
+            filled(s);
+            fs::write(s.dir().join(CURRENT), b"damaged").unwrap();
+            fs::write(s.dir().join(TMP), encode(&sample(22)).unwrap()).unwrap();
+            let loaded = s.load(&test_site());
+            assert_eq!(
+                (loaded.source, loaded.current_json),
+                (Source::Interrupted, FileState::Damaged)
+            );
+            loaded
+        },
+        |s, loaded| {
+            s.recover(loaded);
+        },
+        23,
+    );
+}
+
+#[test]
+fn a_boot_whose_reads_fail_never_rolls_back_silently() {
+    // A read that fails once is tried again; reads that keep failing may
+    // load an older state, but never without an alarm (or a fallback
+    // source, which the engine alarms on), and leave the files as they are.
+    let g = test_site();
+    let setup = |s: &Store| {
+        filled(s);
+        fs::write(s.dir().join(TMP), encode(&sample(22)).unwrap()).unwrap();
+    };
+    let (_d, faulty, s) = faulty_store();
+    setup(&s);
+    faulty.count();
+    assert_eq!(s.load(&g).persisted.rev, 22);
+    let steps = faulty.steps();
+    for mode in [Mode::Once, Mode::From] {
+        for at in 0..steps {
+            let (_d, faulty, s) = faulty_store();
+            setup(&s);
+            faulty.arm(at, mode);
+            let boot = s.load(&g);
+            let alarmed = !boot.alarms.is_empty()
+                || !matches!(boot.source, Source::Current | Source::Interrupted);
+            assert!(
+                boot.persisted.rev == 22 || alarmed,
+                "{mode:?} at step {at}: {boot:?}"
+            );
+            if mode == Mode::Once {
+                assert_eq!(boot.persisted.rev, 22, "{mode:?} at step {at}");
+            }
+            faulty.count();
+            assert_eq!(s.load(&g).persisted.rev, 22, "{mode:?} at step {at}");
+        }
+    }
 }
