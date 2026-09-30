@@ -320,6 +320,12 @@ try {
         ThrowsLike { Enter-IemTuningMode -ProfilePath $bp -Only @('plan', 'governor') -Idle 'disable' } $c[1] "enter-refuses-the-plan $($c[0])"
     }
     Assert ([IemPower]::Active() -eq $activeBefore -and [IemPower]::Read($activeBefore, $proc, $procMin) -eq $srcMin -and [IemPower]::Read($foreignPlan, $proc, $procMin) -eq $foreignMin -and (Get-Service W32Time).Status -eq 'Running' -and -not (Read-IemJournalState $pp)) 'enter-plan-refusals-write-nothing'
+    # The second M2 net: a plan value is never written into a plan that is not
+    # iemmixer's, even by a direct write (review 3.4).
+    $otherMin = $(if ($foreignMin -eq 37) { 38 } else { 37 })
+    $pvItem = [pscustomobject]@{ key = 'plan:proc-min'; kind = 'plan-value'; args = @{ guid = $foreignPlan; sub = $proc; setting = $procMin } }
+    ThrowsLike { Set-IemValue -Item $pvItem -Value "$otherMin" } "*not iemmixer's own plan*" 'plan-value-refuses-a-foreign-plan'
+    Assert ([IemPower]::Read($foreignPlan, $proc, $procMin) -eq $foreignMin) 'plan-value-refusal-writes-nothing'
 
     # Mode levers: plan (C1 only), governor stand-in, placement.
     $e = Enter-IemTuningMode -ProfilePath $pp -Only @('plan', 'governor', 'placement') -Idle 'c1'
