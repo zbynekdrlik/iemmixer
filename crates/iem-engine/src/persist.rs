@@ -20,6 +20,7 @@
 //! refused.
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -176,6 +177,19 @@ fn generation_seq(name: &str) -> Option<u64> {
         .ok()
 }
 
+/// The generation files among a directory's entries (name, path), oldest
+/// first.
+fn generation_entries(
+    entries: impl Iterator<Item = io::Result<(OsString, PathBuf)>>,
+) -> io::Result<Vec<(u64, PathBuf)>> {
+    let mut gens: Vec<(u64, PathBuf)> = entries
+        .filter_map(Result::ok)
+        .filter_map(|(name, path)| Some((generation_seq(name.to_str()?)?, path)))
+        .collect();
+    gens.sort();
+    Ok(gens)
+}
+
 #[derive(Debug, Clone)]
 pub struct Store {
     dir: PathBuf,
@@ -199,15 +213,7 @@ impl Store {
 
     /// Generation files, oldest first.
     pub fn generations(&self) -> io::Result<Vec<(u64, PathBuf)>> {
-        let mut gens: Vec<(u64, PathBuf)> = fs::read_dir(&self.dir)?
-            .filter_map(Result::ok)
-            .filter_map(|e| {
-                let seq = generation_seq(e.file_name().to_str()?)?;
-                Some((seq, e.path()))
-            })
-            .collect();
-        gens.sort();
-        Ok(gens)
+        generation_entries(fs::read_dir(&self.dir)?.map(|e| e.map(|e| (e.file_name(), e.path()))))
     }
 
     /// Saves atomically; the previous `current.json` becomes the newest
