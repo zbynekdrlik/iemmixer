@@ -374,6 +374,40 @@ def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
 
 
+# The raw per-CPU counters, in IemMeasure's Get-IemCpuSample fields (the ones
+# latency_report.cpu_rates reads); rates are computed on the dev box.
+POLL_COUNTERS = ("$c = @(Get-CimInstance -ClassName Win32_PerfRawData_PerfOS_Processor | Where-Object { $_.Name -match '^\\d+$' } | "
+                 "ForEach-Object { [pscustomobject]@{ lp = [int]$_.Name; t100ns = [uint64]$_.Timestamp_Sys100NS; "
+                 "interrupts = [uint64]$_.InterruptsPersec; dpcs = [uint64]$_.DPCsQueuedPersec; dpc_time = [uint64]$_.PercentDPCTime; "
+                 "int_time = [uint64]$_.PercentInterruptTime; idle_time = [uint64]$_.PercentIdleTime; c1_time = [uint64]$_.PercentC1Time; "
+                 "c2_time = [uint64]$_.PercentC2Time; c3_time = [uint64]$_.PercentC3Time } })")
+
+
+def poll_body(governor: str, pid: int, tid: int) -> str:
+    """One sentinel sample every 10 s during a measurement (design note §4.1
+    items 3 and 5), kept light on the PC being measured (#32 B11): it runs
+    through sw.ps (SpikePc's import, as the status poll does) and NOT through
+    the tuning modules, whose import compiles C# (Add-Type) in every new
+    PowerShell; one raw WMI counter query (the formatted class is not read,
+    its frequency columns were unused), the active plan from powercfg, the
+    governor's service state and, while the spike runs, its callback thread's
+    priority (read from outside). Residual load per poll: one ssh session and
+    PowerShell start with the SpikePc import (no compile), one WMI query, one
+    powercfg run — the same order as the status poll it follows."""
+    thread = "$null"
+    if pid > 0 and tid > 0:
+        thread = (f"$(foreach ($t in @((Get-Process -Id {pid} -ErrorAction SilentlyContinue).Threads)) {{ if ($t.Id -eq {tid}) "
+                  "{ [pscustomobject]@{ base = $t.BasePriority; current = $t.CurrentPriority } } })")
+    return " ; ".join([
+        POLL_COUNTERS,
+        "$plan = if ((powercfg.exe /getactivescheme | Out-String) -match '[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}') "
+        "{ $Matches[0].ToLowerInvariant() } else { 'unknown' }",
+        f"$g = Get-Service -Name {ps_quote(governor)} -ErrorAction SilentlyContinue",
+        "[pscustomobject]@{ at = (Get-Date).ToUniversalTime().ToString('o'); cpu = [pscustomobject]@{ cpus = $c }; plan = $plan; "
+        f"governor = $(if ($g) {{ \"$($g.Status)\" }} else {{ 'absent' }}); thread = {thread} }}",
+    ])
+
+
 def _measure(env, args, profile: dict, state: dict, run_dir: str, since: str, tracing: bool) -> None:
     diag = args.trace == "diag"
     opt = trace_options(args.trace, args.circular_mb)
@@ -388,8 +422,7 @@ def _measure(env, args, profile: dict, state: dict, run_dir: str, since: str, tr
         status, progress = st.get("status") or {}, st.get("progress")
         pid = next((r.get("pid") for r in status.get("results") or [] if isinstance(r, dict) and r.get("pid")), 0)
         tid = (progress or {}).get("callback_thread", 0)
-        polls.append(tps(env, f"Get-IemPollSample -ProfilePath {sw.tuning_profile(env)} -SpikePid {int(pid or 0)} -ThreadId {int(tid or 0)}",
-                         timeout=60, event="abandon"))
+        polls.append(sw.ps(env, poll_body(profile["governor"], int(pid or 0), int(tid or 0)), timeout=60, event="abandon"))
         do_cut, cut["seen"] = should_cut(progress, cut["seen"], cut["n"], bool(tracing and args.circular_mb))
         if do_cut:
             cut["n"] += 1
