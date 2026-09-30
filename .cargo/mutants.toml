@@ -172,6 +172,7 @@ exclude_re = [
   "iem-engine/src/rt\\.rs.*replace > with >= in Processor::render_mixes",
   # Equivalent (S3). With the budget spent, `budget >= 0` also cuts the segment at the
   # waiting command; rendering in two pieces is bit-identical (block-size invariance tests).
+  # anchor 1038: if budget > 0
   "iem-engine/src/rt\\.rs:1038:.*replace > with >= in <impl Process for Processor>::process",
   # The fade wait's `elapsed < FADE_WAIT`: differs only at the exact nanosecond.
   "iem-engine/src/control\\.rs.*replace < with <= in Control::fade_out",
@@ -184,6 +185,8 @@ exclude_re = [
   "iem-rpp/src/import\\.rs.*replace > with >= in lin_to_db$",
   # At i == len the byte lookup falls back to a space (skipped) or ends the
   # quoted token at len anyway: both loops end with the same tokens.
+  # anchor 73: while i < bytes.len() {
+  # anchor 82: while i < bytes.len() && bytes.get(i) != Some(&c) {
   "iem-rpp/src/read\\.rs:(73|82):.*replace < with <= in raw_tokens$",
   # A time equal to an era's first_seen lies inside that era's window, which
   # the branch before already returned.
@@ -191,10 +194,12 @@ exclude_re = [
   # `flags & !1` has bit 0 clear, so `| muted` and `^ muted` are the same.
   "iem-rpp/src/export\\.rs.*replace \\| with \\^ in export$",
   # Unobservable (#20): which parent directory commit fsyncs (result dropped); durability shows only across a power loss.
+  # anchor 229: if let Some(parent) = self.target.parent().filter(|p| !p.as_os_str().is_empty()) {
   "iem-migrate/src/stage\\.rs:229:.*delete ! in Stage::commit$",
   # Equivalent (S5). At exactly −60 dB both branches of the fader domain give −60.
   "iem-server/src/view\\.rs.*replace > with >= in ui_db$",
   # Equivalent (S5). p = ±0 rounds to 0 % and is "C" before the side is chosen.
+  # anchor 46: } else if p < 0.0 {
   "iem-server/src/backup\\.rs:46:.*replace < with <= in pan$",
   # Unobservable (S5): the frame age `< 2 s` differs only at the exact nanosecond.
   "iem-server/src/engine/media\\.rs.*replace < with <= in MediaLink::diagnostics$",
@@ -230,11 +235,12 @@ exclude_re = [
   # the "HIL's spare card outputs …" info line is logged — no state and no
   # return value change (like the excluded `delete ! in Control::tick`). `run`
   # IS reachable from unit tests (run_bounded), but no test captures or asserts
-  # that log, so the mutant is unobservable. The `:461:` line anchor is
-  # essential: `run` also has a `delete ! in run` at :433: (the block-size
-  # guard `if !(1..=MAX_BLOCK).contains(&cfg.block)`), which is NOT equivalent
-  # and IS killed by `run_refuses_a_bad_block_and_a_bad_site`, and the
-  # `delete ! in run_hil` at :617: is killed too — both must stay mutated.
+  # that log, so the mutant is unobservable. The line anchor is essential:
+  # `run` also has a `delete ! in run` on the block-size guard
+  # `if !(1..=MAX_BLOCK).contains(&cfg.block)`, which is NOT equivalent and IS
+  # killed by `run_refuses_a_bad_block_and_a_bad_site`, and `delete ! in
+  # run_hil` is killed too — both must stay mutated.
+  # anchor 461: if !hil.is_empty() {
   "iem-engine/src/engine\\.rs:461:.*delete ! in run$",
   # Equivalent (S6): the DER length fold `(n << 8) | usize::from(b)` shifts the
   # accumulator left by 8, so its low 8 bits are always zero; OR-ing in a byte
