@@ -171,10 +171,11 @@ impl Store {
     /// `current.json` to a generation before writing the new one, so a crash
     /// between those two renames leaves the latest state only as a generation
     /// (iemmixer#9 2026-09-28: `import --seed-if-absent` must not re-seed over
-    /// it). Ignores `baseline.json` (a seed is not live state).
+    /// it). Ignores `baseline.json` (a seed is not live state). An I/O error
+    /// while looking is an error, never "no state" (#32: the seed would write
+    /// over state it could not see).
     pub fn has_state(&self) -> io::Result<bool> {
-        Ok(self.dir.join(CURRENT).exists()
-            || self.generations().map(|g| !g.is_empty()).unwrap_or(false))
+        Ok(self.dir.join(CURRENT).try_exists()? || !self.generations()?.is_empty())
     }
 
     /// Generation files, oldest first.
