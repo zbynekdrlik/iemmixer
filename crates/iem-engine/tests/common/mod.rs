@@ -4,8 +4,10 @@
 //! group every block (volume, input/mix/group EQ, processing, levels of an
 //! input and a heard mix, a group strip, solo, listen, limiter raise and
 //! lower, test signal, the HIL test signal on both spare outputs, an Arm, a
-//! full import), talkback, both taps, meter reads, a sanitiser trip every
-//! 1000 blocks and a driver reopen's `discontinuity` every 1000 blocks.
+//! full import), the D5(b) loopback returns (a one-block synthetic loopback
+//! of the spare outputs, so the round-trip probe measures and later signals
+//! find the return busy), talkback, both taps, meter reads, a sanitiser trip
+//! every 1000 blocks and a driver reopen's `discontinuity` every 1000 blocks.
 #![allow(dead_code)]
 
 use std::path::PathBuf;
@@ -25,7 +27,8 @@ use iem_engine_proto::{
 pub const BLOCK: usize = 32;
 
 /// HIL's spare outputs of the test site (`[guard] hil_tx`), opened after
-/// the topology's TX as `run` does under the test-signal flag (S6).
+/// the topology's TX as `run` does under the test-signal flag (S6), and
+/// their loopback returns after the topology's RX (S6 test 5).
 pub const HIL: [u16; 2] = [94, 95];
 
 pub fn site_path() -> PathBuf {
@@ -238,7 +241,7 @@ pub fn scenario() -> Scenario {
         &[],
         Options::default(),
         HIL.len(),
-        0,
+        HIL.len(),
     );
     Scenario {
         topo,
@@ -257,11 +260,16 @@ pub struct Buffers {
     pub drain: Vec<f32>,
 }
 
+/// Hot topology inputs (0.3), then the loopback returns, silent until
+/// `drive` loops the spare outputs back.
 pub fn buffers(topo: &Topology) -> Buffers {
-    let mut bad = vec![0.3; topo.rx.len() * BLOCK];
+    let rx = topo.rx.len() * BLOCK;
+    let mut input = vec![0.3; rx];
+    input.resize(rx + HIL.len() * BLOCK, 0.0);
+    let mut bad = input.clone();
     bad[7] = f64::NAN;
     Buffers {
-        input: vec![0.3; topo.rx.len() * BLOCK],
+        input,
         bad,
         output: vec![0.0; (topo.tx.len() + HIL.len()) * BLOCK],
         talk: vec![0.25; BLOCK],
@@ -269,8 +277,20 @@ pub fn buffers(topo: &Topology) -> Buffers {
     }
 }
 
+/// The D5(b) loopback, one block long: each spare output of this block is
+/// its return input in the next one (both input buffers).
+fn loop_back(b: &mut Buffers, tx: usize, rx: usize) {
+    for j in 0..HIL.len() {
+        let (from, to) = ((tx + j) * BLOCK, (rx + j) * BLOCK);
+        let out = &b.output[from..from + BLOCK];
+        b.input[to..to + BLOCK].copy_from_slice(out);
+        b.bad[to..to + BLOCK].copy_from_slice(out);
+    }
+}
+
 /// Runs `blocks` callbacks; allocates nothing itself.
 pub fn drive(s: &mut Scenario, b: &mut Buffers, blocks: usize) {
+    let (tx, rx) = (s.topo.tx.len(), s.topo.rx.len());
     for k in 0..blocks {
         if let Some(g) = s.groups.get(k % s.groups.len()) {
             push_group(&mut s.handles.cmds, 0, g);
@@ -282,6 +302,7 @@ pub fn drive(s: &mut Scenario, b: &mut Buffers, blocks: usize) {
         }
         let mut block = Block::new(BLOCK, src, &mut b.output);
         s.processor.process(&mut block);
+        loop_back(b, tx, rx);
         let rt = s.handles.status.loopback_samples.load(Ordering::Relaxed);
         s.measured = s.measured.max(rt);
         for tap in &mut s.handles.taps {
