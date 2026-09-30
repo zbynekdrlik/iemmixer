@@ -121,9 +121,14 @@ def load_terms(path: Path) -> list[str]:
     return terms
 
 
+# an escape sequence right before a term is a word boundary even though it ends in a letter or a
+# digit: `\t`, `\0`, `\101`, `\x41`, `A` (byte-string fixtures such as b"\0Program 1\0...")
+_ESCAPE_BEFORE = (r"(?<=\\[0-7abfnrtv])", r"(?<=\\[0-7]{2})", r"(?<=\\[0-7]{3})",
+                  r"(?<=\\x[0-9A-Fa-f]{2})", r"(?<=\\u[0-9A-Fa-f]{4})")
+
+
 def compile_term(term: str) -> re.Pattern[str]:
-    # a `\t`, `\n` or `\r` string escape right before the term is a boundary too
-    left = r"(?:(?<![^\W_])|(?<=\\[ntr]))" if term[:1].isalnum() else ""
+    left = "(?:(?<![^\\W_])|" + "|".join(_ESCAPE_BEFORE) + ")" if term[:1].isalnum() else ""
     right = r"(?![^\W_])" if term[-1:].isalnum() else ""
     return re.compile(left + re.escape(term) + right, re.IGNORECASE)
 
@@ -188,7 +193,11 @@ def reread(text: str, codec: str) -> str:
 
 _UNICODE_ESCAPE = re.compile(r"\\u(?:([0-9A-Fa-f]{4})|\{([0-9A-Fa-f]{1,6})\})")  # JSON/JS/Python; Rust/JS
 _SURROGATE_PAIR = re.compile("[\ud800-\udbff][\udc00-\udfff]")
-_PERCENT = re.compile(r"(?:%[0-9A-Fa-f]{2})+")
+# a run of escapes that each stand for one byte: C / Rust / Python `\xNN`, octal `\NNN` and `\0`,
+# the letter escapes, and URL percent-encoding
+_BYTE_ESCAPES = re.compile(r"(?:\\(?:x[0-9A-Fa-f]{2}|[0-7]{1,3}|[abfnrtv\\'\"?])|%[0-9A-Fa-f]{2})+")
+_ONE_BYTE_ESCAPE = re.compile(r"\\x([0-9A-Fa-f]{2})|%([0-9A-Fa-f]{2})|\\([0-7]{1,3})|\\(.)")
+_LETTER_ESCAPES = {"a": 7, "b": 8, "f": 12, "n": 10, "r": 13, "t": 9, "v": 11, "\\": 92, "'": 39, '"': 34, "?": 63}
 
 
 def _escaped_char(match: re.Match[str]) -> str:
@@ -196,29 +205,31 @@ def _escaped_char(match: re.Match[str]) -> str:
     return chr(value) if value <= 0x10FFFF else match.group()
 
 
-def _percent_bytes(match: re.Match[str]) -> bytes:
-    return bytes.fromhex(match.group().replace("%", ""))
+def _escaped_bytes(match: re.Match[str]) -> str:
+    out = bytearray()
+    for escape in _ONE_BYTE_ESCAPE.finditer(match.group()):
+        hex_digits, percent, octal, letter = escape.groups()
+        if hex_digits or percent:
+            out.append(int(hex_digits or percent, 16))
+        elif octal:
+            out.append(int(octal, 8) & 0xFF)
+        else:
+            out.append(_LETTER_ESCAPES[letter])
+    return decode(bytes(out))
 
 
-def _percent_decoded(text: str, codec: str) -> str:
-    return _PERCENT.sub(lambda match: _percent_bytes(match).decode(codec, "replace"), text)
-
-
-def unescaped(text: str) -> list[str]:
-    """The text with its `\\uXXXX` / `\\u{X}` escapes decoded (a UTF-16 surrogate pair joined), and
-    that with its percent-encoding decoded as UTF-8 -- and, when some encoded bytes are not valid
-    UTF-8, as cp1250 and Latin-1 too (forms() drops a form equal to one it already has)."""
-    found = []
+def unescape(text: str) -> str:
+    """The text with its escapes decoded: `\\uXXXX` / `\\u{X}` (a UTF-16 surrogate pair joined), and
+    each run of byte escapes (C / Rust / Python `\\xNN`, octal, `\\0`, the letter escapes, percent-
+    encoding) as the bytes it stands for, decoded like raw bytes -- undecodable ones stay lone
+    surrogates that forms() re-reads as cp1250 / Latin-1."""
     if "\\u" in text:
         text = _UNICODE_ESCAPE.sub(_escaped_char, text)
         text = _SURROGATE_PAIR.sub(
             lambda pair: pair.group().encode("utf-16-le", "surrogatepass").decode("utf-16-le"), text)
-        found.append(text)
-    runs = [_percent_bytes(match) for match in _PERCENT.finditer(text)]
-    if runs:
-        codecs = ("utf-8",) if all(is_utf8(run) for run in runs) else ("utf-8", *FALLBACK_CODECS)
-        found += [_percent_decoded(text, codec) for codec in codecs]
-    return found
+    if "\\" in text or "%" in text:
+        text = _BYTE_ESCAPES.sub(_escaped_bytes, text)
+    return text
 
 
 def cp1250_from_git_latin1(text: str) -> str:
@@ -229,16 +240,18 @@ def cp1250_from_git_latin1(text: str) -> str:
 
 
 def forms(text: str) -> tuple[str, ...]:
-    """Every reading of a decoded text that is matched against the terms, NFC-normalized: the text;
-    its cp1250 and Latin-1 re-readings when it holds undecodable bytes; and each of those with its
-    escapes decoded (unescaped)."""
-    readings = [text]
-    if undecodable(text):
-        readings += [reread(text, codec) for codec in FALLBACK_CODECS]
+    """Every reading of a decoded text that is matched against the terms, NFC-normalized: the text
+    and the text with its escapes decoded (unescape), each also with its undecodable bytes re-read
+    as cp1250 and Latin-1."""
+    bases = [text]
+    decoded = unescape(text)
+    if decoded != text:
+        bases.append(decoded)
     found: list[str] = []
-    for reading in readings:
-        for form in (reading, *unescaped(reading)):
-            form = nfc(form)
+    for base in bases:
+        readings = [base] + ([reread(base, codec) for codec in FALLBACK_CODECS] if undecodable(base) else [])
+        for reading in readings:
+            form = nfc(reading)
             if form not in found:
                 found.append(form)
     return tuple(found)
