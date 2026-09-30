@@ -176,6 +176,41 @@ fn import_writes_current_and_baseline_with_the_program_counts() {
     assert_eq!(Store::open(&dir).unwrap().generations().unwrap().len(), 1);
 }
 
+/// #32 P4: a plain import replaces the live state, but an interrupted
+/// save (save.tmp, the newest live state) is finished first, so it is kept
+/// as a generation instead of being overwritten.
+#[test]
+fn a_plain_import_keeps_an_interrupted_save_as_a_generation() {
+    let w = World::new(31);
+    let dir = w.path("state");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("current.json"), live(5)).unwrap();
+    std::fs::write(dir.join("save.tmp"), live(6)).unwrap();
+    let mut a = import_args(&w, &[]);
+    a.extend(["--state-dir".into(), s(&dir)]);
+    let report = run(&a).unwrap();
+    assert!(
+        report.contains("save.tmp finished as current.json"),
+        "{report}"
+    );
+    let store = Store::open(&dir).unwrap();
+    let revs: Vec<u64> = store
+        .generations()
+        .unwrap()
+        .iter()
+        .map(|(_, path)| {
+            iem_engine::persist::decode(&std::fs::read(path).unwrap())
+                .unwrap()
+                .rev
+        })
+        .collect();
+    assert_eq!(revs, [5, 6]);
+    assert!(!dir.join("save.tmp").exists());
+    let sf = site::open(&site_path()).unwrap();
+    let loaded = store.load(&sf.compiled);
+    assert_eq!((loaded.source, loaded.persisted.rev), (Saved::Current, 0));
+}
+
 #[test]
 fn seed_if_absent_writes_current_only_when_it_is_missing() {
     // A data command runs `import --seed-if-absent` on every dev entry: the
