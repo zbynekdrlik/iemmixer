@@ -307,6 +307,101 @@ mod tests {
         assert!(loaded.rejected.is_empty(), "{:?}", loaded.rejected);
     }
 
+    fn rev_of(path: &Path) -> u64 {
+        decode(&fs::read(path).unwrap()).unwrap().rev
+    }
+
+    #[test]
+    fn a_boot_on_save_tmp_finishes_its_save() {
+        // #32 review (major): after a boot on save.tmp it stayed the only
+        // copy of the newest state, and the next save truncated it in place.
+        // Recovery finishes the interrupted save before the engine runs.
+        let (_d, s) = store();
+        let g = test_site();
+        s.save(&sample(5)).unwrap();
+        fs::write(s.dir().join(TMP), encode(&sample(6)).unwrap()).unwrap();
+        let loaded = s.load(&g);
+        assert_eq!(loaded.source, Source::Interrupted);
+        let done = s.recover(&loaded);
+        assert_eq!(
+            done,
+            Recovery {
+                finished: true,
+                ..Recovery::default()
+            }
+        );
+        assert!(!s.dir().join(TMP).exists());
+        assert_eq!(rev_of(&s.dir().join(CURRENT)), 6);
+        let gens = s.generations().unwrap();
+        assert_eq!(gens.len(), 1);
+        assert_eq!(rev_of(&gens[0].1), 5);
+        // The next boot loads current.json and has nothing to recover.
+        let again = s.load(&g);
+        assert_eq!((again.source, again.persisted.rev), (Source::Current, 6));
+        assert!(again.rejected.is_empty(), "{:?}", again.rejected);
+        assert_eq!(s.recover(&again), Recovery::default());
+    }
+
+    #[test]
+    fn a_crash_during_recovery_is_finished_at_the_next_boot() {
+        // Each step is a rename. A crash after the first leaves the old
+        // current.json as a generation and save.tmp in place: the next boot
+        // picks save.tmp again and finishes, adding no second generation.
+        let (_d, s) = store();
+        let g = test_site();
+        s.save(&sample(5)).unwrap();
+        fs::write(s.dir().join(TMP), encode(&sample(6)).unwrap()).unwrap();
+        fs::rename(s.dir().join(CURRENT), s.dir().join("gen-0000000001.json")).unwrap();
+        let loaded = s.load(&g);
+        assert_eq!(
+            (loaded.source, loaded.persisted.rev),
+            (Source::Interrupted, 6)
+        );
+        assert!(s.recover(&loaded).finished);
+        assert!(!s.dir().join(TMP).exists());
+        assert_eq!(rev_of(&s.dir().join(CURRENT)), 6);
+        let gens = s.generations().unwrap();
+        assert_eq!(gens.len(), 1);
+        assert_eq!(rev_of(&gens[0].1), 5);
+    }
+
+    #[test]
+    fn a_save_cut_off_after_an_interrupted_boot_keeps_the_loaded_state() {
+        // Once recovered, the next save cut off while writing save.tmp
+        // leaves current.json, the state the engine ran on, never the older
+        // generation.
+        let (_d, s) = store();
+        let g = test_site();
+        s.save(&sample(1)).unwrap();
+        fs::write(s.dir().join(TMP), encode(&sample(2)).unwrap()).unwrap();
+        fs::rename(s.dir().join(CURRENT), s.dir().join("gen-0000000001.json")).unwrap();
+        let loaded = s.load(&g);
+        s.recover(&loaded);
+        let cut = encode(&sample(3)).unwrap();
+        fs::write(s.dir().join(TMP), &cut[..cut.len() / 2]).unwrap();
+        let after = s.load(&g);
+        assert_eq!((after.source, after.persisted.rev), (Source::Current, 2));
+    }
+
+    #[test]
+    fn a_failed_recovery_step_is_reported() {
+        // The engine still starts on the loaded state; the failure becomes
+        // a SaveFailed alarm. Here save.tmp is gone before its rename.
+        let (_d, s) = store();
+        fs::write(s.dir().join(TMP), encode(&sample(4)).unwrap()).unwrap();
+        let loaded = s.load(&test_site());
+        assert_eq!(loaded.source, Source::Interrupted);
+        fs::remove_file(s.dir().join(TMP)).unwrap();
+        let done = s.recover(&loaded);
+        assert!(!done.finished);
+        assert_eq!(done.failed.len(), 1, "{:?}", done.failed);
+        assert!(
+            done.failed[0].starts_with("finishing the interrupted save failed"),
+            "{:?}",
+            done.failed
+        );
+    }
+
     #[test]
     fn a_boot_on_save_tmp_is_named_interrupted() {
         // The first save, cut off before its rename: save.tmp is the only state.
