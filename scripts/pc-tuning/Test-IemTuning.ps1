@@ -105,7 +105,7 @@ function New-TestNic([string]$Hwid, [string]$Adapter = '', [string]$Key = 'HKLM:
     # The test NIC: its driver key (HKLM:\NIC) under the test root, or with -Adapter found by adapter name.
     $n = [ordered]@{ adapter = 'unused'; key = $Key; hwid = $Hwid; properties = [ordered]@{ PowerSaving = '0'; '*EEE' = '0'; IemDword = '0'; IemExpand = 'plain'
                                                                              IemQword = '8'; IemString = 'other'; IemMulti0 = 'x'; IemMulti1 = 'x' }
-                     rss = [ordered]@{ base = 4; max = 5 }; pnp_capabilities = 24 }
+                     rss = [ordered]@{ base = 1; max = 1 }; pnp_capabilities = 24 }   # RSS on layout.nic
     if ($Adapter) { $n.adapter = $Adapter; $n.Remove('key') }
     return $n
 }
@@ -345,7 +345,7 @@ try {
     # endian (M3); processor 2 is the card's role, mask 4.
     $apBytes = (@($ap.GetValue('AssignmentSetOverride') | ForEach-Object { $_.ToString('x2') }) -join '')
     Assert ($ap.GetValue('DevicePolicy') -eq 4 -and "$($ap.GetValueKind('AssignmentSetOverride'))" -eq 'Binary' -and $apBytes -eq '0400000000000000') 'tier3-affinity-policy-and-binary-mask'
-    Assert ((Get-Item -LiteralPath $nic).GetValue('PowerSaving') -eq '0' -and (Get-Item -LiteralPath $nic).GetValue('*RssBaseProcNumber') -eq '4') 'tier3-nic-values'
+    Assert ((Get-Item -LiteralPath $nic).GetValue('PowerSaving') -eq '0' -and (Get-Item -LiteralPath $nic).GetValue('*RssBaseProcNumber') -eq '1') 'tier3-nic-values'
     $st = Get-IemTuningState -ProfilePath $pp
     Assert (@($st.items | Where-Object { $_.tier -eq 3 -and -not $_.pending }).Count -eq 0) 'tier3-items-are-pending-until-a-reboot'
     # The journal holds this boot's token; a clock step changes nothing, another
