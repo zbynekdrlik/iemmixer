@@ -619,6 +619,66 @@ mod tests {
     }
 
     #[test]
+    fn a_newer_save_tmp_beside_current_json_wins() {
+        // #32: a crash after save.tmp was written but before current.json
+        // became a generation. save.tmp (revision N + 1) is the newest state.
+        let (_d, s) = store();
+        s.save(&sample(5)).unwrap();
+        fs::write(s.dir().join(TMP), encode(&sample(6)).unwrap()).unwrap();
+        let loaded = s.load(&test_site());
+        assert_eq!(loaded.source, Source::Interrupted);
+        assert_eq!(loaded.persisted.rev, 6);
+        assert!(loaded.rejected.is_empty(), "{:?}", loaded.rejected);
+    }
+
+    #[test]
+    fn a_save_tmp_not_newer_than_current_json_is_skipped_and_named() {
+        // Equal or older by revision (a repeated save, a leftover baseline of
+        // an older engine) or cut off while writing: current.json stands, and
+        // the skipped save.tmp is reported.
+        let (_d, s) = store();
+        s.save(&sample(5)).unwrap();
+        let cut = encode(&sample(6)).unwrap();
+        for (tmp, why) in [
+            (
+                encode(&sample(5)).unwrap(),
+                "revision 5 is not newer than current.json's 5",
+            ),
+            (
+                encode(&sample(4)).unwrap(),
+                "revision 4 is not newer than current.json's 5",
+            ),
+            (cut[..cut.len() / 2].to_vec(), "not a state file"),
+        ] {
+            fs::write(s.dir().join(TMP), &tmp).unwrap();
+            let loaded = s.load(&test_site());
+            assert_eq!(loaded.source, Source::Current, "{why}");
+            assert_eq!(loaded.persisted.rev, 5, "{why}");
+            assert_eq!(loaded.rejected.len(), 1, "{why}: {:?}", loaded.rejected);
+            assert!(loaded.rejected[0].0.ends_with(TMP));
+            assert!(
+                loaded.rejected[0].1.starts_with(why),
+                "{:?}",
+                loaded.rejected
+            );
+        }
+    }
+
+    #[test]
+    fn live_state_names_the_file_the_engine_would_load() {
+        // Beside current.json, save.tmp is the live state only when it is a
+        // complete state strictly newer by revision, as in the load chain.
+        let (_d, s) = store();
+        s.save(&sample(5)).unwrap();
+        fs::write(s.dir().join(TMP), encode(&sample(6)).unwrap()).unwrap();
+        assert_eq!(s.live_state().unwrap(), Some(Source::Interrupted));
+        fs::write(s.dir().join(TMP), encode(&sample(5)).unwrap()).unwrap();
+        assert_eq!(s.live_state().unwrap(), Some(Source::Current));
+        fs::write(s.dir().join(TMP), b"cut off").unwrap();
+        assert_eq!(s.live_state().unwrap(), Some(Source::Current));
+    }
+
+    #[test]
     fn an_older_save_tmp_beside_current_json_is_not_used() {
         let (_d, s) = store();
         s.save(&sample(2)).unwrap();
