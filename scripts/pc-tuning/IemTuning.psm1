@@ -236,6 +236,56 @@ function Remove-IemRegValue {
     try { $k.DeleteValue($Name, $false) } finally { $k.Close() }
 }
 
+function Get-IemRegRaw {
+    # One registry value exactly, as the journal keeps it for undo (A1): its
+    # kind, and its data as text (numbers in decimal as Windows returns them,
+    # binary as hex, a multi-string as a list), or kind 'absent'.
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Name)
+    if (-not (Test-Path -LiteralPath $Path)) { return @{ kind = 'absent' } }
+    $k = Get-Item -LiteralPath $Path
+    $v = $k.GetValue($Name, $null, 'DoNotExpandEnvironmentNames')
+    if ($null -eq $v) { return @{ kind = 'absent' } }
+    $kind = "$($k.GetValueKind($Name))"
+    if (@('DWord', 'QWord', 'String', 'ExpandString') -contains $kind) { return @{ kind = $kind; data = [string]$v } }
+    if ($kind -eq 'MultiString') { return @{ kind = $kind; data = [string[]]@($v) } }
+    if ($kind -eq 'Binary') { return @{ kind = $kind; data = (@($v | ForEach-Object { $_.ToString('x2') }) -join '') } }
+    throw "registry value $Name under ${Path}: kind $kind refused"
+}
+
+function Set-IemRegRaw {
+    # Writes one registry value exactly as Get-IemRegRaw reads it (kind and
+    # data), or deletes exactly this value for kind 'absent'.
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)]$Raw)
+    $kind = [string]$Raw.kind
+    if ($kind -eq 'absent') { Remove-IemRegValue -Path $Path -Name $Name; return }
+    if (-not (Test-Path -LiteralPath $Path)) { New-Item -Path $Path -Force | Out-Null }
+    $k = Open-IemRegKey -Path $Path
+    try {
+        if ($kind -eq 'DWord') { $k.SetValue($Name, [int]$Raw.data, [Microsoft.Win32.RegistryValueKind]::DWord) }
+        elseif ($kind -eq 'QWord') { $k.SetValue($Name, [long]$Raw.data, [Microsoft.Win32.RegistryValueKind]::QWord) }
+        elseif ($kind -eq 'String' -or $kind -eq 'ExpandString') { $k.SetValue($Name, [string]$Raw.data, [Microsoft.Win32.RegistryValueKind]$kind) }
+        elseif ($kind -eq 'MultiString') { $k.SetValue($Name, [string[]]@($Raw.data), [Microsoft.Win32.RegistryValueKind]::MultiString) }
+        elseif ($kind -eq 'Binary') {
+            $hex = [string]$Raw.data
+            if ($hex.Length % 2 -ne 0) { throw "binary data '$hex' has an odd number of hex digits" }
+            $bytes = New-Object -TypeName byte[] -ArgumentList ($hex.Length / 2)
+            for ($i = 0; $i -lt $bytes.Length; $i++) { $bytes[$i] = [Convert]::ToByte($hex.Substring(2 * $i, 2), 16) }
+            $k.SetValue($Name, $bytes, [Microsoft.Win32.RegistryValueKind]::Binary)
+        } else { throw "registry kind '$kind' refused" }
+    } finally { $k.Close() }
+}
+
+function Test-IemRegRawSame {
+    param([Parameter(Mandatory)]$A, [Parameter(Mandatory)]$B)
+    if ([string]$A.kind -ne [string]$B.kind) { return $false }
+    if ([string]$A.kind -eq 'absent') { return $true }
+    if ([string]$A.kind -eq 'MultiString') {
+        $x = @($A.data); $y = @($B.data)
+        return ($x.Count -eq $y.Count) -and (($x -join [char]0) -ceq ($y -join [char]0))
+    }
+    return [string]$A.data -ceq [string]$B.data
+}
+
 function Get-IemValue {
     param([Parameter(Mandatory)]$Item)
     $a = $Item.args
@@ -292,15 +342,8 @@ function Set-IemValue {
     switch ($Item.kind) {
         'reg' {
             if ($null -eq $Value) { Remove-IemRegValue -Path $a.path -Name $a.name; return }
-            if (-not (Test-Path -LiteralPath $a.path)) { New-Item -Path $a.path -Force | Out-Null }
-            $data = switch ($a.type) {
-                'DWord' { [int]$Value }
-                'QWord' { [long]$Value }
-                'String' { [string]$Value }
-                'Binary' { [byte[]]@(for ($i = 0; $i -lt $Value.Length; $i += 2) { [Convert]::ToByte($Value.Substring($i, 2), 16) }) }
-                default { throw "registry type '$($a.type)' refused" }
-            }
-            New-ItemProperty -LiteralPath $a.path -Name $a.name -Value $data -PropertyType $a.type -Force | Out-Null
+            if (@('DWord', 'QWord', 'String', 'Binary') -notcontains [string]$a.type) { throw "registry type '$($a.type)' refused" }
+            Set-IemRegRaw -Path $a.path -Name $a.name -Raw @{ kind = [string]$a.type; data = [string]$Value }
         }
         'svc-start' {
             if (@('auto', 'delayed-auto', 'demand', 'disabled') -notcontains [string]$Value) { throw "service start type '$Value' refused for $($a.name)" }
@@ -401,10 +444,13 @@ function Write-IemJournal {
 }
 
 function ConvertTo-IemItem {
-    # An item rebuilt from its journal entry, desired = the journaled before-value.
+    # An item rebuilt from its journal entry, desired = the journaled before-value;
+    # restore = the exact registry value (kind and data) for a 'reg' item (A1).
     param([Parameter(Mandatory)][string]$Key, [Parameter(Mandatory)]$Entry)
+    $raw = $null
+    if ($Entry.PSObject.Properties['raw']) { $raw = $Entry.raw }
     [pscustomobject]@{ key = $Key; kind = $Entry.kind; args = $Entry.args; tier = [int]$Entry.tier; group = [string]$Entry.group
-                       reboot = [bool]$Entry.reboot; desired = $Entry.before }
+                       reboot = [bool]$Entry.reboot; desired = $Entry.before; restore = $raw }
 }
 
 function Invoke-IemItem {
@@ -421,8 +467,11 @@ function Invoke-IemItem {
         if (Test-IemSame $before $Item.desired) { $row.action = 'kept'; $row.value = $before; return [pscustomobject]$row }
         $e = $Journal[$Section][$Item.key]
         if ($null -eq $e) {
-            $Journal[$Section][$Item.key] = @{ kind = $Item.kind; args = $Item.args; before = $before; tier = $Item.tier; group = $Item.group
-                                               reboot = $Item.reboot; at = (Get-Date).ToUniversalTime().ToString('o'); boot = $Boot }
+            $e = @{ kind = $Item.kind; args = $Item.args; before = $before; tier = $Item.tier; group = $Item.group
+                    reboot = $Item.reboot; at = (Get-Date).ToUniversalTime().ToString('o'); boot = $Boot }
+            # The exact value for undo: its registry kind and data, not the text (A1).
+            if ($Item.kind -eq 'reg') { $e.raw = Get-IemRegRaw -Path $Item.args.path -Name $Item.args.name }
+            $Journal[$Section][$Item.key] = $e
             $Journal.order[$Section] = @($Journal.order[$Section]) + $Item.key
             Write-IemJournal -Path $Path -Journal $Journal
         } elseif ([string]$e.boot -ne $Boot) {
@@ -443,6 +492,7 @@ function Restore-IemItem {
     # Write the journaled before-value back and read it back. A placed process
     # that ended (or whose pid was reused) is 'gone': nothing to restore.
     param([Parameter(Mandatory)]$Item)
+    if ($Item.kind -eq 'reg') { return Restore-IemRegItem -Item $Item }
     $now = Get-IemValue -Item $Item
     if ($Item.kind -eq 'cpusets' -and $null -eq $now) { return [pscustomobject]@{ key = $Item.key; action = 'gone'; value = $null; error = $null } }
     if (Test-IemSame $now $Item.desired) { return [pscustomobject]@{ key = $Item.key; action = 'kept'; value = $now; error = $null } }
@@ -450,6 +500,21 @@ function Restore-IemItem {
     $after = Get-IemValue -Item $Item
     if (-not (Test-IemSame $after $Item.desired)) { throw "$($Item.key): read back '$after' after restoring '$($Item.desired)'" }
     return [pscustomobject]@{ key = $Item.key; action = 'restored'; value = $after; error = $null }
+}
+
+function Restore-IemRegItem {
+    # A registry value goes back to its journaled kind and data (A1); the item's
+    # own type would turn a REG_BINARY mask into a wrong QWORD.
+    param([Parameter(Mandatory)]$Item)
+    $a = $Item.args
+    if ($null -eq $Item.restore) { throw "$($Item.key): the journal entry has no exact registry value (older module): restore it by hand" }
+    if (Test-IemRegRawSame -A (Get-IemRegRaw -Path $a.path -Name $a.name) -B $Item.restore) {
+        return [pscustomobject]@{ key = $Item.key; action = 'kept'; value = $Item.desired; error = $null }
+    }
+    Set-IemRegRaw -Path $a.path -Name $a.name -Raw $Item.restore
+    $after = Get-IemRegRaw -Path $a.path -Name $a.name
+    if (-not (Test-IemRegRawSame -A $after -B $Item.restore)) { throw "$($Item.key): read back $($after.kind) after restoring $($Item.restore.kind)" }
+    return [pscustomobject]@{ key = $Item.key; action = 'restored'; value = $Item.desired; error = $null }
 }
 
 function ConvertTo-IemMask {
