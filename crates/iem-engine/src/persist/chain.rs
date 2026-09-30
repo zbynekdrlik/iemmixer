@@ -290,8 +290,18 @@ impl Store {
         );
         let current = self.dir.join(CURRENT);
         if loaded.current_json == FileState::Damaged {
-            match self.quarantine(&current) {
-                Ok(aside) => done.quarantined = Some(aside),
+            match self.move_aside(&current, "damaged") {
+                Ok((aside, synced)) => {
+                    // #32 minor-6: moved, only the sync after it failed.
+                    if let Err(e) = synced {
+                        done.failed.push(format!(
+                            "the damaged {CURRENT} was moved aside to {}, but the \
+                             directory sync failed: {e}",
+                            aside.display()
+                        ));
+                    }
+                    done.quarantined = Some(aside);
+                }
                 Err(e) => done.failed.push(format!(
                     "the damaged {CURRENT} could not be moved aside: {e}"
                 )),
@@ -340,12 +350,6 @@ impl Store {
                 Err(e) => return Err(e),
             }
         }
-    }
-
-    fn quarantine(&self, current: &Path) -> io::Result<PathBuf> {
-        let (aside, synced) = self.move_aside(current, "damaged")?;
-        synced?;
-        Ok(aside)
     }
 
     /// Moves a `save.tmp` that is not this store's own aside to the first
