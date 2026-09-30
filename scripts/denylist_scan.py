@@ -26,12 +26,15 @@ term ending in `.` such as `10.0.` hits `10.0.0.5`.
 from __future__ import annotations
 
 import argparse
+import bisect
 import hashlib
 import re
 import shlex
 import subprocess
 import sys
 import unicodedata
+from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -40,6 +43,21 @@ EXIT_HIT = 1
 EXIT_USAGE = 2
 
 REDACTED = "[redacted]"
+# In binary content random bytes form short words by chance: in this repository's f64 goldens 28 %
+# of all 3-letter and 0.5 % of all 4-letter words occur as words of their text runs, 0.003 % of the
+# 5-letter ones. So in a binary text run a term shorter than MIN_BINARY_TERM characters counts only
+# when the run is LONG_TEXT_RUN or more bytes of valid UTF-8 -- text, which random bytes never form.
+MIN_BINARY_TERM = 5
+LONG_TEXT_RUN = 32
+# a text run of binary content: no control character but tab, so UTF-8 / cp1250 letters stay in it
+_BYTE_RUN = re.compile(rb"[\t\x20-\x7e\x80-\xff]+")
+# a UTF-16 string inside binary content (Windows wide strings: an .etl trace, a .lnk, PE resources):
+# a Latin character is its low byte next to a 0x00 (U+0000-00FF) or 0x01 (U+0100-017F) high byte
+_UTF16_RUNS = (
+    ("utf-16-le", re.compile(rb"(?:[\t\x20-\x7e\xa0-\xff]\x00|[\x00-\xff]\x01){2,}")),
+    ("utf-16-be", re.compile(rb"(?:\x00[\t\x20-\x7e\xa0-\xff]|\x01[\x00-\xff]){2,}")),
+)
+GITLINK = b"160000"  # a submodule entry: its object is a commit, not a blob
 # git's C-quoting of a path in a diff header (core.quotePath)
 C_ESCAPES = {"a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13, '"': 34, "\\": 92}
 
@@ -118,11 +136,34 @@ def printable(text: str) -> str:
 class Scanner:
     def __init__(self, terms: list[str], allow: set[str]) -> None:
         self.patterns = [compile_term(nfc(term)) for term in terms]
+        # the bare term, same flags: a necessary condition for a match that the regex engine
+        # searches ~15x faster than the boundary lookarounds, so a clean text costs one fast pass
+        self.literals = [re.compile(re.escape(nfc(term)), re.IGNORECASE) for term in terms]
+        # a short term counts in a binary text run only when the run is long text (MIN_BINARY_TERM)
+        self.short = [len(nfc(term)) < MIN_BINARY_TERM for term in terms]
         self.allow = allow
 
     def entries_in(self, text: str) -> list[int]:
         text = nfc(text)
-        return [number for number, pattern in enumerate(self.patterns, start=1) if pattern.search(text)]
+        return [number for number, (literal, pattern) in enumerate(zip(self.literals, self.patterns), start=1)
+                if literal.search(text) and pattern.search(text)]
+
+    def unit_hits(self, path: str, units: Sequence[Unit]) -> list[tuple[int, int]]:
+        """(unit index, entry number) of every term in a unit that is not allowlisted, sorted.
+
+        Every form of every unit is joined into one text, `\\n`-separated (no unit and no term
+        holds a `\\n`, and a `\\n` is a word boundary like the end of a unit), so each term is one
+        regex pass over the content rather than one per unit -- a binary file has 10^5 runs. A
+        short term is searched only in the units it applies to."""
+        views: dict[bool, Joined] = {}
+        found: set[tuple[int, int]] = set()
+        for entry, (literal, pattern, short) in enumerate(zip(self.literals, self.patterns, self.short), start=1):
+            if short not in views:
+                views[short] = Joined(units, short_terms_only=short)
+            view = views[short]
+            if literal.search(view.text):
+                found.update((view.owner_of(match.start()), entry) for match in pattern.finditer(view.text))
+        return sorted(hit for hit in found if line_key(path, units[hit[0]].key) not in self.allow)
 
     def shown(self, path: str) -> str:
         """The path as printed: each component holding a term is redacted, the others have their
@@ -139,12 +180,6 @@ class Scanner:
     def scan_path(self, path: str, prefix: str) -> list[Hit]:
         return [Hit(f"{prefix}{self.shown(path)}: path", entry) for entry in self.entries_in(path)]
 
-    def scan_line(self, path: str, line: str, where: str) -> list[Hit]:
-        entries = self.entries_in(line)
-        if not entries or line_key(path, line) in self.allow:
-            return []
-        return [Hit(where, entry) for entry in entries]
-
 
 def git(repo: Path, *args: str) -> bytes:
     return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True).stdout
@@ -152,6 +187,91 @@ def git(repo: Path, *args: str) -> bytes:
 
 def decode(data: bytes) -> str:
     return data.decode("utf-8", errors="replace")
+
+
+@dataclass(frozen=True)
+class Unit:
+    """One scanned piece of content: a line of text, or a text run of binary content."""
+    key: str                  # the text its allow key is made of
+    texts: tuple[str, ...]    # every form of it matched against the terms
+    short_terms: bool = True  # False: only terms of MIN_BINARY_TERM or more characters count
+
+
+class Joined:
+    """The forms of units joined into one `\\n`-separated text; an offset maps back to its unit."""
+
+    def __init__(self, units: Sequence[Unit], short_terms_only: bool) -> None:
+        self.owner: list[int] = []
+        self.start: list[int] = []
+        forms: list[str] = []
+        offset = 0
+        for index, unit in enumerate(units):
+            if short_terms_only and not unit.short_terms:
+                continue
+            for text in unit.texts:
+                self.owner.append(index)
+                self.start.append(offset)
+                forms.append(text)
+                offset += len(text) + 1
+        self.text = "\n".join(forms)
+
+    def owner_of(self, offset: int) -> int:
+        return self.owner[bisect.bisect_right(self.start, offset) - 1]
+
+
+def text_unit(text: str, short_terms: bool = True) -> Unit:
+    return Unit(text, (nfc(text),), short_terms)
+
+
+def byte_unit(raw: bytes, short_terms: bool = True) -> Unit:
+    return text_unit(decode(raw), short_terms)
+
+
+def utf16_codec(data: bytes) -> str | None:
+    """The codec of UTF-16 text: from its byte-order mark, or -- without one -- from the NUL high
+    byte of nearly every character (Latin text) against almost no NUL low byte."""
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return "utf-16"
+    if len(data) < 4:
+        return None
+    even, odd = data[0::2], data[1::2]
+    if odd.count(0) >= len(odd) / 2 and even.count(0) <= len(even) / 20:
+        return "utf-16-le"
+    if even.count(0) >= len(even) / 2 and odd.count(0) <= len(odd) / 20:
+        return "utf-16-be"
+    return None
+
+
+def is_plain_text(data: bytes) -> bool:
+    """Content git's line diff shows faithfully: no NUL byte and not UTF-16."""
+    return b"\0" not in data and utf16_codec(data) is None
+
+
+def content_units(data: bytes) -> tuple[str, list[Unit]]:
+    """What of a blob is scanned, and the label of a unit number in a tree location.
+
+    Text: its lines (split on `\\n` only). UTF-16 text: its decoded lines. Other content holding a
+    NUL byte (binary): its text runs -- byte runs without control characters, then UTF-16 strings
+    -- numbered `run N`; a byte run shorter than MIN_BINARY_TERM can never count (a short term
+    needs a LONG_TEXT_RUN), so it is not a unit. `--hash` numbers units the same way."""
+    codec = utf16_codec(data)
+    if codec is not None:
+        return "", [text_unit(line) for line in data.decode(codec, errors="replace").split("\n")]
+    if b"\0" not in data:
+        return "", [byte_unit(line) for line in data.split(b"\n")]
+    units = [byte_unit(run, short_terms=len(run) >= LONG_TEXT_RUN and is_utf8(run))
+             for run in _BYTE_RUN.findall(data) if len(run) >= MIN_BINARY_TERM]
+    for codec, pattern in _UTF16_RUNS:
+        units += [text_unit(run.decode(codec, errors="replace")) for run in pattern.findall(data)]
+    return "run ", units
+
+
+def is_utf8(data: bytes) -> bool:
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return True
 
 
 _OCTAL = frozenset(b"01234567")
@@ -217,14 +337,104 @@ def scan_tree(scanner: Scanner, repo: Path, rev: str) -> list[Hit]:
         hits += scanner.scan_path(path, "tree ")
         if kind != b"blob":
             continue
-        data = git(repo, "cat-file", "blob", decode(obj))
-        if b"\0" in data:
+        # the blob's own bytes: cat-file applies no .gitattributes (binary, -diff, textconv)
+        label, units = content_units(git(repo, "cat-file", "blob", decode(obj)))
+        found = scanner.unit_hits(path, units)
+        if found:
+            shown = scanner.shown(path)
+            hits += [Hit(f"tree {shown}:{label}{index + 1}", entry) for index, entry in found]
+    return hits
+
+
+def changed_blobs(repo: Path, sha: str) -> list[tuple[bytes, str, bytes, str, bytes]]:
+    """(old mode, old blob, new mode, new blob, raw path) of every added, modified or type-changed
+    path of a commit: a root commit against the empty tree (--root), a merge against every parent
+    (-m, a safe over-scan that never misses a path any parent introduces). Raw bytes via -z, so
+    there is no C-quoting to undo."""
+    fields = git(repo, "diff-tree", "--no-commit-id", "-r", "-z", "--root", "--no-renames", "-m",
+                 "--diff-filter=AMT", sha).split(b"\0")
+    changes = []
+    for meta, raw_path in zip(fields[0::2], fields[1::2]):
+        old_mode, new_mode, old, new, _status = meta.lstrip(b":").split()
+        changes.append((old_mode, old.decode("ascii"), new_mode, new.decode("ascii"), raw_path))
+    return changes
+
+
+def added_units(old: list[Unit], new: list[Unit]) -> list[Unit]:
+    """The units of `new` that `old` does not have (a multiset difference by allow-key text)."""
+    before = Counter(unit.key for unit in old)
+    added = []
+    for unit in new:
+        if before[unit.key]:
+            before[unit.key] -= 1
+        else:
+            added.append(unit)
+    return added
+
+
+def scan_commit_blobs(scanner: Scanner, repo: Path, sha: str, seen: set[str]) -> tuple[list[Hit], set[str]]:
+    """Scan every changed path of a commit, and the content of each changed blob git's line diff
+    cannot show (it holds a NUL byte or is UTF-16): the units its new blob adds over the old one.
+    Returns the hits and those blob paths, whose line diff is then not scanned.
+
+    Every path is enumerated here, not only from the unified diff's `+++` headers: an empty or
+    binary file has no such header, so its term-bearing name would otherwise slip past."""
+    short = sha[:12]
+    hits: list[Hit] = []
+    blob_paths: set[str] = set()
+    reported: set[tuple[str, str, int]] = set()
+    for old_mode, old, new_mode, new, raw_path in changed_blobs(repo, sha):
+        path = decode(raw_path)
+        if path not in seen:
+            seen.add(path)
+            hits += scanner.scan_path(path, f"{short} ")
+        if new_mode == GITLINK:
             continue
-        shown = scanner.shown(path)
-        # split on `\n` only: str.splitlines() also breaks on CR/VT/FF/NEL/U+2028, which would let
-        # a term hide after such a char and diverge the allow key from commit/hash mode
-        for number, line in enumerate(decode(data).split("\n"), start=1):
-            hits += scanner.scan_line(path, line, f"tree {shown}:{number}")
+        data = git(repo, "cat-file", "blob", new)
+        if is_plain_text(data):
+            continue
+        blob_paths.add(path)
+        before = []
+        if old.strip("0") and old_mode != GITLINK:  # not an added path, not a submodule
+            before = content_units(git(repo, "cat-file", "blob", old))[1]
+        added = added_units(before, content_units(data)[1])
+        for index, entry in scanner.unit_hits(path, added):
+            if (path, added[index].key, entry) not in reported:  # a merge repeats it per parent
+                reported.add((path, added[index].key, entry))
+                hits.append(Hit(f"{short} {scanner.shown(path)}", entry))
+    return hits, blob_paths
+
+
+def scan_commit_diff(scanner: Scanner, repo: Path, sha: str, seen: set[str], blob_paths: set[str]) -> list[Hit]:
+    """Scan the added lines of a commit's unified diff, except those of the blob_paths."""
+    short = sha[:12]
+    # force quotePath=true so a `+++ ` label is always pure-ASCII octal regardless of the local git
+    # config; diff_path/unquote_c decode it back (a raw non-ASCII byte in a quoted label under
+    # quotePath=false would otherwise fail encode("ascii"))
+    diff = git(repo, "-c", "core.quotePath=true", "show", "--format=", "--unified=0", "--no-color",
+               "--no-ext-diff", "--no-renames", "-m", "--first-parent", sha)
+    hits: list[Hit] = []
+    added: dict[str, list[Unit]] = {}
+    # `+++`/`---` count as headers only before a file's first hunk; inside a hunk an added line
+    # beginning with `++ ` renders as `+++ ...` and is content, not a new header path
+    path, in_hunk = "", False
+    # split on `\n` only (as in scan_tree): splitlines() would break an added line at an embedded
+    # CR/VT/FF/NEL/U+2028, dropping its `+` prefix so the term-bearing tail is skipped
+    for line in diff.split(b"\n"):
+        if line.startswith(b"diff --git "):
+            path, in_hunk = "", False
+        elif line.startswith(b"@@"):
+            in_hunk = True
+        elif in_hunk and line.startswith(b"+"):
+            if path not in blob_paths:
+                added.setdefault(path, []).append(byte_unit(line[1:]))
+        elif not in_hunk and line.startswith(b"+++ "):
+            path = diff_path(decode(line[4:]))
+            if path not in seen:  # a type change or a path diff-tree did not list
+                seen.add(path)
+                hits += scanner.scan_path(path, f"{short} ")
+    for path, units in added.items():
+        hits += [Hit(f"{short} {scanner.shown(path)}", entry) for _index, entry in scanner.unit_hits(path, units)]
     return hits
 
 
@@ -241,43 +451,10 @@ def scan_commits(
             for role, email in zip(("author", "committer"), emails):
                 if email.strip().lower() not in identities:
                     hits.append(IdentityProblem(short, role))
-        # force quotePath=true so a `+++ ` label is always pure-ASCII octal regardless of the
-        # local git config; diff_path/unquote_c decode it back (a raw non-ASCII byte in a quoted
-        # label under quotePath=false would otherwise fail encode("ascii"))
-        diff = decode(git(repo, "-c", "core.quotePath=true", "show", "--format=", "--unified=0",
-                          "--no-color", "--no-ext-diff", "--no-renames", "-m", "--first-parent", sha))
-        # `+++`/`---` count as headers only before a file's first hunk; inside a hunk an added
-        # line beginning with `++ ` renders as `+++ ...` and is content, not a new header path
-        path, in_hunk = "", False
         seen: set[str] = set()
-        # split on `\n` only (as in scan_tree): str.splitlines() would break an added line at an
-        # embedded CR/VT/FF/NEL/U+2028, dropping its `+` prefix so the term-bearing tail is skipped
-        for line in diff.split("\n"):
-            if line.startswith("diff --git "):
-                path, in_hunk = "", False
-            elif line.startswith("@@"):
-                in_hunk = True
-            elif in_hunk and line.startswith("+"):
-                hits += scanner.scan_line(path, line[1:], f"{short} {scanner.shown(path)}")
-            elif not in_hunk and line.startswith("+++ "):
-                path = diff_path(line[4:])
-                seen.add(path)
-                hits += scanner.scan_path(path, f"{short} ")
-        # an added/modified empty or binary file has no `+++` header, so the loop above never sees
-        # its path. Enumerate every added/modified path from the tree diff (raw bytes via -z, no
-        # quoting) and scan any the unified diff never surfaced, so a term hidden in an empty or
-        # binary file name cannot slip past the commit-mode path scan. --root covers a root commit;
-        # -m diffs a merge against every parent (a safe over-scan for a security tool -- it never
-        # misses a path any parent introduces), and `seen` dedups a path already scanned above or
-        # repeated across parents.
-        for raw_path in git(repo, "diff-tree", "--no-commit-id", "--name-only", "-z", "-r", "--root",
-                            "--no-renames", "-m", "--diff-filter=AM", sha).split(b"\0"):
-            if not raw_path:
-                continue
-            changed = decode(raw_path)
-            if changed not in seen:
-                seen.add(changed)
-                hits += scanner.scan_path(changed, f"{short} ")
+        blob_hits, blob_paths = scan_commit_blobs(scanner, repo, sha, seen)
+        hits += blob_hits
+        hits += scan_commit_diff(scanner, repo, sha, seen, blob_paths)
     return hits
 
 
@@ -294,10 +471,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.hash:
         path, number = args.hash
-        # read bytes and split on `\n` only, byte-for-byte like scan_tree (which decodes the blob):
-        # read_text() would translate CR / CRLF to \n and diverge the allow key from the scanner
-        lines = decode((args.repo / path).read_bytes()).split("\n")
-        print(line_key(path, lines[int(number) - 1]))
+        # the units scan_tree numbers, from the file's bytes: read_text() would translate CR / CRLF
+        # to \n and diverge the allow key from the scanner; a UTF-16 line or a binary run (`run N`)
+        # is keyed exactly as the scanner keys it
+        units = content_units((args.repo / path).read_bytes())[1]
+        print(line_key(path, units[int(number) - 1].key))
         return EXIT_CLEAN
     if args.denylist is None or not (args.tree or args.commits):
         parser.error("--denylist and at least one --tree or --commits are required")
