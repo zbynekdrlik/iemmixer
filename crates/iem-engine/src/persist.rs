@@ -325,6 +325,30 @@ mod tests {
     }
 
     #[test]
+    fn a_generation_entry_that_cannot_be_read_is_an_error() {
+        // #32 m3: a failed directory entry was dropped, so a generation the
+        // seed could not see read as "no state".
+        let entry = |name: &str, path: &str| Ok((OsString::from(name), PathBuf::from(path)));
+        let failing = vec![
+            entry("gen-0000000002.json", "a"),
+            Err(io::Error::other("entry unreadable")),
+            entry("gen-0000000001.json", "b"),
+        ];
+        let e = generation_entries(failing.into_iter()).unwrap_err();
+        assert_eq!(e.to_string(), "entry unreadable");
+        // Readable entries: the generations, oldest first, nothing else.
+        let fine = vec![
+            entry("gen-0000000002.json", "a"),
+            entry("current.json", "c"),
+            entry("gen-0000000001.json", "b"),
+        ];
+        assert_eq!(
+            generation_entries(fine.into_iter()).unwrap(),
+            vec![(1, PathBuf::from("b")), (2, PathBuf::from("a"))]
+        );
+    }
+
+    #[test]
     fn encode_decode_is_bit_exact_and_tamper_evident() {
         let p = sample(3);
         let bytes = encode(&p).unwrap();

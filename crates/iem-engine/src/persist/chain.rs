@@ -359,6 +359,23 @@ mod tests {
     }
 
     #[test]
+    fn a_state_dir_that_cannot_be_listed_is_reported() {
+        // #32 m3: the load chain stays tolerant, but a failed listing of the
+        // generations is reported, never silently read as none.
+        let (_d, s) = store();
+        fs::remove_dir(s.dir()).unwrap();
+        fs::write(s.dir(), b"not a directory").unwrap();
+        let loaded = s.load(&test_site());
+        assert_eq!(loaded.source, Source::Defaults);
+        assert!(
+            loaded.rejected.iter().any(|(path, why)| path == s.dir()
+                && why.starts_with("the generations cannot be listed")),
+            "{:?}",
+            loaded.rejected
+        );
+    }
+
+    #[test]
     fn baseline_is_the_last_resort_before_defaults() {
         let (_d, s) = store();
         s.save_baseline(&sample(9)).unwrap();
