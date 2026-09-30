@@ -645,6 +645,30 @@ class MeasureTests(WindowHarness):
         self.assertEqual([e for b, e in self.pc.calls if "Invoke-IemDpcIsr" in b], ["abandon"])
         self.assertIsNone(seen["trace"])                             # recorded as stopped before the analysis
 
+    # B7: a cut keeps the trace's options, and every cut gets its own near-glitch view.
+    def test_a_diag_cut_restarts_with_context_switches_and_gets_its_near_glitch_view(self) -> None:
+        self.pc.progress = {"missed": 1, "overruns": 0, "position_gaps": 0, "callback_thread": 4243}
+        tw.cmd_measure(self.env, self.args(trace="diag", circular_mb=1024))
+        starts = [b.split("Start-IemTrace", 1)[1] for b in self.pc.bodies("Start-IemTrace")]
+        self.assertEqual(len(starts), 2)                             # the start and the cut's restart
+        for options in starts:
+            self.assertIn("-CSwitch", options)
+            self.assertIn("-CircularMB 1024", options)
+        analysis = " ; ".join(self.pc.bodies("Export-IemNearGlitch"))
+        self.assertRegex(analysis, r"Export-IemNearGlitch [^;]*-Name 'cut-1\.etl'")
+        s = self.summary()
+        self.assertEqual([c["cut"] for c in s["cuts"]], [1])
+        self.assertEqual(s["cuts"][0]["near_glitch"][0]["kind"], "missed")
+        self.assertIn("isr nicdrv.sys: above 2048 us (a full period is 333)", s["cuts"][0]["findings"])
+        self.assertEqual(s["near_glitch"][0]["kind"], "missed")       # the final trace's view stays
+
+    def test_a_dpc_trace_has_no_near_glitch_view(self) -> None:
+        self.pc.progress = {"missed": 1, "overruns": 0, "position_gaps": 0, "callback_thread": 4243}
+        tw.cmd_measure(self.env, self.args(circular_mb=1024))
+        self.assertEqual(self.pc.bodies("Export-IemNearGlitch"), [])
+        self.assertNotIn("-CSwitch", " ".join(self.pc.bodies("Start-IemTrace")))
+        self.assertEqual(list(self.summary()["cuts"][0]), ["cut", "findings"])
+
 
 if __name__ == "__main__":
     unittest.main()
