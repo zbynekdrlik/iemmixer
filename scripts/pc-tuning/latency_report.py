@@ -48,11 +48,11 @@ def _read_usage_table(lines: list[str], i: int, cpus: list[str], usage: dict) ->
         if per_module:
             *cells, module = (c.strip() for c in lines[i].split(","))
             if len(cells) != len(cpus):
-                raise ValueError(f"dpcisr: a per-module usage row has {len(cells)} CPU columns, the header {len(cpus)}")
+                raise ValueError(f"dpcisr: a per-module usage row (line {i + 1}) has {len(cells)} CPU columns, the header {len(cpus)}")
             try:
                 usage[module] = {cpu: int(cell.split()[0]) for cpu, cell in zip(cpus, cells)}
             except (IndexError, ValueError):
-                raise ValueError(f"dpcisr: an unreadable per-module usage row (module {module})") from None
+                raise ValueError(f"dpcisr: an unreadable per-module usage row (line {i + 1})") from None
         i += 1
     return i
 
@@ -99,11 +99,13 @@ def parse_dpcisr(text: str) -> dict:
             for limit in LIMITS_US:
                 if lo >= limit:
                     entry["over"][str(limit)] += n
+    # Counts only: a module name can be a private driver's (P6), and this text
+    # is what an operator pastes into a ticket.
     for kind in ("dpc", "isr"):
-        missing = sorted(set(out[kind]) - set(out["usage"][kind]))
+        missing = set(out[kind]) - set(out["usage"][kind])
         if missing:
-            raise ValueError(f"dpcisr: no per-CPU usage for {len(missing)} of {len(out[kind])} {kind} modules "
-                             f"({', '.join(missing[:5])}): the watched-CPU budget cannot be checked")
+            raise ValueError(f"dpcisr: no per-CPU usage for {len(missing)} of {len(out[kind])} {kind} modules: "
+                             "the watched-CPU budget cannot be checked")
     return out
 
 
