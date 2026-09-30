@@ -7,6 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use iem_core::legacy::MixerBackup;
 use iem_engine::core::{reconcile, to_state};
+use iem_engine::engine::STATE_WAIT;
 use iem_engine::persist::{Persisted, Source, Store};
 use iem_engine::topology::Topology;
 use iem_rpp::aliases::parse_aliases;
@@ -143,8 +144,10 @@ pub fn run(args: &[String]) -> Result<String, Failure> {
     let store = Store::open(&dir).map_err(|e| Failure::io(format!("{}: {e}", dir.display())))?;
     // The data step runs only after iemmixer stopped (#32): a running engine
     // holds engine.lock, and the import stops before it reads or writes a
-    // state file. Held until the import returns.
-    let _state_lock = store.lock().map_err(|e| {
+    // state file. An engine that just ended may hold it a moment longer, so
+    // the import waits as the engine does (minor-4). Held until the import
+    // returns.
+    let _state_lock = store.lock_within(STATE_WAIT).map_err(|e| {
         if e.kind() == std::io::ErrorKind::WouldBlock {
             Failure::io(format!(
                 "{}: the state directory is in use by a running engine; stop it first",
