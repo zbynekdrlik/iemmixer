@@ -58,8 +58,11 @@ class DpcIsrTests(unittest.TestCase):
         self.assertIn("isr ndis.sys: above 2048 us (a full period is 333)", findings)
         self.assertFalse([f for f in findings if "yaic.sys" in f])
 
-    def test_empty_text(self) -> None:
-        self.assertEqual(lr.parse_dpcisr(""), {"dpc": {}, "isr": {}, "usage": {"dpc": {}, "isr": {}}})
+    def test_empty_text_is_no_analysis(self) -> None:
+        # An empty dpcisr read as "no modules, no findings" passed the budget check
+        # unchecked (review M2): it fails closed.
+        with self.assertRaisesRegex(ValueError, "no DPC module"):
+            lr.parse_dpcisr("")
 
 
 # xperf -a dpcisr's real layout, written by hand with synthetic modules and
