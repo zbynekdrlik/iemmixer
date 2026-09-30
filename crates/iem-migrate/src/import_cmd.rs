@@ -8,6 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use iem_core::legacy::MixerBackup;
 use iem_engine::core::{reconcile, to_state};
 use iem_engine::persist::{Persisted, Source, Store};
+use iem_engine::topology::Topology;
 use iem_rpp::aliases::parse_aliases;
 use iem_rpp::backup::cross_check;
 use iem_rpp::import::{compare, import};
@@ -159,6 +160,14 @@ pub fn run(args: &[String]) -> Result<String, Failure> {
     } else {
         None
     };
+    if kept.is_none() {
+        report.extend(recover_before_save(&store, &site.compiled).map_err(|why| {
+            Failure::io(format!(
+                "{}: {why}; nothing written, the live state is as it was",
+                dir.display()
+            ))
+        })?);
+    }
     store.save_baseline(&persisted).map_err(io)?;
     if kept.is_none() {
         store.save(&persisted).map_err(io)?;
@@ -172,4 +181,43 @@ pub fn run(args: &[String]) -> Result<String, Failure> {
         dir.display()
     ));
     Ok(report.join("\n"))
+}
+
+/// The engine's boot recovery before an import saves over the live state
+/// (#32 P4): an interrupted save in `save.tmp` (the newest live state)
+/// becomes `current.json` first, so the import's save turns it into a
+/// generation instead of replacing it. Report lines, or why the import must
+/// not go on: the interrupted save could not be finished.
+fn recover_before_save(store: &Store, topo: &Topology) -> Result<Vec<String>, String> {
+    let loaded = store.load(topo);
+    let recovery = store.recover(&loaded);
+    if loaded.source == Source::Interrupted && !recovery.finished {
+        let why: Vec<String> = recovery
+            .failed
+            .into_iter()
+            .chain(recovery.warnings)
+            .collect();
+        return Err(format!(
+            "the interrupted save in save.tmp could not be finished ({})",
+            why.join("; ")
+        ));
+    }
+    let mut lines = Vec::new();
+    if let Some(aside) = recovery.quarantined {
+        lines.push(format!(
+            "recovery: the damaged current.json moved aside to {}",
+            aside.display()
+        ));
+    }
+    if recovery.finished {
+        lines.push("recovery: save.tmp finished as current.json".to_owned());
+    }
+    lines.extend(
+        recovery
+            .failed
+            .into_iter()
+            .chain(recovery.warnings)
+            .map(|why| format!("recovery: {why}")),
+    );
+    Ok(lines)
 }
