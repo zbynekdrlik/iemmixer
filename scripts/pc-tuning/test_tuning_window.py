@@ -411,6 +411,30 @@ class PostBootRunTests(unittest.TestCase):
         st = tw.sw.load_state()
         self.assertEqual((st["card"], st["closed"]), ("reaper", True))
 
+    def test_the_autostart_wait_sleeps_in_short_slices_that_see_the_flag(self) -> None:
+        # Review round 3, m4: the flag is seen within a second, not after a 10 s nap.
+        naps: list[float] = []
+
+        def nap(seconds: float) -> None:
+            naps.append(seconds)
+            if len(naps) == 3:
+                (self.dir / "EVENT-NOW").touch()
+
+        tw.time.sleep.side_effect = nap
+        with self.assertRaises(tw.sw.EventNow):
+            tw.cmd_post_boot(self.env, argparse.Namespace())
+        self.assertTrue(naps and all(s <= 1 for s in naps), naps)
+        self.assertEqual(sum("Get-Process reaper" in c for c in self.calls), 1)   # no further poll after the flag
+
+    def test_the_event_path_says_reaper_is_back_only_when_it_is(self) -> None:
+        self.event_at_poll = 1
+        self.bring_back_fails = True
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(tw.sw.EventNow):
+            tw.cmd_post_boot(self.env, argparse.Namespace())
+        self.assertNotIn("REAPER brought back", out.getvalue())
+        self.assertIn("bring-back failed", out.getvalue())
+
     def test_post_boot_and_a_preempt_bring_reaper_back_once(self) -> None:
         # Review round 3, MAJOR 1: "ide event" during post-boot starts `iempc event` →
         # spike_window preempt in another process; two bring-backs at once would trigger
