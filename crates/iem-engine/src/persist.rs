@@ -112,6 +112,8 @@ pub struct Loaded {
     /// What the chain found at `current.json` (the boot's recovery acts on
     /// it, #32).
     pub current_json: FileState,
+    /// What the chain found at `save.tmp` (#32).
+    pub save_tmp: FileState,
 }
 
 #[derive(Serialize)]
@@ -214,6 +216,9 @@ pub struct Committed {
     /// Removing generations beyond [`GENERATIONS`] failed, why: the save
     /// itself stands.
     pub pruning: Option<String>,
+    /// Where a `save.tmp` this store did not write was moved aside to
+    /// before the save replaced it.
+    pub orphaned: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -321,6 +326,7 @@ impl Store {
         Ok(Committed {
             generation,
             pruning: self.prune().err().map(|e| e.to_string()),
+            orphaned: None,
         })
     }
 

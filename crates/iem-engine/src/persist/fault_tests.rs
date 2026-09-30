@@ -29,10 +29,20 @@ struct FaultState {
     next: Option<&'static str>,
     /// Paths every read of which fails (an I/O error, not a missing file).
     unreadable: Vec<PathBuf>,
+    /// Paths another process holds open without sharing (a Windows sharing
+    /// violation): every read fails and so does every rename from or to
+    /// them.
+    locked: Vec<PathBuf>,
     /// Read failures still to come per path; then its reads succeed.
     flaky: Vec<(PathBuf, usize)>,
     /// Pauses between read tries.
     pauses: usize,
+}
+
+/// A failure this file system injects: a kind the chain retries, as it
+/// would a sharing violation or a transient EIO.
+fn injected(what: String) -> io::Error {
+    io::Error::new(io::ErrorKind::TimedOut, what)
 }
 
 /// The real file system with injected failures. A failed write leaves half
@@ -77,6 +87,16 @@ impl Faulty {
         }
     }
 
+    /// Another process holds `path` while `locked`: reads of it and renames
+    /// from or to it fail.
+    pub(super) fn set_locked(&self, path: &Path, locked: bool) {
+        let mut s = self.state.lock().unwrap();
+        s.locked.retain(|p| p != path);
+        if locked {
+            s.locked.push(path.to_path_buf());
+        }
+    }
+
     /// The next `times` reads of `path` fail, then they succeed.
     pub(super) fn flaky(&self, path: &Path, times: usize) {
         let mut s = self.state.lock().unwrap();
@@ -102,7 +122,7 @@ impl Faulty {
             fails = true;
         }
         if fails {
-            return Err(io::Error::other(format!(
+            return Err(injected(format!(
                 "injected failure at step {at}: {what} {}",
                 path.display()
             )));
@@ -116,12 +136,12 @@ impl Files for Faulty {
         self.step("read", path)?;
         {
             let mut s = self.state.lock().unwrap();
-            if s.unreadable.iter().any(|p| p == path) {
-                return Err(io::Error::other(format!("unreadable: {}", path.display())));
+            if s.unreadable.iter().chain(&s.locked).any(|p| p == path) {
+                return Err(injected(format!("unreadable: {}", path.display())));
             }
             if let Some(f) = s.flaky.iter_mut().find(|(p, n)| p == path && *n > 0) {
                 f.1 -= 1;
-                return Err(io::Error::other(format!("flaky: {}", path.display())));
+                return Err(injected(format!("flaky: {}", path.display())));
             }
         }
         OsFiles.read(path)
@@ -142,6 +162,16 @@ impl Files for Faulty {
 
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
         self.step("rename", from)?;
+        if self
+            .state
+            .lock()
+            .unwrap()
+            .locked
+            .iter()
+            .any(|p| p == from || p == to)
+        {
+            return Err(injected(format!("locked: {}", from.display())));
+        }
         OsFiles.rename(from, to)
     }
 
@@ -174,9 +204,15 @@ impl Files for Faulty {
 pub(super) fn faulty_store() -> (tempfile::TempDir, Arc<Faulty>, Store) {
     let dir = tempfile::tempdir().unwrap();
     let faulty = Arc::new(Faulty::default());
-    let files: Arc<dyn Files> = faulty.clone();
-    let store = Store::with_files(&dir.path().join("state"), files).unwrap();
+    let store = reopen(&dir.path().join("state"), &faulty);
     (dir, faulty, store)
+}
+
+/// A new store on `dir` through `faulty`: the next process (a reboot),
+/// which knows nothing of what the previous one wrote.
+pub(super) fn reopen(dir: &Path, faulty: &Arc<Faulty>) -> Store {
+    let files: Arc<dyn Files> = faulty.clone();
+    Store::with_files(dir, files).unwrap()
 }
 
 #[test]

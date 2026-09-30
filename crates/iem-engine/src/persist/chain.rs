@@ -91,6 +91,7 @@ impl Store {
             dropped: Vec::new(),
             alarms: pick.alarms,
             current_json: pick.current_json,
+            save_tmp: pick.save_tmp,
         }
     }
 
@@ -106,6 +107,7 @@ impl Store {
         let current = self.read_state(&self.dir.join(CURRENT), pick, reading)?;
         pick.current_json = current.state();
         let tmp = self.read_state(&tmp_path, pick, reading)?;
+        pick.save_tmp = tmp.state();
         if let Read::Valid(current) = current {
             return Ok(Some(match tmp {
                 Read::Valid(tmp) if supersedes(&tmp, &current) => (tmp, Source::Interrupted),
@@ -349,6 +351,7 @@ struct Pick {
     rejected: Vec<(PathBuf, String)>,
     alarms: Vec<String>,
     current_json: FileState,
+    save_tmp: FileState,
 }
 
 /// Whether an interrupted save (`save.tmp`) supersedes the state it
@@ -381,6 +384,7 @@ fn settle(topo: &Topology, mut persisted: Persisted, source: Source, pick: Pick)
         dropped,
         alarms: pick.alarms,
         current_json: pick.current_json,
+        save_tmp: pick.save_tmp,
     }
 }
 
