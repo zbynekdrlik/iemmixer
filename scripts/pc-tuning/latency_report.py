@@ -11,7 +11,9 @@ PERIOD_US = 333          # B = 32 at 96 kHz
 WATCH_BUDGET_US = 128    # the xperf bucket edge above 100 us (design note §4.4)
 LIMITS_US = (64, 128, 256, 512)
 
-_SECTION = re.compile(r"^\s*(DPC|Interrupt|ISR)\s+Info\s*$", re.I)
+# A section header; a trailing colon is the same header (review M2). Any other
+# form is not read, and a text without a DPC module fails closed.
+_SECTION = re.compile(r"^\s*(DPC|Interrupt|ISR)\s+Info\s*:?\s*$", re.I)
 _TOTAL = re.compile(r"^\s*Total\s*=\s*(\d+)\s+for module\s+(\S+)")
 _BUCKET = re.compile(r"^\s*Elapsed Time,\s*>\s*(\d+)\s*usecs(?:\s+AND\s+<=\s*(\d+)\s*usecs)?,\s*(\d+)")
 # A per-CPU table header cell: `CPU 3 Usage` (whole-trace and interval
@@ -99,6 +101,10 @@ def parse_dpcisr(text: str) -> dict:
             for limit in LIMITS_US:
                 if lo >= limit:
                     entry["over"][str(limit)] += n
+    # A traced run on Windows always has DPCs: none read means the text was not
+    # xperf's dpcisr (empty, foreign, an unknown header) — never "no findings".
+    if not out["dpc"]:
+        raise ValueError("dpcisr: no DPC module read (empty or not xperf -a dpcisr output): the budgets cannot be checked")
     # Counts only: a module name can be a private driver's (P6), and this text
     # is what an operator pastes into a ticket.
     for kind in ("dpc", "isr"):
