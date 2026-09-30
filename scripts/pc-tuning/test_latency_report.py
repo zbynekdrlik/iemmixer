@@ -9,23 +9,30 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import latency_report as lr  # noqa: E402
 
+def usage_table(rows: dict[str, dict[int, int]], cpus: int = 16) -> str:
+    """xperf -a dpcisr's whole-trace usage table (the layout of DPCISR_XPERF
+    below) for a PC with `cpus` logical processors, then its blank line."""
+    head = ", ".join(f"     CPU {c} Usage" for c in range(cpus)) + ","
+    units = ", ".join("     usec      %" for _ in range(cpus)) + ", Module"
+    body = [", ".join(f"{row.get(c, 0):>9}{0:>7.2f}" for c in range(cpus)) + f", {module}" for module, row in rows.items()]
+    return "\n".join([head, units, *body]) + "\n\n"
+
+
 DPCISR = """
 --------------------------
 DPC Info
 --------------------------
-Total = 3000 for module yaic.sys
+""" + usage_table({"yaic.sys": {2: 45000}, "dxgkrnl.sys": {14: 3000}}) + """Total = 3000 for module yaic.sys
 Elapsed Time, >        0 usecs AND <=        1 usecs,      0, or   0.00%
 Elapsed Time, >        8 usecs AND <=       16 usecs,   2990, or  99.67%
 Elapsed Time, >       64 usecs AND <=      128 usecs,     10, or   0.33%
 Total = 20 for module dxgkrnl.sys
 Elapsed Time, >      128 usecs AND <=      256 usecs,     15, or  75.00%
 Elapsed Time, >      512 usecs AND <=     1024 usecs,      5, or  25.00%
-yaic.sys: 45000 usec (0.10% CPU 2 usage)
-dxgkrnl.sys: 3000 usec (0.01% CPU 14 usage)
 --------------------------
 Interrupt Info
 --------------------------
-Total = 3000 for module yaic.sys
+""" + usage_table({"yaic.sys": {2: 9000}, "ndis.sys": {0: 40}}) + """Total = 3000 for module yaic.sys
 Elapsed Time, >        2 usecs AND <=        4 usecs,   3000, or 100.00%
 Total = 2 for module ndis.sys
 Elapsed Time, >     2048 usecs,      2, or 100.00%
@@ -39,7 +46,9 @@ class DpcIsrTests(unittest.TestCase):
         self.assertEqual(d["dpc"]["dxgkrnl.sys"]["max_us"], 1024)
         self.assertEqual(d["dpc"]["dxgkrnl.sys"]["over"], {"64": 20, "128": 20, "256": 5, "512": 5})
         self.assertEqual(d["isr"]["ndis.sys"], {"count": 2, "max_us": 2048, "open": True, "over": {"64": 2, "128": 2, "256": 2, "512": 2}})
-        self.assertEqual(d["usage"]["dpc"], {"yaic.sys": {"2": 45000}, "dxgkrnl.sys": {"14": 3000}})
+        ran = {m: {c: us for c, us in row.items() if us} for m, row in d["usage"]["dpc"].items()}
+        self.assertEqual(ran, {"yaic.sys": {"2": 45000}, "dxgkrnl.sys": {"14": 3000}})
+        self.assertEqual(len(d["usage"]["dpc"]["yaic.sys"]), 16)   # one column per CPU
 
     def test_budget_names_modules_over_the_limits(self) -> None:
         d = lr.parse_dpcisr(DPCISR)
