@@ -643,7 +643,11 @@ def cmd_post_boot(env, args) -> None:
     boot = tps(env, "Get-IemBootTime", timeout=60, event="ignore")
     checks = {"booted_after_request": boot > state["reboot"]["prepared_at"], "reaper": False, "handover": None,
               "fingerprint": [], "pending": [], "failed_items": []}
+    # "ide event" is checked on every poll: on the flag REAPER comes back at
+    # once (the event path) instead of after ~5 min of waiting (review m10).
     for _ in range(30):
+        if sw.event_now():
+            break
         if int(sw.ps(env, "@(Get-Process reaper -ErrorAction SilentlyContinue).Count", timeout=60, event="ignore")) > 0:
             checks["reaper"] = True
             break
@@ -661,6 +665,11 @@ def cmd_post_boot(env, args) -> None:
     if back:
         state["card"], state["closed"] = "reaper", True
     sw.save_state(state)
+    if sw.event_now():
+        # The read-only checks wait for a dev window; main() pre-empts (a window
+        # still open because the bring-back failed gets another one there).
+        print(json.dumps({"post-boot": "ide event: REAPER brought back, the checks skipped", "handover": checks["handover"]}), flush=True)
+        raise sw.EventNow()
     current = tps(env, f"Get-IemReaperFingerprint -ProfilePath {sw.tuning_profile(env)}", timeout=120, event="ignore")
     checks["fingerprint"] = sw.fingerprint_diff(json.loads(baseline_path(env).read_text(encoding="utf-8")), current)
     st = tps(env, f"Get-IemTuningState -ProfilePath {sw.tuning_profile(env)}", timeout=120, event="ignore")
