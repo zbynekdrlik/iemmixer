@@ -883,6 +883,14 @@ class MeasureTests(WindowHarness):
             # A preempt writes the spike's stop file first: newer than the analysis start → no start.
             self.assertRegex(body, r"queue\\stop'\) ; if \(\(Test-Path -LiteralPath \$s\) -and .*LastWriteTimeUtc -gt .*'2026-01-01T00:00:00Z'.*throw ")
 
+    def test_a_merged_trace_leaves_no_raw_files_behind(self) -> None:
+        # Review round 3, m8: a soak's raw kernel/marker files (per cut) would double
+        # the disk used. They are deleted only after `xperf -merge` succeeded: a failed
+        # merge throws (sw.ps runs under $ErrorActionPreference='Stop') before the delete.
+        for base in ("", "cut-2."):
+            body = tw.merge("'xperf.exe'", "'D'", base)
+            self.assertRegex(body, r"\[void\]\(Invoke-IemXperf [^;]*'-merge'[^;]*\) ; Remove-Item -LiteralPath \$m$")
+
     def test_no_analysis_step_starts_once_the_flag_exists(self) -> None:
         self.pc.progress = {"missed": 1, "overruns": 0, "position_gaps": 0, "callback_thread": 4243}
         self.pc.on_call = lambda body: (self.dir / "EVENT-NOW").touch() if "Invoke-IemDpcIsr" in body else None
