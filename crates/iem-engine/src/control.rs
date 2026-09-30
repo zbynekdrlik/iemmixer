@@ -1104,6 +1104,29 @@ mod tests {
         assert_eq!(r.c.alarms[1].detail, "sanitiser trips: 3");
     }
 
+    #[test]
+    fn a_save_that_moves_a_save_tmp_aside_raises_an_alarm_naming_it() {
+        // #32 MAJOR-1: a save.tmp the boot did not load (here a damaged
+        // one the store never wrote) is kept aside, and the engineer hears
+        // where.
+        let mut r = rig();
+        let state = r.dir.path().join("state");
+        std::fs::write(state.join("save.tmp"), b"cut off").unwrap();
+        r.c.save();
+        let aside = state.join("save.tmp.orphan-1");
+        assert_eq!(std::fs::read(&aside).unwrap(), b"cut off");
+        assert_eq!(r.c.alarms.len(), 1, "{:?}", r.c.alarms);
+        assert_eq!(r.c.alarms[0].code, AlarmCode::StateFallback);
+        assert!(
+            r.c.alarms[0].detail.contains(&aside.display().to_string()),
+            "{:?}",
+            r.c.alarms
+        );
+        // The next save moves nothing and raises nothing.
+        r.c.save();
+        assert_eq!(r.c.alarms.len(), 1, "{:?}", r.c.alarms);
+    }
+
     /// Connections need a socket pair. Unix only: the harness's client
     /// reads with a socket receive timeout, which Windows pipes do not have;
     /// `tests/pipes.rs` runs the engine's pipes on Windows.
