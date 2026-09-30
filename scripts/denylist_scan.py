@@ -192,7 +192,9 @@ def scan_tree(scanner: Scanner, repo: Path, rev: str) -> list[Hit]:
         if b"\0" in data:
             continue
         shown = scanner.shown(path)
-        for number, line in enumerate(decode(data).splitlines(), start=1):
+        # split on `\n` only: str.splitlines() also breaks on CR/VT/FF/NEL/U+2028, which would let
+        # a term hide after such a char and diverge the allow key from commit/hash mode
+        for number, line in enumerate(decode(data).split("\n"), start=1):
             hits += scanner.scan_line(path, line, f"tree {shown}:{number}")
     return hits
 
@@ -219,7 +221,9 @@ def scan_commits(
         # line beginning with `++ ` renders as `+++ ...` and is content, not a new header path
         path, in_hunk = "", False
         seen: set[str] = set()
-        for line in diff.splitlines():
+        # split on `\n` only (as in scan_tree): str.splitlines() would break an added line at an
+        # embedded CR/VT/FF/NEL/U+2028, dropping its `+` prefix so the term-bearing tail is skipped
+        for line in diff.split("\n"):
             if line.startswith("diff --git "):
                 path, in_hunk = "", False
             elif line.startswith("@@"):
@@ -257,7 +261,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.hash:
         path, number = args.hash
-        lines = (args.repo / path).read_text(encoding="utf-8").splitlines()
+        # split on `\n` only, matching scan_tree/scan_commits, so an allow key made here matches
+        # the key the scanner computes for a line containing CR/VT/FF/NEL/U+2028
+        lines = (args.repo / path).read_text(encoding="utf-8").split("\n")
         print(line_key(path, lines[int(number) - 1]))
         return EXIT_CLEAN
     if args.denylist is None or not (args.tree or args.commits):
