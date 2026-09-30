@@ -110,6 +110,8 @@ fn parse(argv: &[String]) -> Result<Args, String> {
                 "{flag}: expected a number up to {max}, got {value:?}"
             )),
         };
+        // A list parser's refusal, prefixed with the flag it came from.
+        let named = |e: String| format!("{flag}: {e}");
         match flag.as_str() {
             "--driver" => a.driver.clone_from(value),
             "--report" => a.report = value.into(),
@@ -121,9 +123,9 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--stress" => a.stress = u32::try_from(num(8)?).unwrap_or(0),
             "--panic-at" => a.panic_at = num(u64::MAX)?,
             "--cycles" => a.cycles = u32::try_from(num(20)?).unwrap_or(0),
-            "--activity-channels" => watched = Some(Watched::parse(value)?),
-            "--audio-cpus" => a.audio_cpus = cpuset::parse_lps(value)?,
-            "--stress-cpus" => a.stress_cpus = cpuset::parse_lps(value)?,
+            "--activity-channels" => watched = Some(Watched::parse(value).map_err(named)?),
+            "--audio-cpus" => a.audio_cpus = cpuset::parse_lps(value).map_err(named)?,
+            "--stress-cpus" => a.stress_cpus = cpuset::parse_lps(value).map_err(named)?,
             "--cpu" => a.cpu = Some(u8::try_from(num(63)?).unwrap_or(0)),
             "--threshold-us" => a.threshold_us = num(1000)?,
             other => return Err(format!("unknown flag {other}")),
