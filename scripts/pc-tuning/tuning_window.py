@@ -407,7 +407,12 @@ def cmd_reboot(env, args) -> None:
     if args.by_owner:
         print(json.dumps({"reboot": "the owner restarts the PC himself; run post-boot afterwards"}))
         return
-    code = sw.ps(env, REBOOT_REQUEST, timeout=60, event="ignore")
+    try:
+        code = sw.ps(env, REBOOT_REQUEST, timeout=60, event="ignore")
+    except StepError as e:
+        # The restart begins at once: the session may end before the exit code comes back.
+        raise StepError(f"no answer to the restart request ({e}): the PC may be restarting; "
+                        "run post-boot, which tells whether it rebooted") from None
     if int(code) != 0:
         raise StepError(f"shutdown.exe /r exited {code}: nothing restarts; tell the owner")
     print(json.dumps({"reboot": "requested", "in_s": 0}))
