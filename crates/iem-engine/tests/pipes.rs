@@ -764,8 +764,9 @@ fn a_boot_on_an_interrupted_save_finishes_it_first() {
 }
 
 /// #32 P5: the boot recovery writes to the state directory, so the state
-/// directory is taken first: a second engine on it (another pipe) stops at
-/// once, before it reads or moves any state file.
+/// directory is taken first: a second engine on it (another pipe) stops
+/// after its bounded wait (minor-4), before it reads or moves any state
+/// file.
 #[test]
 fn a_second_engine_on_the_same_state_dir_leaves_it_alone() {
     use iem_engine::persist::{Persisted, encode};
@@ -784,14 +785,12 @@ fn a_second_engine_on_the_same_state_dir_leaves_it_alone() {
     std::thread::spawn(move || {
         let _ = tx.send(run(cfg));
     });
+    // The error's kind and exit code are the binary test's
+    // (`a_held_state_dir_ends_the_binary_with_exit_75`).
     let err = rx
         .recv_timeout(WAIT)
-        .expect("a refused engine returns at once")
+        .expect("a refused engine returns within its wait")
         .unwrap_err();
-    assert!(
-        matches!(&err, EngineError::Io(io) if io.kind() == std::io::ErrorKind::WouldBlock),
-        "{err}"
-    );
     assert!(
         err.to_string().contains("in use by another engine"),
         "{err}"
