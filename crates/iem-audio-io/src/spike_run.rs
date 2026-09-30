@@ -238,10 +238,32 @@ mod tests {
 
     #[test]
     fn a_failed_audio_cpu_set_refuses_the_run() {
-        assert_eq!(setup_failure(&Applied::Nothing), None);
-        assert_eq!(setup_failure(&Applied::Ids(vec![0x10e])), None);
+        let off = Ok(());
+        assert_eq!(setup_failure(&off, &Applied::Nothing), None);
+        assert_eq!(setup_failure(&off, &Applied::Ids(vec![0x10e])), None);
         assert_eq!(
-            setup_failure(&Applied::Failed("denied".to_owned())),
+            setup_failure(&off, &Applied::Failed("denied".to_owned())),
+            Some(("refused", "audio CPU Set: denied".to_owned()))
+        );
+    }
+
+    /// Power throttling left on (EcoQoS, ignored timer requests) would
+    /// measure another process than the report names: the run fails like a
+    /// lever that could not be applied (#32 review).
+    #[test]
+    fn power_throttling_left_on_fails_the_run() {
+        let on = Err("access denied".to_owned());
+        assert_eq!(
+            setup_failure(&on, &Applied::Nothing),
+            Some(("error", "power throttling: access denied".to_owned()))
+        );
+        assert_eq!(
+            setup_failure(&on, &Applied::Ids(vec![0x10e])),
+            Some(("error", "power throttling: access denied".to_owned()))
+        );
+        // A refused audio CPU Set is named first (it refuses the run).
+        assert_eq!(
+            setup_failure(&on, &Applied::Failed("denied".to_owned())),
             Some(("refused", "audio CPU Set: denied".to_owned()))
         );
     }
