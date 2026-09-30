@@ -6,6 +6,7 @@ import hashlib
 import json
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -587,6 +588,57 @@ class VerdictTests(unittest.TestCase):
         r["segments"].append({"telemetry": None})
         v = sw.verdict(r)
         self.assertEqual((v["callbacks"], v["missed"], v["interval_p999_us"], v["stable"]), (1005, 1, 900.0, False))
+
+
+SLOW_COPY = "import sys, time; open(sys.argv[2], 'w').write('partial'); time.sleep(20)"
+QUICK_COPY = "import sys; open(sys.argv[2], 'w').write('done')"
+FAILED_COPY = "import sys; sys.stderr.write('Permission denied'); sys.exit(1)"
+
+
+class ScpTests(unittest.TestCase):
+    """scp with a local command standing in for the copy over ssh (review M3):
+    an analysis download is abandoned at once on "ide event", and no copy
+    outlives its bound; the local copy is interrupted, never ended harder."""
+
+    def setUp(self) -> None:
+        self.dir = Path(tempfile.mkdtemp())
+        self.flag = self.dir / "EVENT-NOW"
+        self.saved = (sw.EVENT_NOW, sw.POLL_S, getattr(sw, "SCP", None), getattr(sw, "SCP_BOUND_S", None))
+        sw.EVENT_NOW, sw.POLL_S = self.flag, 0.1
+        self.dst = self.dir / "near.txt"
+
+    def tearDown(self) -> None:
+        sw.EVENT_NOW, sw.POLL_S, sw.SCP, sw.SCP_BOUND_S = self.saved
+
+    def copier(self, code: str) -> None:
+        sw.SCP = (sys.executable, "-c", code)
+
+    def test_an_event_interrupts_an_abandonable_copy_at_once(self) -> None:
+        self.copier(SLOW_COPY)
+        threading.Timer(0.5, self.flag.touch).start()
+        t = time.monotonic()
+        with self.assertRaises(sw.EventNow):
+            sw.scp("u@host.invalid:/C:/t/near.txt", str(self.dst), event="abandon")
+        self.assertLess(time.monotonic() - t, 5)
+        self.assertFalse(self.dst.exists())                    # no partial file is left
+
+    def test_a_plain_copy_runs_to_its_end_whatever_the_flag(self) -> None:
+        self.flag.touch()
+        self.copier(QUICK_COPY)
+        sw.scp("u@host.invalid:/x", str(self.dst))
+        self.assertEqual(self.dst.read_text(encoding="utf-8"), "done")
+
+    def test_a_failed_copy_raises(self) -> None:
+        self.copier(FAILED_COPY)
+        with self.assertRaisesRegex(sw.StepError, "Permission denied"):
+            sw.scp("u@host.invalid:/x", str(self.dst))
+
+    def test_a_copy_past_its_bound_is_interrupted(self) -> None:
+        self.copier(SLOW_COPY)
+        sw.SCP_BOUND_S = 0.5
+        with self.assertRaisesRegex(sw.StepError, "interrupted"):
+            sw.scp("u@host.invalid:/x", str(self.dst))
+        self.assertFalse(self.dst.exists())
 
 
 class GuardTests(unittest.TestCase):
