@@ -738,6 +738,31 @@ fn shutdown_saves_fades_and_releases() {
     assert!(dir.path().join("state/gen-0000000001.json").exists());
 }
 
+/// #32: a boot on an interrupted save finishes it before the engine runs:
+/// save.tmp becomes current.json and the older current.json a generation.
+#[test]
+fn a_boot_on_an_interrupted_save_finishes_it_first() {
+    use iem_engine::persist::{Persisted, Store, decode, encode};
+    let at = |rev| Persisted {
+        rev,
+        ..Persisted::default()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    Store::open(&state).unwrap().save(&at(1)).unwrap();
+    std::fs::write(state.join("save.tmp"), encode(&at(2)).unwrap()).unwrap();
+    let e = Engine::start_in(dir, Flags::default(), InputSignal::Silence);
+    let mut c = e.client();
+    let (h, _, rev) = c.hello(Role::Observe);
+    assert_eq!((h.state_rev, rev), (2, 2));
+    assert!(!state.join("save.tmp").exists());
+    let current = std::fs::read(state.join("current.json")).unwrap();
+    assert_eq!(decode(&current).unwrap().rev, 2);
+    let generation = std::fs::read(state.join("gen-0000000001.json")).unwrap();
+    assert_eq!(decode(&generation).unwrap().rev, 1);
+    e.shutdown();
+}
+
 #[test]
 fn fault_injection_releases_the_driver_and_exits() {
     let off = Engine::start(Flags::default(), InputSignal::Silence);
