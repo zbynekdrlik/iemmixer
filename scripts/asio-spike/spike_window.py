@@ -563,10 +563,19 @@ def unwind(env: dict[str, str], state: dict, running: bool, bring_back_reaper: b
     refuses while a spike or its task runs), compare the fingerprint. A failed
     trace stop, tuning exit or fingerprint alarms the owner and never holds
     REAPER back (S1c design note §5.2). Without bring_back_reaper (before an
-    approved reboot) the card stays free and the window stays open."""
+    approved reboot) the card stays free and the window stays open. A spike
+    not confirmed gone may still hold the driver: the trace stop and the mode
+    exit still run (neither touches the driver), but the unwind alarms and
+    stops before the buffer write and the bring-back (I3; set-buffer refuses
+    the same write), leaving the window open for a later preempt."""
     done = []
     gone = True
     for step in undo_plan(state, running):
+        if step in ("restore-buffer", "bring-back") and not gone:
+            alarm("the spike did not stop within 60 s and may still hold the driver: no buffer write and no REAPER "
+                  "start (I3); the last resort is the owner's reboot, which comes back in event mode")
+            raise StepError("the spike did not stop within 60 s: the driver's preferred buffer is not written and REAPER "
+                            "cannot start (I3); alarm the owner now")
         if step == "stop-spike":
             gone = bool(ps(env, f"(Stop-SpikeGracefully -Root {ps_quote(env['PC_ROOT'])} -Seconds 60).gone", timeout=120, event="ignore"))
             done.append({"stop-spike": gone})
@@ -597,9 +606,6 @@ def unwind(env: dict[str, str], state: dict, running: bool, bring_back_reaper: b
         elif step == "bring-back":
             if not bring_back_reaper:
                 break
-            if not gone:
-                raise StepError("the spike did not stop within 60 s, so REAPER cannot start (I3): alarm the owner now; "
-                                "the last resort is the owner's reboot, which comes back in event mode")
             r = bring_back(env, state)
             state["card"] = "reaper"
             save_state(state)
