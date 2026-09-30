@@ -336,6 +336,63 @@ fn seed_if_absent_refuses_a_state_dir_it_cannot_read() {
     assert_eq!(names, ["current.json", "engine.lock"], "nothing written");
 }
 
+/// #32 MAJOR-2: a live state file the import cannot read may hold the
+/// newest state. The engine would boot past it with an alarm; an import
+/// has nobody to hear one, so it stops (exit 1), names the file, and
+/// writes nothing, plain or seed.
+#[test]
+fn an_import_refuses_a_state_file_it_cannot_read() {
+    let w = World::new(28);
+    for (k, unreadable) in ["current.json", "save.tmp"].into_iter().enumerate() {
+        for (j, extra) in [&[][..], &["--seed-if-absent"][..]].into_iter().enumerate() {
+            let dir = w.path(&format!("state-{k}-{j}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("gen-0000000001.json"), live(4)).unwrap();
+            if unreadable == "save.tmp" {
+                std::fs::write(dir.join("current.json"), live(5)).unwrap();
+            }
+            // A directory where the file belongs: reading it fails on
+            // every OS.
+            std::fs::create_dir(dir.join(unreadable)).unwrap();
+            let before = tree(&dir);
+            let mut a = import_args(&w, extra);
+            a.extend(["--state-dir".into(), s(&dir)]);
+            let e = run(&a).unwrap_err();
+            assert_eq!(e.code, EXIT_IO, "{unreadable} {extra:?}: {}", e.msg);
+            assert!(
+                e.msg.contains(unreadable),
+                "{unreadable} {extra:?}: {}",
+                e.msg
+            );
+            let mut after = tree(&dir);
+            // engine.lock is the import's lock on the directory.
+            assert_eq!(after.remove("engine.lock"), Some(Vec::new()));
+            assert_eq!(after, before, "{unreadable} {extra:?}: nothing written");
+            assert!(dir.join(unreadable).is_dir(), "{unreadable} {extra:?}");
+        }
+    }
+}
+
+/// #32 MAJOR-1: a damaged save.tmp is no state, but not the import's to
+/// replace either: its save moves it aside and the report says where.
+#[test]
+fn a_plain_import_reports_the_save_tmp_it_moved_aside() {
+    let w = World::new(27);
+    let dir = w.path("state");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("current.json"), live(5)).unwrap();
+    std::fs::write(dir.join("save.tmp"), b"cut off").unwrap();
+    let mut a = import_args(&w, &[]);
+    a.extend(["--state-dir".into(), s(&dir)]);
+    let report = run(&a).unwrap();
+    let aside = dir.join("save.tmp.orphan-1");
+    assert!(
+        report.contains(&format!("save.tmp moved aside to {}", aside.display())),
+        "{report}"
+    );
+    assert_eq!(std::fs::read(&aside).unwrap(), b"cut off");
+}
+
 #[test]
 fn a_wrong_count_an_unknown_name_or_no_state_dir_fail() {
     let w = World::new(2);
