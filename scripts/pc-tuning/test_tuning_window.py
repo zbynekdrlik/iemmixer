@@ -432,6 +432,10 @@ def hwlat_report(cpu: int, **change) -> dict:
 
 DUPLEX = {"outcome": "done", "segments": [{"telemetry": {"callbacks": 1000, "late": 0, "missed": 0, "overruns": 0, "position_gaps": 0,
                                                          "callback_cpus": {"14": 1000}, "callback_thread": 4243}}]}
+# The spike's exit code per outcome (examples/asio_spike/main.rs code_of; "done"/"stopped" 0).
+EXIT_CODES = {"error": 1, "refused": 4, "band-activity": 5, "fault-caught": 6, "rate-changed": 7, "stop-hung": 8}
+# Outcomes that end a run without a completed measurement.
+NOT_MEASURED = (("refused", 4), ("band-activity", 5), ("fault-caught", 6), ("rate-changed", 7), ("stop-hung", 8))
 
 
 class FakePc:
@@ -467,8 +471,8 @@ class FakePc:
             self.polls += 1
             if self.polls == 1:
                 return {"status": {"state": "running", "results": [{"pid": 4242}]}, "progress": self.progress}
-            return {"status": {"state": "exited", "results": [{"exit": 1 if self.reports[self.runs - 1]["outcome"] == "error" else 0}]},
-                    "progress": self.progress}
+            code = EXIT_CODES.get(self.reports[self.runs - 1]["outcome"], 0)
+            return {"status": {"state": "exited", "results": [{"exit": code}]}, "progress": self.progress}
         if "Get-IemNow" in body:
             return "2026-01-01T00:00:00Z"
         if "Get-IemSystemEvents" in body:
@@ -554,6 +558,19 @@ class HwlatTests(WindowHarness):
             tw.cmd_hwlat(self.env, self.args())
         self.assertEqual([r["cpu"] for r in self.rows()], [2])
 
+    def test_an_outcome_that_is_no_measurement_fails_the_step_and_is_recorded(self) -> None:
+        # #32 follow-up: refused, fault-caught, rate-changed (and band activity, stop-hung)
+        # end a run without a measurement: the step fails, the row names the outcome.
+        for outcome, code in NOT_MEASURED:
+            with self.subTest(outcome):
+                for f in (self.dir / "raw" / "pc-tuning" / "w").glob("hwlat-*.json"):
+                    f.unlink()
+                self.pc.runs = 0
+                self.pc.reports = [{"outcome": outcome, "error": f"synthetic {outcome}"}]
+                with self.assertRaisesRegex(tw.StepError, f"outcome {outcome}"):
+                    tw.cmd_hwlat(self.env, self.args("2"))
+                self.assertEqual([(r["outcome"], r["failed"]) for r in self.rows()], [(outcome, True)])
+
 
 class MeasureTests(WindowHarness):
     """measure through the real cmd_run and unwind, the PC faked at the ssh seam."""
@@ -581,6 +598,26 @@ class MeasureTests(WindowHarness):
         self.assertEqual((s["label"], s["verdict"]["stable"]), ("load-32", True))
         self.assertIn("isr nicdrv.sys: above 2048 us (a full period is 333)", s["findings"])
         self.assertIsNone(self.state()["trace"])
+
+    # #32 follow-up: only a completed run ("done", or "stopped" by the stop file) is a measurement.
+    def test_an_outcome_that_is_no_measurement_fails_the_step_and_is_recorded(self) -> None:
+        tel = DUPLEX["segments"]
+        self.pc.reports = [{"outcome": outcome, "segments": tel} for outcome, _ in NOT_MEASURED]
+        for outcome, code in NOT_MEASURED:
+            with self.subTest(outcome):
+                with self.assertRaisesRegex(tw.StepError, f"{outcome}.*exit {code}"):
+                    tw.cmd_measure(self.env, self.args(label=f"load-{code}"))
+                row = self.state()["measurements"][-1]
+                self.assertEqual((row["label"], row["outcome"], row["exit"], row["failed"]), (f"load-{code}", outcome, code, True))
+                self.assertNotIn("summary", row)
+                self.assertIsNone(self.state()["trace"])                 # stopped on the way out
+        self.assertEqual(list((self.dir / "raw" / "pc-tuning" / "w").rglob("summary.json")), [])
+        self.assertEqual(self.pc.bodies("Invoke-IemDpcIsr"), [])         # never analysed as a measurement
+
+    def test_a_run_stopped_by_the_stop_file_is_still_a_measurement(self) -> None:
+        self.pc.reports = [{**DUPLEX, "outcome": "stopped"}]
+        tw.cmd_measure(self.env, self.args())
+        self.assertEqual(self.summary()["verdict"]["outcome"], "stopped")
 
     # B5: a measure never leaves a kernel trace running behind it.
     def test_an_error_during_the_run_stops_the_trace_and_clears_it(self) -> None:
