@@ -22,7 +22,9 @@ Commit mode scans each commit's author/committer names and emails together
 with its message, its added lines and every added/modified path -- including an
 empty or binary file, whose path the unified diff omits, enumerated via
 `git diff-tree`. Added lines come from `git show --text --no-textconv`, so a
-`binary` / `-diff` attribute or a textconv driver cannot hide them; a changed
+`binary` / `-diff` attribute or a textconv driver cannot hide them, with the
+header shape pinned against local config (`--src-prefix=a/ --dst-prefix=b/
+--no-relative --diff-merges=first-parent`); a changed
 blob that is not plain text is read whole and its new units are scanned. With
 `--identities FILE` it also rejects every commit whose author or committer
 email is not exactly one listed there (read NUL-separated; an email holding a
@@ -522,9 +524,15 @@ def scan_commit_diff(scanner: Scanner, repo: Path, sha: str, seen: set[str], blo
     # quotePath=false would otherwise fail encode("ascii")). --text --no-textconv: a `binary` or
     # `-diff` attribute would print "Binary files differ" and a textconv driver would replace the
     # content, hiding the added lines; with --text a NUL file's lines appear too, but those paths
-    # are blob_paths, scanned from their blobs instead
+    # are blob_paths, scanned from their blobs instead. The rest pins the output shape against a
+    # developer's local config: --src-prefix/--dst-prefix beat diff.noprefix / mnemonicPrefix /
+    # srcPrefix / dstPrefix (without them `+++ b/x` under noprefix is the path `b/x` read as `x`);
+    # --no-relative beats diff.relative (from a subdirectory it hides every change outside it);
+    # --diff-merges=first-parent (what `-m --first-parent` gave by default) beats log.diffMerges,
+    # whose `combined` leaves a merge's diff empty for a file only one parent changed
     diff = git(repo, "-c", "core.quotePath=true", "show", "--format=", "--unified=0", "--no-color",
-               "--no-ext-diff", "--text", "--no-textconv", "--no-renames", "-m", "--first-parent", sha)
+               "--no-ext-diff", "--text", "--no-textconv", "--no-renames", "--src-prefix=a/",
+               "--dst-prefix=b/", "--no-relative", "--diff-merges=first-parent", sha)
     hits: list[Hit] = []
     added: dict[str, list[Unit]] = {}
     # `+++`/`---` count as headers only before a file's first hunk; inside a hunk an added line
