@@ -260,7 +260,8 @@ try {
     Assert (@($st.items | Where-Object { $_.tier -eq 3 -and -not $_.pending }).Count -eq 0) 'tier3-items-are-pending-until-a-reboot'
     # A clock step (time sync) moves LastBootUpTime; the boot stays the same (A13).
     $bj = (Read-IemJournal -Path (Read-IemProfile -Path $pp).journal).global['irq:card:policy'].boot
-    Assert ("$($bj.time)" -eq "$((Get-IemBootIdentity).time)" -and "$($bj.id)" -eq "$((Get-IemBootIdentity).id)") 'tier3-journals-the-boot-identity'
+    $bn = Get-IemBootIdentity
+    Assert ((Test-IemSameBoot -A $bj -B $bn) -and "$($bj.id)" -eq "$($bn.id)") 'tier3-journals-the-boot-identity'
     $now = Get-IemBootIdentity
     $step = [datetime]::Parse([string]$now.time, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime().AddSeconds(30).ToString('o')
     Set-JournalBoot $pp @{ time = $step; id = $now.id }
