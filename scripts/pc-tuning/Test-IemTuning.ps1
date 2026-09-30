@@ -385,6 +385,18 @@ try {
     $pvItem = [pscustomobject]@{ key = 'plan:proc-min'; kind = 'plan-value'; args = @{ guid = $foreignPlan; sub = $proc; setting = $procMin } }
     ThrowsLike { Set-IemValue -Item $pvItem -Value "$otherMin" } "*not iemmixer's own plan*" 'plan-value-refuses-a-foreign-plan'
     Assert ([IemPower]::Read($foreignPlan, $proc, $procMin) -eq $foreignMin) 'plan-value-refusal-writes-nothing'
+    # The plan-exists writer checks its GUID itself too (review R7): never plan.source,
+    # never a built-in scheme, never a plan that already exists, so neither
+    # /duplicatescheme nor the cleanup /delete can touch a plan it did not create.
+    $planNames = { @(foreach ($g in $activeBefore, $builtin, $foreignPlan) { "$g=$(Get-IemPlanName -Guid $g)" }) -join '|' }
+    $namesBefore = & $planNames
+    foreach ($c in @(@($activeBefore, '*REAPER-mode plan*'), @($builtin, '*built-in*'), @($foreignPlan, '*already exists*'))) {
+        $peItem = [pscustomobject]@{ key = 'plan:exists'; kind = 'plan-exists'; args = @{ guid = $c[0]; source = $activeBefore } }
+        ThrowsLike { Set-IemValue -Item $peItem -Value 'present' } $c[1] "plan-exists-refuses $($c[0])"
+    }
+    $builtinValue = [IemPower]::Read($builtin, $proc, $procMin)
+    ThrowsLike { Set-IemValue -Item ([pscustomobject]@{ key = 'plan:proc-min'; kind = 'plan-value'; args = @{ guid = $builtin; sub = $proc; setting = $procMin } }) -Value '37' } '*built-in*' 'plan-value-refuses-a-built-in-scheme'
+    Assert ((& $planNames) -ceq $namesBefore -and [IemPower]::Read($builtin, $proc, $procMin) -eq $builtinValue -and [IemPower]::Active() -eq $activeBefore) 'plan-writer-refusals-change-no-plan'
 
     # Mode levers: plan (C1 only), governor stand-in, placement.
     $e = Enter-IemTuningMode -ProfilePath $pp -Only @('plan', 'governor', 'placement') -Idle 'c1'
