@@ -393,9 +393,10 @@ mod tests {
         std::fs::write(s.dir().join(CURRENT), b"{}").unwrap();
         assert!(s.has_state().unwrap());
         // A generation ALONE, with no `current.json`, is also live state: a
-        // crash between `save`'s two renames can leave the newest state only as
-        // a generation (iemmixer#9). This pins the `||` (either source counts)
-        // and the `!generations.is_empty()` (a present generation is state).
+        // crash between `save`'s two renames leaves the previous state only as
+        // a generation (the newest waits in save.tmp: #32 D6). This pins the
+        // `||` (either source counts) and the `!generations.is_empty()` (a
+        // present generation is state).
         std::fs::remove_file(s.dir().join(CURRENT)).unwrap();
         std::fs::write(s.dir().join("gen-0000000001.json"), b"{}").unwrap();
         assert!(s.has_state().unwrap());
