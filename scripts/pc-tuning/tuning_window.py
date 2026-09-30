@@ -34,6 +34,10 @@ PROFILE_KEYS = ("version", "journal", "registry_root", "layout", "plan", "govern
 LAYOUT_ROLES = ("housekeeping", "card", "nic", "audio")
 MODE_LEVERS = ("plan", "governor", "placement", "services")
 MAX_CUTS = 5
+# The spike outcomes of a completed measure run: it ran to its end, or the stop
+# file ended it. refused, band-activity, fault-caught, rate-changed and
+# stop-hung end it without a measurement (outcome "error" already fails in cmd_run).
+MEASURED = ("done", "stopped")
 LABEL = re.compile(r"[a-z0-9][a-z0-9-]{0,39}")
 APPROVAL = re.compile(r".*\d{1,2}:\d{2}.*\S.*")
 
@@ -436,6 +440,16 @@ def _measure(env, args, profile: dict, state: dict, run_dir: str, since: str, tr
                                   panic_at=0, cycles=5, cpu=None, threshold_us=10, audio_cpus=args.audio_cpus, stress_cpus=stress_cpus)
     result = sw.cmd_run(env, run_args, on_poll=on_poll)
     state = sw.load_state()   # cmd_run saved its own changes (the run list): never overwrite them
+    report = json.loads(Path(result["report"]).read_text(encoding="utf-8"))
+    outcome = report.get("outcome")
+    if outcome not in MEASURED:
+        # Recorded as a failed row, never summarised as an unstable measurement;
+        # the error path stops the trace (its raw files stay on the PC).
+        state.setdefault("measurements", []).append({"label": args.label, "outcome": outcome, "exit": result["exit"],
+                                                     "failed": True, "report": result["report"]})
+        sw.save_state(state)
+        raise StepError(f"measure {args.label}: the spike ended {outcome!r} (exit {result['exit']}), no measurement "
+                        f"(report {result['report']})")
     out = raw(env, state) / Path(run_dir.replace("\\", "/")).name
     out.mkdir(exist_ok=True)
     dpcisr_text = None
@@ -455,7 +469,6 @@ def _measure(env, args, profile: dict, state: dict, run_dir: str, since: str, tr
             sw.scp(f"{env['PC_SSH']}:{scp_dir}/{name}", str(out / name))
         dpcisr_text = read_text(out / "dpcisr.txt")
     events = as_list(tps(env, f"Get-IemSystemEvents -Since {ps_quote(since)}", timeout=120, event="abandon"))
-    report = json.loads(Path(result["report"]).read_text(encoding="utf-8"))
     watched = watch_lps(profile, args.audio_cpus)
     # An unreadable dpcisr (parse_dpcisr fails closed with ValueError) fails the
     # step with the raw file named, never a traceback.
