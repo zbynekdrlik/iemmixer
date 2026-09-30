@@ -186,6 +186,24 @@ mod tests {
         assert_eq!(check_stress_cpus(1, &[14], &[]), Err(e));
     }
 
+    /// A stress thread on an audio CPU runs next to the callback and
+    /// defeats the proxy-load measurement: the lists never overlap, with or
+    /// without threads (the window driver refuses the same).
+    #[test]
+    fn stress_cpus_never_overlap_the_audio_cpus() {
+        let e = check_stress_cpus(4, &[13, 14], &[6, 13, 14]).unwrap_err();
+        assert_eq!(
+            e,
+            "--stress-cpus and --audio-cpus overlap on processors [13, 14] \
+             (a busy thread would run next to the audio callback)"
+        );
+        assert!(check_stress_cpus(4, &[14], &[14]).is_err());
+        assert!(check_stress_cpus(0, &[14], &[6, 14]).is_err(), "no threads");
+        assert_eq!(check_stress_cpus(4, &[14], &[6, 13]), Ok(()));
+        assert_eq!(check_stress_cpus(4, &[], &[6, 14]), Ok(()), "no audio CPUs");
+        assert_eq!(check_stress_cpus(0, &[14], &[]), Ok(()));
+    }
+
     #[test]
     fn a_placement_happens_only_when_processors_are_asked_for() {
         assert_eq!(place_on(&[6, 7], placed), Ok(vec![0x106, 0x107]));
