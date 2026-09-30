@@ -6,22 +6,38 @@ the pre-push hook, the DENYLIST secret in CI. Output never contains a term, a
 matched line or an email address — only locations and the entry number, each
 finding line starting with `tree` or a commit's short SHA (never with a path,
 so a path beginning `::` cannot read as a CI workflow command). A path
-component that holds a term is printed as `[redacted]` (the whole path when a
-term spans components), other components have their control characters escaped.
+component that holds a term, or a byte that is not valid UTF-8, is printed as
+`[redacted]` (the whole path when a term spans components), other components
+have their control characters escaped.
+
+Content is read as units (content_units): the lines of text; the decoded lines
+of UTF-16 text; for other content holding a NUL byte (binary) its text runs --
+byte runs without control characters and embedded UTF-16 strings -- located as
+`run N`. In a binary run a term shorter than MIN_BINARY_TERM counts only when
+the run is LONG_TEXT_RUN bytes of valid UTF-8, since random bytes form short
+words by chance. Tree mode reads each blob's own bytes (cat-file applies no
+.gitattributes); `--hash` numbers units the same way.
 
 Commit mode scans each commit's author/committer names and emails together
 with its message, its added lines and every added/modified path -- including an
 empty or binary file, whose path the unified diff omits, enumerated via
-`git diff-tree`; with `--identities FILE` it also rejects every commit whose
-author or committer email is not listed there. Lines are split on `\n` only (not
+`git diff-tree`. Added lines come from `git show --text --no-textconv`, so a
+`binary` / `-diff` attribute or a textconv driver cannot hide them; a changed
+blob that is not plain text is read whole and its new units are scanned. With
+`--identities FILE` it also rejects every commit whose author or committer
+email is not exactly one listed there (read NUL-separated; an email holding a
+line separator is never allowed). Lines are split on `\n` only (not
 str.splitlines()), so a term after a CR/VT/FF/NEL/U+2028 cannot slip past, and a
 malformed C-quoted path never crashes the scan (`unquote_c` keeps a bad escape
 literal rather than dropping the bytes that follow).
 
-Matching is case-insensitive. A term that starts (ends) with a letter or digit
-must not be preceded (followed) by one, where letters include diacritics and
-`_` is a separator: `kit` does not hit `kitten`, `x_kit_y` is a hit, and a
-term ending in `.` such as `10.0.` hits `10.0.0.5`.
+Text is decoded losslessly (UTF-8, surrogateescape) and matched in every form:
+bytes that are not valid UTF-8 re-read as cp1250 and Latin-1, and `\\uXXXX` /
+`\\u{X}` escapes and percent-encoding decoded (forms). Matching is
+case-insensitive. A term that starts (ends) with a letter or digit must not be
+preceded (followed) by one, where letters include diacritics and `_` is a
+separator: `kit` does not hit `kitten`, `x_kit_y` is a hit, and a term ending
+in `.` such as `10.0.` hits `10.0.0.5`.
 """
 from __future__ import annotations
 
