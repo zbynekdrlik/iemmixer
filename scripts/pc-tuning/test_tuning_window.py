@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import test_latency_report as tlr  # noqa: E402  (the xperf fixtures)
 import tuning_window as tw  # noqa: E402
 
 PROFILE = {"version": 1, "journal": "C:\\j.json", "registry_root": "",
@@ -406,6 +407,151 @@ class TuningSetupTests(unittest.TestCase):
         with self.assertRaisesRegex(tw.StepError, "icacls"):
             tw.cmd_tuning_setup(self.env, argparse.Namespace())
         self.assertEqual(self.copies, [])
+
+
+class FakeClock:
+    """spike_window's clock inside a test: each reading moves 5 s on, sleeps
+    return at once (cmd_run polls the PC every 10 s of this clock)."""
+
+    def __init__(self) -> None:
+        self.t = 0.0
+
+    def monotonic(self) -> float:
+        self.t += 5
+        return self.t
+
+    def sleep(self, seconds: float) -> None:
+        pass
+
+
+def hwlat_report(cpu: int, **change) -> dict:
+    h = {"cpu": cpu, "threshold_us": 10, "placed": [256 + cpu], "priority": "time-critical", "reads": 1000, "over": 2,
+         "gaps_us": {"p50": 11.0, "p99": 15.0, "p999": 20.0, "max": 31.5}, "largest": [{"at_us": 5.0, "gap_us": 31.5}]}
+    return {"outcome": "done", "hwlat": {**h, **change}}
+
+
+DUPLEX = {"outcome": "done", "segments": [{"telemetry": {"callbacks": 1000, "late": 0, "missed": 0, "overruns": 0, "position_gaps": 0,
+                                                         "callback_cpus": {"14": 1000}, "callback_thread": 4243}}]}
+
+
+class FakePc:
+    """The IEM PC at the ssh seam: `ps` answers sw.ps by the PowerShell verb
+    and records (body, event); `scp` writes the file the PC would hold. Each
+    spike run is running on its first status poll and exited on the next."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+        self.reports: list[dict] = []          # one spike report per run, in order
+        self.progress: dict = {"missed": 0, "overruns": 0, "position_gaps": 0, "callback_thread": 4243}
+        self.fail: set[str] = set()            # PowerShell verbs that fail on the PC
+        self.runs = 0
+        self.polls = 0
+        self.on_call = None                    # a hook: (body) -> None, called before answering
+
+    def bodies(self, verb: str) -> list[str]:
+        return [b for b, _ in self.calls if verb in b]
+
+    def ps(self, env, body, timeout=300, event="finish"):
+        self.calls.append((body, event))
+        if self.on_call:
+            self.on_call(body)
+        for verb in self.fail:
+            if verb in body:
+                raise tw.StepError(f"PC step failed: {verb} (synthetic)")
+        if "Write-GoldenRequest" in body:
+            self.runs += 1
+            self.polls = 0
+            return f"spike-{self.runs}"
+        if ".progress.json" in body:
+            self.polls += 1
+            if self.polls == 1:
+                return {"status": {"state": "running", "results": [{"pid": 4242}]}, "progress": self.progress}
+            return {"status": {"state": "exited", "results": [{"exit": 1 if self.reports[self.runs - 1]["outcome"] == "error" else 0}]},
+                    "progress": self.progress}
+        if "Get-IemNow" in body:
+            return "2026-01-01T00:00:00Z"
+        if "Get-IemSystemEvents" in body:
+            return []
+        if "Win32_PerfRawData_PerfOS_Processor" in body or "Get-IemPollSample" in body:
+            return {"at": "2026-01-01T00:00:10Z", "cpu": {"cpus": []}, "plan": "p", "governor": "Stopped",
+                    "thread": {"base": 15, "current": 26}}
+        return {"ok": True}   # Start-/Stop-IemTrace, Invoke-IemDpcIsr, Export-IemNearGlitch
+
+    def scp(self, src: str, dst: str) -> None:
+        name = src.rsplit("/", 1)[-1]
+        if name.endswith(".report.json"):
+            text = json.dumps(self.reports[self.runs - 1])
+        elif name.endswith(".stderr.txt"):
+            text = ""
+        elif name.endswith("dpcisr.txt"):
+            text = tlr.DPCISR_XPERF
+        elif name.endswith("near.txt"):
+            text = tlr.DUMPER
+        else:
+            raise AssertionError(f"unexpected copy: {src}")
+        Path(dst).write_text(text, encoding="utf-8")
+
+
+class WindowHarness(unittest.TestCase):
+    """A dev-time window with a free card at buffer 32 and the real spike_window
+    run loop; only the ssh seam (sw.ps, sw.scp) is faked and spike_window's
+    clock runs fast."""
+
+    def setUp(self) -> None:
+        self.dir = Path(tempfile.mkdtemp())
+        self.saved = (tw.sw.STATE, tw.sw.EVENT_NOW, tw.sw.ps, tw.sw.scp, tw.sw.alarm, tw.PROFILE)
+        tw.sw.STATE, tw.sw.EVENT_NOW = self.dir / "spike-window.json", self.dir / "EVENT-NOW"
+        tw.PROFILE = write(PROFILE)
+        self.pc = FakePc()
+        tw.sw.ps, tw.sw.scp = self.pc.ps, self.pc.scp
+        self.alarms: list[str] = []
+        tw.sw.alarm = self.alarms.append
+        clock = mock.patch.object(tw.sw, "time", FakeClock())
+        clock.start()
+        self.addCleanup(clock.stop)
+        self.env = dict(ENV, PC_SSH="u@pc", PC_ROOT_SCP="/R", PC_TUNING_ROOT="C:\\t", PC_TUNING_ROOT_SCP="/C:/t",
+                        PC_ASIO_DRIVER="D", PC_ACTIVITY_CHANNELS="101-110", RAW_DIR=str(self.dir / "raw"))
+        tw.sw.save_state({"id": "w", "card": "free", "dev_time": True, "preflight": {"pref": 64}, "pref_original": 64,
+                          "pref_current": 32, "pref_restored": False, "runs": [], "closed": False})
+
+    def tearDown(self) -> None:
+        tw.sw.STATE, tw.sw.EVENT_NOW, tw.sw.ps, tw.sw.scp, tw.sw.alarm, tw.PROFILE = self.saved
+
+    def state(self) -> dict:
+        return tw.sw.load_state()
+
+
+class HwlatTests(WindowHarness):
+    """hwlat per CPU through the real cmd_run (#32 C2)."""
+
+    def args(self, lps: str = "2,14") -> argparse.Namespace:
+        return argparse.Namespace(lps=lps, seconds=30, threshold_us=10)
+
+    def rows(self) -> list[dict]:
+        files = sorted((self.dir / "raw" / "pc-tuning" / "w").glob("hwlat-*.json"))
+        self.assertEqual(len(files), 1)
+        return json.loads(files[0].read_text(encoding="utf-8"))
+
+    def test_every_cpu_is_measured_placed_and_raised(self) -> None:
+        self.pc.reports = [hwlat_report(2), hwlat_report(14)]
+        tw.cmd_hwlat(self.env, self.args())
+        self.assertEqual([(r["cpu"], r["placed"], r["priority"], r["failed"]) for r in self.rows()],
+                         [(2, [258], "time-critical", False), (14, [270], "time-critical", False)])
+
+    def test_a_scanner_reported_unplaced_fails_the_step_and_keeps_what_was_measured(self) -> None:
+        # An older spike wrote the placement error as text and still said "done".
+        self.pc.reports = [hwlat_report(2), hwlat_report(14, placed="the CPU set could not be applied (synthetic)"), hwlat_report(15)]
+        with self.assertRaisesRegex(tw.StepError, "CPU 14"):
+            tw.cmd_hwlat(self.env, self.args("2,14,15"))
+        self.assertEqual([(r["cpu"], r["failed"]) for r in self.rows()], [(2, False), (14, True)])
+        self.assertEqual(self.pc.runs, 2)   # stops at the failed CPU
+
+    def test_an_error_outcome_fails_the_step_and_keeps_what_was_measured(self) -> None:
+        self.pc.reports = [hwlat_report(2), {"outcome": "error", "error": "hwlat: cpu 14 not raised (synthetic)",
+                                             "hwlat": {"cpu": 14, "threshold_us": 10, "error": "cpu 14 not raised (synthetic)"}}]
+        with self.assertRaisesRegex(tw.StepError, "not raised"):
+            tw.cmd_hwlat(self.env, self.args())
+        self.assertEqual([r["cpu"] for r in self.rows()], [2])
 
 
 if __name__ == "__main__":

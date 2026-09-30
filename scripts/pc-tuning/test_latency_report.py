@@ -266,9 +266,25 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(lr.sentinel_changes(polls), [{"at": "t1", "plan": "a", "governor": "Stopped"}, {"at": "t3", "plan": "b", "governor": "Running"}])
 
     def test_hwlat_summary(self) -> None:
-        r = {"outcome": "done", "hwlat": {"cpu": 14, "reads": 10, "over": 3, "gaps_us": {"p50": 12.0, "p99": 40.0, "p999": 40.0, "max": 55.5},
+        r = {"outcome": "done", "hwlat": {"cpu": 14, "placed": [270], "priority": "time-critical", "reads": 10, "over": 3,
+                                          "gaps_us": {"p50": 12.0, "p99": 40.0, "p999": 40.0, "max": 55.5},
                                           "largest": [{"at_us": 1.0, "gap_us": 55.5}, {"at_us": 2.0, "gap_us": 40.0}]}}
-        self.assertEqual(lr.hwlat_summary(r), {"cpu": 14, "outcome": "done", "reads": 10, "over": 3, "max_us": 55.5, "p999_us": 40.0, "largest_us": [55.5, 40.0]})
+        self.assertEqual(lr.hwlat_summary(r), {"cpu": 14, "outcome": "done", "placed": [270], "priority": "time-critical", "error": None,
+                                               "failed": False, "reads": 10, "over": 3, "max_us": 55.5, "p999_us": 40.0, "largest_us": [55.5, 40.0]})
+
+    def test_a_scanner_not_placed_or_not_raised_is_a_failed_measurement(self) -> None:
+        # #32 C2: lane F1's spike ends with outcome "error" (its hwlat block carries the
+        # error, no gaps); an older spike wrote the placement or priority error as text
+        # and still said "done". Neither measured the asked CPU at TIME_CRITICAL.
+        err = {"outcome": "error", "error": "hwlat: cpu 14 not placed: synthetic", "hwlat": {"cpu": 14, "threshold_us": 10, "error": "cpu 14 not placed: synthetic"}}
+        s = lr.hwlat_summary(err)
+        self.assertEqual((s["cpu"], s["failed"], s["error"], s["max_us"]), (14, True, "hwlat: cpu 14 not placed: synthetic", None))
+        done = {"outcome": "done", "hwlat": {"cpu": 3, "placed": [259], "priority": "time-critical", "gaps_us": {}, "largest": []}}
+        self.assertFalse(lr.hwlat_summary(done)["failed"])
+        for change in ({"placed": "Access is denied. (os error 5)"}, {"priority": "Access is denied. (os error 5)"}):
+            old = {"outcome": "done", "hwlat": {**done["hwlat"], **change}}
+            self.assertTrue(lr.hwlat_summary(old)["failed"], change)
+        self.assertTrue(lr.hwlat_summary({"outcome": "stopped", "hwlat": done["hwlat"]})["failed"])
 
 
 DUMPER = """BeginHeader
