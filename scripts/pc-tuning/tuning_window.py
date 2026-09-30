@@ -166,8 +166,12 @@ def cmd_tuning_setup(env, args) -> None:
     state = sw.open_state()
     profile = load_profile(PROFILE)
     root = ps_quote(env["PC_TUNING_ROOT"])
-    sw.guarded(sw.ssh_cmd(env), f"New-Item -ItemType Directory -Force -Path {root}, (Join-Path {root} 'runs') | Out-Null ; "
-               f"& icacls.exe {root} /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' | Out-Null\n", 60, "finish")
+    # sw.ps runs this under $ErrorActionPreference='Stop' and returns a PC error
+    # as a StepError; a native exit code never throws by itself, so icacls' is
+    # checked. Nothing is copied into a folder whose ACL was not set.
+    sw.ps(env, f"New-Item -ItemType Directory -Force -Path {root}, (Join-Path {root} 'runs') | Out-Null ; "
+               f"& icacls.exe {root} /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' | Out-Null ; "
+               "if ($LASTEXITCODE -ne 0) { throw \"icacls exited $LASTEXITCODE\" } ; 'ok'", timeout=60)
     sw.scp(str(PROFILE), f"{env['PC_SSH']}:{env['PC_TUNING_ROOT_SCP']}/profile.json")
     r = tps(env, f"(Read-IemProfile -Path {sw.tuning_profile(env)}).version", timeout=60)
     if baseline_path(env).is_file():
