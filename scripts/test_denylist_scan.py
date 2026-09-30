@@ -386,6 +386,18 @@ class DenylistScanTests(unittest.TestCase):
         self.assertIn("[redacted]", scanner.shown(path))
         self.assertNotIn("zyxname", scanner.shown(path))
 
+    def test_hash_key_matches_the_scanner_for_a_line_containing_a_cr(self) -> None:
+        # Vector 2 regression: --hash must yield the SAME allow key the scanner computes for a line
+        # with a CR (and every line of a CRLF file). Path.read_text() translates \r / \r\n to \n,
+        # so the key diverges from tree/commit mode and the allowlist workflow silently fails.
+        self.commit({"a.txt": "keep\rzyxname here\n"})  # a CR inside the added line
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):  # the developer's --hash step
+            ds.main(["--repo", str(self.repo), "--hash", "a.txt", "1"])
+        allow = self.tmp / "allow.txt"
+        allow.write_text(out.getvalue().strip() + "  reviewed ordinary prose\n", encoding="utf-8")
+        self.assertEqual(self.scan("--allow", str(allow), "--tree", "HEAD", "--commits", "HEAD")[0], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
