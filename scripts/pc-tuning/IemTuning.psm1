@@ -716,11 +716,9 @@ function Assert-IemOnly {
 function Get-IemGlobalItems {
     # Tier 2 (no reboot) and Tier 3 (reboot) items of the profile. -Check
     # verifies each device before its items are built (apply only).
-    # -AllocatedIrqs (instance id -> granted IRQ numbers, default: read from
-    # Win32_PnPAllocatedResource when a write needs it) is for the self-test.
-    param([Parameter(Mandatory)]$Profile, [Parameter(Mandatory)][int]$Tier, [string[]]$Only = @(), [switch]$Check,
-          [hashtable]$AllocatedIrqs = $null)
+    param([Parameter(Mandatory)]$Profile, [Parameter(Mandatory)][int]$Tier, [string[]]$Only = @(), [switch]$Check)
     $items = @()
+    $granted = $null   # instance id -> granted IRQs, read once when a write needs it
     if ($Tier -eq 2) {
         if (Select-IemGroup $Only 'services') {
             foreach ($n in @($Profile.services_disable)) {
@@ -764,11 +762,11 @@ function Get-IemGlobalItems {
             $why = $null
             if (-not ($msi.kind -eq 'DWord' -and $msi.data -eq '1')) { $why = 'uses line-based interrupts (MSISupported is not 1)' }
             elseif ($Check) {
-                if ($null -eq $AllocatedIrqs) { $AllocatedIrqs = Get-IemAllocatedIrqs }
-                $granted = @()
-                if ($AllocatedIrqs.ContainsKey([string]$d.instance)) { $granted = @($AllocatedIrqs[[string]$d.instance]) }
-                if ($granted.Count -eq 0) { $why = 'has no interrupt granted now (MSI not confirmed)' }
-                elseif (@($granted | Where-Object { [int]$_ -ge 0 }).Count -gt 0) { $why = 'uses line-based interrupts (INTx granted although MSISupported is 1)' }
+                if ($null -eq $granted) { $granted = & $script:ReadAllocatedIrqs }
+                $irqs = @()
+                if ($granted.ContainsKey([string]$d.instance)) { $irqs = @($granted[[string]$d.instance]) }
+                if ($irqs.Count -eq 0) { $why = 'has no interrupt granted now (MSI not confirmed)' }
+                elseif (@($irqs | Where-Object { [int]$_ -ge 0 }).Count -gt 0) { $why = 'uses line-based interrupts (INTx granted although MSISupported is 1)' }
             }
             if ($why) {
                 $why = "skipped: $($d.id) $why"
@@ -870,13 +868,12 @@ function Get-IemModeItems {
 }
 
 function Invoke-IemTuningApply {
-    param([Parameter(Mandatory)][string]$ProfilePath, [Parameter(Mandatory)][ValidateSet(2, 3)][int]$Tier, [string[]]$Only = @(),
-          [hashtable]$AllocatedIrqs = $null)
+    param([Parameter(Mandatory)][string]$ProfilePath, [Parameter(Mandatory)][ValidateSet(2, 3)][int]$Tier, [string[]]$Only = @())
     $profile = Read-IemProfile -Path $ProfilePath
     Assert-IemOnly -Profile $profile -Tier $Tier -Only $Only
     $j = Read-IemJournal -Path $profile.journal
     $boot = Get-IemBootIdentity
-    $rows = @(foreach ($item in (Get-IemGlobalItems -Profile $profile -Tier $Tier -Only $Only -Check -AllocatedIrqs $AllocatedIrqs)) {
+    $rows = @(foreach ($item in (Get-IemGlobalItems -Profile $profile -Tier $Tier -Only $Only -Check)) {
         Invoke-IemItem -Item $item -Journal $j -Section 'global' -Path $profile.journal -Boot $boot
     })
     # The journal names the profile version of THIS tier only after its complete
@@ -996,6 +993,10 @@ function Get-IemTuningState {
         entered = $j.entered; mode_items = @($j.order.mode); items = $rows
     }
 }
+
+# The interrupt-grant reader: module-private, so the self-test can replace it and
+# no caller can skip the read that gates the card's affinity (review 3.5).
+$script:ReadAllocatedIrqs = { Get-IemAllocatedIrqs }
 
 function Get-IemAllocatedIrqs {
     # Instance id -> the IRQ numbers Windows granted the device now, signed: a
