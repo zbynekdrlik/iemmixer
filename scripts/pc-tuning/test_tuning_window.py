@@ -693,7 +693,7 @@ class MeasureTests(WindowHarness):
         tw.cmd_measure(self.env, self.args())
         stops = [(b, e) for b, e in self.pc.calls if "Stop-IemTrace" in b]
         self.assertEqual(len(stops), 1)
-        self.assertIn("-Merge", stops[0][0])
+        self.assertNotIn("-Merge", stops[0][0])                      # the merge belongs to the analysis (M1)
         self.assertNotIn("Invoke-IemDpcIsr", stops[0][0])
         self.assertEqual(stops[0][1], "finish")                      # the stop changes the PC: it completes
         self.assertEqual([e for b, e in self.pc.calls if "Invoke-IemDpcIsr" in b], ["abandon"])
