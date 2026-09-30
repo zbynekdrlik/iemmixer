@@ -613,6 +613,54 @@ class DenylistScanTests(unittest.TestCase):
         self.assertIn("vendor/[redacted]: path: denylist entry 1", out)
         self.assertNotIn("zyxname", out.lower())
 
+    # --- #32 review: a developer's local diff/log config cannot change the diff commit mode parses ---
+
+    def test_local_prefix_config_cannot_misparse_a_diff_path(self) -> None:
+        # diff.noprefix drops the `b/` of `+++ b/<path>`, so a path under a directory `b/` lost its
+        # first component: its allow key and printed location diverged from tree mode.
+        # mnemonicPrefix and srcPrefix/dstPrefix leave `git show` alone on git 2.43 (the latter two
+        # exist from 2.45) -- guards for newer git
+        line = "keep zyxname here"
+        allow = self.tmp / "allow.txt"
+        allow.write_text(ds.line_key("b/note.txt", line) + "  reviewed ordinary prose\n", encoding="utf-8")
+        for number, settings in enumerate(([("diff.noprefix", "true")], [("diff.mnemonicPrefix", "true")],
+                                            [("diff.srcPrefix", "S/"), ("diff.dstPrefix", "D/")])):
+            with self.subTest(settings=settings):
+                for key, value in settings:
+                    git(self.repo, "config", key, value)
+                try:
+                    self.commit({"b/note.txt": f"{line}\n", "b/other.txt": f"zyxname {number}\n"})
+                    code, out = self.scan("--allow", str(allow), "--tree", "HEAD", "--commits", "-1 HEAD")
+                    self.assertEqual(code, 1)
+                    self.assertNotIn("note.txt", out)                     # the allowlisted line stays allowed
+                    self.assertIn(" b/other.txt: denylist entry 1", out)  # the full path, not `other.txt`
+                finally:
+                    for key, _value in settings:
+                        git(self.repo, "config", "--unset", key)
+
+    def test_local_diff_relative_config_cannot_hide_changes_outside_the_directory(self) -> None:
+        # with diff.relative, `git show` run from a subdirectory (--repo inside the repository)
+        # shows only that subdirectory's changes, so a term added elsewhere was missed
+        git(self.repo, "config", "diff.relative", "true")
+        self.commit({"sub/clean.txt": "clean\n", "top.txt": "zyxname\n"})
+        code, out = self.scan("--repo", str(self.repo / "sub"), "--commits", "HEAD")
+        self.assertEqual(code, 1)
+        self.assertIn(" top.txt: denylist entry 1", out)
+
+    def test_local_diff_merges_config_cannot_change_how_a_merge_is_diffed(self) -> None:
+        # log.diffMerges=combined turned the merge's first-parent diff into a combined diff that
+        # holds nothing for a file only one parent changed, so the lines the merge brings in vanished
+        self.commit({"base.txt": "base\n"})
+        git(self.repo, "checkout", "-q", "-b", "side")
+        self.commit({"side.txt": "brought in zyxname\n"})
+        git(self.repo, "checkout", "-q", "main")
+        self.commit({"main.txt": "main\n"})
+        git(self.repo, "merge", "-q", "--no-ff", "-m", "merge side", "side")
+        git(self.repo, "config", "log.diffMerges", "combined")
+        code, out = self.scan("--commits", "-1 HEAD")  # just the merge commit
+        self.assertEqual(code, 1)
+        self.assertIn(" side.txt: denylist entry 1", out)
+
     # --- #32 E4: the identity check reads author and committer as separate fields ---
 
     def commit_as(self, author_email: str, committer_email: str) -> None:
