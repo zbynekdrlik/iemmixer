@@ -177,14 +177,16 @@ try {
     $msiKey = "$enum\Device Parameters\Interrupt Management\MessageSignaledInterruptProperties"
     New-Item -Path $msiKey -Force | Out-Null
     New-ItemProperty -LiteralPath $msiKey -Name 'MSISupported' -PropertyType DWord -Value 1 | Out-Null
-    # The card's mask exists as REG_BINARY (a KAFFINITY); the item writes a QWORD (A1).
+    # The card's mask exists as REG_BINARY with another mask; undo restores exactly it (A1).
     $apKey = "$enum\Device Parameters\Interrupt Management\Affinity Policy"
     New-Item -Path $apKey -Force | Out-Null
     New-ItemProperty -LiteralPath $apKey -Name 'AssignmentSetOverride' -PropertyType Binary -Value ([byte[]](4, 0, 0, 0, 0, 0, 0, 0)) | Out-Null
     $r3 = Invoke-IemTuningApply -ProfilePath $pp -Tier 3
     Assert (@(Rows $r3 'failed').Count -eq 0) 'tier3-apply-has-no-failure'
     $ap = Get-Item -LiteralPath "$enum\Device Parameters\Interrupt Management\Affinity Policy"
-    Assert ($ap.GetValue('DevicePolicy') -eq 4 -and $ap.GetValue('AssignmentSetOverride') -eq 5) 'tier3-affinity-policy-and-mask'
+    # The mask is written as REG_BINARY, the KAFFINITY's canonical form: 8 bytes, little endian (M3).
+    $apBytes = (@($ap.GetValue('AssignmentSetOverride') | ForEach-Object { $_.ToString('x2') }) -join '')
+    Assert ($ap.GetValue('DevicePolicy') -eq 4 -and "$($ap.GetValueKind('AssignmentSetOverride'))" -eq 'Binary' -and $apBytes -eq '0500000000000000') 'tier3-affinity-policy-and-binary-mask'
     Assert ((Get-Item -LiteralPath $nic).GetValue('PowerSaving') -eq '0' -and (Get-Item -LiteralPath $nic).GetValue('*RssBaseProcNumber') -eq '4') 'tier3-nic-values'
     $st = Get-IemTuningState -ProfilePath $pp
     Assert (@($st.items | Where-Object { $_.tier -eq 3 -and -not $_.pending }).Count -eq 0) 'tier3-items-are-pending-until-a-reboot'
