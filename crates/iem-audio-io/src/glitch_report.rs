@@ -37,8 +37,10 @@ pub fn marker_text(g: &Glitch, base: i64, freq: i64, emit: i64) -> String {
     )
 }
 
-/// Writes one marker per glitch through `write`, oldest first, with the QPC
-/// count `now` returns as the marker's emit time.
+/// Writes one marker per glitch through `write`, oldest first. Each marker's
+/// emit time is the QPC count `now` returns right before that marker is
+/// written: `latency_report.py` places the glitch at the marker's trace time
+/// minus (emit − at), so a batch must not share one emit time.
 pub fn write_markers(
     glitches: &[Glitch],
     base: i64,
@@ -46,8 +48,8 @@ pub fn write_markers(
     mut now: impl FnMut() -> i64,
     mut write: impl FnMut(&str),
 ) {
-    let emit = now();
     for g in glitches {
+        let emit = now();
         write(&marker_text(g, base, freq, emit));
     }
 }
