@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use iem_core::legacy::MixerBackup;
 use iem_engine::core::{reconcile, to_state};
-use iem_engine::persist::{Persisted, Store};
+use iem_engine::persist::{Persisted, Source, Store};
 use iem_rpp::aliases::parse_aliases;
 use iem_rpp::backup::cross_check;
 use iem_rpp::import::{compare, import};
@@ -152,20 +152,24 @@ pub fn run(args: &[String]) -> Result<String, Failure> {
     // left by a crash mid-save: `Store::live_state`); only seed current.json
     // when there is none. Looked at before anything is written: a directory
     // it cannot read refuses the seed whole (#32). The baseline goes through
-    // its own temp file, so an interrupted save stays untouched.
-    let keep_current = seed_if_absent && store.live_state().map_err(io)?.is_some();
+    // its own temp file, so an interrupted save stays untouched. The report
+    // names the file kept.
+    let kept = if seed_if_absent {
+        store.live_state().map_err(io)?.and_then(Source::file_name)
+    } else {
+        None
+    };
     store.save_baseline(&persisted).map_err(io)?;
-    if !keep_current {
+    if kept.is_none() {
         store.save(&persisted).map_err(io)?;
     }
+    let also = kept.map_or_else(
+        || ", current.json".to_owned(),
+        |file| format!("; {file} kept (--seed-if-absent)"),
+    );
     report.push(format!(
-        "state written to {} (baseline.json{})",
-        dir.display(),
-        if keep_current {
-            "; current.json kept (--seed-if-absent)"
-        } else {
-            ", current.json"
-        }
+        "state written to {} (baseline.json{also})",
+        dir.display()
     ));
     Ok(report.join("\n"))
 }
