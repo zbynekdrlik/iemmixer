@@ -484,6 +484,34 @@ class DenylistScanTests(unittest.TestCase):
         allow.write_text("\n".join(keys) + "\n", encoding="utf-8")
         self.assertEqual(self.scan("--allow", str(allow), "--tree", "HEAD", "--commits", "HEAD")[0], 0)
 
+    # --- #32 E1: .gitattributes (binary, -diff, a textconv driver) never hide content ---
+
+    def assert_history_term_found_despite(self, attributes: str, name: str) -> None:
+        # the term is added and removed again, so only commit mode can find it (tree mode sees HEAD)
+        self.commit({".gitattributes": attributes, name: "a,zyxname\n"}, message="add under an attribute")
+        self.commit({name: "a,clean\n"}, message="remove the term again")
+        self.assertEqual(self.scan("--tree", "HEAD")[0], 0)
+        code, out = self.scan("--tree", "HEAD", "--commits", "HEAD")
+        self.assertEqual(code, 1, f"commit mode honoured {attributes.strip()!r}")
+        self.assertNotIn("zyxname", out.lower())
+
+    def test_a_minus_diff_attribute_does_not_hide_content_in_commit_mode(self) -> None:
+        self.assert_history_term_found_despite("*.csv -diff\n", "data.csv")
+
+    def test_a_binary_attribute_does_not_hide_content_in_commit_mode(self) -> None:
+        self.assert_history_term_found_despite("*.dat binary\n", "table.dat")
+
+    def test_a_textconv_driver_does_not_hide_content_in_commit_mode(self) -> None:
+        git(self.repo, "config", "diff.hide.textconv", "true")  # converts every version to nothing
+        self.assert_history_term_found_despite("*.txt diff=hide\n", "note.txt")
+
+    def test_tree_mode_reads_the_bytes_of_an_attribute_marked_file(self) -> None:
+        self.commit({".gitattributes": "*.csv -diff\n*.dat binary\n", "a.csv": "zyxname\n", "b.dat": "zyxname\n"})
+        code, out = self.scan("--tree", "HEAD")
+        self.assertEqual(code, 1)
+        self.assertIn("tree a.csv:1: denylist entry 1", out)
+        self.assertIn("tree b.dat:1: denylist entry 1", out)
+
 
 if __name__ == "__main__":
     unittest.main()
