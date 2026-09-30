@@ -562,6 +562,47 @@ fn a_read_that_fails_briefly_is_tried_again() {
 }
 
 #[test]
+fn only_a_read_error_that_may_pass_is_tried_again() {
+    // #32 minor-5: a directory where current.json belongs (IsADirectory on
+    // Linux, access denied on Windows) does not turn readable by waiting:
+    // it is Unreadable at once, with no pause.
+    let (_d, faulty, s) = faulty_store();
+    s.save_baseline(&sample(4)).unwrap();
+    fs::create_dir(s.dir().join(CURRENT)).unwrap();
+    let loaded = s.load(&test_site());
+    assert_eq!(
+        (loaded.source, loaded.current_json),
+        (Source::Baseline, FileState::Unreadable)
+    );
+    assert_eq!(faulty.pauses(), 0);
+}
+
+#[test]
+fn a_boot_pauses_between_read_tries_two_seconds_at_most() {
+    // #32 minor-5: each file that stays locked took its four pauses (0.8 s
+    // each), so a few of them held the engine past the guard's READY_S
+    // (10 s) before it listened. The pauses of one load are 10 in all
+    // (2 s); a file read once they are spent still gets its one try.
+    let (_d, faulty, s) = faulty_store();
+    for rev in 1..=3 {
+        s.save(&sample(rev)).unwrap();
+    }
+    fs::write(s.dir().join(TMP), encode(&sample(4)).unwrap()).unwrap();
+    for name in [CURRENT, TMP, "gen-0000000002.json"] {
+        faulty.set_locked(&s.dir().join(name), true);
+    }
+    let loaded = s.load(&test_site());
+    assert_eq!(faulty.pauses(), 10);
+    assert_eq!(loaded.source, Source::Generation(1));
+    let unreadable = loaded
+        .alarms
+        .iter()
+        .filter(|a| a.contains(" cannot be read ("))
+        .count();
+    assert_eq!(unreadable, 3, "{:?}", loaded.alarms);
+}
+
+#[test]
 fn an_unreadable_save_tmp_or_generation_is_named_in_an_alarm() {
     let g = test_site();
     let (_d, faulty, s) = faulty_store();
