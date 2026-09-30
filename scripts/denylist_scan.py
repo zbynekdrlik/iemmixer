@@ -149,19 +149,43 @@ def decode(data: bytes) -> str:
     return data.decode("utf-8", errors="replace")
 
 
+_OCTAL = frozenset(b"01234567")
+
+
 def unquote_c(quoted: bytes) -> bytes:
-    """A path git wrote C-quoted (`"b/Kl\\303\\241vor"`) back to its exact bytes."""
-    body, out, i = quoted[1:-1], bytearray(), 0
-    while i < len(body):
-        if body[i:i + 1] != b"\\":
-            out += body[i:i + 1]
+    """A path git wrote C-quoted (`"b/Kl\\303\\241vor"`) back to its exact bytes.
+
+    Defensive: a malformed escape (a lone trailing backslash, an unknown escape
+    letter, a short or out-of-range octal) never crashes and never drops the
+    bytes that follow — the backslash is kept literal so a term cannot hide
+    behind a crafted escape. Well-formed octal (`\\NNN`) and letter escapes
+    decode exactly as before.
+    """
+    body = quoted[1:-1] if len(quoted) >= 2 and quoted[:1] == b'"' and quoted[-1:] == b'"' else quoted
+    out, i, n = bytearray(), 0, len(body)
+    while i < n:
+        if body[i] != 0x5C:  # not a backslash
+            out.append(body[i])
             i += 1
-        elif body[i + 1:i + 2] in (b"0", b"1", b"2", b"3", b"4", b"5", b"6", b"7"):
-            out.append(int(body[i + 1:i + 4], 8))
-            i += 4
-        else:
-            out.append(C_ESCAPES[body[i + 1:i + 2].decode("ascii")])
+            continue
+        nxt = body[i + 1:i + 2]
+        if nxt and nxt[0] in _OCTAL:
+            j = i + 1  # the leading run of up to three octal digits (git emits exactly three)
+            while j < n and j < i + 4 and body[j] in _OCTAL:
+                j += 1
+            value = int(body[i + 1:j], 8)
+            if value <= 0xFF:
+                out.append(value)
+                i = j
+                continue
+        elif (letter := nxt.decode("ascii", "replace")) in C_ESCAPES:
+            out.append(C_ESCAPES[letter])
             i += 2
+            continue
+        # lone trailing backslash, unknown escape or out-of-range octal: keep the backslash literal
+        # so the bytes that follow are re-read and a term cannot hide behind a crafted escape
+        out.append(0x5C)
+        i += 1
     return bytes(out)
 
 
