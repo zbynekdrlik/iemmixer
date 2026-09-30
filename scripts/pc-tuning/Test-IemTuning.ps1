@@ -104,13 +104,14 @@ function New-TestNic([string]$Hwid, [string]$Adapter = '', [string]$Key = 'HKLM:
 function New-TestProfile([string]$Hwid, [hashtable]$Set = @{}) {
     $p = [ordered]@{
         version = 1; journal = (Join-Path $dir 'journal.json'); registry_root = $root
-        layout = [ordered]@{ housekeeping = @(0); card = @(0, 2); nic = @(0); audio = @(0) }
+        # Disjoint roles on the 4-processor runner, as the window requires.
+        layout = [ordered]@{ housekeeping = @(0); nic = @(1); card = @(2); audio = @(3) }
         plan = [ordered]@{ guid = $testPlan; source = $activeBefore }
         governor = 'W32Time'; placement = @('PING'); services_disable = @('Spooler'); services_mode = @()
         updates = [ordered]@{ services = @(); tasks = @() }
         maintenance = [ordered]@{ off = $true; tasks = @("$taskPath$taskName", '\iemmixer-test\no-such-task') }
         defender = [ordered]@{ paths = @($dir); processes = @() }
-        devices = @([ordered]@{ id = 'card'; instance = 'PCI\VEN_TEST&DEV_0001\0'; hwid = $Hwid; lps = @(0, 2); enabled = $true })
+        devices = @([ordered]@{ id = 'card'; instance = 'PCI\VEN_TEST&DEV_0001\0'; hwid = $Hwid; lps = @(2); enabled = $true })
         nic = (New-TestNic 'PCI\VEN_FFFE&DEV_0002')
         fingerprint = [ordered]@{ files = @(); keys = @() }
     }
@@ -228,9 +229,9 @@ try {
     }
     # A device's processors must exist, and the card's must be the layout's card
     # role, before its affinity is written (review 3.9).
-    foreach ($c in @(@(@(0, 62), @(0, 62), '*not present*'), @(@(0, 2), @(0), '*layout.card*'), @(@(), @(), '*no processors*'))) {
+    foreach ($c in @(@(@(2, 62), @(2, 62), '*not present*'), @(@(2), @(2, 62), '*layout.card*'), @(@(), @(2), '*no processors*'))) {
         $dv = @([ordered]@{ id = 'card'; instance = 'PCI\VEN_TEST&DEV_0001\0'; hwid = $hw; lps = $c[0]; enabled = $true })
-        $bp = New-TestProfile $hw @{ devices = $dv; layout = [ordered]@{ housekeeping = @(0); card = $c[1]; nic = @(0); audio = @(0) } }
+        $bp = New-TestProfile $hw @{ devices = $dv; layout = [ordered]@{ housekeeping = @(0); nic = @(1); card = $c[1]; audio = @(3) } }
         ThrowsLike { Invoke-IemTuningApply -ProfilePath $bp -Tier 3 -Only @('irq') } $c[2] "tier3-refuses-card-processors '$($c[0] -join ',')'"
     }
     Assert (-not (Test-Path -LiteralPath "$enum\Device Parameters")) 'tier3-refusal-writes-nothing'
@@ -277,16 +278,17 @@ try {
     # The card's mask exists as REG_BINARY with another mask; undo restores exactly it (A1).
     $apKey = "$enum\Device Parameters\Interrupt Management\Affinity Policy"
     New-Item -Path $apKey -Force | Out-Null
-    New-ItemProperty -LiteralPath $apKey -Name 'AssignmentSetOverride' -PropertyType Binary -Value ([byte[]](4, 0, 0, 0, 0, 0, 0, 0)) | Out-Null
+    New-ItemProperty -LiteralPath $apKey -Name 'AssignmentSetOverride' -PropertyType Binary -Value ([byte[]](8, 0, 0, 0, 0, 0, 0, 0)) | Out-Null
     $grant = @{ $inst = @(-3, -2) }
     Set-TuningSeam 'ReadAllocatedIrqs' ({ $grant }.GetNewClosure())
     $r3 = Invoke-IemTuningApply -ProfilePath $pp -Tier 3
     Set-TuningSeam 'ReadAllocatedIrqs' $savedIrqs
     Assert (@(Rows $r3 'failed').Count -eq 0) 'tier3-apply-has-no-failure'
     $ap = Get-Item -LiteralPath "$enum\Device Parameters\Interrupt Management\Affinity Policy"
-    # The mask is written as REG_BINARY, the KAFFINITY's canonical form: 8 bytes, little endian (M3).
+    # The mask is written as REG_BINARY, the KAFFINITY's canonical form: 8 bytes, little
+    # endian (M3); processor 2 is the card's role, mask 4.
     $apBytes = (@($ap.GetValue('AssignmentSetOverride') | ForEach-Object { $_.ToString('x2') }) -join '')
-    Assert ($ap.GetValue('DevicePolicy') -eq 4 -and "$($ap.GetValueKind('AssignmentSetOverride'))" -eq 'Binary' -and $apBytes -eq '0500000000000000') 'tier3-affinity-policy-and-binary-mask'
+    Assert ($ap.GetValue('DevicePolicy') -eq 4 -and "$($ap.GetValueKind('AssignmentSetOverride'))" -eq 'Binary' -and $apBytes -eq '0400000000000000') 'tier3-affinity-policy-and-binary-mask'
     Assert ((Get-Item -LiteralPath $nic).GetValue('PowerSaving') -eq '0' -and (Get-Item -LiteralPath $nic).GetValue('*RssBaseProcNumber') -eq '4') 'tier3-nic-values'
     $st = Get-IemTuningState -ProfilePath $pp
     Assert (@($st.items | Where-Object { $_.tier -eq 3 -and -not $_.pending }).Count -eq 0) 'tier3-items-are-pending-until-a-reboot'
@@ -334,7 +336,7 @@ try {
     $nk = Get-Item -LiteralPath $nic
     Assert ($null -eq $nk.GetValue('*EEE', $null) -and $nk.GetValue('AdvancedEEE') -eq '1') 'tier3-undo-deletes-exactly-the-literal-value'
     $apv = Get-Item -LiteralPath $apKey
-    Assert ("$($apv.GetValueKind('AssignmentSetOverride'))" -eq 'Binary' -and (@($apv.GetValue('AssignmentSetOverride') | ForEach-Object { $_.ToString('x2') }) -join '') -eq '0400000000000000') 'tier3-undo-restores-a-binary-value'
+    Assert ("$($apv.GetValueKind('AssignmentSetOverride'))" -eq 'Binary' -and (@($apv.GetValue('AssignmentSetOverride') | ForEach-Object { $_.ToString('x2') }) -join '') -eq '0800000000000000') 'tier3-undo-restores-a-binary-value'
     Assert ("$($nk.GetValueKind('IemDword'))" -eq 'DWord' -and $nk.GetValue('IemDword') -eq 1) 'tier3-undo-restores-a-dword-value'
     Assert ("$($nk.GetValueKind('IemExpand'))" -eq 'ExpandString' -and $nk.GetValue('IemExpand', $null, 'DoNotExpandEnvironmentNames') -eq '%SystemRoot%\iem') 'tier3-undo-restores-an-expand-string'
     Assert ("$($nk.GetValueKind('IemQword'))" -eq 'QWord' -and $nk.GetValue('IemQword') -eq 7) 'tier3-undo-restores-a-qword-value'
