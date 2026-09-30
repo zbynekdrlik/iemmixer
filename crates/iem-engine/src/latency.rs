@@ -4,6 +4,12 @@
 //! probe measures the delay from the first emitted sample to the first sample
 //! that returns above a threshold — in samples, then milliseconds.
 //!
+//! A threshold cannot tell an echo from a signal that is already on the
+//! return, so a run is measured only when the return was quiet from
+//! [`QUIET_BEFORE`] samples before the emit until [`MIN_ROUND_TRIP`] samples
+//! after it; otherwise the run gives no measurement, never a false one
+//! (#32 D3: a busy return read as a 16-sample echo).
+//!
 //! The probe runs on the RT thread and is RT-safe: it allocates nothing, only
 //! compares samples and moves a few counters. It never runs in a live engine
 //! (only under `--test-signal`, with the loopback return opened).
@@ -13,11 +19,11 @@
 /// at −60 dBFS is still far above the card's noise floor.
 pub const ONSET: f64 = 0.001; // ≈ −60 dBFS
 
-/// The smallest round-trip the probe accepts, in samples. The path is
-/// double-buffered (a period in, a period out) plus the card's converters and
-/// Dante, so a real loopback is far above this; a return that crosses the
-/// threshold within this many samples of the emit is the emit leaking or an
-/// unrelated signal, not an echo, and is ignored (iemmixer#9 review).
+/// The smallest round-trip, in samples. The path is double-buffered (a
+/// period in, a period out) plus the card's converters and Dante, so a real
+/// loopback is far above this; a return that crosses the threshold within
+/// this many samples of the emit is the emit leaking or an unrelated signal,
+/// not an echo, and the run gives no measurement (iemmixer#9 review, #32).
 pub const MIN_ROUND_TRIP: u64 = 16;
 
 /// How long the return must have been quiet (below [`ONSET`]) right before
@@ -28,13 +34,21 @@ pub const MIN_ROUND_TRIP: u64 = 16;
 pub const QUIET_BEFORE: u64 = 9_600;
 
 /// Measures the loopback round-trip. Fed the engine's continuous sample clock
-/// so the emit and the arrival share one timeline.
+/// so the emit and the arrival share one timeline: every block of every
+/// return, in time order, from the stream's start (a time before it counts
+/// as quiet: nothing was open to sound).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LatencyProbe {
     /// The sample index of the first emitted (non-silent) output sample.
     emitted_at: Option<u64>,
-    /// The sample index of the first return sample above [`ONSET`].
+    /// The sample index of the echo's onset: the earliest return sample at or
+    /// above [`ONSET`] from [`MIN_ROUND_TRIP`] after the emit on.
     arrived_at: Option<u64>,
+    /// This run cannot be measured: the return sounded too close to the emit.
+    spoiled: bool,
+    /// The latest return sample at or above [`ONSET`]. What the return
+    /// carried, not the run's: a reset keeps it.
+    last_loud: Option<u64>,
 }
 
 impl LatencyProbe {
@@ -42,47 +56,62 @@ impl LatencyProbe {
         Self::default()
     }
 
-    /// Clears the measurement for a new run (a new test signal).
+    /// Clears the measurement for a new run (a new test signal). What the
+    /// return carried stays: a signal just before the new emit spoils it.
     pub fn reset(&mut self) {
         self.emitted_at = None;
         self.arrived_at = None;
+        self.spoiled = false;
     }
 
     /// Records the emit time once: `at` is the sample index of the first
     /// non-silent output sample of the test signal. Later calls are ignored,
-    /// so the onset of the very first block is kept.
+    /// so the onset of the very first block is kept. A return that sounded
+    /// within [`QUIET_BEFORE`] samples before it spoils the run.
     pub fn emitted(&mut self, at: u64) {
-        if self.emitted_at.is_none() {
-            self.emitted_at = Some(at);
+        if self.emitted_at.is_some() {
+            return;
+        }
+        self.emitted_at = Some(at);
+        if self
+            .last_loud
+            .is_some_and(|l| l.saturating_add(QUIET_BEFORE) >= at)
+        {
+            self.spoiled = true;
         }
     }
 
-    /// Scans one block of the loopback return. `base` is the sample index of
-    /// the block's first sample. Records the arrival once, at the first sample
-    /// at or above [`ONSET`] whose delay from the emit is at least
-    /// [`MIN_ROUND_TRIP`] — a return within that window is the emit leaking or
-    /// an unrelated signal already on the input, not an echo (iemmixer#9
-    /// review). Does nothing until the signal has been emitted.
+    /// Scans one block of one loopback return. `base` is the sample index of
+    /// the block's first sample. The engine feeds every return of every
+    /// block, in time order; the returns of one block may come in any order.
     ///
-    /// A clean measurement needs the return silent when the signal starts, so
-    /// the engine runs one HIL test signal at a time (`start_test` resets the
-    /// probe, and the HIL job serialises the signals).
+    /// Before the emit it only notes the return's latest onset. After it,
+    /// the earliest sample at or above [`ONSET`] from [`MIN_ROUND_TRIP`] on,
+    /// over every return, is the arrival; one earlier (the emit leaking or an
+    /// unrelated signal already on the input) spoils the run, even after an
+    /// arrival read on another return of the same block.
     pub fn feed(&mut self, ret: &[f64], base: u64) {
-        if self.arrived_at.is_some() {
-            return;
+        for (i, &s) in ret.iter().enumerate() {
+            if s.abs() >= ONSET {
+                self.loud(base.saturating_add(i as u64));
+            }
         }
+    }
+
+    /// A return sample at or above [`ONSET`] at `at`.
+    fn loud(&mut self, at: u64) {
+        self.last_loud = Some(self.last_loud.map_or(at, |l| l.max(at)));
         let Some(emit) = self.emitted_at else {
             return;
         };
-        let earliest = emit.saturating_add(MIN_ROUND_TRIP);
-        for (i, &s) in ret.iter().enumerate() {
-            if s.abs() >= ONSET {
-                let at = base.saturating_add(i as u64);
-                if at >= earliest {
-                    self.arrived_at = Some(at);
-                    return;
-                }
-            }
+        if self.spoiled {
+            return;
+        }
+        if at < emit.saturating_add(MIN_ROUND_TRIP) {
+            self.spoiled = true;
+            self.arrived_at = None;
+        } else {
+            self.arrived_at = Some(self.arrived_at.map_or(at, |a| a.min(at)));
         }
     }
 

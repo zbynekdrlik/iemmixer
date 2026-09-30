@@ -1078,11 +1078,11 @@ impl Processor {
         }
     }
 
-    /// The D5(b) loopback round-trip (S6 test 5): while the HIL signal sounds,
-    /// records the first hil-output sample at or above the onset threshold as
-    /// the emit, scans the loopback-return inputs (after the topology's rx)
-    /// for the first return at or above it as the arrival, and stores the
-    /// delay in samples once both are known. No-op unless the return is open.
+    /// The D5(b) loopback round-trip (S6 test 5): records the first hil-output
+    /// sample at or above the onset threshold as the emit, feeds every block
+    /// of every loopback-return input (after the topology's rx) to the probe,
+    /// which judges the echo and a busy return, and stores the delay in
+    /// samples once measured. No-op unless the return is open.
     fn probe_latency(&mut self, block: &mut Block<'_>, off: usize, n: usize) {
         if self.hil_rx == 0 {
             return;
