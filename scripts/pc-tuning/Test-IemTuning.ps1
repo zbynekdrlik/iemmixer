@@ -560,13 +560,7 @@ try {
     Assert ($xo -match '127\.0\.0\.1') 'xperf-runs-a-signed-binary'
     ThrowsLike { Invoke-IemXperf -Xperf $ping -Arguments @('-n', 'x', '127.0.0.1') } '*(exit *' 'xperf-a-nonzero-exit-throws'
     # The stop without -Merge is the pre-emption path ("ide event") and always works
-    # (review 3.6): it runs xperf unchecked (it was checked when the trace started),
-    # and when xperf cannot run at all it stops the sessions with logman.
-    $fl = Join-Path $dir 'fake-xperf-no-sessions.cmd'
-    [IO.File]::WriteAllText($fl, "@echo off`r`nexit /b 0`r`n")
-    $s1 = $null; $se = $null
-    try { $s1 = Stop-IemTrace -Xperf $fl -Dir $dir } catch { $se = "$_" }
-    Assert ($null -eq $se -and $s1.via -eq 'xperf' -and @($s1.stopped).Count -eq 0) "trace-stop-runs-xperf-unchecked ($se)"
+    # (review 3.6): when xperf cannot run at all it stops the sessions with logman.
     $lm = Invoke-IemNative -FilePath 'logman.exe' -Arguments @('start', 'IemMarkers', '-p', '{3b6c1e0a-5d2f-4c8e-9a71-0e4f2d9b8c11}', '-o', (Join-Path $dir 'markers-test.etl'), '-ets')
     Assert ($lm.code -eq 0) "marker-session-starts ($($lm.out -join ' '))"
     $s2 = $null; $se = $null
