@@ -78,6 +78,11 @@ _UTF16_RUNS = (
     ("utf-16-be", re.compile(rb"(?:\x00[\t\x20-\x7e\xa0-\xff]|\x01[\x00-\xff]){2,}")),
 )
 GITLINK = b"160000"  # a submodule entry: its object is a commit, not a blob
+# a commit's metadata (`git show -s`), pinned against local config: --encoding=UTF-8 beats
+# i18n.logOutputEncoding (UTF-16 puts a NUL in every character, ISO-8859-2 re-encodes letters that
+# no reading decodes back); --no-show-signature beats log.showSignature, whose "No signature"
+# would land in the first field
+METADATA = ("show", "-s", "--encoding=UTF-8", "--no-show-signature")
 # every character str.splitlines() breaks a line at
 LINE_SEPARATORS = frozenset("\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029")
 # git's C-quoting of a path in a diff header (core.quotePath)
@@ -542,10 +547,13 @@ def scan_commit_diff(scanner: Scanner, repo: Path, sha: str, seen: set[str], blo
     # srcPrefix / dstPrefix (without them `+++ b/x` under noprefix is the path `b/x` read as `x`);
     # --no-relative beats diff.relative (from a subdirectory it hides every change outside it);
     # --diff-merges=first-parent (what `-m --first-parent` gave by default) beats log.diffMerges,
-    # whose `combined` leaves a merge's diff empty for a file only one parent changed
+    # whose `combined` leaves a merge's diff empty for a file only one parent changed; --root beats
+    # log.showRoot=false (no diff at all for a root commit); --no-show-signature beats
+    # log.showSignature
     diff = git(repo, "-c", "core.quotePath=true", "show", "--format=", "--unified=0", "--no-color",
                "--no-ext-diff", "--text", "--no-textconv", "--no-renames", "--src-prefix=a/",
-               "--dst-prefix=b/", "--no-relative", "--diff-merges=first-parent", sha)
+               "--dst-prefix=b/", "--no-relative", "--diff-merges=first-parent", "--root",
+               "--no-show-signature", sha)
     hits: list[Hit] = []
     added: dict[str, list[Unit]] = {}
     # `+++`/`---` count as headers only before a file's first hunk; inside a hunk an added line
@@ -580,7 +588,7 @@ def identity_problems(repo: Path, sha: str, identities: set[str]) -> list[Identi
     email out of the check. An email holding any such separator is never allowed, and there is no
     strip(): a trailing separator is whitespace to strip() and would make a stranger's email equal
     an allowed one."""
-    author, committer, _end = decode(git(repo, "show", "-s", "--format=%ae%x00%ce%x00", sha)).split("\0")
+    author, committer, _end = decode(git(repo, *METADATA, "--format=%ae%x00%ce%x00", sha)).split("\0")
     return [IdentityProblem(sha[:12], role) for role, email in (("author", author), ("committer", committer))
             if LINE_SEPARATORS.intersection(email) or email.lower() not in identities]
 
@@ -591,7 +599,7 @@ def scan_commits(
     hits: list[Hit | IdentityProblem] = []
     for sha in decode(git(repo, "rev-list", *revlist_args)).split():
         short = sha[:12]
-        metadata = decode(git(repo, "show", "-s", "--format=%an%n%ae%n%cn%n%ce%n%B", sha))
+        metadata = decode(git(repo, *METADATA, "--format=%an%n%ae%n%cn%n%ce%n%B", sha))
         entries = set(scanner.entries_in(metadata)) | set(scanner.entries_in(cp1250_from_git_latin1(metadata)))
         hits += [Hit(f"{short} commit metadata", entry) for entry in sorted(entries)]
         if identities is not None:
