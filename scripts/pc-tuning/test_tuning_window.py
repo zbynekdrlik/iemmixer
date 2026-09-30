@@ -876,6 +876,34 @@ class MeasureTests(WindowHarness):
         analysis = " ; ".join(b for b, e in self.pc.calls if e == "abandon" and "'-merge'" in b)
         self.assertRegex(analysis, r"'cut-1\.kernel\.etl', 'cut-1\.markers\.etl'.*'cut-1\.etl'")
 
+    # Review round 3, m5: a start the event overtook may end after a preempt's
+    # trace-stop found no session — the measure stops it itself.
+    def stop_after_start(self) -> list[str]:
+        order = [b for b, _ in self.pc.calls if "Start-IemTrace" in b or "Stop-IemTrace" in b]
+        return ["start" if "Start-IemTrace" in b else "stop" for b in order]
+
+    def test_a_start_the_event_overtook_is_stopped_by_the_measure(self) -> None:
+        self.pc.on_call = lambda body: (self.dir / "EVENT-NOW").touch() if "Start-IemTrace" in body else None
+        with self.assertRaises(tw.sw.EventNow):
+            tw.cmd_measure(self.env, self.args())
+        self.assertEqual(self.stop_after_start(), ["start", "stop"])
+        self.assertNotIn("-Merge", self.pc.bodies("Stop-IemTrace")[0])
+
+    def test_a_cut_restart_the_event_overtook_is_stopped_by_the_measure(self) -> None:
+        self.pc.progress = {"missed": 1, "overruns": 0, "position_gaps": 0, "callback_thread": 4243}
+        starts = []
+
+        def on_call(body: str) -> None:
+            if "Start-IemTrace" in body:
+                starts.append(body)
+                if len(starts) == 2:
+                    (self.dir / "EVENT-NOW").touch()   # during the cut's restart
+
+        self.pc.on_call = on_call
+        with self.assertRaises(tw.sw.EventNow):
+            tw.cmd_measure(self.env, self.args(circular_mb=1024))
+        self.assertEqual(self.stop_after_start(), ["start", "stop", "start", "stop"])
+
     def test_no_trace_starts_once_the_event_flag_exists(self) -> None:
         self.pc.progress = {"missed": 1, "overruns": 0, "position_gaps": 0, "callback_thread": 4243}
 
