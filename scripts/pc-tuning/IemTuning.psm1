@@ -7,10 +7,11 @@
 # "absent". Nothing here ends a process, forces a service or restarts Windows.
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-# Journal schema 2 (#32 review): raw registry values, a version per tier, boot
-# identities, the iemmixer plan not journaled. Schema 1 is converted on read where
-# that is exact (Update-IemJournalV1), otherwise refused.
-$script:Schema = 2
+# Journal schema 3 (#32 review): raw registry values, a version per tier, boot
+# identities as tokens (review R1), the iemmixer plan not journaled. Schemas 1 and
+# 2 are converted on read (Update-IemJournalV1, Update-IemJournalBoots) where that
+# is exact, otherwise refused.
+$script:Schema = 3
 $script:Utf8NoBom = New-Object System.Text.UTF8Encoding $false
 
 if (-not ('IemPower' -as [type])) {
@@ -184,42 +185,75 @@ function Get-IemBootTime {
     (Get-CimInstance -ClassName Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().ToString('o')
 }
 
-# Two boot-time readings this close can be the same boot (A13). A clock step (time
-# sync) moves LastBootUpTime by the step, typically seconds; a reboot moves it by
-# at least the whole previous session.
-$script:BootToleranceSeconds = 300
-$script:BootIdKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters'
+# The boot key (review R1): VOLATILE, so Windows discards it, token included, at
+# every reboot. Under registry_root in the self-test.
+$script:BootKeyPath = 'HKLM:\SOFTWARE\iemmixer\boot'
+$script:ChildMustBeVolatile = 1021   # ERROR_CHILD_MUST_BE_VOLATILE
+
+function Open-IemBootKey {
+    # The boot key, opened for writing; created volatile when missing (its parents
+    # stable, so only the leaf is volatile). A key that is not volatile (made by
+    # hand, restored from an export) would outlive a reboot: refused. Windows
+    # refuses a stable subkey under a volatile key, which is the probe.
+    param([Parameter(Mandatory)]$Profile)
+    $path = Get-IemRegPath $Profile $script:BootKeyPath
+    if (-not ($path -match '^(HKLM|HKCU):\\(.+)\\([^\\]+)$')) { throw "boot key ${path}: not an HKLM: or HKCU: path" }
+    $leaf = $Matches[3]
+    $hive = [Microsoft.Win32.Registry]::LocalMachine
+    if ($Matches[1] -eq 'HKCU') { $hive = [Microsoft.Win32.Registry]::CurrentUser }
+    $parent = $hive.CreateSubKey($Matches[2])
+    try {
+        $key = $parent.CreateSubKey($leaf, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, [Microsoft.Win32.RegistryOptions]::Volatile)
+    } finally { $parent.Close() }
+    $probe = $null
+    try { $probe = $key.CreateSubKey('stable-probe') } catch {
+        $why = $_.Exception.GetBaseException()
+        if (-not ($why -is [IO.IOException] -and ($why.HResult -band 0xFFFF) -eq $script:ChildMustBeVolatile)) {
+            $key.Close()
+            throw "boot key ${path}: cannot tell whether it is volatile ($($why.Message))"
+        }
+    }
+    if ($null -ne $probe) {
+        $probe.Close(); $key.DeleteSubKey('stable-probe'); $key.Close()
+        throw "boot key ${path} is not volatile, so it would outlive a reboot: delete it, iemmixer then creates it volatile"
+    }
+    return $key
+}
 
 function Get-IemBootIdentity {
-    # This boot: its time and Windows' BootId counter (PrefetchParameters\BootId,
-    # raised at every boot; $null where Windows keeps none) (m5). The counter lives
-    # in the prefetcher's registry area and may stop advancing once Tier 2 disables
-    # SysMain: harmless while 'pending' only reports, and Test-IemSameBoot's time
-    # rule still tells two boots apart then.
-    $id = $null
-    if (Test-Path -LiteralPath $script:BootIdKey) {
-        $v = (Get-Item -LiteralPath $script:BootIdKey).GetValue('BootId', $null)
-        if ($null -ne $v) { $id = [long]$v }
-    }
-    return @{ time = Get-IemBootTime; id = $id }
+    # This boot (review R1): a random GUID token in the volatile boot key. The key
+    # holds the same token exactly while the boot that wrote it lasts, so no clock,
+    # counter or service (SysMain) takes part. The time (LastBootUpTime) is
+    # information only.
+    param([Parameter(Mandatory)]$Profile)
+    $key = Open-IemBootKey -Profile $Profile
+    try {
+        $t = [string]$key.GetValue('token', '')
+        $g = [guid]::Empty
+        if (-not [guid]::TryParse($t, [ref]$g)) {
+            $key.SetValue('token', [guid]::NewGuid().ToString(), [Microsoft.Win32.RegistryValueKind]::String)
+            $t = [string]$key.GetValue('token', '')   # read back: the stored token counts
+        }
+    } finally { $key.Close() }
+    return @{ token = $t; time = Get-IemBootTime }
+}
+
+function Get-IemBootToken {
+    # The token of a boot identity; '' for $null or a schema 1/2 identity (a time
+    # string, or { time, id }), which names no boot (review R1).
+    param([AllowNull()]$Identity)
+    if ($null -eq $Identity -or $Identity -is [string]) { return '' }
+    if ($Identity -is [Collections.IDictionary]) { return [string]$Identity['token'] }
+    if ($Identity.PSObject.Properties['token']) { return [string]$Identity.token }
+    return ''
 }
 
 function Test-IemSameBoot {
-    # Two boot identities ({ time, id }) name the same boot when their BootId
-    # counters, where both have one, are equal (a reboot raises it however quick,
-    # m5) AND their times lie within 300 s (a clock step, A13). The time rule is
-    # the fallback: it decides alone without a counter, and it still separates two
-    # boots when the counter did not advance (it may freeze once SysMain is off);
-    # only a reboot within 300 s with a frozen counter would read as one boot.
+    # Two boot identities name one boot exactly when both carry a token and the
+    # tokens are equal (review R1); their times take no part.
     param([AllowNull()]$A, [AllowNull()]$B)
-    if ($null -eq $A -or $null -eq $B) { return $false }
-    $ta = [string]$A.time; $tb = [string]$B.time
-    if ([string]::IsNullOrEmpty($ta) -or [string]::IsNullOrEmpty($tb)) { return $false }
-    if ($null -ne $A.id -and $null -ne $B.id -and [string]$A.id -ne [string]$B.id) { return $false }
-    $c = [Globalization.CultureInfo]::InvariantCulture
-    $s = [Globalization.DateTimeStyles]::RoundtripKind
-    $d = [datetime]::Parse($ta, $c, $s).ToUniversalTime() - [datetime]::Parse($tb, $c, $s).ToUniversalTime()
-    return [math]::Abs($d.TotalSeconds) -le $script:BootToleranceSeconds
+    $ta = Get-IemBootToken -Identity $A
+    return ($ta -ne '' -and $ta -eq (Get-IemBootToken -Identity $B))
 }
 
 function Invoke-IemNative {
@@ -507,7 +541,7 @@ function Read-IemJournal {
         }
     }
     $schema = [int]$o.schema
-    if ($schema -ne $script:Schema -and $schema -ne 1) { throw "journal ${Path}: schema $schema, this module $($script:Schema): not read" }
+    if (@(1, 2, $script:Schema) -notcontains $schema) { throw "journal ${Path}: schema $schema, this module $($script:Schema): not read" }
     if ($o.PSObject.Properties['applied']) { foreach ($k in 'tier2', 'tier3') { $j.applied[$k] = [int]$o.applied.$k } }
     $j.entered = [bool]$o.entered
     foreach ($s in 'global', 'mode', 'reverted') {
@@ -520,17 +554,18 @@ function Read-IemJournal {
         $j.problems = Update-IemJournalV1 -Journal $j -Path $Path
         if (@($j.problems).Count -gt 0) { $j.schema = 1 }
     }
+    if ($schema -lt $script:Schema) { Update-IemJournalBoots -Journal $j }
     $blocking = @(@($j.problems) | Where-Object { -not $ModeOnly -or $_.section -eq 'mode' })
     if ($blocking.Count -gt 0) { throw (@($blocking | ForEach-Object { $_.text }) -join '; ') }
     return $j
 }
 
 function Update-IemJournalV1 {
-    # A schema-1 journal (before the #32 review) becomes schema 2 only where the
+    # A schema-1 journal (before the #32 review) becomes schema 3 only where the
     # conversion is exact (m1): its one 'version' is dropped, so both tiers stay at
     # applied version 0 and every held tier reports drift until applied again (the
-    # tier it named is unknown); a boot time string becomes an identity without a
-    # counter (the A13 tolerance decides); a registry entry whose before-value was
+    # tier it named is unknown); its boot times are converted by
+    # Update-IemJournalBoots; a registry entry whose before-value was
     # absent gets raw 'absent'; the plan-exists / plan-value mode entries are
     # dropped (the plan stays defined and is never reverted now, A6/M2). A registry
     # entry with a before-value but no kind cannot be restored exactly: it stays as
@@ -546,7 +581,6 @@ function Update-IemJournalV1 {
                 $Journal.order[$s] = @($Journal.order[$s] | Where-Object { $_ -ne $k })
                 continue
             }
-            if ($e.boot -is [string]) { $e.boot = @{ time = $e.boot; id = $null } }
             if ([string]$e.kind -eq 'reg' -and -not $e.PSObject.Properties['raw']) {
                 if ($null -ne $e.before) {
                     $problems += [pscustomobject]@{ section = $s; text = "journal ${Path}: schema 1, entry '$k' holds a registry before-value without its kind, so it cannot be restored exactly: restore it by hand and remove the entry" }
@@ -556,10 +590,35 @@ function Update-IemJournalV1 {
             }
         }
     }
-    foreach ($k in @($Journal.reverted.Keys)) {
-        if ($Journal.reverted[$k] -is [string]) { $Journal.reverted[$k] = @{ time = $Journal.reverted[$k]; id = $null } }
-    }
     return ,$problems
+}
+
+function ConvertFrom-IemOldBoot {
+    # A schema 1/2 boot identity (a time string, or { time, id }) as one without a
+    # token; an identity that has a token field stays as it is.
+    param([AllowNull()]$Boot)
+    if ($null -eq $Boot) { return $null }
+    if ($Boot -is [string]) { return @{ token = $null; time = $Boot } }
+    if ($Boot.PSObject.Properties['token']) { return $Boot }
+    $time = $null
+    if ($Boot.PSObject.Properties['time']) { $time = [string]$Boot.time }
+    return @{ token = $null; time = $time }
+}
+
+function Update-IemJournalBoots {
+    # Schema 1 and 2 boot identities (a boot time; { time, id } with Windows'
+    # BootId counter) cannot prove a boot, so each becomes an identity without a
+    # token: never this boot (review R1). An older module's write then never reads
+    # as 'pending', the direction that never prescribes a revert reboot (a false
+    # 'pending' does, in post_boot_verdict). The time stays as information.
+    param([Parameter(Mandatory)][hashtable]$Journal)
+    foreach ($s in 'global', 'mode') {
+        foreach ($k in @($Journal[$s].Keys)) {
+            $e = $Journal[$s][$k]
+            if ($null -ne $e -and $e.PSObject.Properties['boot']) { $e.boot = ConvertFrom-IemOldBoot -Boot $e.boot }
+        }
+    }
+    foreach ($k in @($Journal.reverted.Keys)) { $Journal.reverted[$k] = ConvertFrom-IemOldBoot -Boot $Journal.reverted[$k] }
 }
 
 function Write-IemJournal {
@@ -631,7 +690,7 @@ function Invoke-IemItem {
             }
             # The before-value stays the first one; the boot is the latest write's,
             # so a value re-written after a reboot is pending again (A3).
-            if ([string]$e.boot.time -ne [string]$Boot.time -or [string]$e.boot.id -ne [string]$Boot.id) {
+            if (-not (Test-IemSameBoot -A $e.boot -B $Boot)) {
                 $e.boot = $Boot
                 Write-IemJournal -Path $Path -Journal $Journal
             }
@@ -964,7 +1023,7 @@ function Invoke-IemTuningApply {
     Assert-IemLayout -Profile $profile
     Assert-IemOnly -Profile $profile -Tier $Tier -Only $Only
     $j = Read-IemJournal -Path $profile.journal
-    $boot = Get-IemBootIdentity
+    $boot = Get-IemBootIdentity -Profile $profile
     $rows = @(foreach ($item in (Get-IemGlobalItems -Profile $profile -Tier $Tier -Only $Only -Check)) {
         Invoke-IemItem -Item $item -Journal $j -Section 'global' -Path $profile.journal -Boot $boot
     })
@@ -983,7 +1042,7 @@ function Undo-IemTuning {
     $j = Read-IemJournal -Path $profile.journal
     $held = @(foreach ($k in @($j.order.global)) { $e = $j.global[$k]; if ($null -ne $e -and [int]$e.tier -eq $Tier) { [string]$e.group } })
     Assert-IemOnly -Profile $profile -Tier $Tier -Only $Only -Also $held
-    $boot = Get-IemBootIdentity
+    $boot = Get-IemBootIdentity -Profile $profile
     $keys = @($j.order.global); [array]::Reverse($keys)
     $rows = @()
     foreach ($k in $keys) {
@@ -1010,9 +1069,9 @@ function Enter-IemTuningMode {
     # Built, and so checked (M2), before anything is written.
     $items = Get-IemModeItems -Profile $profile -Only $Only -Idle $Idle
     $j = Read-IemJournal -Path $profile.journal
+    $boot = Get-IemBootIdentity -Profile $profile
     $j.entered = $true
     Write-IemJournal -Path $profile.journal -Journal $j   # before any write: an exit after a crash finds it
-    $boot = Get-IemBootIdentity
     $planWritten = $false
     $rows = @(foreach ($item in $items) {
         $row = Invoke-IemItem -Item $item -Journal $j -Section 'mode' -Path $profile.journal -Boot $boot
@@ -1065,7 +1124,7 @@ function Get-IemTuningState {
     param([Parameter(Mandatory)][string]$ProfilePath)
     $profile = Read-IemProfile -Path $ProfilePath
     $j = Read-IemJournal -Path $profile.journal
-    $boot = Get-IemBootIdentity
+    $boot = Get-IemBootIdentity -Profile $profile
     $rows = @()
     foreach ($tier in 2, 3) {
         foreach ($item in (Get-IemGlobalItems -Profile $profile -Tier $tier)) {
@@ -1087,7 +1146,7 @@ function Get-IemTuningState {
     })
     [pscustomobject]@{
         version = [int]$profile.version; applied_version = [pscustomobject]@{ tier2 = $j.applied.tier2; tier3 = $j.applied.tier3 }
-        boot = $boot.time; boot_id = $boot.id
+        boot = $boot.time; boot_token = $boot.token
         drift = [bool]($driftTiers.Count -gt 0); drift_tiers = $driftTiers
         entered = $j.entered; mode_items = @($j.order.mode); items = $rows
     }
