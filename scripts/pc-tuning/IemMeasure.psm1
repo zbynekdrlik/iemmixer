@@ -11,6 +11,9 @@ $script:MarkerProvider = '3b6c1e0a-5d2f-4c8e-9a71-0e4f2d9b8c11'
 $script:MarkerSession = 'IemMarkers'
 $script:KernelSession = 'NT Kernel Logger'
 $script:NearEvents = @('DPC', 'TimedDPC', 'ThreadedDPC', 'Interrupt', 'CSwitch', 'ReadyThread')
+# xperf: WPT 10 or newer (the toolkit the dpcisr/dumper parsers read), Microsoft-signed.
+$script:XperfMinVersion = [version]'10.0'
+$script:XperfChecked = @{}   # paths verified in this process (m4)
 
 function Get-IemNow { (Get-Date).ToUniversalTime().ToString('o') }
 
@@ -27,6 +30,11 @@ function New-IemTraceArguments {
 function Invoke-IemXperf {
     param([Parameter(Mandatory)][string]$Xperf, [Parameter(Mandatory)][string[]]$Arguments)
     if (-not (Test-Path -LiteralPath $Xperf)) { throw "xperf not found at $Xperf (run wpt-install)" }
+    # It runs elevated: only a Microsoft-signed, new-enough binary, checked once per process (m4).
+    if (-not $script:XperfChecked.ContainsKey($Xperf)) {
+        [void](Assert-IemXperf -Xperf $Xperf -MinVersion $script:XperfMinVersion)
+        $script:XperfChecked[$Xperf] = $true
+    }
     # stderr is output; the exit code alone decides (A11).
     $r = Invoke-IemNative -FilePath $Xperf -Arguments $Arguments
     if ($r.code -ne 0) { throw "xperf $($Arguments -join ' ') (exit $($r.code)): $($r.out -join ' ')" }
@@ -144,7 +152,7 @@ function Install-IemWpt {
     # Performance Toolkit; no reboot, no service, no driver. The xperf it finds
     # or installs must be Microsoft-signed and WPT 10 or newer (the toolkit the
     # report parsers read; -MinVersion raises the floor).
-    param([Parameter(Mandatory)][string]$Setup, [Parameter(Mandatory)][string]$Xperf, [version]$MinVersion = '10.0')
+    param([Parameter(Mandatory)][string]$Setup, [Parameter(Mandatory)][string]$Xperf, [version]$MinVersion = $script:XperfMinVersion)
     if (Test-Path -LiteralPath $Xperf) { return [pscustomobject]@{ installed = 'already'; version = (Assert-IemXperf -Xperf $Xperf -MinVersion $MinVersion) } }
     $sig = Get-AuthenticodeSignature -LiteralPath $Setup
     if ($sig.Status -ne 'Valid' -or "$($sig.SignerCertificate.Subject)" -notlike '*O=Microsoft Corporation*') {
