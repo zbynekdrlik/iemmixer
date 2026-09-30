@@ -378,14 +378,23 @@ try {
     Assert (($a -join ' ') -eq '-on PROC_THREAD+LOADER+DPC+INTERRUPT+CSWITCH+DISPATCHER -BufferSize 1024 -MinBuffers 256 -MaxBuffers 1024 -FileMode Circular -MaxFile 1024 -f C:\t\kernel.etl -start IemMarkers -on 3b6c1e0a-5d2f-4c8e-9a71-0e4f2d9b8c11 -f C:\t\markers.etl') 'trace-arguments'
     $l = ConvertFrom-IemLoggers -Text "Logger Name           : NT Kernel Logger`r`nLogger Mode Settings (11)`r`nLogger Name           : IemMarkers`r`n"
     Assert ($l.Count -eq 2 -and $l[0] -eq 'NT Kernel Logger' -and $l[1] -eq 'IemMarkers') 'loggers-parse'
-    # xperf's stderr is output: its exit code alone decides (A11). A stand-in xperf
-    # writes a line to each stream.
-    $fx = Join-Path $dir 'fake-xperf.cmd'
+    # A native program's stderr is output: its exit code alone decides (A11). A
+    # stand-in program writes a line to each stream. (It is tested through
+    # Invoke-IemNative: Invoke-IemXperf now refuses an unsigned stand-in, m4.)
+    $fx = Join-Path $dir 'fake-native.cmd'
     [IO.File]::WriteAllText($fx, "@echo off`r`necho out-line`r`necho err-line 1>&2`r`nexit /b 0`r`n")
-    $xo = (Invoke-IemXperf -Xperf $fx -Arguments @('-Loggers')) -join ' '
-    Assert ($xo -match 'out-line' -and $xo -match 'err-line') 'xperf-stderr-with-exit-0-is-not-an-error'
+    $no = Invoke-IemNative -FilePath $fx -Arguments @('-Loggers')
+    $nt = (@($no.out) -join ' ')
+    Assert ($no.code -eq 0 -and $nt -match 'out-line' -and $nt -match 'err-line') 'native-stderr-with-exit-0-is-output'
+    ThrowsLike { Invoke-IemXperf -Xperf $fx -Arguments @('-Loggers') } '*signature*' 'xperf-refuses-an-unsigned-binary'
     [IO.File]::WriteAllText($fx, "@echo off`r`necho bad-line 1>&2`r`nexit /b 3`r`n")
-    ThrowsLike { Invoke-IemXperf -Xperf $fx -Arguments @('-Loggers') } '*(exit 3)*' 'xperf-a-nonzero-exit-throws'
+    $nb = Invoke-IemNative -FilePath $fx
+    Assert ($nb.code -eq 3 -and ((@($nb.out) -join ' ') -match 'bad-line')) 'native-reports-a-nonzero-exit'
+    # xperf runs only when Microsoft signed it and it is new enough, checked once per
+    # process (m4); PING.EXE stands in for a signed binary.
+    $xo = (Invoke-IemXperf -Xperf $ping -Arguments @('-n', '1', '127.0.0.1')) -join ' '
+    Assert ($xo -match '127\.0\.0\.1') 'xperf-runs-a-signed-binary'
+    ThrowsLike { Invoke-IemXperf -Xperf $ping -Arguments @('-n', 'x', '127.0.0.1') } '*(exit *' 'xperf-a-nonzero-exit-throws'
     # An existing xperf counts as installed only when Microsoft signed it and its
     # version is new enough (A12); PING.EXE stands in for a signed binary.
     $fakeX = Join-Path $dir 'xperf.exe'
