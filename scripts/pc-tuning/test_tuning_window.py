@@ -893,6 +893,11 @@ class MeasureTests(WindowHarness):
         self.assertIn("audio_cpus = '14'", first)
         self.assertIn("stress_cpus = '6-13'", second)
 
+    def test_the_default_stress_cpus_leave_out_the_audio_cpus(self) -> None:
+        # Review m12: an --audio-cpus inside the housekeeping layout is taken out of it.
+        tw.cmd_measure(self.env, self.args(stress=4, audio_cpus="6,7"))
+        self.assertIn("stress_cpus = '0,1,8,9,10,11,12,13'", self.pc.bodies("Write-GoldenRequest")[0])
+
     def test_a_dpc_trace_has_no_near_glitch_view(self) -> None:
         self.pc.progress = {"missed": 1, "overruns": 0, "position_gaps": 0, "callback_thread": 4243}
         tw.cmd_measure(self.env, self.args(circular_mb=1024))

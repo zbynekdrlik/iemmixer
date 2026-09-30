@@ -78,6 +78,13 @@ class RequestTests(unittest.TestCase):
         sw.check_request("duplex", 32, 600, 40, 4, 5)                  # no audio CPU: the threads run anywhere
         sw.check_request("duplex", 32, 600, 40, 0, 5, audio_cpus="14")  # no stress
 
+    def test_stress_and_audio_cpus_never_overlap(self) -> None:
+        # Review m12, as the spike (lane F1): any overlap, with or without busy threads.
+        for stress in (4, 0):
+            with self.assertRaisesRegex(sw.StepError, r"overlap on processors \[13, 14\]", msg=str(stress)):
+                sw.check_request("duplex", 32, 600, 40, stress, 5, audio_cpus="13-14", stress_cpus="6-13,14")
+        sw.check_request("duplex", 32, 600, 40, 4, 5, audio_cpus="14", stress_cpus="6-13")
+
     def test_timeouts(self) -> None:
         self.assertEqual([sw.run_timeout("probe", 600, 5), sw.run_timeout("duplex", 600, 5), sw.run_timeout("reopen", 600, 5)], [60, 660, 210])
         self.assertEqual(sw.run_timeout("hwlat", 30, 1), 90)
