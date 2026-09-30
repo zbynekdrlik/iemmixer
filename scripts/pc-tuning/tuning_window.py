@@ -359,13 +359,32 @@ def trace_options(trace: str, circular_mb: int) -> str:
     return (" -CSwitch" if trace == "diag" else "") + (f" -CircularMB {circular_mb}" if circular_mb else "")
 
 
+def set_aside(d: str, cut: int) -> str:
+    """After a cut's stop: its raw session files become cut-N.kernel.etl and
+    cut-N.markers.etl (a missing marker file stays missing), so the restart
+    writes fresh ones and the merge waits for the analysis."""
+    return " ; ".join(f"if (Test-Path -LiteralPath (Join-Path {d} '{raw}.etl')) {{ Rename-Item -LiteralPath (Join-Path {d} '{raw}.etl') "
+                      f"-NewName 'cut-{cut}.{raw}.etl' }}" for raw in ("kernel", "markers"))
+
+
+def merge(x: str, d: str, base: str) -> str:
+    """xperf -merge of one trace's raw session files (<base>kernel.etl and
+    <base>markers.etl, the ones present) into its .etl — what a merging stop
+    (`xperf -stop ... -d`) does, as a separate, abandonable call."""
+    out = f"{base[:-1]}.etl" if base else "trace.etl"
+    return (f"$m = @(foreach ($n in @('{base}kernel.etl', '{base}markers.etl')) {{ $p = Join-Path {d} $n ; "
+            f"if (Test-Path -LiteralPath $p) {{ $p }} }}) ; "
+            f"[void](Invoke-IemXperf -Xperf {x} -Arguments (@('-merge') + $m + @((Join-Path {d} '{out}'))))")
+
+
 def analysis(x: str, d: str, cuts: int, diag: bool) -> tuple[str, list[str]]:
-    """The xperf analysis of a stopped trace and of each cut: one PowerShell
-    body and the files it leaves in the run folder (dpcisr for every trace,
-    the near-glitch view for every trace of a diag run)."""
+    """The merge and xperf analysis of a stopped trace and of each cut: one
+    PowerShell body and the files it leaves in the run folder (dpcisr for
+    every trace, the near-glitch view for every trace of a diag run)."""
     calls, names = [], []
     for etl in [None] + [f"cut-{i}.etl" for i in range(1, cuts + 1)]:
         name, base = (f" -Name '{etl}'", etl[:-len(".etl")] + ".") if etl else ("", "")
+        calls.append(merge(x, d, base))
         calls.append(f"Invoke-IemDpcIsr -Xperf {x} -Dir {d}{name}")
         names.append(f"{base}dpcisr.txt")
         if diag:
@@ -430,8 +449,14 @@ def _measure(env, args, profile: dict, state: dict, run_dir: str, since: str, tr
         do_cut, cut["seen"] = should_cut(progress, cut["seen"], cut["n"], bool(tracing and args.circular_mb))
         if do_cut:
             cut["n"] += 1
-            tps(env, f"Stop-IemTrace -Xperf {xperf(env)} -Dir {ps_quote(run_dir)} -Merge -Name 'cut-{cut['n']}.etl' ; "
-                     f"Start-IemTrace -Xperf {xperf(env)} -Dir {ps_quote(run_dir)}{opt}", timeout=300)
+            # A quick stop without the merge (the raw files are set aside and
+            # merged with the analysis); "ide event" during it ends the measure
+            # here, and no new kernel trace starts once the flag exists.
+            tps(env, f"Stop-IemTrace -Xperf {xperf(env)} -Dir {ps_quote(run_dir)} ; {set_aside(ps_quote(run_dir), cut['n'])}",
+                timeout=120, event="finish")
+            if sw.event_now():
+                raise sw.EventNow()
+            tps(env, f"Start-IemTrace -Xperf {xperf(env)} -Dir {ps_quote(run_dir)}{opt}", timeout=120, event="finish")
 
     # The proxy load's busy threads run on the housekeeping CPUs unless told otherwise
     # (design note §4.3); never next to the audio CPU (#32 C1).
@@ -454,14 +479,16 @@ def _measure(env, args, profile: dict, state: dict, run_dir: str, since: str, tr
     out.mkdir(exist_ok=True)
     dpcisr_text = None
     if tracing:
-        # The stop (with its merge) changes the PC, so it completes even when
-        # "ide event" comes; then the trace is no longer recorded.
-        tps(env, f"Stop-IemTrace -Xperf {xperf(env)} -Dir {ps_quote(run_dir)} -Merge", timeout=1800, event="finish")
+        # The stop changes the PC, so it completes even when "ide event" comes;
+        # without the merge it is quick (the raw session files stay). Then the
+        # trace is no longer recorded.
+        tps(env, f"Stop-IemTrace -Xperf {xperf(env)} -Dir {ps_quote(run_dir)}", timeout=120, event="finish")
         state["trace"] = None
         sw.save_state(state)
-        # The xperf analysis only reads the stopped trace: "ide event" abandons
-        # it at once (bounded on the PC, it ends by itself) and never waits for it.
-        # Each cut holds the glitches that caused it: it gets its own views (#32 B7).
+        # The merges and the xperf analysis only read the stopped traces: "ide
+        # event" abandons them at once (bounded on the PC, they end by
+        # themselves) and never waits. Each cut holds the glitches that caused
+        # it: it gets its own views (#32 B7, review M1).
         body, names = analysis(xperf(env), ps_quote(run_dir), cut["n"], diag)
         tps(env, body, timeout=1800, event="abandon")
         scp_dir = env["PC_TUNING_ROOT_SCP"] + "/runs/" + out.name
