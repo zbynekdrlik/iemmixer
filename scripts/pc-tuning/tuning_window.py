@@ -350,11 +350,36 @@ def cmd_measure(env, args) -> None:
         raise
 
 
+def trace_options(trace: str, circular_mb: int) -> str:
+    """Start-IemTrace's options, the same at the start and at every cut's restart."""
+    return (" -CSwitch" if trace == "diag" else "") + (f" -CircularMB {circular_mb}" if circular_mb else "")
+
+
+def analysis(x: str, d: str, cuts: int, diag: bool) -> tuple[str, list[str]]:
+    """The xperf analysis of a stopped trace and of each cut: one PowerShell
+    body and the files it leaves in the run folder (dpcisr for every trace,
+    the near-glitch view for every trace of a diag run)."""
+    calls, names = [], []
+    for etl in [None] + [f"cut-{i}.etl" for i in range(1, cuts + 1)]:
+        name, base = (f" -Name '{etl}'", etl[:-len(".etl")] + ".") if etl else ("", "")
+        calls.append(f"Invoke-IemDpcIsr -Xperf {x} -Dir {d}{name}")
+        names.append(f"{base}dpcisr.txt")
+        if diag:
+            calls.append(f"Export-IemNearGlitch -Xperf {x} -Dir {d}{name}")
+            names.append(f"{base}near.txt")
+    return " ; ".join(calls), names
+
+
+def read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
 def _measure(env, args, profile: dict, state: dict, run_dir: str, since: str, tracing: bool) -> None:
+    diag = args.trace == "diag"
+    opt = trace_options(args.trace, args.circular_mb)
     if tracing:
         state["trace"] = run_dir   # recorded before the start: preempt and the error path stop it
         sw.save_state(state)
-        opt = (" -CSwitch" if args.trace == "diag" else "") + (f" -CircularMB {args.circular_mb}" if args.circular_mb else "")
         tps(env, f"Start-IemTrace -Xperf {xperf(env)} -Dir {ps_quote(run_dir)}{opt}", timeout=120)
     polls: list[dict] = []
     cut = {"n": 0, "seen": 0}
@@ -369,7 +394,7 @@ def _measure(env, args, profile: dict, state: dict, run_dir: str, since: str, tr
         if do_cut:
             cut["n"] += 1
             tps(env, f"Stop-IemTrace -Xperf {xperf(env)} -Dir {ps_quote(run_dir)} -Merge -Name 'cut-{cut['n']}.etl' ; "
-                     f"Start-IemTrace -Xperf {xperf(env)} -Dir {ps_quote(run_dir)} -CircularMB {args.circular_mb}", timeout=300)
+                     f"Start-IemTrace -Xperf {xperf(env)} -Dir {ps_quote(run_dir)}{opt}", timeout=300)
 
     run_args = argparse.Namespace(mode="duplex", frames=args.frames, seconds=args.seconds, burn_us=args.burn_us, stress=args.stress,
                                   panic_at=0, cycles=5, cpu=None, threshold_us=10, audio_cpus=args.audio_cpus, stress_cpus=args.stress_cpus)
@@ -386,22 +411,25 @@ def _measure(env, args, profile: dict, state: dict, run_dir: str, since: str, tr
         sw.save_state(state)
         # The xperf analysis only reads the stopped trace: "ide event" abandons
         # it at once (bounded on the PC, it ends by itself) and never waits for it.
-        extra = " ; Export-IemNearGlitch -Xperf {x} -Dir {d}".format(x=xperf(env), d=ps_quote(run_dir)) if args.trace == "diag" else ""
-        cuts = " ; ".join(f"Invoke-IemDpcIsr -Xperf {xperf(env)} -Dir {ps_quote(run_dir)} -Name 'cut-{i}.etl'" for i in range(1, cut["n"] + 1))
-        tps(env, f"Invoke-IemDpcIsr -Xperf {xperf(env)} -Dir {ps_quote(run_dir)}" + (f" ; {cuts}" if cuts else "") + extra,
-            timeout=1800, event="abandon")
+        # Each cut holds the glitches that caused it: it gets its own views (#32 B7).
+        body, names = analysis(xperf(env), ps_quote(run_dir), cut["n"], diag)
+        tps(env, body, timeout=1800, event="abandon")
         scp_dir = env["PC_TUNING_ROOT_SCP"] + "/runs/" + out.name
-        names = ["dpcisr.txt"] + [f"cut-{i}.dpcisr.txt" for i in range(1, cut["n"] + 1)] + (["near.txt"] if args.trace == "diag" else [])
         for name in names:
             sw.scp(f"{env['PC_SSH']}:{scp_dir}/{name}", str(out / name))
-        dpcisr_text = (out / "dpcisr.txt").read_text(encoding="utf-8", errors="replace")
+        dpcisr_text = read_text(out / "dpcisr.txt")
     events = as_list(tps(env, f"Get-IemSystemEvents -Since {ps_quote(since)}", timeout=120, event="abandon"))
     report = json.loads(Path(result["report"]).read_text(encoding="utf-8"))
-    summary = lr.summarize(args.label, result["verdict"], report, dpcisr_text, polls, events, watch_lps(profile, args.audio_cpus))
-    summary["cuts"] = [lr.budget_findings(lr.parse_dpcisr((out / f"cut-{i}.dpcisr.txt").read_text(encoding="utf-8", errors="replace")),
-                                          watch_lps(profile, args.audio_cpus)) for i in range(1, cut["n"] + 1)]
-    if args.trace == "diag":
-        summary["near_glitch"] = lr.near_glitch((out / "near.txt").read_text(encoding="utf-8", errors="replace"), period_us=lr.PERIOD_US)
+    watched = watch_lps(profile, args.audio_cpus)
+    summary = lr.summarize(args.label, result["verdict"], report, dpcisr_text, polls, events, watched)
+    summary["cuts"] = []
+    for i in range(1, cut["n"] + 1):
+        entry = {"cut": i, "findings": lr.budget_findings(lr.parse_dpcisr(read_text(out / f"cut-{i}.dpcisr.txt")), watched)}
+        if diag:
+            entry["near_glitch"] = lr.near_glitch(read_text(out / f"cut-{i}.near.txt"), period_us=lr.PERIOD_US)
+        summary["cuts"].append(entry)
+    if diag:
+        summary["near_glitch"] = lr.near_glitch(read_text(out / "near.txt"), period_us=lr.PERIOD_US)
     (out / "summary.json").write_text(json.dumps(summary, indent=1), encoding="utf-8")
     state.setdefault("measurements", []).append({"label": args.label, "summary": str(out / "summary.json"), "stable": (result["verdict"] or {}).get("stable")})
     sw.save_state(state)
