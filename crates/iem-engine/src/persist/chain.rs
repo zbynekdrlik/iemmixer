@@ -31,11 +31,20 @@
 //! Unreadable file, never truncates `save.tmp`, and never loads or keeps
 //! `save.new`; a step that fails is reported and the engine runs on the
 //! loaded state (`save.tmp` stays whole for the next save or boot).
+//!
+//! **A `save.tmp` the boot did not load** (Unreadable, Damaged, or older
+//! than the state loaded) is not the store's to replace: the next save
+//! moves it aside to `save.tmp.orphan-<n>` and flushes the directory
+//! before `save.new` takes the name; if that fails, the save fails and
+//! nothing is replaced (#32 MAJOR-1). An orphan is kept for inspection,
+//! named in an alarm, and never a load source: it holds state the engine
+//! never ran on, and the session's saves since the boot are what the band
+//! hears, so no revision may bring it back.
 
 use super::*;
 
-/// Names tried for a damaged `current.json` moved aside:
-/// `current.json.damaged-1` up to this.
+/// Names tried for a file moved aside (`current.json.damaged-<n>`,
+/// `save.tmp.orphan-<n>`): 1 up to this.
 const QUARANTINE_NAMES: u32 = 1000;
 
 /// Reads of a file that fail with an I/O error, the file pausing between
@@ -206,6 +215,12 @@ impl Store {
     /// do not decode.
     pub fn recover(&self, loaded: &Loaded) -> Recovery {
         let mut done = Recovery::default();
+        // #32 MAJOR-1: save.tmp is this store's to replace only when it is
+        // the state loaded, or there is none.
+        self.tmp_own.store(
+            loaded.save_tmp == FileState::Missing || loaded.source == Source::Interrupted,
+            Ordering::SeqCst,
+        );
         let current = self.dir.join(CURRENT);
         if loaded.current_json == FileState::Damaged {
             match self.quarantine(&current) {
@@ -259,16 +274,47 @@ impl Store {
     }
 
     fn quarantine(&self, current: &Path) -> io::Result<PathBuf> {
+        let (aside, synced) = self.move_aside(current, "damaged")?;
+        synced?;
+        Ok(aside)
+    }
+
+    /// Moves a `save.tmp` that is not this store's own aside to the first
+    /// free `save.tmp.orphan-<n>` and flushes the directory, before
+    /// `save.new` takes its name; either failing fails the save with
+    /// nothing replaced (#32 MAJOR-1). `None`: nothing to move.
+    pub(super) fn orphan_tmp(&self) -> io::Result<Option<PathBuf>> {
+        let tmp = self.dir.join(TMP);
+        if self.tmp_own.load(Ordering::SeqCst) || !self.files.exists(&tmp)? {
+            return Ok(None);
+        }
+        let (aside, synced) = self.move_aside(&tmp, "orphan")?;
+        synced.map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!(
+                    "{TMP} was moved aside to {}, but the directory sync failed: {e}",
+                    aside.display()
+                ),
+            )
+        })?;
+        Ok(Some(aside))
+    }
+
+    /// Renames `path` to the first free `<name>.<tag>-<n>` beside it: where
+    /// it went, and how the directory sync after it went. An error only
+    /// when it was not moved.
+    fn move_aside(&self, path: &Path, tag: &str) -> io::Result<(PathBuf, io::Result<()>)> {
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
         for n in 1..=QUARANTINE_NAMES {
-            let aside = self.dir.join(format!("{CURRENT}.damaged-{n}"));
+            let aside = self.dir.join(format!("{name}.{tag}-{n}"));
             if !self.files.exists(&aside)? {
-                self.files.rename(current, &aside)?;
-                self.files.sync_dir(&self.dir)?;
-                return Ok(aside);
+                self.files.rename(path, &aside)?;
+                return Ok((aside, self.files.sync_dir(&self.dir)));
             }
         }
         Err(io::Error::other(format!(
-            "{QUARANTINE_NAMES} damaged copies are aside already"
+            "{QUARANTINE_NAMES} copies of {name} are aside already"
         )))
     }
 

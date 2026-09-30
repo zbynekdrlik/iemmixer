@@ -12,6 +12,9 @@
 //! - `baseline.tmp`: a baseline before its rename;
 //! - `current.json.damaged-<n>`: a damaged `current.json` the boot moved
 //!   aside, never read again;
+//! - `save.tmp.orphan-<n>`: a `save.tmp` the boot did not load (it could
+//!   not be read, was older than the state loaded, or was damaged), moved
+//!   aside by the next save and never read again;
 //! - `engine.lock`: the engine holding the directory (`Store::lock`).
 //!
 //! A file is `{"format", "schema", "sha256", "payload"}`; the SHA-256 covers the
@@ -30,6 +33,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use iem_engine_proto::{MixId, MixState, SCHEMA};
@@ -226,24 +230,30 @@ pub struct Store {
     dir: PathBuf,
     /// Every file operation goes through here (#32 P9).
     files: Arc<dyn Files>,
+    /// Whether a `save.tmp` in the directory is this store's own to
+    /// replace: written by its `save`, or the state its boot loaded (or
+    /// there was none). Until then a `save.tmp` may hold state this process
+    /// never ran on, and `save` moves it aside first (#32 MAJOR-1).
+    tmp_own: Arc<AtomicBool>,
 }
 
 impl Store {
     pub fn open(dir: &Path) -> io::Result<Self> {
-        fs::create_dir_all(dir)?;
-        Ok(Self {
-            dir: dir.to_path_buf(),
-            files: Arc::new(OsFiles),
-        })
+        Self::with(dir, Arc::new(OsFiles))
     }
 
     /// A store whose file operations a test controls (#32 P9).
     #[cfg(test)]
     pub(crate) fn with_files(dir: &Path, files: Arc<dyn Files>) -> io::Result<Self> {
+        Self::with(dir, files)
+    }
+
+    fn with(dir: &Path, files: Arc<dyn Files>) -> io::Result<Self> {
         fs::create_dir_all(dir)?;
         Ok(Self {
             dir: dir.to_path_buf(),
             files,
+            tmp_own: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -297,13 +307,24 @@ impl Store {
     /// `save.tmp` in one rename: `save.tmp` may hold the only copy of the
     /// newest state (an interrupted save not yet finished), so it is never
     /// truncated or written in place, only ever the previous complete save
-    /// or the new one (#32 P1).
+    /// or the new one (#32 P1). A `save.tmp` that is not this store's own
+    /// is moved aside first (`Committed::orphaned`; #32 MAJOR-1).
     pub fn save(&self, p: &Persisted) -> io::Result<Committed> {
         let bytes = encode(p)?;
         let new = self.dir.join(NEW);
         self.write_synced(&new, &bytes)?;
+        let orphaned = self.orphan_tmp()?;
         self.files.rename(&new, &self.dir.join(TMP))?;
-        self.commit_tmp()
+        self.tmp_own.store(true, Ordering::SeqCst);
+        let mut committed = self.commit_tmp().map_err(|e| match &orphaned {
+            Some(aside) => io::Error::new(
+                e.kind(),
+                format!("{e} ({TMP} was moved aside to {} first)", aside.display()),
+            ),
+            None => e,
+        })?;
+        committed.orphaned = orphaned;
+        Ok(committed)
     }
 
     /// The renames that end a save: the previous `current.json` becomes the

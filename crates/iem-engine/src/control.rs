@@ -551,6 +551,16 @@ impl Control {
                 if let Some(why) = &committed.pruning {
                     warn!("old generations were not removed: {why}");
                 }
+                // #32 MAJOR-1: kept, never loaded; the engineer hears where.
+                if let Some(aside) = &committed.orphaned {
+                    self.alarm(
+                        AlarmCode::StateFallback,
+                        format!(
+                            "a save.tmp the boot did not load was moved aside to {}",
+                            aside.display()
+                        ),
+                    );
+                }
                 let rev = self.core.rev();
                 self.broadcast(&EngineMsg::Saved {
                     rev,
