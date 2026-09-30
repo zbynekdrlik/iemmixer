@@ -600,6 +600,17 @@ class DenylistScanTests(unittest.TestCase):
         allow.write_text(out.getvalue().strip() + "  reviewed ordinary prose\n", encoding="utf-8")
         self.assertEqual(self.scan("--allow", str(allow), "--tree", "HEAD", "--commits", "HEAD")[0], 0)
 
+    # --- #32 review M1: a C-style escape right before a term, or spelling it, does not hide it ---
+
+    def test_a_c_escape_does_not_hide_a_term(self) -> None:
+        # byte-string fixtures such as b"\0Program 1\0..." put an escape right before a word; the
+        # boundary accepted only \n \t \r, and escapes were never decoded
+        texts = ('let b = b"\\0zyxname\\0";', 'let s = "\\x00zyxname";', 'char s[] = "\\101zyxname";',
+                 'x = "\\azyxname"', 'let s = "\\x7a\\x79\\x78name";', 'char s[] = "\\172\\171\\170name";')
+        for number, text in enumerate(texts):
+            with self.subTest(text=text):
+                self.assert_found_in_both_modes_as({f"escape{number}.rs": text + "\n"}, "zyxname")
+
     def test_a_submodule_entry_is_scanned_by_path_not_read_as_a_blob(self) -> None:
         # commit mode reads changed blobs whole; a gitlink's object is a commit, which cat-file
         # blob would fail on -- its path is still scanned, its object is not read
