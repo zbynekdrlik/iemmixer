@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -301,10 +302,50 @@ def ps(env: dict[str, str], body: str, timeout: float = 300, event: str = "finis
     return doc["r"]
 
 
-def scp(src: str, dst: str) -> None:
-    proc = subprocess.run(["scp", "-q", "-o", "BatchMode=yes", src, dst], capture_output=True, text=True, check=False, timeout=600)
+SCP = ("scp", "-q", "-o", "BatchMode=yes")
+SCP_BOUND_S = 600.0
+REMOTE_PATH = re.compile(r"^[^/:]+:")
+
+
+def scp(src: str, dst: str, event: str = "ignore") -> None:
+    """Copies one file over ssh, bounded at SCP_BOUND_S. event="abandon" (an
+    analysis download a preempt must not wait for): the "ide event" flag is
+    checked every POLL_S; on the flag the copy is interrupted and EventNow
+    raised at once, and a copy that ended while the flag appeared raises it
+    too. "ignore": the copy runs to its end."""
+    proc = subprocess.Popen([*SCP, src, dst], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.PIPE, text=True)
+    deadline = time.monotonic() + SCP_BOUND_S
+    while True:
+        try:
+            _, err = proc.communicate(timeout=POLL_S)
+            break
+        except subprocess.TimeoutExpired:
+            if event == "abandon" and event_now():
+                interrupt_copy(proc, dst)
+                raise EventNow() from None
+            if time.monotonic() > deadline:
+                interrupt_copy(proc, dst)
+                raise StepError(f"scp still running after {SCP_BOUND_S:g} s: interrupted ({src})") from None
     if proc.returncode != 0:
-        raise StepError(f"scp failed: {proc.stderr.strip()[-800:]}")
+        raise StepError(f"scp failed: {err.strip()[-800:]}")
+    if event == "abandon" and event_now():
+        raise EventNow()
+
+
+def interrupt_copy(proc: subprocess.Popen, dst: str) -> None:
+    """A local scp is stopped the way an operator stops it, with Ctrl-C:
+    SIGINT, on which scp closes its ssh session (so the PC stops sending)
+    and exits by itself; then a bounded wait for that exit. Nothing is ended
+    harder: a copy still running after the wait is reported and left alone.
+    A partial download is removed."""
+    proc.send_signal(signal.SIGINT)
+    try:
+        proc.communicate(timeout=10)
+    except subprocess.TimeoutExpired:
+        alarm(f"scp (pid {proc.pid}) did not exit within 10 s of Ctrl-C; it is left to end by itself")
+    if not REMOTE_PATH.match(dst):
+        Path(dst).unlink(missing_ok=True)
 
 
 def remote(env: dict[str, str], rel: str) -> str:
