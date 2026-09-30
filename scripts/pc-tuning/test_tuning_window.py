@@ -117,13 +117,13 @@ class UndoTests(unittest.TestCase):
 
 class RebootPrepareTests(unittest.TestCase):
     """reboot-prepare prepares a reboot only over a cleanly preempted window
-    (I1), exercised through the REAL sw.unwind so the `stop-spike` shape the I1
-    check depends on is genuinely covered: unwind(bring_back_reaper=False) breaks
-    at bring-back BEFORE its graceful-stop check, so a spike that did not stop
-    still holds the card. A graceful reboot must never be prepared over it —
-    reboot-prepare refuses (owner alarm + StepError), keeps the card free and the
-    window open; the spike is never force-ended (I8). Only sw.ps (the ssh
-    boundary) is faked; sw.STATE/sw.EVENT_NOW point at a temp dir."""
+    (I1), exercised through the REAL sw.unwind: a spike that did not stop still
+    holds the card, a kernel trace left running or a mode lever not reverted
+    would carry into the reboot (#32 B4). A reboot is never prepared over any
+    of them — reboot-prepare refuses (owner alarm + StepError), keeps the card
+    free and the window open; the spike is never force-ended (I8). Only sw.ps
+    (the ssh boundary) and sw.alarm (the owner-alarm printer, to count alarms)
+    are faked; sw.STATE/sw.EVENT_NOW point at a temp dir."""
 
     def setUp(self) -> None:
         self.dir = Path(tempfile.mkdtemp())
@@ -131,10 +131,14 @@ class RebootPrepareTests(unittest.TestCase):
         tw.sw.STATE = self.dir / "spike-window.json"
         tw.sw.EVENT_NOW = self.dir / "EVENT-NOW"   # absent → no "ide event"
         self.gone = True
+        self.fail: set[str] = set()   # PowerShell verbs whose call fails on the PC
         self.alarms: list[str] = []
         tw.sw.alarm = lambda text: self.alarms.append(text)
 
         def fake_ps(env, body, timeout=300, event="finish"):
+            for verb in self.fail:
+                if verb in body:
+                    raise tw.StepError(f"PC step failed: {verb}")
             if "Stop-SpikeGracefully" in body:
                 return self.gone
             if "Get-IemTuningState" in body:
@@ -154,9 +158,9 @@ class RebootPrepareTests(unittest.TestCase):
     def tearDown(self) -> None:
         tw.sw.STATE, tw.sw.EVENT_NOW, tw.sw.ps, tw.sw.alarm = self.saved
 
-    def write_state(self) -> None:
+    def write_state(self, **kw) -> None:
         tw.sw.save_state({"id": "w", "card": "free", "pref_original": 64, "pref_current": 64,
-                          "pref_restored": False, "closed": False})
+                          "pref_restored": False, "closed": False, **kw})
 
     def read_state(self) -> dict:
         return json.loads((self.dir / "spike-window.json").read_text(encoding="utf-8"))
@@ -181,6 +185,19 @@ class RebootPrepareTests(unittest.TestCase):
         self.assertFalse(st.get("closed"))           # the window stays open
         self.assertEqual(len(self.alarms), 1)        # the owner is alarmed
         self.assertIn("did not stop", self.alarms[0])
+
+    def test_a_failed_trace_stop_or_mode_exit_refuses_the_reboot(self) -> None:
+        for verb, flag in (("Stop-IemTrace", {"trace": "C:\\t\\runs\\x"}), ("Exit-IemTuningMode", {"tuning_mode": True})):
+            self.fail = {verb}
+            self.alarms.clear()
+            self.write_state(**flag)
+            with self.assertRaisesRegex(tw.StepError, "no reboot prepared", msg=verb):
+                tw.cmd_reboot_prepare(self.env, self.args)
+            st = self.read_state()
+            self.assertEqual(st["card"], "free", verb)
+            self.assertNotIn("reboot", st, verb)
+            self.assertFalse(st.get("closed"), verb)
+            self.assertTrue(any("no reboot is prepared" in a for a in self.alarms), verb)
 
 
 ENV = {"PC_ROOT": "R", "PC_TUNING_ROOT": "T", "PC_XPERF": "xperf.exe",
