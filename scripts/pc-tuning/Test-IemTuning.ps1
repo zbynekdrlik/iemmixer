@@ -378,6 +378,20 @@ try {
     Assert (($a -join ' ') -eq '-on PROC_THREAD+LOADER+DPC+INTERRUPT+CSWITCH+DISPATCHER -BufferSize 1024 -MinBuffers 256 -MaxBuffers 1024 -FileMode Circular -MaxFile 1024 -f C:\t\kernel.etl -start IemMarkers -on 3b6c1e0a-5d2f-4c8e-9a71-0e4f2d9b8c11 -f C:\t\markers.etl') 'trace-arguments'
     $l = ConvertFrom-IemLoggers -Text "Logger Name           : NT Kernel Logger`r`nLogger Mode Settings (11)`r`nLogger Name           : IemMarkers`r`n"
     Assert ($l.Count -eq 2 -and $l[0] -eq 'NT Kernel Logger' -and $l[1] -eq 'IemMarkers') 'loggers-parse'
+    # The near-glitch export works on any trace file (lane F2's cut-aware export):
+    # trace.etl -> near.txt, <base>.etl -> <base>.near.txt, each through its own
+    # dumper temp file (Invoke-IemDpcIsr's naming); the filter keeps the dumper's
+    # header, the DPC/ISR/context-switch rows and the glitch markers.
+    Assert ((Get-Command Export-IemNearGlitch).Parameters['Name'].ParameterType -eq [string]) 'near-glitch-export-takes-a-trace-name'
+    $nf = Get-IemNearGlitchFiles -Dir 'C:\t' -Name 'cut-2.etl'
+    Assert ($nf.input -eq 'C:\t\cut-2.etl' -and $nf.dump -eq 'C:\t\cut-2.dumper.txt' -and $nf.near -eq 'C:\t\cut-2.near.txt') 'near-glitch-files-for-a-cut'
+    $nf = Get-IemNearGlitchFiles -Dir 'C:\t'
+    Assert ($nf.input -eq 'C:\t\trace.etl' -and $nf.dump -eq 'C:\t\dumper.txt' -and $nf.near -eq 'C:\t\near.txt') 'near-glitch-files-for-the-trace'
+    $ndump = Join-Path $dir 'cut-2.dumper.txt'; $nnear = Join-Path $dir 'cut-2.near.txt'
+    [IO.File]::WriteAllText($ndump, "BeginHeader`r`nh1`r`nEndHeader`r`nDPC, 1, x`r`nDiskRead, 2, y`r`nInterrupt, 3, z`r`nMark, 4, iemmixer-glitch 5`r`n")
+    $sn = Select-IemNearGlitch -Dump $ndump -Near $nnear
+    $nl = @(Get-Content -LiteralPath $nnear)
+    Assert ($sn -eq 6 -and ($nl -join '|') -eq 'BeginHeader|h1|EndHeader|DPC, 1, x|Interrupt, 3, z|Mark, 4, iemmixer-glitch 5') 'near-glitch-keeps-header-dpc-isr-and-markers'
     # A native program's stderr is output: its exit code alone decides (A11). A
     # stand-in program writes a line to each stream. (It is tested through
     # Invoke-IemNative: Invoke-IemXperf now refuses an unsigned stand-in, m4.)
