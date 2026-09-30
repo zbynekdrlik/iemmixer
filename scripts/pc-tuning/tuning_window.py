@@ -300,12 +300,21 @@ def no_leftover_trace(state: dict) -> None:
         raise StepError(f"a kernel trace is still recorded ({state['trace']}): run trace-stop first")
 
 
+def clear_trace() -> dict:
+    """Clears the recorded trace in the state as saved NOW, changing nothing
+    else: a preempt in another process may have saved its own changes
+    meanwhile (closed, card, the buffer restore)."""
+    state = sw.load_state()
+    state["trace"] = None
+    sw.save_state(state)
+    return state
+
+
 def stop_trace(env: dict[str, str], state: dict, event: str):
     """Stops the recorded kernel trace without merging (quick; the raw files
     stay on the PC) and clears it from the state."""
     r = tps(env, f"Stop-IemTrace -Xperf {xperf(env)} -Dir {ps_quote(state['trace'])}", timeout=120, event=event)
-    state["trace"] = None
-    sw.save_state(state)
+    clear_trace()
     return r
 
 
@@ -323,9 +332,10 @@ def cmd_trace_stop(env, args) -> None:
 def abandon_trace(env: dict[str, str]) -> None:
     """After a failed measure: stop the trace it started. A stop that fails
     keeps the trace recorded (trace-stop or a preempt retries it) and alarms
-    the owner; it never replaces the measure's own error."""
+    the owner; it never replaces the measure's own error. While the "ide
+    event" flag exists the preempt owns the cleanup: nothing is done here."""
     state = sw.load_state()
-    if not state.get("trace"):
+    if not state.get("trace") or sw.event_now():
         return
     try:
         stop_trace(env, state, event="ignore")
@@ -490,8 +500,7 @@ def _measure(env, args, profile: dict, state: dict, run_dir: str, since: str, tr
         # without the merge it is quick (the raw session files stay). Then the
         # trace is no longer recorded.
         tps(env, f"Stop-IemTrace -Xperf {xperf(env)} -Dir {ps_quote(run_dir)}", timeout=120, event="finish")
-        state["trace"] = None
-        sw.save_state(state)
+        clear_trace()
         # The merges and the xperf analysis only read the stopped traces: "ide
         # event" abandons them at once (bounded on the PC, they end by
         # themselves) and never waits. Each cut holds the glitches that caused
@@ -528,6 +537,7 @@ def _measure(env, args, profile: dict, state: dict, run_dir: str, since: str, tr
     if diag:
         summary["near_glitch"] = lr.near_glitch(out / "near.txt", period_us=lr.PERIOD_US, check=check_event)
     (out / "summary.json").write_text(json.dumps(summary, indent=1), encoding="utf-8")
+    state = sw.load_state()   # as saved now: only the measurement is added
     state.setdefault("measurements", []).append({"label": args.label, "summary": str(out / "summary.json"), "stable": (result["verdict"] or {}).get("stable")})
     sw.save_state(state)
     print(json.dumps(summary))
