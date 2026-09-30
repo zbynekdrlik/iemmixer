@@ -635,6 +635,24 @@ class DenylistScanTests(unittest.TestCase):
                 out = self.assert_found_in_both_modes_as({name: content}, "zyxname")
                 self.assertIn(f"tree {name}:2: denylist entry 1", out)
 
+    # --- #32 review m9: git-lfs content is not in the repository, so its use is a finding ---
+
+    def test_a_git_lfs_filter_and_pointer_are_findings(self) -> None:
+        # with filter=lfs the repository holds only a pointer; the real content lives on the LFS
+        # server, where no scan ever reads it
+        pointer = "version https://git-lfs.github.com/spec/v1\noid sha256:" + "0" * 64 + "\nsize 12\n"
+        self.commit({"base.txt": "base\n"})
+        self.commit({"assets/.gitattributes": "# art\n*.psd filter=lfs diff=lfs merge=lfs -text\n",
+                     "assets/art.psd": pointer})
+        code, out = self.scan("--tree", "HEAD")
+        self.assertEqual(code, 1)
+        self.assertIn("tree assets/.gitattributes:2: git-lfs filter", out)
+        self.assertIn("tree assets/art.psd: git-lfs pointer", out)
+        code, out = self.scan("--commits", "HEAD~1..HEAD")
+        self.assertEqual(code, 1)
+        self.assertIn(" assets/.gitattributes: git-lfs filter", out)
+        self.assertIn(" assets/art.psd: git-lfs pointer", out)
+
     # --- #32 review m10: a finding only history holds can be located and allowlisted ---
 
     def test_commit_mode_locates_a_binary_run_and_a_wide_line(self) -> None:
