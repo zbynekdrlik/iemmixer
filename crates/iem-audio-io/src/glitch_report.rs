@@ -131,4 +131,39 @@ mod tests {
         write_markers(&[], 0, 10, || 77, |_| none += 1);
         assert_eq!(none, 0);
     }
+
+    /// `latency_report.py` places a glitch at the marker's trace time minus
+    /// (emit_qpc − at_qpc): each marker's emit QPC must be read when that
+    /// marker is written, not once for the whole drained batch.
+    #[test]
+    fn every_marker_carries_the_qpc_read_when_it_is_written() {
+        let glitches = [
+            glitch(GlitchKind::Missed, 1_000_000_000, 700_000),
+            glitch(GlitchKind::Overrun, 1_000_000_000, 400_000),
+            glitch(GlitchKind::Late, 2_000_000_000, 500_001),
+        ];
+        let mut clock = 500;
+        let mut reads = 0;
+        let mut written = Vec::new();
+        write_markers(
+            &glitches,
+            0,
+            10,
+            || {
+                reads += 1;
+                clock += 3;
+                clock
+            },
+            |t| written.push(t.to_owned()),
+        );
+        assert_eq!(reads, 3, "one clock read per marker");
+        assert_eq!(
+            written,
+            [
+                "iemmixer-glitch kind=missed at_qpc=10 emit_qpc=503 freq=10 value=700000",
+                "iemmixer-glitch kind=overrun at_qpc=10 emit_qpc=506 freq=10 value=400000",
+                "iemmixer-glitch kind=late at_qpc=20 emit_qpc=509 freq=10 value=500001",
+            ]
+        );
+    }
 }
