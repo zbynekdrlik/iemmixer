@@ -300,22 +300,24 @@ def no_leftover_trace(state: dict) -> None:
         raise StepError(f"a kernel trace is still recorded ({state['trace']}): run trace-stop first")
 
 
-def stop_trace(env: dict[str, str], state: dict):
+def stop_trace(env: dict[str, str], state: dict, event: str):
     """Stops the recorded kernel trace without merging (quick; the raw files
     stay on the PC) and clears it from the state."""
-    r = tps(env, f"Stop-IemTrace -Xperf {xperf(env)} -Dir {ps_quote(state['trace'])}", timeout=120, event="ignore")
+    r = tps(env, f"Stop-IemTrace -Xperf {xperf(env)} -Dir {ps_quote(state['trace'])}", timeout=120, event=event)
     state["trace"] = None
     sw.save_state(state)
     return r
 
 
 def cmd_trace_stop(env, args) -> None:
-    """Stops a kernel trace a failed measure left recorded (#32 B5)."""
+    """Stops a kernel trace a failed measure left recorded (#32 B5). Like every
+    window command it gives way to "ide event": the stop completes, then
+    EventNow (main pre-empts)."""
     state = sw.open_state()
     if not state.get("trace"):
         print(json.dumps({"trace-stop": "no kernel trace recorded in this window"}))
         return
-    print(json.dumps({"trace-stop": stop_trace(env, state)}))
+    print(json.dumps({"trace-stop": stop_trace(env, state, event="finish")}))
 
 
 def abandon_trace(env: dict[str, str]) -> None:
@@ -326,7 +328,7 @@ def abandon_trace(env: dict[str, str]) -> None:
     if not state.get("trace"):
         return
     try:
-        stop_trace(env, state)
+        stop_trace(env, state, event="ignore")
     except StepError as e:
         sw.alarm(f"the kernel trace of a failed measure did not stop ({e}): run tuning_window trace-stop")
 
