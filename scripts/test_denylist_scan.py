@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import unicodedata
 import unittest
 from pathlib import Path
 
@@ -14,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import denylist_scan as ds  # noqa: E402
 
 TERMS = ["zyxname", "10.9.", "ghost-host.example"]
+REDACTED_MARKER = "[redacted]"
 
 
 def git(repo: Path, *args: str) -> None:
@@ -209,6 +211,63 @@ class DenylistScanTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertNotIn("zyxname", out.lower())
         self.assertIn("[redacted]", out)
+
+    # --- #27 round 2: commit-mode C-quoting, NFC, and shown() coverage ---
+
+    def test_a_c_quoted_commit_path_with_a_term_does_not_leak(self) -> None:
+        # git C-quotes a `+++` header path holding a non-ASCII byte (default core.quotePath):
+        # `note<U+00A0>zyxname.txt` -> `+++ "b/note\302\240zyxname.txt"`. A content hit prints
+        # the location, so the quoted path must be decoded and redacted, never printed raw.
+        self.commit({"base.txt": "base\n"})
+        name = "note zyxname.txt"  # no-break space before the term forces C-quoting
+        (self.repo / name).write_text("a line that also holds zyxname\n", encoding="utf-8")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "non-ascii path plus a content hit")
+        code, out = self.scan("--commits", "HEAD~1..HEAD")
+        self.assertEqual(code, 1)
+        self.assertNotIn("zyxname", out.lower())  # the leak this round fixes
+        self.assertNotIn("\\302", out)            # no octal-escaped bytes of the term either
+        self.assertIn("[redacted]", out)
+
+    def test_a_space_in_a_commit_path_aligns_with_the_tree_path(self) -> None:
+        # git appends a TAB to a `+++` label that has a space; the commit-mode path must equal
+        # the tree-mode path so one allowlist key (made with --hash) works in both modes.
+        self.commit({"my note.txt": "keep zyxname here\n"})
+        allow = self.tmp / "allow.txt"
+        allow.write_text(ds.line_key("my note.txt", "keep zyxname here") + "  reviewed\n", encoding="utf-8")
+        self.assertEqual(self.scan("--allow", str(allow), "--tree", "HEAD", "--commits", "HEAD")[0], 0)
+
+    def test_a_decomposed_diacritic_path_is_matched_and_redacted(self) -> None:
+        # A term with a diacritic and a path holding it in NFD (decomposed) form: NFC
+        # normalization must still match and redact it, so it cannot hide in the log.
+        term = "ďurica"  # 'ďurica' precomposed (NFC)
+        scanner = ds.Scanner([term], set())
+        nfd_path = unicodedata.normalize("NFD", f"docs/{term}-notes.md")
+        self.assertNotEqual(nfd_path, f"docs/{term}-notes.md")  # genuinely decomposed
+        self.assertEqual(scanner.shown(nfd_path), "docs/[redacted]")
+
+    def test_shown_redacts_a_component_that_holds_a_term(self) -> None:
+        scanner = ds.Scanner(["zyxname"], set())
+        self.assertEqual(scanner.shown("docs/zyxname-notes.md"), "docs/[redacted]")
+
+    def test_shown_redacts_the_whole_path_for_a_term_spanning_components(self) -> None:
+        scanner = ds.Scanner(["rack/mixer"], set())
+        self.assertEqual(scanner.shown("rack/mixer/config.txt"), REDACTED_MARKER)
+
+    def test_shown_escapes_control_chars_in_a_kept_component(self) -> None:
+        # a raw control char in a kept component could inject a log line / a CI ::command
+        scanner = ds.Scanner(["zyxname"], set())
+        self.assertEqual(scanner.shown("a\x01b/zyxname.txt"), "a\\x01b/[redacted]")
+
+    def test_shown_redacts_a_component_whose_redacted_form_still_matches(self) -> None:
+        # the post-redaction re-check: a term equal to the literal marker text
+        scanner = ds.Scanner(["redacted"], set())
+        self.assertEqual(scanner.shown("x/redacted/y"), REDACTED_MARKER)
+
+    def test_printable_escapes_control_and_non_ascii_characters(self) -> None:
+        self.assertEqual(ds.printable("a\x01b"), "a\\x01b")
+        self.assertEqual(ds.printable("x y"), "x\\u2028y")
+        self.assertEqual(ds.printable("plain-ok"), "plain-ok")
 
 
 if __name__ == "__main__":
