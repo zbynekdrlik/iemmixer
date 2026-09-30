@@ -25,15 +25,27 @@ pub fn exit_code(outcome: &str) -> u8 {
     }
 }
 
-/// `--stress` with `--audio-cpus` needs `--stress-cpus`: a thread without
-/// its own selection runs on the process default CPU Set, which
-/// `--audio-cpus` sets, so the busy threads would share the audio CPUs (S1c
-/// design note §4.3 puts them on the housekeeping CPUs).
+/// The busy threads never share the audio CPUs (S1c design note §4.3 puts
+/// them on the housekeeping CPUs): `--stress` with `--audio-cpus` needs
+/// `--stress-cpus` (a thread without its own selection runs on the process
+/// default CPU Set, which `--audio-cpus` sets), and `--stress-cpus` never
+/// overlaps `--audio-cpus`, with or without threads.
 pub fn check_stress_cpus(stress: u32, audio_cpus: &[u8], stress_cpus: &[u8]) -> Result<(), String> {
     if stress > 0 && !audio_cpus.is_empty() && stress_cpus.is_empty() {
         return Err(
             "--stress with --audio-cpus needs --stress-cpus (the housekeeping CPUs)".to_owned(),
         );
+    }
+    let shared: Vec<u8> = stress_cpus
+        .iter()
+        .copied()
+        .filter(|lp| audio_cpus.contains(lp))
+        .collect();
+    if !shared.is_empty() {
+        return Err(format!(
+            "--stress-cpus and --audio-cpus overlap on processors {shared:?} \
+             (a busy thread would run next to the audio callback)"
+        ));
     }
     Ok(())
 }
@@ -184,6 +196,24 @@ mod tests {
         assert_eq!(check_stress_cpus(4, &[], &[]), Ok(()), "anywhere");
         assert_eq!(check_stress_cpus(0, &[14], &[]), Ok(()), "no threads");
         assert_eq!(check_stress_cpus(1, &[14], &[]), Err(e));
+    }
+
+    /// A stress thread on an audio CPU runs next to the callback and
+    /// defeats the proxy-load measurement: the lists never overlap, with or
+    /// without threads (the window driver refuses the same).
+    #[test]
+    fn stress_cpus_never_overlap_the_audio_cpus() {
+        let e = check_stress_cpus(4, &[13, 14], &[6, 13, 14]).unwrap_err();
+        assert_eq!(
+            e,
+            "--stress-cpus and --audio-cpus overlap on processors [13, 14] \
+             (a busy thread would run next to the audio callback)"
+        );
+        assert!(check_stress_cpus(4, &[14], &[14]).is_err());
+        assert!(check_stress_cpus(0, &[14], &[6, 14]).is_err(), "no threads");
+        assert_eq!(check_stress_cpus(4, &[14], &[6, 13]), Ok(()));
+        assert_eq!(check_stress_cpus(4, &[], &[6, 14]), Ok(()), "no audio CPUs");
+        assert_eq!(check_stress_cpus(0, &[14], &[]), Ok(()));
     }
 
     #[test]

@@ -36,7 +36,7 @@ const USAGE: &str =
 [--activity-channels all|<list, e.g. 101-110,121-124>] [--seconds S] [--burn-us U] [--stress T] \
 [--panic-at K] [--cycles C] [--audio-cpus LIST] [--stress-cpus LIST] [--cpu N] [--threshold-us U]
 (duplex and reopen need --frames and --activity-channels; hwlat needs --cpu and --threshold-us; \
---stress with --audio-cpus needs --stress-cpus)";
+--stress with --audio-cpus needs --stress-cpus, which never overlaps --audio-cpus)";
 
 /// The longest run: an 8 h soak with margin (S1c design note §8 W4).
 const MAX_SECONDS: u64 = 36_000;

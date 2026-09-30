@@ -400,6 +400,14 @@ fn bad_input_is_refused() {
             "--stress-cpus 6-13",
             "--stress-cpus",
         ),
+        // A stress CPU that is also an audio CPU.
+        (
+            "duplex --driver D1 --report r --stop-file s --frames 32 --activity-channels all \
+             --stress 4 --audio-cpus 14 {}",
+            "--stress-cpus 6-14",
+            "--stress-cpus 6-13",
+            "--audio-cpus",
+        ),
         // Busy threads without their own CPUs would run on the process
         // default, the audio CPUs (S1c design note §4.3: housekeeping).
         (
