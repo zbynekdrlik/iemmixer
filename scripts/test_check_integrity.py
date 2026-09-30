@@ -169,5 +169,51 @@ class IntegrityTests(unittest.TestCase):
         self.put("crates/a/src/lib.rs", "fn f() { let futures = 1; let _ = futures; driver.sample_position(); }\n")
         self.assertEqual(ci.violations(self.root), [])
 
+class BundleSyncTests(unittest.TestCase):
+    """spike_window.BUNDLE_FILES equals the asio-spike Bundle step's Copy-Item
+    list (#32 E5): a drift makes fetch-bundle reject every artifact on the dev
+    box while CI stays green."""
+
+    def setUp(self) -> None:
+        self.root = Path(tempfile.mkdtemp())
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.root)
+
+    def put(self, rel: str, text: str) -> None:
+        path = self.root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    def bundle(self, files: str, copy: str) -> None:
+        self.put("scripts/asio-spike/spike_window.py", f"import os\nBUNDLE_FILES = ({files})\n")
+        self.put(".github/workflows/ci.yml",
+                 "jobs:\n  asio-spike:\n    steps:\n" + PINNED
+                 + "      - name: Bundle (spike, PC scripts, SHA256SUMS)\n        run: |\n"
+                 + f"          Copy-Item -LiteralPath {copy} -Destination $b\n"
+                 + "  bundle:\n    steps:\n      - name: Bundle\n        run: Copy-Item -LiteralPath other.exe -Destination $b\n")
+
+    def test_a_matching_bundle_passes(self) -> None:
+        self.bundle('"A.psm1", "b.exe"', "target/release/examples/b.exe, scripts/x/A.psm1")
+        self.assertEqual(ci.violations(self.root), [])
+
+    def test_a_drift_either_way_is_refused(self) -> None:
+        for files, missing in (('"A.psm1", "b.exe", "C.psm1"', "C.psm1"), ('"A.psm1"', "b.exe")):
+            self.bundle(files, "target/release/examples/b.exe, scripts/x/A.psm1")
+            found = ci.violations(self.root)
+            self.assertEqual(len(found), 1, files)
+            self.assertTrue(found[0].startswith(".github/workflows/ci.yml:7: "), found[0])   # the Copy-Item line
+            self.assertIn("BUNDLE_FILES", found[0])
+            self.assertIn(missing, found[0])
+
+    def test_a_missing_bundle_step_is_refused(self) -> None:
+        self.put("scripts/asio-spike/spike_window.py", 'BUNDLE_FILES = ("A.psm1",)\n')
+        self.put(".github/workflows/ci.yml", "jobs:\n  a:\n    steps:\n" + PINNED)
+        self.assertEqual(len(ci.violations(self.root)), 1)
+
+    def test_the_repository_is_in_sync(self) -> None:
+        self.assertEqual(ci.bundle_violations(ci.ROOT), [])
+
+
 if __name__ == "__main__":
     unittest.main()
