@@ -135,6 +135,32 @@ try {
     Remove-Item -LiteralPath "$jp.tmp"
     ThrowsLike { Read-IemJournal -Path $jp } '*empty or unreadable*' 'journal-read-refuses-an-empty-journal-without-a-temp-file'
 
+    # Journal schema 2 (m1). A schema-1 journal (written before this review) is read
+    # with the exact conversions only: an absent registry before-value becomes raw
+    # 'absent', the old plan-exists/plan-value mode entries go (the plan is never
+    # reverted now), boot strings become identities without a counter, and the one
+    # version becomes "no tier applied". Anything else is refused, naming the file.
+    $jv = Join-Path (Join-Path $dir 'journal-v1') 'journal.json'
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $jv) | Out-Null
+    $b1 = '2026-01-01T00:00:00.0000000Z'
+    $e1 = @{ kind = 'reg'; args = @{ path = 'HKLM:\X'; name = 'V'; type = 'DWord' }; before = $null; tier = 3; group = 'nic'; reboot = $true; at = $b1; boot = $b1 }
+    $pe = @{ kind = 'plan-exists'; args = @{ guid = $testPlan; source = $activeBefore }; before = $null; tier = 0; group = 'plan'; reboot = $false; at = $b1; boot = $b1 }
+    $pv = @{ kind = 'plan-value'; args = @{ guid = $testPlan; sub = 's'; setting = 's' }; before = '50'; tier = 0; group = 'plan'; reboot = $false; at = $b1; boot = $b1 }
+    $pa = @{ kind = 'plan-active'; args = @{}; before = $activeBefore; tier = 0; group = 'plan'; reboot = $false; at = $b1; boot = $b1 }
+    $v1 = @{ schema = 1; version = 3; entered = $true; global = @{ 'reg:x' = $e1 }; mode = @{ 'plan:exists' = $pe; 'plan:proc-min' = $pv; 'plan:active' = $pa }
+             reverted = @{ 'reg:y' = $b1 }; order = @{ global = @('reg:x'); mode = @('plan:exists', 'plan:proc-min', 'plan:active') } }
+    [IO.File]::WriteAllText($jv, ($v1 | ConvertTo-Json -Depth 8))
+    $m = Read-IemJournal -Path $jv
+    $mx = $m.global['reg:x']
+    Assert ($m.schema -eq 2 -and $m.applied.tier2 -eq 0 -and $m.applied.tier3 -eq 0 -and $mx.raw.kind -eq 'absent' -and "$($mx.boot.time)" -eq $b1 -and $null -eq $mx.boot.id) 'journal-v1-converts-the-exact-parts'
+    Assert (((@($m.order.mode)) -join ',') -eq 'plan:active' -and -not $m.mode.ContainsKey('plan:exists') -and $m.mode.ContainsKey('plan:active') -and "$($m.reverted['reg:y'].time)" -eq $b1) 'journal-v1-drops-the-old-plan-entries'
+    $e1.before = '1'
+    [IO.File]::WriteAllText($jv, ($v1 | ConvertTo-Json -Depth 8))
+    ThrowsLike { Read-IemJournal -Path $jv } "*$jv*schema 1*reg:x*" 'journal-v1-with-a-registry-value-of-unknown-kind-is-refused'
+    $v1.schema = 9
+    [IO.File]::WriteAllText($jv, ($v1 | ConvertTo-Json -Depth 8))
+    ThrowsLike { Read-IemJournal -Path $jv } "*$jv*schema 9*" 'journal-of-another-schema-is-refused'
+
     # A boot is Windows' BootId counter plus the boot time (m5): a reboot bumps BootId
     # however quick it is; a clock step moves the time by seconds; a stuck or missing
     # counter falls back to the time tolerance (A13).
