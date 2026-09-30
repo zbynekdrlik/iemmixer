@@ -21,11 +21,13 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use iem_audio_io::cpuset;
-use iem_audio_io::telemetry::{ActivityGuard, Glitch, Loudest, Watched, dbfs};
+use iem_audio_io::spike_run::{self, Applied};
+use iem_audio_io::telemetry::{ActivityGuard, GapScan, GapSummary, Loudest, Watched, dbfs};
 use serde_json::{Value, json};
 
 const USAGE: &str =
@@ -33,7 +35,8 @@ const USAGE: &str =
 [--driver <name>] [--progress <file>] [--frames 32|48|64] \
 [--activity-channels all|<list, e.g. 101-110,121-124>] [--seconds S] [--burn-us U] [--stress T] \
 [--panic-at K] [--cycles C] [--audio-cpus LIST] [--stress-cpus LIST] [--cpu N] [--threshold-us U]
-(duplex and reopen need --frames and --activity-channels; hwlat needs --cpu and --threshold-us)";
+(duplex and reopen need --frames and --activity-channels; hwlat needs --cpu and --threshold-us; \
+--stress with --audio-cpus needs --stress-cpus)";
 
 /// The longest run: an 8 h soak with margin (S1c design note §8 W4).
 const MAX_SECONDS: u64 = 36_000;
@@ -110,6 +113,8 @@ fn parse(argv: &[String]) -> Result<Args, String> {
                 "{flag}: expected a number up to {max}, got {value:?}"
             )),
         };
+        // A list parser's refusal, prefixed with the flag it came from.
+        let named = |e: String| format!("{flag}: {e}");
         match flag.as_str() {
             "--driver" => a.driver.clone_from(value),
             "--report" => a.report = value.into(),
@@ -121,9 +126,9 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--stress" => a.stress = u32::try_from(num(8)?).unwrap_or(0),
             "--panic-at" => a.panic_at = num(u64::MAX)?,
             "--cycles" => a.cycles = u32::try_from(num(20)?).unwrap_or(0),
-            "--activity-channels" => watched = Some(Watched::parse(value)?),
-            "--audio-cpus" => a.audio_cpus = cpuset::parse_lps(value)?,
-            "--stress-cpus" => a.stress_cpus = cpuset::parse_lps(value)?,
+            "--activity-channels" => watched = Some(Watched::parse(value).map_err(named)?),
+            "--audio-cpus" => a.audio_cpus = cpuset::parse_lps(value).map_err(named)?,
+            "--stress-cpus" => a.stress_cpus = cpuset::parse_lps(value).map_err(named)?,
             "--cpu" => a.cpu = Some(u8::try_from(num(63)?).unwrap_or(0)),
             "--threshold-us" => a.threshold_us = num(1000)?,
             other => return Err(format!("unknown flag {other}")),
@@ -144,6 +149,7 @@ fn parse(argv: &[String]) -> Result<Args, String> {
     if a.seconds == 0 || a.cycles == 0 {
         return Err("--seconds and --cycles must be positive".to_owned());
     }
+    spike_run::check_stress_cpus(a.stress, &a.audio_cpus, &a.stress_cpus)?;
     match watched {
         Some(w) => a.watched = w,
         // All inputs only when asked for: a site's program inputs may carry
@@ -184,15 +190,14 @@ impl End {
     }
 }
 
-/// The exit code of a run's outcome (module header).
+/// A placement's report value (`spike_run::Applied`): null when nothing was
+/// placed, the processors with the CPU Set IDs applied or with the error.
 #[cfg_attr(not(windows), allow(dead_code))]
-fn code_of(outcome: &str) -> u8 {
-    match outcome {
-        "band-activity" => 5,
-        "fault-caught" => 6,
-        "rate-changed" => 7,
-        "stop-hung" => 8,
-        _ => 0,
+fn applied_json(lps: &[u8], applied: &Applied) -> Value {
+    match applied {
+        Applied::Nothing => Value::Null,
+        Applied::Ids(ids) => json!({ "lps": lps, "ids": ids }),
+        Applied::Failed(e) => json!({ "lps": lps, "error": e }),
     }
 }
 
@@ -282,8 +287,14 @@ fn push(report: &mut Value, key: &str, item: Value) {
     }
 }
 
+/// Places the calling thread on the given processors: the CPU Set IDs
+/// applied, or why not (`os::set_thread_cpus` on the PC).
+#[cfg_attr(not(windows), allow(dead_code))]
+type Place = fn(&[u8]) -> Result<Vec<u32>, String>;
+
 /// Busy threads at normal priority standing in for the server and the
-/// stream. They stop and are joined on drop, so every path ends them.
+/// stream (S1c design note §4.3: on the housekeeping CPUs). They stop and
+/// are joined on drop, so every path ends them.
 #[cfg_attr(not(windows), allow(dead_code))]
 struct Stress {
     stop: Arc<AtomicBool>,
@@ -292,66 +303,76 @@ struct Stress {
 
 #[cfg_attr(not(windows), allow(dead_code))]
 impl Stress {
-    fn start(n: u32, cpus: &[u8]) -> Self {
+    /// Starts `n` busy threads; each first places itself on `cpus` through
+    /// `place` (`spike_run::place_on`: without `cpus` they run on the process
+    /// default) and sends the result back. Returns what was applied
+    /// (`spike_run::stress_placement`), or why a thread could not be placed:
+    /// the run fails then, and every thread is stopped and joined.
+    fn start(n: u32, cpus: &[u8], place: Place) -> Result<(Self, Applied), String> {
         let stop = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = mpsc::channel();
         let threads = (0..n)
             .map(|_| {
                 let stop = Arc::clone(&stop);
                 let cpus = cpus.to_vec();
+                let tx = tx.clone();
                 std::thread::spawn(move || {
-                    place_thread(&cpus);
-                    while !stop.load(Ordering::Relaxed) {
+                    let placed = spike_run::place_on(&cpus, place);
+                    let ok = placed.is_ok();
+                    // `start` receives every thread's result before it drops
+                    // the receiver, so this send cannot fail.
+                    let _ = tx.send(placed);
+                    drop(tx);
+                    while spike_run::keeps_busy(ok, stop.load(Ordering::Relaxed)) {
                         std::hint::spin_loop();
                     }
                 })
             })
             .collect();
-        Self { stop, threads }
+        drop(tx);
+        // From here every return ends the threads (drop).
+        let stress = Self { stop, threads };
+        match spike_run::stress_placement(cpus, (0..n).map(|_| rx.recv().ok())) {
+            Applied::Failed(e) => Err(e),
+            applied => Ok((stress, applied)),
+        }
     }
 }
 
-/// Puts the calling thread on `cpus` (Windows; empty = anywhere). A failure
-/// leaves the thread where Windows puts it; the report's `process.topology`
-/// shows whether those processors exist.
+/// Raises the calling thread to TIME_CRITICAL, or says why not
+/// (`os::set_thread_time_critical` on the PC).
 #[cfg_attr(not(windows), allow(dead_code))]
-fn place_thread(cpus: &[u8]) {
-    #[cfg(windows)]
-    if !cpus.is_empty() {
-        let _ = iem_audio_io::os::set_thread_cpus(cpus);
+type Raise = fn() -> Result<(), String>;
+
+/// The hwlat scanner's thread (S1c design note §4.1): it scans only once
+/// `spike_run::hwlat_ready` placed it on `cpu` and raised it to
+/// TIME_CRITICAL, else it returns why. Then it reads the clock in a tight
+/// loop until `spike_run::scan_ends` (`end` or `stop`): every gap of at
+/// least `threshold_ns` is a stall of that processor. Returns the gaps and
+/// the CPU Set IDs applied.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn hwlat_scan(
+    cpu: u8,
+    threshold_ns: u64,
+    end: Duration,
+    stop: &AtomicBool,
+    place: Place,
+    raise: Raise,
+) -> Result<(GapSummary, Vec<u32>), String> {
+    let ids = spike_run::hwlat_ready(cpu, place, raise)?;
+    let mut scan = GapScan::new(threshold_ns);
+    let t0 = Instant::now();
+    let mut prev = 0_u64;
+    loop {
+        let now = t0.elapsed();
+        let ns = u64::try_from(now.as_nanos()).unwrap_or(u64::MAX);
+        scan.observe(prev, ns);
+        prev = ns;
+        if spike_run::scan_ends(now, end, stop.load(Ordering::Relaxed)) {
+            break;
+        }
     }
-    #[cfg(not(windows))]
-    let _ = cpus;
-}
-
-/// The most glitches one segment's report lists; more are only counted.
-#[cfg_attr(not(windows), allow(dead_code))]
-const GLITCH_REPORT_CAP: usize = 10_000;
-
-/// Adds `new` to a segment's list up to the cap; returns how many did not fit.
-#[cfg_attr(not(windows), allow(dead_code))]
-fn keep_glitches(list: &mut Vec<Glitch>, new: &[Glitch]) -> usize {
-    let take = new.len().min(GLITCH_REPORT_CAP.saturating_sub(list.len()));
-    list.extend(new.iter().take(take).copied());
-    new.len() - take
-}
-
-/// A glitch's QPC count: the stream's QPC base plus its stream-clock time.
-#[cfg_attr(not(windows), allow(dead_code))]
-fn glitch_qpc(at_ns: u64, base: i64, freq: i64) -> i64 {
-    let ticks = u128::from(at_ns) * u128::try_from(freq).unwrap_or(0) / 1_000_000_000;
-    base.saturating_add(i64::try_from(ticks).unwrap_or(i64::MAX))
-}
-
-/// The trace marker of one glitch (`latency_report.py` parses it): the
-/// glitch's QPC, the QPC when the marker was written, the frequency, the value.
-#[cfg_attr(not(windows), allow(dead_code))]
-fn marker_text(g: &Glitch, base: i64, freq: i64, emit: i64) -> String {
-    format!(
-        "iemmixer-glitch kind={} at_qpc={} emit_qpc={emit} freq={freq} value={}",
-        g.kind.name(),
-        glitch_qpc(g.at_ns, base, freq),
-        g.value
-    )
+    Ok((scan.summary(), ids))
 }
 
 impl Drop for Stress {
@@ -397,11 +418,13 @@ mod spike {
         self, AsioError, DriverInfo, Host, Running, StopTimings, StreamConfig,
     };
     use iem_audio_io::format::SampleFormat;
+    use iem_audio_io::glitch_report::{keep_glitches, write_markers};
     use iem_audio_io::os;
-    use iem_audio_io::telemetry::{GapScan, Glitch, Snapshot};
+    use iem_audio_io::spike_run::{self, Applied, exit_code};
+    use iem_audio_io::telemetry::{Glitch, Snapshot};
     use serde_json::{Value, json};
 
-    use super::{Args, ExitCode, Mode, Stress, Watch, code_of, keep_glitches, marker_text, push};
+    use super::{Args, ExitCode, Mode, Stress, Watch, applied_json, hwlat_scan, push};
 
     const FIRST_CALLBACK_WAIT: Duration = Duration::from_secs(2);
     const AFTER_FAULT: Duration = Duration::from_secs(2);
@@ -418,24 +441,24 @@ mod spike {
             "audio_cpus": a.audio_cpus, "stress_cpus": a.stress_cpus,
             "cpu": a.cpu, "threshold_us": a.threshold_us,
         });
-        let (process, refused) = process_setup(a);
+        let (process, failed) = process_setup(a);
         report["process"] = process;
-        let code = if let Some(why) = refused {
-            report["outcome"] = json!("refused");
+        let code = if let Some((outcome, why)) = failed {
+            report["outcome"] = json!(outcome);
             report["error"] = json!(why);
-            4
+            exit_code(outcome)
         } else {
             match run(a, &mut report) {
                 Ok(code) => code,
                 Err(e) => {
-                    let (outcome, code) = match e {
-                        AsioError::NoDrivers(_) | AsioError::NotFound { .. } => ("no-driver", 3),
-                        AsioError::Refused(_) => ("refused", 4),
-                        _ => ("error", 1),
+                    let outcome = match e {
+                        AsioError::NoDrivers(_) | AsioError::NotFound { .. } => "no-driver",
+                        AsioError::Refused(_) => "refused",
+                        _ => "error",
                     };
                     report["outcome"] = json!(outcome);
                     report["error"] = json!(e.to_string());
-                    code
+                    exit_code(outcome)
                 }
             }
         };
@@ -455,7 +478,7 @@ mod spike {
         // Pre-empted before the start: the card is never opened.
         if a.stop_file.exists() {
             report["outcome"] = json!("stopped");
-            return Ok(0);
+            return Ok(exit_code("stopped"));
         }
         let host = Host::open(&a.driver)?;
         let info = host.info()?;
@@ -463,12 +486,12 @@ mod spike {
         if let Err(e) = a.watched.check(usize::try_from(info.inputs).unwrap_or(0)) {
             report["outcome"] = json!("refused");
             report["error"] = json!(e);
-            return Ok(4);
+            return Ok(exit_code("refused"));
         }
         match a.mode {
             Mode::Probe => {
                 report["outcome"] = json!("done");
-                Ok(0)
+                Ok(exit_code("done"))
             }
             Mode::Duplex => duplex(a, host, info, report),
             Mode::Reopen => reopen(a, host, info, report),
@@ -478,12 +501,13 @@ mod spike {
 
     /// In-process levers (S1c design note §6.2 L5): power throttling off and
     /// the audio CPU Set as the process default (every thread without its own
-    /// selection, the driver's included, runs there; no priority changes). A
-    /// requested CPU Set that cannot be applied refuses the run: a
-    /// measurement on the wrong processors would mislead.
-    fn process_setup(a: &Args) -> (Value, Option<String>) {
-        let throttling =
-            os::disable_power_throttling().map_or_else(|e| json!(e.to_string()), |()| json!("off"));
+    /// selection, the driver's included, runs there; no priority changes).
+    /// A lever that could not be applied fails the run
+    /// (`spike_run::setup_failure`: a failed audio CPU Set refuses it,
+    /// throttling left on is an error), since the measurement would not be
+    /// of the process the report names: the outcome and why.
+    fn process_setup(a: &Args) -> (Value, Option<(&'static str, String)>) {
+        let throttling = os::disable_power_throttling().map_err(|e| e.to_string());
         let topology = match os::system_cpu_sets() {
             Ok(sets) => json!(sets
                 .iter()
@@ -491,57 +515,53 @@ mod spike {
                 .collect::<Vec<_>>()),
             Err(e) => json!({ "error": e.to_string() }),
         };
-        let (audio, refused) = if a.audio_cpus.is_empty() {
-            (json!(null), None)
-        } else {
-            match os::set_process_cpus(&a.audio_cpus) {
-                Ok(ids) => (json!({ "lps": a.audio_cpus, "ids": ids }), None),
-                Err(e) => (
-                    json!({ "lps": a.audio_cpus, "error": e.to_string() }),
-                    Some(format!("audio CPU Set: {e}")),
-                ),
-            }
-        };
+        let audio = spike_run::applied(
+            &a.audio_cpus,
+            spike_run::place_on(&a.audio_cpus, |lps| {
+                os::set_process_cpus(lps).map_err(|e| e.to_string())
+            }),
+        );
+        let failed = spike_run::setup_failure(&throttling, &audio);
+        let throttling = throttling.map_or_else(|e| json!(e), |()| json!("off"));
+        // The stress threads' CPU Set: what duplex applies (null until then).
         (
-            json!({ "power_throttling": throttling, "audio_cpus": audio, "stress_cpus": a.stress_cpus, "topology": topology }),
-            refused,
+            json!({ "power_throttling": throttling, "audio_cpus": applied_json(&a.audio_cpus, &audio), "stress_cpus": null, "topology": topology }),
+            failed,
         )
     }
 
+    /// Puts the calling thread on `cpus`: the CPU Set IDs applied.
+    fn place_thread(cpus: &[u8]) -> Result<Vec<u32>, String> {
+        os::set_thread_cpus(cpus).map_err(|e| e.to_string())
+    }
+
+    /// Makes the calling thread TIME_CRITICAL (the hwlat scanner only).
+    fn raise_thread() -> Result<(), String> {
+        os::set_thread_time_critical().map_err(|e| e.to_string())
+    }
+
     /// hwlat (S1c design note §4.1): one thread at TIME_CRITICAL on `--cpu`
-    /// reads the clock in a tight loop; every gap of at least the threshold
-    /// is a stall of that processor. The card is never opened.
+    /// reads the clock in a tight loop (`hwlat_scan`); every gap of at least
+    /// the threshold is a stall of that processor. A scanner that cannot be
+    /// placed or raised never scans: outcome "error", exit 1. The card is
+    /// never opened.
     fn hwlat(a: &Args, report: &mut Value) -> u8 {
         if a.stop_file.exists() {
             report["outcome"] = json!("stopped");
-            return 0;
+            return exit_code("stopped");
         }
         let Some(cpu) = a.cpu else {
+            // The parser requires --cpu for hwlat.
+            report["error"] = json!("hwlat without --cpu");
             report["outcome"] = json!("error");
-            return 2;
+            return exit_code("error");
         };
         let stop = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&stop);
         let threshold_ns = a.threshold_us.saturating_mul(1_000);
         let end = Duration::from_secs(a.seconds);
         let scanner = std::thread::spawn(move || {
-            let placed =
-                os::set_thread_cpus(&[cpu]).map_or_else(|e| json!(e.to_string()), |ids| json!(ids));
-            let priority = os::set_thread_time_critical()
-                .map_or_else(|e| json!(e.to_string()), |()| json!("time-critical"));
-            let mut scan = GapScan::new(threshold_ns);
-            let t0 = Instant::now();
-            let mut prev = 0_u64;
-            loop {
-                let now = t0.elapsed();
-                let ns = u64::try_from(now.as_nanos()).unwrap_or(u64::MAX);
-                scan.observe(prev, ns);
-                prev = ns;
-                if now >= end || flag.load(Ordering::Relaxed) {
-                    break;
-                }
-            }
-            (scan.summary(), placed, priority)
+            hwlat_scan(cpu, threshold_ns, end, &flag, place_thread, raise_thread)
         });
         let mut outcome = "done";
         while !scanner.is_finished() {
@@ -552,20 +572,27 @@ mod spike {
             }
         }
         match scanner.join() {
-            Ok((s, placed, priority)) => {
+            Ok(Ok((s, ids))) => {
                 let q =
                     |v: [f64; 4]| json!({ "p50": v[0], "p99": v[1], "p999": v[2], "max": v[3] });
                 report["hwlat"] = json!({
-                    "cpu": cpu, "threshold_us": a.threshold_us, "placed": placed, "priority": priority,
+                    "cpu": cpu, "threshold_us": a.threshold_us, "placed": ids, "priority": "time-critical",
                     "reads": s.reads, "over": s.over, "gaps_us": q(s.gaps.summary_us()),
                     "largest": s.largest.iter().map(|&(at, gap)| json!({ "at_us": at as f64 / 1e3, "gap_us": gap as f64 / 1e3 })).collect::<Vec<_>>(),
                 });
                 report["outcome"] = json!(outcome);
-                0
+                exit_code(outcome)
+            }
+            Ok(Err(e)) => {
+                report["hwlat"] = json!({ "cpu": cpu, "threshold_us": a.threshold_us, "error": e });
+                report["error"] = json!(e);
+                report["outcome"] = json!("error");
+                exit_code("error")
             }
             Err(_) => {
+                report["error"] = json!("the hwlat scanner thread panicked");
                 report["outcome"] = json!("error");
-                1
+                exit_code("error")
             }
         }
     }
@@ -582,10 +609,13 @@ mod spike {
         fresh.clear();
         running.drain_glitches(fresh);
         if let (Some(m), Some((base, freq))) = (markers, qpc) {
-            let emit = os::qpc().map_or(0, |q| q.0);
-            for g in fresh.iter() {
-                m.write(&marker_text(g, base, freq, emit));
-            }
+            write_markers(
+                fresh,
+                base,
+                freq,
+                || os::qpc().map_or(0, |q| q.0),
+                |text| m.write(text),
+            );
         }
         keep_glitches(kept, fresh)
     }
@@ -624,7 +654,20 @@ mod spike {
             burn_us: a.burn_us,
             panic_at: a.panic_at,
         };
-        let _stress = Stress::start(a.stress, &a.stress_cpus);
+        // The busy threads run on the CPUs the report names, or the run fails.
+        let _stress = match Stress::start(a.stress, &a.stress_cpus, place_thread) {
+            Ok((stress, applied)) => {
+                report["process"]["stress_cpus"] = applied_json(&a.stress_cpus, &applied);
+                stress
+            }
+            Err(e) => {
+                report["process"]["stress_cpus"] =
+                    applied_json(&a.stress_cpus, &Applied::Failed(e.clone()));
+                report["error"] = json!(e);
+                report["outcome"] = json!("error");
+                return Ok(exit_code("error"));
+            }
+        };
         let markers = os::Markers::register().ok();
         let deadline = Instant::now() + Duration::from_secs(a.seconds);
         let mut watch = Watch::new(Instant::now(), a.watched.clone());
@@ -714,7 +757,7 @@ mod spike {
             (host, info) = recreated?;
         }
         report["outcome"] = json!(outcome);
-        Ok(code_of(outcome))
+        Ok(exit_code(outcome))
     }
 
     fn reopen(
@@ -778,7 +821,7 @@ mod spike {
             (host, info) = recreated?;
         }
         report["outcome"] = json!(outcome);
-        Ok(code_of(outcome))
+        Ok(exit_code(outcome))
     }
 
     /// Pumps messages until the first callback; the start timings and the wait.
@@ -863,292 +906,4 @@ mod spike {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::cell::Cell;
-
-    #[test]
-    fn outcomes_have_their_exit_codes() {
-        assert_eq!(
-            [
-                "done",
-                "stopped",
-                "band-activity",
-                "fault-caught",
-                "rate-changed",
-                "stop-hung"
-            ]
-            .map(code_of),
-            [0, 0, 5, 6, 7, 8]
-        );
-        assert_eq!(
-            [End::Stopped, End::RateChanged, End::BandActivity].map(End::outcome),
-            ["stopped", "rate-changed", "band-activity"]
-        );
-    }
-
-    #[test]
-    fn the_watch_stops_on_the_stop_file_a_rate_change_and_band_activity() {
-        let t0 = Instant::now();
-        let s = Duration::from_secs(1);
-        let mut w = Watch::new(t0, Watched::All);
-        assert_eq!(w.poll(t0, true, true, || vec![0.01]), Some(End::Stopped));
-        assert_eq!(
-            w.poll(t0, false, true, || vec![0.01]),
-            Some(End::RateChanged)
-        );
-        // The peaks are read once a second; three loud seconds in a row are band activity.
-        let reads = Cell::new(0);
-        let peaks = || {
-            reads.set(reads.get() + 1);
-            vec![0.0, 0.01]
-        };
-        assert_eq!(w.poll(t0 + s / 2, false, false, peaks), None);
-        assert_eq!(reads.get(), 0);
-        assert_eq!(w.poll(t0 + s, false, false, peaks), None);
-        assert_eq!(w.poll(t0 + s, false, false, peaks), None);
-        assert_eq!(reads.get(), 1);
-        assert_eq!(w.poll(t0 + 2 * s, false, false, peaks), None);
-        assert_eq!(
-            w.poll(t0 + 3 * s, false, false, peaks),
-            Some(End::BandActivity)
-        );
-        assert_eq!(reads.get(), 3);
-    }
-
-    #[test]
-    fn a_quiet_second_resets_the_band_guard_and_a_late_poll_reads_once() {
-        let t0 = Instant::now();
-        let s = Duration::from_secs(1);
-        let mut w = Watch::new(t0, Watched::All);
-        assert_eq!(w.poll(t0 + s, false, false, || vec![0.5]), None);
-        assert_eq!(w.poll(t0 + 2 * s, false, false, || vec![0.0]), None);
-        assert_eq!(w.poll(t0 + 3 * s, false, false, || vec![0.5]), None);
-        // A pause of 10 s (a reopen): one read, the next one a second later.
-        let reads = Cell::new(0);
-        let peaks = || {
-            reads.set(reads.get() + 1);
-            vec![0.5]
-        };
-        assert_eq!(w.poll(t0 + 13 * s, false, false, peaks), None);
-        assert_eq!(w.poll(t0 + 13 * s, false, false, peaks), None);
-        assert_eq!(reads.get(), 1);
-        assert_eq!(
-            w.poll(t0 + 14 * s, false, false, peaks),
-            Some(End::BandActivity)
-        );
-    }
-
-    #[test]
-    fn a_loud_input_outside_the_stage_inputs_does_not_stop_the_run_but_is_reported() {
-        let t0 = Instant::now();
-        let s = Duration::from_secs(1);
-        // Stage inputs 2 and 3 (card numbers); input 1 carries program material.
-        let mut w = Watch::new(t0, Watched::parse("2-3").unwrap());
-        for k in 1..=10 {
-            assert_eq!(
-                w.poll(t0 + k * s, false, false, || vec![0.76, 0.001, 0.0, 0.02]),
-                None,
-                "second {k}"
-            );
-        }
-        let mut report = serde_json::json!({ "tool": "asio_spike" });
-        w.record_levels(&mut report);
-        assert_eq!(report["loudest_input_dbfs"], dbfs(0.76));
-        assert_eq!(report["loudest_watched_dbfs"], dbfs(0.001));
-        assert_eq!(
-            report["loudest_inputs"],
-            serde_json::json!([
-                { "channel": 1, "index": 0, "dbfs": dbfs(0.76) },
-                { "channel": 4, "index": 3, "dbfs": dbfs(0.02) },
-                { "channel": 2, "index": 1, "dbfs": dbfs(0.001) },
-            ])
-        );
-        assert_eq!(report["activity_channels"], serde_json::json!([2, 3]));
-        // The stage inputs get loud: three seconds in a row stop the run.
-        for k in 11..=12 {
-            assert_eq!(
-                w.poll(t0 + k * s, false, false, || vec![0.0, 0.0, 0.5]),
-                None
-            );
-        }
-        assert_eq!(
-            w.poll(t0 + 13 * s, false, false, || vec![0.0, 0.0, 0.5]),
-            Some(End::BandActivity)
-        );
-    }
-
-    #[test]
-    fn the_levels_list_the_five_loudest_inputs_and_all_when_every_input_is_watched() {
-        let t0 = Instant::now();
-        let mut w = Watch::new(t0, Watched::All);
-        let peaks: Vec<f64> = (0..8).map(|i| f64::from(i) / 8.0).collect();
-        assert_eq!(
-            w.poll(t0 + Duration::from_secs(1), false, false, || peaks),
-            None
-        );
-        let mut progress = serde_json::json!({ "elapsed_s": 5 });
-        w.record_levels(&mut progress);
-        let listed: Vec<u64> = progress["loudest_inputs"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|e| e["channel"].as_u64().unwrap())
-            .collect();
-        assert_eq!(listed, [8, 7, 6, 5, 4]);
-        assert_eq!(progress["activity_channels"], "all");
-        assert_eq!(progress["loudest_watched_dbfs"], dbfs(7.0 / 8.0));
-        assert_eq!(progress["elapsed_s"], 5);
-    }
-
-    #[test]
-    fn measurements_are_kept_as_they_complete() {
-        let mut r = serde_json::json!({ "tool": "asio_spike" });
-        push(&mut r, "segments", serde_json::json!({ "seconds": 1 }));
-        push(&mut r, "segments", serde_json::json!({ "seconds": 2 }));
-        assert_eq!(
-            r,
-            serde_json::json!({ "tool": "asio_spike", "segments": [{ "seconds": 1 }, { "seconds": 2 }] })
-        );
-    }
-
-    #[test]
-    fn stress_threads_stop_when_dropped() {
-        let s = Stress::start(2, &[]);
-        let flag = Arc::clone(&s.stop);
-        assert_eq!(s.threads.len(), 2);
-        drop(s);
-        assert!(flag.load(Ordering::Relaxed));
-    }
-
-    fn argv(s: &str) -> Vec<String> {
-        s.split_whitespace().map(str::to_owned).collect()
-    }
-
-    #[test]
-    fn parses_a_duplex_run_under_load() {
-        let a = parse(&argv(
-            "duplex --driver D1 --report r.json --stop-file stop --progress p.json --frames 32 --seconds 600 --burn-us 100 --stress 4 --panic-at 7 --cycles 3 --activity-channels 101-110,121-124 --audio-cpus 14 --stress-cpus 6-13",
-        ))
-        .unwrap();
-        assert_eq!(
-            a,
-            Args {
-                mode: Mode::Duplex,
-                driver: "D1".into(),
-                report: "r.json".into(),
-                progress: Some("p.json".into()),
-                stop_file: "stop".into(),
-                frames: 32,
-                seconds: 600,
-                burn_us: 100,
-                stress: 4,
-                panic_at: 7,
-                cycles: 3,
-                audio_cpus: vec![14],
-                stress_cpus: vec![6, 7, 8, 9, 10, 11, 12, 13],
-                cpu: None,
-                threshold_us: 10,
-                watched: Watched::parse("101-110,121-124").unwrap(),
-            }
-        );
-    }
-
-    #[test]
-    fn probe_needs_no_frames_and_has_defaults() {
-        let a = parse(&argv("probe --driver D1 --report r --stop-file s")).unwrap();
-        assert_eq!(
-            (a.mode, a.frames, a.seconds, a.cycles, a.progress),
-            (Mode::Probe, 0, 600, 5, None)
-        );
-        let r = parse(&argv(
-            "reopen --driver D1 --report r --stop-file s --frames 48 --activity-channels all",
-        ))
-        .unwrap();
-        assert_eq!((r.mode, r.watched), (Mode::Reopen, Watched::All));
-    }
-
-    #[test]
-    fn bad_input_is_refused() {
-        for bad in [
-            "",
-            "record --driver D1 --report r --stop-file s",
-            "probe --driver",
-            "probe --driver D1 --report r --stop-file s --colour red",
-            "probe --report r --stop-file s",
-            "probe --driver D1 --stop-file s",
-            "probe --driver D1 --report r",
-            "duplex --driver D1 --report r --stop-file s",
-            "duplex --driver D1 --report r --stop-file s --frames 64",
-            "reopen --driver D1 --report r --stop-file s --frames 64",
-            "duplex --driver D1 --report r --stop-file s --frames 64 --activity-channels 0",
-            "duplex --driver D1 --report r --stop-file s --frames 64 --activity-channels 5-3",
-            "duplex --driver D1 --report r --stop-file s --frames 16",
-            "duplex --driver D1 --report r --stop-file s --frames 32x",
-            "duplex --driver D1 --report r --stop-file s --frames 32 --seconds 0",
-            "duplex --driver D1 --report r --stop-file s --frames 32 --activity-channels all --seconds 36001",
-            "duplex --driver D1 --report r --stop-file s --frames 32 --burn-us 301",
-            "duplex --driver D1 --report r --stop-file s --frames 32 --stress 9",
-            "reopen --driver D1 --report r --stop-file s --frames 32 --cycles 0",
-            "reopen --driver D1 --report r --stop-file s --frames 32 --cycles 21",
-            "hwlat --report r --stop-file s",
-            "hwlat --report r --stop-file s --cpu 64",
-            "hwlat --report r --stop-file s --cpu 3 --threshold-us 0",
-            "hwlat --report r --stop-file s --cpu 3 --threshold-us 1001",
-            "duplex --driver D1 --report r --stop-file s --frames 32 --activity-channels all --audio-cpus 1,1",
-            "duplex --driver D1 --report r --stop-file s --frames 32 --activity-channels all --stress-cpus 70",
-        ] {
-            assert!(parse(&argv(bad)).is_err(), "{bad:?}");
-        }
-        assert!(parse(&argv("duplex --driver D1 --report r --stop-file s --frames 64 --seconds 3600 --burn-us 300 --stress 8 --activity-channels all")).is_ok());
-        assert!(parse(&argv("duplex --driver D1 --report r --stop-file s --frames 32 --activity-channels all --seconds 36000")).is_ok());
-        let h = parse(&argv(
-            "hwlat --report r --stop-file s --cpu 14 --seconds 30",
-        ))
-        .unwrap();
-        assert_eq!(
-            (
-                h.mode,
-                h.cpu,
-                h.threshold_us,
-                h.seconds,
-                h.driver.is_empty()
-            ),
-            (Mode::Hwlat, Some(14), 10, 30, true)
-        );
-    }
-
-    use iem_audio_io::telemetry::GlitchKind;
-
-    fn glitch(kind: GlitchKind, at_ns: u64, value: u64) -> Glitch {
-        Glitch { kind, at_ns, value }
-    }
-
-    #[test]
-    fn glitch_list_is_capped() {
-        let mut list = vec![glitch(GlitchKind::Late, 0, 1); GLITCH_REPORT_CAP - 2];
-        let new = [glitch(GlitchKind::Missed, 1, 2); 5];
-        assert_eq!(keep_glitches(&mut list, &new), 3);
-        assert_eq!(list.len(), GLITCH_REPORT_CAP);
-        assert_eq!(keep_glitches(&mut list, &new), 5);
-        let mut empty = Vec::new();
-        assert_eq!(keep_glitches(&mut empty, &new), 0);
-        assert_eq!(empty.len(), 5);
-    }
-
-    #[test]
-    fn glitch_times_convert_to_qpc_and_markers_carry_them() {
-        assert_eq!(glitch_qpc(1_000_000_000, 100, 10_000_000), 10_000_100);
-        assert_eq!(glitch_qpc(333_333, 0, 10_000_000), 3_333);
-        assert_eq!(glitch_qpc(5, 7, 0), 7);
-        assert_eq!(
-            marker_text(
-                &glitch(GlitchKind::Missed, 1_000_000_000, 700_000),
-                100,
-                10_000_000,
-                10_050_000
-            ),
-            "iemmixer-glitch kind=missed at_qpc=10000100 emit_qpc=10050000 freq=10000000 value=700000"
-        );
-    }
-}
+mod tests;
