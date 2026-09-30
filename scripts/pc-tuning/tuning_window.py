@@ -389,20 +389,35 @@ def merge(x: str, d: str, base: str) -> str:
             f"[void](Invoke-IemXperf -Xperf {x} -Arguments (@('-merge') + $m + @((Join-Path {d} '{out}'))))")
 
 
-def analysis(x: str, d: str, cuts: int, diag: bool) -> tuple[str, list[str]]:
-    """The merge and xperf analysis of a stopped trace and of each cut: one
-    PowerShell body and the files it leaves in the run folder (dpcisr for
-    every trace, the near-glitch view for every trace of a diag run)."""
-    calls, names = [], []
+def analysis(x: str, d: str, cuts: int, diag: bool) -> list[tuple[str, str | None]]:
+    """The merge and xperf analysis of a stopped trace and of each cut, one
+    step at a time: (PowerShell body, the file it leaves in the run folder or
+    None) — per trace a merge, its dpcisr and, for a diag run, its near-glitch
+    view. Each step is its own PC call (decision B of the #32 review)."""
+    steps: list[tuple[str, str | None]] = []
     for etl in [None] + [f"cut-{i}.etl" for i in range(1, cuts + 1)]:
         name, base = (f" -Name '{etl}'", etl[:-len(".etl")] + ".") if etl else ("", "")
-        calls.append(merge(x, d, base))
-        calls.append(f"Invoke-IemDpcIsr -Xperf {x} -Dir {d}{name}")
-        names.append(f"{base}dpcisr.txt")
+        steps.append((merge(x, d, base), None))
+        steps.append((f"Invoke-IemDpcIsr -Xperf {x} -Dir {d}{name}", f"{base}dpcisr.txt"))
         if diag:
-            calls.append(f"Export-IemNearGlitch -Xperf {x} -Dir {d}{name}")
-            names.append(f"{base}near.txt")
-    return " ; ".join(calls), names
+            steps.append((f"Export-IemNearGlitch -Xperf {x} -Dir {d}{name}", f"{base}near.txt"))
+    return steps
+
+
+ANALYSIS_REFUSED = "ide event: the analysis step did not start"
+
+
+def analysis_guard(root: str, since: str) -> str:
+    """The PC-side start of one analysis step: this PowerShell runs at Idle
+    priority (the xperf it starts inherits the class: CreateProcess keeps an
+    Idle or Below-normal parent's class), and it does not start when the
+    spike's stop file was written after the analysis began (`since`, PC
+    time): the first thing every preempt does is write it, so this is the
+    PC's view of "ide event" when the dev box's call was already on its way."""
+    return (f"(Get-Process -Id $PID).PriorityClass = 'Idle' ; $s = (Join-Path {ps_quote(root)} 'queue\\stop') ; "
+            f"if ((Test-Path -LiteralPath $s) -and (Get-Item -LiteralPath $s).LastWriteTimeUtc -gt "
+            f"[datetime]::Parse({ps_quote(since)}, [Globalization.CultureInfo]::InvariantCulture, "
+            f"[Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()) {{ throw '{ANALYSIS_REFUSED}' }}")
 
 
 def read_text(path: Path) -> str:
@@ -501,14 +516,27 @@ def _measure(env, args, profile: dict, state: dict, run_dir: str, since: str, tr
         # The stop changes the PC, so it completes even when "ide event" comes;
         # without the merge it is quick (the raw session files stay). Then the
         # trace is no longer recorded.
-        tps(env, f"Stop-IemTrace -Xperf {xperf(env)} -Dir {ps_quote(run_dir)}", timeout=120, event="finish")
+        began = tps(env, f"[void](Stop-IemTrace -Xperf {xperf(env)} -Dir {ps_quote(run_dir)}) ; Get-IemNow", timeout=120, event="finish")
         clear_trace()
-        # The merges and the xperf analysis only read the stopped traces: "ide
-        # event" abandons them at once (bounded on the PC, they end by
-        # themselves) and never waits. Each cut holds the glitches that caused
-        # it: it gets its own views (#32 B7, review M1).
-        body, names = analysis(xperf(env), ps_quote(run_dir), cut["n"], diag)
-        tps(env, body, timeout=1800, event="abandon")
+        # The merges and the xperf analysis only read the stopped traces. Each
+        # step is its own abandonable call at Idle priority, issued only while
+        # no "ide event" came (check_event) and started on the PC only while no
+        # preempt wrote the stop file (analysis_guard): after the flag at most
+        # the one step already running goes on, at Idle, and ends by itself
+        # (decision B of the #32 review). Each cut holds the glitches that
+        # caused it: it gets its own views (#32 B7, review M1).
+        guard = analysis_guard(env["PC_ROOT"], began)
+        names = []
+        for body, produced in analysis(xperf(env), ps_quote(run_dir), cut["n"], diag):
+            check_event()
+            try:
+                tps(env, f"{guard} ; {body}", timeout=1800, event="abandon")
+            except StepError as e:
+                if ANALYSIS_REFUSED in str(e):
+                    raise sw.EventNow() from None   # the PC saw a preempt's stop file first
+                raise
+            if produced:
+                names.append(produced)
         # The downloads (a near dump can be hundreds of MB, one per cut) and the
         # parses below give way to "ide event" at once (review M3).
         scp_dir = env["PC_TUNING_ROOT_SCP"] + "/runs/" + out.name
