@@ -85,6 +85,11 @@ _NUL_RUN = re.compile(rb"\x00{2,}")
 # 0x01 lets the regex engine skip ahead, which the low byte first would not)
 _UTF16_RUN = re.compile(rb"(?:\x00[\t\x20-\x7e\xa0-\xff]|\x01[\x00-\xff]){2,}")
 GITLINK = b"160000"  # a submodule entry: its object is a commit, not a blob
+# git-lfs keeps a file's content on its server and only a pointer in the repository (#32 review m9)
+_LFS_POINTER = (b"version https://git-lfs.github.com/spec/", b"version https://hawser.github.com/spec/")
+_LFS_FILTER = re.compile(r"(?<!\S)filter=lfs(?!\S)")
+LFS_POINTER = "git-lfs pointer, its content is not in the repository to scan"
+LFS_FILTER = "git-lfs filter, the content of the files it matches is never in the repository to scan"
 # a commit's metadata (`git show -s`), pinned against local config: --encoding=UTF-8 beats
 # i18n.logOutputEncoding (UTF-16 puts a NUL in every character, ISO-8859-2 re-encodes letters that
 # no reading decodes back); --no-show-signature beats log.showSignature, whose "No signature"
@@ -112,6 +117,18 @@ class IdentityProblem:
 
     def render(self) -> str:
         return f"{self.where}: {self.role} email is not an allowed identity"
+
+
+@dataclass(frozen=True)
+class Unscannable:
+    where: str
+    what: str
+
+    def render(self) -> str:
+        return f"{self.where}: {self.what}"
+
+
+Finding = Hit | IdentityProblem | Unscannable
 
 
 def load_identities(path: Path | None) -> set[str] | None:
@@ -569,10 +586,24 @@ def diff_path(label: str) -> str:
     return label.removeprefix("b/")
 
 
-def scan_tree(scanner: Scanner, repo: Path, rev: str) -> list[Hit]:
+def lfs_problems(scanner: Scanner, where: str, path: str, data: bytes, numbered: bool) -> list[Unscannable]:
+    """A git-lfs pointer blob, and each `.gitattributes` line that sets `filter=lfs`: the content
+    they stand for lives on the LFS server, which no scan reads, so each is a finding."""
+    problems = []
+    if data.startswith(_LFS_POINTER):
+        problems.append(Unscannable(f"{where}{scanner.shown(path)}", LFS_POINTER))
+    if path.rsplit("/", 1)[-1] == ".gitattributes":
+        for number, line in enumerate(decode(data).split("\n"), start=1):
+            if _LFS_FILTER.search(line) and not line.lstrip().startswith("#"):
+                problems.append(Unscannable(f"{where}{scanner.shown(path)}" + (f":{number}" if numbered else ""),
+                                            LFS_FILTER))
+    return problems
+
+
+def scan_tree(scanner: Scanner, repo: Path, rev: str) -> list[Finding]:
     # every location starts with a fixed word, never with a path: a path starting with `::`
     # would otherwise read as a GitHub workflow command in the CI log
-    hits: list[Hit] = []
+    hits: list[Finding] = []
     for entry in git(repo, "ls-tree", "-r", "-z", "--full-tree", rev).split(b"\0"):
         if not entry:
             continue
@@ -583,7 +614,9 @@ def scan_tree(scanner: Scanner, repo: Path, rev: str) -> list[Hit]:
         if kind != b"blob":
             continue
         # the blob's own bytes: cat-file applies no .gitattributes (binary, -diff, textconv)
-        found = scanner.findings(path, batches(git(repo, "cat-file", "blob", decode(obj))))
+        data = git(repo, "cat-file", "blob", decode(obj))
+        hits += lfs_problems(scanner, "tree ", path, data, numbered=True)
+        found = scanner.findings(path, batches(data))
         if found:
             shown = scanner.shown(path)
             hits += [Hit(f"tree {shown}:{label}", entry) for label, _key, entry in found]
@@ -614,15 +647,16 @@ def not_in(found: list[tuple[str, str, int]], old: bytes) -> list[tuple[str, str
     return [finding for finding in found if finding[1] not in present]
 
 
-def scan_commit_blobs(scanner: Scanner, repo: Path, sha: str, seen: set[str]) -> tuple[list[Hit], set[str]]:
-    """Scan every changed path of a commit, and the content of each changed blob git's line diff
-    cannot show (it holds a NUL byte or is UTF-16): the units its new blob adds over the old one.
-    Returns the hits and those blob paths, whose line diff is then not scanned.
+def scan_commit_blobs(scanner: Scanner, repo: Path, sha: str, seen: set[str]) -> tuple[list[Finding], set[str]]:
+    """Scan every changed path of a commit, every changed blob for git-lfs (lfs_problems), and the
+    content of each changed blob git's line diff cannot show (it holds a NUL byte or is UTF-16 /
+    UTF-32): the units its new blob adds over the old one. Returns the findings and those blob
+    paths, whose line diff is then not scanned.
 
     Every path is enumerated here, not only from the unified diff's `+++` headers: an empty or
     binary file has no such header, so its term-bearing name would otherwise slip past."""
     short = sha[:12]
-    hits: list[Hit] = []
+    hits: list[Finding] = []
     blob_paths: set[str] = set()
     reported: set[tuple[str, str, int]] = set()
     for old_mode, old, new_mode, new, raw_path in changed_blobs(repo, sha):
@@ -633,6 +667,8 @@ def scan_commit_blobs(scanner: Scanner, repo: Path, sha: str, seen: set[str]) ->
         if new_mode == GITLINK:
             continue
         data = git(repo, "cat-file", "blob", new)
+        hits += [problem for problem in lfs_problems(scanner, f"{short} ", path, data, numbered=False)
+                 if problem not in hits]  # a merge repeats a path per parent
         if is_plain_text(data):
             continue
         blob_paths.add(path)
@@ -708,8 +744,8 @@ def identity_problems(repo: Path, sha: str, identities: set[str]) -> list[Identi
 
 def scan_commits(
     scanner: Scanner, repo: Path, revlist_args: list[str], identities: set[str] | None = None
-) -> list[Hit | IdentityProblem]:
-    hits: list[Hit | IdentityProblem] = []
+) -> list[Finding]:
+    hits: list[Finding] = []
     for sha in decode(git(repo, "rev-list", *revlist_args)).split():
         short = sha[:12]
         metadata = decode(git(repo, *METADATA, "--format=%an%n%ae%n%cn%n%ce%n%B", sha))
@@ -761,7 +797,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"identity list {args.identities} is empty", file=sys.stderr)
         return EXIT_USAGE
     scanner = Scanner(terms, load_allow(args.allow))
-    hits: list[Hit | IdentityProblem] = []
+    hits: list[Finding] = []
     for rev in args.tree:
         hits += scan_tree(scanner, args.repo, rev)
     for spec in args.commits:
