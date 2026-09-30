@@ -1140,6 +1140,15 @@ mod tests {
                 "--stress-cpus 6-13",
                 "--stress-cpus",
             ),
+            // Busy threads without their own CPUs would run on the process
+            // default, the audio CPUs (S1c design note §4.3: housekeeping).
+            (
+                "duplex --driver D1 --report r --stop-file s --frames 32 --activity-channels all \
+                 --stress 4 --audio-cpus 14 {}",
+                "",
+                "--stress-cpus 6-13",
+                "--stress-cpus",
+            ),
             ("hwlat --report r --stop-file s {}", "", "--cpu 3", "--cpu"),
             (
                 "hwlat --report r --stop-file s --cpu {}",
