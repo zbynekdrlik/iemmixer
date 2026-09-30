@@ -48,6 +48,8 @@ New-ItemProperty -LiteralPath $enum -Name 'HardwareID' -PropertyType MultiString
 $nic = "$root\HKLM\NIC"
 New-Item -Path $nic -Force | Out-Null
 New-ItemProperty -LiteralPath $nic -Name 'PowerSaving' -PropertyType String -Value '1' | Out-Null
+# A value whose name ends like the NDIS keyword *EEE: undoing *EEE must leave it (A2).
+New-ItemProperty -LiteralPath $nic -Name 'AdvancedEEE' -PropertyType String -Value '1' | Out-Null
 $mm = "$root\HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"
 New-Item -Path "$mm\Tasks\Pro Audio" -Force | Out-Null
 New-ItemProperty -LiteralPath $mm -Name 'SystemResponsiveness' -PropertyType DWord -Value 0 | Out-Null
@@ -64,7 +66,7 @@ function New-TestProfile([string]$Hwid) {
         maintenance = [ordered]@{ off = $true; tasks = @("$taskPath$taskName", '\iemmixer-test\no-such-task') }
         defender = [ordered]@{ paths = @($dir); processes = @() }
         devices = @([ordered]@{ id = 'card'; instance = 'PCI\VEN_TEST&DEV_0001\0'; hwid = $Hwid; lps = @(0, 2); enabled = $true })
-        nic = [ordered]@{ adapter = 'unused'; key = 'HKLM:\NIC'; properties = [ordered]@{ PowerSaving = '0' }; rss = [ordered]@{ base = 4; max = 5 }; pnp_capabilities = 24 }
+        nic = [ordered]@{ adapter = 'unused'; key = 'HKLM:\NIC'; properties = [ordered]@{ PowerSaving = '0'; '*EEE' = '0' }; rss = [ordered]@{ base = 4; max = 5 }; pnp_capabilities = 24 }
         fingerprint = [ordered]@{ files = @(); keys = @() }
     }
     $path = Join-Path $dir "profile-$([guid]::NewGuid().ToString('N')).json"
@@ -137,6 +139,8 @@ try {
     $u3 = Undo-IemTuning -ProfilePath $pp -Tier 3
     Assert (@(Rows $u3 'failed').Count -eq 0) 'tier3-undo-has-no-failure'
     Assert ($null -eq $ap.GetValue('DevicePolicy', $null) -and (Get-Item -LiteralPath $nic).GetValue('PowerSaving') -eq '1') 'tier3-undo-deletes-absent-values'
+    $nk = Get-Item -LiteralPath $nic
+    Assert ($null -eq $nk.GetValue('*EEE', $null) -and $nk.GetValue('AdvancedEEE') -eq '1') 'tier3-undo-deletes-exactly-the-literal-value'
     $st = Get-IemTuningState -ProfilePath $pp
     Assert (@($st.items | Where-Object { $_.key -eq 'irq:card:policy' -and $_.revert_pending }).Count -eq 1) 'tier3-undo-is-pending-until-a-reboot'
 
