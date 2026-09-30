@@ -351,7 +351,7 @@ def scp(src: str, dst: str, event: str = "ignore") -> None:
     raised at once, and a copy that ended while the flag appeared raises it
     too. "ignore": the copy runs to its end."""
     proc = subprocess.Popen([*SCP, src, dst], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                            stderr=subprocess.PIPE, text=True)
+                            stderr=subprocess.PIPE, text=True, preexec_fn=sigint_default)
     deadline = time.monotonic() + SCP_BOUND_S
     while True:
         try:
@@ -368,6 +368,13 @@ def scp(src: str, dst: str, event: str = "ignore") -> None:
         raise StepError(f"scp failed: {err.strip()[-800:]}")
     if event == "abandon" and event_now():
         raise EventNow()
+
+
+def sigint_default() -> None:
+    """In the scp child before it starts: SIGINT's default action, so the
+    interrupt below works even when this process ignores SIGINT (an ignored
+    signal is inherited across exec)."""
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
 
 
 def interrupt_copy(proc: subprocess.Popen, dst: str) -> None:
