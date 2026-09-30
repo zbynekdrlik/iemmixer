@@ -185,6 +185,18 @@ class XperfLayoutTests(unittest.TestCase):
         self.assertEqual(sorted(d["usage"]["dpc"]), sorted(d["dpc"]))
         self.assertEqual(lr.parse_dpcisr(DPCISR_XPERF.replace("\n", "\r\n")), d)
 
+    def test_a_colon_after_the_section_header_is_read(self) -> None:
+        # Review M2: `DPC Info:` is the same section; any other header fails closed below.
+        self.assertEqual(lr.parse_dpcisr(DPCISR_XPERF.replace(" Info\n", " Info:\n")), lr.parse_dpcisr(DPCISR_XPERF))
+
+    def test_text_without_any_dpc_module_fails_closed(self) -> None:
+        # A traced run on Windows always has DPCs: none read means the text was not
+        # xperf's dpcisr (empty, foreign, an unknown header), never "no findings".
+        for text in ("", "not an xperf report\n", "--------------------------\nDPC Information\nTotal = 3 for module x.sys\n",
+                     "--------------------------\nDPC Info\n--------------------------\n"):
+            with self.assertRaisesRegex(ValueError, "no DPC module", msg=repr(text)):
+                lr.parse_dpcisr(text)
+
     def test_a_module_over_the_budget_on_a_watched_cpu_is_named(self) -> None:
         findings = lr.budget_findings(lr.parse_dpcisr(DPCISR_XPERF), watch_lps=[2])
         self.assertIn("dpc nicdrv.sys: up to 256 us on a watched CPU (budget 128)", findings)
