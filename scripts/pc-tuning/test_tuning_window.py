@@ -444,6 +444,7 @@ class FakePc:
         self.reports: list[dict] = []          # one spike report per run, in order
         self.progress: dict = {"missed": 0, "overruns": 0, "position_gaps": 0, "callback_thread": 4243}
         self.fail: set[str] = set()            # PowerShell verbs that fail on the PC
+        self.dpcisr = tlr.DPCISR_XPERF         # what every dpcisr.txt holds
         self.runs = 0
         self.polls = 0
         self.on_call = None                    # a hook: (body) -> None, called before answering
@@ -484,7 +485,7 @@ class FakePc:
         elif name.endswith(".stderr.txt"):
             text = ""
         elif name.endswith("dpcisr.txt"):
-            text = tlr.DPCISR_XPERF
+            text = self.dpcisr
         elif name.endswith("near.txt"):
             text = tlr.DUMPER
         else:
@@ -661,6 +662,15 @@ class MeasureTests(WindowHarness):
         self.assertEqual(s["cuts"][0]["near_glitch"][0]["kind"], "missed")
         self.assertIn("isr nicdrv.sys: above 2048 us (a full period is 333)", s["cuts"][0]["findings"])
         self.assertEqual(s["near_glitch"][0]["kind"], "missed")       # the final trace's view stays
+
+    # B8 in the window: an unreadable dpcisr is a failed step with a clear message, not a traceback.
+    def test_a_dpcisr_without_per_cpu_usage_fails_the_step(self) -> None:
+        start = tlr.DPCISR_XPERF.index("     CPU 0 Usage,")
+        self.pc.dpcisr = tlr.DPCISR_XPERF[:start] + tlr.DPCISR_XPERF[tlr.DPCISR_XPERF.index("\nTotal = 3261"):]
+        with self.assertRaisesRegex(tw.StepError, "per-CPU usage.*dpcisr.txt"):
+            tw.cmd_measure(self.env, self.args())
+        self.assertIsNone(self.state()["trace"])                         # the trace was stopped before the analysis
+        self.assertNotIn("measurements", self.state())
 
     # B11: the 10 s poll must not load the PC being measured with a C# compile or heavy WMI.
     def test_the_poll_is_light_and_still_samples_the_sentinels(self) -> None:
