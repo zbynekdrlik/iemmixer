@@ -699,6 +699,39 @@ class MeasureTests(WindowHarness):
         self.assertEqual([e for b, e in self.pc.calls if "Invoke-IemDpcIsr" in b], ["abandon"])
         self.assertIsNone(seen["trace"])                             # recorded as stopped before the analysis
 
+    # Review M1: "ide event" never waits for a merge, and no trace starts after it.
+    def test_the_final_stop_does_not_merge_and_the_merge_is_abandonable(self) -> None:
+        tw.cmd_measure(self.env, self.args())
+        stops = [(b, e) for b, e in self.pc.calls if "Stop-IemTrace" in b]
+        self.assertEqual([("-Merge" in b, e) for b, e in stops], [(False, "finish")])
+        merges = [(b, e) for b, e in self.pc.calls if "'-merge'" in b]
+        self.assertEqual([e for _, e in merges], ["abandon"])
+        self.assertRegex(merges[0][0], r"'kernel\.etl', 'markers\.etl'.*'trace\.etl'")
+
+    def test_a_cut_sets_the_raw_files_aside_and_merges_them_with_the_analysis(self) -> None:
+        self.pc.progress = {"missed": 1, "overruns": 0, "position_gaps": 0, "callback_thread": 4243}
+        tw.cmd_measure(self.env, self.args(circular_mb=1024))
+        cut_stops = [b for b in self.pc.bodies("Stop-IemTrace") if "cut-1" in b]
+        self.assertEqual(len(cut_stops), 1)
+        self.assertNotIn("-Merge", cut_stops[0])
+        self.assertNotIn("Start-IemTrace", cut_stops[0])
+        self.assertIn("'cut-1.kernel.etl'", cut_stops[0])
+        analysis = " ; ".join(b for b, e in self.pc.calls if e == "abandon" and "'-merge'" in b)
+        self.assertRegex(analysis, r"'cut-1\.kernel\.etl', 'cut-1\.markers\.etl'.*'cut-1\.etl'")
+
+    def test_no_trace_starts_once_the_event_flag_exists(self) -> None:
+        self.pc.progress = {"missed": 1, "overruns": 0, "position_gaps": 0, "callback_thread": 4243}
+
+        def on_call(body: str) -> None:
+            if "Stop-IemTrace" in body and "cut-1" in body:
+                (self.dir / "EVENT-NOW").touch()   # "ide event" during the cut's stop
+
+        self.pc.on_call = on_call
+        with self.assertRaises(tw.sw.EventNow):
+            tw.cmd_measure(self.env, self.args(circular_mb=1024))
+        self.assertEqual(len(self.pc.bodies("Start-IemTrace")), 1)   # the first start only
+        self.assertTrue(self.state()["trace"])                       # left to the preempt's trace-stop
+
     # B7: a cut keeps the trace's options, and every cut gets its own near-glitch view.
     def test_a_diag_cut_restarts_with_context_switches_and_gets_its_near_glitch_view(self) -> None:
         self.pc.progress = {"missed": 1, "overruns": 0, "position_gaps": 0, "callback_thread": 4243}
