@@ -427,10 +427,20 @@ function Set-IemValue {
             if ($Value -ne 'present') { throw "plan $($a.guid): only 'present' is written" }
             $r = Invoke-IemNative -FilePath 'powercfg.exe' -Arguments @('/duplicatescheme', $a.source, $a.guid)
             if ($r.code -ne 0) { throw "powercfg /duplicatescheme: $($r.out -join ' ')" }
-            # Named right away: an existing plan counts as iemmixer's only by this name (M2, m6).
-            $r = Invoke-IemNative -FilePath 'powercfg.exe' -Arguments @('/changename', $a.guid, $script:PlanName, $script:PlanDescription)
-            if ($r.code -ne 0) { throw "powercfg /changename: $($r.out -join ' ')" }
-            if ((Get-IemPlanName -Guid ([string]$a.guid)) -cne $script:PlanName) { throw "plan $($a.guid): not named '$($script:PlanName)' after /changename" }
+            # Named right away: an existing plan counts as iemmixer's only by this name
+            # (M2, m6). A failed rename or read-back deletes the plan this call just
+            # created, so no half-made plan stays under the source's name (review 3.3).
+            try {
+                $r = Invoke-IemNative -FilePath 'powercfg.exe' -Arguments @('/changename', $a.guid, $script:PlanName, $script:PlanDescription)
+                if ($r.code -ne 0) { throw "powercfg /changename: $($r.out -join ' ')" }
+                $n = Get-IemPlanName -Guid ([string]$a.guid)
+                if ($n -cne $script:PlanName) { throw "its name reads back '$n', not '$($script:PlanName)'" }
+            } catch {
+                $why = "$_"
+                $d = Invoke-IemNative -FilePath 'powercfg.exe' -Arguments @('/delete', $a.guid)
+                if ($d.code -ne 0) { throw "plan $($a.guid): $why; deleting the plan this call created failed too ($($d.out -join ' ')): delete it by hand" }
+                throw "plan $($a.guid): $why; the plan this call had just created was deleted"
+            }
         }
         'plan-value' {
             if ($null -eq $Value) { throw 'a plan value cannot be removed' }
