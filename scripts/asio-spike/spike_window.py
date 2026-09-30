@@ -20,7 +20,10 @@ import re
 import signal
 import subprocess
 import sys
+import threading
 import time
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "golden"))
@@ -409,11 +412,70 @@ def load_state() -> dict:
     return json.loads(STATE.read_text(encoding="utf-8"))
 
 
+# Decision A of the #32 review: ONE exclusive dev-box lock (flock on a file
+# next to STATE) serialises every read-modify-write of the window state, every
+# bring-back and every unwind across processes (spike_window, tuning_window,
+# iempc event's preempt). Reentrant per thread; waited for in bounded steps.
+LOCK_WAIT_S = 1200.0     # longer than a whole unwind (stop, restore, bring-back)
+_held = threading.local()
+
+
+@contextmanager
+def window_lock() -> Iterator[None]:
+    """Holds the window lock. A holder that does not let go within
+    LOCK_WAIT_S is an owner alarm and a StepError, never a wait forever."""
+    if getattr(_held, "depth", 0):
+        _held.depth += 1
+        try:
+            yield
+        finally:
+            _held.depth -= 1
+        return
+    import fcntl   # the dev box's lock; the Windows CI runner imports this module only for poll-script
+    path = STATE.with_name(STATE.name + ".lock")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        deadline = time.monotonic() + LOCK_WAIT_S
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() > deadline:
+                    alarm(f"the window lock {path} was not free within {LOCK_WAIT_S:g} s: another window process "
+                          "holds it (an unwind or a bring-back?); check it before acting by hand")
+                    raise StepError(f"the window lock was not free within {LOCK_WAIT_S:g} s") from None
+                time.sleep(0.05)
+        _held.depth = 1
+        try:
+            yield
+        finally:
+            _held.depth = 0
+    finally:
+        os.close(fd)   # closing the descriptor releases the lock
+
+
 def save_state(state: dict) -> None:
-    STATE.parent.mkdir(parents=True, exist_ok=True)
-    tmp = STATE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state, indent=1), encoding="utf-8")
-    tmp.replace(STATE)
+    """Writes the whole state atomically under the window lock, through a
+    temp file of this writer's own."""
+    with window_lock():
+        STATE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = STATE.with_name(f"{STATE.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        tmp.write_text(json.dumps(state, indent=1), encoding="utf-8")
+        tmp.replace(STATE)
+
+
+def update_state(fields: dict | None = None, change: Callable[[dict], None] | None = None) -> dict:
+    """One read-modify-write of the state as saved NOW, under the window lock:
+    `fields` merged in, then `change` applied. Returns the saved state."""
+    with window_lock():
+        state = load_state()
+        state.update(fields or {})
+        if change is not None:
+            change(state)
+        save_state(state)
+        return state
 
 
 def open_state() -> dict:
@@ -442,14 +504,15 @@ def cmd_new(env, args) -> None:
     check_signal(args.signal)
     if event_now():
         raise StepError(f"{EVENT_NOW} exists: an event is on, no window")
-    if STATE.is_file() and not json.loads(STATE.read_text(encoding="utf-8")).get("closed"):
-        raise StepError("the last window is still open: finish it (to-event) or run preempt")
-    wid = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    # --dev-time: REAPER was already saved and quit, so the card is free from the start and
-    # "ide event" (preempt, to-event) brings REAPER back with the handover checks.
-    save_state({"id": wid, "signal": args.signal, "card": "free" if args.dev_time else "reaper", "dev_time": bool(args.dev_time),
-                "pref_original": int(env["PC_BUFFER_ORIGINAL"]), "pref_current": None, "pref_restored": False,
-                "runs": [], "closed": False})
+    with window_lock():
+        if STATE.is_file() and not json.loads(STATE.read_text(encoding="utf-8")).get("closed"):
+            raise StepError("the last window is still open: finish it (to-event) or run preempt")
+        wid = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        # --dev-time: REAPER was already saved and quit, so the card is free from the start and
+        # "ide event" (preempt, to-event) brings REAPER back with the handover checks.
+        save_state({"id": wid, "signal": args.signal, "card": "free" if args.dev_time else "reaper", "dev_time": bool(args.dev_time),
+                    "pref_original": int(env["PC_BUFFER_ORIGINAL"]), "pref_current": None, "pref_restored": False,
+                    "runs": [], "closed": False})
     print(wid)
 
 
@@ -482,8 +545,7 @@ def cmd_setup(env, args) -> None:
     for name in (*BUNDLE_FILES, "SHA256SUMS"):
         scp(str(bundle / name), remote(env, f"bin/{name}"))
     names = ps(env, f"$n = Test-SpikeSums -Bin {pc(env, 'bin')} ; Register-SpikeTask -Root {ps_quote(env['PC_ROOT'])} ; $n")
-    state["bundle_sha"] = args.sha
-    save_state(state)
+    update_state({"bundle_sha": args.sha})
     print(json.dumps({"setup": args.sha, "verified": names, "task": "registered"}))
 
 
@@ -509,8 +571,7 @@ def cmd_preflight(env, args) -> None:
     problems = preflight_problems(r, state["pref_original"], dev_time)
     if problems:
         raise StepError("; ".join(problems))
-    state["preflight"] = r
-    save_state(state)
+    update_state({"preflight": r})
     print(json.dumps({"preflight": r}))
 
 
@@ -522,11 +583,9 @@ def cmd_to_dev(env, args) -> None:
     hits = interlock_hits([parse_meter_peaks(t) for t in texts])
     if hits:
         raise StepError(f"band activity: peaks above -50 dBFS on tracks {sorted(hits)}; no switch, alarm the owner")
-    state["card"] = "switching"
-    save_state(state)
+    update_state({"card": "switching"})
     r = ps(env, f"Invoke-GoldenSaveQuit -Http {ps_quote(env['PC_REAPER_HTTP'])} -Project {ps_quote(env['PC_MAIN_PROJECT'])} -AsioModule {ps_quote(env['PC_ASIO_MODULE'])}", timeout=120)
-    state["card"] = "free"
-    save_state(state)
+    update_state({"card": "free"})
     print(json.dumps({"to-dev": r, "app": "kept running"}))
 
 
@@ -539,8 +598,7 @@ def cmd_set_buffer(env, args) -> None:
         raise StepError(f"--frames must be one of {FRAMES}")
     if spike_running(env):
         raise StepError("a spike runs")
-    state["pref_current"], state["pref_restored"] = args.frames, False   # recorded before the write: preempt restores
-    save_state(state)
+    update_state({"pref_current": args.frames, "pref_restored": False})   # recorded before the write: preempt restores
     r = ps(env, f"Set-SpikeBufferPref -Key {ps_quote(env['PC_BUFFER_KEY'])} -Name {ps_quote(env['PC_BUFFER_NAME'])} -Value {args.frames} -Original {state['pref_original']}")
     print(json.dumps({"set-buffer": r}))
 
@@ -559,8 +617,7 @@ def cmd_run(env, args, on_poll=None) -> dict:
     fields = run_fields(env, args)
     rid = ps(env, f"Remove-Item -LiteralPath {pc(env, 'queue/stop')} -ErrorAction SilentlyContinue ; "
                   f"$id = Write-GoldenRequest -Root {ps_quote(env['PC_ROOT'])} -Kind 'spike' -Fields {ps_hashtable(fields)} ; Start-SpikeTask ; $id")
-    state["runs"].append({"request": rid, **fields})
-    save_state(state)
+    update_state(change=lambda st: st["runs"].append({"request": rid, **fields}))
     status_path, progress_path = pc(env, f"status/{rid}.json"), pc(env, f"status/{rid}.progress.json")
     watch = (f"$s = {status_path} ; $p = {progress_path} ; [pscustomobject]@{{ "
              "status = $(if (Test-Path -LiteralPath $s) { Get-Content -LiteralPath $s -Raw | ConvertFrom-Json } else { $null }); "
@@ -591,8 +648,7 @@ def cmd_run(env, args, on_poll=None) -> dict:
     scp(remote(env, f"status/{rid}.stderr.txt"), str(out / f"{rid}.stderr.txt"))
     report = json.loads((out / f"{rid}.report.json").read_text(encoding="utf-8"))
     v = verdict(report) if args.mode != "hwlat" else None
-    state["runs"][-1]["verdict"] = v
-    save_state(state)
+    update_state(change=lambda st: next(r for r in st["runs"] if r.get("request") == rid).update(verdict=v))
     code = st["status"]["results"][0]["exit"]
     print(json.dumps({"run": rid, "exit": code, "verdict": v}), flush=True)
     if code in ALARMS:
@@ -651,7 +707,14 @@ def unwind(env: dict[str, str], state: dict, running: bool, bring_back_reaper: b
     not confirmed gone may still hold the driver: the trace stop and the mode
     exit still run (neither touches the driver), but the unwind alarms and
     stops before the buffer write and the bring-back (I3; set-buffer refuses
-    the same write), leaving the window open for a later preempt."""
+    the same write), leaving the window open for a later preempt. It runs
+    under the window lock: callers read `state` under the same lock, so no
+    other process changes it meanwhile and one bring-back is all there is."""
+    with window_lock():
+        return _unwind(env, state, running, bring_back_reaper)
+
+
+def _unwind(env: dict[str, str], state: dict, running: bool, bring_back_reaper: bool) -> list:
     done = []
     gone = True
     for step in undo_plan(state, running):
@@ -711,21 +774,26 @@ def unwind(env: dict[str, str], state: dict, running: bool, bring_back_reaper: b
 
 
 def cmd_to_event(env, args) -> None:
-    state = open_state()
-    if spike_running(env):
-        raise StepError("a spike runs: wait for it, or preempt")
-    print(json.dumps({"to-event": unwind(env, state, running=False)}))
+    with window_lock():   # the state is read where no other unwind or bring-back runs
+        state = open_state()
+        if spike_running(env):
+            raise StepError("a spike runs: wait for it, or preempt")
+        print(json.dumps({"to-event": unwind(env, state, running=False)}))
 
 
 def cmd_preempt(env, args=None) -> None:
-    state = load_state()
-    if state.get("closed"):
-        print(json.dumps({"preempt": state["id"], "plan": [], "note": "window already closed"}))
-        return
-    running = spike_running(env, event="ignore")
-    print(json.dumps({"preempt": state["id"], "plan": undo_plan(state, running)}), flush=True)
-    state["preempted"] = True
-    print(json.dumps({"done": unwind(env, state, running)}))
+    """Brings REAPER back once, whoever asks: under the window lock the state
+    is read again, and a window another process already closed (REAPER back)
+    is left alone."""
+    with window_lock():
+        state = load_state()
+        if state.get("closed"):
+            print(json.dumps({"preempt": state["id"], "plan": [], "note": "window already closed"}))
+            return
+        running = spike_running(env, event="ignore")
+        print(json.dumps({"preempt": state["id"], "plan": undo_plan(state, running)}), flush=True)
+        state["preempted"] = True
+        print(json.dumps({"done": unwind(env, state, running)}))
 
 
 # Steps inside an open window: an error in one while the flag exists pre-empts.

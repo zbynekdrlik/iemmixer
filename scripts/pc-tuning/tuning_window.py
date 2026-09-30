@@ -179,8 +179,7 @@ def cmd_tuning_setup(env, args) -> None:
     sw.scp(str(PROFILE), f"{env['PC_SSH']}:{env['PC_TUNING_ROOT_SCP']}/profile.json")
     r = tps(env, f"(Read-IemProfile -Path {sw.tuning_profile(env)}).version", timeout=60)
     if baseline_path(env).is_file():
-        state["fingerprint"] = str(baseline_path(env))   # to-event and preempt compare against it
-        sw.save_state(state)
+        state = sw.update_state({"fingerprint": str(baseline_path(env))})   # to-event and preempt compare against it
     print(json.dumps({"tuning-setup": {"profile_version": r, "local_version": profile["version"], "window": state["id"],
                                        "fingerprint": state.get("fingerprint")}}))
 
@@ -206,8 +205,7 @@ def cmd_fingerprint(env, args) -> None:
         text = json.dumps(current, indent=1)
         (raw(env, state) / f"fingerprint-baseline-{stamp()}.json").write_text(text, encoding="utf-8")
         path.write_text(text, encoding="utf-8")
-        state["fingerprint"] = str(path)
-        sw.save_state(state)
+        sw.update_state({"fingerprint": str(path)})
         print(json.dumps({"fingerprint-baseline": str(path), "keys": len(current)}))
         return
     if not state.get("fingerprint"):
@@ -231,15 +229,23 @@ def cmd_wpt_install(env, args) -> None:
     print(json.dumps({"wpt-install": r}))
 
 
+def record_step(step: dict) -> None:
+    """Adds a tuning step to the state as saved now (sw.update_state, under the window lock)."""
+    sw.update_state(change=lambda st: st.setdefault("tuning_steps", []).append(step))
+
+
+def record_measurement(row: dict) -> None:
+    """Adds a measurement row to the state as saved now (sw.update_state, under the window lock)."""
+    sw.update_state(change=lambda st: st.setdefault("measurements", []).append(row))
+
+
 def cmd_enter(env, args) -> None:
     state = sw.open_state()
     need_free(state)
     only = mode_only(args.only)
-    state["tuning_mode"] = True   # recorded before the action: preempt reverts even a half-done enter
-    sw.save_state(state)
+    sw.update_state({"tuning_mode": True})   # recorded before the action: preempt reverts even a half-done enter
     rows = as_list(tps(env, f"Enter-IemTuningMode -ProfilePath {sw.tuning_profile(env)} -Only @({', '.join(ps_quote(x) for x in only)}) -Idle {ps_quote(args.idle)}", timeout=240))
-    state.setdefault("tuning_steps", []).append({"enter": only, "idle": args.idle, "at": stamp()})
-    sw.save_state(state)
+    record_step({"enter": only, "idle": args.idle, "at": stamp()})
     print(json.dumps({"enter": rows}))
     failed = [r for r in rows if r.get("action") == "failed"]
     if failed:
@@ -247,10 +253,9 @@ def cmd_enter(env, args) -> None:
 
 
 def cmd_exit(env, args) -> None:
-    state = sw.open_state()
+    sw.open_state()
     rows = as_list(tps(env, f"Exit-IemTuningMode -ProfilePath {sw.tuning_profile(env)}", timeout=240))
-    state["tuning_mode"] = False
-    sw.save_state(state)
+    sw.update_state({"tuning_mode": False})
     print(json.dumps({"exit": rows}))
 
 
@@ -265,8 +270,7 @@ def cmd_apply(env, args) -> None:
     state = sw.open_state()
     need_free(state)
     rows = as_list(tps(env, f"Invoke-IemTuningApply -ProfilePath {sw.tuning_profile(env)} -Tier {args.tier} -Only {only_arg(args.only)}", timeout=600))
-    state.setdefault("tuning_steps", []).append({"apply": args.tier, "only": args.only, "at": stamp()})
-    sw.save_state(state)
+    record_step({"apply": args.tier, "only": args.only, "at": stamp()})
     print(json.dumps({"apply": rows}))
     failed = [r for r in rows if r.get("action") == "failed"]
     if failed:
@@ -277,8 +281,7 @@ def cmd_undo(env, args) -> None:
     state = sw.open_state()
     need_free(state)
     rows = as_list(tps(env, f"Undo-IemTuning -ProfilePath {sw.tuning_profile(env)} -Tier {args.tier} -Only {only_arg(args.only)}", timeout=600))
-    state.setdefault("tuning_steps", []).append({"undo": args.tier, "only": args.only, "at": stamp()})
-    sw.save_state(state)
+    record_step({"undo": args.tier, "only": args.only, "at": stamp()})
     print(json.dumps({"undo": rows}))
     # Fail loud on any un-reverted item, like cmd_apply (I2, script-failure-policy):
     # post_boot_verdict's failed_items cannot catch it (a failed revert stays
@@ -304,10 +307,7 @@ def clear_trace() -> dict:
     """Clears the recorded trace in the state as saved NOW, changing nothing
     else: a preempt in another process may have saved its own changes
     meanwhile (closed, card, the buffer restore)."""
-    state = sw.load_state()
-    state["trace"] = None
-    sw.save_state(state)
-    return state
+    return sw.update_state({"trace": None})
 
 
 def stop_trace(env: dict[str, str], state: dict, event: str):
@@ -456,8 +456,7 @@ def _measure(env, args, profile: dict, state: dict, run_dir: str, since: str, tr
     diag = args.trace == "diag"
     opt = trace_options(args.trace, args.circular_mb)
     if tracing:
-        state["trace"] = run_dir   # recorded before the start: preempt and the error path stop it
-        sw.save_state(state)
+        sw.update_state({"trace": run_dir})   # recorded before the start: preempt and the error path stop it
         tps(env, f"Start-IemTrace -Xperf {xperf(env)} -Dir {ps_quote(run_dir)}{opt}", timeout=120)
     polls: list[dict] = []
     cut = {"n": 0, "seen": 0}
@@ -486,15 +485,13 @@ def _measure(env, args, profile: dict, state: dict, run_dir: str, since: str, tr
     run_args = argparse.Namespace(mode="duplex", frames=args.frames, seconds=args.seconds, burn_us=args.burn_us, stress=args.stress,
                                   panic_at=0, cycles=5, cpu=None, threshold_us=10, audio_cpus=args.audio_cpus, stress_cpus=stress_cpus)
     result = sw.cmd_run(env, run_args, on_poll=on_poll)
-    state = sw.load_state()   # cmd_run saved its own changes (the run list): never overwrite them
     report = json.loads(Path(result["report"]).read_text(encoding="utf-8"))
     outcome = report.get("outcome")
     if outcome not in MEASURED:
         # Recorded as a failed row, never summarised as an unstable measurement;
         # the error path stops the trace (its raw files stay on the PC).
-        state.setdefault("measurements", []).append({"label": args.label, "outcome": outcome, "exit": result["exit"],
-                                                     "failed": True, "report": result["report"]})
-        sw.save_state(state)
+        record_measurement({"label": args.label, "outcome": outcome, "exit": result["exit"], "failed": True,
+                            "report": result["report"]})
         raise StepError(f"measure {args.label}: the spike ended {outcome!r} (exit {result['exit']}), no measurement "
                         f"(report {result['report']})")
     out = raw(env, state) / Path(run_dir.replace("\\", "/")).name
@@ -542,9 +539,7 @@ def _measure(env, args, profile: dict, state: dict, run_dir: str, since: str, tr
     if diag:
         summary["near_glitch"] = lr.near_glitch(out / "near.txt", period_us=lr.PERIOD_US, check=check_event)
     (out / "summary.json").write_text(json.dumps(summary, indent=1), encoding="utf-8")
-    state = sw.load_state()   # as saved now: only the measurement is added
-    state.setdefault("measurements", []).append({"label": args.label, "summary": str(out / "summary.json"), "stable": (result["verdict"] or {}).get("stable")})
-    sw.save_state(state)
+    record_measurement({"label": args.label, "summary": str(out / "summary.json"), "stable": (result["verdict"] or {}).get("stable")})
     print(json.dumps(summary))
 
 
@@ -578,25 +573,26 @@ def unwind_failures(done: list[dict]) -> list[str]:
 
 
 def cmd_reboot_prepare(env, args) -> None:
-    state = sw.open_state()
-    need_free(state)
-    running = sw.spike_running(env)
-    # A reboot is prepared only over a cleanly preempted window (I1). unwind
-    # raises (after an owner alarm) before the buffer write when the spike was
-    # not confirmed gone; a trace that did not stop or a mode lever not reverted
-    # would carry into the reboot and the event mode it comes back in. Refuse on
-    # any of them: the card stays free and the window open (preempt or to-event
-    # brings REAPER back); the spike is never force-ended (I8, guard.md).
-    done = sw.unwind(env, state, running, bring_back_reaper=False)
-    failed = unwind_failures(done)
-    if failed:
-        sw.alarm(f"the unwind before the reboot did not complete ({', '.join(failed)}): no reboot is prepared; "
-                 "the card stays free and the window open (preempt or to-event brings REAPER back)")
-        raise StepError(f"the unwind failed at {', '.join(failed)}: no reboot prepared")
-    st = tps(env, f"Get-IemTuningState -ProfilePath {sw.tuning_profile(env)}", timeout=120)
-    state["card"] = "rebooting"
-    state["reboot"] = {"prepared_at": tps(env, "Get-IemNow", timeout=60)}
-    sw.save_state(state)
+    # Under the window lock, like every unwind: the state is read where no
+    # other unwind or bring-back runs (decision A of the #32 review).
+    with sw.window_lock():
+        state = sw.open_state()
+        need_free(state)
+        running = sw.spike_running(env)
+        # A reboot is prepared only over a cleanly preempted window (I1). unwind
+        # raises (after an owner alarm) before the buffer write when the spike was
+        # not confirmed gone; a trace that did not stop or a mode lever not reverted
+        # would carry into the reboot and the event mode it comes back in. Refuse on
+        # any of them: the card stays free and the window open (preempt or to-event
+        # brings REAPER back); the spike is never force-ended (I8, guard.md).
+        done = sw.unwind(env, state, running, bring_back_reaper=False)
+        failed = unwind_failures(done)
+        if failed:
+            sw.alarm(f"the unwind before the reboot did not complete ({', '.join(failed)}): no reboot is prepared; "
+                     "the card stays free and the window open (preempt or to-event brings REAPER back)")
+            raise StepError(f"the unwind failed at {', '.join(failed)}: no reboot prepared")
+        st = tps(env, f"Get-IemTuningState -ProfilePath {sw.tuning_profile(env)}", timeout=120)
+        sw.update_state({"card": "rebooting", "reboot": {"prepared_at": tps(env, "Get-IemNow", timeout=60)}})
     items = as_list(st["items"])
     print(json.dumps({"reboot-prepare": done, "pending": [i["key"] for i in items if i["pending"]],
                       "revert_pending": [i["key"] for i in items if i["revert_pending"]]}))
@@ -617,9 +613,7 @@ def cmd_reboot(env, args) -> None:
     if state["card"] != "rebooting" or "reboot" not in state:
         raise StepError("run reboot-prepare first")
     check_approval(args.approval)
-    state["reboot"]["approval"] = args.approval
-    state["reboot"]["by"] = "owner" if args.by_owner else "agent"
-    sw.save_state(state)
+    sw.update_state(change=lambda st: st["reboot"].update(approval=args.approval, by="owner" if args.by_owner else "agent"))
     if args.by_owner:
         print(json.dumps({"reboot": "the owner restarts the PC himself; run post-boot afterwards"}))
         return
@@ -661,19 +655,23 @@ def cmd_post_boot(env, args) -> None:
     # through the start task when it did not start by itself (still a problem:
     # a reboot must come back in event mode) and runs the handover checks. A
     # failed bring-back keeps the window open (card "rebooting"): preempt or
-    # to-event brings REAPER back later.
-    try:
-        checks["handover"] = sw.bring_back(env, state)
-    except StepError as e:
-        checks["handover"] = {"error": str(e)}
-    back = "error" not in checks["handover"]
-    if back:
-        # On the state as saved now: a preempt in another process may have
-        # closed the window meanwhile, and a failed bring-back here never
-        # takes that back (review m5).
-        state = sw.load_state()
-        state["card"], state["closed"] = "reaper", True
-        sw.save_state(state)
+    # to-event brings REAPER back later. Under the window lock, on the state as
+    # read there (decision A): if a preempt in another process (`iempc event`)
+    # already brought REAPER back and closed the window, nothing is done — two
+    # bring-backs would trigger the meter bridge twice (a REAPER dialog, #9).
+    with sw.window_lock():
+        current = sw.load_state()
+        if current.get("closed"):
+            checks["handover"] = {"by": "another window process: the window was already closed with REAPER back"}
+            back = True
+        else:
+            try:
+                checks["handover"] = sw.bring_back(env, current)
+            except StepError as e:
+                checks["handover"] = {"error": str(e)}
+            back = "error" not in checks["handover"]
+            if back:
+                sw.update_state({"card": "reaper", "closed": True})
     if sw.event_now():
         # The read-only checks wait for a dev window; main() pre-empts (a window
         # still open because the bring-back failed gets another one there).
@@ -690,9 +688,7 @@ def cmd_post_boot(env, args) -> None:
     b = tps(env, "Get-IemCpuSample", timeout=60, event="ignore")
     checks["interrupts"] = lr.cpu_rates([a, b])
     problems = post_boot_verdict(checks)
-    state = sw.load_state()
-    state["post_boot"] = {"checks": checks, "problems": problems}
-    sw.save_state(state)
+    state = sw.update_state({"post_boot": {"checks": checks, "problems": problems}})
     print(json.dumps({"post-boot": checks, "problems": problems}))
     if problems:
         sw.alarm("after the approved reboot: " + "; ".join(problems) + ". Revert: tuning_window undo --tier 3 in a dev window, "
