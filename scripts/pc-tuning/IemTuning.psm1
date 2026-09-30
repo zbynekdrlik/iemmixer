@@ -553,19 +553,33 @@ function ConvertTo-IemKaffinity {
     return (@(for ($i = 0; $i -lt 8; $i++) { (($Mask -shr (8 * $i)) -band 0xFF).ToString('x2') }) -join '')
 }
 
+function Assert-IemHwidText {
+    # A profile hardware id is compared exactly, so it must be a whole id: not
+    # empty and without the -like wildcard characters * ? [ ] (M1).
+    param([Parameter(Mandatory)][string]$What, [AllowNull()][AllowEmptyString()][string]$Hwid)
+    if ([string]::IsNullOrWhiteSpace($Hwid)) { throw "${What}: the profile hwid is empty" }
+    if ($Hwid -match '[\*\?\[\]]') { throw "${What}: the profile hwid '$Hwid' has a wildcard character" }
+}
+
 function Assert-IemDevice {
+    # Before any write to a device: the profile's hwid is a PCI VEN_/DEV_ id and
+    # equals (case-insensitive, exactly) one of the instance's HardwareID values.
     param([Parameter(Mandatory)]$Profile, [Parameter(Mandatory)]$Device)
+    $what = "device $($Device.id)"
+    Assert-IemHwidText -What $what -Hwid ([string]$Device.hwid)
+    if ([string]$Device.hwid -notmatch '^PCI\\VEN_[0-9A-F]{4}&DEV_[0-9A-F]{4}(&|$)') { throw "${what}: the profile hwid '$($Device.hwid)' is not a PCI VEN_/DEV_ hardware id" }
     $key = Get-IemRegPath $Profile "HKLM:\SYSTEM\CurrentControlSet\Enum\$($Device.instance)"
-    if (-not (Test-Path -LiteralPath $key)) { throw "device $($Device.id): instance not found (profile stale?)" }
+    if (-not (Test-Path -LiteralPath $key)) { throw "${what}: instance not found (profile stale?)" }
     $hw = @((Get-Item -LiteralPath $key).GetValue('HardwareID', [string[]]@()))
-    if (-not ($hw | Where-Object { $_ -like "$($Device.hwid)*" })) { throw "device $($Device.id): hardware id does not match the profile" }
+    if (@($hw) -notcontains [string]$Device.hwid) { throw "${what}: hardware id does not match the profile" }
 }
 
 function Get-IemNicKey {
     # The NIC's driver key: nic.key (tests), else the Class key whose
     # NetCfgInstanceId is the adapter's, both under registry_root. -Check (before
     # any write) refuses unless the key's MatchingDeviceId, the hardware id its
-    # driver matched, starts with the profile's nic.hwid (design note 7, A8).
+    # driver matched, equals the profile's nic.hwid exactly, case-insensitive
+    # (design note 7, A8, M1).
     param([Parameter(Mandatory)]$Profile, [switch]$Check)
     if ($Profile.nic.PSObject.Properties['key']) { $key = Get-IemRegPath $Profile $Profile.nic.key }
     else {
@@ -580,11 +594,10 @@ function Get-IemNicKey {
     }
     if ($Check) {
         if (-not (Test-Path -LiteralPath $key)) { throw "nic: driver key not found (profile stale?)" }
-        $matched = "$((Get-Item -LiteralPath $key).GetValue('MatchingDeviceId', ''))"
         $hwid = $(if ($Profile.nic.PSObject.Properties['hwid']) { [string]$Profile.nic.hwid } else { '' })
-        if ([string]::IsNullOrEmpty($hwid) -or [string]::IsNullOrEmpty($matched) -or $matched -notlike "$hwid*") {
-            throw "nic: hardware id does not match the profile (nic.hwid)"
-        }
+        Assert-IemHwidText -What 'nic' -Hwid $hwid
+        $matched = "$((Get-Item -LiteralPath $key).GetValue('MatchingDeviceId', ''))"
+        if ([string]::IsNullOrEmpty($matched) -or $matched -ne $hwid) { throw "nic: hardware id does not match the profile (nic.hwid)" }
     }
     return $key
 }
