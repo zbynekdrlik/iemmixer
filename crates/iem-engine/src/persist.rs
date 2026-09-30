@@ -43,7 +43,7 @@ mod files;
 
 use files::{Files, OsFiles};
 
-pub use chain::Recovery;
+pub use chain::{FileState, Recovery};
 
 pub const FORMAT: &str = "iemmixer-state";
 pub const GENERATIONS: usize = 20;
@@ -101,6 +101,12 @@ pub struct Loaded {
     pub rejected: Vec<(PathBuf, String)>,
     /// Ids the topology no longer has.
     pub dropped: Vec<String>,
+    /// Why the state loaded may be older than one the directory holds
+    /// (the engine raises each as an alarm, #32).
+    pub alarms: Vec<String>,
+    /// What the chain found at `current.json` (the boot's recovery acts on
+    /// it, #32).
+    pub current_json: FileState,
 }
 
 #[derive(Serialize)]

@@ -30,7 +30,7 @@ impl Store {
     /// it could not see).
     pub fn live_state(&self) -> io::Result<Option<Source>> {
         Ok(self
-            .pick_live(&mut Vec::new(), Reading::Strict)?
+            .pick_live(&mut Pick::default(), Reading::Strict)?
             .map(|(_, source)| source))
     }
 
@@ -42,21 +42,20 @@ impl Store {
     /// `rejected` with the reason, as is a `save.tmp` passed over for an
     /// older revision and a directory whose generations cannot be listed.
     pub fn load(&self, topo: &Topology) -> Loaded {
-        let mut rejected = Vec::new();
+        let mut pick = Pick::default();
         let live = self
-            .pick_live(&mut rejected, Reading::Tolerant)
+            .pick_live(&mut pick, Reading::Tolerant)
             .unwrap_or_else(|e| {
-                rejected.push((self.dir.clone(), e.to_string()));
+                pick.rejected.push((self.dir.clone(), e.to_string()));
                 None
             });
         if let Some((persisted, source)) = live {
-            return settle(topo, persisted, source, rejected);
+            return settle(topo, persisted, source, pick);
         }
         let baseline = self.dir.join(BASELINE);
-        if let Ok(Read::Found(persisted)) =
-            self.read_state(&baseline, &mut rejected, Reading::Tolerant)
+        if let Ok(Read::Valid(persisted)) = self.read_state(&baseline, &mut pick, Reading::Tolerant)
         {
-            return settle(topo, persisted, Source::Baseline, rejected);
+            return settle(topo, persisted, Source::Baseline, pick);
         }
         Loaded {
             persisted: Persisted {
@@ -65,8 +64,10 @@ impl Store {
                 ..Persisted::default()
             },
             source: Source::Defaults,
-            rejected,
+            rejected: pick.rejected,
             dropped: Vec::new(),
+            alarms: pick.alarms,
+            current_json: pick.current_json,
         }
     }
 
@@ -75,17 +76,18 @@ impl Store {
     /// error), so the seed names exactly the file the engine loads.
     fn pick_live(
         &self,
-        rejected: &mut Vec<(PathBuf, String)>,
+        pick: &mut Pick,
         reading: Reading,
     ) -> io::Result<Option<(Persisted, Source)>> {
         let tmp_path = self.dir.join(TMP);
-        let current = self.read_state(&self.dir.join(CURRENT), rejected, reading)?;
-        let tmp = self.read_state(&tmp_path, rejected, reading)?;
-        if let Read::Found(current) = current {
+        let current = self.read_state(&self.dir.join(CURRENT), pick, reading)?;
+        pick.current_json = current.state();
+        let tmp = self.read_state(&tmp_path, pick, reading)?;
+        if let Read::Valid(current) = current {
             return Ok(Some(match tmp {
-                Read::Found(tmp) if supersedes(&tmp, &current) => (tmp, Source::Interrupted),
-                Read::Found(tmp) => {
-                    rejected.push((
+                Read::Valid(tmp) if supersedes(&tmp, &current) => (tmp, Source::Interrupted),
+                Read::Valid(tmp) => {
+                    pick.rejected.push((
                         tmp_path,
                         format!(
                             "revision {} is not newer than current.json's {}",
@@ -94,7 +96,7 @@ impl Store {
                     ));
                     (current, Source::Current)
                 }
-                Read::Missing | Read::Rejected => (current, Source::Current),
+                Read::Missing | Read::Unreadable | Read::Damaged => (current, Source::Current),
             }));
         }
         // current.json missing or damaged (#32 m1): save.tmp against the
@@ -103,7 +105,7 @@ impl Store {
             Ok(gens) => gens,
             Err(e) if reading == Reading::Strict => return Err(e),
             Err(e) => {
-                rejected.push((
+                pick.rejected.push((
                     self.dir.clone(),
                     format!("the generations cannot be listed: {e}"),
                 ));
@@ -112,14 +114,14 @@ impl Store {
         };
         let mut newest = None;
         for (seq, path) in gens.into_iter().rev() {
-            if let Read::Found(generation) = self.read_state(&path, rejected, reading)? {
+            if let Read::Valid(generation) = self.read_state(&path, pick, reading)? {
                 newest = Some((generation, seq));
                 break;
             }
         }
         Ok(match (tmp, newest) {
-            (Read::Found(tmp), Some((generation, seq))) if !supersedes(&tmp, &generation) => {
-                rejected.push((
+            (Read::Valid(tmp), Some((generation, seq))) if !supersedes(&tmp, &generation) => {
+                pick.rejected.push((
                     tmp_path,
                     format!(
                         "revision {} is not newer than generation {seq}'s {}",
@@ -128,7 +130,7 @@ impl Store {
                 ));
                 Some((generation, Source::Generation(seq)))
             }
-            (Read::Found(tmp), _) => Some((tmp, Source::Interrupted)),
+            (Read::Valid(tmp), _) => Some((tmp, Source::Interrupted)),
             (_, Some((generation, seq))) => Some((generation, Source::Generation(seq))),
             (_, None) => None,
         })
@@ -167,7 +169,10 @@ impl Store {
     pub fn recover(&self, loaded: &Loaded) -> Recovery {
         let mut done = Recovery::default();
         let current = self.dir.join(CURRENT);
-        if loaded.rejected.iter().any(|(path, _)| *path == current) {
+        if matches!(
+            loaded.current_json,
+            FileState::Damaged | FileState::Unreadable
+        ) {
             match self.quarantine(&current) {
                 Ok(aside) => done.quarantined = Some(aside),
                 Err(e) => {
@@ -218,26 +223,21 @@ impl Store {
     /// Reads and decodes `path`. A file that does not decode goes to
     /// `rejected` with the reason; one that cannot be read too when
     /// `Tolerant`, and is the error when `Strict`.
-    fn read_state(
-        &self,
-        path: &Path,
-        rejected: &mut Vec<(PathBuf, String)>,
-        reading: Reading,
-    ) -> io::Result<Read> {
+    fn read_state(&self, path: &Path, pick: &mut Pick, reading: Reading) -> io::Result<Read> {
         let bytes = match self.files.read(path) {
             Ok(b) => b,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Read::Missing),
             Err(e) if reading == Reading::Strict => return Err(e),
             Err(e) => {
-                rejected.push((path.to_path_buf(), e.to_string()));
-                return Ok(Read::Rejected);
+                pick.rejected.push((path.to_path_buf(), e.to_string()));
+                return Ok(Read::Unreadable);
             }
         };
         Ok(match decode(&bytes) {
-            Ok(persisted) => Read::Found(persisted),
+            Ok(persisted) => Read::Valid(persisted),
             Err(why) => {
-                rejected.push((path.to_path_buf(), why));
-                Read::Rejected
+                pick.rejected.push((path.to_path_buf(), why));
+                Read::Damaged
             }
         })
     }
@@ -252,12 +252,44 @@ enum Reading {
     Strict,
 }
 
+/// What the chain found at a state file (#32 P2).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FileState {
+    #[default]
+    Missing,
+    /// It could not be read: an I/O error (locked, no access, a failing
+    /// disk).
+    Unreadable,
+    /// It was read but does not decode (format, schema, SHA-256, parse).
+    Damaged,
+    Valid,
+}
+
 /// One state file, read and decoded.
 enum Read {
     Missing,
-    /// Present but unreadable or not a valid state file (in `rejected`).
-    Rejected,
-    Found(Persisted),
+    Unreadable,
+    Damaged,
+    Valid(Persisted),
+}
+
+impl Read {
+    fn state(&self) -> FileState {
+        match self {
+            Self::Missing => FileState::Missing,
+            Self::Unreadable => FileState::Unreadable,
+            Self::Damaged => FileState::Damaged,
+            Self::Valid(_) => FileState::Valid,
+        }
+    }
+}
+
+/// What a pick gathers besides its choice.
+#[derive(Debug, Default)]
+struct Pick {
+    rejected: Vec<(PathBuf, String)>,
+    alarms: Vec<String>,
+    current_json: FileState,
 }
 
 /// Whether an interrupted save (`save.tmp`) supersedes the state it
@@ -280,19 +312,16 @@ fn supersedes(interrupted: &Persisted, other: &Persisted) -> bool {
 }
 
 /// A loaded state, reconciled against the topology.
-fn settle(
-    topo: &Topology,
-    mut persisted: Persisted,
-    source: Source,
-    rejected: Vec<(PathBuf, String)>,
-) -> Loaded {
+fn settle(topo: &Topology, mut persisted: Persisted, source: Source, pick: Pick) -> Loaded {
     let (r, dropped) = reconcile(topo, &persisted.state);
     persisted.state = to_state(topo, &r);
     Loaded {
         persisted,
         source,
-        rejected,
+        rejected: pick.rejected,
         dropped,
+        alarms: pick.alarms,
+        current_json: pick.current_json,
     }
 }
 
