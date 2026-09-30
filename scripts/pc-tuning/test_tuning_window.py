@@ -93,28 +93,51 @@ class UndoTests(unittest.TestCase):
     """cmd_undo must fail loud when a Tier-3 revert item fails (I2,
     script-failure-policy): a silent exit 0 hides an un-reverted global lever
     (post_boot_verdict's failed_items can't see it — a failed revert stays
-    journaled but still matches its tuned value, so it counts ok). The PC calls
-    (tps) are mocked; only the failed-row handling is under test."""
+    journaled but still matches its tuned value, so it counts ok). Only sw.ps
+    (the ssh boundary) is faked; the real open_state/save_state run on a temp
+    STATE (#32 B14)."""
 
     def setUp(self) -> None:
-        self.saved = (tw.sw.open_state, tw.sw.save_state, tw.tps)
-        tw.sw.open_state = lambda: {"id": "w", "card": "free"}
-        tw.sw.save_state = lambda s: None
-        self.env = {"PC_TUNING_ROOT": "T"}
+        self.dir = Path(tempfile.mkdtemp())
+        self.saved = (tw.sw.STATE, tw.sw.EVENT_NOW, tw.sw.ps)
+        tw.sw.STATE = self.dir / "spike-window.json"
+        tw.sw.EVENT_NOW = self.dir / "EVENT-NOW"
+        tw.sw.save_state({"id": "w", "card": "free", "closed": False})
+        self.rows: list[dict] = []
+        self.bodies: list[str] = []
+
+        def fake_ps(env, body, timeout=300, event="finish"):
+            self.bodies.append(body)
+            return self.rows
+
+        tw.sw.ps = fake_ps
+        self.env = {"PC_ROOT": "R", "PC_TUNING_ROOT": "T", "PC_XPERF": "xperf.exe"}
         self.args = argparse.Namespace(tier=3, only="")
 
     def tearDown(self) -> None:
-        tw.sw.open_state, tw.sw.save_state, tw.tps = self.saved
+        tw.sw.STATE, tw.sw.EVENT_NOW, tw.sw.ps = self.saved
 
     def test_a_clean_revert_succeeds(self) -> None:
-        tw.tps = lambda env, body, **kw: [{"key": "irq:card:policy", "action": "restored", "error": None}]
+        self.rows = [{"key": "irq:card:policy", "action": "restored", "error": None}]
         tw.cmd_undo(self.env, self.args)   # no raise on a clean revert
+        self.assertIn("Undo-IemTuning -ProfilePath 'T\\profile.json' -Tier 3", self.bodies[0])
+        self.assertEqual([s["undo"] for s in tw.sw.load_state()["tuning_steps"]], [3])
 
     def test_a_failed_revert_row_raises(self) -> None:
-        tw.tps = lambda env, body, **kw: [{"key": "irq:card:policy", "action": "failed", "error": "Access is denied"},
-                                          {"key": "irq:nic:rss", "action": "restored", "error": None}]
+        self.rows = [{"key": "irq:card:policy", "action": "failed", "error": "Access is denied"},
+                     {"key": "irq:nic:rss", "action": "restored", "error": None}]
         with self.assertRaisesRegex(tw.StepError, "revert item.*irq:card:policy.*Access is denied"):
             tw.cmd_undo(self.env, self.args)
+        self.assertEqual(len(tw.sw.load_state()["tuning_steps"]), 1)   # recorded before the fail-loud raise
+
+    def test_an_event_or_a_held_card_refuses_before_the_pc(self) -> None:
+        tw.sw.save_state({"id": "w", "card": "reaper", "closed": False})
+        with self.assertRaisesRegex(tw.StepError, "not free"):
+            tw.cmd_undo(self.env, self.args)
+        (self.dir / "EVENT-NOW").touch()
+        with self.assertRaises(tw.sw.EventNow):
+            tw.cmd_undo(self.env, self.args)
+        self.assertEqual(self.bodies, [])
 
 
 class RebootPrepareTests(unittest.TestCase):
