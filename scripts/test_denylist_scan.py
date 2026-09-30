@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import os
 import shutil
 import subprocess
 import sys
@@ -511,6 +512,93 @@ class DenylistScanTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("tree a.csv:1: denylist entry 1", out)
         self.assertIn("tree b.dat:1: denylist entry 1", out)
+
+    # --- #32 E3: non-UTF-8 text, JSON \u and percent escapes, and undecodable paths ---
+
+    def add_terms(self, *terms: str) -> None:
+        self.deny.write_text("\n".join([*TERMS, *terms]) + "\n", encoding="utf-8")
+
+    def assert_found_in_both_modes_as(self, files: dict[str, str | bytes], term_letters: str) -> str:
+        self.bases = getattr(self, "bases", 0) + 1  # a fresh base commit per subTest
+        self.commit({"base.txt": f"base {self.bases}\n"})
+        self.commit(files, message="add content in another encoding")
+        code, tree_out = self.scan("--tree", "HEAD")
+        self.assertEqual(code, 1, "tree mode missed the term")
+        code, commit_out = self.scan("--commits", "HEAD~1..HEAD")
+        self.assertEqual(code, 1, "commit mode missed the term")
+        for out in (tree_out, commit_out):
+            self.assertNotIn(term_letters, out.lower())
+        return tree_out
+
+    def test_a_cp1250_term_is_found_in_both_modes(self) -> None:
+        self.add_terms("ďqxwzy")
+        out = self.assert_found_in_both_modes_as({"c.txt": "meno: Ďqxwzy\n".encode("cp1250")}, "qxwzy")
+        self.assertIn("tree c.txt:1: denylist entry 4", out)
+
+    def test_a_latin1_term_is_found_in_both_modes(self) -> None:
+        self.add_terms("qñzyxw")
+        self.assert_found_in_both_modes_as({"l.txt": "x qñzyxw y\n".encode("latin-1")}, "zyxw")
+
+    def test_a_json_unicode_escape_does_not_hide_a_term(self) -> None:
+        self.add_terms("ďqxwzy")
+        for name, text in (("j.json", '{"n": "\\u010fqxwzy"}\n'), ("u.json", '{"n": "\\u010Fqxwzy"}\n'),
+                           ("r.rs", 'let n = "\\u{10f}qxwzy";\n')):
+            with self.subTest(name=name):
+                self.assert_found_in_both_modes_as({name: text}, "qxwzy")
+
+    def test_percent_encoding_does_not_hide_a_term(self) -> None:
+        self.add_terms("ďqxwzy")
+        for name, text in (("p.txt", "see /x/%C4%8Fqxwzy\n"), ("q.txt", "see /x/%EFqxwzy\n")):  # UTF-8, cp1250
+            with self.subTest(name=name):
+                self.assert_found_in_both_modes_as({name: text}, "qxwzy")
+
+    def test_a_non_utf8_commit_message_is_scanned_in_its_encoding(self) -> None:
+        self.add_terms("ďqxwzy")
+        self.commit({"a.txt": "clean\n"})
+        message = self.tmp / "message.txt"
+        message.write_bytes("fix for Ďqxwzy".encode("cp1250"))  # raw cp1250, no encoding header
+        (self.repo / "a.txt").write_text("clean 2\n", encoding="utf-8")
+        git(self.repo, "commit", "-q", "-a", "-F", str(message))
+        code, out = self.scan("--commits", "HEAD~1..HEAD")
+        self.assertEqual(code, 1)
+        self.assertIn("commit metadata: denylist entry 4", out)
+
+    def test_valid_utf8_is_not_rescanned_as_mojibake(self) -> None:
+        # the cp1250 / Latin-1 readings apply only to bytes that are not valid UTF-8: read as
+        # Latin-1, `č` (C4 8D) would end in a control character and split `čqxv` into a word `qxv`
+        self.deny.write_text("qxv\n", encoding="utf-8")
+        self.commit({"sk.txt": "čqxv\n"})
+        self.assertEqual(self.scan("--tree", "HEAD", "--commits", "HEAD")[0], 0)
+
+    def test_a_cp1250_path_holding_a_term_never_reaches_the_output(self) -> None:
+        # #27 leak class: the undecodable letter used to print as U+FFFD with the rest of the term
+        # after it (`docs/\ufffdqxwzy-notes.md`) in the public CI log
+        self.add_terms("ďqxwzy")
+        path = os.fsdecode(b"docs/\xefqxwzy-notes.md")  # `ďqxwzy` in cp1250
+        out = self.assert_found_in_both_modes_as({path: "x zyxname\n"}, "qxwzy")
+        self.assertIn("tree docs/[redacted]:1: denylist entry 1", out)
+        self.assertIn("tree docs/[redacted]: path: denylist entry 4", out)
+
+    def test_an_undecodable_path_component_is_redacted_even_without_a_term(self) -> None:
+        path = os.fsdecode(b"\xe1bcde/a.txt")  # Latin-1 `ábcde`: not valid UTF-8, holds no term
+        out = self.assert_found_in_both_modes_as({path: "x zyxname\n"}, "bcde")
+        self.assertIn("tree [redacted]/a.txt:1: denylist entry 1", out)
+        self.assertNotIn("\ufffd", out)
+
+    def test_a_percent_encoded_path_holding_a_term_is_matched_and_redacted(self) -> None:
+        scanner = ds.Scanner(["ďqxwzy"], set())
+        self.assertEqual(scanner.entries_in("docs/%C4%8Fqxwzy.md"), [1])
+        self.assertEqual(scanner.shown("docs/%C4%8Fqxwzy.md"), "docs/[redacted]")
+
+    def test_hash_key_allowlists_a_cp1250_line(self) -> None:
+        self.add_terms("ďqxwzy")
+        self.commit({"c.txt": "keep ďqxwzy here\n".encode("cp1250")})
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(ds.main(["--repo", str(self.repo), "--hash", "c.txt", "1"]), 0)
+        allow = self.tmp / "allow.txt"
+        allow.write_text(out.getvalue().strip() + "  reviewed ordinary prose\n", encoding="utf-8")
+        self.assertEqual(self.scan("--allow", str(allow), "--tree", "HEAD", "--commits", "HEAD")[0], 0)
 
 
 if __name__ == "__main__":
