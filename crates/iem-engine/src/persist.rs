@@ -520,6 +520,43 @@ mod tests {
     }
 
     #[test]
+    fn a_crash_between_the_renames_boots_on_the_interrupted_save() {
+        // #32: `save` writes save.tmp, renames current.json to a generation,
+        // then save.tmp to current.json. A crash between the renames leaves
+        // the newest state only in save.tmp: the load chain must take it, not
+        // the older generation (whose boot would lose it at the next save).
+        let (_d, s) = store();
+        let g = test_site();
+        s.save(&sample(1)).unwrap();
+        fs::write(s.dir().join(TMP), encode(&sample(2)).unwrap()).unwrap();
+        fs::rename(s.dir().join(CURRENT), s.dir().join("gen-0000000001.json")).unwrap();
+        let loaded = s.load(&g);
+        assert_eq!(loaded.persisted.rev, 2);
+        assert!(loaded.rejected.is_empty(), "{:?}", loaded.rejected);
+        // A save cut off while writing save.tmp is no state: the generation
+        // stands, and the cut-off file is reported.
+        let partial = encode(&sample(3)).unwrap();
+        fs::write(s.dir().join(TMP), &partial[..partial.len() / 2]).unwrap();
+        let loaded = s.load(&g);
+        assert_eq!(loaded.source, Source::Generation(1));
+        assert_eq!(loaded.persisted.rev, 1);
+        assert_eq!(loaded.rejected.len(), 1, "{:?}", loaded.rejected);
+        assert!(loaded.rejected[0].0.ends_with(TMP));
+    }
+
+    #[test]
+    fn save_tmp_beside_current_json_is_not_read() {
+        // Only a missing current.json sends the load chain to save.tmp.
+        let (_d, s) = store();
+        s.save(&sample(1)).unwrap();
+        fs::write(s.dir().join(TMP), encode(&sample(2)).unwrap()).unwrap();
+        let loaded = s.load(&test_site());
+        assert_eq!(loaded.source, Source::Current);
+        assert_eq!(loaded.persisted.rev, 1);
+        assert!(loaded.rejected.is_empty());
+    }
+
+    #[test]
     fn baseline_is_the_last_resort_before_defaults() {
         let (_d, s) = store();
         s.save_baseline(&sample(9)).unwrap();
