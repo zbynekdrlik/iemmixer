@@ -487,6 +487,34 @@ fn a_damaged_current_json_that_cannot_be_moved_aside_becomes_a_skipped_generatio
     );
 }
 
+#[test]
+fn a_move_aside_whose_directory_sync_fails_is_reported_as_moved() {
+    // #32 minor-6: the rename went through and only the directory sync
+    // after it failed. The damaged file is aside (the report says where
+    // and that the sync failed), not "could not be moved aside".
+    let (_d, faulty, s) = faulty_store();
+    s.save(&sample(7)).unwrap();
+    s.save(&sample(8)).unwrap();
+    fs::write(s.dir().join(CURRENT), b"damaged").unwrap();
+    let s = reopen(s.dir(), &faulty);
+    let loaded = s.load(&test_site());
+    assert_eq!(loaded.current_json, FileState::Damaged);
+    faulty.fail_next("sync_dir");
+    let done = s.recover(&loaded);
+    let aside = s.dir().join("current.json.damaged-1");
+    assert_eq!(done.quarantined, Some(aside.clone()), "{done:?}");
+    assert_eq!(fs::read(&aside).unwrap(), b"damaged");
+    assert!(!s.dir().join(CURRENT).exists());
+    assert_eq!(done.failed.len(), 1, "{done:?}");
+    assert!(
+        done.failed[0].starts_with(&format!(
+            "the damaged current.json was moved aside to {}, but the directory sync failed",
+            aside.display()
+        )),
+        "{done:?}"
+    );
+}
+
 /// A read of a file that keeps failing: tried `READ_TRIES` times.
 const TRIES: usize = 5;
 
