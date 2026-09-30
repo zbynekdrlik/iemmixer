@@ -172,8 +172,8 @@ exclude_re = [
   "iem-engine/src/rt\\.rs.*replace > with >= in Processor::render_mixes",
   # Equivalent (S3). With the budget spent, `budget >= 0` also cuts the segment at the
   # waiting command; rendering in two pieces is bit-identical (block-size invariance tests).
-  # anchor 1038: if budget > 0
-  "iem-engine/src/rt\\.rs:1038:.*replace > with >= in <impl Process for Processor>::process",
+  # anchor 1204: if budget > 0
+  "iem-engine/src/rt\\.rs:1204:.*replace > with >= in <impl Process for Processor>::process",
   # The fade wait's `elapsed < FADE_WAIT`: differs only at the exact nanosecond.
   "iem-engine/src/control\\.rs.*replace < with <= in Control::fade_out",
   # Unobservable (S3): the `!` only decides whether "solos cleared" is logged.
