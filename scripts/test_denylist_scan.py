@@ -398,6 +398,30 @@ class DenylistScanTests(unittest.TestCase):
         allow.write_text(out.getvalue().strip() + "  reviewed ordinary prose\n", encoding="utf-8")
         self.assertEqual(self.scan("--allow", str(allow), "--tree", "HEAD", "--commits", "HEAD")[0], 0)
 
+    def test_empty_term_named_file_in_a_root_commit_is_caught(self) -> None:
+        # Vector 1 (root commit): the diff-tree scan passes --root, so a term-named empty file added
+        # in the very first commit (which has no parent and no `+++` header) is still caught.
+        self.commit({"zyxname-empty.txt": b""})  # the root commit itself
+        code, out = self.scan("--commits", "HEAD")
+        self.assertEqual(code, 1)
+        self.assertNotIn("zyxname", out.lower())
+        self.assertIn("[redacted]", out)
+
+    def test_empty_term_file_merged_from_a_side_branch_is_caught(self) -> None:
+        # Vector 1 (merge): -m makes diff-tree diff a merge against its parents, so a term-named
+        # empty file brought in by a merge is still caught in commit mode.
+        self.commit({"base.txt": "base\n"})
+        git(self.repo, "checkout", "-q", "-b", "feature")
+        (self.repo / "zyxname-merge.txt").write_bytes(b"")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "side branch adds an empty term-named file")
+        git(self.repo, "checkout", "-q", "main")
+        git(self.repo, "merge", "-q", "--no-ff", "-m", "merge feature", "feature")
+        code, out = self.scan("--commits", "-1 HEAD")  # just the merge commit
+        self.assertEqual(code, 1)
+        self.assertNotIn("zyxname", out.lower())
+        self.assertIn("[redacted]", out)
+
 
 if __name__ == "__main__":
     unittest.main()

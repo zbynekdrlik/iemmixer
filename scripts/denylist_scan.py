@@ -161,10 +161,10 @@ def unquote_c(quoted: bytes) -> bytes:
     """A path git wrote C-quoted (`"b/Kl\\303\\241vor"`) back to its exact bytes.
 
     Defensive: a malformed escape (a lone trailing backslash, an unknown escape
-    letter, a short or out-of-range octal) never crashes and never drops the
-    bytes that follow — the backslash is kept literal so a term cannot hide
-    behind a crafted escape. Well-formed octal (`\\NNN`) and letter escapes
-    decode exactly as before.
+    letter, or an out-of-range octal such as `\\777`) never crashes and never
+    drops the bytes that follow — the backslash is kept literal so a term cannot
+    hide behind a crafted escape. Well-formed octal (`\\NNN`, and a 1-2 digit
+    leading run) and the letter escapes decode exactly as before.
     """
     body = quoted[1:-1] if len(quoted) >= 2 and quoted[:1] == b'"' and quoted[-1:] == b'"' else quoted
     out, i, n = bytearray(), 0, len(body)
@@ -266,13 +266,17 @@ def scan_commits(
         # an added/modified empty or binary file has no `+++` header, so the loop above never sees
         # its path. Enumerate every added/modified path from the tree diff (raw bytes via -z, no
         # quoting) and scan any the unified diff never surfaced, so a term hidden in an empty or
-        # binary file name cannot slip past the commit-mode path scan. --root covers a root commit.
+        # binary file name cannot slip past the commit-mode path scan. --root covers a root commit;
+        # -m diffs a merge against every parent (a safe over-scan for a security tool -- it never
+        # misses a path any parent introduces), and `seen` dedups a path already scanned above or
+        # repeated across parents.
         for raw_path in git(repo, "diff-tree", "--no-commit-id", "--name-only", "-z", "-r", "--root",
-                            "--no-renames", "-m", "--first-parent", "--diff-filter=AM", sha).split(b"\0"):
+                            "--no-renames", "-m", "--diff-filter=AM", sha).split(b"\0"):
             if not raw_path:
                 continue
             changed = decode(raw_path)
             if changed not in seen:
+                seen.add(changed)
                 hits += scanner.scan_path(changed, f"{short} ")
     return hits
 
