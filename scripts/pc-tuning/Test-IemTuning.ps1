@@ -188,11 +188,21 @@ try {
     $msiKey = "$enum\Device Parameters\Interrupt Management\MessageSignaledInterruptProperties"
     New-Item -Path $msiKey -Force | Out-Null
     New-ItemProperty -LiteralPath $msiKey -Name 'MSISupported' -PropertyType DWord -Value 1 | Out-Null
+    # MSI in use = the flag AND message-signaled interrupts granted now (a negative IRQ
+    # number in Win32_PnPAllocatedResource); INTx granted or none granted is skipped (m3).
+    $inst = 'PCI\VEN_TEST&DEV_0001\0'
+    foreach ($c in @(@(@{ $inst = @(16) }, '*INTx*'), @(@{ $inst = @(-3, 17) }, '*INTx*'), @(@{}, '*no interrupt*'))) {
+        $rg = Invoke-IemTuningApply -ProfilePath $pp -Tier 3 -Only @('irq') -AllocatedIrqs $c[0]
+        $sk = @(Rows $rg 'skipped')
+        Assert ($sk.Count -eq 1 -and "$($sk[0].value)" -like $c[1] -and @(Rows $rg 'written').Count -eq 0 -and -not (Test-Path -LiteralPath "$enum\Device Parameters\Interrupt Management\Affinity Policy")) "tier3-skips-the-card-without-granted-msi $($c[1])"
+    }
+    $ai = Get-IemAllocatedIrqs
+    Assert ($ai -is [hashtable]) 'allocated-irqs-read-from-wmi'
     # The card's mask exists as REG_BINARY with another mask; undo restores exactly it (A1).
     $apKey = "$enum\Device Parameters\Interrupt Management\Affinity Policy"
     New-Item -Path $apKey -Force | Out-Null
     New-ItemProperty -LiteralPath $apKey -Name 'AssignmentSetOverride' -PropertyType Binary -Value ([byte[]](4, 0, 0, 0, 0, 0, 0, 0)) | Out-Null
-    $r3 = Invoke-IemTuningApply -ProfilePath $pp -Tier 3
+    $r3 = Invoke-IemTuningApply -ProfilePath $pp -Tier 3 -AllocatedIrqs @{ $inst = @(-3, -2) }
     Assert (@(Rows $r3 'failed').Count -eq 0) 'tier3-apply-has-no-failure'
     $ap = Get-Item -LiteralPath "$enum\Device Parameters\Interrupt Management\Affinity Policy"
     # The mask is written as REG_BINARY, the KAFFINITY's canonical form: 8 bytes, little endian (M3).

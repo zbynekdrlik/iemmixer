@@ -646,7 +646,10 @@ function Assert-IemOnly {
 function Get-IemGlobalItems {
     # Tier 2 (no reboot) and Tier 3 (reboot) items of the profile. -Check
     # verifies each device before its items are built (apply only).
-    param([Parameter(Mandatory)]$Profile, [Parameter(Mandatory)][int]$Tier, [string[]]$Only = @(), [switch]$Check)
+    # -AllocatedIrqs (instance id -> granted IRQ numbers) stands in for
+    # Win32_PnPAllocatedResource in the self-test.
+    param([Parameter(Mandatory)]$Profile, [Parameter(Mandatory)][int]$Tier, [string[]]$Only = @(), [switch]$Check,
+          [hashtable]$AllocatedIrqs = $null)
     $items = @()
     if ($Tier -eq 2) {
         if (Select-IemGroup $Only 'services') {
@@ -769,12 +772,13 @@ function Get-IemModeItems {
 }
 
 function Invoke-IemTuningApply {
-    param([Parameter(Mandatory)][string]$ProfilePath, [Parameter(Mandatory)][ValidateSet(2, 3)][int]$Tier, [string[]]$Only = @())
+    param([Parameter(Mandatory)][string]$ProfilePath, [Parameter(Mandatory)][ValidateSet(2, 3)][int]$Tier, [string[]]$Only = @(),
+          [hashtable]$AllocatedIrqs = $null)
     $profile = Read-IemProfile -Path $ProfilePath
     Assert-IemOnly -Profile $profile -Tier $Tier -Only $Only
     $j = Read-IemJournal -Path $profile.journal
     $boot = Get-IemBootTime
-    $rows = @(foreach ($item in (Get-IemGlobalItems -Profile $profile -Tier $Tier -Only $Only -Check)) {
+    $rows = @(foreach ($item in (Get-IemGlobalItems -Profile $profile -Tier $Tier -Only $Only -Check -AllocatedIrqs $AllocatedIrqs)) {
         Invoke-IemItem -Item $item -Journal $j -Section 'global' -Path $profile.journal -Boot $boot
     })
     # The journal names the profile version only after a complete apply without
