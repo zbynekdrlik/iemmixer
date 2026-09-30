@@ -624,6 +624,10 @@ jobs:
           SCAN_REV: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
+          # xtrace off for this whole step: it reads the DENYLIST secret (the -z test and the
+          # printf below); a traced `++ printf … '<terms>'` (or `+ [ -z <terms> ]`) line would
+          # leak every private term into the public CI log if xtrace were ever enabled.
+          set +x
           if [ -z "$DENYLIST" ]; then
             if [ "$EVENT" = "pull_request" ] && [ "$SAME_REPO" != "true" ]; then
               echo "::error::Fork pull request: the private denylist is unavailable here; a maintainer runs the scan locally before merging (CONTRIBUTING.md), and the merge push to dev runs it again."

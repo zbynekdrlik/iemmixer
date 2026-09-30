@@ -3,7 +3,11 @@
 
 The denylist (one term per line, `#` comments) is private: a local file for
 the pre-push hook, the DENYLIST secret in CI. Output never contains a term, a
-matched line or an email address — only locations and the entry number.
+matched line or an email address — only locations and the entry number, each
+finding line starting with `tree` or a commit's short SHA (never with a path,
+so a path beginning `::` cannot read as a CI workflow command). A path
+component that holds a term is printed as `[redacted]` (the whole path when a
+term spans components), other components have their control characters escaped.
 
 Commit mode scans each commit's author/committer names and emails together
 with its message and added lines; with `--identities FILE` it also rejects
@@ -28,6 +32,8 @@ from pathlib import Path
 EXIT_CLEAN = 0
 EXIT_HIT = 1
 EXIT_USAGE = 2
+
+REDACTED = "[redacted]"
 
 
 @dataclass(frozen=True)
@@ -89,6 +95,13 @@ def load_allow(path: Path | None) -> set[str]:
     return keys
 
 
+def printable(text: str) -> str:
+    """Control characters escaped, so a path cannot inject lines (a CI `::error` command) into
+    the log."""
+    return "".join(char if char.isprintable() else f"\\x{ord(char):02x}" if ord(char) < 0x100
+                   else f"\\u{ord(char):04x}" for char in text)
+
+
 class Scanner:
     def __init__(self, terms: list[str], allow: set[str]) -> None:
         self.patterns = [compile_term(term) for term in terms]
@@ -97,8 +110,20 @@ class Scanner:
     def entries_in(self, text: str) -> list[int]:
         return [number for number, pattern in enumerate(self.patterns, start=1) if pattern.search(text)]
 
+    def shown(self, path: str) -> str:
+        """The path as printed: each component holding a term is redacted, the others have their
+        control characters escaped; the whole path is redacted when a term spans components (a
+        term without `/` always matches inside one component) or the printed form holds one."""
+        whole = set(self.entries_in(path))
+        parts = path.split("/")
+        part_hits = [set(self.entries_in(part)) if whole else set() for part in parts]
+        if not whole <= set().union(*part_hits):
+            return REDACTED
+        kept = "/".join(REDACTED if hit else printable(part) for part, hit in zip(parts, part_hits, strict=True))
+        return REDACTED if self.entries_in(kept) else kept
+
     def scan_path(self, path: str, prefix: str) -> list[Hit]:
-        return [Hit(f"{prefix}{path}: path", entry) for entry in self.entries_in(path)]
+        return [Hit(f"{prefix}{self.shown(path)}: path", entry) for entry in self.entries_in(path)]
 
     def scan_line(self, path: str, line: str, where: str) -> list[Hit]:
         entries = self.entries_in(line)
@@ -116,6 +141,8 @@ def decode(data: bytes) -> str:
 
 
 def scan_tree(scanner: Scanner, repo: Path, rev: str) -> list[Hit]:
+    # every location starts with a fixed word, never with a path: a path starting with `::`
+    # would otherwise read as a GitHub workflow command in the CI log
     hits: list[Hit] = []
     for entry in git(repo, "ls-tree", "-r", "-z", "--full-tree", rev).split(b"\0"):
         if not entry:
@@ -123,14 +150,15 @@ def scan_tree(scanner: Scanner, repo: Path, rev: str) -> list[Hit]:
         meta, _, raw_path = entry.partition(b"\t")
         _mode, kind, obj = meta.split()
         path = decode(raw_path)
-        hits += scanner.scan_path(path, "")
+        hits += scanner.scan_path(path, "tree ")
         if kind != b"blob":
             continue
         data = git(repo, "cat-file", "blob", decode(obj))
         if b"\0" in data:
             continue
+        shown = scanner.shown(path)
         for number, line in enumerate(decode(data).splitlines(), start=1):
-            hits += scanner.scan_line(path, line, f"{path}:{number}")
+            hits += scanner.scan_line(path, line, f"tree {shown}:{number}")
     return hits
 
 
@@ -149,14 +177,20 @@ def scan_commits(
                     hits.append(IdentityProblem(short, role))
         diff = decode(git(repo, "show", "--format=", "--unified=0", "--no-color", "--no-ext-diff",
                           "--no-renames", "-m", "--first-parent", sha))
-        path = ""
+        # `+++`/`---` count as headers only before a file's first hunk; inside a hunk an added
+        # line beginning with `++ ` renders as `+++ ...` and is content, not a new header path
+        path, in_hunk = "", False
         for line in diff.splitlines():
-            if line.startswith("+++ "):
+            if line.startswith("diff --git "):
+                path, in_hunk = "", False
+            elif line.startswith("@@"):
+                in_hunk = True
+            elif in_hunk and line.startswith("+"):
+                hits += scanner.scan_line(path, line[1:], f"{short} {scanner.shown(path)}")
+            elif not in_hunk and line.startswith("+++ "):
                 target = line[4:]
                 path = target[2:] if target.startswith("b/") else target
                 hits += scanner.scan_path(path, f"{short} ")
-            elif line.startswith("+"):
-                hits += scanner.scan_line(path, line[1:], f"{short} {path}")
     return hits
 
 
