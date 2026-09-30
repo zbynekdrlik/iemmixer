@@ -21,6 +21,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -199,6 +200,7 @@ impl End {
 #[cfg_attr(not(windows), allow(dead_code))]
 fn code_of(outcome: &str) -> u8 {
     match outcome {
+        "error" => 1,
         "band-activity" => 5,
         "fault-caught" => 6,
         "rate-changed" => 7,
@@ -293,8 +295,14 @@ fn push(report: &mut Value, key: &str, item: Value) {
     }
 }
 
+/// Places the calling thread on the given processors: the CPU Set IDs
+/// applied, or why not (`os::set_thread_cpus` on the PC).
+#[cfg_attr(not(windows), allow(dead_code))]
+type Place = fn(&[u8]) -> Result<Vec<u32>, String>;
+
 /// Busy threads at normal priority standing in for the server and the
-/// stream. They stop and are joined on drop, so every path ends them.
+/// stream (S1c design note §4.3: on the housekeeping CPUs). They stop and
+/// are joined on drop, so every path ends them.
 #[cfg_attr(not(windows), allow(dead_code))]
 struct Stress {
     stop: Arc<AtomicBool>,
@@ -303,35 +311,50 @@ struct Stress {
 
 #[cfg_attr(not(windows), allow(dead_code))]
 impl Stress {
-    fn start(n: u32, cpus: &[u8]) -> Self {
+    /// Starts `n` busy threads. With `cpus`, each thread first places
+    /// itself there through `place`; without, they run on the process
+    /// default. Returns the CPU Set IDs applied (empty without `cpus`). A
+    /// thread that cannot be placed fails the start (the run would load
+    /// other processors than it reports): every thread is stopped and joined,
+    /// and the error says why.
+    fn start(n: u32, cpus: &[u8], place: Place) -> Result<(Self, Vec<u32>), String> {
         let stop = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = mpsc::channel();
         let threads = (0..n)
             .map(|_| {
                 let stop = Arc::clone(&stop);
                 let cpus = cpus.to_vec();
+                let tx = tx.clone();
                 std::thread::spawn(move || {
-                    place_thread(&cpus);
-                    while !stop.load(Ordering::Relaxed) {
+                    let placed = if cpus.is_empty() {
+                        Ok(Vec::new())
+                    } else {
+                        place(&cpus)
+                    };
+                    let ok = placed.is_ok();
+                    // `start` receives every thread's result before it drops
+                    // the receiver, so this send cannot fail.
+                    let _ = tx.send(placed);
+                    drop(tx);
+                    while ok && !stop.load(Ordering::Relaxed) {
                         std::hint::spin_loop();
                     }
                 })
             })
             .collect();
-        Self { stop, threads }
+        drop(tx);
+        // From here every return ends the threads (drop).
+        let stress = Self { stop, threads };
+        let mut ids = Vec::new();
+        for _ in 0..n {
+            match rx.recv() {
+                Ok(Ok(applied)) => ids = applied,
+                Ok(Err(e)) => return Err(format!("placing a stress thread on {cpus:?}: {e}")),
+                Err(_) => return Err("a stress thread ended before it was placed".to_owned()),
+            }
+        }
+        Ok((stress, ids))
     }
-}
-
-/// Puts the calling thread on `cpus` (Windows; empty = anywhere). A failure
-/// leaves the thread where Windows puts it; the report's `process.topology`
-/// shows whether those processors exist.
-#[cfg_attr(not(windows), allow(dead_code))]
-fn place_thread(cpus: &[u8]) {
-    #[cfg(windows)]
-    if !cpus.is_empty() {
-        let _ = iem_audio_io::os::set_thread_cpus(cpus);
-    }
-    #[cfg(not(windows))]
-    let _ = cpus;
 }
 
 impl Drop for Stress {
@@ -483,10 +506,16 @@ mod spike {
                 ),
             }
         };
+        // The stress threads' CPU Set: what duplex applies (null until then).
         (
-            json!({ "power_throttling": throttling, "audio_cpus": audio, "stress_cpus": a.stress_cpus, "topology": topology }),
+            json!({ "power_throttling": throttling, "audio_cpus": audio, "stress_cpus": null, "topology": topology }),
             refused,
         )
+    }
+
+    /// Puts the calling thread on `cpus`: the CPU Set IDs applied.
+    fn place_thread(cpus: &[u8]) -> Result<Vec<u32>, String> {
+        os::set_thread_cpus(cpus).map_err(|e| e.to_string())
     }
 
     /// hwlat (S1c design note §4.1): one thread at TIME_CRITICAL on `--cpu`
@@ -608,7 +637,21 @@ mod spike {
             burn_us: a.burn_us,
             panic_at: a.panic_at,
         };
-        let _stress = Stress::start(a.stress, &a.stress_cpus);
+        // The busy threads run on the CPUs the report names, or the run fails.
+        let _stress = match Stress::start(a.stress, &a.stress_cpus, place_thread) {
+            Ok((stress, ids)) => {
+                if a.stress > 0 && !a.stress_cpus.is_empty() {
+                    report["process"]["stress_cpus"] = json!({ "lps": a.stress_cpus, "ids": ids });
+                }
+                stress
+            }
+            Err(e) => {
+                report["process"]["stress_cpus"] = json!({ "lps": a.stress_cpus, "error": e });
+                report["error"] = json!(e);
+                report["outcome"] = json!("error");
+                return Ok(code_of("error"));
+            }
+        };
         let markers = os::Markers::register().ok();
         let deadline = Instant::now() + Duration::from_secs(a.seconds);
         let mut watch = Watch::new(Instant::now(), a.watched.clone());
