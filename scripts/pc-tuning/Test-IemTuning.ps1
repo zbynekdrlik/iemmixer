@@ -113,16 +113,18 @@ try {
     # Journal file: a flushed temp file swapped in; a stop in between leaves the
     # journal missing or empty next to a complete .tmp, which the read uses (A14).
     $jp = Join-Path (Join-Path $dir 'journal-file') 'journal.json'
-    $jj = @{ schema = 1; version = 7; entered = $true; global = @{}; mode = @{}; reverted = @{}; order = @{ global = @(); mode = @() } }
+    # The journal is the module's own (a fresh read), so the test does not depend
+    # on its fields; 'entered' marks which write a read returns.
+    $jj = Read-IemJournal -Path $jp
     Write-IemJournal -Path $jp -Journal $jj
-    Assert ((Read-IemJournal -Path $jp).version -eq 7 -and -not (Test-Path -LiteralPath "$jp.tmp")) 'journal-write-leaves-no-temp-file'
-    $jj.version = 8
+    Assert (-not (Read-IemJournal -Path $jp).entered -and -not (Test-Path -LiteralPath "$jp.tmp")) 'journal-write-leaves-no-temp-file'
+    $jj.entered = $true
     Write-IemJournal -Path $jp -Journal $jj
-    Assert ((Read-IemJournal -Path $jp).version -eq 8) 'journal-write-replaces-the-journal'
+    Assert ((Read-IemJournal -Path $jp).entered) 'journal-write-replaces-the-journal'
     Move-Item -LiteralPath $jp -Destination "$jp.tmp"
-    Assert ((Read-IemJournal -Path $jp).version -eq 8) 'journal-read-falls-back-to-a-complete-temp-file'
+    Assert ((Read-IemJournal -Path $jp).entered) 'journal-read-falls-back-to-a-complete-temp-file'
     [IO.File]::WriteAllText($jp, '')
-    Assert ((Read-IemJournal -Path $jp).version -eq 8) 'journal-read-falls-back-when-the-journal-is-empty'
+    Assert ((Read-IemJournal -Path $jp).entered) 'journal-read-falls-back-when-the-journal-is-empty'
     Remove-Item -LiteralPath "$jp.tmp"
     ThrowsLike { Read-IemJournal -Path $jp } '*empty or unreadable*' 'journal-read-refuses-an-empty-journal-without-a-temp-file'
 
