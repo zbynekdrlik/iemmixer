@@ -15,6 +15,24 @@ $script:NearEvents = @('DPC', 'TimedDPC', 'ThreadedDPC', 'Interrupt', 'CSwitch',
 # xperf: WPT 10 or newer (the toolkit the dpcisr/dumper parsers read), Microsoft-signed.
 $script:XperfMinVersion = [version]'10.0'
 $script:XperfChecked = @{}   # paths verified in this process (m4)
+# The timer resolution the inventory records (design note 6.6); compiled only
+# when the inventory runs, not at every import.
+$script:TimerSource = @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+
+public static class IemTimer {
+    [DllImport("ntdll.dll")] static extern int NtQueryTimerResolution(out uint coarsest, out uint finest, out uint current);
+    // 100 ns units: coarsest, finest, current.
+    public static uint[] Query() {
+        uint a, b, c;
+        int rc = NtQueryTimerResolution(out a, out b, out c);
+        if (rc != 0) throw new Win32Exception(rc);
+        return new uint[] { a, b, c };
+    }
+}
+'@
 
 function Get-IemNow { (Get-Date).ToUniversalTime().ToString('o') }
 
@@ -307,6 +325,7 @@ function Get-IemInventory {
     # Inventory M0 (design note 4.2), read only. Never reads process command
     # lines, service image paths or task actions: they can carry tokens.
     param([Parameter(Mandatory)][string]$ProfilePath)
+    if (-not ('IemTimer' -as [type])) { Add-Type -TypeDefinition $script:TimerSource }
     $profile = Read-IemProfile -Path $ProfilePath
     $os = Get-CimInstance -ClassName Win32_OperatingSystem
     $bios = Get-CimInstance -ClassName Win32_BIOS

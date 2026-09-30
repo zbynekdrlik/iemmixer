@@ -117,17 +117,6 @@ public static class IemCpuSets {
         } finally { CloseHandle(h); }
     }
 }
-
-public static class IemTimer {
-    [DllImport("ntdll.dll")] static extern int NtQueryTimerResolution(out uint coarsest, out uint finest, out uint current);
-    // 100 ns units: coarsest, finest, current.
-    public static uint[] Query() {
-        uint a, b, c;
-        int rc = NtQueryTimerResolution(out a, out b, out c);
-        if (rc != 0) throw new Win32Exception(rc);
-        return new uint[] { a, b, c };
-    }
-}
 '@
 }
 
