@@ -763,6 +763,44 @@ fn a_boot_on_an_interrupted_save_finishes_it_first() {
     e.shutdown();
 }
 
+/// #32 P5: the boot recovery writes to the state directory, so the state
+/// directory is taken first: a second engine on it (another pipe) stops at
+/// once, before it reads or moves any state file.
+#[test]
+fn a_second_engine_on_the_same_state_dir_leaves_it_alone() {
+    use iem_engine::persist::{Persisted, encode};
+    let e = Engine::start(Flags::default(), InputSignal::Silence);
+    e.client().hello(Role::Observe);
+    let state = e.dir.path().join("state");
+    // A save.tmp the second engine's recovery would make current.json.
+    let probe = Persisted {
+        rev: 9,
+        ..Persisted::default()
+    };
+    std::fs::write(state.join("save.tmp"), encode(&probe).unwrap()).unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let cfg = RunConfig::new(common::site_path(), state.clone(), pipe_name(&other));
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(run(cfg));
+    });
+    let err = rx
+        .recv_timeout(WAIT)
+        .expect("a refused engine returns at once")
+        .unwrap_err();
+    assert!(
+        matches!(&err, EngineError::Io(io) if io.kind() == std::io::ErrorKind::WouldBlock),
+        "{err}"
+    );
+    assert!(
+        err.to_string().contains("in use by another engine"),
+        "{err}"
+    );
+    assert!(state.join("save.tmp").exists());
+    assert!(!state.join("current.json").exists());
+    e.shutdown();
+}
+
 #[test]
 fn fault_injection_releases_the_driver_and_exits() {
     let off = Engine::start(Flags::default(), InputSignal::Silence);
