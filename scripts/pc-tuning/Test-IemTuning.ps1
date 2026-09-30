@@ -231,6 +231,10 @@ try {
     $er = Enter-IemTuningMode -ProfilePath $pp -Only @('plan') -Idle 'c1'
     $ew = @(Rows $er 'written' | ForEach-Object { $_.key })
     Assert (@(Rows $er 'failed').Count -eq 0 -and @(Rows $er 'kept' | Where-Object { $_.key -eq 'plan:exists' }).Count -eq 1 -and $ew.Count -eq 1 -and $ew[0] -eq 'plan:active') 'enter-reuses-the-plan'
+    # New values written into the active plan take effect only through PowerSetActiveScheme (A4).
+    $ea = Enter-IemTuningMode -ProfilePath $pp -Only @('plan') -Idle 'disable'
+    $ra = @($ea | Where-Object { $_.key -eq 'plan:active' })
+    Assert (@(Rows $ea 'failed').Count -eq 0 -and $ra.Count -eq 1 -and $ra[0].action -eq 'reactivated' -and [IemPower]::Active() -eq $testPlan -and [IemPower]::Read($testPlan, '54533251-82be-4824-96c1-47b60b740d00', '5d76a2ca-e8c0-402f-a133-2158492d58ad') -eq 1) 'enter-reactivates-the-active-plan-after-new-values'
     [void](Exit-IemTuningMode -ProfilePath $pp)
     Assert ([IemPower]::Active() -eq $activeBefore -and (@(& powercfg.exe /list) -match $testPlan)) 'exit-after-a-reuse-keeps-the-plan-inactive'
 
