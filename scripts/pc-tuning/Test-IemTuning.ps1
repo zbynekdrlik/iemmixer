@@ -207,6 +207,10 @@ try {
     Assert ([IemPower]::Read($testPlan, '54533251-82be-4824-96c1-47b60b740d00', '9943e905-9a30-4ec1-9b99-44dd3b76f7a2') -eq 1) 'enter-limits-idle-to-c1'
     Assert ([IemPower]::Read($testPlan, '54533251-82be-4824-96c1-47b60b740d00', '893dee8e-2bef-41e0-89c6-b55d0929964c') -eq 100) 'enter-sets-processor-min-100'
     Assert ((Get-Service W32Time).Status -eq 'Stopped') 'enter-pauses-the-governor'
+    # Process Lasso's governor is paused before the iemmixer plan activates, and on exit
+    # restarts only after the REAPER-mode plan is active again (A5).
+    $ek = @($e | ForEach-Object { $_.key })
+    Assert ([array]::IndexOf($ek, 'governor') -ge 0 -and [array]::IndexOf($ek, 'governor') -lt [array]::IndexOf($ek, 'plan:active')) 'enter-pauses-the-governor-before-the-plan'
     $hk = [IemCpuSets]::Map()[0]
     Assert ((@([IemCpuSets]::Get($child.Id)) -join ',') -eq "$hk") 'enter-places-the-process'
     $e2 = Enter-IemTuningMode -ProfilePath $pp -Only @('plan', 'governor', 'placement') -Idle 'c1'
@@ -216,6 +220,8 @@ try {
     Import-Module (Join-Path $here 'IemMeasure.psm1') -Force
     $x = Exit-IemTuningMode -ProfilePath $pp
     Assert ([IemPower]::Active() -eq $activeBefore) 'exit-from-journal-in-a-new-session'
+    $xk = @($x | ForEach-Object { $_.key })
+    Assert ([array]::IndexOf($xk, 'plan:active') -ge 0 -and [array]::IndexOf($xk, 'plan:active') -lt [array]::IndexOf($xk, 'governor')) 'exit-restores-the-plan-before-the-governor'
     # The plan stays defined but inactive (design note 6.2 L2); the next enter reuses it (A6).
     Assert (@(& powercfg.exe /list) -match $testPlan) 'exit-keeps-the-plan-defined'
     Assert ((Get-Service W32Time).Status -eq 'Running') 'exit-restarts-the-governor'
