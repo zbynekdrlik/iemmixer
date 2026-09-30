@@ -126,8 +126,11 @@ pub enum GlitchKind {
     Missed,
     /// Callback longer than one period.
     Overrun,
-    /// The driver's sample position did not advance by one buffer.
+    /// The driver's sample position advanced by other than one buffer, or
+    /// stood still.
     PositionGap,
+    /// The driver's sample position stepped back.
+    PositionBack,
 }
 
 impl GlitchKind {
@@ -137,6 +140,7 @@ impl GlitchKind {
             Self::Missed => "missed",
             Self::Overrun => "overrun",
             Self::PositionGap => "position-gap",
+            Self::PositionBack => "position-back",
         }
     }
 
@@ -146,6 +150,7 @@ impl GlitchKind {
             Self::Missed => 1,
             Self::Overrun => 2,
             Self::PositionGap => 3,
+            Self::PositionBack => 4,
         }
     }
 
@@ -154,14 +159,16 @@ impl GlitchKind {
             1 => Self::Missed,
             2 => Self::Overrun,
             3 => Self::PositionGap,
+            4 => Self::PositionBack,
             _ => Self::Late,
         }
     }
 }
 
 /// One glitch: the callback's entry on the stream clock (ns) and the interval
-/// (late, missed), the callback's duration (overrun) or the position step in
-/// frames (position gap).
+/// (late, missed), the callback's duration (overrun), the position's step
+/// forward in frames (position gap; 0 when it stood still) or how far it
+/// stepped back (position back).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Glitch {
     pub kind: GlitchKind,
@@ -171,7 +178,9 @@ pub struct Glitch {
 
 /// Glitches kept between two drains; more are counted as dropped.
 pub const GLITCH_CAPACITY: usize = 4_096;
-const VALUE_BITS: u32 = 62;
+/// The packed slot: the kind's code in the top three bits (five kinds), the
+/// value below them.
+const VALUE_BITS: u32 = 61;
 const VALUE_MASK: u64 = (1 << VALUE_BITS) - 1;
 
 /// Single-producer (the callback) single-consumer (the owner thread) ring of
@@ -210,9 +219,10 @@ impl GlitchLog {
         let i = self.slot(head);
         if let (Some(at), Some(p)) = (self.at.get(i), self.packed.get(i)) {
             at.store(g.at_ns, Relaxed);
-            // `+`, not `|`: the kind occupies bits at/above 62 and the value is
-            // clamped below 2^62, so they never share a bit. `+` reads back
-            // identically and, unlike `|`, has no equivalent-mutant twin.
+            // `+`, not `|`: the kind occupies bits at/above VALUE_BITS and the
+            // value is clamped below 2^VALUE_BITS, so they never share a bit.
+            // `+` reads back identically and, unlike `|`, has no
+            // equivalent-mutant twin.
             p.store(
                 (g.kind.code() << VALUE_BITS) + g.value.min(VALUE_MASK),
                 Relaxed,
@@ -510,8 +520,14 @@ impl Telemetry {
             let step = pos.wrapping_sub(before);
             if before != NO_POSITION && step != self.frames {
                 self.position_gaps.fetch_add(1, Relaxed);
+                // The value is a magnitude: the kind keeps the direction.
+                let kind = if step < 0 {
+                    GlitchKind::PositionBack
+                } else {
+                    GlitchKind::PositionGap
+                };
                 self.glitches.push(Glitch {
-                    kind: GlitchKind::PositionGap,
+                    kind,
                     at_ns: entry_ns,
                     value: step.unsigned_abs(),
                 });
