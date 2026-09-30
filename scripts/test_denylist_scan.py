@@ -140,10 +140,12 @@ class DenylistScanTests(unittest.TestCase):
         allow.write_text(ds.line_key("a.txt", "keep zyxname here") + "  a.txt reviewed\n", encoding="utf-8")
         self.assertEqual(self.scan("--allow", str(allow), "--tree", "HEAD", "--commits", "HEAD")[0], 0)
 
-    def test_binary_content_is_skipped_but_its_path_is_scanned(self) -> None:
+    def test_binary_content_and_its_path_are_both_scanned(self) -> None:
+        # #32 E2: this test used to assert that a term inside NUL-containing content is SKIPPED
+        # (exit 0) -- the very bypass E2 reports; binary content is now scanned (its text runs).
         self.commit({"bin.dat": b"\0zyxname"})
-        self.assertEqual(self.scan("--tree", "HEAD")[0], 0)
-        self.commit({"zyxname.bin": b"\0x"})
+        self.assertEqual(self.scan("--tree", "HEAD")[0], 1)
+        self.commit({"bin.dat": b"\0x", "zyxname.bin": b"\0x"})
         self.assertEqual(self.scan("--tree", "HEAD")[0], 1)
 
     def test_empty_denylist_is_a_usage_error(self) -> None:
@@ -421,6 +423,66 @@ class DenylistScanTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertNotIn("zyxname", out.lower())
         self.assertIn("[redacted]", out)
+
+    # --- #32 E2: content holding a NUL byte (UTF-16 text, binary files) is scanned too ---
+
+    def assert_found_in_both_modes(self, name: str, content: bytes) -> str:
+        self.commit({"base.txt": f"base for {name}\n"})
+        self.commit({name: content}, message="add content holding a NUL byte")
+        code, tree_out = self.scan("--tree", "HEAD")
+        self.assertEqual(code, 1, "tree mode missed the term")
+        code, commit_out = self.scan("--commits", "HEAD~1..HEAD")
+        self.assertEqual(code, 1, "commit mode missed the term")
+        for out in (tree_out, commit_out):
+            self.assertNotIn("zyxname", out.lower())
+        return tree_out
+
+    def test_utf16_text_with_a_bom_is_decoded_and_scanned(self) -> None:
+        out = self.assert_found_in_both_modes("u.txt", "first line\nhello ZyxName\n".encode("utf-16"))
+        self.assertIn("tree u.txt:2: denylist entry 1", out)
+
+    def test_utf16_text_without_a_bom_is_detected_by_its_nul_pattern(self) -> None:
+        for codec in ("utf-16-le", "utf-16-be"):
+            with self.subTest(codec=codec):
+                self.assert_found_in_both_modes(f"{codec}.txt", "a zyxname line\n".encode(codec))
+
+    def test_a_term_in_a_text_run_of_binary_content_is_found(self) -> None:
+        content = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x01author zyxname\x00\x02\xff"
+        out = self.assert_found_in_both_modes("img.png", content)
+        self.assertIn("tree img.png:run ", out)
+
+    def test_a_utf16_string_inside_binary_content_is_found(self) -> None:
+        content = b"\x00\x01\x02\x03" + "C:\\Users\\zyxname\\trace".encode("utf-16-le") + b"\x00\x00\xfe"
+        self.assert_found_in_both_modes("trace.etl", content)
+
+    def test_a_short_term_needs_a_long_text_run_in_binary_content(self) -> None:
+        # random bytes (the f64 goldens) form short words by chance, so in binary content a term
+        # under MIN_BINARY_TERM characters counts only inside a long valid-UTF-8 text run
+        self.deny.write_text("qxv\n", encoding="utf-8")
+        self.commit({"noise.f64": b"\x00\x07\x91qxv\x00\x93"})
+        self.assertEqual(self.scan("--tree", "HEAD", "--commits", "HEAD")[0], 0)
+        self.commit({"text.bin": b"\x00\x01" + b"a long line of ordinary text that names qxv here" + b"\x00"})
+        self.assertEqual(self.scan("--tree", "HEAD")[0], 1)
+        self.assertEqual(self.scan("--commits", "HEAD~1..HEAD")[0], 1)
+
+    def test_commit_mode_reports_only_the_binary_runs_a_commit_added(self) -> None:
+        self.commit({"blob.bin": b"\x00zyxname\x00one"})
+        self.commit({"blob.bin": b"\x00zyxname\x00two"}, message="change another run")
+        self.assertEqual(self.scan("--commits", "HEAD~1..HEAD")[0], 0)
+        self.assertEqual(self.scan("--commits", "HEAD")[0], 1)
+
+    def test_hash_key_allowlists_a_utf16_line_and_a_binary_run(self) -> None:
+        self.commit({"u.txt": "keep zyxname here\n".encode("utf-16"), "b.bin": b"\x00\x01keep zyxname\x00"})
+        keys = []
+        for path, number in (("u.txt", "1"), ("b.bin", "1")):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(ds.main(["--repo", str(self.repo), "--hash", path, number]), 0)
+            keys.append(out.getvalue().strip() + "  reviewed ordinary prose")
+        self.assertEqual(self.scan("--tree", "HEAD")[0], 1)
+        allow = self.tmp / "allow.txt"
+        allow.write_text("\n".join(keys) + "\n", encoding="utf-8")
+        self.assertEqual(self.scan("--allow", str(allow), "--tree", "HEAD", "--commits", "HEAD")[0], 0)
 
 
 if __name__ == "__main__":
