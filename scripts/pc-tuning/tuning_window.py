@@ -457,10 +457,19 @@ def _measure(env, args, profile: dict, state: dict, run_dir: str, since: str, tr
     events = as_list(tps(env, f"Get-IemSystemEvents -Since {ps_quote(since)}", timeout=120, event="abandon"))
     report = json.loads(Path(result["report"]).read_text(encoding="utf-8"))
     watched = watch_lps(profile, args.audio_cpus)
-    summary = lr.summarize(args.label, result["verdict"], report, dpcisr_text, polls, events, watched)
+    # An unreadable dpcisr (parse_dpcisr fails closed with ValueError) fails the
+    # step with the raw file named, never a traceback.
+    try:
+        summary = lr.summarize(args.label, result["verdict"], report, dpcisr_text, polls, events, watched)
+    except ValueError as e:
+        raise StepError(f"{e} ({out / 'dpcisr.txt'})") from None
     summary["cuts"] = []
     for i in range(1, cut["n"] + 1):
-        entry = {"cut": i, "findings": lr.budget_findings(lr.parse_dpcisr(read_text(out / f"cut-{i}.dpcisr.txt")), watched)}
+        path = out / f"cut-{i}.dpcisr.txt"
+        try:
+            entry = {"cut": i, "findings": lr.budget_findings(lr.parse_dpcisr(read_text(path)), watched)}
+        except ValueError as e:
+            raise StepError(f"{e} ({path})") from None
         if diag:
             entry["near_glitch"] = lr.near_glitch(read_text(out / f"cut-{i}.near.txt"), period_us=lr.PERIOD_US)
         summary["cuts"].append(entry)
