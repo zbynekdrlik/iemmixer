@@ -35,6 +35,8 @@ use crate::core::{defaults_muted, reconcile, to_state};
 use crate::topology::Topology;
 
 mod chain;
+#[cfg(test)]
+mod fault_tests;
 mod files;
 
 use files::{Files, OsFiles};
@@ -196,6 +198,16 @@ impl Store {
         Ok(Self {
             dir: dir.to_path_buf(),
             files: Arc::new(OsFiles),
+        })
+    }
+
+    /// A store whose file operations a test controls (#32 P9).
+    #[cfg(test)]
+    pub(crate) fn with_files(dir: &Path, files: Arc<dyn Files>) -> io::Result<Self> {
+        fs::create_dir_all(dir)?;
+        Ok(Self {
+            dir: dir.to_path_buf(),
+            files,
         })
     }
 
