@@ -6,40 +6,49 @@ the pre-push hook, the DENYLIST secret in CI. Output never contains a term, a
 matched line or an email address — only locations and the entry number, each
 finding line starting with `tree` or a commit's short SHA (never with a path,
 so a path beginning `::` cannot read as a CI workflow command). A path
-component that holds a term, or a byte that is not valid UTF-8, is printed as
+component that holds a term, or any non-ASCII character, is printed as
 `[redacted]` (the whole path when a term spans components), other components
 have their control characters escaped.
 
-Content is read as units (content_units): the lines of text; the decoded lines
-of UTF-16 text; for other content holding a NUL byte (binary) its text runs --
-byte runs without control characters and embedded UTF-16 strings -- located as
-`run N`. In a binary run a term shorter than MIN_BINARY_TERM counts only when
-the run is LONG_TEXT_RUN bytes of valid UTF-8, since random bytes form short
-words by chance. Tree mode reads each blob's own bytes (cat-file applies no
-.gitattributes); `--hash` numbers units the same way.
+Content is read as numbered units in Batches of about CHUNK bytes, so CPU and
+memory stay bounded (#32 review m7): the lines of text; the decoded lines of
+UTF-32 / UTF-16 text, then its byte runs (a binary may only look like wide
+text); for other content holding a NUL byte (binary) its text runs -- byte runs
+without control characters, then embedded UTF-16 strings -- located as `run N`.
+In a binary run a term shorter than MIN_BINARY_TERM counts only when the run is
+LONG_TEXT_RUN bytes of valid UTF-8, since random bytes form short words by
+chance. Tree mode reads each blob's own bytes (cat-file applies no
+.gitattributes); `--hash PATH N` (or `<rev>:<path>`) numbers units the same way.
+A git-lfs pointer blob or a `.gitattributes` `filter=lfs` line is a finding: the
+content it stands for is not in the repository to scan.
 
 Commit mode scans each commit's author/committer names and emails together
 with its message, its added lines and every added/modified path -- including an
 empty or binary file, whose path the unified diff omits, enumerated via
 `git diff-tree`. Added lines come from `git show --text --no-textconv`, so a
 `binary` / `-diff` attribute or a textconv driver cannot hide them, with the
-header shape pinned against local config (`--src-prefix=a/ --dst-prefix=b/
---no-relative --diff-merges=first-parent`); a changed
-blob that is not plain text is read whole and its new units are scanned. With
-`--identities FILE` it also rejects every commit whose author or committer
-email is not exactly one listed there (read NUL-separated; an email holding a
-line separator is never allowed). Lines are split on `\n` only (not
-str.splitlines()), so a term after a CR/VT/FF/NEL/U+2028 cannot slip past, and a
-malformed C-quoted path never crashes the scan (`unquote_c` keeps a bad escape
-literal rather than dropping the bytes that follow).
+output pinned against local config (`--src-prefix=a/ --dst-prefix=b/
+--no-relative --diff-merges=first-parent --root --no-show-signature`, and the
+metadata with `--encoding=UTF-8 --no-show-signature`); a changed blob that is
+not plain text is read whole and the units the old blob lacks are reported as
+`<sha> <path>:<unit>`. With `--identities FILE` it also rejects every commit
+whose author or committer email is not exactly one listed there (read
+NUL-separated; an email holding a line separator is never allowed). Lines are
+split on `\n` only (not str.splitlines()), so a term after a CR/VT/FF/NEL/U+2028
+cannot slip past, and a malformed C-quoted path never crashes the scan
+(`unquote_c` keeps a bad escape literal rather than dropping the bytes that
+follow).
 
-Text is decoded losslessly (UTF-8, surrogateescape) and matched in every form:
-bytes that are not valid UTF-8 re-read as cp1250 and Latin-1, and `\\uXXXX` /
-`\\u{X}` escapes and percent-encoding decoded (forms). Matching is
-case-insensitive. A term that starts (ends) with a letter or digit must not be
-preceded (followed) by one, where letters include diacritics and `_` is a
-separator: `kit` does not hit `kitten`, `x_kit_y` is a hit, and a term ending
-in `.` such as `10.0.` hits `10.0.0.5`.
+Text is decoded losslessly (UTF-8, surrogateescape) and matched in every
+reading (Views): the escapes decoded (`\\uXXXX`, `\\u{X}`, `\\UXXXXXXXX`, XML /
+HTML numeric references, C / Rust / Python byte escapes, percent-encoding);
+double-encoded UTF-8 read back; invisible characters removed and compatibility
+letters (fullwidth ...) read in NFKC; undecodable bytes re-read as cp1250,
+Latin-1, ISO-8859-2 and cp852. Matching is case-insensitive. A term that
+starts (ends) with a letter or digit must not be preceded (followed) by one,
+where letters include diacritics and `_` is a separator, and an escape sequence
+right before it is a boundary too: `kit` does not hit `kitten`, `x_kit_y` and
+`\\0kit` are hits, and a term ending in `.` such as `10.0.` hits `10.0.0.5`.
 """
 from __future__ import annotations
 
