@@ -17,8 +17,8 @@ exclude_globs = [
   # Windows-only ASIO host and backend (unsafe FFI, S1a/S6): not compiled on
   # the Linux runners; the windows jobs build and lint it, HIL exercises it on
   # the PC. Its decisions live in the mutated format.rs, telemetry.rs,
-  # channels.rs, period.rs, reset.rs, owner.rs, messages.rs and iem-win's
-  # prefwin.rs.
+  # glitch_report.rs, channels.rs, period.rs, reset.rs, owner.rs, messages.rs
+  # and iem-win's prefwin.rs.
   "crates/iem-audio-io/src/asio.rs",
   # Windows-only placement/priority/clock/marker FFI (S1c): not compiled on
   # the Linux runners; the windows jobs build it. Only the S1a/S1c spike
@@ -28,7 +28,10 @@ exclude_globs = [
   # placement logic (parse_lps, ids_for) lives in the mutated cpuset.rs; the
   # CPU-set buffer decode is FFI, verified on the PC by the spike.
   "crates/iem-audio-io/src/os.rs",
-  # The S1a spike program (a Windows-only main; its parser is tested).
+  # The S1a/S1c spike program (a Windows-only main, examples/asio_spike/:
+  # main.rs and tests.rs). Its decisions live in the mutated glitch_report.rs
+  # (keep_glitches, glitch_qpc, marker_text, the marker loop); its parser,
+  # Stress and hwlat_scan are tested on every OS.
   "crates/iem-audio-io/examples/**",
   # The engine's ASIO start-up and interlock card (S6): Windows effects, not
   # compiled on the Linux runners; the windows job lints it and runs its
