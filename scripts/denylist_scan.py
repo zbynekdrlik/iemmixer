@@ -10,8 +10,13 @@ component that holds a term is printed as `[redacted]` (the whole path when a
 term spans components), other components have their control characters escaped.
 
 Commit mode scans each commit's author/committer names and emails together
-with its message and added lines; with `--identities FILE` it also rejects
-every commit whose author or committer email is not listed there.
+with its message, its added lines and every added/modified path -- including an
+empty or binary file, whose path the unified diff omits, enumerated via
+`git diff-tree`; with `--identities FILE` it also rejects every commit whose
+author or committer email is not listed there. Lines are split on `\n` only (not
+str.splitlines()), so a term after a CR/VT/FF/NEL/U+2028 cannot slip past, and a
+malformed C-quoted path never crashes the scan (`unquote_c` keeps a bad escape
+literal rather than dropping the bytes that follow).
 
 Matching is case-insensitive. A term that starts (ends) with a letter or digit
 must not be preceded (followed) by one, where letters include diacritics and
