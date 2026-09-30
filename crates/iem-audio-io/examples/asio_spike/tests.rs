@@ -5,24 +5,25 @@
 use super::*;
 use std::cell::Cell;
 
+/// Their exit codes are `spike_run::exit_code`'s (tested there).
 #[test]
-fn outcomes_have_their_exit_codes() {
-    assert_eq!(
-        [
-            "done",
-            "stopped",
-            "band-activity",
-            "fault-caught",
-            "rate-changed",
-            "stop-hung",
-            "error"
-        ]
-        .map(code_of),
-        [0, 0, 5, 6, 7, 8, 1]
-    );
+fn early_ends_have_their_outcomes() {
     assert_eq!(
         [End::Stopped, End::RateChanged, End::BandActivity].map(End::outcome),
         ["stopped", "rate-changed", "band-activity"]
+    );
+}
+
+#[test]
+fn a_placement_reports_null_its_ids_or_its_error() {
+    assert_eq!(applied_json(&[14], &Applied::Nothing), Value::Null);
+    assert_eq!(
+        applied_json(&[6, 7], &Applied::Ids(vec![0x106, 0x107])),
+        serde_json::json!({ "lps": [6, 7], "ids": [0x106, 0x107] })
+    );
+    assert_eq!(
+        applied_json(&[14], &Applied::Failed("denied".to_owned())),
+        serde_json::json!({ "lps": [14], "error": "denied" })
     );
 }
 
@@ -153,9 +154,9 @@ fn measurements_are_kept_as_they_complete() {
 
 #[test]
 fn stress_threads_stop_when_dropped() {
-    let (s, ids) = Stress::start(2, &[], never_placed).unwrap();
+    let (s, applied) = Stress::start(2, &[], never_placed).unwrap();
     let flag = Arc::clone(&s.stop);
-    assert_eq!((s.threads.len(), ids), (2, vec![]));
+    assert_eq!((s.threads.len(), applied), (2, Applied::Nothing));
     drop(s);
     assert!(flag.load(Ordering::Relaxed));
 }
@@ -189,14 +190,17 @@ fn second_refused(cpus: &[u8]) -> Result<Vec<u32>, String> {
 
 #[test]
 fn stress_threads_are_placed_on_their_cpus_and_report_the_ids() {
-    let (s, ids) = Stress::start(3, &[6, 7], placed).unwrap();
-    assert_eq!((s.threads.len(), ids), (3, vec![0x106, 0x107]));
+    let (s, applied) = Stress::start(3, &[6, 7], placed).unwrap();
+    assert_eq!(
+        (s.threads.len(), applied),
+        (3, Applied::Ids(vec![0x106, 0x107]))
+    );
     let flag = Arc::clone(&s.stop);
     drop(s);
     assert!(flag.load(Ordering::Relaxed));
     // No threads: nothing to place, nothing applied.
-    let (none, ids) = Stress::start(0, &[6], refused).unwrap();
-    assert_eq!((none.threads.len(), ids), (0, vec![]));
+    let (none, applied) = Stress::start(0, &[6], refused).unwrap();
+    assert_eq!((none.threads.len(), applied), (0, Applied::Nothing));
 }
 
 /// A busy thread that could not be placed would load other processors

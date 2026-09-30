@@ -26,6 +26,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use iem_audio_io::cpuset;
+use iem_audio_io::spike_run::{self, Applied};
 use iem_audio_io::telemetry::{ActivityGuard, GapScan, GapSummary, Loudest, Watched, dbfs};
 use serde_json::{Value, json};
 
@@ -148,14 +149,7 @@ fn parse(argv: &[String]) -> Result<Args, String> {
     if a.seconds == 0 || a.cycles == 0 {
         return Err("--seconds and --cycles must be positive".to_owned());
     }
-    // A thread without its own selection runs on the process default CPU
-    // Set, which --audio-cpus sets: the busy threads would share the audio
-    // CPUs (S1c design note §4.3 puts them on the housekeeping CPUs).
-    if a.stress > 0 && !a.audio_cpus.is_empty() && a.stress_cpus.is_empty() {
-        return Err(
-            "--stress with --audio-cpus needs --stress-cpus (the housekeeping CPUs)".to_owned(),
-        );
-    }
+    spike_run::check_stress_cpus(a.stress, &a.audio_cpus, &a.stress_cpus)?;
     match watched {
         Some(w) => a.watched = w,
         // All inputs only when asked for: a site's program inputs may carry
@@ -196,16 +190,14 @@ impl End {
     }
 }
 
-/// The exit code of a run's outcome (module header).
+/// A placement's report value (`spike_run::Applied`): null when nothing was
+/// placed, the processors with the CPU Set IDs applied or with the error.
 #[cfg_attr(not(windows), allow(dead_code))]
-fn code_of(outcome: &str) -> u8 {
-    match outcome {
-        "error" => 1,
-        "band-activity" => 5,
-        "fault-caught" => 6,
-        "rate-changed" => 7,
-        "stop-hung" => 8,
-        _ => 0,
+fn applied_json(lps: &[u8], applied: &Applied) -> Value {
+    match applied {
+        Applied::Nothing => Value::Null,
+        Applied::Ids(ids) => json!({ "lps": lps, "ids": ids }),
+        Applied::Failed(e) => json!({ "lps": lps, "error": e }),
     }
 }
 
@@ -311,13 +303,12 @@ struct Stress {
 
 #[cfg_attr(not(windows), allow(dead_code))]
 impl Stress {
-    /// Starts `n` busy threads. With `cpus`, each thread first places
-    /// itself there through `place`; without, they run on the process
-    /// default. Returns the CPU Set IDs applied (empty without `cpus`). A
-    /// thread that cannot be placed fails the start (the run would load
-    /// other processors than it reports): every thread is stopped and joined,
-    /// and the error says why.
-    fn start(n: u32, cpus: &[u8], place: Place) -> Result<(Self, Vec<u32>), String> {
+    /// Starts `n` busy threads; each first places itself on `cpus` through
+    /// `place` (`spike_run::place_on`: without `cpus` they run on the process
+    /// default) and sends the result back. Returns what was applied
+    /// (`spike_run::stress_placement`), or why a thread could not be placed:
+    /// the run fails then, and every thread is stopped and joined.
+    fn start(n: u32, cpus: &[u8], place: Place) -> Result<(Self, Applied), String> {
         let stop = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel();
         let threads = (0..n)
@@ -326,17 +317,13 @@ impl Stress {
                 let cpus = cpus.to_vec();
                 let tx = tx.clone();
                 std::thread::spawn(move || {
-                    let placed = if cpus.is_empty() {
-                        Ok(Vec::new())
-                    } else {
-                        place(&cpus)
-                    };
+                    let placed = spike_run::place_on(&cpus, place);
                     let ok = placed.is_ok();
                     // `start` receives every thread's result before it drops
                     // the receiver, so this send cannot fail.
                     let _ = tx.send(placed);
                     drop(tx);
-                    while ok && !stop.load(Ordering::Relaxed) {
+                    while spike_run::keeps_busy(ok, stop.load(Ordering::Relaxed)) {
                         std::hint::spin_loop();
                     }
                 })
@@ -345,15 +332,10 @@ impl Stress {
         drop(tx);
         // From here every return ends the threads (drop).
         let stress = Self { stop, threads };
-        let mut ids = Vec::new();
-        for _ in 0..n {
-            match rx.recv() {
-                Ok(Ok(applied)) => ids = applied,
-                Ok(Err(e)) => return Err(format!("placing a stress thread on {cpus:?}: {e}")),
-                Err(_) => return Err("a stress thread ended before it was placed".to_owned()),
-            }
+        match spike_run::stress_placement(cpus, (0..n).map(|_| rx.recv().ok())) {
+            Applied::Failed(e) => Err(e),
+            applied => Ok((stress, applied)),
         }
-        Ok((stress, ids))
     }
 }
 
@@ -362,12 +344,12 @@ impl Stress {
 #[cfg_attr(not(windows), allow(dead_code))]
 type Raise = fn() -> Result<(), String>;
 
-/// The hwlat scanner's thread (S1c design note §4.1). `place` puts it on
-/// `cpu` and `raise` makes it TIME_CRITICAL; if either fails it never scans
-/// (it would measure another processor or priority than the report names)
-/// and returns why. Then it reads the clock in a tight loop until `end` or
-/// `stop`: every gap of at least `threshold_ns` is a stall of that
-/// processor. Returns the gaps and the CPU Set IDs applied.
+/// The hwlat scanner's thread (S1c design note §4.1): it scans only once
+/// `spike_run::hwlat_ready` placed it on `cpu` and raised it to
+/// TIME_CRITICAL, else it returns why. Then it reads the clock in a tight
+/// loop until `spike_run::scan_ends` (`end` or `stop`): every gap of at
+/// least `threshold_ns` is a stall of that processor. Returns the gaps and
+/// the CPU Set IDs applied.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn hwlat_scan(
     cpu: u8,
@@ -377,8 +359,7 @@ fn hwlat_scan(
     place: Place,
     raise: Raise,
 ) -> Result<(GapSummary, Vec<u32>), String> {
-    let ids = place(&[cpu]).map_err(|e| format!("placing the scanner on CPU {cpu}: {e}"))?;
-    raise().map_err(|e| format!("raising the scanner to TIME_CRITICAL: {e}"))?;
+    let ids = spike_run::hwlat_ready(cpu, place, raise)?;
     let mut scan = GapScan::new(threshold_ns);
     let t0 = Instant::now();
     let mut prev = 0_u64;
@@ -387,7 +368,7 @@ fn hwlat_scan(
         let ns = u64::try_from(now.as_nanos()).unwrap_or(u64::MAX);
         scan.observe(prev, ns);
         prev = ns;
-        if now >= end || stop.load(Ordering::Relaxed) {
+        if spike_run::scan_ends(now, end, stop.load(Ordering::Relaxed)) {
             break;
         }
     }
@@ -439,10 +420,11 @@ mod spike {
     use iem_audio_io::format::SampleFormat;
     use iem_audio_io::glitch_report::{keep_glitches, write_markers};
     use iem_audio_io::os;
+    use iem_audio_io::spike_run::{self, Applied, exit_code};
     use iem_audio_io::telemetry::{Glitch, Snapshot};
     use serde_json::{Value, json};
 
-    use super::{Args, ExitCode, Mode, Stress, Watch, code_of, hwlat_scan, push};
+    use super::{Args, ExitCode, Mode, Stress, Watch, applied_json, hwlat_scan, push};
 
     const FIRST_CALLBACK_WAIT: Duration = Duration::from_secs(2);
     const AFTER_FAULT: Duration = Duration::from_secs(2);
@@ -459,24 +441,24 @@ mod spike {
             "audio_cpus": a.audio_cpus, "stress_cpus": a.stress_cpus,
             "cpu": a.cpu, "threshold_us": a.threshold_us,
         });
-        let (process, refused) = process_setup(a);
+        let (process, failed) = process_setup(a);
         report["process"] = process;
-        let code = if let Some(why) = refused {
-            report["outcome"] = json!("refused");
+        let code = if let Some((outcome, why)) = failed {
+            report["outcome"] = json!(outcome);
             report["error"] = json!(why);
-            4
+            exit_code(outcome)
         } else {
             match run(a, &mut report) {
                 Ok(code) => code,
                 Err(e) => {
-                    let (outcome, code) = match e {
-                        AsioError::NoDrivers(_) | AsioError::NotFound { .. } => ("no-driver", 3),
-                        AsioError::Refused(_) => ("refused", 4),
-                        _ => ("error", 1),
+                    let outcome = match e {
+                        AsioError::NoDrivers(_) | AsioError::NotFound { .. } => "no-driver",
+                        AsioError::Refused(_) => "refused",
+                        _ => "error",
                     };
                     report["outcome"] = json!(outcome);
                     report["error"] = json!(e.to_string());
-                    code
+                    exit_code(outcome)
                 }
             }
         };
@@ -496,7 +478,7 @@ mod spike {
         // Pre-empted before the start: the card is never opened.
         if a.stop_file.exists() {
             report["outcome"] = json!("stopped");
-            return Ok(0);
+            return Ok(exit_code("stopped"));
         }
         let host = Host::open(&a.driver)?;
         let info = host.info()?;
@@ -504,12 +486,12 @@ mod spike {
         if let Err(e) = a.watched.check(usize::try_from(info.inputs).unwrap_or(0)) {
             report["outcome"] = json!("refused");
             report["error"] = json!(e);
-            return Ok(4);
+            return Ok(exit_code("refused"));
         }
         match a.mode {
             Mode::Probe => {
                 report["outcome"] = json!("done");
-                Ok(0)
+                Ok(exit_code("done"))
             }
             Mode::Duplex => duplex(a, host, info, report),
             Mode::Reopen => reopen(a, host, info, report),
@@ -519,12 +501,12 @@ mod spike {
 
     /// In-process levers (S1c design note §6.2 L5): power throttling off and
     /// the audio CPU Set as the process default (every thread without its own
-    /// selection, the driver's included, runs there; no priority changes). A
-    /// requested CPU Set that cannot be applied refuses the run: a
-    /// measurement on the wrong processors would mislead.
-    fn process_setup(a: &Args) -> (Value, Option<String>) {
-        let throttling =
-            os::disable_power_throttling().map_or_else(|e| json!(e.to_string()), |()| json!("off"));
+    /// selection, the driver's included, runs there; no priority changes).
+    /// `spike_run::setup_failure` decides which lever that could not be
+    /// applied fails the run (a measurement on the wrong processors would
+    /// mislead): the outcome and why.
+    fn process_setup(a: &Args) -> (Value, Option<(&'static str, String)>) {
+        let throttling = os::disable_power_throttling().map_err(|e| e.to_string());
         let topology = match os::system_cpu_sets() {
             Ok(sets) => json!(sets
                 .iter()
@@ -532,21 +514,18 @@ mod spike {
                 .collect::<Vec<_>>()),
             Err(e) => json!({ "error": e.to_string() }),
         };
-        let (audio, refused) = if a.audio_cpus.is_empty() {
-            (json!(null), None)
-        } else {
-            match os::set_process_cpus(&a.audio_cpus) {
-                Ok(ids) => (json!({ "lps": a.audio_cpus, "ids": ids }), None),
-                Err(e) => (
-                    json!({ "lps": a.audio_cpus, "error": e.to_string() }),
-                    Some(format!("audio CPU Set: {e}")),
-                ),
-            }
-        };
+        let audio = spike_run::applied(
+            &a.audio_cpus,
+            spike_run::place_on(&a.audio_cpus, |lps| {
+                os::set_process_cpus(lps).map_err(|e| e.to_string())
+            }),
+        );
+        let failed = spike_run::setup_failure(&audio);
+        let throttling = throttling.map_or_else(|e| json!(e), |()| json!("off"));
         // The stress threads' CPU Set: what duplex applies (null until then).
         (
-            json!({ "power_throttling": throttling, "audio_cpus": audio, "stress_cpus": null, "topology": topology }),
-            refused,
+            json!({ "power_throttling": throttling, "audio_cpus": applied_json(&a.audio_cpus, &audio), "stress_cpus": null, "topology": topology }),
+            failed,
         )
     }
 
@@ -568,11 +547,13 @@ mod spike {
     fn hwlat(a: &Args, report: &mut Value) -> u8 {
         if a.stop_file.exists() {
             report["outcome"] = json!("stopped");
-            return 0;
+            return exit_code("stopped");
         }
         let Some(cpu) = a.cpu else {
+            // The parser requires --cpu for hwlat.
+            report["error"] = json!("hwlat without --cpu");
             report["outcome"] = json!("error");
-            return 2;
+            return exit_code("error");
         };
         let stop = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&stop);
@@ -599,18 +580,18 @@ mod spike {
                     "largest": s.largest.iter().map(|&(at, gap)| json!({ "at_us": at as f64 / 1e3, "gap_us": gap as f64 / 1e3 })).collect::<Vec<_>>(),
                 });
                 report["outcome"] = json!(outcome);
-                code_of(outcome)
+                exit_code(outcome)
             }
             Ok(Err(e)) => {
                 report["hwlat"] = json!({ "cpu": cpu, "threshold_us": a.threshold_us, "error": e });
                 report["error"] = json!(e);
                 report["outcome"] = json!("error");
-                code_of("error")
+                exit_code("error")
             }
             Err(_) => {
                 report["error"] = json!("the hwlat scanner thread panicked");
                 report["outcome"] = json!("error");
-                code_of("error")
+                exit_code("error")
             }
         }
     }
@@ -674,17 +655,16 @@ mod spike {
         };
         // The busy threads run on the CPUs the report names, or the run fails.
         let _stress = match Stress::start(a.stress, &a.stress_cpus, place_thread) {
-            Ok((stress, ids)) => {
-                if a.stress > 0 && !a.stress_cpus.is_empty() {
-                    report["process"]["stress_cpus"] = json!({ "lps": a.stress_cpus, "ids": ids });
-                }
+            Ok((stress, applied)) => {
+                report["process"]["stress_cpus"] = applied_json(&a.stress_cpus, &applied);
                 stress
             }
             Err(e) => {
-                report["process"]["stress_cpus"] = json!({ "lps": a.stress_cpus, "error": e });
+                report["process"]["stress_cpus"] =
+                    applied_json(&a.stress_cpus, &Applied::Failed(e.clone()));
                 report["error"] = json!(e);
                 report["outcome"] = json!("error");
-                return Ok(code_of("error"));
+                return Ok(exit_code("error"));
             }
         };
         let markers = os::Markers::register().ok();
@@ -776,7 +756,7 @@ mod spike {
             (host, info) = recreated?;
         }
         report["outcome"] = json!(outcome);
-        Ok(code_of(outcome))
+        Ok(exit_code(outcome))
     }
 
     fn reopen(
@@ -840,7 +820,7 @@ mod spike {
             (host, info) = recreated?;
         }
         report["outcome"] = json!(outcome);
-        Ok(code_of(outcome))
+        Ok(exit_code(outcome))
     }
 
     /// Pumps messages until the first callback; the start timings and the wait.
