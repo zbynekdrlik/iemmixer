@@ -1101,6 +1101,46 @@ mod tests {
         assert!(e.contains("[6] are not in group 0"), "{e}");
     }
 
+    fn raised() -> Result<(), String> {
+        Ok(())
+    }
+
+    fn not_raised() -> Result<(), String> {
+        Err("access denied".to_owned())
+    }
+
+    fn never_raised() -> Result<(), String> {
+        panic!("raised a scanner that was not placed")
+    }
+
+    /// hwlat measures one processor at TIME_CRITICAL: a scanner that could
+    /// not be placed or raised measures something else, so it never scans
+    /// and the run reports why (outcome "error", exit 1).
+    #[test]
+    fn hwlat_scans_only_on_its_cpu_at_time_critical() {
+        let go = AtomicBool::new(false);
+        let stopped = AtomicBool::new(true);
+        let long = Duration::from_secs(5);
+        // Placed and raised: it reads the clock until stopped (here at once)
+        // or until its end.
+        let (s, ids) = hwlat_scan(3, 10_000, long, &stopped, placed, raised).unwrap();
+        assert_eq!((s.reads, ids), (1, vec![0x103]));
+        let (s, _) = hwlat_scan(3, 10_000, Duration::ZERO, &go, placed, raised).unwrap();
+        assert_eq!(s.reads, 1);
+        // Not placed: not raised either, no scan.
+        let e = hwlat_scan(3, 10_000, long, &go, refused, never_raised).unwrap_err();
+        assert!(
+            e.contains("CPU 3") && e.contains("[3] are not in group 0"),
+            "{e}"
+        );
+        // Not raised: no scan.
+        let e = hwlat_scan(3, 10_000, long, &go, placed, not_raised).unwrap_err();
+        assert!(
+            e.contains("TIME_CRITICAL") && e.contains("access denied"),
+            "{e}"
+        );
+    }
+
     fn argv(s: &str) -> Vec<String> {
         s.split_whitespace().map(str::to_owned).collect()
     }
