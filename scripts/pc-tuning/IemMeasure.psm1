@@ -4,13 +4,30 @@
 # dumper reports, per-CPU counter samples over WMI (language-neutral), the
 # System log, the WPT install, and the REAPER-mode fingerprint and inventory.
 # Changes no Windows setting.
+#
+# -ArgumentList 'stop-only' loads only what the pre-emption stop needs
+# (Stop-IemTraceSessions): IemTuning is not loaded at all (review R2).
+param([string]$Load = 'all')
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-Import-Module (Join-Path $PSScriptRoot 'IemTuning.psm1') -Force -Global
+if (@('all', 'stop-only') -notcontains $Load) { throw "IemMeasure: -ArgumentList '$Load': use 'all' or 'stop-only'" }
+# IemTuning (Invoke-IemNative, the profile, the journal) serves every function
+# here but the pre-emption stop. Nothing is compiled at this import, and a
+# failure to load IemTuning (its Add-Type compiles) is kept, never thrown: this
+# module, and so the stop, loads regardless (review R2). A function that needs
+# IemTuning then fails when called.
+$script:TuningLoadError = $null
+if ($Load -eq 'all') {
+    try { Import-Module (Join-Path $PSScriptRoot 'IemTuning.psm1') -Force -Global }
+    catch { $script:TuningLoadError = "$_" }
+}
 # crates/iem-audio-io/src/os.rs MARKER_PROVIDER.
 $script:MarkerProvider = '3b6c1e0a-5d2f-4c8e-9a71-0e4f2d9b8c11'
 $script:MarkerSession = 'IemMarkers'
 $script:KernelSession = 'NT Kernel Logger'
+# The pre-emption stop's logman: a Windows binary by its full path (no signature
+# check needed, unlike xperf); the self-test points it at a stand-in.
+$script:Logman = Join-Path $env:SystemRoot 'System32\logman.exe'
 $script:NearEvents = @('DPC', 'TimedDPC', 'ThreadedDPC', 'Interrupt', 'CSwitch', 'ReadyThread')
 # xperf: WPT 10 or newer (the toolkit the dpcisr/dumper parsers read), Microsoft-signed.
 $script:XperfMinVersion = [version]'10.0'
@@ -48,9 +65,8 @@ function New-IemTraceArguments {
 
 function Invoke-XperfRun {
     # Module-private (not exported): runs xperf. -Verify: it runs elevated, so only a
-    # Microsoft-signed, new-enough binary, checked once per process (m4); only the
-    # pre-emption stop runs without it (review 3.6). stderr is output, the exit code
-    # alone decides (A11).
+    # Microsoft-signed, new-enough binary, checked once per process (m4). stderr is
+    # output, the exit code alone decides (A11).
     param([Parameter(Mandatory)][string]$Xperf, [Parameter(Mandatory)][string[]]$Arguments, [switch]$Verify)
     if (-not (Test-Path -LiteralPath $Xperf)) { throw "xperf not found at $Xperf (run wpt-install)" }
     if ($Verify -and -not $script:XperfChecked.ContainsKey($Xperf)) {
@@ -81,44 +97,103 @@ function Start-IemTrace {
     [pscustomobject]@{ dir = $Dir; started = Get-IemNow }
 }
 
-function Stop-IemTrace {
-    # Stops whichever of the two sessions runs (none is fine: pre-emption may
-    # come twice). -Merge merges both into -Name; without it the raw files stay.
-    # The stop without -Merge is the pre-emption path ("ide event") and must always
-    # work (review 3.6): xperf runs unchecked (it was checked when the trace
-    # started), and when xperf cannot run at all logman stops the sessions.
-    param([Parameter(Mandatory)][string]$Xperf, [Parameter(Mandatory)][string]$Dir, [switch]$Merge, [string]$Name = 'trace.etl')
-    try {
-        $running = ConvertFrom-IemLoggers -Text ((Invoke-XperfRun -Xperf $Xperf -Arguments @('-Loggers') -Verify:$Merge) -join "`n")
-        $a = @()
-        if ($running -contains $script:KernelSession) { $a += '-stop' }
-        if ($running -contains $script:MarkerSession) { $a += @('-stop', $script:MarkerSession) }
-        if ($a.Count -eq 0) { return [pscustomobject]@{ stopped = @(); via = 'xperf' } }
-        if ($Merge) { $a += @('-d', (Join-Path $Dir $Name)) }
-        [void](Invoke-XperfRun -Xperf $Xperf -Arguments $a -Verify:$Merge)
-        return [pscustomobject]@{ stopped = @($running | Where-Object { @($script:KernelSession, $script:MarkerSession) -contains $_ }); via = 'xperf' }
-    } catch {
-        if ($Merge) { throw }
-        $why = "$_"
-        $stopped = Stop-IemTraceSessionsByLogman
-        return [pscustomobject]@{ stopped = $stopped; via = 'logman'; xperf_error = $why }
-    }
+function Select-OwnTraceSession {
+    # Module-private: of the running ETW sessions, those that are ours to stop.
+    # IemMarkers, and the NT Kernel Logger only while IemMarkers runs: that is the
+    # proof the kernel trace is ours, never another tool's (LatencyMon, ProcMon)
+    # (review R2).
+    param([AllowEmptyCollection()][string[]]$Running = @())
+    if (@($Running) -notcontains $script:MarkerSession) { return ,([string[]]@()) }
+    return ,([string[]]@(@($script:KernelSession, $script:MarkerSession) | Where-Object { @($Running) -contains $_ }))
 }
 
-function Stop-IemTraceSessionsByLogman {
-    # The pre-emption stop without xperf: logman stops each of the two trace
-    # sessions that runs (an ETW session stop, graceful like xperf -stop) and
-    # returns their names; a session it cannot stop throws (review 3.6).
-    $q = Invoke-IemNative -FilePath 'logman.exe' -Arguments @('query', '-ets')
-    if ($q.code -ne 0) { throw "logman query -ets (exit $($q.code)): $($q.out -join ' ')" }
-    $stopped = @()
-    foreach ($s in @($script:KernelSession, $script:MarkerSession)) {
-        if (-not @(@($q.out) | Where-Object { $_ -match ('^\s*' + [regex]::Escape($s) + '\s') })) { continue }
-        $r = Invoke-IemNative -FilePath 'logman.exe' -Arguments @('stop', $s, '-ets')
-        if ($r.code -ne 0) { throw "logman stop $s (exit $($r.code)): $($r.out -join ' ')" }
-        $stopped += $s
+function Stop-IemTrace {
+    # Stops our sessions (none is fine: pre-emption may come twice). Without -Merge
+    # this is the pre-emption stop ("ide event"), Stop-IemTraceSessions: logman
+    # only, -Xperf is not used (review 3.6, R2). -Merge stops them with the verified
+    # xperf and merges them into -Name; the kernel logger only with IemMarkers (R2).
+    param([Parameter(Mandatory)][string]$Xperf, [Parameter(Mandatory)][string]$Dir, [switch]$Merge, [string]$Name = 'trace.etl')
+    if (-not $Merge) { return Stop-IemTraceSessions }
+    $running = ConvertFrom-IemLoggers -Text ((Invoke-XperfRun -Xperf $Xperf -Arguments @('-Loggers') -Verify) -join "`n")
+    $own = Select-OwnTraceSession -Running $running
+    if ($own.Count -eq 0) { return [pscustomobject]@{ stopped = @(); via = 'xperf' } }
+    $a = @()
+    if ($own -contains $script:KernelSession) { $a += '-stop' }
+    $a += @('-stop', $script:MarkerSession, '-d', (Join-Path $Dir $Name))
+    [void](Invoke-XperfRun -Xperf $Xperf -Arguments $a -Verify)
+    return [pscustomobject]@{ stopped = @($own); via = 'xperf' }
+}
+
+function Invoke-LogmanRun {
+    # Module-private: one logman.exe call, bounded. Needs nothing from IemTuning.
+    # A call that does not finish in time is reported and left to finish on its
+    # own: nothing is force-ended (I8).
+    param([Parameter(Mandatory)][string[]]$Arguments, [Parameter(Mandatory)][int]$TimeoutSeconds)
+    $si = New-Object System.Diagnostics.ProcessStartInfo
+    $si.FileName = $script:Logman
+    $si.Arguments = (@($Arguments | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }) -join ' ')
+    $si.UseShellExecute = $false
+    $si.CreateNoWindow = $true
+    $si.RedirectStandardOutput = $true
+    $si.RedirectStandardError = $true
+    $what = "logman $($si.Arguments)"
+    try { $p = [System.Diagnostics.Process]::Start($si) }
+    catch { return [pscustomobject]@{ ok = $false; out = @(); error = "${what}: $($_.Exception.GetBaseException().Message)" } }
+    $out = $p.StandardOutput.ReadToEndAsync()
+    $err = $p.StandardError.ReadToEndAsync()
+    if (-not $p.WaitForExit($TimeoutSeconds * 1000)) { return [pscustomobject]@{ ok = $false; out = @(); error = "$what did not finish within $TimeoutSeconds s" } }
+    $text = @()
+    if ([System.Threading.Tasks.Task]::WaitAll([System.Threading.Tasks.Task[]]@($out, $err), 5000)) {
+        $text = @(($out.Result + "`n" + $err.Result) -split "`r?`n" | Where-Object { $_.Trim() -ne '' })
     }
-    return ,$stopped
+    if ($p.ExitCode -ne 0) { return [pscustomobject]@{ ok = $false; out = $text; error = "$what (exit $($p.ExitCode)): $($text -join ' ')" } }
+    return [pscustomobject]@{ ok = $true; out = $text; error = $null }
+}
+
+function Stop-IemTraceSessions {
+    # The pre-emption stop ("ide event", review 3.6, R2). It needs neither xperf nor
+    # IemTuning, so it works whatever else fails to load (-ArgumentList 'stop-only'
+    # loads nothing else): logman.exe stops IemMarkers, and the NT Kernel Logger
+    # only while IemMarkers runs, the proof the kernel trace is ours (another
+    # tool's is kept and reported). Each session is attempted on its own, each
+    # logman call is bounded, and every error is kept: it throws at the end,
+    # naming them all and what did stop.
+    param([ValidateRange(1, 600)][int]$TimeoutSeconds = 30)
+    $errors = @(); $stopped = @(); $kept = @()
+    $q = Invoke-LogmanRun -Arguments @('query', '-ets') -TimeoutSeconds $TimeoutSeconds
+    if ($q.ok) {
+        $running = @(foreach ($s in $script:MarkerSession, $script:KernelSession) {
+            if (@(@($q.out) | Where-Object { $_ -match ('^\s*' + [regex]::Escape($s) + '\s') }).Count -gt 0) { $s }
+        })
+        $own = Select-OwnTraceSession -Running $running
+        if ($running -contains $script:KernelSession -and $own -notcontains $script:KernelSession) { $kept += $script:KernelSession }
+        # IemMarkers, then the kernel logger (its proof was taken from the query):
+        # the second is tried whatever the first did.
+        foreach ($s in $script:MarkerSession, $script:KernelSession) {
+            if ($own -notcontains $s) { continue }
+            $r = Invoke-LogmanRun -Arguments @('stop', $s, '-ets') -TimeoutSeconds $TimeoutSeconds
+            if ($r.ok) { $stopped += $s } else { $errors += $r.error }
+        }
+    } else {
+        # Which sessions run is unknown: IemMarkers is ours whatever runs, so it is
+        # stopped; the kernel logger only once that stop proved IemMarkers ran.
+        $errors += $q.error
+        $r = Invoke-LogmanRun -Arguments @('stop', $script:MarkerSession, '-ets') -TimeoutSeconds $TimeoutSeconds
+        if ($r.ok) {
+            $stopped += $script:MarkerSession
+            $r = Invoke-LogmanRun -Arguments @('stop', $script:KernelSession, '-ets') -TimeoutSeconds $TimeoutSeconds
+            if ($r.ok) { $stopped += $script:KernelSession } else { $errors += $r.error }
+        } else {
+            $errors += $r.error
+            $errors += "$($script:KernelSession) not stopped: without IemMarkers it is not shown to be ours"
+        }
+    }
+    if ($errors.Count -gt 0) {
+        $done = 'none'
+        if ($stopped.Count -gt 0) { $done = $stopped -join ', ' }
+        throw ("trace stop: $($errors -join '; ') (stopped: $done)")
+    }
+    return [pscustomobject]@{ stopped = @($stopped); kept = @($kept); via = 'logman'; tuning_error = $script:TuningLoadError }
 }
 
 function Invoke-IemDpcIsr {
