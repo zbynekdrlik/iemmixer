@@ -117,6 +117,14 @@ try {
     $bad = New-TestProfile 'PCI\VEN_OTHER'
     Throws { Invoke-IemTuningApply -ProfilePath $bad -Tier 3 -Only @('irq') } 'tier3-refuses-a-mismatched-device'
     Assert (-not (Test-Path -LiteralPath "$enum\Device Parameters")) 'tier3-refusal-writes-nothing'
+    # R1 applies only while the card already uses MSI (design note 6.4 R1): otherwise
+    # it is skipped with its reason, and nothing is written (A7).
+    $rs = Invoke-IemTuningApply -ProfilePath $pp -Tier 3 -Only @('irq')
+    $sk = @(Rows $rs 'skipped')
+    Assert ($sk.Count -eq 1 -and "$($sk[0].value)" -like '*line-based*' -and @(Rows $rs 'written').Count -eq 0 -and -not (Test-Path -LiteralPath "$enum\Device Parameters")) 'tier3-skips-the-card-without-msi'
+    $msiKey = "$enum\Device Parameters\Interrupt Management\MessageSignaledInterruptProperties"
+    New-Item -Path $msiKey -Force | Out-Null
+    New-ItemProperty -LiteralPath $msiKey -Name 'MSISupported' -PropertyType DWord -Value 1 | Out-Null
     # The card's mask exists as REG_BINARY (a KAFFINITY); the item writes a QWORD (A1).
     $apKey = "$enum\Device Parameters\Interrupt Management\Affinity Policy"
     New-Item -Path $apKey -Force | Out-Null
