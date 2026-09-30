@@ -305,12 +305,16 @@ impl Topology {
     /// HIL's spare card outputs (`[guard] hil_tx`; S6 design note §4, the
     /// owner's decision on #9 of 2026-09-28): card channels from 1 that no
     /// mix uses, each named once, at most [`MAX_HIL`]. `run` opens them
-    /// after the topology's TX under the test-signal flag; `check-site`
-    /// refuses a site whose `hil_tx` breaks the rule. `[engine] channels`
-    /// is no bound (the highest channel the topology uses, not the card's
-    /// output count, which `[card]` does not hold): the card's own count is
-    /// checked when the stream opens (`ChannelMap`, a channel the card lacks
-    /// refuses it, exit 3).
+    /// after the topology's TX under the test-signal flag, and the
+    /// same-numbered card inputs after the topology's RX as their D5(b)
+    /// loopback returns (S6 test 5), so no `hil_tx` may be a topology input;
+    /// `check-site` refuses a site whose `hil_tx` breaks the rule.
+    /// `[engine] channels` is no bound (the highest channel the topology
+    /// uses, not the card's channel count, which `[card]` does not hold): the
+    /// card's own counts are checked when the stream opens (`ChannelMap`, a
+    /// channel the card lacks refuses it, exit 3). The card needs an input
+    /// for every `hil_tx` too: with fewer inputs than the highest one, every
+    /// HIL stream is refused ([`hil_return_refusal`] names that input).
     pub fn hil_outputs(&self, hil_tx: &[u16]) -> Result<Vec<u16>, SiteError> {
         if hil_tx.len() > MAX_HIL {
             return Err(SiteError::HilTx(format!(
@@ -404,9 +408,21 @@ impl Topology {
 
 /// Why the card refused the stream, when the channel it lacks is a D5(b)
 /// loopback return (S6 test 5), in words that name that input; `None` for
-/// any other channel refusal, whose own text stands.
-pub fn hil_return_refusal(_e: &MapError) -> Option<String> {
-    None
+/// any other channel refusal, whose own text stands. `ChannelMap` marks a
+/// return channel with the side `"hil-return rx"`.
+pub fn hil_return_refusal(e: &MapError) -> Option<String> {
+    match e {
+        MapError::Missing {
+            side: "hil-return rx",
+            channel,
+            card,
+        } => Some(format!(
+            "the HIL loopback return needs card input {channel}, which the card lacks \
+             ({card} inputs): under --test-signal the engine opens the card input of \
+             each [guard] hil_tx output as its return"
+        )),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
