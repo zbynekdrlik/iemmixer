@@ -371,6 +371,23 @@ def trace_options(trace: str, circular_mb: int) -> str:
     return (" -CSwitch" if trace == "diag" else "") + (f" -CircularMB {circular_mb}" if circular_mb else "")
 
 
+def start_trace(env: dict[str, str], run_dir: str, opt: str) -> None:
+    """Starts the kernel trace (event="finish": the start completes). A start
+    the "ide event" overtook — its call ended in EventNow, or the flag exists
+    right after it — may have ended after a preempt's trace-stop found no
+    session, so this process stops it too (quick, no merge; an alarm if that
+    fails) before EventNow goes on (review round 3, m5)."""
+    try:
+        tps(env, f"Start-IemTrace -Xperf {xperf(env)} -Dir {ps_quote(run_dir)}{opt}", timeout=120, event="finish")
+        check_event()
+    except sw.EventNow:
+        try:
+            tps(env, f"Stop-IemTrace -Xperf {xperf(env)} -Dir {ps_quote(run_dir)}", timeout=120, event="ignore")
+        except StepError as e:
+            sw.alarm(f"a kernel trace started as 'ide event' came did not stop ({e}): run tuning_window trace-stop")
+        raise
+
+
 def set_aside(d: str, cut: int) -> str:
     """After a cut's stop: its raw session files become cut-N.kernel.etl and
     cut-N.markers.etl (a missing marker file stays missing), so the restart
@@ -475,7 +492,7 @@ def _measure(env, args, profile: dict, state: dict, run_dir: str, since: str, tr
     opt = trace_options(args.trace, args.circular_mb)
     if tracing:
         sw.update_state({"trace": run_dir})   # recorded before the start: preempt and the error path stop it
-        tps(env, f"Start-IemTrace -Xperf {xperf(env)} -Dir {ps_quote(run_dir)}{opt}", timeout=120)
+        start_trace(env, run_dir, opt)
     polls: list[dict] = []
     cut = {"n": 0, "seen": 0}
 
@@ -493,7 +510,7 @@ def _measure(env, args, profile: dict, state: dict, run_dir: str, since: str, tr
             tps(env, f"Stop-IemTrace -Xperf {xperf(env)} -Dir {ps_quote(run_dir)} ; {set_aside(ps_quote(run_dir), cut['n'])}",
                 timeout=120, event="finish")
             check_event()
-            tps(env, f"Start-IemTrace -Xperf {xperf(env)} -Dir {ps_quote(run_dir)}{opt}", timeout=120, event="finish")
+            start_trace(env, run_dir, opt)
 
     # The proxy load's busy threads run on the housekeeping CPUs unless told otherwise
     # (design note §4.3), without any --audio-cpus among them (#32 C1, review m12);
