@@ -174,18 +174,36 @@ function Get-IemBootTime {
     (Get-CimInstance -ClassName Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().ToString('o')
 }
 
-# Two boot-time readings this close name the same boot (A13). A clock step (time
+# Two boot-time readings this close can be the same boot (A13). A clock step (time
 # sync) moves LastBootUpTime by the step, typically seconds; a reboot moves it by
-# at least the whole previous session, which in the tuning flow (apply,
-# reboot-prepare, the owner's approval, the restart) is far longer.
+# at least the whole previous session.
 $script:BootToleranceSeconds = 300
+$script:BootIdKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters'
+
+function Get-IemBootIdentity {
+    # This boot: its time and Windows' BootId counter (PrefetchParameters\BootId,
+    # raised at every boot; $null where Windows keeps none) (m5).
+    $id = $null
+    if (Test-Path -LiteralPath $script:BootIdKey) {
+        $v = (Get-Item -LiteralPath $script:BootIdKey).GetValue('BootId', $null)
+        if ($null -ne $v) { $id = [long]$v }
+    }
+    return @{ time = Get-IemBootTime; id = $id }
+}
 
 function Test-IemSameBoot {
-    param([AllowNull()][AllowEmptyString()][string]$A, [AllowNull()][AllowEmptyString()][string]$B)
-    if ([string]::IsNullOrEmpty($A) -or [string]::IsNullOrEmpty($B)) { return $false }
+    # Two boot identities ({ time, id }) name the same boot when their BootId
+    # counters, where both have one, are equal (a reboot raises it however quick,
+    # m5) AND their times lie within the tolerance (a clock step; and a counter
+    # that did not advance cannot merge two boots far apart, A13).
+    param([AllowNull()]$A, [AllowNull()]$B)
+    if ($null -eq $A -or $null -eq $B) { return $false }
+    $ta = [string]$A.time; $tb = [string]$B.time
+    if ([string]::IsNullOrEmpty($ta) -or [string]::IsNullOrEmpty($tb)) { return $false }
+    if ($null -ne $A.id -and $null -ne $B.id -and [string]$A.id -ne [string]$B.id) { return $false }
     $c = [Globalization.CultureInfo]::InvariantCulture
     $s = [Globalization.DateTimeStyles]::RoundtripKind
-    $d = [datetime]::Parse($A, $c, $s).ToUniversalTime() - [datetime]::Parse($B, $c, $s).ToUniversalTime()
+    $d = [datetime]::Parse($ta, $c, $s).ToUniversalTime() - [datetime]::Parse($tb, $c, $s).ToUniversalTime()
     return [math]::Abs($d.TotalSeconds) -le $script:BootToleranceSeconds
 }
 
@@ -500,7 +518,7 @@ function Invoke-IemItem {
     # write (saved before the write), then read back. An optional target that
     # does not exist (a task or service missing on this edition) is 'absent'.
     param([Parameter(Mandatory)]$Item, [Parameter(Mandatory)][hashtable]$Journal, [Parameter(Mandatory)][string]$Section,
-          [Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Boot)
+          [Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)]$Boot)
     $row = [ordered]@{ key = $Item.key; tier = $Item.tier; group = $Item.group; action = ''; before = $null; value = $null; error = $null }
     if ($Item.kind -eq 'skip') { $row.action = 'skipped'; $row.value = $Item.desired; return [pscustomobject]$row }
     try {
@@ -519,7 +537,7 @@ function Invoke-IemItem {
             $Journal[$Section][$Item.key] = $e
             $Journal.order[$Section] = @($Journal.order[$Section]) + $Item.key
             Write-IemJournal -Path $Path -Journal $Journal
-        } elseif ([string]$e.boot -ne $Boot) {
+        } elseif ([string]$e.boot.time -ne [string]$Boot.time -or [string]$e.boot.id -ne [string]$Boot.id) {
             # The before-value stays the first one; the boot is the latest write's,
             # so a value re-written after a reboot is pending again (A3).
             $e.boot = $Boot
@@ -790,7 +808,7 @@ function Invoke-IemTuningApply {
     $profile = Read-IemProfile -Path $ProfilePath
     Assert-IemOnly -Profile $profile -Tier $Tier -Only $Only
     $j = Read-IemJournal -Path $profile.journal
-    $boot = Get-IemBootTime
+    $boot = Get-IemBootIdentity
     $rows = @(foreach ($item in (Get-IemGlobalItems -Profile $profile -Tier $Tier -Only $Only -Check -AllocatedIrqs $AllocatedIrqs)) {
         Invoke-IemItem -Item $item -Journal $j -Section 'global' -Path $profile.journal -Boot $boot
     })
@@ -809,7 +827,7 @@ function Undo-IemTuning {
     $j = Read-IemJournal -Path $profile.journal
     $held = @(foreach ($k in @($j.order.global)) { $e = $j.global[$k]; if ($null -ne $e -and [int]$e.tier -eq $Tier) { [string]$e.group } })
     Assert-IemOnly -Profile $profile -Tier $Tier -Only $Only -Also $held
-    $boot = Get-IemBootTime
+    $boot = Get-IemBootIdentity
     $keys = @($j.order.global); [array]::Reverse($keys)
     $rows = @()
     foreach ($k in $keys) {
@@ -837,7 +855,7 @@ function Enter-IemTuningMode {
     $j = Read-IemJournal -Path $profile.journal
     $j.entered = $true
     Write-IemJournal -Path $profile.journal -Journal $j   # before any write: an exit after a crash finds it
-    $boot = Get-IemBootTime
+    $boot = Get-IemBootIdentity
     $planWritten = $false
     $rows = @(foreach ($item in $items) {
         $row = Invoke-IemItem -Item $item -Journal $j -Section 'mode' -Path $profile.journal -Boot $boot
@@ -884,7 +902,7 @@ function Get-IemTuningState {
     param([Parameter(Mandatory)][string]$ProfilePath)
     $profile = Read-IemProfile -Path $ProfilePath
     $j = Read-IemJournal -Path $profile.journal
-    $boot = Get-IemBootTime
+    $boot = Get-IemBootIdentity
     $rows = @()
     foreach ($tier in 2, 3) {
         foreach ($item in (Get-IemGlobalItems -Profile $profile -Tier $tier)) {
@@ -893,8 +911,8 @@ function Get-IemTuningState {
             $rows += [pscustomobject]@{
                 key = $item.key; tier = $tier; group = $item.group; desired = $item.desired; actual = $actual
                 ok = (Test-IemSame $actual $item.desired); journaled = [bool]$e; before = $(if ($e) { $e.before } else { $null })
-                pending = [bool]($e -and $item.reboot -and (Test-IemSameBoot -A ([string]$e.boot) -B $boot))
-                revert_pending = [bool]($j.reverted.ContainsKey($item.key) -and (Test-IemSameBoot -A ([string]$j.reverted[$item.key]) -B $boot))
+                pending = [bool]($e -and $item.reboot -and (Test-IemSameBoot -A $e.boot -B $boot))
+                revert_pending = [bool]($j.reverted.ContainsKey($item.key) -and (Test-IemSameBoot -A $j.reverted[$item.key] -B $boot))
             }
         }
     }
@@ -905,7 +923,8 @@ function Get-IemTuningState {
         if ($held -and [int]$j.applied["tier$tier"] -ne [int]$profile.version) { $tier }
     })
     [pscustomobject]@{
-        version = [int]$profile.version; applied_version = [pscustomobject]@{ tier2 = $j.applied.tier2; tier3 = $j.applied.tier3 }; boot = $boot
+        version = [int]$profile.version; applied_version = [pscustomobject]@{ tier2 = $j.applied.tier2; tier3 = $j.applied.tier3 }
+        boot = $boot.time; boot_id = $boot.id
         drift = [bool]($driftTiers.Count -gt 0); drift_tiers = $driftTiers
         entered = $j.entered; mode_items = @($j.order.mode); items = $rows
     }
