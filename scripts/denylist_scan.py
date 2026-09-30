@@ -26,6 +26,7 @@ import re
 import shlex
 import subprocess
 import sys
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -34,6 +35,8 @@ EXIT_HIT = 1
 EXIT_USAGE = 2
 
 REDACTED = "[redacted]"
+# git's C-quoting of a path in a diff header (core.quotePath)
+C_ESCAPES = {"a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13, '"': 34, "\\": 92}
 
 
 @dataclass(frozen=True)
@@ -95,6 +98,11 @@ def load_allow(path: Path | None) -> set[str]:
     return keys
 
 
+def nfc(text: str) -> str:
+    """One form for letters with diacritics, so a decomposed `á` cannot hide a term."""
+    return unicodedata.normalize("NFC", text)
+
+
 def printable(text: str) -> str:
     """Control characters escaped, so a path cannot inject lines (a CI `::error` command) into
     the log."""
@@ -104,10 +112,11 @@ def printable(text: str) -> str:
 
 class Scanner:
     def __init__(self, terms: list[str], allow: set[str]) -> None:
-        self.patterns = [compile_term(term) for term in terms]
+        self.patterns = [compile_term(nfc(term)) for term in terms]
         self.allow = allow
 
     def entries_in(self, text: str) -> list[int]:
+        text = nfc(text)
         return [number for number, pattern in enumerate(self.patterns, start=1) if pattern.search(text)]
 
     def shown(self, path: str) -> str:
@@ -138,6 +147,32 @@ def git(repo: Path, *args: str) -> bytes:
 
 def decode(data: bytes) -> str:
     return data.decode("utf-8", errors="replace")
+
+
+def unquote_c(quoted: bytes) -> bytes:
+    """A path git wrote C-quoted (`"b/Kl\\303\\241vor"`) back to its exact bytes."""
+    body, out, i = quoted[1:-1], bytearray(), 0
+    while i < len(body):
+        if body[i:i + 1] != b"\\":
+            out += body[i:i + 1]
+            i += 1
+        elif body[i + 1:i + 2] in (b"0", b"1", b"2", b"3", b"4", b"5", b"6", b"7"):
+            out.append(int(body[i + 1:i + 4], 8))
+            i += 4
+        else:
+            out.append(C_ESCAPES[body[i + 1:i + 2].decode("ascii")])
+            i += 2
+    return bytes(out)
+
+
+def diff_path(label: str) -> str:
+    """The path of a `+++ ` header label: git adds a tab when the label has a space, and
+    C-quotes (core.quotePath) a label with a control or non-ASCII byte. Decode both back to
+    the real path, so a term hiding behind an octal escape or a trailing tab is still redacted."""
+    label = label.removesuffix("\t")
+    if label.startswith('"'):  # a C-quoted label is pure ASCII; unquote to the real bytes
+        return decode(unquote_c(label.encode("ascii")).removeprefix(b"b/"))
+    return label.removeprefix("b/")
 
 
 def scan_tree(scanner: Scanner, repo: Path, rev: str) -> list[Hit]:
@@ -188,8 +223,7 @@ def scan_commits(
             elif in_hunk and line.startswith("+"):
                 hits += scanner.scan_line(path, line[1:], f"{short} {scanner.shown(path)}")
             elif not in_hunk and line.startswith("+++ "):
-                target = line[4:]
-                path = target[2:] if target.startswith("b/") else target
+                path = diff_path(line[4:])
                 hits += scanner.scan_path(path, f"{short} ")
     return hits
 
