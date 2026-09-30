@@ -158,6 +158,21 @@ function Read-IemProfile {
     return $p
 }
 
+function Assert-IemLayout {
+    # The layout's roles are disjoint (one processor, one role), as the window
+    # requires. Checked before a write (apply, enter), never on the exit path.
+    param([Parameter(Mandatory)]$Profile)
+    $seen = @{}
+    foreach ($role in 'housekeeping', 'card', 'nic', 'audio') {
+        if (-not $Profile.layout.PSObject.Properties[$role]) { continue }
+        foreach ($lp in @(@($Profile.layout.$role) | Where-Object { $null -ne $_ })) {
+            $k = [string][int]$lp
+            if ($seen.ContainsKey($k)) { throw "layout: processor $k is in both $($seen[$k]) and $role (roles overlap)" }
+            $seen[$k] = $role
+        }
+    }
+}
+
 function Get-IemRegPath {
     # Tests map HKLM:\... and HKCU:\... under a test key (profile registry_root).
     param([Parameter(Mandatory)]$Profile, [Parameter(Mandatory)][string]$Path)
@@ -897,6 +912,7 @@ function Get-IemModeItems {
 function Invoke-IemTuningApply {
     param([Parameter(Mandatory)][string]$ProfilePath, [Parameter(Mandatory)][ValidateSet(2, 3)][int]$Tier, [string[]]$Only = @())
     $profile = Read-IemProfile -Path $ProfilePath
+    Assert-IemLayout -Profile $profile
     Assert-IemOnly -Profile $profile -Tier $Tier -Only $Only
     $j = Read-IemJournal -Path $profile.journal
     $boot = Get-IemBootIdentity
@@ -941,6 +957,7 @@ function Enter-IemTuningMode {
     param([Parameter(Mandatory)][string]$ProfilePath, [string[]]$Only = @('plan', 'governor', 'placement'),
           [ValidateSet('default', 'c1', 'disable')][string]$Idle = 'default')
     $profile = Read-IemProfile -Path $ProfilePath
+    Assert-IemLayout -Profile $profile
     # Built, and so checked (M2), before anything is written.
     $items = Get-IemModeItems -Profile $profile -Only $Only -Idle $Idle
     $j = Read-IemJournal -Path $profile.journal
