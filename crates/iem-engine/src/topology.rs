@@ -9,6 +9,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
+use iem_audio_io::channels::MapError;
 use iem_engine_proto::{
     GroupId, GroupInfo, InputId, InputInfo, MixId, MixInfo, Source, TopologyInfo, valid_id,
 };
@@ -401,6 +402,13 @@ impl Topology {
     }
 }
 
+/// Why the card refused the stream, when the channel it lacks is a D5(b)
+/// loopback return (S6 test 5), in words that name that input; `None` for
+/// any other channel refusal, whose own text stands.
+pub fn hil_return_refusal(_e: &MapError) -> Option<String> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -562,6 +570,34 @@ mod tests {
         );
         let nine: Vec<u16> = (94..103).collect();
         assert_eq!(refused(&nine), "9 card outputs: at most 8");
+    }
+
+    /// #32 D7: under `--test-signal` the engine also opens the card input of
+    /// each `hil_tx` output as its loopback return. A card with fewer inputs
+    /// refuses the stream (exit 3), and the reason must name that input.
+    #[test]
+    fn a_card_without_a_loopback_return_input_is_named() {
+        use iem_audio_io::channels::ChannelMap;
+        let short = ChannelMap::new(&[1], &[1], 93, 96)
+            .and_then(|m| m.with_hil_return(&[94, 95], 93))
+            .unwrap_err();
+        assert_eq!(
+            hil_return_refusal(&short).as_deref(),
+            Some(
+                "the HIL loopback return needs card input 94, which the card lacks \
+                 (93 inputs): under --test-signal the engine opens the card input of \
+                 each [guard] hil_tx output as its return"
+            )
+        );
+        // Any other channel refusal keeps its own text.
+        let rx = ChannelMap::new(&[133], &[71], 132, 96).unwrap_err();
+        assert_eq!(hil_return_refusal(&rx), None);
+        let tx = ChannelMap::new(&[101], &[97], 132, 96).unwrap_err();
+        assert_eq!(hil_return_refusal(&tx), None);
+        let zero = ChannelMap::new(&[101], &[71], 132, 96)
+            .and_then(|m| m.with_hil_return(&[0], 132))
+            .unwrap_err();
+        assert_eq!(hil_return_refusal(&zero), None);
     }
 
     #[test]
