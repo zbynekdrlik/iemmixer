@@ -743,8 +743,16 @@ function Enter-IemTuningMode {
     $j.entered = $true
     Write-IemJournal -Path $profile.journal -Journal $j   # before any write: an exit after a crash finds it
     $boot = Get-IemBootTime
+    $planWritten = $false
     $rows = @(foreach ($item in (Get-IemModeItems -Profile $profile -Only $Only -Idle $Idle)) {
-        Invoke-IemItem -Item $item -Journal $j -Section 'mode' -Path $profile.journal -Boot $boot
+        $row = Invoke-IemItem -Item $item -Journal $j -Section 'mode' -Path $profile.journal -Boot $boot
+        if ($item.kind -eq 'plan-value' -and $row.action -eq 'written') { $planWritten = $true }
+        if ($item.kind -eq 'plan-active' -and $row.action -eq 'kept' -and $planWritten) {
+            # Values written into the active plan take effect only through
+            # PowerSetActiveScheme (PowerWriteACValueIndex docs), so re-activate it (A4).
+            try { [IemPower]::Activate([string]$item.desired); $row.action = 'reactivated' } catch { $row.action = 'failed'; $row.error = "$_" }
+        }
+        $row
     })
     return ,$rows
 }
