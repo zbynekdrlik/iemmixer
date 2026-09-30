@@ -1041,37 +1041,135 @@ mod tests {
         assert_eq!((r.mode, r.watched), (Mode::Reopen, Watched::All));
     }
 
+    /// Every bad case is otherwise valid (asio-spike.md: reject cases must not
+    /// be shadowed): its line with a good fill in the hole parses, the bad
+    /// fill is refused, and the refusal names the flag under test.
     #[test]
     fn bad_input_is_refused() {
-        for bad in [
-            "",
-            "record --driver D1 --report r --stop-file s",
-            "probe --driver",
-            "probe --driver D1 --report r --stop-file s --colour red",
-            "probe --report r --stop-file s",
-            "probe --driver D1 --stop-file s",
-            "probe --driver D1 --report r",
-            "duplex --driver D1 --report r --stop-file s",
-            "duplex --driver D1 --report r --stop-file s --frames 64",
-            "reopen --driver D1 --report r --stop-file s --frames 64",
-            "duplex --driver D1 --report r --stop-file s --frames 64 --activity-channels 0",
-            "duplex --driver D1 --report r --stop-file s --frames 64 --activity-channels 5-3",
-            "duplex --driver D1 --report r --stop-file s --frames 16",
-            "duplex --driver D1 --report r --stop-file s --frames 32x",
-            "duplex --driver D1 --report r --stop-file s --frames 32 --seconds 0",
-            "duplex --driver D1 --report r --stop-file s --frames 32 --activity-channels all --seconds 36001",
-            "duplex --driver D1 --report r --stop-file s --frames 32 --burn-us 301",
-            "duplex --driver D1 --report r --stop-file s --frames 32 --stress 9",
-            "reopen --driver D1 --report r --stop-file s --frames 32 --cycles 0",
-            "reopen --driver D1 --report r --stop-file s --frames 32 --cycles 21",
-            "hwlat --report r --stop-file s",
-            "hwlat --report r --stop-file s --cpu 64",
-            "hwlat --report r --stop-file s --cpu 3 --threshold-us 0",
-            "hwlat --report r --stop-file s --cpu 3 --threshold-us 1001",
-            "duplex --driver D1 --report r --stop-file s --frames 32 --activity-channels all --audio-cpus 1,1",
-            "duplex --driver D1 --report r --stop-file s --frames 32 --activity-channels all --stress-cpus 70",
-        ] {
-            assert!(parse(&argv(bad)).is_err(), "{bad:?}");
+        const DUPLEX: &str =
+            "duplex --driver D1 --report r --stop-file s --frames 32 --activity-channels all {}";
+        const REOPEN: &str =
+            "reopen --driver D1 --report r --stop-file s --frames 32 --activity-channels all {}";
+        const HWLAT: &str = "hwlat --report r --stop-file s --cpu 3 {}";
+        const NO_FRAMES: &str =
+            "duplex --driver D1 --report r --stop-file s --activity-channels all {}";
+        const NO_CHANNELS: &str = "duplex --driver D1 --report r --stop-file s --frames 64 {}";
+        // (the line with a hole `{}`, the bad fill, a good fill, what the refusal names)
+        let cases = [
+            (
+                "{} --driver D1 --report r --stop-file s",
+                "record",
+                "probe",
+                "mode",
+            ),
+            (
+                "{}",
+                "",
+                "probe --driver D1 --report r --stop-file s",
+                "mode",
+            ),
+            (
+                "probe --report r --stop-file s --driver {}",
+                "",
+                "D1",
+                "--driver",
+            ),
+            (
+                "probe --driver D1 --report r --stop-file s {}",
+                "--colour red",
+                "",
+                "--colour",
+            ),
+            (
+                "probe {} --report r --stop-file s",
+                "",
+                "--driver D1",
+                "--driver",
+            ),
+            (
+                "probe --driver D1 {} --stop-file s",
+                "",
+                "--report r",
+                "--report",
+            ),
+            (
+                "probe --driver D1 --report r {}",
+                "",
+                "--stop-file s",
+                "--stop-file",
+            ),
+            (NO_FRAMES, "", "--frames 64", "--frames"),
+            (NO_FRAMES, "--frames 16", "--frames 48", "--frames"),
+            (NO_FRAMES, "--frames 32x", "--frames 32", "--frames"),
+            (
+                NO_CHANNELS,
+                "",
+                "--activity-channels all",
+                "--activity-channels",
+            ),
+            (
+                "reopen --driver D1 --report r --stop-file s --frames 64 {}",
+                "",
+                "--activity-channels 101-124",
+                "--activity-channels",
+            ),
+            (
+                NO_CHANNELS,
+                "--activity-channels 0",
+                "--activity-channels 101",
+                "--activity-channels",
+            ),
+            (
+                NO_CHANNELS,
+                "--activity-channels 5-3",
+                "--activity-channels 3-5",
+                "--activity-channels",
+            ),
+            (DUPLEX, "--seconds 0", "--seconds 1", "--seconds"),
+            (DUPLEX, "--seconds 36001", "--seconds 36000", "--seconds"),
+            (DUPLEX, "--burn-us 301", "--burn-us 300", "--burn-us"),
+            (DUPLEX, "--stress 9", "--stress 8", "--stress"),
+            (REOPEN, "--cycles 0", "--cycles 1", "--cycles"),
+            (REOPEN, "--cycles 21", "--cycles 20", "--cycles"),
+            (DUPLEX, "--audio-cpus 1,1", "--audio-cpus 1", "--audio-cpus"),
+            (
+                DUPLEX,
+                "--stress-cpus 70",
+                "--stress-cpus 6-13",
+                "--stress-cpus",
+            ),
+            ("hwlat --report r --stop-file s {}", "", "--cpu 3", "--cpu"),
+            (
+                "hwlat --report r --stop-file s --cpu {}",
+                "64",
+                "63",
+                "--cpu",
+            ),
+            (
+                HWLAT,
+                "--threshold-us 0",
+                "--threshold-us 1",
+                "--threshold-us",
+            ),
+            (
+                HWLAT,
+                "--threshold-us 1001",
+                "--threshold-us 1000",
+                "--threshold-us",
+            ),
+        ];
+        for (line, bad, good, names) in cases {
+            let valid = line.replace("{}", good);
+            let parsed = parse(&argv(&valid));
+            assert!(parsed.is_ok(), "{valid:?} must parse: {parsed:?}");
+            let refused = line.replace("{}", bad);
+            match parse(&argv(&refused)) {
+                Err(e) => assert!(
+                    e.contains(names),
+                    "{refused:?} was refused for {e:?}, not for {names}"
+                ),
+                Ok(a) => panic!("{refused:?} parsed: {a:?}"),
+            }
         }
         assert!(parse(&argv("duplex --driver D1 --report r --stop-file s --frames 64 --seconds 3600 --burn-us 300 --stress 8 --activity-channels all")).is_ok());
         assert!(parse(&argv("duplex --driver D1 --report r --stop-file s --frames 32 --activity-channels all --seconds 36000")).is_ok());
