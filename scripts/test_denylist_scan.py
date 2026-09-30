@@ -600,6 +600,19 @@ class DenylistScanTests(unittest.TestCase):
         allow.write_text(out.getvalue().strip() + "  reviewed ordinary prose\n", encoding="utf-8")
         self.assertEqual(self.scan("--allow", str(allow), "--tree", "HEAD", "--commits", "HEAD")[0], 0)
 
+    def test_a_submodule_entry_is_scanned_by_path_not_read_as_a_blob(self) -> None:
+        # commit mode reads changed blobs whole; a gitlink's object is a commit, which cat-file
+        # blob would fail on -- its path is still scanned, its object is not read
+        self.commit({"base.txt": "base\n"})
+        head = subprocess.run(["git", "-C", str(self.repo), "rev-parse", "HEAD"], check=True,
+                              capture_output=True, text=True).stdout.strip()
+        git(self.repo, "update-index", "--add", "--cacheinfo", f"160000,{head},vendor/zyxname-lib")
+        git(self.repo, "commit", "-q", "-m", "add a submodule entry")
+        code, out = self.scan("--tree", "HEAD", "--commits", "HEAD~1..HEAD")
+        self.assertEqual(code, 1)
+        self.assertIn("vendor/[redacted]: path: denylist entry 1", out)
+        self.assertNotIn("zyxname", out.lower())
+
     # --- #32 E4: the identity check reads author and committer as separate fields ---
 
     def commit_as(self, author_email: str, committer_email: str) -> None:
