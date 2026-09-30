@@ -269,6 +269,35 @@ class DenylistScanTests(unittest.TestCase):
         self.assertEqual(ds.printable("x y"), "x\\u2028y")
         self.assertEqual(ds.printable("plain-ok"), "plain-ok")
 
+    def test_commit_path_under_local_quotepath_false_does_not_crash(self) -> None:
+        # A developer's local core.quotePath=false leaves a non-ASCII byte raw inside a quoted
+        # label (git still quotes for the control char); the scan must force quotePath=true so
+        # the label is pure-ASCII octal and decode it, never crash on encode("ascii").
+        git(self.repo, "config", "core.quotePath", "false")
+        self.commit({"base.txt": "base\n"})
+        name = "n\x07ote zyxname.txt"  # a control char forces quoting; a non-ASCII byte too
+        (self.repo / name).write_text("content that also holds zyxname\n", encoding="utf-8")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "control + non-ascii path under quotePath=false")
+        code, out = self.scan("--commits", "HEAD~1..HEAD")
+        self.assertEqual(code, 1)
+        self.assertNotIn("zyxname", out.lower())
+        self.assertIn("[redacted]", out)
+
+    def test_commit_mode_redacts_tricky_path_shapes(self) -> None:
+        # git C-quotes a +++ label with a control char, backslash or quote, and TAB-suffixes a
+        # label with a space: every shape must decode and redact, with a content hit present.
+        names = ["y\x07zyxname.txt", "y\\zyxname.txt", 'y"zyxname.txt', "my zyxname.txt"]
+        self.commit({"base.txt": "base\n"})
+        for name in names:
+            (self.repo / name).write_text("body has zyxname in it\n", encoding="utf-8")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "tricky path shapes, each with a content hit")
+        code, out = self.scan("--commits", "HEAD~1..HEAD")
+        self.assertEqual(code, 1)
+        self.assertNotIn("zyxname", out.lower())
+        self.assertNotIn("\\302", out)
+
 
 if __name__ == "__main__":
     unittest.main()
