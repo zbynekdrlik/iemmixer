@@ -288,6 +288,17 @@ class RebootTests(unittest.TestCase):
             tw.cmd_reboot(ENV, self.args)
         self.assertEqual(tw.sw.load_state()["reboot"]["approval"], self.args.approval)   # post-boot can run
 
+    def test_an_error_reply_to_the_restart_request_is_not_a_lost_answer(self) -> None:
+        # Review m9: the PC answered with an error, so nothing restarted.
+        def refused(env, body, timeout=300, event="finish"):
+            self.calls.append(body)
+            raise tw.StepError("PC step failed: Access is denied")
+
+        tw.sw.ps = refused
+        with self.assertRaisesRegex(tw.StepError, "Access is denied") as cm:
+            tw.cmd_reboot(ENV, self.args)
+        self.assertNotIn("may be restarting", str(cm.exception))
+
 
 class PostBootRunTests(unittest.TestCase):
     """post-boot after the approved reboot: the window closes only with REAPER

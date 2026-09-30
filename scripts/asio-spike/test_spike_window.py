@@ -685,10 +685,42 @@ class GuardTests(unittest.TestCase):
         with self.assertRaisesRegex(sw.StepError, "never kill"):
             sw.guarded(self.py("import time; time.sleep(3)"), "", 0.3, "finish")
 
+    def test_a_lost_session_or_an_overdue_call_is_no_reply(self) -> None:
+        # Review m9: sent, fate unknown — distinct from a reply that reports an error.
+        with self.assertRaises(sw.NoReply):
+            sw.guarded(self.py("import sys; sys.exit(255)"), "", 10, "finish")
+        with self.assertRaises(sw.NoReply):
+            sw.guarded(self.py("import time; time.sleep(3)"), "", 0.3, "finish")
+
     def test_the_flag_file_is_the_event_signal(self) -> None:
         self.assertFalse(sw.event_now())
         self.flag.touch()
         self.assertTrue(sw.event_now())
+
+
+class PsReplyTests(unittest.TestCase):
+    """sw.ps over a faked sw.guarded (the ssh process): a reply that reports an
+    error is a plain StepError, no reply is NoReply (review m9)."""
+
+    def setUp(self) -> None:
+        self.saved = sw.guarded
+        self.out = ""
+        sw.guarded = lambda cmd, stdin, timeout, event: self.out
+
+    def tearDown(self) -> None:
+        sw.guarded = self.saved
+
+    def test_an_error_reply_is_no_lost_reply(self) -> None:
+        self.out = json.dumps({"ok": False, "error": "Access is denied"}) + "\n"
+        with self.assertRaisesRegex(sw.StepError, "Access is denied") as cm:
+            sw.ps({"PC_ROOT": "R", "PC_SSH": "u@h"}, "x")
+        self.assertNotIsInstance(cm.exception, sw.NoReply)
+
+    def test_no_or_a_cut_reply_is_no_reply(self) -> None:
+        for out in ("", "\n", '{"ok": tr\n'):
+            self.out = out
+            with self.assertRaises(sw.NoReply, msg=repr(out)):
+                sw.ps({"PC_ROOT": "R", "PC_SSH": "u@h"}, "x")
 
 
 if __name__ == "__main__":
