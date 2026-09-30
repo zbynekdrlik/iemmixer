@@ -9,6 +9,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -341,6 +342,8 @@ class PostBootRunTests(unittest.TestCase):
         self.started = False       # REAPER started by the bring-back
         self.bring_back_fails = False
         self.event_at_poll = 0     # "ide event" comes during this autostart poll (0: never)
+        self.bring_backs = 0
+        self.bring_back_s = 0.0
         self.calls: list[str] = []
 
         def fake_ps(env, body, timeout=300, event="finish"):
@@ -352,10 +355,16 @@ class PostBootRunTests(unittest.TestCase):
                     (self.dir / "EVENT-NOW").touch()
                 return 1 if (self.autostart or self.started) else 0
             if body.startswith("Invoke-SpikeBringBack"):
+                self.bring_backs += 1
+                threading.Event().wait(self.bring_back_s)   # a bring-back takes a while
                 if self.bring_back_fails:
                     raise tw.StepError("PC step failed: REAPER did not load the project within 120 s")
                 self.started = True
                 return {"asio": "reaper"}
+            if "Get-Process -Name asio_spike" in body:          # a preempt's spike check
+                return 0
+            if "Stop-SpikeGracefully" in body:
+                return True
             if "Get-IemReaperFingerprint" in body:
                 return {"plan.active": "reaper"}
             if "Get-IemTuningState" in body:
@@ -399,6 +408,32 @@ class PostBootRunTests(unittest.TestCase):
         self.assertEqual(sum("Get-Process reaper" in c for c in self.calls), 2)
         self.assertTrue(any(c.startswith("Invoke-SpikeBringBack") for c in self.calls))
         self.assertFalse(any("Get-IemReaperFingerprint" in c or "Get-IemCpuSample" in c for c in self.calls))
+        st = tw.sw.load_state()
+        self.assertEqual((st["card"], st["closed"]), ("reaper", True))
+
+    def test_post_boot_and_a_preempt_bring_reaper_back_once(self) -> None:
+        # Review round 3, MAJOR 1: "ide event" during post-boot starts `iempc event` →
+        # spike_window preempt in another process; two bring-backs at once would trigger
+        # the meter bridge twice (a REAPER dialog during the event, #9). One lock, one
+        # bring-back: whoever comes second re-reads the state and finds REAPER back.
+        self.event_at_poll = 1
+        self.bring_back_s = 0.3
+        env = dict(self.env, PC_ROOT="R")
+        errors: list[BaseException] = []
+
+        def run(fn) -> None:
+            try:
+                fn()
+            except (tw.StepError, tw.sw.EventNow) as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=run, args=(lambda: tw.cmd_post_boot(env, argparse.Namespace()),)),
+                   threading.Thread(target=run, args=(lambda: tw.sw.cmd_preempt(env),))]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(self.bring_backs, 1)
         st = tw.sw.load_state()
         self.assertEqual((st["card"], st["closed"]), ("reaper", True))
 

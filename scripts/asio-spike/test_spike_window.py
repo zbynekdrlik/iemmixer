@@ -246,6 +246,93 @@ class UnwindTests(unittest.TestCase):
         self.assertEqual((state["card"], state["closed"]), ("reaper", True))
 
 
+class WindowLockTests(unittest.TestCase):
+    """Decision A of the #32 review: one dev-box lock serialises every
+    read-modify-write of the window state, every bring-back and every unwind
+    across processes (threads stand in for them: flock is per open file)."""
+
+    def setUp(self) -> None:
+        self.dir = Path(tempfile.mkdtemp())
+        self.saved = (sw.STATE, sw.EVENT_NOW, sw.ps, sw.alarm, getattr(sw, "LOCK_WAIT_S", None))
+        sw.STATE, sw.EVENT_NOW = self.dir / "spike-window.json", self.dir / "EVENT-NOW"
+        self.alarms: list[str] = []
+        sw.alarm = self.alarms.append
+        self.bring_backs = 0
+        self.env = {"PC_ROOT": "R", "PC_BUFFER_KEY": "K", "PC_BUFFER_NAME": "N", "PC_REAPER_HTTP": "H",
+                    "PC_REAPER_START_TASK_PATH": "P", "PC_REAPER_START_TASK": "T", "PC_NTRACK": "9",
+                    "PC_METER_BRIDGE": "B", "PC_METER_ACTION": "A", "PC_METER_HEARTBEAT": "HB",
+                    "PC_ASIO_MODULE": "M", "PC_APP_HTTP": "AH"}
+
+        def fake_ps(env, body, timeout=300, event="finish"):
+            if "Get-Process -Name asio_spike" in body:
+                return 0
+            if "Stop-SpikeGracefully" in body:
+                return True
+            if body.startswith("Invoke-SpikeBringBack"):
+                self.bring_backs += 1           # each one triggers REAPER's meter bridge
+                threading.Event().wait(0.3)     # a bring-back takes a while: the other one arrives meanwhile
+                return {"asio": "reaper"}
+            return {"ok": True}
+
+        sw.ps = fake_ps
+
+    def tearDown(self) -> None:
+        sw.STATE, sw.EVENT_NOW, sw.ps, sw.alarm, sw.LOCK_WAIT_S = self.saved
+
+    def test_concurrent_updates_never_lose_or_break_the_state(self) -> None:
+        sw.save_state({"id": "w", "n": 0, "closed": False})
+        errors: list[Exception] = []
+
+        def bump() -> None:
+            for _ in range(40):
+                try:
+                    sw.update_state(change=lambda st: st.update(n=st["n"] + 1))
+                except Exception as e:  # noqa: BLE001 — any failure is the finding
+                    errors.append(e)
+
+        threads = [threading.Thread(target=bump) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(errors, [])
+        self.assertEqual(sw.load_state()["n"], 160)
+        self.assertEqual([p.name for p in self.dir.glob("*.tmp")], [])
+
+    def test_two_preempts_bring_reaper_back_once(self) -> None:
+        # Two bring-backs at once would trigger the meter bridge twice: a REAPER dialog (#9).
+        sw.save_state({"id": "w", "card": "free", "pref_original": 64, "pref_current": None, "pref_restored": False,
+                       "runs": [], "closed": False})
+        threads = [threading.Thread(target=sw.cmd_preempt, args=(self.env,)) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(self.bring_backs, 1)
+        self.assertEqual((sw.load_state()["card"], sw.load_state()["closed"]), ("reaper", True))
+
+    def test_a_lock_that_stays_taken_alarms_and_fails(self) -> None:
+        sw.save_state({"id": "w", "closed": False})
+        sw.LOCK_WAIT_S = 0.3
+        taken, release = threading.Event(), threading.Event()
+
+        def hold() -> None:
+            with sw.window_lock():
+                taken.set()
+                release.wait(5)
+
+        holder = threading.Thread(target=hold)
+        holder.start()
+        taken.wait(5)
+        try:
+            with self.assertRaisesRegex(sw.StepError, "lock"):
+                sw.update_state({"x": 1})
+        finally:
+            release.set()
+            holder.join()
+        self.assertTrue(any("lock" in a for a in self.alarms))
+
+
 class UnwindTuningTests(unittest.TestCase):
     """The S1c unwind branches (trace-stop, tuning-exit, fingerprint) with the
     PC calls recorded instead of sent (fake ps). Pins the design note §5.2
