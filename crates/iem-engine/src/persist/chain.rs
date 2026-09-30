@@ -427,6 +427,183 @@ mod tests {
         );
     }
 
+    /// `sample(rev)` told apart from another state at the same revision.
+    fn marked(rev: u64, mark: u64) -> Persisted {
+        let mut p = sample(rev);
+        p.saved_unix_ms = mark;
+        p
+    }
+
+    /// current.json at 8 (damaged), generation 1 at 7.
+    fn damaged_current() -> (tempfile::TempDir, Store) {
+        let (d, s) = store();
+        s.save(&sample(7)).unwrap();
+        s.save(&sample(8)).unwrap();
+        corrupt(&s.dir().join(CURRENT));
+        (d, s)
+    }
+
+    #[test]
+    fn a_damaged_current_json_weighs_save_tmp_against_the_newest_generation() {
+        // #32 review (m1): with current.json damaged the chain never looked
+        // at save.tmp. Now the higher revision of save.tmp and the newest
+        // valid generation wins, a tie going to save.tmp.
+        let g = test_site();
+        let (_d, s) = damaged_current();
+        fs::write(s.dir().join(TMP), encode(&sample(9)).unwrap()).unwrap();
+        let loaded = s.load(&g);
+        assert_eq!(
+            (loaded.source, loaded.persisted.rev),
+            (Source::Interrupted, 9)
+        );
+        assert_eq!(s.live_state().unwrap(), Some(Source::Interrupted));
+        fs::write(s.dir().join(TMP), encode(&sample(7)).unwrap()).unwrap();
+        assert_eq!(s.load(&g).source, Source::Interrupted);
+        fs::write(s.dir().join(TMP), encode(&sample(6)).unwrap()).unwrap();
+        let loaded = s.load(&g);
+        assert_eq!(
+            (loaded.source, loaded.persisted.rev),
+            (Source::Generation(1), 7)
+        );
+        assert!(
+            loaded.rejected.iter().any(|(path, why)| path.ends_with(TMP)
+                && why == "revision 6 is not newer than generation 1's 7"),
+            "{:?}",
+            loaded.rejected
+        );
+        assert_eq!(s.live_state().unwrap(), Some(Source::Generation(1)));
+    }
+
+    #[test]
+    fn recovery_moves_a_damaged_current_json_aside_for_good() {
+        let g = test_site();
+        let (_d, s) = damaged_current();
+        let damaged = fs::read(s.dir().join(CURRENT)).unwrap();
+        let loaded = s.load(&g);
+        assert_eq!(loaded.source, Source::Generation(1));
+        let aside = s.dir().join("current.json.damaged-1");
+        assert_eq!(
+            s.recover(&loaded),
+            Recovery {
+                quarantined: Some(aside.clone()),
+                ..Recovery::default()
+            }
+        );
+        assert!(!s.dir().join(CURRENT).exists());
+        assert_eq!(fs::read(&aside).unwrap(), damaged);
+        // It is never read again, even if it held a valid state.
+        fs::write(&aside, encode(&sample(99)).unwrap()).unwrap();
+        assert_eq!(s.load(&g).persisted.rev, 7);
+        // A later damaged current.json goes to the next free name.
+        s.save(&sample(8)).unwrap();
+        corrupt(&s.dir().join(CURRENT));
+        let done = s.recover(&s.load(&g));
+        assert_eq!(
+            done.quarantined,
+            Some(s.dir().join("current.json.damaged-2"))
+        );
+    }
+
+    #[test]
+    fn recovery_moves_a_damaged_current_json_aside_then_finishes_the_save() {
+        let g = test_site();
+        let (_d, s) = damaged_current();
+        fs::write(s.dir().join(TMP), encode(&sample(9)).unwrap()).unwrap();
+        let loaded = s.load(&g);
+        assert_eq!(loaded.source, Source::Interrupted);
+        let done = s.recover(&loaded);
+        assert_eq!(
+            done,
+            Recovery {
+                quarantined: Some(s.dir().join("current.json.damaged-1")),
+                finished: true,
+                failed: Vec::new(),
+            }
+        );
+        assert_eq!(rev_of(&s.dir().join(CURRENT)), 9);
+        assert!(!s.dir().join(TMP).exists());
+        // The damaged file became no generation.
+        let gens = s.generations().unwrap();
+        assert_eq!(gens.len(), 1);
+        assert_eq!(rev_of(&gens[0].1), 7);
+    }
+
+    #[test]
+    fn a_quarantine_that_fails_is_reported_and_the_save_left_for_the_next_boot() {
+        // The engine must still start; the damaged file must not become a
+        // generation, so the interrupted save waits for the next boot.
+        let (_d, s) = damaged_current();
+        fs::write(s.dir().join(TMP), encode(&sample(9)).unwrap()).unwrap();
+        let loaded = s.load(&test_site());
+        fs::remove_file(s.dir().join(CURRENT)).unwrap();
+        let done = s.recover(&loaded);
+        assert_eq!((done.quarantined.clone(), done.finished), (None, false));
+        assert_eq!(done.failed.len(), 1, "{:?}", done.failed);
+        assert!(
+            done.failed[0].starts_with("the damaged current.json could not be moved aside"),
+            "{:?}",
+            done.failed
+        );
+        assert!(s.dir().join(TMP).exists());
+    }
+
+    #[test]
+    fn a_revision_tie_prefers_save_tmp() {
+        // #32 review (m2): save.tmp exists only for a save that was cut off,
+        // newer by construction; at the same revision it is taken.
+        let (_d, s) = store();
+        s.save(&marked(10, 1)).unwrap();
+        fs::write(s.dir().join(TMP), encode(&marked(10, 2)).unwrap()).unwrap();
+        let loaded = s.load(&test_site());
+        assert_eq!(loaded.source, Source::Interrupted);
+        assert_eq!(loaded.persisted.saved_unix_ms, 2);
+        assert_eq!(s.live_state().unwrap(), Some(Source::Interrupted));
+    }
+
+    #[test]
+    fn a_fallback_boot_then_edits_then_a_crash_keeps_the_newest_state() {
+        // The review's scenario: current.json unusable at boot, so the core
+        // restarts at an older generation's revision and edits bring it back
+        // to the lost file's revision; a save cut off then must not lose to
+        // that stale file. The stale file is moved aside at the fallback
+        // boot, and a tie prefers save.tmp anyway.
+        let g = test_site();
+        let (_d, s) = store();
+        s.save(&sample(7)).unwrap();
+        s.save(&marked(10, 1)).unwrap();
+        let stale = fs::read(s.dir().join(CURRENT)).unwrap();
+        corrupt(&s.dir().join(CURRENT));
+        let boot = s.load(&g);
+        assert_eq!(
+            (boot.source, boot.persisted.rev),
+            (Source::Generation(1), 7)
+        );
+        assert!(s.recover(&boot).quarantined.is_some());
+        // The engine edits from 7 back up to 10 and saves.
+        s.save(&marked(10, 2)).unwrap();
+        // The file that failed at boot turns readable again: it stays aside.
+        fs::write(s.dir().join("current.json.damaged-1"), &stale).unwrap();
+        // The next save, at the same revision (a save without a change), is
+        // cut off after save.tmp was written.
+        fs::write(s.dir().join(TMP), encode(&marked(10, 3)).unwrap()).unwrap();
+        let loaded = s.load(&g);
+        assert_eq!(loaded.source, Source::Interrupted);
+        assert_eq!(loaded.persisted.saved_unix_ms, 3);
+    }
+
+    #[test]
+    fn live_state_names_only_what_the_load_chain_would_load() {
+        // A damaged current.json alone is nothing the engine can load: the
+        // seed may write its state (the damaged file is renamed, not lost).
+        let (_d, s) = damaged_current();
+        fs::remove_file(s.dir().join("gen-0000000001.json")).unwrap();
+        assert_eq!(s.live_state().unwrap(), None);
+        // A current.json that cannot be read at all fails the seed closed.
+        let (_d, s) = store();
+        fs::create_dir(s.dir().join(CURRENT)).unwrap();
+        assert!(s.live_state().is_err());
+    }
+
     #[test]
     fn a_boot_on_save_tmp_is_named_interrupted() {
         // The first save, cut off before its rename: save.tmp is the only state.
