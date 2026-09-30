@@ -807,6 +807,21 @@ class GuardTests(unittest.TestCase):
         with self.assertRaises(sw.NoReply):
             sw.guarded(self.py("import time; time.sleep(3)"), "", 0.3, "finish")
 
+    def test_a_connection_that_never_opened_is_a_plain_error(self) -> None:
+        # Review round 3, m7: ssh exits 255 before any session existed — nothing was sent.
+        for msg in ("ssh: connect to host pc port 22: Connection refused", "ssh: connect to host pc port 22: Connection timed out",
+                    "ssh: Could not resolve hostname pc: Name or service not known", "u@pc: Permission denied (publickey).",
+                    "Host key verification failed."):
+            with self.assertRaises(sw.StepError, msg=msg) as cm:
+                sw.guarded(self.py(f"import sys; sys.stderr.write({msg!r}); sys.exit(255)"), "", 10, "finish")
+            self.assertNotIsInstance(cm.exception, sw.NoReply, msg)
+
+    def test_a_session_that_ended_after_the_command_was_sent_is_no_reply(self) -> None:
+        for msg in ("Connection to pc closed by remote host.", "client_loop: send disconnect: Broken pipe",
+                    "Read from remote host pc: Connection reset by peer"):
+            with self.assertRaises(sw.NoReply, msg=msg):
+                sw.guarded(self.py(f"import sys; sys.stderr.write({msg!r}); sys.exit(255)"), "", 10, "finish")
+
     def test_the_flag_file_is_the_event_signal(self) -> None:
         self.assertFalse(sw.event_now())
         self.flag.touch()
