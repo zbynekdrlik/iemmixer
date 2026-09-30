@@ -625,7 +625,7 @@ def cmd_reboot(env, args) -> None:
         raise StepError(f"no answer to the restart request ({e}): the PC may be restarting; "
                         "run post-boot, which tells whether it rebooted") from None
     if int(code) != 0:
-        raise StepError(f"shutdown.exe /r exited {code}: nothing restarts; tell the owner")
+        raise StepError(f"the restart request exited {code}: nothing restarts; tell the owner")
     print(json.dumps({"reboot": "requested", "in_s": 0}))
 
 

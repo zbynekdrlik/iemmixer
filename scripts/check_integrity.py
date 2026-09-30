@@ -26,15 +26,64 @@ VERSION_COMMENT = re.compile(r"^\s+#\s*v\d+(?:\.\d+)*\s*$")
 # call terminate and delete), a job whose closing ends its processes, and the
 # Rust/tokio/Python/.NET process handles' kill methods (called, or named in
 # ForEach-Object). A request plus a bounded wait is the only stop. A forced
-# restart ends every process: shutdown's /f (or -f) anywhere on its line, a
-# /t above 0 (Microsoft: "If the timeout period is greater than 0, the /f
-# parameter is implied"), and Restart-/Stop-Computer -Force (#32 B1).
+# restart ends every process too: see forced_restart.
 FORCE_KILL = re.compile(
     r"(?i)\btaskkill\b|\btskill\b|\bpskill\b|terminateprocess|terminatejobobject|kill_on_job_close|stop-process"
-    r"|\bshutdown(?:\.exe)?(?=\s)[^\n]*?(?:\s[/-]f\b|[/-]t[\s:]+0*[1-9])|\b(?:restart|stop)-computer\b[^\n]*?\s-force\b"
     r"|\.kill\s*\(|\bstart_kill\b|\bkill_on_drop\b|\.terminate\s*\("
     r"|-(?:method)?name\s+['\"]?terminate\b|\bwmic\b.*\b(?:call\s+terminate|delete)\b"
     r"|(?:\bforeach-object|%)\s+(?:-membername\s+)?['\"]?kill\b")
+# Forced restarts and shutdowns (#32 B1, review m6/m7). A command's arguments
+# end at the next command separator, so another command's -f, -t or -Force on
+# the same line is not read as the restart's.
+SEPARATOR = re.compile(r"[;|&\n]")
+SHUTDOWN_CMD = re.compile(r"(?i)\bshutdown(?:\.exe)?\b(?!\s*\()")
+# A switch of shutdown.exe (/r, -t, "/f", '/t','0'), with the number after it.
+SWITCH = re.compile(r"(?i)(?<![\w/\-])[/-]([a-z?]{1,2})(?![a-z0-9_])(?:[\s:\"',]+(\d+))?")
+COMPUTER_CMD = re.compile(r"(?i)\b(?:restart|stop)-computer\b")
+# -Force and the abbreviations PowerShell accepts for it (-For is another parameter).
+FORCE_PARAM = re.compile(r"(?i)(?<![\w-])-(?:f|fo|forc|force)(?![\w-])")
+WIN32_SHUTDOWN = re.compile(r"(?i)\bwin32shutdown(tracker)?\b\s*(?:\(([^)]*)\))?")
+FLAGS_ARG = re.compile(r"(?i)\bflags\s*=\s*(0x[0-9a-f]+|\d+)")
+EXIT_WINDOWS = re.compile(r"(?i)\bexitwindowsex\s*\(\s*(0x[0-9a-f]+|\d+)\s*,")
+FORCE_TOKENS = re.compile(r"(?i)\bEWX_FORCE(?:IFHUNG)?\b|\bSHUTDOWN_FORCE_(?:OTHERS|SELF)\b")
+
+
+def forced_restart(line: str) -> bool:
+    """A restart or shutdown that force-ends processes (I8). shutdown.exe
+    passes only with an explicit /t 0 and no /f (Microsoft: "If the timeout
+    period is greater than 0, the /f parameter is implied", and the default
+    is 30), in any form (a command line, a quoted path, an argv array,
+    -ArgumentList); "shutdown" without a switch of its own is prose or a
+    method, /a (abort) is harmless. Restart-/Stop-Computer never with -Force
+    or its abbreviations; WMI Win32Shutdown(Tracker) never with the force bit
+    (4), and a flags value that cannot be read counts as forced; ExitWindowsEx
+    never with EWX_FORCE(IFHUNG) (0x4, 0x10); InitiateShutdown never with
+    SHUTDOWN_FORCE_OTHERS/SELF."""
+    if FORCE_TOKENS.search(line):
+        return True
+    for m in SHUTDOWN_CMD.finditer(line):
+        switches = SWITCH.findall(SEPARATOR.split(line[m.end():], 1)[0])
+        names = {s.lower() for s, _ in switches}
+        if not switches or names <= {"a", "?"}:
+            continue
+        if "f" in names or not any(s.lower() == "t" and v and int(v) == 0 for s, v in switches):
+            return True
+    for m in COMPUTER_CMD.finditer(line):
+        if FORCE_PARAM.search(SEPARATOR.split(line[m.end():], 1)[0]):
+            return True
+    for m in WIN32_SHUTDOWN.finditer(line):
+        values = [v.strip() for v in (m.group(2) or "").split(",") if v.strip()]
+        flags = values[-1 if m.group(1) else 0] if values else None
+        if flags is None and (a := FLAGS_ARG.search(line)):
+            flags = a.group(1)
+        if flags is None or not re.fullmatch(r"(?i)0x[0-9a-f]+|\d+", flags) or int(flags, 0) & 4:
+            return True
+    for m in EXIT_WINDOWS.finditer(line):
+        if int(m.group(1), 0) & 0x14:
+            return True
+    return False
+
+
 # Children leave the guard's job only through iem-win's spawn glue (S6 design note §5.1).
 BREAKAWAY = re.compile(r"CREATE_BREAKAWAY_FROM_JOB")
 BREAKAWAY_HOME = "crates/iem-win/"
@@ -134,7 +183,7 @@ def violations(root: Path) -> list[str]:
             if rel in SELF:
                 continue
             for n, line in lines(path):
-                if FORCE_KILL.search(line):
+                if FORCE_KILL.search(line) or forced_restart(line):
                     found.append(f"{rel}:{n}: force-kill command (program spec I8)")
                 if BREAKAWAY.search(line) and not rel.startswith(BREAKAWAY_HOME):
                     found.append(f"{rel}:{n}: job breakaway outside iem-win (S6 design note §5.1)")
