@@ -129,6 +129,18 @@ class UndoPlanTests(unittest.TestCase):
         state = {"card": "reaper", "pref_current": None, "tuning_mode": True, "fingerprint": "/b.json"}
         self.assertEqual(sw.undo_plan(state, spike_running=False), ["tuning-exit"])
 
+    def test_a_prepared_reboot_is_card_away(self) -> None:
+        # reboot-prepare left the card free as `rebooting` (#32 B3): "ide event" (or
+        # to-event) stops a spike and brings REAPER back. Its clean unwind already
+        # restored the buffer with read-back, and after the reboot REAPER may hold the
+        # driver, so the buffer is not written again (the bring-back reads it).
+        state = self.state(card="rebooting", pref_current=64, pref_restored=True)
+        self.assertEqual(sw.undo_plan(state, spike_running=False), ["stop-spike", "bring-back"])
+        state["fingerprint"] = "/b.json"
+        self.assertEqual(sw.undo_plan(state, spike_running=True), ["stop-spike", "bring-back", "fingerprint"])
+        # A buffer write not verified as restored is still restored, whatever the card.
+        self.assertIn("restore-buffer", sw.undo_plan(self.state(card="rebooting", pref_current=32), False))
+
     def test_flags_recorded_before_the_action(self) -> None:
         # tuning_window records the flag first; a flag alone (the action may have failed half-way) still unwinds.
         self.assertIn("trace-stop", sw.undo_plan({"card": "free", "trace": "d"}, spike_running=False))
@@ -187,6 +199,13 @@ class UnwindTests(unittest.TestCase):
             sw.unwind(self.env, state, running=False)
         self.assertFalse(any(c.startswith("Invoke-SpikeBringBack") for c in self.calls))
         self.assertFalse(state["closed"])
+
+    def test_a_prepared_reboot_window_closes_only_with_reaper_back(self) -> None:
+        state = self.state(card="rebooting", pref_restored=True, reboot={"prepared_at": "t"})
+        done = sw.unwind(self.env, state, running=False)
+        self.assertEqual([next(iter(d)) for d in done], ["stop-spike", "bring-back"])
+        self.assertFalse(any("Set-SpikeBufferPref" in c for c in self.calls))
+        self.assertEqual((state["card"], state["closed"]), ("reaper", True))
 
 
 class UnwindTuningTests(unittest.TestCase):
