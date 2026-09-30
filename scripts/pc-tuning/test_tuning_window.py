@@ -732,6 +732,36 @@ class MeasureTests(WindowHarness):
         self.assertEqual(len(self.pc.bodies("Start-IemTrace")), 1)   # the first start only
         self.assertTrue(self.state()["trace"])                       # left to the preempt's trace-stop
 
+    # Review M3: the analysis downloads and parses give way to "ide event".
+    def analysis_copies(self) -> list[tuple[str, str]]:
+        return [(n, e) for n, e in self.pc.copies if not n.endswith((".report.json", ".stderr.txt"))]
+
+    def test_the_analysis_copies_are_abandonable(self) -> None:
+        self.pc.progress = {"missed": 1, "overruns": 0, "position_gaps": 0, "callback_thread": 4243}
+        tw.cmd_measure(self.env, self.args(trace="diag", circular_mb=1024))
+        self.assertEqual([n for n, _ in self.analysis_copies()], ["dpcisr.txt", "near.txt", "cut-1.dpcisr.txt", "cut-1.near.txt"])
+        self.assertEqual({e for _, e in self.analysis_copies()}, {"abandon"})
+
+    def test_an_event_during_a_copy_stops_the_analysis_there(self) -> None:
+        self.pc.progress = {"missed": 1, "overruns": 0, "position_gaps": 0, "callback_thread": 4243}
+        self.pc.on_copy = lambda name: (self.dir / "EVENT-NOW").touch() if name == "near.txt" else None
+        with self.assertRaises(tw.sw.EventNow):
+            tw.cmd_measure(self.env, self.args(trace="diag", circular_mb=1024))
+        self.assertEqual([n for n, _ in self.analysis_copies()], ["dpcisr.txt", "near.txt"])
+        self.assertNotIn("measurements", self.state())
+
+    def test_the_near_dumps_are_parsed_from_their_files_with_the_event_check(self) -> None:
+        seen: list = []
+        real = tw.lr.near_glitch
+
+        def spy(source, period_us, window_periods=2, check=None):
+            seen.append((type(source).__name__, check))
+            return real(source, period_us, window_periods, check)
+
+        with mock.patch.object(tw.lr, "near_glitch", spy):
+            tw.cmd_measure(self.env, self.args(trace="diag"))
+        self.assertEqual([(kind, check is not None) for kind, check in seen], [("PosixPath", True)])
+
     # B7: a cut keeps the trace's options, and every cut gets its own near-glitch view.
     def test_a_diag_cut_restarts_with_context_switches_and_gets_its_near_glitch_view(self) -> None:
         self.pc.progress = {"missed": 1, "overruns": 0, "position_gaps": 0, "callback_thread": 4243}
