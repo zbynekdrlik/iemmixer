@@ -1,5 +1,5 @@
 #Requires -Version 5.1
-# S1c Windows tuning (docs/superpowers/specs/2026-09-27-s1c-windows-tuning-design.md §6, §7).
+# S1c Windows tuning (docs/superpowers/specs/2026-09-27-s1c-windows-tuning-design.md section 6, section 7).
 # Every change is an item: a kind with arguments and a desired value, read by
 # Get-IemValue and written by Set-IemValue. Apply writes only what differs,
 # journals the value before the first write and reads back; undo and exit
@@ -114,7 +114,7 @@ public static class IemTimer {
 '@
 }
 
-# The iemmixer plan's settings (design note §6.2 L2): subgroup, setting, AC value.
+# The iemmixer plan's settings (design note 6.2 L2): subgroup, setting, AC value.
 $script:PlanSettings = @(
     @{ name = 'proc-min'; sub = '54533251-82be-4824-96c1-47b60b740d00'; setting = '893dee8e-2bef-41e0-89c6-b55d0929964c'; value = 100 },
     @{ name = 'proc-max'; sub = '54533251-82be-4824-96c1-47b60b740d00'; setting = 'bc5038f7-23e0-4960-96da-33abaf5935ec'; value = 100 },
@@ -286,7 +286,7 @@ function Set-IemRegRaw {
         elseif ($kind -eq 'Binary') {
             $hex = [string]$Raw.data
             if ($hex.Length % 2 -ne 0) { throw "binary data '$hex' has an odd number of hex digits" }
-            $bytes = New-Object -TypeName byte[] -ArgumentList ($hex.Length / 2)
+            $bytes = [byte[]]::new($hex.Length / 2)
             for ($i = 0; $i -lt $bytes.Length; $i++) { $bytes[$i] = [Convert]::ToByte($hex.Substring(2 * $i, 2), 16) }
             $k.SetValue($Name, $bytes, [Microsoft.Win32.RegistryValueKind]::Binary)
         } else { throw "registry kind '$kind' refused" }
@@ -841,7 +841,7 @@ function Get-IemRegText {
 }
 
 function Get-IemReaperFingerprint {
-    # Everything REAPER mode depends on (design note §5.1), read only.
+    # Everything REAPER mode depends on (design note 5.1), read only.
     param([Parameter(Mandatory)][string]$ProfilePath)
     $profile = Read-IemProfile -Path $ProfilePath
     $f = [ordered]@{}
@@ -924,7 +924,7 @@ function Get-IemDeviceInventory {
 }
 
 function Get-IemInventory {
-    # Inventory M0 (design note §4.2), read only. Never reads process command
+    # Inventory M0 (design note 4.2), read only. Never reads process command
     # lines, service image paths or task actions: they can carry tokens.
     param([Parameter(Mandatory)][string]$ProfilePath)
     $profile = Read-IemProfile -Path $ProfilePath

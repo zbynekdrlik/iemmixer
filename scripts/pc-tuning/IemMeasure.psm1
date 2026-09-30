@@ -1,5 +1,5 @@
 #Requires -Version 5.1
-# S1c measurement on the PC (docs/superpowers/specs/2026-09-27-s1c-windows-tuning-design.md §4.1):
+# S1c measurement on the PC (docs/superpowers/specs/2026-09-27-s1c-windows-tuning-design.md section 4.1):
 # the xperf kernel trace with the spike's glitch markers, the dpcisr and
 # dumper reports, per-CPU counter samples over WMI (language-neutral), the
 # System log and the WPT install. Changes no Windows setting.
@@ -102,7 +102,7 @@ function Get-IemCpuSample {
 }
 
 function Get-IemPollSample {
-    # One sentinel sample (design note §4.1 item 5): CPU counters, the active
+    # One sentinel sample (design note 4.1 item 5): CPU counters, the active
     # plan, the governor's state and, while a spike runs, the priority of its
     # callback thread (read from outside; the driver's thread is never touched).
     param([Parameter(Mandatory)][string]$ProfilePath, [int]$SpikePid = 0, [int]$ThreadId = 0)

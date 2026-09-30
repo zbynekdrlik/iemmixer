@@ -1,6 +1,6 @@
 #Requires -Version 5.1
 # Self-test of the S1c tuning modules on Windows PowerShell 5.1 (CI job asio-spike,
-# an ephemeral administrator runner): real backends — registry values under an
+# an ephemeral administrator runner): real backends: registry values under an
 # HKCU test root, two services (Spooler: no start triggers, for the disable-and-stop
 # case; W32Time as the governor stand-in), a scheduled task, a duplicated power plan,
 # Defender exclusions and the CPU Sets of child processes.
@@ -17,7 +17,7 @@ function Assert($cond, $what) { if (-not $cond) { throw "FAILED: $what" }; Write
 function Throws([scriptblock]$b, $what) { $t = $false; try { & $b } catch { $t = $true }; Assert $t $what }
 # Callers wrap this in @(...) so .Count and a ForEach pipe are array-safe under
 # StrictMode on PS 5.1 (a bare (Rows ...) would be $null for 0 matches; a ,@()
-# return would make @(Rows ...) iterate once over an empty array — S1c CI).
+# return would make @(Rows ...) iterate once over an empty array; S1c CI).
 function Rows($rows, $action) { @($rows | Where-Object { $_.action -eq $action }) }
 # Read-IemJournal is exported (every *-Iem* function is); the test reads the flag the module wrote.
 function Read-IemJournalState($profilePath) { $p = Read-IemProfile -Path $profilePath; (Read-IemJournal -Path $p.journal).entered }
