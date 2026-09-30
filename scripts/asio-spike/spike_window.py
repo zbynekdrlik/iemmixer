@@ -522,6 +522,12 @@ def cmd_run(env, args, on_poll=None) -> dict:
     print(json.dumps({"run": rid, "exit": code, "verdict": v}), flush=True)
     if code in ALARMS:
         print(f"OWNER ALARM: {ALARMS[code]}", file=sys.stderr, flush=True)
+    # Outcome "error" (exit 1): the spike could not set up what was asked (a stress
+    # thread or the hwlat scanner not placed or raised), so nothing it reports
+    # measured the requested setup — a failed step, never a result.
+    if report.get("outcome") == "error":
+        raise StepError(f"spike request {rid} failed (exit {code}): {report.get('error') or 'no error text'} "
+                        f"(report {out / f'{rid}.report.json'})")
     return {"run": rid, "exit": code, "verdict": v, "report": str(out / f"{rid}.report.json")}
 
 
