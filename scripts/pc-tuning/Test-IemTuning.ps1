@@ -163,6 +163,16 @@ try {
     $e1.before = '1'
     [IO.File]::WriteAllText($jv, ($v1 | ConvertTo-Json -Depth 8))
     ThrowsLike { Read-IemJournal -Path $jv } "*$jv*schema 1*reg:x*" 'journal-v1-with-a-registry-value-of-unknown-kind-is-refused'
+    # ...but the mode exit ("ide event", logon) needs only its own section: a problem
+    # in the global section is reported, never blocks it, and stays refused for
+    # everything that touches that section (review 3.2).
+    $pj = New-TestProfile $hw @{ journal = $jv }
+    $xe = $null; $xr = @()
+    try { $xr = Exit-IemTuningMode -ProfilePath $pj } catch { $xe = "$_" }
+    $xp = @($xr | Where-Object { $_.action -eq 'problem' })
+    Assert ($null -eq $xe -and $xp.Count -eq 1 -and "$($xp[0].error)" -like '*reg:x*') "exit-is-not-blocked-by-a-global-journal-problem ($xe)"
+    Assert (-not (Read-IemJournal -Path $jv -ModeOnly).entered) 'exit-with-a-global-problem-clears-entered'
+    ThrowsLike { Read-IemJournal -Path $jv } "*$jv*schema 1*reg:x*" 'journal-v1-refusal-survives-an-exit'
     $v1.schema = 9
     [IO.File]::WriteAllText($jv, ($v1 | ConvertTo-Json -Depth 8))
     ThrowsLike { Read-IemJournal -Path $jv } "*$jv*schema 9*" 'journal-of-another-schema-is-refused'
