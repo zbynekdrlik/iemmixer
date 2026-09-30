@@ -660,6 +660,16 @@ def cmd_reboot(env, args) -> None:
     print(json.dumps({"reboot": "requested", "in_s": 0}))
 
 
+def nap_unless_event(seconds: float) -> bool:
+    """Waits `seconds` in 1 s slices; False as soon as the "ide event" flag
+    exists (seen within a second, the window's 2 s rule)."""
+    for _ in range(max(1, round(seconds))):
+        if sw.event_now():
+            return False
+        time.sleep(1.0)
+    return not sw.event_now()
+
+
 def cmd_post_boot(env, args) -> None:
     state = sw.load_state()
     if "approval" not in state.get("reboot", {}):
@@ -673,15 +683,17 @@ def cmd_post_boot(env, args) -> None:
     boot = tps(env, "Get-IemBootTime", timeout=60, event="ignore")
     checks = {"booted_after_request": boot > state["reboot"]["prepared_at"], "reaper": False, "handover": None,
               "fingerprint": [], "pending": [], "failed_items": []}
-    # "ide event" is checked on every poll: on the flag REAPER comes back at
-    # once (the event path) instead of after ~5 min of waiting (review m10).
+    # "ide event" is checked on every poll and every second between polls: on
+    # the flag REAPER comes back at once (the event path) instead of after
+    # ~5 min of waiting (review m10, round 3 m4).
     for _ in range(30):
         if sw.event_now():
             break
         if int(sw.ps(env, "@(Get-Process reaper -ErrorAction SilentlyContinue).Count", timeout=60, event="ignore")) > 0:
             checks["reaper"] = True
             break
-        time.sleep(10)
+        if not nap_unless_event(10):
+            break
     # The window closes only with REAPER back (#32 B13): the bring-back starts it
     # through the start task when it did not start by itself (still a problem:
     # a reboot must come back in event mode) and runs the handover checks. A
@@ -706,7 +718,8 @@ def cmd_post_boot(env, args) -> None:
     if sw.event_now():
         # The read-only checks wait for a dev window; main() pre-empts (a window
         # still open because the bring-back failed gets another one there).
-        print(json.dumps({"post-boot": "ide event: REAPER brought back, the checks skipped", "handover": checks["handover"]}), flush=True)
+        said = "REAPER brought back" if back else "the bring-back failed (the preempt tries again)"
+        print(json.dumps({"post-boot": f"ide event: {said}, the checks skipped", "handover": checks["handover"]}), flush=True)
         raise sw.EventNow()
     current = tps(env, f"Get-IemReaperFingerprint -ProfilePath {sw.tuning_profile(env)}", timeout=120, event="ignore")
     checks["fingerprint"] = sw.fingerprint_diff(json.loads(baseline_path(env).read_text(encoding="utf-8")), current)
