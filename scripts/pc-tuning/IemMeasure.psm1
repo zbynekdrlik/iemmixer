@@ -220,7 +220,7 @@ function Get-IemReaperFingerprint {
     $f['bcd'] = Get-IemTextHash -Text ((@(& bcdedit.exe /enum '{current}')) -join "`n")
     $dg = Get-CimInstance -Namespace root\Microsoft\Windows\DeviceGuard -ClassName Win32_DeviceGuard -ErrorAction SilentlyContinue
     $f['deviceguard.running'] = $(if ($dg) { (@($dg.SecurityServicesRunning) -join ',') } else { 'unavailable' })
-    $f['tuning.entered'] = "$((Read-IemJournal -Path $profile.journal).entered)"
+    $f['tuning.entered'] = "$((Read-IemJournal -Path $profile.journal -ModeOnly).entered)"
     return [pscustomobject]$f
 }
 

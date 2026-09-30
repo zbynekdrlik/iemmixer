@@ -476,10 +476,13 @@ function Read-IemJournalFile {
 }
 
 function Read-IemJournal {
-    param([Parameter(Mandatory)][string]$Path)
+    # -ModeOnly: the reader needs only the mode section (exit, the fingerprint): a
+    # problem in the global section does not stop it, it is in 'problems' (review 3.2).
+    param([Parameter(Mandatory)][string]$Path, [switch]$ModeOnly)
     # applied: the profile version of each tier's last complete, clean apply (m2).
+    # problems: what a schema-1 conversion could not convert (never written).
     $j = @{ schema = $script:Schema; applied = @{ tier2 = 0; tier3 = 0 }; entered = $false; global = @{}; mode = @{}; reverted = @{}
-            order = @{ global = @(); mode = @() } }
+            order = @{ global = @(); mode = @() }; problems = @() }
     $o = Read-IemJournalFile -Path $Path
     if ($null -eq $o) {
         # A write that stopped between its flushed temp file and the swap leaves
@@ -500,7 +503,14 @@ function Read-IemJournal {
         foreach ($p in $o.$s.PSObject.Properties) { $j[$s][$p.Name] = $p.Value }
     }
     foreach ($s in 'global', 'mode') { $j.order[$s] = @($o.order.$s | Where-Object { $_ }) }
-    if ($schema -eq 1) { Update-IemJournalV1 -Journal $j -Path $Path }
+    if ($schema -eq 1) {
+        # A schema-1 journal that could not be converted fully stays schema 1 when
+        # written, so its refusal stays until the entry is resolved by hand.
+        $j.problems = Update-IemJournalV1 -Journal $j -Path $Path
+        if (@($j.problems).Count -gt 0) { $j.schema = 1 }
+    }
+    $blocking = @(@($j.problems) | Where-Object { -not $ModeOnly -or $_.section -eq 'mode' })
+    if ($blocking.Count -gt 0) { throw (@($blocking | ForEach-Object { $_.text }) -join '; ') }
     return $j
 }
 
@@ -512,9 +522,11 @@ function Update-IemJournalV1 {
     # counter (the A13 tolerance decides); a registry entry whose before-value was
     # absent gets raw 'absent'; the plan-exists / plan-value mode entries are
     # dropped (the plan stays defined and is never reverted now, A6/M2). A registry
-    # entry with a before-value but no kind cannot be restored exactly: the journal
-    # is refused, naming the file and the entry.
+    # entry with a before-value but no kind cannot be restored exactly: it stays as
+    # it is and is returned as a problem of its section, naming the file and the
+    # entry (Read-IemJournal refuses the journal for it, review 3.2).
     param([Parameter(Mandatory)][hashtable]$Journal, [Parameter(Mandatory)][string]$Path)
+    $problems = @()
     foreach ($s in 'global', 'mode') {
         foreach ($k in @($Journal[$s].Keys)) {
             $e = $Journal[$s][$k]
@@ -526,7 +538,8 @@ function Update-IemJournalV1 {
             if ($e.boot -is [string]) { $e.boot = @{ time = $e.boot; id = $null } }
             if ([string]$e.kind -eq 'reg' -and -not $e.PSObject.Properties['raw']) {
                 if ($null -ne $e.before) {
-                    throw "journal ${Path}: schema 1, entry '$k' holds a registry before-value without its kind, so it cannot be restored exactly: restore it by hand and remove the entry"
+                    $problems += [pscustomobject]@{ section = $s; text = "journal ${Path}: schema 1, entry '$k' holds a registry before-value without its kind, so it cannot be restored exactly: restore it by hand and remove the entry" }
+                    continue
                 }
                 $e | Add-Member -NotePropertyName 'raw' -NotePropertyValue @{ kind = 'absent' }
             }
@@ -535,6 +548,7 @@ function Update-IemJournalV1 {
     foreach ($k in @($Journal.reverted.Keys)) {
         if ($Journal.reverted[$k] -is [string]) { $Journal.reverted[$k] = @{ time = $Journal.reverted[$k]; id = $null } }
     }
+    return ,$problems
 }
 
 function Write-IemJournal {
@@ -546,7 +560,8 @@ function Write-IemJournal {
     $dir = Split-Path -Parent $Path
     if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
     $tmp = "$Path.tmp"
-    $bytes = $script:Utf8NoBom.GetBytes(($Journal | ConvertTo-Json -Depth 8))
+    $data = $Journal.Clone(); $data.Remove('problems')   # read-time findings, never stored
+    $bytes = $script:Utf8NoBom.GetBytes(($data | ConvertTo-Json -Depth 8))
     $fs = New-Object -TypeName IO.FileStream -ArgumentList $tmp, ([IO.FileMode]::Create), ([IO.FileAccess]::Write), ([IO.FileShare]::None), 4096, ([IO.FileOptions]::WriteThrough)
     try { $fs.Write($bytes, 0, $bytes.Length); $fs.Flush($true) } finally { $fs.Dispose() }
     if (Test-Path -LiteralPath $Path) { [IO.File]::Replace($tmp, $Path, [System.Management.Automation.Language.NullString]::Value) }
@@ -939,7 +954,9 @@ function Exit-IemTuningMode {
     # on past failures; throws at the end when anything could not be restored.
     param([Parameter(Mandatory)][string]$ProfilePath)
     $profile = Read-IemProfile -Path $ProfilePath
-    $j = Read-IemJournal -Path $profile.journal
+    # Only the mode section: a global-section problem never blocks the exit ("ide
+    # event", logon); it is reported with the rows (review 3.2).
+    $j = Read-IemJournal -Path $profile.journal -ModeOnly
     $keys = @($j.order.mode); [array]::Reverse($keys)
     # The governor restarts only after the REAPER-mode plan is active again (A5),
     # whatever order partial enters journaled the items in.
@@ -956,9 +973,13 @@ function Exit-IemTuningMode {
             Write-IemJournal -Path $profile.journal -Journal $j
         } catch { $failed += "${k}: $_" }
     }
-    if ($failed.Count -gt 0) { throw ("tuning exit left $($failed.Count) item(s): " + ($failed -join '; ')) }
+    if ($failed.Count -gt 0) {
+        $all = @($failed) + @(@($j.problems) | ForEach-Object { "journal problem: $($_.text)" })
+        throw ("tuning exit left $($failed.Count) item(s): " + ($all -join '; '))
+    }
     $j.entered = $false
     Write-IemJournal -Path $profile.journal -Journal $j
+    foreach ($p in @($j.problems)) { $rows += [pscustomobject]@{ key = 'journal'; action = 'problem'; value = $null; error = $p.text } }
     return ,$rows
 }
 
