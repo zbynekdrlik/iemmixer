@@ -259,27 +259,37 @@ impl Store {
     }
 
     /// The renames that end a save: the previous `current.json` becomes the
-    /// newest generation and `save.tmp` (synced) becomes `current.json`;
-    /// keeps [`GENERATIONS`] and syncs the directory.
+    /// newest generation and `save.tmp` (synced) becomes `current.json`,
+    /// then the directory is synced. Whether `current.json` exists must be
+    /// known: an error there is the save's error, before `save.tmp` could
+    /// replace it (#32 P7; `save.tmp` keeps the newest state). Pruning to
+    /// [`GENERATIONS`] comes after the commit and apart: its failure is
+    /// `Committed::pruning`, never the save's (#32 P6).
     fn commit_tmp(&self) -> io::Result<Committed> {
         let current = self.dir.join(CURRENT);
         let mut generation = 0;
-        if self.files.exists(&current).unwrap_or(false) {
+        if self.files.exists(&current)? {
             generation = self.generations()?.last().map_or(0, |g| g.0) + 1;
             self.files
                 .rename(&current, &self.generation_path(generation))?;
         }
         self.files.rename(&self.dir.join(TMP), &current)?;
+        self.files.sync_dir(&self.dir)?;
+        Ok(Committed {
+            generation,
+            pruning: self.prune().err().map(|e| e.to_string()),
+        })
+    }
+
+    /// Removes the oldest generations beyond [`GENERATIONS`]. A removal
+    /// lost in a crash only leaves a file the next save removes.
+    fn prune(&self) -> io::Result<()> {
         let gens = self.generations()?;
         let excess = gens.len().saturating_sub(GENERATIONS);
         for (_, path) in gens.iter().take(excess) {
             self.files.remove(path)?;
         }
-        self.files.sync_dir(&self.dir)?;
-        Ok(Committed {
-            generation,
-            pruning: None,
-        })
+        Ok(())
     }
 
     /// Writes `baseline.json` through its own `baseline.tmp`, never

@@ -500,6 +500,9 @@ pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
     if recovery.finished {
         info!("the interrupted save is finished: save.tmp is current.json");
     }
+    for why in &recovery.warnings {
+        warn!("{why}");
+    }
     alarms.extend(recovery.failed.into_iter().map(|detail| Alarm {
         code: AlarmCode::SaveFailed,
         detail,

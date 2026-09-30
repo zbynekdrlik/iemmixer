@@ -180,7 +180,14 @@ impl Store {
         }
         if loaded.source == Source::Interrupted {
             match self.finish_interrupted() {
-                Ok(_) => done.finished = true,
+                Ok(committed) => {
+                    done.finished = true;
+                    done.warnings.extend(
+                        committed
+                            .pruning
+                            .map(|why| format!("old generations were not removed: {why}")),
+                    );
+                }
                 Err(e) => done
                     .failed
                     .push(format!("finishing the interrupted save failed: {e}")),

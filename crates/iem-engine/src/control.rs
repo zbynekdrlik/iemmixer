@@ -547,6 +547,10 @@ impl Control {
         self.schedule.saved();
         match self.store.save(&self.persisted()) {
             Ok(committed) => {
+                // The save stands; only old generations stayed (#32 P6).
+                if let Some(why) = &committed.pruning {
+                    warn!("old generations were not removed: {why}");
+                }
                 let rev = self.core.rev();
                 self.broadcast(&EngineMsg::Saved {
                     rev,
