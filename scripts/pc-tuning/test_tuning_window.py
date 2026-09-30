@@ -677,6 +677,14 @@ class MeasureTests(WindowHarness):
         self.assertNotIn("-Merge", stops[0])
         self.assertIsNone(self.state()["trace"])
 
+    def test_trace_stop_is_a_window_command_the_event_pre_empts(self) -> None:
+        # Review m4: the stop completes (it changes the PC), then "ide event" wins (main pre-empts).
+        self.record_trace()
+        self.pc.on_call = lambda body: (self.dir / "EVENT-NOW").touch() if "Stop-IemTrace" in body else None
+        with self.assertRaises(tw.sw.EventNow):
+            tw.cmd_trace_stop(self.env, argparse.Namespace())
+        self.assertEqual([e for b, e in self.pc.calls if "Stop-IemTrace" in b], ["finish"])
+
     def test_trace_stop_without_a_recorded_trace_touches_nothing(self) -> None:
         tw.cmd_trace_stop(self.env, argparse.Namespace())
         self.assertEqual(self.pc.calls, [])
