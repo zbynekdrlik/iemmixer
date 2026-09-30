@@ -33,7 +33,8 @@ const USAGE: &str =
 [--driver <name>] [--progress <file>] [--frames 32|48|64] \
 [--activity-channels all|<list, e.g. 101-110,121-124>] [--seconds S] [--burn-us U] [--stress T] \
 [--panic-at K] [--cycles C] [--audio-cpus LIST] [--stress-cpus LIST] [--cpu N] [--threshold-us U]
-(duplex and reopen need --frames and --activity-channels; hwlat needs --cpu and --threshold-us)";
+(duplex and reopen need --frames and --activity-channels; hwlat needs --cpu and --threshold-us; \
+--stress with --audio-cpus needs --stress-cpus)";
 
 /// The longest run: an 8 h soak with margin (S1c design note §8 W4).
 const MAX_SECONDS: u64 = 36_000;
@@ -145,6 +146,14 @@ fn parse(argv: &[String]) -> Result<Args, String> {
     }
     if a.seconds == 0 || a.cycles == 0 {
         return Err("--seconds and --cycles must be positive".to_owned());
+    }
+    // A thread without its own selection runs on the process default CPU
+    // Set, which --audio-cpus sets: the busy threads would share the audio
+    // CPUs (S1c design note §4.3 puts them on the housekeeping CPUs).
+    if a.stress > 0 && !a.audio_cpus.is_empty() && a.stress_cpus.is_empty() {
+        return Err(
+            "--stress with --audio-cpus needs --stress-cpus (the housekeeping CPUs)".to_owned(),
+        );
     }
     match watched {
         Some(w) => a.watched = w,
