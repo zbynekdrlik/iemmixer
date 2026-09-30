@@ -124,6 +124,16 @@ try {
     Set-JournalBoot $pp $step
     $st = Get-IemTuningState -ProfilePath $pp
     Assert (@($st.items | Where-Object { $_.tier -eq 3 -and -not $_.pending }).Count -eq 0) 'tier3-pending-survives-a-clock-step'
+    # Pending means written after the current boot: the boot of the latest write counts (A3).
+    Set-JournalBoot $pp '2000-01-01T00:00:00.0000000Z'
+    $st = Get-IemTuningState -ProfilePath $pp
+    Assert (@($st.items | Where-Object { $_.tier -eq 3 -and $_.pending }).Count -eq 0) 'tier3-an-earlier-boot-is-not-pending'
+    Set-ItemProperty -LiteralPath $nic -Name 'PowerSaving' -Value '1'
+    $rw = Invoke-IemTuningApply -ProfilePath $pp -Tier 3 -Only @('nic')
+    Assert (@(Rows $rw 'written').Count -eq 1 -and @(Rows $rw 'failed').Count -eq 0) 'tier3-reapply-rewrites-a-changed-value'
+    $st = Get-IemTuningState -ProfilePath $pp
+    $again3 = @($st.items | Where-Object { $_.pending } | ForEach-Object { $_.key })
+    Assert ($again3.Count -eq 1 -and $again3[0] -eq 'nic:PowerSaving') 'tier3-a-rewrite-is-pending-again'
     $u3 = Undo-IemTuning -ProfilePath $pp -Tier 3
     Assert (@(Rows $u3 'failed').Count -eq 0) 'tier3-undo-has-no-failure'
     Assert ($null -eq $ap.GetValue('DevicePolicy', $null) -and (Get-Item -LiteralPath $nic).GetValue('PowerSaving') -eq '1') 'tier3-undo-deletes-absent-values'
