@@ -154,9 +154,9 @@ def load_terms(path: Path) -> list[str]:
 
 
 # an escape sequence right before a term is a word boundary even though it ends in a letter or a
-# digit: `\t`, `\0`, `\101`, `\x41`, `A` (byte-string fixtures such as b"\0Program 1\0...")
+# digit: `\t`, `\0`, `\101`, `\x41`, `\u0041`, `\U00000041` (byte-string fixtures: b"\0Program 1\0")
 _ESCAPE_BEFORE = (r"(?<=\\[0-7abfnrtv])", r"(?<=\\[0-7]{2})", r"(?<=\\[0-7]{3})",
-                  r"(?<=\\x[0-9A-Fa-f]{2})", r"(?<=\\u[0-9A-Fa-f]{4})")
+                  r"(?<=\\x[0-9A-Fa-f]{2})", r"(?<=\\u[0-9A-Fa-f]{4})", r"(?<=\\U[0-9A-Fa-f]{8})")
 
 
 def compile_term(term: str) -> re.Pattern[str]:
@@ -223,7 +223,9 @@ def reread(text: str, codec: str) -> str:
     return text.translate(_REREAD[codec])
 
 
-_UNICODE_ESCAPE = re.compile(r"\\u(?:([0-9A-Fa-f]{4})|\{([0-9A-Fa-f]{1,6})\})")  # JSON/JS/Python; Rust/JS
+# JSON / JS / Python `\uXXXX`, Rust / JS `\u{X}`, Python `\UXXXXXXXX`, XML / HTML `&#N;` / `&#xN;`
+_UNICODE_ESCAPE = re.compile(r"\\u(?:([0-9A-Fa-f]{4})|\{([0-9A-Fa-f]{1,6})\})|\\U([0-9A-Fa-f]{8})"
+                             r"|&#(?:([0-9]{1,7})|[xX]([0-9A-Fa-f]{1,6}));")
 _SURROGATE_PAIR = re.compile("[\ud800-\udbff][\udc00-\udfff]")
 # a run of escapes that each stand for one byte: C / Rust / Python `\xNN`, octal `\NNN` and `\0`,
 # the letter escapes, and URL percent-encoding
@@ -233,7 +235,8 @@ _LETTER_ESCAPES = {"a": 7, "b": 8, "f": 12, "n": 10, "r": 13, "t": 9, "v": 11, "
 
 
 def _escaped_char(match: re.Match[str]) -> str:
-    value = int(match.group(1) or match.group(2), 16)
+    four, braced, eight, decimal, hexadecimal = match.groups()
+    value = int(decimal, 10) if decimal else int(four or braced or eight or hexadecimal, 16)
     return match.group() if value > 0x10FFFF else "\ufffd" if value == ord(SEP) else chr(value)
 
 
@@ -251,11 +254,11 @@ def _escaped_bytes(match: re.Match[str]) -> str:
 
 
 def unescape(text: str) -> str:
-    """The text with its escapes decoded: `\\uXXXX` / `\\u{X}` (a UTF-16 surrogate pair joined), and
-    each run of byte escapes (C / Rust / Python `\\xNN`, octal, `\\0`, the letter escapes, percent-
-    encoding) as the bytes it stands for, decoded like raw bytes -- undecodable ones stay lone
-    surrogates that Views re-reads as cp1250 / Latin-1."""
-    if "\\u" in text:
+    """The text with its escapes decoded: `\\uXXXX`, `\\u{X}`, `\\UXXXXXXXX` and XML / HTML numeric
+    character references (a UTF-16 surrogate pair joined), and each run of byte escapes (C / Rust /
+    Python `\\xNN`, octal, `\\0`, the letter escapes, percent-encoding) as the bytes it stands for,
+    decoded like raw bytes -- undecodable ones stay lone surrogates that Views re-reads."""
+    if "\\u" in text or "\\U" in text or "&#" in text:
         text = _UNICODE_ESCAPE.sub(_escaped_char, text)
         text = _SURROGATE_PAIR.sub(
             lambda pair: pair.group().encode("utf-16-le", "surrogatepass").decode("utf-16-le"), text)
@@ -264,16 +267,18 @@ def unescape(text: str) -> str:
     return text
 
 
-def _mojibake_pattern(codec: str) -> re.Pattern[str]:
-    """UTF-8 sequences as a single-byte codec shows them: a lead byte's character followed by one,
-    two or three continuation bytes' characters."""
+def _mojibake_patterns(codec: str) -> tuple[re.Pattern[str], re.Pattern[str]]:
+    """UTF-8 sequences as a single-byte codec shows them -- a lead byte's character followed by one,
+    two or three continuation bytes' characters -- and a lead followed by one continuation, which
+    the regex engine finds ~10x faster: most texts have none, and then the sequences are not sought."""
     def chars(first: int, last: int) -> str:
         return "[" + re.escape(bytes(range(first, last + 1)).decode(codec, errors="replace")) + "]"
     cont = chars(0x80, 0xBF)
-    return re.compile(f"(?:{chars(0xC2, 0xDF)}{cont}|{chars(0xE0, 0xEF)}{cont}{{2}}|{chars(0xF0, 0xF4)}{cont}{{3}})+")
+    sequences = f"(?:{chars(0xC2, 0xDF)}{cont}|{chars(0xE0, 0xEF)}{cont}{{2}}|{chars(0xF0, 0xF4)}{cont}{{3}})+"
+    return re.compile(chars(0xC2, 0xF4) + cont), re.compile(sequences)
 
 
-_MOJIBAKE = {codec: _mojibake_pattern(codec) for codec in MOJIBAKE_CODECS}
+_MOJIBAKE = {codec: _mojibake_patterns(codec) for codec in MOJIBAKE_CODECS}
 
 
 def unmojibake(text: str, codec: str) -> str:
@@ -284,7 +289,30 @@ def unmojibake(text: str, codec: str) -> str:
             return match.group().encode(codec).decode("utf-8").replace(SEP, "\ufffd")
         except UnicodeError:
             return match.group()
-    return _MOJIBAKE[codec].sub(undo, text)
+    hint, sequences = _MOJIBAKE[codec]
+    return sequences.sub(undo, text) if hint.search(text) else text
+
+
+# characters no reader sees: soft hyphen, zero-width space / non-joiner / joiner, word joiner,
+# zero-width no-break space (BOM)
+_INVISIBLE = re.compile("[\u00ad\u200b-\u200d\u2060\ufeff]")
+# compatibility characters whose NFKC form holds Latin letters or digits: ª ² ³ ¹ º, the ligature and
+# digraph letters (Ĳ Ŀ ŉ ſ Ǆ-ǌ Ǳ-ǳ), modifier letters, super- and subscripts, letterlike symbols
+# and Roman numerals, enclosed alphanumerics, Latin ligatures, fullwidth forms, mathematical
+# alphanumerics, the enclosed alphanumeric supplement
+_COMPATIBLE = re.compile("[\u00aa\u00b2\u00b3\u00b9\u00ba\u0132\u0133\u013f\u0140\u0149\u017f"
+                         "\u01c4-\u01cc\u01f1-\u01f3\u02b0-\u02b8\u1d2c-\u1d6a\u2070-\u209c"
+                         "\u2100-\u2189\u2460-\u24ff\ufb00-\ufb06\uff01-\uff5e"
+                         "\U0001d400-\U0001d7ff\U0001f100-\U0001f1aa]")
+
+
+def compact(text: str) -> str:
+    """The text with its invisible characters removed and each compatibility character that stands
+    for Latin letters or digits in NFKC (_COMPATIBLE): a fullwidth z reads as `z`, a word split by an
+    invisible character reads whole. (The raw reading keeps a zero-width space as the word break it
+    also is.) Only those characters are normalized -- NFKC of the whole text costs ~10x more."""
+    text = _INVISIBLE.sub("", text)
+    return _COMPATIBLE.sub(lambda match: unicodedata.normalize("NFKC", match.group()), text)
 
 
 def cp1250_from_git_latin1(text: str) -> str:
@@ -312,7 +340,8 @@ class Views:
     """The readings of a decoded text that the terms are matched against, each made on first need.
 
     The text and the text with its escapes decoded (unescape), each also with any double-encoded
-    UTF-8 read back (unmojibake), serve an ASCII term as they are: a re-reading only turns lone
+    UTF-8 read back (unmojibake), and the decoded text compacted (compact: NFKC, invisible characters
+    removed) serve an ASCII term as they are: a re-reading only turns lone
     surrogates -- non-word characters -- into letters or symbols, and NFC only composes a letter
     with a following mark, so neither can add an ASCII term's match. Their case folds pre-filter
     every term. A term with a non-ASCII character is matched in their NFC forms and in the NFC
@@ -328,6 +357,9 @@ class Views:
                 fixed = unmojibake(base, codec)
                 if fixed not in self.raw:
                     self.raw.append(fixed)
+        compacted = compact(self.bases[-1])
+        if compacted not in self.raw:
+            self.raw.append(compacted)
         self.folded = [fold(view) for view in self.raw]
         self._normal: list[str] | None = None
 
