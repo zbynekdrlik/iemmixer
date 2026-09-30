@@ -45,7 +45,7 @@ REPO = "zbynekdrlik/iemmixer"
 BUNDLE_FILES = ("GoldenPc.psm1", "IemMeasure.psm1", "IemTuning.psm1", "SpikePc.psm1", "asio_spike.exe", "spike-task.ps1")
 TASK = "-TaskPath '\\iemmixer\\' -TaskName 'iemmixer-asio-spike'"
 STATE = Path(os.environ.get("SPIKE_STATE", str(Path.home() / ".local/state/iemmixer/spike-window.json")))
-# Spike exit codes the owner must hear about at once (asio_spike.rs).
+# Spike exit codes the owner must hear about at once (crates/iem-audio-io/examples/asio_spike/main.rs).
 ALARMS = {
     5: "band activity on the stage inputs during the spike (loudest_inputs in the verdict): the band may be playing; tell the owner now, no further run",
     8: "a callback did not leave the stream within the stop wait (R6): tell the owner now, no further run",
