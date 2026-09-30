@@ -53,11 +53,13 @@ $taskPath = '\iemmixer-test\'; $taskName = "t-$id"
 Register-ScheduledTask -TaskPath $taskPath -TaskName $taskName -Action (New-ScheduledTaskAction -Execute 'cmd.exe' -Argument '/c exit 0') | Out-Null
 $enum = "$root\HKLM\SYSTEM\CurrentControlSet\Enum\PCI\VEN_TEST&DEV_0001\0"
 New-Item -Path $enum -Force | Out-Null
-New-ItemProperty -LiteralPath $enum -Name 'HardwareID' -PropertyType MultiString -Value @('PCI\VEN_TEST&DEV_0001&SUBSYS_1', 'PCI\VEN_TEST&DEV_0001') | Out-Null
+# Synthetic PCI ids in the VEN_xxxx&DEV_xxxx form real ones have (hex digits).
+$hw = 'PCI\VEN_FFFE&DEV_0001'
+New-ItemProperty -LiteralPath $enum -Name 'HardwareID' -PropertyType MultiString -Value @("$hw&SUBSYS_00000001", $hw) | Out-Null
 $nic = "$root\HKLM\NIC"
 New-Item -Path $nic -Force | Out-Null
 # The NIC driver key names the hardware id its driver matched (A8).
-New-ItemProperty -LiteralPath $nic -Name 'MatchingDeviceId' -PropertyType String -Value 'pci\ven_test&dev_0002' | Out-Null
+New-ItemProperty -LiteralPath $nic -Name 'MatchingDeviceId' -PropertyType String -Value 'pci\ven_fffe&dev_0002' | Out-Null
 New-ItemProperty -LiteralPath $nic -Name 'PowerSaving' -PropertyType String -Value '1' | Out-Null
 # A value whose name ends like the NDIS keyword *EEE: undoing *EEE must leave it (A2).
 New-ItemProperty -LiteralPath $nic -Name 'AdvancedEEE' -PropertyType String -Value '1' | Out-Null
@@ -95,7 +97,7 @@ function New-TestProfile([string]$Hwid, [hashtable]$Set = @{}) {
         maintenance = [ordered]@{ off = $true; tasks = @("$taskPath$taskName", '\iemmixer-test\no-such-task') }
         defender = [ordered]@{ paths = @($dir); processes = @() }
         devices = @([ordered]@{ id = 'card'; instance = 'PCI\VEN_TEST&DEV_0001\0'; hwid = $Hwid; lps = @(0, 2); enabled = $true })
-        nic = (New-TestNic 'PCI\VEN_TEST&DEV_0002')
+        nic = (New-TestNic 'PCI\VEN_FFFE&DEV_0002')
         fingerprint = [ordered]@{ files = @(); keys = @() }
     }
     foreach ($k in @($Set.Keys)) { $p[$k] = $Set[$k] }
@@ -103,7 +105,7 @@ function New-TestProfile([string]$Hwid, [hashtable]$Set = @{}) {
     [IO.File]::WriteAllText($path, ($p | ConvertTo-Json -Depth 6))
     return $path
 }
-$pp = New-TestProfile 'PCI\VEN_TEST&DEV_0001'
+$pp = New-TestProfile $hw
 $maint = "$root\HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\Maintenance"
 
 try {
@@ -142,7 +144,7 @@ try {
     $again = Invoke-IemTuningApply -ProfilePath $pp -Tier 2
     Assert (@(Rows $again 'written').Count -eq 0 -and @(Rows $again 'failed').Count -eq 0) 'tier2-apply-is-idempotent'
     # An exclusion Defender cannot hold (an empty path) fails its row: version 2 is not stamped.
-    $pf = New-TestProfile 'PCI\VEN_TEST&DEV_0001' @{ version = 2; defender = [ordered]@{ paths = @($dir, ''); processes = @() } }
+    $pf = New-TestProfile $hw @{ version = 2; defender = [ordered]@{ paths = @($dir, ''); processes = @() } }
     $rf = Invoke-IemTuningApply -ProfilePath $pf -Tier 2
     Assert (@(Rows $rf 'failed').Count -eq 1 -and (Read-JournalVersion $pp) -eq 1) 'apply-with-a-failure-does-not-stamp-the-version'
     $u = Undo-IemTuning -ProfilePath $pp -Tier 2
@@ -153,21 +155,29 @@ try {
     Assert (-not (@((Get-MpPreference).ExclusionPath) -contains $dir)) 'tier2-undo-removes-the-exclusion'
 
     # Tier 3: affinity policy under the device's key, NIC values; pending until a reboot.
-    $bad = New-TestProfile 'PCI\VEN_OTHER'
-    ThrowsLike { Invoke-IemTuningApply -ProfilePath $bad -Tier 3 -Only @('irq') } '*hardware id does not match*' 'tier3-refuses-a-mismatched-device'
+    # Hardware ids are compared exactly (case-insensitive), never as a pattern: an
+    # empty, wildcard, short or other id is refused before any write (M1).
+    foreach ($c in @(@('', '*empty*'), @('*', '*wildcard*'), @('PCI\VEN_FFFE&DEV_000?', '*wildcard*'),
+                     @('PCI\VEN_FFFE', '*not a PCI VEN_/DEV_*'), @('PCI\VEN_FFFE&DEV_0002', '*hardware id does not match*'))) {
+        $bp = New-TestProfile $c[0]
+        ThrowsLike { Invoke-IemTuningApply -ProfilePath $bp -Tier 3 -Only @('irq') } $c[1] "tier3-refuses-the-card-hwid '$($c[0])'"
+    }
     Assert (-not (Test-Path -LiteralPath "$enum\Device Parameters")) 'tier3-refusal-writes-nothing'
     # The NIC driver key is checked against the profile's hardware id before any write,
     # and found under registry_root also by adapter name (design note 7, A8).
-    $badNic = New-TestProfile 'PCI\VEN_TEST&DEV_0001' @{ nic = (New-TestNic 'PCI\VEN_OTHER') }
-    ThrowsLike { Invoke-IemTuningApply -ProfilePath $badNic -Tier 3 -Only @('nic') } '*hardware id does not match*' 'tier3-refuses-a-mismatched-nic'
+    foreach ($c in @(@('', '*empty*'), @('*', '*wildcard*'), @('PCI\VEN_FFFE', '*hardware id does not match*'),
+                     @('PCI\VEN_OTHER', '*hardware id does not match*'))) {
+        $bp = New-TestProfile $hw @{ nic = (New-TestNic $c[0]) }
+        ThrowsLike { Invoke-IemTuningApply -ProfilePath $bp -Tier 3 -Only @('nic') } $c[1] "tier3-refuses-the-nic-hwid '$($c[0])'"
+    }
     $nk = Get-Item -LiteralPath $nic
     Assert ($nk.GetValue('PowerSaving') -eq '1' -and $null -eq $nk.GetValue('*RssBaseProcNumber', $null)) 'tier3-nic-refusal-writes-nothing'
     $an = @(Get-NetAdapter)[0]
     $cls = "$root\HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e972-e325-11ce-bfc1-08002be10318}\0000"
     New-Item -Path $cls -Force | Out-Null
     New-ItemProperty -LiteralPath $cls -Name 'NetCfgInstanceId' -PropertyType String -Value "$($an.InterfaceGuid)" | Out-Null
-    New-ItemProperty -LiteralPath $cls -Name 'MatchingDeviceId' -PropertyType String -Value 'pci\ven_test&dev_0002' | Out-Null
-    $byName = Read-IemProfile -Path (New-TestProfile 'PCI\VEN_TEST&DEV_0001' @{ nic = (New-TestNic 'PCI\VEN_TEST&DEV_0002' $an.Name) })
+    New-ItemProperty -LiteralPath $cls -Name 'MatchingDeviceId' -PropertyType String -Value 'pci\ven_fffe&dev_0002' | Out-Null
+    $byName = Read-IemProfile -Path (New-TestProfile $hw @{ nic = (New-TestNic 'PCI\VEN_FFFE&DEV_0002' $an.Name) })
     Assert ("$(Get-IemNicKey -Profile $byName)" -like "*iemmixer-tuning-test-$id*") 'tier3-nic-by-adapter-name-stays-under-registry-root'
     # R1 applies only while the card already uses MSI (design note 6.4 R1): otherwise
     # it is skipped with its reason, and nothing is written (A7).
