@@ -465,6 +465,23 @@ try {
     $x = Exit-IemTuningMode -ProfilePath $pp
     Assert (@(Rows $x 'gone').Count -ge 1) 'exit-skips-a-process-that-ended'
     ThrowsLike { Set-IemValue -Item ([pscustomobject]@{ key = 'k'; kind = 'cpusets'; args = @{ pid = $child.Id; name = 'PING'; start = 1 } }) -Value '' } '*pid was reused*' 'cpusets-refuse-a-reused-pid'
+    # A placement entry belongs to the process that started at its args.start: a later
+    # process with the same name and pid is never placed under it, since the restore
+    # would find the entry's process 'gone' and leave the later one placed (review R6).
+    $pk = "placement:PING:$($child.Id)"
+    [void](Enter-IemTuningMode -ProfilePath $pp -Only @('placement'))
+    $jf = (Read-IemProfile -Path $pp).journal
+    $jj = Read-IemJournal -Path $jf
+    $jj.mode[$pk].args.start = [long]$jj.mode[$pk].args.start - 1   # the entry of an earlier process
+    Write-IemJournal -Path $jf -Journal $jj
+    $childArgs = @{ pid = $child.Id; name = 'PING'; start = $child.StartTime.ToUniversalTime().Ticks }
+    Set-IemValue -Item ([pscustomobject]@{ key = $pk; kind = 'cpusets'; args = $childArgs }) -Value ''
+    $e6 = Enter-IemTuningMode -ProfilePath $pp -Only @('placement')
+    $r6 = @($e6 | Where-Object { $_.key -eq $pk })
+    Assert ($r6.Count -eq 1 -and $r6[0].action -eq 'failed' -and "$($r6[0].error)" -like '*earlier process*' -and (@([IemCpuSets]::Get($child.Id)) -join ',') -eq '') 'enter-refuses-a-placement-journaled-for-an-earlier-process'
+    $x6 = Exit-IemTuningMode -ProfilePath $pp
+    $g6 = @($x6 | Where-Object { $_.key -eq $pk })
+    Assert ($g6.Count -eq 1 -and $g6[0].action -eq 'gone' -and (@([IemCpuSets]::Get($child.Id)) -join ',') -eq '' -and -not (Read-IemJournalState $pp)) 'exit-leaves-the-later-process-untouched'
 
     # Fingerprint: stable, and a change is named.
     $f1 = Get-IemReaperFingerprint -ProfilePath $pp
