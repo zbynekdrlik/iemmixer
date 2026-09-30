@@ -639,10 +639,10 @@ def scan_commit_blobs(scanner: Scanner, repo: Path, sha: str, seen: set[str]) ->
         found = scanner.findings(path, batches(data))
         if found and old.strip("0") and old_mode != GITLINK:  # not an added path, not a submodule
             found = not_in(found, git(repo, "cat-file", "blob", old))
-        for _label, key, entry in found:
+        for label, key, entry in found:  # the label lets `--hash <sha>:<path> <N>` allowlist it
             if (path, key, entry) not in reported:  # a merge repeats it per parent
                 reported.add((path, key, entry))
-                hits.append(Hit(f"{short} {scanner.shown(path)}", entry))
+                hits.append(Hit(f"{short} {scanner.shown(path)}:{label}", entry))
     return hits, blob_paths
 
 
@@ -732,15 +732,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repo", type=Path, default=Path("."))
     parser.add_argument("--tree", action="append", default=[], metavar="REV")
     parser.add_argument("--commits", action="append", default=[], metavar="REVLIST")
-    parser.add_argument("--hash", nargs=2, metavar=("PATH", "LINE"))
+    parser.add_argument("--hash", nargs=2, metavar=("PATH", "N"),
+                        help="print the allow key of line N (or `run N`) of PATH, or of <rev>:<path>")
     args = parser.parse_args(argv)
 
     if args.hash:
         path, number = args.hash
-        # the units scan_tree numbers, from the file's bytes: read_text() would translate CR / CRLF
+        target = args.repo / path
+        if target.exists() or ":" not in path:
+            data = target.read_bytes()
+        else:  # `<rev>:<path>`: a blob only history holds (the file since changed or removed)
+            rev, path = path.split(":", 1)
+            data = git(args.repo, "cat-file", "blob", f"{rev}:{path}")
+        # the units the scan numbers, from the file's bytes: read_text() would translate CR / CRLF
         # to \n and diverge the allow key from the scanner; a UTF-16 line or a binary run (`run N`)
         # is keyed exactly as the scanner keys it
-        print(line_key(path, unit_key((args.repo / path).read_bytes(), int(number))))
+        print(line_key(path, unit_key(data, int(number.removeprefix("run").strip()))))
         return EXIT_CLEAN
     if args.denylist is None or not (args.tree or args.commits):
         parser.error("--denylist and at least one --tree or --commits are required")
