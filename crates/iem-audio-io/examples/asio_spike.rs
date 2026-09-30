@@ -24,14 +24,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use iem_audio_io::telemetry::{ActivityGuard, Loudest, Watched, dbfs};
+use iem_audio_io::cpuset;
+use iem_audio_io::telemetry::{ActivityGuard, Glitch, Loudest, Watched, dbfs};
 use serde_json::{Value, json};
 
 const USAGE: &str =
-    "usage: asio_spike probe|duplex|reopen --driver <name> --report <file> --stop-file <file> \
-[--progress <file>] [--frames 32|48|64] [--activity-channels all|<list, e.g. 101-110,121-124>] \
-[--seconds S] [--burn-us U] [--stress T] [--panic-at K] [--cycles C]
-(duplex and reopen need --frames and --activity-channels)";
+    "usage: asio_spike probe|duplex|reopen|hwlat --report <file> --stop-file <file> \
+[--driver <name>] [--progress <file>] [--frames 32|48|64] \
+[--activity-channels all|<list, e.g. 101-110,121-124>] [--seconds S] [--burn-us U] [--stress T] \
+[--panic-at K] [--cycles C] [--audio-cpus LIST] [--stress-cpus LIST] [--cpu N] [--threshold-us U]
+(duplex and reopen need --frames and --activity-channels; hwlat needs --cpu and --threshold-us)";
+
+/// The longest run: an 8 h soak with margin (S1c design note §8 W4).
+const MAX_SECONDS: u64 = 36_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -42,6 +47,9 @@ enum Mode {
     Duplex,
     /// `cycles` × (start, 5 s, stop, release, open), timing every phase.
     Reopen,
+    /// One TIME_CRITICAL thread on `--cpu` reads the clock in a loop and
+    /// records its gaps (S1c design note §4.1); the card is never opened.
+    Hwlat,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +66,10 @@ struct Args {
     stress: u32,
     panic_at: u64,
     cycles: u32,
+    audio_cpus: Vec<u8>,
+    stress_cpus: Vec<u8>,
+    cpu: Option<u8>,
+    threshold_us: u64,
     /// The inputs the band guard listens to.
     watched: Watched,
 }
@@ -68,6 +80,7 @@ fn parse(argv: &[String]) -> Result<Args, String> {
         Some("probe") => Mode::Probe,
         Some("duplex") => Mode::Duplex,
         Some("reopen") => Mode::Reopen,
+        Some("hwlat") => Mode::Hwlat,
         other => return Err(format!("unknown mode {other:?}")),
     };
     let mut a = Args {
@@ -82,6 +95,10 @@ fn parse(argv: &[String]) -> Result<Args, String> {
         stress: 0,
         panic_at: 0,
         cycles: 5,
+        audio_cpus: Vec::new(),
+        stress_cpus: Vec::new(),
+        cpu: None,
+        threshold_us: 10,
         watched: Watched::All,
     };
     let mut watched = None;
@@ -99,21 +116,30 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--progress" => a.progress = Some(value.into()),
             "--stop-file" => a.stop_file = value.into(),
             "--frames" => a.frames = i32::try_from(num(4096)?).unwrap_or(0),
-            "--seconds" => a.seconds = num(3600)?,
+            "--seconds" => a.seconds = num(MAX_SECONDS)?,
             "--burn-us" => a.burn_us = u32::try_from(num(300)?).unwrap_or(0),
             "--stress" => a.stress = u32::try_from(num(8)?).unwrap_or(0),
             "--panic-at" => a.panic_at = num(u64::MAX)?,
             "--cycles" => a.cycles = u32::try_from(num(20)?).unwrap_or(0),
             "--activity-channels" => watched = Some(Watched::parse(value)?),
+            "--audio-cpus" => a.audio_cpus = cpuset::parse_lps(value)?,
+            "--stress-cpus" => a.stress_cpus = cpuset::parse_lps(value)?,
+            "--cpu" => a.cpu = Some(u8::try_from(num(63)?).unwrap_or(0)),
+            "--threshold-us" => a.threshold_us = num(1000)?,
             other => return Err(format!("unknown flag {other}")),
         }
     }
-    if a.driver.is_empty() || a.report.as_os_str().is_empty() || a.stop_file.as_os_str().is_empty()
-    {
-        return Err("--driver, --report and --stop-file are required".to_owned());
+    if a.report.as_os_str().is_empty() || a.stop_file.as_os_str().is_empty() {
+        return Err("--report and --stop-file are required".to_owned());
     }
-    if a.mode != Mode::Probe && ![32, 48, 64].contains(&a.frames) {
+    if a.mode != Mode::Hwlat && a.driver.is_empty() {
+        return Err("--driver is required (every mode but hwlat)".to_owned());
+    }
+    if matches!(a.mode, Mode::Duplex | Mode::Reopen) && ![32, 48, 64].contains(&a.frames) {
         return Err("--frames must be 32, 48 or 64".to_owned());
+    }
+    if a.mode == Mode::Hwlat && (a.cpu.is_none() || a.threshold_us == 0) {
+        return Err("hwlat needs --cpu 0..63 and --threshold-us 1..1000".to_owned());
     }
     if a.seconds == 0 || a.cycles == 0 {
         return Err("--seconds and --cycles must be positive".to_owned());
@@ -121,8 +147,8 @@ fn parse(argv: &[String]) -> Result<Args, String> {
     match watched {
         Some(w) => a.watched = w,
         // All inputs only when asked for: a site's program inputs may carry
-        // signal while the band is silent.
-        None if a.mode != Mode::Probe => {
+        // signal while the band is silent (hwlat opens no card).
+        None if matches!(a.mode, Mode::Duplex | Mode::Reopen) => {
             return Err("--activity-channels is required (the stage inputs, or all)".to_owned());
         }
         None => {}
@@ -266,12 +292,14 @@ struct Stress {
 
 #[cfg_attr(not(windows), allow(dead_code))]
 impl Stress {
-    fn start(n: u32) -> Self {
+    fn start(n: u32, cpus: &[u8]) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let threads = (0..n)
             .map(|_| {
                 let stop = Arc::clone(&stop);
+                let cpus = cpus.to_vec();
                 std::thread::spawn(move || {
+                    place_thread(&cpus);
                     while !stop.load(Ordering::Relaxed) {
                         std::hint::spin_loop();
                     }
@@ -280,6 +308,50 @@ impl Stress {
             .collect();
         Self { stop, threads }
     }
+}
+
+/// Puts the calling thread on `cpus` (Windows; empty = anywhere). A failure
+/// leaves the thread where Windows puts it; the report's `process.topology`
+/// shows whether those processors exist.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn place_thread(cpus: &[u8]) {
+    #[cfg(windows)]
+    if !cpus.is_empty() {
+        let _ = iem_audio_io::os::set_thread_cpus(cpus);
+    }
+    #[cfg(not(windows))]
+    let _ = cpus;
+}
+
+/// The most glitches one segment's report lists; more are only counted.
+#[cfg_attr(not(windows), allow(dead_code))]
+const GLITCH_REPORT_CAP: usize = 10_000;
+
+/// Adds `new` to a segment's list up to the cap; returns how many did not fit.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn keep_glitches(list: &mut Vec<Glitch>, new: &[Glitch]) -> usize {
+    let take = new.len().min(GLITCH_REPORT_CAP.saturating_sub(list.len()));
+    list.extend(new.iter().take(take).copied());
+    new.len() - take
+}
+
+/// A glitch's QPC count: the stream's QPC base plus its stream-clock time.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn glitch_qpc(at_ns: u64, base: i64, freq: i64) -> i64 {
+    let ticks = u128::from(at_ns) * u128::try_from(freq).unwrap_or(0) / 1_000_000_000;
+    base.saturating_add(i64::try_from(ticks).unwrap_or(i64::MAX))
+}
+
+/// The trace marker of one glitch (`latency_report.py` parses it): the
+/// glitch's QPC, the QPC when the marker was written, the frequency, the value.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn marker_text(g: &Glitch, base: i64, freq: i64, emit: i64) -> String {
+    format!(
+        "iemmixer-glitch kind={} at_qpc={} emit_qpc={emit} freq={freq} value={}",
+        g.kind.name(),
+        glitch_qpc(g.at_ns, base, freq),
+        g.value
+    )
 }
 
 impl Drop for Stress {
@@ -317,16 +389,19 @@ fn platform(args: &Args) -> ExitCode {
 mod spike {
     use std::collections::BTreeMap;
     use std::path::Path;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
 
     use iem_audio_io::asio::{
         self, AsioError, DriverInfo, Host, Running, StopTimings, StreamConfig,
     };
     use iem_audio_io::format::SampleFormat;
-    use iem_audio_io::telemetry::Snapshot;
+    use iem_audio_io::os;
+    use iem_audio_io::telemetry::{GapScan, Glitch, Snapshot};
     use serde_json::{Value, json};
 
-    use super::{Args, ExitCode, Mode, Stress, Watch, code_of, push};
+    use super::{Args, ExitCode, Mode, Stress, Watch, code_of, keep_glitches, marker_text, push};
 
     const FIRST_CALLBACK_WAIT: Duration = Duration::from_secs(2);
     const AFTER_FAULT: Duration = Duration::from_secs(2);
@@ -340,18 +415,28 @@ mod spike {
             "mode": format!("{:?}", a.mode).to_lowercase(),
             "frames": a.frames, "seconds": a.seconds, "burn_us": a.burn_us,
             "stress": a.stress, "panic_at": a.panic_at, "cycles": a.cycles,
+            "audio_cpus": a.audio_cpus, "stress_cpus": a.stress_cpus,
+            "cpu": a.cpu, "threshold_us": a.threshold_us,
         });
-        let code = match run(a, &mut report) {
-            Ok(code) => code,
-            Err(e) => {
-                let (outcome, code) = match e {
-                    AsioError::NoDrivers(_) | AsioError::NotFound { .. } => ("no-driver", 3),
-                    AsioError::Refused(_) => ("refused", 4),
-                    _ => ("error", 1),
-                };
-                report["outcome"] = json!(outcome);
-                report["error"] = json!(e.to_string());
-                code
+        let (process, refused) = process_setup(a);
+        report["process"] = process;
+        let code = if let Some(why) = refused {
+            report["outcome"] = json!("refused");
+            report["error"] = json!(why);
+            4
+        } else {
+            match run(a, &mut report) {
+                Ok(code) => code,
+                Err(e) => {
+                    let (outcome, code) = match e {
+                        AsioError::NoDrivers(_) | AsioError::NotFound { .. } => ("no-driver", 3),
+                        AsioError::Refused(_) => ("refused", 4),
+                        _ => ("error", 1),
+                    };
+                    report["outcome"] = json!(outcome);
+                    report["error"] = json!(e.to_string());
+                    code
+                }
             }
         };
         match write_json(&a.report, &report) {
@@ -364,6 +449,9 @@ mod spike {
     }
 
     fn run(a: &Args, report: &mut Value) -> Result<u8, AsioError> {
+        if a.mode == Mode::Hwlat {
+            return Ok(hwlat(a, report));
+        }
         // Pre-empted before the start: the card is never opened.
         if a.stop_file.exists() {
             report["outcome"] = json!("stopped");
@@ -384,7 +472,130 @@ mod spike {
             }
             Mode::Duplex => duplex(a, host, info, report),
             Mode::Reopen => reopen(a, host, info, report),
+            Mode::Hwlat => Ok(hwlat(a, report)),
         }
+    }
+
+    /// In-process levers (S1c design note §6.2 L5): power throttling off and
+    /// the audio CPU Set as the process default (every thread without its own
+    /// selection, the driver's included, runs there; no priority changes). A
+    /// requested CPU Set that cannot be applied refuses the run: a
+    /// measurement on the wrong processors would mislead.
+    fn process_setup(a: &Args) -> (Value, Option<String>) {
+        let throttling =
+            os::disable_power_throttling().map_or_else(|e| json!(e.to_string()), |()| json!("off"));
+        let topology = match os::system_cpu_sets() {
+            Ok(sets) => json!(sets
+                .iter()
+                .map(|c| json!({ "id": c.id, "group": c.group, "lp": c.lp, "core": c.core, "realtime": c.realtime }))
+                .collect::<Vec<_>>()),
+            Err(e) => json!({ "error": e.to_string() }),
+        };
+        let (audio, refused) = if a.audio_cpus.is_empty() {
+            (json!(null), None)
+        } else {
+            match os::set_process_cpus(&a.audio_cpus) {
+                Ok(ids) => (json!({ "lps": a.audio_cpus, "ids": ids }), None),
+                Err(e) => (
+                    json!({ "lps": a.audio_cpus, "error": e.to_string() }),
+                    Some(format!("audio CPU Set: {e}")),
+                ),
+            }
+        };
+        (
+            json!({ "power_throttling": throttling, "audio_cpus": audio, "stress_cpus": a.stress_cpus, "topology": topology }),
+            refused,
+        )
+    }
+
+    /// hwlat (S1c design note §4.1): one thread at TIME_CRITICAL on `--cpu`
+    /// reads the clock in a tight loop; every gap of at least the threshold
+    /// is a stall of that processor. The card is never opened.
+    fn hwlat(a: &Args, report: &mut Value) -> u8 {
+        if a.stop_file.exists() {
+            report["outcome"] = json!("stopped");
+            return 0;
+        }
+        let Some(cpu) = a.cpu else {
+            report["outcome"] = json!("error");
+            return 2;
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&stop);
+        let threshold_ns = a.threshold_us.saturating_mul(1_000);
+        let end = Duration::from_secs(a.seconds);
+        let scanner = std::thread::spawn(move || {
+            let placed =
+                os::set_thread_cpus(&[cpu]).map_or_else(|e| json!(e.to_string()), |ids| json!(ids));
+            let priority = os::set_thread_time_critical()
+                .map_or_else(|e| json!(e.to_string()), |()| json!("time-critical"));
+            let mut scan = GapScan::new(threshold_ns);
+            let t0 = Instant::now();
+            let mut prev = 0_u64;
+            loop {
+                let now = t0.elapsed();
+                let ns = u64::try_from(now.as_nanos()).unwrap_or(u64::MAX);
+                scan.observe(prev, ns);
+                prev = ns;
+                if now >= end || flag.load(Ordering::Relaxed) {
+                    break;
+                }
+            }
+            (scan.summary(), placed, priority)
+        });
+        let mut outcome = "done";
+        while !scanner.is_finished() {
+            std::thread::sleep(Duration::from_millis(100));
+            if a.stop_file.exists() && !stop.load(Ordering::Relaxed) {
+                stop.store(true, Ordering::Relaxed);
+                outcome = "stopped";
+            }
+        }
+        match scanner.join() {
+            Ok((s, placed, priority)) => {
+                let q =
+                    |v: [f64; 4]| json!({ "p50": v[0], "p99": v[1], "p999": v[2], "max": v[3] });
+                report["hwlat"] = json!({
+                    "cpu": cpu, "threshold_us": a.threshold_us, "placed": placed, "priority": priority,
+                    "reads": s.reads, "over": s.over, "gaps_us": q(s.gaps.summary_us()),
+                    "largest": s.largest.iter().map(|&(at, gap)| json!({ "at_us": at as f64 / 1e3, "gap_us": gap as f64 / 1e3 })).collect::<Vec<_>>(),
+                });
+                report["outcome"] = json!(outcome);
+                0
+            }
+            Err(_) => {
+                report["outcome"] = json!("error");
+                1
+            }
+        }
+    }
+
+    /// Drains the stream's new glitches: one trace marker each, then into the
+    /// segment's list (capped). Returns how many did not fit the list.
+    fn take_glitches(
+        running: &Running<'_>,
+        fresh: &mut Vec<Glitch>,
+        kept: &mut Vec<Glitch>,
+        markers: Option<&os::Markers>,
+        qpc: Option<(i64, i64)>,
+    ) -> usize {
+        fresh.clear();
+        running.drain_glitches(fresh);
+        if let (Some(m), Some((base, freq))) = (markers, qpc) {
+            let emit = os::qpc().map_or(0, |q| q.0);
+            for g in fresh.iter() {
+                m.write(&marker_text(g, base, freq, emit));
+            }
+        }
+        keep_glitches(kept, fresh)
+    }
+
+    fn glitches_json(list: &[Glitch]) -> Value {
+        json!(
+            list.iter()
+                .map(|g| json!({ "kind": g.kind.name(), "at_ns": g.at_ns, "value": g.value }))
+                .collect::<Vec<_>>()
+        )
     }
 
     /// Releases the driver and creates it again on this thread, recording
@@ -413,7 +624,8 @@ mod spike {
             burn_us: a.burn_us,
             panic_at: a.panic_at,
         };
-        let _stress = Stress::start(a.stress);
+        let _stress = Stress::start(a.stress, &a.stress_cpus);
+        let markers = os::Markers::register().ok();
         let deadline = Instant::now() + Duration::from_secs(a.seconds);
         let mut watch = Watch::new(Instant::now(), a.watched.clone());
         let mut fault: Option<(Instant, u64)> = None;
@@ -424,11 +636,17 @@ mod spike {
             let running = host.start(&info, cfg)?;
             let first = wait_first_callback(&running)?;
             let latency = host.latencies()?;
+            let qpc = running.qpc_base();
+            let mut glitches: Vec<Glitch> = Vec::new();
+            let mut fresh: Vec<Glitch> = Vec::with_capacity(1_024);
+            let mut unreported = 0_usize;
             let t0 = Instant::now();
             let mut next_progress = t0 + Duration::from_secs(5);
             let reopen = loop {
                 asio::pump_messages();
                 std::thread::sleep(Duration::from_millis(10));
+                unreported +=
+                    take_glitches(&running, &mut fresh, &mut glitches, markers.as_ref(), qpc);
                 let now = Instant::now();
                 if let Some(end) =
                     watch.poll(now, a.stop_file.exists(), running.rate_changed(), || {
@@ -462,6 +680,7 @@ mod spike {
                 }
             };
             let seconds = t0.elapsed().as_secs_f64();
+            unreported += take_glitches(&running, &mut fresh, &mut glitches, markers.as_ref(), qpc);
             let (snap, stop) = running.finish();
             if let (Some((_, at)), Some(s)) = (fault, &snap) {
                 report["callbacks_after_fault"] = json!(s.callbacks.saturating_sub(at));
@@ -474,6 +693,8 @@ mod spike {
                     "create_buffers_us": us(first.0.create_buffers), "start_us": us(first.0.start),
                     "first_callback_us": us(first.1), "seconds": seconds,
                     "telemetry": snap.as_ref().map(telemetry_json), "stop": stop_json(stop),
+                    "glitches": glitches_json(&glitches), "glitches_unreported": unreported,
+                    "qpc": qpc.map(|(base, freq)| json!({ "base": base, "freq": freq })),
                 }),
             );
             watch.record_levels(report);
@@ -613,6 +834,9 @@ mod spike {
             "interval_us": q(s.interval.summary_us()),
             "duration_us": q(s.duration.summary_us()),
             "drift_ppm": s.drift_ppm,
+            "callback_cpus": s.callback_cpus.iter().map(|&(lp, n)| (lp.to_string(), json!(n))).collect::<serde_json::Map<_, _>>(),
+            "cpu_other": s.cpu_other, "callback_thread": s.callback_thread,
+            "thread_switches": s.thread_switches, "glitches_dropped": s.glitches_dropped,
         })
     }
 
@@ -620,6 +844,7 @@ mod spike {
         let mut p = json!({
             "elapsed_s": elapsed.as_secs(), "callbacks": s.callbacks, "late": s.late, "missed": s.missed,
             "overruns": s.overruns, "position_gaps": s.position_gaps, "resets": s.resets,
+            "callback_thread": s.callback_thread,
         });
         watch.record_levels(&mut p);
         p
@@ -789,7 +1014,7 @@ mod tests {
 
     #[test]
     fn stress_threads_stop_when_dropped() {
-        let s = Stress::start(2);
+        let s = Stress::start(2, &[]);
         let flag = Arc::clone(&s.stop);
         assert_eq!(s.threads.len(), 2);
         drop(s);
@@ -803,7 +1028,7 @@ mod tests {
     #[test]
     fn parses_a_duplex_run_under_load() {
         let a = parse(&argv(
-            "duplex --driver D1 --report r.json --stop-file stop --progress p.json --frames 32 --seconds 600 --burn-us 100 --stress 4 --panic-at 7 --cycles 3 --activity-channels 101-110,121-124",
+            "duplex --driver D1 --report r.json --stop-file stop --progress p.json --frames 32 --seconds 600 --burn-us 100 --stress 4 --panic-at 7 --cycles 3 --activity-channels 101-110,121-124 --audio-cpus 14 --stress-cpus 6-13",
         ))
         .unwrap();
         assert_eq!(
@@ -820,6 +1045,10 @@ mod tests {
                 stress: 4,
                 panic_at: 7,
                 cycles: 3,
+                audio_cpus: vec![14],
+                stress_cpus: vec![6, 7, 8, 9, 10, 11, 12, 13],
+                cpu: None,
+                threshold_us: 10,
                 watched: Watched::parse("101-110,121-124").unwrap(),
             }
         );
@@ -857,14 +1086,69 @@ mod tests {
             "duplex --driver D1 --report r --stop-file s --frames 16",
             "duplex --driver D1 --report r --stop-file s --frames 32x",
             "duplex --driver D1 --report r --stop-file s --frames 32 --seconds 0",
-            "duplex --driver D1 --report r --stop-file s --frames 32 --seconds 3601",
+            "duplex --driver D1 --report r --stop-file s --frames 32 --activity-channels all --seconds 36001",
             "duplex --driver D1 --report r --stop-file s --frames 32 --burn-us 301",
             "duplex --driver D1 --report r --stop-file s --frames 32 --stress 9",
             "reopen --driver D1 --report r --stop-file s --frames 32 --cycles 0",
             "reopen --driver D1 --report r --stop-file s --frames 32 --cycles 21",
+            "hwlat --report r --stop-file s",
+            "hwlat --report r --stop-file s --cpu 64",
+            "hwlat --report r --stop-file s --cpu 3 --threshold-us 0",
+            "hwlat --report r --stop-file s --cpu 3 --threshold-us 1001",
+            "duplex --driver D1 --report r --stop-file s --frames 32 --activity-channels all --audio-cpus 1,1",
+            "duplex --driver D1 --report r --stop-file s --frames 32 --activity-channels all --stress-cpus 70",
         ] {
             assert!(parse(&argv(bad)).is_err(), "{bad:?}");
         }
         assert!(parse(&argv("duplex --driver D1 --report r --stop-file s --frames 64 --seconds 3600 --burn-us 300 --stress 8 --activity-channels all")).is_ok());
+        assert!(parse(&argv("duplex --driver D1 --report r --stop-file s --frames 32 --activity-channels all --seconds 36000")).is_ok());
+        let h = parse(&argv(
+            "hwlat --report r --stop-file s --cpu 14 --seconds 30",
+        ))
+        .unwrap();
+        assert_eq!(
+            (
+                h.mode,
+                h.cpu,
+                h.threshold_us,
+                h.seconds,
+                h.driver.is_empty()
+            ),
+            (Mode::Hwlat, Some(14), 10, 30, true)
+        );
+    }
+
+    use iem_audio_io::telemetry::GlitchKind;
+
+    fn glitch(kind: GlitchKind, at_ns: u64, value: u64) -> Glitch {
+        Glitch { kind, at_ns, value }
+    }
+
+    #[test]
+    fn glitch_list_is_capped() {
+        let mut list = vec![glitch(GlitchKind::Late, 0, 1); GLITCH_REPORT_CAP - 2];
+        let new = [glitch(GlitchKind::Missed, 1, 2); 5];
+        assert_eq!(keep_glitches(&mut list, &new), 3);
+        assert_eq!(list.len(), GLITCH_REPORT_CAP);
+        assert_eq!(keep_glitches(&mut list, &new), 5);
+        let mut empty = Vec::new();
+        assert_eq!(keep_glitches(&mut empty, &new), 0);
+        assert_eq!(empty.len(), 5);
+    }
+
+    #[test]
+    fn glitch_times_convert_to_qpc_and_markers_carry_them() {
+        assert_eq!(glitch_qpc(1_000_000_000, 100, 10_000_000), 10_000_100);
+        assert_eq!(glitch_qpc(333_333, 0, 10_000_000), 3_333);
+        assert_eq!(glitch_qpc(5, 7, 0), 7);
+        assert_eq!(
+            marker_text(
+                &glitch(GlitchKind::Missed, 1_000_000_000, 700_000),
+                100,
+                10_000_000,
+                10_050_000
+            ),
+            "iemmixer-glitch kind=missed at_qpc=10000100 emit_qpc=10050000 freq=10000000 value=700000"
+        );
     }
 }

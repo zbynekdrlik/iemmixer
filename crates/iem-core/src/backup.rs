@@ -105,6 +105,10 @@ pub struct RestorePreview {
     pub unchanged_count: usize,
     /// Entries of the backup the running topology does not have
     pub skipped: Vec<SkippedEntry>,
+    /// What the running state has and the backup lacks (added to the
+    /// topology after the capture); the restore leaves it as it is
+    #[serde(default)]
+    pub not_in_backup: Vec<SkippedEntry>,
 }
 
 /// A single proposed change from a restore
@@ -220,10 +224,25 @@ mod tests {
                 description: "gone".into(),
                 reason: "not in the topology".into(),
             }],
+            not_in_backup: vec![SkippedEntry {
+                category: RestoreCategory::Input,
+                description: "KEYS".into(),
+                reason: "not in the backup; stays as it is".into(),
+            }],
         };
         let json = serde_json::to_string(&p).unwrap();
         assert!(json.contains(r#""category":"Level""#), "{json}");
+        assert!(
+            json.contains(r#""not_in_backup":[{"category":"Input","description":"KEYS""#),
+            "{json}"
+        );
         assert_eq!(serde_json::from_str::<RestorePreview>(&json).unwrap(), p);
         assert!(RestoreCategory::Level < RestoreCategory::Customization);
+        // A preview without the list (an older server) reads as an empty one.
+        let old = r#"{"changes":[],"unchanged_count":0,"skipped":[]}"#;
+        assert_eq!(
+            serde_json::from_str::<RestorePreview>(old).unwrap(),
+            RestorePreview::default()
+        );
     }
 }

@@ -15,6 +15,7 @@ use iem_engine_proto::{
 use sha2::{Digest, Sha256};
 
 use crate::SAMPLE_RATE;
+use crate::cmd::MAX_HIL;
 use crate::site::{Site, SiteError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -282,6 +283,68 @@ impl Topology {
         }
     }
 
+    /// The mix whose TX is card channel `ch`, if any.
+    pub fn mix_on_tx(&self, ch: u16) -> Option<&MixNode> {
+        let slot = self.tx.iter().position(|&c| c == ch)?;
+        self.mixes.iter().find(|m| m.tx.contains(&Some(slot)))
+    }
+
+    /// Why card channel `ch` may not carry the HIL signal because a mix
+    /// sends on it (S6; the owner's decision on #9 of 2026-09-28: the HIL
+    /// signal never reaches a channel a band member hears).
+    pub fn mix_tx_refusal(&self, ch: u16) -> Option<String> {
+        self.mix_on_tx(ch).map(|m| {
+            format!(
+                "card output {ch} is mix {}'s TX: the HIL signal goes only to spare outputs",
+                m.id
+            )
+        })
+    }
+
+    /// HIL's spare card outputs (`[guard] hil_tx`; S6 design note §4, the
+    /// owner's decision on #9 of 2026-09-28): card channels from 1 that no
+    /// mix uses, each named once, at most [`MAX_HIL`]. `run` opens them
+    /// after the topology's TX under the test-signal flag; `check-site`
+    /// refuses a site whose `hil_tx` breaks the rule. `[engine] channels`
+    /// is no bound (the highest channel the topology uses, not the card's
+    /// output count, which `[card]` does not hold): the card's own count is
+    /// checked when the stream opens (`ChannelMap`, a channel the card lacks
+    /// refuses it, exit 3).
+    pub fn hil_outputs(&self, hil_tx: &[u16]) -> Result<Vec<u16>, SiteError> {
+        if hil_tx.len() > MAX_HIL {
+            return Err(SiteError::HilTx(format!(
+                "{} card outputs: at most {MAX_HIL}",
+                hil_tx.len()
+            )));
+        }
+        let mut outputs = Vec::with_capacity(hil_tx.len());
+        for &ch in hil_tx {
+            if ch == 0 {
+                return Err(SiteError::HilTx(format!(
+                    "card output {ch}: card channels count from 1"
+                )));
+            }
+            if let Some(why) = self.mix_tx_refusal(ch) {
+                return Err(SiteError::HilTx(why));
+            }
+            // The loopback return opens the same-numbered card input (S6 test
+            // 5): it must not be a band input, or the round-trip probe would
+            // lock onto that input instead of the echo (iemmixer#9 review).
+            if self.rx.contains(&ch) {
+                return Err(SiteError::HilTx(format!(
+                    "card channel {ch} is a topology input: its loopback return would read the band"
+                )));
+            }
+            if outputs.contains(&ch) {
+                return Err(SiteError::HilTx(format!(
+                    "card output {ch} is listed twice"
+                )));
+            }
+            outputs.push(ch);
+        }
+        Ok(outputs)
+    }
+
     /// The source of level slot `k` in mix `m`.
     pub fn source(&self, m: usize, k: usize) -> Option<Source> {
         let node = self.mixes.get(m)?;
@@ -435,6 +498,70 @@ mod tests {
 
     fn m2_of() -> Source {
         Source::Mix(MixId::new("member2"))
+    }
+
+    #[test]
+    fn every_tx_channel_names_its_mix() {
+        let t = test_site();
+        let on = |ch: u16| t.mix_on_tx(ch).map(|m| m.id.0.as_str());
+        for (ch, id) in [
+            (71, "member1"),
+            (72, "member1"),
+            (73, "member2"),
+            (88, "member9"),
+            (91, "engineer"),
+            (92, "engineer"),
+            (93, "translator"),
+        ] {
+            assert_eq!(on(ch), Some(id), "{ch}");
+        }
+        for ch in [0, 1, 70, 89, 90, 94, 95, 101, 160, 161] {
+            assert_eq!(on(ch), None, "{ch}");
+        }
+    }
+
+    /// HIL's spare outputs (`[guard] hil_tx`; the owner's decision on #9 of
+    /// 2026-09-28): card channels from 1 that no mix uses, each once, at
+    /// most a HIL mask's worth, so the HIL signal never reaches a band
+    /// member. `[engine] channels` is no bound: it is the highest channel
+    /// the topology uses, not the card's output count, and the D5(b) pair
+    /// may lie above it; the card's own count is checked when the stream
+    /// opens (`ChannelMap`, exit 3).
+    #[test]
+    fn hil_outputs_are_spare_card_channels() {
+        let t = test_site();
+        assert_eq!(t.hil_outputs(&[94, 95]), Ok(vec![94, 95]));
+        assert_eq!(t.hil_outputs(&[160, 1, 89]), Ok(vec![160, 1, 89]));
+        assert_eq!(t.hil_outputs(&[161, 500]), Ok(vec![161, 500]));
+        assert_eq!(t.hil_outputs(&[u16::MAX]), Ok(vec![u16::MAX]));
+        assert_eq!(t.hil_outputs(&[]), Ok(Vec::new()));
+        // Eight spare outputs, none a topology input (101–132) or a mix TX.
+        let eight: Vec<u16> = vec![94, 95, 96, 97, 98, 99, 100, 160];
+        assert_eq!(t.hil_outputs(&eight), Ok(eight.clone()));
+        let refused = |tx: &[u16]| match t.hil_outputs(tx) {
+            Err(SiteError::HilTx(why)) => why,
+            other => panic!("{tx:?}: {other:?}"),
+        };
+        assert_eq!(
+            refused(&[94, 71]),
+            "card output 71 is mix member1's TX: the HIL signal goes only to spare outputs"
+        );
+        assert_eq!(
+            refused(&[93]),
+            "card output 93 is mix translator's TX: the HIL signal goes only to spare outputs"
+        );
+        assert_eq!(
+            refused(&[94, 0]),
+            "card output 0: card channels count from 1"
+        );
+        assert_eq!(refused(&[95, 94, 95]), "card output 95 is listed twice");
+        // A channel that is also a band input: the loopback return would read it.
+        assert_eq!(
+            refused(&[101]),
+            "card channel 101 is a topology input: its loopback return would read the band"
+        );
+        let nine: Vec<u16> = (94..103).collect();
+        assert_eq!(refused(&nine), "9 card outputs: at most 8");
     }
 
     #[test]

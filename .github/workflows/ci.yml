@@ -32,6 +32,8 @@ jobs:
           set -euo pipefail
           python3 -m unittest discover -s scripts -p 'test_*.py' -v
           python3 -m unittest discover -s scripts/asio-spike -p 'test_*.py' -v
+          python3 -m unittest discover -s scripts/pc-tuning -p 'test_*.py' -v
+          python3 -m unittest discover -s scripts/iem-pc -p 'test_*.py' -v
           python3 scripts/test_check_disposal_safety.py
       - name: Golden tooling self-tests (numpy venv)
         run: |
@@ -41,6 +43,8 @@ jobs:
           "$RUNNER_TEMP/gvenv/bin/python" -m unittest discover -s scripts/golden -p 'test_*.py' -v
       - name: Leptos disposal safety
         run: python3 scripts/check_disposal_safety.py
+      - name: Gen 1 test parity manifest
+        run: python3 scripts/check_parity_manifest.py
       - name: Version consistency
         run: python3 scripts/check_version.py
       - name: Tray icons
@@ -89,14 +93,14 @@ jobs:
           tool: cargo-llvm-cov@0.9.1
       - name: UI unit tests (native)
         run: cargo test --locked -p iem-ui --lib
-      - name: Tests with line coverage (iem-core, iem-server, iem-rpp, iem-dsp, iem-limiter-mga, engine crates, iem-migrate) against the floor
+      - name: Tests with line coverage (iem-core, iem-server, iem-rpp, iem-dsp, iem-limiter-mga, engine crates, iem-migrate, iem-win, iem-guard) against the floor
         # Runs after a failed UI test step too (the job still fails): one CI
         # cycle reports every failing test.
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           cargo llvm-cov --locked --no-fail-fast --package iem-core --package iem-server --package iem-rpp \
-            --package iem-dsp --package iem-limiter-mga --package iem-engine-proto --package iem-audio-io --package iem-engine --package iem-migrate --all-features \
+            --package iem-dsp --package iem-limiter-mga --package iem-engine-proto --package iem-audio-io --package iem-engine --package iem-migrate --package iem-win --package iem-guard --all-features \
             --json --summary-only --output-path "$RUNNER_TEMP/coverage.json"
           pct="$(jq '.data[0].totals.lines.percent' "$RUNNER_TEMP/coverage.json")"
           floor="$(tr -d '[:space:]' < .github/coverage-floor)"
@@ -239,6 +243,17 @@ jobs:
           ls crates/iem-ui/dist/*.wasm
           # X11: the listen limiter worklet ships with the page
           test -f crates/iem-ui/dist/listen-limiter-worklet.js
+          # The app loader is ours (Trunk.toml pattern_script): every
+          # placeholder filled in, and not Trunk's default top-level init.
+          grep -q 'WebAssembly.compileStreaming' crates/iem-ui/dist/index.html
+          if grep -qE '\{(base|js|wasm)\}' crates/iem-ui/dist/index.html; then
+            echo "::error::dist/index.html has an unfilled loader placeholder"
+            exit 1
+          fi
+          if grep -q 'const wasm = await init(' crates/iem-ui/dist/index.html; then
+            echo "::error::dist/index.html has Trunk's default loader"
+            exit 1
+          fi
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: wasm-dist
@@ -354,6 +369,9 @@ jobs:
       - name: Golden PC module self-test (Windows PowerShell 5.1, as on the PC)
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/golden/Test-GoldenPc.ps1
+      - name: Guard PC module and HIL v1 script self-test, parse check included (Windows PowerShell 5.1, as on the PC)
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/iem-pc/Test-IemPc.ps1
       - name: Rust toolchain (rust-toolchain.toml)
         run: rustup toolchain install
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -367,25 +385,144 @@ jobs:
         run: "cargo test --locked -p iem-server --all-features --lib pepper::"
       - name: Clippy (engine crates on the engine's target OS)
         run: cargo clippy --locked -p iem-engine-proto -p iem-audio-io -p iem-engine --all-targets -- -D warnings
-      - name: Engine crate tests (library; the pipe integration tests need socket timeouts, Unix-only until S6)
+      - name: Engine crate tests (library)
         run: cargo test --locked -p iem-engine-proto -p iem-audio-io -p iem-engine --lib
-      - name: Migration CLI clippy and tests (it runs on the PC; the PIN pepper is DPAPI here)
+      - name: Engine pipe tests on named pipes (private DACL, first instance, peeking readers)
+        run: cargo test --locked -p iem-engine --test pipes
+      - name: Clippy (Windows glue iem-win, with its Ctrl-Break test helper)
+        run: cargo clippy --locked -p iem-win --all-targets --features test-helper -- -D warnings
+      - name: Windows glue tests (processes, ports, windows, registry under a test key, Ctrl-Break to a child)
+        run: cargo test --locked -p iem-win --features test-helper
+      # One cargo command per step: the pwsh wrapper stops only on the last
+      # command's exit code, so a lint-only clippy failure followed by green
+      # tests would pass the step.
+      - name: Guard clippy (its Windows effects WinPc build here only; the pure core runs on Linux too)
+        run: cargo clippy --locked -p iem-guard --all-targets -- -D warnings
+      - name: Guard tests on Windows
+        run: cargo test --locked -p iem-guard
+      - name: Migration CLI clippy (it runs on the PC; the PIN pepper is DPAPI here)
+        run: cargo clippy --locked -p iem-migrate --all-targets -- -D warnings
+      - name: Migration CLI tests on Windows
+        run: cargo test --locked -p iem-migrate
+
+  bundle:
+    name: bundle
+    # The one bundle that may reach the PC (P5, S6 design note section 5.5): built
+    # on every push and pull request, verified by the guard's own install code,
+    # uploaded only from a push to dev or main, then attested by digest.
+    needs: [windows]
+    runs-on: windows-2025
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: wasm-dist
+          path: crates/iem-ui/dist
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Build (release; the server as the PC runs it, with TLS and the audio paths)
+        run: cargo build --locked --release -p iem-engine -p iem-server -p iem-guard -p iem-tray -p iem-migrate --features iem-server/standalone,iem-server/tls,iem-server/audio
+      - name: Zip with manifest and sums
+        shell: pwsh
         run: |
-          cargo clippy --locked -p iem-migrate --all-targets -- -D warnings
-          cargo test --locked -p iem-migrate
-      - name: Build release binaries
-        run: cargo build --locked --release -p iem-server -p iem-tray -p iem-migrate --features iem-server/standalone
-      - name: Upload the binaries (push runs only — pull requests, forks included, never yield binaries)
+          $ErrorActionPreference = 'Stop'
+          $b = Join-Path $env:RUNNER_TEMP 'bundle'
+          New-Item -ItemType Directory -Force -Path $b | Out-Null
+          $exes = 'iem-engine', 'iem-server', 'iemmixer-guard', 'iemmode', 'iem-tray', 'iem-migrate' | ForEach-Object { "target/release/$_.exe" }
+          Copy-Item -LiteralPath $exes -Destination $b
+          Copy-Item -LiteralPath scripts/iem-pc/hil-v1.ps1, scripts/iem-pc/IemPc.psm1 -Destination $b
+          Copy-Item -LiteralPath crates/iem-engine/LICENSE -Destination (Join-Path $b 'LICENSE-iem-engine')
+          # The S1c tuning modules, one level deep (bundle names allow tuning/<name> only).
+          if (Test-Path -LiteralPath scripts/pc-tuning) {
+            New-Item -ItemType Directory -Force -Path (Join-Path $b 'tuning') | Out-Null
+            Copy-Item -Path scripts/pc-tuning/*.psm1 -Destination (Join-Path $b 'tuning')
+          }
+          # [workspace.package].version, read from its own table (never the first version line).
+          $version = ''
+          $inPackage = $false
+          foreach ($line in Get-Content -LiteralPath Cargo.toml) {
+            if ($line -match '^\s*\[') { $inPackage = ($line.Trim() -ceq '[workspace.package]'); continue }
+            if ($inPackage -and $line -match '^\s*version\s*=\s*"([^"]+)"') { $version = $Matches[1]; break }
+          }
+          if (-not $version) { throw 'no [workspace.package] version in Cargo.toml' }
+          $branch = if ($env:GITHUB_REF -like 'refs/heads/*') { $env:GITHUB_REF.Substring(11) } else { 'pr' }
+          [ordered]@{ sha = $env:GITHUB_SHA; branch = $branch; version = $version; run = [int64]$env:GITHUB_RUN_ID } | ConvertTo-Json |
+            Set-Content -Encoding utf8NoBOM -LiteralPath (Join-Path $b 'manifest.json')
+          $lines = Get-ChildItem -LiteralPath $b -File -Recurse | Sort-Object FullName | ForEach-Object {
+            '{0}  {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.FullName.Substring($b.Length + 1).Replace('\', '/')
+          }
+          [IO.File]::WriteAllText((Join-Path $b 'SHA256SUMS'), (($lines -join "`n") + "`n"))
+          Get-Content -LiteralPath (Join-Path $b 'SHA256SUMS')
+          Compress-Archive -Path (Join-Path $b '*') -DestinationPath (Join-Path $env:RUNNER_TEMP "iemmixer-$env:GITHUB_SHA.zip")
+      - name: Verify the zip with the code that installs it; a tampered copy is refused
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = Join-Path $env:RUNNER_TEMP "iemmixer-$env:GITHUB_SHA.zip"
+          & target/release/iemmixer-guard.exe install $zip --verify-only
+          if ($LASTEXITCODE -ne 0) { throw "bundle verify failed ($LASTEXITCODE)" }
+          $t = Join-Path $env:RUNNER_TEMP 'tampered'
+          Copy-Item -Recurse -LiteralPath (Join-Path $env:RUNNER_TEMP 'bundle') -Destination $t
+          Add-Content -LiteralPath (Join-Path $t 'hil-v1.ps1') -Value '# tampered after the sums'
+          $out = New-Item -ItemType Directory -Force -Path (Join-Path $env:RUNNER_TEMP 'tampered-zip')
+          $bad = Join-Path $out.FullName "iemmixer-$env:GITHUB_SHA.zip"
+          Compress-Archive -Path (Join-Path $t '*') -DestinationPath $bad
+          # The refusal must name the tampered file's sum, not fail for another reason.
+          $ErrorActionPreference = 'Continue'
+          $said = (& target/release/iemmixer-guard.exe install $bad --verify-only 2>&1 | ForEach-Object { "$_" }) -join "`n"
+          $code = $LASTEXITCODE
+          $ErrorActionPreference = 'Stop'
+          Write-Output $said
+          if ($code -eq 0) { throw 'install --verify-only accepted a tampered bundle' }
+          if ($said -cnotmatch 'hil-v1\.ps1: sha256 [0-9a-f]{64}, SHA256SUMS says [0-9a-f]{64}') {
+            throw "install --verify-only refused the tampered bundle ($code) without naming hil-v1.ps1's sum"
+          }
+          $global:LASTEXITCODE = 0
+      - name: Upload (dev/main pushes only, P5)
         if: github.event_name == 'push'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: windows-binaries
-          path: |
-            target/release/iem-server.exe
-            target/release/iem-tray.exe
-            target/release/iem-migrate.exe
-          retention-days: 7
+          name: iemmixer-bundle-${{ github.sha }}
+          path: ${{ runner.temp }}/iemmixer-${{ github.sha }}.zip
+          retention-days: 30
           if-no-files-found: error
+
+  attest:
+    name: attest
+    # Provenance of the zip by digest: no checkout, no build. The dev box reads
+    # this run's jobs and dispatches the private ops repo's HIL itself (iempc
+    # dispatch-hil); no dispatch job and no token live here (design section 7).
+    if: github.event_name == 'push'
+    needs: [bundle]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      id-token: write
+      attestations: write
+      contents: read
+    outputs:
+      digest: ${{ steps.d.outputs.digest }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: iemmixer-bundle-${{ github.sha }}
+      - name: Digest of the zip
+        id: d
+        run: |
+          set -euo pipefail
+          sum="$(sha256sum "iemmixer-${GITHUB_SHA}.zip" | cut -d' ' -f1)"
+          [[ "$sum" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::no digest for iemmixer-${GITHUB_SHA}.zip"; exit 1; }
+          echo "digest=sha256:$sum" >> "$GITHUB_OUTPUT"
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: iemmixer-${{ github.sha }}.zip
+          subject-digest: ${{ steps.d.outputs.digest }}
 
   asio-spike:
     name: asio-spike
@@ -398,13 +535,18 @@ jobs:
       - name: Spike PC module self-test (Windows PowerShell 5.1, as on the PC)
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/asio-spike/Test-SpikePc.ps1
+      - name: Tuning module self-test (Windows PowerShell 5.1, real backends on the ephemeral runner)
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/pc-tuning/Test-IemTuning.ps1
       - name: Rust toolchain (rust-toolchain.toml)
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - name: Audio I/O clippy and tests on Windows (format, telemetry, the ASIO host builds, the spike's parser)
-        run: |
-          cargo clippy --locked -p iem-audio-io --all-targets -- -D warnings
-          cargo test --locked -p iem-audio-io
+      # One cargo command per step (the pwsh wrapper stops only on the last
+      # command's exit code).
+      - name: Audio I/O clippy on Windows (format, telemetry, the ASIO host builds, the spike's parser)
+        run: cargo clippy --locked -p iem-audio-io --all-targets -- -D warnings
+      - name: Audio I/O tests on Windows
+        run: cargo test --locked -p iem-audio-io
       - name: Build the spike (release)
         run: cargo build --locked --release -p iem-audio-io --example asio_spike
       - name: Without an ASIO driver the spike reports no-driver and exits 3
@@ -423,7 +565,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $b = Join-Path $env:RUNNER_TEMP 'asio-spike'
           New-Item -ItemType Directory -Force -Path $b | Out-Null
-          Copy-Item -LiteralPath target/release/examples/asio_spike.exe, scripts/asio-spike/SpikePc.psm1, scripts/asio-spike/spike-task.ps1, scripts/golden/GoldenPc.psm1 -Destination $b
+          Copy-Item -LiteralPath target/release/examples/asio_spike.exe, scripts/asio-spike/SpikePc.psm1, scripts/asio-spike/spike-task.ps1, scripts/golden/GoldenPc.psm1, scripts/pc-tuning/IemTuning.psm1, scripts/pc-tuning/IemMeasure.psm1 -Destination $b
           $lines = Get-ChildItem -LiteralPath $b -File | Sort-Object Name | ForEach-Object { '{0}  {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name }
           [IO.File]::WriteAllText((Join-Path $b 'SHA256SUMS'), (($lines -join "`n") + "`n"))
       - name: Upload (dev pushes only — the only spike that may reach the PC, P5)
@@ -448,9 +590,11 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - uses: taiki-e/install-action@7623a79cdfecb99d681017af368ca353d9f49bb5 # v2.87.19
         with:
-          tool: cargo-deny@0.20.2
+          tool: cargo-deny@0.20.2,osv-scanner@2.6.0
       - name: cargo-deny (advisories, bans, licences, sources)
         run: cargo deny --locked check advisories bans licenses sources
+      - name: osv-scanner (GitHub and RustSec advisories, every lockfile)
+        run: osv-scanner scan source --config osv-scanner.toml -L Cargo.lock -L fuzz/Cargo.lock -L e2e/package-lock.json
       - name: Engine dependency allowlist (program spec 5.2)
         run: python3 scripts/check_engine_deps.py
 
@@ -534,7 +678,7 @@ jobs:
           if [ -s "$RUNNER_TEMP/pr.diff" ]; then
             cargo mutants --list --in-diff "$RUNNER_TEMP/pr.diff" \
               --package iem-core --package iem-server --package iem-ui --package iem-rpp \
-              --package iem-dsp --package iem-limiter-mga --package iem-engine-proto --package iem-audio-io --package iem-engine --package iem-migrate > "$RUNNER_TEMP/mutants.txt"
+              --package iem-dsp --package iem-limiter-mga --package iem-engine-proto --package iem-audio-io --package iem-engine --package iem-migrate --package iem-win --package iem-guard > "$RUNNER_TEMP/mutants.txt"
             count="$(wc -l < "$RUNNER_TEMP/mutants.txt")"
           fi
           [ "$(grep -cE '^ +shard: \[' .github/workflows/ci.yml)" -eq 1 ] \
@@ -567,7 +711,7 @@ jobs:
         with:
           tool: cargo-nextest@0.9.146
       - name: Build the mutants profile once (the shards restore this cache)
-        run: cargo nextest run --locked --cargo-profile mutants --no-run -p iem-core -p iem-server -p iem-ui -p iem-rpp -p iem-dsp -p iem-limiter-mga -p iem-engine-proto -p iem-audio-io -p iem-engine -p iem-migrate --all-features --all-targets
+        run: cargo nextest run --locked --cargo-profile mutants --no-run -p iem-core -p iem-server -p iem-ui -p iem-rpp -p iem-dsp -p iem-limiter-mga -p iem-engine-proto -p iem-audio-io -p iem-engine -p iem-migrate -p iem-win -p iem-guard --all-features --all-targets
       - name: Unmutated tests under the mutants profile (every test's duration; the shards skip the baseline)
         env:
           # A test that fails or times out here unmutated would make every
@@ -578,7 +722,7 @@ jobs:
         run: |
           set -euo pipefail
           failed=()
-          for p in iem-core iem-server iem-ui iem-rpp iem-dsp iem-limiter-mga iem-engine-proto iem-audio-io iem-engine iem-migrate; do
+          for p in iem-core iem-server iem-ui iem-rpp iem-dsp iem-limiter-mga iem-engine-proto iem-audio-io iem-engine iem-migrate iem-win iem-guard; do
             echo "::group::$p"
             cargo nextest run --locked --cargo-profile mutants --no-fail-fast -p "$p" --all-features --all-targets || failed+=("$p")
             echo "::endgroup::"
@@ -598,7 +742,7 @@ jobs:
       fail-fast: false
       matrix:
         # 0-based (cargo-mutants --shard k/n); the length is the shard count
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191, 192, 193, 194, 195, 196, 197, 198, 199]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -616,7 +760,7 @@ jobs:
         with:
           tool: cargo-mutants@27.1.0,cargo-nextest@0.9.146
       - name: Warm target (dependencies restored; workspace crates build once, then are copied per job)
-        run: cargo nextest run --locked --cargo-profile mutants --no-run -p iem-core -p iem-server -p iem-ui -p iem-rpp -p iem-dsp -p iem-limiter-mga -p iem-engine-proto -p iem-audio-io -p iem-engine -p iem-migrate --all-features --all-targets
+        run: cargo nextest run --locked --cargo-profile mutants --no-run -p iem-core -p iem-server -p iem-ui -p iem-rpp -p iem-dsp -p iem-limiter-mga -p iem-engine-proto -p iem-audio-io -p iem-engine -p iem-migrate -p iem-win -p iem-guard --all-features --all-targets
       - name: Diff-scoped mutants
         env:
           # .config/nextest.toml: stop at the first failing test (fail fast on hangs).
@@ -629,7 +773,7 @@ jobs:
             exit 0
           fi
           packages=(--package iem-core --package iem-server --package iem-ui --package iem-rpp
-            --package iem-dsp --package iem-limiter-mga --package iem-engine-proto --package iem-audio-io --package iem-engine --package iem-migrate)
+            --package iem-dsp --package iem-limiter-mga --package iem-engine-proto --package iem-audio-io --package iem-engine --package iem-migrate --package iem-win --package iem-guard)
           # --timeout: with --baseline=skip cargo-mutants has no measured test time
           # and would allow 300 s per mutant; the tests take ~6 s.
           status=0

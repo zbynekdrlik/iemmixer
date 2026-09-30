@@ -3,8 +3,9 @@
 //! allocation; any other thread reads snapshots. Portable: the ASIO host
 //! (Windows) feeds it, the tests run everywhere.
 
+use core::cmp::Reverse;
 use core::sync::atomic::{
-    AtomicBool, AtomicI64, AtomicU64,
+    AtomicI64, AtomicU8, AtomicU64,
     Ordering::{Acquire, Relaxed, Release},
 };
 
@@ -17,6 +18,9 @@ pub const WARMUP: u64 = 8;
 /// −50 dBFS, the band-activity threshold (program spec §4.2).
 pub const ACTIVITY_THRESHOLD: f64 = 0.003_162_277_660_168_379;
 const NO_POSITION: i64 = i64::MIN;
+/// [`Telemetry::take_requests`]: a reset request and a buffer size change.
+const RESET_BIT: u8 = 1;
+const SIZE_BIT: u8 = 2;
 
 /// ASIO driver-to-host message selectors (asio.h `kAsio…`).
 pub mod selector {
@@ -96,6 +100,156 @@ pub fn reply(sel: i32, value: i32) -> i32 {
     }
 }
 
+/// What the driver asked a reopen for since the last take
+/// ([`Telemetry::take_requests`]); the owner thread logs it (#9 2026-09-28).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Requested {
+    /// `kAsioResetRequest`.
+    pub reset: bool,
+    /// `kAsioBufferSizeChange` (answered 0: the driver then asks for a reset).
+    pub buffer_size: bool,
+}
+
+impl Requested {
+    /// Either asks for a reopen.
+    pub fn any(self) -> bool {
+        self.reset || self.buffer_size
+    }
+}
+
+/// What went wrong at one callback (S1c design note §4.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GlitchKind {
+    /// Interval above 1.5 periods.
+    Late,
+    /// Interval of at least 2 periods.
+    Missed,
+    /// Callback longer than one period.
+    Overrun,
+    /// The driver's sample position did not advance by one buffer.
+    PositionGap,
+}
+
+impl GlitchKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Late => "late",
+            Self::Missed => "missed",
+            Self::Overrun => "overrun",
+            Self::PositionGap => "position-gap",
+        }
+    }
+
+    fn code(self) -> u64 {
+        match self {
+            Self::Late => 0,
+            Self::Missed => 1,
+            Self::Overrun => 2,
+            Self::PositionGap => 3,
+        }
+    }
+
+    fn from_code(code: u64) -> Self {
+        match code {
+            1 => Self::Missed,
+            2 => Self::Overrun,
+            3 => Self::PositionGap,
+            _ => Self::Late,
+        }
+    }
+}
+
+/// One glitch: the callback's entry on the stream clock (ns) and the interval
+/// (late, missed), the callback's duration (overrun) or the position step in
+/// frames (position gap).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Glitch {
+    pub kind: GlitchKind,
+    pub at_ns: u64,
+    pub value: u64,
+}
+
+/// Glitches kept between two drains; more are counted as dropped.
+pub const GLITCH_CAPACITY: usize = 4_096;
+const VALUE_BITS: u32 = 62;
+const VALUE_MASK: u64 = (1 << VALUE_BITS) - 1;
+
+/// Single-producer (the callback) single-consumer (the owner thread) ring of
+/// glitches: preallocated, lock-free, never blocking the producer.
+pub struct GlitchLog {
+    at: Box<[AtomicU64]>,
+    packed: Box<[AtomicU64]>,
+    head: AtomicU64,
+    tail: AtomicU64,
+    dropped: AtomicU64,
+}
+
+impl GlitchLog {
+    pub fn new(capacity: usize) -> Self {
+        let slots = || (0..capacity.max(1)).map(|_| AtomicU64::new(0)).collect();
+        Self {
+            at: slots(),
+            packed: slots(),
+            head: AtomicU64::new(0),
+            tail: AtomicU64::new(0),
+            dropped: AtomicU64::new(0),
+        }
+    }
+
+    fn slot(&self, n: u64) -> usize {
+        usize::try_from(n % self.at.len() as u64).unwrap_or(0)
+    }
+
+    /// Callback thread only.
+    pub fn push(&self, g: Glitch) {
+        let head = self.head.load(Relaxed);
+        if head.wrapping_sub(self.tail.load(Acquire)) >= self.at.len() as u64 {
+            self.dropped.fetch_add(1, Relaxed);
+            return;
+        }
+        let i = self.slot(head);
+        if let (Some(at), Some(p)) = (self.at.get(i), self.packed.get(i)) {
+            at.store(g.at_ns, Relaxed);
+            // `+`, not `|`: the kind occupies bits at/above 62 and the value is
+            // clamped below 2^62, so they never share a bit. `+` reads back
+            // identically and, unlike `|`, has no equivalent-mutant twin.
+            p.store(
+                (g.kind.code() << VALUE_BITS) + g.value.min(VALUE_MASK),
+                Relaxed,
+            );
+        }
+        self.head.store(head.wrapping_add(1), Release);
+    }
+
+    /// Owner thread only: moves every glitch since the last drain into `out`,
+    /// oldest first.
+    pub fn drain(&self, out: &mut Vec<Glitch>) {
+        let tail = self.tail.load(Relaxed);
+        let head = self.head.load(Acquire);
+        let mut n = tail;
+        while n != head {
+            let i = self.slot(n);
+            if let (Some(at), Some(p)) = (self.at.get(i), self.packed.get(i)) {
+                let packed = p.load(Relaxed);
+                out.push(Glitch {
+                    kind: GlitchKind::from_code(packed >> VALUE_BITS),
+                    at_ns: at.load(Relaxed),
+                    value: packed & VALUE_MASK,
+                });
+            }
+            n = n.wrapping_add(1);
+        }
+        self.tail.store(head, Release);
+    }
+
+    pub fn dropped(&self) -> u64 {
+        self.dropped.load(Relaxed)
+    }
+}
+
+/// Logical processors counted per callback; a higher index goes to `cpu_other`.
+pub const CPU_SLOTS: usize = 64;
+
 pub struct Histogram {
     counts: Box<[AtomicU64]>,
     max_ns: AtomicU64,
@@ -174,6 +328,32 @@ impl HistogramSnapshot {
     }
 }
 
+/// The counters of a [`Snapshot`] that a control loop polls, without the
+/// histograms: [`Telemetry::counters`] reads them without allocating.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Counters {
+    pub callbacks: u64,
+    pub late: u64,
+    pub missed: u64,
+    pub overruns: u64,
+    /// The longest callback so far (ns).
+    pub max_ns: u64,
+}
+
+impl Counters {
+    /// `self` followed by `later` (the stream after a reopen): the counts
+    /// add up, the longest callback is the longer of the two.
+    pub fn plus(self, later: Counters) -> Counters {
+        Counters {
+            callbacks: self.callbacks.saturating_add(later.callbacks),
+            late: self.late.saturating_add(later.late),
+            missed: self.missed.saturating_add(later.missed),
+            overruns: self.overruns.saturating_add(later.overruns),
+            max_ns: self.max_ns.max(later.max_ns),
+        }
+    }
+}
+
 /// Everything one stream recorded, read at one moment.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Snapshot {
@@ -196,6 +376,14 @@ pub struct Snapshot {
     pub interval: HistogramSnapshot,
     pub duration: HistogramSnapshot,
     pub drift_ppm: Option<f64>,
+    /// (logical processor, callbacks it ran), in processor order.
+    pub callback_cpus: Vec<(u32, u64)>,
+    pub cpu_other: u64,
+    /// The first callback's thread id (0 = none yet).
+    pub callback_thread: u32,
+    /// Callbacks on a thread other than the first one.
+    pub thread_switches: u64,
+    pub glitches_dropped: u64,
 }
 
 pub struct Telemetry {
@@ -225,7 +413,18 @@ pub struct Telemetry {
     buffer_size_changes: AtomicU64,
     overloads: AtomicU64,
     rate_changes: AtomicU64,
-    reopen: AtomicBool,
+    /// The reopen requests since the last take: `RESET_BIT`, `SIZE_BIT`.
+    reopen: AtomicU8,
+    /// Judged glitches for the trace markers (S1c): the callback pushes, the
+    /// owner thread drains.
+    glitches: GlitchLog,
+    /// Callbacks per logical processor (index = processor); a higher index
+    /// goes to `cpu_other`.
+    cpus: Box<[AtomicU64]>,
+    cpu_other: AtomicU64,
+    /// The first callback thread's id (0 = none yet).
+    thread: AtomicU64,
+    thread_switches: AtomicU64,
 }
 
 impl Telemetry {
@@ -254,7 +453,12 @@ impl Telemetry {
             buffer_size_changes: AtomicU64::new(0),
             overloads: AtomicU64::new(0),
             rate_changes: AtomicU64::new(0),
-            reopen: AtomicBool::new(false),
+            reopen: AtomicU8::new(0),
+            glitches: GlitchLog::new(GLITCH_CAPACITY),
+            cpus: (0..CPU_SLOTS).map(|_| AtomicU64::new(0)).collect(),
+            cpu_other: AtomicU64::new(0),
+            thread: AtomicU64::new(0),
+            thread_switches: AtomicU64::new(0),
         }
     }
 
@@ -270,7 +474,8 @@ impl Telemetry {
     /// driver's sample position when it reported one. Positions count only
     /// after the warm-up (the drift is anchored there, not on the priming
     /// burst); a callback without one leaves nothing to compare the next
-    /// position with, so no gap is judged across it.
+    /// position with, so no gap is judged across it. Every judged glitch also
+    /// enters the glitch log.
     pub fn on_callback(&self, entry_ns: u64, position: Option<i64>) {
         let n = self.callbacks.fetch_add(1, Relaxed);
         let prev = self.last_ns.swap(entry_ns, Relaxed);
@@ -279,18 +484,37 @@ impl Telemetry {
         } else if n >= WARMUP {
             let dt = entry_ns.saturating_sub(prev);
             self.interval.record(dt);
-            match classify(dt, self.period_ns) {
-                Gap::Missed => self.missed.fetch_add(1, Relaxed),
-                Gap::Late => self.late.fetch_add(1, Relaxed),
-                Gap::OnTime => 0,
+            let kind = match classify(dt, self.period_ns) {
+                Gap::Missed => {
+                    self.missed.fetch_add(1, Relaxed);
+                    Some(GlitchKind::Missed)
+                }
+                Gap::Late => {
+                    self.late.fetch_add(1, Relaxed);
+                    Some(GlitchKind::Late)
+                }
+                Gap::OnTime => None,
             };
+            if let Some(kind) = kind {
+                self.glitches.push(Glitch {
+                    kind,
+                    at_ns: entry_ns,
+                    value: dt,
+                });
+            }
         }
         let before = self.prev_pos.swap(position.unwrap_or(NO_POSITION), Relaxed);
         if n >= WARMUP
             && let Some(pos) = position
         {
-            if before != NO_POSITION && pos.wrapping_sub(before) != self.frames {
+            let step = pos.wrapping_sub(before);
+            if before != NO_POSITION && step != self.frames {
                 self.position_gaps.fetch_add(1, Relaxed);
+                self.glitches.push(Glitch {
+                    kind: GlitchKind::PositionGap,
+                    at_ns: entry_ns,
+                    value: step.unsigned_abs(),
+                });
             }
             // The end first: a reader that sees the anchor also sees an end.
             self.last_pos_ns.store(entry_ns, Relaxed);
@@ -307,7 +531,32 @@ impl Telemetry {
         self.duration.record(duration_ns);
         if duration_ns > self.period_ns {
             self.overruns.fetch_add(1, Relaxed);
+            self.glitches.push(Glitch {
+                kind: GlitchKind::Overrun,
+                at_ns: self.last_ns.load(Relaxed),
+                value: duration_ns,
+            });
         }
+    }
+
+    /// At the entry of a callback, from the host: the logical processor it
+    /// runs on and its thread id (both read without a system call).
+    pub fn on_thread(&self, cpu: u32, thread_id: u32) {
+        match usize::try_from(cpu).ok().and_then(|i| self.cpus.get(i)) {
+            Some(c) => c.fetch_add(1, Relaxed),
+            None => self.cpu_other.fetch_add(1, Relaxed),
+        };
+        let id = u64::from(thread_id);
+        if let Err(first) = self.thread.compare_exchange(0, id, Relaxed, Relaxed)
+            && first != id
+        {
+            self.thread_switches.fetch_add(1, Relaxed);
+        }
+    }
+
+    /// Owner thread only: the glitches since the last call, oldest first.
+    pub fn drain_glitches(&self, out: &mut Vec<Glitch>) {
+        self.glitches.drain(out);
     }
 
     /// Counts one `asioMessage` and answers it ([`reply`]).
@@ -323,9 +572,12 @@ impl Telemetry {
         if let Some(c) = counter {
             c.fetch_add(1, Relaxed);
         }
-        if matches!(sel, selector::RESET_REQUEST | selector::BUFFER_SIZE_CHANGE) {
-            self.reopen.store(true, Relaxed);
-        }
+        let request = match sel {
+            selector::RESET_REQUEST => RESET_BIT,
+            selector::BUFFER_SIZE_CHANGE => SIZE_BIT,
+            _ => 0,
+        };
+        self.reopen.fetch_or(request, Relaxed);
         reply(sel, value)
     }
 
@@ -340,7 +592,27 @@ impl Telemetry {
 
     /// True once after the driver asked for a reset (or a buffer resize).
     pub fn take_reopen(&self) -> bool {
-        self.reopen.swap(false, Relaxed)
+        self.take_requests().any()
+    }
+
+    /// Which reopen requests came since the last take (once each).
+    pub fn take_requests(&self) -> Requested {
+        let bits = self.reopen.swap(0, Relaxed);
+        Requested {
+            reset: (bits & RESET_BIT) != 0,
+            buffer_size: (bits & SIZE_BIT) != 0,
+        }
+    }
+
+    /// The polled counters (no allocation, unlike [`Telemetry::snapshot`]).
+    pub fn counters(&self) -> Counters {
+        Counters {
+            callbacks: self.callbacks.load(Relaxed),
+            late: self.late.load(Relaxed),
+            missed: self.missed.load(Relaxed),
+            overruns: self.overruns.load(Relaxed),
+            max_ns: self.duration.max_ns.load(Relaxed),
+        }
     }
 
     pub fn snapshot(&self) -> Snapshot {
@@ -371,6 +643,19 @@ impl Telemetry {
             interval: self.interval.snapshot(),
             duration: self.duration.snapshot(),
             drift_ppm: drift,
+            callback_cpus: self
+                .cpus
+                .iter()
+                .enumerate()
+                .filter_map(|(i, c)| {
+                    let n = c.load(Relaxed);
+                    (n > 0).then(|| (u32::try_from(i).unwrap_or(u32::MAX), n))
+                })
+                .collect(),
+            cpu_other: self.cpu_other.load(Relaxed),
+            callback_thread: u32::try_from(self.thread.load(Relaxed)).unwrap_or(u32::MAX),
+            thread_switches: self.thread_switches.load(Relaxed),
+            glitches_dropped: self.glitches.dropped(),
         }
     }
 }
@@ -542,6 +827,73 @@ impl ActivityGuard {
     }
 }
 
+/// The largest gaps a scan keeps with their times.
+pub const LARGEST: usize = 32;
+
+/// The hwlat scan (S1c design note §4.1): a thread that reads the clock in a
+/// tight loop sees every stall of its CPU (interrupt, DPC, a higher-priority
+/// thread, firmware) as a gap between two reads. Keeps a histogram of the
+/// gaps at or above the threshold and the largest ones with their times; no
+/// allocation after `new`.
+pub struct GapScan {
+    threshold_ns: u64,
+    gaps: Histogram,
+    reads: u64,
+    over: u64,
+    largest: Vec<(u64, u64)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GapSummary {
+    pub reads: u64,
+    pub over: u64,
+    pub gaps: HistogramSnapshot,
+    /// (time of the read before the gap, gap), largest first.
+    pub largest: Vec<(u64, u64)>,
+}
+
+impl GapScan {
+    pub fn new(threshold_ns: u64) -> Self {
+        Self {
+            threshold_ns,
+            gaps: Histogram::default(),
+            reads: 0,
+            over: 0,
+            largest: Vec::with_capacity(LARGEST),
+        }
+    }
+
+    /// Two consecutive clock reads, in ns since the scan's start.
+    pub fn observe(&mut self, prev_ns: u64, now_ns: u64) {
+        self.reads += 1;
+        let gap = now_ns.saturating_sub(prev_ns);
+        if gap < self.threshold_ns {
+            return;
+        }
+        self.over += 1;
+        self.gaps.record(gap);
+        if self.largest.len() < LARGEST {
+            self.largest.push((prev_ns, gap));
+        } else if let Some(last) = self.largest.last_mut()
+            && gap > last.1
+        {
+            *last = (prev_ns, gap);
+        } else {
+            return;
+        }
+        self.largest.sort_unstable_by_key(|&(_, gap)| Reverse(gap));
+    }
+
+    pub fn summary(&self) -> GapSummary {
+        GapSummary {
+            reads: self.reads,
+            over: self.over,
+            gaps: self.gaps.snapshot(),
+            largest: self.largest.clone(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -660,6 +1012,75 @@ mod tests {
         );
         assert_eq!(s.interval.total(), 4);
         assert_eq!(t.callbacks(), WARMUP + 4);
+    }
+
+    #[test]
+    fn counters_are_the_snapshots_counts_without_histograms() {
+        let t = Telemetry::new(32, 96_000.0);
+        assert_eq!(t.counters(), Counters::default());
+        let mut at = 1_000;
+        for _ in 0..WARMUP {
+            t.on_callback(at, None);
+            at += P;
+        }
+        t.on_callback(at, None); // on time
+        at += P * 3 / 2 + 1;
+        t.on_callback(at, None); // late
+        at += 2 * P;
+        t.on_callback(at, None); // missed
+        at += 2 * P;
+        t.on_callback(at, None); // missed
+        t.on_done(P + 1); // overrun
+        t.on_done(7_000);
+        let c = t.counters();
+        assert_eq!(
+            c,
+            Counters {
+                callbacks: WARMUP + 4,
+                late: 1,
+                missed: 2,
+                overruns: 1,
+                max_ns: P + 1,
+            }
+        );
+        let s = t.snapshot();
+        assert_eq!(
+            (c.callbacks, c.late, c.missed, c.overruns, c.max_ns),
+            (s.callbacks, s.late, s.missed, s.overruns, s.duration.max_ns)
+        );
+    }
+
+    #[test]
+    fn counters_add_up_across_reopens_and_keep_the_longest_callback() {
+        let first = Counters {
+            callbacks: 100,
+            late: 1,
+            missed: 2,
+            overruns: 3,
+            max_ns: 900,
+        };
+        let later = Counters {
+            callbacks: 40,
+            late: 5,
+            missed: 7,
+            overruns: 11,
+            max_ns: 400,
+        };
+        let sum = Counters {
+            callbacks: 140,
+            late: 6,
+            missed: 9,
+            overruns: 14,
+            max_ns: 900,
+        };
+        assert_eq!(first.plus(later), sum);
+        assert_eq!(later.plus(first), sum);
+        assert_eq!(Counters::default().plus(later), later);
+        let full = Counters {
+            callbacks: u64::MAX,
+            ..Counters::default()
+        };
+        assert_eq!(full.plus(first).callbacks, u64::MAX);
     }
 
     #[test]
@@ -863,6 +1284,61 @@ mod tests {
         assert_eq!(answers, [2, 1, 0, 1, 1, 1, 0, 0, 0]);
     }
 
+    /// The owner thread logs why it reopens (#9 2026-09-28): a reset request
+    /// and a buffer size change are told apart, and taken once.
+    #[test]
+    fn a_reopen_request_says_which_message_asked() {
+        use selector::*;
+        let t = Telemetry::new(32, 96_000.0);
+        let reset = Requested {
+            reset: true,
+            buffer_size: false,
+        };
+        let size = Requested {
+            reset: false,
+            buffer_size: true,
+        };
+        assert_eq!(t.take_requests(), Requested::default());
+        t.driver_message(RESET_REQUEST, 0);
+        assert_eq!(t.take_requests(), reset);
+        assert_eq!(t.take_requests(), Requested::default());
+        t.driver_message(BUFFER_SIZE_CHANGE, 64);
+        assert_eq!(t.take_requests(), size);
+        t.driver_message(RESET_REQUEST, 0);
+        t.driver_message(BUFFER_SIZE_CHANGE, 64);
+        t.driver_message(RESET_REQUEST, 0);
+        assert_eq!(
+            t.take_requests(),
+            Requested {
+                reset: true,
+                buffer_size: true
+            }
+        );
+        // Nothing else asks for a reopen.
+        for sel in [
+            SELECTOR_SUPPORTED,
+            ENGINE_VERSION,
+            RESYNC_REQUEST,
+            LATENCIES_CHANGED,
+            SUPPORTS_TIME_INFO,
+            SUPPORTS_TIME_CODE,
+            OVERLOAD,
+            0,
+            99,
+        ] {
+            t.driver_message(sel, RESET_REQUEST);
+        }
+        t.on_rate_change();
+        assert_eq!(t.take_requests(), Requested::default());
+        // `take_reopen` is either of them, taken once too.
+        t.driver_message(BUFFER_SIZE_CHANGE, 64);
+        assert!(t.take_reopen());
+        assert_eq!(t.take_requests(), Requested::default());
+        assert!(!Requested::default().any());
+        assert!(reset.any());
+        assert!(size.any());
+    }
+
     #[test]
     fn driver_messages_are_counted_and_resets_request_a_reopen() {
         use selector::*;
@@ -910,5 +1386,164 @@ mod tests {
         assert!(!g.observe(0.0));
         let mut now = ActivityGuard::new(1);
         assert!(now.observe(ACTIVITY_THRESHOLD * 1.001));
+    }
+
+    fn g(kind: GlitchKind, at_ns: u64, value: u64) -> Glitch {
+        Glitch { kind, at_ns, value }
+    }
+
+    #[test]
+    fn glitch_log_keeps_its_capacity_and_counts_drops() {
+        let log = GlitchLog::new(3);
+        for i in 0..4 {
+            log.push(g(GlitchKind::Late, i, 10 + i));
+        }
+        let mut out = Vec::new();
+        log.drain(&mut out);
+        assert_eq!(out.iter().map(|x| x.at_ns).collect::<Vec<_>>(), [0, 1, 2]);
+        assert_eq!(log.dropped(), 1);
+        // After a drain the ring takes three more and wraps around its slots.
+        for i in 10..13 {
+            log.push(g(GlitchKind::Missed, i, i));
+        }
+        out.clear();
+        log.drain(&mut out);
+        assert_eq!(
+            out.iter().map(|x| x.at_ns).collect::<Vec<_>>(),
+            [10, 11, 12]
+        );
+        out.clear();
+        log.drain(&mut out);
+        assert!(out.is_empty());
+        assert_eq!(log.dropped(), 1);
+    }
+
+    #[test]
+    fn glitch_kinds_and_large_values_round_trip() {
+        let log = GlitchLog::new(8);
+        let all = [
+            g(GlitchKind::Late, 1, 500_001),
+            g(GlitchKind::Missed, 2, 700_000),
+            g(GlitchKind::Overrun, 3, 400_000),
+            g(GlitchKind::PositionGap, 4, 64),
+        ];
+        for x in all {
+            log.push(x);
+        }
+        log.push(g(GlitchKind::Missed, 5, u64::MAX));
+        let mut out = Vec::new();
+        log.drain(&mut out);
+        assert_eq!(&out[..4], &all);
+        assert_eq!(out[4], g(GlitchKind::Missed, 5, (1 << 62) - 1));
+        assert_eq!(
+            [
+                GlitchKind::Late,
+                GlitchKind::Missed,
+                GlitchKind::Overrun,
+                GlitchKind::PositionGap
+            ]
+            .map(GlitchKind::name),
+            ["late", "missed", "overrun", "position-gap"]
+        );
+    }
+
+    #[test]
+    fn judged_glitches_enter_the_log_with_their_times() {
+        let t = Telemetry::new(32, 96_000.0);
+        let mut at = 1_000;
+        let mut pos = 0;
+        for _ in 0..WARMUP {
+            t.on_callback(at, Some(pos));
+            at += P;
+            pos += 32;
+        }
+        let prev = at - P;
+        let late_at = prev + P * 3 / 2 + 1;
+        t.on_callback(late_at, Some(pos));
+        let missed_at = late_at + 2 * P;
+        t.on_callback(missed_at, Some(pos + 32 + 64));
+        t.on_done(P + 1);
+        t.on_done(P);
+        let mut out = Vec::new();
+        t.drain_glitches(&mut out);
+        assert_eq!(
+            out,
+            [
+                g(GlitchKind::Late, late_at, P * 3 / 2 + 1),
+                g(GlitchKind::Missed, missed_at, 2 * P),
+                g(GlitchKind::PositionGap, missed_at, 96),
+                g(GlitchKind::Overrun, missed_at, P + 1),
+            ]
+        );
+        assert_eq!(t.snapshot().glitches_dropped, 0);
+    }
+
+    #[test]
+    fn warmup_callbacks_leave_no_glitch() {
+        let t = Telemetry::new(32, 96_000.0);
+        for i in 0..WARMUP {
+            t.on_callback(1_000 + i * 10 * P, Some(i as i64 * 7));
+        }
+        let mut out = Vec::new();
+        t.drain_glitches(&mut out);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn callback_cpus_and_thread_switches_are_counted() {
+        let t = Telemetry::new(32, 96_000.0);
+        t.on_thread(14, 900);
+        t.on_thread(14, 900);
+        t.on_thread(3, 900);
+        t.on_thread(63, 900);
+        t.on_thread(64, 901);
+        let s = t.snapshot();
+        assert_eq!(s.callback_cpus, [(3, 1), (14, 2), (63, 1)]);
+        assert_eq!(
+            (s.cpu_other, s.callback_thread, s.thread_switches),
+            (1, 900, 1)
+        );
+        let fresh = Telemetry::new(32, 96_000.0).snapshot();
+        assert_eq!(
+            (
+                fresh.callback_cpus.len(),
+                fresh.callback_thread,
+                fresh.thread_switches
+            ),
+            (0, 0, 0)
+        );
+    }
+
+    #[test]
+    fn gap_scan_counts_gaps_at_the_threshold_and_keeps_the_largest() {
+        let mut s = GapScan::new(10_000);
+        s.observe(0, 9_999);
+        s.observe(9_999, 19_999);
+        assert_eq!((s.summary().reads, s.summary().over), (2, 1));
+        for i in 0..40_u64 {
+            s.observe(1_000_000 * i, 1_000_000 * i + 20_000 + i);
+        }
+        let sum = s.summary();
+        assert_eq!((sum.reads, sum.over, sum.gaps.total()), (42, 41, 41));
+        assert_eq!(sum.largest.len(), LARGEST);
+        assert_eq!(sum.largest[0], (39_000_000, 20_039));
+        assert_eq!(sum.largest[LARGEST - 1], (8_000_000, 20_008));
+        assert!(sum.largest.windows(2).all(|w| w[0].1 >= w[1].1));
+        // A gap smaller than, or equal to, the smallest kept one changes nothing.
+        s.observe(0, 10_001);
+        s.observe(5, 5 + 20_008);
+        assert_eq!(s.summary().largest, sum.largest);
+    }
+
+    #[test]
+    fn gap_scan_ignores_a_gap_strictly_below_the_threshold() {
+        // A read gap of 9_999 ns is below the 10_000 ns threshold, so it is not
+        // a gap: the read is counted, `over` and the histogram are not. This
+        // pins `gap < threshold` against `gap == threshold` — the equal case is
+        // over (the test above), the strictly-under case is not.
+        let mut s = GapScan::new(10_000);
+        s.observe(0, 9_999);
+        let sum = s.summary();
+        assert_eq!((sum.reads, sum.over, sum.gaps.total()), (1, 0, 0));
     }
 }

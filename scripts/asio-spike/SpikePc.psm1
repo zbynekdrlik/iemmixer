@@ -71,6 +71,20 @@ function Get-SpikeBlockers {
     return ,$problems
 }
 
+function Get-SpikeCpuArguments {
+    # --audio-cpus / --stress-cpus from a request (absent or empty = none), S1c.
+    param([Parameter(Mandatory)]$Request)
+    $a = @()
+    foreach ($pair in @(@('audio_cpus', '--audio-cpus'), @('stress_cpus', '--stress-cpus'))) {
+        $p = $Request.PSObject.Properties[$pair[0]]
+        if ($p -and "$($p.Value)") {
+            if ("$($p.Value)" -notmatch '^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$') { throw "$($pair[0]) '$($p.Value)' refused" }
+            $a += @($pair[1], "$($p.Value)")
+        }
+    }
+    return ,$a
+}
+
 function New-SpikeArguments {
     param([Parameter(Mandatory)]$Request, [Parameter(Mandatory)][string]$Root)
     $status = Join-Path $Root 'status'
@@ -86,14 +100,23 @@ function New-SpikeArguments {
             if ($script:SpikeFrames -notcontains [int]$Request.frames) { throw "frames $($Request.frames) refused" }
             $a += @('--frames', [int]$Request.frames, '--seconds', [int]$Request.seconds, '--burn-us', [int]$Request.burn_us,
                     '--stress', [int]$Request.stress, '--panic-at', [long]$Request.panic_at)
+            $cpu = Get-SpikeCpuArguments -Request $Request; $a += $cpu
         }
         'reopen' {
             if ($script:SpikeFrames -notcontains [int]$Request.frames) { throw "frames $($Request.frames) refused" }
             $a += @('--frames', [int]$Request.frames, '--cycles', [int]$Request.cycles)
         }
+        'hwlat' {
+            $cpu = [int]$Request.cpu; $thr = [int]$Request.threshold_us
+            if ($cpu -lt 0 -or $cpu -gt 63) { throw "cpu $cpu refused" }
+            if ($thr -lt 1 -or $thr -gt 1000) { throw "threshold $thr refused" }
+            $a += @('--cpu', $cpu, '--seconds', [int]$Request.seconds, '--threshold-us', $thr)
+        }
         default { throw "unknown mode $($Request.mode)" }
     }
-    if ($Request.mode -ne 'probe') {
+    # The band guard listens only for the streaming modes; hwlat is a clock-read
+    # loop with no audio stream, and probe just opens the driver (S1c, #15).
+    if (@('duplex', 'reopen') -contains $Request.mode) {
         # The inputs the band guard listens to: the site's stage inputs (card numbers from 1), or "all" when asked.
         $w = $Request.PSObject.Properties['activity_channels']
         if (-not $w) { throw 'the request has no activity_channels (the stage inputs, or all)' }

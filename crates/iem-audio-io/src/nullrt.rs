@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use crate::{Block, Process, panic_message};
+use crate::{Block, Process, StreamStats, panic_message};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum InputSignal {
@@ -32,17 +32,6 @@ pub struct NullRtConfig {
     pub signal: InputSignal,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct StreamStats {
-    pub callbacks: u64,
-    /// Callbacks that finished more than one period after their deadline.
-    pub late: u64,
-    pub faulted: bool,
-    pub running: bool,
-    pub max_process_ns: u64,
-    pub fault: Option<String>,
-}
-
 #[derive(Default)]
 struct Shared {
     stop: AtomicBool,
@@ -57,11 +46,14 @@ struct Shared {
 pub struct NullRt<P: Process + 'static> {
     thread: JoinHandle<P>,
     shared: Arc<Shared>,
+    /// The frames per callback the pacing thread delivers.
+    frames: u32,
 }
 
 impl<P: Process + 'static> NullRt<P> {
     /// Starts the pacing thread; the processor comes back from [`NullRt::stop`].
     pub fn start(cfg: NullRtConfig, mut p: P) -> io::Result<Self> {
+        let frames = u32::try_from(cfg.block.max(1)).unwrap_or(u32::MAX);
         let shared = Arc::new(Shared::default());
         shared.running.store(true, Ordering::Release);
         let s = Arc::clone(&shared);
@@ -72,14 +64,25 @@ impl<P: Process + 'static> NullRt<P> {
                 s.running.store(false, Ordering::Release);
                 p
             })?;
-        Ok(Self { thread, shared })
+        Ok(Self {
+            thread,
+            shared,
+            frames,
+        })
     }
 
     pub fn stats(&self) -> StreamStats {
         let s = &self.shared;
         StreamStats {
+            // No card to measure: the configured block is what it delivers.
+            frames: self.frames,
             callbacks: s.callbacks.load(Ordering::Acquire),
             late: s.late.load(Ordering::Acquire),
+            // No card: no missed periods, overruns, resets or parked stream.
+            missed: 0,
+            overruns: 0,
+            resets: 0,
+            parked: false,
             faulted: s.faulted.load(Ordering::Acquire),
             running: s.running.load(Ordering::Acquire),
             max_process_ns: s.max_ns.load(Ordering::Acquire),
@@ -243,6 +246,16 @@ mod tests {
         let during = rt.stats();
         assert!(during.running);
         assert!(!during.faulted);
+        assert_eq!(
+            (
+                during.frames,
+                during.missed,
+                during.overruns,
+                during.resets,
+                during.parked
+            ),
+            (32, 0, 0, 0, false)
+        );
         let p = rt.stop().unwrap();
         let expected = t0.elapsed().as_secs_f64() * f64::from(SR) / 32.0;
         let calls = p.calls as f64;

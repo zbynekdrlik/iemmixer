@@ -389,6 +389,7 @@ pub(crate) mod fake {
     //! of the code above it that must not depend on a real engine.
 
     use super::*;
+    use iem_engine_proto::{Hello, MixState, TopologyInfo, Transient};
     use tokio::io::{DuplexStream, ReadHalf, WriteHalf};
 
     /// The engine's end of one connection.
@@ -427,6 +428,64 @@ pub(crate) mod fake {
             })
         });
         (connector, rx)
+    }
+
+    /// A client connected to a fake engine that said hello and announced
+    /// `topology` but sent no state yet (the mirror is not synced); the
+    /// engine's end of the connection, the client's hello already read.
+    pub async fn announced(topology: TopologyInfo) -> (EngineClient, Peer) {
+        let (c, mut peers) = connector();
+        let client = EngineClient::spawn_with(c, "test".into());
+        let mut peer = tokio::time::timeout(Duration::from_secs(5), peers.recv())
+            .await
+            .expect("a connection within 5 s")
+            .expect("a peer");
+        assert!(matches!(peer.recv().await, ClientMsg::Hello { .. }));
+        peer.send(&EngineMsg::Hello(Hello {
+            proto: PROTO,
+            engine_build: "fake".into(),
+            topology_hash: topology.hash.clone(),
+            state_rev: 0,
+            sample_rate: topology.sample_rate,
+            block: 32,
+            role: Role::Control,
+        }))
+        .await;
+        peer.send(&EngineMsg::Topology(topology)).await;
+        let t0 = std::time::Instant::now();
+        while client.mirror().topology.is_none() {
+            assert!(
+                t0.elapsed() < Duration::from_secs(5),
+                "the topology within 5 s"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        (client, peer)
+    }
+
+    /// Sends `state` and waits (≤ 5 s) until the mirror holds it.
+    pub async fn sync(client: &EngineClient, peer: &mut Peer, rev: u64, state: MixState) {
+        peer.send(&EngineMsg::State {
+            rev,
+            state,
+            transient: Transient::default(),
+        })
+        .await;
+        let t0 = std::time::Instant::now();
+        loop {
+            let done = {
+                let m = client.mirror();
+                m.synced && m.rev == rev
+            };
+            if done {
+                break;
+            }
+            assert!(
+                t0.elapsed() < Duration::from_secs(5),
+                "the state within 5 s"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 }
 

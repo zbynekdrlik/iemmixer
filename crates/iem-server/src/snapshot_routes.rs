@@ -81,9 +81,8 @@ async fn create_snapshot(
         )),
     ))?;
     let c = capture(&site, &state.engine.mirror(), &page);
-    let timestamp = chrono::Utc::now().timestamp();
     let snapshot = Snapshot {
-        timestamp,
+        timestamp: chrono::Utc::now().timestamp(),
         label: req.label.unwrap_or_else(|| "manual".to_string()),
         pinned: false,
         sends: c.sends,
@@ -92,7 +91,8 @@ async fn create_snapshot(
         archived: false,
         legacy_member: None,
     };
-    state
+    // The entry's id: the next free second when this one is taken.
+    let timestamp = state
         .band
         .add_snapshot(&m, snapshot)
         .map_err(|e| store_error(e, "saving the snapshot"))?;

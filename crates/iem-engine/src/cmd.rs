@@ -7,6 +7,17 @@ use iem_dsp::eq::EqParams;
 
 use crate::params::InputParams;
 
+/// HIL's spare card outputs an engine opens at most (S6, `[guard] hil_tx`):
+/// the D5(b) loopback pair or an unused TX, with room to spare.
+pub const MAX_HIL: usize = 8;
+
+/// The spare outputs a HIL test signal sounds on, by HIL slot (the
+/// engine's outputs after the topology's TX, in `[guard] hil_tx` order): a
+/// fixed array, so it travels through the command ring and lives in the
+/// processor without allocation. It holds no mix's TX, so the HIL signal
+/// can never reach a band member.
+pub type HilMask = [bool; MAX_HIL];
+
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub enum RtOp {
     #[default]
@@ -68,10 +79,26 @@ pub enum RtOp {
         amp: f64,
         ttl: u64,
     },
+    /// The HIL test signal (S6): a test signal whose sine, while it runs,
+    /// sounds only on the spare outputs in `mask`; every mix's TX and every
+    /// other spare output is zero meanwhile.
+    HilTestSignal {
+        i: u16,
+        hz: f64,
+        amp: f64,
+        ttl: u64,
+        mask: HilMask,
+    },
     StopTestSignal,
     FadeOut,
     /// Fault injection (the `--fault-injection` launch flag only).
     Panic,
+    /// A structured exception on the RT thread (the `--fault-injection` flag
+    /// only, the owner-approved SEH test, design §10): `catch_unwind` cannot
+    /// catch it, so the SEH filter releases the driver or parks the stream.
+    Seh,
+    /// A held processor (`Options::hold`) starts its fade-in.
+    Arm,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]

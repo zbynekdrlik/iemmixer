@@ -1,35 +1,34 @@
 //! Backups v2 (F19) and restore with preview (F31; S5 design note §6): a
 //! backup is the engine's state from the mirror plus every member's pins and
 //! hides; the preview is a diff of the running state and the backup in the
-//! UI's names; the restore is one `ImportState` (the engine applies it
-//! atomically with its ramps) plus the pins and hides.
+//! UI's names; the restore is one `ImportState` of the backup completed from
+//! the running state (FG-1), applied atomically, plus the pins and hides.
 
 use iem_core::backup::{MixerBackup, RestoreCategory, RestoreChange, RestorePreview, SkippedEntry};
 use iem_core::band::CustomizationFile;
-use iem_engine_proto::{Eq, InputState, Level, MixState, Source};
+use iem_engine_proto::{Eq, InputId, InputState, Level, MixId, MixState, Source};
 
 use crate::band_store::BandStore;
 use crate::engine::mirror::Mirror;
 use crate::site_view::SiteView;
 use crate::view::GROUP_NAME;
 
-/// A backup of the mirror's state at `timestamp` (RFC 3339).
+/// A backup of the mirror's state at `timestamp` (RFC 3339), refused when
+/// a member's pins and hides cannot be read: never a partial backup.
 pub fn capture(
     view: &SiteView,
     mirror: &Mirror,
     store: &BandStore,
     timestamp: String,
-) -> MixerBackup {
+) -> Result<MixerBackup, String> {
     let mut b = MixerBackup::new(timestamp, mirror.rev, mirror.state.clone());
     for m in &view.members {
-        match store.customization(&m.id) {
-            Ok(c) => {
-                b.customizations.insert(m.id.clone(), c);
-            }
-            Err(e) => tracing::warn!(member = %m.id, error = %e, "backup: pins and hides skipped"),
-        }
+        let c = store
+            .customization(&m.id)
+            .map_err(|e| format!("the pins and hides of {} are unreadable: {e}", m.id))?;
+        b.customizations.insert(m.id.clone(), c);
     }
-    b
+    Ok(b)
 }
 
 fn db(v: f64) -> String {
@@ -121,6 +120,90 @@ impl Diff {
             reason: "not in the running topology".into(),
         });
     }
+
+    fn keep(&mut self, cat: RestoreCategory, what: String) {
+        self.p.not_in_backup.push(SkippedEntry {
+            category: cat,
+            description: what,
+            reason: "not in the backup; stays as it is".into(),
+        });
+    }
+}
+
+fn input_name(view: &SiteView, id: &InputId) -> String {
+    view.input(&id.0)
+        .map_or_else(|| id.0.clone(), |i| i.name.clone())
+}
+
+/// Lists what the running state has and the backup lacks (the topology grew
+/// after the capture, FG-1): one line for each input or mix the backup does
+/// not know at all — its levels in the mixes go with it — and one for each
+/// other missing level or group strip. [`keep_running`] keeps them all.
+fn not_in_backup(d: &mut Diff, view: &SiteView, current: &MixState, backup: &MixState) {
+    let unknown_input = |i: &InputId| !backup.inputs.contains_key(i);
+    let unknown_mix = |m: &MixId| !backup.mixes.contains_key(m);
+    for id in current.inputs.keys().filter(|i| unknown_input(i)) {
+        d.keep(RestoreCategory::Input, input_name(view, id));
+    }
+    for (mix, cur) in &current.mixes {
+        let name = view.mix_name(mix);
+        let Some(old) = backup.mixes.get(mix) else {
+            d.keep(RestoreCategory::Output, name);
+            continue;
+        };
+        for id in cur
+            .inputs
+            .keys()
+            .filter(|i| !old.inputs.contains_key(*i) && !unknown_input(i))
+        {
+            d.keep(
+                RestoreCategory::Level,
+                format!("{} → {name}", input_name(view, id)),
+            );
+        }
+        for m in cur
+            .mixes
+            .keys()
+            .filter(|m| !old.mixes.contains_key(*m) && !unknown_mix(m))
+        {
+            d.keep(
+                RestoreCategory::Level,
+                format!("{} → {name}", view.mix_name(m)),
+            );
+        }
+        for g in cur.groups.keys().filter(|g| !old.groups.contains_key(*g)) {
+            let group = if view.group.as_ref() == Some(g) {
+                GROUP_NAME.to_string()
+            } else {
+                g.0.clone()
+            };
+            d.keep(RestoreCategory::Group, format!("{group} → {name}"));
+        }
+    }
+}
+
+/// The state a restore imports: `backup`'s, with every input, mix, level and
+/// group strip it lacks taken from the running `current` state, so the
+/// restore changes only what the backup holds (FG-1). An import is the whole
+/// state: the engine gives any id missing from it its default (a level off).
+pub fn keep_running(backup: &MixState, current: &MixState) -> MixState {
+    let mut s = backup.clone();
+    for (id, input) in &current.inputs {
+        s.inputs.entry(id.clone()).or_insert(*input);
+    }
+    for (id, cur) in &current.mixes {
+        let mix = s.mixes.entry(id.clone()).or_insert_with(|| cur.clone());
+        for (i, l) in &cur.inputs {
+            mix.inputs.entry(i.clone()).or_insert(*l);
+        }
+        for (m, l) in &cur.mixes {
+            mix.mixes.entry(m.clone()).or_insert(*l);
+        }
+        for (g, strip) in &cur.groups {
+            mix.groups.entry(g.clone()).or_insert(*strip);
+        }
+    }
+    s
 }
 
 fn input_diff(d: &mut Diff, name: &str, cur: &InputState, new: &InputState) {
@@ -253,6 +336,7 @@ pub fn preview(
             });
         }
     }
+    not_in_backup(&mut d, view, current, &backup.state);
     d.p
 }
 
@@ -322,6 +406,181 @@ mod tests {
     }
 
     #[test]
+    fn a_level_from_a_missing_source_is_skipped() {
+        let v = test_view();
+        let backup_state = state_with(|s| {
+            let m = s.mixes.entry(MixId::new("member1")).or_default();
+            m.inputs.insert(InputId::new("gone"), Level::default());
+            m.inputs.insert(
+                InputId::new("mic3"),
+                Level {
+                    gain_db: -3.0,
+                    ..Level::default()
+                },
+            );
+            m.mixes.insert(MixId::new("oldmix"), Level::default());
+            m.groups
+                .insert(GroupId::new("oldgroup"), MixGroup::default());
+        });
+        let b = MixerBackup::new("t".into(), 1, backup_state);
+        let p = preview(&v, &MixState::default(), &|_| None, &b);
+        let skipped: Vec<(RestoreCategory, &str, &str)> = p
+            .skipped
+            .iter()
+            .map(|s| (s.category, s.description.as_str(), s.reason.as_str()))
+            .collect();
+        let why = "not in the running topology";
+        assert_eq!(
+            skipped,
+            [
+                (RestoreCategory::Level, "gone → Member1", why),
+                (RestoreCategory::Level, "oldmix → Member1", why),
+                (RestoreCategory::Group, "oldgroup → Member1", why),
+            ]
+        );
+        // The source the topology has is compared; the others are not.
+        let changed: Vec<&str> = p.changes.iter().map(|c| c.description.as_str()).collect();
+        assert_eq!(changed, ["MEMBER3 mic → Member1"]);
+    }
+
+    #[test]
+    fn a_preview_lists_what_the_backup_does_not_have() {
+        let v = test_view();
+        let ids =
+            |list: &[&str]| -> Vec<InputId> { list.iter().map(|i| InputId::new(*i)).collect() };
+        // The running state (the engine sends every id of its topology).
+        let current = state_with(|s| {
+            for i in ids(&["keys", "mic1", "mic2"]) {
+                s.inputs.insert(i.clone(), InputState::default());
+                for m in ["member1", "member2"] {
+                    let mix = s.mixes.entry(MixId::new(m)).or_default();
+                    mix.inputs.insert(i.clone(), Level::default());
+                }
+            }
+            let m1 = s.mixes.entry(MixId::new("member1")).or_default();
+            m1.mixes.insert(MixId::new("member2"), Level::default());
+            m1.mixes.insert(MixId::new("member3"), Level::default());
+            m1.groups.insert(GroupId::new("stems"), MixGroup::default());
+            m1.groups.insert(GroupId::new("extra"), MixGroup::default());
+            s.mixes.insert(MixId::new("member3"), Default::default());
+        });
+        // A backup from before keys and member3's mix were added, and before
+        // member1 heard member2, got the stems strip and a level of mic2.
+        let backup_state = state_with(|s| {
+            for i in ids(&["mic1", "mic2"]) {
+                s.inputs.insert(i.clone(), InputState::default());
+                s.mixes
+                    .entry(MixId::new("member2"))
+                    .or_default()
+                    .inputs
+                    .insert(i, Level::default());
+            }
+            s.mixes
+                .entry(MixId::new("member1"))
+                .or_default()
+                .inputs
+                .insert(InputId::new("mic1"), Level::default());
+        });
+        let b = MixerBackup::new("t".into(), 1, backup_state);
+        let p = preview(&v, &current, &|_| None, &b);
+        let kept: Vec<(RestoreCategory, &str)> = p
+            .not_in_backup
+            .iter()
+            .map(|k| (k.category, k.description.as_str()))
+            .collect();
+        // A new input or mix is one line; its levels in the mixes are in it.
+        assert_eq!(
+            kept,
+            [
+                (RestoreCategory::Input, "KEYS"),
+                (RestoreCategory::Level, "MEMBER2 mic → Member1"),
+                (RestoreCategory::Level, "Member2 → Member1"),
+                (RestoreCategory::Group, "extra → Member1"),
+                (RestoreCategory::Group, "STEMS → Member1"),
+                (RestoreCategory::Output, "Member3"),
+            ]
+        );
+        assert!(
+            p.not_in_backup
+                .iter()
+                .all(|k| k.reason == "not in the backup; stays as it is")
+        );
+        assert!(p.skipped.is_empty(), "{:?}", p.skipped);
+        assert!(p.changes.is_empty(), "{:?}", p.changes);
+        // A backup of the running state lacks nothing; nor does any backup
+        // when nothing is running.
+        let same = MixerBackup::new("t".into(), 1, current.clone());
+        assert!(
+            preview(&v, &current, &|_| None, &same)
+                .not_in_backup
+                .is_empty()
+        );
+        assert!(
+            preview(&v, &MixState::default(), &|_| None, &b)
+                .not_in_backup
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_restore_state_keeps_the_running_values_the_backup_lacks() {
+        let lvl = |gain_db: f64| Level {
+            gain_db,
+            ..Level::default()
+        };
+        let trim = |trim_db: f64| InputState {
+            trim_db,
+            ..InputState::default()
+        };
+        let (keys, mic1) = (InputId::new("keys"), InputId::new("mic1"));
+        let (m1, m2, m3) = (
+            MixId::new("member1"),
+            MixId::new("member2"),
+            MixId::new("member3"),
+        );
+        let stems = GroupId::new("stems");
+        let current = state_with(|s| {
+            s.inputs.insert(keys.clone(), trim(3.0));
+            s.inputs.insert(mic1.clone(), trim(1.0));
+            let mix = s.mixes.entry(m1.clone()).or_default();
+            mix.inputs.insert(keys.clone(), lvl(-6.0));
+            mix.inputs.insert(mic1.clone(), lvl(-9.0));
+            mix.mixes.insert(m2.clone(), lvl(-12.0));
+            mix.groups.insert(
+                stems.clone(),
+                MixGroup {
+                    gain_db: -2.0,
+                    ..MixGroup::default()
+                },
+            );
+            mix.out.volume_db = -5.0;
+            s.mixes.entry(m3.clone()).or_default().out.volume_db = -4.0;
+        });
+        let backup = state_with(|s| {
+            s.inputs.insert(mic1.clone(), trim(5.0));
+            let mix = s.mixes.entry(m1.clone()).or_default();
+            mix.inputs.insert(mic1.clone(), lvl(-1.0));
+            mix.out.volume_db = -7.0;
+        });
+        // The backup's values where it has them, the running ones elsewhere.
+        let want = state_with(|s| {
+            s.inputs.insert(keys.clone(), trim(3.0));
+            s.inputs.insert(mic1.clone(), trim(5.0));
+            let mix = s.mixes.entry(m1.clone()).or_default();
+            mix.inputs.insert(keys.clone(), lvl(-6.0));
+            mix.inputs.insert(mic1.clone(), lvl(-1.0));
+            mix.mixes.insert(m2.clone(), lvl(-12.0));
+            mix.groups
+                .insert(stems.clone(), current.mixes[&m1].groups[&stems]);
+            mix.out.volume_db = -7.0;
+            s.mixes.insert(m3.clone(), current.mixes[&m3].clone());
+        });
+        assert_eq!(keep_running(&backup, &current), want);
+        assert_eq!(keep_running(&backup, &MixState::default()), backup);
+        assert_eq!(keep_running(&current, &backup).inputs[&keys], trim(3.0));
+    }
+
+    #[test]
     fn capture_takes_the_mirror_and_every_members_pins() {
         let v = test_view();
         let dir = tempfile::tempdir().unwrap();
@@ -342,12 +601,33 @@ mod tests {
             state: state.clone(),
             transient: Transient::default(),
         });
-        let b = capture(&v, &m, &store, "2026-09-27T13:00:00Z".into());
+        let b = capture(&v, &m, &store, "2026-09-27T13:00:00Z".into()).unwrap();
         assert_eq!((b.rev, &b.state), (9, &state));
         assert_eq!(b.customizations.len(), 10);
         assert_eq!(b.customizations["member1"].pinned.len(), 1);
         let json = serde_json::to_string(&b).unwrap();
         assert!(!json.to_lowercase().contains("pin_"), "no PIN field");
+    }
+
+    #[test]
+    fn capture_refuses_when_a_members_pins_cannot_be_read() {
+        let v = test_view();
+        let dir = tempfile::tempdir().unwrap();
+        let store = BandStore::new(dir.path());
+        store
+            .save_customization("member1", vec![Source::Input(InputId::new("mic1"))], vec![])
+            .unwrap();
+        // A folder where member3's file belongs: reading it fails (it is not
+        // "no pins"), and a backup without member3's pins is no backup.
+        let broken = dir.path().join("customizations").join("member3.json");
+        std::fs::create_dir_all(&broken).unwrap();
+        let err = capture(&v, &Mirror::default(), &store, "t".into()).unwrap_err();
+        assert!(err.contains("member3"), "{err}");
+        // Readable again: every member's pins are in.
+        std::fs::remove_dir(&broken).unwrap();
+        let b = capture(&v, &Mirror::default(), &store, "t".into()).unwrap();
+        assert_eq!(b.customizations.len(), 10);
+        assert_eq!(b.customizations["member1"].pinned.len(), 1);
     }
 
     #[test]

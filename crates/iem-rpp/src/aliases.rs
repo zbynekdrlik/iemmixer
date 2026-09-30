@@ -6,9 +6,12 @@
 //!   `[members]` predecessor member id → `{ id, mix, archived }` (`archived`:
 //!   a renamed member, D8);
 //! - `eras.toml`: `[[era]] first_seen`, `last_seen` (Unix seconds of the first
-//!   and last saved project with this track layout) and `tracks` (track 1…N).
+//!   and last saved project with this track layout) and `tracks` (track 1…N);
+//!   optional `[[skip]]` entries (#9, #7): the reviewed list of snapshots the
+//!   band import leaves out, each `{ file = "snapshots/<legacy member>.json",
+//!   name, timestamp, reason }` naming exactly one snapshot of the predecessor.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use iem_core::config::validate_member_id;
 use iem_engine_proto::valid_id;
@@ -44,11 +47,45 @@ pub struct Era {
     pub tracks: Vec<String>,
 }
 
+/// A snapshot the band import leaves out (`[[skip]]` in `eras.toml`): one the
+/// eras cannot map and the owner reviewed. Snapshots only; it must match
+/// exactly one snapshot (file, name and timestamp), never guessed.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Skip {
+    /// `snapshots/<legacy member id>.json` in the predecessor's data directory.
+    pub file: String,
+    /// The snapshot's name (its `label`, e.g. `auto`).
+    pub name: String,
+    /// The snapshot's `timestamp` (Unix seconds).
+    pub timestamp: i64,
+    /// Why it is left out (printed in the report).
+    pub reason: String,
+}
+
+impl Skip {
+    /// Whether this entry names the snapshot `name` saved at `timestamp` in
+    /// `file` (exact on all three).
+    pub fn matches(&self, file: &str, name: &str, timestamp: i64) -> bool {
+        self.file == file && self.name == name && self.timestamp == timestamp
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Eras {
     #[serde(default)]
     pub era: Vec<Era>,
+    #[serde(default)]
+    pub skip: Vec<Skip>,
+}
+
+/// `snapshots/<member>.json` with a valid member id: skips apply to
+/// snapshots only.
+fn snapshot_file(file: &str) -> bool {
+    file.strip_prefix("snapshots/")
+        .and_then(|f| f.strip_suffix(".json"))
+        .is_some_and(|id| validate_member_id(id).is_ok())
 }
 
 pub fn parse_aliases(text: &str) -> Result<Aliases, String> {
@@ -99,6 +136,22 @@ pub fn parse_eras(text: &str) -> Result<Eras, String> {
                 i + 1,
                 i + 2
             ));
+        }
+    }
+    let mut seen = BTreeSet::new();
+    for (i, s) in e.skip.iter().enumerate() {
+        if !snapshot_file(&s.file) {
+            return Err(format!(
+                "eras: skip {}: file {:?} is not snapshots/<member>.json (a skip names a snapshot only)",
+                i + 1,
+                s.file
+            ));
+        }
+        if s.reason.trim().is_empty() {
+            return Err(format!("eras: skip {}: no reason", i + 1));
+        }
+        if !seen.insert((&s.file, &s.name, s.timestamp)) {
+            return Err(format!("eras: skip {} repeats an earlier entry", i + 1));
         }
     }
     Ok(e)
@@ -194,8 +247,12 @@ oldname = { id = "member1", mix = "member1", archived = true }
         assert_eq!(e.candidates(50), vec![0]);
         assert_eq!(e.candidates(501), vec![2]);
         assert_eq!(e.newest(), Some(2));
-        assert_eq!(Eras { era: vec![] }.candidates(1), Vec::<usize>::new());
-        assert_eq!(Eras { era: vec![] }.newest(), None);
+        let none = Eras {
+            era: vec![],
+            skip: vec![],
+        };
+        assert_eq!(none.candidates(1), Vec::<usize>::new());
+        assert_eq!(none.newest(), None);
     }
 
     #[test]
@@ -222,5 +279,121 @@ oldname = { id = "member1", mix = "member1", archived = true }
             let err = parse_eras(bad).unwrap_err();
             assert!(err.contains(why), "{bad:?}: {err}");
         }
+    }
+
+    const ERA: &str = "[[era]]\nfirst_seen = 1\nlast_seen = 9\ntracks = [\"A\"]\n";
+
+    fn skip(file: &str, name: &str, timestamp: i64, reason: &str) -> String {
+        format!(
+            "[[skip]]\nfile = {file:?}\nname = {name:?}\ntimestamp = {timestamp}\nreason = {reason:?}\n"
+        )
+    }
+
+    /// `[[skip]]` is additive: an eras.toml without it has no skips, and the
+    /// entries parse in file order.
+    #[test]
+    fn skips_parse_in_order_and_are_optional() {
+        assert!(parse_eras(ERA).unwrap().skip.is_empty());
+        let e = parse_eras(&format!(
+            "{ERA}{}{}",
+            skip("snapshots/m1.json", "auto", 5, "layout never saved"),
+            skip("snapshots/m-2_x.json", "before gig", 5, "r"),
+        ))
+        .unwrap();
+        assert_eq!(
+            e.skip,
+            vec![
+                Skip {
+                    file: "snapshots/m1.json".into(),
+                    name: "auto".into(),
+                    timestamp: 5,
+                    reason: "layout never saved".into(),
+                },
+                Skip {
+                    file: "snapshots/m-2_x.json".into(),
+                    name: "before gig".into(),
+                    timestamp: 5,
+                    reason: "r".into(),
+                },
+            ]
+        );
+        assert_eq!(e.era.len(), 1);
+    }
+
+    #[test]
+    fn bad_skips_are_refused() {
+        let ok = skip("snapshots/m1.json", "auto", 5, "r");
+        for (bad, why) in [
+            // Snapshots only: never presets, customizations or anything else.
+            (
+                skip("presets/m1.json", "auto", 5, "r"),
+                "eras: skip 1: file \"presets/m1.json\" is not snapshots/<member>.json",
+            ),
+            (
+                skip("customizations/m1.json", "auto", 5, "r"),
+                "is not snapshots/<member>.json",
+            ),
+            (skip("pins.json", "auto", 5, "r"), "is not snapshots"),
+            (
+                skip("snapshots/m1.jsonx", "auto", 5, "r"),
+                "is not snapshots",
+            ),
+            (skip("snapshots/.json", "auto", 5, "r"), "is not snapshots"),
+            (
+                skip("snapshots/a/b.json", "auto", 5, "r"),
+                "is not snapshots",
+            ),
+            (
+                skip("snapshots/../m1.json", "auto", 5, "r"),
+                "is not snapshots",
+            ),
+            (skip("m1.json", "auto", 5, "r"), "is not snapshots"),
+            // Every entry is reviewed: it says why.
+            (
+                skip("snapshots/m1.json", "auto", 5, " \t"),
+                "eras: skip 1: no reason",
+            ),
+            // The same snapshot twice.
+            (
+                format!("{ok}{}{ok}", skip("snapshots/m1.json", "auto", 6, "r")),
+                "eras: skip 3 repeats an earlier entry",
+            ),
+            // Unknown keys are refused, not ignored.
+            (format!("{ok}kind = \"preset\"\n"), "kind"),
+            (
+                "[[skip]]\nfile = \"snapshots/m1.json\"\nname = \"auto\"\nreason = \"r\"\n".into(),
+                "timestamp",
+            ),
+        ] {
+            let err = parse_eras(&format!("{ERA}{bad}")).unwrap_err();
+            assert!(err.contains(why), "{bad:?}: {err}");
+        }
+        // Near misses are distinct entries.
+        let e = parse_eras(&format!(
+            "{ERA}{ok}{}{}{}",
+            skip("snapshots/m1.json", "auto", 6, "r"),
+            skip("snapshots/m1.json", "Auto", 5, "r"),
+            skip("snapshots/m2.json", "auto", 5, "r"),
+        ))
+        .unwrap();
+        assert_eq!(e.skip.len(), 4);
+    }
+
+    /// A skip names one snapshot exactly: file, name and timestamp.
+    #[test]
+    fn a_skip_matches_on_all_three_fields() {
+        let s = Skip {
+            file: "snapshots/m1.json".into(),
+            name: "auto".into(),
+            timestamp: 1200,
+            reason: "r".into(),
+        };
+        assert!(s.matches("snapshots/m1.json", "auto", 1200));
+        assert!(!s.matches("snapshots/m1.json", "auto", 1201), "timestamp");
+        assert!(!s.matches("snapshots/m1.json", "auto", 1199), "timestamp");
+        assert!(!s.matches("snapshots/m1.json", "Auto", 1200), "name");
+        assert!(!s.matches("snapshots/m1.json", "auto ", 1200), "name");
+        assert!(!s.matches("snapshots/m2.json", "auto", 1200), "file");
+        assert!(!s.matches("presets/m1.json", "auto", 1200), "file");
     }
 }

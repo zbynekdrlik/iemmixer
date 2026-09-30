@@ -8,6 +8,7 @@ yanked = "deny"
 unmaintained = "workspace"
 ignore = [
   { id = "RUSTSEC-2024-0429", reason = "glib < 0.20 only via Tauri's Linux GTK stack; the tray ships for Windows only; tracked in #12" },
+  { id = "RUSTSEC-2023-0071", reason = "rsa (Marvin timing attack, no fixed release) only via jsonwebtoken's rust_crypto backend; iem-server signs and verifies HS256 and ES256 only and never builds an RSA key" },
 ]
 
 [licenses]

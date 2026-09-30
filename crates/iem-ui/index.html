@@ -53,11 +53,25 @@
             .shell-member {
                 margin-top: 1rem; font-size: 0.9rem; opacity: 0.7;
             }
+            .shell-error {
+                max-width: 20rem; padding: 0 1rem;
+                text-align: center; line-height: 1.5;
+            }
+            .shell-error button {
+                margin-top: 1rem; padding: 0.6rem 1.6rem;
+                border: 0; border-radius: 6px;
+                background: #4fc3f7; color: #1a1a2e;
+                font: inherit; font-weight: 600; cursor: pointer;
+            }
             @keyframes shell-spin { to { transform: rotate(360deg); } }
         </style>
         <h1>IEM Mixer</h1>
         <div class="shell-spinner"></div>
         <div class="shell-member" id="shell-member-name"></div>
+        <div class="shell-error" id="shell-error" data-testid="load-error" hidden>
+            <p>The mixer did not load.<br />Make sure your phone is on the band WiFi network.</p>
+            <button type="button" id="shell-retry">Try Again</button>
+        </div>
     </div>
     <script>
     if ('serviceWorker' in navigator) {
@@ -77,6 +91,19 @@
             }
         }
     } catch(e) {}
+    // The app's code did not arrive (the loader in Trunk.toml calls this: the
+    // WiFi dropped, or the page was left while it loaded). The shell says so
+    // and offers a reload instead of spinning forever; a log line, not an
+    // error: the page shows the failure itself.
+    window.iemLoadFailed = function (error) {
+        console.log('[load] the app did not load: ' + error);
+        document.querySelector('#app-shell .shell-spinner').hidden = true;
+        document.getElementById('shell-member-name').hidden = true;
+        document.getElementById('shell-error').hidden = false;
+    };
+    document.getElementById('shell-retry').addEventListener('click', function () {
+        location.reload();
+    });
     </script>
 </body>
 </html>

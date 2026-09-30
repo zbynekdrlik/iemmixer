@@ -1,0 +1,63 @@
+[package]
+name = "iem-guard"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "iemmixer guard (S6): switches the IEM PC between REAPER and iemmixer; the iemmixer-guard daemon and the iemmode CLI"
+# The two binaries are listed below; nothing is discovered from src/bin.
+autobins = false
+
+# Never iem-audio-io or iem-engine: the guard does not link the ASIO host (S6
+# design note §3) and stays outside the engine's dependency closure.
+[dependencies]
+# The Windows effects (Task 9): processes, windows, consoles, the registry and
+# the preferred-buffer window (prefwin), all safe wrappers; Unsupported
+# elsewhere.
+iem-win = { path = "../iem-win" }
+# The guard pipe (sync; the daemon and iemmode, Task 10) and the engine's
+# supervisor pipe (the Windows effects, Task 9).
+interprocess = "2.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# Bundle sums (SHA256SUMS) and the predecessor's exe identity.
+sha2 = "0.10"
+thiserror = "2.0"
+# The site's [guard] and [card] tables (Task 9).
+toml = "0.9"
+tracing = "0.1"
+# The binaries' logs: the daemon's file (its task has no console), iemmode's
+# stderr (its stdout is the JSON reply). As in iem-engine.
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# The LAN 443 identity (tls.rs; #9 2026-09-28): a TLS client that proves the
+# served certificate is the server's own cert.pem (byte-equal, its key proven
+# by the handshake), not that it is valid: the certificate the band's phones
+# know expired, and the predecessor serves the same one. ring, as iem-server;
+# already in the lockfile.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+# Plain HTTP on the PC (REAPER's web control, /api/version on port 80,
+# cloudflared's /ready). The public host's HTTPS check runs Windows' own
+# curl.exe, schannel with the system's roots (Task 9).
+ureq = { version = "3.4", default-features = false }
+# Bundle install: deflate only (the zips come from Compress-Archive).
+zip = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+# The guard pipe's security descriptor (SDDL as UTF-16), as interprocess
+# takes it; already in the closure through interprocess.
+[target.'cfg(windows)'.dependencies]
+widestring = "1"
+
+[dev-dependencies]
+# The LAN 443 tests' certificates: Ed25519 keys and signatures, built in the
+# test (no key material in the repository).
+ring = "0.17"
+tempfile = "3"
+
+[[bin]]
+name = "iemmixer-guard"
+path = "src/bin/iemmixer-guard.rs"
+
+[[bin]]
+name = "iemmode"
+path = "src/bin/iemmode.rs"

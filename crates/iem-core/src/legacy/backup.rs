@@ -28,7 +28,10 @@ pub struct MixerBackup {
     pub limiter: HashMap<String, LimiterBackup>,
     /// Per-member UI customizations: member ID → prefs
     pub customizations: HashMap<String, Customization>,
-    /// Per-member PINs: member ID → PIN string
+    /// Per-member PINs: member ID → PIN string. The predecessor's real
+    /// backups do not carry pins (they live apart), so the field is optional
+    /// (iemmixer#9 2026-09-28: a required `pins` broke `import --backup`).
+    #[serde(default)]
     pub pins: HashMap<String, String>,
     /// Track-level mute state for inear/stems tracks: track name → muted
     #[serde(default)]
@@ -198,6 +201,18 @@ mod tests {
         assert_eq!(cust.pinned, vec![1, 5]);
         assert_eq!(cust.hidden, vec![3]);
         assert_eq!(decoded.pins.get("oldmember1").unwrap(), "1234");
+    }
+
+    #[test]
+    fn a_backup_without_pins_parses() {
+        // The predecessor's real backups carry no `pins` field (pins live
+        // apart); the reader must default it, not require it (iemmixer#9
+        // 2026-09-28, the shape seen on the PC).
+        let json = r#"{"version":1,"timestamp":"t","track_layout":{},"sends":[],
+            "track_volumes":{},"eq":{},"limiter":{},"customizations":{},"track_mutes":{}}"#;
+        let b: MixerBackup = serde_json::from_str(json).unwrap();
+        assert!(b.pins.is_empty());
+        assert_eq!(b.version, 1);
     }
 
     #[test]

@@ -1,8 +1,9 @@
 //! WebSocket connection manager with deterministic disposal.
 //!
-//! Owns all background tasks (reconnect, watchdog, token-expiry intervals)
-//! and tears them down via `on_cleanup`. Background closures check
-//! `disposal_guard` (an `Arc<AtomicBool>`) before touching reactive state.
+//! Owns the mixer socket and all background tasks (reconnect, watchdog,
+//! token-expiry intervals) and tears them down via `on_cleanup`. Background
+//! closures check `disposal_guard` (an `Arc<AtomicBool>`) before touching
+//! reactive state.
 
 use leptos::prelude::*;
 use leptos_router::hooks::use_navigate;
@@ -14,12 +15,14 @@ use iem_core::Channel;
 use crate::components::eq_modal::EqBandState;
 use crate::components::talk_button::TalkState;
 
-use super::helpers::{MAX_WS_FAILURES, WsClosureStore, WsFailCounter};
+use super::helpers::{
+    LeaveClose, ReconnectStep, WsClosureStore, WsFailCounter, leave_close, reconnect_step,
+};
 use super::state::MixerState;
 
 /// Set up all background tasks (WS connect, reconnect, watchdog, token-expiry)
-/// and register an `on_cleanup` callback that tears them all down when the
-/// component scope is disposed.
+/// and register an `on_cleanup` callback that tears them all down, and closes
+/// the socket, when the component scope is disposed.
 ///
 /// Background closures (`Closure::forget`) check `disposal_guard` before
 /// touching any reactive state — once cleanup fires, they no-op.
@@ -38,7 +41,8 @@ pub(super) fn setup_connection(
     // Closure storage: keeps WS callbacks alive without Closure::forget() leak
     let ws_closures: WsClosureStore = std::rc::Rc::new(std::cell::RefCell::new(None));
 
-    // WS failure counter: tracks consecutive failures without receiving data
+    // Failed sockets in a row (reset when a socket opens): after
+    // MAX_WS_FAILURES the reconnect tick also checks the token.
     let ws_fail_count: WsFailCounter = std::rc::Rc::new(std::cell::Cell::new(0));
 
     // Track page visibility — skip meter updates when backgrounded.
@@ -119,13 +123,16 @@ pub(super) fn setup_connection(
             return;
         }
 
-        // Exponential backoff gate: skip this tick if the scheduled delay
-        // hasn't elapsed since the last reconnect attempt. reaperiem#153
+        // Exponential backoff gate (reaperiem#153) and the token check after
+        // MAX_WS_FAILURES failed sockets in a row: `reconnect_step`.
         let now_ms = js_sys::Date::now();
-        let attempt = reconnect_attempt_tick.get();
-        let delay_ms = crate::lifecycle::backoff_delay_ms(attempt) as f64;
-        let last_attempt = last_reconnect_attempt_at_tick.get();
-        if last_attempt > 0.0 && (now_ms - last_attempt) < delay_ms {
+        let step = reconnect_step(
+            now_ms,
+            last_reconnect_attempt_at_tick.get(),
+            reconnect_attempt_tick.get(),
+            ws_fail_count.get(),
+        );
+        if step == ReconnectStep::Wait {
             return;
         }
 
@@ -142,8 +149,10 @@ pub(super) fn setup_connection(
                 return;
             }
 
-            // After MAX_WS_FAILURES consecutive failures, check if token is invalid
-            if ws_fail_count.get() >= MAX_WS_FAILURES {
+            // After MAX_WS_FAILURES failed sockets in a row the page also
+            // asks whether its token still holds; it keeps retrying either
+            // way until the answer sends it to the login.
+            if step == ReconnectStep::ConnectAndCheckToken {
                 let nav = navigate_auth_fail.clone();
                 let m = member.clone();
                 wasm_bindgen_futures::spawn_local(async move {
@@ -154,7 +163,6 @@ pub(super) fn setup_connection(
                         nav(&url, Default::default());
                     }
                 });
-                return;
             }
 
             last_reconnect_attempt_at_tick.set(now_ms);
@@ -253,9 +261,12 @@ pub(super) fn setup_connection(
         .unwrap();
     expiry_closure.forget();
 
-    // Register cleanup: set the disposal guard and clear all JS intervals
-    // when the component scope is disposed. Arc<AtomicBool> is Send so it
-    // can be captured directly in the on_cleanup closure.
+    // Register cleanup: set the disposal guard, clear all JS intervals and
+    // close the mixer socket (once it opens, if it is still connecting) when
+    // the component scope is disposed.
+    // Arc<AtomicBool> is Send so it can be captured directly in the
+    // on_cleanup closure; the `ws` signal is read before the scope's signals
+    // are disposed (an owner runs its cleanups first).
     let guard_for_cleanup = disposal_guard.clone();
     on_cleanup(move || {
         guard_for_cleanup.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -263,6 +274,30 @@ pub(super) fn setup_connection(
             w.clear_interval_with_handle(reconnect_interval_id);
             w.clear_interval_with_handle(watchdog_interval_id);
             w.clear_interval_with_handle(expiry_interval_id);
+        }
+        // An in-app navigation keeps the document, and with it an open
+        // socket: the server would keep this page's session. Its handlers
+        // go first, so the close reaches no reconnect logic. A socket still
+        // connecting is closed when it opens (`leave_close`); its one-shot
+        // closer leaks if it never opens.
+        if let Some(Some(socket)) = ws.try_get_untracked() {
+            socket.set_onopen(None);
+            socket.set_onmessage(None);
+            socket.set_onclose(None);
+            socket.set_onerror(None);
+            match leave_close(socket.ready_state()) {
+                LeaveClose::Now => {
+                    let _ = socket.close();
+                }
+                LeaveClose::WhenOpen => {
+                    let opened = socket.clone();
+                    let close_when_open = Closure::once_into_js(move || {
+                        let _ = opened.close();
+                    });
+                    socket.set_onopen(Some(close_when_open.unchecked_ref()));
+                }
+                LeaveClose::Nothing => {}
+            }
         }
     });
 }
@@ -413,6 +448,7 @@ fn connect_websocket(
 
     // Close previous WebSocket if exists (prevents closure leak on reconnect)
     if let Some(Some(old_ws)) = ws.try_get_untracked() {
+        old_ws.set_onopen(None);
         old_ws.set_onmessage(None);
         old_ws.set_onclose(None);
         old_ws.set_onerror(None);
@@ -458,7 +494,7 @@ fn connect_websocket(
     let last_meter_time = std::cell::Cell::new(0.0_f64);
 
     // Clone fail counter for use in closures
-    let fail_count_msg = ws_fail_count.clone();
+    let fail_count_open = ws_fail_count.clone();
     let fail_count_close = ws_fail_count;
 
     let last_frame_at_msg = last_frame_at.clone();
@@ -552,8 +588,6 @@ fn connect_websocket(
                     stems_muted,
                     group,
                 } => {
-                    // Successfully received data — reset failure counter
-                    fail_count_msg.set(0);
                     let _ = set_channels.try_update(|chs| {
                         iem_core::merge_or_replace_channels(chs, new_chs, &touched);
                     });
@@ -746,6 +780,13 @@ fn connect_websocket(
     }) as Box<dyn FnMut(web_sys::MessageEvent)>);
     ws.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
 
+    // An open socket ends a run of failures: the server took the token (a
+    // refused one never opens), so no token check is due.
+    let onopen = Closure::wrap(Box::new(move || {
+        fail_count_open.set(0);
+    }) as Box<dyn FnMut()>);
+    ws.set_onopen(Some(onopen.as_ref().unchecked_ref()));
+
     let reconnect_attempt_close = reconnect_attempt.clone();
 
     // Handle close — mark disconnected and increment failure counter
@@ -767,7 +808,7 @@ fn connect_websocket(
 
     // Store closures so they stay alive (preventing JS callback invalidation)
     // and get dropped on next reconnect (preventing memory leak from Closure::forget)
-    *ws_closures.borrow_mut() = Some((onmessage, onclose));
+    *ws_closures.borrow_mut() = Some((onmessage, onclose, onopen));
 }
 
 #[cfg(test)]

@@ -1,2 +1,4 @@
 goldens/**/*.f64 binary
 crates/iem-limiter-mga/fixtures/* -text
+# TOML fixtures are edited line by line in tests: LF on every checkout, Windows included.
+*.toml text eol=lf

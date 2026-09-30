@@ -133,17 +133,90 @@ fn no_arguments_run_the_server_which_needs_the_site_config() {
     assert!(!stderr.contains("usage"), "stderr: {stderr}");
 }
 
+/// The engineer's push store as the server leaves it (its one-time cleanup
+/// marker and the list), holding `endpoints`.
+fn engineer_subscriptions(dir: &std::path::Path, endpoints: &[&str]) {
+    std::fs::write(dir.join("push_subs_v2_migrated"), "").unwrap();
+    let subs: Vec<serde_json::Value> = endpoints
+        .iter()
+        .map(|e| serde_json::json!({"endpoint": e, "p256dh": "k", "auth": "a"}))
+        .collect();
+    std::fs::write(
+        dir.join("push_subscriptions.json"),
+        serde_json::to_string(&subs).unwrap(),
+    )
+    .unwrap();
+}
+
 #[test]
 fn notify_without_a_subscription_exits_3() {
     let dir = site_dir();
-    let out = run_pin(dir.path(), &["notify", "Kapela hrá", "test"], "");
+    let out = run_pin(
+        dir.path(),
+        &["notify", "--to", "alarm", "Strážca", "test"],
+        "",
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(3), "stderr: {stderr}");
-    assert!(stderr.contains("no device"), "stderr: {stderr}");
-    assert_eq!(
-        run_pin(dir.path(), &["notify", "only a title"], "")
-            .status
-            .code(),
-        Some(2)
+    assert!(
+        stderr.contains("no device took the notice (Alarm)"),
+        "stderr: {stderr}"
     );
+}
+
+/// The guard's alarms go to the engineer's subscriptions (#9 2026-09-28):
+/// with one, the notice gets as far as the VAPID key, which a notice never
+/// creates (exit 1, no secret made).
+#[test]
+fn an_alarm_goes_to_the_engineers_subscriptions() {
+    let dir = site_dir();
+    engineer_subscriptions(dir.path(), &["https://push.example.org/engineer"]);
+    let out = run_pin(
+        dir.path(),
+        &["notify", "--to", "alarm", "Strážca", "test"],
+        "",
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "stderr: {stderr}");
+    assert!(stderr.contains("vapid"), "stderr: {stderr}");
+    assert!(!dir.path().join("secrets").exists());
+}
+
+#[test]
+fn notify_knows_only_alarms() {
+    let dir = site_dir();
+    for args in [
+        &["notify", "only a title"][..],
+        &["notify", "Kapela hrá", "test"][..],
+        &["notify", "--to", "engineer", "T", "B"][..],
+        &["notify", "--to", "band-activity", "T", "B"][..],
+        &["notify", "--to", "alarm", "T"][..],
+        &["notify", "--count", "band-activity"][..],
+        &["notify", "--count"][..],
+        &["alarm-link"][..],
+    ] {
+        assert_eq!(
+            run_pin(dir.path(), args, "").status.code(),
+            Some(2),
+            "{args:?}"
+        );
+    }
+}
+
+#[test]
+fn notify_count_prints_the_engineers_subscriptions() {
+    let dir = site_dir();
+    let count = |dir: &std::path::Path| {
+        let out = run_pin(dir, &["notify", "--count", "alarm"], "");
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        (out.status.code(), stdout)
+    };
+    assert_eq!(count(dir.path()), (Some(0), "0\n".to_string()));
+    engineer_subscriptions(
+        dir.path(),
+        &["https://push.example.org/1", "https://push.example.org/2"],
+    );
+    assert_eq!(count(dir.path()), (Some(0), "2\n".to_string()));
+    std::fs::write(dir.path().join("push_subscriptions.json"), "[oops").unwrap();
+    assert_eq!(count(dir.path()), (Some(1), String::new()));
 }

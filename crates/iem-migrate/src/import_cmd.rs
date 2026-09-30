@@ -39,9 +39,13 @@ pub fn run(args: &[String]) -> Result<String, Failure> {
             "--emit-topology",
             "--expect",
         ],
-        &["--dry-run"],
+        &["--dry-run", "--seed-if-absent"],
     )?;
     let dry = a.flag("--dry-run");
+    // `--seed-if-absent` writes baseline.json but keeps an existing
+    // current.json: a data command runs on every dev entry, and a re-seed
+    // must never wipe the band's live changes (iemmixer#9 2026-09-28).
+    let seed_if_absent = a.flag("--seed-if-absent");
     let rpp = a.path("--rpp")?;
     let state_dir = a.opt_path("--state-dir");
     if !dry && state_dir.is_none() {
@@ -144,11 +148,21 @@ pub fn run(args: &[String]) -> Result<String, Failure> {
         ..Persisted::default()
     };
     let io = |e: std::io::Error| Failure::io(format!("{}: {e}", dir.display()));
-    store.save(&persisted).map_err(io)?;
     store.save_baseline(&persisted).map_err(io)?;
+    // Keep any existing live state (current.json OR a lone generation left by a
+    // crash mid-save); only seed current.json when there is none.
+    let keep_current = seed_if_absent && store.has_state();
+    if !keep_current {
+        store.save(&persisted).map_err(io)?;
+    }
     report.push(format!(
-        "state written to {} (current.json, baseline.json)",
-        dir.display()
+        "state written to {} (baseline.json{})",
+        dir.display(),
+        if keep_current {
+            "; current.json kept (--seed-if-absent)"
+        } else {
+            ", current.json"
+        }
     ));
     Ok(report.join("\n"))
 }

@@ -1,6 +1,35 @@
 [build]
 target = "index.html"
 dist = "dist"
+# The app loader, in place of Trunk's default (`await init(...)` at module top
+# level, which turns a failed download into an uncaught error and leaves the
+# shell spinning). Getting the code - the bindings, and the WASM module,
+# compiled while it streams in - is caught: when it fails (the WiFi dropped,
+# or the page was left before the module arrived) the shell says so and
+# offers a reload (`iemLoadFailed` in index.html). Starting the app is not
+# caught: a panic in `main` stays a loud error. Trunk fills in {base}, {js}
+# and {wasm} by plain replacement, so no other brace pair may spell one of
+# them. CI checks the built index.html for this loader (wasm job).
+pattern_script = '''
+<script type="module">
+let app;
+let wasmModule;
+try {
+    app = await import("{base}{js}");
+    const response = fetch("{base}{wasm}");
+    wasmModule = typeof WebAssembly.compileStreaming === "function"
+        ? await WebAssembly.compileStreaming(response)
+        : await WebAssembly.compile(await (await response).arrayBuffer());
+} catch (error) {
+    window.iemLoadFailed(error);
+}
+if (wasmModule) {
+    const wasm = await app.default({ module_or_path: wasmModule });
+    window.wasmBindings = app;
+    dispatchEvent(new CustomEvent("TrunkApplicationStarted", { detail: { wasm: wasm } }));
+}
+</script>
+'''
 
 [watch]
 watch = ["src", "index.html", "style.css"]

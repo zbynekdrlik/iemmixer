@@ -1,7 +1,8 @@
 //! The server's part of the site file (`site.toml`): who the members are and
 //! which engine mix each hears, how the engine's inputs are shown, and the
 //! web, push, backup and tunnel settings (S5 design note §3). The engine
-//! reads the `[engine]` table itself; the server ignores it.
+//! reads the `[engine]` and `[card]` tables itself, the guard `[guard]`
+//! (S6); the server ignores them.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -52,6 +53,13 @@ pub struct Config {
     /// The band-activity alarm in `dev` (§4.2).
     #[serde(default)]
     pub activity: ActivityConfig,
+
+    /// PIN changes in the web UI (P9, design note §5.4). Until the cutover
+    /// the predecessor is the only place a PIN changes and every entry into
+    /// `dev` brings its PINs over, so the guard writes `false` into every
+    /// `dev` and trial site: the change and reset route then answers 409.
+    #[serde(default = "default_pin_changes")]
+    pub pin_changes: bool,
 
     /// JWT signing key. Never read from the site file: the server loads it
     /// from `<config dir>/secrets/jwt_secret` (`iem_server::secrets`).
@@ -114,6 +122,15 @@ pub struct Config {
     /// The engine's topology table (`[engine]`): read by `iem-engine` only.
     #[serde(default, skip_serializing)]
     pub engine: Option<serde::de::IgnoredAny>,
+
+    /// The engine's ASIO card (`[card]`, S6): read by `iem-engine` and the
+    /// guard only.
+    #[serde(default, skip_serializing)]
+    pub card: Option<serde::de::IgnoredAny>,
+
+    /// The guard's own table (`[guard]`, S6): read by `iemmixer-guard` only.
+    #[serde(default, skip_serializing)]
+    pub guard: Option<serde::de::IgnoredAny>,
 }
 
 /// A member of the band (or the engineer): the id is the URL, the login
@@ -145,14 +162,19 @@ pub struct SiteInputMeta {
     pub owner: Option<String>,
 }
 
-/// Band-activity alarm (§4.2): input peaks above `threshold_dbfs` for at
-/// least `sustain_s` seconds within the last `window_s` seconds.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+/// Band-activity alarm (§4.2): peaks of the watched inputs above
+/// `threshold_dbfs` for at least `sustain_s` seconds within the last
+/// `window_s` seconds.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct ActivityConfig {
     pub threshold_dbfs: f64,
     pub window_s: u64,
     pub sustain_s: u64,
+    /// The engine input ids that count: the stage. Empty (the default) means
+    /// every input of category `mics`. The program input carries signal
+    /// while the band is silent (S1a), so it never belongs here.
+    pub inputs: Vec<String>,
 }
 
 impl Default for ActivityConfig {
@@ -161,12 +183,17 @@ impl Default for ActivityConfig {
             threshold_dbfs: -50.0,
             window_s: 300,
             sustain_s: 120,
+            inputs: Vec::new(),
         }
     }
 }
 
 fn default_port() -> u16 {
     80
+}
+
+fn default_pin_changes() -> bool {
+    true
 }
 
 fn default_engine_pipe() -> String {
@@ -210,6 +237,7 @@ impl Default for Config {
             inputs: Vec::new(),
             back_to_reaper: Vec::new(),
             activity: ActivityConfig::default(),
+            pin_changes: default_pin_changes(),
             jwt_secret: String::new(),
             vapid_private_key: String::new(),
             tls: false,
@@ -224,6 +252,8 @@ impl Default for Config {
             backup_retention_days: default_backup_retention_days(),
             tunnel_ready_url: default_tunnel_ready_url(),
             engine: None,
+            card: None,
+            guard: None,
         }
     }
 }
@@ -286,6 +316,11 @@ impl Config {
         if a.window_s == 0 || a.sustain_s == 0 || a.sustain_s > a.window_s {
             out.push("activity needs 0 < sustain_s <= window_s".to_string());
         }
+        for id in &a.inputs {
+            if !iem_engine_proto::valid_id(id) {
+                out.push(format!("activity input '{id}' is not an input id"));
+            }
+        }
         out
     }
 
@@ -334,6 +369,16 @@ impl Config {
             .as_ref()
             .map(|domain| format!("https://{domain}"))
             .or_else(|| self.lan_url.clone())
+    }
+
+    /// URL the tray's "Open Mixer" opens on the PC: the local server on the
+    /// site's port, never the LAN URL. The tray runs no server of its own
+    /// (F27): `iem-server` serves it. Loopback always reaches it (the HTTPS
+    /// redirect applies to the public host only), and its origin is a secure
+    /// context, so Copy URL's `navigator.clipboard` works in the same window;
+    /// a plain-http LAN address has no clipboard API.
+    pub fn mixer_url(&self) -> String {
+        format!("http://localhost:{}", self.port)
     }
 }
 
@@ -418,7 +463,8 @@ mod tests {
             ActivityConfig {
                 threshold_dbfs: -50.0,
                 window_s: 300,
-                sustain_s: 120
+                sustain_s: 120,
+                inputs: Vec::new(),
             }
         );
         assert!(config.back_to_reaper.is_empty());
@@ -427,6 +473,21 @@ mod tests {
         assert_eq!(
             (custom.activity.window_s, custom.activity.sustain_s),
             (30, 5)
+        );
+        assert!(custom.activity.inputs.is_empty(), "empty: every mics input");
+        let stage: Config = toml::from_str("[activity]\ninputs = [\"mic1\", \"keys\"]\n").unwrap();
+        assert_eq!(stage.activity.inputs, ["mic1", "keys"]);
+        assert_eq!(stage.activity.sustain_s, 120);
+    }
+
+    #[test]
+    fn pin_changes_are_on_unless_the_site_freezes_them() {
+        assert!(Config::default().pin_changes);
+        assert!(toml::from_str::<Config>("port = 80\n").unwrap().pin_changes);
+        assert!(
+            !toml::from_str::<Config>("pin_changes = false\n")
+                .unwrap()
+                .pin_changes
         );
     }
 
@@ -499,6 +560,8 @@ mod tests {
         assert_eq!(site.https_domain.as_deref(), Some("mixer.example.org"));
         assert!(site.engine.is_some(), "the [engine] table is accepted");
         assert!(Config::default().engine.is_none());
+        assert!(site.card.is_some(), "the [card] table is accepted");
+        assert!(Config::default().card.is_none());
         assert_eq!(
             site.member("engineer").map(|m| m.mix.as_str()),
             Some("engineer")
@@ -509,10 +572,45 @@ mod tests {
         );
         assert!(site.member("translator").is_none());
         assert!(!site.back_to_reaper.is_empty());
+        assert!(!site.pin_changes, "the test site is a dev site: frozen");
         let example: Config = toml::from_str(include_str!("../../../config/iemmixer.example.toml"))
             .expect("config/iemmixer.example.toml");
         assert_eq!(example.members.len(), 2);
+        assert!(example.pin_changes);
         assert_eq!(example.problems(), Vec::<String>::new());
+    }
+
+    /// The PC's one site file carries the guard's `[guard]` and the
+    /// engine's `[card]` beside the server's tables (S6): the server ignores
+    /// both, so a guard-started `iem-server` loads the same file.
+    #[test]
+    fn a_site_with_the_guard_and_card_tables_loads() {
+        // The test site carries the engine's key of `[guard]` (hil_tx, S6);
+        // the guard's own keys join that table.
+        let site_text = include_str!("../../../config/test-site.toml");
+        assert!(site_text.contains("\n[guard]"), "the test site's [guard]");
+        let text = site_text.replacen(
+            "\n[guard]",
+            "\n[guard]\nreaper_url = \"http://127.0.0.1:8080\"\nstage_tracks = [1, 2, 3]\non_pref_fail = \"start_reaper_with_alarm\"",
+            1,
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("site.toml");
+        std::fs::write(&path, &text).unwrap();
+        let site = Config::load(&path).expect("a site with [guard] and [card] loads");
+        assert!(site.card.is_some(), "the [card] table is accepted");
+        assert!(site.engine.is_some(), "the [engine] table is accepted");
+        assert!(site.guard.is_some(), "the [guard] table is accepted");
+        assert_eq!(site.members.len(), 10);
+        // Never written back: the tables belong to the engine and the guard.
+        let written = serde_json::to_string(&site).unwrap();
+        for table in ["\"guard\"", "\"card\"", "\"engine\""] {
+            assert!(!written.contains(table), "{table} in {written}");
+        }
+        // Another unknown table is still refused.
+        let other = format!("{text}\n[nonsense]\nx = 1\n");
+        std::fs::write(&path, other).unwrap();
+        assert!(matches!(Config::load(&path), Err(ConfigError::Parse(_))));
     }
 
     #[test]
@@ -536,6 +634,7 @@ mod tests {
                 threshold_dbfs: 0.0,
                 window_s: 10,
                 sustain_s: 11,
+                inputs: vec!["mic1".into(), "Stage Mic".into()],
             },
             ..Config::default()
         };
@@ -551,7 +650,12 @@ mod tests {
         assert!(has("owner 'nobody' is not a member"), "{p:?}");
         assert!(has("threshold_dbfs"), "{p:?}");
         assert!(has("sustain_s <= window_s"), "{p:?}");
-        assert_eq!(p.len(), 10, "{p:?}");
+        assert!(
+            has("activity input 'Stage Mic' is not an input id"),
+            "{p:?}"
+        );
+        assert!(!has("activity input 'mic1'"), "{p:?}");
+        assert_eq!(p.len(), 11, "{p:?}");
         assert!(matches!(config.validate(), Err(ConfigError::Invalid(_))));
         assert!(Config::default().validate().is_ok());
         let zero = Config {
@@ -648,6 +752,24 @@ mod tests {
         };
         assert_eq!(lan_only.share_url().as_deref(), Some("http://10.0.0.10"));
         assert_eq!(Config::default().share_url(), None);
+    }
+
+    #[test]
+    fn test_mixer_url_is_the_local_server_on_the_site_port() {
+        let both = Config {
+            lan_url: Some("http://10.0.0.10".to_string()),
+            https_domain: Some("mixer.example.org".to_string()),
+            port: 8080,
+            ..Config::default()
+        };
+        assert_eq!(both.mixer_url(), "http://localhost:8080");
+        let https_lan = Config {
+            lan_url: Some("https://10.0.0.10".to_string()),
+            port: 8081,
+            ..Config::default()
+        };
+        assert_eq!(https_lan.mixer_url(), "http://localhost:8081");
+        assert_eq!(Config::default().mixer_url(), "http://localhost:80");
     }
 
     #[test]

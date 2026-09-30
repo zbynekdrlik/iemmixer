@@ -213,8 +213,19 @@ pub async fn back_to_reaper(pin: &str) -> Result<(), String> {
     }
 }
 
-/// Check if the stored auth token is still valid by hitting a protected endpoint.
-/// Returns false if the server rejects the token (401) or if no token exists.
+/// Whether the answer to the token check (`GET /api/mixer/<page>`) is the
+/// server refusing the token, which sends the page to the login: 401 (an
+/// invalid or expired token) or 403 (a token not for this page). Any other
+/// answer is no verdict on the token — cloudflared's 502 while the server
+/// restarts or 530 with the tunnel down, a 5xx, a page the site lacks
+/// (404) — so the page keeps its token and keeps retrying.
+pub fn token_refused(status: u16) -> bool {
+    matches!(status, 401 | 403)
+}
+
+/// Whether the stored token still holds, asked of a protected endpoint:
+/// false without a token or when the server refuses it ([`token_refused`]);
+/// a network error or an answer that is no verdict keeps it.
 pub async fn verify_token_valid(member: &str) -> bool {
     let token = match crate::auth::get_token() {
         Some(t) => t,
@@ -228,7 +239,7 @@ pub async fn verify_token_valid(member: &str) -> bool {
         .await;
 
     match resp {
-        Ok(r) => r.ok(),
+        Ok(r) => !token_refused(r.status()),
         Err(_) => true, // Network error — don't clear auth, might be transient
     }
 }
@@ -267,12 +278,19 @@ pub async fn change_pin(old_pin: &str, new_pin: &str, member: &str) -> Result<()
 
     if resp.ok() {
         Ok(())
-    } else if resp.status() == 401 {
-        Err("Wrong current PIN".to_string())
-    } else if resp.status() == 400 {
-        Err("PIN must be exactly 4 digits".to_string())
     } else {
-        Err(format!("Server error: {}", resp.status()))
+        Err(change_pin_error(resp.status()))
+    }
+}
+
+/// The PIN dialog's text for a refused change (`status` = HTTP status); 409
+/// is the freeze before the cutover (P9).
+pub fn change_pin_error(status: u16) -> String {
+    match status {
+        400 => "PIN must be exactly 4 digits".to_string(),
+        401 => "Wrong current PIN".to_string(),
+        409 => iem_core::PIN_CHANGES_FROZEN.to_string(),
+        other => format!("Server error: {other}"),
     }
 }
 
@@ -374,5 +392,33 @@ mod tests {
             "Too many attempts. Try again in 1 s"
         );
         assert_eq!(login_error_message(500, None), "Server error: 500");
+    }
+
+    #[test]
+    fn only_the_servers_verdict_refuses_a_token() {
+        // The server refuses the token (invalid or expired: 401; not for
+        // this page: 403): the page goes to the login.
+        assert!(token_refused(401));
+        assert!(token_refused(403));
+        // It took the token.
+        assert!(!token_refused(200));
+        // No verdict on the token: cloudflared while the server restarts
+        // (502) or with the tunnel down (530), a proxy or server not ready
+        // (500, 503, 504), a page the site lacks (404). A page opened
+        // through the tunnel during a restart keeps its token and retries.
+        for status in [404, 500, 502, 503, 504, 530] {
+            assert!(!token_refused(status), "{status} is no verdict");
+        }
+    }
+
+    #[test]
+    fn pin_change_errors_are_readable() {
+        assert_eq!(change_pin_error(400), "PIN must be exactly 4 digits");
+        assert_eq!(change_pin_error(401), "Wrong current PIN");
+        assert_eq!(
+            change_pin_error(409),
+            "PIN sa zatiaľ mení v pôvodnej aplikácii"
+        );
+        assert_eq!(change_pin_error(500), "Server error: 500");
     }
 }

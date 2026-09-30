@@ -13,6 +13,10 @@ iem-audio-io = { path = "../iem-audio-io" }
 iem-dsp = { path = "../iem-dsp" }
 iem-engine-proto = { path = "../iem-engine-proto" }
 iem-limiter-mga = { path = "../iem-limiter-mga" }
+# The [card] table's preference value (portable prefwin types); on Windows
+# the ASIO start-up's crash dialogs, priority, power throttling, CPU Sets
+# and memory locking (S6). Already in the closure through iem-audio-io.
+iem-win = { path = "../iem-win" }
 interprocess = "2.4"
 rtrb = "0.4"
 serde = { version = "1.0", features = ["derive"] }
@@ -23,6 +27,14 @@ toml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 triple_buffer = "9"
+
+[target.'cfg(windows)'.dependencies]
+# The pipes (S6): the logged-on user's SID for their DACL, and the peek that
+# keeps a reader from waiting in a read.
+iem-win = { path = "../iem-win" }
+# SDDL text for interprocess's SecurityDescriptor (already in the closure
+# through interprocess, at the same version).
+widestring = "1"
 
 [dev-dependencies]
 assert_no_alloc = { version = "1.1.2", default-features = false, features = ["warn_debug", "warn_release"] }

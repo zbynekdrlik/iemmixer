@@ -8,7 +8,7 @@
 //! Also the two pure halves of presets and snapshots: `capture` (the page
 //! mix from the mirror) and `ramp` (applying one as a 50 ms ramp).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -218,13 +218,28 @@ impl BandStore {
             .find(|s| s.timestamp == ts))
     }
 
-    /// Adds a snapshot and prunes the oldest unpinned beyond 50.
-    pub fn add_snapshot(&self, member: &str, snapshot: Snapshot) -> Result<(), StoreError> {
+    /// Adds a snapshot and prunes the oldest unpinned beyond 50; returns the
+    /// timestamp it is stored under. The timestamp is the entry's id
+    /// (restore, pin, delete), so an entry whose second is taken moves to the
+    /// next free second.
+    pub fn add_snapshot(&self, member: &str, mut snapshot: Snapshot) -> Result<i64, StoreError> {
         let _g = self.guard();
         let mut file = self.read::<SnapshotFile>("snapshots", member)?;
+        // Steps over the taken seconds from the entry's own on: the set is
+        // sorted and holds each second once (an older file may hold one
+        // twice), so the walk ends at the first gap.
+        let taken: BTreeSet<i64> = file.snapshots.iter().map(|s| s.timestamp).collect();
+        for &t in taken.range(snapshot.timestamp..) {
+            if t != snapshot.timestamp {
+                break;
+            }
+            snapshot.timestamp += 1;
+        }
+        let id = snapshot.timestamp;
         file.snapshots.push(snapshot);
         prune(&mut file.snapshots);
-        self.write("snapshots", member, &file)
+        self.write("snapshots", member, &file)?;
+        Ok(id)
     }
 
     pub fn delete_snapshot(&self, member: &str, ts: i64) -> Result<bool, StoreError> {
@@ -635,6 +650,53 @@ mod tests {
         assert_eq!(all.len(), MAX_SNAPSHOTS + 2);
     }
 
+    /// A history entry's timestamp is its id (restore, pin, delete), so two
+    /// entries of one second — the day's auto-snapshot and a manual save, a
+    /// double tap on "Uložiť teraz" — must not share it: E2E run 36371298924
+    /// saved two entries of member6 as 1790564273, and pinning, restoring or
+    /// deleting the newer one reached the older.
+    #[test]
+    fn entries_of_one_second_keep_their_own_ids() {
+        let (_dir, s) = store();
+        let at = |label: &str| Snapshot {
+            timestamp: 1_700_000_000,
+            label: label.into(),
+            ..Snapshot::default()
+        };
+        s.add_snapshot("member1", at(AUTO_LABEL)).unwrap();
+        s.add_snapshot("member1", at("manual")).unwrap();
+        s.add_snapshot("member1", at("tap")).unwrap();
+        let ids = |s: &BandStore| {
+            s.snapshots("member1")
+                .unwrap()
+                .into_iter()
+                .map(|x| (x.timestamp, x.label, x.pinned))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ids(&s),
+            vec![
+                (1_700_000_002, "tap".to_string(), false),
+                (1_700_000_001, "manual".to_string(), false),
+                (1_700_000_000, AUTO_LABEL.to_string(), false),
+            ],
+            "each entry gets the next free second, newest first"
+        );
+        // Each id reaches its own entry.
+        assert!(
+            s.pin_snapshot("member1", 1_700_000_001, true, None)
+                .unwrap()
+        );
+        assert!(s.delete_snapshot("member1", 1_700_000_000).unwrap());
+        assert_eq!(
+            ids(&s),
+            vec![
+                (1_700_000_002, "tap".to_string(), false),
+                (1_700_000_001, "manual".to_string(), true),
+            ]
+        );
+    }
+
     #[test]
     fn the_daily_auto_snapshot_is_found_by_its_utc_day() {
         let (_dir, s) = store();
@@ -678,6 +740,34 @@ mod tests {
         assert_eq!(c.format, CUSTOMIZATION_FORMAT);
         assert_eq!(c.pinned, vec![Source::Input(InputId::new("mic1"))]);
         assert_eq!(c.hidden, vec![Source::Mix(MixId::new("member2"))]);
+    }
+
+    #[test]
+    fn customizations_are_per_member_and_a_save_replaces_them() {
+        let (_dir, s) = store();
+        let mic = |n: u32| Source::Input(InputId::new(format!("mic{n}")));
+        s.save_customization("member1", vec![mic(1)], vec![])
+            .unwrap();
+        s.save_customization("member2", vec![], vec![mic(5)])
+            .unwrap();
+        let one = s.customization("member1").unwrap();
+        let two = s.customization("member2").unwrap();
+        assert_eq!((one.pinned, one.hidden), (vec![mic(1)], vec![]));
+        assert_eq!((two.pinned, two.hidden), (vec![], vec![mic(5)]));
+        // A save is the member's whole list, not an addition to it.
+        s.save_customization("member1", vec![mic(5)], vec![])
+            .unwrap();
+        let one = s.customization("member1").unwrap();
+        assert_eq!((one.pinned, one.hidden), (vec![mic(5)], vec![]));
+        s.save_customization("member1", vec![], vec![]).unwrap();
+        let one = s.customization("member1").unwrap();
+        assert!(one.pinned.is_empty() && one.hidden.is_empty());
+        assert_eq!(one.member, "member1");
+        assert_eq!(
+            s.customization("member2").unwrap().hidden,
+            vec![mic(5)],
+            "the other member's file is untouched"
+        );
     }
 
     #[test]

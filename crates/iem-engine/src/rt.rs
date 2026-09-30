@@ -2,7 +2,9 @@
 //! I7; S3 design note §3.2, §3.4; #20 design note §3, §6): one callback runs
 //! the fixed pipeline — the inputs, then every mix in declaration order (its
 //! inputs directly or through their group's strip, the mixes it hears, then
-//! EQ → limiter → volume/mute → Q1 safety → clamp → TX).
+//! EQ → limiter → volume/mute → Q1 safety → clamp → TX), then HIL's spare
+//! outputs after the topology's TX (S6: the HIL test signal's sine while one
+//! runs, zero otherwise).
 //!
 //! A block is cut into segments of at most [`SEG`] samples at every command
 //! timestamp and test-signal end, and every ramp steps per sample, so the
@@ -24,8 +26,9 @@ use iem_engine_proto::{MixState, db_to_lin};
 use iem_limiter_mga::{DISABLE_MS, Limiter, Mga, Sliders};
 use rtrb::{Consumer, Producer, RingBuffer};
 
-use crate::cmd::{RtCmd, RtOp};
+use crate::cmd::{HilMask, MAX_HIL, RtCmd, RtOp};
 use crate::core::reconcile;
+use crate::latency::{self, LatencyProbe};
 use crate::params::{eq_params, input_params};
 use crate::topology::Topology;
 use crate::{MAX_CMDS_PER_BLOCK, SAMPLE_RATE, SEG, TALKBACK_GAIN, TEST_CAP};
@@ -40,22 +43,31 @@ pub const TAP_RING: usize = 2 * 19_200;
 pub const TALK_RING: usize = 11_520;
 /// Engine fade-out on `Shutdown`, and the test signal's fades.
 pub const FADE_MS: f64 = 50.0;
+/// The output fade-in at start, after `Arm` and after a reopen (§4.4).
+pub const FADE_IN_MS: f64 = 500.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Options {
     /// Output fade-in after start (§4.4: 500 ms); 0 starts at full level.
     pub fade_in_ms: f64,
+    /// `--hold` (S6 design note §4): every output stays silent until
+    /// `RtOp::Arm`, then fades in.
+    pub hold: bool,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { fade_in_ms: 500.0 }
+        Self {
+            fade_in_ms: FADE_IN_MS,
+            hold: false,
+        }
     }
 }
 
 /// One meter frame: peaks since the previous frame (inputs after their mute,
-/// mixes after volume and mute, group strips after their fader, mix-major),
-/// limiter GR in dB and X14 active samples per mix.
+/// mixes after volume and mute, group strips after their fader, mix-major,
+/// HIL's spare outputs as written), limiter GR in dB and X14 active samples
+/// per mix.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MeterFrame {
     pub seq: u64,
@@ -65,6 +77,9 @@ pub struct MeterFrame {
     pub gr_db: Vec<f64>,
     pub active: Vec<u64>,
     pub trips: u64,
+    /// HIL's spare outputs (S6), in the order the engine opened them: what
+    /// HIL v1 reads to prove the signal reached them, and left them.
+    pub hil: Vec<f64>,
 }
 
 /// Counters the control loop reads.
@@ -77,13 +92,18 @@ pub struct RtStatus {
     /// Blocks that left commands for the next block (the 512 budget): a
     /// command due in the block that it did not apply. Counted once per block.
     pub deferred: AtomicU64,
+    /// The D5(b) loopback round-trip, in samples, once measured (S6 test 5):
+    /// 0 while no measurement (a loopback is never 0 samples). Cleared when a
+    /// new HIL test signal starts.
+    pub loopback_samples: AtomicU64,
 }
 
 /// The non-RT ends of the processor's rings.
 pub struct RtHandles {
     pub cmds: Producer<RtCmd>,
     pub meters: triple_buffer::Output<MeterFrame>,
-    /// Interleaved stereo 96 kHz: slot 0 the engineer, slot 1 one other mix (X3).
+    /// Interleaved stereo 96 kHz: slot 0 the engineer, slot 1 one other mix
+    /// (X3); silence while a HIL signal runs (S6).
     pub taps: [Consumer<f32>; 2],
     /// Mono 96 kHz talkback into the talkback input (A4).
     pub talkback: Producer<f32>,
@@ -188,9 +208,14 @@ fn copy(dst: &mut [f64], src: &[f64]) {
     }
 }
 
+/// Pushes a segment of a listen tap (X3) as interleaved stereo, or as many
+/// silent frames when `silent` (a HIL signal runs: the tap keeps its
+/// cadence, and the test sine never reaches a web listener; #9,
+/// 2026-09-28).
 fn push_tap(
     p: &mut Producer<f32>,
     (l, r): (&[f64], &[f64]),
+    silent: bool,
     scratch: &mut [f32],
     overruns: &AtomicU64,
 ) {
@@ -201,13 +226,29 @@ fn push_tap(
         .iter_mut()
         .zip(l.iter().zip(r))
     {
-        *pair = [*a as f32, *b as f32];
+        *pair = if silent {
+            [0.0, 0.0]
+        } else {
+            [*a as f32, *b as f32]
+        };
         used += 2;
     }
     let (_, rest) = p.push_partial_slice(scratch.get(..used).unwrap_or_default());
     if !rest.is_empty() {
         overruns.fetch_add(1, Ordering::Relaxed);
     }
+}
+
+/// The output fade from silence to full level over `len` samples; at once
+/// when `len` is 0.
+fn rise(len: u32) -> Ramp {
+    let mut fade = Ramp::new(0.0, len);
+    if len > 0 {
+        fade.set(1.0);
+    } else {
+        fade.jump(1.0);
+    }
+    fade
 }
 
 /// The Q1 safety stage: the MGA core at 0 dB, fully linked.
@@ -319,20 +360,23 @@ struct TestRt {
     fade: Ramp,
     /// Sample time after which it is silent and the caps lift.
     end: u64,
+    /// The HIL signal's spare outputs, by HIL slot: until `end` they carry
+    /// the sine and every mix's TX is zero.
+    mask: Option<HilMask>,
 }
 
 impl TestRt {
-    fn render(&mut self, l: &mut [f64], r: &mut [f64]) {
-        for (a, b) in l.iter_mut().zip(r.iter_mut()) {
+    /// The sine of the next `out.len()` samples: the fade-in, the level,
+    /// the fade-out once the TTL ran out.
+    fn render(&mut self, out: &mut [f64]) {
+        for y in out.iter_mut() {
             if self.left == 0 {
                 self.fade.set(0.0);
             } else {
                 self.left -= 1;
             }
-            let x = self.amp * self.fade.tick() * (core::f64::consts::TAU * self.phase).sin();
+            *y = self.amp * self.fade.tick() * (core::f64::consts::TAU * self.phase).sin();
             self.phase = (self.phase + self.inc).fract();
-            *a = x;
-            *b = x;
         }
     }
 }
@@ -360,7 +404,22 @@ pub struct Processor {
     listen: [Option<usize>; 2],
     listen_lim: Limiter,
     test: Option<TestRt>,
+    /// The test sine of the current segment: the input it replaces and HIL's
+    /// spare outputs read it.
+    test_buf: Vec<f64>,
+    /// HIL's spare outputs (S6), the engine's outputs after the topology's
+    /// TX: their peaks since the last meter frame.
+    hil_peaks: Vec<PeakMeter<1>>,
+    /// How many D5(b) loopback-return inputs the engine opened (S6 test 5),
+    /// after the topology's `rx` in the input buffer; 0 unless opened.
+    hil_rx: usize,
+    /// The loopback round-trip measurement (test 5).
+    latency: LatencyProbe,
     fade: Ramp,
+    /// The fade-in's length in samples; 0 starts at full level.
+    fade_in: u32,
+    /// False while `Options::hold` keeps the output silent (until `Arm`).
+    armed: bool,
     fading_out: bool,
     time: u64,
     since_meter: u64,
@@ -378,6 +437,22 @@ impl Processor {
         counters: &[u64],
         opts: Options,
     ) -> (Self, RtHandles) {
+        Self::with_hil(topo, state, counters, opts, 0, 0)
+    }
+
+    /// [`Processor::new`] with `hil` of HIL's spare card outputs (S6, at
+    /// most [`MAX_HIL`]) as the engine's outputs after the topology's TX:
+    /// they carry the HIL test signal's sine while one runs and zero
+    /// otherwise (A1).
+    pub fn with_hil(
+        topo: Arc<Topology>,
+        state: &MixState,
+        counters: &[u64],
+        opts: Options,
+        hil: usize,
+        hil_rx: usize,
+    ) -> (Self, RtHandles) {
+        let hil = hil.min(MAX_HIL);
         let sr = f64::from(SAMPLE_RATE);
         let r = reconcile(&topo, state).0;
         let inputs = r
@@ -439,6 +514,7 @@ impl Processor {
             gr_db: vec![0.0; topo.mixes.len()],
             active: vec![0; topo.mixes.len()],
             trips: 0,
+            hil: vec![0.0; hil],
         };
         let (meter_in, meters) = triple_buffer::triple_buffer(&frame);
         let (cmd_tx, cmds) = RingBuffer::new(CMD_RING);
@@ -446,12 +522,17 @@ impl Processor {
         let (tap1, tap1_rx) = RingBuffer::new(TAP_RING);
         let (talk_tx, talk) = RingBuffer::new(TALK_RING);
         let status = Arc::new(RtStatus::default());
-        let mut fade = Ramp::new(0.0, samples(opts.fade_in_ms, sr));
-        if opts.fade_in_ms > 0.0 {
-            fade.set(1.0);
+        let fade_in = if opts.fade_in_ms > 0.0 {
+            samples(opts.fade_in_ms, sr)
         } else {
-            fade.jump(1.0);
-        }
+            0
+        };
+        // Held: silent until `Arm` starts the fade-in.
+        let fade = if opts.hold {
+            Ramp::new(0.0, 1)
+        } else {
+            rise(fade_in)
+        };
         let processor = Self {
             talkback_input: topo.inputs.iter().position(|n| n.talkback),
             topo,
@@ -474,7 +555,13 @@ impl Processor {
             listen: [None, None],
             listen_lim: Limiter::new(sr, 0.0),
             test: None,
+            test_buf: vec![0.0; SEG],
+            hil_peaks: vec![PeakMeter::new(); hil],
+            hil_rx,
+            latency: LatencyProbe::new(),
             fade,
+            fade_in,
+            armed: !opts.hold,
             fading_out: false,
             time: 0,
             since_meter: 0,
@@ -497,6 +584,17 @@ impl Processor {
         self.time
     }
 
+    /// The engine's outputs: the topology's TX, then HIL's spare outputs.
+    pub fn outputs(&self) -> usize {
+        self.topo.tx.len() + self.hil_peaks.len()
+    }
+
+    /// The engine's inputs: the topology's RX, then the D5(b) loopback returns
+    /// (`hil_rx`, after the topology's rx). The driver opens exactly this many.
+    pub fn input_channels(&self) -> usize {
+        self.topo.rx.len() + self.hil_rx
+    }
+
     /// X13: every mix hears every input, so a test signal caps every TX.
     fn set_caps(&mut self, on: bool) {
         for mix in &mut self.mixes {
@@ -509,6 +607,19 @@ impl Processor {
     #[allow(clippy::panic)]
     fn inject_fault() {
         panic!("fault injection: panic on the RT thread");
+    }
+
+    /// The owner-approved SEH test (`--fault-injection` only, design §10): a
+    /// structured exception on the RT thread that `catch_unwind` cannot
+    /// catch, so the process's SEH filter runs (Windows). Off Windows there
+    /// is no such filter, so it aborts (equally uncatchable). It never
+    /// returns; no test runs it (it ends the process), and it is excluded
+    /// from mutation.
+    fn inject_seh() {
+        #[cfg(windows)]
+        iem_audio_io::asio::raise_test_seh();
+        #[cfg(not(windows))]
+        std::process::abort();
     }
 
     fn apply(&mut self, op: RtOp) {
@@ -600,21 +711,14 @@ impl Processor {
                     self.listen_lim.reset();
                 }
             }
-            RtOp::TestSignal { i, hz, amp, ttl } => {
-                let len = samples(FADE_MS, sr);
-                let mut fade = Ramp::new(0.0, len);
-                fade.set(1.0);
-                self.test = Some(TestRt {
-                    input: usize::from(i),
-                    phase: 0.0,
-                    inc: hz / sr,
-                    amp: amp.min(TEST_CAP),
-                    left: ttl,
-                    fade,
-                    end: self.time.saturating_add(ttl).saturating_add(u64::from(len)),
-                });
-                self.set_caps(true);
-            }
+            RtOp::TestSignal { i, hz, amp, ttl } => self.start_test(i, hz, amp, ttl, None),
+            RtOp::HilTestSignal {
+                i,
+                hz,
+                amp,
+                ttl,
+                mask,
+            } => self.start_test(i, hz, amp, ttl, Some(mask)),
             RtOp::StopTestSignal => {
                 let now = self.time;
                 if let Some(t) = self.test.as_mut() {
@@ -633,6 +737,46 @@ impl Processor {
                 self.fading_out = true;
             }
             RtOp::Panic => Self::inject_fault(),
+            RtOp::Seh => Self::inject_seh(),
+            RtOp::Arm => {
+                if !self.armed {
+                    self.armed = true;
+                    self.restart_fade();
+                }
+            }
+        }
+    }
+
+    /// X13: a sine replaces input `i` for `ttl` samples and then fades out;
+    /// every TX is capped meanwhile. With `mask` (the HIL signal) the sine
+    /// sounds only on those spare outputs until it ended, and every mix's TX
+    /// is zero.
+    fn start_test(&mut self, i: u16, hz: f64, amp: f64, ttl: u64, mask: Option<HilMask>) {
+        // A new HIL signal restarts the loopback measurement (S6 test 5).
+        if mask.is_some() {
+            self.latency.reset();
+            self.status.loopback_samples.store(0, Ordering::Relaxed);
+        }
+        let len = samples(FADE_MS, self.sr);
+        let mut fade = Ramp::new(0.0, len);
+        fade.set(1.0);
+        self.test = Some(TestRt {
+            input: usize::from(i),
+            phase: 0.0,
+            inc: hz / self.sr,
+            amp: amp.min(TEST_CAP),
+            left: ttl,
+            fade,
+            end: self.time.saturating_add(ttl).saturating_add(u64::from(len)),
+            mask,
+        });
+        self.set_caps(true);
+    }
+
+    /// The fade-in from silence, unless the output is fading out for good.
+    fn restart_fade(&mut self) {
+        if !self.fading_out {
+            self.fade = rise(self.fade_in);
         }
     }
 
@@ -714,8 +858,10 @@ impl Processor {
                 node.eq.reset();
                 tripped = true;
             }
-            if let Some(t) = self.test.as_mut().filter(|t| t.input == i) {
-                t.render(l, r);
+            if self.test.as_ref().is_some_and(|t| t.input == i) {
+                let sine = self.test_buf.get(..n).unwrap_or_default();
+                copy(l, sine);
+                copy(r, sine);
             }
             let mix = &mut node.proc_mix;
             let dry = !mix.is_moving() && mix.value() == 0.0;
@@ -778,8 +924,14 @@ impl Processor {
             listen_buf,
             fade_buf,
             status,
+            test,
             ..
         } = self;
+        // While a HIL signal runs no mix's TX and no listen tap carries
+        // anything: it sounds only on HIL's spare outputs (`render_hil`),
+        // never to a band member or a web listener. The mixes still render
+        // and meter, and the listen limiter still follows its mix.
+        let hil = test.as_ref().is_some_and(|t| t.mask.is_some());
         let heard_from = topo.inputs.len();
         let mut trips = 0;
         for (m, spec) in topo.mixes.iter().enumerate() {
@@ -844,7 +996,7 @@ impl Processor {
             }
             limiter.process(l, r);
             if listen[0] == Some(m) {
-                push_tap(&mut taps[0], (&*l, &*r), tap_buf, &status.tap_overruns);
+                push_tap(&mut taps[0], (&*l, &*r), hil, tap_buf, &status.tap_overruns);
             }
             stereo_gain(fader, l, r);
             if mix_trips.check([&mut *l, &mut *r]) {
@@ -858,7 +1010,13 @@ impl Processor {
                 copy(ll, l);
                 copy(lr, r);
                 listen_lim.process(ll, lr);
-                push_tap(&mut taps[1], (&*ll, &*lr), tap_buf, &status.tap_overruns);
+                push_tap(
+                    &mut taps[1],
+                    (&*ll, &*lr),
+                    hil,
+                    tap_buf,
+                    &status.tap_overruns,
+                );
             }
             let (tl, tr) = tx.get_mut(n);
             let fade = fade_buf.get(..n).unwrap_or_default();
@@ -882,13 +1040,77 @@ impl Processor {
                     continue;
                 };
                 if let Some(out) = block.output(ch).get_mut(off..off + n) {
-                    copy(out, src);
+                    if hil {
+                        out.fill(0.0);
+                    } else {
+                        copy(out, src);
+                    }
                 }
             }
         }
         if trips > 0 {
             self.trips += trips;
             self.status.trips.fetch_add(trips, Ordering::Relaxed);
+        }
+    }
+
+    /// HIL's spare outputs after the topology's TX (S6): while a HIL signal
+    /// runs, the masked ones carry its sine, capped at the test-signal level
+    /// and faded like every output; otherwise, and the others, zero (A1).
+    /// Their peaks go to the meter frame.
+    fn render_hil(&mut self, block: &mut Block<'_>, off: usize, n: usize) {
+        let first = self.topo.tx.len();
+        let mask = self.test.as_ref().and_then(|t| t.mask.as_ref());
+        let sine = self.test_buf.get(..n).unwrap_or_default();
+        let fade = self.fade_buf.get(..n).unwrap_or_default();
+        for (k, peak) in self.hil_peaks.iter_mut().enumerate() {
+            let Some(out) = block.output(first + k).get_mut(off..off + n) else {
+                continue;
+            };
+            if mask.is_some_and(|m| m.get(k).copied().unwrap_or(false)) {
+                for ((y, s), f) in out.iter_mut().zip(sine).zip(fade) {
+                    *y = s.clamp(-TEST_CAP, TEST_CAP) * f;
+                }
+            } else {
+                out.fill(0.0);
+            }
+            peak.observe([&*out]);
+        }
+    }
+
+    /// The D5(b) loopback round-trip (S6 test 5): while the HIL signal sounds,
+    /// records the first hil-output sample at or above the onset threshold as
+    /// the emit, scans the loopback-return inputs (after the topology's rx)
+    /// for the first return at or above it as the arrival, and stores the
+    /// delay in samples once both are known. No-op unless the return is open.
+    fn probe_latency(&mut self, block: &mut Block<'_>, off: usize, n: usize) {
+        if self.hil_rx == 0 {
+            return;
+        }
+        let out_first = self.topo.tx.len();
+        let mut emit: Option<usize> = None;
+        for k in 0..self.hil_peaks.len() {
+            let out = block.output(out_first + k);
+            if let Some(seg) = out.get(off..off + n)
+                && let Some(i) = seg.iter().position(|y| y.abs() >= latency::ONSET)
+            {
+                emit = Some(emit.map_or(i, |e| e.min(i)));
+            }
+        }
+        if let Some(i) = emit {
+            self.latency.emitted(self.time.saturating_add(i as u64));
+        }
+        let in_first = self.topo.rx.len();
+        for j in 0..self.hil_rx {
+            let ret = block.input(in_first + j);
+            if let Some(seg) = ret.get(off..off + n) {
+                self.latency.feed(seg, self.time);
+            }
+        }
+        if let Some(samples) = self.latency.samples() {
+            self.status
+                .loopback_samples
+                .store(samples, Ordering::Relaxed);
         }
     }
 
@@ -901,8 +1123,14 @@ impl Processor {
         for f in fade.iter_mut() {
             *f = self.fade.tick();
         }
+        // The test sine of this segment, before the input it replaces (X13).
+        if let Some(t) = self.test.as_mut() {
+            t.render(self.test_buf.get_mut(..n).unwrap_or_default());
+        }
         self.render_inputs(block, off, n);
         self.render_mixes(block, off, n);
+        self.render_hil(block, off, n);
+        self.probe_latency(block, off, n);
         // After `FadeOut` the fade's target is 0: at rest it is silent.
         if self.fading_out && !self.fade.is_moving() {
             self.status.faded_out.store(true, Ordering::Release);
@@ -934,11 +1162,24 @@ impl Processor {
         {
             *d = strip.peak.take();
         }
+        for (d, peak) in f.hil.iter_mut().zip(self.hil_peaks.iter_mut()) {
+            let [p] = peak.take();
+            *d = p;
+        }
         self.meter_in.publish();
     }
 }
 
 impl Process for Processor {
+    /// A driver reopen (S6): the output fades in again (not while held or
+    /// fading out).
+    #[cfg_attr(iem_rtsan, sanitize(realtime = "nonblocking"))]
+    fn discontinuity(&mut self) {
+        if self.armed {
+            self.restart_fade();
+        }
+    }
+
     #[cfg_attr(iem_rtsan, sanitize(realtime = "nonblocking"))]
     fn process(&mut self, block: &mut Block<'_>) {
         let frames = block.frames();

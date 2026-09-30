@@ -5,17 +5,39 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "iemmixer audio backends: the Process trait, deterministic Offline, paced NullRt and the Windows ASIO host (S1a spike; S6 backend)"
+description = "iemmixer audio backends: the Process trait, deterministic Offline, paced NullRt and the Windows ASIO host (S1a spike) and backend (S6)"
 
 [dependencies]
 
 [target.'cfg(windows)'.dependencies]
 # ASIO host (S1a design note §3). Pinned exactly; fallbacks in program spec §2.2.
 azo = "=0.2.1"
-# The driver thread's message pump (PeekMessageW / DispatchMessageW).
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+# The S6 backend's Windows glue: the preference window (prefwin + the HKCU
+# store), the session-end window, the driver-module holders (I3), VirtualLock.
+iem-win = { path = "../iem-win" }
+# The backend's owner thread logs the driver's messages, the preference
+# window and every reopen with its reason (#9 2026-09-28); never the
+# callback. Already in the engine's closure, the engine's subscriber prints it.
+tracing = "0.1"
+# The owner thread's message pump (PeekMessageW / DispatchMessageW) and the
+# SEH filter (SetUnhandledExceptionFilter needs Win32_System_Kernel). S1c
+# (src/os.rs): CPU Sets, power throttling, thread priority, QPC and trace
+# markers (Threading, SystemInformation, Performance, Diagnostics_Etw).
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_System_Diagnostics_Debug",
+  "Win32_System_Diagnostics_Etw",
+  "Win32_System_Kernel",
+  "Win32_System_Performance",
+  "Win32_System_SystemInformation",
+  "Win32_System_Threading",
+  "Win32_UI_WindowsAndMessaging",
+] }
 
 [dev-dependencies]
+# tests/rt.rs: the RT panic record neither allocates nor frees (that binary
+# runs on its allocator; warn mode counts violations instead of aborting).
+assert_no_alloc = { version = "1.1.2", default-features = false, features = ["warn_debug", "warn_release"] }
 # The asio_spike example's JSON report.
 serde_json = "1"
 

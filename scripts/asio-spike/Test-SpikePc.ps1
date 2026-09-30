@@ -98,6 +98,21 @@ Throws { New-SpikeArguments -Request $req -Root 'C:\r' } 'arguments-refuse-frame
 $req.mode = 'record'
 Throws { New-SpikeArguments -Request $req -Root 'C:\r' } 'arguments-refuse-an-unknown-mode'
 
+# S1c: CPU Sets and hwlat. (duplex carries activity_channels since f154967; the
+# CPU-set flags are appended in the duplex branch, before --activity-channels.
+# hwlat is a clock-read loop with no audio stream, so it takes no watched inputs.)
+$req = [pscustomobject]@{ id = 'spike-2'; mode = 'duplex'; driver = 'Some Card'; frames = 32; seconds = 28800; burn_us = 40; stress = 4; panic_at = 0; cycles = 5; activity_channels = '101-110,121-124'; audio_cpus = '14'; stress_cpus = '6-13' }
+Assert (((New-SpikeArguments -Request $req -Root 'C:\r') -join ' ') -like '*--seconds 28800 *--audio-cpus 14 --stress-cpus 6-13 --activity-channels 101-110,121-124') 'arguments-cpu-sets'
+$req.audio_cpus = '14;calc'
+Throws { New-SpikeArguments -Request $req -Root 'C:\r' } 'arguments-refuse-a-bad-cpu-list'
+$h = [pscustomobject]@{ id = 'spike-3'; mode = 'hwlat'; driver = 'Some Card'; frames = 0; seconds = 30; burn_us = 0; stress = 0; panic_at = 0; cycles = 1; cpu = 14; threshold_us = 10 }
+$ha = New-SpikeArguments -Request $h -Root 'C:\r'
+Assert ($ha[0] -eq 'hwlat' -and (($ha -join ' ') -like '*--cpu 14 --seconds 30 --threshold-us 10')) 'arguments-hwlat'
+$h.cpu = 64
+Throws { New-SpikeArguments -Request $h -Root 'C:\r' } 'arguments-refuse-cpu-64'
+$h.cpu = 3; $h.threshold_us = 0
+Throws { New-SpikeArguments -Request $h -Root 'C:\r' } 'arguments-refuse-threshold-0'
+
 # REAPER web-interface lines.
 $f = ConvertFrom-SpikeReaperLine -Text "NTRACK`t45`n" -Verb 'NTRACK'
 Assert ($f.Count -eq 1 -and $f[0] -eq '45') 'reaper-line-ntrack'

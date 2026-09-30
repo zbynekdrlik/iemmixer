@@ -318,7 +318,15 @@ fn impulses(rx: usize) -> Planar {
 }
 
 fn render(topo: &Arc<Topology>, state: &MixState, input: &Planar, block: usize) -> Planar {
-    let (mut p, _h) = Processor::new(Arc::clone(topo), state, &[], Options { fade_in_ms: 0.0 });
+    let (mut p, _h) = Processor::new(
+        Arc::clone(topo),
+        state,
+        &[],
+        Options {
+            fade_in_ms: 0.0,
+            hold: false,
+        },
+    );
     let run = Offline { block }.run(&mut p, input, topo.tx.len());
     assert!(run.fault.is_none());
     run.output
@@ -629,5 +637,94 @@ fn outputs_do_not_depend_on_the_block_size() {
         "invariance max difference {worst:e} (blocks 32/64/97/256, {} commands, {frames} samples x {} TX)",
         schedule.len(),
         topo.tx.len()
+    );
+}
+
+/// The HIL outputs (S6; the owner's decision on #9 of 2026-09-28) keep the
+/// invariance: a HIL signal on one spare output, stopped inside a block, and
+/// one on both spare outputs that runs to its end, with random mix commands
+/// between them, render bit for bit alike at 32/64/97/256 on every output,
+/// the spare outputs after the topology's TX included.
+#[test]
+fn hil_outputs_do_not_depend_on_the_block_size() {
+    let topo = common::topology();
+    let mut rng = Rng(0x1b10_c512_e000_0002);
+    let state = common::open_state(&topo);
+    let frames = 24_000;
+    let input = hot_material(topo.rx.len(), frames, &mut rng);
+    let flags = Flags {
+        test_signal: true,
+        fault_injection: false,
+    };
+    let mut core = Core::new(Arc::clone(&topo), &state, 0, flags).with_hil(common::HIL.to_vec());
+    let mut schedule: Vec<(u64, Vec<RtOp>)> = Vec::new();
+    let mut at = 100u64;
+    while schedule.len() < 30 {
+        at += 100 + rng.below(450) as u64;
+        let cmd = random_cmd(&topo, &mut rng);
+        if let Ok(out) = core.apply(&cmd)
+            && !out.rt.is_empty()
+        {
+            schedule.push((at, out.rt));
+        }
+    }
+    let hil = |ttl_s: f64, card_tx: &[u16]| Cmd::HilTestSignal {
+        input: InputId::new("mic2"),
+        hz: 997.0,
+        dbfs: -24.0,
+        ttl_s,
+        card_tx: card_tx.to_vec(),
+    };
+    for (at, cmd) in [
+        (1_003, hil(0.1, &common::HIL[1..])),
+        (6_011, Cmd::StopTestSignal),
+        (12_007, hil(0.02, &common::HIL)),
+    ] {
+        schedule.push((at, core.apply(&cmd).unwrap().rt));
+    }
+    schedule.sort_by_key(|(at, _)| *at);
+    assert!(schedule.last().unwrap().0 < frames as u64);
+    let tx = topo.tx.len();
+    let run = |block: usize| {
+        let (mut p, mut h) = Processor::with_hil(
+            Arc::clone(&topo),
+            &state,
+            &[],
+            Options::default(),
+            common::HIL.len(),
+            0,
+        );
+        for (at, ops) in &schedule {
+            assert!(push_group(&mut h.cmds, *at, ops));
+        }
+        let outs = p.outputs();
+        assert_eq!(outs, tx + common::HIL.len());
+        let out = Offline { block }.run(&mut p, &input, outs);
+        assert!(out.fault.is_none());
+        out.output
+    };
+    let reference = run(32);
+    // Both spare outputs carried the signal, the first only in the second
+    // signal; neither sounds after its end.
+    for ch in [tx, tx + 1] {
+        let y = reference.channel(ch);
+        assert!(y.iter().any(|v| v.abs() > 1e-3), "spare output {ch}");
+        assert!(y[19_000..].iter().all(|v| *v == 0.0), "spare output {ch}");
+    }
+    assert!(reference.channel(tx)[..12_007].iter().all(|v| *v == 0.0));
+    let mut worst = 0.0f64;
+    for block in [64, 97, 256] {
+        let other = run(block);
+        for ch in 0..tx + common::HIL.len() {
+            for (a, b) in reference.channel(ch).iter().zip(other.channel(ch)) {
+                worst = worst.max((a - b).abs());
+            }
+        }
+        assert_eq!(worst, 0.0, "block {block}: {worst:e}");
+    }
+    println!(
+        "HIL invariance max difference {worst:e} (blocks 32/64/97/256, {} commands, {frames} samples x {} outputs)",
+        schedule.len(),
+        tx + common::HIL.len()
     );
 }

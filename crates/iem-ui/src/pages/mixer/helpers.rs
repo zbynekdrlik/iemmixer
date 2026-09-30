@@ -125,15 +125,71 @@ pub(super) fn ws_send(ws: ReadSignal<Option<web_sys::WebSocket>>, cmd: &iem_core
 pub(super) type WsClosures = (
     Closure<dyn FnMut(web_sys::MessageEvent)>,
     Closure<dyn FnMut(web_sys::CloseEvent)>,
+    Closure<dyn FnMut()>,
 );
 pub(super) type WsClosureStore = std::rc::Rc<std::cell::RefCell<Option<WsClosures>>>;
 
-/// Counter for consecutive WebSocket failures without receiving data.
-/// Shared across connect_websocket calls via Rc<Cell<>>.
+/// Failed sockets in a row: counted at each close, reset when a socket
+/// opens. Shared across connect_websocket calls via Rc<Cell<>>.
 pub(super) type WsFailCounter = std::rc::Rc<std::cell::Cell<u32>>;
 
-/// Max consecutive WS failures before redirecting to login
+/// Failed sockets in a row after which the page asks the server whether its
+/// token still holds (an invalid one goes to the login).
 pub(super) const MAX_WS_FAILURES: u32 = 3;
+
+/// What the page's reconnect tick does with a closed socket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReconnectStep {
+    /// The backoff delay since the last attempt has not passed yet.
+    Wait,
+    /// Open a new socket.
+    Connect,
+    /// Open a new socket and ask the server whether the token still holds:
+    /// an invalid one goes to the login, a valid one keeps retrying.
+    ConnectAndCheckToken,
+}
+
+/// The reconnect tick's step at `now_ms` for a closed socket, given the
+/// last attempt (`0.0`: none yet), the backoff attempt and the failed
+/// sockets in a row. The page never stops retrying while its token holds:
+/// the failure count only decides whether the token is checked.
+pub(super) fn reconnect_step(
+    now_ms: f64,
+    last_attempt_ms: f64,
+    attempt: u32,
+    failures: u32,
+) -> ReconnectStep {
+    let delay_ms = f64::from(crate::lifecycle::backoff_delay_ms(attempt));
+    if last_attempt_ms > 0.0 && now_ms - last_attempt_ms < delay_ms {
+        ReconnectStep::Wait
+    } else if failures >= MAX_WS_FAILURES {
+        ReconnectStep::ConnectAndCheckToken
+    } else {
+        ReconnectStep::Connect
+    }
+}
+
+/// What a mixer page that is left does with its socket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LeaveClose {
+    /// Open: close it at once (the server ends this page's session).
+    Now,
+    /// Still connecting: close it when it opens. Closing it now makes
+    /// Chrome log "WebSocket is closed before the connection is
+    /// established", which the E2E console guard rejects.
+    WhenOpen,
+    /// Closing or closed already.
+    Nothing,
+}
+
+/// The socket's close when its page is left, by its `ready_state`.
+pub(super) fn leave_close(ready_state: u16) -> LeaveClose {
+    match ready_state {
+        web_sys::WebSocket::OPEN => LeaveClose::Now,
+        web_sys::WebSocket::CONNECTING => LeaveClose::WhenOpen,
+        _ => LeaveClose::Nothing,
+    }
+}
 
 /// Parse track name into main and type parts
 pub(super) fn parse_track_name(name: &str) -> (String, String) {
@@ -273,6 +329,74 @@ mod tests {
             mute_click("keys", true, &solo, &pre),
             MuteClick::Masked(true)
         );
+    }
+
+    #[test]
+    fn the_reconnect_tick_waits_out_the_backoff_delay() {
+        // No attempt yet: the first tick after the drop reconnects.
+        assert_eq!(reconnect_step(1_000.0, 0.0, 1, 1), ReconnectStep::Connect);
+        // Second attempt: 8 s after the first.
+        assert_eq!(
+            reconnect_step(17_999.0, 10_000.0, 2, 2),
+            ReconnectStep::Wait
+        );
+        assert_eq!(
+            reconnect_step(18_000.0, 10_000.0, 2, 2),
+            ReconnectStep::Connect
+        );
+        // Third: 15 s.
+        assert_eq!(
+            reconnect_step(24_999.0, 10_000.0, 3, 2),
+            ReconnectStep::Wait
+        );
+        assert_eq!(
+            reconnect_step(25_000.0, 10_000.0, 3, 2),
+            ReconnectStep::Connect
+        );
+    }
+
+    #[test]
+    fn a_page_keeps_retrying_after_max_failures_and_checks_its_token() {
+        // The third failed socket in a row: the next attempt still opens a
+        // socket, and asks whether the token holds (an invalid one goes to
+        // the login). A server outage longer than the backoff's first steps
+        // (a restart, a mode switch) never leaves the page stuck.
+        assert_eq!(
+            reconnect_step(25_000.0, 10_000.0, 3, MAX_WS_FAILURES),
+            ReconnectStep::ConnectAndCheckToken
+        );
+        // Every 30 s from then on, however long the outage.
+        assert_eq!(
+            reconnect_step(39_999.0, 10_000.0, 9, 9),
+            ReconnectStep::Wait
+        );
+        assert_eq!(
+            reconnect_step(40_000.0, 10_000.0, 9, 9),
+            ReconnectStep::ConnectAndCheckToken
+        );
+        assert_eq!(
+            reconnect_step(1_000.0, 0.0, 40, 40),
+            ReconnectStep::ConnectAndCheckToken
+        );
+        // Below the limit no token check.
+        assert_eq!(
+            reconnect_step(40_000.0, 10_000.0, 9, MAX_WS_FAILURES - 1),
+            ReconnectStep::Connect
+        );
+    }
+
+    #[test]
+    fn a_page_that_is_left_closes_an_open_socket_and_a_connecting_one_when_it_opens() {
+        assert_eq!(leave_close(web_sys::WebSocket::OPEN), LeaveClose::Now);
+        assert_eq!(
+            leave_close(web_sys::WebSocket::CONNECTING),
+            LeaveClose::WhenOpen
+        );
+        assert_eq!(
+            leave_close(web_sys::WebSocket::CLOSING),
+            LeaveClose::Nothing
+        );
+        assert_eq!(leave_close(web_sys::WebSocket::CLOSED), LeaveClose::Nothing);
     }
 
     #[test]

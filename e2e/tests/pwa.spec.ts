@@ -200,4 +200,55 @@ test.describe("Service Worker — PWA with hashed asset caching", () => {
     // ... and nothing else (unhashed files are never cached).
     expect(cacheInfo.keys.filter((k) => !TRUNK_ASSET.test(k))).toEqual([]);
   });
+
+  // The band-activity notice and the guard's alarms reach the same engineer
+  // devices (#9 2026-09-28): the served worker shows each different notice on
+  // its own (the payload's tag), and a payload without one keeps the old tag.
+  test("push: each alarm keeps its own notification by its tag", async ({
+    page,
+    request,
+  }) => {
+    const source = await (await request.get(`${BASE_URL}/sw.js`)).text();
+    await page.goto("about:blank");
+    const shown = await page.evaluate(async (src: string) => {
+      type Shown = { title: string; body: string; tag: string };
+      type PushEvent = {
+        data: { json: () => unknown };
+        waitUntil: (p: Promise<unknown>) => void;
+      };
+      const handlers: Record<string, (e: PushEvent) => void> = {};
+      const out: Shown[] = [];
+      const worker = {
+        addEventListener: (type: string, fn: (e: PushEvent) => void) => {
+          handlers[type] = fn;
+        },
+        registration: {
+          showNotification: async (
+            title: string,
+            opts: { body: string; tag: string },
+          ) => {
+            out.push({ title, body: opts.body, tag: opts.tag });
+          },
+        },
+      };
+      new Function("self", src)(worker);
+      const push = async (payload: unknown) => {
+        const waits: Promise<unknown>[] = [];
+        handlers["push"]({
+          data: { json: () => payload },
+          waitUntil: (p) => waits.push(p),
+        });
+        await Promise.all(waits);
+      };
+      await push({ type: "ALARM", title: "Guard", body: "one", tag: "iem-alarm-0000000000000001" });
+      await push({ type: "ALARM", title: "Guard", body: "two", tag: "iem-alarm-0000000000000002" });
+      await push({ type: "ALARM", title: "Old server", body: "no tag" });
+      return out;
+    }, source);
+    expect(shown).toEqual([
+      { title: "Guard", body: "one", tag: "iem-alarm-0000000000000001" },
+      { title: "Guard", body: "two", tag: "iem-alarm-0000000000000002" },
+      { title: "Old server", body: "no tag", tag: "iem-alarm" },
+    ]);
+  });
 });

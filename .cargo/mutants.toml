@@ -14,12 +14,60 @@ exclude_globs = [
   "crates/iem-server/src/pepper/dpapi.rs",
   # Tauri tray shell: built and linted on Windows only.
   "crates/iem-tray/**",
-  # Windows-only ASIO host (unsafe FFI, S1a): not compiled on the Linux
-  # runners; the PC window exercises it. Its decisions live in the mutated
-  # format.rs and telemetry.rs.
+  # Windows-only ASIO host and backend (unsafe FFI, S1a/S6): not compiled on
+  # the Linux runners; the windows jobs build and lint it, HIL exercises it on
+  # the PC. Its decisions live in the mutated format.rs, telemetry.rs,
+  # channels.rs, period.rs, reset.rs, owner.rs, messages.rs and iem-win's
+  # prefwin.rs.
   "crates/iem-audio-io/src/asio.rs",
+  # Windows-only placement/priority/clock/marker FFI (S1c): not compiled on
+  # the Linux runners; the windows jobs build it and HIL exercises it on the
+  # PC (like asio.rs). Its portable placement logic (parse_lps, ids_for) lives
+  # in the mutated cpuset.rs; the CPU-set buffer decode is FFI, PC-verified.
+  "crates/iem-audio-io/src/os.rs",
   # The S1a spike program (a Windows-only main; its parser is tested).
   "crates/iem-audio-io/examples/**",
+  # The engine's ASIO start-up and interlock card (S6): Windows effects, not
+  # compiled on the Linux runners; the windows job lints it and runs its
+  # no-driver refusal. Its decisions live in the mutated engine.rs
+  # (lock_due, the parser, check_site, interlock_plan), control.rs (Ending,
+  # the lock report), interlock.rs (stage, loop, verdict, report, health)
+  # and site.rs ([card]).
+  "crates/iem-engine/src/asio.rs",
+  # The Windows side of the engine's pipes (S6): not compiled on Linux; the
+  # windows job runs tests/pipes.rs over it. Its decisions are pipe.rs's
+  # sddl_for, dacl_sids, sddl_is_private, name_taken and polled_read, which
+  # stay mutated.
+  "crates/iem-engine/src/pipe/win.rs",
+  # Windows FFI wrappers (S6), not compiled on Linux; the windows job runs
+  # their tests; decisions live in callers and in iem-win's portable decide.rs,
+  # which stays mutated with prefwin.rs and lib.rs.
+  "crates/iem-win/src/console.rs",
+  "crates/iem-win/src/errmode.rs",
+  "crates/iem-win/src/pipe.rs",
+  "crates/iem-win/src/power.rs",
+  "crates/iem-win/src/process.rs",
+  "crates/iem-win/src/registry.rs",
+  "crates/iem-win/src/spawn.rs",
+  "crates/iem-win/src/sync.rs",
+  "crates/iem-win/src/token.rs",
+  "crates/iem-win/src/window.rs",
+  "crates/iem-win/src/win.rs",
+  # The Windows-only Ctrl-Break test helper (feature test-helper).
+  "crates/iem-win/src/bin/**",
+  # The guard's Windows effects (WinPc, S6): not compiled on Linux; the
+  # windows job builds and tests them. Their decisions live in the mutated
+  # pc.rs, site.rs, effects/ and handover.rs (parsers included).
+  "crates/iem-guard/src/win/**",
+  # The Windows side of the guard's pipe writes (the bounded, clean writer
+  # over iem-win's write_within: the guard pipe's replies, the supervisor's
+  # sends): not compiled on Linux; the windows job runs the guard's pipe and
+  # supervisor tests over it. pipe.rs, its Unix twin included, stays mutated.
+  "crates/iem-guard/src/pipe/win.rs",
+  # The guard's two mains (S6 Task 10): Windows effects (the mutex, WinPc,
+  # the session window, the detached hand-over) around the mutated
+  # iem_guard::{cli, daemon, install, pipe}, which hold every decision.
+  "crates/iem-guard/src/bin/**",
 ]
 
 exclude_re = [
@@ -37,6 +85,10 @@ exclude_re = [
   # The console's background loops (100 ms meters, 250 ms janitor): their steps
   # are tested functions (MeterMerge, BandActivity, SoloJanitor, TalkLock).
   "iem-server/src/console\\.rs.*\\b(spawn_tasks|meter_task|janitor_task)\\b",
+  # The owner-approved SEH test's raise (design §10): it raises an uncatchable
+  # structured exception (Windows) or aborts (else), so no test can execute it;
+  # its correctness is the SEH filter's, exercised only on the PC.
+  "iem-engine/src/rt\\.rs.*\\binject_seh\\b",
   # Test-only constructors.
   "new_for_test",
   # Tunnel watchdog loop and the Windows sc.exe restart.
@@ -44,9 +96,14 @@ exclude_re = [
   "restart_service_blocking",
   "sc_windows",
   # Browser-only fetches and context accessors in the UI; covered by
-  # e2e/tests/site-links.spec.ts, e2e/tests/login-protection.spec.ts and
-  # e2e/tests/engineer.spec.ts (the switch).
-  "iem-ui/src/api\\.rs.*replace (login|get_site_links|back_to_reaper) ",
+  # e2e/tests/site-links.spec.ts, e2e/tests/login-protection.spec.ts,
+  # e2e/tests/engineer.spec.ts (the switch) and e2e/tests/pin-freeze.spec.ts
+  # (the PIN change; its messages are the tested change_pin_error).
+  "iem-ui/src/api\\.rs.*replace (login|get_site_links|back_to_reaper|change_pin) ",
+  # The token check's browser-only fetch; its verdict on the answer is the
+  # tested token_refused, and e2e/tests/header.spec.ts drives it (502 while
+  # the server is gone, 200 after the reconnect).
+  "iem-ui/src/api\\.rs.*\\bverify_token_valid\\b",
   # Leptos component bodies (S5): a PascalCase function is a component; its
   # body is DOM event closures and effects that native tests cannot mount. The
   # E2E suites drive them; their pure logic lives in tested helpers.
@@ -115,7 +172,7 @@ exclude_re = [
   "iem-engine/src/rt\\.rs.*replace > with >= in Processor::render_mixes",
   # Equivalent (S3). With the budget spent, `budget >= 0` also cuts the segment at the
   # waiting command; rendering in two pieces is bit-identical (block-size invariance tests).
-  "iem-engine/src/rt\\.rs:963:.*replace > with >= in <impl Process for Processor>::process",
+  "iem-engine/src/rt\\.rs:1038:.*replace > with >= in <impl Process for Processor>::process",
   # The fade wait's `elapsed < FADE_WAIT`: differs only at the exact nanosecond.
   "iem-engine/src/control\\.rs.*replace < with <= in Control::fade_out",
   # Unobservable (S3): the `!` only decides whether "solos cleared" is logged.
@@ -138,7 +195,7 @@ exclude_re = [
   # Equivalent (S5). At exactly −60 dB both branches of the fader domain give −60.
   "iem-server/src/view\\.rs.*replace > with >= in ui_db$",
   # Equivalent (S5). p = ±0 rounds to 0 % and is "C" before the side is chosen.
-  "iem-server/src/backup\\.rs:47:.*replace < with <= in pan$",
+  "iem-server/src/backup\\.rs:46:.*replace < with <= in pan$",
   # Unobservable (S5): the frame age `< 2 s` differs only at the exact nanosecond.
   "iem-server/src/engine/media\\.rs.*replace < with <= in MediaLink::diagnostics$",
   # Unobservable (S5): Listen commands on the mixer socket are ignored either
@@ -146,4 +203,43 @@ exclude_re = [
   "iem-server/src/mixer_ws\\.rs.*delete match arm ClientMsg::ListenStart.* in handle$",
   # Unobservable (S5): the pruned count only decides whether it is logged.
   "iem-server/src/backup_daemon\\.rs.*replace > with (==|<|>=) in run$",
+  # The backup daemon's endless 30 s loop on the wall clock (whole-body
+  # replacement only); its steps are tested functions (due, settle,
+  # RefusalAlarms, refusal_alarm).
+  "iem-server/src/backup_daemon\\.rs.*replace run with \\(\\)$",
+  # Equivalent (S6): the creation flags (the children's and the guard's
+  # helpers') are distinct bits, so `^` gives the same value as `|`.
+  "iem-win/src/decide\\.rs.*replace \\| with \\^ in (creation_flags|helper_flags)$",
+  # The guard pipe's Windows listener (private DACL, first instance, remote
+  # refused) is not compiled on Linux; the windows job's pipe tests run it,
+  # and its Unix twin of the same name serves every pipe test here.
+  "iem-guard/src/pipe\\.rs.*replace listen -> ",
+  # Unobservable (S6): the accept error kind only decides whether it is
+  # logged; both paths wait the same poll.
+  "iem-guard/src/pipe\\.rs.*replace != with == in serve",
+  # Equivalent (S6): the retry loop's `elapsed < limit` differs from `<=`
+  # only at the exact nanosecond.
+  "iem-guard/src/cli\\.rs.*replace < with <= in call_starting",
+  # Equivalent (S6): the session end's wait for the engine, `elapsed <
+  # session_wait`, differs from `<=` only at the exact nanosecond.
+  "iem-guard/src/daemon\\.rs.*replace < with <= in session_end$",
+  # Equivalent (S6): the first pipe instance's retry, `elapsed < limit`,
+  # differs from `<=` only at the exact nanosecond.
+  "iem-guard/src/pipe\\.rs.*replace < with <= in retry",
+  # Unobservable (S6/S1c): `if !hil.is_empty()` in `run` only decides whether
+  # the "HIL's spare card outputs …" info line is logged — no state and no
+  # return value change (like the excluded `delete ! in Control::tick`). `run`
+  # IS reachable from unit tests (run_bounded), but no test captures or asserts
+  # that log, so the mutant is unobservable. The `:461:` line anchor is
+  # essential: `run` also has a `delete ! in run` at :433: (the block-size
+  # guard `if !(1..=MAX_BLOCK).contains(&cfg.block)`), which is NOT equivalent
+  # and IS killed by `run_refuses_a_bad_block_and_a_bad_site`, and the
+  # `delete ! in run_hil` at :617: is killed too — both must stay mutated.
+  "iem-engine/src/engine\\.rs:461:.*delete ! in run$",
+  # Equivalent (S6): the DER length fold `(n << 8) | usize::from(b)` shifts the
+  # accumulator left by 8, so its low 8 bits are always zero; OR-ing in a byte
+  # (0..=255) there equals XOR-ing it, so `| b` and `^ b` are identical (like
+  # the excluded iem-win `creation_flags` `| → ^`). `<< → >>` and `| → &` do
+  # differ and stay mutated, killed by the multi-byte length tests.
+  "iem-guard/src/tls\\.rs.*replace \\| with \\^ in element$",
 ]

@@ -296,7 +296,7 @@ async fn a_backup_restores_through_import_state() {
         )
         .await
         .unwrap();
-    let backup = crate::backup::capture(&site, &s.engine.mirror(), &s.band, "t".into());
+    let backup = crate::backup::capture(&site, &s.engine.mirror(), &s.band, "t".into()).unwrap();
     s.engine
         .request_applied(
             Cmd::SetInput {

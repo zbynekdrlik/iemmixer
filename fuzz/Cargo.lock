@@ -154,24 +154,27 @@ checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
 name = "iem-audio-io"
-version = "2.0.0-dev.8"
+version = "2.0.0-dev.9"
 dependencies = [
  "azo",
+ "iem-win",
+ "tracing",
  "windows-sys",
 ]
 
 [[package]]
 name = "iem-dsp"
-version = "2.0.0-dev.8"
+version = "2.0.0-dev.9"
 
 [[package]]
 name = "iem-engine"
-version = "2.0.0-dev.8"
+version = "2.0.0-dev.9"
 dependencies = [
  "iem-audio-io",
  "iem-dsp",
  "iem-engine-proto",
  "iem-limiter-mga",
+ "iem-win",
  "interprocess",
  "rtrb",
  "serde",
@@ -182,11 +185,12 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "triple_buffer",
+ "widestring",
 ]
 
 [[package]]
 name = "iem-engine-proto"
-version = "2.0.0-dev.8"
+version = "2.0.0-dev.9"
 dependencies = [
  "serde",
  "serde_json",
@@ -203,7 +207,15 @@ dependencies = [
 
 [[package]]
 name = "iem-limiter-mga"
-version = "2.0.0-dev.8"
+version = "2.0.0-dev.9"
+
+[[package]]
+name = "iem-win"
+version = "2.0.0-dev.9"
+dependencies = [
+ "windows-registry",
+ "windows-sys",
+]
 
 [[package]]
 name = "indexmap"

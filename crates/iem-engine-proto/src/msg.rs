@@ -98,11 +98,38 @@ pub enum Cmd {
     SaveNow,
     Shutdown,
     InjectFault,
+    /// Owner-approved SEH test (design §10): a structured exception on the
+    /// RT thread, under the fault-injection flag. Supervisor-may, like
+    /// `InjectFault`.
+    InjectSeh,
     Ping,
+    /// The supervisor lets an engine started with `--hold` sound (S6 design
+    /// note §4): the outputs fade in over 500 ms.
+    Arm,
+    /// The HIL test signal (S6 design note §4, §7): the test signal on
+    /// `input` (under the test-signal flag, capped like `StartTestSignal`;
+    /// `dbfs` above the cap is refused), whose sine, while it runs, sounds
+    /// only on the card outputs `card_tx`: spare outputs no mix uses (the
+    /// site's `[guard] hil_tx`, which the engine opens under the flag); a
+    /// mix's TX is refused, so it never reaches a band member. Every mix's
+    /// TX stays zero meanwhile; the mixes render as usual, so their meters
+    /// show the routing. Supervisor only.
+    HilTestSignal {
+        input: InputId,
+        hz: f64,
+        dbfs: f64,
+        ttl_s: f64,
+        card_tx: Vec<u16>,
+    },
+    /// HIL's forced reopen of the driver (S6 design note §7): the backend
+    /// stops, releases and opens the card again (its reset budget applies;
+    /// the outputs fade in again). Supervisor only, under the
+    /// fault-injection flag.
+    ForceReopen,
 }
 
 /// Every `op` tag, for telling an unknown command from a malformed one.
-pub const OPS: [&str; 20] = [
+pub const OPS: [&str; 24] = [
     "set_input",
     "set_mix",
     "set_level",
@@ -122,13 +149,42 @@ pub const OPS: [&str; 20] = [
     "save_now",
     "shutdown",
     "inject_fault",
+    "inject_seh",
     "ping",
+    "arm",
+    "hil_test_signal",
+    "force_reopen",
 ];
 
 impl Cmd {
     /// Commands an observer connection may send.
     pub fn is_read_only(&self) -> bool {
         matches!(self, Self::GetState | Self::GetTopology | Self::Ping)
+    }
+
+    /// Commands only the supervisor may send (S6 design note §4).
+    pub fn is_supervisor(&self) -> bool {
+        matches!(
+            self,
+            Self::Arm | Self::HilTestSignal { .. } | Self::ForceReopen
+        )
+    }
+
+    /// Commands a supervisor connection may send: reads, its own commands,
+    /// `Shutdown`, `SaveNow`, the test signal and fault injection (their
+    /// launch flags still apply); never a change of the mix.
+    pub fn supervisor_may(&self) -> bool {
+        self.is_read_only()
+            || self.is_supervisor()
+            || matches!(
+                self,
+                Self::Shutdown
+                    | Self::SaveNow
+                    | Self::StartTestSignal { .. }
+                    | Self::StopTestSignal
+                    | Self::InjectFault
+                    | Self::InjectSeh
+            )
     }
 }
 
@@ -137,6 +193,11 @@ impl Cmd {
 pub enum Role {
     Control,
     Observe,
+    /// The guard's connection (S6 design note §4): `Shutdown`, `SaveNow`,
+    /// `Arm`, the test signals and fault injection (under their launch
+    /// flags) and reads; never a mix change. One at a time, beside the
+    /// controller: a new supervisor supersedes the old one only.
+    Supervisor,
 }
 
 // One message at a time, on the control thread only (never the RT thread):
@@ -172,6 +233,8 @@ pub enum ErrCode {
     NoSource,
     NotController,
     TooLarge,
+    /// A supervisor command from another role (S6).
+    NotSupervisor,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -305,6 +368,41 @@ pub struct Status {
     pub tap_overruns: u64,
     pub talkback_dropped: u64,
     pub cmd_backlog: u64,
+    // S6, additive: the stream's own figures (the ASIO backend; NullRt
+    // reports its block and zeros).
+    /// The period the driver delivers, measured from its sample positions.
+    pub frames: u32,
+    /// Callback intervals of two periods or more.
+    pub missed: u64,
+    /// Callbacks longer than one period.
+    pub overruns: u64,
+    /// Driver reopens after a reset request or a stall.
+    pub resets: u64,
+    /// A callback outlived the stop wait: the stream stays allocated (the
+    /// guard alarms).
+    pub parked: bool,
+    /// Started with `--hold` and not armed yet: every output is silent.
+    pub held: bool,
+    /// Locking the real-time memory failed (logged, never fatal).
+    pub lock_failed: bool,
+    /// S6, additive: HIL's spare card outputs (the engine opens the site's
+    /// `[guard] hil_tx` under the test-signal flag), in that order; empty
+    /// otherwise. HIL v1 reads them to prove its test signal reached them,
+    /// at its level, and left them.
+    pub hil: Vec<HilOut>,
+    /// S6 test 5, additive: the D5(b) loopback round-trip, in samples, once
+    /// measured (the HIL signal on a spare output, looped back to the matching
+    /// spare input in Dante); 0 while none. `loopback_ms` derives the time.
+    pub loopback_samples: u64,
+}
+
+/// One of HIL's spare card outputs in a [`Status`] (S6): its card channel
+/// and its peak since the previous `Status` (linear).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HilOut {
+    pub tx: u16,
+    pub peak: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -489,8 +587,150 @@ mod tests {
             Cmd::SaveNow,
             Cmd::Shutdown,
             Cmd::InjectFault,
+            Cmd::InjectSeh,
             Cmd::Ping,
+            Cmd::Arm,
+            Cmd::HilTestSignal {
+                input: InputId::new("mic1"),
+                hz: 1000.0,
+                dbfs: -30.0,
+                ttl_s: 10.0,
+                card_tx: vec![72],
+            },
+            Cmd::ForceReopen,
         ]
+    }
+
+    #[test]
+    fn the_supervisor_role_round_trips() {
+        assert_eq!(
+            serde_json::to_string(&Role::Supervisor).unwrap(),
+            r#""supervisor""#
+        );
+        assert_eq!(
+            serde_json::from_str::<Role>(r#""supervisor""#).unwrap(),
+            Role::Supervisor
+        );
+        assert_eq!(
+            parse_client(br#"{"type":"hello","proto":1,"role":"supervisor","client":"guard"}"#)
+                .unwrap(),
+            ClientMsg::Hello {
+                proto: 1,
+                role: Role::Supervisor,
+                client: "guard".into()
+            }
+        );
+        let hil = parse_client(
+            br#"{"type":"request","id":3,"cmd":{"op":"hil_test_signal","input":"mic1","hz":1000.0,"dbfs":-30.0,"ttl_s":5.0,"card_tx":[72,71]}}"#,
+        )
+        .unwrap();
+        let ClientMsg::Request {
+            id,
+            cmd: Cmd::HilTestSignal { card_tx, .. },
+            ..
+        } = hil
+        else {
+            panic!("{hil:?}")
+        };
+        assert_eq!((id, card_tx), (3, vec![72, 71]));
+        assert_eq!(
+            serde_json::to_string(&ErrCode::NotSupervisor).unwrap(),
+            r#""not_supervisor""#
+        );
+    }
+
+    /// `Status` as an engine before S6 sent it, and as a client before S6
+    /// reads it.
+    #[derive(Deserialize)]
+    struct OldStatus {
+        callbacks: u64,
+        late: u64,
+        faulted: bool,
+        process_max_us: f64,
+        trips: u64,
+        tap_overruns: u64,
+        talkback_dropped: u64,
+        cmd_backlog: u64,
+    }
+
+    #[test]
+    fn the_stream_figures_in_status_are_additive() {
+        let status = Status {
+            callbacks: 9,
+            frames: 32,
+            missed: 2,
+            overruns: 3,
+            resets: 1,
+            parked: true,
+            held: true,
+            lock_failed: true,
+            ..Status::default()
+        };
+        let json = serde_json::to_value(&status).unwrap();
+        assert_eq!(json["frames"], 32);
+        assert_eq!(json["missed"], 2);
+        assert_eq!(json["overruns"], 3);
+        assert_eq!(json["resets"], 1);
+        assert_eq!(json["parked"], true);
+        assert_eq!(json["held"], true);
+        assert_eq!(json["lock_failed"], true);
+        assert_eq!(
+            serde_json::from_value::<Status>(json.clone()).unwrap(),
+            status
+        );
+        // An old client reads the new message and ignores the new fields.
+        let old: OldStatus = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            (old.callbacks, old.late, old.faulted, old.process_max_us),
+            (9, 0, false, 0.0)
+        );
+        assert_eq!(
+            (
+                old.trips,
+                old.tap_overruns,
+                old.talkback_dropped,
+                old.cmd_backlog
+            ),
+            (0, 0, 0, 0)
+        );
+        // An old engine's message reads with the new fields at their defaults.
+        let from_old: Status = serde_json::from_str(
+            r#"{"callbacks":4,"late":0,"faulted":false,"process_max_us":1.5,"trips":0,"tap_overruns":0,"talkback_dropped":0,"cmd_backlog":0}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            from_old,
+            Status {
+                callbacks: 4,
+                process_max_us: 1.5,
+                ..Status::default()
+            }
+        );
+    }
+
+    /// HIL's spare outputs in `Status` (S6): additive both ways, a partial
+    /// entry reads with its defaults.
+    #[test]
+    fn the_hil_outputs_in_status_are_additive() {
+        let status = Status {
+            hil: vec![HilOut { tx: 94, peak: 0.25 }, HilOut { tx: 95, peak: 0.0 }],
+            ..Status::default()
+        };
+        let json = serde_json::to_value(&status).unwrap();
+        assert_eq!(
+            json["hil"],
+            serde_json::json!([{"tx": 94, "peak": 0.25}, {"tx": 95, "peak": 0.0}])
+        );
+        assert_eq!(
+            serde_json::from_value::<Status>(json.clone()).unwrap(),
+            status
+        );
+        let old: OldStatus = serde_json::from_value(json).unwrap();
+        assert_eq!(old.callbacks, 0);
+        let from_old: Status = serde_json::from_str(r#"{"callbacks":4}"#).unwrap();
+        assert!(from_old.hil.is_empty());
+        let partial: Status = serde_json::from_str(r#"{"hil":[{"tx":94}]}"#).unwrap();
+        assert_eq!(partial.hil, vec![HilOut { tx: 94, peak: 0.0 }]);
     }
 
     #[test]
@@ -771,5 +1011,40 @@ mod tests {
         assert!(Cmd::GetTopology.is_read_only());
         assert!(Cmd::Ping.is_read_only());
         assert!(!Cmd::SaveNow.is_read_only());
+    }
+
+    /// The ops of the commands `pick` accepts, in `OPS` order.
+    fn ops_where(pick: fn(&Cmd) -> bool) -> Vec<&'static str> {
+        every_cmd()
+            .iter()
+            .zip(OPS)
+            .filter(|(cmd, _)| pick(cmd))
+            .map(|(_, op)| op)
+            .collect()
+    }
+
+    #[test]
+    fn the_supervisor_sends_its_own_commands_reads_stops_and_tests_but_no_mix_change() {
+        assert_eq!(
+            ops_where(Cmd::is_supervisor),
+            ["arm", "hil_test_signal", "force_reopen"]
+        );
+        assert_eq!(
+            ops_where(Cmd::supervisor_may),
+            [
+                "start_test_signal",
+                "stop_test_signal",
+                "get_state",
+                "get_topology",
+                "save_now",
+                "shutdown",
+                "inject_fault",
+                "inject_seh",
+                "ping",
+                "arm",
+                "hil_test_signal",
+                "force_reopen"
+            ]
+        );
     }
 }

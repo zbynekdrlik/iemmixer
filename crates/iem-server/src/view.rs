@@ -442,7 +442,11 @@ pub fn eq_bands(eq: &Eq) -> Vec<EqBand> {
         .collect()
 }
 
-/// `eq` with one band value set; `param` is freq_hz, gain_db, bw_oct or enabled.
+/// `eq` with one band value set; `param` is freq_hz, gain_db, bw_oct or
+/// enabled. A gain change also switches a band with a gain on, as ReaEQ did
+/// under the predecessor (FG-2, P9: the band must not notice the switch); the
+/// high-pass has no gain, so its switch stays as it is (no low cut from a
+/// gain drag or Reset).
 pub fn apply_band(eq: &Eq, band: u8, param: &str, value: f32) -> Result<Eq, ViewError> {
     if !value.is_finite() {
         return Err(ViewError::BadValue(format!("{param} {value}")));
@@ -455,7 +459,12 @@ pub fn apply_band(eq: &Eq, band: u8, param: &str, value: f32) -> Result<Eq, View
     let v = f64::from(value);
     match param {
         "freq_hz" => b.freq_hz = v,
-        "gain_db" => b.gain_db = v,
+        "gain_db" => {
+            b.gain_db = v;
+            if b.kind != BandKind::HighPass {
+                b.enabled = true;
+            }
+        }
         "bw_oct" => b.bw_oct = v,
         "enabled" => b.enabled = value >= 0.5,
         other => return Err(ViewError::BadValue(format!("EQ parameter {other:?}"))),
@@ -1123,6 +1132,32 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_pan_names_its_value() {
+        let v = test_view();
+        let m = Mirror::default();
+        let p2 = page(&v, "member2");
+        let refused = |pan: f32| {
+            command(
+                &v,
+                &m,
+                &p2,
+                &member("member2"),
+                &ClientMsg::SetPan {
+                    id: "mic1".into(),
+                    pan,
+                },
+            )
+            .unwrap_err()
+            .to_string()
+        };
+        // The UI pan is 0…1; the refusal (logged) names what was sent.
+        assert_eq!(refused(1.5), "bad value: pan 1.5");
+        assert_eq!(refused(-0.25), "bad value: pan -0.25");
+        assert_eq!(refused(f32::NAN), "bad value: pan NaN");
+        assert_eq!(refused(1.0001), "bad value: pan 1.0001");
+    }
+
+    #[test]
     fn engineer_only_commands_work_for_the_engineer() {
         let v = test_view();
         let m = Mirror::default();
@@ -1280,6 +1315,81 @@ mod tests {
         let mut off = eq;
         off.bands[1].gain_db = -1000.0;
         assert_eq!(eq_bands(&off)[1].gain_db, -150.0);
+    }
+
+    #[test]
+    fn a_gain_change_leaves_a_disabled_high_pass_off() {
+        // The high-pass has no gain (the engine ignores it): neither a gain
+        // drag nor Reset (gain 0) may switch on an audible low cut.
+        let eq = Eq::default();
+        assert_eq!(
+            (eq.bands[0].kind, eq.bands[0].enabled),
+            (BandKind::HighPass, false)
+        );
+        for gain in [0.0_f32, 3.0] {
+            let moved = apply_band(&eq, 0, "gain_db", gain).unwrap();
+            assert_eq!(
+                (moved.bands[0].gain_db, moved.bands[0].enabled),
+                (f64::from(gain), false),
+                "{gain}"
+            );
+        }
+        // Its own switch still works, and a gain change leaves it on.
+        let on = apply_band(&eq, 0, "enabled", 1.0).unwrap();
+        assert!(apply_band(&on, 0, "gain_db", 3.0).unwrap().bands[0].enabled);
+        // Every band with a gain switches on, Reset's gain 0 included.
+        for band in 1..5_u8 {
+            let reset = apply_band(&eq, band, "gain_db", 0.0).unwrap();
+            assert!(reset.bands[usize::from(band)].enabled, "band {band}");
+        }
+    }
+
+    #[test]
+    fn a_gain_change_enables_a_disabled_band() {
+        // ReaEQ's behaviour, kept from gen1 (P9: the band notices nothing):
+        // moving the gain of a disabled band switches the band on.
+        let eq = Eq::default();
+        assert!(!eq.bands[1].enabled);
+        let moved = apply_band(&eq, 1, "gain_db", 3.0).unwrap();
+        assert_eq!(
+            (moved.bands[1].gain_db, moved.bands[1].enabled),
+            (3.0, true)
+        );
+        // Only the gain does: frequency and width leave the switch alone.
+        assert!(!apply_band(&eq, 1, "freq_hz", 250.0).unwrap().bands[1].enabled);
+        assert!(!apply_band(&eq, 1, "bw_oct", 0.5).unwrap().bands[1].enabled);
+        // An enabled band stays on; the other bands are untouched.
+        let again = apply_band(&moved, 1, "gain_db", -2.0).unwrap();
+        assert_eq!(
+            (again.bands[1].gain_db, again.bands[1].enabled),
+            (-2.0, true)
+        );
+        assert_eq!(again.bands[..1], eq.bands[..1]);
+        assert_eq!(again.bands[2..], eq.bands[2..]);
+        // The page command sends the band switched on to the engine.
+        let v = test_view();
+        let m = Mirror::default();
+        let p1 = page(&v, "member1");
+        let cmds = command(
+            &v,
+            &m,
+            &p1,
+            &member("member1"),
+            &ClientMsg::SetEqBand {
+                target: "member1".into(),
+                band: 1,
+                param: "gain_db".into(),
+                value: 3.0,
+            },
+        )
+        .unwrap();
+        match cmds.as_slice() {
+            [Cmd::SetEq { target, eq }] => {
+                assert_eq!(target, &EqTarget::Mix(mix("member1")));
+                assert_eq!((eq.bands[1].gain_db, eq.bands[1].enabled), (3.0, true));
+            }
+            other => panic!("one SetEq, got {other:?}"),
+        }
     }
 
     #[test]

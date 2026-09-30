@@ -1,7 +1,8 @@
-//! Backup files (F19): `<config dir>/backups/YYYYMMDD_HHMMSS.json`, backups v2
-//! only; the predecessor's backups (moved to `legacy/backups/` by the
-//! migration) are not listed. Retention prunes files older than the site's
-//! `backup_retention_days`.
+//! Backup files (F19): `<config dir>/backups/YYYYMMDD_HHMMSS_mmm.json` (UTC,
+//! with milliseconds; `_2`, `_3`, … appended when the name is taken: a save
+//! never overwrites a backup), backups v2 only; the predecessor's backups
+//! (moved to `legacy/backups/` by the migration) are not listed. Retention
+//! prunes files older than the site's `backup_retention_days`.
 
 use crate::atomic_write;
 use iem_core::backup::{BackupInfo, MixerBackup};
@@ -18,14 +19,36 @@ impl BackupStore {
         }
     }
 
-    /// Writes `backup` and returns its file name.
+    /// Writes `backup` under a name of its own and returns it: its
+    /// timestamp's name, or that name with `_2`, `_3`, … when a backup of the
+    /// same millisecond exists. A save never overwrites another backup.
     pub fn save(&self, backup: &MixerBackup) -> Result<String, std::io::Error> {
         std::fs::create_dir_all(&self.backups_dir)?;
-        let filename = timestamp_to_filename(&backup.timestamp);
-        let path = self.backups_dir.join(&filename);
+        let first = timestamp_to_filename(&backup.timestamp);
         let json = serde_json::to_string_pretty(backup).map_err(std::io::Error::other)?;
-        atomic_write(&path, &json)?;
-        Ok(filename)
+        for n in 1..=MAX_SAME_NAME {
+            let filename = numbered(&first, n);
+            let path = self.backups_dir.join(&filename);
+            // Claim the name before writing: a second save at the same
+            // moment (the daemon's slot and a manual capture) cannot take it.
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e),
+            }
+            if let Err(e) = atomic_write(&path, &json) {
+                let _ = std::fs::remove_file(&path);
+                return Err(e);
+            }
+            return Ok(filename);
+        }
+        Err(std::io::Error::other(format!(
+            "{MAX_SAME_NAME} backups named {first} exist already"
+        )))
     }
 
     /// Readable backups, newest first.
@@ -83,9 +106,8 @@ impl BackupStore {
             let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
                 continue;
             };
-            if stem.len() == 15
-                && stem.contains('_')
-                && stem < cutoff
+            if let Some(time) = backup_time(stem)
+                && time < cutoff
                 && std::fs::remove_file(&path).is_ok()
             {
                 deleted += 1;
@@ -95,10 +117,43 @@ impl BackupStore {
     }
 }
 
-/// "2026-09-27T13:00:00Z" → "20260927_130000.json".
+/// Names one timestamp may take (`…json`, `…_2.json`, …).
+const MAX_SAME_NAME: u32 = 1000;
+
+/// "2026-09-27T13:00:00.123Z" → "20260927_130000_123.json"; the milliseconds
+/// only when the timestamp has them ("…T13:00:00Z" → "20260927_130000.json").
 fn timestamp_to_filename(timestamp: &str) -> String {
     let ts = timestamp.get(..19).unwrap_or(timestamp);
-    ts.replace(['-', ':'], "").replace('T', "_") + ".json"
+    let mut stem = ts.replace(['-', ':'], "").replace('T', "_");
+    let ms = timestamp
+        .get(19..)
+        .and_then(|r| r.strip_prefix('.'))
+        .and_then(|r| r.strip_suffix('Z'))
+        .filter(|ms| !ms.is_empty() && ms.bytes().all(|b| b.is_ascii_digit()));
+    if let Some(ms) = ms {
+        stem.push('_');
+        stem.push_str(ms);
+    }
+    stem + ".json"
+}
+
+/// The `n`-th name for a backup whose own name is `first`: `first` itself,
+/// then `_2`, `_3`, … before `.json` (they sort after it, so the list stays
+/// newest first).
+fn numbered(first: &str, n: u32) -> String {
+    if n == 1 {
+        return first.to_string();
+    }
+    let stem = first.strip_suffix(".json").unwrap_or(first);
+    format!("{stem}_{n}.json")
+}
+
+/// The "YYYYMMDD_HHMMSS" a backup's file stem starts with (the stem is that,
+/// or that and `_…`), for retention; `None` for any other file.
+fn backup_time(stem: &str) -> Option<&str> {
+    let time = stem.get(..15)?;
+    let rest = stem.get(15..)?;
+    (time.contains('_') && (rest.is_empty() || rest.starts_with('_'))).then_some(time)
 }
 
 #[cfg(test)]
@@ -145,6 +200,105 @@ mod tests {
                 .unwrap_err()
                 .starts_with("read error")
         );
+    }
+
+    #[test]
+    fn two_backups_of_the_same_second_are_two_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BackupStore::new(dir.path());
+        let of_rev = |rev: u64| {
+            let mut b = backup("2026-09-27T13:00:00Z");
+            b.rev = rev;
+            b
+        };
+        let names: Vec<String> = (1..=3)
+            .map(|rev| store.save(&of_rev(rev)).unwrap())
+            .collect();
+        // Never an overwrite: each save gets a name of its own, and every
+        // backup reads back as it was saved.
+        assert_eq!(
+            names,
+            [
+                "20260927_130000.json",
+                "20260927_130000_2.json",
+                "20260927_130000_3.json"
+            ]
+        );
+        for (rev, name) in (1..=3).zip(&names) {
+            assert_eq!(store.load(name).unwrap(), of_rev(rev), "{name}");
+        }
+        let listed: Vec<String> = store.list().into_iter().map(|i| i.filename).collect();
+        let newest_first: Vec<String> = names.iter().rev().cloned().collect();
+        assert_eq!(listed, newest_first);
+    }
+
+    #[test]
+    fn a_save_that_fails_answers_with_its_own_error() {
+        // Only a taken name moves on to the next number. Any other failure
+        // comes back at once, as it is: here the name of a timestamp with
+        // '/' (never a server's own) points into a folder that is not there.
+        let dir = tempfile::tempdir().unwrap();
+        let store = BackupStore::new(dir.path());
+        let e = store.save(&backup("2026/09/27T13:00:00Z")).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::NotFound, "{e}");
+        let written = std::fs::read_dir(dir.path().join("backups"))
+            .unwrap()
+            .count();
+        assert_eq!(written, 0, "nothing written");
+    }
+
+    #[test]
+    fn names_carry_the_milliseconds_and_a_number_after_the_first() {
+        let name = timestamp_to_filename;
+        assert_eq!(name("2026-09-27T13:00:00.123Z"), "20260927_130000_123.json");
+        assert_eq!(name("2026-09-27T13:00:00Z"), "20260927_130000.json");
+        // Anything but digits after the dot is not milliseconds.
+        for odd in [
+            "2026-09-27T13:00:00.Z",
+            "2026-09-27T13:00:00.12aZ",
+            "2026-09-27T13:00:00.123",
+            "2026-09-27T13:00:00,123Z",
+        ] {
+            assert_eq!(name(odd), "20260927_130000.json", "{odd}");
+        }
+        assert_eq!(
+            numbered("20260927_130000_123.json", 1),
+            "20260927_130000_123.json"
+        );
+        assert_eq!(
+            numbered("20260927_130000_123.json", 2),
+            "20260927_130000_123_2.json"
+        );
+        assert_eq!(numbered("x", 3), "x_3.json");
+    }
+
+    #[test]
+    fn retention_knows_every_backup_name_and_nothing_else() {
+        for (stem, time) in [
+            ("20260927_130000", Some("20260927_130000")),
+            ("20260927_130000_123", Some("20260927_130000")),
+            ("20260927_130000_123_2", Some("20260927_130000")),
+            ("20260927_130000x", None),
+            ("202609271300001", None),
+            ("manual", None),
+            ("", None),
+        ] {
+            assert_eq!(backup_time(stem), time, "{stem:?}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let store = BackupStore::new(dir.path());
+        for ts in ["2020-01-01T00:00:00.500Z", "2020-01-01T00:00:00.500Z"] {
+            store.save(&backup(ts)).unwrap();
+        }
+        let kept = store.save(&backup("2099-01-01T00:00:00.001Z")).unwrap();
+        std::fs::write(dir.path().join("backups/20200101_000000x.json"), "{}").unwrap();
+        assert_eq!(store.prune_before("20210101_000000"), 2, "both old ones");
+        let mut left: Vec<String> = std::fs::read_dir(dir.path().join("backups"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["20200101_000000x.json", kept.as_str()]);
     }
 
     #[test]

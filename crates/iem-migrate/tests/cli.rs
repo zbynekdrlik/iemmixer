@@ -168,6 +168,40 @@ fn import_writes_current_and_baseline_with_the_program_counts() {
 }
 
 #[test]
+fn seed_if_absent_writes_current_only_when_it_is_missing() {
+    // A data command runs `import --seed-if-absent` on every dev entry: the
+    // first seeds current.json + baseline.json; a re-seed keeps the band's
+    // live current.json and only refreshes baseline.json (iemmixer#9).
+    let w = World::new(1);
+    let dir = w.path("state");
+    let mut a = import_args(&w, &["--seed-if-absent"]);
+    a.extend(["--state-dir".into(), s(&dir)]);
+    let r1 = run(&a).unwrap();
+    assert!(r1.contains("baseline.json, current.json"), "{r1}");
+    assert!(dir.join("current.json").exists() && dir.join("baseline.json").exists());
+    // A live change to current.json and a removed baseline: the re-seed keeps
+    // the live current.json byte for byte and writes baseline.json again.
+    std::fs::write(dir.join("current.json"), b"LIVE").unwrap();
+    std::fs::remove_file(dir.join("baseline.json")).unwrap();
+    let r2 = run(&a).unwrap();
+    assert!(r2.contains("current.json kept (--seed-if-absent)"), "{r2}");
+    assert_eq!(std::fs::read(dir.join("current.json")).unwrap(), b"LIVE");
+    assert!(dir.join("baseline.json").exists());
+    // A lone generation (a crash left the newest state only as gen-N, no
+    // current.json) is live state too: the re-seed must keep it, not overwrite
+    // from the project (iemmixer#9). Simulate it and re-seed.
+    std::fs::remove_file(dir.join("current.json")).unwrap();
+    std::fs::write(dir.join("gen-0000000001.json"), b"LIVE-GEN").unwrap();
+    let r3 = run(&a).unwrap();
+    assert!(r3.contains("current.json kept (--seed-if-absent)"), "{r3}");
+    assert!(!dir.join("current.json").exists());
+    assert_eq!(
+        std::fs::read(dir.join("gen-0000000001.json")).unwrap(),
+        b"LIVE-GEN"
+    );
+}
+
+#[test]
 fn a_wrong_count_an_unknown_name_or_no_state_dir_fail() {
     let w = World::new(2);
     let e = run(&import_args(&w, &["--dry-run", "--expect", "tracks=44"])).unwrap_err();
@@ -744,6 +778,260 @@ fn missing_or_unmappable_band_data_fails_loudly() {
     assert!(e.msg.contains("snapshots/m2.json: snapshot 1"), "{}", e.msg);
 }
 
+/// A snapshot saved at `t`, full level on every key.
+fn snapshot(t: i64, label: &str, keys: &[usize]) -> MixSnapshot {
+    MixSnapshot {
+        timestamp: t,
+        label: label.into(),
+        pinned: false,
+        channels: keys
+            .iter()
+            .map(|k| {
+                (
+                    *k,
+                    ChannelSnapshot {
+                        vol: 1.0,
+                        mute: false,
+                        pan: 0.5,
+                    },
+                )
+            })
+            .collect(),
+        eq_bands: None,
+    }
+}
+
+/// An `eras.toml` `[[skip]]` entry.
+fn skip(file: &str, name: &str, timestamp: i64, reason: &str) -> String {
+    format!(
+        "[[skip]]\nfile = {file:?}\nname = {name:?}\ntimestamp = {timestamp}\nreason = {reason:?}\n"
+    )
+}
+
+/// `eras` as `legacy` wrote it plus `entries`.
+fn with_skips(eras: &Path, base: &str, entries: &[String]) {
+    std::fs::write(eras, format!("{base}{}", entries.concat())).unwrap();
+}
+
+/// Member m2 holds a snapshot whose layout the eras cannot map (key 999, as
+/// an automatic snapshot of a never-saved layout) and one that maps.
+fn unmappable_m2(l: &Path) {
+    json(
+        &l.join("snapshots/m2.json"),
+        &[snapshot(1500, "auto", &[999]), snapshot(1600, "auto", &[1])],
+    );
+}
+
+const UNMAPPABLE: &str = "  - snapshots/m2.json: snapshot 1 (\"auto\", 1500): unmappable for member m2 (era 1: keys [999])";
+
+#[test]
+fn a_listed_unmappable_snapshot_is_skipped_reported_and_the_rest_imports() {
+    let w = World::new(24);
+    let (l, eras) = legacy(&w);
+    let base = std::fs::read_to_string(&eras).unwrap();
+    let out = w.path("band");
+    unmappable_m2(&l);
+    // Without [[skip]] the importer refuses to guess, as before.
+    let e = run(&band_args(&w, &l, &eras, &out, &[])).unwrap_err();
+    assert_eq!(e.code, EXIT_INPUT);
+    assert!(e.msg.contains(UNMAPPABLE), "{}", e.msg);
+    assert!(!out.exists(), "nothing written");
+    with_skips(
+        &eras,
+        &base,
+        &[skip(
+            "snapshots/m2.json",
+            "auto",
+            1500,
+            "layout never saved",
+        )],
+    );
+    let dry = run(&band_args(&w, &l, &eras, &out, &["--dry-run"])).unwrap();
+    let line = "\nskipped (eras.toml): snapshots/m2.json \"auto\" 1500: layout never saved\n";
+    assert!(dry.contains(line), "{dry}");
+    assert!(!out.exists(), "a dry run writes nothing");
+    let report = run(&band_args(&w, &l, &eras, &out, &[])).unwrap();
+    assert!(report.contains(line), "{report}");
+    assert!(!report.contains("mappable, skipped as listed"), "{report}");
+    assert_eq!(report.matches("skipped (eras.toml)").count(), 1, "{report}");
+    for want in [
+        "\nsnapshots member2: 1 (sends 1, ",
+        "\nsnapshots member1: 3 (sends 6, ",
+    ] {
+        assert!(report.contains(want), "{report}");
+    }
+    let snaps: SnapshotFile =
+        serde_json::from_str(&std::fs::read_to_string(out.join("snapshots/member2.json")).unwrap())
+            .unwrap();
+    assert_eq!(snaps.snapshots.len(), 1);
+    assert_eq!(snaps.snapshots[0].timestamp, 1600);
+    assert_eq!(
+        snaps.snapshots[0].sends[0].src,
+        Source::Input(InputId::new("mic1"))
+    );
+}
+
+/// The list is explicit: an item that would import is still left out, and
+/// the report says so.
+#[test]
+fn a_listed_mappable_snapshot_is_skipped_as_listed() {
+    let w = World::new(25);
+    let (l, eras) = legacy(&w);
+    let base = std::fs::read_to_string(&eras).unwrap();
+    let out = w.path("band");
+    with_skips(
+        &eras,
+        &base,
+        &[skip("snapshots/m1.json", "auto", 1200, "a stray auto save")],
+    );
+    let report = run(&band_args(&w, &l, &eras, &out, &[])).unwrap();
+    assert!(
+        report.contains(
+            "\nskipped (eras.toml): snapshots/m1.json \"auto\" 1200: a stray auto save (mappable, skipped as listed)\n"
+        ),
+        "{report}"
+    );
+    assert!(
+        report.contains("\nsnapshots member1: 2 (sends 4, "),
+        "{report}"
+    );
+    let snaps: SnapshotFile =
+        serde_json::from_str(&std::fs::read_to_string(out.join("snapshots/member1.json")).unwrap())
+            .unwrap();
+    let times: Vec<i64> = snaps.snapshots.iter().map(|s| s.timestamp).collect();
+    assert_eq!(times, vec![1300, 1100], "m1's 1300, then old1's 1100");
+}
+
+/// Every entry must name exactly one snapshot (file, name and timestamp): a
+/// near miss hides nothing and fails the run.
+#[test]
+fn a_skip_that_names_no_snapshot_is_a_problem() {
+    let w = World::new(26);
+    let (l, eras) = legacy(&w);
+    let base = std::fs::read_to_string(&eras).unwrap();
+    let out = w.path("band");
+    unmappable_m2(&l);
+    for (file, name, t) in [
+        ("snapshots/m2.json", "auto", 1501),
+        ("snapshots/m2.json", "auto", 1499),
+        ("snapshots/m2.json", "Auto", 1500),
+        ("snapshots/m2.json", "manual", 1500),
+        ("snapshots/m1.json", "auto", 1500),
+        ("snapshots/nobody.json", "auto", 1500),
+    ] {
+        with_skips(&eras, &base, &[skip(file, name, t, "r")]);
+        let e = run(&band_args(&w, &l, &eras, &out, &[])).unwrap_err();
+        assert_eq!(e.code, EXIT_INPUT);
+        assert!(
+            e.msg.contains(&format!(
+                "  - eras.toml skip {file} {name:?} {t}: no such snapshot (remove or correct the entry)"
+            )),
+            "{}",
+            e.msg
+        );
+        assert!(e.msg.contains(UNMAPPABLE), "nothing hidden: {}", e.msg);
+        assert!(!e.msg.contains("skipped (eras.toml)"), "{}", e.msg);
+        assert!(!out.exists(), "nothing written");
+    }
+    // A stale entry next to a correct one still fails the run.
+    with_skips(
+        &eras,
+        &base,
+        &[
+            skip("snapshots/m2.json", "auto", 1500, "r"),
+            skip("snapshots/m2.json", "auto", 1700, "r"),
+        ],
+    );
+    let e = run(&band_args(&w, &l, &eras, &out, &["--partial"])).unwrap_err();
+    assert_eq!(e.code, EXIT_INPUT);
+    assert!(
+        e.msg
+            .starts_with("1 problem(s), nothing written:\n  - eras.toml skip snapshots/m2.json \"auto\" 1700: no such snapshot"),
+        "{}",
+        e.msg
+    );
+    assert!(!out.exists(), "nothing written");
+    // Without a snapshots directory every entry is stale.
+    std::fs::remove_dir_all(l.join("snapshots")).unwrap();
+    with_skips(
+        &eras,
+        &base,
+        &[skip("snapshots/m1.json", "auto", 1200, "r")],
+    );
+    let e = run(&band_args(&w, &l, &eras, &out, &["--dry-run"])).unwrap_err();
+    assert!(
+        e.msg
+            .contains("  - eras.toml skip snapshots/m1.json \"auto\" 1200: no such snapshot"),
+        "{}",
+        e.msg
+    );
+}
+
+#[test]
+fn a_skip_matching_two_snapshots_or_listed_twice_is_refused() {
+    let w = World::new(27);
+    let (l, eras) = legacy(&w);
+    let base = std::fs::read_to_string(&eras).unwrap();
+    let out = w.path("band");
+    json(
+        &l.join("snapshots/m2.json"),
+        &[snapshot(1500, "auto", &[999]), snapshot(1500, "auto", &[1])],
+    );
+    let entry = skip("snapshots/m2.json", "auto", 1500, "r");
+    with_skips(&eras, &base, std::slice::from_ref(&entry));
+    let e = run(&band_args(&w, &l, &eras, &out, &[])).unwrap_err();
+    assert_eq!(e.code, EXIT_INPUT);
+    assert_eq!(
+        e.msg,
+        "1 problem(s), nothing written:\n  - eras.toml skip snapshots/m2.json \"auto\" 1500: matches 2 snapshots (a skip names exactly one)"
+    );
+    assert!(!out.exists(), "nothing written");
+    unmappable_m2(&l);
+    with_skips(&eras, &base, &[entry.clone(), entry]);
+    let e = run(&band_args(&w, &l, &eras, &out, &[])).unwrap_err();
+    assert_eq!(e.code, EXIT_INPUT);
+    assert_eq!(e.msg, "eras: skip 2 repeats an earlier entry");
+    assert!(!out.exists(), "nothing written");
+}
+
+/// Snapshots only, reviewed entries only: anything else in `[[skip]]` stops
+/// the run before it reads the predecessor's data.
+#[test]
+fn a_skip_entry_with_an_unknown_key_or_not_a_snapshot_fails_parsing() {
+    let w = World::new(28);
+    let (l, eras) = legacy(&w);
+    let base = std::fs::read_to_string(&eras).unwrap();
+    let out = w.path("band");
+    for (entry, why) in [
+        (
+            format!(
+                "{}kind = \"preset\"\n",
+                skip("snapshots/m1.json", "auto", 1200, "r")
+            ),
+            "unknown field `kind`",
+        ),
+        (
+            skip("presets/m1.json", "rehearsal", 1500, "r"),
+            "eras: skip 1: file \"presets/m1.json\" is not snapshots/<member>.json (a skip names a snapshot only)",
+        ),
+        (
+            skip("customizations/m1.json", "auto", 1200, "r"),
+            "is not snapshots/<member>.json",
+        ),
+        (
+            skip("snapshots/m1.json", "auto", 1200, ""),
+            "eras: skip 1: no reason",
+        ),
+    ] {
+        with_skips(&eras, &base, &[entry]);
+        let e = run(&band_args(&w, &l, &eras, &out, &["--dry-run"])).unwrap_err();
+        assert_eq!(e.code, EXIT_INPUT);
+        assert!(e.msg.contains(why), "{why}: {}", e.msg);
+        assert!(!e.msg.contains("problem(s)"), "{}", e.msg);
+    }
+    assert!(!out.exists());
+}
+
 fn edit(path: &Path, from: &str, to: &str) {
     let text = std::fs::read_to_string(path).unwrap();
     assert!(text.contains(from), "{text}");
@@ -860,6 +1148,69 @@ fn an_engineer_pin_that_is_not_4_digits_fails() {
         "{}",
         e.msg
     );
+}
+
+/// Default PINs for member and engineer, written after `band_args` wrote its
+/// member-only file (it rewrites that file on every call).
+fn with_engineer_default(w: &World) {
+    std::fs::write(w.path("defaults.txt"), "member=2468\nengineer=7531\n").unwrap();
+}
+
+/// The predecessor checked its config's engineer PIN and fell back to its
+/// compiled-in default only without one (reaperiem
+/// `test_engineer_pin_config_overrides_default`): a default must never
+/// replace the engineer's real PIN at the cutover.
+#[test]
+fn the_engineer_pin_from_the_config_wins_over_the_default() {
+    let w = World::new(16);
+    let (l, eras) = legacy(&w);
+    let out = w.path("band");
+    let a = band_args(&w, &l, &eras, &out, &[]);
+    with_engineer_default(&w);
+    let report = run(&a).unwrap();
+    assert!(
+        report.contains("\nengineer PIN from the predecessor's config\n"),
+        "{report}"
+    );
+    assert!(!report.contains("7531"), "the report shows a PIN");
+    let (h, store) = hasher(&out);
+    let engineer = store.engineer_hash().unwrap();
+    assert!(h.verify("8642", engineer), "the config's PIN");
+    assert!(!h.verify("7531", engineer), "the default must not verify");
+}
+
+/// Without a config PIN the predecessor's default is the engineer's PIN
+/// (reaperiem `test_engineer_pin_default_<PIN>`); without either there is no
+/// engineer PIN to import.
+#[test]
+fn the_engineer_falls_back_to_the_predecessors_default_pin() {
+    let w = World::new(17);
+    let (l, eras) = legacy(&w);
+    edit(&l.join("config.yaml"), "engineer_pin: \"8642\"\n", "");
+    let out = w.path("band");
+    let e = run(&band_args(&w, &l, &eras, &out, &["--dry-run"])).unwrap_err();
+    assert_eq!(e.code, EXIT_INPUT);
+    assert!(
+        e.msg.contains(
+            "  - the engineer PIN (config engineer_pin or --legacy-default-pins engineer=…) is missing"
+        ),
+        "{}",
+        e.msg
+    );
+    assert!(!out.exists(), "nothing written");
+    let a = band_args(&w, &l, &eras, &out, &[]);
+    with_engineer_default(&w);
+    let report = run(&a).unwrap();
+    assert!(
+        report.contains("\nengineer PIN from the predecessor's default\n"),
+        "{report}"
+    );
+    assert!(!report.contains("7531"), "the report shows a PIN");
+    let (h, store) = hasher(&out);
+    let engineer = store.engineer_hash().unwrap();
+    assert!(h.verify("7531", engineer), "the default PIN");
+    assert!(!h.verify("8642", engineer));
+    assert!(store.member_hash("engineer").is_none());
 }
 
 #[test]

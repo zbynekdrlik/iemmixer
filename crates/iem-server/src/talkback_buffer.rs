@@ -171,6 +171,30 @@ mod tests {
     }
 
     #[test]
+    fn the_oldest_frame_is_dropped_and_playout_keeps_arrival_order() {
+        let mut d = TalkbackDecoder::new().unwrap();
+        let p = packets(CAP + 2);
+        for x in p.iter().take(CAP + 1) {
+            d.push(x.clone());
+        }
+        // Full: the first frame went, the rest wait in arrival order.
+        assert_eq!(d.overflows, 1);
+        assert_eq!(d.queue, &p[1..=CAP]);
+        // Playout decodes the oldest waiting frame first, frame after frame:
+        // the same samples a decoder fed the frames in order gives.
+        let mut reference = opus::Decoder::new(48_000, opus::Channels::Mono).unwrap();
+        let mut want = vec![0f32; FRAME];
+        for (k, packet) in p.iter().enumerate().take(3).skip(1) {
+            let n = reference.decode_float(packet, &mut want, false).unwrap();
+            assert_eq!(d.tick().as_deref(), Some(&want[..n]), "frame {k}");
+        }
+        assert_eq!(d.queue, &p[3..=CAP]);
+        d.push(p[CAP + 1].clone());
+        assert_eq!(d.overflows, 1, "room again after playout");
+        assert_eq!(d.queue.back(), Some(&p[CAP + 1]), "a new frame goes last");
+    }
+
+    #[test]
     fn the_buffer_is_capped_and_garbage_is_counted() {
         let mut d = TalkbackDecoder::new().unwrap();
         for x in packets(CAP + 2) {

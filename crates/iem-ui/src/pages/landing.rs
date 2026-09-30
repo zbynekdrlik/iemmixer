@@ -143,8 +143,8 @@ fn MemberGrid(members: Vec<MemberInfo>) -> impl IntoView {
             <div class="empty-state">
                 <div class="empty-icon">"🎧"</div>
                 <h2>"No Members Configured"</h2>
-                <p>"Add band members in iemmixer.toml to get started."</p>
-                <p class="hint">"Config location: %APPDATA%\\iemmixer\\iemmixer.toml"</p>
+                <p>"Add band members ([[members]]) to the site file to get started."</p>
+                <p class="hint">"The server reads the site file named by IEMMIXER_CONFIG (default: iemmixer.toml in its working directory)."</p>
             </div>
         }
         .into_any()

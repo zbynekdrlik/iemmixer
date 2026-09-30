@@ -21,6 +21,7 @@ iem-audio-io
 iem-dsp
 iem-engine-proto
 iem-limiter-mga
+iem-win
 indexmap
 interprocess
 itoa
@@ -47,6 +48,7 @@ serde_spanned
 sha2
 sharded-slab
 smallvec
+spin  # lazy_static's spin_no_std backend (sharded-slab via tracing-subscriber, off the RT path), unified in from jsonwebtoken's rsa (num-bigint-dig), #9 2026-09-28
 subtle
 syn
 thiserror
@@ -79,4 +81,5 @@ windows-strings
 windows-sys
 winnow
 zeroize
+zeroize_derive  # proc-macro (build time), zeroize's derive feature unified in from jsonwebtoken >= 10.4, #9 2026-09-28
 zmij
