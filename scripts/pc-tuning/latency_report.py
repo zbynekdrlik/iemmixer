@@ -14,27 +14,76 @@ LIMITS_US = (64, 128, 256, 512)
 _SECTION = re.compile(r"^\s*(DPC|Interrupt|ISR)\s+Info\s*$", re.I)
 _TOTAL = re.compile(r"^\s*Total\s*=\s*(\d+)\s+for module\s+(\S+)")
 _BUCKET = re.compile(r"^\s*Elapsed Time,\s*>\s*(\d+)\s*usecs(?:\s+AND\s+<=\s*(\d+)\s*usecs)?,\s*(\d+)")
-_USAGE = re.compile(r"^\s*(\S+):\s*(\d+)\s*usec\s*\(\s*[\d.]+%\s*CPU\s*(\d+)\s*usage\)")
+# A per-CPU table header cell: `CPU 3 Usage` (whole-trace and interval
+# tables) or a bare `CPU 3` (the distribution table).
+_CPU_COLUMN = re.compile(r"CPU\s+(\d+)(?:\s+Usage)?", re.I)
 _MARKER = re.compile(r"iemmixer-glitch kind=(\S+) at_qpc=(-?\d+) emit_qpc=(-?\d+) freq=(\d+) value=(\d+)")
 _MARKER_ID = "3b6c1e0a-5d2f-4c8e-9a71-0e4f2d9b8c11"
 NEAR_EVENTS = ("DPC", "TimedDPC", "ThreadedDPC", "Interrupt", "CSwitch", "ReadyThread")
 
 
+def _cpu_columns(line: str) -> list[str] | None:
+    """The CPU numbers of a per-CPU table's header row, in column order, or
+    None when `line` is no such header. Tolerates a leading label column,
+    spaces before the commas and a trailing comma."""
+    cells = [c.strip() for c in line.split(",")]
+    while cells and not cells[-1]:
+        cells.pop()
+    if cells and not cells[0]:
+        cells = cells[1:]
+    cpus = [m.group(1) for c in cells if (m := _CPU_COLUMN.fullmatch(c))]
+    return cpus if cpus and len(cpus) == len(cells) else None
+
+
+def _read_usage_table(lines: list[str], i: int, cpus: list[str], usage: dict) -> int:
+    """Reads the table whose header row was lines[i - 1]; returns the index of
+    its closing blank line. Only the whole-trace table (its units row ends in
+    `Module`) is per module: each row is one `usec %` cell per CPU column and
+    the module name last, into usage[module][cpu] = usec. The 1-second
+    interval and the distribution tables hold time or usage-% buckets, no
+    module, and are passed over."""
+    per_module = i < len(lines) and lines[i].rsplit(",", 1)[-1].strip().lower() == "module"
+    i += 1
+    while i < len(lines) and lines[i].strip():
+        if per_module:
+            *cells, module = (c.strip() for c in lines[i].split(","))
+            if len(cells) != len(cpus):
+                raise ValueError(f"dpcisr: a per-module usage row has {len(cells)} CPU columns, the header {len(cpus)}")
+            try:
+                usage[module] = {cpu: int(cell.split()[0]) for cpu, cell in zip(cpus, cells)}
+            except (IndexError, ValueError):
+                raise ValueError(f"dpcisr: an unreadable per-module usage row (module {module})") from None
+        i += 1
+    return i
+
+
 def parse_dpcisr(text: str) -> dict:
-    """Per kind (dpc/isr) and module: the count, the upper edge of the highest
-    non-empty bucket (an open last bucket reports its lower edge with
-    open=True) and the counts in buckets starting at or above each limit;
-    per-CPU usage lines as {kind: {module: {cpu: usec}}}."""
+    """xperf -a dpcisr: per kind (dpc/isr) and module the count, the upper edge
+    of the highest non-empty bucket (an open last bucket reports its lower
+    edge with open=True) and the counts in buckets starting at or above each
+    limit; per-CPU usage from the whole-trace usage table (columns = CPU
+    numbers, rows = modules) as {kind: {module: {cpu: usec}}}, every CPU
+    column kept (0 = the module did not run there). Raises ValueError when a
+    module was parsed but its per-CPU usage was not: the watched-CPU budget
+    would otherwise pass unchecked (fail closed)."""
     out: dict = {"dpc": {}, "isr": {}, "usage": {"dpc": {}, "isr": {}}}
     kind = None
     module = None
-    for line in text.splitlines():
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        i += 1
         m = _SECTION.match(line)
         if m:
             kind = "dpc" if m.group(1).lower() == "dpc" else "isr"
             module = None
             continue
         if kind is None:
+            continue
+        if (cpus := _cpu_columns(line)) is not None:
+            i = _read_usage_table(lines, i, cpus, out["usage"][kind])
+            module = None
             continue
         if m := _TOTAL.match(line):
             module = m.group(2)
@@ -50,20 +99,23 @@ def parse_dpcisr(text: str) -> dict:
             for limit in LIMITS_US:
                 if lo >= limit:
                     entry["over"][str(limit)] += n
-        elif m := _USAGE.match(line):
-            out["usage"][kind].setdefault(m.group(1), {})[m.group(3)] = int(m.group(2))
+    for kind in ("dpc", "isr"):
+        missing = sorted(set(out[kind]) - set(out["usage"][kind]))
+        if missing:
+            raise ValueError(f"dpcisr: no per-CPU usage for {len(missing)} of {len(out[kind])} {kind} modules "
+                             f"({', '.join(missing[:5])}): the watched-CPU budget cannot be checked")
     return out
 
 
 def budget_findings(parsed: dict, watch_lps: list[int]) -> list[str]:
-    """Modules above the budget on a watched CPU (the card's, the audio one)
-    and modules reaching a full period anywhere."""
+    """Modules above the budget on a watched CPU (the card's, the audio one:
+    one with usage there) and modules reaching a full period anywhere."""
     watched = {str(x) for x in watch_lps}
     findings = []
     for kind in ("dpc", "isr"):
         for module, e in parsed[kind].items():
             shown = f"above {e['max_us']}" if e["open"] else f"up to {e['max_us']}"
-            cpus = set(parsed["usage"][kind].get(module, {}))
+            cpus = {cpu for cpu, us in parsed["usage"][kind].get(module, {}).items() if us > 0}
             if e["max_us"] > WATCH_BUDGET_US and cpus & watched:
                 findings.append(f"{kind} {module}: {shown} us on a watched CPU (budget {WATCH_BUDGET_US})")
             if e["max_us"] >= PERIOD_US:
