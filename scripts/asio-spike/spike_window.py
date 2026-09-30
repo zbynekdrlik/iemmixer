@@ -293,17 +293,24 @@ def ssh_cmd(env: dict[str, str]) -> list[str]:
             "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command -"]
 
 
-def ps(env: dict[str, str], body: str, timeout: float = 300, event: str = "finish"):
-    """Runs `body` after importing SpikePc (single-line statements: `-Command -`
-    reads stdin line by line); PC errors come back as {ok: false} and raise
-    StepError, a call without a complete reply raises NoReply."""
-    script = "\n".join([
+def ps_script(root: str, body: str) -> str:
+    """The PowerShell text sw.ps sends to `powershell -Command -` on the PC:
+    `body` after importing SpikePc from <root>\\bin, its result or error as
+    one JSON line (single-line statements: `-Command -` reads stdin line by
+    line). The Windows CI runner executes it as printed (tuning_window
+    poll-script)."""
+    return "\n".join([
         "$ErrorActionPreference = 'Stop'",
         "$ProgressPreference = 'SilentlyContinue'",
-        f"try {{ Import-Module (Join-Path {ps_quote(env['PC_ROOT'])} 'bin\\SpikePc.psm1') -Force ; $r = & {{ {body} }} ; $o = [pscustomobject]@{{ ok = $true; r = $r }} }} "
+        f"try {{ Import-Module (Join-Path {ps_quote(root)} 'bin\\SpikePc.psm1') -Force ; $r = & {{ {body} }} ; $o = [pscustomobject]@{{ ok = $true; r = $r }} }} "
         f"catch {{ $o = [pscustomobject]@{{ ok = $false; error = \"$_\" }} }} ; ConvertTo-Json -InputObject $o -Depth 8 -Compress",
     ])
-    out = [line for line in guarded(ssh_cmd(env), script + "\n", timeout, event).splitlines() if line.strip()]
+
+
+def ps(env: dict[str, str], body: str, timeout: float = 300, event: str = "finish"):
+    """Runs `body` on the PC (ps_script); PC errors come back as {ok: false}
+    and raise StepError, a call without a complete reply raises NoReply."""
+    out = [line for line in guarded(ssh_cmd(env), ps_script(env["PC_ROOT"], body) + "\n", timeout, event).splitlines() if line.strip()]
     try:
         doc = json.loads(out[-1]) if out else None
     except ValueError:

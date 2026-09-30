@@ -441,8 +441,11 @@ def poll_body(governor: str, pid: int, tid: int) -> str:
                   "{ [pscustomobject]@{ base = $t.BasePriority; current = $t.CurrentPriority } } })")
     return " ; ".join([
         POLL_COUNTERS,
-        "$plan = if ((powercfg.exe /getactivescheme | Out-String) -match '[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}') "
-        "{ $Matches[0].ToLowerInvariant() } else { 'unknown' }",
+        # A plan that cannot be read is an error (reported by sw.ps), never a guess.
+        "$pc = (powercfg.exe /getactivescheme | Out-String)",
+        "if ($LASTEXITCODE -ne 0 -or -not ($pc -match '[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}')) "
+        "{ throw \"powercfg /getactivescheme (exit $LASTEXITCODE): $($pc.Trim())\" }",
+        "$plan = $Matches[0].ToLowerInvariant()",
         f"$g = Get-Service -Name {ps_quote(governor)} -ErrorAction SilentlyContinue",
         "[pscustomobject]@{ at = (Get-Date).ToUniversalTime().ToString('o'); cpu = [pscustomobject]@{ cpus = $c }; plan = $plan; "
         f"governor = $(if ($g) {{ \"$($g.Status)\" }} else {{ 'absent' }}); thread = {thread} }}",
@@ -727,7 +730,15 @@ def main(argv: list[str]) -> int:
     rb = sub.add_parser("reboot")
     rb.add_argument("--approval", required=True)
     rb.add_argument("--by-owner", action="store_true")
+    pp = sub.add_parser("poll-script", help="print the measurement poll exactly as sw.ps sends it (for the Windows CI runner)")
+    pp.add_argument("--root", required=True, help="a folder whose bin holds SpikePc.psm1 and GoldenPc.psm1")
+    pp.add_argument("--governor", required=True)
+    pp.add_argument("--pid", type=int, default=0)
+    pp.add_argument("--tid", type=int, default=0)
     args = ap.parse_args(argv)
+    if args.cmd == "poll-script":   # no window, no private env
+        print(sw.ps_script(args.root, poll_body(args.governor, args.pid, args.tid)))
+        return 0
     handlers = {"tuning-setup": cmd_tuning_setup, "inventory": cmd_inventory, "fingerprint": cmd_fingerprint, "wpt-install": cmd_wpt_install,
                 "enter": cmd_enter, "exit": cmd_exit, "apply": cmd_apply, "undo": cmd_undo, "state": cmd_state, "measure": cmd_measure,
                 "trace-stop": cmd_trace_stop,
