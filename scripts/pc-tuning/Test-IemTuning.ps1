@@ -14,7 +14,15 @@ foreach ($f in (Get-ChildItem -LiteralPath $here -File | Where-Object { @('.ps1'
 }
 Import-Module (Join-Path $here 'IemMeasure.psm1') -Force
 function Assert($cond, $what) { if (-not $cond) { throw "FAILED: $what" }; Write-Host "ok  $what" }
-function Throws([scriptblock]$b, $what) { $t = $false; try { & $b } catch { $t = $true }; Assert $t $what }
+# A refusal must throw THIS error: any exception (a typo'd parameter, a missing
+# command) would otherwise pass a negative test.
+function ThrowsLike([scriptblock]$b, [string]$like, $what) {
+    $m = $null
+    try { & $b } catch { $m = "$_" }
+    if ($null -eq $m) { throw "FAILED: $what (nothing was thrown)" }
+    if ($m -notlike $like) { throw "FAILED: $what (threw '$m', expected '$like')" }
+    Write-Host "ok  $what"
+}
 # Callers wrap this in @(...) so .Count and a ForEach pipe are array-safe under
 # StrictMode on PS 5.1 (a bare (Rows ...) would be $null for 0 matches; a ,@()
 # return would make @(Rows ...) iterate once over an empty array; S1c CI).
@@ -56,6 +64,12 @@ New-ItemProperty -LiteralPath $nic -Name 'AdvancedEEE' -PropertyType String -Val
 # Values of other kinds than the items write: undo restores their own kind and data (A1).
 New-ItemProperty -LiteralPath $nic -Name 'IemDword' -PropertyType DWord -Value 1 | Out-Null
 New-ItemProperty -LiteralPath $nic -Name 'IemExpand' -PropertyType ExpandString -Value '%SystemRoot%\iem' | Out-Null
+$w = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Software\iemmixer-tuning-test-$id\HKLM\NIC", $true)
+$w.SetValue('IemQword', [long]7, [Microsoft.Win32.RegistryValueKind]::QWord)
+$w.SetValue('IemString', 'text', [Microsoft.Win32.RegistryValueKind]::String)
+$w.SetValue('IemMulti0', [string[]]@(), [Microsoft.Win32.RegistryValueKind]::MultiString)
+$w.SetValue('IemMulti1', [string[]]@('one'), [Microsoft.Win32.RegistryValueKind]::MultiString)
+$w.Close()
 $mm = "$root\HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"
 New-Item -Path "$mm\Tasks\Pro Audio" -Force | Out-Null
 New-ItemProperty -LiteralPath $mm -Name 'SystemResponsiveness' -PropertyType DWord -Value 0 | Out-Null
@@ -64,7 +78,8 @@ $child = Start-Process -FilePath $ping -ArgumentList '-n', '240', '127.0.0.1' -P
 
 function New-TestNic([string]$Hwid, [string]$Adapter = '') {
     # The test NIC: its driver key HKLM:\NIC under the test root, or with -Adapter found by adapter name.
-    $n = [ordered]@{ adapter = 'unused'; key = 'HKLM:\NIC'; hwid = $Hwid; properties = [ordered]@{ PowerSaving = '0'; '*EEE' = '0'; IemDword = '0'; IemExpand = 'plain' }
+    $n = [ordered]@{ adapter = 'unused'; key = 'HKLM:\NIC'; hwid = $Hwid; properties = [ordered]@{ PowerSaving = '0'; '*EEE' = '0'; IemDword = '0'; IemExpand = 'plain'
+                                                                             IemQword = '8'; IemString = 'other'; IemMulti0 = 'x'; IemMulti1 = 'x' }
                      rss = [ordered]@{ base = 4; max = 5 }; pnp_capabilities = 24 }
     if ($Adapter) { $n.adapter = $Adapter; $n.Remove('key') }
     return $n
@@ -106,11 +121,11 @@ try {
     [IO.File]::WriteAllText($jp, '')
     Assert ((Read-IemJournal -Path $jp).version -eq 8) 'journal-read-falls-back-when-the-journal-is-empty'
     Remove-Item -LiteralPath "$jp.tmp"
-    Throws { Read-IemJournal -Path $jp } 'journal-read-refuses-an-empty-journal-without-a-temp-file'
+    ThrowsLike { Read-IemJournal -Path $jp } '*empty or unreadable*' 'journal-read-refuses-an-empty-journal-without-a-temp-file'
 
     # -Only names groups of the tier: a typo is an error, never an empty apply (A9).
-    Throws { Invoke-IemTuningApply -ProfilePath $pp -Tier 2 -Only @('servics') } 'apply-refuses-an-unknown-group'
-    Throws { Undo-IemTuning -ProfilePath $pp -Tier 2 -Only @('servics') } 'undo-refuses-an-unknown-group'
+    ThrowsLike { Invoke-IemTuningApply -ProfilePath $pp -Tier 2 -Only @('servics') } '*servics*no tier 2 group*' 'apply-refuses-an-unknown-group'
+    ThrowsLike { Undo-IemTuning -ProfilePath $pp -Tier 2 -Only @('servics') } '*servics*no tier 2 group*' 'undo-refuses-an-unknown-group'
     # The profile version is stamped only after a complete apply without a failure (A9).
     $rm = Invoke-IemTuningApply -ProfilePath $pp -Tier 2 -Only @('maintenance')
     Assert (@(Rows $rm 'failed').Count -eq 0 -and (Read-JournalVersion $pp) -eq 0) 'apply-partial-does-not-stamp-the-version'
@@ -139,12 +154,12 @@ try {
 
     # Tier 3: affinity policy under the device's key, NIC values; pending until a reboot.
     $bad = New-TestProfile 'PCI\VEN_OTHER'
-    Throws { Invoke-IemTuningApply -ProfilePath $bad -Tier 3 -Only @('irq') } 'tier3-refuses-a-mismatched-device'
+    ThrowsLike { Invoke-IemTuningApply -ProfilePath $bad -Tier 3 -Only @('irq') } '*hardware id does not match*' 'tier3-refuses-a-mismatched-device'
     Assert (-not (Test-Path -LiteralPath "$enum\Device Parameters")) 'tier3-refusal-writes-nothing'
     # The NIC driver key is checked against the profile's hardware id before any write,
     # and found under registry_root also by adapter name (design note 7, A8).
     $badNic = New-TestProfile 'PCI\VEN_TEST&DEV_0001' @{ nic = (New-TestNic 'PCI\VEN_OTHER') }
-    Throws { Invoke-IemTuningApply -ProfilePath $badNic -Tier 3 -Only @('nic') } 'tier3-refuses-a-mismatched-nic'
+    ThrowsLike { Invoke-IemTuningApply -ProfilePath $badNic -Tier 3 -Only @('nic') } '*hardware id does not match*' 'tier3-refuses-a-mismatched-nic'
     $nk = Get-Item -LiteralPath $nic
     Assert ($nk.GetValue('PowerSaving') -eq '1' -and $null -eq $nk.GetValue('*RssBaseProcNumber', $null)) 'tier3-nic-refusal-writes-nothing'
     $an = @(Get-NetAdapter)[0]
@@ -197,6 +212,11 @@ try {
     Assert ("$($apv.GetValueKind('AssignmentSetOverride'))" -eq 'Binary' -and (@($apv.GetValue('AssignmentSetOverride') | ForEach-Object { $_.ToString('x2') }) -join '') -eq '0400000000000000') 'tier3-undo-restores-a-binary-value'
     Assert ("$($nk.GetValueKind('IemDword'))" -eq 'DWord' -and $nk.GetValue('IemDword') -eq 1) 'tier3-undo-restores-a-dword-value'
     Assert ("$($nk.GetValueKind('IemExpand'))" -eq 'ExpandString' -and $nk.GetValue('IemExpand', $null, 'DoNotExpandEnvironmentNames') -eq '%SystemRoot%\iem') 'tier3-undo-restores-an-expand-string'
+    Assert ("$($nk.GetValueKind('IemQword'))" -eq 'QWord' -and $nk.GetValue('IemQword') -eq 7) 'tier3-undo-restores-a-qword-value'
+    Assert ("$($nk.GetValueKind('IemString'))" -eq 'String' -and $nk.GetValue('IemString') -ceq 'text') 'tier3-undo-restores-a-string-value'
+    $m0 = @($nk.GetValue('IemMulti0')); $m1 = @($nk.GetValue('IemMulti1'))
+    Assert ("$($nk.GetValueKind('IemMulti0'))" -eq 'MultiString' -and $m0.Count -eq 0) 'tier3-undo-restores-an-empty-multi-string'
+    Assert ("$($nk.GetValueKind('IemMulti1'))" -eq 'MultiString' -and $m1.Count -eq 1 -and $m1[0] -ceq 'one') 'tier3-undo-restores-a-one-element-multi-string'
     $st = Get-IemTuningState -ProfilePath $pp
     Assert (@($st.items | Where-Object { $_.key -eq 'irq:card:policy' -and $_.revert_pending }).Count -eq 1) 'tier3-undo-is-pending-until-a-reboot'
 
@@ -244,7 +264,7 @@ try {
     $short.WaitForExit(10000) | Out-Null
     $x = Exit-IemTuningMode -ProfilePath $pp
     Assert (@(Rows $x 'gone').Count -ge 1) 'exit-skips-a-process-that-ended'
-    Throws { Set-IemValue -Item ([pscustomobject]@{ key = 'k'; kind = 'cpusets'; args = @{ pid = $child.Id; name = 'PING'; start = 1 } }) -Value '' } 'cpusets-refuse-a-reused-pid'
+    ThrowsLike { Set-IemValue -Item ([pscustomobject]@{ key = 'k'; kind = 'cpusets'; args = @{ pid = $child.Id; name = 'PING'; start = 1 } }) -Value '' } '*pid was reused*' 'cpusets-refuse-a-reused-pid'
 
     # Fingerprint: stable, and a change is named.
     $f1 = Get-IemReaperFingerprint -ProfilePath $pp
@@ -270,16 +290,16 @@ try {
     $xo = (Invoke-IemXperf -Xperf $fx -Arguments @('-Loggers')) -join ' '
     Assert ($xo -match 'out-line' -and $xo -match 'err-line') 'xperf-stderr-with-exit-0-is-not-an-error'
     [IO.File]::WriteAllText($fx, "@echo off`r`necho bad-line 1>&2`r`nexit /b 3`r`n")
-    Throws { Invoke-IemXperf -Xperf $fx -Arguments @('-Loggers') } 'xperf-a-nonzero-exit-throws'
+    ThrowsLike { Invoke-IemXperf -Xperf $fx -Arguments @('-Loggers') } '*(exit 3)*' 'xperf-a-nonzero-exit-throws'
     # An existing xperf counts as installed only when Microsoft signed it and its
     # version is new enough (A12); PING.EXE stands in for a signed binary.
     $fakeX = Join-Path $dir 'xperf.exe'
     [IO.File]::WriteAllText($fakeX, 'not a signed binary')
     $noSetup = Join-Path $dir 'no-adksetup.exe'
-    Throws { Install-IemWpt -Setup $noSetup -Xperf $fakeX } 'wpt-refuses-an-unsigned-xperf'
+    ThrowsLike { Install-IemWpt -Setup $noSetup -Xperf $fakeX } '*signature*' 'wpt-refuses-an-unsigned-xperf'
     $wo = Install-IemWpt -Setup $noSetup -Xperf $ping
     Assert ($wo.installed -eq 'already' -and "$($wo.version)" -like '10.*') 'wpt-accepts-a-microsoft-signed-binary'
-    Throws { Install-IemWpt -Setup $noSetup -Xperf $ping -MinVersion '99.0' } 'wpt-refuses-an-older-version'
+    ThrowsLike { Install-IemWpt -Setup $noSetup -Xperf $ping -MinVersion '99.0' } '*older than 99.0*' 'wpt-refuses-an-older-version'
     $c = Get-IemCpuSample
     Assert ($c.cpus.Count -ge 1 -and $c.cpus[0].t100ns -gt 0) 'cpu-sample-reads-raw-counters'
     $ps = Get-IemPollSample -ProfilePath $pp
@@ -290,7 +310,7 @@ try {
     # reads as zero WHEA/driver-reset/power events (A10).
     $none = Get-IemSystemEvents -Since ((Get-Date).AddDays(1).ToUniversalTime().ToString('o'))
     Assert (@($none).Count -eq 0) 'system-events-none-found-is-empty'
-    Throws { Get-IemSystemEvents -Since ((Get-Date).AddHours(-1).ToUniversalTime().ToString('o')) -LogName "iemmixer-no-such-log-$id" } 'system-events-a-failing-query-throws'
+    ThrowsLike { Get-IemSystemEvents -Since ((Get-Date).AddHours(-1).ToUniversalTime().ToString('o')) -LogName "iemmixer-no-such-log-$id" } "*iemmixer-no-such-log-$id*" 'system-events-a-failing-query-throws'
 } finally {
     try { [void](Exit-IemTuningMode -ProfilePath $pp) } catch { Write-Host "cleanup exit: $_" }
     foreach ($t in 2, 3) { try { [void](Undo-IemTuning -ProfilePath $pp -Tier $t) } catch { Write-Host "cleanup undo: $_" } }
