@@ -17,9 +17,12 @@
 //! A file is `{"format", "schema", "sha256", "payload"}`; the SHA-256 covers the
 //! payload's raw bytes, so a re-serialisation never matters. Readers ignore
 //! unknown fields and default missing ones (additive schemas). The load chain
-//! (`chain`) is current or `save.tmp` → generations (newest first) →
-//! baseline → defaults with every mix muted. Files of an older schema (1:
-//! the REAPER-shaped graph before #20) are refused.
+//! (`chain`, which also holds the save protocol, the Missing / Unreadable /
+//! Damaged / Valid states and the boot recovery) is current or `save.tmp`
+//! → generations (newest first) → baseline → defaults with every mix
+//! muted. Files of an older schema (1: the REAPER-shaped graph before #20)
+//! are refused. Every file operation goes through `files::Files`, so tests
+//! fail any single step (`fault_tests`).
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;

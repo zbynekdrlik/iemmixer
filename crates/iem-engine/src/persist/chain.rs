@@ -3,15 +3,34 @@
 //! seed must keep (`Store::live_state`), and the boot's recovery that
 //! normalizes the directory to what was loaded (`Store::recover`).
 //!
-//! `save` writes the new state to `save.tmp` (synced), then renames
-//! `current.json` to a generation and `save.tmp` to `current.json`. A crash
-//! before the second rename leaves the newest state only in `save.tmp`. It
-//! is the live state when it passes `decode` and its revision is at least
-//! that of the file it competes with ([`supersedes`]): a valid
-//! `current.json`, or the newest valid generation when `current.json` is
-//! missing or damaged. At boot `recover` moves a damaged `current.json`
-//! aside for good and finishes such a save, so `current.json` holds the
-//! loaded state before the engine writes anything.
+//! **The save protocol.** `save` writes the new state to `save.new` and
+//! flushes it, renames `save.new` over `save.tmp` (so `save.tmp` is only
+//! ever a complete save, never written in place), then renames
+//! `current.json` to the next generation and `save.tmp` to `current.json`
+//! and syncs the directory; pruning old generations comes after, apart. A
+//! crash before the last rename leaves the newest state only in `save.tmp`.
+//!
+//! **Each file is Missing, Unreadable, Damaged or Valid.** Unreadable: an
+//! I/O error (a lock, no access, a failing disk) after `READ_TRIES` reads;
+//! the file is named in an alarm and the best Valid candidate loads.
+//! Damaged: read fine but it does not decode (format, schema, SHA-256,
+//! parse). Valid carries its revision.
+//!
+//! **The pick.** `save.tmp` is the live state when it is Valid and its
+//! revision is at least that of the file it competes with
+//! ([`supersedes`]): a Valid `current.json`, or the newest Valid generation
+//! when `current.json` is not Valid (a save.tmp that could not be compared
+//! because the generations cannot be listed loads only with an alarm).
+//! Otherwise a Valid `current.json`, then the newest Valid generation, then
+//! the baseline, then muted defaults.
+//!
+//! **Recovery at boot**, before the engine writes (under `Store::lock`):
+//! a Damaged `current.json` is moved aside to `current.json.damaged-<n>`
+//! (never read again), and a boot on `save.tmp` finishes that save with
+//! `save`'s own steps. Recovery never moves, renames or rotates an
+//! Unreadable file, never truncates `save.tmp`, and never loads or keeps
+//! `save.new`; a step that fails is reported and the engine runs on the
+//! loaded state (`save.tmp` stays whole for the next save or boot).
 
 use super::*;
 
@@ -167,10 +186,11 @@ pub struct Recovery {
 
 impl Store {
     /// Normalizes the state directory to `loaded` before the engine runs
-    /// (#32 review). A damaged or unreadable `current.json` (one `load`
-    /// rejected) is moved aside to the first free `current.json.damaged-<n>`,
-    /// a name the load chain never reads, so it cannot come back as a stale
-    /// state later. A boot on `save.tmp` then finishes that save the way
+    /// (#32 review). A Damaged `current.json` is moved aside to the first
+    /// free `current.json.damaged-<n>`, a name the load chain never reads,
+    /// so it cannot come back as a stale state later; an Unreadable one is
+    /// never touched (an interrupted save then stays in `save.tmp`, whole,
+    /// with a warning). A boot on `save.tmp` then finishes that save the way
     /// `save` would have (`save.tmp` synced, a valid older `current.json`
     /// into the next generation, `save.tmp` to `current.json`, the directory
     /// synced): afterwards `current.json` is the loaded state and no
