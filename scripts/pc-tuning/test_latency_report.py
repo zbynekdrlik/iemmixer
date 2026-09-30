@@ -190,6 +190,14 @@ class XperfLayoutTests(unittest.TestCase):
         self.assertIn("dpc nicdrv.sys: up to 256 us on a watched CPU (budget 128)", findings)
         self.assertIn("isr nicdrv.sys: above 2048 us (a full period is 333)", findings)
 
+    def test_a_module_over_the_budget_only_on_unwatched_cpus_is_no_watched_finding(self) -> None:
+        # The watched-CPU condition's negative case (#32 B9): dropping it, or counting
+        # a 0 us cell as "ran there", must fail a test.
+        d = lr.parse_dpcisr(DPCISR_XPERF)
+        self.assertFalse([f for f in lr.budget_findings(d, watch_lps=[2]) if f.startswith("dpc gpudrv.sys")])   # 256 us, only on CPU 3
+        self.assertEqual(lr.budget_findings(d, watch_lps=[3]), ["dpc gpudrv.sys: up to 256 us on a watched CPU (budget 128)",
+                                                                "isr nicdrv.sys: above 2048 us (a full period is 333)"])
+
     def test_modules_without_readable_per_cpu_usage_fail_loud(self) -> None:
         # Fail closed: a budget check that cannot see where a module ran must not
         # come back with no findings (a real 90 s trace did exactly that).
