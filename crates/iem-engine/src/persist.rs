@@ -252,11 +252,12 @@ impl Store {
         &self.dir
     }
 
-    /// Takes the state directory for this engine, before anything in it is
-    /// read or written: the boot recovery moves files, so a second engine
-    /// on the same directory gets a `WouldBlock` error at once and stops
-    /// before it touches a state file (#32 P5). The lock is an OS file lock
-    /// on `engine.lock`, released with the lock or the process.
+    /// Takes the state directory for this engine (or `iem-migrate import`),
+    /// before anything in it is read or written: the boot recovery moves
+    /// files, so a second engine, or an import while an engine runs, gets a
+    /// `WouldBlock` error at once and stops before it touches a state file
+    /// (#32 P5). The lock is an OS file lock on `engine.lock`, released
+    /// with the lock or the process.
     pub fn lock(&self) -> io::Result<StateLock> {
         let file = fs::OpenOptions::new()
             .create(true)

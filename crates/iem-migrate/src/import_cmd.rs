@@ -141,6 +141,19 @@ pub fn run(args: &[String]) -> Result<String, Failure> {
         return Ok(report.join("\n"));
     };
     let store = Store::open(&dir).map_err(|e| Failure::io(format!("{}: {e}", dir.display())))?;
+    // The data step runs only after iemmixer stopped (#32): a running engine
+    // holds engine.lock, and the import stops before it reads or writes a
+    // state file. Held until the import returns.
+    let _state_lock = store.lock().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::WouldBlock {
+            Failure::io(format!(
+                "{}: the state directory is in use by a running engine; stop it first",
+                dir.display()
+            ))
+        } else {
+            Failure::io(format!("{}: {e}", dir.display()))
+        }
+    })?;
     // `rev` stays at the default 0: an import starts a new revision count.
     let persisted = Persisted {
         topology_hash: site.compiled.hash.clone(),
