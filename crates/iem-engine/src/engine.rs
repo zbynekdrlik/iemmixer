@@ -26,7 +26,7 @@ use crate::control::{Control, CtlMsg, Driver, Exit, Parts, Settings};
 use crate::core::{Core, Flags};
 use crate::interlock::{self, Report, Verdict};
 use crate::media::{Frame, TalkbackFeed, TapFramer};
-use crate::persist::{Source, Store, decode};
+use crate::persist::{Source, StateLock, Store, decode};
 use crate::pipe::{Conn, Framer, control_name, listen, media_name, read_loop};
 use crate::rt::{FADE_IN_MS, Options, Processor, RtHandles};
 use crate::site::{self, Card, SiteError, load, parse, parse_card, parse_hil_tx, parse_stage};
@@ -50,6 +50,11 @@ pub enum EngineError {
     /// map, the preference window, a measured period other than 32.
     #[error("card refused: {0}")]
     Card(String),
+    /// Another process held the state directory past [`STATE_WAIT`]
+    /// (exit 75, #32 minor-4): the guard starts the engine again without
+    /// counting a crash.
+    #[error("{0}")]
+    StateBusy(String),
 }
 
 /// The audio backend of `run`.
@@ -463,7 +468,7 @@ pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
     }
     let store = Store::open(&cfg.state_dir)?;
     // Held until `run` returns: one engine per state directory (#32 P5).
-    let _state_lock = store.lock()?;
+    let _state_lock = lock_state(&store)?;
     let loaded = store.load(&topo);
     for (path, why) in &loaded.rejected {
         warn!("state file {} skipped: {why}", path.display());
@@ -623,6 +628,25 @@ pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
     }
     info!("engine exit: {exit:?}");
     Ok(exit)
+}
+
+/// How long `run` waits for its state directory while another process
+/// holds it (#32 minor-4): an engine that just ended may hold its lock a
+/// moment after its exit (a lock's release can lag the process end).
+/// With the load's read pauses (2 s at most) the engine still listens well
+/// within the guard's READY_S (10 s).
+pub const STATE_WAIT: Duration = Duration::from_secs(3);
+
+/// Takes the state directory (`Store::lock_within` [`STATE_WAIT`]); still
+/// held by another process then, it is `EngineError::StateBusy` (exit 75).
+fn lock_state(store: &Store) -> Result<StateLock, EngineError> {
+    store.lock_within(STATE_WAIT).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::WouldBlock {
+            EngineError::StateBusy(format!("{e} (waited {STATE_WAIT:?})"))
+        } else {
+            EngineError::Io(e)
+        }
+    })
 }
 
 #[cfg(not(windows))]

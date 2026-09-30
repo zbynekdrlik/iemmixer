@@ -61,6 +61,8 @@ const TMP: &str = "save.tmp";
 const NEW: &str = "save.new";
 const LOCK: &str = "engine.lock";
 const BASELINE_TMP: &str = "baseline.tmp";
+/// The pause between two tries of a held state directory's lock.
+pub const LOCK_POLL: Duration = Duration::from_millis(100);
 
 /// What a state file carries.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -290,6 +292,22 @@ impl Store {
             )),
             Err(fs::TryLockError::Error(e)) => Err(e),
         }
+    }
+
+    /// `lock`, tried again every [`LOCK_POLL`] while another process holds
+    /// the directory, for up to `wait` (#32 minor-4: an engine that just
+    /// ended may hold its lock a moment after its exit, as a lock's release
+    /// can lag the process end). Still held then, the `WouldBlock` error;
+    /// any other error at once.
+    pub fn lock_within(&self, wait: Duration) -> io::Result<StateLock> {
+        let tries = wait.as_millis() / LOCK_POLL.as_millis();
+        for _ in 0..tries {
+            match self.lock() {
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => std::thread::sleep(LOCK_POLL),
+                done => return done,
+            }
+        }
+        self.lock()
     }
 
     fn generation_path(&self, seq: u64) -> PathBuf {

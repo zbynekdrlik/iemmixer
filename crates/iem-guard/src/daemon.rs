@@ -2018,8 +2018,22 @@ fn exited(pc: &mut dyn Pc, g: &mut Guard, kid: Kid, code: Option<i32>, at: Insta
 
 fn engine_exited(pc: &mut dyn Pc, g: &mut Guard, code: Option<i32>, at: Instant, session: bool) {
     g.last_exit = code;
-    let abnormal = !session && !matches!(code, Some(0 | 2 | 3));
+    // #32 minor-4: a busy state directory is no crash; it is tried again.
+    let busy = !session && code == Some(crash::STATE_BUSY);
+    let abnormal = !session && !busy && !matches!(code, Some(0 | 2 | 3));
     let looped = abnormal && g.crash.record(at);
+    if g.crash.busy(busy) == crash::BUSY_ALARM {
+        g.raise(
+            None,
+            &format!(
+                "the engine's state directory stayed in use {} times in a row (exit {}): \
+                 starting it again",
+                crash::BUSY_ALARM,
+                crash::STATE_BUSY
+            ),
+            false,
+        );
+    }
     let mode = g.state.mode;
     let n = g.crash.in_window();
     match crash::after_exit(code, mode, g.site.prod, session, looped, n) {
