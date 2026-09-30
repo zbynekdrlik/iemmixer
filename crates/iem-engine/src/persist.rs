@@ -178,14 +178,18 @@ fn generation_seq(name: &str) -> Option<u64> {
 }
 
 /// The generation files among a directory's entries (name, path), oldest
-/// first.
+/// first. An entry that fails to read is that error, never "no generation"
+/// (#32 m3: the seed would read it as no state).
 fn generation_entries(
     entries: impl Iterator<Item = io::Result<(OsString, PathBuf)>>,
 ) -> io::Result<Vec<(u64, PathBuf)>> {
-    let mut gens: Vec<(u64, PathBuf)> = entries
-        .filter_map(Result::ok)
-        .filter_map(|(name, path)| Some((generation_seq(name.to_str()?)?, path)))
-        .collect();
+    let mut gens = Vec::new();
+    for entry in entries {
+        let (name, path) = entry?;
+        if let Some(seq) = name.to_str().and_then(generation_seq) {
+            gens.push((seq, path));
+        }
+    }
     gens.sort();
     Ok(gens)
 }

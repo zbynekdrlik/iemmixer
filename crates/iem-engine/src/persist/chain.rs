@@ -67,9 +67,15 @@ impl Store {
         if let Some((persisted, source)) = first {
             return settle(topo, persisted, source, rejected);
         }
-        let mut rest: Vec<(PathBuf, Source)> = self
-            .generations()
-            .unwrap_or_default()
+        // Tolerant, but a listing that fails is reported (#32 m3).
+        let gens = self.generations().unwrap_or_else(|e| {
+            rejected.push((
+                self.dir.clone(),
+                format!("the generations cannot be listed: {e}"),
+            ));
+            Vec::new()
+        });
+        let mut rest: Vec<(PathBuf, Source)> = gens
             .into_iter()
             .rev()
             .map(|(seq, path)| (path, Source::Generation(seq)))
