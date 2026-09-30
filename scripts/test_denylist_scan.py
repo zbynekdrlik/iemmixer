@@ -360,6 +360,32 @@ class DenylistScanTests(unittest.TestCase):
         allow.write_text(ds.line_key("a.txt", line) + "  reviewed\n", encoding="utf-8")
         self.assertEqual(self.scan("--allow", str(allow), "--tree", "HEAD", "--commits", "HEAD")[0], 0)
 
+    def test_unquote_c_is_robust_to_a_malformed_escape(self) -> None:
+        # Vector 3: a crafted / malformed C-quoted `+++` label must never crash the scan. A
+        # malformed backslash is kept literal (the well-formed octal / letter escapes are
+        # unchanged). Current code raises KeyError / ValueError.
+        self.assertEqual(ds.unquote_c(b'"trailing\\"'), b"trailing\\")   # lone trailing backslash
+        self.assertEqual(ds.unquote_c(b'"a\\zb"'), b"a\\zb")             # unknown escape letter
+        self.assertEqual(ds.unquote_c(b'"o\\9"'), b"o\\9")               # \9 is not octal
+        self.assertEqual(ds.unquote_c(b'"big\\777"'), b"big\\777")       # octal > 255, kept literal
+        # well-formed escapes still decode exactly (no regression)
+        self.assertEqual(ds.unquote_c(b'"b/\\303\\241"'), b"b/\xc3\xa1")
+        self.assertEqual(ds.unquote_c(b'"a\\tb\\\\c\\"d"'), b"a\tb\\c\"d")
+
+    def test_unquote_c_keeps_a_term_visible_after_a_malformed_escape(self) -> None:
+        # Vector 3: bytes after a malformed escape must survive so a term cannot hide behind it.
+        out = ds.unquote_c(b'"b/x\\qzyxname.txt"')  # \q is not a valid C-escape
+        self.assertIn(b"zyxname", out)
+
+    def test_a_malformed_quoted_label_still_exposes_and_redacts_a_term(self) -> None:
+        # Vector 3 end-to-end: a term behind a malformed escape in a `+++` label is still caught
+        # by the scanner and still redacted (never printed).
+        scanner = ds.Scanner(["zyxname"], set())
+        path = ds.diff_path('"b/dir\\qname/zyxname.txt"')  # \q malformed; term in its own component
+        self.assertTrue(scanner.entries_in(path))
+        self.assertIn("[redacted]", scanner.shown(path))
+        self.assertNotIn("zyxname", scanner.shown(path))
+
 
 if __name__ == "__main__":
     unittest.main()
