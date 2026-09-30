@@ -193,6 +193,11 @@ try {
     # -Only names groups of the tier: a typo is an error, never an empty apply (A9).
     ThrowsLike { Invoke-IemTuningApply -ProfilePath $pp -Tier 2 -Only @('servics') } '*servics*no tier 2 group*' 'apply-refuses-an-unknown-group'
     ThrowsLike { Undo-IemTuning -ProfilePath $pp -Tier 2 -Only @('servics') } '*servics*no tier 2 group*' 'undo-refuses-an-unknown-group'
+    # Overlapping layout roles are refused before any write, as the window does (review R5).
+    $po = New-TestProfile $hw @{ layout = [ordered]@{ housekeeping = @(0, 2); nic = @(1); card = @(2); audio = @(3) } }
+    ThrowsLike { Invoke-IemTuningApply -ProfilePath $po -Tier 2 -Only @('maintenance') } '*roles overlap*' 'apply-refuses-overlapping-layout-roles'
+    ThrowsLike { Enter-IemTuningMode -ProfilePath $po -Only @('governor') } '*roles overlap*' 'enter-refuses-overlapping-layout-roles'
+    Assert ((Get-Service W32Time).Status -eq 'Running' -and -not (Read-IemJournalState $pp) -and -not (Test-Path -LiteralPath $maint)) 'layout-refusals-write-nothing'
     # The profile version is stamped only after a complete apply without a failure (A9).
     $rm = Invoke-IemTuningApply -ProfilePath $pp -Tier 2 -Only @('maintenance')
     Assert (@(Rows $rm 'failed').Count -eq 0 -and (Read-JournalVersion $pp 2) -eq 0) 'apply-partial-does-not-stamp-the-version'
