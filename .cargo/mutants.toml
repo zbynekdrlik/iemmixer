@@ -21,9 +21,12 @@ exclude_globs = [
   # prefwin.rs.
   "crates/iem-audio-io/src/asio.rs",
   # Windows-only placement/priority/clock/marker FFI (S1c): not compiled on
-  # the Linux runners; the windows jobs build it and HIL exercises it on the
-  # PC (like asio.rs). Its portable placement logic (parse_lps, ids_for) lives
-  # in the mutated cpuset.rs; the CPU-set buffer decode is FFI, PC-verified.
+  # the Linux runners; the windows jobs build it. Only the S1a/S1c spike
+  # calls it (asio.rs's spike Host::start and examples/asio_spike.rs), in its
+  # measurement windows on the PC; the S6 engine places and prioritises
+  # itself through iem_win::power, so HIL never runs it. Its portable
+  # placement logic (parse_lps, ids_for) lives in the mutated cpuset.rs; the
+  # CPU-set buffer decode is FFI, verified on the PC by the spike.
   "crates/iem-audio-io/src/os.rs",
   # The S1a spike program (a Windows-only main; its parser is tested).
   "crates/iem-audio-io/examples/**",
