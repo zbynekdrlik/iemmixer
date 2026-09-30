@@ -289,9 +289,48 @@ def cmd_state(env, args) -> None:
     print(json.dumps({"state": tps(env, f"Get-IemTuningState -ProfilePath {sw.tuning_profile(env)}", timeout=120, event="abandon")}, indent=1))
 
 
+def no_leftover_trace(state: dict) -> None:
+    """A kernel trace still recorded from an earlier measure would load the PC
+    being measured (and a new start would fail on its running session)."""
+    if state.get("trace"):
+        raise StepError(f"a kernel trace is still recorded ({state['trace']}): run trace-stop first")
+
+
+def stop_trace(env: dict[str, str], state: dict):
+    """Stops the recorded kernel trace without merging (quick; the raw files
+    stay on the PC) and clears it from the state."""
+    r = tps(env, f"Stop-IemTrace -Xperf {xperf(env)} -Dir {ps_quote(state['trace'])}", timeout=120, event="ignore")
+    state["trace"] = None
+    sw.save_state(state)
+    return r
+
+
+def cmd_trace_stop(env, args) -> None:
+    """Stops a kernel trace a failed measure left recorded (#32 B5)."""
+    state = sw.open_state()
+    if not state.get("trace"):
+        print(json.dumps({"trace-stop": "no kernel trace recorded in this window"}))
+        return
+    print(json.dumps({"trace-stop": stop_trace(env, state)}))
+
+
+def abandon_trace(env: dict[str, str]) -> None:
+    """After a failed measure: stop the trace it started. A stop that fails
+    keeps the trace recorded (trace-stop or a preempt retries it) and alarms
+    the owner; it never replaces the measure's own error."""
+    state = sw.load_state()
+    if not state.get("trace"):
+        return
+    try:
+        stop_trace(env, state)
+    except StepError as e:
+        sw.alarm(f"the kernel trace of a failed measure did not stop ({e}): run tuning_window trace-stop")
+
+
 def cmd_measure(env, args) -> None:
     state = sw.open_state()
     need_free(state)
+    no_leftover_trace(state)
     profile = load_profile(PROFILE)
     if not label_ok(args.label):
         raise StepError("--label: lower-case letters, digits and dashes, at most 40")
@@ -301,8 +340,19 @@ def cmd_measure(env, args) -> None:
     run_dir = env["PC_TUNING_ROOT"] + f"\\runs\\{args.label}-{stamp()}"
     since = tps(env, "Get-IemNow", timeout=60, event="abandon")
     tracing = args.trace != "none"
+    try:
+        _measure(env, args, profile, state, run_dir, since, tracing)
+    except sw.EventNow:
+        raise   # "ide event": the preempt's unwind stops the recorded trace (trace-stop); nothing delays it here
+    except BaseException:
+        if tracing:
+            abandon_trace(env)
+        raise
+
+
+def _measure(env, args, profile: dict, state: dict, run_dir: str, since: str, tracing: bool) -> None:
     if tracing:
-        state["trace"] = run_dir   # recorded before the start: preempt stops it
+        state["trace"] = run_dir   # recorded before the start: preempt and the error path stop it
         sw.save_state(state)
         opt = (" -CSwitch" if args.trace == "diag" else "") + (f" -CircularMB {args.circular_mb}" if args.circular_mb else "")
         tps(env, f"Start-IemTrace -Xperf {xperf(env)} -Dir {ps_quote(run_dir)}{opt}", timeout=120)
@@ -359,6 +409,7 @@ def cmd_hwlat(env, args) -> None:
     CPU fails here) keeps what was measured before it."""
     state = sw.open_state()
     need_free(state)
+    no_leftover_trace(state)
     path = raw(env, state) / f"hwlat-{stamp()}.json"
     rows: list[dict] = []
     for lp in parse_lps(args.lps):
@@ -490,13 +541,13 @@ def cmd_post_boot(env, args) -> None:
         raise StepError("post-boot checks failed")
 
 
-STEPS = ("tuning-setup", "enter", "exit", "apply", "undo", "measure", "hwlat", "reboot-prepare")
+STEPS = ("tuning-setup", "enter", "exit", "apply", "undo", "measure", "trace-stop", "hwlat", "reboot-prepare")
 
 
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("tuning-setup", "inventory", "wpt-install", "exit", "state", "reboot-prepare", "post-boot"):
+    for name in ("tuning-setup", "inventory", "wpt-install", "exit", "state", "trace-stop", "reboot-prepare", "post-boot"):
         sub.add_parser(name)
     fp = sub.add_parser("fingerprint")
     g = fp.add_mutually_exclusive_group(required=True)
@@ -529,6 +580,7 @@ def main(argv: list[str]) -> int:
     args = ap.parse_args(argv)
     handlers = {"tuning-setup": cmd_tuning_setup, "inventory": cmd_inventory, "fingerprint": cmd_fingerprint, "wpt-install": cmd_wpt_install,
                 "enter": cmd_enter, "exit": cmd_exit, "apply": cmd_apply, "undo": cmd_undo, "state": cmd_state, "measure": cmd_measure,
+                "trace-stop": cmd_trace_stop,
                 "hwlat": cmd_hwlat, "reboot-prepare": cmd_reboot_prepare, "reboot": cmd_reboot, "post-boot": cmd_post_boot}
     try:
         env = sw.load_env(Path(os.environ.get("SPIKE_ENV", str(Path.home() / ".config/iemmixer/asio-spike.env"))))
