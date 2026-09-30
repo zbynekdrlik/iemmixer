@@ -502,9 +502,10 @@ mod spike {
     /// In-process levers (S1c design note §6.2 L5): power throttling off and
     /// the audio CPU Set as the process default (every thread without its own
     /// selection, the driver's included, runs there; no priority changes).
-    /// `spike_run::setup_failure` decides which lever that could not be
-    /// applied fails the run (a measurement on the wrong processors would
-    /// mislead): the outcome and why.
+    /// A lever that could not be applied fails the run
+    /// (`spike_run::setup_failure`: a failed audio CPU Set refuses it,
+    /// throttling left on is an error), since the measurement would not be
+    /// of the process the report names: the outcome and why.
     fn process_setup(a: &Args) -> (Value, Option<(&'static str, String)>) {
         let throttling = os::disable_power_throttling().map_err(|e| e.to_string());
         let topology = match os::system_cpu_sets() {
@@ -520,7 +521,7 @@ mod spike {
                 os::set_process_cpus(lps).map_err(|e| e.to_string())
             }),
         );
-        let failed = spike_run::setup_failure(&audio);
+        let failed = spike_run::setup_failure(&throttling, &audio);
         let throttling = throttling.map_or_else(|e| json!(e), |()| json!("off"));
         // The stress threads' CPU Set: what duplex applies (null until then).
         (

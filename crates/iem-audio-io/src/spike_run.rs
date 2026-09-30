@@ -105,13 +105,22 @@ pub fn keeps_busy(placed: bool, stopped: bool) -> bool {
 }
 
 /// The in-process levers a run applies before it starts (S1c design note
-/// §6.2 L5): the audio CPU Set as the process default. One that could not
-/// be applied fails the run: the outcome and why.
-pub fn setup_failure(audio: &Applied) -> Option<(&'static str, String)> {
-    match audio {
-        Applied::Failed(e) => Some(("refused", format!("audio CPU Set: {e}"))),
-        _ => None,
+/// §6.2 L5): power throttling off (`throttling`) and the audio CPU Set as
+/// the process default (`audio`). One that could not be applied fails the
+/// run, since it would measure another process than the report names: the
+/// outcome and why. A failed audio CPU Set refuses the run (checked first),
+/// throttling left on is an error.
+pub fn setup_failure(
+    throttling: &Result<(), String>,
+    audio: &Applied,
+) -> Option<(&'static str, String)> {
+    if let Applied::Failed(e) = audio {
+        return Some(("refused", format!("audio CPU Set: {e}")));
     }
+    throttling
+        .as_ref()
+        .err()
+        .map(|e| ("error", format!("power throttling: {e}")))
 }
 
 /// The hwlat scanner's gate (S1c design note §4.1): placed on `cpu` through
