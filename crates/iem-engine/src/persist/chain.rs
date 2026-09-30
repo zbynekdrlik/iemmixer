@@ -950,8 +950,10 @@ mod tests {
         // A directory where current.json belongs: reading it fails, not NotFound.
         fs::create_dir(s.dir().join(CURRENT)).unwrap();
         let loaded = s.load(&test_site());
+        // The baseline's state (its revision is the load's to set: #32
+        // MAJOR-3).
         assert_eq!(loaded.source, Source::Baseline);
-        assert_eq!(loaded.persisted.rev, 4);
+        assert_eq!(loaded.persisted.saved_unix_ms, sample(4).saved_unix_ms);
         assert_eq!(loaded.rejected.len(), 1);
         assert!(loaded.rejected[0].0.ends_with(CURRENT));
     }

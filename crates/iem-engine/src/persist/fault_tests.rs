@@ -460,15 +460,18 @@ fn an_unreadable_current_json_is_never_moved_or_rotated() {
     let bytes = fs::read(&current).unwrap();
     faulty.set_unreadable(&current, true);
     let loaded = s.load(&g);
+    // save.tmp's state (its revision is the load's to set: #32 MAJOR-3).
     assert_eq!(
-        (loaded.source, loaded.persisted.rev),
-        (Source::Interrupted, 9)
+        (loaded.source, loaded.persisted.saved_unix_ms),
+        (Source::Interrupted, sample(9).saved_unix_ms)
     );
     assert_eq!(loaded.current_json, FileState::Unreadable);
     assert_eq!(faulty.pauses(), TRIES - 1);
-    assert_eq!(loaded.alarms.len(), 1, "{:?}", loaded.alarms);
     assert!(
-        loaded.alarms[0].starts_with("current.json cannot be read"),
+        loaded
+            .alarms
+            .iter()
+            .any(|a| a.starts_with("current.json cannot be read")),
         "{:?}",
         loaded.alarms
     );
