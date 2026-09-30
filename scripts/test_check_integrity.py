@@ -107,6 +107,33 @@ class IntegrityTests(unittest.TestCase):
             self.put("scripts/iem-pc/x.ps1", body + "\n")
             self.assertEqual(ci.violations(self.root), [], body)
 
+    def test_every_spelling_of_a_forced_restart_is_refused(self) -> None:
+        # Review m6: a shutdown invocation passes only with an explicit /t 0 and no
+        # force flag, in any form; -Force abbreviations; the API force flags.
+        for body in ("shutdown /r",                                  # default /t 30 implies /f
+                     "& 'shutdown.exe' /r /t 60", 'shutdown.exe "/r" "/t" "60"',
+                     'let argv = ["shutdown", "/r", "/f"];', 'Command::new("shutdown").args(["/r", "/f"]).status()',
+                     "Start-Process shutdown.exe -ArgumentList '/r','/f'", "Start-Process -FilePath shutdown -ArgumentList '/r /t 60'",
+                     "Restart-Computer -f", "Restart-Computer -Forc", "Stop-Computer -Force:$true",
+                     "(Get-CimInstance Win32_OperatingSystem).Win32Shutdown(6)", "$os.Win32Shutdown(4)",
+                     "Invoke-CimMethod -ClassName Win32_OperatingSystem -MethodName Win32Shutdown -Arguments @{ Flags = 5 }",
+                     "$os.Win32ShutdownTracker(0, 'x', 0, 6)",
+                     "ExitWindowsEx(EWX_REBOOT | EWX_FORCE, 0)", "ExitWindowsEx(EWX_REBOOT | EWX_FORCEIFHUNG, 0)",
+                     "ExitWindowsEx(0x6, 0)", "InitiateShutdownW(null, null, 0, SHUTDOWN_RESTART | SHUTDOWN_FORCE_OTHERS, 0)"):
+            self.put("scripts/iem-pc/x.ps1", body + "\n")
+            self.assertEqual(len(ci.violations(self.root)), 1, body)
+
+    def test_graceful_forms_and_other_commands_on_the_line_pass(self) -> None:
+        # Review m7: only the command's own arguments count, never the next command's.
+        for body in ("Start-Process shutdown.exe -ArgumentList '/r','/t','0'", 'Command::new("shutdown").args(["/r", "/t", "0"])',
+                     "Restart-Computer -Wait -For PowerShell", "(Get-CimInstance Win32_OperatingSystem).Win32Shutdown(2)",
+                     "ExitWindowsEx(EWX_REBOOT, SHTDN_REASON_FLAG_PLANNED)", "ExitWindowsEx(0x2, 0)",
+                     'graceful shutdown ; [ -f "$pid" ]', "shutdown requested; ssh -t 5 host",
+                     "Stop-Computer -ComputerName x ; Remove-Item x -Force", "Cmd::Shutdown => \"shutdown\",",
+                     'reason: "shutdown".into(),', "self.shutdown(timeout=5)", "the shutdown message was sent"):
+            self.put("scripts/iem-pc/x.ps1", body + "\n")
+            self.assertEqual(ci.violations(self.root), [], body)
+
     def test_graceful_stops_and_ordinary_words_pass(self) -> None:
         for body in ('Command::new("kill").args(["-TERM", &pid])', "signal::kill(pid, Signal::SIGTERM)",
                      "self.killed = true", "skill(x)", "let force_ended = false",
