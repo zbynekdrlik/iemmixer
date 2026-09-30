@@ -462,6 +462,21 @@ try {
     $xo = (Invoke-IemXperf -Xperf $ping -Arguments @('-n', '1', '127.0.0.1')) -join ' '
     Assert ($xo -match '127\.0\.0\.1') 'xperf-runs-a-signed-binary'
     ThrowsLike { Invoke-IemXperf -Xperf $ping -Arguments @('-n', 'x', '127.0.0.1') } '*(exit *' 'xperf-a-nonzero-exit-throws'
+    # The stop without -Merge is the pre-emption path ("ide event") and always works
+    # (review 3.6): it runs xperf unchecked (it was checked when the trace started),
+    # and when xperf cannot run at all it stops the sessions with logman.
+    $fl = Join-Path $dir 'fake-xperf-no-sessions.cmd'
+    [IO.File]::WriteAllText($fl, "@echo off`r`nexit /b 0`r`n")
+    $s1 = $null; $se = $null
+    try { $s1 = Stop-IemTrace -Xperf $fl -Dir $dir } catch { $se = "$_" }
+    Assert ($null -eq $se -and $s1.via -eq 'xperf' -and @($s1.stopped).Count -eq 0) "trace-stop-runs-xperf-unchecked ($se)"
+    $lm = Invoke-IemNative -FilePath 'logman.exe' -Arguments @('start', 'IemMarkers', '-p', '{3b6c1e0a-5d2f-4c8e-9a71-0e4f2d9b8c11}', '-o', (Join-Path $dir 'markers-test.etl'), '-ets')
+    Assert ($lm.code -eq 0) "marker-session-starts ($($lm.out -join ' '))"
+    $s2 = $null; $se = $null
+    try { $s2 = Stop-IemTrace -Xperf (Join-Path $dir 'no-xperf.exe') -Dir $dir } catch { $se = "$_" }
+    Assert ($null -eq $se -and $s2.via -eq 'logman' -and @($s2.stopped) -contains 'IemMarkers') "trace-stop-falls-back-to-logman ($se)"
+    $lq = Invoke-IemNative -FilePath 'logman.exe' -Arguments @('query', '-ets')
+    Assert ($lq.code -eq 0 -and -not (@($lq.out) -match '^\s*IemMarkers\s')) 'trace-stop-leaves-no-marker-session'
     # An existing xperf counts as installed only when Microsoft signed it and its
     # version is new enough (A12); PING.EXE stands in for a signed binary.
     $fakeX = Join-Path $dir 'xperf.exe'
@@ -487,6 +502,7 @@ try {
     foreach ($g in $testPlan, $foreignPlan, $halfPlan) { if (@(& powercfg.exe /list) -match $g) { & powercfg.exe /delete $g | Out-Null } }
     Unregister-ScheduledTask -TaskPath $taskPath -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
     if (@((Get-MpPreference).ExclusionPath) -contains $dir) { Remove-MpPreference -ExclusionPath $dir }
+    try { [void](Invoke-IemNative -FilePath 'logman.exe' -Arguments @('stop', 'IemMarkers', '-ets')) } catch { Write-Host "cleanup logman: $_" }
     Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
 }
 Write-Host 'Test-IemTuning: all passed'
