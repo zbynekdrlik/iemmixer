@@ -108,6 +108,9 @@ def check_request(mode: str, frames: int | None, seconds: int, burn_us: int, str
     for text in (audio_cpus, stress_cpus):
         if text and not CPU_LIST.fullmatch(text):
             raise StepError("CPU lists look like 14 or 0,1,6-13")
+    # The spike's own rule: busy threads next to a reserved audio CPU need their own CPUs.
+    if stress > 0 and audio_cpus and not stress_cpus:
+        raise StepError("--stress with --audio-cpus needs --stress-cpus (the busy threads' own CPUs)")
 
 
 def run_fields(env: dict[str, str], args) -> dict:
