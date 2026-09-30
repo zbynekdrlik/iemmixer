@@ -300,6 +300,21 @@ try {
     }
     $nk = Get-Item -LiteralPath $nic
     Assert ($nk.GetValue('PowerSaving') -eq '1' -and $null -eq $nk.GetValue('*RssBaseProcNumber', $null)) 'tier3-nic-refusal-writes-nothing'
+    # The NIC's RSS range (the processors of its interrupts) lies in layout.nic and never
+    # on a card or audio processor, where it would share the card's ISR processor or the
+    # audio CPU; checked before any write (review R4 follow-up).
+    foreach ($c in @(@(2, 2, $null, '*card or audio*'), @(3, 3, $null, '*card or audio*'), @(1, 2, $null, '*card or audio*'),
+                     @(0, 1, $null, '*layout.nic*'), @(1, 0, $null, '*above max*'), @('x', 1, $null, '*not a processor number*'),
+                     @($null, 1, $null, '*not a processor number*'), @(62, 62, @(1, 62), '*not present*'))) {
+        $rn = New-TestNic 'PCI\VEN_FFFE&DEV_0002'
+        $rn.rss = [ordered]@{ base = $c[0]; max = $c[1] }
+        $set = @{ nic = $rn }
+        if ($null -ne $c[2]) { $set.layout = [ordered]@{ housekeeping = @(0); nic = $c[2]; card = @(2); audio = @(3) } }
+        $bp = New-TestProfile $hw $set
+        ThrowsLike { Invoke-IemTuningApply -ProfilePath $bp -Tier 3 -Only @('nic') } $c[3] "tier3-refuses-the-nic-rss $($c[0])..$($c[1])"
+    }
+    $nk = Get-Item -LiteralPath $nic
+    Assert ($nk.GetValue('PowerSaving') -eq '1' -and $null -eq $nk.GetValue('*RssBaseProcNumber', $null) -and $null -eq $nk.GetValue('*RssMaxProcNumber', $null)) 'tier3-nic-rss-refusal-writes-nothing'
     $an = @(Get-NetAdapter)[0]
     $cls = "$root\HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e972-e325-11ce-bfc1-08002be10318}\0000"
     New-Item -Path $cls -Force | Out-Null
