@@ -660,6 +660,24 @@ class DenylistScanTests(unittest.TestCase):
         out = self.assert_found_in_both_modes_as({"docs/résumé/a.txt": "x zyxname\n"}, "sum")
         self.assertIn("tree docs/[redacted]/a.txt:1: denylist entry 1", out)
 
+    # --- #32 review m6: character references, \U escapes, invisible characters, compatibility forms ---
+
+    def test_references_escapes_invisibles_and_fullwidth_do_not_hide_a_term(self) -> None:
+        self.add_terms("ďqxwzy")
+        texts = {"ref.html": ("<b>&#271;qxwzy</b>", "qxwzy"), "hexref.xml": ("<n>&#x10F;qxwzy</n>", "qxwzy"),
+                 "ascii.xml": ("<n>&#x7a;&#121;xname</n>", "xname"), "py.py": ('n = "\\U0000010fqxwzy"', "qxwzy"),
+                 "shy.md": ("zyx\u00adname", "name"), "zwsp.md": ("zyx\u200bname", "name"),
+                 "zwj.md": ("zyx\u200dname", "name"), "bom.md": ("zyx\ufeffname", "name"),
+                 "wj.md": ("zyx\u2060name", "name"), "wide.md": ("\uff5a\uff59\uff58\uff4e\uff41\uff4d\uff45", "zyx")}
+        for name, (text, letters) in texts.items():
+            with self.subTest(name=name):
+                self.assert_found_in_both_modes_as({name: f"x {text} y\n"}, letters)
+
+    def test_a_zero_width_space_between_words_still_separates_them(self) -> None:
+        # a zero-width space is also a word break: the term after one is still found
+        self.commit({"a.md": "abc\u200bzyxname\n"})
+        self.assertEqual(self.scan("--tree", "HEAD")[0], 1)
+
     # --- #32 review m9: git-lfs content is not in the repository, so its use is a finding ---
 
     def test_a_git_lfs_filter_and_pointer_are_findings(self) -> None:
