@@ -210,8 +210,11 @@ def scan_commits(
             for role, email in zip(("author", "committer"), emails):
                 if email.strip().lower() not in identities:
                     hits.append(IdentityProblem(short, role))
-        diff = decode(git(repo, "show", "--format=", "--unified=0", "--no-color", "--no-ext-diff",
-                          "--no-renames", "-m", "--first-parent", sha))
+        # force quotePath=true so a `+++ ` label is always pure-ASCII octal regardless of the
+        # local git config; diff_path/unquote_c decode it back (a raw non-ASCII byte in a quoted
+        # label under quotePath=false would otherwise fail encode("ascii"))
+        diff = decode(git(repo, "-c", "core.quotePath=true", "show", "--format=", "--unified=0",
+                          "--no-color", "--no-ext-diff", "--no-renames", "-m", "--first-parent", sha))
         # `+++`/`---` count as headers only before a file's first hunk; inside a hunk an added
         # line beginning with `++ ` renders as `+++ ...` and is content, not a new header path
         path, in_hunk = "", False
