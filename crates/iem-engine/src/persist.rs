@@ -5,19 +5,18 @@
 //! - `gen-<seq>.json`: the 20 previous saves (the newest has the highest seq);
 //! - `baseline.json`: written at each import (and, from S6, at `live` entry);
 //! - `save.tmp`: a save before its renames (a crash before the second one
-//!   leaves the newest state only in it: the load chain reads it when
-//!   `current.json` is missing or older by revision, the seed keeps it,
-//!   `Store::live_state`);
-//! - `baseline.tmp`: a baseline before its rename.
+//!   leaves the newest state only in it; `chain` decides when it is the
+//!   live state, and the boot's recovery finishes that save);
+//! - `baseline.tmp`: a baseline before its rename;
+//! - `current.json.damaged-<n>`: a damaged `current.json` the boot moved
+//!   aside, never read again.
 //!
 //! A file is `{"format", "schema", "sha256", "payload"}`; the SHA-256 covers the
 //! payload's raw bytes, so a re-serialisation never matters. Readers ignore
 //! unknown fields and default missing ones (additive schemas). The load chain
-//! is current (or `save.tmp` when it is newer by revision, or current is
-//! missing) → generations (newest first) → baseline → defaults with every
-//! mix muted.
-//! Files of an older schema (1: the REAPER-shaped graph before #20) are
-//! refused.
+//! (`chain`) is current or `save.tmp` → generations (newest first) →
+//! baseline → defaults with every mix muted. Files of an older schema (1:
+//! the REAPER-shaped graph before #20) are refused.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -61,7 +60,9 @@ pub struct Persisted {
 pub enum Source {
     Current,
     /// `save.tmp`: a save a crash cut off before its renames, the newest
-    /// state there is (`current.json` missing or older by revision, #32).
+    /// state there is (its revision at least that of `current.json`, or of
+    /// the newest generation when `current.json` is missing or damaged; #32).
+    /// The boot's recovery makes it `current.json`.
     Interrupted,
     Generation(u64),
     Baseline,
