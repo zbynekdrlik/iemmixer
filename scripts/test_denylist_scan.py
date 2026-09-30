@@ -157,6 +157,59 @@ class DenylistScanTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(out.getvalue().strip(), ds.line_key("a.txt", "two"))
 
+    # --- #27: the scan must never print a private term into the (public) CI log ---
+
+    def test_a_term_inside_a_path_component_is_redacted_not_printed(self) -> None:
+        # Vector 1: a file whose name holds a listed term must not put the term in the log.
+        self.commit({"docs/zyxname-notes.md": "x\n"})
+        code, out = self.scan("--tree", "HEAD")
+        self.assertEqual(code, 1)
+        self.assertNotIn("zyxname", out.lower())  # the leak the ticket is about
+        self.assertIn("[redacted]", out)          # the term-bearing component is redacted
+        self.assertIn("docs/", out)               # the clean component is still shown
+        self.assertIn("denylist entry", out)
+
+    def test_a_component_named_exactly_as_a_term_is_redacted(self) -> None:
+        self.commit({"zyxname/readme.md": "x\n"})
+        code, out = self.scan("--tree", "HEAD")
+        self.assertEqual(code, 1)
+        self.assertNotIn("zyxname", out.lower())
+        self.assertIn("[redacted]", out)
+
+    def test_a_finding_line_never_starts_with_a_raw_path(self) -> None:
+        # A path starting with `::` would read as a GitHub workflow command in the CI log;
+        # every finding location starts with a fixed word (`tree` / a commit SHA) instead.
+        self.commit({"zyxname.txt": "x\n"})
+        code, out = self.scan("--tree", "HEAD")
+        self.assertEqual(code, 1)
+        finding_lines = [ln for ln in out.splitlines() if "denylist entry" in ln]
+        self.assertTrue(finding_lines)
+        for ln in finding_lines:
+            self.assertTrue(ln.startswith("tree "), ln)
+
+    def test_an_added_line_rendered_as_a_plus_plus_header_does_not_leak(self) -> None:
+        # Vector 2: an added line whose content starts with `++ ` renders as `+++ ...` under
+        # --unified=0 and must be read as content, not a diff file-header, so its text (the
+        # private term) never reaches the log.
+        self.commit({"note.txt": "clean\n"})
+        (self.repo / "note.txt").write_text("++ zyxname secret marker\n", encoding="utf-8")
+        git(self.repo, "commit", "-q", "-am", "add a line beginning with ++")
+        code, out = self.scan("--commits", "HEAD~1..HEAD")
+        self.assertEqual(code, 1)
+        self.assertNotIn("zyxname", out.lower())    # the leak the ticket is about
+        self.assertNotIn("secret marker", out)      # no line content in the log at all
+        self.assertIn("note.txt", out)              # the real (clean) path is reported
+        self.assertIn("denylist entry", out)
+
+    def test_a_term_only_in_a_diff_header_path_is_redacted(self) -> None:
+        # Commit mode reports the added-file path; a term in it must be redacted, not printed.
+        self.commit({"a.txt": "clean\n"})
+        self.commit({"zyxname-new.txt": "harmless\n"}, message="add a file named after a term")
+        code, out = self.scan("--commits", "HEAD~1..HEAD")
+        self.assertEqual(code, 1)
+        self.assertNotIn("zyxname", out.lower())
+        self.assertIn("[redacted]", out)
+
 
 if __name__ == "__main__":
     unittest.main()
