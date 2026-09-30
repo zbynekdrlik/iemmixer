@@ -91,6 +91,22 @@ class IntegrityTests(unittest.TestCase):
             self.put("crates/a/src/lib.rs", f"fn f() {{ {body}; }}\n")
             self.assertEqual(ci.violations(self.root), ["crates/a/src/lib.rs:1: force-kill command (program spec I8)"], body)
 
+    def test_a_forced_restart_is_refused(self) -> None:
+        # Microsoft, shutdown /t: "If the timeout period is greater than 0, the /f
+        # parameter is implied." So a delay forces too, and /f counts anywhere (#32 B1).
+        for body in ("shutdown.exe /r /t 60 /c 'x'", "shutdown /r /t 5", "shutdown -r -t 30", "shutdown /r /t:10",
+                     "shutdown /r /f", "shutdown.exe /s /t 0 /f", "shutdown -r -f -t 0", "Restart-Computer -Force",
+                     "Stop-Computer -ComputerName x -Force", "restart-computer -force"):
+            self.put("scripts/iem-pc/x.ps1", body + "\n")
+            self.assertEqual(len(ci.violations(self.root)), 1, body)
+
+    def test_a_graceful_restart_passes(self) -> None:
+        for body in ("& shutdown.exe /r /t 0 /d p:2:4 /c 'iemmixer: planned restart'", "shutdown /r /t 00", "shutdown /a",
+                     "Restart-Computer", "shutdown_signal()", "handle.graceful_shutdown(Some(STOP_DRAIN))",
+                     "runtime.shutdown_timeout(Duration::from_secs(1))", "a shutdown of the app took 5 s"):
+            self.put("scripts/iem-pc/x.ps1", body + "\n")
+            self.assertEqual(ci.violations(self.root), [], body)
+
     def test_graceful_stops_and_ordinary_words_pass(self) -> None:
         for body in ('Command::new("kill").args(["-TERM", &pid])', "signal::kill(pid, Signal::SIGTERM)",
                      "self.killed = true", "skill(x)", "let force_ended = false",

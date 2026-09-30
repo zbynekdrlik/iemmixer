@@ -183,5 +183,47 @@ class RebootPrepareTests(unittest.TestCase):
         self.assertIn("did not stop", self.alarms[0])
 
 
+ENV = {"PC_ROOT": "R", "PC_TUNING_ROOT": "T", "PC_XPERF": "xperf.exe",
+       "PC_BUFFER_KEY": "K", "PC_BUFFER_NAME": "N", "PC_REAPER_HTTP": "H",
+       "PC_REAPER_START_TASK_PATH": "P", "PC_REAPER_START_TASK": "TK", "PC_NTRACK": "9",
+       "PC_METER_BRIDGE": "B", "PC_METER_ACTION": "A", "PC_METER_HEARTBEAT": "HB",
+       "PC_ASIO_MODULE": "M", "PC_APP_HTTP": "AH"}
+
+
+class RebootTests(unittest.TestCase):
+    """reboot asks Windows for a graceful restart (I8). Only sw.ps (the ssh
+    boundary) is faked; sw.STATE/sw.EVENT_NOW point at a temp dir."""
+
+    def setUp(self) -> None:
+        self.dir = Path(tempfile.mkdtemp())
+        self.saved = (tw.sw.STATE, tw.sw.EVENT_NOW, tw.sw.ps)
+        tw.sw.STATE = self.dir / "spike-window.json"
+        tw.sw.EVENT_NOW = self.dir / "EVENT-NOW"
+        self.calls: list[str] = []
+
+        def fake_ps(env, body, timeout=300, event="finish"):
+            self.calls.append(body)
+            return 0
+
+        tw.sw.ps = fake_ps
+        tw.sw.save_state({"id": "w", "card": "rebooting", "reboot": {"prepared_at": "2026-01-01T00:00:00Z"}, "closed": False})
+        self.args = argparse.Namespace(approval="owner, 14:05: áno, reštartuj", by_owner=False)
+
+    def tearDown(self) -> None:
+        tw.sw.STATE, tw.sw.EVENT_NOW, tw.sw.ps = self.saved
+
+    def test_the_restart_is_immediate_planned_and_never_forced(self) -> None:
+        tw.cmd_reboot(ENV, self.args)
+        self.assertEqual(len(self.calls), 1)
+        body = self.calls[0]
+        # Microsoft: a timeout above 0 implies the force flag. An immediate restart
+        # without it lets an app veto (post-boot then reports that the PC did not reboot).
+        self.assertIn("shutdown.exe /r /t 0 ", body)
+        self.assertIn("/d p:", body)                        # a planned restart, with its reason
+        self.assertNotRegex(body, r"[/-]f\b")
+        self.assertNotRegex(body, r"[/-]t[\s:]+0*[1-9]")
+        self.assertEqual(tw.sw.load_state()["reboot"]["by"], "agent")
+
+
 if __name__ == "__main__":
     unittest.main()
