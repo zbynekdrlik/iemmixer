@@ -554,5 +554,79 @@ class HwlatTests(WindowHarness):
         self.assertEqual([r["cpu"] for r in self.rows()], [2])
 
 
+class MeasureTests(WindowHarness):
+    """measure through the real cmd_run and unwind, the PC faked at the ssh seam."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.pc.reports = [DUPLEX]
+
+    def args(self, **kw) -> argparse.Namespace:
+        base = {"label": "load-32", "frames": 32, "seconds": 60, "burn_us": 40, "stress": 0, "audio_cpus": "", "stress_cpus": "",
+                "trace": "dpc", "circular_mb": 0}
+        return argparse.Namespace(**{**base, **kw})
+
+    def summary(self) -> dict:
+        return json.loads(Path(self.state()["measurements"][-1]["summary"]).read_text(encoding="utf-8"))
+
+    def record_trace(self, where: str = "C:\\t\\runs\\old-20260101T000000Z") -> None:
+        st = self.state()
+        st["trace"] = where
+        tw.sw.save_state(st)
+
+    def test_a_traced_run_is_summarised(self) -> None:
+        tw.cmd_measure(self.env, self.args())
+        s = self.summary()
+        self.assertEqual((s["label"], s["verdict"]["stable"]), ("load-32", True))
+        self.assertIn("isr nicdrv.sys: above 2048 us (a full period is 333)", s["findings"])
+        self.assertIsNone(self.state()["trace"])
+
+    # B5: a measure never leaves a kernel trace running behind it.
+    def test_an_error_during_the_run_stops_the_trace_and_clears_it(self) -> None:
+        self.pc.fail = {".progress.json"}
+        with self.assertRaisesRegex(tw.StepError, "progress.json"):
+            tw.cmd_measure(self.env, self.args())
+        stops = self.pc.bodies("Stop-IemTrace")
+        self.assertEqual(len(stops), 1)
+        self.assertNotIn("-Merge", stops[0])      # quick: the raw files stay
+        self.assertIsNone(self.state()["trace"])
+
+    def test_a_failed_cleanup_keeps_the_trace_recorded_and_alarms(self) -> None:
+        self.pc.fail = {".progress.json", "Stop-IemTrace"}
+        with self.assertRaisesRegex(tw.StepError, "progress.json"):   # the run's error, not the cleanup's
+            tw.cmd_measure(self.env, self.args())
+        self.assertTrue(self.state()["trace"])     # trace-stop, or a preempt, retries it
+        self.assertTrue(any("trace-stop" in a for a in self.alarms))
+
+    def test_an_event_leaves_the_trace_to_the_preempt(self) -> None:
+        self.pc.on_call = lambda body: (self.dir / "EVENT-NOW").touch() if ".progress.json" in body else None
+        with self.assertRaises(tw.sw.EventNow):
+            tw.cmd_measure(self.env, self.args())
+        self.assertEqual(self.pc.bodies("Stop-IemTrace"), [])   # no delay before REAPER comes back
+        self.assertIn("trace-stop", tw.sw.undo_plan(self.state(), spike_running=False))
+
+    def test_a_leftover_trace_refuses_measure_and_hwlat(self) -> None:
+        self.record_trace()
+        with self.assertRaisesRegex(tw.StepError, "trace-stop"):
+            tw.cmd_measure(self.env, self.args())
+        with self.assertRaisesRegex(tw.StepError, "trace-stop"):
+            tw.cmd_hwlat(self.env, argparse.Namespace(lps="2", seconds=30, threshold_us=10))
+        self.assertEqual(self.pc.calls, [])
+
+    def test_trace_stop_stops_the_recorded_trace(self) -> None:
+        self.record_trace()
+        with mock.patch.object(tw.sw, "load_env", return_value=self.env):
+            self.assertEqual(tw.main(["trace-stop"]), 0)
+        stops = self.pc.bodies("Stop-IemTrace")
+        self.assertEqual(len(stops), 1)
+        self.assertIn("-Dir 'C:\\t\\runs\\old-20260101T000000Z'", stops[0])
+        self.assertNotIn("-Merge", stops[0])
+        self.assertIsNone(self.state()["trace"])
+
+    def test_trace_stop_without_a_recorded_trace_touches_nothing(self) -> None:
+        tw.cmd_trace_stop(self.env, argparse.Namespace())
+        self.assertEqual(self.pc.calls, [])
+
+
 if __name__ == "__main__":
     unittest.main()
