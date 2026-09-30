@@ -257,6 +257,7 @@ def cmd_exit(env, args) -> None:
     rows = as_list(tps(env, f"Exit-IemTuningMode -ProfilePath {sw.tuning_profile(env)}", timeout=240))
     sw.update_state({"tuning_mode": False})
     print(json.dumps({"exit": rows}))
+    sw.alarm_exit_problems(rows)   # the exit completed; unconvertible journal entries reach the owner
 
 
 def only_arg(text: str) -> str:

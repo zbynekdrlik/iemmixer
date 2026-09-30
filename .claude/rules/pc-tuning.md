@@ -30,6 +30,7 @@ paths:
   - The journal (schema 2; a schema-1 journal is converted only where exact, else refused naming the file) is written through to disk and swapped with `File.Replace`; a missing, empty or unreadable journal falls back to a complete `.tmp`, else it is refused.
   - The read-only fingerprint and inventory functions live in `IemMeasure.psm1`; `Export-IemNearGlitch` takes `-Name`; `Get-IemPollSample` is gone (the poll is `poll_body`, below).
   - Rows may carry `skipped` (apply) and `reactivated` (enter); `cmd_apply`/`cmd_enter`/`cmd_undo` fail only on `failed`.
+  - `Exit-IemTuningMode` reports a schema-1 journal's global-section entry it cannot convert as a row with action `problem` and still completes the exit. `cmd_exit` and the unwind's tuning-exit step pass the rows to `sw.alarm_exit_problems`, which names each such row (key and error) in an owner alarm; the exit stays successful (`tuning_mode` cleared, REAPER still comes back).
 
 - **reject-case shadowing (tests)** — the spike's `--activity-channels` case is in `asio-spike.md` (it loads alongside this rule on `scripts/asio-spike/**`).
 

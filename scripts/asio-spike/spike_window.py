@@ -714,6 +714,18 @@ def alarm(text: str) -> None:
     print(f"OWNER ALARM: {text}", file=sys.stderr, flush=True)
 
 
+def alarm_exit_problems(rows) -> None:
+    """Exit-IemTuningMode reports a schema-1 journal's global-section entry it
+    could not convert as a row with action "problem"; the exit itself completed.
+    The owner hears which entries (cmd_exit and the unwind's tuning-exit step)."""
+    listed = rows if isinstance(rows, list) else [] if rows is None else [rows]
+    problems = [r for r in listed if isinstance(r, dict) and r.get("action") == "problem"]
+    if problems:
+        alarm(f"the tuning-mode exit completed, but {len(problems)} journal entry(ies) could not be converted: "
+              + "; ".join(f"{r.get('key')}: {r.get('error')}" for r in problems)
+              + "; check them on the PC before the next S1c window")
+
+
 def unwind(env: dict[str, str], state: dict, running: bool, bring_back_reaper: bool = True) -> list:
     """Stop the spike, stop a trace, revert the S1c mode levers, restore the
     buffer (read back), bring REAPER back (it reads the buffer again and
@@ -758,6 +770,7 @@ def _unwind(env: dict[str, str], state: dict, running: bool, bring_back_reaper: 
                 state["tuning_mode"] = False
                 save_state(state)
                 done.append({"tuning-exit": r})
+                alarm_exit_problems(r)
             except StepError as e:
                 alarm(f"the S1c mode levers were not all reverted ({e}); REAPER still comes back")
                 done.append({"tuning-exit": {"error": str(e)}})
