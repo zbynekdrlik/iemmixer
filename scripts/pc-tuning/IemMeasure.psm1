@@ -75,13 +75,21 @@ function Invoke-IemDpcIsr {
     return $out
 }
 
-function Export-IemNearGlitch {
+function Get-IemNearGlitchFiles {
+    # The files of one trace's near-glitch export: trace.etl -> dumper.txt and
+    # near.txt; any other <base>.etl (a soak cut) -> <base>.dumper.txt and
+    # <base>.near.txt (Invoke-IemDpcIsr's naming).
+    param([Parameter(Mandatory)][string]$Dir, [string]$Name = 'trace.etl')
+    if ($Name -eq 'trace.etl') { $d = 'dumper.txt'; $n = 'near.txt' }
+    else { $b = [IO.Path]::GetFileNameWithoutExtension($Name); $d = "$b.dumper.txt"; $n = "$b.near.txt" }
+    [pscustomobject]@{ input = (Join-Path $Dir $Name); dump = (Join-Path $Dir $d); near = (Join-Path $Dir $n) }
+}
+
+function Select-IemNearGlitch {
     # The dumper's header plus the DPC/ISR/context-switch rows and the glitch
-    # markers, streamed into near.txt; the full dump is deleted.
-    param([Parameter(Mandatory)][string]$Xperf, [Parameter(Mandatory)][string]$Dir)
-    $dump = Join-Path $Dir 'dumper.txt'; $near = Join-Path $Dir 'near.txt'
-    [void](Invoke-IemXperf -Xperf $Xperf -Arguments @('-i', (Join-Path $Dir 'trace.etl'), '-o', $dump, '-a', 'dumper'))
-    $r = New-Object IO.StreamReader($dump); $w = New-Object IO.StreamWriter($near, $false, (New-Object Text.UTF8Encoding $false))
+    # markers, streamed from Dump into Near; returns the number of lines kept.
+    param([Parameter(Mandatory)][string]$Dump, [Parameter(Mandatory)][string]$Near)
+    $r = New-Object IO.StreamReader($Dump); $w = New-Object IO.StreamWriter($Near, $false, (New-Object Text.UTF8Encoding $false))
     $n = 0; $header = $false
     try {
         while ($null -ne ($line = $r.ReadLine())) {
@@ -92,8 +100,19 @@ function Export-IemNearGlitch {
             if ($t -eq 'EndHeader') { $header = $false }
         }
     } finally { $r.Close(); $w.Close() }
-    Remove-Item -LiteralPath $dump
-    [pscustomobject]@{ lines = $n; path = $near }
+    return $n
+}
+
+function Export-IemNearGlitch {
+    # One trace file's near-glitch rows (-Name, default trace.etl; a soak cut
+    # cut-<n>.etl works the same), through its own dumper temp file, which is
+    # deleted afterwards.
+    param([Parameter(Mandatory)][string]$Xperf, [Parameter(Mandatory)][string]$Dir, [string]$Name = 'trace.etl')
+    $f = Get-IemNearGlitchFiles -Dir $Dir -Name $Name
+    [void](Invoke-IemXperf -Xperf $Xperf -Arguments @('-i', $f.input, '-o', $f.dump, '-a', 'dumper'))
+    $n = Select-IemNearGlitch -Dump $f.dump -Near $f.near
+    Remove-Item -LiteralPath $f.dump
+    [pscustomobject]@{ lines = $n; path = $f.near }
 }
 
 function Get-IemCpuSample {
