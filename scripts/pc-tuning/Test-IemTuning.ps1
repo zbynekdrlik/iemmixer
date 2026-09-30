@@ -628,7 +628,7 @@ try {
         $body = "`$ErrorActionPreference = 'Stop'; Import-Module '$iso\IemMeasure.psm1' -ArgumentList '$($c[1])'; `$r = Stop-IemTraceSessions; 'stopped=' + @(`$r.stopped).Count"
         $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($body))
         $co = Join-Path $iso "out-$($c[1]).txt"
-        $cp = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-NonInteractive', '-EncodedCommand', $enc) -RedirectStandardOutput $co -RedirectStandardError "$co.err" -NoNewWindow -PassThru
+        $cp = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $enc) -RedirectStandardOutput $co -RedirectStandardError "$co.err" -NoNewWindow -PassThru
         $null = $cp.Handle   # keeps the exit code readable after the wait
         $ended = $cp.WaitForExit(45000)
         $cerr = ''
