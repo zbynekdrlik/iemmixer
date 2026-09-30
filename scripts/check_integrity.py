@@ -23,10 +23,14 @@ VERSION_COMMENT = re.compile(r"^\s+#\s*v\d+(?:\.\d+)*\s*$")
 # PowerShell's, WMI/CIM's Terminate (-MethodName or its alias -Name; wmic's
 # call terminate and delete), a job whose closing ends its processes, and the
 # Rust/tokio/Python/.NET process handles' kill methods (called, or named in
-# ForEach-Object). A request plus a bounded wait is the only stop.
+# ForEach-Object). A request plus a bounded wait is the only stop. A forced
+# restart ends every process: shutdown's /f (or -f) anywhere on its line, a
+# /t above 0 (Microsoft: "If the timeout period is greater than 0, the /f
+# parameter is implied"), and Restart-/Stop-Computer -Force (#32 B1).
 FORCE_KILL = re.compile(
     r"(?i)\btaskkill\b|\btskill\b|\bpskill\b|terminateprocess|terminatejobobject|kill_on_job_close|stop-process"
-    r"|\bshutdown(?:\.exe)?\s+/f\b|\.kill\s*\(|\bstart_kill\b|\bkill_on_drop\b|\.terminate\s*\("
+    r"|\bshutdown(?:\.exe)?(?=\s)[^\n]*?(?:\s[/-]f\b|[/-]t[\s:]+0*[1-9])|\b(?:restart|stop)-computer\b[^\n]*?\s-force\b"
+    r"|\.kill\s*\(|\bstart_kill\b|\bkill_on_drop\b|\.terminate\s*\("
     r"|-(?:method)?name\s+['\"]?terminate\b|\bwmic\b.*\b(?:call\s+terminate|delete)\b"
     r"|(?:\bforeach-object|%)\s+(?:-membername\s+)?['\"]?kill\b")
 # Children leave the guard's job only through iem-win's spawn glue (S6 design note §5.1).

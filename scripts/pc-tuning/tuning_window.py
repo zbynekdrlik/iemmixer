@@ -6,7 +6,8 @@ and unwind. A window opens only with spike_window's `new --signal`; every
 command here checks the "ide event" flag and pre-empts like spike_window.
 Site values come only from the private env ($SPIKE_ENV) and profile
 ($TUNING_PROFILE). Nothing is ever ended by force; a reboot happens only on
-the owner's quoted approval."""
+the owner's quoted approval, and it is an immediate restart that an app may
+veto (never a delayed one: Windows forces those, I8)."""
 from __future__ import annotations
 
 import argparse
@@ -385,9 +386,16 @@ def cmd_reboot_prepare(env, args) -> None:
                       "revert_pending": [i["key"] for i in items if i["revert_pending"]]}))
 
 
+# An immediate, planned restart (reason: operating system reconfiguration) and
+# never a forced one (I8): Microsoft documents that a timeout above 0 implies
+# the force flag, so the timeout is 0. An app may then veto the restart;
+# post-boot reports that as "the PC did not reboot after the request".
+REBOOT_REQUEST = "& shutdown.exe /r /t 0 /d p:2:4 /c 'iemmixer S1c: owner-approved restart' ; $LASTEXITCODE"
+
+
 def cmd_reboot(env, args) -> None:
     """Records the owner's quoted approval; without --by-owner it also asks
-    Windows for a graceful restart in 60 s (never forced)."""
+    Windows for an immediate, planned, graceful restart (REBOOT_REQUEST)."""
     state = sw.load_state()
     if state.get("closed") or state["card"] != "rebooting" or "reboot" not in state:
         raise StepError("run reboot-prepare first")
@@ -398,10 +406,10 @@ def cmd_reboot(env, args) -> None:
     if args.by_owner:
         print(json.dumps({"reboot": "the owner restarts the PC himself; run post-boot afterwards"}))
         return
-    code = sw.ps(env, "& shutdown.exe /r /t 60 /c 'iemmixer S1c: owner-approved restart' ; $LASTEXITCODE", timeout=60, event="ignore")
+    code = sw.ps(env, REBOOT_REQUEST, timeout=60, event="ignore")
     if int(code) != 0:
         raise StepError(f"shutdown.exe /r exited {code}: nothing restarts; tell the owner")
-    print(json.dumps({"reboot": "requested", "in_s": 60}))
+    print(json.dumps({"reboot": "requested", "in_s": 0}))
 
 
 def cmd_post_boot(env, args) -> None:
