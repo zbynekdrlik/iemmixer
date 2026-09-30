@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -231,6 +234,25 @@ ENV = {"PC_ROOT": "R", "PC_TUNING_ROOT": "T", "PC_XPERF": "xperf.exe",
        "PC_REAPER_START_TASK_PATH": "P", "PC_REAPER_START_TASK": "TK", "PC_NTRACK": "9",
        "PC_METER_BRIDGE": "B", "PC_METER_ACTION": "A", "PC_METER_HEARTBEAT": "HB",
        "PC_ASIO_MODULE": "M", "PC_APP_HTTP": "AH"}
+
+
+class PollScriptTests(unittest.TestCase):
+    """The measurement poll's PowerShell (review m11): an error is reported,
+    and the exact script the PC receives can be printed for the Windows CI
+    runner (no private env needed)."""
+
+    def test_a_failed_powercfg_is_an_error_not_an_unknown_plan(self) -> None:
+        body = tw.poll_body("gov", 0, 0)
+        self.assertNotIn("'unknown'", body)
+        self.assertRegex(body, r"\$LASTEXITCODE -ne 0 -or -not \(\$pc -match '[^']+'\)\) \{ throw ")
+
+    def test_poll_script_prints_what_sw_ps_sends(self) -> None:
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"SPIKE_ENV": "/nonexistent/asio-spike.env"}), contextlib.redirect_stdout(out):
+            code = tw.main(["poll-script", "--root", "C:\\r", "--governor", "EventLog", "--pid", "12", "--tid", "34"])
+        self.assertEqual(code, 0)
+        self.assertEqual(out.getvalue(), tw.sw.ps_script("C:\\r", tw.poll_body("EventLog", 12, 34)) + "\n")
+        self.assertIn("Import-Module (Join-Path 'C:\\r' 'bin\\SpikePc.psm1')", out.getvalue())
 
 
 class RebootTests(unittest.TestCase):

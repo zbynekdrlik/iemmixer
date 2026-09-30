@@ -716,6 +716,13 @@ class PsReplyTests(unittest.TestCase):
             sw.ps({"PC_ROOT": "R", "PC_SSH": "u@h"}, "x")
         self.assertNotIsInstance(cm.exception, sw.NoReply)
 
+    def test_the_script_sent_is_ps_script(self) -> None:
+        # One builder for what reaches the PC, so CI can run the same text (review m11).
+        sent: list[str] = []
+        sw.guarded = lambda cmd, stdin, timeout, event: sent.append(stdin) or json.dumps({"ok": True, "r": 1})
+        self.assertEqual(sw.ps({"PC_ROOT": "R", "PC_SSH": "u@h"}, "Get-X"), 1)
+        self.assertEqual(sent, [sw.ps_script("R", "Get-X") + "\n"])
+
     def test_no_or_a_cut_reply_is_no_reply(self) -> None:
         for out in ("", "\n", '{"ok": tr\n'):
             self.out = out
