@@ -691,6 +691,21 @@ function Assert-IemDevice {
     if (@($hw) -notcontains [string]$Device.hwid) { throw "${what}: hardware id does not match the profile" }
 }
 
+function Assert-IemDeviceLps {
+    # Before an affinity write (review 3.9): the device names processors, each one
+    # is present (group 0 of the CPU Set map), and the card's are exactly the
+    # layout's card role.
+    param([Parameter(Mandatory)]$Profile, [Parameter(Mandatory)]$Device)
+    $lps = @(@($Device.lps) | ForEach-Object { [int]$_ } | Sort-Object)
+    if ($lps.Count -eq 0) { throw "device $($Device.id): no processors (lps)" }
+    $present = @([IemCpuSets]::Map().Keys)
+    foreach ($lp in $lps) { if ($present -notcontains $lp) { throw "device $($Device.id): processor $lp is not present" } }
+    if ([string]$Device.id -eq 'card') {
+        $card = @(@($Profile.layout.card) | ForEach-Object { [int]$_ } | Sort-Object)
+        if (($lps -join ',') -ne ($card -join ',')) { throw "device card: lps $($lps -join ',') differ from layout.card $($card -join ',')" }
+    }
+}
+
 function Get-IemNicKey {
     # The NIC's driver key: nic.key (tests), else the Class key whose
     # NetCfgInstanceId is the adapter's, both under registry_root. -Check (before
@@ -775,7 +790,7 @@ function Get-IemGlobalItems {
         foreach ($d in @($Profile.devices)) {
             $wanted = (@($Only) -contains "irq:$($d.id)") -or ([bool]$d.enabled -and (Select-IemGroup $Only 'irq'))
             if (-not $wanted) { continue }
-            if ($Check) { Assert-IemDevice -Profile $Profile -Device $d }
+            if ($Check) { Assert-IemDevice -Profile $Profile -Device $d; Assert-IemDeviceLps -Profile $Profile -Device $d }
             $im = "HKLM:\SYSTEM\CurrentControlSet\Enum\$($d.instance)\Device Parameters\Interrupt Management"
             # The affinity applies only while the device already uses MSI (design note
             # 6.4 R1); enabling MSI is the owner's Tier 4 decision X3 (A7). MSI is in use
