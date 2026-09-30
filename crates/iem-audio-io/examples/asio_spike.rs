@@ -860,10 +860,11 @@ mod tests {
                 "band-activity",
                 "fault-caught",
                 "rate-changed",
-                "stop-hung"
+                "stop-hung",
+                "error"
             ]
             .map(code_of),
-            [0, 0, 5, 6, 7, 8]
+            [0, 0, 5, 6, 7, 8, 1]
         );
         assert_eq!(
             [End::Stopped, End::RateChanged, End::BandActivity].map(End::outcome),
@@ -998,11 +999,63 @@ mod tests {
 
     #[test]
     fn stress_threads_stop_when_dropped() {
-        let s = Stress::start(2, &[]);
+        let (s, ids) = Stress::start(2, &[], never_placed).unwrap();
         let flag = Arc::clone(&s.stop);
-        assert_eq!(s.threads.len(), 2);
+        assert_eq!((s.threads.len(), ids), (2, vec![]));
         drop(s);
         assert!(flag.load(Ordering::Relaxed));
+    }
+
+    /// A stand-in for `os::set_thread_cpus`: the CPU Set ID of processor n
+    /// is 0x100 + n.
+    fn placed(cpus: &[u8]) -> Result<Vec<u32>, String> {
+        Ok(cpus.iter().map(|&lp| 0x100 + u32::from(lp)).collect())
+    }
+
+    fn refused(cpus: &[u8]) -> Result<Vec<u32>, String> {
+        Err(format!("processors {cpus:?} are not in group 0"))
+    }
+
+    /// Without CPUs nothing is placed: a call fails its thread's start.
+    fn never_placed(cpus: &[u8]) -> Result<Vec<u32>, String> {
+        Err(format!(
+            "placed on {cpus:?} although no CPUs were asked for"
+        ))
+    }
+
+    /// Refuses the second placement of this test only (threads place
+    /// themselves concurrently: any one of them is the second).
+    fn second_refused(cpus: &[u8]) -> Result<Vec<u32>, String> {
+        static CALLS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        match CALLS.fetch_add(1, Ordering::SeqCst) {
+            1 => refused(cpus),
+            _ => placed(cpus),
+        }
+    }
+
+    #[test]
+    fn stress_threads_are_placed_on_their_cpus_and_report_the_ids() {
+        let (s, ids) = Stress::start(3, &[6, 7], placed).unwrap();
+        assert_eq!((s.threads.len(), ids), (3, vec![0x106, 0x107]));
+        let flag = Arc::clone(&s.stop);
+        drop(s);
+        assert!(flag.load(Ordering::Relaxed));
+        // No threads: nothing to place, nothing applied.
+        let (none, ids) = Stress::start(0, &[6], refused).unwrap();
+        assert_eq!((none.threads.len(), ids), (0, vec![]));
+    }
+
+    /// A busy thread that could not be placed would load other processors
+    /// than the run reports: the start fails and every thread is ended.
+    #[test]
+    fn a_failed_stress_placement_fails_the_start() {
+        let e = Stress::start(2, &[6, 7], refused).err().unwrap();
+        assert!(
+            e.contains("stress") && e.contains("[6, 7] are not in group 0"),
+            "{e}"
+        );
+        let e = Stress::start(3, &[6], second_refused).err().unwrap();
+        assert!(e.contains("[6] are not in group 0"), "{e}");
     }
 
     fn argv(s: &str) -> Vec<String> {
