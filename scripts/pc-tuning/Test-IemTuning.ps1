@@ -243,9 +243,15 @@ try {
     New-ItemProperty -LiteralPath $msiKey -Name 'MSISupported' -PropertyType DWord -Value 1 | Out-Null
     # MSI in use = the flag AND message-signaled interrupts granted now (a negative IRQ
     # number in Win32_PnPAllocatedResource); INTx granted or none granted is skipped (m3).
+    # The grants come from the module's private reader, which the self-test replaces;
+    # no parameter lets a caller skip the Win32_PnPAllocatedResource read (review 3.5).
+    Assert (-not (Get-Command Invoke-IemTuningApply).Parameters.ContainsKey('AllocatedIrqs') -and -not (Get-Command Get-IemGlobalItems).Parameters.ContainsKey('AllocatedIrqs')) 'msi-grant-read-has-no-bypass-parameter'
+    $savedIrqs = Get-TuningSeam 'ReadAllocatedIrqs'
     $inst = 'PCI\VEN_TEST&DEV_0001\0'
     foreach ($c in @(@(@{ $inst = @(16) }, '*INTx*'), @(@{ $inst = @(-3, 17) }, '*INTx*'), @(@{}, '*no interrupt*'))) {
-        $rg = Invoke-IemTuningApply -ProfilePath $pp -Tier 3 -Only @('irq') -AllocatedIrqs $c[0]
+        $grant = $c[0]
+        Set-TuningSeam 'ReadAllocatedIrqs' ({ $grant }.GetNewClosure())
+        $rg = Invoke-IemTuningApply -ProfilePath $pp -Tier 3 -Only @('irq')
         $sk = @(Rows $rg 'skipped')
         Assert ($sk.Count -eq 1 -and "$($sk[0].value)" -like $c[1] -and @(Rows $rg 'written').Count -eq 0 -and -not (Test-Path -LiteralPath "$enum\Device Parameters\Interrupt Management\Affinity Policy")) "tier3-skips-the-card-without-granted-msi $($c[1])"
     }
@@ -255,7 +261,10 @@ try {
     $apKey = "$enum\Device Parameters\Interrupt Management\Affinity Policy"
     New-Item -Path $apKey -Force | Out-Null
     New-ItemProperty -LiteralPath $apKey -Name 'AssignmentSetOverride' -PropertyType Binary -Value ([byte[]](4, 0, 0, 0, 0, 0, 0, 0)) | Out-Null
-    $r3 = Invoke-IemTuningApply -ProfilePath $pp -Tier 3 -AllocatedIrqs @{ $inst = @(-3, -2) }
+    $grant = @{ $inst = @(-3, -2) }
+    Set-TuningSeam 'ReadAllocatedIrqs' ({ $grant }.GetNewClosure())
+    $r3 = Invoke-IemTuningApply -ProfilePath $pp -Tier 3
+    Set-TuningSeam 'ReadAllocatedIrqs' $savedIrqs
     Assert (@(Rows $r3 'failed').Count -eq 0) 'tier3-apply-has-no-failure'
     $ap = Get-Item -LiteralPath "$enum\Device Parameters\Interrupt Management\Affinity Policy"
     # The mask is written as REG_BINARY, the KAFFINITY's canonical form: 8 bytes, little endian (M3).
