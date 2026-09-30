@@ -209,6 +209,33 @@ function Assert-IemSameProcess {
     }
 }
 
+function Open-IemRegKey {
+    # The key at a registry provider path opened for writing (Get-Item gives a
+    # read-only handle), or $null when it does not exist. The caller closes it.
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+    $ro = Get-Item -LiteralPath $Path
+    $parts = $ro.Name -split '\\', 2
+    $ro.Close()
+    $hive = switch ($parts[0]) {
+        'HKEY_LOCAL_MACHINE' { [Microsoft.Win32.Registry]::LocalMachine }
+        'HKEY_CURRENT_USER' { [Microsoft.Win32.Registry]::CurrentUser }
+        default { throw "registry hive '$($parts[0])' refused" }
+    }
+    $k = $hive.OpenSubKey($parts[1], $true)
+    if ($null -eq $k) { throw "registry key ${Path}: not opened for writing" }
+    return $k
+}
+
+function Remove-IemRegValue {
+    # Deletes exactly the value Name. The name is literal: NDIS keywords start
+    # with '*', which Remove-ItemProperty -Name matches as a wildcard (A2).
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Name)
+    $k = Open-IemRegKey -Path $Path
+    if ($null -eq $k) { return }
+    try { $k.DeleteValue($Name, $false) } finally { $k.Close() }
+}
+
 function Get-IemValue {
     param([Parameter(Mandatory)]$Item)
     $a = $Item.args
@@ -264,12 +291,7 @@ function Set-IemValue {
     $a = $Item.args
     switch ($Item.kind) {
         'reg' {
-            if ($null -eq $Value) {
-                if ((Test-Path -LiteralPath $a.path) -and $null -ne (Get-Item -LiteralPath $a.path).GetValue($a.name, $null)) {
-                    Remove-ItemProperty -LiteralPath $a.path -Name $a.name
-                }
-                return
-            }
+            if ($null -eq $Value) { Remove-IemRegValue -Path $a.path -Name $a.name; return }
             if (-not (Test-Path -LiteralPath $a.path)) { New-Item -Path $a.path -Force | Out-Null }
             $data = switch ($a.type) {
                 'DWord' { [int]$Value }
