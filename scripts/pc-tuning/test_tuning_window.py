@@ -890,6 +890,21 @@ class MeasureTests(WindowHarness):
             tw.cmd_measure(self.env, self.args(trace="diag", circular_mb=1024))
         self.assertEqual(len(self.analysis_calls()), 2)                  # the first merge, then the dpcisr during which it came
 
+    def test_a_step_the_pc_refused_after_a_preempt_is_the_event(self) -> None:
+        # The flag is not on the dev box yet, but a preempt already wrote the stop file.
+        real = self.pc.answer
+
+        def refusing(body, event):
+            if "Invoke-IemDpcIsr" in body:
+                self.pc.calls.append((body, event))
+                raise tw.StepError("PC step failed: ide event: the analysis step did not start")
+            return real(body, event)
+
+        self.pc.answer = refusing
+        with self.assertRaises(tw.sw.EventNow):
+            tw.cmd_measure(self.env, self.args())
+        self.assertNotIn("measurements", self.state())
+
     # Review M3: the analysis downloads and parses give way to "ide event".
     def analysis_copies(self) -> list[tuple[str, str]]:
         return [(n, e) for n, e in self.pc.copies if not n.endswith((".report.json", ".stderr.txt"))]
