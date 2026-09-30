@@ -440,11 +440,15 @@ NOT_MEASURED = (("refused", 4), ("band-activity", 5), ("fault-caught", 6), ("rat
 
 class FakePc:
     """The IEM PC at the ssh seam: `ps` answers sw.ps by the PowerShell verb
-    and records (body, event); `scp` writes the file the PC would hold. Each
-    spike run is running on its first status poll and exited on the next."""
+    and records (body, event); `scp` writes the file the PC would hold and
+    records (name, event). Both keep sw.guarded's "ide event" contract: a
+    call that is not event="ignore" raises EventNow when the flag exists once
+    it has ended (the hooks may create it mid-call). Each spike run is
+    running on its first status poll and exited on the next."""
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
+        self.copies: list[tuple[str, str]] = []
         self.reports: list[dict] = []          # one spike report per run, in order
         self.progress: dict = {"missed": 0, "overruns": 0, "position_gaps": 0, "callback_thread": 4243}
         self.fail: set[str] = set()            # PowerShell verbs that fail on the PC
@@ -452,11 +456,18 @@ class FakePc:
         self.runs = 0
         self.polls = 0
         self.on_call = None                    # a hook: (body) -> None, called before answering
+        self.on_copy = None                    # a hook: (name) -> None, called during a copy
 
     def bodies(self, verb: str) -> list[str]:
         return [b for b, _ in self.calls if verb in b]
 
     def ps(self, env, body, timeout=300, event="finish"):
+        answer = self.answer(body, event)
+        if event != "ignore" and tw.sw.event_now():
+            raise tw.sw.EventNow()
+        return answer
+
+    def answer(self, body, event):
         self.calls.append((body, event))
         if self.on_call:
             self.on_call(body)
@@ -482,8 +493,13 @@ class FakePc:
                     "thread": {"base": 15, "current": 26}}
         return {"ok": True}   # Start-/Stop-IemTrace, Invoke-IemDpcIsr, Export-IemNearGlitch
 
-    def scp(self, src: str, dst: str) -> None:
+    def scp(self, src: str, dst: str, event: str = "ignore") -> None:
         name = src.rsplit("/", 1)[-1]
+        self.copies.append((name, event))
+        if self.on_copy:
+            self.on_copy(name)
+        if event == "abandon" and tw.sw.event_now():
+            raise tw.sw.EventNow()   # the copy is interrupted, nothing is written
         if name.endswith(".report.json"):
             text = json.dumps(self.reports[self.runs - 1])
         elif name.endswith(".stderr.txt"):
