@@ -218,6 +218,7 @@ def scan_commits(
         # `+++`/`---` count as headers only before a file's first hunk; inside a hunk an added
         # line beginning with `++ ` renders as `+++ ...` and is content, not a new header path
         path, in_hunk = "", False
+        seen: set[str] = set()
         for line in diff.splitlines():
             if line.startswith("diff --git "):
                 path, in_hunk = "", False
@@ -227,7 +228,19 @@ def scan_commits(
                 hits += scanner.scan_line(path, line[1:], f"{short} {scanner.shown(path)}")
             elif not in_hunk and line.startswith("+++ "):
                 path = diff_path(line[4:])
+                seen.add(path)
                 hits += scanner.scan_path(path, f"{short} ")
+        # an added/modified empty or binary file has no `+++` header, so the loop above never sees
+        # its path. Enumerate every added/modified path from the tree diff (raw bytes via -z, no
+        # quoting) and scan any the unified diff never surfaced, so a term hidden in an empty or
+        # binary file name cannot slip past the commit-mode path scan. --root covers a root commit.
+        for raw_path in git(repo, "diff-tree", "--no-commit-id", "--name-only", "-z", "-r", "--root",
+                            "--no-renames", "-m", "--first-parent", "--diff-filter=AM", sha).split(b"\0"):
+            if not raw_path:
+                continue
+            changed = decode(raw_path)
+            if changed not in seen:
+                hits += scanner.scan_path(changed, f"{short} ")
     return hits
 
 
