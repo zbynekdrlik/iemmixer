@@ -4,9 +4,11 @@
 //! - `current.json`: the latest save;
 //! - `gen-<seq>.json`: the 20 previous saves (the newest has the highest seq);
 //! - `baseline.json`: written at each import (and, from S6, at `live` entry);
-//! - `save.tmp`: a save before its renames (a crash before the second one
-//!   leaves the newest state only in it; `chain` decides when it is the
-//!   live state, and the boot's recovery finishes that save);
+//! - `save.new`: a save being written (never a load source);
+//! - `save.tmp`: a complete save before its renames, always replaced whole
+//!   (a crash before the second rename leaves the newest state only in it;
+//!   `chain` decides when it is the live state, and the boot's recovery
+//!   finishes that save);
 //! - `baseline.tmp`: a baseline before its rename;
 //! - `current.json.damaged-<n>`: a damaged `current.json` the boot moved
 //!   aside, never read again.
@@ -48,6 +50,7 @@ pub const GENERATIONS: usize = 20;
 const CURRENT: &str = "current.json";
 const BASELINE: &str = "baseline.json";
 const TMP: &str = "save.tmp";
+const NEW: &str = "save.new";
 const BASELINE_TMP: &str = "baseline.tmp";
 
 /// What a state file carries.
@@ -231,10 +234,17 @@ impl Store {
     }
 
     /// Saves atomically; the previous `current.json` becomes the newest
-    /// generation. Returns that generation's seq (0: there was none).
+    /// generation. Returns that generation's seq (0: there was none). The
+    /// state is written and flushed to `save.new`, which then replaces
+    /// `save.tmp` in one rename: `save.tmp` may hold the only copy of the
+    /// newest state (an interrupted save not yet finished), so it is never
+    /// truncated or written in place, only ever the previous complete save
+    /// or the new one (#32 P1).
     pub fn save(&self, p: &Persisted) -> io::Result<u64> {
         let bytes = encode(p)?;
-        self.write_synced(&self.dir.join(TMP), &bytes)?;
+        let new = self.dir.join(NEW);
+        self.write_synced(&new, &bytes)?;
+        self.files.rename(&new, &self.dir.join(TMP))?;
         self.commit_tmp()
     }
 
