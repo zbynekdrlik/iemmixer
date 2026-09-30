@@ -263,6 +263,14 @@ try {
     Assert (($a -join ' ') -eq '-on PROC_THREAD+LOADER+DPC+INTERRUPT+CSWITCH+DISPATCHER -BufferSize 1024 -MinBuffers 256 -MaxBuffers 1024 -FileMode Circular -MaxFile 1024 -f C:\t\kernel.etl -start IemMarkers -on 3b6c1e0a-5d2f-4c8e-9a71-0e4f2d9b8c11 -f C:\t\markers.etl') 'trace-arguments'
     $l = ConvertFrom-IemLoggers -Text "Logger Name           : NT Kernel Logger`r`nLogger Mode Settings (11)`r`nLogger Name           : IemMarkers`r`n"
     Assert ($l.Count -eq 2 -and $l[0] -eq 'NT Kernel Logger' -and $l[1] -eq 'IemMarkers') 'loggers-parse'
+    # xperf's stderr is output: its exit code alone decides (A11). A stand-in xperf
+    # writes a line to each stream.
+    $fx = Join-Path $dir 'fake-xperf.cmd'
+    [IO.File]::WriteAllText($fx, "@echo off`r`necho out-line`r`necho err-line 1>&2`r`nexit /b 0`r`n")
+    $xo = (Invoke-IemXperf -Xperf $fx -Arguments @('-Loggers')) -join ' '
+    Assert ($xo -match 'out-line' -and $xo -match 'err-line') 'xperf-stderr-with-exit-0-is-not-an-error'
+    [IO.File]::WriteAllText($fx, "@echo off`r`necho bad-line 1>&2`r`nexit /b 3`r`n")
+    Throws { Invoke-IemXperf -Xperf $fx -Arguments @('-Loggers') } 'xperf-a-nonzero-exit-throws'
     $c = Get-IemCpuSample
     Assert ($c.cpus.Count -ge 1 -and $c.cpus[0].t100ns -gt 0) 'cpu-sample-reads-raw-counters'
     $ps = Get-IemPollSample -ProfilePath $pp
