@@ -135,6 +135,40 @@ class IntegrityTests(unittest.TestCase):
             self.put("scripts/iem-pc/x.ps1", body + "\n")
             self.assertEqual(ci.violations(self.root), [], body)
 
+    FORCED_ACROSS = {   # review round 3, m6 — every one is a forced restart
+        "crates/a/src/lib.rs": 'fn f() {\n    let _ = Command::new("shutdown")\n        .args(["/r", "/f"])\n        .status();\n}\n',
+        "crates/b/src/lib.rs": 'fn f() {\n    let _ = Command::new("shutdown").args([\n        "/r",\n        "/t",\n        "30",\n    ]);\n}\n',
+        "crates/c/src/lib.rs": 'fn f() { let _ = Command::new("shutdown").args(&["/r", "/f"]).status(); }\n',
+        "crates/d/src/lib.rs": "fn f() { unsafe { InitiateSystemShutdownExW(ptr::null_mut(), ptr::null_mut(), 0, 1, 1, 0) }; }\n",
+        "crates/e/src/lib.rs": "fn f() { unsafe { InitiateSystemShutdownW(ptr::null_mut(), ptr::null_mut(), 0, TRUE, TRUE) }; }\n",
+        "crates/f/src/lib.rs": "fn f(force: i32) { unsafe { InitiateSystemShutdownExW(ptr::null_mut(), ptr::null_mut(), 0, force, 1, 0) }; }\n",
+        "scripts/iem-pc/a.ps1": "& shutdown.exe /r /t 0 /c 'done; next' /f\n",
+        "scripts/iem-pc/b.ps1": "Start-Process shutdown.exe `\n    -ArgumentList '/r','/f'\n",
+        "scripts/iem-pc/c.ps1": "Stop-Computer -For\n",
+    }
+
+    def test_forced_restarts_across_lines_and_inside_quotes_are_refused(self) -> None:
+        for rel, text in self.FORCED_ACROSS.items():
+            with tempfile.TemporaryDirectory() as d:
+                root = Path(d)
+                (root / rel).parent.mkdir(parents=True)
+                (root / rel).write_text(text, encoding="utf-8")
+                self.assertEqual(len(ci.violations(root)), 1, rel)
+
+    def test_graceful_forms_across_lines_pass(self) -> None:
+        for rel, text in {
+            "crates/a/src/lib.rs": 'fn f() {\n    let _ = Command::new("shutdown")\n        .args(["/r", "/t", "0"])\n        .status();\n}\n',
+            "crates/b/src/lib.rs": "fn f() { unsafe { InitiateSystemShutdownExW(ptr::null_mut(), ptr::null_mut(), 0, FALSE, TRUE, 0) }; }\n",
+            "crates/c/src/lib.rs": "// a graceful shutdown of the server\nfn f() { let t = 5; let _ = t - 1; }\n",
+            "scripts/iem-pc/a.ps1": "& shutdown.exe /r /t 0 /c 'done; ok'\n",
+            "scripts/iem-pc/b.ps1": "Restart-Computer -Wait `\n    -For PowerShell\n",
+        }.items():
+            with tempfile.TemporaryDirectory() as d:
+                root = Path(d)
+                (root / rel).parent.mkdir(parents=True)
+                (root / rel).write_text(text, encoding="utf-8")
+                self.assertEqual(ci.violations(root), [], rel)
+
     def test_graceful_stops_and_ordinary_words_pass(self) -> None:
         for body in ('Command::new("kill").args(["-TERM", &pid])', "signal::kill(pid, Signal::SIGTERM)",
                      "self.killed = true", "skill(x)", "let force_ended = false",
