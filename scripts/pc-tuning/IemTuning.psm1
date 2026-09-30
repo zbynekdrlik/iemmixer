@@ -226,12 +226,6 @@ function Invoke-IemNative {
     return [pscustomobject]@{ code = $code; out = $out }
 }
 
-function Get-IemTextHash {
-    param([AllowEmptyString()][string]$Text)
-    $sha = [Security.Cryptography.SHA256]::Create()
-    return (($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Text)) | ForEach-Object { $_.ToString('x2') }) -join '')
-}
-
 function Test-IemSame {
     param([AllowNull()]$A, [AllowNull()]$B)
     if ($null -eq $A) { return $null -eq $B }
@@ -968,76 +962,6 @@ function Get-IemTuningState {
     }
 }
 
-function Get-IemFileDigest {
-    # The file's SHA-256, or of its lines matching any key when keys are given.
-    param([Parameter(Mandatory)][string]$Path, [string[]]$Keys = @())
-    if (-not (Test-Path -LiteralPath $Path)) { return 'absent' }
-    $lines = @(Get-Content -LiteralPath $Path)
-    if (@($Keys).Count -gt 0) { $lines = @($lines | Where-Object { $l = $_; @($Keys | Where-Object { $l -match $_ }).Count -gt 0 }) }
-    return Get-IemTextHash -Text ($lines -join "`n")
-}
-
-function Get-IemRegText {
-    param([Parameter(Mandatory)]$Profile, [Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Name)
-    Get-IemValue -Item (New-IemItem -Key 'r' -Kind 'reg' -Arguments @{ path = (Get-IemRegPath $Profile $Path); name = $Name; type = 'String' } -Desired $null)
-}
-
-function Get-IemReaperFingerprint {
-    # Everything REAPER mode depends on (design note 5.1), read only.
-    param([Parameter(Mandatory)][string]$ProfilePath)
-    $profile = Read-IemProfile -Path $ProfilePath
-    $f = [ordered]@{}
-    $f['plan.active'] = [IemPower]::Active()
-    $f['plan.reaper.settings'] = Get-IemTextHash -Text ((@(& powercfg.exe /qh $profile.plan.source)) -join "`n")
-    $gov = Get-Service -Name $profile.governor -ErrorAction SilentlyContinue
-    $f['governor.state'] = $(if ($gov) { "$($gov.Status)" } else { 'absent' })
-    $f['governor.start'] = Get-IemValue -Item (New-IemItem -Key 'g' -Kind 'svc-start' -Arguments @{ name = $profile.governor } -Desired $null)
-    $n = 0
-    foreach ($file in @($profile.fingerprint.files)) { $n++; $f["file.$n"] = Get-IemFileDigest -Path $file -Keys @($profile.fingerprint.keys) }
-    $r = @(Get-Process -Name reaper -ErrorAction SilentlyContinue)
-    if ($r.Count -eq 1) {
-        $f['reaper.priority'] = "$($r[0].PriorityClass)"
-        $f['reaper.affinity'] = "$([long]$r[0].ProcessorAffinity)"
-        $f['reaper.cpusets'] = ((@([IemCpuSets]::Get($r[0].Id)) | Sort-Object) -join ',')
-    } else { $f['reaper.priority'] = "instances=$($r.Count)" }
-    $mm = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile'
-    foreach ($v in 'SystemResponsiveness', 'NetworkThrottlingIndex') { $f["mmcss.$v"] = Get-IemRegText $profile $mm $v }
-    foreach ($v in 'Affinity', 'Background Only', 'Clock Rate', 'GPU Priority', 'Priority', 'Scheduling Category', 'SFIO Priority') {
-        $f["mmcss.proaudio.$v"] = Get-IemRegText $profile "$mm\Tasks\Pro Audio" $v
-    }
-    $f['kernel.ReservedCpuSets'] = Get-IemRegText $profile 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\kernel' 'ReservedCpuSets'
-    $f['bcd'] = Get-IemTextHash -Text ((@(& bcdedit.exe /enum '{current}')) -join "`n")
-    $dg = Get-CimInstance -Namespace root\Microsoft\Windows\DeviceGuard -ClassName Win32_DeviceGuard -ErrorAction SilentlyContinue
-    $f['deviceguard.running'] = $(if ($dg) { (@($dg.SecurityServicesRunning) -join ',') } else { 'unavailable' })
-    $f['tuning.entered'] = "$((Read-IemJournal -Path $profile.journal).entered)"
-    return [pscustomobject]$f
-}
-
-function Compare-IemFingerprint {
-    param([Parameter(Mandatory)]$Baseline, [Parameter(Mandatory)]$Current)
-    $names = @(@($Baseline.PSObject.Properties.Name) + @($Current.PSObject.Properties.Name) | Sort-Object -Unique)
-    $diff = @()
-    foreach ($n in $names) {
-        $a = $Baseline.PSObject.Properties[$n]; $b = $Current.PSObject.Properties[$n]
-        $va = $(if ($a) { [string]$a.Value } else { '<absent>' }); $vb = $(if ($b) { [string]$b.Value } else { '<absent>' })
-        if ($va -ne $vb) { $diff += [pscustomobject]@{ key = $n; baseline = $va; current = $vb } }
-    }
-    return ,$diff
-}
-
-function Get-IemWinEvent {
-    # Get-WinEvent where "no events found" is an empty result and every other
-    # error (a missing log, access denied, a bad query) throws: a failing query
-    # never reads as "no events" (A10).
-    param([Parameter(Mandatory)][hashtable]$Filter)
-    try { $ev = @(Get-WinEvent -FilterHashtable $Filter -ErrorAction Stop) }
-    catch {
-        if ("$($_.FullyQualifiedErrorId)" -like 'NoMatchingEventsFound*') { return }
-        throw
-    }
-    return $ev
-}
-
 function Get-IemAllocatedIrqs {
     # Instance id -> the IRQ numbers Windows granted the device now, signed: a
     # negative number is a message-signaled interrupt (Win32_PnPAllocatedResource).
@@ -1050,81 +974,6 @@ function Get-IemAllocatedIrqs {
         $irq[$id] = @($irq[$id]) + $n
     }
     return $irq
-}
-
-function Get-IemDeviceInventory {
-    # PCI devices: driver, MSI and affinity registry values, allocated IRQs
-    # (a negative IRQ number is an MSI).
-    $irq = try { Get-IemAllocatedIrqs } catch { @{} }
-    foreach ($d in @(Get-PnpDevice -PresentOnly | Where-Object { $_.InstanceId -like 'PCI\*' })) {
-        $enum = "HKLM:\SYSTEM\CurrentControlSet\Enum\$($d.InstanceId)\Device Parameters\Interrupt Management"
-        $read = { param($k, $n) if (Test-Path -LiteralPath $k) { (Get-Item -LiteralPath $k).GetValue($n, $null) } }
-        $ver = (Get-PnpDeviceProperty -InstanceId $d.InstanceId -KeyName 'DEVPKEY_Device_DriverVersion' -ErrorAction SilentlyContinue).Data
-        $date = (Get-PnpDeviceProperty -InstanceId $d.InstanceId -KeyName 'DEVPKEY_Device_DriverDate' -ErrorAction SilentlyContinue).Data
-        [ordered]@{
-            instance = $d.InstanceId; name = $d.FriendlyName; class = $d.Class; status = "$($d.Status)"; driver = $ver; driver_date = "$date"
-            msi = & $read "$enum\MessageSignaledInterruptProperties" 'MSISupported'
-            msi_limit = & $read "$enum\MessageSignaledInterruptProperties" 'MessageNumberLimit'
-            policy = & $read "$enum\Affinity Policy" 'DevicePolicy'
-            mask = & $read "$enum\Affinity Policy" 'AssignmentSetOverride'
-            irqs = @($irq[$d.InstanceId] | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ })
-        }
-    }
-}
-
-function Get-IemInventory {
-    # Inventory M0 (design note 4.2), read only. Never reads process command
-    # lines, service image paths or task actions: they can carry tokens.
-    param([Parameter(Mandatory)][string]$ProfilePath)
-    $profile = Read-IemProfile -Path $ProfilePath
-    $os = Get-CimInstance -ClassName Win32_OperatingSystem
-    $bios = Get-CimInstance -ClassName Win32_BIOS
-    $map = [IemCpuSets]::Map()
-    $tpm = try { Get-Tpm | Select-Object TpmPresent, TpmReady, ManufacturerIdTxt, ManufacturerVersion } catch { "$_" }
-    $dg = Get-CimInstance -Namespace root\Microsoft\Windows\DeviceGuard -ClassName Win32_DeviceGuard -ErrorAction SilentlyContinue
-    $defender = try { $p = Get-MpPreference; [ordered]@{ exclusion_paths = @($p.ExclusionPath); exclusion_processes = @($p.ExclusionProcess)
-                                                         scan_day = $p.ScanScheduleDay; realtime_off = $p.DisableRealtimeMonitoring } } catch { "$_" }
-    $since = (Get-Date).AddDays(-365)
-    $installed = try { ,@(Get-IemWinEvent -Filter @{ LogName = 'System'; Id = 7045; StartTime = $since } | ForEach-Object {
-        [ordered]@{ at = $_.TimeCreated.ToUniversalTime().ToString('o'); service = "$($_.Properties[0].Value)" } }) } catch { "error: $_" }
-    $cpusets = [ordered]@{}   # ConvertTo-Json needs string keys
-    foreach ($k in ($map.Keys | Sort-Object)) { $cpusets["$k"] = $map[$k] }
-    [ordered]@{
-        at = (Get-Date).ToUniversalTime().ToString('o')
-        os = [ordered]@{ caption = $os.Caption; version = $os.Version; build = $os.BuildNumber; boot = $os.LastBootUpTime.ToUniversalTime().ToString('o') }
-        bios = [ordered]@{ vendor = $bios.Manufacturer; version = $bios.SMBIOSBIOSVersion; date = "$($bios.ReleaseDate)" }
-        cpu = @(Get-CimInstance -ClassName Win32_Processor | ForEach-Object { [ordered]@{ name = $_.Name; cores = $_.NumberOfCores; logical = $_.NumberOfLogicalProcessors } })
-        cpusets = $cpusets
-        tpm = $tpm
-        deviceguard = $(if ($dg) { [ordered]@{ vbs = $dg.VirtualizationBasedSecurityStatus; running = @($dg.SecurityServicesRunning) } } else { 'unavailable' })
-        bcd = @(& bcdedit.exe /enum '{current}')
-        timer_100ns = [IemTimer]::Query()
-        power = [ordered]@{ active = [IemPower]::Active(); list = @(& powercfg.exe /list); active_settings = @(& powercfg.exe /qh) }
-        devices = @(Get-IemDeviceInventory)
-        nics = @(Get-NetAdapter | ForEach-Object {
-            [ordered]@{ name = $_.Name; description = $_.InterfaceDescription; status = "$($_.Status)"; speed = "$($_.LinkSpeed)"; driver = $_.DriverVersion
-                        advanced = @(Get-NetAdapterAdvancedProperty -Name $_.Name -ErrorAction SilentlyContinue | ForEach-Object { [ordered]@{ keyword = $_.RegistryKeyword; value = "$($_.RegistryValue)"; display = $_.DisplayName } })
-                        rss = (Get-NetAdapterRss -Name $_.Name -ErrorAction SilentlyContinue | Select-Object Enabled, BaseProcessorNumber, MaxProcessorNumber, MaxProcessors, NumberOfReceiveQueues)
-                        pm = (Get-NetAdapterPowerManagement -Name $_.Name -ErrorAction SilentlyContinue | Select-Object AllowComputerToTurnOffDevice) } })
-        services = @(Get-CimInstance -ClassName Win32_Service | ForEach-Object { [ordered]@{ name = $_.Name; start = $_.StartMode; state = $_.State } })
-        tasks = @(Get-ScheduledTask | Where-Object { "$($_.State)" -ne 'Disabled' } | ForEach-Object {
-            $i = $_ | Get-ScheduledTaskInfo -ErrorAction SilentlyContinue
-            [ordered]@{ path = $_.TaskPath; name = $_.TaskName; state = "$($_.State)"; last = $(if ($i) { "$($i.LastRunTime)" } else { '' }) } })
-        defender = $defender
-        processes = @(Get-Process | ForEach-Object {
-            $pc = try { "$($_.PriorityClass)" } catch { 'denied' }
-            $af = try { "$([long]$_.ProcessorAffinity)" } catch { 'denied' }
-            [ordered]@{ name = $_.ProcessName; id = $_.Id; session = $_.SessionId; priority = $pc; affinity = $af } })
-        governor_lines = @(foreach ($file in @($profile.fingerprint.files)) { if (Test-Path -LiteralPath $file) {
-            @(Get-Content -LiteralPath $file | Where-Object { $_ -match 'IdleSaver|ProBalance|Gaming|Performance|PowerPlan|Priorit|Affinit|CpuSet|SmartTrim|Exclu' }) } })
-        mmcss = @(Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile' |
-                  Select-Object SystemResponsiveness, NetworkThrottlingIndex)
-        history = [ordered]@{
-            hotfixes = @(Get-HotFix | ForEach-Object { [ordered]@{ id = $_.HotFixID; installed = "$($_.InstalledOn)" } })
-            drivers = @(Get-CimInstance -ClassName Win32_PnPSignedDriver | Where-Object { $_.DriverDate } | ForEach-Object { [ordered]@{ device = $_.DeviceName; version = $_.DriverVersion; date = "$($_.DriverDate)" } })
-            services_installed = $installed
-        }
-    }
 }
 
 Export-ModuleMember -Function *-Iem*
