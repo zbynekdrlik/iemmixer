@@ -397,6 +397,12 @@ def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
 
 
+def check_event() -> None:
+    """Between PC calls, copies and parses: "ide event" pre-empts at once."""
+    if sw.event_now():
+        raise sw.EventNow()
+
+
 # The raw per-CPU counters, in IemMeasure's Get-IemCpuSample fields (the ones
 # latency_report.cpu_rates reads); rates are computed on the dev box.
 POLL_COUNTERS = ("$c = @(Get-CimInstance -ClassName Win32_PerfRawData_PerfOS_Processor | Where-Object { $_.Name -match '^\\d+$' } | "
@@ -454,8 +460,7 @@ def _measure(env, args, profile: dict, state: dict, run_dir: str, since: str, tr
             # here, and no new kernel trace starts once the flag exists.
             tps(env, f"Stop-IemTrace -Xperf {xperf(env)} -Dir {ps_quote(run_dir)} ; {set_aside(ps_quote(run_dir), cut['n'])}",
                 timeout=120, event="finish")
-            if sw.event_now():
-                raise sw.EventNow()
+            check_event()
             tps(env, f"Start-IemTrace -Xperf {xperf(env)} -Dir {ps_quote(run_dir)}{opt}", timeout=120, event="finish")
 
     # The proxy load's busy threads run on the housekeeping CPUs unless told otherwise
@@ -491,12 +496,16 @@ def _measure(env, args, profile: dict, state: dict, run_dir: str, since: str, tr
         # it: it gets its own views (#32 B7, review M1).
         body, names = analysis(xperf(env), ps_quote(run_dir), cut["n"], diag)
         tps(env, body, timeout=1800, event="abandon")
+        # The downloads (a near dump can be hundreds of MB, one per cut) and the
+        # parses below give way to "ide event" at once (review M3).
         scp_dir = env["PC_TUNING_ROOT_SCP"] + "/runs/" + out.name
         for name in names:
-            sw.scp(f"{env['PC_SSH']}:{scp_dir}/{name}", str(out / name))
+            check_event()
+            sw.scp(f"{env['PC_SSH']}:{scp_dir}/{name}", str(out / name), event="abandon")
         dpcisr_text = read_text(out / "dpcisr.txt")
     events = as_list(tps(env, f"Get-IemSystemEvents -Since {ps_quote(since)}", timeout=120, event="abandon"))
     watched = watch_lps(profile, args.audio_cpus)
+    check_event()
     # An unreadable dpcisr (parse_dpcisr fails closed with ValueError) fails the
     # step with the raw file named, never a traceback.
     try:
@@ -505,16 +514,17 @@ def _measure(env, args, profile: dict, state: dict, run_dir: str, since: str, tr
         raise StepError(f"{e} ({out / 'dpcisr.txt'})") from None
     summary["cuts"] = []
     for i in range(1, cut["n"] + 1):
+        check_event()
         path = out / f"cut-{i}.dpcisr.txt"
         try:
             entry = {"cut": i, "findings": lr.budget_findings(lr.parse_dpcisr(read_text(path)), watched)}
         except ValueError as e:
             raise StepError(f"{e} ({path})") from None
         if diag:
-            entry["near_glitch"] = lr.near_glitch(read_text(out / f"cut-{i}.near.txt"), period_us=lr.PERIOD_US)
+            entry["near_glitch"] = lr.near_glitch(out / f"cut-{i}.near.txt", period_us=lr.PERIOD_US, check=check_event)
         summary["cuts"].append(entry)
     if diag:
-        summary["near_glitch"] = lr.near_glitch(read_text(out / "near.txt"), period_us=lr.PERIOD_US)
+        summary["near_glitch"] = lr.near_glitch(out / "near.txt", period_us=lr.PERIOD_US, check=check_event)
     (out / "summary.json").write_text(json.dumps(summary, indent=1), encoding="utf-8")
     state.setdefault("measurements", []).append({"label": args.label, "summary": str(out / "summary.json"), "stable": (result["verdict"] or {}).get("stable")})
     sw.save_state(state)
