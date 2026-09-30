@@ -685,6 +685,28 @@ class MeasureTests(WindowHarness):
             tw.cmd_trace_stop(self.env, argparse.Namespace())
         self.assertEqual([e for b, e in self.pc.calls if "Stop-IemTrace" in b], ["finish"])
 
+    # Review m5: the error path never races a preempt over the window state.
+    def test_abandon_trace_leaves_the_trace_to_the_preempt_once_the_flag_exists(self) -> None:
+        self.record_trace()
+        (self.dir / "EVENT-NOW").touch()
+        tw.abandon_trace(self.env)
+        self.assertEqual(self.pc.calls, [])
+        self.assertTrue(self.state()["trace"])
+
+    def test_abandon_trace_changes_only_the_trace_field(self) -> None:
+        self.record_trace()
+
+        def concurrent_preempt(body: str) -> None:
+            if "Stop-IemTrace" in body:   # another process's preempt saves its own changes meanwhile
+                st = tw.sw.load_state()
+                st.update(card="reaper", closed=True, pref_restored=True)
+                tw.sw.save_state(st)
+
+        self.pc.on_call = concurrent_preempt
+        tw.abandon_trace(self.env)
+        st = self.state()
+        self.assertEqual((st["trace"], st["card"], st["closed"], st["pref_restored"]), (None, "reaper", True, True))
+
     def test_trace_stop_without_a_recorded_trace_touches_nothing(self) -> None:
         tw.cmd_trace_stop(self.env, argparse.Namespace())
         self.assertEqual(self.pc.calls, [])
