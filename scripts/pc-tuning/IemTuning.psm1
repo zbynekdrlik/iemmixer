@@ -155,6 +155,21 @@ function Get-IemBootTime {
     (Get-CimInstance -ClassName Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().ToString('o')
 }
 
+# Two boot-time readings this close name the same boot (A13). A clock step (time
+# sync) moves LastBootUpTime by the step, typically seconds; a reboot moves it by
+# at least the whole previous session, which in the tuning flow (apply,
+# reboot-prepare, the owner's approval, the restart) is far longer.
+$script:BootToleranceSeconds = 300
+
+function Test-IemSameBoot {
+    param([AllowNull()][AllowEmptyString()][string]$A, [AllowNull()][AllowEmptyString()][string]$B)
+    if ([string]::IsNullOrEmpty($A) -or [string]::IsNullOrEmpty($B)) { return $false }
+    $c = [Globalization.CultureInfo]::InvariantCulture
+    $s = [Globalization.DateTimeStyles]::RoundtripKind
+    $d = [datetime]::Parse($A, $c, $s).ToUniversalTime() - [datetime]::Parse($B, $c, $s).ToUniversalTime()
+    return [math]::Abs($d.TotalSeconds) -le $script:BootToleranceSeconds
+}
+
 function Get-IemTextHash {
     param([AllowEmptyString()][string]$Text)
     $sha = [Security.Cryptography.SHA256]::Create()
@@ -625,8 +640,8 @@ function Get-IemTuningState {
             $rows += [pscustomobject]@{
                 key = $item.key; tier = $tier; group = $item.group; desired = $item.desired; actual = $actual
                 ok = (Test-IemSame $actual $item.desired); journaled = [bool]$e; before = $(if ($e) { $e.before } else { $null })
-                pending = [bool]($e -and $item.reboot -and [string]$e.boot -eq $boot)
-                revert_pending = [bool]($j.reverted.ContainsKey($item.key) -and [string]$j.reverted[$item.key] -eq $boot)
+                pending = [bool]($e -and $item.reboot -and (Test-IemSameBoot -A ([string]$e.boot) -B $boot))
+                revert_pending = [bool]($j.reverted.ContainsKey($item.key) -and (Test-IemSameBoot -A ([string]$j.reverted[$item.key]) -B $boot))
             }
         }
     }
