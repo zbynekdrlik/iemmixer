@@ -679,6 +679,16 @@ class MeasureTests(WindowHarness):
         self.assertNotIn("Get-Process", polls[1][0])                     # exited: no process to read
         self.assertEqual(self.summary()["callback"]["priority"], {"base_min": 15, "base_max": 15, "current_min": 26, "current_max": 26})
 
+    # C1: the busy threads never share the audio CPU: the profile's housekeeping CPUs unless told otherwise.
+    def test_stress_runs_on_the_housekeeping_cpus_unless_told_otherwise(self) -> None:
+        self.pc.reports = [DUPLEX, DUPLEX]
+        tw.cmd_measure(self.env, self.args(stress=4, audio_cpus="14"))
+        tw.cmd_measure(self.env, self.args(label="load-32-b", stress=4, audio_cpus="14", stress_cpus="6-13"))
+        first, second = self.pc.bodies("Write-GoldenRequest")
+        self.assertIn("stress_cpus = '0,1,6,7,8,9,10,11,12,13'", first)
+        self.assertIn("audio_cpus = '14'", first)
+        self.assertIn("stress_cpus = '6-13'", second)
+
     def test_a_dpc_trace_has_no_near_glitch_view(self) -> None:
         self.pc.progress = {"missed": 1, "overruns": 0, "position_gaps": 0, "callback_thread": 4243}
         tw.cmd_measure(self.env, self.args(circular_mb=1024))
