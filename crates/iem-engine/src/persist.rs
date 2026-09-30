@@ -6,7 +6,7 @@
 //! - `baseline.json`: written at each import (and, from S6, at `live` entry);
 //! - `save.tmp`: a save before its renames (a crash between them leaves the
 //!   newest state only in it: the load chain reads it when `current.json` is
-//!   missing, the seed keeps it, `Store::has_state`);
+//!   missing, the seed keeps it, `Store::live_state`);
 //! - `baseline.tmp`: a baseline before its rename.
 //!
 //! A file is `{"format", "schema", "sha256", "payload"}`; the SHA-256 covers the
@@ -59,6 +59,20 @@ pub enum Source {
     Generation(u64),
     Baseline,
     Defaults,
+}
+
+impl Source {
+    /// The state file this source names in the state directory; `None` for
+    /// the muted defaults.
+    pub fn file_name(self) -> Option<String> {
+        match self {
+            Self::Current => Some(CURRENT.to_owned()),
+            Self::Interrupted => Some(TMP.to_owned()),
+            Self::Generation(seq) => Some(generation_name(seq)),
+            Self::Baseline => Some(BASELINE.to_owned()),
+            Self::Defaults => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -147,6 +161,10 @@ fn sync_dir(_dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
+fn generation_name(seq: u64) -> String {
+    format!("gen-{seq:010}.json")
+}
+
 fn generation_seq(name: &str) -> Option<u64> {
     name.strip_prefix("gen-")?
         .strip_suffix(".json")?
@@ -172,11 +190,11 @@ impl Store {
     }
 
     fn generation_path(&self, seq: u64) -> PathBuf {
-        self.dir.join(format!("gen-{seq:010}.json"))
+        self.dir.join(generation_name(seq))
     }
 
-    /// Whether any live state exists: `current.json`, `save.tmp` or a
-    /// generation. `save` writes the new state to `save.tmp` (synced), then
+    /// The live state the seed must keep, if any, in the load chain's order:
+    /// `current.json`, `save.tmp`, the newest generation. `save` writes the new state to `save.tmp` (synced), then
     /// renames `current.json` to a generation and `save.tmp` to
     /// `current.json`: a crash before the second rename leaves the newest
     /// state only in `save.tmp`, the previous one maybe only as a generation.
@@ -188,10 +206,17 @@ impl Store {
     /// (a seed is not live state) and `baseline.tmp`. An I/O error while
     /// looking is an error, never "no state" (#32 D5: the seed would write
     /// over state it could not see).
-    pub fn has_state(&self) -> io::Result<bool> {
-        Ok(self.dir.join(CURRENT).try_exists()?
-            || self.dir.join(TMP).try_exists()?
-            || !self.generations()?.is_empty())
+    pub fn live_state(&self) -> io::Result<Option<Source>> {
+        if self.dir.join(CURRENT).try_exists()? {
+            return Ok(Some(Source::Current));
+        }
+        if self.dir.join(TMP).try_exists()? {
+            return Ok(Some(Source::Interrupted));
+        }
+        Ok(self
+            .generations()?
+            .last()
+            .map(|&(seq, _)| Source::Generation(seq)))
     }
 
     /// Generation files, oldest first.
@@ -401,21 +426,19 @@ mod tests {
     }
 
     #[test]
-    fn has_state_sees_current_and_generations_independently() {
+    fn live_state_sees_current_and_generations_independently() {
         let (_d, s) = store();
         // A fresh store holds no live state.
-        assert!(!s.has_state().unwrap());
+        assert_eq!(s.live_state().unwrap(), None);
         // `current.json` alone is live state.
         std::fs::write(s.dir().join(CURRENT), b"{}").unwrap();
-        assert!(s.has_state().unwrap());
+        assert_eq!(s.live_state().unwrap(), Some(Source::Current));
         // A generation ALONE, with no `current.json`, is also live state: a
         // crash between `save`'s two renames leaves the previous state only as
-        // a generation (the newest waits in save.tmp: #32 D6). This pins the
-        // `||` (either source counts) and the `!generations.is_empty()` (a
-        // present generation is state).
+        // a generation (the newest waits in save.tmp: #32 D6).
         std::fs::remove_file(s.dir().join(CURRENT)).unwrap();
         std::fs::write(s.dir().join("gen-0000000001.json"), b"{}").unwrap();
-        assert!(s.has_state().unwrap());
+        assert_eq!(s.live_state().unwrap(), Some(Source::Generation(1)));
     }
 
     #[test]
@@ -424,7 +447,32 @@ mod tests {
         // so a crash between them leaves the newest state only there.
         let (_d, s) = store();
         fs::write(s.dir().join(TMP), b"NEWEST").unwrap();
-        assert!(s.has_state().unwrap());
+        assert_eq!(s.live_state().unwrap(), Some(Source::Interrupted));
+    }
+
+    #[test]
+    fn live_state_follows_the_load_chains_order() {
+        // current.json, then save.tmp, then the newest generation.
+        let (_d, s) = store();
+        fs::write(s.dir().join("gen-0000000002.json"), b"{}").unwrap();
+        fs::write(s.dir().join("gen-0000000003.json"), b"{}").unwrap();
+        assert_eq!(s.live_state().unwrap(), Some(Source::Generation(3)));
+        fs::write(s.dir().join(TMP), b"NEWEST").unwrap();
+        assert_eq!(s.live_state().unwrap(), Some(Source::Interrupted));
+        fs::write(s.dir().join(CURRENT), b"{}").unwrap();
+        assert_eq!(s.live_state().unwrap(), Some(Source::Current));
+    }
+
+    #[test]
+    fn each_source_names_its_file() {
+        assert_eq!(Source::Current.file_name().as_deref(), Some(CURRENT));
+        assert_eq!(Source::Interrupted.file_name().as_deref(), Some(TMP));
+        assert_eq!(
+            Source::Generation(7).file_name().as_deref(),
+            Some("gen-0000000007.json")
+        );
+        assert_eq!(Source::Baseline.file_name().as_deref(), Some(BASELINE));
+        assert_eq!(Source::Defaults.file_name(), None);
     }
 
     #[test]
@@ -438,13 +486,13 @@ mod tests {
     }
 
     #[test]
-    fn has_state_fails_when_the_state_dir_cannot_be_read() {
+    fn live_state_fails_when_the_state_dir_cannot_be_read() {
         // #32 D5: an I/O error is not "no state" — the seed must never write
         // over state it could not look at.
         let (_d, s) = store();
         fs::remove_dir(s.dir()).unwrap();
         fs::write(s.dir(), b"not a directory").unwrap();
-        assert!(s.has_state().is_err());
+        assert!(s.live_state().is_err());
     }
 
     #[test]

@@ -230,7 +230,7 @@ fn seed_if_absent_keeps_an_interrupted_save() {
     assert!(dir.join("baseline.json").exists());
 }
 
-/// #32 D5: `Store::has_state` swallowed I/O errors (`Path::exists`, a
+/// #32 D5: `Store::has_state` (now `live_state`) swallowed I/O errors (`Path::exists`, a
 /// failed `read_dir` read as "no generation"), so a state directory the seed
 /// could not read looked empty and was seeded over. The seed now fails
 /// (exit 1) before it writes anything.
