@@ -613,8 +613,8 @@ impl Processor {
     /// structured exception on the RT thread that `catch_unwind` cannot
     /// catch, so the process's SEH filter runs (Windows). Off Windows there
     /// is no such filter, so it aborts (equally uncatchable). It never
-    /// returns; no test runs it (it ends the process), and it is excluded
-    /// from mutation.
+    /// returns: `tests/pipes.rs` runs it in the binary off Windows (SIGABRT);
+    /// on Windows `iemmode inject-seh` runs it on the PC.
     fn inject_seh() {
         #[cfg(windows)]
         iem_audio_io::asio::raise_test_seh();

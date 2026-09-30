@@ -810,6 +810,62 @@ fn the_binary_runs_and_shuts_down() {
     assert!(String::from_utf8_lossy(&help.stdout).contains("iem-engine render"));
 }
 
+/// The owner-approved SEH test (design §10) off Windows: with
+/// `--fault-injection`, `InjectSeh` reaches the RT thread, whose
+/// `inject_seh` aborts the process (no SEH filter exists here; like the
+/// structured exception on the PC, nothing can catch it). The binary ends by
+/// SIGABRT, not by a clean exit or a caught panic. Should it keep running,
+/// the test asks it to shut down (never a forced end) before it fails.
+#[cfg(unix)]
+#[test]
+fn inject_seh_aborts_the_binary_off_windows() {
+    use std::os::unix::process::ExitStatusExt;
+    /// SIGABRT on Linux and macOS.
+    const SIGABRT: i32 = 6;
+    let exited = |child: &mut std::process::Child| {
+        let start = Instant::now();
+        loop {
+            if let Some(s) = child.try_wait().unwrap() {
+                return Some(s);
+            }
+            if start.elapsed() >= WAIT {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let pipe = pipe_name(&dir);
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_iem-engine"))
+        .args(["run", "--site"])
+        .arg(common::site_path())
+        .arg("--state-dir")
+        .arg(dir.path().join("state"))
+        .args(["--pipe", &pipe, "--fault-injection"])
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut c = Client::new(&pipe);
+    c.hello(Role::Control);
+    // Not `request`: the process may end before its reply is written.
+    c.send(&ClientMsg::Request {
+        id: 1,
+        origin: None,
+        cmd: Cmd::InjectSeh,
+    });
+    let Some(status) = exited(&mut child) else {
+        c.send(&ClientMsg::Request {
+            id: 2,
+            origin: None,
+            cmd: Cmd::Shutdown,
+        });
+        let after = exited(&mut child);
+        panic!("InjectSeh did not end the engine within {WAIT:?} (after Shutdown: {after:?})");
+    };
+    assert_eq!(status.signal(), Some(SIGABRT), "{status:?}");
+    assert_eq!(status.code(), None, "{status:?}");
+}
+
 #[test]
 fn the_binary_renders_offline() {
     let dir = tempfile::tempdir().unwrap();
