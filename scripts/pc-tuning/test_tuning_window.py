@@ -281,7 +281,7 @@ class RebootTests(unittest.TestCase):
         # that is not "nothing restarts" — post-boot tells whether the PC rebooted.
         def lost(env, body, timeout=300, event="finish"):
             self.calls.append(body)
-            raise tw.StepError("PC command failed (exit 255): Connection reset")
+            raise tw.sw.NoReply("PC command failed (exit 255): Connection reset")
 
         tw.sw.ps = lost
         with self.assertRaisesRegex(tw.StepError, "may be restarting.*post-boot"):
