@@ -1524,6 +1524,43 @@ mod tests {
         );
     }
 
+    /// The priming callbacks may arrive in a burst inside `start()`, on the
+    /// thread that called it: they neither name the callback thread nor count
+    /// as switches. The first callback after the warm-up names it.
+    #[test]
+    fn priming_callbacks_neither_name_the_callback_thread_nor_switch_it() {
+        let t = Telemetry::new(32, 96_000.0);
+        let mut at = 1_000;
+        let mut callback = |thread: u32| {
+            t.on_thread(5, thread);
+            t.on_callback(at, None);
+            at += P;
+        };
+        // The burst on the owner thread (7), its last callback on the driver's.
+        for _ in 0..WARMUP - 1 {
+            callback(7);
+        }
+        callback(900);
+        let s = t.snapshot();
+        assert_eq!(
+            (s.callbacks, s.callback_thread, s.thread_switches),
+            (WARMUP, 0, 0),
+            "priming callbacks name no thread"
+        );
+        // The first judged callback names the thread; another thread switches.
+        callback(901);
+        callback(902);
+        callback(901);
+        callback(901);
+        let s = t.snapshot();
+        assert_eq!(
+            (s.callbacks, s.callback_thread, s.thread_switches),
+            (WARMUP + 4, 901, 1)
+        );
+        // Every callback's processor is counted, the priming ones too.
+        assert_eq!(s.callback_cpus, [(5, WARMUP + 4)]);
+    }
+
     #[test]
     fn gap_scan_counts_gaps_at_the_threshold_and_keeps_the_largest() {
         let mut s = GapScan::new(10_000);
