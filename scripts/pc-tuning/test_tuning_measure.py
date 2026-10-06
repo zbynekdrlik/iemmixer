@@ -465,6 +465,18 @@ class MeasureTests(WindowHarness):
             # A preempt writes the spike's stop file first: newer than the analysis start → no start.
             self.assertRegex(body, r"queue\\stop'\) ; if \(\(Test-Path -LiteralPath \$s\) -and .*LastWriteTimeUtc -gt .*'2026-01-01T00:00:00Z'.*throw ")
 
+    def test_the_analysis_guard_runs_before_the_tuning_modules_load(self) -> None:
+        # F2 round 3, m6: importing IemMeasure loads IemTuning (an Add-Type compile).
+        # A step the PC refuses at "ide event" must not compile first, and the import
+        # itself runs at Idle priority.
+        tw.cmd_measure(self.env, self.args(trace="diag"))
+        calls = self.analysis_calls()
+        self.assertEqual(len(calls), 3)
+        for body, _ in calls:
+            load = body.index("IemMeasure.psm1")
+            self.assertLess(body.index("(Get-Process -Id $PID).PriorityClass = 'Idle'"), load, body)
+            self.assertLess(body.index(f"throw '{tw.ANALYSIS_REFUSED}'"), load, body)
+
     def test_a_merged_trace_leaves_no_raw_files_behind(self) -> None:
         # Review round 3, m8: a soak's raw kernel/marker files (per cut) would double
         # the disk used. They are deleted only after `xperf -merge` succeeded: a failed
