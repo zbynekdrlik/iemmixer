@@ -762,6 +762,7 @@ impl Core {
                     ..Partial::default()
                 })
             }
+            Cmd::InjectPark => Ok(Partial::default()),
             Cmd::ForceReopen => {
                 if !self.flags.fault_injection {
                     return Err(CmdError::new(

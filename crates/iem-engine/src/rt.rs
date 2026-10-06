@@ -738,6 +738,7 @@ impl Processor {
             }
             RtOp::Panic => Self::inject_fault(),
             RtOp::Seh => Self::inject_seh(),
+            RtOp::Park => {}
             RtOp::Arm => {
                 if !self.armed {
                     self.armed = true;

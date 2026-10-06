@@ -102,6 +102,12 @@ pub enum Cmd {
     /// RT thread, under the fault-injection flag. Supervisor-may, like
     /// `InjectFault`.
     InjectSeh,
+    /// The parked-engine test (design §10 test #2, #35): the SEH test's
+    /// exception under a test hold, so the backend keeps the driver and the
+    /// SEH filter parks the RT thread; the engine keeps running and reports
+    /// `parked`. Under the fault-injection flag, supervisor-may, like
+    /// `InjectSeh`.
+    InjectPark,
     Ping,
     /// The supervisor lets an engine started with `--hold` sound (S6 design
     /// note §4): the outputs fade in over 500 ms.
@@ -129,7 +135,7 @@ pub enum Cmd {
 }
 
 /// Every `op` tag, for telling an unknown command from a malformed one.
-pub const OPS: [&str; 24] = [
+pub const OPS: [&str; 25] = [
     "set_input",
     "set_mix",
     "set_level",
@@ -150,6 +156,7 @@ pub const OPS: [&str; 24] = [
     "shutdown",
     "inject_fault",
     "inject_seh",
+    "inject_park",
     "ping",
     "arm",
     "hil_test_signal",
@@ -588,6 +595,7 @@ mod tests {
             Cmd::Shutdown,
             Cmd::InjectFault,
             Cmd::InjectSeh,
+            Cmd::InjectPark,
             Cmd::Ping,
             Cmd::Arm,
             Cmd::HilTestSignal {
@@ -1040,6 +1048,7 @@ mod tests {
                 "shutdown",
                 "inject_fault",
                 "inject_seh",
+                "inject_park",
                 "ping",
                 "arm",
                 "hil_test_signal",
