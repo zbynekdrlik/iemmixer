@@ -491,6 +491,22 @@ try {
     Assert ("$($nk.GetValueKind('IemMulti1'))" -eq 'MultiString' -and $m1.Count -eq 1 -and $m1[0] -ceq 'one') 'tier3-undo-restores-a-one-element-multi-string'
     $st = Get-IemTuningState -ProfilePath $pp
     Assert (@($st.items | Where-Object { $_.key -eq 'irq:card:policy' -and $_.revert_pending }).Count -eq 1) 'tier3-undo-is-pending-until-a-reboot'
+    # A boot key that cannot be read never blocks a revert or the state (#32 MINOR-4):
+    # the state reports the problem as a field (no token, nothing pending on it); undo
+    # restores, records the revert's boot as unknown (no token: never this boot) and
+    # reports the problem as a row. Apply still refuses (a write needs its boot).
+    $r4 = Invoke-IemTuningApply -ProfilePath $pp -Tier 3 -Only @('nic')
+    Assert (@(Rows $r4 'failed').Count -eq 0 -and (Get-Item -LiteralPath $nic).GetValue('PowerSaving') -eq '0') 'boot-problem-test-applies-the-nic'
+    Remove-Item -LiteralPath $bootKey
+    New-Item -Path $bootKey -Force | Out-Null   # not volatile: Open-IemBootKey refuses it
+    $s4 = Get-IemTuningState -ProfilePath $pp
+    Assert ("$($s4.boot_problem)" -like '*not volatile*' -and -not $s4.boot_token -and @($s4.items | Where-Object { $_.pending -or $_.revert_pending }).Count -eq 0) 'state-reports-a-boot-key-problem-as-a-field'
+    ThrowsLike { Invoke-IemTuningApply -ProfilePath $pp -Tier 3 -Only @('nic') } '*not volatile*' 'apply-still-refuses-without-a-boot'
+    $u4 = Undo-IemTuning -ProfilePath $pp -Tier 3 -Only @('nic')
+    $p4 = @(Rows $u4 'problem')
+    $rv4 = (Read-IemJournal -Path (Read-IemProfile -Path $pp).journal).reverted['nic:PowerSaving']
+    Assert (@(Rows $u4 'failed').Count -eq 0 -and (Get-Item -LiteralPath $nic).GetValue('PowerSaving') -eq '1' -and $p4.Count -eq 1 -and "$($p4[0].error)" -like '*not volatile*' -and $null -ne $rv4 -and (Get-IemBootToken -Identity $rv4) -eq '') 'undo-restores-and-records-an-unknown-boot'
+    Remove-Item -LiteralPath $bootKey   # from here on a volatile key again, as after a reboot
 
     # Plan values go only into iemmixer's own plan (M2): the REAPER-mode plan
     # (plan.source), a built-in scheme or another existing plan is refused before

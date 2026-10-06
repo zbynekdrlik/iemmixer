@@ -114,6 +114,14 @@ class PostBootTests(unittest.TestCase):
         self.assertEqual(tw.post_boot_verdict({**ok, "booted_after_request": False}), ["the PC did not reboot after the request"])
         self.assertEqual(tw.post_boot_verdict({**ok, "handover": {"error": "no meters"}}), ["handover checks failed: no meters"])
 
+    def test_an_unknown_boot_identity_is_a_problem(self) -> None:
+        # #32 MINOR-4: without a boot token nothing reads as pending, so an empty
+        # "pending" proves nothing; the state's boot_problem fails the verdict.
+        ok = {"booted_after_request": True, "reaper": True, "handover": {"asio": "reaper"}, "fingerprint": [], "pending": [], "failed_items": []}
+        self.assertEqual(tw.post_boot_verdict({**ok, "boot_problem": "boot key: not volatile (synthetic)"}),
+                         ["the boot identity is unknown (boot key: not volatile (synthetic)): what is still pending cannot be told"])
+        self.assertEqual(tw.post_boot_verdict({**ok, "boot_problem": None}), [])
+
 
 class UndoTests(unittest.TestCase):
     """cmd_undo must fail loud when a Tier-3 revert item fails (I2,
@@ -155,6 +163,17 @@ class UndoTests(unittest.TestCase):
         with self.assertRaisesRegex(tw.StepError, "revert item.*irq:card:policy.*Access is denied"):
             tw.cmd_undo(self.env, self.args)
         self.assertEqual(len(tw.sw.load_state()["tuning_steps"]), 1)   # recorded before the fail-loud raise
+
+    def test_a_problem_row_alarms_the_owner_and_the_revert_stands(self) -> None:
+        # #32 MINOR-4: an unreadable boot key no longer blocks the revert; the
+        # module records the revert's boot as unknown and says so in a row.
+        alarms: list[str] = []
+        with mock.patch.object(tw.sw, "alarm", alarms.append):
+            self.rows = [{"key": "irq:card:policy", "action": "restored", "error": None},
+                         {"key": "boot", "action": "problem", "error": "the revert's boot is unknown (synthetic)"}]
+            tw.cmd_undo(self.env, self.args)   # no raise: nothing failed
+        self.assertEqual(len(alarms), 1)
+        self.assertIn("boot: the revert's boot is unknown (synthetic)", alarms[0])
 
     def test_an_event_or_a_held_card_refuses_before_the_pc(self) -> None:
         tw.sw.save_state({"id": "w", "card": "reaper", "closed": False})
@@ -219,6 +238,7 @@ class RebootPrepareTests(unittest.TestCase):
         self.fail: set[str] = set()   # PowerShell verbs whose call fails on the PC
         self.alarms: list[str] = []
         tw.sw.alarm = lambda text: self.alarms.append(text)
+        self.tuning_state: dict = {"items": []}
 
         def fake_ps(env, body, timeout=300, event="finish"):
             for verb in self.fail:
@@ -227,7 +247,7 @@ class RebootPrepareTests(unittest.TestCase):
             if "Stop-SpikeGracefully" in body:
                 return self.gone
             if "Get-IemTuningState" in body:
-                return {"items": []}
+                return self.tuning_state
             if "Get-IemNow" in body:
                 return "2026-01-01T00:00:00Z"
             return {"ok": True}
@@ -258,6 +278,16 @@ class RebootPrepareTests(unittest.TestCase):
         self.assertEqual(st["card"], "rebooting")
         self.assertIn("reboot", st)
         self.assertEqual(self.alarms, [])           # a clean stop raises no alarm
+
+    def test_an_unknown_boot_identity_alarms_the_owner(self) -> None:
+        # #32 MINOR-4: the state reports a boot-key problem as a field; the lists of
+        # what the reboot applies or reverts then prove nothing, so the owner hears it.
+        self.tuning_state = {"items": [], "boot_problem": "boot key: not volatile (synthetic)"}
+        self.write_state()
+        tw.cmd_reboot_prepare(self.env, self.args)
+        self.assertEqual(self.read_state()["card"], "rebooting")
+        self.assertEqual(len(self.alarms), 1)
+        self.assertIn("boot key: not volatile (synthetic)", self.alarms[0])
 
     def test_a_spike_that_did_not_stop_refuses_the_reboot(self) -> None:
         self.gone = False
@@ -400,6 +430,7 @@ class PostBootRunTests(unittest.TestCase):
         self.bring_backs = 0
         self.bring_back_s = 0.0
         self.calls: list[str] = []
+        self.tuning_state: dict = {"items": []}
 
         def fake_ps(env, body, timeout=300, event="finish"):
             self.calls.append(body)
@@ -423,7 +454,7 @@ class PostBootRunTests(unittest.TestCase):
             if "Get-IemReaperFingerprint" in body:
                 return {"plan.active": "reaper"}
             if "Get-IemTuningState" in body:
-                return {"items": []}
+                return self.tuning_state
             if "Get-IemCpuSample" in body:
                 return {"cpus": []}
             raise AssertionError(f"unexpected PC call: {body}")
@@ -445,6 +476,17 @@ class PostBootRunTests(unittest.TestCase):
         tw.cmd_post_boot(self.env, argparse.Namespace())
         st = tw.sw.load_state()
         self.assertEqual((st["card"], st["closed"], st["post_boot"]["problems"]), ("reaper", True, []))
+
+    def test_an_unknown_boot_identity_fails_the_checks(self) -> None:
+        # #32 MINOR-4: no token, so "pending: none" would be vacuous; the window still
+        # closes with REAPER back, and the checks fail naming the boot problem.
+        self.autostart = True
+        self.tuning_state = {"items": [], "boot_problem": "boot key: not volatile (synthetic)"}
+        with self.assertRaisesRegex(tw.StepError, "post-boot checks failed"):
+            tw.cmd_post_boot(self.env, argparse.Namespace())
+        st = tw.sw.load_state()
+        self.assertEqual((st["card"], st["closed"]), ("reaper", True))
+        self.assertTrue(any("boot identity is unknown" in p for p in st["post_boot"]["problems"]))
 
     def test_reaper_that_did_not_autostart_is_brought_back_before_the_window_closes(self) -> None:
         with self.assertRaisesRegex(tw.StepError, "post-boot checks failed"):
