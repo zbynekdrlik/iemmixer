@@ -229,9 +229,12 @@ def _tar_members(path: str, data: bytes, budget: _Budget) -> Iterator[Member | P
             continue
         problem = budget.problem(info.size, info.size)
         if problem is None:
-            stream = archive.extractfile(info)
-            content = stream.read() if stream is not None else b""
-            if len(content) != info.size:
+            try:  # a sparse member's map, a header that lies about the size: tarfile raises
+                stream = archive.extractfile(info)
+                content = stream.read() if stream is not None else b""
+            except (tarfile.TarError, EOFError, OSError, ValueError):
+                content = None
+            if content is None or len(content) != info.size:
                 problem = "cannot be scanned: a broken tar member"
         if problem is not None:
             yield Problem(member, problem)
