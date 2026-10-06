@@ -40,6 +40,9 @@ struct FaultState {
     /// Paths a rename FROM fails while a rename onto them succeeds: a move
     /// aside alone fails.
     pinned: Vec<PathBuf>,
+    /// A path whose reads beyond the bound panic, and its reads so far.
+    read_limit: Option<(PathBuf, usize)>,
+    limited_reads: usize,
     /// Pauses between read tries.
     pauses: usize,
 }
@@ -124,6 +127,20 @@ impl Faulty {
         }
     }
 
+    /// A read of `path` beyond `limit` (from now) panics at once: a read
+    /// tried again without an end fails its test in milliseconds instead
+    /// of hanging it (`.claude/rules/engine.md`, tests that wait).
+    pub(super) fn limit_reads(&self, path: &Path, limit: usize) {
+        let mut s = self.state.lock().unwrap();
+        s.read_limit = Some((path.to_path_buf(), limit));
+        s.limited_reads = 0;
+    }
+
+    /// Reads of the path `limit_reads` names since it was set.
+    pub(super) fn limited_reads(&self) -> usize {
+        self.state.lock().unwrap().limited_reads
+    }
+
     /// Pauses between read tries so far.
     pub(super) fn pauses(&self) -> usize {
         self.state.lock().unwrap().pauses
@@ -157,6 +174,17 @@ impl Files for Faulty {
         self.step("read", path)?;
         {
             let mut s = self.state.lock().unwrap();
+            if let Some((limited, limit)) = s.read_limit.clone()
+                && limited == path
+            {
+                s.limited_reads += 1;
+                let reads = s.limited_reads;
+                assert!(
+                    reads <= limit,
+                    "{} read {reads} times: a read tried again without an end",
+                    path.display()
+                );
+            }
             if s.unreadable.iter().chain(&s.locked).any(|p| p == path) {
                 return Err(injected(format!("unreadable: {}", path.display())));
             }
@@ -774,6 +802,60 @@ fn a_read_that_fails_briefly_is_tried_again() {
     assert_eq!(s.live_state().unwrap(), Some(Source::Current));
     faulty.set_unreadable(&current, true);
     assert!(s.live_state().is_err());
+}
+
+#[test]
+fn a_read_that_keeps_failing_is_tried_a_bounded_number_of_times() {
+    // CI run 37466176804 (caught only by a timeout): with read_tried's
+    // guard mutated (`||`, or always true) a read failing with an error
+    // that may pass was tried forever, and the tests past a locked
+    // current.json hung until nextest ended them. Here a read beyond the
+    // bound panics at once, so such a loop fails this test in
+    // milliseconds; it runs first under the mutants profile (priority).
+    let (_d, faulty, s) = faulty_store();
+    s.save(&sample(5)).unwrap();
+    let current = s.dir().join(CURRENT);
+    faulty.set_unreadable(&current, true);
+    faulty.limit_reads(&current, TRIES);
+    let loaded = s.load(&test_site());
+    assert_eq!(loaded.current_json, FileState::Unreadable);
+    assert_eq!(
+        (faulty.limited_reads(), faulty.pauses()),
+        (TRIES, TRIES - 1)
+    );
+    // The seed's strict pick has the same bound.
+    faulty.limit_reads(&current, TRIES);
+    assert!(s.live_state().is_err());
+    assert_eq!(faulty.limited_reads(), TRIES);
+}
+
+#[test]
+fn the_seed_fails_when_the_generations_cannot_be_listed() {
+    // CI run 37466176804 (a surviving mutant): with current.json missing
+    // the live state may be a generation, so a listing that fails is the
+    // seed's error (its strict pick), never "no state" (#32 m3: the seed
+    // would write over generations it could not see), while the boot's
+    // tolerant pick goes on with an alarm.
+    let (_d, faulty, s) = faulty_store();
+    s.save(&sample(7)).unwrap();
+    s.save(&sample(8)).unwrap();
+    fs::remove_file(s.dir().join(CURRENT)).unwrap();
+    faulty.fail_next("list");
+    assert!(s.live_state().is_err());
+    faulty.fail_next("list");
+    assert!(s.live_file().is_err());
+    assert_eq!(s.live_state().unwrap(), Some(Source::Generation(1)));
+    faulty.fail_next("list");
+    let loaded = s.load(&test_site());
+    assert_eq!(loaded.source, Source::Defaults);
+    assert!(
+        loaded
+            .rejected
+            .iter()
+            .any(|(_, why)| why.starts_with("the generations cannot be listed")),
+        "{:?}",
+        loaded.rejected
+    );
 }
 
 #[test]
