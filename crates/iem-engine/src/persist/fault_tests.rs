@@ -830,6 +830,43 @@ fn a_read_that_keeps_failing_is_tried_a_bounded_number_of_times() {
 }
 
 #[test]
+fn only_what_leaves_the_live_state_in_doubt_is_a_doubt() {
+    // #32 F3-r4 6: an import refuses on `Loaded::doubts` only. An older
+    // save.tmp (its save moves it aside) and an orphan above the state
+    // loaded are alarms, no doubt.
+    let g = test_site();
+    let (_d, _f, s) = faulty_store();
+    s.save(&sample(5)).unwrap();
+    fs::write(s.dir().join(TMP), encode(&sample(4)).unwrap()).unwrap();
+    fs::write(
+        s.dir().join("save.tmp.orphan-1"),
+        encode(&sample(9)).unwrap(),
+    )
+    .unwrap();
+    let loaded = s.load(&g);
+    assert_eq!(loaded.alarms.len(), 2, "{:?}", loaded.alarms);
+    assert!(loaded.doubts.is_empty(), "{:?}", loaded.doubts);
+    // A file that cannot be read, and the revision continued above it.
+    let (_d, faulty, s) = faulty_store();
+    s.save(&sample(7)).unwrap();
+    s.save(&sample(8)).unwrap();
+    faulty.set_unreadable(&s.dir().join(CURRENT), true);
+    let loaded = s.load(&g);
+    assert_eq!(loaded.doubts.len(), 2, "{:?}", loaded.doubts);
+    assert_eq!(loaded.doubts, loaded.alarms);
+    // A save.tmp loaded without a comparison.
+    let (_d, faulty, s) = faulty_store();
+    s.save(&sample(7)).unwrap();
+    fs::write(s.dir().join(CURRENT), b"damaged").unwrap();
+    fs::write(s.dir().join(TMP), encode(&sample(9)).unwrap()).unwrap();
+    faulty.fail_next("list");
+    let loaded = s.load(&g);
+    assert_eq!(loaded.source, Source::Interrupted);
+    assert_eq!(loaded.doubts.len(), 1, "{:?}", loaded.doubts);
+    assert_eq!(loaded.doubts, loaded.alarms);
+}
+
+#[test]
 fn the_seed_fails_when_the_generations_cannot_be_listed() {
     // CI run 37466176804 (a surviving mutant): with current.json missing
     // the live state may be a generation, so a listing that fails is the
