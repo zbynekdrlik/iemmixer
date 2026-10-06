@@ -326,6 +326,13 @@ impl EngineClient {
                 tracing::warn!(%reason, "the engine released its driver");
                 None
             }
+            EngineMsg::DriverParked { reason } => {
+                tracing::error!(
+                    %reason,
+                    "the engine's stream stayed parked: its driver is not released"
+                );
+                None
+            }
             EngineMsg::Saved { .. } => None,
             other => {
                 let event = {
