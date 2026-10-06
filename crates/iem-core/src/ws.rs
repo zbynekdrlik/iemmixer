@@ -257,8 +257,6 @@ pub enum ServerMsg {
     Console(ConsoleInfo),
     /// One console input changed
     InputUpdate(ConsoleInput),
-    /// Band activity while developing (§4.2): banner and switch on engineer pages
-    BandActivity { active: bool, can_switch: bool },
 }
 
 #[cfg(test)]
@@ -750,13 +748,6 @@ mod tests {
             }),
             "InputUpdate",
         );
-        round_trip_server(
-            ServerMsg::BandActivity {
-                active: true,
-                can_switch: true,
-            },
-            "BandActivity",
-        );
     }
 
     /// Every event's JSON, field names included (W4 of the gen1 test parity
@@ -1015,13 +1006,6 @@ mod tests {
                     r#"{"event":"InputUpdate","data":{"id":"keys","name":"KEYS","trim_db":-3.0,"#,
                     r#""muted":true,"processing":false}}"#,
                 ),
-            ),
-            (
-                ServerMsg::BandActivity {
-                    active: true,
-                    can_switch: false,
-                },
-                r#"{"event":"BandActivity","data":{"active":true,"can_switch":false}}"#,
             ),
         ];
         let mut tags = std::collections::BTreeSet::new();

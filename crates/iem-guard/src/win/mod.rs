@@ -2,8 +2,8 @@
 //!
 //! Built on `iem_win`'s safe wrappers, our scheduled tasks (`schtasks.exe`,
 //! arguments only), Windows' own `curl.exe` for HTTPS and `ureq` for plain
-//! HTTP on this PC. Settings come from the site's `[guard]`, `[card]` and
-//! `[activity]` tables and `%LOCALAPPDATA%\iemmixer\guard\pc.toml`.
+//! HTTP on this PC. Settings come from the site's `[guard]` and `[card]`
+//! tables and `%LOCALAPPDATA%\iemmixer\guard\pc.toml`.
 //!
 //! Nothing here ends a process: REAPER saves and quits by its own actions,
 //! the predecessor app by its tray menu's Exit command, the engine by

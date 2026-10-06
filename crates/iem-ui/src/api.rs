@@ -193,26 +193,6 @@ pub async fn batch_mute_all(member: &str) -> Result<(), String> {
     }
 }
 
-/// "Back to REAPER" (§4.2): the engineer's switch, confirmed with the engineer
-/// PIN; the server starts the site's switch command (202).
-pub async fn back_to_reaper(pin: &str) -> Result<(), String> {
-    let token = crate::auth::get_token().ok_or("Not authenticated")?;
-    let resp = Request::post(&format!("{}/mode/event", API_BASE))
-        .header("Authorization", &format!("Bearer {}", token))
-        .json(&serde_json::json!({ "pin": pin }))
-        .map_err(|e| format!("Request error: {}", e))?
-        .send()
-        .await
-        .map_err(|e| format!("Network error: {}", e))?;
-    if resp.ok() {
-        Ok(())
-    } else {
-        Err(crate::components::activity_banner::switch_error_message(
-            resp.status(),
-        ))
-    }
-}
-
 /// Whether the answer to the token check (`GET /api/mixer/<page>`) is the
 /// server refusing the token, which sends the page to the login: 401 (an
 /// invalid or expired token) or 403 (a token not for this page). Any other

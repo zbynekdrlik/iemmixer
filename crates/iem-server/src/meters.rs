@@ -98,16 +98,6 @@ pub fn active_seconds(active_s: &[f64], topo: &TopologyInfo, mix: &iem_engine_pr
         .unwrap_or(0.0)
 }
 
-/// The loudest peak of the `watched` inputs in a frame (band activity,
-/// §4.2); indices the frame does not have are skipped.
-pub fn max_watched_peak(m: &Meters, watched: &[usize]) -> f32 {
-    watched
-        .iter()
-        .filter_map(|&k| m.inputs.get(k))
-        .flat_map(|p| p.iter().copied())
-        .fold(0.0, f32::max)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,7 +188,7 @@ mod tests {
     }
 
     #[test]
-    fn active_seconds_and_input_peaks() {
+    fn active_seconds_are_read_by_the_mixs_position() {
         let topo = test_topology();
         let e = topo
             .mixes
@@ -213,11 +203,5 @@ mod tests {
         );
         assert_eq!(active_seconds(&active, &topo, &MixId::new("nope")), 0.0);
         assert_eq!(active_seconds(&[], &topo, &MixId::new("engineer")), 0.0);
-        let m = frame(vec![[0.1, 0.4], [0.3, 0.2], [0.9, 0.9]], vec![], vec![]);
-        assert_eq!(max_watched_peak(&m, &[0, 1]), 0.4);
-        assert_eq!(max_watched_peak(&m, &[1]), 0.3);
-        assert_eq!(max_watched_peak(&m, &[1, 7]), 0.3, "no input 7");
-        assert_eq!(max_watched_peak(&m, &[]), 0.0);
-        assert_eq!(max_watched_peak(&Meters::default(), &[0]), 0.0);
     }
 }

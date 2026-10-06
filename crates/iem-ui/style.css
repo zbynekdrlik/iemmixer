@@ -2895,42 +2895,6 @@ body.talk-live-overlay {
   color: var(--text-primary);
 }
 
-/* Band activity while developing (engineer pages, program spec 4.2) */
-.band-activity-banner {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  padding: 8px;
-  background: rgba(255, 107, 107, 0.15);
-  color: #ff6b6b;
-  border-bottom: 1px solid rgba(255, 107, 107, 0.3);
-  font-size: 0.85em;
-  font-weight: 600;
-  text-align: center;
-}
-
-.band-activity-banner .settings-action-btn {
-  width: auto;
-  margin: 0;
-  padding: 6px 12px;
-}
-
-.switch-pin-input,
-.pin-modal .pin-input {
-  width: 100%;
-  margin: 12px 0;
-  padding: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  border-radius: 8px;
-  background: rgba(0, 0, 0, 0.3);
-  color: inherit;
-  font-size: 1.4em;
-  letter-spacing: 0.4em;
-  text-align: center;
-}
-
 /* Engineer console in Settings (F29) */
 .console-input,
 .console-limiter {

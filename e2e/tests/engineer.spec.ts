@@ -1,13 +1,11 @@
 import { test, expect } from "./support/fixtures";
-import { ENGINEER_PIN } from "./support/pins";
 import { openMixer, strip, tab } from "./support/session";
 import { PageSocket } from "./support/wire";
 
 // The engineer's pages against the real engine: restore with preview (F31),
 // Mute All (F15), the Mixes tab (F16), SOS (F20), the console and the
-// translator page (F29), and the band-activity banner with "Back to REAPER"
-// (§4.2 — the test site's switch command is `true`; the engine's 1 kHz sine
-// on every input is "the band playing").
+// translator page (F29), and no band-activity banner however loud the stage
+// (#38 — the engine's 1 kHz sine on every input).
 
 test.describe.configure({ mode: "serial" });
 
@@ -117,20 +115,6 @@ test.describe("Engineer", () => {
     await expect(toast).toHaveCount(0);
     await expect(sos).toHaveText("SOS", { timeout: 5_000 });
     await ctx.close();
-  });
-
-  test("the band-activity banner offers Back to REAPER (§4.2)", async ({ page }) => {
-    await openMixer(page, "engineer", { engineer: true });
-    const banner = page.getByTestId("band-activity");
-    await expect(banner).toContainText("Kapela hrá", { timeout: 30_000 });
-    await banner.locator(".back-to-reaper-btn").click();
-    await page.getByTestId("switch-pin").fill(ENGINEER_PIN);
-    const answer = page.waitForResponse(
-      (r) => r.url().endsWith("/api/mode/event") && r.request().method() === "POST",
-    );
-    await page.locator(".back-to-reaper-confirm").click();
-    expect((await answer).status()).toBe(202);
-    await expect(banner).toContainText("Prepína sa na REAPER");
   });
 
   // #38 (owner, 2026-10-06): whether an event runs is the owner's to say, and

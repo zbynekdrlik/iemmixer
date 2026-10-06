@@ -224,11 +224,10 @@ pub fn alert_catchup(
 }
 
 /// Whether an app event for `to` goes to this connection.
-pub fn addressed(to: &To, page: &str, engineer: bool, session: u64) -> bool {
+pub fn addressed(to: &To, page: &str, session: u64) -> bool {
     match to {
         To::All => true,
         To::Page(p) => p == page,
-        To::Engineers => engineer,
         To::Session(s) => *s == session,
     }
 }
@@ -271,9 +270,6 @@ async fn session(
     }
     first.push(ServerMsg::NetworkMode { mode: network_mode });
     first.push(crate::tunnel_watch::current_status_msg(&state).await);
-    if viewer.engineer {
-        first.push(crate::console::activity_msg(&state));
-    }
     for m in &first {
         if socket.send(text(m)).await.is_err() {
             cleanup(&state, &page, session);
@@ -323,7 +319,7 @@ async fn session(
                 Err(broadcast::error::RecvError::Closed) => break,
             },
             ev = app_rx.recv() => match ev {
-                Ok((to, msg)) if addressed(&to, &page.id, viewer.engineer, session) => vec![msg],
+                Ok((to, msg)) if addressed(&to, &page.id, session) => vec![msg],
                 Ok(_) => Vec::new(),
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     tracing::warn!(page = %page.id, skipped = n, "app events lagged");
@@ -834,13 +830,11 @@ mod tests {
 
     #[test]
     fn events_reach_the_addressed_connections() {
-        assert!(addressed(&To::All, "member1", false, 1));
-        assert!(addressed(&To::Page("member1".into()), "member1", false, 1));
-        assert!(!addressed(&To::Page("member1".into()), "member2", true, 1));
-        assert!(addressed(&To::Engineers, "member2", true, 1));
-        assert!(!addressed(&To::Engineers, "member2", false, 1));
-        assert!(addressed(&To::Session(7), "member2", false, 7));
-        assert!(!addressed(&To::Session(7), "member2", true, 8));
+        assert!(addressed(&To::All, "member1", 1));
+        assert!(addressed(&To::Page("member1".into()), "member1", 1));
+        assert!(!addressed(&To::Page("member1".into()), "member2", 1));
+        assert!(addressed(&To::Session(7), "member2", 7));
+        assert!(!addressed(&To::Session(7), "member2", 8));
     }
 
     #[test]

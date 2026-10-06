@@ -19,7 +19,7 @@ pub use backup::{
 };
 pub use band::{MAX_PRESETS, MAX_SNAPSHOTS, PresetInfo, SnapshotInfo};
 #[cfg(feature = "config")]
-pub use config::{ActivityConfig, Config, SiteInputMeta, SiteMember};
+pub use config::{Config, SiteInputMeta, SiteMember};
 pub use types::{
     ApiError, AuthClaims, BatchControlRequest, BatchOperation, Channel, Customization, MixerState,
     PIN_CHANGES_FROZEN, is_valid_ui_pan, merge_or_replace_channels,

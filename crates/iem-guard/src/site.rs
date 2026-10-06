@@ -5,8 +5,9 @@
 //!
 //! The guard reads the site whole but owns only `[guard]` (unknown keys
 //! refused); `[card]` is the engine's table (S6 plan Task 5), so its other
-//! keys are ignored here. The server's `[activity]` table is no business of
-//! the guard's: nothing it does reads the stage (#38).
+//! keys are ignored here. An older site's `[activity]` table (the server's
+//! band-activity alarm, removed) is ignored too: nothing reads the stage
+//! (#38).
 
 use std::fs;
 use std::path::{Path, PathBuf};

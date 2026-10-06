@@ -1,8 +1,14 @@
 //! The engineer's surfaces and the server's background jobs (S5 design note
 //! §6): the F29 console (inputs, limiter counters, member-less pages, login
-//! failures), SOS alerts (F20), the band-activity alarm and the "Back to
-//! REAPER" switch (§4.2, §4.3), and the tasks that merge meters, clear
-//! solos after the last connection left (X2) and end silent talk locks (X6).
+//! failures), SOS alerts (F20), the "Back to REAPER" switch (§4.3), and the
+//! tasks that merge meters, clear solos after the last connection left (X2)
+//! and end silent talk locks (X6).
+//!
+//! No input level stands for "the band plays" (#38, owner decision
+//! 2026-10-06): other devices on the Dante network feed the card's inputs,
+//! and whether an event runs is the owner's to say. The meters only feed
+//! the pages' meters and the limiter counters; the band-activity banner and
+//! notice that read them were removed.
 
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -14,17 +20,15 @@ use axum::{
     response::IntoResponse,
 };
 use iem_core::{
-    ActivityConfig, ApiError, ConsoleInfo, ConsoleInput, ConsoleMix, LoginFailures, PageLink,
-    ServerMsg,
+    ApiError, ConsoleInfo, ConsoleInput, ConsoleMix, LoginFailures, PageLink, ServerMsg,
 };
-use iem_engine_proto::{Change, Cmd, Meters, MixId};
+use iem_engine_proto::{Change, Cmd, MixId};
 use tokio::sync::broadcast;
 
-use crate::activity::{BandActivity, watched_inputs};
 use crate::engine::client::EngineEvent;
-use crate::meters::{METER_PERIOD_MS, MeterMerge, max_watched_peak};
+use crate::meters::{METER_PERIOD_MS, MeterMerge};
 use crate::site_view::{Page, SiteView};
-use crate::{AppState, RunMode, To};
+use crate::{AppState, To};
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
@@ -100,14 +104,6 @@ pub fn input_updates(site: &SiteView, changes: &[Change]) -> Vec<ServerMsg> {
         .collect()
 }
 
-/// The banner state for engineer pages.
-pub fn activity_msg(state: &AppState) -> ServerMsg {
-    ServerMsg::BandActivity {
-        active: state.activity.load(std::sync::atomic::Ordering::Acquire),
-        can_switch: !state.site_config.back_to_reaper.is_empty(),
-    }
-}
-
 /// A member asks the engineer for help (F20): the engineer's pages show it,
 /// the member's page shows it is pending, engineer devices get a push.
 pub async fn call_engineer(state: &AppState, page: &Page) {
@@ -166,83 +162,23 @@ pub fn clear_alert(state: &AppState, page: &Page) {
     }
 }
 
-/// The band-activity alarm fed with the engine's meter frames (§4.2): only
-/// the stage inputs count ([`watched_inputs`]), resolved again whenever the
-/// engine announces another topology.
-pub struct ActivityWatch {
-    activity: BandActivity,
-    inputs: Vec<String>,
-    /// The site view the watched inputs were resolved for, and those inputs.
-    resolved: Option<(Arc<SiteView>, Vec<usize>)>,
-}
-
-impl ActivityWatch {
-    pub fn new(cfg: &ActivityConfig, start: Instant) -> Self {
-        Self {
-            activity: BandActivity::new(cfg, start),
-            inputs: cfg.inputs.clone(),
-            resolved: None,
-        }
-    }
-
-    /// One meter frame at `now`, with the site view of the engine's
-    /// topology (none yet: the frame is ignored); `Some` when the alarm
-    /// turned on (`true`) or off (`false`).
-    pub fn observe(
-        &mut self,
-        site: Option<&Arc<SiteView>>,
-        now: Instant,
-        m: &Meters,
-    ) -> Option<bool> {
-        let site = site?;
-        let seen = self
-            .resolved
-            .as_ref()
-            .is_some_and(|(view, _)| Arc::ptr_eq(view, site));
-        if !seen {
-            let (watched, unknown) = watched_inputs(&self.inputs, site);
-            for id in &unknown {
-                tracing::error!(input = %id, "[activity] inputs: the engine has no such input; left out");
-            }
-            if watched.is_empty() {
-                tracing::error!("band activity watches no input: its alarm cannot turn on");
-            } else {
-                tracing::info!(
-                    inputs = watched.len(),
-                    "band activity watches the stage inputs"
-                );
-            }
-            self.resolved = Some((Arc::clone(site), watched));
-        }
-        let (_, watched) = self.resolved.as_ref()?;
-        self.activity.observe(now, max_watched_peak(m, watched))
-    }
-}
-
-/// Starts the meter merger, the activity alarm and the janitor.
+/// Starts the meter merger and the janitor.
 pub fn spawn_tasks(state: AppState) {
     tokio::spawn(meter_task(state.clone()));
     tokio::spawn(janitor_task(state));
 }
 
+/// Merges the engine's meter frames for the pages and the limiter counters
+/// every [`METER_PERIOD_MS`]. No level here raises anything (#38).
 async fn meter_task(state: AppState) {
     let mut rx = state.engine.subscribe();
     let mut merge = MeterMerge::default();
-    let mut activity = ActivityWatch::new(&state.site_config.activity, Instant::now());
     let mut tick = tokio::time::interval(Duration::from_millis(METER_PERIOD_MS));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             ev = rx.recv() => match ev {
-                Ok(EngineEvent::Meters(m)) => {
-                    merge.push(&m);
-                    if state.mode == RunMode::Dev
-                        && let Some(on) =
-                            activity.observe(state.site().as_ref(), Instant::now(), &m)
-                    {
-                        activity_changed(&state, on);
-                    }
-                }
+                Ok(EngineEvent::Meters(m)) => merge.push(&m),
                 Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
                 Err(broadcast::error::RecvError::Closed) => return,
             },
@@ -254,32 +190,6 @@ async fn meter_task(state: AppState) {
             }
         }
     }
-}
-
-/// The alarm turned on or off: engineer pages get the banner state, and when
-/// it turned on the engineer's devices get the band-activity notice (design
-/// note §5.4). Returns the push task.
-fn activity_changed(state: &AppState, on: bool) -> Option<tokio::task::JoinHandle<()>> {
-    state
-        .activity
-        .store(on, std::sync::atomic::Ordering::Release);
-    let push = if on {
-        tracing::warn!("band activity while developing: engineer banner and notice");
-        let payload = crate::notify::alarm_payload(
-            "Kapela hrá",
-            "iemmixer beží vo vývoji a na vstupoch je signál. Späť na REAPER?",
-        );
-        let s = state.clone();
-        Some(tokio::spawn(async move {
-            crate::notify::push_engineers(&s, &payload).await;
-            tracing::info!("band-activity notice pushed to the engineer's devices");
-        }))
-    } else {
-        tracing::info!("band activity ended");
-        None
-    };
-    state.broadcast(To::Engineers, activity_msg(state));
-    push
 }
 
 async fn janitor_task(state: AppState) {
@@ -500,171 +410,6 @@ mod tests {
             msg,
             ServerMsg::AlertCleared {
                 member_id: "member2".into()
-            }
-        );
-    }
-
-    /// One meter frame of the test site: `loud` at −1 dBFS, every other input
-    /// silent.
-    fn frame_with(v: &SiteView, loud: &str) -> Meters {
-        let peak = 10f32.powf(-1.0 / 20.0);
-        Meters {
-            inputs: v
-                .inputs
-                .iter()
-                .map(|i| {
-                    if i.id.0 == loud {
-                        [peak, peak]
-                    } else {
-                        [0.0, 0.0]
-                    }
-                })
-                .collect(),
-            ..Meters::default()
-        }
-    }
-
-    const NONE: Vec<(u64, bool)> = Vec::new();
-    /// The 120th loud second (second 119) turns the alarm on, once.
-    const ON_AT_119: [(u64, bool); 1] = [(119, true)];
-
-    /// Three frames a second for `secs` seconds; every change of the alarm
-    /// with the second it happened in.
-    fn play(cfg: &ActivityConfig, loud: &str, secs: u64) -> Vec<(u64, bool)> {
-        let site = Arc::new(test_view());
-        let m = frame_with(&site, loud);
-        let t = Instant::now();
-        let mut watch = ActivityWatch::new(cfg, t);
-        let mut changes = Vec::new();
-        for s in 0..secs {
-            for ms in [0, 333, 666] {
-                let now = t + Duration::from_secs(s) + Duration::from_millis(ms);
-                if let Some(on) = watch.observe(Some(&site), now, &m) {
-                    changes.push((s, on));
-                }
-            }
-        }
-        changes
-    }
-
-    #[test]
-    fn program_input_signal_does_not_raise_band_activity() {
-        // S1a: the program input (`content`, category tech) carries signal
-        // while the band is silent; five minutes of it are no band.
-        assert_eq!(play(&ActivityConfig::default(), "content", 300), NONE);
-    }
-
-    #[test]
-    fn stage_input_activity_still_raises_it() {
-        assert_eq!(play(&ActivityConfig::default(), "mic1", 300), ON_AT_119);
-        // An input without a category is a mic too.
-        assert_eq!(play(&ActivityConfig::default(), "keys", 300), ON_AT_119);
-    }
-
-    #[test]
-    fn an_explicit_input_list_replaces_the_mics_default() {
-        let cfg = ActivityConfig {
-            inputs: vec!["content".into()],
-            ..ActivityConfig::default()
-        };
-        assert_eq!(play(&cfg, "content", 300), ON_AT_119);
-        assert_eq!(play(&cfg, "mic1", 300), NONE);
-    }
-
-    #[test]
-    fn a_new_topology_resolves_the_watched_inputs_again() {
-        // Only mic2 counts. The engine then announces a topology with the
-        // inputs in reverse order: mic2 sits at another index of the frame.
-        let cfg = ActivityConfig {
-            inputs: vec!["mic2".into()],
-            ..ActivityConfig::default()
-        };
-        let first = Arc::new(test_view());
-        let mut reversed = test_view();
-        reversed.inputs.reverse();
-        let second = Arc::new(reversed);
-        let t = Instant::now();
-        let mut watch = ActivityWatch::new(&cfg, t);
-        assert_eq!(
-            watch.observe(Some(&first), t, &frame_with(&first, "mic2")),
-            None
-        );
-        let loud = frame_with(&second, "mic2");
-        let mut changes = Vec::new();
-        for s in 1..=120 {
-            let now = t + Duration::from_secs(s);
-            if let Some(on) = watch.observe(Some(&second), now, &loud) {
-                changes.push((s, on));
-            }
-        }
-        // Second 0 (the first topology) and seconds 1 to 119: 120 seconds.
-        assert_eq!(changes, ON_AT_119);
-    }
-
-    #[tokio::test]
-    async fn the_band_activity_notice_reaches_the_engineers_devices() {
-        use crate::push::tests::{fake_push_service, subscription, vapid_private_key};
-        let (base, seen) = fake_push_service().await;
-        let dir = tempfile::tempdir().unwrap();
-        let config = iem_core::Config {
-            vapid_private_key: vapid_private_key(),
-            ..iem_core::Config::default()
-        };
-        let s = AppState::new(config, dir.path());
-        s.push_store
-            .write()
-            .await
-            .add(subscription(format!("{base}/201")))
-            .unwrap();
-        let push = activity_changed(&s, true).expect("a notice when it turns on");
-        tokio::time::timeout(Duration::from_secs(10), push)
-            .await
-            .expect("pushed within 10 s")
-            .unwrap();
-        let paths: Vec<String> = seen
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(path, _, _)| path.clone())
-            .collect();
-        assert_eq!(paths, ["/201"], "the engineer's device");
-        assert!(s.activity.load(std::sync::atomic::Ordering::Acquire));
-        assert!(
-            activity_changed(&s, false).is_none(),
-            "no notice when it ends"
-        );
-        assert!(!s.activity.load(std::sync::atomic::Ordering::Acquire));
-    }
-
-    #[tokio::test]
-    async fn the_banner_reports_activity_and_the_switch() {
-        let (_d, s) = state();
-        assert_eq!(
-            activity_msg(&s),
-            ServerMsg::BandActivity {
-                active: false,
-                can_switch: true
-            }
-        );
-        let mut rx = s.event_tx.subscribe();
-        activity_changed(&s, false);
-        assert_eq!(
-            rx.try_recv().unwrap(),
-            (
-                To::Engineers,
-                ServerMsg::BandActivity {
-                    active: false,
-                    can_switch: true
-                }
-            )
-        );
-        let dir = tempfile::tempdir().unwrap();
-        let none = AppState::new(iem_core::Config::default(), dir.path());
-        assert_eq!(
-            activity_msg(&none),
-            ServerMsg::BandActivity {
-                active: false,
-                can_switch: false
             }
         );
     }

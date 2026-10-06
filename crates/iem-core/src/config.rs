@@ -2,7 +2,7 @@
 //! which engine mix each hears, how the engine's inputs are shown, and the
 //! web, push, backup and tunnel settings (S5 design note §3). The engine
 //! reads the `[engine]` and `[card]` tables itself, the guard `[guard]`
-//! (S6); the server ignores them.
+//! (S6); the server ignores them, and the retired `[activity]` (#38).
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -46,13 +46,16 @@ pub struct Config {
     pub inputs: Vec<SiteInputMeta>,
 
     /// Command line of the engineer's "Back to REAPER" switch (§4.3; S6
-    /// provides `iemmode event`). Empty: no button.
+    /// provides `iemmode event`), `POST /api/mode/event`. Empty: no switch.
     #[serde(default)]
     pub back_to_reaper: Vec<String>,
 
-    /// The band-activity alarm in `dev` (§4.2).
-    #[serde(default)]
-    pub activity: ActivityConfig,
+    /// The retired `[activity]` table: the band-activity alarm read it until
+    /// the owner's decision of 2026-10-06 (#38: no input level stands for
+    /// the band playing). Every site written before has it, so it is still
+    /// accepted, whatever it holds, read by nobody and never written back.
+    #[serde(default, skip_serializing)]
+    pub activity: Option<serde::de::IgnoredAny>,
 
     /// PIN changes in the web UI (P9, design note §5.4). Until the cutover
     /// the predecessor is the only place a PIN changes and every entry into
@@ -162,32 +165,6 @@ pub struct SiteInputMeta {
     pub owner: Option<String>,
 }
 
-/// Band-activity alarm (§4.2): peaks of the watched inputs above
-/// `threshold_dbfs` for at least `sustain_s` seconds within the last
-/// `window_s` seconds.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct ActivityConfig {
-    pub threshold_dbfs: f64,
-    pub window_s: u64,
-    pub sustain_s: u64,
-    /// The engine input ids that count: the stage. Empty (the default) means
-    /// every input of category `mics`. The program input carries signal
-    /// while the band is silent (S1a), so it never belongs here.
-    pub inputs: Vec<String>,
-}
-
-impl Default for ActivityConfig {
-    fn default() -> Self {
-        Self {
-            threshold_dbfs: -50.0,
-            window_s: 300,
-            sustain_s: 120,
-            inputs: Vec::new(),
-        }
-    }
-}
-
 fn default_port() -> u16 {
     80
 }
@@ -236,7 +213,7 @@ impl Default for Config {
             members: Vec::new(),
             inputs: Vec::new(),
             back_to_reaper: Vec::new(),
-            activity: ActivityConfig::default(),
+            activity: None,
             pin_changes: default_pin_changes(),
             jwt_secret: String::new(),
             vapid_private_key: String::new(),
@@ -307,18 +284,6 @@ impl Config {
                 && !ids.contains(o.as_str())
             {
                 out.push(format!("input '{}': owner '{o}' is not a member", i.id));
-            }
-        }
-        let a = &self.activity;
-        if !(a.threshold_dbfs.is_finite() && a.threshold_dbfs < 0.0) {
-            out.push("activity.threshold_dbfs must be below 0 dBFS".to_string());
-        }
-        if a.window_s == 0 || a.sustain_s == 0 || a.sustain_s > a.window_s {
-            out.push("activity needs 0 < sustain_s <= window_s".to_string());
-        }
-        for id in &a.inputs {
-            if !iem_engine_proto::valid_id(id) {
-                out.push(format!("activity input '{id}' is not an input id"));
             }
         }
         out
@@ -454,30 +419,12 @@ mod tests {
     }
 
     #[test]
-    fn engine_pipe_and_activity_have_defaults() {
+    fn engine_pipe_and_the_switch_have_defaults() {
         let config: Config = toml::from_str("port = 81\n").unwrap();
         assert_eq!(config.engine_pipe, "iemmixer-engine");
         assert_eq!(Config::default().engine_pipe, "iemmixer-engine");
-        assert_eq!(
-            config.activity,
-            ActivityConfig {
-                threshold_dbfs: -50.0,
-                window_s: 300,
-                sustain_s: 120,
-                inputs: Vec::new(),
-            }
-        );
         assert!(config.back_to_reaper.is_empty());
-        let custom: Config = toml::from_str("[activity]\nwindow_s = 30\nsustain_s = 5\n").unwrap();
-        assert_eq!(custom.activity.threshold_dbfs, -50.0);
-        assert_eq!(
-            (custom.activity.window_s, custom.activity.sustain_s),
-            (30, 5)
-        );
-        assert!(custom.activity.inputs.is_empty(), "empty: every mics input");
-        let stage: Config = toml::from_str("[activity]\ninputs = [\"mic1\", \"keys\"]\n").unwrap();
-        assert_eq!(stage.activity.inputs, ["mic1", "keys"]);
-        assert_eq!(stage.activity.sustain_s, 120);
+        assert!(config.activity.is_none() && Config::default().activity.is_none());
     }
 
     #[test]
@@ -531,7 +478,6 @@ mod tests {
             "[dante_outputs]\nMEMBER1 = [71, 72]\n",
             "[[members]]\nname = \"Member1\"\ndante_output_l = 71\ndante_output_r = 72\n",
             "[[inputs]]\nname = \"KEYS\"\ndante_input = 109\n",
-            "[activity]\nwindow = 3\n",
         ] {
             assert!(toml::from_str::<Config>(text).is_err(), "{text}");
         }
@@ -652,12 +598,6 @@ mod tests {
                 input("keys", Some("keyboards"), None),
                 input("hand1", Some("tech"), Some("nobody")),
             ],
-            activity: ActivityConfig {
-                threshold_dbfs: 0.0,
-                window_s: 10,
-                sustain_s: 11,
-                inputs: vec!["mic1".into(), "Stage Mic".into()],
-            },
             ..Config::default()
         };
         let p = config.problems();
@@ -670,50 +610,9 @@ mod tests {
         assert!(has("input 'Mic2' is not an input id"), "{p:?}");
         assert!(has("category 'keyboards'"), "{p:?}");
         assert!(has("owner 'nobody' is not a member"), "{p:?}");
-        assert!(has("threshold_dbfs"), "{p:?}");
-        assert!(has("sustain_s <= window_s"), "{p:?}");
-        assert!(
-            has("activity input 'Stage Mic' is not an input id"),
-            "{p:?}"
-        );
-        assert!(!has("activity input 'mic1'"), "{p:?}");
-        assert_eq!(p.len(), 11, "{p:?}");
+        assert_eq!(p.len(), 8, "{p:?}");
         assert!(matches!(config.validate(), Err(ConfigError::Invalid(_))));
         assert!(Config::default().validate().is_ok());
-        let zero = Config {
-            activity: ActivityConfig {
-                window_s: 0,
-                sustain_s: 0,
-                ..ActivityConfig::default()
-            },
-            ..Config::default()
-        };
-        assert_eq!(zero.problems().len(), 1);
-        let no_sustain = Config {
-            activity: ActivityConfig {
-                sustain_s: 0,
-                ..ActivityConfig::default()
-            },
-            ..Config::default()
-        };
-        assert_eq!(no_sustain.problems().len(), 1, "sustain_s must be above 0");
-        let nan = Config {
-            activity: ActivityConfig {
-                threshold_dbfs: f64::NAN,
-                ..ActivityConfig::default()
-            },
-            ..Config::default()
-        };
-        assert_eq!(nan.problems().len(), 1);
-        let edge = Config {
-            activity: ActivityConfig {
-                window_s: 5,
-                sustain_s: 5,
-                ..ActivityConfig::default()
-            },
-            ..Config::default()
-        };
-        assert!(edge.problems().is_empty());
     }
 
     #[test]

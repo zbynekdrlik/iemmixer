@@ -5,7 +5,6 @@
 //! server's own logic (permissions, Mute All, solo clean-up, presets,
 //! history, backups, photos, push, SOS, tunnel health).
 
-pub mod activity;
 pub mod auth;
 pub mod backup;
 pub mod backup_daemon;
@@ -56,7 +55,7 @@ use axum::http::{HeaderName, HeaderValue};
 use iem_core::{Config, ServerMsg};
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::{RwLock, broadcast};
 use tower_http::set_header::SetResponseHeaderLayer;
@@ -82,14 +81,14 @@ pub enum To {
     All,
     /// Every connection on this page.
     Page(String),
-    /// Every connection with an engineer token, on any page.
-    Engineers,
     /// One connection.
     Session(u64),
 }
 
-/// The guard's mode (program spec §4.1): the band-activity alarm runs in
-/// `dev` only. `IEMMIXER_MODE` (S6's guard sets it).
+/// The guard's mode (program spec §4.1), `IEMMIXER_MODE` (S6's guard sets
+/// it), logged when the engine client starts. No server behaviour depends
+/// on it: the band-activity alarm, which ran in `dev` only, was removed by
+/// the owner's decision of 2026-10-06 (#38).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum RunMode {
     #[default]
@@ -161,8 +160,6 @@ pub struct AppState {
     pub talk: Arc<Mutex<talk::TalkLock>>,
     /// Active SOS alerts: member id → (member id, display name)
     pub alerts: Arc<Mutex<HashMap<String, (String, String)>>>,
-    /// The band-activity alarm is on
-    pub activity: Arc<AtomicBool>,
     pub mode: RunMode,
     /// Members whose daily auto-snapshot is taken: member → UTC day
     auto_snapshots: Arc<Mutex<HashMap<String, String>>>,
@@ -215,6 +212,11 @@ impl AppState {
             ?host,
             "CF-Connecting-IP is trusted from loopback and these host addresses"
         );
+        if config.activity.is_some() {
+            tracing::info!(
+                "site: the [activity] table is no longer read (the band-activity alarm was removed, #38); it can go"
+            );
+        }
         let (event_tx, _) = broadcast::channel(256);
         let (meters_tx, _) = broadcast::channel(16);
         Ok(Self {
@@ -235,7 +237,6 @@ impl AppState {
             solo: Arc::new(Mutex::new(solo::SoloJanitor::default())),
             talk: Arc::new(Mutex::new(talk::TalkLock::default())),
             alerts: Arc::new(Mutex::new(HashMap::new())),
-            activity: Arc::new(AtomicBool::new(false)),
             mode,
             auto_snapshots: Arc::new(Mutex::new(HashMap::new())),
             pin_store: Arc::new(RwLock::new(pin_store)),

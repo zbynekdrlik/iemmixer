@@ -28,23 +28,15 @@ tunnel_ready_url = "http://127.0.0.1:20241/ready"
 backup_schedule = ["13:00", "21:00"]
 backup_retention_days = 60
 # The engineer's "Back to REAPER" switch (program spec §4.3): the command the
-# server starts (no shell) after the engineer PIN and a confirmation. Empty or
-# absent: no button.
+# server starts (no shell) for POST /api/mode/event after the engineer PIN.
+# Empty or absent: no switch.
 back_to_reaper = ["iemmode", "event"]
 # PIN changes in the web UI (P9). Until the cutover PINs change only in the
 # predecessor app: the guard writes `false` into every dev and trial site
 # and the PIN dialog then shows why. Absent: true.
 pin_changes = true
-
-# Band-activity alarm while developing (§4.2): peaks of the stage inputs above
-# the threshold for sustain_s seconds within window_s seconds. `inputs` names
-# the engine inputs that count; empty or absent: every input of category mics.
-# Never the program input: it carries signal while the band is silent.
-[activity]
-threshold_dbfs = -50.0
-window_s = 300
-sustain_s = 120
-inputs = ["mic1"]
+# No [activity] table: the band-activity alarm was removed by the owner's
+# decision (#38); an older site's table is still accepted and ignored.
 
 # Band members and the engineer (login grid). `id` is the URL and the login
 # (keep the predecessor's ids: tokens stay valid), `name` the tile label,

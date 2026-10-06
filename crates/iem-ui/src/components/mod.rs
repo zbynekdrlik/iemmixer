@@ -1,6 +1,5 @@
 //! Reusable UI components
 
-pub mod activity_banner;
 pub mod alert_button;
 pub mod alert_toast;
 pub mod audio_player;

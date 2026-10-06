@@ -64,8 +64,6 @@ pub(super) struct MixerState {
     pub talk_state: SignalPair<TalkState>,
     /// The talk id of the held talkback lock (X6): the talkback socket binds with it.
     pub talk_id: SignalPair<Option<String>>,
-    /// Band activity while developing (§4.2): (active, the switch is configured).
-    pub band_activity: SignalPair<(bool, bool)>,
     /// The engineer's console (F29), once requested.
     pub console: SignalPair<Option<iem_core::ConsoleInfo>>,
     pub engineer_talking: SignalPair<bool>,
@@ -219,7 +217,6 @@ impl MixerState {
             alert_active: signal(false),
             talk_state: signal(TalkState::Idle),
             talk_id: signal(None),
-            band_activity: signal((false, false)),
             console: signal(None),
             engineer_talking: signal(false),
             tunnel: signal(None),
