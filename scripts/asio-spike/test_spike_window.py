@@ -623,7 +623,7 @@ class DevTimeWindowTests(unittest.TestCase):
 
         def fake_ps(env, body, timeout=300, event="finish"):
             self.calls.append(body)
-            return dict(self.pc)
+            return "absent" if "Test-SpikeTaskBusy" in body else dict(self.pc)   # clear_stop answers a text
 
         sw.ps = fake_ps
         self.env = {"PC_BUFFER_ORIGINAL": "64", "PC_BUFFER_KEY": "K", "PC_BUFFER_NAME": "N", "PC_ASIO_MODULE": "M",
@@ -674,8 +674,14 @@ class DevTimeWindowTests(unittest.TestCase):
         self.assertEqual(sw.load_state()["preflight"]["stop_file"], "removed")
 
     def test_preflight_leaves_the_stop_file_to_the_event_path(self) -> None:
+        # "ide event" lands while the preflight reads the PC (a flag before it refuses the whole step).
+        def fake_ps(env, body, timeout=300, event="finish"):
+            self.calls.append(body)
+            sw.EVENT_NOW.write_text("owner: ide event\n")
+            return "absent" if "Test-SpikeTaskBusy" in body else dict(self.pc)
+
+        sw.ps = fake_ps
         sw.cmd_new(self.env, self.args())
-        sw.EVENT_NOW.write_text("owner: ide event\n")
         sw.cmd_preflight(self.env, self.args())
         self.assertEqual([b for b in self.calls if "Test-SpikeTaskBusy" in b], [])
         self.assertIn("ide event", sw.load_state()["preflight"]["stop_file"])
