@@ -516,6 +516,20 @@ def spike_window_open() -> bool:
     return not (isinstance(state, dict) and state.get("closed") is True)
 
 
+def spike_window_settling() -> bool:
+    """A closed S1a/S1c window whose preempt (or to-event) still watches a PC
+    change that was in flight (spike_window's settle, without the lock): its
+    `settling` record is there and its bound not over. `spike_window.py
+    preempt` waits for that watch, so iemmode event never starts the guard's
+    bring-back next to the settle's (review of lane G2, finding 1)."""
+    try:
+        state = json.loads(SPIKE_STATE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    s = state.get("settling") if isinstance(state, dict) else None
+    return isinstance(s, dict) and isinstance(s.get("until"), (int, float)) and time.time() <= s["until"]
+
+
 def refuse_open_window(cmd: str) -> None:
     """The card goes to the guard only after the S1a/S1c window handed it over."""
     if spike_window_open():
@@ -835,7 +849,7 @@ def cmd_event(ctx: Ctx) -> int:
     deadline = time.monotonic() + EVENT_BUDGET_S
     if not dry:
         write_flag()
-    if spike_window_open():
+    if spike_window_open() or spike_window_settling():
         if dry:
             emit({"spike_window": "open", "plan": "spike_window.py preempt"})
         else:

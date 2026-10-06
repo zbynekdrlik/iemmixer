@@ -668,7 +668,7 @@ def settle(env: dict[str, str], intent: dict) -> dict:
     ends SETTLE_S after the step's process cleared its intent (its call and
     follow-up are back), and at the latest SETTLE_S after the intent's own
     bound. It runs without the lock, so that process can clear the intent."""
-    end = float(intent["started"]) + float(intent["bound_s"]) + SETTLE_S
+    end = settle_until(intent)
     cleared = False
     watched = {"step": intent["step"], "checks": 0, "brought_back_again": 0}
     while True:
@@ -703,14 +703,56 @@ def clear_stop(env: dict[str, str]) -> str:
             return f"error: {e}"
 
 
+def settle_until(intent: dict) -> float:
+    """The latest end of a settle on `intent` (wall clock)."""
+    return float(intent["started"]) + float(intent["bound_s"]) + SETTLE_S
+
+
+def settle_live(state: dict) -> bool:
+    """A preempt or to-event of some process still settles a PC change: its
+    record (`settling`, saved with the closing unwind) is there and its bound
+    not over (a settler that died holds nothing up past it)."""
+    s = state.get("settling")
+    return isinstance(s, dict) and time.time() <= float(s.get("until", 0))
+
+
+def wait_for_settle() -> None:
+    """A preempt that finds the window closed: the process that closed it may
+    still settle a PC change (without the lock). The caller (iempc event) must
+    not start the guard's bring-back next to the settle's, so this returns only
+    once that settle is over (review of lane G2, finding 1)."""
+    while settle_live(load_state()):
+        time.sleep(POLL_S)
+
+
 def close_out(env: dict[str, str], intent) -> dict:
     """After an unwind that closed the window (REAPER back): the settle watch
-    when a PC change was recorded in flight, then the stop file's clean-up."""
+    when a PC change was recorded in flight (its `settling` record goes when
+    it ends), then the stop file's clean-up."""
     out: dict = {}
-    if isinstance(intent, dict):
-        out["settle"] = settle(env, intent)
+    try:
+        if isinstance(intent, dict):
+            out["settle"] = settle(env, intent)
+    finally:
+        update_state(change=lambda st: st.pop("settling", None))
     out["stop_file"] = clear_stop(env)
     return out
+
+
+def unwind_closing(env: dict[str, str], state: dict, running: bool) -> list:
+    """The unwind of a preempt or to-event, under the lock the caller holds: a
+    PC change in flight gets its `settling` record saved with the close, so a
+    late step and every other preempt see the settle that follows; a failed
+    unwind drops the record again."""
+    intent = state.get("in_flight")
+    if isinstance(intent, dict):
+        state["settling"] = {"step": intent["step"], "until": settle_until(intent)}
+    try:
+        return unwind(env, state, running)
+    except BaseException:
+        if state.pop("settling", None) is not None:
+            save_state(state)
+        raise
 
 
 # ---- commands ----
@@ -802,9 +844,15 @@ def need_free_card(state: dict) -> None:
 
 
 def late_quit(env: dict[str, str]) -> Callable[[dict], None]:
-    """A save and quit that ended after the window closed: the preempt's settle
-    watched REAPER for the step's bound; past it the step is checked here."""
+    """A save and quit that ended after the window closed. While the preempt's
+    settle still watches (its record is live) that watch covers it: an alarm
+    here would send the owner to run the event path again, next to the
+    settle's own bring-back (review of lane G2, finding 1). Without a settle
+    (the window closed after a failed preempt, or the settle's bound is over)
+    REAPER is read here and the owner alarmed when it is off the card."""
     def check(state: dict) -> None:
+        if settle_live(state):
+            return
         if not reaper_on_card(env):
             alarm("REAPER is not on the card after a save and quit that ended after the pre-emption: run the event "
                   "path again (iempc event, or the interim switch) so REAPER comes back")
@@ -1095,7 +1143,7 @@ def cmd_to_event(env, args) -> None:
         if spike_running(env):
             raise StepError("a spike runs: wait for it, or preempt")
         intent = state.get("in_flight")
-        done = unwind(env, state, running=False)
+        done = unwind_closing(env, state, running=False)
     # The window is closed with REAPER back; a change of another process still in
     # flight is watched out without the lock (settle), then the stop file goes.
     print(json.dumps({"to-event": done}), flush=True)
@@ -1109,14 +1157,17 @@ def cmd_preempt(env, args=None) -> None:
     the stop file removed once the window closed (close_out)."""
     with window_lock():
         state = load_state()
-        if state.get("closed"):
-            print(json.dumps({"preempt": state["id"], "plan": [], "note": "window already closed"}))
-            return
-        running = spike_running(env, event="ignore")
-        intent = state.get("in_flight")
-        print(json.dumps({"preempt": state["id"], "plan": undo_plan(state, running), "in_flight": intent}), flush=True)
-        state["preempted"] = True
-        done = unwind(env, state, running)
+        closed = bool(state.get("closed"))
+        if not closed:
+            running = spike_running(env, event="ignore")
+            intent = state.get("in_flight")
+            print(json.dumps({"preempt": state["id"], "plan": undo_plan(state, running), "in_flight": intent}), flush=True)
+            state["preempted"] = True
+            done = unwind_closing(env, state, running)
+    if closed:
+        print(json.dumps({"preempt": state["id"], "plan": [], "note": "window already closed"}), flush=True)
+        wait_for_settle()   # the process that closed it may still settle a PC change
+        return
     print(json.dumps({"done": done}), flush=True)
     print(json.dumps({"close": close_out(env, intent)}))
 
