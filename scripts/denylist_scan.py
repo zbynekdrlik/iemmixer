@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import re
 import shlex
 import subprocess
@@ -487,8 +488,15 @@ class Scanner:
         return [Hit(f"{prefix}{self.shown(path)}: path", entry) for entry in self.entries_in(path)]
 
 
+# Local repository state must not redirect what the scan reads (#32 F5 m7): a replace ref swaps an
+# object for another in cat-file / ls-tree / show / rev-list (--no-replace-objects), and a grafts file
+# gives commits other parents, cutting history out of rev-list (an empty GIT_GRAFT_FILE)
+GIT_ENV = {"GIT_GRAFT_FILE": os.devnull, "GIT_NO_REPLACE_OBJECTS": "1"}
+
+
 def git(repo: Path, *args: str) -> bytes:
-    return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True).stdout
+    return subprocess.run(["git", "--no-replace-objects", "-C", str(repo), *args], check=True,
+                          capture_output=True, env={**os.environ, **GIT_ENV}).stdout
 
 
 @dataclass(frozen=True)
