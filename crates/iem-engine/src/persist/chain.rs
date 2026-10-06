@@ -169,7 +169,7 @@ impl Store {
         let floor = match self.list() {
             Ok(listed) => listed.floor,
             Err(e) => {
-                loaded.alarms.push(format!(
+                loaded.doubt(format!(
                     "the revisions the state files' names show cannot be listed ({e})"
                 ));
                 None
@@ -188,7 +188,7 @@ impl Store {
         let shown = floor.map_or_else(String::new, |floor| {
             format!(" (the names show revision {floor} at most)")
         });
-        loaded.alarms.push(format!(
+        loaded.doubt(format!(
             "{names} cannot be read, so the revision continues at {rev}, \
              above anything {it} can hold{shown}"
         ));
@@ -265,6 +265,7 @@ impl Store {
             rejected: pick.rejected,
             dropped: Vec::new(),
             alarms: pick.alarms,
+            doubts: pick.doubts,
             current_json: pick.current_json,
             save_tmp: pick.save_tmp,
         };
@@ -364,7 +365,7 @@ impl Store {
             (Read::Valid(tmp), _) => {
                 // #32 P8: compared with nothing when the listing failed.
                 if let Some(e) = unlisted {
-                    pick.alarms.push(format!(
+                    pick.doubt(format!(
                         "save.tmp is loaded without comparing it with the \
                          generations, which cannot be listed ({e})"
                     ));
@@ -546,7 +547,7 @@ impl Store {
                 ));
             }
             Err(e) => {
-                pick.alarms.push(format!(
+                pick.doubt(format!(
                     "{name} cannot be read ({e}): the state loaded may be older"
                 ));
                 pick.rejected.push((path.to_path_buf(), e.to_string()));
@@ -609,6 +610,8 @@ impl Read {
 struct Pick {
     rejected: Vec<(PathBuf, String)>,
     alarms: Vec<String>,
+    /// The alarms that leave the live state in doubt (`Loaded::doubts`).
+    doubts: Vec<String>,
     current_json: FileState,
     save_tmp: FileState,
     /// Live files that could not be read (`current.json`, a generation
@@ -616,6 +619,22 @@ struct Pick {
     passed_over: Vec<String>,
     /// Pauses between read tries so far (`READ_PAUSES` at most).
     paused: usize,
+}
+
+impl Pick {
+    /// An alarm that leaves the live state in doubt (`Loaded::doubts`).
+    fn doubt(&mut self, alarm: String) {
+        self.doubts.push(alarm.clone());
+        self.alarms.push(alarm);
+    }
+}
+
+impl Loaded {
+    /// An alarm that leaves the live state in doubt (`Loaded::doubts`).
+    fn doubt(&mut self, alarm: String) {
+        self.doubts.push(alarm.clone());
+        self.alarms.push(alarm);
+    }
 }
 
 /// Whether an interrupted save (`save.tmp`) supersedes the state it
@@ -651,6 +670,7 @@ fn settle(topo: &Topology, mut persisted: Persisted, source: Source, pick: Pick)
         rejected: pick.rejected,
         dropped,
         alarms: pick.alarms,
+        doubts: pick.doubts,
         current_json: pick.current_json,
         save_tmp: pick.save_tmp,
     }
