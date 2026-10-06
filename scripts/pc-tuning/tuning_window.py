@@ -75,8 +75,11 @@ def load_profile(path: Path) -> dict:
 # The profile's processor rules (#32 MINOR-6, MAJOR-2 and its review) are the
 # same as IemTuning's ConvertTo-IemLpNumber / ConvertTo-IemLpList /
 # Assert-IemLayout / Get-IemDeviceLps; both self-tests run the shared cases of
-# profile_cases.json. So a profile tuning-setup copies to the PC is never one the
-# PC refuses (or whose state step throws there).
+# profile_cases.json. load_profile refuses every processor SHAPE the PC refuses
+# (numbers, lists, layout, device lps, rss bounds), so the state step's device
+# mask and RSS read never throw on a copied profile. Relations (a card's lps
+# against layout.card, a device on a card or audio processor, processors that
+# are not present) are checked only on the PC, before any write.
 
 def lp_number(value) -> bool:
     """An integer 0..63. type(), not isinstance(): a bool is an int subclass;

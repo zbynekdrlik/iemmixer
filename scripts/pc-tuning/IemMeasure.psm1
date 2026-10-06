@@ -96,10 +96,11 @@ function Start-IemTrace {
 
 function ConvertTo-TraceDir {
     # Module-private (#32 MAJOR-1): a trace's run folder in one canonical form, so
-    # the start (xperf -f) and every stop compare the same text: GetFullPath folds
-    # doubled and forward separators and . or .. segments, as the path ETW stores
-    # is folded. It is a folder on a drive, never a drive root or a relative path
-    # (under which every kernel trace would count as ours), checked before and after.
+    # xperf's -f (the start) and every stop use one text: GetFullPath folds doubled
+    # and forward separators and . or .. segments. Never rely on ETW folding a path:
+    # the start must go through here too. It is a folder on a drive, never a drive
+    # root or a relative path (under which every kernel trace would count as ours),
+    # checked before and after.
     param([Parameter(Mandatory)][string]$Dir)
     $refused = "trace directory '$Dir': not a folder on a drive (X:\folder); a drive root or a relative path is refused"
     if ($Dir -notmatch '^[A-Za-z]:[\\/]') { throw $refused }
