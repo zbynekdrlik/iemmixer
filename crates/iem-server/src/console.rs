@@ -370,6 +370,21 @@ mod tests {
         );
     }
 
+    /// The console says whether this site has the "Back to REAPER" switch
+    /// (§4.3): the engineer's settings show its button only then. #38 moved
+    /// the button out of the band-activity banner into the console.
+    #[tokio::test]
+    async fn the_console_tells_whether_the_switch_is_configured() {
+        let (_d, s) = state();
+        let v = test_view();
+        let json = serde_json::to_value(console_info(&s, &v)).unwrap();
+        assert_eq!(json["can_switch"], true, "the test site's switch");
+        let dir = tempfile::tempdir().unwrap();
+        let none = AppState::new(iem_core::Config::default(), dir.path());
+        let json = serde_json::to_value(console_info(&none, &v)).unwrap();
+        assert_eq!(json["can_switch"], false, "no back_to_reaper: no button");
+    }
+
     #[tokio::test]
     async fn alerts_are_raised_once_and_cleared_by_their_member_or_the_engineer() {
         let (_d, s) = state();

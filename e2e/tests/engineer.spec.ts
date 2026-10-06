@@ -1,11 +1,13 @@
 import { test, expect } from "./support/fixtures";
+import { ENGINEER_PIN } from "./support/pins";
 import { openMixer, strip, tab } from "./support/session";
 import { PageSocket } from "./support/wire";
 
 // The engineer's pages against the real engine: restore with preview (F31),
 // Mute All (F15), the Mixes tab (F16), SOS (F20), the console and the
-// translator page (F29), and no band-activity banner however loud the stage
-// (#38 — the engine's 1 kHz sine on every input).
+// translator page (F29), "Back to REAPER" in the console (§4.3 — the test
+// site's switch command is `true`), and no band-activity banner however loud
+// the stage (#38 — the engine's 1 kHz sine on every input).
 
 test.describe.configure({ mode: "serial" });
 
@@ -67,6 +69,42 @@ test.describe("Engineer", () => {
     await page.waitForURL("**/translator");
     await expect(page.locator(".mixer-header h1")).toHaveText("Translator");
     await expect(page.getByTestId("global-volume-fader")).toBeVisible({ timeout: 15_000 });
+  });
+
+  // §4.3, D4: the engineer's emergency brake is a person's decision, so it
+  // stays (#38 removed only the level-triggered banner it used to sit in).
+  // It lives in the console of the engineer's settings, with no banner, and
+  // the engineer PIN confirms it; a member's settings have no such button.
+  test("the engineer's settings offer Back to REAPER, confirmed with the PIN (§4.3)", async ({
+    page,
+    browser,
+  }) => {
+    await openMixer(page, "engineer", { engineer: true });
+    await expect(page.getByTestId("band-activity")).toHaveCount(0);
+    await page.locator(".settings-btn").click();
+    const sw = page.getByTestId("console-section").getByTestId("back-to-reaper");
+    await expect(sw).toBeVisible({ timeout: 10_000 });
+    await sw.locator(".back-to-reaper-btn").click();
+    const pin = sw.getByTestId("switch-pin");
+    await expect(pin).toBeVisible();
+    await expect(sw.locator(".back-to-reaper-confirm")).toBeDisabled();
+    await pin.fill(ENGINEER_PIN);
+    const answer = page.waitForResponse(
+      (r) => r.url().endsWith("/api/mode/event") && r.request().method() === "POST",
+    );
+    await sw.locator(".back-to-reaper-confirm").click();
+    expect((await answer).status()).toBe(202);
+    await expect(sw).toContainText("Prepína sa na REAPER");
+    await expect(page.getByTestId("band-activity")).toHaveCount(0);
+
+    const ctx = await browser.newContext();
+    const member = await ctx.newPage();
+    await openMixer(member, "member3");
+    await member.locator(".settings-btn").click();
+    await expect(member.locator(".settings-modal")).toBeVisible();
+    await expect(member.getByTestId("back-to-reaper")).toHaveCount(0);
+    await expect(member.locator(".back-to-reaper-btn")).toHaveCount(0);
+    await ctx.close();
   });
 
   test("Mute All mutes every channel of the engineer's mix (F15)", async ({ page }) => {
