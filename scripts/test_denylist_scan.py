@@ -1064,6 +1064,57 @@ class DenylistScanTests(unittest.TestCase):
                     code, out = self.scan("--commits", "HEAD~1..HEAD")
                     self.assertEqual(out.count(f" {name}:"), 1, out)
 
+    # --- #32 F5 m9: a long line or run is read in bounded, overlapping segments ---
+
+    def assert_within_the_memory_budget(self, content: bytes, terms: list[str]) -> None:
+        self.deny.write_text("\n".join(terms) + "\n", encoding="utf-8")
+        self.commit({"long.bin": content})
+        tracemalloc.start()
+        try:
+            code, out = self.scan("--tree", "HEAD")
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        self.assertEqual(code, 0, out)
+        self.assertLess(peak, 2 * len(content) + BUDGET_MEMORY_BEYOND_BLOB, f"{peak / (1 << 20):.0f} MiB peak")
+
+    def test_one_long_line_stays_within_the_memory_budget(self) -> None:
+        # batches were cut only at a line break, so a 4 MiB line was one batch and each of its
+        # readings a copy of it (escapes, accents and invisible characters make most of them)
+        unit = "abc \\x41 é\xad &amp; %41 ".encode()
+        self.assert_within_the_memory_budget(unit * (BUDGET_BLOB // len(unit)), [*BUDGET_TERMS, "ďabc"])
+
+    def test_one_long_binary_run_stays_within_the_memory_budget(self) -> None:
+        unit = "abcd é\xad zz ".encode()
+        self.assert_within_the_memory_budget(b"\x00" + unit * (BUDGET_BLOB // len(unit)) + b"\x00",
+                                             [*BUDGET_TERMS, "ďabc"])
+
+    def test_a_term_across_a_segment_boundary_is_found_once_and_keyed_alike(self) -> None:
+        # the term starts 3 characters before the unit's first CHUNK ends; its line or run is
+        # allowlisted by one --hash key in tree and commit mode
+        long = "x" * (ds.CHUNK - 4) + " zyxname " + "y" * ds.CHUNK
+        noise = random.Random(9).randbytes(4 * ds.CHUNK).replace(b"\x00", b"\x01")  # keeps a wide string binary
+        cases = {"text.txt": (("first\n" + long + "\n").encode(), "2"),
+                 "run.bin": (b"\x00\x01" + long.encode() + b"\x00", "run 1"),
+                 "wide.txt": (("first\n" + long + "\n").encode("utf-16"), "2"),
+                 "wide-run.bin": (b"\x00\x02" + long.encode("utf-16-le") + b"\x00\x00" + noise, None)}
+        for name, (content, unit) in cases.items():
+            with self.subTest(name=name):
+                self.commit({"base.txt": f"base {name}\n"})
+                self.commit({name: content})
+                for mode in (("--tree", "HEAD"), ("--commits", "HEAD~1..HEAD")):
+                    code, out = self.scan(*mode)
+                    self.assertEqual(code, 1, mode)
+                    self.assertEqual(out.count(f" {name}"), 1, out)
+                    self.assertNotIn("zyxname", out.lower())
+                if unit is None:  # the wide run's number depends on the noise's own runs
+                    unit = next(line for line in out.splitlines() if name in line).split(":")[1].strip()
+                allow = self.tmp / "allow.txt"
+                allow.write_text(self.hash_key(name, unit) + "  reviewed ordinary prose\n", encoding="utf-8")
+                self.assertEqual(self.scan("--allow", str(allow), "--tree", "HEAD", "--commits", "HEAD~1..HEAD"),
+                                 (0, "denylist: clean\n"))
+                self.commit({name: b"removed"})
+
     def test_a_named_reference_never_makes_a_batch_separator(self) -> None:
         # a reading that created U+E000 would shift every later unit: the hit must stay on line 3
         self.commit({"a.html": "&dcaron;\n&#xE000;&#57344;\nkeep zyxname\n"})
