@@ -806,11 +806,14 @@ def close_failed_window(deadline: float, error: str) -> None:
     may be bringing REAPER back itself: no iemmode call. Nothing else in the
     state changes: the guard's event plan brings REAPER back."""
     sw = spike_module()
+    seen: dict = {}
 
     def close(st: dict) -> None:
         if not st.get("closed"):
             st["closed"] = True
             st["closed_by"] = {"by": "iempc event after a failed spike preempt", "at": now_iso(), "error": error[-500:]}
+        if sw.intent_live(st.get("in_flight")):
+            seen["in_flight"] = st["in_flight"]
 
     wait = deadline - time.monotonic() - SWITCH_MIN_S
     try:
@@ -828,7 +831,12 @@ def close_failed_window(deadline: float, error: str) -> None:
               file=sys.stderr, flush=True)
         emit({"spike_window": "unreadable", "after": "a failed spike preempt"})
         return
-    emit({"spike_window": "closed", "after": "a failed spike preempt"})
+    if seen:
+        # No settle watches it on this path (review of lane G2, finding 5): the step's
+        # own late handler sees the window closed, and the guard takes REAPER.
+        print(f"iempc: WARNING: {seen['in_flight'].get('step')} is still in flight in the closed window: its own "
+              "follow-up runs when its call is back; check REAPER once iemmode event is done", file=sys.stderr, flush=True)
+    emit({"spike_window": "closed", "after": "a failed spike preempt", **seen})
 
 
 def switch_timeout(deadline: float) -> float:

@@ -680,21 +680,31 @@ def settle(env: dict[str, str], intent: dict) -> dict:
     window lock, an owner alarm) when the late step took it down. The watch
     ends SETTLE_S after the step's process cleared its intent (its call and
     follow-up are back), and at the latest SETTLE_S after the intent's own
-    bound. It runs without the lock, so that process can clear the intent."""
+    bound. It runs without the lock, so that process can clear the intent. A
+    read or a bring-back that fails is an owner alarm and the watch goes on
+    (review of lane G2, finding 5); `on_card` tells whether its last read saw
+    REAPER on the card."""
     end = settle_until(intent)
     cleared = False
-    watched = {"step": intent["step"], "checks": 0, "brought_back_again": 0}
+    watched = {"step": intent["step"], "checks": 0, "brought_back_again": 0, "errors": 0, "on_card": False}
     while True:
         if not cleared and load_state().get("in_flight") != intent:
             cleared = True
             end = min(end, time.time() + SETTLE_S)
         watched["checks"] += 1
-        if not reaper_on_card(env):
-            with window_lock():
-                alarm(f"REAPER was down or off the card after the bring-back ({intent['step']} was still in flight): "
-                      "it is brought back again")
-                bring_back(env, load_state())
-            watched["brought_back_again"] += 1
+        try:
+            watched["on_card"] = reaper_on_card(env)
+            if not watched["on_card"]:
+                with window_lock():
+                    alarm(f"REAPER was down or off the card after the bring-back ({intent['step']} was still in flight): "
+                          "it is brought back again")
+                    bring_back(env, load_state())
+                watched["brought_back_again"] += 1
+                watched["on_card"] = True   # the bring-back's own handover checks passed
+        except StepError as e:
+            watched["errors"] += 1
+            watched["on_card"] = False
+            alarm(f"while {intent['step']} was in flight REAPER could not be read or brought back ({e}): the watch goes on")
         if time.time() >= end:
             return watched
         time.sleep(POLL_S)
@@ -775,8 +785,14 @@ def close_out(env: dict[str, str], intent, done: list) -> dict:
             if any(isinstance(d.get("tuning-exit"), dict) and "deferred" in d["tuning-exit"] for d in done):
                 out["deferred_exit"] = exit_left_behind(env, intent)
     finally:
-        update_state(change=lambda st: st.pop("settling", None))
-    out["stop_file"] = clear_stop(env)
+        try:
+            update_state(change=lambda st: st.pop("settling", None))
+        finally:
+            out["stop_file"] = clear_stop(env)   # however the watch ended (review of lane G2, finding 5)
+    print(json.dumps({"close": out}), flush=True)
+    if not out.get("settle", {}).get("on_card", True):
+        raise StepError(f"REAPER was not seen on the card at the end of the watch over {intent['step']}: the event path "
+                        "brings it back (iemmode event)")
     return out
 
 
@@ -1204,7 +1220,7 @@ def cmd_to_event(env, args) -> None:
     # The window is closed with REAPER back; a change of another process still in
     # flight is watched out without the lock (settle), then the stop file goes.
     print(json.dumps({"to-event": done}), flush=True)
-    print(json.dumps({"close": close_out(env, intent, done)}))
+    close_out(env, intent, done)
 
 
 def cmd_preempt(env, args=None) -> None:
@@ -1226,7 +1242,7 @@ def cmd_preempt(env, args=None) -> None:
         wait_for_settle()   # the process that closed it may still settle a PC change
         return
     print(json.dumps({"done": done}), flush=True)
-    print(json.dumps({"close": close_out(env, intent, done)}))
+    close_out(env, intent, done)
 
 
 # Steps inside an open window: an error in one while the flag exists pre-empts.
