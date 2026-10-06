@@ -2,15 +2,45 @@
 and runs in segments, the members of containers."""
 from __future__ import annotations
 
+import bz2
+import gzip
+import io
+import lzma
 import random
 import sys
+import tarfile
 import tracemalloc
 import unittest
+import zipfile
+import zlib
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import denylist_content as dc  # noqa: E402
 from denylist_test_support import BUDGET_BLOB, BUDGET_MEMORY_BEYOND_BLOB, BUDGET_TERMS, ScanTestCase  # noqa: E402
+
+
+def zipped(members: dict[str, bytes], method: int = zipfile.ZIP_DEFLATED) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", method) as archive:
+        for name, content in members.items():
+            archive.writestr(name, content)
+    return buffer.getvalue()
+
+
+def tarred(members: dict[str, bytes]) -> bytes:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as archive:
+        for name, content in members.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(content)
+            archive.addfile(info, io.BytesIO(content))
+    return buffer.getvalue()
+
+
+def png_chunk(kind: bytes, body: bytes) -> bytes:
+    return len(body).to_bytes(4, "big") + kind + body + zlib.crc32(kind + body).to_bytes(4, "big")
 
 
 class ContentTests(ScanTestCase):
@@ -79,6 +109,79 @@ class ContentTests(ScanTestCase):
                 self.assertEqual(self.scan("--allow", str(allow), "--tree", "HEAD", "--commits", "HEAD~1..HEAD"),
                                  (0, "denylist: clean\n"))
                 self.commit({name: b"removed"})
+
+    # --- #32 F5 m6: the members of containers are decompressed and scanned, or the blob is a finding ---
+
+    def assert_findings_in_both_modes(self, files: dict[str, bytes], *expected: str) -> None:
+        self.commit({"base.txt": f"base {sorted(files)}\n"})
+        self.commit(files)
+        for prefix, mode in (("tree ", ("--tree", "HEAD")), ("", ("--commits", "HEAD~1..HEAD"))):
+            code, out = self.scan(*mode)
+            self.assertEqual(code, 1, out)
+            self.assertNotIn("zyxname", out.lower())
+            for location in expected:
+                self.assertIn(f"{prefix}{location}" if prefix else f" {location}", out)
+
+    def test_the_members_of_zip_based_files_are_scanned(self) -> None:
+        # a docx / xlsx / odt is a zip of deflated XML: its raw bytes hold no readable term
+        document = b'<w:document><w:t>by zyxname</w:t></w:document>\n'
+        inner = zipped({"c.txt": b"first\nkeep zyxname\n"})
+        self.assert_findings_in_both_modes(
+            {"doc.docx": zipped({"[Content_Types].xml": b"<Types/>", "word/document.xml": document}),
+             "sheet.xlsx": zipped({"xl/sharedStrings.xml": b"<sst><si><t>zyxname</t></si></sst>"}),
+             "outer.zip": zipped({"b.zip": inner}, zipfile.ZIP_STORED)},
+            "doc.docx!/word/document.xml:1: denylist entry 1", "sheet.xlsx!/xl/sharedStrings.xml:1: denylist entry 1",
+            "outer.zip!/b.zip!/c.txt:2: denylist entry 1")
+
+    def test_compressed_streams_and_tar_members_are_scanned(self) -> None:
+        text = b"line one\nhello zyxname\n"
+        self.assert_findings_in_both_modes(
+            {"a.txt.gz": gzip.compress(text), "a.txt.bz2": bz2.compress(text), "a.txt.xz": lzma.compress(text),
+             "two.gz": gzip.compress(b"clean\n") + gzip.compress(text),
+             "b.tar.gz": gzip.compress(tarred({"dir/note.txt": b"by zyxname\n", "dir/clean.txt": b"clean\n"}))},
+            "a.txt.gz!/:2: denylist entry 1", "a.txt.bz2!/:2: denylist entry 1", "a.txt.xz!/:2: denylist entry 1",
+            "two.gz!/:3: denylist entry 1", "b.tar.gz!/!/dir/note.txt:1: denylist entry 1")
+
+    def test_a_member_name_is_scanned_and_shown_like_a_path(self) -> None:
+        self.assert_findings_in_both_modes(
+            {"names.zip": zipped({"docs/zyxname-notes.txt": b"clean\n", "résumé/a.txt": b"x zyxname\n"})},
+            "names.zip!/docs/[redacted]: path: denylist entry 1", "names.zip!/[redacted]/a.txt:1: denylist entry 1")
+
+    def test_a_member_over_a_limit_or_broken_is_a_finding(self) -> None:
+        encrypted = bytearray(zipped({"secret.txt": b"zyxname\n"}))
+        central = encrypted.index(b"PK\x01\x02")
+        encrypted[central + 8] |= 1  # the central directory's general purpose flag: encrypted
+        self.assert_findings_in_both_modes(
+            {"bomb.zip": zipped({"zeros.bin": bytes(4 << 20)}), "broken.zip": b"PK\x03\x04" + bytes(40) + b"zyx",
+             "secret.zip": bytes(encrypted), "cut.gz": gzip.compress(b"hello zyxname\n" * 50)[:-30]},
+            "bomb.zip!/zeros.bin: cannot be scanned: ", "broken.zip: cannot be scanned: ",
+            "secret.zip!/secret.txt: cannot be scanned: ", "cut.gz!/: cannot be scanned: ")
+        with mock.patch("denylist_containers.MEMBER_LIMIT", 1 << 10):
+            self.assert_findings_in_both_modes({"big.zip": zipped({"big.txt": b"clean words " * 200})},
+                                               "big.zip!/big.txt: cannot be scanned: ")
+
+    def test_other_containers_are_findings_allowlisted_by_their_blob_key(self) -> None:
+        pdf = (b"%PDF-1.4\n1 0 obj << /Length 20 /Filter /FlateDecode >> stream\n" + zlib.compress(b"(zyxname) Tj")
+               + b"\nendstream endobj\n%%EOF\n")
+        png = (b"\x89PNG\r\n\x1a\n" + png_chunk(b"IHDR", bytes(13))
+               + png_chunk(b"zTXt", b"Comment\x00\x00" + zlib.compress(b"by zyxname")) + png_chunk(b"IEND", b""))
+        files = {"a.7z": b"7z\xbc\xaf\x27\x1c" + bytes(30), "doc.pdf": pdf, "img.png": png,
+                 "a.zst": b"\x28\xb5\x2f\xfd" + bytes(20)}
+        self.assert_findings_in_both_modes(files, *(f"{name}: cannot be scanned: " for name in files))
+        allow = self.tmp / "allow.txt"
+        allow.write_text("".join(f"{self.hash_key(name, 'blob')}  reviewed, no site data\n" for name in files),
+                         encoding="utf-8")
+        self.assertEqual(self.scan("--allow", str(allow), "--tree", "HEAD", "--commits", "HEAD~1..HEAD"),
+                         (0, "denylist: clean\n"))
+
+    def test_a_member_line_is_allowlisted_and_only_new_member_units_count_in_commit_mode(self) -> None:
+        self.commit({"pack.zip": zipped({"a.txt": b"keep zyxname here\n", "b.txt": b"one\n"})})
+        self.assertEqual(self.scan("--tree", "HEAD")[0], 1)
+        allow = self.tmp / "allow.txt"
+        allow.write_text(self.hash_key("pack.zip!/a.txt", "1") + "  reviewed ordinary prose\n", encoding="utf-8")
+        self.assertEqual(self.scan("--allow", str(allow), "--tree", "HEAD", "--commits", "HEAD"), (0, "denylist: clean\n"))
+        self.commit({"pack.zip": zipped({"a.txt": b"keep zyxname here\n", "b.txt": b"two\n"})})
+        self.assertEqual(self.scan("--commits", "HEAD~1..HEAD"), (0, "denylist: clean\n"))
 
 
 if __name__ == "__main__":
