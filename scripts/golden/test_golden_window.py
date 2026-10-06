@@ -39,6 +39,13 @@ class OrderTests(unittest.TestCase):
         with self.assertRaisesRegex(gw.StepError, "next step is 'interlock'"):
             gw.check_order(state, "backup")
 
+    def test_the_save_and_quit_follows_the_preflight(self) -> None:
+        # #38 (owner, 2026-10-06): the owner's "event skončil" opens the window; no
+        # step reads the stage between it and REAPER's save and quit.
+        gw.check_order({"done": ["preflight"]}, "save-quit")
+        self.assertEqual(gw.STEPS[:2], ("preflight", "save-quit"))
+        self.assertEqual(gw.CHANGING[0], "save-quit")
+
     def test_signal_must_quote_the_owner(self) -> None:
         gw.check_signal("owner 2026-09-27 21:05: event skončil")
         with self.assertRaises(gw.StepError):
