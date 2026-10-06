@@ -9,8 +9,8 @@ use std::cell::Cell;
 #[test]
 fn early_ends_have_their_outcomes() {
     assert_eq!(
-        [End::Stopped, End::RateChanged, End::BandActivity].map(End::outcome),
-        ["stopped", "rate-changed", "band-activity"]
+        [End::Stopped, End::RateChanged].map(End::outcome),
+        ["stopped", "rate-changed"]
     );
 }
 
@@ -27,17 +27,22 @@ fn a_placement_reports_null_its_ids_or_its_error() {
     );
 }
 
+/// A watch whose first second ends at `t0` + 1 s.
+fn a_watch(t0: Instant) -> Watch {
+    Watch::new(t0)
+}
+
 #[test]
-fn the_watch_stops_on_the_stop_file_a_rate_change_and_band_activity() {
+fn the_watch_stops_on_the_stop_file_and_a_rate_change_and_reads_once_a_second() {
     let t0 = Instant::now();
     let s = Duration::from_secs(1);
-    let mut w = Watch::new(t0, Watched::All);
+    let mut w = a_watch(t0);
     assert_eq!(w.poll(t0, true, true, || vec![0.01]), Some(End::Stopped));
     assert_eq!(
         w.poll(t0, false, true, || vec![0.01]),
         Some(End::RateChanged)
     );
-    // The peaks are read once a second; three loud seconds in a row are band activity.
+    // The peaks are read once a second (reading empties the stream's peaks).
     let reads = Cell::new(0);
     let peaks = || {
         reads.set(reads.get() + 1);
@@ -49,79 +54,19 @@ fn the_watch_stops_on_the_stop_file_a_rate_change_and_band_activity() {
     assert_eq!(w.poll(t0 + s, false, false, peaks), None);
     assert_eq!(reads.get(), 1);
     assert_eq!(w.poll(t0 + 2 * s, false, false, peaks), None);
-    assert_eq!(
-        w.poll(t0 + 3 * s, false, false, peaks),
-        Some(End::BandActivity)
-    );
-    assert_eq!(reads.get(), 3);
-}
-
-#[test]
-fn a_quiet_second_resets_the_band_guard_and_a_late_poll_reads_once() {
-    let t0 = Instant::now();
-    let s = Duration::from_secs(1);
-    let mut w = Watch::new(t0, Watched::All);
-    assert_eq!(w.poll(t0 + s, false, false, || vec![0.5]), None);
-    assert_eq!(w.poll(t0 + 2 * s, false, false, || vec![0.0]), None);
-    assert_eq!(w.poll(t0 + 3 * s, false, false, || vec![0.5]), None);
+    assert_eq!(reads.get(), 2);
     // A pause of 10 s (a reopen): one read, the next one a second later.
-    let reads = Cell::new(0);
-    let peaks = || {
-        reads.set(reads.get() + 1);
-        vec![0.5]
-    };
+    assert_eq!(w.poll(t0 + 12 * s, false, false, peaks), None);
+    assert_eq!(w.poll(t0 + 12 * s, false, false, peaks), None);
+    assert_eq!(reads.get(), 3);
     assert_eq!(w.poll(t0 + 13 * s, false, false, peaks), None);
-    assert_eq!(w.poll(t0 + 13 * s, false, false, peaks), None);
-    assert_eq!(reads.get(), 1);
-    assert_eq!(
-        w.poll(t0 + 14 * s, false, false, peaks),
-        Some(End::BandActivity)
-    );
+    assert_eq!(reads.get(), 4);
 }
 
 #[test]
-fn a_loud_input_outside_the_stage_inputs_does_not_stop_the_run_but_is_reported() {
+fn the_levels_list_the_loudest_input_and_the_five_loudest_inputs() {
     let t0 = Instant::now();
-    let s = Duration::from_secs(1);
-    // Stage inputs 2 and 3 (card numbers); input 1 carries program material.
-    let mut w = Watch::new(t0, Watched::parse("2-3").unwrap());
-    for k in 1..=10 {
-        assert_eq!(
-            w.poll(t0 + k * s, false, false, || vec![0.76, 0.001, 0.0, 0.02]),
-            None,
-            "second {k}"
-        );
-    }
-    let mut report = serde_json::json!({ "tool": "asio_spike" });
-    w.record_levels(&mut report);
-    assert_eq!(report["loudest_input_dbfs"], dbfs(0.76));
-    assert_eq!(report["loudest_watched_dbfs"], dbfs(0.001));
-    assert_eq!(
-        report["loudest_inputs"],
-        serde_json::json!([
-            { "channel": 1, "index": 0, "dbfs": dbfs(0.76) },
-            { "channel": 4, "index": 3, "dbfs": dbfs(0.02) },
-            { "channel": 2, "index": 1, "dbfs": dbfs(0.001) },
-        ])
-    );
-    assert_eq!(report["activity_channels"], serde_json::json!([2, 3]));
-    // The stage inputs get loud: three seconds in a row stop the run.
-    for k in 11..=12 {
-        assert_eq!(
-            w.poll(t0 + k * s, false, false, || vec![0.0, 0.0, 0.5]),
-            None
-        );
-    }
-    assert_eq!(
-        w.poll(t0 + 13 * s, false, false, || vec![0.0, 0.0, 0.5]),
-        Some(End::BandActivity)
-    );
-}
-
-#[test]
-fn the_levels_list_the_five_loudest_inputs_and_all_when_every_input_is_watched() {
-    let t0 = Instant::now();
-    let mut w = Watch::new(t0, Watched::All);
+    let mut w = a_watch(t0);
     let peaks: Vec<f64> = (0..8).map(|i| f64::from(i) / 8.0).collect();
     assert_eq!(
         w.poll(t0 + Duration::from_secs(1), false, false, || peaks),
@@ -136,14 +81,14 @@ fn the_levels_list_the_five_loudest_inputs_and_all_when_every_input_is_watched()
         .map(|e| e["channel"].as_u64().unwrap())
         .collect();
     assert_eq!(listed, [8, 7, 6, 5, 4]);
-    assert_eq!(progress["activity_channels"], "all");
-    assert_eq!(progress["loudest_watched_dbfs"], dbfs(7.0 / 8.0));
+    assert_eq!(
+        progress["loudest_inputs"][0],
+        serde_json::json!({ "channel": 8, "index": 7, "dbfs": dbfs(7.0 / 8.0) })
+    );
+    assert_eq!(progress["loudest_input_dbfs"], dbfs(7.0 / 8.0));
     assert_eq!(progress["elapsed_s"], 5);
-}
-
-/// A watch whose first second ends at `t0` + 1 s.
-fn a_watch(t0: Instant) -> Watch {
-    Watch::new(t0, Watched::All)
+    // Only the levels: no inputs listened to, no level of theirs (#38).
+    assert_eq!(progress.as_object().map(|o| o.len()), Some(3), "{progress}");
 }
 
 /// #38 (owner, 2026-10-06): no input level ends a run. Other devices on the
@@ -320,7 +265,7 @@ fn argv(s: &str) -> Vec<String> {
 #[test]
 fn parses_a_duplex_run_under_load() {
     let a = parse(&argv(
-        "duplex --driver D1 --report r.json --stop-file stop --progress p.json --frames 32 --seconds 600 --burn-us 100 --stress 4 --panic-at 7 --cycles 3 --activity-channels 101-110,121-124 --audio-cpus 14 --stress-cpus 6-13",
+        "duplex --driver D1 --report r.json --stop-file stop --progress p.json --frames 32 --seconds 600 --burn-us 100 --stress 4 --panic-at 7 --cycles 3 --audio-cpus 14 --stress-cpus 6-13",
     ))
     .unwrap();
     assert_eq!(
@@ -341,7 +286,6 @@ fn parses_a_duplex_run_under_load() {
             stress_cpus: vec![6, 7, 8, 9, 10, 11, 12, 13],
             cpu: None,
             threshold_us: 10,
-            watched: Watched::parse("101-110,121-124").unwrap(),
         }
     );
 }
@@ -354,10 +298,10 @@ fn probe_needs_no_frames_and_has_defaults() {
         (Mode::Probe, 0, 600, 5, None)
     );
     let r = parse(&argv(
-        "reopen --driver D1 --report r --stop-file s --frames 48 --activity-channels all",
+        "reopen --driver D1 --report r --stop-file s --frames 48",
     ))
     .unwrap();
-    assert_eq!((r.mode, r.watched), (Mode::Reopen, Watched::All));
+    assert_eq!((r.mode, r.frames, r.cycles), (Mode::Reopen, 48, 5));
 }
 
 /// Every bad case is otherwise valid (asio-spike.md: reject cases must not
@@ -365,14 +309,10 @@ fn probe_needs_no_frames_and_has_defaults() {
 /// fill is refused, and the refusal names the flag under test.
 #[test]
 fn bad_input_is_refused() {
-    const DUPLEX: &str =
-        "duplex --driver D1 --report r --stop-file s --frames 32 --activity-channels all {}";
-    const REOPEN: &str =
-        "reopen --driver D1 --report r --stop-file s --frames 32 --activity-channels all {}";
+    const DUPLEX: &str = "duplex --driver D1 --report r --stop-file s --frames 32 {}";
+    const REOPEN: &str = "reopen --driver D1 --report r --stop-file s --frames 32 {}";
     const HWLAT: &str = "hwlat --report r --stop-file s --cpu 3 {}";
-    const NO_FRAMES: &str =
-        "duplex --driver D1 --report r --stop-file s --activity-channels all {}";
-    const NO_CHANNELS: &str = "duplex --driver D1 --report r --stop-file s --frames 64 {}";
+    const NO_FRAMES: &str = "duplex --driver D1 --report r --stop-file s {}";
     // (the line with a hole `{}`, the bad fill, a good fill, what the refusal names)
     let cases = [
         (
@@ -420,30 +360,6 @@ fn bad_input_is_refused() {
         (NO_FRAMES, "", "--frames 64", "--frames"),
         (NO_FRAMES, "--frames 16", "--frames 48", "--frames"),
         (NO_FRAMES, "--frames 32x", "--frames 32", "--frames"),
-        (
-            NO_CHANNELS,
-            "",
-            "--activity-channels all",
-            "--activity-channels",
-        ),
-        (
-            "reopen --driver D1 --report r --stop-file s --frames 64 {}",
-            "",
-            "--activity-channels 101-124",
-            "--activity-channels",
-        ),
-        (
-            NO_CHANNELS,
-            "--activity-channels 0",
-            "--activity-channels 101",
-            "--activity-channels",
-        ),
-        (
-            NO_CHANNELS,
-            "--activity-channels 5-3",
-            "--activity-channels 3-5",
-            "--activity-channels",
-        ),
         (DUPLEX, "--seconds 0", "--seconds 1", "--seconds"),
         (DUPLEX, "--seconds 36001", "--seconds 36000", "--seconds"),
         (DUPLEX, "--burn-us 301", "--burn-us 300", "--burn-us"),
@@ -459,7 +375,7 @@ fn bad_input_is_refused() {
         ),
         // A stress CPU that is also an audio CPU.
         (
-            "duplex --driver D1 --report r --stop-file s --frames 32 --activity-channels all \
+            "duplex --driver D1 --report r --stop-file s --frames 32 \
              --stress 4 --audio-cpus 14 {}",
             "--stress-cpus 6-14",
             "--stress-cpus 6-13",
@@ -468,7 +384,7 @@ fn bad_input_is_refused() {
         // Busy threads without their own CPUs would run on the process
         // default, the audio CPUs (S1c design note §4.3: housekeeping).
         (
-            "duplex --driver D1 --report r --stop-file s --frames 32 --activity-channels all \
+            "duplex --driver D1 --report r --stop-file s --frames 32 \
              --stress 4 --audio-cpus 14 {}",
             "",
             "--stress-cpus 6-13",
@@ -507,8 +423,13 @@ fn bad_input_is_refused() {
             Ok(a) => panic!("{refused:?} parsed: {a:?}"),
         }
     }
-    assert!(parse(&argv("duplex --driver D1 --report r --stop-file s --frames 64 --seconds 3600 --burn-us 300 --stress 8 --activity-channels all")).is_ok());
-    assert!(parse(&argv("duplex --driver D1 --report r --stop-file s --frames 32 --activity-channels all --seconds 36000")).is_ok());
+    assert!(parse(&argv("duplex --driver D1 --report r --stop-file s --frames 64 --seconds 3600 --burn-us 300 --stress 8")).is_ok());
+    assert!(
+        parse(&argv(
+            "duplex --driver D1 --report r --stop-file s --frames 32 --seconds 36000"
+        ))
+        .is_ok()
+    );
     let h = parse(&argv(
         "hwlat --report r --stop-file s --cpu 14 --seconds 30",
     ))
