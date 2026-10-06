@@ -4,8 +4,10 @@
 //! - `typical`: every level open, sine inputs, EQs flat, the site at rest;
 //! - `worst`: all 230 EQ bands (inputs, mixes, group strips) enabled and
 //!   moving, every level and strip ramping, the limiters in gain reduction,
-//!   both listen taps, talkback, a test signal and a 512-command group every
-//!   block.
+//!   both listen taps, talkback, the HIL test signal on all eight spare
+//!   outputs with their D5(b) loopback returns open (busy returns: the
+//!   round-trip probe scans every return sample of every block) and a
+//!   512-command group every block.
 //!
 //! Prints p50/p99/p99.9/max per case. Exits 1 when the typical median
 //! exceeds 25 % of the period or the worst-case median exceeds the period;
@@ -20,7 +22,7 @@ use std::time::Instant;
 
 use iem_audio_io::{Block, Process};
 use iem_dsp::eq::{BandKind, EqParams};
-use iem_engine::cmd::{RtOp, push_group};
+use iem_engine::cmd::{MAX_HIL, RtOp, push_group};
 use iem_engine::params::InputParams;
 use iem_engine::rt::{Options, Processor};
 use iem_engine::site::load;
@@ -153,7 +155,17 @@ fn percentile(sorted: &[f64], q: f64) -> f64 {
 
 fn bench(name: &str, worst: bool) -> f64 {
     let topo = topology();
-    let (mut p, mut h) = Processor::new(Arc::clone(&topo), &open(&topo), &[], Options::default());
+    // HIL's spare outputs and their loopback returns: the worst case only (a
+    // live engine opens neither).
+    let hil = if worst { MAX_HIL } else { 0 };
+    let (mut p, mut h) = Processor::with_hil(
+        Arc::clone(&topo),
+        &open(&topo),
+        &[],
+        Options::default(),
+        hil,
+        hil,
+    );
     let groups = worst_groups(&topo);
     if worst {
         let engineer = topo.engineer as u16;
@@ -170,18 +182,19 @@ fn bench(name: &str, worst: bool) -> f64 {
                     slot: 1,
                     mix: Some(member),
                 },
-                RtOp::TestSignal {
+                RtOp::HilTestSignal {
                     i: 4,
                     hz: 1000.0,
                     amp: 0.1,
                     ttl: u64::MAX / 2,
+                    mask: [true; MAX_HIL],
                 },
             ],
         );
     }
     let amp = if worst { 0.8 } else { 0.1 };
-    let mut input = vec![0.0; topo.rx.len() * B];
-    let mut output = vec![0.0; topo.tx.len() * B];
+    let mut input = vec![0.0; (topo.rx.len() + hil) * B];
+    let mut output = vec![0.0; (topo.tx.len() + hil) * B];
     let talk = vec![0.3f32; B];
     let mut drain = vec![0.0f32; 4 * B];
     let mut times = Vec::with_capacity(CALLS);

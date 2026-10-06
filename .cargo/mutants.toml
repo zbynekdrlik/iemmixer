@@ -5,6 +5,10 @@
 # --baseline=skip there is no measured test time, so a hung mutant would
 # otherwise hold its job for 300 s). Tests run per package only. A mutant
 # caught only by a timeout is tested again by scripts/mutants_recheck.py (#23).
+# An exclude_re entry pinned to a line (`<path>\\.rs:<N>:` or
+# `<path>\\.rs:(<N>|<M>):`) carries one `# anchor <N>: <source text>` comment
+# per line right above it; scripts/check_mutants_anchors.py fails when that
+# line no longer reads so (#32): move the anchor with the code.
 profile = "mutants"
 test_tool = "nextest"
 
@@ -17,15 +21,24 @@ exclude_globs = [
   # Windows-only ASIO host and backend (unsafe FFI, S1a/S6): not compiled on
   # the Linux runners; the windows jobs build and lint it, HIL exercises it on
   # the PC. Its decisions live in the mutated format.rs, telemetry.rs,
-  # channels.rs, period.rs, reset.rs, owner.rs, messages.rs and iem-win's
-  # prefwin.rs.
+  # glitch_report.rs, spike_run.rs, channels.rs, period.rs, reset.rs,
+  # owner.rs, messages.rs and iem-win's prefwin.rs.
   "crates/iem-audio-io/src/asio.rs",
   # Windows-only placement/priority/clock/marker FFI (S1c): not compiled on
-  # the Linux runners; the windows jobs build it and HIL exercises it on the
-  # PC (like asio.rs). Its portable placement logic (parse_lps, ids_for) lives
-  # in the mutated cpuset.rs; the CPU-set buffer decode is FFI, PC-verified.
+  # the Linux runners; the windows jobs build it. Only the S1a/S1c spike
+  # calls it (asio.rs's spike Host::start and examples/asio_spike/), in its
+  # measurement windows on the PC; the S6 engine places and prioritises
+  # itself through iem_win::power, so HIL never runs it. Its portable
+  # placement logic (parse_lps, ids_for) lives in the mutated cpuset.rs; the
+  # CPU-set buffer decode is FFI, verified on the PC by the spike.
   "crates/iem-audio-io/src/os.rs",
-  # The S1a spike program (a Windows-only main; its parser is tested).
+  # The S1a/S1c spike program (a Windows-only main, examples/asio_spike/:
+  # main.rs and tests.rs), now only thread, FFI and JSON plumbing. Its
+  # decisions live in the mutated glitch_report.rs (keep_glitches,
+  # glitch_qpc, marker_text, the marker loop) and spike_run.rs (the exit
+  # code table, check_stress_cpus, the placement results, keeps_busy,
+  # setup_failure, hwlat_ready, scan_ends); its parser, Stress and
+  # hwlat_scan are tested on every OS.
   "crates/iem-audio-io/examples/**",
   # The engine's ASIO start-up and interlock card (S6): Windows effects, not
   # compiled on the Linux runners; the windows job lints it and runs its
@@ -44,6 +57,10 @@ exclude_globs = [
   # which stays mutated with prefwin.rs and lib.rs.
   "crates/iem-win/src/console.rs",
   "crates/iem-win/src/errmode.rs",
+  # The durable rename (#32 minor-7): the engine's OsFiles renames through
+  # it on Windows only; its Windows test and the engine's persistence tests
+  # run in the windows job.
+  "crates/iem-win/src/file.rs",
   "crates/iem-win/src/pipe.rs",
   "crates/iem-win/src/power.rs",
   "crates/iem-win/src/process.rs",
@@ -85,10 +102,6 @@ exclude_re = [
   # The console's background loops (100 ms meters, 250 ms janitor): their steps
   # are tested functions (MeterMerge, BandActivity, SoloJanitor, TalkLock).
   "iem-server/src/console\\.rs.*\\b(spawn_tasks|meter_task|janitor_task)\\b",
-  # The owner-approved SEH test's raise (design §10): it raises an uncatchable
-  # structured exception (Windows) or aborts (else), so no test can execute it;
-  # its correctness is the SEH filter's, exercised only on the PC.
-  "iem-engine/src/rt\\.rs.*\\binject_seh\\b",
   # Test-only constructors.
   "new_for_test",
   # Tunnel watchdog loop and the Windows sc.exe restart.
@@ -151,8 +164,12 @@ exclude_re = [
   # Push subscription through the service worker's PushManager.
   "iem-ui/src/pages/mixer/push\\.rs.*subscribe_to_push",
   # Engine (S3): effects with no observable outcome through the engine's API.
-  # fsync of the state directory: durability shows only across a power loss.
-  "iem-engine/src/persist\\.rs.*replace sync_dir -> ",
+  # The fsync of a file and of the state directory (persist/files.rs, the
+  # file system behind the #32 seam): durability shows only across a power
+  # loss; the tests' fault seam fails them to prove the protocol instead.
+  # `pause` is the real 200 ms wait between read tries: only time shows it,
+  # and the fault seam counts the pauses to test the retry.
+  "iem-engine/src/persist/files\\.rs.*\\b(sync_file|sync_dir|pause)\\b",
   # The NullRt pacing thread's end after release; NullRt::stop itself is
   # tested in iem-audio-io (stop_ends_a_running_stream).
   "iem-engine/src/engine\\.rs.*replace <impl Driver for NullRtDriver>::stop with \\(\\)",
@@ -172,7 +189,8 @@ exclude_re = [
   "iem-engine/src/rt\\.rs.*replace > with >= in Processor::render_mixes",
   # Equivalent (S3). With the budget spent, `budget >= 0` also cuts the segment at the
   # waiting command; rendering in two pieces is bit-identical (block-size invariance tests).
-  "iem-engine/src/rt\\.rs:1038:.*replace > with >= in <impl Process for Processor>::process",
+  # anchor 1204: if budget > 0
+  "iem-engine/src/rt\\.rs:1204:.*replace > with >= in <impl Process for Processor>::process",
   # The fade wait's `elapsed < FADE_WAIT`: differs only at the exact nanosecond.
   "iem-engine/src/control\\.rs.*replace < with <= in Control::fade_out",
   # Unobservable (S3): the `!` only decides whether "solos cleared" is logged.
@@ -184,6 +202,8 @@ exclude_re = [
   "iem-rpp/src/import\\.rs.*replace > with >= in lin_to_db$",
   # At i == len the byte lookup falls back to a space (skipped) or ends the
   # quoted token at len anyway: both loops end with the same tokens.
+  # anchor 73: while i < bytes.len() {
+  # anchor 82: while i < bytes.len() && bytes.get(i) != Some(&c) {
   "iem-rpp/src/read\\.rs:(73|82):.*replace < with <= in raw_tokens$",
   # A time equal to an era's first_seen lies inside that era's window, which
   # the branch before already returned.
@@ -191,10 +211,12 @@ exclude_re = [
   # `flags & !1` has bit 0 clear, so `| muted` and `^ muted` are the same.
   "iem-rpp/src/export\\.rs.*replace \\| with \\^ in export$",
   # Unobservable (#20): which parent directory commit fsyncs (result dropped); durability shows only across a power loss.
+  # anchor 229: if let Some(parent) = self.target.parent().filter(|p| !p.as_os_str().is_empty()) {
   "iem-migrate/src/stage\\.rs:229:.*delete ! in Stage::commit$",
   # Equivalent (S5). At exactly −60 dB both branches of the fader domain give −60.
   "iem-server/src/view\\.rs.*replace > with >= in ui_db$",
   # Equivalent (S5). p = ±0 rounds to 0 % and is "C" before the side is chosen.
+  # anchor 46: } else if p < 0.0 {
   "iem-server/src/backup\\.rs:46:.*replace < with <= in pan$",
   # Unobservable (S5): the frame age `< 2 s` differs only at the exact nanosecond.
   "iem-server/src/engine/media\\.rs.*replace < with <= in MediaLink::diagnostics$",
@@ -230,12 +252,13 @@ exclude_re = [
   # the "HIL's spare card outputs …" info line is logged — no state and no
   # return value change (like the excluded `delete ! in Control::tick`). `run`
   # IS reachable from unit tests (run_bounded), but no test captures or asserts
-  # that log, so the mutant is unobservable. The `:461:` line anchor is
-  # essential: `run` also has a `delete ! in run` at :433: (the block-size
-  # guard `if !(1..=MAX_BLOCK).contains(&cfg.block)`), which is NOT equivalent
-  # and IS killed by `run_refuses_a_bad_block_and_a_bad_site`, and the
-  # `delete ! in run_hil` at :617: is killed too — both must stay mutated.
-  "iem-engine/src/engine\\.rs:461:.*delete ! in run$",
+  # that log, so the mutant is unobservable. The line anchor is essential:
+  # `run` also has a `delete ! in run` on the block-size guard
+  # `if !(1..=MAX_BLOCK).contains(&cfg.block)`, which is NOT equivalent and IS
+  # killed by `run_refuses_a_bad_block_and_a_bad_site`, and `delete ! in
+  # run_hil` is killed too — both must stay mutated.
+  # anchor 466: if !hil.is_empty() {
+  "iem-engine/src/engine\\.rs:466:.*delete ! in run$",
   # Equivalent (S6): the DER length fold `(n << 8) | usize::from(b)` shifts the
   # accumulator left by 8, so its low 8 bits are always zero; OR-ing in a byte
   # (0..=255) there equals XOR-ing it, so `| b` and `^ b` are identical (like

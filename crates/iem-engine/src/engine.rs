@@ -26,7 +26,7 @@ use crate::control::{Control, CtlMsg, Driver, Exit, Parts, Settings};
 use crate::core::{Core, Flags};
 use crate::interlock::{self, Report, Verdict};
 use crate::media::{Frame, TalkbackFeed, TapFramer};
-use crate::persist::{Source, Store, decode};
+use crate::persist::{Source, StateLock, Store, decode};
 use crate::pipe::{Conn, Framer, control_name, listen, media_name, read_loop};
 use crate::rt::{FADE_IN_MS, Options, Processor, RtHandles};
 use crate::site::{self, Card, SiteError, load, parse, parse_card, parse_hil_tx, parse_stage};
@@ -50,6 +50,11 @@ pub enum EngineError {
     /// map, the preference window, a measured period other than 32.
     #[error("card refused: {0}")]
     Card(String),
+    /// Another process held the state directory past [`STATE_WAIT`]
+    /// (exit 75, #32 minor-4): the guard starts the engine again without
+    /// counting a crash.
+    #[error("{0}")]
+    StateBusy(String),
 }
 
 /// The audio backend of `run`.
@@ -462,6 +467,8 @@ pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
         info!("HIL's spare card outputs {hil:?} after the topology's TX");
     }
     let store = Store::open(&cfg.state_dir)?;
+    // Held until `run` returns: one engine per state directory (#32 P5).
+    let _state_lock = lock_state(&store)?;
     let loaded = store.load(&topo);
     for (path, why) in &loaded.rejected {
         warn!("state file {} skipped: {why}", path.display());
@@ -472,6 +479,11 @@ pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
     let mut alarms = Vec::new();
     match loaded.source {
         Source::Current => info!("state rev {} loaded", loaded.persisted.rev),
+        // The newest state: a crash cut its save off between the renames.
+        Source::Interrupted => warn!(
+            "state rev {} loaded from save.tmp: a crash cut its save off before current.json",
+            loaded.persisted.rev
+        ),
         Source::Generation(_) | Source::Baseline => alarms.push(Alarm {
             code: AlarmCode::StateFallback,
             detail: format!(
@@ -484,6 +496,29 @@ pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
             detail: "no usable state: every output is muted".into(),
         }),
     }
+    // #32: why the state loaded may be older than one the directory holds.
+    alarms.extend(loaded.alarms.iter().map(|detail| Alarm {
+        code: AlarmCode::StateFallback,
+        detail: detail.clone(),
+    }));
+    // #32: the directory holds what was loaded before the engine runs.
+    let recovery = store.recover(&loaded);
+    if let Some(to) = &recovery.quarantined {
+        warn!(
+            "the damaged current.json is moved aside to {}",
+            to.display()
+        );
+    }
+    if recovery.finished {
+        info!("the interrupted save is finished: save.tmp is current.json");
+    }
+    for why in &recovery.warnings {
+        warn!("{why}");
+    }
+    alarms.extend(recovery.failed.into_iter().map(|detail| Alarm {
+        code: AlarmCode::SaveFailed,
+        detail,
+    }));
     for a in &alarms {
         warn!("alarm {:?}: {}", a.code, a.detail);
     }
@@ -595,6 +630,25 @@ pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
     Ok(exit)
 }
 
+/// How long `run` waits for its state directory while another process
+/// holds it (#32 minor-4): an engine that just ended may hold its lock a
+/// moment after its exit (a lock's release can lag the process end).
+/// With the load's read pauses (2 s at most) the engine still listens well
+/// within the guard's READY_S (10 s).
+pub const STATE_WAIT: Duration = Duration::from_secs(3);
+
+/// Takes the state directory (`Store::lock_within` [`STATE_WAIT`]); still
+/// held by another process then, it is `EngineError::StateBusy` (exit 75).
+fn lock_state(store: &Store) -> Result<StateLock, EngineError> {
+    store.lock_within(STATE_WAIT).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::WouldBlock {
+            EngineError::StateBusy(format!("{e} (waited {STATE_WAIT:?})"))
+        } else {
+            EngineError::Io(e)
+        }
+    })
+}
+
 #[cfg(not(windows))]
 const ASIO_ON_WINDOWS: &str = "the asio backend runs on Windows only";
 
@@ -623,8 +677,9 @@ fn run_hil(flags: Flags, text: &str, topo: &Topology) -> Result<Vec<u16>, SiteEr
 /// Loads and compiles a site, checks its `[card]` table, the stage the
 /// interlock listens to (every `[activity] inputs` id is an input) and
 /// HIL's spare outputs (`[guard] hil_tx`: card channels from 1 that no mix
-/// uses, `Topology::hil_outputs`; the card's own output count is checked
-/// when the stream opens).
+/// uses and no input is, `Topology::hil_outputs`; the card's own output and
+/// input counts, the latter for the loopback returns, are checked when the
+/// stream opens).
 pub fn check_site(path: &Path) -> Result<SiteSummary, EngineError> {
     let text = site::read(path)?;
     let topo = compile(&parse(&text)?)?;

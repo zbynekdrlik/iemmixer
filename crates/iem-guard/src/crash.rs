@@ -21,10 +21,12 @@ pub enum After {
     PreviousPin,
 }
 
-/// Abnormal engine exits within the last [`CrashLoop::WINDOW`].
+/// Abnormal engine exits within the last [`CrashLoop::WINDOW`], and the
+/// busy exits in a row.
 #[derive(Debug, Clone, Default)]
 pub struct CrashLoop {
     exits: VecDeque<Instant>,
+    busy: usize,
 }
 
 impl CrashLoop {
@@ -49,7 +51,27 @@ impl CrashLoop {
     pub fn in_window(&self) -> usize {
         self.exits.len()
     }
+
+    /// Counts an engine exit toward the busy streak: [`STATE_BUSY`] exits in
+    /// a row, 0 after any other exit. The streak so far.
+    pub fn busy(&mut self, busy: bool) -> usize {
+        self.busy = if busy { self.busy + 1 } else { 0 };
+        self.busy
+    }
 }
+
+/// The engine's exit code when another process held its state directory
+/// past its wait (`iem_engine::engine::STATE_WAIT`, 3 s; EX_TEMPFAIL):
+/// most likely an engine that just ended and whose lock is not yet
+/// released. No crash: tried again after [`BUSY_RETRY`] (#32 minor-4).
+pub const STATE_BUSY: i32 = 75;
+
+/// The delay before the engine starts again after [`STATE_BUSY`].
+pub const BUSY_RETRY: Duration = Duration::from_secs(2);
+
+/// Busy exits in a row after which the guard alarms (once per streak; it
+/// keeps trying).
+pub const BUSY_ALARM: usize = 3;
 
 /// The respawn delay after the `n`-th abnormal exit in the window: 1, 2, 4,
 /// 8 s, then 10 s.
@@ -59,7 +81,8 @@ pub fn backoff(abnormal_in_window: usize) -> Duration {
 }
 
 /// The engine's exit codes: 0 shut down, 1 i/o, 2 usage or site, 3 card
-/// refused, 70 RT fault; `None` when it ended without a code.
+/// refused, 70 RT fault, 75 state directory busy ([`STATE_BUSY`]); `None`
+/// when it ended without a code.
 pub fn after_exit(
     code: Option<i32>,
     mode: Mode,
@@ -77,6 +100,7 @@ pub fn after_exit(
             alarm: Some("the card refused the engine"),
         },
         _ if session_ending => After::Stay { alarm: None },
+        Some(STATE_BUSY) => After::Respawn(BUSY_RETRY),
         _ if looped && mode == Mode::Live && prod => After::PreviousPin,
         _ if looped => After::ToEvent,
         _ => After::Respawn(backoff(n)),
@@ -186,6 +210,37 @@ mod tests {
             after_exit(Some(1), Mode::Event, true, false, true, 3),
             After::ToEvent
         );
+    }
+
+    #[test]
+    fn a_busy_state_directory_is_tried_again_after_2_s_without_a_crash() {
+        // #32 minor-4: exit 75 = the engine waited for its state directory
+        // (another engine's lock not yet released); no crash, so neither
+        // the backoff nor a loop applies. A session ending still wins.
+        for mode in MODES {
+            for prod in [false, true] {
+                for looped in [false, true] {
+                    for n in [0, 1, 3, 7] {
+                        assert_eq!(
+                            after_exit(Some(75), mode, prod, false, looped, n),
+                            After::Respawn(Duration::from_secs(2)),
+                            "{mode:?} {prod} {looped} {n}"
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            after_exit(Some(75), Mode::Dev, false, true, false, 1),
+            After::Stay { alarm: None }
+        );
+    }
+
+    #[test]
+    fn the_busy_streak_counts_busy_exits_in_a_row() {
+        let mut c = CrashLoop::default();
+        let got = [c.busy(true), c.busy(true), c.busy(false), c.busy(true)];
+        assert_eq!(got, [1, 2, 0, 1]);
     }
 
     #[test]

@@ -23,7 +23,7 @@ use crate::engine::{EngineError, InterlockArgs, InterlockPlan, LOCK_EXTRA_MB, lo
 use crate::interlock::{self, Interlock, PeakTap, Report, Verdict};
 use crate::rt::Processor;
 use crate::site::Card;
-use crate::topology::Topology;
+use crate::topology::{Topology, hil_return_refusal};
 
 /// Before the card opens (S6 design note §3): no crash dialog that could
 /// keep the driver held in session 1, the RT panic hook (atomics only), the
@@ -68,6 +68,11 @@ fn card_config(card: &Card) -> CardConfig {
 /// preference window, the measured period. A failing driver call or thread
 /// is an i/o error (exit 1).
 fn refusal(e: AsioError) -> EngineError {
+    if let AsioError::Channels(m) = &e
+        && let Some(why) = hil_return_refusal(m)
+    {
+        return EngineError::Card(why);
+    }
     match e {
         AsioError::NoDrivers(_)
         | AsioError::NotFound { .. }

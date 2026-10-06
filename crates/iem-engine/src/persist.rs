@@ -3,19 +3,37 @@
 //!
 //! - `current.json`: the latest save;
 //! - `gen-<seq>.json`: the 20 previous saves (the newest has the highest seq);
-//! - `baseline.json`: written at each import (and, from S6, at `live` entry).
+//! - `baseline.json`: written at each import (and, from S6, at `live` entry);
+//! - `save.new`: a save being written (never a load source);
+//! - `save.tmp`: a complete save before its renames, always replaced whole
+//!   (a crash before the second rename leaves the newest state only in it;
+//!   `chain` decides when it is the live state, and the boot's recovery
+//!   finishes that save);
+//! - `baseline.tmp`: a baseline before its rename;
+//! - `current.json.damaged-<n>`: a damaged `current.json` the boot moved
+//!   aside, never read again;
+//! - `save.tmp.orphan-<n>`: a `save.tmp` the boot did not load (it could
+//!   not be read, was older than the state loaded, or was damaged), moved
+//!   aside by the next save and never read again;
+//! - `engine.lock`: the engine holding the directory (`Store::lock`).
 //!
 //! A file is `{"format", "schema", "sha256", "payload"}`; the SHA-256 covers the
 //! payload's raw bytes, so a re-serialisation never matters. Readers ignore
 //! unknown fields and default missing ones (additive schemas). The load chain
-//! is current → generations (newest first) → baseline → defaults with every
-//! mix muted. Files of an older schema (1: the REAPER-shaped graph before #20)
-//! are refused.
+//! (`chain`, which also holds the save protocol, the Missing / Unreadable /
+//! Damaged / Valid states and the boot recovery) is current or `save.tmp`
+//! → generations (newest first) → baseline → defaults with every mix
+//! muted. Files of an older schema (1: the REAPER-shaped graph before #20)
+//! are refused. Every file operation goes through `files::Files`, so tests
+//! fail any single step (`fault_tests`).
 
 use std::collections::BTreeMap;
-use std::fs::{self, File};
-use std::io::{self, Write};
+use std::ffi::OsString;
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use iem_engine_proto::{MixId, MixState, SCHEMA};
@@ -26,11 +44,25 @@ use sha2::{Digest, Sha256};
 use crate::core::{defaults_muted, reconcile, to_state};
 use crate::topology::Topology;
 
+mod chain;
+#[cfg(test)]
+mod fault_tests;
+mod files;
+
+use files::{Files, OsFiles};
+
+pub use chain::{FileState, Recovery};
+
 pub const FORMAT: &str = "iemmixer-state";
 pub const GENERATIONS: usize = 20;
 const CURRENT: &str = "current.json";
 const BASELINE: &str = "baseline.json";
 const TMP: &str = "save.tmp";
+const NEW: &str = "save.new";
+const LOCK: &str = "engine.lock";
+const BASELINE_TMP: &str = "baseline.tmp";
+/// The pause between two tries of a held state directory's lock.
+pub const LOCK_POLL: Duration = Duration::from_millis(100);
 
 /// What a state file carries.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -47,9 +79,28 @@ pub struct Persisted {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
     Current,
+    /// `save.tmp`: a save a crash cut off before its renames, the newest
+    /// state there is (its revision at least that of `current.json`, or of
+    /// the newest generation when `current.json` is missing or damaged; #32).
+    /// The boot's recovery makes it `current.json`.
+    Interrupted,
     Generation(u64),
     Baseline,
     Defaults,
+}
+
+impl Source {
+    /// The state file this source names in the state directory; `None` for
+    /// the muted defaults.
+    pub fn file_name(self) -> Option<String> {
+        match self {
+            Self::Current => Some(CURRENT.to_owned()),
+            Self::Interrupted => Some(TMP.to_owned()),
+            Self::Generation(seq) => Some(generation_name(seq)),
+            Self::Baseline => Some(BASELINE.to_owned()),
+            Self::Defaults => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -61,6 +112,14 @@ pub struct Loaded {
     pub rejected: Vec<(PathBuf, String)>,
     /// Ids the topology no longer has.
     pub dropped: Vec<String>,
+    /// Why the state loaded may be older than one the directory holds
+    /// (the engine raises each as an alarm, #32).
+    pub alarms: Vec<String>,
+    /// What the chain found at `current.json` (the boot's recovery acts on
+    /// it, #32).
+    pub current_json: FileState,
+    /// What the chain found at `save.tmp` (#32).
+    pub save_tmp: FileState,
 }
 
 #[derive(Serialize)]
@@ -120,22 +179,8 @@ pub fn decode(bytes: &[u8]) -> Result<Persisted, String> {
     serde_json::from_str(file.payload.get()).map_err(|e| format!("payload: {e}"))
 }
 
-fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let mut f = File::create(path)?;
-    f.write_all(bytes)?;
-    f.sync_all()
-}
-
-#[cfg(unix)]
-fn sync_dir(dir: &Path) -> io::Result<()> {
-    File::open(dir)?.sync_all()
-}
-
-/// Windows has no directory handle to flush this way; the renames are
-/// `MoveFileExW` with replace (S6 may switch to `ReplaceFileW`).
-#[cfg(not(unix))]
-fn sync_dir(_dir: &Path) -> io::Result<()> {
-    Ok(())
+fn generation_name(seq: u64) -> String {
+    format!("gen-{seq:010}.json")
 }
 
 fn generation_seq(name: &str) -> Option<u64> {
@@ -145,125 +190,203 @@ fn generation_seq(name: &str) -> Option<u64> {
         .ok()
 }
 
+/// The generation files among a directory's entries (name, path), oldest
+/// first. An entry that fails to read is that error, never "no generation"
+/// (#32 m3: the seed would read it as no state).
+fn generation_entries(
+    entries: impl Iterator<Item = io::Result<(OsString, PathBuf)>>,
+) -> io::Result<Vec<(u64, PathBuf)>> {
+    let mut gens = Vec::new();
+    for entry in entries {
+        let (name, path) = entry?;
+        if let Some(seq) = name.to_str().and_then(generation_seq) {
+            gens.push((seq, path));
+        }
+    }
+    gens.sort();
+    Ok(gens)
+}
+
+/// The state directory taken by one engine (#32 P5): released when dropped
+/// (or when the process ends).
+#[derive(Debug)]
+pub struct StateLock {
+    _file: fs::File,
+}
+
+/// A save that reached `current.json`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Committed {
+    /// The generation the previous `current.json` became (0: there was none).
+    pub generation: u64,
+    /// Removing generations beyond [`GENERATIONS`] failed, why: the save
+    /// itself stands.
+    pub pruning: Option<String>,
+    /// Where a `save.tmp` this store did not write was moved aside to
+    /// before the save replaced it.
+    pub orphaned: Option<PathBuf>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Store {
     dir: PathBuf,
+    /// Every file operation goes through here (#32 P9).
+    files: Arc<dyn Files>,
+    /// Whether a `save.tmp` in the directory is this store's own to
+    /// replace: written by its `save`, or the state its boot loaded (or
+    /// there was none). Until then a `save.tmp` may hold state this process
+    /// never ran on, and `save` moves it aside first (#32 MAJOR-1).
+    tmp_own: Arc<AtomicBool>,
 }
 
 impl Store {
     pub fn open(dir: &Path) -> io::Result<Self> {
+        Self::with(dir, Arc::new(OsFiles))
+    }
+
+    /// A store whose file operations a test controls (#32 P9).
+    #[cfg(test)]
+    pub(crate) fn with_files(dir: &Path, files: Arc<dyn Files>) -> io::Result<Self> {
+        Self::with(dir, files)
+    }
+
+    fn with(dir: &Path, files: Arc<dyn Files>) -> io::Result<Self> {
         fs::create_dir_all(dir)?;
         Ok(Self {
             dir: dir.to_path_buf(),
+            files,
+            tmp_own: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    /// Writes `bytes` to `path` and flushes it.
+    fn write_synced(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        self.files.write(path, bytes)?;
+        self.files.sync_file(path)
     }
 
     pub fn dir(&self) -> &Path {
         &self.dir
     }
 
-    fn generation_path(&self, seq: u64) -> PathBuf {
-        self.dir.join(format!("gen-{seq:010}.json"))
+    /// Takes the state directory for this engine (or `iem-migrate import`),
+    /// before anything in it is read or written: the boot recovery moves
+    /// files, so a second engine, or an import while an engine runs, gets a
+    /// `WouldBlock` error at once and stops before it touches a state file
+    /// (#32 P5). The lock is an OS file lock on `engine.lock`, released
+    /// with the lock or the process.
+    pub fn lock(&self) -> io::Result<StateLock> {
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(self.dir.join(LOCK))?;
+        match file.try_lock() {
+            Ok(()) => Ok(StateLock { _file: file }),
+            Err(fs::TryLockError::WouldBlock) => Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                format!(
+                    "the state directory {} is in use by another engine",
+                    self.dir.display()
+                ),
+            )),
+            Err(fs::TryLockError::Error(e)) => Err(e),
+        }
     }
 
-    /// Whether any saved live state exists — `current.json` or a generation.
-    /// A generation can be the newest state on its own: `save` renames
-    /// `current.json` to a generation before writing the new one, so a crash
-    /// between those two renames leaves the latest state only as a generation
-    /// (iemmixer#9 2026-09-28: `import --seed-if-absent` must not re-seed over
-    /// it). Ignores `baseline.json` (a seed is not live state).
-    pub fn has_state(&self) -> bool {
-        self.dir.join(CURRENT).exists()
-            || self.generations().map(|g| !g.is_empty()).unwrap_or(false)
+    /// `lock`, tried again every [`LOCK_POLL`] while another process holds
+    /// the directory, for up to `wait` (#32 minor-4: an engine that just
+    /// ended may hold its lock a moment after its exit, as a lock's release
+    /// can lag the process end). Still held then, the `WouldBlock` error;
+    /// any other error at once.
+    pub fn lock_within(&self, wait: Duration) -> io::Result<StateLock> {
+        let tries = wait.as_millis() / LOCK_POLL.as_millis();
+        for _ in 0..tries {
+            match self.lock() {
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => std::thread::sleep(LOCK_POLL),
+                done => return done,
+            }
+        }
+        self.lock()
+    }
+
+    fn generation_path(&self, seq: u64) -> PathBuf {
+        self.dir.join(generation_name(seq))
     }
 
     /// Generation files, oldest first.
     pub fn generations(&self) -> io::Result<Vec<(u64, PathBuf)>> {
-        let mut gens: Vec<(u64, PathBuf)> = fs::read_dir(&self.dir)?
-            .filter_map(Result::ok)
-            .filter_map(|e| {
-                let seq = generation_seq(e.file_name().to_str()?)?;
-                Some((seq, e.path()))
-            })
-            .collect();
-        gens.sort();
-        Ok(gens)
+        generation_entries(self.files.list(&self.dir)?.into_iter())
     }
 
     /// Saves atomically; the previous `current.json` becomes the newest
-    /// generation. Returns that generation's seq (0: there was none).
-    pub fn save(&self, p: &Persisted) -> io::Result<u64> {
+    /// generation (its seq in the result, 0: there was none). The
+    /// state is written and flushed to `save.new`, which then replaces
+    /// `save.tmp` in one rename: `save.tmp` may hold the only copy of the
+    /// newest state (an interrupted save not yet finished), so it is never
+    /// truncated or written in place, only ever the previous complete save
+    /// or the new one (#32 P1). A `save.tmp` that is not this store's own
+    /// is moved aside first (`Committed::orphaned`; #32 MAJOR-1).
+    pub fn save(&self, p: &Persisted) -> io::Result<Committed> {
         let bytes = encode(p)?;
-        let tmp = self.dir.join(TMP);
-        write_synced(&tmp, &bytes)?;
+        let new = self.dir.join(NEW);
+        self.write_synced(&new, &bytes)?;
+        let orphaned = self.orphan_tmp()?;
+        self.files.rename(&new, &self.dir.join(TMP))?;
+        self.tmp_own.store(true, Ordering::SeqCst);
+        let mut committed = self.commit_tmp().map_err(|e| match &orphaned {
+            Some(aside) => io::Error::new(
+                e.kind(),
+                format!("{e} ({TMP} was moved aside to {} first)", aside.display()),
+            ),
+            None => e,
+        })?;
+        committed.orphaned = orphaned;
+        Ok(committed)
+    }
+
+    /// The renames that end a save: the previous `current.json` becomes the
+    /// newest generation and `save.tmp` (synced) becomes `current.json`,
+    /// then the directory is synced. Whether `current.json` exists must be
+    /// known: an error there is the save's error, before `save.tmp` could
+    /// replace it (#32 P7; `save.tmp` keeps the newest state). Pruning to
+    /// [`GENERATIONS`] comes after the commit and apart: its failure is
+    /// `Committed::pruning`, never the save's (#32 P6).
+    fn commit_tmp(&self) -> io::Result<Committed> {
         let current = self.dir.join(CURRENT);
-        let mut seq = 0;
-        if current.exists() {
-            seq = self.generations()?.last().map_or(0, |g| g.0) + 1;
-            fs::rename(&current, self.generation_path(seq))?;
+        let mut generation = 0;
+        if self.files.exists(&current)? {
+            generation = self.generations()?.last().map_or(0, |g| g.0) + 1;
+            self.files
+                .rename(&current, &self.generation_path(generation))?;
         }
-        fs::rename(&tmp, &current)?;
+        self.files.rename(&self.dir.join(TMP), &current)?;
+        self.files.sync_dir(&self.dir)?;
+        Ok(Committed {
+            generation,
+            pruning: self.prune().err().map(|e| e.to_string()),
+            orphaned: None,
+        })
+    }
+
+    /// Removes the oldest generations beyond [`GENERATIONS`]. A removal
+    /// lost in a crash only leaves a file the next save removes.
+    fn prune(&self) -> io::Result<()> {
         let gens = self.generations()?;
         let excess = gens.len().saturating_sub(GENERATIONS);
         for (_, path) in gens.iter().take(excess) {
-            fs::remove_file(path)?;
+            self.files.remove(path)?;
         }
-        sync_dir(&self.dir)?;
-        Ok(seq)
+        Ok(())
     }
 
+    /// Writes `baseline.json` through its own `baseline.tmp`, never
+    /// `save.tmp`, which may hold the only copy of an interrupted save (#32).
     pub fn save_baseline(&self, p: &Persisted) -> io::Result<()> {
-        let tmp = self.dir.join(TMP);
-        write_synced(&tmp, &encode(p)?)?;
-        fs::rename(&tmp, self.dir.join(BASELINE))?;
-        sync_dir(&self.dir)
-    }
-
-    /// The load chain.
-    pub fn load(&self, topo: &Topology) -> Loaded {
-        let mut candidates = vec![(self.dir.join(CURRENT), Source::Current)];
-        if let Ok(gens) = self.generations() {
-            candidates.extend(
-                gens.into_iter()
-                    .rev()
-                    .map(|(seq, path)| (path, Source::Generation(seq))),
-            );
-        }
-        candidates.push((self.dir.join(BASELINE), Source::Baseline));
-        let mut rejected = Vec::new();
-        for (path, source) in candidates {
-            let bytes = match fs::read(&path) {
-                Ok(b) => b,
-                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-                Err(e) => {
-                    rejected.push((path, e.to_string()));
-                    continue;
-                }
-            };
-            match decode(&bytes) {
-                Ok(mut persisted) => {
-                    let (r, dropped) = reconcile(topo, &persisted.state);
-                    persisted.state = to_state(topo, &r);
-                    return Loaded {
-                        persisted,
-                        source,
-                        rejected,
-                        dropped,
-                    };
-                }
-                Err(why) => rejected.push((path, why)),
-            }
-        }
-        Loaded {
-            persisted: Persisted {
-                topology_hash: topo.hash.clone(),
-                state: defaults_muted(topo),
-                ..Persisted::default()
-            },
-            source: Source::Defaults,
-            rejected,
-            dropped: Vec::new(),
-        }
+        let tmp = self.dir.join(BASELINE_TMP);
+        self.write_synced(&tmp, &encode(p)?)?;
+        self.files.rename(&tmp, &self.dir.join(BASELINE))?;
+        self.files.sync_dir(&self.dir)
     }
 }
 
@@ -308,7 +431,7 @@ mod tests {
     use crate::test_support::test_site;
     use iem_engine_proto::{InputId, InputState, Level, Mix};
 
-    fn sample(rev: u64) -> Persisted {
+    pub(super) fn sample(rev: u64) -> Persisted {
         let mut p = Persisted {
             rev,
             topology_hash: "abc".into(),
@@ -337,10 +460,34 @@ mod tests {
         p
     }
 
-    fn store() -> (tempfile::TempDir, Store) {
+    pub(super) fn store() -> (tempfile::TempDir, Store) {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("state")).unwrap();
         (dir, store)
+    }
+
+    #[test]
+    fn a_generation_entry_that_cannot_be_read_is_an_error() {
+        // #32 m3: a failed directory entry was dropped, so a generation the
+        // seed could not see read as "no state".
+        let entry = |name: &str, path: &str| Ok((OsString::from(name), PathBuf::from(path)));
+        let failing = vec![
+            entry("gen-0000000002.json", "a"),
+            Err(io::Error::other("entry unreadable")),
+            entry("gen-0000000001.json", "b"),
+        ];
+        let e = generation_entries(failing.into_iter()).unwrap_err();
+        assert_eq!(e.to_string(), "entry unreadable");
+        // Readable entries: the generations, oldest first, nothing else.
+        let fine = vec![
+            entry("gen-0000000002.json", "a"),
+            entry("current.json", "c"),
+            entry("gen-0000000001.json", "b"),
+        ];
+        assert_eq!(
+            generation_entries(fine.into_iter()).unwrap(),
+            vec![(1, PathBuf::from("b")), (2, PathBuf::from("a"))]
+        );
     }
 
     #[test]
@@ -372,20 +519,25 @@ mod tests {
     }
 
     #[test]
-    fn has_state_sees_current_and_generations_independently() {
+    fn each_source_names_its_file() {
+        assert_eq!(Source::Current.file_name().as_deref(), Some(CURRENT));
+        assert_eq!(Source::Interrupted.file_name().as_deref(), Some(TMP));
+        assert_eq!(
+            Source::Generation(7).file_name().as_deref(),
+            Some("gen-0000000007.json")
+        );
+        assert_eq!(Source::Baseline.file_name().as_deref(), Some(BASELINE));
+        assert_eq!(Source::Defaults.file_name(), None);
+    }
+
+    #[test]
+    fn a_baseline_write_leaves_an_interrupted_save_alone() {
         let (_d, s) = store();
-        // A fresh store holds no live state.
-        assert!(!s.has_state());
-        // `current.json` alone is live state.
-        std::fs::write(s.dir().join(CURRENT), b"{}").unwrap();
-        assert!(s.has_state());
-        // A generation ALONE, with no `current.json`, is also live state: a
-        // crash between `save`'s two renames can leave the newest state only as
-        // a generation (iemmixer#9). This pins the `||` (either source counts)
-        // and the `!generations.is_empty()` (a present generation is state).
-        std::fs::remove_file(s.dir().join(CURRENT)).unwrap();
-        std::fs::write(s.dir().join("gen-0000000001.json"), b"{}").unwrap();
-        assert!(s.has_state());
+        fs::write(s.dir().join(TMP), b"NEWEST").unwrap();
+        s.save_baseline(&sample(3)).unwrap();
+        assert_eq!(fs::read(s.dir().join(TMP)).unwrap(), b"NEWEST");
+        let baseline = fs::read(s.dir().join(BASELINE)).unwrap();
+        assert_eq!(decode(&baseline).unwrap().rev, 3);
     }
 
     #[test]
@@ -394,7 +546,7 @@ mod tests {
         let g = test_site();
         let mut p = sample(1);
         p.state = to_state(&g, &reconcile(&g, &p.state).0);
-        assert_eq!(s.save(&p).unwrap(), 0);
+        assert_eq!(s.save(&p).unwrap().generation, 0);
         let loaded = s.load(&g);
         assert_eq!(loaded.source, Source::Current);
         assert_eq!(loaded.persisted, p);
@@ -410,7 +562,7 @@ mod tests {
     fn a_save_rotates_current_into_a_generation_and_keeps_20() {
         let (_d, s) = store();
         for rev in 1..=25 {
-            assert_eq!(s.save(&sample(rev)).unwrap(), rev - 1);
+            assert_eq!(s.save(&sample(rev)).unwrap().generation, rev - 1);
         }
         let gens = s.generations().unwrap();
         assert_eq!(gens.len(), GENERATIONS);
@@ -429,128 +581,6 @@ mod tests {
             25
         );
         assert!(!s.dir().join(TMP).exists());
-    }
-
-    fn corrupt(path: &Path) {
-        let mut text = fs::read_to_string(path).unwrap();
-        let at = text.find("\"rev\":").unwrap() + 6;
-        text.insert(at, '9');
-        fs::write(path, text).unwrap();
-    }
-
-    #[test]
-    fn a_bad_checksum_falls_back_to_the_newest_good_generation() {
-        let (_d, s) = store();
-        for rev in 1..=3 {
-            s.save(&sample(rev)).unwrap();
-        }
-        corrupt(&s.dir().join(CURRENT));
-        let loaded = s.load(&test_site());
-        assert_eq!(loaded.source, Source::Generation(2));
-        assert_eq!(loaded.persisted.rev, 2);
-        assert_eq!(loaded.rejected.len(), 1);
-        assert!(loaded.rejected[0].0.ends_with(CURRENT));
-        assert_eq!(loaded.rejected[0].1, "checksum mismatch");
-    }
-
-    #[test]
-    fn truncated_or_foreign_files_are_skipped() {
-        let (_d, s) = store();
-        for rev in 1..=3 {
-            s.save(&sample(rev)).unwrap();
-        }
-        let current = s.dir().join(CURRENT);
-        let bytes = fs::read(&current).unwrap();
-        fs::write(&current, &bytes[..bytes.len() / 2]).unwrap();
-        let gens = s.generations().unwrap();
-        let newest = &gens.last().unwrap().1;
-        let text = fs::read_to_string(newest)
-            .unwrap()
-            .replace("iemmixer-state", "not-ours");
-        fs::write(newest, text).unwrap();
-        // A stray temp file never counts.
-        fs::write(s.dir().join(TMP), b"garbage").unwrap();
-        let loaded = s.load(&test_site());
-        assert_eq!(loaded.source, Source::Generation(1));
-        assert_eq!(loaded.persisted.rev, 1);
-        assert_eq!(loaded.rejected.len(), 2);
-    }
-
-    #[test]
-    fn baseline_is_the_last_resort_before_defaults() {
-        let (_d, s) = store();
-        s.save_baseline(&sample(9)).unwrap();
-        fs::write(s.dir().join(CURRENT), b"{}").unwrap();
-        let loaded = s.load(&test_site());
-        assert_eq!(loaded.source, Source::Baseline);
-        assert_eq!(loaded.persisted.rev, 9);
-        assert_eq!(loaded.rejected.len(), 1);
-    }
-
-    #[test]
-    fn an_unreadable_file_is_rejected_not_skipped_as_missing() {
-        let (_d, s) = store();
-        s.save_baseline(&sample(4)).unwrap();
-        // A directory where current.json belongs: reading it fails, not NotFound.
-        fs::create_dir(s.dir().join(CURRENT)).unwrap();
-        let loaded = s.load(&test_site());
-        assert_eq!(loaded.source, Source::Baseline);
-        assert_eq!(loaded.persisted.rev, 4);
-        assert_eq!(loaded.rejected.len(), 1);
-        assert!(loaded.rejected[0].0.ends_with(CURRENT));
-    }
-
-    #[test]
-    fn nothing_loadable_gives_muted_defaults() {
-        let (_d, s) = store();
-        let g = test_site();
-        let loaded = s.load(&g);
-        assert_eq!(loaded.source, Source::Defaults);
-        assert!(loaded.rejected.is_empty());
-        assert_eq!(loaded.persisted.rev, 0);
-        assert_eq!(loaded.persisted.topology_hash, g.hash);
-        for n in &g.mixes {
-            assert!(loaded.persisted.state.mixes[&n.id].out.muted, "{}", n.id);
-        }
-    }
-
-    #[test]
-    fn newer_fields_are_ignored_and_missing_default() {
-        let (_d, s) = store();
-        let payload = r#"{"rev":7,"state":{"inputs":{"mic1":{"trim_db":-2.0,"colour":"red"}}},"future":{"x":1}}"#;
-        let file = format!(
-            r#"{{"format":"iemmixer-state","schema":9,"sha256":"{}","payload":{payload},"later":true}}"#,
-            digest(payload)
-        );
-        fs::write(s.dir().join(CURRENT), file).unwrap();
-        let loaded = s.load(&test_site());
-        assert_eq!(loaded.source, Source::Current);
-        assert_eq!(loaded.persisted.rev, 7);
-        assert!(loaded.persisted.counters.is_empty());
-        let mic1 = loaded.persisted.state.inputs[&InputId::new("mic1")];
-        assert_eq!(mic1.trim_db, -2.0);
-        assert!(mic1.processing);
-        assert_eq!(loaded.persisted.state.mixes.len(), 11);
-    }
-
-    #[test]
-    fn unknown_ids_are_dropped_on_load() {
-        let (_d, s) = store();
-        let mut p = sample(2);
-        p.state
-            .inputs
-            .insert(InputId::new("ghost"), InputState::default());
-        s.save(&p).unwrap();
-        let loaded = s.load(&test_site());
-        assert_eq!(loaded.dropped, vec!["input ghost"]);
-        assert!(
-            !loaded
-                .persisted
-                .state
-                .inputs
-                .contains_key(&InputId::new("ghost"))
-        );
-        assert_eq!(loaded.persisted.state.inputs.len(), 24);
     }
 
     #[test]

@@ -16,7 +16,7 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use iem_audio_io::{InputSignal, Planar, wav};
+use iem_audio_io::InputSignal;
 use iem_engine::control::Exit;
 use iem_engine::core::Flags;
 use iem_engine::engine::{EngineError, RunConfig, run};
@@ -738,6 +738,89 @@ fn shutdown_saves_fades_and_releases() {
     assert!(dir.path().join("state/gen-0000000001.json").exists());
 }
 
+/// #32: a boot on an interrupted save finishes it before the engine runs:
+/// save.tmp becomes current.json and the older current.json a generation.
+#[test]
+fn a_boot_on_an_interrupted_save_finishes_it_first() {
+    use iem_engine::persist::{Persisted, Store, decode, encode};
+    let at = |rev| Persisted {
+        rev,
+        ..Persisted::default()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    Store::open(&state).unwrap().save(&at(1)).unwrap();
+    std::fs::write(state.join("save.tmp"), encode(&at(2)).unwrap()).unwrap();
+    let e = Engine::start_in(dir, Flags::default(), InputSignal::Silence);
+    let mut c = e.client();
+    let (h, _, rev) = c.hello(Role::Observe);
+    assert_eq!((h.state_rev, rev), (2, 2));
+    assert!(!state.join("save.tmp").exists());
+    let current = std::fs::read(state.join("current.json")).unwrap();
+    assert_eq!(decode(&current).unwrap().rev, 2);
+    let generation = std::fs::read(state.join("gen-0000000001.json")).unwrap();
+    assert_eq!(decode(&generation).unwrap().rev, 1);
+    e.shutdown();
+}
+
+/// #32 P5: the boot recovery writes to the state directory, so the state
+/// directory is taken first: a second engine on it (another pipe) stops
+/// after its bounded wait (minor-4), before it reads or moves any state
+/// file.
+#[test]
+fn a_second_engine_on_the_same_state_dir_leaves_it_alone() {
+    use iem_engine::persist::{Persisted, encode};
+    let e = Engine::start(Flags::default(), InputSignal::Silence);
+    e.client().hello(Role::Observe);
+    let state = e.dir.path().join("state");
+    // A save.tmp the second engine's recovery would make current.json.
+    let probe = Persisted {
+        rev: 9,
+        ..Persisted::default()
+    };
+    std::fs::write(state.join("save.tmp"), encode(&probe).unwrap()).unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let cfg = RunConfig::new(common::site_path(), state.clone(), pipe_name(&other));
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(run(cfg));
+    });
+    // The error's kind and exit code are the binary test's
+    // (`a_held_state_dir_ends_the_binary_with_exit_75`).
+    let err = rx
+        .recv_timeout(WAIT)
+        .expect("a refused engine returns within its wait")
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("in use by another engine"),
+        "{err}"
+    );
+    assert!(state.join("save.tmp").exists());
+    assert!(!state.join("current.json").exists());
+    e.shutdown();
+}
+
+/// #32 minor-4: an engine that just ended may hold the state directory's
+/// lock a moment after its exit (a lock's release can lag the process
+/// end), so the next engine waits for it (up to 3 s) instead of ending at
+/// once and counting as a crash.
+#[test]
+fn an_engine_waits_a_moment_for_its_state_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let held = iem_engine::persist::Store::open(&dir.path().join("state"))
+        .unwrap()
+        .lock()
+        .unwrap();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(500));
+        drop(held);
+    });
+    let e = Engine::start_in(dir, Flags::default(), InputSignal::Silence);
+    e.client().hello(Role::Observe);
+    release.join().unwrap();
+    e.shutdown();
+}
+
 #[test]
 fn fault_injection_releases_the_driver_and_exits() {
     let off = Engine::start(Flags::default(), InputSignal::Silence);
@@ -770,82 +853,6 @@ fn fault_injection_releases_the_driver_and_exits() {
     assert!(matches!(e.exit(), Exit::Fault(why) if why.contains("fault injection")));
     let saved = std::fs::read(e.dir.path().join("state/current.json")).unwrap();
     assert_eq!(iem_engine::persist::decode(&saved).unwrap().rev, 1);
-}
-
-#[test]
-fn the_binary_runs_and_shuts_down() {
-    let dir = tempfile::tempdir().unwrap();
-    let pipe = pipe_name(&dir);
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_iem-engine"))
-        .args(["run", "--site"])
-        .arg(common::site_path())
-        .arg("--state-dir")
-        .arg(dir.path().join("state"))
-        .args(["--pipe", &pipe])
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
-    let mut c = Client::new(&pipe);
-    c.hello(Role::Control);
-    assert!(c.request(1, Cmd::Shutdown).error.is_none());
-    let start = Instant::now();
-    let status = loop {
-        if let Some(s) = child.try_wait().unwrap() {
-            break s;
-        }
-        assert!(start.elapsed() < WAIT, "the binary did not exit");
-        std::thread::sleep(Duration::from_millis(20));
-    };
-    assert_eq!(status.code(), Some(0));
-    let usage = std::process::Command::new(env!("CARGO_BIN_EXE_iem-engine"))
-        .args(["run", "--bogus"])
-        .output()
-        .unwrap();
-    assert_eq!(usage.status.code(), Some(2));
-    let help = std::process::Command::new(env!("CARGO_BIN_EXE_iem-engine"))
-        .arg("--help")
-        .output()
-        .unwrap();
-    assert_eq!(help.status.code(), Some(0));
-    assert!(String::from_utf8_lossy(&help.stdout).contains("iem-engine render"));
-}
-
-#[test]
-fn the_binary_renders_offline() {
-    let dir = tempfile::tempdir().unwrap();
-    let input = dir.path().join("in.wav");
-    let output = dir.path().join("out.wav");
-    let mut audio = Planar::new(32, 960);
-    for ch in 0..32 {
-        audio.channel_mut(ch).fill(0.1);
-    }
-    wav::write_file(&input, 96_000, &audio).unwrap();
-    let run = |extra: &[&str]| {
-        std::process::Command::new(env!("CARGO_BIN_EXE_iem-engine"))
-            .arg("render")
-            .arg("--site")
-            .arg(common::site_path())
-            .arg("--in")
-            .arg(&input)
-            .arg("--out")
-            .arg(&output)
-            .args(extra)
-            .output()
-            .unwrap()
-    };
-    let ok = run(&["--block", "97"]);
-    assert_eq!(
-        ok.status.code(),
-        Some(0),
-        "{}",
-        String::from_utf8_lossy(&ok.stderr)
-    );
-    let (rate, out) = wav::read_file(&output).unwrap();
-    assert_eq!((rate, out.channels(), out.frames()), (96_000, 21, 960));
-    wav::write_file(&input, 48_000, &audio).unwrap();
-    let refused = run(&[]);
-    assert_eq!(refused.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&refused.stderr).contains("96000"));
 }
 
 #[test]
@@ -887,349 +894,12 @@ fn a_held_engine_sounds_after_its_supervisor_arms_it() {
     e.shutdown();
 }
 
-#[test]
-fn the_binary_checks_a_site() {
-    let check = |site: &std::path::Path| {
-        std::process::Command::new(env!("CARGO_BIN_EXE_iem-engine"))
-            .args(["check-site", "--site"])
-            .arg(site)
-            .output()
-            .unwrap()
-    };
-    let ok = check(common::site_path().as_path());
-    assert_eq!(
-        ok.status.code(),
-        Some(0),
-        "{}",
-        String::from_utf8_lossy(&ok.stderr)
-    );
-    let summary: serde_json::Value = serde_json::from_slice(&ok.stdout).unwrap();
-    assert_eq!(summary["topology"], common::topology().hash.as_str());
-    assert_eq!(summary["inputs"], 24);
-    assert_eq!(summary["groups"], 1);
-    assert_eq!(summary["mixes"], 11);
-    assert_eq!(summary["card"], true);
-    let dir = tempfile::tempdir().unwrap();
-    let bad = dir.path().join("site.toml");
-    let text = std::fs::read_to_string(common::site_path()).unwrap();
-    std::fs::write(&bad, text.replace("frames = 32", "frames = 64")).unwrap();
-    let refused = check(bad.as_path());
-    assert_eq!(refused.status.code(), Some(2));
-    assert!(refused.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&refused.stderr).contains("frames must be 32"));
-}
-
-/// Off Windows the card cannot open: `run --backend asio` and `interlock`
-/// are usage errors (exit 2), never a card refusal (exit 3).
-#[cfg(not(windows))]
-#[test]
-fn off_windows_the_binary_refuses_the_card_as_usage() {
-    let dir = tempfile::tempdir().unwrap();
-    let engine = |args: &[&str]| {
-        std::process::Command::new(env!("CARGO_BIN_EXE_iem-engine"))
-            .args(args)
-            .arg("--site")
-            .arg(common::site_path())
-            .output()
-            .unwrap()
-    };
-    let interlock = engine(&["interlock", "--seconds", "5"]);
-    assert_eq!(interlock.status.code(), Some(2));
-    assert!(interlock.stdout.is_empty());
-    let state = dir.path().join("state").to_string_lossy().into_owned();
-    let pipe = pipe_name(&dir);
-    let asio = engine(&[
-        "run",
-        "--backend",
-        "asio",
-        "--state-dir",
-        state.as_str(),
-        "--pipe",
-        pipe.as_str(),
-    ]);
-    assert_eq!(asio.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&asio.stderr).contains("Windows"));
-}
+/// The `iem-engine` binary through its command line.
+#[path = "pipes/binary.rs"]
+mod binary;
 
 /// Windows named pipes only (S6 design note §4): the private DACL, the
 /// first-instance flag and writes bounded like the Unix send timeout.
 #[cfg(windows)]
-mod named_pipes {
-    use super::*;
-    use iem_engine::pipe::{listen, sddl_is_private};
-    use iem_win::token::{current_user_sid, pipe_sddl, sddl_sid};
-
-    #[test]
-    fn a_client_that_stops_reading_is_dropped_and_the_engine_keeps_serving() {
-        let e = Engine::start(
-            Flags::default(),
-            InputSignal::Sine {
-                hz: 1000.0,
-                amp: 0.1,
-            },
-        );
-        let mut ctl = e.client();
-        ctl.hello(Role::Control);
-        let engineer = Cmd::StartListen {
-            mix: MixId::new("engineer"),
-        };
-        assert!(ctl.request(1, engineer).error.is_none());
-        // Two clients that never read: the engine's writes to them (the
-        // topology and meters; listen frames) outgrow their pipes' 512-byte
-        // buffers and wait for them.
-        let pipe = e.pipe.clone();
-        let stalled = connect(move || control_name(&pipe));
-        let hello = ClientMsg::Hello {
-            proto: PROTO,
-            role: Role::Observe,
-            client: "stalled".into(),
-        };
-        write_frame(&mut &stalled, &hello).unwrap();
-        let pipe = e.pipe.clone();
-        let stalled_media = connect(move || media_name(&pipe));
-        let start = Instant::now();
-        // The control thread gives the stalled client SEND_TIMEOUT (1 s) and
-        // then drops it: the controller's replies keep coming.
-        for id in 2..=6 {
-            let asked = Instant::now();
-            assert!(ctl.request(id, Cmd::Ping).error.is_none());
-            let took = asked.elapsed();
-            assert!(took < Duration::from_secs(2), "reply {id} after {took:?}");
-        }
-        // The media pump dropped its stalled client too: a new one is served.
-        let media = media_client(&e.pipe);
-        let (h, samples) = media.try_recv().unwrap();
-        assert_eq!((h.channels, samples.len()), (2, 2 * FRAME_48K));
-        // The stalled control client is gone: reading it now shows at most
-        // what fitted its pipe before the drop, then the end.
-        std::thread::sleep(Duration::from_secs(2).saturating_sub(start.elapsed()));
-        let mut dropped = Client {
-            r: Reader::start(stalled, Framer::next_frame),
-        };
-        assert!(dropped.closed(), "the stalled client was dropped");
-        drop(stalled_media);
-        drop(media);
-        // `run` joins the media pump: the shutdown still ends it within 5 s.
-        e.shutdown();
-    }
-
-    /// The engine closes a connection at once, even while its peer has not
-    /// read what the engine wrote last, so a peer that never reads holds up
-    /// no other close. interprocess's flush on drop (limbo) would keep the
-    /// engine's end open on the process's one linger thread until the peer
-    /// has read everything, and every stream dropped later in the process
-    /// would wait behind it, unclosed (Windows CI run 36373563262: two
-    /// clients never read the end the engine gave them, and the engine
-    /// never saw a controller leave). The peer still reads what came before
-    /// the close, then the end.
-    #[test]
-    fn a_peer_that_does_not_read_holds_up_no_close() {
-        use iem_win::pipe::{available, write_within};
-        use std::os::windows::io::AsHandle;
-
-        let e = Engine::start(Flags::default(), InputSignal::Silence);
-        let pipe = e.pipe.clone();
-        let mute = connect(move || control_name(&pipe));
-        // Refused at its hello: a short reply that fits the pipe, then the
-        // engine drops the connection. Nobody reads that reply yet.
-        let hello = ClientMsg::Hello {
-            proto: 0,
-            role: Role::Observe,
-            client: "mute".into(),
-        };
-        write_frame(&mut &mute, &hello).unwrap();
-        let gone = {
-            let Stream::NamedPipe(end) = &mute;
-            let end = end.inner().as_handle();
-            let start = Instant::now();
-            while available(end).unwrap() == 0 {
-                assert!(start.elapsed() < WAIT, "no reply to the refused hello");
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            // Once the engine's end is closed, a byte the client writes
-            // finds the pipe closing; while it stays open, each byte waits
-            // in the pipe (a few dozen fit its 512 bytes).
-            let start = Instant::now();
-            loop {
-                match write_within(end, &[0], Duration::from_millis(100)) {
-                    Err(gone) => break Some(gone),
-                    Ok(_) if start.elapsed() < Duration::from_secs(2) => {
-                        std::thread::sleep(Duration::from_millis(20));
-                    }
-                    Ok(_) => break None,
-                }
-            }
-        };
-        // Meanwhile a controller superseded by a new one reads the end of
-        // its stream.
-        let mut first = e.client();
-        first.hello(Role::Control);
-        let mut second = e.client();
-        second.hello(Role::Control);
-        first.wait(|m| matches!(m, EngineMsg::Superseded).then_some(()));
-        let later_closed = first.closed();
-        // The refused client reads the reply the engine wrote before it
-        // closed, then the end (reading it also frees whatever waited for
-        // it, before any assertion below can fail).
-        let mut late = Client {
-            r: Reader::start(mute, Framer::next_frame),
-        };
-        let reply = late.wait(|m| match m {
-            EngineMsg::Reply(r) => Some(r.clone()),
-            _ => None,
-        });
-        assert_eq!(reply.error.map(|b| b.code), Some(ErrCode::Unsupported));
-        assert!(late.closed(), "the refused client reads the end");
-        let Some(gone) = gone else {
-            panic!("the engine kept a closed connection open until its peer read it");
-        };
-        assert!(
-            matches!(gone.raw_os_error(), Some(109 | 232 | 233)),
-            "{gone}"
-        );
-        assert!(later_closed, "a close waited for a peer that does not read");
-        e.shutdown();
-    }
-
-    /// `ERROR_PIPE_BUSY`: every instance is taken for a moment.
-    const BUSY: i32 = 231;
-
-    /// The pipe's DACL; waits while the engine has not yet made a new
-    /// instance after the last connection.
-    fn read_dacl(name: &str) -> String {
-        let start = Instant::now();
-        loop {
-            match pipe_sddl(name) {
-                Ok(text) => return text,
-                Err(e) if e.raw_os_error() == Some(BUSY) && start.elapsed() < WAIT => {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                Err(e) => panic!("{name}: {e}"),
-            }
-        }
-    }
-
-    #[test]
-    fn a_second_listener_on_a_held_name_is_refused_at_once() {
-        let dir = tempfile::tempdir().unwrap();
-        let name = pipe_name(&dir);
-        let first = listen(control_name(&name).unwrap()).unwrap();
-        // A live listener holds the name as long as it lives (a gone one's
-        // client does not, below), so waiting cannot free it: a second
-        // engine or a squatter is refused at once.
-        let start = Instant::now();
-        let second = listen(control_name(&name).unwrap()).unwrap_err();
-        let took = start.elapsed();
-        assert_eq!(second.kind(), std::io::ErrorKind::AddrInUse, "{second}");
-        assert!(
-            second.to_string().starts_with("pipe name taken ("),
-            "{second}"
-        );
-        assert!(took < Duration::from_secs(1), "{took:?}");
-        // So it stays while the listener serves: a connection accepted and
-        // dropped, its next instance listening.
-        let n = name.clone();
-        let client = connect(move || control_name(&n));
-        drop(accept(&first));
-        let third = listen(control_name(&name).unwrap()).unwrap_err();
-        assert_eq!(third.kind(), std::io::ErrorKind::AddrInUse, "{third}");
-        drop(client);
-    }
-
-    fn accept(listener: &interprocess::local_socket::Listener) -> Stream {
-        use interprocess::local_socket::traits::Listener as _;
-        let start = Instant::now();
-        loop {
-            match listener.accept() {
-                Ok(s) => return s,
-                Err(e) => {
-                    assert!(start.elapsed() < WAIT, "accept: {e}");
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn a_gone_listeners_name_is_free_while_its_client_still_holds_its_end() {
-        let dir = tempfile::tempdir().unwrap();
-        let name = pipe_name(&dir);
-        let first = listen(control_name(&name).unwrap()).unwrap();
-        let n = name.clone();
-        let client = connect(move || control_name(&n));
-        drop(accept(&first));
-        drop(first);
-        // Every server end of the name is closed, as when an engine's
-        // process has ended; its client still holds its end. A client's end
-        // does not hold the name: a new listener (the respawned engine)
-        // creates the first instance while the client is still there
-        // (Windows CI run 36371298924 refuted the opposite).
-        let again = listen(control_name(&name).unwrap())
-            .unwrap_or_else(|e| panic!("the gone listener's client held the name: {e}"));
-        // That client is no client of the new listener: its end reads the
-        // end of the stream.
-        let mut old = Client {
-            r: Reader::start(client, Framer::next_frame),
-        };
-        assert!(old.closed(), "the gone listener's client reads the end");
-        // A new client is the new listener's, which holds the name against
-        // another listener.
-        let n = name.clone();
-        let fresh = connect(move || control_name(&n));
-        drop(accept(&again));
-        let squatter = listen(control_name(&name).unwrap()).unwrap_err();
-        assert_eq!(squatter.kind(), std::io::ErrorKind::AddrInUse, "{squatter}");
-        assert!(
-            squatter.to_string().starts_with("pipe name taken ("),
-            "{squatter}"
-        );
-        drop(fresh);
-    }
-
-    #[test]
-    fn a_second_engine_on_a_held_pipe_stops_with_an_io_error() {
-        let e = Engine::start(Flags::default(), InputSignal::Silence);
-        e.client().hello(Role::Observe);
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = RunConfig::new(
-            common::site_path(),
-            dir.path().join("state"),
-            e.pipe.clone(),
-        );
-        let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = tx.send(run(cfg));
-        });
-        let err = rx
-            .recv_timeout(WAIT)
-            .expect("a refused engine returns at once")
-            .unwrap_err();
-        assert!(
-            matches!(&err, EngineError::Io(io) if io.kind() == std::io::ErrorKind::AddrInUse),
-            "{err}"
-        );
-        assert!(err.to_string().starts_with("pipe name taken ("), "{err}");
-        e.shutdown();
-    }
-
-    #[test]
-    fn the_engines_pipes_admit_only_the_user_and_system() {
-        let e = Engine::start(Flags::default(), InputSignal::Silence);
-        e.client().hello(Role::Observe);
-        let user = current_user_sid().unwrap();
-        let written = sddl_sid(&user).unwrap();
-        // No media client is connected: reading the media pipe's DACL
-        // connects as one for a moment (`pipe_sddl`), superseding nobody.
-        for name in [e.pipe.clone(), format!("{}.media", e.pipe)] {
-            let dacl = read_dacl(&name);
-            assert!(
-                sddl_is_private(&dacl, &written),
-                "{name}: {dacl} (user {user}, written {written})"
-            );
-            assert!(dacl.contains(";;;SY)"), "{name}: {dacl}");
-            // Protected: nothing is inherited into it.
-            assert!(dacl.starts_with("D:P("), "{name}: {dacl}");
-        }
-        e.shutdown();
-    }
-}
+#[path = "pipes/named_pipes.rs"]
+mod named_pipes;

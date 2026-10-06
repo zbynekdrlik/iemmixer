@@ -3489,6 +3489,41 @@ fn clean_and_session_end_exits_are_no_crashes() {
 }
 
 #[test]
+fn a_busy_state_directory_is_tried_again_without_a_crash_count() {
+    // #32 minor-4: exit 75 = the engine waited 3 s for its state directory
+    // (an engine that just ended may hold its lock a moment). No crash:
+    // three in a row make no loop, the guard starts it again after 2 s and
+    // alarms once, at the third in a row.
+    let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Dev));
+    pc.exited = vec![(Kid::Engine, Some(75)); 3];
+    let at = Instant::now();
+    tick(&mut pc, &mut g, at);
+    assert_eq!(g.state.mode, Mode::Dev);
+    assert!(!pc.called(Call::ReaperStart));
+    assert_eq!(
+        texts(&g),
+        [
+            "the engine's state directory stayed in use 3 times in a row (exit 75): starting it again"
+        ]
+    );
+    tick(&mut pc, &mut g, at + Duration::from_millis(1999));
+    assert!(!pc.called(Call::EngineStart));
+    tick(&mut pc, &mut g, at + Duration::from_secs(2));
+    assert_eq!(pc.count(Call::EngineStart), 1);
+    // They counted no crash: two crashes after them make no loop either,
+    // and a fourth busy exit after a crash starts a new streak (no alarm).
+    pc.exited = vec![
+        (Kid::Engine, Some(70)),
+        (Kid::Engine, Some(75)),
+        (Kid::Engine, Some(70)),
+    ];
+    tick(&mut pc, &mut g, at + Duration::from_secs(3));
+    assert_eq!(g.state.mode, Mode::Dev);
+    assert!(!pc.called(Call::ReaperStart));
+    assert_eq!(g.alarms.all().len(), 1, "{:?}", texts(&g));
+}
+
+#[test]
 fn a_crash_loop_goes_back_to_reaper() {
     let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Dev));
     pc.exited = vec![(Kid::Engine, Some(70)); 3];
