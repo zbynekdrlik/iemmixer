@@ -1711,9 +1711,11 @@ fn inject_seh(pc: &mut dyn Pc, g: &mut Guard) -> (bool, String) {
 /// for the job). The engine raises the SEH test's exception under its
 /// backend's test hold: the driver is kept, the SEH filter parks the RT
 /// thread, and the engine keeps running with its stream parked and the card
-/// held (`Status.parked`, so `iemmode status`) until the OS restart the test
-/// makes. The watch sees no exit, so it starts nothing; the event plan's
-/// `EngineStop` meets the parked engine as after a stuck callback (R6).
+/// held (`Status.parked`, so `iemmode status`) until it ends: test #2 ends
+/// it with an OS restart, any `Shutdown` (an "ide event", a job's engine
+/// restart) too. The watch sees no exit, so it starts nothing; the event
+/// plan's `EngineStop` meets the parked engine as after a stuck callback
+/// (R6).
 fn inject_park(pc: &mut dyn Pc, g: &mut Guard) -> (bool, String) {
     if let Err(why) = in_hil_job(g, "inject-park", "a parked-engine test") {
         return (false, why);
@@ -1721,7 +1723,8 @@ fn inject_park(pc: &mut dyn Pc, g: &mut Guard) -> (bool, String) {
     outcome(
         pc.engine_inject_park(),
         "the engine raises a structured exception under the test hold: its stream \
-         parks with the card held and the engine keeps running until an OS restart",
+         parks with the card held and the engine keeps running until it ends \
+         (test #2 ends it with an OS restart)",
     )
 }
 

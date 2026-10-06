@@ -242,7 +242,8 @@ pub fn seh_release(seh: bool, hold: bool, done: bool) -> SehRelease {
 /// Whether a structured exception is a fault of the stream (the engine
 /// saves, releases and exits 70). Under the test hold it parks the stream
 /// instead (#35): the engine keeps running and reports `parked`, like a
-/// stream a stuck callback parked (R6), until the OS restart the test makes.
+/// stream a stuck callback parked (R6), until it ends (the test ends it with
+/// an OS restart).
 pub fn seh_faults(seh: bool, hold: bool) -> bool {
     seh && !hold
 }
@@ -619,8 +620,8 @@ mod tests {
     }
 
     /// A held structured exception parks the stream without a fault, so the
-    /// engine keeps running and reports `parked` until the OS restart the
-    /// test makes (#35); any other one is a fault, as before.
+    /// engine keeps running and reports `parked` until it ends (#35); any
+    /// other one is a fault, as before.
     #[test]
     fn a_structured_exception_is_a_fault_unless_the_test_hold_parks_it() {
         assert!(seh_faults(true, false));

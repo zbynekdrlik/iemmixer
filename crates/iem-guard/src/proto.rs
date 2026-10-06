@@ -91,7 +91,8 @@ pub enum Request {
     /// #35) — the engine raises the SEH test's exception under its backend's
     /// test hold: the driver is kept, the SEH filter parks the RT thread, and
     /// the engine keeps running with its stream parked and the card held
-    /// ([`EngineStatus::parked`]) until the OS restart the test makes.
+    /// ([`EngineStatus::parked`]) until it ends (the test ends it with an OS
+    /// restart).
     InjectPark,
     /// Dev only: stop the idle runner (bootstrap check, S6 plan Task 16).
     RunnerStop,

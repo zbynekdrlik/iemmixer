@@ -1623,7 +1623,21 @@ impl Owner {
     fn hold_card(&mut self) {
         if let Some(live) = self.live.take() {
             let Live { card, backend, .. } = live;
+            // Logged before the call: a driver whose `stop()` waited for the
+            // callback thread the filter holds would hang the owner thread
+            // here, and the log tells that from a park. The SEH release
+            // (test #4, PASS on #9 2026-09-28) made the same call under the
+            // same exception, and it returned.
+            warn!(
+                "[{}] the parked-engine test's hold: stopping the driver while the faulting \
+                 callback waits in the SEH filter",
+                when()
+            );
             let _ = card.driver().stop();
+            info!(
+                "[{}] the parked-engine test's hold: stop() returned",
+                when()
+            );
             BACKEND.store(ptr::null_mut(), Ordering::SeqCst);
             self.shared.running.store(false, Ordering::SeqCst);
             // SAFETY: a held stream is never freed, so its counters stay
@@ -1634,9 +1648,9 @@ impl Owner {
         self.shared.parked.store(true, Ordering::SeqCst);
         self.done = Some(StopOutcome::Parked);
         error!(
-            "[{}] the parked-engine test's hold: the driver is stopped and kept, never disposed \
-             or released, so the SEH filter parks the faulting thread; the stream stays parked \
-             with the card held and the preferred buffer at the engine's value",
+            "[{}] the parked-engine test's hold: the driver is kept, never disposed or released, \
+             so the SEH filter parks the faulting thread; the stream stays parked with the card \
+             held and the preferred buffer at the engine's value until the engine ends",
             when()
         );
         self.log_messages();
@@ -2180,7 +2194,10 @@ pub fn raise_test_seh() {
 /// stopped, never disposed or released), so the SEH filter's wait runs out
 /// and it parks this thread for good: the stream stays parked with the card
 /// held, and the exception is no fault (`owner::seh_faults`), so the engine
-/// keeps running and reports `parked` until the OS restart the test makes.
+/// keeps running and reports `parked` until it ends (the test ends it with an
+/// OS restart; a `Shutdown` ends it too). Raised during a reopen, the old
+/// card's release may set `RELEASED` before the new open clears it: the
+/// filter then lets the exception end the process, as without the hold.
 pub fn raise_test_park() {
     // Before the exception: a tick that sees `SEH` sees the hold too.
     SEH_HOLD.store(true, Ordering::SeqCst);
