@@ -845,6 +845,22 @@ def scan_commits(
     return hits
 
 
+def committed_blob(repo: Path, spec: str) -> tuple[str, bytes] | None:
+    """The path and bytes of the blob `--hash` keys: `<path>` in HEAD, else `<rev>:<path>` (a blob
+    only history holds). Never the working-tree file: an uncommitted edit, its line endings, its
+    encoding or a smudge filter can make it differ from the blob the scan read (#32 F5 m8)."""
+    targets = [("HEAD", spec)]
+    if ":" in spec:  # `HEAD:<path>` first: a path may hold a colon itself
+        rev, path = spec.split(":", 1)
+        targets.append((rev, path))
+    for rev, path in targets:
+        try:
+            return path, git(repo, "cat-file", "blob", f"{rev}:{path}")
+        except subprocess.CalledProcessError:
+            continue
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Scan git content for private site data.")
     parser.add_argument("--denylist", type=Path)
@@ -854,18 +870,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--tree", action="append", default=[], metavar="REV")
     parser.add_argument("--commits", action="append", default=[], metavar="REVLIST")
     parser.add_argument("--hash", nargs=2, metavar=("PATH", "N"),
-                        help="print the allow key of line N (or `run N`) of PATH, or of <rev>:<path>")
+                        help="print the allow key of line N (or `run N`) of PATH as committed in HEAD, "
+                             "or of <rev>:<path>")
     args = parser.parse_args(argv)
 
     if args.hash:
-        path, number = args.hash
-        target = args.repo / path
-        if target.exists() or ":" not in path:
-            data = target.read_bytes()
-        else:  # `<rev>:<path>`: a blob only history holds (the file since changed or removed)
-            rev, path = path.split(":", 1)
-            data = git(args.repo, "cat-file", "blob", f"{rev}:{path}")
-        # the units the scan numbers, from the file's bytes: read_text() would translate CR / CRLF
+        spec, number = args.hash
+        blob = committed_blob(args.repo, spec)
+        if blob is None:
+            print("--hash: no such committed blob (give <path> in HEAD, or <rev>:<path>)", file=sys.stderr)
+            return EXIT_USAGE
+        path, data = blob
+        # the units the scan numbers, from the blob's bytes: a text read would translate CR / CRLF
         # to \n and diverge the allow key from the scanner; a UTF-16 line or a binary run (`run N`)
         # is keyed exactly as the scanner keys it
         print(line_key(path, unit_key(data, int(number.removeprefix("run").strip()))))
