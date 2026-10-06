@@ -639,10 +639,28 @@ def run_batches(data: bytes, first: int) -> Generator[Batch, None, int]:
     return first
 
 
+def wide_runs(data: bytes) -> list[str]:
+    """The UTF-16 strings inside binary content, in the order they occur (few: random bytes rarely
+    form one). A string read in the other byte order one byte later spells the same letters, so of
+    two readings that overlap, the one starting first -- at the string's first byte -- is kept, and
+    the other only when it runs on more than a byte past it (#32 F5 m11: one finding per string)."""
+    size = len(data)
+    spans = sorted([(size - run.end(), size - run.start(), "utf-16-le") for run in _UTF16_RUN.finditer(data[::-1])]
+                   + [(run.start(), run.end(), "utf-16-be") for run in _UTF16_RUN.finditer(data)])
+    kept: list[tuple[int, int, str]] = []
+    last_end = {"utf-16-le": -1, "utf-16-be": -1}  # where the last kept reading in each byte order ends
+    for start, end, codec in spans:
+        other = last_end["utf-16-be" if codec == "utf-16-le" else "utf-16-le"]
+        if start < other and end <= other + 1:
+            continue
+        kept.append((start, end, codec))
+        last_end[codec] = end
+    return [data[start:end].decode(codec, errors="replace") for start, end, codec in kept]
+
+
 def wide_run_batches(data: bytes, first: int) -> Iterator[Batch]:
-    """The UTF-16 strings inside binary content (few: random bytes rarely form one)."""
-    little = [run[::-1].decode("utf-16-le", errors="replace") for run in reversed(_UTF16_RUN.findall(data[::-1]))]
-    runs = little + [run.decode("utf-16-be", errors="replace") for run in _UTF16_RUN.findall(data)]
+    """The UTF-16 strings inside binary content (wide_runs)."""
+    runs = wide_runs(data)
     if runs:  # a decoded UTF-16 run holds no NUL: its characters are U+0009 and U+0020-01FF
         yield Batch("\x00".join(runs), "\x00", first, "run ")
 
