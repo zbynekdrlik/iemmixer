@@ -37,6 +37,9 @@ struct FaultState {
     flaky: Vec<(PathBuf, usize)>,
     /// The next rename onto this path fails, once.
     rename_to: Option<PathBuf>,
+    /// Paths a rename FROM fails while a rename onto them succeeds: a move
+    /// aside alone fails.
+    pinned: Vec<PathBuf>,
     /// Pauses between read tries.
     pauses: usize,
 }
@@ -111,6 +114,16 @@ impl Faulty {
         self.state.lock().unwrap().rename_to = Some(path.to_path_buf());
     }
 
+    /// While `pinned`, a rename FROM `path` fails but a rename onto it
+    /// succeeds: only a save's own refusal keeps the file then.
+    pub(super) fn set_pinned(&self, path: &Path, pinned: bool) {
+        let mut s = self.state.lock().unwrap();
+        s.pinned.retain(|p| p != path);
+        if pinned {
+            s.pinned.push(path.to_path_buf());
+        }
+    }
+
     /// Pauses between read tries so far.
     pub(super) fn pauses(&self) -> usize {
         self.state.lock().unwrap().pauses
@@ -174,6 +187,9 @@ impl Files for Faulty {
             let mut s = self.state.lock().unwrap();
             if s.locked.iter().any(|p| p == from || p == to) {
                 return Err(injected(format!("locked: {}", from.display())));
+            }
+            if s.pinned.iter().any(|p| p == from) {
+                return Err(injected(format!("pinned: {}", from.display())));
             }
             if s.rename_to.as_deref() == Some(to) {
                 s.rename_to = None;
@@ -502,11 +518,14 @@ fn a_save_tmp_that_cannot_be_moved_aside_safely_fails_the_save() {
     assert!(s.save(&session(6)).is_err());
     assert!(kept(s.dir(), &pending));
     assert_eq!(rev_of(&s.dir().join(CURRENT)), 5);
-    // Still held by another process: it cannot be moved, the save fails.
+    // It cannot be moved, though a rename onto it would go through (F3
+    // round 4, finding 7: a save.tmp locked both ways kept itself, so this
+    // half held even without the move aside). The save fails rather than
+    // replace it.
     let (_d, faulty, s, pending) = unread_save_tmp();
-    faulty.set_locked(&s.dir().join(TMP), true);
+    faulty.set_pinned(&s.dir().join(TMP), true);
     assert!(s.save(&session(6)).is_err());
-    faulty.set_locked(&s.dir().join(TMP), false);
+    faulty.set_pinned(&s.dir().join(TMP), false);
     assert_eq!(fs::read(s.dir().join(TMP)).unwrap(), pending);
     assert_eq!(rev_of(&s.dir().join(CURRENT)), 5);
 }
@@ -891,16 +910,33 @@ fn newest(dir: &Path) -> u64 {
         .unwrap()
 }
 
+/// The `save.tmp`s moved aside in `dir` that hold a state above `rev`, by
+/// name.
+fn orphans_over(dir: &Path, rev: u64) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|e| {
+            let e = e.unwrap();
+            let name = e.file_name().to_string_lossy().into_owned();
+            let held = decode(&fs::read(e.path()).ok()?).ok()?;
+            (name.starts_with(ORPHAN) && held.rev > rev).then_some(name)
+        })
+        .collect();
+    names.sort();
+    names
+}
+
 /// Runs `op` after `setup` with each single failure it can meet: once (an
 /// error, the engine runs on) and from that step on (a crash: the next
 /// process boots and recovers). After it, a boot loads the newest
-/// committed or pending state without an alarm; the engine then saves its
+/// committed or pending state, with an alarm only for each orphan above it
+/// (#32 F3-r4 7: a move aside cut off right after it); the engine then saves its
 /// next edit (the boot's revision + 1), which is the newest state on disk
 /// and what the next boot loads (#32 minor-8).
-fn every_failure<T>(what: &str, setup: impl Fn(&Store) -> T, op: impl Fn(&Store, &T)) {
+fn every_failure<T>(what: &str, setup: impl Fn(&Store, &Faulty) -> T, op: impl Fn(&Store, &T)) {
     let g = test_site();
     let (_d, faulty, s) = faulty_store();
-    let prepared = setup(&s);
+    let prepared = setup(&s, &faulty);
     faulty.count();
     op(&s, &prepared);
     let steps = faulty.steps();
@@ -908,7 +944,7 @@ fn every_failure<T>(what: &str, setup: impl Fn(&Store) -> T, op: impl Fn(&Store,
     for mode in [Mode::Once, Mode::From] {
         for at in 0..steps {
             let (_d, faulty, s) = faulty_store();
-            let prepared = setup(&s);
+            let prepared = setup(&s, &faulty);
             faulty.arm(at, mode);
             op(&s, &prepared);
             faulty.count();
@@ -923,7 +959,24 @@ fn every_failure<T>(what: &str, setup: impl Fn(&Store) -> T, op: impl Fn(&Store,
                 boot.persisted.rev, want,
                 "{what}, {mode:?} at step {at}: the first boot"
             );
-            assert!(boot.alarms.is_empty(), "{what}, {mode:?} at {at}: {boot:?}");
+            // Never an older state silently (#32 F3-r4 7): an orphan above
+            // the boot's state is named in an alarm, and nothing else
+            // raises one.
+            let above = orphans_over(s.dir(), boot.persisted.rev);
+            assert_eq!(
+                boot.alarms.len(),
+                above.len(),
+                "{what}, {mode:?} at {at}: {boot:?}"
+            );
+            for name in &above {
+                assert!(
+                    boot.alarms
+                        .iter()
+                        .any(|a| a.starts_with(&format!("{name} ("))),
+                    "{what}, {mode:?} at {at}: {name} unnamed in {:?}",
+                    boot.alarms
+                );
+            }
             if mode == Mode::From {
                 let done = s.recover(&boot);
                 assert!(done.failed.is_empty(), "{what}, {mode:?} at {at}: {done:?}");
@@ -956,16 +1009,20 @@ fn every_failure<T>(what: &str, setup: impl Fn(&Store) -> T, op: impl Fn(&Store,
 
 #[test]
 fn a_save_survives_every_single_failure() {
-    every_failure("save", filled, |s, _| {
-        let _ = s.save(&sample(22));
-    });
+    every_failure(
+        "save",
+        |s, _| filled(s),
+        |s, _| {
+            let _ = s.save(&sample(22));
+        },
+    );
 }
 
 #[test]
 fn a_recovery_survives_every_single_failure() {
     every_failure(
         "recover",
-        |s| {
+        |s, _| {
             filled(s);
             fs::write(s.dir().join(TMP), encode(&sample(22)).unwrap()).unwrap();
             let loaded = s.load(&test_site());
@@ -982,7 +1039,7 @@ fn a_recovery_survives_every_single_failure() {
 fn a_recovery_with_a_move_aside_survives_every_single_failure() {
     every_failure(
         "quarantine",
-        |s| {
+        |s, _| {
             filled(s);
             fs::write(s.dir().join(CURRENT), b"damaged").unwrap();
             fs::write(s.dir().join(TMP), encode(&sample(22)).unwrap()).unwrap();
@@ -995,6 +1052,36 @@ fn a_recovery_with_a_move_aside_survives_every_single_failure() {
         },
         |s, loaded| {
             s.recover(loaded);
+        },
+    );
+}
+
+#[test]
+fn a_save_that_moves_a_save_tmp_aside_survives_every_single_failure() {
+    // F3 round 4, finding 7: no sweep failed the move aside. The boot could
+    // not read save.tmp (another process held it a moment), so the
+    // session's save moves it aside: every failure there (asking whether
+    // save.tmp and the orphan's name exist, the rename, the directory sync)
+    // and after it, each followed by a crash, a boot and a save, leaves no
+    // silent rollback: the boot loads the newest committed or pending
+    // state, or names in an alarm the orphan above it.
+    every_failure(
+        "orphan",
+        |s, faulty| {
+            filled(s);
+            let tmp = s.dir().join(TMP);
+            fs::write(&tmp, encode(&sample(22)).unwrap()).unwrap();
+            faulty.set_unreadable(&tmp, true);
+            let boot = s.load(&test_site());
+            assert_eq!(
+                (boot.source, boot.persisted.rev, boot.save_tmp),
+                (Source::Current, 21, FileState::Unreadable)
+            );
+            s.recover(&boot);
+            faulty.set_unreadable(&tmp, false);
+        },
+        |s, _| {
+            let _ = s.save(&session(22));
         },
     );
 }
