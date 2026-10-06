@@ -31,10 +31,6 @@ class FakeClock:
         self.t += 5
         return self.t
 
-    def time(self) -> float:
-        """The wall clock a PC change's intent records (started), on the same steps."""
-        return 1_700_000_000.0 + self.monotonic()
-
     def sleep(self, seconds: float) -> None:
         pass
 
