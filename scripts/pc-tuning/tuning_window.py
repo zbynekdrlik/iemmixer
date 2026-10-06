@@ -731,8 +731,10 @@ def cmd_reboot_prepare(env, args) -> None:
 # An immediate, planned restart (reason: operating system reconfiguration) and
 # never a forced one (I8): Microsoft documents that a timeout above 0 implies
 # the force flag, so the timeout is 0. An app may then veto the restart;
-# post-boot reports that as "the PC did not reboot after the request".
-REBOOT_REQUEST = "& shutdown.exe /r /t 0 /d p:2:4 /c 'iemmixer S1c: owner-approved restart' ; $LASTEXITCODE"
+# post-boot reports that as "the PC did not reboot after the request". The
+# repository's one restart: the integrity scan passes it only marked and in
+# this literal form (check_integrity RESTART_SAFE).
+REBOOT_REQUEST = "& shutdown.exe /r /t 0 /d p:2:4 /c 'iemmixer S1c: owner-approved restart' ; $LASTEXITCODE"  # iemmixer:graceful-restart
 
 
 def cmd_reboot(env, args) -> None:
