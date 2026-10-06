@@ -598,6 +598,42 @@ jobs:
           if (-not $s.at) { throw 'no sample time' }
           Write-Output "poll sample: $(@($s.cpu.cpus).Count) CPUs, plan $($s.plan), thread priority $($s.thread.base)/$($s.thread.current)"
           $global:LASTEXITCODE = 0
+      # An analysis step's start (S1c measure) is PowerShell composed in Python too:
+      # run it exactly as sw.ps sends it, with the bundle as bin. Without a stop file,
+      # or with one older than the analysis start, it starts at Idle and loads the
+      # tuning modules; a stop file written after the start (a pre-emption) refuses
+      # it with the text the dev box turns into EventNow (#32 F2 round 3 m11).
+      - name: Analysis guard runs as on the PC (Windows PowerShell 5.1)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'pcroot-analysis'
+          New-Item -ItemType Directory -Force -Path (Join-Path $root 'bin'), (Join-Path $root 'queue') | Out-Null
+          Copy-Item -Path (Join-Path $env:RUNNER_TEMP 'asio-spike\*') -Destination (Join-Path $root 'bin')
+          $stop = Join-Path $root 'queue\stop'
+          $since = (Get-Date).ToUniversalTime().ToString('o')
+          $refused = @(python -c "import sys; sys.path.insert(0, 'scripts/pc-tuning'); import tuning_window as tw; print(tw.ANALYSIS_REFUSED)")[-1]
+          if ($LASTEXITCODE -ne 0 -or -not $refused) { throw "the refusal text could not be read (exit $LASTEXITCODE)" }
+          function Invoke-AnalysisStep {
+            $script = @(python scripts/pc-tuning/tuning_window.py analysis-script --root $root --since $since)
+            if ($LASTEXITCODE -ne 0) { throw "analysis-script exited $LASTEXITCODE" }
+            $out = @($script | powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command -)
+            if ($LASTEXITCODE -ne 0) { throw "powershell exited $LASTEXITCODE" }
+            return (@($out | Where-Object { "$_".Trim() })[-1] | ConvertFrom-Json)
+          }
+          $doc = Invoke-AnalysisStep
+          if (-not $doc.ok) { throw "no stop file: the step did not start: $($doc.error)" }
+          if ($doc.r.priority -ne 'Idle' -or -not $doc.r.now) { throw "no stop file: priority '$($doc.r.priority)', now '$($doc.r.now)'" }
+          New-Item -ItemType File -Force -Path $stop | Out-Null
+          (Get-Item -LiteralPath $stop).LastWriteTimeUtc = [datetime]::UtcNow.AddMinutes(-5)
+          $doc = Invoke-AnalysisStep
+          if (-not $doc.ok -or $doc.r.priority -ne 'Idle') { throw "an older stop file: the step did not start: $($doc.error)" }
+          (Get-Item -LiteralPath $stop).LastWriteTimeUtc = [datetime]::UtcNow
+          $doc = Invoke-AnalysisStep
+          if ($doc.ok) { throw 'a stop file written after the analysis start did not refuse the step' }
+          if ("$($doc.error)" -ne $refused) { throw "refused with '$($doc.error)', expected '$refused'" }
+          Write-Output "analysis guard: starts at Idle without a newer stop file, refused with '$refused' after one"
+          $global:LASTEXITCODE = 0
       - name: Upload (dev pushes only — the only spike that may reach the PC, P5)
         if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
