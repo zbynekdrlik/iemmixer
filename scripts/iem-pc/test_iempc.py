@@ -569,6 +569,21 @@ class EventTests(Base):
         self.assertEqual(seen[0]["card"], "free")   # nothing else is claimed: the guard brings REAPER back
         self.assertIn({"spike_window": "closed", "after": "a failed spike preempt"}, docs)
 
+    def test_a_closed_window_whose_preempt_still_settles_gets_the_spike_preempt(self) -> None:
+        # Review of lane G2, finding 1: a window process's own preempt closed the window
+        # and still watches REAPER (settle, without the lock); `spike_window.py preempt`
+        # waits for that watch, so iemmode event never runs next to its bring-back.
+        self.open_window(card="reaper", closed=True, settling={"step": "to-dev", "until": time.time() + 60})
+        seen = []
+        self.pc.replies[("event",)] = lambda: (seen.append(self.spike_log.is_file()), (0, OK))[1]
+        code, docs, _ = self.run_main("event")
+        self.assertEqual((code, seen, self.spike_log.read_text(encoding="utf-8")), (0, [True], "preempt\n"))
+        # A watch past its bound (its process died) is no window to pre-empt.
+        self.spike_log.unlink()
+        self.open_window(card="reaper", closed=True, settling={"step": "to-dev", "until": time.time() - 1})
+        self.assertEqual(self.run_main("event")[0], 0)
+        self.assertFalse(self.spike_log.exists())
+
     def test_no_iemmode_call_while_the_window_lock_stays_taken(self) -> None:
         # The lock wait fits the event budget: a window process that holds it (a
         # bring-back of its own?) is never raced by the guard's.

@@ -559,6 +559,46 @@ class PcChangeTests(unittest.TestCase):
         st = sw.load_state()
         self.assertEqual((st["card"], st["closed"], st.get("in_flight")), ("reaper", True, None))
         self.assertTrue(any("brought back again" in a for a in self.alarms), self.alarms)
+        # Review of lane G2, finding 1: the late quit runs while the settle still
+        # watches; telling the owner to run the event path again would start the
+        # guard's bring-back next to the settle's.
+        self.assertFalse(any("event path again" in a for a in self.alarms), self.alarms)
+        self.assertNotIn("settling", st)
+
+    def test_the_settle_is_recorded_while_it_runs(self) -> None:
+        # So another process's preempt (and iempc event) can wait for it.
+        self.window(in_flight={"step": "to-dev", "started": time.time(), "bound_s": 0.2})
+        seen: list = []
+        self.pc.on_call = lambda body: seen.append(sw.load_state().get("settling")) if "holders = @(Get-GoldenAsioHolders" in body else None
+        (self.dir / "EVENT-NOW").touch()
+        sw.cmd_preempt(ENV)
+        self.assertTrue(seen and all(s and s["step"] == "to-dev" and s["until"] > time.time() - 5 for s in seen), seen)
+        self.assertNotIn("settling", sw.load_state())
+
+    def test_a_preempt_that_finds_the_window_closed_waits_for_a_live_settle(self) -> None:
+        # Review of lane G2, finding 1: a window process's own preempt closed the
+        # window and settles without the lock; iempc's preempt must not return (and
+        # let the guard's bring-back start) until that settle is over.
+        self.window(card="reaper", closed=True, settling={"step": "to-dev", "until": time.time() + 5})
+
+        def settle_ends() -> None:
+            time.sleep(0.4)
+            sw.update_state(change=lambda st: st.pop("settling", None))
+
+        t = threading.Thread(target=settle_ends)
+        start = time.monotonic()
+        t.start()
+        sw.cmd_preempt(ENV)
+        waited = time.monotonic() - start
+        t.join()
+        self.assertGreaterEqual(waited, 0.35)
+        self.assertLess(waited, 3)
+        self.assertEqual(self.pc.calls, [])
+        # A settle whose process died (its bound is over) holds nothing up.
+        self.window(card="reaper", closed=True, settling={"step": "to-dev", "until": time.time() - 1})
+        start = time.monotonic()
+        sw.cmd_preempt(ENV)
+        self.assertLess(time.monotonic() - start, 0.3)
 
     def test_the_settle_watch_is_bounded_by_the_intent(self) -> None:
         # A step whose process never clears its intent: the watch still ends, at
