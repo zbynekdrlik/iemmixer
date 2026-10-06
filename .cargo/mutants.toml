@@ -170,8 +170,9 @@ exclude_re = [
   # and the fault seam counts the pauses to test the retry.
   "iem-engine/src/persist/files\\.rs.*\\b(sync_file|sync_dir|pause)\\b",
   # The NullRt pacing thread's end after release; NullRt::stop itself is
-  # tested in iem-audio-io (stop_ends_a_running_stream).
-  "iem-engine/src/engine\\.rs.*replace <impl Driver for NullRtDriver>::stop with \\(\\)",
+  # tested in iem-audio-io (stop_ends_a_running_stream). Its outcome is
+  # always Released (NullRt holds no card; #35).
+  "iem-engine/src/engine\\.rs.*replace <impl Driver for NullRtDriver>::stop -> StopOutcome with ",
   # Equivalent `>` → `>=` (S2): at equality both branches give the same
   # result, so no input can tell them apart.
   # |x| equal to the running peak: assigning the same value changes nothing.

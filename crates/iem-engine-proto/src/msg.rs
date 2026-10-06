@@ -458,7 +458,15 @@ pub enum EngineMsg {
         generation: u64,
     },
     Alarm(Alarm),
+    /// The stream stopped and the card is released (the engine ends next).
     DriverReleased {
+        reason: String,
+    },
+    /// The stream stopped parked (#35): a callback stayed in it, or the
+    /// parked-engine test's hold kept the card, so nothing was released and
+    /// the card is free only once the engine's process has ended. Sent
+    /// instead of `DriverReleased`, at the same point.
+    DriverParked {
         reason: String,
     },
     Superseded,
@@ -912,6 +920,9 @@ mod tests {
             EngineMsg::DriverReleased {
                 reason: "shutdown".into(),
             },
+            EngineMsg::DriverParked {
+                reason: "shutdown".into(),
+            },
             EngineMsg::Superseded,
         ];
         for m in msgs {
@@ -924,6 +935,26 @@ mod tests {
         }
         let band = EqBand::default();
         assert_eq!(band.gain_db, 0.0);
+    }
+
+    /// The guard reads the stream's end by these names, field by field
+    /// (`iem_guard::effects::engine::parse`; #35).
+    #[test]
+    fn the_stream_ends_go_out_as_driver_released_and_driver_parked() {
+        let released = EngineMsg::DriverReleased {
+            reason: "fault".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&released).unwrap(),
+            r#"{"type":"driver_released","reason":"fault"}"#
+        );
+        let parked = EngineMsg::DriverParked {
+            reason: "shutdown".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&parked).unwrap(),
+            r#"{"type":"driver_parked","reason":"shutdown"}"#
+        );
     }
 
     #[test]
