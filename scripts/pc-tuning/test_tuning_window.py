@@ -93,6 +93,16 @@ class ProfileTests(unittest.TestCase):
                     with self.assertRaisesRegex(tw.StepError, "device card"):
                         tw.load_profile(write(p))
 
+    def test_devices_that_are_not_a_list_of_objects_are_refused(self) -> None:
+        # Python-only structure checks of check_devices: a clear StepError, never an
+        # AttributeError or TypeError from the loop.
+        for devices, text in (({"id": "card"}, "devices: not a list"), ([2], "an entry is not an object")):
+            with self.subTest(devices=devices):
+                p = json.loads(json.dumps(PROFILE))
+                p["devices"] = devices
+                with self.assertRaisesRegex(tw.StepError, text):
+                    tw.load_profile(write(p))
+
     def test_the_rss_bounds_are_processor_numbers(self) -> None:
         # nic.rss base and max follow the number rule, as Assert-IemNicRss does (#32
         # MAJOR-2 review); a missing range is refused too (the PC refuses the NIC write).
