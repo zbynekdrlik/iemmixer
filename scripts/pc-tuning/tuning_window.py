@@ -66,22 +66,44 @@ def load_profile(path: Path) -> dict:
     missing = [k for k in PROFILE_KEYS if k not in p]
     if missing:
         raise StepError(f"{path}: missing {', '.join(missing)}")
+    check_layout(p["layout"], path)
+    return p
+
+
+def check_layout(layout, path: Path) -> None:
+    """The profile's layout rule (#32 MINOR-6), the same as IemTuning's
+    Assert-IemLayout (shared cases: layout_cases.json): layout is an object; a
+    role is absent (no processors) or a list of integers 0..63 — a null, a float
+    (2.0 too), a bool, a string or a nested list is refused, never truncated or
+    read as a number; the roles are disjoint."""
+    if not isinstance(layout, dict):
+        raise StepError(f"{path}: layout: not an object")
     roles: dict[int, str] = {}
     for role in LAYOUT_ROLES:
-        for lp in p["layout"].get(role, []):
-            if not 0 <= int(lp) <= 63:
-                raise StepError(f"{path}: layout {role} processor {lp} outside 0..63")
+        if role not in layout:
+            continue
+        lps = layout[role]
+        if not isinstance(lps, list):
+            raise StepError(f"{path}: layout {role}: not a list of processor numbers")
+        for i, lp in enumerate(lps):
+            # type(), not isinstance(): bool is an int subclass in Python.
+            if type(lp) is not int or not 0 <= lp <= 63:
+                raise StepError(f"{path}: layout {role}: entry {i} is not a processor number 0..63 (integers only)")
             if lp in roles:
-                raise StepError(f"{path}: processor {lp} has two roles ({roles[lp]}, {role})")
+                raise StepError(f"{path}: layout: processor {lp} has two roles ({roles[lp]}, {role})")
             roles[lp] = role
-    return p
+
+
+def layout_lps(profile: dict, role: str) -> list[int]:
+    """A layout role's processors; an absent role is none (the layout rule)."""
+    return list(profile["layout"].get(role, []))
 
 
 def watch_lps(profile: dict, audio_cpus: str) -> list[int]:
     """The CPUs whose DPC/ISR budget is watched: the card's and the audio one
     (the spike's --audio-cpus, else the profile's)."""
-    audio = parse_lps(audio_cpus) if audio_cpus else list(profile["layout"]["audio"])
-    return sorted(set(profile["layout"]["card"]) | set(audio))
+    audio = parse_lps(audio_cpus) if audio_cpus else layout_lps(profile, "audio")
+    return sorted(set(layout_lps(profile, "card")) | set(audio))
 
 
 def mode_only(text: str) -> list[str]:
@@ -517,7 +539,7 @@ def _measure(env, args, profile: dict, state: dict, run_dir: str, since: str, tr
     # (design note §4.3), without any --audio-cpus among them (#32 C1, review m12);
     # check_request and the spike refuse any overlap.
     audio = set(parse_lps(args.audio_cpus)) if args.audio_cpus else set()
-    stress_cpus = args.stress_cpus or ",".join(str(lp) for lp in sorted(set(profile["layout"]["housekeeping"]) - audio))
+    stress_cpus = args.stress_cpus or ",".join(str(lp) for lp in sorted(set(layout_lps(profile, "housekeeping")) - audio))
     run_args = argparse.Namespace(mode="duplex", frames=args.frames, seconds=args.seconds, burn_us=args.burn_us, stress=args.stress,
                                   panic_at=0, cycles=5, cpu=None, threshold_us=10, audio_cpus=args.audio_cpus, stress_cpus=stress_cpus)
     result = sw.cmd_run(env, run_args, on_poll=on_poll)

@@ -159,17 +159,38 @@ function Read-IemProfile {
     return $p
 }
 
+function ConvertTo-IemLpList {
+    # The profile's one rule for a list of processors (#32 MINOR-6, MAJOR-2): a JSON
+    # array of integers 0..63. A null entry, a float (2.0 too), a bool, a string or
+    # a nested list is refused, never dropped, rounded or read as processor 0.
+    # tuning_window.py load_profile applies the same rule to the layout (the shared
+    # cases: layout_cases.json). Integers arrive as Int32 (Windows PowerShell 5.1)
+    # or Int64; a JSON float as Decimal or Double. Returns them in profile order.
+    param([Parameter(Mandatory)][string]$What, [AllowNull()]$Value)
+    if ($null -eq $Value -or $Value -isnot [array]) { throw "${What}: not a list of processor numbers" }
+    $out = @()
+    for ($i = 0; $i -lt $Value.Count; $i++) {
+        $e = $Value[$i]
+        if (-not ($e -is [int] -or $e -is [long]) -or $e -lt 0 -or $e -gt 63) { throw "${What}: entry $i is not a processor number 0..63 (integers only)" }
+        $out += [int]$e
+    }
+    return ,([int[]]$out)
+}
+
 function Assert-IemLayout {
-    # The layout's roles are disjoint (one processor, one role), as the window
-    # requires. Checked before a write (apply, enter), never on the exit path.
+    # The profile's layout rule (#32 MINOR-6, the same as tuning_window.py
+    # load_profile; shared cases in layout_cases.json): layout is an object; a role
+    # is absent (no processors) or a list of processor numbers (ConvertTo-IemLpList);
+    # the roles are disjoint (one processor, one role), as the window requires.
+    # Checked before a write (apply, enter), never on the exit path.
     param([Parameter(Mandatory)]$Profile)
+    if ($Profile.layout -isnot [System.Management.Automation.PSCustomObject]) { throw 'layout: not an object' }
     $seen = @{}
     foreach ($role in 'housekeeping', 'card', 'nic', 'audio') {
         if (-not $Profile.layout.PSObject.Properties[$role]) { continue }
-        foreach ($lp in @(@($Profile.layout.$role) | Where-Object { $null -ne $_ })) {
-            $k = [string][int]$lp
-            if ($seen.ContainsKey($k)) { throw "layout: processor $k is in both $($seen[$k]) and $role (roles overlap)" }
-            $seen[$k] = $role
+        foreach ($lp in (ConvertTo-IemLpList -What "layout $role" -Value $Profile.layout.$role)) {
+            if ($seen.ContainsKey($lp)) { throw "layout: processor $lp is in both $($seen[$lp]) and $role (roles overlap)" }
+            $seen[$lp] = $role
         }
     }
 }
@@ -771,10 +792,13 @@ function Assert-IemDevice {
 }
 
 function Get-IemLayoutLps {
-    # A layout role's processors, sorted; an absent role or a null entry is none.
+    # A layout role's processors, sorted; an absent role is none. Read by the layout
+    # rule (ConvertTo-IemLpList): a null or non-integer entry throws (#32 MINOR-6).
     param([Parameter(Mandatory)]$Profile, [Parameter(Mandatory)][string]$Role)
     if (-not $Profile.layout.PSObject.Properties[$Role]) { return ,([int[]]@()) }
-    return ,([int[]]@(@($Profile.layout.$Role) | Where-Object { $null -ne $_ } | ForEach-Object { [int]$_ } | Sort-Object))
+    $lps = ConvertTo-IemLpList -What "layout $Role" -Value $Profile.layout.$Role
+    [array]::Sort($lps)
+    return ,$lps
 }
 
 function Test-IemCardDevice {
