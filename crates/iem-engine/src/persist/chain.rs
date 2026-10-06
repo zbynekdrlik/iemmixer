@@ -153,57 +153,27 @@ impl Store {
     /// any name shows (#32 MAJOR-3, F3-r4 2).
     pub fn load(&self, topo: &Topology) -> Loaded {
         let (mut loaded, passed_over) = self.load_chain(topo);
+        // An orphan is compared with the state loaded's own revision, never
+        // the jumped one (lane G4 review); one listing serves both.
+        let own = loaded.persisted.rev;
+        let listed = self.list();
         if !passed_over.is_empty() {
-            self.continue_above(&mut loaded, &passed_over);
+            continue_above(&mut loaded, &passed_over, &listed);
         }
-        self.orphans_above(&mut loaded);
+        self.orphans_above(&mut loaded, own, &listed);
         loaded
     }
 
-    /// Continues the loaded revision `REV_JUMP` above the highest one the
-    /// state loaded or any name in the directory shows, past the live
-    /// files `passed_over` that could not be read (#32 MAJOR-3, F3-r4 2),
-    /// with an alarm. A listing that fails leaves the state loaded's own
-    /// revision as the base (named in an alarm too).
-    fn continue_above(&self, loaded: &mut Loaded, passed_over: &[String]) {
-        let floor = match self.list() {
-            Ok(listed) => listed.floor,
-            Err(e) => {
-                loaded.doubt(format!(
-                    "the revisions the state files' names show cannot be listed ({e})"
-                ));
-                None
-            }
-        };
-        let rev = loaded
-            .persisted
-            .rev
-            .max(floor.unwrap_or(0))
-            .saturating_add(REV_JUMP);
-        loaded.persisted.rev = rev;
-        let (names, it) = match passed_over {
-            [one] => (one.clone(), "it"),
-            more => (more.join(" and "), "they"),
-        };
-        let shown = floor.map_or_else(String::new, |floor| {
-            format!(" (the names show revision {floor} at most)")
-        });
-        loaded.doubt(format!(
-            "{names} cannot be read, so the revision continues at {rev}, \
-             above anything {it} can hold{shown}"
-        ));
-    }
-
     /// Names in an alarm each orphan (`save.tmp.orphan-<n>`) that holds a
-    /// revision above the state loaded (#32 F3-r4 1). An orphan is never
-    /// loaded, but a failure or a crash right after its move aside leaves
-    /// the newest pending state only there. Each is read once, without the
-    /// chain's pauses (the boot's bound stays); one that does not decode is
-    /// no state, one that cannot be read and a listing that fails are named
-    /// too.
-    fn orphans_above(&self, loaded: &mut Loaded) {
-        let orphans = match self.list() {
-            Ok(listed) => listed.orphans,
+    /// revision above `own`, the state loaded's (#32 F3-r4 1). An orphan
+    /// is never loaded, but a failure or a crash right after its move aside
+    /// leaves the newest pending state only there. Each is read once,
+    /// without the chain's pauses (the boot's bound stays); one that does
+    /// not decode is no state, one that cannot be read and a listing that
+    /// failed are named too.
+    fn orphans_above(&self, loaded: &mut Loaded, own: u64, listed: &io::Result<Listing>) {
+        let orphans = match listed {
+            Ok(listed) => &listed.orphans,
             Err(e) => {
                 loaded.alarms.push(format!(
                     "the state directory cannot be listed to look for a {TMP} \
@@ -212,16 +182,15 @@ impl Store {
                 return;
             }
         };
-        let rev = loaded.persisted.rev;
         for (_, name, path) in orphans {
             let mut spent = READ_PAUSES;
-            match self.read_tried(&path, &mut spent) {
+            match self.read_tried(path, &mut spent) {
                 Ok(Some(bytes)) => {
                     if let Ok(orphan) = decode(&bytes)
-                        && orphan.rev > rev
+                        && orphan.rev > own
                     {
                         loaded.alarms.push(format!(
-                            "{name} (revision {}) is above the state loaded (revision {rev}): \
+                            "{name} (revision {}) is above the state loaded (revision {own}): \
                              a {TMP} moved aside, kept but never loaded",
                             orphan.rev
                         ));
@@ -235,7 +204,43 @@ impl Store {
             }
         }
     }
+}
 
+/// Continues the loaded revision `REV_JUMP` above the highest one the state
+/// loaded or any name in the directory shows (`listed`), past the live
+/// files `passed_over` that could not be read (#32 MAJOR-3, F3-r4 2), with
+/// an alarm. A listing that failed leaves the state loaded's own revision as
+/// the base (named in an alarm too).
+fn continue_above(loaded: &mut Loaded, passed_over: &[String], listed: &io::Result<Listing>) {
+    let floor = match listed {
+        Ok(listed) => listed.floor,
+        Err(e) => {
+            loaded.doubt(format!(
+                "the revisions the state files' names show cannot be listed ({e})"
+            ));
+            None
+        }
+    };
+    let rev = loaded
+        .persisted
+        .rev
+        .max(floor.unwrap_or(0))
+        .saturating_add(REV_JUMP);
+    loaded.persisted.rev = rev;
+    let (names, it) = match passed_over {
+        [one] => (one.clone(), "it"),
+        more => (more.join(" and "), "they"),
+    };
+    let shown = floor.map_or_else(String::new, |floor| {
+        format!(" (the names show revision {floor} at most)")
+    });
+    loaded.doubt(format!(
+        "{names} cannot be read, so the revision continues at {rev}, \
+         above anything {it} can hold{shown}"
+    ));
+}
+
+impl Store {
     /// The chain itself (see `load`), and the live files it passed over
     /// because they could not be read.
     fn load_chain(&self, topo: &Topology) -> (Loaded, Vec<String>) {
