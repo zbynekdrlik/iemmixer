@@ -979,6 +979,21 @@ mod tests {
         ));
     }
 
+    /// #38 (owner, 2026-10-06): nothing measures the stage before a switch
+    /// (only the owner's signal decides, and other devices on the Dante
+    /// network feed the card's inputs). `interlock` is no command, and
+    /// check-site reads no stage: `[activity]` is the server's own table.
+    #[test]
+    fn there_is_no_interlock_and_check_site_reads_no_stage() {
+        let e = parse_args(&args("interlock --site s")).unwrap_err();
+        assert!(e.contains("unknown command"), "{e}");
+        let dir = tempfile::tempdir().unwrap();
+        let ghost = edited_site(dir.path(), "ghost.toml", |t| {
+            t.replace("[activity]\n", "[activity]\ninputs = [\"ghost\"]\n")
+        });
+        assert!(check_site(&ghost).is_ok());
+    }
+
     #[test]
     fn the_interlock_plan_is_the_card_and_the_stage_channels() {
         let plan = interlock_plan(&crate::test_support::test_site_path()).unwrap();
