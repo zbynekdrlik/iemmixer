@@ -263,10 +263,35 @@ try {
     ThrowsLike { Invoke-IemTuningApply -ProfilePath $po -Tier 2 -Only @('maintenance') } '*roles overlap*' 'apply-refuses-overlapping-layout-roles'
     ThrowsLike { Enter-IemTuningMode -ProfilePath $po -Only @('governor') } '*roles overlap*' 'enter-refuses-overlapping-layout-roles'
     Assert ((Get-Service W32Time).Status -eq 'Running' -and -not (Read-IemJournalState $pp) -and -not (Test-Path -LiteralPath $maint)) 'layout-refusals-write-nothing'
-    # One layout rule on both sides (#32 MINOR-6): every case of layout_cases.json, which
-    # test_tuning_window.py runs against load_profile too. The layout comes straight
-    # from ConvertFrom-Json, as Read-IemProfile reads it (no re-serialization).
-    $layoutCases = @(([IO.File]::ReadAllText((Join-Path $here 'layout_cases.json')) | ConvertFrom-Json).cases)
+    # One processor rule on both sides (#32 MINOR-6, MAJOR-2 and its review): every case
+    # of profile_cases.json, which test_tuning_window.py runs against load_profile and
+    # lp_number too. The values come straight from ConvertFrom-Json, as Read-IemProfile
+    # reads them (no re-serialization).
+    $profileCases = [IO.File]::ReadAllText((Join-Path $here 'profile_cases.json')) | ConvertFrom-Json
+    $numberCases = @($profileCases.numbers)
+    Assert ($numberCases.Count -ge 8) 'number-cases-are-read'
+    foreach ($c in $numberCases) {
+        if ($c.ok) {
+            $ne = $null; $nv = $null
+            try { $nv = ConvertTo-IemLpNumber -What 'case' -Value $c.value } catch { $ne = "$_" }
+            Assert ($null -eq $ne -and $nv -is [int] -and $nv -eq $c.value) "number-case-$($c.name)-is-accepted ($ne)"
+        } else {
+            ThrowsLike { ConvertTo-IemLpNumber -What 'case' -Value $c.value } '*case*not a processor number*' "number-case-$($c.name)-is-refused"
+        }
+    }
+    $deviceCases = @($profileCases.device_lps)
+    Assert ($deviceCases.Count -ge 8) 'device-cases-are-read'
+    foreach ($c in $deviceCases) {
+        $dc = [pscustomobject]@{ id = 'card'; lps = $c.lps }
+        if ($c.ok) {
+            $de = $null
+            try { [void](Get-IemDeviceLps -Device $dc) } catch { $de = "$_" }
+            Assert ($null -eq $de) "device-case-$($c.name)-is-accepted ($de)"
+        } else {
+            ThrowsLike { Get-IemDeviceLps -Device $dc } '*device card*' "device-case-$($c.name)-is-refused"
+        }
+    }
+    $layoutCases = @($profileCases.layouts)
     Assert ($layoutCases.Count -ge 10) 'layout-cases-are-read'
     foreach ($c in $layoutCases) {
         $lc = [pscustomobject]@{ layout = $c.layout }

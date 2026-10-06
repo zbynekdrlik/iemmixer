@@ -26,6 +26,10 @@ PROFILE = {"version": 1, "journal": "C:\\j.json", "registry_root": "",
            "fingerprint": {"files": [], "keys": []}}
 
 
+# The profile rules' shared table (Test-IemTuning.ps1 runs it too, #32 MINOR-6).
+CASES = json.loads((Path(__file__).resolve().parent / "profile_cases.json").read_text(encoding="utf-8"))
+
+
 def write(obj) -> Path:
     p = Path(tempfile.mkdtemp()) / "pc-tuning.json"
     p.write_text(json.dumps(obj), encoding="utf-8")
@@ -54,7 +58,7 @@ class ProfileTests(unittest.TestCase):
     def test_the_shared_layout_cases(self) -> None:
         # One layout rule on both sides (#32 MINOR-6): Test-IemTuning.ps1 runs the
         # same table against Assert-IemLayout, so a profile passes both or neither.
-        cases = json.loads((Path(__file__).resolve().parent / "layout_cases.json").read_text(encoding="utf-8"))["cases"]
+        cases = CASES["layouts"]
         self.assertGreaterEqual(len(cases), 10)
         for case in cases:
             with self.subTest(case["name"]):
@@ -65,6 +69,48 @@ class ProfileTests(unittest.TestCase):
                 else:
                     with self.assertRaisesRegex(tw.StepError, "layout"):
                         tw.load_profile(write(p))
+
+    def test_the_shared_number_cases(self) -> None:
+        # One processor-number rule (#32 MAJOR-2 review): Test-IemTuning.ps1 runs the
+        # same table against ConvertTo-IemLpNumber.
+        self.assertGreaterEqual(len(CASES["numbers"]), 8)
+        for case in CASES["numbers"]:
+            with self.subTest(case["name"]):
+                self.assertEqual(tw.lp_number(case["value"]), case["ok"])
+
+    def test_the_shared_device_cases(self) -> None:
+        # The dev box refuses the device processors the PC refuses (#32 MAJOR-2
+        # review): a profile tuning-setup copies to the PC can never make the state
+        # step throw there. Test-IemTuning.ps1 runs the table against Get-IemDeviceLps.
+        self.assertGreaterEqual(len(CASES["device_lps"]), 8)
+        for case in CASES["device_lps"]:
+            with self.subTest(case["name"]):
+                p = json.loads(json.dumps(PROFILE))
+                p["devices"] = [{"id": "card", "role": "card", "lps": case["lps"], "enabled": True}]
+                if case["ok"]:
+                    tw.load_profile(write(p))
+                else:
+                    with self.assertRaisesRegex(tw.StepError, "device card"):
+                        tw.load_profile(write(p))
+
+    def test_the_rss_bounds_are_processor_numbers(self) -> None:
+        # nic.rss base and max follow the number rule, as Assert-IemNicRss does (#32
+        # MAJOR-2 review); a missing range is refused too (the PC refuses the NIC write).
+        for value in ("4", 4.0, None, True, 64, -1):
+            for key in ("base", "max"):
+                with self.subTest(key=key, value=value):
+                    p = json.loads(json.dumps(PROFILE))
+                    p["nic"]["rss"][key] = value
+                    with self.assertRaisesRegex(tw.StepError, f"nic.rss.{key}"):
+                        tw.load_profile(write(p))
+        p = json.loads(json.dumps(PROFILE))
+        del p["nic"]["rss"]
+        with self.assertRaisesRegex(tw.StepError, "nic.rss"):
+            tw.load_profile(write(p))
+        p = json.loads(json.dumps(PROFILE))
+        p["nic"]["rss"] = {"base": 5, "max": 4}
+        with self.assertRaisesRegex(tw.StepError, "above max"):
+            tw.load_profile(write(p))
 
     def test_an_absent_role_has_no_processors(self) -> None:
         # The rule's "absent role = none" holds for the readers too (#32 MINOR-6).
