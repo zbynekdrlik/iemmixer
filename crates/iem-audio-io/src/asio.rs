@@ -56,7 +56,7 @@ use crate::format::{self, Refusal, SampleFormat};
 use crate::messages::{self, Messages, TOPICS};
 use crate::os;
 pub use crate::owner::StopOutcome;
-use crate::owner::{self, Asked, OpenPeriod, SehStep, Watchdog};
+use crate::owner::{self, Asked, OpenPeriod, SehRelease, SehStep, Watchdog};
 use crate::period::PeriodVerdict;
 use crate::reset::{ResetBudget, Verdict};
 use crate::rtpanic;
@@ -763,10 +763,16 @@ static BACKEND_CALLBACKS: Callbacks = Callbacks {
 /// The SEH filter waits for it; a parked stream never sets it.
 static RELEASED: AtomicBool = AtomicBool::new(true);
 /// A structured exception reached the filter: the owner thread releases the
-/// driver.
+/// driver (under [`SEH_HOLD`] it keeps it).
 static SEH: AtomicBool = AtomicBool::new(false);
 /// The filter parked a faulting thread (the driver was not released in time).
 static SEH_PARKED: AtomicBool = AtomicBool::new(false);
+/// The parked-engine test's hold (S6 design §10 test #2, #35): set by
+/// [`raise_test_park`] before its exception, never cleared. The owner thread
+/// then keeps the driver after a structured exception (`owner::seh_release`)
+/// and the exception is no fault (`owner::seh_faults`). Dev-only: reached
+/// only through the engine's fault-injection flag and the guard's HIL job.
+static SEH_HOLD: AtomicBool = AtomicBool::new(false);
 /// Every driver message since the process started: counted by the handlers
 /// on whatever thread the driver calls them, logged by the owner thread
 /// (`crate::messages`; #9 2026-09-28).
@@ -1604,6 +1610,39 @@ impl Owner {
         outcome
     }
 
+    /// The parked-engine test's hold (S6 design §10 test #2, #35; set only
+    /// by `raise_test_park`): after its structured exception the driver is
+    /// kept as a driver that hangs in `dispose` keeps it. The stream is
+    /// stopped (as `finish` stops it first; the faulting callback no longer
+    /// counts in `BACKEND_IN_FLIGHT`), then neither disposed nor released:
+    /// `RELEASED` stays clear, so the SEH filter's wait runs out and it parks
+    /// the faulting thread. The owner is done (parked) like after a stuck
+    /// callback (R6): the stream is never freed and its counters stay in
+    /// `stats`, the preference window stays held (the card is), a stop or
+    /// the session end releases nothing, and the thread keeps pumping.
+    fn hold_card(&mut self) {
+        if let Some(live) = self.live.take() {
+            let Live { card, backend, .. } = live;
+            let _ = card.driver().stop();
+            BACKEND.store(ptr::null_mut(), Ordering::SeqCst);
+            self.shared.running.store(false, Ordering::SeqCst);
+            // SAFETY: a held stream is never freed, so its counters stay
+            // readable.
+            self.base = self.base.plus(unsafe { &*backend }.telemetry.counters());
+            core::mem::forget(card);
+        }
+        self.shared.parked.store(true, Ordering::SeqCst);
+        self.done = Some(StopOutcome::Parked);
+        error!(
+            "[{}] the parked-engine test's hold: the driver is stopped and kept, never disposed \
+             or released, so the SEH filter parks the faulting thread; the stream stays parked \
+             with the card held and the preferred buffer at the engine's value",
+            when()
+        );
+        self.log_messages();
+        self.publish();
+    }
+
     fn fault(&mut self, why: String) {
         if let Some(live) = &self.live {
             // SAFETY: the stream is live.
@@ -1666,9 +1705,16 @@ impl Owner {
 
     fn tick(&mut self, now: Instant) -> Next {
         self.log_messages();
-        if SEH.load(Ordering::SeqCst) && self.done.is_none() {
-            self.fault("a structured exception reached the filter".to_owned());
-            self.release_for_good();
+        // `SEH` first: `raise_test_park` sets the hold before its exception,
+        // so a tick that sees the exception sees the hold too.
+        let seh = SEH.load(Ordering::SeqCst);
+        match owner::seh_release(seh, SEH_HOLD.load(Ordering::SeqCst), self.done.is_some()) {
+            SehRelease::Nothing => {}
+            SehRelease::Release => {
+                self.fault("a structured exception reached the filter".to_owned());
+                self.release_for_good();
+            }
+            SehRelease::Hold => self.hold_card(),
         }
         if self.shared.release_pending.load(Ordering::SeqCst) && self.done.is_none() {
             // The session-end handler could not reach the owner.
@@ -2002,7 +2048,9 @@ impl<P: Process + 'static> AsioStream<P> {
             overruns: s.overruns.load(Ordering::Acquire),
             resets: s.resets.load(Ordering::Acquire),
             parked: s.parked.load(Ordering::Acquire) || SEH_PARKED.load(Ordering::SeqCst),
-            faulted: s.faulted.load(Ordering::Acquire) || SEH.load(Ordering::SeqCst),
+            // `SEH` first, as in the owner's tick: the hold precedes it.
+            faulted: s.faulted.load(Ordering::Acquire)
+                || owner::seh_faults(SEH.load(Ordering::SeqCst), SEH_HOLD.load(Ordering::SeqCst)),
             running: s.running.load(Ordering::Acquire),
             max_process_ns: s.max_ns.load(Ordering::Acquire),
             fault: s.fault.lock().ok().and_then(|f| f.clone()),
@@ -2098,7 +2146,9 @@ impl<P: Process + 'static> Drop for AsioStream<P> {
 /// keep the card held in session 1. If the driver is still held, the
 /// faulting thread sleeps for good (the stream is parked; the guard alarms).
 /// Exercised by the owner-approved SEH test: `iemmode inject-seh` in a HIL
-/// job drives `raise_test_seh` on the RT thread (design §10).
+/// job drives `raise_test_seh` on the RT thread (design §10 test #4), and
+/// `iemmode inject-park` drives `raise_test_park`, whose hold makes the
+/// filter park (test #2, #35).
 pub fn install_seh_filter() {
     // SAFETY: registers a function of the documented filter signature; the
     // engine installs this filter only, so the previous one is not chained.
@@ -2122,6 +2172,19 @@ pub fn raise_test_seh() {
     unsafe {
         RaiseException(IEM_SEH_TEST, NON_CONTINUABLE, 0, std::ptr::null::<usize>());
     }
+}
+
+/// The parked-engine test (S6 design §10 test #2, #35; `--fault-injection`
+/// only): sets the test hold, then raises the SEH test's exception on the
+/// calling thread. The owner thread keeps the driver (`owner::seh_release`:
+/// stopped, never disposed or released), so the SEH filter's wait runs out
+/// and it parks this thread for good: the stream stays parked with the card
+/// held, and the exception is no fault (`owner::seh_faults`), so the engine
+/// keeps running and reports `parked` until the OS restart the test makes.
+pub fn raise_test_park() {
+    // Before the exception: a tick that sees `SEH` sees the hold too.
+    SEH_HOLD.store(true, Ordering::SeqCst);
+    raise_test_seh();
 }
 
 unsafe extern "system" fn seh_filter(_info: *const EXCEPTION_POINTERS) -> i32 {

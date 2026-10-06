@@ -9,7 +9,10 @@
 //!   put to the [`ResetBudget`] ([`crate::reset`]), its reasons ([`Asked`])
 //!   logged with the verdict;
 //! - [`session_end_release`], [`seh_step`] and [`stop_step`]: the bounded
-//!   waits that end in a released (or parked) driver.
+//!   waits that end in a released (or parked) driver;
+//! - [`seh_release`] and [`seh_faults`]: the owner's answer to a structured
+//!   exception, and whether it is a fault, under the parked-engine test's
+//!   hold (#35) or without it.
 
 use std::fmt;
 use std::time::{Duration, Instant};
@@ -226,19 +229,22 @@ pub enum SehRelease {
 /// The owner thread's answer to a structured exception (`seh`: the filter
 /// ran) while the test hold is `hold` and the stream has `done` (ended for
 /// good: a stop, the session end, an earlier release or hold).
-pub fn seh_release(seh: bool, _hold: bool, done: bool) -> SehRelease {
-    if seh && !done {
-        SehRelease::Release
-    } else {
+pub fn seh_release(seh: bool, hold: bool, done: bool) -> SehRelease {
+    if !seh || done {
         SehRelease::Nothing
+    } else if hold {
+        SehRelease::Hold
+    } else {
+        SehRelease::Release
     }
 }
 
 /// Whether a structured exception is a fault of the stream (the engine
 /// saves, releases and exits 70). Under the test hold it parks the stream
-/// instead (#35).
-pub fn seh_faults(seh: bool, _hold: bool) -> bool {
-    seh
+/// instead (#35): the engine keeps running and reports `parked`, like a
+/// stream a stuck callback parked (R6), until the OS restart the test makes.
+pub fn seh_faults(seh: bool, hold: bool) -> bool {
+    seh && !hold
 }
 
 /// How a stream ended.

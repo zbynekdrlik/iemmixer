@@ -156,9 +156,10 @@ pub struct StreamStats {
     pub overruns: u64,
     /// Driver reopens after a reset request or a stall (ASIO; NullRt 0).
     pub resets: u64,
-    /// A callback was still in flight after the stop wait: the stream is
-    /// left allocated, never freed under a callback, and the guard alarms
-    /// (ASIO; NullRt false).
+    /// A callback was still in flight after the stop wait, or the SEH filter
+    /// parked a faulting thread (the parked-engine test's hold included,
+    /// #35): the stream is left allocated, never freed under a callback, and
+    /// the guard alarms (ASIO; NullRt false).
     pub parked: bool,
     pub faulted: bool,
     pub running: bool,
