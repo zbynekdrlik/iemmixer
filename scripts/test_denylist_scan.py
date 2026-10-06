@@ -608,6 +608,10 @@ class DenylistScanTests(unittest.TestCase):
     def test_hash_key_allowlists_a_cp1250_line(self) -> None:
         self.add_terms("ďqxwzy")
         self.commit({"c.txt": "keep ďqxwzy here\n".encode("cp1250")})
+        # the allowlist must be what clears it (F5 m12: without this the test passed even where
+        # the scan never found the cp1250 term at all)
+        self.assertEqual(self.scan("--tree", "HEAD")[0], 1)
+        self.assertEqual(self.scan("--commits", "HEAD")[0], 1)
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             self.assertEqual(ds.main(["--repo", str(self.repo), "--hash", "c.txt", "1"]), 0)
