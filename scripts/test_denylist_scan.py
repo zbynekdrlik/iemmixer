@@ -1021,6 +1021,34 @@ class DenylistScanTests(unittest.TestCase):
         self.assertIn("commit metadata: denylist entry 4", out)
         self.assertNotIn("qxwzy", out.lower())
 
+    # --- #32 F5 m1: the words of a multi-word term may be split by any whitespace, a line break too ---
+
+    def test_any_whitespace_between_the_words_of_a_term_is_matched(self) -> None:
+        self.add_terms("zyxa qwvb")
+        texts = {"nbsp.txt": "zyxa\xa0qwvb", "tab.txt": "zyxa\tqwvb", "double.txt": "zyxa  qwvb",
+                 "entity.html": "zyxa&nbsp;qwvb", "em.txt": "zyxa\u2003qwvb", "crlf.txt": "zyxa \r qwvb"}
+        for name, text in texts.items():
+            with self.subTest(name=name):
+                self.assert_found_in_both_modes_as({name: f"by {text} here\n"}, "qwvb")
+
+    def test_a_term_split_across_two_lines_is_found_on_its_first_line(self) -> None:
+        # a wrapped paragraph or commit message puts a line break between the words
+        self.add_terms("zyxa qwvb")
+        out = self.assert_found_in_both_modes_as({"wrap.md": "intro\nnamed zyxa\nqwvb and more\n"}, "qwvb")
+        self.assertIn("tree wrap.md:2: denylist entry 4", out)
+        self.commit({"a.txt": "clean\n"}, message="fix for the zyxa\nqwvb case")
+        code, out = self.scan("--commits", "-1 HEAD")
+        self.assertEqual(code, 1)
+        self.assertIn("commit metadata: denylist entry 4", out)
+
+    def test_a_term_split_across_two_lines_is_allowlisted_by_its_first_line(self) -> None:
+        self.add_terms("zyxa qwvb")
+        self.commit({"wrap.md": "named zyxa\nqwvb and more\n"})
+        self.assertEqual(self.scan("--tree", "HEAD", "--commits", "HEAD")[0], 1)
+        allow = self.tmp / "allow.txt"
+        allow.write_text(self.hash_key("wrap.md", "1") + "  reviewed ordinary prose\n", encoding="utf-8")
+        self.assertEqual(self.scan("--allow", str(allow), "--tree", "HEAD", "--commits", "HEAD")[0], 0)
+
     def test_a_named_reference_never_makes_a_batch_separator(self) -> None:
         # a reading that created U+E000 would shift every later unit: the hit must stay on line 3
         self.commit({"a.html": "&dcaron;\n&#xE000;&#57344;\nkeep zyxname\n"})
