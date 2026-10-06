@@ -807,15 +807,28 @@ function Test-IemCardDevice {
     return [bool]($Device.PSObject.Properties['role'] -and [string]$Device.role -eq 'card')
 }
 
+function Get-IemDeviceLps {
+    # A device's processors, sorted (#32 MAJOR-2): the one validated list that the
+    # check (Assert-IemDeviceLps) and the affinity mask read. A missing, null or
+    # empty lps is "no processors"; a null, float, bool or string entry is refused
+    # (ConvertTo-IemLpList), never dropped, rounded or read as processor 0
+    # (@($null) has one element, which [int] makes 0, review R3).
+    param([Parameter(Mandatory)]$Device)
+    $v = $null
+    if ($Device.PSObject.Properties['lps']) { $v = $Device.lps }
+    if ($null -eq $v -or ($v -is [array] -and $v.Count -eq 0)) { throw "device $($Device.id): no processors (lps)" }
+    $lps = ConvertTo-IemLpList -What "device $($Device.id) lps" -Value $v
+    [array]::Sort($lps)
+    return ,$lps
+}
+
 function Assert-IemDeviceLps {
-    # Before an affinity write (review 3.9, R4): the device names processors, each
-    # one is present (group 0 of the CPU Set map); the card's are exactly the
-    # layout's card role, and no other device's is a card or audio processor
-    # (design note 6.4 R3).
+    # Before an affinity write (review 3.9, R4): the device names processors
+    # (Get-IemDeviceLps), each one is present (group 0 of the CPU Set map); the
+    # card's are exactly the layout's card role, and no other device's is a card or
+    # audio processor (design note 6.4 R3).
     param([Parameter(Mandatory)]$Profile, [Parameter(Mandatory)]$Device)
-    # A null entry is no processor (@($null) has one element, which [int] makes 0, review R3).
-    $lps = @(@($Device.lps) | Where-Object { $null -ne $_ } | ForEach-Object { [int]$_ } | Sort-Object)
-    if ($lps.Count -eq 0) { throw "device $($Device.id): no processors (lps)" }
+    $lps = Get-IemDeviceLps -Device $Device
     $present = @([IemCpuSets]::Map().Keys)
     foreach ($lp in $lps) { if ($present -notcontains $lp) { throw "device $($Device.id): processor $lp is not present" } }
     $card = Get-IemLayoutLps -Profile $Profile -Role 'card'
@@ -970,8 +983,9 @@ function Get-IemGlobalItems {
             $key = Get-IemRegPath $Profile "$im\Affinity Policy"
             $items += New-IemItem -Key "irq:$($d.id):policy" -Kind 'reg' -Arguments @{ path = $key; name = 'DevicePolicy'; type = 'DWord' } -Desired 4 -Tier 3 -Group "irq:$($d.id)" -Reboot
             # REG_BINARY, the KAFFINITY's canonical form (M3); read back byte for byte.
+            # The mask reads the list the check validated (#32 MAJOR-2).
             $items += New-IemItem -Key "irq:$($d.id):mask" -Kind 'reg' -Arguments @{ path = $key; name = 'AssignmentSetOverride'; type = 'Binary' } `
-                -Desired (ConvertTo-IemKaffinity -Mask (ConvertTo-IemMask @($d.lps))) -Tier 3 -Group "irq:$($d.id)" -Reboot
+                -Desired (ConvertTo-IemKaffinity -Mask (ConvertTo-IemMask (Get-IemDeviceLps -Device $d))) -Tier 3 -Group "irq:$($d.id)" -Reboot
         }
         if (Select-IemGroup $Only 'nic') {
             $nk = Get-IemNicKey -Profile $Profile -Check:$Check
@@ -1058,8 +1072,15 @@ function Get-IemModeItems {
         foreach ($n in @($Profile.services_mode)) { $items += New-IemItem -Key "mode-svc:$n" -Kind 'svc-state' -Arguments @{ name = $n } -Desired 'stopped' -Group 'services' }
     }
     if (@($Only) -contains 'placement') {
+        # The validated housekeeping list (#32 MAJOR-2); a processor that is not
+        # present has no CPU Set ID, so it is refused here, before any write.
         $map = [IemCpuSets]::Map()
-        $ids = @(@($Profile.layout.housekeeping) | ForEach-Object { $map[[int]$_] }) | Sort-Object
+        $ids = @()
+        foreach ($lp in (Get-IemLayoutLps -Profile $Profile -Role 'housekeeping')) {
+            if (-not $map.ContainsKey($lp)) { throw "layout housekeeping: processor $lp is not present" }
+            $ids += $map[$lp]
+        }
+        $ids = @($ids | Sort-Object)
         foreach ($name in @($Profile.placement)) {
             foreach ($p in @(Get-Process -Name $name -ErrorAction SilentlyContinue)) {
                 $items += New-IemItem -Key "placement:${name}:$($p.Id)" -Kind 'cpusets' -Group 'placement' -Desired ($ids -join ',') `
