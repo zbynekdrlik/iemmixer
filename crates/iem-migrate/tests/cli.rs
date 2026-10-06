@@ -88,6 +88,15 @@ fn s(p: &Path) -> String {
     p.to_str().unwrap().to_owned()
 }
 
+/// A valid state file at revision `rev`: live state the engine would load.
+fn live(rev: u64) -> Vec<u8> {
+    iem_engine::persist::encode(&Persisted {
+        rev,
+        ..Persisted::default()
+    })
+    .unwrap()
+}
+
 fn cmd(parts: &[&str]) -> Vec<String> {
     parts.iter().map(|x| (*x).to_owned()).collect()
 }
@@ -167,6 +176,97 @@ fn import_writes_current_and_baseline_with_the_program_counts() {
     assert_eq!(Store::open(&dir).unwrap().generations().unwrap().len(), 1);
 }
 
+/// #32: the data step runs only after iemmixer stopped, so an import on a
+/// state directory a running engine holds (`engine.lock`) is a bug to
+/// surface: it stops (exit 1) and writes nothing, the seed too.
+fn refused_while_held(extra: &[&str]) {
+    let w = World::new(32);
+    let dir = w.path("state");
+    let held = Store::open(&dir).unwrap().lock().unwrap();
+    let mut a = import_args(&w, extra);
+    a.extend(["--state-dir".into(), s(&dir)]);
+    let e = run(&a).unwrap_err();
+    assert_eq!(e.code, EXIT_IO, "{}", e.msg);
+    assert!(
+        e.msg
+            .contains("the state directory is in use by a running engine; stop it first"),
+        "{}",
+        e.msg
+    );
+    let names: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["engine.lock"], "nothing written");
+    drop(held);
+    run(&a).unwrap();
+}
+
+#[test]
+fn an_import_refuses_a_state_dir_a_running_engine_holds() {
+    refused_while_held(&[]);
+}
+
+#[test]
+fn a_seed_refuses_a_state_dir_a_running_engine_holds() {
+    refused_while_held(&["--seed-if-absent"]);
+}
+
+/// #32 minor-4: the data step runs right after the engine ended, whose
+/// lock may outlive it a moment (a lock's release can lag the process
+/// end). The import waits for it, as the engine does, instead of failing
+/// the dev entry.
+#[test]
+fn an_import_waits_a_moment_for_the_state_dir() {
+    let w = World::new(26);
+    let dir = w.path("state");
+    let held = Store::open(&dir).unwrap().lock().unwrap();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        drop(held);
+    });
+    let mut a = import_args(&w, &["--seed-if-absent"]);
+    a.extend(["--state-dir".into(), s(&dir)]);
+    let report = run(&a).unwrap();
+    release.join().unwrap();
+    assert!(report.contains("baseline.json, current.json"), "{report}");
+}
+
+/// #32 P4: a plain import replaces the live state, but an interrupted
+/// save (save.tmp, the newest live state) is finished first, so it is kept
+/// as a generation instead of being overwritten.
+#[test]
+fn a_plain_import_keeps_an_interrupted_save_as_a_generation() {
+    let w = World::new(31);
+    let dir = w.path("state");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("current.json"), live(5)).unwrap();
+    std::fs::write(dir.join("save.tmp"), live(6)).unwrap();
+    let mut a = import_args(&w, &[]);
+    a.extend(["--state-dir".into(), s(&dir)]);
+    let report = run(&a).unwrap();
+    assert!(
+        report.contains("save.tmp finished as current.json"),
+        "{report}"
+    );
+    let store = Store::open(&dir).unwrap();
+    let revs: Vec<u64> = store
+        .generations()
+        .unwrap()
+        .iter()
+        .map(|(_, path)| {
+            iem_engine::persist::decode(&std::fs::read(path).unwrap())
+                .unwrap()
+                .rev
+        })
+        .collect();
+    assert_eq!(revs, [5, 6]);
+    assert!(!dir.join("save.tmp").exists());
+    let sf = site::open(&site_path()).unwrap();
+    let loaded = store.load(&sf.compiled);
+    assert_eq!((loaded.source, loaded.persisted.rev), (Saved::Current, 0));
+}
+
 #[test]
 fn seed_if_absent_writes_current_only_when_it_is_missing() {
     // A data command runs `import --seed-if-absent` on every dev entry: the
@@ -181,24 +281,203 @@ fn seed_if_absent_writes_current_only_when_it_is_missing() {
     assert!(dir.join("current.json").exists() && dir.join("baseline.json").exists());
     // A live change to current.json and a removed baseline: the re-seed keeps
     // the live current.json byte for byte and writes baseline.json again.
-    std::fs::write(dir.join("current.json"), b"LIVE").unwrap();
+    std::fs::write(dir.join("current.json"), live(7)).unwrap();
     std::fs::remove_file(dir.join("baseline.json")).unwrap();
     let r2 = run(&a).unwrap();
     assert!(r2.contains("current.json kept (--seed-if-absent)"), "{r2}");
-    assert_eq!(std::fs::read(dir.join("current.json")).unwrap(), b"LIVE");
+    assert_eq!(std::fs::read(dir.join("current.json")).unwrap(), live(7));
     assert!(dir.join("baseline.json").exists());
-    // A lone generation (a crash left the newest state only as gen-N, no
-    // current.json) is live state too: the re-seed must keep it, not overwrite
-    // from the project (iemmixer#9). Simulate it and re-seed.
+    // A lone generation (no current.json) is live state too: the re-seed
+    // must keep it, not overwrite from the project (iemmixer#9), and the
+    // report names it. Simulate it and re-seed.
     std::fs::remove_file(dir.join("current.json")).unwrap();
-    std::fs::write(dir.join("gen-0000000001.json"), b"LIVE-GEN").unwrap();
+    std::fs::write(dir.join("gen-0000000001.json"), live(8)).unwrap();
     let r3 = run(&a).unwrap();
-    assert!(r3.contains("current.json kept (--seed-if-absent)"), "{r3}");
+    assert!(
+        r3.contains("gen-0000000001.json kept (--seed-if-absent)"),
+        "{r3}"
+    );
     assert!(!dir.join("current.json").exists());
     assert_eq!(
         std::fs::read(dir.join("gen-0000000001.json")).unwrap(),
-        b"LIVE-GEN"
+        live(8)
     );
+}
+
+/// #32 F3-r4 2: a generation's name carries the revision it holds, so the
+/// seed's report names the generation it keeps as it is on disk.
+#[test]
+fn seed_if_absent_names_a_generation_as_it_is_on_disk() {
+    let w = World::new(24);
+    let dir = w.path("state");
+    let store = Store::open(&dir).unwrap();
+    for rev in [7, 8] {
+        let p = Persisted {
+            rev,
+            ..Persisted::default()
+        };
+        store.save(&p).unwrap();
+    }
+    std::fs::remove_file(dir.join("current.json")).unwrap();
+    let mut a = import_args(&w, &["--seed-if-absent"]);
+    a.extend(["--state-dir".into(), s(&dir)]);
+    let r = run(&a).unwrap();
+    assert!(
+        r.contains("gen-0000000001-r7.json kept (--seed-if-absent)"),
+        "{r}"
+    );
+    assert!(dir.join("gen-0000000001-r7.json").exists());
+    assert!(!dir.join("current.json").exists());
+}
+
+/// #32 D6: `save` writes the new state to save.tmp before its two renames,
+/// so a crash in between leaves the newest state only there. The seed counts
+/// it as live state and never touches it (it used to write baseline.json
+/// through that same save.tmp).
+#[test]
+fn seed_if_absent_keeps_an_interrupted_save() {
+    let w = World::new(30);
+    let dir = w.path("state");
+    let mut a = import_args(&w, &["--seed-if-absent"]);
+    a.extend(["--state-dir".into(), s(&dir)]);
+    run(&a).unwrap();
+    // A crash between save's renames: current.json already became a
+    // generation, the newest state waits in save.tmp.
+    std::fs::rename(dir.join("current.json"), dir.join("gen-0000000001.json")).unwrap();
+    std::fs::write(dir.join("save.tmp"), live(1)).unwrap();
+    let r = run(&a).unwrap();
+    assert!(r.contains("save.tmp kept (--seed-if-absent)"), "{r}");
+    assert_eq!(std::fs::read(dir.join("save.tmp")).unwrap(), live(1));
+    assert!(!dir.join("current.json").exists());
+    // A crash in the very first save, before any rename: save.tmp is the
+    // only state there is.
+    std::fs::remove_file(dir.join("gen-0000000001.json")).unwrap();
+    let r = run(&a).unwrap();
+    assert!(r.contains("save.tmp kept (--seed-if-absent)"), "{r}");
+    assert_eq!(std::fs::read(dir.join("save.tmp")).unwrap(), live(1));
+    assert!(!dir.join("current.json").exists());
+    assert!(dir.join("baseline.json").exists());
+}
+
+/// #32 D5: `Store::has_state` (now `live_state`) swallowed I/O errors
+/// (`Path::exists`, a failed `read_dir` read as "no generation"), so a state
+/// directory the seed could not read looked empty and was seeded over. The
+/// seed now fails (exit 1) before it writes anything.
+#[cfg(unix)]
+#[test]
+fn seed_if_absent_refuses_a_state_dir_it_cannot_read() {
+    let w = World::new(29);
+    let dir = w.path("state");
+    std::fs::create_dir_all(&dir).unwrap();
+    // A `current.json` whose lookup fails for any user: a link to itself.
+    std::os::unix::fs::symlink("current.json", dir.join("current.json")).unwrap();
+    let mut a = import_args(&w, &["--seed-if-absent"]);
+    a.extend(["--state-dir".into(), s(&dir)]);
+    let e = run(&a).unwrap_err();
+    assert_eq!(e.code, EXIT_IO, "{}", e.msg);
+    assert!(e.msg.contains(&s(&dir)), "{}", e.msg);
+    let kept = std::fs::symlink_metadata(dir.join("current.json")).unwrap();
+    assert!(kept.file_type().is_symlink());
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    // engine.lock is the import's lock on the directory, no state file.
+    assert_eq!(names, ["current.json", "engine.lock"], "nothing written");
+}
+
+/// #32 MAJOR-2: a live state file the import cannot read may hold the
+/// newest state. The engine would boot past it with an alarm; an import
+/// has nobody to hear one, so it stops (exit 1), names the file, and
+/// writes nothing, plain or seed.
+#[test]
+fn an_import_refuses_a_state_file_it_cannot_read() {
+    let w = World::new(28);
+    for (k, unreadable) in ["current.json", "save.tmp"].into_iter().enumerate() {
+        for (j, extra) in [&[][..], &["--seed-if-absent"][..]].into_iter().enumerate() {
+            let dir = w.path(&format!("state-{k}-{j}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("gen-0000000001.json"), live(4)).unwrap();
+            if unreadable == "save.tmp" {
+                std::fs::write(dir.join("current.json"), live(5)).unwrap();
+            }
+            // A directory where the file belongs: reading it fails on
+            // every OS.
+            std::fs::create_dir(dir.join(unreadable)).unwrap();
+            let before = tree(&dir);
+            let mut a = import_args(&w, extra);
+            a.extend(["--state-dir".into(), s(&dir)]);
+            let e = run(&a).unwrap_err();
+            assert_eq!(e.code, EXIT_IO, "{unreadable} {extra:?}: {}", e.msg);
+            assert!(
+                e.msg.contains(unreadable),
+                "{unreadable} {extra:?}: {}",
+                e.msg
+            );
+            let mut after = tree(&dir);
+            // engine.lock is the import's lock on the directory.
+            assert_eq!(after.remove("engine.lock"), Some(Vec::new()));
+            assert_eq!(after, before, "{unreadable} {extra:?}: nothing written");
+            assert!(dir.join(unreadable).is_dir(), "{unreadable} {extra:?}");
+        }
+    }
+}
+
+/// #32 MAJOR-1: a damaged save.tmp is no state, but not the import's to
+/// replace either: its save moves it aside and the report says where.
+#[test]
+fn a_plain_import_reports_the_save_tmp_it_moved_aside() {
+    let w = World::new(27);
+    let dir = w.path("state");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("current.json"), live(5)).unwrap();
+    std::fs::write(dir.join("save.tmp"), b"cut off").unwrap();
+    let mut a = import_args(&w, &[]);
+    a.extend(["--state-dir".into(), s(&dir)]);
+    let report = run(&a).unwrap();
+    let aside = dir.join("save.tmp.orphan-1");
+    assert!(
+        report.contains(&format!("save.tmp moved aside to {}", aside.display())),
+        "{report}"
+    );
+    assert_eq!(std::fs::read(&aside).unwrap(), b"cut off");
+}
+
+/// #32 F3-r4 6: a plain import whose save failed right after save.new took
+/// save.tmp's name left its own revision-0 save.tmp beside current.json,
+/// and every later import refused on the "older save.tmp" alarm. Such a
+/// leftover is no doubt about the live state: the import's save moves it
+/// aside as the engine's does, the report names the alarm and where it
+/// went, and the import goes on.
+#[test]
+fn a_plain_import_moves_an_older_save_tmp_aside_and_goes_on() {
+    let w = World::new(23);
+    let dir = w.path("state");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("current.json"), live(5)).unwrap();
+    std::fs::write(dir.join("save.tmp"), live(0)).unwrap();
+    let mut a = import_args(&w, &[]);
+    a.extend(["--state-dir".into(), s(&dir)]);
+    let report = run(&a).unwrap();
+    assert!(
+        report.contains("save.tmp (revision 0) is older than current.json's 5"),
+        "{report}"
+    );
+    let aside = dir.join("save.tmp.orphan-1");
+    assert!(
+        report.contains(&format!("save.tmp moved aside to {}", aside.display())),
+        "{report}"
+    );
+    assert_eq!(std::fs::read(&aside).unwrap(), live(0));
+    let store = Store::open(&dir).unwrap();
+    let gens = store.generations().unwrap();
+    let replaced = iem_engine::persist::decode(&std::fs::read(&gens.last().unwrap().1).unwrap());
+    assert_eq!(replaced.unwrap().rev, 5);
+    let sf = site::open(&site_path()).unwrap();
+    let loaded = store.load(&sf.compiled);
+    assert_eq!((loaded.source, loaded.persisted.rev), (Saved::Current, 0));
+    assert!(loaded.alarms.is_empty(), "{:?}", loaded.alarms);
 }
 
 #[test]

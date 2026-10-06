@@ -184,6 +184,18 @@ pub(crate) fn dword(text: &str) -> io::Result<u32> {
         .map_err(|_| invalid(format!("not a decimal DWORD: {text:?}")))
 }
 
+/// Windows' `ERROR_ACCESS_DENIED`.
+const ACCESS_DENIED: i32 = 5;
+
+/// Whether a durable rename that failed is made again with POSIX
+/// semantics ([`crate::file::rename_durable`]): only after
+/// `ERROR_ACCESS_DENIED`, which `MoveFileExW` gives for a target another
+/// process holds with delete sharing (#32 F3-r4 5). Any other error is the
+/// rename's own.
+pub(crate) fn rename_again(e: &io::Error) -> bool {
+    e.raw_os_error() == Some(ACCESS_DENIED)
+}
+
 /// A window command or notification goes to one window: never the null
 /// handle (a thread message) and never the broadcast handle.
 pub(crate) fn one_window(hwnd: isize) -> io::Result<()> {
@@ -273,6 +285,21 @@ mod tests {
     use crate::kind;
     use std::io::ErrorKind::InvalidInput;
     use std::time::UNIX_EPOCH;
+
+    /// #32 F3-r4 5: only `ERROR_ACCESS_DENIED` (5) makes a durable rename
+    /// try again with POSIX semantics; a missing source, a sharing
+    /// violation or an error without an OS code is the rename's own.
+    #[test]
+    fn a_durable_rename_tries_again_only_after_access_denied() {
+        assert!(rename_again(&io::Error::from_raw_os_error(5)));
+        for code in [2, 3, 32, 183] {
+            assert!(!rename_again(&io::Error::from_raw_os_error(code)), "{code}");
+        }
+        assert!(!rename_again(&io::Error::from(
+            io::ErrorKind::PermissionDenied
+        )));
+        assert!(!rename_again(&io::Error::other("no code")));
+    }
 
     /// Every child runs without a window, in a group of its own when asked;
     /// only a job that allows breakaway gets the flag, and a refusal starts

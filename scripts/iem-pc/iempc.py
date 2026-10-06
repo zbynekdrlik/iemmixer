@@ -9,11 +9,15 @@ window.
 "ide event": the flag file (~/.config/iemmixer/EVENT-NOW) exists. `event`
 writes it first when it is missing (a flag it cannot write is a warning,
 never a stop), pre-empts an open S1a/S1c spike window (spike_window.py
-preempt), then runs `iemmode event`, and `iemmode event --direct` when the
-guard is unreachable (exit 4). The event path has one budget that fits one
+preempt; after a failed one it closes the window under the window lock, so
+no queued window preempt starts a second bring-back), then runs `iemmode
+event`, and `iemmode event --direct` when the guard is unreachable (exit
+4). The event path has one budget that fits one
 Bash call (EVENT_BUDGET_S): the spike preempt gets SPIKE_SHARE_S of it, no
 `iemmode` call starts while the preempt still runs, and none starts with
-less than SWITCH_MIN_S left. `event` never waits for another command.
+less than SWITCH_MIN_S left. `event` never waits for another iempc command;
+it waits only, within its budget, for the window lock (the close after a
+failed preempt) and for a window process's own settle (the spike preempt).
 
 Every other PC step waits for dev time: commands that change the PC refuse
 while the flag exists, and `status` then reports this box only (`--pc`
@@ -514,6 +518,20 @@ def spike_window_open() -> bool:
     return not (isinstance(state, dict) and state.get("closed") is True)
 
 
+def spike_window_settling() -> bool:
+    """A closed S1a/S1c window whose preempt (or to-event) still watches a PC
+    change that was in flight (spike_window's settle, without the lock): its
+    `settling` record is there and its bound not over. `spike_window.py
+    preempt` waits for that watch, so iemmode event never starts the guard's
+    bring-back next to the settle's (review of lane G2, finding 1)."""
+    try:
+        state = json.loads(SPIKE_STATE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    s = state.get("settling") if isinstance(state, dict) else None
+    return isinstance(s, dict) and isinstance(s.get("until"), (int, float)) and time.time() <= s["until"]
+
+
 def refuse_open_window(cmd: str) -> None:
     """The card goes to the guard only after the S1a/S1c window handed it over."""
     if spike_window_open():
@@ -780,6 +798,49 @@ def spike_preempt(timeout: float) -> dict:
     return {"ok": True, "output": out[-4000:]}
 
 
+def close_failed_window(deadline: float, error: str) -> None:
+    """After a FAILED spike preempt (F2 round 3, m2 and decision 2): the window
+    is closed under spike_window's lock before `iemmode event`, so a window
+    preempt another process still has queued finds it closed and starts no
+    second bring-back next to the guard's (one meter-bridge trigger, the #9
+    lesson). The lock is waited for at most what the event budget leaves above
+    the guard's SWITCH_MIN_S; a lock that stays taken means a window process
+    may be bringing REAPER back itself: no iemmode call. Nothing else in the
+    state changes: the guard's event plan brings REAPER back."""
+    sw = spike_module()
+    seen: dict = {}
+
+    def close(st: dict) -> None:
+        if not st.get("closed"):
+            st["closed"] = True
+            st["closed_by"] = {"by": "iempc event after a failed spike preempt", "at": now_iso(), "error": error[-500:]}
+        if sw.intent_live(st.get("in_flight")):
+            seen["in_flight"] = st["in_flight"]
+
+    wait = deadline - time.monotonic() - SWITCH_MIN_S
+    try:
+        if wait <= 0:
+            raise sw.StepError(f"no time left in the event budget to wait for the window lock ({max(wait, 0):.0f} s)")
+        sw.update_state(change=close, wait_s=wait)
+    except sw.StepError as e:
+        raise StepError(f"the S1a/S1c window could not be closed after the failed spike preempt ({e}): no iemmode call "
+                        "while a window process may hold the window lock and bring REAPER back itself (one bring-back, "
+                        "the #9 lesson); run 'iempc event' again once it is free (spike_window.py status)") from None
+    except (OSError, ValueError) as e:
+        # An unreadable window state: no window process can bring REAPER back from it
+        # either (each preempt reads it first), so the guard's event path goes on.
+        print(f"iempc: WARNING: the S1a/S1c window state could not be read to close it ({e}); the event path goes on",
+              file=sys.stderr, flush=True)
+        emit({"spike_window": "unreadable", "after": "a failed spike preempt"})
+        return
+    if seen:
+        # No settle watches it on this path (review of lane G2, finding 5): the step's
+        # own late handler sees the window closed, and the guard takes REAPER.
+        print(f"iempc: WARNING: {seen['in_flight'].get('step')} is still in flight in the closed window: its own "
+              "follow-up runs when its call is back; check REAPER once iemmode event is done", file=sys.stderr, flush=True)
+    emit({"spike_window": "closed", "after": "a failed spike preempt", **seen})
+
+
 def switch_timeout(deadline: float) -> float:
     """What an iemmode call of the event path may take: the rest of the one
     budget. It never starts with less than SWITCH_MIN_S left, since a cut
@@ -798,7 +859,7 @@ def cmd_event(ctx: Ctx) -> int:
     deadline = time.monotonic() + EVENT_BUDGET_S
     if not dry:
         write_flag()
-    if spike_window_open():
+    if spike_window_open() or spike_window_settling():
         if dry:
             emit({"spike_window": "open", "plan": "spike_window.py preempt"})
         else:
@@ -809,6 +870,8 @@ def cmd_event(ctx: Ctx) -> int:
                                 "budget: no iemmode call while it may still be bringing REAPER back (one meter-bridge "
                                 "trigger, the #9 lesson); run 'iempc event' again once it has ended "
                                 "(spike_window.py status)")
+            if not pre["ok"]:
+                close_failed_window(deadline, pre.get("error", ""))
     args = ["event", "--dry-run"] if dry else ["event"]
     code, reply, raw = iemmode(ctx.env, args, switch_timeout(deadline), "ignore")
     emit(result("iemmode", args, code, reply, raw))
@@ -1134,12 +1197,15 @@ def handover_problems(r: dict, original: int) -> list[str]:
 
 
 def spike_module():
-    """spike_window.py, imported only for the hand-over (the event path runs it
-    as its own process)."""
+    """spike_window.py, imported for the hand-over and for closing a window
+    after a failed preempt (the preempt itself runs as its own process). Its
+    state file is the one this box reads (SPIKE_STATE), so both lock and read
+    one file."""
     if str(SPIKE_DIR) not in sys.path:
         sys.path.insert(0, str(SPIKE_DIR))
     import spike_window
 
+    spike_window.STATE = SPIKE_STATE
     return spike_window
 
 
@@ -1156,6 +1222,9 @@ def cmd_handover_s1a(ctx: Ctx) -> int:
         if state.get("card") != "free":
             raise Refused(f"S1a window {state.get('id')}: the card is '{state.get('card')}', not free; close it with "
                           "spike_window.py to-event")
+        if sw.intent_live(state.get("in_flight")):
+            raise Refused(f"S1a window {state.get('id')}: a PC step is in flight ({state['in_flight'].get('step')}): "
+                          "wait for it")
         body = (f"$p = Get-SpikeBufferPref -Key {ps_quote(spike_env['PC_BUFFER_KEY'])} -Name {ps_quote(spike_env['PC_BUFFER_NAME'])} ; "
                 f"$h = Get-GoldenAsioHolders -Module {ps_quote(spike_env['PC_ASIO_MODULE'])} ; "
                 f"$t = Get-ScheduledTask {sw.TASK} -ErrorAction SilentlyContinue ; "
@@ -1170,9 +1239,24 @@ def cmd_handover_s1a(ctx: Ctx) -> int:
     problems = handover_problems(r, int(state["pref_original"]))
     if problems:
         raise StepError("S1a window stays open: " + "; ".join(problems))
-    state["closed"] = True
-    state["handed_over"] = {"to": "iemmixer guard (S6)", "at": now_iso(), "checks": r}
-    sw.save_state(state)
+
+    def hand_over(st: dict) -> None:
+        # The state as saved now, under the window lock (F2 round 3, m5): another
+        # window process may have changed it during the checks.
+        if st.get("id") != state.get("id") or st.get("closed"):
+            raise Refused(f"S1a window {state.get('id')} was closed meanwhile (a preempt or to-event): nothing handed over")
+        if st.get("card") != "free":
+            raise StepError(f"S1a window {state.get('id')}: the card is '{st.get('card')}' now, not free: the window stays open")
+        if sw.intent_live(st.get("in_flight")):
+            raise StepError(f"S1a window {state.get('id')}: a PC step is in flight now ({st['in_flight'].get('step')}): "
+                            "the window stays open")
+        st["closed"] = True
+        st["handed_over"] = {"to": "iemmixer guard (S6)", "at": now_iso(), "checks": r}
+
+    try:
+        sw.update_state(change=hand_over)
+    except sw.StepError as e:   # the window lock was not free within its bound (an owner alarm was printed)
+        raise StepError(str(e)) from None
     emit({"handover-s1a": state.get("id"), "closed": True, "checks": r})
     return 0
 

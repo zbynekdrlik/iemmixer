@@ -135,6 +135,15 @@ class RegexTests(unittest.TestCase):
         self.assertEqual(argv[-6:], ["--timeout", "120", "--package", "iem-server", "--", "--all-targets"])
         self.assertLess(argv.index("--re"), argv.index("--"))
 
+    def test_the_recheck_is_limited_to_the_files_of_its_mutants(self) -> None:
+        # cargo-mutants 27.1.0 tests struct-field deletion mutants whatever --re says (upstream
+        # cargo-mutants#632): limited to the selected mutants' files, the recheck no longer tests
+        # every such mutant of the packages (CI run 37466176804: 51 for 1, one shard ran out of time)
+        argv = mr.recheck_argv(self.NAMES[:2] + [self.NAMES[0]], Path("mutants.out/recheck"), ["--", "--all-targets"])
+        files = [argv[i + 1] for i, a in enumerate(argv) if a == "--file"]
+        self.assertEqual(files, ["crates/iem-engine/src/engine.rs", "crates/iem-server/src/mixer_ws.rs"])
+        self.assertLess(argv.index("--file"), argv.index("--"))
+
 
 def mutant(name: str, summary: str, log_path: str) -> dict:
     return {
@@ -259,6 +268,22 @@ class MainTests(unittest.TestCase):
         code, text = self.main(self.fake_cargo([(A, "CaughtMutant", log(FAIL)), (C, "CaughtMutant", log(FAIL))]))
         self.assertEqual(code, 1)
         self.assertIn(f"::error::recheck: tested a mutant it did not select: {C}", text)
+
+    def test_field_deletions_the_selection_cannot_exclude_are_noted_not_errors(self) -> None:
+        # upstream cargo-mutants#632: a struct-field deletion mutant ignores --re, so the recheck
+        # may test one it did not select in a selected mutant's file; its outcome decides nothing
+        e = "crates/iem-server/src/notify.rs:70:9: delete field to from struct Push expression in push_engineers"
+        f = "crates/iem-server/src/view.rs:12:5: delete field db from struct Row expression in rows"
+        write_out(self.out, [(A, "CaughtMutant", log(TIMEOUT))])
+        code, text = self.main(self.fake_cargo([(A, "CaughtMutant", log(FAIL)), (e, "MissedMutant", log(PASS))]))
+        self.assertEqual(code, 0, text)
+        self.assertIn(f"recheck: not selected, tested anyway (cargo-mutants#632, a field deletion in a selected file): {e}", text)
+        self.assertNotIn("::error::", text)
+        # one in a file no selected mutant is in is still an error: the file limit did not hold
+        write_out(self.out, [(A, "CaughtMutant", log(TIMEOUT))])
+        code, text = self.main(self.fake_cargo([(A, "CaughtMutant", log(FAIL)), (f, "CaughtMutant", log(FAIL))]))
+        self.assertEqual(code, 1)
+        self.assertIn(f"::error::recheck: tested a mutant it did not select: {f}", text)
 
     def test_cargo_mutants_failing_to_run_is_an_error(self) -> None:
         write_out(self.out, [(A, "CaughtMutant", log(TIMEOUT))])

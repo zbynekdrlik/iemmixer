@@ -613,8 +613,8 @@ impl Processor {
     /// structured exception on the RT thread that `catch_unwind` cannot
     /// catch, so the process's SEH filter runs (Windows). Off Windows there
     /// is no such filter, so it aborts (equally uncatchable). It never
-    /// returns; no test runs it (it ends the process), and it is excluded
-    /// from mutation.
+    /// returns: `tests/pipes.rs` runs it in the binary off Windows (SIGABRT);
+    /// on Windows `iemmode inject-seh` runs it on the PC.
     fn inject_seh() {
         #[cfg(windows)]
         iem_audio_io::asio::raise_test_seh();
@@ -1078,11 +1078,11 @@ impl Processor {
         }
     }
 
-    /// The D5(b) loopback round-trip (S6 test 5): while the HIL signal sounds,
-    /// records the first hil-output sample at or above the onset threshold as
-    /// the emit, scans the loopback-return inputs (after the topology's rx)
-    /// for the first return at or above it as the arrival, and stores the
-    /// delay in samples once both are known. No-op unless the return is open.
+    /// The D5(b) loopback round-trip (S6 test 5): records the first hil-output
+    /// sample at or above the onset threshold as the emit, feeds every block
+    /// of every loopback-return input (after the topology's rx) to the probe,
+    /// which judges the echo and a busy return, and stores the delay in
+    /// samples once measured. No-op unless the return is open.
     fn probe_latency(&mut self, block: &mut Block<'_>, off: usize, n: usize) {
         if self.hil_rx == 0 {
             return;

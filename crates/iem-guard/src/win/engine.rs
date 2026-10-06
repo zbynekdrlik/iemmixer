@@ -340,7 +340,17 @@ fn supervisor<'a>(pc: &'a mut WinPc, limit: Duration, c: &Cancel) -> R<&'a mut S
                     break;
                 }
                 Err(e) if start.elapsed() >= limit => return Err(StepError::Failed(e)),
-                Err(_) => c.sleep(procs::POLL)?,
+                Err(e) => {
+                    // An engine of ours that ended never answers: its end
+                    // ends the wait at once (#32 F3-r4 4: the step starts
+                    // one that ended with exit 75 again).
+                    if let Some(code) = pc.kids.ended(Kid::Engine) {
+                        return Err(StepError::failed(format!(
+                            "the engine ended ({code:?}) before its pipe answered: {e}"
+                        )));
+                    }
+                    c.sleep(procs::POLL)?;
+                }
             }
         }
     }

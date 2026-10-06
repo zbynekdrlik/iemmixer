@@ -37,7 +37,7 @@ use crate::crash::{self, After, CrashLoop};
 use crate::effects::engine::ACTIVE_DB;
 use crate::handover::{self, Audio};
 use crate::install::{self, InstallError};
-use crate::pc::{Audience, EngineSeen, Kid, Pc, PrefSeen, Procs, R, StepError, job_note};
+use crate::pc::{Audience, EngineSeen, Kid, Pc, PrefSeen, Procs, R, Status, StepError, job_note};
 use crate::plan::{
     Activation, Busy, Facts, Health, Mode, OnError, PrefFail, Step, activation, on_error, plan,
 };
@@ -987,6 +987,37 @@ fn refused(pc: &mut dyn Pc, g: &mut Guard, from: Mode, to: Mode, report: &str) -
     g.finish(pc, Outcome::Refused, from)
 }
 
+/// `EngineArm`'s readiness. An engine that ended with exit 75 before it
+/// was ready (another process still held its state directory) is started
+/// again, held, once, after `crash::BUSY_RETRY`, inside the step, with the
+/// preference checked right before as for every start (#32 F3-r4 4); any
+/// other end, or a second busy one, is the step's failure (the plan's
+/// error policy unwinds).
+fn engine_ready(pc: &mut dyn Pc, g: &mut Guard, to: Mode, c: &Cancel) -> R<Status> {
+    let mut restarted = false;
+    loop {
+        let e = match pc.engine_ready(READY_S, c) {
+            Err(StepError::Failed(why)) => why,
+            done => return done,
+        };
+        if !crash::ready_restart(pc.engine_exit(), restarted) {
+            return Err(StepError::Failed(e));
+        }
+        restarted = true;
+        g.info(format!(
+            "the engine ended with exit {} before it was ready (its state directory was \
+             held): starting it again in {} s",
+            crash::STATE_BUSY,
+            crash::BUSY_RETRY.as_secs()
+        ));
+        c.sleep(crash::BUSY_RETRY)?;
+        pref_step(pc, g, to)?;
+        let pid = pc.engine_start(true, g.hil_engine(to))?;
+        g.spawns += 1;
+        g.info(format!("engine started again, held (pid {pid})"));
+    }
+}
+
 /// One step, one `Pc` call (plus the verdicts of `handover`).
 fn run_step(pc: &mut dyn Pc, g: &mut Guard, step: Step, to: Mode, facts: &Facts) -> R<()> {
     let c = g.cancel.clone();
@@ -1033,7 +1064,7 @@ fn run_step(pc: &mut dyn Pc, g: &mut Guard, step: Step, to: Mode, facts: &Facts)
             Ok(())
         }
         Step::EngineArm => {
-            let s = pc.engine_ready(READY_S, &c)?;
+            let s = engine_ready(pc, g, to, &c)?;
             g.info(format!(
                 "engine ready: {} frames, {} callbacks, {} missed",
                 s.frames, s.callbacks, s.missed
@@ -2018,11 +2049,28 @@ fn exited(pc: &mut dyn Pc, g: &mut Guard, kid: Kid, code: Option<i32>, at: Insta
 
 fn engine_exited(pc: &mut dyn Pc, g: &mut Guard, code: Option<i32>, at: Instant, session: bool) {
     g.last_exit = code;
-    let abnormal = !session && !matches!(code, Some(0 | 2 | 3));
+    // #32 minor-4: a busy state directory is no crash; it is tried again,
+    // up to `crash::BUSY_LIMIT` times in a row, then each counts as one
+    // (F3-r4 3: something the guard does not watch holds it).
+    let streak = g.crash.busy(!session && code == Some(crash::STATE_BUSY));
+    let busy = !session && crash::busy_retry(code, streak);
+    let abnormal = !session && !busy && !matches!(code, Some(0 | 2 | 3));
     let looped = abnormal && g.crash.record(at);
+    if streak == crash::BUSY_ALARM {
+        g.raise(
+            None,
+            &format!(
+                "the engine's state directory stayed in use {} times in a row (exit {}): \
+                 starting it again",
+                crash::BUSY_ALARM,
+                crash::STATE_BUSY
+            ),
+            false,
+        );
+    }
     let mode = g.state.mode;
     let n = g.crash.in_window();
-    match crash::after_exit(code, mode, g.site.prod, session, looped, n) {
+    match crash::after_exit(code, mode, g.site.prod, session, looped, n, streak) {
         After::Stay { alarm } => {
             if let Some(why) = alarm {
                 g.raise(None, &format!("{why} (exit {code:?})"), false);

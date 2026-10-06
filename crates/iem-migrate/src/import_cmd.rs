@@ -7,7 +7,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use iem_core::legacy::MixerBackup;
 use iem_engine::core::{reconcile, to_state};
-use iem_engine::persist::{Persisted, Store};
+use iem_engine::engine::STATE_WAIT;
+use iem_engine::persist::{Persisted, Source, Store};
+use iem_engine::topology::Topology;
 use iem_rpp::aliases::parse_aliases;
 use iem_rpp::backup::cross_check;
 use iem_rpp::import::{compare, import};
@@ -140,6 +142,21 @@ pub fn run(args: &[String]) -> Result<String, Failure> {
         return Ok(report.join("\n"));
     };
     let store = Store::open(&dir).map_err(|e| Failure::io(format!("{}: {e}", dir.display())))?;
+    // The data step runs only after iemmixer stopped (#32): a running engine
+    // holds engine.lock, and the import stops before it reads or writes a
+    // state file. An engine that just ended may hold it a moment longer, so
+    // the import waits as the engine does (minor-4). Held until the import
+    // returns.
+    let _state_lock = store.lock_within(STATE_WAIT).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::WouldBlock {
+            Failure::io(format!(
+                "{}: the state directory is in use by a running engine; stop it first",
+                dir.display()
+            ))
+        } else {
+            Failure::io(format!("{}: {e}", dir.display()))
+        }
+    })?;
     // `rev` stays at the default 0: an import starts a new revision count.
     let persisted = Persisted {
         topology_hash: site.compiled.hash.clone(),
@@ -148,21 +165,98 @@ pub fn run(args: &[String]) -> Result<String, Failure> {
         ..Persisted::default()
     };
     let io = |e: std::io::Error| Failure::io(format!("{}: {e}", dir.display()));
-    store.save_baseline(&persisted).map_err(io)?;
-    // Keep any existing live state (current.json OR a lone generation left by a
-    // crash mid-save); only seed current.json when there is none.
-    let keep_current = seed_if_absent && store.has_state();
-    if !keep_current {
-        store.save(&persisted).map_err(io)?;
+    // Keep any existing live state (current.json, a generation, or save.tmp
+    // left by a crash mid-save: `Store::live_state`); only seed current.json
+    // when there is none. Looked at before anything is written: a directory
+    // it cannot read refuses the seed whole (#32). The baseline goes through
+    // its own temp file, so an interrupted save stays untouched. The report
+    // names the file kept, as it is on disk (`Store::live_file`).
+    let kept = if seed_if_absent {
+        store.live_file().map_err(io)?
+    } else {
+        None
+    };
+    if kept.is_none() {
+        report.extend(recover_before_save(&store, &site.compiled).map_err(|why| {
+            Failure::io(format!(
+                "{}: {why}; nothing written, the live state is as it was",
+                dir.display()
+            ))
+        })?);
     }
-    report.push(format!(
-        "state written to {} (baseline.json{})",
-        dir.display(),
-        if keep_current {
-            "; current.json kept (--seed-if-absent)"
-        } else {
-            ", current.json"
+    store.save_baseline(&persisted).map_err(io)?;
+    if kept.is_none() {
+        let committed = store.save(&persisted).map_err(io)?;
+        // #32 MAJOR-1: a save.tmp that was no state is kept, never loaded.
+        if let Some(aside) = committed.orphaned {
+            report.push(format!("save.tmp moved aside to {}", aside.display()));
         }
+    }
+    let also = kept.map_or_else(
+        || ", current.json".to_owned(),
+        |file| format!("; {file} kept (--seed-if-absent)"),
+    );
+    report.push(format!(
+        "state written to {} (baseline.json{also})",
+        dir.display()
     ));
     Ok(report.join("\n"))
+}
+
+/// The engine's boot recovery before an import saves over the live state
+/// (#32 P4): an interrupted save in `save.tmp` (the newest live state)
+/// becomes `current.json` first, so the import's save turns it into a
+/// generation instead of replacing it. Report lines, or why the import must
+/// not go on: the load left the live state in doubt (`Loaded::doubts`: a
+/// state file it cannot read, a save.tmp it could not compare, the
+/// revision continued above a file passed over: #32 MAJOR-2; the engine
+/// boots past them with an alarm, an import has nobody to hear one, so it
+/// stops before the recovery or the save touch anything), or the
+/// interrupted save could not be finished. Its other alarms are report
+/// lines: an older save.tmp (a save of the import's own that failed after
+/// save.new took its name, say) is moved aside by the import's save as by
+/// the engine's (#32 F3-r4 6), and an orphan above the state loaded stays
+/// where it is.
+fn recover_before_save(store: &Store, topo: &Topology) -> Result<Vec<String>, String> {
+    let loaded = store.load(topo);
+    if !loaded.doubts.is_empty() {
+        return Err(format!(
+            "the import cannot use the state directory as it is: {}",
+            loaded.doubts.join("; ")
+        ));
+    }
+    let mut lines: Vec<String> = loaded
+        .alarms
+        .iter()
+        .map(|alarm| format!("state: {alarm}"))
+        .collect();
+    let recovery = store.recover(&loaded);
+    if loaded.source == Source::Interrupted && !recovery.finished {
+        let why: Vec<String> = recovery
+            .failed
+            .into_iter()
+            .chain(recovery.warnings)
+            .collect();
+        return Err(format!(
+            "the interrupted save in save.tmp could not be finished ({})",
+            why.join("; ")
+        ));
+    }
+    if let Some(aside) = recovery.quarantined {
+        lines.push(format!(
+            "recovery: the damaged current.json moved aside to {}",
+            aside.display()
+        ));
+    }
+    if recovery.finished {
+        lines.push("recovery: save.tmp finished as current.json".to_owned());
+    }
+    lines.extend(
+        recovery
+            .failed
+            .into_iter()
+            .chain(recovery.warnings)
+            .map(|why| format!("recovery: {why}")),
+    );
+    Ok(lines)
 }

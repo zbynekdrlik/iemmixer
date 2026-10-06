@@ -15,7 +15,9 @@ generous per-test bound) and the options given after `--`:
     python3 scripts/mutants_recheck.py [--out mutants.out] -- <cargo mutants options>
 
 The options are the main run's without --in-diff, --shard and --output: the
-script selects the mutants by name (--re) and writes to <out>/recheck. Pass
+script selects the mutants by name (--re) and by their files (--file: field-deletion
+mutants ignore --re, upstream cargo-mutants#632; one it tests anyway in a selected file
+is only noted) and writes to <out>/recheck. Pass
 --jobs 1 so no second mutant loads the runner. Exit status, as cargo-mutants:
 0 every catch holds (caught again, also by a timeout at the generous bound: a
 hang), 2 a mutant survived its recheck (its first catch was false), 3 a
@@ -45,6 +47,8 @@ FAILED = re.compile(r"^(?:TRY \d+ )?(?:FAIL|FAIL \+ LEAK|FL\+LK|LEAK-FAIL|LKFAIL
 ENDED = re.compile(r"^(?:TRY \d+ )?(?:TIMEOUT|TMT|SIG(?:TERM|KILL|HUP|INT|QUIT))$")
 # regex::escape's meta characters (`<` and `>` stay: `\<` is a word boundary there).
 REGEX_META = set("\\.+*?()|[]{}^$#&-~")
+# A struct-field deletion mutant, which ignores --re (upstream cargo-mutants#632).
+FIELD_DELETION = re.compile(r"^[^:]+:\d+:\d+: delete field \S+ from struct .+ expression in ")
 # Options that would make the recheck select other mutants or write over the main output.
 REFUSED = ("--in-diff", "--shard", "--output", "-o")
 
@@ -98,10 +102,20 @@ def rust_regex_literal(text: str) -> str:
     return "".join("\\" + c if c in REGEX_META else c for c in text)
 
 
+def mutant_file(name: str) -> str:
+    """The source file of a mutant name (`<file>:<line>:<column>: <what>`)."""
+    return name.split(":", 1)[0]
+
+
 def recheck_argv(names: list[str], output: Path, cargo_args: list[str]) -> list[str]:
+    """Selects the mutants by name, and by their files too: cargo-mutants 27.1.0 tests every
+    struct-field deletion mutant whatever --re says (upstream cargo-mutants#632), so without
+    the file limit a recheck of one mutant tested all of the packages' (CI run 37466176804)."""
     argv = ["cargo", "mutants"]
     for name in names:
         argv += ["--re", f"^{rust_regex_literal(name)}$"]
+    for path in sorted({mutant_file(name) for name in names}):
+        argv += ["--file", path]
     return argv + ["--output", str(output), *cargo_args]
 
 
@@ -168,7 +182,11 @@ def main(argv: list[str] | None = None,
 
     rechecked = mutants(read_outcomes(output / "mutants.out") or {})
     errors = missed = timeouts = 0
+    selected_files = {mutant_file(name) for name in retest}
     for name in [n for n in rechecked if n not in retest]:
+        if FIELD_DELETION.match(name) and mutant_file(name) in selected_files:
+            print(f"recheck: not selected, tested anyway (cargo-mutants#632, a field deletion in a selected file): {name}")
+            continue
         print(f"::error::recheck: tested a mutant it did not select: {name}")
         errors += 1
     for name in retest:

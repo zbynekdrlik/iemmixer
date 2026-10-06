@@ -16,6 +16,8 @@ fn code(e: &EngineError) -> u8 {
         EngineError::Site(_) | EngineError::Usage(_) => 2,
         EngineError::Card(_) => 3,
         EngineError::Fault { .. } => 70,
+        // EX_TEMPFAIL: the guard tries again without counting a crash.
+        EngineError::StateBusy(_) => 75,
     }
 }
 

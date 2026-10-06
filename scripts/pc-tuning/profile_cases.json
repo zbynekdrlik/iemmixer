@@ -1,0 +1,46 @@
+{
+  "about": "The profile's processor rules (#32 MINOR-6, MAJOR-2 and its review), one table for both sides: Test-IemTuning.ps1 runs 'numbers' against ConvertTo-IemLpNumber, 'layouts' against Assert-IemLayout and 'device_lps' against Get-IemDeviceLps (IemTuning.psm1); test_tuning_window.py runs them against tuning_window.lp_number and load_profile. A processor number is an integer 0..63 (nic.rss base and max too). A list of them refuses a null entry, a float (2.0 too), a bool, a string or a nested list, never dropping, rounding or truncating one. layout is an object; a role is absent (no processors) or such a list, one role per processor. A device's lps is a non-empty such list. Synthetic processor numbers only.",
+  "numbers": [
+    {"name": "zero", "ok": true, "value": 0},
+    {"name": "sixty-three", "ok": true, "value": 63},
+    {"name": "sixty-four", "ok": false, "value": 64},
+    {"name": "negative", "ok": false, "value": -1},
+    {"name": "null", "ok": false, "value": null},
+    {"name": "a-float", "ok": false, "value": 4.5},
+    {"name": "an-integral-float", "ok": false, "value": 4.0},
+    {"name": "a-bool", "ok": false, "value": true},
+    {"name": "a-string", "ok": false, "value": "4"},
+    {"name": "a-list", "ok": false, "value": [4]}
+  ],
+  "layouts": [
+    {"name": "the-spec-layout", "ok": true, "layout": {"housekeeping": [6, 7, 8, 9, 10, 11, 12, 13], "card": [2], "nic": [4], "audio": [14]}},
+    {"name": "an-absent-role-is-none", "ok": true, "layout": {"housekeeping": [0], "card": [2], "nic": [1]}},
+    {"name": "an-empty-role-is-none", "ok": true, "layout": {"housekeeping": [0], "card": [2], "nic": [1], "audio": []}},
+    {"name": "processor-63", "ok": true, "layout": {"housekeeping": [0], "card": [2], "nic": [1], "audio": [63]}},
+    {"name": "processor-64", "ok": false, "layout": {"housekeeping": [0], "card": [2], "nic": [1], "audio": [64]}},
+    {"name": "a-negative-processor", "ok": false, "layout": {"housekeeping": [0], "card": [2], "nic": [1], "audio": [-1]}},
+    {"name": "a-null-entry", "ok": false, "layout": {"housekeeping": [0, null], "card": [2], "nic": [1], "audio": [3]}},
+    {"name": "a-float", "ok": false, "layout": {"housekeeping": [0], "card": [1.6], "nic": [4], "audio": [3]}},
+    {"name": "an-integral-float", "ok": false, "layout": {"housekeeping": [0], "card": [2.0], "nic": [1], "audio": [3]}},
+    {"name": "a-bool", "ok": false, "layout": {"housekeeping": [0], "card": [true], "nic": [4], "audio": [3]}},
+    {"name": "a-string", "ok": false, "layout": {"housekeeping": [0], "card": ["2"], "nic": [1], "audio": [3]}},
+    {"name": "a-nested-list", "ok": false, "layout": {"housekeeping": [0], "card": [[2]], "nic": [1], "audio": [3]}},
+    {"name": "a-null-role", "ok": false, "layout": {"housekeeping": [0], "card": null, "nic": [1], "audio": [3]}},
+    {"name": "a-scalar-role", "ok": false, "layout": {"housekeeping": [0], "card": 2, "nic": [1], "audio": [3]}},
+    {"name": "two-roles-share-a-processor", "ok": false, "layout": {"housekeeping": [0], "card": [2], "nic": [1], "audio": [2]}},
+    {"name": "a-processor-twice-in-a-role", "ok": false, "layout": {"housekeeping": [0, 0], "card": [2], "nic": [1], "audio": [3]}},
+    {"name": "a-layout-that-is-not-an-object", "ok": false, "layout": [0, 1, 2, 3]}
+  ],
+  "device_lps": [
+    {"name": "one-processor", "ok": true, "lps": [2]},
+    {"name": "two-processors", "ok": true, "lps": [3, 2]},
+    {"name": "a-null-entry", "ok": false, "lps": [2, null]},
+    {"name": "a-float", "ok": false, "lps": [2.5]},
+    {"name": "a-bool", "ok": false, "lps": [true]},
+    {"name": "a-string", "ok": false, "lps": ["2"]},
+    {"name": "processor-64", "ok": false, "lps": [64]},
+    {"name": "empty", "ok": false, "lps": []},
+    {"name": "null", "ok": false, "lps": null},
+    {"name": "a-scalar", "ok": false, "lps": 2}
+  ]
+}
