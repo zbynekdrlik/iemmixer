@@ -467,13 +467,18 @@ def start_trace(env: dict[str, str], run_dir: str, opt: str) -> None:
     the "ide event" overtook — its call ended in EventNow, or the flag exists
     right after it — may have ended after a preempt's trace-stop found no
     session, so this process stops it too (quick, no merge; an alarm if that
-    fails) before EventNow goes on (review round 3, m5)."""
+    fails) before EventNow goes on (review round 3, m5). That stop runs under
+    the window lock (F2 round 3, m4): never at the same time as the unwind's
+    own trace-stop, whose logman stop would then fail; Stop-IemTraceSessions
+    is idempotent, so whichever comes second finds nothing to stop."""
     try:
         tps(env, f"Start-IemTrace -Xperf {xperf(env)} -Dir {ps_quote(run_dir)}{opt}", timeout=120, event="finish")
         check_event()
     except sw.EventNow:
         try:
-            sw.check_trace_stop(sw.ps(env, sw.trace_stop_body(env, run_dir), timeout=sw.TRACE_STOP_CALL_S, event="ignore"))
+            with sw.window_lock():
+                sw.check_trace_stop(sw.ps(env, sw.trace_stop_body(env, run_dir), timeout=sw.TRACE_STOP_CALL_S, event="ignore"))
+                sw.update_state(change=lambda st: st.update(trace=None) if st.get("trace") == run_dir else None)
         except StepError as e:
             sw.alarm(f"a kernel trace started as 'ide event' came did not stop ({e}): run tuning_window trace-stop")
         raise
