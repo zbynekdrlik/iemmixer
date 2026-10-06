@@ -8,6 +8,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 from pathlib import Path
 
@@ -385,6 +386,19 @@ class PcChangeTests(unittest.TestCase):
             sw.cmd_preempt(ENV)
         self.assertFalse(any("Remove-Item" in c for c in self.pc.calls))
 
+
+
+class SignalTests(unittest.TestCase):
+    def test_a_platform_without_sighup_still_installs_sigterm(self) -> None:
+        # Windows has no SIGHUP, and tuning_window.py runs there too (poll-script and
+        # analysis-script in the asio-spike job): exit_on_signals must not fail at start-up.
+        installed: list[int] = []
+        fake = types.SimpleNamespace(SIGTERM=15, signal=lambda s, handler: installed.append(s))
+        saved = pcc.signal
+        pcc.signal = fake
+        self.addCleanup(lambda: setattr(pcc, "signal", saved))
+        pcc.exit_on_signals()
+        self.assertEqual(installed, [15])
 
 if __name__ == "__main__":
     unittest.main()
