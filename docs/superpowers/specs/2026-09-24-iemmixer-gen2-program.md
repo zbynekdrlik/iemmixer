@@ -73,7 +73,7 @@ Numbers are tunable defaults unless they are parity requirements, tolerances (§
 | Process | Started by | Role | Restart effect |
 |---|---|---|---|
 | engine | guard | ASIO, DSP, mix state, taps, listen-path limiter; local pipes only; HIGH priority, QPC time | 1–3 s gap, 500 ms fade-in |
-| guard (~1.2–1.5k LoC) | Interactive task, restart on failure, single-instance mutex; on demand before cutover, at logon after | `iemmode`, modes, interlock, band-activity alarm, handover checks, bundle install/pin/revert, crash loop, alarms; no listening sockets | none; reconnects |
+| guard (~1.2–1.5k LoC) | Interactive task, restart on failure, single-instance mutex; on demand before cutover, at logon after | `iemmode`, modes, band-activity alarm, handover checks, bundle install/pin/revert, crash loop, alarms; no listening sockets | none; reconnects |
 | server (existing binary) | guard | HTTPS, auth, Opus, push, photos, backups, tunnel health | none on audio |
 | tray (Tauri) | guard, iemmixer modes only | status, Open Mixer, Copy URL, alarms | none |
 | ops runner (ops repo only) | guard, `dev` only | HIL, topology deploy | — |
@@ -257,14 +257,14 @@ Proof codes: **M** mock E2E, **L** live E2E/HIL, **S** server tests, **E** engin
 
 ### 4.2 Event signals (D2, owner model approved 2026-09-24)
 
-- **Owner messages drive the PC.** "ide event" (an event is coming) → the agent immediately runs `iemmode event` (graceful iemmixer stop, then REAPER and the predecessor app, handover checks) and confirms to the owner. "event skončil" → the agent runs `iemmode dev` (save and quit REAPER, graceful predecessor-app stop, interlock, iemmixer start) and development continues. Between the two messages the PC stays in `dev`, open-ended.
+- **Owner messages drive the PC.** "ide event" (an event is coming) → the agent immediately runs `iemmode event` (graceful iemmixer stop, then REAPER and the predecessor app, handover checks) and confirms to the owner. "event skončil" → the agent runs `iemmode dev` (graceful predecessor-app stop, save and quit REAPER, iemmixer start) and development continues. Between the two messages the PC stays in `dev`, open-ended.
 - **Rehearsals with iemmixer (trial, before cutover):** the owner's rehearsal message (plus the build) → `iemmode live --build SHA`; the owner's end message → `dev`.
 - **The agent never switches on its own**, except the safety fallbacks below. It never asks whether an event is running; the owner says so.
 - **Reboot** is always `event` (G1); after an unplanned reboot the PC stays in `event` until the owner's next "event skončil".
-- **Activity interlock:** before `event`→`dev` (and `live`→`dev` after cutover) the guard samples stage inputs for 60 s; any peak above −50 dBFS refuses and alarms the owner. `--force` only on explicit owner instruction. Trials skip it: the band is there on purpose.
+- **No activity interlock (owner decision 2026-10-06, #38).** The owner's signal ("ide event" / "event skončil") is the only thing that stops or postpones work on the PC: "pre teba je podstatné či je alebo nie je event a o tom rozhodujem ja! NIE TY!!!". No measurement of silence, activity or the band playing is a gate, before a switch, a HIL job or a measurement: other devices on the Dante network feed the card's inputs, so a level says nothing about the band. (The approved spec had a 60 s interlock here, refusing on any stage peak above −50 dBFS.)
 - **Band-activity alarm in `dev`:** sustained stage-input activity (peaks above −50 dBFS for ≥ 2 min within 5 min) alarms the owner and shows a banner with the "Back to REAPER" button on the engineer page; switching stays an owner (or engineer-button) decision.
 - **Alarms:** a persistent file (shown by the tray and every `iemmode` call) plus Web Push to `alarm_recipients` (the owner) and `ENGINEER` subscriptions, from the server or, if none runs, the server binary run once in `notify` mode. Entering `dev` or `live` requires ≥ 1 alarm subscription; the owner-present S6 bootstrap registers the owner's.
-- **HIL and soak jobs** start only in `dev` with a quiet interlock. An "ide event" cancels running jobs gracefully (through `iemmode`, never force) before the switch. Jobs change state only via `iemmode install|activate|test-signal|report`.
+- **HIL and soak jobs** start only in `dev` (no quiet stage needed, #38). An "ide event" cancels running jobs gracefully (through `iemmode`, never force) before the switch. Jobs change state only via `iemmode install|activate|test-signal|report`.
 
 ### 4.3 Switching, handover, cutover, rollback
 
@@ -277,7 +277,7 @@ Proof codes: **M** mock E2E, **L** live E2E/HIL, **S** server tests, **E** engin
 ### 4.4 Safety invariants
 
 - **G1** Every boot is `event` before cutover and after a rollback.
-- **G2** **Procedural, not technical:** an agent *can* run `iemmode`; the band is protected by the owner-message rule ("ide event" / "event skončil"), the interlock, the band-activity alarm, G1 and owner notification.
+- **G2** **Procedural, not technical:** an agent *can* run `iemmode`; the band is protected by the owner-message rule ("ide event" / "event skončil"), the band-activity alarm (information, never a gate: #38), G1 and owner notification.
 - **G3** "ide event" is executed immediately and confirmed back to the owner; any failure alarms at once. A hung guard fails the switch loudly; the fallback is an owner reboot (= `event`).
 - **G4** No force-kill of REAPER or the engine (P4, I8), OS shutdown included.
 - **G5** HIL, installs, test signal and fault injection only in `dev`; the runner lives only there, so CI never decides about events.

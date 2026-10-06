@@ -42,7 +42,7 @@ Measure the REAPER behaviour that documentation does not settle, before S2 freez
 
 1. **Precondition:** the owner's "event skončil" arrived after the last "ide event". The agent never infers it.
 2. **Preflight (read-only):** REAPER 7.65, no render instance, only REAPER holds the ASIO module (`tasklist /m`), ≥ 10 GB free.
-3. **Interlock:** input meters are read over REAPER's HTTP surface for 60 s. Any peak above −50 dBFS aborts and alarms (§4.2).
+3. **Interlock:** gone (#38, owner 2026-10-06): the owner's "event skončil" is the only gate, so no step reads the stage; the window goes from the preflight to REAPER's save and quit.
 4. **Save and quit REAPER:** save (action 40026, project file changed; the D2 switch step, before any backup), quit (40004), and within 30 s REAPER is gone and nothing holds the ASIO module.
 5. **Stop the predecessor app** via its tray Exit (MCP), its only graceful path.
 6. **Backup** the trees in the private trees file (REAPER resource folder, project folder, the app's data; about 0.7 GB) plus three registry keys and the start task's XML. The sha256 manifests of sources and copies must be equal.
