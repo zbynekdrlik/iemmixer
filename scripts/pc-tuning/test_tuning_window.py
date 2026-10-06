@@ -395,6 +395,22 @@ class PollScriptTests(unittest.TestCase):
         self.assertEqual(out.getvalue(), tw.sw.ps_script("C:\\r", tw.poll_body("EventLog", 12, 34)) + "\n")
         self.assertIn("Import-Module (Join-Path 'C:\\r' 'bin\\SpikePc.psm1')", out.getvalue())
 
+    def test_analysis_script_prints_an_analysis_steps_start_as_sw_ps_sends_it(self) -> None:
+        # F2 round 3, m11: the PC side of the analysis guard (Idle, the stop file's
+        # time against the analysis start, the refusal through ps_script's catch)
+        # runs on the Windows CI runner: this prints one analysis step exactly as
+        # _measure composes it (analysis_step), with a probe as the step's body.
+        out = io.StringIO()
+        root, since = "C:\\r", "2026-01-01T00:00:00.0000000Z"
+        with mock.patch.dict(os.environ, {"SPIKE_ENV": "/nonexistent/asio-spike.env"}), contextlib.redirect_stdout(out):
+            code = tw.main(["analysis-script", "--root", root, "--since", since])
+        self.assertEqual(code, 0)
+        step = tw.analysis_step(root, since, tw.ANALYSIS_PROBE)
+        self.assertEqual(out.getvalue(), tw.sw.ps_script(root, step) + "\n")
+        self.assertEqual(step, " ; ".join([tw.analysis_guard(root, since), tw.sw.measure_import(root), tw.ANALYSIS_PROBE]))
+        self.assertIn("PriorityClass", tw.ANALYSIS_PROBE)
+        self.assertIn("Get-IemNow", tw.ANALYSIS_PROBE)   # proves the tuning modules loaded after the guard
+
 
 class RebootTests(unittest.TestCase):
     """reboot asks Windows for a graceful restart (I8). Only sw.ps (the ssh

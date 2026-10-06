@@ -477,6 +477,16 @@ class MeasureTests(WindowHarness):
             self.assertLess(body.index("(Get-Process -Id $PID).PriorityClass = 'Idle'"), load, body)
             self.assertLess(body.index(f"throw '{tw.ANALYSIS_REFUSED}'"), load, body)
 
+    def test_each_analysis_call_is_the_step_the_ci_runner_runs(self) -> None:
+        # F2 round 3, m11: what _measure sends is analysis_step's composition, the
+        # one `analysis-script` prints for the Windows CI runner to execute.
+        self.pc.progress = {"missed": 1, "overruns": 0, "position_gaps": 0, "callback_thread": 4243}
+        tw.cmd_measure(self.env, self.args(trace="diag", circular_mb=1024))
+        head = tw.analysis_step("R", "2026-01-01T00:00:00Z", "")
+        run_dir = self.pc.bodies("Start-IemTrace")[0].split("-Dir ", 1)[1].split(" ", 1)[0]
+        steps = [body for body, _ in tw.analysis(tw.xperf(self.env), run_dir, 1, True)]
+        self.assertEqual([b for b, _ in self.analysis_calls()], [head + s for s in steps])
+
     def test_a_merged_trace_leaves_no_raw_files_behind(self) -> None:
         # Review round 3, m8: a soak's raw kernel/marker files (per cut) would double
         # the disk used. They are deleted only after `xperf -merge` succeeded: a failed
