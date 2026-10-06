@@ -222,6 +222,19 @@ class ContentTests(ScanTestCase):
                + b"\nendstream endobj\n%%EOF\n")
         self.assert_findings_in_both_modes({"hex.pdf": pdf}, "hex.pdf: cannot be scanned: a PDF with streams")
 
+    def test_the_members_and_the_expansion_of_one_blob_are_bounded(self) -> None:
+        # review of lane G3, finding 3: the member limit was per container, so containers nested in
+        # one blob multiplied it; and members just under the ratio floor expanded a small blob ~400x
+        many = zipped({f"inner{number}.zip": zipped({f"e{entry}.txt": b"" for entry in range(20)})
+                       for number in range(3)}, zipfile.ZIP_STORED)
+        dense = zipped({f"m{number}.txt": b"abcd" * (15 << 10) for number in range(30)})
+        with mock.patch("denylist_containers.MEMBER_COUNT_LIMIT", 50), \
+                mock.patch("denylist_containers.RATIO_FLOOR", 64 << 10):
+            self.assert_findings_in_both_modes(
+                {"many.zip": many, "dense.zip": dense},
+                "many.zip!/inner2.zip: cannot be scanned: more than 50 members in one blob",
+                "dense.zip!/m", ": cannot be scanned: decompressed to more than 20 times the blob")
+
     def test_other_containers_are_findings_allowlisted_by_their_blob_key(self) -> None:
         pdf = (b"%PDF-1.4\n1 0 obj << /Length 20 /Filter /FlateDecode >> stream\n" + zlib.compress(b"(zyxname) Tj")
                + b"\nendstream endobj\n%%EOF\n")
