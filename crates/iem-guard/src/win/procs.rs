@@ -190,6 +190,19 @@ impl Kids {
         }
     }
 
+    /// How the watched `kid` ended, if it has: `Some(code)`. A look only:
+    /// it stays watched, so `reap` still reports it (#32 F3-r4 4).
+    pub(super) fn ended(&self, kid: Kid) -> Option<Option<i32>> {
+        match self.get(kid)?.handle.wait(Duration::ZERO) {
+            Ok(Some(code)) => Some(Some(i32::from_ne_bytes(code.to_ne_bytes()))),
+            Ok(None) => None,
+            Err(e) => {
+                warn!("watching the {} failed: {e}", kid.id());
+                None
+            }
+        }
+    }
+
     /// Our children that ended since the last look, with their exit codes;
     /// they are no longer watched.
     pub(super) fn reap(&mut self) -> Vec<(Kid, Option<i32>)> {

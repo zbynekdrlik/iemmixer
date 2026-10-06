@@ -735,7 +735,7 @@ fn shutdown_saves_fades_and_releases() {
     let (h, _, rev) = c.hello(Role::Observe);
     assert_eq!((h.state_rev, rev), (1, 1));
     let dir = again.shutdown();
-    assert!(dir.path().join("state/gen-0000000001.json").exists());
+    assert!(dir.path().join("state/gen-0000000001-r1.json").exists());
 }
 
 /// #32: a boot on an interrupted save finishes it before the engine runs:
@@ -758,7 +758,7 @@ fn a_boot_on_an_interrupted_save_finishes_it_first() {
     assert!(!state.join("save.tmp").exists());
     let current = std::fs::read(state.join("current.json")).unwrap();
     assert_eq!(decode(&current).unwrap().rev, 2);
-    let generation = std::fs::read(state.join("gen-0000000001.json")).unwrap();
+    let generation = std::fs::read(state.join("gen-0000000001-r1.json")).unwrap();
     assert_eq!(decode(&generation).unwrap().rev, 1);
     e.shutdown();
 }

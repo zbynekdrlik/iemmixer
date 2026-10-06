@@ -713,6 +713,41 @@ fn engine_ready_restarts_its_window_once() {
 }
 
 #[test]
+fn an_engine_that_finds_its_state_directory_busy_is_started_again_within_the_step() {
+    // F3 round 4, finding 4: exit 75 was handled by the crash watch only.
+    // An engine EngineStart started that ended with 75 (its state
+    // directory still held a moment) left EngineArm waiting for its pipe,
+    // and the whole entry unwound. The ready wait notices the exit, and the
+    // step starts the engine again, held, once, after BUSY_RETRY.
+    let entry = |exits: Vec<Option<i32>>| {
+        let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
+        g.state.pins.current = Some(SHA.into());
+        pc.early_exits = exits;
+        let t0 = Instant::now();
+        let r = handle(&mut pc, &mut g, dev(), 0);
+        (pc, g, r, t0.elapsed())
+    };
+    let (pc, g, r, took) = entry(vec![Some(75)]);
+    assert!(r.ok, "{r:?}");
+    assert!(took >= crash::BUSY_RETRY, "{took:?}");
+    assert_eq!(pc.engine_starts, [(true, false), (true, false)]);
+    assert_eq!(pc.count(Call::EngineReady), 2);
+    assert_eq!(pc.count(Call::PrefCheck), 2);
+    assert_eq!(g.spawns, 2);
+    assert_eq!(g.state.mode, Mode::Dev);
+    assert!(g.alarms.all().is_empty(), "{:?}", texts(&g));
+    // A second busy exit, or any other end, fails the step: it unwinds.
+    for (exits, starts) in [(vec![Some(75), Some(75)], 2), (vec![Some(70)], 1)] {
+        let (pc, g, r, _) = entry(exits.clone());
+        assert!(!r.ok, "{exits:?}: {r:?}");
+        assert_eq!(pc.engine_starts.len(), starts, "{exits:?}");
+        assert_eq!(g.spawns, starts as u64, "{exits:?}");
+        assert!(!pc.called(Call::EngineArm), "{exits:?}");
+        assert_eq!(g.state.mode, Mode::Event, "{exits:?}");
+    }
+}
+
+#[test]
 fn a_preempted_token_sends_a_dev_switch_back_before_its_first_step() {
     let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
     g.cancel.preempt();
@@ -3521,6 +3556,44 @@ fn a_busy_state_directory_is_tried_again_without_a_crash_count() {
     assert_eq!(g.state.mode, Mode::Dev);
     assert!(!pc.called(Call::ReaperStart));
     assert_eq!(g.alarms.all().len(), 1, "{:?}", texts(&g));
+}
+
+#[test]
+fn a_state_directory_that_stays_busy_falls_back_like_a_crash_loop() {
+    // F3 round 4, finding 3: exit 75 was tried again without an end, so a
+    // state directory held by something the guard does not watch kept the
+    // crash loop's fallback (REAPER, or the previous pin in prod) from
+    // ever running. Ten busy exits in a row (about 50 s) are still no
+    // crash; each one after them counts as abnormal. The alarm at the
+    // third stays the only busy alarm.
+    let busy = "the engine's state directory stayed in use 3 times in a row (exit 75): \
+                starting it again";
+    let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Dev));
+    pc.exited = vec![(Kid::Engine, Some(75)); 10];
+    let at = Instant::now();
+    tick(&mut pc, &mut g, at);
+    assert_eq!(g.state.mode, Mode::Dev);
+    assert_eq!(texts(&g), [busy]);
+    tick(&mut pc, &mut g, at + Duration::from_millis(1999));
+    assert!(!pc.called(Call::EngineStart));
+    tick(&mut pc, &mut g, at + Duration::from_secs(2));
+    assert_eq!(pc.count(Call::EngineStart), 1);
+    // The eleventh in a row is a crash: the backoff's 1 s, not 2 s.
+    pc.exited = vec![(Kid::Engine, Some(75))];
+    let later = at + Duration::from_secs(10);
+    tick(&mut pc, &mut g, later);
+    tick(&mut pc, &mut g, later + Duration::from_secs(1));
+    assert_eq!(pc.count(Call::EngineStart), 2);
+    assert_eq!(g.state.mode, Mode::Dev);
+    // Two more make three crashes in 10 min: back to REAPER.
+    pc.exited = vec![(Kid::Engine, Some(75)); 2];
+    tick(&mut pc, &mut g, later + Duration::from_secs(5));
+    assert_eq!(g.state.mode, Mode::Event);
+    let t = texts(&g);
+    assert_eq!(t.iter().filter(|a| *a == busy).count(), 1, "{t:?}");
+    let crashed = "the engine crashed 3 times in 10 min: back to REAPER";
+    assert!(t.iter().any(|a| a == crashed), "{t:?}");
+    assert!(pc.called(Call::ReaperStart));
 }
 
 #[test]

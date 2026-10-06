@@ -73,6 +73,29 @@ pub const BUSY_RETRY: Duration = Duration::from_secs(2);
 /// keeps trying).
 pub const BUSY_ALARM: usize = 3;
 
+/// Busy exits in a row the guard tries again without counting a crash:
+/// each takes the engine's 3 s wait and [`BUSY_RETRY`], so about 50 s. A
+/// state directory still held then is held by something the guard does
+/// not watch, so each further exit 75 counts as abnormal and the crash
+/// loop's fallback (REAPER, or the previous pin in prod) runs (#32 F3-r4
+/// 3).
+pub const BUSY_LIMIT: usize = 10;
+
+/// Whether an engine exit is a busy one tried again without a crash: exit
+/// [`STATE_BUSY`] while the busy streak (this exit included) is at most
+/// [`BUSY_LIMIT`].
+pub fn busy_retry(code: Option<i32>, streak: usize) -> bool {
+    code == Some(STATE_BUSY) && streak <= BUSY_LIMIT
+}
+
+/// Whether a plan's ready wait starts its engine again: once, when the
+/// engine ended with [`STATE_BUSY`] before it was ready (`exit`: how it
+/// ended, `None` while it runs; #32 F3-r4 4). Any other end, or a second
+/// busy one, fails the step.
+pub fn ready_restart(exit: Option<Option<i32>>, restarted: bool) -> bool {
+    !restarted && exit == Some(Some(STATE_BUSY))
+}
+
 /// The respawn delay after the `n`-th abnormal exit in the window: 1, 2, 4,
 /// 8 s, then 10 s.
 pub fn backoff(abnormal_in_window: usize) -> Duration {
@@ -81,8 +104,9 @@ pub fn backoff(abnormal_in_window: usize) -> Duration {
 }
 
 /// The engine's exit codes: 0 shut down, 1 i/o, 2 usage or site, 3 card
-/// refused, 70 RT fault, 75 state directory busy ([`STATE_BUSY`]); `None`
-/// when it ended without a code.
+/// refused, 70 RT fault, 75 state directory busy ([`STATE_BUSY`]: tried
+/// again while `busy_streak` allows, [`busy_retry`], then like a crash);
+/// `None` when it ended without a code.
 pub fn after_exit(
     code: Option<i32>,
     mode: Mode,
@@ -90,6 +114,7 @@ pub fn after_exit(
     session_ending: bool,
     looped: bool,
     n: usize,
+    busy_streak: usize,
 ) -> After {
     match code {
         Some(0) => After::Stay { alarm: None },
@@ -100,7 +125,7 @@ pub fn after_exit(
             alarm: Some("the card refused the engine"),
         },
         _ if session_ending => After::Stay { alarm: None },
-        Some(STATE_BUSY) => After::Respawn(BUSY_RETRY),
+        _ if busy_retry(code, busy_streak) => After::Respawn(BUSY_RETRY),
         _ if looped && mode == Mode::Live && prod => After::PreviousPin,
         _ if looped => After::ToEvent,
         _ => After::Respawn(backoff(n)),
@@ -152,7 +177,7 @@ mod tests {
             for prod in [false, true] {
                 for looped in [false, true] {
                     for ending in [false, true] {
-                        let after = |c| after_exit(Some(c), mode, prod, ending, looped, 1);
+                        let after = |c| after_exit(Some(c), mode, prod, ending, looped, 1, 1);
                         assert_eq!(after(0), After::Stay { alarm: None });
                         assert_eq!(
                             after(2),
@@ -178,7 +203,7 @@ mod tests {
             for mode in MODES {
                 for looped in [false, true] {
                     assert_eq!(
-                        after_exit(code, mode, true, true, looped, 2),
+                        after_exit(code, mode, true, true, looped, 2, 1),
                         After::Stay { alarm: None },
                         "{code:?} {mode:?} {looped}"
                     );
@@ -190,24 +215,24 @@ mod tests {
     #[test]
     fn a_loop_goes_to_event_except_in_prod_live() {
         assert_eq!(
-            after_exit(Some(70), Mode::Live, true, false, true, 3),
+            after_exit(Some(70), Mode::Live, true, false, true, 3, 1),
             After::PreviousPin
         );
         // A trial (live before cutover) and dev go back to REAPER.
         assert_eq!(
-            after_exit(Some(70), Mode::Live, false, false, true, 3),
+            after_exit(Some(70), Mode::Live, false, false, true, 3, 1),
             After::ToEvent
         );
         assert_eq!(
-            after_exit(Some(70), Mode::Dev, true, false, true, 3),
+            after_exit(Some(70), Mode::Dev, true, false, true, 3, 1),
             After::ToEvent
         );
         assert_eq!(
-            after_exit(None, Mode::Dev, false, false, true, 3),
+            after_exit(None, Mode::Dev, false, false, true, 3, 1),
             After::ToEvent
         );
         assert_eq!(
-            after_exit(Some(1), Mode::Event, true, false, true, 3),
+            after_exit(Some(1), Mode::Event, true, false, true, 3, 1),
             After::ToEvent
         );
     }
@@ -222,7 +247,7 @@ mod tests {
                 for looped in [false, true] {
                     for n in [0, 1, 3, 7] {
                         assert_eq!(
-                            after_exit(Some(75), mode, prod, false, looped, n),
+                            after_exit(Some(75), mode, prod, false, looped, n, 1),
                             After::Respawn(Duration::from_secs(2)),
                             "{mode:?} {prod} {looped} {n}"
                         );
@@ -231,9 +256,64 @@ mod tests {
             }
         }
         assert_eq!(
-            after_exit(Some(75), Mode::Dev, false, true, false, 1),
+            after_exit(Some(75), Mode::Dev, false, true, false, 1, 1),
             After::Stay { alarm: None }
         );
+    }
+
+    #[test]
+    fn a_busy_streak_beyond_ten_exits_counts_as_crashes() {
+        // #32 F3-r4 3: up to BUSY_LIMIT busy exits in a row are tried again
+        // after 2 s; the next one follows the backoff and the crash loop.
+        assert_eq!(BUSY_LIMIT, 10);
+        assert!(busy_retry(Some(75), 1) && busy_retry(Some(75), 10));
+        assert!(!busy_retry(Some(75), 11));
+        assert!(!busy_retry(Some(70), 1) && !busy_retry(None, 1));
+        for mode in MODES {
+            assert_eq!(
+                after_exit(Some(75), mode, false, false, false, 1, 10),
+                After::Respawn(BUSY_RETRY),
+                "{mode:?}"
+            );
+            // The backoff of the third abnormal exit (4 s), not BUSY_RETRY.
+            assert_eq!(
+                after_exit(Some(75), mode, false, false, false, 3, 11),
+                After::Respawn(Duration::from_secs(4)),
+                "{mode:?}"
+            );
+            assert_eq!(
+                after_exit(Some(75), mode, false, false, true, 3, 12),
+                After::ToEvent,
+                "{mode:?}"
+            );
+            // A session ending still wins.
+            assert_eq!(
+                after_exit(Some(75), mode, true, true, true, 3, 12),
+                After::Stay { alarm: None },
+                "{mode:?}"
+            );
+        }
+        assert_eq!(
+            after_exit(Some(75), Mode::Live, true, false, true, 3, 13),
+            After::PreviousPin
+        );
+    }
+
+    #[test]
+    fn a_plans_ready_wait_starts_an_engine_again_only_after_one_busy_exit() {
+        // #32 F3-r4 4: once, for exit 75; never for another end, nor for
+        // an engine still running.
+        assert!(ready_restart(Some(Some(75)), false));
+        assert!(!ready_restart(Some(Some(75)), true));
+        for exit in [
+            None,
+            Some(None),
+            Some(Some(0)),
+            Some(Some(70)),
+            Some(Some(3)),
+        ] {
+            assert!(!ready_restart(exit, false), "{exit:?}");
+        }
     }
 
     #[test]
@@ -249,7 +329,7 @@ mod tests {
             for mode in MODES {
                 for prod in [false, true] {
                     assert_eq!(
-                        after_exit(code, mode, prod, false, false, 3),
+                        after_exit(code, mode, prod, false, false, 3, 1),
                         After::Respawn(Duration::from_secs(4)),
                         "{code:?} {mode:?} {prod}"
                     );
@@ -257,7 +337,7 @@ mod tests {
             }
         }
         assert_eq!(
-            after_exit(None, Mode::Live, true, false, false, 5),
+            after_exit(None, Mode::Live, true, false, false, 5, 1),
             After::Respawn(Duration::from_secs(10))
         );
     }

@@ -170,9 +170,9 @@ pub fn run(args: &[String]) -> Result<String, Failure> {
     // when there is none. Looked at before anything is written: a directory
     // it cannot read refuses the seed whole (#32). The baseline goes through
     // its own temp file, so an interrupted save stays untouched. The report
-    // names the file kept.
+    // names the file kept, as it is on disk (`Store::live_file`).
     let kept = if seed_if_absent {
-        store.live_state().map_err(io)?.and_then(Source::file_name)
+        store.live_file().map_err(io)?
     } else {
         None
     };
@@ -207,19 +207,29 @@ pub fn run(args: &[String]) -> Result<String, Failure> {
 /// (#32 P4): an interrupted save in `save.tmp` (the newest live state)
 /// becomes `current.json` first, so the import's save turns it into a
 /// generation instead of replacing it. Report lines, or why the import must
-/// not go on: the load raised an alarm (a state file it cannot read, a
-/// save.tmp it could not compare: #32 MAJOR-2; the engine boots past them
-/// with an alarm, an import has nobody to hear one, so it stops before the
-/// recovery or the save touch anything), or the interrupted save could not
-/// be finished.
+/// not go on: the load left the live state in doubt (`Loaded::doubts`: a
+/// state file it cannot read, a save.tmp it could not compare, the
+/// revision continued above a file passed over: #32 MAJOR-2; the engine
+/// boots past them with an alarm, an import has nobody to hear one, so it
+/// stops before the recovery or the save touch anything), or the
+/// interrupted save could not be finished. Its other alarms are report
+/// lines: an older save.tmp (a save of the import's own that failed after
+/// save.new took its name, say) is moved aside by the import's save as by
+/// the engine's (#32 F3-r4 6), and an orphan above the state loaded stays
+/// where it is.
 fn recover_before_save(store: &Store, topo: &Topology) -> Result<Vec<String>, String> {
     let loaded = store.load(topo);
-    if !loaded.alarms.is_empty() {
+    if !loaded.doubts.is_empty() {
         return Err(format!(
             "the import cannot use the state directory as it is: {}",
-            loaded.alarms.join("; ")
+            loaded.doubts.join("; ")
         ));
     }
+    let mut lines: Vec<String> = loaded
+        .alarms
+        .iter()
+        .map(|alarm| format!("state: {alarm}"))
+        .collect();
     let recovery = store.recover(&loaded);
     if loaded.source == Source::Interrupted && !recovery.finished {
         let why: Vec<String> = recovery
@@ -232,7 +242,6 @@ fn recover_before_save(store: &Store, topo: &Topology) -> Result<Vec<String>, St
             why.join("; ")
         ));
     }
-    let mut lines = Vec::new();
     if let Some(aside) = recovery.quarantined {
         lines.push(format!(
             "recovery: the damaged current.json moved aside to {}",
