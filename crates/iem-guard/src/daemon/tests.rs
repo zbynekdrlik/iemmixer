@@ -733,6 +733,7 @@ fn an_engine_that_finds_its_state_directory_busy_is_started_again_within_the_ste
     assert_eq!(pc.engine_starts, [(true, false), (true, false)]);
     assert_eq!(pc.count(Call::EngineReady), 2);
     assert_eq!(pc.count(Call::PrefCheck), 2);
+    assert_eq!(g.spawns, 2);
     assert_eq!(g.state.mode, Mode::Dev);
     assert!(g.alarms.all().is_empty(), "{:?}", texts(&g));
     // A second busy exit, or any other end, fails the step: it unwinds.
@@ -740,6 +741,7 @@ fn an_engine_that_finds_its_state_directory_busy_is_started_again_within_the_ste
         let (pc, g, r, _) = entry(exits.clone());
         assert!(!r.ok, "{exits:?}: {r:?}");
         assert_eq!(pc.engine_starts.len(), starts, "{exits:?}");
+        assert_eq!(g.spawns, starts as u64, "{exits:?}");
         assert!(!pc.called(Call::EngineArm), "{exits:?}");
         assert_eq!(g.state.mode, Mode::Event, "{exits:?}");
     }

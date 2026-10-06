@@ -275,9 +275,10 @@ mod tests {
                 After::Respawn(BUSY_RETRY),
                 "{mode:?}"
             );
+            // The backoff of the third abnormal exit (4 s), not BUSY_RETRY.
             assert_eq!(
-                after_exit(Some(75), mode, false, false, false, 2, 11),
-                After::Respawn(Duration::from_secs(2)),
+                after_exit(Some(75), mode, false, false, false, 3, 11),
+                After::Respawn(Duration::from_secs(4)),
                 "{mode:?}"
             );
             assert_eq!(
