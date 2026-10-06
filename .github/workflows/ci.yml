@@ -47,6 +47,8 @@ jobs:
         run: python3 scripts/check_parity_manifest.py
       - name: Version consistency
         run: python3 scripts/check_version.py
+      - name: Mutation exclusion line anchors
+        run: python3 scripts/check_mutants_anchors.py
       - name: Tray icons
         run: |
           set -euo pipefail
@@ -568,6 +570,34 @@ jobs:
           Copy-Item -LiteralPath target/release/examples/asio_spike.exe, scripts/asio-spike/SpikePc.psm1, scripts/asio-spike/spike-task.ps1, scripts/golden/GoldenPc.psm1, scripts/pc-tuning/IemTuning.psm1, scripts/pc-tuning/IemMeasure.psm1 -Destination $b
           $lines = Get-ChildItem -LiteralPath $b -File | Sort-Object Name | ForEach-Object { '{0}  {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name }
           [IO.File]::WriteAllText((Join-Path $b 'SHA256SUMS'), (($lines -join "`n") + "`n"))
+      # The S1c measurement poll is PowerShell composed in Python: run it here
+      # exactly as sw.ps sends it (Windows PowerShell 5.1, the bundle's
+      # SpikePc import) and check the sample the dev box reads (#32 review m11).
+      - name: Measurement poll runs as on the PC (Windows PowerShell 5.1)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'pcroot'
+          New-Item -ItemType Directory -Force -Path (Join-Path $root 'bin') | Out-Null
+          Copy-Item -Path (Join-Path $env:RUNNER_TEMP 'asio-spike\*') -Destination (Join-Path $root 'bin')
+          $tid = (Get-Process -Id $PID).Threads[0].Id
+          $script = @(python scripts/pc-tuning/tuning_window.py poll-script --root $root --governor EventLog --pid $PID --tid $tid)
+          if ($LASTEXITCODE -ne 0) { throw "poll-script exited $LASTEXITCODE" }
+          $out = @($script | powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command -)
+          if ($LASTEXITCODE -ne 0) { throw "powershell exited $LASTEXITCODE" }
+          $doc = @($out | Where-Object { "$_".Trim() })[-1] | ConvertFrom-Json
+          if (-not $doc.ok) { throw "the poll failed: $($doc.error)" }
+          $s = $doc.r
+          if (@($s.cpu.cpus).Count -lt 1) { throw 'no per-CPU counters' }
+          foreach ($f in 'lp', 't100ns', 'interrupts', 'dpcs', 'dpc_time', 'int_time', 'idle_time', 'c1_time', 'c2_time', 'c3_time') {
+            if ($null -eq @($s.cpu.cpus)[0].$f) { throw "counter field $f missing" }
+          }
+          if ($s.plan -notmatch '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$') { throw "plan '$($s.plan)'" }
+          if ($s.governor -ne 'Running') { throw "governor '$($s.governor)'" }
+          if ($null -eq $s.thread -or $null -eq $s.thread.base -or $null -eq $s.thread.current) { throw 'no callback-thread priority' }
+          if (-not $s.at) { throw 'no sample time' }
+          Write-Output "poll sample: $(@($s.cpu.cpus).Count) CPUs, plan $($s.plan), thread priority $($s.thread.base)/$($s.thread.current)"
+          $global:LASTEXITCODE = 0
       - name: Upload (dev pushes only — the only spike that may reach the PC, P5)
         if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import check_integrity as ci  # noqa: E402
@@ -91,6 +92,83 @@ class IntegrityTests(unittest.TestCase):
             self.put("crates/a/src/lib.rs", f"fn f() {{ {body}; }}\n")
             self.assertEqual(ci.violations(self.root), ["crates/a/src/lib.rs:1: force-kill command (program spec I8)"], body)
 
+    def test_a_forced_restart_is_refused(self) -> None:
+        # Microsoft, shutdown /t: "If the timeout period is greater than 0, the /f
+        # parameter is implied." So a delay forces too, and /f counts anywhere (#32 B1).
+        for body in ("shutdown.exe /r /t 60 /c 'x'", "shutdown /r /t 5", "shutdown -r -t 30", "shutdown /r /t:10",
+                     "shutdown /r /f", "shutdown.exe /s /t 0 /f", "shutdown -r -f -t 0", "Restart-Computer -Force",
+                     "Stop-Computer -ComputerName x -Force", "restart-computer -force"):
+            self.put("scripts/iem-pc/x.ps1", body + "\n")
+            self.assertEqual(len(ci.violations(self.root)), 1, body)
+
+    def test_a_graceful_restart_passes(self) -> None:
+        for body in ("& shutdown.exe /r /t 0 /d p:2:4 /c 'iemmixer: planned restart'", "shutdown /r /t 00", "shutdown /a",
+                     "Restart-Computer", "shutdown_signal()", "handle.graceful_shutdown(Some(STOP_DRAIN))",
+                     "runtime.shutdown_timeout(Duration::from_secs(1))", "a shutdown of the app took 5 s"):
+            self.put("scripts/iem-pc/x.ps1", body + "\n")
+            self.assertEqual(ci.violations(self.root), [], body)
+
+    def test_every_spelling_of_a_forced_restart_is_refused(self) -> None:
+        # Review m6: a shutdown invocation passes only with an explicit /t 0 and no
+        # force flag, in any form; -Force abbreviations; the API force flags.
+        for body in ("shutdown /r",                                  # default /t 30 implies /f
+                     "& 'shutdown.exe' /r /t 60", 'shutdown.exe "/r" "/t" "60"',
+                     'let argv = ["shutdown", "/r", "/f"];', 'Command::new("shutdown").args(["/r", "/f"]).status()',
+                     "Start-Process shutdown.exe -ArgumentList '/r','/f'", "Start-Process -FilePath shutdown -ArgumentList '/r /t 60'",
+                     "Restart-Computer -f", "Restart-Computer -Forc", "Stop-Computer -Force:$true",
+                     "(Get-CimInstance Win32_OperatingSystem).Win32Shutdown(6)", "$os.Win32Shutdown(4)",
+                     "Invoke-CimMethod -ClassName Win32_OperatingSystem -MethodName Win32Shutdown -Arguments @{ Flags = 5 }",
+                     "$os.Win32ShutdownTracker(0, 'x', 0, 6)",
+                     "ExitWindowsEx(EWX_REBOOT | EWX_FORCE, 0)", "ExitWindowsEx(EWX_REBOOT | EWX_FORCEIFHUNG, 0)",
+                     "ExitWindowsEx(0x6, 0)", "InitiateShutdownW(null, null, 0, SHUTDOWN_RESTART | SHUTDOWN_FORCE_OTHERS, 0)"):
+            self.put("scripts/iem-pc/x.ps1", body + "\n")
+            self.assertEqual(len(ci.violations(self.root)), 1, body)
+
+    def test_graceful_forms_and_other_commands_on_the_line_pass(self) -> None:
+        # Review m7: only the command's own arguments count, never the next command's.
+        for body in ("Start-Process shutdown.exe -ArgumentList '/r','/t','0'", 'Command::new("shutdown").args(["/r", "/t", "0"])',
+                     "Restart-Computer -Wait -For PowerShell", "(Get-CimInstance Win32_OperatingSystem).Win32Shutdown(2)",
+                     "ExitWindowsEx(EWX_REBOOT, SHTDN_REASON_FLAG_PLANNED)", "ExitWindowsEx(0x2, 0)",
+                     'graceful shutdown ; [ -f "$pid" ]', "shutdown requested; ssh -t 5 host",
+                     "Stop-Computer -ComputerName x ; Remove-Item x -Force", "Cmd::Shutdown => \"shutdown\",",
+                     'reason: "shutdown".into(),', "self.shutdown(timeout=5)", "the shutdown message was sent"):
+            self.put("scripts/iem-pc/x.ps1", body + "\n")
+            self.assertEqual(ci.violations(self.root), [], body)
+
+    FORCED_ACROSS = {   # review round 3, m6 — every one is a forced restart
+        "crates/a/src/lib.rs": 'fn f() {\n    let _ = Command::new("shutdown")\n        .args(["/r", "/f"])\n        .status();\n}\n',
+        "crates/b/src/lib.rs": 'fn f() {\n    let _ = Command::new("shutdown").args([\n        "/r",\n        "/t",\n        "30",\n    ]);\n}\n',
+        "crates/c/src/lib.rs": 'fn f() { let _ = Command::new("shutdown").args(&["/r", "/f"]).status(); }\n',
+        "crates/d/src/lib.rs": "fn f() { unsafe { InitiateSystemShutdownExW(ptr::null_mut(), ptr::null_mut(), 0, 1, 1, 0) }; }\n",
+        "crates/e/src/lib.rs": "fn f() { unsafe { InitiateSystemShutdownW(ptr::null_mut(), ptr::null_mut(), 0, TRUE, TRUE) }; }\n",
+        "crates/f/src/lib.rs": "fn f(force: i32) { unsafe { InitiateSystemShutdownExW(ptr::null_mut(), ptr::null_mut(), 0, force, 1, 0) }; }\n",
+        "scripts/iem-pc/a.ps1": "& shutdown.exe /r /t 0 /c 'done; next' /f\n",
+        "scripts/iem-pc/b.ps1": "Start-Process shutdown.exe `\n    -ArgumentList '/r','/f'\n",
+        "scripts/iem-pc/c.ps1": "Stop-Computer -For\n",
+    }
+
+    def test_forced_restarts_across_lines_and_inside_quotes_are_refused(self) -> None:
+        for rel, text in self.FORCED_ACROSS.items():
+            with tempfile.TemporaryDirectory() as d:
+                root = Path(d)
+                (root / rel).parent.mkdir(parents=True)
+                (root / rel).write_text(text, encoding="utf-8")
+                self.assertEqual(len(ci.violations(root)), 1, rel)
+
+    def test_graceful_forms_across_lines_pass(self) -> None:
+        for rel, text in {
+            "crates/a/src/lib.rs": 'fn f() {\n    let _ = Command::new("shutdown")\n        .args(["/r", "/t", "0"])\n        .status();\n}\n',
+            "crates/b/src/lib.rs": "fn f() { unsafe { InitiateSystemShutdownExW(ptr::null_mut(), ptr::null_mut(), 0, FALSE, TRUE, 0) }; }\n",
+            "crates/c/src/lib.rs": "// a graceful shutdown of the server\nfn f() { let t = 5; let _ = t - 1; }\n",
+            "scripts/iem-pc/a.ps1": "& shutdown.exe /r /t 0 /c 'done; ok'\n",
+            "scripts/iem-pc/b.ps1": "Restart-Computer -Wait `\n    -For PowerShell\n",
+        }.items():
+            with tempfile.TemporaryDirectory() as d:
+                root = Path(d)
+                (root / rel).parent.mkdir(parents=True)
+                (root / rel).write_text(text, encoding="utf-8")
+                self.assertEqual(ci.violations(root), [], rel)
+
     def test_graceful_stops_and_ordinary_words_pass(self) -> None:
         for body in ('Command::new("kill").args(["-TERM", &pid])', "signal::kill(pid, Signal::SIGTERM)",
                      "self.killed = true", "skill(x)", "let force_ended = false",
@@ -152,6 +230,59 @@ class IntegrityTests(unittest.TestCase):
         self.assertEqual(ci.violations(self.root), [])
         self.put("crates/a/src/lib.rs", "fn f() { let futures = 1; let _ = futures; driver.sample_position(); }\n")
         self.assertEqual(ci.violations(self.root), [])
+
+class BundleSyncTests(unittest.TestCase):
+    """spike_window.BUNDLE_FILES equals the asio-spike Bundle step's Copy-Item
+    list (#32 E5): a drift makes fetch-bundle reject every artifact on the dev
+    box while CI stays green."""
+
+    def setUp(self) -> None:
+        self.root = Path(tempfile.mkdtemp())
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.root)
+
+    def put(self, rel: str, text: str) -> None:
+        path = self.root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    def bundle(self, files: str, copy: str) -> None:
+        self.put("scripts/asio-spike/spike_window.py", f"import os\nBUNDLE_FILES = ({files})\n")
+        self.put(".github/workflows/ci.yml",
+                 "jobs:\n  asio-spike:\n    steps:\n" + PINNED
+                 + "      - name: Bundle (spike, PC scripts, SHA256SUMS)\n        run: |\n"
+                 + f"          Copy-Item -LiteralPath {copy} -Destination $b\n"
+                 + "  bundle:\n    steps:\n      - name: Bundle\n        run: Copy-Item -LiteralPath other.exe -Destination $b\n")
+
+    def test_a_matching_bundle_passes(self) -> None:
+        self.bundle('"A.psm1", "b.exe"', "target/release/examples/b.exe, scripts/x/A.psm1")
+        self.assertEqual(ci.violations(self.root), [])
+
+    def test_a_drift_either_way_is_refused(self) -> None:
+        for files, missing in (('"A.psm1", "b.exe", "C.psm1"', "C.psm1"), ('"A.psm1"', "b.exe")):
+            self.bundle(files, "target/release/examples/b.exe, scripts/x/A.psm1")
+            found = ci.violations(self.root)
+            self.assertEqual(len(found), 1, files)
+            self.assertTrue(found[0].startswith(".github/workflows/ci.yml:7: "), found[0])   # the Copy-Item line
+            self.assertIn("BUNDLE_FILES", found[0])
+            self.assertIn(missing, found[0])
+
+    def test_a_missing_bundle_step_is_refused(self) -> None:
+        self.put("scripts/asio-spike/spike_window.py", 'BUNDLE_FILES = ("A.psm1",)\n')
+        self.put(".github/workflows/ci.yml", "jobs:\n  a:\n    steps:\n" + PINNED)
+        self.assertEqual(len(ci.violations(self.root)), 1)
+
+    def test_the_repository_is_in_sync(self) -> None:
+        self.assertEqual(ci.bundle_violations(ci.ROOT), [])
+
+    def test_the_real_repository_needs_its_spike_window(self) -> None:
+        # Review m8: a missing spike_window.py must not silence the check on the real tree.
+        self.assertEqual(ci.bundle_violations(self.root), [])            # a fixture tree without it
+        self.assertEqual(len(ci.bundle_violations(self.root, required=True)), 1)
+        with mock.patch.object(ci, "ROOT", self.root):                  # main() scans the real root: required
+            self.assertEqual(ci.main(), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

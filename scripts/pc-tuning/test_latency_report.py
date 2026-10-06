@@ -3,29 +3,38 @@ xperf texts, the spike's report and the PC samples)."""
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import latency_report as lr  # noqa: E402
+
+def usage_table(rows: dict[str, dict[int, int]], cpus: int = 16) -> str:
+    """xperf -a dpcisr's whole-trace usage table (the layout of DPCISR_XPERF
+    below) for a PC with `cpus` logical processors, then its blank line."""
+    head = ", ".join(f"     CPU {c} Usage" for c in range(cpus)) + ","
+    units = ", ".join("     usec      %" for _ in range(cpus)) + ", Module"
+    body = [", ".join(f"{row.get(c, 0):>9}{0:>7.2f}" for c in range(cpus)) + f", {module}" for module, row in rows.items()]
+    return "\n".join([head, units, *body]) + "\n\n"
+
 
 DPCISR = """
 --------------------------
 DPC Info
 --------------------------
-Total = 3000 for module yaic.sys
+""" + usage_table({"yaic.sys": {2: 45000}, "dxgkrnl.sys": {14: 3000}}) + """Total = 3000 for module yaic.sys
 Elapsed Time, >        0 usecs AND <=        1 usecs,      0, or   0.00%
 Elapsed Time, >        8 usecs AND <=       16 usecs,   2990, or  99.67%
 Elapsed Time, >       64 usecs AND <=      128 usecs,     10, or   0.33%
 Total = 20 for module dxgkrnl.sys
 Elapsed Time, >      128 usecs AND <=      256 usecs,     15, or  75.00%
 Elapsed Time, >      512 usecs AND <=     1024 usecs,      5, or  25.00%
-yaic.sys: 45000 usec (0.10% CPU 2 usage)
-dxgkrnl.sys: 3000 usec (0.01% CPU 14 usage)
 --------------------------
 Interrupt Info
 --------------------------
-Total = 3000 for module yaic.sys
+""" + usage_table({"yaic.sys": {2: 9000}, "ndis.sys": {0: 40}}) + """Total = 3000 for module yaic.sys
 Elapsed Time, >        2 usecs AND <=        4 usecs,   3000, or 100.00%
 Total = 2 for module ndis.sys
 Elapsed Time, >     2048 usecs,      2, or 100.00%
@@ -39,7 +48,9 @@ class DpcIsrTests(unittest.TestCase):
         self.assertEqual(d["dpc"]["dxgkrnl.sys"]["max_us"], 1024)
         self.assertEqual(d["dpc"]["dxgkrnl.sys"]["over"], {"64": 20, "128": 20, "256": 5, "512": 5})
         self.assertEqual(d["isr"]["ndis.sys"], {"count": 2, "max_us": 2048, "open": True, "over": {"64": 2, "128": 2, "256": 2, "512": 2}})
-        self.assertEqual(d["usage"]["dpc"], {"yaic.sys": {"2": 45000}, "dxgkrnl.sys": {"14": 3000}})
+        ran = {m: {c: us for c, us in row.items() if us} for m, row in d["usage"]["dpc"].items()}
+        self.assertEqual(ran, {"yaic.sys": {"2": 45000}, "dxgkrnl.sys": {"14": 3000}})
+        self.assertEqual(len(d["usage"]["dpc"]["yaic.sys"]), 16)   # one column per CPU
 
     def test_budget_names_modules_over_the_limits(self) -> None:
         d = lr.parse_dpcisr(DPCISR)
@@ -49,8 +60,175 @@ class DpcIsrTests(unittest.TestCase):
         self.assertIn("isr ndis.sys: above 2048 us (a full period is 333)", findings)
         self.assertFalse([f for f in findings if "yaic.sys" in f])
 
-    def test_empty_text(self) -> None:
-        self.assertEqual(lr.parse_dpcisr(""), {"dpc": {}, "isr": {}, "usage": {"dpc": {}, "isr": {}}})
+    def test_empty_text_is_no_analysis(self) -> None:
+        # An empty dpcisr read as "no modules, no findings" passed the budget check
+        # unchecked (review M2): it fails closed.
+        with self.assertRaisesRegex(ValueError, "no DPC module"):
+            lr.parse_dpcisr("")
+
+
+# xperf -a dpcisr's real layout, written by hand with synthetic modules and
+# numbers (#32 B8). Per-CPU usage is a comma-separated TABLE, not a line per
+# module: per section the whole-trace table (header `CPU n Usage`, one
+# `usec %` column per CPU, the module last), the histograms, the 1-second
+# interval table (a label column, spaces before the commas) and, at the end,
+# the distribution table (bare `CPU n` columns, three values each). The PC
+# writes CRLF.
+DPCISR_XPERF = """
+--------------------------
+DPC Info
+
+--------------------------
+CPU Usage Summing By Module For the Whole Trace
+
+CPU Usage from 0 us to 90000000 us:
+
+     CPU 0 Usage,      CPU 1 Usage,      CPU 2 Usage,      CPU 3 Usage,
+     usec      %,      usec      %,      usec      %,      usec      %, Module
+      120   0.00,         0   0.00,     45000   0.05,         0   0.00, carddrv.sys
+        0   0.00,         0   0.00,         0   0.00,      2500   0.00, gpudrv.sys
+     1500   0.00,         0   0.00,       800   0.00,         0   0.00, nicdrv.sys
+        1   0.00,         0   0.00,         0   0.00,         0   0.00, "Unknown"
+
+Total = 3261
+Elapsed Time, >        4 usecs AND <=        8 usecs,    238, or   7.30%
+Elapsed Time, >        8 usecs AND <=       16 usecs,   2990, or  91.69%
+Elapsed Time, >       32 usecs AND <=       64 usecs,      1, or   0.03%
+Elapsed Time, >       64 usecs AND <=      128 usecs,     25, or   0.77%
+Elapsed Time, >      128 usecs AND <=      256 usecs,      7, or   0.21%
+Total,                                                  3261
+
+Total = 3000 for module carddrv.sys
+Elapsed Time, >        8 usecs AND <=       16 usecs,   2990, or  99.67%
+Elapsed Time, >       64 usecs AND <=      128 usecs,     10, or   0.33%
+Total,                                                  3000
+
+Total = 20 for module gpudrv.sys
+Elapsed Time, >       64 usecs AND <=      128 usecs,     15, or  75.00%
+Elapsed Time, >      128 usecs AND <=      256 usecs,      5, or  25.00%
+Total,                                                    20
+
+Total = 240 for module nicdrv.sys
+Elapsed Time, >        4 usecs AND <=        8 usecs,    238, or  99.17%
+Elapsed Time, >      128 usecs AND <=      256 usecs,      2, or   0.83%
+Total,                                                   240
+
+Total = 1 for module "Unknown"
+Elapsed Time, >       32 usecs AND <=       64 usecs,      1, or 100.00%
+Total,                                                     1
+
+All Module = 3261,  Total = 3261,   EQUAL
+
+--------------------------
+Usage From 0 ms to 90000 ms, Summing In 1 second intervals. Intervals=90
+
+                       ,      CPU 0 Usage ,      CPU 1 Usage ,      CPU 2 Usage ,      CPU 3 Usage
+Start (ms) End (ms)    ,    (usec)      % ,    (usec)      % ,    (usec)      % ,    (usec)      %
+         0-1000      :,        18   0.00,         0   0.00,       510   0.05,        28   0.00
+      1000-2000      :,        17   0.00,         0   0.00,       498   0.05,        27   0.00
+
+--------------------------
+Interrupt Info
+
+--------------------------
+CPU Usage Summing By Module For the Whole Trace
+
+CPU Usage from 0 us to 90000000 us:
+
+     CPU 0 Usage,      CPU 1 Usage,      CPU 2 Usage,      CPU 3 Usage,
+     usec      %,      usec      %,      usec      %,      usec      %, Module
+        0   0.00,         0   0.00,      9000   0.01,         0   0.00, carddrv.sys
+     4100   0.00,         0   0.00,         0   0.00,         0   0.00, nicdrv.sys
+
+Total = 3002
+Elapsed Time, >        2 usecs AND <=        4 usecs,   3000, or  99.93%
+Elapsed Time, >     2048 usecs,      2, or   0.07%
+Total,                                                  3002
+
+Total = 3000 for module carddrv.sys
+Elapsed Time, >        2 usecs AND <=        4 usecs,   3000, or 100.00%
+Total,                                                  3000
+
+Total = 2 for module nicdrv.sys
+Elapsed Time, >     2048 usecs,      2, or 100.00%
+Total,                                                     2
+
+All Module = 3002,  Total = 3002,   EQUAL
+
+--------------------------
+Usage From 0 ms to 90000 ms, Summing In 1 second intervals. Intervals=90
+
+                       ,      CPU 0 Usage ,      CPU 1 Usage ,      CPU 2 Usage ,      CPU 3 Usage
+Start (ms) End (ms)    ,    (usec)      % ,    (usec)      % ,    (usec)      % ,    (usec)      %
+         0-1000      :,        46   0.00,         0   0.00,       100   0.01,         0   0.00
+
+
+Distribution of number of 2000 ms intervals w.r.t. DPC/ISR usage:
+
+                ,                      CPU 0,                      CPU 1,                      CPU 2,                      CPU 3
+ DPC/ISR Usage %,      DPC      ISR Combined,      DPC      ISR Combined,      DPC      ISR Combined,      DPC      ISR Combined
+>=  0 AND <=   1,       45,       45,       45,       45,       45,       45,       44,       45,       44,       45,       45,       45
+>   1 AND <=   5,        0,        0,        0,        0,        0,        0,        1,        0,        1,        0,        0,        0
+---
+Total:          ,       45,       45,       45,       45,       45,       45,       45,       45,       45,       45,       45,       45
+"""
+
+
+class XperfLayoutTests(unittest.TestCase):
+    """parse_dpcisr on xperf's real per-CPU usage tables (#32 B8)."""
+
+    def test_the_usage_table_maps_columns_to_cpus_and_rows_to_modules(self) -> None:
+        d = lr.parse_dpcisr(DPCISR_XPERF)
+        self.assertEqual(sorted(d["dpc"]), ['"Unknown"', "carddrv.sys", "gpudrv.sys", "nicdrv.sys"])
+        self.assertEqual(d["usage"]["dpc"]["nicdrv.sys"], {"0": 1500, "1": 0, "2": 800, "3": 0})
+        self.assertEqual(d["usage"]["dpc"]['"Unknown"'], {"0": 1, "1": 0, "2": 0, "3": 0})
+        self.assertEqual(d["usage"]["isr"], {"carddrv.sys": {"0": 0, "1": 0, "2": 9000, "3": 0},
+                                             "nicdrv.sys": {"0": 4100, "1": 0, "2": 0, "3": 0}})
+        self.assertEqual(d["dpc"]["gpudrv.sys"], {"count": 20, "max_us": 256, "open": False, "over": {"64": 20, "128": 5, "256": 0, "512": 0}})
+        self.assertEqual(d["isr"]["nicdrv.sys"], {"count": 2, "max_us": 2048, "open": True, "over": {"64": 2, "128": 2, "256": 2, "512": 2}})
+        # The interval and distribution tables carry no module: nothing else is read as one.
+        self.assertEqual(sorted(d["usage"]["dpc"]), sorted(d["dpc"]))
+        self.assertEqual(lr.parse_dpcisr(DPCISR_XPERF.replace("\n", "\r\n")), d)
+
+    def test_a_colon_after_the_section_header_is_read(self) -> None:
+        # Review M2: `DPC Info:` is the same section; any other header fails closed below.
+        self.assertEqual(lr.parse_dpcisr(DPCISR_XPERF.replace(" Info\n", " Info:\n")), lr.parse_dpcisr(DPCISR_XPERF))
+
+    def test_text_without_any_dpc_module_fails_closed(self) -> None:
+        # A traced run on Windows always has DPCs: none read means the text was not
+        # xperf's dpcisr (empty, foreign, an unknown header), never "no findings".
+        for text in ("", "not an xperf report\n", "--------------------------\nDPC Information\nTotal = 3 for module x.sys\n",
+                     "--------------------------\nDPC Info\n--------------------------\n"):
+            with self.assertRaisesRegex(ValueError, "no DPC module", msg=repr(text)):
+                lr.parse_dpcisr(text)
+
+    def test_a_module_over_the_budget_on_a_watched_cpu_is_named(self) -> None:
+        findings = lr.budget_findings(lr.parse_dpcisr(DPCISR_XPERF), watch_lps=[2])
+        self.assertIn("dpc nicdrv.sys: up to 256 us on a watched CPU (budget 128)", findings)
+        self.assertIn("isr nicdrv.sys: above 2048 us (a full period is 333)", findings)
+
+    def test_a_module_over_the_budget_only_on_unwatched_cpus_is_no_watched_finding(self) -> None:
+        # The watched-CPU condition's negative case (#32 B9): dropping it, or counting
+        # a 0 us cell as "ran there", must fail a test.
+        d = lr.parse_dpcisr(DPCISR_XPERF)
+        self.assertFalse([f for f in lr.budget_findings(d, watch_lps=[2]) if f.startswith("dpc gpudrv.sys")])   # 256 us, only on CPU 3
+        self.assertEqual(lr.budget_findings(d, watch_lps=[3]), ["dpc gpudrv.sys: up to 256 us on a watched CPU (budget 128)",
+                                                                "isr nicdrv.sys: above 2048 us (a full period is 333)"])
+
+    def test_modules_without_readable_per_cpu_usage_fail_loud(self) -> None:
+        # Fail closed: a budget check that cannot see where a module ran must not
+        # come back with no findings (a real 90 s trace did exactly that).
+        start = DPCISR_XPERF.index("     CPU 0 Usage,")
+        end = DPCISR_XPERF.index("\nTotal = 3261")
+        with self.assertRaisesRegex(ValueError, "per-CPU usage"):
+            lr.parse_dpcisr(DPCISR_XPERF[:start] + DPCISR_XPERF[end:])
+        made_up = "DPC Info\nTotal = 3 for module x.sys\nElapsed Time, >  8 usecs AND <=  16 usecs,  3, or 100.00%\nx.sys: 45 usec (0.10% CPU 2 usage)\n"
+        with self.assertRaisesRegex(ValueError, "per-CPU usage"):
+            lr.parse_dpcisr(made_up)
+        short = DPCISR_XPERF.replace('        1   0.00,         0   0.00,         0   0.00,         0   0.00, "Unknown"',
+                                     '        1   0.00,         0   0.00,         0   0.00, "Unknown"')
+        with self.assertRaisesRegex(ValueError, "columns"):
+            lr.parse_dpcisr(short)
 
 
 def cpu(lp, t, ints, dpcs, dpc_t=0, int_t=0, idle=0, c1=0, c2=0, c3=0):
@@ -105,9 +283,34 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(lr.sentinel_changes(polls), [{"at": "t1", "plan": "a", "governor": "Stopped"}, {"at": "t3", "plan": "b", "governor": "Running"}])
 
     def test_hwlat_summary(self) -> None:
-        r = {"outcome": "done", "hwlat": {"cpu": 14, "reads": 10, "over": 3, "gaps_us": {"p50": 12.0, "p99": 40.0, "p999": 40.0, "max": 55.5},
+        r = {"outcome": "done", "hwlat": {"cpu": 14, "placed": [270], "priority": "time-critical", "reads": 10, "over": 3,
+                                          "gaps_us": {"p50": 12.0, "p99": 40.0, "p999": 40.0, "max": 55.5},
                                           "largest": [{"at_us": 1.0, "gap_us": 55.5}, {"at_us": 2.0, "gap_us": 40.0}]}}
-        self.assertEqual(lr.hwlat_summary(r), {"cpu": 14, "outcome": "done", "reads": 10, "over": 3, "max_us": 55.5, "p999_us": 40.0, "largest_us": [55.5, 40.0]})
+        self.assertEqual(lr.hwlat_summary(r), {"cpu": 14, "outcome": "done", "placed": [270], "priority": "time-critical", "error": None,
+                                               "failed": False, "reads": 10, "over": 3, "max_us": 55.5, "p999_us": 40.0, "largest_us": [55.5, 40.0]})
+
+    def test_new_glitch_kinds_and_the_process_block_pass_through(self) -> None:
+        # Lane F1 (#32): a position step back is its own glitch kind, and the report's
+        # process.stress_cpus is null, {lps, ids} or {lps, error}, no longer a list.
+        report = {"outcome": "done", "process": {"stress_cpus": {"lps": [6, 7], "ids": [262, 263]}},
+                  "segments": [{"telemetry": {}, "glitches": [{"kind": "position-back", "at_ns": 1, "value": 32}]}]}
+        s = lr.summarize("x", None, report, None, [], [], watch_lps=[2])
+        self.assertEqual(s["glitches"]["by_kind"], {"position-back": 1})
+        self.assertEqual(s["process"], {"stress_cpus": {"lps": [6, 7], "ids": [262, 263]}})
+
+    def test_a_scanner_not_placed_or_not_raised_is_a_failed_measurement(self) -> None:
+        # #32 C2: lane F1's spike ends with outcome "error" (its hwlat block carries the
+        # error, no gaps); an older spike wrote the placement or priority error as text
+        # and still said "done". Neither measured the asked CPU at TIME_CRITICAL.
+        err = {"outcome": "error", "error": "hwlat: cpu 14 not placed: synthetic", "hwlat": {"cpu": 14, "threshold_us": 10, "error": "cpu 14 not placed: synthetic"}}
+        s = lr.hwlat_summary(err)
+        self.assertEqual((s["cpu"], s["failed"], s["error"], s["max_us"]), (14, True, "hwlat: cpu 14 not placed: synthetic", None))
+        done = {"outcome": "done", "hwlat": {"cpu": 3, "placed": [259], "priority": "time-critical", "gaps_us": {}, "largest": []}}
+        self.assertFalse(lr.hwlat_summary(done)["failed"])
+        for change in ({"placed": "Access is denied. (os error 5)"}, {"priority": "Access is denied. (os error 5)"}):
+            old = {"outcome": "done", "hwlat": {**done["hwlat"], **change}}
+            self.assertTrue(lr.hwlat_summary(old)["failed"], change)
+        self.assertTrue(lr.hwlat_summary({"outcome": "stopped", "hwlat": done["hwlat"]})["failed"])
 
 
 DUMPER = """BeginHeader
@@ -146,6 +349,34 @@ class NearGlitchTests(unittest.TestCase):
         near = lr.near_glitch(text, period_us=333)
         self.assertEqual((near[0]["kind"], near[0]["exact"]), ("unknown", False))
         self.assertEqual(len(near[0]["events"]), 4)
+
+    def near_file(self, filler: int = 0) -> Path:
+        path = Path(tempfile.mkdtemp()) / "near.txt"
+        rows = "".join(f"                    DPC,  {100_000 + i},      3,          1,  gpudrv.sys!0x40\n" for i in range(filler))
+        path.write_text(DUMPER + rows, encoding="utf-8")
+        return path
+
+    def test_a_near_dump_is_streamed_from_its_file(self) -> None:
+        # Review M3: a near dump can be hundreds of MB: two passes line by line, never the whole file.
+        path = self.near_file()
+        with mock.patch.object(Path, "read_text", side_effect=AssertionError("the whole file was read")):
+            near = lr.near_glitch(path, period_us=333)
+        self.assertEqual(near, lr.near_glitch(DUMPER, period_us=333))
+
+    def test_the_check_runs_while_reading_and_can_stop_it(self) -> None:
+        # The window checks "ide event" through `check` while a long dump is read.
+        calls: list[int] = []
+
+        class Stop(Exception):
+            pass
+
+        def check() -> None:
+            calls.append(1)
+            if len(calls) == 2:
+                raise Stop()
+
+        with self.assertRaises(Stop):
+            lr.near_glitch(self.near_file(filler=25_000), period_us=333, check=check)
 
 
 class SummaryTests(unittest.TestCase):
