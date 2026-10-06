@@ -871,6 +871,17 @@ class DenylistScanTests(ScanTestCase):
         self.assertEqual(code, 1)
         self.assertIn(" a.txt: denylist entry 1", out)
 
+    def test_a_shallow_repository_cannot_hide_history_from_commit_mode(self) -> None:
+        # review of lane G3, finding 8: a hand-written .git/shallow cut the history like a graft;
+        # commit mode needs the whole history, so it refuses a shallow repository (CI clones whole)
+        self.commit({"a.txt": "zyxname\n"})
+        self.commit({"a.txt": "clean\n"})
+        (self.repo / ".git" / "shallow").write_text(git_out(self.repo, "rev-parse", "HEAD") + "\n", encoding="utf-8")
+        code, out = self.scan("--commits", "HEAD")
+        self.assertEqual(code, 2, out)
+        self.assertIn("shallow", out)
+        self.assertEqual(self.scan("--tree", "HEAD")[0], 0)  # tree mode needs no history
+
     # --- #32 F5 m8: --hash keys the committed blob, not the working-tree file ---
 
     def test_hash_reads_the_committed_blob_not_the_working_tree(self) -> None:
