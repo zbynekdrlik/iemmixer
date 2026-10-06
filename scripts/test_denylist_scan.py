@@ -1049,6 +1049,21 @@ class DenylistScanTests(unittest.TestCase):
         allow.write_text(self.hash_key("wrap.md", "1") + "  reviewed ordinary prose\n", encoding="utf-8")
         self.assertEqual(self.scan("--allow", str(allow), "--tree", "HEAD", "--commits", "HEAD")[0], 0)
 
+    # --- #32 F5 m11: an embedded UTF-16 string is one finding, not one per byte order ---
+
+    def test_an_embedded_utf16_string_is_found_once(self) -> None:
+        # a little-endian string read big-endian one byte later spells the same letters, so it was
+        # reported twice (two allowlist lines for one string); the term may end the string
+        for codec in ("utf-16-le", "utf-16-be"):
+            for text in ("C:\\Users\\zyxname\\trace", "C:\\data\\zyxname"):
+                with self.subTest(codec=codec, text=text):
+                    name = f"t{len(text)}-{codec}.etl"
+                    content = b"\x07\x01\x02\x03" * 32 + text.encode(codec) + b"\x00\x00\xfe\x07"  # binary, not wide text
+                    out = self.assert_found_in_both_modes_as({name: content}, "zyxname")
+                    self.assertEqual(out.count(f" {name}:"), 1, out)
+                    code, out = self.scan("--commits", "HEAD~1..HEAD")
+                    self.assertEqual(out.count(f" {name}:"), 1, out)
+
     def test_a_named_reference_never_makes_a_batch_separator(self) -> None:
         # a reading that created U+E000 would shift every later unit: the hit must stay on line 3
         self.commit({"a.html": "&dcaron;\n&#xE000;&#57344;\nkeep zyxname\n"})
