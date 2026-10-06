@@ -257,6 +257,15 @@ class ContentTests(ScanTestCase):
                     tracemalloc.stop()
                 self.assertLess(peak, 5 * member // 2 + (1 << 20), f"{peak / member:.2f} x the member")
 
+    def test_a_strongly_encrypted_zip_member_is_reported_as_encrypted(self) -> None:
+        # review of lane G3, finding 11: general purpose flag bit 6 (strong encryption) was reported
+        # as an unknown compression method
+        strong = bytearray(zipped({"s.txt": b"keep zyxname\n"}))
+        central = strong.index(b"PK\x01\x02")
+        strong[central + 8] |= 0x40
+        self.assert_findings_in_both_modes({"strong.zip": bytes(strong)},
+                                           "strong.zip!/s.txt: cannot be scanned: an encrypted zip member")
+
     def test_other_containers_are_findings_allowlisted_by_their_blob_key(self) -> None:
         pdf = (b"%PDF-1.4\n1 0 obj << /Length 20 /Filter /FlateDecode >> stream\n" + zlib.compress(b"(zyxname) Tj")
                + b"\nendstream endobj\n%%EOF\n")
