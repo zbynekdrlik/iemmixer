@@ -111,9 +111,11 @@ impl Driver for AsioDriver {
         self.stream.stats()
     }
 
-    fn stop(self: Box<Self>) {
+    fn stop(self: Box<Self>) -> StopOutcome {
         let AsioDriver { stream, .. } = *self;
-        log_stop(stream.stop());
+        let outcome = stream.stop();
+        log_stop(outcome);
+        outcome
     }
 
     /// After 5 s of streaming: a larger, hard minimum working set, then the

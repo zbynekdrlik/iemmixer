@@ -170,8 +170,9 @@ exclude_re = [
   # and the fault seam counts the pauses to test the retry.
   "iem-engine/src/persist/files\\.rs.*\\b(sync_file|sync_dir|pause)\\b",
   # The NullRt pacing thread's end after release; NullRt::stop itself is
-  # tested in iem-audio-io (stop_ends_a_running_stream).
-  "iem-engine/src/engine\\.rs.*replace <impl Driver for NullRtDriver>::stop with \\(\\)",
+  # tested in iem-audio-io (stop_ends_a_running_stream). Its outcome is
+  # always Released (NullRt holds no card; #35).
+  "iem-engine/src/engine\\.rs.*replace <impl Driver for NullRtDriver>::stop -> StopOutcome with ",
   # Equivalent `>` → `>=` (S2): at equality both branches give the same
   # result, so no input can tell them apart.
   # |x| equal to the running peak: assigning the same value changes nothing.
@@ -256,8 +257,8 @@ exclude_re = [
   # `if !(1..=MAX_BLOCK).contains(&cfg.block)`, which is NOT equivalent and IS
   # killed by `run_refuses_a_bad_block_and_a_bad_site`, and `delete ! in
   # run_hil` is killed too — both must stay mutated.
-  # anchor 433: if !hil.is_empty() {
-  "iem-engine/src/engine\\.rs:433:.*delete ! in run$",
+  # anchor 436: if !hil.is_empty() {
+  "iem-engine/src/engine\\.rs:436:.*delete ! in run$",
   # Equivalent (S6): the DER length fold `(n << 8) | usize::from(b)` shifts the
   # accumulator left by 8, so its low 8 bits are always zero; OR-ing in a byte
   # (0..=255) there equals XOR-ing it, so `| b` and `^ b` are identical (like

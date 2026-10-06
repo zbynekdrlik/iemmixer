@@ -326,6 +326,13 @@ impl EngineClient {
                 tracing::warn!(%reason, "the engine released its driver");
                 None
             }
+            EngineMsg::DriverParked { reason } => {
+                tracing::error!(
+                    %reason,
+                    "the engine's stream stayed parked: its driver is not released"
+                );
+                None
+            }
             EngineMsg::Saved { .. } => None,
             other => {
                 let event = {
@@ -751,6 +758,35 @@ mod tests {
             EngineEvent::Disconnected
         ));
         assert!(!client.connected());
+    }
+
+    /// The stream's stop words (`DriverReleased`, or `DriverParked` when
+    /// the stream stayed parked, #35) raise no event and are no mirror
+    /// message: no revision watcher wakes for them. The engine closes the
+    /// connection right after either.
+    #[tokio::test]
+    async fn the_stream_stop_words_raise_no_event_and_wake_no_revision_watcher() {
+        let (client, mut peer, mut events, _peers) = connected().await;
+        let rev = client.inner.rev.subscribe();
+        for msg in [
+            EngineMsg::DriverReleased {
+                reason: "shutdown".into(),
+            },
+            EngineMsg::DriverParked {
+                reason: "shutdown".into(),
+            },
+            EngineMsg::Superseded,
+        ] {
+            peer.send(&msg).await;
+        }
+        assert!(matches!(
+            event(&mut events).await,
+            EngineEvent::Disconnected
+        ));
+        assert!(
+            !rev.has_changed().unwrap(),
+            "a stop word woke a revision watcher"
+        );
     }
 
     #[tokio::test]

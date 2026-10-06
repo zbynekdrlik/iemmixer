@@ -64,6 +64,9 @@ pub const ALARMS_FILE: &str = "alarms.json";
 /// reply with every kept alarm fits one frame.
 pub const ALARM_CHARS: usize = 600;
 pub const DETAIL_CHARS: usize = 8000;
+/// The watch's alarm on a parked engine outside a HIL job (#35).
+pub const PARKED_ALARM: &str = "the engine's stream is parked outside a HIL job: it holds the \
+                                card and nothing plays until the engine ends; nothing is ended";
 
 /// How a switch ended; the mode is in `g.state.mode`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -457,6 +460,9 @@ pub struct Guard {
     crash: CrashLoop,
     respawn_at: Option<Instant>,
     band_seen: bool,
+    /// The engine start (`spawns`) whose parked engine the watch alarmed
+    /// (#35); cleared once an engine is seen unparked.
+    parked_alarmed: Option<u64>,
     last_drift: Option<Instant>,
     session_done: bool,
     /// The newest alarm whose notice was tried.
@@ -500,6 +506,7 @@ impl Guard {
             crash: CrashLoop::default(),
             respawn_at: None,
             band_seen: false,
+            parked_alarmed: None,
             last_drift: None,
             session_done: false,
             noticed: 0,
@@ -1866,6 +1873,7 @@ pub fn tick(pc: &mut dyn Pc, g: &mut Guard, at: Instant) {
         session_end(pc, g);
     }
     watch_band(g, &p);
+    watch_parked(g);
     if g.respawn_at.is_some_and(|due| due <= at) {
         g.respawn_at = None;
         respawn(pc, g);
@@ -2002,6 +2010,30 @@ fn watch_band(g: &mut Guard, p: &Procs) {
         );
     }
     g.band_seen = up;
+}
+
+/// A parked engine outside a HIL job (#35, supervisor decision of
+/// 2026-10-07): its stream stopped with the card held, so nothing plays
+/// until the engine ends. One alarm per parked engine, by its state alone
+/// (no level, #38); none inside a HIL job (test #2 parks it on purpose). An
+/// engine is known by the guard's start count (`spawns`: every respawn and
+/// plan start counts), so it alarms again only after an engine was seen
+/// unparked or the guard started a new one; a look without an engine (one
+/// coming up, or the connection renewed to the same engine) changes
+/// nothing. Nothing is ended: an "ide event" or a job's engine restart ends
+/// it with `Shutdown`.
+fn watch_parked(g: &mut Guard) {
+    let Some(seen) = &g.seen else {
+        return;
+    };
+    if !seen.status.parked {
+        if g.parked_alarmed.take().is_some() {
+            info!("the engine is no longer parked: its parked alarm is armed again");
+        }
+    } else if g.state.job.is_none() && g.parked_alarmed != Some(g.spawns) {
+        g.parked_alarmed = Some(g.spawns);
+        g.raise(None, PARKED_ALARM, false);
+    }
 }
 
 /// The end of the Windows session (design §5.4): no respawn, the engine
