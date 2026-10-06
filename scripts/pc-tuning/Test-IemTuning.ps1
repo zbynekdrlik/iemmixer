@@ -234,6 +234,25 @@ try {
     ThrowsLike { Invoke-IemTuningApply -ProfilePath $po -Tier 2 -Only @('maintenance') } '*roles overlap*' 'apply-refuses-overlapping-layout-roles'
     ThrowsLike { Enter-IemTuningMode -ProfilePath $po -Only @('governor') } '*roles overlap*' 'enter-refuses-overlapping-layout-roles'
     Assert ((Get-Service W32Time).Status -eq 'Running' -and -not (Read-IemJournalState $pp) -and -not (Test-Path -LiteralPath $maint)) 'layout-refusals-write-nothing'
+    # One layout rule on both sides (#32 MINOR-6): every case of layout_cases.json, which
+    # test_tuning_window.py runs against load_profile too. The layout comes straight
+    # from ConvertFrom-Json, as Read-IemProfile reads it (no re-serialization).
+    $layoutCases = @(([IO.File]::ReadAllText((Join-Path $here 'layout_cases.json')) | ConvertFrom-Json).cases)
+    Assert ($layoutCases.Count -ge 10) 'layout-cases-are-read'
+    foreach ($c in $layoutCases) {
+        $lc = [pscustomobject]@{ layout = $c.layout }
+        if ($c.ok) {
+            $le = $null
+            try { Assert-IemLayout -Profile $lc } catch { $le = "$_" }
+            Assert ($null -eq $le) "layout-case-$($c.name)-is-accepted ($le)"
+        } else {
+            ThrowsLike { Assert-IemLayout -Profile $lc } '*layout*' "layout-case-$($c.name)-is-refused"
+        }
+    }
+    # A null housekeeping entry is refused before any write, never placed on processor 0.
+    $pn = New-TestProfile $hw @{ layout = [ordered]@{ housekeeping = @(0, $null); nic = @(1); card = @(2); audio = @(3) } }
+    ThrowsLike { Enter-IemTuningMode -ProfilePath $pn -Only @('placement') } '*layout housekeeping*entry 1*' 'enter-refuses-a-null-layout-entry'
+    Assert ((@([IemCpuSets]::Get($child.Id)) -join ',') -eq '' -and -not (Read-IemJournalState $pp)) 'layout-entry-refusal-writes-nothing'
     # The profile version is stamped only after a complete apply without a failure (A9).
     $rm = Invoke-IemTuningApply -ProfilePath $pp -Tier 2 -Only @('maintenance')
     Assert (@(Rows $rm 'failed').Count -eq 0 -and (Read-JournalVersion $pp 2) -eq 0) 'apply-partial-does-not-stamp-the-version'

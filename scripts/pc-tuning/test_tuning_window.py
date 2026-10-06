@@ -52,6 +52,27 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(tw.watch_lps(PROFILE, ""), [2, 14])
         self.assertEqual(tw.watch_lps(PROFILE, "3"), [2, 3])
 
+    def test_the_shared_layout_cases(self) -> None:
+        # One layout rule on both sides (#32 MINOR-6): Test-IemTuning.ps1 runs the
+        # same table against Assert-IemLayout, so a profile passes both or neither.
+        cases = json.loads((Path(__file__).resolve().parent / "layout_cases.json").read_text(encoding="utf-8"))["cases"]
+        self.assertGreaterEqual(len(cases), 10)
+        for case in cases:
+            with self.subTest(case["name"]):
+                p = json.loads(json.dumps(PROFILE))
+                p["layout"] = case["layout"]
+                if case["ok"]:
+                    tw.load_profile(write(p))
+                else:
+                    with self.assertRaisesRegex(tw.StepError, "layout"):
+                        tw.load_profile(write(p))
+
+    def test_an_absent_role_has_no_processors(self) -> None:
+        # The rule's "absent role = none" holds for the readers too (#32 MINOR-6).
+        p = json.loads(json.dumps(PROFILE))
+        del p["layout"]["audio"]
+        self.assertEqual(tw.watch_lps(tw.load_profile(write(p)), ""), [2])
+
 
 class ArgumentTests(unittest.TestCase):
     def test_lists_levers_labels(self) -> None:

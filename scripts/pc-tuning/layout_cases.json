@@ -1,0 +1,22 @@
+{
+  "about": "The profile's layout rule (#32 MINOR-6), one table for both sides: Test-IemTuning.ps1 runs every case against Assert-IemLayout (IemTuning.psm1) and test_tuning_window.py against load_profile (tuning_window.py). layout is an object; a role is absent (no processors) or a list of integers 0..63; a processor is in one role at most. A null entry, a float (2.0 too), a bool, a string, a nested list, a null role and a scalar role are refused, never dropped, rounded or truncated. Synthetic processor numbers only.",
+  "cases": [
+    {"name": "the-spec-layout", "ok": true, "layout": {"housekeeping": [6, 7, 8, 9, 10, 11, 12, 13], "card": [2], "nic": [4], "audio": [14]}},
+    {"name": "an-absent-role-is-none", "ok": true, "layout": {"housekeeping": [0], "card": [2], "nic": [1]}},
+    {"name": "an-empty-role-is-none", "ok": true, "layout": {"housekeeping": [0], "card": [2], "nic": [1], "audio": []}},
+    {"name": "processor-63", "ok": true, "layout": {"housekeeping": [0], "card": [2], "nic": [1], "audio": [63]}},
+    {"name": "processor-64", "ok": false, "layout": {"housekeeping": [0], "card": [2], "nic": [1], "audio": [64]}},
+    {"name": "a-negative-processor", "ok": false, "layout": {"housekeeping": [0], "card": [2], "nic": [1], "audio": [-1]}},
+    {"name": "a-null-entry", "ok": false, "layout": {"housekeeping": [0, null], "card": [2], "nic": [1], "audio": [3]}},
+    {"name": "a-float", "ok": false, "layout": {"housekeeping": [0], "card": [1.6], "nic": [4], "audio": [3]}},
+    {"name": "an-integral-float", "ok": false, "layout": {"housekeeping": [0], "card": [2.0], "nic": [1], "audio": [3]}},
+    {"name": "a-bool", "ok": false, "layout": {"housekeeping": [0], "card": [true], "nic": [4], "audio": [3]}},
+    {"name": "a-string", "ok": false, "layout": {"housekeeping": [0], "card": ["2"], "nic": [1], "audio": [3]}},
+    {"name": "a-nested-list", "ok": false, "layout": {"housekeeping": [0], "card": [[2]], "nic": [1], "audio": [3]}},
+    {"name": "a-null-role", "ok": false, "layout": {"housekeeping": [0], "card": null, "nic": [1], "audio": [3]}},
+    {"name": "a-scalar-role", "ok": false, "layout": {"housekeeping": [0], "card": 2, "nic": [1], "audio": [3]}},
+    {"name": "two-roles-share-a-processor", "ok": false, "layout": {"housekeeping": [0], "card": [2], "nic": [1], "audio": [2]}},
+    {"name": "a-processor-twice-in-a-role", "ok": false, "layout": {"housekeeping": [0, 0], "card": [2], "nic": [1], "audio": [3]}},
+    {"name": "a-layout-that-is-not-an-object", "ok": false, "layout": [0, 1, 2, 3]}
+  ]
+}
