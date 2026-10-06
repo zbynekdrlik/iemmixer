@@ -656,6 +656,30 @@ class DevTimeWindowTests(unittest.TestCase):
         with self.assertRaisesRegex(sw.StepError, "preflight belongs before"):
             sw.cmd_preflight(self.env, self.args())
 
+    def test_preflight_clears_a_stop_file_an_earlier_window_left(self) -> None:
+        # Only an unwind that closes a window removes the stop file (F2 round 3, m1); a window that
+        # ended without one (a crashed process, a deadline stop) leaves it, and every changing step of
+        # the next window would refuse. A new window's preflight, with no spike running and no
+        # "ide event" flag, removes it under the lock (clear_stop) and records what it found.
+        def fake_ps(env, body, timeout=300, event="finish"):
+            self.calls.append(body)
+            return "removed" if "Test-SpikeTaskBusy" in body else dict(self.pc)
+
+        sw.ps = fake_ps
+        sw.cmd_new(self.env, self.args())
+        sw.cmd_preflight(self.env, self.args())
+        clears = [b for b in self.calls if "Test-SpikeTaskBusy" in b]
+        self.assertEqual(len(clears), 1)
+        self.assertIn("Remove-Item", clears[0])
+        self.assertEqual(sw.load_state()["preflight"]["stop_file"], "removed")
+
+    def test_preflight_leaves_the_stop_file_to_the_event_path(self) -> None:
+        sw.cmd_new(self.env, self.args())
+        sw.EVENT_NOW.write_text("owner: ide event\n")
+        sw.cmd_preflight(self.env, self.args())
+        self.assertEqual([b for b in self.calls if "Test-SpikeTaskBusy" in b], [])
+        self.assertIn("ide event", sw.load_state()["preflight"]["stop_file"])
+
     def test_a_running_reaper_stops_a_dev_time_preflight(self) -> None:
         self.pc["reaper"] = 1
         sw.cmd_new(self.env, self.args())
