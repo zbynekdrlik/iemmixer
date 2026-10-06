@@ -522,6 +522,19 @@ def analysis_guard(root: str, since: str) -> str:
             f"[Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()) {{ throw '{ANALYSIS_REFUSED}' }}")
 
 
+def analysis_step(root: str, since: str, body: str) -> str:
+    """One analysis step as the PC receives it inside sw.ps: the guard first,
+    then the tuning modules' import (an Add-Type compile, so at Idle and never
+    for a refused step; F2 round 3, m6), then the step. `analysis-script`
+    prints the same composition for the Windows CI runner (m11)."""
+    return f"{analysis_guard(root, since)} ; {sw.measure_import(root)} ; {body}"
+
+
+# The step body the Windows CI runner sends through analysis_step: the priority
+# the guard set, and a call that only works once the tuning modules loaded.
+ANALYSIS_PROBE = "[pscustomobject]@{ priority = \"$((Get-Process -Id $PID).PriorityClass)\"; now = Get-IemNow }"
+
+
 def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
 
@@ -628,14 +641,11 @@ def _measure(env, args, profile: dict, state: dict, run_dir: str, since: str, tr
         # the one step already running goes on, at Idle, and ends by itself
         # (decision B of the #32 review). Each cut holds the glitches that
         # caused it: it gets its own views (#32 B7, review M1).
-        guard = analysis_guard(env["PC_ROOT"], began)
         names = []
         for body, produced in analysis(xperf(env), ps_quote(run_dir), cut["n"], diag):
             check_event()
             try:
-                # The guard comes before the tuning modules' import (F2 round 3, m6):
-                # a refused step compiles nothing, and the compile runs at Idle.
-                sw.ps(env, f"{guard} ; {sw.tuning_body(env, body)}", timeout=1800, event="abandon")
+                sw.ps(env, analysis_step(env["PC_ROOT"], began, body), timeout=1800, event="abandon")
             except StepError as e:
                 if ANALYSIS_REFUSED in str(e):
                     raise sw.EventNow() from None   # the PC saw a preempt's stop file first
@@ -890,9 +900,16 @@ def main(argv: list[str]) -> int:
     pp.add_argument("--governor", required=True)
     pp.add_argument("--pid", type=int, default=0)
     pp.add_argument("--tid", type=int, default=0)
+    asc = sub.add_parser("analysis-script", help="print an analysis step's start (guard, import, a probe) exactly as sw.ps "
+                                                 "sends it (for the Windows CI runner)")
+    asc.add_argument("--root", required=True, help="a folder whose bin holds the spike bundle")
+    asc.add_argument("--since", required=True, help="the analysis start, PC time (Get-IemNow)")
     args = ap.parse_args(argv)
     if args.cmd == "poll-script":   # no window, no private env
         print(sw.ps_script(args.root, poll_body(args.governor, args.pid, args.tid)))
+        return 0
+    if args.cmd == "analysis-script":   # no window, no private env
+        print(sw.ps_script(args.root, analysis_step(args.root, args.since, ANALYSIS_PROBE)))
         return 0
     handlers = {"tuning-setup": cmd_tuning_setup, "inventory": cmd_inventory, "fingerprint": cmd_fingerprint, "wpt-install": cmd_wpt_install,
                 "enter": cmd_enter, "exit": cmd_exit, "apply": cmd_apply, "undo": cmd_undo, "state": cmd_state, "measure": cmd_measure,

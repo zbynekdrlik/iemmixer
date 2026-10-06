@@ -684,12 +684,18 @@ def cmd_run(env, args, on_poll=None) -> dict:
     return {"run": rid, "exit": code, "verdict": v, "report": str(out / f"{rid}.report.json")}
 
 
+def measure_import(root: str) -> str:
+    """The import of the S1c modules from the verified bundle (IemMeasure loads
+    IemTuning, whose Add-Type compiles)."""
+    return f"Import-Module (Join-Path {ps_quote(root)} 'bin\\IemMeasure.psm1') -Force -Global"
+
+
 def tuning_body(env: dict[str, str], body: str) -> str:
     """A PC body that loads the S1c modules from the verified bundle first."""
     for k in ("PC_TUNING_ROOT", "PC_XPERF"):
         if not env.get(k):
             raise StepError(f"{k} missing in the private env (S1c plan Task 12)")
-    return (f"Import-Module (Join-Path {ps_quote(env['PC_ROOT'])} 'bin\\IemMeasure.psm1') -Force -Global ; {body}")
+    return f"{measure_import(env['PC_ROOT'])} ; {body}"
 
 
 def tuning_profile(env: dict[str, str]) -> str:
