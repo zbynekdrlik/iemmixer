@@ -337,6 +337,25 @@ try {
     }
     $nk = Get-Item -LiteralPath $nic
     Assert ($nk.GetValue('PowerSaving') -eq '1' -and $null -eq $nk.GetValue('*RssBaseProcNumber', $null) -and $null -eq $nk.GetValue('*RssMaxProcNumber', $null)) 'tier3-nic-rss-refusal-writes-nothing'
+    # The spec's own layout (§6.1: NIC LP 4, RSS base 4, max 5, its unplaced sibling)
+    # is accepted: the base is a layout.nic processor, and past layout.nic the range
+    # may reach only processors of no role, never another role's (#32 MINOR-5). Here
+    # processor 2 has no role (the card on 3, no audio processor).
+    $sl = [ordered]@{ housekeeping = @(0); nic = @(1); card = @(3); audio = @() }
+    $hl = [ordered]@{ housekeeping = @(2); nic = @(1); card = @(3); audio = @() }
+    $rn = New-TestNic 'PCI\VEN_FFFE&DEV_0002'
+    $rn.rss = [ordered]@{ base = 1; max = 2 }
+    $sp = Read-IemProfile -Path (New-TestProfile $hw @{ nic = $rn; layout = $sl })
+    $se = $null
+    try { Assert-IemNicRss -Profile $sp } catch { $se = "$_" }
+    Assert ($null -eq $se) "nic-rss-may-reach-a-processor-of-no-role ($se)"
+    foreach ($c in @(@(2, 2, $sl, '*base processor 2 is not in layout.nic*'), @(1, 2, $hl, '*processor 2 is a housekeeping processor*'),
+                     @('1', 2, $sl, '*nic.rss.base*not a processor number*'))) {
+        $rn = New-TestNic 'PCI\VEN_FFFE&DEV_0002'
+        $rn.rss = [ordered]@{ base = $c[0]; max = $c[1] }
+        $cp = Read-IemProfile -Path (New-TestProfile $hw @{ nic = $rn; layout = $c[2] })
+        ThrowsLike { Assert-IemNicRss -Profile $cp } $c[3] "nic-rss-refuses $($c[0])..$($c[1]) $($c[3])"
+    }
     $an = @(Get-NetAdapter)[0]
     $cls = "$root\HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e972-e325-11ce-bfc1-08002be10318}\0000"
     New-Item -Path $cls -Force | Out-Null
