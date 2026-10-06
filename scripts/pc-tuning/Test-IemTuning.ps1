@@ -31,11 +31,14 @@ function Set-TuningSeam([string]$Name, [scriptblock]$Value) { & (Get-Module IemT
 # The measurement module's logman path, replaced by a stand-in in the stop tests.
 function Get-MeasureSeam([string]$Name) { & (Get-Module IemMeasure) { param($n) Get-Variable -Scope Script -Name $n -ValueOnly -ErrorAction SilentlyContinue } $Name }
 function Set-MeasureSeam([string]$Name, $Value) { & (Get-Module IemMeasure) { param($n, $v) Set-Variable -Scope Script -Name $n -Value $v } $Name $Value }
-# Whether an ETW session of this name runs now (logman query -ets).
+# Whether an ETW session of this name runs now: asked by its name, never through
+# the list (`query -ets`), which fails (0x80071068) when another tool's session ends
+# during it (CI run 37480733625). PLA_E_DCS_NOT_FOUND (0x80300002) = it does not run.
 function Test-EtwSession([string]$Name) {
-    $q = Invoke-IemNative -FilePath 'logman.exe' -Arguments @('query', '-ets')
-    if ($q.code -ne 0) { throw "logman query -ets (exit $($q.code)): $($q.out -join ' ')" }
-    return (@(@($q.out) | Where-Object { $_ -match ('^\s*' + [regex]::Escape($Name) + '\s') }).Count -gt 0)
+    $q = Invoke-IemNative -FilePath 'logman.exe' -Arguments @('query', $Name, '-ets')
+    if ($q.code -eq 0) { return $true }
+    if ($q.code -eq -2144337918) { return $false }
+    throw "logman query `"$Name`" -ets (exit $($q.code)): $($q.out -join ' ')"
 }
 # Callers wrap this in @(...) so .Count and a ForEach pipe are array-safe under
 # StrictMode on PS 5.1 (a bare (Rows ...) would be $null for 0 matches; a ,@()
