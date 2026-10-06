@@ -609,7 +609,10 @@ def end_change(intent: dict, fields: dict | None = None, late: Callable[[dict], 
             clear(state)
             save_state(state)
             return state
-    if late is not None:
+        # A preempt that waited out its settle may have taken the follow-up over
+        # (exit_left_behind cleared the intent): then it is not run twice.
+        mine = state.get("in_flight") == intent
+    if late is not None and mine:
         try:
             late(state)
         except StepError as e:
@@ -725,18 +728,58 @@ def wait_for_settle() -> None:
         time.sleep(POLL_S)
 
 
-def close_out(env: dict[str, str], intent) -> dict:
+def exit_left_behind(env: dict[str, str], intent: dict) -> dict | None:
+    """After the settle: a journal step whose intent is still recorded never
+    came back (its process ended, or its call outlived its bound), so the
+    tuning-exit the unwind deferred to it never ran (review of lane G2,
+    finding 2). It is taken over here: the intent is cleared first, under the
+    lock (a late step that still comes back then leaves the exit to this),
+    then the exit runs without the lock, with an owner alarm."""
+    with window_lock():
+        state = load_state()
+        if state.get("in_flight") != intent:
+            return None   # the step came back and ran its own follow-up
+        state["in_flight"] = None
+        save_state(state)
+    alarm(f"{intent['step']} never came back (its process ended, or its call outlived its bound): the tuning-exit "
+          "deferred to it runs now")
+    try:
+        rows = ps(env, tuning_body(env, f"Exit-IemTuningMode -ProfilePath {tuning_profile(env)}"), timeout=240, event="ignore")
+    except StepError as e:
+        alarm(f"the deferred tuning-exit failed ({e}): the S1c mode levers may stay applied through the event")
+        return {"tuning-exit": {"error": str(e)}}
+    update_state({"tuning_mode": False})
+    alarm_exit_problems(rows)
+    return {"tuning-exit": rows}
+
+
+def close_out(env: dict[str, str], intent, done: list) -> dict:
     """After an unwind that closed the window (REAPER back): the settle watch
     when a PC change was recorded in flight (its `settling` record goes when
-    it ends), then the stop file's clean-up."""
+    it ends), the tuning-exit a journal step that never came back still owes,
+    then the stop file's clean-up."""
     out: dict = {}
     try:
         if isinstance(intent, dict):
             out["settle"] = settle(env, intent)
+            if any(isinstance(d.get("tuning-exit"), dict) and "deferred" in d["tuning-exit"] for d in done):
+                out["deferred_exit"] = exit_left_behind(env, intent)
     finally:
         update_state(change=lambda st: st.pop("settling", None))
     out["stop_file"] = clear_stop(env)
     return out
+
+
+def exit_on_signals() -> None:
+    """SIGTERM and SIGHUP end a window command through Python's exception path
+    (SystemExit), so a PC change in flight clears its intent and runs its late
+    handler (pc_change) instead of leaving them to its bound (review of lane
+    G2, finding 2). Nothing on the PC is ended: its call runs on."""
+    def leave(signum, frame) -> None:
+        raise SystemExit(128 + signum)
+
+    for s in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(s, leave)
 
 
 def unwind_closing(env: dict[str, str], state: dict, running: bool) -> list:
@@ -1147,7 +1190,7 @@ def cmd_to_event(env, args) -> None:
     # The window is closed with REAPER back; a change of another process still in
     # flight is watched out without the lock (settle), then the stop file goes.
     print(json.dumps({"to-event": done}), flush=True)
-    print(json.dumps({"close": close_out(env, intent)}))
+    print(json.dumps({"close": close_out(env, intent, done)}))
 
 
 def cmd_preempt(env, args=None) -> None:
@@ -1169,7 +1212,7 @@ def cmd_preempt(env, args=None) -> None:
         wait_for_settle()   # the process that closed it may still settle a PC change
         return
     print(json.dumps({"done": done}), flush=True)
-    print(json.dumps({"close": close_out(env, intent)}))
+    print(json.dumps({"close": close_out(env, intent, done)}))
 
 
 # Steps inside an open window: an error in one while the flag exists pre-empts.
@@ -1230,4 +1273,5 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
+    exit_on_signals()
     sys.exit(main(sys.argv[1:]))
