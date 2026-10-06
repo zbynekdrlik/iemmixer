@@ -254,6 +254,43 @@ mod tests {
     }
 
     #[test]
+    fn a_busy_streak_beyond_ten_exits_counts_as_crashes() {
+        // #32 F3-r4 3: up to BUSY_LIMIT busy exits in a row are tried again
+        // after 2 s; the next one follows the backoff and the crash loop.
+        assert_eq!(BUSY_LIMIT, 10);
+        assert!(busy_retry(Some(75), 1) && busy_retry(Some(75), 10));
+        assert!(!busy_retry(Some(75), 11));
+        assert!(!busy_retry(Some(70), 1) && !busy_retry(None, 1));
+        for mode in MODES {
+            assert_eq!(
+                after_exit(Some(75), mode, false, false, false, 1, 10),
+                After::Respawn(BUSY_RETRY),
+                "{mode:?}"
+            );
+            assert_eq!(
+                after_exit(Some(75), mode, false, false, false, 2, 11),
+                After::Respawn(Duration::from_secs(2)),
+                "{mode:?}"
+            );
+            assert_eq!(
+                after_exit(Some(75), mode, false, false, true, 3, 12),
+                After::ToEvent,
+                "{mode:?}"
+            );
+            // A session ending still wins.
+            assert_eq!(
+                after_exit(Some(75), mode, true, true, true, 3, 12),
+                After::Stay { alarm: None },
+                "{mode:?}"
+            );
+        }
+        assert_eq!(
+            after_exit(Some(75), Mode::Live, true, false, true, 3, 13),
+            After::PreviousPin
+        );
+    }
+
+    #[test]
     fn the_busy_streak_counts_busy_exits_in_a_row() {
         let mut c = CrashLoop::default();
         let got = [c.busy(true), c.busy(true), c.busy(false), c.busy(true)];
