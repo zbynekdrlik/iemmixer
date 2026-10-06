@@ -13,6 +13,7 @@ import re
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import warnings
@@ -550,6 +551,53 @@ class EventTests(Base):
         self.assertIn("exit 3", docs[1]["spike_preempt"]["error"])
         self.assertEqual(self.pc.calls, [("iemmode.exe", ["event"], "ignore")])
         self.assertIn("spike preempt", err)
+
+    # F2 round 3, m2 and decision 2: after a FAILED spike preempt the window is closed
+    # under spike_window's lock first, so a window preempt another process still has
+    # queued finds it closed and starts no second bring-back next to the guard's.
+    def test_a_failed_spike_preempt_closes_the_window_before_iemmode_event(self) -> None:
+        self.open_window()
+        ip.SPIKE = self.write_spike(3)
+        seen: list[dict] = []
+        self.pc.replies[("event",)] = lambda: (seen.append(json.loads(ip.SPIKE_STATE.read_text(encoding="utf-8"))), (0, OK))[1]
+        code, docs, err = self.run_main("event")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(seen), 1)
+        self.assertTrue(seen[0]["closed"])
+        self.assertIn("failed spike preempt", seen[0]["closed_by"]["by"])
+        self.assertIn("exit 3", seen[0]["closed_by"]["error"])
+        self.assertEqual(seen[0]["card"], "free")   # nothing else is claimed: the guard brings REAPER back
+        self.assertIn({"spike_window": "closed", "after": "a failed spike preempt"}, docs)
+
+    def test_no_iemmode_call_while_the_window_lock_stays_taken(self) -> None:
+        # The lock wait fits the event budget: a window process that holds it (a
+        # bring-back of its own?) is never raced by the guard's.
+        self.open_window()
+        ip.SPIKE = self.write_spike(3)
+        ip.EVENT_BUDGET_S, ip.SWITCH_MIN_S = 2.0, 1.0
+        sw = ip.spike_module()
+        saved = sw.STATE
+        self.addCleanup(setattr, sw, "STATE", saved)
+        sw.STATE = ip.SPIKE_STATE
+        taken, release = threading.Event(), threading.Event()
+
+        def hold() -> None:
+            with sw.window_lock():
+                taken.set()
+                release.wait(10)
+
+        holder = threading.Thread(target=hold)
+        holder.start()
+        taken.wait(5)
+        try:
+            code, _, err = self.run_main("event")
+        finally:
+            release.set()
+            holder.join()
+        self.assertEqual((code, self.pc.calls), (1, []))
+        self.assertIn("window lock", err)
+        self.assertIn("alarm the owner now", err)
+        self.assertFalse(json.loads(ip.SPIKE_STATE.read_text(encoding="utf-8"))["closed"])
 
     def test_the_event_path_has_one_budget_that_fits_a_bash_call(self) -> None:
         self.assertLessEqual(ip.EVENT_BUDGET_S, 540)  # a Bash call ends at 10 min; the plan's waits stay within 9
