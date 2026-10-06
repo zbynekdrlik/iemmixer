@@ -655,8 +655,9 @@ def pc_change(step: str, bound_s: float, call: Callable[[], T], fields: dict | N
             if event_now():
                 raise EventNow() from None
             raise StepError(f"{step} did not start: the spike's stop file exists on the PC, but no \"ide event\" flag "
-                            "here: an earlier pre-emption did not remove it (to-event, or a preempt, that closes a "
-                            f"window removes it) ({e})") from None
+                            "here: a pre-emption that did not close its window, or a deadline stop, left it. Only an "
+                            "unwind that closes a window removes it: to-event in this window (in a dev-time window it "
+                            f"brings REAPER back), then a new window ({e})") from None
         raise
     except BaseException:
         end_change(intent, late=late)

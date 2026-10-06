@@ -15,7 +15,9 @@ event`, and `iemmode event --direct` when the guard is unreachable (exit
 4). The event path has one budget that fits one
 Bash call (EVENT_BUDGET_S): the spike preempt gets SPIKE_SHARE_S of it, no
 `iemmode` call starts while the preempt still runs, and none starts with
-less than SWITCH_MIN_S left. `event` never waits for another command.
+less than SWITCH_MIN_S left. `event` never waits for another iempc command;
+it waits only, within its budget, for the window lock (the close after a
+failed preempt) and for a window process's own settle (the spike preempt).
 
 Every other PC step waits for dev time: commands that change the PC refuse
 while the flag exists, and `status` then reports this box only (`--pc`
