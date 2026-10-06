@@ -1,9 +1,8 @@
 //! The engine's part of `site.toml` (program spec I4, §3.1; #20 design note
 //! §4): the `[engine]` table of inputs, groups and mixes, and (S6 design
-//! note §4) the `[card]` table of the ASIO backend. Everything else in the
-//! file belongs to the server and is ignored here, except the stage inputs
-//! the interlock listens to (`[activity] inputs`, the `[[inputs]]`
-//! categories); inside `[engine]` and `[card]` unknown keys are errors.
+//! note §4) the `[card]` table of the ASIO backend, and `[guard] hil_tx`.
+//! Everything else in the file belongs to the server or the guard and is
+//! ignored here; inside `[engine]` and `[card]` unknown keys are errors.
 
 use std::path::Path;
 
@@ -135,16 +134,6 @@ impl Card {
     }
 }
 
-/// What the interlock listens to (S6 design note §4): the server's
-/// `[activity] inputs`, and the `[[inputs]]` categories for the fallback
-/// (every `mics` input when the list is empty).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Stage {
-    pub inputs: Vec<String>,
-    /// `[[inputs]]` entries: id and category (`None`: `mics`).
-    pub categories: Vec<(String, Option<String>)>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SiteError {
     #[error("site file: {0}")]
@@ -187,10 +176,6 @@ pub enum SiteError {
     CardFrames(u32),
     #[error("[card] pref_original {0:?} is not a DWORD's decimal text")]
     CardPref(String),
-    #[error("[activity] input {0:?} is not an engine input")]
-    StageInput(String),
-    #[error("no stage input to listen to ([activity] inputs, or inputs of category mics)")]
-    NoStage,
     #[error("[guard] hil_tx: {0}")]
     HilTx(String),
 }
@@ -203,27 +188,6 @@ struct File {
 #[derive(Deserialize)]
 struct CardFile {
     card: Option<Card>,
-}
-
-#[derive(Default, Deserialize)]
-struct ActivityTable {
-    #[serde(default)]
-    inputs: Vec<String>,
-}
-
-#[derive(Deserialize)]
-struct InputMeta {
-    id: String,
-    #[serde(default)]
-    category: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct StageFile {
-    #[serde(default)]
-    activity: ActivityTable,
-    #[serde(default)]
-    inputs: Vec<InputMeta>,
 }
 
 /// The guard's `[guard]` table as the engine reads it: only `hil_tx`, the
@@ -258,20 +222,6 @@ pub fn parse_card(text: &str) -> Result<Option<Card>, SiteError> {
         card.check()?;
     }
     Ok(file.card)
-}
-
-/// The stage inputs' part of a site file (the server's tables, read only
-/// for the interlock).
-pub fn parse_stage(text: &str) -> Result<Stage, SiteError> {
-    let file: StageFile = toml::from_str(text).map_err(|e| toml_error(&e))?;
-    Ok(Stage {
-        inputs: file.activity.inputs,
-        categories: file
-            .inputs
-            .into_iter()
-            .map(|i| (i.id, i.category))
-            .collect(),
-    })
 }
 
 /// `[guard] hil_tx` of a site file: HIL's card outputs (empty without it).
@@ -459,44 +409,6 @@ pref_original = { kind = "dword", raw = "64" }
         ));
         assert!(matches!(
             parse_card(&CARD.replace(r#""dword""#, r#""qword""#)),
-            Err(SiteError::Toml(_))
-        ));
-    }
-
-    #[test]
-    fn the_stage_tables_are_read_and_the_rest_ignored() {
-        let stage = parse_stage(
-            r#"
-            port = 1
-            [activity]
-            threshold_dbfs = -50.0
-            inputs = ["mic1", "keys"]
-            [[inputs]]
-            id = "mic1"
-            name = "M"
-            owner = "member1"
-            [[inputs]]
-            id = "content"
-            name = "C"
-            category = "tech"
-            [engine]
-            channels = 2
-            "#,
-        )
-        .unwrap();
-        assert_eq!(
-            stage,
-            Stage {
-                inputs: vec!["mic1".into(), "keys".into()],
-                categories: vec![
-                    ("mic1".into(), None),
-                    ("content".into(), Some("tech".into()))
-                ],
-            }
-        );
-        assert_eq!(parse_stage("port = 1\n").unwrap(), Stage::default());
-        assert!(matches!(
-            parse_stage("[activity]\ninputs = 3\n"),
             Err(SiteError::Toml(_))
         ));
     }

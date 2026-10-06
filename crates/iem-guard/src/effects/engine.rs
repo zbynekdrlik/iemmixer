@@ -10,7 +10,6 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use crate::handover::FLOOR_DB;
 use crate::pc::{EngineSeen, Status};
 use crate::plan::Health;
 use crate::proto::{EngineStatus, HilOut};
@@ -20,8 +19,6 @@ use crate::site::FRAMES;
 pub const PROTO: u64 = 1;
 /// The engine's largest frame body (`iem_engine_proto::MAX_FRAME`).
 pub const MAX_FRAME: usize = 1 << 20;
-/// Band activity (program spec §4.2): a stage peak above this is playing.
-pub const ACTIVE_DB: f64 = -50.0;
 
 /// One frame of `msg`.
 pub fn frame(msg: &Value) -> Vec<u8> {
@@ -90,22 +87,15 @@ pub fn read_frame(r: &mut impl Read) -> io::Result<Option<Vec<u8>>> {
     Ok(Some(body))
 }
 
-/// What the guard reads from the engine.
+/// What the guard reads from the engine. Its meters and topology are no
+/// business of the guard's (#38: nothing reads the stage): they are `Other`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Msg {
     Hello {
         build: String,
     },
-    /// The input ids in topology order (the order of `Meters.inputs`).
-    Topology {
-        inputs: Vec<String>,
-    },
     /// `build` is empty: it comes from the hello.
     Status(Status),
-    /// Each input's peak, the louder of its two channels (linear).
-    Meters {
-        inputs: Vec<f64>,
-    },
     Reply {
         id: u64,
         error: Option<String>,
@@ -148,25 +138,13 @@ fn hil_outs(v: &Value) -> Vec<HilOut> {
         .unwrap_or_default()
 }
 
-fn louder(pair: &Value) -> f64 {
-    pair.as_array()
-        .map(|ch| ch.iter().filter_map(Value::as_f64).fold(0.0, f64::max))
-        .unwrap_or(0.0)
-}
-
 /// Parses one engine message.
 pub fn parse(body: &[u8]) -> Result<Msg, String> {
     let v: Value = serde_json::from_slice(body).map_err(|e| format!("bad engine message: {e}"))?;
-    let inputs = v.get("inputs").and_then(Value::as_array);
     Ok(
         match v.get("type").and_then(Value::as_str).unwrap_or_default() {
             "hello" => Msg::Hello {
                 build: text(&v, "engine_build"),
-            },
-            "topology" => Msg::Topology {
-                inputs: inputs
-                    .map(|a| a.iter().map(|i| text(i, "id")).collect())
-                    .unwrap_or_default(),
             },
             "status" => Msg::Status(Status {
                 build: String::new(),
@@ -179,11 +157,6 @@ pub fn parse(body: &[u8]) -> Result<Msg, String> {
                 hil: hil_outs(&v),
                 loopback_samples: number(&v, "loopback_samples"),
             }),
-            "meters" => Msg::Meters {
-                inputs: inputs
-                    .map(|a| a.iter().map(louder).collect())
-                    .unwrap_or_default(),
-            },
             "reply" => Msg::Reply {
                 id: number(&v, "id"),
                 error: match v.get("error") {
@@ -360,128 +333,6 @@ pub fn shutdown(released: Option<&str>, reply: Option<Option<String>>) -> Option
     }
 }
 
-/// The stage inputs' positions in the topology's input order, and the ids
-/// the topology lacks.
-pub fn stage_indices(topology: &[String], stage: &[String]) -> (Vec<usize>, Vec<String>) {
-    let mut found = Vec::new();
-    let mut unknown = Vec::new();
-    for id in stage {
-        match topology.iter().position(|t| t == id) {
-            Some(i) => found.push(i),
-            None => unknown.push(id.clone()),
-        }
-    }
-    (found, unknown)
-}
-
-/// A linear peak in dBFS, floored at −150 dBFS (silence, and anything that
-/// is not a number).
-pub fn peak_db(lin: f64) -> f64 {
-    (20.0 * lin.log10()).max(FLOOR_DB)
-}
-
-/// The loudest stage peak of one meter frame (dBFS).
-pub fn stage_max(inputs: &[f64], stage: &[usize]) -> f64 {
-    stage
-        .iter()
-        .filter_map(|i| inputs.get(*i))
-        .map(|l| peak_db(*l))
-        .fold(FLOOR_DB, f64::max)
-}
-
-/// Per stage input, the loudest peak (dBFS) since the last reset.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct StagePeaks {
-    loudest: Vec<f64>,
-    frames: u64,
-}
-
-impl StagePeaks {
-    pub fn reset(&mut self, inputs: usize) {
-        self.loudest = vec![FLOOR_DB; inputs];
-        self.frames = 0;
-    }
-
-    pub fn observe(&mut self, inputs: &[f64], stage: &[usize]) {
-        for (l, i) in self.loudest.iter_mut().zip(stage) {
-            if let Some(v) = inputs.get(*i) {
-                *l = l.max(peak_db(*v));
-            }
-        }
-        self.frames += 1;
-    }
-
-    pub fn loudest(&self) -> &[f64] {
-        &self.loudest
-    }
-
-    /// Meter frames seen since the last reset.
-    pub fn frames(&self) -> u64 {
-        self.frames
-    }
-}
-
-/// How long the stage may go unheard between two supervisor connections
-/// (an engine restart, a reconnect) and still count as quiet throughout.
-pub const QUIET_GAP: Duration = Duration::from_secs(60);
-
-/// How long the stage has been quiet, from the meter frames the guard saw
-/// (a HIL job needs 5 min, design §7). One for the guard's life: every
-/// supervisor connection feeds it and resumes it when it connects, so an
-/// engine restart does not start it again.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Quiet {
-    since: Instant,
-    /// The newest meter frame, over all connections.
-    last: Option<Instant>,
-    /// The current connection has heard a meter frame.
-    heard: bool,
-}
-
-impl Quiet {
-    /// Quiet from `now` on: nothing earlier was seen.
-    pub fn new(now: Instant) -> Self {
-        Self {
-            since: now,
-            last: None,
-            heard: false,
-        }
-    }
-
-    /// A new supervisor connection at `now` (an engine start, a reconnect):
-    /// the quiet goes on when the last frame came at most [`QUIET_GAP`]
-    /// before; else (nothing heard yet, or unheard for longer, when the
-    /// band may have played on REAPER) it starts again now.
-    pub fn resume(&mut self, now: Instant) {
-        self.heard = false;
-        let lately = self
-            .last
-            .is_some_and(|last| now.saturating_duration_since(last) <= QUIET_GAP);
-        if !lately {
-            self.since = now;
-        }
-    }
-
-    /// One frame's loudest stage peak (dBFS) at `now`.
-    pub fn observe(&mut self, loudest_db: f64, now: Instant) {
-        self.last = Some(now);
-        self.heard = true;
-        if loudest_db > ACTIVE_DB {
-            self.since = now;
-        }
-    }
-
-    /// The current connection has heard the stage: a quiet carried over a
-    /// gap is read only once the new engine's meters could have ended it.
-    pub fn heard(&self) -> bool {
-        self.heard
-    }
-
-    pub fn quiet_for(&self, now: Instant) -> Duration {
-        now.saturating_duration_since(self.since)
-    }
-}
-
 /// `iem-engine check-site` (design §4, F30): exit 0 and its report (the
 /// last JSON line); anything else refuses the site.
 pub fn check_site_result(code: Option<i32>, stdout: &str, stderr: &str) -> Result<String, String> {
@@ -497,28 +348,6 @@ pub fn check_site_result(code: Option<i32>, stdout: &str, stderr: &str) -> Resul
             "check-site ended with {other:?}: {}",
             super::tail(stderr, 300)
         )),
-    }
-}
-
-/// `iem-engine interlock` (design §4): exit 0 quiet, 5 activity; anything
-/// else is a failed check (6: its stop file ended it). Its report is the
-/// last JSON line it printed.
-pub fn interlock_result(code: Option<i32>, stdout: &str) -> Result<(bool, String), String> {
-    let report = stdout
-        .lines()
-        .rev()
-        .map(str::trim)
-        .find(|l| l.starts_with('{'))
-        .unwrap_or_default()
-        .to_owned();
-    match code {
-        Some(0) => Ok((true, report)),
-        Some(5) => Ok((false, report)),
-        Some(3) => Err(format!("the card refused the interlock: {report}")),
-        Some(6) => Err(format!(
-            "the interlock was stopped by its stop file: {report}"
-        )),
-        other => Err(format!("the interlock ended with {other:?}: {report}")),
     }
 }
 
@@ -731,13 +560,13 @@ mod tests {
                 build: "2.0.0+abc".into()
             }
         );
+        // The topology and the meters are the engine's to the server: the
+        // guard reads no stage (#38).
         assert_eq!(
             p(
                 json!({"type": "topology", "hash": "h", "inputs": [{"id": "mic1", "channels": 1}, {"id": "mic2"}]})
             ),
-            Msg::Topology {
-                inputs: vec!["mic1".into(), "mic2".into()]
-            }
+            Msg::Other
         );
         assert_eq!(
             p(
@@ -792,9 +621,7 @@ mod tests {
         );
         assert_eq!(
             p(json!({"type": "meters", "seq": 4, "inputs": [[0.5, 0.25], [0.0, 0.75], [], "x"]})),
-            Msg::Meters {
-                inputs: vec![0.5, 0.75, 0.0, 0.0]
-            }
+            Msg::Other
         );
         assert_eq!(
             p(json!({"type": "reply", "id": 9, "rev": 3, "error": null})),
@@ -827,11 +654,6 @@ mod tests {
         assert_eq!(p(json!({"type": "superseded"})), Msg::Superseded);
         assert_eq!(p(json!({"type": "state", "rev": 1})), Msg::Other);
         assert_eq!(p(json!({"no": "type"})), Msg::Other);
-        assert_eq!(
-            p(json!({"type": "topology"})),
-            Msg::Topology { inputs: vec![] }
-        );
-        assert_eq!(p(json!({"type": "meters"})), Msg::Meters { inputs: vec![] });
         assert!(
             parse(b"{not json")
                 .unwrap_err()
@@ -1036,159 +858,6 @@ mod tests {
         assert_eq!(
             health(&first_faulted, &status(32, 2000, 0)),
             Health::Healthy
-        );
-    }
-
-    #[test]
-    fn stage_inputs_are_found_in_topology_order() {
-        let topo: Vec<String> = ["prog", "mic1", "mic2", "hand1"]
-            .iter()
-            .map(|s| (*s).to_owned())
-            .collect();
-        let stage: Vec<String> = ["hand1", "mic1", "keys"]
-            .iter()
-            .map(|s| (*s).to_owned())
-            .collect();
-        assert_eq!(
-            stage_indices(&topo, &stage),
-            (vec![3, 1], vec!["keys".to_owned()])
-        );
-        assert_eq!(stage_indices(&topo, &[]), (vec![], vec![]));
-    }
-
-    #[test]
-    fn peaks_are_decibels_floored_at_silence() {
-        assert_eq!(peak_db(1.0), 0.0);
-        assert!((peak_db(0.1) + 20.0).abs() < 1e-9);
-        assert!((peak_db(0.01) + 40.0).abs() < 1e-9);
-        assert!((peak_db(2.0) - 6.020_599_913_279_624).abs() < 1e-9);
-        assert_eq!(peak_db(0.0), FLOOR_DB);
-        assert_eq!(peak_db(1e-9), FLOOR_DB);
-        assert_eq!(peak_db(-0.5), FLOOR_DB);
-        assert_eq!(peak_db(f64::NAN), FLOOR_DB);
-    }
-
-    #[test]
-    fn the_loudest_stage_input_counts() {
-        let frame = [1.0, 0.1, 0.01, 0.5];
-        assert!((stage_max(&frame, &[1, 2]) + 20.0).abs() < 1e-9);
-        assert_eq!(stage_max(&frame, &[0]), 0.0);
-        assert_eq!(stage_max(&frame, &[]), FLOOR_DB);
-        assert_eq!(stage_max(&frame, &[9]), FLOOR_DB);
-    }
-
-    #[test]
-    fn stage_peaks_keep_each_inputs_loudest_since_the_reset() {
-        let mut s = StagePeaks::default();
-        assert_eq!((s.loudest(), s.frames()), (&[][..], 0));
-        s.reset(2);
-        assert_eq!(s.loudest(), [FLOOR_DB, FLOOR_DB]);
-        s.observe(&[0.01, 0.1, 1.0], &[2, 0]);
-        s.observe(&[0.1, 0.1, 0.001], &[2, 0]);
-        assert_eq!(s.frames(), 2);
-        let l = s.loudest();
-        assert_eq!(l.first(), Some(&0.0));
-        assert!((l.get(1).unwrap() + 20.0).abs() < 1e-9);
-        // An input missing from a frame keeps its value.
-        s.observe(&[], &[2, 0]);
-        assert_eq!(s.frames(), 3);
-        assert_eq!(s.loudest().first(), Some(&0.0));
-        s.reset(1);
-        assert_eq!((s.loudest(), s.frames()), (&[FLOOR_DB][..], 0));
-    }
-
-    #[test]
-    fn quiet_time_restarts_on_any_stage_peak_above_the_activity_level() {
-        let t0 = Instant::now();
-        let at = |ms: u64| t0 + Duration::from_millis(ms);
-        let mut q = Quiet::new(t0);
-        assert_eq!(q.quiet_for(at(0)), Duration::ZERO);
-        q.observe(-60.0, at(1000));
-        q.observe(ACTIVE_DB, at(2000));
-        assert_eq!(q.quiet_for(at(3000)), Duration::from_secs(3));
-        q.observe(-49.9, at(4000));
-        assert_eq!(q.quiet_for(at(4500)), Duration::from_millis(500));
-        // A clock read before the last peak is no quiet at all.
-        assert_eq!(q.quiet_for(at(3000)), Duration::ZERO);
-    }
-
-    /// Every engine restart (a HIL job's activate, a respawn) or reconnect
-    /// makes a new supervisor connection. A job needs 300 s of band quiet,
-    /// so a quiet that started again at each connection refused every HIL
-    /// within 5 min of the last one's activate (lane review). The quiet goes
-    /// on across a gap of up to 60 s since the last frame heard; after a
-    /// longer one (the band may have played unheard, e.g. on REAPER) it
-    /// starts again at the new connection.
-    #[test]
-    fn the_band_quiet_goes_on_across_a_short_gap_between_connections() {
-        let t0 = Instant::now();
-        let at = |s: u64| t0 + Duration::from_secs(s);
-        let mut q = Quiet::new(t0);
-        q.resume(at(0));
-        q.observe(-90.0, at(100));
-        // The restart: the next connection 60 s after the last frame.
-        q.resume(at(160));
-        assert_eq!(q.quiet_for(at(170)), Duration::from_secs(170));
-        // A loud frame on the new connection starts it again, as always.
-        q.observe(-10.0, at(170));
-        assert_eq!(q.quiet_for(at(180)), Duration::from_secs(10));
-        // 61 s unheard: the quiet starts at the new connection.
-        q.observe(-90.0, at(200));
-        q.resume(at(261));
-        assert_eq!(q.quiet_for(at(271)), Duration::from_secs(10));
-        // Nothing heard before the first connection: it starts there.
-        let mut fresh = Quiet::new(t0);
-        fresh.resume(at(5));
-        assert_eq!(fresh.quiet_for(at(8)), Duration::from_secs(3));
-    }
-
-    #[test]
-    fn a_connection_reads_the_quiet_only_once_it_heard_the_stage() {
-        let t0 = Instant::now();
-        let at = |s: u64| t0 + Duration::from_secs(s);
-        let mut q = Quiet::new(t0);
-        assert!(!q.heard());
-        q.resume(at(0));
-        assert!(!q.heard());
-        q.observe(-90.0, at(1));
-        assert!(q.heard());
-        q.resume(at(2));
-        assert!(!q.heard(), "a new connection has heard nothing yet");
-        q.observe(-10.0, at(3));
-        assert!(q.heard());
-        assert_eq!(QUIET_GAP, Duration::from_secs(60));
-    }
-
-    #[test]
-    fn the_interlock_reports_quiet_activity_or_failure() {
-        let out = "starting\n{\"quiet\": true, \"loudest\": []}\n";
-        assert_eq!(
-            interlock_result(Some(0), out),
-            Ok((true, "{\"quiet\": true, \"loudest\": []}".into()))
-        );
-        let loud = "{\"quiet\": false}\n  {\"quiet\": false, \"loudest\": [[101, -20.0]]}  \nbye\n";
-        assert_eq!(
-            interlock_result(Some(5), loud),
-            Ok((
-                false,
-                "{\"quiet\": false, \"loudest\": [[101, -20.0]]}".into()
-            ))
-        );
-        assert_eq!(
-            interlock_result(Some(3), ""),
-            Err("the card refused the interlock: ".into())
-        );
-        assert_eq!(
-            interlock_result(Some(6), "{\"stopped\": true}"),
-            Err("the interlock was stopped by its stop file: {\"stopped\": true}".into())
-        );
-        assert_eq!(
-            interlock_result(Some(1), "{}"),
-            Err("the interlock ended with Some(1): {}".into())
-        );
-        assert_eq!(
-            interlock_result(None, ""),
-            Err("the interlock ended with None: ".into())
         );
     }
 }

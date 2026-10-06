@@ -512,7 +512,6 @@ mod tests {
             &s.name,
             &Request::Dev {
                 build: None,
-                force: false,
                 dry_run: false,
             },
         )

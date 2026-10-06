@@ -20,7 +20,7 @@ import pc_change as pcc  # noqa: E402
 ENV = {"PC_ROOT": "R", "PC_BUFFER_KEY": "K", "PC_BUFFER_NAME": "N", "PC_REAPER_HTTP": "H", "PC_MAIN_PROJECT": "P.rpp",
        "PC_REAPER_START_TASK_PATH": "P", "PC_REAPER_START_TASK": "T", "PC_NTRACK": "9", "PC_METER_BRIDGE": "B",
        "PC_METER_ACTION": "A", "PC_METER_HEARTBEAT": "HB", "PC_ASIO_MODULE": "M", "PC_APP_HTTP": "AH",
-       "PC_ASIO_DRIVER": "D", "PC_ACTIVITY_CHANNELS": "101-110"}
+       "PC_ASIO_DRIVER": "D"}
 
 
 class FakeSpikePc:
@@ -55,8 +55,6 @@ class FakeSpikePc:
             return {"reaper": int(self.reaper), "holders": ["reaper.exe:42"] if self.reaper else []}
         if "Test-SpikeTaskBusy" in body and "Remove-Item" in body:
             return "removed"
-        if "Get-GoldenMeterSamples" in body:
-            return []
         if "Invoke-GoldenSaveQuit" in body:
             self.reaper = False
             return {"saved": True, "quit": True}
@@ -149,6 +147,25 @@ class PcChangeTests(unittest.TestCase):
         self.assertEqual(seen, [("switching", "to-dev", sw.SAVE_QUIT_S, True)])
         st = sw.load_state()
         self.assertEqual((st["card"], st.get("in_flight")), ("free", None))
+
+    def test_to_dev_saves_and_quits_whatever_the_stage_inputs_carry(self) -> None:
+        # #38 (owner, 2026-10-06): only the owner's signal decides whether the PC may
+        # change. Other devices on the Dante network feed the card's inputs, so a
+        # loud stage proves nothing: to-dev reads no level and never refuses on one.
+        self.window(card="reaper")
+        real = self.pc.ps
+        loud = "TRACK\t1\tmic\t0\t1\t0\t-30\t-30\n"   # -3 dBFS on a stage track, far above -50
+
+        def stage_loud(env, body, timeout=300, event="finish"):
+            if "Get-GoldenMeterSamples" in body:
+                return [loud] * 240
+            return real(env, body, timeout, event)
+
+        sw.ps = stage_loud
+        sw.cmd_to_dev(ENV, None)
+        self.assertEqual(sw.load_state()["card"], "free")
+        self.assertFalse(any("Get-GoldenMeterSamples" in c for c in self.pc.calls), self.pc.calls)
+        self.assertEqual(sum("Invoke-GoldenSaveQuit" in c for c in self.pc.calls), 1)
 
     def test_a_failed_call_clears_its_intent_and_keeps_what_it_recorded_before(self) -> None:
         self.window()

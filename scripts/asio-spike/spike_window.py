@@ -28,7 +28,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "golden"))
-from golden_window import StepError, check_signal, interlock_hits, parse_meter_peaks, ps_quote  # noqa: E402
+from golden_window import StepError, check_signal, ps_quote  # noqa: E402
 
 # Run as a script this module is __main__: it is registered under its own name
 # too, so pc_change (which reaches the state, the lock and the PC through it)
@@ -40,8 +40,8 @@ from pc_change import (JOURNAL_STEPS, REAPER_STEPS, RUN_START_S, SAVE_QUIT_S, SE
                        begin_change, changing, clear_stop, close_out, end_change, exit_on_signals, intent_live, pc_change,
                        reaper_on_card, settle_live, step_guard, unwind_closing, wait_for_settle)
 # The pure rules (env, request, undo plan, sums, verdict), re-exported.
-from spike_rules import (ACTIVITY_CHANNELS, CPU_LIST, FRAMES, MAX_INPUT, MAX_SECONDS, REQUIRED, buffer_args,  # noqa: E402,F401
-                         buffer_touched, check_channels, check_request, cpu_set, load_env, parse_sums, pick_run,
+from spike_rules import (CPU_LIST, FRAMES, MAX_SECONDS, REQUIRED, buffer_args, buffer_touched,  # noqa: E402,F401
+                         check_request, cpu_set, load_env, parse_sums, pick_run,
                          ps_hashtable, run_fields, run_timeout, undo_plan, verdict)
 
 POLL_S = 2.0
@@ -51,7 +51,6 @@ TASK = "-TaskPath '\\iemmixer\\' -TaskName 'iemmixer-asio-spike'"
 STATE = Path(os.environ.get("SPIKE_STATE", str(Path.home() / ".local/state/iemmixer/spike-window.json")))
 # Spike exit codes the owner must hear about at once (crates/iem-audio-io/examples/asio_spike/main.rs).
 ALARMS = {
-    5: "band activity on the stage inputs during the spike (loudest_inputs in the verdict): the band may be playing; tell the owner now, no further run",
     8: "a callback did not leave the stream within the stop wait (R6): tell the owner now, no further run",
 }
 EVENT_NOW = Path(os.environ.get("IEMMIXER_EVENT_NOW", str(Path.home() / ".config/iemmixer/EVENT-NOW")))
@@ -486,10 +485,9 @@ def late_buffer(env: dict[str, str]) -> Callable[[dict, bool], None]:
 
 def cmd_to_dev(env, args) -> None:
     need_reaper_card(open_state())
-    texts = ps(env, f"Get-GoldenMeterSamples -Http {ps_quote(env['PC_REAPER_HTTP'])} -Seconds 60", timeout=180, event="abandon")
-    hits = interlock_hits([parse_meter_peaks(t) for t in texts])
-    if hits:
-        raise StepError(f"band activity: peaks above -50 dBFS on tracks {sorted(hits)}; no switch, alarm the owner")
+    # No stage reading (#38, owner 2026-10-06): the owner's "event skončil" opened
+    # the window, and only his signal decides whether the PC may change; other
+    # devices on the Dante network feed the card's inputs, so a level proves nothing.
     # "switching" is recorded with the intent, before the save and quit: a preempt
     # meanwhile brings REAPER back (card away) and settles until the quit is over.
     body = (f"Invoke-GoldenSaveQuit -Http {ps_quote(env['PC_REAPER_HTTP'])} -Project {ps_quote(env['PC_MAIN_PROJECT'])} "

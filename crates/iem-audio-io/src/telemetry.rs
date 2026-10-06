@@ -15,8 +15,6 @@ const BUCKET_NS: u64 = 1_000;
 /// The first callbacks of a stream prime the driver's buffers (possibly inside
 /// `start()`); they are counted but never judged late, missed or gapped.
 pub const WARMUP: u64 = 8;
-/// −50 dBFS, the band-activity threshold (program spec §4.2).
-pub const ACTIVITY_THRESHOLD: f64 = 0.003_162_277_660_168_379;
 const NO_POSITION: i64 = i64::MIN;
 /// [`Telemetry::take_requests`]: a reset request and a buffer size change.
 const RESET_BIT: u8 = 1;
@@ -718,80 +716,6 @@ impl InputPeaks {
     }
 }
 
-/// The highest card input number `--activity-channels` accepts.
-pub const MAX_INPUT: usize = 1024;
-
-/// The card inputs the band guard listens to: the site's stage inputs
-/// (microphones, handhelds, the engineer's microphone), or every input as
-/// the explicit fallback. Other inputs (program material, stems) may carry
-/// signal while the band is silent.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Watched {
-    All,
-    /// Input indices from 0, ascending, without duplicates.
-    Inputs(Vec<usize>),
-}
-
-impl Watched {
-    /// `all`, or card input numbers from 1 as a comma list of numbers and
-    /// ranges (`101-110,121-124`).
-    pub fn parse(text: &str) -> Result<Self, String> {
-        if text == "all" {
-            return Ok(Self::All);
-        }
-        let number = |s: &str| match s.parse::<usize>() {
-            Ok(n) if (1..=MAX_INPUT).contains(&n) => Ok(n),
-            _ => Err(format!(
-                "activity channel {s:?}: expected a card input 1..={MAX_INPUT}"
-            )),
-        };
-        let mut inputs = Vec::new();
-        for part in text.split(',') {
-            let (first, last) = part.split_once('-').unwrap_or((part, part));
-            let (first, last) = (number(first)?, number(last)?);
-            if first > last {
-                return Err(format!(
-                    "activity channels {part:?}: the range runs backwards"
-                ));
-            }
-            inputs.extend(first - 1..last);
-        }
-        inputs.sort_unstable();
-        inputs.dedup();
-        Ok(Self::Inputs(inputs))
-    }
-
-    /// Refuses inputs beyond the card's `inputs`.
-    pub fn check(&self, inputs: usize) -> Result<(), String> {
-        match self {
-            Self::Inputs(list) if list.last().is_some_and(|&i| i >= inputs) => Err(format!(
-                "activity channels beyond the card's {inputs} inputs"
-            )),
-            _ => Ok(()),
-        }
-    }
-
-    /// The loudest watched input of one set of per-input peaks (0 if none).
-    pub fn peak(&self, peaks: &[f64]) -> f64 {
-        match self {
-            Self::All => peaks.iter().copied().fold(0.0, f64::max),
-            Self::Inputs(list) => list
-                .iter()
-                .filter_map(|&i| peaks.get(i))
-                .copied()
-                .fold(0.0, f64::max),
-        }
-    }
-
-    /// The watched card inputs numbered from 1 (`None`: all of them).
-    pub fn numbers(&self) -> Option<Vec<usize>> {
-        match self {
-            Self::All => None,
-            Self::Inputs(list) => Some(list.iter().map(|&i| i + 1).collect()),
-        }
-    }
-}
-
 /// The loudest one-second peak of each card input over a run (report).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Loudest {
@@ -824,30 +748,6 @@ impl Loudest {
         hot.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
         hot.truncate(n);
         hot
-    }
-}
-
-/// Band activity on the inputs: `needed` consecutive one-second peaks above
-/// −50 dBFS.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ActivityGuard {
-    run: u32,
-    needed: u32,
-}
-
-impl ActivityGuard {
-    pub fn new(needed: u32) -> Self {
-        Self { run: 0, needed }
-    }
-
-    /// Feeds one second's peak; true while the band is playing.
-    pub fn observe(&mut self, peak: f64) -> bool {
-        self.run = if peak > ACTIVITY_THRESHOLD {
-            self.run.saturating_add(1)
-        } else {
-            0
-        };
-        self.run >= self.needed
     }
 }
 

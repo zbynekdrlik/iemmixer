@@ -31,8 +31,7 @@ the flag again right before it dispatches.
 
 `activate --sha` runs `iemmode activate`, which the guard allows in dev
 and in an idle event (#9 2026-09-28: none of iemmixer's processes runs, no
-switch, HIL job or interlock retry waits; REAPER and the predecessor app
-are not touched). It is how a guard fix reaches a guard in event, whose
+switch or HIL job waits; REAPER and the predecessor app are not touched). It is how a guard fix reaches a guard in event, whose
 own code may refuse the dev entry: after `install`, `activate` in event,
 then `dev`. It then waits for the hand-over: `iemmode status` until the
 guard that answers names the SHA as its `guard_build` (the GITHUB_SHA its
@@ -57,8 +56,8 @@ the ssh session, so a session cut before it ends (a Bash timeout) stops it
 half-way; the next `iemmode event` resumes from the guard state. A
 pre-emption inside another command adds a whole event budget to that
 command's own time. The dev-entry count behind `dispatch-hil` sees only
-`iempc dev`, not a dev entry the guard makes by itself (an interlock retry,
-rehearse-teardown's re-entry)."""
+`iempc dev`, not a dev entry the guard makes by itself (rehearse-teardown's
+re-entry)."""
 from __future__ import annotations
 
 import argparse
@@ -493,10 +492,10 @@ def state_lock(take: bool) -> Iterator[None]:
 
 def current_entry() -> int:
     """The dev entry: counted up by every successful `iempc dev` (0 before
-    the first). Known limit: the guard also enters dev by itself (a due
-    interlock retry, rehearse-teardown's re-entry), which this box never
-    sees, so "once per SHA per dev entry" means per `iempc dev` until the
-    guard's status exposes a dev-entry id to key the dispatch record on."""
+    the first). Known limit: the guard also enters dev by itself
+    (rehearse-teardown's re-entry), which this box never sees, so "once per
+    SHA per dev entry" means per `iempc dev` until the guard's status
+    exposes a dev-entry id to key the dispatch record on."""
     return int(read_json(state_dir() / "entry.json", {}).get("entry", 0))
 
 
@@ -1082,8 +1081,7 @@ def cmd_activate(ctx: Ctx) -> int:
     """`iemmode activate <sha>`, then the hand-over: `iemmode status` until
     the guard that answers names the SHA as its build. The guard allows it
     in dev and in an idle event (#9 2026-09-28: none of iemmixer's processes
-    runs, no switch, HIL job or interlock retry waits; REAPER and the app
-    are not touched), which is how a guard fix reaches a guard in event.
+    runs, no switch or HIL job waits; REAPER and the app are not touched), which is how a guard fix reaches a guard in event.
     The guard makes the change itself: a new flag lets the activation finish
     (then the event path runs, so "ide event" is not queued behind it on the
     guard that is about to hand over) and abandons the status reads.

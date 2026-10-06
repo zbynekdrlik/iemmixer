@@ -19,10 +19,11 @@ REQUIRED = (
     "PC_ASIO_MODULE", "PC_REAPER_EXE", "PC_REAPER_HTTP", "PC_REAPER_START_TASK",
     "PC_MAIN_PROJECT", "PC_APP_EXE", "PC_APP_PROCESS", "PC_APP_HTTP", "PC_DUMMY_MODE", "RAW_DIR",
 )
-STEPS = ("preflight", "interlock", "save-quit", "app-stopped", "backup", "stage", "seed-res", "render", "fetch", "verify-restore", "bring-back")
-CHANGING = STEPS[2:]
+# No step reads the stage (#38, owner 2026-10-06): the owner's "event skončil"
+# opens the window and only his signal decides whether the PC may change.
+STEPS = ("preflight", "save-quit", "app-stopped", "backup", "stage", "seed-res", "render", "fetch", "verify-restore", "bring-back")
+CHANGING = STEPS[1:]
 TASK = "iemmixer-golden"
-INTERLOCK_DB10 = -500
 STATE = Path(os.environ.get("GOLDEN_STATE", str(Path.home() / ".local/state/iemmixer/golden-window.json")))
 
 
@@ -107,23 +108,6 @@ def parse_holders(text: str) -> list[tuple[str, int]]:
             cells = [c.strip('"') for c in line.split('","')]
             out.append((cells[0], int(cells[1])))
     return out
-
-
-def parse_meter_peaks(text: str) -> dict[int, int]:
-    peaks: dict[int, int] = {}
-    for line in text.splitlines():
-        f = line.split("\t")
-        if len(f) > 6 and f[0] == "TRACK" and f[1].isdigit() and f[1] != "0":
-            peaks[int(f[1])] = int(f[6])
-    return peaks
-
-
-def interlock_hits(samples: list[dict[int, int]]) -> dict[int, int]:
-    worst: dict[int, int] = {}
-    for s in samples:
-        for idx, db10 in s.items():
-            worst[idx] = max(worst.get(idx, -10_000), db10)
-    return {i: v for i, v in worst.items() if v > INTERLOCK_DB10}
 
 
 # ---- ssh / scp (the PC is the external dependency; no unit tests below) ----
@@ -215,16 +199,6 @@ def step_preflight(env, state, args):
         raise StepError("; ".join(problems))
     state["pre"] = {"reaper": r["reaper"] > 0, "app": r["app"] > 0}
     return r
-
-
-def step_interlock(env, state, args):
-    if not state["pre"]["reaper"]:
-        return {"skipped": "REAPER was not running before the window"}
-    texts = ps(env, f"Get-GoldenMeterSamples -Http {ps_quote(env['PC_REAPER_HTTP'])} -Seconds 60", timeout=180)
-    hits = interlock_hits([parse_meter_peaks(t) for t in texts])
-    if hits:
-        raise StepError(f"band activity: peaks above -50 dBFS on tracks {sorted(hits)}; window aborted, alarm the owner")
-    return {"samples": len(texts), "quiet": True}
 
 
 def step_save_quit(env, state, args):
@@ -321,7 +295,7 @@ def step_bring_back(env, state, args):
 
 
 STEP_FUNCS = {
-    "preflight": step_preflight, "interlock": step_interlock, "save-quit": step_save_quit, "app-stopped": step_app_stopped,
+    "preflight": step_preflight, "save-quit": step_save_quit, "app-stopped": step_app_stopped,
     "backup": step_backup, "stage": step_stage, "seed-res": step_seed_res, "render": step_render, "fetch": step_fetch,
     "verify-restore": step_verify_restore, "bring-back": step_bring_back,
 }

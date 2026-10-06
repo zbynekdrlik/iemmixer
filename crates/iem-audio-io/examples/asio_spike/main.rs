@@ -4,15 +4,16 @@
 //! request file (`scripts/asio-spike/`). Outputs stay silent; the card's
 //! rate, clock and buffer are never changed from here.
 //!
-//! The band guard listens only to the inputs given by `--activity-channels`
-//! (the site's stage inputs, card numbers from 1; `all` is the explicit
-//! fallback); the report and the progress file list the five loudest inputs.
+//! The report and the progress file list the five loudest inputs, as
+//! information only: no input level ends a run (#38, owner 2026-10-06: only
+//! the owner's signal decides whether the PC may be used, and other devices
+//! on the Dante network feed the card's inputs).
 //!
 //! Exit codes: 0 done or stopped, 1 other error, 2 usage, 3 driver missing,
-//! 4 refused (rate, buffer, format, activity channels), 5 band activity, 6 fault caught
-//! (`--panic-at`), 7 the driver changed the sample rate, 8 a callback did not
-//! leave the stream within the stop wait (R6: reported, the driver is left
-//! alone, nothing is killed).
+//! 4 refused (rate, buffer, format), 6 fault caught (`--panic-at`), 7 the
+//! driver changed the sample rate, 8 a callback did not leave the stream
+//! within the stop wait (R6: reported, the driver is left alone, nothing is
+//! killed).
 //!
 //! The report keeps every segment, reset and reopen cycle as it completes,
 //! so a run that fails half-way still reports what it measured.
@@ -27,15 +28,14 @@ use std::time::{Duration, Instant};
 
 use iem_audio_io::cpuset;
 use iem_audio_io::spike_run::{self, Applied};
-use iem_audio_io::telemetry::{ActivityGuard, GapScan, GapSummary, Loudest, Watched, dbfs};
+use iem_audio_io::telemetry::{GapScan, GapSummary, Loudest, dbfs};
 use serde_json::{Value, json};
 
 const USAGE: &str =
     "usage: asio_spike probe|duplex|reopen|hwlat --report <file> --stop-file <file> \
-[--driver <name>] [--progress <file>] [--frames 32|48|64] \
-[--activity-channels all|<list, e.g. 101-110,121-124>] [--seconds S] [--burn-us U] [--stress T] \
+[--driver <name>] [--progress <file>] [--frames 32|48|64] [--seconds S] [--burn-us U] [--stress T] \
 [--panic-at K] [--cycles C] [--audio-cpus LIST] [--stress-cpus LIST] [--cpu N] [--threshold-us U]
-(duplex and reopen need --frames and --activity-channels; hwlat needs --cpu and --threshold-us; \
+(duplex and reopen need --frames; hwlat needs --cpu and --threshold-us; \
 --stress with --audio-cpus needs --stress-cpus, which never overlaps --audio-cpus)";
 
 /// The longest run: an 8 h soak with margin (S1c design note §8 W4).
@@ -73,8 +73,6 @@ struct Args {
     stress_cpus: Vec<u8>,
     cpu: Option<u8>,
     threshold_us: u64,
-    /// The inputs the band guard listens to.
-    watched: Watched,
 }
 
 fn parse(argv: &[String]) -> Result<Args, String> {
@@ -102,9 +100,7 @@ fn parse(argv: &[String]) -> Result<Args, String> {
         stress_cpus: Vec::new(),
         cpu: None,
         threshold_us: 10,
-        watched: Watched::All,
     };
-    let mut watched = None;
     while let Some(flag) = it.next() {
         let value = it.next().ok_or_else(|| format!("{flag} needs a value"))?;
         let num = |max: u64| match value.parse::<u64>() {
@@ -126,7 +122,6 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--stress" => a.stress = u32::try_from(num(8)?).unwrap_or(0),
             "--panic-at" => a.panic_at = num(u64::MAX)?,
             "--cycles" => a.cycles = u32::try_from(num(20)?).unwrap_or(0),
-            "--activity-channels" => watched = Some(Watched::parse(value).map_err(named)?),
             "--audio-cpus" => a.audio_cpus = cpuset::parse_lps(value).map_err(named)?,
             "--stress-cpus" => a.stress_cpus = cpuset::parse_lps(value).map_err(named)?,
             "--cpu" => a.cpu = Some(u8::try_from(num(63)?).unwrap_or(0)),
@@ -150,20 +145,9 @@ fn parse(argv: &[String]) -> Result<Args, String> {
         return Err("--seconds and --cycles must be positive".to_owned());
     }
     spike_run::check_stress_cpus(a.stress, &a.audio_cpus, &a.stress_cpus)?;
-    match watched {
-        Some(w) => a.watched = w,
-        // All inputs only when asked for: a site's program inputs may carry
-        // signal while the band is silent (hwlat opens no card).
-        None if matches!(a.mode, Mode::Duplex | Mode::Reopen) => {
-            return Err("--activity-channels is required (the stage inputs, or all)".to_owned());
-        }
-        None => {}
-    }
     Ok(a)
 }
 
-#[cfg_attr(not(windows), allow(dead_code))]
-const ACTIVITY_SECONDS: u32 = 3;
 #[cfg_attr(not(windows), allow(dead_code))]
 const ONE_SECOND: Duration = Duration::from_secs(1);
 /// How many of the loudest inputs the report lists.
@@ -176,7 +160,6 @@ const HOT_INPUTS: usize = 5;
 enum End {
     Stopped,
     RateChanged,
-    BandActivity,
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -185,7 +168,6 @@ impl End {
         match self {
             Self::Stopped => "stopped",
             Self::RateChanged => "rate-changed",
-            Self::BandActivity => "band-activity",
         }
     }
 }
@@ -201,27 +183,21 @@ fn applied_json(lps: &[u8], applied: &Applied) -> Value {
     }
 }
 
-/// The run guards duplex and reopen share (design note §3): the stop file,
-/// a rate change, and once a second the watched inputs' peak for band
-/// activity. Every input's loudest second is kept for the report.
+/// The run guards duplex and reopen share (design note §3): the stop file
+/// and a rate change. Once a second every input's peak is read for the
+/// report; no level ends a run (#38).
 #[cfg_attr(not(windows), allow(dead_code))]
 struct Watch {
-    guard: ActivityGuard,
-    watched: Watched,
     next_second: Instant,
     loudest: Loudest,
-    loudest_watched: f64,
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
 impl Watch {
-    fn new(now: Instant, watched: Watched) -> Self {
+    fn new(now: Instant) -> Self {
         Self {
-            guard: ActivityGuard::new(ACTIVITY_SECONDS),
-            watched,
             next_second: now + ONE_SECOND,
             loudest: Loudest::default(),
-            loudest_watched: 0.0,
         }
     }
 
@@ -245,23 +221,15 @@ impl Watch {
             return None;
         }
         self.next_second = now + ONE_SECOND;
-        let p = peaks();
-        self.loudest.observe(&p);
-        let watched = self.watched.peak(&p);
-        self.loudest_watched = self.loudest_watched.max(watched);
-        self.guard.observe(watched).then_some(End::BandActivity)
+        self.loudest.observe(&peaks());
+        None
     }
 
     /// The input levels so far into the report or the progress file: the
-    /// watched inputs, the loudest of all and of the watched ones, and the
-    /// five loudest inputs (card number from 1, index from 0, dBFS).
+    /// loudest of all and the five loudest inputs (card number from 1, index
+    /// from 0, dBFS).
     fn record_levels(&self, out: &mut Value) {
-        out["activity_channels"] = self
-            .watched
-            .numbers()
-            .map_or_else(|| json!("all"), |n| json!(n));
         out["loudest_input_dbfs"] = json!(dbfs(self.loudest.max()));
-        out["loudest_watched_dbfs"] = json!(dbfs(self.loudest_watched));
         out["loudest_inputs"] = self
             .loudest
             .top(HOT_INPUTS)
@@ -483,11 +451,6 @@ mod spike {
         let host = Host::open(&a.driver)?;
         let info = host.info()?;
         report["driver"] = info_json(&info);
-        if let Err(e) = a.watched.check(usize::try_from(info.inputs).unwrap_or(0)) {
-            report["outcome"] = json!("refused");
-            report["error"] = json!(e);
-            return Ok(exit_code("refused"));
-        }
         match a.mode {
             Mode::Probe => {
                 report["outcome"] = json!("done");
@@ -670,7 +633,7 @@ mod spike {
         };
         let markers = os::Markers::register().ok();
         let deadline = Instant::now() + Duration::from_secs(a.seconds);
-        let mut watch = Watch::new(Instant::now(), a.watched.clone());
+        let mut watch = Watch::new(Instant::now());
         let mut fault: Option<(Instant, u64)> = None;
         let mut outcome = "done";
         report["segments"] = json!([]);
@@ -771,7 +734,7 @@ mod spike {
             burn_us: 0,
             panic_at: 0,
         };
-        let mut watch = Watch::new(Instant::now(), a.watched.clone());
+        let mut watch = Watch::new(Instant::now());
         let mut outcome = "done";
         report["cycles"] = json!([]);
         for cycle in 0..a.cycles {

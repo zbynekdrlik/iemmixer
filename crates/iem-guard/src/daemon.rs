@@ -15,8 +15,8 @@
 //!
 //! A request that is not a switch runs with no switch marked as running: an
 //! "ide event" meanwhile pre-empts the token and queues behind it. Its waits
-//! end at once (install-site's `check-site`, a HIL job's stage peaks, the
-//! runner's stop); its mutations finish first, and they bound the longest
+//! end at once (install-site's `check-site`, the runner's stop); its
+//! mutations finish first, and they bound the longest
 //! an "ide event" waits behind a request: activate's Defender exclusion task
 //! (≤ 120 s), a bundle's unzip (local files), the probe task (≤ 15 s).
 
@@ -34,33 +34,18 @@ use crate::alarms::{Alarm, Alarms};
 use crate::bundle::{self, Hil, Record};
 use crate::cancel::Cancel;
 use crate::crash::{self, After, CrashLoop};
-use crate::effects::engine::ACTIVE_DB;
 use crate::handover::{self, Audio};
 use crate::install::{self, InstallError};
 use crate::pc::{Audience, EngineSeen, Kid, Pc, PrefSeen, Procs, R, Status, StepError, job_note};
 use crate::plan::{
-    Activation, Busy, Facts, Health, Mode, OnError, PrefFail, Step, activation, on_error, plan,
+    Activation, Busy, Health, Mode, OnError, PrefFail, Step, activation, on_error, plan,
 };
 use crate::proto::{self, EngineStatus, Reply, Request};
 use crate::site::GuardSite;
-use crate::state::{self, GuardState, InterlockRetry, Switching};
+use crate::state::{self, GuardState, Switching};
 
-/// The interlock's length in seconds (design §5.2 step 2).
-pub const INTERLOCK_S: u32 = 60;
-/// A refused entry is tried again after this many seconds.
-pub const RETRY_S: u64 = 15 * 60;
-/// The refusal that sends the owner one notice.
-pub const RETRY_NOTICE_AT: u32 = 4;
-/// The refusal after which the entry is dropped.
-pub const RETRY_LAST: u32 = 8;
-/// The owner's notice on the fourth refusal (he reads Slovak).
-pub const RETRY_NOTICE: &str = "na pódiu je signál, prepnutie čaká";
 /// The engine's warm-up window before `Arm` (design §5.2 step 7).
 pub const READY_S: u32 = 10;
-/// A HIL job needs this much band quiet (design §7)…
-pub const JOB_QUIET: Duration = Duration::from_secs(300);
-/// …and a quiet stage over this many seconds of the engine's meters.
-pub const JOB_PEAKS_S: u32 = 60;
 /// The HIL test signal's ceiling (design §7).
 pub const HIL_MAX_DBFS: f64 = -20.0;
 /// The longest HIL test signal (s): the routing proof needs seconds, and the
@@ -88,9 +73,6 @@ pub enum Outcome {
     KeptServing,
     /// The plan stopped; the owner gets the prepared ❓ (alarm flagged `owner_question`).
     NeedsOwner,
-    /// The interlock heard the band: nothing was touched, the entry waits
-    /// for its retry (design §5.2 step 2).
-    Refused,
 }
 
 fn outcome_text(o: Option<Outcome>) -> &'static str {
@@ -98,7 +80,6 @@ fn outcome_text(o: Option<Outcome>) -> &'static str {
         Some(Outcome::Done) => "done",
         Some(Outcome::KeptServing) => "the engine did not release; iemmixer keeps serving",
         Some(Outcome::NeedsOwner) => "stopped; the owner decides",
-        Some(Outcome::Refused) => "refused: activity on stage, tried again every 15 min",
         None => "no switch yet",
     }
 }
@@ -131,12 +112,6 @@ pub fn mode_name(m: Mode) -> &'static str {
 /// The first `max` characters of `text`.
 pub fn cut(text: &str, max: usize) -> String {
     text.chars().take(max).collect()
-}
-
-/// Every stage peak (dBFS) at or below the band-activity level; no peak at
-/// all is not quiet.
-pub fn stage_quiet(peaks: &[f64]) -> bool {
-    !peaks.is_empty() && peaks.iter().all(|p| *p <= ACTIVE_DB)
 }
 
 /// The guard's own site settings the daemon decides with (`[guard]`).
@@ -459,16 +434,11 @@ pub struct Guard {
     /// `%LOCALAPPDATA%\iemmixer` (`bundles\`, `bin\`, `guard\`); none: no files.
     root: Option<PathBuf>,
     clock: Clock,
-    /// The request of the switch in progress.
+    /// The request of the switch in progress (`live --trial`), read by its
+    /// precheck.
     trial: bool,
-    force: bool,
-    build: Option<String>,
-    /// The interlock's report when the stage was not quiet.
-    activity: Option<String>,
     /// What the request being handled did (the reply's detail).
     report: Vec<String>,
-    /// A status line (a dropped retry).
-    note: Option<String>,
     /// What the last precheck named without refusing (a dev entry without
     /// a PWA notification subscription, #9 2026-09-28); dropped by the next
     /// precheck and once an alarm reaches a device.
@@ -522,11 +492,7 @@ impl Guard {
             root,
             clock,
             trial: false,
-            force: false,
-            build: None,
-            activity: None,
             report: Vec::new(),
-            note: None,
             subscriptions_note: None,
             lan_note: None,
             job_note: None,
@@ -701,8 +667,6 @@ impl Guard {
             self.state.job = None;
         }
         self.trial = false;
-        self.force = false;
-        self.build = None;
         info!(
             "switch ended in {}: {}",
             mode_name(mode),
@@ -764,13 +728,6 @@ impl Guard {
             ))
         }
     }
-
-    #[cfg(test)]
-    fn set_now(&self, t: u64) {
-        if let Clock::Fixed(c) = &self.clock {
-            c.store(t, Ordering::SeqCst);
-        }
-    }
 }
 
 /// `iemmode status`: one line.
@@ -782,17 +739,6 @@ pub fn status_text(g: &Guard) -> String {
     });
     if let Some(run) = g.state.job {
         parts.push(format!("HIL job {run}"));
-    }
-    if let Some(r) = &g.state.interlock_retry {
-        parts.push(format!(
-            "the {} switch waits: {} interlock refusals, next try at {}",
-            mode_name(r.target),
-            r.refusals,
-            r.next_at
-        ));
-    }
-    if let Some(n) = &g.note {
-        parts.push(n.clone());
     }
     if g.reaper_notice {
         parts.push(handover::NOTICE_REPORT.to_owned());
@@ -848,12 +794,7 @@ pub fn send_notices(pc: &mut dyn Pc, g: &mut Guard) {
 /// (`plan::on_error`). "ide event" pre-empts a switch into dev/live within
 /// 1 s of a waiting step, after a mutating one.
 pub fn run_switch(pc: &mut dyn Pc, g: &mut Guard, from: Mode, to: Mode) -> Outcome {
-    let facts = Facts {
-        trial: g.trial,
-        force: g.force,
-        ..pc.facts()
-    };
-    let steps = plan(from, to, &facts);
+    let steps = plan(to, &pc.facts());
     g.begin(from, to, &steps);
     let mut skip: Vec<Step> = Vec::new();
     for step in steps {
@@ -864,15 +805,12 @@ pub fn run_switch(pc: &mut dyn Pc, g: &mut Guard, from: Mode, to: Mode) -> Outco
             return back_to_event(pc, g, "pre-empted by event");
         }
         info!("step {step:?}");
-        match run_step(pc, g, step, to, &facts) {
+        match run_step(pc, g, step, to) {
             Ok(()) => g.done(pc, step),
             Err(StepError::Preempted) if to != Mode::Event => {
                 return back_to_event(pc, g, "pre-empted by event");
             }
             Err(e) => {
-                if let Some(report) = g.activity.take() {
-                    return refused(pc, g, from, to, &report);
-                }
                 let (why, health, policy) = failure(pc, g, to, step, &e);
                 match policy {
                     OnError::Unwind => {
@@ -951,42 +889,6 @@ fn failure(
     (why, health, on_error(to, step, health, g.site.on_pref_fail))
 }
 
-/// The interlock heard the band: the entry waits for its retry in 15 min;
-/// the fourth refusal sends the owner one notice, the eighth drops it.
-fn refused(pc: &mut dyn Pc, g: &mut Guard, from: Mode, to: Mode, report: &str) -> Outcome {
-    if !may_end(g, to) {
-        return back_to_event(pc, g, "pre-empted by event");
-    }
-    let refusals = g
-        .state
-        .interlock_retry
-        .as_ref()
-        .filter(|r| r.target == to)
-        .map_or(0, |r| r.refusals)
-        + 1;
-    g.info(format!(
-        "the interlock heard the band ({report}); refusal {refusals}"
-    ));
-    if refusals >= RETRY_LAST {
-        g.state.interlock_retry = None;
-        g.note = Some(format!(
-            "the {} switch was dropped after {refusals} interlock refusals",
-            mode_name(to)
-        ));
-    } else {
-        g.state.interlock_retry = Some(InterlockRetry {
-            target: to,
-            build: g.build.clone(),
-            refusals,
-            next_at: g.now() + RETRY_S,
-        });
-    }
-    if refusals == RETRY_NOTICE_AT {
-        g.raise(Some(Step::Interlock), RETRY_NOTICE, false);
-    }
-    g.finish(pc, Outcome::Refused, from)
-}
-
 /// `EngineArm`'s readiness. An engine that ended with exit 75 before it
 /// was ready (another process still held its state directory) is started
 /// again, held, once, after `crash::BUSY_RETRY`, inside the step, with the
@@ -1019,18 +921,17 @@ fn engine_ready(pc: &mut dyn Pc, g: &mut Guard, to: Mode, c: &Cancel) -> R<Statu
 }
 
 /// One step, one `Pc` call (plus the verdicts of `handover`).
-fn run_step(pc: &mut dyn Pc, g: &mut Guard, step: Step, to: Mode, facts: &Facts) -> R<()> {
+fn run_step(pc: &mut dyn Pc, g: &mut Guard, step: Step, to: Mode) -> R<()> {
     let c = g.cancel.clone();
     match step {
         Step::Precheck => {
             g.subscriptions_note = None;
-            g.subscriptions_note = pc.precheck(to, facts.trial)?;
+            g.subscriptions_note = pc.precheck(to, g.trial)?;
             if let Some(n) = g.subscriptions_note.clone() {
                 g.info(n);
             }
             Ok(())
         }
-        Step::Interlock => interlock(pc, g, facts, &c),
         Step::AppStop => {
             let exit = pc.app_stop(&c)?;
             handover::app_exit(exit).map_err(|bad| StepError::Failed(bad.join("; ")))
@@ -1207,28 +1108,6 @@ fn take_logon(pc: &mut dyn Pc, g: &mut Guard) {
     g.save();
 }
 
-/// 60 s on the stage inputs: REAPER's meters while REAPER runs, else
-/// `iem-engine interlock`. Activity is not an error of the check: the
-/// report goes to [`refused`].
-fn interlock(pc: &mut dyn Pc, g: &mut Guard, facts: &Facts, c: &Cancel) -> R<()> {
-    let (quiet, report) = if facts.reaper {
-        let peaks = pc.reaper_meters(INTERLOCK_S, c)?;
-        (
-            stage_quiet(&peaks),
-            format!("REAPER stage peaks {peaks:?} dBFS"),
-        )
-    } else {
-        pc.engine_interlock(INTERLOCK_S, c)?
-    };
-    if quiet {
-        g.info(format!("interlock quiet: {report}"));
-        Ok(())
-    } else {
-        g.activity = Some(report.clone());
-        Err(StepError::failed(format!("activity on stage: {report}")))
-    }
-}
-
 // ---- requests ----
 
 /// A request from the pipe with the switch generation it saw, and where
@@ -1254,11 +1133,8 @@ fn stale(req: &Request, v: &View) -> Option<Reply> {
 struct Entry {
     to: Mode,
     build: Option<String>,
-    force: bool,
     trial: bool,
     dry_run: bool,
-    /// The guard's own retry after an interlock refusal.
-    retry: bool,
 }
 
 /// Handles one request on the daemon thread.
@@ -1274,20 +1150,14 @@ pub fn handle(pc: &mut dyn Pc, g: &mut Guard, req: Request, epoch: u64) -> Reply
         Request::Subscribe => (true, "subscriptions are served by the pipe".to_owned()),
         Request::Event { dry_run: true } => dry_event(pc, g),
         Request::Event { dry_run: false } => event_now(pc, g),
-        Request::Dev {
-            build,
-            force,
-            dry_run,
-        } => entry(
+        Request::Dev { build, dry_run } => entry(
             pc,
             g,
             Entry {
                 to: Mode::Dev,
                 build,
-                force,
                 trial: false,
                 dry_run,
-                retry: false,
             },
         ),
         Request::Live {
@@ -1300,17 +1170,15 @@ pub fn handle(pc: &mut dyn Pc, g: &mut Guard, req: Request, epoch: u64) -> Reply
             Entry {
                 to: Mode::Live,
                 build: Some(build),
-                force: false,
                 trial,
                 dry_run,
-                retry: false,
             },
         ),
         Request::Install { zip } => install_bundle(g, Path::new(&zip)),
         Request::Activate { sha } => activate(pc, g, &sha),
         Request::TestSignal { input, dbfs, ttl_s } => test_signal(pc, g, &input, dbfs, ttl_s),
         Request::Report { sha, hil, detail } => report(g, &sha, &hil, &detail),
-        Request::JobBegin { run } => job_begin(pc, g, run),
+        Request::JobBegin { run } => job_begin(g, run),
         Request::JobEnd { run } => job_end(g, run),
         Request::InstallSite { path } => install_site(pc, g, &path),
         Request::ForceReopen => match g.need_dev("force-reopen") {
@@ -1359,15 +1227,13 @@ fn plan_text(steps: &[Step]) -> String {
 /// `event --dry-run`: the plan from the facts, nothing changed.
 fn dry_event(pc: &mut dyn Pc, g: &mut Guard) -> (bool, String) {
     let facts = pc.facts();
-    let steps = plan(g.state.mode, Mode::Event, &facts);
+    let steps = plan(Mode::Event, &facts);
     (true, format!("dry run: {}", plan_text(&steps)))
 }
 
 /// "ide event": the event plan from the current mode (in `event` its
 /// checks, plus a restart of what runs but does not serve).
 fn event_now(pc: &mut dyn Pc, g: &mut Guard) -> (bool, String) {
-    g.state.interlock_retry = None;
-    g.note = None;
     let from = g.state.mode;
     let out = run_switch(pc, g, from, Mode::Event);
     (
@@ -1390,23 +1256,11 @@ fn build_refusal(g: &Guard, e: &Entry) -> Option<String> {
     }
 }
 
-/// Ends the wait of a refused entry: it ran, unwound, was pre-empted, or
-/// may no longer run. Otherwise the watch would enter again every second.
-fn drop_retry(g: &mut Guard) {
-    g.state.interlock_retry = None;
-    g.note = None;
-    g.save();
-}
-
+/// A dev or live entry runs at once: only the owner's signal decides
+/// whether the PC may change, so no step waits for a quiet stage or refuses
+/// on activity (#38, owner 2026-10-06).
 fn entry(pc: &mut dyn Pc, g: &mut Guard, e: Entry) -> (bool, String) {
-    if !e.retry {
-        g.state.interlock_retry = None;
-        g.note = None;
-    }
     if let Some(why) = build_refusal(g, &e) {
-        if e.retry {
-            drop_retry(g);
-        }
         return (false, why);
     }
     if e.dry_run {
@@ -1417,14 +1271,8 @@ fn entry(pc: &mut dyn Pc, g: &mut Guard, e: Entry) -> (bool, String) {
         pc.set_bundle(Some(sha));
     }
     g.trial = e.trial;
-    g.force = e.force;
-    g.build.clone_from(&e.build);
     let from = g.state.mode;
     let out = run_switch(pc, g, from, e.to);
-    // Only a refusal waits for its retry (`refused` counted it).
-    if out != Outcome::Refused {
-        drop_retry(g);
-    }
     (
         out == Outcome::Done && g.state.mode == e.to,
         switch_text(e.to, out, g.state.mode),
@@ -1435,12 +1283,8 @@ fn entry(pc: &mut dyn Pc, g: &mut Guard, e: Entry) -> (bool, String) {
 /// bundle, PWA notification subscriptions, foreign engine and app exe),
 /// nothing changed.
 fn dry_entry(pc: &mut dyn Pc, g: &mut Guard, e: &Entry) -> (bool, String) {
-    let facts = Facts {
-        trial: e.trial,
-        force: e.force,
-        ..pc.facts()
-    };
-    let steps = plan(g.state.mode, e.to, &facts);
+    // `trial` decides only the precheck (below), never a step of the plan.
+    let steps = plan(e.to, &pc.facts());
     let bundle = e
         .build
         .clone()
@@ -1538,7 +1382,6 @@ fn activation_now(pc: &mut dyn Pc, g: &Guard) -> Activation {
     let busy = Busy {
         switching: g.state.switching.is_some(),
         job: g.state.job,
-        retry: g.state.interlock_retry.as_ref().map(|r| r.target),
     };
     activation(g.state.mode, &pc.facts(), busy)
 }
@@ -1679,7 +1522,7 @@ fn restart_in_job(pc: &mut dyn Pc, g: &mut Guard) -> Result<(), String> {
         Step::ServerStart,
     ]);
     for step in steps {
-        match run_step(pc, g, step, Mode::Dev, &f) {
+        match run_step(pc, g, step, Mode::Dev) {
             // The children are saved after every step, so the guard an
             // activation hands over to adopts the new engine and server.
             Ok(()) => g.done(pc, step),
@@ -1699,7 +1542,7 @@ fn restart_in_job(pc: &mut dyn Pc, g: &mut Guard) -> Result<(), String> {
 }
 
 /// The HIL test signal, card-masked to `[guard] hil_tx` (design §4), only
-/// inside a begun HIL job (its band-quiet and stage checks, design §7).
+/// inside a begun HIL job (design §7).
 fn test_signal(
     pc: &mut dyn Pc,
     g: &mut Guard,
@@ -1759,36 +1602,16 @@ fn report(g: &mut Guard, sha: &str, hil: &str, detail: &str) -> (bool, String) {
     (true, format!("bundle {sha}: HIL {hil} ({detail})"))
 }
 
-/// A HIL job may begin in dev, after 5 min of band quiet and a quiet
-/// 60 s of stage peaks from the engine's meters (design §7).
-fn job_begin(pc: &mut dyn Pc, g: &mut Guard, run: u64) -> (bool, String) {
+/// A HIL job begins in dev while no other job runs (a switch in progress
+/// refuses it at the pipe, `while_switching`). Nothing reads the stage: only
+/// the owner's signal decides whether the PC may be used, and other devices
+/// on the Dante network feed the card's inputs (#38, owner 2026-10-06).
+fn job_begin(g: &mut Guard, run: u64) -> (bool, String) {
     if let Err(why) = g.need_dev("a HIL job") {
         return (false, why);
     }
     if let Some(other) = g.state.job {
         return (false, format!("HIL job {other} has not ended"));
-    }
-    let quiet = match pc.band_quiet_for() {
-        Ok(d) => d,
-        Err(e) => return (false, format!("band activity unreadable: {e}")),
-    };
-    if quiet < JOB_QUIET {
-        return (
-            false,
-            format!(
-                "the band was quiet for {} s; a job needs {} s",
-                quiet.as_secs(),
-                JOB_QUIET.as_secs()
-            ),
-        );
-    }
-    let c = g.cancel.clone();
-    let peaks = match pc.engine_stage_peaks(JOB_PEAKS_S, &c) {
-        Ok(p) => p,
-        Err(e) => return (false, format!("stage peaks: {e}")),
-    };
-    if !stage_quiet(&peaks) {
-        return (false, format!("stage peaks {peaks:?} dBFS: not quiet"));
     }
     g.state.job = Some(run);
     g.save();
@@ -1935,7 +1758,7 @@ fn rehearse(pc: &mut dyn Pc, g: &mut Guard) -> (bool, String) {
     }
     steps.extend([Step::TuningExit, Step::PrefCheck]);
     for step in steps {
-        let Err(e) = run_step(pc, g, step, Mode::Event, &f) else {
+        let Err(e) = run_step(pc, g, step, Mode::Event) else {
             continue;
         };
         let (why, health, policy) = failure(pc, g, Mode::Event, step, &e);
@@ -2005,8 +1828,8 @@ fn rehearse(pc: &mut dyn Pc, g: &mut Guard) -> (bool, String) {
 // ---- the watch ----
 
 /// The once-a-second watch (P10: the process list only): exits of our
-/// children, REAPER or the app appearing in dev/live, a due respawn or
-/// interlock retry, hourly drift, the end of the session.
+/// children, REAPER or the app appearing in dev/live, a due respawn, hourly
+/// drift, the end of the session.
 pub fn tick(pc: &mut dyn Pc, g: &mut Guard, at: Instant) {
     // What the watch did is logged; no request reads it.
     g.report.clear();
@@ -2023,7 +1846,6 @@ pub fn tick(pc: &mut dyn Pc, g: &mut Guard, at: Instant) {
         g.respawn_at = None;
         respawn(pc, g);
     }
-    retry_due(pc, g);
     if g.last_drift
         .is_none_or(|t| at.saturating_duration_since(t) >= DRIFT_EVERY)
     {
@@ -2156,33 +1978,6 @@ fn watch_band(g: &mut Guard, p: &Procs) {
         );
     }
     g.band_seen = up;
-}
-
-fn retry_due(pc: &mut dyn Pc, g: &mut Guard) {
-    let Some(r) = g.state.interlock_retry.clone() else {
-        return;
-    };
-    if g.now() < r.next_at {
-        return;
-    }
-    info!(
-        "trying the {} switch again after {} interlock refusals",
-        mode_name(r.target),
-        r.refusals
-    );
-    let (_, detail) = entry(
-        pc,
-        g,
-        Entry {
-            to: r.target,
-            build: r.build,
-            force: false,
-            trial: false,
-            dry_run: false,
-            retry: true,
-        },
-    );
-    info!("{detail}");
 }
 
 /// The end of the Windows session (design §5.4): no respawn, the engine

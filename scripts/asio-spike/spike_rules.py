@@ -14,14 +14,9 @@ REQUIRED = (
     "PC_BUFFER_KEY", "PC_BUFFER_NAME", "PC_BUFFER_ORIGINAL",
     "PC_REAPER_HTTP", "PC_MAIN_PROJECT", "PC_REAPER_START_TASK_PATH", "PC_REAPER_START_TASK",
     "PC_NTRACK", "PC_METER_BRIDGE", "PC_METER_HEARTBEAT", "PC_METER_ACTION",
-    "PC_APP_PROCESS", "PC_APP_HTTP", "PC_ACTIVITY_CHANNELS", "RAW_DIR",
+    "PC_APP_PROCESS", "PC_APP_HTTP", "RAW_DIR",
 )
-# The inputs the spike's band guard listens to: the site's stage inputs as card
-# numbers from 1 ("101-110,121-124"), or "all" only when asked (program inputs may
-# carry signal while the band is silent).
-ACTIVITY_CHANNELS = re.compile(r"all|[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*")
 CPU_LIST = re.compile(r"[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*")
-MAX_INPUT = 1024
 FRAMES = (32, 48, 64)
 MAX_SECONDS = 36_000     # an 8 h soak with margin (S1c design note §8 W4)
 
@@ -44,20 +39,7 @@ def load_env(path: Path) -> dict[str, str]:
     for k in ("PC_BUFFER_ORIGINAL", "PC_NTRACK"):
         if not env[k].isdigit():
             raise StepError(f"{path}: {k} must be a whole number")
-    check_channels(env["PC_ACTIVITY_CHANNELS"], path)
     return env
-
-
-def check_channels(text: str, path: Path) -> None:
-    """The spike refuses the same lists (telemetry.rs `Watched::parse`)."""
-    ok = ACTIVITY_CHANNELS.fullmatch(text) is not None
-    if ok and text != "all":
-        for part in text.split(","):
-            first, _, last = part.partition("-")
-            lo, hi = int(first), int(last or first)
-            ok = ok and 1 <= lo <= hi <= MAX_INPUT
-    if not ok:
-        raise StepError(f"{path}: PC_ACTIVITY_CHANNELS must be 'all' or card inputs from 1 like 101-110,121-124 (got {text!r})")
 
 
 def check_request(mode: str, frames: int | None, seconds: int, burn_us: int, stress: int, cycles: int,
@@ -99,7 +81,6 @@ def run_fields(env: dict[str, str], args) -> dict:
             "cycles": args.cycles,
             "cpu": -1 if getattr(args, "cpu", None) is None else args.cpu, "threshold_us": getattr(args, "threshold_us", 10),
             "audio_cpus": getattr(args, "audio_cpus", "") or "", "stress_cpus": getattr(args, "stress_cpus", "") or "",
-            "activity_channels": env["PC_ACTIVITY_CHANNELS"],
             "timeout": run_timeout(args.mode, args.seconds, args.cycles)}
 
 
@@ -192,4 +173,4 @@ def verdict(report: dict) -> dict:
     stable = report.get("outcome") == "done" and bool(tel) and all(v == 0 for v in messages.values()) and all(
         total[k] == 0 for k in ("missed", "overruns", "position_gaps"))
     return {"outcome": report.get("outcome"), "stable": stable, **messages, "interval_p999_us": worst, **total,
-            "activity_channels": report.get("activity_channels"), "loudest_inputs": report.get("loudest_inputs", [])}
+            "loudest_inputs": report.get("loudest_inputs", [])}

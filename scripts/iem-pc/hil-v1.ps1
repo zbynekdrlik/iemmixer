@@ -8,8 +8,8 @@ verified bundle directory (bundles\<sha>\) after `iemmode install`:
 Public, with no site value: it reads everything through `iemmode` and the
 local server's /api/site, and never talks to GitHub.
 
-Order: `iemmode job-begin` (the guard refuses unless dev, not switching, the
-band quiet 5 min and the stage quiet 60 s) -> `iemmode activate` -> the checks
+Order: `iemmode job-begin` (the guard refuses unless dev and no other job
+runs; a switch refuses it; no stage reading, #38) -> `iemmode activate` -> the checks
 -> `iemmode job-end` -> `iemmode report <sha> green|red <summary>` ->
 result.json {conclusion, summary, why, checks}. Once a switch to event started
 (the guard left dev or runs a switch) the job ends as cancelled, never success,
