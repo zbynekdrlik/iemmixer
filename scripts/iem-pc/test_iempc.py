@@ -1525,6 +1525,15 @@ class HandoverTests(Base):
         self.assertEqual((st["card"], st["closed"]), ("reaper", True))
         self.assertNotIn("handed_over", st)
 
+    def test_a_pc_change_in_flight_keeps_the_window_open(self) -> None:
+        # F2 round 3, MAJOR: a window step still changing the PC (a set-buffer write,
+        # an enter) is no free card to hand over.
+        self.open_window(pref_current=64, in_flight={"step": "set-buffer", "started": time.time(), "bound_s": 60})
+        code, _, err = self.run_main("handover-s1a")
+        self.assertEqual(code, 1)
+        self.assertIn("in flight", err)
+        self.assertFalse(self.state()["closed"])
+
     def test_a_card_taken_back_during_the_checks_keeps_the_window_open(self) -> None:
         self.open_window(pref_current=64)
         self.changing_meanwhile(lambda st: st.update(card="switching"))

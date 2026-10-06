@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -396,6 +397,16 @@ class RebootPrepareTests(unittest.TestCase):
         self.assertEqual(events, ["abandon", "abandon"])   # read-only: "ide event" does not wait for them
         self.assertEqual(self.read_state()["card"], "rebooting")
 
+    def test_a_pc_change_in_flight_refuses_the_reboot(self) -> None:
+        # F2 round 3, MAJOR: a step of another process still changing the PC is no
+        # cleanly preempted window (I1).
+        self.write_state(in_flight={"step": "apply", "started": time.time(), "bound_s": 600})
+        with self.assertRaisesRegex(tw.StepError, "in flight"):
+            tw.cmd_reboot_prepare(self.env, self.args)
+        st = self.read_state()
+        self.assertEqual(st["card"], "free")
+        self.assertNotIn("reboot", st)
+
     def test_a_window_a_preempt_closed_during_the_reads_is_not_prepared(self) -> None:
         self.write_state()
 
@@ -452,6 +463,111 @@ ENV = {"PC_ROOT": "R", "PC_TUNING_ROOT": "T", "PC_XPERF": "xperf.exe",
        "PC_REAPER_START_TASK_PATH": "P", "PC_REAPER_START_TASK": "TK", "PC_NTRACK": "9",
        "PC_METER_BRIDGE": "B", "PC_METER_ACTION": "A", "PC_METER_HEARTBEAT": "HB",
        "PC_ASIO_MODULE": "M", "PC_APP_HTTP": "AH"}
+
+
+class TuningChangeTests(unittest.TestCase):
+    """F2 round 3, MAJOR, in the tuning window: enter, exit, apply and undo are
+    PC changes with an intent (recorded under the lock before the call, cleared
+    after it). They all write the tuning journal, so a preempt never runs its
+    own tuning-exit while one is in flight (two journal writers at once lose
+    entries); the late step runs the exit itself once its call is back, and an
+    enter that lands after the window closed reverts its levers. Only sw.ps is
+    faked; the real cmd_preempt, unwind and settle run."""
+
+    def setUp(self) -> None:
+        self.dir = Path(tempfile.mkdtemp())
+        self.saved = (tw.sw.STATE, tw.sw.EVENT_NOW, tw.sw.ps, tw.sw.alarm, tw.sw.POLL_S, getattr(tw.sw, "SETTLE_S", None))
+        tw.sw.STATE, tw.sw.EVENT_NOW = self.dir / "spike-window.json", self.dir / "EVENT-NOW"
+        tw.sw.POLL_S, tw.sw.SETTLE_S = 0.05, 0.3
+        self.alarms: list[str] = []
+        tw.sw.alarm = self.alarms.append
+        self.events: list[str] = []
+        self.bodies: list[str] = []
+        self.wait_for_close = ""        # a verb whose call returns only once a preempt closed the window
+        self.in_flight = threading.Event()
+
+        def fake_ps(env, body, timeout=300, event="finish"):
+            self.bodies.append(body)
+            for verb in ("Enter-IemTuningMode", "Exit-IemTuningMode", "Invoke-IemTuningApply", "Undo-IemTuning"):
+                if verb in body:
+                    self.events.append(f"{verb}:start")
+                    if verb == self.wait_for_close:
+                        self.in_flight.set()
+                        deadline = time.monotonic() + 5
+                        while not tw.sw.load_state().get("closed"):
+                            self.assertLess(time.monotonic(), deadline)
+                            time.sleep(0.01)
+                    self.events.append(f"{verb}:end")
+                    return [{"key": "plan:active", "action": "written", "error": None}]
+            if body == "@(Get-Process -Name asio_spike -ErrorAction SilentlyContinue).Count":
+                return 0
+            if "Stop-SpikeGracefully" in body:
+                return True
+            if "holders = @(Get-GoldenAsioHolders" in body:
+                return {"reaper": 1, "holders": ["reaper.exe:42"]}
+            return {"ok": True}   # the bring-back, the stop file's clean-up
+
+        tw.sw.ps = fake_ps
+        tw.sw.save_state({"id": "w", "card": "free", "preflight": {"pref": 64}, "pref_original": 64, "pref_current": None,
+                          "pref_restored": False, "runs": [], "closed": False})
+        self.env = dict(ENV)
+
+    def tearDown(self) -> None:
+        tw.sw.STATE, tw.sw.EVENT_NOW, tw.sw.ps, tw.sw.alarm, tw.sw.POLL_S, tw.sw.SETTLE_S = self.saved
+
+    def preempt_during(self, step) -> BaseException | None:
+        out: dict = {}
+
+        def run() -> None:
+            try:
+                step()
+            except BaseException as e:  # noqa: BLE001 — the step's outcome is what the test reads
+                out["error"] = e
+
+        t = threading.Thread(target=run)
+        t.start()
+        self.assertTrue(self.in_flight.wait(5))
+        (self.dir / "EVENT-NOW").touch()
+        tw.sw.cmd_preempt(self.env)
+        t.join(10)
+        return out.get("error")
+
+    def test_an_enter_that_lands_after_the_window_closed_reverts_its_levers(self) -> None:
+        self.wait_for_close = "Enter-IemTuningMode"
+        error = self.preempt_during(lambda: tw.cmd_enter(self.env, argparse.Namespace(only="plan,governor,placement", idle="default")))
+        self.assertIsInstance(error, tw.sw.EventNow)
+        # No exit while the enter wrote the journal; the late enter's own exit after it.
+        self.assertEqual(self.events, ["Enter-IemTuningMode:start", "Enter-IemTuningMode:end",
+                                       "Exit-IemTuningMode:start", "Exit-IemTuningMode:end"])
+        st = tw.sw.load_state()
+        self.assertEqual((st["closed"], st["tuning_mode"], st.get("in_flight")), (True, False, None))
+
+    def test_an_apply_that_lands_after_the_window_closed_runs_the_deferred_exit_and_alarms(self) -> None:
+        st = tw.sw.load_state()
+        st["tuning_mode"] = True   # entered earlier in this window
+        tw.sw.save_state(st)
+        self.wait_for_close = "Invoke-IemTuningApply"
+        error = self.preempt_during(lambda: tw.cmd_apply(self.env, argparse.Namespace(tier=2, only="")))
+        self.assertIsInstance(error, tw.sw.EventNow)
+        self.assertEqual(self.events, ["Invoke-IemTuningApply:start", "Invoke-IemTuningApply:end",
+                                       "Exit-IemTuningMode:start", "Exit-IemTuningMode:end"])
+        self.assertTrue(any("apply" in a and "pre-empted" in a for a in self.alarms), self.alarms)
+        self.assertFalse(tw.sw.load_state()["tuning_mode"])
+
+    def test_every_tuning_change_refuses_on_the_pc_before_its_modules_load(self) -> None:
+        # The stop file's check comes first: a step a preempt overtook compiles nothing
+        # and changes nothing.
+        tw.cmd_enter(self.env, argparse.Namespace(only="plan", idle="default"))
+        tw.cmd_exit(self.env, argparse.Namespace())
+        tw.cmd_apply(self.env, argparse.Namespace(tier=2, only=""))
+        tw.cmd_undo(self.env, argparse.Namespace(tier=2, only=""))
+        changes = [b for b in self.bodies if any(v in b for v in ("Enter-IemTuningMode", "Exit-IemTuningMode",
+                                                                  "Invoke-IemTuningApply", "Undo-IemTuning"))]
+        self.assertEqual(len(changes), 4)
+        for body in changes:
+            self.assertTrue(body.startswith(f"if (Test-Path -LiteralPath 'R\\queue\\stop') {{ throw '{tw.sw.STEP_REFUSED}"), body)
+            self.assertLess(body.index("queue\\stop"), body.index("IemMeasure.psm1"))
+        self.assertIsNone(tw.sw.load_state().get("in_flight"))
 
 
 class PollScriptTests(unittest.TestCase):
@@ -599,6 +715,8 @@ class PostBootRunTests(unittest.TestCase):
                     raise tw.StepError("PC step failed: REAPER did not load the project within 120 s")
                 self.started = True
                 return {"asio": "reaper"}
+            if "Test-SpikeTaskBusy" in body and "Remove-Item" in body:   # the spike's stop file, once REAPER is back
+                return "removed"
             if "Get-Process -Name asio_spike" in body:          # a preempt's spike check
                 return 0
             if "Stop-SpikeGracefully" in body:
@@ -629,6 +747,23 @@ class PostBootRunTests(unittest.TestCase):
         tw.cmd_post_boot(self.env, argparse.Namespace())
         st = tw.sw.load_state()
         self.assertEqual((st["card"], st["closed"], st["post_boot"]["problems"]), ("reaper", True, []))
+
+    def test_post_boot_removes_the_stop_file_once_reaper_is_back(self) -> None:
+        # F2 round 3, m1: reboot-prepare's unwind wrote the spike's stop file and kept
+        # it (the window stayed open); the close after the reboot removes it, so the
+        # next window's start is not refused.
+        self.autostart = True
+        tw.cmd_post_boot(self.env, argparse.Namespace())
+        back = next(i for i, c in enumerate(self.calls) if c.startswith("Invoke-SpikeBringBack"))
+        cleanup = [i for i, c in enumerate(self.calls) if "Test-SpikeTaskBusy" in c and "Remove-Item" in c]
+        self.assertEqual(len(cleanup), 1)
+        self.assertGreater(cleanup[0], back)
+
+    def test_a_failed_bring_back_keeps_the_stop_file(self) -> None:
+        self.bring_back_fails = True
+        with self.assertRaises(tw.StepError):
+            tw.cmd_post_boot(self.env, argparse.Namespace())
+        self.assertFalse(any("Remove-Item" in c for c in self.calls))
 
     # F2 round 3, decision 5: a reboot is the boot token changing, never the boot time
     # (a clock set back or forward says nothing about whether the PC rebooted).
