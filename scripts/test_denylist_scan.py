@@ -16,6 +16,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import denylist_content as dc  # noqa: E402
 import denylist_scan as ds  # noqa: E402
 
 TERMS = ["zyxname", "10.9.", "ghost-host.example"]
@@ -1092,8 +1093,8 @@ class DenylistScanTests(unittest.TestCase):
     def test_a_term_across_a_segment_boundary_is_found_once_and_keyed_alike(self) -> None:
         # the term starts 3 characters before the unit's first CHUNK ends; its line or run is
         # allowlisted by one --hash key in tree and commit mode
-        long = "x" * (ds.CHUNK - 4) + " zyxname " + "y" * ds.CHUNK
-        noise = random.Random(9).randbytes(4 * ds.CHUNK).replace(b"\x00", b"\x01")  # keeps a wide string binary
+        long = "x" * (dc.CHUNK - 4) + " zyxname " + "y" * dc.CHUNK
+        noise = random.Random(9).randbytes(4 * dc.CHUNK).replace(b"\x00", b"\x01")  # keeps a wide string binary
         cases = {"text.txt": (("first\n" + long + "\n").encode(), "2"),
                  "run.bin": (b"\x00\x01" + long.encode() + b"\x00", "run 1"),
                  "wide.txt": (("first\n" + long + "\n").encode("utf-16"), "2"),
