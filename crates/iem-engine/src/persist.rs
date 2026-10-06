@@ -21,7 +21,8 @@
 //!   aside, never read again;
 //! - `save.tmp.orphan-<n>`: a `save.tmp` the boot did not load (it could
 //!   not be read, was older than the state loaded, or was damaged), moved
-//!   aside by the next save and never read again;
+//!   aside by the next save and never loaded (each boot reads it once, for
+//!   an alarm when it holds a revision above the state loaded: `chain`);
 //! - `engine.lock`: the engine holding the directory (`Store::lock`).
 //!
 //! A file is `{"format", "schema", "sha256", "payload"}`; the SHA-256 covers the

@@ -92,7 +92,13 @@ mod imp {
     /// own fallback). The handle is opened write-through, as `MoveFileExW`
     /// opens its own for `MOVEFILE_WRITE_THROUGH`, and with write access,
     /// so the renamed file is flushed (`FlushFileBuffers`) before this
-    /// returns: never a plain rename that is not yet on the disk.
+    /// returns: never a plain rename that is not yet on the disk. The
+    /// write access is the price: a source another process holds without
+    /// write sharing fails this retry (the targets that exist and may be
+    /// held are `save.tmp` and `baseline.json`, whose sources `save.new`
+    /// and `baseline.tmp` the store has just written and closed), and the
+    /// save is reported failed and made again by the next one, rather than
+    /// renamed without the flush.
     pub(super) fn rename_posix(from: &Path, to: &Path) -> io::Result<()> {
         let file: File = OpenOptions::new()
             .access_mode(DELETE | GENERIC_WRITE)
