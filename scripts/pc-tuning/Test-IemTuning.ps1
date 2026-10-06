@@ -243,6 +243,16 @@ try {
     $childToken = [IO.File]::ReadAllText($childOut)
     Assert ($childToken -and $childToken -eq [string](Get-IemBootIdentity -Profile $prof).token) 'boot-token-is-one-token-for-both-callers'
     $bootLock.Dispose()
+    # The lock carries its own DACL, Administrators and SYSTEM full control: .NET opens
+    # an existing mutex with full access, so the guard's tuning task, an ssh session
+    # and SYSTEM each open it whoever created it first (#32 MINOR-3).
+    $ownLock = & (Get-Module IemTuning) { New-BootLock }
+    try {
+        $full = [System.Security.AccessControl.MutexRights]::FullControl
+        $rules = @($ownLock.GetAccessControl().GetAccessRules($true, $false, [System.Security.Principal.SecurityIdentifier]))
+        $holders = @($rules | Where-Object { "$($_.AccessControlType)" -eq 'Allow' -and ($_.MutexRights -band $full) -eq $full } | ForEach-Object { $_.IdentityReference.Value })
+        Assert ($holders -contains 'S-1-5-32-544' -and $holders -contains 'S-1-5-18') "boot-lock-opens-to-administrators-and-system ($($holders -join ','))"
+    } finally { $ownLock.Dispose() }
     # A boot key that is not volatile would survive a reboot, so every Tier 3 value
     # would read as pending for ever: it is refused, never trusted (review R1).
     $stableRoot = "$root-stable"
