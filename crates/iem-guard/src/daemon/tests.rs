@@ -2028,7 +2028,7 @@ fn inject_seh_is_refused_outside_a_dev_job() {
 }
 
 /// The parked-engine test (design §10 test #2, #35) leaves the card held
-/// until an OS restart, so it has the SEH test's gates: dev, inside a begun
+/// until the engine ends, so it has the SEH test's gates: dev, inside a begun
 /// HIL job. The mode decides first: live and event refuse it even with a
 /// job recorded, and dev without a job refuses it too; the engine is never
 /// asked. Inside a job the engine's own refusal (no fault-injection flag) is
@@ -2076,8 +2076,9 @@ fn inject_park_is_refused_in_live_in_event_and_outside_a_job() {
 
 /// Inside a HIL job in dev the parked-engine test reaches the engine (#35),
 /// which keeps running with its stream parked and the card held: `iemmode
-/// status` reports `parked`, and the watch starts no engine (none ended)
-/// until the OS restart the test makes.
+/// status` reports `parked`, and the watch starts no engine (none ended).
+/// The engine runs so until it ends: test #2 ends it with an OS restart, but
+/// any `Shutdown` (an "ide event", a job's restart) ends it too.
 #[test]
 fn an_injected_park_leaves_the_engine_running_parked() {
     let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
@@ -2088,7 +2089,8 @@ fn an_injected_park_leaves_the_engine_running_parked() {
         (
             true,
             "the engine raises a structured exception under the test hold: its stream \
-             parks with the card held and the engine keeps running until an OS restart"
+             parks with the card held and the engine keeps running until it ends \
+             (test #2 ends it with an OS restart)"
         )
     );
     assert_eq!(pc.count(Call::InjectPark), 1);
