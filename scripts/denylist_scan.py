@@ -87,6 +87,12 @@ LONG_TEXT_RUN = 32
 # Content is scanned in batches of about CHUNK bytes, joined by SEP -- a private-use, non-word
 # character that no form creates or removes -- so CPU and memory stay bounded (#32 review m7).
 CHUNK = 1 << 18
+# A line or run longer than CHUNK is read in segments of CHUNK, each reaching back this far into the
+# one before (#32 F5 m9) -- and at least OVERLAP_PER_CHARACTER times the longest term, the longest
+# spelling of one character in a reading being four percent-encoded bytes (`%F0%9F%98%80`) -- so
+# no match is split and memory stays bounded however long the line
+SEGMENT_OVERLAP = 1 << 12
+OVERLAP_PER_CHARACTER = 12
 SEP = "\ue000"
 # a control byte ends a text run of binary content (a tab does not)
 _CONTROLS = bytes([*range(0x09), *range(0x0A, 0x20), 0x7F])
@@ -504,6 +510,11 @@ class Scanner:
         self.terms = [Term.of(entry, spelling) for entry, term in enumerate(terms, start=1)
                       for spelling in dict.fromkeys((nfc(term), ascii_spelling(nfc(term)))) if spelling.strip()]
         self.allow = allow
+        self.overlap = max(SEGMENT_OVERLAP, OVERLAP_PER_CHARACTER * max(map(len, terms), default=0))
+
+    def batches(self, data: bytes) -> Iterator[Batch]:
+        """batches(data), a long unit's segments overlapping by at least the longest term."""
+        return batches(data, self.overlap)
 
     def entries_in(self, text: str) -> list[int]:
         """The entries found in any reading of the text (other encodings, escapes decoded)."""
@@ -533,21 +544,24 @@ class Scanner:
                 last = start
                 found.add((unit, index))
         if batch.runs and found:  # a short term counts only in a long text run (MIN_BINARY_TERM)
-            keys = batch.keys()
+            texts = batch.texts()
             found = {(unit, index) for unit, index in found
-                     if not self.terms[index].short or long_text_run(keys[unit])}
+                     if not self.terms[index].short or long_text_run(texts[unit])}
         return sorted({(unit, self.terms[index].entry) for unit, index in found})
 
     def findings(self, path: str, batches: Iterable[Batch]) -> list[tuple[str, str, int]]:
-        """(unit label, unit key, entry number) of every term found and not allowlisted."""
-        found: list[tuple[str, str, int]] = []
+        """(unit label, unit key, entry number) of every term found and not allowlisted, once per
+        unit and entry (the segments of a long unit overlap)."""
+        found: dict[tuple[str, int], str] = {}
         for batch in batches:
             hits = self.batch_hits(batch)
             if hits:
                 keys = batch.keys()
-                found += [(f"{batch.label}{batch.first + unit}", keys[unit], entry) for unit, entry in hits
-                          if line_key(path, keys[unit]) not in self.allow]
-        return found
+                for unit, entry in hits:
+                    label = f"{batch.label}{batch.first + unit}"
+                    if (label, entry) not in found and line_key(path, keys[unit]) not in self.allow:
+                        found[label, entry] = keys[unit]
+        return [(label, key, entry) for (label, entry), key in found.items()]
 
     def shown(self, path: str) -> str:
         """The path as printed: each component holding a term (in any reading) or any non-ASCII
@@ -583,59 +597,143 @@ def git(repo: Path, *args: str) -> bytes:
 @dataclass(frozen=True)
 class Batch:
     """Consecutive units of one blob or diff -- lines of text, or text runs of binary content --
-    scanned together. A batch holds about CHUNK of content, so memory stays bounded whatever the
-    size of the blob."""
+    scanned together, or one segment of a unit longer than CHUNK. A batch holds at most CHUNK of
+    content plus an overlap, so memory stays bounded whatever the size of the blob or of a line."""
     source: str             # the units, decoded (decode), separated by `sep`, which no unit holds
     sep: str
     first: int              # the number of its first unit (`--hash` numbers units the same way)
     label: str = ""         # a unit's label in a location: "" (line N) or "run " (text run N)
     runs: bool = False      # byte runs of binary content: a short term needs a long text run
+    key: str | None = None  # a segment of a unit longer than CHUNK: that unit's key (long_key)
+
+    def texts(self) -> list[str]:
+        """Each unit's text (a segment's own)."""
+        return self.source.split(self.sep)
 
     def keys(self) -> list[str]:
-        """Each unit's text, which its allow key is made of."""
-        return self.source.split(self.sep)
+        """Each unit's key, which its allow key is made of: its text, or a long unit's long_key."""
+        return [self.key] if self.key is not None else self.texts()
 
     def text(self) -> str:
         """The units joined by SEP; a unit's own U+E000 is read as U+FFFD, also a non-word character."""
         return self.source.replace(SEP, "\ufffd").replace(self.sep, SEP)
 
 
-def long_text_run(key: str) -> bool:
-    return not undecodable(key) and len(key.encode("utf-8")) >= LONG_TEXT_RUN
+def long_text_run(text: str) -> bool:
+    return not undecodable(text) and len(text.encode("utf-8")) >= LONG_TEXT_RUN
 
 
-def line_batches(data: bytes | str, first: int = 1) -> Generator[Batch, None, int]:
-    """The lines of text (split on `\\n` only), a piece of about CHUNK at a time. Returns the
-    number the next unit gets."""
+def long_key(data: bytes | str, start: int, end: int) -> str:
+    """The key of a unit longer than CHUNK, data[start:end]: its SHA-256, hashed in place. Tree mode,
+    commit mode and `--hash` read such a unit in the same segments, so its allow key is the same in
+    all three (#32 F5 m9); the leading NUL keeps it apart from any line of text."""
+    digest = hashlib.sha256()
+    if isinstance(data, bytes):
+        digest.update(memoryview(data)[start:end])
+    else:
+        for at in range(start, end, CHUNK):
+            digest.update(data[at:min(end, at + CHUNK)].encode("utf-8", "surrogateescape"))
+    return "\0sha256:" + digest.hexdigest()
+
+
+# a segment edge goes right after one of these: no reading changes them or spans them (no escape,
+# reference or double-encoded character holds one but `;`, which ends a reference), so the edge
+# reads as the non-word character the content has there
+_SEGMENT_CUTS = (" ", "\t", ",", ";")
+_SEGMENT_CUT_BYTES = tuple(cut.encode() for cut in _SEGMENT_CUTS)
+
+
+def _segment_edge(data: bytes | str, low: int, at: int) -> int:
+    """A segment edge in data[low:at]: right after its last _SEGMENT_CUTS character; if it has none
+    (a word longer than the window, base64 say), `at` itself moved past UTF-8 continuation bytes, so
+    no character is split -- where a term may then seem to start or end at the edge."""
+    found = max(data.rfind(cut, low, at) for cut in (_SEGMENT_CUT_BYTES if isinstance(data, bytes) else _SEGMENT_CUTS))
+    if found >= 0:
+        return found + 1
+    if isinstance(data, bytes):
+        for _ in range(3):
+            if at < len(data) and 0x80 <= data[at] < 0xC0:
+                at += 1
+    return at
+
+
+def long_unit_batches(data: bytes | str, start: int, end: int, number: int, label: str, runs: bool,
+                      overlap: int) -> Iterator[Batch]:
+    """Unit `number`, data[start:end], longer than CHUNK, in segments (#32 F5 m9): steps of about
+    CHUNK (at least six overlaps), and each segment reaching back at least `overlap` before its step,
+    so a match up to `overlap` long that crosses a step or a segment's start lies whole in the segment
+    before or after it. Edges sit right after a _SEGMENT_CUTS character where the content has one,
+    so a term at an edge is matched as in the whole unit. Each segment is a batch of its own carrying
+    the whole unit's key; a match inside an overlap is found twice, and findings reports it once."""
+    key = long_key(data, start, end)
+    step = max(CHUNK, 6 * overlap)
+    sep = "\x00" if label else "\n"
+    segment_start = step_start = start
+    while step_start < end:
+        step_end = end if end - step_start <= step else _segment_edge(data, step_start + step // 2, step_start + step)
+        piece = data[segment_start:step_end]
+        yield Batch(decode(piece) if isinstance(piece, bytes) else piece, sep, number, label, runs, key)
+        segment_start = max(start, _segment_edge(data, step_end - 2 * overlap, step_end - overlap))
+        step_start = step_end
+
+
+def line_batches(data: bytes | str, first: int = 1, overlap: int = SEGMENT_OVERLAP) -> Generator[Batch, None, int]:
+    """The lines of text (split on `\\n` only): whole lines of at most CHUNK at a time, and a line
+    longer than that in overlapping segments (long_unit_batches). Returns the number the next unit
+    gets."""
     newline = b"\n" if isinstance(data, bytes) else "\n"
-    start = 0
+    start, size = 0, len(data)
     while True:
-        end = data.find(newline, start + CHUNK)
-        piece = data[start:] if end < 0 else data[start:end]
-        source = decode(piece) if isinstance(piece, bytes) else piece
-        yield Batch(source, "\n", first)
-        first += source.count("\n") + 1
-        if end < 0:
-            return first
-        start = end + 1
+        # the rest of the content, or the last line break within CHUNK
+        cut = size if size - start <= CHUNK else data.rfind(newline, start, start + CHUNK + 1)
+        if cut >= 0:
+            piece = data[start:cut]
+            source = decode(piece) if isinstance(piece, bytes) else piece
+            yield Batch(source, "\n", first)
+            first += source.count("\n") + 1
+            if cut == size:
+                return first
+            start = cut + 1
+        else:  # a line longer than CHUNK
+            end = data.find(newline, start + CHUNK)
+            end = size if end < 0 else end
+            yield from long_unit_batches(data, start, end, first, "", False, overlap)
+            first += 1
+            if end == size:
+                return first
+            start = end + 1
 
 
-def run_batches(data: bytes, first: int) -> Generator[Batch, None, int]:
+def _run_piece(data: bytes, start: int, end: int, first: int) -> Generator[Batch, None, int]:
+    """The runs of data[start:end] (which ends at a control byte or the content's end) as one batch."""
+    piece = _SHORT_RUN.sub(b"\x00", b"\x00" + data[start:end].translate(_CONTROL_TO_NUL) + b"\x00")
+    piece = _NUL_RUN.sub(b"\x00", piece).strip(b"\x00")
+    if piece:
+        yield Batch(decode(piece), "\x00", first, "run ", runs=True)
+        first += piece.count(b"\x00") + 1
+    return first
+
+
+def run_batches(data: bytes, first: int, overlap: int = SEGMENT_OVERLAP) -> Generator[Batch, None, int]:
     """The byte runs of binary content -- bytes without control characters, so a UTF-8 / cp1250
     letter stays in its run -- of MIN_BINARY_TERM or more bytes (a shorter one can never count: a
     short term needs a LONG_TEXT_RUN), NUL-separated, a piece of about CHUNK at a time: a piece ends
-    at a control byte, which no run holds, and no Python object is made per run. Returns the number
-    the next unit gets."""
-    start = 0
-    while start < len(data):
+    at a control byte, which no run holds, and no Python object is made per run. A run longer than
+    CHUNK is read in overlapping segments (long_unit_batches). Returns the number the next unit
+    gets."""
+    start, size = 0, len(data)
+    while start < size:
         cut = _CONTROL.search(data, start + CHUNK)
-        end = cut.end() if cut else len(data)
-        piece = _SHORT_RUN.sub(b"\x00", b"\x00" + data[start:end].translate(_CONTROL_TO_NUL) + b"\x00")
-        piece = _NUL_RUN.sub(b"\x00", piece).strip(b"\x00")
+        end, run_end = (cut.end(), cut.start()) if cut else (size, size)
+        if run_end - start <= 2 * CHUNK:
+            first = yield from _run_piece(data, start, end, first)
+        else:  # the run that crosses start + CHUNK is longer than CHUNK: it starts after the last
+            # control byte before start + CHUNK and ends at run_end
+            run_start = start + data[start:start + CHUNK].translate(_CONTROL_TO_NUL).rfind(b"\x00") + 1
+            first = yield from _run_piece(data, start, run_start, first)
+            yield from long_unit_batches(data, run_start, run_end, first, "run ", True, overlap)
+            first += 1
         start = end
-        if piece:
-            yield Batch(decode(piece), "\x00", first, "run ", runs=True)
-            first += piece.count(b"\x00") + 1
     return first
 
 
@@ -658,28 +756,44 @@ def wide_runs(data: bytes) -> list[str]:
     return [data[start:end].decode(codec, errors="replace") for start, end, codec in kept]
 
 
-def wide_run_batches(data: bytes, first: int) -> Iterator[Batch]:
-    """The UTF-16 strings inside binary content (wide_runs)."""
-    runs = wide_runs(data)
-    if runs:  # a decoded UTF-16 run holds no NUL: its characters are U+0009 and U+0020-01FF
-        yield Batch("\x00".join(runs), "\x00", first, "run ")
+def wide_run_batches(data: bytes, first: int, overlap: int = SEGMENT_OVERLAP) -> Iterator[Batch]:
+    """The UTF-16 strings inside binary content (wide_runs), about CHUNK characters at a time, and a
+    string longer than that in overlapping segments (long_unit_batches). A decoded UTF-16 run holds no
+    NUL: its characters are U+0009 and U+0020-01FF."""
+    pending: list[str] = []
+    size = 0
+    for run in wide_runs(data):
+        if pending and (size + len(run) > CHUNK or len(run) > CHUNK):
+            yield Batch("\x00".join(pending), "\x00", first, "run ")
+            first += len(pending)
+            pending, size = [], 0
+        if len(run) > CHUNK:
+            yield from long_unit_batches(run, 0, len(run), first, "run ", False, overlap)
+            first += 1
+        else:
+            pending.append(run)
+            size += len(run) + 1
+    if pending:
+        yield Batch("\x00".join(pending), "\x00", first, "run ")
 
 
-def batches(data: bytes) -> Iterator[Batch]:
+def batches(data: bytes, overlap: int = SEGMENT_OVERLAP) -> Iterator[Batch]:
     """What of a blob is scanned, numbered on unit after unit: text as its lines; UTF-32 / UTF-16
     text as its decoded lines and then its byte runs too (a binary may only look like it: quiet
     16-bit PCM has a NUL high byte in nearly every sample, and any blob may start FF FE -- genuine
     UTF-16 / UTF-32 Latin text has no byte run a term could match); other content holding a NUL
-    byte (binary) as its text runs -- byte runs, then UTF-16 strings. A run is labelled `run N`."""
+    byte (binary) as its text runs -- byte runs, then UTF-16 strings. A run is labelled `run N`.
+    `overlap` only places the segments of a long unit; units, their numbers and keys never depend
+    on it."""
     codec = wide_codec(data)
     if codec is not None:
-        first = yield from line_batches(data.decode(codec, errors="replace"))
-        yield from run_batches(data, first)
+        first = yield from line_batches(data.decode(codec, errors="replace"), 1, overlap)
+        yield from run_batches(data, first, overlap)
     elif b"\0" not in data:
-        yield from line_batches(data)
+        yield from line_batches(data, 1, overlap)
     else:
-        first = yield from run_batches(data, 1)
-        yield from wide_run_batches(data, first)
+        first = yield from run_batches(data, 1, overlap)
+        yield from wide_run_batches(data, first, overlap)
 
 
 def unit_key(data: bytes, number: int) -> str:
@@ -800,7 +914,7 @@ def scan_tree(scanner: Scanner, repo: Path, rev: str) -> list[Finding]:
         # the blob's own bytes: cat-file applies no .gitattributes (binary, -diff, textconv)
         data = git(repo, "cat-file", "blob", decode(obj))
         hits += lfs_problems(scanner, "tree ", path, data, numbered=True)
-        found = scanner.findings(path, batches(data))
+        found = scanner.findings(path, scanner.batches(data))
         if found:
             shown = scanner.shown(path)
             hits += [Hit(f"tree {shown}:{label}", entry) for label, _key, entry in found]
@@ -856,7 +970,7 @@ def scan_commit_blobs(scanner: Scanner, repo: Path, sha: str, seen: set[str]) ->
         if is_plain_text(data):
             continue
         blob_paths.add(path)
-        found = scanner.findings(path, batches(data))
+        found = scanner.findings(path, scanner.batches(data))
         if found and old.strip("0") and old_mode != GITLINK:  # not an added path, not a submodule
             found = not_in(found, git(repo, "cat-file", "blob", old))
         for label, key, entry in found:  # the label lets `--hash <sha>:<path> <N>` allowlist it
@@ -907,7 +1021,7 @@ def scan_commit_diff(scanner: Scanner, repo: Path, sha: str, seen: set[str], blo
                 seen.add(path)
                 hits += scanner.scan_path(path, f"{short} ")
     for path, lines in added.items():
-        found = scanner.findings(path, line_batches(b"\n".join(lines)))
+        found = scanner.findings(path, line_batches(b"\n".join(lines), 1, scanner.overlap))
         hits += [Hit(f"{short} {scanner.shown(path)}", entry) for _label, _key, entry in found]
     return hits
 
