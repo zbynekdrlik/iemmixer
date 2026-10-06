@@ -2,7 +2,8 @@
 //!
 //! Pure: facts in, ordered steps out. Every step re-reads its own facts before
 //! it acts, so re-running a plan is safe; a failed or interrupted switch into
-//! dev/live unwinds with `plan(current, Mode::Event, facts)`.
+//! dev/live unwinds with `plan(Mode::Event, facts)`. The mode it starts
+//! from changes nothing: the facts say what runs.
 
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -160,7 +161,7 @@ fn stop_iemmixer(f: &Facts, out: &mut Vec<Step>) {
     }
 }
 
-pub fn plan(_from: Mode, to: Mode, f: &Facts) -> Vec<Step> {
+pub fn plan(to: Mode, f: &Facts) -> Vec<Step> {
     let mut out = Vec::new();
     match to {
         Mode::Event => {
@@ -358,8 +359,6 @@ fn idle_event(f: &Facts, busy: Busy) -> Option<String> {
 mod tests {
     use super::*;
 
-    const MODES: [Mode; 3] = [Mode::Event, Mode::Dev, Mode::Live];
-
     fn at(p: &[Step], s: Step) -> Option<usize> {
         p.iter().position(|x| *x == s)
     }
@@ -368,22 +367,18 @@ mod tests {
         at(p, s).is_some()
     }
 
-    fn every(mut check: impl FnMut(Mode, Facts, Vec<Step>)) {
+    fn every(mut check: impl FnMut(Facts, Vec<Step>)) {
         for bits in 0..(1u32 << FACT_BITS) {
             let f = Facts::from_bits(bits);
-            for from in MODES {
-                check(from, f, plan(from, Mode::Event, &f));
-            }
+            check(f, plan(Mode::Event, &f));
         }
     }
 
-    fn every_entry(mut check: impl FnMut(Mode, Mode, Facts, Vec<Step>)) {
+    fn every_entry(mut check: impl FnMut(Mode, Facts, Vec<Step>)) {
         for bits in 0..(1u32 << FACT_BITS) {
             let f = Facts::from_bits(bits);
-            for from in MODES {
-                for to in [Mode::Dev, Mode::Live] {
-                    check(from, to, f, plan(from, to, &f));
-                }
+            for to in [Mode::Dev, Mode::Live] {
+                check(to, f, plan(to, &f));
             }
         }
     }
@@ -530,34 +525,34 @@ mod tests {
 
     #[test]
     fn every_event_plan_checks_the_preference_before_reaper() {
-        every(|from, f, p| {
+        every(|f, p| {
             let pref = at(&p, Step::PrefCheck).expect("PrefCheck in every event plan");
             for s in [Step::ReaperStart, Step::ReaperHandover, Step::AppStart] {
                 if let Some(i) = at(&p, s) {
-                    assert!(pref < i, "{from:?} {f:?}: {s:?} before PrefCheck");
+                    assert!(pref < i, "{f:?}: {s:?} before PrefCheck");
                 }
             }
             if let Some(e) = at(&p, Step::EngineStop) {
-                assert!(e < pref, "{from:?} {f:?}: EngineStop after PrefCheck");
+                assert!(e < pref, "{f:?}: EngineStop after PrefCheck");
             }
             // Every other holder of the driver module has left: the check
             // never writes while a process has the driver open (#9
             // 2026-09-28), so it must not find one it could have waited for.
             if let Some(h) = at(&p, Step::HolderGone) {
-                assert!(h < pref, "{from:?} {f:?}: HolderGone after PrefCheck");
+                assert!(h < pref, "{f:?}: HolderGone after PrefCheck");
             }
         });
     }
 
     #[test]
     fn every_event_plan_ends_with_the_fingerprint() {
-        every(|_, _, p| assert_eq!(p.last(), Some(&Step::Fingerprint)));
+        every(|_, p| assert_eq!(p.last(), Some(&Step::Fingerprint)));
     }
 
     #[test]
     fn every_event_plan_starts_what_does_not_serve_and_keeps_what_does() {
-        every(|from, f, p| {
-            let why = format!("{from:?} {f:?}: {p:?}");
+        every(|f, p| {
+            let why = format!("{f:?}: {p:?}");
             let reaper_ok = f.reaper && f.reaper_holds_module;
             let app_ok = f.app && f.app_serves;
             assert_eq!(has(&p, Step::ReaperStart), !reaper_ok, "{why}");
@@ -678,7 +673,7 @@ mod tests {
     /// and other devices on the Dante network feed the card's inputs.
     #[test]
     fn every_entry_is_the_precheck_the_stops_and_the_start() {
-        every_entry(|from, to, f, p| {
+        every_entry(|to, f, p| {
             let mut want = vec![Step::Precheck];
             if f.app {
                 want.push(Step::AppStop);
@@ -711,14 +706,14 @@ mod tests {
             if to == Mode::Dev {
                 want.push(Step::RunnerStart);
             }
-            assert_eq!(p, want, "{from:?}→{to:?} {f:?}");
+            assert_eq!(p, want, "{to:?} {f:?}");
         });
     }
 
     #[test]
     fn the_app_stops_before_reaper_saves() {
         let f = band_up();
-        let p = plan(Mode::Event, Mode::Dev, &f);
+        let p = plan(Mode::Dev, &f);
         let (a, r) = (
             at(&p, Step::AppStop).unwrap(),
             at(&p, Step::ReaperSaveQuit).unwrap(),
@@ -729,7 +724,7 @@ mod tests {
     #[test]
     fn event_to_dev_is_the_whole_entry_in_order() {
         assert_eq!(
-            plan(Mode::Event, Mode::Dev, &band_up()),
+            plan(Mode::Dev, &band_up()),
             [
                 Step::Precheck,
                 Step::AppStop,
@@ -755,8 +750,8 @@ mod tests {
     /// never while REAPER may hold the card.
     #[test]
     fn every_entry_restores_the_preference_right_before_the_engine_starts() {
-        every_entry(|from, to, f, p| {
-            let why = format!("{from:?}→{to:?} {f:?}: {p:?}");
+        every_entry(|to, f, p| {
+            let why = format!("{to:?} {f:?}: {p:?}");
             let pref = at(&p, Step::PrefCheck).expect("PrefCheck in every entry");
             assert_eq!(
                 p.iter().filter(|s| **s == Step::PrefCheck).count(),
@@ -777,7 +772,7 @@ mod tests {
             }
         });
         assert_eq!(
-            plan(Mode::Event, Mode::Live, &band_up()),
+            plan(Mode::Live, &band_up()),
             [
                 Step::Precheck,
                 Step::AppStop,
@@ -795,7 +790,7 @@ mod tests {
         // Our own engine stops (and restores the preference as it releases
         // the card) before the check.
         assert_eq!(
-            plan(Mode::Dev, Mode::Dev, &iemmixer_up()),
+            plan(Mode::Dev, &iemmixer_up()),
             [
                 Step::Precheck,
                 Step::JobsCancel,
@@ -830,14 +825,14 @@ mod tests {
                 );
             }
         }
-        let back = plan(Mode::Dev, Mode::Event, &Facts::default());
+        let back = plan(Mode::Event, &Facts::default());
         assert!(has(&back, Step::PrefCheck), "{back:?}");
     }
 
     #[test]
     fn dev_to_event_is_the_whole_teardown_in_order() {
         assert_eq!(
-            plan(Mode::Dev, Mode::Event, &iemmixer_up()),
+            plan(Mode::Event, &iemmixer_up()),
             [
                 Step::JobsCancel,
                 Step::RunnerStop,
@@ -857,8 +852,8 @@ mod tests {
 
     #[test]
     fn every_entry_plan_has_its_shape() {
-        every_entry(|from, to, f, p| {
-            let why = format!("{from:?}→{to:?} {f:?}: {p:?}");
+        every_entry(|to, f, p| {
+            let why = format!("{to:?} {f:?}: {p:?}");
             assert_eq!(p.first(), Some(&Step::Precheck), "{why}");
             assert_eq!(has(&p, Step::AppStop), f.app, "{why}");
             assert_eq!(has(&p, Step::ReaperSaveQuit), f.reaper, "{why}");
@@ -914,26 +909,18 @@ mod tests {
 
     #[test]
     fn the_runner_starts_only_in_dev() {
-        for from in MODES {
-            for f in [Facts::default(), band_up(), iemmixer_up()] {
-                let dev = plan(from, Mode::Dev, &f);
-                assert_eq!(dev.last(), Some(&Step::RunnerStart), "{from:?} {f:?}");
-                assert!(
-                    !has(&plan(from, Mode::Live, &f), Step::RunnerStart),
-                    "{from:?} {f:?}"
-                );
-                assert!(
-                    !has(&plan(from, Mode::Event, &f), Step::RunnerStart),
-                    "{from:?} {f:?}"
-                );
-            }
+        for f in [Facts::default(), band_up(), iemmixer_up()] {
+            let dev = plan(Mode::Dev, &f);
+            assert_eq!(dev.last(), Some(&Step::RunnerStart), "{f:?}");
+            assert!(!has(&plan(Mode::Live, &f), Step::RunnerStart), "{f:?}");
+            assert!(!has(&plan(Mode::Event, &f), Step::RunnerStart), "{f:?}");
         }
     }
 
     #[test]
     fn event_in_event_only_checks() {
         assert_eq!(
-            plan(Mode::Event, Mode::Event, &band_up()),
+            plan(Mode::Event, &band_up()),
             [
                 Step::TuningExit,
                 Step::PrefCheck,
@@ -950,7 +937,7 @@ mod tests {
             reaper_holds_module: false,
             ..band_up()
         };
-        let p = plan(Mode::Event, Mode::Event, &f);
+        let p = plan(Mode::Event, &f);
         let pref = at(&p, Step::PrefCheck).unwrap();
         let quit = at(&p, Step::ReaperSaveQuit).expect("ReaperSaveQuit");
         let start = at(&p, Step::ReaperStart).expect("ReaperStart");
@@ -967,7 +954,7 @@ mod tests {
             app_serves: false,
             ..band_up()
         };
-        let p = plan(Mode::Dev, Mode::Event, &f);
+        let p = plan(Mode::Event, &f);
         let stop = at(&p, Step::AppStop).expect("AppStop");
         let start = at(&p, Step::AppStart).expect("AppStart");
         assert!(stop < start, "{p:?}");
@@ -983,7 +970,7 @@ mod tests {
             other_module_holder: true,
             ..Facts::default()
         };
-        let p = plan(Mode::Dev, Mode::Event, &f);
+        let p = plan(Mode::Event, &f);
         let gone = at(&p, Step::HolderGone).expect("HolderGone");
         assert!(gone < at(&p, Step::ReaperStart).unwrap(), "{p:?}");
         // The holder leaves before the preference is checked: the check
@@ -1105,9 +1092,9 @@ mod tests {
     fn a_failed_dev_switch_unwinds_to_event() {
         // The facts after a failure at EngineStart: REAPER and the app were
         // quit, the engine never came up.
-        let entry = plan(Mode::Event, Mode::Dev, &band_up());
+        let entry = plan(Mode::Dev, &band_up());
         assert!(has(&entry, Step::EngineStart));
-        let p = plan(Mode::Event, Mode::Event, &Facts::default());
+        let p = plan(Mode::Event, &Facts::default());
         let (reaper, app) = (
             at(&p, Step::ReaperStart).expect("REAPER starts"),
             at(&p, Step::AppStart).expect("the app starts"),

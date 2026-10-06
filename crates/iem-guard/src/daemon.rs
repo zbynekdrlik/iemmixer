@@ -807,7 +807,7 @@ pub fn run_switch(pc: &mut dyn Pc, g: &mut Guard, from: Mode, to: Mode) -> Outco
         trial: g.trial,
         ..pc.facts()
     };
-    let steps = plan(from, to, &facts);
+    let steps = plan(to, &facts);
     g.begin(from, to, &steps);
     let mut skip: Vec<Step> = Vec::new();
     for step in steps {
@@ -1191,7 +1191,7 @@ pub fn handle(pc: &mut dyn Pc, g: &mut Guard, req: Request, epoch: u64) -> Reply
         Request::Activate { sha } => activate(pc, g, &sha),
         Request::TestSignal { input, dbfs, ttl_s } => test_signal(pc, g, &input, dbfs, ttl_s),
         Request::Report { sha, hil, detail } => report(g, &sha, &hil, &detail),
-        Request::JobBegin { run } => job_begin(pc, g, run),
+        Request::JobBegin { run } => job_begin(g, run),
         Request::JobEnd { run } => job_end(g, run),
         Request::InstallSite { path } => install_site(pc, g, &path),
         Request::ForceReopen => match g.need_dev("force-reopen") {
@@ -1240,7 +1240,7 @@ fn plan_text(steps: &[Step]) -> String {
 /// `event --dry-run`: the plan from the facts, nothing changed.
 fn dry_event(pc: &mut dyn Pc, g: &mut Guard) -> (bool, String) {
     let facts = pc.facts();
-    let steps = plan(g.state.mode, Mode::Event, &facts);
+    let steps = plan(Mode::Event, &facts);
     (true, format!("dry run: {}", plan_text(&steps)))
 }
 
@@ -1298,7 +1298,7 @@ fn entry(pc: &mut dyn Pc, g: &mut Guard, e: Entry) -> (bool, String) {
 /// nothing changed.
 fn dry_entry(pc: &mut dyn Pc, g: &mut Guard, e: &Entry) -> (bool, String) {
     // `trial` decides only the precheck (below), never a step of the plan.
-    let steps = plan(g.state.mode, e.to, &pc.facts());
+    let steps = plan(e.to, &pc.facts());
     let bundle = e
         .build
         .clone()
@@ -1620,7 +1620,7 @@ fn report(g: &mut Guard, sha: &str, hil: &str, detail: &str) -> (bool, String) {
 /// refuses it at the pipe, `while_switching`). Nothing reads the stage: only
 /// the owner's signal decides whether the PC may be used, and other devices
 /// on the Dante network feed the card's inputs (#38, owner 2026-10-06).
-fn job_begin(_pc: &mut dyn Pc, g: &mut Guard, run: u64) -> (bool, String) {
+fn job_begin(g: &mut Guard, run: u64) -> (bool, String) {
     if let Err(why) = g.need_dev("a HIL job") {
         return (false, why);
     }

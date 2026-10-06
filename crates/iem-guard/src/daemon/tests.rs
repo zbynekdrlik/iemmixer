@@ -1598,8 +1598,8 @@ fn dev_with_a_build_pins_it() {
 fn a_hil_job_begins_in_dev_without_reading_the_stage() {
     let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
     assert_eq!(
-        job_begin(&mut pc, &mut g, 7),
-        (true, "HIL job 7 began".to_owned())
+        handle(&mut pc, &mut g, Request::JobBegin { run: 7 }, 0),
+        g.reply(true, "HIL job 7 began")
     );
     assert_eq!(g.state.job, Some(7));
     assert_eq!(pc.calls(), Vec::<Call>::new(), "no PC read");
