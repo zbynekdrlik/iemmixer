@@ -89,6 +89,37 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn a_durable_rename_replaces_a_target_another_process_holds_with_delete_sharing() {
+        // #32 F3-r4 5: a virus scanner or the indexer may hold the target
+        // (baseline.json, save.tmp) open with delete sharing. MoveFileExW
+        // then fails with ERROR_ACCESS_DENIED, as std's rename once did
+        // before it learnt to retry with POSIX semantics: the save failed.
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+        let dir = scratch("held");
+        let (from, to) = (dir.join("save.new"), dir.join("save.tmp"));
+        std::fs::write(&from, b"new").unwrap();
+        std::fs::write(&to, b"old").unwrap();
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .open(&to)
+            .unwrap();
+        rename_durable(&from, &to).unwrap();
+        assert_eq!(std::fs::read(&to).unwrap(), b"new");
+        assert!(!from.exists());
+        drop(held);
+        // A missing source still fails, nothing renamed.
+        let e = rename_durable(&from, &to).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::NotFound, "{e}");
+        assert_eq!(std::fs::read(&to).unwrap(), b"new");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[cfg(not(windows))]
     #[test]
     fn off_windows_a_durable_rename_is_unsupported() {
