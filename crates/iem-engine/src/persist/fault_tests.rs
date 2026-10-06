@@ -391,6 +391,27 @@ fn a_boot_past_a_locked_current_json_keeps_the_sessions_edits() {
 }
 
 #[test]
+fn a_save_at_the_revision_the_marker_shows_leaves_the_marker_alone() {
+    // #32 F3-r4 2: a save without a change (the same revision) has nothing
+    // to rename, so a marker another process holds a moment cannot fail it;
+    // a save at another revision needs the marker and fails with the new
+    // state in save.tmp.
+    let (_d, faulty, s) = faulty_store();
+    s.save(&sample(5)).unwrap();
+    let mark = s.dir().join("current.json.rev-5");
+    faulty.set_locked(&mark, true);
+    assert_eq!(s.save(&sample(5)).unwrap().generation, 1);
+    assert!(s.save(&sample(6)).is_err());
+    assert_eq!(rev_of(&s.dir().join(TMP)), 6);
+    faulty.set_locked(&mark, false);
+    let loaded = s.load(&test_site());
+    assert_eq!(
+        (loaded.source, loaded.persisted.rev),
+        (Source::Interrupted, 6)
+    );
+}
+
+#[test]
 fn a_boot_on_muted_defaults_past_an_unreadable_current_json_continues_above_its_name() {
     // F3 round 4, finding 2 (a): nothing else loads, so the muted defaults
     // (revision 0) jumped to 1 000 000 only, below a current.json past a

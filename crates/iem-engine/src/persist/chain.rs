@@ -1278,6 +1278,57 @@ mod tests {
     }
 
     #[test]
+    fn the_jump_alarm_names_every_file_passed_over_and_the_floor() {
+        // #32 F3-r4 2: one alarm names each live file the boot could not
+        // read and the highest revision the names show.
+        let g = test_site();
+        let (_d, s) = store();
+        for rev in 7..=9 {
+            s.save(&sample(rev)).unwrap();
+        }
+        let newer = s.generations().unwrap()[1].1.clone();
+        fs::remove_file(s.dir().join(CURRENT)).unwrap();
+        fs::create_dir(s.dir().join(CURRENT)).unwrap();
+        let loaded = s.load(&g);
+        assert_eq!(
+            (loaded.source, loaded.persisted.rev),
+            (Source::Generation(2), 1_000_009)
+        );
+        assert_eq!(
+            loaded.alarms.last().unwrap(),
+            "current.json cannot be read, so the revision continues at 1000009, \
+             above anything it can hold (the names show revision 9 at most)"
+        );
+        fs::remove_file(&newer).unwrap();
+        fs::create_dir(&newer).unwrap();
+        let loaded = s.load(&g);
+        assert_eq!(
+            (loaded.source, loaded.persisted.rev),
+            (Source::Generation(1), 1_000_009)
+        );
+        assert_eq!(
+            loaded.alarms.last().unwrap(),
+            "current.json and gen-0000000002-r8.json cannot be read, so the revision \
+             continues at 1000009, above anything they can hold (the names show revision 9 \
+             at most)"
+        );
+        // No name shows a revision: the state loaded's own is the base.
+        let (_d, s) = store();
+        fs::write(
+            s.dir().join("gen-0000000001.json"),
+            encode(&sample(4)).unwrap(),
+        )
+        .unwrap();
+        fs::create_dir(s.dir().join(CURRENT)).unwrap();
+        let loaded = s.load(&g);
+        assert_eq!(
+            loaded.alarms.last().unwrap(),
+            "current.json cannot be read, so the revision continues at 1000004, \
+             above anything it can hold"
+        );
+    }
+
+    #[test]
     fn a_state_directory_with_an_older_engines_names_loads_as_before() {
         // F3 round 4, finding 2: the state directory on the PC has names
         // without a revision (gen-<seq>.json, no marker). They load as

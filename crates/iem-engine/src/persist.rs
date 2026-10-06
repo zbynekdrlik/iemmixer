@@ -563,6 +563,60 @@ mod tests {
     }
 
     #[test]
+    fn a_listing_shows_the_revisions_the_names_carry() {
+        // #32 F3-r4 2: generations with and without a revision, the marker,
+        // orphans; names the store never writes are nothing.
+        let entry = |name: &str| Ok((OsString::from(name), PathBuf::from(name)));
+        let names = [
+            "gen-0000000003-r50.json",
+            "gen-0000000001.json",
+            "current.json.rev-60",
+            "save.tmp.orphan-2",
+            "save.tmp.orphan-1",
+            "current.json",
+            "gen-0000000002-r40.json",
+            "gen-0000000004-rx.json",
+            "gen-x-r70.json",
+            "current.json.rev-x",
+            "save.tmp.orphan-x",
+            "current.json.damaged-1",
+        ];
+        let listed = listing(names.into_iter().map(entry)).unwrap();
+        let path = |name: &str| PathBuf::from(name);
+        assert_eq!(
+            listed.generations,
+            [
+                (1, path("gen-0000000001.json")),
+                (2, path("gen-0000000002-r40.json")),
+                (3, path("gen-0000000003-r50.json"))
+            ]
+        );
+        assert_eq!(listed.marks, [(60, path("current.json.rev-60"))]);
+        assert_eq!(
+            listed.orphans,
+            [
+                (1, "save.tmp.orphan-1".to_owned(), path("save.tmp.orphan-1")),
+                (2, "save.tmp.orphan-2".to_owned(), path("save.tmp.orphan-2"))
+            ]
+        );
+        assert_eq!(listed.floor, Some(60));
+        // Without the marker the generations' names show the floor; old
+        // names alone show none.
+        let listed = listing(
+            names
+                .into_iter()
+                .filter(|n| *n != "current.json.rev-60")
+                .map(entry),
+        )
+        .unwrap();
+        assert_eq!(listed.floor, Some(50));
+        let old = ["gen-0000000001.json", "current.json"];
+        assert_eq!(listing(old.into_iter().map(entry)).unwrap().floor, None);
+        assert_eq!(generation_name(7, Some(9)), "gen-0000000007-r9.json");
+        assert_eq!(generation_name(7, None), "gen-0000000007.json");
+    }
+
+    #[test]
     fn a_lock_error_other_than_a_held_lock_fails_at_once() {
         // CI run 37466176804 (a surviving mutant): only `WouldBlock`, another
         // process holding the directory, is tried again. Any other error is
