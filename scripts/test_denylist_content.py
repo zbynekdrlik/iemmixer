@@ -186,6 +186,28 @@ class ContentTests(ScanTestCase):
                                            "sparse.tar!/a.txt: cannot be scanned: a broken tar member")
         self.assertEqual(len(self.hash_key("sparse.tar", "blob")), 64)
 
+    def test_padded_streams_and_crafted_zip_members_are_read_whole(self) -> None:
+        # review of lane G3, finding 2: these were skipped silently -- xz's stream padding and NULs
+        # between gzip members ended the stream; a zip directory entry carrying data was never read;
+        # zipfile reads a member only to its declared size, so a size of 0 hid the deflate data
+        text = b"hello zyxname\n" * 20
+        directory = io.BytesIO()
+        with zipfile.ZipFile(directory, "w") as archive:
+            entry = zipfile.ZipInfo("dir/")
+            entry.compress_type = zipfile.ZIP_DEFLATED
+            archive.writestr(entry, text)
+        short = bytearray(zipped({"a.txt": text}))
+        for header, crc, size in ((b"PK\x03\x04", 14, 22), (b"PK\x01\x02", 16, 24)):  # local, central
+            at = short.index(header)
+            short[at + crc:at + crc + 4] = bytes(4)
+            short[at + size:at + size + 4] = bytes(4)
+        self.assert_findings_in_both_modes(
+            {"p.xz": lzma.compress(b"clean\n") + bytes(4) + lzma.compress(text),
+             "p.gz": gzip.compress(b"clean\n") + bytes(8) + gzip.compress(text),
+             "d.zip": directory.getvalue(), "s.zip": bytes(short)},
+            "p.xz!/:2: denylist entry 1", "p.gz!/:2: denylist entry 1", "d.zip!/dir/:1: denylist entry 1",
+            "s.zip!/a.txt:1: denylist entry 1")
+
     def test_other_containers_are_findings_allowlisted_by_their_blob_key(self) -> None:
         pdf = (b"%PDF-1.4\n1 0 obj << /Length 20 /Filter /FlateDecode >> stream\n" + zlib.compress(b"(zyxname) Tj")
                + b"\nendstream endobj\n%%EOF\n")
