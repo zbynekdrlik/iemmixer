@@ -320,7 +320,9 @@ fn a_boot_past_a_locked_current_json_keeps_the_sessions_edits() {
     // current.json stays locked (it cannot become a generation, so each
     // save fails with its state in save.tmp). Once current.json can be
     // read again, the session's newest save must win over it: the load
-    // continued the revision 1 000 000 above the state it loaded.
+    // continued the revision 1 000 000 above the highest one the state
+    // loaded or a name shows (current.json's 100, by its marker; F3 round
+    // 4, finding 2).
     let g = test_site();
     let (_d, faulty, s) = faulty_store();
     s.save(&sample(97)).unwrap();
@@ -331,18 +333,49 @@ fn a_boot_past_a_locked_current_json_keeps_the_sessions_edits() {
     let boot = s.load(&g);
     assert_eq!(
         (boot.source, boot.persisted.rev),
-        (Source::Generation(1), 1_000_097)
+        (Source::Generation(1), 1_000_100)
     );
     assert!(
         boot.alarms
             .iter()
-            .any(|a| a.contains("the revision continues at 1000097")),
+            .any(|a| a.contains("the revision continues at 1000100")),
         "{:?}",
         boot.alarms
     );
     assert!(s.recover(&boot).failed.is_empty());
     // Two edits, then the save.
     let edited = boot.persisted.rev + 2;
+    assert!(s.save(&session(edited)).is_err());
+    faulty.set_locked(&current, false);
+    let s = reopen(s.dir(), &faulty);
+    let again = s.load(&g);
+    assert_eq!(
+        (
+            again.source,
+            again.persisted.rev,
+            again.persisted.saved_unix_ms
+        ),
+        (Source::Interrupted, edited, SESSION)
+    );
+    assert!(again.alarms.is_empty(), "{:?}", again.alarms);
+    // F3 round 4, finding 2 (b), the chained jump: that boot finishes the
+    // interrupted save, so the old current.json (100) becomes a generation
+    // and current.json holds the jumped revision. The engine then ends
+    // without a shutdown save, and the next boot cannot read current.json
+    // again: the newest generation it loads holds 100, far below. Its
+    // revision continues above what the names show (current.json's, by
+    // its marker), or the session's next save loses to that file once it
+    // can be read.
+    assert!(s.recover(&again).finished);
+    faulty.set_locked(&current, true);
+    let s = reopen(s.dir(), &faulty);
+    let boot = s.load(&g);
+    assert_eq!(
+        (boot.source, boot.persisted.rev),
+        (Source::Generation(2), 2_000_102)
+    );
+    assert!(s.recover(&boot).failed.is_empty());
+    let edited = boot.persisted.rev + 1;
     assert!(s.save(&session(edited)).is_err());
     faulty.set_locked(&current, false);
     let again = reopen(s.dir(), &faulty).load(&g);
@@ -352,7 +385,89 @@ fn a_boot_past_a_locked_current_json_keeps_the_sessions_edits() {
             again.persisted.rev,
             again.persisted.saved_unix_ms
         ),
-        (Source::Interrupted, edited, SESSION)
+        (Source::Interrupted, 2_000_103, SESSION)
+    );
+    assert!(again.alarms.is_empty(), "{:?}", again.alarms);
+}
+
+#[test]
+fn a_boot_on_muted_defaults_past_an_unreadable_current_json_continues_above_its_name() {
+    // F3 round 4, finding 2 (a): nothing else loads, so the muted defaults
+    // (revision 0) jumped to 1 000 000 only, below a current.json past a
+    // million revisions; the session's save then lost to it.
+    let g = test_site();
+    let (_d, faulty, s) = faulty_store();
+    s.save(&sample(1_500_000)).unwrap();
+    let current = s.dir().join(CURRENT);
+    let s = reopen(s.dir(), &faulty);
+    faulty.set_locked(&current, true);
+    let boot = s.load(&g);
+    assert_eq!(
+        (boot.source, boot.persisted.rev),
+        (Source::Defaults, 2_500_000)
+    );
+    assert!(s.recover(&boot).failed.is_empty());
+    assert!(s.save(&session(2_500_001)).is_err());
+    faulty.set_locked(&current, false);
+    let again = reopen(s.dir(), &faulty).load(&g);
+    assert_eq!(
+        (
+            again.source,
+            again.persisted.rev,
+            again.persisted.saved_unix_ms
+        ),
+        (Source::Interrupted, 2_500_001, SESSION)
+    );
+    assert!(again.alarms.is_empty(), "{:?}", again.alarms);
+}
+
+#[test]
+fn a_boot_past_an_unreadable_newer_generation_continues_above_its_name() {
+    // F3 round 4, finding 2 (c): with current.json missing (or damaged)
+    // the chain loads the newest valid generation. One newer than it that
+    // cannot be read may hold any revision up to what its name shows, and
+    // gave no jump, so the session's next save lost to it once readable.
+    let g = test_site();
+    let (_d, faulty, s) = faulty_store();
+    for rev in [40, 50, 60] {
+        s.save(&sample(rev)).unwrap();
+    }
+    fs::remove_file(s.dir().join(CURRENT)).unwrap();
+    // The marker (current.json held 60) goes too: only the generation's
+    // own name shows its revision.
+    fs::remove_file(s.dir().join("current.json.rev-60")).unwrap();
+    let newer = s.generations().unwrap()[1].1.clone();
+    assert!(
+        newer.ends_with("gen-0000000002-r50.json"),
+        "{}",
+        newer.display()
+    );
+    let s = reopen(s.dir(), &faulty);
+    faulty.set_unreadable(&newer, true);
+    let boot = s.load(&g);
+    assert_eq!(
+        (boot.source, boot.persisted.rev),
+        (Source::Generation(1), 1_000_050)
+    );
+    let note = "gen-0000000002-r50.json cannot be read, so the revision continues at 1000050";
+    assert!(
+        boot.alarms.iter().any(|a| a.starts_with(note)),
+        "{:?}",
+        boot.alarms
+    );
+    assert!(s.recover(&boot).failed.is_empty());
+    // The session's next save is cut off before current.json (a crash).
+    let next = encode(&session(boot.persisted.rev + 1)).unwrap();
+    fs::write(s.dir().join(TMP), next).unwrap();
+    faulty.set_unreadable(&newer, false);
+    let again = reopen(s.dir(), &faulty).load(&g);
+    assert_eq!(
+        (
+            again.source,
+            again.persisted.rev,
+            again.persisted.saved_unix_ms
+        ),
+        (Source::Interrupted, 1_000_051, SESSION)
     );
     assert!(again.alarms.is_empty(), "{:?}", again.alarms);
 }
@@ -648,8 +763,9 @@ fn a_boot_pauses_between_read_tries_two_seconds_at_most() {
         s.save(&sample(rev)).unwrap();
     }
     fs::write(s.dir().join(TMP), encode(&sample(4)).unwrap()).unwrap();
-    for name in [CURRENT, TMP, "gen-0000000002.json"] {
-        faulty.set_locked(&s.dir().join(name), true);
+    let generation = s.generations().unwrap()[1].1.clone();
+    for path in [s.dir().join(CURRENT), s.dir().join(TMP), generation] {
+        faulty.set_locked(&path, true);
     }
     let loaded = s.load(&test_site());
     assert_eq!(faulty.pauses(), 10);
@@ -677,21 +793,31 @@ fn an_unreadable_save_tmp_or_generation_is_named_in_an_alarm() {
         "{:?}",
         loaded.alarms
     );
-    // A generation passed over while looking for the newest valid one.
+    // A generation passed over while looking for the newest valid one; it
+    // may hold any revision up to what the names show (the marker's 9), so
+    // the revision continues above that (F3 round 4, finding 2).
     let (_d, faulty, s) = faulty_store();
     for rev in 7..=9 {
         s.save(&sample(rev)).unwrap();
     }
     fs::remove_file(s.dir().join(CURRENT)).unwrap();
-    faulty.set_unreadable(&s.dir().join("gen-0000000002.json"), true);
+    let generation = s.generations().unwrap()[1].1.clone();
+    faulty.set_unreadable(&generation, true);
     let loaded = s.load(&g);
     assert_eq!(
         (loaded.source, loaded.persisted.rev),
-        (Source::Generation(1), 7)
+        (Source::Generation(1), 1_000_009)
     );
-    assert_eq!(loaded.alarms.len(), 1, "{:?}", loaded.alarms);
+    assert_eq!(loaded.alarms.len(), 2, "{:?}", loaded.alarms);
     assert!(
-        loaded.alarms[0].starts_with("gen-0000000002.json cannot be read"),
+        loaded.alarms[0].starts_with("gen-0000000002-r8.json cannot be read ("),
+        "{:?}",
+        loaded.alarms
+    );
+    assert!(
+        loaded.alarms[1].starts_with(
+            "gen-0000000002-r8.json cannot be read, so the revision continues at 1000009"
+        ),
         "{:?}",
         loaded.alarms
     );

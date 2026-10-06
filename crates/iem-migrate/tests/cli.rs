@@ -304,6 +304,32 @@ fn seed_if_absent_writes_current_only_when_it_is_missing() {
     );
 }
 
+/// #32 F3-r4 2: a generation's name carries the revision it holds, so the
+/// seed's report names the generation it keeps as it is on disk.
+#[test]
+fn seed_if_absent_names_a_generation_as_it_is_on_disk() {
+    let w = World::new(24);
+    let dir = w.path("state");
+    let store = Store::open(&dir).unwrap();
+    for rev in [7, 8] {
+        let p = Persisted {
+            rev,
+            ..Persisted::default()
+        };
+        store.save(&p).unwrap();
+    }
+    std::fs::remove_file(dir.join("current.json")).unwrap();
+    let mut a = import_args(&w, &["--seed-if-absent"]);
+    a.extend(["--state-dir".into(), s(&dir)]);
+    let r = run(&a).unwrap();
+    assert!(
+        r.contains("gen-0000000001-r7.json kept (--seed-if-absent)"),
+        "{r}"
+    );
+    assert!(dir.join("gen-0000000001-r7.json").exists());
+    assert!(!dir.join("current.json").exists());
+}
+
 /// #32 D6: `save` writes the new state to save.tmp before its two renames,
 /// so a crash in between leaves the newest state only there. The seed counts
 /// it as live state and never touches it (it used to write baseline.json

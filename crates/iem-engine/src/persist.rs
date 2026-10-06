@@ -578,18 +578,6 @@ mod tests {
     }
 
     #[test]
-    fn each_source_names_its_file() {
-        assert_eq!(Source::Current.file_name().as_deref(), Some(CURRENT));
-        assert_eq!(Source::Interrupted.file_name().as_deref(), Some(TMP));
-        assert_eq!(
-            Source::Generation(7).file_name().as_deref(),
-            Some("gen-0000000007.json")
-        );
-        assert_eq!(Source::Baseline.file_name().as_deref(), Some(BASELINE));
-        assert_eq!(Source::Defaults.file_name(), None);
-    }
-
-    #[test]
     fn a_baseline_write_leaves_an_interrupted_save_alone() {
         let (_d, s) = store();
         fs::write(s.dir().join(TMP), b"NEWEST").unwrap();

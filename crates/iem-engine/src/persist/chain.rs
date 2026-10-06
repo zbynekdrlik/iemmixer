@@ -963,7 +963,8 @@ mod tests {
         // A damaged current.json alone is nothing the engine can load: the
         // seed may write its state (the damaged file is renamed, not lost).
         let (_d, s) = damaged_current();
-        fs::remove_file(s.dir().join("gen-0000000001.json")).unwrap();
+        let generation = s.generations().unwrap()[0].1.clone();
+        fs::remove_file(generation).unwrap();
         assert_eq!(s.live_state().unwrap(), None);
         // A current.json that cannot be read at all fails the seed closed.
         let (_d, s) = store();
@@ -1095,8 +1096,10 @@ mod tests {
         // #32 MAJOR-3: current.json may hold any revision up to where the
         // session left off, and recovery never moves it. So whatever loads
         // instead (a generation, the baseline, the defaults) continues
-        // 1 000 000 above its own revision, with an alarm: the session's
-        // saves then outrank the file once it can be read again.
+        // 1 000 000 above the highest revision the state loaded or any name
+        // in the directory shows (F3 round 4, finding 2: the marker names
+        // current.json's 8), with an alarm: the session's saves then
+        // outrank the file once it can be read again.
         let g = test_site();
         let (_d, s) = store();
         s.save(&sample(7)).unwrap();
@@ -1106,31 +1109,140 @@ mod tests {
         let loaded = s.load(&g);
         assert_eq!(
             (loaded.source, loaded.persisted.rev),
-            (Source::Generation(1), 1_000_007)
+            (Source::Generation(1), 1_000_008)
         );
-        let note = "current.json cannot be read, so the revision continues at 1000007";
+        let note = "current.json cannot be read, so the revision continues at 1000008";
         assert!(
             loaded.alarms.iter().any(|a| a.starts_with(note)),
             "{:?}",
             loaded.alarms
         );
-        fs::remove_file(s.dir().join("gen-0000000001.json")).unwrap();
+        let generation = s.generations().unwrap()[0].1.clone();
+        fs::remove_file(generation).unwrap();
         s.save_baseline(&sample(4)).unwrap();
         let loaded = s.load(&g);
         assert_eq!(
             (loaded.source, loaded.persisted.rev),
-            (Source::Baseline, 1_000_004)
+            (Source::Baseline, 1_000_008)
         );
         fs::remove_file(s.dir().join(BASELINE)).unwrap();
         let loaded = s.load(&g);
         assert_eq!(
             (loaded.source, loaded.persisted.rev),
-            (Source::Defaults, 1_000_000)
+            (Source::Defaults, 1_000_008)
         );
         // A readable current.json, damaged or not, moves nothing.
         fs::remove_dir(s.dir().join(CURRENT)).unwrap();
         fs::write(s.dir().join(CURRENT), b"damaged").unwrap();
         assert_eq!(s.load(&g).persisted.rev, 0);
+    }
+
+    /// The state directory's names, sorted.
+    fn names(s: &Store) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(s.dir())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn every_commit_writes_the_revisions_into_the_names() {
+        // F3 round 4, finding 2: a floor only file contents carry is
+        // unknowable exactly when they cannot be read. A generation's name
+        // carries the revision it holds and the marker's name the one
+        // current.json holds, so a listing shows them even then.
+        let g = test_site();
+        let (_d, s) = store();
+        for rev in [3, 4, 5] {
+            s.save(&sample(rev)).unwrap();
+        }
+        assert_eq!(
+            names(&s),
+            [
+                "current.json",
+                "current.json.rev-5",
+                "gen-0000000001-r3.json",
+                "gen-0000000002-r4.json"
+            ]
+        );
+        // A boot's recovery that finishes save.tmp commits the same way.
+        fs::write(s.dir().join(TMP), encode(&sample(6)).unwrap()).unwrap();
+        let loaded = s.load(&g);
+        assert!(s.recover(&loaded).finished);
+        assert_eq!(
+            names(&s),
+            [
+                "current.json",
+                "current.json.rev-6",
+                "gen-0000000001-r3.json",
+                "gen-0000000002-r4.json",
+                "gen-0000000003-r5.json"
+            ]
+        );
+        // The marker shows what current.json holds, even below an older
+        // revision (an import starts a new count).
+        s.save(&sample(0)).unwrap();
+        assert!(s.dir().join("current.json.rev-0").exists());
+        assert!(s.dir().join("gen-0000000004-r6.json").exists());
+        assert_eq!(
+            (s.load(&g).source, s.generations().unwrap().len()),
+            (Source::Current, 4)
+        );
+    }
+
+    #[test]
+    fn a_state_directory_with_an_older_engines_names_loads_as_before() {
+        // F3 round 4, finding 2: the state directory on the PC has names
+        // without a revision (gen-<seq>.json, no marker). They load as
+        // before, and past an unreadable current.json the revision jumps
+        // from the state loaded, as no name shows one. The first save names
+        // the rotated current.json the old way (no marker tells its
+        // revision) and starts the marker; from then on the names carry
+        // revisions.
+        let g = test_site();
+        let (_d, s) = store();
+        let put = |name: &str, rev: u64| {
+            fs::write(s.dir().join(name), encode(&sample(rev)).unwrap()).unwrap();
+        };
+        put("gen-0000000001.json", 3);
+        put("gen-0000000002.json", 4);
+        put(CURRENT, 5);
+        let loaded = s.load(&g);
+        assert_eq!((loaded.source, loaded.persisted.rev), (Source::Current, 5));
+        assert!(
+            loaded.alarms.is_empty() && loaded.rejected.is_empty(),
+            "{loaded:?}"
+        );
+        let seqs: Vec<u64> = s.generations().unwrap().iter().map(|g| g.0).collect();
+        assert_eq!(seqs, [1, 2]);
+        assert_eq!(s.live_state().unwrap(), Some(Source::Current));
+        // Past an unreadable current.json: the generation's own revision.
+        fs::remove_file(s.dir().join(CURRENT)).unwrap();
+        fs::create_dir(s.dir().join(CURRENT)).unwrap();
+        let loaded = s.load(&g);
+        assert_eq!(
+            (loaded.source, loaded.persisted.rev),
+            (Source::Generation(2), 1_000_004)
+        );
+        fs::remove_dir(s.dir().join(CURRENT)).unwrap();
+        put(CURRENT, 5);
+        s.save(&sample(6)).unwrap();
+        s.save(&sample(7)).unwrap();
+        assert_eq!(
+            names(&s),
+            [
+                "current.json",
+                "current.json.rev-7",
+                "gen-0000000001.json",
+                "gen-0000000002.json",
+                "gen-0000000003.json",
+                "gen-0000000004-r6.json"
+            ]
+        );
+        let loaded = s.load(&g);
+        assert_eq!((loaded.source, loaded.persisted.rev), (Source::Current, 7));
     }
 
     #[test]
