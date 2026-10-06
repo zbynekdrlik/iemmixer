@@ -722,6 +722,7 @@ fn an_engine_that_finds_its_state_directory_busy_is_started_again_within_the_ste
     let entry = |exits: Vec<Option<i32>>| {
         let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
         g.state.pins.current = Some(SHA.into());
+        pc.meters = vec![-60.0]; // a quiet stage: the interlock lets the entry reach EngineStart
         pc.early_exits = exits;
         let t0 = Instant::now();
         let r = handle(&mut pc, &mut g, dev(), 0);
