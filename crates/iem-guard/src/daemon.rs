@@ -2018,11 +2018,14 @@ fn exited(pc: &mut dyn Pc, g: &mut Guard, kid: Kid, code: Option<i32>, at: Insta
 
 fn engine_exited(pc: &mut dyn Pc, g: &mut Guard, code: Option<i32>, at: Instant, session: bool) {
     g.last_exit = code;
-    // #32 minor-4: a busy state directory is no crash; it is tried again.
-    let busy = !session && code == Some(crash::STATE_BUSY);
+    // #32 minor-4: a busy state directory is no crash; it is tried again,
+    // up to `crash::BUSY_LIMIT` times in a row, then each counts as one
+    // (F3-r4 3: something the guard does not watch holds it).
+    let streak = g.crash.busy(!session && code == Some(crash::STATE_BUSY));
+    let busy = !session && crash::busy_retry(code, streak);
     let abnormal = !session && !busy && !matches!(code, Some(0 | 2 | 3));
     let looped = abnormal && g.crash.record(at);
-    if g.crash.busy(busy) == crash::BUSY_ALARM {
+    if streak == crash::BUSY_ALARM {
         g.raise(
             None,
             &format!(
@@ -2036,7 +2039,7 @@ fn engine_exited(pc: &mut dyn Pc, g: &mut Guard, code: Option<i32>, at: Instant,
     }
     let mode = g.state.mode;
     let n = g.crash.in_window();
-    match crash::after_exit(code, mode, g.site.prod, session, looped, n) {
+    match crash::after_exit(code, mode, g.site.prod, session, looped, n, streak) {
         After::Stay { alarm } => {
             if let Some(why) = alarm {
                 g.raise(None, &format!("{why} (exit {code:?})"), false);
