@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -468,9 +469,18 @@ class MeasureTests(WindowHarness):
         # Review round 3, m8: a soak's raw kernel/marker files (per cut) would double
         # the disk used. They are deleted only after `xperf -merge` succeeded: a failed
         # merge throws (sw.ps runs under $ErrorActionPreference='Stop') before the delete.
-        for base in ("", "cut-2."):
+        # F2 round 3, m10: and only once the merged trace exists and is not empty
+        # (an exit code of 0 alone is no proof the merge wrote it).
+        for base, out in (("", "trace.etl"), ("cut-2.", "cut-2.etl")):
             body = tw.merge("'xperf.exe'", "'D'", base)
-            self.assertRegex(body, r"\[void\]\(Invoke-IemXperf [^;]*'-merge'[^;]*\) ; Remove-Item -LiteralPath \$m$")
+            self.assertRegex(body, r"\[void\]\(Invoke-IemXperf [^;]*'-merge'[^;]*\) ; ")
+            self.assertTrue(body.endswith(" ; Remove-Item -LiteralPath $m"), body)
+            check = re.search(r"if \(-not \(Test-Path -LiteralPath (\$\w+)\) -or \(Get-Item -LiteralPath \1\)\.Length -le 0\) "
+                              r"\{ throw [^}]*\}", body)
+            self.assertIsNotNone(check, body)
+            self.assertIn(f"Join-Path 'D' '{out}'", body[:check.start()])
+            self.assertLess(body.index("'-merge'"), check.start())
+            self.assertLess(check.end(), body.index("Remove-Item"))
 
     def test_no_analysis_step_starts_once_the_flag_exists(self) -> None:
         self.pc.progress = {"missed": 1, "overruns": 0, "position_gaps": 0, "callback_thread": 4243}
