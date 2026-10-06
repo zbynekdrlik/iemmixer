@@ -80,6 +80,50 @@ try {
         ("D:(A;ID;0x1f019f;;;BA)(A;ID;0x1f019f;;;SY)(A;ID;FA;;;BA)(A;;FR;;;$userSid)"))
     foreach ($bad in $badInherited) { Assert (-not (Test-IemTaskSddl -Sddl $bad -UserSid $userSid)) "task-sddl-read-back-refuses [$bad]" }
 
+    # ---- the boot task's command line (pure, #35): reg.exe through cmd.exe, never PowerShell ----
+    $sys32 = 'C:\Windows\System32'
+    $logDir = 'C:\ProgramData\iemmixer\tasks\out'
+    $bootArgs = @{ System = $sys32; PrefName = 'PrefBuffSize'; PrefOriginal = '64'; LogDir = $logDir }
+    $wantBoot = '/d /q /v:on /s /c ""C:\Windows\System32\reg.exe" add "HKCU\Software\ASIO\Test Card" /v "PrefBuffSize" /t REG_DWORD /d 64 /f >nul 2>&1 && set "iemadd=0" || set "iemadd=1" & (echo boot-pref !DATE! !TIME! add=!iemadd!)>>"C:\ProgramData\iemmixer\tasks\out\boot-pref.log" & "C:\Windows\System32\reg.exe" query "HKCU\Software\ASIO\Test Card" /v "PrefBuffSize" >>"C:\ProgramData\iemmixer\tasks\out\boot-pref.log" 2>&1 & exit /b !iemadd!"'
+    $bc = Get-IemBootPrefCommand -PrefKey 'Software\ASIO\Test Card' @bootArgs
+    Assert ($bc.exe -ceq 'C:\Windows\System32\cmd.exe' -and $bc.arguments -ceq $wantBoot) "boot-pref-command-is-reg-exe-through-cmd ($($bc.arguments))"
+    # The task runs elevated with the user's environment: no % (cmd and Task
+    # Scheduler would expand a variable the user set there before cmd parses).
+    Assert (-not $bc.arguments.Contains('%') -and [Environment]::ExpandEnvironmentVariables($bc.arguments) -ceq $bc.arguments) 'boot-pref-command-holds-no-percent-expansion'
+    foreach ($k in @('HKCU:\Software\ASIO\Test Card', 'hkcu:Software\ASIO\Test Card\', 'Registry::HKEY_CURRENT_USER\Software\ASIO\Test Card', '\Software\ASIO\Test Card')) {
+        $bk = Get-IemBootPrefCommand -PrefKey $k @bootArgs
+        Assert ($bk.arguments -ceq $wantBoot) "boot-pref-command-names-the-key-under-hkcu [$k]"
+    }
+    $bt = Get-IemBootPrefCommand -PrefKey 'Software\ASIO\Test Card' -System $sys32 -PrefName 'PrefBuffSize' -PrefOriginal '064' -PrefKind 'text' -LogDir $logDir
+    Assert ($bt.arguments -clike '* add "HKCU\Software\ASIO\Test Card" /v "PrefBuffSize" /t REG_SZ /d 064 /f >nul 2>&1 *') "boot-pref-command-keeps-a-string-kind ($($bt.arguments))"
+    $bx = Get-IemBootPrefCommand -PrefKey 'Software\ASIO\Test Card (x64)' @bootArgs
+    Assert ($bx.arguments -clike '* add "HKCU\Software\ASIO\Test Card (x64)" /v "PrefBuffSize" *') 'boot-pref-command-takes-a-key-with-parentheses-in-quotes'
+    $badKeys = @('Software\ASIO\Test%PATH%', 'Software\ASIO\Test!PATH!', 'Software\ASIO\Te"st', 'Software\ASIO\A&B', 'Software\ASIO\A|B',
+                 'Software\ASIO\A^B', 'Software\ASIO\A<B', 'Software\ASIO\A>B', "Software\ASIO\A`tB", 'HKLM:\Software\ASIO\Test Card',
+                 'Registry::HKEY_LOCAL_MACHINE\Software\ASIO\Test Card', '\')
+    foreach ($k in $badKeys) { Throws { Get-IemBootPrefCommand -PrefKey $k @bootArgs } "boot-pref-command-refuses-the-key [$k]" }
+    foreach ($n in @('Pref%x%', 'Pref!x!', 'Pref"x', 'Pref&x', 'Pref\')) {
+        Throws { Get-IemBootPrefCommand -PrefKey 'Software\ASIO\Test Card' -System $sys32 -PrefName $n -PrefOriginal '64' -LogDir $logDir } "boot-pref-command-refuses-the-value-name [$n]"
+    }
+    foreach ($o in @('6 4', '64x', '0x40', '123456')) {
+        Throws { Get-IemBootPrefCommand -PrefKey 'Software\ASIO\Test Card' -System $sys32 -PrefName 'PrefBuffSize' -PrefOriginal $o -LogDir $logDir } "boot-pref-command-refuses-the-original [$o]"
+    }
+    Throws { Get-IemBootPrefCommand -PrefKey 'Software\ASIO\Test Card' -System $sys32 -PrefName 'PrefBuffSize' -PrefOriginal '64' -PrefKind 'binary' -LogDir $logDir } 'boot-pref-command-refuses-another-kind'
+    foreach ($d in @('C:\Program%x%Data\out', 'C:\Program!x!Data\out', 'tasks\out')) {
+        Throws { Get-IemBootPrefCommand -PrefKey 'Software\ASIO\Test Card' -System $sys32 -PrefName 'PrefBuffSize' -PrefOriginal '64' -LogDir $d } "boot-pref-command-refuses-the-log-folder [$d]"
+    }
+    Throws { Get-IemBootPrefCommand -PrefKey 'Software\ASIO\Test Card' -System 'Windows\System32' -PrefName 'PrefBuffSize' -PrefOriginal '64' -LogDir $logDir } 'boot-pref-command-refuses-a-relative-system-folder'
+    # Its log as Get-IemBootstrapState reads it: the last run's block.
+    $synth = Join-Path $base 'boot-pref-synthetic.log'
+    [IO.File]::WriteAllLines($synth, [string[]]@('boot-pref d1 t1 add=0', '', 'HKEY_CURRENT_USER\Software\ASIO\Test Card', '    PrefBuffSize    REG_DWORD    0x20', '',
+                                                  'boot-pref d2 t2 add=1', 'ERROR: x', ''))
+    $sb = Get-IemBootPrefLog -Path $synth
+    Assert ((@($sb) -join '|') -ceq 'boot-pref d2 t2 add=1|ERROR: x') "boot-pref-log-is-the-last-runs-block ($(@($sb) -join '|'))"
+    $sn = Get-IemBootPrefLog -Path (Join-Path $base 'no-such-boot-pref.log')
+    Assert ($sn.Count -eq 0) 'boot-pref-log-is-empty-before-the-first-run'
+    Assert ((Format-IemTaskTime -Time ([datetime]'1899-12-30')) -ceq '') 'task-time-never-run-is-empty'
+    Assert ((Format-IemTaskTime -Time (New-Object DateTime 2026, 10, 7, 21, 13, 39, ([DateTimeKind]::Utc))) -ceq '2026-10-07T21:13:39.0000000Z') 'task-time-is-utc'
+
     # ---- Register-IemTasks on the real Task Scheduler ----
     $prefArgs = @{ PrefKey = $regKey; PrefName = 'Pref'; PrefOriginal = '64'; Module = 'testcard.dll' }
     $sch = New-Object -ComObject 'Schedule.Service'
@@ -92,6 +136,10 @@ try {
     $e = ErrorOf { Register-IemTasks -Root $root -AppExe $appExe -Folder '\iemmixer-test-none' -ElevatedRoot $elevated -PrefKey $regKey -PrefName 'Pref' -PrefOriginal '64' -Module 'a|b.dll' }
     Assert ($e -like "*module name 'a|b.dll' refused*") "tasks-refuse-a-bad-driver-module-name ($e)"
     Throws { Register-IemTasks -Root ($root + '"') -AppExe $appExe -Folder $folder -ElevatedRoot $elevated @prefArgs } 'tasks-refuse-a-quote-in-a-path'
+    # The boot task's command line refuses what cmd would read, before anything is written.
+    $e = ErrorOf { Register-IemTasks -Root $root -AppExe $appExe -Folder '\iemmixer-test-none' -ElevatedRoot $elevated -PrefKey ($regKey + '!x!') -PrefName 'Pref' -PrefOriginal '64' -Module 'testcard.dll' }
+    Assert ($e -like "*refused for the boot task's command line*") "tasks-refuse-a-key-the-boot-task-cannot-carry ($e)"
+    Assert (-not (Test-Path -LiteralPath $elevated)) 'tasks-refused-boot-key-before-the-elevated-folder'
 
     Register-ScheduledTask -TaskPath '\iemmixer-test\' -TaskName 'iemmixer-StartREAPER' `
         -Action (New-ScheduledTaskAction -Execute 'cmd.exe' -Argument '/c exit 0') `
@@ -99,7 +147,7 @@ try {
     $reports = Register-IemTasks -Root $root -AppExe $appExe -Folder $folder -ElevatedRoot $elevated @prefArgs
     $byName = @{}
     foreach ($r in $reports) { $byName[$r.task] = $r }
-    Assert ((Sorted $byName.Keys) -ceq (Sorted @('iemmixer-guard', 'iemmixer-StartApp', 'iemmixer-probe', 'iemmixer-tuning', 'iemmixer-exclude', 'iemmixer-logon', 'iemmixer-StartREAPER'))) 'tasks-all-seven'
+    Assert ((Sorted $byName.Keys) -ceq (Sorted @('iemmixer-guard', 'iemmixer-StartApp', 'iemmixer-probe', 'iemmixer-tuning', 'iemmixer-exclude', 'iemmixer-logon', 'iemmixer-boot-pref', 'iemmixer-StartREAPER'))) 'tasks-all-eight'
     foreach ($r in $reports) { Assert ($r.sddl_ok -and $r.problems.Count -eq 0) "tasks-$($r.task)-reads-back-with-our-descriptor" }
 
     # An independent read through the ScheduledTasks cmdlets.
@@ -128,6 +176,20 @@ try {
     Assert ($l.Actions[0].Arguments -like "*-File `"$entry`" -Root `"$root`" -TuningDir `"$etuning`" -Kind logon -PrefKey `"$regKey`" -PrefName `"Pref`" -PrefOriginal `"64`" -Module `"testcard.dll`"") "tasks-logon-runs-the-elevated-entry ($($l.Actions[0].Arguments))"
     $tu = Get-ScheduledTask -TaskPath '\iemmixer-test\' -TaskName 'iemmixer-tuning'
     Assert ($tu.Actions[0].Arguments -like "*-File `"$entry`" -Root `"$root`" -TuningDir `"$etuning`" -Kind tuning" -and $tu.Actions[0].Execute -like '*\WindowsPowerShell\v1.0\powershell.exe' -and $tu.Actions[0].WorkingDirectory -eq $etasks) 'tasks-tuning-runs-the-elevated-entry-with-its-tuning-folder'
+    # The boot task (#35): the preference back to its original at the system's
+    # start, before any logon, as the user (S4U, no stored password), elevated
+    # (its log lies in the admin-only out folder), and at no other moment.
+    $bp = Get-ScheduledTask -TaskPath '\iemmixer-test\' -TaskName 'iemmixer-boot-pref'
+    $bps = $bp.Settings
+    Assert ("$($bp.Principal.LogonType)" -eq 'S4U' -and "$($bp.Principal.RunLevel)" -eq 'Highest' -and $bp.Principal.UserId -like "*$(Split-Path -Leaf $me.name)") "tasks-boot-pref-runs-as-the-user-s4u-highest ($($bp.Principal.LogonType), $($bp.Principal.RunLevel), $($bp.Principal.UserId))"
+    Assert (@($bp.Triggers).Count -eq 1 -and $bp.Triggers[0].CimClass.CimClassName -eq 'MSFT_TaskBootTrigger' -and $bp.Triggers[0].Enabled) 'tasks-boot-pref-fires-only-at-the-systems-start'
+    Assert (-not $bps.AllowDemandStart -and -not $bps.StartWhenAvailable -and $bps.RestartCount -eq 0) 'tasks-boot-pref-never-on-demand-late-or-again'
+    Assert ($bps.ExecutionTimeLimit -eq 'PT0S' -and "$($bps.MultipleInstances)" -eq 'IgnoreNew' -and -not $bps.AllowHardTerminate -and $bps.Priority -eq 4 -and
+            -not $bps.DisallowStartIfOnBatteries -and -not $bps.StopIfGoingOnBatteries -and -not $bps.IdleSettings.StopOnIdleEnd) 'tasks-boot-pref-unbounded-ignorenew-never-ended-hard'
+    $bootCmd = Get-IemBootPrefCommand -System ([Environment]::GetFolderPath('System')) -PrefKey $regKey -PrefName 'Pref' -PrefOriginal '64' -LogDir $eout
+    Assert (@($bp.Actions).Count -eq 1 -and $bp.Actions[0].Execute -eq $bootCmd.exe -and $bp.Actions[0].Arguments -ceq $bootCmd.arguments -and
+            $bp.Actions[0].WorkingDirectory -eq $etasks) "tasks-boot-pref-runs-reg-exe-through-cmd ($($bp.Actions[0].Execute) $($bp.Actions[0].Arguments))"
+    Assert ($bootCmd.arguments -clike "*`"$eout\boot-pref.log`"*") 'tasks-boot-pref-logs-into-the-admin-only-out-folder'
     $sr = Get-ScheduledTask -TaskPath '\iemmixer-test\' -TaskName 'iemmixer-StartREAPER'
     Assert ($sr.Actions[0].Execute -eq 'cmd.exe' -and $sr.Actions[0].Arguments -eq '/c exit 0') 'tasks-start-reaper-keeps-its-action'
     foreach ($n in @('iemmixer-StartREAPER', 'iemmixer-guard', 'iemmixer-exclude')) {
@@ -166,7 +228,7 @@ try {
     $sd = $sch.GetFolder($folder).GetTask('iemmixer-guard').GetSecurityDescriptor(4)
     Assert (-not (Test-IemTaskSddl -Sddl $sd -UserSid $me.sid)) "tasks-precondition-the-guard-task-loosened ($sd)"
     $again = Register-IemTasks -Root $root -AppExe $appExe -Folder $folder -ElevatedRoot $elevated @prefArgs
-    Assert ($again.Count -eq 7) 'tasks-register-again-idempotent'
+    Assert ($again.Count -eq 8 -and @($again | Where-Object { $_.problems.Count -gt 0 }).Count -eq 0) 'tasks-register-again-idempotent'
     $sd = $sch.GetFolder($folder).GetTask('iemmixer-guard').GetSecurityDescriptor(4)
     Assert (Test-IemTaskSddl -Sddl $sd -UserSid $me.sid) "tasks-register-again-restores-a-loosened-descriptor ($sd)"
 
@@ -470,6 +532,38 @@ try {
     $nm = Invoke-IemTaskRequest -Kind logon -Root $root -OutDir $eout -TuningDir $noTuning -PrefKey $regKey -PrefName 'Pref' -PrefOriginal '64'
     Assert (-not $nm.ok -and $nm.error -like '*-Module*') "logon-needs-the-driver-module ($($nm.error))"
 
+    # The boot task's action as the task starts it (#35; here as this elevated
+    # user, not at a boot): the preference left at 32 by a parked engine is
+    # written back to the original, its kind kept, and each run appends its
+    # block (header, reg.exe's read-back) to the log in the out folder. The
+    # task itself never starts on demand, so its registered action is run
+    # directly; a run that does not end within 30 s fails the test (nothing is
+    # ended, I8).
+    function Invoke-BootPrefAction($Action) {
+        $psi = New-Object Diagnostics.ProcessStartInfo
+        $psi.FileName = [string]$Action.Path
+        $psi.Arguments = [string]$Action.Arguments
+        $psi.WorkingDirectory = [string]$Action.WorkingDirectory
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $proc = [Diagnostics.Process]::Start($psi)
+        if (-not $proc.WaitForExit(30000)) { throw 'the boot task action did not end within 30 s' }
+        return $proc.ExitCode
+    }
+    $bootLog = Join-Path $eout 'boot-pref.log'
+    $bootAction = @($sch.GetFolder($folder).GetTask('iemmixer-boot-pref').Definition.Actions)[0]
+    Set-ItemProperty -LiteralPath $regKey -Name 'Pref' -Value 32 -Type DWord
+    $bx1 = Invoke-BootPrefAction $bootAction
+    $bv = Get-IemPref -Key $regKey -Name 'Pref'
+    Assert ($bx1 -eq 0 -and $bv.value -eq 64 -and $bv.kind -eq 'DWord') "boot-pref-action-writes-the-original-keeping-its-kind (exit $bx1, $($bv.raw) $($bv.kind))"
+    $blk = Get-IemBootPrefLog -Path $bootLog
+    Assert (@($blk).Count -eq 3 -and $blk[0] -clike 'boot-pref * add=0' -and $blk[1] -clike 'HKEY_CURRENT_USER\Software\iemmixer-iempc-test-*' -and
+            $blk[2] -cmatch '^\s+Pref\s+REG_DWORD\s+0x40\s*$') "boot-pref-action-logs-its-read-back ($(@($blk) -join ' | '))"
+    $bx2 = Invoke-BootPrefAction $bootAction
+    $heads = @([IO.File]::ReadAllLines($bootLog) | Where-Object { $_.StartsWith('boot-pref ') })
+    Assert ($bx2 -eq 0 -and $heads.Count -eq 2 -and (Get-IemPref -Key $regKey -Name 'Pref').value -eq 64) "boot-pref-action-appends-a-block-per-run ($($heads.Count))"
+    Assert (-not (Test-Path -LiteralPath (Join-Path $root 'logs')) -and -not (Test-Path -LiteralPath (Join-Path $root 'boot-pref.log'))) 'boot-pref-action-writes-nothing-in-the-users-root'
+
     $td = Join-Path $root 'guard\tasks'
     New-Item -ItemType Directory -Force -Path $td | Out-Null
     [IO.File]::WriteAllText((Join-Path $td 'tuning.request.json'), '{"id":"t-1","verb":"state"}')
@@ -582,9 +676,16 @@ function Invoke-IemTuningApply { param([string]$ProfilePath, [int]$Tier) return 
     Assert (-not (Test-Path -LiteralPath (Join-Path $td 'tuning.result.json'))) 'elevated-entry-writes-no-result-into-the-users-root'
 
     # ---- bootstrap state (read only) ----
-    $bs = Get-IemBootstrapState -Root $root -Module 'iemmixer-no-such-module.dll' -PrefKey $regKey -PrefName 'Pref' -AppImage 'iemmixer-no-such-app.exe' -Folder $folder -FirewallRule $ruleName
+    $bs = Get-IemBootstrapState -Root $root -Module 'iemmixer-no-such-module.dll' -PrefKey $regKey -PrefName 'Pref' -AppImage 'iemmixer-no-such-app.exe' -Folder $folder -FirewallRule $ruleName -ElevatedRoot $elevated
     Assert ($bs.holders.Count -eq 0 -and $bs.app -eq 0 -and $bs.reaper -eq 0 -and $bs.pref.value -eq 64) 'bootstrap-state-holders-processes-and-preference'
-    Assert (@($bs.tasks | Where-Object { -not $_.exists -or -not $_.sddl_ok }).Count -eq 0 -and @($bs.tasks).Count -eq 7) 'bootstrap-state-our-tasks-with-their-descriptors'
+    Assert (@($bs.tasks | Where-Object { -not $_.exists -or -not $_.sddl_ok }).Count -eq 0 -and @($bs.tasks).Count -eq 8) 'bootstrap-state-our-tasks-with-their-descriptors'
+    # The boot task: never run by Task Scheduler here (no boot, no start on
+    # demand), so no last run and "has not yet run" (0x41303); its log holds the
+    # direct runs above, the last one's block named.
+    $bst = @($bs.tasks | Where-Object { $_.task -ceq 'iemmixer-boot-pref' })
+    Assert ($bst.Count -eq 1 -and $bst[0].last_run -ceq '' -and $bst[0].last_result -eq 267011) "bootstrap-state-names-the-boot-task-and-its-last-result ($($bst[0].last_run), $($bst[0].last_result))"
+    Assert (@($bs.boot_pref.log).Count -eq 3 -and $bs.boot_pref.log[0] -clike 'boot-pref * add=0' -and $bs.boot_pref.log[2] -cmatch 'REG_DWORD\s+0x40' -and -not $bs.boot_pref.log_error) "bootstrap-state-shows-the-boot-tasks-last-logged-run ($(@($bs.boot_pref.log) -join ' | '))"
+    Assert ($bs.boot_pref.path -ceq (Join-Path $eout 'boot-pref.log')) 'bootstrap-state-reads-the-boot-log-in-the-elevated-root'
     Assert ($bs.root.acl_ok -and $bs.firewall.present -and -not $bs.firewall.ok) "bootstrap-state-root-and-the-disabled-test-rule ($(@($bs.root.problems) -join '; '))"
     # An item below the root with a rule of its own: the state sees it, and the
     # next Set-IemRootAcl resets that item only.
@@ -592,7 +693,7 @@ function Invoke-IemTuningApply { param([string]$ProfilePath, [int]$Tier) return 
     $looseAcl = [IO.File]::GetAccessControl($loose)
     $looseAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($everyone, 'Read', 'Allow')))
     [IO.File]::SetAccessControl($loose, $looseAcl)
-    $bs = Get-IemBootstrapState -Root $root -Module 'iemmixer-no-such-module.dll' -PrefKey $regKey -PrefName 'Pref' -AppImage 'iemmixer-no-such-app.exe' -Folder $folder -FirewallRule $ruleName
+    $bs = Get-IemBootstrapState -Root $root -Module 'iemmixer-no-such-module.dll' -PrefKey $regKey -PrefName 'Pref' -AppImage 'iemmixer-no-such-app.exe' -Folder $folder -FirewallRule $ruleName -ElevatedRoot $elevated
     Assert (-not $bs.root.acl_ok -and @($bs.root.problems | Where-Object { $_ -like '*x.txt*S-1-1-0*' }).Count -eq 1) "bootstrap-state-sees-an-item-below-the-root-with-a-rule-of-its-own ($(@($bs.root.problems) -join '; '))"
     $fix = Set-IemRootAcl -Root $root
     Assert ($fix.changed -and (@($fix.reset) -join ',') -ceq 'bundles\x.txt') "root-acl-resets-only-the-item-that-differs ($(@($fix.reset) -join ','))"
