@@ -258,7 +258,7 @@ class DenylistScanTests(unittest.TestCase):
     def test_a_decomposed_diacritic_path_is_matched_and_redacted(self) -> None:
         # A term with a diacritic and a path holding it in NFD (decomposed) form: NFC
         # normalization must still match and redact it, so it cannot hide in the log.
-        term = "ďurica"  # 'ďurica' precomposed (NFC)
+        term = "ďqzywx"  # an invented word with a diacritic, precomposed (NFC)
         scanner = ds.Scanner([term], set())
         nfd_path = unicodedata.normalize("NFD", f"docs/{term}-notes.md")
         self.assertNotEqual(nfd_path, f"docs/{term}-notes.md")  # genuinely decomposed
