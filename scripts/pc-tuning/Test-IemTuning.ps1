@@ -289,9 +289,12 @@ try {
     }
     # A device's processors must exist, and the card's must be the layout's card
     # role, before its affinity is written (review 3.9); "lps": null is no
-    # processor, never processor 0 (review R3).
+    # processor, never processor 0 (review R3). A null, float, bool or string
+    # entry is refused before any write, never dropped or rounded: the check, the
+    # mask and the placement read one validated list (#32 MAJOR-2).
     foreach ($c in @(@(@(2, 62), @(2, 62), '*not present*'), @(@(2), @(2, 62), '*layout.card*'), @(@(), @(2), '*no processors*'),
-                     @($null, @(2), '*no processors*'))) {
+                     @($null, @(2), '*no processors*'), @(@(2, $null), @(2), '*lps: entry 1*'), @(@(2.5), @(2), '*lps: entry 0*'),
+                     @(@($true), @(2), '*lps: entry 0*'), @(@('2'), @(2), '*lps: entry 0*'))) {
         $dv = @([ordered]@{ id = 'card'; role = 'card'; instance = 'PCI\VEN_TEST&DEV_0001\0'; hwid = $hw; lps = $c[0]; enabled = $true })
         $bp = New-TestProfile $hw @{ devices = $dv; layout = [ordered]@{ housekeeping = @(0); nic = @(1); card = $c[1]; audio = @(3) } }
         ThrowsLike { Invoke-IemTuningApply -ProfilePath $bp -Tier 3 -Only @('irq') } $c[2] "tier3-refuses-card-processors '$($c[0] -join ',')'"
@@ -354,6 +357,11 @@ try {
     # The grants come from the module's private reader, which the self-test replaces;
     # no parameter lets a caller skip the Win32_PnPAllocatedResource read (review 3.5).
     Assert (-not (Get-Command Invoke-IemTuningApply).Parameters.ContainsKey('AllocatedIrqs') -and -not (Get-Command Get-IemGlobalItems).Parameters.ContainsKey('AllocatedIrqs')) 'msi-grant-read-has-no-bypass-parameter'
+    # The mask is built from the same validated list as the check (#32 MAJOR-2): with
+    # MSI flagged the items are built without -Check (as the state builds them), and a
+    # null entry throws instead of becoming a mask with processor 0 in it.
+    $pnull = Read-IemProfile -Path (New-TestProfile $hw @{ devices = @([ordered]@{ id = 'card'; role = 'card'; instance = 'PCI\VEN_TEST&DEV_0001\0'; hwid = $hw; lps = @(2, $null); enabled = $true }) })
+    ThrowsLike { Get-IemGlobalItems -Profile $pnull -Tier 3 -Only @('irq') } '*lps: entry 1*' 'mask-is-built-from-the-validated-processors'
     $savedIrqs = Get-TuningSeam 'ReadAllocatedIrqs'
     $inst = 'PCI\VEN_TEST&DEV_0001\0'
     foreach ($c in @(@(@{ $inst = @(16) }, '*INTx*'), @(@{ $inst = @(-3, 17) }, '*INTx*'), @(@{}, '*no interrupt*'))) {
@@ -451,6 +459,12 @@ try {
         ThrowsLike { Enter-IemTuningMode -ProfilePath $bp -Only @('plan', 'governor') -Idle 'disable' } $c[1] "enter-refuses-the-plan $($c[0])"
     }
     Assert ([IemPower]::Active() -eq $activeBefore -and [IemPower]::Read($activeBefore, $proc, $procMin) -eq $srcMin -and [IemPower]::Read($foreignPlan, $proc, $procMin) -eq $foreignMin -and (Get-Service W32Time).Status -eq 'Running' -and -not (Read-IemJournalState $pp)) 'enter-plan-refusals-write-nothing'
+    # The placement reads the validated housekeeping list, and each of its processors
+    # must be present: one that is not is refused before any write, never placed as
+    # CPU Set ID 0 (#32 MAJOR-2).
+    $pph = New-TestProfile $hw @{ layout = [ordered]@{ housekeeping = @(0, 62); nic = @(1); card = @(2); audio = @(3) } }
+    ThrowsLike { Enter-IemTuningMode -ProfilePath $pph -Only @('placement') } '*housekeeping*processor 62 is not present*' 'enter-refuses-a-housekeeping-processor-that-is-not-present'
+    Assert ((@([IemCpuSets]::Get($child.Id)) -join ',') -eq '' -and -not (Read-IemJournalState $pp)) 'placement-refusal-writes-nothing'
     # The second M2 net: a plan value is never written into a plan that is not
     # iemmixer's, even by a direct write (review 3.4).
     $otherMin = $(if ($foreignMin -eq 37) { 38 } else { 37 })
