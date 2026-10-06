@@ -74,8 +74,10 @@ REDACTED = "[redacted]"
 # the other readings of bytes that are not valid UTF-8: Windows Central European, Latin-1, ISO
 # Central European (ISO-8859-2), DOS Central European (cp852)
 FALLBACK_CODECS = ("cp1250", "latin-1", "iso-8859-2", "cp852")
-# UTF-8 decoded as one of these and encoded again (double-encoded mojibake) is read back (unmojibake)
-MOJIBAKE_CODECS = ("cp1250", "latin-1")
+# UTF-8 shown in one of these code pages and encoded again (double-encoded mojibake) is read back
+# (unmojibake): Windows Central European; and Western, where Latin-1 and Windows-1252 differ only in
+# 0x80-0x9F (C1 controls against punctuation and a few letters), so one reading takes both (#32 F5 m3)
+MOJIBAKE_CODECS = {"cp1250": ("cp1250",), "western": ("latin-1", "cp1252")}
 # In binary content random bytes form short words by chance: in this repository's f64 goldens 28 %
 # of all 3-letter and 0.5 % of all 4-letter words occur as words of their text runs, 0.003 % of the
 # 5-letter ones. So in a binary text run a term shorter than MIN_BINARY_TERM characters counts only
@@ -292,30 +294,49 @@ def unescape(text: str) -> str:
     return text
 
 
-def _mojibake_patterns(codec: str) -> tuple[re.Pattern[str], re.Pattern[str]]:
-    """UTF-8 sequences as a single-byte codec shows them -- a lead byte's character followed by one,
-    two or three continuation bytes' characters -- and a lead followed by one continuation, which
-    the regex engine finds ~10x faster: most texts have none, and then the sequences are not sought."""
-    def chars(first: int, last: int) -> str:
-        return "[" + re.escape(bytes(range(first, last + 1)).decode(codec, errors="replace")) + "]"
-    cont = chars(0x80, 0xBF)
-    sequences = f"(?:{chars(0xC2, 0xDF)}{cont}|{chars(0xE0, 0xEF)}{cont}{{2}}|{chars(0xF0, 0xF4)}{cont}{{3}})+"
-    return re.compile(chars(0xC2, 0xF4) + cont), re.compile(sequences)
+@dataclass(frozen=True)
+class CodePage:
+    """How a single-byte code page shows UTF-8's bytes 0x80-0xFF, for reading double-encoded UTF-8 back."""
+    hint: re.Pattern[str]       # a lead byte's character and one continuation's: ~10x faster to find
+    sequences: re.Pattern[str]  # whole UTF-8 sequences as the code page shows them
+    to_bytes: dict[int, str]    # each of those characters -> the Latin-1 character of its byte
+
+    @classmethod
+    def of(cls, *codecs: str) -> CodePage:
+        """The characters bytes 0x80-0xFF show as in any of `codecs` (Windows shows a byte its code
+        page leaves undefined as the C1 control of the same number, so that is one of them)."""
+        chars: dict[str, int] = {}
+        for codec in codecs:
+            for byte in range(0x80, 0x100):
+                try:
+                    chars.setdefault(bytes([byte]).decode(codec), byte)
+                except UnicodeDecodeError:
+                    chars.setdefault(chr(byte), byte)
+
+        def of_bytes(first: int, last: int) -> str:
+            return "[" + re.escape("".join(char for char, byte in chars.items() if first <= byte <= last)) + "]"
+        cont = of_bytes(0x80, 0xBF)
+        sequences = (f"(?:{of_bytes(0xC2, 0xDF)}{cont}|{of_bytes(0xE0, 0xEF)}{cont}{{2}}"
+                     f"|{of_bytes(0xF0, 0xF4)}{cont}{{3}})+")
+        return cls(re.compile(of_bytes(0xC2, 0xF4) + cont), re.compile(sequences),
+                   {ord(char): chr(byte) for char, byte in chars.items()})
 
 
-_MOJIBAKE = {codec: _mojibake_patterns(codec) for codec in MOJIBAKE_CODECS}
+_MOJIBAKE = {reading: CodePage.of(*codecs) for reading, codecs in MOJIBAKE_CODECS.items()}
 
 
-def unmojibake(text: str, codec: str) -> str:
-    """The text with each double-encoded stretch -- UTF-8 once decoded as `codec` and encoded again,
-    `ď` shown as `ÄŹ` -- read back as the UTF-8 it was; a stretch that is not valid UTF-8 stays."""
+def unmojibake(text: str, reading: str) -> str:
+    """The text with each double-encoded stretch -- UTF-8 once shown in a code page (MOJIBAKE_CODECS)
+    and encoded again, `ď` shown as `ÄŹ` -- read back as the UTF-8 it was; a stretch that is not
+    valid UTF-8 stays."""
+    page = _MOJIBAKE[reading]
+
     def undo(match: re.Match[str]) -> str:
         try:
-            return match.group().encode(codec).decode("utf-8").replace(SEP, "\ufffd")
+            return match.group().translate(page.to_bytes).encode("latin-1").decode("utf-8").replace(SEP, "\ufffd")
         except UnicodeError:
             return match.group()
-    hint, sequences = _MOJIBAKE[codec]
-    return sequences.sub(undo, text) if hint.search(text) else text
+    return page.sequences.sub(undo, text) if page.hint.search(text) else text
 
 
 # characters no reader sees -- Unicode's Default_Ignorable_Code_Point set (#32 F5 m5): soft hyphen,
@@ -387,8 +408,8 @@ class Views:
         self.bases = [text] if decoded == text else [text, decoded]
         self.raw = list(self.bases)
         for base in self.bases:
-            for codec in MOJIBAKE_CODECS:
-                fixed = unmojibake(base, codec)
+            for reading in MOJIBAKE_CODECS:
+                fixed = unmojibake(base, reading)
                 if fixed not in self.raw:
                     self.raw.append(fixed)
         compacted = compact(self.bases[-1])
