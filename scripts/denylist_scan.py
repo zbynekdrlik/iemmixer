@@ -173,10 +173,21 @@ _ESCAPE_BEFORE = (r"(?<=\\[0-7abfnrtv])", r"(?<=\\[0-7]{2})", r"(?<=\\[0-7]{3})"
                   r"(?<=\\x[0-9A-Fa-f]{2})", r"(?<=\\u[0-9A-Fa-f]{4})", r"(?<=\\U[0-9A-Fa-f]{8})")
 
 
+# between the words of a multi-word term: any run of whitespace (a no-break space, a tab, a line
+# break in a wrapped commit message) and batch separators, so a term wrapped onto the next line of
+# a file is found too, on the line it starts on (#32 F5 m1)
+_GAP = rf"[\s{SEP}]+"
+
+
+def spelled(term: str) -> str:
+    """The regex of the bare term: its words, any whitespace between them."""
+    return _GAP.join(re.escape(word) for word in term.split())
+
+
 def compile_term(term: str) -> re.Pattern[str]:
     left = "(?:(?<![^\\W_])|" + "|".join(_ESCAPE_BEFORE) + ")" if term[:1].isalnum() else ""
     right = r"(?![^\W_])" if term[-1:].isalnum() else ""
-    return re.compile(left + re.escape(term) + right, re.IGNORECASE)
+    return re.compile(left + spelled(term) + right, re.IGNORECASE)
 
 
 def line_key(path: str, line: str) -> str:
@@ -466,13 +477,16 @@ class Term:
     pattern: re.Pattern[str]  # the term with its word boundaries, tried at each literal hit
     short: bool               # under MIN_BINARY_TERM characters (see LONG_TEXT_RUN)
     ascii: bool
-    folded: str               # an ASCII term folded; else its longest folded ASCII word, or ""
+    folded: str               # an ASCII term's longest word folded; else its longest folded ASCII word, or ""
 
     @classmethod
     def of(cls, entry: int, term: str) -> Term:
         term = nfc(term)
-        folded = fold(term) if term.isascii() else max(_ASCII_WORD.findall(fold(term)), key=len, default="")
-        return cls(entry, re.compile(re.escape(term), re.IGNORECASE), compile_term(term),
+        if term.isascii():  # the longest word: any whitespace may stand between the words
+            folded = max(fold(term).split(), key=len)
+        else:
+            folded = max(_ASCII_WORD.findall(fold(term)), key=len, default="")
+        return cls(entry, re.compile(spelled(term), re.IGNORECASE), compile_term(term),
                    len(term) < MIN_BINARY_TERM, term.isascii(), folded)
 
     def starts(self, view: str) -> Iterator[int]:
@@ -501,8 +515,9 @@ class Scanner:
         """(unit position in the batch, entry number) of every term found in a batch, sorted.
 
         One search per term and reading over the whole batch -- a binary file has ~10^5 runs per
-        MiB -- with each match mapped to its unit by the SEPs before it (no term holds a SEP, so no
-        match spans two units, and a SEP is a word boundary like the end of a unit)."""
+        MiB -- with each match mapped to the unit it starts in by the SEPs before it (a SEP is a word
+        boundary like the end of a unit, and only the gap between the words of a multi-word term
+        crosses one: such a term wrapped onto the next line counts on the line it starts on)."""
         views = Views(batch.text())
         per_view: dict[int, tuple[str, list[tuple[int, int]]]] = {}
         for index, term in enumerate(self.terms):
