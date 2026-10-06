@@ -22,8 +22,8 @@ from denylist_readings import SEP, decode, undecodable
 # when the run is LONG_TEXT_RUN or more bytes of valid UTF-8 -- text, which random bytes never form.
 MIN_BINARY_TERM = 5
 LONG_TEXT_RUN = 32
-# Content is scanned in batches of about CHUNK bytes, joined by SEP -- a private-use, non-word
-# character that no form creates or removes -- so CPU and memory stay bounded (#32 review m7).
+# Content is scanned in batches -- whole lines of at most CHUNK bytes, binary runs up to twice that,
+# a longer line or run in segments -- joined by SEP, so CPU and memory stay bounded (#32 review m7).
 CHUNK = 1 << 18
 # A line or run longer than CHUNK is read in segments of CHUNK, each reaching back this far into the
 # one before (#32 F5 m9) -- and at least OVERLAP_PER_CHARACTER times the longest term, the longest

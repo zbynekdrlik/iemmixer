@@ -10,17 +10,25 @@ component that holds a term, or any non-ASCII character, is printed as
 `[redacted]` (the whole path when a term spans components), other components
 have their control characters escaped.
 
-Content is read as numbered units in Batches of about CHUNK bytes, so CPU and
-memory stay bounded (#32 review m7): the lines of text; the decoded lines of
-UTF-32 / UTF-16 text, then its byte runs (a binary may only look like wide
-text); for other content holding a NUL byte (binary) its text runs -- byte runs
-without control characters, then embedded UTF-16 strings -- located as `run N`.
-In a binary run a term shorter than MIN_BINARY_TERM counts only when the run is
-LONG_TEXT_RUN bytes of valid UTF-8, since random bytes form short words by
-chance. Tree mode reads each blob's own bytes (cat-file applies no
-.gitattributes); `--hash PATH N` (or `<rev>:<path>`) numbers units the same way.
-A git-lfs pointer blob or a `.gitattributes` `filter=lfs` line is a finding: the
-content it stands for is not in the repository to scan.
+Content is read as numbered units in bounded Batches (denylist_content, #32
+review m7, F5 m9): the lines of text; the decoded lines of UTF-32 / UTF-16
+text, then its byte runs (a binary may only look like wide text); for other
+content holding a NUL byte (binary) its text runs -- byte runs without control
+characters, then embedded UTF-16 strings, one per string -- located as `run N`.
+A line or run longer than CHUNK is read in overlapping segments, keyed by its
+SHA-256. In a binary run a term shorter than MIN_BINARY_TERM counts only when
+the run is LONG_TEXT_RUN bytes of valid UTF-8, since random bytes form short
+words by chance. A zip-based file, a gzip / bzip2 / xz stream and a tar archive
+are expanded (denylist_containers, F5 m6): each member is decompressed, within
+size and ratio limits, and read like a blob at `<path>!/<member>`, its name
+scanned like a path; a member that cannot be read and a container no stdlib
+module reads are findings (`... cannot be scanned: ...`), allowlisted by the
+blob's key. Tree mode reads each blob's own bytes (cat-file applies no
+.gitattributes); `--hash PATH N` keys unit N of the blob committed at PATH in
+HEAD (or `<rev>:<path>`, `<path>!/<member>`; N `blob` the blob itself) the
+same way. A git-lfs pointer blob or a `.gitattributes` `filter=lfs` line is a
+finding: the content it stands for is not in the repository to scan. Every git
+read ignores replace refs and grafts (F5 m7).
 
 Commit mode scans each commit's author/committer names and emails together
 with its message, its added lines and every added/modified path -- including an
@@ -30,25 +38,28 @@ empty or binary file, whose path the unified diff omits, enumerated via
 output pinned against local config (`--src-prefix=a/ --dst-prefix=b/
 --no-relative --diff-merges=first-parent --root --no-show-signature`, and the
 metadata with `--encoding=UTF-8 --no-show-signature`); a changed blob that is
-not plain text is read whole and the units the old blob lacks are reported as
-`<sha> <path>:<unit>`. With `--identities FILE` it also rejects every commit
-whose author or committer email is not exactly one listed there (read
-NUL-separated; an email holding a line separator is never allowed). Lines are
-split on `\n` only (not str.splitlines()), so a term after a CR/VT/FF/NEL/U+2028
-cannot slip past, and a malformed C-quoted path never crashes the scan
-(`unquote_c` keeps a bad escape literal rather than dropping the bytes that
-follow).
+not plain text, or is a container, is read whole and the units the old blob
+lacks are reported as `<sha> <path>:<unit>`. With `--identities FILE` it also
+rejects every commit whose author or committer email is not exactly one listed
+there (read NUL-separated; an email holding a line separator is never allowed).
+Lines are split on `\n` only (not str.splitlines()), so a term after a
+CR/VT/FF/NEL/U+2028 cannot slip past, and a malformed C-quoted path never
+crashes the scan (`unquote_c` keeps a bad escape literal rather than dropping
+the bytes that follow).
 
 Text is decoded losslessly (UTF-8, surrogateescape) and matched in every
-reading (Views): the escapes decoded (`\\uXXXX`, `\\u{X}`, `\\UXXXXXXXX`, XML /
-HTML numeric references, C / Rust / Python byte escapes, percent-encoding);
-double-encoded UTF-8 read back; invisible characters removed and compatibility
-letters (fullwidth ...) read in NFKC; undecodable bytes re-read as cp1250,
-Latin-1, ISO-8859-2 and cp852. Matching is case-insensitive. A term that
-starts (ends) with a letter or digit must not be preceded (followed) by one,
-where letters include diacritics and `_` is a separator, and an escape sequence
-right before it is a boundary too: `kit` does not hit `kitten`, `x_kit_y` and
-`\\0kit` are hits, and a term ending in `.` such as `10.0.` hits `10.0.0.5`.
+reading (Views, denylist_readings): the escapes decoded (HTML named and numeric
+references, `\\uXXXX`, `\\u{X}`, `\\UXXXXXXXX`, C / Rust / Python byte escapes,
+percent-encoding); double-encoded UTF-8 read back (cp1250, Latin-1 / cp1252);
+default-ignorable characters removed and compatibility letters (fullwidth ...)
+read in NFKC; undecodable bytes re-read as cp1250, Latin-1, ISO-8859-2 and
+cp852. Each entry is matched as written and in its ASCII spelling (diacritics
+dropped, F5 MAJOR), case-insensitively, any whitespace run (a line break too)
+between the words of a multi-word entry (F5 m1). A term that starts (ends) with
+a letter or digit must not be preceded (followed) by one, where letters include
+diacritics and `_` is a separator, and an escape sequence right before it is a
+boundary too: `kit` does not hit `kitten`, `x_kit_y` and `\\0kit` are hits, and
+a term ending in `.` such as `10.0.` hits `10.0.0.5`.
 """
 from __future__ import annotations
 
