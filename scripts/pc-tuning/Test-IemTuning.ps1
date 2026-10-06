@@ -772,6 +772,28 @@ try {
         $cl = @(Get-Content -LiteralPath $calls)
         $stops = @($cl | Where-Object { $_ -like 'stop *' })
         Assert ($stops.Count -eq 2 -and $stops[0] -like 'stop "NT Kernel Logger" -ets*' -and $stops[1] -like 'stop IemMarkers -ets*' -and @($cl | Where-Object { $_ -like 'query "NT Kernel Logger" -ets*' }).Count -eq 1) 'trace-stop-stops-the-kernel-logger-first'
+        # A session that ends between two logman calls is gone, never an error (CI run
+        # 37464797322: a kernel logger of the runner's own, listed by `query -ets`, had ended
+        # before `query "NT Kernel Logger" -ets`, which exits 0x80300002, PLA_E_DCS_NOT_FOUND).
+        # Gone before the detail query: neither ours nor kept, IemMarkers still stopped.
+        [IO.File]::WriteAllText($fakeLogman, ("@echo off`r`n>>`"%~dp0calls.txt`" echo %*`r`n" +
+            "if /i `"%~1`"==`"query`" if /i `"%~2`"==`"-ets`" goto list`r`nif /i `"%~1`"==`"query`" goto gone`r`n" +
+            "exit /b 0`r`n" +
+            ":list`r`necho IemMarkers                     Trace   Running`r`necho NT Kernel Logger               Trace   Running`r`nexit /b 0`r`n" +
+            ":gone`r`necho Error: 1>&2`r`necho Data Collector Set was not found. 1>&2`r`nexit /b -2144337918`r`n"))
+        $gone = $null; $ge = $null
+        try { $gone = Stop-IemTraceSessions -Dir $runDir } catch { $ge = $_ }
+        Assert ($null -eq $ge -and @($gone.stopped) -contains 'IemMarkers' -and @($gone.stopped) -notcontains 'NT Kernel Logger' -and @($gone.kept).Count -eq 0) "trace-stop-a-kernel-logger-gone-before-its-query-is-no-error ($ge)"
+        # Gone between the detail query and its stop: the stop's not-found is no error.
+        [IO.File]::WriteAllText($fakeLogman, ("@echo off`r`n>>`"%~dp0calls.txt`" echo %*`r`n" +
+            "if /i `"%~1`"==`"query`" if /i `"%~2`"==`"-ets`" goto list`r`nif /i `"%~1`"==`"query`" goto kernel`r`n" +
+            "if /i `"%~2`"==`"NT Kernel Logger`" goto gone`r`nexit /b 0`r`n" +
+            ":list`r`necho IemMarkers                     Trace   Running`r`necho NT Kernel Logger               Trace   Running`r`nexit /b 0`r`n" +
+            ":kernel`r`necho Name:                 NT Kernel Logger`r`necho Output Location:      $runDir\kernel.etl`r`nexit /b 0`r`n" +
+            ":gone`r`necho Data Collector Set was not found. 1>&2`r`nexit /b -2144337918`r`n"))
+        $gone = $null; $ge = $null
+        try { $gone = Stop-IemTraceSessions -Dir $runDir } catch { $ge = $_ }
+        Assert ($null -eq $ge -and @($gone.stopped) -contains 'IemMarkers' -and @($gone.kept).Count -eq 0) "trace-stop-a-session-gone-before-its-stop-is-no-error ($ge)"
         # Each logman call is bounded: one that hangs is reported, never waited for
         # to the end (and never ended, I8).
         [IO.File]::WriteAllText($fakeLogman, "@echo off`r`nping -n 8 127.0.0.1 >nul`r`nexit /b 0`r`n")
