@@ -5,10 +5,8 @@ import contextlib
 import io
 import os
 import random
-import shutil
 import subprocess
 import sys
-import tempfile
 import time
 import tracemalloc
 import unicodedata
@@ -17,51 +15,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import denylist_scan as ds  # noqa: E402
-
-TERMS = ["zyxname", "10.9.", "ghost-host.example"]
-REDACTED_MARKER = "[redacted]"
-# #32 review m7: the stated budget for binary content (public-repo-hygiene.md) -- a 4 MiB blob of
-# pseudo-random bytes against 40 invented terms, in tree mode through main()
-BUDGET_BLOB = 4 << 20
-BUDGET_CPU_PER_MIB = 1.0          # seconds of this process's CPU per MiB of blob
-BUDGET_MEMORY_BEYOND_BLOB = 24 << 20  # peak Python allocation on top of two copies of the blob
-BUDGET_TERMS = ([f"qz{letter}xw{letter}k" for letter in "abcdefghijklmnopqrstuvwxyz"]  # 7 characters
-                + [f"ďq{letter}zyx" for letter in "abcdefgh"] + ["qxv", "zqk", "xwq", "qzzx", "kqxz", "zxqv"])
+from denylist_test_support import (BUDGET_BLOB, BUDGET_CPU_PER_MIB, BUDGET_MEMORY_BEYOND_BLOB,  # noqa: E402
+                                   BUDGET_TERMS, REDACTED_MARKER, ScanTestCase, git, git_out)
 
 
-def git(repo: Path, *args: str) -> None:
-    subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
-
-
-class DenylistScanTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.tmp = Path(tempfile.mkdtemp())
-        self.repo = self.tmp / "repo"
-        self.repo.mkdir()
-        git(self.repo, "init", "-q", "-b", "main")
-        git(self.repo, "config", "user.email", "test@example.org")
-        git(self.repo, "config", "user.name", "test")
-        git(self.repo, "config", "commit.gpgsign", "false")
-        self.deny = self.tmp / "deny.txt"
-        self.deny.write_text("# test terms\n" + "\n".join(TERMS) + "\n", encoding="utf-8")
-
-    def tearDown(self) -> None:
-        shutil.rmtree(self.tmp)
-
-    def commit(self, files: dict[str, str | bytes], message: str = "change") -> None:
-        for rel, content in files.items():
-            path = self.repo / rel
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(content if isinstance(content, bytes) else content.encode("utf-8"))
-        git(self.repo, "add", "-A")
-        git(self.repo, "commit", "-q", "-m", message)
-
-    def scan(self, *extra: str) -> tuple[int, str]:
-        out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = ds.main(["--denylist", str(self.deny), "--repo", str(self.repo), *extra])
-        return code, out.getvalue() + err.getvalue()
-
+class DenylistScanTests(ScanTestCase):
     def test_clean_tree_passes(self) -> None:
         self.commit({"a.txt": "nothing private here\n"})
         self.assertEqual(self.scan("--tree", "HEAD")[0], 0)
@@ -253,7 +211,7 @@ class DenylistScanTests(unittest.TestCase):
     def test_a_decomposed_diacritic_path_is_matched_and_redacted(self) -> None:
         # A term with a diacritic and a path holding it in NFD (decomposed) form: NFC
         # normalization must still match and redact it, so it cannot hide in the log.
-        term = "ďurica"  # 'ďurica' precomposed (NFC)
+        term = "ďqzywx"  # an invented word with a diacritic, precomposed (NFC)
         scanner = ds.Scanner([term], set())
         nfd_path = unicodedata.normalize("NFD", f"docs/{term}-notes.md")
         self.assertNotEqual(nfd_path, f"docs/{term}-notes.md")  # genuinely decomposed
@@ -267,10 +225,20 @@ class DenylistScanTests(unittest.TestCase):
         scanner = ds.Scanner(["rack/mixer"], set())
         self.assertEqual(scanner.shown("rack/mixer/config.txt"), REDACTED_MARKER)
 
-    def test_shown_escapes_control_chars_in_a_kept_component(self) -> None:
-        # a raw control char in a kept component could inject a log line / a CI ::command
+    def test_shown_redacts_a_component_holding_a_control_char(self) -> None:
+        # a raw control char could inject a log line / a CI ::command; and an escape sequence that
+        # ends in a letter (ESC [ 2 J) glues itself to a term, which then matches nothing and was
+        # printed (review of lane G3, finding 7): a component holding one is redacted, like a
+        # non-ASCII one (this test expected the control char printed escaped before)
         scanner = ds.Scanner(["zyxname"], set())
-        self.assertEqual(scanner.shown("a\x01b/zyxname.txt"), "a\\x01b/[redacted]")
+        self.assertEqual(scanner.shown("a\x01b/zyxname.txt"), "[redacted]/[redacted]")
+        self.assertEqual(scanner.shown("docs/x\x1b[2Jzyxname.txt"), "docs/[redacted]")
+        self.commit({"base.txt": "base\n"})
+        self.commit({"docs/x\x1b[2Jzyxname.txt": "keep zyxname\n"})
+        for mode in (("--tree", "HEAD"), ("--commits", "HEAD~1..HEAD")):
+            code, out = self.scan(*mode)
+            self.assertEqual(code, 1)
+            self.assertNotIn("zyxname", out.lower())
 
     def test_shown_redacts_a_component_whose_redacted_form_still_matches(self) -> None:
         # the post-redaction re-check: a term equal to the literal marker text
@@ -525,21 +493,6 @@ class DenylistScanTests(unittest.TestCase):
 
     # --- #32 E3: non-UTF-8 text, JSON \u and percent escapes, and undecodable paths ---
 
-    def add_terms(self, *terms: str) -> None:
-        self.deny.write_text("\n".join([*TERMS, *terms]) + "\n", encoding="utf-8")
-
-    def assert_found_in_both_modes_as(self, files: dict[str, str | bytes], term_letters: str) -> str:
-        self.bases = getattr(self, "bases", 0) + 1  # a fresh base commit per subTest
-        self.commit({"base.txt": f"base {self.bases}\n"})
-        self.commit(files, message="add content in another encoding")
-        code, tree_out = self.scan("--tree", "HEAD")
-        self.assertEqual(code, 1, "tree mode missed the term")
-        code, commit_out = self.scan("--commits", "HEAD~1..HEAD")
-        self.assertEqual(code, 1, "commit mode missed the term")
-        for out in (tree_out, commit_out):
-            self.assertNotIn(term_letters, out.lower())
-        return tree_out
-
     def test_a_cp1250_term_is_found_in_both_modes(self) -> None:
         self.add_terms("ďqxwzy")
         out = self.assert_found_in_both_modes_as({"c.txt": "meno: Ďqxwzy\n".encode("cp1250")}, "qxwzy")
@@ -603,6 +556,10 @@ class DenylistScanTests(unittest.TestCase):
     def test_hash_key_allowlists_a_cp1250_line(self) -> None:
         self.add_terms("ďqxwzy")
         self.commit({"c.txt": "keep ďqxwzy here\n".encode("cp1250")})
+        # the allowlist must be what clears it (F5 m12: without this the test passed even where
+        # the scan never found the cp1250 term at all)
+        self.assertEqual(self.scan("--tree", "HEAD")[0], 1)
+        self.assertEqual(self.scan("--commits", "HEAD")[0], 1)
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             self.assertEqual(ds.main(["--repo", str(self.repo), "--hash", "c.txt", "1"]), 0)
@@ -888,6 +845,62 @@ class DenylistScanTests(unittest.TestCase):
                 self.assertEqual(code, 1)
                 self.assertIn("author email is not an allowed identity", out)
                 self.assertNotIn("committer email", out)
+
+    # --- #32 F5 m7: local repository state cannot redirect what the scan reads ---
+
+    def test_a_replace_ref_cannot_swap_a_blob_for_a_clean_one(self) -> None:
+        # `git replace` makes cat-file, show and ls-tree read another object in place of the real
+        # one: a local replace ref turned the term-bearing blob into a clean one in both modes
+        self.commit({"base.txt": "base\n"})
+        self.commit({"a.txt": "keep zyxname\n"})
+        clean = git_out(self.repo, "hash-object", "-w", "--stdin", stdin=b"clean\n")
+        git(self.repo, "replace", git_out(self.repo, "rev-parse", "HEAD:a.txt"), clean)
+        code, out = self.scan("--tree", "HEAD", "--commits", "HEAD~1..HEAD")
+        self.assertEqual(code, 1)
+        self.assertIn("tree a.txt:1: denylist entry 1", out)
+        self.assertIn(" a.txt: denylist entry 1", out)
+
+    def test_a_graft_cannot_cut_commits_out_of_the_history_scan(self) -> None:
+        # a grafts file gives a commit other parents: listing HEAD alone as a root hid every
+        # commit before it from rev-list
+        self.commit({"a.txt": "zyxname\n"})
+        self.commit({"a.txt": "clean\n"})
+        (self.repo / ".git" / "info" / "grafts").write_text(git_out(self.repo, "rev-parse", "HEAD") + "\n",
+                                                            encoding="utf-8")
+        code, out = self.scan("--commits", "HEAD")
+        self.assertEqual(code, 1)
+        self.assertIn(" a.txt: denylist entry 1", out)
+
+    def test_a_shallow_repository_cannot_hide_history_from_commit_mode(self) -> None:
+        # review of lane G3, finding 8: a hand-written .git/shallow cut the history like a graft;
+        # commit mode needs the whole history, so it refuses a shallow repository (CI clones whole)
+        self.commit({"a.txt": "zyxname\n"})
+        self.commit({"a.txt": "clean\n"})
+        (self.repo / ".git" / "shallow").write_text(git_out(self.repo, "rev-parse", "HEAD") + "\n", encoding="utf-8")
+        code, out = self.scan("--commits", "HEAD")
+        self.assertEqual(code, 2, out)
+        self.assertIn("shallow", out)
+        self.assertEqual(self.scan("--tree", "HEAD")[0], 0)  # tree mode needs no history
+
+    # --- #32 F5 m8: --hash keys the committed blob, not the working-tree file ---
+
+    def test_hash_reads_the_committed_blob_not_the_working_tree(self) -> None:
+        # the working-tree file differs from the scanned blob (an uncommitted edit; eol, encoding or
+        # a smudge filter on checkout), so its key matched nothing the scan reported
+        self.commit({"a.txt": "keep zyxname here\n", "a:b.txt": "keep zyxname too\n"})
+        (self.repo / "a.txt").write_text("edited since\n", encoding="utf-8")
+        (self.repo / "a:b.txt").write_text("edited since\n", encoding="utf-8")
+        self.assertEqual(self.hash_key("a.txt", "1"), ds.line_key("a.txt", "keep zyxname here"))
+        self.assertEqual(self.hash_key("a:b.txt", "1"), ds.line_key("a:b.txt", "keep zyxname too"))
+
+    def test_hash_refuses_a_unit_that_does_not_exist(self) -> None:
+        # review of lane G3, finding 10: 0 keyed the trailing empty unit and -1 the last line
+        self.commit({"a.txt": "one\ntwo\nthree\n"})
+        for number in ("0", "-1", "run 0", "9", "x"):
+            with self.subTest(number=number), contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(ds.main(["--repo", str(self.repo), "--hash", "a.txt", number]), 2)
+
 
 
 if __name__ == "__main__":
