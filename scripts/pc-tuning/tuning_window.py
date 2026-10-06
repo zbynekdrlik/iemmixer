@@ -178,10 +178,23 @@ def should_cut(progress: dict | None, seen: int, cuts: int, circular: bool) -> t
     return (circular and total > seen and cuts < MAX_CUTS), total
 
 
+def boot_changed(prepared: str | None, now: str | None) -> tuple[bool, str | None]:
+    """Whether the PC booted since reboot-prepare, told by the boot token
+    (IemTuning's volatile boot key; equal tokens are one boot, Test-IemSameBoot),
+    never by the boot time, which a clock change moves (F2 round 3, decision 5).
+    Returns (rebooted, why it cannot be told)."""
+    if not prepared:
+        return False, "reboot-prepare recorded no boot token"
+    if not now:
+        return False, "the boot token cannot be read now"
+    return prepared != now, None
+
+
 def post_boot_verdict(c: dict) -> list[str]:
     problems = []
     if not c["booted_after_request"]:
-        problems.append("the PC did not reboot after the request")
+        problems.append(f"whether the PC rebooted cannot be told ({c['boot_unknown']})" if c.get("boot_unknown")
+                        else "the PC did not reboot after the request")
     if not c["reaper"]:
         problems.append("REAPER did not start by itself within 5 min")
     if "error" in (c.get("handover") or {}):
@@ -735,7 +748,10 @@ def cmd_reboot_prepare(env, args) -> None:
                      "the card stays free and the window open (preempt or to-event brings REAPER back)")
             raise StepError(f"the unwind failed at {', '.join(failed)}: no reboot prepared")
         st = tps(env, f"Get-IemTuningState -ProfilePath {sw.tuning_profile(env)}", timeout=120)
-        sw.update_state({"card": "rebooting", "reboot": {"prepared_at": tps(env, "Get-IemNow", timeout=60)}})
+        # The boot token tells post-boot whether the PC rebooted (decision 5); the
+        # time is information only.
+        sw.update_state({"card": "rebooting", "reboot": {"prepared_at": tps(env, "Get-IemNow", timeout=60),
+                                                         "boot_token": st.get("boot_token")}})
     if st.get("boot_problem"):
         sw.alarm(f"the boot identity is unknown ({st['boot_problem']}): the pending and revert_pending lists of this "
                  "reboot prove nothing (#32 MINOR-4)")
@@ -797,8 +813,9 @@ def cmd_post_boot(env, args) -> None:
             sw.alarm("the PC is not reachable 15 min after the approved reboot: tell the owner (power cycle is his)")
             raise StepError("PC unreachable after the reboot")
         time.sleep(15)
-    boot = tps(env, "Get-IemBootTime", timeout=60, event="ignore")
-    checks = {"booted_after_request": boot > state["reboot"]["prepared_at"], "reaper": False, "handover": None,
+    # Whether the PC rebooted is told by the boot token, read with the tuning
+    # state below (decision 5): unknown until then (the event path skips it).
+    checks = {"booted_after_request": None, "reaper": False, "handover": None,
               "fingerprint": [], "pending": [], "failed_items": []}
     # "ide event" is checked on every poll and every second between polls: on
     # the flag REAPER comes back at once (the event path) instead of after
@@ -841,6 +858,7 @@ def cmd_post_boot(env, args) -> None:
     current = tps(env, f"Get-IemReaperFingerprint -ProfilePath {sw.tuning_profile(env)}", timeout=120, event="ignore")
     checks["fingerprint"] = sw.fingerprint_diff(json.loads(baseline_path(env).read_text(encoding="utf-8")), current)
     st = tps(env, f"Get-IemTuningState -ProfilePath {sw.tuning_profile(env)}", timeout=120, event="ignore")
+    checks["booted_after_request"], checks["boot_unknown"] = boot_changed(state["reboot"].get("boot_token"), st.get("boot_token"))
     items = as_list(st["items"])
     checks["pending"] = [i["key"] for i in items if i["pending"] or i["revert_pending"]]
     checks["failed_items"] = [i["key"] for i in items if i["journaled"] and not i["ok"]]
