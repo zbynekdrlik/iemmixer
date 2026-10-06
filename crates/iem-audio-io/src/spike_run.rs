@@ -36,11 +36,13 @@ pub fn check_stress_cpus(stress: u32, audio_cpus: &[u8], stress_cpus: &[u8]) -> 
             "--stress with --audio-cpus needs --stress-cpus (the housekeeping CPUs)".to_owned(),
         );
     }
-    let shared: Vec<u8> = stress_cpus
+    let mut shared: Vec<u8> = stress_cpus
         .iter()
         .copied()
         .filter(|lp| audio_cpus.contains(lp))
         .collect();
+    shared.sort_unstable();
+    shared.dedup();
     if !shared.is_empty() {
         return Err(format!(
             "--stress-cpus and --audio-cpus overlap on processors {shared:?} \

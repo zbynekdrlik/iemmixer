@@ -28,6 +28,9 @@ $script:KernelSession = 'NT Kernel Logger'
 # The pre-emption stop's logman: a Windows binary by its full path (no signature
 # check needed, unlike xperf); the self-test points it at a stand-in.
 $script:Logman = Join-Path $env:SystemRoot 'System32\logman.exe'
+# logman's exit code for a session that does not run (PLA_E_DCS_NOT_FOUND, 0x80300002):
+# one that ended between two calls is gone, never an error (CI run 37464797322).
+$script:SessionNotFound = -2144337918
 $script:NearEvents = @('DPC', 'TimedDPC', 'ThreadedDPC', 'Interrupt', 'CSwitch', 'ReadyThread')
 # xperf: WPT 10 or newer (the toolkit the dpcisr/dumper parsers read), Microsoft-signed.
 $script:XperfMinVersion = [version]'10.0'
@@ -142,7 +145,8 @@ function Get-TraceOwnership {
     } else { $o.errors += $q.error }
     if ($null -eq $listed -or $listed -contains $script:KernelSession) {
         $k = Invoke-LogmanRun -Arguments @('query', $script:KernelSession, '-ets') -TimeoutSeconds $TimeoutSeconds
-        if (-not $k.ok) { $o.errors += "$($script:KernelSession): whose trace it is cannot be read, not stopped ($($k.error))" }
+        if (-not $k.ok -and $k.code -eq $script:SessionNotFound) { }   # ended since the list: nothing to stop
+        elseif (-not $k.ok) { $o.errors += "$($script:KernelSession): whose trace it is cannot be read, not stopped ($($k.error))" }
         elseif (Test-OwnTraceOutput -Lines $k.out -Dir $Dir) { $o.own += $script:KernelSession }
         else { $o.kept += $script:KernelSession }
     }
@@ -170,19 +174,19 @@ function Invoke-LogmanRun {
     $si.RedirectStandardError = $true
     $what = "logman $($si.Arguments)"
     try { $p = [System.Diagnostics.Process]::Start($si) }
-    catch { return [pscustomobject]@{ ok = $false; out = @(); error = "${what}: $($_.Exception.GetBaseException().Message)" } }
+    catch { return [pscustomobject]@{ ok = $false; out = @(); error = "${what}: $($_.Exception.GetBaseException().Message)"; code = $null } }
     $out = $p.StandardOutput.ReadToEndAsync()
     $err = $p.StandardError.ReadToEndAsync()
-    if (-not $p.WaitForExit($TimeoutSeconds * 1000)) { return [pscustomobject]@{ ok = $false; out = @(); error = "$what did not finish within $TimeoutSeconds s" } }
+    if (-not $p.WaitForExit($TimeoutSeconds * 1000)) { return [pscustomobject]@{ ok = $false; out = @(); error = "$what did not finish within $TimeoutSeconds s"; code = $null } }
     # The output is what tells which sessions run and where they write: output not
     # read within 5 s of the exit (a process it started keeps the pipe open) is an
     # error, never an empty "nothing runs" (#32 MINOR-2).
     if (-not [System.Threading.Tasks.Task]::WaitAll([System.Threading.Tasks.Task[]]@($out, $err), 5000)) {
-        return [pscustomobject]@{ ok = $false; out = @(); error = "$what exited, but its output was not read within 5 s" }
+        return [pscustomobject]@{ ok = $false; out = @(); error = "$what exited, but its output was not read within 5 s"; code = $null }
     }
     $text = @(($out.Result + "`n" + $err.Result) -split "`r?`n" | Where-Object { $_.Trim() -ne '' })
-    if ($p.ExitCode -ne 0) { return [pscustomobject]@{ ok = $false; out = $text; error = "$what (exit $($p.ExitCode)): $($text -join ' ')" } }
-    return [pscustomobject]@{ ok = $true; out = $text; error = $null }
+    if ($p.ExitCode -ne 0) { return [pscustomobject]@{ ok = $false; out = $text; error = "$what (exit $($p.ExitCode)): $($text -join ' ')"; code = $p.ExitCode } }
+    return [pscustomobject]@{ ok = $true; out = $text; error = $null; code = 0 }
 }
 
 function Stop-IemTraceSessions {
@@ -199,11 +203,13 @@ function Stop-IemTraceSessions {
     # trace recorded and alarms, never reads it as stopped.
     param([Parameter(Mandatory)][string]$Dir, [ValidateRange(1, 600)][int]$TimeoutSeconds = 30)
     $o = Get-TraceOwnership -Dir $Dir -TimeoutSeconds $TimeoutSeconds
-    $errors = @($o.errors); $stopped = @()
+    $errors = @($o.errors); $stopped = @(); $gone = @()
     foreach ($s in $script:KernelSession, $script:MarkerSession) {
         if (@($o.own) -notcontains $s) { continue }
         $r = Invoke-LogmanRun -Arguments @('stop', $s, '-ets') -TimeoutSeconds $TimeoutSeconds
-        if ($r.ok) { $stopped += $s } else { $errors += $r.error }
+        if ($r.ok) { $stopped += $s }
+        elseif ($r.code -eq $script:SessionNotFound) { $gone += $s }   # ended by itself since the query
+        else { $errors += $r.error }
     }
     $errors += @(Get-KeptTraceText -Kept $o.kept)
     if ($errors.Count -gt 0) {
@@ -211,7 +217,7 @@ function Stop-IemTraceSessions {
         if ($stopped.Count -gt 0) { $done = $stopped -join ', ' }
         throw ("trace stop: $($errors -join '; ') (stopped: $done)")
     }
-    return [pscustomobject]@{ stopped = @($stopped); kept = @($o.kept); via = 'logman'; tuning_error = $script:TuningLoadError }
+    return [pscustomobject]@{ stopped = @($stopped); gone = @($gone); kept = @($o.kept); via = 'logman'; tuning_error = $script:TuningLoadError }
 }
 
 function Invoke-IemDpcIsr {
