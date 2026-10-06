@@ -443,13 +443,18 @@ class RebootPrepareTests(unittest.TestCase):
         self.assertEqual((st["card"], st["closed"]), ("reaper", True))
         self.assertNotIn("reboot", st)
 
-    def test_an_unknown_boot_identity_alarms_the_owner(self) -> None:
-        # #32 MINOR-4: the state reports a boot-key problem as a field; the lists of
-        # what the reboot applies or reverts then prove nothing, so the owner hears it.
+    def test_an_unknown_boot_identity_refuses_the_reboot(self) -> None:
+        # #32 MINOR-4: the state reports a boot-key problem as a field. Since decision 5
+        # post-boot tells the reboot by the boot token alone, so without one the reboot
+        # could never be confirmed (review of lane G2, finding 7): no reboot is
+        # prepared, the owner hears why, the card stays free and the window open.
         self.tuning_state = {"items": [], "boot_problem": "boot key: not volatile (synthetic)"}
         self.write_state()
-        tw.cmd_reboot_prepare(self.env, self.args)
-        self.assertEqual(self.read_state()["card"], "rebooting")
+        with self.assertRaisesRegex(tw.StepError, "no reboot prepared"):
+            tw.cmd_reboot_prepare(self.env, self.args)
+        st = self.read_state()
+        self.assertEqual((st["card"], st.get("closed")), ("free", False))
+        self.assertNotIn("reboot", st)
         self.assertEqual(len(self.alarms), 1)
         self.assertIn("boot key: not volatile (synthetic)", self.alarms[0])
 
