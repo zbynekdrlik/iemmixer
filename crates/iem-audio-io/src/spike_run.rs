@@ -209,6 +209,9 @@ mod tests {
             "--stress-cpus and --audio-cpus overlap on processors [13, 14] \
              (a busy thread would run next to the audio callback)"
         );
+        // the window driver names them sorted and once each: the same text for the same lists
+        let e = check_stress_cpus(4, &[13, 14], &[14, 6, 13, 14]).unwrap_err();
+        assert!(e.contains("processors [13, 14] ("), "{e}");
         assert!(check_stress_cpus(4, &[14], &[14]).is_err());
         assert!(check_stress_cpus(0, &[14], &[6, 14]).is_err(), "no threads");
         assert_eq!(check_stress_cpus(4, &[14], &[6, 13]), Ok(()));
