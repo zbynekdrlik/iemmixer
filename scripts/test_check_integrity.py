@@ -129,10 +129,12 @@ class IntegrityTests(unittest.TestCase):
                      "ExitWindowsEx(EWX_REBOOT, SHTDN_REASON_FLAG_PLANNED)", "Stop-Computer -ComputerName x ; Remove-Item x -Force"):
             self.put("scripts/iem-pc/x.ps1", body + "\n")
             self.assertEqual(ci.violations(self.root), [f"scripts/iem-pc/x.ps1:1: {self.RESTART}"], body)
-        # Marked, but not the literal safe form.
+        # Marked, but not the literal safe form (review of lane G2, finding 4: a quote
+        # right after the switches is no end of the command).
         for body in ("& shutdown.exe /r /t 0 /f", "& shutdown.exe /r /t 60", "& shutdown.exe /r /t 0 /c \"$why\"",
                      "& shutdown.exe $flags", "& shutdown.exe /r /t 0 `", "& shutdown.exe /r /t 0 ; & shutdown.exe /r /f",
-                     "& shutdown.exe /s /t 0", "Restart-Computer", "ExitWindowsEx(0x2, 0)", "shutdown /r /t 0"):
+                     "& shutdown.exe /s /t 0", "Restart-Computer", "ExitWindowsEx(0x2, 0)", "shutdown /r /t 0",
+                     "& shutdown.exe /r /t 0 \"/f\"", "& shutdown.exe /r /t 0 \"$f\"", "R = \"& shutdown.exe /r /t 0\" + \" /f\""):
             self.put("scripts/iem-pc/x.ps1", body + self.MARK + "\n")
             self.assertEqual(ci.violations(self.root), [f"scripts/iem-pc/x.ps1:1: {self.RESTART}"], body)
 
@@ -154,6 +156,10 @@ class IntegrityTests(unittest.TestCase):
             "scripts/x/b.py": ('subprocess.run(\n    [\n        "shutdown",\n        "/r",\n        "/f",\n    ],\n)\n', 3),
             "scripts/x/c.py": ('os.system("shutdown " + flags)\n', 1),
             "e2e/tests/a.spec.ts": ('spawn("shutdown", args);\n', 1),
+            # Review of lane G2, finding 4.
+            "scripts/iem-pc/f.ps1": ("Start-Process -NoNewWindow shutdown '/r','/f'\n", 1),
+            "scripts/iem-pc/g.ps1": ("psshutdown -r -f\n", 1),
+            "scripts/iem-pc/h.cmd": ("psshutdown64.exe -r -t 0\n", 1),
         }
         for rel, (text, line) in cases.items():
             self.assertEqual(self.refused(rel, text), [f"{rel}:{line}: {self.RESTART}"], rel)
