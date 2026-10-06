@@ -622,6 +622,20 @@ impl Processor {
         std::process::abort();
     }
 
+    /// The parked-engine test (`--fault-injection` only, design §10 test #2,
+    /// #35): the SEH test's exception under the ASIO backend's test hold, so
+    /// the backend keeps the driver, the SEH filter parks this thread and the
+    /// engine keeps running with its stream parked. Off Windows it aborts
+    /// like `inject_seh` (no filter, no card to keep): `tests/pipes.rs` runs
+    /// it in the binary there; on Windows `iemmode inject-park` runs it on
+    /// the PC.
+    fn inject_park() {
+        #[cfg(windows)]
+        iem_audio_io::asio::raise_test_park();
+        #[cfg(not(windows))]
+        std::process::abort();
+    }
+
     fn apply(&mut self, op: RtOp) {
         let sr = self.sr;
         match op {
@@ -738,6 +752,7 @@ impl Processor {
             }
             RtOp::Panic => Self::inject_fault(),
             RtOp::Seh => Self::inject_seh(),
+            RtOp::Park => Self::inject_park(),
             RtOp::Arm => {
                 if !self.armed {
                     self.armed = true;

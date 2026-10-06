@@ -1111,6 +1111,7 @@ fn jobs_are_refused_while_switching() {
         Request::ForceReopen,
         Request::InjectFault,
         Request::InjectSeh,
+        Request::InjectPark,
         Request::RunnerStop,
         Request::ProbeTask,
         Request::RehearseTeardown,
@@ -1775,6 +1776,7 @@ fn dev_only_requests_are_refused_elsewhere() {
         (Request::ForceReopen, "force-reopen"),
         (Request::InjectFault, "inject-fault"),
         (Request::InjectSeh, "inject-seh"),
+        (Request::InjectPark, "inject-park"),
         (Request::RunnerStop, "runner-stop"),
         (Request::RehearseTeardown, "rehearse-teardown"),
         (
@@ -2023,6 +2025,88 @@ fn inject_seh_is_refused_outside_a_dev_job() {
         )
     );
     assert_eq!(pc.count(Call::InjectSeh), 1);
+}
+
+/// The parked-engine test (design §10 test #2, #35) leaves the card held
+/// until the engine ends, so it has the SEH test's gates: dev, inside a begun
+/// HIL job. The mode decides first: live and event refuse it even with a
+/// job recorded, and dev without a job refuses it too; the engine is never
+/// asked. Inside a job the engine's own refusal (no fault-injection flag) is
+/// the answer.
+#[test]
+fn inject_park_is_refused_in_live_in_event_and_outside_a_job() {
+    for mode in [Mode::Live, Mode::Event] {
+        let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(mode));
+        g.state.job = Some(7);
+        let r = handle(&mut pc, &mut g, Request::InjectPark, 0);
+        assert_eq!(
+            (r.ok, r.detail),
+            (
+                false,
+                format!("inject-park is for dev; the mode is {}", mode_name(mode))
+            )
+        );
+        assert!(!pc.called(Call::InjectPark), "{mode:?}");
+    }
+    let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
+    let r = handle(&mut pc, &mut g, Request::InjectPark, 0);
+    assert_eq!(
+        (r.ok, r.detail.as_str()),
+        (
+            false,
+            "a parked-engine test needs a begun HIL job (job-begin)"
+        )
+    );
+    assert!(!pc.called(Call::InjectPark));
+    g.state.job = Some(7);
+    pc.fail(
+        Call::InjectPark,
+        "inject_park: the engine runs without the fault-injection flag",
+    );
+    let r = handle(&mut pc, &mut g, Request::InjectPark, 0);
+    assert_eq!(
+        (r.ok, r.detail.as_str()),
+        (
+            false,
+            "inject_park: the engine runs without the fault-injection flag"
+        )
+    );
+    assert_eq!(pc.count(Call::InjectPark), 1);
+}
+
+/// Inside a HIL job in dev the parked-engine test reaches the engine (#35),
+/// which keeps running with its stream parked and the card held: `iemmode
+/// status` reports `parked`, and the watch starts no engine (none ended).
+/// The engine runs so until it ends: test #2 ends it with an OS restart, but
+/// any `Shutdown` (an "ide event", a job's restart) ends it too.
+#[test]
+fn an_injected_park_leaves_the_engine_running_parked() {
+    let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
+    g.state.job = Some(7);
+    let r = handle(&mut pc, &mut g, Request::InjectPark, 0);
+    assert_eq!(
+        (r.ok, r.detail.as_str()),
+        (
+            true,
+            "the engine raises a structured exception under the test hold: its stream \
+             parks with the card held and the engine keeps running until it ends \
+             (test #2 ends it with an OS restart)"
+        )
+    );
+    assert_eq!(pc.count(Call::InjectPark), 1);
+    // The engine's next Status: the stream parked.
+    pc.seen.status.parked = true;
+    let at = Instant::now();
+    tick(&mut pc, &mut g, at);
+    tick(&mut pc, &mut g, at + Duration::from_secs(5));
+    let r = handle(&mut pc, &mut g, Request::Status, 0);
+    assert!(
+        r.engine.as_ref().is_some_and(|e| e.parked),
+        "{:?}",
+        r.engine
+    );
+    assert!(!pc.called(Call::EngineStart));
+    assert_eq!((g.state.mode, g.state.job), (Mode::Dev, Some(7)));
 }
 
 #[test]

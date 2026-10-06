@@ -910,6 +910,31 @@ fn seh_injection_needs_the_flag() {
 }
 
 #[test]
+fn park_injection_needs_the_flag() {
+    // The parked-engine test (design §10 test #2, #35): the SEH test's
+    // exception under the backend's hold, only under the fault-injection
+    // flag; neither state nor revision changes.
+    let mut off = core(Flags::default());
+    assert_eq!(code(off.apply(&Cmd::InjectPark)), ErrCode::Forbidden);
+    let mut test_signal_only = core(Flags {
+        test_signal: true,
+        fault_injection: false,
+    });
+    assert_eq!(
+        code(test_signal_only.apply(&Cmd::InjectPark)),
+        ErrCode::Forbidden
+    );
+    let mut on = core(Flags {
+        test_signal: false,
+        fault_injection: true,
+    });
+    let out = on.apply(&Cmd::InjectPark).unwrap();
+    assert!(out.changes.is_empty());
+    assert_eq!(out.effect, Effect::None);
+    assert_eq!((out.rev, out.rt), (0, vec![RtOp::Park]));
+}
+
+#[test]
 fn a_forced_reopen_needs_the_fault_flag_and_changes_nothing() {
     let mut off = core(Flags::default());
     assert_eq!(code(off.apply(&Cmd::ForceReopen)), ErrCode::Forbidden);

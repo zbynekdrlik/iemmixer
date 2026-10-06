@@ -438,28 +438,42 @@ pub(super) fn hil_signal(
     .map_err(StepError::Failed)
 }
 
+/// One supervisor command without fields (`op`), its answer awaited: HIL's
+/// forced reopen and the fault injections.
+fn bare_request(pc: &mut WinPc, op: &str) -> R<()> {
+    let sup = supervisor(pc, CONNECT, &Cancel::default())?;
+    sup.request(op).map_err(StepError::Failed)
+}
+
 /// A forced driver reopen (HIL, design §7); the engine's reset budget
 /// applies.
 pub(super) fn force_reopen(pc: &mut WinPc) -> R<()> {
-    let sup = supervisor(pc, CONNECT, &Cancel::default())?;
-    sup.request("force_reopen").map_err(StepError::Failed)
+    bare_request(pc, "force_reopen")
 }
 
 /// HIL's RT panic (design §7): `InjectFault` over the supervisor pipe. The
 /// engine refuses it without its fault-injection flag; with it the RT
 /// callback faults and the engine exits 70, which the watch sees.
 pub(super) fn inject_fault(pc: &mut WinPc) -> R<()> {
-    let sup = supervisor(pc, CONNECT, &Cancel::default())?;
-    sup.request("inject_fault").map_err(StepError::Failed)
+    bare_request(pc, "inject_fault")
 }
 
-/// The owner-approved SEH test (design §10): `InjectSeh` over the supervisor
-/// pipe. The engine refuses it without its fault-injection flag; with it the
-/// RT callback raises a structured exception, the SEH filter releases the
-/// driver or parks, and the engine exits, which the watch sees.
+/// The owner-approved SEH test (design §10 test #4): `InjectSeh` over the
+/// supervisor pipe. The engine refuses it without its fault-injection flag;
+/// with it the RT callback raises a structured exception, the SEH filter
+/// releases the driver or parks, and the engine exits, which the watch sees.
 pub(super) fn inject_seh(pc: &mut WinPc) -> R<()> {
-    let sup = supervisor(pc, CONNECT, &Cancel::default())?;
-    sup.request("inject_seh").map_err(StepError::Failed)
+    bare_request(pc, "inject_seh")
+}
+
+/// The parked-engine test (design §10 test #2, #35): `InjectPark` over the
+/// supervisor pipe. The engine refuses it without its fault-injection flag;
+/// with it the RT callback raises the SEH test's exception under the
+/// backend's test hold: the driver is kept, the SEH filter parks the RT
+/// thread, and the engine keeps running with its stream parked (its next
+/// `Status`), so the watch sees no exit.
+pub(super) fn inject_park(pc: &mut WinPc) -> R<()> {
+    bare_request(pc, "inject_park")
 }
 
 /// Whether the engine's control pipe admits only this user and SYSTEM, read

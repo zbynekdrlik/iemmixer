@@ -1,6 +1,7 @@
 //! The `iem-engine` binary through its command line (split from
-//! `pipes.rs`, #32): run and shut down, the SEH test's abort off Windows,
-//! the offline render, `check-site` and the card off Windows.
+//! `pipes.rs`, #32): run and shut down, the SEH and parked-engine tests'
+//! abort off Windows, the offline render, `check-site` and the card off
+//! Windows.
 
 use super::*;
 use iem_audio_io::{Planar, wav};
@@ -43,15 +44,31 @@ fn the_binary_runs_and_shuts_down() {
     assert!(String::from_utf8_lossy(&help.stdout).contains("iem-engine render"));
 }
 
-/// The owner-approved SEH test (design §10) off Windows: with
+/// The owner-approved SEH test (design §10 test #4) off Windows: with
 /// `--fault-injection`, `InjectSeh` reaches the RT thread, whose
 /// `inject_seh` aborts the process (no SEH filter exists here; like the
-/// structured exception on the PC, nothing can catch it). The binary ends by
-/// SIGABRT, not by a clean exit or a caught panic. Should it keep running,
-/// the test asks it to shut down (never a forced end) before it fails.
+/// structured exception on the PC, nothing can catch it).
 #[cfg(unix)]
 #[test]
 fn inject_seh_aborts_the_binary_off_windows() {
+    aborts_the_binary_off_windows(Cmd::InjectSeh);
+}
+
+/// The parked-engine test (design §10 test #2, #35) off Windows: with
+/// `--fault-injection`, `InjectPark` reaches the RT thread, whose
+/// `inject_park` aborts the process like `inject_seh` (no SEH filter and no
+/// card to keep exist here).
+#[cfg(unix)]
+#[test]
+fn inject_park_aborts_the_binary_off_windows() {
+    aborts_the_binary_off_windows(Cmd::InjectPark);
+}
+
+/// The binary with `--fault-injection` ends by SIGABRT after `cmd`, not by a
+/// clean exit or a caught panic. Should it keep running, the test asks it to
+/// shut down (never a forced end) before it fails.
+#[cfg(unix)]
+fn aborts_the_binary_off_windows(cmd: Cmd) {
     use std::os::unix::process::ExitStatusExt;
     /// SIGABRT on Linux and macOS.
     const SIGABRT: i32 = 6;
@@ -80,11 +97,12 @@ fn inject_seh_aborts_the_binary_off_windows() {
         .unwrap();
     let mut c = Client::new(&pipe);
     c.hello(Role::Control);
+    let what = format!("{cmd:?}");
     // Not `request`: the process may end before its reply is written.
     c.send(&ClientMsg::Request {
         id: 1,
         origin: None,
-        cmd: Cmd::InjectSeh,
+        cmd,
     });
     let Some(status) = exited(&mut child) else {
         c.send(&ClientMsg::Request {
@@ -93,7 +111,7 @@ fn inject_seh_aborts_the_binary_off_windows() {
             cmd: Cmd::Shutdown,
         });
         let after = exited(&mut child);
-        panic!("InjectSeh did not end the engine within {WAIT:?} (after Shutdown: {after:?})");
+        panic!("{what} did not end the engine within {WAIT:?} (after Shutdown: {after:?})");
     };
     assert_eq!(status.signal(), Some(SIGABRT), "{status:?}");
     assert_eq!(status.code(), None, "{status:?}");

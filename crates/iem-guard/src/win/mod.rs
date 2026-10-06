@@ -292,6 +292,10 @@ impl Pc for WinPc {
         engine::inject_seh(self)
     }
 
+    fn engine_inject_park(&mut self) -> R<()> {
+        engine::inject_park(self)
+    }
+
     fn engine_seen(&mut self) -> Option<EngineSeen> {
         engine::seen(self)
     }
