@@ -654,6 +654,11 @@ def main(argv: list[str] | None = None) -> int:
     if identities is not None and not identities:
         print(f"identity list {args.identities} is empty", file=sys.stderr)
         return EXIT_USAGE
+    if args.commits and git(args.repo, "rev-parse", "--is-shallow-repository").strip() == b"true":
+        # a shallow clone, or a shallow file written by hand, cuts the history rev-list walks (#32 F5,
+        # review of lane G3, finding 8): commit mode scans the whole history or nothing
+        print("commit mode needs the whole history: the repository is shallow (git fetch --unshallow)", file=sys.stderr)
+        return EXIT_USAGE
     scanner = Scanner(terms, load_allow(args.allow))
     hits: list[Finding] = []
     for rev in args.tree:
