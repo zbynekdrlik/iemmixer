@@ -141,6 +141,63 @@ fn the_levels_list_the_five_loudest_inputs_and_all_when_every_input_is_watched()
     assert_eq!(progress["elapsed_s"], 5);
 }
 
+/// A watch whose first second ends at `t0` + 1 s.
+fn a_watch(t0: Instant) -> Watch {
+    Watch::new(t0, Watched::All)
+}
+
+/// #38 (owner, 2026-10-06): no input level ends a run. Other devices on the
+/// Dante network feed the card's inputs, and only the owner's signal decides
+/// whether the PC may be used; a loud input is listed in the report only.
+#[test]
+fn loud_inputs_never_end_a_run() {
+    let t0 = Instant::now();
+    let s = Duration::from_secs(1);
+    let mut w = a_watch(t0);
+    for k in 1..=20 {
+        assert_eq!(
+            w.poll(t0 + k * s, false, false, || vec![1.0, 0.9, 0.5]),
+            None,
+            "second {k}"
+        );
+    }
+    let mut report = serde_json::json!({ "tool": "asio_spike" });
+    w.record_levels(&mut report);
+    assert_eq!(report["loudest_input_dbfs"], dbfs(1.0));
+    assert_eq!(report["loudest_inputs"][0]["channel"], 1);
+    // The stop file and a rate change still end it.
+    assert_eq!(
+        w.poll(t0 + 21 * s, false, true, || vec![1.0]),
+        Some(End::RateChanged)
+    );
+    assert_eq!(
+        w.poll(t0 + 21 * s, true, false, || vec![1.0]),
+        Some(End::Stopped)
+    );
+}
+
+/// #38: a duplex or reopen run names no inputs to listen to, and the flag
+/// that named them is gone.
+#[test]
+fn a_streaming_run_needs_no_inputs_to_listen_to() {
+    for line in [
+        "duplex --driver D1 --report r --stop-file s --frames 32",
+        "reopen --driver D1 --report r --stop-file s --frames 48 --cycles 2",
+    ] {
+        let parsed = parse(&argv(line));
+        assert!(parsed.is_ok(), "{line:?}: {parsed:?}");
+    }
+    let named = parse(&argv(
+        "duplex --driver D1 --report r --stop-file s --frames 32 --activity-channels all",
+    ));
+    assert!(
+        named
+            .as_ref()
+            .is_err_and(|e| e.contains("unknown flag --activity-channels")),
+        "{named:?}"
+    );
+}
+
 #[test]
 fn measurements_are_kept_as_they_complete() {
     let mut r = serde_json::json!({ "tool": "asio_spike" });
