@@ -156,27 +156,6 @@ function Get-KeptTraceText {
     return @(foreach ($s in @($Kept)) { "$s runs, but its output file is not under the trace directory: another tool's trace, not stopped" })
 }
 
-function Stop-IemTrace {
-    # Stops our sessions by Stop-IemTraceSessions' rule (#32 MAJOR-1). Without -Merge
-    # it IS Stop-IemTraceSessions: logman only, -Xperf is not used (review 3.6, R2).
-    # -Merge stops them with the verified xperf (the kernel logger first in its
-    # arguments) and merges them into -Name; it stops nothing while anything is
-    # unclear (a kernel logger that is not ours, a query that cannot be read): the
-    # plain stop then stops what is ours and reports the rest.
-    param([Parameter(Mandatory)][string]$Xperf, [Parameter(Mandatory)][string]$Dir, [switch]$Merge, [string]$Name = 'trace.etl')
-    if (-not $Merge) { return Stop-IemTraceSessions -Dir $Dir }
-    $o = Get-TraceOwnership -Dir $Dir -TimeoutSeconds 30
-    $unclear = @($o.errors) + @(Get-KeptTraceText -Kept $o.kept)
-    if ($unclear.Count -gt 0) { throw ("trace stop with merge: $($unclear -join '; '); nothing stopped (Stop-IemTraceSessions stops what is ours)") }
-    if (@($o.own).Count -eq 0) { return [pscustomobject]@{ stopped = @(); kept = @(); via = 'xperf' } }
-    $a = @()
-    if (@($o.own) -contains $script:KernelSession) { $a += '-stop' }
-    if (@($o.own) -contains $script:MarkerSession) { $a += @('-stop', $script:MarkerSession) }
-    $a += @('-d', (Join-Path $Dir $Name))
-    [void](Invoke-XperfRun -Xperf $Xperf -Arguments $a -Verify)
-    return [pscustomobject]@{ stopped = @($o.own); kept = @(); via = 'xperf' }
-}
-
 function Invoke-LogmanRun {
     # Module-private: one logman.exe call, bounded. Needs nothing from IemTuning.
     # A call that does not finish in time is reported and left to finish on its

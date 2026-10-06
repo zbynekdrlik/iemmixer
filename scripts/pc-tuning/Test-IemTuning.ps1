@@ -705,23 +705,20 @@ try {
     Assert ($xo -match '127\.0\.0\.1') 'xperf-runs-a-signed-binary'
     ThrowsLike { Invoke-IemXperf -Xperf $ping -Arguments @('-n', 'x', '127.0.0.1') } '*(exit *' 'xperf-a-nonzero-exit-throws'
     # Every trace stop ("ide event", trace-stop, a failed measure's cleanup, a cut, the
-    # final stop) is Stop-IemTraceSessions (review 3.6, R2; Stop-IemTrace without
-    # -Merge is that call): logman only, neither xperf nor IemTuning. Whose trace it
-    # is, is a property of the session (#32 MAJOR-1): the NT Kernel Logger is ours
-    # exactly when its output file lies under -Dir, the trace's run folder; whether
-    # IemMarkers runs proves nothing. IemMarkers is ours by its name.
+    # final stop) is Stop-IemTraceSessions (review 3.6, R2): logman only, neither xperf
+    # nor IemTuning. Whose trace it is, is a property of the session (#32 MAJOR-1): the
+    # NT Kernel Logger is ours exactly when its output file lies under -Dir, the
+    # trace's run folder; whether IemMarkers runs proves nothing. IemMarkers is ours by
+    # its name.
     Assert (-not (Test-EtwSession 'NT Kernel Logger')) 'no-kernel-logger-runs-before-the-stop-tests'
     $runDir = Join-Path $traceRoot 'run-1'
     New-Item -ItemType Directory -Force -Path $runDir | Out-Null
-    $xran = Join-Path $dir 'xperf-ran.txt'
-    $fl = Join-Path $dir 'fake-xperf-never.cmd'
-    [IO.File]::WriteAllText($fl, "@echo off`r`necho ran> `"$xran`"`r`nexit /b 1`r`n")
     $markers = @('start', 'IemMarkers', '-p', '{3b6c1e0a-5d2f-4c8e-9a71-0e4f2d9b8c11}', '-o', (Join-Path $runDir 'markers-1.etl'), '-ets')
     $lm = Invoke-IemNative -FilePath 'logman.exe' -Arguments $markers
     Assert ($lm.code -eq 0) "marker-session-starts ($($lm.out -join ' '))"
     $s2 = $null; $se = $null
-    try { $s2 = Stop-IemTrace -Xperf $fl -Dir $runDir } catch { $se = "$_" }
-    Assert ($null -eq $se -and $s2.via -eq 'logman' -and @($s2.stopped) -contains 'IemMarkers' -and -not (Test-Path -LiteralPath $xran)) "trace-stop-needs-no-xperf ($se)"
+    try { $s2 = Stop-IemTraceSessions -Dir $runDir } catch { $se = "$_" }
+    Assert ($null -eq $se -and $s2.via -eq 'logman' -and @($s2.stopped) -contains 'IemMarkers') "trace-stop-stops-our-markers-with-logman ($se)"
     Assert (-not (Test-EtwSession 'IemMarkers')) 'trace-stop-leaves-no-marker-session'
     # Our kernel logger alone (xperf -on started it but not IemMarkers, or a partial
     # stop left it): its output file lies under -Dir, so it is stopped.
@@ -755,16 +752,8 @@ try {
     Assert ($lm.code -eq 0) "marker-session-starts-again ($($lm.out -join ' '))"
     ThrowsLike { Stop-IemTraceSessions -Dir $runDir } '*not under the trace directory*(stopped: IemMarkers)*' 'trace-stop-markers-prove-nothing-about-the-kernel-logger'
     Assert (-not (Test-EtwSession 'IemMarkers') -and (Test-EtwSession 'NT Kernel Logger')) 'trace-stop-stops-only-ours-next-to-a-foreign-kernel-logger'
-    # The merging stop decides by the same rule, and stops nothing while a kernel logger
-    # that is not ours runs (the plain stop then stops what is ours, and fails).
-    $markers[5] = Join-Path $runDir 'markers-3.etl'
-    $lm = Invoke-IemNative -FilePath 'logman.exe' -Arguments $markers
-    Assert ($lm.code -eq 0) "marker-session-starts-a-third-time ($($lm.out -join ' '))"
-    ThrowsLike { Stop-IemTrace -Xperf $fl -Dir $runDir -Merge } '*not under the trace directory*nothing stopped*' 'trace-stop-merge-follows-the-same-rule'
-    Assert ((Test-EtwSession 'IemMarkers') -and (Test-EtwSession 'NT Kernel Logger') -and -not (Test-Path -LiteralPath $xran)) 'trace-stop-merge-stops-nothing-it-cannot-prove'
-    $lm = Invoke-IemNative -FilePath 'logman.exe' -Arguments @('stop', 'IemMarkers', '-ets')
     $lk = Invoke-IemNative -FilePath 'logman.exe' -Arguments @('stop', 'NT Kernel Logger', '-ets')
-    Assert ($lm.code -eq 0 -and $lk.code -eq 0 -and -not (Test-EtwSession 'NT Kernel Logger') -and -not (Test-EtwSession 'IemMarkers')) "the-test-stops-its-foreign-kernel-logger ($($lk.out -join ' '))"
+    Assert ($lk.code -eq 0 -and -not (Test-EtwSession 'NT Kernel Logger') -and -not (Test-EtwSession 'IemMarkers')) "the-test-stops-its-foreign-kernel-logger ($($lk.out -join ' '))"
     $kernelStarted = $false
     # The kernel logger is stopped first, IemMarkers after it; each session is attempted
     # on its own and every error is kept: a stand-in logman lists both sessions, names
