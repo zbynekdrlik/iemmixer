@@ -977,6 +977,27 @@ class DenylistScanTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assert_found_in_both_modes_as({name: f"meno: {text}\n"}, "qxwzy")
 
+    # --- #32 F5 m4: commit metadata in the other Central European encodings ---
+
+    def test_commit_metadata_in_iso_8859_2_or_cp852_is_read_back(self) -> None:
+        # git stores a message or a name that is not valid UTF-8 with each such byte converted as if
+        # it were Latin-1; only cp1250 was read back from that, so `š` (B9 in ISO-8859-2, E7 in cp852)
+        # hid the term in a message and in an author name
+        self.add_terms("šqxwzy")
+        self.commit({"a.txt": "base\n"})
+        for number, codec in enumerate(("iso-8859-2", "cp852")):
+            for field in ("message", "author"):
+                with self.subTest(codec=codec, field=field):
+                    message = self.tmp / "message.txt"
+                    raw = f"fix for Šqxwzy {number}".encode(codec)
+                    message.write_bytes(raw if field == "message" else b"clean message")
+                    env = {**os.environb, b"GIT_AUTHOR_NAME": raw if field == "author" else b"test"}
+                    subprocess.run(["git", "-C", str(self.repo), "commit", "-q", "--allow-empty", "-F", str(message)],
+                                   check=True, capture_output=True, env=env)
+                    code, out = self.scan("--commits", "-1 HEAD")
+                    self.assertEqual(code, 1, out)
+                    self.assertIn("commit metadata: denylist entry 4", out)
+
     def test_a_named_reference_never_makes_a_batch_separator(self) -> None:
         # a reading that created U+E000 would shift every later unit: the hit must stay on line 3
         self.commit({"a.html": "&dcaron;\n&#xE000;&#57344;\nkeep zyxname\n"})
