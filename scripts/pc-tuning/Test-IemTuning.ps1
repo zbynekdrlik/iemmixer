@@ -63,6 +63,9 @@ $id = [guid]::NewGuid().ToString('N')
 $root = "HKCU:\Software\iemmixer-tuning-test-$id"
 $dir = Join-Path ([IO.Path]::GetTempPath()) "tuning-test-$id"
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
+# The trace tests' run folders: outside the temp path, which can hold an 8.3 short
+# name on the runner (RUNNER~1) that ETW might report in its long form.
+$traceRoot = Join-Path $env:ProgramData "iemmixer-trace-test-$id"
 foreach ($s in 'Spooler', 'W32Time') {
     $svc = Get-Service -Name $s   # both exist on the runner; a missing one fails the test
     if ($svc.Status -ne 'Running') { Start-Service -InputObject $svc; $svc.WaitForStatus('Running', [TimeSpan]::FromSeconds(60)) }
@@ -683,7 +686,7 @@ try {
     # exactly when its output file lies under -Dir, the trace's run folder; whether
     # IemMarkers runs proves nothing. IemMarkers is ours by its name.
     Assert (-not (Test-EtwSession 'NT Kernel Logger')) 'no-kernel-logger-runs-before-the-stop-tests'
-    $runDir = Join-Path $dir 'run-1'
+    $runDir = Join-Path $traceRoot 'run-1'
     New-Item -ItemType Directory -Force -Path $runDir | Out-Null
     $xran = Join-Path $dir 'xperf-ran.txt'
     $fl = Join-Path $dir 'fake-xperf-never.cmd'
@@ -705,6 +708,16 @@ try {
     # Idempotent (F2 round 3 item 4): a second stop with nothing running succeeds.
     $s3 = Stop-IemTraceSessions -Dir $runDir
     Assert (@($s3.stopped).Count -eq 0 -and @($s3.kept).Count -eq 0) 'trace-stop-twice-is-harmless'
+    # The run folder is compared in one canonical form (GetFullPath on both the start
+    # and the stop side): a doubled or a forward separator in the caller's -Dir (a
+    # PC_TUNING_ROOT written with a trailing \ or with /) still names our trace.
+    foreach ($odd in ($traceRoot + '\\run-1'), $runDir.Replace('\', '/')) {
+        $lk = Invoke-IemNative -FilePath 'logman.exe' -Arguments @('start', 'NT Kernel Logger', '-p', 'Windows Kernel Trace', '(process,thread)', '-o', (Join-Path $runDir 'kernel.etl'), '-ets')
+        Assert ($lk.code -eq 0) "our-kernel-logger-starts-again ($($lk.out -join ' '))"
+        $s3 = $null; $se = $null
+        try { $s3 = Stop-IemTraceSessions -Dir $odd } catch { $se = "$_" }
+        Assert ($null -eq $se -and @($s3.stopped) -contains 'NT Kernel Logger' -and -not (Test-EtwSession 'NT Kernel Logger')) "trace-stop-normalizes-the-dir $odd ($se)"
+    }
     # A kernel trace of another tool (LatencyMon, ProcMon) writes elsewhere: it is never
     # stopped, and the stop fails naming it, also next to our running IemMarkers (the
     # old proof), which still stops. The caller keeps the trace recorded and alarms.
@@ -807,5 +820,6 @@ try {
     if ($kernelStarted) { try { [void](Invoke-IemNative -FilePath 'logman.exe' -Arguments @('stop', 'NT Kernel Logger', '-ets')) } catch { Write-Host "cleanup kernel logger: $_" } }
     Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath "$root-stable" -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $traceRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 Write-Host 'Test-IemTuning: all passed'
