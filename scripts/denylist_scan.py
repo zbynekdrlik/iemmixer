@@ -54,6 +54,8 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import html
+import html.entities
 import os
 import re
 import shlex
@@ -236,6 +238,10 @@ def reread(text: str, codec: str) -> str:
 # JSON / JS / Python `\uXXXX`, Rust / JS `\u{X}`, Python `\UXXXXXXXX`, XML / HTML `&#N;` / `&#xN;`
 _UNICODE_ESCAPE = re.compile(r"\\u(?:([0-9A-Fa-f]{4})|\{([0-9A-Fa-f]{1,6})\})|\\U([0-9A-Fa-f]{8})"
                              r"|&#(?:([0-9]{1,7})|[xX]([0-9A-Fa-f]{1,6}));")
+# an HTML named character reference: `&` and a name of up to 32 characters, `;` optional (HTML5 keeps
+# a legacy set without it; html.unescape reads a longer name as such a prefix and the rest)
+_NAMED_REFERENCE = re.compile(r"&[A-Za-z][A-Za-z0-9]{1,31};?")
+_HTML5 = html.entities.html5
 _SURROGATE_PAIR = re.compile("[\ud800-\udbff][\udc00-\udfff]")
 # a run of escapes that each stand for one byte: C / Rust / Python `\xNN`, octal `\NNN` and `\0`,
 # the letter escapes, and URL percent-encoding
@@ -263,12 +269,21 @@ def _escaped_bytes(match: re.Match[str]) -> str:
     return decode(bytes(out)).replace(SEP, "\ufffd")  # an escape never makes a batch separator
 
 
+def _named_reference(match: re.Match[str]) -> str:
+    # no named reference stands for SEP (U+E000): html5 holds no private-use character
+    return _HTML5.get(match.group()[1:]) or html.unescape(match.group())
+
+
 def unescape(text: str) -> str:
-    """The text with its escapes decoded: `\\uXXXX`, `\\u{X}`, `\\UXXXXXXXX` and XML / HTML numeric
-    character references (a UTF-16 surrogate pair joined), and each run of byte escapes (C / Rust /
-    Python `\\xNN`, octal, `\\0`, the letter escapes, percent-encoding) as the bytes it stands for,
-    decoded like raw bytes -- undecodable ones stay lone surrogates that Views re-reads."""
-    if "\\u" in text or "\\U" in text or "&#" in text:
+    """The text with its escapes decoded: HTML named character references first (`&dcaron;`,
+    `&shy;`, `&nbsp;`, HTML5's legacy ones without `;`, so a double-escaped `&amp;#271;` is decoded
+    too -- #32 F5 m5), then `\\uXXXX`, `\\u{X}`, `\\UXXXXXXXX` and XML / HTML numeric character
+    references (a UTF-16 surrogate pair joined), and each run of byte escapes (C / Rust / Python
+    `\\xNN`, octal, `\\0`, the letter escapes, percent-encoding) as the bytes it stands for, decoded
+    like raw bytes -- undecodable ones stay lone surrogates that Views re-reads."""
+    if "&" in text:
+        text = _NAMED_REFERENCE.sub(_named_reference, text)
+    if"\\u" in text or "\\U" in text or "&#" in text:
         text = _UNICODE_ESCAPE.sub(_escaped_char, text)
         text = _SURROGATE_PAIR.sub(
             lambda pair: pair.group().encode("utf-16-le", "surrogatepass").decode("utf-16-le"), text)
@@ -303,9 +318,15 @@ def unmojibake(text: str, codec: str) -> str:
     return sequences.sub(undo, text) if hint.search(text) else text
 
 
-# characters no reader sees: soft hyphen, zero-width space / non-joiner / joiner, word joiner,
-# zero-width no-break space (BOM)
-_INVISIBLE = re.compile("[\u00ad\u200b-\u200d\u2060\ufeff]")
+# characters no reader sees -- Unicode's Default_Ignorable_Code_Point set (#32 F5 m5): soft hyphen,
+# combining grapheme joiner, Arabic letter mark, Hangul fillers, Khmer inherent vowels, Mongolian
+# variation selectors and vowel separator, zero-width space / non-joiner / joiner, left-to-right and
+# right-to-left marks, bidi embeddings and overrides, word joiner, invisible operators, bidi isolates,
+# variation selectors, zero-width no-break space (BOM), the reserved U+FFF0-FFF8, shorthand format
+# controls, musical symbol formats, tag characters
+_INVISIBLE = re.compile("[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u202a-\u202e"
+                        "\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff0-\ufff8"
+                        "\U0001bca0-\U0001bca3\U0001d173-\U0001d17a\U000e0000-\U000e0fff]")
 # compatibility characters whose NFKC form holds Latin letters or digits: ª ² ³ ¹ º, the ligature and
 # digraph letters (Ĳ Ŀ ŉ ſ Ǆ-ǌ Ǳ-ǳ), modifier letters, super- and subscripts, letterlike symbols
 # and Roman numerals, enclosed alphanumerics, Latin ligatures, fullwidth forms, mathematical
