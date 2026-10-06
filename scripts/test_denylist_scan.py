@@ -998,6 +998,29 @@ class DenylistScanTests(unittest.TestCase):
                     self.assertEqual(code, 1, out)
                     self.assertIn("commit metadata: denylist entry 4", out)
 
+    # --- #32 F5 MAJOR: a term with diacritics is found in its plain ASCII spelling too ---
+
+    def test_a_diacritic_term_is_found_in_its_ascii_spelling(self) -> None:
+        # names lose their diacritics in paths, e-mail addresses, identifiers and host names, so
+        # `ďqxwzy` written `dqxwzy` passed; letters NFKD keeps whole are spelled out (ł l, ß ss)
+        self.add_terms("ďqxwzy", "łqzxwv ßqzv")
+        texts = {"mail.txt": ("contact dqxwzy@example.org", "dqxwzy"), "ident.rs": ("let DQXWZY_HOST = 1;", "dqxwzy"),
+                 "host.txt": ("https://dqxwzy.example.org/", "dqxwzy"), "other.txt": ("by lqzxwv ssqzv", "qzxwv")}
+        for name, (text, letters) in texts.items():
+            with self.subTest(name=name):
+                self.assert_found_in_both_modes_as({name: f"{text}\n"}, letters)
+
+    def test_the_ascii_spelling_of_a_term_is_redacted_in_paths_and_found_in_metadata(self) -> None:
+        self.add_terms("ďqxwzy")
+        out = self.assert_found_in_both_modes_as({"docs/dqxwzy-notes.md": "x zyxname\n"}, "qxwzy")
+        self.assertIn("tree docs/[redacted]: path: denylist entry 4", out)
+        git(self.repo, "config", "user.email", "dqxwzy@example.org")
+        self.commit({"a.txt": "clean\n"})
+        code, out = self.scan("--commits", "-1 HEAD")
+        self.assertEqual(code, 1)
+        self.assertIn("commit metadata: denylist entry 4", out)
+        self.assertNotIn("qxwzy", out.lower())
+
     def test_a_named_reference_never_makes_a_batch_separator(self) -> None:
         # a reading that created U+E000 would shift every later unit: the hit must stay on line 3
         self.commit({"a.html": "&dcaron;\n&#xE000;&#57344;\nkeep zyxname\n"})
