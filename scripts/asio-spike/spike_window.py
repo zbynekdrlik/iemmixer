@@ -585,19 +585,28 @@ def begin_change(step: str, bound_s: float, fields: dict | None = None, check: C
         if other:
             alarm(f"an earlier {other.get('step')} never cleared its intent (its process ended, or its call outlived its "
                   "bound): check what it left on the PC")
-        intent = {"step": step, "started": time.time(), "bound_s": bound_s}
+        # `prior`: the values `fields` replace, put back when the PC refuses the step.
+        intent = {"step": step, "started": time.time(), "bound_s": bound_s,
+                  "prior": {k: state.get(k) for k in (fields or {})}}
         state.update(fields or {})
         state["in_flight"] = intent
         save_state(state)
         return intent
 
 
-def end_change(intent: dict, fields: dict | None = None, late: Callable[[dict], None] | None = None) -> dict:
+def end_change(intent: dict, fields: dict | None = None, late: Callable[[dict, bool], None] | None = None,
+               ran: bool = True) -> dict:
     """After the step's call (or its error): while the window is open, `fields`
-    are merged and the intent cleared, under the lock. When a preempt or
-    to-event closed the window meanwhile, `late` runs first (without the lock,
-    the intent still recorded, so a settle watch goes on meanwhile) with the
-    state as saved then; its error is an owner alarm. Returns the state as saved."""
+    are merged and the intent cleared, under the lock. A step the PC refused
+    (`ran` False: nothing changed there) gets what begin_change recorded for
+    it put back instead (review of lane G2, finding 3). When a preempt or
+    to-event closed the window meanwhile, `late(state, ran)` runs first
+    (without the lock, the intent still recorded, so a settle watch goes on
+    meanwhile) with the state as saved then (for a refused step, as it was
+    before it: the closing unwind's own results stay saved); its error is an
+    owner alarm. Returns the state as saved."""
+    prior = intent.get("prior") or {}
+
     def clear(st: dict) -> None:
         if st.get("in_flight") == intent:
             st["in_flight"] = None
@@ -605,16 +614,17 @@ def end_change(intent: dict, fields: dict | None = None, late: Callable[[dict], 
     with window_lock():
         state = load_state()
         if not state.get("closed"):
-            state.update(fields or {})
+            state.update((fields or {}) if ran else prior)
             clear(state)
             save_state(state)
             return state
         # A preempt that waited out its settle may have taken the follow-up over
         # (exit_left_behind cleared the intent): then it is not run twice.
         mine = state.get("in_flight") == intent
+        view = state if ran else {**state, **prior}
     if late is not None and mine:
         try:
-            late(state)
+            late(view, ran)
         except StepError as e:
             alarm(f"{intent['step']} ended after the window was closed, and its follow-up failed ({e}): check the PC")
     return update_state(change=clear)
@@ -624,7 +634,7 @@ T = TypeVar("T")
 
 
 def pc_change(step: str, bound_s: float, call: Callable[[], T], fields: dict | None = None, after: dict | None = None,
-              check: Callable[[dict], None] | None = None, late: Callable[[dict], None] | None = None) -> T:
+              check: Callable[[dict], None] | None = None, late: Callable[[dict, bool], None] | None = None) -> T:
     """One step that changes the PC: begin_change, the call (its ssh call runs
     without the lock, bounded by `bound_s`), end_change with `after` (what its
     success records) or, after an error, nothing. A step whose window was
@@ -635,7 +645,7 @@ def pc_change(step: str, bound_s: float, call: Callable[[], T], fields: dict | N
     try:
         result = call()
     except StepError as e:
-        end_change(intent, late=late)
+        end_change(intent, late=late, ran=STEP_REFUSED not in str(e))
         if STEP_REFUSED in str(e):
             if event_now():
                 raise EventNow() from None
@@ -886,15 +896,16 @@ def need_free_card(state: dict) -> None:
         raise StepError("the card is not free (run to-dev)")
 
 
-def late_quit(env: dict[str, str]) -> Callable[[dict], None]:
+def late_quit(env: dict[str, str]) -> Callable[[dict, bool], None]:
     """A save and quit that ended after the window closed. While the preempt's
     settle still watches (its record is live) that watch covers it: an alarm
     here would send the owner to run the event path again, next to the
     settle's own bring-back (review of lane G2, finding 1). Without a settle
     (the window closed after a failed preempt, or the settle's bound is over)
-    REAPER is read here and the owner alarmed when it is off the card."""
-    def check(state: dict) -> None:
-        if settle_live(state):
+    REAPER is read here and the owner alarmed when it is off the card. A quit
+    the PC refused touched nothing."""
+    def check(state: dict, ran: bool) -> None:
+        if not ran or settle_live(state):
             return
         if not reaper_on_card(env):
             alarm("REAPER is not on the card after a save and quit that ended after the pre-emption: run the event "
@@ -902,11 +913,14 @@ def late_quit(env: dict[str, str]) -> Callable[[dict], None]:
     return check
 
 
-def late_buffer(env: dict[str, str]) -> Callable[[dict], None]:
+def late_buffer(env: dict[str, str]) -> Callable[[dict, bool], None]:
     """A buffer write that ended after the window closed: the preempt restored
     the original before the bring-back, so the value is read again; it is
-    never written here, REAPER may hold the driver (I2)."""
-    def check(state: dict) -> None:
+    never written here, REAPER may hold the driver (I2). A write the PC
+    refused wrote nothing."""
+    def check(state: dict, ran: bool) -> None:
+        if not ran:
+            return
         r = ps(env, f"Get-SpikeBufferPref -Key {ps_quote(env['PC_BUFFER_KEY'])} -Name {ps_quote(env['PC_BUFFER_NAME'])}",
                timeout=60, event="ignore")
         if (r or {}).get("value") != state["pref_original"]:

@@ -339,14 +339,15 @@ def late_journal(env: dict[str, str], step: str):
     """A journal step that ended after the window was closed: the preempt
     deferred its tuning-exit to it (two journal writers at once lose entries),
     so the exit runs here, now that the step's own write is over — always after
-    an enter (it may have applied levers after the pre-emption), after the
-    others while the mode is recorded as entered. An apply or undo changed
-    global levers during the event: the owner hears it."""
-    def follow_up(state: dict) -> None:
-        if step in ("apply", "undo"):
+    an enter that ran (it may have applied levers after the pre-emption),
+    otherwise while the mode is recorded as entered (a refused step's state is
+    the one before it: review of lane G2, finding 8). An apply or undo that ran
+    changed global levers during the event: the owner hears it."""
+    def follow_up(state: dict, ran: bool) -> None:
+        if step in ("apply", "undo") and ran:
             sw.alarm(f"{step} ended after the window was pre-empted: the global levers it changed stay as they are (no "
                      "mode levers); compare the REAPER fingerprint (fingerprint --check) in the next window")
-        if step == "enter" or state.get("tuning_mode"):
+        if (step == "enter" and ran) or state.get("tuning_mode"):
             rows = as_list(tps(env, f"Exit-IemTuningMode -ProfilePath {sw.tuning_profile(env)}", timeout=MODE_S, event="ignore"))
             sw.update_state({"tuning_mode": False})
             print(json.dumps({"late-exit": rows}), flush=True)
@@ -806,6 +807,13 @@ def cmd_reboot_prepare(env, args) -> None:
         if current.get("closed") or current.get("card") != "free":
             raise StepError(f"the window was closed or its card taken meanwhile (card {current.get('card')!r}): "
                             "no reboot prepared")
+        # A step begun while the lock was free (review of lane G2, finding 3): a change
+        # in flight, a buffer not verified as restored (after the reboot REAPER may
+        # hold the driver, I2) or a mode recorded as entered is no clean window (I1).
+        if sw.intent_live(current.get("in_flight")) or (sw.buffer_touched(current) and not current.get("pref_restored")) \
+                or current.get("tuning_mode"):
+            raise StepError("a window step ran while the reboot was being prepared (a change in flight, the buffer or "
+                            "the mode): no reboot prepared")
         # The boot token tells post-boot whether the PC rebooted (decision 5); the
         # time is information only.
         current.update(card="rebooting", reboot={"prepared_at": prepared_at, "boot_token": st.get("boot_token")})
