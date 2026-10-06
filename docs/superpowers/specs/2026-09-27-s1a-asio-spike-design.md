@@ -108,7 +108,7 @@ This driver is the interim switch script of #3: `to-dev` and `to-event` are "eve
 
 - **R1 (azo fails on this driver):** the fallbacks are in §4.
 - **The driver may reject 48 or read the preference only at load:** findings; 32 and 64 decide.
-- **R6 (a hang in `stop()`):** no kill. A callback still in flight after 2 s ends the spike with exit 8 (the driver is not called again); `spike_window.py` prints an owner alarm (also for exit 5, band activity). The owner may reboot.
+- **R6 (a hang in `stop()`):** no kill. A callback still in flight after 2 s ends the spike with exit 8 (the driver is not called again); `spike_window.py` prints an owner alarm (exit 5, once band activity, is unused since #38: no input level ends a run). The owner may reboot.
 - **A late "ide event":** the stop file within 2 s; REAPER back after the restore and the project load (≤ 2 min).
 
 ## 9. Results (PC window 2026-09-27, 13:12–14:22 CEST, dev time)

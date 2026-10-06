@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. Tasks 15–19 (pushes, CI waits, the PC, owner signals, report, PR) run in the main session, never in a subagent. A subagent never touches the PC.
 
-> **Amendment #38 (owner decision 2026-10-06).** The owner's signal ("ide event" / "event skončil") is the only gate on the PC: no step measures silence, activity or the band playing. The interlock (Task 5 Step 5, the planner's `Interlock` step, its 15-min retry, `--force`), the HIL job's band quiet and stage-peak check, and the tests named for them below are gone; the remaining tasks run without them. Read the design note (§5.2, §7) and `.claude/rules/guard.md` for the rules as they stand.
+> **Amendment #38 (owner decision 2026-10-06).** The owner's signal ("ide event" / "event skončil") is the only gate on the PC: no step measures silence, activity or the band playing. The interlock (Task 5 Step 5, the planner's `Interlock` step, its 15-min retry, `--force`), the HIL job's band quiet and stage-peak check, the server's band-activity alarm (Task 7 Steps 1–2: its banner, its push notice, `BandActivity`, the ops site's `[activity] inputs`; S7's activity thresholds), and the tests named for them below are gone; the remaining tasks run without them. Read the design note (§5.2, §7) and `.claude/rules/guard.md` for the rules as they stand.
 
 **Goal:** iemmixer runs on the IEM PC.
 - The ASIO backend sits behind `iem_audio_io::Process` at 32 samples.
