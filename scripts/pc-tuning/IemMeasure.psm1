@@ -85,18 +85,27 @@ function Invoke-IemXperf {
 }
 
 function Start-IemTrace {
+    # The run folder in the stop's canonical form (ConvertTo-TraceDir), so the
+    # kernel logger's output file is found under it again (#32 MAJOR-1).
     param([Parameter(Mandatory)][string]$Xperf, [Parameter(Mandatory)][string]$Dir, [switch]$CSwitch, [int]$CircularMB = 0)
+    $Dir = ConvertTo-TraceDir -Dir $Dir
     New-Item -ItemType Directory -Force -Path $Dir | Out-Null
     [void](Invoke-IemXperf -Xperf $Xperf -Arguments (New-IemTraceArguments -Dir $Dir -CSwitch:$CSwitch -CircularMB $CircularMB))
     [pscustomobject]@{ dir = $Dir; started = Get-IemNow }
 }
 
-function Assert-TraceDir {
-    # Module-private: a trace's run folder is a folder on a drive, never a drive root
-    # or a relative path, under which every kernel trace would count as ours (#32
-    # MAJOR-1).
+function ConvertTo-TraceDir {
+    # Module-private (#32 MAJOR-1): a trace's run folder in one canonical form, so
+    # the start (xperf -f) and every stop compare the same text: GetFullPath folds
+    # doubled and forward separators and . or .. segments, as the path ETW stores
+    # is folded. It is a folder on a drive, never a drive root or a relative path
+    # (under which every kernel trace would count as ours), checked before and after.
     param([Parameter(Mandatory)][string]$Dir)
-    if ($Dir -notmatch '^[A-Za-z]:\\[^\\]+') { throw "trace directory '$Dir': not a folder on a drive (X:\folder); a drive root or a relative path is refused" }
+    $refused = "trace directory '$Dir': not a folder on a drive (X:\folder); a drive root or a relative path is refused"
+    if ($Dir -notmatch '^[A-Za-z]:[\\/]') { throw $refused }
+    $full = [IO.Path]::GetFullPath($Dir).TrimEnd('\')
+    if ($full -notmatch '^[A-Za-z]:\\[^\\]+') { throw $refused }
+    return $full
 }
 
 function Test-OwnTraceOutput {
@@ -121,7 +130,7 @@ function Get-TraceOwnership {
     # only the kernel logger, and a partial stop may leave it alone. When the list
     # of sessions cannot be read, both are looked at.
     param([Parameter(Mandatory)][string]$Dir, [Parameter(Mandatory)][int]$TimeoutSeconds)
-    Assert-TraceDir -Dir $Dir
+    $Dir = ConvertTo-TraceDir -Dir $Dir
     $o = [pscustomobject]@{ own = @(); kept = @(); errors = @() }
     $listed = $null
     $q = Invoke-LogmanRun -Arguments @('query', '-ets') -TimeoutSeconds $TimeoutSeconds
