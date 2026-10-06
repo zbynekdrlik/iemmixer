@@ -185,10 +185,13 @@ function Invoke-LogmanRun {
     $out = $p.StandardOutput.ReadToEndAsync()
     $err = $p.StandardError.ReadToEndAsync()
     if (-not $p.WaitForExit($TimeoutSeconds * 1000)) { return [pscustomobject]@{ ok = $false; out = @(); error = "$what did not finish within $TimeoutSeconds s" } }
-    $text = @()
-    if ([System.Threading.Tasks.Task]::WaitAll([System.Threading.Tasks.Task[]]@($out, $err), 5000)) {
-        $text = @(($out.Result + "`n" + $err.Result) -split "`r?`n" | Where-Object { $_.Trim() -ne '' })
+    # The output is what tells which sessions run and where they write: output not
+    # read within 5 s of the exit (a process it started keeps the pipe open) is an
+    # error, never an empty "nothing runs" (#32 MINOR-2).
+    if (-not [System.Threading.Tasks.Task]::WaitAll([System.Threading.Tasks.Task[]]@($out, $err), 5000)) {
+        return [pscustomobject]@{ ok = $false; out = @(); error = "$what exited, but its output was not read within 5 s" }
     }
+    $text = @(($out.Result + "`n" + $err.Result) -split "`r?`n" | Where-Object { $_.Trim() -ne '' })
     if ($p.ExitCode -ne 0) { return [pscustomobject]@{ ok = $false; out = $text; error = "$what (exit $($p.ExitCode)): $($text -join ' ')" } }
     return [pscustomobject]@{ ok = $true; out = $text; error = $null }
 }
