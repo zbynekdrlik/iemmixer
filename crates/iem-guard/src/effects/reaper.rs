@@ -81,17 +81,6 @@ pub fn keep_max(loudest: &mut [f64], now: &[Option<f64>]) {
     }
 }
 
-/// The stage tracks that gave no meter reading at all (not record-armed, or
-/// not there): their silence proves nothing, so the interlock cannot pass.
-pub fn unmetered(stage: &[u32], loudest: &[f64]) -> Vec<u32> {
-    stage
-        .iter()
-        .zip(loudest)
-        .filter(|(_, l)| **l == f64::NEG_INFINITY)
-        .map(|(t, _)| *t)
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,15 +184,5 @@ mod tests {
         assert_eq!(loudest, [-40.0, -10.0, -29.9]);
         keep_max(&mut loudest, &[]);
         assert_eq!(loudest, [-40.0, -10.0, -29.9]);
-    }
-
-    #[test]
-    fn tracks_without_any_reading_are_named() {
-        assert_eq!(
-            unmetered(&[1, 2, 3], &[f64::NEG_INFINITY, -150.0, f64::NEG_INFINITY]),
-            [1, 3]
-        );
-        assert!(unmetered(&[1, 2], &[-150.0, 0.0]).is_empty());
-        assert!(unmetered(&[], &[]).is_empty());
     }
 }

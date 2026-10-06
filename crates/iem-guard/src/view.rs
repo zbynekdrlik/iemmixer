@@ -250,13 +250,13 @@ mod tests {
     fn the_first_reply_in_a_switch_announces_the_switch_s_alarms() {
         let mut alarms = Alarms::default();
         alarms.raise(49, None, "before the switch", false);
-        alarms.raise(50, Some(Step::Interlock), "refused once", false);
+        alarms.raise(50, Some(Step::Data), "a data command failed", false);
         alarms.raise(60, None, "tuning module missing", false);
         let mut r = reply(Mode::Dev, &alarms);
         r.switching = Some(Switching {
             from: Mode::Event,
             to: Mode::Dev,
-            done: vec![Step::Precheck, Step::Interlock],
+            done: vec![Step::Precheck, Step::AppStop],
             started: 50,
         });
         // The guard started the tray in the switch, after its alarms.

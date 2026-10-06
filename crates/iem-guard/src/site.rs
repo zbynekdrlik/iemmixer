@@ -1,11 +1,12 @@
 //! The guard's settings on the PC (S6 plan Task 9, Task 13): the site's
-//! `[guard]`, `[card]` and `[activity]` tables and the paths in
+//! `[guard]` and `[card]` tables and the paths in
 //! `%LOCALAPPDATA%\iemmixer\guard\pc.toml`. Real values live only in the
 //! private ops repository and on the PC (P6); the tests use synthetic ones.
 //!
 //! The guard reads the site whole but owns only `[guard]` (unknown keys
-//! refused); `[card]` is the engine's table (S6 plan Task 5) and
-//! `[activity]` the server's, so their other keys are ignored here.
+//! refused); `[card]` is the engine's table (S6 plan Task 5), so its other
+//! keys are ignored here. The server's `[activity]` table is no business of
+//! the guard's: nothing it does reads the stage (#38).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -229,18 +230,10 @@ impl CardSite {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-struct ActivitySite {
-    #[serde(default)]
-    inputs: Vec<String>,
-}
-
 #[derive(Debug, Deserialize)]
 struct SiteTables {
     guard: Option<GuardSite>,
     card: Option<CardSite>,
-    #[serde(default)]
-    activity: ActivitySite,
 }
 
 fn default_engine_pipe() -> String {
@@ -349,8 +342,6 @@ impl PcToml {
 pub struct Settings {
     pub guard: GuardSite,
     pub card: CardSite,
-    /// `[activity] inputs`: the stage inputs' engine ids.
-    pub stage_inputs: Vec<String>,
     pub pc: PcToml,
 }
 
@@ -375,7 +366,6 @@ impl Settings {
         let s = Settings {
             guard: t.guard.ok_or("the site has no [guard] table")?,
             card: t.card.ok_or("the site has no [card] table")?,
-            stage_inputs: t.activity.inputs,
             pc,
         };
         let bad = s.problems();
@@ -390,9 +380,6 @@ impl Settings {
         let mut bad = self.guard.problems();
         bad.extend(self.card.problems());
         bad.extend(self.pc.problems());
-        if self.stage_inputs.is_empty() {
-            bad.push("[activity] inputs is empty: the guard needs the stage inputs".to_owned());
-        }
         let app = self.pc.app_exe.to_string_lossy();
         if !file_name(&app).eq_ignore_ascii_case(&self.guard.app_image) {
             bad.push("pc.toml: app_exe is not [guard] app_image".to_owned());
@@ -567,7 +554,6 @@ threshold_dbfs = -50.0
                 raw: "64".into()
             }
         );
-        assert_eq!(s.stage_inputs, ["mic1", "mic2", "mic3"]);
         assert_eq!(s.pc.engine_pipe, "iemmixer-engine");
         assert_eq!(s.pc.tunnel_ready, "http://127.0.0.1:20241/ready");
         assert!(s.pc.data_live.is_empty());
@@ -636,10 +622,6 @@ threshold_dbfs = -50.0
             (
                 SITE.replace("[card]", "[not_card]"),
                 "the site has no [card] table",
-            ),
-            (
-                SITE.replace(r#"inputs = ["mic1", "mic2", "mic3"]"#, "inputs = []"),
-                "[activity] inputs is empty: the guard needs the stage inputs",
             ),
             (
                 SITE.replace(r#"app_image = "app.exe""#, r#"app_image = "other.exe""#),
@@ -1063,7 +1045,6 @@ threshold_dbfs = -50.0
     #[test]
     fn settings_problems_join_the_tables_and_check_the_app() {
         let mut s = settings();
-        s.stage_inputs.clear();
         s.pc.app_exe = PathBuf::from("C:\\Programs\\App\\other.exe");
         s.card.frames = 48;
         s.guard.app_members = 0;
@@ -1072,7 +1053,6 @@ threshold_dbfs = -50.0
             [
                 "[guard] app_members must be above 0",
                 "[card] frames must be 32 (I2)",
-                "[activity] inputs is empty: the guard needs the stage inputs",
                 "pc.toml: app_exe is not [guard] app_image",
             ]
         );

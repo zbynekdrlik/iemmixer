@@ -1,8 +1,8 @@
-//! The engine (design §4, §5.2): its start, the interlock run, and the
-//! supervisor pipe. One connection says hello as `supervisor`; a reader
-//! thread keeps what the engine sends (`Hello`, `Topology`, `Status`,
-//! `Meters`, replies, `DriverReleased`) so the engine never waits on the
-//! guard, and the steps read that inbox. The guard never waits long on the
+//! The engine (design §4, §5.2): its start and the supervisor pipe. One
+//! connection says hello as `supervisor`; a reader thread keeps what the
+//! engine sends (`Hello`, `Status`, replies, `DriverReleased`; its meters are
+//! read by nobody here, #38) so the engine never waits on the guard, and the
+//! steps read that inbox. The guard never waits long on the
 //! engine either: every send must be taken within [`SEND`], else it fails,
 //! the connection counts as closed and the step fails into the plan's error
 //! policy (a hung engine at "ide event": `EngineStop`, then `EngineHealth`).
@@ -27,7 +27,7 @@ use tracing::{info, warn};
 
 use super::{WinPc, procs};
 use crate::cancel::Cancel;
-use crate::effects::engine::{self as proto, Msg, Quiet, Ready, ReadyWindow, Shutdown, StagePeaks};
+use crate::effects::engine::{self as proto, Msg, Ready, ReadyWindow, Shutdown};
 use crate::pc::{EngineSeen, Kid, R, Status, StepError};
 use crate::plan::Health;
 use crate::site::ENGINE_EXE;
@@ -41,7 +41,7 @@ const CONNECT: Duration = Duration::from_secs(5);
 /// pipe whose acceptor is stuck fails the attempt (`seen` makes one per
 /// look, `supervisor` repeats them until its step's limit).
 const CONNECT_ATTEMPT: Duration = Duration::from_millis(200);
-/// `Hello` and `Topology` follow the hello at once.
+/// `Hello` follows the guard's hello at once.
 const HELLO: Duration = Duration::from_secs(10);
 /// `Status` comes once a second.
 const STATUS_GAP: Duration = Duration::from_secs(3);
@@ -57,66 +57,27 @@ const RELEASE: Duration = Duration::from_secs(10);
 const SEND: Duration = Duration::from_secs(1);
 const GONE: Duration = Duration::from_secs(5);
 const INBOX_POLL: Duration = Duration::from_millis(50);
-/// The interlock's stop file under the guard directory (`--stop-file`).
-const INTERLOCK_STOP: &str = "interlock.stop";
 const MAX_REPLIES: usize = 64;
 
 /// What the reader thread kept.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct Inbox {
-    stage_ids: Vec<String>,
     build: Option<String>,
-    topology: bool,
-    /// The stage inputs' positions in `Meters.inputs`.
-    stage: Vec<usize>,
-    /// Stage inputs the topology lacks.
-    unknown: Vec<String>,
     status: Option<Status>,
     /// Counts the statuses, so a step reads only newer ones.
     status_seq: u64,
     replies: Vec<(u64, Option<String>)>,
     released: Option<String>,
-    peaks: StagePeaks,
-    /// The guard's band quiet (`WinPc::quiet`), shared by every connection.
-    quiet: Arc<Mutex<Quiet>>,
     closed: Option<String>,
 }
 
 impl Inbox {
-    fn new(stage_ids: Vec<String>, quiet: Arc<Mutex<Quiet>>) -> Self {
-        Self {
-            stage_ids,
-            build: None,
-            topology: false,
-            stage: Vec::new(),
-            unknown: Vec::new(),
-            status: None,
-            status_seq: 0,
-            replies: Vec::new(),
-            released: None,
-            peaks: StagePeaks::default(),
-            quiet,
-            closed: None,
-        }
-    }
-
-    fn take(&mut self, msg: Msg, now: Instant) {
+    fn take(&mut self, msg: Msg) {
         match msg {
             Msg::Hello { build } => self.build = Some(build),
-            Msg::Topology { inputs } => {
-                let (stage, unknown) = proto::stage_indices(&inputs, &self.stage_ids);
-                self.peaks.reset(stage.len());
-                self.stage = stage;
-                self.unknown = unknown;
-                self.topology = true;
-            }
             Msg::Status(s) => {
                 self.status = Some(s);
                 self.status_seq += 1;
-            }
-            Msg::Meters { inputs } => {
-                self.peaks.observe(&inputs, &self.stage);
-                lock(&self.quiet).observe(proto::stage_max(&inputs, &self.stage), now);
             }
             Msg::Reply { id, error } => {
                 self.replies.push((id, error));
@@ -130,23 +91,6 @@ impl Inbox {
             }
             Msg::Other => {}
         }
-    }
-
-    /// The stage inputs are known: the topology named every one of them.
-    fn stage_known(&self) -> Result<(), String> {
-        if !self.topology {
-            return Err("the engine sent no topology".to_owned());
-        }
-        if !self.unknown.is_empty() {
-            return Err(format!(
-                "stage inputs missing from the engine's topology: {}",
-                self.unknown.join(", ")
-            ));
-        }
-        if self.stage.is_empty() {
-            return Err("no stage input in the engine's topology".to_owned());
-        }
-        Ok(())
     }
 }
 
@@ -166,7 +110,7 @@ fn read_loop(stream: &Stream, inbox: &Mutex<Inbox>) {
     let why = loop {
         match proto::read_frame(&mut r) {
             Ok(Some(body)) => match proto::parse(&body) {
-                Ok(msg) => lock(inbox).take(msg, Instant::now()),
+                Ok(msg) => lock(inbox).take(msg),
                 Err(e) => warn!("{e}"),
             },
             Ok(None) => break "the engine closed the supervisor pipe".to_owned(),
@@ -202,18 +146,12 @@ fn connect_pipe(pipe: &str) -> io::Result<Stream> {
 }
 
 impl Supervisor {
-    /// One attempt, at most [`CONNECT_ATTEMPT`] on a busy pipe. The new
-    /// connection resumes the guard's band quiet and feeds it.
-    fn connect(
-        pipe: &str,
-        stage_ids: Vec<String>,
-        quiet: &Arc<Mutex<Quiet>>,
-    ) -> Result<Self, String> {
+    /// One attempt, at most [`CONNECT_ATTEMPT`] on a busy pipe.
+    fn connect(pipe: &str) -> Result<Self, String> {
         let stream =
             connect_pipe(pipe).map_err(|e| format!("connecting to the engine's pipe: {e}"))?;
         let stream = Arc::new(stream);
-        lock(quiet).resume(Instant::now());
-        let inbox = Arc::new(Mutex::new(Inbox::new(stage_ids, Arc::clone(quiet))));
+        let inbox = Arc::new(Mutex::new(Inbox::default()));
         let (reader, shared) = (Arc::clone(&stream), Arc::clone(&inbox));
         let _reader = thread::Builder::new()
             .name("iemmixer-guard-supervisor".to_owned())
@@ -334,7 +272,7 @@ fn supervisor<'a>(pc: &'a mut WinPc, limit: Duration, c: &Cancel) -> R<&'a mut S
         pc.sup = None;
         let start = Instant::now();
         loop {
-            match Supervisor::connect(&pc.s.pc.engine_pipe, pc.s.stage_inputs.clone(), &pc.quiet) {
+            match Supervisor::connect(&pc.s.pc.engine_pipe) {
                 Ok(sup) => {
                     pc.sup = Some(sup);
                     break;
@@ -375,35 +313,6 @@ pub(super) fn start(pc: &mut WinPc, hold: bool, hil: bool) -> R<u32> {
     pc.sup = None;
     pc.dacl = None;
     procs::start_kid(pc, Kid::Engine, &mut cmd, false)
-}
-
-/// `iem-engine interlock` (design §4): a wait, so "ide event" creates its
-/// stop file, which it sees within 0.1 s: it releases the card and exits 6
-/// (never Ctrl-Break: its default handler would end it with the card open).
-/// It opens the card, so it is placed by the guard's job like the engine
-/// (design §5.1).
-pub(super) fn interlock(pc: &WinPc, seconds: u32, c: &Cancel) -> R<(bool, String)> {
-    let dir = pc.bundle_dir()?;
-    let guard = pc.s.guard_dir();
-    fs::create_dir_all(&guard).map_err(|e| procs::failed("the guard directory", e))?;
-    let stop = guard.join(INTERLOCK_STOP);
-    match fs::remove_file(&stop) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(procs::failed("the interlock's old stop file", e)),
-    }
-    let mut cmd = Command::new(dir.join(ENGINE_EXE));
-    cmd.arg("interlock")
-        .arg("--site")
-        .arg(&pc.s.pc.site)
-        .arg("--seconds")
-        .arg(seconds.to_string())
-        .arg("--stop-file")
-        .arg(&stop)
-        .current_dir(dir);
-    let limit = Duration::from_secs(u64::from(seconds) + 30);
-    let out = procs::run_detached("iem-engine interlock", &mut cmd, limit, c, &stop)?;
-    proto::interlock_result(out.code, &out.stdout).map_err(StepError::Failed)
 }
 
 pub(super) fn ready(pc: &mut WinPc, secs: u32, c: &Cancel) -> R<Status> {
@@ -512,51 +421,6 @@ pub(super) fn health(pc: &mut WinPc) -> R<Health> {
     Ok(proto::health(&first, &second))
 }
 
-/// The loudest peak of each stage input over `seconds`, from the engine's
-/// meters (no card reopen).
-pub(super) fn stage_peaks(pc: &mut WinPc, seconds: u32, c: &Cancel) -> R<Vec<f64>> {
-    let sup = supervisor(pc, CONNECT, c)?;
-    wait_inbox(sup, HELLO, c, |i| i.topology.then_some(()))?;
-    {
-        let mut inbox = lock(&sup.inbox);
-        inbox.stage_known().map_err(StepError::Failed)?;
-        let inputs = inbox.stage.len();
-        inbox.peaks.reset(inputs);
-    }
-    c.sleep(Duration::from_secs(u64::from(seconds)))?;
-    let inbox = lock(&sup.inbox);
-    if let Some(why) = &inbox.closed {
-        return Err(StepError::Failed(why.clone()));
-    }
-    if inbox.peaks.frames() == 0 {
-        return Err(StepError::failed(format!("no meter frame in {seconds} s")));
-    }
-    Ok(inbox.peaks.loudest().to_vec())
-}
-
-/// How long the stage inputs have been below the band-activity level, as
-/// far as the guard's supervisor connections saw (`WinPc::quiet`: a new
-/// connection resumes it, across a gap of up to `QUIET_GAP`). Read once
-/// this connection heard the stage, so a band that played during the gap
-/// has ended the quiet by then.
-pub(super) fn quiet_for(pc: &mut WinPc) -> R<Duration> {
-    let c = Cancel::default();
-    let sup = supervisor(pc, CONNECT, &c)?;
-    let heard = wait_inbox(sup, HELLO, &c, |i| {
-        (i.topology && lock(&i.quiet).heard()).then_some(())
-    })?;
-    let inbox = lock(&sup.inbox);
-    inbox.stage_known().map_err(StepError::Failed)?;
-    if heard.is_none() {
-        return Err(StepError::failed(format!(
-            "no meter frame within {} s",
-            HELLO.as_secs()
-        )));
-    }
-    let quiet = lock(&inbox.quiet).quiet_for(Instant::now());
-    Ok(quiet)
-}
-
 /// The HIL test signal (design §4, §7): `HilTestSignal`, encoded only on
 /// `card_tx`; the engine refuses it above its test-signal cap.
 pub(super) fn hil_signal(
@@ -616,8 +480,7 @@ fn pipe_private(pipe: &str) -> Result<bool, String> {
 pub(super) fn seen(pc: &mut WinPc) -> Option<EngineSeen> {
     let pid = pc.kids.pid(Kid::Engine)?;
     if !pc.sup.as_ref().is_some_and(Supervisor::open) {
-        pc.sup =
-            Supervisor::connect(&pc.s.pc.engine_pipe, pc.s.stage_inputs.clone(), &pc.quiet).ok();
+        pc.sup = Supervisor::connect(&pc.s.pc.engine_pipe).ok();
     }
     let sup = pc.sup.as_ref()?;
     let status = {
@@ -691,14 +554,14 @@ pub(super) fn install_site(pc: &WinPc, path: &str, c: &Cancel) -> R<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex, mpsc};
+    use std::sync::mpsc;
     use std::thread;
     use std::time::{Duration, Instant};
 
     use interprocess::local_socket::prelude::*;
     use interprocess::local_socket::{GenericNamespaced, ListenerOptions, Stream};
 
-    use super::{Quiet, Supervisor};
+    use super::Supervisor;
 
     /// An engine pipe with no free instance (its acceptor stuck): an
     /// attempt to connect as its supervisor fails within a bound instead of
@@ -708,17 +571,16 @@ mod tests {
     #[test]
     fn a_busy_engine_pipe_fails_the_connect_within_a_bound() {
         let pipe = format!("iemmixer-guard-test-busy-{}", std::process::id());
-        let quiet = Arc::new(Mutex::new(Quiet::new(Instant::now())));
         let name = || pipe.clone().to_ns_name::<GenericNamespaced>().unwrap();
         let listener = ListenerOptions::new().name(name()).create_sync().unwrap();
         // The listener's one instance is taken and never accepted: the next
         // client finds no free instance (ERROR_PIPE_BUSY).
         let first = Stream::connect(name()).unwrap();
         let (tx, rx) = mpsc::channel();
-        let (busy, shared) = (pipe.clone(), Arc::clone(&quiet));
+        let busy = pipe.clone();
         thread::spawn(move || {
             let start = Instant::now();
-            let r = Supervisor::connect(&busy, Vec::new(), &shared).map(|_| ());
+            let r = Supervisor::connect(&busy).map(|_| ());
             let _ = tx.send((r, start.elapsed()));
         });
         let (r, took) = rx
@@ -730,7 +592,7 @@ mod tests {
         drop(listener);
         // No pipe at all fails at once.
         let start = Instant::now();
-        assert!(Supervisor::connect(&format!("{pipe}-none"), Vec::new(), &quiet).is_err());
+        assert!(Supervisor::connect(&format!("{pipe}-none")).is_err());
         assert!(start.elapsed() < Duration::from_secs(2));
     }
 
@@ -743,13 +605,12 @@ mod tests {
     #[test]
     fn a_send_to_an_engine_that_does_not_read_fails_within_a_bound() {
         let pipe = format!("iemmixer-guard-test-mute-{}", std::process::id());
-        let quiet = Arc::new(Mutex::new(Quiet::new(Instant::now())));
         let name = pipe.clone().to_ns_name::<GenericNamespaced>().unwrap();
         // The engine's end: its one instance takes the connection and
         // nothing ever reads it.
         let listener = ListenerOptions::new().name(name).create_sync().unwrap();
         // The hello fits the pipe's 512 bytes.
-        let sup = Supervisor::connect(&pipe, Vec::new(), &quiet).unwrap();
+        let sup = Supervisor::connect(&pipe).unwrap();
         assert!(sup.open());
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
