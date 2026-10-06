@@ -893,6 +893,14 @@ class DenylistScanTests(ScanTestCase):
         self.assertEqual(self.hash_key("a.txt", "1"), ds.line_key("a.txt", "keep zyxname here"))
         self.assertEqual(self.hash_key("a:b.txt", "1"), ds.line_key("a:b.txt", "keep zyxname too"))
 
+    def test_hash_refuses_a_unit_that_does_not_exist(self) -> None:
+        # review of lane G3, finding 10: 0 keyed the trailing empty unit and -1 the last line
+        self.commit({"a.txt": "one\ntwo\nthree\n"})
+        for number in ("0", "-1", "run 0", "9", "x"):
+            with self.subTest(number=number), contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(ds.main(["--repo", str(self.repo), "--hash", "a.txt", number]), 2)
+
 
 
 if __name__ == "__main__":
