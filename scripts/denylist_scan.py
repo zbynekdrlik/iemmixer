@@ -227,7 +227,9 @@ def _byte_table(first: int, codec: str) -> dict[int, str]:
 
 
 _REREAD = {codec: _byte_table(0xDC00, codec) for codec in FALLBACK_CODECS}  # surrogateescape bytes
-_GIT_LATIN1_AS_CP1250 = _byte_table(0, "cp1250")  # U+0080-00FF, see cp1250_from_git_latin1
+# U+0080-00FF read as the other code pages' bytes, see from_git_latin1
+_GIT_LATIN1_AS = {codec: _byte_table(0, codec) for codec in FALLBACK_CODECS if codec != "latin-1"}
+_GIT_LATIN1_CHARS = re.compile("[\u0080-\u00ff]")
 
 
 def reread(text: str, codec: str) -> str:
@@ -369,11 +371,14 @@ def compact(text: str) -> str:
     return _COMPATIBLE.sub(lambda match: unicodedata.normalize("NFKC", match.group()), text)
 
 
-def cp1250_from_git_latin1(text: str) -> str:
+def from_git_latin1(text: str) -> list[str]:
     """git stores a commit message or name that is not valid UTF-8 with each such byte converted
-    as if it were Latin-1 (commit.c verify_utf8), so a cp1250 `ď` (0xEF) arrives as `ï`: read the
-    U+0080-00FF characters back as the cp1250 bytes they were."""
-    return text.translate(_GIT_LATIN1_AS_CP1250)
+    as if it were Latin-1 (commit.c verify_utf8), so a cp1250 `ď` (0xEF) arrives as `ï`: the text
+    with its U+0080-00FF characters read back as the bytes they were, in each other FALLBACK_CODECS
+    code page -- cp1250, ISO-8859-2, cp852 (#32 F5 m4) -- or nothing when it has none."""
+    if not _GIT_LATIN1_CHARS.search(text):
+        return []
+    return [text.translate(table) for table in _GIT_LATIN1_AS.values()]
 
 
 # re.IGNORECASE matches an ASCII letter against these non-ASCII characters too (checked against every
@@ -879,7 +884,7 @@ def scan_commits(
     for sha in decode(git(repo, "rev-list", *revlist_args)).split():
         short = sha[:12]
         metadata = decode(git(repo, *METADATA, "--format=%an%n%ae%n%cn%n%ce%n%B", sha))
-        entries = set(scanner.entries_in(metadata)) | set(scanner.entries_in(cp1250_from_git_latin1(metadata)))
+        entries = {entry for reading in [metadata, *from_git_latin1(metadata)] for entry in scanner.entries_in(reading)}
         hits += [Hit(f"{short} commit metadata", entry) for entry in sorted(entries)]
         if identities is not None:
             hits += identity_problems(repo, sha, identities)
