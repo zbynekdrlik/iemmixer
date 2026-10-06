@@ -132,17 +132,19 @@ function Get-TraceOwnership {
     # tool's (LatencyMon, ProcMon); IemMarkers is ours by its name. Whether
     # IemMarkers runs proves nothing about the kernel logger: xperf -on may start
     # only the kernel logger, and a partial stop may leave it alone. When the list
-    # of sessions cannot be read, both are looked at.
+    # of sessions cannot be read, both are looked at, and the list's error is only a
+    # note: another tool's session ending during the list makes logman fail it
+    # (0x80071068), while each session's own query and stop still answer.
     param([Parameter(Mandatory)][string]$Dir, [Parameter(Mandatory)][int]$TimeoutSeconds)
     $Dir = ConvertTo-TraceDir -Dir $Dir
-    $o = [pscustomobject]@{ own = @(); kept = @(); errors = @() }
+    $o = [pscustomobject]@{ own = @(); kept = @(); errors = @(); notes = @() }
     $listed = $null
     $q = Invoke-LogmanRun -Arguments @('query', '-ets') -TimeoutSeconds $TimeoutSeconds
     if ($q.ok) {
         $listed = @(foreach ($s in $script:KernelSession, $script:MarkerSession) {
             if (@(@($q.out) | Where-Object { $_ -match ('^\s*' + [regex]::Escape($s) + '\s') }).Count -gt 0) { $s }
         })
-    } else { $o.errors += $q.error }
+    } else { $o.notes += $q.error }   # each session's own query below decides (CI run 37465635726)
     if ($null -eq $listed -or $listed -contains $script:KernelSession) {
         $k = Invoke-LogmanRun -Arguments @('query', $script:KernelSession, '-ets') -TimeoutSeconds $TimeoutSeconds
         if (-not $k.ok -and $k.code -eq $script:SessionNotFound) { }   # ended since the list: nothing to stop
@@ -217,7 +219,7 @@ function Stop-IemTraceSessions {
         if ($stopped.Count -gt 0) { $done = $stopped -join ', ' }
         throw ("trace stop: $($errors -join '; ') (stopped: $done)")
     }
-    return [pscustomobject]@{ stopped = @($stopped); gone = @($gone); kept = @($o.kept); via = 'logman'; tuning_error = $script:TuningLoadError }
+    return [pscustomobject]@{ stopped = @($stopped); gone = @($gone); kept = @($o.kept); notes = @($o.notes); via = 'logman'; tuning_error = $script:TuningLoadError }
 }
 
 function Invoke-IemDpcIsr {
