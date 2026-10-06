@@ -159,27 +159,32 @@ function Read-IemProfile {
     return $p
 }
 
+function ConvertTo-IemLpNumber {
+    # The profile's processor-number rule (#32 MINOR-6, MAJOR-2; tuning_window.py
+    # lp_number is the same, shared cases in profile_cases.json): an integer 0..63
+    # as the JSON reader gives it (Int32 on Windows PowerShell 5.1, or Int64). A
+    # float (4.0 too: Decimal or Double), a bool, a string, null or a list is
+    # refused, never rounded or read as processor 0.
+    param([Parameter(Mandatory)][string]$What, [AllowNull()]$Value)
+    if (-not ($Value -is [int] -or $Value -is [long]) -or $Value -lt 0 -or $Value -gt 63) { throw "${What}: not a processor number 0..63 (integers only)" }
+    return [int]$Value
+}
+
 function ConvertTo-IemLpList {
-    # The profile's one rule for a list of processors (#32 MINOR-6, MAJOR-2): a JSON
-    # array of integers 0..63. A null entry, a float (2.0 too), a bool, a string or
-    # a nested list is refused, never dropped, rounded or read as processor 0.
-    # tuning_window.py load_profile applies the same rule to the layout (the shared
-    # cases: layout_cases.json). Integers arrive as Int32 (Windows PowerShell 5.1)
-    # or Int64; a JSON float as Decimal or Double. Returns them in profile order.
+    # The profile's rule for a list of processors (#32 MINOR-6, MAJOR-2): a JSON
+    # array of processor numbers (ConvertTo-IemLpNumber), so a null entry, a float,
+    # a bool, a string or a nested list is refused, never dropped. load_profile
+    # applies the same rule (profile_cases.json). Returns them in profile order.
     param([Parameter(Mandatory)][string]$What, [AllowNull()]$Value)
     if ($null -eq $Value -or $Value -isnot [array]) { throw "${What}: not a list of processor numbers" }
     $out = @()
-    for ($i = 0; $i -lt $Value.Count; $i++) {
-        $e = $Value[$i]
-        if (-not ($e -is [int] -or $e -is [long]) -or $e -lt 0 -or $e -gt 63) { throw "${What}: entry $i is not a processor number 0..63 (integers only)" }
-        $out += [int]$e
-    }
+    for ($i = 0; $i -lt $Value.Count; $i++) { $out += ConvertTo-IemLpNumber -What "${What}: entry $i" -Value $Value[$i] }
     return ,([int[]]$out)
 }
 
 function Assert-IemLayout {
     # The profile's layout rule (#32 MINOR-6, the same as tuning_window.py
-    # load_profile; shared cases in layout_cases.json): layout is an object; a role
+    # load_profile; shared cases in profile_cases.json): layout is an object; a role
     # is absent (no processors) or a list of processor numbers (ConvertTo-IemLpList);
     # the roles are disjoint (one processor, one role), as the window requires.
     # Checked before a write (apply, enter), never on the exit path.
@@ -898,8 +903,7 @@ function Assert-IemNicRss {
     foreach ($k in 'base', 'max') {
         $v = $null
         if ($Profile.nic.PSObject.Properties['rss'] -and $null -ne $Profile.nic.rss -and $Profile.nic.rss.PSObject.Properties[$k]) { $v = $Profile.nic.rss.$k }
-        if (-not ($v -is [int] -or $v -is [long]) -or $v -lt 0 -or $v -gt 63) { throw "nic.rss.${k} '$v' is not a processor number" }
-        $b[$k] = [int]$v
+        $b[$k] = ConvertTo-IemLpNumber -What "nic.rss.$k" -Value $v
     }
     if ($b['base'] -gt $b['max']) { throw "nic.rss: base $($b['base']) is above max $($b['max'])" }
     $range = "$($b['base'])..$($b['max'])"

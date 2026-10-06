@@ -67,31 +67,73 @@ def load_profile(path: Path) -> dict:
     if missing:
         raise StepError(f"{path}: missing {', '.join(missing)}")
     check_layout(p["layout"], path)
+    check_devices(p["devices"], path)
+    check_rss(p["nic"], path)
     return p
 
 
+# The profile's processor rules (#32 MINOR-6, MAJOR-2 and its review) are the
+# same as IemTuning's ConvertTo-IemLpNumber / ConvertTo-IemLpList /
+# Assert-IemLayout / Get-IemDeviceLps; both self-tests run the shared cases of
+# profile_cases.json. So a profile tuning-setup copies to the PC is never one the
+# PC refuses (or whose state step throws there).
+
+def lp_number(value) -> bool:
+    """An integer 0..63. type(), not isinstance(): a bool is an int subclass;
+    a float (4.0 too), a string, None or a list is no processor number."""
+    return type(value) is int and 0 <= value <= 63
+
+
+def lp_list(value, what: str, path: Path) -> list[int]:
+    """A JSON list of processor numbers; one entry that is none is refused,
+    never dropped, truncated or read as a number."""
+    if not isinstance(value, list):
+        raise StepError(f"{path}: {what}: not a list of processor numbers")
+    for i, lp in enumerate(value):
+        if not lp_number(lp):
+            raise StepError(f"{path}: {what}: entry {i}: not a processor number 0..63 (integers only)")
+    return value
+
+
 def check_layout(layout, path: Path) -> None:
-    """The profile's layout rule (#32 MINOR-6), the same as IemTuning's
-    Assert-IemLayout (shared cases: layout_cases.json): layout is an object; a
-    role is absent (no processors) or a list of integers 0..63 — a null, a float
-    (2.0 too), a bool, a string or a nested list is refused, never truncated or
-    read as a number; the roles are disjoint."""
+    """layout is an object; a role is absent (no processors) or a list of
+    processor numbers; the roles are disjoint."""
     if not isinstance(layout, dict):
         raise StepError(f"{path}: layout: not an object")
     roles: dict[int, str] = {}
     for role in LAYOUT_ROLES:
         if role not in layout:
             continue
-        lps = layout[role]
-        if not isinstance(lps, list):
-            raise StepError(f"{path}: layout {role}: not a list of processor numbers")
-        for i, lp in enumerate(lps):
-            # type(), not isinstance(): bool is an int subclass in Python.
-            if type(lp) is not int or not 0 <= lp <= 63:
-                raise StepError(f"{path}: layout {role}: entry {i} is not a processor number 0..63 (integers only)")
+        for lp in lp_list(layout[role], f"layout {role}", path):
             if lp in roles:
                 raise StepError(f"{path}: layout: processor {lp} has two roles ({roles[lp]}, {role})")
             roles[lp] = role
+
+
+def check_devices(devices, path: Path) -> None:
+    """Every device names a non-empty list of processor numbers (lps)."""
+    if not isinstance(devices, list):
+        raise StepError(f"{path}: devices: not a list")
+    for d in devices:
+        if not isinstance(d, dict):
+            raise StepError(f"{path}: devices: an entry is not an object")
+        lps = d.get("lps")
+        if lps is None or lps == []:
+            raise StepError(f"{path}: device {d.get('id')}: no processors (lps)")
+        lp_list(lps, f"device {d.get('id')} lps", path)
+
+
+def check_rss(nic, path: Path) -> None:
+    """nic.rss base and max are processor numbers, base <= max (where the range
+    lies against the layout and the present processors, the PC checks)."""
+    rss = nic.get("rss") if isinstance(nic, dict) else None
+    if not isinstance(rss, dict):
+        raise StepError(f"{path}: nic.rss: missing (base and max)")
+    for k in ("base", "max"):
+        if not lp_number(rss.get(k)):
+            raise StepError(f"{path}: nic.rss.{k}: not a processor number 0..63 (integers only)")
+    if rss["base"] > rss["max"]:
+        raise StepError(f"{path}: nic.rss: base {rss['base']} is above max {rss['max']}")
 
 
 def layout_lps(profile: dict, role: str) -> list[int]:
