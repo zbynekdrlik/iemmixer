@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from array import array
 from collections.abc import Generator, Iterator
 from dataclasses import dataclass
 
@@ -189,44 +190,60 @@ def run_batches(data: bytes, first: int, overlap: int = SEGMENT_OVERLAP) -> Gene
     return first
 
 
-def wide_runs(data: bytes) -> list[str]:
-    """The UTF-16 strings inside binary content, in the order they occur (few: random bytes rarely
-    form one). A string read in the other byte order one byte later spells the same letters, so of
-    two readings that overlap, the one starting first -- at the string's first byte -- is kept, and
-    the other only when it runs on more than a byte past it (#32 F5 m11: one finding per string)."""
+def wide_runs(data: bytes) -> Iterator[str]:
+    """The UTF-16 strings inside binary content, in the order they occur. A string read in the other
+    byte order one byte later spells the same letters, so of two readings that overlap, the one
+    starting first -- at the string's first byte -- is kept, and the other only when it runs on more
+    than a byte past it (#32 F5 m11: one finding per string). Lazily, so memory stays bounded however
+    many strings there are (review of lane G3, finding 13): the little-endian readings -- found in the
+    reversed bytes, last first -- are kept as integer pairs, the big-endian ones read as found, and
+    each string decoded only when it is yielded."""
     size = len(data)
-    spans = sorted([(size - run.end(), size - run.start(), "utf-16-le") for run in _UTF16_RUN.finditer(data[::-1])]
-                   + [(run.start(), run.end(), "utf-16-be") for run in _UTF16_RUN.finditer(data)])
-    kept: list[tuple[int, int, str]] = []
+    little = array("q")
+    for run in _UTF16_RUN.finditer(data[::-1]):
+        little.extend((size - run.end(), size - run.start()))
+    big = ((run.start(), run.end(), "utf-16-be") for run in _UTF16_RUN.finditer(data))
+
+    def next_little(at: int = len(little)) -> Iterator[tuple[int, int, str]]:
+        while at:
+            at -= 2
+            yield little[at], little[at + 1], "utf-16-le"
+
+    littles = next_little()
+    pending_little, pending_big = next(littles, None), next(big, None)
     last_end = {"utf-16-le": -1, "utf-16-be": -1}  # where the last kept reading in each byte order ends
-    for start, end, codec in spans:
+    while pending_little is not None or pending_big is not None:
+        if pending_big is None or (pending_little is not None and pending_little < pending_big):
+            (start, end, codec), pending_little = pending_little, next(littles, None)
+        else:
+            (start, end, codec), pending_big = pending_big, next(big, None)
         other = last_end["utf-16-be" if codec == "utf-16-le" else "utf-16-le"]
         if start < other and end <= other + 1:
             continue
-        kept.append((start, end, codec))
         last_end[codec] = end
-    return [data[start:end].decode(codec, errors="replace") for start, end, codec in kept]
+        yield data[start:end].decode(codec, errors="replace")
 
 
 def wide_run_batches(data: bytes, first: int, overlap: int = SEGMENT_OVERLAP) -> Iterator[Batch]:
     """The UTF-16 strings inside binary content (wide_runs), about CHUNK characters at a time, and a
-    string longer than that in overlapping segments (long_unit_batches). A decoded UTF-16 run holds no
+    string longer than that in overlapping segments (long_unit_batches). Like a byte run, a short
+    term counts only in a LONG_TEXT_RUN (review of lane G3, finding 13). A decoded UTF-16 run holds no
     NUL: its characters are U+0009 and U+0020-01FF."""
     pending: list[str] = []
     size = 0
     for run in wide_runs(data):
         if pending and (size + len(run) > CHUNK or len(run) > CHUNK):
-            yield Batch("\x00".join(pending), "\x00", first, "run ")
+            yield Batch("\x00".join(pending), "\x00", first, "run ", runs=True)
             first += len(pending)
             pending, size = [], 0
         if len(run) > CHUNK:
-            yield from long_unit_batches(run, 0, len(run), first, "run ", False, overlap)
+            yield from long_unit_batches(run, 0, len(run), first, "run ", True, overlap)
             first += 1
         else:
             pending.append(run)
             size += len(run) + 1
     if pending:
-        yield Batch("\x00".join(pending), "\x00", first, "run ")
+        yield Batch("\x00".join(pending), "\x00", first, "run ", runs=True)
 
 
 def batches(data: bytes, overlap: int = SEGMENT_OVERLAP) -> Iterator[Batch]:
