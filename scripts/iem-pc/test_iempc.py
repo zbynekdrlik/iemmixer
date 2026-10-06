@@ -1495,6 +1495,44 @@ class HandoverTests(Base):
         self.assertEqual(self.pc.calls, [("iemmode.exe", ["event"], "ignore")])
         self.assertFalse(self.state()["closed"])
 
+    # F2 round 3, m5: the hand-over writes the state as saved when it closes it,
+    # under the window lock, never the dict it read before its PC checks.
+    def changing_meanwhile(self, change) -> None:
+        def ps(env, body, timeout=300, event="finish"):
+            st = self.state()
+            change(st)
+            ip.SPIKE_STATE.write_text(json.dumps(st), encoding="utf-8")   # another window process saved meanwhile
+            return dict(self.checks)
+
+        self.sw.ps = ps
+
+    def test_a_change_saved_during_the_checks_is_kept(self) -> None:
+        self.open_window(pref_current=64, runs=[])
+        self.changing_meanwhile(lambda st: st["runs"].append({"request": "spike-1"}))
+        code, _, err = self.run_main("handover-s1a")
+        self.assertEqual(code, 0, err)
+        st = self.state()
+        self.assertEqual((st["closed"], st["runs"]), (True, [{"request": "spike-1"}]))
+        self.assertIn("handed_over", st)
+
+    def test_a_window_a_preempt_closed_during_the_checks_is_not_handed_over(self) -> None:
+        self.open_window(pref_current=64)
+        self.changing_meanwhile(lambda st: st.update(card="reaper", closed=True))
+        code, _, err = self.run_main("handover-s1a")
+        self.assertEqual(code, 1)
+        self.assertIn("closed meanwhile", err)
+        st = self.state()
+        self.assertEqual((st["card"], st["closed"]), ("reaper", True))
+        self.assertNotIn("handed_over", st)
+
+    def test_a_card_taken_back_during_the_checks_keeps_the_window_open(self) -> None:
+        self.open_window(pref_current=64)
+        self.changing_meanwhile(lambda st: st.update(card="switching"))
+        code, _, err = self.run_main("handover-s1a")
+        self.assertEqual(code, 1)
+        self.assertIn("not free", err)
+        self.assertEqual((self.state()["card"], self.state()["closed"]), ("switching", False))
+
 
 class LockTests(Base):
     def test_a_second_changing_command_is_refused_while_one_runs_but_event_never_waits(self) -> None:
