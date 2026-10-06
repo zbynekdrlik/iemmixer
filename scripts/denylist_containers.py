@@ -201,7 +201,7 @@ def _zip_members(path: str, data: bytes, budget: _Budget) -> Iterator[Member | P
         if info.is_dir() and info.compress_size == 0:
             yield Member(member, info.filename, b"")
             continue
-        if info.flag_bits & 0x1:
+        if info.flag_bits & 0x41:  # bit 0 encrypted, bit 6 strong encryption
             yield Problem(member, "cannot be scanned: an encrypted zip member")
             continue
         problem = budget.problem(info.file_size)
