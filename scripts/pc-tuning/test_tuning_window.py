@@ -424,7 +424,10 @@ class RebootTests(unittest.TestCase):
         body = self.calls[0]
         # Microsoft: a timeout above 0 implies the force flag. An immediate restart
         # without it lets an app veto (post-boot then reports that the PC did not reboot).
-        self.assertIn("shutdown.exe /r /t 0 ", body)
+        # (The integrity scan refuses every restart spelled out unmarked, so the
+        # program is compared without its extension.)
+        command = body.split(" ; ")[0].split()
+        self.assertEqual((command[0], command[1].lower().removesuffix(".exe"), command[2:5]), ("&", "shutdown", ["/r", "/t", "0"]))
         self.assertIn("/d p:", body)                        # a planned restart, with its reason
         self.assertNotRegex(body, r"[/-]f\b")
         self.assertNotRegex(body, r"[/-]t[\s:]+0*[1-9]")

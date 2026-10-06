@@ -83,7 +83,7 @@ class IntegrityTests(unittest.TestCase):
         for body in ("child.kill()", "child.kill ()", "child.start_kill()", "cmd.kill_on_drop(true)",
                      "TerminateJobObject(job, 1)", "JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE", "$p.Kill()",
                      "proc.terminate()", "Invoke-CimMethod -InputObject $p -MethodName Terminate",
-                     "Invoke-CimMethod $p -MethodName 'Terminate'", "shutdown.exe /f /r",
+                     "Invoke-CimMethod $p -MethodName 'Terminate'",
                      "nt::NtTerminateProcess(h, 0)", "Invoke-CimMethod -InputObject $p -Name Terminate",
                      "Invoke-WmiMethod -Path $w -Name Terminate", "Invoke-WmiMethod -Name 'terminate' -Path $w",
                      "wmic process where processid=1 call terminate", "wmic process where name='x' delete",
@@ -92,25 +92,87 @@ class IntegrityTests(unittest.TestCase):
             self.put("crates/a/src/lib.rs", f"fn f() {{ {body}; }}\n")
             self.assertEqual(ci.violations(self.root), ["crates/a/src/lib.rs:1: force-kill command (program spec I8)"], body)
 
+    # Restarts (F2 round 3, m9 and decision 3): every restart mechanism is refused
+    # unless its line carries the marker AND the one literally safe form; the
+    # scanner no longer reads arguments (the bypasses below defeated that).
+    MARK = "  # iemmixer:graceful-restart"
+    RESTART = "restart without the graceful-restart marker and its literal safe form (program spec I8)"
+
+    def refused(self, rel: str, text: str) -> list[str]:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / rel).parent.mkdir(parents=True)
+            (root / rel).write_text(text, encoding="utf-8")
+            return ci.violations(root)
+
     def test_a_forced_restart_is_refused(self) -> None:
         # Microsoft, shutdown /t: "If the timeout period is greater than 0, the /f
         # parameter is implied." So a delay forces too, and /f counts anywhere (#32 B1).
         for body in ("shutdown.exe /r /t 60 /c 'x'", "shutdown /r /t 5", "shutdown -r -t 30", "shutdown /r /t:10",
                      "shutdown /r /f", "shutdown.exe /s /t 0 /f", "shutdown -r -f -t 0", "Restart-Computer -Force",
-                     "Stop-Computer -ComputerName x -Force", "restart-computer -force"):
+                     "Stop-Computer -ComputerName x -Force", "restart-computer -force", "shutdown.exe /f /r"):
             self.put("scripts/iem-pc/x.ps1", body + "\n")
-            self.assertEqual(len(ci.violations(self.root)), 1, body)
+            self.assertEqual(ci.violations(self.root), [f"scripts/iem-pc/x.ps1:1: {self.RESTART}"], body)
 
-    def test_a_graceful_restart_passes(self) -> None:
-        for body in ("& shutdown.exe /r /t 0 /d p:2:4 /c 'iemmixer: planned restart'", "shutdown /r /t 00", "shutdown /a",
-                     "Restart-Computer", "shutdown_signal()", "handle.graceful_shutdown(Some(STOP_DRAIN))",
-                     "runtime.shutdown_timeout(Duration::from_secs(1))", "a shutdown of the app took 5 s"):
+    def test_the_marked_literal_restart_passes_and_nothing_else_does(self) -> None:
+        # The one legitimate call (tuning_window.REBOOT_REQUEST): an immediate,
+        # planned restart as a whole PowerShell command, its line marked.
+        for body in ("& shutdown.exe /r /t 0 /d p:2:4 /c 'iemmixer: planned restart'" + self.MARK,
+                     "& shutdown.exe /r /t 0" + self.MARK,
+                     "R = \"& shutdown.exe /r /t 0 /d p:2:4 /c 'iemmixer S1c: owner-approved restart' ; $LASTEXITCODE\"" + self.MARK):
             self.put("scripts/iem-pc/x.ps1", body + "\n")
             self.assertEqual(ci.violations(self.root), [], body)
+        # Graceful, but unmarked: every restart is a decision someone marks.
+        for body in ("& shutdown.exe /r /t 0 /d p:2:4 /c 'iemmixer: planned restart'", "shutdown /r /t 00", "Restart-Computer",
+                     "Start-Process shutdown.exe -ArgumentList '/r','/t','0'", "Restart-Computer -Wait -For PowerShell",
+                     "(Get-CimInstance Win32_OperatingSystem).Win32Shutdown(2)", "ExitWindowsEx(0x2, 0)",
+                     "ExitWindowsEx(EWX_REBOOT, SHTDN_REASON_FLAG_PLANNED)", "Stop-Computer -ComputerName x ; Remove-Item x -Force"):
+            self.put("scripts/iem-pc/x.ps1", body + "\n")
+            self.assertEqual(ci.violations(self.root), [f"scripts/iem-pc/x.ps1:1: {self.RESTART}"], body)
+        # Marked, but not the literal safe form.
+        for body in ("& shutdown.exe /r /t 0 /f", "& shutdown.exe /r /t 60", "& shutdown.exe /r /t 0 /c \"$why\"",
+                     "& shutdown.exe $flags", "& shutdown.exe /r /t 0 `", "& shutdown.exe /r /t 0 ; & shutdown.exe /r /f",
+                     "& shutdown.exe /s /t 0", "Restart-Computer", "ExitWindowsEx(0x2, 0)", "shutdown /r /t 0"):
+            self.put("scripts/iem-pc/x.ps1", body + self.MARK + "\n")
+            self.assertEqual(ci.violations(self.root), [f"scripts/iem-pc/x.ps1:1: {self.RESTART}"], body)
+
+    def test_the_reviewed_bypasses_are_refused(self) -> None:
+        # F2 round 3, m9: non-literal flags, a constant OR-ed with a number, a numeric
+        # force flag, a program named in one statement and its flags in the next, an
+        # -ArgumentList over several lines, an argv with the flag on a continuation line.
+        cases = {
+            "scripts/iem-pc/a.ps1": ("& shutdown.exe $flags\n", 1),
+            "scripts/iem-pc/b.ps1": ("Start-Process shutdown.exe -ArgumentList $a\n", 1),
+            "scripts/iem-pc/c.ps1": ("$a = @('/r', '/f')\nStart-Process -FilePath 'shutdown' -ArgumentList $a\n", 2),
+            "scripts/iem-pc/d.ps1": ("shutdown $args\n", 1),
+            "crates/a/src/lib.rs": ("fn f() { unsafe { ExitWindowsEx(EWX_REBOOT | 0x4, 0) }; }\n", 1),
+            "crates/b/src/lib.rs": ("fn f(flags: u32) { unsafe { ExitWindowsEx(flags, 0) }; }\n", 1),
+            "crates/c/src/lib.rs": ("fn f() { unsafe { InitiateShutdownW(ptr::null(), ptr::null(), 0, 0x5, 0) }; }\n", 1),
+            "crates/d/src/lib.rs": ('fn f() {\n    let mut c = Command::new("shutdown");\n    c.args(["/r", "/f"]);\n    let _ = c.status();\n}\n', 2),
+            "scripts/iem-pc/e.ps1": ("Start-Process shutdown.exe -ArgumentList @(\n    '/r',\n    '/f'\n)\n", 1),
+            "scripts/x/a.py": ('subprocess.run(["shutdown", "/r", "/t", "0",\n                "/f"], check=True)\n', 1),
+            "scripts/x/b.py": ('subprocess.run(\n    [\n        "shutdown",\n        "/r",\n        "/f",\n    ],\n)\n', 3),
+            "scripts/x/c.py": ('os.system("shutdown " + flags)\n', 1),
+            "e2e/tests/a.spec.ts": ('spawn("shutdown", args);\n', 1),
+        }
+        for rel, (text, line) in cases.items():
+            self.assertEqual(self.refused(rel, text), [f"{rel}:{line}: {self.RESTART}"], rel)
+
+    def test_prose_methods_and_protocol_words_pass(self) -> None:
+        # "shutdown" without a switch of its own, a method, a protocol command name.
+        for body in ("shutdown /a", "shutdown_signal()", "handle.graceful_shutdown(Some(STOP_DRAIN))",
+                     "runtime.shutdown_timeout(Duration::from_secs(1))", "a shutdown of the app took 5 s",
+                     'graceful shutdown ; [ -f "$pid" ]', "shutdown requested; ssh -t 5 host", "Cmd::Shutdown => \"shutdown\",",
+                     'reason: "shutdown".into(),', "self.shutdown(timeout=5)", "the shutdown message was sent",
+                     'Some(Shutdown::Released("shutdown".into()))', "use windows_sys::Win32::System::Shutdown::ShutdownBlockReasonCreate;"):
+            self.put("scripts/iem-pc/x.ps1", body + "\n")
+            self.assertEqual(ci.violations(self.root), [], body)
+        # A list of protocol names may hold "shutdown" on a line of its own.
+        names = 'const NAMES: [&str; 3] = [\n    "save_now",\n    "shutdown",\n    "inject_fault",\n];\n'
+        self.assertEqual(self.refused("crates/a/src/lib.rs", names), [])
 
     def test_every_spelling_of_a_forced_restart_is_refused(self) -> None:
-        # Review m6: a shutdown invocation passes only with an explicit /t 0 and no
-        # force flag, in any form; -Force abbreviations; the API force flags.
+        # Review m6: a shutdown invocation in any form; -Force abbreviations; the API force flags.
         for body in ("shutdown /r",                                  # default /t 30 implies /f
                      "& 'shutdown.exe' /r /t 60", 'shutdown.exe "/r" "/t" "60"',
                      'let argv = ["shutdown", "/r", "/f"];', 'Command::new("shutdown").args(["/r", "/f"]).status()',
@@ -122,52 +184,30 @@ class IntegrityTests(unittest.TestCase):
                      "ExitWindowsEx(EWX_REBOOT | EWX_FORCE, 0)", "ExitWindowsEx(EWX_REBOOT | EWX_FORCEIFHUNG, 0)",
                      "ExitWindowsEx(0x6, 0)", "InitiateShutdownW(null, null, 0, SHUTDOWN_RESTART | SHUTDOWN_FORCE_OTHERS, 0)"):
             self.put("scripts/iem-pc/x.ps1", body + "\n")
-            self.assertEqual(len(ci.violations(self.root)), 1, body)
+            self.assertEqual(ci.violations(self.root), [f"scripts/iem-pc/x.ps1:1: {self.RESTART}"], body)
 
-    def test_graceful_forms_and_other_commands_on_the_line_pass(self) -> None:
-        # Review m7: only the command's own arguments count, never the next command's.
-        for body in ("Start-Process shutdown.exe -ArgumentList '/r','/t','0'", 'Command::new("shutdown").args(["/r", "/t", "0"])',
-                     "Restart-Computer -Wait -For PowerShell", "(Get-CimInstance Win32_OperatingSystem).Win32Shutdown(2)",
-                     "ExitWindowsEx(EWX_REBOOT, SHTDN_REASON_FLAG_PLANNED)", "ExitWindowsEx(0x2, 0)",
-                     'graceful shutdown ; [ -f "$pid" ]', "shutdown requested; ssh -t 5 host",
-                     "Stop-Computer -ComputerName x ; Remove-Item x -Force", "Cmd::Shutdown => \"shutdown\",",
-                     'reason: "shutdown".into(),', "self.shutdown(timeout=5)", "the shutdown message was sent"):
-            self.put("scripts/iem-pc/x.ps1", body + "\n")
-            self.assertEqual(ci.violations(self.root), [], body)
-
-    FORCED_ACROSS = {   # review round 3, m6 — every one is a forced restart
-        "crates/a/src/lib.rs": 'fn f() {\n    let _ = Command::new("shutdown")\n        .args(["/r", "/f"])\n        .status();\n}\n',
-        "crates/b/src/lib.rs": 'fn f() {\n    let _ = Command::new("shutdown").args([\n        "/r",\n        "/t",\n        "30",\n    ]);\n}\n',
-        "crates/c/src/lib.rs": 'fn f() { let _ = Command::new("shutdown").args(&["/r", "/f"]).status(); }\n',
-        "crates/d/src/lib.rs": "fn f() { unsafe { InitiateSystemShutdownExW(ptr::null_mut(), ptr::null_mut(), 0, 1, 1, 0) }; }\n",
-        "crates/e/src/lib.rs": "fn f() { unsafe { InitiateSystemShutdownW(ptr::null_mut(), ptr::null_mut(), 0, TRUE, TRUE) }; }\n",
-        "crates/f/src/lib.rs": "fn f(force: i32) { unsafe { InitiateSystemShutdownExW(ptr::null_mut(), ptr::null_mut(), 0, force, 1, 0) }; }\n",
-        "scripts/iem-pc/a.ps1": "& shutdown.exe /r /t 0 /c 'done; next' /f\n",
-        "scripts/iem-pc/b.ps1": "Start-Process shutdown.exe `\n    -ArgumentList '/r','/f'\n",
-        "scripts/iem-pc/c.ps1": "Stop-Computer -For\n",
+    FORCED_ACROSS = {   # review round 3, m6 — every one is a restart, reported on the line naming it
+        "crates/a/src/lib.rs": ('fn f() {\n    let _ = Command::new("shutdown")\n        .args(["/r", "/f"])\n        .status();\n}\n', 2),
+        "crates/b/src/lib.rs": ('fn f() {\n    let _ = Command::new("shutdown").args([\n        "/r",\n        "/t",\n        "30",\n    ]);\n}\n', 2),
+        "crates/c/src/lib.rs": ('fn f() { let _ = Command::new("shutdown").args(&["/r", "/f"]).status(); }\n', 1),
+        "crates/d/src/lib.rs": ("fn f() { unsafe { InitiateSystemShutdownExW(ptr::null_mut(), ptr::null_mut(), 0, 1, 1, 0) }; }\n", 1),
+        "crates/e/src/lib.rs": ("fn f() { unsafe { InitiateSystemShutdownW(ptr::null_mut(), ptr::null_mut(), 0, TRUE, TRUE) }; }\n", 1),
+        "crates/f/src/lib.rs": ("fn f(force: i32) { unsafe { InitiateSystemShutdownExW(ptr::null_mut(), ptr::null_mut(), 0, force, 1, 0) }; }\n", 1),
+        "crates/g/src/lib.rs": ('fn f() {\n    let _ = Command::new("shutdown")\n        .args(["/r", "/t", "0"])\n        .status();\n}\n', 2),
+        "crates/h/src/lib.rs": ("fn f() { unsafe { InitiateSystemShutdownExW(ptr::null_mut(), ptr::null_mut(), 0, FALSE, TRUE, 0) }; }\n", 1),
+        "scripts/iem-pc/a.ps1": ("& shutdown.exe /r /t 0 /c 'done; next' /f\n", 1),
+        "scripts/iem-pc/b.ps1": ("Start-Process shutdown.exe `\n    -ArgumentList '/r','/f'\n", 1),
+        "scripts/iem-pc/c.ps1": ("Stop-Computer -For\n", 1),
+        "scripts/iem-pc/d.ps1": ("Restart-Computer -Wait `\n    -For PowerShell\n", 1),
+        "scripts/iem-pc/e.ps1": ("& shutdown.exe /r /t 0 /c 'done; ok'\n", 1),
     }
 
-    def test_forced_restarts_across_lines_and_inside_quotes_are_refused(self) -> None:
-        for rel, text in self.FORCED_ACROSS.items():
-            with tempfile.TemporaryDirectory() as d:
-                root = Path(d)
-                (root / rel).parent.mkdir(parents=True)
-                (root / rel).write_text(text, encoding="utf-8")
-                self.assertEqual(len(ci.violations(root)), 1, rel)
+    def test_restarts_across_lines_and_inside_quotes_are_refused(self) -> None:
+        for rel, (text, line) in self.FORCED_ACROSS.items():
+            self.assertEqual(self.refused(rel, text), [f"{rel}:{line}: {self.RESTART}"], rel)
 
-    def test_graceful_forms_across_lines_pass(self) -> None:
-        for rel, text in {
-            "crates/a/src/lib.rs": 'fn f() {\n    let _ = Command::new("shutdown")\n        .args(["/r", "/t", "0"])\n        .status();\n}\n',
-            "crates/b/src/lib.rs": "fn f() { unsafe { InitiateSystemShutdownExW(ptr::null_mut(), ptr::null_mut(), 0, FALSE, TRUE, 0) }; }\n",
-            "crates/c/src/lib.rs": "// a graceful shutdown of the server\nfn f() { let t = 5; let _ = t - 1; }\n",
-            "scripts/iem-pc/a.ps1": "& shutdown.exe /r /t 0 /c 'done; ok'\n",
-            "scripts/iem-pc/b.ps1": "Restart-Computer -Wait `\n    -For PowerShell\n",
-        }.items():
-            with tempfile.TemporaryDirectory() as d:
-                root = Path(d)
-                (root / rel).parent.mkdir(parents=True)
-                (root / rel).write_text(text, encoding="utf-8")
-                self.assertEqual(ci.violations(root), [], rel)
+    def test_a_comment_about_a_graceful_shutdown_passes(self) -> None:
+        self.assertEqual(self.refused("crates/c/src/lib.rs", "// a graceful shutdown of the server\nfn f() { let t = 5; let _ = t - 1; }\n"), [])
 
     def test_graceful_stops_and_ordinary_words_pass(self) -> None:
         for body in ('Command::new("kill").args(["-TERM", &pid])', "signal::kill(pid, Signal::SIGTERM)",
