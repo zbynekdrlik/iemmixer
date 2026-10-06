@@ -118,16 +118,13 @@ pub struct Facts {
     pub app_serves: bool,
     /// A process other than REAPER and our engine holds the driver module.
     pub other_module_holder: bool,
-    /// `live` before cutover (a rehearsal): the request's, read by the
-    /// precheck; it changes no step of the plan.
-    pub trial: bool,
 }
 
 /// The number of fields of [`Facts`].
-pub const FACT_BITS: u32 = 10;
+pub const FACT_BITS: u32 = 9;
 
 impl Facts {
-    /// Every combination for the exhaustive tests (2^10 = 1024): bit `n` sets
+    /// Every combination for the exhaustive tests (2^9 = 512): bit `n` sets
     /// the `n`-th field in declaration order.
     pub fn from_bits(b: u32) -> Self {
         let bit = |n: u32| (b & (1 << n)) != 0;
@@ -141,7 +138,6 @@ impl Facts {
             reaper_holds_module: bit(6),
             app_serves: bit(7),
             other_module_holder: bit(8),
-            trial: bit(9),
         }
     }
 }
@@ -419,7 +415,6 @@ mod tests {
                 reaper_holds_module: true,
                 app_serves: true,
                 other_module_holder: true,
-                trial: true,
             }
         );
         let one = |n: u32| Facts::from_bits(1 << n);
@@ -483,13 +478,6 @@ mod tests {
             one(8),
             Facts {
                 other_module_holder: true,
-                ..Facts::default()
-            }
-        );
-        assert_eq!(
-            one(9),
-            Facts {
-                trial: true,
                 ..Facts::default()
             }
         );

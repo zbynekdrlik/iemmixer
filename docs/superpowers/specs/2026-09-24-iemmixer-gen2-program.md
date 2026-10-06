@@ -73,7 +73,7 @@ Numbers are tunable defaults unless they are parity requirements, tolerances (§
 | Process | Started by | Role | Restart effect |
 |---|---|---|---|
 | engine | guard | ASIO, DSP, mix state, taps, listen-path limiter; local pipes only; HIGH priority, QPC time | 1–3 s gap, 500 ms fade-in |
-| guard (~1.2–1.5k LoC) | Interactive task, restart on failure, single-instance mutex; on demand before cutover, at logon after | `iemmode`, modes, band-activity alarm, handover checks, bundle install/pin/revert, crash loop, alarms; no listening sockets | none; reconnects |
+| guard (~1.2–1.5k LoC) | Interactive task, restart on failure, single-instance mutex; on demand before cutover, at logon after | `iemmode`, modes, handover checks, bundle install/pin/revert, crash loop, alarms; no listening sockets | none; reconnects |
 | server (existing binary) | guard | HTTPS, auth, Opus, push, photos, backups, tunnel health | none on audio |
 | tray (Tauri) | guard, iemmixer modes only | status, Open Mixer, Copy URL, alarms | none |
 | ops runner (ops repo only) | guard, `dev` only | HIL, topology deploy | — |

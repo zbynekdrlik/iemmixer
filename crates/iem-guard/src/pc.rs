@@ -179,8 +179,7 @@ impl Procs {
 pub type Ports = (Option<u32>, Option<u32>);
 
 /// The facts of a plan (design §5.1) from the process list, the driver
-/// module's holders and the owners of ports 80/443. `trial` is the
-/// request's, set by the daemon.
+/// module's holders and the owners of ports 80/443.
 ///
 /// An unreadable holder list assumes a running REAPER holds the card (the
 /// handover checks it) and no foreign holder (`reaper_start` reads again and
@@ -215,7 +214,6 @@ pub fn facts_from(p: &Procs, holders: Option<&[(u32, String)]>, ports: Option<Po
         reaper_holds_module,
         app_serves,
         other_module_holder,
-        trial: false,
     }
 }
 
@@ -461,7 +459,7 @@ pub trait Pc {
     /// app, engine, server, tray and runner — and our children that ended.
     fn procs(&mut self) -> Procs;
     /// Once per plan: processes, driver-module holders, port owners (design
-    /// §5.1). `trial` is false.
+    /// §5.1).
     fn facts(&mut self) -> Facts;
     /// Re-adopts the children a previous guard started (pid, image path and
     /// start time must match); returns the adopted ones.
@@ -1355,7 +1353,6 @@ mod tests {
     fn facts_name_what_runs() {
         let f = facts_from(&band(), Some(NO_HOLDER), Some((None, None)));
         assert!(f.reaper && f.app && f.engine && f.server && f.tray && f.runner);
-        assert!(!f.trial);
         let nothing = facts_from(&Procs::default(), Some(NO_HOLDER), Some((None, None)));
         assert_eq!(nothing, Facts::default());
         for (p, want) in [

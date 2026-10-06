@@ -38,7 +38,7 @@ use crate::handover::{self, Audio};
 use crate::install::{self, InstallError};
 use crate::pc::{Audience, EngineSeen, Kid, Pc, PrefSeen, Procs, R, Status, StepError, job_note};
 use crate::plan::{
-    Activation, Busy, Facts, Health, Mode, OnError, PrefFail, Step, activation, on_error, plan,
+    Activation, Busy, Health, Mode, OnError, PrefFail, Step, activation, on_error, plan,
 };
 use crate::proto::{self, EngineStatus, Reply, Request};
 use crate::site::GuardSite;
@@ -434,9 +434,9 @@ pub struct Guard {
     /// `%LOCALAPPDATA%\iemmixer` (`bundles\`, `bin\`, `guard\`); none: no files.
     root: Option<PathBuf>,
     clock: Clock,
-    /// The request of the switch in progress.
+    /// The request of the switch in progress (`live --trial`), read by its
+    /// precheck.
     trial: bool,
-    build: Option<String>,
     /// What the request being handled did (the reply's detail).
     report: Vec<String>,
     /// What the last precheck named without refusing (a dev entry without
@@ -492,7 +492,6 @@ impl Guard {
             root,
             clock,
             trial: false,
-            build: None,
             report: Vec::new(),
             subscriptions_note: None,
             lan_note: None,
@@ -668,7 +667,6 @@ impl Guard {
             self.state.job = None;
         }
         self.trial = false;
-        self.build = None;
         info!(
             "switch ended in {}: {}",
             mode_name(mode),
@@ -728,13 +726,6 @@ impl Guard {
                 "{what} is for dev; the mode is {}",
                 mode_name(self.state.mode)
             ))
-        }
-    }
-
-    #[cfg(test)]
-    fn set_now(&self, t: u64) {
-        if let Clock::Fixed(c) = &self.clock {
-            c.store(t, Ordering::SeqCst);
         }
     }
 }
@@ -803,11 +794,7 @@ pub fn send_notices(pc: &mut dyn Pc, g: &mut Guard) {
 /// (`plan::on_error`). "ide event" pre-empts a switch into dev/live within
 /// 1 s of a waiting step, after a mutating one.
 pub fn run_switch(pc: &mut dyn Pc, g: &mut Guard, from: Mode, to: Mode) -> Outcome {
-    let facts = Facts {
-        trial: g.trial,
-        ..pc.facts()
-    };
-    let steps = plan(to, &facts);
+    let steps = plan(to, &pc.facts());
     g.begin(from, to, &steps);
     let mut skip: Vec<Step> = Vec::new();
     for step in steps {
@@ -818,7 +805,7 @@ pub fn run_switch(pc: &mut dyn Pc, g: &mut Guard, from: Mode, to: Mode) -> Outco
             return back_to_event(pc, g, "pre-empted by event");
         }
         info!("step {step:?}");
-        match run_step(pc, g, step, to, &facts) {
+        match run_step(pc, g, step, to) {
             Ok(()) => g.done(pc, step),
             Err(StepError::Preempted) if to != Mode::Event => {
                 return back_to_event(pc, g, "pre-empted by event");
@@ -934,12 +921,12 @@ fn engine_ready(pc: &mut dyn Pc, g: &mut Guard, to: Mode, c: &Cancel) -> R<Statu
 }
 
 /// One step, one `Pc` call (plus the verdicts of `handover`).
-fn run_step(pc: &mut dyn Pc, g: &mut Guard, step: Step, to: Mode, facts: &Facts) -> R<()> {
+fn run_step(pc: &mut dyn Pc, g: &mut Guard, step: Step, to: Mode) -> R<()> {
     let c = g.cancel.clone();
     match step {
         Step::Precheck => {
             g.subscriptions_note = None;
-            g.subscriptions_note = pc.precheck(to, facts.trial)?;
+            g.subscriptions_note = pc.precheck(to, g.trial)?;
             if let Some(n) = g.subscriptions_note.clone() {
                 g.info(n);
             }
@@ -1284,7 +1271,6 @@ fn entry(pc: &mut dyn Pc, g: &mut Guard, e: Entry) -> (bool, String) {
         pc.set_bundle(Some(sha));
     }
     g.trial = e.trial;
-    g.build.clone_from(&e.build);
     let from = g.state.mode;
     let out = run_switch(pc, g, from, e.to);
     (
@@ -1536,7 +1522,7 @@ fn restart_in_job(pc: &mut dyn Pc, g: &mut Guard) -> Result<(), String> {
         Step::ServerStart,
     ]);
     for step in steps {
-        match run_step(pc, g, step, Mode::Dev, &f) {
+        match run_step(pc, g, step, Mode::Dev) {
             // The children are saved after every step, so the guard an
             // activation hands over to adopts the new engine and server.
             Ok(()) => g.done(pc, step),
@@ -1772,7 +1758,7 @@ fn rehearse(pc: &mut dyn Pc, g: &mut Guard) -> (bool, String) {
     }
     steps.extend([Step::TuningExit, Step::PrefCheck]);
     for step in steps {
-        let Err(e) = run_step(pc, g, step, Mode::Event, &f) else {
+        let Err(e) = run_step(pc, g, step, Mode::Event) else {
             continue;
         };
         let (why, health, policy) = failure(pc, g, Mode::Event, step, &e);

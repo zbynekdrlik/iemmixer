@@ -396,8 +396,8 @@ mod tests {
         assert_eq!(pc.settings().guard.app_exit_id, 4242);
         let p = pc.procs();
         assert!(p.exited.is_empty());
-        let f = pc.facts();
-        assert!(!f.trial);
+        // The facts read the process list, the module's holders and the ports.
+        let _ = pc.facts();
         assert_eq!(pc.children(), Children::default());
         let failed = |r: R<u32>| matches!(r, Err(StepError::Failed(_)));
         assert!(failed(pc.engine_start(true, false)));

@@ -14,6 +14,7 @@ use crate::effects::tuning::{Logon, LogonPref};
 use crate::install;
 use crate::pc::fake::{Call, FakePc};
 use crate::pc::{CardHolders, PrefHeld, Status};
+use crate::plan::Facts;
 use crate::proto::GUARD_BUILD;
 
 const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
