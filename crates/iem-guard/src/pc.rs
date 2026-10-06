@@ -1778,7 +1778,6 @@ mod tests {
 
     #[test]
     fn the_fake_answers_the_reads() {
-        let c = Cancel::default();
         let mut pc = FakePc::new(Facts::default());
         assert_eq!(pc.pref_check().unwrap(), PrefSeen::Original(0));
         assert_eq!(pc.tuning_drift().unwrap(), None);
