@@ -6,6 +6,7 @@ import contextlib
 import io
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -553,6 +554,33 @@ class TuningChangeTests(unittest.TestCase):
                                        "Exit-IemTuningMode:start", "Exit-IemTuningMode:end"])
         self.assertTrue(any("apply" in a and "pre-empted" in a for a in self.alarms), self.alarms)
         self.assertFalse(tw.sw.load_state()["tuning_mode"])
+
+    def test_a_deferred_exit_whose_step_never_came_back_runs_after_the_settle(self) -> None:
+        # Review of lane G2, finding 2 (MAJOR): the step's process died (a SIGTERM, a
+        # Bash timeout) with its journal intent live; the preempt deferred its exit to
+        # a late handler that never runs. Once the settle is over, the preempt exits
+        # itself, alarms and clears the intent: no mode lever stays through the event.
+        st = tw.sw.load_state()
+        st.update(tuning_mode=True, in_flight={"step": "enter", "started": time.time(), "bound_s": 0.3})
+        tw.sw.save_state(st)
+        (self.dir / "EVENT-NOW").touch()
+        tw.sw.cmd_preempt(self.env)
+        self.assertEqual(self.events, ["Exit-IemTuningMode:start", "Exit-IemTuningMode:end"])
+        st = tw.sw.load_state()
+        self.assertEqual((st["closed"], st["tuning_mode"], st.get("in_flight")), (True, False, None))
+        self.assertTrue(any("never came back" in a for a in self.alarms), self.alarms)
+
+    def test_a_term_signal_ends_a_step_through_its_clean_up(self) -> None:
+        # The other half of finding 2: SIGTERM and SIGHUP end a window command through
+        # Python's exception path, so pc_change clears its intent (and runs a late
+        # handler) instead of leaving it to the bound.
+        saved = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP)}
+        self.addCleanup(lambda: [signal.signal(s, h) for s, h in saved.items()])
+        tw.sw.exit_on_signals()
+        for s in (signal.SIGTERM, signal.SIGHUP):
+            with self.assertRaises(SystemExit):
+                os.kill(os.getpid(), s)
+                time.sleep(1)   # the handler runs between bytecodes
 
     def test_every_tuning_change_refuses_on_the_pc_before_its_modules_load(self) -> None:
         # The stop file's check comes first: a step a preempt overtook compiles nothing
