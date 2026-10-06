@@ -35,6 +35,8 @@ struct FaultState {
     locked: Vec<PathBuf>,
     /// Read failures still to come per path; then its reads succeed.
     flaky: Vec<(PathBuf, usize)>,
+    /// The next rename onto this path fails, once.
+    rename_to: Option<PathBuf>,
     /// Pauses between read tries.
     pauses: usize,
 }
@@ -103,6 +105,12 @@ impl Faulty {
         s.flaky.push((path.to_path_buf(), times));
     }
 
+    /// The next rename onto `path` fails, once (the rename that follows a
+    /// move aside, say).
+    pub(super) fn fail_rename_to(&self, path: &Path) {
+        self.state.lock().unwrap().rename_to = Some(path.to_path_buf());
+    }
+
     /// Pauses between read tries so far.
     pub(super) fn pauses(&self) -> usize {
         self.state.lock().unwrap().pauses
@@ -162,15 +170,15 @@ impl Files for Faulty {
 
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
         self.step("rename", from)?;
-        if self
-            .state
-            .lock()
-            .unwrap()
-            .locked
-            .iter()
-            .any(|p| p == from || p == to)
         {
-            return Err(injected(format!("locked: {}", from.display())));
+            let mut s = self.state.lock().unwrap();
+            if s.locked.iter().any(|p| p == from || p == to) {
+                return Err(injected(format!("locked: {}", from.display())));
+            }
+            if s.rename_to.as_deref() == Some(to) {
+                s.rename_to = None;
+                return Err(injected(format!("rename onto {} failed", to.display())));
+            }
         }
         OsFiles.rename(from, to)
     }
@@ -365,6 +373,30 @@ fn a_save_tmp_that_cannot_be_moved_aside_safely_fails_the_save() {
     faulty.set_locked(&s.dir().join(TMP), false);
     assert_eq!(fs::read(s.dir().join(TMP)).unwrap(), pending);
     assert_eq!(rev_of(&s.dir().join(CURRENT)), 5);
+}
+
+#[test]
+fn a_save_cut_off_after_its_move_aside_names_the_orphan_and_the_boot_alarms() {
+    // F3 round 4, finding 1: the rename of save.new over save.tmp failed
+    // after the move aside, and neither its error nor any boot named the
+    // orphan, which may hold the newest pending state.
+    let (_d, faulty, s, pending) = unread_save_tmp();
+    let orphan = s.dir().join("save.tmp.orphan-1");
+    faulty.fail_rename_to(&s.dir().join(TMP));
+    let e = s.save(&session(6)).unwrap_err();
+    assert!(e.to_string().contains(&orphan.display().to_string()), "{e}");
+    assert_eq!(fs::read(&orphan).unwrap(), pending);
+    // A crash now: the next boot loads current.json (5), and an alarm names
+    // the orphan above it.
+    let boot = reopen(s.dir(), &faulty).load(&test_site());
+    assert_eq!((boot.source, boot.persisted.rev), (Source::Current, 5));
+    assert_eq!(
+        boot.alarms,
+        [
+            "save.tmp.orphan-1 (revision 6) is above the state loaded (revision 5): \
+          a save.tmp moved aside, kept but never loaded"
+        ]
+    );
 }
 
 #[test]

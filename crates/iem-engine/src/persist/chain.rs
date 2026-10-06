@@ -1109,6 +1109,35 @@ mod tests {
     }
 
     #[test]
+    fn an_orphan_above_the_state_loaded_raises_an_alarm() {
+        // F3 round 4, finding 1: an orphan is never loaded, but one that
+        // holds a revision above the state that loaded is named in an
+        // alarm, never passed over silently. One at or below it, one that
+        // does not decode, and a name the store never writes are left
+        // alone.
+        let g = test_site();
+        let (_d, s) = store();
+        s.save(&sample(5)).unwrap();
+        let aside = |name: &str, bytes: &[u8]| fs::write(s.dir().join(name), bytes).unwrap();
+        aside("save.tmp.orphan-1", &encode(&sample(5)).unwrap());
+        aside("save.tmp.orphan-2", b"cut off");
+        aside("save.tmp.orphan-x", &encode(&sample(9)).unwrap());
+        let loaded = s.load(&g);
+        assert!(loaded.alarms.is_empty(), "{:?}", loaded.alarms);
+        aside("save.tmp.orphan-3", &encode(&sample(6)).unwrap());
+        let loaded = s.load(&g);
+        assert_eq!((loaded.source, loaded.persisted.rev), (Source::Current, 5));
+        assert_eq!(
+            loaded.alarms,
+            [
+                "save.tmp.orphan-3 (revision 6) is above the state loaded (revision 5): \
+              a save.tmp moved aside, kept but never loaded"
+            ]
+        );
+        assert!(loaded.rejected.is_empty(), "{:?}", loaded.rejected);
+    }
+
+    #[test]
     fn a_read_is_tried_again_only_for_an_error_that_may_pass() {
         use io::ErrorKind::{
             Interrupted, IsADirectory, NotADirectory, Other, PermissionDenied, TimedOut, WouldBlock,
