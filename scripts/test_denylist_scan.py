@@ -33,6 +33,11 @@ def git(repo: Path, *args: str) -> None:
     subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
 
 
+def git_out(repo: Path, *args: str, stdin: bytes = b"") -> str:
+    return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True,
+                          input=stdin).stdout.decode().strip()
+
+
 class DenylistScanTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp())
@@ -888,6 +893,31 @@ class DenylistScanTests(unittest.TestCase):
                 self.assertEqual(code, 1)
                 self.assertIn("author email is not an allowed identity", out)
                 self.assertNotIn("committer email", out)
+
+    # --- #32 F5 m7: local repository state cannot redirect what the scan reads ---
+
+    def test_a_replace_ref_cannot_swap_a_blob_for_a_clean_one(self) -> None:
+        # `git replace` makes cat-file, show and ls-tree read another object in place of the real
+        # one: a local replace ref turned the term-bearing blob into a clean one in both modes
+        self.commit({"base.txt": "base\n"})
+        self.commit({"a.txt": "keep zyxname\n"})
+        clean = git_out(self.repo, "hash-object", "-w", "--stdin", stdin=b"clean\n")
+        git(self.repo, "replace", git_out(self.repo, "rev-parse", "HEAD:a.txt"), clean)
+        code, out = self.scan("--tree", "HEAD", "--commits", "HEAD~1..HEAD")
+        self.assertEqual(code, 1)
+        self.assertIn("tree a.txt:1: denylist entry 1", out)
+        self.assertIn(" a.txt: denylist entry 1", out)
+
+    def test_a_graft_cannot_cut_commits_out_of_the_history_scan(self) -> None:
+        # a grafts file gives a commit other parents: listing HEAD alone as a root hid every
+        # commit before it from rev-list
+        self.commit({"a.txt": "zyxname\n"})
+        self.commit({"a.txt": "clean\n"})
+        (self.repo / ".git" / "info" / "grafts").write_text(git_out(self.repo, "rev-parse", "HEAD") + "\n",
+                                                            encoding="utf-8")
+        code, out = self.scan("--commits", "HEAD")
+        self.assertEqual(code, 1)
+        self.assertIn(" a.txt: denylist entry 1", out)
 
 
 if __name__ == "__main__":
