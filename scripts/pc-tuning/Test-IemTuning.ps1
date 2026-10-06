@@ -645,8 +645,6 @@ try {
     # Measurement helpers that need no xperf.
     $a = New-IemTraceArguments -Dir 'C:\t' -CSwitch -CircularMB 1024
     Assert (($a -join ' ') -eq '-on PROC_THREAD+LOADER+DPC+INTERRUPT+CSWITCH+DISPATCHER -BufferSize 1024 -MinBuffers 256 -MaxBuffers 1024 -FileMode Circular -MaxFile 1024 -f C:\t\kernel.etl -start IemMarkers -on 3b6c1e0a-5d2f-4c8e-9a71-0e4f2d9b8c11 -f C:\t\markers.etl') 'trace-arguments'
-    $l = ConvertFrom-IemLoggers -Text "Logger Name           : NT Kernel Logger`r`nLogger Mode Settings (11)`r`nLogger Name           : IemMarkers`r`n"
-    Assert ($l.Count -eq 2 -and $l[0] -eq 'NT Kernel Logger' -and $l[1] -eq 'IemMarkers') 'loggers-parse'
     # The near-glitch export works on any trace file (lane F2's cut-aware export):
     # trace.etl -> near.txt, <base>.etl -> <base>.near.txt, each through its own
     # dumper temp file (Invoke-IemDpcIsr's naming); the filter keeps the dumper's
@@ -678,54 +676,85 @@ try {
     $xo = (Invoke-IemXperf -Xperf $ping -Arguments @('-n', '1', '127.0.0.1')) -join ' '
     Assert ($xo -match '127\.0\.0\.1') 'xperf-runs-a-signed-binary'
     ThrowsLike { Invoke-IemXperf -Xperf $ping -Arguments @('-n', 'x', '127.0.0.1') } '*(exit *' 'xperf-a-nonzero-exit-throws'
-    # The pre-emption stop ("ide event") always works and stops only what is ours
-    # (review 3.6, R2): Stop-IemTrace without -Merge is Stop-IemTraceSessions, which
-    # needs neither xperf nor IemTuning. logman stops IemMarkers, and the NT Kernel
-    # Logger only while IemMarkers runs, the proof the kernel trace is ours.
+    # Every trace stop ("ide event", trace-stop, a failed measure's cleanup, a cut, the
+    # final stop) is Stop-IemTraceSessions (review 3.6, R2; Stop-IemTrace without
+    # -Merge is that call): logman only, neither xperf nor IemTuning. Whose trace it
+    # is, is a property of the session (#32 MAJOR-1): the NT Kernel Logger is ours
+    # exactly when its output file lies under -Dir, the trace's run folder; whether
+    # IemMarkers runs proves nothing. IemMarkers is ours by its name.
     Assert (-not (Test-EtwSession 'NT Kernel Logger')) 'no-kernel-logger-runs-before-the-stop-tests'
+    $runDir = Join-Path $dir 'run-1'
+    New-Item -ItemType Directory -Force -Path $runDir | Out-Null
     $xran = Join-Path $dir 'xperf-ran.txt'
     $fl = Join-Path $dir 'fake-xperf-never.cmd'
     [IO.File]::WriteAllText($fl, "@echo off`r`necho ran> `"$xran`"`r`nexit /b 1`r`n")
-    $markers = @('start', 'IemMarkers', '-p', '{3b6c1e0a-5d2f-4c8e-9a71-0e4f2d9b8c11}', '-o', (Join-Path $dir 'markers-test.etl'), '-ets')
+    $markers = @('start', 'IemMarkers', '-p', '{3b6c1e0a-5d2f-4c8e-9a71-0e4f2d9b8c11}', '-o', (Join-Path $runDir 'markers-1.etl'), '-ets')
     $lm = Invoke-IemNative -FilePath 'logman.exe' -Arguments $markers
     Assert ($lm.code -eq 0) "marker-session-starts ($($lm.out -join ' '))"
     $s2 = $null; $se = $null
-    try { $s2 = Stop-IemTrace -Xperf $fl -Dir $dir } catch { $se = "$_" }
+    try { $s2 = Stop-IemTrace -Xperf $fl -Dir $runDir } catch { $se = "$_" }
     Assert ($null -eq $se -and $s2.via -eq 'logman' -and @($s2.stopped) -contains 'IemMarkers' -and -not (Test-Path -LiteralPath $xran)) "trace-stop-needs-no-xperf ($se)"
     Assert (-not (Test-EtwSession 'IemMarkers')) 'trace-stop-leaves-no-marker-session'
-    # A kernel trace of another tool (LatencyMon, ProcMon) is never stopped; with our
-    # IemMarkers running, the kernel trace is ours and both stop.
+    # Our kernel logger alone (xperf -on started it but not IemMarkers, or a partial
+    # stop left it): its output file lies under -Dir, so it is stopped.
     $kernelStarted = $true
+    $lk = Invoke-IemNative -FilePath 'logman.exe' -Arguments @('start', 'NT Kernel Logger', '-p', 'Windows Kernel Trace', '(process,thread)', '-o', (Join-Path $runDir 'kernel.etl'), '-ets')
+    Assert ($lk.code -eq 0) "our-kernel-logger-starts ($($lk.out -join ' '))"
+    $s3 = Stop-IemTraceSessions -Dir $runDir
+    Assert (@($s3.stopped) -contains 'NT Kernel Logger' -and @($s3.kept).Count -eq 0 -and -not (Test-EtwSession 'NT Kernel Logger')) 'trace-stop-stops-our-kernel-logger-without-markers'
+    # Idempotent (F2 round 3 item 4): a second stop with nothing running succeeds.
+    $s3 = Stop-IemTraceSessions -Dir $runDir
+    Assert (@($s3.stopped).Count -eq 0 -and @($s3.kept).Count -eq 0) 'trace-stop-twice-is-harmless'
+    # A kernel trace of another tool (LatencyMon, ProcMon) writes elsewhere: it is never
+    # stopped, and the stop fails naming it, also next to our running IemMarkers (the
+    # old proof), which still stops. The caller keeps the trace recorded and alarms.
     $lk = Invoke-IemNative -FilePath 'logman.exe' -Arguments @('start', 'NT Kernel Logger', '-p', 'Windows Kernel Trace', '(process,thread)', '-o', (Join-Path $dir 'foreign-kernel.etl'), '-ets')
     Assert ($lk.code -eq 0) "a-foreign-kernel-logger-starts ($($lk.out -join ' '))"
-    $s3 = Stop-IemTraceSessions
-    Assert (@($s3.stopped).Count -eq 0 -and @($s3.kept) -contains 'NT Kernel Logger' -and (Test-EtwSession 'NT Kernel Logger')) 'trace-stop-keeps-a-foreign-kernel-logger'
-    $markers[5] = Join-Path $dir 'markers-test-2.etl'
+    ThrowsLike { Stop-IemTraceSessions -Dir $runDir } '*NT Kernel Logger runs, but its output file is not under the trace directory*' 'trace-stop-fails-on-a-foreign-kernel-logger'
+    Assert (Test-EtwSession 'NT Kernel Logger') 'trace-stop-keeps-a-foreign-kernel-logger'
+    $markers[5] = Join-Path $runDir 'markers-2.etl'
     $lm = Invoke-IemNative -FilePath 'logman.exe' -Arguments $markers
     Assert ($lm.code -eq 0) "marker-session-starts-again ($($lm.out -join ' '))"
-    $s4 = Stop-IemTraceSessions
-    Assert (@($s4.stopped) -contains 'IemMarkers' -and @($s4.stopped) -contains 'NT Kernel Logger' -and -not (Test-EtwSession 'NT Kernel Logger') -and -not (Test-EtwSession 'IemMarkers')) 'trace-stop-stops-our-kernel-trace'
+    ThrowsLike { Stop-IemTraceSessions -Dir $runDir } '*not under the trace directory*(stopped: IemMarkers)*' 'trace-stop-markers-prove-nothing-about-the-kernel-logger'
+    Assert (-not (Test-EtwSession 'IemMarkers') -and (Test-EtwSession 'NT Kernel Logger')) 'trace-stop-stops-only-ours-next-to-a-foreign-kernel-logger'
+    # The merging stop decides by the same rule, and stops nothing while a kernel logger
+    # that is not ours runs (the plain stop then stops what is ours, and fails).
+    $markers[5] = Join-Path $runDir 'markers-3.etl'
+    $lm = Invoke-IemNative -FilePath 'logman.exe' -Arguments $markers
+    Assert ($lm.code -eq 0) "marker-session-starts-a-third-time ($($lm.out -join ' '))"
+    ThrowsLike { Stop-IemTrace -Xperf $fl -Dir $runDir -Merge } '*not under the trace directory*nothing stopped*' 'trace-stop-merge-follows-the-same-rule'
+    Assert ((Test-EtwSession 'IemMarkers') -and (Test-EtwSession 'NT Kernel Logger') -and -not (Test-Path -LiteralPath $xran)) 'trace-stop-merge-stops-nothing-it-cannot-prove'
+    $lm = Invoke-IemNative -FilePath 'logman.exe' -Arguments @('stop', 'IemMarkers', '-ets')
+    $lk = Invoke-IemNative -FilePath 'logman.exe' -Arguments @('stop', 'NT Kernel Logger', '-ets')
+    Assert ($lm.code -eq 0 -and $lk.code -eq 0 -and -not (Test-EtwSession 'NT Kernel Logger') -and -not (Test-EtwSession 'IemMarkers')) "the-test-stops-its-foreign-kernel-logger ($($lk.out -join ' '))"
     $kernelStarted = $false
-    # Each session is attempted on its own and every error is kept: a stand-in
-    # logman lists both sessions and fails both stops.
+    # The kernel logger is stopped first, IemMarkers after it; each session is attempted
+    # on its own and every error is kept: a stand-in logman lists both sessions, names
+    # an output file under -Dir for the kernel logger and fails both stops.
     $fakeLogman = Join-Path $dir 'fake-logman.cmd'
     $calls = Join-Path $dir 'calls.txt'
-    [IO.File]::WriteAllText($fakeLogman, ("@echo off`r`n>>`"%~dp0calls.txt`" echo %*`r`nif /i `"%~1`"==`"query`" goto query`r`n" +
-        "echo failed-%~2 1>&2`r`nexit /b 5`r`n:query`r`necho IemMarkers                     Trace   Running`r`n" +
-        "echo NT Kernel Logger               Trace   Running`r`nexit /b 0`r`n"))
+    [IO.File]::WriteAllText($fakeLogman, ("@echo off`r`n>>`"%~dp0calls.txt`" echo %*`r`n" +
+        "if /i `"%~1`"==`"query`" if /i `"%~2`"==`"-ets`" goto list`r`nif /i `"%~1`"==`"query`" goto kernel`r`n" +
+        "echo failed-%~2 1>&2`r`nexit /b 5`r`n" +
+        ":list`r`necho IemMarkers                     Trace   Running`r`necho NT Kernel Logger               Trace   Running`r`nexit /b 0`r`n" +
+        ":kernel`r`necho Name:                 NT Kernel Logger`r`necho Output Location:      $runDir\kernel.etl`r`nexit /b 0`r`n"))
     $savedLogman = Get-MeasureSeam 'Logman'
     Set-MeasureSeam 'Logman' $fakeLogman
     try {
-        ThrowsLike { Stop-IemTraceSessions } '*failed-IemMarkers*failed-NT Kernel Logger*' 'trace-stop-keeps-every-error'
+        ThrowsLike { Stop-IemTraceSessions -Dir $runDir } '*failed-NT Kernel Logger*failed-IemMarkers*' 'trace-stop-keeps-every-error'
         $cl = @(Get-Content -LiteralPath $calls)
-        Assert (@($cl | Where-Object { $_ -like 'stop IemMarkers -ets*' }).Count -eq 1 -and @($cl | Where-Object { $_ -like 'stop "NT Kernel Logger" -ets*' }).Count -eq 1) 'trace-stop-attempts-each-session'
+        $stops = @($cl | Where-Object { $_ -like 'stop *' })
+        Assert ($stops.Count -eq 2 -and $stops[0] -like 'stop "NT Kernel Logger" -ets*' -and $stops[1] -like 'stop IemMarkers -ets*' -and @($cl | Where-Object { $_ -like 'query "NT Kernel Logger" -ets*' }).Count -eq 1) 'trace-stop-stops-the-kernel-logger-first'
         # Each logman call is bounded: one that hangs is reported, never waited for
         # to the end (and never ended, I8).
         [IO.File]::WriteAllText($fakeLogman, "@echo off`r`nping -n 8 127.0.0.1 >nul`r`nexit /b 0`r`n")
         $sw = [Diagnostics.Stopwatch]::StartNew()
-        ThrowsLike { Stop-IemTraceSessions -TimeoutSeconds 1 } '*did not finish within 1 s*' 'trace-stop-bounds-each-logman-call'
+        ThrowsLike { Stop-IemTraceSessions -Dir $runDir -TimeoutSeconds 1 } '*did not finish within 1 s*' 'trace-stop-bounds-each-logman-call'
         Assert ($sw.Elapsed.TotalSeconds -lt 6) "trace-stop-returns-within-its-bounds ($([int]$sw.Elapsed.TotalSeconds) s)"
     } finally { Set-MeasureSeam 'Logman' $savedLogman }
+    # The run folder is a folder on a drive: a drive root or a relative path would make
+    # every kernel trace there ours.
+    foreach ($bd in 'C:\', 'C:', 'runs\x') { ThrowsLike { Stop-IemTraceSessions -Dir $bd } '*a folder on a drive*' "trace-stop-refuses-the-dir $bd" }
     # Importing IemMeasure never keeps the stop from loading: an IemTuning that fails
     # to load leaves IemMeasure and Stop-IemTraceSessions working, and -ArgumentList
     # 'stop-only' does not load IemTuning at all (here one that hangs).
@@ -734,7 +763,7 @@ try {
     Copy-Item -LiteralPath (Join-Path $here 'IemMeasure.psm1') -Destination $iso
     foreach ($c in @(@("throw 'simulated IemTuning load failure'", 'all'), @('Start-Sleep -Seconds 90', 'stop-only'))) {
         [IO.File]::WriteAllText((Join-Path $iso 'IemTuning.psm1'), $c[0])
-        $body = "`$ErrorActionPreference = 'Stop'; Import-Module '$iso\IemMeasure.psm1' -ArgumentList '$($c[1])'; `$r = Stop-IemTraceSessions; 'stopped=' + @(`$r.stopped).Count"
+        $body = "`$ErrorActionPreference = 'Stop'; Import-Module '$iso\IemMeasure.psm1' -ArgumentList '$($c[1])'; `$r = Stop-IemTraceSessions -Dir '$iso'; 'stopped=' + @(`$r.stopped).Count"
         $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($body))
         $co = Join-Path $iso "out-$($c[1]).txt"
         $cp = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $enc) -RedirectStandardOutput $co -RedirectStandardError "$co.err" -NoNewWindow -PassThru

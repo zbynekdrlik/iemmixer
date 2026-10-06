@@ -681,6 +681,8 @@ class FakePc:
         self.polls = 0
         self.on_call = None                    # a hook: (body) -> None, called before answering
         self.on_copy = None                    # a hook: (name) -> None, called during a copy
+        # Stop-IemTraceSessions' reply: what it stopped, and no session kept.
+        self.stop_reply = {"stopped": ["NT Kernel Logger", "IemMarkers"], "kept": [], "via": "logman"}
 
     def bodies(self, verb: str) -> list[str]:
         return [b for b, _ in self.calls if verb in b]
@@ -715,7 +717,9 @@ class FakePc:
         if "Win32_PerfRawData_PerfOS_Processor" in body or "Get-IemPollSample" in body:
             return {"at": "2026-01-01T00:00:10Z", "cpu": {"cpus": []}, "plan": "p", "governor": "Stopped",
                     "thread": {"base": 15, "current": 26}}
-        return {"ok": True}   # Start-/Stop-IemTrace, Invoke-IemDpcIsr, Export-IemNearGlitch
+        if "Stop-IemTrace" in body:
+            return self.stop_reply
+        return {"ok": True}   # Start-IemTrace, Invoke-IemDpcIsr, Export-IemNearGlitch
 
     def scp(self, src: str, dst: str, event: str = "ignore") -> None:
         name = src.rsplit("/", 1)[-1]
@@ -900,6 +904,25 @@ class MeasureTests(WindowHarness):
         self.assertIn("-Dir 'C:\\t\\runs\\old-20260101T000000Z'", stops[0])
         self.assertNotIn("-Merge", stops[0])
         self.assertIsNone(self.state()["trace"])
+
+    def test_a_stop_that_is_not_confirmed_keeps_the_trace_recorded(self) -> None:
+        # #32 MAJOR-1: only a stop reply with no kept session clears the recorded
+        # trace; a kept kernel logger or a reply that is no stop result is a failure.
+        for reply in ({"stopped": ["IemMarkers"], "kept": ["NT Kernel Logger"], "via": "logman"}, {"ok": True}):
+            with self.subTest(reply=reply):
+                self.record_trace()
+                self.pc.stop_reply = reply
+                with self.assertRaisesRegex(tw.StepError, "not confirmed"):
+                    tw.cmd_trace_stop(self.env, argparse.Namespace())
+                self.assertEqual(self.state()["trace"], "C:\\t\\runs\\old-20260101T000000Z")
+
+    def test_a_failed_measure_whose_stop_is_not_confirmed_alarms(self) -> None:
+        self.pc.fail = {".progress.json"}
+        self.pc.stop_reply = {"stopped": ["IemMarkers"], "kept": ["NT Kernel Logger"], "via": "logman"}
+        with self.assertRaisesRegex(tw.StepError, "progress.json"):   # the run's error, not the cleanup's
+            tw.cmd_measure(self.env, self.args())
+        self.assertTrue(self.state()["trace"])
+        self.assertTrue(any("trace-stop" in a for a in self.alarms))
 
     def test_trace_stop_is_a_window_command_the_event_pre_empts(self) -> None:
         # Review m4: the stop completes (it changes the PC), then "ide event" wins (main pre-empts).

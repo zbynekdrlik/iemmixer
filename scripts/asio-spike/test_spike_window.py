@@ -352,6 +352,8 @@ class UnwindTuningTests(unittest.TestCase):
         self.fail: set[str] = set()   # PowerShell verbs whose body should raise
         self.calls: list[str] = []
         self.gone = True
+        # Stop-IemTraceSessions' reply: what it stopped, and no session kept.
+        self.stop_reply = {"stopped": ["NT Kernel Logger", "IemMarkers"], "kept": [], "via": "logman"}
 
         def fake_ps(env, body, timeout=300, event="finish"):
             self.calls.append(body)
@@ -360,6 +362,8 @@ class UnwindTuningTests(unittest.TestCase):
                     raise sw.StepError(f"{verb} failed")
             if "Stop-SpikeGracefully" in body:
                 return self.gone
+            if "Stop-IemTrace" in body:
+                return self.stop_reply
             if "Get-IemReaperFingerprint" in body:
                 return {"plan.active": "spike", "affinity": "x"}   # differs from the baseline → alarm
             return {"ok": True}
@@ -400,6 +404,24 @@ class UnwindTuningTests(unittest.TestCase):
         self.assertIn("error", steps["tuning-exit"])
         self.assertTrue(any(c.startswith("Invoke-SpikeBringBack") for c in self.calls))   # REAPER still comes back
         self.assertEqual((state["card"], state["closed"]), ("reaper", True))
+
+    def test_a_stop_that_kept_a_session_keeps_the_trace_recorded_and_alarms(self) -> None:
+        # #32 MAJOR-1: a reply naming a kept kernel logger, or one that is no stop
+        # result, is a failed stop: the trace stays recorded (trace-stop or the next
+        # preempt retries it), the owner hears it, and REAPER still comes back.
+        alarms: list[str] = []
+        for reply in ({"stopped": ["IemMarkers"], "kept": ["NT Kernel Logger"], "via": "logman"}, None, {"ok": True}):
+            with self.subTest(reply=reply), mock.patch.object(sw, "alarm", alarms.append):
+                alarms.clear()
+                self.stop_reply = reply
+                state = self.state()
+                done = sw.unwind(self.env, state, running=False)
+                steps = {next(iter(d)): list(d.values())[0] for d in done}
+                self.assertIn("error", steps["trace-stop"])
+                self.assertEqual(state["trace"], "C:\\t\\runs\\x")
+                self.assertEqual(sw.load_state()["trace"], "C:\\t\\runs\\x")
+                self.assertTrue(any("kernel trace did not stop" in a for a in alarms))
+                self.assertEqual((state["card"], state["closed"]), ("reaper", True))
 
     def test_a_spike_not_gone_still_stops_the_trace_and_the_mode_but_not_the_buffer(self) -> None:
         # Neither touches the driver; the buffer write and REAPER wait for the spike (#32 B10).
