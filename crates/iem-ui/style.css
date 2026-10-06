@@ -2895,30 +2895,8 @@ body.talk-live-overlay {
   color: var(--text-primary);
 }
 
-/* Band activity while developing (engineer pages, program spec 4.2) */
-.band-activity-banner {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  padding: 8px;
-  background: rgba(255, 107, 107, 0.15);
-  color: #ff6b6b;
-  border-bottom: 1px solid rgba(255, 107, 107, 0.3);
-  font-size: 0.85em;
-  font-weight: 600;
-  text-align: center;
-}
-
-.band-activity-banner .settings-action-btn {
-  width: auto;
-  margin: 0;
-  padding: 6px 12px;
-}
-
-.switch-pin-input,
-.pin-modal .pin-input {
+/* "Back to REAPER" in the engineer's console (program spec 4.3): its PIN step */
+.switch-pin-input {
   width: 100%;
   margin: 12px 0;
   padding: 8px;
@@ -2929,6 +2907,11 @@ body.talk-live-overlay {
   font-size: 1.4em;
   letter-spacing: 0.4em;
   text-align: center;
+}
+
+.console-switch .back-to-reaper-btn {
+  width: auto;
+  margin: 0;
 }
 
 /* Engineer console in Settings (F29) */

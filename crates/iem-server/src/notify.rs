@@ -3,10 +3,11 @@
 //! `iem-migrate band` carries the predecessor's over with its VAPID keys.
 //! They are the one audience, the one the predecessor's alerts reached
 //! (owner decision, #9 2026-09-28: "I added the PWA, allowed notifications
-//! and everything worked"): SOS (F20), the band-activity notice (§4.2) and
-//! the technical alarms — the guard's through `iem-server notify --to
-//! alarm`, the running server's refused scheduled backup through
-//! [`push_alarm`].
+//! and everything worked"): SOS (F20) and the technical alarms — the
+//! guard's through `iem-server notify --to alarm`, the running server's
+//! refused scheduled backup through [`push_alarm`]. (The band-activity
+//! notice was removed by the owner's decision of 2026-10-06, #38: no input
+//! level stands for the band playing.)
 //!
 //! Notify mode sends once and exits; `iem-server notify --count alarm`
 //! prints how many subscriptions an alarm would go to (the guard's precheck
@@ -39,8 +40,8 @@ impl Audience {
 
 /// The push payload of an alarm or notice (the service worker shows title
 /// and body). Its tag comes from the text: the same notice again replaces
-/// itself on the phone, a different one shows on its own (the band-activity
-/// notice and the guard's alarms reach the same devices).
+/// itself on the phone, a different one shows on its own (the guard's and
+/// the server's alarms reach the same devices).
 pub fn alarm_payload(title: &str, body: &str) -> Vec<u8> {
     let mut hasher = Sha256::new();
     hasher.update(title.len().to_le_bytes());
@@ -76,8 +77,8 @@ pub async fn send_to(
     sent
 }
 
-/// To the engineer's devices from the running server: SOS (F20, F21), the
-/// band-activity notice and [`push_alarm`]. Expired subscriptions are
+/// To the engineer's devices from the running server: SOS (F20, F21) and
+/// [`push_alarm`]. Expired subscriptions are
 /// dropped from the store. Returns how many devices took it (0 without a
 /// VAPID key).
 pub async fn push_engineers(state: &AppState, payload: &[u8]) -> usize {
@@ -162,8 +163,8 @@ mod tests {
     }
 
     /// The engineer's phone shows every different notice on its own (the
-    /// band-activity notice and the guard's alarms reach the same devices,
-    /// #9 2026-09-28); the same notice again replaces itself.
+    /// guard's and the server's alarms reach the same devices, #9
+    /// 2026-09-28); the same notice again replaces itself.
     #[test]
     fn each_different_notice_has_its_own_tag() {
         let tag = |t: &str, b: &str| {
@@ -183,7 +184,8 @@ mod tests {
     }
 
     /// The predecessor had one push audience, the engineer's devices, and no
-    /// other kind of notice from the command line (#9 2026-09-28).
+    /// other kind of notice from the command line (#9 2026-09-28); no
+    /// band-activity notice exists at all (#38).
     #[test]
     fn alarm_is_the_only_notice_from_the_command_line() {
         assert_eq!(Audience::parse("alarm"), Some(Audience::Alarm));

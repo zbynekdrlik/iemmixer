@@ -1,7 +1,8 @@
 //! The engineer's console in Settings (F29): what REAPER's own window used to
 //! offer — each input's mute, trim and processing, every mix's limiter
 //! counter with a reset, the mixer pages without a member (the translator),
-//! and the login-failure counters.
+//! and the login-failure counters; and the "Späť na REAPER" switch (§4.3)
+//! where the site has one.
 
 use iem_core::{ClientMsg, ConsoleInfo};
 use leptos::prelude::*;
@@ -86,6 +87,8 @@ pub fn ConsoleSection(
             },
         );
     };
+
+    let can_switch = move || console.with(|c| c.as_ref().is_some_and(|c| c.can_switch));
 
     view! {
         <div class="settings-section" data-testid="console-section">
@@ -172,6 +175,11 @@ pub fn ConsoleSection(
                     }.into_any()
                 }
             }}
+            // "Späť na REAPER" (§4.3) where the site has the switch. Outside the
+            // refreshed block above, so the 2 s refresh never resets its PIN step.
+            <Show when=can_switch fallback=|| ()>
+                <crate::components::back_to_reaper::BackToReaper />
+            </Show>
         </div>
     }
 }

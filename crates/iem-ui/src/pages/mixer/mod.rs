@@ -3,7 +3,6 @@
 //! Uses WebSocket for real-time bidirectional communication with the server
 //! (UI protocol v2: channels keyed by engine ids).
 
-use crate::components::activity_banner::ActivityBanner;
 use crate::components::alert_toast::AlertToast;
 use crate::components::category_tabs::{Category, CategoryTabs};
 use crate::components::eq_modal::EQModal;
@@ -140,7 +139,6 @@ pub fn MixerPage() -> impl IntoView {
     let (talk_state, set_talk_state) = state.talk_state;
     let engineer_talking = state.engineer_talking.0;
     let talk_id = state.talk_id.0;
-    let band_activity = state.band_activity.0;
     let console = state.console.0;
     let tunnel = state.tunnel.0;
     let ws = state.ws.0;
@@ -283,9 +281,6 @@ pub fn MixerPage() -> impl IntoView {
             // the engineer, "use the LAN address" banner for band members.
             {is_engineer.then(|| view! { <TunnelIndicator status=tunnel /> })}
             {(!is_engineer).then(|| view! { <TunnelBanner status=tunnel /> })}
-
-            // Band activity while developing (§4.2): banner + "Back to REAPER" (engineer)
-            {is_engineer.then(|| view! { <ActivityBanner activity=band_activity /> })}
 
             <CategoryTabs
                 active=active_category

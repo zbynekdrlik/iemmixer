@@ -438,7 +438,6 @@ fn connect_websocket(
     let set_talk_state = state.talk_state.1;
     let set_engineer_talking = state.engineer_talking.1;
     let set_talk_id = state.talk_id.1;
-    let set_band_activity = state.band_activity.1;
     let set_console = state.console.1;
     // Without a valid token the page is on its way to the login (the auth
     // guard redirects); a socket now would only be refused.
@@ -757,9 +756,6 @@ fn connect_websocket(
                             update_console_input(c, input);
                         }
                     });
-                }
-                iem_core::ServerMsg::BandActivity { active, can_switch } => {
-                    let _ = set_band_activity.try_set((active, can_switch));
                 }
                 iem_core::ServerMsg::LimiterParams {
                     mix: _,

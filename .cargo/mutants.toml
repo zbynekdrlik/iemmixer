@@ -98,7 +98,7 @@ exclude_re = [
   "iem-server/src/listen_ws\\.rs.*\\b(ws_audio|session)\\b",
   "iem-server/src/talkback_ws\\.rs.*\\b(ws_talkback|session)\\b",
   # The console's background loops (100 ms meters, 250 ms janitor): their steps
-  # are tested functions (MeterMerge, BandActivity, SoloJanitor, TalkLock).
+  # are tested functions (MeterMerge, SoloJanitor, TalkLock).
   "iem-server/src/console\\.rs.*\\b(spawn_tasks|meter_task|janitor_task)\\b",
   # Test-only constructors.
   "new_for_test",
@@ -108,8 +108,9 @@ exclude_re = [
   "sc_windows",
   # Browser-only fetches and context accessors in the UI; covered by
   # e2e/tests/site-links.spec.ts, e2e/tests/login-protection.spec.ts,
-  # e2e/tests/engineer.spec.ts (the switch) and e2e/tests/pin-freeze.spec.ts
-  # (the PIN change; its messages are the tested change_pin_error).
+  # e2e/tests/engineer.spec.ts (the switch; its messages are the tested
+  # switch_error_message) and e2e/tests/pin-freeze.spec.ts (the PIN change;
+  # its messages are the tested change_pin_error).
   "iem-ui/src/api\\.rs.*replace (login|get_site_links|back_to_reaper|change_pin) ",
   # The token check's browser-only fetch; its verdict on the answer is the
   # tested token_refused, and e2e/tests/header.spec.ts drives it (502 while

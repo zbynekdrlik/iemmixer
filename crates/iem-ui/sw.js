@@ -104,7 +104,7 @@ self.addEventListener("push", (event) => {
   }
 
   if (data.type === "ALARM") {
-    // Engine alarms and the band-activity notice (§4.2), and `iem-server notify`.
+    // The guard's alarms (`iem-server notify`) and the server's own.
     // Each different notice has its own tag (from its text), so one never
     // replaces an unread other; a payload without one keeps the old tag.
     event.waitUntil(
