@@ -468,6 +468,9 @@ async fn a_loud_stage_raises_no_banner_and_no_notice() {
     }
     assert!(loud >= 60, "the stage was loud: {loud} of {frames} frames");
 
+    // No session and no talk lock: the meter task and the janitor tell the
+    // pages nothing but meters, whatever a level is (and under whatever
+    // name a level-based message might come back).
     let mut told = Vec::new();
     loop {
         match events.try_recv() {
@@ -476,10 +479,7 @@ async fn a_loud_stage_raises_no_banner_and_no_notice() {
             Err(_) => break,
         }
     }
-    assert!(
-        !told.iter().any(|e| e == "BandActivity"),
-        "no band-activity banner: {told:?}"
-    );
+    assert!(told.is_empty(), "no message to the pages: {told:?}");
     assert!(
         seen.lock().unwrap().is_empty(),
         "no notice to the engineer's devices"
