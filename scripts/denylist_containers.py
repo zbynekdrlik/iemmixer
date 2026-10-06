@@ -157,7 +157,7 @@ def _zip_members(path: str, data: bytes, budget: _Budget) -> Iterator[Member | P
         return
     for info in infos:
         member = f"{path}!/{info.filename}"
-        if info.is_dir():
+        if info.is_dir() and info.compress_size == 0:
             yield Member(member, info.filename, b"")
             continue
         if info.flag_bits & 0x1:
@@ -165,14 +165,8 @@ def _zip_members(path: str, data: bytes, budget: _Budget) -> Iterator[Member | P
             continue
         problem = budget.problem(info.file_size, info.compress_size)
         if problem is None:
-            try:
-                with archive.open(info) as stream:
-                    content = stream.read(MEMBER_LIMIT + 1)
-            except NotImplementedError:
-                problem = f"cannot be scanned: zip compression method {info.compress_type}"
-            except _ZIP_ERRORS:
-                problem = "cannot be scanned: a broken zip member"
-            else:  # the sizes a zip declares are read back, not trusted
+            content, problem = _zip_content(data, archive, info)
+            if problem is None:  # the sizes a zip declares are read back, not trusted
                 problem = budget.problem(len(content), info.compress_size)
         if problem is not None:
             yield Problem(member, problem)
@@ -181,14 +175,43 @@ def _zip_members(path: str, data: bytes, budget: _Budget) -> Iterator[Member | P
         yield Member(member, info.filename, content)
 
 
+def _zip_content(data: bytes, archive: zipfile.ZipFile, info: zipfile.ZipInfo) -> tuple[bytes, str | None]:
+    """A zip member's content, and why it cannot be scanned (or None). A stored or deflated member
+    is read from its own compressed bytes to their end (zipfile stops at the declared size, which a
+    crafted zip sets to 0); another method through zipfile."""
+    if info.compress_type in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+        at = info.header_offset
+        if data[at:at + 4] != b"PK\x03\x04":
+            return b"", "cannot be scanned: a broken zip member"
+        start = at + 30 + int.from_bytes(data[at + 26:at + 28], "little") + int.from_bytes(data[at + 28:at + 30], "little")
+        stored = memoryview(data)[start:start + info.compress_size]
+        if info.compress_type == zipfile.ZIP_STORED:
+            return bytes(stored[:MEMBER_LIMIT + 1]), None
+        decompressor = zlib.decompressobj(-15)
+        try:
+            content = decompressor.decompress(stored, MEMBER_LIMIT + 1)
+        except zlib.error:
+            return b"", "cannot be scanned: a broken zip member"
+        if len(content) <= MEMBER_LIMIT and not decompressor.eof:
+            return b"", "cannot be scanned: a broken zip member"
+        return content, None
+    try:
+        with archive.open(info) as stream:
+            return stream.read(MEMBER_LIMIT + 1), None
+    except NotImplementedError:
+        return b"", f"cannot be scanned: zip compression method {info.compress_type}"
+    except _ZIP_ERRORS:
+        return b"", "cannot be scanned: a broken zip member"
+
+
 # a compressed stream's decompressor, `max_length` bounded: `decompress(data, limit)`
 _DECOMPRESSORS: dict[str, Callable[[], object]] = {
     "gzip": lambda: zlib.decompressobj(wbits=31), "bzip2": bz2.BZ2Decompressor, "xz": lzma.LZMADecompressor}
 
 
 def _stream_member(path: str, data: bytes, kind: str, budget: _Budget) -> Iterator[Member | Problem]:
-    """The one member of a gzip, bzip2 or xz stream, concatenated streams joined (bytes after the
-    last stream are left to the raw scan of the blob)."""
+    """The one member of a gzip, bzip2 or xz stream, concatenated streams joined across NUL padding
+    (bytes after the last stream are left to the raw scan of the blob)."""
     out, rest, limit, first = bytearray(), data, min(MEMBER_LIMIT, budget.left) + 1, True
     try:
         while rest and (first or rest.startswith(data[:3])):
@@ -200,7 +223,7 @@ def _stream_member(path: str, data: bytes, kind: str, budget: _Budget) -> Iterat
             if not decompressor.eof:
                 yield Problem(f"{path}!/", f"cannot be scanned: a broken {kind} stream")
                 return
-            rest = decompressor.unused_data
+            rest = decompressor.unused_data.lstrip(b"\0")  # NUL padding between streams (xz's own)
     except (zlib.error, OSError, EOFError, lzma.LZMAError, ValueError):
         yield Problem(f"{path}!/", f"cannot be scanned: a broken {kind} stream")
         return
