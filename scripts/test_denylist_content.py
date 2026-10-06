@@ -17,6 +17,7 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import denylist_containers as dcn  # noqa: E402
 import denylist_content as dc  # noqa: E402
 from denylist_test_support import BUDGET_BLOB, BUDGET_MEMORY_BEYOND_BLOB, BUDGET_TERMS, ScanTestCase  # noqa: E402
 
@@ -236,6 +237,25 @@ class ContentTests(ScanTestCase):
                 "dense.zip!/m1.txt: cannot be scanned: decompressed to more than 20 times the blob")  # 20 x 5132 bytes
             code, out = self.scan("--tree", "HEAD")
             self.assertEqual(out.count("dense.zip!/"), 1, out)  # the blob's expansion stops at its limit
+
+    def test_a_container_holds_one_member_at_a_time(self) -> None:
+        # review of lane G3, finding 6: the previous member was still referenced while the next one
+        # was decompressed (and a stream's output copied once more), so two 30 MiB members cost
+        # 107 MiB; a member being decompressed costs up to twice its size (zlib joins its output)
+        member = 4 << 20
+        letters = random.Random(5).randbytes(member).translate(
+            bytes.maketrans(bytes(range(256)), (b"abcdefghijklmnopqrstuvwxyz \n" * 10)[:256]))
+        for name, blob in (("three.zip", zipped({"a.txt": letters, "b.txt": letters[::-1], "c.txt": letters})),
+                           ("two.gz", gzip.compress(letters[:member // 2]) + gzip.compress(letters[member // 2:]))):
+            with self.subTest(name=name):
+                tracemalloc.start()
+                try:
+                    for part in dcn.expand(name, blob):
+                        del part  # dropped before the next one is read, as the scanner drops it
+                    peak = tracemalloc.get_traced_memory()[1]
+                finally:
+                    tracemalloc.stop()
+                self.assertLess(peak, 5 * member // 2 + (1 << 20), f"{peak / member:.2f} x the member")
 
     def test_other_containers_are_findings_allowlisted_by_their_blob_key(self) -> None:
         pdf = (b"%PDF-1.4\n1 0 obj << /Length 20 /Filter /FlateDecode >> stream\n" + zlib.compress(b"(zyxname) Tj")
