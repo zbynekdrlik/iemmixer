@@ -63,6 +63,9 @@ $id = [guid]::NewGuid().ToString('N')
 $root = "HKCU:\Software\iemmixer-tuning-test-$id"
 $dir = Join-Path ([IO.Path]::GetTempPath()) "tuning-test-$id"
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
+# The trace tests' run folders: outside the temp path, which can hold an 8.3 short
+# name on the runner (RUNNER~1) that ETW might report in its long form.
+$traceRoot = Join-Path $env:ProgramData "iemmixer-trace-test-$id"
 foreach ($s in 'Spooler', 'W32Time') {
     $svc = Get-Service -Name $s   # both exist on the runner; a missing one fails the test
     if ($svc.Status -ne 'Running') { Start-Service -InputObject $svc; $svc.WaitForStatus('Running', [TimeSpan]::FromSeconds(60)) }
@@ -217,6 +220,32 @@ try {
     Remove-Item -LiteralPath $bootKey   # what a reboot does to a volatile key
     $b2 = Get-IemBootIdentity -Profile $prof
     Assert ([string]$b2.token -and $b2.token -ne $b0.token -and -not (Test-IemSameBoot -A $b0 -B $b2)) 'boot-a-reboot-is-another-boot'
+    # The token is created under a Global\ named mutex (#32 MINOR-3): the first two
+    # callers after a boot (the guard's state step, an ssh apply) never write two
+    # tokens. While the test holds the mutex, a second PowerShell that needs the
+    # token (after a "reboot") waits and writes nothing; once the mutex is free it
+    # creates the one token both then read.
+    $bootLock = New-Object -TypeName System.Threading.Mutex -ArgumentList $false, 'Global\iemmixer-boot-token'
+    $ready = Join-Path $dir 'boot-child.ready'; $childOut = Join-Path $dir 'boot-child.txt'
+    $childBody = "`$ErrorActionPreference = 'Stop'; Import-Module '$here\IemTuning.psm1'; `$p = Read-IemProfile -Path '$pp'; " +
+                 "[IO.File]::WriteAllText('$ready', 'x'); `$b = Get-IemBootIdentity -Profile `$p; [IO.File]::WriteAllText('$childOut', [string]`$b.token)"
+    $childEnc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childBody))
+    [void]$bootLock.WaitOne()
+    try {
+        Remove-Item -LiteralPath $bootKey   # a reboot: no token yet
+        $bc = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $childEnc) -NoNewWindow -PassThru
+        $null = $bc.Handle   # keeps the exit code readable after the wait
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        while (-not (Test-Path -LiteralPath $ready) -and $sw.Elapsed.TotalSeconds -lt 90) { Start-Sleep -Milliseconds 200 }
+        Start-Sleep -Seconds 3   # the child's Get-IemBootIdentity has started by now
+        $tokenMeanwhile = $null
+        if (Test-Path -LiteralPath $bootKey) { $tokenMeanwhile = (Get-Item -LiteralPath $bootKey).GetValue('token', $null) }
+        Assert ((Test-Path -LiteralPath $ready) -and -not $bc.HasExited -and $null -eq $tokenMeanwhile) 'boot-token-creation-waits-for-the-boot-lock'
+    } finally { $bootLock.ReleaseMutex() }
+    Assert ($bc.WaitForExit(60000) -and $bc.ExitCode -eq 0) 'boot-token-creation-goes-on-once-the-lock-is-free'
+    $childToken = [IO.File]::ReadAllText($childOut)
+    Assert ($childToken -and $childToken -eq [string](Get-IemBootIdentity -Profile $prof).token) 'boot-token-is-one-token-for-both-callers'
+    $bootLock.Dispose()
     # A boot key that is not volatile would survive a reboot, so every Tier 3 value
     # would read as pending for ever: it is refused, never trusted (review R1).
     $stableRoot = "$root-stable"
@@ -234,6 +263,50 @@ try {
     ThrowsLike { Invoke-IemTuningApply -ProfilePath $po -Tier 2 -Only @('maintenance') } '*roles overlap*' 'apply-refuses-overlapping-layout-roles'
     ThrowsLike { Enter-IemTuningMode -ProfilePath $po -Only @('governor') } '*roles overlap*' 'enter-refuses-overlapping-layout-roles'
     Assert ((Get-Service W32Time).Status -eq 'Running' -and -not (Read-IemJournalState $pp) -and -not (Test-Path -LiteralPath $maint)) 'layout-refusals-write-nothing'
+    # One processor rule on both sides (#32 MINOR-6, MAJOR-2 and its review): every case
+    # of profile_cases.json, which test_tuning_window.py runs against load_profile and
+    # lp_number too. The values come straight from ConvertFrom-Json, as Read-IemProfile
+    # reads them (no re-serialization).
+    $profileCases = [IO.File]::ReadAllText((Join-Path $here 'profile_cases.json')) | ConvertFrom-Json
+    $numberCases = @($profileCases.numbers)
+    Assert ($numberCases.Count -ge 8) 'number-cases-are-read'
+    foreach ($c in $numberCases) {
+        if ($c.ok) {
+            $ne = $null; $nv = $null
+            try { $nv = ConvertTo-IemLpNumber -What 'case' -Value $c.value } catch { $ne = "$_" }
+            Assert ($null -eq $ne -and $nv -is [int] -and $nv -eq $c.value) "number-case-$($c.name)-is-accepted ($ne)"
+        } else {
+            ThrowsLike { ConvertTo-IemLpNumber -What 'case' -Value $c.value } '*case*not a processor number*' "number-case-$($c.name)-is-refused"
+        }
+    }
+    $deviceCases = @($profileCases.device_lps)
+    Assert ($deviceCases.Count -ge 8) 'device-cases-are-read'
+    foreach ($c in $deviceCases) {
+        $dc = [pscustomobject]@{ id = 'card'; lps = $c.lps }
+        if ($c.ok) {
+            $de = $null
+            try { [void](Get-IemDeviceLps -Device $dc) } catch { $de = "$_" }
+            Assert ($null -eq $de) "device-case-$($c.name)-is-accepted ($de)"
+        } else {
+            ThrowsLike { Get-IemDeviceLps -Device $dc } '*device card*' "device-case-$($c.name)-is-refused"
+        }
+    }
+    $layoutCases = @($profileCases.layouts)
+    Assert ($layoutCases.Count -ge 10) 'layout-cases-are-read'
+    foreach ($c in $layoutCases) {
+        $lc = [pscustomobject]@{ layout = $c.layout }
+        if ($c.ok) {
+            $le = $null
+            try { Assert-IemLayout -Profile $lc } catch { $le = "$_" }
+            Assert ($null -eq $le) "layout-case-$($c.name)-is-accepted ($le)"
+        } else {
+            ThrowsLike { Assert-IemLayout -Profile $lc } '*layout*' "layout-case-$($c.name)-is-refused"
+        }
+    }
+    # A null housekeeping entry is refused before any write, never placed on processor 0.
+    $pn = New-TestProfile $hw @{ layout = [ordered]@{ housekeeping = @(0, $null); nic = @(1); card = @(2); audio = @(3) } }
+    ThrowsLike { Enter-IemTuningMode -ProfilePath $pn -Only @('placement') } '*layout housekeeping*entry 1*' 'enter-refuses-a-null-layout-entry'
+    Assert ((@([IemCpuSets]::Get($child.Id)) -join ',') -eq '' -and -not (Read-IemJournalState $pp)) 'layout-entry-refusal-writes-nothing'
     # The profile version is stamped only after a complete apply without a failure (A9).
     $rm = Invoke-IemTuningApply -ProfilePath $pp -Tier 2 -Only @('maintenance')
     Assert (@(Rows $rm 'failed').Count -eq 0 -and (Read-JournalVersion $pp 2) -eq 0) 'apply-partial-does-not-stamp-the-version'
@@ -270,9 +343,12 @@ try {
     }
     # A device's processors must exist, and the card's must be the layout's card
     # role, before its affinity is written (review 3.9); "lps": null is no
-    # processor, never processor 0 (review R3).
+    # processor, never processor 0 (review R3). A null, float, bool or string
+    # entry is refused before any write, never dropped or rounded: the check, the
+    # mask and the placement read one validated list (#32 MAJOR-2).
     foreach ($c in @(@(@(2, 62), @(2, 62), '*not present*'), @(@(2), @(2, 62), '*layout.card*'), @(@(), @(2), '*no processors*'),
-                     @($null, @(2), '*no processors*'))) {
+                     @($null, @(2), '*no processors*'), @(@(2, $null), @(2), '*lps: entry 1*'), @(@(2.5), @(2), '*lps: entry 0*'),
+                     @(@($true), @(2), '*lps: entry 0*'), @(@('2'), @(2), '*lps: entry 0*'))) {
         $dv = @([ordered]@{ id = 'card'; role = 'card'; instance = 'PCI\VEN_TEST&DEV_0001\0'; hwid = $hw; lps = $c[0]; enabled = $true })
         $bp = New-TestProfile $hw @{ devices = $dv; layout = [ordered]@{ housekeeping = @(0); nic = @(1); card = $c[1]; audio = @(3) } }
         ThrowsLike { Invoke-IemTuningApply -ProfilePath $bp -Tier 3 -Only @('irq') } $c[2] "tier3-refuses-card-processors '$($c[0] -join ',')'"
@@ -315,6 +391,25 @@ try {
     }
     $nk = Get-Item -LiteralPath $nic
     Assert ($nk.GetValue('PowerSaving') -eq '1' -and $null -eq $nk.GetValue('*RssBaseProcNumber', $null) -and $null -eq $nk.GetValue('*RssMaxProcNumber', $null)) 'tier3-nic-rss-refusal-writes-nothing'
+    # The spec's own layout (§6.1: NIC LP 4, RSS base 4, max 5, its unplaced sibling)
+    # is accepted: the base is a layout.nic processor, and past layout.nic the range
+    # may reach only processors of no role, never another role's (#32 MINOR-5). Here
+    # processor 2 has no role (the card on 3, no audio processor).
+    $sl = [ordered]@{ housekeeping = @(0); nic = @(1); card = @(3); audio = @() }
+    $hl = [ordered]@{ housekeeping = @(2); nic = @(1); card = @(3); audio = @() }
+    $rn = New-TestNic 'PCI\VEN_FFFE&DEV_0002'
+    $rn.rss = [ordered]@{ base = 1; max = 2 }
+    $sp = Read-IemProfile -Path (New-TestProfile $hw @{ nic = $rn; layout = $sl })
+    $se = $null
+    try { Assert-IemNicRss -Profile $sp } catch { $se = "$_" }
+    Assert ($null -eq $se) "nic-rss-may-reach-a-processor-of-no-role ($se)"
+    foreach ($c in @(@(2, 2, $sl, '*base processor 2 is not in layout.nic*'), @(1, 2, $hl, '*processor 2 is a housekeeping processor*'),
+                     @('1', 2, $sl, '*nic.rss.base*not a processor number*'))) {
+        $rn = New-TestNic 'PCI\VEN_FFFE&DEV_0002'
+        $rn.rss = [ordered]@{ base = $c[0]; max = $c[1] }
+        $cp = Read-IemProfile -Path (New-TestProfile $hw @{ nic = $rn; layout = $c[2] })
+        ThrowsLike { Assert-IemNicRss -Profile $cp } $c[3] "nic-rss-refuses $($c[0])..$($c[1]) $($c[3])"
+    }
     $an = @(Get-NetAdapter)[0]
     $cls = "$root\HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e972-e325-11ce-bfc1-08002be10318}\0000"
     New-Item -Path $cls -Force | Out-Null
@@ -335,6 +430,11 @@ try {
     # The grants come from the module's private reader, which the self-test replaces;
     # no parameter lets a caller skip the Win32_PnPAllocatedResource read (review 3.5).
     Assert (-not (Get-Command Invoke-IemTuningApply).Parameters.ContainsKey('AllocatedIrqs') -and -not (Get-Command Get-IemGlobalItems).Parameters.ContainsKey('AllocatedIrqs')) 'msi-grant-read-has-no-bypass-parameter'
+    # The mask is built from the same validated list as the check (#32 MAJOR-2): with
+    # MSI flagged the items are built without -Check (as the state builds them), and a
+    # null entry throws instead of becoming a mask with processor 0 in it.
+    $pnull = Read-IemProfile -Path (New-TestProfile $hw @{ devices = @([ordered]@{ id = 'card'; role = 'card'; instance = 'PCI\VEN_TEST&DEV_0001\0'; hwid = $hw; lps = @(2, $null); enabled = $true }) })
+    ThrowsLike { Get-IemGlobalItems -Profile $pnull -Tier 3 -Only @('irq') } '*lps: entry 1*' 'mask-is-built-from-the-validated-processors'
     $savedIrqs = Get-TuningSeam 'ReadAllocatedIrqs'
     $inst = 'PCI\VEN_TEST&DEV_0001\0'
     foreach ($c in @(@(@{ $inst = @(16) }, '*INTx*'), @(@{ $inst = @(-3, 17) }, '*INTx*'), @(@{}, '*no interrupt*'))) {
@@ -419,6 +519,22 @@ try {
     Assert ("$($nk.GetValueKind('IemMulti1'))" -eq 'MultiString' -and $m1.Count -eq 1 -and $m1[0] -ceq 'one') 'tier3-undo-restores-a-one-element-multi-string'
     $st = Get-IemTuningState -ProfilePath $pp
     Assert (@($st.items | Where-Object { $_.key -eq 'irq:card:policy' -and $_.revert_pending }).Count -eq 1) 'tier3-undo-is-pending-until-a-reboot'
+    # A boot key that cannot be read never blocks a revert or the state (#32 MINOR-4):
+    # the state reports the problem as a field (no token, nothing pending on it); undo
+    # restores, records the revert's boot as unknown (no token: never this boot) and
+    # reports the problem as a row. Apply still refuses (a write needs its boot).
+    $r4 = Invoke-IemTuningApply -ProfilePath $pp -Tier 3 -Only @('nic')
+    Assert (@(Rows $r4 'failed').Count -eq 0 -and (Get-Item -LiteralPath $nic).GetValue('PowerSaving') -eq '0') 'boot-problem-test-applies-the-nic'
+    Remove-Item -LiteralPath $bootKey
+    New-Item -Path $bootKey -Force | Out-Null   # not volatile: Open-IemBootKey refuses it
+    $s4 = Get-IemTuningState -ProfilePath $pp
+    Assert ("$($s4.boot_problem)" -like '*not volatile*' -and -not $s4.boot_token -and @($s4.items | Where-Object { $_.pending -or $_.revert_pending }).Count -eq 0) 'state-reports-a-boot-key-problem-as-a-field'
+    ThrowsLike { Invoke-IemTuningApply -ProfilePath $pp -Tier 3 -Only @('nic') } '*not volatile*' 'apply-still-refuses-without-a-boot'
+    $u4 = Undo-IemTuning -ProfilePath $pp -Tier 3 -Only @('nic')
+    $p4 = @(Rows $u4 'problem')
+    $rv4 = (Read-IemJournal -Path (Read-IemProfile -Path $pp).journal).reverted['nic:PowerSaving']
+    Assert (@(Rows $u4 'failed').Count -eq 0 -and (Get-Item -LiteralPath $nic).GetValue('PowerSaving') -eq '1' -and $p4.Count -eq 1 -and "$($p4[0].error)" -like '*not volatile*' -and $null -ne $rv4 -and (Get-IemBootToken -Identity $rv4) -eq '') 'undo-restores-and-records-an-unknown-boot'
+    Remove-Item -LiteralPath $bootKey   # from here on a volatile key again, as after a reboot
 
     # Plan values go only into iemmixer's own plan (M2): the REAPER-mode plan
     # (plan.source), a built-in scheme or another existing plan is refused before
@@ -432,6 +548,12 @@ try {
         ThrowsLike { Enter-IemTuningMode -ProfilePath $bp -Only @('plan', 'governor') -Idle 'disable' } $c[1] "enter-refuses-the-plan $($c[0])"
     }
     Assert ([IemPower]::Active() -eq $activeBefore -and [IemPower]::Read($activeBefore, $proc, $procMin) -eq $srcMin -and [IemPower]::Read($foreignPlan, $proc, $procMin) -eq $foreignMin -and (Get-Service W32Time).Status -eq 'Running' -and -not (Read-IemJournalState $pp)) 'enter-plan-refusals-write-nothing'
+    # The placement reads the validated housekeeping list, and each of its processors
+    # must be present: one that is not is refused before any write, never placed as
+    # CPU Set ID 0 (#32 MAJOR-2).
+    $pph = New-TestProfile $hw @{ layout = [ordered]@{ housekeeping = @(0, 62); nic = @(1); card = @(2); audio = @(3) } }
+    ThrowsLike { Enter-IemTuningMode -ProfilePath $pph -Only @('placement') } '*housekeeping*processor 62 is not present*' 'enter-refuses-a-housekeeping-processor-that-is-not-present'
+    Assert ((@([IemCpuSets]::Get($child.Id)) -join ',') -eq '' -and -not (Read-IemJournalState $pp)) 'placement-refusal-writes-nothing'
     # The second M2 net: a plan value is never written into a plan that is not
     # iemmixer's, even by a direct write (review 3.4).
     $otherMin = $(if ($foreignMin -eq 37) { 38 } else { 37 })
@@ -551,8 +673,6 @@ try {
     # Measurement helpers that need no xperf.
     $a = New-IemTraceArguments -Dir 'C:\t' -CSwitch -CircularMB 1024
     Assert (($a -join ' ') -eq '-on PROC_THREAD+LOADER+DPC+INTERRUPT+CSWITCH+DISPATCHER -BufferSize 1024 -MinBuffers 256 -MaxBuffers 1024 -FileMode Circular -MaxFile 1024 -f C:\t\kernel.etl -start IemMarkers -on 3b6c1e0a-5d2f-4c8e-9a71-0e4f2d9b8c11 -f C:\t\markers.etl') 'trace-arguments'
-    $l = ConvertFrom-IemLoggers -Text "Logger Name           : NT Kernel Logger`r`nLogger Mode Settings (11)`r`nLogger Name           : IemMarkers`r`n"
-    Assert ($l.Count -eq 2 -and $l[0] -eq 'NT Kernel Logger' -and $l[1] -eq 'IemMarkers') 'loggers-parse'
     # The near-glitch export works on any trace file (lane F2's cut-aware export):
     # trace.etl -> near.txt, <base>.etl -> <base>.near.txt, each through its own
     # dumper temp file (Invoke-IemDpcIsr's naming); the filter keeps the dumper's
@@ -584,54 +704,100 @@ try {
     $xo = (Invoke-IemXperf -Xperf $ping -Arguments @('-n', '1', '127.0.0.1')) -join ' '
     Assert ($xo -match '127\.0\.0\.1') 'xperf-runs-a-signed-binary'
     ThrowsLike { Invoke-IemXperf -Xperf $ping -Arguments @('-n', 'x', '127.0.0.1') } '*(exit *' 'xperf-a-nonzero-exit-throws'
-    # The pre-emption stop ("ide event") always works and stops only what is ours
-    # (review 3.6, R2): Stop-IemTrace without -Merge is Stop-IemTraceSessions, which
-    # needs neither xperf nor IemTuning. logman stops IemMarkers, and the NT Kernel
-    # Logger only while IemMarkers runs, the proof the kernel trace is ours.
+    # Every trace stop ("ide event", trace-stop, a failed measure's cleanup, a cut, the
+    # final stop) is Stop-IemTraceSessions (review 3.6, R2; Stop-IemTrace without
+    # -Merge is that call): logman only, neither xperf nor IemTuning. Whose trace it
+    # is, is a property of the session (#32 MAJOR-1): the NT Kernel Logger is ours
+    # exactly when its output file lies under -Dir, the trace's run folder; whether
+    # IemMarkers runs proves nothing. IemMarkers is ours by its name.
     Assert (-not (Test-EtwSession 'NT Kernel Logger')) 'no-kernel-logger-runs-before-the-stop-tests'
+    $runDir = Join-Path $traceRoot 'run-1'
+    New-Item -ItemType Directory -Force -Path $runDir | Out-Null
     $xran = Join-Path $dir 'xperf-ran.txt'
     $fl = Join-Path $dir 'fake-xperf-never.cmd'
     [IO.File]::WriteAllText($fl, "@echo off`r`necho ran> `"$xran`"`r`nexit /b 1`r`n")
-    $markers = @('start', 'IemMarkers', '-p', '{3b6c1e0a-5d2f-4c8e-9a71-0e4f2d9b8c11}', '-o', (Join-Path $dir 'markers-test.etl'), '-ets')
+    $markers = @('start', 'IemMarkers', '-p', '{3b6c1e0a-5d2f-4c8e-9a71-0e4f2d9b8c11}', '-o', (Join-Path $runDir 'markers-1.etl'), '-ets')
     $lm = Invoke-IemNative -FilePath 'logman.exe' -Arguments $markers
     Assert ($lm.code -eq 0) "marker-session-starts ($($lm.out -join ' '))"
     $s2 = $null; $se = $null
-    try { $s2 = Stop-IemTrace -Xperf $fl -Dir $dir } catch { $se = "$_" }
+    try { $s2 = Stop-IemTrace -Xperf $fl -Dir $runDir } catch { $se = "$_" }
     Assert ($null -eq $se -and $s2.via -eq 'logman' -and @($s2.stopped) -contains 'IemMarkers' -and -not (Test-Path -LiteralPath $xran)) "trace-stop-needs-no-xperf ($se)"
     Assert (-not (Test-EtwSession 'IemMarkers')) 'trace-stop-leaves-no-marker-session'
-    # A kernel trace of another tool (LatencyMon, ProcMon) is never stopped; with our
-    # IemMarkers running, the kernel trace is ours and both stop.
+    # Our kernel logger alone (xperf -on started it but not IemMarkers, or a partial
+    # stop left it): its output file lies under -Dir, so it is stopped.
     $kernelStarted = $true
+    $lk = Invoke-IemNative -FilePath 'logman.exe' -Arguments @('start', 'NT Kernel Logger', '-p', 'Windows Kernel Trace', '(process,thread)', '-o', (Join-Path $runDir 'kernel.etl'), '-ets')
+    Assert ($lk.code -eq 0) "our-kernel-logger-starts ($($lk.out -join ' '))"
+    $s3 = Stop-IemTraceSessions -Dir $runDir
+    Assert (@($s3.stopped) -contains 'NT Kernel Logger' -and @($s3.kept).Count -eq 0 -and -not (Test-EtwSession 'NT Kernel Logger')) 'trace-stop-stops-our-kernel-logger-without-markers'
+    # Idempotent (F2 round 3 item 4): a second stop with nothing running succeeds.
+    $s3 = Stop-IemTraceSessions -Dir $runDir
+    Assert (@($s3.stopped).Count -eq 0 -and @($s3.kept).Count -eq 0) 'trace-stop-twice-is-harmless'
+    # The run folder is compared in one canonical form (GetFullPath on both the start
+    # and the stop side): a doubled or a forward separator in the caller's -Dir (a
+    # PC_TUNING_ROOT written with a trailing \ or with /) still names our trace.
+    foreach ($odd in ($traceRoot + '\\run-1'), $runDir.Replace('\', '/')) {
+        $lk = Invoke-IemNative -FilePath 'logman.exe' -Arguments @('start', 'NT Kernel Logger', '-p', 'Windows Kernel Trace', '(process,thread)', '-o', (Join-Path $runDir 'kernel.etl'), '-ets')
+        Assert ($lk.code -eq 0) "our-kernel-logger-starts-again ($($lk.out -join ' '))"
+        $s3 = $null; $se = $null
+        try { $s3 = Stop-IemTraceSessions -Dir $odd } catch { $se = "$_" }
+        Assert ($null -eq $se -and @($s3.stopped) -contains 'NT Kernel Logger' -and -not (Test-EtwSession 'NT Kernel Logger')) "trace-stop-normalizes-the-dir $odd ($se)"
+    }
+    # A kernel trace of another tool (LatencyMon, ProcMon) writes elsewhere: it is never
+    # stopped, and the stop fails naming it, also next to our running IemMarkers (the
+    # old proof), which still stops. The caller keeps the trace recorded and alarms.
     $lk = Invoke-IemNative -FilePath 'logman.exe' -Arguments @('start', 'NT Kernel Logger', '-p', 'Windows Kernel Trace', '(process,thread)', '-o', (Join-Path $dir 'foreign-kernel.etl'), '-ets')
     Assert ($lk.code -eq 0) "a-foreign-kernel-logger-starts ($($lk.out -join ' '))"
-    $s3 = Stop-IemTraceSessions
-    Assert (@($s3.stopped).Count -eq 0 -and @($s3.kept) -contains 'NT Kernel Logger' -and (Test-EtwSession 'NT Kernel Logger')) 'trace-stop-keeps-a-foreign-kernel-logger'
-    $markers[5] = Join-Path $dir 'markers-test-2.etl'
+    ThrowsLike { Stop-IemTraceSessions -Dir $runDir } '*NT Kernel Logger runs, but its output file is not under the trace directory*' 'trace-stop-fails-on-a-foreign-kernel-logger'
+    Assert (Test-EtwSession 'NT Kernel Logger') 'trace-stop-keeps-a-foreign-kernel-logger'
+    $markers[5] = Join-Path $runDir 'markers-2.etl'
     $lm = Invoke-IemNative -FilePath 'logman.exe' -Arguments $markers
     Assert ($lm.code -eq 0) "marker-session-starts-again ($($lm.out -join ' '))"
-    $s4 = Stop-IemTraceSessions
-    Assert (@($s4.stopped) -contains 'IemMarkers' -and @($s4.stopped) -contains 'NT Kernel Logger' -and -not (Test-EtwSession 'NT Kernel Logger') -and -not (Test-EtwSession 'IemMarkers')) 'trace-stop-stops-our-kernel-trace'
+    ThrowsLike { Stop-IemTraceSessions -Dir $runDir } '*not under the trace directory*(stopped: IemMarkers)*' 'trace-stop-markers-prove-nothing-about-the-kernel-logger'
+    Assert (-not (Test-EtwSession 'IemMarkers') -and (Test-EtwSession 'NT Kernel Logger')) 'trace-stop-stops-only-ours-next-to-a-foreign-kernel-logger'
+    # The merging stop decides by the same rule, and stops nothing while a kernel logger
+    # that is not ours runs (the plain stop then stops what is ours, and fails).
+    $markers[5] = Join-Path $runDir 'markers-3.etl'
+    $lm = Invoke-IemNative -FilePath 'logman.exe' -Arguments $markers
+    Assert ($lm.code -eq 0) "marker-session-starts-a-third-time ($($lm.out -join ' '))"
+    ThrowsLike { Stop-IemTrace -Xperf $fl -Dir $runDir -Merge } '*not under the trace directory*nothing stopped*' 'trace-stop-merge-follows-the-same-rule'
+    Assert ((Test-EtwSession 'IemMarkers') -and (Test-EtwSession 'NT Kernel Logger') -and -not (Test-Path -LiteralPath $xran)) 'trace-stop-merge-stops-nothing-it-cannot-prove'
+    $lm = Invoke-IemNative -FilePath 'logman.exe' -Arguments @('stop', 'IemMarkers', '-ets')
+    $lk = Invoke-IemNative -FilePath 'logman.exe' -Arguments @('stop', 'NT Kernel Logger', '-ets')
+    Assert ($lm.code -eq 0 -and $lk.code -eq 0 -and -not (Test-EtwSession 'NT Kernel Logger') -and -not (Test-EtwSession 'IemMarkers')) "the-test-stops-its-foreign-kernel-logger ($($lk.out -join ' '))"
     $kernelStarted = $false
-    # Each session is attempted on its own and every error is kept: a stand-in
-    # logman lists both sessions and fails both stops.
+    # The kernel logger is stopped first, IemMarkers after it; each session is attempted
+    # on its own and every error is kept: a stand-in logman lists both sessions, names
+    # an output file under -Dir for the kernel logger and fails both stops.
     $fakeLogman = Join-Path $dir 'fake-logman.cmd'
     $calls = Join-Path $dir 'calls.txt'
-    [IO.File]::WriteAllText($fakeLogman, ("@echo off`r`n>>`"%~dp0calls.txt`" echo %*`r`nif /i `"%~1`"==`"query`" goto query`r`n" +
-        "echo failed-%~2 1>&2`r`nexit /b 5`r`n:query`r`necho IemMarkers                     Trace   Running`r`n" +
-        "echo NT Kernel Logger               Trace   Running`r`nexit /b 0`r`n"))
+    [IO.File]::WriteAllText($fakeLogman, ("@echo off`r`n>>`"%~dp0calls.txt`" echo %*`r`n" +
+        "if /i `"%~1`"==`"query`" if /i `"%~2`"==`"-ets`" goto list`r`nif /i `"%~1`"==`"query`" goto kernel`r`n" +
+        "echo failed-%~2 1>&2`r`nexit /b 5`r`n" +
+        ":list`r`necho IemMarkers                     Trace   Running`r`necho NT Kernel Logger               Trace   Running`r`nexit /b 0`r`n" +
+        ":kernel`r`necho Name:                 NT Kernel Logger`r`necho Output Location:      $runDir\kernel.etl`r`nexit /b 0`r`n"))
     $savedLogman = Get-MeasureSeam 'Logman'
     Set-MeasureSeam 'Logman' $fakeLogman
     try {
-        ThrowsLike { Stop-IemTraceSessions } '*failed-IemMarkers*failed-NT Kernel Logger*' 'trace-stop-keeps-every-error'
+        ThrowsLike { Stop-IemTraceSessions -Dir $runDir } '*failed-NT Kernel Logger*failed-IemMarkers*' 'trace-stop-keeps-every-error'
         $cl = @(Get-Content -LiteralPath $calls)
-        Assert (@($cl | Where-Object { $_ -like 'stop IemMarkers -ets*' }).Count -eq 1 -and @($cl | Where-Object { $_ -like 'stop "NT Kernel Logger" -ets*' }).Count -eq 1) 'trace-stop-attempts-each-session'
+        $stops = @($cl | Where-Object { $_ -like 'stop *' })
+        Assert ($stops.Count -eq 2 -and $stops[0] -like 'stop "NT Kernel Logger" -ets*' -and $stops[1] -like 'stop IemMarkers -ets*' -and @($cl | Where-Object { $_ -like 'query "NT Kernel Logger" -ets*' }).Count -eq 1) 'trace-stop-stops-the-kernel-logger-first'
         # Each logman call is bounded: one that hangs is reported, never waited for
         # to the end (and never ended, I8).
         [IO.File]::WriteAllText($fakeLogman, "@echo off`r`nping -n 8 127.0.0.1 >nul`r`nexit /b 0`r`n")
         $sw = [Diagnostics.Stopwatch]::StartNew()
-        ThrowsLike { Stop-IemTraceSessions -TimeoutSeconds 1 } '*did not finish within 1 s*' 'trace-stop-bounds-each-logman-call'
+        ThrowsLike { Stop-IemTraceSessions -Dir $runDir -TimeoutSeconds 1 } '*did not finish within 1 s*' 'trace-stop-bounds-each-logman-call'
         Assert ($sw.Elapsed.TotalSeconds -lt 6) "trace-stop-returns-within-its-bounds ($([int]$sw.Elapsed.TotalSeconds) s)"
+        # Output that is not read within 5 s of the exit is an error, never "nothing
+        # runs" (#32 MINOR-2): the stand-in exits 0 at once, and the ping it starts in
+        # the background keeps its output pipe open for about 8 s (it ends by itself).
+        [IO.File]::WriteAllText($fakeLogman, "@echo off`r`nstart `"`" /b ping -n 9 127.0.0.1`r`nexit /b 0`r`n")
+        ThrowsLike { Stop-IemTraceSessions -Dir $runDir } '*its output was not read within 5 s*' 'trace-stop-unread-output-is-an-error'
     } finally { Set-MeasureSeam 'Logman' $savedLogman }
+    # The run folder is a folder on a drive: a drive root or a relative path would make
+    # every kernel trace there ours.
+    foreach ($bd in 'C:\', 'C:', 'runs\x') { ThrowsLike { Stop-IemTraceSessions -Dir $bd } '*a folder on a drive*' "trace-stop-refuses-the-dir $bd" }
     # Importing IemMeasure never keeps the stop from loading: an IemTuning that fails
     # to load leaves IemMeasure and Stop-IemTraceSessions working, and -ArgumentList
     # 'stop-only' does not load IemTuning at all (here one that hangs).
@@ -640,7 +806,7 @@ try {
     Copy-Item -LiteralPath (Join-Path $here 'IemMeasure.psm1') -Destination $iso
     foreach ($c in @(@("throw 'simulated IemTuning load failure'", 'all'), @('Start-Sleep -Seconds 90', 'stop-only'))) {
         [IO.File]::WriteAllText((Join-Path $iso 'IemTuning.psm1'), $c[0])
-        $body = "`$ErrorActionPreference = 'Stop'; Import-Module '$iso\IemMeasure.psm1' -ArgumentList '$($c[1])'; `$r = Stop-IemTraceSessions; 'stopped=' + @(`$r.stopped).Count"
+        $body = "`$ErrorActionPreference = 'Stop'; Import-Module '$iso\IemMeasure.psm1' -ArgumentList '$($c[1])'; `$r = Stop-IemTraceSessions -Dir '$iso'; 'stopped=' + @(`$r.stopped).Count"
         $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($body))
         $co = Join-Path $iso "out-$($c[1]).txt"
         $cp = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $enc) -RedirectStandardOutput $co -RedirectStandardError "$co.err" -NoNewWindow -PassThru
@@ -679,5 +845,6 @@ try {
     if ($kernelStarted) { try { [void](Invoke-IemNative -FilePath 'logman.exe' -Arguments @('stop', 'NT Kernel Logger', '-ets')) } catch { Write-Host "cleanup kernel logger: $_" } }
     Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath "$root-stable" -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $traceRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 Write-Host 'Test-IemTuning: all passed'

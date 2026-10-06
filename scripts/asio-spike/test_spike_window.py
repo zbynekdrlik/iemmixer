@@ -352,6 +352,8 @@ class UnwindTuningTests(unittest.TestCase):
         self.fail: set[str] = set()   # PowerShell verbs whose body should raise
         self.calls: list[str] = []
         self.gone = True
+        # Stop-IemTraceSessions' reply: what it stopped, and no session kept.
+        self.stop_reply = {"stopped": ["NT Kernel Logger", "IemMarkers"], "kept": [], "via": "logman"}
 
         def fake_ps(env, body, timeout=300, event="finish"):
             self.calls.append(body)
@@ -360,6 +362,8 @@ class UnwindTuningTests(unittest.TestCase):
                     raise sw.StepError(f"{verb} failed")
             if "Stop-SpikeGracefully" in body:
                 return self.gone
+            if "Stop-IemTrace" in body:
+                return self.stop_reply
             if "Get-IemReaperFingerprint" in body:
                 return {"plan.active": "spike", "affinity": "x"}   # differs from the baseline → alarm
             return {"ok": True}
@@ -400,6 +404,48 @@ class UnwindTuningTests(unittest.TestCase):
         self.assertIn("error", steps["tuning-exit"])
         self.assertTrue(any(c.startswith("Invoke-SpikeBringBack") for c in self.calls))   # REAPER still comes back
         self.assertEqual((state["card"], state["closed"]), ("reaper", True))
+
+    def test_the_trace_stop_imports_only_the_stop_and_names_the_run_folder(self) -> None:
+        # #32 MINOR-1, F2 round 3 item 4: the pre-emption's trace stop imports
+        # IemMeasure in its stop-only mode (IemTuning is not imported: no Add-Type
+        # compile) and calls Stop-IemTraceSessions with the trace's run folder. It
+        # needs neither PC_TUNING_ROOT nor PC_XPERF, so nothing of the tuning
+        # modules or their settings can keep a trace running into the event.
+        env = {k: v for k, v in self.env.items() if k not in ("PC_TUNING_ROOT", "PC_XPERF")}
+        state = self.state(tuning_mode=False, fingerprint=None)
+        done = sw.unwind(env, state, running=False)
+        stops = [c for c in self.calls if "Stop-IemTrace" in c]
+        self.assertEqual(len(stops), 1)
+        self.assertIn("'bin\\IemMeasure.psm1') -ArgumentList 'stop-only'", stops[0])
+        self.assertIn(f"Stop-IemTraceSessions -Dir 'C:\\t\\runs\\x' -TimeoutSeconds {sw.TRACE_STOP_LOGMAN_S}", stops[0])
+        self.assertNotIn("IemTuning", stops[0])
+        self.assertNotIn("Stop-IemTrace -Xperf", stops[0])
+        self.assertEqual([d["trace-stop"] for d in done if "trace-stop" in d], [self.stop_reply])
+        self.assertIsNone(state["trace"])
+
+    def test_the_trace_stop_bound_holds_its_logman_calls(self) -> None:
+        # At most four logman calls (the session list, the kernel logger's query and
+        # the two stops), each bounded on the PC plus its 5 s output read, inside the
+        # bound of the ssh call with room for the PowerShell start and the import.
+        self.assertLessEqual(4 * (sw.TRACE_STOP_LOGMAN_S + 5) + 15, sw.TRACE_STOP_CALL_S)
+
+    def test_a_stop_that_kept_a_session_keeps_the_trace_recorded_and_alarms(self) -> None:
+        # #32 MAJOR-1: a reply naming a kept kernel logger, or one that is no stop
+        # result, is a failed stop: the trace stays recorded (trace-stop or the next
+        # preempt retries it), the owner hears it, and REAPER still comes back.
+        alarms: list[str] = []
+        for reply in ({"stopped": ["IemMarkers"], "kept": ["NT Kernel Logger"], "via": "logman"}, None, {"ok": True}):
+            with self.subTest(reply=reply), mock.patch.object(sw, "alarm", alarms.append):
+                alarms.clear()
+                self.stop_reply = reply
+                state = self.state()
+                done = sw.unwind(self.env, state, running=False)
+                steps = {next(iter(d)): list(d.values())[0] for d in done}
+                self.assertIn("error", steps["trace-stop"])
+                self.assertEqual(state["trace"], "C:\\t\\runs\\x")
+                self.assertEqual(sw.load_state()["trace"], "C:\\t\\runs\\x")
+                self.assertTrue(any("kernel trace did not stop" in a for a in alarms))
+                self.assertEqual((state["card"], state["closed"]), ("reaper", True))
 
     def test_a_spike_not_gone_still_stops_the_trace_and_the_mode_but_not_the_buffer(self) -> None:
         # Neither touches the driver; the buffer write and REAPER wait for the spike (#32 B10).

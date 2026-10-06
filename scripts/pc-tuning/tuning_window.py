@@ -66,22 +66,89 @@ def load_profile(path: Path) -> dict:
     missing = [k for k in PROFILE_KEYS if k not in p]
     if missing:
         raise StepError(f"{path}: missing {', '.join(missing)}")
+    check_layout(p["layout"], path)
+    check_devices(p["devices"], path)
+    check_rss(p["nic"], path)
+    return p
+
+
+# The profile's processor rules (#32 MINOR-6, MAJOR-2 and its review) are the
+# same as IemTuning's ConvertTo-IemLpNumber / ConvertTo-IemLpList /
+# Assert-IemLayout / Get-IemDeviceLps; both self-tests run the shared cases of
+# profile_cases.json. load_profile refuses every processor SHAPE the PC refuses
+# (numbers, lists, layout, device lps, rss bounds), so the state step's device
+# mask and RSS read never throw on a copied profile. Relations (a card's lps
+# against layout.card, a device on a card or audio processor, processors that
+# are not present) are checked only on the PC, before any write.
+
+def lp_number(value) -> bool:
+    """An integer 0..63. type(), not isinstance(): a bool is an int subclass;
+    a float (4.0 too), a string, None or a list is no processor number."""
+    return type(value) is int and 0 <= value <= 63
+
+
+def lp_list(value, what: str, path: Path) -> list[int]:
+    """A JSON list of processor numbers; one entry that is none is refused,
+    never dropped, truncated or read as a number."""
+    if not isinstance(value, list):
+        raise StepError(f"{path}: {what}: not a list of processor numbers")
+    for i, lp in enumerate(value):
+        if not lp_number(lp):
+            raise StepError(f"{path}: {what}: entry {i}: not a processor number 0..63 (integers only)")
+    return value
+
+
+def check_layout(layout, path: Path) -> None:
+    """layout is an object; a role is absent (no processors) or a list of
+    processor numbers; the roles are disjoint."""
+    if not isinstance(layout, dict):
+        raise StepError(f"{path}: layout: not an object")
     roles: dict[int, str] = {}
     for role in LAYOUT_ROLES:
-        for lp in p["layout"].get(role, []):
-            if not 0 <= int(lp) <= 63:
-                raise StepError(f"{path}: layout {role} processor {lp} outside 0..63")
+        if role not in layout:
+            continue
+        for lp in lp_list(layout[role], f"layout {role}", path):
             if lp in roles:
-                raise StepError(f"{path}: processor {lp} has two roles ({roles[lp]}, {role})")
+                raise StepError(f"{path}: layout: processor {lp} has two roles ({roles[lp]}, {role})")
             roles[lp] = role
-    return p
+
+
+def check_devices(devices, path: Path) -> None:
+    """Every device names a non-empty list of processor numbers (lps)."""
+    if not isinstance(devices, list):
+        raise StepError(f"{path}: devices: not a list")
+    for d in devices:
+        if not isinstance(d, dict):
+            raise StepError(f"{path}: devices: an entry is not an object")
+        lps = d.get("lps")
+        if lps is None or lps == []:
+            raise StepError(f"{path}: device {d.get('id')}: no processors (lps)")
+        lp_list(lps, f"device {d.get('id')} lps", path)
+
+
+def check_rss(nic, path: Path) -> None:
+    """nic.rss base and max are processor numbers, base <= max (where the range
+    lies against the layout and the present processors, the PC checks)."""
+    rss = nic.get("rss") if isinstance(nic, dict) else None
+    if not isinstance(rss, dict):
+        raise StepError(f"{path}: nic.rss: missing (base and max)")
+    for k in ("base", "max"):
+        if not lp_number(rss.get(k)):
+            raise StepError(f"{path}: nic.rss.{k}: not a processor number 0..63 (integers only)")
+    if rss["base"] > rss["max"]:
+        raise StepError(f"{path}: nic.rss: base {rss['base']} is above max {rss['max']}")
+
+
+def layout_lps(profile: dict, role: str) -> list[int]:
+    """A layout role's processors; an absent role is none (the layout rule)."""
+    return list(profile["layout"].get(role, []))
 
 
 def watch_lps(profile: dict, audio_cpus: str) -> list[int]:
     """The CPUs whose DPC/ISR budget is watched: the card's and the audio one
     (the spike's --audio-cpus, else the profile's)."""
-    audio = parse_lps(audio_cpus) if audio_cpus else list(profile["layout"]["audio"])
-    return sorted(set(profile["layout"]["card"]) | set(audio))
+    audio = parse_lps(audio_cpus) if audio_cpus else layout_lps(profile, "audio")
+    return sorted(set(layout_lps(profile, "card")) | set(audio))
 
 
 def mode_only(text: str) -> list[str]:
@@ -125,6 +192,10 @@ def post_boot_verdict(c: dict) -> list[str]:
         problems.append("still pending after the reboot: " + ", ".join(c["pending"]))
     if c["failed_items"]:
         problems.append("items not as applied: " + ", ".join(c["failed_items"]))
+    if c.get("boot_problem"):
+        # Without a boot token nothing reads as pending, so an empty "pending"
+        # proves nothing (#32 MINOR-4).
+        problems.append(f"the boot identity is unknown ({c['boot_problem']}): what is still pending cannot be told")
     return problems
 
 
@@ -291,6 +362,11 @@ def cmd_undo(env, args) -> None:
     failed = [r for r in rows if r.get("action") == "failed"]
     if failed:
         raise StepError(f"{len(failed)} revert item(s) failed: " + "; ".join(f"{r['key']}: {r['error']}" for r in failed))
+    # A "problem" row (the revert's boot unknown, #32 MINOR-4) does not undo the
+    # revert; the owner hears it.
+    problems = [r for r in rows if r.get("action") == "problem"]
+    if problems:
+        sw.alarm("the revert completed, but: " + "; ".join(f"{r.get('key')}: {r.get('error')}" for r in problems))
 
 
 def cmd_state(env, args) -> None:
@@ -313,8 +389,9 @@ def clear_trace() -> dict:
 
 def stop_trace(env: dict[str, str], state: dict, event: str):
     """Stops the recorded kernel trace without merging (quick; the raw files
-    stay on the PC) and clears it from the state."""
-    r = tps(env, f"Stop-IemTrace -Xperf {xperf(env)} -Dir {ps_quote(state['trace'])}", timeout=120, event=event)
+    stay on the PC) and clears it from the state once the stop is confirmed
+    (sw.check_trace_stop, #32 MAJOR-1); any other reply keeps it recorded."""
+    r = sw.check_trace_stop(sw.ps(env, sw.trace_stop_body(env, state["trace"]), timeout=sw.TRACE_STOP_CALL_S, event=event))
     clear_trace()
     return r
 
@@ -383,7 +460,7 @@ def start_trace(env: dict[str, str], run_dir: str, opt: str) -> None:
         check_event()
     except sw.EventNow:
         try:
-            tps(env, f"Stop-IemTrace -Xperf {xperf(env)} -Dir {ps_quote(run_dir)}", timeout=120, event="ignore")
+            sw.check_trace_stop(sw.ps(env, sw.trace_stop_body(env, run_dir), timeout=sw.TRACE_STOP_CALL_S, event="ignore"))
         except StepError as e:
             sw.alarm(f"a kernel trace started as 'ide event' came did not stop ({e}): run tuning_window trace-stop")
         raise
@@ -508,8 +585,8 @@ def _measure(env, args, profile: dict, state: dict, run_dir: str, since: str, tr
             # A quick stop without the merge (the raw files are set aside and
             # merged with the analysis); "ide event" during it ends the measure
             # here, and no new kernel trace starts once the flag exists.
-            tps(env, f"Stop-IemTrace -Xperf {xperf(env)} -Dir {ps_quote(run_dir)} ; {set_aside(ps_quote(run_dir), cut['n'])}",
-                timeout=120, event="finish")
+            sw.check_trace_stop(sw.ps(env, f"{sw.trace_stop_body(env, run_dir)} ; {set_aside(ps_quote(run_dir), cut['n'])}",
+                                      timeout=sw.TRACE_STOP_CALL_S, event="finish"))
             check_event()
             start_trace(env, run_dir, opt)
 
@@ -517,7 +594,7 @@ def _measure(env, args, profile: dict, state: dict, run_dir: str, since: str, tr
     # (design note §4.3), without any --audio-cpus among them (#32 C1, review m12);
     # check_request and the spike refuse any overlap.
     audio = set(parse_lps(args.audio_cpus)) if args.audio_cpus else set()
-    stress_cpus = args.stress_cpus or ",".join(str(lp) for lp in sorted(set(profile["layout"]["housekeeping"]) - audio))
+    stress_cpus = args.stress_cpus or ",".join(str(lp) for lp in sorted(set(layout_lps(profile, "housekeeping")) - audio))
     run_args = argparse.Namespace(mode="duplex", frames=args.frames, seconds=args.seconds, burn_us=args.burn_us, stress=args.stress,
                                   panic_at=0, cycles=5, cpu=None, threshold_us=10, audio_cpus=args.audio_cpus, stress_cpus=stress_cpus)
     result = sw.cmd_run(env, run_args, on_poll=on_poll)
@@ -537,7 +614,8 @@ def _measure(env, args, profile: dict, state: dict, run_dir: str, since: str, tr
         # The stop changes the PC, so it completes even when "ide event" comes;
         # without the merge it is quick (the raw session files stay). Then the
         # trace is no longer recorded.
-        began = tps(env, f"[void](Stop-IemTrace -Xperf {xperf(env)} -Dir {ps_quote(run_dir)}) ; Get-IemNow", timeout=120, event="finish")
+        began = sw.ps(env, f"{sw.trace_stop_import(env)} ; [void]({sw.trace_stop_call(run_dir)}) ; Get-IemNow",
+                      timeout=sw.TRACE_STOP_CALL_S, event="finish")
         clear_trace()
         # The merges and the xperf analysis only read the stopped traces. Each
         # step is its own abandonable call at Idle priority, issued only while
@@ -642,6 +720,9 @@ def cmd_reboot_prepare(env, args) -> None:
             raise StepError(f"the unwind failed at {', '.join(failed)}: no reboot prepared")
         st = tps(env, f"Get-IemTuningState -ProfilePath {sw.tuning_profile(env)}", timeout=120)
         sw.update_state({"card": "rebooting", "reboot": {"prepared_at": tps(env, "Get-IemNow", timeout=60)}})
+    if st.get("boot_problem"):
+        sw.alarm(f"the boot identity is unknown ({st['boot_problem']}): the pending and revert_pending lists of this "
+                 "reboot prove nothing (#32 MINOR-4)")
     items = as_list(st["items"])
     print(json.dumps({"reboot-prepare": done, "pending": [i["key"] for i in items if i["pending"]],
                       "revert_pending": [i["key"] for i in items if i["revert_pending"]]}))
@@ -745,6 +826,7 @@ def cmd_post_boot(env, args) -> None:
     items = as_list(st["items"])
     checks["pending"] = [i["key"] for i in items if i["pending"] or i["revert_pending"]]
     checks["failed_items"] = [i["key"] for i in items if i["journaled"] and not i["ok"]]
+    checks["boot_problem"] = st.get("boot_problem")
     a = tps(env, "Get-IemCpuSample", timeout=60, event="ignore")
     time.sleep(10)
     b = tps(env, "Get-IemCpuSample", timeout=60, event="ignore")

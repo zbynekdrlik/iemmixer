@@ -159,17 +159,43 @@ function Read-IemProfile {
     return $p
 }
 
+function ConvertTo-IemLpNumber {
+    # The profile's processor-number rule (#32 MINOR-6, MAJOR-2; tuning_window.py
+    # lp_number is the same, shared cases in profile_cases.json): an integer 0..63
+    # as the JSON reader gives it (Int32 on Windows PowerShell 5.1, or Int64). A
+    # float (4.0 too: Decimal or Double), a bool, a string, null or a list is
+    # refused, never rounded or read as processor 0.
+    param([Parameter(Mandatory)][string]$What, [AllowNull()]$Value)
+    if (-not ($Value -is [int] -or $Value -is [long]) -or $Value -lt 0 -or $Value -gt 63) { throw "${What}: not a processor number 0..63 (integers only)" }
+    return [int]$Value
+}
+
+function ConvertTo-IemLpList {
+    # The profile's rule for a list of processors (#32 MINOR-6, MAJOR-2): a JSON
+    # array of processor numbers (ConvertTo-IemLpNumber), so a null entry, a float,
+    # a bool, a string or a nested list is refused, never dropped. load_profile
+    # applies the same rule (profile_cases.json). Returns them in profile order.
+    param([Parameter(Mandatory)][string]$What, [AllowNull()]$Value)
+    if ($null -eq $Value -or $Value -isnot [array]) { throw "${What}: not a list of processor numbers" }
+    $out = @()
+    for ($i = 0; $i -lt $Value.Count; $i++) { $out += ConvertTo-IemLpNumber -What "${What}: entry $i" -Value $Value[$i] }
+    return ,([int[]]$out)
+}
+
 function Assert-IemLayout {
-    # The layout's roles are disjoint (one processor, one role), as the window
-    # requires. Checked before a write (apply, enter), never on the exit path.
+    # The profile's layout rule (#32 MINOR-6, the same as tuning_window.py
+    # load_profile; shared cases in profile_cases.json): layout is an object; a role
+    # is absent (no processors) or a list of processor numbers (ConvertTo-IemLpList);
+    # the roles are disjoint (one processor, one role), as the window requires.
+    # Checked before a write (apply, enter), never on the exit path.
     param([Parameter(Mandatory)]$Profile)
+    if ($Profile.layout -isnot [System.Management.Automation.PSCustomObject]) { throw 'layout: not an object' }
     $seen = @{}
     foreach ($role in 'housekeeping', 'card', 'nic', 'audio') {
         if (-not $Profile.layout.PSObject.Properties[$role]) { continue }
-        foreach ($lp in @(@($Profile.layout.$role) | Where-Object { $null -ne $_ })) {
-            $k = [string][int]$lp
-            if ($seen.ContainsKey($k)) { throw "layout: processor $k is in both $($seen[$k]) and $role (roles overlap)" }
-            $seen[$k] = $role
+        foreach ($lp in (ConvertTo-IemLpList -What "layout $role" -Value $Profile.layout.$role)) {
+            if ($seen.ContainsKey($lp)) { throw "layout: processor $lp is in both $($seen[$lp]) and $role (roles overlap)" }
+            $seen[$lp] = $role
         }
     }
 }
@@ -220,22 +246,64 @@ function Open-IemBootKey {
     return $key
 }
 
+# The boot token's lock (#32 MINOR-3): Global\, so the first callers of a boot in
+# any session (the guard's state step, an ssh apply) take the same one.
+$script:BootLockName = 'Global\iemmixer-boot-token'
+$script:BootLockWaitMs = 30000
+
 function Get-IemBootIdentity {
     # This boot (review R1): a random GUID token in the volatile boot key. The key
     # holds the same token exactly while the boot that wrote it lasts, so no clock,
     # counter or service (SysMain) takes part. The time (LastBootUpTime) is
-    # information only.
+    # information only. Read and created under the boot lock (#32 MINOR-3): two
+    # first callers after a boot never write two tokens (the second would journal
+    # one the key no longer holds, so its Tier 3 writes would never read as
+    # pending in that boot).
     param([Parameter(Mandatory)]$Profile)
-    $key = Open-IemBootKey -Profile $Profile
+    # No DACL of its own: when full access to an existing mutex is refused, the .NET
+    # Framework constructor opens it with MUTEX_MODIFY_STATE | SYNCHRONIZE, which the
+    # creator's default DACL grants every elevated caller and SYSTEM (review of #32).
+    $lock = New-Object -TypeName System.Threading.Mutex -ArgumentList $false, $script:BootLockName
+    $held = $false
     try {
-        $t = [string]$key.GetValue('token', '')
-        $g = [guid]::Empty
-        if (-not [guid]::TryParse($t, [ref]$g)) {
-            $key.SetValue('token', [guid]::NewGuid().ToString(), [Microsoft.Win32.RegistryValueKind]::String)
-            $t = [string]$key.GetValue('token', '')   # read back: the stored token counts
+        try { $held = $lock.WaitOne($script:BootLockWaitMs) }
+        catch {
+            # Its last holder ended without releasing it: the lock is ours now, and
+            # the key's token is read again below.
+            if ($_.Exception.GetBaseException() -isnot [System.Threading.AbandonedMutexException]) { throw }
+            $held = $true
         }
-    } finally { $key.Close() }
+        if (-not $held) { throw "boot token: the boot lock was not free within $($script:BootLockWaitMs / 1000) s" }
+        $key = Open-IemBootKey -Profile $Profile
+        try {
+            $t = [string]$key.GetValue('token', '')
+            $g = [guid]::Empty
+            if (-not [guid]::TryParse($t, [ref]$g)) {
+                $key.SetValue('token', [guid]::NewGuid().ToString(), [Microsoft.Win32.RegistryValueKind]::String)
+                $t = [string]$key.GetValue('token', '')   # read back: the stored token counts
+            }
+        } finally { $key.Close() }
+    } finally {
+        if ($held) { $lock.ReleaseMutex() }
+        $lock.Dispose()
+    }
     return @{ token = $t; time = Get-IemBootTime }
+}
+
+function Get-IemBootIdentityOrUnknown {
+    # This boot, or, when the boot key cannot be read (#32 MINOR-4), an identity
+    # without a token: never this boot, so nothing reads as pending on it (the
+    # direction Update-IemJournalBoots also takes), and 'problem' says why. Only
+    # for what a boot-key problem must never block: undo (the revert is recorded
+    # with an unknown boot) and the state (a field). A write still needs its boot.
+    param([Parameter(Mandatory)]$Profile)
+    try { return Get-IemBootIdentity -Profile $Profile }
+    catch {
+        $problem = "$_"
+        $time = $null
+        try { $time = Get-IemBootTime } catch { $problem += "; the boot time cannot be read either ($_)" }
+        return @{ token = $null; time = $time; problem = $problem }
+    }
 }
 
 function Get-IemBootToken {
@@ -771,10 +839,13 @@ function Assert-IemDevice {
 }
 
 function Get-IemLayoutLps {
-    # A layout role's processors, sorted; an absent role or a null entry is none.
+    # A layout role's processors, sorted; an absent role is none. Read by the layout
+    # rule (ConvertTo-IemLpList): a null or non-integer entry throws (#32 MINOR-6).
     param([Parameter(Mandatory)]$Profile, [Parameter(Mandatory)][string]$Role)
     if (-not $Profile.layout.PSObject.Properties[$Role]) { return ,([int[]]@()) }
-    return ,([int[]]@(@($Profile.layout.$Role) | Where-Object { $null -ne $_ } | ForEach-Object { [int]$_ } | Sort-Object))
+    $lps = ConvertTo-IemLpList -What "layout $Role" -Value $Profile.layout.$Role
+    [array]::Sort($lps)
+    return ,$lps
 }
 
 function Test-IemCardDevice {
@@ -783,15 +854,28 @@ function Test-IemCardDevice {
     return [bool]($Device.PSObject.Properties['role'] -and [string]$Device.role -eq 'card')
 }
 
+function Get-IemDeviceLps {
+    # A device's processors, sorted (#32 MAJOR-2): the one validated list that the
+    # check (Assert-IemDeviceLps) and the affinity mask read. A missing, null or
+    # empty lps is "no processors"; a null, float, bool or string entry is refused
+    # (ConvertTo-IemLpList), never dropped, rounded or read as processor 0
+    # (@($null) has one element, which [int] makes 0, review R3).
+    param([Parameter(Mandatory)]$Device)
+    $v = $null
+    if ($Device.PSObject.Properties['lps']) { $v = $Device.lps }
+    if ($null -eq $v -or ($v -is [array] -and $v.Count -eq 0)) { throw "device $($Device.id): no processors (lps)" }
+    $lps = ConvertTo-IemLpList -What "device $($Device.id) lps" -Value $v
+    [array]::Sort($lps)
+    return ,$lps
+}
+
 function Assert-IemDeviceLps {
-    # Before an affinity write (review 3.9, R4): the device names processors, each
-    # one is present (group 0 of the CPU Set map); the card's are exactly the
-    # layout's card role, and no other device's is a card or audio processor
-    # (design note 6.4 R3).
+    # Before an affinity write (review 3.9, R4): the device names processors
+    # (Get-IemDeviceLps), each one is present (group 0 of the CPU Set map); the
+    # card's are exactly the layout's card role, and no other device's is a card or
+    # audio processor (design note 6.4 R3).
     param([Parameter(Mandatory)]$Profile, [Parameter(Mandatory)]$Device)
-    # A null entry is no processor (@($null) has one element, which [int] makes 0, review R3).
-    $lps = @(@($Device.lps) | Where-Object { $null -ne $_ } | ForEach-Object { [int]$_ } | Sort-Object)
-    if ($lps.Count -eq 0) { throw "device $($Device.id): no processors (lps)" }
+    $lps = Get-IemDeviceLps -Device $Device
     $present = @([IemCpuSets]::Map().Keys)
     foreach ($lp in $lps) { if ($present -notcontains $lp) { throw "device $($Device.id): processor $lp is not present" } }
     $card = Get-IemLayoutLps -Profile $Profile -Role 'card'
@@ -807,29 +891,33 @@ function Assert-IemDeviceLps {
 }
 
 function Assert-IemNicRss {
-    # Before a NIC write (review R4 follow-up): the RSS range nic.rss.base..max, the
-    # processors of the NIC's interrupts, is processor numbers with base <= max,
-    # never a card or audio processor (the card's ISR processor, the audio CPU),
-    # each inside layout.nic and present.
+    # Before a NIC write (review R4 follow-up, #32 MINOR-5): the RSS range
+    # nic.rss.base..max holds the processors of the NIC's interrupts. base and max
+    # are processor numbers (integers 0..63, the profile rule), base <= max. The
+    # base is a layout.nic processor; past layout.nic the range may reach only
+    # processors of no role (spec §6.1: NIC LP 4, RSS base 4, max 5, its unplaced
+    # sibling), never a card or audio processor (the card's ISR processor, the
+    # audio CPU) and never a housekeeping one; each present.
     param([Parameter(Mandatory)]$Profile)
     $b = @{}
     foreach ($k in 'base', 'max') {
         $v = $null
         if ($Profile.nic.PSObject.Properties['rss'] -and $null -ne $Profile.nic.rss -and $Profile.nic.rss.PSObject.Properties[$k]) { $v = $Profile.nic.rss.$k }
-        $n = 0
-        if ($null -eq $v -or -not [int]::TryParse([string]$v, [ref]$n) -or $n -lt 0) { throw "nic.rss.${k} '$v' is not a processor number" }
-        $b[$k] = $n
+        $b[$k] = ConvertTo-IemLpNumber -What "nic.rss.$k" -Value $v
     }
     if ($b['base'] -gt $b['max']) { throw "nic.rss: base $($b['base']) is above max $($b['max'])" }
     $range = "$($b['base'])..$($b['max'])"
-    $card = Get-IemLayoutLps -Profile $Profile -Role 'card'
-    $audio = Get-IemLayoutLps -Profile $Profile -Role 'audio'
+    $roles = @{}   # processor -> its layout role
+    foreach ($role in 'housekeeping', 'card', 'nic', 'audio') {
+        foreach ($lp in (Get-IemLayoutLps -Profile $Profile -Role $role)) { $roles[$lp] = $role }
+    }
     $nic = Get-IemLayoutLps -Profile $Profile -Role 'nic'
-    $reserved = @($card) + @($audio)
     $present = @([IemCpuSets]::Map().Keys)
     for ($lp = $b['base']; $lp -le $b['max']; $lp++) {
-        if ($reserved -contains $lp) { throw "nic.rss ${range}: processor $lp is a card or audio processor, which the NIC's interrupts must never use" }
-        if ($nic -notcontains $lp) { throw "nic.rss ${range}: processor $lp is not in layout.nic ($($nic -join ','))" }
+        $role = $roles[$lp]
+        if ($role -eq 'card' -or $role -eq 'audio') { throw "nic.rss ${range}: processor $lp is a card or audio processor, which the NIC's interrupts must never use" }
+        if ($lp -eq $b['base'] -and $role -ne 'nic') { throw "nic.rss ${range}: the base processor $lp is not in layout.nic ($($nic -join ','))" }
+        if ($null -ne $role -and $role -ne 'nic') { throw "nic.rss ${range}: processor $lp is a $role processor; past layout.nic the range may reach only processors of no role" }
         if ($present -notcontains $lp) { throw "nic.rss ${range}: processor $lp is not present" }
     }
 }
@@ -946,8 +1034,9 @@ function Get-IemGlobalItems {
             $key = Get-IemRegPath $Profile "$im\Affinity Policy"
             $items += New-IemItem -Key "irq:$($d.id):policy" -Kind 'reg' -Arguments @{ path = $key; name = 'DevicePolicy'; type = 'DWord' } -Desired 4 -Tier 3 -Group "irq:$($d.id)" -Reboot
             # REG_BINARY, the KAFFINITY's canonical form (M3); read back byte for byte.
+            # The mask reads the list the check validated (#32 MAJOR-2).
             $items += New-IemItem -Key "irq:$($d.id):mask" -Kind 'reg' -Arguments @{ path = $key; name = 'AssignmentSetOverride'; type = 'Binary' } `
-                -Desired (ConvertTo-IemKaffinity -Mask (ConvertTo-IemMask @($d.lps))) -Tier 3 -Group "irq:$($d.id)" -Reboot
+                -Desired (ConvertTo-IemKaffinity -Mask (ConvertTo-IemMask (Get-IemDeviceLps -Device $d))) -Tier 3 -Group "irq:$($d.id)" -Reboot
         }
         if (Select-IemGroup $Only 'nic') {
             $nk = Get-IemNicKey -Profile $Profile -Check:$Check
@@ -1034,8 +1123,15 @@ function Get-IemModeItems {
         foreach ($n in @($Profile.services_mode)) { $items += New-IemItem -Key "mode-svc:$n" -Kind 'svc-state' -Arguments @{ name = $n } -Desired 'stopped' -Group 'services' }
     }
     if (@($Only) -contains 'placement') {
+        # The validated housekeeping list (#32 MAJOR-2); a processor that is not
+        # present has no CPU Set ID, so it is refused here, before any write.
         $map = [IemCpuSets]::Map()
-        $ids = @(@($Profile.layout.housekeeping) | ForEach-Object { $map[[int]$_] }) | Sort-Object
+        $ids = @()
+        foreach ($lp in (Get-IemLayoutLps -Profile $Profile -Role 'housekeeping')) {
+            if (-not $map.ContainsKey($lp)) { throw "layout housekeeping: processor $lp is not present" }
+            $ids += $map[$lp]
+        }
+        $ids = @($ids | Sort-Object)
         foreach ($name in @($Profile.placement)) {
             foreach ($p in @(Get-Process -Name $name -ErrorAction SilentlyContinue)) {
                 $items += New-IemItem -Key "placement:${name}:$($p.Id)" -Kind 'cpusets' -Group 'placement' -Desired ($ids -join ',') `
@@ -1071,9 +1167,15 @@ function Undo-IemTuning {
     $j = Read-IemJournal -Path $profile.journal
     $held = @(foreach ($k in @($j.order.global)) { $e = $j.global[$k]; if ($null -ne $e -and [int]$e.tier -eq $Tier) { [string]$e.group } })
     Assert-IemOnly -Profile $profile -Tier $Tier -Only $Only -Also $held
-    $boot = Get-IemBootIdentity -Profile $profile
+    # A boot-key problem never blocks a revert (#32 MINOR-4): the revert's boot is
+    # recorded as unknown (no token, so it never reads as pending) and reported.
+    $boot = Get-IemBootIdentityOrUnknown -Profile $profile
     $keys = @($j.order.global); [array]::Reverse($keys)
     $rows = @()
+    if ($boot['problem']) {
+        $rows += [pscustomobject]@{ key = 'boot'; action = 'problem'; value = $null
+                                    error = "the revert's boot is unknown ($($boot['problem'])): a reverted reboot-bound value never reads as pending" }
+    }
     foreach ($k in $keys) {
         $e = $j.global[$k]
         if ($null -eq $e -or [int]$e.tier -ne $Tier) { continue }
@@ -1153,7 +1255,9 @@ function Get-IemTuningState {
     param([Parameter(Mandatory)][string]$ProfilePath)
     $profile = Read-IemProfile -Path $ProfilePath
     $j = Read-IemJournal -Path $profile.journal
-    $boot = Get-IemBootIdentity -Profile $profile
+    # A boot-key problem is a field, never a throw (#32 MINOR-4): the guard's state
+    # step ends every event plan. Without a token nothing reads as pending.
+    $boot = Get-IemBootIdentityOrUnknown -Profile $profile
     $rows = @()
     foreach ($tier in 2, 3) {
         foreach ($item in (Get-IemGlobalItems -Profile $profile -Tier $tier)) {
@@ -1175,7 +1279,7 @@ function Get-IemTuningState {
     })
     [pscustomobject]@{
         version = [int]$profile.version; applied_version = [pscustomobject]@{ tier2 = $j.applied.tier2; tier3 = $j.applied.tier3 }
-        boot = $boot.time; boot_token = $boot.token
+        boot = $boot['time']; boot_token = $boot['token']; boot_problem = $boot['problem']
         drift = [bool]($driftTiers.Count -gt 0); drift_tiers = $driftTiers
         entered = $j.entered; mode_items = @($j.order.mode); items = $rows
     }
