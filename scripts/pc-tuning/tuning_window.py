@@ -147,6 +147,10 @@ def post_boot_verdict(c: dict) -> list[str]:
         problems.append("still pending after the reboot: " + ", ".join(c["pending"]))
     if c["failed_items"]:
         problems.append("items not as applied: " + ", ".join(c["failed_items"]))
+    if c.get("boot_problem"):
+        # Without a boot token nothing reads as pending, so an empty "pending"
+        # proves nothing (#32 MINOR-4).
+        problems.append(f"the boot identity is unknown ({c['boot_problem']}): what is still pending cannot be told")
     return problems
 
 
@@ -313,6 +317,11 @@ def cmd_undo(env, args) -> None:
     failed = [r for r in rows if r.get("action") == "failed"]
     if failed:
         raise StepError(f"{len(failed)} revert item(s) failed: " + "; ".join(f"{r['key']}: {r['error']}" for r in failed))
+    # A "problem" row (the revert's boot unknown, #32 MINOR-4) does not undo the
+    # revert; the owner hears it.
+    problems = [r for r in rows if r.get("action") == "problem"]
+    if problems:
+        sw.alarm("the revert completed, but: " + "; ".join(f"{r.get('key')}: {r.get('error')}" for r in problems))
 
 
 def cmd_state(env, args) -> None:
@@ -664,6 +673,9 @@ def cmd_reboot_prepare(env, args) -> None:
             raise StepError(f"the unwind failed at {', '.join(failed)}: no reboot prepared")
         st = tps(env, f"Get-IemTuningState -ProfilePath {sw.tuning_profile(env)}", timeout=120)
         sw.update_state({"card": "rebooting", "reboot": {"prepared_at": tps(env, "Get-IemNow", timeout=60)}})
+    if st.get("boot_problem"):
+        sw.alarm(f"the boot identity is unknown ({st['boot_problem']}): the pending and revert_pending lists of this "
+                 "reboot prove nothing (#32 MINOR-4)")
     items = as_list(st["items"])
     print(json.dumps({"reboot-prepare": done, "pending": [i["key"] for i in items if i["pending"]],
                       "revert_pending": [i["key"] for i in items if i["revert_pending"]]}))
@@ -767,6 +779,7 @@ def cmd_post_boot(env, args) -> None:
     items = as_list(st["items"])
     checks["pending"] = [i["key"] for i in items if i["pending"] or i["revert_pending"]]
     checks["failed_items"] = [i["key"] for i in items if i["journaled"] and not i["ok"]]
+    checks["boot_problem"] = st.get("boot_problem")
     a = tps(env, "Get-IemCpuSample", timeout=60, event="ignore")
     time.sleep(10)
     b = tps(env, "Get-IemCpuSample", timeout=60, event="ignore")

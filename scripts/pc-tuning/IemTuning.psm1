@@ -282,6 +282,22 @@ function Get-IemBootIdentity {
     return @{ token = $t; time = Get-IemBootTime }
 }
 
+function Get-IemBootIdentityOrUnknown {
+    # This boot, or, when the boot key cannot be read (#32 MINOR-4), an identity
+    # without a token: never this boot, so nothing reads as pending on it (the
+    # direction Update-IemJournalBoots also takes), and 'problem' says why. Only
+    # for what a boot-key problem must never block: undo (the revert is recorded
+    # with an unknown boot) and the state (a field). A write still needs its boot.
+    param([Parameter(Mandatory)]$Profile)
+    try { return Get-IemBootIdentity -Profile $Profile }
+    catch {
+        $problem = "$_"
+        $time = $null
+        try { $time = Get-IemBootTime } catch { $problem += "; the boot time cannot be read either ($_)" }
+        return @{ token = $null; time = $time; problem = $problem }
+    }
+}
+
 function Get-IemBootToken {
     # The token of a boot identity; '' for $null or a schema 1/2 identity (a time
     # string, or { time, id }), which names no boot (review R1).
@@ -1144,9 +1160,15 @@ function Undo-IemTuning {
     $j = Read-IemJournal -Path $profile.journal
     $held = @(foreach ($k in @($j.order.global)) { $e = $j.global[$k]; if ($null -ne $e -and [int]$e.tier -eq $Tier) { [string]$e.group } })
     Assert-IemOnly -Profile $profile -Tier $Tier -Only $Only -Also $held
-    $boot = Get-IemBootIdentity -Profile $profile
+    # A boot-key problem never blocks a revert (#32 MINOR-4): the revert's boot is
+    # recorded as unknown (no token, so it never reads as pending) and reported.
+    $boot = Get-IemBootIdentityOrUnknown -Profile $profile
     $keys = @($j.order.global); [array]::Reverse($keys)
     $rows = @()
+    if ($boot['problem']) {
+        $rows += [pscustomobject]@{ key = 'boot'; action = 'problem'; value = $null
+                                    error = "the revert's boot is unknown ($($boot['problem'])): a reverted reboot-bound value never reads as pending" }
+    }
     foreach ($k in $keys) {
         $e = $j.global[$k]
         if ($null -eq $e -or [int]$e.tier -ne $Tier) { continue }
@@ -1226,7 +1248,9 @@ function Get-IemTuningState {
     param([Parameter(Mandatory)][string]$ProfilePath)
     $profile = Read-IemProfile -Path $ProfilePath
     $j = Read-IemJournal -Path $profile.journal
-    $boot = Get-IemBootIdentity -Profile $profile
+    # A boot-key problem is a field, never a throw (#32 MINOR-4): the guard's state
+    # step ends every event plan. Without a token nothing reads as pending.
+    $boot = Get-IemBootIdentityOrUnknown -Profile $profile
     $rows = @()
     foreach ($tier in 2, 3) {
         foreach ($item in (Get-IemGlobalItems -Profile $profile -Tier $tier)) {
@@ -1248,7 +1272,7 @@ function Get-IemTuningState {
     })
     [pscustomobject]@{
         version = [int]$profile.version; applied_version = [pscustomobject]@{ tier2 = $j.applied.tier2; tier3 = $j.applied.tier3 }
-        boot = $boot.time; boot_token = $boot.token
+        boot = $boot['time']; boot_token = $boot['token']; boot_problem = $boot['problem']
         drift = [bool]($driftTiers.Count -gt 0); drift_tiers = $driftTiers
         entered = $j.entered; mode_items = @($j.order.mode); items = $rows
     }
