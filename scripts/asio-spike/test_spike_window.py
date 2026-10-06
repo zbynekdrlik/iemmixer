@@ -532,6 +532,21 @@ class PcChangeTests(unittest.TestCase):
             sw.cmd_set_buffer(ENV, type("A", (), {"frames": 32})())
         self.assertIsNone(sw.load_state().get("in_flight"))
 
+    def test_a_step_the_pc_refused_takes_back_what_it_recorded_before_its_call(self) -> None:
+        # Review of lane G2, finding 3: nothing ran on the PC, so the fields the step
+        # recorded with its intent go back (a "switching" card, a pref_current a
+        # later unwind or reboot-prepare would act on).
+        self.pc.refuse_stop_file = True
+        self.window(card="reaper")
+        with self.assertRaisesRegex(sw.StepError, "stop file"):
+            sw.cmd_to_dev(ENV, None)
+        self.assertEqual((sw.load_state()["card"], sw.load_state().get("in_flight")), ("reaper", None))
+        self.window(pref_current=48, pref_restored=False)
+        with self.assertRaisesRegex(sw.StepError, "stop file"):
+            sw.cmd_set_buffer(ENV, type("A", (), {"frames": 32})())
+        st = sw.load_state()
+        self.assertEqual((st["pref_current"], st["pref_restored"], st.get("in_flight")), (48, False, None))
+
     def test_a_save_and_quit_that_lands_after_the_bring_back_is_settled(self) -> None:
         # The MAJOR: "ide event" during to-dev's save and quit. The preempt finds
         # REAPER still up, brings it back (checks only) and closes the window; the

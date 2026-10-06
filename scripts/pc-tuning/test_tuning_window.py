@@ -320,6 +320,7 @@ class RebootPrepareTests(unittest.TestCase):
                 return "2026-01-01T00:00:00Z"
             return {"ok": True}
 
+        self.fake_ps = fake_ps
         tw.sw.ps = fake_ps   # tw.tps wraps sw.ps via sw.tuning_body — kept real
         self.env = {"PC_ROOT": "R", "PC_TUNING_ROOT": "T", "PC_XPERF": "xperf.exe",
                     "PC_BUFFER_KEY": "K", "PC_BUFFER_NAME": "N", "PC_REAPER_HTTP": "H",
@@ -408,6 +409,25 @@ class RebootPrepareTests(unittest.TestCase):
         self.assertEqual(st["card"], "free")
         self.assertNotIn("reboot", st)
 
+    def test_a_step_begun_during_the_reads_refuses_the_reboot(self) -> None:
+        # Review of lane G2, finding 3: between the unwind and the write the lock is
+        # free; a set-buffer or an enter begun there leaves a buffer not verified as
+        # restored, a mode recorded as entered, or a change in flight. A reboot is not
+        # prepared over any of them (I1; after the reboot a buffer write could meet a
+        # REAPER that holds the driver, I2).
+        for change in ({"pref_current": 32, "pref_restored": False},
+                       {"tuning_mode": True},
+                       {"in_flight": {"step": "set-buffer", "started": time.time(), "bound_s": 60}}):
+            with self.subTest(change=change):
+                self.write_state()
+                self.wrap_reads(lambda: tw.sw.update_state(change))
+                with self.assertRaisesRegex(tw.StepError, "no reboot prepared"):
+                    tw.cmd_reboot_prepare(self.env, self.args)
+                st = self.read_state()
+                self.assertEqual(st["card"], "free")
+                self.assertNotIn("reboot", st)
+                tw.sw.ps = self.fake_ps
+
     def test_a_window_a_preempt_closed_during_the_reads_is_not_prepared(self) -> None:
         self.write_state()
 
@@ -485,6 +505,7 @@ class TuningChangeTests(unittest.TestCase):
         self.events: list[str] = []
         self.bodies: list[str] = []
         self.wait_for_close = ""        # a verb whose call returns only once a preempt closed the window
+        self.refused = False            # that call then reports the PC's refusal on the stop file
         self.in_flight = threading.Event()
 
         def fake_ps(env, body, timeout=300, event="finish"):
@@ -498,6 +519,9 @@ class TuningChangeTests(unittest.TestCase):
                         while not tw.sw.load_state().get("closed"):
                             self.assertLess(time.monotonic(), deadline)
                             time.sleep(0.01)
+                        if self.refused:
+                            self.events.append(f"{verb}:refused")
+                            raise tw.StepError(f"PC step failed: {tw.sw.STEP_REFUSED} (the spike stop file exists: synthetic)")
                     self.events.append(f"{verb}:end")
                     return [{"key": "plan:active", "action": "written", "error": None}]
             if body == "@(Get-Process -Name asio_spike -ErrorAction SilentlyContinue).Count":
@@ -553,6 +577,32 @@ class TuningChangeTests(unittest.TestCase):
         self.assertEqual(self.events, ["Invoke-IemTuningApply:start", "Invoke-IemTuningApply:end",
                                        "Exit-IemTuningMode:start", "Exit-IemTuningMode:end"])
         self.assertTrue(any("apply" in a and "pre-empted" in a for a in self.alarms), self.alarms)
+        self.assertFalse(tw.sw.load_state()["tuning_mode"])
+
+    # Review of lane G2, finding 8: a step the PC refused on the stop file changed
+    # nothing, so its late handler neither alarms nor runs an exit it does not owe.
+    def test_a_refused_apply_on_a_closed_window_alarms_nothing_and_exits_nothing(self) -> None:
+        self.wait_for_close, self.refused = "Invoke-IemTuningApply", True
+        error = self.preempt_during(lambda: tw.cmd_apply(self.env, argparse.Namespace(tier=2, only="")))
+        self.assertIsInstance(error, tw.sw.EventNow)
+        self.assertEqual(self.events, ["Invoke-IemTuningApply:start", "Invoke-IemTuningApply:refused"])
+        self.assertFalse(any("apply" in a for a in self.alarms), self.alarms)
+
+    def test_a_refused_enter_exits_only_a_mode_entered_before_it(self) -> None:
+        self.wait_for_close, self.refused = "Enter-IemTuningMode", True
+        args = argparse.Namespace(only="plan", idle="default")
+        error = self.preempt_during(lambda: tw.cmd_enter(self.env, args))
+        self.assertIsInstance(error, tw.sw.EventNow)
+        self.assertEqual(self.events, ["Enter-IemTuningMode:start", "Enter-IemTuningMode:refused"])
+        # Entered earlier in the window: the exit the preempt deferred is still owed.
+        self.events.clear()
+        self.in_flight.clear()
+        tw.sw.save_state({"id": "w2", "card": "free", "preflight": {"pref": 64}, "pref_original": 64, "pref_current": None,
+                          "pref_restored": False, "runs": [], "closed": False, "tuning_mode": True})
+        (self.dir / "EVENT-NOW").unlink()
+        error = self.preempt_during(lambda: tw.cmd_enter(self.env, args))
+        self.assertEqual(self.events, ["Enter-IemTuningMode:start", "Enter-IemTuningMode:refused",
+                                       "Exit-IemTuningMode:start", "Exit-IemTuningMode:end"])
         self.assertFalse(tw.sw.load_state()["tuning_mode"])
 
     def test_a_deferred_exit_whose_step_never_came_back_runs_after_the_settle(self) -> None:
