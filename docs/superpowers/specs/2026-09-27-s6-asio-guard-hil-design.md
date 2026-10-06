@@ -166,7 +166,7 @@ Unit- and mutation-tested on Linux: channel map, preference window, reset budget
 Asked right after HIL v1 is green, before any long unattended engine run (dev mode is one), as one ~45 min dev-time session. `live --trial` is refused until `[guard] pc_tests_passed = true`.
 
 1. **OS restart with the engine running** — proves the session-end path; needed early, since the owner shuts the PC down after events.
-2. **Reboot with the engine parked** — does it delay or block the restart; fixes the owner's recovery (R6, G3).
+2. **Reboot with the engine parked** — does it delay or block the restart; fixes the owner's recovery (R6, G3). The park is forced on demand by `iemmode inject-park` inside a HIL job (#35): the SEH test's exception under a dev-only test hold, so the owner thread keeps the driver and the filter parks.
 3. **Hard kill** (once, owner at the PC) — does the driver open again without a reboot.
 4. **SEH injection (`seh_ctl`)** — release ≤ 1 s or park; `catch_unwind` cannot catch it.
 5. **Round-trip latency over the D5(b) loopback** — real in→out latency and a first look at our output on the wire. For S8 sign-off.
