@@ -691,6 +691,32 @@ def tuning_profile(env: dict[str, str]) -> str:
     return ps_quote(env["PC_TUNING_ROOT"] + "\\profile.json")
 
 
+# Every trace stop (#32 MAJOR-1, MINOR-1, F2 round 3 item 4): IemMeasure in its
+# stop-only mode — IemTuning is not imported, so no Add-Type compile runs and the
+# stop depends neither on the tuning modules loading nor on PC_TUNING_ROOT or
+# PC_XPERF — and Stop-IemTraceSessions with the trace's run folder, which decides
+# whose kernel trace it is. It makes at most four logman calls (the session list,
+# the kernel logger's query, two stops), each bounded on the PC at
+# TRACE_STOP_LOGMAN_S plus a 5 s output read, inside the TRACE_STOP_CALL_S bound
+# of the ssh call.
+TRACE_STOP_LOGMAN_S = 20
+TRACE_STOP_CALL_S = 120
+
+
+def trace_stop_import(env: dict[str, str]) -> str:
+    return f"Import-Module (Join-Path {ps_quote(env['PC_ROOT'])} 'bin\\IemMeasure.psm1') -ArgumentList 'stop-only' -Force -Global"
+
+
+def trace_stop_call(trace_dir: str) -> str:
+    return f"Stop-IemTraceSessions -Dir {ps_quote(trace_dir)} -TimeoutSeconds {TRACE_STOP_LOGMAN_S}"
+
+
+def trace_stop_body(env: dict[str, str], trace_dir: str) -> str:
+    """The trace stop as one PC body; its reply goes through check_trace_stop.
+    Idempotent: with nothing running it stops nothing and succeeds."""
+    return f"{trace_stop_import(env)} ; {trace_stop_call(trace_dir)}"
+
+
 def check_trace_stop(reply) -> dict:
     """A trace stop's reply (Stop-IemTraceSessions): the PC throws on any error
     and on a kernel logger that runs but is not ours (its output file is not
@@ -768,8 +794,7 @@ def _unwind(env: dict[str, str], state: dict, running: bool, bring_back_reaper: 
             done.append({"stop-spike": gone})
         elif step == "trace-stop":
             try:
-                r = check_trace_stop(ps(env, tuning_body(env, f"Stop-IemTrace -Xperf {ps_quote(env['PC_XPERF'])} -Dir {ps_quote(state['trace'])}"),
-                                        timeout=120, event="ignore"))
+                r = check_trace_stop(ps(env, trace_stop_body(env, state["trace"]), timeout=TRACE_STOP_CALL_S, event="ignore"))
                 state["trace"] = None
                 save_state(state)
                 done.append({"trace-stop": r})
