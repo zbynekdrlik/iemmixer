@@ -340,9 +340,13 @@ def exit_on_signals() -> None:
     """SIGTERM and SIGHUP end a window command through Python's exception path
     (SystemExit), so a PC change in flight clears its intent and runs its late
     handler (pc_change) instead of leaving them to its bound (review of lane
-    G2, finding 2). Nothing on the PC is ended: its call runs on."""
+    G2, finding 2). Nothing on the PC is ended: its call runs on. A signal the
+    platform lacks is skipped: Windows has no SIGHUP, and the scripts' poll and
+    analysis printers run there in CI."""
     def leave(signum, frame) -> None:
         raise SystemExit(128 + signum)
 
-    for s in (signal.SIGTERM, signal.SIGHUP):
-        signal.signal(s, leave)
+    for name in ("SIGTERM", "SIGHUP"):
+        s = getattr(signal, name, None)
+        if s is not None:
+            signal.signal(s, leave)
