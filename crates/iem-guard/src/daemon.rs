@@ -1148,7 +1148,7 @@ pub fn handle(pc: &mut dyn Pc, g: &mut Guard, req: Request, epoch: u64) -> Reply
     let (ok, detail) = match req {
         Request::Status => (true, status_text(g)),
         Request::Subscribe => (true, "subscriptions are served by the pipe".to_owned()),
-        Request::Event { dry_run: true } => dry_event(pc, g),
+        Request::Event { dry_run: true } => dry_event(pc),
         Request::Event { dry_run: false } => event_now(pc, g),
         Request::Dev { build, dry_run } => entry(
             pc,
@@ -1225,7 +1225,7 @@ fn plan_text(steps: &[Step]) -> String {
 }
 
 /// `event --dry-run`: the plan from the facts, nothing changed.
-fn dry_event(pc: &mut dyn Pc, g: &mut Guard) -> (bool, String) {
+fn dry_event(pc: &mut dyn Pc) -> (bool, String) {
     let facts = pc.facts();
     let steps = plan(Mode::Event, &facts);
     (true, format!("dry run: {}", plan_text(&steps)))
@@ -2089,7 +2089,7 @@ pub fn direct_event<L>(pc: &mut dyn Pc, g: &mut Guard, lock: Option<L>, dry_run:
     g.state.pids = pc.adopt(&saved);
     pc.set_bundle(g.state.pins.current.as_deref());
     let (ok, detail) = if dry_run {
-        dry_event(pc, g)
+        dry_event(pc)
     } else {
         event_now(pc, g)
     };
