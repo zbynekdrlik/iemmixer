@@ -191,6 +191,7 @@ impl Cmd {
                     | Self::StopTestSignal
                     | Self::InjectFault
                     | Self::InjectSeh
+                    | Self::InjectPark
             )
     }
 }
