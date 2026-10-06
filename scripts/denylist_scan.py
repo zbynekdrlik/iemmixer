@@ -309,9 +309,11 @@ _INVISIBLE = re.compile("[\u00ad\u200b-\u200d\u2060\ufeff]")
 # compatibility characters whose NFKC form holds Latin letters or digits: ª ² ³ ¹ º, the ligature and
 # digraph letters (Ĳ Ŀ ŉ ſ Ǆ-ǌ Ǳ-ǳ), modifier letters, super- and subscripts, letterlike symbols
 # and Roman numerals, enclosed alphanumerics, Latin ligatures, fullwidth forms, mathematical
-# alphanumerics, the enclosed alphanumeric supplement
+# alphanumerics, the enclosed alphanumeric supplement; and the two characters besides the Kelvin
+# sign (which fold covers) whose NFC form is ASCII: the Greek question mark (`;`) and the Greek varia
+# (a backtick) -- checked against every code point (#32 F5 m10)
 _COMPATIBLE = re.compile("[\u00aa\u00b2\u00b3\u00b9\u00ba\u0132\u0133\u013f\u0140\u0149\u017f"
-                         "\u01c4-\u01cc\u01f1-\u01f3\u02b0-\u02b8\u1d2c-\u1d6a\u2070-\u209c"
+                         "\u01c4-\u01cc\u01f1-\u01f3\u02b0-\u02b8\u037e\u1d2c-\u1d6a\u1fef\u2070-\u209c"
                          "\u2100-\u2189\u2460-\u24ff\ufb00-\ufb06\uff01-\uff5e"
                          "\U0001d400-\U0001d7ff\U0001f100-\U0001f1aa]")
 
@@ -352,8 +354,9 @@ class Views:
     The text and the text with its escapes decoded (unescape), each also with any double-encoded
     UTF-8 read back (unmojibake), and the decoded text compacted (compact: NFKC, invisible characters
     removed) serve an ASCII term as they are: a re-reading only turns lone
-    surrogates -- non-word characters -- into letters or symbols, and NFC only composes a letter
-    with a following mark, so neither can add an ASCII term's match. Their case folds pre-filter
+    surrogates -- non-word characters -- into letters or symbols, and NFC turns no character into
+    an ASCII one but U+037E, U+1FEF (compact reads both as their ASCII forms) and the Kelvin sign
+    (fold), so neither can add an ASCII term's match. Their case folds pre-filter
     every term. A term with a non-ASCII character is matched in their NFC forms and in the NFC
     re-readings of the first two with FALLBACK_CODECS (undecodable bytes only) -- made only when the
     term's longest ASCII word occurs in a fold, since those readings keep every ASCII character."""
