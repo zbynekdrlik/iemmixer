@@ -199,6 +199,27 @@ fn meters_msg(f: &MeterFrame) -> Meters {
     }
 }
 
+/// What the engine says about its stream as it stops (#35): `DriverReleased`
+/// once the card is free; a stream that stayed parked (a callback stuck in
+/// it, or the parked-engine test's hold) released nothing, so
+/// `DriverParked`: the card is free only once the process has ended.
+fn stream_end(outcome: StopOutcome, reason: &str) -> EngineMsg {
+    let reason = reason.to_owned();
+    match outcome {
+        StopOutcome::Released => {
+            info!("driver released: {reason}");
+            EngineMsg::DriverReleased { reason }
+        }
+        StopOutcome::Parked => {
+            error!(
+                "the stream stayed parked ({reason}): the driver is not released, \
+                 the card is free once this process has ended"
+            );
+            EngineMsg::DriverParked { reason }
+        }
+    }
+}
+
 impl Control {
     pub fn new(p: Parts) -> Self {
         let hil_peaks = vec![0.0; p.core.hil().len()];
@@ -587,14 +608,14 @@ impl Control {
         }
     }
 
+    /// Stops the backend and says how its stream ended, as the last word
+    /// before every connection closes.
     fn release(&mut self, reason: &str) {
-        if let Some(d) = self.driver.take() {
-            d.stop();
-        }
-        info!("driver released: {reason}");
-        self.broadcast(&EngineMsg::DriverReleased {
-            reason: reason.into(),
-        });
+        let outcome = self
+            .driver
+            .take()
+            .map_or(StopOutcome::Released, |d| d.stop());
+        self.broadcast(&stream_end(outcome, reason));
         for (_, p) in std::mem::take(&mut self.peers) {
             p.conn.close();
         }
