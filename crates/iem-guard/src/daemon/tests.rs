@@ -1880,6 +1880,45 @@ fn dev_with_a_build_pins_it() {
     assert_eq!(pc.bundle.as_deref(), Some(SHA));
 }
 
+/// #38 (owner, 2026-10-06): a HIL job begins in dev when no other job runs,
+/// whatever the stage carries. Nothing reads it: other devices on the Dante
+/// network feed the card's inputs, and only the owner's signal decides
+/// whether the PC may be used.
+#[test]
+fn a_hil_job_begins_in_dev_without_reading_the_stage() {
+    let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
+    assert_eq!(
+        job_begin(&mut pc, &mut g, 7),
+        (true, "HIL job 7 began".to_owned())
+    );
+    assert_eq!(g.state.job, Some(7));
+    assert_eq!(pc.calls(), Vec::<Call>::new(), "no PC read");
+}
+
+/// #38: a dev entry reads no stage, never waits for quiet and never refuses
+/// on activity: from the band's system the app's stop follows the precheck,
+/// and with nothing running the tuning enter does.
+#[test]
+fn a_dev_entry_reads_no_stage_and_never_waits_for_quiet() {
+    let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
+    g.state.pins.current = Some(SHA.into());
+    let r = handle(&mut pc, &mut g, dev(), 0);
+    assert!(r.ok, "{r:?}");
+    assert_eq!(g.state.mode, Mode::Dev);
+    assert_eq!(
+        steps(&pc).get(..3),
+        Some(&[Call::Precheck, Call::AppStop, Call::ReaperSaveQuit][..])
+    );
+    let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Event));
+    g.state.pins.current = Some(SHA.into());
+    let r = handle(&mut pc, &mut g, dev(), 0);
+    assert!(r.ok, "{r:?}");
+    assert_eq!(
+        steps(&pc).get(..2),
+        Some(&[Call::Precheck, Call::Tuning][..])
+    );
+}
+
 #[test]
 fn job_begin_needs_a_quiet_stage() {
     let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));

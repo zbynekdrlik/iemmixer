@@ -681,6 +681,49 @@ mod tests {
         }
     }
 
+    /// #38 (owner, 2026-10-06): a dev or live entry is the precheck, the
+    /// stops and the start, from any mode and with any facts. No step reads
+    /// the stage: only the owner's signal decides whether the PC may change,
+    /// and other devices on the Dante network feed the card's inputs.
+    #[test]
+    fn every_entry_is_the_precheck_the_stops_and_the_start() {
+        every_entry(|from, to, f, p| {
+            let mut want = vec![Step::Precheck];
+            if f.app {
+                want.push(Step::AppStop);
+            }
+            if f.reaper {
+                want.push(Step::ReaperSaveQuit);
+            }
+            if f.runner {
+                want.extend([Step::JobsCancel, Step::RunnerStop]);
+            }
+            if f.engine {
+                want.push(Step::EngineStop);
+            }
+            if f.server {
+                want.push(Step::ServerStop);
+            }
+            if f.tray {
+                want.push(Step::TrayStop);
+            }
+            want.extend([
+                Step::TuningEnter,
+                Step::Data,
+                Step::PrefCheck,
+                Step::EngineStart,
+                Step::EngineArm,
+                Step::ServerStart,
+                Step::TrayStart,
+                Step::IdentityCheck,
+            ]);
+            if to == Mode::Dev {
+                want.push(Step::RunnerStart);
+            }
+            assert_eq!(p, want, "{from:?}→{to:?} {f:?}");
+        });
+    }
+
     #[test]
     fn dev_entry_with_reaper_running_always_runs_the_interlock() {
         for from in MODES {
