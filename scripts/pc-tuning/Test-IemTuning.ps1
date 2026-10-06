@@ -794,6 +794,18 @@ try {
         $gone = $null; $ge = $null
         try { $gone = Stop-IemTraceSessions -Dir $runDir } catch { $ge = $_ }
         Assert ($null -eq $ge -and @($gone.stopped) -contains 'IemMarkers' -and @($gone.kept).Count -eq 0) "trace-stop-a-session-gone-before-its-stop-is-no-error ($ge)"
+        # The list itself may fail while another tool's session ends during it (CI run
+        # 37465635726: `query -ets` exited 0x80071068, the WMI GUID not found, after a partial
+        # list). The list is only a shortcut: each session's own query decides, so a failed
+        # list is a note, never an error, when those queries answer.
+        [IO.File]::WriteAllText($fakeLogman, ("@echo off`r`n>>`"%~dp0calls.txt`" echo %*`r`n" +
+            "if /i `"%~1`"==`"query`" if /i `"%~2`"==`"-ets`" goto list`r`nif /i `"%~1`"==`"query`" goto kernel`r`n" +
+            "exit /b 0`r`n" +
+            ":list`r`necho IemMarkers                     Trace   Running`r`necho Error: 1>&2`r`necho The GUID passed was not recognized as valid by a WMI data provider. 1>&2`r`nexit /b -2147020696`r`n" +
+            ":kernel`r`necho Name:                 NT Kernel Logger`r`necho Output Location:      $runDir\kernel.etl`r`nexit /b 0`r`n"))
+        $gone = $null; $ge = $null
+        try { $gone = Stop-IemTraceSessions -Dir $runDir } catch { $ge = $_ }
+        Assert ($null -eq $ge -and @($gone.stopped) -contains 'NT Kernel Logger' -and @($gone.stopped) -contains 'IemMarkers' -and @($gone.notes).Count -eq 1) "trace-stop-a-failed-list-is-a-note-when-each-session-answers ($ge)"
         # Each logman call is bounded: one that hangs is reported, never waited for
         # to the end (and never ended, I8).
         [IO.File]::WriteAllText($fakeLogman, "@echo off`r`nping -n 8 127.0.0.1 >nul`r`nexit /b 0`r`n")
