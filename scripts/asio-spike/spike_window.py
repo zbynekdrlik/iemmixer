@@ -61,11 +61,16 @@ class EventNow(Exception):
     """The owner said "ide event" (the flag file exists): pre-empt."""
 
 
-# ssh's own messages when it exits 255 before any session existed (refused,
-# timed out, name not resolved, not authorised, host key): nothing was sent.
-SSH_NOT_CONNECTED = re.compile(r"(?i)ssh: connect to host|could not resolve hostname|name or service not known|"
-                               r"temporary failure in name resolution|no route to host|network is unreachable|"
-                               r"permission denied|host key verification failed")
+# ssh's own lines when it exits 255 before any session existed: nothing was
+# sent. Each is anchored to its pre-session shape (review round 3, m8): the
+# connect phase (refused, timed out, no route, network unreachable), the name
+# lookup, the auth refusal and the host key. The same words anywhere else (the
+# network dropping mid-call, a remote program's error) leave the PC's fate
+# unknown: NoReply.
+SSH_NOT_CONNECTED = re.compile(r"(?im)^(?:ssh: connect to host \S+ port \d+: .+"
+                               r"|ssh: could not resolve hostname \S+: .+"
+                               r"|\S+: permission denied \([\w,-]+\)\.?"
+                               r"|host key verification failed\.)\s*$")
 
 
 class NoReply(StepError):
