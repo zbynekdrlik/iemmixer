@@ -905,6 +905,31 @@ class MeasureTests(WindowHarness):
         self.assertNotIn("-Merge", stops[0])
         self.assertIsNone(self.state()["trace"])
 
+    def test_every_trace_stop_imports_only_the_stop(self) -> None:
+        # #32 MINOR-1: a cut's stop, the final stop, a failed measure's cleanup,
+        # trace-stop and the stop of a start the event overtook all send IemMeasure's
+        # stop-only import and Stop-IemTraceSessions with the run folder, never the
+        # tuning modules' import (an Add-Type compile on the PC being measured).
+        self.pc.progress = {"missed": 1, "overruns": 0, "position_gaps": 0, "callback_thread": 4243}
+        tw.cmd_measure(self.env, self.args(circular_mb=1024))             # a cut and the final stop
+        self.pc.reports.append(DUPLEX)
+        self.pc.fail = {".progress.json"}
+        with self.assertRaisesRegex(tw.StepError, "progress.json"):
+            tw.cmd_measure(self.env, self.args(label="load-err"))         # the cleanup's stop
+        self.pc.fail = set()
+        self.record_trace()
+        tw.cmd_trace_stop(self.env, argparse.Namespace())                  # trace-stop
+        self.pc.on_call = lambda body: (self.dir / "EVENT-NOW").touch() if "Start-IemTrace" in body else None
+        with self.assertRaises(tw.sw.EventNow):
+            tw.cmd_measure(self.env, self.args(label="load-ev"))          # the overtaken start's stop
+        stops = self.pc.bodies("Stop-IemTrace")
+        self.assertEqual(len(stops), 5)
+        for body in stops:
+            self.assertIn("'bin\\IemMeasure.psm1') -ArgumentList 'stop-only'", body)
+            self.assertRegex(body, r"Stop-IemTraceSessions -Dir 'C:\\t\\runs\\[a-z0-9-]+-?[0-9TZ]*' -TimeoutSeconds \d+")
+            self.assertNotIn("IemTuning", body)
+            self.assertNotIn("Stop-IemTrace -Xperf", body)
+
     def test_a_stop_that_is_not_confirmed_keeps_the_trace_recorded(self) -> None:
         # #32 MAJOR-1: only a stop reply with no kept session clears the recorded
         # trace; a kept kernel logger or a reply that is no stop result is a failure.

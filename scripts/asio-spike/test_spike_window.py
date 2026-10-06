@@ -405,6 +405,30 @@ class UnwindTuningTests(unittest.TestCase):
         self.assertTrue(any(c.startswith("Invoke-SpikeBringBack") for c in self.calls))   # REAPER still comes back
         self.assertEqual((state["card"], state["closed"]), ("reaper", True))
 
+    def test_the_trace_stop_imports_only_the_stop_and_names_the_run_folder(self) -> None:
+        # #32 MINOR-1, F2 round 3 item 4: the pre-emption's trace stop imports
+        # IemMeasure in its stop-only mode (IemTuning is not imported: no Add-Type
+        # compile) and calls Stop-IemTraceSessions with the trace's run folder. It
+        # needs neither PC_TUNING_ROOT nor PC_XPERF, so nothing of the tuning
+        # modules or their settings can keep a trace running into the event.
+        env = {k: v for k, v in self.env.items() if k not in ("PC_TUNING_ROOT", "PC_XPERF")}
+        state = self.state(tuning_mode=False, fingerprint=None)
+        done = sw.unwind(env, state, running=False)
+        stops = [c for c in self.calls if "Stop-IemTrace" in c]
+        self.assertEqual(len(stops), 1)
+        self.assertIn("'bin\\IemMeasure.psm1') -ArgumentList 'stop-only'", stops[0])
+        self.assertIn(f"Stop-IemTraceSessions -Dir 'C:\\t\\runs\\x' -TimeoutSeconds {sw.TRACE_STOP_LOGMAN_S}", stops[0])
+        self.assertNotIn("IemTuning", stops[0])
+        self.assertNotIn("Stop-IemTrace -Xperf", stops[0])
+        self.assertEqual([d["trace-stop"] for d in done if "trace-stop" in d], [self.stop_reply])
+        self.assertIsNone(state["trace"])
+
+    def test_the_trace_stop_bound_holds_its_logman_calls(self) -> None:
+        # At most four logman calls (the session list, the kernel logger's query and
+        # the two stops), each bounded on the PC plus its 5 s output read, inside the
+        # bound of the ssh call with room for the PowerShell start and the import.
+        self.assertLessEqual(4 * (sw.TRACE_STOP_LOGMAN_S + 5) + 15, sw.TRACE_STOP_CALL_S)
+
     def test_a_stop_that_kept_a_session_keeps_the_trace_recorded_and_alarms(self) -> None:
         # #32 MAJOR-1: a reply naming a kept kernel logger, or one that is no stop
         # result, is a failed stop: the trace stays recorded (trace-stop or the next
