@@ -351,6 +351,66 @@ class RebootPrepareTests(unittest.TestCase):
         tw.cmd_reboot_prepare(self.env, self.args)
         self.assertEqual(self.read_state()["reboot"]["boot_token"], "tok-prepare")
 
+    # F2 round 3, m3: the long read-only calls (the tuning state compiles IemTuning)
+    # run outside the window lock, so a preempt never waits for them; the write
+    # takes the lock again and decides on the state as saved then.
+    def wrap_reads(self, during) -> list[str]:
+        events: list[str] = []
+        real = tw.sw.ps
+
+        def ps(env, body, timeout=300, event="finish"):
+            if "Get-IemTuningState" in body or "Get-IemNow" in body:
+                events.append(event)
+                during()
+            return real(env, body, timeout, event)
+
+        tw.sw.ps = ps
+        return events
+
+    def lock_is_free(self) -> bool:
+        got: list[bool] = []
+
+        def probe() -> None:   # another process's preempt, in short
+            try:
+                with tw.sw.window_lock():
+                    got.append(True)
+            except tw.StepError:
+                got.append(False)
+
+        saved = tw.sw.LOCK_WAIT_S
+        tw.sw.LOCK_WAIT_S = 0.3
+        try:
+            t = threading.Thread(target=probe)
+            t.start()
+            t.join()
+        finally:
+            tw.sw.LOCK_WAIT_S = saved
+        return got[0]
+
+    def test_the_read_only_calls_run_outside_the_window_lock(self) -> None:
+        self.write_state()
+        free: list[bool] = []
+        events = self.wrap_reads(lambda: free.append(self.lock_is_free()))
+        tw.cmd_reboot_prepare(self.env, self.args)
+        self.assertEqual(free, [True, True])
+        self.assertEqual(events, ["abandon", "abandon"])   # read-only: "ide event" does not wait for them
+        self.assertEqual(self.read_state()["card"], "rebooting")
+
+    def test_a_window_a_preempt_closed_during_the_reads_is_not_prepared(self) -> None:
+        self.write_state()
+
+        def preempt() -> None:
+            st = tw.sw.load_state()
+            st.update(card="reaper", closed=True)
+            tw.sw.save_state(st)
+
+        self.wrap_reads(preempt)
+        with self.assertRaisesRegex(tw.StepError, "closed"):
+            tw.cmd_reboot_prepare(self.env, self.args)
+        st = self.read_state()
+        self.assertEqual((st["card"], st["closed"]), ("reaper", True))
+        self.assertNotIn("reboot", st)
+
     def test_an_unknown_boot_identity_alarms_the_owner(self) -> None:
         # #32 MINOR-4: the state reports a boot-key problem as a field; the lists of
         # what the reboot applies or reverts then prove nothing, so the owner hears it.
