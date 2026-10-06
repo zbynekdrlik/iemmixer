@@ -780,6 +780,41 @@ def spike_preempt(timeout: float) -> dict:
     return {"ok": True, "output": out[-4000:]}
 
 
+def close_failed_window(deadline: float, error: str) -> None:
+    """After a FAILED spike preempt (F2 round 3, m2 and decision 2): the window
+    is closed under spike_window's lock before `iemmode event`, so a window
+    preempt another process still has queued finds it closed and starts no
+    second bring-back next to the guard's (one meter-bridge trigger, the #9
+    lesson). The lock is waited for at most what the event budget leaves above
+    the guard's SWITCH_MIN_S; a lock that stays taken means a window process
+    may be bringing REAPER back itself: no iemmode call. Nothing else in the
+    state changes: the guard's event plan brings REAPER back."""
+    sw = spike_module()
+
+    def close(st: dict) -> None:
+        if not st.get("closed"):
+            st["closed"] = True
+            st["closed_by"] = {"by": "iempc event after a failed spike preempt", "at": now_iso(), "error": error[-500:]}
+
+    wait = deadline - time.monotonic() - SWITCH_MIN_S
+    try:
+        if wait <= 0:
+            raise sw.StepError(f"no time left in the event budget to wait for the window lock ({max(wait, 0):.0f} s)")
+        sw.update_state(change=close, wait_s=wait)
+    except sw.StepError as e:
+        raise StepError(f"the S1a/S1c window could not be closed after the failed spike preempt ({e}): no iemmode call "
+                        "while a window process may hold the window lock and bring REAPER back itself (one bring-back, "
+                        "the #9 lesson); run 'iempc event' again once it is free (spike_window.py status)") from None
+    except (OSError, ValueError) as e:
+        # An unreadable window state: no window process can bring REAPER back from it
+        # either (each preempt reads it first), so the guard's event path goes on.
+        print(f"iempc: WARNING: the S1a/S1c window state could not be read to close it ({e}); the event path goes on",
+              file=sys.stderr, flush=True)
+        emit({"spike_window": "unreadable", "after": "a failed spike preempt"})
+        return
+    emit({"spike_window": "closed", "after": "a failed spike preempt"})
+
+
 def switch_timeout(deadline: float) -> float:
     """What an iemmode call of the event path may take: the rest of the one
     budget. It never starts with less than SWITCH_MIN_S left, since a cut
@@ -809,6 +844,8 @@ def cmd_event(ctx: Ctx) -> int:
                                 "budget: no iemmode call while it may still be bringing REAPER back (one meter-bridge "
                                 "trigger, the #9 lesson); run 'iempc event' again once it has ended "
                                 "(spike_window.py status)")
+            if not pre["ok"]:
+                close_failed_window(deadline, pre.get("error", ""))
     args = ["event", "--dry-run"] if dry else ["event"]
     code, reply, raw = iemmode(ctx.env, args, switch_timeout(deadline), "ignore")
     emit(result("iemmode", args, code, reply, raw))
@@ -1134,12 +1171,15 @@ def handover_problems(r: dict, original: int) -> list[str]:
 
 
 def spike_module():
-    """spike_window.py, imported only for the hand-over (the event path runs it
-    as its own process)."""
+    """spike_window.py, imported for the hand-over and for closing a window
+    after a failed preempt (the preempt itself runs as its own process). Its
+    state file is the one this box reads (SPIKE_STATE), so both lock and read
+    one file."""
     if str(SPIKE_DIR) not in sys.path:
         sys.path.insert(0, str(SPIKE_DIR))
     import spike_window
 
+    spike_window.STATE = SPIKE_STATE
     return spike_window
 
 

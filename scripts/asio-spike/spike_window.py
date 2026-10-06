@@ -444,9 +444,11 @@ _held = threading.local()
 
 
 @contextmanager
-def window_lock() -> Iterator[None]:
-    """Holds the window lock. A holder that does not let go within
-    LOCK_WAIT_S is an owner alarm and a StepError, never a wait forever."""
+def window_lock(wait_s: float | None = None) -> Iterator[None]:
+    """Holds the window lock. A holder that does not let go within `wait_s`
+    (default LOCK_WAIT_S) is an owner alarm and a StepError, never a wait
+    forever."""
+    wait_s = LOCK_WAIT_S if wait_s is None else wait_s
     if getattr(_held, "depth", 0):
         _held.depth += 1
         try:
@@ -459,16 +461,16 @@ def window_lock() -> Iterator[None]:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
     try:
-        deadline = time.monotonic() + LOCK_WAIT_S
+        deadline = time.monotonic() + wait_s
         while True:
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 break
             except BlockingIOError:
                 if time.monotonic() > deadline:
-                    alarm(f"the window lock {path} was not free within {LOCK_WAIT_S:g} s: another window process "
+                    alarm(f"the window lock {path} was not free within {wait_s:g} s: another window process "
                           "holds it (an unwind or a bring-back?); check it before acting by hand")
-                    raise StepError(f"the window lock was not free within {LOCK_WAIT_S:g} s") from None
+                    raise StepError(f"the window lock was not free within {wait_s:g} s") from None
                 time.sleep(0.05)
         _held.depth = 1
         try:
@@ -489,10 +491,12 @@ def save_state(state: dict) -> None:
         tmp.replace(STATE)
 
 
-def update_state(fields: dict | None = None, change: Callable[[dict], None] | None = None) -> dict:
-    """One read-modify-write of the state as saved NOW, under the window lock:
-    `fields` merged in, then `change` applied. Returns the saved state."""
-    with window_lock():
+def update_state(fields: dict | None = None, change: Callable[[dict], None] | None = None,
+                 wait_s: float | None = None) -> dict:
+    """One read-modify-write of the state as saved NOW, under the window lock
+    (waited for at most `wait_s`, default LOCK_WAIT_S): `fields` merged in,
+    then `change` applied. Returns the saved state."""
+    with window_lock(wait_s):
         state = load_state()
         state.update(fields or {})
         if change is not None:
