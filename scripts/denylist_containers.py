@@ -4,10 +4,11 @@ A zip-based file (zip, docx, xlsx, odt, jar ...), a gzip, bzip2 or xz stream and
 their text in members, compressed in all but tar, so the raw bytes the scan reads hold none of it.
 expand() yields the blob itself and then each member, decompressed and expanded in turn, as
 `<path>!/<member name>` (a stream's one member has no name: `a.txt.gz!/`; a tar inside it is
-`b.tar.gz!/!/dir/note.txt`). Decompression is bounded: a member over MEMBER_LIMIT, over RATIO_LIMIT
-times its compressed size (past RATIO_FLOOR), past EXPANSION_LIMIT for the whole blob, past
-MEMBER_COUNT_LIMIT members or DEPTH_LIMIT levels, an encrypted member and a broken one are each a
-Problem, never a silent skip. A container no stdlib module reads (7z, RAR, zstd ...), a PDF with
+`b.tar.gz!/!/dir/note.txt`). Decompression is bounded per blob, every level together: a member over
+MEMBER_LIMIT, more than EXPANSION_LIMIT -- or, past RATIO_FLOOR, more than RATIO_LIMIT times the
+blob's size -- decompressed from the blob, more than MEMBER_COUNT_LIMIT members in it, containers
+nested more than DEPTH_LIMIT deep, an encrypted member and a broken one are each a Problem, never a
+silent skip. A container no stdlib module reads (7z, RAR, zstd ...), a PDF with
 streams (or binary content) and a PNG with a compressed text chunk are a Problem too; text that only
 starts like one is not. A Problem is allowlisted by its blob's key (blob_key, `--hash PATH blob`).
 """
@@ -25,10 +26,10 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
 MEMBER_LIMIT = 32 << 20        # bytes of one decompressed member
-EXPANSION_LIMIT = 128 << 20    # bytes decompressed from one blob, every member and level together
-RATIO_LIMIT = 100              # a member's size over its compressed size ...
-RATIO_FLOOR = 1 << 20          # ... checked once the member is larger than this
-MEMBER_COUNT_LIMIT = 10_000    # members of one container
+EXPANSION_LIMIT = 128 << 20    # bytes decompressed from one blob, every member and level together ...
+RATIO_LIMIT = 20               # ... and at most this many times the blob's size (#32 F5, G3 review 3) ...
+RATIO_FLOOR = 1 << 20          # ... once past this: a small office file may expand more
+MEMBER_COUNT_LIMIT = 10_000    # members of one blob, every level together
 DEPTH_LIMIT = 4                # containers inside containers
 # containers no stdlib module reads, by their magic bytes
 _UNREADABLE = ((b"7z\xbc\xaf\x27\x1c", "a 7z archive"), (b"Rar!\x1a\x07", "a RAR archive"),
@@ -54,19 +55,40 @@ class Problem:
 
 
 class _Budget:
-    """The bytes one blob may still expand to (EXPANSION_LIMIT)."""
+    """What one blob may still expand to, every level together: bytes and members (#32 F5, review of
+    lane G3, finding 3: limits per container let nested containers multiply them)."""
 
-    def __init__(self) -> None:
-        self.left = EXPANSION_LIMIT
+    def __init__(self, blob_size: int) -> None:
+        self.cap = min(EXPANSION_LIMIT, max(RATIO_FLOOR, RATIO_LIMIT * blob_size))
+        self.expanded = 0
+        self.members = 0
+        self.over = False  # a blob-wide limit was reached: nothing more of the blob is read
 
-    def problem(self, size: int, compressed: int) -> str | None:
-        """Why a member of `size` bytes (`compressed` stored) is not decompressed, or None."""
+    def room(self) -> int:
+        """The most bytes the next member may decompress to; reading one byte more shows it is over."""
+        return max(0, min(MEMBER_LIMIT, self.cap - self.expanded))
+
+    def problem(self, size: int) -> str | None:
+        """Why a member of `size` bytes is not decompressed, or None."""
         if size > MEMBER_LIMIT:
             return f"cannot be scanned: a member over {MEMBER_LIMIT >> 20} MiB"
-        if size > RATIO_FLOOR and size > RATIO_LIMIT * max(compressed, 1):
-            return f"cannot be scanned: a member compressed more than {RATIO_LIMIT}:1"
-        if size > self.left:
-            return f"cannot be scanned: more than {EXPANSION_LIMIT >> 20} MiB expanded from one blob"
+        if self.expanded + size > EXPANSION_LIMIT:
+            self.over = True
+            return f"cannot be scanned: more than {EXPANSION_LIMIT >> 20} MiB decompressed from one blob"
+        if self.expanded + size > self.cap:
+            self.over = True
+            return f"cannot be scanned: decompressed to more than {RATIO_LIMIT} times the blob"
+        return None
+
+    def spend(self, size: int) -> None:
+        self.expanded += size
+
+    def count(self, members: int) -> str | None:
+        """Count a container's members; why they are not read, or None."""
+        self.members += members
+        if self.members > MEMBER_COUNT_LIMIT:
+            self.over = True
+            return f"cannot be scanned: more than {MEMBER_COUNT_LIMIT} members in one blob"
         return None
 
 
@@ -168,10 +190,13 @@ def _zip_members(path: str, data: bytes, budget: _Budget) -> Iterator[Member | P
     except _ZIP_ERRORS:
         yield Problem(path, "cannot be scanned: a broken zip archive")
         return
-    if len(infos) > MEMBER_COUNT_LIMIT:
-        yield Problem(path, f"cannot be scanned: more than {MEMBER_COUNT_LIMIT} members")
+    problem = budget.count(len(infos))
+    if problem is not None:
+        yield Problem(path, problem)
         return
     for info in infos:
+        if budget.over:
+            return
         member = f"{path}!/{info.filename}"
         if info.is_dir() and info.compress_size == 0:
             yield Member(member, info.filename, b"")
@@ -179,22 +204,23 @@ def _zip_members(path: str, data: bytes, budget: _Budget) -> Iterator[Member | P
         if info.flag_bits & 0x1:
             yield Problem(member, "cannot be scanned: an encrypted zip member")
             continue
-        problem = budget.problem(info.file_size, info.compress_size)
+        problem = budget.problem(info.file_size)
         if problem is None:
-            content, problem = _zip_content(data, archive, info)
+            content, problem = _zip_content(data, archive, info, budget.room() + 1)
             if problem is None:  # the sizes a zip declares are read back, not trusted
-                problem = budget.problem(len(content), info.compress_size)
+                problem = budget.problem(len(content))
         if problem is not None:
             yield Problem(member, problem)
             continue
-        budget.left -= len(content)
+        budget.spend(len(content))
         yield Member(member, info.filename, content)
 
 
-def _zip_content(data: bytes, archive: zipfile.ZipFile, info: zipfile.ZipInfo) -> tuple[bytes, str | None]:
-    """A zip member's content, and why it cannot be scanned (or None). A stored or deflated member
-    is read from its own compressed bytes to their end (zipfile stops at the declared size, which a
-    crafted zip sets to 0); another method through zipfile."""
+def _zip_content(data: bytes, archive: zipfile.ZipFile, info: zipfile.ZipInfo,
+                 limit: int) -> tuple[bytes, str | None]:
+    """A zip member's content, at most `limit` bytes, and why it cannot be scanned (or None). A stored
+    or deflated member is read from its own compressed bytes to their end (zipfile stops at the
+    declared size, which a crafted zip sets to 0); another method through zipfile."""
     if info.compress_type in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
         at = info.header_offset
         if data[at:at + 4] != b"PK\x03\x04":
@@ -202,18 +228,18 @@ def _zip_content(data: bytes, archive: zipfile.ZipFile, info: zipfile.ZipInfo) -
         start = at + 30 + int.from_bytes(data[at + 26:at + 28], "little") + int.from_bytes(data[at + 28:at + 30], "little")
         stored = memoryview(data)[start:start + info.compress_size]
         if info.compress_type == zipfile.ZIP_STORED:
-            return bytes(stored[:MEMBER_LIMIT + 1]), None
+            return bytes(stored[:limit]), None
         decompressor = zlib.decompressobj(-15)
         try:
-            content = decompressor.decompress(stored, MEMBER_LIMIT + 1)
+            content = decompressor.decompress(stored, limit)
         except zlib.error:
             return b"", "cannot be scanned: a broken zip member"
-        if len(content) <= MEMBER_LIMIT and not decompressor.eof:
+        if len(content) < limit and not decompressor.eof:
             return b"", "cannot be scanned: a broken zip member"
         return content, None
     try:
         with archive.open(info) as stream:
-            return stream.read(MEMBER_LIMIT + 1), None
+            return stream.read(limit), None
     except NotImplementedError:
         return b"", f"cannot be scanned: zip compression method {info.compress_type}"
     except _ZIP_ERRORS:
@@ -228,7 +254,11 @@ _DECOMPRESSORS: dict[str, Callable[[], object]] = {
 def _stream_member(path: str, data: bytes, kind: str, budget: _Budget) -> Iterator[Member | Problem]:
     """The one member of a gzip, bzip2 or xz stream, concatenated streams joined across NUL padding
     (bytes after the last stream are left to the raw scan of the blob)."""
-    out, rest, limit, first = bytearray(), data, min(MEMBER_LIMIT, budget.left) + 1, True
+    problem = budget.count(1)
+    if problem is not None:
+        yield Problem(f"{path}!/", problem)
+        return
+    out, rest, limit, first = bytearray(), data, budget.room() + 1, True
     try:
         while rest and (first or rest.startswith(data[:3])):
             first = False
@@ -243,11 +273,11 @@ def _stream_member(path: str, data: bytes, kind: str, budget: _Budget) -> Iterat
     except (zlib.error, OSError, EOFError, lzma.LZMAError, ValueError):
         yield Problem(f"{path}!/", f"cannot be scanned: a broken {kind} stream")
         return
-    problem = budget.problem(len(out), len(data) - len(rest))
+    problem = budget.problem(len(out))
     if problem is not None:
         yield Problem(f"{path}!/", problem)
         return
-    budget.left -= len(out)
+    budget.spend(len(out))
     yield Member(f"{path}!/", "", bytes(out))
 
 
@@ -258,15 +288,18 @@ def _tar_members(path: str, data: bytes, budget: _Budget) -> Iterator[Member | P
     except (tarfile.TarError, EOFError, OSError, ValueError):
         yield Problem(path, "cannot be scanned: a broken tar archive")
         return
-    if len(infos) > MEMBER_COUNT_LIMIT:
-        yield Problem(path, f"cannot be scanned: more than {MEMBER_COUNT_LIMIT} members")
+    problem = budget.count(len(infos))
+    if problem is not None:
+        yield Problem(path, problem)
         return
     for info in infos:
+        if budget.over:
+            return
         member = f"{path}!/{info.name}"
         if not info.isfile():
             yield Member(member, info.name, b"")
             continue
-        problem = budget.problem(info.size, info.size)
+        problem = budget.problem(info.size)
         if problem is None:
             try:  # a sparse member's map, a header that lies about the size: tarfile raises
                 stream = archive.extractfile(info)
@@ -278,7 +311,7 @@ def _tar_members(path: str, data: bytes, budget: _Budget) -> Iterator[Member | P
         if problem is not None:
             yield Problem(member, problem)
             continue
-        budget.left -= len(content)
+        budget.spend(len(content))
         yield Member(member, info.name, content)
 
 
@@ -290,13 +323,13 @@ _READERS: dict[str, Callable[[str, bytes, _Budget], Iterator[Member | Problem]]]
 def expand(path: str, data: bytes) -> Iterator[Member | Problem]:
     """The blob itself (a Member named ""), then the members of the container it is, each expanded
     in turn, depth first; a part that cannot be scanned is a Problem."""
-    yield from _expand(Member(path, "", data), 0, _Budget())
+    yield from _expand(Member(path, "", data), 0, _Budget(len(data)))
 
 
 def _expand(part: Member, depth: int, budget: _Budget) -> Iterator[Member | Problem]:
     yield part
     kind = container_kind(part.data)
-    if kind is None:
+    if kind is None or budget.over:
         return
     if kind not in _READERS:
         yield Problem(part.path, f"cannot be scanned: {kind}")

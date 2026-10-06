@@ -430,7 +430,9 @@ def blob_findings(scanner: Scanner, prefix: str, path: str, data: bytes,
             continue
         if part.name:
             findings += [Hit(f"{prefix}{scanner.shown(part.path)}: path", entry) for entry in scanner.entries_in(part.name)]
-        found += [(part.path, label, key, entry) for label, key, entry in scanner.findings(part.path, scanner.batches(part.data))]
+        if part.data:  # an empty member (a directory) has a name only
+            found += [(part.path, label, key, entry)
+                      for label, key, entry in scanner.findings(part.path, scanner.batches(part.data))]
     if found and old is not None:
         present = present_units(path, old(), {(part_path, key) for part_path, _label, key, _entry in found})
         found = [hit for hit in found if (hit[0], hit[2]) not in present]
