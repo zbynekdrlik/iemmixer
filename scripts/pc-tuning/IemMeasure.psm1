@@ -84,12 +84,6 @@ function Invoke-IemXperf {
     return ,$out
 }
 
-function ConvertFrom-IemLoggers {
-    # Session names from `xperf -Loggers` ("Logger Name : <name>" lines).
-    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
-    return ,@($Text -split "`n" | ForEach-Object { if ($_ -match '^\s*Logger Name\s*:\s*(.+?)\s*$') { $Matches[1] } })
-}
-
 function Start-IemTrace {
     param([Parameter(Mandatory)][string]$Xperf, [Parameter(Mandatory)][string]$Dir, [switch]$CSwitch, [int]$CircularMB = 0)
     New-Item -ItemType Directory -Force -Path $Dir | Out-Null
@@ -97,31 +91,80 @@ function Start-IemTrace {
     [pscustomobject]@{ dir = $Dir; started = Get-IemNow }
 }
 
-function Select-OwnTraceSession {
-    # Module-private: of the running ETW sessions, those that are ours to stop.
-    # IemMarkers, and the NT Kernel Logger only while IemMarkers runs: that is the
-    # proof the kernel trace is ours, never another tool's (LatencyMon, ProcMon)
-    # (review R2).
-    param([AllowEmptyCollection()][string[]]$Running = @())
-    if (@($Running) -notcontains $script:MarkerSession) { return ,([string[]]@()) }
-    return ,([string[]]@(@($script:KernelSession, $script:MarkerSession) | Where-Object { @($Running) -contains $_ }))
+function Assert-TraceDir {
+    # Module-private: a trace's run folder is a folder on a drive, never a drive root
+    # or a relative path, under which every kernel trace would count as ours (#32
+    # MAJOR-1).
+    param([Parameter(Mandatory)][string]$Dir)
+    if ($Dir -notmatch '^[A-Za-z]:\\[^\\]+') { throw "trace directory '$Dir': not a folder on a drive (X:\folder); a drive root or a relative path is refused" }
+}
+
+function Test-OwnTraceOutput {
+    # Module-private (#32 MAJOR-1): whether logman's description of one session
+    # names an output file under Dir. Any line holding Dir and a path separator
+    # counts, case-insensitive: logman's field labels are localized, so none is
+    # keyed on.
+    param([AllowEmptyCollection()][string[]]$Lines = @(), [Parameter(Mandatory)][string]$Dir)
+    $prefix = $Dir.TrimEnd('\') + '\'
+    foreach ($l in @($Lines)) { if ($l.IndexOf($prefix, [StringComparison]::OrdinalIgnoreCase) -ge 0) { return $true } }
+    return $false
+}
+
+function Get-TraceOwnership {
+    # Module-private (#32 MAJOR-1): which of our sessions run and are ours to stop
+    # ('own', the kernel logger first), which run and are not ('kept'), and what
+    # could not be read ('errors'). Ownership is a property of the session itself:
+    # the NT Kernel Logger is ours exactly when its output file lies under Dir, the
+    # trace's run folder (logman query "NT Kernel Logger" -ets), never another
+    # tool's (LatencyMon, ProcMon); IemMarkers is ours by its name. Whether
+    # IemMarkers runs proves nothing about the kernel logger: xperf -on may start
+    # only the kernel logger, and a partial stop may leave it alone. When the list
+    # of sessions cannot be read, both are looked at.
+    param([Parameter(Mandatory)][string]$Dir, [Parameter(Mandatory)][int]$TimeoutSeconds)
+    Assert-TraceDir -Dir $Dir
+    $o = [pscustomobject]@{ own = @(); kept = @(); errors = @() }
+    $listed = $null
+    $q = Invoke-LogmanRun -Arguments @('query', '-ets') -TimeoutSeconds $TimeoutSeconds
+    if ($q.ok) {
+        $listed = @(foreach ($s in $script:KernelSession, $script:MarkerSession) {
+            if (@(@($q.out) | Where-Object { $_ -match ('^\s*' + [regex]::Escape($s) + '\s') }).Count -gt 0) { $s }
+        })
+    } else { $o.errors += $q.error }
+    if ($null -eq $listed -or $listed -contains $script:KernelSession) {
+        $k = Invoke-LogmanRun -Arguments @('query', $script:KernelSession, '-ets') -TimeoutSeconds $TimeoutSeconds
+        if (-not $k.ok) { $o.errors += "$($script:KernelSession): whose trace it is cannot be read, not stopped ($($k.error))" }
+        elseif (Test-OwnTraceOutput -Lines $k.out -Dir $Dir) { $o.own += $script:KernelSession }
+        else { $o.kept += $script:KernelSession }
+    }
+    if ($null -eq $listed -or $listed -contains $script:MarkerSession) { $o.own += $script:MarkerSession }
+    return $o
+}
+
+function Get-KeptTraceText {
+    # Module-private: the error a kept session is (#32 MAJOR-1).
+    param([AllowEmptyCollection()][string[]]$Kept = @())
+    return @(foreach ($s in @($Kept)) { "$s runs, but its output file is not under the trace directory: another tool's trace, not stopped" })
 }
 
 function Stop-IemTrace {
-    # Stops our sessions (none is fine: pre-emption may come twice). Without -Merge
-    # this is the pre-emption stop ("ide event"), Stop-IemTraceSessions: logman
-    # only, -Xperf is not used (review 3.6, R2). -Merge stops them with the verified
-    # xperf and merges them into -Name; the kernel logger only with IemMarkers (R2).
+    # Stops our sessions by Stop-IemTraceSessions' rule (#32 MAJOR-1). Without -Merge
+    # it IS Stop-IemTraceSessions: logman only, -Xperf is not used (review 3.6, R2).
+    # -Merge stops them with the verified xperf (the kernel logger first in its
+    # arguments) and merges them into -Name; it stops nothing while anything is
+    # unclear (a kernel logger that is not ours, a query that cannot be read): the
+    # plain stop then stops what is ours and reports the rest.
     param([Parameter(Mandatory)][string]$Xperf, [Parameter(Mandatory)][string]$Dir, [switch]$Merge, [string]$Name = 'trace.etl')
-    if (-not $Merge) { return Stop-IemTraceSessions }
-    $running = ConvertFrom-IemLoggers -Text ((Invoke-XperfRun -Xperf $Xperf -Arguments @('-Loggers') -Verify) -join "`n")
-    $own = Select-OwnTraceSession -Running $running
-    if ($own.Count -eq 0) { return [pscustomobject]@{ stopped = @(); via = 'xperf' } }
+    if (-not $Merge) { return Stop-IemTraceSessions -Dir $Dir }
+    $o = Get-TraceOwnership -Dir $Dir -TimeoutSeconds 30
+    $unclear = @($o.errors) + @(Get-KeptTraceText -Kept $o.kept)
+    if ($unclear.Count -gt 0) { throw ("trace stop with merge: $($unclear -join '; '); nothing stopped (Stop-IemTraceSessions stops what is ours)") }
+    if (@($o.own).Count -eq 0) { return [pscustomobject]@{ stopped = @(); kept = @(); via = 'xperf' } }
     $a = @()
-    if ($own -contains $script:KernelSession) { $a += '-stop' }
-    $a += @('-stop', $script:MarkerSession, '-d', (Join-Path $Dir $Name))
+    if (@($o.own) -contains $script:KernelSession) { $a += '-stop' }
+    if (@($o.own) -contains $script:MarkerSession) { $a += @('-stop', $script:MarkerSession) }
+    $a += @('-d', (Join-Path $Dir $Name))
     [void](Invoke-XperfRun -Xperf $Xperf -Arguments $a -Verify)
-    return [pscustomobject]@{ stopped = @($own); via = 'xperf' }
+    return [pscustomobject]@{ stopped = @($o.own); kept = @(); via = 'xperf' }
 }
 
 function Invoke-LogmanRun {
@@ -151,49 +194,32 @@ function Invoke-LogmanRun {
 }
 
 function Stop-IemTraceSessions {
-    # The pre-emption stop ("ide event", review 3.6, R2). It needs neither xperf nor
-    # IemTuning, so it works whatever else fails to load (-ArgumentList 'stop-only'
-    # loads nothing else): logman.exe stops IemMarkers, and the NT Kernel Logger
-    # only while IemMarkers runs, the proof the kernel trace is ours (another
-    # tool's is kept and reported). Each session is attempted on its own, each
-    # logman call is bounded, and every error is kept: it throws at the end,
-    # naming them all and what did stop.
-    param([ValidateRange(1, 600)][int]$TimeoutSeconds = 30)
-    $errors = @(); $stopped = @(); $kept = @()
-    $q = Invoke-LogmanRun -Arguments @('query', '-ets') -TimeoutSeconds $TimeoutSeconds
-    if ($q.ok) {
-        $running = @(foreach ($s in $script:MarkerSession, $script:KernelSession) {
-            if (@(@($q.out) | Where-Object { $_ -match ('^\s*' + [regex]::Escape($s) + '\s') }).Count -gt 0) { $s }
-        })
-        $own = Select-OwnTraceSession -Running $running
-        if ($running -contains $script:KernelSession -and $own -notcontains $script:KernelSession) { $kept += $script:KernelSession }
-        # IemMarkers, then the kernel logger (its proof was taken from the query):
-        # the second is tried whatever the first did.
-        foreach ($s in $script:MarkerSession, $script:KernelSession) {
-            if ($own -notcontains $s) { continue }
-            $r = Invoke-LogmanRun -Arguments @('stop', $s, '-ets') -TimeoutSeconds $TimeoutSeconds
-            if ($r.ok) { $stopped += $s } else { $errors += $r.error }
-        }
-    } else {
-        # Which sessions run is unknown: IemMarkers is ours whatever runs, so it is
-        # stopped; the kernel logger only once that stop proved IemMarkers ran.
-        $errors += $q.error
-        $r = Invoke-LogmanRun -Arguments @('stop', $script:MarkerSession, '-ets') -TimeoutSeconds $TimeoutSeconds
-        if ($r.ok) {
-            $stopped += $script:MarkerSession
-            $r = Invoke-LogmanRun -Arguments @('stop', $script:KernelSession, '-ets') -TimeoutSeconds $TimeoutSeconds
-            if ($r.ok) { $stopped += $script:KernelSession } else { $errors += $r.error }
-        } else {
-            $errors += $r.error
-            $errors += "$($script:KernelSession) not stopped: without IemMarkers it is not shown to be ours"
-        }
+    # The trace stop every caller uses: the pre-emption at "ide event", trace-stop,
+    # a failed measure's cleanup, a cut, the final stop (review 3.6, R2; #32 MAJOR-1).
+    # It needs neither xperf nor IemTuning, so it works whatever else fails to load
+    # (-ArgumentList 'stop-only' loads nothing else), and it is idempotent: nothing
+    # running is success. -Dir is the trace's run folder, which decides ownership
+    # (Get-TraceOwnership): the NT Kernel Logger is ours exactly when its output
+    # file lies there. logman.exe stops the kernel logger first and IemMarkers
+    # after it, each attempted on its own, each call bounded. Every error, output
+    # that was not read, and a kernel logger that runs but is not ours (kept) fail
+    # the call at the end, naming them all and what did stop: the caller keeps the
+    # trace recorded and alarms, never reads it as stopped.
+    param([Parameter(Mandatory)][string]$Dir, [ValidateRange(1, 600)][int]$TimeoutSeconds = 30)
+    $o = Get-TraceOwnership -Dir $Dir -TimeoutSeconds $TimeoutSeconds
+    $errors = @($o.errors); $stopped = @()
+    foreach ($s in $script:KernelSession, $script:MarkerSession) {
+        if (@($o.own) -notcontains $s) { continue }
+        $r = Invoke-LogmanRun -Arguments @('stop', $s, '-ets') -TimeoutSeconds $TimeoutSeconds
+        if ($r.ok) { $stopped += $s } else { $errors += $r.error }
     }
+    $errors += @(Get-KeptTraceText -Kept $o.kept)
     if ($errors.Count -gt 0) {
         $done = 'none'
         if ($stopped.Count -gt 0) { $done = $stopped -join ', ' }
         throw ("trace stop: $($errors -join '; ') (stopped: $done)")
     }
-    return [pscustomobject]@{ stopped = @($stopped); kept = @($kept); via = 'logman'; tuning_error = $script:TuningLoadError }
+    return [pscustomobject]@{ stopped = @($stopped); kept = @($o.kept); via = 'logman'; tuning_error = $script:TuningLoadError }
 }
 
 function Invoke-IemDpcIsr {

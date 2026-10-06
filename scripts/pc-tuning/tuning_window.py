@@ -344,8 +344,9 @@ def clear_trace() -> dict:
 
 def stop_trace(env: dict[str, str], state: dict, event: str):
     """Stops the recorded kernel trace without merging (quick; the raw files
-    stay on the PC) and clears it from the state."""
-    r = tps(env, f"Stop-IemTrace -Xperf {xperf(env)} -Dir {ps_quote(state['trace'])}", timeout=120, event=event)
+    stay on the PC) and clears it from the state once the stop is confirmed
+    (sw.check_trace_stop, #32 MAJOR-1); any other reply keeps it recorded."""
+    r = sw.check_trace_stop(tps(env, f"Stop-IemTrace -Xperf {xperf(env)} -Dir {ps_quote(state['trace'])}", timeout=120, event=event))
     clear_trace()
     return r
 
@@ -414,7 +415,7 @@ def start_trace(env: dict[str, str], run_dir: str, opt: str) -> None:
         check_event()
     except sw.EventNow:
         try:
-            tps(env, f"Stop-IemTrace -Xperf {xperf(env)} -Dir {ps_quote(run_dir)}", timeout=120, event="ignore")
+            sw.check_trace_stop(tps(env, f"Stop-IemTrace -Xperf {xperf(env)} -Dir {ps_quote(run_dir)}", timeout=120, event="ignore"))
         except StepError as e:
             sw.alarm(f"a kernel trace started as 'ide event' came did not stop ({e}): run tuning_window trace-stop")
         raise
@@ -539,8 +540,8 @@ def _measure(env, args, profile: dict, state: dict, run_dir: str, since: str, tr
             # A quick stop without the merge (the raw files are set aside and
             # merged with the analysis); "ide event" during it ends the measure
             # here, and no new kernel trace starts once the flag exists.
-            tps(env, f"Stop-IemTrace -Xperf {xperf(env)} -Dir {ps_quote(run_dir)} ; {set_aside(ps_quote(run_dir), cut['n'])}",
-                timeout=120, event="finish")
+            sw.check_trace_stop(tps(env, f"Stop-IemTrace -Xperf {xperf(env)} -Dir {ps_quote(run_dir)} ; {set_aside(ps_quote(run_dir), cut['n'])}",
+                                    timeout=120, event="finish"))
             check_event()
             start_trace(env, run_dir, opt)
 

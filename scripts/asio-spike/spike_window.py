@@ -691,6 +691,17 @@ def tuning_profile(env: dict[str, str]) -> str:
     return ps_quote(env["PC_TUNING_ROOT"] + "\\profile.json")
 
 
+def check_trace_stop(reply) -> dict:
+    """A trace stop's reply (Stop-IemTraceSessions): the PC throws on any error
+    and on a kernel logger that runs but is not ours (its output file is not
+    under the trace's run folder); a reply that is no stop result, or that
+    names a kept session, fails here too. Only a confirmed stop clears
+    state["trace"]; any other keeps it recorded (#32 MAJOR-1)."""
+    if not isinstance(reply, dict) or not isinstance(reply.get("stopped"), list) or reply.get("kept") != []:
+        raise StepError(f"the trace stop is not confirmed (reply {json.dumps(reply)})")
+    return reply
+
+
 def bring_back(env: dict[str, str], state: dict) -> dict:
     """REAPER through our own start task (only if it does not run), then the
     S1a handover checks."""
@@ -757,12 +768,14 @@ def _unwind(env: dict[str, str], state: dict, running: bool, bring_back_reaper: 
             done.append({"stop-spike": gone})
         elif step == "trace-stop":
             try:
-                r = ps(env, tuning_body(env, f"Stop-IemTrace -Xperf {ps_quote(env['PC_XPERF'])} -Dir {ps_quote(state['trace'])}"), timeout=120, event="ignore")
+                r = check_trace_stop(ps(env, tuning_body(env, f"Stop-IemTrace -Xperf {ps_quote(env['PC_XPERF'])} -Dir {ps_quote(state['trace'])}"),
+                                        timeout=120, event="ignore"))
                 state["trace"] = None
                 save_state(state)
                 done.append({"trace-stop": r})
             except StepError as e:
-                alarm(f"the kernel trace did not stop ({e}); stop it with xperf -stop -stop IemMarkers")
+                # The trace stays recorded: trace-stop or the next preempt retries it.
+                alarm(f"the kernel trace did not stop ({e}); it stays recorded in the window: tuning_window trace-stop retries it")
                 done.append({"trace-stop": {"error": str(e)}})
         elif step == "tuning-exit":
             try:
