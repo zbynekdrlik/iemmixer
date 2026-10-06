@@ -8,8 +8,8 @@ expand() yields the blob itself and then each member, decompressed and expanded 
 times its compressed size (past RATIO_FLOOR), past EXPANSION_LIMIT for the whole blob, past
 MEMBER_COUNT_LIMIT members or DEPTH_LIMIT levels, an encrypted member and a broken one are each a
 Problem, never a silent skip. A container no stdlib module reads (7z, RAR, zstd ...), a PDF with
-compressed or encrypted streams and a PNG with a compressed text chunk are a Problem too. A Problem
-is allowlisted by its blob's key (blob_key, `--hash PATH blob`).
+streams (or binary content) and a PNG with a compressed text chunk are a Problem too; text that only
+starts like one is not. A Problem is allowlisted by its blob's key (blob_key, `--hash PATH blob`).
 """
 from __future__ import annotations
 
@@ -119,22 +119,38 @@ def _is_zip(data: bytes) -> bool:
     return True
 
 
+def _text(data: bytes) -> bool:
+    """Valid UTF-8 without a NUL byte: text, read as such even when it starts like a container (a
+    compressed stream or an archive with binary headers never is)."""
+    if b"\0" in data:
+        return False
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
 def container_kind(data: bytes) -> str | None:
     """The kind of container a blob is -- one of _READERS, or the description of one that cannot
-    be scanned -- or None."""
+    be scanned -- or None. Text that only starts with a container's magic bytes is no container."""
     for magic, kind in _UNREADABLE:
         if data.startswith(magic):
-            return kind
+            return None if _text(data) else kind
     if data.startswith(b"\x1f\x8b\x08"):
         return "gzip"
     if _BZIP2.match(data):
-        return "bzip2"
+        return None if _text(data) else "bzip2"
     if data.startswith(b"\xfd7zXZ\x00"):
         return "xz"
     if _is_tar(data):
         return "tar"
-    if data.startswith(b"%PDF-") and (b"/Filter" in data or b"/Encrypt" in data):
-        return "a PDF with compressed or encrypted streams"
+    if data.startswith(b"%PDF-"):  # any stream may be compressed, encoded or encrypted, under a
+        # filter name a text check cannot find (`/Fil#74er`)
+        if b"endstream" in data:
+            return "a PDF with streams"
+        if not _text(data):
+            return "a binary PDF"
     if data.startswith(_PNG) and _png_compressed_text(data):
         return "a PNG with a compressed text chunk"
     if _is_zip(data):
