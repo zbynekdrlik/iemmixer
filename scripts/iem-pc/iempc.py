@@ -1156,6 +1156,9 @@ def cmd_handover_s1a(ctx: Ctx) -> int:
         if state.get("card") != "free":
             raise Refused(f"S1a window {state.get('id')}: the card is '{state.get('card')}', not free; close it with "
                           "spike_window.py to-event")
+        if sw.intent_live(state.get("in_flight")):
+            raise Refused(f"S1a window {state.get('id')}: a PC step is in flight ({state['in_flight'].get('step')}): "
+                          "wait for it")
         body = (f"$p = Get-SpikeBufferPref -Key {ps_quote(spike_env['PC_BUFFER_KEY'])} -Name {ps_quote(spike_env['PC_BUFFER_NAME'])} ; "
                 f"$h = Get-GoldenAsioHolders -Module {ps_quote(spike_env['PC_ASIO_MODULE'])} ; "
                 f"$t = Get-ScheduledTask {sw.TASK} -ErrorAction SilentlyContinue ; "
@@ -1178,6 +1181,9 @@ def cmd_handover_s1a(ctx: Ctx) -> int:
             raise Refused(f"S1a window {state.get('id')} was closed meanwhile (a preempt or to-event): nothing handed over")
         if st.get("card") != "free":
             raise StepError(f"S1a window {state.get('id')}: the card is '{st.get('card')}' now, not free: the window stays open")
+        if sw.intent_live(st.get("in_flight")):
+            raise StepError(f"S1a window {state.get('id')}: a PC step is in flight now ({st['in_flight'].get('step')}): "
+                            "the window stays open")
         st["closed"] = True
         st["handed_over"] = {"to": "iemmixer guard (S6)", "at": now_iso(), "checks": r}
 

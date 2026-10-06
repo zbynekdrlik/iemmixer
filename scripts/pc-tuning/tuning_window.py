@@ -323,12 +323,46 @@ def record_measurement(row: dict) -> None:
     sw.update_state(change=lambda st: st.setdefault("measurements", []).append(row))
 
 
+# The tuning steps that change the PC (enter, exit, apply, undo) are PC changes
+# with an intent (sw.pc_change, F2 round 3 MAJOR): their bounds are the ssh
+# calls' bounds, and their bodies refuse on the PC while the spike's stop file
+# exists, before the tuning modules load (tps_change).
+MODE_S = 240
+APPLY_S = 600
+
+
+def tps_change(env: dict[str, str], body: str, **kw):
+    return sw.ps(env, sw.changing(env, sw.tuning_body(env, body)), **kw)
+
+
+def late_journal(env: dict[str, str], step: str):
+    """A journal step that ended after the window was closed: the preempt
+    deferred its tuning-exit to it (two journal writers at once lose entries),
+    so the exit runs here, now that the step's own write is over — always after
+    an enter (it may have applied levers after the pre-emption), after the
+    others while the mode is recorded as entered. An apply or undo changed
+    global levers during the event: the owner hears it."""
+    def follow_up(state: dict) -> None:
+        if step in ("apply", "undo"):
+            sw.alarm(f"{step} ended after the window was pre-empted: the global levers it changed stay as they are (no "
+                     "mode levers); compare the REAPER fingerprint (fingerprint --check) in the next window")
+        if step == "enter" or state.get("tuning_mode"):
+            rows = as_list(tps(env, f"Exit-IemTuningMode -ProfilePath {sw.tuning_profile(env)}", timeout=MODE_S, event="ignore"))
+            sw.update_state({"tuning_mode": False})
+            print(json.dumps({"late-exit": rows}), flush=True)
+            sw.alarm_exit_problems(rows)
+    return follow_up
+
+
 def cmd_enter(env, args) -> None:
-    state = sw.open_state()
-    need_free(state)
+    need_free(sw.open_state())
     only = mode_only(args.only)
-    sw.update_state({"tuning_mode": True})   # recorded before the action: preempt reverts even a half-done enter
-    rows = as_list(tps(env, f"Enter-IemTuningMode -ProfilePath {sw.tuning_profile(env)} -Only @({', '.join(ps_quote(x) for x in only)}) -Idle {ps_quote(args.idle)}", timeout=240))
+    # tuning_mode is recorded with the intent, before the action: a preempt reverts
+    # even a half-done enter (or the late enter does, MAJOR).
+    rows = as_list(sw.pc_change("enter", MODE_S, lambda: tps_change(
+        env, f"Enter-IemTuningMode -ProfilePath {sw.tuning_profile(env)} -Only @({', '.join(ps_quote(x) for x in only)}) "
+             f"-Idle {ps_quote(args.idle)}", timeout=MODE_S),
+        fields={"tuning_mode": True}, check=need_free, late=late_journal(env, "enter")))
     record_step({"enter": only, "idle": args.idle, "at": stamp()})
     print(json.dumps({"enter": rows}))
     failed = [r for r in rows if r.get("action") == "failed"]
@@ -338,8 +372,9 @@ def cmd_enter(env, args) -> None:
 
 def cmd_exit(env, args) -> None:
     sw.open_state()
-    rows = as_list(tps(env, f"Exit-IemTuningMode -ProfilePath {sw.tuning_profile(env)}", timeout=240))
-    sw.update_state({"tuning_mode": False})
+    rows = as_list(sw.pc_change("exit", MODE_S, lambda: tps_change(env, f"Exit-IemTuningMode -ProfilePath {sw.tuning_profile(env)}",
+                                                                   timeout=MODE_S),
+                                after={"tuning_mode": False}, late=late_journal(env, "exit")))
     print(json.dumps({"exit": rows}))
     sw.alarm_exit_problems(rows)   # the exit completed; unconvertible journal entries reach the owner
 
@@ -352,9 +387,11 @@ def only_arg(text: str) -> str:
 
 
 def cmd_apply(env, args) -> None:
-    state = sw.open_state()
-    need_free(state)
-    rows = as_list(tps(env, f"Invoke-IemTuningApply -ProfilePath {sw.tuning_profile(env)} -Tier {args.tier} -Only {only_arg(args.only)}", timeout=600))
+    need_free(sw.open_state())
+    only = only_arg(args.only)
+    rows = as_list(sw.pc_change("apply", APPLY_S, lambda: tps_change(
+        env, f"Invoke-IemTuningApply -ProfilePath {sw.tuning_profile(env)} -Tier {args.tier} -Only {only}", timeout=APPLY_S),
+        check=need_free, late=late_journal(env, "apply")))
     record_step({"apply": args.tier, "only": args.only, "at": stamp()})
     print(json.dumps({"apply": rows}))
     failed = [r for r in rows if r.get("action") == "failed"]
@@ -363,9 +400,11 @@ def cmd_apply(env, args) -> None:
 
 
 def cmd_undo(env, args) -> None:
-    state = sw.open_state()
-    need_free(state)
-    rows = as_list(tps(env, f"Undo-IemTuning -ProfilePath {sw.tuning_profile(env)} -Tier {args.tier} -Only {only_arg(args.only)}", timeout=600))
+    need_free(sw.open_state())
+    only = only_arg(args.only)
+    rows = as_list(sw.pc_change("undo", APPLY_S, lambda: tps_change(
+        env, f"Undo-IemTuning -ProfilePath {sw.tuning_profile(env)} -Tier {args.tier} -Only {only}", timeout=APPLY_S),
+        check=need_free, late=late_journal(env, "undo")))
     record_step({"undo": args.tier, "only": args.only, "at": stamp()})
     print(json.dumps({"undo": rows}))
     # Fail loud on any un-reverted item, like cmd_apply (I2, script-failure-policy):
@@ -739,6 +778,10 @@ def cmd_reboot_prepare(env, args) -> None:
     with sw.window_lock():
         state = sw.open_state()
         need_free(state)
+        intent = state.get("in_flight")
+        if sw.intent_live(intent):
+            # Another process's step still changes the PC: no cleanly preempted window (MAJOR).
+            raise StepError(f"a PC step is in flight ({intent['step']}): wait for it; no reboot prepared")
         running = sw.spike_running(env)
         # A reboot is prepared only over a cleanly preempted window (I1). unwind
         # raises (after an owner alarm) before the buffer write when the spike was
@@ -865,6 +908,9 @@ def cmd_post_boot(env, args) -> None:
             back = "error" not in checks["handover"]
             if back:
                 sw.update_state({"card": "reaper", "closed": True})
+                # reboot-prepare's unwind wrote the spike's stop file and kept it (the
+                # window stayed open); this close removes it (F2 round 3, m1).
+                checks["stop_file"] = sw.clear_stop(env)
     if sw.event_now():
         # The read-only checks wait for a dev window; main() pre-empts (a window
         # still open because the bring-back failed gets another one there).

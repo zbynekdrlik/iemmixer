@@ -25,6 +25,7 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import TypeVar
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "golden"))
 from golden_window import StepError, check_signal, interlock_hits, parse_meter_peaks, ps_quote  # noqa: E402
@@ -520,6 +521,193 @@ def spike_running(env: dict[str, str], event: str = "abandon") -> bool:
     return bool(ps(env, "@(Get-Process -Name asio_spike -ErrorAction SilentlyContinue).Count", timeout=60, event=event))
 
 
+# ---- PC changes in flight (F2 round 3, MAJOR: decision 1, intents and settling) ----
+#
+# The window lock guards the state, never a PC call (approach 2, holding it
+# across the call, would make "ide event" wait for a save and quit or an enter).
+# So every step that changes what the event depends on (REAPER and the card, the
+# driver's preferred buffer, the spike, the tuning levers and journal) records an
+# intent {step, started, bound_s} in the state under the lock BEFORE its ssh call
+# and clears it after, on error too (pc_change). A preempt that finds one in
+# flight still brings REAPER back at once, then watches, bounded, that REAPER runs
+# and holds the card, and brings it back again when the late step took it down
+# (settle). The late step sees the window closed and undoes what it may have left
+# (late handlers). On the PC every such step starts only while the spike's stop
+# file is absent (step_guard): every preempt writes it first, and only the unwind
+# that closes the window removes it again (clear_stop, F2 round 3 m1).
+STOP_FILE = "queue/stop"
+STEP_REFUSED = "ide event: the step did not start"
+SETTLE_S = 15.0
+SAVE_QUIT_S = 120   # to-dev: Invoke-GoldenSaveQuit (save <= 15 s, quit <= 30 s, the requests and the holder read)
+SET_BUFFER_S = 60   # one registry write and its read-back
+RUN_START_S = 60    # the request file and the task start
+# The steps that write the S1c tuning journal: the preempt never runs its own
+# tuning-exit while one is in flight (two writers at once lose journal entries);
+# the late step runs the exit itself.
+JOURNAL_STEPS = ("enter", "exit", "apply", "undo")
+
+
+def step_guard(env: dict[str, str]) -> str:
+    """The PC-side start of a step that changes the PC: it throws, changing
+    nothing, while the spike's stop file exists — a preempt wrote it (the step
+    was sent before "ide event"), or the last unwind did not remove it. It comes
+    before any module import."""
+    return (f"if (Test-Path -LiteralPath {pc(env, STOP_FILE)}) {{ throw '{STEP_REFUSED} (the spike stop file exists: "
+            "a pre-emption runs, or the last unwind did not remove it)' }")
+
+
+def changing(env: dict[str, str], body: str) -> str:
+    return f"{step_guard(env)} ; {body}"
+
+
+def intent_live(intent) -> bool:
+    """A recorded intent whose step may still be changing the PC: its bound is
+    not over yet. A later one is stale (its process ended without clearing it)."""
+    return isinstance(intent, dict) and time.time() <= float(intent.get("started", 0)) + float(intent.get("bound_s", 0))
+
+
+def begin_change(step: str, bound_s: float, fields: dict | None = None, check: Callable[[dict], None] | None = None) -> dict:
+    """Under the window lock, on the state as saved now: the window is open and
+    no "ide event" flag exists (open_state), `check` passes and no other change
+    is in flight; then `fields` and the intent are saved. Returns the intent."""
+    with window_lock():
+        state = open_state()
+        if check is not None:
+            check(state)
+        other = state.get("in_flight")
+        if intent_live(other):
+            raise StepError(f"another PC step is in flight ({other['step']}, at most {other['bound_s']:g} s): wait for it")
+        if other:
+            alarm(f"an earlier {other.get('step')} never cleared its intent (its process ended, or its call outlived its "
+                  "bound): check what it left on the PC")
+        intent = {"step": step, "started": time.time(), "bound_s": bound_s}
+        state.update(fields or {})
+        state["in_flight"] = intent
+        save_state(state)
+        return intent
+
+
+def end_change(intent: dict, fields: dict | None = None, late: Callable[[dict], None] | None = None) -> dict:
+    """After the step's call (or its error): while the window is open, `fields`
+    are merged and the intent cleared, under the lock. When a preempt or
+    to-event closed the window meanwhile, `late` runs first (without the lock,
+    the intent still recorded, so a settle watch goes on meanwhile) with the
+    state as saved then; its error is an owner alarm. Returns the state as saved."""
+    def clear(st: dict) -> None:
+        if st.get("in_flight") == intent:
+            st["in_flight"] = None
+
+    with window_lock():
+        state = load_state()
+        if not state.get("closed"):
+            state.update(fields or {})
+            clear(state)
+            save_state(state)
+            return state
+    if late is not None:
+        try:
+            late(state)
+        except StepError as e:
+            alarm(f"{intent['step']} ended after the window was closed, and its follow-up failed ({e}): check the PC")
+    return update_state(change=clear)
+
+
+T = TypeVar("T")
+
+
+def pc_change(step: str, bound_s: float, call: Callable[[], T], fields: dict | None = None, after: dict | None = None,
+              check: Callable[[dict], None] | None = None, late: Callable[[dict], None] | None = None) -> T:
+    """One step that changes the PC: begin_change, the call (its ssh call runs
+    without the lock, bounded by `bound_s`), end_change with `after` (what its
+    success records) or, after an error, nothing. A step whose window was
+    closed while it ran raises EventNow ("ide event", the usual case) or a
+    StepError (to-event in another process), after its late handler. A body
+    the PC refused on the stop file is "ide event" when the flag exists."""
+    intent = begin_change(step, bound_s, fields, check)
+    try:
+        result = call()
+    except StepError as e:
+        end_change(intent, late=late)
+        if STEP_REFUSED in str(e):
+            if event_now():
+                raise EventNow() from None
+            raise StepError(f"{step} did not start: the spike's stop file exists on the PC, but no \"ide event\" flag "
+                            "here: an earlier pre-emption did not remove it (to-event, or a preempt, that closes a "
+                            f"window removes it) ({e})") from None
+        raise
+    except BaseException:
+        end_change(intent, late=late)
+        raise
+    if end_change(intent, after, late).get("closed"):
+        if event_now():
+            raise EventNow()
+        raise StepError(f"the window was closed (to-event) while {step} ran")
+    return result
+
+
+def reaper_on_card(env: dict[str, str]) -> bool:
+    """REAPER runs and is the one holder of the ASIO module (read-only)."""
+    r = ps(env, f"[pscustomobject]@{{ reaper = @(Get-Process reaper -ErrorAction SilentlyContinue).Count; "
+                f"holders = @(Get-GoldenAsioHolders -Module {ps_quote(env['PC_ASIO_MODULE'])}) }}", timeout=60, event="ignore")
+    if not isinstance(r, dict):
+        raise StepError(f"REAPER's state could not be read (reply {json.dumps(r)})")
+    holders = r.get("holders")
+    holders = holders if isinstance(holders, list) else [] if holders is None else [holders]
+    return bool(r.get("reaper")) and sum(str(h).lower().startswith("reaper.exe:") for h in holders) == 1
+
+
+def settle(env: dict[str, str], intent: dict) -> dict:
+    """After a bring-back that found a PC change in flight: watches that REAPER
+    runs and holds the card, every POLL_S, and brings it back again (under the
+    window lock, an owner alarm) when the late step took it down. The watch
+    ends SETTLE_S after the step's process cleared its intent (its call and
+    follow-up are back), and at the latest SETTLE_S after the intent's own
+    bound. It runs without the lock, so that process can clear the intent."""
+    end = float(intent["started"]) + float(intent["bound_s"]) + SETTLE_S
+    cleared = False
+    watched = {"step": intent["step"], "checks": 0, "brought_back_again": 0}
+    while True:
+        if not cleared and load_state().get("in_flight") != intent:
+            cleared = True
+            end = min(end, time.time() + SETTLE_S)
+        watched["checks"] += 1
+        if not reaper_on_card(env):
+            with window_lock():
+                alarm(f"REAPER was down or off the card after the bring-back ({intent['step']} was still in flight): "
+                      "it is brought back again")
+                bring_back(env, load_state())
+            watched["brought_back_again"] += 1
+        if time.time() >= end:
+            return watched
+        time.sleep(POLL_S)
+
+
+def clear_stop(env: dict[str, str]) -> str:
+    """The spike's stop file, removed by the unwind that closed the window (and
+    post-boot's close), never by a start, which refuses while it exists (F2
+    round 3, m1). Kept while the spike or its task runs. A failure is an owner
+    alarm: the next start refuses until an unwind removes it."""
+    body = (f"$s = {pc(env, STOP_FILE)} ; if ((@(Get-Process -Name asio_spike -ErrorAction SilentlyContinue).Count -gt 0) -or "
+            "(Test-SpikeTaskBusy)) { 'kept: the spike or its task runs' } elseif (Test-Path -LiteralPath $s) "
+            "{ Remove-Item -LiteralPath $s ; 'removed' } else { 'absent' }")
+    with window_lock():
+        try:
+            return ps(env, body, timeout=60, event="ignore")
+        except StepError as e:
+            alarm(f"the spike's stop file was not removed ({e}): the next start refuses until an unwind removes it")
+            return f"error: {e}"
+
+
+def close_out(env: dict[str, str], intent) -> dict:
+    """After an unwind that closed the window (REAPER back): the settle watch
+    when a PC change was recorded in flight, then the stop file's clean-up."""
+    out: dict = {}
+    if isinstance(intent, dict):
+        out["settle"] = settle(env, intent)
+    out["stop_file"] = clear_stop(env)
+    return out
+
+
 # ---- commands ----
 
 def cmd_new(env, args) -> None:
@@ -597,39 +785,74 @@ def cmd_preflight(env, args) -> None:
     print(json.dumps({"preflight": r}))
 
 
-def cmd_to_dev(env, args) -> None:
-    state = open_state()
+def need_reaper_card(state: dict) -> None:
     if state["card"] != "reaper" or "preflight" not in state:
         raise StepError("run preflight first (REAPER must hold the card)")
+
+
+def need_free_card(state: dict) -> None:
+    need_preflight(state)
+    if state["card"] != "free":
+        raise StepError("the card is not free (run to-dev)")
+
+
+def late_quit(env: dict[str, str]) -> Callable[[dict], None]:
+    """A save and quit that ended after the window closed: the preempt's settle
+    watched REAPER for the step's bound; past it the step is checked here."""
+    def check(state: dict) -> None:
+        if not reaper_on_card(env):
+            alarm("REAPER is not on the card after a save and quit that ended after the pre-emption: run the event "
+                  "path again (iempc event, or the interim switch) so REAPER comes back")
+    return check
+
+
+def late_buffer(env: dict[str, str]) -> Callable[[dict], None]:
+    """A buffer write that ended after the window closed: the preempt restored
+    the original before the bring-back, so the value is read again; it is
+    never written here, REAPER may hold the driver (I2)."""
+    def check(state: dict) -> None:
+        r = ps(env, f"Get-SpikeBufferPref -Key {ps_quote(env['PC_BUFFER_KEY'])} -Name {ps_quote(env['PC_BUFFER_NAME'])}",
+               timeout=60, event="ignore")
+        if (r or {}).get("value") != state["pref_original"]:
+            alarm(f"the driver's preferred buffer reads {(r or {}).get('value')} after a set-buffer that ended after the "
+                  f"pre-emption, not the original {state['pref_original']}: it is not written while REAPER may hold the "
+                  "driver (I2); tell the owner")
+    return check
+
+
+def cmd_to_dev(env, args) -> None:
+    need_reaper_card(open_state())
     texts = ps(env, f"Get-GoldenMeterSamples -Http {ps_quote(env['PC_REAPER_HTTP'])} -Seconds 60", timeout=180, event="abandon")
     hits = interlock_hits([parse_meter_peaks(t) for t in texts])
     if hits:
         raise StepError(f"band activity: peaks above -50 dBFS on tracks {sorted(hits)}; no switch, alarm the owner")
-    update_state({"card": "switching"})
-    r = ps(env, f"Invoke-GoldenSaveQuit -Http {ps_quote(env['PC_REAPER_HTTP'])} -Project {ps_quote(env['PC_MAIN_PROJECT'])} -AsioModule {ps_quote(env['PC_ASIO_MODULE'])}", timeout=120)
-    update_state({"card": "free"})
+    # "switching" is recorded with the intent, before the save and quit: a preempt
+    # meanwhile brings REAPER back (card away) and settles until the quit is over.
+    body = (f"Invoke-GoldenSaveQuit -Http {ps_quote(env['PC_REAPER_HTTP'])} -Project {ps_quote(env['PC_MAIN_PROJECT'])} "
+            f"-AsioModule {ps_quote(env['PC_ASIO_MODULE'])}")
+    r = pc_change("to-dev", SAVE_QUIT_S, lambda: ps(env, changing(env, body), timeout=SAVE_QUIT_S),
+                  fields={"card": "switching"}, after={"card": "free"}, check=need_reaper_card, late=late_quit(env))
     print(json.dumps({"to-dev": r, "app": "kept running"}))
 
 
 def cmd_set_buffer(env, args) -> None:
     state = open_state()
-    need_preflight(state)
-    if state["card"] != "free":
-        raise StepError("the card is not free (run to-dev)")
+    need_free_card(state)
     if args.frames not in FRAMES:
         raise StepError(f"--frames must be one of {FRAMES}")
     if spike_running(env):
         raise StepError("a spike runs")
-    update_state({"pref_current": args.frames, "pref_restored": False})   # recorded before the write: preempt restores
-    r = ps(env, f"Set-SpikeBufferPref -Key {ps_quote(env['PC_BUFFER_KEY'])} -Name {ps_quote(env['PC_BUFFER_NAME'])} -Value {args.frames} -Original {state['pref_original']}")
+    # pref_current is recorded with the intent, before the write: a preempt restores it.
+    body = (f"Set-SpikeBufferPref -Key {ps_quote(env['PC_BUFFER_KEY'])} -Name {ps_quote(env['PC_BUFFER_NAME'])} "
+            f"-Value {args.frames} -Original {state['pref_original']}")
+    r = pc_change("set-buffer", SET_BUFFER_S, lambda: ps(env, changing(env, body), timeout=SET_BUFFER_S),
+                  fields={"pref_current": args.frames, "pref_restored": False}, check=need_free_card, late=late_buffer(env))
     print(json.dumps({"set-buffer": r}))
 
 
 def cmd_run(env, args, on_poll=None) -> dict:
     state = open_state()
-    need_preflight(state)
-    if state["card"] != "free":
-        raise StepError("the card is not free (run to-dev)")
+    need_free_card(state)
     check_request(args.mode, args.frames, args.seconds, args.burn_us, args.stress, args.cycles,
                   getattr(args, "cpu", None), getattr(args, "threshold_us", 10),
                   getattr(args, "audio_cpus", "") or "", getattr(args, "stress_cpus", "") or "")
@@ -637,8 +860,10 @@ def cmd_run(env, args, on_poll=None) -> dict:
     if args.mode in ("duplex", "reopen") and args.frames != current:
         raise StepError(f"the driver's preferred buffer is {current}: run set-buffer --frames {args.frames} first")
     fields = run_fields(env, args)
-    rid = ps(env, f"Remove-Item -LiteralPath {pc(env, 'queue/stop')} -ErrorAction SilentlyContinue ; "
-                  f"$id = Write-GoldenRequest -Root {ps_quote(env['PC_ROOT'])} -Kind 'spike' -Fields {ps_hashtable(fields)} ; Start-SpikeTask ; $id")
+    # The start never removes the stop file and refuses while it exists (F2 round 3,
+    # m1): only the unwind that closes the window removes it (clear_stop).
+    body = f"$id = Write-GoldenRequest -Root {ps_quote(env['PC_ROOT'])} -Kind 'spike' -Fields {ps_hashtable(fields)} ; Start-SpikeTask ; $id"
+    rid = pc_change("run", RUN_START_S, lambda: ps(env, changing(env, body), timeout=RUN_START_S), check=need_free_card)
     update_state(change=lambda st: st["runs"].append({"request": rid, **fields}))
     status_path, progress_path = pc(env, f"status/{rid}.json"), pc(env, f"status/{rid}.progress.json")
     watch = (f"$s = {status_path} ; $p = {progress_path} ; [pscustomobject]@{{ "
@@ -814,6 +1039,13 @@ def _unwind(env: dict[str, str], state: dict, running: bool, bring_back_reaper: 
                 alarm(f"the kernel trace did not stop ({e}); it stays recorded in the window: tuning_window trace-stop retries it")
                 done.append({"trace-stop": {"error": str(e)}})
         elif step == "tuning-exit":
+            intent = state.get("in_flight")
+            if intent_live(intent) and intent.get("step") in JOURNAL_STEPS:
+                # Another process's enter/exit/apply/undo still writes the tuning
+                # journal: two writers at once lose entries, so that step runs the
+                # exit itself once its call is back (its late handler, MAJOR).
+                done.append({"tuning-exit": {"deferred": f"{intent['step']} is in flight: it runs the exit when its call is back"}})
+                continue
             try:
                 r = ps(env, tuning_body(env, f"Exit-IemTuningMode -ProfilePath {tuning_profile(env)}"), timeout=240, event="ignore")
                 state["tuning_mode"] = False
@@ -857,22 +1089,31 @@ def cmd_to_event(env, args) -> None:
         state = open_state()
         if spike_running(env):
             raise StepError("a spike runs: wait for it, or preempt")
-        print(json.dumps({"to-event": unwind(env, state, running=False)}))
+        intent = state.get("in_flight")
+        done = unwind(env, state, running=False)
+    # The window is closed with REAPER back; a change of another process still in
+    # flight is watched out without the lock (settle), then the stop file goes.
+    print(json.dumps({"to-event": done}), flush=True)
+    print(json.dumps({"close": close_out(env, intent)}))
 
 
 def cmd_preempt(env, args=None) -> None:
     """Brings REAPER back once, whoever asks: under the window lock the state
     is read again, and a window another process already closed (REAPER back)
-    is left alone."""
+    is left alone. A PC change in flight is settled after the bring-back, and
+    the stop file removed once the window closed (close_out)."""
     with window_lock():
         state = load_state()
         if state.get("closed"):
             print(json.dumps({"preempt": state["id"], "plan": [], "note": "window already closed"}))
             return
         running = spike_running(env, event="ignore")
-        print(json.dumps({"preempt": state["id"], "plan": undo_plan(state, running)}), flush=True)
+        intent = state.get("in_flight")
+        print(json.dumps({"preempt": state["id"], "plan": undo_plan(state, running), "in_flight": intent}), flush=True)
         state["preempted"] = True
-        print(json.dumps({"done": unwind(env, state, running)}))
+        done = unwind(env, state, running)
+    print(json.dumps({"done": done}), flush=True)
+    print(json.dumps({"close": close_out(env, intent)}))
 
 
 # Steps inside an open window: an error in one while the flag exists pre-empts.
