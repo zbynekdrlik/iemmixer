@@ -940,6 +940,16 @@ class DenylistScanTests(unittest.TestCase):
         self.assertEqual(self.hash_key("a.txt", "1"), ds.line_key("a.txt", "keep zyxname here"))
         self.assertEqual(self.hash_key("a:b.txt", "1"), ds.line_key("a:b.txt", "keep zyxname too"))
 
+    # --- #32 F5 m10: the two non-ASCII characters whose normal form is ASCII punctuation ---
+
+    def test_the_greek_question_mark_and_varia_read_as_their_ascii_forms(self) -> None:
+        # NFC maps U+037E to `;` and U+1FEF to a backtick, so an ASCII term holding either could be
+        # spelled with them past the ASCII-only readings
+        self.add_terms("qxv;zyxw", "zyx`qwvn")
+        for name, text in (("greek.txt", "qxv;zyxw"), ("varia.txt", "zyx`qwvn")):
+            with self.subTest(name=name):
+                self.assert_found_in_both_modes_as({name: f"x {text} y\n"}, "zyx")
+
 
 if __name__ == "__main__":
     unittest.main()
