@@ -249,7 +249,9 @@ def batches(data: bytes, overlap: int = SEGMENT_OVERLAP) -> Iterator[Batch]:
 
 
 def unit_key(data: bytes, number: int) -> str:
-    """The key of unit `number` of a blob, numbered as the scan numbers it (`--hash`)."""
+    """The key of unit `number` of a blob, numbered as the scan numbers it (`--hash`): from 1."""
+    if number < 1:
+        raise IndexError(f"units are numbered from 1, not {number}")
     for batch in batches(data):
         keys = batch.keys()
         if number < batch.first + len(keys):
