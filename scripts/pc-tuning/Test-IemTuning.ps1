@@ -217,6 +217,32 @@ try {
     Remove-Item -LiteralPath $bootKey   # what a reboot does to a volatile key
     $b2 = Get-IemBootIdentity -Profile $prof
     Assert ([string]$b2.token -and $b2.token -ne $b0.token -and -not (Test-IemSameBoot -A $b0 -B $b2)) 'boot-a-reboot-is-another-boot'
+    # The token is created under a Global\ named mutex (#32 MINOR-3): the first two
+    # callers after a boot (the guard's state step, an ssh apply) never write two
+    # tokens. While the test holds the mutex, a second PowerShell that needs the
+    # token (after a "reboot") waits and writes nothing; once the mutex is free it
+    # creates the one token both then read.
+    $bootLock = New-Object -TypeName System.Threading.Mutex -ArgumentList $false, 'Global\iemmixer-boot-token'
+    $ready = Join-Path $dir 'boot-child.ready'; $childOut = Join-Path $dir 'boot-child.txt'
+    $childBody = "`$ErrorActionPreference = 'Stop'; Import-Module '$here\IemTuning.psm1'; `$p = Read-IemProfile -Path '$pp'; " +
+                 "[IO.File]::WriteAllText('$ready', 'x'); `$b = Get-IemBootIdentity -Profile `$p; [IO.File]::WriteAllText('$childOut', [string]`$b.token)"
+    $childEnc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childBody))
+    [void]$bootLock.WaitOne()
+    try {
+        Remove-Item -LiteralPath $bootKey   # a reboot: no token yet
+        $bc = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $childEnc) -NoNewWindow -PassThru
+        $null = $bc.Handle   # keeps the exit code readable after the wait
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        while (-not (Test-Path -LiteralPath $ready) -and $sw.Elapsed.TotalSeconds -lt 90) { Start-Sleep -Milliseconds 200 }
+        Start-Sleep -Seconds 3   # the child's Get-IemBootIdentity has started by now
+        $tokenMeanwhile = $null
+        if (Test-Path -LiteralPath $bootKey) { $tokenMeanwhile = (Get-Item -LiteralPath $bootKey).GetValue('token', $null) }
+        Assert ((Test-Path -LiteralPath $ready) -and -not $bc.HasExited -and $null -eq $tokenMeanwhile) 'boot-token-creation-waits-for-the-boot-lock'
+    } finally { $bootLock.ReleaseMutex() }
+    Assert ($bc.WaitForExit(60000) -and $bc.ExitCode -eq 0) 'boot-token-creation-goes-on-once-the-lock-is-free'
+    $childToken = [IO.File]::ReadAllText($childOut)
+    Assert ($childToken -and $childToken -eq [string](Get-IemBootIdentity -Profile $prof).token) 'boot-token-is-one-token-for-both-callers'
+    $bootLock.Dispose()
     # A boot key that is not volatile would survive a reboot, so every Tier 3 value
     # would read as pending for ever: it is refused, never trusted (review R1).
     $stableRoot = "$root-stable"
