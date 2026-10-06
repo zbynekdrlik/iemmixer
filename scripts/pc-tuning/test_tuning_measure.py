@@ -8,6 +8,8 @@ import json
 import re
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -418,6 +420,37 @@ class MeasureTests(WindowHarness):
             tw.cmd_measure(self.env, self.args())
         self.assertEqual(self.stop_after_start(), ["start", "stop"])
         self.assertNotIn("-Merge", self.pc.bodies("Stop-IemTrace")[0])
+
+    def test_a_start_the_event_overtook_is_stopped_under_the_window_lock(self) -> None:
+        # F2 round 3, m4: the preempt's unwind stops the trace too, under the window
+        # lock; two logman stops at once make the second fail (a false alarm at the
+        # start of the event, `trace` kept). The overtaken start's stop takes the
+        # lock, so it runs before or after the unwind, never during it.
+        stop_while_held: list[bool] = []
+        taken, release = threading.Event(), threading.Event()
+
+        def unwind_elsewhere() -> None:   # a preempt's unwind in another process
+            with tw.sw.window_lock():
+                taken.set()
+                release.wait(5)
+
+        holder = threading.Thread(target=unwind_elsewhere)
+
+        def on_call(body: str) -> None:
+            if "Start-IemTrace" in body:
+                (self.dir / "EVENT-NOW").touch()
+                holder.start()
+                taken.wait(5)
+                threading.Timer(0.3, release.set).start()
+            elif "Stop-IemTrace" in body:
+                stop_while_held.append(not release.is_set())
+
+        self.pc.on_call = on_call
+        with mock.patch.object(tw.sw, "time", time), self.assertRaises(tw.sw.EventNow):   # the real clock: the lock wait sleeps
+            tw.cmd_measure(self.env, self.args())
+        holder.join()
+        self.assertEqual(stop_while_held, [False])
+        self.assertIsNone(self.state()["trace"])   # confirmed stopped: no longer recorded
 
     def test_a_cut_restart_the_event_overtook_is_stopped_by_the_measure(self) -> None:
         self.pc.progress = {"missed": 1, "overruns": 0, "position_gaps": 0, "callback_thread": 4243}
