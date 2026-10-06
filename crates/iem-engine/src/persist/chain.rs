@@ -49,10 +49,16 @@
 //! than the state loaded) is not the store's to replace: the next save
 //! moves it aside to `save.tmp.orphan-<n>` and flushes the directory
 //! before `save.new` takes the name; if that fails, the save fails and
-//! nothing is replaced (#32 MAJOR-1). An orphan is kept for inspection,
-//! named in an alarm, and never a load source: it holds state the engine
-//! never ran on, and the session's saves since the boot are what the band
-//! hears, so no revision may bring it back.
+//! nothing is replaced (#32 MAJOR-1). The move is logged, and every error
+//! of that save after it names the orphan. An orphan is kept for
+//! inspection, named in an alarm, and never a load source: it holds state
+//! the engine never ran on, and the session's saves since the boot are
+//! what the band hears, so no revision may bring it back. A failure or a
+//! crash right after the move aside leaves the newest pending state only
+//! there, so every boot names in an alarm each orphan whose revision is
+//! above the state loaded (#32 F3-r4 1).
+
+use tracing::warn;
 
 use super::*;
 
@@ -128,7 +134,50 @@ impl Store {
                  above anything it can hold"
             ));
         }
+        self.orphans_above(&mut loaded);
         loaded
+    }
+
+    /// Names in an alarm each orphan (`save.tmp.orphan-<n>`) that holds a
+    /// revision above the state loaded (#32 F3-r4 1). An orphan is never
+    /// loaded, but a failure or a crash right after its move aside leaves
+    /// the newest pending state only there. Each is read once, without the
+    /// chain's pauses (the boot's bound stays); one that does not decode is
+    /// no state, one that cannot be read and a listing that fails are named
+    /// too.
+    fn orphans_above(&self, loaded: &mut Loaded) {
+        let orphans = match self.list() {
+            Ok(listed) => listed.orphans,
+            Err(e) => {
+                loaded.alarms.push(format!(
+                    "the state directory cannot be listed to look for a {TMP} \
+                     moved aside above the state loaded ({e})"
+                ));
+                return;
+            }
+        };
+        let rev = loaded.persisted.rev;
+        for (_, name, path) in orphans {
+            let mut spent = READ_PAUSES;
+            match self.read_tried(&path, &mut spent) {
+                Ok(Some(bytes)) => {
+                    if let Ok(orphan) = decode(&bytes)
+                        && orphan.rev > rev
+                    {
+                        loaded.alarms.push(format!(
+                            "{name} (revision {}) is above the state loaded (revision {rev}): \
+                             a {TMP} moved aside, kept but never loaded",
+                            orphan.rev
+                        ));
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => loaded.alarms.push(format!(
+                    "{name} cannot be read ({e}): a {TMP} moved aside, it may hold \
+                     a state above the one loaded"
+                )),
+            }
+        }
     }
 
     /// The chain itself (see `load`).
@@ -355,13 +404,18 @@ impl Store {
     /// Moves a `save.tmp` that is not this store's own aside to the first
     /// free `save.tmp.orphan-<n>` and flushes the directory, before
     /// `save.new` takes its name; either failing fails the save with
-    /// nothing replaced (#32 MAJOR-1). `None`: nothing to move.
+    /// nothing replaced (#32 MAJOR-1). The move is logged when it happens
+    /// (#32 F3-r4 1). `None`: nothing to move.
     pub(super) fn orphan_tmp(&self) -> io::Result<Option<PathBuf>> {
         let tmp = self.dir.join(TMP);
         if self.tmp_own.load(Ordering::SeqCst) || !self.files.exists(&tmp)? {
             return Ok(None);
         }
         let (aside, synced) = self.move_aside(&tmp, "orphan")?;
+        warn!(
+            "{TMP} was not this engine's to replace: moved aside to {}",
+            aside.display()
+        );
         synced.map_err(|e| {
             io::Error::new(
                 e.kind(),

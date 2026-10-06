@@ -61,6 +61,8 @@ const TMP: &str = "save.tmp";
 const NEW: &str = "save.new";
 const LOCK: &str = "engine.lock";
 const BASELINE_TMP: &str = "baseline.tmp";
+/// The name of a `save.tmp` moved aside, before its number.
+const ORPHAN: &str = "save.tmp.orphan-";
 /// The pause between two tries of a held state directory's lock.
 pub const LOCK_POLL: Duration = Duration::from_millis(100);
 
@@ -190,21 +192,59 @@ fn generation_seq(name: &str) -> Option<u64> {
         .ok()
 }
 
+/// The number of a `save.tmp` moved aside (`save.tmp.orphan-<n>`).
+fn orphan_number(name: &str) -> Option<u32> {
+    name.strip_prefix(ORPHAN)?.parse().ok()
+}
+
+/// What a listing of the state directory shows by the names alone.
+#[derive(Debug, Default)]
+struct Listing {
+    /// The generations (seq, path), oldest first.
+    generations: Vec<(u64, PathBuf)>,
+    /// The `save.tmp`s moved aside (n, name, path), by their number.
+    orphans: Vec<(u32, String, PathBuf)>,
+}
+
+/// Sorts a directory's entries (name, path) by what their names show. An
+/// entry that fails to read is that error, never "nothing there" (#32 m3:
+/// the seed would read it as no state).
+fn listing(entries: impl Iterator<Item = io::Result<(OsString, PathBuf)>>) -> io::Result<Listing> {
+    let mut listed = Listing::default();
+    for entry in entries {
+        let (name, path) = entry?;
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if let Some(seq) = generation_seq(name) {
+            listed.generations.push((seq, path));
+        } else if let Some(n) = orphan_number(name) {
+            listed.orphans.push((n, name.to_owned(), path));
+        }
+    }
+    listed.generations.sort();
+    listed.orphans.sort();
+    Ok(listed)
+}
+
 /// The generation files among a directory's entries (name, path), oldest
-/// first. An entry that fails to read is that error, never "no generation"
-/// (#32 m3: the seed would read it as no state).
+/// first (`listing`).
 fn generation_entries(
     entries: impl Iterator<Item = io::Result<(OsString, PathBuf)>>,
 ) -> io::Result<Vec<(u64, PathBuf)>> {
-    let mut gens = Vec::new();
-    for entry in entries {
-        let (name, path) = entry?;
-        if let Some(seq) = name.to_str().and_then(generation_seq) {
-            gens.push((seq, path));
-        }
+    Ok(listing(entries)?.generations)
+}
+
+/// `e`, naming where the save moved `save.tmp` aside before it failed
+/// (#32 F3-r4 1: the orphan may hold the newest pending state).
+fn naming_orphan(e: io::Error, orphaned: Option<&Path>) -> io::Error {
+    match orphaned {
+        Some(aside) => io::Error::new(
+            e.kind(),
+            format!("{e} ({TMP} was moved aside to {} first)", aside.display()),
+        ),
+        None => e,
     }
-    gens.sort();
-    Ok(gens)
 }
 
 /// The state directory taken by one engine (#32 P5): released when dropped
@@ -314,9 +354,14 @@ impl Store {
         self.dir.join(generation_name(seq))
     }
 
+    /// What the state directory's names show (`listing`).
+    fn list(&self) -> io::Result<Listing> {
+        listing(self.files.list(&self.dir)?.into_iter())
+    }
+
     /// Generation files, oldest first.
     pub fn generations(&self) -> io::Result<Vec<(u64, PathBuf)>> {
-        generation_entries(self.files.list(&self.dir)?.into_iter())
+        Ok(self.list()?.generations)
     }
 
     /// Saves atomically; the previous `current.json` becomes the newest
@@ -326,21 +371,19 @@ impl Store {
     /// newest state (an interrupted save not yet finished), so it is never
     /// truncated or written in place, only ever the previous complete save
     /// or the new one (#32 P1). A `save.tmp` that is not this store's own
-    /// is moved aside first (`Committed::orphaned`; #32 MAJOR-1).
+    /// is moved aside first (`Committed::orphaned`; #32 MAJOR-1), and every
+    /// error after that names where it went (#32 F3-r4 1).
     pub fn save(&self, p: &Persisted) -> io::Result<Committed> {
         let bytes = encode(p)?;
         let new = self.dir.join(NEW);
         self.write_synced(&new, &bytes)?;
         let orphaned = self.orphan_tmp()?;
-        self.files.rename(&new, &self.dir.join(TMP))?;
+        let named = |e: io::Error| naming_orphan(e, orphaned.as_deref());
+        self.files
+            .rename(&new, &self.dir.join(TMP))
+            .map_err(named)?;
         self.tmp_own.store(true, Ordering::SeqCst);
-        let mut committed = self.commit_tmp().map_err(|e| match &orphaned {
-            Some(aside) => io::Error::new(
-                e.kind(),
-                format!("{e} ({TMP} was moved aside to {} first)", aside.display()),
-            ),
-            None => e,
-        })?;
+        let mut committed = self.commit_tmp().map_err(named)?;
         committed.orphaned = orphaned;
         Ok(committed)
     }
