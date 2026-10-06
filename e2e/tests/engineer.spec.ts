@@ -79,29 +79,53 @@ test.describe("Engineer", () => {
     page,
     browser,
   }) => {
+    // The console refreshes every 2 s (a Console frame on the page's socket);
+    // the PIN step lives outside what a refresh rebuilds.
+    const consoleFrames: number[] = [];
+    page.on("websocket", (ws) => {
+      if (!ws.url().includes("/ws/engineer")) return;
+      ws.on("framereceived", (f) => {
+        if (typeof f.payload === "string" && f.payload.includes('"event":"Console"')) {
+          consoleFrames.push(Date.now());
+        }
+      });
+    });
     await openMixer(page, "engineer", { engineer: true });
     await expect(page.getByTestId("band-activity")).toHaveCount(0);
     await page.locator(".settings-btn").click();
     const sw = page.getByTestId("console-section").getByTestId("back-to-reaper");
     await expect(sw).toBeVisible({ timeout: 10_000 });
-    await sw.locator(".back-to-reaper-btn").click();
     const pin = sw.getByTestId("switch-pin");
+    const confirm = sw.locator(".back-to-reaper-confirm");
+
+    // Zrušiť closes the PIN step again.
+    await sw.locator(".back-to-reaper-btn").click();
     await expect(pin).toBeVisible();
-    await expect(sw.locator(".back-to-reaper-confirm")).toBeDisabled();
+    await sw.locator(".confirm-actions .settings-action-btn", { hasText: "Zrušiť" }).click();
+    await expect(pin).toHaveCount(0);
+
+    await sw.locator(".back-to-reaper-btn").click();
+    await expect(pin).toBeVisible();
+    await expect(confirm).toBeDisabled();
     await pin.fill(ENGINEER_PIN);
+    // A console refresh after the PIN was typed keeps it.
+    const typed = Date.now();
+    await expect.poll(() => consoleFrames.filter((t) => t > typed).length, { timeout: 5_000 }).toBeGreaterThan(0);
+    await expect(pin).toHaveValue(ENGINEER_PIN);
+    await expect(confirm).toBeEnabled();
     const answer = page.waitForResponse(
       (r) => r.url().endsWith("/api/mode/event") && r.request().method() === "POST",
     );
-    await sw.locator(".back-to-reaper-confirm").click();
+    await confirm.click();
     expect((await answer).status()).toBe(202);
     await expect(sw).toContainText("Prepína sa na REAPER");
-    await expect(page.getByTestId("band-activity")).toHaveCount(0);
 
     const ctx = await browser.newContext();
     const member = await ctx.newPage();
     await openMixer(member, "member3");
     await member.locator(".settings-btn").click();
     await expect(member.locator(".settings-modal")).toBeVisible();
+    await expect(member.getByTestId("console-section")).toHaveCount(0);
     await expect(member.getByTestId("back-to-reaper")).toHaveCount(0);
     await expect(member.locator(".back-to-reaper-btn")).toHaveCount(0);
     await ctx.close();
