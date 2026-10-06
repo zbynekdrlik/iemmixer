@@ -569,6 +569,17 @@ class EventTests(Base):
         self.assertEqual(seen[0]["card"], "free")   # nothing else is claimed: the guard brings REAPER back
         self.assertIn({"spike_window": "closed", "after": "a failed spike preempt"}, docs)
 
+    def test_a_change_still_in_flight_after_a_failed_preempt_is_named(self) -> None:
+        # Review of lane G2, finding 5: no settle watches it on this path; the step's own
+        # late handler and the guard take it from here, and the agent hears which step.
+        intent = {"step": "set-buffer", "started": time.time(), "bound_s": 60}
+        self.open_window(in_flight=intent)
+        ip.SPIKE = self.write_spike(3)
+        code, docs, err = self.run_main("event")
+        self.assertEqual(code, 0, err)
+        self.assertIn({"spike_window": "closed", "after": "a failed spike preempt", "in_flight": intent}, docs)
+        self.assertIn("set-buffer is still in flight", err)
+
     def test_a_closed_window_whose_preempt_still_settles_gets_the_spike_preempt(self) -> None:
         # Review of lane G2, finding 1: a window process's own preempt closed the window
         # and still watches REAPER (settle, without the lock); `spike_window.py preempt`

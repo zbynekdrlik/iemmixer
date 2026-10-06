@@ -626,6 +626,42 @@ class PcChangeTests(unittest.TestCase):
         self.assertGreater(sum("holders = @(Get-GoldenAsioHolders" in c for c in self.pc.calls), 1)
         self.assertEqual(self.pc.bring_backs, 1)
 
+    # Review of lane G2, finding 5: one failed read must not end the watch, and the
+    # stop file's clean-up runs however the watch ends.
+    def test_a_failed_reaper_read_during_the_settle_is_an_alarm_and_the_watch_goes_on(self) -> None:
+        self.window(in_flight={"step": "to-dev", "started": time.time(), "bound_s": 0.2})
+        real, reads = self.pc.ps, []
+
+        def flaky(env, body, timeout=300, event="finish"):
+            if "holders = @(Get-GoldenAsioHolders" in body:
+                reads.append(body)
+                if len(reads) == 1:
+                    raise sw.NoReply("PC command failed (exit 255): Connection reset")
+            return real(env, body, timeout, event)
+
+        sw.ps = flaky
+        (self.dir / "EVENT-NOW").touch()
+        sw.cmd_preempt(ENV)
+        self.assertGreater(len(reads), 1)
+        self.assertTrue(any("could not be read" in a for a in self.alarms), self.alarms)
+        self.assertTrue(any("Test-SpikeTaskBusy" in c and "Remove-Item" in c for c in self.pc.calls))
+
+    def test_a_settle_that_never_saw_reaper_on_the_card_fails_after_the_clean_up(self) -> None:
+        self.window(in_flight={"step": "to-dev", "started": time.time(), "bound_s": 0.2})
+        real = self.pc.ps
+
+        def unreadable(env, body, timeout=300, event="finish"):
+            if "holders = @(Get-GoldenAsioHolders" in body:
+                raise sw.NoReply("PC command failed (exit 255): Connection reset")
+            return real(env, body, timeout, event)
+
+        sw.ps = unreadable
+        (self.dir / "EVENT-NOW").touch()
+        with self.assertRaisesRegex(sw.StepError, "REAPER"):
+            sw.cmd_preempt(ENV)   # exit 1: iempc event then lets the guard bring REAPER back
+        self.assertTrue(any("Test-SpikeTaskBusy" in c and "Remove-Item" in c for c in self.pc.calls))
+        self.assertNotIn("settling", sw.load_state())
+
     def test_only_the_closing_unwind_removes_the_stop_file(self) -> None:
         self.window()
         sw.cmd_preempt(ENV)
