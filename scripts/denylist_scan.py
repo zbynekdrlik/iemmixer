@@ -300,18 +300,19 @@ class Scanner:
         return [(label, key, entry) for (label, entry), key in found.items()]
 
     def shown(self, path: str) -> str:
-        """The path as printed: each component holding a term (in any reading) or any non-ASCII
-        character is redacted -- no set of readings can be proven complete, and printed in a
-        reading the scanner lacks, the ASCII tail of a term (`ĺˇqxwzy`, a cp1250 `\\xefqxwzy`)
-        would reach the log -- and the others have their control characters escaped; the whole
-        path is redacted when a term spans components (a term without `/` always matches inside
-        one component) or the printed form holds one."""
+        """The path as printed: each component holding a term (in any reading), any non-ASCII
+        character or any control character is redacted -- no set of readings can be proven
+        complete, and printed in a reading the scanner lacks, the ASCII tail of a term (`ĺˇqxwzy`,
+        a cp1250 `\\xefqxwzy`) would reach the log, as would a term glued to an escape sequence
+        that ends in a letter (ESC [ 2 J, #32 F5 review of lane G3) -- and the rest is printed as it
+        is (printable() keeps it so); the whole path is redacted when a term spans components (a
+        term without `/` always matches inside one component) or the printed form holds one."""
         whole = set(self.entries_in(path))
         parts = path.split("/")
         part_hits = [set(self.entries_in(part)) if whole else set() for part in parts]
         if not whole <= set().union(*part_hits):
             return REDACTED
-        kept = "/".join(REDACTED if hit or not part.isascii() else printable(part)
+        kept = "/".join(REDACTED if hit or not (part.isascii() and part.isprintable()) else printable(part)
                         for part, hit in zip(parts, part_hits, strict=True))
         return REDACTED if self.entries_in(kept) else kept
 
