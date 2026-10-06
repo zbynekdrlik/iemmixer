@@ -445,6 +445,20 @@ class Views:
         return self.normal()
 
 
+# Latin letters NFKD keeps whole, with their usual ASCII spellings
+_ASCII_LETTERS = str.maketrans({"ł": "l", "Ł": "L", "đ": "d", "Đ": "D", "ø": "o", "Ø": "O", "ß": "ss", "ẞ": "SS",
+                                "æ": "ae", "Æ": "AE", "œ": "oe", "Œ": "OE", "ħ": "h", "Ħ": "H", "ŧ": "t", "Ŧ": "T",
+                                "ı": "i", "ð": "d", "Ð": "D", "þ": "th", "Þ": "TH"})
+
+
+def ascii_spelling(term: str) -> str:
+    """The term as a name is written in a path, an e-mail address, an identifier or a host name: its
+    diacritics dropped (NFKD, combining marks removed) and the Latin letters NFKD keeps whole spelled
+    in ASCII (`ł` l, `ß` ss). An entry is matched in this spelling too (#32 F5 MAJOR)."""
+    decomposed = unicodedata.normalize("NFKD", term.translate(_ASCII_LETTERS))
+    return nfc("".join(char for char in decomposed if unicodedata.category(char) != "Mn"))
+
+
 @dataclass(frozen=True)
 class Term:
     entry: int
@@ -472,14 +486,16 @@ class Term:
 
 class Scanner:
     def __init__(self, terms: list[str], allow: set[str]) -> None:
-        self.terms = [Term.of(entry, term) for entry, term in enumerate(terms, start=1)]
+        # each entry's term, and its ASCII spelling when that differs (#32 F5 MAJOR)
+        self.terms = [Term.of(entry, spelling) for entry, term in enumerate(terms, start=1)
+                      for spelling in dict.fromkeys((nfc(term), ascii_spelling(nfc(term)))) if spelling.strip()]
         self.allow = allow
 
     def entries_in(self, text: str) -> list[int]:
         """The entries found in any reading of the text (other encodings, escapes decoded)."""
         views = Views(text)
-        return [term.entry for term in self.terms
-                if any(next(term.starts(view), None) is not None for view in views.for_term(term))]
+        return sorted({term.entry for term in self.terms
+                       if any(next(term.starts(view), None) is not None for view in views.for_term(term))})
 
     def batch_hits(self, batch: Batch) -> list[tuple[int, int]]:
         """(unit position in the batch, entry number) of every term found in a batch, sorted.
@@ -489,23 +505,23 @@ class Scanner:
         match spans two units, and a SEP is a word boundary like the end of a unit)."""
         views = Views(batch.text())
         per_view: dict[int, tuple[str, list[tuple[int, int]]]] = {}
-        for term in self.terms:
+        for index, term in enumerate(self.terms):
             for view in views.for_term(term):
-                starts = [(start, term.entry) for start in term.starts(view)]
+                starts = [(start, index) for start in term.starts(view)]
                 if starts:
                     per_view.setdefault(id(view), (view, []))[1].extend(starts)
         found: set[tuple[int, int]] = set()
         for view, starts in per_view.values():
             unit = last = 0
-            for start, entry in sorted(starts):
+            for start, index in sorted(starts):
                 unit += view.count(SEP, last, start)
                 last = start
-                found.add((unit, entry))
+                found.add((unit, index))
         if batch.runs and found:  # a short term counts only in a long text run (MIN_BINARY_TERM)
             keys = batch.keys()
-            found = {(unit, entry) for unit, entry in found
-                     if not self.terms[entry - 1].short or long_text_run(keys[unit])}
-        return sorted(found)
+            found = {(unit, index) for unit, index in found
+                     if not self.terms[index].short or long_text_run(keys[unit])}
+        return sorted({(unit, self.terms[index].entry) for unit, index in found})
 
     def findings(self, path: str, batches: Iterable[Batch]) -> list[tuple[str, str, int]]:
         """(unit label, unit key, entry number) of every term found and not allowlisted."""
