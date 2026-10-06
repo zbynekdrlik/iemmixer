@@ -189,11 +189,43 @@ class ContentTests(ScanTestCase):
         self.assert_findings_in_both_modes(
             {"bomb.zip": zipped({"zeros.bin": bytes(4 << 20)}), "broken.zip": b"PK\x03\x04" + bytes(40) + b"zyx",
              "secret.zip": bytes(encrypted), "cut.gz": gzip.compress(b"hello zyxname\n" * 50)[:-30]},
-            "bomb.zip!/zeros.bin: cannot be scanned: ", "broken.zip: cannot be scanned: ",
-            "secret.zip!/secret.txt: cannot be scanned: ", "cut.gz!/: cannot be scanned: ")
-        with mock.patch("denylist_containers.MEMBER_LIMIT", 1 << 10):
-            self.assert_findings_in_both_modes({"big.zip": zipped({"big.txt": b"clean words " * 200})},
-                                               "big.zip!/big.txt: cannot be scanned: ")
+            "bomb.zip!/zeros.bin: cannot be scanned: decompressed to more than 20 times the blob",
+            "broken.zip: cannot be scanned: a broken zip archive",
+            "secret.zip!/secret.txt: cannot be scanned: an encrypted zip member",
+            "cut.gz!/: cannot be scanned: a broken gzip stream")
+        letters = random.Random(7).randbytes(3 << 19).translate(
+            bytes.maketrans(bytes(range(256)), (b"abcdefghijklmnopqrstuvwxyz \n" * 10)[:256]))
+        with mock.patch("denylist_containers.MEMBER_LIMIT", 1 << 20):
+            self.assert_findings_in_both_modes({"big.zip": zipped({"big.txt": letters})},
+                                               "big.zip!/big.txt: cannot be scanned: a member over 1 MiB")
+
+    def test_each_reason_a_container_cannot_be_scanned(self) -> None:
+        # review of lane G3, finding 5: every limit and Problem branch, with its exact reason
+        method = bytearray(zipped({"m.txt": b"keep zyxname\n"}))
+        for header, offset in ((b"PK\x03\x04", 8), (b"PK\x01\x02", 10)):  # local and central method field
+            at = method.index(header)
+            method[at + offset:at + offset + 2] = (99).to_bytes(2, "little")
+        deep = b"deep zyxname\n"
+        for _level in range(6):
+            deep = gzip.compress(deep)
+        itxt = b"Comment\x00\x01\x00\x00\x00" + zlib.compress(b"by zyxname")
+        png = b"\x89PNG\r\n\x1a\n" + png_chunk(b"IHDR", bytes(13)) + png_chunk(b"iTXt", itxt) + png_chunk(b"IEND", b"")
+        letters = random.Random(8).randbytes(3 << 19).translate(
+            bytes.maketrans(bytes(range(256)), (b"abcdefghijklmnopqrstuvwxyz \n" * 10)[:256]))
+        with mock.patch("denylist_containers.EXPANSION_LIMIT", 1 << 20):
+            self.assert_findings_in_both_modes(
+                {"method.zip": bytes(method), "deep.gz": deep, "i.png": png,
+                 "cut.tar": tarred({"a.txt": b"x" * 1000, "b.txt": b"y" * 1000})[:1200],
+                 "app.bin": b"leading bytes\x00\x01" + zipped({"a.txt": b"keep zyxname"}),
+                 "wide.zip": zipped({"w.txt": letters})},
+                "method.zip!/m.txt: cannot be scanned: zip compression method 99",
+                "deep.gz!/!/!/!/: cannot be scanned: containers nested more than 4 deep",
+                "i.png: cannot be scanned: a PNG with a compressed text chunk",
+                "cut.tar: cannot be scanned: a broken tar archive",
+                "app.bin!/a.txt:1: denylist entry 1",
+                "wide.zip!/w.txt: cannot be scanned: more than 1 MiB decompressed from one blob")
+        self.assert_findings_in_both_modes({"ratio.gz": gzip.compress(bytes(2 << 20))},
+                                           "ratio.gz!/: cannot be scanned: decompressed to more than 20 times the blob")
 
     def test_a_tar_member_that_cannot_be_read_is_a_finding_not_a_crash(self) -> None:
         # review of lane G3, finding 1: extractfile().read() raised outside any handler, a traceback
