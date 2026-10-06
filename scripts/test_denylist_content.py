@@ -39,6 +39,25 @@ def tarred(members: dict[str, bytes]) -> bytes:
     return buffer.getvalue()
 
 
+def sparse_tar() -> bytes:
+    """An old-GNU sparse tar member whose map reaches far past the data stored for it."""
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w", format=tarfile.GNU_FORMAT) as archive:
+        payload = b"hello there\n" * 40
+        info = tarfile.TarInfo("a.txt")
+        info.size = len(payload)
+        archive.addfile(info, io.BytesIO(payload))
+    header = bytearray(buffer.getvalue())
+    header[156] = ord("S")                        # GNUTYPE_SPARSE
+    header[386:398] = b"%011o\0" % 0              # sparse entry 0: offset 0 ...
+    header[398:410] = b"%011o\0" % 200000         # ... 200000 bytes, more than are stored
+    header[482] = 0                               # no extended sparse header
+    header[483:495] = b"%011o\0" % 200000         # the real size
+    header[148:156] = b"        "
+    header[148:156] = b"%06o\0 " % sum(header[:512])
+    return bytes(header)
+
+
 def png_chunk(kind: bytes, body: bytes) -> bytes:
     return len(body).to_bytes(4, "big") + kind + body + zlib.crc32(kind + body).to_bytes(4, "big")
 
@@ -159,6 +178,13 @@ class ContentTests(ScanTestCase):
         with mock.patch("denylist_containers.MEMBER_LIMIT", 1 << 10):
             self.assert_findings_in_both_modes({"big.zip": zipped({"big.txt": b"clean words " * 200})},
                                                "big.zip!/big.txt: cannot be scanned: ")
+
+    def test_a_tar_member_that_cannot_be_read_is_a_finding_not_a_crash(self) -> None:
+        # review of lane G3, finding 1: extractfile().read() raised outside any handler, a traceback
+        # that no allowlist line could clear
+        self.assert_findings_in_both_modes({"sparse.tar": sparse_tar()},
+                                           "sparse.tar!/a.txt: cannot be scanned: a broken tar member")
+        self.assertEqual(len(self.hash_key("sparse.tar", "blob")), 64)
 
     def test_other_containers_are_findings_allowlisted_by_their_blob_key(self) -> None:
         pdf = (b"%PDF-1.4\n1 0 obj << /Length 20 /Filter /FlateDecode >> stream\n" + zlib.compress(b"(zyxname) Tj")
