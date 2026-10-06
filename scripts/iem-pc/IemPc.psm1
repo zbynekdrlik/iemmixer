@@ -16,11 +16,18 @@ $script:Utf8NoBom = New-Object System.Text.UTF8Encoding $false
 # result (`$x = Test-IemBundleSums ...`); `@(Test-IemBundleSums ...)` would nest it.
 
 $script:TaskNames = @('iemmixer-guard', 'iemmixer-StartREAPER', 'iemmixer-StartApp', 'iemmixer-probe',
-                      'iemmixer-tuning', 'iemmixer-exclude', 'iemmixer-logon')
+                      'iemmixer-tuning', 'iemmixer-exclude', 'iemmixer-logon', 'iemmixer-boot-pref')
 $script:SidAdmins = 'S-1-5-32-544'
 $script:SidSystem = 'S-1-5-18'
-# Task Scheduler: TASK_LOGON_INTERACTIVE_TOKEN, TASK_RUNLEVEL_LUA / _HIGHEST.
+# Task Scheduler: TASK_LOGON_INTERACTIVE_TOKEN; TASK_LOGON_S4U (the boot task:
+# the user's account without a stored password, before any logon);
+# TASK_TRIGGER_BOOT / _LOGON; TASK_RUNLEVEL_LUA / _HIGHEST (below).
 $script:LogonInteractive = 3
+$script:LogonS4U = 2
+$script:TriggerBoot = 8
+$script:TriggerLogon = 9
+# The boot task's log, in <elevated root>\tasks\out (#35).
+$script:BootPrefLog = 'boot-pref.log'
 # RegisterTaskDefinition flags: TASK_CREATE_OR_UPDATE (6) and
 # TASK_DONT_ADD_PRINCIPAL_ACE (0x10): without it the service adds its own allow
 # ACE for the task's user next to ours, and the read-back (exactly our three
@@ -174,13 +181,19 @@ function New-IemTaskDefinition {
     # Interactive for the user, no time limit, IgnoreNew, no idle or battery stop,
     # restart on failure 3 x 1 min (spec section 2.1), normal priority (the default 7
     # would pass below-normal on to the guard's children), never ended hard.
+    # -AtBoot (the boot task, #35): S4U (the user's account before any logon,
+    # no stored password), the system's start its only trigger, and no other
+    # start: no restart on failure, no late start, no start on demand (a later
+    # run could meet a process that holds the driver).
     param([Parameter(Mandatory)]$Scheduler, [Parameter(Mandatory)][string]$User, [Parameter(Mandatory)][int]$RunLevel,
           [Parameter(Mandatory)][string]$Exe, [string]$Arguments = '', [string]$WorkDir = '', [string]$Description = '',
-          [switch]$AtLogon)
+          [switch]$AtLogon, [switch]$AtBoot)
+    if ($AtLogon -and $AtBoot) { throw 'a task starts at the logon or at the system start, not both' }
     $d = $Scheduler.NewTask(0)
     $d.RegistrationInfo.Description = $Description
     $d.Principal.UserId = $User
     $d.Principal.LogonType = $script:LogonInteractive
+    if ($AtBoot) { $d.Principal.LogonType = $script:LogonS4U }
     $d.Principal.RunLevel = $RunLevel
     $s = $d.Settings
     $s.Enabled = $true
@@ -193,16 +206,24 @@ function New-IemTaskDefinition {
     $s.IdleSettings.StopOnIdleEnd = $false
     $s.AllowHardTerminate = $false
     $s.StartWhenAvailable = $false
-    $s.RestartCount = 3
-    $s.RestartInterval = 'PT1M'
+    if ($AtBoot) {
+        $s.AllowDemandStart = $false
+    } else {
+        $s.RestartCount = 3
+        $s.RestartInterval = 'PT1M'
+    }
     $s.Priority = 4
     $a = $d.Actions.Create(0)
     $a.Path = $Exe
     if ($Arguments) { $a.Arguments = $Arguments }
     if ($WorkDir) { $a.WorkingDirectory = $WorkDir }
     if ($AtLogon) {
-        $t = $d.Triggers.Create(9)
+        $t = $d.Triggers.Create($script:TriggerLogon)
         $t.UserId = $User
+        $t.Enabled = $true
+    }
+    if ($AtBoot) {
+        $t = $d.Triggers.Create($script:TriggerBoot)
         $t.Enabled = $true
     }
     return $d
@@ -239,7 +260,12 @@ function Get-IemTaskReport {
     $d = $Task.Definition
     $s = $d.Settings
     $triggers = @()
-    foreach ($t in $d.Triggers) { $triggers += [int]$t.Type }
+    $repeat = @()
+    foreach ($t in $d.Triggers) {
+        $triggers += [int]$t.Type
+        $iv = [string]$t.Repetition.Interval
+        if ($iv) { $repeat += $iv }
+    }
     $sddl = [string]$Task.GetSecurityDescriptor(4)
     [pscustomobject]@{
         task = [string]$Task.Name
@@ -249,6 +275,9 @@ function Get-IemTaskReport {
         time_limit = [string]$s.ExecutionTimeLimit
         instances = [int]$s.MultipleInstances
         restart = ('{0}x{1}' -f $s.RestartCount, $s.RestartInterval)
+        demand_start = [bool]$s.AllowDemandStart
+        late_start = [bool]$s.StartWhenAvailable
+        repeat = ($repeat -join ',')
         batteries = ((-not $s.DisallowStartIfOnBatteries) -and (-not $s.StopIfGoingOnBatteries))
         idle_stop = [bool]$s.IdleSettings.StopOnIdleEnd
         hard_end = [bool]$s.AllowHardTerminate
@@ -262,13 +291,25 @@ function Get-IemTaskReport {
 
 function Test-IemTaskReport {
     # What every task of ours must read back as; returns the differences.
-    param([Parameter(Mandatory)]$Report, [Parameter(Mandatory)][int]$RunLevel)
+    # -Boot (the boot task, #35): S4U, no restart and no start on demand.
+    param([Parameter(Mandatory)]$Report, [Parameter(Mandatory)][int]$RunLevel, [switch]$Boot)
+    $logon = $script:LogonInteractive
+    $restart = '3xPT1M'
+    $demand = $true
+    if ($Boot) {
+        $logon = $script:LogonS4U
+        $restart = '0x'
+        $demand = $false
+    }
     $bad = @()
-    if ($Report.logon_type -ne $script:LogonInteractive) { $bad += "logon type $($Report.logon_type)" }
+    if ($Report.logon_type -ne $logon) { $bad += "logon type $($Report.logon_type)" }
     if ($Report.run_level -ne $RunLevel) { $bad += "run level $($Report.run_level)" }
     if ($Report.time_limit -cne 'PT0S') { $bad += "time limit $($Report.time_limit)" }
     if ($Report.instances -ne 2) { $bad += "instances $($Report.instances)" }
-    if ($Report.restart -cne '3xPT1M') { $bad += "restart $($Report.restart)" }
+    if ($Report.restart -cne $restart) { $bad += "restart $($Report.restart)" }
+    if ($Report.demand_start -ne $demand) { $bad += "start on demand $($Report.demand_start)" }
+    if ($Report.late_start) { $bad += 'starts late after a missed start' }
+    if ($Report.repeat) { $bad += "repeats $($Report.repeat)" }
     if (-not $Report.batteries) { $bad += 'stops on batteries' }
     if ($Report.idle_stop) { $bad += 'stops on idle end' }
     if ($Report.hard_end) { $bad += 'may be ended hard' }
@@ -277,11 +318,88 @@ function Test-IemTaskReport {
     return ,$bad
 }
 
+function Resolve-IemElevatedRoot {
+    # The elevated root: the given absolute path, or %ProgramData%\iemmixer
+    # from the known folder (never from an environment variable).
+    param([string]$ElevatedRoot = '')
+    if (-not $ElevatedRoot) {
+        $pd = [Environment]::GetFolderPath('CommonApplicationData')
+        if (-not $pd) { throw 'the ProgramData known folder is unknown' }
+        $ElevatedRoot = Join-Path $pd 'iemmixer'
+    }
+    $ElevatedRoot = $ElevatedRoot.TrimEnd('\')
+    if (-not [IO.Path]::IsPathRooted($ElevatedRoot)) { throw "the elevated root $ElevatedRoot is not an absolute path" }
+    return $ElevatedRoot
+}
+
+function ConvertTo-IemRegExeKey {
+    # The site's key (`Software\...`, relative to HKCU, or HKCU:\..., or
+    # Registry::HKEY_CURRENT_USER\...) as reg.exe names it: HKCU\... . The
+    # boot task writes the user's hive only; any other hive is refused.
+    param([Parameter(Mandatory)][string]$Key)
+    $k = $Key
+    if ($k -match '^HKCU:') {
+        $k = $k.Substring(5)
+    } elseif ($k -match '^Registry::(HKEY_CURRENT_USER|HKCU)\\') {
+        $k = $k.Substring($k.IndexOf('\') + 1)
+    } elseif ($k.Contains(':')) {
+        throw "key '$Key' refused (the boot task writes under HKCU only)"
+    }
+    $k = $k.Trim('\')
+    if (-not $k) { throw "key '$Key' refused (no key below HKCU)" }
+    return 'HKCU\' + $k
+}
+
+function Get-IemBootPrefCommand {
+    # The boot task's action (#35): the preference written back to its
+    # original at the system's start, before any logon, so before any process
+    # can hold the driver (REAPER, the engine and the spikes start only in a
+    # logged-on session), then read back. Native only, cmd.exe and reg.exe:
+    # PowerShell took ~8 s to start there (#35, the PC 2026-10-06); reg.exe
+    # writes about a second after the task starts, ~12 s before REAPER. Each
+    # run appends to <log dir>\boot-pref.log a header "boot-pref <date> <time>
+    # add=<0|1>" (cmd's local clock; Get-IemBootstrapState gives the task's
+    # last run in UTC) and reg.exe's query of the value; cmd's exit code is
+    # the add's (0 written, 1 not). The task runs elevated with the user's
+    # environment, so the line holds no %: cmd and Task Scheduler expand
+    # %name% before cmd parses the line, while cmd /v:on expands !name! after
+    # it, so a value the user set is text, never a command. /d skips cmd's
+    # AutoRun; every program by its full path; no pipe and no FOR /F (each
+    # starts another cmd through COMSPEC). A key, value name or path holding
+    # a character cmd reads there (" % ! ^ & | < >) or a control character is
+    # refused. -PrefKind: the site's [card] pref_original kind (dword, text).
+    param([Parameter(Mandatory)][string]$System, [Parameter(Mandatory)][string]$PrefKey,
+          [Parameter(Mandatory)][string]$PrefName, [Parameter(Mandatory)][string]$PrefOriginal,
+          [Parameter(Mandatory)][string]$LogDir, [ValidateSet('dword', 'text')][string]$PrefKind = 'dword')
+    if ($PrefOriginal -cnotmatch '^[0-9]{1,5}$') { throw "PrefOriginal '$PrefOriginal' refused (the recorded buffer, digits)" }
+    $key = ConvertTo-IemRegExeKey -Key $PrefKey
+    $System = $System.TrimEnd('\')
+    $LogDir = $LogDir.TrimEnd('\')
+    foreach ($p in @($System, $LogDir)) {
+        if (-not [IO.Path]::IsPathRooted($p)) { throw "$p is not an absolute path (the boot task's command line)" }
+    }
+    if ($PrefName.EndsWith('\')) { throw "value name '$PrefName' refused (a trailing backslash would escape its quote)" }
+    foreach ($v in @($key, $PrefName, $System, $LogDir)) {
+        if ($v -match '[\x00-\x1f"%!^&|<>]') { throw "'$v' refused for the boot task's command line (it holds a character cmd reads)" }
+    }
+    $reg = '"' + [IO.Path]::Combine($System, 'reg.exe') + '"'
+    $log = '"' + [IO.Path]::Combine($LogDir, $script:BootPrefLog) + '"'
+    $type = 'REG_DWORD'
+    if ($PrefKind -eq 'text') { $type = 'REG_SZ' }
+    $value = '"{0}" /v "{1}"' -f $key, $PrefName
+    $line = ('{0} add {1} /t {2} /d {3} /f >nul 2>&1 && set "iemadd=0" || set "iemadd=1"' -f $reg, $value, $type, $PrefOriginal) +
+        (' & (echo boot-pref !DATE! !TIME! add=!iemadd!)>>{0}' -f $log) +
+        (' & {0} query {1} >>{2} 2>&1' -f $reg, $value, $log) +
+        ' & exit /b !iemadd!'
+    [pscustomobject]@{ exe = [IO.Path]::Combine($System, 'cmd.exe'); arguments = ('/d /q /v:on /s /c "' + $line + '"') }
+}
+
 function Register-IemTasks {
     # Our tasks under -Folder (design section 5.1): the guard, StartApp (its exe
-    # directly, never its launcher script), the probe and the three Highest
-    # tasks (tuning, exclude, logon), each with the security descriptor that
-    # lets the Limited guard run it. StartREAPER predates S6 and holds site
+    # directly, never its launcher script), the probe and the four Highest
+    # tasks (tuning, exclude, logon, boot-pref), each with the security
+    # descriptor that lets the Limited guard run it (the boot task never runs
+    # on demand, #35: Get-IemBootPrefCommand). StartREAPER predates S6 and holds site
     # values: it keeps its definition, gains only the descriptor, and must
     # exist (nothing is registered without it). The Highest tasks run this
     # module from a copy in -ElevatedRoot\tasks and load S1c's tuning module
@@ -300,15 +418,10 @@ function Register-IemTasks {
         [Parameter(Mandatory)][string]$Module,
         [string]$Folder = '\iemmixer',
         [string]$User = '',
-        [string]$ElevatedRoot = ''
+        [string]$ElevatedRoot = '',
+        [ValidateSet('dword', 'text')][string]$PrefKind = 'dword'
     )
-    if (-not $ElevatedRoot) {
-        $pd = [Environment]::GetFolderPath('CommonApplicationData')
-        if (-not $pd) { throw 'the ProgramData known folder is unknown' }
-        $ElevatedRoot = Join-Path $pd 'iemmixer'
-    }
-    $ElevatedRoot = $ElevatedRoot.TrimEnd('\')
-    if (-not [IO.Path]::IsPathRooted($ElevatedRoot)) { throw "the elevated root $ElevatedRoot is not an absolute path" }
+    $ElevatedRoot = Resolve-IemElevatedRoot -ElevatedRoot $ElevatedRoot
     $userRoot = $Root.TrimEnd('\') + '\'
     if (($ElevatedRoot + '\').StartsWith($userRoot, [StringComparison]::OrdinalIgnoreCase) -or
         $userRoot.StartsWith($ElevatedRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
@@ -320,6 +433,11 @@ function Register-IemTasks {
     if ($Module -cnotmatch '^[^\\/:*?"<>|]+\.dll$') { throw "module name '$Module' refused" }
     foreach ($v in @($Root, $AppExe, $PrefKey, $PrefName, $ElevatedRoot, $Module)) { [void](Format-IemArg -Value $v) }
     if (-not (Test-Path -LiteralPath $AppExe -PathType Leaf)) { throw "the app exe $AppExe does not exist" }
+    $tasksDir = Join-Path $ElevatedRoot 'tasks'
+    $system = [Environment]::GetFolderPath('System')
+    # The boot task's command line (#35), refused here before anything is written.
+    $boot = Get-IemBootPrefCommand -System $system -PrefKey $PrefKey -PrefName $PrefName -PrefOriginal $PrefOriginal `
+        -PrefKind $PrefKind -LogDir (Join-Path $tasksDir 'out')
     $u = Resolve-IemUser -User $User
     $sddl = Get-IemTaskSddl -UserSid $u.sid
     $sch = Connect-IemScheduler
@@ -334,9 +452,7 @@ function Register-IemTasks {
     $reaperActions = Get-IemTaskActions -Definition $reaperDef
     $f = Get-IemTaskFolder -Scheduler $sch -Path $Folder
     Install-IemElevatedDir -Root $ElevatedRoot -UserSid $u.sid
-    $tasksDir = Join-Path $ElevatedRoot 'tasks'
 
-    $system = [Environment]::GetFolderPath('System')
     $ps = Join-Path $system 'WindowsPowerShell\v1.0\powershell.exe'
     $common = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File ' +
         (Format-IemArg (Join-Path $tasksDir 'iem-task.ps1')) + ' -Root ' + (Format-IemArg $Root) +
@@ -344,26 +460,32 @@ function Register-IemTasks {
     $logonArgs = $common + ' -Kind logon -PrefKey ' + (Format-IemArg $PrefKey) + ' -PrefName ' + (Format-IemArg $PrefName) +
         ' -PrefOriginal ' + (Format-IemArg $PrefOriginal) + ' -Module ' + (Format-IemArg $Module)
     $specs = @(
-        @{ name = 'iemmixer-guard'; level = $script:RunLevelLimited; exe = (Join-Path $Root 'bin\iemmixer-guard.exe'); args = 'run'; dir = $Root; logon = $false },
-        @{ name = 'iemmixer-StartApp'; level = $script:RunLevelLimited; exe = $AppExe; args = ''; dir = (Split-Path -Parent $AppExe); logon = $false },
-        @{ name = 'iemmixer-probe'; level = $script:RunLevelLimited; exe = (Join-Path $system 'cmd.exe'); args = '/c exit 0'; dir = ''; logon = $false },
-        @{ name = 'iemmixer-tuning'; level = $script:RunLevelHighest; exe = $ps; args = ($common + ' -Kind tuning'); dir = $tasksDir; logon = $false },
-        @{ name = 'iemmixer-exclude'; level = $script:RunLevelHighest; exe = $ps; args = ($common + ' -Kind exclude'); dir = $tasksDir; logon = $false },
-        @{ name = 'iemmixer-logon'; level = $script:RunLevelHighest; exe = $ps; args = $logonArgs; dir = $tasksDir; logon = $true }
+        @{ name = 'iemmixer-guard'; level = $script:RunLevelLimited; exe = (Join-Path $Root 'bin\iemmixer-guard.exe'); args = 'run'; dir = $Root; trigger = '' },
+        @{ name = 'iemmixer-StartApp'; level = $script:RunLevelLimited; exe = $AppExe; args = ''; dir = (Split-Path -Parent $AppExe); trigger = '' },
+        @{ name = 'iemmixer-probe'; level = $script:RunLevelLimited; exe = (Join-Path $system 'cmd.exe'); args = '/c exit 0'; dir = ''; trigger = '' },
+        @{ name = 'iemmixer-tuning'; level = $script:RunLevelHighest; exe = $ps; args = ($common + ' -Kind tuning'); dir = $tasksDir; trigger = '' },
+        @{ name = 'iemmixer-exclude'; level = $script:RunLevelHighest; exe = $ps; args = ($common + ' -Kind exclude'); dir = $tasksDir; trigger = '' },
+        @{ name = 'iemmixer-logon'; level = $script:RunLevelHighest; exe = $ps; args = $logonArgs; dir = $tasksDir; trigger = 'logon' },
+        @{ name = 'iemmixer-boot-pref'; level = $script:RunLevelHighest; exe = $boot.exe; args = $boot.arguments; dir = $tasksDir; trigger = 'boot' }
     )
     $reports = @()
     $problems = @()
     foreach ($s in $specs) {
+        $atLogon = ($s.trigger -ceq 'logon')
+        $atBoot = ($s.trigger -ceq 'boot')
+        $logonType = $script:LogonInteractive
+        if ($atBoot) { $logonType = $script:LogonS4U }
         $d = New-IemTaskDefinition -Scheduler $sch -User $u.name -RunLevel $s.level -Exe $s.exe -Arguments $s.args `
-            -WorkDir $s.dir -Description ('iemmixer S6: ' + $s.name) -AtLogon:$s.logon
-        [void]$f.RegisterTaskDefinition($s.name, $d, $script:TaskCreateOrUpdate, $u.name, $null, $script:LogonInteractive, $sddl)
+            -WorkDir $s.dir -Description ('iemmixer S6: ' + $s.name) -AtLogon:$atLogon -AtBoot:$atBoot
+        [void]$f.RegisterTaskDefinition($s.name, $d, $script:TaskCreateOrUpdate, $u.name, $null, $logonType, $sddl)
         [void]$f.GetTask($s.name).SetSecurityDescriptor($sddl, $script:TaskDontAddPrincipalAce)
         $rep = Get-IemTaskReport -Task $f.GetTask($s.name) -UserSid $u.sid
-        $bad = Test-IemTaskReport -Report $rep -RunLevel $s.level
+        $bad = Test-IemTaskReport -Report $rep -RunLevel $s.level -Boot:$atBoot
         $want = [pscustomobject]@{ path = $s.exe; arguments = $s.args; workdir = $s.dir }
         if (-not (Test-IemSameActions -A @($want) -B $rep.actions)) { $bad += ('action ' + (ConvertTo-Json -InputObject $rep.actions -Compress)) }
         $wantTriggers = ''
-        if ($s.logon) { $wantTriggers = '9' }
+        if ($atLogon) { $wantTriggers = [string]$script:TriggerLogon }
+        if ($atBoot) { $wantTriggers = [string]$script:TriggerBoot }
         if ((@($rep.triggers) -join ',') -cne $wantTriggers) { $bad += ('triggers ' + (@($rep.triggers) -join ',')) }
         foreach ($b in $bad) { $problems += ('{0}: {1}' -f $s.name, $b) }
         $reports += [pscustomobject]@{ task = $s.name; run_level = $rep.run_level; sddl_ok = $rep.sddl_ok; actions = $rep.actions; triggers = $rep.triggers; problems = $bad }
@@ -1209,24 +1331,55 @@ function Restore-IemPref {
                        ok = (Test-IemPrefIsOriginal -Pref $now -Original $Original) }
 }
 
+function Format-IemTaskTime {
+    # A task's last run time (local, as Task Scheduler gives it) in UTC, ISO
+    # 8601; '' when it never ran (Task Scheduler then gives a time before 2000).
+    param($Time)
+    if ($null -eq $Time) { return '' }
+    $t = [datetime]$Time
+    if ($t.Year -lt 2000) { return '' }
+    return $t.ToUniversalTime().ToString('o')
+}
+
+function Get-IemBootPrefLog {
+    # The boot task's last logged run (#35): the lines of <elevated root>\
+    # tasks\out\boot-pref.log from its last "boot-pref " header on, empty
+    # lines dropped (the header, then reg.exe's read-back: the key and the
+    # value, or its error). @() before the first run.
+    param([Parameter(Mandatory)][string]$Path)
+    if (Test-IemReparsePoint -Path $Path) { throw "$Path is a junction or a link: refused" }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return ,@() }
+    $lines = @([IO.File]::ReadAllLines($Path) | Where-Object { $_.Trim() })
+    $start = -1
+    for ($i = 0; $i -lt $lines.Count; $i++) { if ($lines[$i].StartsWith('boot-pref ')) { $start = $i } }
+    if ($start -lt 0) { return ,@() }
+    return ,@($lines[$start..($lines.Count - 1)])
+}
+
 function Get-IemBootstrapState {
     # Read-only (plan Task 16 Step 1): REAPER and the app running, the driver
-    # module's holders, the preference, our tasks and their descriptors, the
-    # root's DACL and every item below it, the firewall rule, the network
-    # categories, Defender.
+    # module's holders, the preference, our tasks (descriptor, last result,
+    # last run in UTC), the boot task's last logged run (#35; its log in
+    # -ElevatedRoot, default %ProgramData%\iemmixer), the root's DACL and every
+    # item below it, the firewall rule, the network categories, Defender.
     param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][string]$Module, [Parameter(Mandatory)][string]$PrefKey,
           [Parameter(Mandatory)][string]$PrefName, [Parameter(Mandatory)][string]$AppImage, [string]$ReaperImage = 'reaper',
-          [string]$Folder = '\iemmixer', [string]$FirewallRule = 'iemmixer-http', [string]$User = '')
+          [string]$Folder = '\iemmixer', [string]$FirewallRule = 'iemmixer-http', [string]$User = '', [string]$ElevatedRoot = '')
+    $ElevatedRoot = Resolve-IemElevatedRoot -ElevatedRoot $ElevatedRoot
     $u = Resolve-IemUser -User $User
     $sch = Connect-IemScheduler
     $tasks = @()
     foreach ($name in $script:TaskNames) {
         $t = Get-IemRegisteredTask -Scheduler $sch -Folder $Folder -Name $name
-        if ($null -eq $t) { $tasks += [pscustomobject]@{ task = $name; exists = $false; state = 0; last_result = 0; sddl_ok = $false }; continue }
+        if ($null -eq $t) { $tasks += [pscustomobject]@{ task = $name; exists = $false; state = 0; last_result = 0; last_run = ''; sddl_ok = $false }; continue }
         $sddl = [string]$t.GetSecurityDescriptor(4)
         $tasks += [pscustomobject]@{ task = $name; exists = $true; state = [int]$t.State; last_result = [int64]$t.LastTaskResult
-                                     sddl_ok = (Test-IemTaskSddl -Sddl $sddl -UserSid $u.sid) }
+                                     last_run = (Format-IemTaskTime -Time $t.LastRunTime); sddl_ok = (Test-IemTaskSddl -Sddl $sddl -UserSid $u.sid) }
     }
+    $bootLog = [IO.Path]::Combine($ElevatedRoot, 'tasks', 'out', $script:BootPrefLog)
+    $bootLines = @()
+    $bootError = ''
+    try { $bootLines = Get-IemBootPrefLog -Path $bootLog } catch { $bootError = $_.Exception.Message }
     $pref = $null
     $prefError = ''
     try { $pref = Get-IemPref -Key $PrefKey -Name $PrefName } catch { $prefError = $_.Exception.Message }
@@ -1255,6 +1408,7 @@ function Get-IemBootstrapState {
         pref = $pref
         pref_error = $prefError
         tasks = $tasks
+        boot_pref = [pscustomobject]@{ path = $bootLog; log = $bootLines; log_error = $bootError }
         root = [pscustomobject]@{ exists = $rootExists; acl_ok = ($rootExists -and $rootBad.Count -eq 0); problems = $rootBad }
         firewall = [pscustomobject]@{ present = ($null -ne $fw); ok = (Test-IemFirewallRule -Rule $fw -Enabled 'True'); rule = $fw }
         networks = @(Get-NetConnectionProfile -ErrorAction SilentlyContinue | ForEach-Object { "$($_.NetworkCategory)" })
