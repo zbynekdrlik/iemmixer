@@ -428,8 +428,15 @@ def cmd_preflight(env, args) -> None:
     problems = preflight_problems(r, state["pref_original"], dev_time)
     if problems:
         raise StepError("; ".join(problems))
-    update_state({"preflight": r})
-    print(json.dumps({"preflight": r}))
+    # A window that ended without a closing unwind (its process died, a deadline stop) left the
+    # spike's stop file, and every changing step of this window would refuse on it. No spike runs
+    # (checked above), so it is stale: removed here under the lock, never while "ide event" holds
+    # the flag (the event path owns it then). clear_stop keeps it while the spike or its task runs.
+    stop = 'kept: the "ide event" flag exists' if event_now() else clear_stop(env)
+    if stop.startswith("error"):
+        raise StepError(f"the spike's stop file left by an earlier window could not be removed ({stop})")
+    update_state({"preflight": dict(r, stop_file=stop)})
+    print(json.dumps({"preflight": r, "stop_file": stop}))
 
 
 def need_reaper_card(state: dict) -> None:
