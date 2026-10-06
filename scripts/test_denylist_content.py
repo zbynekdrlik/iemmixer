@@ -233,7 +233,9 @@ class ContentTests(ScanTestCase):
             self.assert_findings_in_both_modes(
                 {"many.zip": many, "dense.zip": dense},
                 "many.zip!/inner2.zip: cannot be scanned: more than 50 members in one blob",
-                "dense.zip!/m", ": cannot be scanned: decompressed to more than 20 times the blob")
+                "dense.zip!/m1.txt: cannot be scanned: decompressed to more than 20 times the blob")  # 20 x 5132 bytes
+            code, out = self.scan("--tree", "HEAD")
+            self.assertEqual(out.count("dense.zip!/"), 1, out)  # the blob's expansion stops at its limit
 
     def test_other_containers_are_findings_allowlisted_by_their_blob_key(self) -> None:
         pdf = (b"%PDF-1.4\n1 0 obj << /Length 20 /Filter /FlateDecode >> stream\n" + zlib.compress(b"(zyxname) Tj")
