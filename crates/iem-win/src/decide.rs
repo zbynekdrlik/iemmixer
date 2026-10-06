@@ -286,6 +286,21 @@ mod tests {
     use std::io::ErrorKind::InvalidInput;
     use std::time::UNIX_EPOCH;
 
+    /// #32 F3-r4 5: only `ERROR_ACCESS_DENIED` (5) makes a durable rename
+    /// try again with POSIX semantics; a missing source, a sharing
+    /// violation or an error without an OS code is the rename's own.
+    #[test]
+    fn a_durable_rename_tries_again_only_after_access_denied() {
+        assert!(rename_again(&io::Error::from_raw_os_error(5)));
+        for code in [2, 3, 32, 183] {
+            assert!(!rename_again(&io::Error::from_raw_os_error(code)), "{code}");
+        }
+        assert!(!rename_again(&io::Error::from(
+            io::ErrorKind::PermissionDenied
+        )));
+        assert!(!rename_again(&io::Error::other("no code")));
+    }
+
     /// Every child runs without a window, in a group of its own when asked;
     /// only a job that allows breakaway gets the flag, and a refusal starts
     /// nothing and names why.
