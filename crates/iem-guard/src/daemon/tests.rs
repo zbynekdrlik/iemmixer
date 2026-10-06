@@ -3524,6 +3524,44 @@ fn a_busy_state_directory_is_tried_again_without_a_crash_count() {
 }
 
 #[test]
+fn a_state_directory_that_stays_busy_falls_back_like_a_crash_loop() {
+    // F3 round 4, finding 3: exit 75 was tried again without an end, so a
+    // state directory held by something the guard does not watch kept the
+    // crash loop's fallback (REAPER, or the previous pin in prod) from
+    // ever running. Ten busy exits in a row (about 50 s) are still no
+    // crash; each one after them counts as abnormal. The alarm at the
+    // third stays the only busy alarm.
+    let busy = "the engine's state directory stayed in use 3 times in a row (exit 75): \
+                starting it again";
+    let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Dev));
+    pc.exited = vec![(Kid::Engine, Some(75)); 10];
+    let at = Instant::now();
+    tick(&mut pc, &mut g, at);
+    assert_eq!(g.state.mode, Mode::Dev);
+    assert_eq!(texts(&g), [busy]);
+    tick(&mut pc, &mut g, at + Duration::from_millis(1999));
+    assert!(!pc.called(Call::EngineStart));
+    tick(&mut pc, &mut g, at + Duration::from_secs(2));
+    assert_eq!(pc.count(Call::EngineStart), 1);
+    // The eleventh in a row is a crash: the backoff's 1 s, not 2 s.
+    pc.exited = vec![(Kid::Engine, Some(75))];
+    let later = at + Duration::from_secs(10);
+    tick(&mut pc, &mut g, later);
+    tick(&mut pc, &mut g, later + Duration::from_secs(1));
+    assert_eq!(pc.count(Call::EngineStart), 2);
+    assert_eq!(g.state.mode, Mode::Dev);
+    // Two more make three crashes in 10 min: back to REAPER.
+    pc.exited = vec![(Kid::Engine, Some(75)); 2];
+    tick(&mut pc, &mut g, later + Duration::from_secs(5));
+    assert_eq!(g.state.mode, Mode::Event);
+    let t = texts(&g);
+    assert_eq!(t.iter().filter(|a| *a == busy).count(), 1, "{t:?}");
+    let crashed = "the engine crashed 3 times in 10 min: back to REAPER";
+    assert!(t.iter().any(|a| a == crashed), "{t:?}");
+    assert!(pc.called(Call::ReaperStart));
+}
+
+#[test]
 fn a_crash_loop_goes_back_to_reaper() {
     let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Dev));
     pc.exited = vec![(Kid::Engine, Some(70)); 3];
