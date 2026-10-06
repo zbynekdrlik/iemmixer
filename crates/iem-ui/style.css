@@ -2895,6 +2895,25 @@ body.talk-live-overlay {
   color: var(--text-primary);
 }
 
+/* "Back to REAPER" in the engineer's console (program spec 4.3): its PIN step */
+.switch-pin-input {
+  width: 100%;
+  margin: 12px 0;
+  padding: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.3);
+  color: inherit;
+  font-size: 1.4em;
+  letter-spacing: 0.4em;
+  text-align: center;
+}
+
+.console-switch .back-to-reaper-btn {
+  width: auto;
+  margin: 0;
+}
+
 /* Engineer console in Settings (F29) */
 .console-input,
 .console-limiter {

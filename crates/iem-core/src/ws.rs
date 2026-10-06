@@ -84,6 +84,10 @@ pub struct ConsoleInfo {
     pub limiters: Vec<ConsoleMix>,
     pub pages: Vec<PageLink>,
     pub login: LoginFailures,
+    /// The site has the "Back to REAPER" switch (§4.3, `back_to_reaper`):
+    /// the console then shows its button.
+    #[serde(default)]
+    pub can_switch: bool,
 }
 
 /// Client → Server commands (sent via WebSocket)
@@ -735,6 +739,7 @@ mod tests {
                     tunnel: 2,
                     engineer_budget_trips: 0,
                 },
+                can_switch: true,
             }),
             "Console",
         );
@@ -986,12 +991,14 @@ mod tests {
                         tunnel: 2,
                         engineer_budget_trips: 3,
                     },
+                    can_switch: true,
                 }),
                 concat!(
                     r#"{"event":"Console","data":{"inputs":[{"id":"mic1","name":"MEMBER1 mic","#,
                     r#""trim_db":0.0,"muted":false,"processing":true}],"limiters":[{"id":"member1","#,
                     r#""name":"Member1","active_seconds":1.5}],"pages":[{"id":"translator","#,
-                    r#""name":"Translator"}],"login":{"lan":1,"tunnel":2,"engineer_budget_trips":3}}}"#,
+                    r#""name":"Translator"}],"login":{"lan":1,"tunnel":2,"engineer_budget_trips":3},"#,
+                    r#""can_switch":true}}"#,
                 ),
             ),
             (

@@ -3,6 +3,7 @@
 pub mod alert_button;
 pub mod alert_toast;
 pub mod audio_player;
+pub mod back_to_reaper;
 pub mod backup_section;
 pub mod category_tabs;
 pub mod confirm_dialog;

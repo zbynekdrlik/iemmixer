@@ -37,7 +37,8 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// How often solos and talk locks are checked.
 pub const JANITOR_PERIOD: Duration = Duration::from_millis(250);
 
-/// The console's data (F29).
+/// The console's data (F29), and whether the site has the "Back to REAPER"
+/// switch (§4.3), whose button the console shows.
 pub fn console_info(state: &AppState, site: &SiteView) -> ConsoleInfo {
     let mirror = state.engine.mirror();
     let inputs = site
@@ -82,6 +83,7 @@ pub fn console_info(state: &AppState, site: &SiteView) -> ConsoleInfo {
             tunnel: stats.tunnel_failures,
             engineer_budget_trips: stats.engineer_budget_trips,
         },
+        can_switch: !state.site_config.back_to_reaper.is_empty(),
     }
 }
 

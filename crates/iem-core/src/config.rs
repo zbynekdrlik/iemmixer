@@ -46,7 +46,8 @@ pub struct Config {
     pub inputs: Vec<SiteInputMeta>,
 
     /// Command line of the engineer's "Back to REAPER" switch (§4.3; S6
-    /// provides `iemmode event`), `POST /api/mode/event`. Empty: no switch.
+    /// provides `iemmode event`): `POST /api/mode/event`, the button in the
+    /// engineer's console. Empty: no switch, no button.
     #[serde(default)]
     pub back_to_reaper: Vec<String>,
 

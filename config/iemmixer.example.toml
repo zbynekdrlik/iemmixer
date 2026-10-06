@@ -29,7 +29,7 @@ backup_schedule = ["13:00", "21:00"]
 backup_retention_days = 60
 # The engineer's "Back to REAPER" switch (program spec §4.3): the command the
 # server starts (no shell) for POST /api/mode/event after the engineer PIN.
-# Empty or absent: no switch.
+# Empty or absent: no switch (and no button in the engineer's console).
 back_to_reaper = ["iemmode", "event"]
 # PIN changes in the web UI (P9). Until the cutover PINs change only in the
 # predecessor app: the guard writes `false` into every dev and trial site
