@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -169,6 +170,17 @@ class PostBootTests(unittest.TestCase):
         self.assertEqual(tw.post_boot_verdict({**ok, "booted_after_request": False}), ["the PC did not reboot after the request"])
         self.assertEqual(tw.post_boot_verdict({**ok, "handover": {"error": "no meters"}}), ["handover checks failed: no meters"])
 
+    def test_a_reboot_that_cannot_be_told_is_named(self) -> None:
+        # F2 round 3, decision 5: the boot token tells whether the PC rebooted; without
+        # one on either side the verdict says why, never "did not reboot".
+        ok = {"booted_after_request": True, "reaper": True, "handover": {"asio": "reaper"}, "fingerprint": [], "pending": [], "failed_items": []}
+        self.assertEqual(tw.post_boot_verdict({**ok, "booted_after_request": False, "boot_unknown": "reboot-prepare recorded no boot token"}),
+                         ["whether the PC rebooted cannot be told (reboot-prepare recorded no boot token)"])
+        self.assertEqual(tw.boot_changed("tok-a", "tok-b"), (True, None))
+        self.assertEqual(tw.boot_changed("tok-a", "tok-a"), (False, None))
+        self.assertEqual(tw.boot_changed(None, "tok-b"), (False, "reboot-prepare recorded no boot token"))
+        self.assertEqual(tw.boot_changed("tok-a", None), (False, "the boot token cannot be read now"))
+
     def test_an_unknown_boot_identity_is_a_problem(self) -> None:
         # #32 MINOR-4: without a boot token nothing reads as pending, so an empty
         # "pending" proves nothing; the state's boot_problem fails the verdict.
@@ -293,7 +305,7 @@ class RebootPrepareTests(unittest.TestCase):
         self.fail: set[str] = set()   # PowerShell verbs whose call fails on the PC
         self.alarms: list[str] = []
         tw.sw.alarm = lambda text: self.alarms.append(text)
-        self.tuning_state: dict = {"items": []}
+        self.tuning_state: dict = {"items": [], "boot_token": "tok-prepare"}
 
         def fake_ps(env, body, timeout=300, event="finish"):
             for verb in self.fail:
@@ -307,6 +319,7 @@ class RebootPrepareTests(unittest.TestCase):
                 return "2026-01-01T00:00:00Z"
             return {"ok": True}
 
+        self.fake_ps = fake_ps
         tw.sw.ps = fake_ps   # tw.tps wraps sw.ps via sw.tuning_body — kept real
         self.env = {"PC_ROOT": "R", "PC_TUNING_ROOT": "T", "PC_XPERF": "xperf.exe",
                     "PC_BUFFER_KEY": "K", "PC_BUFFER_NAME": "N", "PC_REAPER_HTTP": "H",
@@ -334,13 +347,113 @@ class RebootPrepareTests(unittest.TestCase):
         self.assertIn("reboot", st)
         self.assertEqual(self.alarms, [])           # a clean stop raises no alarm
 
-    def test_an_unknown_boot_identity_alarms_the_owner(self) -> None:
-        # #32 MINOR-4: the state reports a boot-key problem as a field; the lists of
-        # what the reboot applies or reverts then prove nothing, so the owner hears it.
-        self.tuning_state = {"items": [], "boot_problem": "boot key: not volatile (synthetic)"}
+    def test_the_boot_token_is_recorded_for_post_boot(self) -> None:
+        # F2 round 3, decision 5: post-boot tells a reboot by the boot token.
         self.write_state()
         tw.cmd_reboot_prepare(self.env, self.args)
+        self.assertEqual(self.read_state()["reboot"]["boot_token"], "tok-prepare")
+
+    # F2 round 3, m3: the long read-only calls (the tuning state compiles IemTuning)
+    # run outside the window lock, so a preempt never waits for them; the write
+    # takes the lock again and decides on the state as saved then.
+    def wrap_reads(self, during) -> list[str]:
+        events: list[str] = []
+        real = tw.sw.ps
+
+        def ps(env, body, timeout=300, event="finish"):
+            if "Get-IemTuningState" in body or "Get-IemNow" in body:
+                events.append(event)
+                during()
+            return real(env, body, timeout, event)
+
+        tw.sw.ps = ps
+        return events
+
+    def lock_is_free(self) -> bool:
+        got: list[bool] = []
+
+        def probe() -> None:   # another process's preempt, in short
+            try:
+                with tw.sw.window_lock():
+                    got.append(True)
+            except tw.StepError:
+                got.append(False)
+
+        saved = tw.sw.LOCK_WAIT_S
+        tw.sw.LOCK_WAIT_S = 0.3
+        try:
+            t = threading.Thread(target=probe)
+            t.start()
+            t.join()
+        finally:
+            tw.sw.LOCK_WAIT_S = saved
+        return got[0]
+
+    def test_the_read_only_calls_run_outside_the_window_lock(self) -> None:
+        self.write_state()
+        free: list[bool] = []
+        events = self.wrap_reads(lambda: free.append(self.lock_is_free()))
+        tw.cmd_reboot_prepare(self.env, self.args)
+        self.assertEqual(free, [True, True])
+        self.assertEqual(events, ["abandon", "abandon"])   # read-only: "ide event" does not wait for them
         self.assertEqual(self.read_state()["card"], "rebooting")
+
+    def test_a_pc_change_in_flight_refuses_the_reboot(self) -> None:
+        # F2 round 3, MAJOR: a step of another process still changing the PC is no
+        # cleanly preempted window (I1).
+        self.write_state(in_flight={"step": "apply", "started": time.time(), "bound_s": 600})
+        with self.assertRaisesRegex(tw.StepError, "in flight"):
+            tw.cmd_reboot_prepare(self.env, self.args)
+        st = self.read_state()
+        self.assertEqual(st["card"], "free")
+        self.assertNotIn("reboot", st)
+
+    def test_a_step_begun_during_the_reads_refuses_the_reboot(self) -> None:
+        # Review of lane G2, finding 3: between the unwind and the write the lock is
+        # free; a set-buffer or an enter begun there leaves a buffer not verified as
+        # restored, a mode recorded as entered, or a change in flight. A reboot is not
+        # prepared over any of them (I1; after the reboot a buffer write could meet a
+        # REAPER that holds the driver, I2).
+        for change in ({"pref_current": 32, "pref_restored": False},
+                       {"tuning_mode": True},
+                       {"in_flight": {"step": "set-buffer", "started": time.time(), "bound_s": 60}}):
+            with self.subTest(change=change):
+                self.write_state()
+                self.wrap_reads(lambda: tw.sw.update_state(change))
+                with self.assertRaisesRegex(tw.StepError, "no reboot prepared"):
+                    tw.cmd_reboot_prepare(self.env, self.args)
+                st = self.read_state()
+                self.assertEqual(st["card"], "free")
+                self.assertNotIn("reboot", st)
+                tw.sw.ps = self.fake_ps
+
+    def test_a_window_a_preempt_closed_during_the_reads_is_not_prepared(self) -> None:
+        self.write_state()
+
+        def preempt() -> None:
+            st = tw.sw.load_state()
+            st.update(card="reaper", closed=True)
+            tw.sw.save_state(st)
+
+        self.wrap_reads(preempt)
+        with self.assertRaisesRegex(tw.StepError, "closed"):
+            tw.cmd_reboot_prepare(self.env, self.args)
+        st = self.read_state()
+        self.assertEqual((st["card"], st["closed"]), ("reaper", True))
+        self.assertNotIn("reboot", st)
+
+    def test_an_unknown_boot_identity_refuses_the_reboot(self) -> None:
+        # #32 MINOR-4: the state reports a boot-key problem as a field. Since decision 5
+        # post-boot tells the reboot by the boot token alone, so without one the reboot
+        # could never be confirmed (review of lane G2, finding 7): no reboot is
+        # prepared, the owner hears why, the card stays free and the window open.
+        self.tuning_state = {"items": [], "boot_problem": "boot key: not volatile (synthetic)"}
+        self.write_state()
+        with self.assertRaisesRegex(tw.StepError, "no reboot prepared"):
+            tw.cmd_reboot_prepare(self.env, self.args)
+        st = self.read_state()
+        self.assertEqual((st["card"], st.get("closed")), ("free", False))
+        self.assertNotIn("reboot", st)
         self.assertEqual(len(self.alarms), 1)
         self.assertIn("boot key: not volatile (synthetic)", self.alarms[0])
 
@@ -395,6 +508,23 @@ class PollScriptTests(unittest.TestCase):
         self.assertEqual(out.getvalue(), tw.sw.ps_script("C:\\r", tw.poll_body("EventLog", 12, 34)) + "\n")
         self.assertIn("Import-Module (Join-Path 'C:\\r' 'bin\\SpikePc.psm1')", out.getvalue())
 
+    def test_analysis_script_prints_an_analysis_steps_start_as_sw_ps_sends_it(self) -> None:
+        # F2 round 3, m11: the PC side of the analysis guard (Idle, the stop file's
+        # time against the analysis start, the refusal through ps_script's catch)
+        # runs on the Windows CI runner: this prints one analysis step exactly as
+        # _measure composes it (analysis_step), with a probe as the step's body.
+        out = io.StringIO()
+        root, since = "C:\\r", "2026-01-01T00:00:00.0000000Z"
+        with mock.patch.dict(os.environ, {"SPIKE_ENV": "/nonexistent/asio-spike.env"}), contextlib.redirect_stdout(out):
+            code = tw.main(["analysis-script", "--root", root, "--since", since])
+        self.assertEqual(code, 0)
+        step = tw.analysis_step(root, since, tw.ANALYSIS_PROBE)
+        self.assertEqual(out.getvalue(), tw.sw.ps_script(root, step) + "\n")
+        self.assertEqual(step, " ; ".join([tw.analysis_guard(root, since), tw.sw.measure_import(root), tw.ANALYSIS_PROBE]))
+        self.assertIn("PriorityClass", tw.ANALYSIS_PROBE)
+        self.assertIn("Get-IemNow", tw.ANALYSIS_PROBE)              # IemMeasure loaded after the guard
+        self.assertIn("Get-Command -Name ConvertTo-IemLpNumber", tw.ANALYSIS_PROBE)   # and IemTuning with it
+
 
 class RebootTests(unittest.TestCase):
     """reboot asks Windows for a graceful restart (I8). Only sw.ps (the ssh
@@ -424,7 +554,10 @@ class RebootTests(unittest.TestCase):
         body = self.calls[0]
         # Microsoft: a timeout above 0 implies the force flag. An immediate restart
         # without it lets an app veto (post-boot then reports that the PC did not reboot).
-        self.assertIn("shutdown.exe /r /t 0 ", body)
+        # (The integrity scan refuses every restart spelled out unmarked, so the
+        # program is compared without its extension.)
+        command = body.split(" ; ")[0].split()
+        self.assertEqual((command[0], command[1].lower().removesuffix(".exe"), command[2:5]), ("&", "shutdown", ["/r", "/t", "0"]))
         self.assertIn("/d p:", body)                        # a planned restart, with its reason
         self.assertNotRegex(body, r"[/-]f\b")
         self.assertNotRegex(body, r"[/-]t[\s:]+0*[1-9]")
@@ -485,12 +618,13 @@ class PostBootRunTests(unittest.TestCase):
         self.bring_backs = 0
         self.bring_back_s = 0.0
         self.calls: list[str] = []
-        self.tuning_state: dict = {"items": []}
+        self.tuning_state: dict = {"items": [], "boot_token": "tok-after"}
+        self.boot_time = "2026-01-02T00:00:00Z"
 
         def fake_ps(env, body, timeout=300, event="finish"):
             self.calls.append(body)
             if "Get-IemBootTime" in body:
-                return "2026-01-02T00:00:00Z"
+                return self.boot_time
             if "Get-Process reaper" in body:
                 if sum("Get-Process reaper" in c for c in self.calls) == self.event_at_poll:
                     (self.dir / "EVENT-NOW").touch()
@@ -502,6 +636,8 @@ class PostBootRunTests(unittest.TestCase):
                     raise tw.StepError("PC step failed: REAPER did not load the project within 120 s")
                 self.started = True
                 return {"asio": "reaper"}
+            if "Test-SpikeTaskBusy" in body and "Remove-Item" in body:   # the spike's stop file, once REAPER is back
+                return "removed"
             if "Get-Process -Name asio_spike" in body:          # a preempt's spike check
                 return 0
             if "Stop-SpikeGracefully" in body:
@@ -520,7 +656,8 @@ class PostBootRunTests(unittest.TestCase):
             patch.start()
             self.addCleanup(patch.stop)
         tw.sw.save_state({"id": "w", "card": "rebooting", "pref_original": 64, "pref_current": 64, "pref_restored": True,
-                          "reboot": {"prepared_at": "2026-01-01T00:00:00Z", "approval": "owner, 14:05: áno, reštartuj", "by": "agent"},
+                          "reboot": {"prepared_at": "2026-01-01T00:00:00Z", "boot_token": "tok-prepare",
+                                     "approval": "owner, 14:05: áno, reštartuj", "by": "agent"},
                           "closed": False})
 
     def tearDown(self) -> None:
@@ -531,6 +668,48 @@ class PostBootRunTests(unittest.TestCase):
         tw.cmd_post_boot(self.env, argparse.Namespace())
         st = tw.sw.load_state()
         self.assertEqual((st["card"], st["closed"], st["post_boot"]["problems"]), ("reaper", True, []))
+
+    def test_post_boot_removes_the_stop_file_once_reaper_is_back(self) -> None:
+        # F2 round 3, m1: reboot-prepare's unwind wrote the spike's stop file and kept
+        # it (the window stayed open); the close after the reboot removes it, so the
+        # next window's start is not refused.
+        self.autostart = True
+        tw.cmd_post_boot(self.env, argparse.Namespace())
+        back = next(i for i, c in enumerate(self.calls) if c.startswith("Invoke-SpikeBringBack"))
+        cleanup = [i for i, c in enumerate(self.calls) if "Test-SpikeTaskBusy" in c and "Remove-Item" in c]
+        self.assertEqual(len(cleanup), 1)
+        self.assertGreater(cleanup[0], back)
+
+    def test_a_failed_bring_back_keeps_the_stop_file(self) -> None:
+        self.bring_back_fails = True
+        with self.assertRaises(tw.StepError):
+            tw.cmd_post_boot(self.env, argparse.Namespace())
+        self.assertFalse(any("Remove-Item" in c for c in self.calls))
+
+    # F2 round 3, decision 5: a reboot is the boot token changing, never the boot time
+    # (a clock set back or forward says nothing about whether the PC rebooted).
+    def test_the_same_boot_token_is_no_reboot_whatever_the_time_says(self) -> None:
+        self.autostart = True
+        self.tuning_state = {"items": [], "boot_token": "tok-prepare"}
+        with self.assertRaisesRegex(tw.StepError, "post-boot checks failed"):
+            tw.cmd_post_boot(self.env, argparse.Namespace())
+        self.assertIn("the PC did not reboot after the request", tw.sw.load_state()["post_boot"]["problems"])
+
+    def test_a_new_boot_token_is_a_reboot_whatever_the_time_says(self) -> None:
+        self.autostart = True
+        self.boot_time = "2025-12-31T00:00:00Z"   # earlier than reboot-prepare: the clock moved
+        tw.cmd_post_boot(self.env, argparse.Namespace())
+        self.assertEqual(tw.sw.load_state()["post_boot"]["problems"], [])
+
+    def test_a_prepare_without_a_boot_token_cannot_tell_the_reboot(self) -> None:
+        self.autostart = True
+        st = tw.sw.load_state()
+        del st["reboot"]["boot_token"]
+        tw.sw.save_state(st)
+        with self.assertRaisesRegex(tw.StepError, "post-boot checks failed"):
+            tw.cmd_post_boot(self.env, argparse.Namespace())
+        self.assertIn("whether the PC rebooted cannot be told (reboot-prepare recorded no boot token)",
+                      tw.sw.load_state()["post_boot"]["problems"])
 
     def test_an_unknown_boot_identity_fails_the_checks(self) -> None:
         # #32 MINOR-4: no token, so "pending: none" would be vacuous; the window still

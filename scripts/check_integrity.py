@@ -2,7 +2,8 @@
 """Integrity gate: no ignored/skipped/focused tests, no continue-on-error,
 self-hosted runners or pull_request_target, every action pinned to a full
 commit SHA with its version comment, no force-kill verb anywhere, comments
-included (program spec I8), job breakaway only in iem-win's spawn glue (S6),
+included (program spec I8), no restart but the one marked literal form (I8),
+job breakaway only in iem-win's spawn glue (S6),
 no ASIO rate, clock or control-panel call (I2), and the asio-spike bundle's
 Copy-Item list equal to spike_window.BUNDLE_FILES."""
 from __future__ import annotations
@@ -26,134 +27,70 @@ VERSION_COMMENT = re.compile(r"^\s+#\s*v\d+(?:\.\d+)*\s*$")
 # call terminate and delete), a job whose closing ends its processes, and the
 # Rust/tokio/Python/.NET process handles' kill methods (called, or named in
 # ForEach-Object). A request plus a bounded wait is the only stop. A forced
-# restart ends every process too: see forced_restart.
+# restart ends every process too: see restart_lines.
 FORCE_KILL = re.compile(
     r"(?i)\btaskkill\b|\btskill\b|\bpskill\b|terminateprocess|terminatejobobject|kill_on_job_close|stop-process"
     r"|\.kill\s*\(|\bstart_kill\b|\bkill_on_drop\b|\.terminate\s*\("
     r"|-(?:method)?name\s+['\"]?terminate\b|\bwmic\b.*\b(?:call\s+terminate|delete)\b"
     r"|(?:\bforeach-object|%)\s+(?:-membername\s+)?['\"]?kill\b")
-# Forced restarts and shutdowns (#32 B1, review m6/m7, round 3 m6). A
-# command's arguments end at the next separator OUTSIDE quotes (in Rust only
-# `;`: `&` and `|` are operators there), so another command's -f, -t or -Force
-# on the line is not read as the restart's, and a `;` inside a quoted /c text
-# does not hide what follows; a statement over several lines (a Rust chain or
-# argument list up to its `;`, a PowerShell backtick continuation) is read as one.
-SEPARATORS = ";|&"
-PS_SUFFIXES = (".ps1", ".psm1", ".psd1")
-CANDIDATE = re.compile(r"(?i)shutdown|restart-computer|stop-computer|exitwindowsex")
-SHUTDOWN_CMD = re.compile(r"(?i)\bshutdown(?:\.exe)?\b(?!\s*\()")
-# A switch of shutdown.exe (/r, -t, "/f", '/t','0'), with the number after it.
-SWITCH = re.compile(r"(?i)(?<![\w/\-])[/-]([a-z?]{1,2})(?![a-z0-9_])(?:[\s:\"',]+(\d+))?")
-COMPUTER_CMD = re.compile(r"(?i)\b(restart|stop)-computer\b")
-# -Force and the abbreviations PowerShell accepts for it. Restart-Computer also
-# has a -For parameter; Stop-Computer does not, so there -For is -Force.
-FORCE_PARAM = {"restart": re.compile(r"(?i)(?<![\w-])-(?:f|fo|forc|force)(?![\w-])"),
-               "stop": re.compile(r"(?i)(?<![\w-])-(?:f|fo|for|forc|force)(?![\w-])")}
-WIN32_SHUTDOWN = re.compile(r"(?i)\bwin32shutdown(tracker)?\b\s*(\()?")
-SYSTEM_SHUTDOWN = re.compile(r"(?i)\binitiatesystemshutdown(?:ex)?[aw]?\s*\(")
-FLAGS_ARG = re.compile(r"(?i)\bflags\s*=\s*(0x[0-9a-f]+|\d+)")
-EXIT_WINDOWS = re.compile(r"(?i)\bexitwindowsex\s*\(\s*(0x[0-9a-f]+|\d+)\s*,")
-FORCE_TOKENS = re.compile(r"(?i)\bEWX_FORCE(?:IFHUNG)?\b|\bSHUTDOWN_FORCE_(?:OTHERS|SELF)\b")
-NUMBER = re.compile(r"(?i)0x[0-9a-f]+|\d+")
+# Restarts and shutdowns (#32 B1, review m6/m7, F2 round 3 m9 and its decision
+# 3). Reading a restart's arguments failed again and again (non-literal flags, a
+# constant OR-ed with a number, a program named in one statement and its flags
+# in the next, an argument list over several lines), so the rule is simple:
+# every restart mechanism is a violation unless its line carries RESTART_MARKER
+# and the mechanism is in the one literally safe form, RESTART_SAFE. The one
+# legitimate call is tuning_window.REBOOT_REQUEST. Another graceful form (an
+# API call with literal flags, say) needs its own safe form and test first.
+RESTART_MARKER = "iemmixer:graceful-restart"
+RESTART_MECHANISMS = (
+    re.compile(r"(?i)\bshutdown\.exe\b"),                                       # the program, in any form
+    re.compile(r"(?i)(?<![\w.$-])shutdown\s+[/-](?!(?:a|\?)(?!\w))[a-z?]"),      # a command line with a switch (/a aborts)
+    re.compile(r"(?i)(?:^|[;|&{(`\"'])\s*shutdown\s+[$@`]"),                    # a command whose arguments are variables
+    re.compile(r"(?i)(?:&|\bstart-process\b|-filepath\b)\s*['\"]?shutdown(?:\.exe)?['\"]?(?![\w.(])"),
+    re.compile(r"(?i)\bstart-process\b[^;|\n]*?\s['\"]?shutdown(?:\.exe)?\b"),     # parameters before the program
+    re.compile(r"(?i)\bpsshutdown(?:64)?\b"),                                   # Sysinternals
+    re.compile(r"(?i)\bcommand::new\s*\(\s*r?#*\"shutdown"),                   # Rust's process API
+    re.compile(r"(?i)\b(?:system|popen|exec\w*|spawn\w*|run|call|check_call|check_output|start|processstartinfo)"
+               r"\s*\(\s*\[?\s*[rbuf]?[\"'`]shutdown\b"),                       # Python, JS, .NET process APIs
+    re.compile(r"(?i)\bfilename\s*=\s*[\"']shutdown\b"),                       # .NET ProcessStartInfo
+    re.compile(r"(?i)\[\s*[rbuf]?[\"']shutdown(?:\.exe)?[\"']"),                # an argv starting with it
+    re.compile(r"(?i)\b(?:restart|stop)-computer\b"),
+    re.compile(r"(?i)\bwin32shutdown(?:tracker)?\b|\.reboot\s*\(|-methodname\s+['\"]?(?:reboot|shutdown)\b"
+               r"|\bwmic\b.*\bcall\s+(?:reboot|shutdown|win32shutdown)\b"),
+    re.compile(r"(?i)\binitiate(?:system)?shutdown(?:ex)?[aw]?\b|\bexitwindows(?:ex)?\b|\b(?:nt|zw)shutdownsystem\b"),
+    re.compile(r"\bEWX_[A-Z_]+\b|\bSHUTDOWN_(?:FORCE_OTHERS|FORCE_SELF|GRACE_OVERRIDE|HYBRID|INSTALL_UPDATES|NOREBOOT"
+               r"|POWEROFF|RESTART|RESTARTAPPS|SKIP_SVC_PRESHUTDOWN|SOFT_REBOOT)\b"),
+)
+# An argv whose program and first switch sit on two lines (a formatter puts
+# each list element on a line of its own).
+RESTART_ARGV = re.compile(r"(?i)[\"']shutdown(?:\.exe)?[\"']\s*,\s*[rbuf]?[\"'][/-]")
+# The literally safe form: an immediate (/t 0, never a delay: Microsoft, "If
+# the timeout period is greater than 0, the /f parameter is implied"), planned
+# restart without /f, as a whole PowerShell command: literal switches only,
+# the reason literal, the comment single-quoted (no expansion), and the command
+# ended right there: a `;`, a comment or the line's end — never a quote, which
+# may open one more argument or close a string another one is joined to
+# (review of lane G2, finding 4).
+RESTART_SAFE = re.compile(r"(?i)&\s*shutdown\.exe /r /t 0(?: /d [pu]:\d{1,3}:\d{1,5})?(?: /c '[^'$`\"\\;|&\r\n]*')?"
+                          r"(?=\s*(?:[;#]|$))")
+RESTART = "restart without the graceful-restart marker and its literal safe form (program spec I8)"
 
 
-def statements(path: Path) -> list[tuple[int, str]]:
-    """The file's lines, a statement continued over several lines joined into
-    its first: in Rust a line naming a shutdown up to the `;` after it (at
-    most 20 lines on), in PowerShell across trailing backticks."""
-    rows = lines(path)
-    out: list[tuple[int, str]] = []
-    i = 0
-    while i < len(rows):
-        n, text = rows[i]
-        j = i
-        if path.suffix == ".rs" and (m := CANDIDATE.search(text)):
-            while ";" not in text[m.start():] and j + 1 < len(rows) and j - i < 20:
-                j += 1
-                text += " " + rows[j][1].strip()
-        elif path.suffix in PS_SUFFIXES:
-            while text.rstrip().endswith("`") and j + 1 < len(rows):
-                j += 1
-                text = text.rstrip()[:-1] + " " + rows[j][1].strip()
-        out.append((n, text))
-        i = j + 1
-    return out
-
-
-def own_arguments(text: str, start: int, rust: bool) -> str:
-    """The text after a command word up to its command's end: the next
-    separator outside quotes, quotes opened before the word included."""
-    separators = ";" if rust else SEPARATORS
-    quote = None
-    for i, ch in enumerate(text):
-        if i >= start and quote is None and ch in separators:
-            return text[start:i]
-        if quote is not None:
-            if ch == quote and (i == 0 or text[i - 1] != "\\"):
-                quote = None
-        elif ch in "'\"":
-            quote = ch
-    return text[start:]
-
-
-def call_args(text: str, open_paren: int) -> list[str] | None:
-    """The top-level arguments of the call whose `(` is at open_paren, or
-    None when it does not close in `text`."""
-    depth, args, current = 0, [], ""
-    for ch in text[open_paren:]:
-        if ch in "([{":
-            depth += 1
-            if depth == 1:
-                continue
-        elif ch in ")]}":
-            depth -= 1
-            if depth == 0:
-                return [*args, current.strip()] if current.strip() or args else []
-        elif ch == "," and depth == 1:
-            args.append(current.strip())
-            current = ""
+def restart_lines(rows: list[tuple[int, str]]) -> set[int]:
+    """The lines holding a restart that is not allowed: any mechanism, unless
+    the line carries RESTART_MARKER and every mechanism on it lies inside a
+    RESTART_SAFE command."""
+    found: set[int] = set()
+    for i, (n, text) in enumerate(rows):
+        pair = text + "\n" + (rows[i + 1][1] if i + 1 < len(rows) else "")
+        starts = [m.start() for rx in RESTART_MECHANISMS for m in rx.finditer(text)]
+        starts += [m.start() for m in RESTART_ARGV.finditer(pair) if m.start() < len(text)]
+        if not starts:
             continue
-        current += ch
-    return None
-
-
-def forced_restart(text: str, rust: bool = False) -> bool:
-    """A restart or shutdown that force-ends processes (I8), in one statement.
-    shutdown.exe passes only with an explicit /t 0 and no /f (Microsoft: "If
-    the timeout period is greater than 0, the /f parameter is implied", and
-    the default is 30), in any form (a command line, a quoted path, an argv
-    array, -ArgumentList); "shutdown" without a switch of its own is prose or
-    a method, /a (abort) is harmless. Restart-/Stop-Computer never with
-    -Force or its abbreviations; WMI Win32Shutdown(Tracker) never with the
-    force bit (4); InitiateSystemShutdown(Ex) only with bForceAppsClosed a
-    literal FALSE/0; ExitWindowsEx never with EWX_FORCE(IFHUNG) (0x4, 0x10);
-    InitiateShutdown never with SHUTDOWN_FORCE_OTHERS/SELF. A value that
-    cannot be read counts as forced (fail closed)."""
-    if FORCE_TOKENS.search(text):
-        return True
-    for m in SHUTDOWN_CMD.finditer(text):
-        switches = SWITCH.findall(own_arguments(text, m.end(), rust))
-        names = {s.lower() for s, _ in switches}
-        if not switches or names <= {"a", "?"}:
-            continue
-        if "f" in names or not any(s.lower() == "t" and v and int(v) == 0 for s, v in switches):
-            return True
-    for m in COMPUTER_CMD.finditer(text):
-        if FORCE_PARAM[m.group(1).lower()].search(own_arguments(text, m.end(), rust)):
-            return True
-    for m in WIN32_SHUTDOWN.finditer(text):
-        args = call_args(text, m.end() - 1) if m.group(2) else None
-        flags = (args[-1 if m.group(1) else 0] if args else None) or ((a := FLAGS_ARG.search(text)) and a.group(1))
-        if not flags or not NUMBER.fullmatch(flags) or int(flags, 0) & 4:
-            return True
-    for m in SYSTEM_SHUTDOWN.finditer(text):
-        args = call_args(text, m.end() - 1)
-        if args is None or len(args) < 4 or not re.fullmatch(r"(?i)false|0", args[3]):
-            return True
-    for m in EXIT_WINDOWS.finditer(text):
-        if int(m.group(1), 0) & 0x14:
-            return True
-    return False
+        safe = [m.span() for m in RESTART_SAFE.finditer(text)] if RESTART_MARKER in text else []
+        if any(not any(a <= s < b for a, b in safe) for s in starts):
+            found.add(n)
+    return found
 
 
 # Children leave the guard's job only through iem-win's spawn glue (S6 design note §5.1).
@@ -257,10 +194,13 @@ def violations(root: Path, repository: bool = False) -> list[str]:
             rel = path.relative_to(root).as_posix()
             if rel in SELF:
                 continue
-            forced = {n for n, text in statements(path) if forced_restart(text, rust=path.suffix == ".rs")}
-            for n, line in lines(path):
-                if FORCE_KILL.search(line) or n in forced:
+            rows = lines(path)
+            restarts = restart_lines(rows)
+            for n, line in rows:
+                if FORCE_KILL.search(line):
                     found.append(f"{rel}:{n}: force-kill command (program spec I8)")
+                elif n in restarts:
+                    found.append(f"{rel}:{n}: {RESTART}")
                 if BREAKAWAY.search(line) and not rel.startswith(BREAKAWAY_HOME):
                     found.append(f"{rel}:{n}: job breakaway outside iem-win (S6 design note §5.1)")
     goldens = root / "goldens"

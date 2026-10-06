@@ -13,6 +13,7 @@ import re
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import warnings
@@ -550,6 +551,79 @@ class EventTests(Base):
         self.assertIn("exit 3", docs[1]["spike_preempt"]["error"])
         self.assertEqual(self.pc.calls, [("iemmode.exe", ["event"], "ignore")])
         self.assertIn("spike preempt", err)
+
+    # F2 round 3, m2 and decision 2: after a FAILED spike preempt the window is closed
+    # under spike_window's lock first, so a window preempt another process still has
+    # queued finds it closed and starts no second bring-back next to the guard's.
+    def test_a_failed_spike_preempt_closes_the_window_before_iemmode_event(self) -> None:
+        self.open_window()
+        ip.SPIKE = self.write_spike(3)
+        seen: list[dict] = []
+        self.pc.replies[("event",)] = lambda: (seen.append(json.loads(ip.SPIKE_STATE.read_text(encoding="utf-8"))), (0, OK))[1]
+        code, docs, err = self.run_main("event")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(seen), 1)
+        self.assertTrue(seen[0]["closed"])
+        self.assertIn("failed spike preempt", seen[0]["closed_by"]["by"])
+        self.assertIn("exit 3", seen[0]["closed_by"]["error"])
+        self.assertEqual(seen[0]["card"], "free")   # nothing else is claimed: the guard brings REAPER back
+        self.assertIn({"spike_window": "closed", "after": "a failed spike preempt"}, docs)
+
+    def test_a_change_still_in_flight_after_a_failed_preempt_is_named(self) -> None:
+        # Review of lane G2, finding 5: no settle watches it on this path; the step's own
+        # late handler and the guard take it from here, and the agent hears which step.
+        intent = {"step": "set-buffer", "started": time.time(), "bound_s": 60}
+        self.open_window(in_flight=intent)
+        ip.SPIKE = self.write_spike(3)
+        code, docs, err = self.run_main("event")
+        self.assertEqual(code, 0, err)
+        self.assertIn({"spike_window": "closed", "after": "a failed spike preempt", "in_flight": intent}, docs)
+        self.assertIn("set-buffer is still in flight", err)
+
+    def test_a_closed_window_whose_preempt_still_settles_gets_the_spike_preempt(self) -> None:
+        # Review of lane G2, finding 1: a window process's own preempt closed the window
+        # and still watches REAPER (settle, without the lock); `spike_window.py preempt`
+        # waits for that watch, so iemmode event never runs next to its bring-back.
+        self.open_window(card="reaper", closed=True, settling={"step": "to-dev", "until": time.time() + 60})
+        seen = []
+        self.pc.replies[("event",)] = lambda: (seen.append(self.spike_log.is_file()), (0, OK))[1]
+        code, docs, _ = self.run_main("event")
+        self.assertEqual((code, seen, self.spike_log.read_text(encoding="utf-8")), (0, [True], "preempt\n"))
+        # A watch past its bound (its process died) is no window to pre-empt.
+        self.spike_log.unlink()
+        self.open_window(card="reaper", closed=True, settling={"step": "to-dev", "until": time.time() - 1})
+        self.assertEqual(self.run_main("event")[0], 0)
+        self.assertFalse(self.spike_log.exists())
+
+    def test_no_iemmode_call_while_the_window_lock_stays_taken(self) -> None:
+        # The lock wait fits the event budget: a window process that holds it (a
+        # bring-back of its own?) is never raced by the guard's.
+        self.open_window()
+        ip.SPIKE = self.write_spike(3)
+        ip.EVENT_BUDGET_S, ip.SWITCH_MIN_S = 2.0, 1.0
+        sw = ip.spike_module()
+        saved = sw.STATE
+        self.addCleanup(setattr, sw, "STATE", saved)
+        sw.STATE = ip.SPIKE_STATE
+        taken, release = threading.Event(), threading.Event()
+
+        def hold() -> None:
+            with sw.window_lock():
+                taken.set()
+                release.wait(10)
+
+        holder = threading.Thread(target=hold)
+        holder.start()
+        taken.wait(5)
+        try:
+            code, _, err = self.run_main("event")
+        finally:
+            release.set()
+            holder.join()
+        self.assertEqual((code, self.pc.calls), (1, []))
+        self.assertIn("window lock", err)
+        self.assertIn("alarm the owner now", err)
+        self.assertFalse(json.loads(ip.SPIKE_STATE.read_text(encoding="utf-8"))["closed"])
 
     def test_the_event_path_has_one_budget_that_fits_a_bash_call(self) -> None:
         self.assertLessEqual(ip.EVENT_BUDGET_S, 540)  # a Bash call ends at 10 min; the plan's waits stay within 9
@@ -1494,6 +1568,53 @@ class HandoverTests(Base):
         self.assertEqual((code, self.spike_log.read_text(encoding="utf-8")), (ip.PREEMPTED, "preempt\n"))
         self.assertEqual(self.pc.calls, [("iemmode.exe", ["event"], "ignore")])
         self.assertFalse(self.state()["closed"])
+
+    # F2 round 3, m5: the hand-over writes the state as saved when it closes it,
+    # under the window lock, never the dict it read before its PC checks.
+    def changing_meanwhile(self, change) -> None:
+        def ps(env, body, timeout=300, event="finish"):
+            st = self.state()
+            change(st)
+            ip.SPIKE_STATE.write_text(json.dumps(st), encoding="utf-8")   # another window process saved meanwhile
+            return dict(self.checks)
+
+        self.sw.ps = ps
+
+    def test_a_change_saved_during_the_checks_is_kept(self) -> None:
+        self.open_window(pref_current=64, runs=[])
+        self.changing_meanwhile(lambda st: st["runs"].append({"request": "spike-1"}))
+        code, _, err = self.run_main("handover-s1a")
+        self.assertEqual(code, 0, err)
+        st = self.state()
+        self.assertEqual((st["closed"], st["runs"]), (True, [{"request": "spike-1"}]))
+        self.assertIn("handed_over", st)
+
+    def test_a_window_a_preempt_closed_during_the_checks_is_not_handed_over(self) -> None:
+        self.open_window(pref_current=64)
+        self.changing_meanwhile(lambda st: st.update(card="reaper", closed=True))
+        code, _, err = self.run_main("handover-s1a")
+        self.assertEqual(code, 1)
+        self.assertIn("closed meanwhile", err)
+        st = self.state()
+        self.assertEqual((st["card"], st["closed"]), ("reaper", True))
+        self.assertNotIn("handed_over", st)
+
+    def test_a_pc_change_in_flight_keeps_the_window_open(self) -> None:
+        # F2 round 3, MAJOR: a window step still changing the PC (a set-buffer write,
+        # an enter) is no free card to hand over.
+        self.open_window(pref_current=64, in_flight={"step": "set-buffer", "started": time.time(), "bound_s": 60})
+        code, _, err = self.run_main("handover-s1a")
+        self.assertEqual(code, 1)
+        self.assertIn("in flight", err)
+        self.assertFalse(self.state()["closed"])
+
+    def test_a_card_taken_back_during_the_checks_keeps_the_window_open(self) -> None:
+        self.open_window(pref_current=64)
+        self.changing_meanwhile(lambda st: st.update(card="switching"))
+        code, _, err = self.run_main("handover-s1a")
+        self.assertEqual(code, 1)
+        self.assertIn("not free", err)
+        self.assertEqual((self.state()["card"], self.state()["closed"]), ("switching", False))
 
 
 class LockTests(Base):

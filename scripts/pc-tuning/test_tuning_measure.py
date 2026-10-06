@@ -5,8 +5,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -418,6 +421,37 @@ class MeasureTests(WindowHarness):
         self.assertEqual(self.stop_after_start(), ["start", "stop"])
         self.assertNotIn("-Merge", self.pc.bodies("Stop-IemTrace")[0])
 
+    def test_a_start_the_event_overtook_is_stopped_under_the_window_lock(self) -> None:
+        # F2 round 3, m4: the preempt's unwind stops the trace too, under the window
+        # lock; two logman stops at once make the second fail (a false alarm at the
+        # start of the event, `trace` kept). The overtaken start's stop takes the
+        # lock, so it runs before or after the unwind, never during it.
+        stop_while_held: list[bool] = []
+        taken, release = threading.Event(), threading.Event()
+
+        def unwind_elsewhere() -> None:   # a preempt's unwind in another process
+            with tw.sw.window_lock():
+                taken.set()
+                release.wait(5)
+
+        holder = threading.Thread(target=unwind_elsewhere)
+
+        def on_call(body: str) -> None:
+            if "Start-IemTrace" in body:
+                (self.dir / "EVENT-NOW").touch()
+                holder.start()
+                taken.wait(5)
+                threading.Timer(0.3, release.set).start()
+            elif "Stop-IemTrace" in body:
+                stop_while_held.append(not release.is_set())
+
+        self.pc.on_call = on_call
+        with mock.patch.object(tw.sw, "time", time), self.assertRaises(tw.sw.EventNow):   # the real clock: the lock wait sleeps
+            tw.cmd_measure(self.env, self.args())
+        holder.join()
+        self.assertEqual(stop_while_held, [False])
+        self.assertIsNone(self.state()["trace"])   # confirmed stopped: no longer recorded
+
     def test_a_cut_restart_the_event_overtook_is_stopped_by_the_measure(self) -> None:
         self.pc.progress = {"missed": 1, "overruns": 0, "position_gaps": 0, "callback_thread": 4243}
         starts = []
@@ -464,13 +498,44 @@ class MeasureTests(WindowHarness):
             # A preempt writes the spike's stop file first: newer than the analysis start → no start.
             self.assertRegex(body, r"queue\\stop'\) ; if \(\(Test-Path -LiteralPath \$s\) -and .*LastWriteTimeUtc -gt .*'2026-01-01T00:00:00Z'.*throw ")
 
+    def test_the_analysis_guard_runs_before_the_tuning_modules_load(self) -> None:
+        # F2 round 3, m6: importing IemMeasure loads IemTuning (an Add-Type compile).
+        # A step the PC refuses at "ide event" must not compile first, and the import
+        # itself runs at Idle priority.
+        tw.cmd_measure(self.env, self.args(trace="diag"))
+        calls = self.analysis_calls()
+        self.assertEqual(len(calls), 3)
+        for body, _ in calls:
+            load = body.index("IemMeasure.psm1")
+            self.assertLess(body.index("(Get-Process -Id $PID).PriorityClass = 'Idle'"), load, body)
+            self.assertLess(body.index(f"throw '{tw.ANALYSIS_REFUSED}'"), load, body)
+
+    def test_each_analysis_call_is_the_step_the_ci_runner_runs(self) -> None:
+        # F2 round 3, m11: what _measure sends is analysis_step's composition, the
+        # one `analysis-script` prints for the Windows CI runner to execute.
+        self.pc.progress = {"missed": 1, "overruns": 0, "position_gaps": 0, "callback_thread": 4243}
+        tw.cmd_measure(self.env, self.args(trace="diag", circular_mb=1024))
+        head = tw.analysis_step("R", "2026-01-01T00:00:00Z", "")
+        run_dir = self.pc.bodies("Start-IemTrace")[0].split("-Dir ", 1)[1].split(" ", 1)[0]
+        steps = [body for body, _ in tw.analysis(tw.xperf(self.env), run_dir, 1, True)]
+        self.assertEqual([b for b, _ in self.analysis_calls()], [head + s for s in steps])
+
     def test_a_merged_trace_leaves_no_raw_files_behind(self) -> None:
         # Review round 3, m8: a soak's raw kernel/marker files (per cut) would double
         # the disk used. They are deleted only after `xperf -merge` succeeded: a failed
         # merge throws (sw.ps runs under $ErrorActionPreference='Stop') before the delete.
-        for base in ("", "cut-2."):
+        # F2 round 3, m10: and only once the merged trace exists and is not empty
+        # (an exit code of 0 alone is no proof the merge wrote it).
+        for base, out in (("", "trace.etl"), ("cut-2.", "cut-2.etl")):
             body = tw.merge("'xperf.exe'", "'D'", base)
-            self.assertRegex(body, r"\[void\]\(Invoke-IemXperf [^;]*'-merge'[^;]*\) ; Remove-Item -LiteralPath \$m$")
+            self.assertRegex(body, r"\[void\]\(Invoke-IemXperf [^;]*'-merge'[^;]*\) ; ")
+            self.assertTrue(body.endswith(" ; Remove-Item -LiteralPath $m"), body)
+            check = re.search(r"if \(-not \(Test-Path -LiteralPath (\$\w+)\) -or \(Get-Item -LiteralPath \1\)\.Length -le 0\) "
+                              r"\{ throw [^}]*\}", body)
+            self.assertIsNotNone(check, body)
+            self.assertIn(f"Join-Path 'D' '{out}'", body[:check.start()])
+            self.assertLess(body.index("'-merge'"), check.start())
+            self.assertLess(check.end(), body.index("Remove-Item"))
 
     def test_no_analysis_step_starts_once_the_flag_exists(self) -> None:
         self.pc.progress = {"missed": 1, "overruns": 0, "position_gaps": 0, "callback_thread": 4243}

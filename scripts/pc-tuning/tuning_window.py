@@ -26,177 +26,13 @@ sys.path.insert(0, str(HERE))
 import latency_report as lr  # noqa: E402
 import spike_window as sw  # noqa: E402
 from golden_window import StepError, ps_quote  # noqa: E402
+# The pure rules (profile, arguments, cuts, post-boot verdict), re-exported.
+from tuning_rules import (APPROVAL, LABEL, LAYOUT_ROLES, MAX_CUTS, MEASURED, MODE_LEVERS, PROFILE_KEYS, boot_changed,  # noqa: E402,F401
+                          check_approval, check_devices, check_layout, check_rss, label_ok, layout_lps, load_profile,
+                          lp_list, lp_number, mode_only, parse_lps, post_boot_verdict, should_cut, watch_lps)
 
 PROFILE = Path(os.environ.get("TUNING_PROFILE", str(Path.home() / ".config/iemmixer/pc-tuning.json")))
 ADK_URL = "https://go.microsoft.com/fwlink/?linkid=2289980"  # ADK 10.1.26100.9457 (September 2026), design note [7]
-PROFILE_KEYS = ("version", "journal", "registry_root", "layout", "plan", "governor", "placement", "services_disable",
-                "services_mode", "updates", "maintenance", "defender", "devices", "nic", "fingerprint")
-LAYOUT_ROLES = ("housekeeping", "card", "nic", "audio")
-MODE_LEVERS = ("plan", "governor", "placement", "services")
-MAX_CUTS = 5
-# The spike outcomes of a completed measure run: it ran to its end, or the stop
-# file ended it. refused, band-activity, fault-caught, rate-changed and
-# stop-hung end it without a measurement (outcome "error" already fails in cmd_run).
-MEASURED = ("done", "stopped")
-LABEL = re.compile(r"[a-z0-9][a-z0-9-]{0,39}")
-APPROVAL = re.compile(r".*\d{1,2}:\d{2}.*\S.*")
-
-
-def parse_lps(text: str) -> list[int]:
-    out: list[int] = []
-    for part in (p.strip() for p in text.split(",") if p.strip()):
-        lo, _, hi = part.partition("-")
-        try:
-            a, b = int(lo), int(hi or lo)
-        except ValueError:
-            raise StepError(f"bad processor list {text!r}") from None
-        if not (0 <= a <= b <= 63):
-            raise StepError(f"bad range {part!r}: processors are 0..63, ascending")
-        for lp in range(a, b + 1):
-            if lp in out:
-                raise StepError(f"{text!r} names processor {lp} twice")
-            out.append(lp)
-    return sorted(out)
-
-
-def load_profile(path: Path) -> dict:
-    if not path.is_file():
-        raise StepError(f"{path}: missing (private profile, plan Task 12)")
-    p = json.loads(path.read_text(encoding="utf-8"))
-    missing = [k for k in PROFILE_KEYS if k not in p]
-    if missing:
-        raise StepError(f"{path}: missing {', '.join(missing)}")
-    check_layout(p["layout"], path)
-    check_devices(p["devices"], path)
-    check_rss(p["nic"], path)
-    return p
-
-
-# The profile's processor rules (#32 MINOR-6, MAJOR-2 and its review) are the
-# same as IemTuning's ConvertTo-IemLpNumber / ConvertTo-IemLpList /
-# Assert-IemLayout / Get-IemDeviceLps; both self-tests run the shared cases of
-# profile_cases.json. load_profile refuses every processor SHAPE the PC refuses
-# (numbers, lists, layout, device lps, rss bounds), so the state step's device
-# mask and RSS read never throw on a copied profile. Relations (a card's lps
-# against layout.card, a device on a card or audio processor, processors that
-# are not present) are checked only on the PC, before any write.
-
-def lp_number(value) -> bool:
-    """An integer 0..63. type(), not isinstance(): a bool is an int subclass;
-    a float (4.0 too), a string, None or a list is no processor number."""
-    return type(value) is int and 0 <= value <= 63
-
-
-def lp_list(value, what: str, path: Path) -> list[int]:
-    """A JSON list of processor numbers; one entry that is none is refused,
-    never dropped, truncated or read as a number."""
-    if not isinstance(value, list):
-        raise StepError(f"{path}: {what}: not a list of processor numbers")
-    for i, lp in enumerate(value):
-        if not lp_number(lp):
-            raise StepError(f"{path}: {what}: entry {i}: not a processor number 0..63 (integers only)")
-    return value
-
-
-def check_layout(layout, path: Path) -> None:
-    """layout is an object; a role is absent (no processors) or a list of
-    processor numbers; the roles are disjoint."""
-    if not isinstance(layout, dict):
-        raise StepError(f"{path}: layout: not an object")
-    roles: dict[int, str] = {}
-    for role in LAYOUT_ROLES:
-        if role not in layout:
-            continue
-        for lp in lp_list(layout[role], f"layout {role}", path):
-            if lp in roles:
-                raise StepError(f"{path}: layout: processor {lp} has two roles ({roles[lp]}, {role})")
-            roles[lp] = role
-
-
-def check_devices(devices, path: Path) -> None:
-    """Every device names a non-empty list of processor numbers (lps)."""
-    if not isinstance(devices, list):
-        raise StepError(f"{path}: devices: not a list")
-    for d in devices:
-        if not isinstance(d, dict):
-            raise StepError(f"{path}: devices: an entry is not an object")
-        lps = d.get("lps")
-        if lps is None or lps == []:
-            raise StepError(f"{path}: device {d.get('id')}: no processors (lps)")
-        lp_list(lps, f"device {d.get('id')} lps", path)
-
-
-def check_rss(nic, path: Path) -> None:
-    """nic.rss base and max are processor numbers, base <= max (where the range
-    lies against the layout and the present processors, the PC checks)."""
-    rss = nic.get("rss") if isinstance(nic, dict) else None
-    if not isinstance(rss, dict):
-        raise StepError(f"{path}: nic.rss: missing (base and max)")
-    for k in ("base", "max"):
-        if not lp_number(rss.get(k)):
-            raise StepError(f"{path}: nic.rss.{k}: not a processor number 0..63 (integers only)")
-    if rss["base"] > rss["max"]:
-        raise StepError(f"{path}: nic.rss: base {rss['base']} is above max {rss['max']}")
-
-
-def layout_lps(profile: dict, role: str) -> list[int]:
-    """A layout role's processors; an absent role is none (the layout rule)."""
-    return list(profile["layout"].get(role, []))
-
-
-def watch_lps(profile: dict, audio_cpus: str) -> list[int]:
-    """The CPUs whose DPC/ISR budget is watched: the card's and the audio one
-    (the spike's --audio-cpus, else the profile's)."""
-    audio = parse_lps(audio_cpus) if audio_cpus else layout_lps(profile, "audio")
-    return sorted(set(layout_lps(profile, "card")) | set(audio))
-
-
-def mode_only(text: str) -> list[str]:
-    levers = [x.strip() for x in text.split(",") if x.strip()]
-    bad = [x for x in levers if x not in MODE_LEVERS]
-    if bad or not levers:
-        raise StepError(f"--only takes {', '.join(MODE_LEVERS)}")
-    return levers
-
-
-def label_ok(text: str) -> bool:
-    return bool(LABEL.fullmatch(text))
-
-
-def check_approval(text: str) -> None:
-    """The owner's approval of the reboot, quoted with its time (HH:MM)."""
-    if not APPROVAL.fullmatch(text.strip()) or len(text.strip()) < 12:
-        raise StepError("quote the owner's approval with its time, e.g. 'owner, 14:05: áno, reštartuj'")
-
-
-def should_cut(progress: dict | None, seen: int, cuts: int, circular: bool) -> tuple[bool, int]:
-    """A new missed period, overrun or position gap cuts a circular soak
-    trace (at most MAX_CUTS times); returns (cut, glitches seen now)."""
-    if not progress:
-        return False, seen
-    total = sum(int(progress.get(k, 0)) for k in ("missed", "overruns", "position_gaps"))
-    return (circular and total > seen and cuts < MAX_CUTS), total
-
-
-def post_boot_verdict(c: dict) -> list[str]:
-    problems = []
-    if not c["booted_after_request"]:
-        problems.append("the PC did not reboot after the request")
-    if not c["reaper"]:
-        problems.append("REAPER did not start by itself within 5 min")
-    if "error" in (c.get("handover") or {}):
-        problems.append(f"handover checks failed: {c['handover']['error']}")
-    if c["fingerprint"]:
-        problems.append("REAPER mode differs: " + ", ".join(d["key"] for d in c["fingerprint"]))
-    if c["pending"]:
-        problems.append("still pending after the reboot: " + ", ".join(c["pending"]))
-    if c["failed_items"]:
-        problems.append("items not as applied: " + ", ".join(c["failed_items"]))
-    if c.get("boot_problem"):
-        # Without a boot token nothing reads as pending, so an empty "pending"
-        # proves nothing (#32 MINOR-4).
-        problems.append(f"the boot identity is unknown ({c['boot_problem']}): what is still pending cannot be told")
-    return problems
 
 
 # ---- PC access (the PC is the external dependency; no unit tests below) ----
@@ -310,12 +146,47 @@ def record_measurement(row: dict) -> None:
     sw.update_state(change=lambda st: st.setdefault("measurements", []).append(row))
 
 
+# The tuning steps that change the PC (enter, exit, apply, undo) are PC changes
+# with an intent (sw.pc_change, F2 round 3 MAJOR): their bounds are the ssh
+# calls' bounds, and their bodies refuse on the PC while the spike's stop file
+# exists, before the tuning modules load (tps_change).
+MODE_S = 240
+APPLY_S = 600
+
+
+def tps_change(env: dict[str, str], body: str, **kw):
+    return sw.ps(env, sw.changing(env, sw.tuning_body(env, body)), **kw)
+
+
+def late_journal(env: dict[str, str], step: str):
+    """A journal step that ended after the window was closed: the preempt
+    deferred its tuning-exit to it (two journal writers at once lose entries),
+    so the exit runs here, now that the step's own write is over — always after
+    an enter that ran (it may have applied levers after the pre-emption),
+    otherwise while the mode is recorded as entered (a refused step's state is
+    the one before it: review of lane G2, finding 8). An apply or undo that ran
+    changed global levers during the event: the owner hears it."""
+    def follow_up(state: dict, ran: bool) -> None:
+        if step in ("apply", "undo") and ran:
+            sw.alarm(f"{step} ended after the window was pre-empted: the global levers it changed stay as they are (no "
+                     "mode levers); compare the REAPER fingerprint (fingerprint --check) in the next window")
+        if (step == "enter" and ran) or state.get("tuning_mode"):
+            rows = as_list(tps(env, f"Exit-IemTuningMode -ProfilePath {sw.tuning_profile(env)}", timeout=MODE_S, event="ignore"))
+            sw.update_state({"tuning_mode": False})
+            print(json.dumps({"late-exit": rows}), flush=True)
+            sw.alarm_exit_problems(rows)
+    return follow_up
+
+
 def cmd_enter(env, args) -> None:
-    state = sw.open_state()
-    need_free(state)
+    need_free(sw.open_state())
     only = mode_only(args.only)
-    sw.update_state({"tuning_mode": True})   # recorded before the action: preempt reverts even a half-done enter
-    rows = as_list(tps(env, f"Enter-IemTuningMode -ProfilePath {sw.tuning_profile(env)} -Only @({', '.join(ps_quote(x) for x in only)}) -Idle {ps_quote(args.idle)}", timeout=240))
+    # tuning_mode is recorded with the intent, before the action: a preempt reverts
+    # even a half-done enter (or the late enter does, MAJOR).
+    rows = as_list(sw.pc_change("enter", MODE_S, lambda: tps_change(
+        env, f"Enter-IemTuningMode -ProfilePath {sw.tuning_profile(env)} -Only @({', '.join(ps_quote(x) for x in only)}) "
+             f"-Idle {ps_quote(args.idle)}", timeout=MODE_S),
+        fields={"tuning_mode": True}, check=need_free, late=late_journal(env, "enter")))
     record_step({"enter": only, "idle": args.idle, "at": stamp()})
     print(json.dumps({"enter": rows}))
     failed = [r for r in rows if r.get("action") == "failed"]
@@ -325,8 +196,9 @@ def cmd_enter(env, args) -> None:
 
 def cmd_exit(env, args) -> None:
     sw.open_state()
-    rows = as_list(tps(env, f"Exit-IemTuningMode -ProfilePath {sw.tuning_profile(env)}", timeout=240))
-    sw.update_state({"tuning_mode": False})
+    rows = as_list(sw.pc_change("exit", MODE_S, lambda: tps_change(env, f"Exit-IemTuningMode -ProfilePath {sw.tuning_profile(env)}",
+                                                                   timeout=MODE_S),
+                                after={"tuning_mode": False}, late=late_journal(env, "exit")))
     print(json.dumps({"exit": rows}))
     sw.alarm_exit_problems(rows)   # the exit completed; unconvertible journal entries reach the owner
 
@@ -339,9 +211,11 @@ def only_arg(text: str) -> str:
 
 
 def cmd_apply(env, args) -> None:
-    state = sw.open_state()
-    need_free(state)
-    rows = as_list(tps(env, f"Invoke-IemTuningApply -ProfilePath {sw.tuning_profile(env)} -Tier {args.tier} -Only {only_arg(args.only)}", timeout=600))
+    need_free(sw.open_state())
+    only = only_arg(args.only)
+    rows = as_list(sw.pc_change("apply", APPLY_S, lambda: tps_change(
+        env, f"Invoke-IemTuningApply -ProfilePath {sw.tuning_profile(env)} -Tier {args.tier} -Only {only}", timeout=APPLY_S),
+        check=need_free, late=late_journal(env, "apply")))
     record_step({"apply": args.tier, "only": args.only, "at": stamp()})
     print(json.dumps({"apply": rows}))
     failed = [r for r in rows if r.get("action") == "failed"]
@@ -350,9 +224,11 @@ def cmd_apply(env, args) -> None:
 
 
 def cmd_undo(env, args) -> None:
-    state = sw.open_state()
-    need_free(state)
-    rows = as_list(tps(env, f"Undo-IemTuning -ProfilePath {sw.tuning_profile(env)} -Tier {args.tier} -Only {only_arg(args.only)}", timeout=600))
+    need_free(sw.open_state())
+    only = only_arg(args.only)
+    rows = as_list(sw.pc_change("undo", APPLY_S, lambda: tps_change(
+        env, f"Undo-IemTuning -ProfilePath {sw.tuning_profile(env)} -Tier {args.tier} -Only {only}", timeout=APPLY_S),
+        check=need_free, late=late_journal(env, "undo")))
     record_step({"undo": args.tier, "only": args.only, "at": stamp()})
     print(json.dumps({"undo": rows}))
     # Fail loud on any un-reverted item, like cmd_apply (I2, script-failure-policy):
@@ -454,13 +330,18 @@ def start_trace(env: dict[str, str], run_dir: str, opt: str) -> None:
     the "ide event" overtook — its call ended in EventNow, or the flag exists
     right after it — may have ended after a preempt's trace-stop found no
     session, so this process stops it too (quick, no merge; an alarm if that
-    fails) before EventNow goes on (review round 3, m5)."""
+    fails) before EventNow goes on (review round 3, m5). That stop runs under
+    the window lock (F2 round 3, m4): never at the same time as the unwind's
+    own trace-stop, whose logman stop would then fail; Stop-IemTraceSessions
+    is idempotent, so whichever comes second finds nothing to stop."""
     try:
         tps(env, f"Start-IemTrace -Xperf {xperf(env)} -Dir {ps_quote(run_dir)}{opt}", timeout=120, event="finish")
         check_event()
     except sw.EventNow:
         try:
-            sw.check_trace_stop(sw.ps(env, sw.trace_stop_body(env, run_dir), timeout=sw.TRACE_STOP_CALL_S, event="ignore"))
+            with sw.window_lock():
+                sw.check_trace_stop(sw.ps(env, sw.trace_stop_body(env, run_dir), timeout=sw.TRACE_STOP_CALL_S, event="ignore"))
+                sw.update_state(change=lambda st: st.update(trace=None) if st.get("trace") == run_dir else None)
         except StepError as e:
             sw.alarm(f"a kernel trace started as 'ide event' came did not stop ({e}): run tuning_window trace-stop")
         raise
@@ -478,12 +359,16 @@ def merge(x: str, d: str, base: str) -> str:
     """xperf -merge of one trace's raw session files (<base>kernel.etl and
     <base>markers.etl, the ones present) into its .etl — what a merging stop
     (`xperf -stop ... -d`) does, as a separate, abandonable call. The raw
-    files are deleted once the merge succeeded (a soak would otherwise double
-    its disk use); a failed merge throws first and keeps them."""
+    files are deleted once the merge succeeded and the merged trace exists and
+    is not empty (a soak would otherwise double its disk use); a failed merge,
+    or one that wrote nothing, throws first and keeps them (F2 round 3, m10)."""
     out = f"{base[:-1]}.etl" if base else "trace.etl"
     return (f"$m = @(foreach ($n in @('{base}kernel.etl', '{base}markers.etl')) {{ $p = Join-Path {d} $n ; "
             f"if (Test-Path -LiteralPath $p) {{ $p }} }}) ; "
             f"[void](Invoke-IemXperf -Xperf {x} -Arguments (@('-merge') + $m + @((Join-Path {d} '{out}')))) ; "
+            f"$o = Join-Path {d} '{out}' ; "
+            f"if (-not (Test-Path -LiteralPath $o) -or (Get-Item -LiteralPath $o).Length -le 0) "
+            f"{{ throw \"xperf -merge left no trace in $o (the raw files are kept)\" }} ; "
             f"Remove-Item -LiteralPath $m")
 
 
@@ -516,6 +401,21 @@ def analysis_guard(root: str, since: str) -> str:
             f"if ((Test-Path -LiteralPath $s) -and (Get-Item -LiteralPath $s).LastWriteTimeUtc -gt "
             f"[datetime]::Parse({ps_quote(since)}, [Globalization.CultureInfo]::InvariantCulture, "
             f"[Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()) {{ throw '{ANALYSIS_REFUSED}' }}")
+
+
+def analysis_step(root: str, since: str, body: str) -> str:
+    """One analysis step as the PC receives it inside sw.ps: the guard first,
+    then the tuning modules' import (an Add-Type compile, so at Idle and never
+    for a refused step; F2 round 3, m6), then the step. `analysis-script`
+    prints the same composition for the Windows CI runner (m11)."""
+    return f"{analysis_guard(root, since)} ; {sw.measure_import(root)} ; {body}"
+
+
+# The step body the Windows CI runner sends through analysis_step: the priority
+# the guard set, IemMeasure's clock, and whether IemTuning loaded too (IemMeasure
+# keeps a failed IemTuning load to itself, so Get-IemNow alone proves nothing).
+ANALYSIS_PROBE = ("[pscustomobject]@{ priority = \"$((Get-Process -Id $PID).PriorityClass)\"; now = Get-IemNow; "
+                  "tuning = [bool](Get-Command -Name ConvertTo-IemLpNumber -ErrorAction SilentlyContinue) }")
 
 
 def read_text(path: Path) -> str:
@@ -624,12 +524,11 @@ def _measure(env, args, profile: dict, state: dict, run_dir: str, since: str, tr
         # the one step already running goes on, at Idle, and ends by itself
         # (decision B of the #32 review). Each cut holds the glitches that
         # caused it: it gets its own views (#32 B7, review M1).
-        guard = analysis_guard(env["PC_ROOT"], began)
         names = []
         for body, produced in analysis(xperf(env), ps_quote(run_dir), cut["n"], diag):
             check_event()
             try:
-                tps(env, f"{guard} ; {body}", timeout=1800, event="abandon")
+                sw.ps(env, analysis_step(env["PC_ROOT"], began, body), timeout=1800, event="abandon")
             except StepError as e:
                 if ANALYSIS_REFUSED in str(e):
                     raise sw.EventNow() from None   # the PC saw a preempt's stop file first
@@ -705,6 +604,10 @@ def cmd_reboot_prepare(env, args) -> None:
     with sw.window_lock():
         state = sw.open_state()
         need_free(state)
+        intent = state.get("in_flight")
+        if sw.intent_live(intent):
+            # Another process's step still changes the PC: no cleanly preempted window (MAJOR).
+            raise StepError(f"a PC step is in flight ({intent['step']}): wait for it; no reboot prepared")
         running = sw.spike_running(env)
         # A reboot is prepared only over a cleanly preempted window (I1). unwind
         # raises (after an owner alarm) before the buffer write when the spike was
@@ -718,11 +621,36 @@ def cmd_reboot_prepare(env, args) -> None:
             sw.alarm(f"the unwind before the reboot did not complete ({', '.join(failed)}): no reboot is prepared; "
                      "the card stays free and the window open (preempt or to-event brings REAPER back)")
             raise StepError(f"the unwind failed at {', '.join(failed)}: no reboot prepared")
-        st = tps(env, f"Get-IemTuningState -ProfilePath {sw.tuning_profile(env)}", timeout=120)
-        sw.update_state({"card": "rebooting", "reboot": {"prepared_at": tps(env, "Get-IemNow", timeout=60)}})
-    if st.get("boot_problem"):
-        sw.alarm(f"the boot identity is unknown ({st['boot_problem']}): the pending and revert_pending lists of this "
-                 "reboot prove nothing (#32 MINOR-4)")
+    # Read-only, so outside the lock and abandonable (F2 round 3, m3): the tuning
+    # state compiles IemTuning, and a preempt never waits for it.
+    st = tps(env, f"Get-IemTuningState -ProfilePath {sw.tuning_profile(env)}", timeout=120, event="abandon")
+    prepared_at = tps(env, "Get-IemNow", timeout=60, event="abandon")
+    if not st.get("boot_token"):
+        # post-boot tells the reboot by this token alone (decision 5): without it the
+        # reboot could never be confirmed (review of lane G2, finding 7).
+        sw.alarm(f"the boot identity is unknown ({st.get('boot_problem') or 'no boot token'}): no reboot is prepared, "
+                 "since post-boot could not tell whether the PC rebooted; fix the boot key, then reboot-prepare again "
+                 "(the card stays free and the window open)")
+        raise StepError("no boot token on the PC: no reboot prepared")
+
+    def prepare(current: dict) -> None:
+        # The state as saved now: a preempt may have closed the window (REAPER back)
+        # or taken the card meanwhile; then no reboot is prepared.
+        if current.get("closed") or current.get("card") != "free":
+            raise StepError(f"the window was closed or its card taken meanwhile (card {current.get('card')!r}): "
+                            "no reboot prepared")
+        # A step begun while the lock was free (review of lane G2, finding 3): a change
+        # in flight, a buffer not verified as restored (after the reboot REAPER may
+        # hold the driver, I2) or a mode recorded as entered is no clean window (I1).
+        if sw.intent_live(current.get("in_flight")) or (sw.buffer_touched(current) and not current.get("pref_restored")) \
+                or current.get("tuning_mode"):
+            raise StepError("a window step ran while the reboot was being prepared (a change in flight, the buffer or "
+                            "the mode): no reboot prepared")
+        # The boot token tells post-boot whether the PC rebooted (decision 5); the
+        # time is information only.
+        current.update(card="rebooting", reboot={"prepared_at": prepared_at, "boot_token": st.get("boot_token")})
+
+    sw.update_state(change=prepare)
     items = as_list(st["items"])
     print(json.dumps({"reboot-prepare": done, "pending": [i["key"] for i in items if i["pending"]],
                       "revert_pending": [i["key"] for i in items if i["revert_pending"]]}))
@@ -731,8 +659,10 @@ def cmd_reboot_prepare(env, args) -> None:
 # An immediate, planned restart (reason: operating system reconfiguration) and
 # never a forced one (I8): Microsoft documents that a timeout above 0 implies
 # the force flag, so the timeout is 0. An app may then veto the restart;
-# post-boot reports that as "the PC did not reboot after the request".
-REBOOT_REQUEST = "& shutdown.exe /r /t 0 /d p:2:4 /c 'iemmixer S1c: owner-approved restart' ; $LASTEXITCODE"
+# post-boot reports that as "the PC did not reboot after the request". The
+# repository's one restart: the integrity scan passes it only marked and in
+# this literal form (check_integrity RESTART_SAFE).
+REBOOT_REQUEST = "& shutdown.exe /r /t 0 /d p:2:4 /c 'iemmixer S1c: owner-approved restart' ; $LASTEXITCODE"  # iemmixer:graceful-restart
 
 
 def cmd_reboot(env, args) -> None:
@@ -779,8 +709,9 @@ def cmd_post_boot(env, args) -> None:
             sw.alarm("the PC is not reachable 15 min after the approved reboot: tell the owner (power cycle is his)")
             raise StepError("PC unreachable after the reboot")
         time.sleep(15)
-    boot = tps(env, "Get-IemBootTime", timeout=60, event="ignore")
-    checks = {"booted_after_request": boot > state["reboot"]["prepared_at"], "reaper": False, "handover": None,
+    # Whether the PC rebooted is told by the boot token, read with the tuning
+    # state below (decision 5): unknown until then (the event path skips it).
+    checks = {"booted_after_request": None, "reaper": False, "handover": None,
               "fingerprint": [], "pending": [], "failed_items": []}
     # "ide event" is checked on every poll and every second between polls: on
     # the flag REAPER comes back at once (the event path) instead of after
@@ -814,6 +745,9 @@ def cmd_post_boot(env, args) -> None:
             back = "error" not in checks["handover"]
             if back:
                 sw.update_state({"card": "reaper", "closed": True})
+                # reboot-prepare's unwind wrote the spike's stop file and kept it (the
+                # window stayed open); this close removes it (F2 round 3, m1).
+                checks["stop_file"] = sw.clear_stop(env)
     if sw.event_now():
         # The read-only checks wait for a dev window; main() pre-empts (a window
         # still open because the bring-back failed gets another one there).
@@ -823,6 +757,7 @@ def cmd_post_boot(env, args) -> None:
     current = tps(env, f"Get-IemReaperFingerprint -ProfilePath {sw.tuning_profile(env)}", timeout=120, event="ignore")
     checks["fingerprint"] = sw.fingerprint_diff(json.loads(baseline_path(env).read_text(encoding="utf-8")), current)
     st = tps(env, f"Get-IemTuningState -ProfilePath {sw.tuning_profile(env)}", timeout=120, event="ignore")
+    checks["booted_after_request"], checks["boot_unknown"] = boot_changed(state["reboot"].get("boot_token"), st.get("boot_token"))
     items = as_list(st["items"])
     checks["pending"] = [i["key"] for i in items if i["pending"] or i["revert_pending"]]
     checks["failed_items"] = [i["key"] for i in items if i["journaled"] and not i["ok"]]
@@ -882,9 +817,16 @@ def main(argv: list[str]) -> int:
     pp.add_argument("--governor", required=True)
     pp.add_argument("--pid", type=int, default=0)
     pp.add_argument("--tid", type=int, default=0)
+    asc = sub.add_parser("analysis-script", help="print an analysis step's start (guard, import, a probe) exactly as sw.ps "
+                                                 "sends it (for the Windows CI runner)")
+    asc.add_argument("--root", required=True, help="a folder whose bin holds the spike bundle")
+    asc.add_argument("--since", required=True, help="the analysis start, PC time (Get-IemNow)")
     args = ap.parse_args(argv)
     if args.cmd == "poll-script":   # no window, no private env
         print(sw.ps_script(args.root, poll_body(args.governor, args.pid, args.tid)))
+        return 0
+    if args.cmd == "analysis-script":   # no window, no private env
+        print(sw.ps_script(args.root, analysis_step(args.root, args.since, ANALYSIS_PROBE)))
         return 0
     handlers = {"tuning-setup": cmd_tuning_setup, "inventory": cmd_inventory, "fingerprint": cmd_fingerprint, "wpt-install": cmd_wpt_install,
                 "enter": cmd_enter, "exit": cmd_exit, "apply": cmd_apply, "undo": cmd_undo, "state": cmd_state, "measure": cmd_measure,
@@ -914,4 +856,5 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
+    sw.exit_on_signals()
     sys.exit(main(sys.argv[1:]))
