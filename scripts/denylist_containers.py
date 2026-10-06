@@ -214,6 +214,7 @@ def _zip_members(path: str, data: bytes, budget: _Budget) -> Iterator[Member | P
             continue
         budget.spend(len(content))
         yield Member(member, info.filename, content)
+        content = b""  # released before the next member is read: one member at a time in memory
 
 
 def _zip_content(data: bytes, archive: zipfile.ZipFile, info: zipfile.ZipInfo,
@@ -258,13 +259,15 @@ def _stream_member(path: str, data: bytes, kind: str, budget: _Budget) -> Iterat
     if problem is not None:
         yield Problem(f"{path}!/", problem)
         return
-    out, rest, limit, first = bytearray(), data, budget.room() + 1, True
+    chunks: list[bytes] = []  # one per stream, joined only when there are several (no copy of one)
+    rest, limit, size, first = data, budget.room() + 1, 0, True
     try:
         while rest and (first or rest.startswith(data[:3])):
             first = False
             decompressor = _DECOMPRESSORS[kind]()
-            out += decompressor.decompress(rest, limit - len(out))
-            if len(out) >= limit:
+            chunks.append(decompressor.decompress(rest, limit - size))
+            size += len(chunks[-1])
+            if size >= limit:
                 break
             if not decompressor.eof:
                 yield Problem(f"{path}!/", f"cannot be scanned: a broken {kind} stream")
@@ -273,12 +276,12 @@ def _stream_member(path: str, data: bytes, kind: str, budget: _Budget) -> Iterat
     except (zlib.error, OSError, EOFError, lzma.LZMAError, ValueError):
         yield Problem(f"{path}!/", f"cannot be scanned: a broken {kind} stream")
         return
-    problem = budget.problem(len(out))
+    problem = budget.problem(size)
     if problem is not None:
         yield Problem(f"{path}!/", problem)
         return
-    budget.spend(len(out))
-    yield Member(f"{path}!/", "", bytes(out))
+    budget.spend(size)
+    yield Member(f"{path}!/", "", chunks[0] if len(chunks) == 1 else b"".join(chunks))
 
 
 def _tar_members(path: str, data: bytes, budget: _Budget) -> Iterator[Member | Problem]:
@@ -313,6 +316,7 @@ def _tar_members(path: str, data: bytes, budget: _Budget) -> Iterator[Member | P
             continue
         budget.spend(len(content))
         yield Member(member, info.name, content)
+        content = b""  # released before the next member is read
 
 
 _READERS: dict[str, Callable[[str, bytes, _Budget], Iterator[Member | Problem]]] = {
@@ -338,3 +342,4 @@ def _expand(part: Member, depth: int, budget: _Budget) -> Iterator[Member | Prob
     else:
         for item in _READERS[kind](part.path, part.data, budget):
             yield from _expand(item, depth + 1, budget) if isinstance(item, Member) else (item,)
+            del item  # released before the reader reads the next member
