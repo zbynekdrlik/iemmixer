@@ -579,8 +579,7 @@ class TuningChangeTests(unittest.TestCase):
         tw.sw.exit_on_signals()
         for s in (signal.SIGTERM, signal.SIGHUP):
             with self.assertRaises(SystemExit):
-                os.kill(os.getpid(), s)
-                time.sleep(1)   # the handler runs between bytecodes
+                signal.raise_signal(s)
 
     def test_every_tuning_change_refuses_on_the_pc_before_its_modules_load(self) -> None:
         # The stop file's check comes first: a step a preempt overtook compiles nothing
