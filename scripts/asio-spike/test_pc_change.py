@@ -20,7 +20,7 @@ import pc_change as pcc  # noqa: E402
 ENV = {"PC_ROOT": "R", "PC_BUFFER_KEY": "K", "PC_BUFFER_NAME": "N", "PC_REAPER_HTTP": "H", "PC_MAIN_PROJECT": "P.rpp",
        "PC_REAPER_START_TASK_PATH": "P", "PC_REAPER_START_TASK": "T", "PC_NTRACK": "9", "PC_METER_BRIDGE": "B",
        "PC_METER_ACTION": "A", "PC_METER_HEARTBEAT": "HB", "PC_ASIO_MODULE": "M", "PC_APP_HTTP": "AH",
-       "PC_ASIO_DRIVER": "D", "PC_ACTIVITY_CHANNELS": "101-110"}
+       "PC_ASIO_DRIVER": "D"}
 
 
 class FakeSpikePc:
@@ -55,8 +55,6 @@ class FakeSpikePc:
             return {"reaper": int(self.reaper), "holders": ["reaper.exe:42"] if self.reaper else []}
         if "Test-SpikeTaskBusy" in body and "Remove-Item" in body:
             return "removed"
-        if "Get-GoldenMeterSamples" in body:
-            return []
         if "Invoke-GoldenSaveQuit" in body:
             self.reaper = False
             return {"saved": True, "quit": True}

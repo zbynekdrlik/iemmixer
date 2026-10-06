@@ -74,35 +74,25 @@ Set-Content -LiteralPath (Join-Path $sums 'SHA256SUMS') -Value ''
 Throws { Test-SpikeSums -Bin $sums } 'sums-refuse-an-empty-list'
 
 # Spike arguments from a request.
-$req = [pscustomobject]@{ id = 'spike-1'; mode = 'duplex'; driver = 'Some Card'; frames = 32; seconds = 600; burn_us = 100; stress = 4; panic_at = 0; cycles = 5
-                          activity_channels = '101-110,121-124' }
+$req = [pscustomobject]@{ id = 'spike-1'; mode = 'duplex'; driver = 'Some Card'; frames = 32; seconds = 600; burn_us = 100; stress = 4; panic_at = 0; cycles = 5 }
 $a = New-SpikeArguments -Request $req -Root 'C:\x y'
 Assert ($a[0] -eq 'duplex' -and $a[2] -eq '"Some Card"' -and $a[4] -eq '"C:\x y\status\spike-1.report.json"' -and $a[8] -eq '"C:\x y\queue\stop"') 'arguments-quote-paths-and-driver'
-Assert (($a -join ' ') -like '*--frames 32 --seconds 600 --burn-us 100 --stress 4 --panic-at 0 --activity-channels 101-110,121-124') 'arguments-duplex-options'
+Assert (($a -join ' ') -like '*--frames 32 --seconds 600 --burn-us 100 --stress 4 --panic-at 0') 'arguments-duplex-options'
+# #38 (owner, 2026-10-06): no input level ends a run, so a run names no inputs to listen to.
+Assert (-not (($a -join ' ') -like '*activity*')) 'arguments-name-no-inputs-to-listen-to'
 $req.mode = 'probe'
 Assert ((New-SpikeArguments -Request $req -Root 'C:\r').Count -eq 9) 'arguments-probe-has-no-options'
 $req.mode = 'reopen'
-Assert (((New-SpikeArguments -Request $req -Root 'C:\r') -join ' ') -like '*--frames 32 --cycles 5 --activity-channels 101-110,121-124') 'arguments-reopen-options'
-$req.activity_channels = 'all'
-Assert (((New-SpikeArguments -Request $req -Root 'C:\r') -join ' ') -like '*--activity-channels all') 'arguments-watch-all-inputs-only-when-asked'
-foreach ($bad in @('', '3; calc', '3 4', 'ALL', '"3"')) {
-    $req.activity_channels = $bad
-    Throws { New-SpikeArguments -Request $req -Root 'C:\r' } "arguments-refuse-activity-channels [$bad]"
-}
-$none = [pscustomobject]@{ id = 'spike-2'; mode = 'duplex'; driver = 'Some Card'; frames = 32; seconds = 600; burn_us = 0; stress = 0; panic_at = 0; cycles = 5 }
-$e = ErrorOf { New-SpikeArguments -Request $none -Root 'C:\r' }
-Assert ($e -like '*activity_channels*') "arguments-need-the-watched-inputs ($e)"
-$req.activity_channels = '101-110,121-124'
+Assert (((New-SpikeArguments -Request $req -Root 'C:\r') -join ' ') -like '*--frames 32 --cycles 5') 'arguments-reopen-options'
 $req.frames = 16
 Throws { New-SpikeArguments -Request $req -Root 'C:\r' } 'arguments-refuse-frames-16'
 $req.mode = 'record'
 Throws { New-SpikeArguments -Request $req -Root 'C:\r' } 'arguments-refuse-an-unknown-mode'
 
-# S1c: CPU Sets and hwlat. (duplex carries activity_channels since f154967; the
-# CPU-set flags are appended in the duplex branch, before --activity-channels.
-# hwlat is a clock-read loop with no audio stream, so it takes no watched inputs.)
-$req = [pscustomobject]@{ id = 'spike-2'; mode = 'duplex'; driver = 'Some Card'; frames = 32; seconds = 28800; burn_us = 40; stress = 4; panic_at = 0; cycles = 5; activity_channels = '101-110,121-124'; audio_cpus = '14'; stress_cpus = '6-13' }
-Assert (((New-SpikeArguments -Request $req -Root 'C:\r') -join ' ') -like '*--seconds 28800 *--audio-cpus 14 --stress-cpus 6-13 --activity-channels 101-110,121-124') 'arguments-cpu-sets'
+# S1c: CPU Sets and hwlat. (The CPU-set flags close the duplex branch; hwlat is a
+# clock-read loop with no audio stream.)
+$req = [pscustomobject]@{ id = 'spike-2'; mode = 'duplex'; driver = 'Some Card'; frames = 32; seconds = 28800; burn_us = 40; stress = 4; panic_at = 0; cycles = 5; audio_cpus = '14'; stress_cpus = '6-13' }
+Assert (((New-SpikeArguments -Request $req -Root 'C:\r') -join ' ') -like '*--seconds 28800 *--audio-cpus 14 --stress-cpus 6-13') 'arguments-cpu-sets'
 $req.audio_cpus = '14;calc'
 Throws { New-SpikeArguments -Request $req -Root 'C:\r' } 'arguments-refuse-a-bad-cpu-list'
 $h = [pscustomobject]@{ id = 'spike-3'; mode = 'hwlat'; driver = 'Some Card'; frames = 0; seconds = 30; burn_us = 0; stress = 0; panic_at = 0; cycles = 1; cpu = 14; threshold_us = 10 }

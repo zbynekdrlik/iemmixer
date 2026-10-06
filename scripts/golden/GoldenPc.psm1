@@ -373,16 +373,6 @@ function Invoke-GoldenBringBack {
     [pscustomobject]@{ reaper = $reaperUp; app = $appUp }
 }
 
-function Get-GoldenMeterSamples {
-    param([Parameter(Mandatory)][string]$Http, [int]$Seconds = 60)
-    $samples = @()
-    for ($i = 0; $i -lt $Seconds; $i++) {
-        $samples += (Invoke-WebRequest -UseBasicParsing -Uri "$Http/_/NTRACK;TRACK" -TimeoutSec 5).Content
-        Start-Sleep -Seconds 1
-    }
-    return ,$samples
-}
-
 function Get-GoldenFileHashes {
     param([Parameter(Mandatory)][string]$Path)
     $root = [IO.Path]::GetFullPath($Path).TrimEnd('\')

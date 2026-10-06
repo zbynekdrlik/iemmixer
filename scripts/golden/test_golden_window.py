@@ -34,9 +34,9 @@ class EnvTests(unittest.TestCase):
 
 class OrderTests(unittest.TestCase):
     def test_steps_run_in_order(self) -> None:
-        state = {"done": ["preflight"]}
-        gw.check_order(state, "interlock")
-        with self.assertRaisesRegex(gw.StepError, "next step is 'interlock'"):
+        state = {"done": ["preflight", "save-quit"]}
+        gw.check_order(state, "app-stopped")
+        with self.assertRaisesRegex(gw.StepError, "next step is 'app-stopped'"):
             gw.check_order(state, "backup")
 
     def test_the_save_and_quit_follows_the_preflight(self) -> None:
@@ -54,14 +54,14 @@ class OrderTests(unittest.TestCase):
 
 class UndoPlanTests(unittest.TestCase):
     def test_undo_plan_before_anything_changed_is_empty(self) -> None:
-        self.assertEqual(gw.undo_plan(["preflight", "interlock"], ["preflight", "interlock"], render_running=False), [])
+        self.assertEqual(gw.undo_plan(["preflight"], ["preflight"], render_running=False), [])
 
     def test_undo_plan_mid_render_stops_restores_and_brings_back(self) -> None:
-        done = ["preflight", "interlock", "save-quit", "app-stopped", "backup", "stage", "seed-res"]
+        done = ["preflight", "save-quit", "app-stopped", "backup", "stage", "seed-res"]
         self.assertEqual(gw.undo_plan(done, done + ["render"], render_running=True), ["stop-render", "verify-restore", "bring-back"])
 
     def test_undo_plan_after_a_failed_quit_still_brings_back(self) -> None:
-        self.assertEqual(gw.undo_plan(["preflight", "interlock"], ["preflight", "interlock", "save-quit"], render_running=False), ["bring-back"])
+        self.assertEqual(gw.undo_plan(["preflight"], ["preflight", "save-quit"], render_running=False), ["bring-back"])
 
     def test_undo_plan_after_restore_only_brings_back(self) -> None:
         done = list(gw.STEPS[:-1])
@@ -72,14 +72,6 @@ class ParseTests(unittest.TestCase):
     def test_holders_parse_tasklist_csv(self) -> None:
         self.assertEqual(gw.parse_holders('"reaper.exe","6496","x.dll"\r\n'), [("reaper.exe", 6496)])
         self.assertEqual(gw.parse_holders("INFO: No tasks are running which match the specified criteria.\r\n"), [])
-
-    def test_meter_peaks_skip_the_master(self) -> None:
-        text = "NTRACK\t2\nTRACK\t0\tMASTER\t0\t1\t0\t-100\t-100\nTRACK\t1\tin\t0\t1\t0\t-620\t-620\nTRACK\t2\tbus\t0\t1\t0\t-1500\t-1500\n"
-        self.assertEqual(gw.parse_meter_peaks(text), {1: -620, 2: -1500})
-
-    def test_interlock_verdict(self) -> None:
-        self.assertEqual(gw.interlock_hits([{1: -620, 2: -1500}, {1: -480}]), {1: -480})
-        self.assertEqual(gw.interlock_hits([{1: -620}]), {})
 
 
 class DevWindowTests(unittest.TestCase):

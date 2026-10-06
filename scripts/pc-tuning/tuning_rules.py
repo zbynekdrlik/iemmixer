@@ -17,8 +17,9 @@ LAYOUT_ROLES = ("housekeeping", "card", "nic", "audio")
 MODE_LEVERS = ("plan", "governor", "placement", "services")
 MAX_CUTS = 5
 # The spike outcomes of a completed measure run: it ran to its end, or the stop
-# file ended it. refused, band-activity, fault-caught, rate-changed and
-# stop-hung end it without a measurement (outcome "error" already fails in cmd_run).
+# file ended it. refused, fault-caught, rate-changed and stop-hung end it without
+# a measurement (outcome "error" already fails in cmd_run). No input level ends a
+# run (#38): the stage's levels are only listed in the report.
 MEASURED = ("done", "stopped")
 LABEL = re.compile(r"[a-z0-9][a-z0-9-]{0,39}")
 APPROVAL = re.compile(r".*\d{1,2}:\d{2}.*\S.*")
