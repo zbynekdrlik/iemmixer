@@ -751,6 +751,11 @@ try {
         $sw = [Diagnostics.Stopwatch]::StartNew()
         ThrowsLike { Stop-IemTraceSessions -Dir $runDir -TimeoutSeconds 1 } '*did not finish within 1 s*' 'trace-stop-bounds-each-logman-call'
         Assert ($sw.Elapsed.TotalSeconds -lt 6) "trace-stop-returns-within-its-bounds ($([int]$sw.Elapsed.TotalSeconds) s)"
+        # Output that is not read within 5 s of the exit is an error, never "nothing
+        # runs" (#32 MINOR-2): the stand-in exits 0 at once, and the ping it starts in
+        # the background keeps its output pipe open for about 8 s (it ends by itself).
+        [IO.File]::WriteAllText($fakeLogman, "@echo off`r`nstart `"`" /b ping -n 9 127.0.0.1`r`nexit /b 0`r`n")
+        ThrowsLike { Stop-IemTraceSessions -Dir $runDir } '*its output was not read within 5 s*' 'trace-stop-unread-output-is-an-error'
     } finally { Set-MeasureSeam 'Logman' $savedLogman }
     # The run folder is a folder on a drive: a drive root or a relative path would make
     # every kernel trace there ours.
