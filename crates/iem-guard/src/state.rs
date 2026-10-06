@@ -19,24 +19,12 @@ use crate::plan::{Mode, Step};
 pub struct Switching {
     pub from: Mode,
     pub to: Mode,
-    /// The steps finished so far, in order.
-    #[serde(default)]
+    /// The steps finished so far, in order (a step an older guard saved
+    /// that this one no longer has is left out: `plan::known_steps`).
+    #[serde(default, deserialize_with = "crate::plan::known_steps")]
     pub done: Vec<Step>,
     /// Seconds since the epoch.
     pub started: u64,
-}
-
-/// A dev/live entry the interlock refused (activity on stage): the guard
-/// tries again every 15 min (design §5.2 step 2).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InterlockRetry {
-    pub target: Mode,
-    /// The bundle the refused request named (`--build`), if any.
-    #[serde(default)]
-    pub build: Option<String>,
-    pub refusals: u32,
-    /// Seconds since the epoch.
-    pub next_at: u64,
 }
 
 /// A child the guard started. Adoption after a guard restart needs all three
@@ -68,7 +56,6 @@ pub struct GuardState {
     /// Installed bundles by SHA.
     pub bundles: BTreeMap<String, Record>,
     pub pins: Pins,
-    pub interlock_retry: Option<InterlockRetry>,
     /// The HIL job that began and has not ended (its run id). Kept here so
     /// a guard that hands over to a new exe inside the job (HIL activates
     /// the bundle it tests) or restarts still serves the job (design §7).
@@ -91,13 +78,12 @@ pub fn reset_to_event(st: &GuardState, boot_time: u64, reaper_or_app: bool, engi
 }
 
 impl GuardState {
-    /// The mode after [`reset_to_event`]: `event`, no switch in progress, no
-    /// pending interlock retry and no HIL job (`pref_held` and `logon_seen`
-    /// stay: the next check reads the preference again).
+    /// The mode after [`reset_to_event`]: `event`, no switch in progress and
+    /// no HIL job (`pref_held` and `logon_seen` stay: the next check reads
+    /// the preference again).
     pub fn reset(&mut self) {
         self.mode = Mode::Event;
         self.switching = None;
-        self.interlock_retry = None;
         self.job = None;
     }
 
@@ -188,12 +174,6 @@ mod tests {
                 current: Some("a".repeat(40)),
                 previous: None,
             },
-            interlock_retry: Some(InterlockRetry {
-                target: Mode::Dev,
-                build: None,
-                refusals: 2,
-                next_at: 1_790_000_900,
-            }),
             job: Some(4242),
             pref_held: Some(
                 "REAPER runs with the preferred buffer at 32; it is restored at REAPER's next start"
@@ -259,6 +239,38 @@ mod tests {
             GuardState {
                 mode: Mode::Live,
                 written_at: 5,
+                ..GuardState::default()
+            }
+        );
+    }
+
+    /// #38: an older guard's state, saved with a pending interlock retry
+    /// and an interlock step done, still loads; both are left out (no stage
+    /// is read any more), the rest is kept.
+    #[test]
+    fn an_older_guards_interlock_retry_and_step_are_left_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("guard-state.json");
+        let old = r#"{"mode": "dev", "written_at": 7,
+            "switching": {"from": "event", "to": "dev", "started": 6,
+                          "done": ["precheck", "interlock", "app_stop"]},
+            "interlock_retry": {"target": "dev", "refusals": 2, "next_at": 9},
+            "job": 42}"#;
+        fs::write(&path, old).unwrap();
+        let (st, err) = GuardState::load(&path);
+        assert_eq!(err, None);
+        assert_eq!(
+            st,
+            GuardState {
+                mode: Mode::Dev,
+                written_at: 7,
+                switching: Some(Switching {
+                    from: Mode::Event,
+                    to: Mode::Dev,
+                    done: vec![Step::Precheck, Step::AppStop],
+                    started: 6,
+                }),
+                job: Some(42),
                 ..GuardState::default()
             }
         );
@@ -365,12 +377,11 @@ mod tests {
     }
 
     #[test]
-    fn reset_forgets_the_mode_the_switch_and_the_retry() {
+    fn reset_forgets_the_mode_the_switch_and_the_job() {
         let mut st = sample();
         st.reset();
         assert_eq!(st.mode, Mode::Event);
         assert_eq!(st.switching, None);
-        assert_eq!(st.interlock_retry, None);
         assert_eq!(st.job, None, "no HIL job after a reboot");
         // Everything else stays: bundles, pins and children are facts, and
         // so is a preference left alone under a holder (#9 2026-09-28): the

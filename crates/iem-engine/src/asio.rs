@@ -1,26 +1,21 @@
 //! The ASIO backend's start-up on Windows (S6 design note §3, §4): the card
-//! of the site's `[card]` table behind [`Driver`], and the interlock's card.
+//! of the site's `[card]` table behind [`Driver`].
 //!
 //! Windows effects only, excluded from mutation (`.cargo/mutants.toml`);
 //! the decisions are portable and tested: the memory lock's timing
 //! ([`lock_due`]), the backend's endings ([`Ending`], `Control::tick`), the
-//! stage, the listening loop and the verdict ([`crate::interlock`]), the
 //! card's channels, period and preference window (`iem_audio_io`,
 //! `iem_win::prefwin`).
 
 use std::io;
-use std::path::Path;
-use std::sync::Arc;
 use std::time::Instant;
 
 use iem_audio_io::StreamStats;
 use iem_audio_io::asio::{AsioError, AsioStream, CardConfig, StopOutcome, install_seh_filter};
-use iem_audio_io::telemetry::InputPeaks;
 use tracing::{error, info, warn};
 
 use crate::control::{Driver, Ending};
-use crate::engine::{EngineError, InterlockArgs, InterlockPlan, LOCK_EXTRA_MB, lock_due};
-use crate::interlock::{self, Interlock, PeakTap, Report, Verdict};
+use crate::engine::{EngineError, LOCK_EXTRA_MB, lock_due};
 use crate::rt::Processor;
 use crate::site::Card;
 use crate::topology::{Topology, hil_return_refusal};
@@ -195,49 +190,4 @@ pub(crate) fn start(
     });
     let block = usize::try_from(card.frames).unwrap_or(usize::MAX);
     Ok((driver, block))
-}
-
-/// The interlock on the card: the stage channels only, no TX channel (every
-/// card output stays zero), until the verdict or the stop file.
-pub(crate) fn interlock(
-    plan: InterlockPlan,
-    a: &InterlockArgs,
-) -> Result<(Verdict, Report), EngineError> {
-    prepare(&plan.card);
-    let peaks = Arc::new(InputPeaks::new(plan.channels.len()));
-    let tap = PeakTap::new(Arc::clone(&peaks));
-    let stream = AsioStream::start(
-        card_config(&plan.card),
-        plan.channels.clone(),
-        Vec::new(),
-        Vec::new(),
-        tap,
-    )
-    .map_err(refusal)?;
-    info!(
-        "interlock: listening to {} stage channels for {} s",
-        plan.channels.len(),
-        a.seconds
-    );
-    let mut lock = Interlock::new(plan.channels, a.seconds);
-    let mut before = stream.stats().callbacks;
-    let verdict = interlock::watch(
-        &mut lock,
-        || {
-            before = interlock::health(before, &stream.stats())?;
-            Ok(peaks.take())
-        },
-        || a.stop_file.as_deref().is_some_and(Path::exists),
-        std::thread::sleep,
-    );
-    let outcome = stream.stop();
-    log_stop(outcome);
-    if outcome == StopOutcome::Parked {
-        return Err(EngineError::Io(io::Error::other(
-            "the interlock's stream parked: the card may be held",
-        )));
-    }
-    let verdict = verdict.map_err(|why| EngineError::Io(io::Error::other(why)))?;
-    info!("interlock: {verdict:?}");
-    Ok((verdict, lock.report(verdict)))
 }

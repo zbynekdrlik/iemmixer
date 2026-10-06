@@ -1,7 +1,9 @@
-//! The band-activity banner on engineer pages (program spec §4.2): while
-//! iemmixer runs for development and the band starts playing, the engineer
-//! sees it here (and gets one push) with the "Back to REAPER" switch — the
-//! engineer PIN confirms it, the server runs the site's switch command.
+//! "Späť na REAPER" in the engineer's console (program spec §4.3, D4): the
+//! emergency brake back to REAPER. A person decides it — the engineer
+//! confirms with the engineer PIN and the server runs the site's switch
+//! command (`POST /api/mode/event`). #38 removed the band-activity banner
+//! this button used to sit in (no input level may stand for the band
+//! playing); the button itself stays, here, whenever the site has the switch.
 
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
@@ -31,11 +33,10 @@ enum SwitchState {
     Failed(String),
 }
 
+/// The button and its PIN step, inline in the console (the settings modal
+/// around it is already a dialog).
 #[component]
-pub fn ActivityBanner(
-    /// (the band is playing, the switch is configured)
-    activity: ReadSignal<(bool, bool)>,
-) -> impl IntoView {
+pub fn BackToReaper() -> impl IntoView {
     let (state, set_state) = signal(SwitchState::Idle);
     let (pin, set_pin) = signal(String::new());
 
@@ -55,7 +56,7 @@ pub fn ActivityBanner(
         });
     };
 
-    // Closing unmounts the dialog: after the click has finished bubbling.
+    // Cancelling unmounts the PIN step: after the click has finished bubbling.
     let cancel = move || {
         crate::components::after_event(move || {
             let _ = set_pin.try_set(String::new());
@@ -63,8 +64,7 @@ pub fn ActivityBanner(
         });
     };
 
-    let active = move || activity.get().0;
-    let can_switch = move || activity.get().1;
+    let started = move || state.get() == SwitchState::Started;
     let asking = move || {
         matches!(
             state.get(),
@@ -73,32 +73,30 @@ pub fn ActivityBanner(
     };
 
     view! {
-        <Show when=active fallback=|| ()>
-            <div class="band-activity-banner" data-testid="band-activity">
-                "Kapela hrá — mixuje iemmixer (vývoj)"
-                <Show when=can_switch fallback=|| ()>
-                    <button
-                        class="settings-action-btn back-to-reaper-btn"
-                        on:click=move |_| { let _ = set_state.try_set(SwitchState::Asking); }
-                    >
-                        "Späť na REAPER"
-                    </button>
-                </Show>
-                {move || (state.get() == SwitchState::Started).then(|| view! {
-                    <div class="band-activity-status">"Prepína sa na REAPER…"</div>
-                })}
+        <div class="console-switch" data-testid="back-to-reaper">
+            <div class="settings-row">
+                <div class="settings-label">
+                    <div class="settings-name">"REAPER"</div>
+                    <div class="settings-desc">"iemmixer sa zastaví a spustí sa REAPER."</div>
+                </div>
+                <button
+                    class="settings-action-btn back-to-reaper-btn"
+                    on:click=move |_| { let _ = set_state.try_set(SwitchState::Asking); }
+                >
+                    "Späť na REAPER"
+                </button>
             </div>
-        </Show>
-        <Show when=asking fallback=|| ()>
-            <div class="pin-modal-overlay" on:click=move |_| cancel()>
-                <div class="pin-modal" on:click=move |e| e.stop_propagation()>
-                    <h2>"Späť na REAPER?"</h2>
-                    <p>"iemmixer sa zastaví a spustí sa REAPER. Potvrď PIN-om inžiniera."</p>
+            <Show when=started fallback=|| ()>
+                <div class="settings-desc">"Prepína sa na REAPER…"</div>
+            </Show>
+            <Show when=asking fallback=|| ()>
+                <div class="switch-confirm">
+                    <div class="settings-desc">"Späť na REAPER? Potvrď PIN-om inžiniera."</div>
                     <input
                         type="password"
                         inputmode="numeric"
                         maxlength="4"
-                        class="pin-input"
+                        class="switch-pin-input"
                         data-testid="switch-pin"
                         prop:value=move || pin.get()
                         on:input=move |ev: web_sys::Event| {
@@ -115,10 +113,7 @@ pub fn ActivityBanner(
                         _ => None,
                     }}
                     <div class="confirm-actions">
-                        <button
-                            class="settings-action-btn"
-                            on:click=move |_| cancel()
-                        >
+                        <button class="settings-action-btn" on:click=move |_| cancel()>
                             "Zrušiť"
                         </button>
                         <button
@@ -130,8 +125,8 @@ pub fn ActivityBanner(
                         </button>
                     </div>
                 </div>
-            </div>
-        </Show>
+            </Show>
+        </div>
     }
 }
 

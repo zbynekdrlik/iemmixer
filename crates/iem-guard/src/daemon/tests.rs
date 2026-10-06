@@ -14,6 +14,7 @@ use crate::effects::tuning::{Logon, LogonPref};
 use crate::install;
 use crate::pc::fake::{Call, FakePc};
 use crate::pc::{CardHolders, PrefHeld, Status};
+use crate::plan::Facts;
 use crate::proto::GUARD_BUILD;
 
 const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
@@ -42,7 +43,6 @@ fn iemmixer_up() -> Facts {
 fn dev() -> Request {
     Request::Dev {
         build: None,
-        force: false,
         dry_run: false,
     }
 }
@@ -71,7 +71,7 @@ fn texts(g: &Guard) -> Vec<String> {
 
 /// A request sent after the one before it was answered: the pipe queues it
 /// with the switch generation of that moment (`Shared::route`). A literal
-/// generation after a switch began (a request, a retry of the watch) is a
+/// generation after a switch began (a request, the watch's crash fallback) is a
 /// request queued before that switch, answered as during it (`stale`).
 fn ask(pc: &mut FakePc, g: &mut Guard, req: Request) -> Reply {
     let epoch = g.shared.epoch();
@@ -81,9 +81,9 @@ fn ask(pc: &mut FakePc, g: &mut Guard, req: Request) -> Reply {
 // ---- the plan's exact tests ----
 
 #[test]
-fn preempt_during_interlock_starts_event_within_1s() {
+fn preempt_during_a_waiting_step_starts_event_within_1s() {
     let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
-    pc.block_until_cancel(Call::ReaperMeters);
+    pc.block_until_cancel(Call::AppStop);
     let c = g.cancel.clone();
     let fired = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(300));
@@ -92,7 +92,7 @@ fn preempt_during_interlock_starts_event_within_1s() {
     });
     run_switch(&mut pc, &mut g, Mode::Event, Mode::Dev);
     let at = fired.join().unwrap();
-    assert!(!pc.called(Call::AppStop) && !pc.called(Call::ReaperSaveQuit));
+    assert!(!pc.called(Call::ReaperSaveQuit));
     let first_event_call = pc.first_after(at).expect("the event plan ran");
     assert!(first_event_call.1.duration_since(at) < Duration::from_secs(1));
     assert_eq!(g.state.mode, Mode::Event);
@@ -150,7 +150,7 @@ fn a_parked_engine_stops_the_plan_and_asks_the_owner() {
 #[test]
 fn a_preemption_is_no_failure_and_the_steps_done_are_published() {
     let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
-    pc.block_until_cancel(Call::ReaperMeters);
+    pc.block_until_cancel(Call::AppStop);
     let (c, shared) = (g.cancel.clone(), Arc::clone(&g.shared));
     let seen = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(300));
@@ -259,12 +259,11 @@ fn the_kept_serving_alarm_says_so() {
 fn a_dev_entry_runs_the_whole_plan_and_serves() {
     let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
     g.state.pins.current = Some(SHA.into());
-    pc.meters = vec![-60.0, -70.0];
     let r = handle(&mut pc, &mut g, dev(), 0);
     assert!(r.ok, "{r:?}");
     assert!(
         r.detail
-            .starts_with("dev: done; interlock quiet: REAPER stage peaks [-60.0, -70.0] dBFS"),
+            .starts_with("dev: done; tuning enter: enter: ok; Dev data refreshed; "),
         "{}",
         r.detail
     );
@@ -279,7 +278,6 @@ fn a_dev_entry_runs_the_whole_plan_and_serves() {
         steps(&pc),
         [
             Call::Precheck,
-            Call::ReaperMeters,
             Call::AppStop,
             Call::ReaperSaveQuit,
             Call::Tuning,
@@ -317,7 +315,6 @@ fn a_dev_entry_runs_the_whole_plan_and_serves() {
 fn a_dev_entry_restores_the_preference_right_before_the_engine_starts() {
     let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
     g.state.pins.current = Some(SHA.into());
-    pc.meters = vec![-60.0];
     pc.pref_attempts = 1;
     let r = handle(&mut pc, &mut g, dev(), 0);
     assert!(r.ok, "{r:?}");
@@ -344,7 +341,6 @@ fn a_dev_entry_restores_the_preference_right_before_the_engine_starts() {
 
     let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
     g.state.pins.current = Some(SHA.into());
-    pc.meters = vec![-60.0];
     pc.fail(Call::PrefCheck, "3 restores failed");
     let r = handle(&mut pc, &mut g, dev(), 0);
     assert!(!r.ok, "{r:?}");
@@ -420,7 +416,6 @@ fn a_preference_left_under_reaper_is_restored_once_reaper_quits() {
     let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
     g.state.pins.current = Some(SHA.into());
     pc.pref_attempts = 1;
-    pc.meters = vec![-60.0];
     assert!(ask(&mut pc, &mut g, Request::Event { dry_run: false }).ok);
     let r = ask(&mut pc, &mut g, Request::Event { dry_run: false });
     assert!(r.ok, "{r:?}");
@@ -633,7 +628,6 @@ fn the_logon_task_and_the_event_plan_alarm_once_for_the_same_value() {
 #[test]
 fn a_failed_dev_step_alarms_and_unwinds_to_event() {
     let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
-    pc.meters = vec![-60.0];
     pc.fail(Call::Data, "iem-migrate band ended with Some(1)");
     let r = handle(&mut pc, &mut g, dev(), 0);
     assert!(!r.ok);
@@ -722,7 +716,6 @@ fn an_engine_that_finds_its_state_directory_busy_is_started_again_within_the_ste
     let entry = |exits: Vec<Option<i32>>| {
         let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
         g.state.pins.current = Some(SHA.into());
-        pc.meters = vec![-60.0]; // a quiet stage: the interlock lets the entry reach EngineStart
         pc.early_exits = exits;
         let t0 = Instant::now();
         let r = handle(&mut pc, &mut g, dev(), 0);
@@ -822,30 +815,6 @@ fn ide_event_during_the_last_step_of_a_dev_switch_goes_to_event() {
         "{:?}",
         texts(&g)
     );
-}
-
-#[test]
-fn ide_event_while_the_interlock_hears_the_band_goes_to_event() {
-    let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Event));
-    pc.interlock = (false, "activity on mic1".into());
-    // The interlock ends with activity just as "ide event" comes.
-    pc.delay(Call::EngineInterlock, Duration::from_millis(300));
-    let fired = preempt_after(&g, Step::Precheck);
-    let r = handle(&mut pc, &mut g, dev(), 0);
-    fired.join().unwrap();
-    assert!(!r.ok);
-    assert!(
-        r.detail.starts_with(
-            "dev: not entered; unwound to event; unwinding to event: pre-empted by event"
-        ),
-        "{}",
-        r.detail
-    );
-    assert_eq!(g.state.mode, Mode::Event);
-    assert_eq!(g.state.interlock_retry, None);
-    assert!(pc.called(Call::Fingerprint));
-    assert!(!g.cancel.preempted());
-    assert!(g.alarms.all().is_empty(), "{:?}", texts(&g));
 }
 
 #[test]
@@ -1063,7 +1032,6 @@ fn the_status_names_the_notice_only_as_the_last_handover_saw_it() {
         "{}",
         status_reply(&g)
     );
-    pc.meters = vec![-60.0];
     let r = ask(&mut pc, &mut g, dev());
     assert!(r.ok, "{r:?}");
     assert!(
@@ -1109,250 +1077,6 @@ fn the_jobs_are_cancelled_before_the_runner_stops() {
     assert_eq!(g.state.job, None);
     assert!(r.detail.contains("HIL job 4242 cancelled"), "{}", r.detail);
     assert!(pc.index(Call::RunnerStop) < pc.index(Call::EngineStop));
-}
-
-// ---- the interlock ----
-
-#[test]
-fn interlock_refusals_retry_every_15_min_and_alarm_once() {
-    let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Event));
-    pc.interlock = (false, "activity on mic1".into());
-    let r = handle(&mut pc, &mut g, dev(), 0);
-    assert!(!r.ok);
-    assert_eq!(
-        r.detail,
-        "dev: refused: activity on stage, tried again every 15 min; the mode is event; \
-         the interlock heard the band (activity on mic1); refusal 1"
-    );
-    assert_eq!(g.state.mode, Mode::Event);
-    assert_eq!(g.state.switching, None);
-    assert_eq!(
-        g.state.interlock_retry,
-        Some(InterlockRetry {
-            target: Mode::Dev,
-            build: None,
-            refusals: 1,
-            next_at: T0 + RETRY_S,
-        })
-    );
-    assert_eq!(RETRY_S, 900);
-    assert_eq!(
-        steps(&pc),
-        [Call::Precheck, Call::EngineInterlock],
-        "nothing was touched"
-    );
-    assert!(g.alarms.all().is_empty());
-    // Not due yet.
-    g.set_now(T0 + RETRY_S - 1);
-    tick(&mut pc, &mut g, Instant::now());
-    assert_eq!(pc.count(Call::EngineInterlock), 1);
-    for n in 2..=7 {
-        let due = g.state.interlock_retry.as_ref().unwrap().next_at;
-        g.set_now(due);
-        tick(&mut pc, &mut g, Instant::now());
-        let r = g.state.interlock_retry.as_ref().unwrap();
-        assert_eq!((r.refusals, r.next_at), (n, due + RETRY_S), "refusal {n}");
-        let expected = usize::from(n >= RETRY_NOTICE_AT);
-        assert_eq!(g.alarms.all().len(), expected, "refusal {n}");
-    }
-    let a = g.alarms.last().unwrap();
-    assert_eq!(
-        (a.text.as_str(), a.step, a.owner_question, a.notified),
-        (RETRY_NOTICE, Some(Step::Interlock), false, true)
-    );
-    // The eighth drops the retry; status says so.
-    let due = g.state.interlock_retry.as_ref().unwrap().next_at;
-    g.set_now(due);
-    tick(&mut pc, &mut g, Instant::now());
-    assert_eq!(g.state.interlock_retry, None);
-    assert_eq!(pc.count(Call::EngineInterlock), 8);
-    assert_eq!(g.alarms.all().len(), 1);
-    assert!(
-        status_text(&g).contains("the dev switch was dropped after 8 interlock refusals"),
-        "{}",
-        status_text(&g)
-    );
-    g.set_now(due + 10 * RETRY_S);
-    tick(&mut pc, &mut g, Instant::now());
-    assert_eq!(pc.count(Call::EngineInterlock), 8);
-    assert_eq!(g.state.mode, Mode::Event);
-    assert!(!pc.called(Call::EngineStart));
-    assert_eq!((RETRY_NOTICE_AT, RETRY_LAST), (4, 8));
-}
-
-#[test]
-fn ide_event_or_a_new_request_clears_the_retry() {
-    let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Event));
-    pc.interlock = (false, "activity".into());
-    ask(&mut pc, &mut g, dev());
-    let due = g.state.interlock_retry.as_ref().unwrap().next_at;
-    g.set_now(due);
-    tick(&mut pc, &mut g, Instant::now());
-    assert_eq!(g.state.interlock_retry.as_ref().unwrap().refusals, 2);
-    // A new request starts counting again.
-    ask(&mut pc, &mut g, dev());
-    assert_eq!(g.state.interlock_retry.as_ref().unwrap().refusals, 1);
-    // "ide event" drops it.
-    let r = ask(&mut pc, &mut g, Request::Event { dry_run: false });
-    assert!(r.ok, "{r:?}");
-    assert_eq!(g.state.interlock_retry, None);
-    g.set_now(due + 10 * RETRY_S);
-    let before = pc.count(Call::EngineInterlock);
-    tick(&mut pc, &mut g, Instant::now());
-    assert_eq!(pc.count(Call::EngineInterlock), before);
-}
-
-#[test]
-fn a_retry_that_enters_dev_is_not_tried_again() {
-    let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Event));
-    g.state.pins.current = Some(SHA.into());
-    pc.interlock = (false, "activity on mic1".into());
-    handle(&mut pc, &mut g, dev(), 0);
-    let due = g.state.interlock_retry.as_ref().unwrap().next_at;
-    // The stage is quiet at the retry: dev is entered.
-    pc.interlock = (true, "quiet".into());
-    g.set_now(due);
-    tick(&mut pc, &mut g, Instant::now());
-    assert_eq!(g.state.mode, Mode::Dev);
-    assert_eq!(g.state.interlock_retry, None);
-    assert_eq!(
-        (pc.count(Call::EngineInterlock), pc.count(Call::EngineStart)),
-        (2, 1)
-    );
-    for t in [due + 1, due + RETRY_S, due + 10 * RETRY_S] {
-        g.set_now(t);
-        tick(&mut pc, &mut g, Instant::now());
-    }
-    assert_eq!(
-        (pc.count(Call::EngineInterlock), pc.count(Call::EngineStart)),
-        (2, 1)
-    );
-    assert!(!pc.called(Call::EngineStop));
-    assert_eq!(g.state.mode, Mode::Dev);
-    assert!(!status_text(&g).contains("waits"), "{}", status_text(&g));
-}
-
-#[test]
-fn a_retry_that_unwinds_or_may_no_longer_run_is_dropped() {
-    let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Event));
-    pc.interlock = (false, "activity on mic1".into());
-    ask(&mut pc, &mut g, dev());
-    let due = g.state.interlock_retry.as_ref().unwrap().next_at;
-    // Quiet at the retry, but the data refresh fails: back to event.
-    pc.interlock = (true, "quiet".into());
-    pc.fail(Call::Data, "iem-migrate band ended with Some(1)");
-    g.set_now(due);
-    tick(&mut pc, &mut g, Instant::now());
-    assert_eq!(g.state.mode, Mode::Event);
-    assert_eq!(g.state.interlock_retry, None);
-    assert_eq!(pc.count(Call::ReaperStart), 1);
-    for t in [due + 1, due + RETRY_S] {
-        g.set_now(t);
-        tick(&mut pc, &mut g, Instant::now());
-    }
-    assert_eq!(
-        (pc.count(Call::EngineInterlock), pc.count(Call::ReaperStart)),
-        (2, 1)
-    );
-    // A live retry whose bundle turned red meanwhile is dropped, not
-    // refused again every second.
-    let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Event));
-    g.state
-        .bundles
-        .insert(SHA.into(), record(SHA, "main", Hil::Green));
-    pc.interlock = (false, "activity on mic1".into());
-    let live = Request::Live {
-        build: SHA.into(),
-        trial: false,
-        dry_run: false,
-    };
-    assert!(!ask(&mut pc, &mut g, live).ok);
-    let due = g.state.interlock_retry.as_ref().unwrap().next_at;
-    let red = Request::Report {
-        sha: SHA.into(),
-        hil: "red".into(),
-        detail: "loopback silent".into(),
-    };
-    let r = ask(&mut pc, &mut g, red);
-    assert!(r.ok, "{r:?}");
-    assert!(g.state.interlock_retry.is_some());
-    g.set_now(due);
-    tick(&mut pc, &mut g, Instant::now());
-    assert_eq!(g.state.interlock_retry, None);
-    assert_eq!(pc.count(Call::EngineInterlock), 1);
-    assert_eq!(g.state.mode, Mode::Event);
-}
-
-#[test]
-fn reaper_meters_above_the_activity_level_refuse() {
-    for (peaks, quiet) in [
-        (vec![-60.0, -50.0], true),
-        (vec![-60.0, -49.9], false),
-        (vec![f64::NAN], false),
-        (vec![], false),
-    ] {
-        let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
-        g.state.pins.current = Some(SHA.into());
-        pc.meters = peaks.clone();
-        let r = handle(&mut pc, &mut g, dev(), 0);
-        assert_eq!(r.ok, quiet, "{peaks:?}: {r:?}");
-        assert_eq!(pc.called(Call::AppStop), quiet, "{peaks:?}");
-        assert_eq!(g.state.interlock_retry.is_some(), !quiet, "{peaks:?}");
-    }
-    // A retry keeps its bundle.
-    let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
-    g.state
-        .bundles
-        .insert(SHA.into(), record(SHA, "dev", Hil::Pending));
-    pc.meters = vec![-10.0];
-    handle(
-        &mut pc,
-        &mut g,
-        Request::Dev {
-            build: Some(SHA.into()),
-            force: false,
-            dry_run: false,
-        },
-        0,
-    );
-    assert_eq!(
-        g.state.interlock_retry.as_ref().unwrap().build.as_deref(),
-        Some(SHA)
-    );
-}
-
-#[test]
-fn stage_quiet_needs_every_peak_at_or_below_the_level() {
-    assert!(stage_quiet(&[-50.0]));
-    assert!(stage_quiet(&[-90.0, -60.0]));
-    assert!(!stage_quiet(&[-49.99]));
-    assert!(!stage_quiet(&[-90.0, -30.0]));
-    assert!(!stage_quiet(&[f64::NAN]));
-    assert!(!stage_quiet(&[]));
-}
-
-#[test]
-fn force_skips_the_interlock() {
-    let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
-    g.state.pins.current = Some(SHA.into());
-    let r = ask(
-        &mut pc,
-        &mut g,
-        Request::Dev {
-            build: None,
-            force: true,
-            dry_run: false,
-        },
-    );
-    assert!(r.ok, "{r:?}");
-    assert!(!pc.called(Call::ReaperMeters));
-    // The flags end with the switch: the next one checks the stage again.
-    pc.facts = band_up();
-    let r = ask(&mut pc, &mut g, Request::Event { dry_run: false });
-    assert!(r.ok, "{r:?}");
-    let r = ask(&mut pc, &mut g, dev());
-    assert!(!r.ok);
-    assert!(pc.called(Call::ReaperMeters));
 }
 
 // ---- requests ----
@@ -1572,7 +1296,6 @@ fn dry_run_changes_nothing() {
     };
     let dry_dev = Request::Dev {
         build: None,
-        force: false,
         dry_run: true,
     };
     for req in [Request::Event { dry_run: true }, dry_dev, live] {
@@ -1594,16 +1317,14 @@ fn dry_run_changes_nothing() {
         &mut g,
         Request::Dev {
             build: None,
-            force: false,
             dry_run: true,
         },
         0,
     );
     assert_eq!(
         r.detail,
-        "dry run: Precheck, Interlock, AppStop, ReaperSaveQuit, TuningEnter, Data, PrefCheck, \
-         EngineStart, EngineArm, ServerStart, TrayStart, IdentityCheck, RunnerStart; bundle none; \
-         precheck ok"
+        "dry run: Precheck, AppStop, ReaperSaveQuit, TuningEnter, Data, PrefCheck, EngineStart, \
+         EngineArm, ServerStart, TrayStart, IdentityCheck, RunnerStart; bundle none; precheck ok"
     );
     pc.fail(Call::Precheck, "an engine the guard did not start runs");
     let r = handle(
@@ -1611,7 +1332,6 @@ fn dry_run_changes_nothing() {
         &mut g,
         Request::Dev {
             build: None,
-            force: true,
             dry_run: true,
         },
         0,
@@ -1623,7 +1343,6 @@ fn dry_run_changes_nothing() {
         "{}",
         r.detail
     );
-    assert!(!r.detail.contains("Interlock"), "force: {}", r.detail);
     let r = handle(&mut pc, &mut g, Request::Event { dry_run: true }, 0);
     assert_eq!(
         r.detail,
@@ -1647,13 +1366,12 @@ const NO_SUBSCRIPTION_NOTE: &str = "no PWA notification subscription: no enginee
 fn a_dev_entry_without_a_pwa_subscription_goes_on_and_names_it() {
     let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
     g.state.pins.current = Some(SHA.into());
-    pc.meters = vec![-60.0];
     pc.subscriptions = Some(0);
     let r = ask(&mut pc, &mut g, dev());
     assert!(r.ok, "{r:?}");
     assert!(
         r.detail.starts_with(&format!(
-            "dev: done; {NO_SUBSCRIPTION_NOTE}; interlock quiet: "
+            "dev: done; {NO_SUBSCRIPTION_NOTE}; tuning enter: "
         )),
         "{}",
         r.detail
@@ -1671,7 +1389,6 @@ fn a_dev_entry_without_a_pwa_subscription_goes_on_and_names_it() {
     // Its dry run passes and names it too.
     let dry = Request::Dev {
         build: None,
-        force: false,
         dry_run: true,
     };
     let r = ask(&mut pc, &mut g, dry);
@@ -1697,7 +1414,6 @@ fn a_dev_entry_without_a_pwa_subscription_goes_on_and_names_it() {
     // longer names it.
     let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
     g.state.pins.current = Some(SHA.into());
-    pc.meters = vec![-60.0];
     pc.subscriptions = Some(0);
     assert!(ask(&mut pc, &mut g, dev()).ok);
     pc.subscriptions = Some(1);
@@ -1711,7 +1427,6 @@ fn a_dev_entry_without_a_pwa_subscription_goes_on_and_names_it() {
     // With a subscription the entry names nothing.
     let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
     g.state.pins.current = Some(SHA.into());
-    pc.meters = vec![-60.0];
     let r = ask(&mut pc, &mut g, dev());
     assert!(r.ok, "{r:?}");
     assert!(!r.detail.contains("PWA notification"), "{}", r.detail);
@@ -1731,7 +1446,6 @@ const LAN_NOTE: &str =
 fn an_expired_lan_certificate_is_named_and_never_an_alarm() {
     let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
     g.state.pins.current = Some(SHA.into());
-    pc.meters = vec![-60.0];
     pc.lan_note = Some(LAN_NOTE.into());
     let r = ask(&mut pc, &mut g, dev());
     assert!(r.ok, "{r:?}");
@@ -1759,7 +1473,6 @@ fn an_expired_lan_certificate_is_named_and_never_an_alarm() {
     assert!(status_reply(&g).contains(LAN_NOTE), "{}", status_reply(&g));
     // The next check that names nothing drops it.
     pc.lan_note = None;
-    pc.meters = vec![-60.0];
     let r = ask(&mut pc, &mut g, dev());
     assert!(r.ok, "{r:?}");
     assert!(!r.detail.contains("LAN certificate"), "{}", r.detail);
@@ -1843,15 +1556,14 @@ fn live_needs_an_installed_green_main_bundle() {
     assert_eq!(g.state.pins.current.as_deref(), Some(SHA));
     assert_eq!(pc.bundle.as_deref(), Some(SHA));
     assert!(!pc.called(Call::RunnerStart));
-    assert!(pc.called(Call::EngineInterlock));
-    // A trial skips the interlock (the band is there on purpose).
+    // A trial (the band there on purpose) enters the same way.
     let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
     g.state
         .bundles
         .insert(SHA.into(), record(SHA, "main", Hil::Green));
     let r = handle(&mut pc, &mut g, live(true), 0);
     assert!(r.ok, "{r:?}");
-    assert!(!pc.called(Call::ReaperMeters));
+    assert_eq!(g.state.mode, Mode::Live);
 }
 
 #[test]
@@ -1859,7 +1571,6 @@ fn dev_with_a_build_pins_it() {
     let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Event));
     let build = |sha: &str| Request::Dev {
         build: Some(sha.into()),
-        force: false,
         dry_run: false,
     };
     let r = handle(&mut pc, &mut g, build(SHA), 0);
@@ -1880,30 +1591,52 @@ fn dev_with_a_build_pins_it() {
     assert_eq!(pc.bundle.as_deref(), Some(SHA));
 }
 
+/// #38 (owner, 2026-10-06): a HIL job begins in dev when no other job runs,
+/// whatever the stage carries. Nothing reads it: other devices on the Dante
+/// network feed the card's inputs, and only the owner's signal decides
+/// whether the PC may be used.
 #[test]
-fn job_begin_needs_a_quiet_stage() {
+fn a_hil_job_begins_in_dev_without_reading_the_stage() {
+    let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
+    assert_eq!(
+        handle(&mut pc, &mut g, Request::JobBegin { run: 7 }, 0),
+        g.reply(true, "HIL job 7 began")
+    );
+    assert_eq!(g.state.job, Some(7));
+    assert_eq!(pc.calls(), Vec::<Call>::new(), "no PC read");
+}
+
+/// #38: a dev entry reads no stage, never waits for quiet and never refuses
+/// on activity: from the band's system the app's stop follows the precheck,
+/// and with nothing running the tuning enter does.
+#[test]
+fn a_dev_entry_reads_no_stage_and_never_waits_for_quiet() {
+    let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
+    g.state.pins.current = Some(SHA.into());
+    let r = handle(&mut pc, &mut g, dev(), 0);
+    assert!(r.ok, "{r:?}");
+    assert_eq!(g.state.mode, Mode::Dev);
+    assert_eq!(
+        steps(&pc).get(..3),
+        Some(&[Call::Precheck, Call::AppStop, Call::ReaperSaveQuit][..])
+    );
+    let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Event));
+    g.state.pins.current = Some(SHA.into());
+    let r = handle(&mut pc, &mut g, dev(), 0);
+    assert!(r.ok, "{r:?}");
+    assert_eq!(
+        steps(&pc).get(..2),
+        Some(&[Call::Precheck, Call::Tuning][..])
+    );
+}
+
+#[test]
+fn a_job_begins_once_and_ends_by_its_run() {
     let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
     let begin = Request::JobBegin { run: 7 };
-    pc.quiet_for = Duration::from_secs(299);
-    let r = handle(&mut pc, &mut g, begin.clone(), 0);
-    assert_eq!(
-        (r.ok, r.detail.as_str()),
-        (false, "the band was quiet for 299 s; a job needs 300 s")
-    );
-    assert!(!pc.called(Call::EngineStagePeaks));
-    pc.quiet_for = Duration::from_secs(300);
-    pc.stage_peaks = vec![-90.0, -30.0];
-    let r = handle(&mut pc, &mut g, begin.clone(), 0);
-    assert_eq!(
-        (r.ok, r.detail.as_str()),
-        (false, "stage peaks [-90.0, -30.0] dBFS: not quiet")
-    );
-    assert_eq!(g.state.job, None);
-    pc.stage_peaks = vec![-90.0, -50.0];
     let r = handle(&mut pc, &mut g, begin.clone(), 0);
     assert_eq!((r.ok, r.detail.as_str()), (true, "HIL job 7 began"));
     assert_eq!(g.state.job, Some(7));
-    assert_eq!(JOB_PEAKS_S, 60);
     let r = handle(&mut pc, &mut g, Request::JobBegin { run: 8 }, 0);
     assert_eq!(r.detail, "HIL job 7 has not ended");
     // job-end
@@ -1917,13 +1650,6 @@ fn job_begin_needs_a_quiet_stage() {
         (r.ok, r.detail.as_str()),
         (true, "no HIL job runs (job 7 has ended)")
     );
-    // Unreadable activity or meters refuse.
-    pc.fail(Call::EngineStagePeaks, "no meter frame in 60 s");
-    let r = handle(&mut pc, &mut g, begin.clone(), 0);
-    assert_eq!(r.detail, "stage peaks: no meter frame in 60 s");
-    pc.fail(Call::BandQuietFor, "no topology");
-    let r = handle(&mut pc, &mut g, begin.clone(), 0);
-    assert_eq!(r.detail, "band activity unreadable: no topology");
     // Only in dev.
     g.state.mode = Mode::Live;
     let r = handle(&mut pc, &mut g, begin, 0);
@@ -1995,7 +1721,7 @@ fn a_test_signal_needs_a_begun_job_and_at_most_60_s() {
         dbfs: -30.0,
         ttl_s,
     };
-    // Without JobBegin's band-quiet and stage checks: refused.
+    // Without a begun job: refused.
     let r = handle(&mut pc, &mut g, signal(5.0), 0);
     assert_eq!(
         (r.ok, r.detail.as_str()),
@@ -2398,9 +2124,7 @@ fn installed_in_event(dir: &Path) -> Guard {
 }
 
 /// Every call to REAPER or the predecessor app, reads included.
-const BAND_CALLS: [Call; 9] = [
-    Call::ReaperMeters,
-    Call::EngineInterlock,
+const BAND_CALLS: [Call; 7] = [
     Call::ReaperSaveQuit,
     Call::AppStop,
     Call::HolderGone,
@@ -2487,29 +2211,7 @@ fn activate_in_event_is_refused_while_the_guard_is_not_idle() {
         )
     );
     assert!(steps(&pc).is_empty(), "{:?}", pc.calls());
-    // A switch waits for its interlock retry (a hand-over's new guard
-    // would drop it).
-    g.state.interlock_retry = Some(InterlockRetry {
-        target: Mode::Dev,
-        build: Some(SHA.into()),
-        refusals: 1,
-        next_at: T0 + RETRY_S,
-    });
     let mut pc = FakePc::new(band_up());
-    let r = handle(&mut pc, &mut g, activate(), 0);
-    assert_eq!(
-        (r.ok, r.detail.as_str()),
-        (
-            false,
-            "the dev switch waits for its interlock retry: activate waits until it ran or was \
-             dropped"
-        )
-    );
-    assert_eq!(
-        g.state.interlock_retry.as_ref().map(|r| r.refusals),
-        Some(1)
-    );
-    g.state.interlock_retry = None;
     // A switch persisted as unfinished.
     g.state.switching = Some(Switching {
         from: Mode::Event,
@@ -2694,23 +2396,7 @@ fn activate_offline_is_refused_while_a_guard_runs_or_the_event_is_not_idle() {
             "activate in event needs no iemmixer process; running: engine"
         )
     );
-    // A switch waits for its interlock retry.
-    g.state.interlock_retry = Some(InterlockRetry {
-        target: Mode::Dev,
-        build: None,
-        refusals: 2,
-        next_at: T0 + RETRY_S,
-    });
     let mut pc = FakePc::new(band_up());
-    let r = activate_offline(&mut pc, &mut g, Some(()), SHA);
-    assert!(!r.ok);
-    assert!(
-        r.detail
-            .starts_with("the dev switch waits for its interlock retry"),
-        "{}",
-        r.detail
-    );
-    g.state.interlock_retry = None;
     // A bundle that is not installed.
     let r = activate_offline(&mut pc, &mut g, Some(()), OTHER);
     assert_eq!(
@@ -3163,21 +2849,11 @@ fn status_names_everything_that_waits() {
     assert_eq!(status_text(&g), "mode dev; no bundle");
     g.state.pins.current = Some(SHA.into());
     g.state.job = Some(4242);
-    g.state.interlock_retry = Some(InterlockRetry {
-        target: Mode::Live,
-        build: None,
-        refusals: 2,
-        next_at: T0 + 900,
-    });
-    g.note = Some("a note".into());
     g.raise(None, "one", false);
     g.raise(None, "two", false);
     assert_eq!(
         status_text(&g),
-        format!(
-            "mode dev; bundle {SHA}; HIL job 4242; the live switch waits: 2 interlock \
-             refusals, next try at 1790000900; a note; 2 unacknowledged alarms"
-        )
+        format!("mode dev; bundle {SHA}; HIL job 4242; 2 unacknowledged alarms")
     );
     assert_eq!(g.shared.view().status, status_text(&g));
     assert_eq!(
@@ -3200,11 +2876,10 @@ fn a_guard_whose_children_stay_in_its_job_names_it() {
     assert_eq!(start(&mut pc, &mut g, 0), None);
     assert_eq!(status_text(&g), format!("mode dev; no bundle; {NOTE}"));
     assert_eq!(g.shared.view().status, status_text(&g));
-    g.note = Some("a note".into());
     g.raise(None, "one", false);
     assert_eq!(
         status_text(&g),
-        format!("mode dev; no bundle; a note; {NOTE}; 1 unacknowledged alarms")
+        format!("mode dev; no bundle; {NOTE}; 1 unacknowledged alarms")
     );
     for job in [
         Ok(Placement::Breakaway),
@@ -3735,8 +3410,7 @@ fn drift_is_read_after_every_mode_change() {
     assert_eq!(pc.calls_after(Call::EngineHealth), Vec::<Call>::new());
     tick(&mut pc, &mut g, at + TICK);
     assert_eq!(pc.count(Call::TuningDrift), 2);
-    // A kept-serving engine and a refused entry changed nothing: the drift
-    // waits for its hour.
+    // A kept-serving engine changed nothing: the drift waits for its hour.
     let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
     tick(&mut pc, &mut g, at);
     pc.fail(Call::EngineStop, "no DriverReleased within 10 s");
@@ -3744,15 +3418,6 @@ fn drift_is_read_after_every_mode_change() {
     assert_eq!(
         run_switch(&mut pc, &mut g, Mode::Dev, Mode::Event),
         Outcome::KeptServing
-    );
-    tick(&mut pc, &mut g, at + TICK);
-    assert_eq!(pc.count(Call::TuningDrift), 1);
-    let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Event));
-    tick(&mut pc, &mut g, at);
-    pc.interlock = (false, "activity on mic1".into());
-    assert_eq!(
-        run_switch(&mut pc, &mut g, Mode::Event, Mode::Dev),
-        Outcome::Refused
     );
     tick(&mut pc, &mut g, at + TICK);
     assert_eq!(pc.count(Call::TuningDrift), 1);
@@ -3908,12 +3573,6 @@ fn a_reboot_resets_the_mode_to_event() {
             done: vec![Step::Precheck],
             started: 1_000,
         }),
-        interlock_retry: Some(InterlockRetry {
-            target: Mode::Dev,
-            build: None,
-            refusals: 1,
-            next_at: 2_000,
-        }),
         ..GuardState::default()
     };
     save_state(dir.path(), &mut saved, 1_000);
@@ -3924,7 +3583,6 @@ fn a_reboot_resets_the_mode_to_event() {
     assert_eq!(start(&mut pc, &mut g, 5_000), Some(Outcome::Done));
     assert_eq!(g.state.mode, Mode::Event);
     assert_eq!(g.state.switching, None);
-    assert_eq!(g.state.interlock_retry, None);
     for c in [
         Call::Tuning,
         Call::PrefCheck,
@@ -3979,12 +3637,7 @@ fn a_restarted_guard_unwinds_a_half_done_dev_switch() {
     g.state.switching = Some(Switching {
         from: Mode::Event,
         to: Mode::Dev,
-        done: vec![
-            Step::Precheck,
-            Step::Interlock,
-            Step::AppStop,
-            Step::ReaperSaveQuit,
-        ],
+        done: vec![Step::Precheck, Step::AppStop, Step::ReaperSaveQuit],
         started: T0,
     });
     g.state.written_at = 2_000;
@@ -4274,43 +3927,6 @@ fn site_settings_and_clocks() {
     let sys = Clock::System.now();
     assert!((now..=now + 5).contains(&sys), "{sys} {now}");
     assert_eq!(fixed(42).now(), 42);
-}
-
-#[test]
-fn a_live_trial_dry_run_takes_trial_from_the_request_not_the_facts() {
-    // dry_entry builds the plan's facts from `Entry` (`trial: e.trial`), not
-    // from `pc.facts()`. A Live trial enters with the band up on purpose, so
-    // its plan skips the interlock; a non-trial Live from the same state plans
-    // it. If the `trial` field were dropped it would fall back to the PC facts
-    // (trial = false), and even the trial would plan the interlock.
-    let live = |trial| Request::Live {
-        build: SHA.into(),
-        trial,
-        dry_run: true,
-    };
-    let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
-    g.state
-        .bundles
-        .insert(SHA.into(), record(SHA, "main", Hil::Green));
-    let r = ask(&mut pc, &mut g, live(true));
-    assert!(r.ok, "{r:?}");
-    assert!(r.detail.starts_with("dry run: "), "{}", r.detail);
-    assert!(
-        !r.detail.contains("Interlock"),
-        "a trial skips the interlock: {}",
-        r.detail
-    );
-    // The contrast: a non-trial Live from the same band-up state DOES plan it.
-    let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
-    g.state
-        .bundles
-        .insert(SHA.into(), record(SHA, "main", Hil::Green));
-    let r = ask(&mut pc, &mut g, live(false));
-    assert!(
-        r.detail.contains("Interlock"),
-        "a non-trial live plans the interlock: {}",
-        r.detail
-    );
 }
 
 #[test]

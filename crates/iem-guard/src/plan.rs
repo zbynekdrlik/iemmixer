@@ -2,9 +2,10 @@
 //!
 //! Pure: facts in, ordered steps out. Every step re-reads its own facts before
 //! it acts, so re-running a plan is safe; a failed or interrupted switch into
-//! dev/live unwinds with `plan(current, Mode::Event, facts)`.
+//! dev/live unwinds with `plan(Mode::Event, facts)`. The mode it starts
+//! from changes nothing: the facts say what runs.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// What the PC runs: REAPER and the predecessor app (`event`), or iemmixer
 /// (`dev` before cutover, `live` after it or as a trial). After a reboot the
@@ -22,7 +23,6 @@ pub enum Mode {
 #[serde(rename_all = "snake_case")]
 pub enum Step {
     Precheck,
-    Interlock,
     AppStop,
     ReaperSaveQuit,
     TuningEnter,
@@ -52,9 +52,8 @@ pub enum Step {
 
 impl Step {
     /// Every step, in declaration order (tests and status listings).
-    pub const ALL: [Step; 26] = [
+    pub const ALL: [Step; 25] = [
         Step::Precheck,
-        Step::Interlock,
         Step::AppStop,
         Step::ReaperSaveQuit,
         Step::TuningEnter,
@@ -80,6 +79,27 @@ impl Step {
         Step::AppHandover,
         Step::Fingerprint,
     ];
+
+    /// The step of this name, if this guard has it.
+    fn named(name: String) -> Option<Self> {
+        serde_json::from_value(serde_json::Value::String(name)).ok()
+    }
+}
+
+/// An alarm's step as saved (`alarms.json`) or sent (a reply): a step an
+/// older guard had and this one has not (the interlock, gone with #38) reads
+/// as none, so that guard's alarms still load.
+pub fn known_step<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Step>, D::Error> {
+    Ok(Option::<String>::deserialize(d)?.and_then(Step::named))
+}
+
+/// A switch's steps done as saved (`guard-state.json`) or sent: the steps
+/// this guard has, in order; one only an older guard had is left out.
+pub fn known_steps<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<Step>, D::Error> {
+    Ok(Vec::<String>::deserialize(d)?
+        .into_iter()
+        .filter_map(Step::named)
+        .collect())
 }
 
 /// Read once per plan (module holders and ports included); the once-a-second
@@ -98,17 +118,13 @@ pub struct Facts {
     pub app_serves: bool,
     /// A process other than REAPER and our engine holds the driver module.
     pub other_module_holder: bool,
-    /// `live` before cutover (a rehearsal): the band is there on purpose.
-    pub trial: bool,
-    /// Owner-instructed `--force`: skips the interlock only.
-    pub force: bool,
 }
 
 /// The number of fields of [`Facts`].
-pub const FACT_BITS: u32 = 11;
+pub const FACT_BITS: u32 = 9;
 
 impl Facts {
-    /// Every combination for the exhaustive tests (2^11 = 2048): bit `n` sets
+    /// Every combination for the exhaustive tests (2^9 = 512): bit `n` sets
     /// the `n`-th field in declaration order.
     pub fn from_bits(b: u32) -> Self {
         let bit = |n: u32| (b & (1 << n)) != 0;
@@ -122,8 +138,6 @@ impl Facts {
             reaper_holds_module: bit(6),
             app_serves: bit(7),
             other_module_holder: bit(8),
-            trial: bit(9),
-            force: bit(10),
         }
     }
 }
@@ -143,7 +157,7 @@ fn stop_iemmixer(f: &Facts, out: &mut Vec<Step>) {
     }
 }
 
-pub fn plan(from: Mode, to: Mode, f: &Facts) -> Vec<Step> {
+pub fn plan(to: Mode, f: &Facts) -> Vec<Step> {
     let mut out = Vec::new();
     match to {
         Mode::Event => {
@@ -179,15 +193,10 @@ pub fn plan(from: Mode, to: Mode, f: &Facts) -> Vec<Step> {
             out.extend([Step::AppHandover, Step::Fingerprint]);
         }
         Mode::Dev | Mode::Live => {
+            // No step reads the stage (#38, owner 2026-10-06): only the
+            // owner's signal decides whether the PC may change, and other
+            // devices on the Dante network feed the card's inputs.
             out.push(Step::Precheck);
-            let band_there = to == Mode::Live && f.trial;
-            // A running REAPER or app means the band's system is up, whatever
-            // the saved mode says (a reboot restores `event`, spec §4.1).
-            let from_band =
-                f.reaper || f.app || from == Mode::Event || (from == Mode::Live && to == Mode::Dev);
-            if from_band && !band_there && !f.force {
-                out.push(Step::Interlock);
-            }
             // The app first: after it nothing writes to REAPER, so the save
             // cannot be dirtied before the quit (deviation from spec §4.3).
             if f.app {
@@ -283,8 +292,6 @@ pub struct Busy {
     pub switching: bool,
     /// The HIL job that began and has not ended.
     pub job: Option<u64>,
-    /// A refused entry into this mode waits for its interlock retry.
-    pub retry: Option<Mode>,
 }
 
 /// What `activate <sha>` does (design §5.5; #9 2026-09-28).
@@ -302,13 +309,11 @@ pub enum Activation {
 
 /// `activate` per mode. In `dev` as always. In `event` only while the
 /// guard runs none of iemmixer's processes (in event it has none) and no
-/// switch, HIL job or interlock retry waits: then it only copies files and
-/// hands over, and REAPER and the predecessor app are never touched (in
-/// event the guard only reads them). This is how a guard fix reaches a
-/// guard in event, whose own code may refuse the dev entry. A hand-over's
-/// new guard starts in event and drops a waiting retry
-/// (`state::reset_to_event`), so a retry refuses instead. In `live` never:
-/// `live --build` activates its bundle.
+/// switch or HIL job waits: then it only copies files and hands over, and
+/// REAPER and the predecessor app are never touched (in event the guard
+/// only reads them). This is how a guard fix reaches a guard in event,
+/// whose own code may refuse the dev entry. In `live` never: `live
+/// --build` activates its bundle.
 pub fn activation(mode: Mode, f: &Facts, busy: Busy) -> Activation {
     match mode {
         Mode::Dev if busy.job.is_some() => Activation::FilesThenJobRestart,
@@ -342,23 +347,13 @@ fn idle_event(f: &Facts, busy: Busy) -> Option<String> {
     if busy.switching {
         return Some("a switch is in progress: activate waits for its end".to_owned());
     }
-    if let Some(run) = busy.job {
-        return Some(format!("HIL job {run} runs: activate waits for its end"));
-    }
-    busy.retry.map(|to| {
-        format!(
-            "the {} switch waits for its interlock retry: activate waits until it ran or was \
-             dropped",
-            crate::view::mode_name(to)
-        )
-    })
+    busy.job
+        .map(|run| format!("HIL job {run} runs: activate waits for its end"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const MODES: [Mode; 3] = [Mode::Event, Mode::Dev, Mode::Live];
 
     fn at(p: &[Step], s: Step) -> Option<usize> {
         p.iter().position(|x| *x == s)
@@ -368,22 +363,18 @@ mod tests {
         at(p, s).is_some()
     }
 
-    fn every(mut check: impl FnMut(Mode, Facts, Vec<Step>)) {
+    fn every(mut check: impl FnMut(Facts, Vec<Step>)) {
         for bits in 0..(1u32 << FACT_BITS) {
             let f = Facts::from_bits(bits);
-            for from in MODES {
-                check(from, f, plan(from, Mode::Event, &f));
-            }
+            check(f, plan(Mode::Event, &f));
         }
     }
 
-    fn every_entry(mut check: impl FnMut(Mode, Mode, Facts, Vec<Step>)) {
+    fn every_entry(mut check: impl FnMut(Mode, Facts, Vec<Step>)) {
         for bits in 0..(1u32 << FACT_BITS) {
             let f = Facts::from_bits(bits);
-            for from in MODES {
-                for to in [Mode::Dev, Mode::Live] {
-                    check(from, to, f, plan(from, to, &f));
-                }
+            for to in [Mode::Dev, Mode::Live] {
+                check(to, f, plan(to, &f));
             }
         }
     }
@@ -424,8 +415,6 @@ mod tests {
                 reaper_holds_module: true,
                 app_serves: true,
                 other_module_holder: true,
-                trial: true,
-                force: true,
             }
         );
         let one = |n: u32| Facts::from_bits(1 << n);
@@ -492,20 +481,6 @@ mod tests {
                 ..Facts::default()
             }
         );
-        assert_eq!(
-            one(9),
-            Facts {
-                trial: true,
-                ..Facts::default()
-            }
-        );
-        assert_eq!(
-            one(10),
-            Facts {
-                force: true,
-                ..Facts::default()
-            }
-        );
         // Bits above the facts change nothing.
         assert_eq!(Facts::from_bits(1 << FACT_BITS), Facts::default());
     }
@@ -538,34 +513,34 @@ mod tests {
 
     #[test]
     fn every_event_plan_checks_the_preference_before_reaper() {
-        every(|from, f, p| {
+        every(|f, p| {
             let pref = at(&p, Step::PrefCheck).expect("PrefCheck in every event plan");
             for s in [Step::ReaperStart, Step::ReaperHandover, Step::AppStart] {
                 if let Some(i) = at(&p, s) {
-                    assert!(pref < i, "{from:?} {f:?}: {s:?} before PrefCheck");
+                    assert!(pref < i, "{f:?}: {s:?} before PrefCheck");
                 }
             }
             if let Some(e) = at(&p, Step::EngineStop) {
-                assert!(e < pref, "{from:?} {f:?}: EngineStop after PrefCheck");
+                assert!(e < pref, "{f:?}: EngineStop after PrefCheck");
             }
             // Every other holder of the driver module has left: the check
             // never writes while a process has the driver open (#9
             // 2026-09-28), so it must not find one it could have waited for.
             if let Some(h) = at(&p, Step::HolderGone) {
-                assert!(h < pref, "{from:?} {f:?}: HolderGone after PrefCheck");
+                assert!(h < pref, "{f:?}: HolderGone after PrefCheck");
             }
         });
     }
 
     #[test]
     fn every_event_plan_ends_with_the_fingerprint() {
-        every(|_, _, p| assert_eq!(p.last(), Some(&Step::Fingerprint)));
+        every(|_, p| assert_eq!(p.last(), Some(&Step::Fingerprint)));
     }
 
     #[test]
     fn every_event_plan_starts_what_does_not_serve_and_keeps_what_does() {
-        every(|from, f, p| {
-            let why = format!("{from:?} {f:?}: {p:?}");
+        every(|f, p| {
+            let why = format!("{f:?}: {p:?}");
             let reaper_ok = f.reaper && f.reaper_holds_module;
             let app_ok = f.app && f.app_serves;
             assert_eq!(has(&p, Step::ReaperStart), !reaper_ok, "{why}");
@@ -594,7 +569,6 @@ mod tests {
             // Never planned: the entry steps and the runner's own EngineHealth.
             for s in [
                 Step::Precheck,
-                Step::Interlock,
                 Step::TuningEnter,
                 Step::Data,
                 Step::EngineStart,
@@ -681,44 +655,66 @@ mod tests {
         }
     }
 
+    /// #38 (owner, 2026-10-06): a dev or live entry is the precheck, the
+    /// stops and the start, from any mode and with any facts. No step reads
+    /// the stage: only the owner's signal decides whether the PC may change,
+    /// and other devices on the Dante network feed the card's inputs.
     #[test]
-    fn dev_entry_with_reaper_running_always_runs_the_interlock() {
-        for from in MODES {
-            for f in [
-                Facts {
-                    reaper: true,
-                    ..Facts::default()
-                },
-                Facts {
-                    app: true,
-                    ..Facts::default()
-                },
-            ] {
-                let p = plan(from, Mode::Dev, &f);
-                assert!(at(&p, Step::Interlock).is_some(), "{from:?} {f:?}");
+    fn every_entry_is_the_precheck_the_stops_and_the_start() {
+        every_entry(|to, f, p| {
+            let mut want = vec![Step::Precheck];
+            if f.app {
+                want.push(Step::AppStop);
             }
-        }
+            if f.reaper {
+                want.push(Step::ReaperSaveQuit);
+            }
+            if f.runner {
+                want.extend([Step::JobsCancel, Step::RunnerStop]);
+            }
+            if f.engine {
+                want.push(Step::EngineStop);
+            }
+            if f.server {
+                want.push(Step::ServerStop);
+            }
+            if f.tray {
+                want.push(Step::TrayStop);
+            }
+            want.extend([
+                Step::TuningEnter,
+                Step::Data,
+                Step::PrefCheck,
+                Step::EngineStart,
+                Step::EngineArm,
+                Step::ServerStart,
+                Step::TrayStart,
+                Step::IdentityCheck,
+            ]);
+            if to == Mode::Dev {
+                want.push(Step::RunnerStart);
+            }
+            assert_eq!(p, want, "{to:?} {f:?}");
+        });
     }
 
     #[test]
     fn the_app_stops_before_reaper_saves() {
         let f = band_up();
-        let p = plan(Mode::Event, Mode::Dev, &f);
-        let (i, a, r) = (
-            at(&p, Step::Interlock).unwrap(),
+        let p = plan(Mode::Dev, &f);
+        let (a, r) = (
             at(&p, Step::AppStop).unwrap(),
             at(&p, Step::ReaperSaveQuit).unwrap(),
         );
-        assert!(i < a && a < r, "{p:?}");
+        assert!(a < r, "{p:?}");
     }
 
     #[test]
     fn event_to_dev_is_the_whole_entry_in_order() {
         assert_eq!(
-            plan(Mode::Event, Mode::Dev, &band_up()),
+            plan(Mode::Dev, &band_up()),
             [
                 Step::Precheck,
-                Step::Interlock,
                 Step::AppStop,
                 Step::ReaperSaveQuit,
                 Step::TuningEnter,
@@ -742,8 +738,8 @@ mod tests {
     /// never while REAPER may hold the card.
     #[test]
     fn every_entry_restores_the_preference_right_before_the_engine_starts() {
-        every_entry(|from, to, f, p| {
-            let why = format!("{from:?}→{to:?} {f:?}: {p:?}");
+        every_entry(|to, f, p| {
+            let why = format!("{to:?} {f:?}: {p:?}");
             let pref = at(&p, Step::PrefCheck).expect("PrefCheck in every entry");
             assert_eq!(
                 p.iter().filter(|s| **s == Step::PrefCheck).count(),
@@ -752,7 +748,6 @@ mod tests {
             );
             assert_eq!(at(&p, Step::EngineStart), Some(pref + 1), "{why}");
             for s in [
-                Step::Interlock,
                 Step::AppStop,
                 Step::ReaperSaveQuit,
                 Step::EngineStop,
@@ -765,10 +760,9 @@ mod tests {
             }
         });
         assert_eq!(
-            plan(Mode::Event, Mode::Live, &band_up()),
+            plan(Mode::Live, &band_up()),
             [
                 Step::Precheck,
-                Step::Interlock,
                 Step::AppStop,
                 Step::ReaperSaveQuit,
                 Step::TuningEnter,
@@ -784,7 +778,7 @@ mod tests {
         // Our own engine stops (and restores the preference as it releases
         // the card) before the check.
         assert_eq!(
-            plan(Mode::Dev, Mode::Dev, &iemmixer_up()),
+            plan(Mode::Dev, &iemmixer_up()),
             [
                 Step::Precheck,
                 Step::JobsCancel,
@@ -819,14 +813,14 @@ mod tests {
                 );
             }
         }
-        let back = plan(Mode::Dev, Mode::Event, &Facts::default());
+        let back = plan(Mode::Event, &Facts::default());
         assert!(has(&back, Step::PrefCheck), "{back:?}");
     }
 
     #[test]
     fn dev_to_event_is_the_whole_teardown_in_order() {
         assert_eq!(
-            plan(Mode::Dev, Mode::Event, &iemmixer_up()),
+            plan(Mode::Event, &iemmixer_up()),
             [
                 Step::JobsCancel,
                 Step::RunnerStop,
@@ -846,8 +840,8 @@ mod tests {
 
     #[test]
     fn every_entry_plan_has_its_shape() {
-        every_entry(|from, to, f, p| {
-            let why = format!("{from:?}→{to:?} {f:?}: {p:?}");
+        every_entry(|to, f, p| {
+            let why = format!("{to:?} {f:?}: {p:?}");
             assert_eq!(p.first(), Some(&Step::Precheck), "{why}");
             assert_eq!(has(&p, Step::AppStop), f.app, "{why}");
             assert_eq!(has(&p, Step::ReaperSaveQuit), f.reaper, "{why}");
@@ -866,9 +860,6 @@ mod tests {
                 }),
                 "{why}"
             );
-            if let Some(i) = at(&p, Step::Interlock) {
-                assert_eq!(i, 1, "{why}: the interlock comes right after the precheck");
-            }
             // Nothing of the band's system is started, and no event-only step
             // runs (`PrefCheck` runs in both: right before the engine here).
             for s in [
@@ -905,110 +896,19 @@ mod tests {
     }
 
     #[test]
-    fn a_trial_skips_the_interlock() {
-        for from in MODES {
-            let f = Facts {
-                trial: true,
-                ..band_up()
-            };
-            assert!(
-                !has(&plan(from, Mode::Live, &f), Step::Interlock),
-                "{from:?}"
-            );
-            // `trial` only means something for `live`.
-            assert!(has(&plan(from, Mode::Dev, &f), Step::Interlock), "{from:?}");
-        }
-        // A live entry that is not a trial checks the stage.
-        assert!(has(
-            &plan(Mode::Event, Mode::Live, &band_up()),
-            Step::Interlock
-        ));
-    }
-
-    #[test]
-    fn force_skips_only_the_interlock() {
-        for from in MODES {
-            for to in [Mode::Dev, Mode::Live] {
-                let forced = plan(
-                    from,
-                    to,
-                    &Facts {
-                        force: true,
-                        ..band_up()
-                    },
-                );
-                let mut normal = plan(from, to, &band_up());
-                assert!(has(&normal, Step::Interlock), "{from:?}→{to:?}");
-                normal.retain(|s| *s != Step::Interlock);
-                assert_eq!(forced, normal, "{from:?}→{to:?}");
-            }
-        }
-    }
-
-    #[test]
-    fn live_to_dev_runs_the_interlock() {
-        assert!(has(
-            &plan(Mode::Live, Mode::Dev, &Facts::default()),
-            Step::Interlock
-        ));
-        assert!(has(
-            &plan(Mode::Live, Mode::Dev, &iemmixer_up()),
-            Step::Interlock
-        ));
-    }
-
-    #[test]
-    fn dev_to_live_does_not() {
-        assert!(!has(
-            &plan(Mode::Dev, Mode::Live, &Facts::default()),
-            Step::Interlock
-        ));
-        assert!(!has(
-            &plan(Mode::Dev, Mode::Live, &iemmixer_up()),
-            Step::Interlock
-        ));
-    }
-
-    #[test]
-    fn staying_in_dev_or_live_with_the_band_down_skips_the_interlock() {
-        for m in [Mode::Dev, Mode::Live] {
-            assert!(
-                !has(&plan(m, m, &Facts::default()), Step::Interlock),
-                "{m:?}"
-            );
-            assert!(!has(&plan(m, m, &iemmixer_up()), Step::Interlock), "{m:?}");
-        }
-        // From event it always runs, even with REAPER and the app already down.
-        for to in [Mode::Dev, Mode::Live] {
-            assert!(
-                has(&plan(Mode::Event, to, &Facts::default()), Step::Interlock),
-                "{to:?}"
-            );
-        }
-    }
-
-    #[test]
     fn the_runner_starts_only_in_dev() {
-        for from in MODES {
-            for f in [Facts::default(), band_up(), iemmixer_up()] {
-                let dev = plan(from, Mode::Dev, &f);
-                assert_eq!(dev.last(), Some(&Step::RunnerStart), "{from:?} {f:?}");
-                assert!(
-                    !has(&plan(from, Mode::Live, &f), Step::RunnerStart),
-                    "{from:?} {f:?}"
-                );
-                assert!(
-                    !has(&plan(from, Mode::Event, &f), Step::RunnerStart),
-                    "{from:?} {f:?}"
-                );
-            }
+        for f in [Facts::default(), band_up(), iemmixer_up()] {
+            let dev = plan(Mode::Dev, &f);
+            assert_eq!(dev.last(), Some(&Step::RunnerStart), "{f:?}");
+            assert!(!has(&plan(Mode::Live, &f), Step::RunnerStart), "{f:?}");
+            assert!(!has(&plan(Mode::Event, &f), Step::RunnerStart), "{f:?}");
         }
     }
 
     #[test]
     fn event_in_event_only_checks() {
         assert_eq!(
-            plan(Mode::Event, Mode::Event, &band_up()),
+            plan(Mode::Event, &band_up()),
             [
                 Step::TuningExit,
                 Step::PrefCheck,
@@ -1025,7 +925,7 @@ mod tests {
             reaper_holds_module: false,
             ..band_up()
         };
-        let p = plan(Mode::Event, Mode::Event, &f);
+        let p = plan(Mode::Event, &f);
         let pref = at(&p, Step::PrefCheck).unwrap();
         let quit = at(&p, Step::ReaperSaveQuit).expect("ReaperSaveQuit");
         let start = at(&p, Step::ReaperStart).expect("ReaperStart");
@@ -1042,7 +942,7 @@ mod tests {
             app_serves: false,
             ..band_up()
         };
-        let p = plan(Mode::Dev, Mode::Event, &f);
+        let p = plan(Mode::Event, &f);
         let stop = at(&p, Step::AppStop).expect("AppStop");
         let start = at(&p, Step::AppStart).expect("AppStart");
         assert!(stop < start, "{p:?}");
@@ -1058,7 +958,7 @@ mod tests {
             other_module_holder: true,
             ..Facts::default()
         };
-        let p = plan(Mode::Dev, Mode::Event, &f);
+        let p = plan(Mode::Event, &f);
         let gone = at(&p, Step::HolderGone).expect("HolderGone");
         assert!(gone < at(&p, Step::ReaperStart).unwrap(), "{p:?}");
         // The holder leaves before the preference is checked: the check
@@ -1180,9 +1080,9 @@ mod tests {
     fn a_failed_dev_switch_unwinds_to_event() {
         // The facts after a failure at EngineStart: REAPER and the app were
         // quit, the engine never came up.
-        let entry = plan(Mode::Event, Mode::Dev, &band_up());
+        let entry = plan(Mode::Dev, &band_up());
         assert!(has(&entry, Step::EngineStart));
-        let p = plan(Mode::Event, Mode::Event, &Facts::default());
+        let p = plan(Mode::Event, &Facts::default());
         let (reaper, app) = (
             at(&p, Step::ReaperStart).expect("REAPER starts"),
             at(&p, Step::AppStart).expect("the app starts"),
@@ -1197,14 +1097,10 @@ mod tests {
     const IDLE: Busy = Busy {
         switching: false,
         job: None,
-        retry: None,
     };
 
     const LIVE_REFUSAL: &str = "activate is for dev and an idle event; the mode is live \
                                 (live --build activates its bundle)";
-
-    const RETRY_REFUSAL: &str =
-        "switch waits for its interlock retry: activate waits until it ran or was dropped";
 
     fn refused(why: &str) -> Activation {
         Activation::Refused(why.to_owned())
@@ -1283,7 +1179,7 @@ mod tests {
     }
 
     #[test]
-    fn activate_in_event_is_refused_while_a_switch_a_job_or_a_retry_waits() {
+    fn activate_in_event_is_refused_while_a_switch_or_a_job_waits() {
         let busy = |b: Busy| activation(Mode::Event, &band_up(), b);
         assert_eq!(
             busy(Busy {
@@ -1299,22 +1195,6 @@ mod tests {
             }),
             refused("HIL job 7 runs: activate waits for its end")
         );
-        // A hand-over's new guard starts in event and drops a waiting
-        // retry (state::reset_to_event): activate waits for it instead.
-        assert_eq!(
-            busy(Busy {
-                retry: Some(Mode::Dev),
-                ..IDLE
-            }),
-            refused(&format!("the dev {RETRY_REFUSAL}"))
-        );
-        assert_eq!(
-            busy(Busy {
-                retry: Some(Mode::Live),
-                ..IDLE
-            }),
-            refused(&format!("the live {RETRY_REFUSAL}"))
-        );
         // A process of iemmixer's is named first.
         assert_eq!(
             activation(
@@ -1326,7 +1206,6 @@ mod tests {
                 Busy {
                     switching: true,
                     job: Some(7),
-                    retry: Some(Mode::Dev),
                 }
             ),
             refused("activate in event needs no iemmixer process; running: runner")
@@ -1339,11 +1218,10 @@ mod tests {
     fn activate_in_dev_is_as_before() {
         for bits in 0..(1u32 << FACT_BITS) {
             let f = Facts::from_bits(bits);
-            for (switching, retry) in [(false, None), (true, Some(Mode::Live))] {
+            for switching in [false, true] {
                 let b = Busy {
                     switching,
                     job: None,
-                    retry,
                 };
                 assert_eq!(activation(Mode::Dev, &f, b), Activation::Files, "{f:?}");
                 let b = Busy { job: Some(3), ..b };
@@ -1366,7 +1244,6 @@ mod tests {
                 Busy {
                     switching: true,
                     job: Some(3),
-                    retry: Some(Mode::Dev),
                 },
             ] {
                 assert_eq!(

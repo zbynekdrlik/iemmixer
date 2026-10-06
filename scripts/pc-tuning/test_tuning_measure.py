@@ -44,9 +44,9 @@ def hwlat_report(cpu: int, **change) -> dict:
 DUPLEX = {"outcome": "done", "segments": [{"telemetry": {"callbacks": 1000, "late": 0, "missed": 0, "overruns": 0, "position_gaps": 0,
                                                          "callback_cpus": {"14": 1000}, "callback_thread": 4243}}]}
 # The spike's exit code per outcome (examples/asio_spike/main.rs code_of; "done"/"stopped" 0).
-EXIT_CODES = {"error": 1, "refused": 4, "band-activity": 5, "fault-caught": 6, "rate-changed": 7, "stop-hung": 8}
+EXIT_CODES = {"error": 1, "refused": 4, "fault-caught": 6, "rate-changed": 7, "stop-hung": 8}
 # Outcomes that end a run without a completed measurement.
-NOT_MEASURED = (("refused", 4), ("band-activity", 5), ("fault-caught", 6), ("rate-changed", 7), ("stop-hung", 8))
+NOT_MEASURED = (("refused", 4), ("fault-caught", 6), ("rate-changed", 7), ("stop-hung", 8))
 
 
 class FakePc:
@@ -146,7 +146,7 @@ class WindowHarness(unittest.TestCase):
         clock.start()
         self.addCleanup(clock.stop)
         self.env = dict(ENV, PC_SSH="u@pc", PC_ROOT_SCP="/R", PC_TUNING_ROOT="C:\\t", PC_TUNING_ROOT_SCP="/C:/t",
-                        PC_ASIO_DRIVER="D", PC_ACTIVITY_CHANNELS="101-110", RAW_DIR=str(self.dir / "raw"))
+                        PC_ASIO_DRIVER="D", RAW_DIR=str(self.dir / "raw"))
         tw.sw.save_state({"id": "w", "card": "free", "dev_time": True, "preflight": {"pref": 64}, "pref_original": 64,
                           "pref_current": 32, "pref_restored": False, "runs": [], "closed": False})
 
@@ -190,7 +190,7 @@ class HwlatTests(WindowHarness):
         self.assertEqual([r["cpu"] for r in self.rows()], [2])
 
     def test_an_outcome_that_is_no_measurement_fails_the_step_and_is_recorded(self) -> None:
-        # #32 follow-up: refused, fault-caught, rate-changed (and band activity, stop-hung)
+        # #32 follow-up: refused, fault-caught, rate-changed (and stop-hung)
         # end a run without a measurement: the step fails, the row names the outcome.
         for outcome, code in NOT_MEASURED:
             with self.subTest(outcome):

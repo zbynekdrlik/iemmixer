@@ -30,14 +30,14 @@ Measured, per buffer size the driver accepts (32, 48, 64 at 96 kHz):
 In `iem-audio-io`:
 
 - **`format.rs` (portable, tested):** the little-endian ASIO sample types to and from f64, with clipping and non-finite values as silence; `peak`; `admit(rate, preferred, expected, types)`, which enforces the refusals above.
-- **`telemetry.rs` (portable, tested):** lock-free 1 µs histograms (0–5 ms plus overflow), counters, `classify`, drift, the `asioMessage` reply policy and its counters, and the activity guard (3 consecutive seconds above −50 dBFS) over the watched inputs (`--activity-channels`: the site's stage inputs from the private env, `all` only when asked), with per-input peaks so the report names the five loudest inputs. The callback is the only writer; it never allocates or locks.
+- **`telemetry.rs` (portable, tested):** lock-free 1 µs histograms (0–5 ms plus overflow), counters, `classify`, drift, the `asioMessage` reply policy and its counters, and per-input peaks so the report names the five loudest inputs (the activity guard over `--activity-channels` that stopped a run is gone, #38: no input level is a gate). The callback is the only writer; it never allocates or locks.
 - **`asio.rs` (Windows only, the crate's only unsafe code):**
   - `Host` is `!Send`: the thread that creates the driver (COM STA) makes every driver call and pumps its window messages.
   - Callbacks carry no user pointer, so one global slot holds the stream (one stream per process, claimed with `compare_exchange`). `Running::finish` stops the driver, clears the slot, waits until no callback is in flight, disposes the buffers, then frees the stream. The wait pumps messages and is bounded (2 s): a callback that never leaves is reported as hung, and the stream and buffers are leaked, never freed under it (R6).
   - The callback body runs inside `catch_unwind`; after a panic the outputs stay zeroed.
   - A reset or a buffer-size request sets a flag; the owner thread releases and recreates the driver.
   - The crate lint becomes `deny(unsafe_code)`, allowed only on this module.
-- **`examples/asio_spike.rs`:** modes `probe`, `duplex` and `reopen`; a JSON report, a progress file every 5 s; `duplex` and `reopen` share the guards and stop on the stop file, band activity or a rate change, `duplex` also on the time limit or a caught fault (distinct exit codes; 8 = a hung stop). Every segment, reset and reopen cycle enters the report as it completes, so a failed run still reports what it measured. A stop file present at the start keeps the card closed.
+- **`examples/asio_spike.rs`:** modes `probe`, `duplex` and `reopen`; a JSON report, a progress file every 5 s; `duplex` and `reopen` share the guards and stop on the stop file or a rate change (never on an input level, #38), `duplex` also on the time limit or a caught fault (distinct exit codes; 8 = a hung stop). Every segment, reset and reopen cycle enters the report as it completes, so a failed run still reports what it measured. A stop file present at the start keeps the card closed.
 
 **Dependencies:** `azo = "=0.2.1"` (MIT; builds `windows-bindgen` 0.100 at build time) and `windows-sys` features for the message pump, both for Windows targets only. Twelve crate names join `scripts/engine-deps-allow.txt`, and `bitflags` moves to 2.13.2. `asio.rs` and the example are excluded from mutation testing (like `dpapi.rs`): their decisions live in the two tested modules.
 
@@ -58,7 +58,7 @@ In `iem-audio-io`:
    - REAPER and the predecessor app run, and only `reaper.exe` holds the driver module;
    - the preferred buffer equals the recorded original (64 today), otherwise the window stops and the owner is told;
    - the bundle on the PC verifies.
-4. **`to-dev`:** 60 s input interlock (below −50 dBFS), then REAPER saves (40026, project file changed) and quits (40004); the driver module is released. The predecessor app keeps running: its graceful exit is still open (§7).
+4. **`to-dev`:** REAPER saves (40026, project file changed) and quits (40004), with no stage reading before (#38: the owner's signal is the only gate; this design first had a 60 s input interlock here); the driver module is released. The predecessor app keeps running: its graceful exit is still open (§7).
 5. **Runs:** `set-buffer --frames N` writes the preferred buffer with its registry kind kept and reads it back. `run --mode …` writes a request file and starts the task; the task checks hashes and I3, starts the spike at HIGH priority and ends only through the stop file. The report and stderr go to the raw directory, and the dev box prints a verdict per run.
 6. **`to-event` / `preempt`:** while the card is free, always stop gracefully (60 s): the stop waits for the spike and its task, and a task that has not started the spike yet refuses on the stop file. Restore the preferred buffer with read-back whenever a `set-buffer` was recorded (a failed second write leaves the registry unknown). Then start REAPER through our own task (`\iemmixer\iemmixer-StartREAPER`, no 72 h limit); it refuses while a spike or the spike task runs and unless the preference reads back as the original. A failed step while the EVENT-NOW flag exists pre-empts too. Then the handover checks:
    - the project is loaded (track count);
@@ -86,8 +86,8 @@ This driver is the interim switch script of #3: `to-dev` and `to-event` are "eve
 **Decisions:**
 
 - The buffer is set in the driver's registry preference (I2 streams at the preferred size; the spike never picks one). A driver that reads it only at load makes the spike refuse (`preferred … expected …`): a finding.
-- Silent outputs only. The activity guard stops a run when the band plays.
-- The predecessor app stays up. The window reuses the S1b PowerShell (`GoldenPc.psm1`) for save/quit, interlock and module holders.
+- Silent outputs only. No input level stops a run (#38, owner 2026-10-06: the owner's signal is the only gate; the activity guard of this design is gone, the loudest inputs stay in the report).
+- The predecessor app stays up. The window reuses the S1b PowerShell (`GoldenPc.psm1`) for save/quit and module holders.
 
 **Deferred until the owner approves each one on #3 (not run):**
 
@@ -108,7 +108,7 @@ This driver is the interim switch script of #3: `to-dev` and `to-event` are "eve
 
 - **R1 (azo fails on this driver):** the fallbacks are in §4.
 - **The driver may reject 48 or read the preference only at load:** findings; 32 and 64 decide.
-- **R6 (a hang in `stop()`):** no kill. A callback still in flight after 2 s ends the spike with exit 8 (the driver is not called again); `spike_window.py` prints an owner alarm (also for exit 5, band activity). The owner may reboot.
+- **R6 (a hang in `stop()`):** no kill. A callback still in flight after 2 s ends the spike with exit 8 (the driver is not called again); `spike_window.py` prints an owner alarm (exit 5, once band activity, is unused since #38: no input level ends a run). The owner may reboot.
 - **A late "ide event":** the stop file within 2 s; REAPER back after the restore and the project load (≤ 2 min).
 
 ## 9. Results (PC window 2026-09-27, 13:12–14:22 CEST, dev time)
@@ -117,7 +117,7 @@ Window `20260927T111244Z`, opened with `new --dev-time` after the owner's "event
 
 **Driver facts (probe):** 96 kHz, 128 inputs / 128 outputs, Int32LSB on every channel; buffer min 32, max 2048, power-of-two granularity (**48 is not a size this driver offers**, so step 6 of §6 was dropped); one clock source (PTP), current (read only). The driver reads `PrefBuffSize` when it is opened: after `set-buffer 32` the next probe reported preferred 32, after `set-buffer 64` again 64 — a buffer change needs a registry write and a reopen, no driver reload. Latencies read before `createBuffers` are meaningless (5 701 756 samples); the valid ones come from the running stream.
 
-**Band guard finding:** the first duplex (bundle `87ee2f7`) stopped after 3 s at −2.4 dBFS because the guard took the peak of all 128 inputs. The per-input report of bundle `f154967` showed that only the two channels of the stereo program input `CONTENT` carry signal (−1.0 … −4.5 dBFS over the window); every stage input (`MIC_1`…`MIC_10`, `HAND_1`…`HAND_3`, `ENG_MIC`) and every other input stayed at digital silence (−150 dBFS). The guard now listens only to the stage inputs (`--activity-channels`, the real channel list in the private env); the report and the progress file list the five loudest inputs.
+**Band guard finding:** the first duplex (bundle `87ee2f7`) stopped after 3 s at −2.4 dBFS because the guard took the peak of all 128 inputs. The per-input report of bundle `f154967` showed that only the two channels of the stereo program input `CONTENT` carry signal (−1.0 … −4.5 dBFS over the window); every stage input (`MIC_1`…`MIC_10`, `HAND_1`…`HAND_3`, `ENG_MIC`) and every other input stayed at digital silence (−150 dBFS). The guard then listened only to the stage inputs (`--activity-channels`); since #38 (owner 2026-10-06) there is no guard at all, and the report and the progress file list the five loudest inputs.
 
 | | 64 samples (666.7 µs) | 32 samples (333.3 µs), idle | 32 samples, `--burn-us 100 --stress 4` |
 |---|---|---|---|

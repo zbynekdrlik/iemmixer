@@ -1,6 +1,6 @@
 //! Children that outlive a restart of their starter (S6 design note §5.1,
-//! I9): the guard starts the engine, server, tray, runner, the card's
-//! interlock and a hand-over's new guard so that the end of the guard's
+//! I9): the guard starts the engine, server, tray, runner, a direct REAPER
+//! or app start and a hand-over's new guard so that the end of the guard's
 //! process never ends them. Where they start follows the job the guard runs
 //! in, as read ([`job_limits`], [`placement`]), never found by trying: out of
 //! a job that allows breakaway; without the flag where the job lets every

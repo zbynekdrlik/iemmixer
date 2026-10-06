@@ -115,20 +115,6 @@ fn sample(pc: &WinPc, seconds: u32, c: &Cancel) -> R<Vec<f64>> {
     }
 }
 
-/// The interlock's reading: every stage track must have given meters, or
-/// its silence proves nothing.
-pub(super) fn meters(pc: &WinPc, seconds: u32, c: &Cancel) -> R<Vec<f64>> {
-    let loudest = sample(pc, seconds, c)?;
-    let silent = reaper::unmetered(&pc.s.guard.stage_tracks, &loudest);
-    if silent.is_empty() {
-        Ok(loudest)
-    } else {
-        Err(StepError::failed(format!(
-            "REAPER gave no meters for stage tracks {silent:?} (not armed?)"
-        )))
-    }
-}
-
 /// 40026; the project's mtime changes ≤ 15 s; no dialog but the evaluation
 /// notice; 40004; gone ≤ 30 s; the driver module unheld.
 pub(super) fn save_quit(pc: &WinPc, c: &Cancel) -> R<()> {

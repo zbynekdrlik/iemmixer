@@ -14,8 +14,9 @@ pub struct Alarm {
     pub id: u64,
     /// Seconds since the epoch.
     pub at: u64,
-    /// The switch step that failed, if a step did.
-    #[serde(default)]
+    /// The switch step that failed, if a step did (a step only an older
+    /// guard had reads as none: `plan::known_step`).
+    #[serde(default, deserialize_with = "crate::plan::known_step")]
     pub step: Option<Step>,
     pub text: String,
     #[serde(default)]
@@ -216,5 +217,28 @@ mod tests {
             serde_json::from_str::<Alarms>("{}").unwrap(),
             Alarms::default()
         );
+    }
+
+    /// #38: an older guard's alarm of its interlock step still loads, with
+    /// no step (this guard has none of that name); the others keep theirs.
+    #[test]
+    fn an_older_guards_interlock_alarm_loads_without_its_step() {
+        let old = r#"{"last_id": 3, "list": [
+            {"id": 1, "at": 5, "step": "interlock", "text": "Interlock: no meters"},
+            {"id": 2, "at": 6, "step": "pref_check", "text": "held"},
+            {"id": 3, "at": 7, "step": null, "text": "drift"}]}"#;
+        let mut back: Alarms = serde_json::from_str(old).unwrap();
+        assert_eq!(
+            back.all()
+                .iter()
+                .map(|a| (a.id, a.step, a.text.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (1, None, "Interlock: no meters"),
+                (2, Some(Step::PrefCheck), "held"),
+                (3, None, "drift"),
+            ]
+        );
+        assert_eq!(back.raise(8, None, "next", false), 4);
     }
 }

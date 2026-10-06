@@ -9,15 +9,15 @@
 use std::time::Duration;
 
 /// The exit code of a run's outcome (the example's header): 0 done or
-/// stopped, 3 no driver, 4 refused, 5 band activity, 6 fault caught, 7 the
-/// driver changed the rate, 8 a callback did not leave the stream; any other
-/// outcome ("error") is 1. Exit 2 (usage) is the parser's, never an outcome.
+/// stopped, 3 no driver, 4 refused, 6 fault caught, 7 the driver changed the
+/// rate, 8 a callback did not leave the stream; any other outcome ("error")
+/// is 1. Exit 2 (usage) is the parser's, never an outcome. No input level
+/// ends a run (#38, owner 2026-10-06): 5, once band activity, is unused.
 pub fn exit_code(outcome: &str) -> u8 {
     match outcome {
         "done" | "stopped" => 0,
         "no-driver" => 3,
         "refused" => 4,
-        "band-activity" => 5,
         "fault-caught" => 6,
         "rate-changed" => 7,
         "stop-hung" => 8,
@@ -178,15 +178,15 @@ mod tests {
                 "stopped",
                 "no-driver",
                 "refused",
-                "band-activity",
                 "fault-caught",
                 "rate-changed",
                 "stop-hung",
                 "error",
+                "band-activity",
                 "anything else",
             ]
             .map(exit_code),
-            [0, 0, 3, 4, 5, 6, 7, 8, 1, 1]
+            [0, 0, 3, 4, 6, 7, 8, 1, 1, 1]
         );
     }
 

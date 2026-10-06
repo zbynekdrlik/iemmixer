@@ -1,6 +1,6 @@
 # S5 — Server and UI on the engine protocol: design note
 
-**Ticket:** #8 (program #1). **Spec:** `2026-09-24-iemmixer-gen2-program.md` §2.1, §2.3, I1, I6, I9, §3.2 (F1–F32), §3.4 (X2–X7, X11, X15, Q2), §4.2 (band-activity alarm, "Back to REAPER"), §4.3, §5.3 (talk lock, handshake), P6, P9. **Model:** `2026-09-26-engine-model-rework-design.md` (#20). **Plan:** `docs/superpowers/plans/2026-09-27-s5-server-ui.md`. **Inputs:** the hand-offs from S0, S3, S4 and #20 on #8; the owner rulings on #1/#20 (the members' GUI defines the functionality; no DAW generality; no REAPER concept outside the importer).
+**Ticket:** #8 (program #1). **Spec:** `2026-09-24-iemmixer-gen2-program.md` §2.1, §2.3, I1, I6, I9, §3.2 (F1–F32), §3.4 (X2–X7, X11, X15, Q2), §4.2 (band-activity alarm, "Back to REAPER"; the alarm removed by #38), §4.3, §5.3 (talk lock, handshake), P6, P9. **Model:** `2026-09-26-engine-model-rework-design.md` (#20). **Plan:** `docs/superpowers/plans/2026-09-27-s5-server-ui.md`. **Inputs:** the hand-offs from S0, S3, S4 and #20 on #8; the owner rulings on #1/#20 (the members' GUI defines the functionality; no DAW generality; no REAPER concept outside the importer).
 
 ## 1. Goal
 
@@ -18,11 +18,7 @@ The engine reads `[engine]`; the server reads the rest (`deny_unknown_fields` st
 
 ```toml
 engine_pipe = "iemmixer-engine"        # control pipe (Unix: socket path; Windows: pipe name); media = <pipe>.media
-back_to_reaper = ["iemmode", "event"]  # argv of the engineer's switch; empty = no button (S6 provides iemmode)
-[activity]                             # §4.2 band-activity alarm (tunable defaults)
-threshold_dbfs = -50.0
-window_s = 300
-sustain_s = 120
+back_to_reaper = ["iemmode", "event"]  # argv of the engineer's switch; empty = no switch, no button (S6 provides iemmode)
 [[members]]                            # login tiles, URLs, JWT `sub` — the predecessor's ids (P9)
 id = "member1"
 name = "Member1"                       # display name, as today
@@ -34,7 +30,7 @@ category = "mics"                      # mics | stems | tech (grouped inputs are
 owner = "member1"                      # X7: may edit this input's EQ; its first owned input is the member's "own" channel
 ```
 
-`IEMMIXER_ENGINE_PIPE` overrides `engine_pipe` (CI uses a socket path); `IEMMIXER_MODE` = `dev` (default) | `live` is set by the guard (S6). Validation: unique valid ids, owners are members, categories known. Ids the engine topology does not have are reported at connect and left out of the views (never guessed).
+`IEMMIXER_ENGINE_PIPE` overrides `engine_pipe` (CI uses a socket path); `IEMMIXER_MODE` = `dev` (default) | `live` is set by the guard (S6). The `[activity]` table this note had (the band-activity alarm) was removed by the owner's decision of 2026-10-06 (#38); an older site's table still loads and is ignored. Validation: unique valid ids, owners are members, categories known. Ids the engine topology does not have are reported at connect and left out of the views (never guessed).
 
 ## 4. Engine client and mirror
 
@@ -58,19 +54,19 @@ owner = "member1"                      # X7: may edit this input's EQ; its first
 - **Mute All** (F15): one engine `Batch` muting every level of the engineer's mix. **Presets** (F13) and **snapshots** (F14) live in the band schema-3 files (`presets/`, `snapshots/`, `customizations/<member>.json`): the server captures the page mix's levels and group faders from the mirror (Q2: input EQ of owned inputs as never-applied metadata), and applies them as a **50 ms ramp** of five `Batch` steps 10 ms apart (linear-amplitude interpolation, mutes at the first step when muting and at the last when unmuting). Daily auto-snapshot: the first change of the day to a member's mix snapshots the mirror **before** the delta. Archived entries (D8) are listed and loadable, never overwritten, renamed or deleted.
 - **Backups** (F19) are `{format: "iemmixer-backup", version: 2, timestamp, rev, state: MixState, customizations}` at 13:00, 21:00 and on demand, kept 60 days. **Restore with preview** (F31): a diff of the current mirror and the backup in the UI's names (level, group, output, EQ, limiter, input, customization; before → after), then one `ImportState`.
 - **F29 engineer console** (settings, engineer's own page): per input mute, trim (−24…+24 dB) and processing; every mix's limiter active-seconds with reset; a link to the translator page; the login-failure counters (`LoginGuard::stats()`).
-- **Band activity (§4.2)** (`IEMMIXER_MODE=dev` only): a pure detector over the input meters (peak > −50 dBFS counted per second; active when ≥ 120 s of the last 300 s) → `BandActivity{active, can_switch}` to engineer pages (banner with "Späť na REAPER") and one Web Push to the engineer and alarm subscriptions when it turns on. **"Back to REAPER"**: engineer PIN + confirm → `POST /api/mode/event` → the server spawns `back_to_reaper` (argv, no shell, not awaited) and answers 202.
+- **No band activity (#38, owner decision 2026-10-06).** This note had a detector over the input meters in `dev` (peak > −50 dBFS counted per second; active when ≥ 120 s of the last 300 s) → `BandActivity{active, can_switch}` to engineer pages (a banner with "Späť na REAPER") and one Web Push to the engineer's devices when it turned on. Removed: other devices on the Dante network feed the card's inputs, so no level says the band plays, and whether an event runs is the owner's to say. **"Back to REAPER"** (§4.3): engineer PIN → `POST /api/mode/event` → the server spawns `back_to_reaper` (argv, no shell, not awaited) and answers 202. Its button moved from that banner into the console of the engineer's settings (F29), shown when the site has the switch (`ConsoleInfo.can_switch`).
 - **`iem-server notify <title> <body>`** (§4.2 "notify mode"): sends one Web Push to every stored engineer and alarm subscription and exits.
 - Everything else (PINs, login guard, JWT, photos, push, SOS, tunnel watch, version, client errors, diagnostics with today's JSON fields) is unchanged.
 
 ## 7. Proof
 
 - **Server tests on the real engine:** `iem-server` tests start `iem_engine::engine::run` on a thread with NullRt and a temp socket (Unix; dev-dependency only, the server binary stays permissive) and drive the client: hello/topology/state, a UI command becomes an engine change and a UI update, `rev` gap resync, reconnect after an engine restart, `Superseded`, Mute All batch, preset ramp steps, solo mask and 10 s clean-up, restore through `ImportState`, listen frames through Opus and back through a decoder, talkback frames arriving on stream 16.
-- **Pure units:** mirror, view mapping (every command, permission and dB/pan edge), meter merge, solo janitor, band-activity detector, talk lock, ramps, diff, config validation.
-- **Mock E2E (CI):** `iem-engine run --sine 1000` + the server; the old suites without `REAPER_ABSENT`, and new suites for F4–F8, F10–F16, F20, F23, F29, F31, the banner and button, the handshake, the talk-id binding, zero console errors.
+- **Pure units:** mirror, view mapping (every command, permission and dB/pan edge), meter merge, solo janitor, talk lock, ramps, diff, config validation.
+- **Mock E2E (CI):** `iem-engine run --sine 1000` + the server; the old suites without `REAPER_ABSENT`, and new suites for F4–F8, F10–F16, F20, F23, F29, F31, "Back to REAPER" in the console, no band-activity banner on a loud stage (#38), the handshake, the talk-id binding, zero console errors.
 
 ## 8. What the band sees
 
-Nothing new. Approved visible changes: X11 limiter after the listen boost (engineer's phone), the band-activity banner and "Back to REAPER" button, the F29 console and the translator page, restore preview (all engineer only), and a one-time reload of an open tab after an upgrade. Kept on purpose (P9): every label, tab, colour and layout, including the disconnect banner text.
+Nothing new. Approved visible changes: X11 limiter after the listen boost (engineer's phone), the band-activity banner (removed: #38), the "Back to REAPER" button (in the console since #38), the F29 console and the translator page, restore preview (all engineer only), and a one-time reload of an open tab after an upgrade. Kept on purpose (P9): every label, tab, colour and layout, including the disconnect banner text.
 
 ## 9. Deviations
 

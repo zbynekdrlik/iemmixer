@@ -1,12 +1,13 @@
 import { test, expect } from "./support/fixtures";
 import { ENGINEER_PIN } from "./support/pins";
 import { openMixer, strip, tab } from "./support/session";
+import { PageSocket } from "./support/wire";
 
 // The engineer's pages against the real engine: restore with preview (F31),
 // Mute All (F15), the Mixes tab (F16), SOS (F20), the console and the
-// translator page (F29), and the band-activity banner with "Back to REAPER"
-// (§4.2 — the test site's switch command is `true`; the engine's 1 kHz sine
-// on every input is "the band playing").
+// translator page (F29), "Back to REAPER" in the console (§4.3 — the test
+// site's switch command is `true`), and no band-activity banner however loud
+// the stage (#38 — the engine's 1 kHz sine on every input).
 
 test.describe.configure({ mode: "serial" });
 
@@ -70,6 +71,66 @@ test.describe("Engineer", () => {
     await expect(page.getByTestId("global-volume-fader")).toBeVisible({ timeout: 15_000 });
   });
 
+  // §4.3, D4: the engineer's emergency brake is a person's decision, so it
+  // stays (#38 removed only the level-triggered banner it used to sit in).
+  // It lives in the console of the engineer's settings, with no banner, and
+  // the engineer PIN confirms it; a member's settings have no such button.
+  test("the engineer's settings offer Back to REAPER, confirmed with the PIN (§4.3)", async ({
+    page,
+    browser,
+  }) => {
+    // The console refreshes every 2 s (a Console frame on the page's socket);
+    // the PIN step lives outside what a refresh rebuilds.
+    const consoleFrames: number[] = [];
+    page.on("websocket", (ws) => {
+      if (!ws.url().includes("/ws/engineer")) return;
+      ws.on("framereceived", (f) => {
+        if (typeof f.payload === "string" && f.payload.includes('"event":"Console"')) {
+          consoleFrames.push(Date.now());
+        }
+      });
+    });
+    await openMixer(page, "engineer", { engineer: true });
+    await expect(page.getByTestId("band-activity")).toHaveCount(0);
+    await page.locator(".settings-btn").click();
+    const sw = page.getByTestId("console-section").getByTestId("back-to-reaper");
+    await expect(sw).toBeVisible({ timeout: 10_000 });
+    const pin = sw.getByTestId("switch-pin");
+    const confirm = sw.locator(".back-to-reaper-confirm");
+
+    // Zrušiť closes the PIN step again.
+    await sw.locator(".back-to-reaper-btn").click();
+    await expect(pin).toBeVisible();
+    await sw.locator(".confirm-actions .settings-action-btn", { hasText: "Zrušiť" }).click();
+    await expect(pin).toHaveCount(0);
+
+    await sw.locator(".back-to-reaper-btn").click();
+    await expect(pin).toBeVisible();
+    await expect(confirm).toBeDisabled();
+    await pin.fill(ENGINEER_PIN);
+    // A console refresh after the PIN was typed keeps it.
+    const typed = Date.now();
+    await expect.poll(() => consoleFrames.filter((t) => t > typed).length, { timeout: 5_000 }).toBeGreaterThan(0);
+    await expect(pin).toHaveValue(ENGINEER_PIN);
+    await expect(confirm).toBeEnabled();
+    const answer = page.waitForResponse(
+      (r) => r.url().endsWith("/api/mode/event") && r.request().method() === "POST",
+    );
+    await confirm.click();
+    expect((await answer).status()).toBe(202);
+    await expect(sw).toContainText("Prepína sa na REAPER");
+
+    const ctx = await browser.newContext();
+    const member = await ctx.newPage();
+    await openMixer(member, "member3");
+    await member.locator(".settings-btn").click();
+    await expect(member.locator(".settings-modal")).toBeVisible();
+    await expect(member.getByTestId("console-section")).toHaveCount(0);
+    await expect(member.getByTestId("back-to-reaper")).toHaveCount(0);
+    await expect(member.locator(".back-to-reaper-btn")).toHaveCount(0);
+    await ctx.close();
+  });
+
   test("Mute All mutes every channel of the engineer's mix (F15)", async ({ page }) => {
     await openMixer(page, "engineer", { engineer: true });
     await page.locator(".toolbar-btn-mute-all").click();
@@ -118,18 +179,37 @@ test.describe("Engineer", () => {
     await ctx.close();
   });
 
-  test("the band-activity banner offers Back to REAPER (§4.2)", async ({ page }) => {
-    await openMixer(page, "engineer", { engineer: true });
-    const banner = page.getByTestId("band-activity");
-    await expect(banner).toContainText("Kapela hrá", { timeout: 30_000 });
-    await banner.locator(".back-to-reaper-btn").click();
-    await page.getByTestId("switch-pin").fill(ENGINEER_PIN);
-    const answer = page.waitForResponse(
-      (r) => r.url().endsWith("/api/mode/event") && r.request().method() === "POST",
-    );
-    await page.locator(".back-to-reaper-confirm").click();
-    expect((await answer).status()).toBe(202);
-    await expect(banner).toContainText("Prepína sa na REAPER");
+  // #38 (owner, 2026-10-06): whether an event runs is the owner's to say, and
+  // other devices on the Dante network feed the card's inputs, so no input
+  // level means "the band plays". The engine's sine on every input, for 8 s
+  // (the old alarm came up after 5 s on this site), shows the engineer no
+  // banner, and the server sends the engineer's pages no such message.
+  test("a loud stage shows the engineer no band-activity banner (#38)", async ({ page, baseURL }) => {
+    const auth = await openMixer(page, "engineer", { engineer: true });
+    const watch = await PageSocket.open(baseURL, "engineer", auth.token);
+    try {
+      await tab(page, "Mics");
+      const fill = strip(page, "mic1").locator(".meter-fill").first();
+      await expect
+        .poll(
+          async () => {
+            const m = /width:\s*([\d.]+)%/.exec((await fill.getAttribute("style")) ?? "");
+            return m ? Number(m[1]) : 0;
+          },
+          { timeout: 10_000 },
+        )
+        .toBeGreaterThan(0);
+      // 80 meter frames (one per 100 ms): the stage loud, far above the old
+      // alarm's −50 dBFS (0.0032), all along.
+      const from = Date.now();
+      await expect.poll(() => watch.peaks("mic1", from).length, { timeout: 15_000 }).toBeGreaterThanOrEqual(80);
+      expect(Math.min(...watch.peaks("mic1", from))).toBeGreaterThan(0.01);
+      expect(watch.events.map((e) => e.event)).not.toContain("BandActivity");
+      await expect(page.getByTestId("band-activity")).toHaveCount(0);
+      await expect(page.getByText("Kapela hrá")).toHaveCount(0);
+    } finally {
+      watch.close();
+    }
   });
 
   test("after Mute All one channel can be unmuted, the rest stay muted (F15)", async ({ page }) => {

@@ -417,3 +417,71 @@ async fn talkback_frames_reach_the_talkback_input() {
         }
     }
 }
+
+/// #38 (owner, 2026-10-06): whether an event runs is the owner's to say,
+/// and other devices on the Dante network feed the card's inputs, so no
+/// input level means "the band plays". In dev, the engine's sine on every
+/// input (−20 dBFS) for 8 s — longer than the 5 s the test site's old
+/// `[activity]` table needed — raises no banner on engineer pages and sends
+/// the engineer's devices no notice.
+#[tokio::test]
+async fn a_loud_stage_raises_no_banner_and_no_notice() {
+    use crate::push::tests::{fake_push_service, subscription, vapid_private_key};
+    use iem_audio_io::InputSignal;
+    use tokio::sync::broadcast::error::{RecvError, TryRecvError};
+
+    let h = EngineHarness::start_with(|cfg| {
+        cfg.signal = InputSignal::Sine {
+            hz: 1000.0,
+            amp: 0.1,
+        };
+    });
+    let (_d, s) = h.state().await;
+    assert_eq!(s.mode, crate::RunMode::Dev);
+    let (base, seen) = fake_push_service().await;
+    s.config.write().await.vapid_private_key = vapid_private_key();
+    s.push_store
+        .write()
+        .await
+        .add(subscription(format!("{base}/201")))
+        .unwrap();
+    let mut events = s.event_tx.subscribe();
+    let mut merged = s.meters_tx.subscribe();
+    crate::console::spawn_tasks(s.clone());
+
+    // 80 merged frames, one per 100 ms: 8 s, the stage loud (above the old
+    // alarm's −50 dBFS by far) in at least 6 s of them.
+    let (mut frames, mut loud) = (0u64, 0u64);
+    while frames < 80 {
+        match tokio::time::timeout(Duration::from_secs(5), merged.recv()).await {
+            Ok(Ok(m)) => {
+                frames += 1;
+                let loudest = m.inputs.iter().flatten().fold(0f32, |a, &b| a.max(b));
+                if loudest > 0.05 {
+                    loud += 1;
+                }
+            }
+            Ok(Err(RecvError::Lagged(n))) => frames += n,
+            Ok(Err(RecvError::Closed)) => panic!("the meter task ended"),
+            Err(_) => panic!("no merged meters within 5 s"),
+        }
+    }
+    assert!(loud >= 60, "the stage was loud: {loud} of {frames} frames");
+
+    // No session and no talk lock: the meter task and the janitor tell the
+    // pages nothing but meters, whatever a level is (and under whatever
+    // name a level-based message might come back).
+    let mut told = Vec::new();
+    loop {
+        match events.try_recv() {
+            Ok((_, msg)) => told.push(serde_json::to_value(&msg).unwrap()["event"].clone()),
+            Err(TryRecvError::Lagged(_)) => {}
+            Err(_) => break,
+        }
+    }
+    assert!(told.is_empty(), "no message to the pages: {told:?}");
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "no notice to the engineer's devices"
+    );
+}

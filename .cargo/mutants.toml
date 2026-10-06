@@ -40,12 +40,10 @@ exclude_globs = [
   # setup_failure, hwlat_ready, scan_ends); its parser, Stress and
   # hwlat_scan are tested on every OS.
   "crates/iem-audio-io/examples/**",
-  # The engine's ASIO start-up and interlock card (S6): Windows effects, not
-  # compiled on the Linux runners; the windows job lints it and runs its
-  # no-driver refusal. Its decisions live in the mutated engine.rs
-  # (lock_due, the parser, check_site, interlock_plan), control.rs (Ending,
-  # the lock report), interlock.rs (stage, loop, verdict, report, health)
-  # and site.rs ([card]).
+  # The engine's ASIO start-up (S6): Windows effects, not compiled on the
+  # Linux runners; the windows job lints it and runs its no-driver refusal.
+  # Its decisions live in the mutated engine.rs (lock_due, the parser,
+  # check_site), control.rs (Ending, the lock report) and site.rs ([card]).
   "crates/iem-engine/src/asio.rs",
   # The Windows side of the engine's pipes (S6): not compiled on Linux; the
   # windows job runs tests/pipes.rs over it. Its decisions are pipe.rs's
@@ -100,7 +98,7 @@ exclude_re = [
   "iem-server/src/listen_ws\\.rs.*\\b(ws_audio|session)\\b",
   "iem-server/src/talkback_ws\\.rs.*\\b(ws_talkback|session)\\b",
   # The console's background loops (100 ms meters, 250 ms janitor): their steps
-  # are tested functions (MeterMerge, BandActivity, SoloJanitor, TalkLock).
+  # are tested functions (MeterMerge, SoloJanitor, TalkLock).
   "iem-server/src/console\\.rs.*\\b(spawn_tasks|meter_task|janitor_task)\\b",
   # Test-only constructors.
   "new_for_test",
@@ -110,8 +108,9 @@ exclude_re = [
   "sc_windows",
   # Browser-only fetches and context accessors in the UI; covered by
   # e2e/tests/site-links.spec.ts, e2e/tests/login-protection.spec.ts,
-  # e2e/tests/engineer.spec.ts (the switch) and e2e/tests/pin-freeze.spec.ts
-  # (the PIN change; its messages are the tested change_pin_error).
+  # e2e/tests/engineer.spec.ts (the switch; its messages are the tested
+  # switch_error_message) and e2e/tests/pin-freeze.spec.ts (the PIN change;
+  # its messages are the tested change_pin_error).
   "iem-ui/src/api\\.rs.*replace (login|get_site_links|back_to_reaper|change_pin) ",
   # The token check's browser-only fetch; its verdict on the answer is the
   # tested token_refused, and e2e/tests/header.spec.ts drives it (502 while
@@ -257,8 +256,8 @@ exclude_re = [
   # `if !(1..=MAX_BLOCK).contains(&cfg.block)`, which is NOT equivalent and IS
   # killed by `run_refuses_a_bad_block_and_a_bad_site`, and `delete ! in
   # run_hil` is killed too — both must stay mutated.
-  # anchor 466: if !hil.is_empty() {
-  "iem-engine/src/engine\\.rs:466:.*delete ! in run$",
+  # anchor 433: if !hil.is_empty() {
+  "iem-engine/src/engine\\.rs:433:.*delete ! in run$",
   # Equivalent (S6): the DER length fold `(n << 8) | usize::from(b)` shifts the
   # accumulator left by 8, so its low 8 bits are always zero; OR-ing in a byte
   # (0..=255) there equals XOR-ing it, so `| b` and `^ b` are identical (like

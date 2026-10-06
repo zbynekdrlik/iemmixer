@@ -216,8 +216,9 @@ fn the_binary_checks_a_site() {
     assert!(String::from_utf8_lossy(&refused.stderr).contains("frames must be 32"));
 }
 
-/// Off Windows the card cannot open: `run --backend asio` and `interlock`
-/// are usage errors (exit 2), never a card refusal (exit 3).
+/// Off Windows the card cannot open: `run --backend asio` is a usage error
+/// (exit 2), never a card refusal (exit 3). `interlock` is no command (#38:
+/// nothing listens to the stage before a switch): a usage error too.
 #[cfg(not(windows))]
 #[test]
 fn off_windows_the_binary_refuses_the_card_as_usage() {
@@ -230,9 +231,10 @@ fn off_windows_the_binary_refuses_the_card_as_usage() {
             .output()
             .unwrap()
     };
-    let interlock = engine(&["interlock", "--seconds", "5"]);
-    assert_eq!(interlock.status.code(), Some(2));
-    assert!(interlock.stdout.is_empty());
+    let gone = engine(&["interlock"]);
+    assert_eq!(gone.status.code(), Some(2));
+    assert!(gone.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&gone.stderr).contains("unknown command \"interlock\""));
     let state = dir.path().join("state").to_string_lossy().into_owned();
     let pipe = pipe_name(&dir);
     let asio = engine(&[

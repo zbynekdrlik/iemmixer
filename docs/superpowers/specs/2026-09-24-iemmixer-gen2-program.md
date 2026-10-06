@@ -73,7 +73,7 @@ Numbers are tunable defaults unless they are parity requirements, tolerances (§
 | Process | Started by | Role | Restart effect |
 |---|---|---|---|
 | engine | guard | ASIO, DSP, mix state, taps, listen-path limiter; local pipes only; HIGH priority, QPC time | 1–3 s gap, 500 ms fade-in |
-| guard (~1.2–1.5k LoC) | Interactive task, restart on failure, single-instance mutex; on demand before cutover, at logon after | `iemmode`, modes, interlock, band-activity alarm, handover checks, bundle install/pin/revert, crash loop, alarms; no listening sockets | none; reconnects |
+| guard (~1.2–1.5k LoC) | Interactive task, restart on failure, single-instance mutex; on demand before cutover, at logon after | `iemmode`, modes, handover checks, bundle install/pin/revert, crash loop, alarms; no listening sockets | none; reconnects |
 | server (existing binary) | guard | HTTPS, auth, Opus, push, photos, backups, tunnel health | none on audio |
 | tray (Tauri) | guard, iemmixer modes only | status, Open Mixer, Copy URL, alarms | none |
 | ops runner (ops repo only) | guard, `dev` only | HIL, topology deploy | — |
@@ -257,27 +257,27 @@ Proof codes: **M** mock E2E, **L** live E2E/HIL, **S** server tests, **E** engin
 
 ### 4.2 Event signals (D2, owner model approved 2026-09-24)
 
-- **Owner messages drive the PC.** "ide event" (an event is coming) → the agent immediately runs `iemmode event` (graceful iemmixer stop, then REAPER and the predecessor app, handover checks) and confirms to the owner. "event skončil" → the agent runs `iemmode dev` (save and quit REAPER, graceful predecessor-app stop, interlock, iemmixer start) and development continues. Between the two messages the PC stays in `dev`, open-ended.
+- **Owner messages drive the PC.** "ide event" (an event is coming) → the agent immediately runs `iemmode event` (graceful iemmixer stop, then REAPER and the predecessor app, handover checks) and confirms to the owner. "event skončil" → the agent runs `iemmode dev` (graceful predecessor-app stop, save and quit REAPER, iemmixer start) and development continues. Between the two messages the PC stays in `dev`, open-ended.
 - **Rehearsals with iemmixer (trial, before cutover):** the owner's rehearsal message (plus the build) → `iemmode live --build SHA`; the owner's end message → `dev`.
 - **The agent never switches on its own**, except the safety fallbacks below. It never asks whether an event is running; the owner says so.
 - **Reboot** is always `event` (G1); after an unplanned reboot the PC stays in `event` until the owner's next "event skončil".
-- **Activity interlock:** before `event`→`dev` (and `live`→`dev` after cutover) the guard samples stage inputs for 60 s; any peak above −50 dBFS refuses and alarms the owner. `--force` only on explicit owner instruction. Trials skip it: the band is there on purpose.
-- **Band-activity alarm in `dev`:** sustained stage-input activity (peaks above −50 dBFS for ≥ 2 min within 5 min) alarms the owner and shows a banner with the "Back to REAPER" button on the engineer page; switching stays an owner (or engineer-button) decision.
+- **No activity interlock (owner decision 2026-10-06, #38).** The owner's signal ("ide event" / "event skončil") is the only thing that stops or postpones work on the PC: "pre teba je podstatné či je alebo nie je event a o tom rozhodujem ja! NIE TY!!!". No measurement of silence, activity or the band playing is a gate, before a switch, a HIL job or a measurement: other devices on the Dante network feed the card's inputs, so a level says nothing about the band. (The approved spec had a 60 s interlock here, refusing on any stage peak above −50 dBFS.)
+- **No band-activity alarm (owner decision 2026-10-06, #38).** The server reads no input level as "the band plays", for the same reason: it sends no banner and no notice about activity on the inputs, and whether an event runs is the owner's to say. (The approved spec had an alarm here: sustained stage-input activity, peaks above −50 dBFS for ≥ 2 min within 5 min, alarmed the owner and showed a banner with the "Back to REAPER" button on the engineer page.)
 - **Alarms:** a persistent file (shown by the tray and every `iemmode` call) plus Web Push to `alarm_recipients` (the owner) and `ENGINEER` subscriptions, from the server or, if none runs, the server binary run once in `notify` mode. Entering `dev` or `live` requires ≥ 1 alarm subscription; the owner-present S6 bootstrap registers the owner's.
-- **HIL and soak jobs** start only in `dev` with a quiet interlock. An "ide event" cancels running jobs gracefully (through `iemmode`, never force) before the switch. Jobs change state only via `iemmode install|activate|test-signal|report`.
+- **HIL and soak jobs** start only in `dev` (no quiet stage needed, #38). An "ide event" cancels running jobs gracefully (through `iemmode`, never force) before the switch. Jobs change state only via `iemmode install|activate|test-signal|report`.
 
 ### 4.3 Switching, handover, cutover, rollback
 
 - **Into iemmixer:** save REAPER (verify the file changed), quit it (verify gone within 30 s), then stop the predecessor app through its own graceful exit path (never force; verify gone and its data files closed); any failure aborts, restarting whatever was stopped. The graceful-exit path of the predecessor app is verified in S1a. If the import then refuses, the back-to-`event` path (with handover checks) runs. `live` imports band data; `dev` only reports a shadow import. The engine fades in after 10 s at 96 kHz with 0 missed periods.
 - **Back to `event`:** engine `Shutdown`, then ≤ 10 s for `DriverReleased` (timeout: alarm, no REAPER start). Start REAPER, then the predecessor app, and within 90 s run the **handover checks**: engine gone, REAPER alive, no REAPER dialog, control plane up, predecessor app up and connected to REAPER, input peaks not all −∞. Unconfirmed audio is `UNCONFIRMED-AUDIO`, never success; failures alarm.
-- **"Back to REAPER" button** (engineer PIN plus confirm; in `dev`, trials and the rollback window): `iemmode event` before cutover, the full rollback after. It silences every in-ear for about a minute (target ≤ 60 s, S7 measures it): never "the safe direction" while the band plays, and agents never request it during `live` without an owner instruction.
+- **"Back to REAPER" button** (engineer PIN plus confirm; in `dev`, trials and the rollback window): `iemmode event` before cutover, the full rollback after. It silences every in-ear for about a minute (target ≤ 60 s, S7 measures it): never "the safe direction" while the band plays, and agents never request it during `live` without an owner instruction. The button lives in the engineer's settings (the console section), wherever the site has the switch; since #38 it is no longer in a banner.
 - **Cutover** (owner message, outside slots): final import, guard logon task, prod pin, old autostarts disabled with their values exported, ports and tunnel repair switched, VAPID imported, post-deploy checks.
 - **Rollback:** export band data to a **new** RPP and self-check it (the original is never overwritten); stop iemmixer, disable the guard task, persist `event` (read back), start the predecessor, and start REAPER on the verified export (fallback: the original plus an alarm) with autostart pointed at it. iemmixer-only changes are not carried back. S8 drills it, ending with a reboot.
 
 ### 4.4 Safety invariants
 
 - **G1** Every boot is `event` before cutover and after a rollback.
-- **G2** **Procedural, not technical:** an agent *can* run `iemmode`; the band is protected by the owner-message rule ("ide event" / "event skončil"), the interlock, the band-activity alarm, G1 and owner notification.
+- **G2** **Procedural, not technical:** an agent *can* run `iemmode`; the band is protected by the owner-message rule ("ide event" / "event skončil"), G1 and owner notification. (The band-activity alarm listed here was removed by the owner's decision of 2026-10-06, #38: no input level stands for the band playing.)
 - **G3** "ide event" is executed immediately and confirmed back to the owner; any failure alarms at once. A hung guard fails the switch loudly; the fallback is an owner reboot (= `event`).
 - **G4** No force-kill of REAPER or the engine (P4, I8), OS shutdown included.
 - **G5** HIL, installs, test signal and fault injection only in `dev`; the runner lives only there, so CI never decides about events.
@@ -332,7 +332,7 @@ Proof codes: **M** mock E2E, **L** live E2E/HIL, **S** server tests, **E** engin
 | S2 | DSP, limiter, golden harness, vectors | No | ~2.5k, 2 wk | S1b, D1 |
 | S3 | Engine on Offline/NullRt: graph, RT, persistence, pipes, crash handling, test cap, oracle | No | ~3.5k, 3 wk | S2 |
 | S4 | Importer, exporter, legacy data, certificate, PIN rule | No | ~0.9k, 1.5 wk | S3 |
-| S5 | Server and UI on the engine: Opus, taps, browser limiter, talk bind, handshake, `notify`, engineer-page login-failure counters, band-activity banner, button, F29, F31, mock E2E | No | +2k/−3.6k, 0.8k UI, 4 wk | S3 |
+| S5 | Server and UI on the engine: Opus, taps, browser limiter, talk bind, handshake, `notify`, engineer-page login-failure counters, band-activity banner (removed: #38), "Back to REAPER" button (in the engineer's settings since #38), F29, F31, mock E2E | No | +2k/−3.6k, 0.8k UI, 4 wk | S3 |
 | S6 | ASIO backend, guard (modes, event signals, pin, alarms), bootstrap with alarm subscription, runner, `hil.yml`, F30 | Yes | ~1.5k + ops, 2–3 wk | S1a, S3, D2 |
 | S7 | Full HIL, live specs, ≥ 8 h PC soak, one manual 72 h NullRt soak, switch timing | Yes | ~1k + 3k TS, 2–3 wk | S5, S6 |
 | S8 | Shadow imports (≥ 2 weeks), D5 loopback, rollback drill, trials, sign-off, cutover, rollback window, decommissioning | Yes | ~0.5k; 3–4 wk + 8 wk | all; D3–D5 |
@@ -350,7 +350,7 @@ Proof codes: **M** mock E2E, **L** live E2E/HIL, **S** server tests, **E** engin
 - **R1** azo fails on this driver → S1a first; fallbacks (§2.2).
 - **R2** REAPER behaviours stay unknown or goldens are blocked → goldens before DSP freeze; D7 fallback chain; Methods B/C; A/B.
 - **R3** Dropouts at B = 32 → S1c OS tuning (priorities, interrupts, power, background services), DPC/ISR latency measurement, CPU gate, late-callback telemetry, soak.
-- **R4** Development or a HIL job cuts into an event (the owner's signal comes late, or an agent switches unasked) → owner-message rule; immediate "ide event" with job cancel; band-activity alarm; G1.
+- **R4** Development or a HIL job cuts into an event (the owner's signal comes late, or an agent switches unasked) → owner-message rule; immediate "ide event" with job cancel; G1 (no level-based alarm or gate: #38).
 - **R5** Engine bug harms hearing → §4.4; fuzzing.
 - **R6** Engine death or parking hangs the PC → graceful paths; S1a reboot test; power cycle last.
 - **R7** Public-repo exposure or PIN guessing → §5.1; §5.3.
@@ -365,7 +365,7 @@ Proof codes: **M** mock E2E, **L** live E2E/HIL, **S** server tests, **E** engin
 D1–D4: the **bold** option was approved. D5 waits for S8; **bold** = recommended. (Former D6 and D8 are settled by P9 and the agent: PINs stay 4 digits; a renamed member's old history is imported archived and read-only.)
 
 - **D1 Licence** (blocks the first push): **(a) MIT OR Apache-2.0 with a GPL limiter crate (engine binary GPL).** (b) All GPL. (c) Permissive with a clean-room limiter: behavioural parity only, weak legal footing.
-- **D2 Sharing the PC — approved (owner model, 2026-09-24):** **the owner signals every event by message — "ide event" → `event`, "event skončil" → `dev`; the PC belongs to development in between; reboot = `event`; interlock and band-activity alarm kept; G2 procedural.** (Superseded alternatives: 12 h owner-granted windows, signed grants, calendar-autonomous, unrestricted, owner-present only.)
+- **D2 Sharing the PC — approved (owner model, 2026-09-24):** **the owner signals every event by message — "ide event" → `event`, "event skončil" → `dev`; the PC belongs to development in between; reboot = `event`; interlock and band-activity alarm kept; G2 procedural.** (Owner decision 2026-10-06, #38: neither the interlock nor the band-activity alarm remains; the owner's signal is the only gate.) (Superseded alternatives: 12 h owner-granted windows, signed grants, calendar-autonomous, unrestricted, owner-present only.)
 - **D3 REAPER quirks Q1–Q4** (blocks S8): **(a) exact mix math; fix all four (§3.4).** (b) Replicate any chosen item.
 - **D4 Cutover** (blocks S8): **(a) all gates green, 2 trial rehearsals and 1 service on the band's usual address, engineer and band sign-off, then iemmixer becomes the boot default; 8-week rollback window.** (b) 1 rehearsal, 12 weeks. (c) 4 rehearsals and 2 services, 6 weeks. The band's address never changes; trial mixes are discarded.
 - **D5 Dante self-loopback** (S8): (a) none. **(b) The owner subscribes a spare TX pair to a spare RX pair on the same card (the A1 exception).** (c) The same on a band pair.

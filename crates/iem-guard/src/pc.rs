@@ -13,7 +13,6 @@
 //! portable and mutation-tested; `win` only reads and acts.
 
 use std::fmt;
-use std::time::Duration;
 
 use iem_win::prefwin::Checked;
 use iem_win::spawn::Placement;
@@ -180,8 +179,7 @@ impl Procs {
 pub type Ports = (Option<u32>, Option<u32>);
 
 /// The facts of a plan (design §5.1) from the process list, the driver
-/// module's holders and the owners of ports 80/443. `trial` and `force` are
-/// the request's, set by the daemon.
+/// module's holders and the owners of ports 80/443.
 ///
 /// An unreadable holder list assumes a running REAPER holds the card (the
 /// handover checks it) and no foreign holder (`reaper_start` reads again and
@@ -216,8 +214,6 @@ pub fn facts_from(p: &Procs, holders: Option<&[(u32, String)]>, ports: Option<Po
         reaper_holds_module,
         app_serves,
         other_module_holder,
-        trial: false,
-        force: false,
     }
 }
 
@@ -463,7 +459,7 @@ pub trait Pc {
     /// app, engine, server, tray and runner — and our children that ended.
     fn procs(&mut self) -> Procs;
     /// Once per plan: processes, driver-module holders, port owners (design
-    /// §5.1). `trial` and `force` are false.
+    /// §5.1).
     fn facts(&mut self) -> Facts;
     /// Re-adopts the children a previous guard started (pid, image path and
     /// start time must match); returns the adopted ones.
@@ -479,10 +475,6 @@ pub trait Pc {
     /// foreign engine, the app's exe hash. `Some`: what it names without
     /// refusing.
     fn precheck(&mut self, to: Mode, trial: bool) -> R<Option<String>>;
-    /// REAPER's stage tracks for `seconds`: the loudest peak of each (dBFS).
-    fn reaper_meters(&mut self, seconds: u32, c: &Cancel) -> R<Vec<f64>>;
-    /// `iem-engine interlock`: (quiet, its report).
-    fn engine_interlock(&mut self, seconds: u32, c: &Cancel) -> R<(bool, String)>;
     /// 40026; project mtime changed ≤ 15 s; no dialog but REAPER's
     /// evaluation notice (`handover::dialogs`); 40004; gone ≤ 30 s; driver
     /// module unheld.
@@ -525,15 +517,10 @@ pub trait Pc {
     /// Two statuses about 1 s apart: callbacks advancing, not faulted, not
     /// parked.
     fn engine_health(&mut self) -> R<Health>;
-    /// From the engine's `Meters` (no card reopen): the loudest peak of each
-    /// stage input over `seconds` (dBFS).
-    fn engine_stage_peaks(&mut self, seconds: u32, c: &Cancel) -> R<Vec<f64>>;
     /// With a config that freezes PIN changes before cutover.
     fn server_start(&mut self, mode: Mode) -> R<u32>;
     /// Ctrl-Break on its own console, gone ≤ 10 s, ports free.
     fn server_stop(&mut self, c: &Cancel) -> R<()>;
-    /// How long the stage inputs have been below the band-activity level.
-    fn band_quiet_for(&mut self) -> R<Duration>;
     fn tray_start(&mut self) -> R<()>;
     /// `Quit` over the guard pipe, gone ≤ 10 s.
     fn tray_stop(&mut self, c: &Cancel) -> R<()>;
@@ -610,7 +597,7 @@ pub trait Pc {
 pub mod fake {
     use std::collections::HashMap;
     use std::thread;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     use super::*;
 
@@ -623,8 +610,6 @@ pub mod fake {
         Children,
         SetBundle,
         Precheck,
-        ReaperMeters,
-        EngineInterlock,
         ReaperSaveQuit,
         AppStop,
         Tuning,
@@ -636,10 +621,8 @@ pub mod fake {
         EngineArm,
         EngineStop,
         EngineHealth,
-        EngineStagePeaks,
         ServerStart,
         ServerStop,
-        BandQuietFor,
         TrayStart,
         TrayStop,
         Identity,
@@ -666,8 +649,7 @@ pub mod fake {
         pub fn mutates(self) -> bool {
             matches!(
                 self,
-                Call::EngineInterlock
-                    | Call::ReaperSaveQuit
+                Call::ReaperSaveQuit
                     | Call::AppStop
                     | Call::Tuning
                     | Call::PrefCheck
@@ -711,13 +693,9 @@ pub mod fake {
     #[derive(Debug)]
     pub struct FakePc {
         pub facts: Facts,
-        pub meters: Vec<f64>,
-        pub interlock: (bool, String),
         pub app_exit: AppExit,
         pub reaper: ReaperFacts,
         pub status: Status,
-        pub quiet_for: Duration,
-        pub stage_peaks: Vec<f64>,
         /// The writes a restore takes; 0: the preference holds REAPER's
         /// original. A script: every check finds it so again.
         pub pref_attempts: u32,
@@ -781,8 +759,6 @@ pub mod fake {
         pub fn new(facts: Facts) -> Self {
             Self {
                 facts,
-                meters: Vec::new(),
-                interlock: (true, "quiet".into()),
                 app_exit: AppExit {
                     exit_code: Some(0),
                     ports_free: true,
@@ -808,8 +784,6 @@ pub mod fake {
                     hil: Vec::new(),
                     loopback_samples: 0,
                 },
-                quiet_for: Duration::from_secs(600),
-                stage_peaks: vec![-90.0],
                 pref_attempts: 0,
                 pref_value: "32".into(),
                 pref_writes: 0,
@@ -1003,16 +977,6 @@ pub mod fake {
             })
         }
 
-        fn reaper_meters(&mut self, _seconds: u32, c: &Cancel) -> R<Vec<f64>> {
-            self.enter(Call::ReaperMeters, Some(c))?;
-            Ok(self.meters.clone())
-        }
-
-        fn engine_interlock(&mut self, _seconds: u32, c: &Cancel) -> R<(bool, String)> {
-            self.enter(Call::EngineInterlock, Some(c))?;
-            Ok(self.interlock.clone())
-        }
-
         fn reaper_save_quit(&mut self, c: &Cancel) -> R<()> {
             self.enter(Call::ReaperSaveQuit, Some(c))?;
             self.facts.reaper = false;
@@ -1117,11 +1081,6 @@ pub mod fake {
             Ok(self.health)
         }
 
-        fn engine_stage_peaks(&mut self, _seconds: u32, c: &Cancel) -> R<Vec<f64>> {
-            self.enter(Call::EngineStagePeaks, Some(c))?;
-            Ok(self.stage_peaks.clone())
-        }
-
         fn server_start(&mut self, _mode: Mode) -> R<u32> {
             self.enter(Call::ServerStart, None)?;
             self.facts.server = true;
@@ -1132,11 +1091,6 @@ pub mod fake {
             self.enter(Call::ServerStop, Some(c))?;
             self.facts.server = false;
             Ok(())
-        }
-
-        fn band_quiet_for(&mut self) -> R<Duration> {
-            self.enter(Call::BandQuietFor, None)?;
-            Ok(self.quiet_for)
         }
 
         fn tray_start(&mut self) -> R<()> {
@@ -1269,7 +1223,7 @@ pub mod fake {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     use super::fake::{Call, FakePc};
     use super::*;
@@ -1399,7 +1353,6 @@ mod tests {
     fn facts_name_what_runs() {
         let f = facts_from(&band(), Some(NO_HOLDER), Some((None, None)));
         assert!(f.reaper && f.app && f.engine && f.server && f.tray && f.runner);
-        assert!(!f.trial && !f.force);
         let nothing = facts_from(&Procs::default(), Some(NO_HOLDER), Some((None, None)));
         assert_eq!(nothing, Facts::default());
         for (p, want) in [
@@ -1825,13 +1778,7 @@ mod tests {
 
     #[test]
     fn the_fake_answers_the_reads() {
-        let c = Cancel::default();
         let mut pc = FakePc::new(Facts::default());
-        pc.meters = vec![-60.0, -70.0];
-        assert_eq!(pc.reaper_meters(60, &c).unwrap(), [-60.0, -70.0]);
-        assert_eq!(pc.engine_interlock(60, &c).unwrap(), (true, "quiet".into()));
-        assert_eq!(pc.engine_stage_peaks(60, &c).unwrap(), [-90.0]);
-        assert_eq!(pc.band_quiet_for().unwrap(), Duration::from_secs(600));
         assert_eq!(pc.pref_check().unwrap(), PrefSeen::Original(0));
         assert_eq!(pc.tuning_drift().unwrap(), None);
         assert_eq!(pc.engine_health().unwrap(), Health::Dead);
@@ -2072,7 +2019,7 @@ mod tests {
     #[test]
     fn a_blocked_fake_call_ends_within_a_slice_of_the_preemption() {
         let mut pc = FakePc::new(up());
-        pc.block_until_cancel(Call::ReaperMeters);
+        pc.block_until_cancel(Call::Data);
         let c = Cancel::default();
         let other = c.clone();
         let fired = std::thread::spawn(move || {
@@ -2080,14 +2027,14 @@ mod tests {
             other.preempt();
             Instant::now()
         });
-        assert_eq!(pc.reaper_meters(60, &c), Err(StepError::Preempted));
+        assert_eq!(pc.data(Mode::Dev, &c), Err(StepError::Preempted));
         let back = Instant::now();
         let at = fired.join().unwrap();
         assert!(back.duration_since(at) < Duration::from_millis(600));
         assert_eq!(pc.first_after(at), None);
         let before = back.checked_sub(Duration::from_secs(5)).unwrap();
         let (first, t) = pc.first_after(before).unwrap();
-        assert_eq!(first, Call::ReaperMeters);
+        assert_eq!(first, Call::Data);
         assert!(t < at);
         // A call without a token cannot block.
         pc.block_until_cancel(Call::EngineStart);

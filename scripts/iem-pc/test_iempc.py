@@ -801,7 +801,7 @@ class DevTests(Base):
         self.assertEqual([c[1][0] for c in self.pc.calls], ["dev", "rehearse-teardown"])
 
     def test_a_refused_dev_or_a_dry_run_opens_none(self) -> None:
-        self.pc.replies[("dev", "--build", SHA)] = (1, json.dumps({"error": "band activity"}))
+        self.pc.replies[("dev", "--build", SHA)] = (1, json.dumps({"error": "precheck refused"}))
         code, docs, _ = self.run_main("dev", "--build", SHA)
         self.assertEqual((code, "dev_entry" in docs[-1], ip.current_entry()), (1, False, 0))
         code, docs, _ = self.run_main("dev", "--build", SHA, "--dry-run")

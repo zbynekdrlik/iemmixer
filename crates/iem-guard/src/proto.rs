@@ -36,9 +36,10 @@ pub enum Request {
     Event {
         dry_run: bool,
     },
+    /// An older iemmode's `force` (it skipped the interlock, gone with #38)
+    /// is read and ignored.
     Dev {
         build: Option<String>,
-        force: bool,
         dry_run: bool,
     },
     Live {
@@ -64,8 +65,9 @@ pub enum Request {
         hil: String,
         detail: String,
     },
-    /// Refused unless dev, not switching, band activity quiet for 5 min and a
-    /// 60 s stage-input peak check from the engine's meters is quiet.
+    /// Refused unless dev, no switch in progress and no other job runs.
+    /// Nothing reads the stage (#38, owner 2026-10-06): only the owner's
+    /// signal decides whether the PC may be used.
     JobBegin {
         run: u64,
     },
@@ -276,12 +278,10 @@ mod tests {
             Request::Event { dry_run: true },
             Request::Dev {
                 build: Some("0123456789abcdef0123456789abcdef01234567".into()),
-                force: false,
                 dry_run: true,
             },
             Request::Dev {
                 build: None,
-                force: true,
                 dry_run: false,
             },
             Request::Live {
@@ -358,6 +358,16 @@ mod tests {
         assert_eq!(
             decode::<Request>(br#"{"cmd":"alarm_ack","id":3}"#).unwrap(),
             Request::AlarmAck { id: 3 }
+        );
+        // An older iemmode's dev request names `force` (it skipped the
+        // interlock, gone with #38): read and ignored.
+        assert_eq!(
+            decode::<Request>(br#"{"cmd":"dev","build":null,"force":true,"dry_run":false}"#)
+                .unwrap(),
+            Request::Dev {
+                build: None,
+                dry_run: false
+            }
         );
     }
 

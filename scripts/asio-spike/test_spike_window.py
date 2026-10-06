@@ -17,7 +17,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import spike_window as sw  # noqa: E402
 
-NUMERIC = {"PC_BUFFER_ORIGINAL": "64", "PC_NTRACK": "9", "PC_ACTIVITY_CHANNELS": "101-110,121-124"}
+NUMERIC = {"PC_BUFFER_ORIGINAL": "64", "PC_NTRACK": "9"}
 FULL = "\n".join(f"{k}=v" for k in sw.REQUIRED if k not in NUMERIC) + "\n" + "".join(f"{k}={v}\n" for k, v in NUMERIC.items())
 
 
@@ -40,14 +40,12 @@ class EnvTests(unittest.TestCase):
         with self.assertRaisesRegex(sw.StepError, "PC_BUFFER_ORIGINAL must be a whole number"):
             sw.load_env(write(FULL.replace("PC_BUFFER_ORIGINAL=64", "PC_BUFFER_ORIGINAL=sixty")))
 
-    def test_the_guard_watches_the_configured_stage_inputs_or_explicitly_all(self) -> None:
-        self.assertEqual(sw.load_env(write(FULL))["PC_ACTIVITY_CHANNELS"], "101-110,121-124")
-        with self.assertRaisesRegex(sw.StepError, "missing PC_ACTIVITY_CHANNELS"):
-            sw.load_env(write(FULL.replace("PC_ACTIVITY_CHANNELS=101-110,121-124\n", "")))
-        self.assertEqual(sw.load_env(write(FULL.replace("=101-110,121-124", "=all")))["PC_ACTIVITY_CHANNELS"], "all")
-        for bad in ("101-110, 121-124", "3;4", "0", "3-", "-3", "5-3", "All", "3,,4", "1-1025"):
-            with self.assertRaisesRegex(sw.StepError, "PC_ACTIVITY_CHANNELS", msg=bad):
-                sw.load_env(write(FULL.replace("=101-110,121-124", "=" + bad)))
+    def test_no_stage_inputs_are_needed(self) -> None:
+        # #38 (owner, 2026-10-06): no input level is a gate, so the env names no
+        # inputs to listen to; an older env's list is read and ignored.
+        self.assertNotIn("PC_ACTIVITY_CHANNELS", sw.REQUIRED)
+        env = sw.load_env(write(FULL + "PC_ACTIVITY_CHANNELS=101-110,121-124\n"))
+        self.assertEqual(env["PC_NTRACK"], "9")
 
     def test_missing_file(self) -> None:
         with self.assertRaisesRegex(sw.StepError, "missing"):
@@ -92,13 +90,14 @@ class RequestTests(unittest.TestCase):
         self.assertEqual([sw.run_timeout("probe", 600, 5), sw.run_timeout("duplex", 600, 5), sw.run_timeout("reopen", 600, 5)], [60, 660, 210])
         self.assertEqual(sw.run_timeout("hwlat", 30, 1), 90)
 
-    def test_the_request_carries_the_watched_inputs(self) -> None:
-        env = {"PC_ASIO_DRIVER": "D", "PC_ASIO_MODULE": "M", "PC_ACTIVITY_CHANNELS": "101-110,121-124"}
+    def test_the_request_names_no_inputs_to_listen_to(self) -> None:
+        # #38: no input level ends a run.
+        env = {"PC_ASIO_DRIVER": "D", "PC_ASIO_MODULE": "M"}
         args = type("A", (), {"mode": "duplex", "frames": 64, "seconds": 20, "burn_us": 0, "stress": 0, "panic_at": 0, "cycles": 5})()
         self.assertEqual(sw.run_fields(env, args),
                          {"mode": "duplex", "driver": "D", "module": "M", "frames": 64, "seconds": 20, "burn_us": 0, "stress": 0,
                           "panic_at": 0, "cycles": 5, "cpu": -1, "threshold_us": 10, "audio_cpus": "", "stress_cpus": "",
-                          "activity_channels": "101-110,121-124", "timeout": 80})
+                          "timeout": 80})
         args.mode, args.frames = "probe", None
         self.assertEqual((sw.run_fields(env, args)["frames"], sw.run_fields(env, args)["timeout"]), (0, 60))
 
@@ -555,7 +554,7 @@ class RunTests(unittest.TestCase):
 
         sw.ps, sw.scp = fake_ps, fake_scp
         self.env = {"PC_ROOT": "R", "PC_ROOT_SCP": "/R", "PC_SSH": "u@pc", "PC_ASIO_DRIVER": "D", "PC_ASIO_MODULE": "M",
-                    "PC_ACTIVITY_CHANNELS": "101-110", "RAW_DIR": str(self.dir / "raw")}
+                    "RAW_DIR": str(self.dir / "raw")}
         sw.save_state({"id": "w", "card": "free", "preflight": {"pref": 64}, "pref_original": 64, "pref_current": 32,
                        "pref_restored": False, "runs": [], "closed": False})
 
@@ -766,15 +765,14 @@ class VerdictTests(unittest.TestCase):
                   {"outcome": "done", "segments": []}):
             self.assertFalse(sw.verdict(r)["stable"], r)
 
-    def test_the_hot_inputs_and_the_watched_ones_are_reported(self) -> None:
-        r = self.report("band-activity")
-        r["activity_channels"] = [101, 102]
+    def test_the_hot_inputs_are_reported_and_never_decide_stability(self) -> None:
+        # #38: the levels are information only; a loud input leaves a clean run stable.
+        r = self.report()
         r["loudest_inputs"] = [{"channel": 125, "index": 124, "dbfs": -2.4}]
         v = sw.verdict(r)
-        self.assertEqual((v["activity_channels"], v["loudest_inputs"], v["stable"]),
-                         ([101, 102], [{"channel": 125, "index": 124, "dbfs": -2.4}], False))
-        v = sw.verdict(self.report())
-        self.assertEqual((v["activity_channels"], v["loudest_inputs"]), (None, []))
+        self.assertEqual((v["loudest_inputs"], v["stable"]), ([{"channel": 125, "index": 124, "dbfs": -2.4}], True))
+        self.assertNotIn("activity_channels", v)
+        self.assertEqual(sw.verdict(self.report())["loudest_inputs"], [])
 
     def test_segments_add_up(self) -> None:
         r = self.report()

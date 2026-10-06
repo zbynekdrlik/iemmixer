@@ -24,7 +24,7 @@ pub const START_WAIT: Duration = Duration::from_secs(15);
 pub const START_POLL: Duration = Duration::from_millis(500);
 
 pub const IEMMODE_USAGE: &str = "usage: iemmode status | event [--dry-run] [--direct]
-  | dev [--build SHA] [--force] [--dry-run] | live --build SHA [--trial] [--dry-run]
+  | dev [--build SHA] [--dry-run] | live --build SHA [--trial] [--dry-run]
   | install <zip> | activate <sha> | test-signal <input> <dbfs> <ttl>
   | report <sha> <green|red> <detail> | job-begin <run> | job-end <run>
   | install-site <file> | force-reopen | inject-fault | inject-seh | runner-stop | probe-task
@@ -139,10 +139,9 @@ pub fn parse(args: &[String]) -> Result<Cli, String> {
             }
         }
         "dev" => {
-            let f = Flags::read(&rest, &["--force", "--dry-run"], &["--build"])?;
+            let f = Flags::read(&rest, &["--dry-run"], &["--build"])?;
             ask(Request::Dev {
                 build: f.value("--build").map(sha).transpose()?,
-                force: f.has("--force"),
                 dry_run: f.has("--dry-run"),
             })
         }
@@ -347,15 +346,13 @@ mod tests {
             ask(&["dev"]),
             Request::Dev {
                 build: None,
-                force: false,
                 dry_run: false
             }
         );
         assert_eq!(
-            ask(&["dev", "--build", SHA, "--force", "--dry-run"]),
+            ask(&["dev", "--build", SHA, "--dry-run"]),
             Request::Dev {
                 build: Some(SHA.into()),
-                force: true,
                 dry_run: true
             }
         );
@@ -468,6 +465,8 @@ mod tests {
             "--dry-run given twice"
         );
         assert_eq!(err(&["dev", "--build"]), "--build needs a value");
+        // Nothing waits for a quiet stage any more, so nothing skips it (#38).
+        assert_eq!(err(&["dev", "--force"]), "unknown argument \"--force\"");
         assert_eq!(
             err(&["dev", "--build", SHA, "--build", SHA]),
             "--build given twice"

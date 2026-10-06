@@ -4350,7 +4350,7 @@ $T fingerprint --check
   - `wpt-install` gives `installed: now` with a version; the ADK bootstrapper's signature is checked on the PC.
   - The second fingerprint read (after the install) shows whether the Process Lasso config is stable. If it differs, set `fingerprint.keys` to its rule-line patterns (design note §5.1), run `$T tuning-setup` and `$T fingerprint --baseline` again, and record it on #15.
 
-- [ ] **Step 5: Switch and set 32.** `$S to-dev`, then `$S set-buffer --frames 32` (skip both if S1a's part of this window already did).
+- [ ] **Step 5: Switch and set 32.** `$S to-dev`, then `$S set-buffer --frames 32` (skip both if S1a's part of this window already did). `to-dev` reads no stage and never waits for silence: the owner's "event skončil" is the only gate (#38, owner 2026-10-06).
 
 - [ ] **Step 6: Baseline measurement set** (no tuning; design note §4.3).
 

@@ -126,7 +126,7 @@ pub fn creation_flags(new_group: bool, placed: Placement) -> io::Result<u32> {
 /// waiting one (Ctrl-Break on "ide event") a process group of its own, so the
 /// Ctrl-Break reaches that helper only (S6 design note §5.5). Helpers stay in
 /// the caller's job: they are short, and a job that refuses breakaway must not
-/// refuse them. Only the long-lived children and the card's interlock are
+/// refuse them. Only the long-lived children are
 /// placed by the job ([`placement`], [`creation_flags`], I9).
 pub fn helper_flags(waiting: bool) -> u32 {
     let group = if waiting { CREATE_NEW_PROCESS_GROUP } else { 0 };

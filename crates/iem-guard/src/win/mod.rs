@@ -2,8 +2,8 @@
 //!
 //! Built on `iem_win`'s safe wrappers, our scheduled tasks (`schtasks.exe`,
 //! arguments only), Windows' own `curl.exe` for HTTPS and `ureq` for plain
-//! HTTP on this PC. Settings come from the site's `[guard]`, `[card]` and
-//! `[activity]` tables and `%LOCALAPPDATA%\iemmixer\guard\pc.toml`.
+//! HTTP on this PC. Settings come from the site's `[guard]` and `[card]`
+//! tables and `%LOCALAPPDATA%\iemmixer\guard\pc.toml`.
 //!
 //! Nothing here ends a process: REAPER saves and quits by its own actions,
 //! the predecessor app by its tray menu's Exit command, the engine by
@@ -26,16 +26,15 @@ mod web;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, mpsc};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use iem_win::spawn::{self, Placement};
 use iem_win::window::{self, SessionEndWindow};
 use tracing::{info, warn};
 
 use crate::cancel::Cancel;
-use crate::effects::engine::Quiet;
 use crate::handover::{AppExit, ReaperFacts};
 use crate::pc::{
     self, Audience, EngineSeen, Images, Kid, Pc, Ports, PrefSeen, Procs, R, Status, StepError,
@@ -61,9 +60,6 @@ pub struct WinPc {
     sup: Option<engine::Supervisor>,
     /// The engine pid whose control pipe's DACL was read, and the verdict.
     dacl: Option<(u32, bool)>,
-    /// The band's quiet as the supervisor connections saw it: one for the
-    /// guard's life, fed by every connection and resumed by each new one.
-    quiet: Arc<Mutex<Quiet>>,
     tray_quit: Option<TrayQuit>,
 }
 
@@ -82,7 +78,6 @@ impl WinPc {
             http: ureq::Agent::new_with_config(config),
             sup: None,
             dacl: None,
-            quiet: Arc::new(Mutex::new(Quiet::new(Instant::now()))),
             tray_quit: None,
         }
     }
@@ -170,14 +165,6 @@ impl Pc for WinPc {
         app::precheck(self, to, trial)
     }
 
-    fn reaper_meters(&mut self, seconds: u32, c: &Cancel) -> R<Vec<f64>> {
-        reaper::meters(self, seconds, c)
-    }
-
-    fn engine_interlock(&mut self, seconds: u32, c: &Cancel) -> R<(bool, String)> {
-        engine::interlock(self, seconds, c)
-    }
-
     fn reaper_save_quit(&mut self, c: &Cancel) -> R<()> {
         reaper::save_quit(self, c)
     }
@@ -229,20 +216,12 @@ impl Pc for WinPc {
         engine::health(self)
     }
 
-    fn engine_stage_peaks(&mut self, seconds: u32, c: &Cancel) -> R<Vec<f64>> {
-        engine::stage_peaks(self, seconds, c)
-    }
-
     fn server_start(&mut self, mode: Mode) -> R<u32> {
         procs::server_start(self, mode)
     }
 
     fn server_stop(&mut self, c: &Cancel) -> R<()> {
         procs::server_stop(self, c)
-    }
-
-    fn band_quiet_for(&mut self) -> R<Duration> {
-        engine::quiet_for(self)
     }
 
     fn tray_start(&mut self) -> R<()> {
@@ -417,8 +396,8 @@ mod tests {
         assert_eq!(pc.settings().guard.app_exit_id, 4242);
         let p = pc.procs();
         assert!(p.exited.is_empty());
-        let f = pc.facts();
-        assert!(!f.trial && !f.force);
+        // The facts read the process list, the module's holders and the ports.
+        let _ = pc.facts();
         assert_eq!(pc.children(), Children::default());
         let failed = |r: R<u32>| matches!(r, Err(StepError::Failed(_)));
         assert!(failed(pc.engine_start(true, false)));
