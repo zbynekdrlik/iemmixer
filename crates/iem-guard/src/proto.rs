@@ -87,6 +87,12 @@ pub enum Request {
     /// the engine raises a structured exception on its RT callback, the SEH
     /// filter releases the driver or parks, and the watch starts it again.
     InjectSeh,
+    /// Dev with a HIL job only: the parked-engine test (design §10 test #2,
+    /// #35) — the engine raises the SEH test's exception under its backend's
+    /// test hold: the driver is kept, the SEH filter parks the RT thread, and
+    /// the engine keeps running with its stream parked and the card held
+    /// ([`EngineStatus::parked`]) until the OS restart the test makes.
+    InjectPark,
     /// Dev only: stop the idle runner (bootstrap check, S6 plan Task 16).
     RunnerStop,
     /// Starts `\iemmixer\iemmixer-probe` from the guard (design §5.1); any
@@ -313,6 +319,7 @@ mod tests {
             Request::ForceReopen,
             Request::InjectFault,
             Request::InjectSeh,
+            Request::InjectPark,
             Request::RunnerStop,
             Request::ProbeTask,
             Request::RehearseTeardown,
@@ -355,6 +362,7 @@ mod tests {
         );
         assert_eq!(json(&Request::InjectFault), r#"{"cmd":"inject_fault"}"#);
         assert_eq!(json(&Request::InjectSeh), r#"{"cmd":"inject_seh"}"#);
+        assert_eq!(json(&Request::InjectPark), r#"{"cmd":"inject_park"}"#);
         assert_eq!(
             decode::<Request>(br#"{"cmd":"alarm_ack","id":3}"#).unwrap(),
             Request::AlarmAck { id: 3 }

@@ -462,6 +462,17 @@ pub(super) fn inject_seh(pc: &mut WinPc) -> R<()> {
     sup.request("inject_seh").map_err(StepError::Failed)
 }
 
+/// The parked-engine test (design §10 test #2, #35): `InjectPark` over the
+/// supervisor pipe. The engine refuses it without its fault-injection flag;
+/// with it the RT callback raises the SEH test's exception under the
+/// backend's test hold: the driver is kept, the SEH filter parks the RT
+/// thread, and the engine keeps running with its stream parked (its next
+/// `Status`), so the watch sees no exit.
+pub(super) fn inject_park(pc: &mut WinPc) -> R<()> {
+    let sup = supervisor(pc, CONNECT, &Cancel::default())?;
+    sup.request("inject_park").map_err(StepError::Failed)
+}
+
 /// Whether the engine's control pipe admits only this user and SYSTEM, read
 /// back through its DACL (HIL, design §7). Reading connects to the pipe for
 /// a moment, so it is read once per engine process.

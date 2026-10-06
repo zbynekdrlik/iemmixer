@@ -1187,6 +1187,7 @@ pub fn handle(pc: &mut dyn Pc, g: &mut Guard, req: Request, epoch: u64) -> Reply
         },
         Request::InjectFault => inject_fault(pc, g),
         Request::InjectSeh => inject_seh(pc, g),
+        Request::InjectPark => (false, "inject-park is not wired yet".to_owned()),
         Request::RunnerStop => runner_stop(pc, g),
         Request::ProbeTask => outcome(pc.probe_task(), "the probe task ended with 0"),
         Request::RehearseTeardown => rehearse(pc, g),

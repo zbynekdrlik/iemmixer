@@ -407,6 +407,7 @@ mod tests {
             ("force-reopen", Request::ForceReopen),
             ("inject-fault", Request::InjectFault),
             ("inject-seh", Request::InjectSeh),
+            ("inject-park", Request::InjectPark),
             ("runner-stop", Request::RunnerStop),
             ("probe-task", Request::ProbeTask),
             ("rehearse-teardown", Request::RehearseTeardown),
@@ -621,6 +622,7 @@ mod tests {
             json!({"ok": false, "detail": "the guard is unreachable: x"})
         );
         assert!(IEMMODE_USAGE.starts_with("usage: iemmode status"));
+        assert!(IEMMODE_USAGE.contains("| inject-seh | inject-park |"));
         assert!(GUARD_USAGE.contains("--verify-only"));
     }
 
