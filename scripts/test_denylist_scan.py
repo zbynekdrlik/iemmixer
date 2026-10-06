@@ -963,6 +963,20 @@ class DenylistScanTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assert_found_in_both_modes_as({name: f"x {text} y\n"}, "qxwzy" if "qxwzy" in text else "name")
 
+    # --- #32 F5 m3: UTF-8 shown as Windows-1252 (or with a byte cp1250 / cp1252 leave undefined) ---
+
+    def test_utf8_double_encoded_through_windows_code_pages_is_read_back(self) -> None:
+        # Windows reads UTF-8 as cp1252 (`ň` C5 88 shows as `Åˆ`) -- neither cp1250 nor Latin-1 reads
+        # 0x88 that way -- and it reads a byte a code page leaves undefined as the C1 control of the same
+        # number (`Á` C3 81 through cp1250 shows as `Ă` and U+0081)
+        self.add_terms("ňqxwzy", "ŕqxwzy", "áqxwzy", "čqxwzy")
+        texts = {"cp1252-n.txt": "ňqxwzy".encode().decode("cp1252"), "cp1252-r.txt": "ŕqxwzy".encode().decode("cp1252"),
+                 "cp1250-hole.txt": b"\xc3".decode("cp1250") + "\x81qxwzy",
+                 "cp1252-hole.txt": b"\xc4".decode("cp1252") + "\x8dqxwzy"}
+        for name, text in texts.items():
+            with self.subTest(name=name):
+                self.assert_found_in_both_modes_as({name: f"meno: {text}\n"}, "qxwzy")
+
     def test_a_named_reference_never_makes_a_batch_separator(self) -> None:
         # a reading that created U+E000 would shift every later unit: the hit must stay on line 3
         self.commit({"a.html": "&dcaron;\n&#xE000;&#57344;\nkeep zyxname\n"})
