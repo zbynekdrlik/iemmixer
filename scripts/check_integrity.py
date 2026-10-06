@@ -47,6 +47,8 @@ RESTART_MECHANISMS = (
     re.compile(r"(?i)(?<![\w.$-])shutdown\s+[/-](?!(?:a|\?)(?!\w))[a-z?]"),      # a command line with a switch (/a aborts)
     re.compile(r"(?i)(?:^|[;|&{(`\"'])\s*shutdown\s+[$@`]"),                    # a command whose arguments are variables
     re.compile(r"(?i)(?:&|\bstart-process\b|-filepath\b)\s*['\"]?shutdown(?:\.exe)?['\"]?(?![\w.(])"),
+    re.compile(r"(?i)\bstart-process\b[^;|\n]*?\s['\"]?shutdown(?:\.exe)?\b"),     # parameters before the program
+    re.compile(r"(?i)\bpsshutdown(?:64)?\b"),                                   # Sysinternals
     re.compile(r"(?i)\bcommand::new\s*\(\s*r?#*\"shutdown"),                   # Rust's process API
     re.compile(r"(?i)\b(?:system|popen|exec\w*|spawn\w*|run|call|check_call|check_output|start|processstartinfo)"
                r"\s*\(\s*\[?\s*[rbuf]?[\"'`]shutdown\b"),                       # Python, JS, .NET process APIs
@@ -66,10 +68,11 @@ RESTART_ARGV = re.compile(r"(?i)[\"']shutdown(?:\.exe)?[\"']\s*,\s*[rbuf]?[\"'][
 # the timeout period is greater than 0, the /f parameter is implied"), planned
 # restart without /f, as a whole PowerShell command: literal switches only,
 # the reason literal, the comment single-quoted (no expansion), and the command
-# ended right there (a `;`, the end of the string holding it, a comment or the
-# line's end).
+# ended right there: a `;`, a comment or the line's end — never a quote, which
+# may open one more argument or close a string another one is joined to
+# (review of lane G2, finding 4).
 RESTART_SAFE = re.compile(r"(?i)&\s*shutdown\.exe /r /t 0(?: /d [pu]:\d{1,3}:\d{1,5})?(?: /c '[^'$`\"\\;|&\r\n]*')?"
-                          r"(?=\s*(?:[;\"#]|$))")
+                          r"(?=\s*(?:[;#]|$))")
 RESTART = "restart without the graceful-restart marker and its literal safe form (program spec I8)"
 
 
