@@ -435,6 +435,35 @@ fn a_boot_past_a_locked_current_json_keeps_the_sessions_edits() {
 }
 
 #[test]
+fn an_orphan_above_the_state_loaded_is_named_after_a_revision_jump_too() {
+    // Lane G4 review, finding 2: the orphan check compared each orphan
+    // with the jumped revision (a million above), so past an unreadable
+    // current.json an orphan holding a state above the one that loaded (a
+    // save cut off right after its move aside) was never named. It is
+    // compared with the state loaded's own revision.
+    let g = test_site();
+    let (_d, faulty, s) = faulty_store();
+    s.save(&sample(97)).unwrap();
+    s.save(&sample(100)).unwrap();
+    let orphan = s.dir().join("save.tmp.orphan-1");
+    fs::write(&orphan, encode(&sample(101)).unwrap()).unwrap();
+    let s = reopen(s.dir(), &faulty);
+    faulty.set_locked(&s.dir().join(CURRENT), true);
+    let boot = s.load(&g);
+    assert_eq!(
+        (boot.source, boot.persisted.rev),
+        (Source::Generation(1), 1_000_100)
+    );
+    assert!(
+        boot.alarms.iter().any(|a| a
+            == "save.tmp.orphan-1 (revision 101) is above the state loaded (revision 97): \
+                a save.tmp moved aside, kept but never loaded"),
+        "{:?}",
+        boot.alarms
+    );
+}
+
+#[test]
 fn a_save_at_the_revision_the_marker_shows_leaves_the_marker_alone() {
     // #32 F3-r4 2: a save without a change (the same revision) has nothing
     // to rename, so a marker another process holds a moment cannot fail it;
