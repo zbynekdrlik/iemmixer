@@ -950,6 +950,26 @@ class DenylistScanTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assert_found_in_both_modes_as({name: f"x {text} y\n"}, "zyx")
 
+    # --- #32 F5 m5: named character references and the other default-ignorable characters ---
+
+    def test_named_references_and_ignorable_characters_do_not_hide_a_term(self) -> None:
+        self.add_terms("ďqxwzy")
+        texts = {"dcaron.html": "<b>&dcaron;qxwzy</b>", "shy.html": "zyx&shy;name", "zwsp.html": "zyx&ZeroWidthSpace;name",
+                 "double.html": "&amp;#271;qxwzy"}
+        texts |= {f"ignorable-{number}.md": f"zyx{char}name" for number, char in enumerate(
+            ("\u200e", "\u200f", "\u034f", "\ufe0f", "\ufe00", "\u2061", "\u2064", "\u2066", "\u202a",
+             "\u061c", "\u180e", "\U000e0020"))}
+        for name, text in texts.items():
+            with self.subTest(name=name):
+                self.assert_found_in_both_modes_as({name: f"x {text} y\n"}, "qxwzy" if "qxwzy" in text else "name")
+
+    def test_a_named_reference_never_makes_a_batch_separator(self) -> None:
+        # a reading that created U+E000 would shift every later unit: the hit must stay on line 3
+        self.commit({"a.html": "&dcaron;\n&#xE000;&#57344;\nkeep zyxname\n"})
+        code, out = self.scan("--tree", "HEAD")
+        self.assertEqual((code, out.count("denylist entry")), (1, 1), out)
+        self.assertIn("tree a.html:3: denylist entry 1", out)
+
 
 if __name__ == "__main__":
     unittest.main()
