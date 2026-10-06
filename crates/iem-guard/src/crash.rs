@@ -299,6 +299,23 @@ mod tests {
     }
 
     #[test]
+    fn a_plans_ready_wait_starts_an_engine_again_only_after_one_busy_exit() {
+        // #32 F3-r4 4: once, for exit 75; never for another end, nor for
+        // an engine still running.
+        assert!(ready_restart(Some(Some(75)), false));
+        assert!(!ready_restart(Some(Some(75)), true));
+        for exit in [
+            None,
+            Some(None),
+            Some(Some(0)),
+            Some(Some(70)),
+            Some(Some(3)),
+        ] {
+            assert!(!ready_restart(exit, false), "{exit:?}");
+        }
+    }
+
+    #[test]
     fn the_busy_streak_counts_busy_exits_in_a_row() {
         let mut c = CrashLoop::default();
         let got = [c.busy(true), c.busy(true), c.busy(false), c.busy(true)];
