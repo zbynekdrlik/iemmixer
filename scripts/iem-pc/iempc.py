@@ -1170,9 +1170,21 @@ def cmd_handover_s1a(ctx: Ctx) -> int:
     problems = handover_problems(r, int(state["pref_original"]))
     if problems:
         raise StepError("S1a window stays open: " + "; ".join(problems))
-    state["closed"] = True
-    state["handed_over"] = {"to": "iemmixer guard (S6)", "at": now_iso(), "checks": r}
-    sw.save_state(state)
+
+    def hand_over(st: dict) -> None:
+        # The state as saved now, under the window lock (F2 round 3, m5): another
+        # window process may have changed it during the checks.
+        if st.get("id") != state.get("id") or st.get("closed"):
+            raise Refused(f"S1a window {state.get('id')} was closed meanwhile (a preempt or to-event): nothing handed over")
+        if st.get("card") != "free":
+            raise StepError(f"S1a window {state.get('id')}: the card is '{st.get('card')}' now, not free: the window stays open")
+        st["closed"] = True
+        st["handed_over"] = {"to": "iemmixer guard (S6)", "at": now_iso(), "checks": r}
+
+    try:
+        sw.update_state(change=hand_over)
+    except sw.StepError as e:   # the window lock was not free within its bound (an owner alarm was printed)
+        raise StepError(str(e)) from None
     emit({"handover-s1a": state.get("id"), "closed": True, "checks": r})
     return 0
 
