@@ -5,10 +5,8 @@ import contextlib
 import io
 import os
 import random
-import shutil
 import subprocess
 import sys
-import tempfile
 import time
 import tracemalloc
 import unicodedata
@@ -16,58 +14,12 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import denylist_content as dc  # noqa: E402
 import denylist_scan as ds  # noqa: E402
-
-TERMS = ["zyxname", "10.9.", "ghost-host.example"]
-REDACTED_MARKER = "[redacted]"
-# #32 review m7: the stated budget for binary content (public-repo-hygiene.md) -- a 4 MiB blob of
-# pseudo-random bytes against 40 invented terms, in tree mode through main()
-BUDGET_BLOB = 4 << 20
-BUDGET_CPU_PER_MIB = 1.0          # seconds of this process's CPU per MiB of blob
-BUDGET_MEMORY_BEYOND_BLOB = 24 << 20  # peak Python allocation on top of two copies of the blob
-BUDGET_TERMS = ([f"qz{letter}xw{letter}k" for letter in "abcdefghijklmnopqrstuvwxyz"]  # 7 characters
-                + [f"ďq{letter}zyx" for letter in "abcdefgh"] + ["qxv", "zqk", "xwq", "qzzx", "kqxz", "zxqv"])
+from denylist_test_support import (BUDGET_BLOB, BUDGET_CPU_PER_MIB, BUDGET_MEMORY_BEYOND_BLOB,  # noqa: E402
+                                   BUDGET_TERMS, REDACTED_MARKER, ScanTestCase, git, git_out)
 
 
-def git(repo: Path, *args: str) -> None:
-    subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
-
-
-def git_out(repo: Path, *args: str, stdin: bytes = b"") -> str:
-    return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True,
-                          input=stdin).stdout.decode().strip()
-
-
-class DenylistScanTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.tmp = Path(tempfile.mkdtemp())
-        self.repo = self.tmp / "repo"
-        self.repo.mkdir()
-        git(self.repo, "init", "-q", "-b", "main")
-        git(self.repo, "config", "user.email", "test@example.org")
-        git(self.repo, "config", "user.name", "test")
-        git(self.repo, "config", "commit.gpgsign", "false")
-        self.deny = self.tmp / "deny.txt"
-        self.deny.write_text("# test terms\n" + "\n".join(TERMS) + "\n", encoding="utf-8")
-
-    def tearDown(self) -> None:
-        shutil.rmtree(self.tmp)
-
-    def commit(self, files: dict[str, str | bytes], message: str = "change") -> None:
-        for rel, content in files.items():
-            path = self.repo / rel
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(content if isinstance(content, bytes) else content.encode("utf-8"))
-        git(self.repo, "add", "-A")
-        git(self.repo, "commit", "-q", "-m", message)
-
-    def scan(self, *extra: str) -> tuple[int, str]:
-        out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = ds.main(["--denylist", str(self.deny), "--repo", str(self.repo), *extra])
-        return code, out.getvalue() + err.getvalue()
-
+class DenylistScanTests(ScanTestCase):
     def test_clean_tree_passes(self) -> None:
         self.commit({"a.txt": "nothing private here\n"})
         self.assertEqual(self.scan("--tree", "HEAD")[0], 0)
@@ -531,21 +483,6 @@ class DenylistScanTests(unittest.TestCase):
 
     # --- #32 E3: non-UTF-8 text, JSON \u and percent escapes, and undecodable paths ---
 
-    def add_terms(self, *terms: str) -> None:
-        self.deny.write_text("\n".join([*TERMS, *terms]) + "\n", encoding="utf-8")
-
-    def assert_found_in_both_modes_as(self, files: dict[str, str | bytes], term_letters: str) -> str:
-        self.bases = getattr(self, "bases", 0) + 1  # a fresh base commit per subTest
-        self.commit({"base.txt": f"base {self.bases}\n"})
-        self.commit(files, message="add content in another encoding")
-        code, tree_out = self.scan("--tree", "HEAD")
-        self.assertEqual(code, 1, "tree mode missed the term")
-        code, commit_out = self.scan("--commits", "HEAD~1..HEAD")
-        self.assertEqual(code, 1, "commit mode missed the term")
-        for out in (tree_out, commit_out):
-            self.assertNotIn(term_letters, out.lower())
-        return tree_out
-
     def test_a_cp1250_term_is_found_in_both_modes(self) -> None:
         self.add_terms("ďqxwzy")
         out = self.assert_found_in_both_modes_as({"c.txt": "meno: Ďqxwzy\n".encode("cp1250")}, "qxwzy")
@@ -926,12 +863,6 @@ class DenylistScanTests(unittest.TestCase):
 
     # --- #32 F5 m8: --hash keys the committed blob, not the working-tree file ---
 
-    def hash_key(self, target: str, number: str) -> str:
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            self.assertEqual(ds.main(["--repo", str(self.repo), "--hash", target, number]), 0)
-        return out.getvalue().strip()
-
     def test_hash_reads_the_committed_blob_not_the_working_tree(self) -> None:
         # the working-tree file differs from the scanned blob (an uncommitted edit; eol, encoding or
         # a smudge filter on checkout), so its key matched nothing the scan reported
@@ -941,187 +872,6 @@ class DenylistScanTests(unittest.TestCase):
         self.assertEqual(self.hash_key("a.txt", "1"), ds.line_key("a.txt", "keep zyxname here"))
         self.assertEqual(self.hash_key("a:b.txt", "1"), ds.line_key("a:b.txt", "keep zyxname too"))
 
-    # --- #32 F5 m10: the two non-ASCII characters whose normal form is ASCII punctuation ---
-
-    def test_the_greek_question_mark_and_varia_read_as_their_ascii_forms(self) -> None:
-        # NFC maps U+037E to `;` and U+1FEF to a backtick, so an ASCII term holding either could be
-        # spelled with them past the ASCII-only readings
-        self.add_terms("qxv;zyxw", "zyx`qwvn")
-        for name, text in (("greek.txt", "qxv\u037ezyxw"), ("varia.txt", "zyx\u1fefqwvn")):
-            with self.subTest(name=name):
-                self.assert_found_in_both_modes_as({name: f"x {text} y\n"}, "zyx")
-
-    # --- #32 F5 m5: named character references and the other default-ignorable characters ---
-
-    def test_named_references_and_ignorable_characters_do_not_hide_a_term(self) -> None:
-        self.add_terms("ďqxwzy")
-        texts = {"dcaron.html": "<b>&dcaron;qxwzy</b>", "shy.html": "zyx&shy;name", "zwsp.html": "zyx&ZeroWidthSpace;name",
-                 "double.html": "&amp;#271;qxwzy"}
-        texts |= {f"ignorable-{number}.md": f"zyx{char}name" for number, char in enumerate(
-            ("\u200e", "\u200f", "\u034f", "\ufe0f", "\ufe00", "\u2061", "\u2064", "\u2066", "\u202a",
-             "\u061c", "\u180e", "\U000e0020"))}
-        for name, text in texts.items():
-            with self.subTest(name=name):
-                self.assert_found_in_both_modes_as({name: f"x {text} y\n"}, "qxwzy" if "qxwzy" in text else "name")
-
-    # --- #32 F5 m3: UTF-8 shown as Windows-1252 (or with a byte cp1250 / cp1252 leave undefined) ---
-
-    def test_utf8_double_encoded_through_windows_code_pages_is_read_back(self) -> None:
-        # Windows reads UTF-8 as cp1252 (`ň` C5 88 shows as `Åˆ`) -- neither cp1250 nor Latin-1 reads
-        # 0x88 that way -- and it reads a byte a code page leaves undefined as the C1 control of the same
-        # number (`Á` C3 81 through cp1250 shows as `Ă` and U+0081)
-        self.add_terms("ňqxwzy", "ŕqxwzy", "áqxwzy", "čqxwzy")
-        texts = {"cp1252-n.txt": "ňqxwzy".encode().decode("cp1252"), "cp1252-r.txt": "ŕqxwzy".encode().decode("cp1252"),
-                 "cp1250-hole.txt": b"\xc3".decode("cp1250") + "\x81qxwzy",
-                 "cp1252-hole.txt": b"\xc4".decode("cp1252") + "\x8dqxwzy"}
-        for name, text in texts.items():
-            with self.subTest(name=name):
-                self.assert_found_in_both_modes_as({name: f"meno: {text}\n"}, "qxwzy")
-
-    # --- #32 F5 m4: commit metadata in the other Central European encodings ---
-
-    def test_commit_metadata_in_iso_8859_2_or_cp852_is_read_back(self) -> None:
-        # git stores a message or a name that is not valid UTF-8 with each such byte converted as if
-        # it were Latin-1; only cp1250 was read back from that, so `š` (B9 in ISO-8859-2, E7 in cp852)
-        # hid the term in a message and in an author name
-        self.add_terms("šqxwzy")
-        self.commit({"a.txt": "base\n"})
-        for number, codec in enumerate(("iso-8859-2", "cp852")):
-            for field in ("message", "author"):
-                with self.subTest(codec=codec, field=field):
-                    message = self.tmp / "message.txt"
-                    raw = f"fix for Šqxwzy {number}".encode(codec)
-                    message.write_bytes(raw if field == "message" else b"clean message")
-                    env = {**os.environb, b"GIT_AUTHOR_NAME": raw if field == "author" else b"test"}
-                    subprocess.run(["git", "-C", str(self.repo), "commit", "-q", "--allow-empty", "-F", str(message)],
-                                   check=True, capture_output=True, env=env)
-                    code, out = self.scan("--commits", "-1 HEAD")
-                    self.assertEqual(code, 1, out)
-                    self.assertIn("commit metadata: denylist entry 4", out)
-
-    # --- #32 F5 MAJOR: a term with diacritics is found in its plain ASCII spelling too ---
-
-    def test_a_diacritic_term_is_found_in_its_ascii_spelling(self) -> None:
-        # names lose their diacritics in paths, e-mail addresses, identifiers and host names, so
-        # `ďqxwzy` written `dqxwzy` passed; letters NFKD keeps whole are spelled out (ł l, ß ss)
-        self.add_terms("ďqxwzy", "łqzxwv ßqzv")
-        texts = {"mail.txt": ("contact dqxwzy@example.org", "dqxwzy"), "ident.rs": ("let DQXWZY_HOST = 1;", "dqxwzy"),
-                 "host.txt": ("https://dqxwzy.example.org/", "dqxwzy"), "other.txt": ("by lqzxwv ssqzv", "qzxwv")}
-        for name, (text, letters) in texts.items():
-            with self.subTest(name=name):
-                self.assert_found_in_both_modes_as({name: f"{text}\n"}, letters)
-
-    def test_the_ascii_spelling_of_a_term_is_redacted_in_paths_and_found_in_metadata(self) -> None:
-        self.add_terms("ďqxwzy")
-        out = self.assert_found_in_both_modes_as({"docs/dqxwzy-notes.md": "x zyxname\n"}, "qxwzy")
-        self.assertIn("tree docs/[redacted]: path: denylist entry 4", out)
-        git(self.repo, "config", "user.email", "dqxwzy@example.org")
-        self.commit({"a.txt": "clean\n"})
-        code, out = self.scan("--commits", "-1 HEAD")
-        self.assertEqual(code, 1)
-        self.assertIn("commit metadata: denylist entry 4", out)
-        self.assertNotIn("qxwzy", out.lower())
-
-    # --- #32 F5 m1: the words of a multi-word term may be split by any whitespace, a line break too ---
-
-    def test_any_whitespace_between_the_words_of_a_term_is_matched(self) -> None:
-        self.add_terms("zyxa qwvb")
-        texts = {"nbsp.txt": "zyxa\xa0qwvb", "tab.txt": "zyxa\tqwvb", "double.txt": "zyxa  qwvb",
-                 "entity.html": "zyxa&nbsp;qwvb", "em.txt": "zyxa\u2003qwvb", "crlf.txt": "zyxa \r qwvb"}
-        for name, text in texts.items():
-            with self.subTest(name=name):
-                self.assert_found_in_both_modes_as({name: f"by {text} here\n"}, "qwvb")
-
-    def test_a_term_split_across_two_lines_is_found_on_its_first_line(self) -> None:
-        # a wrapped paragraph or commit message puts a line break between the words
-        self.add_terms("zyxa qwvb")
-        out = self.assert_found_in_both_modes_as({"wrap.md": "intro\nnamed zyxa\nqwvb and more\n"}, "qwvb")
-        self.assertIn("tree wrap.md:2: denylist entry 4", out)
-        self.commit({"a.txt": "clean\n"}, message="fix for the zyxa\nqwvb case")
-        code, out = self.scan("--commits", "-1 HEAD")
-        self.assertEqual(code, 1)
-        self.assertIn("commit metadata: denylist entry 4", out)
-
-    def test_a_term_split_across_two_lines_is_allowlisted_by_its_first_line(self) -> None:
-        self.add_terms("zyxa qwvb")
-        self.commit({"wrap.md": "named zyxa\nqwvb and more\n"})
-        self.assertEqual(self.scan("--tree", "HEAD", "--commits", "HEAD")[0], 1)
-        allow = self.tmp / "allow.txt"
-        allow.write_text(self.hash_key("wrap.md", "1") + "  reviewed ordinary prose\n", encoding="utf-8")
-        self.assertEqual(self.scan("--allow", str(allow), "--tree", "HEAD", "--commits", "HEAD")[0], 0)
-
-    # --- #32 F5 m11: an embedded UTF-16 string is one finding, not one per byte order ---
-
-    def test_an_embedded_utf16_string_is_found_once(self) -> None:
-        # a little-endian string read big-endian one byte later spells the same letters, so it was
-        # reported twice (two allowlist lines for one string); the term may end the string
-        for codec in ("utf-16-le", "utf-16-be"):
-            for text in ("C:\\Users\\zyxname\\trace", "C:\\data\\zyxname"):
-                with self.subTest(codec=codec, text=text):
-                    name = f"t{len(text)}-{codec}.etl"
-                    content = b"\x07\x01\x02\x03" * 32 + text.encode(codec) + b"\x00\x00\xfe\x07"  # binary, not wide text
-                    out = self.assert_found_in_both_modes_as({name: content}, "zyxname")
-                    self.assertEqual(out.count(f" {name}:"), 1, out)
-                    code, out = self.scan("--commits", "HEAD~1..HEAD")
-                    self.assertEqual(out.count(f" {name}:"), 1, out)
-
-    # --- #32 F5 m9: a long line or run is read in bounded, overlapping segments ---
-
-    def assert_within_the_memory_budget(self, content: bytes, terms: list[str]) -> None:
-        self.deny.write_text("\n".join(terms) + "\n", encoding="utf-8")
-        self.commit({"long.bin": content})
-        tracemalloc.start()
-        try:
-            code, out = self.scan("--tree", "HEAD")
-            peak = tracemalloc.get_traced_memory()[1]
-        finally:
-            tracemalloc.stop()
-        self.assertEqual(code, 0, out)
-        self.assertLess(peak, 2 * len(content) + BUDGET_MEMORY_BEYOND_BLOB, f"{peak / (1 << 20):.0f} MiB peak")
-
-    def test_one_long_line_stays_within_the_memory_budget(self) -> None:
-        # batches were cut only at a line break, so a 4 MiB line was one batch and each of its
-        # readings a copy of it (escapes, accents and invisible characters make most of them)
-        unit = "abc \\x41 é\xad &amp; %41 ".encode()
-        self.assert_within_the_memory_budget(unit * (BUDGET_BLOB // len(unit)), [*BUDGET_TERMS, "ďabc"])
-
-    def test_one_long_binary_run_stays_within_the_memory_budget(self) -> None:
-        unit = "abcd é\xad zz ".encode()
-        self.assert_within_the_memory_budget(b"\x00" + unit * (BUDGET_BLOB // len(unit)) + b"\x00",
-                                             [*BUDGET_TERMS, "ďabc"])
-
-    def test_a_term_across_a_segment_boundary_is_found_once_and_keyed_alike(self) -> None:
-        # the term starts 3 characters before the unit's first CHUNK ends; its line or run is
-        # allowlisted by one --hash key in tree and commit mode
-        long = "x" * (dc.CHUNK - 4) + " zyxname " + "y" * dc.CHUNK
-        noise = random.Random(9).randbytes(4 * dc.CHUNK).replace(b"\x00", b"\x01")  # keeps a wide string binary
-        cases = {"text.txt": (("first\n" + long + "\n").encode(), "2"),
-                 "run.bin": (b"\x00\x01" + long.encode() + b"\x00", "run 1"),
-                 "wide.txt": (("first\n" + long + "\n").encode("utf-16"), "2"),
-                 "wide-run.bin": (b"\x00\x02" + long.encode("utf-16-le") + b"\x00\x00" + noise, None)}
-        for name, (content, unit) in cases.items():
-            with self.subTest(name=name):
-                self.commit({"base.txt": f"base {name}\n"})
-                self.commit({name: content})
-                for mode in (("--tree", "HEAD"), ("--commits", "HEAD~1..HEAD")):
-                    code, out = self.scan(*mode)
-                    self.assertEqual(code, 1, mode)
-                    self.assertEqual(out.count(f" {name}"), 1, out)
-                    self.assertNotIn("zyxname", out.lower())
-                if unit is None:  # the wide run's number depends on the noise's own runs
-                    unit = next(line for line in out.splitlines() if name in line).split(":")[1].strip()
-                allow = self.tmp / "allow.txt"
-                allow.write_text(self.hash_key(name, unit) + "  reviewed ordinary prose\n", encoding="utf-8")
-                self.assertEqual(self.scan("--allow", str(allow), "--tree", "HEAD", "--commits", "HEAD~1..HEAD"),
-                                 (0, "denylist: clean\n"))
-                self.commit({name: b"removed"})
-
-    def test_a_named_reference_never_makes_a_batch_separator(self) -> None:
-        # a reading that created U+E000 would shift every later unit: the hit must stay on line 3
-        self.commit({"a.html": "&dcaron;\n&#xE000;&#57344;\nkeep zyxname\n"})
-        code, out = self.scan("--tree", "HEAD")
-        self.assertEqual((code, out.count("denylist entry")), (1, 1), out)
-        self.assertIn("tree a.html:3: denylist entry 1", out)
 
 
 if __name__ == "__main__":
