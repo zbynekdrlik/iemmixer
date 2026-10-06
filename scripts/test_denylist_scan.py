@@ -946,7 +946,7 @@ class DenylistScanTests(unittest.TestCase):
         # NFC maps U+037E to `;` and U+1FEF to a backtick, so an ASCII term holding either could be
         # spelled with them past the ASCII-only readings
         self.add_terms("qxv;zyxw", "zyx`qwvn")
-        for name, text in (("greek.txt", "qxv;zyxw"), ("varia.txt", "zyx`qwvn")):
+        for name, text in (("greek.txt", "qxv\u037ezyxw"), ("varia.txt", "zyx\u1fefqwvn")):
             with self.subTest(name=name):
                 self.assert_found_in_both_modes_as({name: f"x {text} y\n"}, "zyx")
 
