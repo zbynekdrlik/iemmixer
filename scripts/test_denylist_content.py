@@ -79,6 +79,21 @@ class ContentTests(ScanTestCase):
                     code, out = self.scan("--commits", "HEAD~1..HEAD")
                     self.assertEqual(out.count(f" {name}:"), 1, out)
 
+    def test_a_short_term_needs_a_long_wide_string_in_binary_content(self) -> None:
+        # review of lane G3, finding 13: embedded UTF-16 strings were exempt from the rule for short
+        # terms in binary content, so a short wide string matched a short term by chance
+        self.deny.write_text("qxv\n", encoding="utf-8")
+        noise = b"\x07\x01\x02\x03" * 32
+        self.commit({"short.bin": noise + "qxv".encode("utf-16-le") + b"\x07" + noise})
+        self.assertEqual(self.scan("--tree", "HEAD", "--commits", "HEAD"), (0, "denylist: clean\n"))
+        self.commit({"long.bin": noise + "a longer wide string that names qxv".encode("utf-16-le") + b"\x07" + noise})
+        self.assertEqual(self.scan("--tree", "HEAD")[0], 1)
+
+    def test_many_embedded_wide_strings_stay_within_the_memory_budget(self) -> None:
+        # every two-character UTF-16 string of the blob was kept as a tuple and a string at once:
+        # ~600000 of them in 4 MiB (binary, not UTF-16 text) peaked at ~144 MiB
+        self.assert_within_the_memory_budget(b"\x00A\x00B\x07\x07\x07" * (BUDGET_BLOB // 7), BUDGET_TERMS)
+
     # --- #32 F5 m9: a long line or run is read in bounded, overlapping segments ---
 
     def assert_within_the_memory_budget(self, content: bytes, terms: list[str]) -> None:
