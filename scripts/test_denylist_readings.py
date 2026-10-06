@@ -95,7 +95,7 @@ class ReadingTests(ScanTestCase):
         # typed in ASCII) was missed where the text writes them (#32 lane G3 follow-up)
         self.add_terms("zyxqwvn")
         texts = {"name.txt": "by z\u00fdxqwv\u0148 today", "decomposed.txt": "zyx q z\u0301yxqwvn",
-                 "upper.txt": "ZYXQW\u00c1N"}
+                 "upper.txt": "Z\u00ddXQWV\u0147"}
         for name, text in texts.items():
             with self.subTest(name=name):
                 self.assert_found_in_both_modes_as({name: f"{text}\n"}, "qwv")
