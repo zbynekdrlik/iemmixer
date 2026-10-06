@@ -626,6 +626,26 @@ class PcChangeTests(unittest.TestCase):
         self.assertGreater(sum("holders = @(Get-GoldenAsioHolders" in c for c in self.pc.calls), 1)
         self.assertEqual(self.pc.bring_backs, 1)
 
+    # Review of lane G2, finding 6: the watch costs an ssh session and a PowerShell
+    # start per poll on the PC during the event, so REAPER is read only after a step
+    # that can take it off the card; a journal step is waited out from the state alone.
+    def test_a_step_that_cannot_take_reaper_down_is_waited_out_without_pc_reads(self) -> None:
+        self.window(in_flight={"step": "apply", "started": time.time(), "bound_s": 0.2})
+        (self.dir / "EVENT-NOW").touch()
+        t = time.monotonic()
+        sw.cmd_preempt(ENV)
+        self.assertGreaterEqual(time.monotonic() - t, 0.2)          # waited for the step all the same
+        self.assertFalse(any("holders = @(Get-GoldenAsioHolders" in c for c in self.pc.calls))
+
+    def test_the_watch_bound_is_never_more_than_the_steps_own_bound_from_now(self) -> None:
+        # A wall clock set back must not stretch the watch: the remaining bound is
+        # taken between 0 and bound_s.
+        self.window(in_flight={"step": "to-dev", "started": time.time() + 2, "bound_s": 0.2})
+        (self.dir / "EVENT-NOW").touch()
+        t = time.monotonic()
+        sw.cmd_preempt(ENV)
+        self.assertLess(time.monotonic() - t, 0.2 + sw.SETTLE_S + 0.8)
+
     # Review of lane G2, finding 5: one failed read must not end the watch, and the
     # stop file's clean-up runs however the watch ends.
     def test_a_failed_reaper_read_during_the_settle_is_an_alarm_and_the_watch_goes_on(self) -> None:
