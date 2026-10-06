@@ -90,6 +90,16 @@ class ReadingTests(ScanTestCase):
             with self.subTest(name=name):
                 self.assert_found_in_both_modes_as({name: f"{text}\n"}, letters)
 
+    def test_an_ascii_term_is_found_where_the_text_adds_diacritics(self) -> None:
+        # the reverse of the ASCII spelling: an entry the list holds without its diacritics (a name
+        # typed in ASCII) was missed where the text writes them (#32 lane G3 follow-up)
+        self.add_terms("zyxqwvn")
+        texts = {"name.txt": "by z\u00fdxqwv\u0148 today", "decomposed.txt": "zyx q z\u0301yxqwvn",
+                 "upper.txt": "ZYXQW\u00c1N"}
+        for name, text in texts.items():
+            with self.subTest(name=name):
+                self.assert_found_in_both_modes_as({name: f"{text}\n"}, "qwv")
+
     def test_the_ascii_spelling_of_a_term_is_redacted_in_paths_and_found_in_metadata(self) -> None:
         self.add_terms("ďqxwzy")
         out = self.assert_found_in_both_modes_as({"docs/dqxwzy-notes.md": "x zyxname\n"}, "qxwzy")
