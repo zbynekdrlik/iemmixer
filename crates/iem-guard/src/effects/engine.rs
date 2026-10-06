@@ -103,6 +103,10 @@ pub enum Msg {
     DriverReleased {
         reason: String,
     },
+    /// The engine's stream stopped parked (#35): nothing was released.
+    DriverParked {
+        reason: String,
+    },
     Superseded,
     Other,
 }
@@ -312,22 +316,56 @@ pub fn health(first: &Status, second: &Status) -> Health {
     }
 }
 
+/// How the engine's stream stopped: its last word before the engine ends,
+/// with its reason (`shutdown`, `fault`, `card refused`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Stopped {
+    /// `DriverReleased`: the card is free.
+    Released(String),
+    /// `DriverParked` (#35): the stream stayed parked (a callback stuck in
+    /// it, or the parked-engine test's hold), nothing was released; the
+    /// card is free once the engine's process has ended.
+    Parked(String),
+}
+
+impl Stopped {
+    /// What the guard logs when the word comes.
+    pub fn note(&self) -> String {
+        match self {
+            Self::Released(reason) | Self::Parked(reason) => {
+                format!("the engine released the driver: {reason}")
+            }
+        }
+    }
+
+    /// `EngineStop`'s failure when the engine did not end within `gone`
+    /// after the word.
+    pub fn not_ended(&self, gone: Duration) -> String {
+        format!(
+            "the engine released the driver but did not end within {} s",
+            gone.as_secs()
+        )
+    }
+}
+
 /// Where a `Shutdown` request stands (design §5.2 "back to event" step 2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Shutdown {
-    /// `DriverReleased` came, with its reason.
-    Released(String),
+    /// The stream stopped (`DriverReleased` or `DriverParked`): the step
+    /// waits for the engine's process to end either way.
+    Stopped(Stopped),
     /// The engine refused the request (its reply carried an error).
     Refused(String),
 }
 
-/// `released`: the reason of a `DriverReleased`; `reply`: the request's
-/// reply, `None` not yet, `Some(None)` accepted, `Some(Some(error))`
-/// refused. The release ends the wait, and so does a refusal; an accepted
-/// request waits on for the release (`None`).
-pub fn shutdown(released: Option<&str>, reply: Option<Option<String>>) -> Option<Shutdown> {
-    match (released, reply) {
-        (Some(reason), _) => Some(Shutdown::Released(reason.to_owned())),
+/// `stopped`: the engine's word on its stream (`DriverReleased` or
+/// `DriverParked`); `reply`: the request's reply, `None` not yet,
+/// `Some(None)` accepted, `Some(Some(error))` refused. The stream's stop
+/// ends the wait, and so does a refusal; an accepted request waits on for
+/// the stop (`None`).
+pub fn shutdown(stopped: Option<&Stopped>, reply: Option<Option<String>>) -> Option<Shutdown> {
+    match (stopped, reply) {
+        (Some(stopped), _) => Some(Shutdown::Stopped(stopped.clone())),
         (None, Some(Some(error))) => Some(Shutdown::Refused(error)),
         (None, Some(None) | None) => None,
     }
@@ -369,22 +407,70 @@ mod tests {
         }
     }
 
+    fn released() -> Stopped {
+        Stopped::Released("shutdown".into())
+    }
+
+    fn parked() -> Stopped {
+        Stopped::Parked("shutdown".into())
+    }
+
     #[test]
     fn a_shutdown_waits_for_the_release() {
         assert_eq!(shutdown(None, None), None);
         assert_eq!(shutdown(None, Some(None)), None);
         assert_eq!(
-            shutdown(Some("shutdown"), None),
-            Some(Shutdown::Released("shutdown".into()))
+            shutdown(Some(&released()), None),
+            Some(Shutdown::Stopped(released()))
         );
         assert_eq!(
-            shutdown(Some("shutdown"), Some(None)),
-            Some(Shutdown::Released("shutdown".into()))
+            shutdown(Some(&released()), Some(None)),
+            Some(Shutdown::Stopped(released()))
         );
         // The release wins over a late refusal.
         assert_eq!(
-            shutdown(Some("shutdown"), Some(Some("forbidden".into()))),
-            Some(Shutdown::Released("shutdown".into()))
+            shutdown(Some(&released()), Some(Some("forbidden".into()))),
+            Some(Shutdown::Stopped(released()))
+        );
+    }
+
+    /// A stream that stopped parked (#35) ends the wait as a release does:
+    /// `EngineStop` then waits for the engine's process to end, after which
+    /// the card is free, exactly as before the engine said so.
+    #[test]
+    fn a_parked_stop_ends_the_wait_like_a_release() {
+        assert_eq!(
+            shutdown(Some(&parked()), Some(None)),
+            Some(Shutdown::Stopped(parked()))
+        );
+        assert_eq!(
+            shutdown(Some(&parked()), Some(Some("forbidden".into()))),
+            Some(Shutdown::Stopped(parked()))
+        );
+    }
+
+    /// The log line and the step's failure say what happened (#35): a
+    /// parked stream released nothing, so neither says "released".
+    #[test]
+    fn a_parked_stop_is_never_called_a_release() {
+        let gone = Duration::from_secs(5);
+        assert_eq!(
+            released().note(),
+            "the engine released the driver: shutdown"
+        );
+        assert_eq!(
+            released().not_ended(gone),
+            "the engine released the driver but did not end within 5 s"
+        );
+        assert_eq!(
+            Stopped::Parked("fault".into()).note(),
+            "the engine's stream stayed parked (fault): nothing was released; \
+             the card is free once the engine has ended"
+        );
+        assert_eq!(
+            parked().not_ended(gone),
+            "the engine's stream stayed parked and the engine did not end within 5 s: \
+             the card may still be held"
         );
     }
 
@@ -649,6 +735,12 @@ mod tests {
             p(json!({"type": "driver_released", "reason": "shutdown"})),
             Msg::DriverReleased {
                 reason: "shutdown".into()
+            }
+        );
+        assert_eq!(
+            p(json!({"type": "driver_parked", "reason": "fault"})),
+            Msg::DriverParked {
+                reason: "fault".into()
             }
         );
         assert_eq!(p(json!({"type": "superseded"})), Msg::Superseded);
