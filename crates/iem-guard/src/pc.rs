@@ -512,6 +512,12 @@ pub trait Pc {
     /// Hello names the bundle; measured frames 32, callbacks advancing, no
     /// missed period for `secs` (one warm-up miss restarts the window once).
     fn engine_ready(&mut self, secs: u32, c: &Cancel) -> R<Status>;
+    /// Whether the engine this guard started (or adopted) has ended, and
+    /// its exit code (`Some(None)`: none): `None` while it runs or none is
+    /// watched. A look only: the crash watch still sees the exit unless a
+    /// new start replaces the engine (#32 F3-r4 4: the plan's ready wait
+    /// starts one that ended with exit 75 again).
+    fn engine_exit(&mut self) -> Option<Option<i32>>;
     fn engine_arm(&mut self) -> R<()>;
     /// `Shutdown`, `DriverReleased` ≤ 10 s, gone ≤ 5 s; a refused
     /// `Shutdown` fails at once.
@@ -740,6 +746,8 @@ pub mod fake {
         pub early_exits: Vec<Option<i32>>,
         /// How the engine started last will end before it is ready.
         ending: Option<Option<i32>>,
+        /// How it ended, once it did (`engine_exit`).
+        exit: Option<Option<i32>>,
         /// Every exclusion request: (bundle, the bundles kept).
         pub excluded: Vec<(String, Vec<String>)>,
         /// What `engine_seen` reports while an engine runs (a read of what
@@ -816,6 +824,7 @@ pub mod fake {
                 engine_starts: Vec::new(),
                 early_exits: Vec::new(),
                 ending: None,
+                exit: None,
                 excluded: Vec::new(),
                 seen: EngineSeen {
                     status: Status {
@@ -1071,6 +1080,7 @@ pub mod fake {
             self.engine_starts.push((hold, hil));
             self.facts.engine = true;
             self.ending = (!self.early_exits.is_empty()).then(|| self.early_exits.remove(0));
+            self.exit = None;
             Ok(self.pid())
         }
 
@@ -1079,11 +1089,17 @@ pub mod fake {
             self.enter(Call::EngineReady, Some(c))?;
             if let Some(code) = self.ending.take() {
                 self.facts.engine = false;
+                self.exit = Some(code);
                 return Err(StepError::failed(format!(
                     "the engine ended ({code:?}) before it was ready"
                 )));
             }
             Ok(self.status.clone())
+        }
+
+        /// A read of the watched engine: not a recorded call.
+        fn engine_exit(&mut self) -> Option<Option<i32>> {
+            self.exit
         }
 
         fn engine_arm(&mut self) -> R<()> {

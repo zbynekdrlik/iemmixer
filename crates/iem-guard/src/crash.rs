@@ -88,6 +88,14 @@ pub fn busy_retry(code: Option<i32>, streak: usize) -> bool {
     code == Some(STATE_BUSY) && streak <= BUSY_LIMIT
 }
 
+/// Whether a plan's ready wait starts its engine again: once, when the
+/// engine ended with [`STATE_BUSY`] before it was ready (`exit`: how it
+/// ended, `None` while it runs; #32 F3-r4 4). Any other end, or a second
+/// busy one, fails the step.
+pub fn ready_restart(exit: Option<Option<i32>>, restarted: bool) -> bool {
+    !restarted && exit == Some(Some(STATE_BUSY))
+}
+
 /// The respawn delay after the `n`-th abnormal exit in the window: 1, 2, 4,
 /// 8 s, then 10 s.
 pub fn backoff(abnormal_in_window: usize) -> Duration {

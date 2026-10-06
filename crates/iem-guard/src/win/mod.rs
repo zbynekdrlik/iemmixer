@@ -213,6 +213,10 @@ impl Pc for WinPc {
         engine::ready(self, secs, c)
     }
 
+    fn engine_exit(&mut self) -> Option<Option<i32>> {
+        self.kids.ended(Kid::Engine)
+    }
+
     fn engine_arm(&mut self) -> R<()> {
         engine::arm(self)
     }
