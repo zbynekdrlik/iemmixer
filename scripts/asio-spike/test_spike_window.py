@@ -472,15 +472,18 @@ class PcChangeTests(unittest.TestCase):
     def test_a_failed_call_clears_its_intent_and_keeps_what_it_recorded_before(self) -> None:
         self.window()
         real = self.pc.ps
+        during: list = []
 
         def failing(env, body, timeout=300, event="finish"):
             if "Set-SpikeBufferPref" in body:
+                during.append((sw.load_state().get("in_flight") or {}).get("step"))
                 raise sw.NoReply("PC command failed (exit 255): Connection reset")
             return real(env, body, timeout, event)
 
         sw.ps = failing
         with self.assertRaises(sw.NoReply):
             sw.cmd_set_buffer(ENV, type("A", (), {"frames": 32})())
+        self.assertEqual(during, ["set-buffer"])                                     # recorded during the call
         st = sw.load_state()
         self.assertEqual((st.get("in_flight"), st["pref_current"]), (None, 32))   # a preempt still restores the buffer
 

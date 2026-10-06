@@ -623,7 +623,9 @@ jobs:
           }
           $doc = Invoke-AnalysisStep
           if (-not $doc.ok) { throw "no stop file: the step did not start: $($doc.error)" }
-          if ($doc.r.priority -ne 'Idle' -or -not $doc.r.now) { throw "no stop file: priority '$($doc.r.priority)', now '$($doc.r.now)'" }
+          if ($doc.r.priority -ne 'Idle' -or -not $doc.r.now -or $doc.r.tuning -ne $true) {
+            throw "no stop file: priority '$($doc.r.priority)', now '$($doc.r.now)', IemTuning loaded '$($doc.r.tuning)'"
+          }
           New-Item -ItemType File -Force -Path $stop | Out-Null
           (Get-Item -LiteralPath $stop).LastWriteTimeUtc = [datetime]::UtcNow.AddMinutes(-5)
           $doc = Invoke-AnalysisStep

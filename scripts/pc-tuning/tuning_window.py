@@ -589,8 +589,10 @@ def analysis_step(root: str, since: str, body: str) -> str:
 
 
 # The step body the Windows CI runner sends through analysis_step: the priority
-# the guard set, and a call that only works once the tuning modules loaded.
-ANALYSIS_PROBE = "[pscustomobject]@{ priority = \"$((Get-Process -Id $PID).PriorityClass)\"; now = Get-IemNow }"
+# the guard set, IemMeasure's clock, and whether IemTuning loaded too (IemMeasure
+# keeps a failed IemTuning load to itself, so Get-IemNow alone proves nothing).
+ANALYSIS_PROBE = ("[pscustomobject]@{ priority = \"$((Get-Process -Id $PID).PriorityClass)\"; now = Get-IemNow; "
+                  "tuning = [bool](Get-Command -Name ConvertTo-IemLpNumber -ErrorAction SilentlyContinue) }")
 
 
 def read_text(path: Path) -> str:

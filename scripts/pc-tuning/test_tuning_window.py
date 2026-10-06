@@ -684,7 +684,8 @@ class PollScriptTests(unittest.TestCase):
         self.assertEqual(out.getvalue(), tw.sw.ps_script(root, step) + "\n")
         self.assertEqual(step, " ; ".join([tw.analysis_guard(root, since), tw.sw.measure_import(root), tw.ANALYSIS_PROBE]))
         self.assertIn("PriorityClass", tw.ANALYSIS_PROBE)
-        self.assertIn("Get-IemNow", tw.ANALYSIS_PROBE)   # proves the tuning modules loaded after the guard
+        self.assertIn("Get-IemNow", tw.ANALYSIS_PROBE)              # IemMeasure loaded after the guard
+        self.assertIn("Get-Command -Name ConvertTo-IemLpNumber", tw.ANALYSIS_PROBE)   # and IemTuning with it
 
 
 class RebootTests(unittest.TestCase):
