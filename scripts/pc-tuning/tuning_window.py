@@ -800,6 +800,13 @@ def cmd_reboot_prepare(env, args) -> None:
     # state compiles IemTuning, and a preempt never waits for it.
     st = tps(env, f"Get-IemTuningState -ProfilePath {sw.tuning_profile(env)}", timeout=120, event="abandon")
     prepared_at = tps(env, "Get-IemNow", timeout=60, event="abandon")
+    if not st.get("boot_token"):
+        # post-boot tells the reboot by this token alone (decision 5): without it the
+        # reboot could never be confirmed (review of lane G2, finding 7).
+        sw.alarm(f"the boot identity is unknown ({st.get('boot_problem') or 'no boot token'}): no reboot is prepared, "
+                 "since post-boot could not tell whether the PC rebooted; fix the boot key, then reboot-prepare again "
+                 "(the card stays free and the window open)")
+        raise StepError("no boot token on the PC: no reboot prepared")
 
     def prepare(current: dict) -> None:
         # The state as saved now: a preempt may have closed the window (REAPER back)
@@ -819,9 +826,6 @@ def cmd_reboot_prepare(env, args) -> None:
         current.update(card="rebooting", reboot={"prepared_at": prepared_at, "boot_token": st.get("boot_token")})
 
     sw.update_state(change=prepare)
-    if st.get("boot_problem"):
-        sw.alarm(f"the boot identity is unknown ({st['boot_problem']}): the pending and revert_pending lists of this "
-                 "reboot prove nothing (#32 MINOR-4)")
     items = as_list(st["items"])
     print(json.dumps({"reboot-prepare": done, "pending": [i["key"] for i in items if i["pending"]],
                       "revert_pending": [i["key"] for i in items if i["revert_pending"]]}))
