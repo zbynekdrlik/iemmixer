@@ -50,8 +50,9 @@ _UTF16_RUN = re.compile(rb"(?:\x00[\t\x20-\x7e\xa0-\xff]|\x01[\x00-\xff]){2,}")
 @dataclass(frozen=True)
 class Batch:
     """Consecutive units of one blob or diff -- lines of text, or text runs of binary content --
-    scanned together, or one segment of a unit longer than CHUNK. A batch holds at most CHUNK of
-    content plus an overlap, so memory stays bounded whatever the size of the blob or of a line."""
+    scanned together, or one segment of a unit longer than CHUNK. A batch holds whole lines of at
+    most CHUNK, byte runs of at most twice that, or a segment of at most max(CHUNK, six overlaps)
+    plus two overlaps, so memory stays bounded whatever the size of the blob or of a line."""
     source: str             # the units, decoded (decode), separated by `sep`, which no unit holds
     sep: str
     first: int              # the number of its first unit (`--hash` numbers units the same way)
@@ -112,10 +113,10 @@ def _segment_edge(data: bytes | str, low: int, at: int) -> int:
 
 def long_unit_batches(data: bytes | str, start: int, end: int, number: int, label: str, runs: bool,
                       overlap: int) -> Iterator[Batch]:
-    """Unit `number`, data[start:end], longer than CHUNK, in segments (#32 F5 m9): steps of about
-    CHUNK (at least six overlaps), and each segment reaching back at least `overlap` before its step,
-    so a match up to `overlap` long that crosses a step or a segment's start lies whole in the segment
-    before or after it. Edges sit right after a _SEGMENT_CUTS character where the content has one,
+    """Unit `number`, data[start:end], longer than CHUNK, in segments (#32 F5 m9): steps of up to
+    max(CHUNK, six overlaps) and at least half that, each segment reaching back at least `overlap`
+    (at most twice it) before its step, so a match up to `overlap` long that crosses a step or a
+    segment's start lies whole in the segment before or after it. Edges sit right after a _SEGMENT_CUTS character where the content has one,
     so a term at an edge is matched as in the whole unit. Each segment is a batch of its own carrying
     the whole unit's key; a match inside an overlap is found twice, and findings reports it once."""
     key = long_key(data, start, end)

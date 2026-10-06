@@ -6,9 +6,8 @@ the pre-push hook, the DENYLIST secret in CI. Output never contains a term, a
 matched line or an email address — only locations and the entry number, each
 finding line starting with `tree` or a commit's short SHA (never with a path,
 so a path beginning `::` cannot read as a CI workflow command). A path
-component that holds a term, or any non-ASCII character, is printed as
-`[redacted]` (the whole path when a term spans components), other components
-have their control characters escaped.
+component that holds a term, any non-ASCII character or any control character
+is printed as `[redacted]` (the whole path when a term spans components).
 
 Content is read as numbered units in bounded Batches (denylist_content, #32
 review m7, F5 m9): the lines of text; the decoded lines of UTF-32 / UTF-16
