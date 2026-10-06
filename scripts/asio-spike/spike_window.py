@@ -550,6 +550,11 @@ RUN_START_S = 60    # the request file and the task start
 # tuning-exit while one is in flight (two writers at once lose journal entries);
 # the late step runs the exit itself.
 JOURNAL_STEPS = ("enter", "exit", "apply", "undo")
+# The steps that can take REAPER off the card when they land late: the save and
+# quit, a preference write the driver may answer with a reset, a spike start.
+# The settle reads REAPER on the PC only after one of these (review of lane G2,
+# finding 6).
+REAPER_STEPS = ("to-dev", "set-buffer", "run")
 
 
 def step_guard(env: dict[str, str]) -> str:
@@ -683,14 +688,23 @@ def settle(env: dict[str, str], intent: dict) -> dict:
     bound. It runs without the lock, so that process can clear the intent. A
     read or a bring-back that fails is an owner alarm and the watch goes on
     (review of lane G2, finding 5); `on_card` tells whether its last read saw
-    REAPER on the card."""
+    REAPER on the card. Only a step in REAPER_STEPS can take REAPER off the
+    card: after any other (the journal steps) the watch reads no PC, it only
+    waits from the state for the step and its follow-up (an exit) to end, so
+    the event path does not run the guard's own exit next to it (finding 6)."""
     end = settle_until(intent)
     cleared = False
-    watched = {"step": intent["step"], "checks": 0, "brought_back_again": 0, "errors": 0, "on_card": False}
+    reads = intent["step"] in REAPER_STEPS
+    watched = {"step": intent["step"], "checks": 0, "brought_back_again": 0, "errors": 0, "on_card": False if reads else None}
     while True:
         if not cleared and load_state().get("in_flight") != intent:
             cleared = True
             end = min(end, time.time() + SETTLE_S)
+        if not reads:
+            if cleared or time.time() >= end:
+                return watched
+            time.sleep(POLL_S)
+            continue
         watched["checks"] += 1
         try:
             watched["on_card"] = reaper_on_card(env)
@@ -727,8 +741,13 @@ def clear_stop(env: dict[str, str]) -> str:
 
 
 def settle_until(intent: dict) -> float:
-    """The latest end of a settle on `intent` (wall clock)."""
-    return float(intent["started"]) + float(intent["bound_s"]) + SETTLE_S
+    """The latest end of a settle on `intent` (wall clock): SETTLE_S after the
+    step's remaining bound, taken between 0 and its whole bound, so a clock
+    set back or forward never stretches the watch (review of lane G2,
+    finding 6)."""
+    bound = float(intent["bound_s"])
+    now = time.time()
+    return now + min(max(float(intent["started"]) + bound - now, 0.0), bound) + SETTLE_S
 
 
 def settle_live(state: dict) -> bool:
@@ -790,7 +809,7 @@ def close_out(env: dict[str, str], intent, done: list) -> dict:
         finally:
             out["stop_file"] = clear_stop(env)   # however the watch ended (review of lane G2, finding 5)
     print(json.dumps({"close": out}), flush=True)
-    if not out.get("settle", {}).get("on_card", True):
+    if out.get("settle", {}).get("on_card") is False:
         raise StepError(f"REAPER was not seen on the card at the end of the watch over {intent['step']}: the event path "
                         "brings it back (iemmode event)")
     return out
