@@ -223,12 +223,28 @@ def fold(text: str) -> str:
     return text.lower()
 
 
+# Latin letters NFKD keeps whole, with their usual ASCII spellings
+_ASCII_LETTERS = str.maketrans({"ł": "l", "Ł": "L", "đ": "d", "Đ": "D", "ø": "o", "Ø": "O", "ß": "ss", "ẞ": "SS",
+                                "æ": "ae", "Æ": "AE", "œ": "oe", "Œ": "OE", "ħ": "h", "Ħ": "H", "ŧ": "t", "Ŧ": "T",
+                                "ı": "i", "ð": "d", "Ð": "D", "þ": "th", "Þ": "TH"})
+
+
+def ascii_spelling(term: str) -> str:
+    """The term as a name is written in a path, an e-mail address, an identifier or a host name: its
+    diacritics dropped (NFKD, combining marks removed) and the Latin letters NFKD keeps whole spelled
+    in ASCII (`ł` l, `ß` ss). An entry is matched in this spelling too (#32 F5 MAJOR), and an ASCII entry in the
+    text's own ASCII spelling (Views; #32 lane G3 follow-up)."""
+    decomposed = unicodedata.normalize("NFKD", term.translate(_ASCII_LETTERS))
+    return nfc("".join(char for char in decomposed if unicodedata.category(char) != "Mn"))
+
+
 class Views:
     """The readings of a decoded text that the terms are matched against, each made on first need.
 
     The text and the text with its escapes decoded (unescape), each also with any double-encoded
     UTF-8 read back (unmojibake), and the decoded text compacted (compact: NFKC, invisible characters
-    removed) serve an ASCII term as they are: a re-reading only turns lone
+    removed) and that compact reading in ASCII spelling (ascii_spelling: an ASCII entry the text
+    writes with diacritics) serve an ASCII term as they are: a re-reading only turns lone
     surrogates -- non-word characters -- into letters or symbols, and NFC turns no character into
     an ASCII one but U+037E, U+1FEF (compact reads both as their ASCII forms) and the Kelvin sign
     (fold), so neither can add an ASCII term's match. Their case folds pre-filter
@@ -248,6 +264,10 @@ class Views:
         compacted = compact(self.bases[-1])
         if compacted not in self.raw:
             self.raw.append(compacted)
+        if not compacted.isascii():  # the text's diacritics dropped: an ASCII entry written with them
+            unaccented = ascii_spelling(compacted)
+            if unaccented not in self.raw:
+                self.raw.append(unaccented)
         self.folded = [fold(view) for view in self.raw]
         self._normal: list[str] | None = None
 

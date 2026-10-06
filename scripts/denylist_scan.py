@@ -69,7 +69,6 @@ import re
 import shlex
 import subprocess
 import sys
-import unicodedata
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -77,7 +76,7 @@ from pathlib import Path
 from denylist_containers import Member, Problem, blob_key, container_kind, expand
 from denylist_content import (MIN_BINARY_TERM, OVERLAP_PER_CHARACTER, SEGMENT_OVERLAP, Batch, batches, is_plain_text,
                               line_batches, long_text_run, unit_key)
-from denylist_readings import SEP, Views, decode, fold, from_git_latin1, nfc
+from denylist_readings import SEP, Views, ascii_spelling, decode, fold, from_git_latin1, nfc
 
 EXIT_CLEAN = 0
 EXIT_HIT = 1
@@ -197,20 +196,6 @@ def printable(text: str) -> str:
 
 
 _ASCII_WORD = re.compile("[a-z0-9]{2,}")
-# Latin letters NFKD keeps whole, with their usual ASCII spellings
-_ASCII_LETTERS = str.maketrans({"ł": "l", "Ł": "L", "đ": "d", "Đ": "D", "ø": "o", "Ø": "O", "ß": "ss", "ẞ": "SS",
-                                "æ": "ae", "Æ": "AE", "œ": "oe", "Œ": "OE", "ħ": "h", "Ħ": "H", "ŧ": "t", "Ŧ": "T",
-                                "ı": "i", "ð": "d", "Ð": "D", "þ": "th", "Þ": "TH"})
-
-
-def ascii_spelling(term: str) -> str:
-    """The term as a name is written in a path, an e-mail address, an identifier or a host name: its
-    diacritics dropped (NFKD, combining marks removed) and the Latin letters NFKD keeps whole spelled
-    in ASCII (`ł` l, `ß` ss). An entry is matched in this spelling too (#32 F5 MAJOR)."""
-    decomposed = unicodedata.normalize("NFKD", term.translate(_ASCII_LETTERS))
-    return nfc("".join(char for char in decomposed if unicodedata.category(char) != "Mn"))
-
-
 @dataclass(frozen=True)
 class Term:
     entry: int
