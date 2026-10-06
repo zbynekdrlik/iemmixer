@@ -184,6 +184,18 @@ pub(crate) fn dword(text: &str) -> io::Result<u32> {
         .map_err(|_| invalid(format!("not a decimal DWORD: {text:?}")))
 }
 
+/// Windows' `ERROR_ACCESS_DENIED`.
+const ACCESS_DENIED: i32 = 5;
+
+/// Whether a durable rename that failed is made again with POSIX
+/// semantics ([`crate::file::rename_durable`]): only after
+/// `ERROR_ACCESS_DENIED`, which `MoveFileExW` gives for a target another
+/// process holds with delete sharing (#32 F3-r4 5). Any other error is the
+/// rename's own.
+pub(crate) fn rename_again(e: &io::Error) -> bool {
+    e.raw_os_error() == Some(ACCESS_DENIED)
+}
+
 /// A window command or notification goes to one window: never the null
 /// handle (a thread message) and never the broadcast handle.
 pub(crate) fn one_window(hwnd: isize) -> io::Result<()> {
