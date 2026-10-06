@@ -396,7 +396,7 @@ pub(super) fn stop(pc: &mut WinPc, c: &Cancel) -> R<()> {
         }
         None => {
             return Err(StepError::failed(format!(
-                "no DriverReleased within {} s",
+                "no DriverReleased or DriverParked within {} s",
                 RELEASE.as_secs()
             )));
         }

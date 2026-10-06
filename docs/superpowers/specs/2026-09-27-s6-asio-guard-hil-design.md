@@ -87,7 +87,7 @@ Any failure unwinds to `event`.
 **Back to `event`:**
 
 1. Cancel HIL jobs; stop the idle runner.
-2. Engine `Shutdown` → `DriverReleased` ≤ 10 s → process gone. **On a timeout the guard reads the engine's health** over the supervisor pipe (callbacks advancing, not faulted, not parked):
+2. Engine `Shutdown` → `DriverReleased` (or `DriverParked`: the stream stayed parked, nothing released; #35) ≤ 10 s → process gone. **On a timeout the guard reads the engine's health** over the supervisor pipe (callbacks advancing, not faulted, not parked):
    - healthy → it stops here and keeps iemmixer serving the band (engine, server, tray untouched), alarms, and the agent tells the owner;
    - dead or parked → it stops here too (no REAPER while the card may be held, no app without REAPER) and the agent sends the owner a prepared Slovak ❓ offering a reboot (= `event`).
 3. Server: Ctrl-Break delivered to its own console (§5.5); tray: `Quit`; ports free.
