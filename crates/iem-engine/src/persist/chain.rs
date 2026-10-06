@@ -6,9 +6,11 @@
 //! **The save protocol.** `save` writes the new state to `save.new` and
 //! flushes it, renames `save.new` over `save.tmp` (so `save.tmp` is only
 //! ever a complete save, never written in place), then renames
-//! `current.json` to the next generation and `save.tmp` to `current.json`
-//! and syncs the directory; pruning old generations comes after, apart. A
-//! crash before the last rename leaves the newest state only in `save.tmp`.
+//! `current.json` to the next generation (named with the revision the
+//! marker shows for it), the marker `current.json.rev-<rev>` to the new
+//! revision, and `save.tmp` to `current.json`, and syncs the directory;
+//! pruning old generations comes after, apart. A crash before the last
+//! rename leaves the newest state only in `save.tmp`.
 //!
 //! **Each file is Missing, Unreadable, Damaged or Valid.** Unreadable: an
 //! I/O error (a lock, no access, a failing disk); one that may pass (a
@@ -30,12 +32,18 @@
 //! lower revision is only legitimate as a leftover: it is named in an
 //! alarm (and the next save moves it aside).
 //!
-//! **Past an Unreadable `current.json`** the state loaded (a generation,
-//! `save.tmp`, the baseline or the defaults) continues its revision
-//! `REV_JUMP` above its own, with an alarm (#32 MAJOR-3): the file may
-//! hold any revision the last session reached, recovery never moves it,
-//! and once it can be read again it must not outrank the saves made since
-//! this boot.
+//! **Past an Unreadable live file** (`current.json`, or a generation newer
+//! than the one loaded) the state loaded (a generation, `save.tmp`, the
+//! baseline or the defaults) continues its revision `REV_JUMP` above the
+//! highest revision it or any name in the directory shows, with an alarm
+//! (#32 MAJOR-3, F3-r4 2): the file may hold any revision the last session
+//! reached, recovery never moves it, and once it can be read again it must
+//! not outrank the saves made since this boot. A floor only the contents
+//! carry is unknowable exactly then, so every commit writes revisions into
+//! names (a generation's carries the revision it holds, the marker's the
+//! one `current.json` holds), which a listing shows whatever a file's
+//! contents do. Names without a revision (an older engine's) show none:
+//! the jump then counts from the state loaded, as before.
 //!
 //! **Recovery at boot**, before the engine writes (under `Store::lock`):
 //! a Damaged `current.json` is moved aside to `current.json.damaged-<n>`
@@ -66,12 +74,14 @@ use super::*;
 /// `save.tmp.orphan-<n>`): 1 up to this.
 const QUARANTINE_NAMES: u32 = 1000;
 
-/// How far the revision of a state loaded past an Unreadable
-/// `current.json` jumps (#32 MAJOR-3). The core's revision grows by one per
-/// changing request and is carried across restarts; a million requests is
-/// far beyond what one session (or years of them) reaches, so the
-/// session's saves outrank whatever that file holds. Each such boot jumps
-/// again; the `u64` revision cannot run out.
+/// How far above the highest revision the state loaded or any name in the
+/// directory shows a boot past an Unreadable live file continues (#32
+/// MAJOR-3, F3-r4 2). The names show every committed revision; above them
+/// only a save not yet committed (`save.tmp`) can lie, and the core's
+/// revision grows by one per changing request: a million requests is far
+/// beyond what one session reaches, so the session's saves outrank
+/// whatever that file holds. Each such boot jumps again; the `u64`
+/// revision cannot run out.
 const REV_JUMP: u64 = 1_000_000;
 
 /// Reads of a file that fail with an error that may pass, with a pause
@@ -110,9 +120,25 @@ impl Store {
     /// error, never "no state" (#32 D5, m3: the seed would write over state
     /// it could not see).
     pub fn live_state(&self) -> io::Result<Option<Source>> {
+        Ok(self.live()?.map(|(source, _)| source))
+    }
+
+    /// The name of the file `live_state` names, as it is on disk (a
+    /// generation's name carries its revision, #32 F3-r4 2).
+    pub fn live_file(&self) -> io::Result<Option<String>> {
+        Ok(self.live()?.map(|(_, path)| {
+            path.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+        }))
+    }
+
+    /// The strict pick's source and file (`live_state`).
+    fn live(&self) -> io::Result<Option<(Source, PathBuf)>> {
         Ok(self
             .pick_live(&mut Pick::default(), Reading::Strict)?
-            .map(|(_, source)| source))
+            .map(|(_, source, path)| (source, path)))
     }
 
     /// The load chain: the live state (`current.json`, `save.tmp` or the
@@ -122,20 +148,50 @@ impl Store {
     /// be used; one that exists and does not, or cannot be read, is
     /// `rejected` with the reason, as is a `save.tmp` passed over for an
     /// older revision and a directory whose generations cannot be listed.
-    /// Past an Unreadable `current.json` the revision continues
-    /// `REV_JUMP` above the state loaded (#32 MAJOR-3).
+    /// Past an Unreadable `current.json` or newer generation the revision
+    /// continues `REV_JUMP` above the highest revision the state loaded or
+    /// any name shows (#32 MAJOR-3, F3-r4 2).
     pub fn load(&self, topo: &Topology) -> Loaded {
-        let mut loaded = self.load_chain(topo);
-        if loaded.current_json == FileState::Unreadable {
-            let rev = loaded.persisted.rev.saturating_add(REV_JUMP);
-            loaded.persisted.rev = rev;
-            loaded.alarms.push(format!(
-                "{CURRENT} cannot be read, so the revision continues at {rev}, \
-                 above anything it can hold"
-            ));
+        let (mut loaded, passed_over) = self.load_chain(topo);
+        if !passed_over.is_empty() {
+            self.continue_above(&mut loaded, &passed_over);
         }
         self.orphans_above(&mut loaded);
         loaded
+    }
+
+    /// Continues the loaded revision `REV_JUMP` above the highest one the
+    /// state loaded or any name in the directory shows, past the live
+    /// files `passed_over` that could not be read (#32 MAJOR-3, F3-r4 2),
+    /// with an alarm. A listing that fails leaves the state loaded's own
+    /// revision as the base (named in an alarm too).
+    fn continue_above(&self, loaded: &mut Loaded, passed_over: &[String]) {
+        let floor = match self.list() {
+            Ok(listed) => listed.floor,
+            Err(e) => {
+                loaded.alarms.push(format!(
+                    "the revisions the state files' names show cannot be listed ({e})"
+                ));
+                None
+            }
+        };
+        let rev = loaded
+            .persisted
+            .rev
+            .max(floor.unwrap_or(0))
+            .saturating_add(REV_JUMP);
+        loaded.persisted.rev = rev;
+        let (names, it) = match passed_over {
+            [one] => (one.clone(), "it"),
+            more => (more.join(" and "), "they"),
+        };
+        let shown = floor.map_or_else(String::new, |floor| {
+            format!(" (the names show revision {floor} at most)")
+        });
+        loaded.alarms.push(format!(
+            "{names} cannot be read, so the revision continues at {rev}, \
+             above anything {it} can hold{shown}"
+        ));
     }
 
     /// Names in an alarm each orphan (`save.tmp.orphan-<n>`) that holds a
@@ -180,8 +236,9 @@ impl Store {
         }
     }
 
-    /// The chain itself (see `load`).
-    fn load_chain(&self, topo: &Topology) -> Loaded {
+    /// The chain itself (see `load`), and the live files it passed over
+    /// because they could not be read.
+    fn load_chain(&self, topo: &Topology) -> (Loaded, Vec<String>) {
         let mut pick = Pick::default();
         let live = self
             .pick_live(&mut pick, Reading::Tolerant)
@@ -189,15 +246,16 @@ impl Store {
                 pick.rejected.push((self.dir.clone(), e.to_string()));
                 None
             });
-        if let Some((persisted, source)) = live {
-            return settle(topo, persisted, source, pick);
+        let passed_over = std::mem::take(&mut pick.passed_over);
+        if let Some((persisted, source, _)) = live {
+            return (settle(topo, persisted, source, pick), passed_over);
         }
         let baseline = self.dir.join(BASELINE);
         if let Ok(Read::Valid(persisted)) = self.read_state(&baseline, &mut pick, Reading::Tolerant)
         {
-            return settle(topo, persisted, Source::Baseline, pick);
+            return (settle(topo, persisted, Source::Baseline, pick), passed_over);
         }
-        Loaded {
+        let loaded = Loaded {
             persisted: Persisted {
                 topology_hash: topo.hash.clone(),
                 state: defaults_muted(topo),
@@ -209,25 +267,33 @@ impl Store {
             alarms: pick.alarms,
             current_json: pick.current_json,
             save_tmp: pick.save_tmp,
-        }
+        };
+        (loaded, passed_over)
     }
 
-    /// The live state and its source, shared by `load` (tolerant: a file it
-    /// cannot read is `rejected`) and `live_state` (strict: that is an
-    /// error), so the seed names exactly the file the engine loads.
+    /// The live state, its source and its file, shared by `load` (tolerant:
+    /// a file it cannot read is `rejected`, and one that could hold live
+    /// state goes to `Pick::passed_over`) and `live_state` (strict: that is
+    /// an error), so the seed names exactly the file the engine loads.
     fn pick_live(
         &self,
         pick: &mut Pick,
         reading: Reading,
-    ) -> io::Result<Option<(Persisted, Source)>> {
+    ) -> io::Result<Option<(Persisted, Source, PathBuf)>> {
         let tmp_path = self.dir.join(TMP);
-        let current = self.read_state(&self.dir.join(CURRENT), pick, reading)?;
+        let current_path = self.dir.join(CURRENT);
+        let current = self.read_state(&current_path, pick, reading)?;
         pick.current_json = current.state();
+        if pick.current_json == FileState::Unreadable {
+            pick.passed_over.push(CURRENT.to_owned());
+        }
         let tmp = self.read_state(&tmp_path, pick, reading)?;
         pick.save_tmp = tmp.state();
         if let Read::Valid(current) = current {
             return Ok(Some(match tmp {
-                Read::Valid(tmp) if supersedes(&tmp, &current) => (tmp, Source::Interrupted),
+                Read::Valid(tmp) if supersedes(&tmp, &current) => {
+                    (tmp, Source::Interrupted, tmp_path)
+                }
                 Read::Valid(tmp) => {
                     pick.rejected.push((
                         tmp_path,
@@ -240,9 +306,11 @@ impl Store {
                         "{TMP} (revision {}) is older than {CURRENT}'s {} and is not loaded",
                         tmp.rev, current.rev
                     ));
-                    (current, Source::Current)
+                    (current, Source::Current, current_path)
                 }
-                Read::Missing | Read::Unreadable | Read::Damaged => (current, Source::Current),
+                Read::Missing | Read::Unreadable | Read::Damaged => {
+                    (current, Source::Current, current_path)
+                }
             }));
         }
         // current.json missing or damaged (#32 m1): save.tmp against the
@@ -262,13 +330,24 @@ impl Store {
         };
         let mut newest = None;
         for (seq, path) in gens.into_iter().rev() {
-            if let Read::Valid(generation) = self.read_state(&path, pick, reading)? {
-                newest = Some((generation, seq));
-                break;
+            match self.read_state(&path, pick, reading)? {
+                Read::Valid(generation) => {
+                    newest = Some((generation, seq, path));
+                    break;
+                }
+                // #32 F3-r4 2: newer than the one that loads, it may hold
+                // any revision its name shows.
+                Read::Unreadable => pick.passed_over.push(
+                    path.file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                Read::Missing | Read::Damaged => {}
             }
         }
         Ok(match (tmp, newest) {
-            (Read::Valid(tmp), Some((generation, seq))) if !supersedes(&tmp, &generation) => {
+            (Read::Valid(tmp), Some((generation, seq, path))) if !supersedes(&tmp, &generation) => {
                 pick.rejected.push((
                     tmp_path,
                     format!(
@@ -280,7 +359,7 @@ impl Store {
                     "{TMP} (revision {}) is older than generation {seq}'s {} and is not loaded",
                     tmp.rev, generation.rev
                 ));
-                Some((generation, Source::Generation(seq)))
+                Some((generation, Source::Generation(seq), path))
             }
             (Read::Valid(tmp), _) => {
                 // #32 P8: compared with nothing when the listing failed.
@@ -290,9 +369,9 @@ impl Store {
                          generations, which cannot be listed ({e})"
                     ));
                 }
-                Some((tmp, Source::Interrupted))
+                Some((tmp, Source::Interrupted, tmp_path))
             }
-            (_, Some((generation, seq))) => Some((generation, Source::Generation(seq))),
+            (_, Some((generation, seq, path))) => Some((generation, Source::Generation(seq), path)),
             (_, None) => None,
         })
     }
@@ -364,7 +443,7 @@ impl Store {
                  and recovery never moves it"
             ));
         } else if loaded.source == Source::Interrupted {
-            match self.finish_interrupted() {
+            match self.finish_interrupted(loaded.persisted.rev) {
                 Ok(committed) => {
                     done.finished = true;
                     done.warnings.extend(
@@ -445,9 +524,11 @@ impl Store {
         )))
     }
 
-    fn finish_interrupted(&self) -> io::Result<Committed> {
+    /// `save`'s commit of the `save.tmp` the boot loaded at `rev` (at
+    /// least what it holds: a jumped revision only raises the marker).
+    fn finish_interrupted(&self, rev: u64) -> io::Result<Committed> {
         self.files.sync_file(&self.dir.join(TMP))?;
-        self.commit_tmp()
+        self.commit_tmp(rev)
     }
 
     /// Reads and decodes `path`. A file that does not decode goes to
@@ -530,6 +611,9 @@ struct Pick {
     alarms: Vec<String>,
     current_json: FileState,
     save_tmp: FileState,
+    /// Live files that could not be read (`current.json`, a generation
+    /// newer than the one that loads): the load continues above them.
+    passed_over: Vec<String>,
     /// Pauses between read tries so far (`READ_PAUSES` at most).
     paused: usize,
 }
@@ -545,10 +629,11 @@ struct Pick {
 /// beside it. After a fallback boot the core restarts at an older state's
 /// revision, and the file it fell back from must never outrank the
 /// session's saves: a Damaged `current.json` is moved aside by the
-/// recovery (it cannot come back), and past an Unreadable one (which
-/// recovery never moves) the load continues the revision `REV_JUMP`
-/// above the state loaded (#32 MAJOR-3), so the session's saves outrank
-/// the file once it can be read again. A lower revision never wins: an
+/// recovery (it cannot come back), and past an Unreadable one or newer
+/// generation (which recovery never moves) the load continues the
+/// revision `REV_JUMP` above the highest the state loaded or any name
+/// shows (#32 MAJOR-3, F3-r4 2), so the session's saves outrank the file
+/// once it can be read again. A lower revision never wins: an
 /// import's fresh count (0) and an older engine's leftover baseline never
 /// roll the saved state back (such a baseline at the same revision holds
 /// that revision's state); such a `save.tmp` is named in an alarm.

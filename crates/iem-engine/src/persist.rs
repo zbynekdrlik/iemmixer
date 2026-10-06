@@ -2,7 +2,14 @@
 //! checksummed state files in the state directory —
 //!
 //! - `current.json`: the latest save;
-//! - `gen-<seq>.json`: the 20 previous saves (the newest has the highest seq);
+//! - `gen-<seq>-r<rev>.json`: the 20 previous saves (the newest has the
+//!   highest seq), each name carrying the revision it holds (`gen-<seq>.json`
+//!   when no marker told it: an older engine's, or the first rotation after
+//!   one);
+//! - `current.json.rev-<rev>`: an empty marker whose name carries the
+//!   revision `current.json` holds, renamed at each commit, so a listing
+//!   shows every committed revision even when contents cannot be read
+//!   (#32 F3-r4 2; `chain`, the revision floor);
 //! - `baseline.json`: written at each import (and, from S6, at `live` entry);
 //! - `save.new`: a save being written (never a load source);
 //! - `save.tmp`: a complete save before its renames, always replaced whole
@@ -63,6 +70,9 @@ const LOCK: &str = "engine.lock";
 const BASELINE_TMP: &str = "baseline.tmp";
 /// The name of a `save.tmp` moved aside, before its number.
 const ORPHAN: &str = "save.tmp.orphan-";
+/// The marker's name before the revision `current.json` holds (#32 F3-r4
+/// 2).
+const MARK: &str = "current.json.rev-";
 /// The pause between two tries of a held state directory's lock.
 pub const LOCK_POLL: Duration = Duration::from_millis(100);
 
@@ -89,20 +99,6 @@ pub enum Source {
     Generation(u64),
     Baseline,
     Defaults,
-}
-
-impl Source {
-    /// The state file this source names in the state directory; `None` for
-    /// the muted defaults.
-    pub fn file_name(self) -> Option<String> {
-        match self {
-            Self::Current => Some(CURRENT.to_owned()),
-            Self::Interrupted => Some(TMP.to_owned()),
-            Self::Generation(seq) => Some(generation_name(seq)),
-            Self::Baseline => Some(BASELINE.to_owned()),
-            Self::Defaults => None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -181,15 +177,28 @@ pub fn decode(bytes: &[u8]) -> Result<Persisted, String> {
     serde_json::from_str(file.payload.get()).map_err(|e| format!("payload: {e}"))
 }
 
-fn generation_name(seq: u64) -> String {
-    format!("gen-{seq:010}.json")
+/// A generation's file name: `gen-<seq>-r<rev>.json` with the revision it
+/// holds, `gen-<seq>.json` when that is not known (#32 F3-r4 2).
+fn generation_name(seq: u64, rev: Option<u64>) -> String {
+    match rev {
+        Some(rev) => format!("gen-{seq:010}-r{rev}.json"),
+        None => format!("gen-{seq:010}.json"),
+    }
 }
 
-fn generation_seq(name: &str) -> Option<u64> {
-    name.strip_prefix("gen-")?
-        .strip_suffix(".json")?
-        .parse()
-        .ok()
+/// A generation file name's seq and the revision it shows (`None`: a name
+/// without one, as older engines wrote).
+fn generation_parts(name: &str) -> Option<(u64, Option<u64>)> {
+    let stem = name.strip_prefix("gen-")?.strip_suffix(".json")?;
+    match stem.split_once("-r") {
+        Some((seq, rev)) => Some((seq.parse().ok()?, Some(rev.parse().ok()?))),
+        None => Some((stem.parse().ok()?, None)),
+    }
+}
+
+/// The revision a marker's name shows (`current.json.rev-<rev>`).
+fn mark_rev(name: &str) -> Option<u64> {
+    name.strip_prefix(MARK)?.parse().ok()
 }
 
 /// The number of a `save.tmp` moved aside (`save.tmp.orphan-<n>`).
@@ -202,8 +211,14 @@ fn orphan_number(name: &str) -> Option<u32> {
 struct Listing {
     /// The generations (seq, path), oldest first.
     generations: Vec<(u64, PathBuf)>,
+    /// The markers (rev, path), lowest first (one, but for a crash
+    /// mid-way or a hand's copy).
+    marks: Vec<(u64, PathBuf)>,
     /// The `save.tmp`s moved aside (n, name, path), by their number.
     orphans: Vec<(u32, String, PathBuf)>,
+    /// The highest revision any name shows (a generation's or a
+    /// marker's); `None`: no name shows one.
+    floor: Option<u64>,
 }
 
 /// Sorts a directory's entries (name, path) by what their names show. An
@@ -216,23 +231,20 @@ fn listing(entries: impl Iterator<Item = io::Result<(OsString, PathBuf)>>) -> io
         let Some(name) = name.to_str() else {
             continue;
         };
-        if let Some(seq) = generation_seq(name) {
+        if let Some((seq, rev)) = generation_parts(name) {
             listed.generations.push((seq, path));
+            listed.floor = listed.floor.max(rev);
+        } else if let Some(rev) = mark_rev(name) {
+            listed.marks.push((rev, path));
+            listed.floor = listed.floor.max(Some(rev));
         } else if let Some(n) = orphan_number(name) {
             listed.orphans.push((n, name.to_owned(), path));
         }
     }
     listed.generations.sort();
+    listed.marks.sort();
     listed.orphans.sort();
     Ok(listed)
-}
-
-/// The generation files among a directory's entries (name, path), oldest
-/// first (`listing`).
-fn generation_entries(
-    entries: impl Iterator<Item = io::Result<(OsString, PathBuf)>>,
-) -> io::Result<Vec<(u64, PathBuf)>> {
-    Ok(listing(entries)?.generations)
 }
 
 /// `e`, naming where the save moved `save.tmp` aside before it failed
@@ -350,10 +362,6 @@ impl Store {
         self.lock()
     }
 
-    fn generation_path(&self, seq: u64) -> PathBuf {
-        self.dir.join(generation_name(seq))
-    }
-
     /// What the state directory's names show (`listing`).
     fn list(&self) -> io::Result<Listing> {
         listing(self.files.list(&self.dir)?.into_iter())
@@ -383,26 +391,36 @@ impl Store {
             .rename(&new, &self.dir.join(TMP))
             .map_err(named)?;
         self.tmp_own.store(true, Ordering::SeqCst);
-        let mut committed = self.commit_tmp().map_err(named)?;
+        let mut committed = self.commit_tmp(p.rev).map_err(named)?;
         committed.orphaned = orphaned;
         Ok(committed)
     }
 
-    /// The renames that end a save: the previous `current.json` becomes the
-    /// newest generation and `save.tmp` (synced) becomes `current.json`,
-    /// then the directory is synced. Whether `current.json` exists must be
-    /// known: an error there is the save's error, before `save.tmp` could
-    /// replace it (#32 P7; `save.tmp` keeps the newest state). Pruning to
-    /// [`GENERATIONS`] comes after the commit and apart: its failure is
+    /// The renames that end a save of revision `rev` (what `save.tmp`
+    /// holds): the previous `current.json` becomes the newest generation,
+    /// named with the revision the marker shows for it; the marker is
+    /// renamed to `rev` (created at the first commit); `save.tmp` (synced)
+    /// becomes `current.json`; then the directory is synced. So every
+    /// committed revision is in a name before it is in `current.json`
+    /// (the old one's before the marker moves on), and a failed marker
+    /// fails the save with the new state still in `save.tmp` (#32 F3-r4
+    /// 2). Whether `current.json` exists must be known: an error
+    /// there is the save's error, before `save.tmp` could replace it (#32
+    /// P7; `save.tmp` keeps the newest state). Pruning to [`GENERATIONS`]
+    /// comes after the commit and apart: its failure is
     /// `Committed::pruning`, never the save's (#32 P6).
-    fn commit_tmp(&self) -> io::Result<Committed> {
+    fn commit_tmp(&self, rev: u64) -> io::Result<Committed> {
         let current = self.dir.join(CURRENT);
+        let listed = self.list()?;
+        let mark = listed.marks.last();
         let mut generation = 0;
         if self.files.exists(&current)? {
-            generation = self.generations()?.last().map_or(0, |g| g.0) + 1;
-            self.files
-                .rename(&current, &self.generation_path(generation))?;
+            generation = listed.generations.last().map_or(0, |g| g.0) + 1;
+            let held = mark.map(|(held, _)| *held);
+            let name = generation_name(generation, held);
+            self.files.rename(&current, &self.dir.join(name))?;
         }
+        self.mark(mark.map(|(_, path)| path.as_path()), rev)?;
         self.files.rename(&self.dir.join(TMP), &current)?;
         self.files.sync_dir(&self.dir)?;
         Ok(Committed {
@@ -410,6 +428,17 @@ impl Store {
             pruning: self.prune().err().map(|e| e.to_string()),
             orphaned: None,
         })
+    }
+
+    /// Renames the marker `old` to show `rev`, or creates it when there is
+    /// none (#32 F3-r4 2). Its content is nothing: only its name counts.
+    fn mark(&self, old: Option<&Path>, rev: u64) -> io::Result<()> {
+        let new = self.dir.join(format!("{MARK}{rev}"));
+        match old {
+            Some(old) if old == new => Ok(()),
+            Some(old) => self.files.rename(old, &new),
+            None => self.files.write(&new, b""),
+        }
     }
 
     /// Removes the oldest generations beyond [`GENERATIONS`]. A removal
@@ -519,7 +548,7 @@ mod tests {
             Err(io::Error::other("entry unreadable")),
             entry("gen-0000000001.json", "b"),
         ];
-        let e = generation_entries(failing.into_iter()).unwrap_err();
+        let e = listing(failing.into_iter()).unwrap_err();
         assert_eq!(e.to_string(), "entry unreadable");
         // Readable entries: the generations, oldest first, nothing else.
         let fine = vec![
@@ -528,7 +557,7 @@ mod tests {
             entry("gen-0000000001.json", "b"),
         ];
         assert_eq!(
-            generation_entries(fine.into_iter()).unwrap(),
+            listing(fine.into_iter()).unwrap().generations,
             vec![(1, PathBuf::from("b")), (2, PathBuf::from("a"))]
         );
     }

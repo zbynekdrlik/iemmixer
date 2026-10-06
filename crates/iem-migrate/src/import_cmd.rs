@@ -170,9 +170,9 @@ pub fn run(args: &[String]) -> Result<String, Failure> {
     // when there is none. Looked at before anything is written: a directory
     // it cannot read refuses the seed whole (#32). The baseline goes through
     // its own temp file, so an interrupted save stays untouched. The report
-    // names the file kept.
+    // names the file kept, as it is on disk (`Store::live_file`).
     let kept = if seed_if_absent {
-        store.live_state().map_err(io)?.and_then(Source::file_name)
+        store.live_file().map_err(io)?
     } else {
         None
     };
