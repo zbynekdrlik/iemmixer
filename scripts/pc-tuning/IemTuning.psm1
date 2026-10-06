@@ -844,29 +844,34 @@ function Assert-IemDeviceLps {
 }
 
 function Assert-IemNicRss {
-    # Before a NIC write (review R4 follow-up): the RSS range nic.rss.base..max, the
-    # processors of the NIC's interrupts, is processor numbers with base <= max,
-    # never a card or audio processor (the card's ISR processor, the audio CPU),
-    # each inside layout.nic and present.
+    # Before a NIC write (review R4 follow-up, #32 MINOR-5): the RSS range
+    # nic.rss.base..max holds the processors of the NIC's interrupts. base and max
+    # are processor numbers (integers 0..63, the profile rule), base <= max. The
+    # base is a layout.nic processor; past layout.nic the range may reach only
+    # processors of no role (spec §6.1: NIC LP 4, RSS base 4, max 5, its unplaced
+    # sibling), never a card or audio processor (the card's ISR processor, the
+    # audio CPU) and never a housekeeping one; each present.
     param([Parameter(Mandatory)]$Profile)
     $b = @{}
     foreach ($k in 'base', 'max') {
         $v = $null
         if ($Profile.nic.PSObject.Properties['rss'] -and $null -ne $Profile.nic.rss -and $Profile.nic.rss.PSObject.Properties[$k]) { $v = $Profile.nic.rss.$k }
-        $n = 0
-        if ($null -eq $v -or -not [int]::TryParse([string]$v, [ref]$n) -or $n -lt 0) { throw "nic.rss.${k} '$v' is not a processor number" }
-        $b[$k] = $n
+        if (-not ($v -is [int] -or $v -is [long]) -or $v -lt 0 -or $v -gt 63) { throw "nic.rss.${k} '$v' is not a processor number" }
+        $b[$k] = [int]$v
     }
     if ($b['base'] -gt $b['max']) { throw "nic.rss: base $($b['base']) is above max $($b['max'])" }
     $range = "$($b['base'])..$($b['max'])"
-    $card = Get-IemLayoutLps -Profile $Profile -Role 'card'
-    $audio = Get-IemLayoutLps -Profile $Profile -Role 'audio'
+    $roles = @{}   # processor -> its layout role
+    foreach ($role in 'housekeeping', 'card', 'nic', 'audio') {
+        foreach ($lp in (Get-IemLayoutLps -Profile $Profile -Role $role)) { $roles[$lp] = $role }
+    }
     $nic = Get-IemLayoutLps -Profile $Profile -Role 'nic'
-    $reserved = @($card) + @($audio)
     $present = @([IemCpuSets]::Map().Keys)
     for ($lp = $b['base']; $lp -le $b['max']; $lp++) {
-        if ($reserved -contains $lp) { throw "nic.rss ${range}: processor $lp is a card or audio processor, which the NIC's interrupts must never use" }
-        if ($nic -notcontains $lp) { throw "nic.rss ${range}: processor $lp is not in layout.nic ($($nic -join ','))" }
+        $role = $roles[$lp]
+        if ($role -eq 'card' -or $role -eq 'audio') { throw "nic.rss ${range}: processor $lp is a card or audio processor, which the NIC's interrupts must never use" }
+        if ($lp -eq $b['base'] -and $role -ne 'nic') { throw "nic.rss ${range}: the base processor $lp is not in layout.nic ($($nic -join ','))" }
+        if ($null -ne $role -and $role -ne 'nic') { throw "nic.rss ${range}: processor $lp is a $role processor; past layout.nic the range may reach only processors of no role" }
         if ($present -notcontains $lp) { throw "nic.rss ${range}: processor $lp is not present" }
     }
 }

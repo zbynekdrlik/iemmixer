@@ -156,6 +156,8 @@ In order of expected impact and risk. Every lever has a reader (read-back), an i
 | 6–13 (cores 3–6) | Housekeeping: background processes, server, streams, stress |
 | 14 (core 7) | The engine process (audio CPU Set); its sibling 15 stays unplaced |
 
+In the profile this is `layout`: `housekeeping` 6–13, `card` 2, `nic` 4, `audio` 14 (a role is absent or a list of integers 0..63, one role per processor; #32 MINOR-6). The RSS range (`nic.rss.base`..`max`, here 4–5) starts on a `layout.nic` processor and past it may reach only processors of no role (here LP 5, the NIC core's unplaced sibling), never a card, audio or housekeeping processor; the tuning module refuses any other range before a write (#32 MINOR-5).
+
 Three placements of the engine are compared (§8 W2), and the best one is kept:
 
 - no CPU Set;
@@ -187,7 +189,7 @@ Three placements of the engine are compared (§8 W2), and the best one is kept:
 | Id | What and why | Why REAPER cannot suffer |
 |---|---|---|
 | R1 `irq-card` | Card interrupt affinity → LP 2 (`Affinity Policy`: `DevicePolicy = 4` IrqPolicySpecifiedProcessors, `AssignmentSetOverride` = mask [11]). Applies only when the card already uses MSI; enabling MSI is Tier 4. The profile's instance path is checked against the hardware id before any write. | The ISR moves off core 0's crowd. REAPER's threads keep all CPUs. Verified by the post-boot handover checks (REAPER meters advance = the card delivers). |
-| R2 `irq-nic` | NIC: RSS base/max → LP 4–5 (MSI-X affinity only if its ISRs still land elsewhere); "power saving" and "allow the computer to turn off this device" off. Written as the adapter's driver-key values [15], which NDIS reads at initialization: no network drop before the reboot. | The web control plane and meters keep working; power saving off only reduces wake latency. |
+| R2 `irq-nic` | NIC: RSS base/max → LP 4–5 (the base on `layout.nic`, the rest on it or on processors of no role, §6.1; MSI-X affinity only if its ISRs still land elsewhere); "power saving" and "allow the computer to turn off this device" off. Written as the adapter's driver-key values [15], which NDIS reads at initialization: no network drop before the reboot. | The web control plane and meters keep working; power saving off only reduces wake latency. |
 | R3 `irq-others` (conditional) | Graphics, USB controller and storage interrupts away from LP 2/14 — only if their ISR/DPC land there in the traces. | As R1. |
 
 Undo: each value is written back from the journal, which needs another reboot. That revert reboot is pre-approved in the same question.
