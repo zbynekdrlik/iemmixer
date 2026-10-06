@@ -1310,7 +1310,7 @@ mod tests {
                 dbfs: -40.0,
                 ttl_s: 1.0,
             };
-            let supervisor: [(u64, Cmd, Option<ErrCode>); 10] = [
+            let supervisor: [(u64, Cmd, Option<ErrCode>); 11] = [
                 (12, Cmd::Ping, None),
                 (13, Cmd::GetState, None),
                 (14, Cmd::GetTopology, None),
@@ -1318,7 +1318,10 @@ mod tests {
                 // A running HIL signal refuses a plain one: stop it first.
                 (16, Cmd::StopTestSignal, None),
                 (17, start, None),
+                // Fault injection reaches the core, which refuses it without
+                // the flag: never `NotController`.
                 (18, Cmd::InjectFault, Some(ErrCode::Forbidden)),
+                (22, Cmd::InjectPark, Some(ErrCode::Forbidden)),
                 (19, set_mix(), Some(ErrCode::NotController)),
                 (
                     20,
