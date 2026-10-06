@@ -1187,7 +1187,7 @@ pub fn handle(pc: &mut dyn Pc, g: &mut Guard, req: Request, epoch: u64) -> Reply
         },
         Request::InjectFault => inject_fault(pc, g),
         Request::InjectSeh => inject_seh(pc, g),
-        Request::InjectPark => (false, "inject-park is not wired yet".to_owned()),
+        Request::InjectPark => inject_park(pc, g),
         Request::RunnerStop => runner_stop(pc, g),
         Request::ProbeTask => outcome(pc.probe_task(), "the probe task ended with 0"),
         Request::RehearseTeardown => rehearse(pc, g),
@@ -1663,19 +1663,26 @@ fn install_site(pc: &mut dyn Pc, g: &mut Guard, path: &str) -> (bool, String) {
     )
 }
 
+/// The gate of every fault injection (HIL, design §7 and §10): dev first
+/// (never live, whatever job is recorded), then a begun HIL job, whose
+/// engine runs with its fault-injection flag (the engine refuses the
+/// injection otherwise). `what` is the iemmode word, `test` names the test
+/// in the refusal.
+fn in_hil_job(g: &Guard, what: &str, test: &str) -> Result<(), String> {
+    g.need_dev(what)?;
+    if g.state.job.is_none() {
+        return Err(format!("{test} needs a begun HIL job (job-begin)"));
+    }
+    Ok(())
+}
+
 /// HIL's RT panic (design §7): dev, inside a begun HIL job, forwarded to
 /// the engine (started with its fault-injection flag for the job, which
 /// refuses it otherwise); its exit 70 is the watch's, which starts it again
 /// after the backoff (`crash::after_exit`, the fade-in on the new stream).
 fn inject_fault(pc: &mut dyn Pc, g: &mut Guard) -> (bool, String) {
-    if let Err(why) = g.need_dev("inject-fault") {
+    if let Err(why) = in_hil_job(g, "inject-fault", "a fault") {
         return (false, why);
-    }
-    if g.state.job.is_none() {
-        return (
-            false,
-            "a fault needs a begun HIL job (job-begin)".to_owned(),
-        );
     }
     outcome(
         pc.engine_inject_fault(),
@@ -1683,25 +1690,38 @@ fn inject_fault(pc: &mut dyn Pc, g: &mut Guard) -> (bool, String) {
     )
 }
 
-/// The owner-approved SEH test (design §10): dev, inside a begun HIL job,
-/// forwarded to the engine (started with its fault-injection flag for the
-/// job). The engine raises a structured exception on its RT callback; the
-/// SEH filter releases the driver within its bound or parks the stream, and
-/// the watch starts the engine again.
+/// The owner-approved SEH test (design §10 test #4): dev, inside a begun
+/// HIL job, forwarded to the engine (started with its fault-injection flag
+/// for the job). The engine raises a structured exception on its RT
+/// callback; the SEH filter releases the driver within its bound or parks
+/// the stream, and the watch starts the engine again.
 fn inject_seh(pc: &mut dyn Pc, g: &mut Guard) -> (bool, String) {
-    if let Err(why) = g.need_dev("inject-seh") {
+    if let Err(why) = in_hil_job(g, "inject-seh", "an SEH test") {
         return (false, why);
-    }
-    if g.state.job.is_none() {
-        return (
-            false,
-            "an SEH test needs a begun HIL job (job-begin)".to_owned(),
-        );
     }
     outcome(
         pc.engine_inject_seh(),
         "the engine raises a structured exception on its RT callback; \
          the SEH filter releases the driver or parks, and the watch starts it again",
+    )
+}
+
+/// The parked-engine test (design §10 test #2, #35): dev, inside a begun
+/// HIL job, forwarded to the engine (started with its fault-injection flag
+/// for the job). The engine raises the SEH test's exception under its
+/// backend's test hold: the driver is kept, the SEH filter parks the RT
+/// thread, and the engine keeps running with its stream parked and the card
+/// held (`Status.parked`, so `iemmode status`) until the OS restart the test
+/// makes. The watch sees no exit, so it starts nothing; the event plan's
+/// `EngineStop` meets the parked engine as after a stuck callback (R6).
+fn inject_park(pc: &mut dyn Pc, g: &mut Guard) -> (bool, String) {
+    if let Err(why) = in_hil_job(g, "inject-park", "a parked-engine test") {
+        return (false, why);
+    }
+    outcome(
+        pc.engine_inject_park(),
+        "the engine raises a structured exception under the test hold: its stream \
+         parks with the card held and the engine keeps running until an OS restart",
     )
 }
 

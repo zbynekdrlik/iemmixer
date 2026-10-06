@@ -27,8 +27,8 @@ pub const IEMMODE_USAGE: &str = "usage: iemmode status | event [--dry-run] [--di
   | dev [--build SHA] [--dry-run] | live --build SHA [--trial] [--dry-run]
   | install <zip> | activate <sha> | test-signal <input> <dbfs> <ttl>
   | report <sha> <green|red> <detail> | job-begin <run> | job-end <run>
-  | install-site <file> | force-reopen | inject-fault | inject-seh | runner-stop | probe-task
-  | rehearse-teardown | alarm-test | alarm-ack <id> | quit";
+  | install-site <file> | force-reopen | inject-fault | inject-seh | inject-park | runner-stop
+  | probe-task | rehearse-teardown | alarm-test | alarm-ack <id> | quit";
 
 pub const GUARD_USAGE: &str =
     "usage: iemmixer-guard run | install <zip> [--verify-only] | activate <sha>";
@@ -204,6 +204,7 @@ pub fn parse(args: &[String]) -> Result<Cli, String> {
         "force-reopen" => bare(Request::ForceReopen),
         "inject-fault" => bare(Request::InjectFault),
         "inject-seh" => bare(Request::InjectSeh),
+        "inject-park" => bare(Request::InjectPark),
         "runner-stop" => bare(Request::RunnerStop),
         "probe-task" => bare(Request::ProbeTask),
         "rehearse-teardown" => bare(Request::RehearseTeardown),

@@ -680,6 +680,7 @@ pub mod fake {
                     | Call::ForceReopen
                     | Call::InjectFault
                     | Call::InjectSeh
+                    | Call::InjectPark
                     | Call::InstallSite
                     | Call::Exclude
             )
