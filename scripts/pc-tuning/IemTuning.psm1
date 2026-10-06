@@ -241,21 +241,44 @@ function Open-IemBootKey {
     return $key
 }
 
+# The boot token's lock (#32 MINOR-3): Global\, so the first callers of a boot in
+# any session (the guard's state step, an ssh apply) take the same one.
+$script:BootLockName = 'Global\iemmixer-boot-token'
+$script:BootLockWaitMs = 30000
+
 function Get-IemBootIdentity {
     # This boot (review R1): a random GUID token in the volatile boot key. The key
     # holds the same token exactly while the boot that wrote it lasts, so no clock,
     # counter or service (SysMain) takes part. The time (LastBootUpTime) is
-    # information only.
+    # information only. Read and created under the boot lock (#32 MINOR-3): two
+    # first callers after a boot never write two tokens (the second would journal
+    # one the key no longer holds, so its Tier 3 writes would never read as
+    # pending in that boot).
     param([Parameter(Mandatory)]$Profile)
-    $key = Open-IemBootKey -Profile $Profile
+    $lock = New-Object -TypeName System.Threading.Mutex -ArgumentList $false, $script:BootLockName
+    $held = $false
     try {
-        $t = [string]$key.GetValue('token', '')
-        $g = [guid]::Empty
-        if (-not [guid]::TryParse($t, [ref]$g)) {
-            $key.SetValue('token', [guid]::NewGuid().ToString(), [Microsoft.Win32.RegistryValueKind]::String)
-            $t = [string]$key.GetValue('token', '')   # read back: the stored token counts
+        try { $held = $lock.WaitOne($script:BootLockWaitMs) }
+        catch {
+            # Its last holder ended without releasing it: the lock is ours now, and
+            # the key's token is read again below.
+            if ($_.Exception.GetBaseException() -isnot [System.Threading.AbandonedMutexException]) { throw }
+            $held = $true
         }
-    } finally { $key.Close() }
+        if (-not $held) { throw "boot token: the boot lock was not free within $($script:BootLockWaitMs / 1000) s" }
+        $key = Open-IemBootKey -Profile $Profile
+        try {
+            $t = [string]$key.GetValue('token', '')
+            $g = [guid]::Empty
+            if (-not [guid]::TryParse($t, [ref]$g)) {
+                $key.SetValue('token', [guid]::NewGuid().ToString(), [Microsoft.Win32.RegistryValueKind]::String)
+                $t = [string]$key.GetValue('token', '')   # read back: the stored token counts
+            }
+        } finally { $key.Close() }
+    } finally {
+        if ($held) { $lock.ReleaseMutex() }
+        $lock.Dispose()
+    }
     return @{ token = $t; time = Get-IemBootTime }
 }
 
