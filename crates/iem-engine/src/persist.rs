@@ -491,6 +491,22 @@ mod tests {
     }
 
     #[test]
+    fn a_lock_error_other_than_a_held_lock_fails_at_once() {
+        // CI run 37466176804 (a surviving mutant): only `WouldBlock`, another
+        // process holding the directory, is tried again. Any other error is
+        // the lock's at once, never polled for the whole wait (the engine
+        // would then wait 3 s for nothing).
+        let (_d, s) = store();
+        // A directory where engine.lock belongs: opening it fails on every
+        // OS (IsADirectory on Linux, access denied on Windows).
+        fs::create_dir(s.dir().join(LOCK)).unwrap();
+        let t0 = Instant::now();
+        let e = s.lock_within(Duration::from_secs(3)).unwrap_err();
+        assert_ne!(e.kind(), io::ErrorKind::WouldBlock, "{e}");
+        assert!(t0.elapsed() < Duration::from_secs(1), "{:?}", t0.elapsed());
+    }
+
+    #[test]
     fn encode_decode_is_bit_exact_and_tamper_evident() {
         let p = sample(3);
         let bytes = encode(&p).unwrap();
