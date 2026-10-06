@@ -8,7 +8,7 @@ fn periods_and_levels() {
     assert_eq!(period_ns(64, 96_000.0), 666_667);
     assert_eq!(period_ns(48, 96_000.0), 500_000);
     assert_eq!(dbfs(1.0), 0.0);
-    assert!((dbfs(ACTIVITY_THRESHOLD) + 50.0).abs() < 1e-9);
+    assert!((dbfs(0.003_162_277_660_168_379) + 50.0).abs() < 1e-9);
     assert_eq!(dbfs(0.0), -150.0);
     assert_eq!(dbfs(-1.0), -150.0);
     assert_eq!(dbfs(1e-12), -150.0);
@@ -425,21 +425,6 @@ fn driver_messages_are_counted_and_resets_request_a_reopen() {
         ),
         (1, 1, 1, 1, 2, 1)
     );
-}
-
-#[test]
-fn activity_needs_consecutive_seconds_above_minus_50_dbfs() {
-    let mut g = ActivityGuard::new(3);
-    assert!(!g.observe(0.01));
-    assert!(!g.observe(0.01));
-    assert!(!g.observe(ACTIVITY_THRESHOLD));
-    assert!(!g.observe(0.01));
-    assert!(!g.observe(0.01));
-    assert!(g.observe(0.01));
-    assert!(g.observe(1.0));
-    assert!(!g.observe(0.0));
-    let mut now = ActivityGuard::new(1);
-    assert!(now.observe(ACTIVITY_THRESHOLD * 1.001));
 }
 
 fn g(kind: GlitchKind, at_ns: u64, value: u64) -> Glitch {

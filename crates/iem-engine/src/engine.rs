@@ -2,8 +2,8 @@
 //! site and the state, start the backend (NullRt, or on Windows the ASIO
 //! card of the site's `[card]` table, S6), open the pipes, run the control
 //! loop; or render a WAV file through the processor with `Offline`; or, S6,
-//! check a site (`check-site`) and listen to the stage before a switch
-//! (`interlock`, Windows).
+//! check a site (`check-site`). Nothing listens to the stage before a switch
+//! (#38: only the owner's signal decides).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -24,12 +24,11 @@ use tracing::{error, info, warn};
 use crate::SAMPLE_RATE;
 use crate::control::{Control, CtlMsg, Driver, Exit, Parts, Settings};
 use crate::core::{Core, Flags};
-use crate::interlock::{self, Report, Verdict};
 use crate::media::{Frame, TalkbackFeed, TapFramer};
 use crate::persist::{Source, StateLock, Store, decode};
 use crate::pipe::{Conn, Framer, control_name, listen, media_name, read_loop};
 use crate::rt::{FADE_IN_MS, Options, Processor, RtHandles};
-use crate::site::{self, Card, SiteError, load, parse, parse_card, parse_hil_tx, parse_stage};
+use crate::site::{self, SiteError, load, parse, parse_card, parse_hil_tx};
 use crate::topology::{Topology, compile};
 
 /// Largest block the engine accepts.
@@ -107,18 +106,9 @@ pub struct RenderArgs {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct InterlockArgs {
-    pub site: PathBuf,
-    pub seconds: u32,
-    /// The guard's pre-emption: the interlock stops once this file exists.
-    pub stop_file: Option<PathBuf>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     Run(RunConfig),
     Render(RenderArgs),
-    Interlock(InterlockArgs),
     CheckSite(PathBuf),
     Help,
 }
@@ -130,7 +120,6 @@ usage:
                  [--test-signal] [--fault-injection]
   iem-engine render --site <site.toml> [--state <state.json>] --in <in.wav> --out <out.wav>
                  [--block <frames>]
-  iem-engine interlock --site <site.toml> [--seconds <1-600>] [--stop-file <path>]
   iem-engine check-site --site <site.toml>
 
 run: the engine at 96 kHz on the paced NullRt backend (--block, --sine), or
@@ -140,14 +129,10 @@ with --backend asio (Windows) on the card of the site's [card] table at its
 is <name>.media).
 render: the input WAV must be 96 kHz with one channel per RX channel of the
 site; the output has one channel per TX channel.
-interlock (Windows): opens the card, listens to the stage inputs ([activity]
-inputs, or every mics input) for --seconds (60) and writes nothing; prints
-{\"quiet\", \"stopped\", \"loudest\": [[channel, dBFS], ...]}; a --stop-file that
-appears ends it within 0.1 s.
-check-site: validates the site (I4; [card], the interlock's stage and
-[guard] hil_tx too) and prints its topology hash and counts.
-exit codes: 0 shut down (interlock: quiet), 1 i/o error, 2 usage or site
-error, 3 card refused, 5 stage activity, 6 interlock stopped, 70 RT fault";
+check-site: validates the site (I4; [card] and [guard] hil_tx too) and
+prints its topology hash and counts.
+exit codes: 0 shut down, 1 i/o error, 2 usage or site error, 3 card
+refused, 70 RT fault, 75 state directory busy";
 
 fn value<'a>(it: &mut impl Iterator<Item = &'a String>, flag: &str) -> Result<&'a String, String> {
     it.next().ok_or_else(|| format!("{flag} needs a value"))
@@ -168,32 +153,21 @@ fn backend(v: &str) -> Result<Backend, String> {
     }
 }
 
-fn seconds(v: &str) -> Result<u32, String> {
-    match v.parse::<u32>() {
-        Ok(n) if (1..=interlock::MAX_SECONDS).contains(&n) => Ok(n),
-        _ => Err(format!(
-            "--seconds must be 1…{}, not {v:?}",
-            interlock::MAX_SECONDS
-        )),
-    }
-}
-
 /// Parses the command line (without the program name).
 pub fn parse_args(args: &[String]) -> Result<Command, String> {
     let mut it = args.iter();
     let sub = match it.next().map(String::as_str) {
         None | Some("-h" | "--help" | "help") => return Ok(Command::Help),
-        Some(s @ ("run" | "render" | "interlock" | "check-site")) => s,
+        Some(s @ ("run" | "render" | "check-site")) => s,
         Some(other) => return Err(format!("unknown command {other:?}")),
     };
-    let mut paths: [Option<PathBuf>; 6] = Default::default();
+    let mut paths: [Option<PathBuf>; 5] = Default::default();
     let mut pipe = None;
     let mut size = None;
     let mut flags = Flags::default();
     let mut signal = None;
     let mut chosen = Backend::NullRt;
     let mut hold = false;
-    let mut listen_for = interlock::DEFAULT_SECONDS;
     while let Some(flag) = it.next() {
         let slot = match flag.as_str() {
             "--site" => Some(0),
@@ -201,7 +175,6 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
             "--state" => Some(2),
             "--in" => Some(3),
             "--out" => Some(4),
-            "--stop-file" => Some(5),
             _ => None,
         };
         if let Some(k) = slot {
@@ -227,11 +200,10 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
             "--fault-injection" => flags.fault_injection = true,
             "--backend" => chosen = backend(value(&mut it, flag)?)?,
             "--hold" => hold = true,
-            "--seconds" => listen_for = seconds(value(&mut it, flag)?)?,
             other => return Err(format!("unknown option {other:?}")),
         }
     }
-    let [site, state_dir, state, input, output, stop_file] = paths;
+    let [site, state_dir, state, input, output] = paths;
     let need = |p: Option<PathBuf>, flag: &str| p.ok_or_else(|| format!("{sub} needs {flag}"));
     match sub {
         "run" => {
@@ -259,11 +231,6 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
             input: need(input, "--in")?,
             output: need(output, "--out")?,
             block: size.unwrap_or(32),
-        })),
-        "interlock" => Ok(Command::Interlock(InterlockArgs {
-            site: need(site, "--site")?,
-            seconds: listen_for,
-            stop_file,
         })),
         _ => Ok(Command::CheckSite(need(site, "--site")?)),
     }
@@ -674,9 +641,8 @@ fn run_hil(flags: Flags, text: &str, topo: &Topology) -> Result<Vec<u16>, SiteEr
     topo.hil_outputs(&parse_hil_tx(text)?)
 }
 
-/// Loads and compiles a site, checks its `[card]` table, the stage the
-/// interlock listens to (every `[activity] inputs` id is an input) and
-/// HIL's spare outputs (`[guard] hil_tx`: card channels from 1 that no mix
+/// Loads and compiles a site, checks its `[card]` table and HIL's spare
+/// outputs (`[guard] hil_tx`: card channels from 1 that no mix
 /// uses and no input is, `Topology::hil_outputs`; the card's own output and
 /// input counts, the latter for the loopback returns, are checked when the
 /// stream opens).
@@ -684,7 +650,6 @@ pub fn check_site(path: &Path) -> Result<SiteSummary, EngineError> {
     let text = site::read(path)?;
     let topo = compile(&parse(&text)?)?;
     let card = parse_card(&text)?;
-    interlock::stage_channels(&topo, &parse_stage(&text)?)?;
     // The HIL signal goes only to spare outputs, never to a band member
     // (the owner's decision on #9 of 2026-09-28).
     topo.hil_outputs(&parse_hil_tx(&text)?)?;
@@ -695,41 +660,6 @@ pub fn check_site(path: &Path) -> Result<SiteSummary, EngineError> {
         mixes: topo.mixes.len(),
         card: card.is_some(),
     })
-}
-
-/// What the interlock needs from the site: the card and the stage's RX
-/// channels.
-#[derive(Debug, Clone, PartialEq)]
-pub struct InterlockPlan {
-    pub card: Card,
-    pub channels: Vec<u16>,
-}
-
-pub fn interlock_plan(path: &Path) -> Result<InterlockPlan, EngineError> {
-    let text = site::read(path)?;
-    let topo = compile(&parse(&text)?)?;
-    let card = parse_card(&text)?.ok_or(SiteError::NoCardTable)?;
-    let channels = interlock::stage_channels(&topo, &parse_stage(&text)?)?;
-    Ok(InterlockPlan { card, channels })
-}
-
-/// Listens to the stage on the card (Windows): the verdict and the report.
-pub fn interlock(a: &InterlockArgs) -> Result<(Verdict, Report), EngineError> {
-    let plan = interlock_plan(&a.site)?;
-    #[cfg(windows)]
-    {
-        crate::asio::interlock(plan, a)
-    }
-    #[cfg(not(windows))]
-    {
-        info!(
-            "interlock of {} stage channels needs the card",
-            plan.channels.len()
-        );
-        Err(EngineError::Usage(
-            "interlock runs on Windows only (the ASIO card)".to_owned(),
-        ))
-    }
 }
 
 /// Reads a state file (the persisted format, or a plain `MixState` JSON).
@@ -857,25 +787,6 @@ mod tests {
             panic!()
         };
         assert_eq!((cfg.backend, cfg.hold), (Backend::NullRt, false));
-        let lock = |seconds: u32, stop_file: Option<&str>| {
-            Command::Interlock(InterlockArgs {
-                site: "s".into(),
-                seconds,
-                stop_file: stop_file.map(PathBuf::from),
-            })
-        };
-        assert_eq!(
-            parse_args(&args("interlock --site s")).unwrap(),
-            lock(60, None)
-        );
-        assert_eq!(
-            parse_args(&args("interlock --site s --seconds 1 --stop-file x/stop")).unwrap(),
-            lock(1, Some("x/stop"))
-        );
-        assert_eq!(
-            parse_args(&args("interlock --seconds 600 --site s")).unwrap(),
-            lock(600, None)
-        );
         assert_eq!(
             parse_args(&args("check-site --site s.toml")).unwrap(),
             Command::CheckSite("s.toml".into())
@@ -897,10 +808,14 @@ mod tests {
                 "run --site s --state-dir d --pipe p --backend asio --sine 440",
                 "nullrt backend",
             ),
-            ("interlock", "--site"),
-            ("interlock --site s --seconds 0", "--seconds"),
-            ("interlock --site s --seconds 601", "--seconds"),
-            ("interlock --site s --seconds x", "--seconds"),
+            (
+                "run --site s --state-dir d --pipe p --seconds 5",
+                "--seconds",
+            ),
+            (
+                "run --site s --state-dir d --pipe p --stop-file x",
+                "--stop-file",
+            ),
             ("check-site", "--site"),
         ] {
             let e = parse_args(&args(line)).unwrap_err();
@@ -994,62 +909,6 @@ mod tests {
         assert!(check_site(&ghost).is_ok());
     }
 
-    #[test]
-    fn the_interlock_plan_is_the_card_and_the_stage_channels() {
-        let plan = interlock_plan(&crate::test_support::test_site_path()).unwrap();
-        assert_eq!(
-            (plan.card.driver.as_str(), plan.card.frames),
-            ("Test Card", 32)
-        );
-        // No `[activity] inputs` in the test site: every mics input.
-        let mut stage: Vec<u16> = (101..=110).collect();
-        stage.extend([115, 116]);
-        assert_eq!(plan.channels, stage);
-        let dir = tempfile::tempdir().unwrap();
-        let listed = edited_site(dir.path(), "listed.toml", |t| {
-            t.replace(
-                "[activity]\n",
-                "[activity]\ninputs = [\"hand1\", \"keys\"]\n",
-            )
-        });
-        assert_eq!(interlock_plan(&listed).unwrap().channels, [111, 115, 116]);
-        let bare = edited_site(dir.path(), "bare.toml", without_card);
-        assert!(matches!(
-            interlock_plan(&bare),
-            Err(EngineError::Site(SiteError::NoCardTable))
-        ));
-        let ghost = edited_site(dir.path(), "ghost.toml", |t| {
-            t.replace("[activity]\n", "[activity]\ninputs = [\"ghost\"]\n")
-        });
-        assert!(matches!(
-            interlock_plan(&ghost),
-            Err(EngineError::Site(SiteError::StageInput(id))) if id == "ghost"
-        ));
-    }
-
-    /// F30: a site whose stage the interlock cannot hear (an `[activity]
-    /// inputs` id the topology lacks) is refused by check-site, before
-    /// `install-site` replaces the site, not at the next dev entry's
-    /// interlock (lane A review).
-    #[test]
-    fn check_site_refuses_a_stage_the_interlock_cannot_hear() {
-        let dir = tempfile::tempdir().unwrap();
-        let ghost = edited_site(dir.path(), "ghost.toml", |t| {
-            t.replace("[activity]\n", "[activity]\ninputs = [\"ghost\"]\n")
-        });
-        assert!(matches!(
-            check_site(&ghost),
-            Err(EngineError::Site(SiteError::StageInput(id))) if id == "ghost"
-        ));
-        let listed = edited_site(dir.path(), "listed.toml", |t| {
-            t.replace(
-                "[activity]\n",
-                "[activity]\ninputs = [\"hand1\", \"keys\"]\n",
-            )
-        });
-        assert!(check_site(&listed).is_ok());
-    }
-
     /// HIL's test signal goes only to spare card outputs outside the
     /// topology (`[guard] hil_tx`; the owner's decision on #9 of
     /// 2026-09-28): the D5(b) loopback pair or an unused TX, never a channel
@@ -1135,16 +994,6 @@ mod tests {
     #[test]
     fn off_windows_the_card_is_a_usage_error_before_any_state() {
         let site = crate::test_support::test_site_path();
-        let e = interlock(&InterlockArgs {
-            site: site.clone(),
-            seconds: 60,
-            stop_file: None,
-        })
-        .unwrap_err();
-        assert!(
-            matches!(&e, EngineError::Usage(m) if m.contains("Windows")),
-            "{e}"
-        );
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = RunConfig::new(
             site,
@@ -1164,18 +1013,11 @@ mod tests {
     }
 
     /// The hosted Windows runner has no ASIO driver: the synthetic card of
-    /// the test site is refused (exit 3), by `run` and by the interlock.
+    /// the test site is refused (exit 3) by `run`.
     #[cfg(windows)]
     #[test]
     fn without_the_driver_the_card_is_refused() {
         let site = crate::test_support::test_site_path();
-        let e = interlock(&InterlockArgs {
-            site: site.clone(),
-            seconds: 60,
-            stop_file: None,
-        })
-        .unwrap_err();
-        assert!(matches!(&e, EngineError::Card(_)), "{e}");
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = RunConfig::new(
             site,

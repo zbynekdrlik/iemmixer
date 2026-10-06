@@ -11,8 +11,9 @@
 //! - [`persist`]: atomic checksummed saves, generations, baseline, load chain;
 //! - [`pipe`], [`control`], [`engine`]: local-socket pipes, the control loop,
 //!   start-up, the crash model without the driver and the offline renderer;
-//! - [`interlock`] (S6): the stage check before a switch; on Windows the
-//!   private `asio` module starts the ASIO backend and the interlock's card.
+//!   on Windows the private `asio` module starts the ASIO backend (S6).
+//!   Nothing in the engine measures the stage to gate a switch (#38: only
+//!   the owner's signal decides).
 //!
 //! GPL-3.0-or-later: the engine links the MGA limiter port (D1).
 
@@ -36,7 +37,6 @@ pub mod cmd;
 pub mod control;
 pub mod core;
 pub mod engine;
-pub mod interlock;
 pub mod latency;
 pub mod media;
 pub mod params;

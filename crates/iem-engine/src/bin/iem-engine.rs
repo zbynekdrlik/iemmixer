@@ -1,13 +1,11 @@
 //! `iem-engine`: the iemmixer audio engine (S3: NullRt and offline render;
-//! S6: the ASIO backend, the interlock and the site check). See
+//! S6: the ASIO backend and the site check). See
 //! `iem-engine --help`.
 
 use std::process::ExitCode;
 
 use iem_engine::control::Exit;
-use iem_engine::engine::{
-    Command, EngineError, USAGE, check_site, interlock, parse_args, render, run,
-};
+use iem_engine::engine::{Command, EngineError, USAGE, check_site, parse_args, render, run};
 use tracing_subscriber::EnvFilter;
 
 fn code(e: &EngineError) -> u8 {
@@ -47,9 +45,6 @@ fn main() -> ExitCode {
             Exit::Fault(_) => 70,
         }),
         Ok(Command::Render(a)) => render(&a).map(|()| 0),
-        Ok(Command::Interlock(a)) => {
-            interlock(&a).and_then(|(verdict, report)| print_json(&report).map(|()| verdict.code()))
-        }
         Ok(Command::CheckSite(site)) => {
             check_site(&site).and_then(|summary| print_json(&summary).map(|()| 0))
         }

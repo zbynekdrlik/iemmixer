@@ -15,8 +15,6 @@ const BUCKET_NS: u64 = 1_000;
 /// The first callbacks of a stream prime the driver's buffers (possibly inside
 /// `start()`); they are counted but never judged late, missed or gapped.
 pub const WARMUP: u64 = 8;
-/// −50 dBFS, the band-activity threshold (program spec §4.2).
-pub const ACTIVITY_THRESHOLD: f64 = 0.003_162_277_660_168_379;
 const NO_POSITION: i64 = i64::MIN;
 /// [`Telemetry::take_requests`]: a reset request and a buffer size change.
 const RESET_BIT: u8 = 1;
@@ -750,30 +748,6 @@ impl Loudest {
         hot.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
         hot.truncate(n);
         hot
-    }
-}
-
-/// Band activity on the inputs: `needed` consecutive one-second peaks above
-/// −50 dBFS.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ActivityGuard {
-    run: u32,
-    needed: u32,
-}
-
-impl ActivityGuard {
-    pub fn new(needed: u32) -> Self {
-        Self { run: 0, needed }
-    }
-
-    /// Feeds one second's peak; true while the band is playing.
-    pub fn observe(&mut self, peak: f64) -> bool {
-        self.run = if peak > ACTIVITY_THRESHOLD {
-            self.run.saturating_add(1)
-        } else {
-            0
-        };
-        self.run >= self.needed
     }
 }
 
