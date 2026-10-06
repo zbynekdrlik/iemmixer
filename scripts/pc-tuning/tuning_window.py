@@ -633,7 +633,9 @@ def _measure(env, args, profile: dict, state: dict, run_dir: str, since: str, tr
         for body, produced in analysis(xperf(env), ps_quote(run_dir), cut["n"], diag):
             check_event()
             try:
-                tps(env, f"{guard} ; {body}", timeout=1800, event="abandon")
+                # The guard comes before the tuning modules' import (F2 round 3, m6):
+                # a refused step compiles nothing, and the compile runs at Idle.
+                sw.ps(env, f"{guard} ; {sw.tuning_body(env, body)}", timeout=1800, event="abandon")
             except StepError as e:
                 if ANALYSIS_REFUSED in str(e):
                     raise sw.EventNow() from None   # the PC saw a preempt's stop file first
