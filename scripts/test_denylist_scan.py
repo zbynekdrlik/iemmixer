@@ -225,10 +225,20 @@ class DenylistScanTests(ScanTestCase):
         scanner = ds.Scanner(["rack/mixer"], set())
         self.assertEqual(scanner.shown("rack/mixer/config.txt"), REDACTED_MARKER)
 
-    def test_shown_escapes_control_chars_in_a_kept_component(self) -> None:
-        # a raw control char in a kept component could inject a log line / a CI ::command
+    def test_shown_redacts_a_component_holding_a_control_char(self) -> None:
+        # a raw control char could inject a log line / a CI ::command; and an escape sequence that
+        # ends in a letter (ESC [ 2 J) glues itself to a term, which then matches nothing and was
+        # printed (review of lane G3, finding 7): a component holding one is redacted, like a
+        # non-ASCII one (this test expected the control char printed escaped before)
         scanner = ds.Scanner(["zyxname"], set())
-        self.assertEqual(scanner.shown("a\x01b/zyxname.txt"), "a\\x01b/[redacted]")
+        self.assertEqual(scanner.shown("a\x01b/zyxname.txt"), "[redacted]/[redacted]")
+        self.assertEqual(scanner.shown("docs/x\x1b[2Jzyxname.txt"), "docs/[redacted]")
+        self.commit({"base.txt": "base\n"})
+        self.commit({"docs/x\x1b[2Jzyxname.txt": "keep zyxname\n"})
+        for mode in (("--tree", "HEAD"), ("--commits", "HEAD~1..HEAD")):
+            code, out = self.scan(*mode)
+            self.assertEqual(code, 1)
+            self.assertNotIn("zyxname", out.lower())
 
     def test_shown_redacts_a_component_whose_redacted_form_still_matches(self) -> None:
         # the post-redaction re-check: a term equal to the literal marker text
