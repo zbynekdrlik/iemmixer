@@ -444,6 +444,42 @@ fn a_plain_import_reports_the_save_tmp_it_moved_aside() {
     assert_eq!(std::fs::read(&aside).unwrap(), b"cut off");
 }
 
+/// #32 F3-r4 6: a plain import whose save failed right after save.new took
+/// save.tmp's name left its own revision-0 save.tmp beside current.json,
+/// and every later import refused on the "older save.tmp" alarm. Such a
+/// leftover is no doubt about the live state: the import's save moves it
+/// aside as the engine's does, the report names the alarm and where it
+/// went, and the import goes on.
+#[test]
+fn a_plain_import_moves_an_older_save_tmp_aside_and_goes_on() {
+    let w = World::new(23);
+    let dir = w.path("state");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("current.json"), live(5)).unwrap();
+    std::fs::write(dir.join("save.tmp"), live(0)).unwrap();
+    let mut a = import_args(&w, &[]);
+    a.extend(["--state-dir".into(), s(&dir)]);
+    let report = run(&a).unwrap();
+    assert!(
+        report.contains("save.tmp (revision 0) is older than current.json's 5"),
+        "{report}"
+    );
+    let aside = dir.join("save.tmp.orphan-1");
+    assert!(
+        report.contains(&format!("save.tmp moved aside to {}", aside.display())),
+        "{report}"
+    );
+    assert_eq!(std::fs::read(&aside).unwrap(), live(0));
+    let store = Store::open(&dir).unwrap();
+    let gens = store.generations().unwrap();
+    let replaced = iem_engine::persist::decode(&std::fs::read(&gens.last().unwrap().1).unwrap());
+    assert_eq!(replaced.unwrap().rev, 5);
+    let sf = site::open(&site_path()).unwrap();
+    let loaded = store.load(&sf.compiled);
+    assert_eq!((loaded.source, loaded.persisted.rev), (Saved::Current, 0));
+    assert!(loaded.alarms.is_empty(), "{:?}", loaded.alarms);
+}
+
 #[test]
 fn a_wrong_count_an_unknown_name_or_no_state_dir_fail() {
     let w = World::new(2);
