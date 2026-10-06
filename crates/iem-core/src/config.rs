@@ -613,6 +613,28 @@ mod tests {
         assert!(matches!(Config::load(&path), Err(ConfigError::Parse(_))));
     }
 
+    /// #38 (owner, 2026-10-06): the band-activity alarm is gone and nothing
+    /// reads `[activity]` any more. Every site written before has the table
+    /// (the PC's private one too): it still loads, whatever the table holds,
+    /// and is never written back.
+    #[test]
+    fn a_site_with_the_retired_activity_table_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("site.toml");
+        for table in [
+            // The shape every site had: the stage inputs and the thresholds.
+            "[activity]\ninputs = [\"mic1\", \"mic2\"]\nthreshold_dbfs = -50.0\nwindow_s = 300\nsustain_s = 120\n",
+            // Values and keys the alarm refused are no problem of the site's.
+            "[activity]\ninputs = [\"Stage Mic\"]\nthreshold_dbfs = 6.0\nwindow_s = 0\nsustain_s = 0\nwatch = \"all\"\n",
+        ] {
+            std::fs::write(&path, format!("port = 8081\n{table}")).unwrap();
+            let site = Config::load(&path).unwrap_or_else(|e| panic!("{table}: {e:?}"));
+            assert_eq!(site.port, 8081);
+            let written = serde_json::to_string(&site).unwrap();
+            assert!(!written.contains("activity"), "{written}");
+        }
+    }
+
     #[test]
     fn problems_name_every_offender() {
         let config = Config {
