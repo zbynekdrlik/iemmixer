@@ -919,6 +919,23 @@ class DenylistScanTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn(" a.txt: denylist entry 1", out)
 
+    # --- #32 F5 m8: --hash keys the committed blob, not the working-tree file ---
+
+    def hash_key(self, target: str, number: str) -> str:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(ds.main(["--repo", str(self.repo), "--hash", target, number]), 0)
+        return out.getvalue().strip()
+
+    def test_hash_reads_the_committed_blob_not_the_working_tree(self) -> None:
+        # the working-tree file differs from the scanned blob (an uncommitted edit; eol, encoding or
+        # a smudge filter on checkout), so its key matched nothing the scan reported
+        self.commit({"a.txt": "keep zyxname here\n", "a:b.txt": "keep zyxname too\n"})
+        (self.repo / "a.txt").write_text("edited since\n", encoding="utf-8")
+        (self.repo / "a:b.txt").write_text("edited since\n", encoding="utf-8")
+        self.assertEqual(self.hash_key("a.txt", "1"), ds.line_key("a.txt", "keep zyxname here"))
+        self.assertEqual(self.hash_key("a:b.txt", "1"), ds.line_key("a:b.txt", "keep zyxname too"))
+
 
 if __name__ == "__main__":
     unittest.main()
