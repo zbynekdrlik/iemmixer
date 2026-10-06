@@ -60,10 +60,11 @@ import shlex
 import subprocess
 import sys
 import unicodedata
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
+from denylist_containers import Member, Problem, blob_key, container_kind, expand
 from denylist_content import (MIN_BINARY_TERM, OVERLAP_PER_CHARACTER, SEGMENT_OVERLAP, Batch, batches, is_plain_text,
                               line_batches, long_text_run, unit_key)
 from denylist_readings import SEP, Views, decode, fold, from_git_latin1, nfc
@@ -398,11 +399,34 @@ def scan_tree(scanner: Scanner, repo: Path, rev: str) -> list[Finding]:
         # the blob's own bytes: cat-file applies no .gitattributes (binary, -diff, textconv)
         data = git(repo, "cat-file", "blob", decode(obj))
         hits += lfs_problems(scanner, "tree ", path, data, numbered=True)
-        found = scanner.findings(path, scanner.batches(data))
-        if found:
-            shown = scanner.shown(path)
-            hits += [Hit(f"tree {shown}:{label}", entry) for label, _key, entry in found]
+        hits += blob_findings(scanner, "tree ", path, data)
     return hits
+
+
+def blob_findings(scanner: Scanner, prefix: str, path: str, data: bytes,
+                  old: Callable[[], bytes] | None = None) -> list[Finding]:
+    """The findings of a blob and of the members of the container it is (expand, #32 F5 m6): each
+    member name holding a term, as a path; each unit holding one, at `<path>[!/<member>]:<unit>` --
+    the location `--hash` takes to allowlist it -- and, given `old` (the blob before a commit, read
+    only when needed), only the units that version lacks, so a commit reports what it adds; and each
+    part that cannot be scanned, unless the blob's own key (`--hash PATH blob`) is allowlisted."""
+    findings: list[Finding] = []
+    found: list[tuple[str, str, str, int]] = []  # (part path, unit label, unit key, entry)
+    problems: list[Problem] = []
+    for part in expand(path, data):
+        if isinstance(part, Problem):
+            problems.append(part)
+            continue
+        if part.name:
+            findings += [Hit(f"{prefix}{scanner.shown(part.path)}: path", entry) for entry in scanner.entries_in(part.name)]
+        found += [(part.path, label, key, entry) for label, key, entry in scanner.findings(part.path, scanner.batches(part.data))]
+    if found and old is not None:
+        present = present_units(path, old(), {(part_path, key) for part_path, _label, key, _entry in found})
+        found = [hit for hit in found if (hit[0], hit[2]) not in present]
+    findings += [Hit(f"{prefix}{scanner.shown(part_path)}:{label}", entry) for part_path, label, _key, entry in found]
+    if problems and line_key(path, blob_key(data)) not in scanner.allow:
+        findings += [Unscannable(f"{prefix}{scanner.shown(problem.path)}", problem.what) for problem in problems]
+    return findings
 
 
 def changed_blobs(repo: Path, sha: str) -> list[tuple[bytes, str, bytes, str, bytes]]:
@@ -419,28 +443,32 @@ def changed_blobs(repo: Path, sha: str) -> list[tuple[bytes, str, bytes, str, by
     return changes
 
 
-def not_in(found: list[tuple[str, str, int]], old: bytes) -> list[tuple[str, str, int]]:
-    """The findings whose unit the old blob does not have: only those are the commit's own. The old
-    blob is read a batch at a time, and only the found keys are looked up."""
-    wanted = {key for _label, key, _entry in found}
-    present: set[str] = set()
-    for batch in batches(old):
-        present |= wanted.intersection(batch.keys())
-    return [finding for finding in found if finding[1] not in present]
+def present_units(path: str, old: bytes, wanted: set[tuple[str, str]]) -> set[tuple[str, str]]:
+    """The (part path, unit key) pairs of `wanted` that the old version of a blob has too -- its own
+    units or its members' -- read a batch at a time, only the wanted keys looked up; the old
+    container is expanded only when a member is wanted."""
+    present: set[tuple[str, str]] = set()
+    parts = expand(path, old) if {part_path for part_path, _key in wanted} != {path} else iter([Member(path, "", old)])
+    for part in parts:
+        keys = {key for part_path, key in wanted if isinstance(part, Member) and part_path == part.path}
+        if keys:
+            for batch in batches(part.data):
+                present |= {(part.path, key) for key in keys.intersection(batch.keys())}
+    return present
 
 
 def scan_commit_blobs(scanner: Scanner, repo: Path, sha: str, seen: set[str]) -> tuple[list[Finding], set[str]]:
-    """Scan every changed path of a commit, every changed blob for git-lfs (lfs_problems), and the
-    content of each changed blob git's line diff cannot show (it holds a NUL byte or is UTF-16 /
-    UTF-32): the units its new blob adds over the old one. Returns the findings and those blob
-    paths, whose line diff is then not scanned.
+    """Scan every changed path of a commit, every changed blob for git-lfs (lfs_problems), and each
+    changed blob git's line diff cannot show (it holds a NUL byte or is UTF-16 / UTF-32) or that is a
+    container (container_kind): its findings the old version lacks (blob_findings). Returns the
+    findings and those blob paths, whose line diff is then not scanned.
 
     Every path is enumerated here, not only from the unified diff's `+++` headers: an empty or
     binary file has no such header, so its term-bearing name would otherwise slip past."""
     short = sha[:12]
     hits: list[Finding] = []
     blob_paths: set[str] = set()
-    reported: set[tuple[str, str, int]] = set()
+    reported: set[Finding] = set()
     for old_mode, old, new_mode, new, raw_path in changed_blobs(repo, sha):
         path = decode(raw_path)
         if path not in seen:
@@ -449,18 +477,16 @@ def scan_commit_blobs(scanner: Scanner, repo: Path, sha: str, seen: set[str]) ->
         if new_mode == GITLINK:
             continue
         data = git(repo, "cat-file", "blob", new)
-        hits += [problem for problem in lfs_problems(scanner, f"{short} ", path, data, numbered=False)
-                 if problem not in hits]  # a merge repeats a path per parent
-        if is_plain_text(data):
-            continue
-        blob_paths.add(path)
-        found = scanner.findings(path, scanner.batches(data))
-        if found and old.strip("0") and old_mode != GITLINK:  # not an added path, not a submodule
-            found = not_in(found, git(repo, "cat-file", "blob", old))
-        for label, key, entry in found:  # the label lets `--hash <sha>:<path> <N>` allowlist it
-            if (path, key, entry) not in reported:  # a merge repeats it per parent
-                reported.add((path, key, entry))
-                hits.append(Hit(f"{short} {scanner.shown(path)}:{label}", entry))
+        found: list[Finding] = list(lfs_problems(scanner, f"{short} ", path, data, numbered=False))
+        if not is_plain_text(data) or container_kind(data) is not None:
+            blob_paths.add(path)
+            earlier = old.strip("0") and old_mode != GITLINK  # not an added path, not a submodule
+            found += blob_findings(scanner, f"{short} ", path, data,
+                                   (lambda old=old: git(repo, "cat-file", "blob", old)) if earlier else None)
+        for finding in found:  # a merge repeats a path per parent
+            if finding not in reported:
+                reported.add(finding)
+                hits.append(finding)
     return hits, blob_paths
 
 
@@ -542,20 +568,42 @@ def scan_commits(
     return hits
 
 
-def committed_blob(repo: Path, spec: str) -> tuple[str, bytes] | None:
-    """The path and bytes of the blob `--hash` keys: `<path>` in HEAD, else `<rev>:<path>` (a blob
-    only history holds). Never the working-tree file: an uncommitted edit, its line endings, its
-    encoding or a smudge filter can make it differ from the blob the scan read (#32 F5 m8)."""
+def committed_blob(repo: Path, spec: str) -> tuple[str, bytes, str] | None:
+    """(blob path, its bytes, the part path) for `--hash`: `<path>` in HEAD, else `<rev>:<path>` (a
+    blob only history holds); a path `<blob>!/<member>` names a member of a container blob (expand),
+    its part path the whole spec. Never the working-tree file: an uncommitted edit, its line endings,
+    its encoding or a smudge filter can make it differ from the blob the scan read (#32 F5 m8)."""
     targets = [("HEAD", spec)]
     if ":" in spec:  # `HEAD:<path>` first: a path may hold a colon itself
         rev, path = spec.split(":", 1)
         targets.append((rev, path))
     for rev, path in targets:
-        try:
-            return path, git(repo, "cat-file", "blob", f"{rev}:{path}")
-        except subprocess.CalledProcessError:
-            continue
+        for blob_path in [path, *(path[:member.start()] for member in re.finditer("!/", path))]:
+            try:
+                return blob_path, git(repo, "cat-file", "blob", f"{rev}:{blob_path}"), path
+            except subprocess.CalledProcessError:
+                continue
     return None
+
+
+def hash_key(repo: Path, spec: str, number: str) -> str | None:
+    """The allow key `--hash` prints: of unit `number` (N or `run N`) of a blob or a member of it,
+    or of the blob itself (`blob`, for a finding that cannot be scanned), or None when there is no
+    such blob, member or unit."""
+    target = committed_blob(repo, spec)
+    if target is None:
+        return None
+    blob_path, data, part_path = target
+    if number == "blob":
+        return line_key(blob_path, blob_key(data))
+    part = next((part for part in expand(blob_path, data) if isinstance(part, Member) and part.path == part_path), None)
+    try:
+        # the units the scan numbers, from the blob's bytes: a text read would translate CR / CRLF
+        # to \n and diverge the allow key from the scanner; a UTF-16 line or a binary run (`run N`)
+        # is keyed exactly as the scanner keys it
+        return None if part is None else line_key(part_path, unit_key(part.data, int(number.removeprefix("run").strip())))
+    except (IndexError, ValueError):
+        return None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -567,21 +615,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--tree", action="append", default=[], metavar="REV")
     parser.add_argument("--commits", action="append", default=[], metavar="REVLIST")
     parser.add_argument("--hash", nargs=2, metavar=("PATH", "N"),
-                        help="print the allow key of line N (or `run N`) of PATH as committed in HEAD, "
-                             "or of <rev>:<path>")
+                        help="print the allow key of line N (or `run N`) of PATH as committed in HEAD, of "
+                             "<rev>:<path>, of a container member <path>!/<member>; N `blob` keys the blob itself")
     args = parser.parse_args(argv)
 
     if args.hash:
-        spec, number = args.hash
-        blob = committed_blob(args.repo, spec)
-        if blob is None:
-            print("--hash: no such committed blob (give <path> in HEAD, or <rev>:<path>)", file=sys.stderr)
+        key = hash_key(args.repo, *args.hash)
+        if key is None:
+            print("--hash: no such committed blob, member or unit (give <path> in HEAD, or <rev>:<path>; "
+                  "<path>!/<member> for a container member)", file=sys.stderr)
             return EXIT_USAGE
-        path, data = blob
-        # the units the scan numbers, from the blob's bytes: a text read would translate CR / CRLF
-        # to \n and diverge the allow key from the scanner; a UTF-16 line or a binary run (`run N`)
-        # is keyed exactly as the scanner keys it
-        print(line_key(path, unit_key(data, int(number.removeprefix("run").strip()))))
+        print(key)
         return EXIT_CLEAN
     if args.denylist is None or not (args.tree or args.commits):
         parser.error("--denylist and at least one --tree or --commits are required")
