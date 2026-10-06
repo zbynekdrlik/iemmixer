@@ -511,8 +511,8 @@ pub trait Pc {
     /// starts one that ended with exit 75 again).
     fn engine_exit(&mut self) -> Option<Option<i32>>;
     fn engine_arm(&mut self) -> R<()>;
-    /// `Shutdown`, `DriverReleased` ≤ 10 s, gone ≤ 5 s; a refused
-    /// `Shutdown` fails at once.
+    /// `Shutdown`, `DriverReleased` (or `DriverParked`, #35: nothing was
+    /// released) ≤ 10 s, gone ≤ 5 s; a refused `Shutdown` fails at once.
     fn engine_stop(&mut self, c: &Cancel) -> R<()>;
     /// Two statuses about 1 s apart: callbacks advancing, not faulted, not
     /// parked.
