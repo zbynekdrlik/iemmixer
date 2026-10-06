@@ -478,12 +478,16 @@ def merge(x: str, d: str, base: str) -> str:
     """xperf -merge of one trace's raw session files (<base>kernel.etl and
     <base>markers.etl, the ones present) into its .etl — what a merging stop
     (`xperf -stop ... -d`) does, as a separate, abandonable call. The raw
-    files are deleted once the merge succeeded (a soak would otherwise double
-    its disk use); a failed merge throws first and keeps them."""
+    files are deleted once the merge succeeded and the merged trace exists and
+    is not empty (a soak would otherwise double its disk use); a failed merge,
+    or one that wrote nothing, throws first and keeps them (F2 round 3, m10)."""
     out = f"{base[:-1]}.etl" if base else "trace.etl"
     return (f"$m = @(foreach ($n in @('{base}kernel.etl', '{base}markers.etl')) {{ $p = Join-Path {d} $n ; "
             f"if (Test-Path -LiteralPath $p) {{ $p }} }}) ; "
             f"[void](Invoke-IemXperf -Xperf {x} -Arguments (@('-merge') + $m + @((Join-Path {d} '{out}')))) ; "
+            f"$o = Join-Path {d} '{out}' ; "
+            f"if (-not (Test-Path -LiteralPath $o) -or (Get-Item -LiteralPath $o).Length -le 0) "
+            f"{{ throw \"xperf -merge left no trace in $o (the raw files are kept)\" }} ; "
             f"Remove-Item -LiteralPath $m")
 
 
