@@ -747,11 +747,22 @@ def cmd_reboot_prepare(env, args) -> None:
             sw.alarm(f"the unwind before the reboot did not complete ({', '.join(failed)}): no reboot is prepared; "
                      "the card stays free and the window open (preempt or to-event brings REAPER back)")
             raise StepError(f"the unwind failed at {', '.join(failed)}: no reboot prepared")
-        st = tps(env, f"Get-IemTuningState -ProfilePath {sw.tuning_profile(env)}", timeout=120)
+    # Read-only, so outside the lock and abandonable (F2 round 3, m3): the tuning
+    # state compiles IemTuning, and a preempt never waits for it.
+    st = tps(env, f"Get-IemTuningState -ProfilePath {sw.tuning_profile(env)}", timeout=120, event="abandon")
+    prepared_at = tps(env, "Get-IemNow", timeout=60, event="abandon")
+
+    def prepare(current: dict) -> None:
+        # The state as saved now: a preempt may have closed the window (REAPER back)
+        # or taken the card meanwhile; then no reboot is prepared.
+        if current.get("closed") or current.get("card") != "free":
+            raise StepError(f"the window was closed or its card taken meanwhile (card {current.get('card')!r}): "
+                            "no reboot prepared")
         # The boot token tells post-boot whether the PC rebooted (decision 5); the
         # time is information only.
-        sw.update_state({"card": "rebooting", "reboot": {"prepared_at": tps(env, "Get-IemNow", timeout=60),
-                                                         "boot_token": st.get("boot_token")}})
+        current.update(card="rebooting", reboot={"prepared_at": prepared_at, "boot_token": st.get("boot_token")})
+
+    sw.update_state(change=prepare)
     if st.get("boot_problem"):
         sw.alarm(f"the boot identity is unknown ({st['boot_problem']}): the pending and revert_pending lists of this "
                  "reboot prove nothing (#32 MINOR-4)")
