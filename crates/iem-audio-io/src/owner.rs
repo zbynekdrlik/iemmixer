@@ -206,6 +206,41 @@ pub fn seh_step(released: bool, waited: Duration) -> SehStep {
     }
 }
 
+/// What the owner thread does in a tick once a structured exception reached
+/// the SEH filter (design §3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SehRelease {
+    /// No exception, or the stream already ended for good: nothing to do.
+    Nothing,
+    /// Release the driver for good: once `RELEASED` is set the filter lets
+    /// the exception end the process.
+    Release,
+    /// The test hold (the parked-engine test, S6 design §10 test #2, #35;
+    /// set only through the engine's fault-injection flag): the driver is
+    /// kept as a driver that hangs in `dispose` keeps it (stopped, never
+    /// disposed or released), so the filter's wait runs out and it parks the
+    /// faulting thread.
+    Hold,
+}
+
+/// The owner thread's answer to a structured exception (`seh`: the filter
+/// ran) while the test hold is `hold` and the stream has `done` (ended for
+/// good: a stop, the session end, an earlier release or hold).
+pub fn seh_release(seh: bool, _hold: bool, done: bool) -> SehRelease {
+    if seh && !done {
+        SehRelease::Release
+    } else {
+        SehRelease::Nothing
+    }
+}
+
+/// Whether a structured exception is a fault of the stream (the engine
+/// saves, releases and exits 70). Under the test hold it parks the stream
+/// instead (#35).
+pub fn seh_faults(seh: bool, _hold: bool) -> bool {
+    seh
+}
+
 /// How a stream ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopOutcome {
@@ -558,6 +593,34 @@ mod tests {
         assert_eq!(seh_step(false, ms(999)), SehStep::Wait);
         assert_eq!(seh_step(false, ms(1_000)), SehStep::Park);
         assert_eq!(seh_step(false, ms(1_001)), SehStep::Park);
+    }
+
+    /// The parked-engine test (S6 design §10 test #2, #35): a structured
+    /// exception under the test hold keeps the driver, so the SEH filter
+    /// parks; without the hold the owner releases, as before.
+    #[test]
+    fn the_owner_releases_after_a_structured_exception_unless_the_test_hold_keeps_the_driver() {
+        use SehRelease::{Hold, Nothing, Release};
+        // No exception: nothing, whatever the hold and the stream.
+        for (hold, done) in [(false, false), (true, false), (false, true), (true, true)] {
+            assert_eq!(seh_release(false, hold, done), Nothing, "{hold} {done}");
+        }
+        assert_eq!(seh_release(true, false, false), Release);
+        assert_eq!(seh_release(true, true, false), Hold);
+        // A stream that already ended for good is left as it is.
+        assert_eq!(seh_release(true, false, true), Nothing);
+        assert_eq!(seh_release(true, true, true), Nothing);
+    }
+
+    /// A held structured exception parks the stream without a fault, so the
+    /// engine keeps running and reports `parked` until the OS restart the
+    /// test makes (#35); any other one is a fault, as before.
+    #[test]
+    fn a_structured_exception_is_a_fault_unless_the_test_hold_parks_it() {
+        assert!(seh_faults(true, false));
+        assert!(!seh_faults(true, true));
+        assert!(!seh_faults(false, false));
+        assert!(!seh_faults(false, true));
     }
 
     #[test]
