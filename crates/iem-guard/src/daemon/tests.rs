@@ -2113,8 +2113,10 @@ fn an_injected_park_leaves_the_engine_running_parked() {
 /// 2026-10-07): its stream stopped with the card held, so nothing plays
 /// until the engine ends. The watch alarms it by the engine's state alone (no
 /// level, #38), once per parked engine: never inside a HIL job (test #2 parks
-/// it on purpose), again only after the engine was no longer parked (its
-/// status unparked, or no engine seen: a new one). It ends nothing.
+/// it on purpose), again only after an engine was seen unparked or the guard
+/// started a new one (`spawns`); a look without an engine changes nothing.
+/// In every mode: in event an engine of ours runs only after the event plan
+/// stopped for the owner (whose own alarm comes besides). It ends nothing.
 #[test]
 fn a_parked_engine_outside_a_hil_job_alarms_once_until_it_is_no_longer_parked() {
     const PARKED: &str = "the engine's stream is parked outside a HIL job: it holds the card \
@@ -2134,7 +2136,7 @@ fn a_parked_engine_outside_a_hil_job_alarms_once_until_it_is_no_longer_parked() 
     tick(&mut pc, &mut g, at + s(6));
     tick(&mut pc, &mut g, at + s(7));
     assert_eq!(texts(&g), vec![PARKED.to_owned()]);
-    for mode in [Mode::Dev, Mode::Live] {
+    for mode in [Mode::Dev, Mode::Live, Mode::Event] {
         let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(mode));
         // A streaming engine raises nothing.
         tick(&mut pc, &mut g, at);
@@ -2161,12 +2163,18 @@ fn a_parked_engine_outside_a_hil_job_alarms_once_until_it_is_no_longer_parked() 
         tick(&mut pc, &mut g, at + s(5));
         tick(&mut pc, &mut g, at + s(6));
         assert_eq!(parked(&g), 2, "{mode:?}");
-        // The engine ended (none seen), and a new one parks: one more.
+        // A look without an engine (one coming up, or the connection renewed
+        // to the same engine) changes nothing: still the one alarm.
         pc.engine_up = false;
         tick(&mut pc, &mut g, at + s(7));
         pc.engine_up = true;
         tick(&mut pc, &mut g, at + s(8));
+        assert_eq!(parked(&g), 2, "{mode:?}");
+        // A new engine of ours (a respawn or a plan's start, each counted in
+        // `spawns`) that parks: one more, even with no look between.
+        g.spawns += 1;
         tick(&mut pc, &mut g, at + s(9));
+        tick(&mut pc, &mut g, at + s(10));
         assert_eq!(parked(&g), 3, "{mode:?}");
         // The watch ends nothing and starts nothing for it.
         assert!(
