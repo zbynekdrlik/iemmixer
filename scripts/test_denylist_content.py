@@ -208,6 +208,20 @@ class ContentTests(ScanTestCase):
             "p.xz!/:2: denylist entry 1", "p.gz!/:2: denylist entry 1", "d.zip!/dir/:1: denylist entry 1",
             "s.zip!/a.txt:1: denylist entry 1")
 
+    def test_plain_text_is_never_read_as_a_container(self) -> None:
+        # review of lane G3, finding 4: text starting like a bzip2 stream, an ar or lzip archive or
+        # a PDF was reported as a container that cannot be scanned
+        self.commit({"notes/bz.txt": "BZh91AY&SY then ordinary words\n", "notes/ar.md": "!<arch>\nordinary notes\n",
+                     "notes/lz.txt": "LZIP\x01 ordinary words\n", "notes/pdf.txt": "%PDF-1.7 notes on /Filter and /Encrypt\n",
+                     "notes/tar.txt": "x" * 257 + "ustar" + "y" * 300 + "\n"})
+        self.assertEqual(self.scan("--tree", "HEAD", "--commits", "HEAD"), (0, "denylist: clean\n"))
+
+    def test_a_pdf_with_streams_is_a_finding_whatever_its_filter_is_called(self) -> None:
+        # a name object may spell a character as #xx, so `/Fil#74er` is a /Filter the text check missed
+        pdf = (b"%PDF-1.4\n1 0 obj << /Length 20 /Fil#74er /FlateDecode >> stream\n" + zlib.compress(b"(zyxname) Tj")
+               + b"\nendstream endobj\n%%EOF\n")
+        self.assert_findings_in_both_modes({"hex.pdf": pdf}, "hex.pdf: cannot be scanned: a PDF with streams")
+
     def test_other_containers_are_findings_allowlisted_by_their_blob_key(self) -> None:
         pdf = (b"%PDF-1.4\n1 0 obj << /Length 20 /Filter /FlateDecode >> stream\n" + zlib.compress(b"(zyxname) Tj")
                + b"\nendstream endobj\n%%EOF\n")
