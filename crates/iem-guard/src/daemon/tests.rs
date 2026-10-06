@@ -2109,6 +2109,74 @@ fn an_injected_park_leaves_the_engine_running_parked() {
     assert_eq!((g.state.mode, g.state.job), (Mode::Dev, Some(7)));
 }
 
+/// A parked engine outside a HIL job is a fault (#35, supervisor decision of
+/// 2026-10-07): its stream stopped with the card held, so nothing plays
+/// until the engine ends. The watch alarms it by the engine's state alone (no
+/// level, #38), once per parked engine: never inside a HIL job (test #2 parks
+/// it on purpose), again only after the engine was no longer parked (its
+/// status unparked, or no engine seen: a new one). It ends nothing.
+#[test]
+fn a_parked_engine_outside_a_hil_job_alarms_once_until_it_is_no_longer_parked() {
+    const PARKED: &str = "the engine's stream is parked outside a HIL job: it holds the card \
+                          and nothing plays until the engine ends; nothing is ended";
+    let parked = |g: &Guard| texts(g).iter().filter(|t| t.as_str() == PARKED).count();
+    let at = Instant::now();
+    let s = Duration::from_secs;
+    // Inside a job: no alarm, however long it stays parked.
+    let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
+    g.state.job = Some(7);
+    pc.seen.status.parked = true;
+    tick(&mut pc, &mut g, at);
+    tick(&mut pc, &mut g, at + s(5));
+    assert!(g.alarms.all().is_empty(), "{:?}", texts(&g));
+    // The job ends while it stays parked: now it is a fault, alarmed once.
+    g.state.job = None;
+    tick(&mut pc, &mut g, at + s(6));
+    tick(&mut pc, &mut g, at + s(7));
+    assert_eq!(texts(&g), vec![PARKED.to_owned()]);
+    for mode in [Mode::Dev, Mode::Live] {
+        let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(mode));
+        // A streaming engine raises nothing.
+        tick(&mut pc, &mut g, at);
+        assert!(g.alarms.all().is_empty(), "{mode:?}: {:?}", texts(&g));
+        // Parked: one alarm, no owner question, its notice sent, however
+        // many looks see it.
+        pc.seen.status.parked = true;
+        for k in 1..4 {
+            tick(&mut pc, &mut g, at + s(k));
+        }
+        assert_eq!(texts(&g), vec![PARKED.to_owned()], "{mode:?}");
+        let a = g.alarms.last().unwrap();
+        assert!(a.notified && !a.owner_question && a.step.is_none(), "{a:?}");
+        assert_eq!(
+            pc.notices.last().map(|n| n.2.as_str()),
+            Some(PARKED),
+            "{mode:?}"
+        );
+        // No longer parked, then parked again: one more.
+        pc.seen.status.parked = false;
+        tick(&mut pc, &mut g, at + s(4));
+        assert_eq!(parked(&g), 1, "{mode:?}");
+        pc.seen.status.parked = true;
+        tick(&mut pc, &mut g, at + s(5));
+        tick(&mut pc, &mut g, at + s(6));
+        assert_eq!(parked(&g), 2, "{mode:?}");
+        // The engine ended (none seen), and a new one parks: one more.
+        pc.engine_up = false;
+        tick(&mut pc, &mut g, at + s(7));
+        pc.engine_up = true;
+        tick(&mut pc, &mut g, at + s(8));
+        tick(&mut pc, &mut g, at + s(9));
+        assert_eq!(parked(&g), 3, "{mode:?}");
+        // The watch ends nothing and starts nothing for it.
+        assert!(
+            pc.mutating_calls().iter().all(|c| *c == Call::Notify),
+            "{mode:?}: {:?}",
+            pc.mutating_calls()
+        );
+    }
+}
+
 #[test]
 fn an_injected_fault_is_respawned_once_and_reported() {
     let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
