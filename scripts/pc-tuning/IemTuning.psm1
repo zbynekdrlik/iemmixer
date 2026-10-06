@@ -246,6 +246,21 @@ function Open-IemBootKey {
 $script:BootLockName = 'Global\iemmixer-boot-token'
 $script:BootLockWaitMs = 30000
 
+function New-BootLock {
+    # Module-private: the boot token's lock, created with its own DACL
+    # (Administrators and SYSTEM full control). .NET opens an existing mutex with
+    # full access, so with the first creator's default DACL another account (the
+    # guard's tuning task, an ssh session, SYSTEM) could be refused (#32 MINOR-3).
+    $sec = New-Object -TypeName System.Security.AccessControl.MutexSecurity
+    foreach ($t in [Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, [Security.Principal.WellKnownSidType]::LocalSystemSid) {
+        $sid = New-Object -TypeName System.Security.Principal.SecurityIdentifier -ArgumentList $t, $null
+        $sec.AddAccessRule((New-Object -TypeName System.Security.AccessControl.MutexAccessRule -ArgumentList $sid,
+            ([System.Security.AccessControl.MutexRights]::FullControl), ([System.Security.AccessControl.AccessControlType]::Allow)))
+    }
+    $created = $false
+    return [System.Threading.Mutex]::new($false, $script:BootLockName, [ref]$created, $sec)
+}
+
 function Get-IemBootIdentity {
     # This boot (review R1): a random GUID token in the volatile boot key. The key
     # holds the same token exactly while the boot that wrote it lasts, so no clock,
@@ -255,7 +270,7 @@ function Get-IemBootIdentity {
     # one the key no longer holds, so its Tier 3 writes would never read as
     # pending in that boot).
     param([Parameter(Mandatory)]$Profile)
-    $lock = New-Object -TypeName System.Threading.Mutex -ArgumentList $false, $script:BootLockName
+    $lock = New-BootLock
     $held = $false
     try {
         try { $held = $lock.WaitOne($script:BootLockWaitMs) }
