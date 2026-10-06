@@ -889,6 +889,25 @@ class GuardTests(unittest.TestCase):
             with self.assertRaises(sw.NoReply, msg=msg):
                 sw.guarded(self.py(f"import sys; sys.stderr.write({msg!r}); sys.exit(255)"), "", 10, "finish")
 
+    def test_only_the_connect_phase_message_says_nothing_was_sent(self) -> None:
+        # Review round 3, m8: "no route to host", "network is unreachable" and
+        # "permission denied" mean "never connected" only in ssh's own pre-session
+        # messages. The same words after the session opened (the network dropped
+        # mid-call, a remote program's error) leave the PC's fate unknown: NoReply,
+        # so cmd_reboot points at post-boot instead of inviting a second restart.
+        for msg in ("ssh: connect to host pc port 22: No route to host",
+                    "ssh: connect to host pc port 22: Network is unreachable",
+                    "ssh: Could not resolve hostname pc: Temporary failure in name resolution"):
+            with self.assertRaises(sw.StepError, msg=msg) as cm:
+                sw.guarded(self.py(f"import sys; sys.stderr.write({msg!r}); sys.exit(255)"), "", 10, "finish")
+            self.assertNotIsInstance(cm.exception, sw.NoReply, msg)
+        for msg in ("client_loop: send disconnect: Network is unreachable",
+                    "Connection to pc closed by remote host.\nclient_loop: send disconnect: No route to host",
+                    "Set-ItemProperty : Permission denied", "write failed: Permission denied",
+                    "the step said: ssh: connect to host pc port 22: Connection refused"):
+            with self.assertRaises(sw.NoReply, msg=msg):
+                sw.guarded(self.py(f"import sys; sys.stderr.write({msg!r}); sys.exit(255)"), "", 10, "finish")
+
     def test_the_flag_file_is_the_event_signal(self) -> None:
         self.assertFalse(sw.event_now())
         self.flag.touch()
