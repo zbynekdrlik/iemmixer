@@ -6,7 +6,8 @@ A window opens only with the owner's quoted "event skončil" and never while
 the "ide event" flag file exists. Every wait checks that flag every 2 s; when
 it appears the driver stops the spike through its stop file, restores the
 driver's preferred buffer (read back) and brings REAPER back with the handover
-checks (`preempt`); a step that fails while the flag exists pre-empts too
+checks (`preempt`), then watches a PC change still in flight until it is
+over (settle); a step that fails while the flag exists pre-empts too
 (exit 10). PC work runs in SpikePc.psm1 over ssh; site values come only from
 the private env file ($SPIKE_ENV). Nothing is ever ended by force."""
 from __future__ import annotations

@@ -9,8 +9,10 @@ window.
 "ide event": the flag file (~/.config/iemmixer/EVENT-NOW) exists. `event`
 writes it first when it is missing (a flag it cannot write is a warning,
 never a stop), pre-empts an open S1a/S1c spike window (spike_window.py
-preempt), then runs `iemmode event`, and `iemmode event --direct` when the
-guard is unreachable (exit 4). The event path has one budget that fits one
+preempt; after a failed one it closes the window under the window lock, so
+no queued window preempt starts a second bring-back), then runs `iemmode
+event`, and `iemmode event --direct` when the guard is unreachable (exit
+4). The event path has one budget that fits one
 Bash call (EVENT_BUDGET_S): the spike preempt gets SPIKE_SHARE_S of it, no
 `iemmode` call starts while the preempt still runs, and none starts with
 less than SWITCH_MIN_S left. `event` never waits for another command.
