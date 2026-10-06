@@ -176,6 +176,9 @@ pub fn parse(body: &[u8]) -> Result<Msg, String> {
             "driver_released" => Msg::DriverReleased {
                 reason: text(&v, "reason"),
             },
+            "driver_parked" => Msg::DriverParked {
+                reason: text(&v, "reason"),
+            },
             "superseded" => Msg::Superseded,
             _ => Msg::Other,
         },
@@ -332,19 +335,27 @@ impl Stopped {
     /// What the guard logs when the word comes.
     pub fn note(&self) -> String {
         match self {
-            Self::Released(reason) | Self::Parked(reason) => {
-                format!("the engine released the driver: {reason}")
-            }
+            Self::Released(reason) => format!("the engine released the driver: {reason}"),
+            Self::Parked(reason) => format!(
+                "the engine's stream stayed parked ({reason}): nothing was released; \
+                 the card is free once the engine has ended"
+            ),
         }
     }
 
     /// `EngineStop`'s failure when the engine did not end within `gone`
     /// after the word.
     pub fn not_ended(&self, gone: Duration) -> String {
-        format!(
-            "the engine released the driver but did not end within {} s",
-            gone.as_secs()
-        )
+        let secs = gone.as_secs();
+        match self {
+            Self::Released(_) => {
+                format!("the engine released the driver but did not end within {secs} s")
+            }
+            Self::Parked(_) => format!(
+                "the engine's stream stayed parked and the engine did not end within {secs} s: \
+                 the card may still be held"
+            ),
+        }
     }
 }
 
