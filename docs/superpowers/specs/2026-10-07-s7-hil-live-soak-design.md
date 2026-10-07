@@ -71,7 +71,8 @@ The gates need distributions the engine does not export today. `Status` has `lat
 - **Client harness `iem-soakclient`** (Rust, a new crate, built by CI into the bundle):
   - It logs in as the engineer through the server's normal login (PIN from the ops secret in the job's environment).
   - It opens one mixer socket and one listen socket on one member mix, at the LAN address the server names.
-  - It decodes the Opus frames and counts frames, gaps (> 60 ms without a frame), reconnects and meter frames, then writes a JSON summary.
+  - It first checks that `/api/version` names the soaked build (`--expect-build`), else `wrong-server`: after "ide event" the predecessor answers at the same address and accepts the same token, and a `ListenStart` there would mute members' sends in REAPER.
+  - It decodes the Opus frames and counts frames, gaps (> 60 ms without a frame) and meter frames, then writes a JSON summary. It never opens a socket twice: the first close, error or silence past the idle bound ends the run `connection-lost` (the summary's `reconnects` stays, always 0). Each socket ends with `ListenStop` (listen), a Close and a bounded wait for the peer's Close.
   - Its own CPU Set is the profile's housekeeping set when one is given.
 - **Polls:**
   - every 60 s: `iemmode status`;
