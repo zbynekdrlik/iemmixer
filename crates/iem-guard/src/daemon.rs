@@ -534,6 +534,9 @@ pub struct Guard {
     last_exit: Option<i32>,
     /// The step clock of the switch running now (`LastSwitch.steps`, S7).
     laps: Laps,
+    /// The entry the running switch unwinds (`back_to_event`): its target
+    /// and its `Switching.started`, so the unwind's record spans it.
+    unwinding: Option<(Mode, u64)>,
 }
 
 impl Guard {
@@ -575,6 +578,7 @@ impl Guard {
             spawns: 0,
             last_exit: None,
             laps: Laps::default(),
+            unwinding: None,
         };
         g.publish(|_| {});
         g
@@ -716,7 +720,12 @@ impl Guard {
             done: Vec::new(),
             started: self.now(),
         });
-        self.laps.start(Instant::now());
+        // An unwind goes on with the entry's clock.
+        if self.unwinding.is_some() {
+            self.laps.resume(Instant::now());
+        } else {
+            self.laps.start(Instant::now());
+        }
         self.store();
         let cancel = self.cancel.clone();
         self.publish(|v| {
@@ -752,11 +761,13 @@ impl Guard {
         }
         self.trial = false;
         // The record of this switch (S7 design note §5), saved and replied
-        // from here on.
+        // from here on; an unwind's spans the entry it unwinds.
+        let entry = self.unwinding.take();
         if let Some(s) = &sw {
             let steps = self.laps.take();
             let ended = self.now();
-            self.state.last_switch = Some(LastSwitch::new(s, mode, outcome.into(), ended, steps));
+            let record = LastSwitch::new(s, mode, outcome.into(), ended, steps);
+            self.state.last_switch = Some(record.unwinding(entry));
         }
         info!(
             "switch ended in {}: {}",
@@ -966,9 +977,12 @@ fn may_end(g: &Guard, to: Mode) -> bool {
     to == Mode::Event || g.shared.end_unless_preempted()
 }
 
+/// The unwind of a failed or pre-empted dev or live entry: a switch to
+/// event whose record spans the entry (S7 part 3, `LastSwitch.unwound`).
 fn back_to_event(pc: &mut dyn Pc, g: &mut Guard, why: &str) -> Outcome {
     g.cancel.clear();
     g.info(format!("unwinding to event: {why}"));
+    g.unwinding = g.state.switching.as_ref().map(|s| (s.to, s.started));
     let now = g.state.mode;
     run_switch(pc, g, now, Mode::Event)
 }

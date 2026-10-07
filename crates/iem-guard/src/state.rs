@@ -454,6 +454,31 @@ mod tests {
         );
     }
 
+    /// S7 part 3 (#10): an unwind's record names the entry it unwinds and
+    /// keeps it across a save; an older guard's record, without the key,
+    /// loads whole, with none.
+    #[test]
+    fn an_unwound_record_round_trips_and_an_older_one_loads_without_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("guard-state.json");
+        let mut st = sample();
+        st.last_switch = st.last_switch.map(|r| LastSwitch {
+            unwound: Some(Mode::Live),
+            ..r
+        });
+        st.save(&path, 1_790_000_300).unwrap();
+        let (back, err) = GuardState::load(&path);
+        assert_eq!(err, None);
+        assert_eq!(back.last_switch, st.last_switch);
+        let mut older = serde_json::to_value(&st).unwrap();
+        let record = older["last_switch"].as_object_mut().unwrap();
+        assert_eq!(record.remove("unwound"), Some(serde_json::json!("live")));
+        fs::write(&path, serde_json::to_vec(&older).unwrap()).unwrap();
+        let (back, err) = GuardState::load(&path);
+        assert_eq!(err, None);
+        assert_eq!(back.last_switch, sample().last_switch);
+    }
+
     /// A record this guard cannot read (a newer guard's shape) is dropped:
     /// the state loads, no alarm, nothing else is lost.
     #[test]
