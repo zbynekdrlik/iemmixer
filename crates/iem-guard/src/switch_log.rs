@@ -47,6 +47,11 @@ pub struct LastSwitch {
     pub steps: Vec<StepTime>,
     /// [`silence_ms`] of the steps.
     pub silence_ms: Option<u64>,
+    /// The target of the dev or live entry this record unwinds (S7 part 3,
+    /// [`LastSwitch::unwinding`]); none for every other switch and in an
+    /// older guard's record.
+    #[serde(default)]
+    pub unwound: Option<Mode>,
 }
 
 impl LastSwitch {
@@ -67,7 +72,23 @@ impl LastSwitch {
             ended,
             steps,
             silence_ms,
+            unwound: None,
         }
+    }
+
+    /// The record of an unwind that spans the failed or pre-empted `entry`
+    /// it unwinds (the entry's target and its `Switching.started`; #10
+    /// 2026-10-07): it begins at the entry's start, and its steps, the
+    /// entry's then its own on one clock ([`Laps::resume`]), give a silence
+    /// window from the entry's first silencing step through the unwind's
+    /// handover. No entry: the record as it is.
+    #[must_use]
+    pub fn unwinding(mut self, entry: Option<(Mode, u64)>) -> Self {
+        if let Some((to, started)) = entry {
+            self.unwound = Some(to);
+            self.started = started;
+        }
+        self
     }
 }
 
@@ -100,10 +121,18 @@ pub struct Laps {
 
 impl Laps {
     /// A switch begins: its first step is timed from `now`, and the steps
-    /// of one that never ended (an unwind is a switch of its own) are gone.
+    /// of one that never ended are gone (an unwind resumes instead).
     pub fn start(&mut self, now: Instant) {
         self.last = Some(now);
         self.steps.clear();
+    }
+
+    /// The unwind of an entry that never ended begins: the entry's steps
+    /// stay first and its first step is timed from the entry's last lap, so
+    /// the steps add up to the entry and its unwind. A stopped clock runs
+    /// from `now`, as after a start.
+    pub fn resume(&mut self, now: Instant) {
+        self.last.get_or_insert(now);
     }
 
     /// `step` ended at `now` (0 ms without a start).
