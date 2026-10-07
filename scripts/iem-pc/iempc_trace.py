@@ -17,9 +17,16 @@ PC while the guard's engine plays, in dev time.
    (`hash_check`; both, or IemMeasure's alone for the stop-only import, which
    loads no IemTuning): the elevated ssh session imports nothing else, and
    never the bundle's copy in the user's root.
-4. `Start-IemTrace -Xperf <PC_XPERF> -Dir <PC_ROOT>\\traces\\<label>-<UTC
-   stamp>` (the kernel's DPC and INTERRUPT events and the engine's marker
-   session; `--circular-mb` keeps the kernel file circular at that size).
+4. A trace an earlier `iempc trace` left recorded is stopped first (refused
+   when that stop is not confirmed); this run is recorded in the state dir
+   (RECORD: run folder, run, label, start time); then `Start-IemTrace -Xperf
+   <PC_XPERF> -Dir <PC_ROOT>\\traces\\<label>-<UTC stamp>` (the kernel's DPC
+   and INTERRUPT events and the engine's marker session; `--circular-mb`
+   keeps the kernel file circular at that size). The record goes after a
+   confirmed stop; a dev box that dies hard leaves it, and `iempc event` and
+   `iempc dev` stop that trace first (stop_recorded). The scripts that load
+   IemTuning set TEMP and TMP to the admin-only <elevated root>\\temp first
+   (its Add-Type compiles there, elevated_ps.temp_first).
 5. This box waits N seconds and looks at the "ide event" flag every POLL_S
    (2 s). A flag stops the trace at once (`Stop-IemTraceSessions`, IemMeasure
    imported 'stop-only': nothing compiles), then the event path runs (exit

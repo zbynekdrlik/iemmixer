@@ -12,7 +12,9 @@ iempc_trace.py, PC_XPERF below), and the hand-over of an open S1a window.
 writes it first when it is missing (a flag it cannot write is a warning,
 never a stop), pre-empts an open S1a/S1c spike window (spike_window.py
 preempt; after a failed one it closes the window under the window lock, so
-no queued window preempt starts a second bring-back), then runs `iemmode
+no queued window preempt starts a second bring-back), stops a kernel trace
+whose `iempc trace` died with this box (its record, iempc_trace.stop_recorded;
+`dev` does too), then runs `iemmode
 event`, and `iemmode event --direct` when the guard is unreachable (exit
 4). The event path has one budget that fits one
 Bash call (EVENT_BUDGET_S): the spike preempt gets SPIKE_SHARE_S of it, no
