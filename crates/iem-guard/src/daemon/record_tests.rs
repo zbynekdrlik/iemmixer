@@ -61,7 +61,6 @@ fn a_dev_entry_keeps_its_record_with_every_step_timed() {
     assert_eq!(steps_of(&r), plan(Mode::Dev, &band_up()));
     let arm = r.steps.iter().find(|s| s.step == Step::EngineArm).unwrap();
     assert!(arm.ms >= 150, "{arm:?}");
-    assert!(r.ended >= r.started);
     // The steps add up to the switch, never more: each is timed from the
     // end of the one before.
     let total: u64 = r.steps.iter().map(|s| s.ms).sum();
@@ -74,19 +73,38 @@ fn a_dev_entry_keeps_its_record_with_every_step_timed() {
     assert_eq!(r.silence_ms, Some(quiet));
 }
 
+/// The record names when its switch began (`Switching.started`) and when it
+/// ended (the clock at its end), in seconds since the epoch.
+#[test]
+fn a_record_names_when_its_switch_began_and_ended() {
+    let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Event));
+    let Clock::Fixed(t) = g.clock.clone() else {
+        panic!("the test guard's clock is fixed")
+    };
+    g.begin(Mode::Event, Mode::Dev, &[], false);
+    t.store(1_790_000_042, Ordering::SeqCst);
+    g.finish(&mut pc, Outcome::Done, Mode::Dev);
+    let r = last(&g);
+    assert_eq!((r.started, r.ended), (1_790_000_000, 1_790_000_042));
+    assert!(r.steps.is_empty(), "{:?}", r.steps);
+}
+
 /// A failed step is timed and kept: at "ide event" a failed `AppHandover`
-/// (policy `Continue`) is alarmed, the plan goes on, the record lists it.
+/// (policy `Continue`) is alarmed, the plan goes on, the record lists it
+/// with its time.
 #[test]
 fn a_failed_step_is_timed_and_kept_in_the_record() {
     let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
     pc.fail(Call::AppAnswers, "the app does not answer");
+    pc.delay(Call::AppAnswers, Duration::from_millis(50));
     assert_eq!(
         run_switch(&mut pc, &mut g, Mode::Dev, Mode::Event),
         Outcome::Done
     );
     let r = last(&g);
     assert_eq!(steps_of(&r), plan(Mode::Event, &iemmixer_up()));
-    assert!(steps_of(&r).contains(&Step::AppHandover));
+    let failed = r.steps.iter().find(|s| s.step == Step::AppHandover);
+    assert!(failed.is_some_and(|s| s.ms >= 50), "{failed:?}");
     assert_eq!(
         (r.from, r.to, r.ended_in, r.outcome),
         (Mode::Dev, Mode::Event, Mode::Event, SwitchOutcome::Done)
@@ -98,8 +116,9 @@ fn a_failed_step_is_timed_and_kept_in_the_record() {
 }
 
 /// A failed engine stop at "ide event" is followed by the health read the
-/// runner inserts (never planned): the record lists both. A plan that
-/// stopped there never played REAPER: no silence window.
+/// runner inserts (never planned): the record lists both, the read timed
+/// once it answered. A plan that stopped there never played REAPER: no
+/// silence window.
 #[test]
 fn a_failed_engine_stop_records_its_health_read() {
     for (health, outcome, ended_in) in [
@@ -109,6 +128,7 @@ fn a_failed_engine_stop_records_its_health_read() {
         let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
         pc.fail(Call::EngineStop, "no DriverReleased within 10 s");
         pc.health(health);
+        pc.delay(Call::EngineHealth, Duration::from_millis(50));
         run_switch(&mut pc, &mut g, Mode::Dev, Mode::Event);
         let r = last(&g);
         assert_eq!(
@@ -116,6 +136,7 @@ fn a_failed_engine_stop_records_its_health_read() {
             [Step::EngineStop, Step::EngineHealth],
             "{health:?}"
         );
+        assert!(r.steps[1].ms >= 50, "{health:?}: {:?}", r.steps);
         assert_eq!(
             (r.from, r.to, r.ended_in, r.outcome),
             (Mode::Dev, Mode::Event, ended_in, outcome),

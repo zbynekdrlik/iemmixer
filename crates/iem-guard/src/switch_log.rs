@@ -232,7 +232,9 @@ mod tests {
         // The engine stopped, the plan stopped for the owner before REAPER.
         let stopped = [st(Step::EngineStop, 10_000), st(Step::EngineHealth, 200)];
         assert_eq!(silence_ms(Mode::Event, &stopped), None);
-        // A dev entry that unwound before the engine's arm.
+        // A dev entry that stopped before the engine's arm (the rehearsal's
+        // re-entry stops for the owner; any other entry unwinds, and the
+        // unwind leaves a record of its own).
         let unwound = [st(Step::ReaperSaveQuit, 8000), st(Step::EngineStart, 700)];
         assert_eq!(silence_ms(Mode::Dev, &unwound), None);
         // The end before the start is no window.
