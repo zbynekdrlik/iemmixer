@@ -4,6 +4,7 @@ every value is synthetic."""
 from __future__ import annotations
 
 import copy
+import datetime as dt
 import fcntl
 import json
 import sys
@@ -160,6 +161,31 @@ class SwitchTestTests(SwitchBase):
     def test_the_running_engine_must_be_the_active_bundle_whichever_it_is(self) -> None:
         eng = dict(READY["engine"], build=SHA2)
         self.status(ready(detail=f"mode dev; bundle {SHA2}; 1 unacknowledged alarm", engine=eng))
+        code, docs, err = self.switch()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.result(docs)["conclusion"], "success")
+
+    def test_a_soak_of_this_dev_entry_that_may_still_run_refuses_the_test(self) -> None:
+        # A switch would end it: the soak job leaves on any mode but dev (#10).
+        now = dt.datetime.now().astimezone()
+        path = ip.state_dir() / "soak.json"
+
+        def soak(entry: int, hours: int, ago_h: float) -> dict:
+            at = (now - dt.timedelta(hours=ago_h)).isoformat(timespec="seconds")
+            return {"sha": SHA, "branch": "dev", "run": 1, "hours": hours, "entry": entry, "at": at}
+
+        path.write_text(json.dumps({"soaks": [soak(ip.current_entry(), 8, 1)]}), encoding="utf-8")
+        err = self.refused("a soak dispatched in this dev entry may still run")
+        self.assertIn("a switch would end it", err)
+        # Its hours plus the margin still count; a record it cannot read counts too (fail safe).
+        path.write_text(json.dumps({"soaks": [soak(ip.current_entry(), 1, 1.4)]}), encoding="utf-8")
+        self.refused("a soak dispatched in this dev entry may still run")
+        path.write_text(json.dumps({"soaks": [dict(soak(ip.current_entry(), 1, 1), at="later")]}), encoding="utf-8")
+        self.refused("a soak dispatched in this dev entry may still run")
+        # One of another dev entry, or one past its hours and margin, does not.
+        path.write_text(json.dumps({"soaks": [soak(ip.current_entry() + 1, 8, 1), soak(ip.current_entry(), 1, 1.6)]}),
+                        encoding="utf-8")
+        self.pc.calls.clear()
         code, docs, err = self.switch()
         self.assertEqual(code, 0, err)
         self.assertEqual(self.result(docs)["conclusion"], "success")
