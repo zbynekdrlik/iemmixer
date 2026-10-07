@@ -2965,7 +2965,8 @@ fn ide_event_ends_the_site_check_at_once() {
         INIT,
     );
     let (route, at) = fired.join().unwrap();
-    assert_eq!(route, Route::Queue(0));
+    // Its own generation holds the fence it moved (#42).
+    assert_eq!(route, Route::Queue(Generation { epoch: 0, fence: 1 }));
     assert!(at.elapsed() < Duration::from_secs(1), "{:?}", at.elapsed());
     assert_eq!(
         (r.ok, r.detail.as_str()),
