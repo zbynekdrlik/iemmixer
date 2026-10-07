@@ -10,8 +10,9 @@
 //! Threads: the daemon thread owns the [`Guard`] and the `Pc` and handles
 //! one request at a time; the pipe's connection threads answer from the
 //! [`Shared`] view while a switch runs ("ide event" pre-empts it through the
-//! [`Cancel`] token, everything else is refused) and hand every other
-//! request to the daemon thread.
+//! [`Cancel`] token, a dev or live entry is queued behind the start's
+//! checks, everything else is refused) and hand every other request to the
+//! daemon thread.
 //!
 //! A request that is not a switch runs with no switch marked as running: an
 //! "ide event" meanwhile pre-empts the token and queues behind it. Its waits
@@ -320,9 +321,14 @@ impl Shared {
     /// Decides under the view's lock, so "ide event" either pre-empts a
     /// switch that is not an event plan or waits for the event plan, never
     /// both: an event plan clears the token under the same lock as it
-    /// begins.
+    /// begins. "Ide event" moves the fence, so a dev or live entry queued
+    /// before it never runs after it; one routed while the start's checks
+    /// run is queued behind them (#42).
     pub fn route(&self, req: &Request) -> Route {
-        let v = self.lock();
+        let mut v = self.lock();
+        if matches!(req, Request::Event { dry_run: false }) {
+            v.fence += 1;
+        }
         match (req, v.running) {
             (Request::Subscribe, _) => Route::Subscribe,
             (Request::Status, _) => Route::Now(v.reply(true, &v.status)),
@@ -336,6 +342,9 @@ impl Shared {
             (Request::Event { dry_run: false }, None) => {
                 // A request queued before it pre-empts at its start.
                 self.cancel.preempt();
+                Route::Queue(v.generation())
+            }
+            (Request::Dev { .. } | Request::Live { .. }, Some(_)) if v.start_checks => {
                 Route::Queue(v.generation())
             }
             (_, Some(_)) => Route::Now(v.reply(false, while_switching(req))),
@@ -663,9 +672,15 @@ impl Guard {
     }
 
     /// The switch is persisted as it begins and after every step (the
-    /// steps done), so a restarted guard re-plans it to event.
-    fn begin(&mut self, from: Mode, to: Mode, steps: &[Step]) {
-        info!("switch {} → {}: {steps:?}", mode_name(from), mode_name(to));
+    /// steps done), so a restarted guard re-plans it to event. Every switch
+    /// but the start's checks (`checks`) moves the fence (#42).
+    fn begin(&mut self, from: Mode, to: Mode, steps: &[Step], checks: bool) {
+        let what = if checks { " (the start's checks)" } else { "" };
+        info!(
+            "switch {} → {}{what}: {steps:?}",
+            mode_name(from),
+            mode_name(to)
+        );
         self.state.switching = Some(Switching {
             from,
             to,
@@ -677,6 +692,11 @@ impl Guard {
         self.publish(|v| {
             v.running = Some(to);
             v.epoch += 1;
+            if !checks {
+                v.fence += 1;
+            }
+            v.start_checks = checks;
+            v.began = Some((from, to));
             if to == Mode::Event {
                 cancel.clear();
             }
@@ -827,8 +847,14 @@ pub fn send_notices(pc: &mut dyn Pc, g: &mut Guard) {
 /// (`plan::on_error`). "ide event" pre-empts a switch into dev/live within
 /// 1 s of a waiting step, after a mutating one.
 pub fn run_switch(pc: &mut dyn Pc, g: &mut Guard, from: Mode, to: Mode) -> Outcome {
+    switch(pc, g, from, to, false)
+}
+
+/// [`run_switch`]; `checks`: the start's event checks, which a dev or live
+/// entry queued meanwhile follows (#42).
+fn switch(pc: &mut dyn Pc, g: &mut Guard, from: Mode, to: Mode, checks: bool) -> Outcome {
     let steps = plan(to, &pc.facts());
-    g.begin(from, to, &steps);
+    g.begin(from, to, &steps, checks);
     let mut skip: Vec<Step> = Vec::new();
     for step in steps {
         if skip.contains(&step) {
@@ -1152,12 +1178,32 @@ pub struct Job {
     pub reply: SyncSender<Reply>,
 }
 
-/// A request queued before a switch began is answered as during it.
-fn stale(req: &Request, v: &View) -> Option<Reply> {
+/// A request queued before a switch began is answered as during it; a dev
+/// or live entry only once the fence moved (#42): queued before or during
+/// the start's checks, it runs after them.
+fn stale(req: &Request, seen: Generation, v: &View) -> Option<Reply> {
     match req {
         Request::Status | Request::Subscribe => None,
+        Request::Dev { .. } | Request::Live { .. } => {
+            (seen.fence != v.fence).then(|| v.reply(false, &fenced(seen, v)))
+        }
+        _ if seen.epoch == v.epoch => None,
         Request::Event { dry_run: false } => Some(v.event_reply("a switch ran meanwhile")),
         _ => Some(v.reply(false, while_switching(req))),
+    }
+}
+
+/// Why a dev or live entry queued before the fence moved does not run: the
+/// switch begun last, when one began since it was queued, else the "ide
+/// event" that came meanwhile.
+fn fenced(seen: Generation, v: &View) -> String {
+    match v.began {
+        Some((from, to)) if seen.epoch != v.epoch => format!(
+            "busy: a switch ran meanwhile ({} → {})",
+            mode_name(from),
+            mode_name(to)
+        ),
+        _ => "busy: a switch to event was asked meanwhile".to_owned(),
     }
 }
 
@@ -1172,9 +1218,10 @@ struct Entry {
 
 /// Handles one request on the daemon thread.
 pub fn handle(pc: &mut dyn Pc, g: &mut Guard, req: Request, seen: Generation) -> Reply {
-    if seen.epoch != g.shared.generation().epoch
-        && let Some(reply) = stale(&req, &g.shared.view())
+    if seen != g.shared.generation()
+        && let Some(reply) = stale(&req, seen, &g.shared.view())
     {
+        info!("a request queued before a switch: {}", reply.detail);
         return reply;
     }
     g.report.clear();
@@ -2100,8 +2147,9 @@ pub fn session_end(pc: &mut dyn Pc, g: &mut Guard) {
 /// A starting guard (design §5.2): the job its children start in (logged,
 /// and named in the status while they stay in it, §5.1), the reboot rule,
 /// then the children a previous guard started, then an unfinished switch
-/// unwinds to event (or resumes, when it was one). The outcome of an event
-/// plan that ran.
+/// unwinds to event (or resumes, when it was one). From event the event
+/// plan is the start's checks: a dev or live entry the pipe queues
+/// meanwhile runs after them (#42). The outcome of an event plan that ran.
 pub fn start(pc: &mut dyn Pc, g: &mut Guard, boot: u64) -> Option<Outcome> {
     let job = pc.job();
     if let Err(e) = &job {
@@ -2127,7 +2175,7 @@ pub fn start(pc: &mut dyn Pc, g: &mut Guard, boot: u64) -> Option<Outcome> {
     let resume = g.state.switching.is_some();
     let out = (reset || resume).then(|| {
         let from = g.state.mode;
-        run_switch(pc, g, from, Mode::Event)
+        switch(pc, g, from, Mode::Event, from == Mode::Event)
     });
     send_notices(pc, g);
     out

@@ -9,8 +9,9 @@
 //!
 //! A connection sends requests and reads one reply each; the routing is
 //! [`Shared::route`]: while a switch runs, "ide event" pre-empts or waits
-//! for it and everything else but `Status` is refused; otherwise the
-//! request goes to the daemon thread. `Subscribe` turns the connection into
+//! for it, a dev or live entry during the start's checks is queued behind
+//! them, and everything else but `Status` is refused; otherwise the request
+//! goes to the daemon thread. `Subscribe` turns the connection into
 //! a stream of [`Update`]s (the tray): the state, and the tray's quit.
 //!
 //! The guard never waits long for a client: every reply and update goes out
