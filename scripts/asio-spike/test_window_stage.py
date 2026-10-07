@@ -259,6 +259,17 @@ class CiScriptTests(unittest.TestCase):
         # The CI runner asserts the four modules' paths are all in the stage (#15).
         self.assertIn("Get-Module -Name SpikePc, GoldenPc, IemMeasure, IemTuning", tw.ANALYSIS_PROBE)
 
+    def test_the_trace_stop_prints_as_sent(self) -> None:
+        # The asio-spike job times it against TRACE_STOP_CALL_S (#15, the last lane, item 5).
+        sums = Path(tempfile.mkdtemp()) / "SHA256SUMS"
+        sums.write_text("".join(f"{h}  {n}\n" for n, h in sorted(SUMS.items())), encoding="utf-8")
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"SPIKE_ENV": "/nonexistent/asio-spike.env"}), contextlib.redirect_stdout(out):
+            code = tw.main(["trace-stop-script", "--root", "C:\\r", "--dir", "C:\\r\\runs\\t", "--sums", str(sums)])
+        self.assertEqual(code, 0)
+        self.assertEqual(out.getvalue(),
+                         sw.ps_script("C:\\r", sw.trace_stop_body({"PC_ROOT": "C:\\r"}, "C:\\r\\runs\\t"), SUMS) + "\n")
+
     def test_the_preempts_first_script_prints_as_sent(self) -> None:
         # The asio-spike job runs it on Windows PowerShell 5.1 (#15, the last lane, item 1).
         out = io.StringIO()
