@@ -234,7 +234,7 @@ mod tests {
         assert_eq!(silence_ms(Mode::Event, &stopped), None);
         // A dev entry that stopped before the engine's arm (the rehearsal's
         // re-entry stops for the owner; any other entry unwinds, and the
-        // unwind leaves a record of its own).
+        // unwind's record spans it).
         let unwound = [st(Step::ReaperSaveQuit, 8000), st(Step::EngineStart, 700)];
         assert_eq!(silence_ms(Mode::Dev, &unwound), None);
         // The end before the start is no window.
@@ -260,7 +260,7 @@ mod tests {
         laps.lap(Step::EngineHealth, at(1500));
         assert_eq!(laps.take(), [st(Step::EngineHealth, 0)]);
         // A start forgets the steps of a switch that never ended (an unwind
-        // is a switch of its own).
+        // resumes instead: `Laps::resume`).
         laps.start(at(2000));
         laps.lap(Step::EngineArm, at(2500));
         laps.start(at(3000));
@@ -270,6 +270,35 @@ mod tests {
         laps.start(at(4000));
         laps.lap(Step::TrayStop, at(3900));
         assert_eq!(laps.take(), [st(Step::TrayStop, 0)]);
+    }
+
+    /// The unwind of a failed entry resumes the entry's clock (#10
+    /// 2026-10-07): the entry's steps stay first, and the unwind's first
+    /// step is timed from the entry's last lap (the failed step's), so the
+    /// steps add up to the entry and its unwind. A stopped clock resumes
+    /// from `now`, as a start would.
+    #[test]
+    fn a_resumed_clock_keeps_the_steps_and_times_from_the_last_lap() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut laps = Laps::default();
+        laps.start(t0);
+        laps.lap(Step::ReaperSaveQuit, at(8000));
+        laps.lap(Step::EngineArm, at(18_500));
+        laps.resume(at(19_000));
+        laps.lap(Step::EngineStop, at(19_600));
+        assert_eq!(
+            laps.take(),
+            [
+                st(Step::ReaperSaveQuit, 8000),
+                st(Step::EngineArm, 10_500),
+                st(Step::EngineStop, 1100),
+            ]
+        );
+        // Taken (the clock stopped): it runs again from `now`, never 0.
+        laps.resume(at(20_000));
+        laps.lap(Step::TrayStop, at(20_300));
+        assert_eq!(laps.take(), [st(Step::TrayStop, 300)]);
     }
 
     #[test]
@@ -310,6 +339,52 @@ mod tests {
         assert_eq!((r.started, r.ended), (1_790_000_100, 1_790_000_119));
         assert_eq!(r.steps.len(), 3);
         assert_eq!(r.silence_ms, Some(18_500));
+        assert_eq!(r.unwound, None);
+    }
+
+    /// An unwind's record spans the dev or live entry it unwinds (#10
+    /// 2026-10-07): it names the entry's target and begins at the entry's
+    /// start; its steps are the entry's then its own, so the silence runs
+    /// from the entry's save and quit through the unwind's handover. Any
+    /// other record names no entry and keeps its own start.
+    #[test]
+    fn an_unwinds_record_names_the_entry_and_begins_at_its_start() {
+        let sw = Switching {
+            from: Mode::Event,
+            to: Mode::Event,
+            done: Vec::new(),
+            started: 1_790_000_130,
+        };
+        let steps = vec![
+            st(Step::Precheck, 400),
+            st(Step::ReaperSaveQuit, 8000),
+            st(Step::EngineArm, 10_500),
+            st(Step::EngineStop, 600),
+            st(Step::ReaperStart, 15_000),
+            st(Step::ReaperHandover, 7000),
+            st(Step::AppHandover, 3000),
+        ];
+        let record = |entry| {
+            LastSwitch::new(
+                &sw,
+                Mode::Event,
+                SwitchOutcome::Done,
+                1_790_000_160,
+                steps.clone(),
+            )
+            .unwinding(entry)
+        };
+        let r = record(Some((Mode::Dev, 1_790_000_100)));
+        assert_eq!(
+            (r.from, r.to, r.ended_in, r.unwound),
+            (Mode::Event, Mode::Event, Mode::Event, Some(Mode::Dev))
+        );
+        assert_eq!((r.started, r.ended), (1_790_000_100, 1_790_000_160));
+        assert_eq!(r.steps, steps);
+        assert_eq!(r.silence_ms, Some(41_100));
+        let own = record(None);
+        assert_eq!((own.started, own.unwound), (1_790_000_130, None));
+        assert_eq!(own.silence_ms, Some(41_100));
     }
 
     /// `lenient` reads `GuardState.last_switch` and `Reply.last_switch`: a

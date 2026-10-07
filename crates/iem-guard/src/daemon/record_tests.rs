@@ -186,27 +186,125 @@ fn the_record_survives_a_guard_restart() {
     assert_eq!(back.shared.view().last_switch, rec);
 }
 
-/// A dev entry that fails unwinds to event: the unwind is a switch of its
-/// own (`back_to_event`), and its record is the one kept, without the
-/// entry's steps.
+/// A dev entry that fails unwinds to event (`back_to_event`), and the
+/// unwind's record spans both (#10 2026-10-07): the entry's steps up to the
+/// failed `EngineArm`, then the unwind's, on one clock; it names the entry
+/// (`unwound`) and its start; its silence runs from the entry's save and
+/// quit through the unwind's handover. The switch after it is one of its own
+/// again.
 #[test]
-fn an_unwound_dev_entry_records_the_unwind() {
+fn an_unwound_dev_entry_records_its_steps_then_the_unwind() {
     let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
     g.state.pins.current = Some(sha());
     pc.fail(Call::EngineArm, "the engine did not arm");
-    run_switch(&mut pc, &mut g, Mode::Event, Mode::Dev);
+    pc.delay(Call::EngineArm, Duration::from_millis(100));
+    pc.delay(Call::EngineStop, Duration::from_millis(100));
+    let t0 = Instant::now();
+    assert_eq!(
+        run_switch(&mut pc, &mut g, Mode::Event, Mode::Dev),
+        Outcome::Done
+    );
+    let took = t0.elapsed().as_millis();
     let r = last(&g);
     assert_eq!(
-        (r.from, r.to, r.ended_in, r.outcome),
-        (Mode::Event, Mode::Event, Mode::Event, SwitchOutcome::Done)
+        (r.from, r.to, r.ended_in, r.outcome, r.unwound),
+        (
+            Mode::Event,
+            Mode::Event,
+            Mode::Event,
+            SwitchOutcome::Done,
+            Some(Mode::Dev)
+        )
     );
-    let steps = steps_of(&r);
-    assert_eq!(steps.first(), Some(&Step::EngineStop), "{steps:?}");
-    assert!(!steps.contains(&Step::EngineArm), "{steps:?}");
+    assert_eq!(r.started, 1_790_000_000);
+    let entry = plan(Mode::Dev, &band_up());
+    let arm = entry.iter().position(|s| *s == Step::EngineArm).unwrap();
+    let unwind = plan(
+        Mode::Event,
+        &Facts {
+            engine: true,
+            ..Facts::default()
+        },
+    );
+    assert_eq!(steps_of(&r), [&entry[..=arm], &unwind[..]].concat());
+    // One clock: the steps add up to the entry and its unwind, never more.
+    let total: u64 = r.steps.iter().map(|s| s.ms).sum();
+    assert!(
+        u128::from(total) <= took,
+        "{total} ms of steps in {took} ms"
+    );
+    // The in-ears went quiet with the entry's save and quit and played
+    // again after the unwind's handover: both delayed steps lie inside.
+    let quiet = sum_over(&r, Step::ReaperSaveQuit, Step::ReaperHandover);
+    assert!(quiet >= 200, "{quiet}");
+    assert_eq!(r.silence_ms, Some(quiet));
+    // The next switch (the event checks) is one of its own: no entry, its
+    // own start, its own steps.
+    let Clock::Fixed(t) = g.clock.clone() else {
+        panic!("the test guard's clock is fixed")
+    };
+    t.store(1_790_000_100, Ordering::SeqCst);
+    let checks = plan(Mode::Event, &pc.facts);
+    run_switch(&mut pc, &mut g, Mode::Event, Mode::Event);
+    let next = last(&g);
+    assert_eq!((next.unwound, next.started), (None, 1_790_000_100));
+    assert_eq!(steps_of(&next), checks);
+}
+
+/// "Ide event" pre-empts a dev entry, which unwinds through the same path
+/// (#10 2026-10-07): the record spans the entry (its steps up to the
+/// pre-empted one) and its unwind, and begins at the entry's start, not at
+/// the unwind's.
+#[test]
+fn a_preempted_entry_records_its_steps_then_the_unwind() {
+    let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
+    pc.block_until_cancel(Call::AppStop);
+    let Clock::Fixed(t) = g.clock.clone() else {
+        panic!("the test guard's clock is fixed")
+    };
+    let c = g.cancel.clone();
+    let fired = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        // The unwind begins 30 s after the entry.
+        t.store(1_790_000_030, Ordering::SeqCst);
+        c.preempt();
+    });
+    run_switch(&mut pc, &mut g, Mode::Event, Mode::Dev);
+    fired.join().unwrap();
+    let r = last(&g);
     assert_eq!(
-        r.silence_ms,
-        Some(sum_over(&r, Step::EngineStop, Step::ReaperHandover))
+        (r.from, r.to, r.ended_in, r.unwound),
+        (Mode::Event, Mode::Event, Mode::Event, Some(Mode::Dev))
     );
+    assert_eq!((r.started, r.ended), (1_790_000_000, 1_790_000_030));
+    // A pre-empted step changes nothing: the unwind meets the band's system.
+    let prefix = [Step::Precheck, Step::AppStop];
+    assert_eq!(
+        steps_of(&r),
+        [&prefix[..], &plan(Mode::Event, &band_up())[..]].concat()
+    );
+    // The pre-empted step is timed until the pre-emption (~300 ms in).
+    assert!(r.steps[1].ms >= 200, "{:?}", r.steps);
+    // The app's stop leaves REAPER playing: nothing went quiet.
+    assert_eq!(r.silence_ms, None);
+}
+
+/// The watch's way back to REAPER after a crash loop (dev → event) is a
+/// switch of its own, not an unwind: its record names no entry and begins
+/// at its own start.
+#[test]
+fn a_crash_fallback_record_has_no_unwound_entry() {
+    let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Dev));
+    pc.exited = vec![(Kid::Engine, Some(70)); 3];
+    tick(&mut pc, &mut g, Instant::now());
+    assert_eq!(g.state.mode, Mode::Event);
+    let r = last(&g);
+    assert_eq!(
+        (r.from, r.to, r.ended_in, r.unwound),
+        (Mode::Dev, Mode::Event, Mode::Event, None)
+    );
+    assert_eq!(r.started, 1_790_000_000);
+    assert_eq!(steps_of(&r), plan(Mode::Event, &Facts::default()));
 }
 
 /// The soak's "one pid" (S7 design note §4): `Reply.engine` names the engine

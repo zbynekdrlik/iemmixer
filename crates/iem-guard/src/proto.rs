@@ -506,6 +506,28 @@ mod tests {
         assert_eq!(v.get("last_switch"), None);
     }
 
+    /// S7 part 3 (#10): an unwind's record names the entry it unwinds over
+    /// the pipe; an older guard's record, without the key, reads whole, with
+    /// none.
+    #[test]
+    fn an_unwound_record_crosses_the_pipe_and_an_older_one_reads_without_it() {
+        let reply = Reply {
+            last_switch: Some(LastSwitch {
+                unwound: Some(Mode::Dev),
+                ..a_switch_record()
+            }),
+            ..a_state(Mode::Event)
+        };
+        let mut wire = Vec::new();
+        write_frame(&mut wire, &reply).unwrap();
+        assert_eq!(read_msg::<Reply, _>(&mut wire.as_slice()).unwrap(), reply);
+        let mut older = serde_json::to_value(&reply).unwrap();
+        let record = older["last_switch"].as_object_mut().unwrap();
+        assert_eq!(record.remove("unwound"), Some(serde_json::json!("dev")));
+        let r = decode::<Reply>(&serde_json::to_vec(&older).unwrap()).unwrap();
+        assert_eq!(r.last_switch, Some(a_switch_record()));
+    }
+
     /// The guard's own build (#9 2026-09-28): after `activate` hands over
     /// to a new exe, `iempc activate` waits until `iemmode status` names
     /// the bundle's SHA here. CI builds every bundle with `GITHUB_SHA`.
@@ -781,6 +803,8 @@ mod tests {
             .max_by_key(|s| serde_json::to_string(s).unwrap().len())
             .unwrap();
         let full = vec![(HIST_TOP_MAX, u64::MAX); HIST_LEN_MAX];
+        // An unwind's record: the entry's steps, then the unwind's; a plan
+        // runs a step at most once (S7 part 3).
         let record = LastSwitch {
             from: Mode::Event,
             to: Mode::Event,
@@ -793,9 +817,10 @@ mod tests {
                     step: longest,
                     ms: u64::MAX,
                 };
-                30
+                2 * Step::ALL.len()
             ],
             silence_ms: Some(u64::MAX),
+            unwound: Some(Mode::Live),
         };
         for chars in ["\u{1F3A7}", "\u{0}\u{1f}"] {
             let text = |n: usize| cut(&chars.repeat(n), n);
