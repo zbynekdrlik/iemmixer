@@ -293,6 +293,29 @@ mod tests {
     use super::*;
     use crate::alarms::Alarms;
     use crate::plan::Step;
+    use crate::switch_log::{StepTime, SwitchOutcome};
+
+    /// A dev entry's record: its steps and its in-ear silence.
+    fn a_switch_record() -> LastSwitch {
+        let step = |step: Step, ms: u64| StepTime { step, ms };
+        LastSwitch::new(
+            &Switching {
+                from: Mode::Event,
+                to: Mode::Dev,
+                done: Vec::new(),
+                started: 1_790_000_000,
+            },
+            Mode::Dev,
+            SwitchOutcome::Done,
+            1_790_000_025,
+            vec![
+                step(Step::AppStop, 3000),
+                step(Step::ReaperSaveQuit, 8000),
+                step(Step::EngineStart, 700),
+                step(Step::EngineArm, 10_500),
+            ],
+        )
+    }
 
     fn every_request() -> Vec<Request> {
         vec![
@@ -417,12 +440,20 @@ mod tests {
             detail: "switching".into(),
             engine: Some(an_engine()),
             guard_build: Some("89abcdef0123456789abcdef0123456789abcdef".into()),
+            last_switch: Some(a_switch_record()),
         };
         let mut wire = Vec::new();
         write_frame(&mut wire, &reply).unwrap();
         assert_eq!(read_msg::<Reply, _>(&mut wire.as_slice()).unwrap(), reply);
-        // Older or newer peers: missing lists, texts, the engine and the
-        // guard's build default.
+        let v = serde_json::to_value(&reply).unwrap();
+        assert_eq!(v["last_switch"]["silence_ms"], 19_200);
+        assert_eq!(v["last_switch"]["outcome"], "done");
+        assert_eq!(
+            v["last_switch"]["steps"][1],
+            serde_json::json!({"step": "reaper_save_quit", "ms": 8000})
+        );
+        // Older or newer peers: missing lists, texts, the engine, the
+        // guard's build and the last switch default.
         assert_eq!(
             decode::<Reply>(br#"{"ok":true,"mode":"event","switching":null}"#).unwrap(),
             Reply {
@@ -433,8 +464,36 @@ mod tests {
                 detail: String::new(),
                 engine: None,
                 guard_build: None,
+                last_switch: None,
             }
         );
+    }
+
+    /// S7 (#10): a last switch this guard cannot read (another shape, a step
+    /// it does not have) leaves the reply readable, without the record; a
+    /// reply without one has no key at all.
+    #[test]
+    fn a_last_switch_this_peer_cannot_read_leaves_the_reply_readable() {
+        for body in [
+            &br#"{"ok":true,"mode":"dev","switching":null,"last_switch":{"from":7}}"#[..],
+            &br#"{"ok":true,"mode":"dev","switching":null,"last_switch":null}"#[..],
+        ] {
+            let r = decode::<Reply>(body).unwrap();
+            assert_eq!((r.ok, r.mode, r.last_switch), (true, Mode::Dev, None));
+        }
+        let mut newer = serde_json::to_value(Reply {
+            last_switch: Some(a_switch_record()),
+            ..a_state(Mode::Dev)
+        })
+        .unwrap();
+        newer["last_switch"]["steps"][0]["step"] = serde_json::json!("a_newer_step");
+        let r = decode::<Reply>(&serde_json::to_vec(&newer).unwrap()).unwrap();
+        assert_eq!(
+            (r.mode, r.alarms.len(), r.last_switch),
+            (Mode::Dev, 1, None)
+        );
+        let v = serde_json::to_value(a_state(Mode::Event)).unwrap();
+        assert_eq!(v.get("last_switch"), None);
     }
 
     /// The guard's own build (#9 2026-09-28): after `activate` hands over
@@ -511,6 +570,7 @@ mod tests {
             detail: String::new(),
             engine: Some(an_engine()),
             guard_build: None,
+            last_switch: None,
         };
         let v = serde_json::to_value(&reply).unwrap();
         assert_eq!(
@@ -586,6 +646,7 @@ mod tests {
             detail: String::new(),
             engine: None,
             guard_build: None,
+            last_switch: None,
         }
     }
 
@@ -624,6 +685,7 @@ mod tests {
                 detail: String::new(),
                 engine: None,
                 guard_build: None,
+                last_switch: None,
             })
         );
     }
@@ -692,7 +754,9 @@ mod tests {
     /// and the detail at their character caps, a switch with every step,
     /// and an engine with every spare output (8), both histograms as long as
     /// `effects::engine::parse` reads them (1001 buckets each, the 1 ms cap)
-    /// and its counters at their largest. The texts go through `cut` as the
+    /// and its counters at their largest, and a last switch of 30 steps (a
+    /// switch runs each step of its plan once, plus the health read; an
+    /// unwind is a record of its own). The texts go through `cut` as the
     /// guard's do (it counts characters): once four-byte characters, the
     /// longest a character is in UTF-8, once C0 control characters, which
     /// JSON would escape to six bytes each and `cut` makes spaces (S7 Task 3
@@ -707,6 +771,22 @@ mod tests {
             .max_by_key(|s| serde_json::to_string(s).unwrap().len())
             .unwrap();
         let full = vec![(HIST_TOP_MAX, u64::MAX); HIST_LEN_MAX];
+        let record = LastSwitch {
+            from: Mode::Event,
+            to: Mode::Event,
+            ended_in: Mode::Event,
+            outcome: SwitchOutcome::KeptServing,
+            started: u64::MAX,
+            ended: u64::MAX,
+            steps: vec![
+                StepTime {
+                    step: longest,
+                    ms: u64::MAX,
+                };
+                30
+            ],
+            silence_ms: Some(u64::MAX),
+        };
         for chars in ["\u{1F3A7}", "\u{0}\u{1f}"] {
             let text = |n: usize| cut(&chars.repeat(n), n);
             let mut alarms = Alarms::default();
@@ -750,6 +830,7 @@ mod tests {
                     ..an_engine()
                 }),
                 guard_build: Some(GUARD_BUILD.into()),
+                last_switch: Some(record.clone()),
             };
             let mut wire = Vec::new();
             write_frame(&mut wire, &reply).unwrap_or_else(|e| panic!("{chars:?}: {e}"));

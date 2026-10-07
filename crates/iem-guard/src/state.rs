@@ -139,6 +139,7 @@ pub fn load_json<T: DeserializeOwned + Default>(path: &Path) -> (T, Option<Strin
 mod tests {
     use super::*;
     use crate::bundle::Hil;
+    use crate::switch_log::{StepTime, SwitchOutcome};
 
     fn sample() -> GuardState {
         let mut bundles = BTreeMap::new();
@@ -180,6 +181,27 @@ mod tests {
                     .into(),
             ),
             logon_seen: Some("2026-09-28T06:00:00.1234567Z".into()),
+            last_switch: Some(LastSwitch::new(
+                &Switching {
+                    from: Mode::Event,
+                    to: Mode::Dev,
+                    done: Vec::new(),
+                    started: 1_790_000_150,
+                },
+                Mode::Dev,
+                SwitchOutcome::Done,
+                1_790_000_170,
+                vec![
+                    StepTime {
+                        step: Step::ReaperSaveQuit,
+                        ms: 8000,
+                    },
+                    StepTime {
+                        step: Step::EngineArm,
+                        ms: 10_500,
+                    },
+                ],
+            )),
         }
     }
 
@@ -392,5 +414,60 @@ mod tests {
         assert_eq!(st.pids, before.pids);
         assert_eq!(st.pref_held, before.pref_held);
         assert_eq!(st.logon_seen, before.logon_seen);
+    }
+
+    /// S7 (#10): the last switch is saved with the state and survives a
+    /// reset (a reboot or the band's system up): `iempc switch-test` reads
+    /// the switch that ended, whatever came after it.
+    #[test]
+    fn the_last_switch_round_trips_and_a_reset_keeps_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("guard-state.json");
+        let mut st = sample();
+        assert!(st.last_switch.is_some());
+        st.save(&path, 1_790_000_300).unwrap();
+        let (back, err) = GuardState::load(&path);
+        assert_eq!(err, None);
+        assert_eq!(back.last_switch, st.last_switch);
+        st.reset();
+        assert_eq!(st.last_switch, sample().last_switch);
+    }
+
+    #[test]
+    fn an_older_guards_state_without_a_last_switch_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("guard-state.json");
+        fs::write(&path, br#"{"mode": "dev", "written_at": 7, "job": 42}"#).unwrap();
+        let (st, err) = GuardState::load(&path);
+        assert_eq!(err, None);
+        assert_eq!(
+            (st.mode, st.written_at, st.job, st.last_switch),
+            (Mode::Dev, 7, Some(42), None)
+        );
+    }
+
+    /// A record this guard cannot read (a newer guard's shape) is dropped:
+    /// the state loads, no alarm, nothing else is lost.
+    #[test]
+    fn a_last_switch_this_guard_cannot_read_is_dropped_not_the_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("guard-state.json");
+        for body in [
+            &br#"{"mode":"dev","last_switch":{"from":"dev"}}"#[..],
+            &br#"{"mode":"dev","last_switch":null}"#[..],
+            &br#"{"mode":"dev","last_switch":"later"}"#[..],
+        ] {
+            fs::write(&path, body).unwrap();
+            let (st, err) = GuardState::load(&path);
+            assert_eq!(err, None, "{body:?}");
+            assert_eq!(
+                st,
+                GuardState {
+                    mode: Mode::Dev,
+                    ..GuardState::default()
+                },
+                "{body:?}"
+            );
+        }
     }
 }

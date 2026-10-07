@@ -23,7 +23,7 @@ const T0: u64 = 1_790_000_000;
 /// The generation of a guard that began no switch and routed no "ide event".
 const INIT: Generation = Generation { epoch: 0, fence: 0 };
 
-fn band_up() -> Facts {
+pub(super) fn band_up() -> Facts {
     Facts {
         reaper: true,
         app: true,
@@ -33,7 +33,7 @@ fn band_up() -> Facts {
     }
 }
 
-fn iemmixer_up() -> Facts {
+pub(super) fn iemmixer_up() -> Facts {
     Facts {
         engine: true,
         server: true,
