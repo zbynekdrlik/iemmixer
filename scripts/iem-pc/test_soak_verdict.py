@@ -248,6 +248,10 @@ class Verdict(unittest.TestCase):
     def test_an_incomplete_or_short_harness_is_red(self):
         self.red(polls(), "no harness summary", None)
         self.red(polls(), "harness incomplete (server-gone)", harness(complete=False, error="server-gone"))
+        # The client never opens a socket twice and checks the server's build first (#10): a lost socket and
+        # a server that does not name the build are named too.
+        for code in ("connection-lost", "wrong-server"):
+            self.red(polls(), f"harness incomplete ({code})", harness(complete=False, error=code))
         self.red(polls(), "harness incomplete", harness(complete=False, error="mixer.example.org"))
         self.red(polls(), "harness ran 28799.9 s of 28800 s", harness(seconds=28_799.9))
         # Rounded down: a short run never reads as the bound.
@@ -363,6 +367,10 @@ class Harness(unittest.TestCase):
         self.assertEqual(sv.harness_problems({**ci, "complete": False, "error": "login-refused", "frames": 0,
                                               "expected_frames": 0, "gaps": 5, "reconnects": 1}, 599, 3),
                          ["harness incomplete (login-refused)", "gaps 5", "reconnects 1", "no listen frames"])
+        # CI's step names a lost socket and a server that does not name the build (#10).
+        for code in ("connection-lost", "wrong-server"):
+            self.assertEqual(sv.harness_problems({**ci, "complete": False, "error": code}, 599, 3),
+                             [f"harness incomplete ({code})"])
         self.assertEqual(sv.harness_problems(None, 599, 3), ["no harness summary"])
 
     def test_the_ci_step_needs_a_meter_frame_the_pc_verdict_does_not(self):
