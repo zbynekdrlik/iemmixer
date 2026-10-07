@@ -831,7 +831,12 @@ function Invoke-IemTuningApply { param([string]$ProfilePath, [int]$Tier) return 
         foreach ($p in @($tmod, $tprof)) { Set-IemAdminsOwner -Path $p }
     }
     Write-FakeTuning
+    $savedTemp = @($env:TEMP, $env:TMP)
     Assert ((Invoke-IemTuningVerb -Verb 'state' -TuningDir $etuning) -ceq 'fake-state') 'tuning-imports-an-admin-only-module'
+    # The import ran with TEMP and TMP at the admin-only <elevated root>\temp (#15: IemTuning's Add-Type).
+    $etemp = Join-Path (Split-Path -Parent $etuning) 'temp'
+    $tb = Test-IemElevatedItem -Path $etemp -UserSid $me.sid
+    Assert ($env:TEMP -eq $etemp -and $env:TMP -eq $etemp -and $tb.Count -eq 0) "tuning-imports-with-the-admin-only-temp ($env:TEMP; $($tb -join '; '))"
     Assert ((Invoke-IemTuningVerb -Verb 'apply-tier2' -TuningDir $etuning) -ceq 'fake-apply-2') 'tuning-apply-tier2-passes-tier-2'
     [IO.File]::WriteAllText((Join-Path $td 'tuning.request.json'), '{"id":"t-5","verb":"enter"}')
     $tr = Invoke-IemTaskRequest -Kind tuning -Root $root -OutDir $eout -TuningDir $etuning
@@ -871,6 +876,8 @@ function Invoke-IemTuningApply { param([string]$ProfilePath, [int]$Tier) return 
     [IO.Directory]::SetAccessControl($etuning, (New-IemElevatedSecurity -UserSid $me.sid))
     Throws { Invoke-IemTuningVerb -Verb 'state' -TuningDir 'relative\tuning' } 'tuning-refuses-a-relative-folder'
     foreach ($p in @($tmod, $tprof)) { Remove-Item -LiteralPath $p -Force }
+    $env:TEMP = $savedTemp[0]
+    $env:TMP = $savedTemp[1]
 
     # The generated entry, as the task runs it (its results in tasks\out).
     [IO.File]::WriteAllText((Join-Path $td 'tuning.request.json'), '{"id":"t-4","verb":"exit"}')

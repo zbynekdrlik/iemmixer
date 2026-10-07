@@ -412,10 +412,11 @@ def analysis_step(root: str, since: str, body: str) -> str:
 
 
 # The step body the Windows CI runner sends through analysis_step: the priority
-# the guard set, IemMeasure's clock, and whether IemTuning loaded too (IemMeasure
-# keeps a failed IemTuning load to itself, so Get-IemNow alone proves nothing).
+# the guard set, IemMeasure's clock, whether IemTuning loaded too (IemMeasure
+# keeps a failed IemTuning load to itself, so Get-IemNow alone proves nothing),
+# and the TEMP its Add-Type compiled in (#15: the admin-only <elevated root>\temp).
 ANALYSIS_PROBE = ("[pscustomobject]@{ priority = \"$((Get-Process -Id $PID).PriorityClass)\"; now = Get-IemNow; "
-                  "tuning = [bool](Get-Command -Name ConvertTo-IemLpNumber -ErrorAction SilentlyContinue) }")
+                  "tuning = [bool](Get-Command -Name ConvertTo-IemLpNumber -ErrorAction SilentlyContinue); temp = $env:TEMP }")
 
 
 def read_text(path: Path) -> str:

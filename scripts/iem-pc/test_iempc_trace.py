@@ -32,7 +32,9 @@ TUNING = TDIR + "\\IemTuning.psm1"
 MEASURE = TDIR + "\\IemMeasure.psm1"
 HT, HM = sha256(MODULES["tuning/IemTuning.psm1"]), sha256(MODULES["tuning/IemMeasure.psm1"])
 IDLE = "(Get-Process -Id $PID).PriorityClass = 'Idle'"
-STEP_NAMES = (("GetFolderPath('CommonApplicationData')", "preflight"), ("Start-IemTrace", "start"),
+# The preflight's own text (the elevated root's expression is in every TEMP setup too, #15).
+PREFLIGHT = "measure = (& $h"
+STEP_NAMES = ((PREFLIGHT, "preflight"), ("Start-IemTrace", "start"),
               ("Stop-IemTraceSessions", "stop"), ("'-merge'", "merge"), ("Invoke-IemDpcIsr", "dpcisr"))
 
 
@@ -57,7 +59,7 @@ class TraceBase(Base):
         self.gh.artifact = make_zip(self.tmp / "artifact-tuning" / f"iemmixer-{SHA}.zip", extra=MODULES)
         self.fetched()
         self.statuses(status(engine=ENGINE), status(engine={**ENGINE, "callbacks": 4000, "missed": 2, "resets": 1}))
-        self.answers: dict = {"GetFolderPath('CommonApplicationData')": {"dir": TDIR, "tuning": HT, "measure": HM,
+        self.answers: dict = {PREFLIGHT: {"dir": TDIR, "tuning": HT, "measure": HM,
                                                                           "profile": sha256(self.profile.read_bytes())},
                               "Start-IemTrace": {"dir": "x", "started": "2026-10-07T06:00:00Z"},
                               "Stop-IemTraceSessions": STOPPED, "'-merge'": None,
@@ -133,10 +135,16 @@ class TraceTests(TraceBase):
         pc_run = f"X:\\root\\traces\\{run}"
         preflight, start, stop, merge, dpcisr = (s for s, _ in self.pc.modules)
         self.assertIn("(Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'iemmixer\\tuning')", preflight)
-        load = f"{ip.hash_check(TUNING, HT)} ; {ip.hash_check(MEASURE, HM)} ; Import-Module '{MEASURE}' -Force ; "
+        # TEMP and TMP first: IemTuning's Add-Type compiles there, never in the user's TEMP (#15).
+        temp = ip.elevated_ps().temp_first()
+        load = f"{temp} ; {ip.hash_check(TUNING, HT)} ; {ip.hash_check(MEASURE, HM)} ; Import-Module '{MEASURE}' -Force ; "
         self.assertIn(f"try {{ {load}$r = & {{ Start-IemTrace -Xperf '{XPERF}' -Dir '{pc_run}' }}", start)
+        self.assertLess(start.index("$env:TEMP = $iemTemp ; $env:TMP = $iemTemp"), start.index(f"Import-Module '{MEASURE}'"))
+        self.assertIn("$iemTemp = Join-Path $iemRoot 'temp'", temp)
+        # The stop-only import compiles nothing: no TEMP set up there.
         self.assertIn(f"try {{ {ip.hash_check(MEASURE, HM)} ; Import-Module '{MEASURE}' -ArgumentList 'stop-only' -Force ; "
                       f"$r = & {{ Stop-IemTraceSessions -Dir '{pc_run}' -TimeoutSeconds 20 }}", stop)
+        self.assertNotIn("TEMP", stop)
         for step in (merge, dpcisr):
             self.assertIn(f"try {{ {IDLE} ; {load}$r = & {{ ", step)
         self.assertIn(f"Join-Path '{pc_run}' 'trace.etl'", merge)
@@ -216,7 +224,7 @@ class TraceTests(TraceBase):
     def test_modules_that_are_not_the_running_bundle_s_are_refused_before_the_start(self) -> None:
         for found in ({"dir": TDIR, "tuning": HT, "measure": "0" * 64}, {"dir": TDIR, "tuning": None, "measure": None},
                       {"dir": "relative\\tuning", "tuning": HT, "measure": HM}, "ok"):
-            self.answers["GetFolderPath('CommonApplicationData')"] = found
+            self.answers[PREFLIGHT] = found
             self.pc.modules.clear()
             code, docs, err = self.trace()
             self.assertEqual((code, docs, self.names()), (1, [], ["preflight"]), found)
@@ -263,7 +271,7 @@ class TraceTests(TraceBase):
 
     def test_a_pc_profile_other_than_the_local_one_is_refused_before_the_start(self) -> None:
         for found in ("0" * 64, None):
-            self.answers["GetFolderPath('CommonApplicationData')"] = {"dir": TDIR, "tuning": HT, "measure": HM, "profile": found}
+            self.answers[PREFLIGHT] = {"dir": TDIR, "tuning": HT, "measure": HM, "profile": found}
             self.pc.modules.clear()
             code, docs, err = self.trace()
             self.assertEqual((code, docs, self.names()), (1, [], ["preflight"]), found)

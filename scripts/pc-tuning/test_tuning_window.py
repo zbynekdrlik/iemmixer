@@ -524,6 +524,25 @@ class PollScriptTests(unittest.TestCase):
         self.assertIn("PriorityClass", tw.ANALYSIS_PROBE)
         self.assertIn("Get-IemNow", tw.ANALYSIS_PROBE)              # IemMeasure loaded after the guard
         self.assertIn("Get-Command -Name ConvertTo-IemLpNumber", tw.ANALYSIS_PROBE)   # and IemTuning with it
+        self.assertIn("temp = $env:TEMP", tw.ANALYSIS_PROBE)    # the TEMP its Add-Type compiled in (#15)
+
+    def test_the_tuning_modules_load_only_after_temp_points_at_the_admin_only_temp(self) -> None:
+        """#15: IemTuning's Add-Type has csc write and load a DLL in TEMP, and the
+        session user's TEMP is open to every process of the user: TEMP and TMP
+        point at <elevated root>\\temp (admin-only) before the import; the
+        stop-only import compiles nothing and sets up nothing."""
+        body = tw.sw.tuning_body(ENV, "Get-IemNow")
+        imp = body.index("Import-Module (Join-Path 'R' 'bin\\IemMeasure.psm1') -Force -Global")
+        self.assertLess(body.index("$env:TEMP = $iemTemp ; $env:TMP = $iemTemp"), imp)
+        self.assertLess(body.index("& $iemDir $iemTemp"), body.index("$env:TEMP = $iemTemp"))
+        self.assertIn("$iemRoot = (Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'iemmixer')", body)
+        self.assertIn("$iemTemp = Join-Path $iemRoot 'temp'", body)
+        step = tw.analysis_step("R", "2026-01-01T00:00:00.0000000Z", "B")
+        self.assertLess(step.index("$env:TEMP = $iemTemp"), step.index("Import-Module (Join-Path 'R' 'bin\\IemMeasure.psm1')"))
+        self.assertLess(step.index(tw.ANALYSIS_REFUSED), step.index("$env:TEMP"))   # a refused step sets up nothing
+        stop = tw.sw.trace_stop_body(ENV, "R\\run")
+        self.assertNotIn("TEMP", stop)
+        self.assertNotIn("$iemDir", stop)
 
 
 class RebootTests(unittest.TestCase):
