@@ -142,17 +142,32 @@ fn hil_outs(v: &Value) -> Vec<HilOut> {
         .unwrap_or_default()
 }
 
+/// The engine's largest histogram bucket (S7): the range is capped at 1 ms
+/// in 1 µs buckets (`iem_audio_io::hist::MAX_RANGE_NS`), so the overflow
+/// bucket is at most 1000.
+pub const HIST_TOP_MAX: u32 = 1000;
+/// The most buckets an engine histogram has (0 to [`HIST_TOP_MAX`]): what a
+/// guard reply carries at most (`proto::tests::the_largest_reply_fits_a_frame`).
+pub const HIST_LEN_MAX: usize = 1001;
+
 /// `Status.interval_hist` / `process_hist` (S7): `[[bucket, count], …]`. A
-/// histogram with any entry that is not a pair of integers in range reads as
+/// histogram with more than [`HIST_LEN_MAX`] entries, or any entry that is
+/// not a pair of integers with the bucket up to [`HIST_TOP_MAX`], reads as
 /// none (the soak verdict then names it), never as part of one.
 fn hist(v: &Value, key: &str) -> Vec<(u32, u64)> {
-    let Some(list) = v.get(key).and_then(Value::as_array) else {
+    let Some(list) = v
+        .get(key)
+        .and_then(Value::as_array)
+        .filter(|l| l.len() <= HIST_LEN_MAX)
+    else {
         return Vec::new();
     };
     list.iter()
         .map(|e| {
             let pair = e.as_array().filter(|p| p.len() == 2)?;
-            let bucket = u32::try_from(pair.first()?.as_u64()?).ok()?;
+            let bucket = u32::try_from(pair.first()?.as_u64()?)
+                .ok()
+                .filter(|&b| b <= HIST_TOP_MAX)?;
             Some((bucket, pair.get(1)?.as_u64()?))
         })
         .collect::<Option<Vec<_>>>()
