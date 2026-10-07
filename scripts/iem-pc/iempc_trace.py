@@ -185,15 +185,17 @@ def tuning_modules(ctx, ip, build: str, profile: Path, local: str) -> dict[str, 
 
 
 def measure_load(ip, mods: dict, pre: str = "", stop_only: bool = False) -> dict:
-    """module_script's keywords for a body after IemMeasure's import from the
-    elevated tuning folder, both modules' sha256 checked on the PC first;
-    `stop_only`: IemMeasure alone (its hash), IemTuning never loads (nothing
-    compiles)."""
+    """module_script's `pre` for a body after IemMeasure's import from the
+    elevated tuning folder, both modules' sha256 checked on the PC first (never
+    module_script's `module`, which stages an upload from the user's root:
+    these are admin-only already); `stop_only`: IemMeasure alone (its hash),
+    IemTuning never loads (nothing compiles)."""
     (tuning, tuning_hex), (measure, measure_hex) = mods["tuning"], mods["measure"]
     if stop_only:
         return {"pre": f"{pre}{ip.hash_check(measure, measure_hex)} ; Import-Module {ip.ps_quote(measure)} "
                        "-ArgumentList 'stop-only' -Force ; "}
-    return {"pre": f"{pre}{ip.hash_check(tuning, tuning_hex)} ; ", "module": measure, "module_hex": measure_hex}
+    return {"pre": f"{pre}{ip.hash_check(tuning, tuning_hex)} ; {ip.hash_check(measure, measure_hex)} ; "
+                   f"Import-Module {ip.ps_quote(measure)} -Force ; "}
 
 
 def start_reply(ctx, ip, mods: dict, body: str) -> dict:

@@ -66,7 +66,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import datetime as dt
-import fcntl
 import hashlib
 import json
 import os
@@ -348,12 +347,31 @@ def native_script(exe: str, args: list[str], checks: tuple[str, ...] = ()) -> st
     ])
 
 
-def module_script(body: str, module: str | None = None, module_hex: str | None = None, pre: str = "", fin: str = "") -> str:
-    """Runs `body` (after importing `module`, checked by its sha256) and prints
-    {ok, r} or {ok: false, error} as the last line."""
+def elevated_ps():
+    """scripts/asio-spike/elevated_ps.py (#15): the stage, the admin-only folders
+    and TEMP of an elevated ssh session, loaded when a script needs them (never
+    at import: the event path depends on no S1a/S1c code)."""
+    if str(SPIKE_DIR) not in sys.path:
+        sys.path.insert(0, str(SPIKE_DIR))
+    import elevated_ps as ep
+    return ep
+
+
+def module_script(body: str, module: str | None = None, module_hex: str | None = None, pre: str = "", fin: str = "",
+                  elevated_root: str | None = None) -> str:
+    """Runs `body` and prints {ok, r} or {ok: false, error} as the last line.
+    `module`: a module this box uploaded into a run folder of the user's root
+    (a bundle's IemPc.psm1): its bytes are read once and checked by
+    `module_hex`, staged admin-only under the elevated root, checked again
+    there and imported only from there (#15, elevated_ps.staged_import).
+    `elevated_root`: another elevated root than the PC's (the CI self-test)."""
     load = ""
     if module is not None:
-        load = hash_check(module, module_hex or "") + f" ; Import-Module {ps_quote(module)} -Force ; "
+        if not HEX64.fullmatch(module_hex or ""):
+            raise StepError(f"not a sha256: {module_hex!r}")
+        ep = elevated_ps()
+        root = ep.ROOT if elevated_root is None else ps_quote(elevated_root)
+        load = ep.staged_import(ps_quote(module), module.rsplit("\\", 1)[-1], module_hex, root) + " ; "
     tail = f" finally {{ {fin} }}" if fin else ""
     return "\n".join([
         "$ErrorActionPreference = 'Stop'",
@@ -488,6 +506,7 @@ def state_lock(take: bool) -> Iterator[None]:
     if not take:
         yield
         return
+    import fcntl   # the dev box's lock; the Windows CI runner imports this module only to compose (Test-IemStage.ps1)
     with open(state_dir() / "iempc.lock", "a+", encoding="utf-8") as f:
         try:
             fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
