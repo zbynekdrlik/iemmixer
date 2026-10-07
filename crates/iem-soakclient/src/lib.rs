@@ -181,9 +181,14 @@ fn is_commit(s: &str) -> bool {
 /// `/api/version`'s answer names `build` (a commit, as `--expect-build`): its
 /// `git_hash`, the server's commit as `git rev-parse --short` printed it at
 /// build time (`iem_core::git_hash`), is at least [`MIN_HASH`] characters
-/// and a prefix of `build`, as HIL v1 checks the server. The predecessor
-/// app's answer names its own commit, never this one; any other answer
-/// names none.
+/// and a prefix of `build`. The predecessor app's answer names its own
+/// commit, never this one; any other answer names none.
+///
+/// The same rule has two other copies: HIL v1's `Test-IemHilVersion`
+/// (`scripts/iem-pc/IemPc.psm1`, lower case and an ordinal prefix, as here)
+/// and the guard's `iem_guard::effects::web::version_matches` (any case).
+/// This crate links no server or guard crate, so the rule is repeated; a
+/// change to one is made to all three.
 pub fn names_build(answer: &str, build: &str) -> bool {
     let answer: serde_json::Value = serde_json::from_str(answer).unwrap_or_default();
     answer
