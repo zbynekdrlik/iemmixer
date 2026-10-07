@@ -108,6 +108,8 @@ GUARD_UNREACHABLE = 4
 PREEMPTED = 10
 POLL_S = 2.0
 STATUS_S = 120
+BUSY_WAIT_S = 300.0  # how long dev waits for a switch the guard still runs (#35)
+BUSY_POLL_S = 5.0
 SWITCH_S = 540
 INSTALL_S = 540
 BOOTSTRAP_S = 540
@@ -883,9 +885,22 @@ def cmd_event(ctx: Ctx) -> int:
     return code
 
 
+def wait_switch_end(ctx: Ctx) -> None:
+    """Polls `iemmode status` until no switch runs, at most BUSY_WAIT_S (a new
+    flag abandons the wait like any read)."""
+    deadline = time.monotonic() + BUSY_WAIT_S
+    while time.monotonic() < deadline:
+        _code, reply, _raw = iemmode(ctx.env, ["status"], STATUS_S, ctx.watch(abandon=True))
+        if not (reply or {}).get("switching"):
+            return
+        time.sleep(BUSY_POLL_S)
+
+
 def cmd_dev(ctx: Ctx) -> int:
     """The guard owns the switch: a new flag abandons this client at once and
-    the event path pre-empts the switch."""
+    the event path pre-empts the switch. A guard still switching (after a
+    restart it runs the event plan's checks) answers "busy": then the switch's
+    end is waited for and dev asked once more (#35)."""
     refuse_open_window("dev")
     args = ["dev"]
     if ctx.args.build:
@@ -894,6 +909,11 @@ def cmd_dev(ctx: Ctx) -> int:
     if dry:
         args.append("--dry-run")
     code, reply, raw = iemmode(ctx.env, args, STATUS_S if dry else SWITCH_S, ctx.watch(abandon=True))
+    if not dry and code != 0 and (reply or {}).get("detail") == "busy":
+        print("iempc: the guard is still switching (after a restart: the event plan's checks); "
+              "waiting for it to end, then dev again", file=sys.stderr, flush=True)
+        wait_switch_end(ctx)
+        code, reply, raw = iemmode(ctx.env, args, SWITCH_S, ctx.watch(abandon=True))
     out = result("iemmode", args, code, reply, raw)
     if code == 0 and not dry:
         out["dev_entry"] = next_entry(ctx.args.build)
