@@ -207,7 +207,7 @@ class RefreshTests(TuningBase):
         self.pc.texts["profile.json"] = True
         code, docs, err = self.run_main("activate", "--sha", SHA)
         self.assertEqual(code, 0, err)
-        self.assertEqual([next(iter(d)) for d in docs], ["iemmode", "handover", "elevated_bin", "tuning_refresh"])
+        self.assertEqual([next(iter(d)) for d in docs], ["iemmode", "elevated_bin", "handover", "tuning_refresh"])
         self.assertEqual(self.profile_checks(), ["abandon"])
         [m] = self.installs()
         sums = ip.load_record(SHA)["sums"]
@@ -227,7 +227,7 @@ class RefreshTests(TuningBase):
         self.assertEqual(code, 0, err)
         self.assertEqual(self.profile_checks(), ["abandon"])
         self.assertEqual((self.installs(), [s[1].rsplit("/", 1)[1] for s in self.pc.scps]), ([], [f"iemmode-{SHA}.exe"]))
-        self.assertEqual([next(iter(d)) for d in docs], ["iemmode", "handover", "elevated_bin"])
+        self.assertEqual([next(iter(d)) for d in docs], ["iemmode", "elevated_bin", "handover"])
         self.assertIn("no tuning profile in the PC's elevated tuning folder", err)
 
     def test_a_failed_refresh_is_reported_and_the_activation_counts(self) -> None:
@@ -294,7 +294,7 @@ class RefreshTests(TuningBase):
         code, docs, err = self.run_main("activate", "--sha", SHA, "--offline")
         self.assertEqual(code, 0, err)
         self.assertEqual([c[0] for c in self.pc.calls], ["iemmode.exe", "iemmixer-guard.exe", "iemmode.exe"])
-        self.assertEqual([next(iter(d)) for d in docs][-3:], ["handover", "elevated_bin", "tuning_refresh"])
+        self.assertEqual([next(iter(d)) for d in docs][-3:], ["elevated_bin", "handover", "tuning_refresh"])
         self.assertEqual(docs[-1]["tuning_refresh"], SHA)
         self.assertEqual(self.installs()[0].group(5), " -KeepProfile")
 

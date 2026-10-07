@@ -4,6 +4,8 @@ reuse test_iempc's fakes (FakePc stands in for ssh and scp, FakeGh for
 GitHub); every value is synthetic."""
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import sys
 import unittest
@@ -30,25 +32,44 @@ def in_order(test: unittest.TestCase, text: str, steps: list[str]) -> None:
 
 class PickTests(Base):
     """Every iemmode call runs %ProgramData%\\iemmixer\\bin\\iemmode.exe when the
-    elevated root, bin and the file read back admin-only; else PC_BIN's, with
-    one note per command."""
+    elevated root, bin and the file read back admin-only and the file is the
+    build this box installed there (its record); else PC_BIN's, with one note
+    per command."""
 
     def setUp(self) -> None:
         super().setUp()
         self.pc.replies[("activate", SHA)] = ACTIVATED
         self.pc.replies[("status",)] = STATUS
+        self.fetched()
 
-    def test_iemmode_runs_the_admin_only_copy_when_it_reads_back(self) -> None:
+    def record(self) -> None:
+        ip.write_json(ip.state_dir() / ib.RECORD, {"sha": SHA, "sha256": IEMMODE})
+
+    def test_iemmode_runs_the_admin_only_copy_of_the_installed_build(self) -> None:
+        self.record()
         ip.iemmode(dict(ENV), ["status"], 10, "abandon")
         self.assertEqual(self.pc.calls, [("iemmode.exe", ["status"], "abandon")])
-        in_order(self, self.pc.native_scripts[0], [
+        script = self.pc.native_scripts[0]
+        in_order(self, script, [
             "$x = 'X:\\root\\bin\\iemmode.exe' ; $a = @('status') ; ",
             f"$iemE = Join-Path {ROOT} 'bin\\iemmode.exe'",
             "foreach ($p in @((Split-Path -Parent (Split-Path -Parent $iemE)), (Split-Path -Parent $iemE), $iemE)) { & $iemOnly $p }",
+            f"(Get-FileHash -LiteralPath $iemE -Algorithm SHA256).Hash.ToLowerInvariant() -cne '{IEMMODE}'",
             "$iemUse = $iemE", "catch { $iemNote = \"$_\" }", "if ($iemUse) { $x = $iemUse } ; $r = @(& $x @a 2>&1)",
             "note = $iemNote"])
+        for write in ("& $iemDir", "Delete(", "WriteAllBytes", "Move("):   # the pick on the event path only reads
+            self.assertNotIn(write, script)
+
+    def test_without_an_installed_build_on_record_pc_bin_runs_with_a_note(self) -> None:
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            ip.iemmode(dict(ENV), ["status"], 10, "abandon")
+        self.assertNotIn("$iemUse", self.pc.native_scripts[0])
+        self.assertIn("iemmode ran from PC_BIN", err.getvalue())
+        self.assertIn("no admin-only copy is recorded on this box", err.getvalue())
 
     def test_a_copy_that_does_not_read_back_runs_pc_bin_with_one_note_per_command(self) -> None:
+        self.record()
         self.pc.bin_note = "X:\\bin\\iemmode.exe may be changed by S-1-5-21-1-2-3-1001: refused"
         for _ in range(2):
             code, _, err = self.run_main("activate", "--sha", SHA)
@@ -73,6 +94,7 @@ class InstallTests(Base):
         self.assertEqual(code, 0, err)
         self.assertIn((str(ip.bundle_dir(SHA) / "iemmode.exe"), f"tester@pc.test:/X:/root/incoming/iemmode-{SHA}.exe",
                        "finish"), self.pc.scps)
+        self.assertEqual(ip.read_json(ip.state_dir() / ib.RECORD, None), {"sha": SHA, "sha256": IEMMODE})
         script, mode = next(m for m in self.pc.modules if "$iemDst" in m[0])
         self.assertEqual(mode, "finish")
         in_order(self, script, [
@@ -82,12 +104,15 @@ class InstallTests(Base):
             "$iemDst = Join-Path $iemBin 'iemmode.exe'", "[IO.File]::Delete($iemDst) ; [IO.File]::Move($iemMod, $iemDst)",
             "& $iemOnly $iemDst", f"-cne '{IEMMODE}') {{ throw ('sha256 mismatch after the copy: ' + $iemDst) }}"])
         self.assertEqual(script.count(f"'{UPLOAD}'"), 2)   # read once, named in the mismatch
-        handover = [next(iter(d)) for d in docs].index("handover")
-        self.assertEqual(docs[handover + 1], {"elevated_bin": SHA, "path": ib.SHOWN, "sha256": IEMMODE})
+        # Right after `iemmode activate` put the new bins in place, before the hand-over's reads (#15 review).
+        self.assertEqual([next(iter(d)) for d in docs][:3], ["iemmode", "elevated_bin", "handover"])
+        self.assertEqual(docs[1], {"elevated_bin": SHA, "path": ib.SHOWN, "sha256": IEMMODE})
 
     def test_a_read_back_that_differs_is_reported_and_the_activation_counts(self) -> None:
+        ip.write_json(ip.state_dir() / ib.RECORD, {"sha": "b" * 40, "sha256": "1" * 64})   # an earlier install
         self.pc.texts["$iemDst"] = "0" * 64
         code, docs, err = self.run_main("activate", "--sha", SHA)
+        self.assertIsNone(ip.read_json(ip.state_dir() / ib.RECORD, None))   # no copy on record: PC_BIN runs
         self.assertEqual(code, 0, err)
         failed = next(d for d in docs if "elevated_bin" in d)
         self.assertEqual((failed["elevated_bin"], failed["sha"]), ("failed", SHA))
@@ -103,7 +128,19 @@ class InstallTests(Base):
         self.pc.texts["$iemDst"] = flag_then_hash
         code, _, _ = self.run_main("activate", "--sha", SHA)
         self.assertEqual(code, ip.PREEMPTED)
-        self.assertEqual([c[1][0] for c in self.pc.calls], ["activate", "status", "event"])
+        self.assertEqual([c[1][0] for c in self.pc.calls], ["activate", "event"])
+
+    def test_an_install_that_outlives_its_bound_is_named_as_still_running(self) -> None:
+        def still_running():
+            raise ip.StillRunning("ssh still running after 540 s (bounded on the PC; check 'iempc status', never force-end)")
+
+        self.pc.texts["$iemDst"] = still_running
+        code, docs, err = self.run_main("activate", "--sha", SHA)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(next(d for d in docs if "elevated_bin" in d)["elevated_bin"], "still-running")
+        self.assertIn("the install may still run on the PC", err)
+        self.assertNotIn("was not installed", err)
+        self.assertIsNone(ip.read_json(ip.state_dir() / ib.RECORD, None))
 
 
 class TuningInstallBinTests(TuningBase):

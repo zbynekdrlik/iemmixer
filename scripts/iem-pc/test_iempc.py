@@ -1053,7 +1053,13 @@ class InstallTests(Base):
         self.assertEqual(self.pc.scps[1], (str(ip.bundle_dir(SHA) / "iemmixer-guard.exe"),
                                            f"tester@pc.test:/X:/root/incoming/iemmixer-guard-{SHA}.exe", "finish"))
         self.assertEqual(self.pc.calls[0][0], f"iemmixer-guard-{SHA}.exe")
-        self.assertIn(ip.hash_check(guard, sha256(b"synthetic iemmixer-guard.exe")), self.pc.native_scripts[0])
+        # #15 (review): read once, checked, staged admin-only and run from the stage.
+        run, at = self.pc.native_scripts[0], 0
+        for step in (f"$iemB = [IO.File]::ReadAllBytes({ip.ps_quote(guard)})",
+                     f"$iemH -cne '{sha256(b'synthetic iemmixer-guard.exe')}'",
+                     "$iemMod = Join-Path $iemStage 'iemmixer-guard.exe'", "& $iemOnly $iemMod",
+                     "$x = $iemMod ; $r = @(& $x @a 2>&1)"):
+            at = run.index(step, at)
         self.assertEqual((docs[-1]["via"], docs[-1]["output"]), ("iemmixer-guard (first bundle)", "installed"))
 
     def test_an_open_spike_window_refuses_install_but_not_the_first_bundle(self) -> None:
@@ -1116,13 +1122,14 @@ class ActivateTests(Base):
         self.assertEqual(self.pc.timeouts, [ip.SWITCH_S] + [ip.STATUS_S] * 4)
         self.assertEqual({k: docs[0][k] for k in ("iemmode", "exit")}, {"iemmode": ["activate", SHA], "exit": 0})
         self.assertEqual(docs[0]["reply"]["detail"], f"activated {SHA}; the guard hands over to its new exe")
-        self.assertEqual(docs[1], {"handover": {"guard_build": SHA, "reads": 4, "mode": "event",
+        self.assertEqual(docs[1]["elevated_bin"], "failed")   # not fetched here; before the hand-over (#15)
+        self.assertEqual(docs[2], {"handover": {"guard_build": SHA, "reads": 4, "mode": "event",
                                                 "detail": "mode event; bundle " + SHA}})
 
     def test_a_guard_already_on_the_sha_is_read_once(self) -> None:
         self.statuses(self.status(SHA))
         code, docs, _ = self.run_main("activate", "--sha", SHA)
-        self.assertEqual((code, docs[1]["handover"]["reads"]), (0, 1))
+        self.assertEqual((code, docs[2]["handover"]["reads"]), (0, 1))
         self.assertEqual(len(self.pc.calls), 2)
 
     def test_a_status_read_that_fails_is_read_again(self) -> None:
@@ -1132,7 +1139,7 @@ class ActivateTests(Base):
         self.statuses(ssh_cut, self.status(SHA))
         code, docs, err = self.run_main("activate", "--sha", SHA)
         self.assertEqual(code, 0, err)
-        self.assertEqual(docs[1]["handover"]["reads"], 2)
+        self.assertEqual(docs[2]["handover"]["reads"], 2)
 
     def test_a_hand_over_that_never_names_the_sha_fails_within_its_bound(self) -> None:
         ip.HANDOVER_S = 0.2
@@ -1140,7 +1147,7 @@ class ActivateTests(Base):
         start = time.monotonic()
         code, docs, err = self.run_main("activate", "--sha", SHA)
         self.assertLess(time.monotonic() - start, 5)
-        self.assertEqual((code, len(docs)), (1, 1))
+        self.assertEqual((code, [next(iter(d)) for d in docs]), (1, ["iemmode", "elevated_bin"]))
         self.assertIn(f"the guard did not name build {SHA} within 0.2 s", err)
         self.assertIn(f"the last: exit 0, guard_build '{SHA2}'", err)
         self.assertIn("never force-end", err)
@@ -1253,10 +1260,10 @@ class OfflineActivateTests(Base):
             at = guard_run.index(step, at)
         self.assertEqual(guard_run.count(ip.ps_quote(self.EXE)), 3)   # read once, named in the mismatch, the fallback text
         self.assertEqual(self.pc.timeouts, [ip.STATUS_S, ip.INSTALL_S, ip.STATUS_S])
-        self.assertEqual([next(iter(d)) for d in docs], ["iemmode", "guard_stopped", "iemmixer-guard", "handover", "elevated_bin"])
+        self.assertEqual([next(iter(d)) for d in docs], ["iemmode", "guard_stopped", "iemmixer-guard", "elevated_bin", "handover"])
         self.assertEqual(docs[1], {"guard_stopped": {"reads": 2}})
         self.assertEqual((docs[2]["iemmixer-guard"], docs[2]["exit"]), (["activate", SHA], 0))
-        self.assertEqual(docs[3]["handover"]["guard_build"], SHA)
+        self.assertEqual(docs[4]["handover"]["guard_build"], SHA)
 
     def test_without_a_running_guard_nothing_is_quit(self) -> None:
         self.guards(0)

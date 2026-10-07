@@ -34,7 +34,7 @@ function Invoke-Staged([string]$Module, [string]$Hex, [string]$Root) {
 function Get-Result($Doc) { return ('ok={0} r={1} error={2}' -f (Get-IemProp $Doc 'ok'), (Get-IemProp (Get-IemProp $Doc 'r') 'path'), (Get-IemProp $Doc 'error')) }
 
 $composeBin = 'import sys; sys.path.insert(0, sys.argv[1]); import iempc, iempc_bin; print(iempc_bin.install_script(iempc, sys.argv[2], sys.argv[3], elevated_root=sys.argv[4]))'
-$composeRun = 'import sys; sys.path.insert(0, sys.argv[1]); import iempc, iempc_bin; print(iempc.native_script(sys.argv[2], [], then=iempc_bin.pick(iempc, elevated_root=sys.argv[3])))'
+$composeRun = 'import sys; sys.path.insert(0, sys.argv[1]); import iempc, iempc_bin; print(iempc.native_script(sys.argv[2], [], then=iempc_bin.pick_for(iempc, sys.argv[3], elevated_root=sys.argv[4])))'
 
 function Invoke-Composed([string[]]$PyArgs) {
     $script = @(& python -c @PyArgs)
@@ -45,7 +45,7 @@ function Invoke-Composed([string[]]$PyArgs) {
 }
 
 function Install-Bin([string]$Exe, [string]$Hex, [string]$Root) { return (Invoke-Composed @($composeBin, $here, $Exe, $Hex, $Root)) }
-function Invoke-Bin([string]$PcBinExe, [string]$Root) { return (Invoke-Composed @($composeRun, $here, $PcBinExe, $Root)) }
+function Invoke-Bin([string]$PcBinExe, [string]$Want, [string]$Root) { return (Invoke-Composed @($composeRun, $here, $PcBinExe, $Want, $Root)) }
 function Get-Run($Doc) { return ('exit={0} out={1} note={2} err={3}' -f (Get-IemProp $Doc 'exit'), (Get-IemProp $Doc 'out'), (Get-IemProp $Doc 'note'), (Get-IemProp $Doc 'err')) }
 
 function New-FakeExe([string]$Path, [string]$Class, [string]$Says) {
@@ -121,7 +121,7 @@ try {
     New-FakeExe -Path $userExe -Class 'IemStageUserBin' -Says 'user-bin'
     $br = Join-Path $base 'er-bin'
     $copy = Join-Path $br 'bin\iemmode.exe'
-    $doc = Invoke-Bin $userExe $br
+    $doc = Invoke-Bin $userExe $exeHex $br
     Assert ((Get-IemProp $doc 'exit') -eq 0 -and "$(Get-IemProp $doc 'out')".Trim() -eq 'user-bin' -and "$(Get-IemProp $doc 'note')") "bin-none-yet-runs-pc-bin-with-a-note ($(Get-Run $doc))"
     $doc = Install-Bin $exe $exeHex $br
     Assert ((Get-IemProp $doc 'ok') -eq $true -and (Get-IemProp $doc 'r') -eq $exeHex) "bin-install-answers-the-read-back-sha256 ($(Get-IemProp $doc 'error'))"
@@ -130,8 +130,11 @@ try {
         Assert ($bad.Count -eq 0) "bin-reads-back-as-an-elevated-item [$p] ($($bad -join '; '))"
     }
     Assert ((FileSha $copy) -ceq $exeHex) 'bin-holds-the-checked-bytes'
-    $doc = Invoke-Bin $userExe $br
+    $doc = Invoke-Bin $userExe $exeHex $br
     Assert ((Get-IemProp $doc 'exit') -eq 0 -and "$(Get-IemProp $doc 'out')".Trim() -eq 'bin-copy' -and -not (Get-IemProp $doc 'note')) "bin-iemmode-runs-the-admin-only-copy ($(Get-Run $doc))"
+    # A copy that is not the build the dev box installed (a later activation by another path) is never run.
+    $doc = Invoke-Bin $userExe (FileSha $userExe) $br
+    Assert ("$(Get-IemProp $doc 'out')".Trim() -eq 'user-bin' -and "$(Get-IemProp $doc 'note')" -like '*not the build*') "bin-a-copy-of-another-build-is-never-run ($(Get-Run $doc))"
     $written = (Get-Item -LiteralPath $copy).LastWriteTimeUtc
     Start-Sleep -Milliseconds 50
     $doc = Install-Bin $exe $exeHex $br
@@ -143,7 +146,7 @@ try {
     $acl = Get-Acl -LiteralPath $copy
     $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier $me.sid), 'Modify', 'Allow')))
     Set-Acl -LiteralPath $copy -AclObject $acl
-    $doc = Invoke-Bin $userExe $br
+    $doc = Invoke-Bin $userExe $exeHex $br
     Assert ("$(Get-IemProp $doc 'out')".Trim() -eq 'user-bin' -and "$(Get-IemProp $doc 'note')" -like '*may be changed by*') "bin-a-copy-the-user-may-change-is-never-run ($(Get-Run $doc))"
 } finally {
     Remove-Item -LiteralPath $base -Recurse -Force -ErrorAction SilentlyContinue
