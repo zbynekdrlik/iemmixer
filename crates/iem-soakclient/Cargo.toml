@@ -8,6 +8,10 @@ repository.workspace = true
 description = "iemmixer soak harness (S7): one mixer socket and one listen socket on a member's mix, counted into a JSON summary"
 
 [dependencies]
+# On the PC the client signs its own engineer token with the server's JWT
+# secret (#10 decision, 2026-10-07): the server's own crate, version and
+# backend (rust_crypto: pure-Rust HS256; RSA is never used).
+jsonwebtoken = { version = "11.1", features = ["rust_crypto"] }
 # The listen frames are the server's Opus (X4); the server's own codec crate.
 opus = "0.4"
 serde = { version = "1.0", features = ["derive"] }

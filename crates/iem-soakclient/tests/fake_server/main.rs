@@ -5,7 +5,8 @@
 //! `recv_timeout`, so a run that never ends fails here instead of hanging.
 //! Timing is asserted only from below (a wait that must have happened) or
 //! against the run's own measured length, never as a fixed sleep. A run
-//! that must end early is a 30 s run waited for 5 or 6 s.
+//! that must end early is a 30 s run waited for 5 or 6 s. The PC's own
+//! engineer token (`--jwt-secret-file`) is tested in [`token`].
 
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -15,14 +16,21 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use iem_core::AuthClaims;
 use iem_soakclient::net::{Limits, run};
-use iem_soakclient::{Args, PIN_ENV, Reason, Summary, write_summary};
+use iem_soakclient::{Args, Credential, PIN_ENV, Reason, Summary, write_summary};
+use jsonwebtoken::{DecodingKey, Validation, decode};
 use serde_json::json;
 use tungstenite::{Message, WebSocket};
+
+mod token;
 
 /// The engineer's PIN the fake accepts, and the token it issues.
 const PIN: &str = "1234";
 const TOKEN: &str = "T";
+/// A synthetic JWT secret (P6: never a site's): with it, the fake also
+/// takes an engineer token signed with it, as the server does.
+const SECRET: &str = "synthetic-jwt-secret";
 /// The build the client is told to expect, the short hash the fake's
 /// `/api/version` names it by (`git_hash`, as `git rev-parse --short`
 /// prints it), and another build.
@@ -66,6 +74,9 @@ struct Script {
     /// nothing more and holds the connection for `WAIT`: the client's Close
     /// is never answered.
     deaf_after_stop: bool,
+    /// The server's JWT secret: the sockets also take an engineer token
+    /// signed with it ([`claims`]), besides the login's `TOKEN`.
+    secret: Option<&'static str>,
 }
 
 impl Default for Script {
@@ -79,6 +90,7 @@ impl Default for Script {
             refuse_upgrades: false,
             stall_mixer: false,
             deaf_after_stop: false,
+            secret: None,
         }
     }
 }
@@ -239,15 +251,17 @@ fn http(mut stream: TcpStream, head_len: usize, target: &str, script: &Script) {
     );
 }
 
-/// The socket at `target` (another path or token, or a `refuse_upgrades`
-/// script: refused before the handshake).
+/// The socket at `target` (another path, a token the fake does not take, or
+/// a `refuse_upgrades` script: refused before the handshake).
 fn upgrade(stream: TcpStream, target: &str, script: &Script, report: &Report) {
-    let listen = match target {
-        MIXER => false,
-        LISTEN => true,
-        _ => return,
+    let Some((listen, token)) = socket(target) else {
+        return;
     };
-    if script.refuse_upgrades {
+    let taken = token == TOKEN
+        || script
+            .secret
+            .is_some_and(|secret| claims(token, secret).is_some_and(|c| c.engineer));
+    if script.refuse_upgrades || !taken {
         return;
     }
     let Ok(mut ws) = tungstenite::accept(stream) else {
@@ -258,6 +272,29 @@ fn upgrade(stream: TcpStream, target: &str, script: &Script, report: &Report) {
     } else {
         mixer_stream(&mut ws, script.stall_mixer, report);
     }
+}
+
+/// The socket `target` asks for, as the client must ask for it (the mixer
+/// socket on member9, or the listen socket), and its token; `None` for any
+/// other target. `true`: the listen socket.
+fn socket(target: &str) -> Option<(bool, &str)> {
+    let mixer = target
+        .strip_prefix("/ws/member9?token=")
+        .and_then(|rest| rest.strip_suffix("&proto=2"));
+    match mixer {
+        Some(token) => Some((false, token)),
+        None => target.strip_prefix("/ws/audio?token=").map(|t| (true, t)),
+    }
+}
+
+/// The claims of `token` as the server reads them: HS256 with `secret`'s
+/// bytes and the default validation, which checks `exp`
+/// (`iem_server::auth::extract_claims`).
+fn claims(token: &str, secret: &str) -> Option<AuthClaims> {
+    let key = DecodingKey::from_secret(secret.as_bytes());
+    decode::<AuthClaims>(token, &key, &Validation::default())
+        .ok()
+        .map(|data| data.claims)
 }
 
 type Ws = WebSocket<TcpStream>;
@@ -389,6 +426,7 @@ fn args(base: &str, direct: bool, seconds: u64) -> Args {
         seconds,
         out: PathBuf::from("unused.json"),
         expect_build: BUILD.to_owned(),
+        jwt_secret_file: None,
         cpu_sets: Vec::new(),
     }
 }
@@ -413,14 +451,19 @@ struct Ran {
     took: Duration,
 }
 
-/// `run` on its own thread, waited for at most `bound`; each summary is also
-/// written to `out` when given.
+/// [`run_as`] with the PIN `pin`.
 fn run_within(args: Args, pin: &'static str, bound: Duration, out: Option<PathBuf>) -> Ran {
+    run_as(args, Credential::Pin(pin.to_owned()), bound, out)
+}
+
+/// `run` with `credential` on its own thread, waited for at most `bound`;
+/// each summary is also written to `out` when given.
+fn run_as(args: Args, credential: Credential, bound: Duration, out: Option<PathBuf>) -> Ran {
     let (tx, rx) = mpsc::channel();
     let began = Instant::now();
     thread::spawn(move || {
         let mut written = Vec::new();
-        let summary = run(&args, pin, &limits(), &mut |s: &Summary| {
+        let summary = run(&args, &credential, &limits(), &mut |s: &Summary| {
             if let Some(out) = &out {
                 write_summary(out, s).unwrap();
             }

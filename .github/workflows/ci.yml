@@ -362,7 +362,11 @@ jobs:
         # The server must name the build first: its /api/version git_hash is
         # this checkout's `git rev-parse --short HEAD`, read when the step
         # above built it (iem-core's build.rs), so the client expects the
-        # same HEAD in full. The step's own bound (600 s, the build check,
+        # same HEAD in full. Then 30 s in the PC's mode (#10 decision,
+        # 2026-10-07): no PIN, the client signs its own engineer token with
+        # this server's own JWT secret (secrets/jwt_secret next to the site
+        # file), so a real server reads a token the client signed before any
+        # PC soak does. The step's own bound (both runs, the build checks,
         # the login and the sockets' Close fit in it) makes a hung client a
         # failed step, so the upload still runs.
         timeout-minutes: 15
@@ -377,7 +381,14 @@ jobs:
             --member member9 --expect-build "$build" --seconds "$SOAK_SECONDS" --out "$summary" || status=$?
           python3 scripts/iem-pc/soak_verdict.py harness "$summary" \
             --min-seconds "$((SOAK_SECONDS - 1))" --max-gaps 3
-          exit "$status"
+          secret_summary="$RUNNER_TEMP/soakclient-secret.json"
+          secret_status=0
+          ./target/release/iem-soakclient --base http://127.0.0.1:8080 --direct \
+            --jwt-secret-file "$(dirname "$IEMMIXER_CONFIG")/secrets/jwt_secret" \
+            --member member9 --expect-build "$build" --seconds 30 --out "$secret_summary" || secret_status=$?
+          python3 scripts/iem-pc/soak_verdict.py harness "$secret_summary" --min-seconds 29 --max-gaps 3
+          [ "$status" -eq 0 ] || exit "$status"
+          exit "$secret_status"
       - name: Upload failure evidence
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -388,6 +399,7 @@ jobs:
             ${{ runner.temp }}/server.log
             ${{ runner.temp }}/engine.log
             ${{ runner.temp }}/soakclient.json
+            ${{ runner.temp }}/soakclient-secret.json
           retention-days: 7
 
   windows:
