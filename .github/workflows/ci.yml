@@ -267,7 +267,8 @@ jobs:
     name: e2e
     needs: [wasm]
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # ~10 min of builds and Playwright, then the soak client's 10 min on a push.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -279,11 +280,12 @@ jobs:
           name: wasm-dist
           path: crates/iem-ui/dist
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - name: Build the server and the engine
+      - name: Build the server, the engine and the soak client
         run: |
           set -euo pipefail
           cargo build --locked --release -p iem-server --features standalone,audio
           cargo build --locked --release -p iem-engine
+          cargo build --locked --release -p iem-soakclient
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
@@ -348,6 +350,26 @@ jobs:
           CI: "true"
           E2E_BASE_URL: http://127.0.0.1:8080
         run: npx playwright test --reporter=list
+      - name: Soak client against the NullRt engine and the server (10 min on a push, 2 min on a pull request; S7 design note section 9)
+        # After Playwright, so no spec runs beside it. The client reads only (it
+        # sends no mixer command) and listens to member9's mix, which no spec
+        # changes (the tunnel pages only look at it). The member listen tap is
+        # one slot: while the client holds it, an engineer listening to another
+        # member's mix gets no_source. The PIN goes in through the client's own
+        # variable, never an argument. The verdict runs even when the client
+        # ended early, so the log names what failed; --max-gaps 3 is the hosted
+        # runner's tolerance for scheduling stalls (the PC verdict wants 0).
+        env:
+          SOAK_SECONDS: ${{ github.event_name == 'push' && '600' || '120' }}
+        run: |
+          set -euo pipefail
+          summary="$RUNNER_TEMP/soakclient.json"
+          status=0
+          IEM_SOAK_PIN="$E2E_ENGINEER_PIN" ./target/release/iem-soakclient --base http://127.0.0.1:8080 --direct \
+            --member member9 --seconds "$SOAK_SECONDS" --out "$summary" || status=$?
+          python3 scripts/iem-pc/soak_verdict.py harness "$summary" \
+            --min-seconds "$((SOAK_SECONDS - 1))" --max-gaps 3
+          exit "$status"
       - name: Upload failure evidence
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -357,6 +379,7 @@ jobs:
             e2e/test-results/
             ${{ runner.temp }}/server.log
             ${{ runner.temp }}/engine.log
+            ${{ runner.temp }}/soakclient.json
           retention-days: 7
 
   windows:
@@ -406,6 +429,10 @@ jobs:
         run: cargo clippy --locked -p iem-migrate --all-targets -- -D warnings
       - name: Migration CLI tests on Windows
         run: cargo test --locked -p iem-migrate
+      # The first compile of the soak client's Windows path (its CPU Sets
+      # through iem_win::power::set_cpu_sets); the bundle job builds it.
+      - name: Soak client clippy (its Windows CPU Sets)
+        run: cargo clippy --locked -p iem-soakclient --all-targets -- -D warnings
 
   bundle:
     name: bundle
@@ -429,14 +456,15 @@ jobs:
           path: crates/iem-ui/dist
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Build (release; the server as the PC runs it, with TLS and the audio paths)
-        run: cargo build --locked --release -p iem-engine -p iem-server -p iem-guard -p iem-tray -p iem-migrate --features iem-server/standalone,iem-server/tls,iem-server/audio
+        run: cargo build --locked --release -p iem-engine -p iem-server -p iem-guard -p iem-tray -p iem-migrate -p iem-soakclient --features iem-server/standalone,iem-server/tls,iem-server/audio
       - name: Zip with manifest and sums
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $b = Join-Path $env:RUNNER_TEMP 'bundle'
           New-Item -ItemType Directory -Force -Path $b | Out-Null
-          $exes = 'iem-engine', 'iem-server', 'iemmixer-guard', 'iemmode', 'iem-tray', 'iem-migrate' | ForEach-Object { "target/release/$_.exe" }
+          # The soak client rides along (S7) but is not required: older bundles still install.
+          $exes = 'iem-engine', 'iem-server', 'iemmixer-guard', 'iemmode', 'iem-tray', 'iem-migrate', 'iem-soakclient' | ForEach-Object { "target/release/$_.exe" }
           Copy-Item -LiteralPath $exes -Destination $b
           Copy-Item -LiteralPath scripts/iem-pc/hil-v1.ps1, scripts/iem-pc/IemPc.psm1 -Destination $b
           Copy-Item -LiteralPath crates/iem-engine/LICENSE -Destination (Join-Path $b 'LICENSE-iem-engine')
