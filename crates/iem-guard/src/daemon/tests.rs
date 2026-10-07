@@ -4039,19 +4039,21 @@ fn await_running(shared: &Shared) {
     }
 }
 
-/// After a reboot the guard runs the event plan's checks (a reboot always
-/// comes back in event) while the pipe already routes (#42). They change
-/// nothing a dev entry could undo: a dev queued before them runs after them,
-/// one `iempc dev`, never a repeat (the epoch moved, the fence did not).
+/// A PC in dev rebooted comes back in event, and the guard runs the event
+/// plan's checks while the pipe already routes (#42). They are the reset
+/// rule's checks, not a switch back to REAPER the owner or the crash loop
+/// chose: a dev queued before them runs after them, one `iempc dev`, never a
+/// repeat (the epoch moved, the fence did not).
 #[test]
 fn a_dev_queued_before_the_start_checks_runs_after_them() {
-    let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
+    let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Dev));
     g.state.pins.current = Some(SHA.into());
     let Route::Queue(seen) = g.shared.route(&dev()) else {
         panic!("an idle guard queues a dev entry");
     };
     assert_eq!(seen, INIT);
     assert_eq!(start(&mut pc, &mut g, 5_000), Some(Outcome::Done));
+    assert_eq!(g.state.mode, Mode::Event);
     let v = g.shared.view();
     assert_eq!(
         (v.epoch, v.fence, v.start_checks, v.began),
@@ -4128,15 +4130,12 @@ fn ide_event_during_the_start_checks_fences_a_dev_queued_before_it() {
     assert!(answer.ok, "{answer:?}");
     assert_eq!(g.shared.generation(), Generation { epoch: 1, fence: 1 });
     let made = pc.calls().len();
-    // Queued before the checks: they ran meanwhile.
+    // Queued before the checks: they move no fence, the "ide event" routed
+    // during them did, so the reply names the event, not the checks.
     let r = handle(&mut pc, &mut g, dev(), before);
     assert_eq!(
         (r.ok, r.detail.as_str(), r.mode),
-        (
-            false,
-            "busy: a switch ran meanwhile (event → event)",
-            Mode::Event
-        )
+        (false, asked, Mode::Event)
     );
     // Queued during them, before the "ide event".
     let Route::Queue(seen) = during else {
