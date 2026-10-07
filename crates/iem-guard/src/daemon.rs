@@ -1194,11 +1194,12 @@ fn stale(req: &Request, seen: Generation, v: &View) -> Option<Reply> {
 }
 
 /// Why a dev or live entry queued before the fence moved does not run: the
-/// switch begun last, when one began since it was queued, else the "ide
-/// event" that came meanwhile.
+/// switch begun last, when one began since it was queued and it was not the
+/// start's checks (they move no fence), else the "ide event" that came
+/// meanwhile.
 fn fenced(seen: Generation, v: &View) -> String {
     match v.began {
-        Some((from, to)) if seen.epoch != v.epoch => format!(
+        Some((from, to)) if seen.epoch != v.epoch && !v.start_checks => format!(
             "busy: a switch ran meanwhile ({} → {})",
             mode_name(from),
             mode_name(to)
@@ -1218,10 +1219,11 @@ struct Entry {
 
 /// Handles one request on the daemon thread.
 pub fn handle(pc: &mut dyn Pc, g: &mut Guard, req: Request, seen: Generation) -> Reply {
-    if seen != g.shared.generation()
-        && let Some(reply) = stale(&req, seen, &g.shared.view())
+    let v = g.shared.view();
+    if seen != v.generation()
+        && let Some(reply) = stale(&req, seen, &v)
     {
-        info!("a request queued before a switch: {}", reply.detail);
+        info!("a request answered as stale: {}", reply.detail);
         return reply;
     }
     g.report.clear();
