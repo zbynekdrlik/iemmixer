@@ -308,11 +308,50 @@ class TraceStopTests(TraceBase):
         self.assertEqual(self.steps(), [("preflight", "abandon"), ("start", "finish"), ("stop", "ignore")])
         self.assertIn("PC step failed: xperf at X:\\wpt\\xperf.exe is not signed by Microsoft", err)
         self.assertIn("the kernel trace was stopped", err)
-        # The PC answered, so a stop that finds nothing proves that no trace ran.
+        # The PC answered, so a stop that finds nothing proves that no trace runs.
         self.answers["Stop-IemTraceSessions"] = {"stopped": [], "gone": [], "kept": [], "notes": []}
         code, docs, err = self.trace()
         self.assertEqual((code, docs), (1, []))
-        self.assertIn("no kernel trace ran", err)
+        self.assertIn("no kernel trace was running", err)
+
+    def test_a_start_that_completed_before_the_flag_counts_as_over(self) -> None:
+        """"finish": the start's call completed, then EventNow; a stop that finds
+        nothing is no unconfirmed stop, and a session that ended by itself is named."""
+        def start_then_flag():
+            self.flag()
+            return {"dir": "x", "started": "2026-10-07T06:00:00Z"}
+
+        self.answers["Start-IemTrace"] = start_then_flag
+        for gone, said in (([], "no kernel trace was running"), (["NT Kernel Logger"], "ended by itself: ['NT Kernel Logger']")):
+            self.answers["Stop-IemTraceSessions"] = {"stopped": [], "gone": gone, "kept": [], "notes": []}
+            if ip.EVENT_NOW.exists():
+                ip.EVENT_NOW.unlink()
+            code, docs, err = self.trace()
+            self.assertEqual(code, ip.PREEMPTED, gone)
+            self.assertEqual(docs[0], {"event": "ide event (flag file)", "action": "iempc event"}, gone)
+            self.assertIn(said, err)
+            self.assertNotIn("unconfirmed", json.dumps(docs))
+
+    def test_a_malformed_stop_reply_is_a_failed_stop_and_never_blocks_the_event_path(self) -> None:
+        self.answers["Stop-IemTraceSessions"] = {"stopped": [{"name": "NT Kernel Logger"}], "gone": [], "kept": []}
+        with mock.patch.object(ip.time, "sleep", side_effect=lambda _s: self.flag()):
+            code, docs, err = self.trace()
+        self.assertEqual(code, ip.PREEMPTED)
+        self.assertEqual(docs[0]["trace_stop"], "failed")
+        self.assertIn("WARNING: the kernel trace may still run", err)
+        self.assertEqual(self.pc.calls[-1], ("iemmode.exe", ["event"], "ignore"))
+        ip.EVENT_NOW.unlink()
+        code, docs, err = self.trace()
+        self.assertEqual((code, docs[0]["trace_stop"]), (1, "failed"))
+        self.assertIn("names a session that is no text", err)
+
+    def test_an_abandon_that_fails_unexpectedly_never_hides_the_cause(self) -> None:
+        with mock.patch.object(iempc_trace, "abandon", side_effect=RuntimeError("synthetic")):
+            with mock.patch.object(ip.time, "sleep", side_effect=lambda _s: self.flag()):
+                code, docs, err = self.trace()
+        self.assertEqual(code, ip.PREEMPTED)
+        self.assertEqual(docs[0]["trace_stop"], "failed")
+        self.assertIn("RuntimeError('synthetic')", err)
 
     def test_a_start_that_did_not_return_leaves_an_unconfirmed_stop(self) -> None:
         """A start whose reply was never read (it outlived its bound, its ssh
