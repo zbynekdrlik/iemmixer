@@ -247,6 +247,18 @@ class RefreshTests(TuningBase):
         self.assertIn("the refresh may still run on the PC", err)
         self.assertNotIn("were not refreshed", err)
 
+    def test_a_refresh_still_running_after_a_new_flag_runs_the_event_path(self) -> None:
+        self.pc.texts["profile.json"] = True
+
+        def still_running(_m):
+            self.flag()
+            raise ip.StillRunning("ssh still running after 540 s (bounded on the PC; check 'iempc status', never force-end)")
+
+        self.on_install = still_running
+        code, _, _ = self.run_main("activate", "--sha", SHA)
+        self.assertEqual(code, ip.PREEMPTED)
+        self.assertEqual([c[1][0] for c in self.pc.calls], ["activate", "status", "event"])
+
     def test_an_unanswerable_profile_check_is_a_failed_refresh(self) -> None:
         self.pc.texts["profile.json"] = "ok"
         code, docs, err = self.run_main("activate", "--sha", SHA)

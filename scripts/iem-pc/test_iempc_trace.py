@@ -57,7 +57,8 @@ class TraceBase(Base):
         self.gh.artifact = make_zip(self.tmp / "artifact-tuning" / f"iemmixer-{SHA}.zip", extra=MODULES)
         self.fetched()
         self.statuses(status(engine=ENGINE), status(engine={**ENGINE, "callbacks": 4000, "missed": 2, "resets": 1}))
-        self.answers: dict = {"GetFolderPath('CommonApplicationData')": {"dir": TDIR, "tuning": HT, "measure": HM},
+        self.answers: dict = {"GetFolderPath('CommonApplicationData')": {"dir": TDIR, "tuning": HT, "measure": HM,
+                                                                          "profile": sha256(self.profile.read_bytes())},
                               "Start-IemTrace": {"dir": "x", "started": "2026-10-07T06:00:00Z"},
                               "Stop-IemTraceSessions": STOPPED, "'-merge'": None,
                               "Invoke-IemDpcIsr": "X:\\root\\traces\\run\\dpcisr.txt"}
@@ -65,6 +66,16 @@ class TraceBase(Base):
         self.report = DPCISR_XPERF
         self.fetches: list[tuple[str, str, str]] = []
         ip.scp = self.scp
+        ip.ssh_ps = self.ssh_ps
+
+    def ssh_ps(self, env, script, timeout, event):
+        """FakePc's answer; an answer {"pc_error": text} is the PC's own failure
+        reply ({"ok": false, "error": text}), as module_script prints it."""
+        out = self.pc.ssh_ps(env, script, timeout, event)
+        doc = json.loads(out.splitlines()[-1])
+        if isinstance(doc.get("r"), dict) and "pc_error" in doc["r"]:
+            return json.dumps({"ok": False, "error": doc["r"]["pc_error"]}) + "\n"
+        return out
 
     def statuses(self, *answers) -> None:
         """`iemmode status` gives these in turn, then the last one again; a callable is called."""
@@ -111,7 +122,7 @@ class TraceTests(TraceBase):
         code, docs, err = self.trace()
         self.assertEqual(code, 0, err)
         self.assertEqual(self.pc.calls, [("iemmode.exe", ["status"], "abandon")] * 2)
-        self.assertEqual(self.steps(), [("preflight", "abandon"), ("start", "finish"), ("stop", "finish"),
+        self.assertEqual(self.steps(), [("preflight", "abandon"), ("start", "finish"), ("stop", "ignore"),
                                         ("merge", "abandon"), ("dpcisr", "abandon")])
         [doc] = docs
         run = doc["run"]
@@ -133,6 +144,7 @@ class TraceTests(TraceBase):
         self.assertEqual(doc, {
             "label": "base-test", "seconds": 1, "circular_mb": None, "run": run, "build": SHA, "frames": 32,
             "callbacks": 3000, "missed": 2, "resets": 1, "same_engine": True, "after_error": None,
+            "after": {"mode": "dev", "parked": False, "faulted": False}, "profile_sha256": sha256(self.profile.read_bytes()),
             "watched": {"lps": [2, 3],
                         "dpc": {"carddrv.sys": {"2": 45000, "3": 0}, "gpudrv.sys": {"2": 0, "3": 2500}, "nicdrv.sys": {"2": 800, "3": 0}},
                         "isr": {"carddrv.sys": {"2": 9000, "3": 0}}},
@@ -232,8 +244,28 @@ class TraceTests(TraceBase):
         code, docs, err = self.trace()
         self.assertEqual(code, 0, err)
         self.assertEqual(self.names(), ["preflight", "start", "stop", "merge", "dpcisr"])
-        self.assertEqual((docs[-1]["callbacks"], docs[-1]["same_engine"]), (None, False))
+        self.assertEqual((docs[-1]["callbacks"], docs[-1]["same_engine"], docs[-1]["after"]), (None, False, None))
         self.assertIn("connection reset", docs[-1]["after_error"])
+        # A status that answers with an error is a failed read too, never a quiet restart.
+        self.statuses(status(engine=ENGINE), status(code=4))
+        code, docs, err = self.trace()
+        self.assertEqual(code, 0, err)
+        self.assertEqual((docs[-1]["after_error"], docs[-1]["same_engine"]), ("iemmode status exit 4", False))
+
+    def test_the_after_read_names_an_engine_that_parked_during_the_trace(self) -> None:
+        self.statuses(status(engine=ENGINE), status(engine={**ENGINE, "callbacks": 1500, "parked": True}))
+        code, docs, err = self.trace()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(docs[-1]["after"], {"mode": "dev", "parked": True, "faulted": False})
+
+    def test_a_pc_profile_other_than_the_local_one_is_refused_before_the_start(self) -> None:
+        for found in ("0" * 64, None):
+            self.answers["GetFolderPath('CommonApplicationData')"] = {"dir": TDIR, "tuning": HT, "measure": HM, "profile": found}
+            self.pc.modules.clear()
+            code, docs, err = self.trace()
+            self.assertEqual((code, docs, self.names()), (1, [], ["preflight"]), found)
+            self.assertIn("the watched processors would not be the PC's", err)
+            self.assertIn(f"iempc tuning-install --sha {SHA}", err)
 
 
 class TraceStopTests(TraceBase):
@@ -266,31 +298,66 @@ class TraceStopTests(TraceBase):
         self.assertEqual(self.steps(), [("preflight", "abandon"), ("start", "finish"), ("stop", "ignore")])
         self.assertIs(signal.getsignal(signal.SIGTERM), before)
 
-    def test_a_failed_start_still_runs_the_stop(self) -> None:
-        def refused():
-            raise ip.StepError("PC step failed: xperf at X:\\wpt\\xperf.exe is not signed by Microsoft")
-
-        self.answers["Start-IemTrace"] = refused
+    def test_a_start_the_pc_refused_still_runs_the_stop(self) -> None:
+        self.answers["Start-IemTrace"] = {"pc_error": "xperf at X:\\wpt\\xperf.exe is not signed by Microsoft"}
         code, docs, err = self.trace()
         self.assertEqual((code, docs), (1, []))
         self.assertEqual(self.steps(), [("preflight", "abandon"), ("start", "finish"), ("stop", "ignore")])
-        self.assertIn("not signed by Microsoft", err)
+        self.assertIn("PC step failed: xperf at X:\\wpt\\xperf.exe is not signed by Microsoft", err)
         self.assertIn("the kernel trace was stopped", err)
+        # The PC answered, so a stop that finds nothing proves that no trace ran.
+        self.answers["Stop-IemTraceSessions"] = {"stopped": [], "gone": [], "kept": [], "notes": []}
+        code, docs, err = self.trace()
+        self.assertEqual((code, docs), (1, []))
+        self.assertIn("no kernel trace ran", err)
 
     def test_a_start_that_did_not_return_leaves_an_unconfirmed_stop(self) -> None:
-        """A start still running on the PC may begin its trace after a stop that found none (#32 B5)."""
+        """A start whose reply was never read (it outlived its bound, its ssh
+        session failed) may still begin its trace after a stop that found none
+        or stopped one session only (#32 B5)."""
         def still_running():
             raise ip.StillRunning("ssh still running after 120 s (bounded on the PC; check 'iempc status', never force-end)")
 
-        self.answers["Start-IemTrace"] = still_running
-        self.answers["Stop-IemTraceSessions"] = {"stopped": [], "gone": [], "kept": [], "notes": []}
+        def ssh_failed():
+            raise ip.StepError("ssh failed (exit 255): Connection reset by peer")
+
+        for start in (still_running, ssh_failed):
+            for stopped in ([], ["NT Kernel Logger"]):
+                self.answers["Start-IemTrace"] = start
+                self.answers["Stop-IemTraceSessions"] = {"stopped": stopped, "gone": [], "kept": [], "notes": []}
+                self.pc.modules.clear()
+                code, docs, err = self.trace()
+                self.assertEqual(code, 1, (start, stopped))
+                self.assertEqual(self.names(), ["preflight", "start", "stop"], (start, stopped))
+                self.assertEqual(docs[0]["trace_stop"], "unconfirmed", (start, stopped))
+                self.assertIn("WARNING: the kernel trace may still start or run", err)
+                self.assertIn("Stop-IemTraceSessions -Dir", err)
+                self.assertNotIn("the kernel trace was stopped", err)
+        # Both sessions stopped: confirmed even after a start that did not return.
+        self.answers["Stop-IemTraceSessions"] = STOPPED
         code, docs, err = self.trace()
-        self.assertEqual(code, 1)
-        self.assertEqual(self.names(), ["preflight", "start", "stop"])
-        self.assertEqual(docs[0]["trace_stop"], "unconfirmed")
-        self.assertIn("WARNING: the kernel trace may still start or run", err)
-        self.assertIn("Stop-IemTraceSessions -Dir", err)
-        self.assertNotIn("the kernel trace was stopped", err)
+        self.assertEqual((code, docs), (1, []))
+        self.assertIn("the kernel trace was stopped", err)
+
+    def test_a_flag_during_the_final_stop_still_checks_it_then_runs_the_event_path(self) -> None:
+        def stop_then_flag(reply):
+            self.flag()
+            return reply
+
+        self.answers["Stop-IemTraceSessions"] = lambda: stop_then_flag(STOPPED)
+        code, docs, _ = self.trace()
+        self.assertEqual(code, ip.PREEMPTED)
+        self.assertEqual(self.steps()[-1], ("stop", "ignore"))
+        self.assertEqual((self.names()[-1], self.fetches), ("stop", []))
+        self.assertEqual(docs[0], {"event": "ide event (flag file)", "action": "iempc event"})
+        # A stop the PC did not confirm is named before the event path runs.
+        self.answers["Stop-IemTraceSessions"] = lambda: stop_then_flag({"stopped": [], "gone": [], "kept": ["NT Kernel Logger"]})
+        ip.EVENT_NOW.unlink()
+        code, docs, err = self.trace()
+        self.assertEqual(code, ip.PREEMPTED)
+        self.assertEqual(docs[0]["trace_stop"], "failed")
+        self.assertIn("the kernel trace may still run on the PC", err)
+        self.assertEqual(self.pc.calls[-1], ("iemmode.exe", ["event"], "ignore"))
 
     def test_a_stop_that_is_not_confirmed_fails_and_analyses_nothing(self) -> None:
         self.answers["Stop-IemTraceSessions"] = {"stopped": [], "gone": [], "kept": ["NT Kernel Logger"], "notes": []}
