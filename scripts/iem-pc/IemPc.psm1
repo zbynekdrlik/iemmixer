@@ -379,18 +379,20 @@ function Get-IemBootPrefCommand {
     # ~16 s after the boot (#35, the PC 2026-10-06). The write never relies
     # on that timing (review of PR #40): tasklist.exe /m <module> /fo csv /nh
     # writes the module's holders into <log dir>\boot-pref.holders right
-    # before the add, and any line starting with a quote (a holder's CSV row;
-    # the "no tasks" line is localized text and never read) skips the add, as
-    # the logon task and the guard never write under a holder (I2). A task
-    # started late under REAPER thus writes nothing (add=held, exit 0) and
-    # REAPER runs at 32 until it quits, named by the logon task and the guard.
-    # A holder list that cannot be written or read (tasklist or its
-    # redirection failed, findstr exited 2) writes nothing either
-    # (add=unread, exit 2): only a read that names no holder (findstr's exit
-    # 1) lets the add run. Native only, cmd.exe,
-    # reg.exe, findstr.exe and tasklist.exe: PowerShell took ~8 s to start
-    # there (measured again by test #2: the log header's time against
-    # REAPER's start). Each run appends to <log dir>\boot-pref.log a header
+    # before the add, and any line starting with a quote (a holder's CSV row)
+    # skips the add, as the logon task and the guard never write under a
+    # holder (I2). A task started late under REAPER thus writes nothing
+    # (add=held, exit 0) and REAPER runs at 32 until it quits, named by the
+    # logon task and the guard. The add runs only on proof that the list was
+    # read and names no holder: no quote line (findstr /b) AND a line without
+    # one (findstr /v /b: tasklist's "no tasks" text, in any language, whose
+    # words are never read). findstr exits 1 both for "no match" and for a
+    # file it cannot open, so a list that cannot be written or read
+    # (tasklist or its redirection failed, findstr cannot open it) writes
+    # nothing either (add=unread, exit 2). Native only, cmd.exe, reg.exe,
+    # findstr.exe and tasklist.exe: PowerShell took ~8 s to start there
+    # (test #2 measures the native chain, tasklist included: the log
+    # header's time against REAPER's start). Each run appends to <log dir>\boot-pref.log a header
     # "boot-pref <date> <time> add=<none|held|unread|0|1>" (none: at the
     # original, nothing written and no holder read; cmd's local clock, a
     # diagnostic only: the task's last run (UTC) and last result in
@@ -445,8 +447,10 @@ function Get-IemBootPrefCommand {
     $value = '"{0}" /v "{1}"' -f $key, $PrefName
     $original = '    {0}    {1}    {2}' -f $PrefName, $type, $shown
     $add = '({0} add {1} /t {2} /d {3} /f >nul 2>&1 && set "iemadd=0" || set "iemadd=1")' -f $reg, $value, $type, $PrefOriginal
-    # findstr's exit: 0 a holder, 1 none (only then the add), 2 the list unreadable.
-    $held = '({0} /b /l \^" {1} >nul & if errorlevel 2 (set "iemadd=unread") else if errorlevel 1 {2} else (set "iemadd=held"))' -f $findstr, $holders, $add
+    # A quote line: held. Else the add only on proof the list was read (a
+    # line without the quote: findstr exits 1 for "no match" and for a file
+    # it cannot open alike), otherwise unread.
+    $held = '({0} /b /l \^" {1} >nul && set "iemadd=held" || ({0} /v /b /l \^" {1} >nul && {2} || set "iemadd=unread"))' -f $findstr, $holders, $add
     $line = ('{0} query {1} >{2} 2>&1' -f $reg, $value, $before) +
         ' & set "iemadd=none"' +
         (' & {0} /i /l /x /c:"{1}" {2} >nul' -f $findstr, $original, $before) +
