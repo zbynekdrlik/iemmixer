@@ -2,7 +2,8 @@
 """Dev-box control of the IEM PC (S6, design note §5.1, §5.5, §6, §7).
 
 `iemmode` over ssh with the EVENT-NOW discipline, attested bundles from CI
-(fetch, install, activate), HIL dispatch on the private ops repo, PC bootstrap through
+(fetch, install, activate), HIL and soak dispatch on the private ops repo
+(`dispatch-soak`: iempc_soak.py), PC bootstrap through
 the bundle's IemPc.psm1 (dev time only), S1c's tuning modules and profile into
 the PC's elevated tuning folder (`tuning-install`, refreshed after `activate`:
 iempc_tuning.py), a kernel DPC/ISR trace on the guard's engine (`trace`:
@@ -29,8 +30,8 @@ read-only call or a switch the guard owns is abandoned (the guard pre-empts
 itself), a change the call makes itself completes first; then the command
 runs the event path itself (exit 10). `dev`, `rehearse-teardown`,
 `install` (except `--first`) and `activate` refuse while an S1a/S1c window
-is open: `handover-s1a` hands the card over first. `dispatch-hil` checks
-the flag again right before it dispatches.
+is open: `handover-s1a` hands the card over first. `dispatch-hil` and
+`dispatch-soak` check the flag again right before they dispatch.
 
 `activate --sha` runs `iemmode activate`, which the guard allows in dev
 and in an idle event (#9 2026-09-28: none of iemmixer's processes runs, no
@@ -85,6 +86,7 @@ from pathlib import Path
 from typing import Callable, Iterator
 
 import iempc_bin
+import iempc_soak
 import iempc_trace
 import iempc_tuning
 
@@ -1203,6 +1205,11 @@ def cmd_dispatch_hil(ctx: Ctx) -> int:
     return 0
 
 
+def cmd_dispatch_soak(ctx: Ctx) -> int:
+    """S7 soak dispatch; the code lives in iempc_soak.py (#10, #36)."""
+    return iempc_soak.dispatch(ctx, sys.modules[__name__])
+
+
 def read_only_function(name: str) -> bool:
     return FUNCTION.fullmatch(name) is not None and name.split("-", 1)[0] in READ_ONLY_VERBS
 
@@ -1351,6 +1358,7 @@ COMMANDS: dict[str, Spec] = {
     "install": Spec(cmd_install, pc=True, dev_time=True, locked=True),
     "activate": Spec(cmd_activate, pc=True, dev_time=True, locked=True),
     "dispatch-hil": Spec(cmd_dispatch_hil, pc=False, dev_time=True, locked=True),
+    "dispatch-soak": Spec(cmd_dispatch_soak, pc=True, dev_time=True, locked=True),
     "bootstrap": Spec(cmd_bootstrap, pc=True, dev_time=True, locked=True),
     "handover-s1a": Spec(cmd_handover_s1a, pc=True, dev_time=True, locked=True),
     "tuning-install": Spec(cmd_tuning_install, pc=True, dev_time=True, locked=True),
@@ -1378,6 +1386,10 @@ def build_parser() -> argparse.ArgumentParser:
     activate.add_argument("--offline", action="store_true",
                           help="a guard too old to activate in event: quit it, activate with the bundle's own guard")
     sub.add_parser("dispatch-hil").add_argument("--sha")
+    soak = sub.add_parser("dispatch-soak")
+    soak.add_argument("--sha", required=True, help="the bundle the PC runs in dev (its engine's build)")
+    soak.add_argument("--hours", type=int, default=iempc_soak.HOURS_DEFAULT,
+                      help=f"the soak's length, {iempc_soak.HOURS_MIN} to {iempc_soak.HOURS_MAX}")
     boot = sub.add_parser("bootstrap")
     boot.add_argument("--sha", help="the fetched bundle whose IemPc.psm1 runs (default: the newest fetched)")
     boot.add_argument("step", help="an IemPc.psm1 function, e.g. Get-IemBootstrapState")
