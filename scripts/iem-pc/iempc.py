@@ -893,7 +893,20 @@ def wait_switch_end(ctx: Ctx) -> None:
         _code, reply, _raw = iemmode(ctx.env, ["status"], STATUS_S, ctx.watch(abandon=True))
         if not (reply or {}).get("switching"):
             return
-        time.sleep(BUSY_POLL_S)
+        busy_pause()
+
+
+def busy_pause() -> None:
+    time.sleep(BUSY_POLL_S)
+
+
+def post_restart_checks(reply: dict | None) -> bool:
+    """The switch a "busy" refusal meets is the guard's post-restart checks
+    (event to event), the only one dev waits out: a switch back to REAPER (the
+    engineer's button, a crash loop, an unwind) is a decision dev never undoes
+    (review of PR #41)."""
+    sw = (reply or {}).get("switching") or {}
+    return sw.get("from") == "event" and sw.get("to") == "event"
 
 
 def cmd_dev(ctx: Ctx) -> int:
@@ -910,10 +923,14 @@ def cmd_dev(ctx: Ctx) -> int:
         args.append("--dry-run")
     code, reply, raw = iemmode(ctx.env, args, STATUS_S if dry else SWITCH_S, ctx.watch(abandon=True))
     if not dry and code != 0 and (reply or {}).get("detail") == "busy":
-        print("iempc: the guard is still switching (after a restart: the event plan's checks); "
-              "waiting for it to end, then dev again", file=sys.stderr, flush=True)
-        wait_switch_end(ctx)
-        code, reply, raw = iemmode(ctx.env, args, SWITCH_S, ctx.watch(abandon=True))
+        _c, now, _r = iemmode(ctx.env, ["status"], STATUS_S, ctx.watch(abandon=True))
+        if post_restart_checks(now):
+            print("iempc: the guard is still running its post-restart checks; waiting for them to end, "
+                  "then dev again", file=sys.stderr, flush=True)
+            wait_switch_end(ctx)
+            if event_now():  # "ide event" during the wait: no second dev request
+                raise EventNow()
+            code, reply, raw = iemmode(ctx.env, args, SWITCH_S, ctx.watch(abandon=True))
     out = result("iemmode", args, code, reply, raw)
     if code == 0 and not dry:
         out["dev_entry"] = next_entry(ctx.args.build)
