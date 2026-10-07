@@ -355,6 +355,39 @@ mod tests {
         assert!(rt.stop().unwrap().calls >= 100);
     }
 
+    /// S7: every interval between two callbacks (one fewer than the
+    /// callbacks) and every callback's own time land in the stream
+    /// histograms, two periods at 32 samples wide.
+    #[test]
+    fn nullrt_records_every_interval_and_every_callback_time() {
+        let rt = NullRt::start(cfg(InputSignal::Silence), Count::default()).unwrap();
+        wait_for(&rt, |s| s.callbacks >= 200);
+        let s = rt.stats();
+        let h = rt.histograms();
+        let total = |v: &[(u32, u64)]| v.iter().map(|e| e.1).sum::<u64>();
+        assert_eq!(h.top_us, 667);
+        assert!(s.callbacks >= 200, "{s:?}");
+        assert!(total(&h.process) >= s.callbacks, "{h:?} {s:?}");
+        assert!(total(&h.interval) + 1 >= s.callbacks, "{h:?} {s:?}");
+        assert!(rt.stop().unwrap().calls >= 200);
+    }
+
+    #[test]
+    fn a_slow_callback_lands_in_both_overflow_buckets() {
+        let rt = NullRt::start(cfg(InputSignal::Silence), Slow { calls: 0 }).unwrap();
+        let start = Instant::now();
+        while rt.stats().callbacks < 100 && start.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let h = rt.histograms();
+        let overflow = |v: &[(u32, u64)]| v.iter().find(|e| e.0 == h.top_us).map_or(0, |e| e.1);
+        // Call 3 took 20 ms: its own time and the interval to call 4.
+        assert!(overflow(&h.process) >= 1, "{h:?}");
+        assert!(overflow(&h.interval) >= 1, "{h:?}");
+        assert_eq!(h.top_us, 667);
+        assert!(rt.stop().unwrap().calls >= 100);
+    }
+
     #[test]
     fn the_period_is_block_over_rate() {
         assert_eq!(period(48_000, 48_000.0), Duration::from_secs(1));

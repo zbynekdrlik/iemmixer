@@ -53,6 +53,7 @@ pub mod channels;
 pub mod cpuset;
 pub mod format;
 pub mod glitch_report;
+pub mod hist;
 pub mod messages;
 pub mod nullrt;
 pub mod offline;

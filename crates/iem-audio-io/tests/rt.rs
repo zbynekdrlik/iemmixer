@@ -1,15 +1,16 @@
 //! I7 for the RT panic path (S6 design note §3): marking the callback thread
 //! real-time and recording a panic neither allocate nor free; nor does
 //! counting a driver message, which may come on the callback's thread (#9
-//! 2026-09-28). Its own binary, so only these tests run on the allocation
-//! detector. `assert_no_alloc` runs in warn mode (the per-thread violation
+//! 2026-09-28), nor recording the stream histograms (S7). Its own binary, so
+//! only these tests run on the allocation detector. `assert_no_alloc` runs in warn mode (the per-thread violation
 //! count must stay zero); the first test proves the detector sees an
 //! allocation.
 
 use assert_no_alloc::{AllocDisabler, assert_no_alloc, reset_violation_count, violation_count};
+use iem_audio_io::hist::StreamHists;
 use iem_audio_io::messages::{Messages, Topic};
 use iem_audio_io::rtpanic::{is_rt_thread, latest, mark_rt_thread, record};
-use iem_audio_io::telemetry::{GLITCH_CAPACITY, GapScan, Telemetry, selector};
+use iem_audio_io::telemetry::{GLITCH_CAPACITY, GapScan, Telemetry, period_ns, selector};
 
 #[global_allocator]
 static ALLOCATOR: AllocDisabler = AllocDisabler;
@@ -107,4 +108,27 @@ fn callback_telemetry_and_the_gap_scan_do_not_allocate() {
     .join()
     .unwrap();
     assert_eq!(violations, 0, "the callback telemetry allocated");
+}
+
+/// I7 (S7 design note §3): the backends record every callback's interval and
+/// time into the stream histograms; neither allocates nor frees, overflow
+/// included. Built outside the detector: the arrays are the stream's.
+#[test]
+fn recording_the_stream_histograms_does_not_allocate() {
+    let (violations, snap) = std::thread::spawn(|| {
+        let h = StreamHists::new(period_ns(32, 96_000.0));
+        reset_violation_count();
+        assert_no_alloc(|| {
+            for i in 0..100_000_u64 {
+                h.interval.record(333_000 + (i % 400) * 1_000); // spans the overflow bucket
+                h.process.record(i % 90_000);
+            }
+            h.interval.record(u64::MAX);
+        });
+        (violation_count(), h.snapshot())
+    })
+    .join()
+    .unwrap();
+    assert_eq!(violations, 0, "recording a histogram allocated");
+    assert_eq!(snap.interval.iter().map(|e| e.1).sum::<u64>(), 100_001);
 }
