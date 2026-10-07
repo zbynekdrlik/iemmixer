@@ -335,7 +335,7 @@ struct Claims<'a> {
 /// (`iem_server::auth::issue_token`: the default header, HS256, the
 /// secret's bytes), issued at the Unix second `now` and valid for `seconds`
 /// and [`TOKEN_MARGIN`] more. A token that cannot be signed with the secret
-/// is `secret-unreadable`.
+/// is `secret-unreadable` (after the build check: not seen with HS256).
 pub fn engineer_token(secret: &Secret, now: u64, seconds: u64) -> Result<String, Reason> {
     let claims = Claims {
         sub: ENGINEER,
@@ -530,7 +530,9 @@ pub enum Reason {
     /// The process could not be placed on the given CPU Sets.
     CpuSets,
     /// `--jwt-secret-file` could not be read, is not UTF-8 text or is
-    /// blank (or no token could be signed with it): nothing was sent.
+    /// blank: nothing was sent (it is read before any request). Also a
+    /// token that could not be signed with it, after the build check (not
+    /// seen with HS256).
     SecretUnreadable,
 }
 
