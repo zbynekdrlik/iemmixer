@@ -12,6 +12,7 @@ use std::time::Instant;
 
 use iem_audio_io::StreamStats;
 use iem_audio_io::asio::{AsioError, AsioStream, CardConfig, StopOutcome, install_seh_filter};
+use iem_audio_io::hist::HistSnapshot;
 use tracing::{error, info, warn};
 
 use crate::control::{Driver, Ending};
@@ -153,6 +154,11 @@ impl Driver for AsioDriver {
     fn force_reopen(&self) -> bool {
         self.stream.force_reopen();
         true
+    }
+
+    /// Counted since `AsioStream::start`, the card's reopens included (S7).
+    fn histograms(&self) -> Option<HistSnapshot> {
+        Some(self.stream.histograms())
     }
 }
 

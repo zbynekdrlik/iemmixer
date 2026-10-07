@@ -441,6 +441,21 @@ pub struct Status {
     /// The D5(b) loopback round-trip in samples, once measured (S6 test 5); 0
     /// while none.
     pub loopback_samples: u64,
+    // S7, from the engine's `Status` (design note §3); an older engine's are
+    // 0 and empty.
+    /// Callback intervals above 1.5 periods (information; the soak judges the
+    /// histogram).
+    pub late: u64,
+    /// Callbacks longer than one period.
+    pub overruns: u64,
+    /// The longest callback since the start, in µs.
+    pub process_max_us: f64,
+    /// The histograms' overflow bucket: two periods in µs, rounded up.
+    pub hist_top_us: u32,
+    /// The callback interval and the callback's own time, sparse
+    /// `(bucket µs, count)` pairs, ascending.
+    pub interval_hist: Vec<(u32, u64)>,
+    pub process_hist: Vec<(u32, u64)>,
 }
 
 /// The running engine as the guard's supervisor connection saw it last
@@ -794,6 +809,12 @@ pub mod fake {
                     parked: false,
                     hil: Vec::new(),
                     loopback_samples: 0,
+                    late: 0,
+                    overruns: 0,
+                    process_max_us: 0.0,
+                    hist_top_us: 0,
+                    interval_hist: Vec::new(),
+                    process_hist: Vec::new(),
                 },
                 pref_attempts: 0,
                 pref_value: "32".into(),

@@ -615,9 +615,10 @@ impl Guard {
     /// The running engine as `Reply.engine` shows it (design §7: HIL v1
     /// reads it through `iemmode status`); `None` while none runs.
     pub fn engine_status(&self) -> Option<EngineStatus> {
-        self.seen
-            .as_ref()
-            .map(|seen| crate::effects::engine::engine_status(seen, self.spawns, self.last_exit))
+        let pid = self.state.pids.engine.as_ref().map(|c| c.pid);
+        self.seen.as_ref().map(|seen| {
+            crate::effects::engine::engine_status(seen, self.spawns, self.last_exit, pid)
+        })
     }
 
     /// Looks at what the supervisor connection holds of the engine (no
@@ -2230,5 +2231,7 @@ pub fn direct_event<L>(pc: &mut dyn Pc, g: &mut Guard, lock: Option<L>, dry_run:
     g.reply(ok, &format!("direct: {detail}"))
 }
 
+#[cfg(test)]
+mod record_tests;
 #[cfg(test)]
 mod tests;

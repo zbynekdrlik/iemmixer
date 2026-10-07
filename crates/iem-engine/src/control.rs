@@ -13,6 +13,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use iem_audio_io::StreamStats;
+use iem_audio_io::hist::HistSnapshot;
 use iem_audio_io::owner::StopOutcome;
 use iem_engine_proto::{
     Alarm, AlarmCode, ClientMsg, Cmd, EngineMsg, ErrCode, ErrorBody, Hello, HilOut, Meters, PROTO,
@@ -57,6 +58,11 @@ pub trait Driver: Send {
     /// (the ASIO card reopens through its reset budget; NullRt has no card).
     fn force_reopen(&self) -> bool {
         false
+    }
+    /// The stream's histograms since it opened (S7 design note §3), read once
+    /// a second for `Status`; none from a backend without them.
+    fn histograms(&self) -> Option<HistSnapshot> {
+        None
     }
 }
 
@@ -659,6 +665,11 @@ impl Control {
     }
 
     fn status_msg(&self, st: &StreamStats) -> Status {
+        let h = self
+            .driver
+            .as_ref()
+            .and_then(|d| d.histograms())
+            .unwrap_or_default();
         Status {
             callbacks: st.callbacks,
             late: st.late,
@@ -686,6 +697,9 @@ impl Control {
                 })
                 .collect(),
             loopback_samples: self.status.loopback_samples.load(Ordering::Relaxed),
+            interval_hist: h.interval,
+            process_hist: h.process,
+            hist_top_us: h.top_us,
         }
     }
 
@@ -1086,6 +1100,53 @@ mod tests {
             lock_failed,
         };
         (Box::new(d), ticks)
+    }
+
+    /// A running backend with stream histograms (S7).
+    struct Measured(HistSnapshot);
+
+    impl Driver for Measured {
+        fn stats(&self) -> StreamStats {
+            StreamStats {
+                running: true,
+                ..StreamStats::default()
+            }
+        }
+
+        fn stop(self: Box<Self>) -> StopOutcome {
+            StopOutcome::Released
+        }
+
+        fn histograms(&self) -> Option<HistSnapshot> {
+            Some(self.0.clone())
+        }
+    }
+
+    /// `Status` carries the stream's two histograms and their overflow
+    /// bucket (S7 design note §3); a backend without them, or no backend,
+    /// none and 0.
+    #[test]
+    fn status_carries_both_histograms_and_their_top() {
+        let mut r = rig();
+        let h = HistSnapshot {
+            top_us: 667,
+            interval: vec![(333, 2990), (667, 1)],
+            process: vec![(40, 2991)],
+        };
+        r.c.driver = Some(Box::new(Measured(h.clone())));
+        let s = r.c.status_msg(&StreamStats::default());
+        assert_eq!(
+            (s.hist_top_us, s.interval_hist, s.process_hist),
+            (667, h.interval, h.process)
+        );
+        r.c.driver = None;
+        let s = r.c.status_msg(&StreamStats::default());
+        assert_eq!(s.hist_top_us, 0);
+        assert!(s.interval_hist.is_empty() && s.process_hist.is_empty());
+        let s = rig().c.status_msg(&StreamStats::default());
+        assert_eq!(s.hist_top_us, 0);
+        assert!(s.interval_hist.is_empty() && s.process_hist.is_empty());
+        assert_eq!(Idle.histograms(), None);
     }
 
     #[test]

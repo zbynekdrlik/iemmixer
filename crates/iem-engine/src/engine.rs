@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use iem_audio_io::hist::HistSnapshot;
 use iem_audio_io::owner::StopOutcome;
 use iem_audio_io::{InputSignal, NullRt, NullRtConfig, Offline, StreamStats, wav};
 use iem_engine_proto::media::stream;
@@ -262,6 +263,10 @@ impl Driver for NullRtDriver {
             warn!("the NullRt thread ended outside its guarded callback");
         }
         StopOutcome::Released
+    }
+
+    fn histograms(&self) -> Option<HistSnapshot> {
+        Some(self.0.histograms())
     }
 }
 
