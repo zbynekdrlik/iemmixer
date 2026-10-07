@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import signal
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -250,6 +251,15 @@ class TraceStopTests(TraceBase):
         self.assertEqual((code, docs), (1, []))
         self.assertIn("no DPC module read", err)
         self.assertIn("dpcisr.txt", err)
+
+
+class ImportTests(unittest.TestCase):
+    def test_iempc_loads_none_of_s1c_s_modules_until_a_tuning_command_runs(self) -> None:
+        """`iempc event` must never depend on S1c's code (scripts/pc-tuning, asio-spike, golden)."""
+        names = ("tuning_rules", "latency_report", "spike_window", "tuning_window", "golden_window")
+        code = f"import sys; sys.path.insert(0, {str(HERE)!r}); import iempc; print([m for m in {names!r} if m in sys.modules])"
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True, timeout=60).stdout
+        self.assertEqual(out.strip(), "[]")
 
 
 if __name__ == "__main__":

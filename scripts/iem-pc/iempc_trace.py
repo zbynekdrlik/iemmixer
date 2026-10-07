@@ -48,10 +48,7 @@ import sys
 from pathlib import Path
 from typing import Iterator
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "pc-tuning"))
-import iempc_tuning  # noqa: E402
-import latency_report as lr  # noqa: E402
-import tuning_rules as tr  # noqa: E402
+import iempc_tuning
 
 MAX_SECONDS = 24 * 3600
 MAX_CIRCULAR_MB = 16384
@@ -67,11 +64,15 @@ IDLE = "(Get-Process -Id $PID).PriorityClass = 'Idle'"
 
 
 def s1c(ip):
-    """spike_window and tuning_window (imported for `trace` only): the trace
-    stop's check and bound, the merge and dpcisr bodies they already compose."""
+    """S1c's modules, imported only when `trace` runs (the event path never
+    depends on them): tuning_rules (the label, the watched processors),
+    latency_report (the parse), spike_window (the trace stop's check and
+    bound) and tuning_window (the merge and dpcisr bodies it composes)."""
+    tr = iempc_tuning.tuning_rules()
+    import latency_report as lr
     sw = ip.spike_module()
     import tuning_window as tw
-    return sw, tw
+    return tr, lr, sw, tw
 
 
 @contextlib.contextmanager
@@ -95,7 +96,7 @@ def ended_by_signals() -> Iterator[None]:
             signal.signal(s, handler if handler is not None else signal.SIG_DFL)
 
 
-def check_args(ip, args) -> tuple[str, int, int | None]:
+def check_args(ip, tr, args) -> tuple[str, int, int | None]:
     if not tr.label_ok(args.label or ""):
         raise ip.Refused(f"trace: --label {args.label!r}: 1 to 40 of a-z 0-9 -, starting with a letter or digit")
     if not 1 <= args.seconds <= MAX_SECONDS:
@@ -176,13 +177,13 @@ def trace(ctx, ip) -> int:
     env = ctx.env
     if not env.get("PC_XPERF"):
         raise ip.Refused("trace: PC_XPERF missing in the private env (xperf.exe's full path on the PC)")
-    label, seconds, circular_mb = check_args(ip, ctx.args)
+    tr, lr, sw, tw = s1c(ip)
+    label, seconds, circular_mb = check_args(ip, tr, ctx.args)
     profile = iempc_tuning.load_profile(ip, Path(ctx.args.profile) if ctx.args.profile else iempc_tuning.PROFILE)
     lps = tr.watch_lps(profile, "")
     code, reply, _ = ip.iemmode(env, ["status"], ip.STATUS_S, ctx.watch(abandon=True))
     before = engine_seen(ip, code, reply)
-    sw, tw = s1c(ip)
-    run = f"{label}-{dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    run =f"{label}-{dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
     rel = f"traces/{run}"
     run_dir = ip.pc_join(env["PC_ROOT"], rel)
     xperf, d = ip.ps_quote(env["PC_XPERF"]), ip.ps_quote(run_dir)

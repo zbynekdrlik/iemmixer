@@ -31,9 +31,7 @@ import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "pc-tuning"))
-import tuning_rules as tr  # noqa: E402
-
+PC_TUNING = Path(__file__).resolve().parent.parent / "pc-tuning"
 PROFILE = Path(os.environ.get("TUNING_PROFILE", str(Path.home() / ".config/iemmixer/pc-tuning.json")))
 # The bundle's tuning modules (`tuning/<name>`) by the key of their hash in Install-IemTuning's answer.
 MODULES = {"tuning": "IemTuning.psm1", "measure": "IemMeasure.psm1"}
@@ -44,8 +42,18 @@ PROFILE_PRESENT = f"Test-Path -LiteralPath (Join-Path {TUNING_DIR_PS} 'profile.j
 HASH_KEYS = ("tuning", "measure", "profile")
 
 
+def tuning_rules():
+    """S1c's tuning_rules (scripts/pc-tuning), imported only when a tuning
+    command runs: the event path never depends on S1c's code."""
+    if str(PC_TUNING) not in sys.path:
+        sys.path.insert(0, str(PC_TUNING))
+    import tuning_rules as tr
+    return tr
+
+
 def load_profile(ip, path: Path) -> dict:
     """The private profile, its shapes checked as the PC checks them (tuning_rules)."""
+    tr = tuning_rules()
     try:
         return tr.load_profile(path)
     except (tr.StepError, ValueError, OSError) as e:
