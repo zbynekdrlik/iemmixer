@@ -95,6 +95,10 @@ class Verdict(unittest.TestCase):
     def test_less_than_eight_hours_of_polls_is_red_with_the_hours(self):
         self.red(polls(451), "polled 7.50 h of 8 h")
         self.red(polls(480), "polled 7.98 h of 8 h")
+        # One second short is red, and its hours are rounded down.
+        ps = polls()
+        ps[-1]["t"] -= 1
+        self.red(ps, "polled 7.99 h of 8 h")
         self.assertEqual(sv.verdict(polls(241), HARNESS, SHA, hours=4)["conclusion"], "success")
 
     def test_a_hole_in_the_polls_is_red(self):
@@ -107,7 +111,7 @@ class Verdict(unittest.TestCase):
             else:
                 self.green(ps)
         ps = polls()
-        ps[10]["t"], ps[11]["t"] = ps[11]["t"], ps[10]["t"]
+        ps[11]["t"] = ps[10]["t"] - 1
         self.red(ps, "poll 12 is older than poll 11")
         del ps[10]["t"]
         self.red(ps, "poll 11 has no time")
@@ -219,6 +223,7 @@ class Verdict(unittest.TestCase):
         self.assertEqual(sv.quantile_us({5: 1, 9: 1}, 1000), 10)
         self.assertEqual(sv.quantile_us({1: 1, 2: 1, 3: 1}, 500), 3)
         self.assertIsNone(sv.quantile_us({}, 999))
+        self.assertIsNone(sv.quantile_us({5: 0}, 999))
         # Unsorted input, and a bucket emptied by the delta.
         self.assertEqual(sv.quantile_us({83: 3, 10: 997, 5: 0}, 999), 84)
         self.assertEqual(sv.at_or_above({346: 5, 347: 2, 667: 1}, 347), 3)
