@@ -25,19 +25,14 @@ pub struct Tally {
     frames: u64,
     decode_errors: u64,
     meter_frames: u64,
-    reconnects: u64,
     no_source: u64,
     error: Option<Reason>,
 }
 
 impl Tally {
-    /// A socket opened at `now`; `again`: it had been open before (a
-    /// reconnect).
-    pub fn opened(&mut self, now: Instant, again: bool) {
+    /// A socket opened at `now` (each is opened once).
+    pub fn opened(&mut self, now: Instant) {
         self.opened.get_or_insert(now);
-        if again {
-            self.reconnects += 1;
-        }
     }
 
     /// The listen socket sent `ListenStart` at `now`.
@@ -105,7 +100,6 @@ impl Tally {
             max_gap_ms: gaps.max_gap_ms,
             first_frame_ms: self.first_frame_ms,
             meter_frames: self.meter_frames,
-            reconnects: self.reconnects,
             no_source: self.no_source,
             error: self.error,
             ..Summary::default()

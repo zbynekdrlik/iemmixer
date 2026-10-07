@@ -1,10 +1,11 @@
 //! The soak harness (S7 design note §4): logs in as the engineer through the
 //! server's login, opens one mixer socket and one listen socket on one
 //! member's mix at the LAN address the server names (`/api/site`), decodes
-//! the Opus frames and counts frames, gaps, reconnects and meter frames into
-//! a JSON summary. It reads only: it sends no mixer command. The PIN comes
-//! from `IEM_SOAK_PIN`, never from the command line. Nothing here ends a
-//! process: sockets close by being dropped.
+//! the Opus frames and counts frames, gaps and meter frames into a JSON
+//! summary. It reads only: it sends no mixer command. It never opens a
+//! socket twice (#10): a lost socket ends the run. The PIN comes from
+//! `IEM_SOAK_PIN`, never from the command line. Nothing here ends a
+//! process: each socket ends with a WebSocket Close.
 //!
 //! This file is the pure core: the arguments, the URLs, the gap clock, the
 //! event classes and the summary. [`tally`] counts a run into its summary
@@ -52,8 +53,6 @@ pub const UI_PROTO: u16 = 2;
 pub const MAX_SECONDS: u64 = 36_000;
 /// Where `/api/site` is read without `--base`: the server on this PC.
 pub const DEFAULT_BASE: &str = "http://127.0.0.1";
-/// The longest wait before a socket is opened again.
-pub const BACKOFF_CAP: Duration = Duration::from_secs(10);
 
 pub const USAGE: &str = "\
 iem-soakclient --member ID --seconds N --out FILE [--base URL] [--direct] [--cpu-sets IDS]
@@ -238,8 +237,7 @@ pub struct GapCount {
 }
 
 /// The listen stream's clock: a wait of more than [`GAP`] between two frames,
-/// or from the last frame to the end, is a gap. It runs across reopens of
-/// the socket: a reopen's silence is a gap like any other.
+/// or from the last frame to the end, is a gap.
 #[derive(Debug, Clone, Default)]
 pub struct Gaps {
     first: Option<Instant>,
@@ -340,12 +338,6 @@ pub fn classify(text: &str) -> Event {
     }
 }
 
-/// The wait before the next open of a socket after `n` failed opens in a
-/// row: 1, 2, 4, 8 s, then [`BACKOFF_CAP`].
-pub fn backoff(n: u32) -> Duration {
-    Duration::from_secs(2u64.saturating_pow(n)).min(BACKOFF_CAP)
-}
-
 /// Why a run ended early: a fixed code, never a site value (P6). It is
 /// serialised as its [`Reason::code`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -359,8 +351,12 @@ pub enum Reason {
     LoginRefused,
     /// The login was not the engineer's (the listen socket is engineer-only).
     NotEngineer,
-    /// A socket could not be opened again within the give-up bound.
+    /// The login got no answer, or a socket could not be opened (there is
+    /// no second try).
     ServerGone,
+    /// A socket closed, failed or stayed silent for the idle bound before
+    /// the end: no socket is opened twice (#10).
+    ConnectionLost,
     /// The process could not be placed on the given CPU Sets.
     CpuSets,
 }
@@ -373,6 +369,7 @@ impl Reason {
             Reason::LoginRefused => "login-refused",
             Reason::NotEngineer => "not-engineer",
             Reason::ServerGone => "server-gone",
+            Reason::ConnectionLost => "connection-lost",
             Reason::CpuSets => "cpu-sets",
         }
     }
@@ -403,7 +400,9 @@ pub struct Summary {
     pub first_frame_ms: Option<u64>,
     /// `Meters` events on the mixer socket.
     pub meter_frames: u64,
-    /// Sockets opened again after a close, both sockets.
+    /// Sockets opened again after a close: always 0, since no socket is
+    /// opened twice (#10). Kept so the summary's schema 1 and the verdict's
+    /// check 11 stay as they are.
     pub reconnects: u64,
     /// `AudioStatus` `no_source` answers.
     pub no_source: u64,
