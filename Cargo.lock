@@ -2874,6 +2874,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "iem-soakclient"
+version = "2.0.0-dev.18"
+dependencies = [
+ "iem-core",
+ "iem-win",
+ "opus",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tungstenite",
+ "ureq",
+]
+
+[[package]]
 name = "iem-tray"
 version = "2.0.0-dev.18"
 dependencies = [
