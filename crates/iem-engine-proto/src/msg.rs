@@ -410,6 +410,21 @@ pub struct Status {
     /// measured (the HIL signal on a spare output, looped back to the matching
     /// spare input in Dante); 0 while none. `loopback_ms` derives the time.
     pub loopback_samples: u64,
+    /// S7, additive (design note §3): the callback interval since the stream
+    /// opened, 1 µs buckets `[b, b + 1)` below two periods and the overflow
+    /// bucket `hist_top_us` (two periods or more: the card's `missed`), as
+    /// `[[bucket, count], …]`, non-empty buckets ascending. Absent without a
+    /// stream and from an older engine.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub interval_hist: Vec<(u32, u64)>,
+    /// S7, additive: the callback's own time, the span `process_max_us`
+    /// measures (decode, `process()` and encode on the card; `process()` on
+    /// NullRt), in the buckets of `interval_hist`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub process_hist: Vec<(u32, u64)>,
+    /// S7, additive: the overflow bucket's index, two periods in µs rounded
+    /// up (667 at 32 samples, 96 kHz; at most 1000); 0 without histograms.
+    pub hist_top_us: u32,
 }
 
 /// One of HIL's spare card outputs in a [`Status`] (S6): its card channel

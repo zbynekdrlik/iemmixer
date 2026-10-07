@@ -13,6 +13,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use iem_audio_io::StreamStats;
+use iem_audio_io::hist::HistSnapshot;
 use iem_audio_io::owner::StopOutcome;
 use iem_engine_proto::{
     Alarm, AlarmCode, ClientMsg, Cmd, EngineMsg, ErrCode, ErrorBody, Hello, HilOut, Meters, PROTO,
@@ -57,6 +58,11 @@ pub trait Driver: Send {
     /// (the ASIO card reopens through its reset budget; NullRt has no card).
     fn force_reopen(&self) -> bool {
         false
+    }
+    /// The stream's histograms since it opened (S7 design note §3), read once
+    /// a second for `Status`; none from a backend without them.
+    fn histograms(&self) -> Option<HistSnapshot> {
+        None
     }
 }
 
@@ -659,6 +665,11 @@ impl Control {
     }
 
     fn status_msg(&self, st: &StreamStats) -> Status {
+        let h = self
+            .driver
+            .as_ref()
+            .and_then(|d| d.histograms())
+            .unwrap_or_default();
         Status {
             callbacks: st.callbacks,
             late: st.late,
@@ -686,6 +697,9 @@ impl Control {
                 })
                 .collect(),
             loopback_samples: self.status.loopback_samples.load(Ordering::Relaxed),
+            interval_hist: h.interval,
+            process_hist: h.process,
+            hist_top_us: h.top_us,
         }
     }
 
