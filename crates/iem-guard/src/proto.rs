@@ -786,9 +786,10 @@ mod tests {
     /// and the detail at their character caps, a switch with every step,
     /// and an engine with every spare output (8), both histograms as long as
     /// `effects::engine::parse` reads them (1001 buckets each, the 1 ms cap)
-    /// and its counters at their largest, and a last switch of 30 steps (a
-    /// switch runs each step of its plan once, plus the health read; an
-    /// unwind is a record of its own). The texts go through `cut` as the
+    /// and its counters at their largest, and an unwound last switch of
+    /// `2 × Step::ALL` steps (an unwind's record holds the entry's steps,
+    /// then its own; a plan runs each step once, the health read included,
+    /// S7 part 3). The texts go through `cut` as the
     /// guard's do (it counts characters): once four-byte characters, the
     /// longest a character is in UTF-8, once C0 control characters, which
     /// JSON would escape to six bytes each and `cut` makes spaces (S7 Task 3
