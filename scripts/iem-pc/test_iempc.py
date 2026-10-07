@@ -789,6 +789,34 @@ class DevTests(Base):
         self.assertEqual(self.pc.calls[-1], ("iemmode.exe", ["dev"], "abandon"))
         self.assertEqual(self.pc.timeouts, [ip.SWITCH_S, ip.SWITCH_S])
 
+    def test_dev_while_the_guard_still_switches_waits_for_the_end_and_asks_again(self) -> None:
+        # After a restart the guard runs the event plan's checks; a dev request meanwhile gets
+        # "busy" (twice on the PC, #35 2026-10-07). iempc waits for that switch to end and asks
+        # once more, instead of returning the refusal.
+        answers = iter([(1, json.dumps({"ok": False, "detail": "busy"})), (0, OK)])
+        self.pc.replies[("dev",)] = lambda: next(answers)
+        states = iter([json.dumps({"ok": True, "switching": {"from": "event", "to": "event"}}), OK])
+        self.pc.replies[("status",)] = lambda: (0, next(states))
+        saved = ip.BUSY_POLL_S
+        ip.BUSY_POLL_S = 0
+        self.addCleanup(setattr, ip, "BUSY_POLL_S", saved)
+        code, docs, _ = self.run_main("dev")
+        self.assertEqual(code, 0)
+        self.assertEqual([c[1] for c in self.pc.calls], [["dev"], ["status"], ["status"], ["dev"]])
+        self.assertEqual(docs[-1]["dev_entry"], 1)
+
+    def test_a_switch_that_does_not_end_in_time_returns_the_refusal(self) -> None:
+        self.pc.replies[("dev",)] = (1, json.dumps({"ok": False, "detail": "busy"}))
+        self.pc.replies[("status",)] = (0, json.dumps({"ok": True, "switching": {"from": "event", "to": "event"}}))
+        saved = (ip.BUSY_POLL_S, ip.BUSY_WAIT_S)
+        ip.BUSY_POLL_S, ip.BUSY_WAIT_S = 0, 0.05
+        self.addCleanup(lambda: (setattr(ip, "BUSY_POLL_S", saved[0]), setattr(ip, "BUSY_WAIT_S", saved[1])))
+        code, docs, _ = self.run_main("dev")
+        self.assertEqual(code, 1)
+        self.assertEqual(self.pc.calls[0][1], ["dev"])
+        self.assertEqual(self.pc.calls[-1][1], ["dev"])
+        self.assertNotIn("dev_entry", docs[-1])
+
     def test_an_open_spike_window_refuses_dev_and_the_rehearsal(self) -> None:
         self.open_window()
         for argv in (["dev", "--build", SHA], ["dev", "--dry-run"], ["rehearse-teardown"]):
