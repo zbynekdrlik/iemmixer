@@ -86,7 +86,7 @@ exclude_globs = [
   # The soak client's binary (S7): argv, env, CPU Set and file glue; the
   # decisions are in lib.rs (parse_args, pin_from, origin, Gaps,
   # write_summary), net.rs (run) and tally.rs, mutated; CI runs the binary
-  # (tests/fake_server.rs checks its exit codes, the e2e job's soak step runs
+  # (tests/fake_server/ checks its exit codes, the e2e job's soak step runs
   # it against the real server). Its #[cfg(windows)] CPU Set call is not
   # compiled on the Linux runners, so no test there could catch its mutant.
   "crates/iem-soakclient/src/main.rs",
