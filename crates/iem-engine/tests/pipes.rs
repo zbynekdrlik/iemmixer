@@ -821,13 +821,18 @@ fn an_engine_waits_a_moment_for_its_state_dir() {
     e.shutdown();
 }
 
+/// The supervisor's fault injection under the flag ends the engine with a
+/// fault; without the flag it is `Forbidden`. The controller never injects,
+/// flag or not (review of PR #40, #35: an engine keeps `--fault-injection`
+/// until it restarts, and only the guard allows an injection, inside a HIL
+/// job).
 #[test]
 fn fault_injection_releases_the_driver_and_exits() {
     let off = Engine::start(Flags::default(), InputSignal::Silence);
-    let mut c = off.client();
-    c.hello(Role::Control);
+    let mut sup = off.client();
+    sup.hello(Role::Supervisor);
     assert_eq!(
-        c.request(1, Cmd::InjectFault).error.unwrap().code,
+        sup.request(1, Cmd::InjectFault).error.unwrap().code,
         ErrCode::Forbidden
     );
     off.shutdown();
@@ -841,7 +846,20 @@ fn fault_injection_releases_the_driver_and_exits() {
     let mut c = e.client();
     c.hello(Role::Control);
     assert!(c.request(1, set_mix("member7", -5.0)).error.is_none());
-    assert!(c.request(2, Cmd::InjectFault).error.is_none());
+    for (id, cmd) in [
+        (2, Cmd::InjectFault),
+        (3, Cmd::InjectSeh),
+        (4, Cmd::InjectPark),
+    ] {
+        assert_eq!(
+            c.request(id, cmd).error.map(|b| b.code),
+            Some(ErrCode::NotSupervisor),
+            "the controller's injection {id}"
+        );
+    }
+    let mut sup = e.client();
+    sup.hello(Role::Supervisor);
+    assert!(sup.request(5, Cmd::InjectFault).error.is_none());
     let code = c.wait(|m| match m {
         EngineMsg::Alarm(a) if a.code == AlarmCode::Fault => Some(a.detail.clone()),
         _ => None,

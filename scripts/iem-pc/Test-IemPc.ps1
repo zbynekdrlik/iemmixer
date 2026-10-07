@@ -85,10 +85,19 @@ try {
     # ---- the boot task's command line (pure, #35): reg.exe through cmd.exe, never PowerShell ----
     $sys32 = 'C:\Windows\System32'
     $logDir = 'C:\ProgramData\iemmixer\tasks\out'
-    $bootArgs = @{ System = $sys32; PrefName = 'PrefBuffSize'; PrefOriginal = '64'; LogDir = $logDir }
+    $bootArgs = @{ System = $sys32; PrefName = 'PrefBuffSize'; PrefOriginal = '64'; Module = 'testcard.dll'; LogDir = $logDir }
     # The value is read first and written only when it is not the original
-    # (a normal boot writes nothing); the add's failure is the exit code.
-    $wantBoot = '/d /q /e:on /v:on /s /c ""C:\Windows\System32\reg.exe" query "HKCU\Software\ASIO\Test Card" /v "PrefBuffSize" >"C:\ProgramData\iemmixer\tasks\out\boot-pref.before" 2>&1 & set "iemadd=none" & "C:\Windows\System32\findstr.exe" /i /l /x /c:"    PrefBuffSize    REG_DWORD    0x40" "C:\ProgramData\iemmixer\tasks\out\boot-pref.before" >nul || ("C:\Windows\System32\reg.exe" add "HKCU\Software\ASIO\Test Card" /v "PrefBuffSize" /t REG_DWORD /d 64 /f >nul 2>&1 && set "iemadd=0" || set "iemadd=1") & (echo boot-pref !DATE! !TIME! add=!iemadd!)>>"C:\ProgramData\iemmixer\tasks\out\boot-pref.log" & "C:\Windows\System32\reg.exe" query "HKCU\Software\ASIO\Test Card" /v "PrefBuffSize" >>"C:\ProgramData\iemmixer\tasks\out\boot-pref.log" 2>&1 & if "!iemadd!"=="1" (exit /b 1) else (exit /b 0)"'
+    # (a normal boot writes nothing) and no process holds the driver module:
+    # tasklist's CSV rows start with a quote (its "no tasks" line is localized
+    # text, never read), which findstr /b looks for (\^" : the caret keeps
+    # cmd's quote state, the backslash is findstr's own escape of the quote).
+    # A quote line found: add=held, exit 0. Else the add runs only on proof
+    # that the list was read: findstr /v finds a line that does not start
+    # with a quote (tasklist's "no tasks" line, in any language); findstr
+    # exits 1 both for "no match" and for a file it cannot open, so without
+    # that proof nothing is written (add=unread, exit 2), as for a list
+    # tasklist or its redirection could not write. A failed add is exit 1.
+    $wantBoot = '/d /q /e:on /v:on /s /c ""C:\Windows\System32\reg.exe" query "HKCU\Software\ASIO\Test Card" /v "PrefBuffSize" >"C:\ProgramData\iemmixer\tasks\out\boot-pref.before" 2>&1 & set "iemadd=none" & "C:\Windows\System32\findstr.exe" /i /l /x /c:"    PrefBuffSize    REG_DWORD    0x40" "C:\ProgramData\iemmixer\tasks\out\boot-pref.before" >nul || ("C:\Windows\System32\tasklist.exe" /m "testcard.dll" /fo csv /nh >"C:\ProgramData\iemmixer\tasks\out\boot-pref.holders" 2>&1 && ("C:\Windows\System32\findstr.exe" /b /l \^" "C:\ProgramData\iemmixer\tasks\out\boot-pref.holders" >nul && set "iemadd=held" || ("C:\Windows\System32\findstr.exe" /v /b /l \^" "C:\ProgramData\iemmixer\tasks\out\boot-pref.holders" >nul && ("C:\Windows\System32\reg.exe" add "HKCU\Software\ASIO\Test Card" /v "PrefBuffSize" /t REG_DWORD /d 64 /f >nul 2>&1 && set "iemadd=0" || set "iemadd=1") || set "iemadd=unread")) || set "iemadd=unread") & (echo boot-pref !DATE! !TIME! add=!iemadd!)>>"C:\ProgramData\iemmixer\tasks\out\boot-pref.log" & "C:\Windows\System32\reg.exe" query "HKCU\Software\ASIO\Test Card" /v "PrefBuffSize" >>"C:\ProgramData\iemmixer\tasks\out\boot-pref.log" 2>&1 & if "!iemadd!"=="1" (exit /b 1) else if "!iemadd!"=="unread" (exit /b 2) else (exit /b 0)"'
     $bc = Get-IemBootPrefCommand -PrefKey 'Software\ASIO\Test Card' @bootArgs
     Assert ($bc.exe -ceq 'C:\Windows\System32\cmd.exe' -and $bc.arguments -ceq $wantBoot) "boot-pref-command-is-reg-exe-through-cmd ($($bc.arguments))"
     # The task runs elevated with the user's environment: no % (cmd and Task
@@ -98,27 +107,34 @@ try {
         $bk = Get-IemBootPrefCommand -PrefKey $k @bootArgs
         Assert ($bk.arguments -ceq $wantBoot) "boot-pref-command-names-the-key-under-hkcu [$k]"
     }
-    $bt = Get-IemBootPrefCommand -PrefKey 'Software\ASIO\Test Card' -System $sys32 -PrefName 'PrefBuffSize' -PrefOriginal '064' -PrefKind 'text' -LogDir $logDir
+    $bt = Get-IemBootPrefCommand -PrefKey 'Software\ASIO\Test Card' -System $sys32 -PrefName 'PrefBuffSize' -PrefOriginal '064' -PrefKind 'text' -Module 'testcard.dll' -LogDir $logDir
     Assert ($bt.arguments -clike '* /c:"    PrefBuffSize    REG_SZ    064" * add "HKCU\Software\ASIO\Test Card" /v "PrefBuffSize" /t REG_SZ /d 064 /f >nul 2>&1 *') "boot-pref-command-keeps-a-string-kind ($($bt.arguments))"
-    $b4 = Get-IemBootPrefCommand -PrefKey 'Software\ASIO\Test Card' -System $sys32 -PrefName 'PrefBuffSize' -PrefOriginal '1024' -LogDir $logDir
+    $b4 = Get-IemBootPrefCommand -PrefKey 'Software\ASIO\Test Card' -System $sys32 -PrefName 'PrefBuffSize' -PrefOriginal '1024' -Module 'testcard.dll' -LogDir $logDir
     Assert ($b4.arguments -clike '* /c:"    PrefBuffSize    REG_DWORD    0x400" * /t REG_DWORD /d 1024 /f *') "boot-pref-command-compares-the-dword-in-reg-exe-s-hex ($($b4.arguments))"
     $bx = Get-IemBootPrefCommand -PrefKey 'Software\ASIO\Test Card (x64)' @bootArgs
     Assert ($bx.arguments -clike '* add "HKCU\Software\ASIO\Test Card (x64)" /v "PrefBuffSize" *') 'boot-pref-command-takes-a-key-with-parentheses-in-quotes'
+    # The holder check names the module the logon task reads (Register-IemTasks' -Module).
+    $bm = Get-IemBootPrefCommand -PrefKey 'Software\ASIO\Test Card' -System $sys32 -PrefName 'PrefBuffSize' -PrefOriginal '64' -Module 'Test Card x64.dll' -LogDir $logDir
+    Assert ($bm.arguments -clike '* ("C:\Windows\System32\tasklist.exe" /m "Test Card x64.dll" /fo csv /nh >"C:\ProgramData\iemmixer\tasks\out\boot-pref.holders" 2>&1 && (*') "boot-pref-command-reads-the-holders-of-the-module ($($bm.arguments))"
     $badKeys = @('Software\ASIO\Test%PATH%', 'Software\ASIO\Test!PATH!', 'Software\ASIO\Te"st', 'Software\ASIO\A&B', 'Software\ASIO\A|B',
                  'Software\ASIO\A^B', 'Software\ASIO\A<B', 'Software\ASIO\A>B', "Software\ASIO\A`tB", 'HKLM:\Software\ASIO\Test Card',
                  'Registry::HKEY_LOCAL_MACHINE\Software\ASIO\Test Card', '\')
     foreach ($k in $badKeys) { Throws { Get-IemBootPrefCommand -PrefKey $k @bootArgs } "boot-pref-command-refuses-the-key [$k]" }
     foreach ($n in @('Pref%x%', 'Pref!x!', 'Pref"x', 'Pref&x', 'Pref\', 'Pref\x')) {
-        Throws { Get-IemBootPrefCommand -PrefKey 'Software\ASIO\Test Card' -System $sys32 -PrefName $n -PrefOriginal '64' -LogDir $logDir } "boot-pref-command-refuses-the-value-name [$n]"
+        Throws { Get-IemBootPrefCommand -PrefKey 'Software\ASIO\Test Card' -System $sys32 -PrefName $n -PrefOriginal '64' -Module 'testcard.dll' -LogDir $logDir } "boot-pref-command-refuses-the-value-name [$n]"
     }
     foreach ($o in @('6 4', '64x', '0x40', '123456')) {
-        Throws { Get-IemBootPrefCommand -PrefKey 'Software\ASIO\Test Card' -System $sys32 -PrefName 'PrefBuffSize' -PrefOriginal $o -LogDir $logDir } "boot-pref-command-refuses-the-original [$o]"
+        Throws { Get-IemBootPrefCommand -PrefKey 'Software\ASIO\Test Card' -System $sys32 -PrefName 'PrefBuffSize' -PrefOriginal $o -Module 'testcard.dll' -LogDir $logDir } "boot-pref-command-refuses-the-original [$o]"
     }
-    Throws { Get-IemBootPrefCommand -PrefKey 'Software\ASIO\Test Card' -System $sys32 -PrefName 'PrefBuffSize' -PrefOriginal '64' -PrefKind 'binary' -LogDir $logDir } 'boot-pref-command-refuses-another-kind'
+    foreach ($m in @('test%x%.dll', 'test!x!.dll', 'te^st.dll', 'a&b.dll', 'a|b.dll', 'a"b.dll', "a`tb.dll", 'x\testcard.dll', 'testcard', 'testcard.exe')) {
+        $e = ErrorOf { Get-IemBootPrefCommand -PrefKey 'Software\ASIO\Test Card' -System $sys32 -PrefName 'PrefBuffSize' -PrefOriginal '64' -Module $m -LogDir $logDir }
+        Assert ($e -like "*module name*refused*" -or $e -like "*refused for the boot task's command line*") "boot-pref-command-refuses-the-module [$m] ($e)"
+    }
+    Throws { Get-IemBootPrefCommand -PrefKey 'Software\ASIO\Test Card' -System $sys32 -PrefName 'PrefBuffSize' -PrefOriginal '64' -PrefKind 'binary' -Module 'testcard.dll' -LogDir $logDir } 'boot-pref-command-refuses-another-kind'
     foreach ($d in @('C:\Program%x%Data\out', 'C:\Program!x!Data\out', 'tasks\out')) {
-        Throws { Get-IemBootPrefCommand -PrefKey 'Software\ASIO\Test Card' -System $sys32 -PrefName 'PrefBuffSize' -PrefOriginal '64' -LogDir $d } "boot-pref-command-refuses-the-log-folder [$d]"
+        Throws { Get-IemBootPrefCommand -PrefKey 'Software\ASIO\Test Card' -System $sys32 -PrefName 'PrefBuffSize' -PrefOriginal '64' -Module 'testcard.dll' -LogDir $d } "boot-pref-command-refuses-the-log-folder [$d]"
     }
-    Throws { Get-IemBootPrefCommand -PrefKey 'Software\ASIO\Test Card' -System 'Windows\System32' -PrefName 'PrefBuffSize' -PrefOriginal '64' -LogDir $logDir } 'boot-pref-command-refuses-a-relative-system-folder'
+    Throws { Get-IemBootPrefCommand -PrefKey 'Software\ASIO\Test Card' -System 'Windows\System32' -PrefName 'PrefBuffSize' -PrefOriginal '64' -Module 'testcard.dll' -LogDir $logDir } 'boot-pref-command-refuses-a-relative-system-folder'
     # The read-back's rules (Test-IemTaskReport), pure: a task as Register-IemTasks
     # makes it passes; each deviation is named. The boot task (-Boot) logs on S4U,
     # never restarts and never starts on demand; no task starts late, repeats,
@@ -158,6 +174,47 @@ try {
     Assert ($sn.Count -eq 0) 'boot-pref-log-is-empty-before-the-first-run'
     Assert ((Format-IemTaskTime -Time ([datetime]'1899-12-30')) -ceq '') 'task-time-never-run-is-empty'
     Assert ((Format-IemTaskTime -Time (New-Object DateTime 2026, 10, 7, 21, 13, 39, ([DateTimeKind]::Utc))) -ceq '2026-10-07T21:13:39.0000000Z') 'task-time-is-utc'
+    # Fast Startup (pure, #35 review of PR #40): on only with HiberbootEnabled 1
+    # AND the hibernation file present; the venue PC has HiberbootEnabled 1 with
+    # hibernation off, a full shutdown: no problem there. A fact that cannot be
+    # read leaves it unknown ($null), never a problem.
+    $fsCases = @(@(1, $true, $true), @(1, $false, $false), @(0, $true, $false), @(0, $false, $false), @($null, $false, $false),
+                 @(1, $null, $null), @($null, $true, $null), @($null, $null, $null))
+    foreach ($c in $fsCases) {
+        $fs = Get-IemFastStartup -Hiberboot $c[0] -HiberFile $c[1]
+        $named = ($fs.problem -cne '')
+        Assert ("$($fs.active)" -ceq "$($c[2])" -and $named -eq ($c[2] -eq $true) -and "$($fs.hiberboot_enabled)" -ceq "$($c[0])" -and "$($fs.hiberfile_present)" -ceq "$($c[1])") "fast-startup-is-on-only-with-hiberboot-and-the-hibernation-file [$($c[0]), $($c[1])] ($($fs.active): $($fs.problem))"
+    }
+    $fsOn = Get-IemFastStartup -Hiberboot 1 -HiberFile $true
+    Assert ($fsOn.problem -clike '*iemmixer-boot-pref*' -and $fsOn.problem -clike '*logon task*') "fast-startup-on-names-the-boot-task-it-skips ($($fsOn.problem))"
+    $fsVenue = Get-IemFastStartup -Hiberboot 1 -HiberFile $false
+    # What Register-IemTasks says about the boot task: a warning only while it is on, never a refusal.
+    $bw = Get-IemBootTaskWarnings -FastStartup $fsOn
+    Assert ($bw.Count -eq 1 -and $bw[0] -ceq $fsOn.problem) "boot-task-warns-of-fast-startup-that-is-on ($($bw -join ' | '))"
+    foreach ($f in @($fsVenue, (Get-IemFastStartup -Hiberboot 0 -HiberFile $true))) {
+        $bw = Get-IemBootTaskWarnings -FastStartup $f
+        Assert ($bw.Count -eq 0) "boot-task-warns-of-nothing-else [$($f.hiberboot_enabled), $($f.hiberfile_present)] ($($bw -join ' | '))"
+    }
+    # A fact that could not be read is named as such (Get-IemFastStartupState's
+    # error), never as Fast Startup being on.
+    $fsUnread = [pscustomobject]@{ hiberboot_enabled = 1; hiberfile_present = $null; active = $null; problem = ''; error = 'the hibernation file: x' }
+    $bw = Get-IemBootTaskWarnings -FastStartup $fsUnread
+    Assert ($bw.Count -eq 1 -and $bw[0] -ceq 'Fast Startup could not be judged (the hibernation file: x): if it is on, a shutdown skips iemmixer-boot-pref') "boot-task-names-a-fast-startup-it-cannot-judge ($($bw -join ' | '))"
+    # An unknown fact without a read error is named too (review of PR #41): HiberbootEnabled
+    # absent while the hibernation file is there, or the file unknown while HiberbootEnabled is 1.
+    foreach ($c in @(@($null, $true, 'HiberbootEnabled absent'), @(1, $null, 'the hibernation file not read'))) {
+        $bw = Get-IemBootTaskWarnings -FastStartup (Get-IemFastStartup -Hiberboot $c[0] -HiberFile $c[1])
+        Assert ($bw.Count -eq 1 -and $bw[0] -ceq ('Fast Startup could not be judged ({0}): if it is on, a shutdown skips iemmixer-boot-pref' -f $c[2])) "boot-task-names-an-unknown-fast-startup-fact $($c[2]) ($($bw -join ' | '))"
+    }
+    # Each unknown fact is named, with the read error where there is one (review of PR #41).
+    $fsBoth = [pscustomobject]@{ hiberboot_enabled = $null; hiberfile_present = $null; active = $null; problem = ''; error = 'the hibernation file: x' }
+    $bw = Get-IemBootTaskWarnings -FastStartup $fsBoth
+    Assert ($bw.Count -eq 1 -and $bw[0] -ceq 'Fast Startup could not be judged (HiberbootEnabled absent, the hibernation file: x): if it is on, a shutdown skips iemmixer-boot-pref') "boot-task-names-every-unknown-fast-startup-fact ($($bw -join ' | '))"
+    $fsHbErr = [pscustomobject]@{ hiberboot_enabled = $null; hiberfile_present = $true; active = $null; problem = ''; error = 'HiberbootEnabled: x' }
+    $bw = Get-IemBootTaskWarnings -FastStartup $fsHbErr
+    Assert ($bw.Count -eq 1 -and $bw[0] -ceq 'Fast Startup could not be judged (HiberbootEnabled: x): if it is on, a shutdown skips iemmixer-boot-pref') "boot-task-names-an-unreadable-hiberboot-as-unreadable-not-absent ($($bw -join ' | '))"
+    $fsRead = [pscustomobject]@{ hiberboot_enabled = 1; hiberfile_present = $false; active = $false; problem = ''; error = '' }
+    Assert ((Get-IemBootTaskWarnings -FastStartup $fsRead).Count -eq 0) 'boot-task-warns-of-nothing-when-both-facts-were-read-and-it-is-off'
 
     # ---- Register-IemTasks on the real Task Scheduler ----
     $prefArgs = @{ PrefKey = $regKey; PrefName = 'Pref'; PrefOriginal = '64'; Module = 'testcard.dll' }
@@ -189,6 +246,10 @@ try {
     foreach ($r in $reports) { $byName[$r.task] = $r }
     Assert ((Sorted $byName.Keys) -ceq (Sorted @('iemmixer-guard', 'iemmixer-StartApp', 'iemmixer-probe', 'iemmixer-tuning', 'iemmixer-exclude', 'iemmixer-logon', 'iemmixer-boot-pref', 'iemmixer-StartREAPER'))) 'tasks-all-eight'
     foreach ($r in $reports) { Assert ($r.sddl_ok -and $r.problems.Count -eq 0) "tasks-$($r.task)-reads-back-with-our-descriptor" }
+    # Fast Startup is named on the boot task's row, by this PC's facts (Get-IemFastStartupState), and on no other.
+    $wantWarn = Get-IemBootTaskWarnings -FastStartup (Get-IemFastStartupState)
+    Assert ((@($byName['iemmixer-boot-pref'].warnings) -join '|') -ceq (@($wantWarn) -join '|') -and
+            @($reports | Where-Object { $_.task -cne 'iemmixer-boot-pref' -and @($_.warnings).Count -gt 0 }).Count -eq 0) "tasks-name-fast-startup-on-the-boot-task-only ($(@($byName['iemmixer-boot-pref'].warnings) -join ' | '))"
 
     # An independent read through the ScheduledTasks cmdlets.
     foreach ($n in @('iemmixer-guard', 'iemmixer-StartApp', 'iemmixer-probe', 'iemmixer-tuning', 'iemmixer-exclude', 'iemmixer-logon')) {
@@ -226,7 +287,7 @@ try {
     Assert (-not $bps.AllowDemandStart -and -not $bps.StartWhenAvailable -and $bps.RestartCount -eq 0) 'tasks-boot-pref-never-on-demand-late-or-again'
     Assert ($bps.ExecutionTimeLimit -eq 'PT0S' -and "$($bps.MultipleInstances)" -eq 'IgnoreNew' -and -not $bps.AllowHardTerminate -and $bps.Priority -eq 4 -and
             -not $bps.DisallowStartIfOnBatteries -and -not $bps.StopIfGoingOnBatteries -and -not $bps.IdleSettings.StopOnIdleEnd) 'tasks-boot-pref-unbounded-ignorenew-never-ended-hard'
-    $bootCmd = Get-IemBootPrefCommand -System ([Environment]::GetFolderPath('System')) -PrefKey $regKey -PrefName 'Pref' -PrefOriginal '64' -LogDir $eout
+    $bootCmd = Get-IemBootPrefCommand -System ([Environment]::GetFolderPath('System')) -PrefKey $regKey -PrefName 'Pref' -PrefOriginal '64' -Module 'testcard.dll' -LogDir $eout
     Assert (@($bp.Actions).Count -eq 1 -and $bp.Actions[0].Execute -eq $bootCmd.exe -and $bp.Actions[0].Arguments -ceq $bootCmd.arguments -and
             $bp.Actions[0].WorkingDirectory -eq $etasks) "tasks-boot-pref-runs-reg-exe-through-cmd ($($bp.Actions[0].Execute) $($bp.Actions[0].Arguments))"
     Assert ($bootCmd.arguments -clike "*`"$eout\boot-pref.log`"*") 'tasks-boot-pref-logs-into-the-admin-only-out-folder'
@@ -285,6 +346,16 @@ try {
     Assert ($again.Count -eq 8 -and @($again | Where-Object { $_.problems.Count -gt 0 }).Count -eq 0) 'tasks-register-again-idempotent'
     $sd = $sch.GetFolder($folder).GetTask('iemmixer-guard').GetSecurityDescriptor(4)
     Assert (Test-IemTaskSddl -Sddl $sd -UserSid $me.sid) "tasks-register-again-restores-a-loosened-descriptor ($sd)"
+    # Fast Startup that is on (given here with -FastStartup; by default this
+    # PC's facts): the registration goes through, warns once, and names the
+    # problem on the boot task's row only.
+    $fsReports = Register-IemTasks -Root $root -AppExe $appExe -Folder $folder -ElevatedRoot $elevated @prefArgs -FastStartup $fsOn -WarningVariable fsWarned -WarningAction SilentlyContinue
+    $fsByName = @{}
+    foreach ($r in $fsReports) { $fsByName[$r.task] = $r }
+    Assert ($fsReports.Count -eq 8 -and @($fsReports | Where-Object { $_.problems.Count -gt 0 }).Count -eq 0) 'tasks-register-with-fast-startup-on'
+    Assert ((@($fsByName['iemmixer-boot-pref'].warnings) -join '|') -ceq $fsOn.problem -and
+            @($fsReports | Where-Object { $_.task -cne 'iemmixer-boot-pref' -and @($_.warnings).Count -gt 0 }).Count -eq 0) "tasks-name-fast-startup-that-is-on-on-the-boot-task-only ($(@($fsByName['iemmixer-boot-pref'].warnings) -join ' | '))"
+    Assert (@($fsWarned).Count -eq 1 -and "$($fsWarned[0])" -ceq $fsOn.problem) "tasks-warn-once-of-fast-startup-that-is-on ($(@($fsWarned) -join ' | '))"
     # The boot task writes the kind the value has (as the logon task keeps it).
     New-ItemProperty -LiteralPath $regKey -Name 'TextPref' -Value '64' -PropertyType String | Out-Null
     $tx = Register-IemTasks -Root $root -AppExe $appExe -Folder $folder -ElevatedRoot $elevated -PrefKey $regKey -PrefName 'TextPref' -PrefOriginal '64' -Module 'testcard.dll'
@@ -612,6 +683,9 @@ try {
         return $proc.ExitCode
     }
     $bootLog = Join-Path $eout 'boot-pref.log'
+    $bootHolders = Join-Path $eout 'boot-pref.holders'
+    # Lines tasklist writes for a process holding the module ("image","pid",...).
+    function HolderRows($Path) { return ,@([IO.File]::ReadAllLines($Path) | Where-Object { $_.StartsWith('"') }) }
     $bootAction = @($sch.GetFolder($folder).GetTask('iemmixer-boot-pref').Definition.Actions)[0]
     Set-ItemProperty -LiteralPath $regKey -Name 'Pref' -Value 32 -Type DWord
     $bx1 = Invoke-BootPrefAction $bootAction
@@ -620,17 +694,72 @@ try {
     $blk = Get-IemBootPrefLog -Path $bootLog
     Assert (@($blk).Count -eq 3 -and $blk[0] -clike 'boot-pref * add=0' -and $blk[1] -clike 'HKEY_CURRENT_USER\Software\iemmixer-iempc-test-*' -and
             $blk[2] -cmatch '^\s+Pref\s+REG_DWORD\s+0x40\s*$') "boot-pref-action-logs-its-read-back ($(@($blk) -join ' | '))"
-    # At the original (a normal boot) it writes nothing and says so.
+    # It wrote only after reading the module's holders: none (no process loads testcard.dll).
+    Assert (Test-Path -LiteralPath $bootHolders -PathType Leaf) 'boot-pref-action-reads-the-holders-before-it-writes'
+    $freeRows = HolderRows $bootHolders
+    Assert ($freeRows.Count -eq 0) "boot-pref-action-finds-no-holder-of-a-module-no-process-loads ($($freeRows -join ' | '))"
+    # At the original (a normal boot) it writes nothing, reads no holders and says so.
+    Remove-Item -LiteralPath $bootHolders -Force
     $bx2 = Invoke-BootPrefAction $bootAction
     $heads = @([IO.File]::ReadAllLines($bootLog) | Where-Object { $_.StartsWith('boot-pref ') })
     $blk2 = Get-IemBootPrefLog -Path $bootLog
     Assert ($bx2 -eq 0 -and $heads.Count -eq 2 -and $blk2[0] -clike 'boot-pref * add=none' -and (Get-IemPref -Key $regKey -Name 'Pref').value -eq 64) "boot-pref-action-at-the-original-writes-nothing ($(@($blk2) -join ' | '))"
+    Assert (-not (Test-Path -LiteralPath $bootHolders)) 'boot-pref-action-at-the-original-reads-no-holders'
     Assert ($bootAction.Arguments.IndexOf($root, [StringComparison]::OrdinalIgnoreCase) -lt 0 -and $bootAction.Arguments.IndexOf($eout, [StringComparison]::OrdinalIgnoreCase) -ge 0) 'boot-pref-action-writes-only-into-the-admin-only-out-folder'
+    # A task started late, while a process holds the driver module (REAPER on
+    # the card at 32, here kernel32.dll, which every process holds): nothing is
+    # written, the run says add=held and succeeds; the logon task and the guard
+    # name it (its own log folder here).
+    $heldLog = Join-Path $base 'boot-pref-held'
+    New-Item -ItemType Directory -Force -Path $heldLog | Out-Null
+    $hc = Get-IemBootPrefCommand -System ([Environment]::GetFolderPath('System')) -PrefKey $regKey -PrefName 'Pref' -PrefOriginal '64' -Module $heldModule -LogDir $heldLog
+    $heldAction = [pscustomobject]@{ Path = $hc.exe; Arguments = $hc.arguments; WorkingDirectory = $etasks }
+    Set-ItemProperty -LiteralPath $regKey -Name 'Pref' -Value 32 -Type DWord
+    $hx = Invoke-BootPrefAction $heldAction
+    $hv = Get-IemPref -Key $regKey -Name 'Pref'
+    $hb = Get-IemBootPrefLog -Path (Join-Path $heldLog 'boot-pref.log')
+    $heldRows = HolderRows (Join-Path $heldLog 'boot-pref.holders')
+    Assert ($hx -eq 0 -and $hv.value -eq 32 -and @($hb).Count -eq 3 -and $hb[0] -clike 'boot-pref * add=held' -and $hb[2] -cmatch '^\s+Pref\s+REG_DWORD\s+0x20\s*$' -and
+            $heldRows.Count -gt 1) "boot-pref-action-never-writes-while-a-process-holds-the-driver-module (exit $hx, $($hv.raw); $(@($hb) -join ' | '); $($heldRows.Count) holders)"
+    # A holder list that cannot be written (its path taken by a folder) writes
+    # nothing either: add=unread, exit 2 (the task's last result names it).
+    $unreadLog = Join-Path $base 'boot-pref-unread'
+    New-Item -ItemType Directory -Force -Path (Join-Path $unreadLog 'boot-pref.holders') | Out-Null
+    $uc = Get-IemBootPrefCommand -System ([Environment]::GetFolderPath('System')) -PrefKey $regKey -PrefName 'Pref' -PrefOriginal '64' -Module 'testcard.dll' -LogDir $unreadLog
+    $unreadAction = [pscustomobject]@{ Path = $uc.exe; Arguments = $uc.arguments; WorkingDirectory = $etasks }
+    $ux = Invoke-BootPrefAction $unreadAction
+    $uv = Get-IemPref -Key $regKey -Name 'Pref'
+    $ub = Get-IemBootPrefLog -Path (Join-Path $unreadLog 'boot-pref.log')
+    Assert ($ux -eq 2 -and $uv.value -eq 32 -and @($ub).Count -eq 3 -and $ub[0] -clike 'boot-pref * add=unread') "boot-pref-action-writes-nothing-without-a-holder-list (exit $ux, $($uv.raw); $(@($ub) -join ' | '))"
+    # A list tasklist wrote but findstr cannot open (reading it denied to this
+    # user, writing allowed): findstr exits 1 then, as for "no holder", so the
+    # add waits for findstr /v's proof that the list was read, which cannot
+    # come: nothing is written either (its own log folder here).
+    $deniedLog = Join-Path $base 'boot-pref-denied'
+    New-Item -ItemType Directory -Force -Path $deniedLog | Out-Null
+    $deniedList = Join-Path $deniedLog 'boot-pref.holders'
+    [IO.File]::WriteAllText($deniedList, '')
+    $deniedAcl = [IO.File]::GetAccessControl($deniedList)
+    $denyRead = New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier($me.sid)),
+        [System.Security.AccessControl.FileSystemRights]::ReadData, [System.Security.AccessControl.AccessControlType]::Deny)
+    $deniedAcl.AddAccessRule($denyRead)
+    [IO.File]::SetAccessControl($deniedList, $deniedAcl)
+    $dc = Get-IemBootPrefCommand -System ([Environment]::GetFolderPath('System')) -PrefKey $regKey -PrefName 'Pref' -PrefOriginal '64' -Module 'testcard.dll' -LogDir $deniedLog
+    $deniedAction = [pscustomobject]@{ Path = $dc.exe; Arguments = $dc.arguments; WorkingDirectory = $etasks }
+    $dx = Invoke-BootPrefAction $deniedAction
+    $dv = Get-IemPref -Key $regKey -Name 'Pref'
+    $db = Get-IemBootPrefLog -Path (Join-Path $deniedLog 'boot-pref.log')
+    $deniedLength = (Get-Item -LiteralPath $deniedList).Length
+    [void]$deniedAcl.RemoveAccessRule($denyRead)
+    [IO.File]::SetAccessControl($deniedList, $deniedAcl)
+    Assert ($deniedLength -gt 0) "boot-pref-denied-precondition-tasklist-wrote-the-list ($deniedLength bytes)"
+    Assert ($dx -eq 2 -and $dv.value -eq 32 -and @($db).Count -eq 3 -and $db[0] -clike 'boot-pref * add=unread') "boot-pref-action-writes-nothing-when-findstr-cannot-read-the-list (exit $dx, $($dv.raw); $(@($db) -join ' | '))"
+    Set-ItemProperty -LiteralPath $regKey -Name 'Pref' -Value 64 -Type DWord
     # A string preference: compared and written as REG_SZ, kind kept (its own log folder here).
     $textLog = Join-Path $base 'boot-pref-text'
     New-Item -ItemType Directory -Force -Path $textLog | Out-Null
     Set-ItemProperty -LiteralPath $regKey -Name 'Text' -Value '32' -Type String
-    $tc = Get-IemBootPrefCommand -System ([Environment]::GetFolderPath('System')) -PrefKey $regKey -PrefName 'Text' -PrefOriginal '064' -PrefKind 'text' -LogDir $textLog
+    $tc = Get-IemBootPrefCommand -System ([Environment]::GetFolderPath('System')) -PrefKey $regKey -PrefName 'Text' -PrefOriginal '064' -PrefKind 'text' -Module 'testcard.dll' -LogDir $textLog
     $textAction = [pscustomobject]@{ Path = $tc.exe; Arguments = $tc.arguments; WorkingDirectory = $etasks }
     $tx1 = Invoke-BootPrefAction $textAction
     $tv1 = Get-IemPref -Key $regKey -Name 'Text'
@@ -762,10 +891,16 @@ function Invoke-IemTuningApply { param([string]$ProfilePath, [int]$Tier) return 
     Assert ($bst.Count -eq 1 -and $bst[0].last_run -ceq '' -and $bst[0].last_result -eq 267011) "bootstrap-state-names-the-boot-task-and-its-last-result ($($bst[0].last_run), $($bst[0].last_result))"
     Assert (@($bs.boot_pref.log).Count -eq 3 -and $bs.boot_pref.log[0] -clike 'boot-pref * add=none' -and $bs.boot_pref.log[2] -cmatch 'REG_DWORD\s+0x40' -and -not $bs.boot_pref.log_error) "bootstrap-state-shows-the-boot-tasks-last-logged-run ($(@($bs.boot_pref.log) -join ' | '))"
     # Fast Startup turns a shutdown into a hibernation of the system session: the
-    # next start fires no boot trigger, so the state names it (HiberbootEnabled).
+    # next start fires no boot trigger. The state names both facts, each read
+    # without a guess (HiberbootEnabled; hiberfil.sys listed at the system
+    # volume's root), and
+    # judges them as Get-IemFastStartup does (a problem only when it is on).
     $hb = $null
     try { $hb = (Get-Item -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power').GetValue('HiberbootEnabled', $null) } catch { $hb = $null }
-    Assert ($bs.PSObject.Properties['fast_startup'] -and "$($bs.fast_startup)" -ceq "$hb") "bootstrap-state-names-fast-startup ($($bs.fast_startup))"
+    $fs = $bs.fast_startup
+    Assert ("$($fs.hiberboot_enabled)" -ceq "$hb" -and $fs.hiberfile_present -is [bool] -and $fs.error -ceq '') "bootstrap-state-reads-fast-startup ($(ConvertTo-Json -InputObject $fs -Compress))"
+    $fsWant = Get-IemFastStartup -Hiberboot $hb -HiberFile $fs.hiberfile_present
+    Assert ("$($fs.active)" -ceq "$($fsWant.active)" -and $fs.problem -ceq $fsWant.problem) "bootstrap-state-judges-fast-startup-by-both-facts ($($fs.active))"
     Assert ($bs.boot_pref.path -ceq (Join-Path $eout 'boot-pref.log')) 'bootstrap-state-reads-the-boot-log-in-the-elevated-root'
     Assert ($bs.root.acl_ok -and $bs.firewall.present -and -not $bs.firewall.ok) "bootstrap-state-root-and-the-disabled-test-rule ($(@($bs.root.problems) -join '; '))"
     # An item below the root with a rule of its own: the state sees it, and the
