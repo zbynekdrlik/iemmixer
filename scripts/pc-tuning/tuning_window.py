@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import os
 import re
@@ -132,7 +133,12 @@ def cmd_wpt_install(env, args) -> None:
     if not local.is_file():
         subprocess.run(["curl", "-fsSL", "-o", str(local), ADK_URL], check=True, timeout=300)
     sw.scp(str(local), f"{env['PC_SSH']}:{env['PC_TUNING_ROOT_SCP']}/adksetup.exe")
-    r = tps(env, f"Install-IemWpt -Setup {ps_quote(env['PC_TUNING_ROOT'] + chr(92) + 'adksetup.exe')} -Xperf {xperf(env)}", timeout=1800)
+    # The elevated session runs only an admin-only copy (#15, the last lane, item 3): the
+    # upload is read once and checked by this box's sha256, staged and read back; Install-IemWpt
+    # checks the stage copy's signature and runs that copy.
+    upload = ps_quote(env["PC_TUNING_ROOT"] + "\\adksetup.exe")
+    stage = sw.elevated_ps.staged([(upload, "adksetup.exe", hashlib.sha256(local.read_bytes()).hexdigest())])
+    r = tps(env, f"{stage} ; Install-IemWpt -Setup $iemMod -Xperf {xperf(env)}", timeout=1800)
     print(json.dumps({"wpt-install": r}))
 
 
@@ -828,11 +834,26 @@ def main(argv: list[str]) -> int:
     asc.add_argument("--root", required=True, help="a folder whose bin holds the spike bundle")
     asc.add_argument("--since", required=True, help="the analysis start, PC time (Get-IemNow)")
     asc.add_argument("--sums", required=True, help="the bundle's SHA256SUMS (the modules are checked against it, #15)")
+    pre = sub.add_parser("preempt-script", help="print the preempt's first call (the spike's stop file, the spike count) "
+                                                "exactly as sw.plain_ps sends it (for the Windows CI runner, #15)")
+    pre.add_argument("--root", required=True, help="a folder with a queue folder")
+    tsc = sub.add_parser("trace-stop-script", help="print a trace stop exactly as sw.ps sends it (for the Windows CI "
+                                                   "runner, which times it against TRACE_STOP_CALL_S, #15)")
+    tsc.add_argument("--root", required=True, help="a folder whose bin holds the spike bundle")
+    tsc.add_argument("--dir", required=True, help="the trace's run folder")
+    tsc.add_argument("--sums", required=True, help="the bundle's SHA256SUMS (the modules are checked against it, #15)")
     args = ap.parse_args(argv)
-    if args.cmd in ("poll-script", "analysis-script"):   # no window, no private env
+    if args.cmd == "preempt-script":   # no window, no private env, no bundle: it imports nothing
+        print(sw.plain_script(sw.stop_first_body({"PC_ROOT": args.root})))
+        return 0
+    if args.cmd in ("poll-script", "analysis-script", "trace-stop-script"):   # no window, no private env
         sums = sw.parse_sums(Path(args.sums).read_text(encoding="utf-8"))
-        body = (poll_body(args.governor, args.pid, args.tid) if args.cmd == "poll-script"
-                else analysis_step(args.root, args.since, ANALYSIS_PROBE))
+        if args.cmd == "poll-script":
+            body = poll_body(args.governor, args.pid, args.tid)
+        elif args.cmd == "analysis-script":
+            body = analysis_step(args.root, args.since, ANALYSIS_PROBE)
+        else:
+            body = sw.trace_stop_body({"PC_ROOT": args.root}, args.dir)
         print(sw.ps_script(args.root, body, sums))
         return 0
     handlers = {"tuning-setup": cmd_tuning_setup, "inventory": cmd_inventory, "fingerprint": cmd_fingerprint, "wpt-install": cmd_wpt_install,

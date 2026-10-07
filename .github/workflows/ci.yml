@@ -700,6 +700,78 @@ jobs:
           if ("$($doc.error)" -ne $refused) { throw "refused with '$($doc.error)', expected '$refused'" }
           Write-Output "analysis guard: starts at Idle without a newer stop file, refused with '$refused' after one"
           $global:LASTEXITCODE = 0
+      # The preempt's first call at "ide event" (#15): plain PowerShell with no module
+      # and no stage. Run it exactly as sw.plain_ps sends it, through the remote
+      # command every ssh call names (elevated_ps.REMOTE) as a cmd.exe default shell
+      # runs it: it writes the spike's stop file and counts the spike (none runs here).
+      - name: Preempt's first call runs as on the PC (Windows PowerShell 5.1)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'pcroot-preempt'
+          New-Item -ItemType Directory -Force -Path (Join-Path $root 'queue') | Out-Null
+          $script = @(python scripts/pc-tuning/tuning_window.py preempt-script --root $root)
+          if ($LASTEXITCODE -ne 0) { throw "preempt-script exited $LASTEXITCODE" }
+          $remote = @(python -c "import sys; sys.path.insert(0, 'scripts/asio-spike'); import elevated_ps; print(elevated_ps.REMOTE)")[-1]
+          if ($LASTEXITCODE -ne 0 -or -not $remote) { throw "elevated_ps.REMOTE could not be read (exit $LASTEXITCODE)" }
+          $out = @($script | & cmd.exe /c $remote)
+          if ($LASTEXITCODE -ne 0) { throw "cmd.exe /c '$remote' exited $LASTEXITCODE" }
+          $doc = @($out | Where-Object { "$_".Trim() })[-1] | ConvertFrom-Json
+          if (-not $doc.ok) { throw "the preempt's first call failed: $($doc.error)" }
+          if ($doc.r -ne 0) { throw "spike count '$($doc.r)', expected 0" }
+          if (-not (Test-Path -LiteralPath (Join-Path $root 'queue\stop') -PathType Leaf)) { throw 'the stop file was not written' }
+          Write-Output "preempt's first call: the stop file written, spike count $($doc.r)"
+          $global:LASTEXITCODE = 0
+      # Every trace stop (#15): the stop as sw.ps sends it (the stage, IemMeasure's
+      # stop-only import, Stop-IemTraceSessions) ends within the ssh call's bound,
+      # TRACE_STOP_CALL_S. Our kernel logger and marker session run, so the stop
+      # makes the four logman calls the bound counts. The run folder lies under
+      # ProgramData (an 8.3 temp path may read back in its long form, pc-tuning.md).
+      - name: Trace stop as sent ends within its bound (Windows PowerShell 5.1)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'pcroot-trace-stop'
+          New-Item -ItemType Directory -Force -Path (Join-Path $root 'bin') | Out-Null
+          Copy-Item -Path (Join-Path $env:RUNNER_TEMP 'asio-spike\*') -Destination (Join-Path $root 'bin')
+          $run = Join-Path $env:ProgramData ('iem-trace-stop-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+          New-Item -ItemType Directory -Force -Path $run | Out-Null
+          $sums = Join-Path $env:RUNNER_TEMP 'asio-spike\SHA256SUMS'
+          $limit = [double](@(python -c "import sys; sys.path.insert(0, 'scripts/asio-spike'); import spike_window as sw; print(sw.TRACE_STOP_CALL_S)")[-1])
+          if ($LASTEXITCODE -ne 0 -or $limit -le 0) { throw "TRACE_STOP_CALL_S could not be read (exit $LASTEXITCODE)" }
+          $script = @(python scripts/pc-tuning/tuning_window.py trace-stop-script --root $root --dir $run --sums $sums)
+          if ($LASTEXITCODE -ne 0) { throw "trace-stop-script exited $LASTEXITCODE" }
+          $started = @()
+          try {
+            $out = & logman.exe start IemMarkers -p '{3b6c1e0a-5d2f-4c8e-9a71-0e4f2d9b8c11}' -o (Join-Path $run 'markers.etl') -ets
+            if ($LASTEXITCODE -ne 0) { throw "logman start IemMarkers exited ${LASTEXITCODE}: $out" }
+            $started += 'IemMarkers'
+            $out = & logman.exe start 'NT Kernel Logger' -p 'Windows Kernel Trace' '(process,thread)' -o (Join-Path $run 'kernel.etl') -ets
+            if ($LASTEXITCODE -ne 0) { throw "logman start NT Kernel Logger exited $LASTEXITCODE (another one runs?): $out" }
+            $started += 'NT Kernel Logger'
+            $clock = [Diagnostics.Stopwatch]::StartNew()
+            $out = @($script | powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command -)
+            $took = $clock.Elapsed.TotalSeconds
+            if ($LASTEXITCODE -ne 0) { throw "powershell exited $LASTEXITCODE" }
+            $doc = @($out | Where-Object { "$_".Trim() })[-1] | ConvertFrom-Json
+            if (-not $doc.ok) { throw "the trace stop failed: $($doc.error)" }
+            $stopped = @($doc.r.stopped)
+            if (@($doc.r.kept).Count -ne 0 -or $stopped -notcontains 'NT Kernel Logger' -or $stopped -notcontains 'IemMarkers') {
+              throw "the trace stop did not stop both sessions: stopped '$($stopped -join ', ')', kept '$(@($doc.r.kept) -join ', ')'"
+            }
+            # On the PC the same bound also covers ssh's connect (ConnectTimeout 10 s) and
+            # its authentication: 15 s of it are kept for those. The stage copies exist
+            # already (the earlier steps), as they do on the PC after any session.
+            $budget = $limit - 15
+            if ($took -ge $budget) { throw "the trace stop took $([math]::Round($took, 1)) s; TRACE_STOP_CALL_S ($limit s) less 15 s for ssh leaves $budget s" }
+            Write-Output "trace stop as sent: $([math]::Round($took, 1)) s of $budget s ($limit s less 15 s for ssh), stopped $($stopped -join ', ')"
+          } finally {
+            foreach ($s in $started) {   # only the sessions this step started, if the stop left them
+              & logman.exe query $s -ets *> $null
+              if ($LASTEXITCODE -eq 0) { & logman.exe stop $s -ets | Out-Null }
+            }
+          }
+          $global:LASTEXITCODE = 0
       - name: Upload (dev pushes only — the only spike that may reach the PC, P5)
         if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

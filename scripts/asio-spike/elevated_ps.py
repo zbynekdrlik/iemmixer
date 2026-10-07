@@ -33,7 +33,12 @@ rule:
   has that one staged first;
 - TEMP and TMP point at <root>\\temp before IemTuning.psm1 loads: its Add-Type
   has csc write and then load a DLL in TEMP, and the session user's TEMP is open
-  to every process of the user.
+  to every process of the user;
+- PIN, the first statement of every composed script (the last #15 lane, item
+  2): PSModulePath holds only Windows PowerShell's own module folders, as
+  iem-task.ps1 pins it; otherwise the user's Documents path leads it, and a
+  module autoloaded from there would run in the elevated session. ssh starts
+  Windows PowerShell by its full path (REMOTE).
 
 Each is one line (`powershell -Command -` reads stdin line by line) and keeps
 no state between calls. The Windows CI runner runs them as composed: the stage
@@ -55,6 +60,16 @@ ADMINS = "(New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-544
 # write EA and attributes, delete a child, delete, write DAC and owner, generic
 # write and all.
 CHANGE = "0x500D0156"
+# The first statement of every composed script, before its first command (#15).
+PIN = ("$env:PSModulePath = [IO.Path]::Combine($PSHOME, 'Modules') + ';' + "
+       "[IO.Path]::Combine([Environment]::GetFolderPath('ProgramFiles'), 'WindowsPowerShell\\Modules')")
+# What ssh starts on the PC: Windows PowerShell 5.1 by its full path, never one
+# found on a PATH, reading the composed script on stdin. A literal path, no
+# variable: %SystemRoot% would be expanded from the session's environment, which
+# the user's HKCU\Environment feeds (an elevated process never reads an
+# environment variable for a path), and only by a cmd.exe default shell.
+REMOTE = ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe "
+          "-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command -")
 
 # $iemOwn: no junction or link, owned by Administrators or SYSTEM. $iemOnly:
 # that, and nobody else may change it. $iemDir: one admin-only folder.

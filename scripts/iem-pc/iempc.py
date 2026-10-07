@@ -54,8 +54,8 @@ Site values come only from the private env file ($PC_ENV, default
 ~/.config/iemmixer/iem-pc.env): PC_SSH (the ssh destination), PC_ROOT (the
 root folder on the PC, Windows form), PC_ROOT_SCP (the same folder as scp
 names it), PC_BIN (optional, default: bin under PC_ROOT; iemmode runs from
-the admin-only %ProgramData%\\iemmixer\\bin copy instead when it reads back,
-iempc_bin) and PC_XPERF
+the admin-only %ProgramData%\\iemmixer\\bin copy instead when it reads back
+and the guard last seen runs its build, iempc_bin) and PC_XPERF
 (optional, xperf.exe's full path on the PC; `trace` refuses without it).
 Nothing is ever ended by force.
 
@@ -315,8 +315,8 @@ def remote(env: dict[str, str], rel: str) -> str:
 
 
 def ssh_cmd(env: dict[str, str]) -> list[str]:
-    return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", env["PC_SSH"],
-            "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command -"]
+    """Windows PowerShell by its full path (elevated_ps.REMOTE, #15)."""
+    return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", env["PC_SSH"], elevated_ps().REMOTE]
 
 
 def ssh_ps(env: dict[str, str], script: str, timeout: float, event: str) -> str:
@@ -349,12 +349,14 @@ def native_script(exe: str, args: list[str], checks: tuple[str, ...] = (), then:
     """Runs a native program and prints {exit, out, err, note} as the last line;
     `exit` is null when the program did not start (or a check threw). `then`
     runs once $x and $a are set and may point $x elsewhere (iempc_bin: the
-    admin-only copy, `note` saying why not, #15)."""
+    admin-only copy, `note` saying why not, #15). PSModulePath is pinned
+    before the first command (elevated_ps.PIN, #15)."""
     pre = "".join(c + " ; " for c in checks)
     return "\n".join([
         "$ErrorActionPreference = 'Continue'",
         "$ProgressPreference = 'SilentlyContinue'",
-        f"try {{ {pre}$x = {ps_quote(exe)} ; $a = {ps_args(args)} ; {then}$r = @(& $x @a 2>&1) ; $c = $LASTEXITCODE ; "
+        f"{elevated_ps().PIN} ; try {{ {pre}$x = {ps_quote(exe)} ; $a = {ps_args(args)} ; {then}$r = @(& $x @a 2>&1) ; "
+        "$c = $LASTEXITCODE ; "
         "$out = @($r | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] } | ForEach-Object { \"$_\" }) -join \"`n\" ; "
         "$err = @($r | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } | ForEach-Object { $_.Exception.Message }) -join \"`n\" ; "
         "$o = [pscustomobject]@{ exit = $c; out = $out; err = $err; note = $iemNote } } "
@@ -364,9 +366,11 @@ def native_script(exe: str, args: list[str], checks: tuple[str, ...] = (), then:
 
 
 def elevated_ps():
-    """scripts/asio-spike/elevated_ps.py (#15): the stage, the admin-only folders
-    and TEMP of an elevated ssh session, loaded when a script needs them (never
-    at import: the event path depends on no S1a/S1c code)."""
+    """scripts/asio-spike/elevated_ps.py (#15): the module path pin and the
+    remote command every ssh call uses, the stage, the admin-only folders and
+    TEMP of an elevated ssh session. Loaded at the first PC call, never at
+    import: a module of constants and string composers that imports only `re`,
+    and no other S1a/S1c code reaches the event path."""
     if str(SPIKE_DIR) not in sys.path:
         sys.path.insert(0, str(SPIKE_DIR))
     import elevated_ps as ep
@@ -380,19 +384,20 @@ def module_script(body: str, module: str | None = None, module_hex: str | None =
     (a bundle's IemPc.psm1): its bytes are read once and checked by
     `module_hex`, staged admin-only under the elevated root, checked again
     there and imported only from there (#15, elevated_ps.staged_import).
-    `elevated_root`: another elevated root than the PC's (the CI self-test)."""
+    `elevated_root`: another elevated root than the PC's (the CI self-test).
+    PSModulePath is pinned before the first command (elevated_ps.PIN, #15)."""
+    ep = elevated_ps()
     load = ""
     if module is not None:
         if not HEX64.fullmatch(module_hex or ""):
             raise StepError(f"not a sha256: {module_hex!r}")
-        ep = elevated_ps()
         root = ep.ROOT if elevated_root is None else ps_quote(elevated_root)
         load = ep.staged_import(ps_quote(module), module.rsplit("\\", 1)[-1], module_hex, root) + " ; "
     tail = f" finally {{ {fin} }}" if fin else ""
     return "\n".join([
         "$ErrorActionPreference = 'Stop'",
         "$ProgressPreference = 'SilentlyContinue'",
-        f"try {{ {pre}{load}$r = & {{ {body} }} ; $o = [pscustomobject]@{{ ok = $true; r = $r }} }} "
+        f"{ep.PIN} ; try {{ {pre}{load}$r = & {{ {body} }} ; $o = [pscustomobject]@{{ ok = $true; r = $r }} }} "
         f"catch {{ $o = [pscustomobject]@{{ ok = $false; error = \"$_\" }} }}{tail} ; "
         "ConvertTo-Json -InputObject $o -Depth 8 -Compress",
     ])
@@ -478,9 +483,13 @@ def call(env: dict[str, str], exe: str, args: list[str], timeout: float, event: 
 
 def iemmode(env: dict[str, str], args: list[str], timeout: float, event: str,
             checks: tuple[str, ...] = ()) -> tuple[int, dict | None, dict]:
-    """iemmode from the admin-only bin when it reads back, else PC_BIN's (#15, iempc_bin)."""
-    return call(env, pc_join(env["PC_BIN"], "iemmode.exe"), args, timeout, event, checks,
-                then=iempc_bin.pick(sys.modules[__name__]))
+    """iemmode from the admin-only bin while the guard last seen runs its
+    build and it reads back, else PC_BIN's (#15, iempc_bin); the reply's
+    guard_build is what the next call compares."""
+    code, reply, raw = call(env, pc_join(env["PC_BIN"], "iemmode.exe"), args, timeout, event, checks,
+                            then=iempc_bin.pick(sys.modules[__name__]))
+    iempc_bin.seen(sys.modules[__name__], reply)
+    return code, reply, raw
 
 
 def result(label: str, args: list[str], code: int, reply: dict | None, raw: dict) -> dict:
@@ -1197,6 +1206,7 @@ def cmd_dispatch_hil(ctx: Ctx) -> int:
     check_local_zip(sha, rec)
     if event_now():  # "ide event" during the gh waits above: HIL is dev-time work
         raise Refused(f"{EVENT_NOW} appeared: no HIL dispatch during an event (nothing was dispatched)")
+    iempc_bin.hil_dispatched(sys.modules[__name__], sha)   # the run activates `sha`: awaited from now (#15)
     gh(["workflow", "run", HIL_WORKFLOW, "-R", OPS_REPO, "-f", f"sha={sha}", "-f", f"branch={branch}",
         "-f", f"run={run}", "-f", f"digest={rec['digest']}"])
     record = {"sha": sha, "branch": branch, "run": run, "digest": rec["digest"], "entry": entry, "at": now_iso()}

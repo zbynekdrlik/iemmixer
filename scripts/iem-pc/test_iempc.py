@@ -365,6 +365,24 @@ class GuardedTests(Base):
 
 
 class ScriptTests(Base):
+    # #15, the last lane, item 2: the elevated session loads modules only from Windows
+    # PowerShell's own folders, pinned before its first command, and ssh starts
+    # powershell.exe by its full path.
+    PIN = ("$env:PSModulePath = [IO.Path]::Combine($PSHOME, 'Modules') + ';' + "
+           "[IO.Path]::Combine([Environment]::GetFolderPath('ProgramFiles'), 'WindowsPowerShell\\Modules')")
+
+    def test_every_script_pins_the_module_path_before_any_command(self) -> None:
+        for script, eap in ((ip.native_script("x.exe", ["a"], ("CHECK",)), "Continue"),
+                            (ip.module_script("Get-X", module="X:\\m.psm1", module_hex="cd" * 32, pre="P ; "), "Stop")):
+            self.assertEqual(script.count("$env:PSModulePath"), 1, script)
+            at = script.index(self.PIN)
+            self.assertEqual(script[:at], f"$ErrorActionPreference = '{eap}'\n$ProgressPreference = 'SilentlyContinue'\n")
+            self.assertTrue(script[at + len(self.PIN):].startswith(" ; try { "), script)
+
+    def test_ssh_starts_windows_powershell_by_its_full_path(self) -> None:
+        self.assertEqual(ip.ssh_cmd(ENV)[-1], "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe "
+                                              "-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command -")
+
     def test_the_program_and_each_argument_are_quoted(self) -> None:
         s = ip.native_script("X:\\root\\bin\\iemmode.exe", ["install", "X:\\it's\\a.zip"], ("CHECK",))
         self.assertEqual(s.splitlines()[0], "$ErrorActionPreference = 'Continue'")

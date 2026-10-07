@@ -278,6 +278,9 @@ class WindowLockTests(unittest.TestCase):
             return {"ok": True}
 
         sw.ps = fake_ps
+        patch = mock.patch.object(sw, "plain_ps", fake_ps, create=True)   # the preempt's first call (#15)
+        patch.start()
+        self.addCleanup(patch.stop)
 
     def tearDown(self) -> None:
         sw.STATE, sw.EVENT_NOW, sw.ps, sw.alarm, sw.LOCK_WAIT_S = self.saved
