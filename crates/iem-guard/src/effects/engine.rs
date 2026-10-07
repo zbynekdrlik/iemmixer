@@ -142,6 +142,23 @@ fn hil_outs(v: &Value) -> Vec<HilOut> {
         .unwrap_or_default()
 }
 
+/// `Status.interval_hist` / `process_hist` (S7): `[[bucket, count], …]`. A
+/// histogram with any entry that is not a pair of integers in range reads as
+/// none (the soak verdict then names it), never as part of one.
+fn hist(v: &Value, key: &str) -> Vec<(u32, u64)> {
+    let Some(list) = v.get(key).and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    list.iter()
+        .map(|e| {
+            let pair = e.as_array().filter(|p| p.len() == 2)?;
+            let bucket = u32::try_from(pair.first()?.as_u64()?).ok()?;
+            Some((bucket, pair.get(1)?.as_u64()?))
+        })
+        .collect::<Option<Vec<_>>>()
+        .unwrap_or_default()
+}
+
 /// Parses one engine message.
 pub fn parse(body: &[u8]) -> Result<Msg, String> {
     let v: Value = serde_json::from_slice(body).map_err(|e| format!("bad engine message: {e}"))?;
@@ -160,6 +177,15 @@ pub fn parse(body: &[u8]) -> Result<Msg, String> {
                 parked: flag(&v, "parked"),
                 hil: hil_outs(&v),
                 loopback_samples: number(&v, "loopback_samples"),
+                late: number(&v, "late"),
+                overruns: number(&v, "overruns"),
+                process_max_us: v
+                    .get("process_max_us")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0),
+                hist_top_us: u32::try_from(number(&v, "hist_top_us")).unwrap_or(0),
+                interval_hist: hist(&v, "interval_hist"),
+                process_hist: hist(&v, "process_hist"),
             }),
             "reply" => Msg::Reply {
                 id: number(&v, "id"),
@@ -207,8 +233,14 @@ pub fn seen_status(build: Option<&str>, status: Option<&Status>) -> Option<Statu
 /// The guard's `Reply.engine` (design §7, what HIL v1 reads through
 /// `iemmode status`): the engine as the supervisor connection saw it, its
 /// build as the bare commit (the bundle's SHA), with the engine starts of
-/// this guard and the exit code of the engine before the running one.
-pub fn engine_status(seen: &EngineSeen, spawns: u64, last_exit: Option<i32>) -> EngineStatus {
+/// this guard, the exit code of the engine before the running one and the
+/// running one's pid (`GuardState.pids`; S7, the soak's "one pid").
+pub fn engine_status(
+    seen: &EngineSeen,
+    spawns: u64,
+    last_exit: Option<i32>,
+    pid: Option<u32>,
+) -> EngineStatus {
     let s = &seen.status;
     EngineStatus {
         build: commit_of(&s.build).to_owned(),
@@ -224,6 +256,13 @@ pub fn engine_status(seen: &EngineSeen, spawns: u64, last_exit: Option<i32>) -> 
         hil: s.hil.clone(),
         loopback_samples: s.loopback_samples,
         loopback_ms: s.loopback_samples as f64 * 1000.0 / 96_000.0,
+        pid,
+        late: s.late,
+        overruns: s.overruns,
+        process_max_us: s.process_max_us,
+        hist_top_us: s.hist_top_us,
+        interval_hist: s.interval_hist.clone(),
+        process_hist: s.process_hist.clone(),
     }
 }
 

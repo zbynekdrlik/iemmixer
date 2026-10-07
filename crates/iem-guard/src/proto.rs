@@ -16,8 +16,9 @@ use crate::state::Switching;
 /// The guard pipe's name; the single-instance mutex is `Global\` + this.
 pub const NAME: &str = "iemmixer-guard";
 
-/// Largest frame body in bytes.
-pub const MAX_FRAME: usize = 64 * 1024;
+/// Largest frame body in bytes: a reply carries every kept alarm and the
+/// engine's two histograms (S7, #10): `the_largest_reply_fits_a_frame`.
+pub const MAX_FRAME: usize = 256 * 1024;
 
 /// The commit this exe was built from: CI builds every bundle with
 /// `GITHUB_SHA` (the bundle's SHA, as in the engine's `Hello.engine_build`),
@@ -162,6 +163,20 @@ pub struct EngineStatus {
     pub loopback_samples: u64,
     /// The same round-trip in milliseconds (`loopback_samples` / 96 kHz).
     pub loopback_ms: f64,
+    /// The engine process the guard started or adopted (`GuardState.pids`):
+    /// the soak's "one pid" (S7 design note §4); null when unknown.
+    pub pid: Option<u32>,
+    /// S7, passed through from the engine's `Status` (design note §3): the
+    /// 1.5-period late counter (information), overruns, the longest callback,
+    /// and both histograms; an older engine's are 0 and absent.
+    pub late: u64,
+    pub overruns: u64,
+    pub process_max_us: f64,
+    pub hist_top_us: u32,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub interval_hist: Vec<(u32, u64)>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub process_hist: Vec<(u32, u64)>,
 }
 
 /// One of HIL's spare card outputs as the engine's `Status` reports it: its
@@ -215,7 +230,7 @@ pub enum FrameError {
     #[error("guard pipe i/o: {0}")]
     Io(#[from] io::Error),
     /// The announced or produced body exceeds [`MAX_FRAME`].
-    #[error("frame of {0} bytes exceeds the 64 KiB limit")]
+    #[error("frame of {0} bytes exceeds the 256 KiB limit")]
     TooLarge(usize),
     /// The peer closed the stream between frames.
     #[error("guard pipe closed")]
