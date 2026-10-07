@@ -745,6 +745,46 @@ mod tests {
     }
 
     #[test]
+    fn a_meters_frame_of_any_data_shape_is_a_meter_frame() {
+        // The tag decides: a field of another shape in a Meters frame's
+        // data (here a numeric `status`) never makes the frame unreadable.
+        for meters in [
+            r#"{"event":"Meters","data":{"status":1,"meters":{}}}"#,
+            r#"{"event":"Meters","data":[1]}"#,
+            r#"{"event":"Meters"}"#,
+        ] {
+            assert_eq!(classify(meters), Event::Meters, "{meters}");
+        }
+        let numeric = r#"{"event":"AudioStatus","data":{"status":1}}"#;
+        assert_eq!(classify(numeric), Event::Other);
+    }
+
+    #[test]
+    fn the_summary_names_its_error_by_the_reason_code() {
+        use Reason::*;
+        for reason in [
+            SiteUnreadable,
+            NotHttp,
+            LoginRefused,
+            NotEngineer,
+            ServerGone,
+            CpuSets,
+        ] {
+            let summary = Summary {
+                error: Some(reason),
+                ..Summary::default()
+            };
+            let v = serde_json::to_value(&summary).unwrap();
+            assert_eq!(v["error"], reason.code());
+            let back: Summary = serde_json::from_value(v).unwrap();
+            assert_eq!(back.error, Some(reason));
+        }
+        // Any other text is no reason (P6: the summary carries no free text).
+        let free = r#"{"error":"http://10.0.0.10 refused"}"#;
+        assert!(serde_json::from_str::<Summary>(free).is_err());
+    }
+
+    #[test]
     fn the_wire_forms_are_the_servers_own() {
         use iem_core::{ClientMsg, ServerMsg, tunnel::SiteLinks};
         // The mixer socket's protocol is one the server serves.
@@ -852,7 +892,7 @@ mod tests {
         let second = Summary {
             frames: 2,
             complete: true,
-            error: Some(Reason::ServerGone.code().to_owned()),
+            error: Some(Reason::ServerGone),
             ..Summary::default()
         };
         // A reader holding the old file keeps reading it whole: the new
