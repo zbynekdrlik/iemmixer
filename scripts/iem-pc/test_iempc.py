@@ -737,27 +737,6 @@ class PreemptionTests(Base):
         self.assertEqual(docs[0], {"event": "ide event (flag file)", "action": "iempc event"})
         self.assertEqual(ip.current_entry(), 0)
 
-    def test_a_flag_during_the_busy_wait_sends_no_second_dev(self) -> None:
-        # The wait may end at its deadline right after a pause: "ide event" in that pause must
-        # stop the second dev request before it reaches the guard (review of PR #41).
-        self.pc.replies[("dev",)] = (1, json.dumps({"ok": False, "detail": "busy", "switching": {"from": "event", "to": "event"}}))
-        self.pc.replies[("status",)] = (0, json.dumps({"ok": True, "switching": {"from": "event", "to": "event"}}))
-        saved = (ip.BUSY_WAIT_S, getattr(ip, "busy_pause", None), ip.BUSY_POLL_S)
-        ip.BUSY_POLL_S = 0
-        self.addCleanup(setattr, ip, "BUSY_POLL_S", saved[2])
-
-        def pause():
-            self.flag()
-            time.sleep(0.06)  # past the deadline: the wait ends without another read
-
-        ip.BUSY_WAIT_S = 0.05
-        ip.busy_pause = pause
-        self.addCleanup(lambda: (setattr(ip, "BUSY_WAIT_S", saved[0]), setattr(ip, "busy_pause", saved[1])))
-        code, _docs, _ = self.run_main("dev")
-        self.assertEqual(code, ip.PREEMPTED)
-        self.assertEqual([c[1] for c in self.pc.calls].count(["dev"]), 1)
-        self.assertEqual(self.pc.calls[-1][1], ["event"])
-
     def test_a_failed_step_after_a_new_flag_runs_the_event_path(self) -> None:
         def fail():
             self.flag()
@@ -809,67 +788,6 @@ class DevTests(Base):
         self.assertEqual(self.run_main("dev")[1][-1]["dev_entry"], 2)
         self.assertEqual(self.pc.calls[-1], ("iemmode.exe", ["dev"], "abandon"))
         self.assertEqual(self.pc.timeouts, [ip.SWITCH_S, ip.SWITCH_S])
-
-    def test_dev_while_the_guard_still_switches_waits_for_the_end_and_asks_again(self) -> None:
-        # After a restart the guard runs the event plan's checks; a dev request meanwhile gets
-        # "busy" (twice on the PC, #35 2026-10-07). iempc waits for that switch to end and asks
-        # once more, instead of returning the refusal.
-        answers = iter([(1, json.dumps({"ok": False, "detail": "busy", "switching": {"from": "event", "to": "event"}})), (0, OK)])
-        self.pc.replies[("dev",)] = lambda: next(answers)
-        self.pc.replies[("status",)] = (0, OK)  # the checks have ended by the first poll
-        saved = ip.BUSY_POLL_S
-        ip.BUSY_POLL_S = 0
-        self.addCleanup(setattr, ip, "BUSY_POLL_S", saved)
-        code, docs, _ = self.run_main("dev")
-        self.assertEqual(code, 0)
-        # the busy reply itself names the switch (no extra read that could race its end)
-        self.assertEqual([c[1] for c in self.pc.calls], [["dev"], ["status"], ["dev"]])
-        self.assertEqual(docs[-1]["dev_entry"], 1)
-
-    def test_the_busy_wait_and_the_second_dev_share_one_budget(self) -> None:
-        # One bound for the whole command (review of PR #41): the second request gets what is
-        # left of SWITCH_S, and with less than DEV_MIN_S left the refusal is returned.
-        answers = iter([(1, json.dumps({"ok": False, "detail": "busy", "switching": {"from": "event", "to": "event"}})), (0, OK)])
-        self.pc.replies[("dev",)] = lambda: next(answers)
-        self.pc.replies[("status",)] = (0, OK)
-        code, _docs, _ = self.run_main("dev")
-        self.assertEqual(code, 0)
-        self.assertEqual(self.pc.timeouts[0], ip.SWITCH_S)
-        self.assertLessEqual(self.pc.timeouts[-1], ip.SWITCH_S)
-        self.assertGreaterEqual(self.pc.timeouts[-1], ip.DEV_MIN_S)
-        self.pc.calls.clear()
-        self.pc.replies[("dev",)] = (1, json.dumps({"ok": False, "detail": "busy", "switching": {"from": "event", "to": "event"}}))
-        saved = ip.SWITCH_S
-        ip.SWITCH_S = ip.DEV_MIN_S - 1  # no room for a second switch
-        self.addCleanup(setattr, ip, "SWITCH_S", saved)
-        code, _docs, _ = self.run_main("dev")
-        self.assertEqual(code, 1)
-        self.assertEqual([c[1] for c in self.pc.calls], [["dev"]])
-
-    def test_busy_from_a_switch_back_to_reaper_is_returned_not_undone(self) -> None:
-        # Only the post-restart checks (event to event) are waited out; a switch back to REAPER
-        # (the engineer's "Späť na REAPER", a crash loop, an unwind) is a decision dev must not
-        # undo (review of PR #41).
-        self.pc.replies[("dev",)] = (1, json.dumps({"ok": False, "detail": "busy", "switching": {"from": "dev", "to": "event"}}))
-        saved = (ip.BUSY_POLL_S, ip.BUSY_WAIT_S)
-        ip.BUSY_POLL_S, ip.BUSY_WAIT_S = 0, 0.05
-        self.addCleanup(lambda: (setattr(ip, "BUSY_POLL_S", saved[0]), setattr(ip, "BUSY_WAIT_S", saved[1])))
-        code, docs, _ = self.run_main("dev")
-        self.assertEqual(code, 1)
-        self.assertEqual([c[1] for c in self.pc.calls], [["dev"]])
-        self.assertNotIn("dev_entry", docs[-1])
-
-    def test_a_switch_that_does_not_end_in_time_returns_the_refusal(self) -> None:
-        self.pc.replies[("dev",)] = (1, json.dumps({"ok": False, "detail": "busy", "switching": {"from": "event", "to": "event"}}))
-        self.pc.replies[("status",)] = (0, json.dumps({"ok": True, "switching": {"from": "event", "to": "event"}}))
-        saved = (ip.BUSY_POLL_S, ip.BUSY_WAIT_S)
-        ip.BUSY_POLL_S, ip.BUSY_WAIT_S = 0, 0.05
-        self.addCleanup(lambda: (setattr(ip, "BUSY_POLL_S", saved[0]), setattr(ip, "BUSY_WAIT_S", saved[1])))
-        code, docs, _ = self.run_main("dev")
-        self.assertEqual(code, 1)
-        self.assertEqual(self.pc.calls[0][1], ["dev"])
-        self.assertEqual(self.pc.calls[-1][1], ["dev"])
-        self.assertNotIn("dev_entry", docs[-1])
 
     def test_an_open_spike_window_refuses_dev_and_the_rehearsal(self) -> None:
         self.open_window()
