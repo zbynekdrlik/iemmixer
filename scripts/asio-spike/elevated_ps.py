@@ -13,10 +13,10 @@ rule:
 
 - a folder is created with its owner (Administrators) and protected DACL
   (Administrators and SYSTEM full, the session's user read and execute) in one
-  step; one that exists must be no junction or link and owned by Administrators
-  or SYSTEM (else refused: someone else made it) and gets both again; then it is
-  read back: no junction or link, that owner, and no allow rule that lets anyone
-  else change it;
+  step (if someone else made it meanwhile, its owner refuses it) and the DACL
+  set once more; one that exists is only read back, so a window's 10 s poll
+  writes no security descriptor: no junction or link, owned by Administrators
+  or SYSTEM, and no allow rule that lets anyone else change it;
 - the stage: the uploaded module is read once into memory and checked by its
   sha256; those bytes are written into <root>\\bootstrap-stage (a file link
   there is removed, never followed; a directory junction makes the delete
@@ -28,7 +28,7 @@ rule:
   the upload after the check, never the staged copy, and the module's own
   $PSCommandPath (Install-IemElevatedDir copies it) is the staged copy too. A
   window session checks each module against `$iemSums` (sums_table: the
-  attested bundle record's sums, composed on the dev box), and a module that
+  fetched bundle record's sums, composed on the dev box), and a module that
   loads another from its own folder (SpikePc GoldenPc, IemMeasure IemTuning)
   has that one staged first;
 - TEMP and TMP point at <root>\\temp before IemTuning.psm1 loads: its Add-Type
@@ -75,7 +75,8 @@ HELPERS = " ; ".join([
     "@([Security.Principal.WindowsIdentity]::GetCurrent().User.Value, [Security.AccessControl.FileSystemRights]::ReadAndExecute))) { "
     "$s.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule("
     "(New-Object System.Security.Principal.SecurityIdentifier $a[0]), $a[1], 'ContainerInherit, ObjectInherit', 'None', 'Allow'))) } ; "
-    "[void][IO.Directory]::CreateDirectory($d, $s) ; & $iemOwn $d ; [IO.Directory]::SetAccessControl($d, $s) ; & $iemOnly $d }",
+    "if (-not [IO.Directory]::Exists($d)) { [void][IO.Directory]::CreateDirectory($d, $s) ; & $iemOwn $d ; "
+    "[IO.Directory]::SetAccessControl($d, $s) } ; & $iemOnly $d }",
 ])
 
 
@@ -97,9 +98,10 @@ def _hash(path: str) -> str:
 
 
 def _same(path: str, want: str) -> str:
-    """True when `path` is a file, no junction or link, holding exactly `want`."""
+    """True when `path` is a file, no junction or link, admin-only (else it is
+    written again: a loosened copy repairs itself) and holds exactly `want`."""
     return (f"([IO.File]::Exists({path}) -and (([IO.File]::GetAttributes({path}) -band [IO.FileAttributes]::ReparsePoint) -eq 0) "
-            f"-and ({_hash(path)} -ceq {want}))")
+            f"-and (& {{ try {{ & $iemOnly {path} ; $true }} catch {{ $false }} }}) -and ({_hash(path)} -ceq {want}))")
 
 
 def _owned(path: str) -> str:
@@ -139,8 +141,8 @@ def staged_import(src: str, name: str, hexd: str, root: str = ROOT) -> str:
 
 
 def sums_table(sums: dict[str, str]) -> str:
-    """`$iemSums`, the attested sha256 of each module a window session may
-    stage (staged with hexd None), from the bundle record on the dev box."""
+    """`$iemSums`, the sha256 of each module a window session may stage
+    (staged with hexd None), from the fetched bundle record on the dev box."""
     for name, hexd in sums.items():
         _want(name, hexd)
     return "$iemSums = @{ " + "; ".join(f"'{n}' = '{h}'" for n, h in sorted(sums.items())) + " }"

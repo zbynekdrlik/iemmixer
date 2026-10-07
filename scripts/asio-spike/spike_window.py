@@ -122,20 +122,27 @@ def verify_bundle(bundle: Path) -> list[str]:
 
 def bundle_sums(env: dict[str, str]) -> dict[str, str]:
     """The sums of the bundle the window's PC holds in bin (state
-    `bundle_sha`, set by setup and kept by every new window): its fetched,
-    attested record on this box (#15). Every window session checks the
-    modules it stages against them."""
+    `bundle_sha`, set by setup and kept by every new window): its fetched
+    record on this box (the CI artifact of a green dev push, its SHA256SUMS
+    checked at fetch; #15). Every window session checks the modules it stages
+    against them; the record must name each of MODULES."""
     sha = load_state().get("bundle_sha")
     if not sha:
         raise StepError("no bundle is set up for this window: run 'setup --sha <bundle>' (#15: the PC's modules are "
                         "checked against the fetched bundle's sums)")
     bundle = bundle_dir(env, sha)
     marker = bundle.parent / f"{sha}.source-sha"
-    if not marker.is_file() or marker.read_text(encoding="utf-8").strip() != sha:
+    try:
+        named = marker.read_text(encoding="utf-8").strip() if marker.is_file() else None
+        text = (bundle / "SHA256SUMS").read_text(encoding="utf-8") if named == sha else ""
+    except OSError as e:
+        raise StepError(f"bundle {sha}: its record on this box cannot be read ({e}): fetch-bundle it again") from None
+    if named != sha:
         raise StepError(f"bundle {sha}: its .source-sha is missing or names another commit: fetch-bundle it again")
-    sums = parse_sums((bundle / "SHA256SUMS").read_text(encoding="utf-8"))
-    if sorted(sums) != sorted(BUNDLE_FILES):
-        raise StepError(f"bundle {sha} lists {sorted(sums)}, expected {sorted(BUNDLE_FILES)}")
+    sums = parse_sums(text)
+    missing = [n for n in MODULES if n not in sums]
+    if missing:
+        raise StepError(f"bundle {sha}'s SHA256SUMS lists no {', '.join(missing)}: fetch-bundle it again")
     return sums
 
 
@@ -187,7 +194,7 @@ def ps_script(root: str, body: str, sums: dict[str, str]) -> str:
     `body` after importing SpikePc, its result or error as one JSON line
     (single-line statements: `-Command -` reads stdin line by line). SpikePc
     and GoldenPc (which it loads from its own folder) are read from
-    <root>\\bin, checked against `sums` (the attested bundle's) and imported
+    <root>\\bin, checked against `sums` (the fetched bundle's) and imported
     only from the admin-only stage (#15, elevated_ps); `$iemSums` serves the
     body's own staged imports. The Windows CI runner executes it as printed
     (tuning_window poll-script)."""
