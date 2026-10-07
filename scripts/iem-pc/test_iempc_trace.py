@@ -8,6 +8,7 @@ import json
 import signal
 import subprocess
 import sys
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -565,6 +566,29 @@ class TraceRecordTests(TraceBase):
         self.assertTrue(self.record().exists())
         self.assertIn("ALARM", err)
         self.assertEqual(self.pc.calls[-1], ("iemmode.exe", ["event"], "ignore"))
+
+    def test_a_recorded_stop_that_outlives_its_bound_still_leaves_iemmode_event_its_minimum(self) -> None:
+        """guarded notices a bound only at its next poll: a stop left running
+        returns up to POLL_S late, and iemmode event must still get SWITCH_MIN_S."""
+        self.write_record()
+        ip.EVENT_BUDGET_S, ip.SWITCH_MIN_S = 1.0, 0.3
+        inner = self.ssh_ps
+
+        def slow(env, script, timeout, event):
+            if f"-Dir '{OLD}'" in script:
+                self.bounds.append((script, timeout))
+                time.sleep(timeout + ip.POLL_S)
+                raise ip.StillRunning(f"ssh still running after {timeout} s (bounded on the PC; never force-end)")
+            return inner(env, script, timeout, event)
+
+        ip.ssh_ps = slow
+        with mock.patch.object(iempc_trace, "RECORDED_STOP_MIN_S", 0.1):
+            code, docs, err = self.run_main("event")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(self.recorded_stops()), 1)
+        self.assertEqual(self.pc.calls, [("iemmode.exe", ["event"], "ignore")])
+        self.assertGreaterEqual(self.pc.timeouts[-1], ip.SWITCH_MIN_S)
+        self.assertTrue(self.record().exists())
 
     def test_dev_stops_a_recorded_trace_before_iemmode_dev(self) -> None:
         self.write_record()
