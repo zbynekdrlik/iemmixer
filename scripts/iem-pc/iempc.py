@@ -900,8 +900,9 @@ def cmd_event(ctx: Ctx) -> int:
                                 "(spike_window.py status)")
             if not pre["ok"]:
                 close_failed_window(deadline, pre.get("error", ""))
-    if not dry:   # a trace whose dev-box process died (#15); never raises
-        iempc_trace.stop_recorded(ctx, sys.modules[__name__], deadline - time.monotonic() - SWITCH_MIN_S)
+    if not dry:   # a trace whose dev-box process died (#15); never raises. guarded sees its
+        # bound only at its next poll: two polls stay with iemmode event's minimum.
+        iempc_trace.stop_recorded(ctx, sys.modules[__name__], deadline - time.monotonic() - SWITCH_MIN_S - 2 * POLL_S)
     args = ["event", "--dry-run"] if dry else ["event"]
     code, reply, raw = iemmode(ctx.env, args, switch_timeout(deadline), "ignore")
     emit(result("iemmode", args, code, reply, raw))
