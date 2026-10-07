@@ -113,9 +113,19 @@ pub fn mode_name(m: Mode) -> &'static str {
     }
 }
 
-/// The first `max` characters of `text`.
+/// The first `max` characters of `text`, each C0 control character but a
+/// line break and a tab as a space: JSON escapes those to six bytes each, so
+/// a reply of them could pass the frame (S7 Task 3 review, #10).
 pub fn cut(text: &str, max: usize) -> String {
-    text.chars().take(max).collect()
+    text.chars().take(max).map(plain).collect()
+}
+
+fn plain(c: char) -> char {
+    match c {
+        '\n' | '\t' => c,
+        '\0'..='\u{1f}' => ' ',
+        other => other,
+    }
 }
 
 /// The guard's own site settings the daemon decides with (`[guard]`).
