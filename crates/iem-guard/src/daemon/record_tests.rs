@@ -189,9 +189,10 @@ fn the_record_survives_a_guard_restart() {
 /// A dev entry that fails unwinds to event (`back_to_event`), and the
 /// unwind's record spans both (#10 2026-10-07): the entry's steps up to the
 /// failed `EngineArm`, then the unwind's, on one clock; it names the entry
-/// (`unwound`) and its start; its silence runs from the entry's save and
-/// quit through the unwind's handover. The switch after it is one of its own
-/// again.
+/// (`unwound`); its silence runs from the entry's save and quit through the
+/// unwind's handover. The switch after it is one of its own again. (The
+/// record's start is the entry's: the fixed clock gives both the same here,
+/// so `a_preempted_entry_records_its_steps_then_the_unwind` moves it.)
 #[test]
 fn an_unwound_dev_entry_records_its_steps_then_the_unwind() {
     let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
