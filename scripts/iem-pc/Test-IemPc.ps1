@@ -817,6 +817,7 @@ try {
 
     # S1c's tuning module is imported only from an admin-owned, admin-only folder.
     $fakeTuning = @'
+$global:IemFakeTempAtImport = $env:TEMP
 function Get-IemTuningState { param([string]$ProfilePath) return 'fake-state' }
 function Enter-IemTuningMode { param([string]$ProfilePath) return 'fake-enter' }
 function Exit-IemTuningMode { param([string]$ProfilePath) return 'fake-exit' }
@@ -831,7 +832,14 @@ function Invoke-IemTuningApply { param([string]$ProfilePath, [int]$Tier) return 
         foreach ($p in @($tmod, $tprof)) { Set-IemAdminsOwner -Path $p }
     }
     Write-FakeTuning
+    $savedTemp = @($env:TEMP, $env:TMP)
+    $global:IemFakeTempAtImport = ''
     Assert ((Invoke-IemTuningVerb -Verb 'state' -TuningDir $etuning) -ceq 'fake-state') 'tuning-imports-an-admin-only-module'
+    # The import ran with TEMP and TMP at the admin-only <elevated root>\temp (#15: IemTuning's Add-Type):
+    # the fake module read TEMP while it was imported.
+    $etemp = Join-Path (Split-Path -Parent $etuning) 'temp'
+    $tb = Test-IemElevatedItem -Path $etemp -UserSid $me.sid
+    Assert ($global:IemFakeTempAtImport -eq $etemp -and $env:TMP -eq $etemp -and $tb.Count -eq 0) "tuning-imports-with-the-admin-only-temp ($global:IemFakeTempAtImport; $($tb -join '; '))"
     Assert ((Invoke-IemTuningVerb -Verb 'apply-tier2' -TuningDir $etuning) -ceq 'fake-apply-2') 'tuning-apply-tier2-passes-tier-2'
     [IO.File]::WriteAllText((Join-Path $td 'tuning.request.json'), '{"id":"t-5","verb":"enter"}')
     $tr = Invoke-IemTaskRequest -Kind tuning -Root $root -OutDir $eout -TuningDir $etuning
@@ -871,6 +879,8 @@ function Invoke-IemTuningApply { param([string]$ProfilePath, [int]$Tier) return 
     [IO.Directory]::SetAccessControl($etuning, (New-IemElevatedSecurity -UserSid $me.sid))
     Throws { Invoke-IemTuningVerb -Verb 'state' -TuningDir 'relative\tuning' } 'tuning-refuses-a-relative-folder'
     foreach ($p in @($tmod, $tprof)) { Remove-Item -LiteralPath $p -Force }
+    $env:TEMP = $savedTemp[0]
+    $env:TMP = $savedTemp[1]
 
     # The generated entry, as the task runs it (its results in tasks\out).
     [IO.File]::WriteAllText((Join-Path $td 'tuning.request.json'), '{"id":"t-4","verb":"exit"}')
@@ -1247,4 +1257,7 @@ exit 1
 # Install-IemTuning (#15) in a process of its own: it imports S1c's IemTuning.psm1.
 & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $here 'Test-IemTuningInstall.ps1')
 if ($LASTEXITCODE -ne 0) { throw "FAILED: Test-IemTuningInstall.ps1 (exit $LASTEXITCODE)" }
+# The bootstrap's admin-only stage (#15), the script iempc.py composes, in a process of its own.
+& powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $here 'Test-IemStage.ps1')
+if ($LASTEXITCODE -ne 0) { throw "FAILED: Test-IemStage.ps1 (exit $LASTEXITCODE)" }
 Write-Host 'Test-IemPc: all passed'

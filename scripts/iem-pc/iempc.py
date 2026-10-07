@@ -12,9 +12,10 @@ iempc_trace.py, PC_XPERF below), and the hand-over of an open S1a window.
 writes it first when it is missing (a flag it cannot write is a warning,
 never a stop), pre-empts an open S1a/S1c spike window (spike_window.py
 preempt; after a failed one it closes the window under the window lock, so
-no queued window preempt starts a second bring-back), then runs `iemmode
-event`, and `iemmode event --direct` when the guard is unreachable (exit
-4). The event path has one budget that fits one
+no queued window preempt starts a second bring-back), stops a kernel trace
+whose `iempc trace` died with this box (its record, iempc_trace.stop_recorded;
+`dev` does too), then runs `iemmode event`, and `iemmode event --direct` when
+the guard is unreachable (exit 4). The event path has one budget that fits one
 Bash call (EVENT_BUDGET_S): the spike preempt gets SPIKE_SHARE_S of it, no
 `iemmode` call starts while the preempt still runs, and none starts with
 less than SWITCH_MIN_S left. `event` never waits for another iempc command;
@@ -66,7 +67,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import datetime as dt
-import fcntl
 import hashlib
 import json
 import os
@@ -348,12 +348,31 @@ def native_script(exe: str, args: list[str], checks: tuple[str, ...] = ()) -> st
     ])
 
 
-def module_script(body: str, module: str | None = None, module_hex: str | None = None, pre: str = "", fin: str = "") -> str:
-    """Runs `body` (after importing `module`, checked by its sha256) and prints
-    {ok, r} or {ok: false, error} as the last line."""
+def elevated_ps():
+    """scripts/asio-spike/elevated_ps.py (#15): the stage, the admin-only folders
+    and TEMP of an elevated ssh session, loaded when a script needs them (never
+    at import: the event path depends on no S1a/S1c code)."""
+    if str(SPIKE_DIR) not in sys.path:
+        sys.path.insert(0, str(SPIKE_DIR))
+    import elevated_ps as ep
+    return ep
+
+
+def module_script(body: str, module: str | None = None, module_hex: str | None = None, pre: str = "", fin: str = "",
+                  elevated_root: str | None = None) -> str:
+    """Runs `body` and prints {ok, r} or {ok: false, error} as the last line.
+    `module`: a module this box uploaded into a run folder of the user's root
+    (a bundle's IemPc.psm1): its bytes are read once and checked by
+    `module_hex`, staged admin-only under the elevated root, checked again
+    there and imported only from there (#15, elevated_ps.staged_import).
+    `elevated_root`: another elevated root than the PC's (the CI self-test)."""
     load = ""
     if module is not None:
-        load = hash_check(module, module_hex or "") + f" ; Import-Module {ps_quote(module)} -Force ; "
+        if not HEX64.fullmatch(module_hex or ""):
+            raise StepError(f"not a sha256: {module_hex!r}")
+        ep = elevated_ps()
+        root = ep.ROOT if elevated_root is None else ps_quote(elevated_root)
+        load = ep.staged_import(ps_quote(module), module.rsplit("\\", 1)[-1], module_hex, root) + " ; "
     tail = f" finally {{ {fin} }}" if fin else ""
     return "\n".join([
         "$ErrorActionPreference = 'Stop'",
@@ -488,6 +507,7 @@ def state_lock(take: bool) -> Iterator[None]:
     if not take:
         yield
         return
+    import fcntl   # the dev box's lock; the Windows CI runner imports this module only to compose (Test-IemStage.ps1)
     with open(state_dir() / "iempc.lock", "a+", encoding="utf-8") as f:
         try:
             fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -879,6 +899,9 @@ def cmd_event(ctx: Ctx) -> int:
                                 "(spike_window.py status)")
             if not pre["ok"]:
                 close_failed_window(deadline, pre.get("error", ""))
+    if not dry:   # a trace whose dev-box process died (#15); never raises. guarded sees its
+        # bound only at its next poll: two polls stay with iemmode event's minimum.
+        iempc_trace.stop_recorded(ctx, sys.modules[__name__], deadline - time.monotonic() - SWITCH_MIN_S - 2 * POLL_S)
     args = ["event", "--dry-run"] if dry else ["event"]
     code, reply, raw = iemmode(ctx.env, args, switch_timeout(deadline), "ignore")
     emit(result("iemmode", args, code, reply, raw))
@@ -901,6 +924,10 @@ def cmd_dev(ctx: Ctx) -> int:
     dry = bool(ctx.args.dry_run)
     if dry:
         args.append("--dry-run")
+    else:   # a trace whose dev-box process died (#15); never raises
+        iempc_trace.stop_recorded(ctx, sys.modules[__name__], float("inf"))
+        if ctx.watch(abandon=True) != "ignore" and event_now():
+            raise EventNow()   # that stop ran with "ignore": a dev entry now would reach the guard after "ide event"
     code, reply, raw = iemmode(ctx.env, args, STATUS_S if dry else SWITCH_S, ctx.watch(abandon=True))
     out = result("iemmode", args, code, reply, raw)
     if code == 0 and not dry:

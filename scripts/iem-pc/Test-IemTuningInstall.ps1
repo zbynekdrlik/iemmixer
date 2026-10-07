@@ -73,6 +73,10 @@ try {
     $er = New-ElevatedRoot 'er-ok'
     $src = New-Source 'src-ok' $goodLayout
     $h = Get-SourceHashes $src
+    # TEMP at a folder that does not exist: IemTuning's first compile (Add-Type) can only
+    # succeed in the TEMP Install-IemTuning sets before the import (#15).
+    $env:TEMP = Join-Path $base 'no-such-temp'
+    $env:TMP = $env:TEMP
     $r = Install-IemTuning -Root $er -SourceDir $src @h
     Assert ((@($r.PSObject.Properties.Name) -join ',') -ceq 'tuning,measure,profile') "tuning-install-returns-the-three-hashes-only ($(@($r.PSObject.Properties.Name) -join ','))"
     Assert ($r.tuning -ceq $h.TuningSha256 -and $r.measure -ceq $h.MeasureSha256 -and $r.profile -ceq $h.ProfileSha256) 'tuning-install-returns-the-hashes-it-read-back'
@@ -94,6 +98,10 @@ try {
     # folder, never again from the upload in the user's root.
     $loaded = & (Get-Module IemPc) { (Get-Module IemTuning).Path }
     Assert ("$loaded".StartsWith((Join-Path $er 'tuning-stage') + '\', [StringComparison]::OrdinalIgnoreCase)) "tuning-install-imports-the-staged-module-never-the-upload ($loaded)"
+    # IemTuning's Add-Type compiled in the admin-only <root>\temp, never in the user's TEMP (#15).
+    $etemp = Join-Path $er 'temp'
+    $eb = Test-IemElevatedItem -Path $etemp -UserSid $me.sid
+    Assert ($env:TEMP -eq $etemp -and $env:TMP -eq $etemp -and $eb.Count -eq 0) "tuning-install-compiles-in-the-admin-only-temp ($env:TEMP; $($eb -join '; '))"
     # Again with the same files: the same result (written fresh each time).
     $r2 = Install-IemTuning -Root $er -SourceDir $src @h
     Assert ($r2.profile -ceq $h.ProfileSha256 -and (Get-Installed $er) -ceq $installed) 'tuning-install-again-is-the-same'

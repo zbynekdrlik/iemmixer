@@ -626,6 +626,10 @@ jobs:
           if ($doc.r.priority -ne 'Idle' -or -not $doc.r.now -or $doc.r.tuning -ne $true) {
             throw "no stop file: priority '$($doc.r.priority)', now '$($doc.r.now)', IemTuning loaded '$($doc.r.tuning)'"
           }
+          # The step ran (and IemTuning's Add-Type compiled) with the admin-only elevated temp,
+          # never the user's TEMP (#15); GetTempPath ends with a backslash.
+          $etemp = (Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'iemmixer\temp') + '\'
+          if ($doc.r.temp -ne $etemp) { throw "the step's temp folder is '$($doc.r.temp)', not '$etemp'" }
           New-Item -ItemType File -Force -Path $stop | Out-Null
           (Get-Item -LiteralPath $stop).LastWriteTimeUtc = [datetime]::UtcNow.AddMinutes(-5)
           $doc = Invoke-AnalysisStep

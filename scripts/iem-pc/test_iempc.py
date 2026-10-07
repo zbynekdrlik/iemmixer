@@ -368,11 +368,36 @@ class ScriptTests(Base):
             with self.assertRaises(ip.StepError, msg=bad):
                 ip.hash_check("X:\\z.zip", bad)
 
-    def test_a_module_is_imported_only_after_its_hash_check(self) -> None:
-        s = ip.module_script("Get-IemBootstrapState", module="X:\\m.psm1", module_hex="cd" * 32)
+    def test_a_module_is_imported_only_from_its_admin_only_stage(self) -> None:
+        """#15: the upload in the user's root is read once and checked; those
+        bytes go into <elevated root>\\bootstrap-stage (admin-only, read back),
+        are checked again there, and only that copy is imported."""
+        hexd = "cd" * 32
+        s = ip.module_script("Get-IemBootstrapState", module="X:\\run\\IemPc.psm1", module_hex=hexd)
         line = s.splitlines()[2]
-        self.assertLess(line.index("Get-FileHash -LiteralPath 'X:\\m.psm1'"), line.index("Import-Module 'X:\\m.psm1' -Force"))
-        self.assertLess(line.index("Import-Module"), line.index("$r = & { Get-IemBootstrapState }"))
+        order = ["[IO.File]::ReadAllBytes('X:\\run\\IemPc.psm1')", f"$iemH -cne '{hexd}'",
+                 "$iemRoot = (Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'iemmixer')",
+                 "$iemStage = Join-Path $iemRoot 'bootstrap-stage'", "& $iemDir $iemRoot", "& $iemDir $iemStage",
+                 "$iemMod = Join-Path $iemStage 'IemPc.psm1'", "[IO.File]::Delete($iemMod)",
+                 "[IO.File]::WriteAllBytes($iemMod, $iemB)", "& $iemOnly $iemMod",
+                 f"(Get-FileHash -LiteralPath $iemMod -Algorithm SHA256).Hash.ToLowerInvariant() -cne '{hexd}'",
+                 "Import-Module $iemMod -Force", "$r = & { Get-IemBootstrapState }"]
+        at = [line.index(t) for t in order]
+        self.assertEqual(at, sorted(at))
+        # The upload is read once (and named in the mismatch); nothing else reads or imports it.
+        self.assertEqual(line.count("'X:\\run\\IemPc.psm1'"), 2)
+        self.assertEqual(line.count("Import-Module"), 1)
+        # A folder: created with its security in one step, owner checked, the DACL set again, read back.
+        mk = line[line.index("$iemDir = {"):]
+        mk = [mk.index(t) for t in ("SetOwner((New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-544'))",
+                                    "SetAccessRuleProtection($true, $false)", "[IO.Directory]::CreateDirectory($d, $s)",
+                                    "& $iemOwn $d", "[IO.Directory]::SetAccessControl($d, $s)", "& $iemOnly $d")]
+        self.assertEqual(mk, sorted(mk))
+        # The CI runner's temp elevated root (Test-IemStage.ps1).
+        self.assertIn("$iemRoot = 'Y:\\er' ; ", ip.module_script("B", module="X:\\m.psm1", module_hex=hexd, elevated_root="Y:\\er"))
+        for bad in ("CD" * 32, "cd" * 31):
+            with self.assertRaises(ip.StepError, msg=bad):
+                ip.module_script("B", module="X:\\m.psm1", module_hex=bad)
         self.assertNotIn("finally", s)
         self.assertIn("} finally { F } ; ConvertTo-Json", ip.module_script("B", pre="P ; ", fin="F"))
         self.assertIn("try { P ; $r = & { B }", ip.module_script("B", pre="P ; ", fin="F"))
@@ -1413,8 +1438,10 @@ class BootstrapTests(Base):
                                          f"tester@pc.test:/X:/root/bootstrap/{SHA}/IemPc.psm1", "finish")])
         script, mode = self.pc.modules[-1]
         self.assertEqual(mode, "finish")
-        self.assertIn(ip.hash_check(self.MODULE, sha256(b"synthetic IemPc.psm1")) + f" ; Import-Module '{self.MODULE}' -Force ; "
-                      "$r = & { Grant-IemServiceRight -Service 'svc name' }", script)
+        self.assertIn(f"$iemB = [IO.File]::ReadAllBytes('{self.MODULE}')", script)
+        self.assertIn(f"$iemH -cne '{sha256(b'synthetic IemPc.psm1')}'", script)
+        self.assertIn("Import-Module $iemMod -Force ; $r = & { Grant-IemServiceRight -Service 'svc name' }", script)
+        self.assertNotIn(f"Import-Module '{self.MODULE}'", script)   # never from the run folder (#15)
         self.assertEqual(docs[-1], {"bootstrap": "Grant-IemServiceRight", "sha": SHA, "result": {"reaper": 1}})
 
     def test_a_read_only_step_is_refused_during_an_event(self) -> None:
