@@ -23,6 +23,12 @@ use tungstenite::{Message, WebSocket};
 /// The engineer's PIN the fake accepts, and the token it issues.
 const PIN: &str = "1234";
 const TOKEN: &str = "T";
+/// The build the client is told to expect, the short hash the fake's
+/// `/api/version` names it by (`git_hash`, as `git rev-parse --short`
+/// prints it), and another build.
+const BUILD: &str = "0123456789abcdef0123456789abcdef01234567";
+const SHORT: &str = "0123456";
+const OTHER: &str = "fedcba9876543210fedcba9876543210fedcba98";
 /// The two sockets, as the client must ask for them.
 const MIXER: &str = "/ws/member9?token=T&proto=2";
 const LISTEN: &str = "/ws/audio?token=T";
@@ -41,6 +47,8 @@ const SILENCE: Duration = Duration::from_millis(300);
 struct Script {
     /// `/api/site`'s `lan_url` (`null` when `None`).
     lan_url: Option<String>,
+    /// `/api/version`'s `git_hash`; `None`: no version route (404).
+    version: Option<&'static str>,
     /// The login's `engineer`.
     engineer: bool,
     /// The listen socket sends this many frames and one frame Opus refuses,
@@ -64,6 +72,7 @@ impl Default for Script {
     fn default() -> Self {
         Self {
             lan_url: None,
+            version: Some(SHORT),
             engineer: true,
             drop_listen_after: None,
             close_not_drop: false,
@@ -197,12 +206,18 @@ fn http(mut stream: TcpStream, head_len: usize, target: &str, script: &Script) {
         .unwrap_or(0);
     let mut body = vec![0u8; length];
     stream.read_exact(&mut body).unwrap();
-    let (status, reply) = match target {
-        "/api/site" => (
+    let (status, reply) = match (target, script.version) {
+        ("/api/site", _) => (
             "200 OK",
             json!({"lan_url": script.lan_url, "public_host": "mixer.example.org"}),
         ),
-        "/api/auth" => {
+        // The server's `VersionInfo`.
+        ("/api/version", Some(git_hash)) => (
+            "200 OK",
+            json!({"version": "2.0.0-dev.18", "git_hash": git_hash, "branch": "dev",
+                "build_time": "0", "deployed_at": "0", "full_version": "2.0.0-dev.18 (local)"}),
+        ),
+        ("/api/auth", _) => {
             let login: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
             if login == json!({"member": "engineer", "pin": PIN}) {
                 let token = json!({"token": TOKEN, "member": "engineer",
@@ -373,6 +388,7 @@ fn args(base: &str, direct: bool, seconds: u64) -> Args {
         member: "member9".to_owned(),
         seconds,
         out: PathBuf::from("unused.json"),
+        expect_build: BUILD.to_owned(),
         cpu_sets: Vec::new(),
     }
 }
@@ -469,14 +485,17 @@ fn a_whole_run_counts_frames_and_meters_and_writes_a_summary_every_period() {
     assert!(periodic[0] >= every, "{at:?}");
     assert!(periodic.windows(2).all(|w| w[1] - w[0] >= every), "{at:?}");
     assert!(written.iter().rev().skip(1).all(|w| !w.complete));
-    // One login, each socket once, and both ended with a Close.
+    // The build check first, then one login, each socket once, and both
+    // ended with a Close.
     let seen = fake.seen();
+    assert_eq!(seen[..2], ["/api/version", "/api/auth"], "{seen:?}");
     let counts = [
+        times(&seen, "/api/version"),
         times(&seen, "/api/auth"),
         times(&seen, MIXER),
         times(&seen, LISTEN),
     ];
-    assert_eq!(counts, [1, 1, 1], "{seen:?}");
+    assert_eq!(counts, [1, 1, 1, 1], "{seen:?}");
     assert_eq!(times(&seen, "/api/site"), 0, "--direct reads no /api/site");
     assert_eq!(fake.closed(2), ["listen", "mixer"]);
 }
@@ -498,7 +517,7 @@ fn the_sockets_go_to_the_lan_url_the_server_names() {
     assert_eq!(a.seen(), ["/api/site"]);
     let mut on_b = b.seen();
     on_b.sort();
-    assert_eq!(on_b, ["/api/auth", LISTEN, MIXER]);
+    assert_eq!(on_b, ["/api/auth", "/api/version", LISTEN, MIXER]);
     // It reads only: after its ListenStart, the one thing it sent on either
     // socket is the ListenStop at the end.
     assert_eq!(b.heard(), [format!("listen {STOP}")]);
@@ -629,8 +648,54 @@ fn a_refused_login_ends_the_run_with_its_reason() {
         assert!(!ran.summary.complete);
         let written: Vec<&Summary> = ran.written.iter().map(|(_, s)| s).collect();
         assert_eq!(written, [&ran.summary], "one summary, the end's");
-        assert_eq!(fake.seen(), ["/api/auth"], "{reason:?}");
+        assert_eq!(fake.seen(), ["/api/version", "/api/auth"], "{reason:?}");
     }
+}
+
+#[test]
+fn a_server_that_does_not_name_the_build_is_refused_before_the_login() {
+    // Another build, and a server without a version route.
+    for version in [Some("fedcba9"), None] {
+        let fake = Fake::start(Script {
+            version,
+            ..Script::default()
+        });
+        let ran = run_within(
+            args(&fake.origin(), true, 30),
+            PIN,
+            Duration::from_secs(5),
+            None,
+        );
+        assert_eq!(ran.summary.error, Some(Reason::WrongServer), "{version:?}");
+        assert!(!ran.summary.complete);
+        let written: Vec<&Summary> = ran.written.iter().map(|(_, s)| s).collect();
+        assert_eq!(written, [&ran.summary], "one summary, the end's");
+        // No login and no socket.
+        assert_eq!(fake.seen(), ["/api/version"], "{version:?}");
+    }
+}
+
+#[test]
+fn the_build_is_checked_at_the_lan_url_the_server_names() {
+    // The base names the build, but the LAN URL it names does not: the
+    // client checks where it would go, and goes nowhere.
+    let b = Fake::start(Script {
+        version: Some("fedcba9"),
+        ..Script::default()
+    });
+    let a = Fake::start(Script {
+        lan_url: Some(format!("{}/", b.origin())),
+        ..Script::default()
+    });
+    let ran = run_within(
+        args(&a.origin(), false, 30),
+        PIN,
+        Duration::from_secs(5),
+        None,
+    );
+    assert_eq!(ran.summary.error, Some(Reason::WrongServer));
+    assert_eq!(a.seen(), ["/api/site"]);
+    assert_eq!(b.seen(), ["/api/version"]);
 }
 
 #[test]
@@ -680,7 +745,7 @@ fn the_binary_exits_0_complete_1_with_a_reason_code_and_2_on_a_usage_error() {
     let fake = Fake::start(Script::default());
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("soakclient.json");
-    let argv = |seconds: &str| -> Vec<String> {
+    let argv_for = |build: &str, seconds: &str| -> Vec<String> {
         let origin = fake.origin();
         let out = out.to_str().unwrap();
         let base = origin.as_str();
@@ -690,6 +755,8 @@ fn the_binary_exits_0_complete_1_with_a_reason_code_and_2_on_a_usage_error() {
             "--direct",
             "--member",
             "member9",
+            "--expect-build",
+            build,
             "--seconds",
             seconds,
             "--out",
@@ -698,6 +765,7 @@ fn the_binary_exits_0_complete_1_with_a_reason_code_and_2_on_a_usage_error() {
         .map(str::to_owned)
         .to_vec()
     };
+    let argv = |seconds: &str| argv_for(BUILD, seconds);
     // A usage error and a missing PIN: 2, before any request.
     assert_eq!(exe(Vec::new(), Some(PIN)).status.code(), Some(2));
     assert_eq!(exe(argv("30"), None).status.code(), Some(2));
@@ -714,6 +782,13 @@ fn the_binary_exits_0_complete_1_with_a_reason_code_and_2_on_a_usage_error() {
         serde_json::from_slice::<Summary>(&refused.stdout).unwrap(),
         file
     );
+    // A server that names another build: 1, `wrong-server`.
+    let wrong = exe(argv_for(OTHER, "30"), Some(PIN));
+    assert_eq!(wrong.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&wrong.stderr);
+    assert_eq!(stderr.trim(), "iem-soakclient: wrong-server");
+    let summary: Summary = serde_json::from_slice(&wrong.stdout).unwrap();
+    assert_eq!(summary.error, Some(Reason::WrongServer));
     // A whole run: 0, nothing on stderr.
     let done = exe(argv("1"), Some(PIN));
     let stderr = String::from_utf8_lossy(&done.stderr);

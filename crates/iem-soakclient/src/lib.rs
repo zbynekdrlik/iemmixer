@@ -457,8 +457,22 @@ mod tests {
         parse_args(&list)
     }
 
-    /// The three required flags and nothing else.
-    const MINIMAL: [&str; 6] = ["--member", "member9", "--seconds", "600", "--out", "s.json"];
+    /// A commit the server must name (40 lower-case hex digits), and the
+    /// short hash it names it by.
+    const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+    const SHORT: &str = "0123456";
+
+    /// The four required flags and nothing else.
+    const MINIMAL: [&str; 8] = [
+        "--member",
+        "member9",
+        "--seconds",
+        "600",
+        "--out",
+        "s.json",
+        "--expect-build",
+        COMMIT,
+    ];
 
     /// [`MINIMAL`] followed by `extra`.
     fn with(extra: &[&str]) -> Result<Args, String> {
@@ -507,11 +521,14 @@ mod tests {
                 member: "member9".to_owned(),
                 seconds: 600,
                 out: PathBuf::from("s.json"),
+                expect_build: COMMIT.to_owned(),
                 cpu_sets: Vec::new(),
             }
         );
         // Every flag, in any order; the base is kept as its origin.
         let all = args(&[
+            "--expect-build",
+            COMMIT,
             "--out",
             "s.json",
             "--direct",
@@ -528,12 +545,13 @@ mod tests {
         assert_eq!(all.member, "member9");
         assert_eq!(all.seconds, 1);
         assert_eq!(all.out, PathBuf::from("s.json"));
+        assert_eq!(all.expect_build, COMMIT);
         assert_eq!(replaced("--seconds", "36000").unwrap().seconds, MAX_SECONDS);
     }
 
     #[test]
     fn every_bad_argument_is_a_usage_error() {
-        for flag in ["--member", "--seconds", "--out"] {
+        for flag in ["--member", "--seconds", "--out", "--expect-build"] {
             assert!(without(flag).unwrap_err().contains(flag), "{flag}");
         }
         for seconds in ["0", "36001", "x", "-1", ""] {
@@ -553,6 +571,74 @@ mod tests {
         assert!(with(&["--base", "http://"]).is_err());
         assert!(with(&["--cpu-sets", "256,x"]).is_err());
         assert!(with(&["--cpu-sets", ""]).is_err());
+        assert!(with(&["--expect-build", COMMIT]).is_err(), "given twice");
+    }
+
+    #[test]
+    fn the_expected_build_is_a_commits_40_lower_case_hex_digits() {
+        let other = "fedcba9876543210fedcba9876543210fedcba98";
+        assert_eq!(
+            replaced("--expect-build", other).unwrap().expect_build,
+            other
+        );
+        let upper = COMMIT.to_ascii_uppercase();
+        let (short, long) = (&COMMIT[..39], format!("{COMMIT}0"));
+        let not_hex = format!("{}g", &COMMIT[..39]);
+        let spaced = format!(" {}", &COMMIT[..39]);
+        for bad in [
+            "",
+            SHORT,
+            short,
+            long.as_str(),
+            upper.as_str(),
+            not_hex.as_str(),
+            spaced.as_str(),
+        ] {
+            let e = replaced("--expect-build", bad).unwrap_err();
+            assert!(e.contains("--expect-build"), "{bad:?}: {e}");
+            assert!(bad.is_empty() || !e.contains(bad), "never echoed: {e}");
+        }
+    }
+
+    #[test]
+    fn the_version_names_the_build_by_a_prefix_of_at_least_7_hex_digits() {
+        let names = |git_hash: &str| {
+            let answer = serde_json::json!({"version": "2.0.0-dev.18", "git_hash": git_hash,
+                "branch": "dev", "build_time": "0", "deployed_at": "x", "full_version": "y"});
+            names_build(&answer.to_string(), COMMIT)
+        };
+        // git's short hash, a longer one, the whole commit.
+        for good in [SHORT, &COMMIT[..12], COMMIT] {
+            assert!(names(good), "{good}");
+        }
+        // Too short, another commit, a build without its hash, a hash with
+        // anything around it.
+        let other = format!("{}0", &COMMIT[..6]);
+        let upper = COMMIT[..12].to_ascii_uppercase();
+        for bad in [
+            &SHORT[..6],
+            "",
+            "fedcba9",
+            other.as_str(),
+            "unknown",
+            upper.as_str(),
+            " 0123456",
+            "0123456 ",
+        ] {
+            assert!(!names(bad), "{bad:?}");
+        }
+        // An answer that is not the server's version at all.
+        for answer in [
+            "",
+            "not json",
+            "{}",
+            r#"{"version":"2.0.0"}"#,
+            r#"{"git_hash":123456789}"#,
+            r#"{"git_hash":null}"#,
+            r#"["0123456"]"#,
+        ] {
+            assert!(!names_build(answer, COMMIT), "{answer}");
+        }
     }
 
     #[test]
@@ -778,6 +864,7 @@ mod tests {
         for reason in [
             SiteUnreadable,
             NotHttp,
+            WrongServer,
             LoginRefused,
             NotEngineer,
             ServerGone,
@@ -848,6 +935,7 @@ mod tests {
         let codes = [
             SiteUnreadable,
             NotHttp,
+            WrongServer,
             LoginRefused,
             NotEngineer,
             ServerGone,
@@ -857,8 +945,8 @@ mod tests {
         let codes = codes.map(Reason::code).join(" ");
         assert_eq!(
             codes,
-            "site-unreadable not-http login-refused not-engineer server-gone connection-lost \
-             cpu-sets"
+            "site-unreadable not-http wrong-server login-refused not-engineer server-gone \
+             connection-lost cpu-sets"
         );
     }
 
