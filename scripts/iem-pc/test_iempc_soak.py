@@ -142,13 +142,17 @@ class DispatchSoakTests(SoakBase):
             (ready(switching=SWITCHING), f"a switch runs ({json.dumps(SWITCHING)})"),
             (ready(detail=f"mode dev; bundle {SHA}; HIL job 42"), "a HIL job runs (HIL job 42)"),
             (ready(detail=f"mode dev; bundle {SHA}; HIL job 42; 2 unacknowledged alarms"), "a HIL job runs (HIL job 42)"),
+            (ready(detail=f"mode dev; bundle {SHA}; HIL job"), "a HIL job runs (HIL job)"),
             (ready(ok=False), "the guard's status did not answer ok"),
+            (ready(ok=None), "the guard's status did not answer ok"),
+            (ready(ok="true"), "the guard's status did not answer ok"),
+            (ready(ok=...), "the guard's status did not answer ok"),
         ):
             self.status(reply)
             self.refused(f"no soak: {words} {NOTHING}", reply)
         self.status(READY, code=3)
         self.refused(f"no soak: iemmode status failed (exit 3) {NOTHING}")
-        self.assertEqual({c for c in self.pc.calls}, {("iemmode.exe", ["status"], "abandon")})
+        self.assertEqual(self.pc.calls, [("iemmode.exe", ["status"], "abandon")] * 11)
         self.assertEqual(self.gh.calls, [])
 
     def test_another_active_bundle_or_engine_build_or_no_engine_is_refused(self) -> None:
@@ -161,6 +165,8 @@ class DispatchSoakTests(SoakBase):
             (engine(build=...), f"the running engine's build is None, not {SHA}"),
             (ready(engine=...), "no engine runs"),
             (ready(engine=None), "no engine runs"),
+            (ready(engine="running"), "no engine runs"),
+            (ready(engine=[READY["engine"]]), "no engine runs"),
         ):
             self.status(reply)
             self.refused(f"no soak: {words}", reply)
@@ -306,6 +312,15 @@ class PureTests(SoakBase):
         self.assertEqual(replies, before)
         self.assertEqual((self.pc.calls, self.gh.calls), ([], []))
         self.assertFalse((ip.STATE_DIR / "soak.json").exists())
+
+    def test_hours_must_be_an_int_of_1_to_9(self) -> None:
+        """argparse gives an int; the check holds for any caller (a bool is no hour count)."""
+        for hours in (1, 5, 9):
+            self.assertEqual(soak.check_hours(ip, hours), hours)
+        for hours in (0, 10, -1, True, 3.0, "3", None):
+            with self.assertRaises(ip.Refused, msg=repr(hours)) as cm:
+                soak.check_hours(ip, hours)
+            self.assertIn("--hours must be 1..9", str(cm.exception))
 
     def test_the_constants_match_the_ops_job(self) -> None:
         self.assertEqual((soak.SOAK_WORKFLOW, soak.HOURS_DEFAULT, soak.HOURS_MIN, soak.HOURS_MAX),
