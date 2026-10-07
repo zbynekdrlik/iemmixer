@@ -39,10 +39,11 @@ def sha256(data: bytes) -> str:
 def make_zip(path: Path, *, sha: str = SHA, branch: str = "dev", run: int = RUN, drop: tuple[str, ...] = (),
              tamper: str | None = None, unlisted: str | None = None, rename: dict | None = None,
              manifest: dict | None = None, sums_extra: str = "", manifest_raw: bytes | None = None,
-             sums_raw: bytes | None = None) -> Path:
-    """A bundle zip shaped like the CI `bundle` job's (plan Task 12)."""
+             sums_raw: bytes | None = None, extra: dict[str, bytes] | None = None) -> Path:
+    """A bundle zip shaped like the CI `bundle` job's (plan Task 12); `extra`: more listed files."""
     files = {n: f"synthetic {n}".encode() for n in ip.BUNDLE_REQUIRED if n != "manifest.json"}
     files["tuning/state.ps1"] = b"synthetic tuning"
+    files.update(extra or {})
     doc = manifest if manifest is not None else {"sha": sha, "branch": branch, "version": "2.0.0-dev.9", "run": run}
     files["manifest.json"] = json.dumps(doc).encode() if manifest_raw is None else manifest_raw
     for name in drop:
@@ -80,6 +81,9 @@ class FakePc:
         self.scps: list[tuple[str, str, str]] = []
         self.replies: dict = {}  # args -> (exit, stdout[, stderr]) or a callable returning one
         self.module_result = "ok"
+        # A module script holding the text gets this result (or a callable's) instead: the
+        # elevated tuning folder's profile check after every activate (iempc_tuning) finds none.
+        self.texts: dict = {"profile.json": False}
 
     def ssh_ps(self, env, script, timeout, event):
         m = self.NATIVE.search(script)
@@ -94,7 +98,7 @@ class FakePc:
             doc = {"exit": code, "out": out, "err": err}
         else:
             self.modules.append((script, event))
-            r = self.module_result
+            r = next((v for k, v in self.texts.items() if k in script), self.module_result)
             doc = {"ok": True, "r": r() if callable(r) else r}
         if event != "ignore" and ip.event_now():
             raise ip.EventNow()

@@ -54,6 +54,8 @@ $script:RunnerSha256 = '1150692afa94e71f872017e254ea55b6eece1eece3fe7e3a6d4c93d0
 $script:OpsUrl = 'https://github.com/zbynekdrlik/iemmixer-ops'
 # The four verbs the tuning task accepts (design section 5.1).
 $script:TuningVerbs = @('enter', 'exit', 'state', 'apply-tier2')
+# The files Install-IemTuning puts into the elevated tuning folder (#15).
+$script:TuningFiles = @('IemTuning.psm1', 'IemMeasure.psm1', 'profile.json')
 
 # The elevated tasks' entry script, written by Register-IemTasks next to its
 # copy of this module.
@@ -937,6 +939,135 @@ function Install-IemElevatedDir {
     $h2 = (Get-FileHash -LiteralPath $module -Algorithm SHA256).Hash
     if ($h1 -cne $h2) { throw "the copy of IemPc.psm1 in $tasks does not match the module" }
     if ([IO.File]::ReadAllText($entry) -cne $script:TaskEntry) { throw "the entry script in $tasks does not read back" }
+}
+
+# ---- S1c's tuning module in the elevated root (#15) ----
+
+function Get-IemBytesSha256 {
+    # The SHA-256 of bytes in memory, as lowercase hex.
+    param([Parameter(Mandatory)][AllowEmptyCollection()][byte[]]$Bytes)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $h = $sha.ComputeHash($Bytes) } finally { $sha.Dispose() }
+    return (-join @($h | ForEach-Object { $_.ToString('x2') }))
+}
+
+function Remove-IemTuningStage {
+    # Install-IemTuning's staging folder: the files it may hold (never through a
+    # junction or a link), then the folder itself, which must then be empty.
+    param([Parameter(Mandatory)][string]$Stage)
+    if (-not (Test-Path -LiteralPath $Stage)) { return }
+    if (Test-IemReparsePoint -Path $Stage) { throw "$Stage is a junction or a link: refused" }
+    foreach ($name in $script:TuningFiles) {
+        $p = Join-Path $Stage $name
+        if (Test-IemReparsePoint -Path $p) { throw "$p is a junction or a link: refused" }
+        if (Test-Path -LiteralPath $p) { [IO.File]::Delete($p) }
+    }
+    [IO.Directory]::Delete($Stage, $false)
+}
+
+function Install-IemTuning {
+    # S1c's tuning modules and the private profile into <Root>\tuning, where the
+    # tuning task loads them (Invoke-IemTuningVerb). Run elevated over ssh from
+    # the dev box (`iempc tuning-install`, and `iempc activate`'s refresh): the
+    # only path that installs them (#15, the decision of 2026-10-07: never from
+    # the bundle in the user's root, which any process of the user may change).
+    # -SourceDir holds what the dev box uploaded: IemTuning.psm1, IemMeasure.psm1
+    # and, unless -KeepProfile, profile.json. Each is read once from there and
+    # its SHA-256 must be the one the dev box computed (the modules from the
+    # attested bundle, the profile from the private file). Those checked bytes
+    # go into an admin-only staging folder (<Root>\tuning-stage), and nothing is
+    # read from the user's root again: IemTuning's own loader (Read-IemProfile,
+    # Assert-IemLayout) checks the profile from there, the staged module
+    # imported. -KeepProfile: the installed profile stays as it is, admin-only,
+    # checked by the new module the same way. The root must be the admin-only
+    # folder Register-IemTasks made; nothing is written through a junction or a
+    # link. Any refusal leaves the tuning folder as it was and the staging
+    # folder gone. Then each file goes in by a rename on the same volume, so the
+    # tuning task (the guard's enter, exit, state) finds the old file or the new
+    # one, never a part of one (between the delete and the rename, an instant,
+    # none); a failure part-way leaves each file whole and is thrown, and a file
+    # whose rename failed after its delete keeps its checked copy in the stage,
+    # named in the error. Everything is read back (Test-IemElevatedItem, the
+    # hashes). Returns the three hashes, never the profile's content (site
+    # values, P6).
+    param(
+        [Parameter(Mandatory)][string]$SourceDir,
+        [Parameter(Mandatory)][string]$TuningSha256,
+        [Parameter(Mandatory)][string]$MeasureSha256,
+        [string]$ProfileSha256 = '',
+        [switch]$KeepProfile,
+        [string]$Root = '',
+        [string]$User = ''
+    )
+    if ($KeepProfile.IsPresent -eq [bool]$ProfileSha256) {
+        throw 'Install-IemTuning takes exactly one of -ProfileSha256 (a new profile) and -KeepProfile (the installed one)'
+    }
+    $Root = Resolve-IemElevatedRoot -ElevatedRoot $Root
+    $u = Resolve-IemUser -User $User
+    $tuning = Join-Path $Root 'tuning'
+    $want = [ordered]@{ 'IemTuning.psm1' = $TuningSha256; 'IemMeasure.psm1' = $MeasureSha256 }
+    if (-not $KeepProfile) { $want['profile.json'] = $ProfileSha256 }
+    $bytes = @{}
+    foreach ($name in @($want.Keys)) {
+        if ($want[$name] -cnotmatch '^[0-9a-f]{64}$') { throw "${name}: the expected SHA-256 is not 64 lowercase hex digits" }
+        $b = [IO.File]::ReadAllBytes((Join-Path $SourceDir $name))
+        $got = Get-IemBytesSha256 -Bytes $b
+        if ($got -cne $want[$name]) { throw "${name}: sha256 $got, expected $($want[$name]): refused, nothing written" }
+        $bytes[$name] = $b
+    }
+    $rootBad = Test-IemElevatedItem -Path $Root -UserSid $u.sid
+    if ($rootBad.Count -gt 0) { throw ('the elevated root is refused (Register-IemTasks makes it): ' + ($rootBad -join '; ')) }
+    $stage = Join-Path $Root 'tuning-stage'
+    $targets = @{}
+    $staged = @{}
+    foreach ($name in $script:TuningFiles) { $targets[$name] = Join-Path $tuning $name; $staged[$name] = Join-Path $stage $name }
+    foreach ($p in @($tuning, $stage) + @($targets.Values) + @($staged.Values)) {
+        if (Test-IemReparsePoint -Path $p) { throw "$p is a junction or a link: refused, nothing written" }
+    }
+    $profilePath = $staged['profile.json']
+    if ($KeepProfile) {
+        $profilePath = $targets['profile.json']
+        $bad = @()
+        foreach ($p in @($tuning, $profilePath)) { $bad += Test-IemElevatedItem -Path $p -UserSid $u.sid }
+        if ($bad.Count -gt 0) { throw ('the installed profile is refused (-KeepProfile needs an admin-only one): ' + ($bad -join '; ')) }
+    }
+    Install-IemElevatedFolder -Path $stage -UserSid $u.sid
+    $swapping = $false
+    try {
+        foreach ($name in @($want.Keys)) { Write-IemElevatedFile -Path $staged[$name] -Bytes $bytes[$name] }
+        Import-Module $staged['IemTuning.psm1'] -Force
+        Assert-IemLayout -Profile (Read-IemProfile -Path $profilePath)
+        Install-IemElevatedFolder -Path $tuning -UserSid $u.sid
+        $swapping = $true
+        foreach ($name in @($want.Keys)) {
+            if (Test-IemReparsePoint -Path $targets[$name]) { throw "$($targets[$name]) is a junction or a link: refused" }
+            if (Test-Path -LiteralPath $targets[$name]) { [IO.File]::Delete($targets[$name]) }
+            [IO.File]::Move($staged[$name], $targets[$name])
+        }
+        $read = @{}
+        foreach ($name in $script:TuningFiles) {
+            $bad = Test-IemElevatedItem -Path $targets[$name] -UserSid $u.sid
+            if ($bad.Count -gt 0) { throw ('tuning file read-back: ' + ($bad -join '; ')) }
+            $read[$name] = (Get-FileHash -LiteralPath $targets[$name] -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($want.Contains($name) -and $read[$name] -cne $want[$name]) { throw "$name does not read back: sha256 $($read[$name])" }
+        }
+    } catch {
+        $err = "$_"
+        # A rename that failed after its target's delete: the checked copy stays
+        # staged (named), never removed with the stage.
+        $lost = @()
+        if ($swapping) {
+            $lost = @(@($want.Keys) | Where-Object { -not (Test-Path -LiteralPath $targets[$_]) -and (Test-Path -LiteralPath $staged[$_]) })
+        }
+        if ($lost.Count -gt 0) {
+            $err += "; the tuning folder lacks $($lost -join ', '): the checked copies stay in $stage; run the install again"
+        } else {
+            try { Remove-IemTuningStage -Stage $stage } catch { $err += "; the staging folder $stage was not removed: $($_.Exception.Message)" }
+        }
+        throw $err
+    }
+    Remove-IemTuningStage -Stage $stage
+    [pscustomobject]@{ tuning = $read['IemTuning.psm1']; measure = $read['IemMeasure.psm1']; profile = $read['profile.json'] }
 }
 
 # ---- firewall (P9) ----

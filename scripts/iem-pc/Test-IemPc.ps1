@@ -1244,4 +1244,7 @@ exit 1
     Remove-Item -Path 'Env:\ACTIONS_RUNNER_INPUT_TOKEN' -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $base -Recurse -Force -ErrorAction SilentlyContinue
 }
+# Install-IemTuning (#15) in a process of its own: it imports S1c's IemTuning.psm1.
+& powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $here 'Test-IemTuningInstall.ps1')
+if ($LASTEXITCODE -ne 0) { throw "FAILED: Test-IemTuningInstall.ps1 (exit $LASTEXITCODE)" }
 Write-Host 'Test-IemPc: all passed'

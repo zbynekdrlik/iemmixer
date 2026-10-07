@@ -3,8 +3,10 @@
 
 `iemmode` over ssh with the EVENT-NOW discipline, attested bundles from CI
 (fetch, install, activate), HIL dispatch on the private ops repo, PC bootstrap through
-the bundle's IemPc.psm1 (dev time only), and the hand-over of an open S1a
-window.
+the bundle's IemPc.psm1 (dev time only), S1c's tuning modules and profile into
+the PC's elevated tuning folder (`tuning-install`, refreshed after `activate`:
+iempc_tuning.py), a kernel DPC/ISR trace on the guard's engine (`trace`:
+iempc_trace.py, PC_XPERF below), and the hand-over of an open S1a window.
 
 "ide event": the flag file (~/.config/iemmixer/EVENT-NOW) exists. `event`
 writes it first when it is missing (a flag it cannot write is a warning,
@@ -48,8 +50,9 @@ guard again.
 Site values come only from the private env file ($PC_ENV, default
 ~/.config/iemmixer/iem-pc.env): PC_SSH (the ssh destination), PC_ROOT (the
 root folder on the PC, Windows form), PC_ROOT_SCP (the same folder as scp
-names it) and PC_BIN (optional, default: bin under PC_ROOT). Nothing is ever
-ended by force.
+names it), PC_BIN (optional, default: bin under PC_ROOT) and PC_XPERF
+(optional, xperf.exe's full path on the PC; `trace` refuses without it).
+Nothing is ever ended by force.
 
 Known limits (S6 Task 16): `iemmode event --direct` runs the switch inside
 the ssh session, so a session cut before it ends (a Bash timeout) stops it
@@ -77,6 +80,9 @@ import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterator
+
+import iempc_trace
+import iempc_tuning
 
 HERE = Path(__file__).resolve().parent
 SPIKE_DIR = HERE.parent / "asio-spike"
@@ -705,11 +711,12 @@ def latest_record_sha() -> str:
     return max(found)[1]
 
 
-def extract_member(sha: str, rec: dict, name: str) -> tuple[Path, str]:
-    """A top-level file of the fetched, verified zip, checked against its sums."""
+def extract_member(sha: str, rec: dict, name: str, nested: bool = False) -> tuple[Path, str]:
+    """A top-level file of the fetched, verified zip, checked against its sums;
+    with `nested` one under `tuning/` (S1c's modules, iempc_tuning)."""
     want = (rec.get("sums") or {}).get(name)
-    if "/" in name or want is None:
-        raise StepError(f"{name} is not a listed top-level file of bundle {sha}")
+    if ("/" in name) != nested or (nested and not name.startswith("tuning/")) or want is None:
+        raise StepError(f"{name} is not a listed {'tuning' if nested else 'top-level'} file of bundle {sha}")
     z = check_local_zip(sha, rec)
     with zipfile.ZipFile(z) as zf:
         infos = [i for i in zf.infolist() if i.filename.replace("\\", "/") == name]
@@ -719,7 +726,8 @@ def extract_member(sha: str, rec: dict, name: str) -> tuple[Path, str]:
     if hashlib.sha256(data).hexdigest() != want:
         raise StepError(f"{name} in {z.name} does not match SHA256SUMS")
     out = bundle_dir(sha) / name
-    tmp = out.with_name(name + ".tmp")
+    out.parent.mkdir(mode=0o700, exist_ok=True)
+    tmp = out.with_name(out.name + ".tmp")
     tmp.write_bytes(data)
     os.chmod(tmp, 0o600)
     tmp.replace(out)
@@ -1074,6 +1082,7 @@ def activate_offline(ctx: Ctx, sha: str) -> int:
         bring_guard_back(ctx)
         return code
     emit({"handover": await_guard_build(ctx, sha)})
+    iempc_tuning.refresh_after_activate(ctx, sys.modules[__name__], sha)
     return 0
 
 
@@ -1096,7 +1105,18 @@ def cmd_activate(ctx: Ctx) -> int:
     if code != 0:
         return code
     emit({"handover": await_guard_build(ctx, sha)})
+    iempc_tuning.refresh_after_activate(ctx, sys.modules[__name__], sha)
     return 0
+
+
+def cmd_tuning_install(ctx: Ctx) -> int:
+    """S1c's tuning modules and the profile into the elevated tuning folder; the code lives in iempc_tuning.py (#15, #36)."""
+    return iempc_tuning.install(ctx, sys.modules[__name__])
+
+
+def cmd_trace(ctx: Ctx) -> int:
+    """A kernel DPC/ISR trace on the guard's engine; the code lives in iempc_trace.py (#15, #36)."""
+    return iempc_trace.trace(ctx, sys.modules[__name__])
 
 
 def load_dispatches() -> list[dict]:
@@ -1281,6 +1301,8 @@ COMMANDS: dict[str, Spec] = {
     "dispatch-hil": Spec(cmd_dispatch_hil, pc=False, dev_time=True, locked=True),
     "bootstrap": Spec(cmd_bootstrap, pc=True, dev_time=True, locked=True),
     "handover-s1a": Spec(cmd_handover_s1a, pc=True, dev_time=True, locked=True),
+    "tuning-install": Spec(cmd_tuning_install, pc=True, dev_time=True, locked=True),
+    "trace": Spec(cmd_trace, pc=True, dev_time=True, locked=True),
 }
 
 
@@ -1308,6 +1330,14 @@ def build_parser() -> argparse.ArgumentParser:
     boot.add_argument("--sha", help="the fetched bundle whose IemPc.psm1 runs (default: the newest fetched)")
     boot.add_argument("step", help="an IemPc.psm1 function, e.g. Get-IemBootstrapState")
     boot.add_argument("params", nargs=argparse.REMAINDER, help="-Name value pairs and -Switch flags")
+    tuning = sub.add_parser("tuning-install")
+    tuning.add_argument("--sha", required=True, help="the fetched bundle whose tuning modules and IemPc.psm1 run")
+    tuning.add_argument("--profile", help="the private tuning profile (default: $TUNING_PROFILE or ~/.config/iemmixer/pc-tuning.json)")
+    trace = sub.add_parser("trace")
+    trace.add_argument("--label", required=True, help="the run's name: 1 to 40 of a-z 0-9 -")
+    trace.add_argument("--seconds", type=int, required=True, help="how long the kernel trace runs")
+    trace.add_argument("--circular-mb", type=int, help="a circular kernel file of this size (a long soak)")
+    trace.add_argument("--profile", help="the private tuning profile whose card and audio processors are watched")
     return ap
 
 
