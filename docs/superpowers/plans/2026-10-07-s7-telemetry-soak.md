@@ -1411,3 +1411,63 @@ $P status
 - crates/iem-guard/src/daemon.rs (with the new switch_log.rs)
 - crates/iem-soakclient/src/net.rs (new; with lib.rs)
 - scripts/iem-pc/soak_verdict.py (new; with iempc_soak.py)
+---
+
+## Part 3: switch timing (design §5, §10 item 3; #10 decision of 2026-10-07)
+
+Tasks 13 and 14 are one lane each, in order. Task 15 is the main session's run. The Global Constraints above apply.
+
+### Task 13: Guard: an unwound entry's record spans the entry and its unwind [lane, ~250 LoC]
+
+**Why.** When a dev or live entry fails and unwinds, `back_to_event` runs a new switch. That switch's `begin` restarts the `Laps`, and the entry never reaches `finish`. So the entry's steps are dropped, and the in-ear silence (REAPER quit by the entry, REAPER back only at the unwind's handover) is in neither record. The decision is that the unwind's record carries the failed entry's steps as its prefix.
+
+**Files:** `crates/iem-guard/src/switch_log.rs`, `crates/iem-guard/src/daemon.rs` (call sites only, #36), `crates/iem-guard/src/daemon/record_tests.rs`, `.claude/rules/guard.md`.
+
+- [ ] **Step 1 (RED).**
+  - `switch_log::tests::a_resumed_clock_keeps_the_steps_and_times_from_the_last_lap`: `Laps::resume` keeps the steps and the last instant; the next lap is timed from the failed step's lap.
+  - `record_tests::an_unwound_dev_entry_records_its_steps_then_the_unwind`:
+    - `FakePc` fails `EngineArm` (policy `Unwind`) on a dev entry from event;
+    - `g.state.last_switch` has `from: Event`, `to: Event`, `ended_in: Event` and `unwound: Some(Dev)`;
+    - `started` is the entry's start;
+    - the steps are the entry's up to `EngineArm`, then the unwind's;
+    - `silence_ms` runs from the entry's `ReaperSaveQuit` through the unwind's `ReaperHandover`.
+  - `record_tests::a_crash_fallback_record_has_no_unwound_entry`: the watch's dev → event fallback is a switch of its own, so `unwound` is `None`.
+  - `state` and `proto` round trips carry `unwound`, and an older record without it reads as `None`.
+- [ ] **Step 2 (GREEN).**
+  - `LastSwitch` gains `#[serde(default)] pub unwound: Option<Mode>`, the target of the entry this record unwinds. `Laps::resume(&mut self)` keeps `steps` and `last`.
+  - `Guard` gains `unwinding: Option<(Mode, u64)>`, the failed entry's target and its `Switching.started`. `back_to_event` sets it from `g.state.switching` before it calls `run_switch`. `begin` calls `laps.resume()` instead of `laps.start(now)` when `unwinding` is set.
+  - `finish` builds the record with `unwound` and the entry's `started`, then clears `unwinding`.
+  - A pre-empted entry ("ide event" during dev) unwinds through the same path, so its record spans it too.
+- [ ] **Step 3.** Add a "Switch record" sentence to `guard.md`. Commits `test(guard): [red] …` / `feat(guard): [green] … (#10)`.
+
+### Task 14: `iempc switch-test` [lane, ~350 LoC; after Task 13 is green in CI]
+
+**Files:** `scripts/iem-pc/iempc_switch.py` (new; `ip` passed in, never imported), `scripts/iem-pc/test_iempc_switch.py`, `scripts/iem-pc/iempc.py` (call sites only), `.claude/rules/guard.md`.
+
+- **What it does (dev time only):**
+  - Refuses unless:
+    - the guard is in dev, not switching, with no HIL job;
+    - EVENT-NOW does not exist;
+    - the running engine is the active bundle.
+  - Runs `iemmode event` directly through the guard (the pipe's own switch). It never writes EVENT-NOW: that flag is the owner's signal, and the test must not leave it behind.
+  - Reads `last_switch` (dev → event) from the reply or from one `iemmode status`.
+  - Then, unless EVENT-NOW appeared meanwhile (an "ide event" during the test wins: no dev leg, the PC stays in event), runs `iemmode dev` and reads `last_switch` (event → dev).
+  - Emits one JSON object with both records' `silence_ms`, the step times and the handover time (from the first of `ReaperStart` / `ReaperHandover` through `AppHandover`).
+  - Prints a verdict:
+    - dev → event silence ≤ 60 000 ms;
+    - handover ≤ 90 000 ms;
+    - the dev leg `outcome` `done`.
+  - A red verdict names the first failing number. It still ends in dev when it can; nothing is ever force-ended.
+- **Tests:** on synthetic replies (`test_iempc.Base` fakes):
+  - every refusal;
+  - no EVENT-NOW written;
+  - a flag before the dev leg means no `iemmode dev` and the run exits with the event path's code;
+  - the verdict's three bounds, each on both sides;
+  - the handover window's ends.
+
+### Task 15: The switch-timing run (main session, dev time)
+
+After Tasks 13 and 14 are on the PC:
+
+1. `iempc switch-test`, three runs a few minutes apart. Post the numbers on #10.
+2. Tighten the guard's 120 s handover bound (S6 §11) to the measured worst case plus margin. Make it its own small lane, with the numbers in the commit.
