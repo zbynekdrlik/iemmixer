@@ -581,7 +581,8 @@ jobs:
           New-Item -ItemType Directory -Force -Path (Join-Path $root 'bin') | Out-Null
           Copy-Item -Path (Join-Path $env:RUNNER_TEMP 'asio-spike\*') -Destination (Join-Path $root 'bin')
           $tid = (Get-Process -Id $PID).Threads[0].Id
-          $script = @(python scripts/pc-tuning/tuning_window.py poll-script --root $root --governor EventLog --pid $PID --tid $tid)
+          $sums = Join-Path $env:RUNNER_TEMP 'asio-spike\SHA256SUMS'
+          $script = @(python scripts/pc-tuning/tuning_window.py poll-script --root $root --governor EventLog --pid $PID --tid $tid --sums $sums)
           if ($LASTEXITCODE -ne 0) { throw "poll-script exited $LASTEXITCODE" }
           $out = @($script | powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command -)
           if ($LASTEXITCODE -ne 0) { throw "powershell exited $LASTEXITCODE" }
@@ -611,11 +612,12 @@ jobs:
           New-Item -ItemType Directory -Force -Path (Join-Path $root 'bin'), (Join-Path $root 'queue') | Out-Null
           Copy-Item -Path (Join-Path $env:RUNNER_TEMP 'asio-spike\*') -Destination (Join-Path $root 'bin')
           $stop = Join-Path $root 'queue\stop'
+          $sums = Join-Path $env:RUNNER_TEMP 'asio-spike\SHA256SUMS'
           $since = (Get-Date).ToUniversalTime().ToString('o')
           $refused = @(python -c "import sys; sys.path.insert(0, 'scripts/pc-tuning'); import tuning_window as tw; print(tw.ANALYSIS_REFUSED)")[-1]
           if ($LASTEXITCODE -ne 0 -or -not $refused) { throw "the refusal text could not be read (exit $LASTEXITCODE)" }
           function Invoke-AnalysisStep {
-            $script = @(python scripts/pc-tuning/tuning_window.py analysis-script --root $root --since $since)
+            $script = @(python scripts/pc-tuning/tuning_window.py analysis-script --root $root --since $since --sums $sums)
             if ($LASTEXITCODE -ne 0) { throw "analysis-script exited $LASTEXITCODE" }
             $out = @($script | powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command -)
             if ($LASTEXITCODE -ne 0) { throw "powershell exited $LASTEXITCODE" }
@@ -630,6 +632,12 @@ jobs:
           # never the user's TEMP (#15); GetTempPath ends with a backslash.
           $etemp = (Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'iemmixer\temp') + '\'
           if ($doc.r.temp -ne $etemp) { throw "the step's temp folder is '$($doc.r.temp)', not '$etemp'" }
+          # The four modules were imported from the admin-only stage, never from bin (#15).
+          $estage = (Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'iemmixer\bootstrap-stage') + '\'
+          $mods = @($doc.r.modules)
+          if ($mods.Count -ne 4 -or @($mods | Where-Object { -not "$_".StartsWith($estage, [StringComparison]::OrdinalIgnoreCase) }).Count -ne 0) {
+            throw "the step's modules are not all in the stage: $($mods -join ', ')"
+          }
           New-Item -ItemType File -Force -Path $stop | Out-Null
           (Get-Item -LiteralPath $stop).LastWriteTimeUtc = [datetime]::UtcNow.AddMinutes(-5)
           $doc = Invoke-AnalysisStep

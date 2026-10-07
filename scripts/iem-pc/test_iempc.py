@@ -71,7 +71,8 @@ class FakePc:
     arguments, flag mode) and module call, answers with scripted replies, and
     ends a watched call on the flag the way `guarded` does."""
 
-    NATIVE = re.compile(r"\$x = ('(?:[^']|'')*') ; \$a = @\((.*?)\) ; \$r = ")
+    NATIVE = re.compile(r"\$x = ('(?:[^']|'')*') ; \$a = @\(((?:'(?:[^']|'')*'(?:, )?)*)\) ; .*?\$r = @\(& \$x @a")
+    WANT = re.compile(r"\$iemH -cne '([0-9a-f]{64})'")
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, list[str], str]] = []
@@ -82,8 +83,14 @@ class FakePc:
         self.replies: dict = {}  # args -> (exit, stdout[, stderr]) or a callable returning one
         self.module_result = "ok"
         # A module script holding the text gets this result (or a callable's) instead: the
-        # elevated tuning folder's profile check after every activate (iempc_tuning) finds none.
-        self.texts: dict = {"profile.json": False}
+        # elevated tuning folder's profile check after every activate (iempc_tuning) finds none,
+        # and the admin-only bin's install (#15) reads back the hash it was given.
+        self.texts: dict = {"profile.json": False, "$iemDst": self.bin_installed}
+        # An iemmode call's note (#15): the admin-only copy did not read back, PC_BIN ran.
+        self.bin_note = None
+
+    def bin_installed(self) -> str:
+        return self.WANT.findall(self.modules[-1][0])[-1]
 
     def ssh_ps(self, env, script, timeout, event):
         m = self.NATIVE.search(script)
@@ -95,7 +102,7 @@ class FakePc:
             self.native_scripts.append(script)
             reply = self.replies.get(tuple(args), (0, OK))
             code, out, err = (*(reply() if callable(reply) else reply), "")[:3]
-            doc = {"exit": code, "out": out, "err": err}
+            doc = {"exit": code, "out": out, "err": err, "note": self.bin_note if "$iemUse" in script else None}
         else:
             self.modules.append((script, event))
             r = next((v for k, v in self.texts.items() if k in script), self.module_result)
@@ -382,8 +389,9 @@ class ScriptTests(Base):
                  "[IO.File]::WriteAllBytes($iemMod, $iemB)", "& $iemOnly $iemMod",
                  f"(Get-FileHash -LiteralPath $iemMod -Algorithm SHA256).Hash.ToLowerInvariant() -cne '{hexd}'",
                  "Import-Module $iemMod -Force", "$r = & { Get-IemBootstrapState }"]
-        at = [line.index(t) for t in order]
-        self.assertEqual(at, sorted(at))
+        at = 0   # each step after the one before (the keep check reads the copy back too, #15 review)
+        for step in order:
+            at = line.index(step, at)
         # The upload is read once (and named in the mismatch); nothing else reads or imports it.
         self.assertEqual(line.count("'X:\\run\\IemPc.psm1'"), 2)
         self.assertEqual(line.count("Import-Module"), 1)
@@ -1046,7 +1054,13 @@ class InstallTests(Base):
         self.assertEqual(self.pc.scps[1], (str(ip.bundle_dir(SHA) / "iemmixer-guard.exe"),
                                            f"tester@pc.test:/X:/root/incoming/iemmixer-guard-{SHA}.exe", "finish"))
         self.assertEqual(self.pc.calls[0][0], f"iemmixer-guard-{SHA}.exe")
-        self.assertIn(ip.hash_check(guard, sha256(b"synthetic iemmixer-guard.exe")), self.pc.native_scripts[0])
+        # #15 (review): read once, checked, staged admin-only and run from the stage.
+        run, at = self.pc.native_scripts[0], 0
+        for step in (f"$iemB = [IO.File]::ReadAllBytes({ip.ps_quote(guard)})",
+                     f"$iemH -cne '{sha256(b'synthetic iemmixer-guard.exe')}'",
+                     "$iemMod = Join-Path $iemStage 'iemmixer-guard.exe'", "& $iemOnly $iemMod",
+                     "$x = $iemMod ; $r = @(& $x @a 2>&1)"):
+            at = run.index(step, at)
         self.assertEqual((docs[-1]["via"], docs[-1]["output"]), ("iemmixer-guard (first bundle)", "installed"))
 
     def test_an_open_spike_window_refuses_install_but_not_the_first_bundle(self) -> None:
@@ -1109,13 +1123,14 @@ class ActivateTests(Base):
         self.assertEqual(self.pc.timeouts, [ip.SWITCH_S] + [ip.STATUS_S] * 4)
         self.assertEqual({k: docs[0][k] for k in ("iemmode", "exit")}, {"iemmode": ["activate", SHA], "exit": 0})
         self.assertEqual(docs[0]["reply"]["detail"], f"activated {SHA}; the guard hands over to its new exe")
-        self.assertEqual(docs[1], {"handover": {"guard_build": SHA, "reads": 4, "mode": "event",
+        self.assertEqual(docs[1]["elevated_bin"], "failed")   # not fetched here; before the hand-over (#15)
+        self.assertEqual(docs[2], {"handover": {"guard_build": SHA, "reads": 4, "mode": "event",
                                                 "detail": "mode event; bundle " + SHA}})
 
     def test_a_guard_already_on_the_sha_is_read_once(self) -> None:
         self.statuses(self.status(SHA))
         code, docs, _ = self.run_main("activate", "--sha", SHA)
-        self.assertEqual((code, docs[-1]["handover"]["reads"]), (0, 1))
+        self.assertEqual((code, docs[2]["handover"]["reads"]), (0, 1))
         self.assertEqual(len(self.pc.calls), 2)
 
     def test_a_status_read_that_fails_is_read_again(self) -> None:
@@ -1125,7 +1140,7 @@ class ActivateTests(Base):
         self.statuses(ssh_cut, self.status(SHA))
         code, docs, err = self.run_main("activate", "--sha", SHA)
         self.assertEqual(code, 0, err)
-        self.assertEqual(docs[-1]["handover"]["reads"], 2)
+        self.assertEqual(docs[2]["handover"]["reads"], 2)
 
     def test_a_hand_over_that_never_names_the_sha_fails_within_its_bound(self) -> None:
         ip.HANDOVER_S = 0.2
@@ -1133,7 +1148,7 @@ class ActivateTests(Base):
         start = time.monotonic()
         code, docs, err = self.run_main("activate", "--sha", SHA)
         self.assertLess(time.monotonic() - start, 5)
-        self.assertEqual((code, len(docs)), (1, 1))
+        self.assertEqual((code, [next(iter(d)) for d in docs]), (1, ["iemmode", "elevated_bin"]))
         self.assertIn(f"the guard did not name build {SHA} within 0.2 s", err)
         self.assertIn(f"the last: exit 0, guard_build '{SHA2}'", err)
         self.assertIn("never force-end", err)
@@ -1235,14 +1250,21 @@ class OfflineActivateTests(Base):
                                          ("iemmixer-guard.exe", ["activate", SHA], "finish"),
                                          ("iemmode.exe", ["status"], "abandon")])
         self.assertEqual(self.reads(), ["abandon"] * 3)
+        # #15: the guard is read once from bundles\<sha>, checked by the fetch record, staged
+        # admin-only and run from the stage, never from the user's root.
         guard_run = self.pc.native_scripts[1]
-        self.assertIn(ip.hash_check(self.EXE, sha256(b"synthetic iemmixer-guard.exe")) + " ; $x = " + ip.ps_quote(self.EXE),
-                      guard_run)
+        at = 0
+        for step in (f"$iemB = [IO.File]::ReadAllBytes({ip.ps_quote(self.EXE)})",
+                     f"$iemH -cne '{sha256(b'synthetic iemmixer-guard.exe')}'", "$iemStage = Join-Path $iemRoot 'bootstrap-stage'",
+                     "$iemMod = Join-Path $iemStage 'iemmixer-guard.exe'", "& $iemOnly $iemMod", f"$x = {ip.ps_quote(self.EXE)}",
+                     "$x = $iemMod ; $r = @(& $x @a 2>&1)"):
+            at = guard_run.index(step, at)
+        self.assertEqual(guard_run.count(ip.ps_quote(self.EXE)), 3)   # read once, named in the mismatch, the fallback text
         self.assertEqual(self.pc.timeouts, [ip.STATUS_S, ip.INSTALL_S, ip.STATUS_S])
-        self.assertEqual([next(iter(d)) for d in docs], ["iemmode", "guard_stopped", "iemmixer-guard", "handover"])
+        self.assertEqual([next(iter(d)) for d in docs], ["iemmode", "guard_stopped", "iemmixer-guard", "elevated_bin", "handover"])
         self.assertEqual(docs[1], {"guard_stopped": {"reads": 2}})
         self.assertEqual((docs[2]["iemmixer-guard"], docs[2]["exit"]), (["activate", SHA], 0))
-        self.assertEqual(docs[3]["handover"]["guard_build"], SHA)
+        self.assertEqual(docs[4]["handover"]["guard_build"], SHA)
 
     def test_without_a_running_guard_nothing_is_quit(self) -> None:
         self.guards(0)

@@ -89,10 +89,13 @@ class TuningInstallTests(TuningBase):
         self.assertEqual(self.pc.scps, [(str(ip.bundle_dir(SHA) / "IemPc.psm1"), f"{dest}/IemPc.psm1", "finish"),
                                         (self.staged("IemTuning.psm1"), f"{dest}/tuning/IemTuning.psm1", "finish"),
                                         (self.staged("IemMeasure.psm1"), f"{dest}/tuning/IemMeasure.psm1", "finish"),
-                                        (str(self.profile), f"{dest}/tuning/profile.json", "finish")])
+                                        (str(self.profile), f"{dest}/tuning/profile.json", "finish"),
+                                        # then the admin-only bin's iemmode.exe (#15)
+                                        (str(ip.bundle_dir(SHA) / "iemmode.exe"),
+                                         f"tester@pc.test:/X:/root/incoming/iemmode-{SHA}.exe", "finish")])
         for name in ("IemTuning.psm1", "IemMeasure.psm1"):
             self.assertEqual(Path(self.staged(name)).read_bytes(), MODULES[f"tuning/{name}"], name)
-        script, mode = self.pc.modules[-1]
+        script, mode = next(m for m in self.pc.modules if "Install-IemTuning" in m[0])
         self.assertEqual(mode, "finish")
         self.assertIn(f"$iemB = [IO.File]::ReadAllBytes('{MODULE}')", script)
         self.assertIn(f"$iemH -cne '{sha256(b'synthetic IemPc.psm1')}'", script)
@@ -103,8 +106,9 @@ class TuningInstallTests(TuningBase):
         self.assertEqual(m.groups(), (SOURCE, sums["tuning/IemTuning.psm1"], sums["tuning/IemMeasure.psm1"],
                                       sha256(self.profile.read_bytes()), None))
         self.assertEqual((m.group(2), m.group(3)), (sha256(MODULES["tuning/IemTuning.psm1"]), sha256(MODULES["tuning/IemMeasure.psm1"])))
-        self.assertEqual(docs[-1], {"tuning_install": SHA, "hashes": {"tuning": m.group(2), "measure": m.group(3),
+        self.assertEqual(docs[-2], {"tuning_install": SHA, "hashes": {"tuning": m.group(2), "measure": m.group(3),
                                                                       "profile": m.group(4)}})
+        self.assertEqual(docs[-1]["elevated_bin"], SHA)
 
     def test_profile_names_another_private_file(self) -> None:
         self.fetched()
@@ -112,7 +116,7 @@ class TuningInstallTests(TuningBase):
         other.write_text(json.dumps({**PROFILE, "governor": "other"}), encoding="utf-8")
         code, _, err = self.run_main("tuning-install", "--sha", SHA, "--profile", str(other))
         self.assertEqual(code, 0, err)
-        self.assertEqual(self.pc.scps[-1][0], str(other))
+        self.assertEqual(self.pc.scps[-2][0], str(other))   # the last one is the admin-only bin's iemmode.exe (#15)
         self.assertEqual(self.installs()[0].group(4), sha256(other.read_bytes()))
 
     def test_a_profile_load_profile_refuses_never_reaches_the_pc(self) -> None:
@@ -203,12 +207,13 @@ class RefreshTests(TuningBase):
         self.pc.texts["profile.json"] = True
         code, docs, err = self.run_main("activate", "--sha", SHA)
         self.assertEqual(code, 0, err)
-        self.assertEqual([next(iter(d)) for d in docs], ["iemmode", "handover", "tuning_refresh"])
+        self.assertEqual([next(iter(d)) for d in docs], ["iemmode", "elevated_bin", "handover", "tuning_refresh"])
         self.assertEqual(self.profile_checks(), ["abandon"])
         [m] = self.installs()
         sums = ip.load_record(SHA)["sums"]
         self.assertEqual(m.groups(), (SOURCE, sums["tuning/IemTuning.psm1"], sums["tuning/IemMeasure.psm1"], None, " -KeepProfile"))
-        self.assertEqual([s[1].rsplit("/", 1)[1] for s in self.pc.scps], ["IemPc.psm1", "IemTuning.psm1", "IemMeasure.psm1"])
+        self.assertEqual([s[1].rsplit("/", 1)[1] for s in self.pc.scps],
+                         [f"iemmode-{SHA}.exe", "IemPc.psm1", "IemTuning.psm1", "IemMeasure.psm1"])
         self.assertEqual({s[2] for s in self.pc.scps}, {"finish"})
         install = next(s for s, _ in self.pc.modules if "Install-IemTuning" in s)
         self.assertIn("Import-Module $iemMod -Force ; $r = & { Install-IemTuning ", install)   # the staged copy (#15)
@@ -221,8 +226,8 @@ class RefreshTests(TuningBase):
         code, docs, err = self.run_main("activate", "--sha", SHA)
         self.assertEqual(code, 0, err)
         self.assertEqual(self.profile_checks(), ["abandon"])
-        self.assertEqual((self.installs(), self.pc.scps), ([], []))
-        self.assertEqual([next(iter(d)) for d in docs], ["iemmode", "handover"])
+        self.assertEqual((self.installs(), [s[1].rsplit("/", 1)[1] for s in self.pc.scps]), ([], [f"iemmode-{SHA}.exe"]))
+        self.assertEqual([next(iter(d)) for d in docs], ["iemmode", "elevated_bin", "handover"])
         self.assertIn("no tuning profile in the PC's elevated tuning folder", err)
 
     def test_a_failed_refresh_is_reported_and_the_activation_counts(self) -> None:
@@ -289,7 +294,7 @@ class RefreshTests(TuningBase):
         code, docs, err = self.run_main("activate", "--sha", SHA, "--offline")
         self.assertEqual(code, 0, err)
         self.assertEqual([c[0] for c in self.pc.calls], ["iemmode.exe", "iemmixer-guard.exe", "iemmode.exe"])
-        self.assertEqual(next(iter(docs[-2])), "handover")
+        self.assertEqual([next(iter(d)) for d in docs][-3:], ["elevated_bin", "handover", "tuning_refresh"])
         self.assertEqual(docs[-1]["tuning_refresh"], SHA)
         self.assertEqual(self.installs()[0].group(5), " -KeepProfile")
 

@@ -500,13 +500,22 @@ class PollScriptTests(unittest.TestCase):
         self.assertNotIn("'unknown'", body)
         self.assertRegex(body, r"\$LASTEXITCODE -ne 0 -or -not \(\$pc -match '[^']+'\)\) \{ throw ")
 
+    def sums(self) -> tuple[str, dict]:
+        """A bundle's SHA256SUMS (synthetic), as the CI runner's bundle has it (#15)."""
+        sums = {n: f"{i:064x}" for i, n in enumerate(tw.sw.BUNDLE_FILES)}
+        path = Path(tempfile.mkdtemp()) / "SHA256SUMS"
+        path.write_text("".join(f"{h}  {n}\n" for n, h in sums.items()), encoding="utf-8")
+        return str(path), sums
+
     def test_poll_script_prints_what_sw_ps_sends(self) -> None:
         out = io.StringIO()
+        path, sums = self.sums()
         with mock.patch.dict(os.environ, {"SPIKE_ENV": "/nonexistent/asio-spike.env"}), contextlib.redirect_stdout(out):
-            code = tw.main(["poll-script", "--root", "C:\\r", "--governor", "EventLog", "--pid", "12", "--tid", "34"])
+            code = tw.main(["poll-script", "--root", "C:\\r", "--governor", "EventLog", "--pid", "12", "--tid", "34",
+                            "--sums", path])
         self.assertEqual(code, 0)
-        self.assertEqual(out.getvalue(), tw.sw.ps_script("C:\\r", tw.poll_body("EventLog", 12, 34)) + "\n")
-        self.assertIn("Import-Module (Join-Path 'C:\\r' 'bin\\SpikePc.psm1')", out.getvalue())
+        self.assertEqual(out.getvalue(), tw.sw.ps_script("C:\\r", tw.poll_body("EventLog", 12, 34), sums) + "\n")
+        self.assertIn("Import-Module (Join-Path $iemStage 'SpikePc.psm1')", out.getvalue())   # the stage copy (#15)
 
     def test_analysis_script_prints_an_analysis_steps_start_as_sw_ps_sends_it(self) -> None:
         # F2 round 3, m11: the PC side of the analysis guard (Idle, the stop file's
@@ -515,11 +524,12 @@ class PollScriptTests(unittest.TestCase):
         # _measure composes it (analysis_step), with a probe as the step's body.
         out = io.StringIO()
         root, since = "C:\\r", "2026-01-01T00:00:00.0000000Z"
+        path, sums = self.sums()
         with mock.patch.dict(os.environ, {"SPIKE_ENV": "/nonexistent/asio-spike.env"}), contextlib.redirect_stdout(out):
-            code = tw.main(["analysis-script", "--root", root, "--since", since])
+            code = tw.main(["analysis-script", "--root", root, "--since", since, "--sums", path])
         self.assertEqual(code, 0)
         step = tw.analysis_step(root, since, tw.ANALYSIS_PROBE)
-        self.assertEqual(out.getvalue(), tw.sw.ps_script(root, step) + "\n")
+        self.assertEqual(out.getvalue(), tw.sw.ps_script(root, step, sums) + "\n")
         self.assertEqual(step, " ; ".join([tw.analysis_guard(root, since), tw.sw.measure_import(root), tw.ANALYSIS_PROBE]))
         self.assertIn("PriorityClass", tw.ANALYSIS_PROBE)
         self.assertIn("Get-IemNow", tw.ANALYSIS_PROBE)              # IemMeasure loaded after the guard
@@ -532,17 +542,17 @@ class PollScriptTests(unittest.TestCase):
         point at <elevated root>\\temp (admin-only) before the import; the
         stop-only import compiles nothing and sets up nothing."""
         body = tw.sw.tuning_body(ENV, "Get-IemNow")
-        imp = body.index("Import-Module (Join-Path 'R' 'bin\\IemMeasure.psm1') -Force -Global")
+        imp = body.index("Import-Module (Join-Path $iemStage 'IemMeasure.psm1') -Force -Global")
         self.assertLess(body.index("$env:TEMP = $iemTemp ; $env:TMP = $iemTemp"), imp)
         self.assertLess(body.index("& $iemDir $iemTemp"), body.index("$env:TEMP = $iemTemp"))
         self.assertIn("$iemRoot = (Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'iemmixer')", body)
         self.assertIn("$iemTemp = Join-Path $iemRoot 'temp'", body)
         step = tw.analysis_step("R", "2026-01-01T00:00:00.0000000Z", "B")
-        self.assertLess(step.index("$env:TEMP = $iemTemp"), step.index("Import-Module (Join-Path 'R' 'bin\\IemMeasure.psm1')"))
+        self.assertLess(step.index("$env:TEMP = $iemTemp"), step.index("Import-Module (Join-Path $iemStage 'IemMeasure.psm1')"))
         self.assertLess(step.index(tw.ANALYSIS_REFUSED), step.index("$env:TEMP"))   # a refused step sets up nothing
         stop = tw.sw.trace_stop_body(ENV, "R\\run")
         self.assertNotIn("TEMP", stop)
-        self.assertNotIn("$iemDir", stop)
+        self.assertNotIn("$iemTemp", stop)   # the stage, never TEMP (#15)
 
 
 class RebootTests(unittest.TestCase):
@@ -864,7 +874,15 @@ class TuningSetupTests(unittest.TestCase):
         tw.sw.guarded = fake_guarded
         tw.sw.scp = lambda src, dst: self.copies.append((src, dst))
         self.env = dict(ENV, PC_SSH="u@pc", PC_TUNING_ROOT="C:\\t", PC_TUNING_ROOT_SCP="/C:/t", RAW_DIR=str(self.dir / "raw"))
-        tw.sw.save_state({"id": "w", "card": "reaper", "closed": False})
+        # The bundle the window's PC holds, as fetch-bundle records it: every session checks the
+        # modules it stages against its sums (#15).
+        sha = "a" * 40
+        bundle = tw.sw.bundle_dir(self.env, sha)
+        bundle.mkdir(parents=True)
+        (bundle / "SHA256SUMS").write_text("".join(f"{i:064x}  {n}\n" for i, n in enumerate(tw.sw.BUNDLE_FILES)),
+                                           encoding="utf-8")
+        (bundle.parent / f"{sha}.source-sha").write_text(sha + "\n", encoding="utf-8")
+        tw.sw.save_state({"id": "w", "card": "reaper", "closed": False, "bundle_sha": sha})
 
     def tearDown(self) -> None:
         tw.sw.STATE, tw.sw.EVENT_NOW, tw.sw.guarded, tw.sw.scp, tw.PROFILE = self.saved
