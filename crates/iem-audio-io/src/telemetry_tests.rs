@@ -116,6 +116,29 @@ fn late_missed_and_position_gaps_are_counted() {
     assert_eq!(t.callbacks(), WARMUP + 4);
 }
 
+/// S7: the backend records the interval telemetry judged in the stream's
+/// histogram, so `on_callback` hands it back exactly where it judges one.
+#[test]
+fn the_judged_interval_is_returned_after_the_warm_up() {
+    let t = Telemetry::new(32, 96_000.0);
+    let mut at = 1_000;
+    // The first callback and the warm-up are counted, never judged: even a
+    // missed interval among them returns nothing.
+    assert_eq!(t.on_callback(at, None), None);
+    for _ in 1..WARMUP {
+        at += 10 * P;
+        assert_eq!(t.on_callback(at, Some(0)), None);
+    }
+    // Callback 9: entry 9 minus entry 8.
+    at += P + 7;
+    assert_eq!(t.on_callback(at, None), Some(P + 7));
+    // A missed interval is returned too (the histogram's overflow bucket).
+    at += 3 * P;
+    assert_eq!(t.on_callback(at, None), Some(3 * P));
+    let s = t.snapshot();
+    assert_eq!((s.callbacks, s.missed), (WARMUP + 2, 1));
+}
+
 #[test]
 fn counters_are_the_snapshots_counts_without_histograms() {
     let t = Telemetry::new(32, 96_000.0);

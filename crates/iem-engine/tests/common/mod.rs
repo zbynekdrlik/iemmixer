@@ -7,13 +7,17 @@
 //! full import), the D5(b) loopback returns (a one-block synthetic loopback
 //! of the spare outputs, so the round-trip probe measures and later signals
 //! find the return busy), talkback, both taps, meter reads, a sanitiser trip
-//! every 1000 blocks and a driver reopen's `discontinuity` every 1000 blocks.
+//! every 1000 blocks, a driver reopen's `discontinuity` every 1000 blocks and
+//! the backends' two histogram records per block (S7: the interval before
+//! `process`, its time after it; the overflow bucket included).
 #![allow(dead_code)]
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use iem_audio_io::hist::StreamHists;
+use iem_audio_io::telemetry::period_ns;
 use iem_audio_io::{Block, Process};
 use iem_engine::cmd::{RtOp, push_group};
 use iem_engine::core::{Core, Flags};
@@ -25,6 +29,10 @@ use iem_engine_proto::{
 };
 
 pub const BLOCK: usize = 32;
+
+/// The intervals `drive` records, in turn: on time, the S1a p99.9 edge
+/// (347 µs), late (1.5 periods) and a missed period (the overflow bucket).
+const INTERVALS: [u64; 4] = [333_333, 347_000, 500_000, 700_000];
 
 /// HIL's spare outputs of the test site (`[guard] hil_tx`), opened after
 /// the topology's TX as `run` does under the test-signal flag (S6), and
@@ -79,6 +87,8 @@ pub struct Scenario {
     /// The largest D5(b) loopback round-trip (samples) the processor
     /// reported during `drive`: 0 while the probe never measured.
     pub measured: u64,
+    /// The backends' per-block histogram records (S7), as `drive` makes them.
+    pub hists: Arc<StreamHists>,
 }
 
 fn mix(s: &str) -> MixId {
@@ -249,6 +259,7 @@ pub fn scenario() -> Scenario {
         processor,
         handles,
         measured: 0,
+        hists: Arc::new(StreamHists::new(period_ns(BLOCK as u32, 96_000.0))),
     }
 }
 
@@ -300,8 +311,10 @@ pub fn drive(s: &mut Scenario, b: &mut Buffers, blocks: usize) {
         if k % 1000 == 500 {
             s.processor.discontinuity();
         }
+        s.hists.interval.record(INTERVALS[k % INTERVALS.len()]);
         let mut block = Block::new(BLOCK, src, &mut b.output);
         s.processor.process(&mut block);
+        s.hists.process.record(20_000 + (k % 64) as u64 * 1_000);
         loop_back(b, tx, rx);
         let rt = s.handles.status.loopback_samples.load(Ordering::Relaxed);
         s.measured = s.measured.max(rt);

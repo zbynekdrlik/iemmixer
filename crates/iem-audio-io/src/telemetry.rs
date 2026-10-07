@@ -9,9 +9,10 @@ use core::sync::atomic::{
     Ordering::{Acquire, Relaxed, Release},
 };
 
+use crate::hist::BUCKET_NS;
+
 /// Histogram resolution: 1 µs buckets up to 5 ms, then one overflow bucket.
 pub const BUCKETS: usize = 5_001;
-const BUCKET_NS: u64 = 1_000;
 /// The first callbacks of a stream prime the driver's buffers (possibly inside
 /// `start()`); they are counted but never judged late, missed or gapped.
 pub const WARMUP: u64 = 8;
@@ -483,15 +484,19 @@ impl Telemetry {
     /// after the warm-up (the drift is anchored there, not on the priming
     /// burst); a callback without one leaves nothing to compare the next
     /// position with, so no gap is judged across it. Every judged glitch also
-    /// enters the glitch log.
-    pub fn on_callback(&self, entry_ns: u64, position: Option<i64>) {
+    /// enters the glitch log. Returns the interval it judged (`None` for the
+    /// first callback and the warm-up): the backend records the same interval
+    /// in the stream's histogram (S7).
+    pub fn on_callback(&self, entry_ns: u64, position: Option<i64>) -> Option<u64> {
         let n = self.callbacks.fetch_add(1, Relaxed);
         let prev = self.last_ns.swap(entry_ns, Relaxed);
+        let mut judged = None;
         if n == 0 {
             self.first_ns.store(entry_ns, Relaxed);
         } else if n >= WARMUP {
             let dt = entry_ns.saturating_sub(prev);
             self.interval.record(dt);
+            judged = Some(dt);
             let kind = match classify(dt, self.period_ns) {
                 Gap::Missed => {
                     self.missed.fetch_add(1, Relaxed);
@@ -538,6 +543,7 @@ impl Telemetry {
                 self.first_pos.store(pos, Release);
             }
         }
+        judged
     }
 
     /// At the exit of a callback: how long it took.
