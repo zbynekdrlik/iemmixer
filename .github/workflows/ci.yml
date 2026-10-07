@@ -359,17 +359,22 @@ jobs:
         # variable, never an argument. The verdict runs even when the client
         # ended early, so the log names what failed; --max-gaps 3 is the hosted
         # runner's tolerance for scheduling stalls (the PC verdict wants 0).
-        # The step's own bound (600 s, the 120 s give-up and the login fit in
-        # it) makes a hung client a failed step, so the upload still runs.
+        # The server must name the build first: its /api/version git_hash is
+        # this checkout's `git rev-parse --short HEAD`, read when the step
+        # above built it (iem-core's build.rs), so the client expects the
+        # same HEAD in full. The step's own bound (600 s, the build check,
+        # the login and the sockets' Close fit in it) makes a hung client a
+        # failed step, so the upload still runs.
         timeout-minutes: 15
         env:
           SOAK_SECONDS: ${{ github.event_name == 'push' && '600' || '120' }}
         run: |
           set -euo pipefail
           summary="$RUNNER_TEMP/soakclient.json"
+          build="$(git rev-parse HEAD)"
           status=0
           IEM_SOAK_PIN="$E2E_ENGINEER_PIN" ./target/release/iem-soakclient --base http://127.0.0.1:8080 --direct \
-            --member member9 --seconds "$SOAK_SECONDS" --out "$summary" || status=$?
+            --member member9 --expect-build "$build" --seconds "$SOAK_SECONDS" --out "$summary" || status=$?
           python3 scripts/iem-pc/soak_verdict.py harness "$summary" \
             --min-seconds "$((SOAK_SECONDS - 1))" --max-gaps 3
           exit "$status"

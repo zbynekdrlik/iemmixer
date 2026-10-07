@@ -1278,7 +1278,7 @@ jobs:
           if (-not (Test-Path -LiteralPath $client)) { '{"conclusion":"failure","reason":"no-client"}' | Set-Content -Encoding ascii -Path $result; exit 1 }
           $base = if ($env:SOAK_BASE) { $env:SOAK_BASE } else { 'http://127.0.0.1' }
           $seconds = [int]$env:HOURS * 3600 + 180
-          $cargs = @('--base', $base, '--member', $env:SOAK_MEMBER, '--seconds', "$seconds", '--out', (Join-Path $PWD 'soakclient.json'))
+          $cargs = @('--base', $base, '--member', $env:SOAK_MEMBER, '--expect-build', $env:SHA, '--seconds', "$seconds", '--out', (Join-Path $PWD 'soakclient.json'))
           if ($env:SOAK_CPU_SETS) { $cargs += @('--cpu-sets', $env:SOAK_CPU_SETS) }
           $p = Start-Process -FilePath $client -ArgumentList $cargs -NoNewWindow -PassThru
           $polls = Join-Path $PWD 'polls.jsonl'
@@ -1341,7 +1341,7 @@ jobs:
   Notes:
   - The `soak` job holds one secret, the engineer PIN. This deviates from `hil.yml`'s secret-free `pc` job, as the design (§4) requires.
   - It changes no guard state: no `job-begin`, no install, no activate.
-  - Its PowerShell holds no process-ending call; the client ends itself after `--seconds`, or after the 120 s give-up bound once the server is gone ("ide event").
+  - Its PowerShell holds no process-ending call; the client ends itself after `--seconds`, or `connection-lost` at the first close of either socket ("ide event"), and it starts only at a server whose `/api/version` names `--expect-build` (`wrong-server` when the predecessor app already answers). Both are the #10 decision of 2026-10-07 (`.claude/rules/soak.md`).
   - UNVERIFIED:
     - how GitHub concludes a job whose self-hosted runner gets Ctrl-Break from the guard mid-job, and whether the `if: always()` upload still runs. The report maps cancelled, a missing record and `left-dev` to `cancelled`, so neither outcome makes red. Confirm at the first "ide event" during a soak and record it on #10.
     - the PowerShell 5.1 console decoding of `iemmode status` output (`[Console]::OutputEncoding`). Only ASCII numbers and fields are read; non-ASCII alarm text may arrive mangled, which the verdict never reads.

@@ -54,8 +54,8 @@ SHA = re.compile(r"[0-9a-f]{40}")
 # The ops soak job's reason codes (result.json) and iem-soakclient's (`Reason::code`).
 PC_REASONS = frozenset({"finished", "left-dev", "not-finished", "bundle-not-active", "no-client",
                         "harness-did-not-end"})
-HARNESS_REASONS = frozenset({"site-unreadable", "not-http", "login-refused", "not-engineer", "server-gone",
-                             "cpu-sets"})
+HARNESS_REASONS = frozenset({"site-unreadable", "not-http", "wrong-server", "login-refused", "not-engineer",
+                             "server-gone", "connection-lost", "cpu-sets"})
 # The summary's whole-number fields the verdict reads (besides `complete` and `seconds`).
 HARNESS_COUNTS = ("frames", "expected_frames", "gaps", "reconnects", "decode_errors", "meter_frames")
 UNREADABLE = object()  # a harness file that holds no JSON (no summary shape: check 9 names it)

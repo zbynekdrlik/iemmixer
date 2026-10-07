@@ -25,19 +25,14 @@ pub struct Tally {
     frames: u64,
     decode_errors: u64,
     meter_frames: u64,
-    reconnects: u64,
     no_source: u64,
     error: Option<Reason>,
 }
 
 impl Tally {
-    /// A socket opened at `now`; `again`: it had been open before (a
-    /// reconnect).
-    pub fn opened(&mut self, now: Instant, again: bool) {
+    /// A socket opened at `now` (each is opened once).
+    pub fn opened(&mut self, now: Instant) {
         self.opened.get_or_insert(now);
-        if again {
-            self.reconnects += 1;
-        }
     }
 
     /// The listen socket sent `ListenStart` at `now`.
@@ -105,7 +100,6 @@ impl Tally {
             max_gap_ms: gaps.max_gap_ms,
             first_frame_ms: self.first_frame_ms,
             meter_frames: self.meter_frames,
-            reconnects: self.reconnects,
             no_source: self.no_source,
             error: self.error,
             ..Summary::default()
@@ -141,17 +135,15 @@ mod tests {
     }
 
     #[test]
-    fn the_run_clock_starts_at_the_first_open_and_reopens_count() {
+    fn the_run_clock_starts_at_the_first_open() {
         let t0 = Instant::now();
         let mut tally = Tally::default();
-        tally.opened(at(t0, 100), false);
-        // The other socket's first open, then a reopen.
-        tally.opened(at(t0, 200), false);
-        tally.opened(at(t0, 900), true);
+        tally.opened(at(t0, 100));
+        // The other socket's open does not move the clock.
+        tally.opened(at(t0, 200));
         assert_eq!(tally.ends_at(3), Some(at(t0, 3_100)));
         let s = tally.summary(at(t0, 2_600), false);
         assert_eq!(s.seconds, 2.5);
-        assert_eq!(s.reconnects, 1);
         assert!(!s.complete);
         // No frame since the first open: one gap as long as the run.
         assert_eq!((s.gaps, s.max_gap_ms), (1, 2_500));
@@ -165,10 +157,8 @@ mod tests {
     fn frames_of_960_samples_count_and_anything_else_is_a_decode_error() {
         let t0 = Instant::now();
         let mut tally = Tally::default();
-        tally.opened(t0, false);
+        tally.opened(t0);
         tally.listen_started(at(t0, 10));
-        // A reopen's ListenStart does not move the first one.
-        tally.listen_started(at(t0, 30));
         for bad in [None, Some(SAMPLES - 1), Some(SAMPLES + 1), Some(0)] {
             tally.frame(at(t0, 20), bad);
         }
@@ -210,10 +200,10 @@ mod tests {
     fn the_first_reason_stays() {
         let mut tally = Tally::default();
         assert_eq!(tally.error(), None);
+        tally.fail(Reason::ConnectionLost);
         tally.fail(Reason::ServerGone);
-        tally.fail(Reason::LoginRefused);
-        assert_eq!(tally.error(), Some(Reason::ServerGone));
+        assert_eq!(tally.error(), Some(Reason::ConnectionLost));
         let s = tally.summary(Instant::now(), false);
-        assert_eq!(s.error, Some(Reason::ServerGone));
+        assert_eq!(s.error, Some(Reason::ConnectionLost));
     }
 }

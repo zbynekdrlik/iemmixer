@@ -1955,6 +1955,7 @@ function Test-IemHilInputs {
 
 function Test-IemHilVersion {
     # /api/version names the bundle: its git_hash (short, lowercase) is a prefix of the SHA.
+    # The same rule: iem_guard::effects::web::version_matches and iem-soakclient's names_build.
     param([Parameter(Mandatory)][string]$Sha, $Version)
     $hash = [string](Get-IemProp $Version 'git_hash')
     $ok = ($hash.Length -ge 7) -and ($hash -cmatch '^[0-9a-f]+$') -and $Sha.StartsWith($hash, [StringComparison]::Ordinal)

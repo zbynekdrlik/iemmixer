@@ -4,13 +4,13 @@
 //! run is bounded: it runs on its own thread and the test waits for it with
 //! `recv_timeout`, so a run that never ends fails here instead of hanging.
 //! Timing is asserted only from below (a wait that must have happened) or
-//! against the run's own measured length, never as a fixed sleep.
+//! against the run's own measured length, never as a fixed sleep. A run
+//! that must end early is a 30 s run waited for 5 or 6 s.
 
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Command, Output};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -23,6 +23,12 @@ use tungstenite::{Message, WebSocket};
 /// The engineer's PIN the fake accepts, and the token it issues.
 const PIN: &str = "1234";
 const TOKEN: &str = "T";
+/// The build the client is told to expect, the short hash the fake's
+/// `/api/version` names it by (`git_hash`, as `git rev-parse --short`
+/// prints it), and another build.
+const BUILD: &str = "0123456789abcdef0123456789abcdef01234567";
+const SHORT: &str = "0123456";
+const OTHER: &str = "fedcba9876543210fedcba9876543210fedcba98";
 /// The two sockets, as the client must ask for them.
 const MIXER: &str = "/ws/member9?token=T&proto=2";
 const LISTEN: &str = "/ws/audio?token=T";
@@ -41,36 +47,40 @@ const SILENCE: Duration = Duration::from_millis(300);
 struct Script {
     /// `/api/site`'s `lan_url` (`null` when `None`).
     lan_url: Option<String>,
+    /// `/api/version`'s `git_hash`; `None`: no version route (404).
+    version: Option<&'static str>,
     /// The login's `engineer`.
     engineer: bool,
-    /// The first listen socket sends this many frames and one frame Opus
-    /// refuses, then it is dropped.
+    /// The listen socket sends this many frames and one frame Opus refuses,
+    /// then it is dropped without a Close.
     drop_listen_after: Option<usize>,
-    /// Each socket is dropped right after its first upgrade, and every later
-    /// upgrade is refused.
-    gone: bool,
-    /// The first mixer socket sends `Hello` and `State`, then nothing, and
-    /// stays open.
+    /// With `drop_listen_after`: the listen socket sends a Close instead of
+    /// being dropped, and reads the client's answer.
+    close_not_drop: bool,
+    /// Every upgrade is refused before its handshake.
+    refuse_upgrades: bool,
+    /// The mixer socket sends `Hello` and `State`, then nothing, and stays
+    /// open (it still reads the client).
     stall_mixer: bool,
+    /// Once the listen socket hears the client's `ListenStop`, it reads
+    /// nothing more and holds the connection for `WAIT`: the client's Close
+    /// is never answered.
+    deaf_after_stop: bool,
 }
 
 impl Default for Script {
     fn default() -> Self {
         Self {
             lan_url: None,
+            version: Some(SHORT),
             engineer: true,
             drop_listen_after: None,
-            gone: false,
+            close_not_drop: false,
+            refuse_upgrades: false,
             stall_mixer: false,
+            deaf_after_stop: false,
         }
     }
-}
-
-/// Upgrades the fake saw, per socket.
-#[derive(Default)]
-struct Upgrades {
-    mixer: AtomicUsize,
-    listen: AtomicUsize,
 }
 
 struct Fake {
@@ -80,12 +90,15 @@ struct Fake {
     /// What the client sent on its sockets after `ListenStart`, as
     /// "<socket> <text>".
     heard: mpsc::Receiver<String>,
+    /// The sockets ("mixer", "listen") the client ended with a Close.
+    closed: mpsc::Receiver<String>,
 }
 
 /// Where the fake reports.
 struct Report {
     seen: mpsc::Sender<String>,
     heard: mpsc::Sender<String>,
+    closed: mpsc::Sender<String>,
 }
 
 impl Fake {
@@ -94,18 +107,25 @@ impl Fake {
         let addr = listener.local_addr().unwrap();
         let (seen_tx, seen) = mpsc::channel();
         let (heard_tx, heard) = mpsc::channel();
+        let (closed_tx, closed) = mpsc::channel();
         let report = Report {
             seen: seen_tx,
             heard: heard_tx,
+            closed: closed_tx,
         };
-        let shared = Arc::new((script, Upgrades::default(), report));
+        let shared = Arc::new((script, report));
         thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 let shared = Arc::clone(&shared);
-                thread::spawn(move || connection(stream, &shared.0, &shared.1, &shared.2));
+                thread::spawn(move || connection(stream, &shared.0, &shared.1));
             }
         });
-        Self { addr, seen, heard }
+        Self {
+            addr,
+            seen,
+            heard,
+            closed,
+        }
     }
 
     fn origin(&self) -> String {
@@ -130,9 +150,19 @@ impl Fake {
         }
         heard
     }
+
+    /// The sockets the client ended with a Close, sorted: `n` of them
+    /// waited for (each at most 2 s), and any more already there.
+    fn closed(&self, n: usize) -> Vec<String> {
+        let wait = || self.closed.recv_timeout(Duration::from_secs(2)).ok();
+        let mut closed: Vec<String> = (0..n).map_while(|_| wait()).collect();
+        closed.extend(self.closed.try_iter());
+        closed.sort();
+        closed
+    }
 }
 
-fn connection(stream: TcpStream, script: &Script, upgrades: &Upgrades, report: &Report) {
+fn connection(stream: TcpStream, script: &Script, report: &Report) {
     stream.set_read_timeout(Some(WAIT)).unwrap();
     stream.set_write_timeout(Some(WAIT)).unwrap();
     let Some(head) = peek_head(&stream) else {
@@ -141,7 +171,7 @@ fn connection(stream: TcpStream, script: &Script, upgrades: &Upgrades, report: &
     let target = head.split(' ').nth(1).unwrap_or_default().to_owned();
     let _ = report.seen.send(target.clone());
     if head.to_ascii_lowercase().contains("upgrade: websocket") {
-        upgrade(stream, &target, script, upgrades, &report.heard);
+        upgrade(stream, &target, script, report);
     } else {
         http(stream, head.len(), &target, script);
     }
@@ -176,12 +206,18 @@ fn http(mut stream: TcpStream, head_len: usize, target: &str, script: &Script) {
         .unwrap_or(0);
     let mut body = vec![0u8; length];
     stream.read_exact(&mut body).unwrap();
-    let (status, reply) = match target {
-        "/api/site" => (
+    let (status, reply) = match (target, script.version) {
+        ("/api/site", _) => (
             "200 OK",
             json!({"lan_url": script.lan_url, "public_host": "mixer.example.org"}),
         ),
-        "/api/auth" => {
+        // The server's `VersionInfo`.
+        ("/api/version", Some(git_hash)) => (
+            "200 OK",
+            json!({"version": "2.0.0-dev.18", "git_hash": git_hash, "branch": "dev",
+                "build_time": "0", "deployed_at": "0", "full_version": "2.0.0-dev.18 (local)"}),
+        ),
+        ("/api/auth", _) => {
             let login: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
             if login == json!({"member": "engineer", "pin": PIN}) {
                 let token = json!({"token": TOKEN, "member": "engineer",
@@ -203,41 +239,35 @@ fn http(mut stream: TcpStream, head_len: usize, target: &str, script: &Script) {
     );
 }
 
-fn upgrade(
-    stream: TcpStream,
-    target: &str,
-    script: &Script,
-    upgrades: &Upgrades,
-    heard: &mpsc::Sender<String>,
-) {
-    let (count, listen) = match target {
-        MIXER => (&upgrades.mixer, false),
-        LISTEN => (&upgrades.listen, true),
-        // Another path or token: refused before the handshake.
+/// The socket at `target` (another path or token, or a `refuse_upgrades`
+/// script: refused before the handshake).
+fn upgrade(stream: TcpStream, target: &str, script: &Script, report: &Report) {
+    let listen = match target {
+        MIXER => false,
+        LISTEN => true,
         _ => return,
     };
-    let n = count.fetch_add(1, Ordering::SeqCst);
-    if script.gone && n > 0 {
+    if script.refuse_upgrades {
         return;
     }
     let Ok(mut ws) = tungstenite::accept(stream) else {
         return;
     };
-    if script.gone {
-        return;
-    }
     if listen {
-        listen_stream(&mut ws, n == 0, script, heard);
+        listen_stream(&mut ws, script, report);
     } else {
-        mixer_stream(&mut ws, n == 0 && script.stall_mixer, heard);
+        mixer_stream(&mut ws, script.stall_mixer, report);
     }
 }
 
 type Ws = WebSocket<TcpStream>;
 
 /// Reads what the client sends, for at most `wait` or until it leaves
-/// (false); each text goes to `heard` as "<socket> <text>".
-fn hear(ws: &mut Ws, socket: &str, heard: &mpsc::Sender<String>, wait: Duration) -> bool {
+/// (false); each text goes to `heard` as "<socket> <text>", a Close to
+/// `closed` (the next read sends the answering Close). `deaf`: after the
+/// client's `ListenStop` nothing more is read, the connection is held for
+/// `WAIT`, and the client's Close is never answered.
+fn hear(ws: &mut Ws, socket: &str, report: &Report, wait: Duration, deaf: bool) -> bool {
     let until = Instant::now() + wait;
     loop {
         let left = until.saturating_duration_since(Instant::now());
@@ -247,7 +277,14 @@ fn hear(ws: &mut Ws, socket: &str, heard: &mpsc::Sender<String>, wait: Duration)
         ws.get_mut().set_read_timeout(Some(left)).unwrap();
         match ws.read() {
             Ok(Message::Text(text)) => {
-                let _ = heard.send(format!("{socket} {text}"));
+                let _ = report.heard.send(format!("{socket} {text}"));
+                if deaf && text.as_str() == STOP {
+                    thread::sleep(WAIT);
+                    return false;
+                }
+            }
+            Ok(Message::Close(_)) => {
+                let _ = report.closed.send(socket.to_owned());
             }
             Ok(_) => {}
             Err(tungstenite::Error::Io(e))
@@ -264,36 +301,33 @@ fn hear(ws: &mut Ws, socket: &str, heard: &mpsc::Sender<String>, wait: Duration)
 }
 
 /// Sends `next()` every 20 ms on a fixed schedule, hearing the client in
-/// between, until `next` gives nothing (the socket is then dropped at once)
-/// or the client leaves (its last words are still read).
+/// between, until `next` gives nothing (the socket is then dropped at once,
+/// without a Close) or the client leaves (its last words are still read).
 fn stream(
     ws: &mut Ws,
     socket: &str,
-    heard: &mpsc::Sender<String>,
+    report: &Report,
+    deaf: bool,
     mut next: impl FnMut() -> Option<Message>,
 ) {
     let mut at = Instant::now();
     while let Some(message) = next() {
         if ws.send(message).is_err() {
-            hear(ws, socket, heard, Duration::from_millis(200));
+            hear(ws, socket, report, Duration::from_millis(200), deaf);
             return;
         }
         at += FRAME;
-        if !hear(
-            ws,
-            socket,
-            heard,
-            at.saturating_duration_since(Instant::now()),
-        ) {
+        let left = at.saturating_duration_since(Instant::now());
+        if !hear(ws, socket, report, left, deaf) {
             return;
         }
     }
 }
 
 /// `Hello`, `State`, a silence, then `Meters` every 20 ms until the client
-/// is gone. A stalled socket sends nothing more and stays open until the
-/// client leaves (or 5 s).
-fn mixer_stream(ws: &mut Ws, stall: bool, heard: &mpsc::Sender<String>) {
+/// is gone. A stalled socket sends nothing more and stays open, reading,
+/// until the client leaves (or 5 s).
+fn mixer_stream(ws: &mut Ws, stall: bool, report: &Report) {
     let hello = r#"{"event":"Hello","data":{"proto":2,"build":"local","min_client_proto":2}}"#;
     let state = r#"{"event":"State","data":{"channels":[],"connected":true}}"#;
     for text in [hello, state] {
@@ -302,17 +336,17 @@ fn mixer_stream(ws: &mut Ws, stall: bool, heard: &mpsc::Sender<String>) {
         }
     }
     let silence = if stall { WAIT } else { SILENCE };
-    if !hear(ws, "mixer", heard, silence) || stall {
+    if !hear(ws, "mixer", report, silence, false) || stall {
         return;
     }
     let meters = r#"{"event":"Meters","data":{"meters":{"mic1":[0.1,0.1]}}}"#;
-    stream(ws, "mixer", heard, || Some(Message::text(meters)));
+    stream(ws, "mixer", report, false, || Some(Message::text(meters)));
 }
 
 /// Waits for `ListenStart` on member9, answers `listening`, then sends one
-/// Opus packet of silence every 20 ms until the client is gone (the first
-/// socket of a `drop_listen_after` script is cut short).
-fn listen_stream(ws: &mut Ws, first: bool, script: &Script, heard: &mpsc::Sender<String>) {
+/// Opus packet of silence every 20 ms until the client is gone (a
+/// `drop_listen_after` script cuts it short: a drop, or a Close).
+fn listen_stream(ws: &mut Ws, script: &Script, report: &Report) {
     loop {
         match ws.read() {
             Ok(Message::Text(text)) if text.as_str() == START => break,
@@ -326,9 +360,9 @@ fn listen_stream(ws: &mut Ws, first: bool, script: &Script, heard: &mpsc::Sender
     }
     let mut encoder =
         opus::Encoder::new(48_000, opus::Channels::Stereo, opus::Application::LowDelay).unwrap();
-    let cut = script.drop_listen_after.filter(|_| first);
+    let cut = script.drop_listen_after;
     let mut sent = 0;
-    stream(ws, "listen", heard, || {
+    stream(ws, "listen", report, script.deaf_after_stop, || {
         let frame = match cut {
             // Then the socket is dropped.
             Some(cut) if sent > cut => return None,
@@ -339,6 +373,11 @@ fn listen_stream(ws: &mut Ws, first: bool, script: &Script, heard: &mpsc::Sender
         sent += 1;
         Some(frame)
     });
+    if script.close_not_drop {
+        // The client's answering Close goes to `closed`.
+        let _ = ws.close(None);
+        hear(ws, "listen", report, WAIT, false);
+    }
 }
 
 /// The arguments of a run of `seconds` on member9 at `base`.
@@ -349,19 +388,20 @@ fn args(base: &str, direct: bool, seconds: u64) -> Args {
         member: "member9".to_owned(),
         seconds,
         out: PathBuf::from("unused.json"),
+        expect_build: BUILD.to_owned(),
         cpu_sets: Vec::new(),
     }
 }
 
-/// The tests' bounds: a socket down for 1 s ends the run, a summary every
-/// 500 ms, reads wait 100 ms, a socket silent for 1 s is opened again (the
-/// mixer's silence after `State` is 300 ms).
+/// The tests' bounds: a summary every 500 ms, reads wait 100 ms, a socket
+/// silent for 1 s ends the run (the mixer's silence after `State` is
+/// 300 ms), and a socket waits at most 1 s for the fake's Close.
 fn limits() -> Limits {
     Limits {
-        give_up: Duration::from_secs(1),
         write_every: Duration::from_millis(500),
         read_timeout: Duration::from_millis(100),
         idle: Duration::from_secs(1),
+        close_wait: Duration::from_secs(1),
     }
 }
 
@@ -398,6 +438,11 @@ fn run_within(args: Args, pin: &'static str, bound: Duration, out: Option<PathBu
     }
 }
 
+/// How often `target` was requested.
+fn times(seen: &[String], target: &str) -> usize {
+    seen.iter().filter(|t| *t == target).count()
+}
+
 /// The binary with `argv` and the PIN in its environment when given, waited
 /// for at most 8 s.
 fn exe(argv: Vec<String>, pin: Option<&'static str>) -> Output {
@@ -415,11 +460,8 @@ fn exe(argv: Vec<String>, pin: Option<&'static str>) -> Output {
 }
 
 #[test]
-fn a_run_counts_frames_meters_one_reconnect_and_one_bad_frame() {
-    let fake = Fake::start(Script {
-        drop_listen_after: Some(10),
-        ..Script::default()
-    });
+fn a_whole_run_counts_frames_and_meters_and_writes_a_summary_every_period() {
+    let fake = Fake::start(Script::default());
     let ran = run_within(
         args(&fake.origin(), true, 3),
         PIN,
@@ -430,18 +472,10 @@ fn a_run_counts_frames_meters_one_reconnect_and_one_bad_frame() {
     assert!(s.complete, "{s:?}");
     assert_eq!(s.error, None);
     assert!(s.seconds >= 3.0, "{s:?}");
-    // The listen socket's drop is the one reconnect: the mixer socket's
-    // silence (longer than a read's wait) did not close it.
-    assert_eq!(s.reconnects, 1, "{s:?}");
-    assert_eq!(s.decode_errors, 1, "{s:?}");
-    assert!(s.gaps >= 1, "{s:?}");
-    // The reopen waited its backoff (1 s) first.
-    assert!(s.max_gap_ms >= 1_000, "{s:?}");
+    assert_eq!((s.decode_errors, s.no_source), (0, 0));
     assert!(s.frames >= 60, "{s:?}");
-    assert!(s.expected_frames > s.frames, "{s:?}");
     assert!(s.meter_frames >= 60, "{s:?}");
     assert!(s.first_frame_ms.is_some(), "{s:?}");
-    assert_eq!(s.no_source, 0);
     // A summary every 500 ms (never sooner), the last one the end's.
     let (at, written): (Vec<Duration>, Vec<Summary>) = ran.written.into_iter().unzip();
     assert_eq!(written.last(), Some(s));
@@ -451,11 +485,19 @@ fn a_run_counts_frames_meters_one_reconnect_and_one_bad_frame() {
     assert!(periodic[0] >= every, "{at:?}");
     assert!(periodic.windows(2).all(|w| w[1] - w[0] >= every), "{at:?}");
     assert!(written.iter().rev().skip(1).all(|w| !w.complete));
-    // One login, the mixer socket once, the listen socket twice.
+    // The build check first, then one login, each socket once, and both
+    // ended with a Close.
     let seen = fake.seen();
-    let times = |target: &str| seen.iter().filter(|t| *t == target).count();
-    assert_eq!((times("/api/auth"), times(MIXER), times(LISTEN)), (1, 1, 2));
-    assert_eq!(times("/api/site"), 0, "--direct reads no /api/site");
+    assert_eq!(seen[..2], ["/api/version", "/api/auth"], "{seen:?}");
+    let counts = [
+        times(&seen, "/api/version"),
+        times(&seen, "/api/auth"),
+        times(&seen, MIXER),
+        times(&seen, LISTEN),
+    ];
+    assert_eq!(counts, [1, 1, 1, 1], "{seen:?}");
+    assert_eq!(times(&seen, "/api/site"), 0, "--direct reads no /api/site");
+    assert_eq!(fake.closed(2), ["listen", "mixer"]);
 }
 
 #[test]
@@ -475,31 +517,110 @@ fn the_sockets_go_to_the_lan_url_the_server_names() {
     assert_eq!(a.seen(), ["/api/site"]);
     let mut on_b = b.seen();
     on_b.sort();
-    assert_eq!(on_b, ["/api/auth", LISTEN, MIXER]);
+    assert_eq!(on_b, ["/api/auth", "/api/version", LISTEN, MIXER]);
     // It reads only: after its ListenStart, the one thing it sent on either
     // socket is the ListenStop at the end.
     assert_eq!(b.heard(), [format!("listen {STOP}")]);
 }
 
 #[test]
-fn a_socket_silent_past_the_idle_bound_is_opened_again() {
+fn a_dropped_socket_ends_the_run_connection_lost_and_is_never_opened_again() {
+    // The listen socket dropped, or closed by the server with a Close: the
+    // mixer socket, still open, ends with a Close, and the client answers
+    // the server's Close.
+    let cases = [(false, &["mixer"][..]), (true, &["listen", "mixer"][..])];
+    for (close_not_drop, closed) in cases {
+        let fake = Fake::start(Script {
+            drop_listen_after: Some(10),
+            close_not_drop,
+            ..Script::default()
+        });
+        let ran = run_within(
+            args(&fake.origin(), true, 30),
+            PIN,
+            Duration::from_secs(5),
+            None,
+        );
+        let s = &ran.summary;
+        assert_eq!(s.error, Some(Reason::ConnectionLost), "{s:?}");
+        assert!(!s.complete, "{s:?}");
+        // Everything before the cut was counted, the refused frame included.
+        assert_eq!((s.frames, s.decode_errors), (10, 1), "{s:?}");
+        let seen = fake.seen();
+        let counts = [times(&seen, MIXER), times(&seen, LISTEN)];
+        assert_eq!(counts, [1, 1], "one connection per socket: {seen:?}");
+        assert_eq!(fake.closed(closed.len()), closed, "{close_not_drop}");
+    }
+}
+
+#[test]
+fn a_socket_silent_past_the_idle_bound_ends_the_run_connection_lost() {
     let fake = Fake::start(Script {
         stall_mixer: true,
         ..Script::default()
     });
     let ran = run_within(
-        args(&fake.origin(), true, 4),
+        args(&fake.origin(), true, 30),
         PIN,
-        Duration::from_secs(9),
+        Duration::from_secs(6),
         None,
     );
     let s = &ran.summary;
-    assert!(s.complete, "{s:?}");
-    assert_eq!(s.reconnects, 1, "{s:?}");
-    // The second mixer socket's meters.
-    assert!(s.meter_frames > 0, "{s:?}");
+    assert_eq!(s.error, Some(Reason::ConnectionLost), "{s:?}");
+    assert!(!s.complete, "{s:?}");
+    assert_eq!(s.meter_frames, 0, "{s:?}");
+    // Not before the idle bound.
+    assert!(ran.took >= limits().idle, "{:?}", ran.took);
     let seen = fake.seen();
-    assert_eq!(seen.iter().filter(|t| *t == MIXER).count(), 2);
+    let counts = [times(&seen, MIXER), times(&seen, LISTEN)];
+    assert_eq!(counts, [1, 1], "one connection per socket: {seen:?}");
+    // Both sockets still end as at a whole run's end: the listen socket's
+    // ListenStop reached the fake, and each ended with a Close.
+    assert_eq!(fake.heard(), [format!("listen {STOP}")]);
+    assert_eq!(fake.closed(2), ["listen", "mixer"]);
+}
+
+#[test]
+fn a_peer_that_never_answers_the_close_is_left_after_the_close_wait() {
+    let fake = Fake::start(Script {
+        deaf_after_stop: true,
+        ..Script::default()
+    });
+    let ran = run_within(
+        args(&fake.origin(), true, 1),
+        PIN,
+        Duration::from_secs(6),
+        None,
+    );
+    assert!(ran.summary.complete, "{:?}", ran.summary);
+    // The listen socket waited its whole close wait after the run's second.
+    let floor = Duration::from_secs(1) + limits().close_wait;
+    assert!(ran.took >= floor, "{:?}", ran.took);
+    assert_eq!(fake.heard(), [format!("listen {STOP}")]);
+}
+
+#[test]
+fn a_refused_upgrade_ends_the_run_server_gone_without_a_second_try() {
+    let fake = Fake::start(Script {
+        refuse_upgrades: true,
+        ..Script::default()
+    });
+    let ran = run_within(
+        args(&fake.origin(), true, 30),
+        PIN,
+        Duration::from_secs(5),
+        None,
+    );
+    assert_eq!(ran.summary.error, Some(Reason::ServerGone));
+    assert!(!ran.summary.complete);
+    // Each socket was asked for once: nothing opens a socket again.
+    let seen = fake.seen();
+    let counts = [
+        times(&seen, "/api/auth"),
+        times(&seen, MIXER),
+        times(&seen, LISTEN),
+    ];
+    assert_eq!(counts, [1, 1, 1], "{seen:?}");
 }
 
 #[test]
@@ -525,8 +646,54 @@ fn a_refused_login_ends_the_run_with_its_reason() {
         assert!(!ran.summary.complete);
         let written: Vec<&Summary> = ran.written.iter().map(|(_, s)| s).collect();
         assert_eq!(written, [&ran.summary], "one summary, the end's");
-        assert_eq!(fake.seen(), ["/api/auth"], "{reason:?}");
+        assert_eq!(fake.seen(), ["/api/version", "/api/auth"], "{reason:?}");
     }
+}
+
+#[test]
+fn a_server_that_does_not_name_the_build_is_refused_before_the_login() {
+    // Another build, and a server without a version route.
+    for version in [Some("fedcba9"), None] {
+        let fake = Fake::start(Script {
+            version,
+            ..Script::default()
+        });
+        let ran = run_within(
+            args(&fake.origin(), true, 30),
+            PIN,
+            Duration::from_secs(5),
+            None,
+        );
+        assert_eq!(ran.summary.error, Some(Reason::WrongServer), "{version:?}");
+        assert!(!ran.summary.complete);
+        let written: Vec<&Summary> = ran.written.iter().map(|(_, s)| s).collect();
+        assert_eq!(written, [&ran.summary], "one summary, the end's");
+        // No login and no socket.
+        assert_eq!(fake.seen(), ["/api/version"], "{version:?}");
+    }
+}
+
+#[test]
+fn the_build_is_checked_at_the_lan_url_the_server_names() {
+    // The base names the build, but the LAN URL it names does not: the
+    // client checks where it would go, and goes nowhere.
+    let b = Fake::start(Script {
+        version: Some("fedcba9"),
+        ..Script::default()
+    });
+    let a = Fake::start(Script {
+        lan_url: Some(format!("{}/", b.origin())),
+        ..Script::default()
+    });
+    let ran = run_within(
+        args(&a.origin(), false, 30),
+        PIN,
+        Duration::from_secs(5),
+        None,
+    );
+    assert_eq!(ran.summary.error, Some(Reason::WrongServer));
+    assert_eq!(a.seen(), ["/api/site"]);
+    assert_eq!(b.seen(), ["/api/version"]);
 }
 
 #[test]
@@ -554,25 +721,6 @@ fn an_https_lan_url_is_refused() {
 }
 
 #[test]
-fn a_server_that_stays_gone_ends_the_run_after_the_give_up_bound() {
-    let fake = Fake::start(Script {
-        gone: true,
-        ..Script::default()
-    });
-    let ran = run_within(
-        args(&fake.origin(), true, 30),
-        PIN,
-        Duration::from_secs(5),
-        None,
-    );
-    assert_eq!(ran.summary.error, Some(Reason::ServerGone));
-    assert!(!ran.summary.complete);
-    assert_eq!(ran.summary.reconnects, 0, "no reopen succeeded");
-    // Not before the bound: the reopen waited 1 s and failed.
-    assert!(ran.took >= Duration::from_secs(1), "{:?}", ran.took);
-}
-
-#[test]
 fn the_summary_written_names_no_member_and_no_host() {
     let fake = Fake::start(Script::default());
     let dir = tempfile::tempdir().unwrap();
@@ -595,7 +743,7 @@ fn the_binary_exits_0_complete_1_with_a_reason_code_and_2_on_a_usage_error() {
     let fake = Fake::start(Script::default());
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("soakclient.json");
-    let argv = |seconds: &str| -> Vec<String> {
+    let argv_for = |build: &str, seconds: &str| -> Vec<String> {
         let origin = fake.origin();
         let out = out.to_str().unwrap();
         let base = origin.as_str();
@@ -605,6 +753,8 @@ fn the_binary_exits_0_complete_1_with_a_reason_code_and_2_on_a_usage_error() {
             "--direct",
             "--member",
             "member9",
+            "--expect-build",
+            build,
             "--seconds",
             seconds,
             "--out",
@@ -613,6 +763,7 @@ fn the_binary_exits_0_complete_1_with_a_reason_code_and_2_on_a_usage_error() {
         .map(str::to_owned)
         .to_vec()
     };
+    let argv = |seconds: &str| argv_for(BUILD, seconds);
     // A usage error and a missing PIN: 2, before any request.
     assert_eq!(exe(Vec::new(), Some(PIN)).status.code(), Some(2));
     assert_eq!(exe(argv("30"), None).status.code(), Some(2));
@@ -629,6 +780,13 @@ fn the_binary_exits_0_complete_1_with_a_reason_code_and_2_on_a_usage_error() {
         serde_json::from_slice::<Summary>(&refused.stdout).unwrap(),
         file
     );
+    // A server that names another build: 1, `wrong-server`.
+    let wrong = exe(argv_for(OTHER, "30"), Some(PIN));
+    assert_eq!(wrong.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&wrong.stderr);
+    assert_eq!(stderr.trim(), "iem-soakclient: wrong-server");
+    let summary: Summary = serde_json::from_slice(&wrong.stdout).unwrap();
+    assert_eq!(summary.error, Some(Reason::WrongServer));
     // A whole run: 0, nothing on stderr.
     let done = exe(argv("1"), Some(PIN));
     let stderr = String::from_utf8_lossy(&done.stderr);

@@ -1,13 +1,23 @@
-//! The soak client's wire (S7 design note §4): the login and `/api/site`
-//! over plain HTTP, the mixer and listen sockets each on its own thread, the
-//! run's clock on the calling thread. A socket read waits at most
-//! `read_timeout`, so a reading thread sees the end of the run within it (a
-//! thread inside an open, within the open's own bounds); the clock and the
-//! reopen waits sleep on a condition variable. No thread polls. A socket
-//! silent for `idle` is opened again: the server sends meters and repeats a
-//! listen's `no_source`, so silence means it stopped serving that socket.
-//! Nothing here ends a process: the sockets close by being dropped, the
-//! listen socket after its `ListenStop`.
+//! The soak client's wire (S7 design note §4): `/api/site`, the build check
+//! (`/api/version`) and the login over plain HTTP, the mixer and listen
+//! sockets each on its own thread, the run's clock on the calling thread. A
+//! socket read waits at most `read_timeout`, so a reading thread sees the
+//! end of the run within it (a thread inside an open, within the open's own
+//! bounds); the clock sleeps on a condition variable. No thread polls.
+//!
+//! Nothing is sent to a server before it names `--expect-build` in
+//! `/api/version`: after "ide event" the predecessor app answers at the
+//! band's usual address and takes the client's token, and a `ListenStart`
+//! there would mute every other member's send to the engineer's mix.
+//!
+//! Each socket is opened once and never again (#10): by a second open the
+//! address may have changed hands since the check. A socket that cannot be
+//! opened ends the run (`server-gone`); its first close, an error on it, or
+//! a silence of `idle` ends the run (`connection-lost`). The server sends
+//! meters and repeats a listen's `no_source`, so silence means it stopped
+//! serving that socket. Nothing here ends a process: each socket ends with
+//! the listen socket's `ListenStop`, a Close and a bounded wait for the
+//! peer's Close, and is then dropped.
 
 use std::io;
 use std::net::{TcpStream, ToSocketAddrs};
@@ -22,10 +32,11 @@ use tungstenite::{Message, WebSocket};
 
 use crate::tally::{SAMPLES, Tally};
 use crate::{
-    Args, Reason, Summary, backoff, classify, listen_path, listen_start, mixer_path, origin, ws_url,
+    Args, Reason, Summary, classify, listen_path, listen_start, mixer_path, names_build, origin,
+    ws_url,
 };
 
-/// One HTTP request (`/api/site`, the login) at most.
+/// One HTTP request (`/api/site`, `/api/version`, the login) at most.
 const HTTP_WAIT: Duration = Duration::from_secs(10);
 /// A socket's connect, its handshake and each of its writes at most.
 const OPEN_WAIT: Duration = Duration::from_secs(5);
@@ -37,33 +48,33 @@ const LISTEN_STOP: &str = r#"{"cmd":"ListenStop"}"#;
 /// The run's bounds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
-    /// A socket that cannot be opened again for this long ends the run
-    /// (`server-gone`).
-    pub give_up: Duration,
     /// The summary is handed to the writer this often, and at the end.
     pub write_every: Duration,
     /// Socket reads wait this long, so the threads see the end within it.
     pub read_timeout: Duration,
-    /// A socket that has sent nothing for this long is opened again.
+    /// A socket that has sent nothing for this long ends the run
+    /// (`connection-lost`).
     pub idle: Duration,
+    /// At its end a socket waits at most this long for the peer's Close.
+    pub close_wait: Duration,
 }
 
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            give_up: Duration::from_secs(120),
             write_every: Duration::from_secs(60),
             read_timeout: Duration::from_millis(500),
             idle: Duration::from_secs(10),
+            close_wait: Duration::from_secs(2),
         }
     }
 }
 
 /// One run: the login (once), then the mixer and listen sockets on their own
 /// threads until `args.seconds` have passed since the first open (complete)
-/// or a socket stays gone past `give_up`. `write` gets the summary every
-/// `write_every` and the final one; a run that fails before its sockets
-/// writes that one summary only.
+/// or a socket could not be opened or was lost. `write` gets the summary
+/// every `write_every` and the final one, once both sockets have ended; a
+/// run that fails before its sockets writes that one summary only.
 pub fn run(args: &Args, pin: &str, limits: &Limits, write: &mut dyn FnMut(&Summary)) -> Summary {
     let (origin, token) = match login(args, pin) {
         Ok(found) => found,
@@ -79,8 +90,8 @@ pub fn run(args: &Args, pin: &str, limits: &Limits, write: &mut dyn FnMut(&Summa
     let listen = ws_url(&origin, &listen_path(&token));
     let shared = Shared::default();
     let summary = thread::scope(|s| {
-        s.spawn(|| keep_open(&shared, &mixer, limits, &mut Role::Mixer));
-        s.spawn(|| keep_open(&shared, &listen, limits, &mut Role::listen(&args.member)));
+        s.spawn(|| hold(&shared, &mixer, limits, &mut Role::Mixer));
+        s.spawn(|| hold(&shared, &listen, limits, &mut Role::listen(&args.member)));
         let summary = watch(&shared, args.seconds, limits.write_every, write);
         shared.end();
         summary
@@ -90,8 +101,9 @@ pub fn run(args: &Args, pin: &str, limits: &Limits, write: &mut dyn FnMut(&Summa
 }
 
 /// The origin the sockets go to and the engineer's token: `/api/site`'s
-/// LAN URL at `--base` (or `--base` itself with `--direct`), then the login
-/// there. A server that does not answer the login is `server-gone`.
+/// LAN URL at `--base` (or `--base` itself with `--direct`), the build
+/// check there, then the login there. A server that does not answer the
+/// build check or the login is `server-gone`.
 fn login(args: &Args, pin: &str) -> Result<(String, String), Reason> {
     let http = agent();
     let lan_url = if args.direct {
@@ -100,6 +112,7 @@ fn login(args: &Args, pin: &str) -> Result<(String, String), Reason> {
         site_lan_url(&http, &args.base)
     };
     let origin = origin(args, lan_url.as_deref())?;
+    check_build(&http, &origin, &args.expect_build)?;
     let body = serde_json::json!({"member": ENGINEER, "pin": pin}).to_string();
     let mut reply = http
         .post(format!("{origin}/api/auth"))
@@ -118,6 +131,26 @@ fn login(args: &Args, pin: &str) -> Result<(String, String), Reason> {
         return Err(Reason::NotEngineer);
     }
     Ok((origin, login.token))
+}
+
+/// `/api/version` at `origin` names `build` ([`names_build`]) before the
+/// PIN or anything else is sent there. Any other answer, a missing version
+/// route included, is `wrong-server`; no answer is `server-gone`.
+fn check_build(http: &ureq::Agent, origin: &str, build: &str) -> Result<(), Reason> {
+    let mut reply = http
+        .get(format!("{origin}/api/version"))
+        .call()
+        .map_err(|_| Reason::ServerGone)?;
+    let named = reply.status() == 200
+        && reply
+            .body_mut()
+            .read_to_string()
+            .is_ok_and(|text| names_build(&text, build));
+    if named {
+        Ok(())
+    } else {
+        Err(Reason::WrongServer)
+    }
 }
 
 /// The login's answer (`LoginResponse`; the other fields are not read).
@@ -173,7 +206,7 @@ impl Shared {
         f(&mut self.lock());
     }
 
-    /// Counts what the clock waits for (an open, a give-up) and wakes it.
+    /// Counts what the clock waits for (an open, a failure) and wakes it.
     fn signal(&self, f: impl FnOnce(&mut Tally)) {
         f(&mut self.lock());
         self.changed.notify_all();
@@ -181,16 +214,6 @@ impl Shared {
 
     fn stopped(&self) -> bool {
         self.stop.load(Ordering::Acquire)
-    }
-
-    /// Waits `wait`, or less when the run ends; true when it has ended.
-    fn pause(&self, wait: Duration) -> bool {
-        let tally = self.lock();
-        let waited = self
-            .changed
-            .wait_timeout_while(tally, wait, |_| !self.stopped());
-        drop(waited.unwrap_or_else(PoisonError::into_inner));
-        self.stopped()
     }
 
     /// Ends the run: the threads see it within a read's wait.
@@ -203,7 +226,7 @@ impl Shared {
 
 /// The run's clock: hands `write` a summary every `write_every`, and returns
 /// the final one once `seconds` have passed since the first open (complete)
-/// or a socket gave up.
+/// or the run failed.
 fn watch(
     shared: &Shared,
     seconds: u64,
@@ -236,63 +259,21 @@ fn watch(
     }
 }
 
-/// One socket's reopen clock: failed opens in a row, and since when the
-/// socket has been down.
-struct Reopen {
-    down_since: Instant,
-    failures: u32,
-}
-
-impl Reopen {
-    /// Not open yet: down since `now`.
-    fn new(now: Instant) -> Self {
-        Self {
-            down_since: now,
-            failures: 0,
-        }
+/// One socket for the whole run, opened once. Not opened, it ends the run
+/// at once (`server-gone`): a second try could reach whatever answers at
+/// that address by then (the predecessor app after "ide event"). Lost
+/// before the end, it ends the run (`connection-lost`). Either way it then
+/// ends as [`Role::finish`] says, as far as it still can.
+fn hold(shared: &Shared, url: &str, limits: &Limits, role: &mut Role) {
+    let Some(mut socket) = open(url, limits.read_timeout) else {
+        shared.signal(|t| t.fail(Reason::ServerGone));
+        return;
+    };
+    shared.signal(|t| t.opened(Instant::now()));
+    if !role.serve(&mut socket, shared, limits.idle) {
+        shared.signal(|t| t.fail(Reason::ConnectionLost));
     }
-
-    fn opened(&mut self) {
-        self.failures = 0;
-    }
-
-    fn closed(&mut self, now: Instant) {
-        self.down_since = now;
-    }
-
-    /// An open failed at `now`: false once the socket has been down for
-    /// `give_up` (the run ends), true to try again after [`Reopen::wait`].
-    fn failed(&mut self, now: Instant, give_up: Duration) -> bool {
-        self.failures = self.failures.saturating_add(1);
-        now.saturating_duration_since(self.down_since) < give_up
-    }
-
-    /// The wait before the next open.
-    fn wait(&self) -> Duration {
-        backoff(self.failures)
-    }
-}
-
-/// One socket for the whole run: opened, read until it closes, opened again
-/// after its backoff; down for `give_up`, it ends the run (`server-gone`).
-fn keep_open(shared: &Shared, url: &str, limits: &Limits, role: &mut Role) {
-    let mut reopen = Reopen::new(Instant::now());
-    let mut again = false;
-    while !shared.stopped() {
-        if let Some(mut socket) = open(url, limits.read_timeout) {
-            reopen.opened();
-            shared.signal(|t| t.opened(Instant::now(), again));
-            again = true;
-            role.serve(&mut socket, shared, limits.idle);
-            reopen.closed(Instant::now());
-        } else if !reopen.failed(Instant::now(), limits.give_up) {
-            shared.signal(|t| t.fail(Reason::ServerGone));
-            return;
-        }
-        if shared.pause(reopen.wait()) {
-            return;
-        }
-    }
+    role.finish(&mut socket, limits.close_wait);
 }
 
 type Socket = WebSocket<TcpStream>;
@@ -330,7 +311,8 @@ fn waited(e: &io::Error) -> bool {
 
 /// What a socket is for.
 enum Role {
-    /// The member's mixer page: its `Meters` are counted. It sends nothing.
+    /// The member's mixer page: its `Meters` are counted. It sends nothing
+    /// but its Close.
     Mixer,
     /// The engineer's listen socket on the member's mix: `start` is its
     /// `ListenStart`; a decoder that could not be made leaves every frame
@@ -349,12 +331,12 @@ impl Role {
         }
     }
 
-    /// Reads `socket` into the tally until it closes, stays silent for
-    /// `idle` or the run ends (the listen socket then sends `ListenStop`).
-    fn serve(&mut self, socket: &mut Socket, shared: &Shared, idle: Duration) {
+    /// Reads `socket` into the tally until the run ends (true), or until it
+    /// closes, fails or stays silent for `idle` before that (false: lost).
+    fn serve(&mut self, socket: &mut Socket, shared: &Shared, idle: Duration) -> bool {
         if let Role::Listen { start, .. } = self {
             if socket.send(Message::text(start.clone())).is_err() {
-                return;
+                return false;
             }
             shared.count(|t| t.listen_started(Instant::now()));
         }
@@ -378,20 +360,47 @@ impl Role {
                     let event = classify(&text);
                     shared.count(|t| t.text(&event));
                 }
+                // The peer's Close: [`Role::finish`] sends the answer.
+                Ok(Message::Close(_)) => return false,
                 Ok(_) => {}
                 Err(tungstenite::Error::Io(e)) => {
                     // A read's wait ran out: the socket stays open unless it
                     // has been silent for `idle`.
                     if !waited(&e) || heard.elapsed() >= idle {
+                        return false;
+                    }
+                }
+                Err(_) => return false,
+            }
+        }
+        true
+    }
+
+    /// Ends `socket` so that what it sent reaches the peer: the listen
+    /// socket's `ListenStop`, a Close (or the answer to the peer's), then
+    /// reads, not counted, until the peer's Close or the socket's end, for
+    /// `wait` and at most one read's wait more. Once the peer's Close has
+    /// come nothing is left unread, so the drop that follows ends the
+    /// connection with a FIN on Windows, not with a reset, which can lose
+    /// the `ListenStop` at the peer. Best effort: a socket that already
+    /// failed ends at its first error.
+    fn finish(&self, socket: &mut Socket, wait: Duration) {
+        if matches!(self, Role::Listen { .. }) {
+            let _ = socket.send(Message::text(LISTEN_STOP));
+        }
+        let _ = socket.close(None);
+        let began = Instant::now();
+        while began.elapsed() <= wait {
+            match socket.read() {
+                Ok(Message::Close(_)) => return,
+                Ok(_) => {}
+                Err(tungstenite::Error::Io(e)) => {
+                    if !waited(&e) {
                         return;
                     }
                 }
                 Err(_) => return,
             }
-        }
-        if matches!(self, Role::Listen { .. }) {
-            // The socket is dropped next whether this reaches the server or not.
-            let _ = socket.send(Message::text(LISTEN_STOP));
         }
     }
 }
@@ -404,36 +413,14 @@ mod tests {
     fn the_default_limits() {
         let l = Limits::default();
         let secs = Duration::from_secs;
-        assert_eq!((l.give_up, l.write_every), (secs(120), secs(60)));
+        assert_eq!(l.write_every, secs(60));
         assert_eq!(l.read_timeout, Duration::from_millis(500));
         // Far above the server's meter period and its 5 s `no_source`
         // repeat on an open listen socket.
         assert_eq!(l.idle, secs(10));
-    }
-
-    #[test]
-    fn a_socket_reopens_after_its_backoff_and_gives_up_once_down_for_the_bound() {
-        let t0 = Instant::now();
-        let bound = Duration::from_secs(1);
-        let at = |ms| t0 + Duration::from_millis(ms);
-        let secs = Duration::from_secs;
-        // Never opened: down since the start.
-        assert!(!Reopen::new(t0).failed(at(1_000), bound));
-        let mut r = Reopen::new(t0);
-        assert_eq!(r.wait(), secs(1));
-        assert!(r.failed(at(999), bound), "down 999 ms: open again");
-        assert_eq!(r.wait(), secs(2));
-        assert!(r.failed(at(999), bound));
-        assert_eq!(r.wait(), secs(4));
-        // An open resets the backoff; the down clock starts at the close.
-        r.opened();
-        assert_eq!(r.wait(), secs(1));
-        r.closed(at(5_000));
-        assert!(r.failed(at(5_999), bound));
-        assert!(
-            !r.failed(at(6_000), bound),
-            "down exactly the bound: give up"
-        );
+        // The peer's Close answers at once; the wait only bounds a peer
+        // that never sends it.
+        assert_eq!(l.close_wait, secs(2));
     }
 
     #[test]
