@@ -1,10 +1,13 @@
 //! The soak client's wire (S7 design note §4): the login and `/api/site`
 //! over plain HTTP, the mixer and listen sockets each on its own thread, the
 //! run's clock on the calling thread. A socket read waits at most
-//! `read_timeout`, so every thread sees the end of the run within it; the
-//! clock and the reopen waits sleep on a condition variable. No thread
-//! polls. Nothing here ends a process: the sockets close by being dropped,
-//! the listen socket after its `ListenStop`.
+//! `read_timeout`, so a reading thread sees the end of the run within it (a
+//! thread inside an open, within the open's own bounds); the clock and the
+//! reopen waits sleep on a condition variable. No thread polls. A socket
+//! silent for `idle` is opened again: the server sends meters and repeats a
+//! listen's `no_source`, so silence means it stopped serving that socket.
+//! Nothing here ends a process: the sockets close by being dropped, the
+//! listen socket after its `ListenStop`.
 
 use std::io;
 use std::net::{TcpStream, ToSocketAddrs};
@@ -41,6 +44,8 @@ pub struct Limits {
     pub write_every: Duration,
     /// Socket reads wait this long, so the threads see the end within it.
     pub read_timeout: Duration,
+    /// A socket that has sent nothing for this long is opened again.
+    pub idle: Duration,
 }
 
 impl Default for Limits {
@@ -49,6 +54,7 @@ impl Default for Limits {
             give_up: Duration::from_secs(120),
             write_every: Duration::from_secs(60),
             read_timeout: Duration::from_millis(500),
+            idle: Duration::from_secs(10),
         }
     }
 }
@@ -277,7 +283,7 @@ fn keep_open(shared: &Shared, url: &str, limits: &Limits, role: &mut Role) {
             reopen.opened();
             shared.signal(|t| t.opened(Instant::now(), again));
             again = true;
-            role.serve(&mut socket, shared);
+            role.serve(&mut socket, shared, limits.idle);
             reopen.closed(Instant::now());
         } else if !reopen.failed(Instant::now(), limits.give_up) {
             shared.signal(|t| t.fail(Reason::ServerGone));
@@ -343,9 +349,9 @@ impl Role {
         }
     }
 
-    /// Reads `socket` into the tally until it closes or the run ends (the
-    /// listen socket then sends `ListenStop`).
-    fn serve(&mut self, socket: &mut Socket, shared: &Shared) {
+    /// Reads `socket` into the tally until it closes, stays silent for
+    /// `idle` or the run ends (the listen socket then sends `ListenStop`).
+    fn serve(&mut self, socket: &mut Socket, shared: &Shared, idle: Duration) {
         if let Role::Listen { start, .. } = self {
             if socket.send(Message::text(start.clone())).is_err() {
                 return;
@@ -353,8 +359,13 @@ impl Role {
             shared.count(|t| t.listen_started(Instant::now()));
         }
         let mut pcm = [0f32; 2 * SAMPLES];
+        let mut heard = Instant::now();
         while !shared.stopped() {
-            match socket.read() {
+            let read = socket.read();
+            if read.is_ok() {
+                heard = Instant::now();
+            }
+            match read {
                 Ok(Message::Binary(data)) => {
                     if let Role::Listen { decoder, .. } = self {
                         let samples = decoder
@@ -369,7 +380,9 @@ impl Role {
                 }
                 Ok(_) => {}
                 Err(tungstenite::Error::Io(e)) => {
-                    if !waited(&e) {
+                    // A read's wait ran out: the socket stays open unless it
+                    // has been silent for `idle`.
+                    if !waited(&e) || heard.elapsed() >= idle {
                         return;
                     }
                 }

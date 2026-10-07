@@ -1,13 +1,15 @@
 //! `iem-soakclient`: the soak harness's binary (S7 design note §4). Its
 //! decisions are the library's (`parse_args`, `pin_from`, `net::run`); this
 //! is the argv, environment, CPU Set and file glue. Exit codes: 0 the whole
-//! run, 1 a run that ended early (its reason code on stderr), 2 a usage
-//! error. Stderr never carries a site value (P6): usage messages name flags,
-//! not their values, and a run's end is a reason code. It ends no process:
-//! its sockets close by being dropped.
+//! run with its final summary written, 1 a run that ended early (its reason
+//! code on stderr) or whose final summary could not be written
+//! (`summary-unwritable`), 2 a usage error. Stderr never carries a site
+//! value (P6): usage messages name flags, not their values, and a run's end
+//! is a code. It ends no process: its sockets close by being dropped.
 
 #![forbid(unsafe_code)]
 
+use std::cell::Cell;
 use std::process::ExitCode;
 
 use iem_soakclient::net::{Limits, run};
@@ -32,11 +34,15 @@ fn main() -> ExitCode {
         Err(e) => return usage(&e),
     };
     // A summary that cannot be written never ends the run (a reader may hold
-    // the file on Windows): the next write tries again.
+    // the file on Windows): the next write tries again. The final one must
+    // be written, or the run is no evidence (exit 1).
+    let written = Cell::new(false);
     let mut save = |summary: &Summary| {
-        if write_summary(&args.out, summary).is_err() {
+        let ok = write_summary(&args.out, summary).is_ok();
+        if !ok {
             eprintln!("iem-soakclient: summary-unwritable");
         }
+        written.set(ok);
     };
     let summary = match place(&args.cpu_sets) {
         Ok(()) => run(&args, &pin, &Limits::default(), &mut save),
@@ -53,7 +59,7 @@ fn main() -> ExitCode {
         eprintln!("iem-soakclient: {}", reason.code());
     }
     println!("{}", serde_json::to_string(&summary).unwrap_or_default());
-    if summary.complete {
+    if summary.complete && written.get() {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
