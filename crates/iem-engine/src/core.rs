@@ -508,6 +508,19 @@ impl Core {
         Ok(all)
     }
 
+    /// Fault injection and HIL's forced reopen run only under the
+    /// `--fault-injection` launch flag.
+    fn need_fault_injection(&self) -> Result<(), CmdError> {
+        if self.flags.fault_injection {
+            Ok(())
+        } else {
+            Err(CmdError::new(
+                ErrCode::Forbidden,
+                "the engine runs without the fault-injection flag",
+            ))
+        }
+    }
+
     fn input(&self, id: &InputId) -> Result<usize, CmdError> {
         self.topo.input_index(id).ok_or_else(|| {
             CmdError::new(ErrCode::UnknownId, format!("unknown input {}", clip(&id.0)))
@@ -739,36 +752,30 @@ impl Core {
                 Partial::default()
             }),
             Cmd::InjectFault => {
-                if !self.flags.fault_injection {
-                    return Err(CmdError::new(
-                        ErrCode::Forbidden,
-                        "the engine runs without the fault-injection flag",
-                    ));
-                }
+                self.need_fault_injection()?;
                 Ok(Partial {
                     rt: vec![RtOp::Panic],
                     ..Partial::default()
                 })
             }
             Cmd::InjectSeh => {
-                if !self.flags.fault_injection {
-                    return Err(CmdError::new(
-                        ErrCode::Forbidden,
-                        "the engine runs without the fault-injection flag",
-                    ));
-                }
+                self.need_fault_injection()?;
                 Ok(Partial {
                     rt: vec![RtOp::Seh],
                     ..Partial::default()
                 })
             }
+            // The parked-engine test (design §10 test #2, #35): the SEH
+            // test's exception under the backend's test hold.
+            Cmd::InjectPark => {
+                self.need_fault_injection()?;
+                Ok(Partial {
+                    rt: vec![RtOp::Park],
+                    ..Partial::default()
+                })
+            }
             Cmd::ForceReopen => {
-                if !self.flags.fault_injection {
-                    return Err(CmdError::new(
-                        ErrCode::Forbidden,
-                        "the engine runs without the fault-injection flag",
-                    ));
-                }
+                self.need_fault_injection()?;
                 Ok(Partial::effect(Effect::Reopen))
             }
             Cmd::Batch { .. } => Err(CmdError::new(ErrCode::BadRequest, "nested batch")),

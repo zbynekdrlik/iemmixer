@@ -1,6 +1,7 @@
 //! The engine (design §4, §5.2): its start and the supervisor pipe. One
 //! connection says hello as `supervisor`; a reader thread keeps what the
-//! engine sends (`Hello`, `Status`, replies, `DriverReleased`; its meters are
+//! engine sends (`Hello`, `Status`, replies, `DriverReleased` or
+//! `DriverParked`; its meters are
 //! read by nobody here, #38) so the engine never waits on the guard, and the
 //! steps read that inbox. The guard never waits long on the
 //! engine either: every send must be taken within [`SEND`], else it fails,
@@ -27,7 +28,7 @@ use tracing::{info, warn};
 
 use super::{WinPc, procs};
 use crate::cancel::Cancel;
-use crate::effects::engine::{self as proto, Msg, Ready, ReadyWindow, Shutdown};
+use crate::effects::engine::{self as proto, Msg, Ready, ReadyWindow, Shutdown, Stopped};
 use crate::pc::{EngineSeen, Kid, R, Status, StepError};
 use crate::plan::Health;
 use crate::site::ENGINE_EXE;
@@ -48,7 +49,8 @@ const STATUS_GAP: Duration = Duration::from_secs(3);
 const REPLY: Duration = Duration::from_secs(5);
 /// `iem-engine check-site` loads and compiles a site in well under this.
 const CHECK_SITE: Duration = Duration::from_secs(60);
-/// `Shutdown` → `DriverReleased` (design §5.2), then the process ends.
+/// `Shutdown` → `DriverReleased` or `DriverParked` (design §5.2, #35), then
+/// the process ends.
 const RELEASE: Duration = Duration::from_secs(10);
 /// The engine takes a sent frame within this (its readers look every
 /// 10 ms), or the send fails (`crate::pipe::Bounded`): a hung engine never
@@ -67,7 +69,8 @@ struct Inbox {
     /// Counts the statuses, so a step reads only newer ones.
     status_seq: u64,
     replies: Vec<(u64, Option<String>)>,
-    released: Option<String>,
+    /// The stream's stop (`DriverReleased` or `DriverParked`).
+    stopped: Option<Stopped>,
     closed: Option<String>,
 }
 
@@ -85,7 +88,8 @@ impl Inbox {
                     self.replies.remove(0);
                 }
             }
-            Msg::DriverReleased { reason } => self.released = Some(reason),
+            Msg::DriverReleased { reason } => self.stopped = Some(Stopped::Released(reason)),
+            Msg::DriverParked { reason } => self.stopped = Some(Stopped::Parked(reason)),
             Msg::Superseded => {
                 self.closed = Some("another supervisor took the engine's pipe".to_owned());
             }
@@ -368,21 +372,23 @@ pub(super) fn arm(pc: &mut WinPc) -> R<()> {
 }
 
 /// `Shutdown`, `DriverReleased` ≤ 10 s, the process gone ≤ 5 s; a refused
-/// `Shutdown` ends the wait at once (`effects::engine::shutdown`).
+/// `Shutdown` ends the wait at once (`effects::engine::shutdown`). A stream
+/// that stopped parked (`DriverParked`, #35) released nothing: the card is
+/// free once the process has ended, which the same wait reads.
 pub(super) fn stop(pc: &mut WinPc, c: &Cancel) -> R<()> {
     let pid = procs::running_pid(pc, Kid::Engine)?;
     let handle = Handle::open_waitable(pid).map_err(|e| procs::failed("the engine", e))?;
     let sup = supervisor(pc, CONNECT, c)?;
-    lock(&sup.inbox).released = None;
+    lock(&sup.inbox).stopped = None;
     let id = sup.fresh_id();
     sup.send(&proto::request(id, "shutdown"))
         .map_err(StepError::Failed)?;
     let outcome = wait_inbox(sup, RELEASE, c, |i| {
         let reply = take_reply(i, id);
-        proto::shutdown(i.released.as_deref(), reply)
+        proto::shutdown(i.stopped.as_ref(), reply)
     })?;
-    let reason = match outcome {
-        Some(Shutdown::Released(reason)) => reason,
+    let stopped = match outcome {
+        Some(Shutdown::Stopped(stopped)) => stopped,
         Some(Shutdown::Refused(e)) => {
             return Err(StepError::failed(format!(
                 "the engine refused Shutdown: {e}"
@@ -390,20 +396,20 @@ pub(super) fn stop(pc: &mut WinPc, c: &Cancel) -> R<()> {
         }
         None => {
             return Err(StepError::failed(format!(
-                "no DriverReleased within {} s",
+                "no DriverReleased or DriverParked within {} s",
                 RELEASE.as_secs()
             )));
         }
     };
-    info!("the engine released the driver: {reason}");
+    match &stopped {
+        Stopped::Released(_) => info!("{}", stopped.note()),
+        Stopped::Parked(_) => warn!("{}", stopped.note()),
+    }
     // Our end of the supervisor pipe goes now: this engine is going, and
     // the next step connects to the next one.
     pc.sup = None;
     if procs::wait_exit(&handle, GONE, c)?.is_none() {
-        return Err(StepError::failed(format!(
-            "the engine released the driver but did not end within {} s",
-            GONE.as_secs()
-        )));
+        return Err(StepError::failed(stopped.not_ended(GONE)));
     }
     pc.dacl = None;
     pc.kids.forget(Kid::Engine);
@@ -438,28 +444,42 @@ pub(super) fn hil_signal(
     .map_err(StepError::Failed)
 }
 
+/// One supervisor command without fields (`op`), its answer awaited: HIL's
+/// forced reopen and the fault injections.
+fn bare_request(pc: &mut WinPc, op: &str) -> R<()> {
+    let sup = supervisor(pc, CONNECT, &Cancel::default())?;
+    sup.request(op).map_err(StepError::Failed)
+}
+
 /// A forced driver reopen (HIL, design §7); the engine's reset budget
 /// applies.
 pub(super) fn force_reopen(pc: &mut WinPc) -> R<()> {
-    let sup = supervisor(pc, CONNECT, &Cancel::default())?;
-    sup.request("force_reopen").map_err(StepError::Failed)
+    bare_request(pc, "force_reopen")
 }
 
 /// HIL's RT panic (design §7): `InjectFault` over the supervisor pipe. The
 /// engine refuses it without its fault-injection flag; with it the RT
 /// callback faults and the engine exits 70, which the watch sees.
 pub(super) fn inject_fault(pc: &mut WinPc) -> R<()> {
-    let sup = supervisor(pc, CONNECT, &Cancel::default())?;
-    sup.request("inject_fault").map_err(StepError::Failed)
+    bare_request(pc, "inject_fault")
 }
 
-/// The owner-approved SEH test (design §10): `InjectSeh` over the supervisor
-/// pipe. The engine refuses it without its fault-injection flag; with it the
-/// RT callback raises a structured exception, the SEH filter releases the
-/// driver or parks, and the engine exits, which the watch sees.
+/// The owner-approved SEH test (design §10 test #4): `InjectSeh` over the
+/// supervisor pipe. The engine refuses it without its fault-injection flag;
+/// with it the RT callback raises a structured exception, the SEH filter
+/// releases the driver or parks, and the engine exits, which the watch sees.
 pub(super) fn inject_seh(pc: &mut WinPc) -> R<()> {
-    let sup = supervisor(pc, CONNECT, &Cancel::default())?;
-    sup.request("inject_seh").map_err(StepError::Failed)
+    bare_request(pc, "inject_seh")
+}
+
+/// The parked-engine test (design §10 test #2, #35): `InjectPark` over the
+/// supervisor pipe. The engine refuses it without its fault-injection flag;
+/// with it the RT callback raises the SEH test's exception under the
+/// backend's test hold: the driver is kept, the SEH filter parks the RT
+/// thread, and the engine keeps running with its stream parked (its next
+/// `Status`), so the watch sees no exit.
+pub(super) fn inject_park(pc: &mut WinPc) -> R<()> {
+    bare_request(pc, "inject_park")
 }
 
 /// Whether the engine's control pipe admits only this user and SYSTEM, read

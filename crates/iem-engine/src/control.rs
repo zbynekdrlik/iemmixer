@@ -13,6 +13,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use iem_audio_io::StreamStats;
+use iem_audio_io::owner::StopOutcome;
 use iem_engine_proto::{
     Alarm, AlarmCode, ClientMsg, Cmd, EngineMsg, ErrCode, ErrorBody, Hello, HilOut, Meters, PROTO,
     Reply, Role, Status, negotiate, parse_client, write_frame,
@@ -37,7 +38,10 @@ pub const FADE_WAIT: Duration = Duration::from_millis(500);
 /// The audio backend as the control loop sees it.
 pub trait Driver: Send {
     fn stats(&self) -> StreamStats;
-    fn stop(self: Box<Self>);
+    /// Stops the stream: `Released` once the card is free, `Parked` when
+    /// it stayed held (a callback stuck in the stream, or the parked-engine
+    /// test's hold; #35). A backend without a card releases.
+    fn stop(self: Box<Self>) -> StopOutcome;
     /// Every control tick (never the RT thread): the backend's timed work,
     /// e.g. the ASIO backend locks its memory after 5 s of streaming.
     fn tick(&mut self, _now: Instant) {}
@@ -192,6 +196,27 @@ fn meters_msg(f: &MeterFrame) -> Meters {
             .map(|a| *a as f64 / f64::from(SAMPLE_RATE))
             .collect(),
         trips: f.trips,
+    }
+}
+
+/// What the engine says about its stream as it stops (#35): `DriverReleased`
+/// once the card is free; a stream that stayed parked (a callback stuck in
+/// it, or the parked-engine test's hold) released nothing, so
+/// `DriverParked`: the card is free only once the process has ended.
+fn stream_end(outcome: StopOutcome, reason: &str) -> EngineMsg {
+    let reason = reason.to_owned();
+    match outcome {
+        StopOutcome::Released => {
+            info!("driver released: {reason}");
+            EngineMsg::DriverReleased { reason }
+        }
+        StopOutcome::Parked => {
+            error!(
+                "the stream stayed parked ({reason}): the driver is not released, \
+                 the card is free once this process has ended"
+            );
+            EngineMsg::DriverParked { reason }
+        }
     }
 }
 
@@ -583,14 +608,14 @@ impl Control {
         }
     }
 
+    /// Stops the backend and says how its stream ended, as the last word
+    /// before every connection closes.
     fn release(&mut self, reason: &str) {
-        if let Some(d) = self.driver.take() {
-            d.stop();
-        }
-        info!("driver released: {reason}");
-        self.broadcast(&EngineMsg::DriverReleased {
-            reason: reason.into(),
-        });
+        let outcome = self
+            .driver
+            .take()
+            .map_or(StopOutcome::Released, |d| d.stop());
+        self.broadcast(&stream_end(outcome, reason));
         for (_, p) in std::mem::take(&mut self.peers) {
             p.conn.close();
         }
@@ -811,7 +836,9 @@ mod tests {
             }
         }
 
-        fn stop(self: Box<Self>) {}
+        fn stop(self: Box<Self>) -> StopOutcome {
+            StopOutcome::Released
+        }
     }
 
     struct Rig {
@@ -1024,7 +1051,9 @@ mod tests {
             }
         }
 
-        fn stop(self: Box<Self>) {}
+        fn stop(self: Box<Self>) -> StopOutcome {
+            StopOutcome::Released
+        }
 
         fn tick(&mut self, _now: Instant) {
             self.ticks.fetch_add(1, Ordering::Relaxed);
@@ -1310,7 +1339,7 @@ mod tests {
                 dbfs: -40.0,
                 ttl_s: 1.0,
             };
-            let supervisor: [(u64, Cmd, Option<ErrCode>); 10] = [
+            let supervisor: [(u64, Cmd, Option<ErrCode>); 11] = [
                 (12, Cmd::Ping, None),
                 (13, Cmd::GetState, None),
                 (14, Cmd::GetTopology, None),
@@ -1318,7 +1347,10 @@ mod tests {
                 // A running HIL signal refuses a plain one: stop it first.
                 (16, Cmd::StopTestSignal, None),
                 (17, start, None),
+                // Fault injection reaches the core, which refuses it without
+                // the flag: never `NotController`.
                 (18, Cmd::InjectFault, Some(ErrCode::Forbidden)),
+                (22, Cmd::InjectPark, Some(ErrCode::Forbidden)),
                 (19, set_mix(), Some(ErrCode::NotController)),
                 (
                     20,
@@ -1516,6 +1548,70 @@ mod tests {
                 vec![2],
                 "the ping after the shutdown stays unanswered"
             );
+        }
+
+        /// A backend whose stop ends as scripted (#35).
+        struct Stops(StopOutcome);
+
+        impl Driver for Stops {
+            fn stats(&self) -> StreamStats {
+                StreamStats {
+                    running: true,
+                    ..StreamStats::default()
+                }
+            }
+
+            fn stop(self: Box<Self>) -> StopOutcome {
+                self.0
+            }
+        }
+
+        /// The stream's end says what happened (#35): a stream that stayed
+        /// parked (a callback stuck in it, or the parked-engine test's hold)
+        /// released nothing, so the engine says `DriverParked`, never
+        /// `DriverReleased`; a released one says `DriverReleased`. Either is
+        /// the last word before the engine closes the connection, and the
+        /// run ends as a shutdown either way.
+        #[test]
+        fn a_stop_that_leaves_the_stream_parked_says_so_never_released() {
+            let reason = || "shutdown".to_owned();
+            for (outcome, end) in [
+                (
+                    StopOutcome::Released,
+                    EngineMsg::DriverReleased { reason: reason() },
+                ),
+                (
+                    StopOutcome::Parked,
+                    EngineMsg::DriverParked { reason: reason() },
+                ),
+            ] {
+                let mut r = rig();
+                r.c.driver = Some(Box::new(Stops(outcome)));
+                r.status.faded_out.store(true, Ordering::Release);
+                let (conn, client) = peer(r.dir.path());
+                let got = reader(client);
+                r.c.handle(CtlMsg::Connected { id: 1, conn });
+                r.c.handle(hello());
+                r.c.handle(request(2, Cmd::Shutdown));
+                assert_eq!(
+                    r.c.tick(Instant::now()),
+                    Some(Exit::Shutdown { faded: true }),
+                    "{outcome:?}"
+                );
+                assert!(r.c.driver.is_none(), "{outcome:?}: stopped");
+                let msgs = got.join().unwrap();
+                let ends: Vec<&EngineMsg> = msgs
+                    .iter()
+                    .filter(|m| {
+                        matches!(
+                            m,
+                            EngineMsg::DriverReleased { .. } | EngineMsg::DriverParked { .. }
+                        )
+                    })
+                    .collect();
+                assert_eq!(ends, vec![&end], "{outcome:?}");
+                assert_eq!(msgs.last(), Some(&end), "{outcome:?}: the last word");
+            }
         }
 
         #[test]

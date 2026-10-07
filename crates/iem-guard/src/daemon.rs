@@ -64,6 +64,9 @@ pub const ALARMS_FILE: &str = "alarms.json";
 /// reply with every kept alarm fits one frame.
 pub const ALARM_CHARS: usize = 600;
 pub const DETAIL_CHARS: usize = 8000;
+/// The watch's alarm on a parked engine outside a HIL job (#35).
+pub const PARKED_ALARM: &str = "the engine's stream is parked outside a HIL job: it holds the \
+                                card and nothing plays until the engine ends; nothing is ended";
 
 /// How a switch ended; the mode is in `g.state.mode`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -457,6 +460,9 @@ pub struct Guard {
     crash: CrashLoop,
     respawn_at: Option<Instant>,
     band_seen: bool,
+    /// The engine start (`spawns`) whose parked engine the watch alarmed
+    /// (#35); cleared once an engine is seen unparked.
+    parked_alarmed: Option<u64>,
     last_drift: Option<Instant>,
     session_done: bool,
     /// The newest alarm whose notice was tried.
@@ -500,6 +506,7 @@ impl Guard {
             crash: CrashLoop::default(),
             respawn_at: None,
             band_seen: false,
+            parked_alarmed: None,
             last_drift: None,
             session_done: false,
             noticed: 0,
@@ -1187,6 +1194,7 @@ pub fn handle(pc: &mut dyn Pc, g: &mut Guard, req: Request, epoch: u64) -> Reply
         },
         Request::InjectFault => inject_fault(pc, g),
         Request::InjectSeh => inject_seh(pc, g),
+        Request::InjectPark => inject_park(pc, g),
         Request::RunnerStop => runner_stop(pc, g),
         Request::ProbeTask => outcome(pc.probe_task(), "the probe task ended with 0"),
         Request::RehearseTeardown => rehearse(pc, g),
@@ -1662,19 +1670,26 @@ fn install_site(pc: &mut dyn Pc, g: &mut Guard, path: &str) -> (bool, String) {
     )
 }
 
+/// The gate of every fault injection (HIL, design §7 and §10): dev first
+/// (never live, whatever job is recorded), then a begun HIL job, whose
+/// engine runs with its fault-injection flag (the engine refuses the
+/// injection otherwise). `what` is the iemmode word, `test` names the test
+/// in the refusal.
+fn in_hil_job(g: &Guard, what: &str, test: &str) -> Result<(), String> {
+    g.need_dev(what)?;
+    if g.state.job.is_none() {
+        return Err(format!("{test} needs a begun HIL job (job-begin)"));
+    }
+    Ok(())
+}
+
 /// HIL's RT panic (design §7): dev, inside a begun HIL job, forwarded to
 /// the engine (started with its fault-injection flag for the job, which
 /// refuses it otherwise); its exit 70 is the watch's, which starts it again
 /// after the backoff (`crash::after_exit`, the fade-in on the new stream).
 fn inject_fault(pc: &mut dyn Pc, g: &mut Guard) -> (bool, String) {
-    if let Err(why) = g.need_dev("inject-fault") {
+    if let Err(why) = in_hil_job(g, "inject-fault", "a fault") {
         return (false, why);
-    }
-    if g.state.job.is_none() {
-        return (
-            false,
-            "a fault needs a begun HIL job (job-begin)".to_owned(),
-        );
     }
     outcome(
         pc.engine_inject_fault(),
@@ -1682,25 +1697,41 @@ fn inject_fault(pc: &mut dyn Pc, g: &mut Guard) -> (bool, String) {
     )
 }
 
-/// The owner-approved SEH test (design §10): dev, inside a begun HIL job,
-/// forwarded to the engine (started with its fault-injection flag for the
-/// job). The engine raises a structured exception on its RT callback; the
-/// SEH filter releases the driver within its bound or parks the stream, and
-/// the watch starts the engine again.
+/// The owner-approved SEH test (design §10 test #4): dev, inside a begun
+/// HIL job, forwarded to the engine (started with its fault-injection flag
+/// for the job). The engine raises a structured exception on its RT
+/// callback; the SEH filter releases the driver within its bound or parks
+/// the stream, and the watch starts the engine again.
 fn inject_seh(pc: &mut dyn Pc, g: &mut Guard) -> (bool, String) {
-    if let Err(why) = g.need_dev("inject-seh") {
+    if let Err(why) = in_hil_job(g, "inject-seh", "an SEH test") {
         return (false, why);
-    }
-    if g.state.job.is_none() {
-        return (
-            false,
-            "an SEH test needs a begun HIL job (job-begin)".to_owned(),
-        );
     }
     outcome(
         pc.engine_inject_seh(),
         "the engine raises a structured exception on its RT callback; \
          the SEH filter releases the driver or parks, and the watch starts it again",
+    )
+}
+
+/// The parked-engine test (design §10 test #2, #35): dev, inside a begun
+/// HIL job, forwarded to the engine (started with its fault-injection flag
+/// for the job). The engine raises the SEH test's exception under its
+/// backend's test hold: the driver is kept, the SEH filter parks the RT
+/// thread, and the engine keeps running with its stream parked and the card
+/// held (`Status.parked`, so `iemmode status`) until it ends: test #2 ends
+/// it with an OS restart, any `Shutdown` (an "ide event", a job's engine
+/// restart) too. The watch sees no exit, so it starts nothing; the event
+/// plan's `EngineStop` meets the parked engine as after a stuck callback
+/// (R6).
+fn inject_park(pc: &mut dyn Pc, g: &mut Guard) -> (bool, String) {
+    if let Err(why) = in_hil_job(g, "inject-park", "a parked-engine test") {
+        return (false, why);
+    }
+    outcome(
+        pc.engine_inject_park(),
+        "the engine raises a structured exception under the test hold: its stream \
+         parks with the card held and the engine keeps running until it ends \
+         (test #2 ends it with an OS restart)",
     )
 }
 
@@ -1842,6 +1873,7 @@ pub fn tick(pc: &mut dyn Pc, g: &mut Guard, at: Instant) {
         session_end(pc, g);
     }
     watch_band(g, &p);
+    watch_parked(g);
     if g.respawn_at.is_some_and(|due| due <= at) {
         g.respawn_at = None;
         respawn(pc, g);
@@ -1978,6 +2010,30 @@ fn watch_band(g: &mut Guard, p: &Procs) {
         );
     }
     g.band_seen = up;
+}
+
+/// A parked engine outside a HIL job (#35, supervisor decision of
+/// 2026-10-07): its stream stopped with the card held, so nothing plays
+/// until the engine ends. One alarm per parked engine, by its state alone
+/// (no level, #38); none inside a HIL job (test #2 parks it on purpose). An
+/// engine is known by the guard's start count (`spawns`: every respawn and
+/// plan start counts), so it alarms again only after an engine was seen
+/// unparked or the guard started a new one; a look without an engine (one
+/// coming up, or the connection renewed to the same engine) changes
+/// nothing. Nothing is ended: an "ide event" or a job's engine restart ends
+/// it with `Shutdown`.
+fn watch_parked(g: &mut Guard) {
+    let Some(seen) = &g.seen else {
+        return;
+    };
+    if !seen.status.parked {
+        if g.parked_alarmed.take().is_some() {
+            info!("the engine is no longer parked: its parked alarm is armed again");
+        }
+    } else if g.state.job.is_none() && g.parked_alarmed != Some(g.spawns) {
+        g.parked_alarmed = Some(g.spawns);
+        g.raise(None, PARKED_ALARM, false);
+    }
 }
 
 /// The end of the Windows session (design §5.4): no respawn, the engine

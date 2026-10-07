@@ -511,8 +511,8 @@ pub trait Pc {
     /// starts one that ended with exit 75 again).
     fn engine_exit(&mut self) -> Option<Option<i32>>;
     fn engine_arm(&mut self) -> R<()>;
-    /// `Shutdown`, `DriverReleased` ≤ 10 s, gone ≤ 5 s; a refused
-    /// `Shutdown` fails at once.
+    /// `Shutdown`, `DriverReleased` (or `DriverParked`, #35: nothing was
+    /// released) ≤ 10 s, gone ≤ 5 s; a refused `Shutdown` fails at once.
     fn engine_stop(&mut self, c: &Cancel) -> R<()>;
     /// Two statuses about 1 s apart: callbacks advancing, not faulted, not
     /// parked.
@@ -564,6 +564,12 @@ pub trait Pc {
     /// callback; the SEH filter releases the driver or parks, and the watch
     /// starts it again. Under the fault-injection flag, like the fault.
     fn engine_inject_seh(&mut self) -> R<()>;
+    /// `InjectPark` over the supervisor pipe (the parked-engine test, design
+    /// §10 test #2, #35): the SEH test's exception under the backend's test
+    /// hold, so the driver is kept, the SEH filter parks the RT thread and
+    /// the engine keeps running with its stream parked (`Status.parked`).
+    /// Under the fault-injection flag, like the SEH test.
+    fn engine_inject_park(&mut self) -> R<()>;
     /// What the supervisor connection holds of the running engine; `None`
     /// while no engine of ours runs. Never waits: at most one attempt to
     /// connect, and the pipe's DACL is read once per engine process.
@@ -640,6 +646,7 @@ pub mod fake {
         ForceReopen,
         InjectFault,
         InjectSeh,
+        InjectPark,
         InstallSite,
         Exclude,
     }
@@ -673,6 +680,7 @@ pub mod fake {
                     | Call::ForceReopen
                     | Call::InjectFault
                     | Call::InjectSeh
+                    | Call::InjectPark
                     | Call::InstallSite
                     | Call::Exclude
             )
@@ -1189,6 +1197,10 @@ pub mod fake {
 
         fn engine_inject_seh(&mut self) -> R<()> {
             self.enter(Call::InjectSeh, None)
+        }
+
+        fn engine_inject_park(&mut self) -> R<()> {
+            self.enter(Call::InjectPark, None)
         }
 
         fn engine_seen(&mut self) -> Option<EngineSeen> {
@@ -1812,6 +1824,7 @@ mod tests {
         pc.engine_force_reopen().unwrap();
         pc.engine_inject_fault().unwrap();
         pc.engine_inject_seh().unwrap();
+        pc.engine_inject_park().unwrap();
         assert_eq!(
             pc.install_site("site.toml", &Cancel::default()).unwrap(),
             "site.toml: checked and installed"
@@ -1824,6 +1837,7 @@ mod tests {
             Call::ForceReopen,
             Call::InjectFault,
             Call::InjectSeh,
+            Call::InjectPark,
             Call::InstallSite,
             Call::Exclude,
         ] {

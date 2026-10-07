@@ -102,6 +102,12 @@ pub enum Cmd {
     /// RT thread, under the fault-injection flag. Supervisor-may, like
     /// `InjectFault`.
     InjectSeh,
+    /// The parked-engine test (design §10 test #2, #35): the SEH test's
+    /// exception under a test hold, so the backend keeps the driver and the
+    /// SEH filter parks the RT thread; the engine keeps running and reports
+    /// `parked`. Under the fault-injection flag, supervisor-may, like
+    /// `InjectSeh`.
+    InjectPark,
     Ping,
     /// The supervisor lets an engine started with `--hold` sound (S6 design
     /// note §4): the outputs fade in over 500 ms.
@@ -129,7 +135,7 @@ pub enum Cmd {
 }
 
 /// Every `op` tag, for telling an unknown command from a malformed one.
-pub const OPS: [&str; 24] = [
+pub const OPS: [&str; 25] = [
     "set_input",
     "set_mix",
     "set_level",
@@ -150,6 +156,7 @@ pub const OPS: [&str; 24] = [
     "shutdown",
     "inject_fault",
     "inject_seh",
+    "inject_park",
     "ping",
     "arm",
     "hil_test_signal",
@@ -184,6 +191,7 @@ impl Cmd {
                     | Self::StopTestSignal
                     | Self::InjectFault
                     | Self::InjectSeh
+                    | Self::InjectPark
             )
     }
 }
@@ -450,7 +458,15 @@ pub enum EngineMsg {
         generation: u64,
     },
     Alarm(Alarm),
+    /// The stream stopped and the card is released (the engine ends next).
     DriverReleased {
+        reason: String,
+    },
+    /// The stream stopped parked (#35): a callback stayed in it, or the
+    /// parked-engine test's hold kept the card, so nothing was released and
+    /// the card is free only once the engine's process has ended. Sent
+    /// instead of `DriverReleased`, at the same point.
+    DriverParked {
         reason: String,
     },
     Superseded,
@@ -588,6 +604,7 @@ mod tests {
             Cmd::Shutdown,
             Cmd::InjectFault,
             Cmd::InjectSeh,
+            Cmd::InjectPark,
             Cmd::Ping,
             Cmd::Arm,
             Cmd::HilTestSignal {
@@ -903,6 +920,9 @@ mod tests {
             EngineMsg::DriverReleased {
                 reason: "shutdown".into(),
             },
+            EngineMsg::DriverParked {
+                reason: "shutdown".into(),
+            },
             EngineMsg::Superseded,
         ];
         for m in msgs {
@@ -915,6 +935,26 @@ mod tests {
         }
         let band = EqBand::default();
         assert_eq!(band.gain_db, 0.0);
+    }
+
+    /// The guard reads the stream's end by these names, field by field
+    /// (`iem_guard::effects::engine::parse`; #35).
+    #[test]
+    fn the_stream_ends_go_out_as_driver_released_and_driver_parked() {
+        let released = EngineMsg::DriverReleased {
+            reason: "fault".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&released).unwrap(),
+            r#"{"type":"driver_released","reason":"fault"}"#
+        );
+        let parked = EngineMsg::DriverParked {
+            reason: "shutdown".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&parked).unwrap(),
+            r#"{"type":"driver_parked","reason":"shutdown"}"#
+        );
     }
 
     #[test]
@@ -1040,6 +1080,7 @@ mod tests {
                 "shutdown",
                 "inject_fault",
                 "inject_seh",
+                "inject_park",
                 "ping",
                 "arm",
                 "hil_test_signal",
