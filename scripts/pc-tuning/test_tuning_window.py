@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -903,6 +904,26 @@ class TuningSetupTests(unittest.TestCase):
         with self.assertRaisesRegex(tw.StepError, "icacls"):
             tw.cmd_tuning_setup(self.env, argparse.Namespace())
         self.assertEqual(self.copies, [])
+
+    def test_wpt_install_runs_adksetup_only_from_the_admin_only_stage(self) -> None:
+        # #15, the last lane, item 3: the upload is read once, checked by this box's sha256,
+        # staged admin-only, read back and checked again; Install-IemWpt checks the stage
+        # copy's signature and runs it, never the upload.
+        local = Path(self.env["RAW_DIR"]) / "pc-tuning" / "adksetup.exe"
+        local.parent.mkdir(parents=True)
+        local.write_bytes(b"synthetic adksetup")
+        hexd = hashlib.sha256(b"synthetic adksetup").hexdigest()
+        tw.cmd_wpt_install(dict(self.env, PC_XPERF="C:\\wpt\\xperf.exe"), argparse.Namespace())
+        self.assertEqual(self.copies, [(str(local), "u@pc:/C:/t/adksetup.exe")])
+        script = next(x for x in self.scripts if "Install-IemWpt" in x)
+        upload = "'C:\\t\\adksetup.exe'"
+        at = 0
+        for step in (f"$iemB = [IO.File]::ReadAllBytes({upload})", f"if ($iemH -cne '{hexd}')",
+                     "$iemMod = Join-Path $iemStage 'adksetup.exe'", "& $iemOnly $iemMod",
+                     f"-cne '{hexd}') {{ throw ('sha256 mismatch after the copy: ' + $iemMod) }}",
+                     "Install-IemWpt -Setup $iemMod -Xperf 'C:\\wpt\\xperf.exe'"):
+            at = script.index(step, at)
+        self.assertEqual(script.count(upload), 2)   # read once, named in the mismatch
 
 
 if __name__ == "__main__":
