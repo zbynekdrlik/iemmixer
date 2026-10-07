@@ -359,6 +359,9 @@ jobs:
         # variable, never an argument. The verdict runs even when the client
         # ended early, so the log names what failed; --max-gaps 3 is the hosted
         # runner's tolerance for scheduling stalls (the PC verdict wants 0).
+        # The step's own bound (600 s, the 120 s give-up and the login fit in
+        # it) makes a hung client a failed step, so the upload still runs.
+        timeout-minutes: 15
         env:
           SOAK_SECONDS: ${{ github.event_name == 'push' && '600' || '120' }}
         run: |
@@ -433,6 +436,10 @@ jobs:
       # through iem_win::power::set_cpu_sets); the bundle job builds it.
       - name: Soak client clippy (its Windows CPU Sets)
         run: cargo clippy --locked -p iem-soakclient --all-targets -- -D warnings
+      # The PC runs it on Windows: the fake-server tests read Windows sockets,
+      # whose read timeout is TimedOut, not WouldBlock (.claude/rules/soak.md).
+      - name: Soak client tests on Windows
+        run: cargo test --locked -p iem-soakclient
 
   bundle:
     name: bundle
