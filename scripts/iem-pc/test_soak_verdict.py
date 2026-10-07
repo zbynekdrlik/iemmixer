@@ -380,6 +380,14 @@ class Harness(unittest.TestCase):
         # The PC verdict keeps its 12 checks: the soak's meters decide nothing there.
         self.assertEqual(sv.verdict(polls(), harness(meter_frames=0), SHA)["conclusion"], "success")
 
+    def test_the_harness_reason_codes_are_the_clients_own(self):
+        # Reason::code is an exhaustive match: a code the client gains fails here until the verdict knows it,
+        # so a red summary never drops it as unknown.
+        lib = (Path(__file__).resolve().parents[2] / "crates" / "iem-soakclient" / "src" / "lib.rs").read_text(
+            encoding="utf-8")
+        body = lib.split("pub fn code(self) -> &'static str {", 1)[1].split("\n    }\n", 1)[0]
+        self.assertEqual(set(re.findall(r'Reason::\w+ => "([a-z-]+)"', body)), sv.HARNESS_REASONS)
+
 
 class Main(unittest.TestCase):
     def setUp(self) -> None:
