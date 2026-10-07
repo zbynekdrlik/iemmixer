@@ -879,7 +879,8 @@ function Invoke-IemTuningApply { param([string]$ProfilePath, [int]$Tier) return 
     Assert (@($bs.boot_pref.log).Count -eq 3 -and $bs.boot_pref.log[0] -clike 'boot-pref * add=none' -and $bs.boot_pref.log[2] -cmatch 'REG_DWORD\s+0x40' -and -not $bs.boot_pref.log_error) "bootstrap-state-shows-the-boot-tasks-last-logged-run ($(@($bs.boot_pref.log) -join ' | '))"
     # Fast Startup turns a shutdown into a hibernation of the system session: the
     # next start fires no boot trigger. The state names both facts, each read
-    # without a guess (HiberbootEnabled; the kernel's HiberFilePresent), and
+    # without a guess (HiberbootEnabled; hiberfil.sys listed at the system
+    # volume's root), and
     # judges them as Get-IemFastStartup does (a problem only when it is on).
     $hb = $null
     try { $hb = (Get-Item -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power').GetValue('HiberbootEnabled', $null) } catch { $hb = $null }
