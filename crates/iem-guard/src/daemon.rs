@@ -2231,4 +2231,6 @@ pub fn direct_event<L>(pc: &mut dyn Pc, g: &mut Guard, lock: Option<L>, dry_run:
 }
 
 #[cfg(test)]
+mod record_tests;
+#[cfg(test)]
 mod tests;

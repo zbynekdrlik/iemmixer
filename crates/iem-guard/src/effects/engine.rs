@@ -415,6 +415,12 @@ mod tests {
             parked: false,
             hil: Vec::new(),
             loopback_samples: 0,
+            late: 0,
+            overruns: 0,
+            process_max_us: 0.0,
+            hist_top_us: 0,
+            interval_hist: Vec::new(),
+            process_hist: Vec::new(),
         }
     }
 
@@ -679,6 +685,31 @@ mod tests {
                 parked: true,
                 hil: Vec::new(),
                 loopback_samples: 0,
+                late: 1,
+                overruns: 0,
+                process_max_us: 0.0,
+                hist_top_us: 0,
+                interval_hist: Vec::new(),
+                process_hist: Vec::new(),
+            })
+        );
+        // S7: the soak's figures and both histograms (design note §3).
+        assert_eq!(
+            p(json!({
+                "type": "status", "callbacks": 360_000, "frames": 32, "late": 5, "overruns": 1,
+                "process_max_us": 61.5, "hist_top_us": 667,
+                "interval_hist": [[333, 359_990], [400, 9]], "process_hist": [[60, 360_000]]
+            })),
+            Msg::Status(Status {
+                frames: 32,
+                callbacks: 360_000,
+                late: 5,
+                overruns: 1,
+                process_max_us: 61.5,
+                hist_top_us: 667,
+                interval_hist: vec![(333, 359_990), (400, 9)],
+                process_hist: vec![(60, 360_000)],
+                ..Status::default()
             })
         );
         // HIL's spare outputs with their peaks (design §7); a partial or
@@ -713,7 +744,9 @@ mod tests {
             Msg::Status(status(0, 3000, 0))
         );
         assert_eq!(
-            p(json!({"type": "status", "callbacks": 1, "frames": 5_000_000_000_u64})),
+            p(
+                json!({"type": "status", "callbacks": 1, "frames": 5_000_000_000_u64, "hist_top_us": 5_000_000_000_u64})
+            ),
             Msg::Status(status(0, 1, 0))
         );
         assert_eq!(
@@ -764,6 +797,44 @@ mod tests {
         );
     }
 
+    /// A histogram is read whole or not at all (S7): one entry that is not a
+    /// pair of integers in range makes it none, never part of one (the soak
+    /// verdict then names it); an absent one is none (an older engine).
+    #[test]
+    fn a_histogram_with_a_bad_entry_reads_as_none() {
+        let read = |h: Value| match p(
+            json!({"type": "status", "interval_hist": h, "process_hist": [[7, 1]]}),
+        ) {
+            Msg::Status(s) => (s.interval_hist, s.process_hist),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            read(json!([[0, 7], [4_294_967_295_u64, u64::MAX]])),
+            (vec![(0, 7), (u32::MAX, u64::MAX)], vec![(7, 1)])
+        );
+        for bad in [
+            json!([[1]]),
+            json!([[1, 2, 3]]),
+            json!([[-1, 2]]),
+            json!([[1, -2]]),
+            json!([[4_294_967_296_u64, 1]]),
+            json!([["a", 1]]),
+            json!([[1, "b"]]),
+            json!([[1.5, 2]]),
+            json!([7]),
+            json!({"a": 1}),
+            json!("x"),
+            json!(null),
+            json!([[333, 2], [1], [400, 9]]),
+        ] {
+            assert_eq!(read(bad.clone()), (Vec::new(), vec![(7, 1)]), "{bad}");
+        }
+        match p(json!({"type": "status", "callbacks": 4})) {
+            Msg::Status(s) => assert!(s.interval_hist.is_empty() && s.process_hist.is_empty()),
+            other => panic!("{other:?}"),
+        }
+    }
+
     #[test]
     fn the_reply_names_the_engine_by_its_commit() {
         let sha = "0123456789abcdef0123456789abcdef01234567";
@@ -789,11 +860,17 @@ mod tests {
                 parked: true,
                 hil: spare.clone(),
                 loopback_samples: 129,
+                late: 5,
+                overruns: 1,
+                process_max_us: 61.5,
+                hist_top_us: 667,
+                interval_hist: vec![(333, 359_990), (400, 9)],
+                process_hist: vec![(60, 360_000)],
             },
             pipe_private: true,
         };
         assert_eq!(
-            engine_status(&seen, 3, Some(70)),
+            engine_status(&seen, 3, Some(70), Some(4242)),
             EngineStatus {
                 build: sha.to_owned(),
                 frames: 32,
@@ -808,6 +885,13 @@ mod tests {
                 hil: spare,
                 loopback_samples: 129,
                 loopback_ms: 129.0 * 1000.0 / 96_000.0,
+                pid: Some(4242),
+                late: 5,
+                overruns: 1,
+                process_max_us: 61.5,
+                hist_top_us: 667,
+                interval_hist: vec![(333, 359_990), (400, 9)],
+                process_hist: vec![(60, 360_000)],
             }
         );
         let quiet = EngineSeen {
@@ -815,7 +899,7 @@ mod tests {
             ..EngineSeen::default()
         };
         assert_eq!(
-            engine_status(&quiet, 0, None),
+            engine_status(&quiet, 0, None, None),
             EngineStatus {
                 build: String::new(),
                 ..EngineStatus::default()
