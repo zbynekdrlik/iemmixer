@@ -548,10 +548,11 @@ def state_lock(take: bool) -> Iterator[None]:
 
 def current_entry() -> int:
     """The dev entry: counted up by every successful `iempc dev` and
-    switch-test dev leg (0 before the first). Known limit: the guard also enters dev by itself
-    (rehearse-teardown's re-entry), which this box never sees, so "once per
-    SHA per dev entry" means per `iempc dev` until the guard's status
-    exposes a dev-entry id to key the dispatch record on."""
+    switch-test dev leg (0 before the first). Known limit: the guard also
+    enters dev by itself (rehearse-teardown's re-entry), which this box never
+    sees, so "once per SHA per dev entry" means per `iempc dev` or
+    switch-test dev leg until the guard's status exposes a dev-entry id to
+    key the dispatch record on."""
     return int(read_json(state_dir() / "entry.json", {}).get("entry", 0))
 
 

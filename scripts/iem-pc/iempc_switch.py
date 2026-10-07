@@ -7,44 +7,63 @@ no EVENT-NOW flag at the start). In this order:
    one `iemmode status` (a new flag abandons it and runs the event path):
    the guard answers ok, in dev, no switch, no HIL job (iempc_soak's
    `settled_refusal`); the active bundle (the detail's `bundle <sha>`) is the
-   running engine's build, and that engine plays, neither parked nor
-   faulted (the event plan's engine stop would stop for the owner at one
-   that does not).
+   running engine's build, and that engine plays, neither parked nor faulted
+   (an engine already silent or broken gives no silence of a switch from a
+   playing one). Then a trace an `iempc trace` that died left recorded is
+   stopped (iempc_trace.stop_recorded, as `iempc dev` and `iempc event` do);
+   one that may still run refuses the test (it would run through both legs
+   and weigh on the times measured), and a flag that came during that stop
+   runs the event path.
 2. The event leg: `iemmode event` straight through the guard's pipe (the
    guard's own switch, never `--direct`). It never writes the EVENT-NOW flag:
    that flag is the owner's signal, and a test must not leave it behind. A
    flag that appears meanwhile lets the leg run to its end: it is the switch
    to event.
-3. The dev leg, only when the event leg ended in event (exit 0) and no flag
-   appeared: `iemmode dev` (the guard owns the switch: a new flag abandons
-   this client and the event path pre-empts it). One that exits 0 is a dev
-   entry of this box, as `iempc dev`'s (`next_entry`).
-   A flag before or during it: no dev leg, the PC stays in or goes back to
-   event, the output says so, and the event path follows (EventNow: its exit
-   code is the command's). A failed event leg: no dev leg either; the guard
-   decides where the PC is.
+3. The dev leg, only when the event leg exited 0 and no flag appeared:
+   `iemmode dev` (the guard owns the switch: a new flag abandons this client
+   and the event path pre-empts it). One that exits 0 is a dev entry of this
+   box, as `iempc dev`'s (`next_entry`). A flag before or during it: no dev
+   leg, the output says so, then the event path (EventNow: its exit code is
+   the command's). An event leg that did not exit 0: no dev leg either; the
+   guard decides where the PC is.
 4. Each leg's record is its reply's `last_switch`, or that of one `iemmode
    status` when the reply carries none; the record already seen before the
-   leg is no record of it.
-5. One JSON object `{"switch_test": …}`: both legs' exit codes and records
-   (their `silence_ms` and step times), `numbers` with the handover time
-   (from the first of REAPER's start or its handover through the app's
-   handover) and `verdict`'s conclusion: `success` (exit 0), `failure` (exit
-   1, red names the first failing number; a red event leg still goes back to
-   dev) or `cancelled` (an "ide event" took the dev leg and nothing was red).
+   leg is no record of it. A call that fails (an ssh error, a call left
+   running past its bound) is the leg's `error`: the output is still
+   printed, then the command fails with it.
+5. One JSON object `{"switch_test": …}`: each leg's exit code, record (its
+   `silence_ms` and step times) and the guard's `detail`; `numbers` with the
+   handover time (from the first of REAPER's start or its handover through
+   the app's handover), none from a record that is not the leg's own switch;
+   and `verdict`'s conclusion: `success` (exit 0), `failure` (exit 1, red
+   names the first failing number; a red event leg still goes back to dev) or
+   `cancelled` (an "ide event" took the dev leg and nothing was red).
    Nothing is ever force-ended.
+
+Known limits: the calls' bounds add up to 1440 s (three status reads of
+STATUS_S, two switches of SWITCH_S), past one 10-minute foreground call; a
+switch normally takes a minute or two. A soak running on the PC is not seen
+(it changes no guard state): a switch test then ends that soak (`left-dev`).
 
 iempc.py passes itself in (`ip`), so this module never imports it (#36)."""
 from __future__ import annotations
 
 import iempc_soak
+import iempc_trace
 
 SILENCE_MAX_MS = 60_000    # design note §5: dev → event silences the in-ears at most 60 s
 HANDOVER_MAX_MS = 90_000   # design note §5: the handover checks finish within 90 s
 HANDOVER_FIRST = ("reaper_start", "reaper_handover")
 HANDOVER_LAST = "app_handover"
+DETAIL_CHARS = 2000   # of the guard's reply detail, as iempc's `result` keeps output
+ERROR_CHARS = 1500
+NOTHING = "(nothing was switched)"
 FLAG_BEFORE = "EVENT-NOW appeared before the dev leg: no dev leg, the PC stays in event; the event path follows"
+FLAG_FAILED = ("EVENT-NOW appeared during an event leg that did not exit 0: no dev leg; the event path follows "
+               "(it brings the PC to event)")
 FLAG_DURING = "EVENT-NOW appeared during the dev leg: the guard unwinds it to event; the event path follows"
+EVENT_FAILED = ("the event leg did not exit 0: no dev leg; the guard's state decides (check 'iempc status'), never "
+                "force-end")
 
 
 def is_ms(v) -> bool:
@@ -97,10 +116,22 @@ def switch_refusal(reply) -> str | None:
     return iempc_soak.playing_refusal(engine, "a switch test")
 
 
-def event_problem(code: int, rec: dict | None) -> str | None:
-    """The event leg's first failure: its record (a switch dev → event of
-    its own), its end, its silence, the handover, its exit code."""
-    if rec is None or (rec["from"], rec["to"], rec["unwound"]) != ("dev", "event", None):
+def own_event(rec: dict | None) -> bool:
+    """The record is a switch dev → event of its own (no unwound entry in it)."""
+    return rec is not None and (rec["from"], rec["to"], rec["unwound"]) == ("dev", "event", None)
+
+
+def own_dev(rec: dict | None) -> bool:
+    """The record is a switch from event: the dev entry, or its unwind."""
+    return rec is not None and rec["from"] == "event"
+
+
+def event_problem(code: int | None, rec: dict | None) -> str | None:
+    """The event leg's first failure: its call, its record, its end, its
+    silence, the handover, its exit code."""
+    if code is None:
+        return "event leg: the iemmode event call failed"
+    if not own_event(rec):
         return f"event leg: no record of a switch dev → event (iemmode event exit {code})"
     if (rec["outcome"], rec["ended_in"]) != ("done", "event"):
         return f"event leg: outcome {rec['outcome']}, ended in {rec['ended_in']}"
@@ -119,11 +150,13 @@ def event_problem(code: int, rec: dict | None) -> str | None:
     return None
 
 
-def dev_problem(code: int, rec: dict | None) -> str | None:
-    """The dev leg's first failure: its record (a switch from event of its
-    own), unwound none (an unwound entry also ends `done`, #10 2026-10-07),
-    its target dev, outcome done, its exit code."""
-    if rec is None or rec["from"] != "event":
+def dev_problem(code: int | None, rec: dict | None) -> str | None:
+    """The dev leg's first failure: its call, its record, unwound none (an
+    unwound entry also ends `done`, #10 2026-10-07), its target dev, outcome
+    done, its exit code."""
+    if code is None:
+        return "dev leg: the iemmode dev call failed"
+    if not own_dev(rec):
         return f"dev leg: no record of a switch from event (iemmode dev exit {code})"
     if rec["unwound"] is not None:
         return f"dev leg: unwound (its {rec['unwound']} entry went back to event)"
@@ -141,15 +174,15 @@ def _ms(v: int | None) -> str:
 
 
 def verdict(event: dict, dev: dict | None) -> dict:
-    """The legs (`{"exit", "record"}`; `dev` None when no dev leg ran) judged
-    (pure): `{"conclusion": "success"|"failure"|"cancelled", "summary",
-    "first_failure", "numbers"}`. Red names the first failure, the event
-    leg's first; no dev leg and nothing red is cancelled (only an "ide event"
-    takes the dev leg of an event leg that ended in event)."""
+    """The legs (`{"exit", "record", …}`; `dev` None when no dev leg ran)
+    judged (pure): `{"conclusion": "success"|"failure"|"cancelled",
+    "summary", "first_failure", "numbers"}`. Red names the first failure, the
+    event leg's first; no dev leg and nothing red is cancelled (only an "ide
+    event" takes the dev leg of an event leg that exited 0)."""
     ev, dv = event["record"], dev["record"] if dev else None
-    numbers = {"event_silence_ms": ev["silence_ms"] if ev else None,
-               "handover_ms": handover_ms(ev["steps"]) if ev else None,
-               "dev_silence_ms": dv["silence_ms"] if dv else None}
+    numbers = {"event_silence_ms": ev["silence_ms"] if own_event(ev) else None,
+               "handover_ms": handover_ms(ev["steps"]) if own_event(ev) else None,
+               "dev_silence_ms": dv["silence_ms"] if own_dev(dv) else None}
     text = (f"event-leg silence {_ms(numbers['event_silence_ms'])}, handover {_ms(numbers['handover_ms'])}, "
             f"dev-leg silence {_ms(numbers['dev_silence_ms'])}")
     first = event_problem(event["exit"], ev) or (dev_problem(dev["exit"], dv) if dev else None)
@@ -164,17 +197,24 @@ def verdict(event: dict, dev: dict | None) -> dict:
 
 def leg(ctx, ip, mode: str, watch: str, seen: dict | None) -> tuple[dict, dict | None]:
     """`iemmode <mode>` and its record (the reply's `last_switch`, else one
-    `iemmode status`'s). Returns `{"exit", "record"}` (the record None when
-    none was read or it is `seen`, the one read before) and the record read."""
+    `iemmode status`'s). Returns `{"exit", "record", "detail"}` (the record
+    None when none was read or it is `seen`, the one read before; `exit` None
+    when the switch call failed; `error` when a call failed) and the record
+    read. EventNow (a new flag in a watched call) is not caught."""
+    out: dict = {"exit": None, "record": None, "detail": None}
+    read = None
     try:
         code, reply, _ = ip.iemmode(ctx.env, [mode], ip.SWITCH_S, watch)
+        out["exit"] = code
+        if isinstance(reply, dict) and isinstance(reply.get("detail"), str):
+            out["detail"] = reply["detail"][-DETAIL_CHARS:]
         if not isinstance(reply, dict) or reply.get("last_switch") is None:
             _, reply, _ = ip.iemmode(ctx.env, ["status"], ip.STATUS_S, watch)
+        read = read_record(reply.get("last_switch") if isinstance(reply, dict) else None)
     except ip.StepError as e:
-        raise ip.StepError(f"switch-test: the {mode} leg: {e} (the guard decides where the PC ends: check 'iempc "
-                           "status'; never force-end)") from None
-    read = read_record(reply.get("last_switch") if isinstance(reply, dict) else None)
-    return {"exit": code, "record": read if read != seen else None}, read
+        out["error"] = str(e)[-ERROR_CHARS:]
+    out["record"] = read if read != seen else None
+    return out, read
 
 
 def report(event: dict, dev: dict | None, no_dev: str | None = None) -> dict:
@@ -185,22 +225,39 @@ def report(event: dict, dev: dict | None, no_dev: str | None = None) -> dict:
     return out
 
 
+def finish(ip, out: dict) -> int:
+    """After the output: a leg whose call failed fails the command with its
+    error (iempc then runs the event path if a new flag exists); else 0 green,
+    1 red."""
+    for name in ("event", "dev"):
+        error = (out[f"{name}_leg"] or {}).get("error")
+        if error:
+            raise ip.StepError(f"switch-test: the {name} leg: {error} (the guard decides where the PC ends: check "
+                               "'iempc status'; never force-end)")
+    return 0 if out["conclusion"] == "success" else 1
+
+
 def switch_test(ctx, ip) -> int:
     """`iempc switch-test` (dev time, locked)."""
     ip.refuse_open_window("switch-test")
     code, status, _ = ip.iemmode(ctx.env, ["status"], ip.STATUS_S, ctx.watch(abandon=True))
     why = f"iemmode status failed (exit {code})" if code != 0 else switch_refusal(status)
     if why:
-        raise ip.Refused(f"no switch test: {why} (nothing was switched)")
+        raise ip.Refused(f"no switch test: {why} {NOTHING}")
+    stopped = iempc_trace.stop_recorded(ctx, ip, float("inf"))
+    if ip.event_now():   # that stop ran with "ignore": no switch after a flag that came meanwhile
+        raise ip.EventNow()
+    if not stopped:
+        raise ip.StepError(f"no switch test: a trace recorded in {iempc_trace.record_path(ip)} may still run on the "
+                           f"PC (above) {NOTHING}")
     event, seen = leg(ctx, ip, "event", "ignore", read_record(status.get("last_switch")))
-    if ip.event_now():   # "ide event" meanwhile wins: the PC stays in event
-        ip.emit({"switch_test": report(event, None, FLAG_BEFORE)})
+    if ip.event_now():   # "ide event" meanwhile wins: no dev leg
+        ip.emit({"switch_test": report(event, None, FLAG_BEFORE if event["exit"] == 0 else FLAG_FAILED)})
         raise ip.EventNow()
     if event["exit"] != 0:
-        ip.emit({"switch_test": report(event, None, (
-            f"the event leg did not end in event (iemmode event exit {event['exit']}): no dev leg; the guard's state "
-            "decides (check 'iempc status'), never force-end"))})
-        return 1
+        out = report(event, None, EVENT_FAILED)
+        ip.emit({"switch_test": out})
+        return finish(ip, out)
     try:
         dev, _ = leg(ctx, ip, "dev", ctx.watch(abandon=True), seen)
     except ip.EventNow:
@@ -210,4 +267,4 @@ def switch_test(ctx, ip) -> int:
     if dev["exit"] == 0:
         out["dev_entry"] = ip.next_entry(None)
     ip.emit({"switch_test": out})
-    return 0 if out["conclusion"] == "success" else 1
+    return finish(ip, out)

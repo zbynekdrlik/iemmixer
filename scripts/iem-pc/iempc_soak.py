@@ -8,8 +8,8 @@ this order, nothing dispatched on any refusal:
 1. Before any call: dev time (iempc's Spec: no EVENT-NOW flag at the start),
    a full SHA, hours HOURS_MIN..HOURS_MAX (the ops job's 600 min hold 9 h of
    polls, the client's start and its end), and no soak of this SHA in this dev
-   entry yet (RECORD in the state dir; the entry is `iempc dev`'s count,
-   `current_entry`).
+   entry yet (RECORD in the state dir; the entry is the count of `iempc dev`
+   and switch-test's dev leg, `current_entry`).
 2. `iemmode status` (a new flag abandons the read and runs the event path):
    the guard answers ok, in dev, no switch, no HIL job; the active bundle and
    the running engine's build are both the SHA; the engine plays (neither
