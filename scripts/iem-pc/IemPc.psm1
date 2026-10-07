@@ -951,6 +951,20 @@ function Get-IemBytesSha256 {
     return (-join @($h | ForEach-Object { $_.ToString('x2') }))
 }
 
+function Set-IemElevatedTemp {
+    # TEMP and TMP of this elevated process at <Root>\temp, an admin-only folder
+    # of the elevated root (Install-IemElevatedFolder, read back), before it
+    # imports S1c's IemTuning.psm1: its Add-Type has csc write and then load a
+    # DLL in TEMP, and the session user's TEMP is open to every process of the
+    # user (#15). For the rest of the process. Returns the folder.
+    param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][string]$UserSid)
+    $t = Join-Path $Root 'temp'
+    Install-IemElevatedFolder -Path $t -UserSid $UserSid
+    $env:TEMP = $t
+    $env:TMP = $t
+    return $t
+}
+
 function Remove-IemTuningStage {
     # Install-IemTuning's staging folder: the files it may hold (never through a
     # junction or a link), then the folder itself, which must then be empty.
@@ -1035,6 +1049,7 @@ function Install-IemTuning {
     $swapping = $false
     try {
         foreach ($name in @($want.Keys)) { Write-IemElevatedFile -Path $staged[$name] -Bytes $bytes[$name] }
+        [void](Set-IemElevatedTemp -Root $Root -UserSid $u.sid)
         Import-Module $staged['IemTuning.psm1'] -Force
         Assert-IemLayout -Profile (Read-IemProfile -Path $profilePath)
         Install-IemElevatedFolder -Path $tuning -UserSid $u.sid
@@ -1786,6 +1801,7 @@ function Invoke-IemTuningVerb {
         $bad += $b
     }
     if ($bad.Count -gt 0) { throw ('tuning module refused (not admin-only): ' + ($bad -join '; ')) }
+    [void](Set-IemElevatedTemp -Root (Split-Path -Parent $TuningDir) -UserSid $sid)
     Import-Module $module -Force
     switch ($Verb) {
         'enter' { return (Enter-IemTuningMode -ProfilePath $profilePath) }

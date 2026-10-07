@@ -39,6 +39,7 @@ sys.modules.setdefault("spike_window", sys.modules[__name__])
 from pc_change import (JOURNAL_STEPS, REAPER_STEPS, RUN_START_S, SAVE_QUIT_S, SET_BUFFER_S, STEP_REFUSED, STOP_FILE,  # noqa: E402,F401
                        begin_change, changing, clear_stop, close_out, end_change, exit_on_signals, intent_live, pc_change,
                        reaper_on_card, settle_live, step_guard, unwind_closing, wait_for_settle)
+import elevated_ps  # noqa: E402  (TEMP before the tuning modules' import, #15)
 # The pure rules (env, request, undo plan, sums, verdict), re-exported.
 from spike_rules import (CPU_LIST, FRAMES, MAX_SECONDS, REQUIRED, buffer_args, buffer_touched,  # noqa: E402,F401
                          check_request, cpu_set, load_env, parse_sums, pick_run,
@@ -573,8 +574,10 @@ def cmd_run(env, args, on_poll=None) -> dict:
 
 def measure_import(root: str) -> str:
     """The import of the S1c modules from the verified bundle (IemMeasure loads
-    IemTuning, whose Add-Type compiles)."""
-    return f"Import-Module (Join-Path {ps_quote(root)} 'bin\\IemMeasure.psm1') -Force -Global"
+    IemTuning, whose Add-Type compiles), TEMP and TMP first at the admin-only
+    <elevated root>\\temp: csc writes and loads its DLL there, never in the
+    session user's TEMP (#15, elevated_ps.temp_first)."""
+    return f"{elevated_ps.temp_first()} ; Import-Module (Join-Path {ps_quote(root)} 'bin\\IemMeasure.psm1') -Force -Global"
 
 
 def tuning_body(env: dict[str, str], body: str) -> str:
