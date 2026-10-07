@@ -160,6 +160,19 @@ class FakeGh:
         return [c for c in self.calls if c[:len(prefix)] == list(prefix)]
 
 
+class FakeClock:
+    """A monotonic clock that moves only when a fake reply waits (`sleep`)."""
+
+    def __init__(self) -> None:
+        self.t = 1024.0   # binary fractions below stay exact
+
+    def now(self) -> float:
+        return self.t
+
+    def sleep(self, seconds: float) -> None:
+        self.t += seconds
+
+
 class Base(unittest.TestCase):
     PATCHED = ("EVENT_NOW", "STATE_DIR", "SPIKE_STATE", "SPIKE", "POLL_S", "ssh_ps", "scp", "gh", "env_path",
                "EVENT_BUDGET_S", "SPIKE_SHARE_S", "SWITCH_MIN_S")
@@ -697,15 +710,21 @@ class EventTests(Base):
         self.assertEqual(self.pc.calls, [])
 
     def test_an_iemmode_call_never_starts_with_less_than_its_minimum(self) -> None:
+        # On a fake clock that only the replies move: the branch never depends on
+        # this process's own speed (a loaded run once ate the margin).
+        clock = FakeClock()
         ip.EVENT_BUDGET_S, ip.SWITCH_MIN_S = 1.0, 0.5
-        self.pc.replies[("event",)] = lambda: (time.sleep(0.6), (4, OK))[1]
-        code, _, err = self.run_main("event")
+        self.pc.replies[("event",)] = lambda: (clock.sleep(0.625), (4, OK))[1]
+        with mock.patch.object(ip, "event_clock", clock.now):
+            code, _, err = self.run_main("event")
         self.assertEqual((code, [c[1] for c in self.pc.calls]), (1, [["event"]]))
         self.assertIn("less than the 0.5 s an iemmode call gets: run 'iempc event' again", err)
         self.assertIn("alarm the owner now", err)
         self.pc.calls.clear()
-        self.pc.replies[("event",)] = lambda: (time.sleep(0.1), (4, OK))[1]
-        self.assertEqual(self.run_main("event")[0], 0)
+        # Exactly the minimum left is enough: 1.0 - 0.5 = 0.5.
+        self.pc.replies[("event",)] = lambda: (clock.sleep(0.5), (4, OK))[1]
+        with mock.patch.object(ip, "event_clock", clock.now):
+            self.assertEqual(self.run_main("event")[0], 0)
         self.assertEqual([c[1] for c in self.pc.calls], [["event"], ["event", "--direct"]])
 
     def test_an_unreachable_guard_falls_back_to_direct(self) -> None:

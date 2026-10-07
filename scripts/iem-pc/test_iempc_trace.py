@@ -19,7 +19,7 @@ sys.path.insert(0, str(HERE.parent / "pc-tuning"))
 import iempc_trace  # noqa: E402,F401  (the module under test; `iempc trace` runs it)
 import iempc_tuning  # noqa: E402
 import latency_report as lr  # noqa: E402
-from test_iempc import OK, SHA, SHA2, Base, ip, make_zip, sha256  # noqa: E402
+from test_iempc import OK, SHA, SHA2, Base, FakeClock, ip, make_zip, sha256  # noqa: E402
 from test_iempc_tuning import MODULES, PROFILE  # noqa: E402
 from test_latency_report import DPCISR_XPERF  # noqa: E402
 
@@ -576,19 +576,21 @@ class TraceRecordTests(TraceBase):
         """guarded notices a bound only at its next poll: a stop left running
         returns up to POLL_S late, and iemmode event must still get SWITCH_MIN_S."""
         self.write_record()
-        # One poll of slack for this process's own work (0.2 s; at 0.05 s a loaded run failed it).
+        # On a fake clock that only the stop's wait moves: the branch never
+        # depends on this process's own speed (a loaded run once ate the slack).
+        clock = FakeClock()
         ip.EVENT_BUDGET_S, ip.SWITCH_MIN_S, ip.POLL_S = 2.0, 0.5, 0.2
         inner = self.ssh_ps
 
         def slow(env, script, timeout, event):
             if f"-Dir '{OLD}'" in script:
                 self.bounds.append((script, timeout))
-                time.sleep(timeout + ip.POLL_S)
+                clock.sleep(timeout + ip.POLL_S)
                 raise ip.StillRunning(f"ssh still running after {timeout} s (bounded on the PC; never force-end)")
             return inner(env, script, timeout, event)
 
         ip.ssh_ps = slow
-        with mock.patch.object(iempc_trace, "RECORDED_STOP_MIN_S", 0.1):
+        with mock.patch.object(iempc_trace, "RECORDED_STOP_MIN_S", 0.1), mock.patch.object(ip, "event_clock", clock.now):
             code, docs, err = self.run_main("event")
         self.assertEqual(code, 0, err)
         self.assertEqual(len(self.recorded_stops()), 1)

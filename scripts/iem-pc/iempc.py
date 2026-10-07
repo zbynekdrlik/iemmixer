@@ -228,6 +228,12 @@ def now_iso() -> str:
     return dt.datetime.now().astimezone().isoformat(timespec="seconds")
 
 
+def event_clock() -> float:
+    """The event path's one clock (its budget, each call's share); the tests
+    run the path on a fake one, so no branch depends on this process's speed."""
+    return time.monotonic()
+
+
 def emit(obj: dict) -> None:
     print(json.dumps(obj, ensure_ascii=False), flush=True)
 
@@ -855,7 +861,7 @@ def close_failed_window(deadline: float, error: str) -> None:
         if sw.intent_live(st.get("in_flight")):
             seen["in_flight"] = st["in_flight"]
 
-    wait = deadline - time.monotonic() - SWITCH_MIN_S
+    wait = deadline - event_clock() - SWITCH_MIN_S
     try:
         if wait <= 0:
             raise sw.StepError(f"no time left in the event budget to wait for the window lock ({max(wait, 0):.0f} s)")
@@ -883,7 +889,7 @@ def switch_timeout(deadline: float) -> float:
     """What an iemmode call of the event path may take: the rest of the one
     budget. It never starts with less than SWITCH_MIN_S left, since a cut
     `--direct` session stops its switch half-way."""
-    left = deadline - time.monotonic()
+    left = deadline - event_clock()
     if left < SWITCH_MIN_S:
         raise StepError(f"the event path has {max(left, 0):.0f} s of its {EVENT_BUDGET_S} s budget left, less than the "
                         f"{SWITCH_MIN_S} s an iemmode call gets: run 'iempc event' again (a new budget)")
@@ -894,7 +900,7 @@ def cmd_event(ctx: Ctx) -> int:
     """The flag, the spike preempt when a window is open, then `iemmode
     event` (and `--direct` on exit 4), all within EVENT_BUDGET_S."""
     dry = bool(getattr(ctx.args, "dry_run", False))
-    deadline = time.monotonic() + EVENT_BUDGET_S
+    deadline = event_clock() + EVENT_BUDGET_S
     if not dry:
         write_flag()
     if spike_window_open() or spike_window_settling():
@@ -912,7 +918,7 @@ def cmd_event(ctx: Ctx) -> int:
                 close_failed_window(deadline, pre.get("error", ""))
     if not dry:   # a trace whose dev-box process died (#15); never raises. guarded sees its
         # bound only at its next poll: two polls stay with iemmode event's minimum.
-        iempc_trace.stop_recorded(ctx, sys.modules[__name__], deadline - time.monotonic() - SWITCH_MIN_S - 2 * POLL_S)
+        iempc_trace.stop_recorded(ctx, sys.modules[__name__], deadline - event_clock() - SWITCH_MIN_S - 2 * POLL_S)
     args = ["event", "--dry-run"] if dry else ["event"]
     code, reply, raw = iemmode(ctx.env, args, switch_timeout(deadline), "ignore")
     emit(result("iemmode", args, code, reply, raw))
