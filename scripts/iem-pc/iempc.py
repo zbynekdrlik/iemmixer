@@ -54,8 +54,8 @@ Site values come only from the private env file ($PC_ENV, default
 ~/.config/iemmixer/iem-pc.env): PC_SSH (the ssh destination), PC_ROOT (the
 root folder on the PC, Windows form), PC_ROOT_SCP (the same folder as scp
 names it), PC_BIN (optional, default: bin under PC_ROOT; iemmode runs from
-the admin-only %ProgramData%\\iemmixer\\bin copy instead when it reads back,
-iempc_bin) and PC_XPERF
+the admin-only %ProgramData%\\iemmixer\\bin copy instead when it reads back
+and the guard last seen runs its build, iempc_bin) and PC_XPERF
 (optional, xperf.exe's full path on the PC; `trace` refuses without it).
 Nothing is ever ended by force.
 
@@ -483,9 +483,13 @@ def call(env: dict[str, str], exe: str, args: list[str], timeout: float, event: 
 
 def iemmode(env: dict[str, str], args: list[str], timeout: float, event: str,
             checks: tuple[str, ...] = ()) -> tuple[int, dict | None, dict]:
-    """iemmode from the admin-only bin when it reads back, else PC_BIN's (#15, iempc_bin)."""
-    return call(env, pc_join(env["PC_BIN"], "iemmode.exe"), args, timeout, event, checks,
-                then=iempc_bin.pick(sys.modules[__name__]))
+    """iemmode from the admin-only bin while the guard last seen runs its
+    build and it reads back, else PC_BIN's (#15, iempc_bin); the reply's
+    guard_build is what the next call compares."""
+    code, reply, raw = call(env, pc_join(env["PC_BIN"], "iemmode.exe"), args, timeout, event, checks,
+                            then=iempc_bin.pick(sys.modules[__name__]))
+    iempc_bin.seen(sys.modules[__name__], reply)
+    return code, reply, raw
 
 
 def result(label: str, args: list[str], code: int, reply: dict | None, raw: dict) -> dict:
@@ -1204,6 +1208,7 @@ def cmd_dispatch_hil(ctx: Ctx) -> int:
         raise Refused(f"{EVENT_NOW} appeared: no HIL dispatch during an event (nothing was dispatched)")
     gh(["workflow", "run", HIL_WORKFLOW, "-R", OPS_REPO, "-f", f"sha={sha}", "-f", f"branch={branch}",
         "-f", f"run={run}", "-f", f"digest={rec['digest']}"])
+    iempc_bin.forget(sys.modules[__name__])   # the run activates `sha`: the guard's build is not known (#15)
     record = {"sha": sha, "branch": branch, "run": run, "digest": rec["digest"], "entry": entry, "at": now_iso()}
     write_json(state_dir() / "dispatch.json", {"dispatches": (done + [record])[-200:]})
     emit({"dispatched": record})
