@@ -586,7 +586,7 @@ class RunTests(unittest.TestCase):
 
 
 class PreflightTests(unittest.TestCase):
-    GOOD = {"pref": 64, "reaper": 1, "app": 1, "spike": 0, "holders": ["reaper.exe:6496"], "task": True, "files": 6}
+    GOOD = {"pref": 64, "reaper": 1, "app": 1, "spike": 0, "holders": ["reaper.exe:6496"], "task": True, "files": 7}
 
     def test_good_state_passes(self) -> None:
         self.assertEqual(sw.preflight_problems(dict(self.GOOD), 64), [])
@@ -622,7 +622,7 @@ class DevTimeWindowTests(unittest.TestCase):
         sw.STATE, sw.EVENT_NOW = d / "spike-window.json", d / "EVENT-NOW"
         self.calls: list[str] = []
         self.pc = {"pref": 64, "kind": "DWord", "raw": "64", "reaper": 0, "app": 1, "spike": 0, "holders": [],
-                   "task": True, "files": 6}
+                   "task": True, "files": 7}
 
         def fake_ps(env, body, timeout=300, event="finish"):
             self.calls.append(body)
@@ -718,6 +718,12 @@ class BundleTests(unittest.TestCase):
 
     def test_a_complete_bundle_verifies(self) -> None:
         self.assertEqual(sw.verify_bundle(self.bundle()), sorted(sw.BUNDLE_FILES))
+
+    def test_the_bundle_carries_the_tuning_store_next_to_iemtuning(self) -> None:
+        # #34: IemTuning.psm1 loads IemTuningStore.psm1 from its own folder, so the
+        # store travels in the bundle and every window session stages it.
+        self.assertIn("IemTuningStore.psm1", sw.BUNDLE_FILES)
+        self.assertIn("IemTuningStore.psm1", sw.MODULES)
 
     def test_a_changed_file_fails(self) -> None:
         d = self.bundle()
