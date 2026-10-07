@@ -3771,7 +3771,7 @@ fn the_loop_answers_requests_and_ends_on_quit() {
     let (rtx, rrx) = mpsc::sync_channel(1);
     tx.send(Job {
         req: Request::Quit,
-        epoch: 0,
+        generation: INIT,
         reply: rtx,
     })
     .unwrap();
@@ -3831,7 +3831,7 @@ fn the_guard_waits_for_its_last_reply_to_be_written() {
     let (rtx, rrx) = mpsc::sync_channel(1);
     tx.send(Job {
         req: Request::Quit,
-        epoch: 0,
+        generation: INIT,
         reply: rtx,
     })
     .unwrap();
@@ -3878,7 +3878,7 @@ fn the_watch_runs_once_a_second() {
     let (rtx, rrx) = mpsc::sync_channel(1);
     tx.send(Job {
         req: Request::Quit,
-        epoch: 0,
+        generation: INIT,
         reply: rtx,
     })
     .unwrap();
