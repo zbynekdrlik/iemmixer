@@ -985,9 +985,11 @@ function Install-IemTuning {
     # folder gone. Then each file goes in by a rename on the same volume, so the
     # tuning task (the guard's enter, exit, state) finds the old file or the new
     # one, never a part of one (between the delete and the rename, an instant,
-    # none); a failure part-way leaves each file whole and is thrown. Everything
-    # is read back (Test-IemElevatedItem, the hashes). Returns the three hashes,
-    # never the profile's content (site values, P6).
+    # none); a failure part-way leaves each file whole and is thrown, and a file
+    # whose rename failed after its delete keeps its checked copy in the stage,
+    # named in the error. Everything is read back (Test-IemElevatedItem, the
+    # hashes). Returns the three hashes, never the profile's content (site
+    # values, P6).
     param(
         [Parameter(Mandatory)][string]$SourceDir,
         [Parameter(Mandatory)][string]$TuningSha256,
@@ -1030,11 +1032,13 @@ function Install-IemTuning {
         if ($bad.Count -gt 0) { throw ('the installed profile is refused (-KeepProfile needs an admin-only one): ' + ($bad -join '; ')) }
     }
     Install-IemElevatedFolder -Path $stage -UserSid $u.sid
+    $swapping = $false
     try {
         foreach ($name in @($want.Keys)) { Write-IemElevatedFile -Path $staged[$name] -Bytes $bytes[$name] }
         Import-Module $staged['IemTuning.psm1'] -Force
         Assert-IemLayout -Profile (Read-IemProfile -Path $profilePath)
         Install-IemElevatedFolder -Path $tuning -UserSid $u.sid
+        $swapping = $true
         foreach ($name in @($want.Keys)) {
             if (Test-IemReparsePoint -Path $targets[$name]) { throw "$($targets[$name]) is a junction or a link: refused" }
             if (Test-Path -LiteralPath $targets[$name]) { [IO.File]::Delete($targets[$name]) }
@@ -1049,7 +1053,17 @@ function Install-IemTuning {
         }
     } catch {
         $err = "$_"
-        try { Remove-IemTuningStage -Stage $stage } catch { $err += "; the staging folder $stage was not removed: $($_.Exception.Message)" }
+        # A rename that failed after its target's delete: the checked copy stays
+        # staged (named), never removed with the stage.
+        $lost = @()
+        if ($swapping) {
+            $lost = @(@($want.Keys) | Where-Object { -not (Test-Path -LiteralPath $targets[$_]) -and (Test-Path -LiteralPath $staged[$_]) })
+        }
+        if ($lost.Count -gt 0) {
+            $err += "; the tuning folder lacks $($lost -join ', '): the checked copies stay in $stage; run the install again"
+        } else {
+            try { Remove-IemTuningStage -Stage $stage } catch { $err += "; the staging folder $stage was not removed: $($_.Exception.Message)" }
+        }
         throw $err
     }
     Remove-IemTuningStage -Stage $stage
