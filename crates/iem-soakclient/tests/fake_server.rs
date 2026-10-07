@@ -46,6 +46,9 @@ struct Script {
     /// The listen socket sends this many frames and one frame Opus refuses,
     /// then it is dropped without a Close.
     drop_listen_after: Option<usize>,
+    /// With `drop_listen_after`: the listen socket sends a Close instead of
+    /// being dropped, and reads the client's answer.
+    close_not_drop: bool,
     /// Every upgrade is refused before its handshake.
     refuse_upgrades: bool,
     /// The mixer socket sends `Hello` and `State`, then nothing, and stays
@@ -63,6 +66,7 @@ impl Default for Script {
             lan_url: None,
             engineer: true,
             drop_listen_after: None,
+            close_not_drop: false,
             refuse_upgrades: false,
             stall_mixer: false,
             deaf_after_stop: false,
@@ -326,7 +330,7 @@ fn mixer_stream(ws: &mut Ws, stall: bool, report: &Report) {
 
 /// Waits for `ListenStart` on member9, answers `listening`, then sends one
 /// Opus packet of silence every 20 ms until the client is gone (a
-/// `drop_listen_after` script cuts it short).
+/// `drop_listen_after` script cuts it short: a drop, or a Close).
 fn listen_stream(ws: &mut Ws, script: &Script, report: &Report) {
     loop {
         match ws.read() {
@@ -354,6 +358,11 @@ fn listen_stream(ws: &mut Ws, script: &Script, report: &Report) {
         sent += 1;
         Some(frame)
     });
+    if script.close_not_drop {
+        // The client's answering Close goes to `closed`.
+        let _ = ws.close(None);
+        hear(ws, "listen", report, WAIT, false);
+    }
 }
 
 /// The arguments of a run of `seconds` on member9 at `base`.
@@ -497,27 +506,33 @@ fn the_sockets_go_to_the_lan_url_the_server_names() {
 
 #[test]
 fn a_dropped_socket_ends_the_run_connection_lost_and_is_never_opened_again() {
-    let fake = Fake::start(Script {
-        drop_listen_after: Some(10),
-        ..Script::default()
-    });
-    let ran = run_within(
-        args(&fake.origin(), true, 30),
-        PIN,
-        Duration::from_secs(5),
-        None,
-    );
-    let s = &ran.summary;
-    assert_eq!(s.error, Some(Reason::ConnectionLost), "{s:?}");
-    assert!(!s.complete, "{s:?}");
-    // Everything before the drop was counted, the refused frame included.
-    assert_eq!((s.frames, s.decode_errors), (10, 1), "{s:?}");
-    assert_eq!(s.reconnects, 0, "{s:?}");
-    let seen = fake.seen();
-    let counts = [times(&seen, MIXER), times(&seen, LISTEN)];
-    assert_eq!(counts, [1, 1], "one connection per socket: {seen:?}");
-    // The mixer socket, still open, ended with a Close.
-    assert_eq!(fake.closed(1), ["mixer"]);
+    // The listen socket dropped, or closed by the server with a Close: the
+    // mixer socket, still open, ends with a Close, and the client answers
+    // the server's Close.
+    let cases = [(false, &["mixer"][..]), (true, &["listen", "mixer"][..])];
+    for (close_not_drop, closed) in cases {
+        let fake = Fake::start(Script {
+            drop_listen_after: Some(10),
+            close_not_drop,
+            ..Script::default()
+        });
+        let ran = run_within(
+            args(&fake.origin(), true, 30),
+            PIN,
+            Duration::from_secs(5),
+            None,
+        );
+        let s = &ran.summary;
+        assert_eq!(s.error, Some(Reason::ConnectionLost), "{s:?}");
+        assert!(!s.complete, "{s:?}");
+        // Everything before the cut was counted, the refused frame included.
+        assert_eq!((s.frames, s.decode_errors), (10, 1), "{s:?}");
+        assert_eq!(s.reconnects, 0, "{s:?}");
+        let seen = fake.seen();
+        let counts = [times(&seen, MIXER), times(&seen, LISTEN)];
+        assert_eq!(counts, [1, 1], "one connection per socket: {seen:?}");
+        assert_eq!(fake.closed(closed.len()), closed, "{close_not_drop}");
+    }
 }
 
 #[test]
