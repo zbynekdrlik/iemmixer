@@ -1,9 +1,11 @@
 """PowerShell an elevated ssh session runs before it trusts anything in the
 user's root (#15, the lane findings of 2026-10-07): admin-only folders under the
 PC's elevated root (%ProgramData%\\iemmixer, the known folder as
-Register-IemTasks resolves it), the bootstrap's stage, and the TEMP an Add-Type
-compile uses. Composed on the dev box for iempc (bootstrap, tuning-install, the
-refresh after activate: module_script; trace: iempc_trace.measure_load) and for
+Register-IemTasks resolves it), the bootstrap's stage, the TEMP an Add-Type
+compile uses, and the admin-only bin whose programs an elevated session runs
+(installed_copy, verified_bin: iempc_bin). Composed on the dev box for iempc
+(bootstrap, tuning-install, the refresh after activate: module_script; trace:
+iempc_trace.measure_load; iemmode and the offline guard: iempc_bin) and for
 the S1a/S1c/golden window sessions (spike_window.ps_script, measure_import,
 trace_stop_import; golden_window.ps_script). They run before IemPc.psm1 is
 loaded, so this is the one PowerShell copy of its Install-IemElevatedFolder
@@ -44,6 +46,7 @@ import re
 ROOT = "(Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'iemmixer')"
 STAGE = "bootstrap-stage"
 TEMP = "temp"
+BIN = "bin"   # the admin-only copies of our programs an elevated session runs (#15)
 NAME = re.compile(r"[A-Za-z0-9_.-]+")
 HEX64 = re.compile(r"[0-9a-f]{64}")
 ADMINS = "(New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-544')"
@@ -147,6 +150,37 @@ def import_staged(name: str, opts: str = "-Force") -> str:
     """Imports the stage copy `name` that staged() put there in this session."""
     _want(name, None)
     return f"Import-Module (Join-Path $iemStage '{name}') {opts}"
+
+
+def installed_copy(src: str, name: str, hexd: str, root: str = ROOT) -> str:
+    """Statements that put the program uploaded at `src` into <root>\\bin\\<name>
+    (#15, ROZHODNUTE of 2026-10-07: an elevated session runs only admin-only
+    copies of our programs): read once and checked by `hexd`, staged, then
+    moved into the admin-only bin unless it already holds exactly those bytes
+    (a copy that may be running is never replaced for nothing; a move on the
+    same volume, so a caller sees the old file or the new one, for an instant
+    none), owned by Administrators, read back and checked again: `$iemDst`."""
+    want = _want(name, hexd)
+    return " ; ".join([
+        staged([(src, name, hexd)], root),
+        f"$iemBin = Join-Path $iemRoot '{BIN}' ; & $iemDir $iemBin ; $iemDst = Join-Path $iemBin '{name}'",
+        f"if (-not {_same('$iemDst', want)}) {{ [IO.File]::Delete($iemDst) ; [IO.File]::Move($iemMod, $iemDst) ; "
+        f"{_owned('$iemDst')} }}",
+        "& $iemOnly $iemDst",
+        f"if ({_hash('$iemDst')} -cne {want}) {{ throw ('sha256 mismatch after the copy: ' + $iemDst) }}",
+    ])
+
+
+def verified_bin(name: str, root: str = ROOT) -> str:
+    """Statements that set `$iemUse` to <root>\\bin\\<name> when the elevated
+    root, bin and the file read back admin-only (`$iemOnly`: no junction or
+    link, owned by Administrators or SYSTEM, nobody else may change it), else
+    leave it `$null` and say why in `$iemNote`. They only read."""
+    _want(name, None)
+    return (f"{HELPERS} ; $iemUse = $null ; $iemNote = $null ; $iemE = Join-Path {root} '{BIN}\\{name}' ; "
+            "$iemEap = $ErrorActionPreference ; $ErrorActionPreference = 'Stop' ; "
+            "try { foreach ($p in @((Split-Path -Parent (Split-Path -Parent $iemE)), (Split-Path -Parent $iemE), $iemE)) "
+            "{ & $iemOnly $p } ; $iemUse = $iemE } catch { $iemNote = \"$_\" } finally { $ErrorActionPreference = $iemEap }")
 
 
 def temp_first(root: str = ROOT) -> str:

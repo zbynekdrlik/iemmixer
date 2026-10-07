@@ -42,16 +42,19 @@ exe was built with), at most HANDOVER_S; a status read that fails meanwhile
 is read again. A guard built before that rule refuses it in event:
 `activate --offline` then quits it gracefully (`iemmode quit`, then its
 processes read until none runs, QUIT_S), runs the bundle's own
-`bundles\\<sha>\\iemmixer-guard.exe activate <sha>` (its sha256 checked on
-the PC; it takes the guard's mutex and activates an idle event only) and
-waits for the hand-over the same way; the first status read starts the
+`iemmixer-guard.exe activate <sha>` (read once from `bundles\\<sha>`, its
+sha256 checked on the PC, run from the admin-only stage: iempc_bin; it takes
+the guard's mutex and activates an idle event only) and waits for the
+hand-over the same way; the first status read starts the
 guard's task, which runs the new exe. A refused offline step starts the
 guard again.
 
 Site values come only from the private env file ($PC_ENV, default
 ~/.config/iemmixer/iem-pc.env): PC_SSH (the ssh destination), PC_ROOT (the
 root folder on the PC, Windows form), PC_ROOT_SCP (the same folder as scp
-names it), PC_BIN (optional, default: bin under PC_ROOT) and PC_XPERF
+names it), PC_BIN (optional, default: bin under PC_ROOT; iemmode runs from
+the admin-only %ProgramData%\\iemmixer\\bin copy instead when it reads back,
+iempc_bin) and PC_XPERF
 (optional, xperf.exe's full path on the PC; `trace` refuses without it).
 Nothing is ever ended by force.
 
@@ -81,6 +84,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterator
 
+import iempc_bin
 import iempc_trace
 import iempc_tuning
 
@@ -333,18 +337,21 @@ def hash_check(path: str, hexd: str) -> str:
             f"'{hexd}') {{ throw ('sha256 mismatch: ' + {q}) }}")
 
 
-def native_script(exe: str, args: list[str], checks: tuple[str, ...] = ()) -> str:
-    """Runs a native program and prints {exit, out, err} as the last line;
-    `exit` is null when the program did not start (or a check threw)."""
+def native_script(exe: str, args: list[str], checks: tuple[str, ...] = (), then: str = "") -> str:
+    """Runs a native program and prints {exit, out, err, note} as the last line;
+    `exit` is null when the program did not start (or a check threw). `then`
+    runs once $x and $a are set and may point $x elsewhere (iempc_bin: the
+    admin-only copy, `note` saying why not, #15)."""
     pre = "".join(c + " ; " for c in checks)
     return "\n".join([
         "$ErrorActionPreference = 'Continue'",
         "$ProgressPreference = 'SilentlyContinue'",
-        f"try {{ {pre}$x = {ps_quote(exe)} ; $a = {ps_args(args)} ; $r = @(& $x @a 2>&1) ; $c = $LASTEXITCODE ; "
+        f"try {{ {pre}$x = {ps_quote(exe)} ; $a = {ps_args(args)} ; {then}$r = @(& $x @a 2>&1) ; $c = $LASTEXITCODE ; "
         "$out = @($r | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] } | ForEach-Object { \"$_\" }) -join \"`n\" ; "
         "$err = @($r | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } | ForEach-Object { $_.Exception.Message }) -join \"`n\" ; "
-        "$o = [pscustomobject]@{ exit = $c; out = $out; err = $err } } "
-        "catch { $o = [pscustomobject]@{ exit = $null; out = ''; err = \"$_\" } } ; ConvertTo-Json -InputObject $o -Compress",
+        "$o = [pscustomobject]@{ exit = $c; out = $out; err = $err; note = $iemNote } } "
+        "catch { $o = [pscustomobject]@{ exit = $null; out = ''; err = \"$_\"; note = $iemNote } } ; "
+        "ConvertTo-Json -InputObject $o -Compress",
     ])
 
 
@@ -397,11 +404,13 @@ def last_json(text: str) -> dict:
 
 
 def run_native(env: dict[str, str], exe: str, args: list[str], timeout: float, event: str,
-               checks: tuple[str, ...] = ()) -> dict:
-    doc = last_json(ssh_ps(env, native_script(exe, args, checks), timeout, event))
+               checks: tuple[str, ...] = (), then: str = "") -> dict:
+    doc = last_json(ssh_ps(env, native_script(exe, args, checks, then), timeout, event))
     code = doc.get("exit")
     if code is not None and not isinstance(code, int):
         raise StepError(f"the PC reported a non-numeric exit code: {code!r}")
+    if doc.get("note"):
+        iempc_bin.noted(str(doc["note"]))
     return {"exit": code, "out": doc.get("out") or "", "err": doc.get("err") or ""}
 
 
@@ -440,8 +449,8 @@ def owner_alarms(reply: dict | None) -> list[dict]:
 
 
 def call(env: dict[str, str], exe: str, args: list[str], timeout: float, event: str,
-         checks: tuple[str, ...] = (), json_reply: bool = True) -> tuple[int, dict | None, dict]:
-    raw = run_native(env, exe, args, timeout, event, checks)
+         checks: tuple[str, ...] = (), json_reply: bool = True, then: str = "") -> tuple[int, dict | None, dict]:
+    raw = run_native(env, exe, args, timeout, event, checks, then)
     if raw["exit"] is None:
         name = exe.rsplit("\\", 1)[-1]
         raise StepError(f"{name} did not run on the PC: {raw['err'][-800:]}")
@@ -461,7 +470,9 @@ def call(env: dict[str, str], exe: str, args: list[str], timeout: float, event: 
 
 def iemmode(env: dict[str, str], args: list[str], timeout: float, event: str,
             checks: tuple[str, ...] = ()) -> tuple[int, dict | None, dict]:
-    return call(env, pc_join(env["PC_BIN"], "iemmode.exe"), args, timeout, event, checks)
+    """iemmode from the admin-only bin when it reads back, else PC_BIN's (#15, iempc_bin)."""
+    return call(env, pc_join(env["PC_BIN"], "iemmode.exe"), args, timeout, event, checks,
+                then=iempc_bin.pick(sys.modules[__name__]))
 
 
 def result(label: str, args: list[str], code: int, reply: dict | None, raw: dict) -> dict:
@@ -984,9 +995,9 @@ def cmd_install(ctx: Ctx) -> int:
         exe = pc_join(env["PC_ROOT"], exe_rel)
         scp(str(local), remote(env, exe_rel), mode)
         checks.append(hash_check(exe, hexd))
+        code, reply, raw = call(env, exe, ["install", pc_zip], INSTALL_S, mode, tuple(checks), json_reply=False)
     else:
-        exe = pc_join(env["PC_BIN"], "iemmode.exe")
-    code, reply, raw = call(env, exe, ["install", pc_zip], INSTALL_S, mode, tuple(checks), json_reply=not ctx.args.first)
+        code, reply, raw = iemmode(env, ["install", pc_zip], INSTALL_S, mode, tuple(checks))
     out = result("install", [sha], code, reply, raw)
     out["via"] = "iemmixer-guard (first bundle)" if ctx.args.first else "iemmode"
     emit(out)
@@ -1077,11 +1088,12 @@ def activate_offline(ctx: Ctx, sha: str) -> int:
     """`activate --offline` (#9 2026-09-28), for a guard too old to activate
     in event: a graceful `iemmode quit` of the running guard (skipped when
     none runs), the guard's processes read until none runs (QUIT_S), then the
-    bundle's own `bundles\\<sha>\\iemmixer-guard.exe activate <sha>` (its
-    sha256 from this box's fetch record checked on the PC first), which
-    takes the guard's mutex and activates in an idle event only; then the
-    hand-over as online (the first `iemmode status` starts the guard's task,
-    which runs the new exe from bin\\). A refused or failed offline step
+    bundle's own `iemmixer-guard.exe activate <sha>` (read once from
+    `bundles\\<sha>`, checked by this box's fetch record and run from the
+    admin-only stage: iempc_bin.offline_guard, #15), which takes the guard's
+    mutex and activates in an idle event only; then the hand-over as online
+    (the first `iemmode status` starts the guard's task, which runs the new
+    exe from bin\\) and the admin-only iemmode. A refused or failed offline step
     starts the guard again (`iemmode status`). The quit and the offline step
     are changes: a new flag lets each finish, then the event path runs (it
     starts a guard); the reads are abandoned."""
@@ -1090,6 +1102,7 @@ def activate_offline(ctx: Ctx, sha: str) -> int:
     if not want:
         raise StepError(f"bundle {sha}'s fetch record lists no iemmixer-guard.exe: fetch it again")
     exe = pc_join(env["PC_ROOT"], f"bundles/{sha}/iemmixer-guard.exe")
+    checks, then = iempc_bin.offline_guard(sys.modules[__name__], exe, want)   # run from the stage (#15)
     if guard_processes(ctx):
         code, reply, raw = iemmode(env, ["quit"], STATUS_S, ctx.watch(abandon=False))
         emit(result("iemmode", ["quit"], code, reply, raw))
@@ -1098,7 +1111,7 @@ def activate_offline(ctx: Ctx, sha: str) -> int:
         emit({"guard_stopped": {"reads": await_guard_gone(ctx)}})
     args = ["activate", sha]
     try:
-        code, reply, raw = call(env, exe, args, INSTALL_S, ctx.watch(abandon=False), (hash_check(exe, want),))
+        code, reply, raw = call(env, exe, args, INSTALL_S, ctx.watch(abandon=False), checks, then=then)
     except StillRunning:
         raise  # it may still hold the guard's mutex: a guard started now would only wait for it
     except StepError:
@@ -1109,6 +1122,7 @@ def activate_offline(ctx: Ctx, sha: str) -> int:
         bring_guard_back(ctx)
         return code
     emit({"handover": await_guard_build(ctx, sha)})
+    iempc_bin.install_after_activate(ctx, sys.modules[__name__], sha)
     iempc_tuning.refresh_after_activate(ctx, sys.modules[__name__], sha)
     return 0
 
@@ -1132,13 +1146,17 @@ def cmd_activate(ctx: Ctx) -> int:
     if code != 0:
         return code
     emit({"handover": await_guard_build(ctx, sha)})
+    iempc_bin.install_after_activate(ctx, sys.modules[__name__], sha)
     iempc_tuning.refresh_after_activate(ctx, sys.modules[__name__], sha)
     return 0
 
 
 def cmd_tuning_install(ctx: Ctx) -> int:
-    """S1c's tuning modules and the profile into the elevated tuning folder; the code lives in iempc_tuning.py (#15, #36)."""
-    return iempc_tuning.install(ctx, sys.modules[__name__])
+    """S1c's tuning modules and the profile into the elevated tuning folder, then
+    the bundle's iemmode.exe into the admin-only bin (iempc_tuning.py, iempc_bin.py; #15, #36)."""
+    code = iempc_tuning.install(ctx, sys.modules[__name__])
+    emit({"elevated_bin": ctx.args.sha, **iempc_bin.install(ctx, sys.modules[__name__], ctx.args.sha)})
+    return code
 
 
 def cmd_trace(ctx: Ctx) -> int:
@@ -1387,6 +1405,7 @@ def main(argv: list[str]) -> int:
         print(f"iempc: {e}", file=sys.stderr)
         return 1
     spec = COMMANDS[args.cmd]
+    iempc_bin.NOTED.clear()   # one note per command (#15)
     try:
         if spec.dev_time and flag_at_start:
             raise Refused(f"{EVENT_NOW} exists: an event is on; '{args.cmd}' runs only in dev time")
