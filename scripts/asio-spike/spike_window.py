@@ -180,8 +180,7 @@ def guarded(cmd: list[str], stdin: str, timeout: float, event: str) -> str:
 # ---- PC access (the PC is the external dependency; no unit tests below) ----
 
 def ssh_cmd(env: dict[str, str]) -> list[str]:
-    return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", env["PC_SSH"],
-            "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command -"]
+    return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", env["PC_SSH"], elevated_ps.REMOTE]
 
 
 def bin_modules(root: str, *names: str) -> list[tuple[str, str, None]]:
@@ -217,11 +216,12 @@ def plain_script(body: str) -> str:
 
 def reply_script(pre: str, body: str) -> str:
     """`pre`, then `body`, its result or error as one JSON line (single-line
-    statements: `-Command -` reads stdin line by line)."""
+    statements: `-Command -` reads stdin line by line). PSModulePath is pinned
+    before the first command (elevated_ps.PIN, #15)."""
     return "\n".join([
         "$ErrorActionPreference = 'Stop'",
         "$ProgressPreference = 'SilentlyContinue'",
-        f"try {{ {pre}$r = & {{ {body} }} ; $o = [pscustomobject]@{{ ok = $true; r = $r }} }} "
+        f"{elevated_ps.PIN} ; try {{ {pre}$r = & {{ {body} }} ; $o = [pscustomobject]@{{ ok = $true; r = $r }} }} "
         f"catch {{ $o = [pscustomobject]@{{ ok = $false; error = \"$_\" }} }} ; ConvertTo-Json -InputObject $o -Depth 8 -Compress",
     ])
 
@@ -487,7 +487,7 @@ def cmd_setup(env, args) -> None:
         raise StepError("bundle .source-sha differs from --sha (P5: only the reviewed dev commit's bundle)")
     verify_bundle(bundle)
     dirs = ", ".join(pc(env, d) for d in ("bin", "queue", "status"))
-    guarded(ssh_cmd(env), f"New-Item -ItemType Directory -Force -Path {dirs} | Out-Null\n", 60, "finish")
+    guarded(ssh_cmd(env), f"{elevated_ps.PIN} ; New-Item -ItemType Directory -Force -Path {dirs} | Out-Null\n", 60, "finish")
     for name in (*BUNDLE_FILES, "SHA256SUMS"):
         scp(str(bundle / name), remote(env, f"bin/{name}"))
     # The PC's bin holds this bundle now: its sums check every module a session stages (#15).

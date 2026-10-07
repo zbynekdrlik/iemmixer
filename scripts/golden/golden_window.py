@@ -113,11 +113,20 @@ def parse_holders(text: str) -> list[tuple[str, int]]:
 
 # ---- ssh / scp (the PC is the external dependency; no unit tests below) ----
 
+def elevated_ps():
+    """asio-spike's elevated_ps: the stage, the module path pin, the remote command (#15)."""
+    if str(HERE.parent / "asio-spike") not in sys.path:
+        sys.path.insert(0, str(HERE.parent / "asio-spike"))
+    import elevated_ps as ep
+    return ep
+
+
+def ssh_cmd(env: dict[str, str]) -> list[str]:
+    return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", env["PC_SSH"], elevated_ps().REMOTE]
+
+
 def ssh_raw(env: dict[str, str], script: str, timeout: int = 900) -> str:
-    proc = subprocess.run(
-        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", env["PC_SSH"],
-         "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command -"],
-        input=script + "\n", text=True, capture_output=True, timeout=timeout, check=False)
+    proc = subprocess.run(ssh_cmd(env), input=script + "\n", text=True, capture_output=True, timeout=timeout, check=False)
     if proc.returncode != 0:
         raise StepError(f"PC command failed (exit {proc.returncode}): {proc.stderr.strip()[-1500:]}")
     return proc.stdout
@@ -129,17 +138,16 @@ def ps_script(env: dict[str, str], body: str) -> str:
     once from PC_ROOT\\bin, checked against the copy setup uploads (this
     box's GoldenPc.psm1) and imported only from the admin-only stage (#15,
     asio-spike's elevated_ps). Errors are caught on the PC and come back as
-    {ok: false}; -InputObject keeps one-element arrays as arrays."""
-    if str(HERE.parent / "asio-spike") not in sys.path:
-        sys.path.insert(0, str(HERE.parent / "asio-spike"))
-    import elevated_ps
+    {ok: false}; -InputObject keeps one-element arrays as arrays. PSModulePath
+    is pinned before the first command (elevated_ps.PIN)."""
+    ep = elevated_ps()
     src = ps_quote(env["PC_ROOT"] + "\\bin\\GoldenPc.psm1")
     hexd = hashlib.sha256((HERE / "GoldenPc.psm1").read_bytes()).hexdigest()
-    load = f"{elevated_ps.staged([(src, 'GoldenPc.psm1', hexd)])} ; {elevated_ps.import_staged('GoldenPc.psm1')}"
+    load = f"{ep.staged([(src, 'GoldenPc.psm1', hexd)])} ; {ep.import_staged('GoldenPc.psm1')}"
     return "\n".join([
         "$ErrorActionPreference = 'Stop'",
         "$ProgressPreference = 'SilentlyContinue'",
-        f"try {{ {load} ; $r = & {{ {body} }} ; $o = [pscustomobject]@{{ ok = $true; r = $r }} }} "
+        f"{ep.PIN} ; try {{ {load} ; $r = & {{ {body} }} ; $o = [pscustomobject]@{{ ok = $true; r = $r }} }} "
         f"catch {{ $o = [pscustomobject]@{{ ok = $false; error = \"$_\" }} }} ; ConvertTo-Json -InputObject $o -Depth 8 -Compress",
     ])
 
@@ -339,7 +347,8 @@ def cmd_new(env, args) -> None:
 
 def cmd_setup(env, args) -> None:
     here = HERE
-    ssh_raw(env, f"New-Item -ItemType Directory -Force -Path {', '.join(pc(env, d) for d in ('bin', 'queue', 'status', 'backups', 'jobs'))} | Out-Null")
+    ssh_raw(env, f"{elevated_ps().PIN} ; New-Item -ItemType Directory -Force -Path "
+                 f"{', '.join(pc(env, d) for d in ('bin', 'queue', 'status', 'backups', 'jobs'))} | Out-Null")
     for f in ("GoldenPc.psm1", "golden-task.ps1"):
         scp(env, str(here / f), remote(env, f"bin/{f}"))
     scp(env, env["PC_TREES"], remote(env, "bin/trees.json"))
