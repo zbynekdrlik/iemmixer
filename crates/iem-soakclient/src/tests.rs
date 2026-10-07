@@ -1,5 +1,8 @@
-//! The pure core's tests (`lib.rs`): the arguments, the build check, the
-//! URLs, the gap clock, the event classes and the summary.
+//! The pure core's tests (`lib.rs`): the arguments, the credential and the
+//! engineer token, the build check, the URLs, the gap clock, the event
+//! classes and the summary.
+
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::*;
 
@@ -73,6 +76,7 @@ fn the_arguments_and_their_defaults() {
             seconds: 600,
             out: PathBuf::from("s.json"),
             expect_build: COMMIT.to_owned(),
+            jwt_secret_file: None,
             cpu_sets: Vec::new(),
         }
     );
@@ -82,6 +86,8 @@ fn the_arguments_and_their_defaults() {
         COMMIT,
         "--out",
         "s.json",
+        "--jwt-secret-file",
+        "secrets/jwt_secret",
         "--direct",
         "--seconds",
         "1",
@@ -97,6 +103,8 @@ fn the_arguments_and_their_defaults() {
     assert_eq!(all.seconds, 1);
     assert_eq!(all.out, PathBuf::from("s.json"));
     assert_eq!(all.expect_build, COMMIT);
+    let file = Some(PathBuf::from("secrets/jwt_secret"));
+    assert_eq!(all.jwt_secret_file, file);
     assert_eq!(replaced("--seconds", "36000").unwrap().seconds, MAX_SECONDS);
 }
 
@@ -123,6 +131,143 @@ fn every_bad_argument_is_a_usage_error() {
     assert!(with(&["--cpu-sets", "256,x"]).is_err());
     assert!(with(&["--cpu-sets", ""]).is_err());
     assert!(with(&["--expect-build", COMMIT]).is_err(), "given twice");
+    // The secret file: a path, once, never echoed.
+    let file = "secrets/jwt_secret";
+    let twice = with(&["--jwt-secret-file", file, "--jwt-secret-file", file]).unwrap_err();
+    let empty = with(&["--jwt-secret-file", ""]).unwrap_err();
+    for e in [&twice, &empty] {
+        assert!(e.contains("--jwt-secret-file"), "{e}");
+        assert!(!e.contains(file), "never echoed: {e}");
+    }
+    assert!(with(&["--jwt-secret-file"]).is_err());
+}
+
+/// A synthetic JWT secret (P6: never a site's).
+const SECRET: &str = "synthetic-jwt-secret";
+
+/// The claims of `token` as the server reads them (the body of
+/// `iem_server::auth::extract_claims`: HS256 with the secret's bytes and the
+/// default validation, which checks `exp`). The tests link no server crate:
+/// it embeds the UI's `dist`, and its axum, tokio and argon2 are no
+/// client's.
+fn as_server(token: &str, secret: &str) -> Option<iem_core::AuthClaims> {
+    let key = jsonwebtoken::DecodingKey::from_secret(secret.as_bytes());
+    let validation = jsonwebtoken::Validation::default();
+    jsonwebtoken::decode::<iem_core::AuthClaims>(token, &key, &validation)
+        .ok()
+        .map(|data| data.claims)
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+#[test]
+fn the_credential_is_the_secret_file_or_the_pin_never_both_nor_neither() {
+    let file = Path::new("secrets/jwt_secret");
+    let pin = || Some("1234".to_owned());
+    assert_eq!(
+        credential(Some(file), None),
+        Ok(Credential::SecretFile(file.to_path_buf()))
+    );
+    assert_eq!(
+        credential(None, pin()),
+        Ok(Credential::Pin("1234".to_owned()))
+    );
+    // A PIN alone is pin_from's to judge.
+    for bad in ["", "123", "12a4"] {
+        let refused = pin_from(Some(bad.to_owned())).map(Credential::Pin);
+        assert_eq!(credential(None, Some(bad.to_owned())), refused, "{bad:?}");
+    }
+    // Both (an empty PIN beside the file too), and neither: usage errors
+    // that name the two, never a value.
+    let both = credential(Some(file), pin()).unwrap_err();
+    let neither = credential(None, None).unwrap_err();
+    assert_eq!(
+        credential(Some(file), Some(String::new())),
+        Err(both.clone())
+    );
+    assert_ne!(both, neither);
+    for e in [&both, &neither] {
+        assert!(
+            e.contains("--jwt-secret-file") && e.contains(PIN_ENV),
+            "{e}"
+        );
+        assert!(!e.contains("1234") && !e.contains("secrets"), "{e}");
+    }
+}
+
+#[test]
+fn the_credential_and_the_secret_are_never_printed() {
+    let pin = Credential::Pin("1234".to_owned());
+    let file = Credential::SecretFile(PathBuf::from("secrets/jwt_secret"));
+    assert_eq!(format!("{pin:?}"), "Pin(..)");
+    assert_eq!(format!("{file:?}"), "SecretFile(..)");
+    let secret = Secret::from_text(SECRET).unwrap();
+    assert_eq!(format!("{secret:?}"), "Secret(..)");
+}
+
+#[test]
+fn the_secret_is_the_files_text_trimmed_as_the_server_reads_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = |name: &str, text: &[u8]| {
+        let path = dir.path().join(name);
+        std::fs::write(&path, text).unwrap();
+        path
+    };
+    // The server writes the key alone and reads it trimmed: the trimmed
+    // text's bytes sign the token.
+    let read = read_secret(&file("jwt_secret", b"  synthetic-jwt-secret\r\n")).unwrap();
+    assert_eq!(Some(&read), Secret::from_text(SECRET).as_ref());
+    let token = engineer_token(&read, unix_now(), 60).unwrap();
+    assert!(as_server(&token, SECRET).is_some());
+    assert!(as_server(&token, &format!("  {SECRET}\r\n")).is_none());
+    // Missing, empty, blank, not UTF-8 (the server's read fails there
+    // too), a directory: unreadable, and nothing is created.
+    let missing = dir.path().join("missing");
+    let unreadable = [
+        missing.clone(),
+        file("empty", b""),
+        file("blank", b" \r\n\t "),
+        file("binary", &[0xff, 0xfe, 0x41]),
+        dir.path().to_path_buf(),
+    ];
+    for path in unreadable {
+        assert_eq!(
+            read_secret(&path),
+            Err(Reason::SecretUnreadable),
+            "{path:?}"
+        );
+    }
+    assert!(!missing.exists(), "the client never creates the secret");
+    assert_eq!(Secret::from_text(" \n"), None);
+}
+
+#[test]
+fn the_minted_token_is_the_engineers_as_the_server_issues_it() {
+    let secret = Secret::from_text(SECRET).unwrap();
+    let now = unix_now();
+    let token = engineer_token(&secret, now, 3_600).unwrap();
+    let claims = as_server(&token, SECRET).expect("the server reads it");
+    assert_eq!(claims.sub, "engineer");
+    assert!(claims.engineer);
+    assert_eq!(claims.iat, now);
+    // The run's seconds and the margin.
+    assert_eq!(TOKEN_MARGIN, 600);
+    assert_eq!(claims.exp, now + 3_600 + TOKEN_MARGIN);
+    // HS256, the server's `Header::default()`.
+    let header = jsonwebtoken::decode_header(&token).unwrap();
+    assert_eq!(header.alg, jsonwebtoken::Algorithm::HS256);
+    // Another secret is refused, and so is a token whose time is over.
+    assert!(as_server(&token, "another-synthetic-secret").is_none());
+    let old = engineer_token(&secret, now - 7_200, 1).unwrap();
+    assert!(as_server(&old, SECRET).is_none());
+    // It goes into the sockets' query as it is.
+    let url_safe = |b: u8| b.is_ascii_alphanumeric() || b"-_.".contains(&b);
+    assert!(token.bytes().all(url_safe), "{token}");
 }
 
 #[test]
@@ -421,6 +566,7 @@ fn the_summary_names_its_error_by_the_reason_code() {
         ServerGone,
         ConnectionLost,
         CpuSets,
+        SecretUnreadable,
     ] {
         let summary = Summary {
             error: Some(reason),
@@ -492,12 +638,13 @@ fn reasons_are_fixed_codes() {
         ServerGone,
         ConnectionLost,
         CpuSets,
+        SecretUnreadable,
     ];
     let codes = codes.map(Reason::code).join(" ");
     assert_eq!(
         codes,
         "site-unreadable not-http wrong-server login-refused not-engineer server-gone \
-         connection-lost cpu-sets"
+         connection-lost cpu-sets secret-unreadable"
     );
 }
 

@@ -249,8 +249,9 @@ class Verdict(unittest.TestCase):
         self.red(polls(), "no harness summary", None)
         self.red(polls(), "harness incomplete (server-gone)", harness(complete=False, error="server-gone"))
         # The client never opens a socket twice and checks the server's build first (#10): a lost socket and
-        # a server that does not name the build are named too.
-        for code in ("connection-lost", "wrong-server"):
+        # a server that does not name the build are named too. On the PC it signs its own token with the
+        # server's secret file (#10): a secret it cannot read is named as well.
+        for code in ("connection-lost", "wrong-server", "secret-unreadable"):
             self.red(polls(), f"harness incomplete ({code})", harness(complete=False, error=code))
         self.red(polls(), "harness incomplete", harness(complete=False, error="mixer.example.org"))
         self.red(polls(), "harness ran 28799.9 s of 28800 s", harness(seconds=28_799.9))

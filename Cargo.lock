@@ -2880,6 +2880,7 @@ dependencies = [
  "iem-core",
  "iem-engine-proto",
  "iem-win",
+ "jsonwebtoken",
  "opus",
  "serde",
  "serde_json",
