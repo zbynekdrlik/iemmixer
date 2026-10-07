@@ -16,10 +16,15 @@ PC while the guard's engine plays, in dev time.
    Every later import re-checks the modules' hashes on the PC first
    (`hash_check`; both, or IemMeasure's alone for the stop-only import, which
    loads no IemTuning): the elevated ssh session imports nothing else, and
-   never the bundle's copy in the user's root.
+   never the bundle's copy in the user's root. Only the stop of a recorded
+   trace (below) reads the folder, its parent and IemMeasure back admin-only
+   instead of the hash, so a refresh since that trace never blocks its stop.
 4. A trace an earlier `iempc trace` left recorded is stopped first (refused
-   when that stop is not confirmed); this run is recorded in the state dir
-   (RECORD: run folder, run, label, start time); then `Start-IemTrace -Xperf
+   when that stop is not confirmed; no start after a flag that came during
+   it); this run is recorded in the state dir (RECORD: run folder, run, label,
+   start time, `answered` once the start's reply was read: an unanswered
+   start's record goes only when both sessions stop, or after UNANSWERED_S,
+   since that start may still begin the trace); then `Start-IemTrace -Xperf
    <PC_XPERF> -Dir <PC_ROOT>\\traces\\<label>-<UTC stamp>` (the kernel's DPC
    and INTERRUPT events and the engine's marker session; `--circular-mb`
    keeps the kernel file circular at that size). The record goes after a
@@ -101,11 +106,10 @@ DRIVE_PATH = re.compile(r"[A-Za-z]:\\[^\x00-\x1f\"]+")
 RECORD = "trace.json"
 # Below this an ssh session, a PowerShell start and the stop-only import do not fit.
 RECORDED_STOP_MIN_S = 30
-# A recorded trace's stop imports IemMeasure 'stop-only' from the elevated tuning
-# folder as it is now (admin-only; Install-IemTuning checked every hash): a
-# refresh since the trace never makes its stop impossible.
-RECORDED_STOP_IMPORT = (f"Import-Module (Join-Path {iempc_tuning.TUNING_DIR_PS} 'IemMeasure.psm1') "
-                        "-ArgumentList 'stop-only' -Force ; ")
+# A start whose reply was never read may still begin its trace (#32 B5): its record
+# goes only when both sessions stop, or once it is older than this (the start's own
+# bound is START_S; nothing begins a trace that late).
+UNANSWERED_S = 600
 TRACE_ALARM = ("iempc: OWNER ALARM: a kernel trace 'iempc trace' started may still run on the PC ({dir}): {why}. Its "
                "record stays ({record}); the next 'iempc event' or 'iempc dev' tries again; on the PC: "
                "Stop-IemTraceSessions -Dir {dir} (IemMeasure imported with -ArgumentList 'stop-only'). Never force-end "
@@ -244,6 +248,34 @@ def record_path(ip) -> Path:
     return ip.STATE_DIR / RECORD
 
 
+def recorded_stop_import(ip) -> str:
+    """IemMeasure 'stop-only' from the elevated tuning folder as it is now, the
+    folder, its parent and the module read back admin-only first (elevated_ps:
+    no junction or link, owned by Administrators or SYSTEM, nobody else may
+    change them): the module's hash is not checked, so a refresh since the trace
+    never makes its stop impossible."""
+    return (f"{ip.elevated_ps().HELPERS} ; $iemT = {iempc_tuning.TUNING_DIR_PS} ; $iemM = Join-Path $iemT 'IemMeasure.psm1' ; "
+            "foreach ($p in @((Split-Path -Parent $iemT), $iemT, $iemM)) { & $iemOnly $p } ; "
+            "Import-Module $iemM -ArgumentList 'stop-only' -Force ; ")
+
+
+def started_long_ago(rec: dict) -> bool:
+    try:
+        started = dt.datetime.fromisoformat(rec["started"])
+        return (dt.datetime.now(dt.timezone.utc) - started).total_seconds() > UNANSWERED_S
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def mark_answered(ip, rec: dict) -> None:
+    """The start's reply was read: its record says so (a failed write keeps it
+    `answered: false`, the stricter rule, and never hides the trace's cause)."""
+    try:
+        ip.write_json(ip.state_dir() / RECORD, {**rec, "answered": True})
+    except OSError as e:
+        print(f"iempc: WARNING: the trace record could not be updated ({e})", file=sys.stderr, flush=True)
+
+
 def stop_recorded(ctx, ip, room: float) -> bool:
     """A trace whose `iempc trace` died with the dev box (its record in the
     state dir) is stopped first by `iempc event` (room: what the event budget
@@ -255,17 +287,27 @@ def stop_recorded(ctx, ip, room: float) -> bool:
     path = record_path(ip)
     if not path.exists():
         return True
-    run_dir = None
     try:
-        run_dir = ip.read_json(path, {}).get("dir")
+        rec = ip.read_json(path, {})
+        run_dir = rec.get("dir")
         if not isinstance(run_dir, str) or not DRIVE_PATH.fullmatch(run_dir):
-            raise ip.StepError(f"the record names no run folder ({run_dir!r})")
+            raise ip.StepError(f"it names no run folder ({run_dir!r})")
+    except (ip.StepError, OSError) as e:
+        print(f"iempc: OWNER ALARM: the trace record {path} cannot be used ({e}): check it by hand (a kernel trace "
+              "'iempc trace' started may still run on the PC: Stop-IemTraceSessions -Dir <its run folder>), then remove "
+              "it. Never force-end anything.", file=sys.stderr, flush=True)
+        ip.emit({"recorded_trace": "unreadable", "record": str(path), "error": str(e)[-800:]})
+        return False
+    try:
         sw = ip.spike_module()
         bound = min(sw.TRACE_STOP_CALL_S, room)
         if bound < RECORDED_STOP_MIN_S:
             raise ip.StepError(f"{max(bound, 0):.0f} s left for its stop, less than {RECORDED_STOP_MIN_S} s: not started")
         body = f"Stop-IemTraceSessions -Dir {ip.ps_quote(run_dir)} -TimeoutSeconds {sw.TRACE_STOP_LOGMAN_S}"
-        r = confirmed(ip, sw, ip.run_module(ctx.env, body, bound, "ignore", pre=RECORDED_STOP_IMPORT))
+        r = confirmed(ip, sw, ip.run_module(ctx.env, body, bound, "ignore", pre=recorded_stop_import(ip)))
+        if rec.get("answered") is not True and not set(SESSIONS) <= set(r["stopped"]) and not started_long_ago(rec):
+            raise ip.StepError(f"its start never answered and the stop stopped {sorted(r['stopped']) or 'nothing'}: "
+                               "the start may still begin the trace")
     except Exception as e:   # never over the event path or the dev entry: reported, the record kept
         print(TRACE_ALARM.format(dir=run_dir, why=str(e)[-800:], record=path), file=sys.stderr, flush=True)
         ip.emit({"recorded_trace": "failed", "dir": run_dir, "error": str(e)[-800:]})
@@ -355,13 +397,15 @@ def trace(ctx, ip) -> int:
     mods = tuning_modules(ctx, ip, before["build"], profile_path, profile_hex)
     if not stop_recorded(ctx, ip, sw.TRACE_STOP_CALL_S):
         raise ip.StepError(f"no trace: a trace recorded in {record_path(ip)} may still run on the PC (above)")
+    check_event(ctx, ip)   # the recorded stop ran with "ignore": no start after a flag that came meanwhile
     run = f"{label}-{dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
     rel = f"traces/{run}"
     run_dir = ip.pc_join(env["PC_ROOT"], rel)
     xperf, d = ip.ps_quote(env["PC_XPERF"]), ip.ps_quote(run_dir)
     after, after_error, start_over = None, None, False
+    rec = {"dir": run_dir, "run": run, "label": label, "started": ip.now_iso(), "answered": False}
     try:   # before the start: a dev box that dies leaves the event path a trace to stop
-        ip.write_json(ip.state_dir() / RECORD, {"dir": run_dir, "run": run, "label": label, "started": ip.now_iso()})
+        ip.write_json(ip.state_dir() / RECORD, rec)
     except OSError as e:
         raise ip.StepError(f"no trace: its record could not be written ({e})") from None
     with ended_by_signals():
@@ -370,8 +414,10 @@ def trace(ctx, ip) -> int:
                 doc = start_reply(ctx, ip, mods, f"Start-IemTrace -Xperf {xperf} -Dir {d}{tw.trace_options('', circular_mb or 0)}")
             except ip.EventNow:
                 start_over = True   # "finish": the call completed before the flag was raised
+                mark_answered(ip, rec)
                 raise
             start_over = True       # the PC's reply was read: its start is over, whatever it says
+            mark_answered(ip, rec)
             if doc.get("ok") is not True:
                 raise ip.StepError(f"PC step failed: {doc.get('error')}")
             ip.pause(ctx, seconds)

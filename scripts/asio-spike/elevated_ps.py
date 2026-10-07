@@ -15,9 +15,10 @@ rule:
   read back: no junction or link, that owner, and no allow rule that lets anyone
   else change it;
 - the stage: the uploaded module is read once into memory and checked by its
-  sha256; those bytes are written fresh into <root>\\bootstrap-stage (a link
-  there is removed, never followed), owned by Administrators, read back and
-  checked again, and only that copy is imported. A process of the user may swap
+  sha256; those bytes are written fresh into <root>\\bootstrap-stage (a file
+  link there is removed, never followed; a directory junction makes the delete
+  throw), owned by Administrators, read back and checked again, and only that
+  copy is imported. A process of the user may swap
   the upload after the check, never the staged copy, and the module's own
   $PSCommandPath (Install-IemElevatedDir copies it) is the staged copy too;
 - TEMP and TMP point at <root>\\temp before IemTuning.psm1 loads: its Add-Type

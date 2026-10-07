@@ -926,6 +926,8 @@ def cmd_dev(ctx: Ctx) -> int:
         args.append("--dry-run")
     else:   # a trace whose dev-box process died (#15); never raises
         iempc_trace.stop_recorded(ctx, sys.modules[__name__], float("inf"))
+        if ctx.watch(abandon=True) != "ignore" and event_now():
+            raise EventNow()   # that stop ran with "ignore": a dev entry now would reach the guard after "ide event"
     code, reply, raw = iemmode(ctx.env, args, STATUS_S if dry else SWITCH_S, ctx.watch(abandon=True))
     out = result("iemmode", args, code, reply, raw)
     if code == 0 and not dry:
