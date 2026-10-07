@@ -994,8 +994,9 @@ def cmd_install(ctx: Ctx) -> int:
         exe_rel = f"incoming/iemmixer-guard-{sha}.exe"
         exe = pc_join(env["PC_ROOT"], exe_rel)
         scp(str(local), remote(env, exe_rel), mode)
-        checks.append(hash_check(exe, hexd))
-        code, reply, raw = call(env, exe, ["install", pc_zip], INSTALL_S, mode, tuple(checks), json_reply=False)
+        guard, then = iempc_bin.staged_guard(sys.modules[__name__], exe, hexd)   # run from the stage (#15)
+        code, reply, raw = call(env, exe, ["install", pc_zip], INSTALL_S, mode, (*checks, *guard), json_reply=False,
+                                then=then)
     else:
         code, reply, raw = iemmode(env, ["install", pc_zip], INSTALL_S, mode, tuple(checks))
     out = result("install", [sha], code, reply, raw)
@@ -1090,10 +1091,10 @@ def activate_offline(ctx: Ctx, sha: str) -> int:
     none runs), the guard's processes read until none runs (QUIT_S), then the
     bundle's own `iemmixer-guard.exe activate <sha>` (read once from
     `bundles\\<sha>`, checked by this box's fetch record and run from the
-    admin-only stage: iempc_bin.offline_guard, #15), which takes the guard's
-    mutex and activates in an idle event only; then the hand-over as online
-    (the first `iemmode status` starts the guard's task, which runs the new
-    exe from bin\\) and the admin-only iemmode. A refused or failed offline step
+    admin-only stage: iempc_bin.staged_guard, #15), which takes the guard's
+    mutex and activates in an idle event only; then the admin-only iemmode and
+    the hand-over as online (the first `iemmode status` starts the guard's
+    task, which runs the new exe from bin\\). A refused or failed offline step
     starts the guard again (`iemmode status`). The quit and the offline step
     are changes: a new flag lets each finish, then the event path runs (it
     starts a guard); the reads are abandoned."""
@@ -1102,7 +1103,7 @@ def activate_offline(ctx: Ctx, sha: str) -> int:
     if not want:
         raise StepError(f"bundle {sha}'s fetch record lists no iemmixer-guard.exe: fetch it again")
     exe = pc_join(env["PC_ROOT"], f"bundles/{sha}/iemmixer-guard.exe")
-    checks, then = iempc_bin.offline_guard(sys.modules[__name__], exe, want)   # run from the stage (#15)
+    checks, then = iempc_bin.staged_guard(sys.modules[__name__], exe, want)   # run from the stage (#15)
     if guard_processes(ctx):
         code, reply, raw = iemmode(env, ["quit"], STATUS_S, ctx.watch(abandon=False))
         emit(result("iemmode", ["quit"], code, reply, raw))
@@ -1121,8 +1122,8 @@ def activate_offline(ctx: Ctx, sha: str) -> int:
     if code != 0:
         bring_guard_back(ctx)
         return code
+    iempc_bin.install_after_activate(ctx, sys.modules[__name__], sha)   # the new bins are in place (#15)
     emit({"handover": await_guard_build(ctx, sha)})
-    iempc_bin.install_after_activate(ctx, sys.modules[__name__], sha)
     iempc_tuning.refresh_after_activate(ctx, sys.modules[__name__], sha)
     return 0
 
@@ -1145,8 +1146,8 @@ def cmd_activate(ctx: Ctx) -> int:
     emit(result("iemmode", args, code, reply, raw))
     if code != 0:
         return code
+    iempc_bin.install_after_activate(ctx, sys.modules[__name__], sha)   # the new bins are in place (#15)
     emit({"handover": await_guard_build(ctx, sha)})
-    iempc_bin.install_after_activate(ctx, sys.modules[__name__], sha)
     iempc_tuning.refresh_after_activate(ctx, sys.modules[__name__], sha)
     return 0
 

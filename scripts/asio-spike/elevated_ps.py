@@ -171,16 +171,18 @@ def installed_copy(src: str, name: str, hexd: str, root: str = ROOT) -> str:
     ])
 
 
-def verified_bin(name: str, root: str = ROOT) -> str:
+def verified_bin(name: str, hexd: str, root: str = ROOT) -> str:
     """Statements that set `$iemUse` to <root>\\bin\\<name> when the elevated
     root, bin and the file read back admin-only (`$iemOnly`: no junction or
-    link, owned by Administrators or SYSTEM, nobody else may change it), else
-    leave it `$null` and say why in `$iemNote`. They only read."""
-    _want(name, None)
+    link, owned by Administrators or SYSTEM, nobody else may change it) and
+    the file is the build `hexd` names, else leave it `$null` and say why in
+    `$iemNote`. They only read."""
+    want = _want(name, hexd)
     return (f"{HELPERS} ; $iemUse = $null ; $iemNote = $null ; $iemE = Join-Path {root} '{BIN}\\{name}' ; "
             "$iemEap = $ErrorActionPreference ; $ErrorActionPreference = 'Stop' ; "
             "try { foreach ($p in @((Split-Path -Parent (Split-Path -Parent $iemE)), (Split-Path -Parent $iemE), $iemE)) "
-            "{ & $iemOnly $p } ; $iemUse = $iemE } catch { $iemNote = \"$_\" } finally { $ErrorActionPreference = $iemEap }")
+            f"{{ & $iemOnly $p }} ; if ({_hash('$iemE')} -cne {want}) {{ throw \"$iemE is not the build this box installed\" }} ; "
+            "$iemUse = $iemE } catch { $iemNote = \"$_\" } finally { $ErrorActionPreference = $iemEap }")
 
 
 def temp_first(root: str = ROOT) -> str:
