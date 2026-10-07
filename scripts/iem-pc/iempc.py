@@ -898,6 +898,8 @@ def cmd_event(ctx: Ctx) -> int:
                                 "(spike_window.py status)")
             if not pre["ok"]:
                 close_failed_window(deadline, pre.get("error", ""))
+    if not dry:   # a trace whose dev-box process died (#15); never raises
+        iempc_trace.stop_recorded(ctx, sys.modules[__name__], deadline - time.monotonic() - SWITCH_MIN_S)
     args = ["event", "--dry-run"] if dry else ["event"]
     code, reply, raw = iemmode(ctx.env, args, switch_timeout(deadline), "ignore")
     emit(result("iemmode", args, code, reply, raw))
@@ -920,6 +922,8 @@ def cmd_dev(ctx: Ctx) -> int:
     dry = bool(ctx.args.dry_run)
     if dry:
         args.append("--dry-run")
+    else:   # a trace whose dev-box process died (#15); never raises
+        iempc_trace.stop_recorded(ctx, sys.modules[__name__], float("inf"))
     code, reply, raw = iemmode(ctx.env, args, STATUS_S if dry else SWITCH_S, ctx.watch(abandon=True))
     out = result("iemmode", args, code, reply, raw)
     if code == 0 and not dry:

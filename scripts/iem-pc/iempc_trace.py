@@ -89,6 +89,20 @@ PREFLIGHT = (f"$t = {iempc_tuning.TUNING_DIR_PS} ; "
              "[pscustomobject]@{ dir = $t; tuning = (& $h (Join-Path $t 'IemTuning.psm1')); "
              "measure = (& $h (Join-Path $t 'IemMeasure.psm1')); profile = (& $h (Join-Path $t 'profile.json')) }")
 DRIVE_PATH = re.compile(r"[A-Za-z]:\\[^\x00-\x1f\"]+")
+# The running trace in the state dir: written before Start-IemTrace, removed
+# after a confirmed stop (#15: a dev box that dies hard leaves the trace running).
+RECORD = "trace.json"
+# Below this an ssh session, a PowerShell start and the stop-only import do not fit.
+RECORDED_STOP_MIN_S = 30
+# A recorded trace's stop imports IemMeasure 'stop-only' from the elevated tuning
+# folder as it is now (admin-only; Install-IemTuning checked every hash): a
+# refresh since the trace never makes its stop impossible.
+RECORDED_STOP_IMPORT = (f"Import-Module (Join-Path {iempc_tuning.TUNING_DIR_PS} 'IemMeasure.psm1') "
+                        "-ArgumentList 'stop-only' -Force ; ")
+TRACE_ALARM = ("iempc: OWNER ALARM: a kernel trace 'iempc trace' started may still run on the PC ({dir}): {why}. Its "
+               "record stays ({record}); the next 'iempc event' or 'iempc dev' tries again; on the PC: "
+               "Stop-IemTraceSessions -Dir {dir} (IemMeasure imported with -ArgumentList 'stop-only'). Never force-end "
+               "anything.")
 
 
 def s1c(ip):
@@ -209,17 +223,59 @@ def start_reply(ctx, ip, mods: dict, body: str) -> dict:
     return ip.last_json(ip.ssh_ps(ctx.env, script, START_S, ctx.watch(abandon=False)))
 
 
+def confirmed(ip, sw, reply) -> dict:
+    """A trace stop's reply: a list of stopped sessions, none kept
+    (check_trace_stop), every session it names a text."""
+    r = sw.check_trace_stop(reply)
+    for key in ("stopped", "gone"):
+        if not all(isinstance(s, str) for s in r.get(key) or []):
+            raise ip.StepError(f"the trace stop's reply names a session that is no text ({key}: {r.get(key)!r})")
+    return r
+
+
+def record_path(ip) -> Path:
+    return ip.STATE_DIR / RECORD
+
+
+def stop_recorded(ctx, ip, room: float) -> bool:
+    """A trace whose `iempc trace` died with the dev box (its record in the
+    state dir) is stopped first by `iempc event` (room: what the event budget
+    leaves above SWITCH_MIN_S), `iempc dev` and the next trace: the stop-only
+    import, "ignore", bounded by TRACE_STOP_CALL_S and `room`; a confirmed stop
+    clears the record (quietly when nothing ran any more). Never raises: a
+    failure, or too little room, keeps the record and prints TRACE_ALARM, and
+    the event path or the dev entry goes on. True when no record is left."""
+    path = record_path(ip)
+    if not path.exists():
+        return True
+    run_dir = None
+    try:
+        run_dir = ip.read_json(path, {}).get("dir")
+        if not isinstance(run_dir, str) or not DRIVE_PATH.fullmatch(run_dir):
+            raise ip.StepError(f"the record names no run folder ({run_dir!r})")
+        sw = ip.spike_module()
+        bound = min(sw.TRACE_STOP_CALL_S, room)
+        if bound < RECORDED_STOP_MIN_S:
+            raise ip.StepError(f"{max(bound, 0):.0f} s left for its stop, less than {RECORDED_STOP_MIN_S} s: not started")
+        body = f"Stop-IemTraceSessions -Dir {ip.ps_quote(run_dir)} -TimeoutSeconds {sw.TRACE_STOP_LOGMAN_S}"
+        r = confirmed(ip, sw, ip.run_module(ctx.env, body, bound, "ignore", pre=RECORDED_STOP_IMPORT))
+    except Exception as e:   # never over the event path or the dev entry: reported, the record kept
+        print(TRACE_ALARM.format(dir=run_dir, why=str(e)[-800:], record=path), file=sys.stderr, flush=True)
+        ip.emit({"recorded_trace": "failed", "dir": run_dir, "error": str(e)[-800:]})
+        return False
+    path.unlink(missing_ok=True)
+    if r["stopped"]:
+        ip.emit({"recorded_trace": "stopped", "dir": run_dir, "stopped": r["stopped"]})
+    return True
+
+
 def stop(ctx, ip, sw, mods: dict, run_dir: str) -> dict:
     """The trace stop with "ignore" (it completes and its reply is always
     checked: check_trace_stop); a failure names the trace that may still run."""
     body = f"Stop-IemTraceSessions -Dir {ip.ps_quote(run_dir)} -TimeoutSeconds {sw.TRACE_STOP_LOGMAN_S}"
     try:
-        r = sw.check_trace_stop(ip.run_module(ctx.env, body, sw.TRACE_STOP_CALL_S, "ignore",
-                                              **measure_load(ip, mods, stop_only=True)))
-        for key in ("stopped", "gone"):
-            if not all(isinstance(s, str) for s in r.get(key) or []):
-                raise ip.StepError(f"the trace stop's reply names a session that is no text ({key}: {r.get(key)!r})")
-        return r
+        return confirmed(ip, sw, ip.run_module(ctx.env, body, sw.TRACE_STOP_CALL_S, "ignore",
+                                               **measure_load(ip, mods, stop_only=True)))
     except (ip.StepError, sw.StepError) as e:   # sw's own StepError: check_trace_stop
         raise ip.StepError(f"{e}: the kernel trace may still run on the PC (stop it with Stop-IemTraceSessions -Dir "
                            f"{run_dir})") from None
@@ -244,6 +300,7 @@ def abandon(ctx, ip, sw, mods: dict, run_dir: str, cause: BaseException, start_o
               f"Stop-IemTraceSessions -Dir {run_dir}", file=sys.stderr, flush=True)
         ip.emit({"trace_stop": "unconfirmed", "dir": run_dir, "why": why, "stopped": sorted(stopped)})
         return
+    record_path(ip).unlink(missing_ok=True)   # confirmed: nothing of this trace runs
     if not stopped:
         gone = sorted(r.get("gone") or [])
         print(f"iempc: no kernel trace was running ({why}): the stop stopped none"
@@ -289,11 +346,17 @@ def trace(ctx, ip) -> int:
     code, reply, _ = ip.iemmode(env, ["status"], ip.STATUS_S, ctx.watch(abandon=True))
     before = engine_seen(ip, code, reply)
     mods = tuning_modules(ctx, ip, before["build"], profile_path, profile_hex)
+    if not stop_recorded(ctx, ip, sw.TRACE_STOP_CALL_S):
+        raise ip.StepError(f"no trace: a trace recorded in {record_path(ip)} may still run on the PC (above)")
     run = f"{label}-{dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
     rel = f"traces/{run}"
     run_dir = ip.pc_join(env["PC_ROOT"], rel)
     xperf, d = ip.ps_quote(env["PC_XPERF"]), ip.ps_quote(run_dir)
     after, after_error, start_over = None, None, False
+    try:   # before the start: a dev box that dies leaves the event path a trace to stop
+        ip.write_json(ip.state_dir() / RECORD, {"dir": run_dir, "run": run, "label": label, "started": ip.now_iso()})
+    except OSError as e:
+        raise ip.StepError(f"no trace: its record could not be written ({e})") from None
     with ended_by_signals():
         try:
             try:
@@ -327,6 +390,7 @@ def trace(ctx, ip) -> int:
     except ip.StepError as e:
         ip.emit({"trace_stop": "failed", "dir": run_dir, "error": str(e)[-800:]})
         raise
+    record_path(ip).unlink(missing_ok=True)
     for body, _ in tw.analysis(xperf, d, 0, False):
         check_event(ctx, ip)
         ip.run_module(env, body, ANALYSIS_S, ctx.watch(abandon=True), **measure_load(ip, mods, pre=f"{IDLE} ; "))
