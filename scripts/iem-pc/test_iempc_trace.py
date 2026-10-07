@@ -63,6 +63,9 @@ class TraceBase(Base):
                               "Stop-IemTraceSessions": STOPPED, "'-merge'": None,
                               "Invoke-IemDpcIsr": "X:\\root\\traces\\run\\dpcisr.txt"}
         self.pc.module_result = self.answer
+        # The trace runs no refresh, and its preflight names profile.json too: no
+        # module script is answered as the refresh's profile check here.
+        self.pc.texts = {}
         self.report = DPCISR_XPERF
         self.fetches: list[tuple[str, str, str]] = []
         ip.scp = self.scp
