@@ -7,9 +7,11 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import iempc_bin as ib  # noqa: E402
@@ -139,6 +141,71 @@ class PickTests(Base):
         self.assertEqual(code, 0, err)
         self.pc.native_scripts.clear()
         self.assertEqual(self.picks(STATUS, STATUS), [False, True])
+
+    # The lane's review, finding 3: until the HIL run activates its SHA the guard runs
+    # the build before, and its replies must not bring the older copy back.
+    def test_a_hil_dispatch_waits_for_a_reply_naming_its_build(self) -> None:
+        self.record()
+        self.seen(SHA2)
+        code, _, err = self.run_main("dispatch-hil", "--sha", SHA)
+        self.assertEqual(code, 0, err)
+        note = io.StringIO()
+        with contextlib.redirect_stderr(note):
+            ip.iemmode(dict(ENV), ["status"], 10, "abandon")
+        self.assertIn(f"HIL run dispatched for {SHA}", note.getvalue())
+
+    def test_replies_of_the_guard_before_the_hil_s_activation_are_not_kept(self) -> None:
+        self.record()                     # the admin-only copy is SHA
+        self.seen(SHA)
+        ib.hil_dispatched(ip, SHA2)       # HIL v1 for SHA2, the guard still runs SHA
+        other = (0, json.dumps({"ok": True, "mode": "dev", "alarms": [], "guard_build": SHA2}))
+        self.assertEqual(self.picks(STATUS, other, STATUS, STATUS), [False, False, False, True])
+
+    def test_an_activate_ends_the_wait_for_a_hil_build(self) -> None:
+        self.record()
+        ib.hil_dispatched(ip, SHA2)
+        code, _, err = self.run_main("activate", "--sha", SHA)
+        self.assertEqual(code, 0, err)
+        self.pc.native_scripts.clear()
+        self.assertEqual(self.picks(STATUS), [True])
+
+    # The lane's review, findings 5 to 7.
+    def test_an_unreadable_record_of_the_build_is_a_note_never_a_stop(self) -> None:
+        self.record()
+        self.seen(SHA)
+        path = ip.state_dir() / ib.SEEN
+        os.chmod(path, 0)
+        self.addCleanup(os.chmod, path, 0o600)
+        self.assertRaises(PermissionError, path.read_text)   # the premise (not root)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            ip.iemmode(dict(ENV), ["status"], 10, "abandon")   # PC_BIN's, and its reply is kept
+        self.assertIn("cannot be read", err.getvalue())
+        self.assertEqual(self.picks(STATUS), [False, True])   # that reply wrote the record again
+
+    def test_a_record_that_cannot_be_written_is_a_warning(self) -> None:
+        self.record()
+        (ip.state_dir() / ib.SEEN).mkdir()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            ip.iemmode(dict(ENV), ["status"], 10, "abandon")
+        self.assertIn("WARNING: the guard's build", err.getvalue())
+        self.assertIn("was not recorded", err.getvalue())
+
+    def test_only_a_build_name_the_guard_makes_is_kept(self) -> None:
+        self.record()
+        self.seen(SHA)
+        odd = [(0, json.dumps({"ok": True, "mode": "dev", "alarms": [], "guard_build": b}))
+               for b in (123, "", "A" * 40, "../" + SHA, SHA + "\n", "x" * 101)]
+        local = (0, json.dumps({"ok": True, "mode": "dev", "alarms": [], "guard_build": "local"}))
+        self.assertEqual(self.picks(*odd, local, STATUS), [True] * 7 + [False])
+
+    def test_the_build_is_written_only_when_it_changes(self) -> None:
+        self.record()
+        stamps = iter(["t1", "t2", "t3"])
+        with mock.patch.object(ip, "now_iso", lambda: next(stamps)):
+            self.picks(STATUS, STATUS, STATUS)
+        self.assertEqual(ip.read_json(ip.state_dir() / ib.SEEN, None), {"build": SHA, "at": "t1"})
 
 
 class InstallTests(Base):
