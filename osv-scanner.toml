@@ -13,7 +13,7 @@ reason = "alias of RUSTSEC-2024-0429 (glib, Linux GTK stack only)"
 
 [[IgnoredVulns]]
 id = "RUSTSEC-2023-0071"
-reason = "rsa (Marvin timing attack, no fixed release) only via jsonwebtoken's rust_crypto backend; iem-server uses HS256 and ES256 only and never builds an RSA key (deny.toml)"
+reason = "rsa (Marvin timing attack, no fixed release) only via jsonwebtoken's rust_crypto backend; iem-server uses HS256 and ES256 only, iem-soakclient HS256 only, and neither builds an RSA key (deny.toml)"
 
 [[IgnoredVulns]]
 id = "RUSTSEC-2026-0097"

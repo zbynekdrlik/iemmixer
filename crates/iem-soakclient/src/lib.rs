@@ -1,15 +1,19 @@
-//! The soak harness (S7 design note §4): logs in as the engineer through the
-//! server's login, opens one mixer socket and one listen socket on one
-//! member's mix at the LAN address the server names (`/api/site`), decodes
-//! the Opus frames and counts frames, gaps and meter frames into a JSON
-//! summary. It reads only: it sends no mixer command. It never opens a
-//! socket twice (#10): a lost socket ends the run. The PIN comes from
-//! `IEM_SOAK_PIN`, never from the command line. Nothing here ends a
-//! process: each socket ends with a WebSocket Close.
+//! The soak harness (S7 design note §4): signs in as the engineer, opens
+//! one mixer socket and one listen socket on one member's mix at the LAN
+//! address the server names (`/api/site`), decodes the Opus frames and
+//! counts frames, gaps and meter frames into a JSON summary. It reads only:
+//! it sends no mixer command. It never opens a socket twice (#10): a lost
+//! socket ends the run. The engineer's credential is exactly one of two
+//! (#10 decision, 2026-10-07): on the server's PC its JWT secret file
+//! (`--jwt-secret-file`), with which the client signs its own token and
+//! never logs in; in CI the PIN from `IEM_SOAK_PIN` (never from the command
+//! line) for the server's login. Nothing here ends a process: each socket
+//! ends with a WebSocket Close.
 //!
-//! This file is the pure core: the arguments, the URLs, the gap clock, the
-//! event classes and the summary. [`tally`] counts a run into its summary
-//! (pure too); [`net`] is the wire: the login and the socket threads.
+//! This file is the pure core: the arguments, the credential and the
+//! engineer token, the URLs, the gap clock, the event classes and the
+//! summary. [`tally`] counts a run into its summary (pure too); [`net`] is
+//! the wire: the sign-in and the socket threads.
 
 #![forbid(unsafe_code)]
 #![cfg_attr(
@@ -22,11 +26,13 @@
     )
 )]
 
+use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use jsonwebtoken::{EncodingKey, Header};
 use serde::{Deserialize, Serialize};
 
 pub mod net;
@@ -41,6 +47,13 @@ pub const FRAME: Duration = Duration::from_millis(20);
 pub const SCHEMA: u32 = 1;
 /// The environment variable that holds the engineer's PIN.
 pub const PIN_ENV: &str = "IEM_SOAK_PIN";
+/// The engineer's id: the login's member and the token's subject (the
+/// server's `ENGINEER_ID`).
+pub const ENGINEER: &str = "engineer";
+/// A token the client signs outlives `--seconds` by this much (10 min): the
+/// build check, the opens and the closes come on top of the run. The server
+/// reads the token only when a socket opens.
+pub const TOKEN_MARGIN: u64 = 600;
 /// The build, as the guard names its own (`GITHUB_SHA` in CI).
 pub const BUILD: &str = match option_env!("GITHUB_SHA") {
     Some(sha) => sha,
@@ -61,19 +74,24 @@ pub const MIN_HASH: usize = 7;
 
 pub const USAGE: &str = "\
 iem-soakclient --member ID --seconds N --out FILE --expect-build SHA
-               [--base URL] [--direct] [--cpu-sets IDS]
+               [--jwt-secret-file PATH] [--base URL] [--direct]
+               [--cpu-sets IDS]
 
 Goes to the LAN address the server at --base names (/api/site; with --direct
-to --base itself), checks that /api/version there names build SHA, logs in
-as the engineer (the PIN from IEM_SOAK_PIN, never an argument), opens one
-mixer socket and one listen socket on the mix of member ID, and writes a
-JSON summary to FILE every minute and at the end. It reads only, and opens
-no socket twice: a lost socket ends the run.
+to --base itself), checks that /api/version there names build SHA, signs in
+as the engineer, opens one mixer socket and one listen socket on the mix of
+member ID, and writes a JSON summary to FILE every minute and at the end.
+It reads only, and opens no socket twice: a lost socket ends the run.
 
-  --expect-build SHA  the server's commit: 40 lower-case hex digits
-  --seconds N         1 to 36000
-  --base URL          http://HOST[:PORT], default http://127.0.0.1
-  --cpu-sets IDS      CPU Set ids, e.g. 256,257 (Windows only)";
+The engineer's credential is exactly one of two: on the server's PC
+--jwt-secret-file, with which it signs its own token (no login); else the
+PIN from IEM_SOAK_PIN (never an argument) for the server's login.
+
+  --expect-build SHA      the server's commit: 40 lower-case hex digits
+  --seconds N             1 to 36000
+  --jwt-secret-file PATH  the server's jwt_secret file
+  --base URL              http://HOST[:PORT], default http://127.0.0.1
+  --cpu-sets IDS          CPU Set ids, e.g. 256,257 (Windows only)";
 
 /// The command line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,6 +110,9 @@ pub struct Args {
     /// `--expect-build`: the commit the server must name in `/api/version`
     /// before anything else is sent to it ([`names_build`]).
     pub expect_build: String,
+    /// `--jwt-secret-file`: the server's JWT secret file, on the server's
+    /// PC; [`credential`] takes it or the PIN, never both.
+    pub jwt_secret_file: Option<PathBuf>,
     /// `--cpu-sets 256,257` (Windows): CPU Set ids, as the engine's
     /// `[card] cpu_sets`.
     pub cpu_sets: Vec<u32>,
@@ -106,6 +127,7 @@ pub fn parse_args(args: &[String]) -> Result<Args, String> {
     let mut seconds = None;
     let mut out = None;
     let mut expect_build = None;
+    let mut jwt_secret_file = None;
     let mut cpu_sets = None;
     let mut it = args.iter();
     while let Some(flag) = it.next() {
@@ -119,6 +141,7 @@ pub fn parse_args(args: &[String]) -> Result<Args, String> {
             "--seconds" => &mut seconds,
             "--out" => &mut out,
             "--expect-build" => &mut expect_build,
+            "--jwt-secret-file" => &mut jwt_secret_file,
             "--cpu-sets" => &mut cpu_sets,
             f if f == "--pin" || f.starts_with("--pin=") => {
                 return Err(format!(
@@ -150,6 +173,9 @@ pub fn parse_args(args: &[String]) -> Result<Args, String> {
     if !is_commit(&expect_build) {
         return Err("--expect-build must be a commit's 40 lower-case hex digits".to_owned());
     }
+    if jwt_secret_file.as_deref() == Some("") {
+        return Err("--jwt-secret-file needs a path".to_owned());
+    }
     let base = http_origin(base.as_deref().unwrap_or(DEFAULT_BASE))
         .ok_or("--base must be http://HOST[:PORT]")?;
     let cpu_sets = match cpu_sets {
@@ -169,6 +195,7 @@ pub fn parse_args(args: &[String]) -> Result<Args, String> {
         seconds,
         out: PathBuf::from(out),
         expect_build,
+        jwt_secret_file: jwt_secret_file.map(PathBuf::from),
         cpu_sets,
     })
 }
@@ -222,6 +249,102 @@ pub fn pin_from(value: Option<String>) -> Result<String, String> {
         )),
         None => Err(format!("{PIN_ENV} is not set")),
     }
+}
+
+/// How the client signs in as the engineer (#10 decision, 2026-10-07).
+#[derive(Clone, PartialEq, Eq)]
+pub enum Credential {
+    /// `--jwt-secret-file`, on the server's PC: read when the run starts
+    /// ([`read_secret`]), before any request; the client signs its own
+    /// token with it ([`engineer_token`]) and never logs in.
+    SecretFile(PathBuf),
+    /// `IEM_SOAK_PIN` ([`pin_from`]), in CI: the server's login.
+    Pin(String),
+}
+
+/// Neither the PIN nor the path (P6).
+impl fmt::Debug for Credential {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Credential::SecretFile(_) => "SecretFile(..)",
+            Credential::Pin(_) => "Pin(..)",
+        })
+    }
+}
+
+/// Exactly one credential: `secret_file` (`--jwt-secret-file`) or `pin`
+/// (`IEM_SOAK_PIN` as read, set at all: an empty value counts), judged by
+/// [`pin_from`]. Both or neither is a usage error that names the two, never
+/// a value.
+pub fn credential(secret_file: Option<&Path>, pin: Option<String>) -> Result<Credential, String> {
+    match (secret_file, pin) {
+        (Some(_), Some(_)) => Err(format!(
+            "--jwt-secret-file and {PIN_ENV} are both given: give one"
+        )),
+        (Some(path), None) => Ok(Credential::SecretFile(path.to_owned())),
+        (None, Some(pin)) => pin_from(Some(pin)).map(Credential::Pin),
+        (None, None) => Err(format!(
+            "give --jwt-secret-file (on the server's PC) or {PIN_ENV}"
+        )),
+    }
+}
+
+/// The server's JWT signing key as the server holds it: its `jwt_secret`
+/// file's text, trimmed (`iem_server::secrets`), whose bytes are the HS256
+/// key (`auth::issue_token`). Never printed.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Secret(String);
+
+impl Secret {
+    /// The key in `text` as the server reads its file: trimmed; none when
+    /// nothing is left.
+    pub fn from_text(text: &str) -> Option<Self> {
+        let key = text.trim();
+        (!key.is_empty()).then(|| Self(key.to_owned()))
+    }
+}
+
+impl fmt::Debug for Secret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Secret(..)")
+    }
+}
+
+/// The secret in the server's `jwt_secret` file at `path`, read as the
+/// server reads it ([`Secret::from_text`] of its UTF-8 text). A file that
+/// is missing, unreadable, not UTF-8 or blank is `secret-unreadable`, as it
+/// stops the server's start. The file is never created here (the server's
+/// first start makes it), and neither its path nor its text reaches an
+/// error.
+pub fn read_secret(path: &Path) -> Result<Secret, Reason> {
+    let text = fs::read_to_string(path).map_err(|_| Reason::SecretUnreadable)?;
+    Secret::from_text(&text).ok_or(Reason::SecretUnreadable)
+}
+
+/// The engineer token's claims: the server's `AuthClaims` (`iem_core`; the
+/// tests read the token back into it).
+#[derive(Serialize)]
+struct Claims<'a> {
+    sub: &'a str,
+    engineer: bool,
+    exp: u64,
+    iat: u64,
+}
+
+/// The engineer's token as the server's login issues it
+/// (`iem_server::auth::issue_token`: the default header, HS256, the
+/// secret's bytes), issued at the Unix second `now` and valid for `seconds`
+/// and [`TOKEN_MARGIN`] more. A token that cannot be signed with the secret
+/// is `secret-unreadable`.
+pub fn engineer_token(secret: &Secret, now: u64, seconds: u64) -> Result<String, Reason> {
+    let claims = Claims {
+        sub: ENGINEER,
+        engineer: true,
+        exp: now + seconds + TOKEN_MARGIN,
+        iat: now,
+    };
+    let key = EncodingKey::from_secret(secret.0.as_bytes());
+    jsonwebtoken::encode(&Header::default(), &claims, &key).map_err(|_| Reason::SecretUnreadable)
 }
 
 /// `http://HOST[:PORT]` of an `http://` URL (the scheme in any case; a
@@ -406,6 +529,9 @@ pub enum Reason {
     ConnectionLost,
     /// The process could not be placed on the given CPU Sets.
     CpuSets,
+    /// `--jwt-secret-file` could not be read, is not UTF-8 text or is
+    /// blank (or no token could be signed with it): nothing was sent.
+    SecretUnreadable,
 }
 
 impl Reason {
@@ -419,6 +545,7 @@ impl Reason {
             Reason::ServerGone => "server-gone",
             Reason::ConnectionLost => "connection-lost",
             Reason::CpuSets => "cpu-sets",
+            Reason::SecretUnreadable => "secret-unreadable",
         }
     }
 }

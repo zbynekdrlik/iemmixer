@@ -1,5 +1,5 @@
 //! The soak client's wire (S7 design note §4): `/api/site`, the build check
-//! (`/api/version`) and the login over plain HTTP, the mixer and listen
+//! (`/api/version`) and the PIN login over plain HTTP, the mixer and listen
 //! sockets each on its own thread, the run's clock on the calling thread. A
 //! socket read waits at most `read_timeout`, so a reading thread sees the
 //! end of the run within it (a thread inside an open, within the open's own
@@ -7,8 +7,10 @@
 //!
 //! Nothing is sent to a server before it names `--expect-build` in
 //! `/api/version`: after "ide event" the predecessor app answers at the
-//! band's usual address and takes the client's token, and a `ListenStart`
-//! there would mute every other member's send to the engineer's mix.
+//! band's usual address and takes the client's token (the PIN login's, or
+//! one the client signed: `iem-migrate band` copies the predecessor's JWT
+//! secret), and a `ListenStart` there would mute every other member's send
+//! to the engineer's mix. A secret file is read before any request.
 //!
 //! Each socket is opened once and never again (#10): by a second open the
 //! address may have changed hands since the check. A socket that cannot be
@@ -24,7 +26,7 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 use tungstenite::client::IntoClientRequest;
@@ -32,16 +34,14 @@ use tungstenite::{Message, WebSocket};
 
 use crate::tally::{SAMPLES, Tally};
 use crate::{
-    Args, Reason, Summary, classify, listen_path, listen_start, mixer_path, names_build, origin,
-    ws_url,
+    Args, Credential, ENGINEER, Reason, Secret, Summary, classify, engineer_token, listen_path,
+    listen_start, mixer_path, names_build, origin, read_secret, ws_url,
 };
 
 /// One HTTP request (`/api/site`, `/api/version`, the login) at most.
 const HTTP_WAIT: Duration = Duration::from_secs(10);
 /// A socket's connect, its handshake and each of its writes at most.
 const OPEN_WAIT: Duration = Duration::from_secs(5);
-/// The login's member: the listen socket is the engineer's only.
-const ENGINEER: &str = "engineer";
 /// `ClientMsg::ListenStop`.
 const LISTEN_STOP: &str = r#"{"cmd":"ListenStop"}"#;
 
@@ -70,13 +70,19 @@ impl Default for Limits {
     }
 }
 
-/// One run: the login (once), then the mixer and listen sockets on their own
-/// threads until `args.seconds` have passed since the first open (complete)
-/// or a socket could not be opened or was lost. `write` gets the summary
-/// every `write_every` and the final one, once both sockets have ended; a
-/// run that fails before its sockets writes that one summary only.
-pub fn run(args: &Args, pin: &str, limits: &Limits, write: &mut dyn FnMut(&Summary)) -> Summary {
-    let (origin, token) = match login(args, pin) {
+/// One run: the sign-in with `credential` (once), then the mixer and listen
+/// sockets on their own threads until `args.seconds` have passed since the
+/// first open (complete) or a socket could not be opened or was lost.
+/// `write` gets the summary every `write_every` and the final one, once both
+/// sockets have ended; a run that fails before its sockets writes that one
+/// summary only.
+pub fn run(
+    args: &Args,
+    credential: &Credential,
+    limits: &Limits,
+    write: &mut dyn FnMut(&Summary),
+) -> Summary {
+    let (origin, token) = match sign_in(args, credential) {
         Ok(found) => found,
         Err(reason) => {
             let mut tally = Tally::default();
@@ -100,11 +106,26 @@ pub fn run(args: &Args, pin: &str, limits: &Limits, write: &mut dyn FnMut(&Summa
     summary
 }
 
-/// The origin the sockets go to and the engineer's token: `/api/site`'s
-/// LAN URL at `--base` (or `--base` itself with `--direct`), the build
-/// check there, then the login there. A server that does not answer the
+/// What signs the client in once the secret file is read.
+enum Key<'a> {
+    /// The PIN, for the server's login.
+    Pin(&'a str),
+    /// The server's secret, to sign the client's own token with.
+    Secret(Secret),
+}
+
+/// The origin the sockets go to and the engineer's token. A secret file is
+/// read first, so an unreadable one sends nothing (`secret-unreadable`).
+/// Then `/api/site`'s LAN URL at `--base` (or `--base` itself with
+/// `--direct`), the build check there, and only then the token: the login
+/// there with the PIN, or one signed here with the secret, valid for the
+/// run ([`engineer_token`]; no login). A server that does not answer the
 /// build check or the login is `server-gone`.
-fn login(args: &Args, pin: &str) -> Result<(String, String), Reason> {
+fn sign_in(args: &Args, credential: &Credential) -> Result<(String, String), Reason> {
+    let key = match credential {
+        Credential::SecretFile(path) => Key::Secret(read_secret(path)?),
+        Credential::Pin(pin) => Key::Pin(pin),
+    };
     let http = agent();
     let lan_url = if args.direct {
         None
@@ -113,6 +134,24 @@ fn login(args: &Args, pin: &str) -> Result<(String, String), Reason> {
     };
     let origin = origin(args, lan_url.as_deref())?;
     check_build(&http, &origin, &args.expect_build)?;
+    let token = match key {
+        Key::Pin(pin) => login(&http, &origin, pin)?,
+        Key::Secret(secret) => engineer_token(&secret, unix_now(), args.seconds)?,
+    };
+    Ok((origin, token))
+}
+
+/// Seconds since the Unix epoch, as the server's clock reads them
+/// (`mixer_ws::claims_of`); the server runs on the same PC.
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// The server's login at `origin` with the engineer's PIN: its token, the
+/// engineer's. No answer is `server-gone`.
+fn login(http: &ureq::Agent, origin: &str, pin: &str) -> Result<String, Reason> {
     let body = serde_json::json!({"member": ENGINEER, "pin": pin}).to_string();
     let mut reply = http
         .post(format!("{origin}/api/auth"))
@@ -130,12 +169,12 @@ fn login(args: &Args, pin: &str) -> Result<(String, String), Reason> {
     if !login.engineer {
         return Err(Reason::NotEngineer);
     }
-    Ok((origin, login.token))
+    Ok(login.token)
 }
 
 /// `/api/version` at `origin` names `build` ([`names_build`]) before the
-/// PIN or anything else is sent there. Any other answer, a missing version
-/// route included, is `wrong-server`; no answer is `server-gone`.
+/// PIN, a token or anything else is sent there. Any other answer, a missing
+/// version route included, is `wrong-server`; no answer is `server-gone`.
 fn check_build(http: &ureq::Agent, origin: &str, build: &str) -> Result<(), Reason> {
     let mut reply = http
         .get(format!("{origin}/api/version"))
