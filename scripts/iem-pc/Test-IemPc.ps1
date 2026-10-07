@@ -91,10 +91,13 @@ try {
     # tasklist's CSV rows start with a quote (its "no tasks" line is localized
     # text, never read), which findstr /b looks for (\^" : the caret keeps
     # cmd's quote state, the backslash is findstr's own escape of the quote).
-    # findstr's exit decides: 0 a holder (add=held, exit 0), 1 none (the
-    # add), 2 the list unreadable (add=unread, exit 2), as is a list tasklist
-    # or its redirection could not write; a failed add is exit 1.
-    $wantBoot = '/d /q /e:on /v:on /s /c ""C:\Windows\System32\reg.exe" query "HKCU\Software\ASIO\Test Card" /v "PrefBuffSize" >"C:\ProgramData\iemmixer\tasks\out\boot-pref.before" 2>&1 & set "iemadd=none" & "C:\Windows\System32\findstr.exe" /i /l /x /c:"    PrefBuffSize    REG_DWORD    0x40" "C:\ProgramData\iemmixer\tasks\out\boot-pref.before" >nul || ("C:\Windows\System32\tasklist.exe" /m "testcard.dll" /fo csv /nh >"C:\ProgramData\iemmixer\tasks\out\boot-pref.holders" 2>&1 && ("C:\Windows\System32\findstr.exe" /b /l \^" "C:\ProgramData\iemmixer\tasks\out\boot-pref.holders" >nul & if errorlevel 2 (set "iemadd=unread") else if errorlevel 1 ("C:\Windows\System32\reg.exe" add "HKCU\Software\ASIO\Test Card" /v "PrefBuffSize" /t REG_DWORD /d 64 /f >nul 2>&1 && set "iemadd=0" || set "iemadd=1") else (set "iemadd=held")) || set "iemadd=unread") & (echo boot-pref !DATE! !TIME! add=!iemadd!)>>"C:\ProgramData\iemmixer\tasks\out\boot-pref.log" & "C:\Windows\System32\reg.exe" query "HKCU\Software\ASIO\Test Card" /v "PrefBuffSize" >>"C:\ProgramData\iemmixer\tasks\out\boot-pref.log" 2>&1 & if "!iemadd!"=="1" (exit /b 1) else if "!iemadd!"=="unread" (exit /b 2) else (exit /b 0)"'
+    # A quote line found: add=held, exit 0. Else the add runs only on proof
+    # that the list was read: findstr /v finds a line that does not start
+    # with a quote (tasklist's "no tasks" line, in any language); findstr
+    # exits 1 both for "no match" and for a file it cannot open, so without
+    # that proof nothing is written (add=unread, exit 2), as for a list
+    # tasklist or its redirection could not write. A failed add is exit 1.
+    $wantBoot = '/d /q /e:on /v:on /s /c ""C:\Windows\System32\reg.exe" query "HKCU\Software\ASIO\Test Card" /v "PrefBuffSize" >"C:\ProgramData\iemmixer\tasks\out\boot-pref.before" 2>&1 & set "iemadd=none" & "C:\Windows\System32\findstr.exe" /i /l /x /c:"    PrefBuffSize    REG_DWORD    0x40" "C:\ProgramData\iemmixer\tasks\out\boot-pref.before" >nul || ("C:\Windows\System32\tasklist.exe" /m "testcard.dll" /fo csv /nh >"C:\ProgramData\iemmixer\tasks\out\boot-pref.holders" 2>&1 && ("C:\Windows\System32\findstr.exe" /b /l \^" "C:\ProgramData\iemmixer\tasks\out\boot-pref.holders" >nul && set "iemadd=held" || ("C:\Windows\System32\findstr.exe" /v /b /l \^" "C:\ProgramData\iemmixer\tasks\out\boot-pref.holders" >nul && ("C:\Windows\System32\reg.exe" add "HKCU\Software\ASIO\Test Card" /v "PrefBuffSize" /t REG_DWORD /d 64 /f >nul 2>&1 && set "iemadd=0" || set "iemadd=1") || set "iemadd=unread")) || set "iemadd=unread") & (echo boot-pref !DATE! !TIME! add=!iemadd!)>>"C:\ProgramData\iemmixer\tasks\out\boot-pref.log" & "C:\Windows\System32\reg.exe" query "HKCU\Software\ASIO\Test Card" /v "PrefBuffSize" >>"C:\ProgramData\iemmixer\tasks\out\boot-pref.log" 2>&1 & if "!iemadd!"=="1" (exit /b 1) else if "!iemadd!"=="unread" (exit /b 2) else (exit /b 0)"'
     $bc = Get-IemBootPrefCommand -PrefKey 'Software\ASIO\Test Card' @bootArgs
     Assert ($bc.exe -ceq 'C:\Windows\System32\cmd.exe' -and $bc.arguments -ceq $wantBoot) "boot-pref-command-is-reg-exe-through-cmd ($($bc.arguments))"
     # The task runs elevated with the user's environment: no % (cmd and Task
@@ -698,6 +701,29 @@ try {
     $uv = Get-IemPref -Key $regKey -Name 'Pref'
     $ub = Get-IemBootPrefLog -Path (Join-Path $unreadLog 'boot-pref.log')
     Assert ($ux -eq 2 -and $uv.value -eq 32 -and @($ub).Count -eq 3 -and $ub[0] -clike 'boot-pref * add=unread') "boot-pref-action-writes-nothing-without-a-holder-list (exit $ux, $($uv.raw); $(@($ub) -join ' | '))"
+    # A list tasklist wrote but findstr cannot open (reading it denied to this
+    # user, writing allowed): findstr exits 1 then, as for "no holder", so the
+    # add waits for findstr /v's proof that the list was read, which cannot
+    # come: nothing is written either (its own log folder here).
+    $deniedLog = Join-Path $base 'boot-pref-denied'
+    New-Item -ItemType Directory -Force -Path $deniedLog | Out-Null
+    $deniedList = Join-Path $deniedLog 'boot-pref.holders'
+    [IO.File]::WriteAllText($deniedList, '')
+    $deniedAcl = [IO.File]::GetAccessControl($deniedList)
+    $denyRead = New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier($me.sid)),
+        [System.Security.AccessControl.FileSystemRights]::ReadData, [System.Security.AccessControl.AccessControlType]::Deny)
+    $deniedAcl.AddAccessRule($denyRead)
+    [IO.File]::SetAccessControl($deniedList, $deniedAcl)
+    $dc = Get-IemBootPrefCommand -System ([Environment]::GetFolderPath('System')) -PrefKey $regKey -PrefName 'Pref' -PrefOriginal '64' -Module 'testcard.dll' -LogDir $deniedLog
+    $deniedAction = [pscustomobject]@{ Path = $dc.exe; Arguments = $dc.arguments; WorkingDirectory = $etasks }
+    $dx = Invoke-BootPrefAction $deniedAction
+    $dv = Get-IemPref -Key $regKey -Name 'Pref'
+    $db = Get-IemBootPrefLog -Path (Join-Path $deniedLog 'boot-pref.log')
+    $deniedLength = (Get-Item -LiteralPath $deniedList).Length
+    [void]$deniedAcl.RemoveAccessRule($denyRead)
+    [IO.File]::SetAccessControl($deniedList, $deniedAcl)
+    Assert ($deniedLength -gt 0) "boot-pref-denied-precondition-tasklist-wrote-the-list ($deniedLength bytes)"
+    Assert ($dx -eq 2 -and $dv.value -eq 32 -and @($db).Count -eq 3 -and $db[0] -clike 'boot-pref * add=unread') "boot-pref-action-writes-nothing-when-findstr-cannot-read-the-list (exit $dx, $($dv.raw); $(@($db) -join ' | '))"
     Set-ItemProperty -LiteralPath $regKey -Name 'Pref' -Value 64 -Type DWord
     # A string preference: compared and written as REG_SZ, kind kept (its own log folder here).
     $textLog = Join-Path $base 'boot-pref-text'
