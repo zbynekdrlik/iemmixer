@@ -110,11 +110,20 @@ class Verdict(unittest.TestCase):
                 self.red(ps, first)
             else:
                 self.green(ps)
+        # Rounded up: a red hole never reads as the bound.
+        ps = polls()
+        for p in ps[200:]:
+            p["t"] += 240.00001
+        self.red(ps, "no poll for 300.1 s after poll 200")
         ps = polls()
         ps[11]["t"] = ps[10]["t"] - 1
         self.red(ps, "poll 12 is older than poll 11")
         del ps[10]["t"]
         self.red(ps, "poll 11 has no time")
+        for t in (float("nan"), float("inf")):
+            ps = polls()
+            ps[100]["t"] = t
+            self.red(ps, "poll 101 has no time")
 
     def test_another_engine_pid_or_bundle_is_red(self):
         for key, value, first in (("pid", 4243, "poll 301 runs another engine pid"),
@@ -241,6 +250,10 @@ class Verdict(unittest.TestCase):
         self.red(polls(), "harness incomplete (server-gone)", harness(complete=False, error="server-gone"))
         self.red(polls(), "harness incomplete", harness(complete=False, error="mixer.example.org"))
         self.red(polls(), "harness ran 28799.9 s of 28800 s", harness(seconds=28_799.9))
+        # Rounded down: a short run never reads as the bound.
+        self.red(polls(), "harness ran 28799.9 s of 28800 s", harness(seconds=28_799.95))
+        for seconds in (float("inf"), float("nan")):
+            self.red(polls(), "the harness summary is unreadable", harness(seconds=seconds))
         self.green(polls(), harness(seconds=28_800))
         for bad in ({"frames": "1"}, {"seconds": True}, {"complete": 1}, {"gaps": -1}):
             self.red(polls(), "the harness summary is unreadable", harness(**bad))
@@ -285,19 +298,25 @@ class Verdict(unittest.TestCase):
 
     def test_drift_alarms_during_the_soak_are_counted_as_information(self):
         ps = polls()
-        before = {"id": 1, "at": T0 - 10, "text": "tuning drift: before the soak"}
+        before = {"id": 1, "at": T0 - 1, "text": "tuning drift: before the soak"}
         other = {"id": 2, "at": T0 + 30, "text": "engine respawned"}
+        start = {"id": 5, "at": T0, "text": "tuning drift: at the first poll"}
         for i, p in enumerate(ps):
-            alarms = [before, other]
+            alarms = [before, other, start]
             if i >= 60:
                 alarms.append({"id": 3, "at": T0 + 3600, "text": "tuning drift: one"})
             if i >= 120:
                 alarms.append({"id": 4, "at": T0 + 7200, "text": "tuning drift: two"})
             p["status"]["alarms"] = alarms
         n = self.green(ps)["numbers"]
-        self.assertEqual(n["drift_alarms"], 2)
+        self.assertEqual(n["drift_alarms"], 3)
         self.assertEqual((n["late_counter"], n["overruns"], n["process_max_us"]), (1440, 0, 52.5))
         self.assertEqual((n["decode_errors"], n["meter_frames"]), (0, 289_800))
+
+    def test_information_that_is_not_a_finite_number_is_left_out(self):
+        ps = polls()
+        engine(ps[-1])["process_max_us"] = float("nan")
+        self.assertNotIn("process_max_us", self.green(ps)["numbers"])
 
 
 class Report(unittest.TestCase):
@@ -363,7 +382,7 @@ class Main(unittest.TestCase):
         code, out = self.run_main("report", "--pc", pc, "--dir", str(self.dir), "--sha", SHA, "--hours", "8")
         self.assertEqual(code, 0)
         self.assertEqual(out.count("\n"), 1, out)
-        return json.loads(out)
+        return json.loads(out, parse_constant=lambda c: self.fail(f"{c} is not JSON (jq refuses it)"))
 
     def write(self, name: str, text: str) -> None:
         (self.dir / name).write_text(text, encoding="utf-8")
@@ -386,6 +405,30 @@ class Main(unittest.TestCase):
         self.assertEqual(self.report("cancelled")["summary"], "cancelled: the pc job was cancelled")
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             self.run_main("report", "--pc", "success", "--dir", str(self.dir), "--sha", "member9", "--hours", "8")
+
+    def test_main_report_keeps_left_dev_cancelled_whatever_the_harness_file_holds(self):
+        # On left-dev the PC job ends while the client may still rewrite its summary.
+        self.write("result.json", '{"conclusion":"cancelled","reason":"left-dev"}')
+        self.write("soakclient.json", '{"schema":1,')
+        self.assertEqual(self.report()["summary"], "cancelled: the pc left dev")
+        self.write("result.json", '{"conclusion":"success","reason":"finished"}')
+        self.write("polls.jsonl", "".join(json.dumps(p) + "\n" for p in polls()))
+        self.assertEqual(self.report()["first_failure"], "the harness summary is unreadable")
+        # A number that is no JSON number (NaN) in a poll never reaches the output.
+        ps = polls()
+        engine(ps[-1])["process_max_us"] = float("nan")
+        self.write("polls.jsonl", "".join(json.dumps(p) + "\n" for p in ps))
+        self.write("soakclient.json", json.dumps(HARNESS))
+        self.assertEqual(self.report()["conclusion"], "success")
+
+    def test_main_report_takes_hours_above_0_up_to_10(self):
+        for hours, ok in (("0", False), ("10.5", False), ("nan", False), ("10", True), ("0.5", True)):
+            argv = ("report", "--pc", "success", "--dir", str(self.dir), "--sha", SHA, "--hours", hours)
+            if ok:
+                self.assertEqual(self.run_main(*argv)[0], 0, hours)
+            else:
+                with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit, msg=hours):
+                    self.run_main(*argv)
 
     def test_main_harness_exits_1_on_a_problem(self):
         path = self.dir / "soakclient.json"
