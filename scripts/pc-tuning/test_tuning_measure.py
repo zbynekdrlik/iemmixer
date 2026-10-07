@@ -312,7 +312,7 @@ class MeasureTests(WindowHarness):
         stops = self.pc.bodies("Stop-IemTrace")
         self.assertEqual(len(stops), 5)
         for body in stops:
-            self.assertIn("'bin\\IemMeasure.psm1') -ArgumentList 'stop-only'", body)
+            self.assertIn("Import-Module (Join-Path $iemStage 'IemMeasure.psm1') -ArgumentList 'stop-only'", body)   # #15
             self.assertRegex(body, r"Stop-IemTraceSessions -Dir 'C:\\t\\runs\\[a-z0-9-]+-?[0-9TZ]*' -TimeoutSeconds \d+")
             self.assertNotIn("IemTuning", body)
             self.assertNotIn("Stop-IemTrace -Xperf", body)

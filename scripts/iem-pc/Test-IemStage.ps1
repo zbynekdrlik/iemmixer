@@ -49,8 +49,13 @@ try {
         Assert ($bad.Count -eq 0) "stage-reads-back-as-an-elevated-item [$p] ($($bad -join '; '))"
     }
     Assert ((FileSha $staged) -ceq $hex) 'stage-holds-the-checked-bytes'
+    # A stage that already holds exactly the checked bytes is read, never rewritten: sessions that
+    # run at the same time (a window's poll and a preempt) never write under another's import.
+    $written = (Get-Item -LiteralPath $staged).LastWriteTimeUtc
+    Start-Sleep -Milliseconds 50
     $doc = Invoke-Staged $src $hex $er
-    Assert ((Get-IemProp $doc 'ok') -eq $true -and $doc.r.path -eq $staged) "stage-again-writes-the-copy-fresh ($(Get-Result $doc))"
+    Assert ((Get-IemProp $doc 'ok') -eq $true -and $doc.r.path -eq $staged) "stage-again-imports-the-staged-copy ($(Get-Result $doc))"
+    Assert ((Get-Item -LiteralPath $staged).LastWriteTimeUtc -eq $written) 'stage-again-keeps-the-identical-copy'
 
     # ---- an upload that is not the attested one: refused, nothing staged or imported ----
     Add-Content -LiteralPath $src -Value '# changed after the sums'

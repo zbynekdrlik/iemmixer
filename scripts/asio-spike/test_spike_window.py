@@ -16,6 +16,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import spike_window as sw  # noqa: E402
+from test_window_stage import SUMS, bundle_record  # noqa: E402
 
 NUMERIC = {"PC_BUFFER_ORIGINAL": "64", "PC_NTRACK": "9"}
 FULL = "\n".join(f"{k}=v" for k in sw.REQUIRED if k not in NUMERIC) + "\n" + "".join(f"{k}={v}\n" for k, v in NUMERIC.items())
@@ -415,7 +416,7 @@ class UnwindTuningTests(unittest.TestCase):
         done = sw.unwind(env, state, running=False)
         stops = [c for c in self.calls if "Stop-IemTrace" in c]
         self.assertEqual(len(stops), 1)
-        self.assertIn("'bin\\IemMeasure.psm1') -ArgumentList 'stop-only'", stops[0])
+        self.assertIn("Import-Module (Join-Path $iemStage 'IemMeasure.psm1') -ArgumentList 'stop-only'", stops[0])   # #15
         self.assertIn(f"Stop-IemTraceSessions -Dir 'C:\\t\\runs\\x' -TimeoutSeconds {sw.TRACE_STOP_LOGMAN_S}", stops[0])
         self.assertNotIn("IemTuning", stops[0])
         self.assertNotIn("Stop-IemTrace -Xperf", stops[0])
@@ -950,6 +951,7 @@ class PsReplyTests(unittest.TestCase):
         self.saved = sw.guarded
         self.out = ""
         sw.guarded = lambda cmd, stdin, timeout, event: self.out
+        self.env = bundle_record(self)   # the window's attested bundle (#15)
 
     def tearDown(self) -> None:
         sw.guarded = self.saved
@@ -957,21 +959,21 @@ class PsReplyTests(unittest.TestCase):
     def test_an_error_reply_is_no_lost_reply(self) -> None:
         self.out = json.dumps({"ok": False, "error": "Access is denied"}) + "\n"
         with self.assertRaisesRegex(sw.StepError, "Access is denied") as cm:
-            sw.ps({"PC_ROOT": "R", "PC_SSH": "u@h"}, "x")
+            sw.ps(self.env, "x")
         self.assertNotIsInstance(cm.exception, sw.NoReply)
 
     def test_the_script_sent_is_ps_script(self) -> None:
         # One builder for what reaches the PC, so CI can run the same text (review m11).
         sent: list[str] = []
         sw.guarded = lambda cmd, stdin, timeout, event: sent.append(stdin) or json.dumps({"ok": True, "r": 1})
-        self.assertEqual(sw.ps({"PC_ROOT": "R", "PC_SSH": "u@h"}, "Get-X"), 1)
-        self.assertEqual(sent, [sw.ps_script("R", "Get-X") + "\n"])
+        self.assertEqual(sw.ps(self.env, "Get-X"), 1)
+        self.assertEqual(sent, [sw.ps_script("R", "Get-X", SUMS) + "\n"])
 
     def test_no_or_a_cut_reply_is_no_reply(self) -> None:
         for out in ("", "\n", '{"ok": tr\n'):
             self.out = out
             with self.assertRaises(sw.NoReply, msg=repr(out)):
-                sw.ps({"PC_ROOT": "R", "PC_SSH": "u@h"}, "x")
+                sw.ps(self.env, "x")
 
 
 if __name__ == "__main__":
