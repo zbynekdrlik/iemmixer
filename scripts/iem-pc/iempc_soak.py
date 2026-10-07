@@ -8,8 +8,8 @@ this order, nothing dispatched on any refusal:
 1. Before any call: dev time (iempc's Spec: no EVENT-NOW flag at the start),
    a full SHA, hours HOURS_MIN..HOURS_MAX (the ops job's 600 min hold 9 h of
    polls, the client's start and its end), and no soak of this SHA in this dev
-   entry yet (RECORD in the state dir; the entry is `iempc dev`'s count,
-   `current_entry`).
+   entry yet (RECORD in the state dir; the entry is the count of `iempc dev`
+   and switch-test's dev leg, `current_entry`).
 2. `iemmode status` (a new flag abandons the read and runs the event path):
    the guard answers ok, in dev, no switch, no HIL job; the active bundle and
    the running engine's build are both the SHA; the engine plays (neither
@@ -64,9 +64,10 @@ def hil_job(reply: dict) -> str | None:
     return next((p for p in detail_parts(reply) if p.startswith(HIL_JOB)), None)
 
 
-def soak_refusal(reply, sha: str) -> str | None:
-    """Why the PC cannot be soaked at `sha` now, from one `iemmode status`
-    reply (pure); None when it can."""
+def settled_refusal(reply) -> str | None:
+    """Why the guard is not settled in dev, from one `iemmode status` reply
+    (pure): it answers ok, in dev, no switch, no HIL job; None when it is.
+    Also `iempc switch-test`'s first checks (iempc_switch.py)."""
     if not isinstance(reply, dict):
         return "iemmode status gave no reply"
     if reply.get("ok") is not True:
@@ -78,6 +79,24 @@ def soak_refusal(reply, sha: str) -> str | None:
     job = hil_job(reply)
     if job is not None:
         return f"a HIL job runs ({job})"
+    return None
+
+
+def playing_refusal(engine: dict, what: str) -> str | None:
+    """Why the reply's `engine` does not play (`parked` and `faulted` must be
+    exactly false), for `what` that measures it; None when it plays."""
+    for state in ("parked", "faulted"):
+        if engine.get(state) is not False:
+            return f"the engine is {state} ({engine.get(state)!r}); {what} measures an engine that plays"
+    return None
+
+
+def soak_refusal(reply, sha: str) -> str | None:
+    """Why the PC cannot be soaked at `sha` now, from one `iemmode status`
+    reply (pure); None when it can."""
+    why = settled_refusal(reply)
+    if why:
+        return why
     bundle = active_bundle(reply)
     if bundle != sha:
         return f"the active bundle is {bundle or 'none'}, not {sha}"
@@ -86,10 +105,7 @@ def soak_refusal(reply, sha: str) -> str | None:
         return "no engine runs (the guard's status shows none)"
     if engine.get("build") != sha:
         return f"the running engine's build is {engine.get('build')!r}, not {sha}"
-    for state in ("parked", "faulted"):
-        if engine.get(state) is not False:
-            return f"the engine is {state} ({engine.get(state)!r}); a soak measures an engine that plays"
-    return None
+    return playing_refusal(engine, "a soak")
 
 
 def check_hours(ip, hours) -> int:
