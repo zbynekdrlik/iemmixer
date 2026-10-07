@@ -61,10 +61,11 @@ class StageTests(unittest.TestCase):
         src = sw.ps_quote(f"{root}\\bin\\{name}")
         want = want or f"$iemSums['{name}']"
         self.assertEqual(script.count(src), 2, name)   # read once, named in the mismatch
-        at = [script.index(t) for t in (f"$iemB = [IO.File]::ReadAllBytes({src})", f"if ($iemH -cne {want})",
-                                        f"$iemMod = Join-Path $iemStage '{name}'", "& $iemOnly $iemMod")]
-        self.assertEqual(at, sorted(at), name)
-        return at[-1]
+        at = 0   # each step searched after the one before: this module's own, in this order
+        for step in (f"$iemB = [IO.File]::ReadAllBytes({src})", f"if ($iemH -cne {want})",
+                     f"$iemMod = Join-Path $iemStage '{name}'", "& $iemOnly $iemMod"):
+            at = script.index(step, at)
+        return at
 
     def test_every_window_session_imports_spikepc_only_from_the_stage(self) -> None:
         s = sw.ps_script("C:\\r", "Get-X", SUMS)
