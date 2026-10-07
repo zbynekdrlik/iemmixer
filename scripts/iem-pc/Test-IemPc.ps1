@@ -817,6 +817,7 @@ try {
 
     # S1c's tuning module is imported only from an admin-owned, admin-only folder.
     $fakeTuning = @'
+$global:IemFakeTempAtImport = $env:TEMP
 function Get-IemTuningState { param([string]$ProfilePath) return 'fake-state' }
 function Enter-IemTuningMode { param([string]$ProfilePath) return 'fake-enter' }
 function Exit-IemTuningMode { param([string]$ProfilePath) return 'fake-exit' }
@@ -832,11 +833,13 @@ function Invoke-IemTuningApply { param([string]$ProfilePath, [int]$Tier) return 
     }
     Write-FakeTuning
     $savedTemp = @($env:TEMP, $env:TMP)
+    $global:IemFakeTempAtImport = ''
     Assert ((Invoke-IemTuningVerb -Verb 'state' -TuningDir $etuning) -ceq 'fake-state') 'tuning-imports-an-admin-only-module'
-    # The import ran with TEMP and TMP at the admin-only <elevated root>\temp (#15: IemTuning's Add-Type).
+    # The import ran with TEMP and TMP at the admin-only <elevated root>\temp (#15: IemTuning's Add-Type):
+    # the fake module read TEMP while it was imported.
     $etemp = Join-Path (Split-Path -Parent $etuning) 'temp'
     $tb = Test-IemElevatedItem -Path $etemp -UserSid $me.sid
-    Assert ($env:TEMP -eq $etemp -and $env:TMP -eq $etemp -and $tb.Count -eq 0) "tuning-imports-with-the-admin-only-temp ($env:TEMP; $($tb -join '; '))"
+    Assert ($global:IemFakeTempAtImport -eq $etemp -and $env:TMP -eq $etemp -and $tb.Count -eq 0) "tuning-imports-with-the-admin-only-temp ($global:IemFakeTempAtImport; $($tb -join '; '))"
     Assert ((Invoke-IemTuningVerb -Verb 'apply-tier2' -TuningDir $etuning) -ceq 'fake-apply-2') 'tuning-apply-tier2-passes-tier-2'
     [IO.File]::WriteAllText((Join-Path $td 'tuning.request.json'), '{"id":"t-5","verb":"enter"}')
     $tr = Invoke-IemTaskRequest -Kind tuning -Root $root -OutDir $eout -TuningDir $etuning

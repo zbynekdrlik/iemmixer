@@ -524,7 +524,7 @@ class PollScriptTests(unittest.TestCase):
         self.assertIn("PriorityClass", tw.ANALYSIS_PROBE)
         self.assertIn("Get-IemNow", tw.ANALYSIS_PROBE)              # IemMeasure loaded after the guard
         self.assertIn("Get-Command -Name ConvertTo-IemLpNumber", tw.ANALYSIS_PROBE)   # and IemTuning with it
-        self.assertIn("temp = $env:TEMP", tw.ANALYSIS_PROBE)    # the TEMP its Add-Type compiled in (#15)
+        self.assertIn("temp = [IO.Path]::GetTempPath()", tw.ANALYSIS_PROBE)    # the temp folder Add-Type reads (#15)
 
     def test_the_tuning_modules_load_only_after_temp_points_at_the_admin_only_temp(self) -> None:
         """#15: IemTuning's Add-Type has csc write and load a DLL in TEMP, and the

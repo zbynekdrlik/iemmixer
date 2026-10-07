@@ -73,6 +73,10 @@ try {
     $er = New-ElevatedRoot 'er-ok'
     $src = New-Source 'src-ok' $goodLayout
     $h = Get-SourceHashes $src
+    # TEMP at a folder that does not exist: IemTuning's first compile (Add-Type) can only
+    # succeed in the TEMP Install-IemTuning sets before the import (#15).
+    $env:TEMP = Join-Path $base 'no-such-temp'
+    $env:TMP = $env:TEMP
     $r = Install-IemTuning -Root $er -SourceDir $src @h
     Assert ((@($r.PSObject.Properties.Name) -join ',') -ceq 'tuning,measure,profile') "tuning-install-returns-the-three-hashes-only ($(@($r.PSObject.Properties.Name) -join ','))"
     Assert ($r.tuning -ceq $h.TuningSha256 -and $r.measure -ceq $h.MeasureSha256 -and $r.profile -ceq $h.ProfileSha256) 'tuning-install-returns-the-hashes-it-read-back'
