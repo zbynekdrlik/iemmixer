@@ -75,14 +75,14 @@ The gates need distributions the engine does not export today. `Status` has `lat
   - Its own CPU Set is the profile's housekeeping set when one is given.
 - **Polls:**
   - every 60 s: `iemmode status`;
-  - every 10 min: the guard's `tuning state` drift, read through `status`;
+  - the guard's own drift read (hourly, `DRIFT_EVERY`) raises `tuning drift: …` alarms that every poll carries; the verdict counts them as information (no guard request reads the tuning state on demand);
   - alongside: a circular DPC trace (1 GB, at most 5 cuts) through `iempc trace` (#15 design, 2026-10-07).
 - **Verdict:**
   - green, with ≥ 8 h of polls on one engine pid and one bundle, when:
     - missed +0 and resets +0;
     - late (§3) ≤ 0.2 %;
     - `process()` p99.9 ≤ 83 µs;
-    - harness gaps 0 and reconnects 0;
+    - harness gaps 0 and reconnects 0, and at least 99 % of the expected listen frames (gaps alone cannot tell a thinned stream from a full one);
   - any other end is red, naming the first failing number.
   - The ops `report` job posts `soak/iem-pc` on the SHA. `iemmode report` records it per bundle beside HIL.
 - **"Ide event":** the guard stops the runner, and the job ends cancelled (never red, never green).
