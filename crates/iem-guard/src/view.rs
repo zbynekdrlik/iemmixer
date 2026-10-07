@@ -153,6 +153,7 @@ mod tests {
             detail: String::new(),
             engine: None,
             guard_build: None,
+            last_switch: None,
         }
     }
 

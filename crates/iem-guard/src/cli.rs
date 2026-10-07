@@ -602,6 +602,7 @@ mod tests {
             detail: "d".into(),
             engine: None,
             guard_build: None,
+            last_switch: None,
         }
     }
 

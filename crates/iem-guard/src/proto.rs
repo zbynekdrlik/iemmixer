@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::alarms::Alarm;
 use crate::plan::Mode;
 use crate::state::Switching;
+use crate::switch_log::LastSwitch;
 
 /// The guard pipe's name; the single-instance mutex is `Global\` + this.
 pub const NAME: &str = "iemmixer-guard";
@@ -131,6 +132,15 @@ pub struct Reply {
     /// absent from a guard older than it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guard_build: Option<String>,
+    /// The last switch that ended, with its steps timed and its in-ear
+    /// silence (S7); absent from an older guard and before the first switch,
+    /// none when this peer cannot read it (`switch_log::lenient`).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::switch_log::lenient"
+    )]
+    pub last_switch: Option<LastSwitch>,
 }
 
 /// The engine in a [`Reply`] (design §7: HIL v1 reads it through `iemmode

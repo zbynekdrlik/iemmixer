@@ -3,6 +3,132 @@
 //! steps (`Laps`) and keeps the record in its state and its replies; `iempc
 //! switch-test` (S7 part 3) reads it.
 
+use std::time::Instant;
+
+use serde::{Deserialize, Deserializer, Serialize};
+
+use crate::plan::{Mode, Step};
+use crate::state::Switching;
+
+/// A step and its time: from the end of the step before it (the switch's
+/// start for the first) to its own end, so a record's steps add up to the
+/// switch (the state save between two steps counts toward the second).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StepTime {
+    pub step: Step,
+    pub ms: u64,
+}
+
+/// How the switch ended (`daemon::Outcome`, as saved and replied).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwitchOutcome {
+    Done,
+    KeptServing,
+    NeedsOwner,
+    /// An outcome a newer guard saved.
+    #[serde(other)]
+    Unknown,
+}
+
+/// The last switch that ended: in `GuardState` and in every `Reply`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LastSwitch {
+    pub from: Mode,
+    pub to: Mode,
+    /// The mode the switch left the guard in (an unwound or stopped switch
+    /// ends elsewhere than `to`).
+    pub ended_in: Mode,
+    pub outcome: SwitchOutcome,
+    /// Seconds since the epoch.
+    pub started: u64,
+    pub ended: u64,
+    /// Every step that ran, failed ones included, in order.
+    pub steps: Vec<StepTime>,
+    /// [`silence_ms`] of the steps.
+    pub silence_ms: Option<u64>,
+}
+
+impl LastSwitch {
+    pub fn new(
+        sw: &Switching,
+        ended_in: Mode,
+        outcome: SwitchOutcome,
+        ended: u64,
+        steps: Vec<StepTime>,
+    ) -> Self {
+        let silence_ms = silence_ms(sw.to, &steps);
+        Self {
+            from: sw.from,
+            to: sw.to,
+            ended_in,
+            outcome,
+            started: sw.started,
+            ended,
+            steps,
+            silence_ms,
+        }
+    }
+}
+
+/// The in-ear silence of a switch to `to` (ms): from the first step that
+/// silences the in-ears (the engine's stop and fade-out, or REAPER's save
+/// and quit, whichever ran first) through the step after which the other
+/// side plays (REAPER's handover for `event`, the engine's arm for `dev` and
+/// `live`), both included. `None` when either end is missing.
+pub fn silence_ms(to: Mode, steps: &[StepTime]) -> Option<u64> {
+    let start = steps
+        .iter()
+        .position(|s| matches!(s.step, Step::EngineStop | Step::ReaperSaveQuit))?;
+    let last = if to == Mode::Event {
+        Step::ReaperHandover
+    } else {
+        Step::EngineArm
+    };
+    let window = steps.get(start..)?;
+    let end = window.iter().position(|s| s.step == last)?;
+    Some(window.get(..=end)?.iter().map(|s| s.ms).sum())
+}
+
+/// The step clock of the switch running now (not persisted: a restarted
+/// guard re-plans to event and times that switch).
+#[derive(Debug, Default)]
+pub struct Laps {
+    last: Option<Instant>,
+    steps: Vec<StepTime>,
+}
+
+impl Laps {
+    /// A switch begins: its first step is timed from `now`, and the steps
+    /// of one that never ended (an unwind is a switch of its own) are gone.
+    pub fn start(&mut self, now: Instant) {
+        self.last = Some(now);
+        self.steps.clear();
+    }
+
+    /// `step` ended at `now` (0 ms without a start).
+    pub fn lap(&mut self, step: Step, now: Instant) {
+        let ms = self.last.map_or(0, |t| {
+            u64::try_from(now.saturating_duration_since(t).as_millis()).unwrap_or(u64::MAX)
+        });
+        self.steps.push(StepTime { step, ms });
+        self.last = Some(now);
+    }
+
+    /// The steps timed since the start; the clock stops.
+    pub fn take(&mut self) -> Vec<StepTime> {
+        self.last = None;
+        std::mem::take(&mut self.steps)
+    }
+}
+
+/// `GuardState.last_switch` and `Reply.last_switch` as read: a record this
+/// guard cannot read is none, never an unreadable state or reply.
+pub fn lenient<'de, D: Deserializer<'de>>(d: D) -> Result<Option<LastSwitch>, D::Error> {
+    let v = Option::<serde_json::Value>::deserialize(d)?;
+    Ok(v.and_then(|v| serde_json::from_value(v).ok()))
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
