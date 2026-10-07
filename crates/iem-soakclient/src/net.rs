@@ -1,19 +1,23 @@
-//! The soak client's wire (S7 design note §4): the login and `/api/site`
-//! over plain HTTP, the mixer and listen sockets each on its own thread, the
-//! run's clock on the calling thread. A socket read waits at most
-//! `read_timeout`, so a reading thread sees the end of the run within it (a
-//! thread inside an open, within the open's own bounds); the clock sleeps on
-//! a condition variable. No thread polls.
+//! The soak client's wire (S7 design note §4): `/api/site`, the build check
+//! (`/api/version`) and the login over plain HTTP, the mixer and listen
+//! sockets each on its own thread, the run's clock on the calling thread. A
+//! socket read waits at most `read_timeout`, so a reading thread sees the
+//! end of the run within it (a thread inside an open, within the open's own
+//! bounds); the clock sleeps on a condition variable. No thread polls.
 //!
-//! Each socket is opened once and never again (#10): after "ide event" the
-//! predecessor app answers at the same address, takes the client's token
-//! and would take a new `ListenStart`. A socket that cannot be opened ends
-//! the run (`server-gone`); its first close, an error on it, or a silence of
-//! `idle` ends the run (`connection-lost`). The server sends meters and
-//! repeats a listen's `no_source`, so silence means it stopped serving that
-//! socket. Nothing here ends a process: each socket ends with the listen
-//! socket's `ListenStop`, a Close and a bounded wait for the peer's Close,
-//! and is then dropped.
+//! Nothing is sent to a server before it names `--expect-build` in
+//! `/api/version`: after "ide event" the predecessor app answers at the
+//! band's usual address and takes the client's token, and a `ListenStart`
+//! there would mute every other member's send to the engineer's mix.
+//!
+//! Each socket is opened once and never again (#10): by a second open the
+//! address may have changed hands since the check. A socket that cannot be
+//! opened ends the run (`server-gone`); its first close, an error on it, or
+//! a silence of `idle` ends the run (`connection-lost`). The server sends
+//! meters and repeats a listen's `no_source`, so silence means it stopped
+//! serving that socket. Nothing here ends a process: each socket ends with
+//! the listen socket's `ListenStop`, a Close and a bounded wait for the
+//! peer's Close, and is then dropped.
 
 use std::io;
 use std::net::{TcpStream, ToSocketAddrs};
@@ -28,10 +32,11 @@ use tungstenite::{Message, WebSocket};
 
 use crate::tally::{SAMPLES, Tally};
 use crate::{
-    Args, Reason, Summary, classify, listen_path, listen_start, mixer_path, origin, ws_url,
+    Args, Reason, Summary, classify, listen_path, listen_start, mixer_path, names_build, origin,
+    ws_url,
 };
 
-/// One HTTP request (`/api/site`, the login) at most.
+/// One HTTP request (`/api/site`, `/api/version`, the login) at most.
 const HTTP_WAIT: Duration = Duration::from_secs(10);
 /// A socket's connect, its handshake and each of its writes at most.
 const OPEN_WAIT: Duration = Duration::from_secs(5);
@@ -96,8 +101,9 @@ pub fn run(args: &Args, pin: &str, limits: &Limits, write: &mut dyn FnMut(&Summa
 }
 
 /// The origin the sockets go to and the engineer's token: `/api/site`'s
-/// LAN URL at `--base` (or `--base` itself with `--direct`), then the login
-/// there. A server that does not answer the login is `server-gone`.
+/// LAN URL at `--base` (or `--base` itself with `--direct`), the build
+/// check there, then the login there. A server that does not answer the
+/// build check or the login is `server-gone`.
 fn login(args: &Args, pin: &str) -> Result<(String, String), Reason> {
     let http = agent();
     let lan_url = if args.direct {
@@ -106,6 +112,7 @@ fn login(args: &Args, pin: &str) -> Result<(String, String), Reason> {
         site_lan_url(&http, &args.base)
     };
     let origin = origin(args, lan_url.as_deref())?;
+    check_build(&http, &origin, &args.expect_build)?;
     let body = serde_json::json!({"member": ENGINEER, "pin": pin}).to_string();
     let mut reply = http
         .post(format!("{origin}/api/auth"))
@@ -124,6 +131,26 @@ fn login(args: &Args, pin: &str) -> Result<(String, String), Reason> {
         return Err(Reason::NotEngineer);
     }
     Ok((origin, login.token))
+}
+
+/// `/api/version` at `origin` names `build` ([`names_build`]) before the
+/// PIN or anything else is sent there. Any other answer, a missing version
+/// route included, is `wrong-server`; no answer is `server-gone`.
+fn check_build(http: &ureq::Agent, origin: &str, build: &str) -> Result<(), Reason> {
+    let mut reply = http
+        .get(format!("{origin}/api/version"))
+        .call()
+        .map_err(|_| Reason::ServerGone)?;
+    let named = reply.status() == 200
+        && reply
+            .body_mut()
+            .read_to_string()
+            .is_ok_and(|text| names_build(&text, build));
+    if named {
+        Ok(())
+    } else {
+        Err(Reason::WrongServer)
+    }
 }
 
 /// The login's answer (`LoginResponse`; the other fields are not read).

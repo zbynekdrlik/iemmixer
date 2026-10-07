@@ -5,7 +5,7 @@
 //! code on stderr) or whose final summary could not be written
 //! (`summary-unwritable`), 2 a usage error. Stderr never carries a site
 //! value (P6): usage messages name flags, not their values, and a run's end
-//! is a code. It ends no process: its sockets close by being dropped.
+//! is a code. It ends no process: its sockets end with a WebSocket Close.
 
 #![forbid(unsafe_code)]
 

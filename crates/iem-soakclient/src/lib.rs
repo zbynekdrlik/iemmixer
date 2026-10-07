@@ -53,19 +53,27 @@ pub const UI_PROTO: u16 = 2;
 pub const MAX_SECONDS: u64 = 36_000;
 /// Where `/api/site` is read without `--base`: the server on this PC.
 pub const DEFAULT_BASE: &str = "http://127.0.0.1";
+/// `--expect-build`: a commit's hex digits.
+const COMMIT_LEN: usize = 40;
+/// A server names its build by this many of the commit's first hex digits
+/// at least: git's short hash, as HIL v1's `Test-IemHilVersion` takes it.
+pub const MIN_HASH: usize = 7;
 
 pub const USAGE: &str = "\
-iem-soakclient --member ID --seconds N --out FILE [--base URL] [--direct] [--cpu-sets IDS]
+iem-soakclient --member ID --seconds N --out FILE --expect-build SHA
+               [--base URL] [--direct] [--cpu-sets IDS]
 
-Logs in as the engineer (the PIN from IEM_SOAK_PIN, never an argument), opens
-one mixer socket and one listen socket on the mix of member ID at the LAN
-address the server at --base names (/api/site; with --direct at --base
-itself), and writes a JSON summary to FILE every minute and at the end. It
-reads only.
+Goes to the LAN address the server at --base names (/api/site; with --direct
+to --base itself), checks that /api/version there names build SHA, logs in
+as the engineer (the PIN from IEM_SOAK_PIN, never an argument), opens one
+mixer socket and one listen socket on the mix of member ID, and writes a
+JSON summary to FILE every minute and at the end. It reads only, and opens
+no socket twice: a lost socket ends the run.
 
-  --seconds N     1 to 36000
-  --base URL      http://HOST[:PORT], default http://127.0.0.1
-  --cpu-sets IDS  CPU Set ids, e.g. 256,257 (Windows only)";
+  --expect-build SHA  the server's commit: 40 lower-case hex digits
+  --seconds N         1 to 36000
+  --base URL          http://HOST[:PORT], default http://127.0.0.1
+  --cpu-sets IDS      CPU Set ids, e.g. 256,257 (Windows only)";
 
 /// The command line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +89,9 @@ pub struct Args {
     pub seconds: u64,
     /// `--out`: the summary file.
     pub out: PathBuf,
+    /// `--expect-build`: the commit the server must name in `/api/version`
+    /// before anything else is sent to it ([`names_build`]).
+    pub expect_build: String,
     /// `--cpu-sets 256,257` (Windows): CPU Set ids, as the engine's
     /// `[card] cpu_sets`.
     pub cpu_sets: Vec<u32>,
@@ -94,6 +105,7 @@ pub fn parse_args(args: &[String]) -> Result<Args, String> {
     let mut member = None;
     let mut seconds = None;
     let mut out = None;
+    let mut expect_build = None;
     let mut cpu_sets = None;
     let mut it = args.iter();
     while let Some(flag) = it.next() {
@@ -106,6 +118,7 @@ pub fn parse_args(args: &[String]) -> Result<Args, String> {
             "--member" => &mut member,
             "--seconds" => &mut seconds,
             "--out" => &mut out,
+            "--expect-build" => &mut expect_build,
             "--cpu-sets" => &mut cpu_sets,
             f if f == "--pin" || f.starts_with("--pin=") => {
                 return Err(format!(
@@ -133,6 +146,10 @@ pub fn parse_args(args: &[String]) -> Result<Args, String> {
         .filter(|s| (1..=MAX_SECONDS).contains(s))
         .ok_or_else(|| format!("--seconds must be a whole number from 1 to {MAX_SECONDS}"))?;
     let out = out.filter(|o| !o.is_empty()).ok_or("--out is required")?;
+    let expect_build = expect_build.ok_or("--expect-build is required")?;
+    if !is_commit(&expect_build) {
+        return Err("--expect-build must be a commit's 40 lower-case hex digits".to_owned());
+    }
     let base = http_origin(base.as_deref().unwrap_or(DEFAULT_BASE))
         .ok_or("--base must be http://HOST[:PORT]")?;
     let cpu_sets = match cpu_sets {
@@ -151,8 +168,28 @@ pub fn parse_args(args: &[String]) -> Result<Args, String> {
         member,
         seconds,
         out: PathBuf::from(out),
+        expect_build,
         cpu_sets,
     })
+}
+
+/// A commit as `--expect-build` takes it: 40 lower-case hex digits.
+fn is_commit(s: &str) -> bool {
+    s.len() == COMMIT_LEN && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// `/api/version`'s answer names `build` (a commit, as `--expect-build`): its
+/// `git_hash`, the server's commit as `git rev-parse --short` printed it at
+/// build time (`iem_core::git_hash`), is at least [`MIN_HASH`] characters
+/// and a prefix of `build`, as HIL v1 checks the server. The predecessor
+/// app's answer names its own commit, never this one; any other answer
+/// names none.
+pub fn names_build(answer: &str, build: &str) -> bool {
+    let answer: serde_json::Value = serde_json::from_str(answer).unwrap_or_default();
+    answer
+        .get("git_hash")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|hash| hash.len() >= MIN_HASH && build.starts_with(hash))
 }
 
 /// A member id as the site writes it: 1 to 64 of `[A-Za-z0-9_-]`.
@@ -193,8 +230,9 @@ fn http_origin(url: &str) -> Option<String> {
     (!host.is_empty()).then(|| format!("http://{host}"))
 }
 
-/// Where the sockets and the login go: the server's own LAN address
-/// (`/api/site`'s `lan_url`), or `--base` itself with `--direct`.
+/// Where the build check, the login and the sockets go: the server's own
+/// LAN address (`/api/site`'s `lan_url`), or `--base` itself with
+/// `--direct`.
 pub fn origin(args: &Args, lan_url: Option<&str>) -> Result<String, Reason> {
     if args.direct {
         return Ok(args.base.clone());
@@ -347,12 +385,16 @@ pub enum Reason {
     SiteUnreadable,
     /// The LAN URL is not plain `http://` (the client speaks no TLS).
     NotHttp,
+    /// The server there answered `/api/version` without naming
+    /// `--expect-build` (another build, the predecessor app, no version
+    /// route): nothing else was sent to it.
+    WrongServer,
     /// The login was refused (the PIN, or the login protection).
     LoginRefused,
     /// The login was not the engineer's (the listen socket is engineer-only).
     NotEngineer,
-    /// The login got no answer, or a socket could not be opened (there is
-    /// no second try).
+    /// The build check or the login got no answer, or a socket could not
+    /// be opened (there is no second try).
     ServerGone,
     /// A socket closed, failed or stayed silent for the idle bound before
     /// the end: no socket is opened twice (#10).
@@ -366,6 +408,7 @@ impl Reason {
         match self {
             Reason::SiteUnreadable => "site-unreadable",
             Reason::NotHttp => "not-http",
+            Reason::WrongServer => "wrong-server",
             Reason::LoginRefused => "login-refused",
             Reason::NotEngineer => "not-engineer",
             Reason::ServerGone => "server-gone",
