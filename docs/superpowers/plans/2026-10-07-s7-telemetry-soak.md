@@ -1471,3 +1471,989 @@ After Tasks 13 and 14 are on the PC:
 
 1. `iempc switch-test`, three runs a few minutes apart. Post the numbers on #10.
 2. Tighten the guard's 120 s handover bound (S6 §11) to the measured worst case plus margin. Make it its own small lane, with the numbers in the commit.
+
+---
+
+## Part 4: Listen probe and live E2E (design §6, §10 item 4; #10 decisions of 2026-10-07)
+
+Tasks 16 to 24 are lanes and run one at a time, in order, unless a task says it is independent. Tasks 25 to 27 run in the main session, because they touch the ops repo, the pushes, CI waits and the PC. A subagent never touches the PC. The Global Constraints above apply, together with the additions below.
+
+**Goal:**
+- **Listen probe:** a HIL signal can carry its sine to the engineer's listen sockets that ask for it with `&hil=1`, and to nothing else.
+- **Live specs:** `e2e/tests/live/` measures on the real PC, through the public host:
+  - Listen at ± 1 Hz and ± 0.5 dB;
+  - talkback at −8.4 ± 0.3 dB;
+  - the 7 PENDING parity rows;
+  - the #25 repeats.
+- **Running it:** `iempc dispatch-live` runs the ops `live.yml`, and a pure verdict posts `live/iem-pc`.
+- **The manifest:** after the first green run it loses its last PENDING row (`--cutover` passes).
+
+**Architecture:**
+- **Engine (lane 4a):**
+  - `Cmd::HilTestSignal` gains `listen: bool`, which travels to `RtOp::HilTestSignal`.
+  - The RT processor gets two more rings, the **probe taps**. They are allocated in `Processor::with_hil` and pushed only while a HIL signal with `listen` runs, at the cadence of each listened slot. They carry the spare outputs' own sample expression.
+  - The normal taps keep their silent frames exactly as today.
+  - The media pump frames the probe rings as new media streams **2** (`ENGINEER_PROBE`) and **3** (`MEMBER_PROBE`). The IEMF v1 header is unchanged, and the stream byte is the mark.
+- **Guard (lane 4b):** `iemmode test-signal <input> <dbfs> <ttl> --listen` sets `Request::TestSignal.listen`. As today, it works only inside a begun HIL job.
+- **Server (lane 4c):**
+  - `MediaLink` routes streams 2 and 3 to a `probe` broadcast per slot, with Opus encoders of their own. Only a `/ws/audio` session opened with `&hil=1` subscribes to it.
+  - A pure `ProbeGate` sends that session the probe frames in place of the silent ones while probe frames come.
+  - The session is told the burst's edges with `AudioStatus` `probe` and `listening`.
+- **Live specs (lanes 4d-1 to 4d-3):**
+  - They run with their own Playwright config.
+  - Every page socket goes through a runner-side relay. The relay opens one real socket per path and test, only after `/api/version` names the run's build, and never opens a second one.
+  - The specs measure only inside a burst.
+  - `live_verdict.py` is the ops report job's pure verdict.
+- **PC side (lane 4f):**
+  - `iem-soakclient token` mints the run's short-lived tokens on the PC.
+  - `iempc dispatch-live` dispatches `live.yml`.
+  - `dispatch-soak` and `switch-test` refuse while a live run of the dev entry may still run.
+- **Ops (main session):** `live.yml` has the jobs `verify`, then `pc-begin`, then `browser` and `pc` in parallel, then `pc-end`, then `report`.
+
+**Decisions this part takes. Record them on #10 with Task 16, before code. Item 1 is the main session's technical decision (no band PIN in GitHub; #10, 2026-10-08).**
+1. **No band PIN in GitHub for the live run either.**
+   - The design (§2 P6, §6) has PINs "from the ops run's environment". By the reasoning of the #10 decision of 2026-10-07, that would copy a band credential into GitHub, and a PIN change would turn every later run red.
+   - Instead, `pc-begin` mints an engineer token and one member token on the PC with `iem-soakclient token`. The expiry is the run's length (3600 s). They are handed to `browser` in a private artifact of one-day retention, which `report` deletes.
+   - Since nothing then logs in, the design's login-budget risk is gone.
+   - The predecessor shares the secret, so the relay's build check and its no-reconnect rule apply as for the soak client.
+2. **The probe mark is the media stream id.**
+   - The tap rings carry bare interleaved f32 (`rt.rs:40`, `rt.rs:211-240`). The 79-tap decimator spreads samples across frame edges (`media.rs` `TapFramer`). So a mark inside the same ring could not keep the edge frames exact.
+   - Separate probe rings and streams 2 and 3 keep the normal taps byte-for-byte what they are today.
+3. **The PC job is split into `pc-begin`, `pc` and `pc-end`.**
+   - The engine gets `--test-signal` only from a restart inside the HIL job (`activate` then `restart_in_job`), and that restarts the server too. So the browser may start only after `pc-begin` has finished.
+   - `pc-end` (`if: always()`) ends the guard's job and reads the PC evidence even after a failed `pc`.
+4. **Bursts run at −20 dBFS (the HIL ceiling, `daemon.rs:52`), not −30.**
+   - The limiter's range is −6…0 dB (`params.rs:23`).
+   - Per-mix levers alone reach −30 + 12 (level, `params.rs:15`) + 12 (mix EQ, `params.rs:20`) = −6 dBFS, which never limits; −20 reaches +4 dBFS.
+   - The limiter row is driven by the burst's sine, not by a talkback step: Chromium's AGC makes the talkback level unknown (`talkback.js:47-55`), and holding Talk longer widens the window in which a switch could meet an open talkback.
+5. **The burst signal is explicit.** The server sends a `&hil=1` session `AudioStatus{status:"probe"}` when it starts forwarding probe frames and `"listening"` when the normal frames resume. The UI ignores an unknown status (`audio_player.rs:316-323`).
+6. **"Listen within 3 s" (row 570) is measured on the probe.**
+   - In dev time the band does not play, and no input level may stand for a signal (#38).
+   - The only deterministic source is the burst's sine, played through the real Listen button and player.
+
+### Additions to the Global Constraints (Parts 4 and 5)
+
+- **Size budgets (#36):**
+  - Over budget, so they get call sites only: `daemon.rs`, `daemon/tests.rs`, `iempc.py`, `test_iempc.py`, `IemPc.psm1`, `msg.rs`, `control.rs`.
+  - Also above 1000 lines and treated the same way: `rt.rs` (1244), `core.rs` (1098), `core_tests.rs` (1237), `engine.rs` (1226), `pc.rs` (2128), `routes.rs` (1577), `login_guard.rs` (1036), `Test-IemPc.ps1` (1263), `proto.rs` (980, close).
+  - New logic goes into new modules: `probe.rs`, `probe_gate.rs`, `peer_route.rs`, `mint.rs`, `iempc_live.py`, `live_verdict.py`, `IemHil.psm1`.
+  - New tests go into new files: `rt_tests_probe.rs`, `msg/s7_tests.rs`, `control/tests/s7.rs`, `daemon/probe_tests.rs`, `test_iempc_live.py`, `test_live_verdict.py`, `Test-IemHil.ps1`.
+- **The owner's rule (#9 2026-09-28):**
+  - The sine reaches the spare outputs and the probe streams only.
+  - Every mix TX stays zero while any HIL signal runs (unchanged; proven again with `listen: true` in `parity.rs`).
+  - The normal taps stay silent during it (unchanged).
+  - Probe streams reach only `&hil=1` sockets, and `/ws/audio` is engineer-only (`listen_ws.rs:40-49`).
+  - A live spec changes a mix or an input only inside a burst, and restores it before the burst ends, checked against the server's `listening` status.
+- **No reconnect in live specs (the #10 decision of 2026-10-07, applied to the browser):**
+  - Every page socket goes through `relaySockets`, which opens at most one real socket per path and test, after `/api/version` at the public host names `LIVE_SHA`.
+  - A server-side close fails the test.
+  - Runner-side sockets (`BurstWatch`, `PageSocket`) follow the same rule.
+- **P6 for live:**
+  - Specs read every site value from `LIVE_*` variables, lazily, so `--list` works without them.
+  - The live config switches off trace, screenshot and video, because a trace would hold tokens and the host.
+  - No thrown error carries a URL with its query.
+  - The verdict prints fixed codes, numbers from known annotation keys and spec titles (public, from this repo), never a test's error text.
+- **Additive both ways:**
+
+| Change | An older peer |
+|---|---|
+| `HilTestSignal.listen` | An older engine ignores it (no `deny_unknown_fields`): no probe, so the spec fails "no probe within 3 min", which is safe. |
+| Media streams 2 and 3 | An older server drops them (`listen_frame`'s `_ => return`, server `engine/media.rs:223-227`). |
+| `Request::TestSignal.listen` | An older guard ignores it (a plain burst). |
+| `WsQuery.hil` | An older server ignores it (silence). |
+| `AudioStatus "probe"` | The UI ignores it. |
+| Part 5's `Status` and `EngineStatus` fields | Default to 0 or null. |
+
+### Review Focus (Part 4)
+
+1. **TX zero and silent taps with `listen`.** Tests:
+   - `rt_tests_probe::{every_mix_tx_is_zero_during_a_probe, the_listen_taps_stay_exactly_silent_during_a_probe}`;
+   - `parity.rs::a_listen_probe_keeps_every_mix_tx_zero_and_its_taps_do_not_depend_on_the_block_size`.
+2. **I7.**
+   - Expected: `probe::push_probe` is an index loop and one `push_partial_slice` into a ring allocated in `with_hil`.
+   - Tests: `tests/rt.rs::process_does_not_allocate` and `tests/rtsan.rs::process_is_realtime_safe` run the probe through `common::scenario` (`listen: true`, both slots listened) and assert the probe rings got samples.
+3. **Routing.**
+   - Expected: a session without `&hil=1` never holds a probe receiver.
+   - Tests:
+     - `listen_ws::tests::a_socket_without_hil_holds_no_probe_feed`;
+     - `engine::media::tests::probe_frames_reach_only_the_probe_channel_of_their_slot`;
+     - the NullRt test `a_listener_without_hil_gets_only_silence_while_a_probe_runs`.
+4. **Relay.**
+   - Expected: one real socket per path and test; a build check before each open; a second attempt is refused and never reaches the server.
+   - Tests: `relay.ts` is exercised by every live spec, and `tone.spec.ts` (mock CI) tests the pure estimators.
+5. **Burst-only actions.** Every changing step in `talkback`, `limiter` and `meters` is guarded by `watch.inBurst()` and restores in `finally`.
+6. **Verdict.**
+   - Expected: cancelled for `left-dev` and `not-free`; red names the first failing check; the summary holds only codes, numbers and titles.
+   - Tests: `test_live_verdict.py`.
+7. **Dispatch guards.**
+   - Expected: the soak guards plus "no soak of this entry may still run", and the reverse for `dispatch-soak` and `switch-test`.
+   - Tests: `test_iempc_live.py`.
+
+### File Structure (Part 4)
+
+```
+crates/iem-engine-proto/src/msg.rs              HilTestSignal.listen (field + doc; `mod s7_tests;`)
+crates/iem-engine-proto/src/msg/s7_tests.rs     NEW listen additive; Part 5 adds the Status fields
+crates/iem-engine-proto/src/media.rs            stream::ENGINEER_PROBE = 2, MEMBER_PROBE = 3 (+ test)
+crates/iem-engine/src/cmd.rs                    RtOp::HilTestSignal.listen
+crates/iem-engine/src/core.rs                   passes listen to start_test (call sites)
+crates/iem-engine/src/probe.rs                  NEW push_probe (RT, mutated)
+crates/iem-engine/src/rt.rs                     probe rings, TestRt.listen, push in render_mixes (call sites)
+crates/iem-engine/src/rt_tests_probe.rs         NEW (included from rt_tests.rs beside `mod hil`)
+crates/iem-engine/src/engine.rs                 media_pump drains the probe rings (call site)
+crates/iem-engine/src/{control.rs,core_tests.rs,rt_tests_hil.rs}, examples/bench.rs, tests/{common/mod.rs,parity.rs,pipes.rs,rt.rs,rtsan.rs}   literals += listen; scenario listen: true
+crates/iem-guard/src/{proto.rs,cli.rs,pc.rs,effects/engine.rs,win/engine.rs,win/mod.rs,daemon.rs}   listen pass-through
+crates/iem-guard/src/effects/engine/tests.rs, crates/iem-guard/src/daemon/probe_tests.rs (NEW)
+crates/iem-server/src/probe_gate.rs             NEW ProbeGate, PROBE_HOLD (pure, mutated)
+crates/iem-server/src/engine/media.rs           Route, route(), probe channels and encoders, subscribe_probe
+crates/iem-server/src/listen_ws.rs              hil sessions, feeds(), probe/listening statuses
+crates/iem-server/src/mixer_ws.rs               WsQuery.hil
+crates/iem-server/src/engine/testkit.rs         EngineHarness::supervise
+e2e/playwright.live.config.ts                   NEW
+e2e/tests/live/support/{env.ts,relay.ts,burst.ts,tone.ts,audio.ts}   NEW
+e2e/tests/live/{listen-probe,talkback,limiter,meters,tunnel,push,client-error}.spec.ts   NEW
+e2e/tests/tone.spec.ts                          NEW (mock CI: the pure estimators)
+e2e/tests/support/wav.ts                        NEW (toneWav moved out of talkback.spec.ts)
+crates/iem-soakclient/src/{mint.rs (NEW), lib.rs, main.rs}
+scripts/iem-pc/{live_verdict.py,test_live_verdict.py,iempc_live.py,test_iempc_live.py}   NEW
+scripts/iem-pc/iempc.py                         cmd_dispatch_live; refuse_while_live in two wrappers (call sites)
+.github/workflows/ci.yml                        live --list step; token mint check in the e2e soak step
+docs/parity/gen1-tests.tsv                      Task 27 only, after the first green live/iem-pc
+.claude/rules/{engine,server-engine,guard,e2e,soak}.md, .claude/rules/live.md (NEW), CLAUDE.md (router)
+private: $OPS/.github/workflows/live.yml, ops variables, $OPS/docs/s6-pc-runbook.md (Live section)
+```
+
+---
+
+### Task 16: Engine: the listen probe [lane 4a, ~570 LoC]
+
+**Files:** as listed under File Structure (engine and proto lines), plus `.claude/rules/engine.md`.
+
+- [ ] **Step 1 (RED): tests first.**
+  - `msg/s7_tests.rs`, `the_listen_flag_of_the_hil_signal_is_additive`:
+    - `{"op":"hil_test_signal","input":"mic1","hz":1000.0,"dbfs":-20.0,"ttl_s":30.0,"card_tx":[94,95]}` reads `listen: false`;
+    - with `"listen":true` it reads `true`;
+    - `listen: false` serialises without the key;
+    - a local copy of today's variant fields (an older engine) reads `"listen":true` and ignores it.
+  - `media.rs`, `the_probe_streams_are_2_and_3_beside_the_listen_taps`: the ids differ from 0, 1 and 16, and a stream-2 frame round-trips through `write_media`/`read_media` with the v1 header.
+  - `rt_tests_probe.rs`, on `rig_hil(test site, [StartListen engineer, StartListen member1], TEST_FLAG, AT_ONCE, SPARE)` with `HilTestSignal{input mic1, hz 1000, dbfs -20, ttl_s 0.2, card_tx SPARE, listen: true}` at 0, run 0.3 s at 32:
+    - `a_listen_probe_carries_the_spare_outputs_sine_on_both_probe_taps`:
+      - every pair of `h.probes[0]` and `h.probes[1]` has `l == r`;
+      - the left samples equal spare output 94's samples over the same span (as `f32`);
+      - the peak after the 50 ms fade-in is within 1e-6 of 0.1.
+    - `the_listen_taps_stay_exactly_silent_during_a_probe`: `h.taps[k]` drained during the signal are all `0.0`, and there are as many values as the probe tap's (lockstep cadence).
+    - `every_mix_tx_is_zero_during_a_probe`: every topology TX channel is `0.0` from the signal's sample to its end (TTL plus the 50 ms fade).
+    - `no_probe_without_listen_or_without_a_listened_slot`:
+      - `listen: false` leaves both probe rings empty;
+      - `listen: true` with only slot 0 listened leaves `probes[1]` empty.
+    - `a_plain_test_signal_never_feeds_the_probe`: `StartTestSignal` leaves the probe rings empty, and the taps carry the capped mix (not 0).
+    - `the_probe_taps_go_quiet_when_the_signal_ends`.
+    - `the_listen_flag_travels_from_the_command_to_the_rt_op`:
+      - `Core::apply` gives `RtOp::HilTestSignal{listen: true, ..}`;
+      - without the test flag the answer is `Forbidden`, as today.
+  - `tests/common/mod.rs`: the scenario's `HilTestSignal` gets `listen: true`, and both slots are listened while it runs.
+    - `tests/rt.rs::process_does_not_allocate` and `tests/rtsan.rs::process_is_realtime_safe` gain `assert!(s.handles.probes.iter().any(|c| c.slots() > 0), "the probe path ran")`.
+    - `examples/bench.rs`'s worst case gets `listen: true` and its listen slots (engine.md: new per-block work goes into the scenario and the bench).
+  - `tests/parity.rs`, `a_listen_probe_keeps_every_mix_tx_zero_and_its_taps_do_not_depend_on_the_block_size`:
+    - the schedule of `hil_outputs_do_not_depend_on_the_block_size` with `listen: true` and both slots listened;
+    - at 32/64/97/256: every TX exactly 0.0 inside the signal, the normal taps exactly 0.0, and the probe taps bit-identical across block sizes.
+  - `tests/pipes.rs`, `a_listen_probe_goes_out_on_the_probe_streams_and_the_taps_stay_silent`:
+    - NullRt, `--test-signal`, the test site (hil_tx 94/95);
+    - a supervisor client sends the signal with `listen: true` after the controller's two `StartListen`;
+    - the media client reads stream 0 and 1 frames that are all zeros, and stream 2 and 3 frames whose peak is −20 ± 0.1 dBFS.
+
+  Commit: `test(engine): [red] the listen probe: the HIL sine on probe taps of its own, the taps silent, every TX zero (#10)`.
+- [ ] **Step 2 (GREEN): proto.** `msg.rs`, in `HilTestSignal`:
+
+```rust
+        /// S7, additive (design note §6): the listen probe. While the signal
+        /// runs, the listen taps keep their silent frames and the probe streams
+        /// (`media::stream::ENGINEER_PROBE`, `MEMBER_PROBE`) carry the spare
+        /// outputs' sine, for the server's `&hil=1` listeners only. Every mix's
+        /// TX stays zero. An older engine ignores it.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        listen: bool,
+```
+
+  `media.rs` `stream`:
+
+```rust
+    /// The listen probe (S7): the HIL sine of the engineer slot / the member
+    /// slot, for `&hil=1` listeners only; an older server drops both.
+    pub const ENGINEER_PROBE: u8 = 2;
+    pub const MEMBER_PROBE: u8 = 3;
+```
+
+- [ ] **Step 3 (GREEN): RT.**
+  - `cmd.rs`: `RtOp::HilTestSignal { …, listen: bool }`.
+  - `core.rs`: `Cmd::HilTestSignal { listen, .. }` leads to `start_test(.., Some(mask), *listen)`, and `StartTestSignal` passes `false`.
+  - `rt.rs` changes (call sites):
+    - `TestRt.listen`;
+    - `Processor.probes: [Producer<f32>; 2]` and `RtHandles.probes: [Consumer<f32>; 2]`, both `RingBuffer::new(TAP_RING)` in `with_hil`, always allocated (2 × 154 KB);
+    - in `render_mixes`, after each `push_tap(&mut taps[k], …, hil, …)`:
+
+```rust
+let probe = test.as_ref().is_some_and(|t| t.mask.is_some() && t.listen);
+// … inside `if listen[k] == Some(m) { push_tap(…); … }`:
+if probe {
+    probe::push_probe(&mut probes[k], test_buf.get(..n).unwrap_or_default(),
+                      fade_buf.get(..n).unwrap_or_default(), tap_buf, &status.tap_overruns);
+}
+```
+
+  - `probe.rs` (new, mutated):
+
+```rust
+//! The listen probe (S7 design note §6): while a HIL signal with `listen`
+//! runs, each listened slot's probe tap carries the spare outputs' own
+//! samples (`render_hil`: the sine clamped to `TEST_CAP`, times the output
+//! fade), stereo, at the slot's cadence. RT: no allocation (I7).
+
+pub fn push_probe(p: &mut Producer<f32>, sine: &[f64], fade: &[f64], scratch: &mut [f32], overruns: &AtomicU64) {
+    let mut used = 0;
+    for (pair, (s, f)) in scratch.as_chunks_mut::<2>().0.iter_mut().zip(sine.iter().zip(fade)) {
+        let y = (s.clamp(-TEST_CAP, TEST_CAP) * f) as f32;
+        *pair = [y, y];
+        used += 2;
+    }
+    let (_, rest) = p.push_partial_slice(scratch.get(..used).unwrap_or_default());
+    if !rest.is_empty() {
+        overruns.fetch_add(1, Ordering::Relaxed);
+    }
+}
+```
+
+  - `engine.rs` `media_pump(taps, probes, conns, stop)`:
+    - framers `[ENGINEER_LISTEN, MEMBER_LISTEN, ENGINEER_PROBE, MEMBER_PROBE]`;
+    - drained as `taps.iter_mut().chain(probes.iter_mut())`, the normal taps first.
+  - Known effect: a partial probe frame left at a burst's end opens the next burst's first probe frame. It is the same sine at the same level, and the spec measures well inside a burst.
+  - Update every `Cmd::HilTestSignal` and `RtOp::HilTestSignal` literal (`listen: false` unless a test says otherwise): `control.rs`, `core_tests.rs`, `rt_tests_hil.rs`, `msg.rs` tests, `tests/{common,parity}`, `bench.rs`.
+
+  Commit: `feat(engine): [green] the listen probe on probe streams 2 and 3; the taps and every TX as before (#10)`.
+- [ ] **Step 4: rule.** In `engine.md` "Supervisor, hold, HIL mask", add a sentence: `listen` enables the probe rings and streams; every TX zero and the taps silent stay as they are; name the proofs.
+
+  Local check: `cargo fmt --all --check`.
+
+---
+
+### Task 17: Guard and iemmode: `test-signal --listen` [lane 4b, ~200 LoC; after Task 16]
+
+**Files:** `crates/iem-guard/src/{proto.rs,cli.rs,pc.rs,effects/engine.rs,effects/engine/tests.rs,win/engine.rs,win/mod.rs,daemon.rs}`, `crates/iem-guard/src/daemon/probe_tests.rs` (new), `.claude/rules/guard.md`.
+
+- [ ] **Step 1 (RED).**
+  - `cli.rs`:
+    - `ask(&["test-signal","mic1","-20","30","--listen"])` gives `TestSignal{listen: true}`;
+    - without `--listen` it gives `listen: false`;
+    - `["test-signal","--listen","mic1","-20","30"]` and `["test-signal","mic1","-20","30","--loud"]` are errors.
+  - `proto.rs`:
+    - `every_request()` gains a `TestSignal{listen: true}`;
+    - `requests_are_tagged_by_cmd_in_snake_case` pins `{"cmd":"test_signal","input":"mic1","dbfs":-20.0,"ttl_s":30.0,"listen":true}`, and the `listen: false` JSON stays as it is today.
+  - `effects/engine/tests.rs`: `the_listen_probe_adds_listen_to_the_hil_signal` (`"listen": true`). `the_hil_test_signal_names_its_card_outputs` stays byte-equal for `false`.
+  - `daemon/probe_tests.rs` (`#[cfg(test)] mod probe_tests;` in `daemon.rs`):
+    - `a_listen_probe_needs_a_begun_hil_job`: refused outside a job, in event and in live, as the plain signal;
+    - `a_listen_probe_reaches_the_engine_with_listen`: `FakePc` records `(input, dbfs, ttl, tx, listen)`;
+    - `a_plain_test_signal_sends_no_listen`.
+
+  Commit: `test(guard): [red] iemmode test-signal --listen asks the engine for the listen probe, inside a HIL job only (#10)`.
+- [ ] **Step 2 (GREEN).**
+  - `Request::TestSignal { input, dbfs, ttl_s, #[serde(default, skip_serializing_if = "std::ops::Not::not")] listen: bool }`.
+  - `cli.rs`: a trailing `--listen` is stripped before `exactly::<3>`, so the negative dB value never meets the flag parser. Update `IEMMODE_USAGE`.
+  - `Pc::engine_hil_signal(.., listen: bool)` (`pc.rs` trait and `FakePc`, `win/mod.rs`, `win/engine.rs::hil_signal`).
+  - `effects::engine::hil_test_signal(.., listen)` adds `"listen": true` only when true.
+  - `daemon.rs` (call sites): `test_signal(pc, g, &input, dbfs, ttl_s, listen)`; its reply adds `"; listen probe"`.
+  - `guard.md` HIL bullet: `--listen`, the job gate, and the probe going only to `&hil=1` sockets.
+
+  Commit: `feat(guard): [green] test-signal --listen (#10)`.
+
+---
+
+### Task 18: Server: probe frames only to `&hil=1` sockets [lane 4c, ~480 LoC; after Task 16]
+
+**Files:** `crates/iem-server/src/{probe_gate.rs (new), lib.rs, engine/media.rs, listen_ws.rs, mixer_ws.rs, engine/testkit.rs}`, `.claude/rules/server-engine.md`.
+
+**The routing code points:**
+- `engine/media.rs::listen_frame` (today `:222-249`): `route(h.stream)`.
+- `Inner.probe: [broadcast::Sender<Bytes>; 2]` beside `listen` (`:128`).
+- `run()`'s encoders become `[Option<ListenEncoder>; 4]`, indexed `slot + 2·probe`, so the probe never shares the normal stream's Opus state.
+- `MediaLink::subscribe_probe(slot)`.
+- `listen_ws.rs::ws_audio` (`:31-51`) reads `query.hil == Some(1)`.
+- `session` (`:133-223`): `feeds()` on `ListenStart`, a probe arm, and `ProbeGate` on the listen arm.
+
+- [ ] **Step 1 (RED).**
+  - `probe_gate.rs` tests:
+    - `a_listen_frame_passes_while_no_probe_came`;
+    - `after_a_probe_frame_listen_frames_wait_probe_hold` (99 ms dropped, 100 ms passes);
+    - `the_first_probe_frame_enters_a_burst_and_the_first_listen_frame_after_it_leaves_it`.
+  - `engine/media.rs`:
+    - `route_maps_0_1_to_the_listen_slots_2_3_to_the_probe_and_nothing_else` (16 and 4 give `None`);
+    - `probe_frames_reach_only_the_probe_channel_of_their_slot`: `subscribe(0)` and `subscribe(1)` receivers get nothing for a stream 2 or 3 frame, and the diagnostics' counts and sequence gaps are unchanged by probe frames.
+  - `listen_ws.rs`:
+    - `a_socket_without_hil_holds_no_probe_feed`: `feeds(&link, 1, false).probe.is_none()`, and with `true` it is `Some`.
+    - `mod live` (`EngineHarness::start_with(|c| c.flags.test_signal = true)`), `a_listener_without_hil_gets_only_silence_while_a_probe_runs_and_a_hil_listener_gets_the_tone`:
+      - `start(&s, member1)`;
+      - non-hil and hil feeds of slot 1;
+      - `h.supervise(HilTestSignal{.., dbfs -20, ttl 1.0, listen: true})`;
+      - collect for 1.5 s and decode with `opus::Decoder`;
+      - every non-hil frame peaks below 1e-4, and the hil probe frames reach −20 ± 1 dBFS.
+    - (`/ws/audio` is engineer-only, `listen_ws.rs:40-49`; "a member socket" is every socket without `&hil=1`, whichever mix it hears.)
+  - `mixer_ws.rs`: `the_query_reads_hil` (`?token=t&hil=1` gives `Some(1)`, an absent one gives `None`).
+
+  Commit: `test(server): [red] probe frames reach only a hil=1 listen socket; every other listener gets silence (#10)`.
+- [ ] **Step 2 (GREEN).** `probe_gate.rs`:
+
+```rust
+//! The listen probe's gate for one `&hil=1` session (S7 design note §6):
+//! probe frames go out as they come; the slot's own (silent) frames wait
+//! until no probe frame came for `PROBE_HOLD`, so the player gets one stream.
+pub const PROBE_HOLD: Duration = Duration::from_millis(100);
+
+#[derive(Debug, Default)]
+pub struct ProbeGate { last_probe: Option<Instant>, in_burst: bool }
+
+pub enum Pass { Drop, Send, SendLeaving }
+
+impl ProbeGate {
+    /// A probe frame: send it; `true` when it opens a burst (tell the socket `probe`).
+    pub fn probe(&mut self, now: Instant) -> bool { … }
+    /// A listen frame: drop it inside the hold; the first one after a burst
+    /// leaves it (tell the socket `listening`).
+    pub fn listen(&mut self, now: Instant) -> Pass { … }
+}
+```
+
+  - `engine/media.rs`:
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Route { pub slot: usize, pub probe: bool }
+pub fn route(stream: u8) -> Option<Route> {
+    match stream {
+        stream::ENGINEER_LISTEN => Some(Route { slot: 0, probe: false }),
+        stream::MEMBER_LISTEN => Some(Route { slot: 1, probe: false }),
+        stream::ENGINEER_PROBE => Some(Route { slot: 0, probe: true }),
+        stream::MEMBER_PROBE => Some(Route { slot: 1, probe: true }),
+        _ => None,
+    }
+}
+```
+
+    `listen_frame` counts `Stats::frame` only for `!probe`, and sends to `probe[slot]` or `listen[slot]`.
+  - `listen_ws.rs`:
+    - `pub fn feeds(media: &MediaLink, slot: usize, hil: bool) -> Feeds { listen: media.subscribe(slot), probe: hil.then(|| media.subscribe_probe(slot)) }`;
+    - `session(socket, state, hil)` keeps `probe_rx` and a `ProbeGate`;
+    - a probe arm (`if probing`) sends `status("probe", target)` when `gate.probe(now)` is true, then the frame;
+    - the listen arm follows `gate.listen(now)` and sends `status("listening", target)` on `SendLeaving`;
+    - probe frames also reset `last_audio`;
+    - the info log names `hil`.
+  - `mixer_ws::WsQuery` gains `#[serde(default)] pub hil: Option<u8>`.
+  - `testkit.rs`: `EngineHarness::supervise(&self, cmd: Cmd) -> Result<(), ErrorBody>`, a role-`Supervisor` connection in the pattern of `shutdown`, read until its reply.
+  - `server-engine.md`: one bullet, "Listen probe (S7)".
+
+  Commit: `feat(server): [green] the listen probe's frames only to hil=1 listen sockets, with probe and listening statuses (#10)`.
+
+---
+
+### Task 19: Live specs I: support, the tone estimate, the live config, the listen probe [lane 4d-1, ~560 LoC; after Task 18]
+
+**Files:** `e2e/playwright.live.config.ts`, `e2e/tests/live/support/{env.ts,relay.ts,burst.ts,tone.ts,audio.ts}`, `e2e/tests/live/listen-probe.spec.ts`, `e2e/tests/tone.spec.ts`, `.github/workflows/ci.yml` (one step).
+
+- [ ] **Step 1 (RED): `e2e/tests/tone.spec.ts`** (mock CI, no page use; it imports `./support/fixtures` as every spec does):
+  - `the tone estimate reads 1 kHz at -20 dBFS within 0.01 Hz and 0.01 dB`;
+  - `the tone estimate tells 1001 Hz from 1000 Hz`;
+  - `a dropout inside the window is a gap`;
+  - `silence reads -150 dBFS`;
+  - `a CELT 20 ms stereo packet passes the TOC check and SILK or 10 ms or mono does not` (synthetic TOC bytes per RFC 6716 §3.1).
+
+  Commit: `test(e2e): [red] the live specs' tone estimate and Opus TOC check (#10)`.
+- [ ] **Step 2 (GREEN): support.**
+  - `tone.ts`: `toneOf(x, rate) -> { hz, dbfs, gap }`:
+    - frequency from rising zero crossings, linearly interpolated;
+    - level as `20·log10(√2·rms)`;
+    - a gap is ≥ 48 samples under 1e-5.
+  - `burst.ts`: `celt20msStereo(packet)` checks config ≥ 16, `config % 4 == 3`, the s bit set, c = 0, and 2 to 1276 bytes.
+  - `env.ts`: `live()` reads lazily and validates:
+    - `LIVE_BASE_URL` (`^https://`);
+    - `LIVE_SHA` (40 hex);
+    - `LIVE_TOKENS` (a file of `{engineer, member}`);
+    - `LIVE_MEMBER`, `LIVE_TEST_INPUT`, `LIVE_TALKBACK_INPUT` (`[A-Za-z0-9_-]{1,64}`);
+    - `LIVE_BURST_DBFS` (a number ≤ −20).
+
+    A refusal names the variable, never its value.
+
+    `expectBuild(request)` requires `/api/version`'s `git_hash` to be ≥ 7 hex and a prefix of `LIVE_SHA` (the `Test-IemHilVersion` rule). Otherwise it fails with "the public host does not answer with the run's build (tunnel or server)", the failing hop.
+
+    `openLive(page, who, path)` puts the token into `localStorage.iem_token` and goes to the page, as `openMixer` does without a login.
+  - `relay.ts`:
+
+```ts
+/** Every page socket through the runner (#10 decision 2026-10-07, applied to the
+ *  browser): one real socket per path and test, opened only after /api/version
+ *  names LIVE_SHA; a second attempt is refused and never reaches the server (after
+ *  "ide event" the predecessor answers at the same address with the same secret).
+ *  `/ws/audio` gains `&hil=1` with `hil`. Errors name the path, never the URL. */
+export async function relaySockets(page: Page, opts: { hil?: boolean } = {}): Promise<Relay> {
+  const relay = new Relay();
+  await page.routeWebSocket(/\/ws\//, async (route) => {
+    const path = new URL(route.url()).pathname;
+    if (relay.opened.has(path)) { relay.refused.push(path); route.close({ code: 1000 }); return; }
+    relay.opened.add(path);
+    await expectBuild();
+    const real = new NodeWebSocket(path === "/ws/audio" && opts.hil ? `${route.url()}&hil=1` : route.url());
+    const queue: (string | Buffer)[] = [];
+    route.onMessage((m) => (real.readyState === NodeWebSocket.OPEN ? real.send(m) : queue.push(m)));
+    real.on("open", () => queue.splice(0).forEach((m) => real.send(m)));
+    real.on("message", (d, binary) => { relay.observe(path, d, binary); route.send(binary ? (d as Buffer) : d.toString()); });
+    real.on("close", () => { relay.serverClosed.push(path); route.close({ code: 1000 }); });
+    route.onClose(() => real.close());
+  });
+  return relay;
+}
+```
+
+    (Playwright 1.58's `WebSocketRoute.connectToServer()` takes no URL, so the relay holds the real socket itself.)
+  - `burst.ts`: `BurstWatch.open(token)` is a runner-side `/ws/audio?…&hil=1` socket. It opens after `expectBuild` and sends `ListenStart` for `engineer`. It records:
+    - the `probe` and `listening` statuses with their times;
+    - the binary frames inside bursts and how many fail `celt20msStereo`.
+
+    `burst({ minLeftMs = 22_000, within = 180_000 })` resolves at a `probe` status. `inBurst()` is true from a `probe` status until `listening` or 28 s after it. A server close makes every later call throw: no reconnect.
+  - `audio.ts`:
+    - `ANALYSER_INIT` (`page.addInitScript`) wraps `AudioNode.prototype.connect`: the first node connected to an `AudioDestinationNode` (the player's limiter, `audio_player.js:63-64`) is also connected to an `AnalyserNode` with `fftSize` 32768, kept in `window.__live_analyser`.
+    - `readTone(page)` returns `toneOf(getFloatTimeDomainData)` at the context's rate (48 kHz).
+    - `TALK_INIT` wraps `AudioEncoder.prototype.encode` to push each frame's peak (`AudioData.copyTo` of plane 0) and `performance.now()` into `window.__live_talk_in`.
+  - `playwright.live.config.ts`:
+    - `testDir: "./tests/live"`, `workers: 1`, `retries: 0`;
+    - `timeout: 240_000`, `globalTimeout: 40 * 60_000`;
+    - `use: { baseURL: process.env.LIVE_BASE_URL, trace: "off", screenshot: "off", video: "off" }`;
+    - reporters `list` and `["json", { outputFile: process.env.LIVE_RESULTS ?? "live-results.json" }]`;
+    - one `chromium` project.
+
+    `e2e/playwright.config.ts` keeps ignoring `**/live/**`.
+- [ ] **Step 3: `listen-probe.spec.ts`.** Engineer-page allowances: the incognito Push pair, as in `listen.spec.ts`. Titles, exactly:
+  - `Listen on the engineer page plays audio within 3 s on the real PC` (row 570):
+    - `expectBuild`, then `BurstWatch.open`, then `relaySockets(page, { hil: true })`, then `openLive(page, "engineer")`;
+    - `await watch.burst()`, click Listen, then poll `__iem_audio_level() > -100` every 100 ms for at most 3 s;
+    - annotation `first_audio_ms`.
+  - `the listen probe plays 1 kHz at the burst level through the player within 1 Hz and 0.5 dB`:
+    - `addInitScript(ANALYSER_INIT)`;
+    - inside a burst, after 1 s of settling, three `readTone` windows 300 ms apart, each gap-free;
+    - the median `|hz − 1000| ≤ 1` and `|dbfs − LIVE_BURST_DBFS| ≤ 0.5`;
+    - annotations `listen_hz` and `listen_dbfs`.
+  - `#25 repeat: every listen frame in a burst is CELT Opus, 20 ms, stereo, and decodes without error`:
+    - the watch's burst frames ≥ 50 with 0 failing the TOC check;
+    - `__iem_audio_error()` is null;
+    - `GET /api/audio/diagnostics` shows `receiving_oiem` and `packets_per_second` ≥ 45;
+    - annotation `opus_frames`.
+
+    Numbers go out only as `test.info().annotations.push({ type: "live_number", description: "<key>=<number>" })`.
+- [ ] **Step 4: CI.** In the `e2e` job, after "Playwright (mock E2E, clean console)":
+
+```yaml
+      - name: Live specs listed (they run only from the ops live run; no LIVE_* here)
+        working-directory: e2e
+        run: npx playwright test --config playwright.live.config.ts --list
+```
+
+  Commit: `feat(e2e): [green] live support (relay without reconnect, burst watch, tone estimate) and the listen probe specs (#10)`.
+
+---
+
+### Task 20: Live specs II: talkback, limiter, meters [lane 4d-2, ~330 LoC; after Task 19]
+
+**Files:** `e2e/tests/support/wav.ts` (new; `toneWav` moved from `talkback.spec.ts` in its own commit `test(e2e): toneWav moves to support/wav.ts (#10)`), `e2e/tests/live/{talkback,limiter,meters}.spec.ts`.
+
+Every changing step below runs only while `watch.inBurst()`, starts with at least 22 s of the burst left, and restores what `state()` / `console()` showed in a `finally`.
+
+- [ ] **`talkback.spec.ts`.**
+  - Top-level `test.use({ launchOptions: { args: [fake ui, fake device, --use-file-for-fake-audio-capture=<1 kHz, 0.5 WAV>] }, permissions: ["microphone"] })`.
+  - The test input is `eng_mic` (from `LIVE_TALKBACK_INPUT`).
+  - Titles:
+    - `talkback reaches the ENG_MIC meter at -8.4 dB of its input within 0.3 dB during a burst`:
+      - `addInitScript(TALK_INIT)`;
+      - a runner-side `PageSocket` on the engineer page, opened after `expectBuild`;
+      - `SetInput{trim_db: -150, processing: true, muted: false}` takes the card away, as in the mock spec;
+      - the meter reads silence, then Talk is held (hover, `mouse.down`, the `live` class);
+      - after 2.5 s of settling, 3 s of both series;
+      - `median(meter dB) − median(input dB) = −8.405 ± 0.3`, with the input series steady within 0.2 dB, else red "talkback input not steady";
+      - release at the latest 8 s after the press;
+      - annotation `talkback_db`.
+    - `held Talk reaches the ENG_MIC input continuously on the real PC` (row 731):
+      - 50 meter frames while held, ≥ 40 above −60 dB;
+      - below −60 dB within 600 ms of the release.
+
+      The card output is not reached by design: every mix TX is zero in a burst.
+- [ ] **`limiter.spec.ts`.**
+  - The page is `LIVE_MEMBER`'s, with the engineer token, through the relay.
+  - Title `the limiter counter counts while a burst drives the mix over its limit, and Reset zeros it` (row 611):
+    - in that mix: `LIVE_TEST_INPUT`'s level +12 dB, the mix EQ band 1 at 1 kHz +12.04 dB, and the limiter on at −6 dB (−20 + 24 = +4 dBFS);
+    - `limiterActiveSeconds` grows ≥ 1.5 s within 5 s;
+    - restore the level and the EQ;
+    - wait until two reads 500 ms apart agree (X14 lag, `e2e.md`);
+    - click Reset; the counter reads 0;
+    - restore the limiter;
+    - annotation `limiter_active_s`.
+- [ ] **`meters.spec.ts`.**
+  - Title `#25 repeat: meters arrive about 10 times a second and the burst input reads the burst level on the real card`:
+    - `SetInput{LIVE_TEST_INPUT, processing: false, muted: false}`, so the sine reaches the meter dry;
+    - over 3 s, ≥ 27 frames, and the input's median peak within 0.5 dB of `LIVE_BURST_DBFS`;
+    - annotations `meter_fps` and `burst_input_dbfs`.
+
+  Commit: `feat(e2e): live talkback, limiter and meter specs, inside a burst only (#10)`.
+
+---
+
+### Task 21: Live specs III: tunnel ×2, push unsubscribe, client error marker; the live rule [lane 4d-3, ~350 LoC]
+
+**Files:** `e2e/tests/live/{tunnel,push,client-error}.spec.ts`, `.claude/rules/live.md` (new), `.claude/rules/e2e.md`, `CLAUDE.md`.
+
+- [ ] **`tunnel.spec.ts`** (rows 735 and 736):
+  - `the engineer's header shows Vonkajší prístup: OK matching /api/tunnel through the real tunnel`;
+  - `a member's page shows no tunnel banner while the real tunnel is Ok` (`LIVE_MEMBER` with its own token).
+
+  Both use the mock spec's selectors.
+- [ ] **`push.spec.ts`** (row 717), `logout revokes a real Web Push subscription in the browser and on the server`:
+  - `chromium.launchPersistentContext(tmp)` (not incognito: the Push API exists) with `notifications` granted;
+  - its own console guard with no allowance;
+  - wait for `POST /api/push/subscribe` 200 and keep the endpoint from its body;
+  - log out through the UI;
+  - `POST /api/push/unsubscribe` answers 200 with that endpoint, and `pushManager.getSubscription()` is null;
+  - in `finally`, when it is still subscribed, `POST /api/push/unsubscribe` with the endpoint and the token.
+
+  `pc-end` compares the subscription counts as the backstop.
+- [ ] **`client-error.spec.ts`** (row 555), `the marker panic report is accepted on the real PC`:
+  - `POST /api/client-error` with `panic_message: iemmixer-live-marker-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}` answers 204;
+  - `pc-end` finds it in the server's log, `<root>\logs\server.log` (`win/procs.rs:241-252`, `site.rs:425`), not in the tray's rolling log.
+- [ ] **Rules.**
+  - `live.md` (`paths: e2e/tests/live/**, e2e/playwright.live.config.ts, scripts/iem-pc/{live_verdict,iempc_live}.py`), covering:
+    - where the specs run;
+    - the `LIVE_*` variables;
+    - the tokens (decision 1);
+    - the relay and no-reconnect rule;
+    - the burst protocol (−20 dBFS, 30 s every 60 s, `probe`/`listening`) and the burst-only rule;
+    - each measurement's method;
+    - the verdict's checks;
+    - the manifest rows.
+  - `e2e.md`: its last-but-one bullet ("Live specs … never in public CI") now says they live here and run only from ops `live.yml`, with public CI only listing them.
+  - `CLAUDE.md`: the router line "Live E2E on the PC, live verdict, dispatch-live → `.claude/rules/live.md`".
+
+  Commit: `feat(e2e): live tunnel, push and client-error specs; the live rule (#10)`.
+
+---
+
+### Task 22: `live_verdict.py` [lane, ~450 LoC; independent]
+
+**Files:** `scripts/iem-pc/live_verdict.py`, `scripts/iem-pc/test_live_verdict.py` (stdlib).
+
+- [ ] **Step 1 (RED).** Tests on a synthetic record directory:
+  - `test_a_full_run_with_every_spec_passed_is_green`;
+  - `test_a_failed_skipped_or_missing_spec_is_red_naming_the_first_title`;
+  - `test_no_burst_or_a_refused_burst_is_red`;
+  - `test_a_missing_or_unreadable_client_log_marker_is_red`;
+  - `test_a_push_subscription_left_behind_is_red`;
+  - `test_a_failed_job_end_is_red`;
+  - `test_a_cancelled_pc_job_left_dev_or_not_free_is_cancelled`;
+  - `test_another_pc_failure_names_its_reason_code`;
+  - `test_numbers_come_only_from_known_keys_and_finite_values`;
+  - `test_the_summary_never_holds_a_tests_error_text` (an error naming `https://mixer.example.org/ws/audio?token=x` never appears);
+  - `test_expected_titles_are_read_from_the_spec_files` (the parity checker's `test(` regex);
+  - `test_main_report_reads_the_record_and_prints_one_json`.
+
+  Commit: `test(iem-pc): [red] the live verdict on synthetic records (#10)`.
+- [ ] **Step 2 (GREEN).**
+
+```python
+BEGIN_REASONS = {"ready", "not-free", "left-dev", "bundle-not-active", "engine-not-up", "no-client", "token-failed", "push-count-failed"}
+PC_REASONS = {"browser-done", "left-dev", "browser-never-started", "burst-refused", "jobs-unreadable", "not-finished"}
+CANCELLED = {"left-dev", "not-free"}
+NUMBER_KEYS = ("listen_hz", "listen_dbfs", "first_audio_ms", "talkback_db", "limiter_active_s", "meter_fps", "burst_input_dbfs", "opus_frames")
+def report(results: dict | None, begin, pc, evidence, bursts: list, titles: list[str], pc_results: dict) -> dict:
+    """{"conclusion","summary","first_failure","numbers"}; checks in order: begin ready; ≥ 1 burst and every
+    burst exit 0; every expected title passed (status "expected"); client_log found; push_after ≤ push_before;
+    job_end ok."""
+```
+
+  CLI: `live_verdict.py report --dir <record> --specs e2e/tests/live --begin <result> --pc <result> --browser <result> --end <result>`.
+
+  The summary looks like:
+  `green: 10 live specs, 7 bursts, listen 1000.02 Hz -20.08 dBFS, first audio 640 ms, talkback -8.39 dB, limiter 2.4 s, client log found, push 2 -> 2`.
+
+  Commit: `feat(iem-pc): [green] the live verdict and its report mapping (#10)`.
+
+---
+
+### Task 23: `iem-soakclient token` [lane, ~220 LoC; independent]
+
+**Files:** `crates/iem-soakclient/src/{mint.rs (new), lib.rs, main.rs}`, `.github/workflows/ci.yml` (the e2e soak step), `.claude/rules/soak.md`.
+
+- [ ] **Step 1 (RED).** In `mint.rs` tests:
+  - `a_member_token_reads_back_as_that_member_and_not_engineer` and `an_engineer_token_reads_back_as_the_engineer`, read back through the body of `extract_claims`, as `token.rs` does;
+  - `the_arguments_refuse_a_member_with_engineer_and_engineer_without_it`;
+  - `seconds_are_60_to_7200`;
+  - `a_bad_sub_is_a_usage_error_naming_no_value`;
+  - `the_token_alone_goes_to_stdout`.
+
+  Commit: `test(soak): [red] iem-soakclient token mints a short-lived token on the PC (#10)`.
+- [ ] **Step 2 (GREEN).**
+  - `mint::token(secret, sub, engineer, now, seconds)`; `engineer_token` calls it with `seconds + TOKEN_MARGIN`.
+  - `main.rs`: `token --jwt-secret-file <path> --sub <id> [--engineer] --seconds <n>`. It exits 2 on a usage error and 1 with `secret-unreadable`.
+  - CI: in the e2e soak step, mint an engineer token and a `member9` token from the job's own secret. Then `GET /api/audio/diagnostics` answers 200 for the engineer token and is refused for the member token. Check the exact refusal status in `routes.rs`.
+  - `soak.md`: the subcommand and its trust (the same as `--jwt-secret-file`).
+
+  Commit: `feat(soak): [green] iem-soakclient token (#10)`.
+
+---
+
+### Task 24: `iempc dispatch-live` [lane, ~450 LoC; independent]
+
+**Files:** `scripts/iem-pc/iempc_live.py`, `scripts/iem-pc/test_iempc_live.py`, `scripts/iem-pc/iempc.py` (call sites), `.claude/rules/guard.md`.
+
+- [ ] **Step 1 (RED).** Tests on `test_iempc.Base`:
+  - `test_a_live_run_is_dispatched_with_the_active_bundle_in_dev`: `gh workflow run live.yml -R <ops> -f sha -f branch -f run`, with `live.json` recorded;
+  - `test_the_flag_refuses_before_any_call`;
+  - `test_a_flag_during_the_gh_waits_stops_the_dispatch`;
+  - `test_not_settled_another_bundle_or_engine_or_parked_is_refused` (reusing `iempc_soak.settled_refusal`, `active_bundle` and `playing_refusal`);
+  - `test_a_sha_without_a_green_push_run_is_refused`;
+  - `test_one_live_run_per_sha_per_dev_entry`;
+  - `test_a_soak_of_this_entry_that_may_still_run_refuses` (`iempc_soak.running_soak`);
+  - `test_dispatch_soak_and_switch_test_refuse_while_a_live_run_may_still_run`, which also passes after `WINDOW_S`;
+  - `test_an_unreadable_live_record_counts_as_running`.
+
+  Commit: `test(iem-pc): [red] dispatch-live, and soak/switch-test refuse while a live run may run (#10)`.
+- [ ] **Step 2 (GREEN).**
+  - `iempc_live.py`:
+    - `LIVE_WORKFLOW = "live.yml"`, `RECORD = "live.json"`, and `WINDOW_S = 5400` (the jobs' bounds 15 + 60 + 10 + 5 minutes);
+    - `live_refusal(reply, sha)`, `running_live(ip, entry, now)`, `refuse_while_live(ip)` and `dispatch(ctx, ip)`, in `iempc_soak.dispatch`'s shape.
+  - `iempc.py`:
+    - `cmd_dispatch_live` with `Spec(pc=True, dev_time=True, locked=True)` and a parser with `--sha`;
+    - `cmd_dispatch_soak` and `cmd_switch_test` first call `iempc_live.refuse_while_live(sys.modules[__name__])`, a call site each.
+  - `guard.md`, the dev-box bullet: `dispatch-live`.
+
+  Commit: `feat(iem-pc): [green] iempc dispatch-live (#10)`.
+
+---
+
+### Task 25: Ops repo: `live.yml`, variables, runbook (private; main session)
+
+This needs decision 1 recorded on #10 first. Model it on `hil.yml` and Task 10's `soak.yml`:
+- validated inputs;
+- every action pinned to a full SHA with its tag comment;
+- App tokens from `vars.OPS_APP_ID` and `secrets.OPS_APP_KEY`;
+- PowerShell 5.1 on the PC with no process-ending call;
+- bounded waits.
+
+The ops variables:
+- `LIVE_BASE_URL` (`https://` plus the public host);
+- `LIVE_MEMBER` (a member not active in dev);
+- `LIVE_TEST_INPUT` (an input the burst replaces);
+- `LIVE_TALKBACK_INPUT`;
+- `LIVE_SERVER_CONFIG` (`IEMMIXER_CONFIG` for `notify --count`);
+- `LIVE_SECRET_FILE` (the server's `secrets/jwt_secret`).
+
+The bursts are fixed at −20 dBFS, 30 s, every 60 s. No secret is new.
+
+```yaml
+name: live
+on: { workflow_dispatch: { inputs: { sha: …, branch: …, run: … } } }
+permissions: { contents: read }
+concurrency: { group: live-iem-pc, cancel-in-progress: false }
+jobs:
+  verify:   # ubuntu: inputs, App token, "a green push run of the SHA on the branch" (as soak.yml)
+  pc-begin: # [self-hosted, iem-pc], timeout 15, permissions {}
+    # status: dev, no switch, no HIL job, active bundle = engine build = SHA (else begin.json reason)
+    # iemmode job-begin $GITHUB_RUN_ID (refused → not-free); iemmode activate $SHA (restart in job, HIL flags);
+    # wait ≤ 60 s for engine build = SHA, frames 32, callbacks advancing (else engine-not-up)
+    # push_before = iem-server notify --count alarm (IEMMIXER_CONFIG = vars.LIVE_SERVER_CONFIG)
+    # tokens.json = { engineer: iem-soakclient token --sub engineer --engineer --seconds 3600,
+    #                 member: … --sub $LIVE_MEMBER --seconds 3600 }   (never echoed)
+    # upload live-begin (begin.json) and live-tokens (tokens.json, retention-days: 1)
+  browser:  # ubuntu-24.04, needs pc-begin, if begin ready, timeout 45, permissions { contents: read }
+    # checkout iemmixer at SHA (persist-credentials false); setup-node; npm ci; playwright install chromium
+    # download live-tokens; ::add-mask:: each token; LIVE_* env; LIVE_RESULTS=results.json
+    # npx playwright test -c playwright.live.config.ts; upload live-browser (results.json) always()
+  pc:       # [self-hosted, iem-pc], needs pc-begin, if begin ready, timeout 60, permissions { actions: read }
+    # every 10 s: GET /repos/$REPO/actions/runs/$RUN_ID/attempts/$ATTEMPT/jobs (Bearer github.token)
+    #   browser in_progress and ≥ 60 s since the last burst → iemmode test-signal $LIVE_TEST_INPUT -20 30 --listen
+    #   (one line per burst in bursts.jsonl); a status outside dev → left-dev (cancelled); browser completed → done;
+    #   never started within 15 min → browser-never-started
+    # upload live-pc (pc.json, bursts.jsonl) always()
+  pc-end:   # [self-hosted, iem-pc], needs [pc-begin, browser, pc], if always() && pc-begin succeeded, timeout 10
+    # iemmode job-end $GITHUB_RUN_ID; Select-String -SimpleMatch the marker in the tail (20000 lines) of
+    # <root>\logs\server.log → found|missing|unreadable; push_after; upload live-end (evidence.json)
+  report:   # ubuntu, needs all, if always() && verify ok, permissions { contents: read, actions: write }
+    # checkout at SHA; download live-begin/live-pc/live-end/live-browser (never live-tokens);
+    # python3 scripts/iem-pc/live_verdict.py report …; App token → check run live/iem-pc on the SHA;
+    # delete the live-tokens artifact (gh api -X DELETE …/actions/artifacts/<id>)
+```
+
+Runbook: a "Live" section with dispatching, the cancelled cases, the tokens' life and `gh run rerun`.
+
+---
+
+### Task 26: Push, CI green (main session)
+
+Use Task 11's steps. On top of the usual jobs, CI must show:
+- the `e2e` job's new steps green (live `--list`, `tone.spec.ts`, the token mint);
+- the `windows` job green.
+
+Post on #10: the e2e job's soak numbers and the listed live titles.
+
+---
+
+### Task 27: The live run on the PC, then the manifest (main session, dev time)
+
+**Precondition:** as Task 12. On "ide event", run `$P event`. A cut run is cancelled, never red.
+
+1. Fetch, install and activate the green bundle, then `$P dev`. Then `$P dispatch-live --sha <sha>`, poll the ops run with bounded calls, and post `live/iem-pc`'s summary (numbers only) on #10.
+2. On the first green run, flip the manifest in its own commit, `docs(parity): the seven PC halves pass on the IEM PC (#10)`. The message names no other ticket with `#`; the rows' reasons may.
+
+| Line | gen1 test | Added to `gen2` (the CI half stays) | New status / reason |
+|---|---|---|---|
+| 555 | marker panic report reaches the rolling log file | `e2e/tests/live/client-error.spec.ts::the marker panic report is accepted on the real PC; scripts/iem-pc/test_live_verdict.py::test_a_missing_or_unreadable_client_log_marker_is_red` | TRANSFORMED: "CI half in #25; PC half: the live run's pc-end finds the marker in the server's log on the PC (S7, live/iem-pc green on <short sha>)" |
+| 570 | Listen produces audio output within 3 seconds on engineer page | `e2e/tests/live/listen-probe.spec.ts::Listen on the engineer page plays audio within 3 s on the real PC` | TRANSFORMED: "… on the burst's sine (dev time has no band signal, #38)" |
+| 611 | counter accumulates while limiter is reducing gain, Reset zeros it | `e2e/tests/live/limiter.spec.ts::the limiter counter counts while a burst drives the mix over its limit, and Reset zeros it` | TRANSFORMED |
+| 717 | logout fires unsubscribe browser-side and server-side | `e2e/tests/live/push.spec.ts::logout revokes a real Web Push subscription in the browser and on the server` | TRANSFORMED |
+| 731 | engineer talkback delivers continuous signal to ENGINEER mic track | `e2e/tests/live/talkback.spec.ts::held Talk reaches the ENG_MIC input continuously on the real PC` | TRANSFORMED: "… to the ENG_MIC input; no card output, every mix TX is zero in a burst (owner's rule)" |
+| 735 | engineer header shows Vonkajší prístup: OK matching /api/tunnel | `e2e/tests/live/tunnel.spec.ts::the engineer's header shows Vonkajší prístup: OK matching /api/tunnel through the real tunnel` | TRANSFORMED |
+| 736 | member page (member1) shows no tunnel banner while Ok | `e2e/tests/live/tunnel.spec.ts::a member's page shows no tunnel banner while the real tunnel is Ok` | TRANSFORMED |
+
+   Rows 498 and 499 (OBSOLETE, "real-PC meter checks belong to S7 #10") also cite `e2e/tests/live/meters.spec.ts::#25 repeat: meters arrive about 10 times a second and the burst input reads the burst level on the real card`, and stay OBSOLETE.
+
+   The checker must print:
+   `parity manifest: 908 rows (PORTED 331, TRANSFORMED 354, OBSOLETE 223, PENDING 0, FEATURE-GAP 0); allowed until cutover: 0 (none)`.
+   `--cutover` must exit 0. Run the denylist tree scan over the edit before committing.
+
+---
+
+## Part 5: HIL v2 (design §7; #10 decisions of 2026-10-07)
+
+Tasks 28 to 31 are lanes, one at a time; 30 may share a lane with 29 if the diff stays at or below ~600 lines. Tasks 32 and 33 run in the main session.
+
+`hil-v1.ps1` keeps its name, because it is `bundle::REQUIRED` and what the ops `hil.yml` calls. It grows six checks:
+- `pipe-owner`;
+- `tunnel-peer` and `lan-peer`;
+- `reopen-time`;
+- `fault-time`;
+- `alarm-ack`;
+- F30's byte restore.
+
+**Where each number comes from today, and what is new:**
+
+| Check | Today | New |
+|---|---|---|
+| First-instance flag | No Win32 call reads `FILE_FLAG_FIRST_PIPE_INSTANCE` back. The engine sets it through interprocess (`pipe/win.rs:18-31`), and HIL v1 reads only the DACL, `pipe_private` (`win/engine.rs:488-530`). | `EngineStatus.pipe_server_pid`: `GetNamedPipeServerProcessId` on the guard's supervisor connection, read once per engine like the DACL. HIL compares it with `EngineStatus.pid` (Task 3). That proves the flag's effect: the engine created the pipe and serves the guard's instance. |
+| Tunnel peer | `login_guard::ClientKey::from_request` (`login_guard.rs:113-133`) classifies a request (`Tunnel` only from a host peer carrying `CF-Connecting-IP`), but no route reports it. HIL v1 checks only `/api/version` at the public host. | `GET /api/peer` answers `{"origin":"tunnel"\|"lan","peer":"loopback"\|"host"\|"other"}` (fixed codes, no address). |
+| Forced reopen's duration (≈ 100 ms) | The owner logs only the open part ("open N ready after X ms", `asio.rs:1281-1287`), in the log. `resets` counts reopens (`asio.rs:1798`). S1a measured ≈ 104 ms per reopen at 64 samples. | `StreamStats.last_reopen_us`, from `Owner::reopen`'s entry (before `finish` stops the old stream) to the new stream's measured period. It goes into the engine's `Status.last_reopen_us`, the guard's `pc::Status`, and `EngineStatus.last_reopen_us`. |
+| Fault callback's time (< 1 ms) | The faulting callback's time enters only `max_process_ns` and `process_hist` (`asio.rs:935-937`, `nullrt.rs:196-201`) of an engine that exits 70 at once. `tick` (`control.rs:727-729`) goes to `fault()` (`:650-656`) with no `Status` between. | `StreamStats.fault_callback_ns` (ASIO `Backend::on_buffer`, NullRt `pace`). The engine sends a last `Status` with `fault_callback_us` before `fault()`. The guard keeps `EngineStatus.last_fault_us` across the respawn. |
+| Alarm test | `alarm_test` (`daemon.rs:1884-1894`) raises `"alarm test (iemmode alarm-test)"` and never acknowledges it. | Nothing in Rust. HIL finds its own alarm in the reply's `alarms` and acknowledges it with `iemmode alarm-ack <id>`. |
+
+### Review Focus (Part 5)
+
+1. **Every new field is additive.** An older engine's or guard's field reads as 0 or null, and HIL v2 then fails that check with "lacks '<field>'".
+2. **`last_fault_us` survives the respawn.** Tests: `effects::engine::tests::the_last_fault_is_a_faulted_status_callback_time`, the NullRt `tests/pipes.rs` fault test, and the PowerShell fake with `fault_us`.
+3. **`/api/peer` answers fixed codes.** A foreign peer with a forged header is `lan`/`other`.
+4. **`alarm-ack`.** It never acknowledges an alarm other than the exact test text with no step and no owner question, and it acknowledges only after `alarm-push` passed.
+5. **F30.** The installed site's sha256 after the revert equals the one before the change.
+
+---
+
+### Task 28: Engine: the reopen's time and the faulting callback's time [lane 5a, ~350 LoC]
+
+**Files:** `crates/iem-audio-io/src/{lib.rs,owner.rs,nullrt.rs,asio.rs}`, `crates/iem-engine-proto/src/{msg.rs, msg/s7_tests.rs}`, `crates/iem-engine/src/control.rs` (call sites), `crates/iem-engine/src/control/tests/s7.rs` (new, `mod s7;` inside `control.rs`'s `mod tests`), `crates/iem-engine/tests/pipes.rs`, `.claude/rules/engine.md`.
+
+- [ ] **Step 1 (RED).**
+  - `owner.rs`: `a_reopen_time_is_whole_microseconds_never_zero_and_saturates`.
+  - `nullrt.rs`: `a_panic_records_the_faulting_callbacks_own_time` (the `nullrt_panic_marks_the_stream_faulted_and_stops_calling` processor; `0 < fault_callback_ns < 1 s`; 0 before the panic).
+  - `msg/s7_tests.rs`: `the_reopen_and_fault_times_are_additive` (an old `{"callbacks":4}` reads 0 and 0.0).
+  - `control/tests/s7.rs`:
+    - `a_fault_sends_a_last_status_with_the_faulting_callbacks_time`: a `scripted` driver whose stats are faulted with `fault_callback_ns` 412_000; the broadcasts end `Status{faulted: true, fault_callback_us: 412.0}`, then the `Fault` alarm, then `DriverReleased`.
+    - `status_carries_the_last_reopen`.
+  - `tests/pipes.rs`, `an_injected_fault_ends_with_a_status_that_times_the_faulting_callback`: NullRt with `--fault-injection`, a supervisor `InjectFault`; the last `Status` before `DriverReleased` has `faulted` and `0 < fault_callback_us < 1e6`.
+
+  Commit: `test(engine): [red] the forced reopen's time and the faulting callback's time in Status (#10)`.
+- [ ] **Step 2 (GREEN).**
+  - `lib.rs` `StreamStats`: `last_reopen_us: u64` and `fault_callback_ns: u64`, each with a doc.
+  - `owner::reopen_us(took: Duration) -> u64`: `u64::try_from(took.as_micros()).unwrap_or(u64::MAX).max(1)`.
+  - `asio.rs` (Windows, excluded from mutation): `Owner::reopen` takes `let began = Instant::now();` before `finish`; after `open(carry, false)` succeeds, `self.shared.reopen_us.store(owner::reopen_us(began.elapsed()), SeqCst)`.
+  - `Backend::on_buffer`: `let was = self.faulted.load(Acquire);`, then after `took`:
+
+```rust
+if !was && self.faulted.load(Ordering::Acquire) {
+    self.fault_ns.store(took.max(1), Ordering::Relaxed); // one store on the fault path (I7)
+}
+```
+
+    `Owner::watch` copies `b.fault_ns` into `shared.fault_ns` when it sees `b.faulted`, and `stats()` reads both.
+  - `nullrt.rs`: `s.fault_ns.store(ns.max(1), Release)` before `faulted.store(true)`.
+  - `msg.rs` `Status` (fields only):
+
+```rust
+    /// S7 HIL v2, additive: the last driver reopen, from the old stream's
+    /// stop to the new one's measured period, µs; 0 before any (NullRt: 0).
+    pub last_reopen_us: u64,
+    /// S7 HIL v2, additive: the faulting callback's own time, µs (its entry
+    /// to its return, the caught panic included); 0 while not faulted.
+    pub fault_callback_us: f64,
+```
+
+  - `control.rs` (call sites):
+    - `status_msg` fills both;
+    - `tick` becomes `if stats.faulted { let last = self.next_status(&stats); self.broadcast(&EngineMsg::Status(last)); return Some(self.fault(…)); }`.
+  - `engine.md`: both fields; the last `Status` before a fault's `DriverReleased`.
+
+  Commit: `feat(engine): [green] Status carries the last reopen's time and the faulting callback's time (#10)`.
+
+---
+
+### Task 29: Guard: the pipe's server, the reopen time and the last fault in `Reply.engine` [lane 5b, ~350 LoC; after Task 28]
+
+**Files:** `crates/iem-win/src/pipe.rs`, `crates/iem-guard/src/{pc.rs,proto.rs,effects/engine.rs,effects/engine/tests.rs,win/engine.rs,win/mod.rs}`, `.claude/rules/guard.md`. `daemon.rs` is unchanged: `engine_status` copies from `EngineSeen`.
+
+- [ ] **Step 1 (RED).**
+  - `iem-win` (Windows job), `server_pid_names_the_listening_process`: with the existing `pair()`, `server_pid(client.as_handle()) == std::process::id()`. Off Windows it is `Unsupported`.
+  - `effects/engine/tests.rs`:
+    - `engine_messages_are_read_field_by_field` reads `last_reopen_us` 104000 and `fault_callback_us` 412.5;
+    - `the_last_fault_is_a_faulted_status_callback_time` (`fault_time`: `Some` only when faulted, finite and > 0);
+    - `the_reply_names_the_engine_by_its_commit` passes `pipe_server_pid`, `last_reopen_us` and `last_fault_us`.
+  - `proto.rs`: extend `the_engine_carries_the_fields_hil_v1_reads`'s exact JSON with `"pipe_server_pid": 4242, "last_reopen_us": 104000, "last_fault_us": 412.5`. Add the three at their largest in `the_largest_reply_fits_a_frame`. Keep `proto.rs` under 1000 lines, else move these tests into `proto/tests_s7.rs`.
+
+  Commit: `test(guard): [red] HIL v2's figures in Reply.engine: the pipe's server, the reopen time, the last fault (#10)`.
+- [ ] **Step 2 (GREEN).**
+  - `iem_win::pipe::server_pid(pipe: BorrowedHandle<'_>) -> io::Result<u32>` (`GetNamedPipeServerProcessId`; the `Win32_System_Pipes` feature is already on).
+  - `pc::Status` gains `last_reopen_us` and `fault_callback_us`. `EngineSeen` gains `pipe_server_pid: Option<u32>` and `last_fault_us: Option<f64>`.
+  - `proto::EngineStatus`: `pipe_server_pid: Option<u32>`, `last_reopen_us: u64`, `last_fault_us: Option<f64>`, each documented with its source.
+  - `effects::engine`: `parse` fills them, `pub fn fault_time(s: &pc::Status) -> Option<f64>`, and `engine_status` copies them.
+  - `win/engine.rs::seen` (Windows glue):
+    - the per-pid cache `pc.dacl` becomes `(pid, private, server_pid)`, read with `Supervisor::server_pid()`;
+    - `WinPc.last_fault: Option<f64>` is taken with `fault_time` from the inbox's newest status at every look;
+    - before a closed supervisor is replaced, it is taken from the old one's inbox, so the respawn keeps it.
+  - `FakePc::engine_seen` sets both new `EngineSeen` fields.
+  - `guard.md`, the HIL bullet: the three fields and their sources. Delete "Not in HIL v1: …".
+
+  Commit: `feat(guard): [green] Reply.engine carries the pipe's server pid, the last reopen time and the last fault's callback time (#10)`.
+
+---
+
+### Task 30: Server: `GET /api/peer` [lane 5c, ~200 LoC; independent; may share a lane with Task 29]
+
+**Files:** `crates/iem-server/src/peer_route.rs` (new), `crates/iem-server/src/lib.rs` (`mod`), `login_guard.rs` (`LoginGuard::is_host`, one fn), `routes.rs` (one `.route` line), `.claude/rules/security-baseline.md`.
+
+- [ ] **Step 1 (RED).** With `MockConnectInfo`, as in `auth.rs`'s tests:
+  - `a_loopback_peer_with_cf_connecting_ip_is_the_tunnel`;
+  - `the_hosts_own_address_with_the_header_is_the_tunnel` (`HostAddrs::new([10.0.0.10])`);
+  - `a_loopback_peer_without_the_header_is_lan`;
+  - `a_foreign_peer_with_a_forged_header_is_lan_and_other`;
+  - `the_answer_has_exactly_origin_and_peer` (no address).
+
+  Commit: `test(server): [red] /api/peer names how a request was classified, without an address (#10)`.
+- [ ] **Step 2 (GREEN).**
+
+```rust
+//! `GET /api/peer` (S7 HIL v2, design §7 "the tunnel peer"): how this server
+//! classified the request it answers, by `login_guard`'s rule: `origin`
+//! "tunnel" when the socket peer is this host and the request carries
+//! CF-Connecting-IP, else "lan"; `peer` "loopback" | "host" | "other". Fixed
+//! codes only, no address (P6); public like /api/version.
+pub async fn get_peer(State(state): State<AppState>, ConnectInfo(peer): ConnectInfo<SocketAddr>,
+                      headers: HeaderMap) -> Json<PeerInfo>
+```
+
+  `security-baseline.md` gets one sentence on it.
+
+  Commit: `feat(server): [green] GET /api/peer (#10)`.
+
+---
+
+### Task 31: HIL v2 in `hil-v1.ps1` [lane 5d, ~550 LoC; after Tasks 29 and 30]
+
+**Files:**
+- `scripts/iem-pc/IemHil.psm1` (new);
+- `scripts/iem-pc/hil-v1.ps1`;
+- `scripts/iem-pc/Test-IemHil.ps1` (new);
+- `scripts/iem-pc/Test-IemPc.ps1` (the end-to-end block moves out, plus a call site);
+- `.github/workflows/ci.yml` (`bundle`: the `Copy-Item` adds `IemHil.psm1`; `bundle::REQUIRED`, `iempc.BUNDLE_REQUIRED` and `Test-IemBundleSums` are unchanged, so older bundles still install);
+- `.claude/rules/guard.md`.
+
+- [ ] **Step 0: move without changes.** The `hil-v1.ps1` end-to-end block of `Test-IemPc.ps1` (the fake `iemmode` through `$h10`) moves verbatim into `Test-IemHil.ps1`. `Test-IemPc.ps1` starts it in a process of its own, like `Test-IemTuningInstall.ps1`. CI green.
+
+  Commit: `test(iem-pc): the hil-v1.ps1 end-to-end self-test moves to Test-IemHil.ps1 (#10)`.
+- [ ] **Step 1 (RED).** In `Test-IemHil.ps1`, against IemHil.psm1's pure functions:
+  - `hil-pipe-owner-the-engine-serves-its-pipe` (`pipe_server_pid == pid`, `pipe_private`); refused when they differ, either is null, or the DACL is not private.
+  - `hil-peer-tunnel-from-loopback-or-host` and `hil-peer-refuses-lan-or-other-through-the-public-host`; `hil-lan-peer-is-lan`.
+  - `hil-reopen-time-within-the-bound` (104 ms at a 200 ms bound passes; 0, missing, or 201 ms fails).
+  - `hil-fault-time-under-1-ms` (412.5 µs passes; 0, null, or 1000 µs fails).
+  - `hil-own-test-alarm-is-the-new-one` and `hil-stale-test-alarms-are-only-the-exact-text-unacked-without-step-or-question`.
+  - `hil-test-alarm-text-is-the-guards`: `crates/iem-guard/src/daemon.rs` holds `"alarm test (iemmode alarm-test)"`.
+  - `hil-site-restored-by-bytes`.
+
+  The fake `iemmode` gains:
+  - engine fields `pid`, `pipe_server_pid`, `last_reopen_us` and `last_fault_us`, the last after `inject-fault`;
+  - `alarms` from the scenario;
+  - `alarm-test` appends an alarm with the next id;
+  - `alarm-ack <id>` is logged.
+
+  End-to-end tests:
+  - `hil-run-acks-its-own-test-alarm-and-the-stale-ones-never-another`: calls hold `alarm-ack 5` and `alarm-ack 3`, never `alarm-ack 4`;
+  - `hil-run-acks-nothing-when-the-push-failed` (`refuse: ['alarm-test']`);
+  - `hil-run-v2-checks-pass-on-good-figures`;
+  - `hil-run-a-respawned-engine-without-last-fault-fails-fault-time`;
+  - `hil-run-f30-without-the-installed-site-fails`.
+
+  The failing set of `$h1` grows by `lan-peer` and `tunnel-peer` (the server is down).
+
+  Commit: `test(iem-pc): [red] HIL v2: pipe owner, tunnel peer, reopen and fault times, the test alarm acknowledged, F30 restored (#10)`.
+- [ ] **Step 2 (GREEN).**
+  - `IemHil.psm1` (PowerShell 5.1, ASCII, `Set-StrictMode -Version Latest`, reads through `Get-IemProp`):
+    - `$script:HilTestAlarmText = 'alarm test (iemmode alarm-test)'`;
+    - `Test-IemHilPipeOwner`, `Test-IemHilPeer -Want tunnel|lan`, `Test-IemHilReopenTime -MaxMs`, `Test-IemHilFaultTime -MaxUs`;
+    - `Get-IemHilMaxAlarmId`, `Get-IemHilTestAlarms -Reply -Above` (returns `own` and `stale`), `Test-IemHilSiteRestored`, `Test-IemHilV2Inputs`.
+  - `hil-v1.ps1` (it imports `IemHil.psm1` beside `IemPc.psm1`):
+    - parameters `-ReopenMaxMs 200` (S1a's 104 ms at 64, doubled; tighten after Task 33), `-FaultMaxUs 1000` and `-SiteInstalled ''`;
+    - after `pipes`, `pipe-owner`;
+    - after `public-host`, `tunnel-peer` (`<public>/api/peer`) and `lan-peer` (`<lan_url>/api/peer`);
+    - after `reopen`, `reopen-time` (the waited `$after`);
+    - after `panic`, `fault-time` (`$later`);
+    - `alarm-test`: read the max id first; once `alarm-push` passed, `alarm-ack` its own id, then each stale one, as one check `alarm-ack` with numbers `{own, stale}`;
+    - F30 needs `-SiteChange`, `-SiteRevert` and `-SiteInstalled` together; `Get-FileHash` of the installed file before the change and after the revert must be equal.
+  - The doc header's "Not in HIL v1" paragraph goes. The summary text is left as it is ("HIL v1 …", `IemPc.psm1`: call sites only).
+  - `guard.md`, the HIL bullet: v2's checks.
+
+  Commit: `feat(iem-pc): [green] HIL v2 checks and the test alarm acknowledged (#10)`.
+
+---
+
+### Task 32: Ops `hil.yml`: F30 and the v2 inputs (private; main session)
+
+The `pc` job, before `hil-v1.ps1`:
+1. Read the installed site's path from the ops variable `HIL_SITE`.
+2. Write `site-revert.toml` as its exact bytes.
+3. Write `site-change.toml` as those bytes plus `"\n# hil f30 synthetic change, run <id>\n"`. A comment changes no topology, so no state entry can be dropped.
+
+Then pass `-SiteChange`, `-SiteRevert` and `-SiteInstalled`. Run it in dev time from the ops `dev` branch, in an owner-merged PR, and add a runbook line.
+
+### Task 33: Push, CI, the HIL v2 run (main session)
+
+After CI is green, run `iempc dispatch-hil` on the SHA in dev time, then read `hil/iem-pc`. Post the numbers on #10:
+- reopen ms;
+- fault µs;
+- pipe server = engine;
+- the peer codes;
+- the acknowledged test alarms (own and stale);
+- F30 restored.
+
+Then set `-ReopenMaxMs` to the measured worst plus margin in a small lane of its own, with the number in the commit.
+
+### UNVERIFIED (Parts 4 and 5)
+
+1. Chromium's Web Push subscribe on a hosted runner: a headless persistent context reaching FCM. If not, row 717 needs the owner's call; it is never skipped.
+2. An `AnalyserNode` attached by wrapping `AudioNode.prototype.connect` in an init script, and the `AudioEncoder.prototype.encode` wrap, without a console warning.
+3. The self-hosted runner's `github.token` (`actions: read`) reading the `browser` job of its own run attempt.
+4. Login budgets on the public host: with decision 1 there is no login at all. If the owner keeps PINs, a successful login counts nothing (`login_guard` counts failures only). Still open either way: a Cloudflare bot or WAF challenge for GitHub-hosted IPs; `expectBuild` names that hop.
+5. Chromium's audio processing (AGC, noise suppression) on the fake capture staying steady within 0.2 dB over 3 s, which the talkback reference needs.
+6. Playwright's `WebSocketRoute.send(Buffer)` reaching the page's `arraybuffer` socket as binary.
+7. Opus 128 kb/s CELT plus WebCodecs keeping a −20 dBFS sine within 0.5 dB. The server test asserts 1 dB for a 0.5 amplitude.
+8. The stereo bit on every CELT frame of a dual-mono sine.
+9. The reopen time at 32 samples. S1a measured ≈ 104 ms at 64.
+10. PC paths:
+    - `<root>\logs\server.log` under `%LOCALAPPDATA%\iemmixer`;
+    - the installed site's path (`HIL_SITE`);
+    - `IEMMIXER_CONFIG` for `notify --count`.
+11. Whether `dev` entries re-import mix state, which would undo a spec's leftover change if a restore failed (`finally` restores either way).
