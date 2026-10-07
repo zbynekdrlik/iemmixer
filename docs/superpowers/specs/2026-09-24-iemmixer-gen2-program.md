@@ -87,7 +87,7 @@ Numbers are tunable defaults unless they are parity requirements, tolerances (§
 
 **Licensing:** MIT OR Apache-2.0, except `iem-limiter-mga` (GPL-3.0-or-later, D1(a)); the engine links it, so its binary is GPL with licence text and source link. Server, UI, guard and tray are separate processes and stay permissive.
 
-**ASIO:** azo 0.2.1, vendored and pinned behind the backend trait. Fallbacks: patch the fork, our own IASIO host, then `asio-sys`.
+**ASIO:** azo 0.2.1, pinned exactly from crates.io (`=0.2.1` and the lockfile checksum, not copied into the repository) behind the backend trait; a newer azo only for a concrete reason and through HIL on the PC. Fallbacks: patch the fork, our own IASIO host, then `asio-sys`.
 
 ### 2.3 IPC and trust
 
