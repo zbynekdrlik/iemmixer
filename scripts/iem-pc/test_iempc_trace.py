@@ -18,15 +18,22 @@ sys.path.insert(0, str(HERE.parent / "pc-tuning"))
 import iempc_trace  # noqa: E402,F401  (the module under test; `iempc trace` runs it)
 import iempc_tuning  # noqa: E402
 import latency_report as lr  # noqa: E402
-from test_iempc import SHA, Base, ip  # noqa: E402
-from test_iempc_tuning import PROFILE  # noqa: E402
+from test_iempc import SHA, SHA2, Base, ip, make_zip, sha256  # noqa: E402
+from test_iempc_tuning import MODULES, PROFILE  # noqa: E402
 from test_latency_report import DPCISR_XPERF  # noqa: E402
 
 XPERF = "X:\\wpt\\xperf.exe"
 ENGINE = {"build": SHA, "frames": 32, "callbacks": 1000, "missed": 0, "resets": 0, "parked": False, "faulted": False,
           "pipe_private": True, "spawns": 1, "last_exit": None, "hil": []}
 STOPPED = {"stopped": ["NT Kernel Logger", "IemMarkers"], "gone": [], "kept": [], "notes": [], "via": "logman", "tuning_error": None}
-IMPORT = "Import-Module (Join-Path (Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'iemmixer\\tuning') 'IemMeasure.psm1')"
+# The elevated tuning folder as the PC resolves it (the preflight's answer) and its modules.
+TDIR = "C:\\ProgramData\\iemmixer\\tuning"
+TUNING = TDIR + "\\IemTuning.psm1"
+MEASURE = TDIR + "\\IemMeasure.psm1"
+HT, HM = sha256(MODULES["tuning/IemTuning.psm1"]), sha256(MODULES["tuning/IemMeasure.psm1"])
+IDLE = "(Get-Process -Id $PID).PriorityClass = 'Idle'"
+STEP_NAMES = (("GetFolderPath('CommonApplicationData')", "preflight"), ("Start-IemTrace", "start"),
+              ("Stop-IemTraceSessions", "stop"), ("'-merge'", "merge"), ("Invoke-IemDpcIsr", "dpcisr"))
 
 
 def status(mode: str = "dev", engine: dict | None = None, switching=None, code: int = 0) -> tuple[int, str]:
@@ -46,8 +53,12 @@ class TraceBase(Base):
         saved = iempc_tuning.PROFILE
         self.addCleanup(setattr, iempc_tuning, "PROFILE", saved)
         iempc_tuning.PROFILE = self.profile
+        # The running engine's bundle, fetched on this box with its tuning modules.
+        self.gh.artifact = make_zip(self.tmp / "artifact-tuning" / f"iemmixer-{SHA}.zip", extra=MODULES)
+        self.fetched()
         self.statuses(status(engine=ENGINE), status(engine={**ENGINE, "callbacks": 4000, "missed": 2, "resets": 1}))
-        self.answers: dict = {"Start-IemTrace": {"dir": "x", "started": "2026-10-07T06:00:00Z"},
+        self.answers: dict = {"GetFolderPath('CommonApplicationData')": {"dir": TDIR, "tuning": HT, "measure": HM},
+                              "Start-IemTrace": {"dir": "x", "started": "2026-10-07T06:00:00Z"},
                               "Stop-IemTraceSessions": STOPPED, "'-merge'": None,
                               "Invoke-IemDpcIsr": "X:\\root\\traces\\run\\dpcisr.txt"}
         self.pc.module_result = self.answer
@@ -78,8 +89,10 @@ class TraceBase(Base):
 
     def steps(self) -> list[tuple[str, str]]:
         """The PC module calls as (step, flag mode)."""
-        names = (("Start-IemTrace", "start"), ("Stop-IemTraceSessions", "stop"), ("'-merge'", "merge"), ("Invoke-IemDpcIsr", "dpcisr"))
-        return [(next((n for t, n in names if t in s), "other"), e) for s, e in self.pc.modules]
+        return [(next((n for t, n in STEP_NAMES if t in s), "other"), e) for s, e in self.pc.modules]
+
+    def names(self) -> list[str]:
+        return [n for n, _ in self.steps()]
 
     def trace(self, *extra: str) -> tuple[int, list[dict], str]:
         return self.run_main("trace", "--label", "base-test", "--seconds", "1", *extra)
@@ -98,23 +111,27 @@ class TraceTests(TraceBase):
         code, docs, err = self.trace()
         self.assertEqual(code, 0, err)
         self.assertEqual(self.pc.calls, [("iemmode.exe", ["status"], "abandon")] * 2)
-        self.assertEqual(self.steps(), [("start", "finish"), ("stop", "finish"), ("merge", "abandon"), ("dpcisr", "abandon")])
+        self.assertEqual(self.steps(), [("preflight", "abandon"), ("start", "finish"), ("stop", "finish"),
+                                        ("merge", "abandon"), ("dpcisr", "abandon")])
         [doc] = docs
         run = doc["run"]
         self.assertRegex(run, r"^base-test-\d{8}T\d{6}Z$")
         pc_run = f"X:\\root\\traces\\{run}"
-        start, stop, merge, dpcisr = (s for s, _ in self.pc.modules)
-        self.assertIn(f"$r = & {{ {IMPORT} -Force -Global ; Start-IemTrace -Xperf '{XPERF}' -Dir '{pc_run}' }}", start)
-        self.assertIn(f"{IMPORT} -ArgumentList 'stop-only' -Force -Global ; Stop-IemTraceSessions -Dir '{pc_run}' -TimeoutSeconds 20", stop)
+        preflight, start, stop, merge, dpcisr = (s for s, _ in self.pc.modules)
+        self.assertIn("(Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'iemmixer\\tuning')", preflight)
+        load = f"{ip.hash_check(TUNING, HT)} ; {ip.hash_check(MEASURE, HM)} ; Import-Module '{MEASURE}' -Force ; "
+        self.assertIn(f"try {{ {load}$r = & {{ Start-IemTrace -Xperf '{XPERF}' -Dir '{pc_run}' }}", start)
+        self.assertIn(f"try {{ {ip.hash_check(MEASURE, HM)} ; Import-Module '{MEASURE}' -ArgumentList 'stop-only' -Force ; "
+                      f"$r = & {{ Stop-IemTraceSessions -Dir '{pc_run}' -TimeoutSeconds 20 }}", stop)
         for step in (merge, dpcisr):
-            self.assertIn(f"$r = & {{ (Get-Process -Id $PID).PriorityClass = 'Idle' ; {IMPORT} -Force -Global ; ", step)
+            self.assertIn(f"try {{ {IDLE} ; {load}$r = & {{ ", step)
         self.assertIn(f"Join-Path '{pc_run}' 'trace.etl'", merge)
         self.assertIn(f"Invoke-IemDpcIsr -Xperf '{XPERF}' -Dir '{pc_run}'", dpcisr)
         local = ip.state_dir() / "traces" / run / "dpcisr.txt"
         self.assertEqual(self.fetches, [(f"tester@pc.test:/X:/root/traces/{run}/dpcisr.txt", str(local), "abandon")])
         parsed = lr.parse_dpcisr(DPCISR_XPERF)
         self.assertEqual(doc, {
-            "label": "base-test", "seconds": 1, "circular_mb": None, "run": run, "build": SHA,
+            "label": "base-test", "seconds": 1, "circular_mb": None, "run": run, "build": SHA, "frames": 32,
             "callbacks": 3000, "missed": 2, "resets": 1, "same_engine": True, "after_error": None,
             "watched": {"lps": [2, 3],
                         "dpc": {"carddrv.sys": {"2": 45000, "3": 0}, "gpudrv.sys": {"2": 0, "3": 2500}, "nicdrv.sys": {"2": 800, "3": 0}},
@@ -126,8 +143,13 @@ class TraceTests(TraceBase):
     def test_a_circular_trace_passes_its_size(self) -> None:
         code, docs, err = self.trace("--circular-mb", "512")
         self.assertEqual(code, 0, err)
-        self.assertIn(" -CircularMB 512", self.pc.modules[0][0])
+        self.assertIn(" -CircularMB 512 }", self.pc.modules[1][0])
         self.assertEqual(docs[-1]["circular_mb"], 512)
+
+    def test_a_long_trace_needs_a_circular_file(self) -> None:
+        code, docs, err = self.run_main("trace", "--label", "soak", "--seconds", str(iempc_trace.MAX_LINEAR_S + 1))
+        self.assertEqual((code, docs, self.pc.calls, self.pc.modules), (1, [], [], []))
+        self.assertIn("needs --circular-mb", err)
 
     def test_without_pc_xperf_it_is_refused_before_the_pc(self) -> None:
         envfile = ip.env_path()
@@ -138,7 +160,8 @@ class TraceTests(TraceBase):
 
     def test_bad_arguments_are_refused_before_the_pc(self) -> None:
         for argv in (("--label", "Base_Test", "--seconds", "60"), ("--label", "ok", "--seconds", "0"),
-                     ("--label", "ok", "--seconds", "86401"), ("--label", "ok", "--seconds", "60", "--circular-mb", "0"),
+                     ("--label", "ok", "--seconds", "86401", "--circular-mb", "512"),
+                     ("--label", "ok", "--seconds", "60", "--circular-mb", "0"),
                      ("--label", "ok", "--seconds", "60", "--circular-mb", "16385")):
             code, docs, err = self.run_main("trace", *argv)
             self.assertEqual((code, docs), (1, []), argv)
@@ -151,11 +174,21 @@ class TraceTests(TraceBase):
         self.assertEqual((code, self.pc.calls, self.pc.modules), (1, [], []))
         self.assertIn("processor 2 has two roles", err)
 
-    def test_the_guard_must_be_settled_in_dev_with_an_engine(self) -> None:
+    def test_an_open_spike_window_refuses_the_trace(self) -> None:
+        self.open_window()
+        code, _, err = self.trace()
+        self.assertEqual((code, self.pc.calls, self.pc.modules), (1, [], []))
+        self.assertIn("'trace' waits until 'iempc handover-s1a'", err)
+
+    def test_the_guard_must_be_settled_in_dev_with_a_playing_engine(self) -> None:
         for answer, why in ((status(mode="event", engine=ENGINE), "mode event"),
                             (status(engine=ENGINE, switching={"from": "event", "to": "dev"}), "a switch runs"),
                             (status(), "no engine runs"),
+                            (status(engine={**ENGINE, "parked": True}), "parked"),
+                            (status(engine={**ENGINE, "faulted": True}), "faulted"),
                             (status(engine={**ENGINE, "callbacks": True}), "callbacks"),
+                            (status(engine={**ENGINE, "frames": "32"}), "frames"),
+                            (status(engine={**ENGINE, "build": "local"}), "build"),
                             (status(code=4), "exit 4")):
             self.statuses(answer)
             self.pc.calls.clear()
@@ -164,6 +197,22 @@ class TraceTests(TraceBase):
             self.assertIn("no trace:", err, why)
             self.assertIn(why, err, why)
             self.assertEqual(self.pc.calls, [("iemmode.exe", ["status"], "abandon")], why)
+
+    def test_modules_that_are_not_the_running_bundle_s_are_refused_before_the_start(self) -> None:
+        for found in ({"dir": TDIR, "tuning": HT, "measure": "0" * 64}, {"dir": TDIR, "tuning": None, "measure": None},
+                      {"dir": "relative\\tuning", "tuning": HT, "measure": HM}, "ok"):
+            self.answers["GetFolderPath('CommonApplicationData')"] = found
+            self.pc.modules.clear()
+            code, docs, err = self.trace()
+            self.assertEqual((code, docs, self.names()), (1, [], ["preflight"]), found)
+            self.assertIn("no trace:", err, found)
+        self.assertIn(f"iempc tuning-install --sha {SHA}", err)
+
+    def test_a_running_bundle_this_box_never_fetched_is_refused_before_the_pc_changes(self) -> None:
+        self.statuses(status(engine={**ENGINE, "build": SHA2}))
+        code, _, err = self.trace()
+        self.assertEqual((code, self.pc.modules), (1, []))
+        self.assertIn(f"bundle {SHA2} is not fetched", err)
 
     def test_a_restarted_engine_has_no_deltas(self) -> None:
         self.statuses(status(engine=ENGINE), status(engine={**ENGINE, "callbacks": 50, "spawns": 2}))
@@ -182,21 +231,21 @@ class TraceTests(TraceBase):
         self.statuses(status(engine=ENGINE), ssh_cut)
         code, docs, err = self.trace()
         self.assertEqual(code, 0, err)
-        self.assertEqual([s for s, _ in self.steps()], ["start", "stop", "merge", "dpcisr"])
+        self.assertEqual(self.names(), ["preflight", "start", "stop", "merge", "dpcisr"])
         self.assertEqual((docs[-1]["callbacks"], docs[-1]["same_engine"]), (None, False))
         self.assertIn("connection reset", docs[-1]["after_error"])
 
 
 class TraceStopTests(TraceBase):
-    """The kernel trace is never left behind: a flag, a signal or a failure
-    after the start stops it at once (the stop-only import, no merge)."""
+    """The kernel trace is never left behind unreported: a flag, a signal or a
+    failure after the start stops it at once (the stop-only import, no merge)."""
 
     def test_a_flag_during_the_wait_stops_the_trace_at_once_and_runs_the_event_path(self) -> None:
         with mock.patch.object(ip.time, "sleep", side_effect=lambda _s: self.flag()):
             code, docs, _ = self.trace()
         self.assertEqual(code, ip.PREEMPTED)
-        self.assertEqual(self.steps(), [("start", "finish"), ("stop", "ignore")])
-        self.assertIn("-ArgumentList 'stop-only'", self.pc.modules[1][0])
+        self.assertEqual(self.steps(), [("preflight", "abandon"), ("start", "finish"), ("stop", "ignore")])
+        self.assertIn("-ArgumentList 'stop-only'", self.pc.modules[2][0])
         self.assertEqual(self.pc.calls, [("iemmode.exe", ["status"], "abandon"), ("iemmode.exe", ["event"], "ignore")])
         self.assertEqual(docs[0], {"event": "ide event (flag file)", "action": "iempc event"})
         self.assertEqual(self.fetches, [])
@@ -205,7 +254,7 @@ class TraceStopTests(TraceBase):
         self.answers["'-merge'"] = lambda: self.flag()
         code, _, _ = self.trace()
         self.assertEqual(code, ip.PREEMPTED)
-        self.assertEqual(self.steps(), [("start", "finish"), ("stop", "finish"), ("merge", "abandon")])
+        self.assertEqual(self.names(), ["preflight", "start", "stop", "merge"])
         self.assertEqual(self.pc.calls[-1], ("iemmode.exe", ["event"], "ignore"))
         self.assertEqual(self.fetches, [])
 
@@ -214,7 +263,7 @@ class TraceStopTests(TraceBase):
         with mock.patch.object(ip.time, "sleep", side_effect=lambda _s: signal.raise_signal(signal.SIGTERM)):
             with self.assertRaises(SystemExit):
                 self.trace()
-        self.assertEqual(self.steps(), [("start", "finish"), ("stop", "ignore")])
+        self.assertEqual(self.steps(), [("preflight", "abandon"), ("start", "finish"), ("stop", "ignore")])
         self.assertIs(signal.getsignal(signal.SIGTERM), before)
 
     def test_a_failed_start_still_runs_the_stop(self) -> None:
@@ -224,15 +273,44 @@ class TraceStopTests(TraceBase):
         self.answers["Start-IemTrace"] = refused
         code, docs, err = self.trace()
         self.assertEqual((code, docs), (1, []))
-        self.assertEqual(self.steps(), [("start", "finish"), ("stop", "ignore")])
+        self.assertEqual(self.steps(), [("preflight", "abandon"), ("start", "finish"), ("stop", "ignore")])
         self.assertIn("not signed by Microsoft", err)
+        self.assertIn("the kernel trace was stopped", err)
+
+    def test_a_start_that_did_not_return_leaves_an_unconfirmed_stop(self) -> None:
+        """A start still running on the PC may begin its trace after a stop that found none (#32 B5)."""
+        def still_running():
+            raise ip.StillRunning("ssh still running after 120 s (bounded on the PC; check 'iempc status', never force-end)")
+
+        self.answers["Start-IemTrace"] = still_running
+        self.answers["Stop-IemTraceSessions"] = {"stopped": [], "gone": [], "kept": [], "notes": []}
+        code, docs, err = self.trace()
+        self.assertEqual(code, 1)
+        self.assertEqual(self.names(), ["preflight", "start", "stop"])
+        self.assertEqual(docs[0]["trace_stop"], "unconfirmed")
+        self.assertIn("WARNING: the kernel trace may still start or run", err)
+        self.assertIn("Stop-IemTraceSessions -Dir", err)
+        self.assertNotIn("the kernel trace was stopped", err)
 
     def test_a_stop_that_is_not_confirmed_fails_and_analyses_nothing(self) -> None:
         self.answers["Stop-IemTraceSessions"] = {"stopped": [], "gone": [], "kept": ["NT Kernel Logger"], "notes": []}
         code, docs, err = self.trace()
-        self.assertEqual((code, docs), (1, []))
-        self.assertEqual([s for s, _ in self.steps()], ["start", "stop"])
+        self.assertEqual(code, 1)
+        self.assertEqual(self.names(), ["preflight", "start", "stop"])
+        self.assertEqual(docs[0]["trace_stop"], "failed")
         self.assertIn("the trace stop is not confirmed", err)
+        self.assertIn("the kernel trace may still run on the PC", err)
+
+    def test_a_final_stop_that_fails_names_the_trace_left_running(self) -> None:
+        def cut():
+            raise ip.StepError("ssh: connection reset")
+
+        self.answers["Stop-IemTraceSessions"] = cut
+        code, docs, err = self.trace()
+        self.assertEqual(code, 1)
+        self.assertEqual(docs[0]["trace_stop"], "failed")
+        self.assertIn("connection reset", docs[0]["error"])
+        self.assertIn("the kernel trace may still run on the PC", err)
 
     def test_a_failed_stop_after_a_flag_is_reported_and_the_event_path_still_runs(self) -> None:
         def cut():
