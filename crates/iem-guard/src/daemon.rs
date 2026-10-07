@@ -179,8 +179,17 @@ pub struct View {
     /// How the last switch ended.
     pub last: Option<Outcome>,
     /// Counts the switches begun: a request queued before one began is
-    /// answered as during it.
+    /// answered as during it (a dev or live entry by `fence`).
     pub epoch: u64,
+    /// Counts what a dev or live entry queued before it must not follow
+    /// (#42): every switch begun but the start's checks, and every "ide
+    /// event" the pipe routes.
+    pub fence: u64,
+    /// The switch begun last is the start's checks (event → event, #42): a
+    /// dev or live entry routed while it runs is queued behind it.
+    pub start_checks: bool,
+    /// The switch begun last (from, to): a fenced entry's reply names it.
+    pub began: Option<(Mode, Mode)>,
     /// Counts the changes (subscribers wait on it).
     pub version: u64,
     /// Counts the requests to the tray to quit.
@@ -213,6 +222,14 @@ impl View {
         }
     }
 
+    /// The generation a request routed now sees.
+    pub fn generation(&self) -> Generation {
+        Generation {
+            epoch: self.epoch,
+            fence: self.fence,
+        }
+    }
+
     /// "ide event" once no switch runs: done when the last switch ended in
     /// `event`.
     pub fn event_reply(&self, note: &str) -> Reply {
@@ -230,6 +247,15 @@ pub fn while_switching(req: &Request) -> &'static str {
     }
 }
 
+/// The switch generation a request saw when the pipe routed it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Generation {
+    /// [`View::epoch`].
+    pub epoch: u64,
+    /// [`View::fence`].
+    pub fence: u64,
+}
+
 /// Where the pipe sends a request.
 #[derive(Debug, Clone, PartialEq)]
 // `Now(Reply)` carries the whole engine status (control thread only, one at a
@@ -241,7 +267,7 @@ pub enum Route {
     /// Answered once the switch running now has ended.
     AwaitEnd(&'static str),
     /// To the daemon thread, with the switch generation seen.
-    Queue(u64),
+    Queue(Generation),
     Subscribe,
 }
 
@@ -270,8 +296,8 @@ impl Shared {
         self.lock().clone()
     }
 
-    pub fn epoch(&self) -> u64 {
-        self.lock().epoch
+    pub fn generation(&self) -> Generation {
+        self.lock().generation()
     }
 
     /// Changes the view and wakes its waiters.
@@ -310,10 +336,10 @@ impl Shared {
             (Request::Event { dry_run: false }, None) => {
                 // A request queued before it pre-empts at its start.
                 self.cancel.preempt();
-                Route::Queue(v.epoch)
+                Route::Queue(v.generation())
             }
             (_, Some(_)) => Route::Now(v.reply(false, while_switching(req))),
-            (_, None) => Route::Queue(v.epoch),
+            (_, None) => Route::Queue(v.generation()),
         }
     }
 
@@ -1122,7 +1148,7 @@ fn take_logon(pc: &mut dyn Pc, g: &mut Guard) {
 #[derive(Debug)]
 pub struct Job {
     pub req: Request,
-    pub epoch: u64,
+    pub generation: Generation,
     pub reply: SyncSender<Reply>,
 }
 
@@ -1145,8 +1171,8 @@ struct Entry {
 }
 
 /// Handles one request on the daemon thread.
-pub fn handle(pc: &mut dyn Pc, g: &mut Guard, req: Request, epoch: u64) -> Reply {
-    if epoch != g.shared.epoch()
+pub fn handle(pc: &mut dyn Pc, g: &mut Guard, req: Request, seen: Generation) -> Reply {
+    if seen.epoch != g.shared.generation().epoch
         && let Some(reply) = stale(&req, &g.shared.view())
     {
         return reply;
@@ -2116,7 +2142,7 @@ pub fn serve_requests(pc: &mut dyn Pc, g: &mut Guard, jobs: &Receiver<Job>) {
     while !g.quit && g.handover.is_none() {
         match jobs.recv_timeout(next.saturating_duration_since(Instant::now())) {
             Ok(job) => {
-                let reply = handle(pc, g, job.req, job.epoch);
+                let reply = handle(pc, g, job.req, job.generation);
                 g.shared.reply_sent();
                 if job.reply.send(reply).is_err() {
                     info!("a client left before its reply");

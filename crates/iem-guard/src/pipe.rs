@@ -33,7 +33,7 @@ use interprocess::local_socket::{
 };
 use tracing::{info, warn};
 
-use crate::daemon::{Job, Route, Shared};
+use crate::daemon::{Generation, Job, Route, Shared};
 use crate::proto::{self, FrameError, Reply, Request, Update};
 
 #[cfg(windows)]
@@ -201,11 +201,11 @@ fn spawn_connection(stream: Stream, shared: &Arc<Shared>, jobs: &Sender<Job>) {
 }
 
 /// Hands `req` to the daemon thread and waits for its reply.
-fn ask(jobs: &Sender<Job>, req: Request, epoch: u64) -> Result<Reply, String> {
+fn ask(jobs: &Sender<Job>, req: Request, generation: Generation) -> Result<Reply, String> {
     let (tx, rx) = mpsc::sync_channel(1);
     jobs.send(Job {
         req,
-        epoch,
+        generation,
         reply: tx,
     })
     .map_err(|_| "the guard is stopping".to_owned())?;
@@ -237,7 +237,7 @@ fn connection(stream: &Stream, shared: &Shared, jobs: &Sender<Job>) {
         let (reply, handed) = match shared.route(&req) {
             Route::Now(reply) => (reply, false),
             Route::AwaitEnd(note) => (shared.await_end(note, AWAIT_END), false),
-            Route::Queue(epoch) => match ask(jobs, req, epoch) {
+            Route::Queue(generation) => match ask(jobs, req, generation) {
                 Ok(reply) => (reply, true),
                 Err(why) => (shared.view().reply(false, &why), false),
             },
@@ -397,16 +397,16 @@ mod tests {
             let job = rx.recv_timeout(Duration::from_secs(5)).unwrap();
             let mut pc = FakePc::new(Facts::default());
             let mut g = Guard::for_test(Mode::Event);
-            let epoch = job.epoch;
+            let generation = job.generation;
             job.reply
-                .send(handle(&mut pc, &mut g, job.req, epoch))
+                .send(handle(&mut pc, &mut g, job.req, generation))
                 .unwrap();
-            epoch
+            generation
         });
         let reply = call(&s.name, &Request::AlarmAck { id: 99 }).unwrap();
         assert!(!reply.ok);
         assert_eq!(reply.detail, "no alarm 99");
-        assert_eq!(answer.join().unwrap(), 0);
+        assert_eq!(answer.join().unwrap(), Generation::default());
     }
 
     #[test]
@@ -416,9 +416,9 @@ mod tests {
             let job = rx.recv_timeout(Duration::from_secs(5)).unwrap();
             let mut pc = FakePc::new(Facts::default());
             let mut g = Guard::for_test(Mode::Event);
-            let epoch = job.epoch;
+            let generation = job.generation;
             job.reply
-                .send(handle(&mut pc, &mut g, job.req, epoch))
+                .send(handle(&mut pc, &mut g, job.req, generation))
                 .unwrap();
         });
         // Answered from the view: nothing to count.
@@ -518,6 +518,32 @@ mod tests {
         .unwrap();
         assert!(!busy.ok);
         assert_eq!(busy.detail, "busy");
+        let job = call(&s.name, &Request::JobBegin { run: 7 }).unwrap();
+        assert_eq!((job.ok, job.detail.as_str()), (false, "switching"));
+    }
+
+    /// While the start's checks run, a dev entry goes to the daemon thread,
+    /// queued behind them (#42); everything else is refused as before.
+    #[test]
+    fn a_dev_during_the_start_checks_reaches_the_daemon() {
+        let (s, rx) = served();
+        s.shared.update(|v| {
+            v.running = Some(Mode::Event);
+            v.start_checks = true;
+        });
+        let dry_dev = Request::Dev {
+            build: None,
+            dry_run: true,
+        };
+        let (name, req) = (s.name.clone(), dry_dev.clone());
+        let client = thread::spawn(move || call(&name, &req).unwrap());
+        let job = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(job.req, dry_dev);
+        job.reply
+            .send(s.shared.view().reply(true, "queued"))
+            .unwrap();
+        let reply = client.join().unwrap();
+        assert_eq!((reply.ok, reply.detail.as_str()), (true, "queued"));
         let job = call(&s.name, &Request::JobBegin { run: 7 }).unwrap();
         assert_eq!((job.ok, job.detail.as_str()), (false, "switching"));
     }
