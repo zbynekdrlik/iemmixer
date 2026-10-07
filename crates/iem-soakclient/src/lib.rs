@@ -7,7 +7,8 @@
 //! process: sockets close by being dropped.
 //!
 //! This file is the pure core: the arguments, the URLs, the gap clock, the
-//! event classes and the summary. The socket threads build on it.
+//! event classes and the summary. [`tally`] counts a run into its summary
+//! (pure too); [`net`] is the wire: the login and the socket threads.
 
 #![forbid(unsafe_code)]
 #![cfg_attr(
@@ -26,6 +27,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+
+pub mod net;
+pub mod tally;
 
 /// More than this without a listen frame is a gap.
 pub const GAP: Duration = Duration::from_millis(60);

@@ -26,5 +26,7 @@ iem-win = { path = "../iem-win" }
 # the tests pin this client's wire forms to them. Tests only: the client
 # links no server crate. Without defaults, as iem-ui uses it.
 iem-core = { path = "../iem-core", default-features = false }
+# A listen frame's 960 samples are the engine's FRAME_48K (tally's test).
+iem-engine-proto = { path = "../iem-engine-proto" }
 # write_summary's tests (a temporary directory), as the other crates use it.
 tempfile = "3"
