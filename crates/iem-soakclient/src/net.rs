@@ -404,36 +404,14 @@ mod tests {
     fn the_default_limits() {
         let l = Limits::default();
         let secs = Duration::from_secs;
-        assert_eq!((l.give_up, l.write_every), (secs(120), secs(60)));
+        assert_eq!(l.write_every, secs(60));
         assert_eq!(l.read_timeout, Duration::from_millis(500));
         // Far above the server's meter period and its 5 s `no_source`
         // repeat on an open listen socket.
         assert_eq!(l.idle, secs(10));
-    }
-
-    #[test]
-    fn a_socket_reopens_after_its_backoff_and_gives_up_once_down_for_the_bound() {
-        let t0 = Instant::now();
-        let bound = Duration::from_secs(1);
-        let at = |ms| t0 + Duration::from_millis(ms);
-        let secs = Duration::from_secs;
-        // Never opened: down since the start.
-        assert!(!Reopen::new(t0).failed(at(1_000), bound));
-        let mut r = Reopen::new(t0);
-        assert_eq!(r.wait(), secs(1));
-        assert!(r.failed(at(999), bound), "down 999 ms: open again");
-        assert_eq!(r.wait(), secs(2));
-        assert!(r.failed(at(999), bound));
-        assert_eq!(r.wait(), secs(4));
-        // An open resets the backoff; the down clock starts at the close.
-        r.opened();
-        assert_eq!(r.wait(), secs(1));
-        r.closed(at(5_000));
-        assert!(r.failed(at(5_999), bound));
-        assert!(
-            !r.failed(at(6_000), bound),
-            "down exactly the bound: give up"
-        );
+        // The peer's Close answers at once; the wait only bounds a peer
+        // that never sends it.
+        assert_eq!(l.close_wait, secs(2));
     }
 
     #[test]

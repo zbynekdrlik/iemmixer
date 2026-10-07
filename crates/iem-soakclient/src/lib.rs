@@ -702,10 +702,9 @@ mod tests {
     }
 
     #[test]
-    fn a_reconnect_does_not_restart_the_gap_clock() {
-        // The listen socket closed after the frame at 0 ms and its next
-        // frame, after the reopen, came at 500 ms: one 500 ms gap, and the
-        // first frame stays the first.
+    fn a_long_wait_is_one_gap_and_the_first_frame_stays() {
+        // The stream stalled after the frame at 0 ms and its next frame came
+        // at 500 ms: one 500 ms gap, and the first frame stays the first.
         let t0 = Instant::now();
         let mut g = Gaps::default();
         g.frame(t0);
@@ -783,6 +782,7 @@ mod tests {
             LoginRefused,
             NotEngineer,
             ServerGone,
+            ConnectionLost,
             CpuSets,
         ] {
             let summary = Summary {
@@ -844,13 +844,6 @@ mod tests {
     }
 
     #[test]
-    fn reopens_back_off_1_2_4_8_then_10_s() {
-        let secs: Vec<u64> = (0..6).map(|n| backoff(n).as_secs()).collect();
-        assert_eq!(secs, [1, 2, 4, 8, 10, 10]);
-        assert_eq!(backoff(u32::MAX), Duration::from_secs(10));
-    }
-
-    #[test]
     fn reasons_are_fixed_codes() {
         use Reason::*;
         let codes = [
@@ -859,12 +852,14 @@ mod tests {
             LoginRefused,
             NotEngineer,
             ServerGone,
+            ConnectionLost,
             CpuSets,
         ];
         let codes = codes.map(Reason::code).join(" ");
         assert_eq!(
             codes,
-            "site-unreadable not-http login-refused not-engineer server-gone cpu-sets"
+            "site-unreadable not-http login-refused not-engineer server-gone connection-lost \
+             cpu-sets"
         );
     }
 
