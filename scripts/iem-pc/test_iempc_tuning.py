@@ -234,6 +234,19 @@ class RefreshTests(TuningBase):
         self.assertIn("WARNING: the tuning modules were not refreshed", err)
         self.assertIn("iempc tuning-install --sha", err)
 
+    def test_a_refresh_that_outlives_its_bound_is_named_as_still_running(self) -> None:
+        self.pc.texts["profile.json"] = True
+
+        def still_running(_m):
+            raise ip.StillRunning("ssh still running after 540 s (bounded on the PC; check 'iempc status', never force-end)")
+
+        self.on_install = still_running
+        code, docs, err = self.run_main("activate", "--sha", SHA)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(docs[-1]["tuning_refresh"], "still-running")
+        self.assertIn("the refresh may still run on the PC", err)
+        self.assertNotIn("were not refreshed", err)
+
     def test_an_unanswerable_profile_check_is_a_failed_refresh(self) -> None:
         self.pc.texts["profile.json"] = "ok"
         code, docs, err = self.run_main("activate", "--sha", SHA)
