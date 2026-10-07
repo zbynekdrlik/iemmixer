@@ -30,7 +30,7 @@ category = "mics"                      # mics | stems | tech (grouped inputs are
 owner = "member1"                      # X7: may edit this input's EQ; its first owned input is the member's "own" channel
 ```
 
-`IEMMIXER_ENGINE_PIPE` overrides `engine_pipe` (CI uses a socket path); `IEMMIXER_MODE` = `dev` (default) | `live` is set by the guard (S6). The `[activity]` table this note had (the band-activity alarm) was removed by the owner's decision of 2026-10-06 (#38); an older site's table still loads and is ignored. Validation: unique valid ids, owners are members, categories known. Ids the engine topology does not have are reported at connect and left out of the views (never guessed).
+`IEMMIXER_ENGINE_PIPE` overrides `engine_pipe` (CI uses a socket path); `IEMMIXER_MODE` (`dev` | `live`) is set by the guard (S6) and only logged by the server: no server behaviour depends on it since #38 (its `RunMode` type was removed in the review of PR #39). The `[activity]` table this note had (the band-activity alarm) was removed by the owner's decision of 2026-10-06 (#38); an older site's table still loads and is ignored. Validation: unique valid ids, owners are members, categories known. Ids the engine topology does not have are reported at connect and left out of the views (never guessed).
 
 ## 4. Engine client and mirror
 

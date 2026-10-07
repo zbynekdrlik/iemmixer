@@ -437,7 +437,6 @@ async fn a_loud_stage_raises_no_banner_and_no_notice() {
         };
     });
     let (_d, s) = h.state().await;
-    assert_eq!(s.mode, crate::RunMode::Dev);
     let (base, seen) = fake_push_service().await;
     s.config.write().await.vapid_private_key = vapid_private_key();
     s.push_store
