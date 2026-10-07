@@ -1088,6 +1088,53 @@ mod tests {
         (Box::new(d), ticks)
     }
 
+    /// A running backend with stream histograms (S7).
+    struct Measured(HistSnapshot);
+
+    impl Driver for Measured {
+        fn stats(&self) -> StreamStats {
+            StreamStats {
+                running: true,
+                ..StreamStats::default()
+            }
+        }
+
+        fn stop(self: Box<Self>) -> StopOutcome {
+            StopOutcome::Released
+        }
+
+        fn histograms(&self) -> Option<HistSnapshot> {
+            Some(self.0.clone())
+        }
+    }
+
+    /// `Status` carries the stream's two histograms and their overflow
+    /// bucket (S7 design note §3); a backend without them, or no backend,
+    /// none and 0.
+    #[test]
+    fn status_carries_both_histograms_and_their_top() {
+        let mut r = rig();
+        let h = HistSnapshot {
+            top_us: 667,
+            interval: vec![(333, 2990), (667, 1)],
+            process: vec![(40, 2991)],
+        };
+        r.c.driver = Some(Box::new(Measured(h.clone())));
+        let s = r.c.status_msg(&StreamStats::default());
+        assert_eq!(
+            (s.hist_top_us, s.interval_hist, s.process_hist),
+            (667, h.interval, h.process)
+        );
+        r.c.driver = None;
+        let s = r.c.status_msg(&StreamStats::default());
+        assert_eq!(s.hist_top_us, 0);
+        assert!(s.interval_hist.is_empty() && s.process_hist.is_empty());
+        let s = rig().c.status_msg(&StreamStats::default());
+        assert_eq!(s.hist_top_us, 0);
+        assert!(s.interval_hist.is_empty() && s.process_hist.is_empty());
+        assert_eq!(Idle.histograms(), None);
+    }
+
     #[test]
     fn the_backend_is_ticked_and_its_lock_failure_is_reported() {
         let mut r = rig();

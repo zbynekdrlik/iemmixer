@@ -758,6 +758,42 @@ mod tests {
         assert_eq!(partial.hil, vec![HilOut { tx: 94, peak: 0.0 }]);
     }
 
+    /// The stream histograms in `Status` (S7 design note §3): sparse
+    /// `[[bucket, count], …]`, additive both ways, absent without a stream.
+    #[test]
+    fn the_histograms_in_status_are_additive_and_sparse() {
+        let status = Status {
+            callbacks: 2991,
+            hist_top_us: 667,
+            interval_hist: vec![(333, 2990), (667, 1)],
+            process_hist: vec![(40, 2991)],
+            ..Status::default()
+        };
+        let json = serde_json::to_value(&status).unwrap();
+        assert_eq!(
+            json["interval_hist"],
+            serde_json::json!([[333, 2990], [667, 1]])
+        );
+        assert_eq!(json["process_hist"], serde_json::json!([[40, 2991]]));
+        assert_eq!(json["hist_top_us"], 667);
+        assert_eq!(
+            serde_json::from_value::<Status>(json.clone()).unwrap(),
+            status
+        );
+        // An old client reads the new message and ignores the new fields.
+        let old: OldStatus = serde_json::from_value(json).unwrap();
+        assert_eq!(old.callbacks, 2991);
+        // Without a stream: no histogram keys, the top 0.
+        let none = serde_json::to_value(Status::default()).unwrap();
+        assert_eq!(none.get("interval_hist"), None);
+        assert_eq!(none.get("process_hist"), None);
+        assert_eq!(none["hist_top_us"], 0);
+        // An old engine's message reads with empty histograms and top 0.
+        let from_old: Status = serde_json::from_str(r#"{"callbacks":4}"#).unwrap();
+        assert!(from_old.interval_hist.is_empty() && from_old.process_hist.is_empty());
+        assert_eq!(from_old.hist_top_us, 0);
+    }
+
     #[test]
     fn every_command_round_trips_and_its_op_is_listed() {
         let cmds = every_cmd();

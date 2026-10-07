@@ -458,6 +458,17 @@ fn meters_and_status_flow() {
         s.process_max_us
     );
     assert_eq!(s.cmd_backlog, 0);
+    // NullRt's stream histograms (S7): two periods at 32 samples, every
+    // callback's time counted before its callback was.
+    let total = |v: &[(u32, u64)]| v.iter().map(|e| e.1).sum::<u64>();
+    assert_eq!(s.hist_top_us, 667);
+    assert!(
+        total(&s.process_hist) >= s.callbacks,
+        "{} callback times, {} callbacks",
+        total(&s.process_hist),
+        s.callbacks
+    );
+    assert!(total(&s.interval_hist) > 0, "no interval recorded");
     e.shutdown();
 }
 
