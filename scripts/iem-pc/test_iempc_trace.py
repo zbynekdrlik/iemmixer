@@ -18,7 +18,7 @@ sys.path.insert(0, str(HERE.parent / "pc-tuning"))
 import iempc_trace  # noqa: E402,F401  (the module under test; `iempc trace` runs it)
 import iempc_tuning  # noqa: E402
 import latency_report as lr  # noqa: E402
-from test_iempc import SHA, SHA2, Base, ip, make_zip, sha256  # noqa: E402
+from test_iempc import OK, SHA, SHA2, Base, ip, make_zip, sha256  # noqa: E402
 from test_iempc_tuning import MODULES, PROFILE  # noqa: E402
 from test_latency_report import DPCISR_XPERF  # noqa: E402
 
@@ -70,12 +70,14 @@ class TraceBase(Base):
         self.pc.texts = {}
         self.report = DPCISR_XPERF
         self.fetches: list[tuple[str, str, str]] = []
+        self.bounds: list[tuple[str, float]] = []   # every PC script with its timeout
         ip.scp = self.scp
         ip.ssh_ps = self.ssh_ps
 
     def ssh_ps(self, env, script, timeout, event):
         """FakePc's answer; an answer {"pc_error": text} is the PC's own failure
         reply ({"ok": false, "error": text}), as module_script prints it."""
+        self.bounds.append((script, timeout))
         out = self.pc.ssh_ps(env, script, timeout, event)
         doc = json.loads(out.splitlines()[-1])
         if isinstance(doc.get("r"), dict) and "pc_error" in doc["r"]:
@@ -446,6 +448,151 @@ class TraceStopTests(TraceBase):
         self.assertEqual((code, docs), (1, []))
         self.assertIn("no DPC module read", err)
         self.assertIn("dpcisr.txt", err)
+
+
+OLD = "X:\\root\\traces\\old-20261007T060000Z"
+
+
+class TraceRecordTests(TraceBase):
+    """#15: a dev box that dies during `iempc trace` leaves its kernel trace
+    running, into the next event too. The trace is recorded in the state dir
+    before its start and cleared after a confirmed stop; `iempc event` (inside
+    its budget, before iemmode event) and `iempc dev` stop a recorded one first."""
+
+    def record(self) -> Path:
+        return ip.STATE_DIR / "trace.json"
+
+    def write_record(self) -> None:
+        ip.state_dir()
+        self.record().write_text(json.dumps({"dir": OLD, "run": "old-20261007T060000Z", "label": "old",
+                                             "started": "2026-10-07T08:00:00+02:00"}), encoding="utf-8")
+
+    def recorded_stops(self) -> list[tuple[str, float]]:
+        return [(s, t) for s, t in self.bounds if f"Stop-IemTraceSessions -Dir '{OLD}'" in s]
+
+    def test_a_trace_is_recorded_before_its_start_and_cleared_after_a_confirmed_stop(self) -> None:
+        seen = []
+        self.answers["Start-IemTrace"] = lambda: (seen.append(json.loads(self.record().read_text(encoding="utf-8"))),
+                                                  {"dir": "x", "started": "2026-10-07T06:00:00Z"})[1]
+        code, docs, err = self.trace()
+        self.assertEqual(code, 0, err)
+        [rec] = seen
+        self.assertEqual((rec["dir"], rec["run"], rec["label"]), (f"X:\\root\\traces\\{docs[-1]['run']}", docs[-1]["run"], "base-test"))
+        self.assertIn("started", rec)
+        self.assertFalse(self.record().exists())
+        # A stop that stopped both sessions after a flag clears it too.
+        with mock.patch.object(ip.time, "sleep", side_effect=lambda _s: self.flag()):
+            self.assertEqual(self.trace()[0], ip.PREEMPTED)
+        self.assertFalse(self.record().exists())
+
+    def test_a_stop_that_is_not_confirmed_keeps_the_record(self) -> None:
+        self.answers["Stop-IemTraceSessions"] = {"stopped": [], "gone": [], "kept": ["NT Kernel Logger"], "notes": []}
+        self.assertEqual(self.trace()[0], 1)
+        self.assertTrue(json.loads(self.record().read_text(encoding="utf-8"))["dir"].startswith("X:\\root\\traces\\base-test-"))
+        # A start whose reply was never read, then a stop of one session only: unconfirmed, kept.
+        self.record().unlink()
+
+        def still_running():
+            raise ip.StillRunning("ssh still running after 120 s (bounded on the PC; check 'iempc status', never force-end)")
+
+        self.answers["Start-IemTrace"] = still_running
+        self.answers["Stop-IemTraceSessions"] = {"stopped": ["NT Kernel Logger"], "gone": [], "kept": [], "notes": []}
+        self.assertEqual(self.trace()[0], 1)
+        self.assertTrue(self.record().exists())
+
+    def test_event_stops_the_recorded_trace_before_iemmode_event(self) -> None:
+        self.write_record()
+        at_event = []
+        self.pc.replies[("event",)] = lambda: (at_event.append((len(self.recorded_stops()), self.record().exists())), (0, OK))[1]
+        code, docs, err = self.run_main("event")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(at_event, [(1, False)])
+        [(script, _)] = self.recorded_stops()
+        self.assertEqual(self.steps(), [("stop", "ignore")])
+        self.assertIn(f"Import-Module (Join-Path {iempc_tuning.TUNING_DIR_PS} 'IemMeasure.psm1') -ArgumentList 'stop-only' -Force ; "
+                      f"$r = & {{ Stop-IemTraceSessions -Dir '{OLD}' -TimeoutSeconds 20 }}", script)
+        self.assertNotIn("TEMP", script)
+        self.assertIn({"recorded_trace": "stopped", "dir": OLD, "stopped": STOPPED["stopped"]}, docs)
+
+    def test_a_failed_recorded_stop_still_runs_the_event_path_and_keeps_the_record(self) -> None:
+        def cut():
+            raise ip.StepError("ssh: connection reset")
+
+        for answer in (cut, {"stopped": [], "gone": [], "kept": ["NT Kernel Logger"], "notes": []}):
+            self.write_record()
+            self.pc.calls.clear()
+            self.answers["Stop-IemTraceSessions"] = answer
+            code, docs, err = self.run_main("event")
+            self.assertEqual(code, 0, err)
+            self.assertEqual(self.pc.calls, [("iemmode.exe", ["event"], "ignore")])
+            self.assertEqual(json.loads(self.record().read_text(encoding="utf-8"))["dir"], OLD)
+            self.assertIn("ALARM", err)
+            self.assertIn(f"Stop-IemTraceSessions -Dir {OLD}", err)
+            self.assertEqual([d["recorded_trace"] for d in docs if "recorded_trace" in d], ["failed"])
+
+    def test_no_record_means_no_extra_call(self) -> None:
+        for argv in (["dev"], ["event"]):   # dev first: event writes the flag
+            self.pc.calls.clear()
+            code, _, err = self.run_main(*argv)
+            self.assertEqual(code, 0, err)
+            self.assertEqual((self.pc.modules, [c[1] for c in self.pc.calls]), ([], [argv]))
+
+    def test_a_record_whose_trace_is_gone_is_cleared_quietly(self) -> None:
+        self.write_record()
+        self.answers["Stop-IemTraceSessions"] = {"stopped": [], "gone": ["NT Kernel Logger"], "kept": [], "notes": []}
+        code, docs, err = self.run_main("event")
+        self.assertEqual((code, err), (0, ""))
+        self.assertFalse(self.record().exists())
+        self.assertFalse(any("recorded_trace" in d for d in docs))
+
+    def test_the_recorded_stop_fits_the_event_budget(self) -> None:
+        self.write_record()
+        ip.EVENT_BUDGET_S, ip.SWITCH_MIN_S = 200.0, 120.0
+        self.assertEqual(self.run_main("event")[0], 0)
+        [(_, bound)] = self.recorded_stops()
+        self.assertLessEqual(bound, 80.0)
+        self.assertGreater(bound, 70.0)
+        self.assertGreaterEqual(self.pc.timeouts[-1], 120.0 - 10)   # iemmode event keeps its minimum
+        # Too little left for a stop: none starts, the record stays, iemmode event still runs.
+        self.write_record()
+        self.bounds.clear()
+        ip.EVENT_BUDGET_S = 140.0
+        code, docs, err = self.run_main("event")
+        self.assertEqual((code, self.recorded_stops()), (0, []))
+        self.assertTrue(self.record().exists())
+        self.assertIn("ALARM", err)
+        self.assertEqual(self.pc.calls[-1], ("iemmode.exe", ["event"], "ignore"))
+
+    def test_dev_stops_a_recorded_trace_before_iemmode_dev(self) -> None:
+        self.write_record()
+        at_dev = []
+        self.pc.replies[("dev",)] = lambda: (at_dev.append(len(self.recorded_stops())), (0, OK))[1]
+        code, _, err = self.run_main("dev")
+        self.assertEqual((code, at_dev), (0, [1]), err)
+        self.assertFalse(self.record().exists())
+        # A failed stop: the dev entry goes on, the record stays for the next event or dev.
+        self.write_record()
+        self.answers["Stop-IemTraceSessions"] = {"pc_error": "logman failed"}
+        code, _, err = self.run_main("dev")
+        self.assertEqual(code, 0, err)
+        self.assertTrue(self.record().exists())
+        self.assertIn("ALARM", err)
+
+    def test_a_new_trace_stops_a_recorded_one_first(self) -> None:
+        self.write_record()
+        code, _, err = self.trace()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.names()[:3], ["preflight", "stop", "start"])
+        self.assertIn(f"-Dir '{OLD}'", self.pc.modules[1][0])
+        self.assertFalse(self.record().exists())
+        # It is not confirmed: no new trace starts over it.
+        self.write_record()
+        self.pc.modules.clear()
+        self.answers["Stop-IemTraceSessions"] = {"stopped": [], "gone": [], "kept": ["NT Kernel Logger"], "notes": []}
+        code, _, err = self.trace()
+        self.assertEqual((code, self.names()), (1, ["preflight", "stop"]))
+        self.assertIn(OLD, err)
+        self.assertEqual(json.loads(self.record().read_text(encoding="utf-8"))["dir"], OLD)
 
 
 class ImportTests(unittest.TestCase):
