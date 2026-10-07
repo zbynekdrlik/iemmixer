@@ -681,7 +681,8 @@ class PostBootRunTests(unittest.TestCase):
 
         tw.sw.ps = fake_ps
         for patch in (mock.patch.object(tw.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)),
-                      mock.patch.object(tw.time, "sleep")):
+                      mock.patch.object(tw.time, "sleep"),
+                      mock.patch.object(tw.sw, "plain_ps", fake_ps, create=True)):   # the preempt's first call (#15)
             patch.start()
             self.addCleanup(patch.stop)
         tw.sw.save_state({"id": "w", "card": "rebooting", "pref_original": 64, "pref_current": 64, "pref_restored": True,

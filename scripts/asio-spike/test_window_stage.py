@@ -184,6 +184,23 @@ class BundleRecordTests(unittest.TestCase):
             sw.cmd_setup(env, type("Args", (), {"sha": SHA})())
         self.assertEqual(seen, [SHA])
 
+    def test_the_preempts_first_call_imports_nothing_and_needs_no_bundle_record(self) -> None:
+        # #15, the last lane, item 1: without a bundle record every staged call refuses, yet
+        # the spike's stop file and the spike count go out first, in a script that imports nothing.
+        env = bundle_record(self, {"id": "w", "card": "free", "pref_original": 64, "pref_current": None,
+                                   "pref_restored": False, "runs": [], "closed": False})
+        with mock.patch.object(sw, "EVENT_NOW", sw.STATE.with_name("EVENT-NOW")), contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(sw.StepError, "setup --sha"):
+                sw.cmd_preempt(env)
+        self.assertEqual(len(self.sent), 1)
+        script = self.sent[0]
+        self.assertEqual(script, sw.plain_script(sw.stop_first_body(env)) + "\n")
+        for staged in ("Import-Module", "$iemSums", "ReadAllBytes", "bootstrap-stage", "SpikePc", "GoldenPc"):
+            self.assertNotIn(staged, script)
+        self.assertLess(script.index("New-Item -ItemType File -Force -Path 'R\\queue\\stop' | Out-Null"),
+                        script.index("@(Get-Process -Name asio_spike -ErrorAction SilentlyContinue).Count"))
+        self.assertTrue(script.endswith("ConvertTo-Json -InputObject $o -Depth 8 -Compress\n"))
+
 
 class CiScriptTests(unittest.TestCase):
     """poll-script and analysis-script take the bundle's SHA256SUMS (the CI
@@ -201,6 +218,14 @@ class CiScriptTests(unittest.TestCase):
             self.assertEqual(out.getvalue(), sw.ps_script("C:\\r", body, SUMS) + "\n")
         # The CI runner asserts the four modules' paths are all in the stage (#15).
         self.assertIn("Get-Module -Name SpikePc, GoldenPc, IemMeasure, IemTuning", tw.ANALYSIS_PROBE)
+
+    def test_the_preempts_first_script_prints_as_sent(self) -> None:
+        # The asio-spike job runs it on Windows PowerShell 5.1 (#15, the last lane, item 1).
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"SPIKE_ENV": "/nonexistent/asio-spike.env"}), contextlib.redirect_stdout(out):
+            code = tw.main(["preempt-script", "--root", "C:\\r"])
+        self.assertEqual(code, 0)
+        self.assertEqual(out.getvalue(), sw.plain_script(sw.stop_first_body({"PC_ROOT": "C:\\r"})) + "\n")
 
 
 if __name__ == "__main__":

@@ -13,6 +13,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tuning_window as tw  # noqa: E402
@@ -58,8 +59,8 @@ class TuningChangeTests(unittest.TestCase):
                             raise tw.StepError(f"PC step failed: {tw.sw.STEP_REFUSED} (the spike stop file exists: synthetic)")
                     self.events.append(f"{verb}:end")
                     return [{"key": "plan:active", "action": "written", "error": None}]
-            if body == "@(Get-Process -Name asio_spike -ErrorAction SilentlyContinue).Count":
-                return 0
+            if body.endswith("@(Get-Process -Name asio_spike -ErrorAction SilentlyContinue).Count"):
+                return 0   # alone, or after the preempt's stop file (#15)
             if "Stop-SpikeGracefully" in body:
                 return True
             if "holders = @(Get-GoldenAsioHolders" in body:
@@ -67,6 +68,9 @@ class TuningChangeTests(unittest.TestCase):
             return {"ok": True}   # the bring-back, the stop file's clean-up
 
         tw.sw.ps = fake_ps
+        patch = mock.patch.object(tw.sw, "plain_ps", fake_ps, create=True)   # the preempt's first call (#15)
+        patch.start()
+        self.addCleanup(patch.stop)
         tw.sw.save_state({"id": "w", "card": "free", "preflight": {"pref": 64}, "pref_original": 64, "pref_current": None,
                           "pref_restored": False, "runs": [], "closed": False})
         self.env = dict(ENV)

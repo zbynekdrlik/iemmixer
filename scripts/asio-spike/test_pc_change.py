@@ -11,6 +11,7 @@ import time
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import spike_window as sw  # noqa: E402  (first: pc_change reaches the state and the PC through it)
@@ -43,8 +44,8 @@ class FakeSpikePc:
             self.on_call(body)
         if self.refuse_stop_file and body.startswith("if (Test-Path -LiteralPath 'R\\queue\\stop')"):
             raise sw.StepError(f"PC step failed: {sw.STEP_REFUSED} (synthetic)")
-        if body == "@(Get-Process -Name asio_spike -ErrorAction SilentlyContinue).Count":
-            return 0
+        if body.endswith("@(Get-Process -Name asio_spike -ErrorAction SilentlyContinue).Count"):
+            return 0   # alone, or after the preempt's stop file (#15)
         if "Stop-SpikeGracefully" in body:
             return self.gone
         if "Invoke-SpikeBringBack" in body:
@@ -85,6 +86,10 @@ class PcChangeTests(unittest.TestCase):
         sw.alarm = self.alarms.append
         self.pc = FakeSpikePc()
         sw.ps = self.pc.ps
+        # The preempt's first call, plain PowerShell without a module (#15): the same fake PC.
+        patch = mock.patch.object(sw, "plain_ps", self.pc.ps, create=True)
+        patch.start()
+        self.addCleanup(patch.stop)
 
     def tearDown(self) -> None:
         sw.STATE, sw.EVENT_NOW, sw.ps, sw.alarm, sw.POLL_S, pcc.SETTLE_S = self.saved
@@ -402,6 +407,67 @@ class PcChangeTests(unittest.TestCase):
         with self.assertRaisesRegex(sw.StepError, "did not stop"):
             sw.cmd_preempt(ENV)
         self.assertFalse(any("Remove-Item" in c for c in self.pc.calls))
+
+    # #15, the last lane, item 1: the preempt's first PC action needs no module and no
+    # stage. It writes the spike's stop file and counts the spike in plain PowerShell,
+    # so a failure of the admin-only stage never leaves a spike holding the card.
+    def ordered(self, plain_reply=0, staged_fails: bool = False) -> list[tuple]:
+        order: list[tuple] = []
+        real = self.pc.ps
+
+        def plain(env, body, timeout=300, event="finish"):
+            order.append(("plain", body, timeout, event))
+            return plain_reply
+
+        def staged(env, body, timeout=300, event="finish"):
+            order.append(("staged", body, timeout, event))
+            if staged_fails:
+                raise sw.StepError("PC step failed: R\\bin\\SpikePc.psm1 may be changed by S-1-5-21-1-2-3-1001: refused")
+            return real(env, body, timeout, event)
+
+        sw.plain_ps, sw.ps = plain, staged
+        return order
+
+    def test_the_preempt_first_writes_the_stop_file_and_counts_the_spike_in_plain_powershell(self) -> None:
+        self.window()
+        order = self.ordered(plain_reply=1)
+        sw.cmd_preempt(ENV)
+        kind, body, timeout, event = order[0]
+        self.assertEqual((kind, timeout, event), ("plain", 60, "ignore"))   # spike_running's bound, as before
+        self.assertLess(body.index("New-Item -ItemType File -Force -Path 'R\\queue\\stop' | Out-Null"),
+                        body.index("@(Get-Process -Name asio_spike -ErrorAction SilentlyContinue).Count"))
+        self.assertEqual([o[0] for o in order].count("plain"), 1)
+        # Then the order as before: the graceful stop waits for the spike, REAPER comes back, the stop file goes.
+        steps = [next(v for v in ("Stop-SpikeGracefully", "Invoke-SpikeBringBack", "Remove-Item") if v in o[1])
+                 for o in order[1:] if any(v in o[1] for v in ("Stop-SpikeGracefully", "Invoke-SpikeBringBack", "Remove-Item"))]
+        self.assertEqual(steps, ["Stop-SpikeGracefully", "Invoke-SpikeBringBack", "Remove-Item"])
+        self.assertTrue(sw.load_state()["closed"])
+
+    def test_a_window_with_reaper_on_the_card_gets_the_stop_file_too_and_its_close_removes_it(self) -> None:
+        self.window(card="reaper")
+        order = self.ordered()
+        sw.cmd_preempt(ENV)
+        self.assertEqual(order[0][0], "plain")
+        self.assertIn("'R\\queue\\stop'", order[0][1])
+        self.assertTrue(any("Test-SpikeTaskBusy" in o[1] and "Remove-Item" in o[1] for o in order[1:]))
+        self.assertTrue(sw.load_state()["closed"])
+
+    def test_a_failed_stage_comes_after_the_stop_file(self) -> None:
+        self.window()
+        order = self.ordered(plain_reply=1, staged_fails=True)
+        with self.assertRaisesRegex(sw.StepError, "refused"):
+            sw.cmd_preempt(ENV)   # exit 1: iempc event lets the guard go on; the spike stops on its stop file
+        self.assertEqual([o[0] for o in order], ["plain", "staged"])
+        self.assertIn("Stop-SpikeGracefully", order[1][1])
+        self.assertFalse(sw.load_state()["closed"])   # the next preempt tries again
+
+    def test_a_first_reply_that_is_no_count_fails_the_preempt(self) -> None:
+        for reply in (True, "1", -1, None):
+            self.window()
+            order = self.ordered(plain_reply=reply)
+            with self.assertRaisesRegex(sw.StepError, "count"):
+                sw.cmd_preempt(ENV)
+            self.assertEqual([o[0] for o in order], ["plain"], reply)
 
 
 
