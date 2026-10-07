@@ -20,6 +20,8 @@ use crate::proto::GUARD_BUILD;
 const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
 const OTHER: &str = "89abcdef0123456789abcdef0123456789abcdef";
 const T0: u64 = 1_790_000_000;
+/// The generation of a guard that began no switch and routed no "ide event".
+const INIT: Generation = Generation { epoch: 0, fence: 0 };
 
 fn band_up() -> Facts {
     Facts {
@@ -72,10 +74,11 @@ fn texts(g: &Guard) -> Vec<String> {
 /// A request sent after the one before it was answered: the pipe queues it
 /// with the switch generation of that moment (`Shared::route`). A literal
 /// generation after a switch began (a request, the watch's crash fallback) is a
-/// request queued before that switch, answered as during it (`stale`).
+/// request queued before that switch, answered as during it (`stale`; a dev or
+/// live entry only once the fence moved, #42).
 fn ask(pc: &mut FakePc, g: &mut Guard, req: Request) -> Reply {
-    let epoch = g.shared.epoch();
-    handle(pc, g, req, epoch)
+    let seen = g.shared.generation();
+    handle(pc, g, req, seen)
 }
 
 // ---- the plan's exact tests ----
@@ -174,7 +177,7 @@ fn a_parked_engine_at_ide_event_is_no_success() {
     let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
     pc.fail(Call::EngineStop, "no DriverReleased within 10 s");
     pc.health(Health::Parked);
-    let r = handle(&mut pc, &mut g, Request::Event { dry_run: false }, 0);
+    let r = handle(&mut pc, &mut g, Request::Event { dry_run: false }, INIT);
     assert!(!r.ok);
     assert_eq!(r.mode, Mode::Event);
     assert!(
@@ -237,7 +240,7 @@ fn the_kept_serving_alarm_says_so() {
     let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
     pc.fail(Call::EngineStop, "no DriverReleased within 10 s");
     pc.health(Health::Healthy);
-    let r = handle(&mut pc, &mut g, Request::Event { dry_run: false }, 0);
+    let r = handle(&mut pc, &mut g, Request::Event { dry_run: false }, INIT);
     assert!(!r.ok);
     assert!(
         r.detail.starts_with(
@@ -259,7 +262,7 @@ fn the_kept_serving_alarm_says_so() {
 fn a_dev_entry_runs_the_whole_plan_and_serves() {
     let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
     g.state.pins.current = Some(SHA.into());
-    let r = handle(&mut pc, &mut g, dev(), 0);
+    let r = handle(&mut pc, &mut g, dev(), INIT);
     assert!(r.ok, "{r:?}");
     assert!(
         r.detail
@@ -304,6 +307,11 @@ fn a_dev_entry_runs_the_whole_plan_and_serves() {
         (Mode::Dev, None, Some(Outcome::Done))
     );
     assert_eq!(v.epoch, 1);
+    // A dev entry is no start's checks: it moves the fence (#42).
+    assert_eq!(
+        (v.fence, v.start_checks, v.began),
+        (1, false, Some((Mode::Event, Mode::Dev)))
+    );
 }
 
 /// An engine that ended while it held the card (a hard kill, a power loss)
@@ -316,7 +324,7 @@ fn a_dev_entry_restores_the_preference_right_before_the_engine_starts() {
     let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
     g.state.pins.current = Some(SHA.into());
     pc.pref_attempts = 1;
-    let r = handle(&mut pc, &mut g, dev(), 0);
+    let r = handle(&mut pc, &mut g, dev(), INIT);
     assert!(r.ok, "{r:?}");
     assert!(
         r.detail
@@ -342,7 +350,7 @@ fn a_dev_entry_restores_the_preference_right_before_the_engine_starts() {
     let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
     g.state.pins.current = Some(SHA.into());
     pc.fail(Call::PrefCheck, "3 restores failed");
-    let r = handle(&mut pc, &mut g, dev(), 0);
+    let r = handle(&mut pc, &mut g, dev(), INIT);
     assert!(!r.ok, "{r:?}");
     assert!(!pc.called(Call::EngineStart));
     // The entry's check, then the event plan's (REAPER with an alarm).
@@ -629,7 +637,7 @@ fn the_logon_task_and_the_event_plan_alarm_once_for_the_same_value() {
 fn a_failed_dev_step_alarms_and_unwinds_to_event() {
     let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
     pc.fail(Call::Data, "iem-migrate band ended with Some(1)");
-    let r = handle(&mut pc, &mut g, dev(), 0);
+    let r = handle(&mut pc, &mut g, dev(), INIT);
     assert!(!r.ok);
     assert!(
         r.detail.starts_with("dev: not entered; unwound to event"),
@@ -649,13 +657,20 @@ fn a_failed_dev_step_alarms_and_unwinds_to_event() {
     assert_eq!(a.text, "Data: iem-migrate band ended with Some(1)");
     assert!(!a.owner_question);
     assert_eq!(g.shared.view().epoch, 2);
+    // The entry and its unwind (event → event, no start's checks) each moved
+    // the fence (#42).
+    let v = g.shared.view();
+    assert_eq!(
+        (v.fence, v.start_checks, v.began),
+        (2, false, Some((Mode::Event, Mode::Event)))
+    );
 }
 
 #[test]
 fn a_failed_arm_readiness_or_identity_unwinds() {
     let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Event));
     // No active bundle: the identity check cannot name one.
-    let r = handle(&mut pc, &mut g, dev(), 0);
+    let r = handle(&mut pc, &mut g, dev(), INIT);
     assert!(!r.ok);
     assert_eq!(g.alarms.all()[0].text, "IdentityCheck: no active bundle");
     assert!(pc.called(Call::EngineStop));
@@ -695,7 +710,7 @@ fn engine_ready_restarts_its_window_once() {
         Call::EngineReady,
         "2 periods missed after the warm-up restart",
     );
-    let r = handle(&mut pc, &mut g, dev(), 0);
+    let r = handle(&mut pc, &mut g, dev(), INIT);
     assert!(!r.ok);
     assert_eq!(pc.ready_secs, [10]);
     assert!(!pc.called(Call::EngineArm));
@@ -718,7 +733,7 @@ fn an_engine_that_finds_its_state_directory_busy_is_started_again_within_the_ste
         g.state.pins.current = Some(SHA.into());
         pc.early_exits = exits;
         let t0 = Instant::now();
-        let r = handle(&mut pc, &mut g, dev(), 0);
+        let r = handle(&mut pc, &mut g, dev(), INIT);
         (pc, g, r, t0.elapsed())
     };
     let (pc, g, r, took) = entry(vec![Some(75)]);
@@ -799,7 +814,7 @@ fn ide_event_during_the_last_step_of_a_dev_switch_goes_to_event() {
     pc.delay(Call::ServerStart, Duration::from_millis(300));
     pc.fail(Call::ServerStart, "ports 80/443 are still held");
     let fired = preempt_after(&g, Step::EngineArm);
-    let r = handle(&mut pc, &mut g, Request::RehearseTeardown, 0);
+    let r = handle(&mut pc, &mut g, Request::RehearseTeardown, INIT);
     fired.join().unwrap();
     assert!(!r.ok);
     assert!(
@@ -954,7 +969,7 @@ fn the_handover_reports_what_it_saw() {
     let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Event));
     pc.reaper.peaks = vec![f64::NEG_INFINITY];
     pc.pref_attempts = 2;
-    let r = handle(&mut pc, &mut g, Request::Event { dry_run: false }, 0);
+    let r = handle(&mut pc, &mut g, Request::Event { dry_run: false }, INIT);
     assert!(r.ok, "{r:?}");
     assert_eq!(
         r.detail,
@@ -963,7 +978,7 @@ fn the_handover_reports_what_it_saw() {
     );
     // A preference already at the original is not reported.
     let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
-    let r = handle(&mut pc, &mut g, Request::Event { dry_run: false }, 0);
+    let r = handle(&mut pc, &mut g, Request::Event { dry_run: false }, INIT);
     assert_eq!(r.detail, "event: done; tuning exit: exit: ok");
 }
 
@@ -1072,7 +1087,7 @@ fn the_jobs_are_cancelled_before_the_runner_stops() {
         Guard::for_test(Mode::Dev),
     );
     g.state.job = Some(4242);
-    let r = handle(&mut pc, &mut g, Request::Event { dry_run: false }, 0);
+    let r = handle(&mut pc, &mut g, Request::Event { dry_run: false }, INIT);
     assert!(r.ok, "{r:?}");
     assert_eq!(g.state.job, None);
     assert!(r.detail.contains("HIL job 4242 cancelled"), "{}", r.detail);
@@ -1142,35 +1157,70 @@ fn jobs_are_refused_while_switching() {
         other => panic!("{other:?}"),
     }
     assert_eq!(shared.route(&Request::Subscribe), Route::Subscribe);
-    // A job queued before a switch began is answered as during it.
+    // A job queued before a switch began is answered as during it; a dev or
+    // live entry once the fence moved too (every switch but the start's
+    // checks moves it, #42), naming the switch.
     let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
-    let epoch = g.shared.epoch();
-    g.shared.update(|v| v.epoch += 1);
-    let r = handle(&mut pc, &mut g, Request::JobBegin { run: 4242 }, epoch);
+    let seen = g.shared.generation();
+    g.shared.update(|v| {
+        v.epoch += 1;
+        v.fence += 1;
+        v.began = Some((Mode::Dev, Mode::Event));
+    });
+    let r = handle(&mut pc, &mut g, Request::JobBegin { run: 4242 }, seen);
     assert_eq!((r.ok, r.detail.as_str()), (false, "switching"));
     assert_eq!(g.state.job, None);
-    let r = handle(&mut pc, &mut g, dev(), epoch);
-    assert_eq!((r.ok, r.detail.as_str()), (false, "busy"));
+    let r = handle(&mut pc, &mut g, dev(), seen);
+    assert_eq!(
+        (r.ok, r.detail.as_str()),
+        (false, "busy: a switch ran meanwhile (dev → event)")
+    );
     assert!(pc.calls().is_empty());
-    let r = handle(&mut pc, &mut g, Request::Event { dry_run: false }, epoch);
+    let r = handle(&mut pc, &mut g, Request::Event { dry_run: false }, seen);
     assert!(!r.ok);
     assert_eq!(r.detail, "a switch ran meanwhile; event: no switch yet");
     assert!(pc.calls().is_empty());
-    let r = handle(&mut pc, &mut g, Request::Status, epoch);
+    let r = handle(&mut pc, &mut g, Request::Status, seen);
     assert!(r.ok);
-    // The same generation is handled.
-    let r = handle(&mut pc, &mut g, Request::JobBegin { run: 4242 }, epoch + 1);
+    // Only the epoch moved (the start's checks ran): a job is still answered
+    // as during them, a dev entry is handled.
+    let seen = g.shared.generation();
+    assert_eq!(seen, Generation { epoch: 1, fence: 1 });
+    g.shared.update(|v| v.epoch += 1);
+    let r = handle(&mut pc, &mut g, Request::JobBegin { run: 4242 }, seen);
+    assert_eq!((r.ok, r.detail.as_str()), (false, "switching"));
+    let dry_dev = Request::Dev {
+        build: None,
+        dry_run: true,
+    };
+    let r = handle(&mut pc, &mut g, dry_dev, seen);
     assert!(r.ok, "{r:?}");
+    assert!(r.detail.starts_with("dry run: "), "{}", r.detail);
+    // Only the fence moved (an "ide event" was routed): the job is handled,
+    // the dev entry is not.
+    let seen = g.shared.generation();
+    g.shared.update(|v| v.fence += 1);
+    let r = handle(&mut pc, &mut g, dev(), seen);
+    assert_eq!(
+        (r.ok, r.detail.as_str()),
+        (false, "busy: a switch to event was asked meanwhile")
+    );
+    assert_eq!(g.state.mode, Mode::Dev);
+    let r = handle(&mut pc, &mut g, Request::JobBegin { run: 4242 }, seen);
+    assert!(r.ok, "{r:?}");
+    assert_eq!(g.state.job, Some(4242));
 }
 
 #[test]
 fn ide_event_preempts_or_waits_but_never_both() {
     let cancel = Cancel::default();
     let shared = Shared::new(cancel.clone());
-    // Idle: pre-empt whatever is queued ahead, then queue.
+    // Idle: pre-empt whatever is queued ahead, then queue. Every "ide event"
+    // moves the fence, so a dev or live entry queued before it never runs
+    // after it (#42).
     assert_eq!(
         shared.route(&Request::Event { dry_run: false }),
-        Route::Queue(0)
+        Route::Queue(Generation { epoch: 0, fence: 1 })
     );
     assert!(cancel.preempted());
     cancel.clear();
@@ -1184,6 +1234,7 @@ fn ide_event_preempts_or_waits_but_never_both() {
         Route::AwaitEnd("already switching to event")
     );
     assert!(!cancel.preempted());
+    assert_eq!(shared.view().fence, 2);
     // During any other switch: pre-empt it and wait.
     shared.update(|v| v.running = Some(Mode::Live));
     assert_eq!(
@@ -1191,13 +1242,82 @@ fn ide_event_preempts_or_waits_but_never_both() {
         Route::AwaitEnd("pre-empted the switch in progress")
     );
     assert!(cancel.preempted());
-    // Other requests while idle go to the daemon with the generation.
+    assert_eq!(shared.view().fence, 3);
+    // Other requests while idle go to the daemon with the generation; they
+    // move no fence (a dry run neither).
     shared.update(|v| v.running = None);
-    assert_eq!(shared.route(&Request::Quit), Route::Queue(3));
+    let now = Generation { epoch: 3, fence: 3 };
+    assert_eq!(shared.route(&Request::Quit), Route::Queue(now));
     assert_eq!(
         shared.route(&Request::Event { dry_run: true }),
-        Route::Queue(3)
+        Route::Queue(now)
     );
+    assert_eq!(shared.route(&dev()), Route::Queue(now));
+    assert!(matches!(shared.route(&Request::Status), Route::Now(_)));
+    assert_eq!(shared.route(&Request::Subscribe), Route::Subscribe);
+    assert_eq!(shared.view().generation(), now);
+}
+
+/// A dev queued before a switch that is not the start's checks never runs
+/// after it (#42): the crash loop's way back to REAPER, an "ide event" (from
+/// dev, or its checks in event), an entry that unwound. The reply names the
+/// switch that ran meanwhile; a live entry is answered the same.
+#[test]
+fn an_entry_queued_before_a_switch_back_to_reaper_never_runs() {
+    let ran = |from: &str, to: &str| format!("busy: a switch ran meanwhile ({from} → {to})");
+    let live = Request::Live {
+        build: SHA.into(),
+        trial: false,
+        dry_run: false,
+    };
+    // The crash loop goes back to REAPER: dev → event.
+    let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Dev));
+    let seen = g.shared.generation();
+    pc.exited = vec![(Kid::Engine, Some(70)); 3];
+    tick(&mut pc, &mut g, Instant::now());
+    assert_eq!(g.state.mode, Mode::Event);
+    let made = pc.calls().len();
+    for req in [dev(), live.clone()] {
+        let r = handle(&mut pc, &mut g, req, seen);
+        assert_eq!(
+            (r.ok, r.detail, r.mode),
+            (false, ran("dev", "event"), Mode::Event)
+        );
+    }
+    assert_eq!(pc.calls().len(), made, "nothing ran");
+    // "Ide event" from dev: dev → event.
+    let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
+    let seen = g.shared.generation();
+    assert!(ask(&mut pc, &mut g, Request::Event { dry_run: false }).ok);
+    let made = pc.calls().len();
+    let r = handle(&mut pc, &mut g, dev(), seen);
+    assert_eq!((r.ok, r.detail), (false, ran("dev", "event")));
+    assert_eq!(pc.calls().len(), made, "nothing ran");
+    assert_eq!(g.state.mode, Mode::Event);
+    // "Ide event" in event runs its checks (event → event), which are not
+    // the start's.
+    let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
+    g.state.pins.current = Some(SHA.into());
+    let seen = g.shared.generation();
+    assert!(ask(&mut pc, &mut g, Request::Event { dry_run: false }).ok);
+    let made = pc.calls().len();
+    for req in [dev(), live] {
+        let r = handle(&mut pc, &mut g, req, seen);
+        assert_eq!((r.ok, r.detail), (false, ran("event", "event")));
+    }
+    assert_eq!(pc.calls().len(), made, "nothing ran");
+    // An entry that failed and unwound (event → dev, then event → event).
+    let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
+    g.state.pins.current = Some(SHA.into());
+    let seen = g.shared.generation();
+    pc.fail(Call::Data, "iem-migrate band ended with Some(1)");
+    assert!(!ask(&mut pc, &mut g, dev()).ok);
+    assert_eq!(g.state.mode, Mode::Event);
+    let made = pc.calls().len();
+    let r = handle(&mut pc, &mut g, dev(), seen);
+    assert_eq!((r.ok, r.detail), (false, ran("event", "event")));
+    assert_eq!(pc.calls().len(), made, "nothing ran");
+    assert_eq!(pc.count(Call::ReaperSaveQuit), 1, "the failed entry's only");
 }
 
 #[test]
@@ -1304,7 +1424,7 @@ fn dry_run_changes_nothing() {
         g.state
             .bundles
             .insert(SHA.into(), record(SHA, "main", Hil::Green));
-        let r = handle(&mut pc, &mut g, req.clone(), 0);
+        let r = handle(&mut pc, &mut g, req.clone(), INIT);
         assert!(r.ok, "{req:?}: {r:?}");
         assert!(r.detail.starts_with("dry run: "), "{}", r.detail);
         assert_eq!(pc.mutating_calls(), Vec::<Call>::new(), "{req:?}");
@@ -1320,7 +1440,7 @@ fn dry_run_changes_nothing() {
             build: None,
             dry_run: true,
         },
-        0,
+        INIT,
     );
     assert_eq!(
         r.detail,
@@ -1335,7 +1455,7 @@ fn dry_run_changes_nothing() {
             build: None,
             dry_run: true,
         },
-        0,
+        INIT,
     );
     assert!(!r.ok);
     assert!(
@@ -1344,7 +1464,7 @@ fn dry_run_changes_nothing() {
         "{}",
         r.detail
     );
-    let r = handle(&mut pc, &mut g, Request::Event { dry_run: true }, 0);
+    let r = handle(&mut pc, &mut g, Request::Event { dry_run: true }, INIT);
     assert_eq!(
         r.detail,
         "dry run: TuningExit, PrefCheck, ReaperHandover, AppHandover, Fingerprint"
@@ -1590,7 +1710,7 @@ fn live_needs_an_installed_green_main_bundle() {
         dry_run: false,
     };
     let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Event));
-    let r = handle(&mut pc, &mut g, live(false), 0);
+    let r = handle(&mut pc, &mut g, live(false), INIT);
     assert_eq!(
         (r.ok, r.detail.as_str()),
         (false, format!("bundle {SHA} is not installed").as_str())
@@ -1598,18 +1718,18 @@ fn live_needs_an_installed_green_main_bundle() {
     g.state
         .bundles
         .insert(SHA.into(), record(SHA, "dev", Hil::Green));
-    let r = handle(&mut pc, &mut g, live(false), 0);
+    let r = handle(&mut pc, &mut g, live(false), INIT);
     assert_eq!(r.detail, format!("{SHA} is from \"dev\"; live needs main"));
     g.state
         .bundles
         .insert(SHA.into(), record(SHA, "main", Hil::Pending));
-    let r = handle(&mut pc, &mut g, live(false), 0);
+    let r = handle(&mut pc, &mut g, live(false), INIT);
     assert_eq!(r.detail, format!("{SHA}: HIL Pending; live needs green"));
     assert!(pc.calls().is_empty());
     g.state
         .bundles
         .insert(SHA.into(), record(SHA, "main", Hil::Green));
-    let r = handle(&mut pc, &mut g, live(false), 0);
+    let r = handle(&mut pc, &mut g, live(false), INIT);
     assert!(r.ok, "{r:?}");
     assert_eq!(g.state.mode, Mode::Live);
     assert_eq!(g.state.pins.current.as_deref(), Some(SHA));
@@ -1620,7 +1740,7 @@ fn live_needs_an_installed_green_main_bundle() {
     g.state
         .bundles
         .insert(SHA.into(), record(SHA, "main", Hil::Green));
-    let r = handle(&mut pc, &mut g, live(true), 0);
+    let r = handle(&mut pc, &mut g, live(true), INIT);
     assert!(r.ok, "{r:?}");
     assert_eq!(g.state.mode, Mode::Live);
 }
@@ -1632,13 +1752,13 @@ fn dev_with_a_build_pins_it() {
         build: Some(sha.into()),
         dry_run: false,
     };
-    let r = handle(&mut pc, &mut g, build(SHA), 0);
+    let r = handle(&mut pc, &mut g, build(SHA), INIT);
     assert_eq!(r.detail, format!("bundle {SHA} is not installed"));
     g.state.pins.current = Some(OTHER.into());
     g.state
         .bundles
         .insert(SHA.into(), record(SHA, "dev", Hil::Pending));
-    let r = handle(&mut pc, &mut g, build(SHA), 0);
+    let r = handle(&mut pc, &mut g, build(SHA), INIT);
     assert!(r.ok, "{r:?}");
     assert_eq!(
         g.state.pins,
@@ -1658,7 +1778,7 @@ fn dev_with_a_build_pins_it() {
 fn a_hil_job_begins_in_dev_without_reading_the_stage() {
     let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
     assert_eq!(
-        handle(&mut pc, &mut g, Request::JobBegin { run: 7 }, 0),
+        handle(&mut pc, &mut g, Request::JobBegin { run: 7 }, INIT),
         g.reply(true, "HIL job 7 began")
     );
     assert_eq!(g.state.job, Some(7));
@@ -1672,7 +1792,7 @@ fn a_hil_job_begins_in_dev_without_reading_the_stage() {
 fn a_dev_entry_reads_no_stage_and_never_waits_for_quiet() {
     let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
     g.state.pins.current = Some(SHA.into());
-    let r = handle(&mut pc, &mut g, dev(), 0);
+    let r = handle(&mut pc, &mut g, dev(), INIT);
     assert!(r.ok, "{r:?}");
     assert_eq!(g.state.mode, Mode::Dev);
     assert_eq!(
@@ -1681,7 +1801,7 @@ fn a_dev_entry_reads_no_stage_and_never_waits_for_quiet() {
     );
     let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Event));
     g.state.pins.current = Some(SHA.into());
-    let r = handle(&mut pc, &mut g, dev(), 0);
+    let r = handle(&mut pc, &mut g, dev(), INIT);
     assert!(r.ok, "{r:?}");
     assert_eq!(
         steps(&pc).get(..2),
@@ -1693,25 +1813,25 @@ fn a_dev_entry_reads_no_stage_and_never_waits_for_quiet() {
 fn a_job_begins_once_and_ends_by_its_run() {
     let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
     let begin = Request::JobBegin { run: 7 };
-    let r = handle(&mut pc, &mut g, begin.clone(), 0);
+    let r = handle(&mut pc, &mut g, begin.clone(), INIT);
     assert_eq!((r.ok, r.detail.as_str()), (true, "HIL job 7 began"));
     assert_eq!(g.state.job, Some(7));
-    let r = handle(&mut pc, &mut g, Request::JobBegin { run: 8 }, 0);
+    let r = handle(&mut pc, &mut g, Request::JobBegin { run: 8 }, INIT);
     assert_eq!(r.detail, "HIL job 7 has not ended");
     // job-end
-    let r = handle(&mut pc, &mut g, Request::JobEnd { run: 8 }, 0);
+    let r = handle(&mut pc, &mut g, Request::JobEnd { run: 8 }, INIT);
     assert_eq!((r.ok, r.detail.as_str()), (false, "HIL job 7 runs, not 8"));
-    let r = handle(&mut pc, &mut g, Request::JobEnd { run: 7 }, 0);
+    let r = handle(&mut pc, &mut g, Request::JobEnd { run: 7 }, INIT);
     assert_eq!((r.ok, r.detail.as_str()), (true, "HIL job 7 ended"));
     assert_eq!(g.state.job, None);
-    let r = handle(&mut pc, &mut g, Request::JobEnd { run: 7 }, 0);
+    let r = handle(&mut pc, &mut g, Request::JobEnd { run: 7 }, INIT);
     assert_eq!(
         (r.ok, r.detail.as_str()),
         (true, "no HIL job runs (job 7 has ended)")
     );
     // Only in dev.
     g.state.mode = Mode::Live;
-    let r = handle(&mut pc, &mut g, begin, 0);
+    let r = handle(&mut pc, &mut g, begin, INIT);
     assert_eq!(r.detail, "a HIL job is for dev; the mode is live");
 }
 
@@ -1724,7 +1844,7 @@ fn the_test_signal_goes_only_to_the_hil_outputs() {
         dbfs,
         ttl_s,
     };
-    let r = handle(&mut pc, &mut g, signal(-20.0, 5.0), 0);
+    let r = handle(&mut pc, &mut g, signal(-20.0, 5.0), INIT);
     assert_eq!(
         (r.ok, r.detail.as_str()),
         (
@@ -1753,21 +1873,21 @@ fn the_test_signal_goes_only_to_the_hil_outputs() {
         ),
         (-30.0, f64::NAN, "a TTL of NaN s is not a positive time"),
     ] {
-        let r = handle(&mut pc, &mut g, signal(dbfs, ttl), 0);
+        let r = handle(&mut pc, &mut g, signal(dbfs, ttl), INIT);
         assert_eq!((r.ok, r.detail.as_str()), (false, why));
     }
     assert_eq!(pc.hil_signals.len(), 1);
     pc.fail(Call::HilSignal, "not a supervisor");
-    let r = handle(&mut pc, &mut g, signal(-30.0, 1.0), 0);
+    let r = handle(&mut pc, &mut g, signal(-30.0, 1.0), INIT);
     assert_eq!((r.ok, r.detail.as_str()), (false, "not a supervisor"));
     g.site.hil_tx.clear();
-    let r = handle(&mut pc, &mut g, signal(-30.0, 1.0), 0);
+    let r = handle(&mut pc, &mut g, signal(-30.0, 1.0), INIT);
     assert_eq!(
         r.detail,
         "[guard] hil_tx is empty: no card output may carry a test signal"
     );
     g.state.mode = Mode::Event;
-    let r = handle(&mut pc, &mut g, signal(-30.0, 1.0), 0);
+    let r = handle(&mut pc, &mut g, signal(-30.0, 1.0), INIT);
     assert_eq!(r.detail, "test-signal is for dev; the mode is event");
     assert_eq!(HIL_MAX_DBFS, -20.0);
 }
@@ -1781,16 +1901,16 @@ fn a_test_signal_needs_a_begun_job_and_at_most_60_s() {
         ttl_s,
     };
     // Without a begun job: refused.
-    let r = handle(&mut pc, &mut g, signal(5.0), 0);
+    let r = handle(&mut pc, &mut g, signal(5.0), INIT);
     assert_eq!(
         (r.ok, r.detail.as_str()),
         (false, "a test signal needs a begun HIL job (job-begin)")
     );
     assert!(!pc.called(Call::HilSignal));
     g.state.job = Some(7);
-    let r = handle(&mut pc, &mut g, signal(60.0), 0);
+    let r = handle(&mut pc, &mut g, signal(60.0), INIT);
     assert!(r.ok, "{r:?}");
-    let r = handle(&mut pc, &mut g, signal(60.5), 0);
+    let r = handle(&mut pc, &mut g, signal(60.5), INIT);
     assert_eq!(
         (r.ok, r.detail.as_str()),
         (false, "a TTL of 60.5 s is above the HIL limit of 60 s")
@@ -1807,20 +1927,20 @@ fn a_hil_report_records_the_result() {
         hil: hil.into(),
         detail: "120 s at 32".into(),
     };
-    let r = handle(&mut pc, &mut g, report("green"), 0);
+    let r = handle(&mut pc, &mut g, report("green"), INIT);
     assert_eq!(r.detail, format!("bundle {SHA} is not installed"));
     g.state
         .bundles
         .insert(SHA.into(), record(SHA, "main", Hil::Pending));
-    let r = handle(&mut pc, &mut g, report("green"), 0);
+    let r = handle(&mut pc, &mut g, report("green"), INIT);
     assert_eq!(
         (r.ok, r.detail.clone()),
         (true, format!("bundle {SHA}: HIL green (120 s at 32)"))
     );
     assert_eq!(g.state.bundles[SHA].hil, Hil::Green);
-    handle(&mut pc, &mut g, report("red"), 0);
+    handle(&mut pc, &mut g, report("red"), INIT);
     assert_eq!(g.state.bundles[SHA].hil, Hil::Red);
-    let r = handle(&mut pc, &mut g, report("yellow"), 0);
+    let r = handle(&mut pc, &mut g, report("yellow"), INIT);
     assert_eq!(
         (r.ok, r.detail.as_str()),
         (false, "HIL result \"yellow\": green or red")
@@ -1845,7 +1965,7 @@ fn dev_only_requests_are_refused_elsewhere() {
         ),
     ] {
         let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
-        let r = handle(&mut pc, &mut g, req, 0);
+        let r = handle(&mut pc, &mut g, req, INIT);
         assert_eq!(
             (r.ok, r.detail),
             (false, format!("{what} is for dev; the mode is event"))
@@ -1863,27 +1983,27 @@ fn engine_and_runner_requests_in_dev() {
         }),
         Guard::for_test(Mode::Dev),
     );
-    let r = handle(&mut pc, &mut g, Request::ForceReopen, 0);
+    let r = handle(&mut pc, &mut g, Request::ForceReopen, INIT);
     assert_eq!(
         (r.ok, r.detail.as_str()),
         (true, "the engine reopened the driver")
     );
     g.state.job = Some(3);
-    let r = handle(&mut pc, &mut g, Request::RunnerStop, 0);
+    let r = handle(&mut pc, &mut g, Request::RunnerStop, INIT);
     assert_eq!(r.detail, "HIL job 3 runs: the runner is not idle");
     assert!(!pc.called(Call::RunnerStop));
     g.state.job = None;
-    let r = handle(&mut pc, &mut g, Request::RunnerStop, 0);
+    let r = handle(&mut pc, &mut g, Request::RunnerStop, INIT);
     assert_eq!((r.ok, r.detail.as_str()), (true, "the runner stopped"));
     pc.fail(Call::ForceReopen, "the reset budget is spent");
-    let r = handle(&mut pc, &mut g, Request::ForceReopen, 0);
+    let r = handle(&mut pc, &mut g, Request::ForceReopen, INIT);
     assert_eq!(
         (r.ok, r.detail.as_str()),
         (false, "the reset budget is spent")
     );
     // The probe task runs in any mode.
     g.state.mode = Mode::Event;
-    let r = handle(&mut pc, &mut g, Request::ProbeTask, 0);
+    let r = handle(&mut pc, &mut g, Request::ProbeTask, INIT);
     assert_eq!(
         (r.ok, r.detail.as_str()),
         (true, "the probe task ended with 0")
@@ -1904,7 +2024,7 @@ fn rehearse_teardown_is_refused_inside_a_hil_job() {
     );
     g.state.pins.current = Some(SHA.into());
     g.state.job = Some(3);
-    let r = handle(&mut pc, &mut g, Request::RehearseTeardown, 0);
+    let r = handle(&mut pc, &mut g, Request::RehearseTeardown, INIT);
     assert_eq!(
         (r.ok, r.detail.as_str()),
         (
@@ -1917,7 +2037,7 @@ fn rehearse_teardown_is_refused_inside_a_hil_job() {
     assert!(g.alarms.all().is_empty(), "{:?}", texts(&g));
     // After the job the rehearsal runs.
     g.state.job = None;
-    let r = handle(&mut pc, &mut g, Request::RehearseTeardown, 0);
+    let r = handle(&mut pc, &mut g, Request::RehearseTeardown, INIT);
     assert!(r.ok, "{r:?}");
     assert!(pc.called(Call::RunnerStop) && pc.called(Call::EngineStop));
 }
@@ -1940,12 +2060,12 @@ fn engine_of(spawns: u64, last_exit: Option<i32>) -> EngineStatus {
 #[test]
 fn replies_carry_the_running_engine() {
     let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Dev));
-    let r = handle(&mut pc, &mut g, Request::Status, 0);
+    let r = handle(&mut pc, &mut g, Request::Status, INIT);
     assert_eq!(r.engine, None, "no engine runs");
     pc.facts.engine = true;
     pc.seen.status.missed = 1;
     pc.seen.status.resets = 2;
-    let r = handle(&mut pc, &mut g, Request::Status, 0);
+    let r = handle(&mut pc, &mut g, Request::Status, INIT);
     assert_eq!(
         r.engine,
         Some(EngineStatus {
@@ -1978,7 +2098,7 @@ fn replies_carry_the_running_engine() {
 fn an_engine_coming_up_is_absent_from_the_reply() {
     let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
     pc.engine_up = false;
-    let r = handle(&mut pc, &mut g, Request::Status, 0);
+    let r = handle(&mut pc, &mut g, Request::Status, INIT);
     assert_eq!(r.engine, None);
     tick(&mut pc, &mut g, Instant::now());
     match g.shared.route(&Request::Status) {
@@ -1991,7 +2111,7 @@ fn an_engine_coming_up_is_absent_from_the_reply() {
         Route::Now(r) => assert_eq!(r.engine, Some(engine_of(0, None))),
         other => panic!("{other:?}"),
     }
-    let r = handle(&mut pc, &mut g, Request::Status, 0);
+    let r = handle(&mut pc, &mut g, Request::Status, INIT);
     assert_eq!(r.engine, Some(engine_of(0, None)));
 }
 
@@ -2024,13 +2144,13 @@ fn the_engines_hil_flags_are_for_a_dev_job_only() {
 #[test]
 fn inject_fault_is_refused_outside_a_dev_job() {
     let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Event));
-    let r = handle(&mut pc, &mut g, Request::InjectFault, 0);
+    let r = handle(&mut pc, &mut g, Request::InjectFault, INIT);
     assert_eq!(
         (r.ok, r.detail.as_str()),
         (false, "inject-fault is for dev; the mode is event")
     );
     g.state.mode = Mode::Dev;
-    let r = handle(&mut pc, &mut g, Request::InjectFault, 0);
+    let r = handle(&mut pc, &mut g, Request::InjectFault, INIT);
     assert_eq!(
         (r.ok, r.detail.as_str()),
         (false, "a fault needs a begun HIL job (job-begin)")
@@ -2042,7 +2162,7 @@ fn inject_fault_is_refused_outside_a_dev_job() {
         Call::InjectFault,
         "inject_fault: the engine runs without the fault-injection flag",
     );
-    let r = handle(&mut pc, &mut g, Request::InjectFault, 0);
+    let r = handle(&mut pc, &mut g, Request::InjectFault, INIT);
     assert_eq!(
         (r.ok, r.detail.as_str()),
         (
@@ -2056,13 +2176,13 @@ fn inject_fault_is_refused_outside_a_dev_job() {
 #[test]
 fn inject_seh_is_refused_outside_a_dev_job() {
     let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Event));
-    let r = handle(&mut pc, &mut g, Request::InjectSeh, 0);
+    let r = handle(&mut pc, &mut g, Request::InjectSeh, INIT);
     assert_eq!(
         (r.ok, r.detail.as_str()),
         (false, "inject-seh is for dev; the mode is event")
     );
     g.state.mode = Mode::Dev;
-    let r = handle(&mut pc, &mut g, Request::InjectSeh, 0);
+    let r = handle(&mut pc, &mut g, Request::InjectSeh, INIT);
     assert_eq!(
         (r.ok, r.detail.as_str()),
         (false, "an SEH test needs a begun HIL job (job-begin)")
@@ -2074,7 +2194,7 @@ fn inject_seh_is_refused_outside_a_dev_job() {
         Call::InjectSeh,
         "inject_seh: the engine runs without the fault-injection flag",
     );
-    let r = handle(&mut pc, &mut g, Request::InjectSeh, 0);
+    let r = handle(&mut pc, &mut g, Request::InjectSeh, INIT);
     assert_eq!(
         (r.ok, r.detail.as_str()),
         (
@@ -2096,7 +2216,7 @@ fn inject_park_is_refused_in_live_in_event_and_outside_a_job() {
     for mode in [Mode::Live, Mode::Event] {
         let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(mode));
         g.state.job = Some(7);
-        let r = handle(&mut pc, &mut g, Request::InjectPark, 0);
+        let r = handle(&mut pc, &mut g, Request::InjectPark, INIT);
         assert_eq!(
             (r.ok, r.detail),
             (
@@ -2107,7 +2227,7 @@ fn inject_park_is_refused_in_live_in_event_and_outside_a_job() {
         assert!(!pc.called(Call::InjectPark), "{mode:?}");
     }
     let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
-    let r = handle(&mut pc, &mut g, Request::InjectPark, 0);
+    let r = handle(&mut pc, &mut g, Request::InjectPark, INIT);
     assert_eq!(
         (r.ok, r.detail.as_str()),
         (
@@ -2121,7 +2241,7 @@ fn inject_park_is_refused_in_live_in_event_and_outside_a_job() {
         Call::InjectPark,
         "inject_park: the engine runs without the fault-injection flag",
     );
-    let r = handle(&mut pc, &mut g, Request::InjectPark, 0);
+    let r = handle(&mut pc, &mut g, Request::InjectPark, INIT);
     assert_eq!(
         (r.ok, r.detail.as_str()),
         (
@@ -2141,7 +2261,7 @@ fn inject_park_is_refused_in_live_in_event_and_outside_a_job() {
 fn an_injected_park_leaves_the_engine_running_parked() {
     let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
     g.state.job = Some(7);
-    let r = handle(&mut pc, &mut g, Request::InjectPark, 0);
+    let r = handle(&mut pc, &mut g, Request::InjectPark, INIT);
     assert_eq!(
         (r.ok, r.detail.as_str()),
         (
@@ -2157,7 +2277,7 @@ fn an_injected_park_leaves_the_engine_running_parked() {
     let at = Instant::now();
     tick(&mut pc, &mut g, at);
     tick(&mut pc, &mut g, at + Duration::from_secs(5));
-    let r = handle(&mut pc, &mut g, Request::Status, 0);
+    let r = handle(&mut pc, &mut g, Request::Status, INIT);
     assert!(
         r.engine.as_ref().is_some_and(|e| e.parked),
         "{:?}",
@@ -2247,7 +2367,7 @@ fn a_parked_engine_outside_a_hil_job_alarms_once_until_it_is_no_longer_parked() 
 fn an_injected_fault_is_respawned_once_and_reported() {
     let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
     g.state.job = Some(7);
-    let r = handle(&mut pc, &mut g, Request::InjectFault, 0);
+    let r = handle(&mut pc, &mut g, Request::InjectFault, INIT);
     assert_eq!(
         (r.ok, r.detail.as_str()),
         (
@@ -2263,12 +2383,12 @@ fn an_injected_fault_is_respawned_once_and_reported() {
     let at = Instant::now();
     tick(&mut pc, &mut g, at);
     assert!(!pc.called(Call::EngineStart));
-    let r = handle(&mut pc, &mut g, Request::Status, 0);
+    let r = handle(&mut pc, &mut g, Request::Status, INIT);
     assert_eq!(r.engine, None, "no engine between the exit and the respawn");
     tick(&mut pc, &mut g, at + Duration::from_secs(1));
     tick(&mut pc, &mut g, at + Duration::from_secs(5));
     assert_eq!(pc.engine_starts, [(false, true)]);
-    let r = handle(&mut pc, &mut g, Request::Status, 0);
+    let r = handle(&mut pc, &mut g, Request::Status, INIT);
     assert_eq!(r.engine, Some(engine_of(1, Some(70))));
     assert_eq!(g.state.mode, Mode::Dev);
     assert!(g.alarms.all().is_empty(), "{:?}", texts(&g));
@@ -2288,7 +2408,7 @@ fn activate_in_a_job_restarts_the_engine_and_the_server() {
     assert!(install_bundle(&mut g, &zip).0);
     // The pin before this one keeps its Defender exclusions.
     g.state.pins.current = Some(OTHER.into());
-    let r = handle(&mut pc, &mut g, Request::Activate { sha: SHA.into() }, 0);
+    let r = handle(&mut pc, &mut g, Request::Activate { sha: SHA.into() }, INIT);
     assert_eq!(pc.excluded, [(SHA.to_owned(), vec![OTHER.to_owned()])]);
     assert_eq!(
         (r.ok, r.detail.clone()),
@@ -2325,7 +2445,7 @@ fn activate_in_a_job_restarts_the_engine_and_the_server() {
     // Outside a job the engine is not touched.
     let mut pc = FakePc::new(iemmixer_up());
     g.state.job = None;
-    let r = handle(&mut pc, &mut g, Request::Activate { sha: SHA.into() }, 0);
+    let r = handle(&mut pc, &mut g, Request::Activate { sha: SHA.into() }, INIT);
     assert_eq!((r.ok, r.detail.clone()), (true, format!("activated {SHA}")));
     assert!(!pc.called(Call::EngineStop) && !pc.called(Call::EngineStart));
 }
@@ -2363,7 +2483,7 @@ fn activate_in_an_idle_event_hands_over_and_leaves_reaper_and_the_app_alone() {
     let dir = tempfile::tempdir().unwrap();
     let mut g = installed_in_event(dir.path());
     let mut pc = FakePc::new(band_up());
-    let r = handle(&mut pc, &mut g, Request::Activate { sha: SHA.into() }, 0);
+    let r = handle(&mut pc, &mut g, Request::Activate { sha: SHA.into() }, INIT);
     assert_eq!(
         (r.ok, r.detail.clone()),
         (
@@ -2420,7 +2540,7 @@ fn activate_in_event_is_refused_while_the_guard_is_not_idle() {
         tray: true,
         ..band_up()
     });
-    let r = handle(&mut pc, &mut g, activate(), 0);
+    let r = handle(&mut pc, &mut g, activate(), INIT);
     assert_eq!(
         (r.ok, r.detail.as_str()),
         (
@@ -2437,7 +2557,7 @@ fn activate_in_event_is_refused_while_the_guard_is_not_idle() {
         done: vec![Step::Precheck],
         started: T0,
     });
-    let r = handle(&mut pc, &mut g, activate(), 0);
+    let r = handle(&mut pc, &mut g, activate(), INIT);
     assert_eq!(
         (r.ok, r.detail.as_str()),
         (false, "a switch is in progress: activate waits for its end")
@@ -2445,7 +2565,7 @@ fn activate_in_event_is_refused_while_the_guard_is_not_idle() {
     g.state.switching = None;
     // A HIL job that did not end.
     g.state.job = Some(7);
-    let r = handle(&mut pc, &mut g, activate(), 0);
+    let r = handle(&mut pc, &mut g, activate(), INIT);
     assert_eq!(
         (r.ok, r.detail.as_str()),
         (false, "HIL job 7 runs: activate waits for its end")
@@ -2466,7 +2586,7 @@ fn activate_in_event_is_refused_while_the_guard_is_not_idle() {
         Request::Activate {
             sha: missing.clone(),
         },
-        0,
+        INIT,
     );
     assert_eq!(
         (r.ok, r.detail),
@@ -2482,7 +2602,7 @@ fn activate_in_live_is_refused() {
     g.state
         .bundles
         .insert(SHA.into(), record(SHA, "main", Hil::Green));
-    let r = handle(&mut pc, &mut g, Request::Activate { sha: SHA.into() }, 0);
+    let r = handle(&mut pc, &mut g, Request::Activate { sha: SHA.into() }, INIT);
     assert_eq!(
         (r.ok, r.detail.as_str()),
         (
@@ -2641,7 +2761,7 @@ fn install_site_in_a_job_restarts_only_the_engine_and_the_server() {
     let site = Request::InstallSite {
         path: "site.toml".into(),
     };
-    let r = handle(&mut pc, &mut g, site.clone(), 0);
+    let r = handle(&mut pc, &mut g, site.clone(), INIT);
     assert_eq!(
         (r.ok, r.detail.as_str()),
         (
@@ -2668,7 +2788,7 @@ fn install_site_in_a_job_restarts_only_the_engine_and_the_server() {
     g.state.pins.current = Some(SHA.into());
     g.state.job = Some(7);
     pc.fail(Call::ServerStart, "ports 80/443 are still held");
-    let r = handle(&mut pc, &mut g, site, 0);
+    let r = handle(&mut pc, &mut g, site, INIT);
     assert!(!r.ok);
     assert!(
         r.detail
@@ -2703,7 +2823,7 @@ fn a_job_restart_restores_the_preference_right_before_the_engine_starts() {
     let site = Request::InstallSite {
         path: "site.toml".into(),
     };
-    let r = handle(&mut pc, &mut g, site.clone(), 0);
+    let r = handle(&mut pc, &mut g, site.clone(), INIT);
     assert!(r.ok, "{r:?}");
     assert!(
         r.detail
@@ -2737,7 +2857,7 @@ fn a_job_restart_restores_the_preference_right_before_the_engine_starts() {
         Call::PrefCheck,
         "writing the preferred buffer failed: access denied",
     );
-    let r = handle(&mut pc, &mut g, site, 0);
+    let r = handle(&mut pc, &mut g, site, INIT);
     assert!(!r.ok);
     assert!(
         r.detail.starts_with(
@@ -2768,7 +2888,7 @@ fn install_site_checks_the_site_and_enters_dev_again() {
         Request::InstallSite {
             path: "bad.toml".into(),
         },
-        0,
+        INIT,
     );
     assert_eq!(
         (r.ok, r.detail.as_str()),
@@ -2783,7 +2903,7 @@ fn install_site_checks_the_site_and_enters_dev_again() {
         Request::InstallSite {
             path: "site.toml".into(),
         },
-        0,
+        INIT,
     );
     assert!(r.ok, "{r:?}");
     assert!(
@@ -2810,7 +2930,7 @@ fn an_install_site_whose_dev_entry_unwinds_is_no_success() {
         Request::InstallSite {
             path: "site.toml".into(),
         },
-        0,
+        INIT,
     );
     assert!(!r.ok);
     assert!(
@@ -2842,10 +2962,11 @@ fn ide_event_ends_the_site_check_at_once() {
         Request::InstallSite {
             path: "site.toml".into(),
         },
-        0,
+        INIT,
     );
     let (route, at) = fired.join().unwrap();
-    assert_eq!(route, Route::Queue(0));
+    // Its own generation holds the fence it moved (#42).
+    assert_eq!(route, Route::Queue(Generation { epoch: 0, fence: 1 }));
     assert!(at.elapsed() < Duration::from_secs(1), "{:?}", at.elapsed());
     assert_eq!(
         (r.ok, r.detail.as_str()),
@@ -2859,7 +2980,7 @@ fn ide_event_ends_the_site_check_at_once() {
 fn rehearse_teardown_never_starts_reaper() {
     let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
     g.state.pins.current = Some(SHA.into());
-    let r = handle(&mut pc, &mut g, Request::RehearseTeardown, 0);
+    let r = handle(&mut pc, &mut g, Request::RehearseTeardown, INIT);
     assert!(r.ok, "{r:?}");
     assert!(
         r.detail.starts_with(
@@ -3016,7 +3137,7 @@ fn a_rehearsal_that_finds_problems_says_so() {
 #[test]
 fn alarm_test_ack_status_quit_and_subscribe() {
     let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Event));
-    let r = handle(&mut pc, &mut g, Request::AlarmTest, 0);
+    let r = handle(&mut pc, &mut g, Request::AlarmTest, INIT);
     assert_eq!(
         (r.ok, r.detail.as_str()),
         (true, "the test alarm reached the engineer's devices")
@@ -3031,29 +3152,29 @@ fn alarm_test_ack_status_quit_and_subscribe() {
     );
     assert_eq!(r.alarms.len(), 1);
     let id = r.alarms[0].id;
-    let r = handle(&mut pc, &mut g, Request::AlarmAck { id }, 0);
+    let r = handle(&mut pc, &mut g, Request::AlarmAck { id }, INIT);
     assert_eq!(
         (r.ok, r.detail.clone()),
         (true, format!("alarm {id} acknowledged"))
     );
     assert!(r.alarms[0].acked);
-    let r = handle(&mut pc, &mut g, Request::AlarmAck { id: 99 }, 0);
+    let r = handle(&mut pc, &mut g, Request::AlarmAck { id: 99 }, INIT);
     assert_eq!((r.ok, r.detail.as_str()), (false, "no alarm 99"));
     pc.fail(Call::Notify, "no device took the notice");
-    let r = handle(&mut pc, &mut g, Request::AlarmTest, 0);
+    let r = handle(&mut pc, &mut g, Request::AlarmTest, INIT);
     assert_eq!(
         (r.ok, r.detail.as_str()),
         (false, "the test alarm was not delivered")
     );
-    let r = handle(&mut pc, &mut g, Request::Status, 0);
+    let r = handle(&mut pc, &mut g, Request::Status, INIT);
     assert_eq!(
         (r.ok, r.detail.as_str()),
         (true, "mode event; no bundle; 1 unacknowledged alarms")
     );
-    let r = handle(&mut pc, &mut g, Request::Subscribe, 0);
+    let r = handle(&mut pc, &mut g, Request::Subscribe, INIT);
     assert!(r.ok);
     assert!(!g.quit);
-    let r = handle(&mut pc, &mut g, Request::Quit, 0);
+    let r = handle(&mut pc, &mut g, Request::Quit, INIT);
     assert_eq!(
         (r.ok, r.detail.as_str()),
         (true, "the guard stops; its children keep running")
@@ -3360,7 +3481,7 @@ fn a_respawn_due_after_ide_event_starts_nothing() {
     pc.exited.push((Kid::Engine, Some(70)));
     let at = Instant::now();
     tick(&mut pc, &mut g, at);
-    let r = handle(&mut pc, &mut g, Request::Event { dry_run: false }, 0);
+    let r = handle(&mut pc, &mut g, Request::Event { dry_run: false }, INIT);
     assert!(r.ok, "{r:?}");
     tick(&mut pc, &mut g, at + Duration::from_secs(5));
     assert!(!pc.called(Call::EngineStart));
@@ -3879,6 +4000,12 @@ fn a_restarted_guard_unwinds_a_half_done_dev_switch() {
     assert!(pc.index(Call::Adopt) < pc.index(Call::ReaperStart));
     assert_eq!(pc.kids, saved_kids);
     assert_eq!(pc.bundle.as_deref(), Some(SHA));
+    // From event these are the start's checks: the fence stays (#42).
+    let v = g.shared.view();
+    assert_eq!(
+        (v.epoch, v.fence, v.start_checks, v.began),
+        (1, 0, true, Some((Mode::Event, Mode::Event)))
+    );
     // An unfinished event plan resumes the same way.
     let mut g = Guard::for_test(Mode::Dev);
     g.state.switching = Some(Switching {
@@ -3894,6 +4021,154 @@ fn a_restarted_guard_unwinds_a_half_done_dev_switch() {
     });
     assert_eq!(start(&mut pc, &mut g, 1_000), Some(Outcome::Done));
     assert!(pc.index(Call::ServerStop) < pc.index(Call::ReaperStart));
+    // From dev it is a way back to REAPER, no start's checks: the fence
+    // moved (#42).
+    let v = g.shared.view();
+    assert_eq!(
+        (v.epoch, v.fence, v.start_checks, v.began),
+        (1, 1, false, Some((Mode::Dev, Mode::Event)))
+    );
+}
+
+/// Waits (on a test thread) until the guard runs a switch.
+fn await_running(shared: &Shared) {
+    let t = Instant::now();
+    while shared.view().running.is_none() {
+        assert!(t.elapsed() < Duration::from_secs(5), "no switch began");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// A PC in dev rebooted comes back in event, and the guard runs the event
+/// plan's checks while the pipe already routes (#42). They are the reset
+/// rule's checks, not a switch back to REAPER the owner or the crash loop
+/// chose: a dev queued before them runs after them, one `iempc dev`, never a
+/// repeat (the epoch moved, the fence did not).
+#[test]
+fn a_dev_queued_before_the_start_checks_runs_after_them() {
+    let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Dev));
+    g.state.pins.current = Some(SHA.into());
+    let Route::Queue(seen) = g.shared.route(&dev()) else {
+        panic!("an idle guard queues a dev entry");
+    };
+    assert_eq!(seen, INIT);
+    assert_eq!(start(&mut pc, &mut g, 5_000), Some(Outcome::Done));
+    assert_eq!(g.state.mode, Mode::Event);
+    let v = g.shared.view();
+    assert_eq!(
+        (v.epoch, v.fence, v.start_checks, v.began),
+        (1, 0, true, Some((Mode::Event, Mode::Event)))
+    );
+    let r = handle(&mut pc, &mut g, dev(), seen);
+    assert!(r.ok, "{r:?}");
+    assert!(r.detail.starts_with("dev: done"), "{}", r.detail);
+    assert_eq!(g.state.mode, Mode::Dev);
+    assert!(pc.index(Call::Fingerprint) < pc.index(Call::ReaperSaveQuit));
+    assert!(pc.called(Call::EngineArm));
+}
+
+/// A dev or live entry routed while the start's checks run is queued behind
+/// them instead of refused (#42), and runs after them. Anything else is
+/// refused as during any switch.
+#[test]
+fn a_dev_routed_during_the_start_checks_is_queued_and_runs_after_them() {
+    let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
+    g.state.pins.current = Some(SHA.into());
+    pc.delay(Call::Fingerprint, Duration::from_millis(500));
+    let shared = Arc::clone(&g.shared);
+    let routed = std::thread::spawn(move || {
+        await_running(&shared);
+        let live = Request::Live {
+            build: SHA.into(),
+            trial: false,
+            dry_run: false,
+        };
+        [dev(), live, Request::JobBegin { run: 7 }].map(|req| shared.route(&req))
+    });
+    assert_eq!(start(&mut pc, &mut g, 5_000), Some(Outcome::Done));
+    let [dev_route, live_route, job_route] = routed.join().unwrap();
+    let during = Generation { epoch: 1, fence: 0 };
+    assert_eq!(dev_route, Route::Queue(during));
+    assert_eq!(live_route, Route::Queue(during));
+    match job_route {
+        Route::Now(r) => assert_eq!((r.ok, r.detail.as_str()), (false, "switching")),
+        other => panic!("{other:?}"),
+    }
+    let r = handle(&mut pc, &mut g, dev(), during);
+    assert!(r.ok, "{r:?}");
+    assert!(r.detail.starts_with("dev: done"), "{}", r.detail);
+    assert_eq!(g.state.mode, Mode::Dev);
+    assert!(pc.index(Call::Fingerprint) < pc.index(Call::ReaperSaveQuit));
+}
+
+/// An "ide event" routed while the start's checks run moves the fence (#42):
+/// the checks answer it, and a dev queued before it, before the checks or
+/// during them, never runs after it. Routed while no switch runs, it fences a
+/// dev queued ahead of it as well; a request that is no entry keeps the
+/// generation rule and runs.
+#[test]
+fn ide_event_during_the_start_checks_fences_a_dev_queued_before_it() {
+    let asked = "busy: a switch to event was asked meanwhile";
+    let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
+    g.state.pins.current = Some(SHA.into());
+    let Route::Queue(before) = g.shared.route(&dev()) else {
+        panic!("an idle guard queues a dev entry");
+    };
+    pc.delay(Call::Fingerprint, Duration::from_millis(500));
+    let shared = Arc::clone(&g.shared);
+    let routed = std::thread::spawn(move || {
+        await_running(&shared);
+        let during = shared.route(&dev());
+        let event = shared.route(&Request::Event { dry_run: false });
+        let answer = shared.await_end("already switching to event", Duration::from_secs(10));
+        (during, event, answer)
+    });
+    assert_eq!(start(&mut pc, &mut g, 5_000), Some(Outcome::Done));
+    let (during, event, answer) = routed.join().unwrap();
+    assert_eq!(during, Route::Queue(Generation { epoch: 1, fence: 0 }));
+    assert_eq!(event, Route::AwaitEnd("already switching to event"));
+    assert!(answer.ok, "{answer:?}");
+    assert_eq!(g.shared.generation(), Generation { epoch: 1, fence: 1 });
+    let made = pc.calls().len();
+    // Queued before the checks: they move no fence, the "ide event" routed
+    // during them did, so the reply names the event, not the checks.
+    let r = handle(&mut pc, &mut g, dev(), before);
+    assert_eq!(
+        (r.ok, r.detail.as_str(), r.mode),
+        (false, asked, Mode::Event)
+    );
+    // Queued during them, before the "ide event".
+    let Route::Queue(seen) = during else {
+        unreachable!("asserted above")
+    };
+    let r = handle(&mut pc, &mut g, dev(), seen);
+    assert_eq!((r.ok, r.detail.as_str()), (false, asked));
+    assert_eq!(pc.calls().len(), made, "no dev entry ran");
+    assert_eq!(g.state.mode, Mode::Event);
+    // No switch runs: a dev and a job are queued, then "ide event".
+    let mut queue = [
+        dev(),
+        Request::AlarmAck { id: 99 },
+        Request::Event { dry_run: false },
+    ]
+    .map(|req| match g.shared.route(&req) {
+        Route::Queue(seen) => (req, seen),
+        other => panic!("{req:?}: {other:?}"),
+    })
+    .into_iter();
+    let (req, seen) = queue.next().unwrap();
+    let r = handle(&mut pc, &mut g, req, seen);
+    assert_eq!((r.ok, r.detail.as_str()), (false, asked));
+    let (req, seen) = queue.next().unwrap();
+    assert_eq!(seen, Generation { epoch: 1, fence: 1 });
+    let r = handle(&mut pc, &mut g, req, seen);
+    assert_eq!((r.ok, r.detail.as_str()), (false, "no alarm 99"));
+    let (req, seen) = queue.next().unwrap();
+    assert_eq!(seen, Generation { epoch: 1, fence: 2 });
+    let r = handle(&mut pc, &mut g, req, seen);
+    assert!(r.ok, "{r:?}");
+    assert_eq!(g.state.mode, Mode::Event);
+    assert!(!pc.called(Call::ReaperSaveQuit), "no dev entry ran");
 }
 
 #[test]
@@ -3976,7 +4251,7 @@ fn install_records_the_bundle_and_refuses_other_sums() {
         Request::Install {
             zip: zip.to_string_lossy().into_owned(),
         },
-        0,
+        INIT,
     );
     assert_eq!(
         (r.ok, r.detail.clone()),
@@ -3989,7 +4264,7 @@ fn install_records_the_bundle_and_refuses_other_sums() {
         Request::Install {
             zip: zip.to_string_lossy().into_owned(),
         },
-        0,
+        INIT,
     );
     assert_eq!(r.detail, format!("bundle {SHA} already installed"));
     // Other sums for the same SHA: refused with an alarm.
@@ -4007,7 +4282,7 @@ fn install_records_the_bundle_and_refuses_other_sums() {
         Request::Install {
             zip: other.to_string_lossy().into_owned(),
         },
-        0,
+        INIT,
     );
     let why = format!("bundle {SHA} is installed with other sums; it is never overwritten");
     assert_eq!((r.ok, r.detail.clone()), (false, why.clone()));
@@ -4019,7 +4294,7 @@ fn install_records_the_bundle_and_refuses_other_sums() {
         Request::Install {
             zip: dir.path().join("none.zip").to_string_lossy().into_owned(),
         },
-        0,
+        INIT,
     );
     assert!(!r.ok);
     assert!(r.detail.starts_with("install refused: "), "{}", r.detail);
@@ -4039,11 +4314,11 @@ fn activation_pins_copies_excludes_and_hands_over() {
     g.state.mode = Mode::Dev;
     let mut pc = FakePc::new(Facts::default());
     let activate = Request::Activate { sha: SHA.into() };
-    let r = handle(&mut pc, &mut g, activate.clone(), 0);
+    let r = handle(&mut pc, &mut g, activate.clone(), INIT);
     assert_eq!(r.detail, format!("bundle {SHA} is not installed"));
     let zip = install::tests::good_zip(dir.path(), SHA);
     assert!(install_bundle(&mut g, &zip).0);
-    let r = handle(&mut pc, &mut g, activate.clone(), 0);
+    let r = handle(&mut pc, &mut g, activate.clone(), INIT);
     assert_eq!(
         (r.ok, r.detail.clone()),
         (
@@ -4059,12 +4334,12 @@ fn activation_pins_copies_excludes_and_hands_over() {
     assert!(pc.called(Call::Exclude));
     // The same bundle again: the guard's exe did not change.
     g.handover = None;
-    let r = handle(&mut pc, &mut g, activate.clone(), 0);
+    let r = handle(&mut pc, &mut g, activate.clone(), INIT);
     assert_eq!((r.ok, r.detail.clone()), (true, format!("activated {SHA}")));
     assert_eq!(g.handover, None);
     // Failed exclusions alarm, the activation stands.
     pc.fail(Call::Exclude, "the exclude task ended with 1");
-    let r = handle(&mut pc, &mut g, activate, 0);
+    let r = handle(&mut pc, &mut g, activate, INIT);
     assert!(r.ok);
     assert_eq!(
         texts(&g),
@@ -4077,7 +4352,12 @@ fn activation_pins_copies_excludes_and_hands_over() {
     bare.state
         .bundles
         .insert(SHA.into(), record(SHA, "dev", Hil::Pending));
-    let r = handle(&mut pc, &mut bare, Request::Activate { sha: SHA.into() }, 0);
+    let r = handle(
+        &mut pc,
+        &mut bare,
+        Request::Activate { sha: SHA.into() },
+        INIT,
+    );
     assert_eq!(
         (r.ok, r.detail.as_str()),
         (
