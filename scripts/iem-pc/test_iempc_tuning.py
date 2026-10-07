@@ -94,7 +94,10 @@ class TuningInstallTests(TuningBase):
             self.assertEqual(Path(self.staged(name)).read_bytes(), MODULES[f"tuning/{name}"], name)
         script, mode = self.pc.modules[-1]
         self.assertEqual(mode, "finish")
-        self.assertIn(ip.hash_check(MODULE, sha256(b"synthetic IemPc.psm1")) + f" ; Import-Module '{MODULE}' -Force ; ", script)
+        self.assertIn(f"$iemB = [IO.File]::ReadAllBytes('{MODULE}')", script)
+        self.assertIn(f"$iemH -cne '{sha256(b'synthetic IemPc.psm1')}'", script)
+        self.assertIn("Import-Module $iemMod -Force ; $r = & { Install-IemTuning ", script)
+        self.assertNotIn(f"Import-Module '{MODULE}'", script)   # never from the run folder (#15)
         [m] = self.installs()
         sums = ip.load_record(SHA)["sums"]
         self.assertEqual(m.groups(), (SOURCE, sums["tuning/IemTuning.psm1"], sums["tuning/IemMeasure.psm1"],
@@ -207,6 +210,9 @@ class RefreshTests(TuningBase):
         self.assertEqual(m.groups(), (SOURCE, sums["tuning/IemTuning.psm1"], sums["tuning/IemMeasure.psm1"], None, " -KeepProfile"))
         self.assertEqual([s[1].rsplit("/", 1)[1] for s in self.pc.scps], ["IemPc.psm1", "IemTuning.psm1", "IemMeasure.psm1"])
         self.assertEqual({s[2] for s in self.pc.scps}, {"finish"})
+        install = next(s for s, _ in self.pc.modules if "Install-IemTuning" in s)
+        self.assertIn("Import-Module $iemMod -Force ; $r = & { Install-IemTuning ", install)   # the staged copy (#15)
+        self.assertNotIn(f"Import-Module '{MODULE}'", install)
         self.assertEqual(docs[-1], {"tuning_refresh": SHA, "hashes": {"tuning": m.group(2), "measure": m.group(3), "profile": KEPT}})
         # The hand-over came first: the refresh runs after the guard named the SHA.
         self.assertEqual([c[1][0] for c in self.pc.calls], ["activate", "status"])
