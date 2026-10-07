@@ -745,6 +745,50 @@ mod tests {
     }
 
     #[test]
+    fn the_wire_forms_are_the_servers_own() {
+        use iem_core::{ClientMsg, ServerMsg, tunnel::SiteLinks};
+        // The mixer socket's protocol is one the server serves.
+        let served = iem_core::MIN_CLIENT_PROTO..=iem_core::UI_PROTO;
+        assert!(served.contains(&UI_PROTO));
+        let start = ClientMsg::ListenStart {
+            member_id: "member9".to_owned(),
+        };
+        assert_eq!(
+            listen_start("member9"),
+            serde_json::to_string(&start).unwrap()
+        );
+        let wire = |m: &ServerMsg| serde_json::to_string(m).unwrap();
+        let meters = ServerMsg::Meters {
+            meters: [("mic1".to_owned(), [0.1, 0.1])].into(),
+        };
+        assert_eq!(classify(&wire(&meters)), Event::Meters);
+        let status = ServerMsg::AudioStatus {
+            status: "no_source".to_owned(),
+            target: Some("member9".to_owned()),
+        };
+        assert_eq!(
+            classify(&wire(&status)),
+            Event::AudioStatus("no_source".to_owned())
+        );
+        let hello = ServerMsg::Hello {
+            proto: iem_core::UI_PROTO,
+            build: "local".to_owned(),
+            min_client_proto: iem_core::MIN_CLIENT_PROTO,
+        };
+        assert_eq!(classify(&wire(&hello)), Event::Other);
+        // `/api/site`'s body names the LAN URL `lan_url`.
+        let site = serde_json::to_value(SiteLinks {
+            lan_url: Some("http://10.0.0.10/".to_owned()),
+            public_host: Some("mixer.example.org".to_owned()),
+        })
+        .unwrap();
+        assert_eq!(
+            lan(site["lan_url"].as_str()),
+            Ok("http://10.0.0.10".to_owned())
+        );
+    }
+
+    #[test]
     fn reopens_back_off_1_2_4_8_then_10_s() {
         let secs: Vec<u64> = (0..6).map(|n| backoff(n).as_secs()).collect();
         assert_eq!(secs, [1, 2, 4, 8, 10, 10]);
@@ -811,7 +855,13 @@ mod tests {
             error: Some(Reason::ServerGone.code().to_owned()),
             ..Summary::default()
         };
+        // A reader holding the old file keeps reading it whole: the new
+        // summary replaces the file, it never rewrites it in place.
+        let mut held = std::fs::File::open(&out).unwrap();
         write_summary(&out, &second).unwrap();
+        let mut old = String::new();
+        std::io::Read::read_to_string(&mut held, &mut old).unwrap();
+        assert_eq!(serde_json::from_str::<Summary>(&old).unwrap(), first);
         assert_eq!(read(&out), second);
         let names: Vec<String> = std::fs::read_dir(dir.path())
             .unwrap()

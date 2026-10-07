@@ -22,5 +22,9 @@ ureq = { version = "3.4", default-features = false }
 iem-win = { path = "../iem-win" }
 
 [dev-dependencies]
+# The server's own wire types (UI protocol, ClientMsg, ServerMsg, SiteLinks):
+# the tests pin this client's wire forms to them. Tests only: the client
+# links no server crate. Without defaults, as iem-ui uses it.
+iem-core = { path = "../iem-core", default-features = false }
 # write_summary's tests (a temporary directory), as the other crates use it.
 tempfile = "3"
