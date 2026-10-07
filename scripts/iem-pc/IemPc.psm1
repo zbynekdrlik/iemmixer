@@ -939,6 +939,88 @@ function Install-IemElevatedDir {
     if ([IO.File]::ReadAllText($entry) -cne $script:TaskEntry) { throw "the entry script in $tasks does not read back" }
 }
 
+# ---- S1c's tuning module in the elevated root (#15) ----
+
+function Get-IemBytesSha256 {
+    # The SHA-256 of bytes in memory, as lowercase hex.
+    param([Parameter(Mandatory)][AllowEmptyCollection()][byte[]]$Bytes)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $h = $sha.ComputeHash($Bytes) } finally { $sha.Dispose() }
+    return (-join @($h | ForEach-Object { $_.ToString('x2') }))
+}
+
+function Install-IemTuning {
+    # S1c's tuning modules and the private profile into <Root>\tuning, where the
+    # tuning task loads them (Invoke-IemTuningVerb). Run elevated over ssh from
+    # the dev box (`iempc tuning-install`, and `iempc activate`'s refresh): the
+    # only path that installs them (#15, the decision of 2026-10-07: never from
+    # the bundle in the user's root, which any process of the user may change).
+    # -SourceDir holds what the dev box uploaded: IemTuning.psm1, IemMeasure.psm1
+    # and, unless -KeepProfile, profile.json. Each is read once and its SHA-256
+    # must be the one the dev box computed (the modules from the attested
+    # bundle, the profile from the private file); the bytes written are the ones
+    # checked. The profile is checked by IemTuning's own loader (the uploaded
+    # module, imported after its hash check, as `iempc bootstrap` imports this
+    # module: Read-IemProfile, Assert-IemLayout) before anything is written.
+    # -KeepProfile: the installed profile stays as it is, admin-only, checked by
+    # the new module the same way. The root must be the admin-only folder
+    # Register-IemTasks made; nothing is written through a junction or a link.
+    # Any refusal writes nothing. The files are written fresh (owned by
+    # Administrators, the folder's rules inherited) and read back. Returns the
+    # three hashes, never the profile's content (site values, P6).
+    param(
+        [Parameter(Mandatory)][string]$SourceDir,
+        [Parameter(Mandatory)][string]$TuningSha256,
+        [Parameter(Mandatory)][string]$MeasureSha256,
+        [string]$ProfileSha256 = '',
+        [switch]$KeepProfile,
+        [string]$Root = '',
+        [string]$User = ''
+    )
+    if ($KeepProfile.IsPresent -eq [bool]$ProfileSha256) {
+        throw 'Install-IemTuning takes exactly one of -ProfileSha256 (a new profile) and -KeepProfile (the installed one)'
+    }
+    $Root = Resolve-IemElevatedRoot -ElevatedRoot $Root
+    $u = Resolve-IemUser -User $User
+    $tuning = Join-Path $Root 'tuning'
+    $want = [ordered]@{ 'IemTuning.psm1' = $TuningSha256; 'IemMeasure.psm1' = $MeasureSha256 }
+    if (-not $KeepProfile) { $want['profile.json'] = $ProfileSha256 }
+    $bytes = @{}
+    foreach ($name in @($want.Keys)) {
+        if ($want[$name] -cnotmatch '^[0-9a-f]{64}$') { throw "${name}: the expected SHA-256 is not 64 lowercase hex digits" }
+        $b = [IO.File]::ReadAllBytes((Join-Path $SourceDir $name))
+        $got = Get-IemBytesSha256 -Bytes $b
+        if ($got -cne $want[$name]) { throw "${name}: sha256 $got, expected $($want[$name]): refused, nothing written" }
+        $bytes[$name] = $b
+    }
+    $rootBad = Test-IemElevatedItem -Path $Root -UserSid $u.sid
+    if ($rootBad.Count -gt 0) { throw ('the elevated root is refused (Register-IemTasks makes it): ' + ($rootBad -join '; ')) }
+    $targets = @{}
+    foreach ($name in @('IemTuning.psm1', 'IemMeasure.psm1', 'profile.json')) { $targets[$name] = Join-Path $tuning $name }
+    foreach ($p in @($tuning) + @($targets.Values)) {
+        if (Test-IemReparsePoint -Path $p) { throw "$p is a junction or a link: refused, nothing written" }
+    }
+    $profilePath = Join-Path $SourceDir 'profile.json'
+    if ($KeepProfile) {
+        $profilePath = $targets['profile.json']
+        $bad = @()
+        foreach ($p in @($tuning, $profilePath)) { $bad += Test-IemElevatedItem -Path $p -UserSid $u.sid }
+        if ($bad.Count -gt 0) { throw ('the installed profile is refused (-KeepProfile needs an admin-only one): ' + ($bad -join '; ')) }
+    }
+    Import-Module (Join-Path $SourceDir 'IemTuning.psm1') -Force
+    Assert-IemLayout -Profile (Read-IemProfile -Path $profilePath)
+    Install-IemElevatedFolder -Path $tuning -UserSid $u.sid
+    foreach ($name in @($want.Keys)) { Write-IemElevatedFile -Path $targets[$name] -Bytes $bytes[$name] }
+    $read = @{}
+    foreach ($name in @($targets.Keys)) {
+        $bad = Test-IemElevatedItem -Path $targets[$name] -UserSid $u.sid
+        if ($bad.Count -gt 0) { throw ('tuning file read-back: ' + ($bad -join '; ')) }
+        $read[$name] = (Get-FileHash -LiteralPath $targets[$name] -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($want.Contains($name) -and $read[$name] -cne $want[$name]) { throw "$name does not read back: sha256 $($read[$name])" }
+    }
+    [pscustomobject]@{ tuning = $read['IemTuning.psm1']; measure = $read['IemMeasure.psm1']; profile = $read['profile.json'] }
+}
+
 # ---- firewall (P9) ----
 
 function Get-IemFirewallRule {
