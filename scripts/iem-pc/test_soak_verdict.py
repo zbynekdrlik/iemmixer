@@ -365,6 +365,29 @@ class Harness(unittest.TestCase):
                          ["harness incomplete (login-refused)", "gaps 5", "reconnects 1", "no listen frames"])
         self.assertEqual(sv.harness_problems(None, 599, 3), ["no harness summary"])
 
+    def test_the_ci_step_needs_a_meter_frame_the_pc_verdict_does_not(self):
+        # CI's run against the real server is the one place that proves the client reads its Meters (plan Task 9).
+        ci = harness(seconds=600.2, frames=30_000, expected_frames=30_010)
+        self.assertEqual(sv.harness_problems({**ci, "meter_frames": 1}, 599, 3), [])
+        self.assertEqual(sv.harness_problems({**ci, "meter_frames": 0}, 599, 3), ["no meter frames"])
+        # Named after the checks 9 to 12.
+        self.assertEqual(sv.harness_problems({**ci, "meter_frames": 0, "reconnects": 2}, 599, 3),
+                         ["reconnects 2", "no meter frames"])
+        # An unreadable summary is named once, never also as meterless.
+        self.assertEqual(sv.harness_problems({**ci, "meter_frames": -1}, 599, 3),
+                         ["the harness summary is unreadable"])
+        self.assertEqual(sv.harness_problems(None, 599, 3), ["no harness summary"])
+        # The PC verdict keeps its 12 checks: the soak's meters decide nothing there.
+        self.assertEqual(sv.verdict(polls(), harness(meter_frames=0), SHA)["conclusion"], "success")
+
+    def test_the_harness_reason_codes_are_the_clients_own(self):
+        # Reason::code is an exhaustive match: a code the client gains fails here until the verdict knows it,
+        # so a red summary never drops it as unknown.
+        lib = (Path(__file__).resolve().parents[2] / "crates" / "iem-soakclient" / "src" / "lib.rs").read_text(
+            encoding="utf-8")
+        body = lib.split("pub fn code(self) -> &'static str {", 1)[1].split("\n    }\n", 1)[0]
+        self.assertEqual(set(re.findall(r'Reason::\w+ => "([a-z-]+)"', body)), sv.HARNESS_REASONS)
+
 
 class Main(unittest.TestCase):
     def setUp(self) -> None:
@@ -442,6 +465,13 @@ class Main(unittest.TestCase):
         self.assertEqual(self.run_main(*args), (1, "gaps 4\nreconnects 1\n"))
         self.write("soakclient.json", "not json")
         self.assertEqual(self.run_main(*args), (1, "soakclient.json is unreadable\n"))
+
+    def test_main_harness_exits_1_without_a_meter_frame(self):
+        path = self.dir / "soakclient.json"
+        args = ("harness", str(path), "--min-seconds", "599", "--max-gaps", "3")
+        self.write("soakclient.json", json.dumps(harness(seconds=600.0, frames=30_000, expected_frames=30_000,
+                                                         meter_frames=0)))
+        self.assertEqual(self.run_main(*args), (1, "no meter frames\n"))
 
 
 if __name__ == "__main__":

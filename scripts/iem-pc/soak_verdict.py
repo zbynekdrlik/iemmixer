@@ -25,8 +25,10 @@ summary (`red: <it>; <numbers>`):
     between frames, gaps 0 alone cannot tell a thinned stream from a full one).
 
 Counts before the first poll never count: every gate reads last minus first.
-`harness` is CI's e2e step: the checks 9 to 12 with CI's bounds; it prints
-the problems and exits 1 when there are any.
+`harness` is CI's e2e step: the checks 9 to 12 with CI's bounds, then at
+least one meter frame (the run against the real server is the one place that
+proves the client reads its Meters; the PC verdict does not judge them); it
+prints the problems and exits 1 when there are any.
 
 The summary holds numbers and fixed words only (P6): never a member id, a
 host or a SHA. The harness's and the PC job's reason codes are printed only
@@ -314,9 +316,17 @@ def _harness_check(summary: object, min_seconds: float, max_gaps: int) -> tuple[
     return problems, {k: v for k, v in h.items() if k != "complete"}
 
 
+def _ci_check(summary: object, min_seconds: float, max_gaps: int) -> tuple[list[str], dict]:
+    """CI's e2e step: the checks 9 to 12, then at least one meter frame (a readable summary only)."""
+    problems, h = _harness_check(summary, min_seconds, max_gaps)
+    if h and h["meter_frames"] == 0:
+        problems.append("no meter frames")
+    return problems, h
+
+
 def harness_problems(summary: object, min_seconds: float, max_gaps: int) -> list[str]:
-    """The harness's checks 9 to 12, in order; [] when it passed."""
-    return _harness_check(summary, min_seconds, max_gaps)[0]
+    """CI's harness check: the checks 9 to 12, then a meter frame, in order; [] when it passed."""
+    return _ci_check(summary, min_seconds, max_gaps)[0]
 
 
 def _text(n: dict) -> str:
@@ -440,7 +450,7 @@ def cmd_report(a: argparse.Namespace) -> int:
 
 def cmd_harness(a: argparse.Namespace) -> int:
     try:
-        problems, h = _harness_check(read_json(Path(a.summary)), a.min_seconds, a.max_gaps)
+        problems, h = _ci_check(read_json(Path(a.summary)), a.min_seconds, a.max_gaps)
     except Bad as e:
         problems, h = [str(e)], {}
     for p in problems:
@@ -448,7 +458,7 @@ def cmd_harness(a: argparse.Namespace) -> int:
     if problems:
         return 1
     print(f"harness ok: {h['seconds']:g} s, frames {h['frames']} of {h['expected_frames']}, gaps {h['gaps']}, "
-          f"reconnects {h['reconnects']}")
+          f"reconnects {h['reconnects']}, meter frames {h['meter_frames']}")
     return 0
 
 

@@ -22,6 +22,7 @@ Gen 2 of the band's in-ear-monitor mixer: a native Rust audio engine replacing R
 - Gen 1 test parity manifest (`docs/parity/gen1-tests.tsv`, its CI check, cutover gate) → `.claude/rules/parity.md`
 - Golden renders on the IEM PC (generator, window driver, analysis) → `.claude/rules/golden-renders.md`
 - Guard, iemmode, PC install → `.claude/rules/guard.md`
+- Soak harness, verdict, dispatch-soak → `.claude/rules/soak.md`
 
 ## Always-apply rules
 

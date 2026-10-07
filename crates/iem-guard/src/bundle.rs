@@ -388,6 +388,24 @@ mod tests {
         assert_eq!(verify(&without_sums, &sums, &manifest(), SHA), Ok(()));
     }
 
+    /// The soak client (S7) rides in the bundle but is not required: a bundle
+    /// built before it must still install.
+    #[test]
+    fn a_bundle_may_carry_the_soak_client() {
+        let client = "iem-soakclient.exe";
+        assert!(valid_name(client));
+        assert!(
+            !REQUIRED.contains(&client),
+            "older bundles must still install"
+        );
+        let (mut files, mut sums) = bundle();
+        let entry = (client.to_owned(), sha256_hex(client.as_bytes()));
+        sums.push(entry.clone());
+        files.push(entry);
+        assert_eq!(parse_sums(&sums_text(&sums)).unwrap(), sums);
+        assert_eq!(verify(&files, &sums, &manifest(), SHA), Ok(()));
+    }
+
     #[test]
     fn a_tampered_file_is_refused() {
         let (mut files, sums) = bundle();
