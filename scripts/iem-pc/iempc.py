@@ -1206,9 +1206,9 @@ def cmd_dispatch_hil(ctx: Ctx) -> int:
     check_local_zip(sha, rec)
     if event_now():  # "ide event" during the gh waits above: HIL is dev-time work
         raise Refused(f"{EVENT_NOW} appeared: no HIL dispatch during an event (nothing was dispatched)")
+    iempc_bin.hil_dispatched(sys.modules[__name__], sha)   # the run activates `sha`: awaited from now (#15)
     gh(["workflow", "run", HIL_WORKFLOW, "-R", OPS_REPO, "-f", f"sha={sha}", "-f", f"branch={branch}",
         "-f", f"run={run}", "-f", f"digest={rec['digest']}"])
-    iempc_bin.forget(sys.modules[__name__])   # the run activates `sha`: the guard's build is not known (#15)
     record = {"sha": sha, "branch": branch, "run": run, "digest": rec["digest"], "entry": entry, "at": now_iso()}
     write_json(state_dir() / "dispatch.json", {"dispatches": (done + [record])[-200:]})
     emit({"dispatched": record})
