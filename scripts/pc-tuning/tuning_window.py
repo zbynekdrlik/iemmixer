@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import os
 import re
@@ -132,7 +133,12 @@ def cmd_wpt_install(env, args) -> None:
     if not local.is_file():
         subprocess.run(["curl", "-fsSL", "-o", str(local), ADK_URL], check=True, timeout=300)
     sw.scp(str(local), f"{env['PC_SSH']}:{env['PC_TUNING_ROOT_SCP']}/adksetup.exe")
-    r = tps(env, f"Install-IemWpt -Setup {ps_quote(env['PC_TUNING_ROOT'] + chr(92) + 'adksetup.exe')} -Xperf {xperf(env)}", timeout=1800)
+    # The elevated session runs only an admin-only copy (#15, the last lane, item 3): the
+    # upload is read once and checked by this box's sha256, staged and read back; Install-IemWpt
+    # checks the stage copy's signature and runs that copy.
+    upload = ps_quote(env["PC_TUNING_ROOT"] + "\\adksetup.exe")
+    stage = sw.elevated_ps.staged([(upload, "adksetup.exe", hashlib.sha256(local.read_bytes()).hexdigest())])
+    r = tps(env, f"{stage} ; Install-IemWpt -Setup $iemMod -Xperf {xperf(env)}", timeout=1800)
     print(json.dumps({"wpt-install": r}))
 
 
