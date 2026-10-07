@@ -29,6 +29,7 @@ iempc.py passes itself in (`ip`), so this module never imports it (#36:
 iempc.py is over its size budget)."""
 from __future__ import annotations
 
+import datetime as dt
 import json
 import re
 
@@ -123,6 +124,31 @@ def load_soaks(ip) -> list[dict]:
     if not isinstance(soaks, list) or not all(isinstance(d, dict) for d in soaks):
         raise ip.StepError(f"{path}: 'soaks' is not a list of objects; check it by hand")
     return soaks
+
+
+# How long past its hours a soak's job may still hold the PC: the client's start
+# and end, the job's last waits and the report (soak.yml). A switch inside this
+# window ends the soak, since the job leaves on any mode but dev.
+RUN_MARGIN_S = 1800
+
+
+def running_soak(ip, entry: int, now: dt.datetime) -> dict | None:
+    """The newest soak dispatched in dev entry `entry` that may still run at
+    `now` (an aware time), or None. A record whose time or hours cannot be
+    read may still run (fail safe)."""
+    for d in reversed(load_soaks(ip)):
+        if d.get("entry") != entry:
+            continue
+        hours = d.get("hours")
+        try:
+            at = dt.datetime.fromisoformat(str(d.get("at")))
+        except ValueError:
+            return d
+        if type(hours) is not int or at.tzinfo is None:
+            return d
+        if now < at + dt.timedelta(seconds=hours * 3600 + RUN_MARGIN_S):
+            return d
+    return None
 
 
 def dispatch(ctx, ip) -> int:

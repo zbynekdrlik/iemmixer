@@ -48,6 +48,8 @@ switch normally takes a minute or two. A soak running on the PC is not seen
 iempc.py passes itself in (`ip`), so this module never imports it (#36)."""
 from __future__ import annotations
 
+import datetime as dt
+
 import iempc_soak
 import iempc_trace
 
@@ -244,6 +246,10 @@ def switch_test(ctx, ip) -> int:
     why = f"iemmode status failed (exit {code})" if code != 0 else switch_refusal(status)
     if why:
         raise ip.Refused(f"no switch test: {why} {NOTHING}")
+    soak = iempc_soak.running_soak(ip, ip.current_entry(), dt.datetime.now().astimezone())
+    if soak is not None:
+        raise ip.Refused(f"no switch test: a soak dispatched in this dev entry may still run (dispatched "
+                         f"{soak.get('at')}, {soak.get('hours')} h): a switch would end it {NOTHING}")
     stopped = iempc_trace.stop_recorded(ctx, ip, float("inf"))
     if ip.event_now():   # that stop ran with "ignore": no switch after a flag that came meanwhile
         raise ip.EventNow()
