@@ -171,6 +171,27 @@ try {
     Assert ($sn.Count -eq 0) 'boot-pref-log-is-empty-before-the-first-run'
     Assert ((Format-IemTaskTime -Time ([datetime]'1899-12-30')) -ceq '') 'task-time-never-run-is-empty'
     Assert ((Format-IemTaskTime -Time (New-Object DateTime 2026, 10, 7, 21, 13, 39, ([DateTimeKind]::Utc))) -ceq '2026-10-07T21:13:39.0000000Z') 'task-time-is-utc'
+    # Fast Startup (pure, #35 review of PR #40): on only with HiberbootEnabled 1
+    # AND the hibernation file present; the venue PC has HiberbootEnabled 1 with
+    # hibernation off, a full shutdown: no problem there. A fact that cannot be
+    # read leaves it unknown ($null), never a problem.
+    $fsCases = @(@(1, $true, $true), @(1, $false, $false), @(0, $true, $false), @(0, $false, $false), @($null, $false, $false),
+                 @(1, $null, $null), @($null, $true, $null), @($null, $null, $null))
+    foreach ($c in $fsCases) {
+        $fs = Get-IemFastStartup -Hiberboot $c[0] -HiberFile $c[1]
+        $named = ($fs.problem -cne '')
+        Assert ("$($fs.active)" -ceq "$($c[2])" -and $named -eq ($c[2] -eq $true) -and "$($fs.hiberboot_enabled)" -ceq "$($c[0])" -and "$($fs.hiberfile_present)" -ceq "$($c[1])") "fast-startup-is-on-only-with-hiberboot-and-the-hibernation-file [$($c[0]), $($c[1])] ($($fs.active): $($fs.problem))"
+    }
+    $fsOn = Get-IemFastStartup -Hiberboot 1 -HiberFile $true
+    Assert ($fsOn.problem -clike '*iemmixer-boot-pref*' -and $fsOn.problem -clike '*logon task*') "fast-startup-on-names-the-boot-task-it-skips ($($fsOn.problem))"
+    $fsVenue = Get-IemFastStartup -Hiberboot 1 -HiberFile $false
+    # What Register-IemTasks says about the boot task: a warning only while it is on, never a refusal.
+    $bw = Get-IemBootTaskWarnings -FastStartup $fsOn
+    Assert ($bw.Count -eq 1 -and $bw[0] -ceq $fsOn.problem) "boot-task-warns-of-fast-startup-that-is-on ($($bw -join ' | '))"
+    foreach ($f in @($fsVenue, (Get-IemFastStartup -Hiberboot 1 -HiberFile $null), (Get-IemFastStartup -Hiberboot 0 -HiberFile $true))) {
+        $bw = Get-IemBootTaskWarnings -FastStartup $f
+        Assert ($bw.Count -eq 0) "boot-task-warns-of-nothing-else [$($f.hiberboot_enabled), $($f.hiberfile_present)] ($($bw -join ' | '))"
+    }
 
     # ---- Register-IemTasks on the real Task Scheduler ----
     $prefArgs = @{ PrefKey = $regKey; PrefName = 'Pref'; PrefOriginal = '64'; Module = 'testcard.dll' }
@@ -202,6 +223,10 @@ try {
     foreach ($r in $reports) { $byName[$r.task] = $r }
     Assert ((Sorted $byName.Keys) -ceq (Sorted @('iemmixer-guard', 'iemmixer-StartApp', 'iemmixer-probe', 'iemmixer-tuning', 'iemmixer-exclude', 'iemmixer-logon', 'iemmixer-boot-pref', 'iemmixer-StartREAPER'))) 'tasks-all-eight'
     foreach ($r in $reports) { Assert ($r.sddl_ok -and $r.problems.Count -eq 0) "tasks-$($r.task)-reads-back-with-our-descriptor" }
+    # Fast Startup is named on the boot task's row, by this PC's facts (Get-IemFastStartupState), and on no other.
+    $wantWarn = Get-IemBootTaskWarnings -FastStartup (Get-IemFastStartupState)
+    Assert ((@($byName['iemmixer-boot-pref'].warnings) -join '|') -ceq (@($wantWarn) -join '|') -and
+            @($reports | Where-Object { $_.task -cne 'iemmixer-boot-pref' -and @($_.warnings).Count -gt 0 }).Count -eq 0) "tasks-name-fast-startup-on-the-boot-task-only ($(@($byName['iemmixer-boot-pref'].warnings) -join ' | '))"
 
     # An independent read through the ScheduledTasks cmdlets.
     foreach ($n in @('iemmixer-guard', 'iemmixer-StartApp', 'iemmixer-probe', 'iemmixer-tuning', 'iemmixer-exclude', 'iemmixer-logon')) {
@@ -810,10 +835,15 @@ function Invoke-IemTuningApply { param([string]$ProfilePath, [int]$Tier) return 
     Assert ($bst.Count -eq 1 -and $bst[0].last_run -ceq '' -and $bst[0].last_result -eq 267011) "bootstrap-state-names-the-boot-task-and-its-last-result ($($bst[0].last_run), $($bst[0].last_result))"
     Assert (@($bs.boot_pref.log).Count -eq 3 -and $bs.boot_pref.log[0] -clike 'boot-pref * add=none' -and $bs.boot_pref.log[2] -cmatch 'REG_DWORD\s+0x40' -and -not $bs.boot_pref.log_error) "bootstrap-state-shows-the-boot-tasks-last-logged-run ($(@($bs.boot_pref.log) -join ' | '))"
     # Fast Startup turns a shutdown into a hibernation of the system session: the
-    # next start fires no boot trigger, so the state names it (HiberbootEnabled).
+    # next start fires no boot trigger. The state names both facts, each read
+    # without a guess (HiberbootEnabled; the kernel's HiberFilePresent), and
+    # judges them as Get-IemFastStartup does (a problem only when it is on).
     $hb = $null
     try { $hb = (Get-Item -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power').GetValue('HiberbootEnabled', $null) } catch { $hb = $null }
-    Assert ($bs.PSObject.Properties['fast_startup'] -and "$($bs.fast_startup)" -ceq "$hb") "bootstrap-state-names-fast-startup ($($bs.fast_startup))"
+    $fs = $bs.fast_startup
+    Assert ("$($fs.hiberboot_enabled)" -ceq "$hb" -and $fs.hiberfile_present -is [bool] -and $fs.error -ceq '') "bootstrap-state-reads-fast-startup ($(ConvertTo-Json -InputObject $fs -Compress))"
+    $fsWant = Get-IemFastStartup -Hiberboot $hb -HiberFile $fs.hiberfile_present
+    Assert ("$($fs.active)" -ceq "$($fsWant.active)" -and $fs.problem -ceq $fsWant.problem) "bootstrap-state-judges-fast-startup-by-both-facts ($($fs.active))"
     Assert ($bs.boot_pref.path -ceq (Join-Path $eout 'boot-pref.log')) 'bootstrap-state-reads-the-boot-log-in-the-elevated-root'
     Assert ($bs.root.acl_ok -and $bs.firewall.present -and -not $bs.firewall.ok) "bootstrap-state-root-and-the-disabled-test-rule ($(@($bs.root.problems) -join '; '))"
     # An item below the root with a rule of its own: the state sees it, and the
