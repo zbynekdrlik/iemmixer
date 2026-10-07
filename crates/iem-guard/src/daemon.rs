@@ -912,6 +912,10 @@ fn switch(pc: &mut dyn Pc, g: &mut Guard, from: Mode, to: Mode, checks: bool) ->
             }
             Err(e) => {
                 let (why, health, policy) = failure(pc, g, to, step, &e);
+                if health.is_some() {
+                    // The health read inserted after a failed engine stop.
+                    g.laps.lap(Step::EngineHealth, Instant::now());
+                }
                 match policy {
                     OnError::Unwind => {
                         // The rehearsal's re-entry stops for the owner,
@@ -984,9 +988,7 @@ fn failure(
     };
     let health = (to == Mode::Event && step == Step::EngineStop).then(|| {
         info!("step {:?}", Step::EngineHealth);
-        let health = pc.engine_health().unwrap_or(Health::Dead);
-        g.laps.lap(Step::EngineHealth, Instant::now());
-        health
+        pc.engine_health().unwrap_or(Health::Dead)
     });
     (why, health, on_error(to, step, health, g.site.on_pref_fail))
 }

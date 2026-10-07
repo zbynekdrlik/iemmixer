@@ -86,8 +86,8 @@ pub fn reset_to_event(st: &GuardState, boot_time: u64, reaper_or_app: bool, engi
 impl GuardState {
     /// The mode after [`reset_to_event`]: `event`, no switch in progress and
     /// no HIL job (`pref_held` and `logon_seen` stay: the next check reads
-    /// the preference again; `last_switch` stays: it is the switch that
-    /// ended last).
+    /// the preference again; `last_switch` stays until the next switch,
+    /// the start's checks included, ends).
     pub fn reset(&mut self) {
         self.mode = Mode::Event;
         self.switching = None;
@@ -423,9 +423,10 @@ mod tests {
         assert_eq!(st.logon_seen, before.logon_seen);
     }
 
-    /// S7 (#10): the last switch is saved with the state and survives a
-    /// reset (a reboot or the band's system up): `iempc switch-test` reads
-    /// the switch that ended, whatever came after it.
+    /// S7 (#10): the last switch is saved with the state, and a reset (a
+    /// reboot, or the band's system up) leaves it as it is; the start's
+    /// checks that follow a reset are a switch of their own and replace it
+    /// with their record when they end (`daemon::start`).
     #[test]
     fn the_last_switch_round_trips_and_a_reset_keeps_it() {
         let dir = tempfile::tempdir().unwrap();
