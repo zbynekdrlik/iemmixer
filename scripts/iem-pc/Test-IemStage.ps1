@@ -148,6 +148,12 @@ try {
     Set-Acl -LiteralPath $copy -AclObject $acl
     $doc = Invoke-Bin $userExe $exeHex $br
     Assert ("$(Get-IemProp $doc 'out')".Trim() -eq 'user-bin' -and "$(Get-IemProp $doc 'note')" -like '*may be changed by*') "bin-a-copy-the-user-may-change-is-never-run ($(Get-Run $doc))"
+    # The next install writes such a copy again (review: a loosened copy is never kept as identical).
+    $doc = Install-Bin $exe $exeHex $br
+    $bad = Test-IemElevatedItem -Path $copy -UserSid $me.sid
+    Assert ((Get-IemProp $doc 'ok') -eq $true -and $bad.Count -eq 0) "bin-install-repairs-a-copy-the-user-may-change ($(Get-IemProp $doc 'error'); $($bad -join '; '))"
+    $doc = Invoke-Bin $userExe $exeHex $br
+    Assert ("$(Get-IemProp $doc 'out')".Trim() -eq 'bin-copy' -and -not (Get-IemProp $doc 'note')) "bin-the-repaired-copy-runs ($(Get-Run $doc))"
 } finally {
     Remove-Item -LiteralPath $base -Recurse -Force -ErrorAction SilentlyContinue
 }

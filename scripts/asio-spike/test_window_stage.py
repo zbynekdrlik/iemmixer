@@ -1,7 +1,8 @@
 """The S1a/S1c/golden window sessions import our PowerShell modules only from
 the admin-only stage (#15, the review lane's findings of 2026-10-07): the
 elevated ssh session reads each module from PC_ROOT\\bin once, checks it
-against the fetched, attested bundle record on this box, stages it under
+against the fetched bundle record on this box (the CI artifact of a green dev
+push, its SHA256SUMS checked at fetch), stages it under
 <elevated root>\\bootstrap-stage (elevated_ps) and imports only that copy."""
 from __future__ import annotations
 
@@ -21,6 +22,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "pc-tuning"))
 sys.path.insert(0, str(HERE.parent / "golden"))
+import elevated_ps  # noqa: E402
 import golden_window as gw  # noqa: E402
 import spike_window as sw  # noqa: E402
 import tuning_window as tw  # noqa: E402
@@ -107,6 +109,21 @@ class StageTests(unittest.TestCase):
         self.assertLess(s.index("Import-Module"), s.index("$r = & { Get-X }"))
 
 
+class StageWriteTests(unittest.TestCase):
+    """What the stage writes (#15, review): nothing on a folder that exists,
+    and a copy again when the one there is not admin-only."""
+
+    def test_an_existing_folder_is_only_read_back(self) -> None:
+        self.assertIn("if (-not [IO.Directory]::Exists($d)) { [void][IO.Directory]::CreateDirectory($d, $s) ; & $iemOwn $d ; "
+                      "[IO.Directory]::SetAccessControl($d, $s) } ; & $iemOnly $d }", elevated_ps.HELPERS)
+
+    def test_a_copy_others_may_change_is_written_again(self) -> None:
+        s = elevated_ps.staged([("'R\\bin\\SpikePc.psm1'", "SpikePc.psm1", None)])
+        keep = s[s.index("if (-not ([IO.File]::Exists($iemMod)"):s.index("[IO.File]::Delete($iemMod)")]
+        self.assertIn("(& { try { & $iemOnly $iemMod ; $true } catch { $false } })", keep)
+        self.assertLess(keep.index("& $iemOnly $iemMod"), keep.index("Get-FileHash"))
+
+
 class BundleRecordTests(unittest.TestCase):
     """sw.ps takes the sums from the attested bundle the window's PC holds."""
 
@@ -129,7 +146,21 @@ class BundleRecordTests(unittest.TestCase):
         (sw.bundle_dir(env, SHA).parent / f"{SHA}.source-sha").write_text("b" * 40 + "\n", encoding="utf-8")
         with self.assertRaisesRegex(sw.StepError, "source-sha"):
             sw.ps(env, "Get-X")
+        env = bundle_record(self)
+        (sw.bundle_dir(env, SHA) / "SHA256SUMS").unlink()
+        with self.assertRaisesRegex(sw.StepError, "cannot be read"):   # a StepError, never an OSError (review)
+            sw.ps(env, "Get-X")
+        (sw.bundle_dir(env, SHA) / "SHA256SUMS").write_text(f"{SUMS['GoldenPc.psm1']}  GoldenPc.psm1\n", encoding="utf-8")
+        with self.assertRaisesRegex(sw.StepError, "lists no IemMeasure.psm1, IemTuning.psm1, SpikePc.psm1"):
+            sw.ps(env, "Get-X")
         self.assertEqual(self.sent, [])
+
+    def test_a_record_that_lists_more_than_the_modules_serves(self) -> None:
+        env = bundle_record(self)
+        extra = "".join(f"{h}  {n}\n" for n, h in sorted(SUMS.items())) + f"{'e' * 64}  later-file.txt\n"
+        (sw.bundle_dir(env, SHA) / "SHA256SUMS").write_text(extra, encoding="utf-8")
+        self.assertEqual(sw.ps(env, "Get-X"), 1)
+        self.assertEqual(self.sent, [sw.ps_script("R", "Get-X", SUMS) + "\n"])
 
     def test_a_new_window_keeps_the_bundle_the_pc_holds(self) -> None:
         env = bundle_record(self, {"id": "old", "closed": True, "bundle_sha": SHA})
