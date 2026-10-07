@@ -204,10 +204,24 @@ def ps_script(root: str, body: str, sums: dict[str, str]) -> str:
     load = " ; ".join([elevated_ps.sums_table({n: sums[n] for n in MODULES}),
                        elevated_ps.staged(bin_modules(root, "GoldenPc.psm1", "SpikePc.psm1")),
                        elevated_ps.import_staged("SpikePc.psm1")])
+    return reply_script(f"{load} ; ", body)
+
+
+def plain_script(body: str) -> str:
+    """`body` as one JSON reply like ps_script, with no module import and no
+    stage (#15, the last lane, item 1): the preempt's first call, which must
+    depend neither on the stage nor on the bundle record. The asio-spike CI
+    job runs it as printed (tuning_window preempt-script)."""
+    return reply_script("", body)
+
+
+def reply_script(pre: str, body: str) -> str:
+    """`pre`, then `body`, its result or error as one JSON line (single-line
+    statements: `-Command -` reads stdin line by line)."""
     return "\n".join([
         "$ErrorActionPreference = 'Stop'",
         "$ProgressPreference = 'SilentlyContinue'",
-        f"try {{ {load} ; $r = & {{ {body} }} ; $o = [pscustomobject]@{{ ok = $true; r = $r }} }} "
+        f"try {{ {pre}$r = & {{ {body} }} ; $o = [pscustomobject]@{{ ok = $true; r = $r }} }} "
         f"catch {{ $o = [pscustomobject]@{{ ok = $false; error = \"$_\" }} }} ; ConvertTo-Json -InputObject $o -Depth 8 -Compress",
     ])
 
@@ -215,7 +229,17 @@ def ps_script(root: str, body: str, sums: dict[str, str]) -> str:
 def ps(env: dict[str, str], body: str, timeout: float = 300, event: str = "finish"):
     """Runs `body` on the PC (ps_script); PC errors come back as {ok: false}
     and raise StepError, a call without a complete reply raises NoReply."""
-    script = ps_script(env["PC_ROOT"], body, bundle_sums(env))
+    return send(env, ps_script(env["PC_ROOT"], body, bundle_sums(env)), timeout, event)
+
+
+def plain_ps(env: dict[str, str], body: str, timeout: float = 300, event: str = "finish"):
+    """Runs `body` on the PC with no module and no stage (plain_script); the
+    reply as in ps."""
+    return send(env, plain_script(body), timeout, event)
+
+
+def send(env: dict[str, str], script: str, timeout: float, event: str):
+    """Sends a composed script over ssh (guarded) and reads its one JSON reply."""
     out = [line for line in guarded(ssh_cmd(env), script + "\n", timeout, event).splitlines() if line.strip()]
     try:
         doc = json.loads(out[-1]) if out else None
@@ -394,8 +418,27 @@ def need_preflight(state: dict) -> None:
         raise StepError("run preflight first")
 
 
+SPIKE_COUNT = "@(Get-Process -Name asio_spike -ErrorAction SilentlyContinue).Count"
+
+
 def spike_running(env: dict[str, str], event: str = "abandon") -> bool:
-    return bool(ps(env, "@(Get-Process -Name asio_spike -ErrorAction SilentlyContinue).Count", timeout=60, event=event))
+    return bool(ps(env, SPIKE_COUNT, timeout=60, event=event))
+
+
+def stop_first_body(env: dict[str, str]) -> str:
+    return f"New-Item -ItemType File -Force -Path {pc(env, STOP_FILE)} | Out-Null ; {SPIKE_COUNT}"
+
+
+def stop_first(env: dict[str, str]) -> int:
+    """The preempt's first PC action (#15, the last lane, item 1): the spike's
+    stop file, then the spike count, in plain PowerShell (plain_ps: no module,
+    no stage, no bundle record). A running spike ends its run on the file and
+    its task refuses to start one, so a stage that fails after this leaves no
+    spike holding the card. Bounded like the spike check it replaces."""
+    n = plain_ps(env, stop_first_body(env), timeout=60, event="ignore")
+    if isinstance(n, bool) or not isinstance(n, int) or n < 0:
+        raise StepError(f"the PC's spike count after the stop file reads {n!r}, not a count")
+    return n
 
 
 # ---- commands ----
@@ -817,13 +860,15 @@ def cmd_to_event(env, args) -> None:
 def cmd_preempt(env, args=None) -> None:
     """Brings REAPER back once, whoever asks: under the window lock the state
     is read again, and a window another process already closed (REAPER back)
-    is left alone. A PC change in flight is settled after the bring-back, and
-    the stop file removed once the window closed (close_out)."""
+    is left alone. The first PC action writes the spike's stop file and counts
+    the spike without any module (stop_first, #15). A PC change in flight is
+    settled after the bring-back, and the stop file removed once the window
+    closed (close_out)."""
     with window_lock():
         state = load_state()
         closed = bool(state.get("closed"))
         if not closed:
-            running = spike_running(env, event="ignore")
+            running = stop_first(env) > 0
             intent = state.get("in_flight")
             print(json.dumps({"preempt": state["id"], "plan": undo_plan(state, running), "in_flight": intent}), flush=True)
             state["preempted"] = True

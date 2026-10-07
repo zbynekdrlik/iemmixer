@@ -700,6 +700,25 @@ jobs:
           if ("$($doc.error)" -ne $refused) { throw "refused with '$($doc.error)', expected '$refused'" }
           Write-Output "analysis guard: starts at Idle without a newer stop file, refused with '$refused' after one"
           $global:LASTEXITCODE = 0
+      # The preempt's first call at "ide event" (#15): plain PowerShell with no module
+      # and no stage. Run it exactly as sw.plain_ps sends it: it writes the spike's
+      # stop file and counts the spike (none runs here).
+      - name: Preempt's first call runs as on the PC (Windows PowerShell 5.1)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'pcroot-preempt'
+          New-Item -ItemType Directory -Force -Path (Join-Path $root 'queue') | Out-Null
+          $script = @(python scripts/pc-tuning/tuning_window.py preempt-script --root $root)
+          if ($LASTEXITCODE -ne 0) { throw "preempt-script exited $LASTEXITCODE" }
+          $out = @($script | powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command -)
+          if ($LASTEXITCODE -ne 0) { throw "powershell exited $LASTEXITCODE" }
+          $doc = @($out | Where-Object { "$_".Trim() })[-1] | ConvertFrom-Json
+          if (-not $doc.ok) { throw "the preempt's first call failed: $($doc.error)" }
+          if ($doc.r -ne 0) { throw "spike count '$($doc.r)', expected 0" }
+          if (-not (Test-Path -LiteralPath (Join-Path $root 'queue\stop') -PathType Leaf)) { throw 'the stop file was not written' }
+          Write-Output "preempt's first call: the stop file written, spike count $($doc.r)"
+          $global:LASTEXITCODE = 0
       - name: Upload (dev pushes only — the only spike that may reach the PC, P5)
         if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

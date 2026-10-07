@@ -828,7 +828,13 @@ def main(argv: list[str]) -> int:
     asc.add_argument("--root", required=True, help="a folder whose bin holds the spike bundle")
     asc.add_argument("--since", required=True, help="the analysis start, PC time (Get-IemNow)")
     asc.add_argument("--sums", required=True, help="the bundle's SHA256SUMS (the modules are checked against it, #15)")
+    pre = sub.add_parser("preempt-script", help="print the preempt's first call (the spike's stop file, the spike count) "
+                                                "exactly as sw.plain_ps sends it (for the Windows CI runner, #15)")
+    pre.add_argument("--root", required=True, help="a folder with a queue folder")
     args = ap.parse_args(argv)
+    if args.cmd == "preempt-script":   # no window, no private env, no bundle: it imports nothing
+        print(sw.plain_script(sw.stop_first_body({"PC_ROOT": args.root})))
+        return 0
     if args.cmd in ("poll-script", "analysis-script"):   # no window, no private env
         sums = sw.parse_sums(Path(args.sums).read_text(encoding="utf-8"))
         body = (poll_body(args.governor, args.pid, args.tid) if args.cmd == "poll-script"
