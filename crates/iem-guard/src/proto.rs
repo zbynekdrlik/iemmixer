@@ -689,69 +689,77 @@ mod tests {
     }
 
     /// The guard's largest reply fits one frame (S7, #10): every kept alarm
-    /// and the detail at their character caps in four-byte characters (the
-    /// longest a character is in UTF-8: `cut` counts characters), a switch
-    /// with every step, and an engine with every spare output (8), both
-    /// histograms as long as `effects::engine::parse` reads them (1001
-    /// buckets each, the 1 ms cap) and its counters at their largest. It is
-    /// above the old 64 KiB cap: the reason the cap is 256 KiB.
+    /// and the detail at their character caps, a switch with every step,
+    /// and an engine with every spare output (8), both histograms as long as
+    /// `effects::engine::parse` reads them (1001 buckets each, the 1 ms cap)
+    /// and its counters at their largest. The texts go through `cut` as the
+    /// guard's do (it counts characters): once four-byte characters, the
+    /// longest a character is in UTF-8, once C0 control characters, which
+    /// JSON would escape to six bytes each and `cut` makes spaces (S7 Task 3
+    /// review). Each is above the old 64 KiB cap: the reason the cap is 256
+    /// KiB.
     #[test]
     fn the_largest_reply_fits_a_frame() {
-        use crate::daemon::{ALARM_CHARS, DETAIL_CHARS};
+        use crate::daemon::{ALARM_CHARS, DETAIL_CHARS, cut};
         use crate::effects::engine::{HIST_LEN_MAX, HIST_TOP_MAX};
-        let wide = |n: usize| "\u{1F3A7}".repeat(n);
         let longest = Step::ALL
             .into_iter()
             .max_by_key(|s| serde_json::to_string(s).unwrap().len())
             .unwrap();
-        let mut alarms = Alarms::default();
-        for _ in 0..Alarms::KEEP {
-            alarms.raise(u64::MAX, Some(longest), wide(ALARM_CHARS), true);
-        }
         let full = vec![(HIST_TOP_MAX, u64::MAX); HIST_LEN_MAX];
-        let reply = Reply {
-            ok: false,
-            mode: Mode::Live,
-            switching: Some(Switching {
-                from: Mode::Live,
-                to: Mode::Event,
-                done: Step::ALL.to_vec(),
-                started: u64::MAX,
-            }),
-            alarms: alarms.all().to_vec(),
-            detail: wide(DETAIL_CHARS),
-            engine: Some(EngineStatus {
-                frames: u32::MAX,
-                callbacks: u64::MAX,
-                missed: u64::MAX,
-                resets: u64::MAX,
-                spawns: u64::MAX,
-                last_exit: Some(i32::MIN),
-                hil: vec![
-                    HilOut {
-                        tx: u16::MAX,
-                        peak: 0.0316,
-                    };
-                    8
-                ],
-                loopback_samples: u64::MAX,
-                loopback_ms: 333.25,
-                pid: Some(u32::MAX),
-                late: u64::MAX,
-                overruns: u64::MAX,
-                process_max_us: 61.5,
-                hist_top_us: u32::MAX,
-                interval_hist: full.clone(),
-                process_hist: full,
-                ..an_engine()
-            }),
-            guard_build: Some(GUARD_BUILD.into()),
-        };
-        let mut wire = Vec::new();
-        write_frame(&mut wire, &reply).unwrap();
-        let body = wire.len() - 4;
-        assert!(body > 64 * 1024, "{body} bytes: the old cap would do");
-        assert_eq!(read_msg::<Reply, _>(&mut wire.as_slice()).unwrap(), reply);
+        for chars in ["\u{1F3A7}", "\u{0}\u{1f}"] {
+            let text = |n: usize| cut(&chars.repeat(n), n);
+            let mut alarms = Alarms::default();
+            for _ in 0..Alarms::KEEP {
+                alarms.raise(u64::MAX, Some(longest), text(ALARM_CHARS), true);
+            }
+            let reply = Reply {
+                ok: false,
+                mode: Mode::Live,
+                switching: Some(Switching {
+                    from: Mode::Live,
+                    to: Mode::Event,
+                    done: Step::ALL.to_vec(),
+                    started: u64::MAX,
+                }),
+                alarms: alarms.all().to_vec(),
+                detail: text(DETAIL_CHARS),
+                engine: Some(EngineStatus {
+                    frames: u32::MAX,
+                    callbacks: u64::MAX,
+                    missed: u64::MAX,
+                    resets: u64::MAX,
+                    spawns: u64::MAX,
+                    last_exit: Some(i32::MIN),
+                    hil: vec![
+                        HilOut {
+                            tx: u16::MAX,
+                            peak: 0.0316,
+                        };
+                        8
+                    ],
+                    loopback_samples: u64::MAX,
+                    loopback_ms: 333.25,
+                    pid: Some(u32::MAX),
+                    late: u64::MAX,
+                    overruns: u64::MAX,
+                    process_max_us: 61.5,
+                    hist_top_us: u32::MAX,
+                    interval_hist: full.clone(),
+                    process_hist: full.clone(),
+                    ..an_engine()
+                }),
+                guard_build: Some(GUARD_BUILD.into()),
+            };
+            let mut wire = Vec::new();
+            write_frame(&mut wire, &reply).unwrap_or_else(|e| panic!("{chars:?}: {e}"));
+            let body = wire.len() - 4;
+            assert!(
+                body > 64 * 1024,
+                "{chars:?}: {body} bytes: the old cap would do"
+            );
+            assert_eq!(read_msg::<Reply, _>(&mut wire.as_slice()).unwrap(), reply);
+        }
     }
 
     #[test]
