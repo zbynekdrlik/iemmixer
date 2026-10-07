@@ -56,9 +56,16 @@ function Get-SourceHashes([string]$Src) {
 }
 
 function Get-Installed([string]$Root) {
-    # The tuning folder's files and their hashes, '' for one that is absent.
+    # The tuning folder's files and their hashes ('' for one that is absent), and
+    # whether Install-IemTuning's staging folder is left (never, after any call).
     $t = Join-Path $Root 'tuning'
-    return (@($names | ForEach-Object { $p = Join-Path $t $_; if (Test-Path -LiteralPath $p -PathType Leaf) { "${_}=$(FileSha $p)" } else { "${_}=" } }) -join ';')
+    $files = @($names | ForEach-Object { $p = Join-Path $t $_; if (Test-Path -LiteralPath $p -PathType Leaf) { "${_}=$(FileSha $p)" } else { "${_}=" } })
+    return (($files + @("stage=$(Test-Path -LiteralPath (Join-Path $Root 'tuning-stage'))")) -join ';')
+}
+
+function Test-Untouched([string]$Root) {
+    # A root a refusal met first: no tuning folder made, no staging folder left.
+    return (-not (Test-Path -LiteralPath (Join-Path $Root 'tuning')) -and -not (Test-Path -LiteralPath (Join-Path $Root 'tuning-stage')))
 }
 
 try {
@@ -82,6 +89,11 @@ try {
                 @($fr | Where-Object { -not $_.IsInherited }).Count -eq 0) "tuning-install-file-admin-owned-rules-inherited [$n] ($($fb -join '; '))"
     }
     $installed = Get-Installed $er
+    Assert ($installed -clike '*;stage=False') "tuning-install-leaves-no-staging-folder ($installed)"
+    # The profile check ran on the module imported from the admin-only staging
+    # folder, never again from the upload in the user's root.
+    $loaded = & (Get-Module IemPc) { (Get-Module IemTuning).Path }
+    Assert ("$loaded".StartsWith((Join-Path $er 'tuning-stage') + '\', [StringComparison]::OrdinalIgnoreCase)) "tuning-install-imports-the-staged-module-never-the-upload ($loaded)"
     # Again with the same files: the same result (written fresh each time).
     $r2 = Install-IemTuning -Root $er -SourceDir $src @h
     Assert ($r2.profile -ceq $h.ProfileSha256 -and (Get-Installed $er) -ceq $installed) 'tuning-install-again-is-the-same'
@@ -95,20 +107,22 @@ try {
     Assert ($e -like '*IemMeasure.psm1: sha256*refused*' -and (Get-Installed $er) -ceq $installed) "tuning-install-a-wrong-hash-changes-nothing ($e)"
     $empty = New-ElevatedRoot 'er-empty'
     $e = ErrorOf { Install-IemTuning -Root $empty -SourceDir $src2 @h2 }
-    Assert ($e -like '*sha256*refused*' -and -not (Test-Path -LiteralPath (Join-Path $empty 'tuning'))) "tuning-install-a-wrong-hash-makes-no-folder ($e)"
+    Assert ($e -like '*sha256*refused*' -and (Test-Untouched $empty)) "tuning-install-a-wrong-hash-makes-no-folder ($e)"
     $bad = Get-SourceHashes $src
     $bad.TuningSha256 = $bad.TuningSha256.ToUpperInvariant()
     $e = ErrorOf { Install-IemTuning -Root $empty -SourceDir $src @bad }
-    Assert ($e -like '*not 64 lowercase hex*' -and -not (Test-Path -LiteralPath (Join-Path $empty 'tuning'))) "tuning-install-refuses-a-hash-that-is-not-lowercase-hex ($e)"
+    Assert ($e -like '*not 64 lowercase hex*' -and (Test-Untouched $empty)) "tuning-install-refuses-a-hash-that-is-not-lowercase-hex ($e)"
 
     # ---- a profile IemTuning's own loader refuses writes nothing ----
     $badLayouts = @('two-roles-share-a-processor', 'a-string', 'processor-64', 'a-null-role', 'a-scalar-role', 'a-layout-that-is-not-an-object')
-    foreach ($c in @($cases.layouts | Where-Object { $badLayouts -contains $_.name })) {
+    $picked = @($cases.layouts | Where-Object { $badLayouts -contains $_.name })
+    Assert ($picked.Count -eq $badLayouts.Count) "tuning-install-every-named-layout-is-in-the-shared-table ($($picked.Count))"
+    foreach ($c in $picked) {
         Assert (-not $c.ok) "tuning-install-case-is-a-refusal [$($c.name)]"
         $s = New-Source ('src-' + $c.name) $c.layout
         $hs = Get-SourceHashes $s
         $e = ErrorOf { Install-IemTuning -Root $empty -SourceDir $s @hs }
-        Assert ($e -like '*layout*' -and -not (Test-Path -LiteralPath (Join-Path $empty 'tuning'))) "tuning-install-a-refused-layout-writes-nothing [$($c.name)] ($e)"
+        Assert ($e -like '*layout*' -and (Test-Untouched $empty)) "tuning-install-a-refused-layout-writes-nothing [$($c.name)] ($e)"
         $e = ErrorOf { Install-IemTuning -Root $er -SourceDir $s @hs }
         Assert ($e -like '*layout*' -and (Get-Installed $er) -ceq $installed) "tuning-install-a-refused-layout-keeps-the-installed-files [$($c.name)]"
     }
@@ -129,7 +143,7 @@ try {
     Assert ($r3.measure -ceq $h3.MeasureSha256 -and $r3.measure -cne $h.MeasureSha256 -and $r3.profile -ceq $h.ProfileSha256) 'tuning-install-keep-profile-replaces-the-modules'
     Assert ((FileSha (Join-Path $tuning 'profile.json')) -ceq $h.ProfileSha256) 'tuning-install-keep-profile-leaves-the-profile'
     $e = ErrorOf { Install-IemTuning -Root $empty -SourceDir $src3 @h3 -KeepProfile }
-    Assert ($e -like '*installed profile*' -and -not (Test-Path -LiteralPath (Join-Path $empty 'tuning'))) "tuning-install-keep-profile-without-one-writes-nothing ($e)"
+    Assert ($e -like '*installed profile*' -and (Test-Untouched $empty)) "tuning-install-keep-profile-without-one-writes-nothing ($e)"
     $installed = Get-Installed $er
     $pf = Join-Path $tuning 'profile.json'
     $fs = [IO.File]::GetAccessControl($pf)
