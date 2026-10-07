@@ -31,6 +31,12 @@ SHA = "a" * 40
 SUMS = {n: hashlib.sha256(n.encode()).hexdigest() for n in sw.BUNDLE_FILES}
 ENV = {"PC_ROOT": "R", "PC_ROOT_SCP": "/R", "PC_SSH": "u@h", "PC_TUNING_ROOT": "T", "PC_XPERF": "xperf.exe"}
 STAGED = re.compile(r"Import-Module \(Join-Path \$iemStage '([A-Za-z]+\.psm1)'\)")
+# #15, the last lane, item 2: modules load only from Windows PowerShell's own folders,
+# and ssh starts Windows PowerShell by its full path.
+PIN = ("$env:PSModulePath = [IO.Path]::Combine($PSHOME, 'Modules') + ';' + "
+       "[IO.Path]::Combine([Environment]::GetFolderPath('ProgramFiles'), 'WindowsPowerShell\\Modules')")
+REMOTE = ("%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe "
+          "-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command -")
 
 
 def bundle_record(test: unittest.TestCase, state: dict | None = None) -> dict[str, str]:
@@ -124,6 +130,37 @@ class StageWriteTests(unittest.TestCase):
         self.assertLess(keep.index("& $iemOnly $iemMod"), keep.index("Get-FileHash"))
 
 
+class PinTests(unittest.TestCase):
+    """#15, the last lane, item 2: an elevated window session pins
+    PSModulePath to Windows PowerShell's own folders before its first command
+    (the user's Documents path comes first otherwise, and a module autoloaded
+    from there would run elevated), and ssh starts powershell.exe by its full
+    path (never one a user's PATH finds first)."""
+
+    def pinned_first(self, script: str, eap: str = "Stop") -> None:
+        self.assertEqual(script.count("$env:PSModulePath"), 1, script)
+        self.assertEqual(script[:script.index(PIN)], f"$ErrorActionPreference = '{eap}'\n$ProgressPreference = 'SilentlyContinue'\n")
+        self.assertTrue(script[script.index(PIN) + len(PIN):].startswith(" ; try { "), script)
+
+    def test_every_window_script_pins_the_module_path_before_any_command(self) -> None:
+        self.pinned_first(sw.ps_script("C:\\r", "Get-X", SUMS))
+        self.pinned_first(sw.plain_script(sw.stop_first_body({"PC_ROOT": "R"})))
+        self.pinned_first(gw.ps_script({"PC_ROOT": "R"}, "Get-X"))
+        self.assertEqual(elevated_ps.PIN, PIN)
+
+    def test_ssh_starts_windows_powershell_by_its_full_path(self) -> None:
+        self.assertEqual(sw.ssh_cmd(ENV), ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "u@h", REMOTE])
+        self.assertEqual(gw.ssh_cmd(ENV), ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "u@h", REMOTE])
+
+    def test_the_golden_setup_s_folders_script_is_pinned(self) -> None:
+        sent: list[str] = []
+        env = dict(ENV, PC_TREES="/x/trees.json")
+        with mock.patch.object(gw, "ssh_raw", lambda e, script, timeout=900: sent.append(script) or ""), \
+                mock.patch.object(gw, "scp"), mock.patch.object(gw, "ps"), contextlib.redirect_stdout(io.StringIO()):
+            gw.cmd_setup(env, None)
+        self.assertTrue(sent[0].startswith(f"{PIN} ; New-Item -ItemType Directory -Force -Path 'R\\bin', "), sent)
+
+
 class BundleRecordTests(unittest.TestCase):
     """sw.ps takes the sums from the attested bundle the window's PC holds."""
 
@@ -183,6 +220,9 @@ class BundleRecordTests(unittest.TestCase):
                 contextlib.redirect_stdout(io.StringIO()):
             sw.cmd_setup(env, type("Args", (), {"sha": SHA})())
         self.assertEqual(seen, [SHA])
+        # Its folders' call is pinned like every composed script (#15, the last lane, item 2).
+        self.assertEqual(self.sent, [f"{PIN} ; New-Item -ItemType Directory -Force -Path 'R\\bin', 'R\\queue', 'R\\status' "
+                                     "| Out-Null\n"])
 
     def test_the_preempts_first_call_imports_nothing_and_needs_no_bundle_record(self) -> None:
         # #15, the last lane, item 1: without a bundle record every staged call refuses, yet
