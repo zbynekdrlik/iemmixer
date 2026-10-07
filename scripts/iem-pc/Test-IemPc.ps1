@@ -191,7 +191,7 @@ try {
     # What Register-IemTasks says about the boot task: a warning only while it is on, never a refusal.
     $bw = Get-IemBootTaskWarnings -FastStartup $fsOn
     Assert ($bw.Count -eq 1 -and $bw[0] -ceq $fsOn.problem) "boot-task-warns-of-fast-startup-that-is-on ($($bw -join ' | '))"
-    foreach ($f in @($fsVenue, (Get-IemFastStartup -Hiberboot 1 -HiberFile $null), (Get-IemFastStartup -Hiberboot 0 -HiberFile $true))) {
+    foreach ($f in @($fsVenue, (Get-IemFastStartup -Hiberboot 0 -HiberFile $true))) {
         $bw = Get-IemBootTaskWarnings -FastStartup $f
         Assert ($bw.Count -eq 0) "boot-task-warns-of-nothing-else [$($f.hiberboot_enabled), $($f.hiberfile_present)] ($($bw -join ' | '))"
     }
@@ -200,6 +200,12 @@ try {
     $fsUnread = [pscustomobject]@{ hiberboot_enabled = 1; hiberfile_present = $null; active = $null; problem = ''; error = 'the hibernation file: x' }
     $bw = Get-IemBootTaskWarnings -FastStartup $fsUnread
     Assert ($bw.Count -eq 1 -and $bw[0] -ceq 'Fast Startup could not be judged (the hibernation file: x): if it is on, a shutdown skips iemmixer-boot-pref') "boot-task-names-a-fast-startup-it-cannot-judge ($($bw -join ' | '))"
+    # An unknown fact without a read error is named too (review of PR #41): HiberbootEnabled
+    # absent while the hibernation file is there, or the file unknown while HiberbootEnabled is 1.
+    foreach ($c in @(@($null, $true, 'HiberbootEnabled absent'), @(1, $null, 'the hibernation file not read'))) {
+        $bw = Get-IemBootTaskWarnings -FastStartup (Get-IemFastStartup -Hiberboot $c[0] -HiberFile $c[1])
+        Assert ($bw.Count -eq 1 -and $bw[0] -ceq ('Fast Startup could not be judged ({0}): if it is on, a shutdown skips iemmixer-boot-pref' -f $c[2])) "boot-task-names-an-unknown-fast-startup-fact $($c[2]) ($($bw -join ' | '))"
+    }
     $fsRead = [pscustomobject]@{ hiberboot_enabled = 1; hiberfile_present = $false; active = $false; problem = ''; error = '' }
     Assert ((Get-IemBootTaskWarnings -FastStartup $fsRead).Count -eq 0) 'boot-task-warns-of-nothing-when-both-facts-were-read-and-it-is-off'
 
