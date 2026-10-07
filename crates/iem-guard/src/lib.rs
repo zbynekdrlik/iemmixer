@@ -12,6 +12,8 @@
 //! - [`handover`]: the REAPER, meter-bridge and predecessor-exit verdicts;
 //! - [`proto`]: the guard pipe's requests, replies and frames;
 //! - [`state`]: the persistent state and the reboot rule;
+//! - [`switch_log`]: the last switch's record, its steps timed, and its
+//!   in-ear silence (S7);
 //! - [`alarms`]: the kept alarms;
 //! - [`cancel`]: the pre-emption token of every waiting step;
 //! - [`view`]: what the tray shows (tooltip, alarm notices).
@@ -61,6 +63,7 @@ pub mod plan;
 pub mod proto;
 pub mod site;
 pub mod state;
+pub mod switch_log;
 pub mod tls;
 pub mod view;
 #[cfg(windows)]
