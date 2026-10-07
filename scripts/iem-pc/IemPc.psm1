@@ -26,8 +26,9 @@ $script:LogonInteractive = 3
 $script:LogonS4U = 2
 $script:TriggerBoot = 8
 $script:TriggerLogon = 9
-# The boot task's log, in <elevated root>\tasks\out (#35).
+# The boot task's log and its first query, in <elevated root>\tasks\out (#35).
 $script:BootPrefLog = 'boot-pref.log'
+$script:BootPrefBefore = 'boot-pref.before'
 # RegisterTaskDefinition flags: TASK_CREATE_OR_UPDATE (6) and
 # TASK_DONT_ADD_PRINCIPAL_ACE (0x10): without it the service adds its own allow
 # ACE for the task's user next to ours, and the read-back (exactly our three
@@ -261,10 +262,18 @@ function Get-IemTaskReport {
     $s = $d.Settings
     $triggers = @()
     $repeat = @()
+    $delays = @()
+    $disabled = 0
     foreach ($t in $d.Triggers) {
         $triggers += [int]$t.Type
         $iv = [string]$t.Repetition.Interval
         if ($iv) { $repeat += $iv }
+        # Delay exists on the boot and logon triggers (not on a time trigger).
+        if ($null -ne $t.PSObject.Properties['Delay']) {
+            $dl = [string]$t.Delay
+            if ($dl) { $delays += $dl }
+        }
+        if (-not [bool]$t.Enabled) { $disabled++ }
     }
     $sddl = [string]$Task.GetSecurityDescriptor(4)
     [pscustomobject]@{
@@ -278,6 +287,8 @@ function Get-IemTaskReport {
         demand_start = [bool]$s.AllowDemandStart
         late_start = [bool]$s.StartWhenAvailable
         repeat = ($repeat -join ',')
+        delays = ($delays -join ',')
+        disabled = $disabled
         batteries = ((-not $s.DisallowStartIfOnBatteries) -and (-not $s.StopIfGoingOnBatteries))
         idle_stop = [bool]$s.IdleSettings.StopOnIdleEnd
         hard_end = [bool]$s.AllowHardTerminate
@@ -291,7 +302,9 @@ function Get-IemTaskReport {
 
 function Test-IemTaskReport {
     # What every task of ours must read back as; returns the differences.
-    # -Boot (the boot task, #35): S4U, no restart and no start on demand.
+    # -Boot (the boot task, #35): S4U, no restart and no start on demand. No
+    # task of ours starts late, repeats, waits a trigger delay (it would push
+    # the boot task's write toward REAPER's start) or has a disabled trigger.
     param([Parameter(Mandatory)]$Report, [Parameter(Mandatory)][int]$RunLevel, [switch]$Boot)
     $logon = $script:LogonInteractive
     $restart = '3xPT1M'
@@ -310,6 +323,8 @@ function Test-IemTaskReport {
     if ($Report.demand_start -ne $demand) { $bad += "start on demand $($Report.demand_start)" }
     if ($Report.late_start) { $bad += 'starts late after a missed start' }
     if ($Report.repeat) { $bad += "repeats $($Report.repeat)" }
+    if ($Report.delays) { $bad += "trigger delay $($Report.delays)" }
+    if ($Report.disabled -gt 0) { $bad += "$($Report.disabled) disabled trigger(s)" }
     if (-not $Report.batteries) { $bad += 'stops on batteries' }
     if ($Report.idle_stop) { $bad += 'stops on idle end' }
     if ($Report.hard_end) { $bad += 'may be ended hard' }
@@ -351,23 +366,33 @@ function ConvertTo-IemRegExeKey {
 }
 
 function Get-IemBootPrefCommand {
-    # The boot task's action (#35): the preference written back to its
-    # original at the system's start, before any logon, so before any process
-    # can hold the driver (REAPER, the engine and the spikes start only in a
-    # logged-on session), then read back. Native only, cmd.exe and reg.exe:
-    # PowerShell took ~8 s to start there (#35, the PC 2026-10-06); reg.exe
-    # writes about a second after the task starts, ~12 s before REAPER. Each
-    # run appends to <log dir>\boot-pref.log a header "boot-pref <date> <time>
-    # add=<0|1>" (cmd's local clock; Get-IemBootstrapState gives the task's
-    # last run in UTC) and reg.exe's query of the value; cmd's exit code is
-    # the add's (0 written, 1 not). The task runs elevated with the user's
-    # environment, so the line holds no %: cmd and Task Scheduler expand
-    # %name% before cmd parses the line, while cmd /v:on expands !name! after
-    # it, so a value the user set is text, never a command. /d skips cmd's
-    # AutoRun; every program by its full path; no pipe and no FOR /F (each
-    # starts another cmd through COMSPEC). A key, value name or path holding
-    # a character cmd reads there (" % ! ^ & | < >) or a control character is
-    # refused. -PrefKind: the site's [card] pref_original kind (dword, text).
+    # The boot task's action (#35): at the system's start the preference is
+    # read and, only when it is not the original (a parked engine, a power
+    # loss or a hard kill left 32), written back, then read back. The task
+    # starts ~4 s after the boot, before the desktop session's logon (the PC
+    # logs on by itself ~3 s later) and well before REAPER, which the
+    # predecessor's autostart starts ~16 s after the boot (#35, the PC
+    # 2026-10-06); nothing can hold the driver before REAPER, the engine or a
+    # spike starts. Native only, cmd.exe, reg.exe and findstr.exe: PowerShell
+    # took ~8 s to start there, while reg.exe is expected to write within
+    # about a second of the task's start (measured again by test #2). Each run
+    # appends to <log dir>\boot-pref.log a header "boot-pref <date> <time>
+    # add=<none|0|1>" (none: at the original, nothing written; cmd's local
+    # clock, a diagnostic only: the task's last run (UTC) and last result in
+    # Get-IemBootstrapState are authoritative) and reg.exe's query of the
+    # value; reg.exe's first query goes to <log dir>\boot-pref.before, which
+    # findstr compares with the original's line as reg.exe prints it (a DWORD
+    # in lower-case hex). cmd's exit code is 1 only when the add failed. The
+    # task runs elevated with the user's environment, so the line holds no %:
+    # cmd and Task Scheduler expand %name% before cmd parses the line, while
+    # cmd /v:on expands !name! after it, so a value the user set is text,
+    # never a command. /d skips cmd's AutoRun, /e:on keeps the extensions
+    # whatever the user's HKCU says; every program by its full path; no pipe
+    # and no FOR /F (each starts another cmd through COMSPEC). A key, value
+    # name or path holding a character cmd reads there (" % ! ^ & | < >) or
+    # a control character is refused, and a value name holding a backslash
+    # (findstr reads it in its literal). -PrefKind: the value's registry kind
+    # (dword, text), which Register-IemTasks reads from the value itself.
     param([Parameter(Mandatory)][string]$System, [Parameter(Mandatory)][string]$PrefKey,
           [Parameter(Mandatory)][string]$PrefName, [Parameter(Mandatory)][string]$PrefOriginal,
           [Parameter(Mandatory)][string]$LogDir, [ValidateSet('dword', 'text')][string]$PrefKind = 'dword')
@@ -378,20 +403,45 @@ function Get-IemBootPrefCommand {
     foreach ($p in @($System, $LogDir)) {
         if (-not [IO.Path]::IsPathRooted($p)) { throw "$p is not an absolute path (the boot task's command line)" }
     }
-    if ($PrefName.EndsWith('\')) { throw "value name '$PrefName' refused (a trailing backslash would escape its quote)" }
+    if ($PrefName.Contains('\')) { throw "value name '$PrefName' refused (a backslash: findstr and reg.exe would read it as an escape)" }
     foreach ($v in @($key, $PrefName, $System, $LogDir)) {
         if ($v -match '[\x00-\x1f"%!^&|<>]') { throw "'$v' refused for the boot task's command line (it holds a character cmd reads)" }
     }
     $reg = '"' + [IO.Path]::Combine($System, 'reg.exe') + '"'
+    $findstr = '"' + [IO.Path]::Combine($System, 'findstr.exe') + '"'
     $log = '"' + [IO.Path]::Combine($LogDir, $script:BootPrefLog) + '"'
+    $before = '"' + [IO.Path]::Combine($LogDir, $script:BootPrefBefore) + '"'
     $type = 'REG_DWORD'
-    if ($PrefKind -eq 'text') { $type = 'REG_SZ' }
+    $shown = '0x{0:x}' -f [int]$PrefOriginal
+    if ($PrefKind -eq 'text') {
+        $type = 'REG_SZ'
+        $shown = $PrefOriginal
+    }
     $value = '"{0}" /v "{1}"' -f $key, $PrefName
-    $line = ('{0} add {1} /t {2} /d {3} /f >nul 2>&1 && set "iemadd=0" || set "iemadd=1"' -f $reg, $value, $type, $PrefOriginal) +
+    $original = '    {0}    {1}    {2}' -f $PrefName, $type, $shown
+    $line = ('{0} query {1} >{2} 2>&1' -f $reg, $value, $before) +
+        ' & set "iemadd=none"' +
+        (' & {0} /i /l /x /c:"{1}" {2} >nul' -f $findstr, $original, $before) +
+        (' || ({0} add {1} /t {2} /d {3} /f >nul 2>&1 && set "iemadd=0" || set "iemadd=1")' -f $reg, $value, $type, $PrefOriginal) +
         (' & (echo boot-pref !DATE! !TIME! add=!iemadd!)>>{0}' -f $log) +
         (' & {0} query {1} >>{2} 2>&1' -f $reg, $value, $log) +
-        ' & exit /b !iemadd!'
-    [pscustomobject]@{ exe = [IO.Path]::Combine($System, 'cmd.exe'); arguments = ('/d /q /v:on /s /c "' + $line + '"') }
+        ' & if "!iemadd!"=="1" (exit /b 1) else (exit /b 0)'
+    [pscustomobject]@{ exe = [IO.Path]::Combine($System, 'cmd.exe'); arguments = ('/d /q /e:on /v:on /s /c "' + $line + '"') }
+}
+
+function Get-IemPrefKind {
+    # The preference's registry kind as the boot task writes it (dword or
+    # text), read from the value in this session's HKCU (Get-IemPref: DWord or
+    # String, else refused). Register-IemTasks runs as the desktop user, as
+    # `iempc bootstrap` does (the tasks' user by default), so this is the
+    # driver's value; a missing key or value is refused (a typo would make
+    # reg.exe add create one).
+    param([Parameter(Mandatory)][string]$Key, [Parameter(Mandatory)][string]$Name)
+    try { $p = Get-IemPref -Key $Key -Name $Name } catch {
+        throw "the preference $Name under $Key cannot be read in this session's HKCU (run Register-IemTasks as the desktop user): $($_.Exception.Message)"
+    }
+    if ($p.kind -eq 'String') { return 'text' }
+    return 'dword'
 }
 
 function Register-IemTasks {
@@ -399,7 +449,9 @@ function Register-IemTasks {
     # directly, never its launcher script), the probe and the four Highest
     # tasks (tuning, exclude, logon, boot-pref), each with the security
     # descriptor that lets the Limited guard run it (the boot task never runs
-    # on demand, #35: Get-IemBootPrefCommand). StartREAPER predates S6 and holds site
+    # on demand, #35: Get-IemBootPrefCommand; it writes the kind the value has
+    # in this session's HKCU, Get-IemPrefKind, so run this as the desktop
+    # user, as `iempc bootstrap` does). StartREAPER predates S6 and holds site
     # values: it keeps its definition, gains only the descriptor, and must
     # exist (nothing is registered without it). The Highest tasks run this
     # module from a copy in -ElevatedRoot\tasks and load S1c's tuning module
@@ -418,8 +470,7 @@ function Register-IemTasks {
         [Parameter(Mandatory)][string]$Module,
         [string]$Folder = '\iemmixer',
         [string]$User = '',
-        [string]$ElevatedRoot = '',
-        [ValidateSet('dword', 'text')][string]$PrefKind = 'dword'
+        [string]$ElevatedRoot = ''
     )
     $ElevatedRoot = Resolve-IemElevatedRoot -ElevatedRoot $ElevatedRoot
     $userRoot = $Root.TrimEnd('\') + '\'
@@ -435,9 +486,14 @@ function Register-IemTasks {
     if (-not (Test-Path -LiteralPath $AppExe -PathType Leaf)) { throw "the app exe $AppExe does not exist" }
     $tasksDir = Join-Path $ElevatedRoot 'tasks'
     $system = [Environment]::GetFolderPath('System')
-    # The boot task's command line (#35), refused here before anything is written.
+    # The boot task's command line (#35): what cmd would read is refused here,
+    # then the value's kind is read (a value that cannot be read is refused),
+    # all before anything is written.
+    $outDir = Join-Path $tasksDir 'out'
+    [void](Get-IemBootPrefCommand -System $system -PrefKey $PrefKey -PrefName $PrefName -PrefOriginal $PrefOriginal -LogDir $outDir)
+    $prefKind = Get-IemPrefKind -Key $PrefKey -Name $PrefName
     $boot = Get-IemBootPrefCommand -System $system -PrefKey $PrefKey -PrefName $PrefName -PrefOriginal $PrefOriginal `
-        -PrefKind $PrefKind -LogDir (Join-Path $tasksDir 'out')
+        -PrefKind $prefKind -LogDir $outDir
     $u = Resolve-IemUser -User $User
     $sddl = Get-IemTaskSddl -UserSid $u.sid
     $sch = Connect-IemScheduler
@@ -473,11 +529,9 @@ function Register-IemTasks {
     foreach ($s in $specs) {
         $atLogon = ($s.trigger -ceq 'logon')
         $atBoot = ($s.trigger -ceq 'boot')
-        $logonType = $script:LogonInteractive
-        if ($atBoot) { $logonType = $script:LogonS4U }
         $d = New-IemTaskDefinition -Scheduler $sch -User $u.name -RunLevel $s.level -Exe $s.exe -Arguments $s.args `
             -WorkDir $s.dir -Description ('iemmixer S6: ' + $s.name) -AtLogon:$atLogon -AtBoot:$atBoot
-        [void]$f.RegisterTaskDefinition($s.name, $d, $script:TaskCreateOrUpdate, $u.name, $null, $logonType, $sddl)
+        [void]$f.RegisterTaskDefinition($s.name, $d, $script:TaskCreateOrUpdate, $u.name, $null, [int]$d.Principal.LogonType, $sddl)
         [void]$f.GetTask($s.name).SetSecurityDescriptor($sddl, $script:TaskDontAddPrincipalAce)
         $rep = Get-IemTaskReport -Task $f.GetTask($s.name) -UserSid $u.sid
         $bad = Test-IemTaskReport -Report $rep -RunLevel $s.level -Boot:$atBoot
@@ -1360,8 +1414,12 @@ function Get-IemBootstrapState {
     # Read-only (plan Task 16 Step 1): REAPER and the app running, the driver
     # module's holders, the preference, our tasks (descriptor, last result,
     # last run in UTC), the boot task's last logged run (#35; its log in
-    # -ElevatedRoot, default %ProgramData%\iemmixer), the root's DACL and every
-    # item below it, the firewall rule, the network categories, Defender.
+    # -ElevatedRoot, default %ProgramData%\iemmixer), Fast Startup
+    # (HiberbootEnabled; with it on, a shutdown hibernates the system session
+    # and the next start fires no boot trigger), the root's DACL and every
+    # item below it, the firewall rule, the network categories, Defender. The
+    # result holds site values (the user, the preference key in the boot log):
+    # it stays on the dev box, never on a public ticket (P6).
     param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][string]$Module, [Parameter(Mandatory)][string]$PrefKey,
           [Parameter(Mandatory)][string]$PrefName, [Parameter(Mandatory)][string]$AppImage, [string]$ReaperImage = 'reaper',
           [string]$Folder = '\iemmixer', [string]$FirewallRule = 'iemmixer-http', [string]$User = '', [string]$ElevatedRoot = '')
@@ -1380,6 +1438,10 @@ function Get-IemBootstrapState {
     $bootLines = @()
     $bootError = ''
     try { $bootLines = Get-IemBootPrefLog -Path $bootLog } catch { $bootError = $_.Exception.Message }
+    $fastStartup = $null
+    try {
+        $fastStartup = (Get-Item -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power').GetValue('HiberbootEnabled', $null)
+    } catch { $fastStartup = $null }
     $pref = $null
     $prefError = ''
     try { $pref = Get-IemPref -Key $PrefKey -Name $PrefName } catch { $prefError = $_.Exception.Message }
@@ -1409,6 +1471,7 @@ function Get-IemBootstrapState {
         pref_error = $prefError
         tasks = $tasks
         boot_pref = [pscustomobject]@{ path = $bootLog; log = $bootLines; log_error = $bootError }
+        fast_startup = $fastStartup
         root = [pscustomobject]@{ exists = $rootExists; acl_ok = ($rootExists -and $rootBad.Count -eq 0); problems = $rootBad }
         firewall = [pscustomobject]@{ present = ($null -ne $fw); ok = (Test-IemFirewallRule -Rule $fw -Enabled 'True'); rule = $fw }
         networks = @(Get-NetConnectionProfile -ErrorAction SilentlyContinue | ForEach-Object { "$($_.NetworkCategory)" })
