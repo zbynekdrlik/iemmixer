@@ -1524,6 +1524,64 @@ fn a_live_entry_without_a_pwa_subscription_is_refused() {
     }
 }
 
+/// The precheck's text for a trial before the PC tests (`pc::precheck`).
+const NO_PC_TESTS: &str =
+    "[guard] pc_tests_passed is false: no trial before the owner-approved PC tests";
+
+/// `live --trial` waits for the owner-approved PC tests (design §10,
+/// `[guard] pc_tests_passed`): its entry and its dry run are refused
+/// without them and pass with them, and a live entry that is no trial is
+/// not affected. The trial reaches the precheck only through the entry
+/// (`g.trial = e.trial`, the dry run's `e.trial`; review of PR #39, #38):
+/// dropping either passes a trial here.
+#[test]
+fn a_live_trial_needs_the_pc_tests_and_a_plain_live_entry_does_not() {
+    let live = |trial, dry_run| Request::Live {
+        build: SHA.into(),
+        trial,
+        dry_run,
+    };
+    let fresh = |pc_tests_passed| {
+        let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
+        g.state
+            .bundles
+            .insert(SHA.into(), record(SHA, "main", Hil::Green));
+        pc.pc_tests_passed = pc_tests_passed;
+        (pc, g)
+    };
+    // Without the PC tests: the trial's dry run and its entry are refused.
+    let (mut pc, mut g) = fresh(false);
+    let r = ask(&mut pc, &mut g, live(true, true));
+    assert!(!r.ok, "{r:?}");
+    assert!(
+        r.detail.ends_with(&format!("precheck {NO_PC_TESTS}")),
+        "{}",
+        r.detail
+    );
+    assert_eq!(pc.mutating_calls(), Vec::<Call>::new());
+    let r = ask(&mut pc, &mut g, live(true, false));
+    assert!(!r.ok, "{r:?}");
+    assert_eq!(g.state.mode, Mode::Event);
+    assert!(!pc.called(Call::EngineStart));
+    assert_eq!(texts(&g), [format!("Precheck: {NO_PC_TESTS}")]);
+    // With them the same trial passes both.
+    let (mut pc, mut g) = fresh(true);
+    let r = ask(&mut pc, &mut g, live(true, true));
+    assert!(r.ok, "{r:?}");
+    assert!(r.detail.ends_with("; precheck ok"), "{}", r.detail);
+    let r = ask(&mut pc, &mut g, live(true, false));
+    assert!(r.ok, "{r:?}");
+    assert_eq!(g.state.mode, Mode::Live);
+    // A live entry that is no trial does not read them.
+    let (mut pc, mut g) = fresh(false);
+    let r = ask(&mut pc, &mut g, live(false, true));
+    assert!(r.ok, "{r:?}");
+    assert!(r.detail.ends_with("; precheck ok"), "{}", r.detail);
+    let r = ask(&mut pc, &mut g, live(false, false));
+    assert!(r.ok, "{r:?}");
+    assert_eq!(g.state.mode, Mode::Live);
+}
+
 #[test]
 fn live_needs_an_installed_green_main_bundle() {
     let live = |trial| Request::Live {

@@ -745,6 +745,9 @@ pub mod fake {
         /// The PWA notification subscriptions the precheck reads (`None`:
         /// unreadable).
         pub subscriptions: Option<u32>,
+        /// `[guard] pc_tests_passed` as the precheck reads it (default:
+        /// passed, so a live trial goes as far as the other facts let it).
+        pub pc_tests_passed: bool,
         /// What `job` reads (a fixed fact of the process: not a recorded
         /// call).
         pub job: Result<Placement, String>,
@@ -819,6 +822,7 @@ pub mod fake {
                 },
                 engine_up: true,
                 subscriptions: Some(1),
+                pc_tests_passed: true,
                 job: Ok(Placement::NoJob),
                 logon: None,
                 lan_note: None,
@@ -973,12 +977,13 @@ pub mod fake {
 
         fn precheck(&mut self, to: Mode, trial: bool) -> R<Option<String>> {
             self.enter(Call::Precheck, None)?;
-            // The real verdict over `subscriptions`; every other fact passes.
+            // The real verdict over `subscriptions` and `pc_tests_passed`;
+            // every other fact passes.
             precheck(&PrecheckFacts {
                 to,
                 trial,
                 bundle: true,
-                pc_tests_passed: true,
+                pc_tests_passed: self.pc_tests_passed,
                 subscriptions: self.subscriptions,
                 foreign_engine: false,
                 app_binary: Ok(()),
