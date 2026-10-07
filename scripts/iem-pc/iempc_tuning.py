@@ -20,7 +20,8 @@ equal what this box sent. The guard's elevated tuning task then finds them
 hand-over is verified, online and offline, when the elevated tuning folder
 holds a profile (one read-only check): the installed profile stays as it is
 (`-KeepProfile`), so the module never drifts from the running bundle. A failed
-refresh is reported (stderr and a `tuning_refresh: failed` line); the
+refresh is reported (stderr and a `tuning_refresh: failed` line, or
+`still-running` for an install that outlived its bound and runs on); the
 activation still counts as done. The exclude task is left as it is: it would
 take the modules from the bundle in the user's root, which the user may change.
 
@@ -130,6 +131,13 @@ def refresh_after_activate(ctx, ip, sha: str) -> None:
         if present is not True:
             raise ip.StepError(f"the profile check reads {present!r}")
         ip.emit({"tuning_refresh": sha, "hashes": run_install(ctx, ip, sha, None)})
+    except ip.StillRunning as e:
+        if ip.event_now() and not ctx.flag_at_start:
+            raise
+        print(f"iempc: WARNING: the refresh may still run on the PC ({e}); it is left to finish, never force-ended; the "
+              f"activation is done; once it is over, check with 'iempc tuning-install --sha {sha}'", file=sys.stderr,
+              flush=True)
+        ip.emit({"tuning_refresh": "still-running", "sha": sha, "error": str(e)[-800:]})
     except ip.StepError as e:
         if ip.event_now() and not ctx.flag_at_start:
             raise
