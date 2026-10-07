@@ -140,6 +140,27 @@ $kernelStarted = $false   # the test's own NT Kernel Logger, stopped in finally 
 $maint = "$root\HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\Maintenance"
 
 try {
+    # The store (#34): IemTuning loads IemTuningStore.psm1 from its own folder, the
+    # journal, registry and boot functions come from it, and an IemTuning without
+    # it does not load (in a child PowerShell, so the failed import stays out of this one).
+    $store = Get-Module -Name IemTuningStore
+    Assert ($null -ne $store -and $store.Path -eq (Join-Path $here 'IemTuningStore.psm1')) "store-loads-from-the-tuning-folder ($(if ($store) { $store.Path }))"
+    $notStore = @(@('Read-IemJournal', 'Write-IemJournal', 'Set-IemRegRaw', 'Remove-IemRegValue', 'Get-IemRegPath', 'Get-IemBootIdentity', 'Test-IemSameBoot') |
+        Where-Object { (Get-Command -Name $_).ModuleName -cne 'IemTuningStore' })
+    Assert ($notStore.Count -eq 0) "store-serves-the-journal-registry-and-boot-functions ($($notStore -join ', '))"
+    $alone = Join-Path $dir 'tuning-without-store'
+    New-Item -ItemType Directory -Force -Path $alone | Out-Null
+    Copy-Item -LiteralPath (Join-Path $here 'IemTuning.psm1') -Destination $alone
+    # The child names the outcome in one short line (a long error text may be wrapped).
+    $aloneBody = @'
+$ErrorActionPreference = 'Stop'
+try { Import-Module 'MODULE'; 'loaded' } catch { if ("$_" -like '*IemTuningStore.psm1*') { 'refused-for-its-store' } else { 'refused: ' + "$_" } }
+'@
+    $aloneBody = $aloneBody.Replace('MODULE', (Join-Path $alone 'IemTuning.psm1'))
+    $aloneRun = Invoke-IemNative -FilePath 'powershell.exe' -Arguments @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand',
+                                                                         [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($aloneBody)))
+    Assert ($aloneRun.code -eq 0 -and $aloneRun.out -contains 'refused-for-its-store') "tuning-without-its-store-does-not-load (exit $($aloneRun.code): $($aloneRun.out -join ' '))"
+
     # Journal file: a flushed temp file swapped in; a stop in between leaves the
     # journal missing or empty next to a complete .tmp, which the read uses (A14).
     $jp = Join-Path (Join-Path $dir 'journal-file') 'journal.json'
@@ -593,7 +614,7 @@ try {
     $e2 = Enter-IemTuningMode -ProfilePath $pp -Only @('plan', 'governor', 'placement') -Idle 'c1'
     Assert (@(Rows $e2 'written').Count -eq 0) 'enter-is-idempotent'
     # A new session restores from the journal alone.
-    Remove-Module IemMeasure, IemTuning
+    Remove-Module IemMeasure, IemTuning, IemTuningStore
     Import-Module (Join-Path $here 'IemMeasure.psm1') -Force
     $x = Exit-IemTuningMode -ProfilePath $pp
     Assert ([IemPower]::Active() -eq $activeBefore) 'exit-from-journal-in-a-new-session'
