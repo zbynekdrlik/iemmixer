@@ -691,13 +691,14 @@ mod tests {
     /// The guard's largest reply fits one frame (S7, #10): every kept alarm
     /// and the detail at their character caps in four-byte characters (the
     /// longest a character is in UTF-8: `cut` counts characters), a switch
-    /// with every step, and an engine with every spare output (8) and both
-    /// histograms full (1001 buckets each, the 1 ms cap), its integers at
-    /// their largest. It is above the old 64 KiB cap: the reason the cap is
-    /// 256 KiB.
+    /// with every step, and an engine with every spare output (8), both
+    /// histograms as long as `effects::engine::parse` reads them (1001
+    /// buckets each, the 1 ms cap) and its counters at their largest. It is
+    /// above the old 64 KiB cap: the reason the cap is 256 KiB.
     #[test]
     fn the_largest_reply_fits_a_frame() {
         use crate::daemon::{ALARM_CHARS, DETAIL_CHARS};
+        use crate::effects::engine::{HIST_LEN_MAX, HIST_TOP_MAX};
         let wide = |n: usize| "\u{1F3A7}".repeat(n);
         let longest = Step::ALL
             .into_iter()
@@ -707,7 +708,7 @@ mod tests {
         for _ in 0..Alarms::KEEP {
             alarms.raise(u64::MAX, Some(longest), wide(ALARM_CHARS), true);
         }
-        let full = vec![(1000, u64::MAX); 1001];
+        let full = vec![(HIST_TOP_MAX, u64::MAX); HIST_LEN_MAX];
         let reply = Reply {
             ok: false,
             mode: Mode::Live,
@@ -720,6 +721,7 @@ mod tests {
             alarms: alarms.all().to_vec(),
             detail: wide(DETAIL_CHARS),
             engine: Some(EngineStatus {
+                frames: u32::MAX,
                 callbacks: u64::MAX,
                 missed: u64::MAX,
                 resets: u64::MAX,

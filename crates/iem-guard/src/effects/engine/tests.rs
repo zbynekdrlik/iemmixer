@@ -394,8 +394,10 @@ fn engine_messages_are_read_field_by_field() {
 }
 
 /// A histogram is read whole or not at all (S7): one entry that is not a
-/// pair of integers in range makes it none, never part of one (the soak
-/// verdict then names it); an absent one is none (an older engine).
+/// pair of integers in range (a bucket up to the engine's largest overflow
+/// bucket, 1000) or more entries than the engine has buckets (1001) make it
+/// none, never part of one (the soak verdict then names it), so the guard's
+/// reply stays within its frame; an absent one is none (an older engine).
 #[test]
 fn a_histogram_with_a_bad_entry_reads_as_none() {
     let read =
@@ -405,10 +407,17 @@ fn a_histogram_with_a_bad_entry_reads_as_none() {
             other => panic!("{other:?}"),
         };
     assert_eq!(
-        read(json!([[0, 7], [4_294_967_295_u64, u64::MAX]])),
-        (vec![(0, 7), (u32::MAX, u64::MAX)], vec![(7, 1)])
+        read(json!([[0, 7], [1000, u64::MAX]])),
+        (vec![(0, 7), (1000, u64::MAX)], vec![(7, 1)])
+    );
+    assert_eq!((HIST_TOP_MAX, HIST_LEN_MAX), (1000, 1001));
+    assert_eq!(
+        read(json!(vec![[1000_u64, 1]; 1001])),
+        (vec![(1000, 1); 1001], vec![(7, 1)])
     );
     for bad in [
+        json!(vec![[0_u64, 1]; 1002]),
+        json!([[1001, 1]]),
         json!([[1]]),
         json!([[1, 2, 3]]),
         json!([[-1, 2]]),
