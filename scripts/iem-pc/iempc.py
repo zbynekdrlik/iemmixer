@@ -63,9 +63,9 @@ Known limits (S6 Task 16): `iemmode event --direct` runs the switch inside
 the ssh session, so a session cut before it ends (a Bash timeout) stops it
 half-way; the next `iemmode event` resumes from the guard state. A
 pre-emption inside another command adds a whole event budget to that
-command's own time. The dev-entry count behind `dispatch-hil` sees only
-`iempc dev`, not a dev entry the guard makes by itself (rehearse-teardown's
-re-entry)."""
+command's own time. The dev-entry count behind `dispatch-hil` and
+`dispatch-soak` sees only `iempc dev`, not a dev entry the guard makes by
+itself (rehearse-teardown's re-entry)."""
 from __future__ import annotations
 
 import argparse

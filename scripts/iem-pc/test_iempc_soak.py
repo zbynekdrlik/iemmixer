@@ -3,9 +3,11 @@ plan Task 8, Review Focus 7). They reuse test_iempc's fakes (FakePc stands in
 for ssh, FakeGh for GitHub); every value is synthetic."""
 from __future__ import annotations
 
+import contextlib
 import copy
 import datetime as dt
 import fcntl
+import io
 import json
 import sys
 import unittest
@@ -140,6 +142,8 @@ class DispatchSoakTests(SoakBase):
             (ready(mode="event", detail=f"mode event; bundle {SHA}"), "the guard is in mode event, not dev"),
             (ready(mode="live", detail=f"mode live; bundle {SHA}"), "the guard is in mode live, not dev"),
             (ready(switching=SWITCHING), f"a switch runs ({json.dumps(SWITCHING)})"),
+            (ready(switching={}), "a switch runs ({})"),
+            (ready(switching=False), "a switch runs (false)"),
             (ready(detail=f"mode dev; bundle {SHA}; HIL job 42"), "a HIL job runs (HIL job 42)"),
             (ready(detail=f"mode dev; bundle {SHA}; HIL job 42; 2 unacknowledged alarms"),
              "a HIL job runs (HIL job 42)"),
@@ -153,7 +157,7 @@ class DispatchSoakTests(SoakBase):
             self.refused(f"no soak: {words} {NOTHING}", reply)
         self.status(READY, code=3)
         self.refused(f"no soak: iemmode status failed (exit 3) {NOTHING}")
-        self.assertEqual(self.pc.calls, [("iemmode.exe", ["status"], "abandon")] * 11)
+        self.assertEqual(self.pc.calls, [("iemmode.exe", ["status"], "abandon")] * 13)
         self.assertEqual(self.gh.calls, [])
 
     def test_another_active_bundle_or_engine_build_or_no_engine_is_refused(self) -> None:
@@ -251,6 +255,9 @@ class DispatchSoakTests(SoakBase):
             self.assertEqual(self.soaks()[n]["hours"], int(hours))
 
     def test_a_bad_sha_or_soak_record_is_refused_before_any_call(self) -> None:
+        with self.assertRaises(SystemExit) as cm, contextlib.redirect_stderr(io.StringIO()):
+            ip.main(["dispatch-soak"])   # --sha is required: argparse's usage error
+        self.assertEqual(cm.exception.code, 2)
         for bad in (SHA.upper(), SHA[:-1], SHA + "0", "main"):
             code, _, err = self.run_main("dispatch-soak", "--sha", bad)
             self.assertEqual((code, self.pc.calls, self.gh.calls), (1, [], []), bad)
