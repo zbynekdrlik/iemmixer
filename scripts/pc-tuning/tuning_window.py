@@ -414,11 +414,13 @@ def analysis_step(root: str, since: str, body: str) -> str:
 # The step body the Windows CI runner sends through analysis_step: the priority
 # the guard set, IemMeasure's clock, whether IemTuning loaded too (IemMeasure
 # keeps a failed IemTuning load to itself, so Get-IemNow alone proves nothing),
-# and the temp folder the step runs with (#15: GetTempPath, which Add-Type's compile
-# reads, is the admin-only <elevated root>\temp, set before the tuning modules' import).
+# the temp folder the step runs with (#15: GetTempPath, which Add-Type's compile
+# reads, is the admin-only <elevated root>\temp, set before the tuning modules' import)
+# and where the four modules were imported from (#15: the admin-only stage, never bin).
 ANALYSIS_PROBE = ("[pscustomobject]@{ priority = \"$((Get-Process -Id $PID).PriorityClass)\"; now = Get-IemNow; "
                   "tuning = [bool](Get-Command -Name ConvertTo-IemLpNumber -ErrorAction SilentlyContinue); "
-                  "temp = [IO.Path]::GetTempPath() }")
+                  "temp = [IO.Path]::GetTempPath(); "
+                  "modules = @(Get-Module -Name SpikePc, GoldenPc, IemMeasure, IemTuning | ForEach-Object { $_.Path }) }")
 
 
 def read_text(path: Path) -> str:
@@ -820,16 +822,18 @@ def main(argv: list[str]) -> int:
     pp.add_argument("--governor", required=True)
     pp.add_argument("--pid", type=int, default=0)
     pp.add_argument("--tid", type=int, default=0)
+    pp.add_argument("--sums", required=True, help="the bundle's SHA256SUMS (the modules are checked against it, #15)")
     asc = sub.add_parser("analysis-script", help="print an analysis step's start (guard, import, a probe) exactly as sw.ps "
                                                  "sends it (for the Windows CI runner)")
     asc.add_argument("--root", required=True, help="a folder whose bin holds the spike bundle")
     asc.add_argument("--since", required=True, help="the analysis start, PC time (Get-IemNow)")
+    asc.add_argument("--sums", required=True, help="the bundle's SHA256SUMS (the modules are checked against it, #15)")
     args = ap.parse_args(argv)
-    if args.cmd == "poll-script":   # no window, no private env
-        print(sw.ps_script(args.root, poll_body(args.governor, args.pid, args.tid)))
-        return 0
-    if args.cmd == "analysis-script":   # no window, no private env
-        print(sw.ps_script(args.root, analysis_step(args.root, args.since, ANALYSIS_PROBE)))
+    if args.cmd in ("poll-script", "analysis-script"):   # no window, no private env
+        sums = sw.parse_sums(Path(args.sums).read_text(encoding="utf-8"))
+        body = (poll_body(args.governor, args.pid, args.tid) if args.cmd == "poll-script"
+                else analysis_step(args.root, args.since, ANALYSIS_PROBE))
+        print(sw.ps_script(args.root, body, sums))
         return 0
     handlers = {"tuning-setup": cmd_tuning_setup, "inventory": cmd_inventory, "fingerprint": cmd_fingerprint, "wpt-install": cmd_wpt_install,
                 "enter": cmd_enter, "exit": cmd_exit, "apply": cmd_apply, "undo": cmd_undo, "state": cmd_state, "measure": cmd_measure,
