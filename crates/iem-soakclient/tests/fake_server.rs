@@ -246,7 +246,7 @@ fn listen_stream(ws: &mut WebSocket<TcpStream>, first: bool, script: &Script) {
         if cut == Some(sent) {
             // A frame Opus refuses (63 frames of 20 ms in one packet), then
             // the socket is dropped.
-            let _ = ws.send(Message::binary(vec![0xff; 3]));
+            let _ = ws.send(Message::binary(vec![0xffu8; 3]));
             return false;
         }
         sent += 1;
@@ -315,7 +315,7 @@ fn exe(argv: Vec<String>, pin: Option<&'static str>) -> Output {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_iem-soakclient"));
-        cmd.args(&argv).env_remove(PIN_ENV);
+        cmd.args(argv).env_remove(PIN_ENV);
         if let Some(pin) = pin {
             cmd.env(PIN_ENV, pin);
         }
