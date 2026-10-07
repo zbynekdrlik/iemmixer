@@ -759,8 +759,12 @@ jobs:
             if (@($doc.r.kept).Count -ne 0 -or $stopped -notcontains 'NT Kernel Logger' -or $stopped -notcontains 'IemMarkers') {
               throw "the trace stop did not stop both sessions: stopped '$($stopped -join ', ')', kept '$(@($doc.r.kept) -join ', ')'"
             }
-            if ($took -ge $limit) { throw "the trace stop took $([math]::Round($took, 1)) s, its bound TRACE_STOP_CALL_S is $limit s" }
-            Write-Output "trace stop as sent: $([math]::Round($took, 1)) s of its $limit s bound, stopped $($stopped -join ', ')"
+            # On the PC the same bound also covers ssh's connect (ConnectTimeout 10 s) and
+            # its authentication: 15 s of it are kept for those. The stage copies exist
+            # already (the earlier steps), as they do on the PC after any session.
+            $budget = $limit - 15
+            if ($took -ge $budget) { throw "the trace stop took $([math]::Round($took, 1)) s; TRACE_STOP_CALL_S ($limit s) less 15 s for ssh leaves $budget s" }
+            Write-Output "trace stop as sent: $([math]::Round($took, 1)) s of $budget s ($limit s less 15 s for ssh), stopped $($stopped -join ', ')"
           } finally {
             foreach ($s in $started) {   # only the sessions this step started, if the stop left them
               & logman.exe query $s -ets *> $null
