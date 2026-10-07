@@ -418,6 +418,27 @@ mod tests {
         assert!(rt.stop().unwrap().calls >= 100);
     }
 
+    /// S7, exact once the thread has ended: three callbacks ran (the third
+    /// panicked), so three callback times and the two intervals between their
+    /// starts; the faulting callback's time counts too.
+    #[test]
+    fn a_faulted_stream_counted_each_time_and_each_interval_once() {
+        let rt = NullRt::start(
+            cfg(InputSignal::Silence),
+            Count {
+                panic_at: Some(3),
+                ..Count::default()
+            },
+        )
+        .unwrap();
+        let s = wait_for(&rt, |s| s.faulted && !s.running);
+        assert!(s.faulted && !s.running, "{s:?}");
+        let h = rt.histograms();
+        let total = |v: &[(u32, u64)]| v.iter().map(|e| e.1).sum::<u64>();
+        assert_eq!((total(&h.process), total(&h.interval)), (3, 2), "{h:?}");
+        assert_eq!(rt.stop().unwrap().calls, 3);
+    }
+
     #[test]
     fn the_period_is_block_over_rate() {
         assert_eq!(period(48_000, 48_000.0), Duration::from_secs(1));
