@@ -488,7 +488,10 @@ function Register-IemTasks {
     # process never reads an environment variable for it); only Administrators
     # and SYSTEM may change that root. Each task's descriptor is set explicitly
     # (SetSecurityDescriptor) before its read-back, because an update keeps a
-    # task's old one; any difference throws after every task was tried.
+    # task's old one; any difference throws after every task was tried. Every
+    # row names its warnings: Fast Startup that is really on, on the boot
+    # task's row (Get-IemBootTaskWarnings, also written as a warning), never a
+    # refusal.
     param(
         [Parameter(Mandatory)][string]$Root,
         [Parameter(Mandatory)][string]$AppExe,
@@ -553,11 +556,17 @@ function Register-IemTasks {
         @{ name = 'iemmixer-logon'; level = $script:RunLevelHighest; exe = $ps; args = $logonArgs; dir = $tasksDir; trigger = 'logon' },
         @{ name = 'iemmixer-boot-pref'; level = $script:RunLevelHighest; exe = $boot.exe; args = $boot.arguments; dir = $tasksDir; trigger = 'boot' }
     )
+    # Fast Startup that is really on skips the boot task's trigger: named (a
+    # warning and the boot task's row), never a refusal (#35, review of PR #40).
+    $bootWarnings = Get-IemBootTaskWarnings -FastStartup (Get-IemFastStartupState)
+    foreach ($w in $bootWarnings) { Write-Warning $w }
     $reports = @()
     $problems = @()
     foreach ($s in $specs) {
         $atLogon = ($s.trigger -ceq 'logon')
         $atBoot = ($s.trigger -ceq 'boot')
+        $warnings = @()
+        if ($atBoot) { $warnings = $bootWarnings }
         $d = New-IemTaskDefinition -Scheduler $sch -User $u.name -RunLevel $s.level -Exe $s.exe -Arguments $s.args `
             -WorkDir $s.dir -Description ('iemmixer S6: ' + $s.name) -AtLogon:$atLogon -AtBoot:$atBoot
         [void]$f.RegisterTaskDefinition($s.name, $d, $script:TaskCreateOrUpdate, $u.name, $null, [int]$d.Principal.LogonType, $sddl)
@@ -571,7 +580,8 @@ function Register-IemTasks {
         if ($atBoot) { $wantTriggers = [string]$script:TriggerBoot }
         if ((@($rep.triggers) -join ',') -cne $wantTriggers) { $bad += ('triggers ' + (@($rep.triggers) -join ',')) }
         foreach ($b in $bad) { $problems += ('{0}: {1}' -f $s.name, $b) }
-        $reports += [pscustomobject]@{ task = $s.name; run_level = $rep.run_level; sddl_ok = $rep.sddl_ok; actions = $rep.actions; triggers = $rep.triggers; problems = $bad }
+        $reports += [pscustomobject]@{ task = $s.name; run_level = $rep.run_level; sddl_ok = $rep.sddl_ok; actions = $rep.actions; triggers = $rep.triggers; problems = $bad
+                                       warnings = $warnings }
     }
 
     # StartREAPER: its definition untouched (never registered again), only our
@@ -582,7 +592,8 @@ function Register-IemTasks {
     if (-not $rep.sddl_ok) { $bad += ('security descriptor ' + $rep.sddl) }
     if (-not (Test-IemSameActions -A $reaperActions -B $rep.actions)) { $bad += 'its action changed' }
     foreach ($b in $bad) { $problems += ('iemmixer-StartREAPER: {0}' -f $b) }
-    $reports += [pscustomobject]@{ task = 'iemmixer-StartREAPER'; run_level = $rep.run_level; sddl_ok = $rep.sddl_ok; actions = $rep.actions; triggers = $rep.triggers; problems = $bad }
+    $reports += [pscustomobject]@{ task = 'iemmixer-StartREAPER'; run_level = $rep.run_level; sddl_ok = $rep.sddl_ok; actions = $rep.actions; triggers = $rep.triggers; problems = $bad
+                                   warnings = @() }
 
     if ($problems.Count -gt 0) { throw ('task read-back: ' + ($problems -join '; ')) }
     return ,$reports
@@ -1439,16 +1450,101 @@ function Get-IemBootPrefLog {
     return ,@($lines[$start..($lines.Count - 1)])
 }
 
+function Get-IemFastStartup {
+    # Fast Startup as the next shutdown will act (pure; #35, review of PR
+    # #40). It is on only when HiberbootEnabled is 1 AND the hibernation file
+    # is present: a shutdown with it on hibernates the system session into
+    # that file, and the next start fires no boot trigger, so the boot task
+    # does not run. Without the file Windows shuts down fully whatever
+    # HiberbootEnabled says (the venue PC: HiberbootEnabled 1, hibernation off
+    # in powercfg /a). -Hiberboot: the registry value ($null: absent or
+    # unreadable); -HiberFile: the kernel's HiberFilePresent ($null:
+    # unreadable). active: $true when both hold, $false when either is known
+    # off, $null when a fact is unknown and none is off. problem: the text
+    # only when active is $true, else ''.
+    param($Hiberboot = $null, $HiberFile = $null)
+    $hb = $null
+    if ($null -ne $Hiberboot) { $hb = [string]$Hiberboot }
+    $file = $null
+    if ($HiberFile -is [bool]) { $file = $HiberFile }
+    $active = $null
+    if (($null -ne $hb -and $hb -cne '1') -or ($file -eq $false)) {
+        $active = $false
+    } elseif ($hb -ceq '1' -and $file -eq $true) {
+        $active = $true
+    }
+    $problem = ''
+    if ($active -eq $true) {
+        $problem = 'Fast Startup is on (HiberbootEnabled 1, the hibernation file present): a shutdown hibernates ' +
+            'the system session and the next start fires no boot trigger, so iemmixer-boot-pref does not run and ' +
+            'the logon task is the first to restore the preference (a restart is a full boot). Turn Fast Startup ' +
+            'off (Power Options, or hibernation off) to keep the boot task first.'
+    }
+    [pscustomobject]@{ hiberboot_enabled = $Hiberboot; hiberfile_present = $file; active = $active; problem = $problem }
+}
+
+function Test-IemHiberFilePresent {
+    # The kernel's power capabilities (powrprof.dll GetPwrCapabilities, the
+    # source of powercfg /a): SYSTEM_POWER_CAPABILITIES.HiberFilePresent, the
+    # BOOLEAN at byte 8 (after PowerButtonPresent, SleepButtonPresent,
+    # LidPresent and SystemS1 to SystemS5, one byte each; winnt.h). It is the
+    # hibernation file Fast Startup needs, whatever the registry says. The
+    # type is compiled on first use only (Add-Type), so the elevated tasks,
+    # which import this module, never compile it.
+    $t = 'IemPcNative.Power' -as [type]
+    if ($null -eq $t) {
+        Add-Type -Namespace 'IemPcNative' -Name 'Power' -MemberDefinition @'
+[DllImport("powrprof.dll", SetLastError = true)]
+[return: MarshalAs(UnmanagedType.U1)]
+public static extern bool GetPwrCapabilities([Out] byte[] capabilities);
+'@
+        $t = 'IemPcNative.Power' -as [type]
+    }
+    # SYSTEM_POWER_CAPABILITIES is 76 bytes; the buffer leaves room.
+    $caps = New-Object byte[] 128
+    if (-not $t::GetPwrCapabilities($caps)) {
+        throw ('GetPwrCapabilities failed (error {0})' -f [Runtime.InteropServices.Marshal]::GetLastWin32Error())
+    }
+    return ($caps[8] -ne 0)
+}
+
+function Get-IemFastStartupState {
+    # Get-IemFastStartup over this PC's facts: HiberbootEnabled
+    # (HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Power) and
+    # Test-IemHiberFilePresent. A read that fails leaves its fact $null and
+    # its message in error, never a guess.
+    $hb = $null
+    $file = $null
+    $errors = @()
+    try {
+        $hb = (Get-Item -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power').GetValue('HiberbootEnabled', $null)
+    } catch { $errors += ('HiberbootEnabled: ' + $_.Exception.Message) }
+    try { $file = Test-IemHiberFilePresent } catch { $errors += ('the hibernation file: ' + $_.Exception.Message) }
+    $s = Get-IemFastStartup -Hiberboot $hb -HiberFile $file
+    [pscustomobject]@{ hiberboot_enabled = $s.hiberboot_enabled; hiberfile_present = $s.hiberfile_present
+                       active = $s.active; problem = $s.problem; error = ($errors -join '; ') }
+}
+
+function Get-IemBootTaskWarnings {
+    # What Register-IemTasks says about the boot task without refusing it
+    # (pure): Fast Startup that is on (Get-IemFastStartup) skips its trigger
+    # at every start after a shutdown.
+    param([Parameter(Mandatory)]$FastStartup)
+    if ($FastStartup.active -eq $true) { return ,@([string]$FastStartup.problem) }
+    return ,@()
+}
+
 function Get-IemBootstrapState {
     # Read-only (plan Task 16 Step 1): REAPER and the app running, the driver
     # module's holders, the preference, our tasks (descriptor, last result,
     # last run in UTC), the boot task's last logged run (#35; its log in
     # -ElevatedRoot, default %ProgramData%\iemmixer), Fast Startup
-    # (HiberbootEnabled; with it on, a shutdown hibernates the system session
-    # and the next start fires no boot trigger), the root's DACL and every
-    # item below it, the firewall rule, the network categories, Defender. The
-    # result holds site values (the user, the preference key in the boot log):
-    # it stays on the dev box, never on a public ticket (P6).
+    # (Get-IemFastStartupState: HiberbootEnabled, the hibernation file, on or
+    # not and its problem; with it on, a shutdown hibernates the system
+    # session and the next start fires no boot trigger), the root's DACL and
+    # every item below it, the firewall rule, the network categories,
+    # Defender. The result holds site values (the user, the preference key in
+    # the boot log): it stays on the dev box, never on a public ticket (P6).
     param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][string]$Module, [Parameter(Mandatory)][string]$PrefKey,
           [Parameter(Mandatory)][string]$PrefName, [Parameter(Mandatory)][string]$AppImage, [string]$ReaperImage = 'reaper',
           [string]$Folder = '\iemmixer', [string]$FirewallRule = 'iemmixer-http', [string]$User = '', [string]$ElevatedRoot = '')
@@ -1467,10 +1563,7 @@ function Get-IemBootstrapState {
     $bootLines = @()
     $bootError = ''
     try { $bootLines = Get-IemBootPrefLog -Path $bootLog } catch { $bootError = $_.Exception.Message }
-    $fastStartup = $null
-    try {
-        $fastStartup = (Get-Item -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power').GetValue('HiberbootEnabled', $null)
-    } catch { $fastStartup = $null }
+    $fastStartup = Get-IemFastStartupState
     $pref = $null
     $prefError = ''
     try { $pref = Get-IemPref -Key $PrefKey -Name $PrefName } catch { $prefError = $_.Exception.Message }
