@@ -32,10 +32,12 @@ SUMS = {n: hashlib.sha256(n.encode()).hexdigest() for n in sw.BUNDLE_FILES}
 ENV = {"PC_ROOT": "R", "PC_ROOT_SCP": "/R", "PC_SSH": "u@h", "PC_TUNING_ROOT": "T", "PC_XPERF": "xperf.exe"}
 STAGED = re.compile(r"Import-Module \(Join-Path \$iemStage '([A-Za-z]+\.psm1)'\)")
 # #15, the last lane, item 2: modules load only from Windows PowerShell's own folders,
-# and ssh starts Windows PowerShell by its full path.
+# and ssh starts Windows PowerShell by its full path, a literal one (the review: an
+# environment variable in it would be expanded from the session's environment, which
+# the user's HKCU\Environment feeds, and only by cmd.exe).
 PIN = ("$env:PSModulePath = [IO.Path]::Combine($PSHOME, 'Modules') + ';' + "
        "[IO.Path]::Combine([Environment]::GetFolderPath('ProgramFiles'), 'WindowsPowerShell\\Modules')")
-REMOTE = ("%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe "
+REMOTE = ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe "
           "-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command -")
 
 
@@ -151,6 +153,8 @@ class PinTests(unittest.TestCase):
     def test_ssh_starts_windows_powershell_by_its_full_path(self) -> None:
         self.assertEqual(sw.ssh_cmd(ENV), ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "u@h", REMOTE])
         self.assertEqual(gw.ssh_cmd(ENV), ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "u@h", REMOTE])
+        for expanded in ("%", "$", "!"):   # nothing a shell expands from the session's environment
+            self.assertNotIn(expanded, elevated_ps.REMOTE)
 
     def test_the_golden_setup_s_folders_script_is_pinned(self) -> None:
         sent: list[str] = []

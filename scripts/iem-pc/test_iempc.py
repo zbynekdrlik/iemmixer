@@ -380,7 +380,7 @@ class ScriptTests(Base):
             self.assertTrue(script[at + len(self.PIN):].startswith(" ; try { "), script)
 
     def test_ssh_starts_windows_powershell_by_its_full_path(self) -> None:
-        self.assertEqual(ip.ssh_cmd(ENV)[-1], "%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe "
+        self.assertEqual(ip.ssh_cmd(ENV)[-1], "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe "
                                               "-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command -")
 
     def test_the_program_and_each_argument_are_quoted(self) -> None:
