@@ -56,6 +56,7 @@ HARNESS_REASONS = frozenset({"site-unreadable", "not-http", "login-refused", "no
                              "cpu-sets"})
 # The summary's whole-number fields the verdict reads (besides `complete` and `seconds`).
 HARNESS_COUNTS = ("frames", "expected_frames", "gaps", "reconnects", "decode_errors", "meter_frames")
+UNREADABLE = object()  # a harness file that holds no JSON (no summary shape: check 9 names it)
 
 
 class Bad(ValueError):
@@ -195,8 +196,8 @@ def _span(s: _Soak) -> str | None:
     if span < s.hours * 3600:
         return f"polled {s.numbers['polled_hours']:.2f} h of {s.hours:g} h"
     for n, step in enumerate(steps, 1):
-        if step > POLL_HOLE_S:
-            return f"no poll for {step:g} s after poll {n}"
+        if step > POLL_HOLE_S:  # rounded up at 0.1 s: a hole never reads as the bound
+            return f"no poll for {math.ceil(step * 10) / 10:g} s after poll {n}"
     return None
 
 
@@ -266,7 +267,7 @@ def _information(s: _Soak) -> dict:
     for key, name in (("late", "late_counter"), ("overruns", "overruns")):
         if type(_get(first, key)) is int and type(_get(last, key)) is int:
             info[name] = last[key] - first[key]
-    if type(_get(last, "process_max_us")) in (int, float):
+    if type(_get(last, "process_max_us")) in (int, float) and math.isfinite(last["process_max_us"]):
         info["process_max_us"] = last["process_max_us"]
     t0 = _get(s.polls[0], "t")
     if type(t0) in (int, float):
@@ -300,8 +301,8 @@ def _harness_check(summary: object, min_seconds: float, max_gaps: int) -> tuple[
     if not h["complete"]:
         code = summary.get("error")
         problems.append(f"harness incomplete ({code})" if code in HARNESS_REASONS else "harness incomplete")
-    if h["seconds"] < min_seconds:
-        problems.append(f"harness ran {h['seconds']:g} s of {min_seconds:g} s")
+    if h["seconds"] < min_seconds:  # rounded down at 0.1 s: a short run never reads as the bound
+        problems.append(f"harness ran {math.floor(h['seconds'] * 10) / 10:g} s of {min_seconds:g} s")
     if h["gaps"] > max_gaps:
         problems.append(f"gaps {h['gaps']}")
     if h["reconnects"]:
@@ -413,15 +414,27 @@ def _hours(v: str) -> float:
     return h
 
 
+def _harness_file(path: Path) -> object:
+    """soakclient.json, or UNREADABLE when it holds no JSON, which check 9
+    names: on left-dev the PC job ends while the client may still rewrite
+    it, and report() maps the record first."""
+    try:
+        return read_json(path)
+    except Bad:
+        return UNREADABLE
+
+
 def cmd_report(a: argparse.Namespace) -> int:
     d = Path(a.dir)
     try:
-        out = report(a.pc, read_json(d / "result.json"), read_polls(d / "polls.jsonl"),
-                     read_json(d / "soakclient.json"), a.sha, a.hours)
-    except Bad as e:  # an unreadable record file: a cancelled PC job stays cancelled
+        record = read_json(d / "result.json")
+    except Bad as e:  # an unreadable record: a cancelled PC job stays cancelled
         out = (_outcome("cancelled", "cancelled: the pc job was cancelled") if a.pc == "cancelled"
                else _outcome("failure", f"red: {e}", str(e)))
-    print(json.dumps(out))
+    else:
+        out = report(a.pc, record, read_polls(d / "polls.jsonl"), _harness_file(d / "soakclient.json"), a.sha,
+                     a.hours)
+    print(json.dumps(out, allow_nan=False))  # strict JSON for jq: a NaN raises here, never reaches the job
     return 0
 
 
