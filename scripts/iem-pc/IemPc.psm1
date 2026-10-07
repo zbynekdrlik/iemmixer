@@ -493,9 +493,11 @@ function Register-IemTasks {
     # and SYSTEM may change that root. Each task's descriptor is set explicitly
     # (SetSecurityDescriptor) before its read-back, because an update keeps a
     # task's old one; any difference throws after every task was tried. Every
-    # row names its warnings: Fast Startup that is really on, on the boot
-    # task's row (Get-IemBootTaskWarnings, also written as a warning), never a
-    # refusal.
+    # row names its warnings: Fast Startup that is really on (or that could
+    # not be judged), on the boot task's row (Get-IemBootTaskWarnings, also
+    # written as a warning), never a refusal. -FastStartup: a judged Fast
+    # Startup (Get-IemFastStartup's shape) in place of this PC's facts
+    # (Get-IemFastStartupState, the default).
     param(
         [Parameter(Mandatory)][string]$Root,
         [Parameter(Mandatory)][string]$AppExe,
@@ -505,7 +507,8 @@ function Register-IemTasks {
         [Parameter(Mandatory)][string]$Module,
         [string]$Folder = '\iemmixer',
         [string]$User = '',
-        [string]$ElevatedRoot = ''
+        [string]$ElevatedRoot = '',
+        $FastStartup = $null
     )
     $ElevatedRoot = Resolve-IemElevatedRoot -ElevatedRoot $ElevatedRoot
     $userRoot = $Root.TrimEnd('\') + '\'
@@ -562,7 +565,8 @@ function Register-IemTasks {
     )
     # Fast Startup that is really on skips the boot task's trigger: named (a
     # warning and the boot task's row), never a refusal (#35, review of PR #40).
-    $bootWarnings = Get-IemBootTaskWarnings -FastStartup (Get-IemFastStartupState)
+    if ($null -eq $FastStartup) { $FastStartup = Get-IemFastStartupState }
+    $bootWarnings = Get-IemBootTaskWarnings -FastStartup $FastStartup
     foreach ($w in $bootWarnings) { Write-Warning $w }
     $reports = @()
     $problems = @()
@@ -1462,8 +1466,8 @@ function Get-IemFastStartup {
     # does not run. Without the file Windows shuts down fully whatever
     # HiberbootEnabled says (the venue PC: HiberbootEnabled 1, hibernation off
     # in powercfg /a). -Hiberboot: the registry value ($null: absent or
-    # unreadable); -HiberFile: the kernel's HiberFilePresent ($null:
-    # unreadable). active: $true when both hold, $false when either is known
+    # unreadable); -HiberFile: the hibernation file present
+    # (Test-IemHiberFilePresent; $null: unreadable). active: $true when both hold, $false when either is known
     # off, $null when a fact is unknown and none is off. problem: the text
     # only when active is $true, else ''.
     param($Hiberboot = $null, $HiberFile = $null)
@@ -1488,28 +1492,17 @@ function Get-IemFastStartup {
 }
 
 function Test-IemHiberFilePresent {
-    # The kernel's power capabilities (powrprof.dll GetPwrCapabilities, the
-    # source of powercfg /a): SYSTEM_POWER_CAPABILITIES.HiberFilePresent, the
-    # BOOLEAN at byte 8 (after PowerButtonPresent, SleepButtonPresent,
-    # LidPresent and SystemS1 to SystemS5, one byte each; winnt.h). It is the
-    # hibernation file Fast Startup needs, whatever the registry says. The
-    # type is compiled on first use only (Add-Type), so the elevated tasks,
-    # which import this module, never compile it.
-    $t = 'IemPcNative.Power' -as [type]
-    if ($null -eq $t) {
-        Add-Type -Namespace 'IemPcNative' -Name 'Power' -MemberDefinition @'
-[DllImport("powrprof.dll", SetLastError = true)]
-[return: MarshalAs(UnmanagedType.U1)]
-public static extern bool GetPwrCapabilities([Out] byte[] capabilities);
-'@
-        $t = 'IemPcNative.Power' -as [type]
-    }
-    # SYSTEM_POWER_CAPABILITIES is 76 bytes; the buffer leaves room.
-    $caps = New-Object byte[] 128
-    if (-not $t::GetPwrCapabilities($caps)) {
-        throw ('GetPwrCapabilities failed (error {0})' -f [Runtime.InteropServices.Marshal]::GetLastWin32Error())
-    }
-    return ($caps[8] -ne 0)
+    # The hibernation file Fast Startup needs: hiberfil.sys at the root of
+    # the system volume, where Windows keeps it while hibernation is on
+    # (powercfg /h off deletes it), whatever the registry's setting says. It
+    # is found by listing the root (FindFirstFile), never opened: the kernel
+    # holds it open. Nothing is compiled (no Add-Type: in Windows PowerShell
+    # 5.1 that builds in the user's temp folder, which a process of the user
+    # could change under an elevated session).
+    $root = [IO.Path]::GetPathRoot([Environment]::SystemDirectory)
+    if (-not $root) { throw 'the system folder has no root' }
+    $found = @([IO.Directory]::GetFiles($root, 'hiberfil.sys') | Where-Object { [IO.Path]::GetFileName($_) -ieq 'hiberfil.sys' })
+    return ($found.Count -gt 0)
 }
 
 function Get-IemFastStartupState {
@@ -1532,9 +1525,14 @@ function Get-IemFastStartupState {
 function Get-IemBootTaskWarnings {
     # What Register-IemTasks says about the boot task without refusing it
     # (pure): Fast Startup that is on (Get-IemFastStartup) skips its trigger
-    # at every start after a shutdown.
+    # at every start after a shutdown; one it could not judge (a fact
+    # unread, Get-IemFastStartupState's error) is named as such, never as on.
     param([Parameter(Mandatory)]$FastStartup)
     if ($FastStartup.active -eq $true) { return ,@([string]$FastStartup.problem) }
+    $err = [string](Get-IemProp -Object $FastStartup -Name 'error')
+    if ($null -eq $FastStartup.active -and $err) {
+        return ,@(('Fast Startup could not be judged ({0}): if it is on, a shutdown skips iemmixer-boot-pref' -f $err))
+    }
     return ,@()
 }
 
