@@ -63,10 +63,12 @@ CHANGE = "0x500D0156"
 # The first statement of every composed script, before its first command (#15).
 PIN = ("$env:PSModulePath = [IO.Path]::Combine($PSHOME, 'Modules') + ';' + "
        "[IO.Path]::Combine([Environment]::GetFolderPath('ProgramFiles'), 'WindowsPowerShell\\Modules')")
-# What ssh starts on the PC (the ssh server's default shell, cmd.exe, expands
-# %SystemRoot%): Windows PowerShell 5.1 by its full path, never one found on a
-# PATH, reading the composed script on stdin.
-REMOTE = ("%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe "
+# What ssh starts on the PC: Windows PowerShell 5.1 by its full path, never one
+# found on a PATH, reading the composed script on stdin. A literal path, no
+# variable: %SystemRoot% would be expanded from the session's environment, which
+# the user's HKCU\Environment feeds (an elevated process never reads an
+# environment variable for a path), and only by a cmd.exe default shell.
+REMOTE = ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe "
           "-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command -")
 
 # $iemOwn: no junction or link, owned by Administrators or SYSTEM. $iemOnly:
