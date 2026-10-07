@@ -389,8 +389,9 @@ class ScriptTests(Base):
                  "[IO.File]::WriteAllBytes($iemMod, $iemB)", "& $iemOnly $iemMod",
                  f"(Get-FileHash -LiteralPath $iemMod -Algorithm SHA256).Hash.ToLowerInvariant() -cne '{hexd}'",
                  "Import-Module $iemMod -Force", "$r = & { Get-IemBootstrapState }"]
-        at = [line.index(t) for t in order]
-        self.assertEqual(at, sorted(at))
+        at = 0   # each step after the one before (the keep check reads the copy back too, #15 review)
+        for step in order:
+            at = line.index(step, at)
         # The upload is read once (and named in the mismatch); nothing else reads or imports it.
         self.assertEqual(line.count("'X:\\run\\IemPc.psm1'"), 2)
         self.assertEqual(line.count("Import-Module"), 1)
