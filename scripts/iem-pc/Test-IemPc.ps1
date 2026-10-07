@@ -195,6 +195,13 @@ try {
         $bw = Get-IemBootTaskWarnings -FastStartup $f
         Assert ($bw.Count -eq 0) "boot-task-warns-of-nothing-else [$($f.hiberboot_enabled), $($f.hiberfile_present)] ($($bw -join ' | '))"
     }
+    # A fact that could not be read is named as such (Get-IemFastStartupState's
+    # error), never as Fast Startup being on.
+    $fsUnread = [pscustomobject]@{ hiberboot_enabled = 1; hiberfile_present = $null; active = $null; problem = ''; error = 'the hibernation file: x' }
+    $bw = Get-IemBootTaskWarnings -FastStartup $fsUnread
+    Assert ($bw.Count -eq 1 -and $bw[0] -ceq 'Fast Startup could not be judged (the hibernation file: x): if it is on, a shutdown skips iemmixer-boot-pref') "boot-task-names-a-fast-startup-it-cannot-judge ($($bw -join ' | '))"
+    $fsRead = [pscustomobject]@{ hiberboot_enabled = 1; hiberfile_present = $false; active = $false; problem = ''; error = '' }
+    Assert ((Get-IemBootTaskWarnings -FastStartup $fsRead).Count -eq 0) 'boot-task-warns-of-nothing-when-both-facts-were-read-and-it-is-off'
 
     # ---- Register-IemTasks on the real Task Scheduler ----
     $prefArgs = @{ PrefKey = $regKey; PrefName = 'Pref'; PrefOriginal = '64'; Module = 'testcard.dll' }
@@ -326,6 +333,16 @@ try {
     Assert ($again.Count -eq 8 -and @($again | Where-Object { $_.problems.Count -gt 0 }).Count -eq 0) 'tasks-register-again-idempotent'
     $sd = $sch.GetFolder($folder).GetTask('iemmixer-guard').GetSecurityDescriptor(4)
     Assert (Test-IemTaskSddl -Sddl $sd -UserSid $me.sid) "tasks-register-again-restores-a-loosened-descriptor ($sd)"
+    # Fast Startup that is on (given here with -FastStartup; by default this
+    # PC's facts): the registration goes through, warns once, and names the
+    # problem on the boot task's row only.
+    $fsReports = Register-IemTasks -Root $root -AppExe $appExe -Folder $folder -ElevatedRoot $elevated @prefArgs -FastStartup $fsOn -WarningVariable fsWarned -WarningAction SilentlyContinue
+    $fsByName = @{}
+    foreach ($r in $fsReports) { $fsByName[$r.task] = $r }
+    Assert ($fsReports.Count -eq 8 -and @($fsReports | Where-Object { $_.problems.Count -gt 0 }).Count -eq 0) 'tasks-register-with-fast-startup-on'
+    Assert ((@($fsByName['iemmixer-boot-pref'].warnings) -join '|') -ceq $fsOn.problem -and
+            @($fsReports | Where-Object { $_.task -cne 'iemmixer-boot-pref' -and @($_.warnings).Count -gt 0 }).Count -eq 0) "tasks-name-fast-startup-that-is-on-on-the-boot-task-only ($(@($fsByName['iemmixer-boot-pref'].warnings) -join ' | '))"
+    Assert (@($fsWarned).Count -eq 1 -and "$($fsWarned[0])" -ceq $fsOn.problem) "tasks-warn-once-of-fast-startup-that-is-on ($(@($fsWarned) -join ' | '))"
     # The boot task writes the kind the value has (as the logon task keeps it).
     New-ItemProperty -LiteralPath $regKey -Name 'TextPref' -Value '64' -PropertyType String | Out-Null
     $tx = Register-IemTasks -Root $root -AppExe $appExe -Folder $folder -ElevatedRoot $elevated -PrefKey $regKey -PrefName 'TextPref' -PrefOriginal '64' -Module 'testcard.dll'
