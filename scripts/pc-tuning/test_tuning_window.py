@@ -874,7 +874,15 @@ class TuningSetupTests(unittest.TestCase):
         tw.sw.guarded = fake_guarded
         tw.sw.scp = lambda src, dst: self.copies.append((src, dst))
         self.env = dict(ENV, PC_SSH="u@pc", PC_TUNING_ROOT="C:\\t", PC_TUNING_ROOT_SCP="/C:/t", RAW_DIR=str(self.dir / "raw"))
-        tw.sw.save_state({"id": "w", "card": "reaper", "closed": False})
+        # The bundle the window's PC holds, as fetch-bundle records it: every session checks the
+        # modules it stages against its sums (#15).
+        sha = "a" * 40
+        bundle = tw.sw.bundle_dir(self.env, sha)
+        bundle.mkdir(parents=True)
+        (bundle / "SHA256SUMS").write_text("".join(f"{i:064x}  {n}\n" for i, n in enumerate(tw.sw.BUNDLE_FILES)),
+                                           encoding="utf-8")
+        (bundle.parent / f"{sha}.source-sha").write_text(sha + "\n", encoding="utf-8")
+        tw.sw.save_state({"id": "w", "card": "reaper", "closed": False, "bundle_sha": sha})
 
     def tearDown(self) -> None:
         tw.sw.STATE, tw.sw.EVENT_NOW, tw.sw.guarded, tw.sw.scp, tw.PROFILE = self.saved
