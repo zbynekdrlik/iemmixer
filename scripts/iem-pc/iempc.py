@@ -5,7 +5,8 @@
 (fetch, install, activate), HIL dispatch on the private ops repo, PC bootstrap through
 the bundle's IemPc.psm1 (dev time only), S1c's tuning modules and profile into
 the PC's elevated tuning folder (`tuning-install`, refreshed after `activate`:
-iempc_tuning.py), and the hand-over of an open S1a window.
+iempc_tuning.py), a kernel DPC/ISR trace on the guard's engine (`trace`:
+iempc_trace.py, PC_XPERF below), and the hand-over of an open S1a window.
 
 "ide event": the flag file (~/.config/iemmixer/EVENT-NOW) exists. `event`
 writes it first when it is missing (a flag it cannot write is a warning,
@@ -49,8 +50,9 @@ guard again.
 Site values come only from the private env file ($PC_ENV, default
 ~/.config/iemmixer/iem-pc.env): PC_SSH (the ssh destination), PC_ROOT (the
 root folder on the PC, Windows form), PC_ROOT_SCP (the same folder as scp
-names it) and PC_BIN (optional, default: bin under PC_ROOT). Nothing is ever
-ended by force.
+names it), PC_BIN (optional, default: bin under PC_ROOT) and PC_XPERF
+(optional, xperf.exe's full path on the PC; `trace` refuses without it).
+Nothing is ever ended by force.
 
 Known limits (S6 Task 16): `iemmode event --direct` runs the switch inside
 the ssh session, so a session cut before it ends (a Bash timeout) stops it
@@ -79,6 +81,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterator
 
+import iempc_trace
 import iempc_tuning
 
 HERE = Path(__file__).resolve().parent
@@ -1111,6 +1114,11 @@ def cmd_tuning_install(ctx: Ctx) -> int:
     return iempc_tuning.install(ctx, sys.modules[__name__])
 
 
+def cmd_trace(ctx: Ctx) -> int:
+    """A kernel DPC/ISR trace on the guard's engine; the code lives in iempc_trace.py (#15, #36)."""
+    return iempc_trace.trace(ctx, sys.modules[__name__])
+
+
 def load_dispatches() -> list[dict]:
     return list(read_json(state_dir() / "dispatch.json", {}).get("dispatches", []))
 
@@ -1294,6 +1302,7 @@ COMMANDS: dict[str, Spec] = {
     "bootstrap": Spec(cmd_bootstrap, pc=True, dev_time=True, locked=True),
     "handover-s1a": Spec(cmd_handover_s1a, pc=True, dev_time=True, locked=True),
     "tuning-install": Spec(cmd_tuning_install, pc=True, dev_time=True, locked=True),
+    "trace": Spec(cmd_trace, pc=True, dev_time=True, locked=True),
 }
 
 
@@ -1324,6 +1333,11 @@ def build_parser() -> argparse.ArgumentParser:
     tuning = sub.add_parser("tuning-install")
     tuning.add_argument("--sha", required=True, help="the fetched bundle whose tuning modules and IemPc.psm1 run")
     tuning.add_argument("--profile", help="the private tuning profile (default: $TUNING_PROFILE or ~/.config/iemmixer/pc-tuning.json)")
+    trace = sub.add_parser("trace")
+    trace.add_argument("--label", required=True, help="the run's name: 1 to 40 of a-z 0-9 -")
+    trace.add_argument("--seconds", type=int, required=True, help="how long the kernel trace runs")
+    trace.add_argument("--circular-mb", type=int, help="a circular kernel file of this size (a long soak)")
+    trace.add_argument("--profile", help="the private tuning profile whose card and audio processors are watched")
     return ap
 
 

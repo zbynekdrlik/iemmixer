@@ -44,13 +44,12 @@ PROFILE_PRESENT = f"Test-Path -LiteralPath (Join-Path {TUNING_DIR_PS} 'profile.j
 HASH_KEYS = ("tuning", "measure", "profile")
 
 
-def checked_profile(ip, path: Path) -> Path:
+def load_profile(ip, path: Path) -> dict:
     """The private profile, its shapes checked as the PC checks them (tuning_rules)."""
     try:
-        tr.load_profile(path)
+        return tr.load_profile(path)
     except (tr.StepError, ValueError, OSError) as e:
         raise ip.Refused(f"the tuning profile is refused: {e}") from None
-    return path
 
 
 def check_hashes(ip, r, want: dict[str, str]) -> dict:
@@ -102,7 +101,8 @@ def run_install(ctx, ip, sha: str, profile: Path | None) -> dict:
 def install(ctx, ip) -> int:
     """`iempc tuning-install --sha SHA [--profile PATH]` (dev time)."""
     sha = ip.check_sha(ctx.args.sha)
-    profile = checked_profile(ip, Path(ctx.args.profile) if ctx.args.profile else PROFILE)
+    profile = Path(ctx.args.profile) if ctx.args.profile else PROFILE
+    load_profile(ip, profile)
     ip.emit({"tuning_install": sha, "hashes": run_install(ctx, ip, sha, profile)})
     return 0
 
