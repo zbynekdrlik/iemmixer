@@ -7,7 +7,7 @@
 
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
-/// One bucket: 1 µs.
+/// One bucket: 1 µs (telemetry's own histogram shares it).
 pub const BUCKET_NS: u64 = 1_000;
 /// The longest range below the overflow bucket: 1 ms. Two periods are 667 µs
 /// at 32 samples, 96 kHz; a larger NullRt block is capped here, so `Status`
@@ -107,8 +107,9 @@ pub struct HistSnapshot {
 }
 
 /// The upper edge (µs) of the bucket holding the `per_mille` quantile (rank
-/// ⌈per_mille·n/1000⌉, at least 1): the soak verdict's rule
-/// (scripts/iem-pc/soak_verdict.py `quantile_us`). `None` when empty.
+/// ⌈per_mille·n/1000⌉, at least 1; `per_mille` in 0..=1000): the soak
+/// verdict's rule (scripts/iem-pc/soak_verdict.py `quantile_us`). `None` when
+/// empty, or when `per_mille` above 1000 asks for a rank past the total.
 pub fn quantile_us(sparse: &[(u32, u64)], per_mille: u64) -> Option<u32> {
     let total: u64 = sparse.iter().map(|e| e.1).sum();
     let rank = per_mille.saturating_mul(total).div_ceil(1000).max(1);

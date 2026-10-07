@@ -218,10 +218,10 @@ fn bench(name: &str, worst: bool) -> f64 {
         let mut block = Block::new(B, &input, &mut output);
         let t0 = Instant::now();
         p.process(&mut block);
-        let dt = t0.elapsed().as_secs_f64() * 1e6;
+        let took = t0.elapsed();
         if call >= WARMUP {
-            times.push(dt);
-            hist.record((dt * 1000.0) as u64);
+            times.push(took.as_secs_f64() * 1e6);
+            hist.record(u64::try_from(took.as_nanos()).unwrap_or(u64::MAX));
         }
         for tap in &mut h.taps {
             let _ = tap.pop_partial_slice(&mut drain);

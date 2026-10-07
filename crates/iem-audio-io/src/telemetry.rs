@@ -9,9 +9,10 @@ use core::sync::atomic::{
     Ordering::{Acquire, Relaxed, Release},
 };
 
+use crate::hist::BUCKET_NS;
+
 /// Histogram resolution: 1 µs buckets up to 5 ms, then one overflow bucket.
 pub const BUCKETS: usize = 5_001;
-const BUCKET_NS: u64 = 1_000;
 /// The first callbacks of a stream prime the driver's buffers (possibly inside
 /// `start()`); they are counted but never judged late, missed or gapped.
 pub const WARMUP: u64 = 8;

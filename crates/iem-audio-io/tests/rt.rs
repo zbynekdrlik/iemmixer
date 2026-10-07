@@ -2,9 +2,9 @@
 //! real-time and recording a panic neither allocate nor free; nor does
 //! counting a driver message, which may come on the callback's thread (#9
 //! 2026-09-28), nor recording the stream histograms (S7). Its own binary, so
-//! only these tests run on the allocation detector. `assert_no_alloc` runs in warn mode (the per-thread violation
-//! count must stay zero); the first test proves the detector sees an
-//! allocation.
+//! only these tests run on the allocation detector. `assert_no_alloc` runs in
+//! warn mode (the per-thread violation count must stay zero); the first test
+//! proves the detector sees an allocation.
 
 use assert_no_alloc::{AllocDisabler, assert_no_alloc, reset_violation_count, violation_count};
 use iem_audio_io::hist::StreamHists;
