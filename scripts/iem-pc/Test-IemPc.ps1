@@ -206,6 +206,10 @@ try {
         $bw = Get-IemBootTaskWarnings -FastStartup (Get-IemFastStartup -Hiberboot $c[0] -HiberFile $c[1])
         Assert ($bw.Count -eq 1 -and $bw[0] -ceq ('Fast Startup could not be judged ({0}): if it is on, a shutdown skips iemmixer-boot-pref' -f $c[2])) "boot-task-names-an-unknown-fast-startup-fact $($c[2]) ($($bw -join ' | '))"
     }
+    # Each unknown fact is named, with the read error where there is one (review of PR #41).
+    $fsBoth = [pscustomobject]@{ hiberboot_enabled = $null; hiberfile_present = $null; active = $null; problem = ''; error = 'the hibernation file: x' }
+    $bw = Get-IemBootTaskWarnings -FastStartup $fsBoth
+    Assert ($bw.Count -eq 1 -and $bw[0] -ceq 'Fast Startup could not be judged (HiberbootEnabled absent, the hibernation file: x): if it is on, a shutdown skips iemmixer-boot-pref') "boot-task-names-every-unknown-fast-startup-fact ($($bw -join ' | '))"
     $fsRead = [pscustomobject]@{ hiberboot_enabled = 1; hiberfile_present = $false; active = $false; problem = ''; error = '' }
     Assert ((Get-IemBootTaskWarnings -FastStartup $fsRead).Count -eq 0) 'boot-task-warns-of-nothing-when-both-facts-were-read-and-it-is-off'
 
