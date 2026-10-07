@@ -3,6 +3,116 @@
 //! into the [`Summary`] written every `write_every` and at the end. Pure:
 //! every time is passed in.
 
+use std::time::{Duration, Instant};
+
+use crate::{Event, GapCount, Gaps, Reason, Summary, ms};
+
+/// Samples per channel in one listen frame: 20 ms at 48 kHz, the engine's
+/// frame, which the server encodes (pinned to `FRAME_48K` in the tests).
+pub const SAMPLES: usize = 960;
+/// The `AudioStatus` of a listen with nothing to hear.
+const NO_SOURCE: &str = "no_source";
+
+/// The counts of one run so far.
+#[derive(Debug, Clone, Default)]
+pub struct Tally {
+    /// The first open of either socket: the run's clock starts there.
+    opened: Option<Instant>,
+    /// The first `ListenStart`.
+    listen_started: Option<Instant>,
+    first_frame_ms: Option<u64>,
+    gaps: Gaps,
+    frames: u64,
+    decode_errors: u64,
+    meter_frames: u64,
+    reconnects: u64,
+    no_source: u64,
+    error: Option<Reason>,
+}
+
+impl Tally {
+    /// A socket opened at `now`; `again`: it had been open before (a
+    /// reconnect).
+    pub fn opened(&mut self, now: Instant, again: bool) {
+        self.opened.get_or_insert(now);
+        if again {
+            self.reconnects += 1;
+        }
+    }
+
+    /// The listen socket sent `ListenStart` at `now`.
+    pub fn listen_started(&mut self, now: Instant) {
+        self.listen_started.get_or_insert(now);
+    }
+
+    /// A listen frame arrived at `now` and decoded to `samples` per channel
+    /// (`None`: Opus refused it). Only a whole frame is a frame; anything
+    /// else is a decode error and, for the gap clock, no frame.
+    pub fn frame(&mut self, now: Instant, samples: Option<usize>) {
+        if samples != Some(SAMPLES) {
+            self.decode_errors += 1;
+            return;
+        }
+        self.frames += 1;
+        self.gaps.frame(now);
+        if self.frames == 1 {
+            self.first_frame_ms = self
+                .listen_started
+                .map(|start| ms(now.saturating_duration_since(start)));
+        }
+    }
+
+    /// A text frame from the server.
+    pub fn text(&mut self, event: &Event) {
+        match event {
+            Event::Meters => self.meter_frames += 1,
+            Event::AudioStatus(status) if status == NO_SOURCE => self.no_source += 1,
+            Event::AudioStatus(_) | Event::Other => {}
+        }
+    }
+
+    /// The run ends early for `reason`; the first reason stays.
+    pub fn fail(&mut self, reason: Reason) {
+        self.error.get_or_insert(reason);
+    }
+
+    pub fn error(&self) -> Option<Reason> {
+        self.error
+    }
+
+    /// When a run of `seconds` ends: that long after the first open.
+    pub fn ends_at(&self, seconds: u64) -> Option<Instant> {
+        self.opened
+            .map(|opened| opened + Duration::from_secs(seconds))
+    }
+
+    /// The summary if the run ended at `now`.
+    pub fn summary(&self, now: Instant, complete: bool) -> Summary {
+        let (gaps, seconds) = match self.opened {
+            Some(opened) => (
+                self.gaps.end(opened, now),
+                now.saturating_duration_since(opened).as_secs_f64(),
+            ),
+            None => (GapCount::default(), 0.0),
+        };
+        Summary {
+            complete,
+            seconds,
+            frames: self.frames,
+            expected_frames: self.gaps.expected(now),
+            decode_errors: self.decode_errors,
+            gaps: gaps.gaps,
+            max_gap_ms: gaps.max_gap_ms,
+            first_frame_ms: self.first_frame_ms,
+            meter_frames: self.meter_frames,
+            reconnects: self.reconnects,
+            no_source: self.no_source,
+            error: self.error,
+            ..Summary::default()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
