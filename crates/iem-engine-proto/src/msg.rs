@@ -97,15 +97,19 @@ pub enum Cmd {
     GetTopology,
     SaveNow,
     Shutdown,
+    /// A panic on the RT thread (HIL's panic check), under the
+    /// fault-injection flag. Supervisor only: an engine keeps the flag until
+    /// it restarts, after its HIL job too, and only the guard allows an
+    /// injection, inside a job (review of PR #40, #35).
     InjectFault,
     /// Owner-approved SEH test (design §10): a structured exception on the
-    /// RT thread, under the fault-injection flag. Supervisor-may, like
+    /// RT thread, under the fault-injection flag. Supervisor only, like
     /// `InjectFault`.
     InjectSeh,
     /// The parked-engine test (design §10 test #2, #35): the SEH test's
     /// exception under a test hold, so the backend keeps the driver and the
     /// SEH filter parks the RT thread; the engine keeps running and reports
-    /// `parked`. Under the fault-injection flag, supervisor-may, like
+    /// `parked`. Under the fault-injection flag, supervisor only, like
     /// `InjectSeh`.
     InjectPark,
     Ping,
@@ -169,17 +173,24 @@ impl Cmd {
         matches!(self, Self::GetState | Self::GetTopology | Self::Ping)
     }
 
-    /// Commands only the supervisor may send (S6 design note §4).
+    /// Commands only the supervisor may send (S6 design note §4): `Arm`,
+    /// the HIL signal, the forced reopen and the fault injections (review
+    /// of PR #40, #35); anyone else gets `NotSupervisor`.
     pub fn is_supervisor(&self) -> bool {
         matches!(
             self,
-            Self::Arm | Self::HilTestSignal { .. } | Self::ForceReopen
+            Self::Arm
+                | Self::HilTestSignal { .. }
+                | Self::ForceReopen
+                | Self::InjectFault
+                | Self::InjectSeh
+                | Self::InjectPark
         )
     }
 
-    /// Commands a supervisor connection may send: reads, its own commands,
-    /// `Shutdown`, `SaveNow`, the test signal and fault injection (their
-    /// launch flags still apply); never a change of the mix.
+    /// Commands a supervisor connection may send: reads, its own commands
+    /// (fault injection among them), `Shutdown`, `SaveNow` and the test
+    /// signal (their launch flags still apply); never a change of the mix.
     pub fn supervisor_may(&self) -> bool {
         self.is_read_only()
             || self.is_supervisor()
@@ -189,9 +200,6 @@ impl Cmd {
                     | Self::SaveNow
                     | Self::StartTestSignal { .. }
                     | Self::StopTestSignal
-                    | Self::InjectFault
-                    | Self::InjectSeh
-                    | Self::InjectPark
             )
     }
 }
