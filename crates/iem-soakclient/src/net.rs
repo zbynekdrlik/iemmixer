@@ -393,6 +393,9 @@ mod tests {
         let secs = Duration::from_secs;
         assert_eq!((l.give_up, l.write_every), (secs(120), secs(60)));
         assert_eq!(l.read_timeout, Duration::from_millis(500));
+        // Far above the server's meter period and its 5 s `no_source`
+        // repeat on an open listen socket.
+        assert_eq!(l.idle, secs(10));
     }
 
     #[test]
