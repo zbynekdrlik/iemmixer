@@ -1533,13 +1533,11 @@ function Get-IemBootTaskWarnings {
     if ($null -eq $FastStartup.active) {
         # Unknown is named, never read as off (review of PR #41): a read error, or a
         # fact absent without one (HiberbootEnabled missing, the file not read).
-        $why = $err
-        if (-not $why) {
-            $unknown = @()
-            if ($null -eq $FastStartup.hiberboot_enabled) { $unknown += 'HiberbootEnabled absent' }
-            if ($null -eq $FastStartup.hiberfile_present) { $unknown += 'the hibernation file not read' }
-            $why = $unknown -join ', '
-        }
+        $unknown = @()
+        if ($null -eq $FastStartup.hiberboot_enabled -and $err -cnotlike '*HiberbootEnabled*') { $unknown += 'HiberbootEnabled absent' }
+        if ($null -eq $FastStartup.hiberfile_present -and $err -cnotlike '*hibernation file*') { $unknown += 'the hibernation file not read' }
+        if ($err) { $unknown += $err }
+        $why = $unknown -join ', '
         return ,@(('Fast Startup could not be judged ({0}): if it is on, a shutdown skips iemmixer-boot-pref' -f $why))
     }
     return ,@()
