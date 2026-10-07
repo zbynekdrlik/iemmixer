@@ -11,10 +11,12 @@ PC while the guard's engine plays, in dev time.
 3. A read-only preflight: the elevated tuning folder (%ProgramData%\\iemmixer\\
    tuning as the PC resolves the known folder; filled by `iempc
    tuning-install`) must hold that bundle's two tuning modules (their sha256
-   against its SHA256SUMS), else no trace and the hint to run tuning-install.
-   Every later import re-checks both hashes on the PC first (`hash_check`):
-   the elevated ssh session imports nothing else, and never the bundle's copy
-   in the user's root.
+   against its SHA256SUMS) and the local profile (its sha256: the watched
+   processors are the PC's), else no trace and the hint to run tuning-install.
+   Every later import re-checks the modules' hashes on the PC first
+   (`hash_check`; both, or IemMeasure's alone for the stop-only import, which
+   loads no IemTuning): the elevated ssh session imports nothing else, and
+   never the bundle's copy in the user's root.
 4. `Start-IemTrace -Xperf <PC_XPERF> -Dir <PC_ROOT>\\traces\\<label>-<UTC
    stamp>` (the kernel's DPC and INTERRUPT events and the engine's marker
    session; `--circular-mb` keeps the kernel file circular at that size).
@@ -24,13 +26,16 @@ PC while the guard's engine plays, in dev time.
    10). SIGTERM and SIGHUP end the wait through SystemExit, and any failure
    once the start was sent ends the command, both after the same stop. That
    stop's own failure is reported (`trace_stop: failed`), never raised over
-   the cause; after a start that never returned (StillRunning, a signal during
-   it) a stop that found nothing is `unconfirmed`: the start may still begin
-   the trace on the PC.
-6. The counters again (a failed read is `after_error`; the trace is analysed
-   all the same), the stop (confirmed: every session stopped, none kept;
-   spike_window.check_trace_stop; a failure names the trace left running),
-   then the merge (its raw files removed once the merged trace exists) and
+   the cause. The start is over only when its reply was read (the PC's own
+   failure included); after one whose reply was not (StillRunning, a failed
+   ssh session, a signal during it) a stop that did not stop both sessions is
+   `unconfirmed`: the start may still begin the trace on the PC.
+6. The counters again (a failed read or an error answer is `after_error`; the
+   trace is analysed all the same), the stop with "ignore" (its reply is
+   always checked: every session stopped, none kept, spike_window.
+   check_trace_stop; a failure is `trace_stop: failed` and names the trace
+   left running), then the flag, then the merge (its raw files removed once
+   the merged trace exists) and
    `xperf -a dpcisr`, the two bodies tuning_window.analysis composes, each its
    own call at Idle priority, given up at once on a flag (the step on the PC
    ends by itself at Idle).
@@ -40,8 +45,8 @@ PC while the guard's engine plays, in dev time.
    each module's usage on those processors. One JSON object, also saved as
    traces/<run>/summary.json: label, seconds, circular_mb, run, build, frames,
    the callbacks/missed/resets deltas (None when the reads saw different
-   engines: same_engine false), after_error, watched, top_modules, findings,
-   report.
+   engines: same_engine false), after_error, after (the after-read's mode,
+   parked, faulted), profile_sha256, watched, top_modules, findings, report.
 
 The report and the summary name drivers: private site data (P6), never pasted
 raw into a public ticket. PC_XPERF (xperf.exe's full path on the PC: WPT 10 or
@@ -73,14 +78,16 @@ START_S = 120
 # One analysis step (a merge, or xperf -a dpcisr) at Idle priority.
 ANALYSIS_S = 1800
 COUNTERS = ("callbacks", "missed", "resets")
+# The trace's two ETW sessions (IemMeasure's kernel logger and marker session).
+SESSIONS = ("NT Kernel Logger", "IemMarkers")
 IDLE = "(Get-Process -Id $PID).PriorityClass = 'Idle'"
 # The preflight (read-only): the elevated tuning folder as the PC resolves it,
-# and its two modules' sha256 (null for one that is absent).
+# and the sha256 of its two modules and its profile (null for one that is absent).
 PREFLIGHT = (f"$t = {iempc_tuning.TUNING_DIR_PS} ; "
              "$h = { param($p) if (Test-Path -LiteralPath $p -PathType Leaf) "
              "{ (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash.ToLowerInvariant() } } ; "
              "[pscustomobject]@{ dir = $t; tuning = (& $h (Join-Path $t 'IemTuning.psm1')); "
-             "measure = (& $h (Join-Path $t 'IemMeasure.psm1')) }")
+             "measure = (& $h (Join-Path $t 'IemMeasure.psm1')); profile = (& $h (Join-Path $t 'profile.json')) }")
 DRIVE_PATH = re.compile(r"[A-Za-z]:\\[^\x00-\x1f\"]+")
 
 
@@ -154,9 +161,10 @@ def engine_seen(ip, code: int, reply: dict | None) -> dict:
     return engine
 
 
-def tuning_modules(ctx, ip, build: str) -> dict[str, tuple[str, str]]:
-    """The elevated tuning folder's two modules as (path on the PC, sha256): the
-    running bundle's (fetched and attested here), read by the preflight."""
+def tuning_modules(ctx, ip, build: str, profile: Path) -> tuple[dict[str, tuple[str, str]], str]:
+    """The elevated tuning folder's two modules as (path on the PC, sha256):
+    the running bundle's (fetched and attested here); and the profile's sha256,
+    which must be the local profile's. Read by the preflight."""
     sums = ip.need_record(build).get("sums") or {}
     want = {key: sums.get(f"tuning/{name}") for key, name in iempc_tuning.MODULES.items()}
     if not all(want.values()):
@@ -169,26 +177,42 @@ def tuning_modules(ctx, ip, build: str) -> dict[str, tuple[str, str]]:
         if r.get(key) != want[key]:
             raise ip.Refused(f"no trace: the elevated tuning folder's {name} is {r.get(key) or 'absent'}, not bundle "
                              f"{build}'s (the running engine's): run '{fix}'")
-    return {key: (f"{r['dir']}\\{name}", want[key]) for key, name in iempc_tuning.MODULES.items()}
+    local = ip.sha256_file(profile)
+    if r.get("profile") != local:
+        raise ip.Refused(f"no trace: the PC's tuning profile is {r.get('profile') or 'absent'}, not {profile} ({local}): "
+                         f"the watched processors would not be the PC's; run '{fix} --profile {profile}', or name the "
+                         "installed profile with --profile")
+    return {key: (f"{r['dir']}\\{name}", want[key]) for key, name in iempc_tuning.MODULES.items()}, local
 
 
-def run_measure(ctx, ip, mods: dict, body: str, timeout: float, event: str, pre: str = "", stop_only: bool = False):
-    """`body` after IemMeasure's import from the elevated tuning folder, both
-    modules' sha256 checked on the PC first; `stop_only`: IemMeasure alone,
-    IemTuning never loads (nothing compiles)."""
+def measure_load(ip, mods: dict, pre: str = "", stop_only: bool = False) -> dict:
+    """module_script's keywords for a body after IemMeasure's import from the
+    elevated tuning folder, both modules' sha256 checked on the PC first;
+    `stop_only`: IemMeasure alone (its hash), IemTuning never loads (nothing
+    compiles)."""
     (tuning, tuning_hex), (measure, measure_hex) = mods["tuning"], mods["measure"]
     if stop_only:
-        load = f"{ip.hash_check(measure, measure_hex)} ; Import-Module {ip.ps_quote(measure)} -ArgumentList 'stop-only' -Force ; "
-        return ip.run_module(ctx.env, body, timeout, event, pre=pre + load)
-    return ip.run_module(ctx.env, body, timeout, event, pre=f"{pre}{ip.hash_check(tuning, tuning_hex)} ; ",
-                         module=measure, module_hex=measure_hex)
+        return {"pre": f"{pre}{ip.hash_check(measure, measure_hex)} ; Import-Module {ip.ps_quote(measure)} "
+                       "-ArgumentList 'stop-only' -Force ; "}
+    return {"pre": f"{pre}{ip.hash_check(tuning, tuning_hex)} ; ", "module": measure, "module_hex": measure_hex}
 
 
-def stop(ctx, ip, sw, mods: dict, run_dir: str, event: str) -> dict:
-    """The trace stop, confirmed (check_trace_stop); a failure names the trace that may still run."""
+def start_reply(ctx, ip, mods: dict, body: str) -> dict:
+    """Start-IemTrace's reply as the PC printed it (`ok`, or its own failure).
+    An exception (StillRunning, a failed ssh session, no reply read) means the
+    start may still run on the PC; EventNow comes only after a "finish" call
+    that completed."""
+    script = ip.module_script(body, **measure_load(ip, mods))
+    return ip.last_json(ip.ssh_ps(ctx.env, script, START_S, ctx.watch(abandon=False)))
+
+
+def stop(ctx, ip, sw, mods: dict, run_dir: str) -> dict:
+    """The trace stop with "ignore" (it completes and its reply is always
+    checked: check_trace_stop); a failure names the trace that may still run."""
     body = f"Stop-IemTraceSessions -Dir {ip.ps_quote(run_dir)} -TimeoutSeconds {sw.TRACE_STOP_LOGMAN_S}"
     try:
-        return sw.check_trace_stop(run_measure(ctx, ip, mods, body, sw.TRACE_STOP_CALL_S, event, stop_only=True))
+        return sw.check_trace_stop(ip.run_module(ctx.env, body, sw.TRACE_STOP_CALL_S, "ignore",
+                                                 **measure_load(ip, mods, stop_only=True)))
     except (ip.StepError, sw.StepError) as e:   # sw's own StepError: check_trace_stop
         raise ip.StepError(f"{e}: the kernel trace may still run on the PC (stop it with Stop-IemTraceSessions -Dir "
                            f"{run_dir})") from None
@@ -197,20 +221,24 @@ def stop(ctx, ip, sw, mods: dict, run_dir: str, event: str) -> dict:
 def abandon(ctx, ip, sw, mods: dict, run_dir: str, cause: BaseException, start_over: bool) -> None:
     """The stop after a flag, a signal or a failure once the start was sent: at
     once, without the merge, whatever the flag says. Its own failure is
-    reported, never raised over the cause. `start_over`: the start call
-    returned; when it did not, a stop that found nothing proves nothing."""
+    reported, never raised over the cause. `start_over`: the start's reply was
+    read; when it was not, only a stop of both sessions proves the trace gone."""
     why = "ide event" if isinstance(cause, ip.EventNow) else type(cause).__name__
     try:
-        r = stop(ctx, ip, sw, mods, run_dir, "ignore")
+        r = stop(ctx, ip, sw, mods, run_dir)
     except ip.StepError as e:
         print(f"iempc: WARNING: the kernel trace may still run on the PC after {why}: {e}", file=sys.stderr, flush=True)
         ip.emit({"trace_stop": "failed", "dir": run_dir, "error": str(e)[-800:]})
         return
-    if not start_over and not r.get("stopped"):
-        print(f"iempc: WARNING: the kernel trace may still start or run on the PC: its start did not return ({why}) and "
-              f"the stop found nothing to stop; once the start is over, stop it with Stop-IemTraceSessions -Dir {run_dir}",
-              file=sys.stderr, flush=True)
-        ip.emit({"trace_stop": "unconfirmed", "dir": run_dir, "why": why})
+    stopped = set(r.get("stopped") or [])
+    if not start_over and not set(SESSIONS) <= stopped:
+        print(f"iempc: WARNING: the kernel trace may still start or run on the PC: its start's reply was not read ({why}) "
+              f"and the stop stopped {sorted(stopped) or 'nothing'}; once the start is over, stop it with "
+              f"Stop-IemTraceSessions -Dir {run_dir}", file=sys.stderr, flush=True)
+        ip.emit({"trace_stop": "unconfirmed", "dir": run_dir, "why": why, "stopped": sorted(stopped)})
+        return
+    if not stopped:
+        print(f"iempc: no kernel trace ran ({why}): the stop found none", file=sys.stderr, flush=True)
         return
     print(f"iempc: the kernel trace was stopped ({why})", file=sys.stderr, flush=True)
 
@@ -245,11 +273,11 @@ def trace(ctx, ip) -> int:
     ip.refuse_open_window("trace")
     tr, lr, sw, tw = s1c(ip)
     label, seconds, circular_mb = check_args(ip, tr, ctx.args)
-    profile = iempc_tuning.load_profile(ip, Path(ctx.args.profile) if ctx.args.profile else iempc_tuning.PROFILE)
-    lps = tr.watch_lps(profile, "")
+    profile_path = Path(ctx.args.profile) if ctx.args.profile else iempc_tuning.PROFILE
+    lps = tr.watch_lps(iempc_tuning.load_profile(ip, profile_path), "")
     code, reply, _ = ip.iemmode(env, ["status"], ip.STATUS_S, ctx.watch(abandon=True))
     before = engine_seen(ip, code, reply)
-    mods = tuning_modules(ctx, ip, before["build"])
+    mods, profile_hex = tuning_modules(ctx, ip, before["build"], profile_path)
     run = f"{label}-{dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
     rel = f"traces/{run}"
     run_dir = ip.pc_join(env["PC_ROOT"], rel)
@@ -258,31 +286,34 @@ def trace(ctx, ip) -> int:
     with ended_by_signals():
         try:
             try:
-                run_measure(ctx, ip, mods, f"Start-IemTrace -Xperf {xperf} -Dir {d}{tw.trace_options('', circular_mb or 0)}",
-                            START_S, ctx.watch(abandon=False))
-            except ip.StillRunning:
+                doc = start_reply(ctx, ip, mods, f"Start-IemTrace -Xperf {xperf} -Dir {d}{tw.trace_options('', circular_mb or 0)}")
+            except ip.EventNow:
+                start_over = True   # "finish": the call completed before the flag was raised
                 raise
-            except (ip.StepError, ip.EventNow):
-                start_over = True   # the PC answered, or the start completed before the flag ("finish")
-                raise
-            start_over = True
+            start_over = True       # the PC's reply was read: its start is over, whatever it says
+            if doc.get("ok") is not True:
+                raise ip.StepError(f"PC step failed: {doc.get('error')}")
             ip.pause(ctx, seconds)
             try:
                 code, reply, _ = ip.iemmode(env, ["status"], ip.STATUS_S, ctx.watch(abandon=True))
-                after = reply.get("engine") if code == 0 and isinstance(reply, dict) else None
             except ip.StepError as e:   # the counters only: the trace is stopped and analysed all the same
                 after_error = str(e)[-800:]
+            else:
+                if code == 0 and isinstance(reply, dict):
+                    after = reply.get("engine")
+                else:
+                    after_error = f"iemmode status exit {code}"
         except BaseException as e:
             abandon(ctx, ip, sw, mods, run_dir, e, start_over)
             raise
     try:
-        stop(ctx, ip, sw, mods, run_dir, ctx.watch(abandon=False))
+        stop(ctx, ip, sw, mods, run_dir)
     except ip.StepError as e:
         ip.emit({"trace_stop": "failed", "dir": run_dir, "error": str(e)[-800:]})
         raise
     for body, _ in tw.analysis(xperf, d, 0, False):
         check_event(ctx, ip)
-        run_measure(ctx, ip, mods, body, ANALYSIS_S, ctx.watch(abandon=True), pre=f"{IDLE} ; ")
+        ip.run_module(env, body, ANALYSIS_S, ctx.watch(abandon=True), **measure_load(ip, mods, pre=f"{IDLE} ; "))
     check_event(ctx, ip)
     out = ip.state_dir() / "traces" / run
     out.mkdir(parents=True, exist_ok=True)
@@ -294,7 +325,9 @@ def trace(ctx, ip) -> int:
         raise ip.StepError(f"{e} ({local})") from None
     doc = {"label": label, "seconds": seconds, "circular_mb": circular_mb, "run": run, "build": before["build"],
            "frames": before["frames"], **deltas(before, after), "after_error": after_error,
-           "watched": {"lps": lps, **watched_usage(parsed, lps)},
+           "after": ({"mode": reply.get("mode"), "parked": after.get("parked"), "faulted": after.get("faulted")}
+                     if isinstance(after, dict) else None),
+           "profile_sha256": profile_hex, "watched": {"lps": lps, **watched_usage(parsed, lps)},
            "top_modules": lr.top_modules(parsed), "findings": lr.budget_findings(parsed, lps), "report": str(local)}
     ip.write_json(out / "summary.json", doc)
     ip.emit(doc)
