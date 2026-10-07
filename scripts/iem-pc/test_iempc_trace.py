@@ -549,7 +549,8 @@ class TraceRecordTests(TraceBase):
         self.write_record()
         self.answers["Stop-IemTraceSessions"] = {"stopped": [], "gone": ["NT Kernel Logger"], "kept": [], "notes": []}
         code, docs, err = self.run_main("event")
-        self.assertEqual((code, err), (0, ""))
+        # Quiet about the trace; iemmode event's one note on the admin-only bin (#15) is not the trace's.
+        self.assertEqual((code, [line for line in err.splitlines() if "iemmode ran from PC_BIN" not in line]), (0, []))
         self.assertFalse(self.record().exists())
         self.assertFalse(any("recorded_trace" in d for d in docs))
 
