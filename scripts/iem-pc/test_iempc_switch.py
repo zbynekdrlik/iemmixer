@@ -75,9 +75,14 @@ def engine(**kw) -> dict:
     return ready(engine=eng)
 
 
+def said(mode: str) -> str:
+    """The detail of `answer(mode, …)`."""
+    return f"mode {mode}; bundle {SHA}"
+
+
 def answer(mode: str, rec=..., code: int = 0) -> tuple[int, str]:
     """An `iemmode event|dev|status` answer: the guard in `mode`, its `last_switch` `rec` (... leaves it out)."""
-    doc = {"ok": code == 0, "mode": mode, "switching": None, "alarms": [], "detail": f"mode {mode}; bundle {SHA}"}
+    doc = {"ok": code == 0, "mode": mode, "switching": None, "alarms": [], "detail": said(mode)}
     if rec is not ...:
         doc["last_switch"] = rec
     return code, json.dumps(doc)
@@ -93,8 +98,9 @@ def in_turn(*answers):
     return give
 
 
-def leg(exit_code: int, rec) -> dict:
-    return {"exit": exit_code, "record": rec}
+def leg(exit_code: int | None, rec, detail: str | None = None, **extra) -> dict:
+    """A leg as the command prints it (`detail`: the guard's reply's)."""
+    return {"exit": exit_code, "record": rec, "detail": detail, **extra}
 
 
 class SwitchBase(Base):
@@ -145,7 +151,8 @@ class SwitchTestTests(SwitchBase):
         self.assertEqual(self.pc.timeouts, [ip.STATUS_S, ip.SWITCH_S, ip.SWITCH_S])
         self.assertEqual(docs, [{"switch_test": {
             "conclusion": "success", "summary": f"green: {GREEN_TEXT}", "first_failure": None,
-            "numbers": GREEN_NUMBERS, "event_leg": leg(0, EVENT), "dev_leg": leg(0, DEV), "dev_entry": 1}}])
+            "numbers": GREEN_NUMBERS, "event_leg": leg(0, EVENT, said("event")), "dev_leg": leg(0, DEV, said("dev")),
+            "dev_entry": 1}}])
         # The dev leg is a dev entry of this box, as `iempc dev`'s (dispatch-hil, dispatch-soak).
         self.assertEqual(ip.current_entry(), 1)
         self.assertFalse(ip.EVENT_NOW.exists())
@@ -201,8 +208,8 @@ class SwitchTestTests(SwitchBase):
             self.refused(f"no switch test: {words}", doc)
 
     def test_a_parked_or_faulted_engine_is_refused(self) -> None:
-        """The event plan's engine stop would meet an engine that does not play
-        and stop for the owner: the test needs one that plays."""
+        """An engine already silent or broken gives no silence of a switch from
+        a playing one: the test needs one that plays."""
         for state in ("parked", "faulted"):
             for value in (True, None, "false", 0, ...):
                 self.status(engine(**{state: value}))
@@ -240,7 +247,7 @@ class LegTests(SwitchBase):
         self.assertEqual(self.pc.timeouts, [ip.STATUS_S, ip.SWITCH_S, ip.STATUS_S, ip.SWITCH_S, ip.STATUS_S])
         out = self.result(docs)
         self.assertEqual((out["event_leg"], out["dev_leg"], out["conclusion"]),
-                         (leg(0, EVENT), leg(0, DEV), "success"))
+                         (leg(0, EVENT, said("event")), leg(0, DEV, said("dev")), "success"))
 
     def test_a_record_seen_before_a_leg_is_no_record_of_it(self) -> None:
         """A request the guard refused at once answers with the record it
@@ -248,13 +255,15 @@ class LegTests(SwitchBase):
         self.pc.replies[("event",)] = answer("event", BEFORE)
         code, docs, _ = self.switch()
         out = self.result(docs)
-        self.assertEqual((code, out["event_leg"], out["dev_leg"]), (1, leg(0, None), leg(0, DEV)))
+        self.assertEqual((code, out["event_leg"], out["dev_leg"]),
+                         (1, leg(0, None, said("event")), leg(0, DEV, said("dev"))))
         self.assertEqual(out["first_failure"], "event leg: no record of a switch dev → event (iemmode event exit 0)")
         self.pc.replies[("event",)] = answer("event", EVENT)
         self.pc.replies[("dev",)] = answer("event", EVENT, code=1)
         code, docs, _ = self.switch()
         out = self.result(docs)
-        self.assertEqual((code, out["event_leg"], out["dev_leg"]), (1, leg(0, EVENT), leg(1, None)))
+        self.assertEqual((code, out["event_leg"], out["dev_leg"]),
+                         (1, leg(0, EVENT, said("event")), leg(1, None, said("event"))))
         self.assertEqual(out["first_failure"], "dev leg: no record of a switch from event (iemmode dev exit 1)")
 
     def test_a_red_event_leg_still_goes_back_to_dev(self) -> None:
@@ -267,8 +276,8 @@ class LegTests(SwitchBase):
             "conclusion": "failure", "first_failure": "event-leg silence 60001 ms > 60000 ms",
             "summary": "red: event-leg silence 60001 ms > 60000 ms; event-leg silence 60001 ms, handover 34000 ms, "
                        "dev-leg silence 14000 ms",
-            "numbers": dict(GREEN_NUMBERS, event_silence_ms=60_001), "event_leg": leg(0, slow),
-            "dev_leg": leg(0, DEV), "dev_entry": 1})
+            "numbers": dict(GREEN_NUMBERS, event_silence_ms=60_001), "event_leg": leg(0, slow, said("event")),
+            "dev_leg": leg(0, DEV, said("dev")), "dev_entry": 1})
         self.assertFalse(ip.EVENT_NOW.exists())
 
     def test_an_event_leg_that_did_not_end_in_event_has_no_dev_leg(self) -> None:
@@ -279,12 +288,29 @@ class LegTests(SwitchBase):
         self.assertEqual(code, 1, err)
         self.assertEqual(self.calls(), [(["status"], "abandon"), (["event"], "ignore")])
         out = self.result(docs)
-        self.assertEqual((out["event_leg"], out["dev_leg"], out["conclusion"]), (leg(1, kept), None, "failure"))
+        self.assertEqual((out["event_leg"], out["dev_leg"], out["conclusion"]),
+                         (leg(1, kept, said("dev")), None, "failure"))
         self.assertEqual(out["first_failure"], "event leg: outcome kept_serving, ended in dev")
-        self.assertEqual(out["no_dev_leg"], "the event leg did not end in event (iemmode event exit 1): no dev leg; "
-                                            "the guard's state decides (check 'iempc status'), never force-end")
+        self.assertEqual(out["no_dev_leg"], sw.EVENT_FAILED)
+        self.assertEqual(sw.EVENT_FAILED, "the event leg did not exit 0: no dev leg; the guard's state decides "
+                                          "(check 'iempc status'), never force-end")
         self.assertEqual(ip.current_entry(), 0)
         self.assertFalse(ip.EVENT_NOW.exists())
+
+    def test_an_iemmode_that_prints_no_json_or_crashes_gets_no_dev_leg(self) -> None:
+        """A crashed iemmode.exe exits with a negative code in PowerShell, and
+        output that is no JSON with a failing exit is no reply (iempc's `call`)."""
+        self.pc.replies[("event",)] = (-1073741819, "")
+        self.pc.replies[("status",)] = in_turn((0, json.dumps(READY)), (4, "garbage"))
+        code, docs, err = self.switch()
+        self.assertEqual(code, 1, err)
+        self.assertEqual(self.calls(), [(["status"], "abandon"), (["event"], "ignore"), (["status"], "ignore")])
+        out = self.result(docs)
+        self.assertEqual((out["event_leg"], out["dev_leg"], out["no_dev_leg"]),
+                         (leg(-1073741819, None), None, sw.EVENT_FAILED))
+        self.assertEqual(out["first_failure"],
+                         "event leg: no record of a switch dev → event (iemmode event exit -1073741819)")
+        self.assertEqual(ip.current_entry(), 0)
 
     def test_an_unreachable_guard_on_the_event_leg_gets_no_direct_switch_and_no_flag(self) -> None:
         gone = (4, json.dumps({"ok": False, "detail": "the guard is unreachable: no pipe"}))
@@ -294,24 +320,58 @@ class LegTests(SwitchBase):
         self.assertEqual(code, 1)
         self.assertEqual(self.calls(), [(["status"], "abandon"), (["event"], "ignore"), (["status"], "ignore")])
         out = self.result(docs)
-        self.assertEqual((out["event_leg"], out["dev_leg"]), (leg(4, None), None))
+        self.assertEqual((out["event_leg"], out["dev_leg"]), (leg(4, None, "the guard is unreachable: no pipe"), None))
         self.assertEqual(out["first_failure"], "event leg: no record of a switch dev → event (iemmode event exit 4)")
         self.assertFalse(ip.EVENT_NOW.exists())
 
-    def test_a_failed_call_names_its_leg_and_switches_no_further(self) -> None:
+    def test_a_failed_call_is_printed_red_then_fails_the_command_naming_its_leg(self) -> None:
+        """An ssh error or a call left running past its bound: the output keeps
+        what was measured (the event leg's numbers when the dev leg's call
+        fails), then the command fails with the error."""
+        reset = "ssh failed (exit 255): connection reset"
+
         def broken():
-            raise ip.StepError("ssh failed (exit 255): connection reset")
+            raise ip.StepError(reset)
         self.pc.replies[("event",)] = broken
         code, docs, err = self.switch()
-        self.assertEqual((code, docs), (1, []))
-        self.assertIn("switch-test: the event leg: ssh failed (exit 255): connection reset", err)
-        self.assertIn("check 'iempc status'", err)
+        self.assertEqual(code, 1)
+        self.assertEqual(docs, [{"switch_test": {
+            "conclusion": "failure", "first_failure": "event leg: the iemmode event call failed",
+            "summary": "red: event leg: the iemmode event call failed; event-leg silence none, handover none, "
+                       "dev-leg silence none",
+            "numbers": {"event_silence_ms": None, "handover_ms": None, "dev_silence_ms": None},
+            "event_leg": leg(None, None, error=reset), "dev_leg": None, "no_dev_leg": sw.EVENT_FAILED}}])
+        self.assertIn(f"switch-test: the event leg: {reset} (the guard decides where the PC ends: check 'iempc "
+                      "status'; never force-end)", err)
         self.assertEqual(self.calls(), [(["status"], "abandon"), (["event"], "ignore")])
-        self.pc.replies[("event",)] = answer("event", EVENT)
+        self.defaults()
         self.pc.replies[("dev",)] = broken
         code, docs, err = self.switch()
-        self.assertEqual((code, docs, ip.current_entry()), (1, [], 0))
-        self.assertIn("switch-test: the dev leg: ssh failed (exit 255)", err)
+        self.assertEqual((code, ip.current_entry()), (1, 0))
+        out = self.result(docs)
+        self.assertEqual((out["event_leg"], out["dev_leg"], out["first_failure"], out["numbers"]),
+                         (leg(0, EVENT, said("event")), leg(None, None, error=reset),
+                          "dev leg: the iemmode dev call failed", dict(GREEN_NUMBERS, dev_silence_ms=None)))
+        self.assertNotIn("dev_entry", out)
+        self.assertIn(f"switch-test: the dev leg: {reset}", err)
+
+    def test_a_switch_whose_record_read_fails_keeps_its_exit_and_goes_on(self) -> None:
+        """The event switch exited 0 (the PC is in event) but its status read
+        failed: the dev leg still runs, the output is red, then the error."""
+        def broken():
+            raise ip.StillRunning("ssh still running after 120 s (bounded on the PC; check 'iempc status', never "
+                                  "force-end)")
+        self.pc.replies[("event",)] = answer("event")
+        self.pc.replies[("status",)] = in_turn((0, json.dumps(READY)), broken)
+        code, docs, err = self.switch()
+        self.assertEqual(code, 1)
+        self.assertEqual(self.calls()[-1], (["dev"], "abandon"))
+        out = self.result(docs)
+        self.assertEqual(out["event_leg"]["exit"], 0)
+        self.assertEqual((out["event_leg"]["record"], out["dev_leg"], out["dev_entry"]),
+                         (None, leg(0, DEV, said("dev")), 1))
+        self.assertIn("ssh still running after 120 s", out["event_leg"]["error"])
+        self.assertIn("switch-test: the event leg: ssh still running after 120 s", err)
 
     def test_an_unwound_dev_leg_is_red_and_opens_no_dev_entry(self) -> None:
         self.pc.replies[("dev",)] = answer("event", UNWOUND, code=1)
@@ -319,7 +379,7 @@ class LegTests(SwitchBase):
         self.assertEqual(code, 1)
         out = self.result(docs)
         self.assertEqual((out["dev_leg"], out["first_failure"]),
-                         (leg(1, UNWOUND), "dev leg: unwound (its dev entry went back to event)"))
+                         (leg(1, UNWOUND, said("event")), "dev leg: unwound (its dev entry went back to event)"))
         self.assertNotIn("dev_entry", out)
         self.assertEqual(ip.current_entry(), 0)
         self.assertFalse(ip.EVENT_NOW.exists())
@@ -336,7 +396,7 @@ class FlagTests(SwitchBase):
             "conclusion": "cancelled", "summary": "cancelled: no dev leg; event-leg silence 25050 ms, handover "
                                                   "34000 ms, dev-leg silence none",
             "first_failure": None, "numbers": dict(GREEN_NUMBERS, dev_silence_ms=None),
-            "event_leg": leg(0, EVENT), "dev_leg": None, "no_dev_leg": sw.FLAG_BEFORE}})
+            "event_leg": leg(0, EVENT, said("event")), "dev_leg": None, "no_dev_leg": sw.FLAG_BEFORE}})
         self.assertEqual(docs[1], {"event": "ide event (flag file)", "action": "iempc event"})
         self.assertIn("no dev leg, the PC stays in event", sw.FLAG_BEFORE)
         self.assertEqual((self.flag_text(), ip.current_entry()), (OWNER_FLAG, 0))
@@ -350,7 +410,26 @@ class FlagTests(SwitchBase):
         self.assertEqual(self.calls(), [(["status"], "abandon"), (["event"], "ignore"), (["status"], "ignore"),
                                         (["event"], "ignore")])
         out = self.result(docs)
-        self.assertEqual((out["event_leg"], out["dev_leg"], out["no_dev_leg"]), (leg(0, EVENT), None, sw.FLAG_BEFORE))
+        self.assertEqual((out["event_leg"], out["dev_leg"], out["no_dev_leg"]), (leg(0, EVENT, said("event")), None, sw.FLAG_BEFORE))
+
+    def test_the_flag_wins_over_an_event_leg_that_did_not_exit_0(self) -> None:
+        """The owner's flag is checked before the failed leg's return: the
+        event path runs (it brings the PC to event; a kept-serving leg left it
+        in dev), and the output says no dev leg ran."""
+        kept = record("dev", "event", EVENT_STEPS[:3] + [st("engine_health", 40)], None, ended_in="dev",
+                      outcome="kept_serving", started=1_790_000_100)
+        self.pc.replies[("event",)] = in_turn(lambda: (self.flag(), answer("dev", kept, code=1))[1],
+                                              answer("event", EVENT))
+        code, docs, _ = self.switch()
+        self.assertEqual(code, ip.PREEMPTED)
+        self.assertEqual(self.calls(), [(["status"], "abandon"), (["event"], "ignore"), (["event"], "ignore")])
+        out = self.result(docs)
+        self.assertEqual((out["event_leg"], out["dev_leg"], out["no_dev_leg"], out["first_failure"]),
+                         (leg(1, kept, said("dev")), None, sw.FLAG_FAILED, "event leg: outcome kept_serving, ended in dev"))
+        self.assertIn("did not exit 0: no dev leg; the event path follows", sw.FLAG_FAILED)
+        self.assertNotIn("stays in event", sw.FLAG_FAILED)
+        self.assertEqual(docs[1], {"event": "ide event (flag file)", "action": "iempc event"})
+        self.assertEqual(self.flag_text(), OWNER_FLAG)
 
     def test_a_red_event_leg_stays_red_when_the_flag_takes_the_dev_leg(self) -> None:
         slow = dict(EVENT, silence_ms=60_001)
@@ -369,7 +448,7 @@ class FlagTests(SwitchBase):
                                         (["event"], "ignore")])
         out = self.result(docs)
         self.assertEqual((out["conclusion"], out["event_leg"], out["dev_leg"], out["no_dev_leg"]),
-                         ("cancelled", leg(0, EVENT), None, sw.FLAG_DURING))
+                         ("cancelled", leg(0, EVENT, said("event")), None, sw.FLAG_DURING))
         self.assertIn("the guard unwinds it to event", sw.FLAG_DURING)
         self.assertEqual(docs[-2], {"event": "ide event (flag file)", "action": "iempc event"})
         self.assertEqual((self.flag_text(), ip.current_entry()), (OWNER_FLAG, 0))
@@ -483,6 +562,67 @@ class VerdictTests(unittest.TestCase):
         self.assertEqual(v["numbers"], {"event_silence_ms": None, "handover_ms": None, "dev_silence_ms": None})
         self.assertEqual(v["summary"], "red: event leg: no record of a switch dev → event (iemmode event exit 4); "
                                        "event-leg silence none, handover none, dev-leg silence none")
+
+    def test_no_numbers_from_a_record_that_is_not_the_legs_own_switch(self) -> None:
+        none = {"event_silence_ms": None, "handover_ms": None}
+        for rec in (dict(EVENT, **{"from": "event"}), dict(EVENT, to="dev"), dict(EVENT, unwound="dev")):
+            self.assertEqual(sw.verdict(leg(0, rec), leg(0, DEV))["numbers"], dict(GREEN_NUMBERS, **none), rec)
+        # The dev leg's numbers come from a switch from event: its entry, or that entry's unwind.
+        self.assertIsNone(sw.verdict(leg(0, EVENT), leg(0, dict(DEV, **{"from": "dev"})))["numbers"]["dev_silence_ms"])
+        self.assertEqual(sw.verdict(leg(0, EVENT), leg(1, UNWOUND))["numbers"]["dev_silence_ms"], 52_250)
+
+    def test_a_failed_call_is_named_before_anything_else_of_its_leg(self) -> None:
+        self.assertEqual(sw.verdict(leg(None, None), None)["first_failure"], "event leg: the iemmode event call failed")
+        self.assertEqual(sw.verdict(leg(None, EVENT), None)["first_failure"], "event leg: the iemmode event call failed")
+        self.assertEqual(sw.verdict(leg(0, EVENT), leg(None, DEV))["first_failure"],
+                         "dev leg: the iemmode dev call failed")
+
+
+class TraceRecordTests(SwitchBase):
+    """A trace a dead `iempc trace` left recorded (#15) is stopped first, as by
+    `iempc dev` and `iempc event`; one that may still run refuses the test."""
+
+    OLD = "X:\\root\\traces\\old-20261007T060000Z"
+
+    def setUp(self) -> None:
+        super().setUp()
+        ip.state_dir()
+        self.record = ip.STATE_DIR / "trace.json"
+        self.record.write_text(json.dumps({"dir": self.OLD, "run": "old-20261007T060000Z", "label": "old",
+                                           "started": "2026-10-07T08:00:00+02:00", "answered": True}),
+                               encoding="utf-8")
+        # Only the recorded stop's module script is answered (no profile check here).
+        self.pc.texts = {"Stop-IemTraceSessions": {"stopped": ["NT Kernel Logger", "IemMarkers"], "gone": [],
+                                                   "kept": [], "notes": []}}
+
+    def test_a_recorded_trace_is_stopped_before_the_event_leg(self) -> None:
+        code, docs, err = self.switch()
+        self.assertEqual(code, 0, err)
+        self.assertFalse(self.record.exists())
+        [(script, mode)] = self.pc.modules
+        self.assertIn(f"Stop-IemTraceSessions -Dir '{self.OLD}'", script)
+        self.assertEqual(mode, "ignore")
+        self.assertEqual(self.calls(), [(["status"], "abandon"), (["event"], "ignore"), (["dev"], "abandon")])
+        self.assertEqual([next(iter(d)) for d in docs], ["recorded_trace", "switch_test"])
+
+    def test_a_recorded_trace_that_may_still_run_refuses_the_test(self) -> None:
+        self.pc.texts["Stop-IemTraceSessions"] = {"stopped": [], "gone": [], "kept": ["NT Kernel Logger"], "notes": []}
+        code, docs, err = self.switch()
+        self.assertEqual(code, 1)
+        self.assertEqual(self.calls(), [(["status"], "abandon")])
+        self.assertIn(f"no switch test: a trace recorded in {self.record} may still run on the PC (above) "
+                      "(nothing was switched)", err)
+        self.assertTrue(self.record.exists())
+        self.assertEqual([d.get("recorded_trace") for d in docs], ["failed"])
+
+    def test_a_flag_during_the_recorded_stop_runs_the_event_path_and_switches_nothing(self) -> None:
+        stopped = self.pc.texts["Stop-IemTraceSessions"]
+        self.pc.texts["Stop-IemTraceSessions"] = lambda: (self.flag(), stopped)[1]
+        code, docs, _ = self.switch()
+        self.assertEqual(code, ip.PREEMPTED)
+        self.assertEqual(self.calls(), [(["status"], "abandon"), (["event"], "ignore")])
+        self.assertFalse(any("switch_test" in d for d in docs))
+        self.assertEqual(self.flag_text(), OWNER_FLAG)
 
 
 class HandoverTests(unittest.TestCase):
