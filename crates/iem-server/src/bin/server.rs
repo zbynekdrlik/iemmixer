@@ -134,7 +134,8 @@ fn run_server() -> anyhow::Result<()> {
     if let Ok(pipe) = std::env::var("IEMMIXER_ENGINE_PIPE") {
         config.engine_pipe = pipe;
     }
-    // The guard's mode, logged as given (quoted, `None` when unset).
+    // The guard's mode, logged as given in its Debug form (`Some("live")`,
+    // `None` when unset), so a stray character stays escaped.
     let mode = std::env::var("IEMMIXER_MODE").ok();
     tracing::info!(
         path = %path.display(),
