@@ -26,9 +26,13 @@ $script:LogonInteractive = 3
 $script:LogonS4U = 2
 $script:TriggerBoot = 8
 $script:TriggerLogon = 9
-# The boot task's log and its first query, in <elevated root>\tasks\out (#35).
+# The boot task's log, its first query and its read of the driver module's
+# holders, in <elevated root>\tasks\out (#35).
 $script:BootPrefLog = 'boot-pref.log'
 $script:BootPrefBefore = 'boot-pref.before'
+$script:BootPrefHolders = 'boot-pref.holders'
+# A driver module's name, as the [card] module names it (no path).
+$script:ModulePattern = '^[^\\/:*?"<>|]+\.dll$'
 # RegisterTaskDefinition flags: TASK_CREATE_OR_UPDATE (6) and
 # TASK_DONT_ADD_PRINCIPAL_ACE (0x10): without it the service adds its own allow
 # ACE for the task's user next to ours, and the read-back (exactly our three
@@ -368,35 +372,54 @@ function ConvertTo-IemRegExeKey {
 function Get-IemBootPrefCommand {
     # The boot task's action (#35): at the system's start the preference is
     # read and, only when it is not the original (a parked engine, a power
-    # loss or a hard kill left 32), written back, then read back. The task
-    # starts ~4 s after the boot, before the desktop session's logon (the PC
-    # logs on by itself ~3 s later) and well before REAPER, which the
-    # predecessor's autostart starts ~16 s after the boot (#35, the PC
-    # 2026-10-06); nothing can hold the driver before REAPER, the engine or a
-    # spike starts. Native only, cmd.exe, reg.exe and findstr.exe: PowerShell
-    # took ~8 s to start there, while reg.exe is expected to write within
-    # about a second of the task's start (measured again by test #2). Each run
-    # appends to <log dir>\boot-pref.log a header "boot-pref <date> <time>
-    # add=<none|0|1>" (none: at the original, nothing written; cmd's local
-    # clock, a diagnostic only: the task's last run (UTC) and last result in
+    # loss or a hard kill left 32) and no process holds the driver module,
+    # written back, then read back. The task starts ~4 s after the boot,
+    # before the desktop session's logon (the PC logs on by itself ~3 s
+    # later) and well before REAPER, which the predecessor's autostart starts
+    # ~16 s after the boot (#35, the PC 2026-10-06). The write never relies
+    # on that timing (review of PR #40): tasklist.exe /m <module> /fo csv /nh
+    # writes the module's holders into <log dir>\boot-pref.holders right
+    # before the add, and any line starting with a quote (a holder's CSV row;
+    # the "no tasks" line is localized text and never read) skips the add, as
+    # the logon task and the guard never write under a holder (I2). A task
+    # started late under REAPER thus writes nothing (add=held, exit 0) and
+    # REAPER runs at 32 until it quits, named by the logon task and the guard.
+    # A holder list that cannot be written or read (tasklist or its
+    # redirection failed, findstr exited 2) writes nothing either
+    # (add=unread, exit 2): only a read that names no holder (findstr's exit
+    # 1) lets the add run. Native only, cmd.exe,
+    # reg.exe, findstr.exe and tasklist.exe: PowerShell took ~8 s to start
+    # there (measured again by test #2: the log header's time against
+    # REAPER's start). Each run appends to <log dir>\boot-pref.log a header
+    # "boot-pref <date> <time> add=<none|held|unread|0|1>" (none: at the
+    # original, nothing written and no holder read; cmd's local clock, a
+    # diagnostic only: the task's last run (UTC) and last result in
     # Get-IemBootstrapState are authoritative) and reg.exe's query of the
     # value; reg.exe's first query goes to <log dir>\boot-pref.before, which
     # findstr compares with the original's line as reg.exe prints it (a DWORD
-    # in lower-case hex). cmd's exit code is 1 only when the add failed. The
-    # task runs elevated with the user's environment, so the line holds no %:
-    # cmd and Task Scheduler expand %name% before cmd parses the line, while
-    # cmd /v:on expands !name! after it, so a value the user set is text,
-    # never a command. /d skips cmd's AutoRun, /e:on keeps the extensions
-    # whatever the user's HKCU says; every program by its full path; no pipe
-    # and no FOR /F (each starts another cmd through COMSPEC). A key, value
-    # name or path holding a character cmd reads there (" % ! ^ & | < >) or
-    # a control character is refused, and a value name holding a backslash
-    # (findstr reads it in its literal). -PrefKind: the value's registry kind
-    # (dword, text), which Register-IemTasks reads from the value itself.
+    # in lower-case hex). cmd's exit code is 1 when the add failed, 2 when
+    # the holders could not be read, else 0. The task runs elevated with the
+    # user's environment, so the line holds no %: cmd and Task Scheduler
+    # expand %name% before cmd parses the line, while cmd /v:on expands
+    # !name! after it, so a value the user set is text, never a command. /d
+    # skips cmd's AutoRun, /e:on keeps the extensions whatever the user's
+    # HKCU says; every program by its full path; no pipe and no FOR /F (each
+    # starts another cmd through COMSPEC). findstr's quote is \^" : the caret
+    # makes cmd take the quote as text (its quote state stays as it is, and
+    # the findstr command holds no ! for delayed expansion to read the caret
+    # again), the backslash is findstr's own escape of a quote. A key, value
+    # name, module or path holding a character cmd reads there
+    # (" % ! ^ & | < >) or a control character is refused, and a value name
+    # holding a backslash (findstr reads it in its literal); the module is a
+    # bare .dll name, as Register-IemTasks takes it. -PrefKind: the value's
+    # registry kind (dword, text), which Register-IemTasks reads from the
+    # value itself.
     param([Parameter(Mandatory)][string]$System, [Parameter(Mandatory)][string]$PrefKey,
           [Parameter(Mandatory)][string]$PrefName, [Parameter(Mandatory)][string]$PrefOriginal,
-          [Parameter(Mandatory)][string]$LogDir, [ValidateSet('dword', 'text')][string]$PrefKind = 'dword')
+          [Parameter(Mandatory)][string]$Module, [Parameter(Mandatory)][string]$LogDir,
+          [ValidateSet('dword', 'text')][string]$PrefKind = 'dword')
     if ($PrefOriginal -cnotmatch '^[0-9]{1,5}$') { throw "PrefOriginal '$PrefOriginal' refused (the recorded buffer, digits)" }
+    if ($Module -cnotmatch $script:ModulePattern) { throw "module name '$Module' refused" }
     $key = ConvertTo-IemRegExeKey -Key $PrefKey
     $System = $System.TrimEnd('\')
     $LogDir = $LogDir.TrimEnd('\')
@@ -404,13 +427,15 @@ function Get-IemBootPrefCommand {
         if (-not [IO.Path]::IsPathRooted($p)) { throw "$p is not an absolute path (the boot task's command line)" }
     }
     if ($PrefName.Contains('\')) { throw "value name '$PrefName' refused (a backslash: findstr and reg.exe would read it as an escape)" }
-    foreach ($v in @($key, $PrefName, $System, $LogDir)) {
+    foreach ($v in @($key, $PrefName, $Module, $System, $LogDir)) {
         if ($v -match '[\x00-\x1f"%!^&|<>]') { throw "'$v' refused for the boot task's command line (it holds a character cmd reads)" }
     }
     $reg = '"' + [IO.Path]::Combine($System, 'reg.exe') + '"'
     $findstr = '"' + [IO.Path]::Combine($System, 'findstr.exe') + '"'
+    $tasklist = '"' + [IO.Path]::Combine($System, 'tasklist.exe') + '"'
     $log = '"' + [IO.Path]::Combine($LogDir, $script:BootPrefLog) + '"'
     $before = '"' + [IO.Path]::Combine($LogDir, $script:BootPrefBefore) + '"'
+    $holders = '"' + [IO.Path]::Combine($LogDir, $script:BootPrefHolders) + '"'
     $type = 'REG_DWORD'
     $shown = '0x{0:x}' -f [int]$PrefOriginal
     if ($PrefKind -eq 'text') {
@@ -419,13 +444,16 @@ function Get-IemBootPrefCommand {
     }
     $value = '"{0}" /v "{1}"' -f $key, $PrefName
     $original = '    {0}    {1}    {2}' -f $PrefName, $type, $shown
+    $add = '({0} add {1} /t {2} /d {3} /f >nul 2>&1 && set "iemadd=0" || set "iemadd=1")' -f $reg, $value, $type, $PrefOriginal
+    # findstr's exit: 0 a holder, 1 none (only then the add), 2 the list unreadable.
+    $held = '({0} /b /l \^" {1} >nul & if errorlevel 2 (set "iemadd=unread") else if errorlevel 1 {2} else (set "iemadd=held"))' -f $findstr, $holders, $add
     $line = ('{0} query {1} >{2} 2>&1' -f $reg, $value, $before) +
         ' & set "iemadd=none"' +
         (' & {0} /i /l /x /c:"{1}" {2} >nul' -f $findstr, $original, $before) +
-        (' || ({0} add {1} /t {2} /d {3} /f >nul 2>&1 && set "iemadd=0" || set "iemadd=1")' -f $reg, $value, $type, $PrefOriginal) +
+        (' || ({0} /m "{1}" /fo csv /nh >{2} 2>&1 && {3} || set "iemadd=unread")' -f $tasklist, $Module, $holders, $held) +
         (' & (echo boot-pref !DATE! !TIME! add=!iemadd!)>>{0}' -f $log) +
         (' & {0} query {1} >>{2} 2>&1' -f $reg, $value, $log) +
-        ' & if "!iemadd!"=="1" (exit /b 1) else (exit /b 0)'
+        ' & if "!iemadd!"=="1" (exit /b 1) else if "!iemadd!"=="unread" (exit /b 2) else (exit /b 0)'
     [pscustomobject]@{ exe = [IO.Path]::Combine($System, 'cmd.exe'); arguments = ('/d /q /e:on /v:on /s /c "' + $line + '"') }
 }
 
@@ -479,9 +507,10 @@ function Register-IemTasks {
         throw "the elevated root $ElevatedRoot and the user's root $Root must not contain each other"
     }
     if ($PrefOriginal -cnotmatch '^[0-9]{1,5}$') { throw "PrefOriginal '$PrefOriginal' refused (the recorded buffer, digits)" }
-    # The driver module ([card] module): the logon task never writes the
-    # preference while a process holds it (#9 2026-09-28).
-    if ($Module -cnotmatch '^[^\\/:*?"<>|]+\.dll$') { throw "module name '$Module' refused" }
+    # The driver module ([card] module): the logon task and the boot task
+    # never write the preference while a process holds it (#9 2026-09-28;
+    # #35, review of PR #40).
+    if ($Module -cnotmatch $script:ModulePattern) { throw "module name '$Module' refused" }
     foreach ($v in @($Root, $AppExe, $PrefKey, $PrefName, $ElevatedRoot, $Module)) { [void](Format-IemArg -Value $v) }
     if (-not (Test-Path -LiteralPath $AppExe -PathType Leaf)) { throw "the app exe $AppExe does not exist" }
     $tasksDir = Join-Path $ElevatedRoot 'tasks'
@@ -490,10 +519,10 @@ function Register-IemTasks {
     # then the value's kind is read (a value that cannot be read is refused),
     # all before anything is written.
     $outDir = Join-Path $tasksDir 'out'
-    [void](Get-IemBootPrefCommand -System $system -PrefKey $PrefKey -PrefName $PrefName -PrefOriginal $PrefOriginal -LogDir $outDir)
+    [void](Get-IemBootPrefCommand -System $system -PrefKey $PrefKey -PrefName $PrefName -PrefOriginal $PrefOriginal -Module $Module -LogDir $outDir)
     $prefKind = Get-IemPrefKind -Key $PrefKey -Name $PrefName
     $boot = Get-IemBootPrefCommand -System $system -PrefKey $PrefKey -PrefName $PrefName -PrefOriginal $PrefOriginal `
-        -PrefKind $prefKind -LogDir $outDir
+        -Module $Module -PrefKind $prefKind -LogDir $outDir
     $u = Resolve-IemUser -User $User
     $sddl = Get-IemTaskSddl -UserSid $u.sid
     $sch = Connect-IemScheduler
@@ -1287,7 +1316,7 @@ function Get-IemPredecessorFacts {
 function Get-IemModuleHolders {
     # Processes that have the driver module loaded, as "image:pid" (I3).
     param([Parameter(Mandatory)][string]$Module)
-    if ($Module -cnotmatch '^[^\\/:*?"<>|]+\.dll$') { throw "module name '$Module' refused" }
+    if ($Module -cnotmatch $script:ModulePattern) { throw "module name '$Module' refused" }
     $ErrorActionPreference = 'Continue'
     $out = @(& tasklist.exe /m $Module /fo csv /nh 2>&1)
     $code = $LASTEXITCODE
@@ -1355,7 +1384,7 @@ function Restore-IemPref {
     param([Parameter(Mandatory)][string]$Key, [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$Original,
           [Parameter(Mandatory)][string]$Module, [string]$ReaperImage = 'reaper')
     if ($Original -cnotmatch '^[0-9]{1,5}$') { throw "original '$Original' refused (digits)" }
-    if ($Module -cnotmatch '^[^\\/:*?"<>|]+\.dll$') { throw "module name '$Module' refused" }
+    if ($Module -cnotmatch $script:ModulePattern) { throw "module name '$Module' refused" }
     $path = ConvertTo-IemHkcuPath -Key $Key
     $before = Get-IemPref -Key $Key -Name $Name
     $isOriginal = Test-IemPrefIsOriginal -Pref $before -Original $Original
