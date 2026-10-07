@@ -472,7 +472,7 @@ fn a_whole_run_counts_frames_and_meters_and_writes_a_summary_every_period() {
     assert!(s.complete, "{s:?}");
     assert_eq!(s.error, None);
     assert!(s.seconds >= 3.0, "{s:?}");
-    assert_eq!((s.reconnects, s.decode_errors, s.no_source), (0, 0, 0));
+    assert_eq!((s.decode_errors, s.no_source), (0, 0));
     assert!(s.frames >= 60, "{s:?}");
     assert!(s.meter_frames >= 60, "{s:?}");
     assert!(s.first_frame_ms.is_some(), "{s:?}");
@@ -546,7 +546,6 @@ fn a_dropped_socket_ends_the_run_connection_lost_and_is_never_opened_again() {
         assert!(!s.complete, "{s:?}");
         // Everything before the cut was counted, the refused frame included.
         assert_eq!((s.frames, s.decode_errors), (10, 1), "{s:?}");
-        assert_eq!(s.reconnects, 0, "{s:?}");
         let seen = fake.seen();
         let counts = [times(&seen, MIXER), times(&seen, LISTEN)];
         assert_eq!(counts, [1, 1], "one connection per socket: {seen:?}");
@@ -569,7 +568,7 @@ fn a_socket_silent_past_the_idle_bound_ends_the_run_connection_lost() {
     let s = &ran.summary;
     assert_eq!(s.error, Some(Reason::ConnectionLost), "{s:?}");
     assert!(!s.complete, "{s:?}");
-    assert_eq!((s.meter_frames, s.reconnects), (0, 0), "{s:?}");
+    assert_eq!(s.meter_frames, 0, "{s:?}");
     // Not before the idle bound.
     assert!(ran.took >= limits().idle, "{:?}", ran.took);
     let seen = fake.seen();
@@ -614,7 +613,6 @@ fn a_refused_upgrade_ends_the_run_server_gone_without_a_second_try() {
     );
     assert_eq!(ran.summary.error, Some(Reason::ServerGone));
     assert!(!ran.summary.complete);
-    assert_eq!(ran.summary.reconnects, 0);
     // Each socket was asked for once: nothing opens a socket again.
     let seen = fake.seen();
     let counts = [

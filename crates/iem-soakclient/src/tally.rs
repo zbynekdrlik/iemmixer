@@ -144,8 +144,6 @@ mod tests {
         assert_eq!(tally.ends_at(3), Some(at(t0, 3_100)));
         let s = tally.summary(at(t0, 2_600), false);
         assert_eq!(s.seconds, 2.5);
-        // Nothing reopens a socket (#10): the summary's reconnects stay 0.
-        assert_eq!(s.reconnects, 0);
         assert!(!s.complete);
         // No frame since the first open: one gap as long as the run.
         assert_eq!((s.gaps, s.max_gap_ms), (1, 2_500));
