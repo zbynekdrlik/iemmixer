@@ -99,8 +99,7 @@ fn a_token_signed_with_another_secret_is_refused_at_the_sockets() {
 
 #[test]
 fn an_unreadable_secret_file_ends_the_run_before_any_request() {
-    let (dir, _file) = secret_file("");
-    let blank = dir.path().join("jwt_secret");
+    let (dir, blank) = secret_file("");
     for file in [dir.path().join("missing"), blank] {
         let fake = with_secret();
         // Not --direct: not even /api/site is read.
