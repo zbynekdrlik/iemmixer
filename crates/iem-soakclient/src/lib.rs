@@ -20,7 +20,8 @@
     )
 )]
 
-use std::io;
+use std::fs::{self, File};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -31,8 +32,6 @@ pub const GAP: Duration = Duration::from_millis(60);
 /// One Opus frame: 20 ms, 960 samples per channel at 48 kHz, stereo (the
 /// server's listen encoder, X4).
 pub const FRAME: Duration = Duration::from_millis(20);
-/// Samples per channel one listen frame decodes to.
-pub const FRAME_SAMPLES: usize = 960;
 /// The summary's schema.
 pub const SCHEMA: u32 = 1;
 /// The environment variable that holds the engineer's PIN.
@@ -42,7 +41,8 @@ pub const BUILD: &str = match option_env!("GITHUB_SHA") {
     Some(sha) => sha,
     None => "local",
 };
-/// The UI protocol the mixer socket speaks (`iem_core::ws::UI_PROTO`).
+/// The UI protocol the mixer socket speaks (`iem_core::ws::UI_PROTO`; the
+/// tests check that the server serves it).
 pub const UI_PROTO: u16 = 2;
 /// `--seconds` at most: 10 h (the soak job's 600 min).
 pub const MAX_SECONDS: u64 = 36_000;
@@ -305,30 +305,34 @@ pub enum Event {
     Other,
 }
 
-/// A server event's tag and the one field read (`iem_core::ws::ServerMsg`:
-/// `{"event": …, "data": {…}}`); the rest is skipped unread.
+/// A server event's tag (`iem_core::ws::ServerMsg`: `{"event": …, "data":
+/// …}`); its data is skipped unread, whatever its shape.
 #[derive(Deserialize)]
-struct Wire {
+struct Tag {
     event: String,
-    data: Option<WireData>,
+}
+
+/// An `AudioStatus` event's status, read only once the tag says so.
+#[derive(Deserialize)]
+struct Status {
+    data: StatusData,
 }
 
 #[derive(Deserialize)]
-struct WireData {
-    status: Option<String>,
+struct StatusData {
+    status: String,
 }
 
 /// The class of a text frame from the server.
 pub fn classify(text: &str) -> Event {
-    match serde_json::from_str::<Wire>(text) {
-        Ok(Wire { event, data }) => match event.as_str() {
-            "Meters" => Event::Meters,
-            "AudioStatus" => data
-                .and_then(|d| d.status)
-                .map_or(Event::Other, Event::AudioStatus),
-            _ => Event::Other,
-        },
-        Err(_) => Event::Other,
+    let Ok(Tag { event }) = serde_json::from_str::<Tag>(text) else {
+        return Event::Other;
+    };
+    match event.as_str() {
+        "Meters" => Event::Meters,
+        "AudioStatus" => serde_json::from_str::<Status>(text)
+            .map_or(Event::Other, |s| Event::AudioStatus(s.data.status)),
+        _ => Event::Other,
     }
 }
 
@@ -338,8 +342,10 @@ pub fn backoff(n: u32) -> Duration {
     Duration::from_secs(2u64.saturating_pow(n)).min(BACKOFF_CAP)
 }
 
-/// Why a run ended early: a fixed code, never a site value (P6).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Why a run ended early: a fixed code, never a site value (P6). It is
+/// serialised as its [`Reason::code`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Reason {
     /// `/api/site` could not be read, or names no LAN URL.
     SiteUnreadable,
@@ -397,8 +403,9 @@ pub struct Summary {
     pub reconnects: u64,
     /// `AudioStatus` `no_source` answers.
     pub no_source: u64,
-    /// Why the run ended early ([`Reason::code`]).
-    pub error: Option<String>,
+    /// Why the run ended early, as its [`Reason::code`]: a reason by type,
+    /// so no error text (a URL, a host) can reach the summary (P6).
+    pub error: Option<Reason>,
 }
 
 impl Default for Summary {
@@ -422,16 +429,20 @@ impl Default for Summary {
     }
 }
 
-/// Writes `summary` to `<path>.tmp`, then renames it over `path`, so a reader
-/// sees the last whole summary, never a part. A failed rename leaves the
-/// `.tmp`, which the next write replaces.
+/// Writes `summary` to `<path>.tmp`, flushes it to disk, then renames it
+/// over `path` (as the guard's `state::write_atomic`), so a reader sees the
+/// last whole summary, never a part. A failed rename leaves the `.tmp`,
+/// which the next write replaces.
 pub fn write_summary(path: &Path, summary: &Summary) -> io::Result<()> {
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
     let mut text = serde_json::to_vec_pretty(summary).map_err(io::Error::other)?;
     text.push(b'\n');
-    std::fs::write(&tmp, text)?;
-    std::fs::rename(&tmp, path)
+    let mut file = File::create(&tmp)?;
+    file.write_all(&text)?;
+    file.sync_all()?;
+    drop(file);
+    fs::rename(&tmp, path)
 }
 
 #[cfg(test)]
