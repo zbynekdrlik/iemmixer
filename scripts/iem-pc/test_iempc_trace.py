@@ -351,6 +351,7 @@ class TraceStopTests(TraceBase):
         self.assertIn("WARNING: the kernel trace may still run", err)
         self.assertEqual(self.pc.calls[-1], ("iemmode.exe", ["event"], "ignore"))
         ip.EVENT_NOW.unlink()
+        (ip.STATE_DIR / "trace.json").unlink(missing_ok=True)   # the first run's record (#15): this run alone
         code, docs, err = self.trace()
         self.assertEqual((code, docs[0]["trace_stop"]), (1, "failed"))
         self.assertIn("names a session that is no text", err)
@@ -378,6 +379,7 @@ class TraceStopTests(TraceBase):
                 self.answers["Start-IemTrace"] = start
                 self.answers["Stop-IemTraceSessions"] = {"stopped": stopped, "gone": [], "kept": [], "notes": []}
                 self.pc.modules.clear()
+                (ip.STATE_DIR / "trace.json").unlink(missing_ok=True)   # the run before's record (#15): this run alone
                 code, docs, err = self.trace()
                 self.assertEqual(code, 1, (start, stopped))
                 self.assertEqual(self.names(), ["preflight", "start", "stop"], (start, stopped))
@@ -387,6 +389,7 @@ class TraceStopTests(TraceBase):
                 self.assertNotIn("the kernel trace was stopped", err)
         # Both sessions stopped: confirmed even after a start that did not return.
         self.answers["Stop-IemTraceSessions"] = STOPPED
+        (ip.STATE_DIR / "trace.json").unlink(missing_ok=True)
         code, docs, err = self.trace()
         self.assertEqual((code, docs), (1, []))
         self.assertIn("the kernel trace was stopped", err)
