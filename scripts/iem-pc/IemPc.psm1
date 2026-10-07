@@ -26,9 +26,13 @@ $script:LogonInteractive = 3
 $script:LogonS4U = 2
 $script:TriggerBoot = 8
 $script:TriggerLogon = 9
-# The boot task's log and its first query, in <elevated root>\tasks\out (#35).
+# The boot task's log, its first query and its read of the driver module's
+# holders, in <elevated root>\tasks\out (#35).
 $script:BootPrefLog = 'boot-pref.log'
 $script:BootPrefBefore = 'boot-pref.before'
+$script:BootPrefHolders = 'boot-pref.holders'
+# A driver module's name, as the [card] module names it (no path).
+$script:ModulePattern = '^[^\\/:*?"<>|]+\.dll$'
 # RegisterTaskDefinition flags: TASK_CREATE_OR_UPDATE (6) and
 # TASK_DONT_ADD_PRINCIPAL_ACE (0x10): without it the service adds its own allow
 # ACE for the task's user next to ours, and the read-back (exactly our three
@@ -368,35 +372,56 @@ function ConvertTo-IemRegExeKey {
 function Get-IemBootPrefCommand {
     # The boot task's action (#35): at the system's start the preference is
     # read and, only when it is not the original (a parked engine, a power
-    # loss or a hard kill left 32), written back, then read back. The task
-    # starts ~4 s after the boot, before the desktop session's logon (the PC
-    # logs on by itself ~3 s later) and well before REAPER, which the
-    # predecessor's autostart starts ~16 s after the boot (#35, the PC
-    # 2026-10-06); nothing can hold the driver before REAPER, the engine or a
-    # spike starts. Native only, cmd.exe, reg.exe and findstr.exe: PowerShell
-    # took ~8 s to start there, while reg.exe is expected to write within
-    # about a second of the task's start (measured again by test #2). Each run
-    # appends to <log dir>\boot-pref.log a header "boot-pref <date> <time>
-    # add=<none|0|1>" (none: at the original, nothing written; cmd's local
-    # clock, a diagnostic only: the task's last run (UTC) and last result in
+    # loss or a hard kill left 32) and no process holds the driver module,
+    # written back, then read back. The task starts ~4 s after the boot,
+    # before the desktop session's logon (the PC logs on by itself ~3 s
+    # later) and well before REAPER, which the predecessor's autostart starts
+    # ~16 s after the boot (#35, the PC 2026-10-06). The write never relies
+    # on that timing (review of PR #40): tasklist.exe /m <module> /fo csv /nh
+    # writes the module's holders into <log dir>\boot-pref.holders right
+    # before the add, and any line starting with a quote (a holder's CSV row)
+    # skips the add, as the logon task and the guard never write under a
+    # holder (I2). A task started late under REAPER thus writes nothing
+    # (add=held, exit 0) and REAPER runs at 32 until it quits, named by the
+    # logon task and the guard. The add runs only on proof that the list was
+    # read and names no holder: no quote line (findstr /b) AND a line without
+    # one (findstr /v /b: tasklist's "no tasks" text, in any language, whose
+    # words are never read). findstr exits 1 both for "no match" and for a
+    # file it cannot open, so a list that cannot be written or read
+    # (tasklist or its redirection failed, findstr cannot open it) writes
+    # nothing either (add=unread, exit 2). Native only, cmd.exe, reg.exe,
+    # findstr.exe and tasklist.exe: PowerShell took ~8 s to start there
+    # (test #2 measures the native chain, tasklist included: the log
+    # header's time against REAPER's start). Each run appends to <log dir>\boot-pref.log a header
+    # "boot-pref <date> <time> add=<none|held|unread|0|1>" (none: at the
+    # original, nothing written and no holder read; cmd's local clock, a
+    # diagnostic only: the task's last run (UTC) and last result in
     # Get-IemBootstrapState are authoritative) and reg.exe's query of the
     # value; reg.exe's first query goes to <log dir>\boot-pref.before, which
     # findstr compares with the original's line as reg.exe prints it (a DWORD
-    # in lower-case hex). cmd's exit code is 1 only when the add failed. The
-    # task runs elevated with the user's environment, so the line holds no %:
-    # cmd and Task Scheduler expand %name% before cmd parses the line, while
-    # cmd /v:on expands !name! after it, so a value the user set is text,
-    # never a command. /d skips cmd's AutoRun, /e:on keeps the extensions
-    # whatever the user's HKCU says; every program by its full path; no pipe
-    # and no FOR /F (each starts another cmd through COMSPEC). A key, value
-    # name or path holding a character cmd reads there (" % ! ^ & | < >) or
-    # a control character is refused, and a value name holding a backslash
-    # (findstr reads it in its literal). -PrefKind: the value's registry kind
-    # (dword, text), which Register-IemTasks reads from the value itself.
+    # in lower-case hex). cmd's exit code is 1 when the add failed, 2 when
+    # the holders could not be read, else 0. The task runs elevated with the
+    # user's environment, so the line holds no %: cmd and Task Scheduler
+    # expand %name% before cmd parses the line, while cmd /v:on expands
+    # !name! after it, so a value the user set is text, never a command. /d
+    # skips cmd's AutoRun, /e:on keeps the extensions whatever the user's
+    # HKCU says; every program by its full path; no pipe and no FOR /F (each
+    # starts another cmd through COMSPEC). findstr's quote is \^" : the caret
+    # makes cmd take the quote as text (its quote state stays as it is, and
+    # the findstr command holds no ! for delayed expansion to read the caret
+    # again), the backslash is findstr's own escape of a quote. A key, value
+    # name, module or path holding a character cmd reads there
+    # (" % ! ^ & | < >) or a control character is refused, and a value name
+    # holding a backslash (findstr reads it in its literal); the module is a
+    # bare .dll name, as Register-IemTasks takes it. -PrefKind: the value's
+    # registry kind (dword, text), which Register-IemTasks reads from the
+    # value itself.
     param([Parameter(Mandatory)][string]$System, [Parameter(Mandatory)][string]$PrefKey,
           [Parameter(Mandatory)][string]$PrefName, [Parameter(Mandatory)][string]$PrefOriginal,
-          [Parameter(Mandatory)][string]$LogDir, [ValidateSet('dword', 'text')][string]$PrefKind = 'dword')
+          [Parameter(Mandatory)][string]$Module, [Parameter(Mandatory)][string]$LogDir,
+          [ValidateSet('dword', 'text')][string]$PrefKind = 'dword')
     if ($PrefOriginal -cnotmatch '^[0-9]{1,5}$') { throw "PrefOriginal '$PrefOriginal' refused (the recorded buffer, digits)" }
+    if ($Module -cnotmatch $script:ModulePattern) { throw "module name '$Module' refused" }
     $key = ConvertTo-IemRegExeKey -Key $PrefKey
     $System = $System.TrimEnd('\')
     $LogDir = $LogDir.TrimEnd('\')
@@ -404,13 +429,15 @@ function Get-IemBootPrefCommand {
         if (-not [IO.Path]::IsPathRooted($p)) { throw "$p is not an absolute path (the boot task's command line)" }
     }
     if ($PrefName.Contains('\')) { throw "value name '$PrefName' refused (a backslash: findstr and reg.exe would read it as an escape)" }
-    foreach ($v in @($key, $PrefName, $System, $LogDir)) {
+    foreach ($v in @($key, $PrefName, $Module, $System, $LogDir)) {
         if ($v -match '[\x00-\x1f"%!^&|<>]') { throw "'$v' refused for the boot task's command line (it holds a character cmd reads)" }
     }
     $reg = '"' + [IO.Path]::Combine($System, 'reg.exe') + '"'
     $findstr = '"' + [IO.Path]::Combine($System, 'findstr.exe') + '"'
+    $tasklist = '"' + [IO.Path]::Combine($System, 'tasklist.exe') + '"'
     $log = '"' + [IO.Path]::Combine($LogDir, $script:BootPrefLog) + '"'
     $before = '"' + [IO.Path]::Combine($LogDir, $script:BootPrefBefore) + '"'
+    $holders = '"' + [IO.Path]::Combine($LogDir, $script:BootPrefHolders) + '"'
     $type = 'REG_DWORD'
     $shown = '0x{0:x}' -f [int]$PrefOriginal
     if ($PrefKind -eq 'text') {
@@ -419,13 +446,18 @@ function Get-IemBootPrefCommand {
     }
     $value = '"{0}" /v "{1}"' -f $key, $PrefName
     $original = '    {0}    {1}    {2}' -f $PrefName, $type, $shown
+    $add = '({0} add {1} /t {2} /d {3} /f >nul 2>&1 && set "iemadd=0" || set "iemadd=1")' -f $reg, $value, $type, $PrefOriginal
+    # A quote line: held. Else the add only on proof the list was read (a
+    # line without the quote: findstr exits 1 for "no match" and for a file
+    # it cannot open alike), otherwise unread.
+    $held = '({0} /b /l \^" {1} >nul && set "iemadd=held" || ({0} /v /b /l \^" {1} >nul && {2} || set "iemadd=unread"))' -f $findstr, $holders, $add
     $line = ('{0} query {1} >{2} 2>&1' -f $reg, $value, $before) +
         ' & set "iemadd=none"' +
         (' & {0} /i /l /x /c:"{1}" {2} >nul' -f $findstr, $original, $before) +
-        (' || ({0} add {1} /t {2} /d {3} /f >nul 2>&1 && set "iemadd=0" || set "iemadd=1")' -f $reg, $value, $type, $PrefOriginal) +
+        (' || ({0} /m "{1}" /fo csv /nh >{2} 2>&1 && {3} || set "iemadd=unread")' -f $tasklist, $Module, $holders, $held) +
         (' & (echo boot-pref !DATE! !TIME! add=!iemadd!)>>{0}' -f $log) +
         (' & {0} query {1} >>{2} 2>&1' -f $reg, $value, $log) +
-        ' & if "!iemadd!"=="1" (exit /b 1) else (exit /b 0)'
+        ' & if "!iemadd!"=="1" (exit /b 1) else if "!iemadd!"=="unread" (exit /b 2) else (exit /b 0)'
     [pscustomobject]@{ exe = [IO.Path]::Combine($System, 'cmd.exe'); arguments = ('/d /q /e:on /v:on /s /c "' + $line + '"') }
 }
 
@@ -460,7 +492,12 @@ function Register-IemTasks {
     # process never reads an environment variable for it); only Administrators
     # and SYSTEM may change that root. Each task's descriptor is set explicitly
     # (SetSecurityDescriptor) before its read-back, because an update keeps a
-    # task's old one; any difference throws after every task was tried.
+    # task's old one; any difference throws after every task was tried. Every
+    # row names its warnings: Fast Startup that is really on (or that could
+    # not be judged), on the boot task's row (Get-IemBootTaskWarnings, also
+    # written as a warning), never a refusal. -FastStartup: a judged Fast
+    # Startup (Get-IemFastStartup's shape) in place of this PC's facts
+    # (Get-IemFastStartupState, the default).
     param(
         [Parameter(Mandatory)][string]$Root,
         [Parameter(Mandatory)][string]$AppExe,
@@ -470,7 +507,8 @@ function Register-IemTasks {
         [Parameter(Mandatory)][string]$Module,
         [string]$Folder = '\iemmixer',
         [string]$User = '',
-        [string]$ElevatedRoot = ''
+        [string]$ElevatedRoot = '',
+        $FastStartup = $null
     )
     $ElevatedRoot = Resolve-IemElevatedRoot -ElevatedRoot $ElevatedRoot
     $userRoot = $Root.TrimEnd('\') + '\'
@@ -479,9 +517,10 @@ function Register-IemTasks {
         throw "the elevated root $ElevatedRoot and the user's root $Root must not contain each other"
     }
     if ($PrefOriginal -cnotmatch '^[0-9]{1,5}$') { throw "PrefOriginal '$PrefOriginal' refused (the recorded buffer, digits)" }
-    # The driver module ([card] module): the logon task never writes the
-    # preference while a process holds it (#9 2026-09-28).
-    if ($Module -cnotmatch '^[^\\/:*?"<>|]+\.dll$') { throw "module name '$Module' refused" }
+    # The driver module ([card] module): the logon task and the boot task
+    # never write the preference while a process holds it (#9 2026-09-28;
+    # #35, review of PR #40).
+    if ($Module -cnotmatch $script:ModulePattern) { throw "module name '$Module' refused" }
     foreach ($v in @($Root, $AppExe, $PrefKey, $PrefName, $ElevatedRoot, $Module)) { [void](Format-IemArg -Value $v) }
     if (-not (Test-Path -LiteralPath $AppExe -PathType Leaf)) { throw "the app exe $AppExe does not exist" }
     $tasksDir = Join-Path $ElevatedRoot 'tasks'
@@ -490,10 +529,10 @@ function Register-IemTasks {
     # then the value's kind is read (a value that cannot be read is refused),
     # all before anything is written.
     $outDir = Join-Path $tasksDir 'out'
-    [void](Get-IemBootPrefCommand -System $system -PrefKey $PrefKey -PrefName $PrefName -PrefOriginal $PrefOriginal -LogDir $outDir)
+    [void](Get-IemBootPrefCommand -System $system -PrefKey $PrefKey -PrefName $PrefName -PrefOriginal $PrefOriginal -Module $Module -LogDir $outDir)
     $prefKind = Get-IemPrefKind -Key $PrefKey -Name $PrefName
     $boot = Get-IemBootPrefCommand -System $system -PrefKey $PrefKey -PrefName $PrefName -PrefOriginal $PrefOriginal `
-        -PrefKind $prefKind -LogDir $outDir
+        -Module $Module -PrefKind $prefKind -LogDir $outDir
     $u = Resolve-IemUser -User $User
     $sddl = Get-IemTaskSddl -UserSid $u.sid
     $sch = Connect-IemScheduler
@@ -524,11 +563,18 @@ function Register-IemTasks {
         @{ name = 'iemmixer-logon'; level = $script:RunLevelHighest; exe = $ps; args = $logonArgs; dir = $tasksDir; trigger = 'logon' },
         @{ name = 'iemmixer-boot-pref'; level = $script:RunLevelHighest; exe = $boot.exe; args = $boot.arguments; dir = $tasksDir; trigger = 'boot' }
     )
+    # Fast Startup that is really on skips the boot task's trigger: named (a
+    # warning and the boot task's row), never a refusal (#35, review of PR #40).
+    if ($null -eq $FastStartup) { $FastStartup = Get-IemFastStartupState }
+    $bootWarnings = Get-IemBootTaskWarnings -FastStartup $FastStartup
+    foreach ($w in $bootWarnings) { Write-Warning $w }
     $reports = @()
     $problems = @()
     foreach ($s in $specs) {
         $atLogon = ($s.trigger -ceq 'logon')
         $atBoot = ($s.trigger -ceq 'boot')
+        $warnings = @()
+        if ($atBoot) { $warnings = $bootWarnings }
         $d = New-IemTaskDefinition -Scheduler $sch -User $u.name -RunLevel $s.level -Exe $s.exe -Arguments $s.args `
             -WorkDir $s.dir -Description ('iemmixer S6: ' + $s.name) -AtLogon:$atLogon -AtBoot:$atBoot
         [void]$f.RegisterTaskDefinition($s.name, $d, $script:TaskCreateOrUpdate, $u.name, $null, [int]$d.Principal.LogonType, $sddl)
@@ -542,7 +588,8 @@ function Register-IemTasks {
         if ($atBoot) { $wantTriggers = [string]$script:TriggerBoot }
         if ((@($rep.triggers) -join ',') -cne $wantTriggers) { $bad += ('triggers ' + (@($rep.triggers) -join ',')) }
         foreach ($b in $bad) { $problems += ('{0}: {1}' -f $s.name, $b) }
-        $reports += [pscustomobject]@{ task = $s.name; run_level = $rep.run_level; sddl_ok = $rep.sddl_ok; actions = $rep.actions; triggers = $rep.triggers; problems = $bad }
+        $reports += [pscustomobject]@{ task = $s.name; run_level = $rep.run_level; sddl_ok = $rep.sddl_ok; actions = $rep.actions; triggers = $rep.triggers; problems = $bad
+                                       warnings = $warnings }
     }
 
     # StartREAPER: its definition untouched (never registered again), only our
@@ -553,7 +600,8 @@ function Register-IemTasks {
     if (-not $rep.sddl_ok) { $bad += ('security descriptor ' + $rep.sddl) }
     if (-not (Test-IemSameActions -A $reaperActions -B $rep.actions)) { $bad += 'its action changed' }
     foreach ($b in $bad) { $problems += ('iemmixer-StartREAPER: {0}' -f $b) }
-    $reports += [pscustomobject]@{ task = 'iemmixer-StartREAPER'; run_level = $rep.run_level; sddl_ok = $rep.sddl_ok; actions = $rep.actions; triggers = $rep.triggers; problems = $bad }
+    $reports += [pscustomobject]@{ task = 'iemmixer-StartREAPER'; run_level = $rep.run_level; sddl_ok = $rep.sddl_ok; actions = $rep.actions; triggers = $rep.triggers; problems = $bad
+                                   warnings = @() }
 
     if ($problems.Count -gt 0) { throw ('task read-back: ' + ($problems -join '; ')) }
     return ,$reports
@@ -1287,7 +1335,7 @@ function Get-IemPredecessorFacts {
 function Get-IemModuleHolders {
     # Processes that have the driver module loaded, as "image:pid" (I3).
     param([Parameter(Mandatory)][string]$Module)
-    if ($Module -cnotmatch '^[^\\/:*?"<>|]+\.dll$') { throw "module name '$Module' refused" }
+    if ($Module -cnotmatch $script:ModulePattern) { throw "module name '$Module' refused" }
     $ErrorActionPreference = 'Continue'
     $out = @(& tasklist.exe /m $Module /fo csv /nh 2>&1)
     $code = $LASTEXITCODE
@@ -1355,7 +1403,7 @@ function Restore-IemPref {
     param([Parameter(Mandatory)][string]$Key, [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$Original,
           [Parameter(Mandatory)][string]$Module, [string]$ReaperImage = 'reaper')
     if ($Original -cnotmatch '^[0-9]{1,5}$') { throw "original '$Original' refused (digits)" }
-    if ($Module -cnotmatch '^[^\\/:*?"<>|]+\.dll$') { throw "module name '$Module' refused" }
+    if ($Module -cnotmatch $script:ModulePattern) { throw "module name '$Module' refused" }
     $path = ConvertTo-IemHkcuPath -Key $Key
     $before = Get-IemPref -Key $Key -Name $Name
     $isOriginal = Test-IemPrefIsOriginal -Pref $before -Original $Original
@@ -1410,16 +1458,95 @@ function Get-IemBootPrefLog {
     return ,@($lines[$start..($lines.Count - 1)])
 }
 
+function Get-IemFastStartup {
+    # Fast Startup as the next shutdown will act (pure; #35, review of PR
+    # #40). It is on only when HiberbootEnabled is 1 AND the hibernation file
+    # is present: a shutdown with it on hibernates the system session into
+    # that file, and the next start fires no boot trigger, so the boot task
+    # does not run. Without the file Windows shuts down fully whatever
+    # HiberbootEnabled says (the venue PC: HiberbootEnabled 1, hibernation off
+    # in powercfg /a). -Hiberboot: the registry value ($null: absent or
+    # unreadable); -HiberFile: the hibernation file present
+    # (Test-IemHiberFilePresent; $null: unreadable). active: $true when both hold, $false when either is known
+    # off, $null when a fact is unknown and none is off. problem: the text
+    # only when active is $true, else ''.
+    param($Hiberboot = $null, $HiberFile = $null)
+    $hb = $null
+    if ($null -ne $Hiberboot) { $hb = [string]$Hiberboot }
+    $file = $null
+    if ($HiberFile -is [bool]) { $file = $HiberFile }
+    $active = $null
+    if (($null -ne $hb -and $hb -cne '1') -or ($file -eq $false)) {
+        $active = $false
+    } elseif ($hb -ceq '1' -and $file -eq $true) {
+        $active = $true
+    }
+    $problem = ''
+    if ($active -eq $true) {
+        $problem = 'Fast Startup is on (HiberbootEnabled 1, the hibernation file present): a shutdown hibernates ' +
+            'the system session and the next start fires no boot trigger, so iemmixer-boot-pref does not run and ' +
+            'the logon task is the first to restore the preference (a restart is a full boot). Turn Fast Startup ' +
+            'off (Power Options, or hibernation off) to keep the boot task first.'
+    }
+    [pscustomobject]@{ hiberboot_enabled = $Hiberboot; hiberfile_present = $file; active = $active; problem = $problem }
+}
+
+function Test-IemHiberFilePresent {
+    # The hibernation file Fast Startup needs: hiberfil.sys at the root of
+    # the system volume, where Windows keeps it while hibernation is on
+    # (powercfg /h off deletes it), whatever the registry's setting says. It
+    # is found by listing the root (FindFirstFile), never opened: the kernel
+    # holds it open. Nothing is compiled (no Add-Type: in Windows PowerShell
+    # 5.1 that builds in the user's temp folder, which a process of the user
+    # could change under an elevated session).
+    $root = [IO.Path]::GetPathRoot([Environment]::SystemDirectory)
+    if (-not $root) { throw 'the system folder has no root' }
+    $found = @([IO.Directory]::GetFiles($root, 'hiberfil.sys') | Where-Object { [IO.Path]::GetFileName($_) -ieq 'hiberfil.sys' })
+    return ($found.Count -gt 0)
+}
+
+function Get-IemFastStartupState {
+    # Get-IemFastStartup over this PC's facts: HiberbootEnabled
+    # (HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Power) and
+    # Test-IemHiberFilePresent. A read that fails leaves its fact $null and
+    # its message in error, never a guess.
+    $hb = $null
+    $file = $null
+    $errors = @()
+    try {
+        $hb = (Get-Item -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power').GetValue('HiberbootEnabled', $null)
+    } catch { $errors += ('HiberbootEnabled: ' + $_.Exception.Message) }
+    try { $file = Test-IemHiberFilePresent } catch { $errors += ('the hibernation file: ' + $_.Exception.Message) }
+    $s = Get-IemFastStartup -Hiberboot $hb -HiberFile $file
+    [pscustomobject]@{ hiberboot_enabled = $s.hiberboot_enabled; hiberfile_present = $s.hiberfile_present
+                       active = $s.active; problem = $s.problem; error = ($errors -join '; ') }
+}
+
+function Get-IemBootTaskWarnings {
+    # What Register-IemTasks says about the boot task without refusing it
+    # (pure): Fast Startup that is on (Get-IemFastStartup) skips its trigger
+    # at every start after a shutdown; one it could not judge (a fact
+    # unread, Get-IemFastStartupState's error) is named as such, never as on.
+    param([Parameter(Mandatory)]$FastStartup)
+    if ($FastStartup.active -eq $true) { return ,@([string]$FastStartup.problem) }
+    $err = [string](Get-IemProp -Object $FastStartup -Name 'error')
+    if ($null -eq $FastStartup.active -and $err) {
+        return ,@(('Fast Startup could not be judged ({0}): if it is on, a shutdown skips iemmixer-boot-pref' -f $err))
+    }
+    return ,@()
+}
+
 function Get-IemBootstrapState {
     # Read-only (plan Task 16 Step 1): REAPER and the app running, the driver
     # module's holders, the preference, our tasks (descriptor, last result,
     # last run in UTC), the boot task's last logged run (#35; its log in
     # -ElevatedRoot, default %ProgramData%\iemmixer), Fast Startup
-    # (HiberbootEnabled; with it on, a shutdown hibernates the system session
-    # and the next start fires no boot trigger), the root's DACL and every
-    # item below it, the firewall rule, the network categories, Defender. The
-    # result holds site values (the user, the preference key in the boot log):
-    # it stays on the dev box, never on a public ticket (P6).
+    # (Get-IemFastStartupState: HiberbootEnabled, the hibernation file, on or
+    # not and its problem; with it on, a shutdown hibernates the system
+    # session and the next start fires no boot trigger), the root's DACL and
+    # every item below it, the firewall rule, the network categories,
+    # Defender. The result holds site values (the user, the preference key in
+    # the boot log): it stays on the dev box, never on a public ticket (P6).
     param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][string]$Module, [Parameter(Mandatory)][string]$PrefKey,
           [Parameter(Mandatory)][string]$PrefName, [Parameter(Mandatory)][string]$AppImage, [string]$ReaperImage = 'reaper',
           [string]$Folder = '\iemmixer', [string]$FirewallRule = 'iemmixer-http', [string]$User = '', [string]$ElevatedRoot = '')
@@ -1438,10 +1565,7 @@ function Get-IemBootstrapState {
     $bootLines = @()
     $bootError = ''
     try { $bootLines = Get-IemBootPrefLog -Path $bootLog } catch { $bootError = $_.Exception.Message }
-    $fastStartup = $null
-    try {
-        $fastStartup = (Get-Item -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power').GetValue('HiberbootEnabled', $null)
-    } catch { $fastStartup = $null }
+    $fastStartup = Get-IemFastStartupState
     $pref = $null
     $prefError = ''
     try { $pref = Get-IemPref -Key $PrefKey -Name $PrefName } catch { $prefError = $_.Exception.Message }

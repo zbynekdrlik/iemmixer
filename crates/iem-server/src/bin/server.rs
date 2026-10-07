@@ -11,7 +11,9 @@
 //!
 //! The site config is `$IEMMIXER_CONFIG` (default `iemmixer.toml`); runtime
 //! data and secrets live next to it. `IEMMIXER_ENGINE_PIPE` overrides the
-//! site's `engine_pipe`; `IEMMIXER_MODE` is `dev` (default) or `live`.
+//! site's `engine_pipe`. `IEMMIXER_MODE`, the guard's mode (`dev` or `live`,
+//! set by the guard when it starts the server), is only logged as given: no
+//! server behaviour depends on it (#38).
 //! SIGTERM or SIGINT (Windows: Ctrl-Break or Ctrl-C) stop the server
 //! gracefully: open requests get up to 5 s, then it exits 0.
 
@@ -21,9 +23,9 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use iem_core::Config;
+use iem_server::ServerConfig;
 use iem_server::notify::Audience;
 use iem_server::provision::{self, PinTarget, ProvisionError};
-use iem_server::{RunMode, ServerConfig};
 
 const USAGE: &str = "usage: iem-server [pin set-engineer | pin set-member <member-id> | notify --to alarm <title> <body> | notify --count alarm]   (a PIN is read from stdin)";
 
@@ -132,7 +134,9 @@ fn run_server() -> anyhow::Result<()> {
     if let Ok(pipe) = std::env::var("IEMMIXER_ENGINE_PIPE") {
         config.engine_pipe = pipe;
     }
-    let mode = RunMode::parse(std::env::var("IEMMIXER_MODE").ok().as_deref());
+    // The guard's mode, logged as given in its Debug form (`Some("live")`,
+    // `None` when unset), so a stray character stays escaped.
+    let mode = std::env::var("IEMMIXER_MODE").ok();
     tracing::info!(
         path = %path.display(),
         members = config.members.len(),
@@ -156,7 +160,6 @@ fn run_server() -> anyhow::Result<()> {
                 port,
                 config,
                 config_dir,
-                mode,
             },
             None,
             stop,

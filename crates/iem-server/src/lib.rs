@@ -85,27 +85,6 @@ pub enum To {
     Session(u64),
 }
 
-/// The guard's mode (program spec §4.1), `IEMMIXER_MODE` (S6's guard sets
-/// it), logged when the engine client starts. No server behaviour depends
-/// on it: the band-activity alarm, which ran in `dev` only, was removed by
-/// the owner's decision of 2026-10-06 (#38).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum RunMode {
-    #[default]
-    Dev,
-    Live,
-}
-
-impl RunMode {
-    /// `live` → Live; anything else (or nothing) → Dev.
-    pub fn parse(s: Option<&str>) -> Self {
-        match s.map(str::trim) {
-            Some("live") => Self::Live,
-            _ => Self::Dev,
-        }
-    }
-}
-
 /// The site view built for one topology (keyed by its hash).
 type SiteCacheEntry = (String, Arc<SiteView>);
 
@@ -160,7 +139,6 @@ pub struct AppState {
     pub talk: Arc<Mutex<talk::TalkLock>>,
     /// Active SOS alerts: member id → (member id, display name)
     pub alerts: Arc<Mutex<HashMap<String, (String, String)>>>,
-    pub mode: RunMode,
     /// Members whose daily auto-snapshot is taken: member → UTC day
     auto_snapshots: Arc<Mutex<HashMap<String, String>>>,
     /// Argon2id PIN hashes (`<config dir>/secrets/pin_hashes.json`)
@@ -197,11 +175,7 @@ impl AppState {
     /// PIN store is an error — never regenerated, never ignored — so the server
     /// refuses to start. The engine and media links start detached;
     /// `start_server` connects them.
-    pub fn try_new(
-        config: Config,
-        config_dir: &std::path::Path,
-        mode: RunMode,
-    ) -> std::io::Result<Self> {
+    pub fn try_new(config: Config, config_dir: &std::path::Path) -> std::io::Result<Self> {
         let secrets_dir = config_dir.join(secrets::SECRETS_DIR);
         let pepper = pepper::load_or_create(&secrets_dir)?;
         let pin_store = pin_store::PinStore::load(&secrets_dir)?;
@@ -237,7 +211,6 @@ impl AppState {
             solo: Arc::new(Mutex::new(solo::SoloJanitor::default())),
             talk: Arc::new(Mutex::new(talk::TalkLock::default())),
             alerts: Arc::new(Mutex::new(HashMap::new())),
-            mode,
             auto_snapshots: Arc::new(Mutex::new(HashMap::new())),
             pin_store: Arc::new(RwLock::new(pin_store)),
             pin_hasher: pin_hash::PinHasher::new(pepper),
@@ -265,8 +238,7 @@ impl AppState {
     /// Test constructor: panics where `try_new` returns an error.
     #[cfg(test)]
     pub fn new(config: Config, config_dir: &std::path::Path) -> Self {
-        Self::try_new(config, config_dir, RunMode::Dev)
-            .expect("test AppState: pepper and PIN store")
+        Self::try_new(config, config_dir).expect("test AppState: pepper and PIN store")
     }
 
     /// The site view over the engine's current topology (`None` until the
@@ -382,18 +354,6 @@ pub struct ServerConfig {
     pub config: Config,
     /// Directory where config and runtime data live (secrets/, stores, etc.)
     pub config_dir: std::path::PathBuf,
-    pub mode: RunMode,
-}
-
-impl Default for ServerConfig {
-    fn default() -> Self {
-        Self {
-            port: 80,
-            config: Config::default(),
-            config_dir: std::path::PathBuf::from("."),
-            mode: RunMode::Dev,
-        }
-    }
 }
 
 /// Embedded WASM assets (built by Trunk)
@@ -473,14 +433,14 @@ where
     config.jwt_secret = secrets.jwt_secret;
     config.vapid_private_key = secrets.vapid_private_key;
     let pipe = config.engine_pipe.clone();
-    let mut state = AppState::try_new(config, &server_config.config_dir, server_config.mode)
+    let mut state = AppState::try_new(config, &server_config.config_dir)
         .context("loading the PIN pepper and PIN hashes")?;
     state.engine = EngineClient::spawn(pipe.clone(), iem_core::VERSION.to_string());
     #[cfg(feature = "audio")]
     {
         state.media = engine::media::MediaLink::spawn(pipe.clone());
     }
-    tracing::info!(pipe = %pipe, mode = ?state.mode, "engine client started");
+    tracing::info!(pipe = %pipe, "engine client started");
 
     // Auto-detect public IP for LAN/WAN detection (if not configured)
     {
@@ -824,7 +784,6 @@ mod startup_tests {
             port: 0,
             config: Config::default(),
             config_dir: dir.to_path_buf(),
-            mode: RunMode::Dev,
         }
     }
 
@@ -883,17 +842,6 @@ mod startup_tests {
             b"short",
             "never replaced"
         );
-    }
-
-    #[test]
-    fn the_mode_is_live_only_when_asked() {
-        assert_eq!(RunMode::parse(Some("live")), RunMode::Live);
-        assert_eq!(RunMode::parse(Some(" live\n")), RunMode::Live);
-        assert_eq!(RunMode::parse(Some("dev")), RunMode::Dev);
-        assert_eq!(RunMode::parse(Some("LIVE")), RunMode::Dev);
-        assert_eq!(RunMode::parse(None), RunMode::Dev);
-        assert_eq!(RunMode::default(), RunMode::Dev);
-        assert_eq!(ServerConfig::default().mode, RunMode::Dev);
     }
 
     #[tokio::test]

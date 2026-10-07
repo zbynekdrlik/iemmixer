@@ -95,8 +95,9 @@ fn aborts_the_binary_off_windows(cmd: Cmd) {
         .stderr(std::process::Stdio::null())
         .spawn()
         .unwrap();
+    // The injections are the supervisor's alone (review of PR #40, #35).
     let mut c = Client::new(&pipe);
-    c.hello(Role::Control);
+    c.hello(Role::Supervisor);
     let what = format!("{cmd:?}");
     // Not `request`: the process may end before its reply is written.
     c.send(&ClientMsg::Request {
