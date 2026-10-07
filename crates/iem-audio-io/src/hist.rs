@@ -5,6 +5,121 @@
 //! the stream starts (I7); the control thread reads a sparse snapshot once a
 //! second for `Status`.
 
+use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
+/// One bucket: 1 µs.
+pub const BUCKET_NS: u64 = 1_000;
+/// The longest range below the overflow bucket: 1 ms. Two periods are 667 µs
+/// at 32 samples, 96 kHz; a larger NullRt block is capped here, so `Status`
+/// and the guard's reply stay bounded (at most 1001 buckets each).
+pub const MAX_RANGE_NS: u64 = 1_000_000;
+
+/// One distribution: whole µs below two periods, then the overflow bucket.
+pub struct PeriodHist {
+    /// Two periods (capped at [`MAX_RANGE_NS`]): the overflow's lower edge.
+    limit_ns: u64,
+    /// The overflow bucket's index.
+    top: usize,
+    /// `top + 1` counters, allocated here, before the stream starts.
+    counts: Box<[AtomicU64]>,
+}
+
+impl PeriodHist {
+    pub fn new(period_ns: u64) -> Self {
+        let limit_ns = period_ns.max(1).saturating_mul(2).min(MAX_RANGE_NS);
+        let top = usize::try_from(limit_ns.div_ceil(BUCKET_NS)).unwrap_or(0);
+        Self {
+            limit_ns,
+            top,
+            counts: (0..=top).map(|_| AtomicU64::new(0)).collect(),
+        }
+    }
+
+    /// The overflow bucket's index: two periods in µs, rounded up.
+    pub fn top(&self) -> u32 {
+        u32::try_from(self.top).unwrap_or(u32::MAX)
+    }
+
+    /// The bucket of `ns`: whole µs below two periods, else the overflow.
+    pub fn index(&self, ns: u64) -> usize {
+        if ns >= self.limit_ns {
+            self.top
+        } else {
+            usize::try_from(ns / BUCKET_NS).unwrap_or(self.top)
+        }
+    }
+
+    /// RT thread: one relaxed increment (I7).
+    #[cfg_attr(iem_rtsan, sanitize(realtime = "nonblocking"))]
+    pub fn record(&self, ns: u64) {
+        if let Some(c) = self.counts.get(self.index(ns)) {
+            c.fetch_add(1, Relaxed);
+        }
+    }
+
+    /// The non-empty buckets, ascending (control thread; allocates).
+    pub fn sparse(&self) -> Vec<(u32, u64)> {
+        self.counts
+            .iter()
+            .enumerate()
+            .filter_map(|(i, c)| {
+                let n = c.load(Relaxed);
+                (n > 0).then(|| (u32::try_from(i).unwrap_or(u32::MAX), n))
+            })
+            .collect()
+    }
+}
+
+/// Both histograms of one stream, shared with its RT thread.
+pub struct StreamHists {
+    /// The interval between two callbacks' entries (after telemetry's
+    /// warm-up on the card).
+    pub interval: PeriodHist,
+    /// The callback's own time (the span of `StreamStats::max_process_ns`).
+    pub process: PeriodHist,
+}
+
+impl StreamHists {
+    pub fn new(period_ns: u64) -> Self {
+        Self {
+            interval: PeriodHist::new(period_ns),
+            process: PeriodHist::new(period_ns),
+        }
+    }
+
+    pub fn snapshot(&self) -> HistSnapshot {
+        HistSnapshot {
+            top_us: self.interval.top(),
+            interval: self.interval.sparse(),
+            process: self.process.sparse(),
+        }
+    }
+}
+
+/// Both histograms read at one moment, sparse: `(bucket, count)` pairs,
+/// ascending, empty buckets left out.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HistSnapshot {
+    /// The overflow bucket's index (both histograms share the period).
+    pub top_us: u32,
+    pub interval: Vec<(u32, u64)>,
+    pub process: Vec<(u32, u64)>,
+}
+
+/// The upper edge (µs) of the bucket holding the `per_mille` quantile (rank
+/// ⌈per_mille·n/1000⌉, at least 1): the soak verdict's rule
+/// (scripts/iem-pc/soak_verdict.py `quantile_us`). `None` when empty.
+pub fn quantile_us(sparse: &[(u32, u64)], per_mille: u64) -> Option<u32> {
+    let total: u64 = sparse.iter().map(|e| e.1).sum();
+    let rank = per_mille.saturating_mul(total).div_ceil(1000).max(1);
+    let mut seen = 0u64;
+    // Empty (or all zero): `seen` never reaches the rank of at least 1.
+    sparse.iter().find_map(|&(b, n)| {
+        seen = seen.saturating_add(n);
+        (seen >= rank).then(|| b.saturating_add(1))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

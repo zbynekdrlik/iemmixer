@@ -45,3 +45,7 @@ serde_json = "1"
 name = "asio_spike"
 # Runs the argument-parser tests on every OS.
 test = true
+
+[lints.rust]
+# `iem_rtsan` is set by the rtsan CI job (nightly, -Zsanitizer=realtime): hist::PeriodHist::record.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(iem_rtsan)"] }

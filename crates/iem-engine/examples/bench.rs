@@ -9,10 +9,11 @@
 //!   round-trip probe scans every return sample of every block) and a
 //!   512-command group every block.
 //!
-//! Prints p50/p99/p99.9/max per case. Exits 1 when the typical median
-//! exceeds 25 % of the period or the worst-case median exceeds the period;
-//! hosted runners preempt, so tails are reported, not gated (the §3.5 p99.9
-//! gate is measured on the PC in S7).
+//! Prints p50/p99/p99.9/max per case, and beside them the p99.9 the stream
+//! histogram gives (S7: 1 µs buckets, the soak's rule, `hist::quantile_us`).
+//! Exits 1 when the typical median exceeds 25 % of the period or the
+//! worst-case median exceeds the period; hosted runners preempt, so tails are
+//! reported, not gated (the §3.5 p99.9 gate is measured on the PC in S7).
 //!
 //! `cargo run --release -p iem-engine --example bench`
 
@@ -20,6 +21,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use iem_audio_io::hist::{PeriodHist, quantile_us};
+use iem_audio_io::telemetry::period_ns;
 use iem_audio_io::{Block, Process};
 use iem_dsp::eq::{BandKind, EqParams};
 use iem_engine::cmd::{MAX_HIL, RtOp, push_group};
@@ -199,6 +202,8 @@ fn bench(name: &str, worst: bool) -> f64 {
     let mut drain = vec![0.0f32; 4 * B];
     let mut times = Vec::with_capacity(CALLS);
     let rate = f64::from(SAMPLE_RATE);
+    // The callback-time histogram a backend keeps (S7), fed the same calls.
+    let hist = PeriodHist::new(period_ns(B as u32, rate));
     for call in 0..WARMUP + CALLS {
         for (ch, x) in input.chunks_mut(B).enumerate() {
             for (k, v) in x.iter_mut().enumerate() {
@@ -216,6 +221,7 @@ fn bench(name: &str, worst: bool) -> f64 {
         let dt = t0.elapsed().as_secs_f64() * 1e6;
         if call >= WARMUP {
             times.push(dt);
+            hist.record((dt * 1000.0) as u64);
         }
         for tap in &mut h.taps {
             let _ = tap.pop_partial_slice(&mut drain);
@@ -229,8 +235,11 @@ fn bench(name: &str, worst: bool) -> f64 {
         percentile(&times, 0.999),
         times[times.len() - 1],
     );
+    // The upper edge of the 1 µs bucket at rank ⌈0.999·n⌉ (the soak's rule);
+    // two periods or more read as the overflow bucket's edge.
+    let hist_p999 = quantile_us(&hist.sparse(), 999).unwrap_or(0);
     println!(
-        "bench {name}: p50 {p50:.1} µs ({:.1} %), p99 {p99:.1} µs ({:.1} %), p99.9 {p999:.1} µs ({:.1} %), max {max:.1} µs; period {period:.1} µs, B = {B}, {CALLS} calls",
+        "bench {name}: p50 {p50:.1} µs ({:.1} %), p99 {p99:.1} µs ({:.1} %), p99.9 {p999:.1} µs ({:.1} %), hist p99.9 {hist_p999} µs, max {max:.1} µs; period {period:.1} µs, B = {B}, {CALLS} calls",
         100.0 * p50 / period,
         100.0 * p99 / period,
         100.0 * p999 / period,

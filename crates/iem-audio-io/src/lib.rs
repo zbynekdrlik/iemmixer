@@ -15,7 +15,9 @@
 //! messages, counted on any thread and logged by the owner thread),
 //! [`cpuset`] (CPU lists), [`glitch_report`] (the spike's capped glitch list
 //! and trace-marker text), [`spike_run`] (the spike's run decisions: argument
-//! rule, applied levers, the hwlat gate, exit codes) and, on Windows only,
+//! rule, applied levers, the hwlat gate, exit codes), [`hist`] (the stream
+//! histograms of the callback interval and the callback's own time, which
+//! NullRt and the ASIO backend record, S7) and, on Windows only,
 //! `asio` and `os` — the crate's
 //! only unsafe code: the S1a spike host and the S6 backend `AsioStream`. The preference window (the driver's
 //! preferred buffer holds 32 while the engine holds the card, REAPER's
@@ -30,6 +32,9 @@
 //! overruns, resets and a parked stream.
 
 #![deny(unsafe_code)]
+// The rtsan CI job (nightly, `--cfg iem_rtsan`) marks `hist::PeriodHist::record`
+// as a real-time context (S7; the engine's `Processor::process` likewise).
+#![cfg_attr(iem_rtsan, feature(sanitize))]
 #![cfg_attr(
     not(test),
     deny(
