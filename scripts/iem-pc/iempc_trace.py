@@ -161,10 +161,10 @@ def engine_seen(ip, code: int, reply: dict | None) -> dict:
     return engine
 
 
-def tuning_modules(ctx, ip, build: str, profile: Path) -> tuple[dict[str, tuple[str, str]], str]:
+def tuning_modules(ctx, ip, build: str, profile: Path, local: str) -> dict[str, tuple[str, str]]:
     """The elevated tuning folder's two modules as (path on the PC, sha256):
-    the running bundle's (fetched and attested here); and the profile's sha256,
-    which must be the local profile's. Read by the preflight."""
+    the running bundle's (fetched and attested here); its profile's sha256 must
+    be the local profile's (`local`). Read by the preflight."""
     sums = ip.need_record(build).get("sums") or {}
     want = {key: sums.get(f"tuning/{name}") for key, name in iempc_tuning.MODULES.items()}
     if not all(want.values()):
@@ -177,12 +177,11 @@ def tuning_modules(ctx, ip, build: str, profile: Path) -> tuple[dict[str, tuple[
         if r.get(key) != want[key]:
             raise ip.Refused(f"no trace: the elevated tuning folder's {name} is {r.get(key) or 'absent'}, not bundle "
                              f"{build}'s (the running engine's): run '{fix}'")
-    local = ip.sha256_file(profile)
     if r.get("profile") != local:
         raise ip.Refused(f"no trace: the PC's tuning profile is {r.get('profile') or 'absent'}, not {profile} ({local}): "
                          f"the watched processors would not be the PC's; run '{fix} --profile {profile}', or name the "
                          "installed profile with --profile")
-    return {key: (f"{r['dir']}\\{name}", want[key]) for key, name in iempc_tuning.MODULES.items()}, local
+    return {key: (f"{r['dir']}\\{name}", want[key]) for key, name in iempc_tuning.MODULES.items()}
 
 
 def measure_load(ip, mods: dict, pre: str = "", stop_only: bool = False) -> dict:
@@ -211,8 +210,12 @@ def stop(ctx, ip, sw, mods: dict, run_dir: str) -> dict:
     checked: check_trace_stop); a failure names the trace that may still run."""
     body = f"Stop-IemTraceSessions -Dir {ip.ps_quote(run_dir)} -TimeoutSeconds {sw.TRACE_STOP_LOGMAN_S}"
     try:
-        return sw.check_trace_stop(ip.run_module(ctx.env, body, sw.TRACE_STOP_CALL_S, "ignore",
-                                                 **measure_load(ip, mods, stop_only=True)))
+        r = sw.check_trace_stop(ip.run_module(ctx.env, body, sw.TRACE_STOP_CALL_S, "ignore",
+                                              **measure_load(ip, mods, stop_only=True)))
+        for key in ("stopped", "gone"):
+            if not all(isinstance(s, str) for s in r.get(key) or []):
+                raise ip.StepError(f"the trace stop's reply names a session that is no text ({key}: {r.get(key)!r})")
+        return r
     except (ip.StepError, sw.StepError) as e:   # sw's own StepError: check_trace_stop
         raise ip.StepError(f"{e}: the kernel trace may still run on the PC (stop it with Stop-IemTraceSessions -Dir "
                            f"{run_dir})") from None
@@ -238,7 +241,9 @@ def abandon(ctx, ip, sw, mods: dict, run_dir: str, cause: BaseException, start_o
         ip.emit({"trace_stop": "unconfirmed", "dir": run_dir, "why": why, "stopped": sorted(stopped)})
         return
     if not stopped:
-        print(f"iempc: no kernel trace ran ({why}): the stop found none", file=sys.stderr, flush=True)
+        gone = sorted(r.get("gone") or [])
+        print(f"iempc: no kernel trace was running ({why}): the stop stopped none"
+              + (f" (ended by itself: {gone})" if gone else ""), file=sys.stderr, flush=True)
         return
     print(f"iempc: the kernel trace was stopped ({why})", file=sys.stderr, flush=True)
 
@@ -274,10 +279,12 @@ def trace(ctx, ip) -> int:
     tr, lr, sw, tw = s1c(ip)
     label, seconds, circular_mb = check_args(ip, tr, ctx.args)
     profile_path = Path(ctx.args.profile) if ctx.args.profile else iempc_tuning.PROFILE
-    lps = tr.watch_lps(iempc_tuning.load_profile(ip, profile_path), "")
+    profile = iempc_tuning.load_profile(ip, profile_path)
+    profile_hex = ip.sha256_file(profile_path)   # right after the load: the hash the PC's must equal
+    lps = tr.watch_lps(profile, "")
     code, reply, _ = ip.iemmode(env, ["status"], ip.STATUS_S, ctx.watch(abandon=True))
     before = engine_seen(ip, code, reply)
-    mods, profile_hex = tuning_modules(ctx, ip, before["build"], profile_path)
+    mods = tuning_modules(ctx, ip, before["build"], profile_path, profile_hex)
     run = f"{label}-{dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
     rel = f"traces/{run}"
     run_dir = ip.pc_join(env["PC_ROOT"], rel)
@@ -304,7 +311,12 @@ def trace(ctx, ip) -> int:
                 else:
                     after_error = f"iemmode status exit {code}"
         except BaseException as e:
-            abandon(ctx, ip, sw, mods, run_dir, e, start_over)
+            try:
+                abandon(ctx, ip, sw, mods, run_dir, e, start_over)
+            except Exception as failure:   # never over the cause: after a flag the event path must still run
+                print(f"iempc: WARNING: the kernel trace may still run on the PC: its stop failed ({failure!r}); stop it "
+                      f"with Stop-IemTraceSessions -Dir {run_dir}", file=sys.stderr, flush=True)
+                ip.emit({"trace_stop": "failed", "dir": run_dir, "error": repr(failure)[-800:]})
             raise
     try:
         stop(ctx, ip, sw, mods, run_dir)
