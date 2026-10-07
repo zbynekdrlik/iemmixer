@@ -509,7 +509,9 @@ class HandoverTests(unittest.TestCase):
 
 class RecordTests(unittest.TestCase):
     def test_a_record_reads_as_the_guard_writes_it(self) -> None:
-        for rec in (EVENT, DEV, UNWOUND, dict(EVENT, silence_ms=None), dict(EVENT, steps=[])):
+        # A step of 0 ms: the guard's `Laps::lap` without a start.
+        for rec in (EVENT, DEV, UNWOUND, dict(EVENT, silence_ms=None), dict(EVENT, steps=[]),
+                    dict(EVENT, silence_ms=0, steps=[st("engine_stop", 0), st("reaper_handover", 0)])):
             self.assertEqual(sw.read_record(copy.deepcopy(rec)), rec)
 
     def test_an_older_guards_record_without_unwound_reads_it_as_none(self) -> None:
