@@ -14,9 +14,8 @@ never a stop), pre-empts an open S1a/S1c spike window (spike_window.py
 preempt; after a failed one it closes the window under the window lock, so
 no queued window preempt starts a second bring-back), stops a kernel trace
 whose `iempc trace` died with this box (its record, iempc_trace.stop_recorded;
-`dev` does too), then runs `iemmode
-event`, and `iemmode event --direct` when the guard is unreachable (exit
-4). The event path has one budget that fits one
+`dev` does too), then runs `iemmode event`, and `iemmode event --direct` when
+the guard is unreachable (exit 4). The event path has one budget that fits one
 Bash call (EVENT_BUDGET_S): the spike preempt gets SPIKE_SHARE_S of it, no
 `iemmode` call starts while the preempt still runs, and none starts with
 less than SWITCH_MIN_S left. `event` never waits for another iempc command;
