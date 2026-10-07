@@ -3,7 +3,8 @@
 
 `iemmode` over ssh with the EVENT-NOW discipline, attested bundles from CI
 (fetch, install, activate), HIL and soak dispatch on the private ops repo
-(`dispatch-soak`: iempc_soak.py), PC bootstrap through
+(`dispatch-soak`: iempc_soak.py), the switch timing (`switch-test`:
+iempc_switch.py), PC bootstrap through
 the bundle's IemPc.psm1 (dev time only), S1c's tuning modules and profile into
 the PC's elevated tuning folder (`tuning-install`, refreshed after `activate`:
 iempc_tuning.py), a kernel DPC/ISR trace on the guard's engine (`trace`:
@@ -64,8 +65,8 @@ the ssh session, so a session cut before it ends (a Bash timeout) stops it
 half-way; the next `iemmode event` resumes from the guard state. A
 pre-emption inside another command adds a whole event budget to that
 command's own time. The dev-entry count behind `dispatch-hil` and
-`dispatch-soak` sees only `iempc dev`, not a dev entry the guard makes by
-itself (rehearse-teardown's re-entry)."""
+`dispatch-soak` sees only `iempc dev` and switch-test's dev leg, not a dev
+entry the guard makes by itself (rehearse-teardown's re-entry)."""
 from __future__ import annotations
 
 import argparse
@@ -87,6 +88,7 @@ from typing import Callable, Iterator
 
 import iempc_bin
 import iempc_soak
+import iempc_switch
 import iempc_trace
 import iempc_tuning
 
@@ -545,8 +547,8 @@ def state_lock(take: bool) -> Iterator[None]:
 
 
 def current_entry() -> int:
-    """The dev entry: counted up by every successful `iempc dev` (0 before
-    the first). Known limit: the guard also enters dev by itself
+    """The dev entry: counted up by every successful `iempc dev` and
+    switch-test dev leg (0 before the first). Known limit: the guard also enters dev by itself
     (rehearse-teardown's re-entry), which this box never sees, so "once per
     SHA per dev entry" means per `iempc dev` until the guard's status
     exposes a dev-entry id to key the dispatch record on."""
@@ -1220,6 +1222,11 @@ def cmd_dispatch_soak(ctx: Ctx) -> int:
     return iempc_soak.dispatch(ctx, sys.modules[__name__])
 
 
+def cmd_switch_test(ctx: Ctx) -> int:
+    """S7 switch timing; the code lives in iempc_switch.py (#10, #36)."""
+    return iempc_switch.switch_test(ctx, sys.modules[__name__])
+
+
 def read_only_function(name: str) -> bool:
     return FUNCTION.fullmatch(name) is not None and name.split("-", 1)[0] in READ_ONLY_VERBS
 
@@ -1369,6 +1376,7 @@ COMMANDS: dict[str, Spec] = {
     "activate": Spec(cmd_activate, pc=True, dev_time=True, locked=True),
     "dispatch-hil": Spec(cmd_dispatch_hil, pc=False, dev_time=True, locked=True),
     "dispatch-soak": Spec(cmd_dispatch_soak, pc=True, dev_time=True, locked=True),
+    "switch-test": Spec(cmd_switch_test, pc=True, dev_time=True, locked=True),
     "bootstrap": Spec(cmd_bootstrap, pc=True, dev_time=True, locked=True),
     "handover-s1a": Spec(cmd_handover_s1a, pc=True, dev_time=True, locked=True),
     "tuning-install": Spec(cmd_tuning_install, pc=True, dev_time=True, locked=True),
@@ -1379,7 +1387,7 @@ COMMANDS: dict[str, Spec] = {
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="iempc", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("rehearse-teardown", "probe-task", "handover-s1a"):
+    for name in ("rehearse-teardown", "probe-task", "handover-s1a", "switch-test"):
         sub.add_parser(name)
     sub.add_parser("status").add_argument("--pc", action="store_true",
                                           help="ask the guard even while the flag exists (it may start the guard)")
