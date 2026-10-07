@@ -1065,9 +1065,18 @@ mod tests {
 
     #[test]
     fn the_supervisor_sends_its_own_commands_reads_stops_and_tests_but_no_mix_change() {
+        // The fault injections are the guard's alone (review of PR #40,
+        // #35): the controller is told `NotSupervisor`.
         assert_eq!(
             ops_where(Cmd::is_supervisor),
-            ["arm", "hil_test_signal", "force_reopen"]
+            [
+                "inject_fault",
+                "inject_seh",
+                "inject_park",
+                "arm",
+                "hil_test_signal",
+                "force_reopen"
+            ]
         );
         assert_eq!(
             ops_where(Cmd::supervisor_may),

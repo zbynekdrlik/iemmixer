@@ -1371,13 +1371,20 @@ mod tests {
             for (id, cmd, _) in &supervisor {
                 r.c.handle(request_from(2, *id, cmd.clone()));
             }
-            // The controller may not arm or start the HIL signal; an observer
-            // may do neither either.
+            // The controller may not arm, start the HIL signal or inject a
+            // fault (an engine keeps `--fault-injection` until it restarts,
+            // after its HIL job too, so only the guard, which allows them
+            // inside a job, sends them; review of PR #40, #35); an observer
+            // may do none of it either.
             r.c.handle(request_from(1, 30, Cmd::Arm));
             r.c.handle(request_from(1, 31, hil()));
             r.c.handle(request_from(1, 32, set_mix()));
+            r.c.handle(request_from(1, 33, Cmd::InjectFault));
+            r.c.handle(request_from(1, 34, Cmd::InjectSeh));
+            r.c.handle(request_from(1, 35, Cmd::InjectPark));
             r.c.handle(request_from(3, 40, Cmd::Arm));
             r.c.handle(request_from(3, 41, hil()));
+            r.c.handle(request_from(3, 42, Cmd::InjectPark));
             // The supervisor reads the meters like everyone.
             r.meters.input_buffer_mut().seq = 5;
             r.meters.publish();
@@ -1410,10 +1417,23 @@ mod tests {
                     None
                 )
             );
+            // Refused for its role before the core reads the flag.
+            assert_eq!(
+                (ctl[&33], ctl[&34], ctl[&35]),
+                (
+                    Some(ErrCode::NotSupervisor),
+                    Some(ErrCode::NotSupervisor),
+                    Some(ErrCode::NotSupervisor)
+                )
+            );
             let obs = codes(&obs_got.join().unwrap());
             assert_eq!(
-                (obs[&40], obs[&41]),
-                (Some(ErrCode::NotController), Some(ErrCode::NotController))
+                (obs[&40], obs[&41], obs[&42]),
+                (
+                    Some(ErrCode::NotController),
+                    Some(ErrCode::NotController),
+                    Some(ErrCode::NotController)
+                )
             );
         }
 
