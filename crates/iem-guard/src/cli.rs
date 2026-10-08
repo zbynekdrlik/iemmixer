@@ -382,7 +382,8 @@ mod tests {
             Request::TestSignal {
                 input: "mic1".into(),
                 dbfs: -30.5,
-                ttl_s: 20.0
+                ttl_s: 20.0,
+                listen: false
             }
         );
         assert_eq!(
@@ -514,6 +515,39 @@ mod tests {
         assert_eq!(err(&["job-begin", "-1"]), "\"-1\" is not a whole number");
         assert_eq!(err(&["job-end", "x"]), "\"x\" is not a whole number");
         assert_eq!(err(&["alarm-ack", "1.5"]), "\"1.5\" is not a whole number");
+    }
+
+    /// The listen probe (S7, #10): `--listen` only after the three values,
+    /// so a negative dB value never meets a flag parser.
+    #[test]
+    fn test_signal_takes_a_trailing_listen_only() {
+        let signal = |listen| Request::TestSignal {
+            input: "mic1".into(),
+            dbfs: -20.0,
+            ttl_s: 30.0,
+            listen,
+        };
+        assert_eq!(
+            ask(&["test-signal", "mic1", "-20", "30", "--listen"]),
+            signal(true)
+        );
+        assert_eq!(ask(&["test-signal", "mic1", "-20", "30"]), signal(false));
+        for wrong in [
+            ["test-signal", "--listen", "mic1", "-20", "30"],
+            ["test-signal", "mic1", "-20", "30", "--loud"],
+            ["test-signal", "mic1", "-20", "--listen", "30"],
+        ] {
+            assert_eq!(err(&wrong), "3 arguments expected, 4 given", "{wrong:?}");
+        }
+        assert_eq!(
+            err(&["test-signal", "mic1", "-20", "30", "--listen", "--listen"]),
+            "3 arguments expected, 4 given"
+        );
+        assert_eq!(
+            err(&["test-signal", "mic1", "-20", "--listen"]),
+            "3 arguments expected, 2 given"
+        );
+        assert!(IEMMODE_USAGE.contains("| test-signal <input> <dbfs> <ttl> [--listen]\n"));
     }
 
     #[test]

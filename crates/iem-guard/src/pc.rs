@@ -1845,8 +1845,12 @@ mod tests {
         assert!(!pc.called(Call::AppStop));
         pc.engine_ready(10, &Cancel::default()).unwrap();
         assert_eq!(pc.ready_secs, [10]);
-        pc.engine_hil_signal("mic1", -30.0, 5.0, &[94]).unwrap();
-        assert_eq!(pc.hil_signals, [("mic1".to_owned(), -30.0, 5.0, vec![94])]);
+        pc.engine_hil_signal("mic1", -30.0, 5.0, &[94], true)
+            .unwrap();
+        assert_eq!(
+            pc.hil_signals,
+            [("mic1".to_owned(), -30.0, 5.0, vec![94], true)]
+        );
         pc.engine_force_reopen().unwrap();
         pc.engine_inject_fault().unwrap();
         pc.engine_inject_seh().unwrap();
@@ -1885,7 +1889,10 @@ mod tests {
         assert!(pc.install_site("bad.toml", &Cancel::default()).is_err());
         assert_eq!(pc.sites, ["site.toml"]);
         pc.fail(Call::HilSignal, "refused");
-        assert!(pc.engine_hil_signal("mic2", -30.0, 5.0, &[94]).is_err());
+        assert!(
+            pc.engine_hil_signal("mic2", -30.0, 5.0, &[94], false)
+                .is_err()
+        );
         assert_eq!(pc.hil_signals.len(), 1);
     }
 

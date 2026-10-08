@@ -148,7 +148,7 @@ fn check_site_passes_only_with_exit_0() {
 #[test]
 fn the_hil_test_signal_names_its_card_outputs() {
     assert_eq!(
-        hil_test_signal("mic1", -24.5, 30.0, &[94, 95]),
+        hil_test_signal("mic1", -24.5, 30.0, &[94, 95], false),
         json!({
             "op": "hil_test_signal",
             "input": "mic1",
@@ -159,6 +159,24 @@ fn the_hil_test_signal_names_its_card_outputs() {
         })
     );
     assert_eq!(HIL_HZ, 1000.0);
+}
+
+/// The listen probe (S7, #10): the engine's `HilTestSignal.listen`, written
+/// only when true, so a plain signal stays what an older engine reads.
+#[test]
+fn the_listen_probe_adds_listen_to_the_hil_signal() {
+    assert_eq!(
+        hil_test_signal("mic1", -20.0, 30.0, &[94, 95], true),
+        json!({
+            "op": "hil_test_signal",
+            "input": "mic1",
+            "hz": 1000.0,
+            "dbfs": -20.0,
+            "ttl_s": 30.0,
+            "card_tx": [94, 95],
+            "listen": true,
+        })
+    );
 }
 
 #[test]

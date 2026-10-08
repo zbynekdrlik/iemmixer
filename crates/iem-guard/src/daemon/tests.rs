@@ -1114,6 +1114,7 @@ fn jobs_are_refused_while_switching() {
             input: "mic1".into(),
             dbfs: -30.0,
             ttl_s: 5.0,
+            listen: false,
         },
         Request::Report {
             sha: SHA.into(),
@@ -1843,6 +1844,7 @@ fn the_test_signal_goes_only_to_the_hil_outputs() {
         input: "mic1".into(),
         dbfs,
         ttl_s,
+        listen: false,
     };
     let r = handle(&mut pc, &mut g, signal(-20.0, 5.0), INIT);
     assert_eq!(
@@ -1852,7 +1854,10 @@ fn the_test_signal_goes_only_to_the_hil_outputs() {
             "test signal on mic1 at -20 dBFS for 5 s on card outputs [94]"
         )
     );
-    assert_eq!(pc.hil_signals, [("mic1".to_owned(), -20.0, 5.0, vec![94])]);
+    assert_eq!(
+        pc.hil_signals,
+        [("mic1".to_owned(), -20.0, 5.0, vec![94], false)]
+    );
     for (dbfs, ttl, why) in [
         (
             -19.9,
@@ -1899,6 +1904,7 @@ fn a_test_signal_needs_a_begun_job_and_at_most_60_s() {
         input: "mic1".into(),
         dbfs: -30.0,
         ttl_s,
+        listen: false,
     };
     // Without a begun job: refused.
     let r = handle(&mut pc, &mut g, signal(5.0), INIT);
@@ -1915,7 +1921,10 @@ fn a_test_signal_needs_a_begun_job_and_at_most_60_s() {
         (r.ok, r.detail.as_str()),
         (false, "a TTL of 60.5 s is above the HIL limit of 60 s")
     );
-    assert_eq!(pc.hil_signals, [("mic1".to_owned(), -30.0, 60.0, vec![94])]);
+    assert_eq!(
+        pc.hil_signals,
+        [("mic1".to_owned(), -30.0, 60.0, vec![94], false)]
+    );
     assert_eq!(HIL_MAX_TTL_S, 60.0);
 }
 
