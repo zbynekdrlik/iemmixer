@@ -334,11 +334,19 @@ class Report(unittest.TestCase):
                 ("cancelled", done, "cancelled: the pc job was cancelled"),
                 ("cancelled", {"conclusion": "failure", "reason": "not-finished"}, "cancelled: the pc job was cancelled"),
                 ("failure", None, "cancelled: no record of the pc job"),
-                ("success", None, "cancelled: no record of the pc job"),
-                ("skipped", None, "cancelled: no record of the pc job")):
+                ("cancelled", None, "cancelled: the pc job was cancelled")):
             v = self.report(pc, record)
             self.assertEqual((v["conclusion"], v["summary"], v["first_failure"]), ("cancelled", summary, None))
         self.assertEqual(self.report("success", done)["summary"], GREEN)
+
+    def test_report_names_a_pc_job_that_ended_without_failing_and_left_no_record_red(self):
+        # The job writes its record before anything else and uploads it always(): a job that
+        # succeeded or was skipped without one is a broken harness or report, never "ide event"
+        # (iemmixer#10: the first 8 h soak's report read an empty folder and posted cancelled).
+        for pc in ("success", "skipped"):
+            v = self.report(pc, None)
+            first = f"pc job {pc} left no record"
+            self.assertEqual((v["conclusion"], v["summary"], v["first_failure"]), ("failure", f"red: {first}", first))
 
     def test_report_maps_a_left_dev_record_to_cancelled_and_other_pc_failures_to_failure(self):
         left = {"conclusion": "cancelled", "reason": "left-dev"}
@@ -420,7 +428,8 @@ class Main(unittest.TestCase):
         (self.dir / name).write_text(text, encoding="utf-8")
 
     def test_main_report_reads_the_record_directory_and_prints_one_json(self):
-        self.assertEqual(self.report()["summary"], "cancelled: no record of the pc job")
+        self.assertEqual(self.report()["summary"], "red: pc job success left no record")
+        self.assertEqual(self.report("failure")["summary"], "cancelled: no record of the pc job")
         # PowerShell's files: a BOM tolerated, one poll per line.
         self.write("result.json", '\ufeff{"conclusion":"success","reason":"finished"}\r\n')
         self.write("polls.jsonl", "\ufeff" + "".join(json.dumps(p) + "\n" for p in polls()))
