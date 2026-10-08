@@ -619,7 +619,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $b = Join-Path $env:RUNNER_TEMP 'asio-spike'
           New-Item -ItemType Directory -Force -Path $b | Out-Null
-          Copy-Item -LiteralPath target/release/examples/asio_spike.exe, scripts/asio-spike/SpikePc.psm1, scripts/asio-spike/spike-task.ps1, scripts/golden/GoldenPc.psm1, scripts/pc-tuning/IemTuning.psm1, scripts/pc-tuning/IemMeasure.psm1 -Destination $b
+          Copy-Item -LiteralPath target/release/examples/asio_spike.exe, scripts/asio-spike/SpikePc.psm1, scripts/asio-spike/spike-task.ps1, scripts/golden/GoldenPc.psm1, scripts/pc-tuning/IemTuning.psm1, scripts/pc-tuning/IemTuningStore.psm1, scripts/pc-tuning/IemMeasure.psm1 -Destination $b
           $lines = Get-ChildItem -LiteralPath $b -File | Sort-Object Name | ForEach-Object { '{0}  {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name }
           [IO.File]::WriteAllText((Join-Path $b 'SHA256SUMS'), (($lines -join "`n") + "`n"))
       # The S1c measurement poll is PowerShell composed in Python: run it here
@@ -684,10 +684,11 @@ jobs:
           # never the user's TEMP (#15); GetTempPath ends with a backslash.
           $etemp = (Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'iemmixer\temp') + '\'
           if ($doc.r.temp -ne $etemp) { throw "the step's temp folder is '$($doc.r.temp)', not '$etemp'" }
-          # The four modules were imported from the admin-only stage, never from bin (#15).
+          # The five modules (IemTuning's store too, #34) were imported from the
+          # admin-only stage, never from bin (#15).
           $estage = (Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'iemmixer\bootstrap-stage') + '\'
           $mods = @($doc.r.modules)
-          if ($mods.Count -ne 4 -or @($mods | Where-Object { -not "$_".StartsWith($estage, [StringComparison]::OrdinalIgnoreCase) }).Count -ne 0) {
+          if ($mods.Count -ne 5 -or @($mods | Where-Object { -not "$_".StartsWith($estage, [StringComparison]::OrdinalIgnoreCase) }).Count -ne 0) {
             throw "the step's modules are not all in the stage: $($mods -join ', ')"
           }
           New-Item -ItemType File -Force -Path $stop | Out-Null
