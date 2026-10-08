@@ -1,23 +1,31 @@
 #Requires -Version 5.1
 # Self-test of IemSshShell.psm1 (#15, the admin-only OpenSSH default shell) on
 # Windows PowerShell 5.1 (CI job windows, an ephemeral administrator runner).
-# Every function runs against a TEST key (HKLM:\SOFTWARE\iemmixer-ssh-test-<id>,
-# made admin-only as the real one must be), a test task folder
-# \iemmixer-test-ssh-<id>\ and a temp elevated root: never
-# HKLM:\SOFTWARE\OpenSSH and never a task of \iemmixer. The undo task is run
-# once as registered (SYSTEM, its entry script and module copies). The probe
-# iempc composes runs through cmd.exe exactly as sshd starts it, with and
+# The module runs as the stage holds it: next to IemPc.psm1 and S1c's
+# IemTuningStore.psm1 (its exact registry save and restore), copied into one
+# folder. Every function runs against a TEST key
+# (HKLM:\SOFTWARE\iemmixer-ssh-test-<id>, made admin-only as the real one must
+# be), a test task folder \iemmixer-test-ssh-<id>\ and a temp elevated root:
+# never HKLM:\SOFTWARE\OpenSSH and never a task of \iemmixer. The undo task is
+# run once as registered (SYSTEM, its entry script and module copies). The
+# probe iempc composes runs through cmd.exe exactly as sshd starts it, with and
 # without /d, and iempc_sshshell.parse_probe judges both. Only its own test
 # objects are removed.
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
-Import-Module (Join-Path $here 'IemSshShell.psm1') -Force
 function Assert($cond, $what) { if (-not $cond) { throw "FAILED: $what" } ; Write-Host "ok  $what" }
 function ErrorOf([scriptblock]$b) { try { & $b; return '' } catch { return "$_" } }
 
 $id = [guid]::NewGuid().ToString('N').Substring(0, 8)
 $base = Join-Path ([IO.Path]::GetTempPath()) ('iem-sshshell-' + $id)
+$mods = Join-Path $base 'modules'
+$sources = @{ 'IemPc.psm1' = (Join-Path $here 'IemPc.psm1'); 'IemSshShell.psm1' = (Join-Path $here 'IemSshShell.psm1')
+              'IemTuningStore.psm1' = (Join-Path (Split-Path -Parent $here) 'pc-tuning\IemTuningStore.psm1') }
+New-Item -ItemType Directory -Force -Path $mods | Out-Null
+foreach ($n in @($sources.Keys)) { Copy-Item -LiteralPath $sources[$n] -Destination (Join-Path $mods $n) }
+Import-Module (Join-Path $mods 'IemSshShell.psm1') -Force
+
 $er = Join-Path $base 'elevated'
 $sub = 'SOFTWARE\iemmixer-ssh-test-' + $id
 $key = 'HKLM:\' + $sub
@@ -28,6 +36,7 @@ $cmd = Join-Path ([Environment]::GetFolderPath('System')) 'cmd.exe'
 $common = @{ Key = $key; TaskFolder = $folder; ElevatedRoot = $er }
 $dir = Join-Path $er 'ssh-shell'
 $prior = Join-Path $dir 'prior.json'
+$log = Join-Path $dir 'undo.log'
 $hklm = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
 $names = @('DefaultShell', 'DefaultShellCommandOption', 'DefaultShellArguments')
 $sidUsers = 'S-1-5-32-545'
@@ -47,26 +56,41 @@ function New-TestKey {
     $k.Close()
 }
 
-function Set-Foreign {
-    # A prior shell of another kind each: a string, an unexpanded expandable
-    # string and a multi-string (Undo must write back exactly these).
-    $k = $hklm.OpenSubKey($sub, $true)
+function Add-KeyRule([string]$Rights, [string]$Inherit, [string]$Propagate) {
+    # One more allow rule for Users on the test key.
+    $k = $hklm.OpenSubKey($sub, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree,
+        [System.Security.AccessControl.RegistryRights]::ChangePermissions -bor [System.Security.AccessControl.RegistryRights]::ReadPermissions)
     try {
-        $k.SetValue('DefaultShell', 'C:\Tools\othershell.exe', [Microsoft.Win32.RegistryValueKind]::String)
-        $k.SetValue('DefaultShellCommandOption', '-c %IEMTESTVAR%', [Microsoft.Win32.RegistryValueKind]::ExpandString)
-        $k.SetValue('DefaultShellArguments', [string[]]@('-a', 'b c'), [Microsoft.Win32.RegistryValueKind]::MultiString)
+        $acl = $k.GetAccessControl()
+        $acl.AddAccessRule((New-Object System.Security.AccessControl.RegistryAccessRule((New-Object System.Security.Principal.SecurityIdentifier $sidUsers),
+            [System.Security.AccessControl.RegistryRights]$Rights, $Inherit, $Propagate, 'Allow')))
+        $k.SetAccessControl($acl)
     } finally { $k.Close() }
 }
 
+function Set-TestValue([string]$Name, $Data, [Microsoft.Win32.RegistryValueKind]$Kind) {
+    $k = $hklm.OpenSubKey($sub, $true)
+    try { $k.SetValue($Name, $Data, $Kind) } finally { $k.Close() }
+}
+
+function Set-Foreign {
+    # A prior shell of another kind each: a string, an unexpanded expandable
+    # string and a multi-string (Undo must write back exactly these).
+    Set-TestValue 'DefaultShell' 'C:\Tools\othershell.exe' ([Microsoft.Win32.RegistryValueKind]::String)
+    Set-TestValue 'DefaultShellCommandOption' '-c %IEMTESTVAR%' ([Microsoft.Win32.RegistryValueKind]::ExpandString)
+    Set-TestValue 'DefaultShellArguments' ([string[]]@('-a', 'b c')) ([Microsoft.Win32.RegistryValueKind]::MultiString)
+}
+
 function Read-Values {
-    # Each value as "<kind>:<data>" (unexpanded; a multi-string joined by |), or "absent".
+    # Each value as "<kind>:<data>" (unexpanded; a multi-string as its count
+    # and its items joined by |), or "absent".
     $k = $hklm.OpenSubKey($sub)
     try {
         $out = @()
         foreach ($n in $names) {
             if (@($k.GetValueNames()) -notcontains $n) { $out += 'absent'; continue }
             $d = $k.GetValue($n, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
-            if ($d -is [array]) { $d = @($d) -join '|' }
+            if ($d -is [array]) { $d = ('{0}:{1}' -f @($d).Count, (@($d) -join '|')) }
             $out += ('{0}:{1}' -f $k.GetValueKind($n), $d)
         }
         return ($out -join ' ; ')
@@ -75,7 +99,7 @@ function Read-Values {
 
 $ours = "String:$cmd ; String:/d /c ; String:/d"
 $absent = 'absent ; absent ; absent'
-$foreign = 'String:C:\Tools\othershell.exe ; ExpandString:-c %IEMTESTVAR% ; MultiString:-a|b c'
+$foreign = 'String:C:\Tools\othershell.exe ; ExpandString:-c %IEMTESTVAR% ; MultiString:2:-a|b c'
 
 function SidOf([string]$Name) {
     # A task principal's UserId: Task Scheduler may give a name or the SID itself.
@@ -88,11 +112,17 @@ function Get-UndoTask {
     return (Get-IemRegisteredTask -Scheduler $sch -Folder $folder -Name $taskName)
 }
 
-function Wait-UndoTaskGone([int]$Seconds) {
-    # The undo task removes itself once it restored; never ended by force.
+function Get-LogLines {
+    if (-not (Test-Path -LiteralPath $log)) { return 0 }
+    return @([IO.File]::ReadAllLines($log) | Where-Object { $_.Trim() }).Count
+}
+
+function Wait-UndoDone([int]$LogLines, [int]$Seconds) {
+    # The undo task removes itself and the saved values, then its entry
+    # appends one line to undo.log: all three, within a bound. Never ended by force.
     $clock = [Diagnostics.Stopwatch]::StartNew()
     while ($clock.Elapsed.TotalSeconds -lt $Seconds) {
-        if ($null -eq (Get-UndoTask) -and -not (Test-Path -LiteralPath $prior)) { return $true }
+        if ($null -eq (Get-UndoTask) -and -not (Test-Path -LiteralPath $prior) -and (Get-LogLines) -gt $LogLines) { return $true }
         Start-Sleep -Milliseconds 500
     }
     return $false
@@ -119,12 +149,12 @@ function Invoke-ThroughCmd([string]$Option) {
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
     $p = [Diagnostics.Process]::Start($psi)
+    $outRead = $p.StandardOutput.ReadToEndAsync()
     $errRead = $p.StandardError.ReadToEndAsync()
     $p.StandardInput.Write($script)
     $p.StandardInput.Close()
-    $out = $p.StandardOutput.ReadToEnd()
     if (-not $p.WaitForExit(120000)) { throw 'the probe still runs after 120 s (left running, never force-ended)' }
-    $last = @($out -split "`r?`n" | Where-Object { $_.Trim() })[-1]
+    $last = @($outRead.Result -split "`r?`n" | Where-Object { $_.Trim() })[-1]
     $doc = $last | ConvertFrom-Json
     if ((Get-IemProp $doc 'ok') -ne $true) { throw ('the probe failed: ' + (Get-IemProp $doc 'error') + ' ' + $errRead.Result) }
     return $doc.r
@@ -145,8 +175,6 @@ function Test-Parse($R) {
 }
 
 try {
-    New-Item -ItemType Directory -Force -Path $base | Out-Null
-
     # ---- the probe, through cmd.exe as sshd starts it ----
     $withD = Invoke-ThroughCmd '/d /c'
     Assert ([string]$withD.exe -eq $cmd) "probe-reads-the-shell-it-ran-under ($($withD.exe))"
@@ -159,41 +187,38 @@ try {
     # ---- refusals before anything is written ----
     New-TestKey
     $e = ErrorOf { Set-IemSshShell @common }
-    Assert ($e -like '*elevated root*refused*' -and (Read-Values) -eq $absent -and $null -eq (Get-UndoTask)) "set-refuses-an-elevated-root-that-is-not-admin-only ($e)"
+    Assert ($e -like '*elevated root*refused*' -and (Read-Values) -eq $absent -and $null -eq (Get-UndoTask)) "set-refuses-a-missing-elevated-root ($e)"
+    New-Item -ItemType Directory -Force -Path $er | Out-Null
+    $e = ErrorOf { Set-IemSshShell @common }
+    Assert ($e -like '*elevated root*refused*' -and (Read-Values) -eq $absent -and $null -eq (Get-UndoTask) -and -not (Test-Path -LiteralPath $dir)) "set-refuses-an-elevated-root-the-user-may-change ($e)"
+    Remove-Item -LiteralPath $er -Recurse -Force
     Install-IemElevatedFolder -Path $er -UserSid $me.sid
-    $k = $hklm.OpenSubKey($sub, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, [System.Security.AccessControl.RegistryRights]::ChangePermissions -bor [System.Security.AccessControl.RegistryRights]::ReadPermissions)
-    $acl = $k.GetAccessControl()
-    $acl.AddAccessRule((New-Object System.Security.AccessControl.RegistryAccessRule((New-Object System.Security.Principal.SecurityIdentifier $sidUsers), 'SetValue', 'None', 'None', 'Allow')))
-    $k.SetAccessControl($acl)
-    $k.Close()
+    Add-KeyRule 'SetValue' 'None' 'None'
     $e = ErrorOf { Set-IemSshShell @common }
     Assert ($e -like "*may be changed by $sidUsers*" -and (Read-Values) -eq $absent -and $null -eq (Get-UndoTask) -and -not (Test-Path -LiteralPath $prior)) "set-refuses-a-key-users-may-write-and-writes-nothing ($e)"
     New-TestKey
-    # A rule that reaches only subkeys (inherit-only) gives no right on the key's own values.
-    $k = $hklm.OpenSubKey($sub, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, [System.Security.AccessControl.RegistryRights]::ChangePermissions -bor [System.Security.AccessControl.RegistryRights]::ReadPermissions)
-    $acl = $k.GetAccessControl()
-    $acl.AddAccessRule((New-Object System.Security.AccessControl.RegistryAccessRule((New-Object System.Security.Principal.SecurityIdentifier $sidUsers), 'FullControl', 'ContainerInherit', 'InheritOnly', 'Allow')))
-    $k.SetAccessControl($acl)
-    $k.Close()
-    $k = $hklm.OpenSubKey($sub, $true)
-    $k.SetValue('DefaultShell', [byte[]]@(), [Microsoft.Win32.RegistryValueKind]::None)
-    $k.Close()
-    # The key's rules are read first: this refusal names the value, so the inherit-only rule passed.
+    # A rule that reaches only subkeys (inherit-only) gives no right on the key's own values;
+    # the key's rules are read first, so a refusal naming the value proves the rule passed.
+    Add-KeyRule 'FullControl' 'ContainerInherit' 'InheritOnly'
+    Set-TestValue 'DefaultShell' ([byte[]]@(1)) ([Microsoft.Win32.RegistryValueKind]::None)
     $e = ErrorOf { Set-IemSshShell @common }
-    Assert ($e -like '*DefaultShell*cannot be saved*' -and $null -eq (Get-UndoTask) -and -not (Test-Path -LiteralPath $prior)) "set-passes-an-inherit-only-rule-and-refuses-a-value-it-cannot-write-back-exactly ($e)"
+    Assert ($e -like '*DefaultShell*kind None refused*' -and $null -eq (Get-UndoTask) -and -not (Test-Path -LiteralPath $prior)) "set-passes-an-inherit-only-rule-and-refuses-a-value-it-cannot-write-back-exactly ($e)"
     New-TestKey
 
     # ---- from absent: saved, armed, written, read back ----
     $before = Get-Date
     $r = Set-IemSshShell @common
     Assert ($r.state -ceq 'set' -and (Read-Values) -ceq $ours) "set-from-absent-writes-the-three-values ($(Read-Values))"
-    foreach ($n in $names) { Assert ((Get-IemProp $r.prior $n) -eq $null) "set-from-absent-saves-$n-absent" }
-    foreach ($p in @($dir, $prior, (Join-Path $dir 'IemSshShell.psm1'), (Join-Path $dir 'IemPc.psm1'), (Join-Path $dir 'ssh-shell-undo.ps1'))) {
+    foreach ($n in $names) { Assert ([string](Get-IemProp (Get-IemProp $r.prior $n) 'kind') -ceq 'absent') "set-from-absent-saves-$n-absent" }
+    foreach ($p in @($dir, $prior, (Join-Path $dir 'ssh-shell-undo.ps1'))) {
         $bad = Test-IemElevatedItem -Path $p -UserSid $me.sid
         Assert ($bad.Count -eq 0) "set-writes-admin-only [$p] ($($bad -join '; '))"
     }
-    Assert ((Get-FileHash -LiteralPath (Join-Path $dir 'IemPc.psm1')).Hash -ceq (Get-FileHash -LiteralPath (Join-Path $here 'IemPc.psm1')).Hash) 'set-copies-the-iempc-module-it-loaded'
-    Assert ((Get-FileHash -LiteralPath (Join-Path $dir 'IemSshShell.psm1')).Hash -ceq (Get-FileHash -LiteralPath (Join-Path $here 'IemSshShell.psm1')).Hash) 'set-copies-itself'
+    foreach ($n in @($sources.Keys)) {
+        $copy = Join-Path $dir $n
+        $bad = Test-IemElevatedItem -Path $copy -UserSid $me.sid
+        Assert ($bad.Count -eq 0 -and (Get-FileHash -LiteralPath $copy).Hash -ceq (Get-FileHash -LiteralPath $sources[$n]).Hash) "set-copies-the-module-the-undo-loads-admin-only [$n] ($($bad -join '; '))"
+    }
     $t = Get-UndoTask
     Assert ($null -ne $t) 'set-arms-the-undo-task'
     $d = $t.Definition
@@ -202,6 +227,8 @@ try {
     $tr = @($d.Triggers)
     $start = [datetime]$tr[0].StartBoundary
     Assert ($tr.Count -eq 1 -and [int]$tr[0].Type -eq 1 -and $start -ge $before.AddMinutes(9.5) -and $start -le (Get-Date).AddMinutes(10.5)) "undo-task-fires-once-in-ten-minutes ($($tr[0].StartBoundary))"
+    $next = [datetime]$t.NextRunTime
+    Assert ($next -ge $before.AddMinutes(9.5) -and $next -le (Get-Date).AddMinutes(10.5)) "undo-task-next-run-is-in-ten-minutes-local-time ($next)"
     Assert ([datetime]$r.undo.at -eq $start -and $r.undo.task -ceq ($folder + '\' + $taskName)) "set-answers-the-undo-task-and-its-time ($($r.undo.task) $($r.undo.at))"
     $a = @($d.Actions)[0]
     Assert ($a.Path -ceq (Join-Path ([Environment]::GetFolderPath('System')) 'WindowsPowerShell\v1.0\powershell.exe') -and
@@ -217,7 +244,19 @@ try {
     Assert ((Get-IemBytesSha256 -Bytes ([IO.File]::ReadAllBytes($prior))) -ceq (Get-IemBytesSha256 -Bytes $savedBytes)) 'set-again-keeps-the-first-saved-values'
     Assert ([datetime]$r.undo.at -gt $start) "set-again-moves-the-undo-time ($($r.undo.at))"
 
-    # ---- confirm: the task and the saved values go, the values stay ----
+    # ---- confirm refuses a key others may change, and keeps the undo armed ----
+    Add-KeyRule 'SetValue' 'None' 'None'
+    $e = ErrorOf { Confirm-IemSshShell @common }
+    Assert ($e -like "*may be changed by $sidUsers*" -and $null -ne (Get-UndoTask) -and (Test-Path -LiteralPath $prior)) "confirm-refuses-a-key-others-may-change ($e)"
+    $k = $hklm.OpenSubKey($sub, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree,
+        [System.Security.AccessControl.RegistryRights]::ChangePermissions -bor [System.Security.AccessControl.RegistryRights]::ReadPermissions)
+    $acl = $k.GetAccessControl()
+    [void]$acl.RemoveAccessRule((New-Object System.Security.AccessControl.RegistryAccessRule((New-Object System.Security.Principal.SecurityIdentifier $sidUsers),
+        [System.Security.AccessControl.RegistryRights]::SetValue, 'None', 'None', 'Allow')))
+    $k.SetAccessControl($acl)
+    $k.Close()
+
+    # ---- confirm: the saved values and the task go, the values stay ----
     $c = Confirm-IemSshShell @common
     Assert ($c.state -ceq 'confirmed' -and $null -eq (Get-UndoTask) -and -not (Test-Path -LiteralPath $prior) -and (Read-Values) -ceq $ours) "confirm-removes-the-undo-task-and-the-saved-values ($($c.state))"
     $c = Confirm-IemSshShell @common
@@ -234,6 +273,15 @@ try {
     $u = Undo-IemSshShell @common
     Assert ($u.state -ceq 'restored' -and (Read-Values) -ceq $absent -and $null -eq (Get-UndoTask) -and -not (Test-Path -LiteralPath $prior)) "undo-restores-absent-values ($(Read-Values))"
 
+    # ---- an empty multi-string is no absent value and no empty string ----
+    Set-TestValue 'DefaultShellArguments' ([string[]]@()) ([Microsoft.Win32.RegistryValueKind]::MultiString)
+    $empty = 'absent ; absent ; MultiString:0:'
+    Assert ((Read-Values) -ceq $empty) "empty-multi-string-in-place ($(Read-Values))"
+    $r = Set-IemSshShell @common
+    $u = Undo-IemSshShell @common
+    Assert ($u.state -ceq 'restored' -and (Read-Values) -ceq $empty) "undo-restores-an-empty-multi-string-exactly ($(Read-Values))"
+    New-TestKey
+
     # ---- a foreign prior shell: saved and restored exactly, by hand and by the task ----
     Set-Foreign
     Assert ((Read-Values) -ceq $foreign) "foreign-prior-in-place ($(Read-Values))"
@@ -245,32 +293,30 @@ try {
 
     # ---- confirm refuses values that are not ours, and keeps the undo armed ----
     $r = Set-IemSshShell @common
-    $k = $hklm.OpenSubKey($sub, $true)
-    $k.SetValue('DefaultShellArguments', '/x', [Microsoft.Win32.RegistryValueKind]::String)
-    $k.Close()
+    Set-TestValue 'DefaultShellArguments' '/x' ([Microsoft.Win32.RegistryValueKind]::String)
     $e = ErrorOf { Confirm-IemSshShell @common }
     Assert ($e -like '*not ours*' -and $null -ne (Get-UndoTask) -and (Test-Path -LiteralPath $prior)) "confirm-refuses-values-that-are-not-ours ($e)"
 
     # ---- a saved file someone else may change is never restored from ----
+    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier $sidUsers), 'Modify', 'Allow')
     $facl = Get-Acl -LiteralPath $prior
-    $facl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier $sidUsers), 'Modify', 'Allow')))
+    $facl.AddAccessRule($rule)
     Set-Acl -LiteralPath $prior -AclObject $facl
     $e = ErrorOf { Undo-IemSshShell @common }
     Assert ($e -like '*saved values are refused*' -and (Read-Values) -like '*String:/x') "undo-refuses-a-saved-file-others-may-change ($e)"
     $e = ErrorOf { Set-IemSshShell @common }
     Assert ($e -like '*saved values are refused*') "set-refuses-a-saved-file-others-may-change ($e)"
     $facl = Get-Acl -LiteralPath $prior
-    [void]$facl.RemoveAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier $sidUsers), 'Modify', 'Allow')))
+    [void]$facl.RemoveAccessRule($rule)
     Set-Acl -LiteralPath $prior -AclObject $facl
 
     # ---- the undo task as registered, run now: SYSTEM restores the foreign shell ----
-    $t = Get-UndoTask
-    [void]$t.Run($null)
-    $gone = Wait-UndoTaskGone 120
-    $log = Join-Path $dir 'undo.log'
+    $lines = Get-LogLines
+    [void](Get-UndoTask).Run($null)
+    $done = Wait-UndoDone $lines 120
     $said = ''
     if (Test-Path -LiteralPath $log) { $said = ([IO.File]::ReadAllText($log)).Trim() }
-    Assert ($gone -and (Read-Values) -ceq $foreign) "undo-task-restores-the-prior-shell-as-system ($(Read-Values); log: $said)"
+    Assert ($done -and (Read-Values) -ceq $foreign) "undo-task-restores-the-prior-shell-as-system ($(Read-Values); log: $said)"
     Assert ($said -like '*undo restored') "undo-task-logs-its-result ($said)"
     $r = Set-IemSshShell @common
     Assert ($r.state -ceq 'set' -and $r.undo_log -like '*undo restored') "set-names-the-last-undo ($($r.undo_log))"

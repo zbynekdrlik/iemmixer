@@ -15,7 +15,7 @@ import iempc_sshshell as ss  # noqa: E402
 from test_iempc import SHA, Base, ip, make_zip, sha256  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
-MODULES = {"IemSshShell.psm1": b"synthetic IemSshShell.psm1"}
+MODULES = {"IemSshShell.psm1": b"synthetic IemSshShell.psm1", "tuning/IemTuningStore.psm1": b"synthetic IemTuningStore.psm1"}
 CMD = "C:\\WINDOWS\\system32\\cmd.exe"
 AT = "2026-10-08T12:10:00"
 UPLOADED = "X:\\root\\bootstrap\\" + SHA + "\\"
@@ -43,9 +43,9 @@ class ShellBase(Base):
                                   "undo": {"task": ss.UNDO_TASK, "at": AT}}
         self.probe_reply: object = {"exe": CMD, "line": line("/d /c")}
         self.confirm_reply: object = {"state": "confirmed"}
-        self.pc.texts[ss.SET] = lambda: self.set_reply
-        self.pc.texts[ss.CONFIRM] = lambda: self.confirm_reply
-        self.pc.texts[PROBE_MARK] = self.probe
+        self.pc.texts[ss.SET] = lambda: self.answer(self.set_reply)
+        self.pc.texts[ss.CONFIRM] = lambda: self.answer(self.confirm_reply)
+        self.pc.texts[PROBE_MARK] = lambda: self.answer(self.probe_reply)
         self.failing: dict[str, str] = {}   # a script mark -> the ssh failure its call raises
         fake = self.pc.ssh_ps
 
@@ -58,8 +58,9 @@ class ShellBase(Base):
 
         ip.ssh_ps = ssh_ps
 
-    def probe(self):
-        r = self.probe_reply
+    @staticmethod
+    def answer(r):
+        """A scripted reply, or a callable's (one that does something first, e.g. writes the flag)."""
         return r() if callable(r) else r
 
     def scripts(self, mark: str) -> list[tuple[str, str]]:
@@ -85,22 +86,28 @@ class SequenceTests(ShellBase):
         self.assertEqual(docs[-1]["ssh_shell"], "confirmed")
         self.assertEqual((docs[-1]["set"], docs[-1]["confirm"], docs[-1]["shell"]), ("set", "confirmed", CMD))
 
-    def test_both_modules_come_from_the_bundle_and_only_their_stage_copies_load(self) -> None:
-        """IemSshShell.psm1 imports IemPc.psm1 from its own folder: IemPc.psm1
-        is staged first, each checked by the zip's sha256, and only the stage
-        copy of the new module is imported (elevated_ps.staged)."""
+    def test_the_modules_come_from_the_bundle_and_only_their_stage_copies_load(self) -> None:
+        """IemSshShell.psm1 imports IemPc.psm1 and IemTuningStore.psm1 (its
+        exact registry save and restore) from its own folder: both are staged
+        first, each checked by the zip's sha256, and only the stage copy of
+        the new module is imported (elevated_ps.staged)."""
         self.fetched()
         self.assertEqual(self.run_main("ssh-shell", "--sha", SHA)[0], 0)
         self.assertEqual(self.pc.scps, [
             (str(ip.bundle_dir(SHA) / "IemPc.psm1"), f"tester@pc.test:/X:/root/bootstrap/{SHA}/IemPc.psm1", "finish"),
+            (str(ip.bundle_dir(SHA) / "tuning" / "IemTuningStore.psm1"),
+             f"tester@pc.test:/X:/root/bootstrap/{SHA}/IemTuningStore.psm1", "finish"),
             (str(ip.bundle_dir(SHA) / "IemSshShell.psm1"), f"tester@pc.test:/X:/root/bootstrap/{SHA}/IemSshShell.psm1",
              "finish")])
         for mark in (ss.SET, ss.CONFIRM):
             script = self.scripts(mark)[0][0]
             pc = script.index(f"$iemB = [IO.File]::ReadAllBytes('{UPLOADED}IemPc.psm1')")
+            store = script.index(f"$iemB = [IO.File]::ReadAllBytes('{UPLOADED}IemTuningStore.psm1')")
             new = script.index(f"$iemB = [IO.File]::ReadAllBytes('{UPLOADED}IemSshShell.psm1')")
             self.assertLess(pc, new, mark)
+            self.assertLess(store, new, mark)
             self.assertIn(f"$iemH -cne '{sha256(b'synthetic IemPc.psm1')}'", script)
+            self.assertIn(f"$iemH -cne '{sha256(MODULES['tuning/IemTuningStore.psm1'])}'", script)
             self.assertIn(f"$iemH -cne '{sha256(MODULES['IemSshShell.psm1'])}'", script)
             self.assertIn(f"Import-Module $iemMod -Force ; $r = & {{ {mark} }}", script[new:])
             self.assertNotIn(f"Import-Module '{UPLOADED}", script)   # never from the run folder (#15)
@@ -203,6 +210,37 @@ class FailureTests(ShellBase):
             self.assertIn("Set-IemSshShell", err)
             self.assertEqual(self.scripts(PROBE_MARK), [], bad)
 
+    def test_a_new_flag_during_set_lets_it_finish_then_runs_the_event_path_unprobed(self) -> None:
+        self.fetched()
+
+        def set_then_flag():
+            self.flag()
+            return {"state": "set", "key": ss.KEY, "values": ours(), "undo": {"task": ss.UNDO_TASK, "at": AT}}
+
+        self.set_reply = set_then_flag
+        code, docs, err = self.run_main("ssh-shell", "--sha", SHA)
+        self.assertEqual(code, ip.PREEMPTED)
+        self.assertEqual([e for _, e in self.scripts(ss.SET)], ["finish"])
+        self.assertEqual((self.scripts(PROBE_MARK), self.scripts(ss.CONFIRM)), ([], []))
+        self.assertEqual(self.pc.calls, [("iemmode.exe", ["event"], "ignore")])
+        self.assertIn(f"if it armed {ss.UNDO_TASK}", err)
+
+    def test_a_new_flag_during_confirm_lets_it_finish_then_runs_the_event_path(self) -> None:
+        self.fetched()
+
+        def confirm_then_flag():
+            self.flag()
+            return {"state": "confirmed"}
+
+        self.confirm_reply = confirm_then_flag
+        code, docs, err = self.run_main("ssh-shell", "--sha", SHA)
+        self.assertEqual(code, ip.PREEMPTED)
+        self.assertEqual([e for _, e in self.scripts(ss.CONFIRM)], ["finish"])
+        self.assertEqual(self.pc.calls, [("iemmode.exe", ["event"], "ignore")])
+        # Confirm may have finished on the PC: never called unconfirmed outright.
+        self.assertIn("may have finished", err)
+        self.assertIn(f"restores the prior OpenSSH default shell at {AT}", err)
+
     def test_a_new_flag_during_the_probe_runs_the_event_path_unconfirmed(self) -> None:
         self.fetched()
 
@@ -238,15 +276,25 @@ class RefusalTests(ShellBase):
         self.assertEqual((doc["ssh_shell"], doc["sha"], doc["key"], doc["undo_task"], doc["undo_after_min"]),
                          ("dry-run", SHA, "HKLM:\\SOFTWARE\\OpenSSH", "\\iemmixer\\iemmixer-ssh-shell-undo", 10))
         self.assertEqual((doc["values"]["DefaultShellCommandOption"], doc["values"]["DefaultShellArguments"]), ("/d /c", "/d"))
-        self.assertEqual(doc["modules"], ["IemPc.psm1", "IemSshShell.psm1"])
+        self.assertEqual(doc["modules"], ["IemPc.psm1", "tuning/IemTuningStore.psm1", "IemSshShell.psm1"])
 
     def test_a_bundle_without_the_module_is_refused_before_the_pc(self) -> None:
-        self.gh.artifact = self.artifact   # test_iempc's zip: no IemSshShell.psm1
+        self.gh.artifact = self.artifact   # test_iempc's zip: no IemSshShell.psm1, no tuning store
         self.fetched()
         for argv in (("ssh-shell", "--sha", SHA), ("ssh-shell", "--sha", SHA, "--dry-run")):
             code, _, err = self.run_main(*argv)
             self.assertEqual(code, 1, argv)
-            self.assertIn("has no IemSshShell.psm1", err)
+            self.assertIn("has no", err)
+            self.assertIn("IemSshShell.psm1", err)
+        self.assertEqual((self.pc.modules, self.pc.scps), ([], []))
+
+    def test_a_bundle_without_the_tuning_store_is_refused_before_the_pc(self) -> None:
+        self.gh.artifact = make_zip(self.tmp / "artifact-nostore" / f"iemmixer-{SHA}.zip",
+                                    extra={"IemSshShell.psm1": MODULES["IemSshShell.psm1"]})
+        self.fetched()
+        code, _, err = self.run_main("ssh-shell", "--sha", SHA)
+        self.assertEqual(code, 1)
+        self.assertIn("has no tuning/IemTuningStore.psm1", err)
         self.assertEqual((self.pc.modules, self.pc.scps), ([], []))
 
     def test_an_unfetched_or_malformed_sha_is_refused(self) -> None:
@@ -305,9 +353,11 @@ class AgreementTests(unittest.TestCase):
         self.assertIn(f"$script:DefaultTaskName = '{name}'", text)
         self.assertIn(f"$script:UndoMinutes = {ss.UNDO_MIN}", text)
         self.assertEqual((ss.OPTION, ss.ARGUMENTS), ("/d /c", "/d"))
-        # It loads IemPc.psm1 from its own folder, which is why the stage gets IemPc.psm1 first.
+        # It loads IemPc.psm1 and IemTuningStore.psm1 from its own folder, so the stage gets both first.
         self.assertIn("Import-Module (Join-Path $PSScriptRoot 'IemPc.psm1')", text)
-        self.assertEqual(ss.STAGE, ("IemPc.psm1", "IemSshShell.psm1"))
+        self.assertIn("Import-Module (Join-Path $PSScriptRoot 'IemTuningStore.psm1')", text)
+        self.assertEqual([name for _, name in ss.STAGE], ["IemPc.psm1", "IemTuningStore.psm1", "IemSshShell.psm1"])
+        self.assertEqual([member for member, _ in ss.STAGE], ["IemPc.psm1", "tuning/IemTuningStore.psm1", "IemSshShell.psm1"])
 
     def test_the_bundle_job_ships_the_module(self) -> None:
         ci = (HERE.parent.parent / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
