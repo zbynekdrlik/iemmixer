@@ -14,7 +14,9 @@ export default defineConfig({
   retries: 0,
   timeout: 240_000,
   globalTimeout: 40 * 60_000,
-  reporter: [["list"], ["json", { outputFile: process.env.LIVE_RESULTS ?? "live-results.json" }]],
+  // The ops run names its results file (LIVE_RESULTS); the default stays in
+  // the ignored test-results/ (the report holds this checkout's own paths).
+  reporter: [["list"], ["json", { outputFile: process.env.LIVE_RESULTS ?? "test-results/live-results.json" }]],
   use: {
     baseURL: process.env.LIVE_BASE_URL,
     trace: "off",

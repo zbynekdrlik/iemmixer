@@ -1,10 +1,13 @@
 import { test, expect } from "./support/fixtures";
 import { toneOf } from "./live/support/tone";
 import { celt20msStereo } from "./live/support/burst";
+import { namesBuild } from "./live/support/env";
+import { ANALYSER_INIT, readTone } from "./live/support/audio";
 
-// The live specs' pure estimators (S7, #10), run in the mock E2E job: the
-// live specs themselves run only from the ops live run, against the real PC.
-// No page is used; every input is synthetic with a known answer.
+// The live specs' pure estimators and their in-page analyser (S7, #10), run
+// in the mock E2E job: the live specs themselves run only from the ops live
+// run, against the real PC. Every input is synthetic with a known answer; only
+// the analyser test uses a page (its own, served by a route, no server).
 
 const RATE = 48_000;
 /** The analyser's window in the live specs (AnalyserNode fftSize 32768). */
@@ -125,4 +128,54 @@ test("a CELT 20 ms stereo packet passes the TOC check and SILK or 10 ms or mono 
   for (const code of [1, 2, 3]) {
     expect(celt20msStereo(packet(toc(31, true, code), 160)), `code ${code}`).toBe(false);
   }
+});
+
+test("the build check takes a git_hash of 7 or more lowercase hex digits that starts the run's SHA", () => {
+  // Synthetic: no build has this SHA.
+  const sha = "0123456789abcdef0123456789abcdef01234567";
+  expect(namesBuild("0123456", sha)).toBe(true);
+  expect(namesBuild(sha, sha)).toBe(true);
+  expect(namesBuild("012345", sha), "6 digits").toBe(false);
+  expect(namesBuild("0123457", sha), "not a prefix").toBe(false);
+  expect(namesBuild("123456789a", sha), "inside the SHA, not at its start").toBe(false);
+  expect(namesBuild("0123456789ABCDEF", "0123456789ABCDEF" + sha.slice(16)), "upper case").toBe(false);
+  expect(namesBuild(`${sha}8`, sha), "longer than the SHA").toBe(false);
+  expect(namesBuild("0123456 ", sha), "a trailing space").toBe(false);
+  expect(namesBuild("unknown", sha)).toBe(false);
+  expect(namesBuild("", sha)).toBe(false);
+  expect(namesBuild(123456789, sha)).toBe(false);
+  expect(namesBuild(undefined, sha)).toBe(false);
+  // Not a string, though its text would pass: JSON never coerces into a build.
+  expect(namesBuild(["0123456"], sha)).toBe(false);
+  expect(namesBuild(1234567, `1234567${sha.slice(7)}`)).toBe(false);
+});
+
+test("the analyser init script reads what a real AudioContext plays: 1 kHz at -20 dBFS", async ({ page }) => {
+  // The live specs' in-page path, run here in the same Chromium: the init
+  // script as Playwright transpiles and injects it, the tap on the node that
+  // feeds the destination, and readTone over the page's analyser.
+  await page.route("http://tone.test/**", (route) =>
+    route.fulfill({ contentType: "text/html", body: "<!doctype html><title>tone</title>" }),
+  );
+  await page.addInitScript(ANALYSER_INIT);
+  await page.goto("http://tone.test/");
+  const state = await page.evaluate(async () => {
+    const ctx = new AudioContext({ sampleRate: 48_000 });
+    const osc = ctx.createOscillator();
+    osc.frequency.value = 1000;
+    const gain = ctx.createGain();
+    gain.gain.value = 0.1;
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start();
+    await ctx.resume();
+    return ctx.state;
+  });
+  expect(state).toBe("running");
+  // The analyser's window (0.68 s) then holds only the steady tone.
+  await page.waitForTimeout(1_500);
+  const tone = await readTone(page);
+  expect(Math.abs(tone.hz - 1000), `${tone.hz} Hz`).toBeLessThanOrEqual(0.5);
+  expect(Math.abs(tone.dbfs + 20), `${tone.dbfs} dBFS`).toBeLessThanOrEqual(0.1);
+  expect(tone.gap).toBe(false);
 });

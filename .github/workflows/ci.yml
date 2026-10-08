@@ -351,8 +351,11 @@ jobs:
           E2E_BASE_URL: http://127.0.0.1:8080
         run: npx playwright test --reporter=list
       - name: Live specs listed (they run only from the ops live run; no LIVE_* here)
+        # Without the mock run's PINs as well: the ops browser job has none
+        # (no band PIN in GitHub, #10), so a live spec that reads them at
+        # import (support/session.ts -> pins.ts) must fail here, not there.
         working-directory: e2e
-        run: npx playwright test --config playwright.live.config.ts --list
+        run: env -u E2E_ENGINEER_PIN -u E2E_MEMBER_PIN npx playwright test --config playwright.live.config.ts --list
       - name: Soak client against the NullRt engine and the server (10 min on a push, 2 min on a pull request; S7 design note section 9)
         # After Playwright, so no spec runs beside it. The client reads only (it
         # sends no mixer command) and listens to member9's mix, which no spec

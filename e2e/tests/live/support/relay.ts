@@ -1,7 +1,7 @@
-// Imported as NodeWebSocket, never WebSocket: see tests/support/wire.ts.
-import NodeWebSocket from "ws";
+import type NodeWebSocket from "ws";
 import type { Page, WebSocketRoute } from "@playwright/test";
 import { expectBuild, live } from "./env";
+import { liveSocket } from "./socket";
 
 // Every page socket of a live spec goes through the runner (the #10 decision
 // of 2026-10-07, applied to the browser): after "ide event" the predecessor
@@ -10,12 +10,13 @@ import { expectBuild, live } from "./env";
 // 1.58's `WebSocketRoute.connectToServer()` takes no URL (and connects from
 // the page, past any check), so the relay holds the real socket itself.
 
-/** How long a real socket may take to open (the tunnel's TLS and upgrade). */
-const OPEN_MS = 15_000;
-/** A page close: the page-side mock forwards 1000 (a native socket refuses 1001). */
+/** Closing the page's (mocked) socket: a normal close, which the app handles like the server's. */
 const CLOSE = { code: 1000 };
 
 export type RelayEvent = { event: string; data: unknown; at: number };
+
+/** Whether the page closed one routed socket; set from the route's first moment. */
+type PageSide = { gone: boolean };
 
 /** What the relay saw; `check()` turns a broken rule into a failure. */
 export class Relay {
@@ -25,7 +26,7 @@ export class Relay {
   readonly refused: string[] = [];
   /** Paths the server closed (a live spec never reconnects). */
   readonly serverClosed: string[] = [];
-  /** Paths whose socket never opened, and why (fixed words, no URL). */
+  /** Sockets that never opened or broke, and why (the path and fixed words, no URL). */
   readonly failures: string[] = [];
   private readonly texts = new Map<string, RelayEvent[]>();
   private readonly binaries = new Map<string, number>();
@@ -68,7 +69,7 @@ export class Relay {
     return this.binaries.get(path) ?? 0;
   }
 
-  /** Throws the first broken rule: a socket that never opened, a server close, a second attempt. */
+  /** Throws the first broken rule: a socket that never opened or broke, a server close, a second attempt. */
   check(): void {
     if (this.failures.length > 0) throw new Error(`relay: ${this.failures[0]}`);
     if (this.serverClosed.length > 0) throw new Error(`relay: the server closed ${this.serverClosed[0]} (no reconnect)`);
@@ -82,63 +83,52 @@ export class Relay {
     this.sockets.clear();
   }
 
-  /** Pipes one page socket on `path` to the real one at `url`; resolves once that opened or failed. */
-  async pipe(route: WebSocketRoute, path: string, url: string): Promise<void> {
-    let pageClosed = false;
+  /**
+   * Pipes the page's socket on `path` to a real one at `url`; resolves once
+   * that opened or failed. `side` is the page's close, tracked since the
+   * route began (a close during the build check means no real socket).
+   */
+  async pipe(route: WebSocketRoute, path: string, url: string, side: PageSide): Promise<void> {
+    if (side.gone || this.ending) return;
     let failed = false;
     const fail = (why: string) => {
-      if (failed || pageClosed || this.ending) return;
+      if (failed || side.gone || this.ending) return;
       failed = true;
-      this.failures.push(`${path} ${why}`);
+      this.failures.push(why);
       void route.close(CLOSE);
     };
-    const real = new NodeWebSocket(url, { origin: live().baseURL });
+    const { ws: real, opened } = liveSocket(url, path);
     this.sockets.add(real);
     const queue: (string | Buffer)[] = [];
     route.onMessage((m) => {
-      if (real.readyState === NodeWebSocket.OPEN) real.send(m);
+      if (real.readyState === real.OPEN) real.send(m);
       else queue.push(m);
     });
+    // Replaces the handler's own onClose: the page's close now also ends the real socket.
     route.onClose(() => {
-      pageClosed = true;
+      side.gone = true;
       real.close();
+    });
+    real.once("open", () => {
+      for (const m of queue.splice(0)) real.send(m);
     });
     real.on("message", (d: Buffer, binary: boolean) => {
       this.observe(path, d, binary);
-      if (!pageClosed) route.send(binary ? d : d.toString());
+      if (!side.gone) route.send(binary ? d : d.toString());
     });
+    real.on("error", () => fail(`${path} failed (socket error)`));
     real.on("close", () => {
       this.sockets.delete(real);
-      if (failed || pageClosed || this.ending) return;
+      if (failed || side.gone || this.ending) return;
       this.serverClosed.push(path);
       void route.close(CLOSE);
     });
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(() => {
-        fail(`did not open within ${OPEN_MS / 1000} s`);
-        // A socket still connecting: close() aborts its handshake.
-        real.close();
-        resolve();
-      }, OPEN_MS);
-      real.on("open", () => {
-        clearTimeout(timer);
-        for (const m of queue.splice(0)) real.send(m);
-        resolve();
-      });
-      real.on("unexpected-response", (req, res) => {
-        clearTimeout(timer);
-        fail(`was refused: HTTP ${res.statusCode}`);
-        res.resume();
-        req.destroy();
-        resolve();
-      });
-      // The error's own text can name the host: the path and fixed words only.
-      real.on("error", () => {
-        clearTimeout(timer);
-        fail("failed (socket error)");
-        resolve();
-      });
-    });
+    try {
+      await opened;
+    } catch (e) {
+      // liveSocket's reason: the path and fixed words.
+      fail((e as Error).message);
+    }
   }
 }
 
@@ -155,6 +145,10 @@ export async function relaySockets(page: Page, opts: { hil?: boolean } = {}): Pr
   const host = new URL(live().baseURL).host;
   page.once("close", () => relay.end());
   await page.routeWebSocket(/\/ws\//, async (route) => {
+    const side: PageSide = { gone: false };
+    route.onClose(() => {
+      side.gone = true;
+    });
     let path = "/ws/…";
     try {
       const url = new URL(route.url());
@@ -179,7 +173,7 @@ export async function relaySockets(page: Page, opts: { hil?: boolean } = {}): Pr
         return;
       }
       if (path === "/ws/audio" && opts.hil) url.searchParams.set("hil", "1");
-      await relay.pipe(route, path, url.toString());
+      await relay.pipe(route, path, url.toString(), side);
     } catch {
       // A handler that throws would surface Playwright's own text (the URL).
       relay.failures.push(`${path} could not be relayed`);

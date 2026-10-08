@@ -1,7 +1,7 @@
-// Imported as NodeWebSocket, never WebSocket: see tests/support/wire.ts.
-import NodeWebSocket from "ws";
+import type NodeWebSocket from "ws";
 import type { APIRequestContext } from "@playwright/test";
 import { expectBuild, live } from "./env";
+import { OPEN_MS, liveSocket } from "./socket";
 
 // The bursts (S7, #10): while the browser job runs, the PC fires the HIL test
 // signal with the listen probe in bursts of 30 s every 60 s. The server tells
@@ -29,8 +29,6 @@ export function celt20msStereo(packet: Uint8Array): boolean {
 
 /** `inBurst()` ends at the latest this long after a burst's `probe` (a burst is 30 s). */
 export const BURST_MS = 28_000;
-/** How long the watch's socket may take to open, and the server to answer ListenStart. */
-const OPEN_MS = 15_000;
 
 export type Status = { status: string; at: number };
 
@@ -66,9 +64,11 @@ export class BurstWatch {
     url.protocol = "wss:";
     url.searchParams.set("token", token ?? tokens.engineer);
     url.searchParams.set("hil", "1");
-    const watch = new BurstWatch(new NodeWebSocket(url.toString(), { origin: baseURL }));
-    await watch.opened();
+    const { ws, opened } = liveSocket(url.toString(), "the burst watch's socket");
+    // Listening before the open: nothing the server sends first is missed.
+    const watch = new BurstWatch(ws);
     try {
+      await opened;
       watch.ws.send(JSON.stringify({ cmd: "ListenStart", member_id: "engineer" }));
       const deadline = Date.now() + OPEN_MS;
       for (;;) {
@@ -83,30 +83,6 @@ export class BurstWatch {
       watch.close();
       throw e;
     }
-  }
-
-  private opened(): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.close();
-        reject(new Error(`the burst watch's socket did not open within ${OPEN_MS / 1000} s`));
-      }, OPEN_MS);
-      this.ws.once("open", () => {
-        clearTimeout(timer);
-        resolve();
-      });
-      this.ws.once("unexpected-response", (req, res) => {
-        clearTimeout(timer);
-        this.closed = true;
-        res.resume();
-        req.destroy();
-        reject(new Error(`the burst watch's socket was refused: HTTP ${res.statusCode}`));
-      });
-      this.ws.once("error", () => {
-        clearTimeout(timer);
-        reject(new Error("the burst watch's socket failed to open"));
-      });
-    });
   }
 
   private breaks(why: string): void {
