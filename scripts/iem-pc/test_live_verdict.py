@@ -296,6 +296,42 @@ class Verdict(unittest.TestCase):
         r.jobs["browser"] = "cancelled"
         self.assertEqual(r.verdict()["conclusion"], "failure")
 
+    def test_a_failed_pc_job_that_left_no_record_is_cancelled(self):
+        # The guard stops the runner at "ide event": GitHub's conclusion for that job, and whether its
+        # always() upload still runs, are unverified (plan Task 10). A failed PC job without its record is
+        # a cut, never red; one that succeeded or was skipped and left none is red.
+        for key, field, job, missing in (("begin", "begin", "pc-begin", "no begin record"),
+                                         ("pc", "pc", "pc", "no pc record"),
+                                         ("end", "evidence", "pc-end", "no end record")):
+            r = Record()
+            setattr(r, field, None)
+            r.jobs[key] = "failure"
+            self.cancelled(r, f"cancelled: no record of the {job} job")
+            # Before every check: the titles, the bursts and the browser job broken too.
+            r.titles, r.bursts, r.jobs["browser"] = [], [], "failure"
+            self.cancelled(r, f"cancelled: no record of the {job} job")
+            for result in ("success", "skipped"):
+                r = Record()
+                setattr(r, field, None)
+                r.jobs[key] = result
+                self.red(r, missing)
+            r = Record()
+            setattr(r, field, lv.UNREADABLE)
+            r.jobs[key] = "failure"
+            self.assertEqual(r.verdict()["conclusion"], "failure")
+        # The browser's report is no PC record.
+        r = Record()
+        r.results, r.jobs["browser"] = None, "failure"
+        self.red(r, "no browser results")
+
+    def test_a_bursts_exit_code_is_printed_only_within_32_bits(self):
+        for code, first in ((2 ** 32 - 1, "burst 3 exited 4294967295"), (-(2 ** 31), "burst 3 exited -2147483648"),
+                            (2 ** 32, "burst 3 exited abnormally"), (-(2 ** 31) - 1, "burst 3 exited abnormally"),
+                            (10 ** 40, "burst 3 exited abnormally")):
+            r = Record()
+            r.bursts[2]["exit"] = code
+            self.red(r, first)
+
     def test_another_pc_failure_names_its_reason_code(self):
         for code in ("bundle-not-active", "engine-not-up", "no-client", "token-failed", "push-count-failed"):
             r = Record()
@@ -483,6 +519,19 @@ test('second; with a semicolon', async () => {});
         # A title twice stays twice: each needs its own test.
         self.spec("nested/again.spec.ts", "test(`third title`, async () => {});\n")
         self.assertEqual(lv.titles(self.dir).count("third title"), 2)
+
+    def test_each_files_titles_are_the_parity_checkers_on_every_e2e_spec(self):
+        # One rule for both: on the repository's own spec files, a file's titles in source order hold
+        # exactly the titles check_parity_manifest reads, one per `test(` it finds.
+        specs = sorted((Path(__file__).resolve().parents[2] / "e2e" / "tests").rglob("*.spec.ts"))
+        self.assertGreater(len(specs), 10)
+        for path in specs:
+            text = path.read_text(encoding="utf-8")
+            got = lv.file_titles(text)
+            self.assertEqual(set(got), cpm.playwright_titles(text), path.name)
+            self.assertEqual(len(got), len(cpm.PW_TEST.findall(text)), path.name)
+        self.assertEqual(lv.file_titles('test("b", f);\ntest(`a \\` tick`, f);\ntest(\'c\', f);\n'),
+                         ["b", "a ` tick", "c"])
 
     def test_a_missing_folder_or_an_unreadable_spec_cannot_be_read(self):
         self.assertEqual(lv.titles(self.dir), [])
