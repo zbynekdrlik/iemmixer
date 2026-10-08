@@ -29,6 +29,12 @@ export function celt20msStereo(packet: Uint8Array): boolean {
 
 /** `inBurst()` ends at the latest this long after a burst's `probe` (a burst is 30 s). */
 export const BURST_MS = 28_000;
+/**
+ * A `probe` begins a burst for the watch only after this many of the slot's
+ * own frames since the last `listening`: 5 s of 20 ms frames. Bursts are 30 s
+ * apart; a stall of the probe frames inside a burst gives one or a few.
+ */
+export const OWN_FRAMES_BEFORE_A_BURST = 250;
 
 export type Status = { status: string; at: number };
 
@@ -38,14 +44,27 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  * A runner-side `/ws/audio?…&hil=1` socket listening to the engineer's mix:
  * it sees every burst's edges and frames. One socket, opened after the build
  * check; a server close makes every later call throw (no reconnect).
+ *
+ * A burst counts only when the watch saw it begin: 5 s of the slot's own
+ * frames came after the last `listening` (the ListenStart answer or a
+ * burst's end) and before its `probe`. The server's probe gate is per
+ * session, so a watch opened in the middle of a burst gets `probe` with its
+ * first frame, and a stall of the probe frames over the gate's 100 ms hold
+ * gives `listening`, an own frame and `probe` again in the middle of one:
+ * neither tells how much of the burst is left, and the watch waits for the
+ * next one.
  */
 export class BurstWatch {
   /** Every `AudioStatus` with its arrival time (ms). */
   readonly statuses: Status[] = [];
   private frames = 0;
   private bad = 0;
-  /** When the current burst's `probe` came; null outside a burst. */
+  /** When the current burst's `probe` came; null outside a burst it saw begin. */
   private probeAt: number | null = null;
+  /** The slot's own frames since the last `listening`. */
+  private ownFrames = 0;
+  /** Inside a burst the watch did not see begin (opened in its middle, or after a stall). */
+  private joined = false;
   private broken: string | null = null;
   private closed = false;
 
@@ -102,11 +121,23 @@ export class BurstWatch {
       if (msg?.event !== "AudioStatus" || typeof msg.data?.status !== "string") return;
       const status = msg.data.status;
       this.statuses.push({ status, at: now });
-      if (status === "probe") this.probeAt = now;
-      if (status === "listening") this.probeAt = null;
+      if (status === "probe") {
+        if (this.ownFrames >= OWN_FRAMES_BEFORE_A_BURST) this.probeAt = now;
+        else this.joined = true;
+      }
+      if (status === "listening") {
+        this.probeAt = null;
+        this.joined = false;
+        this.ownFrames = 0;
+      }
       return;
     }
-    if (this.probeAt === null) return;
+    // A joined burst's frames are probe frames too: neither the slot's own nor counted.
+    if (this.joined) return;
+    if (this.probeAt === null) {
+      this.ownFrames += 1;
+      return;
+    }
     this.frames += 1;
     if (!celt20msStereo(new Uint8Array(d.buffer, d.byteOffset, d.byteLength))) this.bad += 1;
   }
@@ -117,7 +148,7 @@ export class BurstWatch {
     if (this.closed) throw new Error("the burst watch is closed");
   }
 
-  /** Inside a burst: from its `probe` until `listening`, at most `BURST_MS`. */
+  /** Inside a burst the watch saw begin: from its `probe` until `listening`, at most `BURST_MS`. */
   inBurst(): boolean {
     this.check();
     return this.probeAt !== null && Date.now() - this.probeAt < BURST_MS;
@@ -130,7 +161,8 @@ export class BurstWatch {
 
   /**
    * Resolves inside a burst with at least `minLeftMs` of it left: at once in
-   * such a burst, else at the next `probe`; throws after `within` ms.
+   * such a burst, else at the next `probe` the watch sees begin; throws
+   * after `within` ms.
    */
   async burst({ minLeftMs = 22_000, within = 180_000 }: { minLeftMs?: number; within?: number } = {}): Promise<void> {
     if (minLeftMs > BURST_MS) throw new Error(`a burst never has ${minLeftMs} ms left (at most ${BURST_MS})`);
@@ -142,7 +174,7 @@ export class BurstWatch {
     }
   }
 
-  /** Binary frames received inside bursts. */
+  /** Binary frames received inside the bursts the watch saw begin. */
   get burstFrames(): number {
     this.check();
     return this.frames;
