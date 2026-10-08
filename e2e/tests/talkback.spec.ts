@@ -1,8 +1,8 @@
-import { writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, expect } from "./support/fixtures";
 import { openMixer, tab } from "./support/session";
+import { toneWav } from "./support/wav";
 import { PageSocket } from "./support/wire";
 
 // The engineer's push-to-talk (F18; X5, X6) with Chromium's fake microphone
@@ -12,31 +12,6 @@ import { PageSocket } from "./support/wire";
 // carries the −20 dBFS test sine, so the test takes the card away (eng_mic's
 // trim off, which comes before the talkback in the input) and puts it back
 // after: what eng_mic's meter then shows is the talkback alone.
-
-/** A loop-safe tone (a whole number of cycles) as 16-bit mono PCM WAV. */
-function toneWav(file: string, hz: number, amplitude: number, rate = 48_000): string {
-  const n = rate;
-  const data = Buffer.alloc(n * 2);
-  for (let i = 0; i < n; i++) {
-    data.writeInt16LE(Math.round(amplitude * 32767 * Math.sin((2 * Math.PI * hz * i) / rate)), i * 2);
-  }
-  const header = Buffer.alloc(44);
-  header.write("RIFF", 0);
-  header.writeUInt32LE(36 + data.length, 4);
-  header.write("WAVE", 8);
-  header.write("fmt ", 12);
-  header.writeUInt32LE(16, 16);
-  header.writeUInt16LE(1, 20); // PCM
-  header.writeUInt16LE(1, 22); // mono
-  header.writeUInt32LE(rate, 24);
-  header.writeUInt32LE(rate * 2, 28);
-  header.writeUInt16LE(2, 32);
-  header.writeUInt16LE(16, 34);
-  header.write("data", 36);
-  header.writeUInt32LE(data.length, 40);
-  writeFileSync(file, Buffer.concat([header, data]));
-  return file;
-}
 
 const MIC_WAV = toneWav(join(tmpdir(), "iemmixer-e2e-talkback-1k.wav"), 1000, 0.9);
 
