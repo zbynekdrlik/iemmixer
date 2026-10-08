@@ -116,7 +116,8 @@ export class Relay {
     await new Promise<void>((resolve) => {
       const timer = setTimeout(() => {
         fail(`did not open within ${OPEN_MS / 1000} s`);
-        real.terminate();
+        // A socket still connecting: close() aborts its handshake.
+        real.close();
         resolve();
       }, OPEN_MS);
       real.on("open", () => {
