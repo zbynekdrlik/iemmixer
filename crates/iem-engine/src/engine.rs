@@ -355,13 +355,21 @@ fn accept_media(
     }
 }
 
-/// Drains the listen taps into 48 kHz frames for the current media client;
-/// a client that takes nothing for `pipe::SEND_TIMEOUT` is dropped
-/// (`Conn::writer`), so `run`, which joins this thread, still returns.
-fn media_pump(mut taps: [Consumer<f32>; 2], conns: mpsc::Receiver<Conn>, stop: Arc<AtomicBool>) {
+/// Drains the listen taps, then the listen probe's taps (S7: streams 2 and
+/// 3), into 48 kHz frames for the current media client; a client that takes
+/// nothing for `pipe::SEND_TIMEOUT` is dropped (`Conn::writer`), so `run`,
+/// which joins this thread, still returns.
+fn media_pump(
+    mut taps: [Consumer<f32>; 2],
+    mut probes: [Consumer<f32>; 2],
+    conns: mpsc::Receiver<Conn>,
+    stop: Arc<AtomicBool>,
+) {
     let mut framers = [
         TapFramer::new(stream::ENGINEER_LISTEN),
         TapFramer::new(stream::MEMBER_LISTEN),
+        TapFramer::new(stream::ENGINEER_PROBE),
+        TapFramer::new(stream::MEMBER_PROBE),
     ];
     let mut current: Option<Conn> = None;
     let mut buf = vec![0.0f32; crate::rt::TAP_RING];
@@ -373,7 +381,8 @@ fn media_pump(mut taps: [Consumer<f32>; 2], conns: mpsc::Receiver<Conn>, stop: A
             }
         }
         // 5 ms of a tap is 960 values; the buffer holds a whole tap ring.
-        for (tap, framer) in taps.iter_mut().zip(framers.iter_mut()) {
+        let rings = taps.iter_mut().chain(probes.iter_mut());
+        for (tap, framer) in rings.zip(framers.iter_mut()) {
             let (got, _) = tap.pop_partial_slice(&mut buf);
             let n = got.len();
             framer.feed(buf.get(..n).unwrap_or_default(), &mut frames);
@@ -529,6 +538,7 @@ pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
         cmds,
         meters,
         taps,
+        probes,
         talkback,
         status,
     } = handles;
@@ -577,7 +587,7 @@ pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
         })?,
         spawn("iem-media", {
             let stop = Arc::clone(&stop);
-            move || media_pump(taps, media_rx, stop)
+            move || media_pump(taps, probes, media_rx, stop)
         })?,
     ];
     let control = Control::new(Parts {

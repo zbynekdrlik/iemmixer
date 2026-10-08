@@ -81,13 +81,15 @@ pub enum RtOp {
     },
     /// The HIL test signal (S6): a test signal whose sine, while it runs,
     /// sounds only on the spare outputs in `mask`; every mix's TX and every
-    /// other spare output is zero meanwhile.
+    /// other spare output is zero meanwhile. With `listen` (S7) the probe
+    /// taps of the listened slots carry the spare outputs' samples too.
     HilTestSignal {
         i: u16,
         hz: f64,
         amp: f64,
         ttl: u64,
         mask: HilMask,
+        listen: bool,
     },
     StopTestSignal,
     FadeOut,

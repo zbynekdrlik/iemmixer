@@ -30,6 +30,7 @@ use crate::cmd::{HilMask, MAX_HIL, RtCmd, RtOp};
 use crate::core::reconcile;
 use crate::latency::{self, LatencyProbe};
 use crate::params::{eq_params, input_params};
+use crate::probe;
 use crate::topology::Topology;
 use crate::{MAX_CMDS_PER_BLOCK, SAMPLE_RATE, SEG, TALKBACK_GAIN, TEST_CAP};
 
@@ -105,6 +106,9 @@ pub struct RtHandles {
     /// Interleaved stereo 96 kHz: slot 0 the engineer, slot 1 one other mix
     /// (X3); silence while a HIL signal runs (S6).
     pub taps: [Consumer<f32>; 2],
+    /// The listen probe's taps (S7), by slot like `taps`: the spare outputs'
+    /// samples while a HIL signal with `listen` runs (`probe::push_probe`).
+    pub probes: [Consumer<f32>; 2],
     /// Mono 96 kHz talkback into the talkback input (A4).
     pub talkback: Producer<f32>,
     pub status: Arc<RtStatus>,
@@ -363,6 +367,9 @@ struct TestRt {
     /// The HIL signal's spare outputs, by HIL slot: until `end` they carry
     /// the sine and every mix's TX is zero.
     mask: Option<HilMask>,
+    /// The listen probe (S7, HIL only): the listened slots' probe taps carry
+    /// the spare outputs' samples until `end`.
+    listen: bool,
 }
 
 impl TestRt {
@@ -390,6 +397,7 @@ pub struct Processor {
     cmds: Consumer<RtCmd>,
     meter_in: triple_buffer::Input<MeterFrame>,
     taps: [Producer<f32>; 2],
+    probes: [Producer<f32>; 2],
     talk: Consumer<f32>,
     talk_gate: Ramp,
     talk_f32: Vec<f32>,
@@ -520,6 +528,8 @@ impl Processor {
         let (cmd_tx, cmds) = RingBuffer::new(CMD_RING);
         let (tap0, tap0_rx) = RingBuffer::new(TAP_RING);
         let (tap1, tap1_rx) = RingBuffer::new(TAP_RING);
+        let (probe0, probe0_rx) = RingBuffer::new(TAP_RING);
+        let (probe1, probe1_rx) = RingBuffer::new(TAP_RING);
         let (talk_tx, talk) = RingBuffer::new(TALK_RING);
         let status = Arc::new(RtStatus::default());
         let fade_in = if opts.fade_in_ms > 0.0 {
@@ -542,6 +552,7 @@ impl Processor {
             cmds,
             meter_in,
             taps: [tap0, tap1],
+            probes: [probe0, probe1],
             talk,
             talk_gate: Ramp::new(0.0, samples(MUTE_MS, sr)),
             talk_f32: vec![0.0; SEG],
@@ -573,6 +584,7 @@ impl Processor {
             cmds: cmd_tx,
             meters,
             taps: [tap0_rx, tap1_rx],
+            probes: [probe0_rx, probe1_rx],
             talkback: talk_tx,
             status,
         };
@@ -725,14 +737,15 @@ impl Processor {
                     self.listen_lim.reset();
                 }
             }
-            RtOp::TestSignal { i, hz, amp, ttl } => self.start_test(i, hz, amp, ttl, None),
+            RtOp::TestSignal { i, hz, amp, ttl } => self.start_test(i, hz, amp, ttl, None, false),
             RtOp::HilTestSignal {
                 i,
                 hz,
                 amp,
                 ttl,
                 mask,
-            } => self.start_test(i, hz, amp, ttl, Some(mask)),
+                listen,
+            } => self.start_test(i, hz, amp, ttl, Some(mask), listen),
             RtOp::StopTestSignal => {
                 let now = self.time;
                 if let Some(t) = self.test.as_mut() {
@@ -765,8 +778,16 @@ impl Processor {
     /// X13: a sine replaces input `i` for `ttl` samples and then fades out;
     /// every TX is capped meanwhile. With `mask` (the HIL signal) the sine
     /// sounds only on those spare outputs until it ended, and every mix's TX
-    /// is zero.
-    fn start_test(&mut self, i: u16, hz: f64, amp: f64, ttl: u64, mask: Option<HilMask>) {
+    /// is zero; `listen` adds the listen probe (S7).
+    fn start_test(
+        &mut self,
+        i: u16,
+        hz: f64,
+        amp: f64,
+        ttl: u64,
+        mask: Option<HilMask>,
+        listen: bool,
+    ) {
         // A new HIL signal restarts the loopback measurement (S6 test 5).
         if mask.is_some() {
             self.latency.reset();
@@ -784,6 +805,7 @@ impl Processor {
             fade,
             end: self.time.saturating_add(ttl).saturating_add(u64::from(len)),
             mask,
+            listen,
         });
         self.set_caps(true);
     }
@@ -940,13 +962,18 @@ impl Processor {
             fade_buf,
             status,
             test,
+            test_buf,
+            probes,
             ..
         } = self;
         // While a HIL signal runs no mix's TX and no listen tap carries
-        // anything: it sounds only on HIL's spare outputs (`render_hil`),
-        // never to a band member or a web listener. The mixes still render
-        // and meter, and the listen limiter still follows its mix.
+        // anything: it sounds only on HIL's spare outputs (`render_hil`) and,
+        // with `listen`, the listened slots' probe taps (S7, for the server's
+        // `&hil=1` listeners only), never to a band member. The mixes still
+        // render and meter, and the listen limiter still follows its mix.
         let hil = test.as_ref().is_some_and(|t| t.mask.is_some());
+        let probing = test.as_ref().is_some_and(|t| t.mask.is_some() && t.listen);
+        let sine = test_buf.get(..n).unwrap_or_default();
         let heard_from = topo.inputs.len();
         let mut trips = 0;
         for (m, spec) in topo.mixes.iter().enumerate() {
@@ -1012,6 +1039,10 @@ impl Processor {
             limiter.process(l, r);
             if listen[0] == Some(m) {
                 push_tap(&mut taps[0], (&*l, &*r), hil, tap_buf, &status.tap_overruns);
+                if probing {
+                    let fade = fade_buf.get(..n).unwrap_or_default();
+                    probe::push_probe(&mut probes[0], sine, fade, tap_buf, &status.tap_overruns);
+                }
             }
             stereo_gain(fader, l, r);
             if mix_trips.check([&mut *l, &mut *r]) {
@@ -1032,6 +1063,10 @@ impl Processor {
                     tap_buf,
                     &status.tap_overruns,
                 );
+                if probing {
+                    let fade = fade_buf.get(..n).unwrap_or_default();
+                    probe::push_probe(&mut probes[1], sine, fade, tap_buf, &status.tap_overruns);
+                }
             }
             let (tl, tr) = tx.get_mut(n);
             let fade = fade_buf.get(..n).unwrap_or_default();
