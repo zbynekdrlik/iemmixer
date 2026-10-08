@@ -441,10 +441,122 @@ mod tests {
         assert_eq!(MediaLink::detached().pipe(), "");
     }
 
+    fn head(stream: u8, seq: u64) -> MediaHeader {
+        MediaHeader {
+            stream,
+            channels: 2,
+            seq,
+            frames: 960,
+        }
+    }
+
+    /// Everything the listen diagnostics are made of.
+    fn stats_of(link: &MediaLink) -> impl PartialEq + std::fmt::Debug {
+        let s = lock(&link.inner.stats);
+        (
+            s.last_frame,
+            s.window_start,
+            s.in_window,
+            s.per_second,
+            s.last_size,
+            s.peak_db,
+            s.last_seq,
+            s.gaps,
+        )
+    }
+
+    #[test]
+    fn route_maps_0_1_to_the_listen_slots_2_3_to_the_probe_and_nothing_else() {
+        let to = |slot, probe| Some(Route { slot, probe });
+        assert_eq!(route(stream::ENGINEER_LISTEN), to(0, false));
+        assert_eq!(route(stream::MEMBER_LISTEN), to(1, false));
+        assert_eq!(route(stream::ENGINEER_PROBE), to(0, true));
+        assert_eq!(route(stream::MEMBER_PROBE), to(1, true));
+        assert_eq!(route(stream::TALKBACK), None);
+        assert_eq!(route(4), None);
+        assert_eq!(route(u8::MAX), None);
+    }
+
+    #[tokio::test]
+    async fn probe_frames_reach_only_the_probe_channel_of_their_slot() {
+        let link = MediaLink::detached();
+        let mut enc = encoders();
+        let mut listen = [link.subscribe(0), link.subscribe(1)];
+        let probe = [link.subscribe_probe(0), link.subscribe_probe(1)];
+        // One frame of each slot's own, at −20 dBFS.
+        link.listen_frame(
+            &mut enc,
+            &head(stream::ENGINEER_LISTEN, 3),
+            &tone(440.0, 0.1, 0),
+        );
+        link.listen_frame(
+            &mut enc,
+            &head(stream::MEMBER_LISTEN, 7),
+            &tone(440.0, 0.1, 0),
+        );
+        let before = stats_of(&link);
+        // Probe frames: louder, their sequence numbers far from the slots'.
+        let loud = tone(1000.0, 0.5, 0);
+        link.listen_frame(&mut enc, &head(stream::ENGINEER_PROBE, 100), &loud);
+        link.listen_frame(&mut enc, &head(stream::MEMBER_PROBE, 200), &loud);
+        link.listen_frame(&mut enc, &head(stream::MEMBER_PROBE, 201), &loud);
+        for (k, rx) in listen.iter_mut().enumerate() {
+            assert!(rx.try_recv().is_ok(), "slot {k}'s own frame");
+            assert!(rx.try_recv().is_err(), "slot {k} got a probe frame");
+        }
+        assert_eq!(probe[0].len(), 1, "stream 2: the engineer slot's probe");
+        assert_eq!(probe[1].len(), 2, "stream 3: the member slot's probe");
+        assert_eq!(
+            stats_of(&link),
+            before,
+            "probe frames never count in the listen diagnostics"
+        );
+        let d = link.diagnostics();
+        assert_eq!((d.last_sequence, d.sequence_gaps), (7, 0));
+        assert!((d.peak_db + 20.0).abs() < 0.1, "{}", d.peak_db);
+    }
+
+    #[tokio::test]
+    async fn each_stream_has_an_opus_encoder_of_its_own() {
+        let link = MediaLink::detached();
+        let mut enc = encoders();
+        let mut listen = [link.subscribe(0), link.subscribe(1)];
+        let mut probe = [link.subscribe_probe(0), link.subscribe_probe(1)];
+        let fresh = || ListenEncoder::new().unwrap();
+        let mut reference = [fresh(), fresh()];
+        let own = [stream::ENGINEER_LISTEN, stream::MEMBER_LISTEN];
+        // The slots' own streams run first: their encoders carry state.
+        for k in 0..3 {
+            for (slot, s) in own.into_iter().enumerate() {
+                link.listen_frame(&mut enc, &head(s, k as u64), &tone(440.0, 0.1, k));
+                reference[slot].encode(&tone(440.0, 0.1, k)).unwrap();
+            }
+        }
+        // A probe's first frame is what a fresh encoder makes of it.
+        let first = tone(1000.0, 0.1, 0);
+        let want = fresh().encode(&first).unwrap();
+        link.listen_frame(&mut enc, &head(stream::ENGINEER_PROBE, 0), &first);
+        link.listen_frame(&mut enc, &head(stream::MEMBER_PROBE, 0), &first);
+        for (k, rx) in probe.iter_mut().enumerate() {
+            assert_eq!(
+                rx.try_recv().unwrap().as_ref(),
+                want.as_slice(),
+                "probe {k}"
+            );
+        }
+        // The slots' own streams go on as if no probe had come.
+        for (slot, s) in own.into_iter().enumerate() {
+            link.listen_frame(&mut enc, &head(s, 3), &tone(440.0, 0.1, 3));
+            let want = reference[slot].encode(&tone(440.0, 0.1, 3)).unwrap();
+            let got = std::iter::from_fn(|| listen[slot].try_recv().ok()).last();
+            assert_eq!(got.unwrap().as_ref(), want.as_slice(), "slot {slot}");
+        }
+    }
+
     #[tokio::test]
     async fn frames_reach_their_slot_and_count_in_the_diagnostics() {
         let link = MediaLink::detached();
-        let mut enc = [ListenEncoder::new().ok(), ListenEncoder::new().ok()];
+        let mut enc = encoders();
         let mut rx0 = link.subscribe(0);
         let mut rx1 = link.subscribe(1);
         let h = |stream: u8, seq: u64| MediaHeader {

@@ -5,6 +5,8 @@
 //! starts the engine's tap; the last listener of a mix leaving stops it; a
 //! second different mix while one is heard gets `no_source`.
 
+pub mod probe_gate;
+
 use std::time::Duration;
 
 use axum::{
@@ -284,11 +286,278 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_query_reads_hil() {
+        let query = |q: &str| {
+            let uri: axum::http::Uri = format!("/ws/audio?{q}").parse().unwrap();
+            Query::<WsQuery>::try_from_uri(&uri).unwrap().0
+        };
+        let q = query("token=t&hil=1");
+        assert_eq!((q.token.as_deref(), q.hil), (Some("t"), Some(1)));
+        assert_eq!(query("token=t").hil, None);
+        assert_eq!(query("hil=0&token=t").hil, Some(0));
+    }
+
+    #[test]
+    fn only_hil_1_asks_for_the_probe() {
+        let query = |hil| WsQuery {
+            token: Some("t".into()),
+            proto: None,
+            talk: None,
+            hil,
+        };
+        assert!(asks_for_probe(&query(Some(1))));
+        assert!(!asks_for_probe(&query(None)), "a plain listener");
+        assert!(!asks_for_probe(&query(Some(0))));
+        assert!(!asks_for_probe(&query(Some(2))));
+    }
+
+    #[test]
+    fn a_socket_without_hil_holds_no_probe_feed() {
+        let link = crate::engine::media::MediaLink::detached();
+        for slot in [0, 1] {
+            assert!(feeds(&link, slot, false).probe.is_none(), "slot {slot}");
+            assert!(feeds(&link, slot, true).probe.is_some(), "slot {slot}");
+        }
+    }
+
+    /// A feed on channels the test holds: (the slot's frames, the probe's, the feed).
+    fn feed(hil: bool) -> (broadcast::Sender<Bytes>, broadcast::Sender<Bytes>, Feeds) {
+        let (listen_tx, listen) = broadcast::channel(64);
+        let (probe_tx, probe) = broadcast::channel(64);
+        let feed = Feeds {
+            listen,
+            probe: hil.then_some(probe),
+            gate: ProbeGate::default(),
+        };
+        (listen_tx, probe_tx, feed)
+    }
+
+    /// What `f` sends next (bounded: a feed that never answers fails here).
+    async fn next(f: &mut Feeds, now: impl FnMut() -> std::time::Instant) -> Out {
+        tokio::time::timeout(Duration::from_secs(5), f.next_at(now))
+            .await
+            .expect("an answer within 5 s")
+    }
+
+    /// A frame as (its one byte, a probe frame, the edge before it).
+    fn frame(out: Out) -> (u8, bool, Option<&'static str>) {
+        match out {
+            Out::Frame { data, probe, edge } => (data[0], probe, edge),
+            other => panic!("not a frame: {other:?}"),
+        }
+    }
+
+    fn byte(b: u8) -> Bytes {
+        Bytes::from(vec![b])
+    }
+
+    #[tokio::test]
+    async fn a_hil_feed_sends_the_probe_in_place_of_the_slots_frames_and_names_its_edges() {
+        let (listen_tx, probe_tx, mut f) = feed(true);
+        let t0 = std::time::Instant::now();
+        // One reading of the clock per frame taken.
+        let mut clock = [0, 10, 30, 129, 130, 131]
+            .map(|ms| t0 + Duration::from_millis(ms))
+            .into_iter();
+        let mut now = move || clock.next().expect("a time per frame");
+        listen_tx.send(byte(1)).unwrap();
+        assert_eq!(
+            frame(next(&mut f, &mut now).await),
+            (1, false, None),
+            "no probe yet"
+        );
+        // A burst: probe frames, with the slot's own frames queued beside them.
+        for b in [10, 11] {
+            probe_tx.send(byte(b)).unwrap();
+        }
+        for b in [2, 3, 4] {
+            listen_tx.send(byte(b)).unwrap();
+        }
+        assert_eq!(
+            frame(next(&mut f, &mut now).await),
+            (10, true, Some("probe")),
+            "the first probe frame opens the burst"
+        );
+        assert_eq!(frame(next(&mut f, &mut now).await), (11, true, None));
+        // Frame 2, 99 ms after the last probe frame, is dropped; frame 3, at
+        // PROBE_HOLD, leaves the burst.
+        assert_eq!(
+            frame(next(&mut f, &mut now).await),
+            (3, false, Some("listening"))
+        );
+        assert_eq!(frame(next(&mut f, &mut now).await), (4, false, None));
+    }
+
+    #[tokio::test]
+    async fn a_plain_feed_sends_the_slots_frames_and_reports_lag_and_the_end() {
+        let (listen_tx, probe_tx, mut f) = feed(false);
+        assert!(probe_tx.send(byte(10)).is_err(), "nobody holds the probe");
+        let t0 = std::time::Instant::now();
+        let mut now = || t0;
+        for b in [1, 2] {
+            listen_tx.send(byte(b)).unwrap();
+        }
+        assert_eq!(frame(next(&mut f, &mut now).await), (1, false, None));
+        assert_eq!(frame(next(&mut f, &mut now).await), (2, false, None));
+        // 66 frames into a channel of 64: two lost, then the newest five.
+        for b in 0..66 {
+            listen_tx.send(byte(b)).unwrap();
+        }
+        assert!(matches!(next(&mut f, &mut now).await, Out::Lagged(2)));
+        assert_eq!(frame(next(&mut f, &mut now).await), (61, false, None));
+        drop(listen_tx);
+        for b in 62..66 {
+            assert_eq!(frame(next(&mut f, &mut now).await), (b, false, None));
+        }
+        assert!(matches!(next(&mut f, &mut now).await, Out::Closed));
+    }
+
     /// Listen taps against the real engine (NullRt).
     #[cfg(unix)]
     mod live {
         use super::*;
         use crate::engine::testkit::{EngineHarness, wait_until};
+        use iem_engine_proto::InputId;
+
+        /// A frame one of the two listeners got.
+        struct Got {
+            hil: bool,
+            probe: bool,
+            edge: Option<&'static str>,
+            data: Bytes,
+        }
+
+        fn got(hil: bool, out: Out) -> Option<Got> {
+            match out {
+                Out::Frame { data, probe, edge } => Some(Got {
+                    hil,
+                    probe,
+                    edge,
+                    data,
+                }),
+                Out::Lagged(_) => None,
+                Out::Closed => panic!("the media link closed"),
+            }
+        }
+
+        /// The decoded frame's peak.
+        fn peak(dec: &mut opus::Decoder, packet: &[u8]) -> f32 {
+            let mut out = [0f32; 2 * iem_engine_proto::FRAME_48K];
+            let n = dec.decode_float(packet, &mut out, false).unwrap();
+            assert_eq!(n, iem_engine_proto::FRAME_48K);
+            out.iter().fold(0f32, |m, x| m.max(x.abs()))
+        }
+
+        fn decoder() -> opus::Decoder {
+            opus::Decoder::new(48_000, opus::Channels::Stereo).unwrap()
+        }
+
+        /// The owner's rule (#9 2026-09-28) for the listen probe: a socket
+        /// without `&hil=1` (any socket a member could hear) never gets a
+        /// probe frame; the engineer's `&hil=1` socket gets the burst's
+        /// tone in place of the slot's own frames.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn a_listener_without_hil_gets_only_silence_while_a_probe_runs_and_a_hil_listener_gets_the_tone()
+         {
+            let h = EngineHarness::start_with(|c| c.flags.test_signal = true);
+            let (_d, s) = h.state().await;
+            let media = s.media.clone();
+            wait_until("the media pipe", || media.connected()).await;
+            let m1 = MixId::new("member1");
+            start(&s, &m1).await.unwrap();
+            let slot = slot_of(&s, &m1);
+            assert_eq!(slot, 1);
+            let mut plain = feeds(&s.media, slot, false);
+            let mut hil = feeds(&s.media, slot, true);
+            // The tap runs, so the stream and its start fade-in do.
+            let first = tokio::time::timeout(Duration::from_secs(5), plain.next())
+                .await
+                .expect("a frame of member1's tap within 5 s");
+            assert!(matches!(
+                first,
+                Out::Frame {
+                    probe: false,
+                    edge: None,
+                    ..
+                }
+            ));
+            h.supervise(Cmd::HilTestSignal {
+                input: InputId::new("mic1"),
+                hz: 1000.0,
+                dbfs: -20.0,
+                ttl_s: 1.0,
+                card_tx: vec![94, 95],
+                listen: true,
+            })
+            .expect("the engine runs the listen probe");
+            // Both listeners' frames in the order they came, until the burst
+            // (1 s) is over and the hil listener was told so; ≤ 10 s.
+            let mut all: Vec<Got> = Vec::new();
+            let ended = |all: &[Got]| {
+                all.iter().rev().filter(|g| g.hil).find_map(|g| g.edge) == Some("listening")
+            };
+            let t0 = std::time::Instant::now();
+            while t0.elapsed() < Duration::from_millis(1500) || !ended(&all) {
+                assert!(
+                    t0.elapsed() < Duration::from_secs(10),
+                    "the hil listener heard a burst begin and end within 10 s"
+                );
+                tokio::select! {
+                    out = plain.next() => all.extend(got(false, out)),
+                    out = hil.next() => all.extend(got(true, out)),
+                    () = tokio::time::sleep(Duration::from_secs(1)) => {}
+                }
+            }
+            let begun = all
+                .iter()
+                .position(|g| g.hil && g.edge == Some("probe"))
+                .expect("the hil listener was told `probe`");
+            let over = all
+                .iter()
+                .rposition(|g| g.hil && g.edge == Some("listening"))
+                .expect("and then `listening`");
+            // The plain listener: the slot's own frames only, silent, and
+            // they went on while the probe ran.
+            let mut dec = decoder();
+            let mut during = 0;
+            for (k, g) in all.iter().enumerate().filter(|(_, g)| !g.hil) {
+                assert!(
+                    !g.probe && g.edge.is_none(),
+                    "frame {k}: a probe frame or an edge"
+                );
+                let p = peak(&mut dec, &g.data);
+                assert!(p < 1e-4, "frame {k} of the plain listener peaks at {p}");
+                during += usize::from((begun..over).contains(&k));
+            }
+            assert!(during >= 10, "{during} plain frames while the probe ran");
+            // The hil listener: probe frames exactly inside its bursts, the
+            // tone at −20 dBFS; the slot's own frames outside them, silent.
+            let (mut probe_dec, mut own_dec) = (decoder(), decoder());
+            let (mut in_burst, mut probes, mut loudest) = (false, 0, 0f32);
+            for g in all.iter().filter(|g| g.hil) {
+                match g.edge {
+                    Some("probe") => in_burst = true,
+                    Some("listening") => in_burst = false,
+                    Some(other) => panic!("an unknown edge {other}"),
+                    None => {}
+                }
+                assert_eq!(g.probe, in_burst, "a probe frame exactly inside a burst");
+                if g.probe {
+                    probes += 1;
+                    loudest = loudest.max(peak(&mut probe_dec, &g.data));
+                } else {
+                    let p = peak(&mut own_dec, &g.data);
+                    assert!(p < 1e-4, "the slot's own frame peaks at {p}");
+                }
+            }
+            assert!(probes >= 10, "{probes} probe frames");
+            let dbfs = 20.0 * loudest.log10();
+            assert!(
+                (dbfs + 20.0).abs() <= 1.0,
+                "the probe's tone at {dbfs} dBFS"
+            );
+        }
 
         fn listeners(state: &AppState, mix: &MixId) -> Option<usize> {
             state
