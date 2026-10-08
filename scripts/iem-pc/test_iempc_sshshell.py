@@ -394,6 +394,19 @@ class AgreementTests(unittest.TestCase):
         self.assertEqual([name for _, name in ss.STAGE], ["IemPc.psm1", "IemTuningStore.psm1", "IemSshShell.psm1"])
         self.assertEqual([member for member, _ in ss.STAGE], ["IemPc.psm1", "tuning/IemTuningStore.psm1", "IemSshShell.psm1"])
 
+    def test_a_key_s_rules_never_go_through_the_acl_cmdlets(self) -> None:
+        """Windows PowerShell 5.1's Get-Acl and Set-Acl hand a -LiteralPath on as
+        the provider's own path, which for a registry key ('HKEY_LOCAL_MACHINE\\...')
+        they then cannot find (PowerShell #13107; CI run 37741639195: "Cannot
+        find path ... because it does not exist" for a key that exists). The
+        module and its self-test read a key's rules through the registry API;
+        their Get-/Set-Acl calls are on files only."""
+        for name in ("IemSshShell.psm1", "Test-IemSshShell.ps1"):
+            for line in (HERE / name).read_text(encoding="ascii").splitlines():
+                code = line.split("#", 1)[0]
+                if re.search(r"\b(?:Get|Set)-Acl\b", code, re.IGNORECASE):
+                    self.assertNotRegex(code, re.compile(r"\$key\b|HKLM:|HKEY_", re.IGNORECASE), f"{name}: {line.strip()}")
+
     def test_the_bundle_job_ships_the_module(self) -> None:
         ci = (HERE.parent.parent / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         job = ci[ci.index("\n  bundle:\n"):ci.index("\n  attest:\n")]
