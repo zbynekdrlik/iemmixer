@@ -37,8 +37,9 @@ export const test = base.extend<LiveFixtures>({
     await use(relay);
     relay.check();
   },
-  desk: async ({ request, watch }, use) => {
-    const desk = new Desk(request, watch);
+  desk: async ({ request, watch }, use, testInfo) => {
+    // A burst must come early enough for the steps and restores to end before the test's timeout.
+    const desk = new Desk(request, watch, Desk.deadline(testInfo.timeout));
     try {
       await use(desk);
     } finally {

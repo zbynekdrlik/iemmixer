@@ -2,7 +2,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, expect, liveNumber, type Page } from "./support/live";
 import { TALK_INIT, TALK_TONE } from "./support/audio";
-import { pause, type Desk, type LiveMixer } from "./support/desk";
+import { RESTORE_MS, pause, type Desk, type LiveMixer } from "./support/desk";
 import { live, openLive } from "./support/env";
 import { SILENT_PEAK, continuity, talkbackLevel } from "./support/series";
 import { toneWav } from "../support/wav";
@@ -104,10 +104,12 @@ function encodedFrames(page: Page): Promise<number> {
 
 /**
  * Holds Talk while `body` runs: a real press (the button needs pointerdown
- * with a pointer id), live within `LIVE_MS` and the encoder's first frame
- * within `START_MS` (`body` gets when it came); released when `body` ends or
- * fails, and by a timer before `HOLD_MS` should a step overrun. The page
- * needs `TALK_INIT`.
+ * with a pointer id), only with the whole hold and the restore's time left
+ * in the burst, live within `LIVE_MS` and the encoder's first frame within
+ * `START_MS` (`body` gets when it came). Released when `body` ends or fails,
+ * by a timer before `HOLD_MS` should a step overrun (`capped`), and by the
+ * desk should the burst end first or the test time out (the release is the
+ * press's undo). The page needs `TALK_INIT`.
  */
 async function holdTalk<T>(
   page: Page,
@@ -116,13 +118,28 @@ async function holdTalk<T>(
 ): Promise<Hold<T>> {
   const talk = page.locator(".toolbar-btn-talk");
   await talk.hover({ timeout: desk.bound(5_000) });
-  desk.inside("Talk");
-  let release: Promise<void> | null = null;
-  const up = () => (release ??= page.mouse.up());
+  desk.need(HOLD_MS + RESTORE_MS, "Talk");
+  // One release for every caller (the step, the timer, the desk): each waits for the same.
+  let held = false;
+  let releasing: Promise<void> = Promise.resolve();
+  const up = (): Promise<void> => {
+    if (held) {
+      held = false;
+      releasing = page.mouse.up();
+    }
+    return releasing;
+  };
+  desk.track("Talk", up);
   const pressedAt = Date.now();
+  // Before the press: a release from the desk while it is on its way comes after it.
+  held = true;
   await page.mouse.down();
+  let capped = false;
   const cap = setTimeout(
-    () => void up().catch(() => undefined),
+    () => {
+      capped = true;
+      up().catch(() => undefined);
+    },
     pressedAt + HOLD_MS - HOLD_MARGIN_MS - Date.now(),
   );
   let result: T;
@@ -143,6 +160,8 @@ async function holdTalk<T>(
   const releasedAt = Date.now();
   await expect(talk).toHaveText("🎤 Talk");
   expect(releasedAt - pressedAt, "Talk held at most 8 s").toBeLessThanOrEqual(HOLD_MS);
+  // The cap's release came inside the steps: what they read may hold the release.
+  expect(capped, "the steps ended before the hold's cap released Talk").toBe(false);
   return { result, pressedAt, releasedAt };
 }
 

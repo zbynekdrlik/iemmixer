@@ -147,13 +147,28 @@ function authOf(who: Who): { token: string; member: string; engineer: boolean } 
 export async function openLive(page: Page, who: Who, path?: string): Promise<void> {
   const auth = authOf(who);
   const { baseURL } = live();
-  await page.goto(new URL("/", baseURL).toString());
+  await navigate(page, new URL("/", baseURL).toString(), "the app's start page");
   await page.evaluate((a) => {
     localStorage.setItem("iem_token", JSON.stringify(a));
     sessionStorage.setItem("iem_redirected", "1");
   }, auth);
-  await page.goto(new URL(`/${path ?? auth.member}`, baseURL).toString());
+  const what = who === "engineer" ? "a mixer page" : "the member's mixer page";
+  await navigate(page, new URL(`/${path ?? auth.member}`, baseURL).toString(), what);
   await expect(page.getByTestId("global-volume-fader")).toBeVisible({ timeout: 15_000 });
+}
+
+/**
+ * `page.goto(url)`; a failure names `what` and Chromium's net error code,
+ * never the URL (Playwright's own text holds the host and the page, P6).
+ */
+async function navigate(page: Page, url: string, what: string): Promise<void> {
+  try {
+    await page.goto(url);
+  } catch (e) {
+    const net = /net::ERR_[A-Z_]+/.exec(String(e))?.[0];
+    const code = net ?? ((e as Error).name === "TimeoutError" ? "a timeout" : "no answer");
+    throw new Error(`the public host did not serve ${what}: ${code}`);
+  }
 }
 
 /**

@@ -1,5 +1,6 @@
 import type NodeWebSocket from "ws";
 import { expect, type APIRequestContext } from "@playwright/test";
+import type { Channel as PageChannel, ConsoleInput, EqBand } from "../../support/mixer-socket";
 import type { BurstWatch } from "./burst";
 import { expectBuild, live, type Who } from "./env";
 import { liveSocket } from "./socket";
@@ -9,30 +10,39 @@ import { liveSocket } from "./socket";
 // changes a mix or an input only inside a burst, while the engine holds every
 // mix's TX at zero, and puts it back before the burst ends, checked against
 // the server's `listening` status. `Desk.during` runs a spec's changing steps
-// inside one burst; `Desk.change` refuses a change outside it and keeps its
-// undo, and the undos go back when the steps end, also when they fail, at
-// once should the burst end first (a guard looks every 50 ms), and at the
-// fixture's teardown should a timeout abandon the test body (a body's
-// `finally` does not run then). A socket the server closes is a failure and is
-// never opened again (the #10 decision of 2026-10-07). No error here carries a
-// URL, a token or a site value (P6): the page and input ids are site data.
+// inside one burst; `Desk.change` refuses a change outside it, or with less
+// than `RESTORE_MS` of it left, and keeps its undo (`Desk.track` keeps a
+// page action's, e.g. Talk's release). The undos go back when the steps end,
+// also when they fail, at once should the burst end first (a guard looks
+// every 50 ms), and at the fixture's teardown should a timeout abandon the
+// test body (a body's `finally` does not run then). Every command sent is in
+// the engine before a socket closes: the server drops a closed socket's
+// queued commands. A socket the server closes is a failure and is never
+// opened again (the #10 decision of 2026-10-07): the changes it carried
+// cannot go back then. No error here carries a URL, a token or a site value
+// (P6): the page and input ids are site data. Restored values are the
+// server's UI values (f32; a level at or below −60 dB comes back as off).
 
 /** A changing step starts with at least this much of its burst left (Task 20). */
 export const MIN_LEFT_MS = 22_000;
+/** A change starts, and a wait inside the burst ends, at least this long before the burst does: the restore's time. */
+export const RESTORE_MS = 2_000;
+/** `during` finds its burst at the latest this long before the test's timeout: its steps and restores fit after it. */
+const AFTER_BURST_MS = 75_000;
+/** `during` waits at most this long for a burst (one comes every 60 s, a joined one is skipped). */
+const BURST_WAIT_MS = 180_000;
 /** How long a request waits for its answer. */
 const ANSWER_MS = 5_000;
+/** How often `during` looks whether its burst ended while changes are in place. */
+const GUARD_MS = 50;
 
 /** One UI command (`iem_core::ws::ClientMsg`). */
 export type Cmd = { cmd: string; [field: string]: unknown };
 
-/** One channel of a page, as its state and later updates show it (`iem_core::Channel`). */
-export type Channel = { id: string; level_db: number; muted: boolean; pan: number };
+/** One channel of a page as its state and later updates show it (an update carries no name). */
+export type Channel = Omit<PageChannel, "name">;
 
-/** One input on the engineer's console (`iem_core::ws::ConsoleInput`). */
-export type ConsoleInput = { id: string; trim_db: number; muted: boolean; processing: boolean };
-
-/** One EQ band as the server reports it (`iem_core::ws::EqBand`). */
-export type EqBand = { band_type: string; freq_hz: number; gain_db: number; bw: number; enabled: boolean };
+export type { ConsoleInput, EqBand };
 
 /** The page mix's limiter (`ServerMsg::LimiterParams`). */
 export type LimiterParams = {
@@ -52,12 +62,15 @@ export const pause = (ms: number): Promise<void> =>
 /**
  * A mixer page's socket (`/ws/<page>`, UI protocol 2) held by the runner: it
  * opens after the build check, records every JSON event with its arrival time
- * and sends commands. Its errors name it by `label`, never by its page.
+ * and sends commands; one request at a time, so each answer is its own. Its
+ * errors name it by `label`, never by its page.
  */
 export class LiveMixer {
   private readonly events: Received[] = [];
   private broken: string | null = null;
   private closed = false;
+  /** The last request in flight: the next one starts after it. */
+  private queue: Promise<unknown> = Promise.resolve();
 
   private constructor(
     private readonly ws: NodeWebSocket,
@@ -131,11 +144,20 @@ export class LiveMixer {
     }
   }
 
-  /** Sends `cmd` and returns the data of the first later `event` that `accept` takes. */
-  private async request(cmd: Cmd, event: string, accept: (data: unknown) => boolean = () => true): Promise<unknown> {
-    const from = this.events.length;
-    this.send(cmd);
-    return (await this.after(from, (e) => e.event === event && accept(e.data), `${event} answer`)).data;
+  /**
+   * Sends `cmd` once every earlier request was answered, and returns the
+   * data of the first later `event` that `accept` takes: with one request
+   * in flight, that answer is this request's.
+   */
+  private request(cmd: Cmd, event: string, accept: (data: unknown) => boolean = () => true): Promise<unknown> {
+    const run = async () => {
+      const from = this.events.length;
+      this.send(cmd);
+      return (await this.after(from, (e) => e.event === event && accept(e.data), `${event} answer`)).data;
+    };
+    const answer = this.queue.then(run, run);
+    this.queue = answer.catch(() => null);
+    return answer;
   }
 
   /**
@@ -196,7 +218,7 @@ export class LiveMixer {
   channel(id: string): Channel | undefined {
     const state = this.newest("State");
     if (!state) return undefined;
-    let channel = (state.data as { channels: Channel[] }).channels.find((c) => c.id === id);
+    let channel: Channel | undefined = (state.data as { channels: Channel[] }).channels.find((c) => c.id === id);
     if (!channel) return undefined;
     for (const e of this.events.slice(state.index + 1)) {
       if (e.event !== "ChannelUpdate") continue;
@@ -237,11 +259,8 @@ export class LiveMixer {
   }
 }
 
-/** The commands that put back one change, in their own order. */
-type Undo = { mixer: LiveMixer; cmds: Cmd[] };
-
-/** How often `during` looks whether its burst ended while changes are in place. */
-const GUARD_MS = 50;
+/** What puts back one change: commands in their own order, or a page action (Talk's release). */
+type Undo = { mixer: LiveMixer; cmds: Cmd[] } | { act: () => Promise<void> };
 
 /**
  * A test's runner-side mixer sockets and the changes made with them: each
@@ -251,23 +270,41 @@ const GUARD_MS = 50;
  * and the steps fail.
  */
 export class Desk {
-  private readonly mixers: LiveMixer[] = [];
+  /** The open sockets, one per token and page (no reconnect). */
+  private readonly mixers = new Map<string, LiveMixer>();
   private readonly undos: Undo[] = [];
   /** How many statuses the watch had when `during` entered its burst; null outside `during`. */
   private since: number | null = null;
   private guard: ReturnType<typeof setInterval> | null = null;
   /** Why the guard had to put changes back after the burst's end; null while it did not. */
   private late: string | null = null;
+  /** The sockets the guard sent undos on, not yet known to be in the engine. */
+  private readonly unsettled = new Set<LiveMixer>();
+  /** The test is over: nothing more may change. */
+  private ending = false;
 
+  /**
+   * `deadline` (ms, `Date.now()` time): when `during` must have found its
+   * burst, so its steps and restores end before the test's timeout; null
+   * for none.
+   */
   constructor(
     private readonly request: APIRequestContext,
     private readonly watch: BurstWatch,
+    private readonly deadline: number | null = null,
   ) {}
 
-  /** Opens `page`'s socket with `who`'s token (`LiveMixer.open`); closed after the test. */
+  /** The deadline for a test of `timeoutMs` (0: none) whose desk is made now. */
+  static deadline(timeoutMs: number): number | null {
+    return timeoutMs > 0 ? Date.now() + timeoutMs - AFTER_BURST_MS : null;
+  }
+
+  /** Opens `page`'s socket with `who`'s token (`LiveMixer.open`), once per test; closed after it. */
   async open(who: Who, page: string): Promise<LiveMixer> {
+    const key = `${who}\n${page}`;
+    if (this.mixers.has(key)) throw new Error(`a second runner ${who} socket on one page (no reconnect)`);
     const mixer = await LiveMixer.open(this.request, who, page);
-    this.mixers.push(mixer);
+    this.mixers.set(key, mixer);
     return mixer;
   }
 
@@ -278,7 +315,14 @@ export class Desk {
    */
   async during<T>(body: () => Promise<T>, minLeftMs = MIN_LEFT_MS): Promise<T> {
     if (this.since !== null) throw new Error("desk.during does not nest");
-    await this.watch.burst({ minLeftMs });
+    if (this.ending) throw new Error("desk.during after the test's end");
+    if (this.deadline === null) {
+      await this.watch.burst({ minLeftMs, within: BURST_WAIT_MS });
+    } else {
+      const within = Math.min(BURST_WAIT_MS, this.deadline - Date.now());
+      if (within <= 0) throw new Error("no time left in the test to wait for a burst");
+      await this.watch.burst({ minLeftMs, within });
+    }
     this.since = this.watch.statuses.length;
     this.late = null;
     this.guard = setInterval(() => this.guardBurst(), GUARD_MS);
@@ -323,14 +367,22 @@ export class Desk {
     }
     if (on) return;
     let unsent = false;
-    for (const { mixer, cmds } of this.undos.splice(0).reverse()) {
-      for (const cmd of cmds) {
+    for (const undo of this.undos.splice(0).reverse()) {
+      if ("act" in undo) {
+        undo.act().catch(() => {
+          this.late = "the burst ended with a page action in place, and its undo failed";
+        });
+        continue;
+      }
+      for (const cmd of undo.cmds) {
         try {
-          mixer.send(cmd);
+          undo.mixer.send(cmd);
         } catch {
           unsent = true;
         }
       }
+      // `restore` and `end` wait until the engine has them.
+      this.unsettled.add(undo.mixer);
     }
     this.late ??= unsent
       ? "the burst ended with changes in place, and a broken socket could not put its change back"
@@ -345,27 +397,49 @@ export class Desk {
 
   /** Throws unless `during` is running and its burst still is. */
   inside(what: string): void {
+    if (this.ending) throw new Error(`${what} after the test's end`);
     if (this.since === null) throw new Error(`${what} outside desk.during`);
     if (!this.burstOn()) throw new Error(`${what} came after the burst's end`);
   }
 
-  /**
-   * `ms`, cut to the time left in the burst: a wait inside `during` never
-   * outlasts it (at least 1 ms: a timeout of 0 is none at all).
-   */
-  bound(ms: number): number {
-    return Math.max(1, Math.min(ms, this.watch.leftMs()));
+  /** Throws unless `during`'s burst runs with at least `ms` of it left. */
+  need(ms: number, what: string): void {
+    this.inside(what);
+    const left = this.watch.leftMs();
+    if (left < ms) {
+      throw new Error(`${what} needs ${(ms / 1000).toFixed(1)} s of the burst; ${(left / 1000).toFixed(1)} s are left`);
+    }
   }
 
   /**
-   * Sends `cmds` on `mixer`, only inside the burst; `undo` puts them back, in
-   * its own order (an EQ band's gain switches the band on, so its switch goes
-   * back last). The undo is kept before the send.
+   * `ms`, cut to the time left in the burst less `RESTORE_MS`: a wait inside
+   * `during` never runs into the restore's time (at least 1 ms: a timeout of
+   * 0 is none at all).
+   */
+  bound(ms: number): number {
+    return Math.max(1, Math.min(ms, this.watch.leftMs() - RESTORE_MS));
+  }
+
+  /**
+   * Sends `cmds` on `mixer`, only inside the burst with `RESTORE_MS` of it
+   * left; `undo` puts them back, in its own order (an EQ band's gain switches
+   * the band on, so its switch goes back last). The undo is kept before the send.
    */
   change(mixer: LiveMixer, cmds: Cmd | Cmd[], undo: Cmd | Cmd[]): void {
-    this.inside("a change");
+    this.need(RESTORE_MS, "a change");
     this.undos.push({ mixer, cmds: ([] as Cmd[]).concat(undo) });
     for (const cmd of ([] as Cmd[]).concat(cmds)) mixer.send(cmd);
+  }
+
+  /**
+   * Keeps `act` as the undo of a change a page makes (Talk held): it runs with
+   * the other undos, newest first, and at once from the guard. It may run more
+   * than once (a step that already undid it, then the restore): it must be
+   * idempotent. Call it before the change.
+   */
+  track(what: string, act: () => Promise<void>): void {
+    this.need(RESTORE_MS, what);
+    this.undos.push({ act });
   }
 
   /** How many changes are in place: `restore(mark)` undoes the later ones. */
@@ -375,24 +449,34 @@ export class Desk {
 
   /**
    * Puts back every change since `from` (default: all), newest first, waits
-   * until the engine has them, and checks they landed inside the burst. A
-   * socket that broke cannot put its changes back: the first such failure is
-   * thrown after the others went back.
+   * until the engine has them (and what the guard sent), and checks they
+   * landed inside the burst. A socket that broke cannot put its changes back:
+   * the first such failure is thrown after the others went back.
    */
   async restore(from = 0): Promise<void> {
     const pending = this.undos.splice(from).reverse();
-    if (pending.length === 0) return;
+    const sent = new Set<LiveMixer>(this.unsettled);
+    this.unsettled.clear();
     let failure: unknown = null;
-    for (const { mixer, cmds } of pending) {
-      for (const cmd of cmds) {
+    for (const undo of pending) {
+      if ("act" in undo) {
         try {
-          mixer.send(cmd);
+          await undo.act();
+        } catch (e) {
+          failure ??= e;
+        }
+        continue;
+      }
+      for (const cmd of undo.cmds) {
+        try {
+          undo.mixer.send(cmd);
         } catch (e) {
           failure ??= e;
         }
       }
+      sent.add(undo.mixer);
     }
-    for (const mixer of new Set(pending.map((u) => u.mixer))) {
+    for (const mixer of sent) {
       try {
         await mixer.applied();
       } catch (e) {
@@ -400,11 +484,17 @@ export class Desk {
       }
     }
     if (failure !== null) throw failure;
-    this.inside("the restore");
+    if (pending.length > 0 && !this.burstOn()) throw new Error("the restore came after the burst's end");
   }
 
-  /** The test is over: puts back what a timed-out body left, then checks and closes every socket. */
+  /**
+   * The test is over: nothing more may change; what a timed-out body left
+   * goes back; every socket's commands are in the engine before it closes
+   * (the server drops a closed socket's queued ones); a socket the server
+   * closed fails the test.
+   */
   async end(): Promise<void> {
+    this.ending = true;
     let failure: unknown = null;
     try {
       await this.restore();
@@ -412,17 +502,16 @@ export class Desk {
       failure = e;
     }
     this.stop();
-    for (const mixer of this.mixers) {
-      if (failure === null) {
-        try {
-          mixer.check();
-        } catch (e) {
-          failure = e;
-        }
+    for (const mixer of this.mixers.values()) {
+      try {
+        mixer.check();
+        await mixer.applied();
+      } catch (e) {
+        failure ??= e;
       }
       mixer.close();
     }
-    this.mixers.length = 0;
+    this.mixers.clear();
     if (failure !== null) throw failure;
   }
 }

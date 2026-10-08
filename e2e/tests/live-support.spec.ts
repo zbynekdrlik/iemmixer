@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import type { APIRequestContext } from "@playwright/test";
 import { test, expect } from "./support/fixtures";
 import { BurstWatch } from "./live/support/burst";
-import { Desk, LiveMixer, type Cmd } from "./live/support/desk";
+import { Desk, LiveMixer, RESTORE_MS, type Cmd } from "./live/support/desk";
 import { SILENT_PEAK, continuity, dbOf, median, spread, talkbackLevel } from "./live/support/series";
 
 // The live specs' support (S7, #10), run in the mock E2E job: the live specs
@@ -18,14 +18,18 @@ type Sent = { cmd: string; [field: string]: unknown };
 /** A socket stand-in: records what is sent, answers GetLimiterParams (the desk's barrier), feeds server events in. */
 class FakeSocket extends EventEmitter {
   readonly sent: Sent[] = [];
+  /** Answer each GetLimiterParams at once (false: the test answers with `limiter`). */
+  autoAnswer = true;
 
   send(data: string): void {
     const sent = JSON.parse(data) as Sent;
     this.sent.push(sent);
-    if (sent.cmd === "GetLimiterParams") {
-      const answer = { mix: "member1", limit_db: -6, limit_norm: 0, enabled: true, active_seconds: 0 };
-      setTimeout(() => this.event("LimiterParams", answer), 1);
-    }
+    if (sent.cmd === "GetLimiterParams" && this.autoAnswer) setTimeout(() => this.limiter(0), 1);
+  }
+
+  /** A LimiterParams answer with the counter at `active_seconds`. */
+  limiter(active_seconds: number): void {
+    this.event("LimiterParams", { mix: "member1", limit_db: -6, limit_norm: 0, enabled: true, active_seconds });
   }
 
   /** A server event (a text frame). */
@@ -33,8 +37,11 @@ class FakeSocket extends EventEmitter {
     this.emit("message", Buffer.from(JSON.stringify({ event, data })), false);
   }
 
+  /** How many commands were sent when the client closed the socket; null while open. */
+  closedAfter: number | null = null;
+
   close(): void {
-    this.emit("closed-by-client");
+    this.closedAfter ??= this.sent.length;
   }
 
   /** The changes sent, by their tag, without the barrier's requests. */
@@ -336,11 +343,105 @@ test("the guard puts the changes back the moment the burst ends, and the steps f
       expect(socket.changes()).toEqual(["a1", "a2", "b", "undo b", "undo a1", "undo a2"]);
     }),
   ).rejects.toThrow("the burst ended with changes in place: they went back after its end");
-  // Nothing went back twice.
+  // Nothing went back twice, and the steps' end waited until the engine had
+  // the guard's undos (a barrier after them): the server drops a closed
+  // socket's queued commands.
   expect(socket.changes().length).toBe(6);
+  expect(socket.barriers()).toBe(1);
+  expect(socket.sent[socket.sent.length - 1].cmd).toBe("GetLimiterParams");
   // The guard stopped with the steps.
   await new Promise((resolve) => setTimeout(resolve, 120));
   expect(socket.changes().length).toBe(6);
+});
+
+test("a page action's undo goes back in its place, and at once from the guard", async () => {
+  const { watch, status } = watchOn();
+  const { mixer, socket } = mixerOn();
+  const desk = deskOn(watch);
+  // Talk's release, as the talkback spec keeps it: logged among the commands.
+  const release = async (): Promise<void> => {
+    socket.sent.push({ cmd: "Act", tag: "release" });
+  };
+  status("probe");
+  await desk.during(async () => {
+    desk.change(mixer, cmd("a"), cmd("undo a"));
+    desk.track("Talk", release);
+    desk.change(mixer, cmd("b"), cmd("undo b"));
+  });
+  expect(socket.changes()).toEqual(["a", "b", "undo b", "release", "undo a"]);
+
+  // The burst ends while Talk is held: the guard releases it without waiting for the step.
+  const second = watchOn();
+  const guarded = deskOn(second.watch);
+  const before = socket.changes().length;
+  second.status("probe");
+  await expect(
+    guarded.during(async () => {
+      guarded.track("Talk", release);
+      second.status("listening");
+      await expect.poll(() => socket.changes().length, { timeout: 1_000, intervals: [10] }).toBe(before + 1);
+    }),
+  ).rejects.toThrow("the burst ended with changes in place");
+  expect(socket.changes().slice(before)).toEqual(["release"]);
+});
+
+test("a step that needs more of the burst than is left is refused before it starts", async () => {
+  const { watch, status } = watchOn();
+  const { mixer, socket } = mixerOn();
+  const desk = deskOn(watch);
+  status("probe");
+  await desk.during(async () => {
+    desk.need(20_000, "the drive");
+    expect(() => desk.need(29_000, "the drive")).toThrow(/^the drive needs 29\.0 s of the burst; 2[78]\.\d s are left$/);
+    expect(() => desk.track("Talk", async () => undefined)).not.toThrow();
+  });
+  expect(socket.sent).toEqual([]);
+  expect(() => desk.need(1, "a step")).toThrow("a step outside desk.during");
+  void mixer;
+});
+
+test("the desk's sockets: one per page, and each one's commands reach the engine before it closes", async () => {
+  const { watch } = watchOn();
+  const desk = deskOn(watch);
+  const first = mixerOn();
+  const second = mixerOn();
+  const open = LiveMixer.open;
+  try {
+    // The public host's open, stood in for: the sockets above.
+    const queue = [first.mixer, second.mixer];
+    LiveMixer.open = async () => queue.shift() as LiveMixer;
+    expect(await desk.open("engineer", "engineer")).toBe(first.mixer);
+    await expect(desk.open("engineer", "engineer")).rejects.toThrow(
+      "a second runner engineer socket on one page (no reconnect)",
+    );
+    expect(await desk.open("engineer", "member1")).toBe(second.mixer);
+  } finally {
+    LiveMixer.open = open;
+  }
+  first.mixer.send(cmd("a"));
+  await desk.end();
+  // A barrier after every command sent, then the close.
+  expect(first.socket.closedAfter).toBe(2);
+  expect(first.socket.sent.map((c) => c.cmd)).toEqual(["SetLevel", "GetLimiterParams"]);
+  expect(second.socket.closedAfter).toBe(1);
+  expect(second.socket.barriers()).toBe(1);
+  expect(() => first.mixer.send(cmd("b"))).toThrow("the test socket is closed");
+});
+
+test("the mixer sends one request at a time, so each answer is its own", async () => {
+  const { mixer, socket } = mixerOn();
+  socket.autoAnswer = false;
+  const a = mixer.limiter();
+  const b = mixer.activeSeconds();
+  await expect.poll(() => socket.barriers(), { intervals: [10] }).toBe(1);
+  // The second waits for the first's answer before it is sent.
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(socket.barriers()).toBe(1);
+  socket.limiter(1.5);
+  expect((await a).active_seconds).toBe(1.5);
+  await expect.poll(() => socket.barriers(), { intervals: [10] }).toBe(2);
+  socket.limiter(2.5);
+  expect(await b).toBe(2.5);
 });
 
 test("the desk's end puts back what an abandoned step left in place", async () => {
@@ -359,24 +460,43 @@ test("the desk's end puts back what an abandoned step left in place", async () =
   await expect.poll(() => changed).toBe(true);
   await desk.end();
   expect(socket.changes()).toEqual(["a", "undo a"]);
-  expect(() => desk.change(mixer, cmd("b"), cmd("undo b"))).toThrow("a change outside desk.during");
+  expect(() => desk.change(mixer, cmd("b"), cmd("undo b"))).toThrow("a change after the test's end");
   // The abandoned step ends later: nothing is left for it to put back.
   finish();
   await abandoned;
   expect(socket.changes()).toEqual(["a", "undo a"]);
 });
 
-test("a wait inside the burst is cut to the time left in it, and never to 0 (no timeout)", async () => {
+test("a wait inside the burst is cut to the time left in it less the restore's, and never to 0 (no timeout)", async () => {
   const { watch, status } = watchOn();
   const desk = deskOn(watch);
   expect(desk.bound(5_000)).toBe(1);
   status("probe");
   expect(desk.bound(5_000)).toBe(5_000);
+  // 28 s of the watch's burst, less RESTORE_MS.
   const left = desk.bound(60_000);
-  expect(left).toBeGreaterThan(27_000);
-  expect(left).toBeLessThanOrEqual(28_000);
+  expect(left).toBeGreaterThan(25_000);
+  expect(left).toBeLessThanOrEqual(28_000 - RESTORE_MS);
   status("listening");
   expect(desk.bound(5_000)).toBe(1);
+});
+
+test("a desk whose test has no time left for a burst fails before it waits", async () => {
+  const { watch, status } = watchOn();
+  status("probe");
+  // A test of 60 s: its burst would have had to come 15 s before the desk was made.
+  const desk = new Desk(undefined as unknown as APIRequestContext, watch, Desk.deadline(60_000));
+  let ran = false;
+  await expect(
+    desk.during(async () => {
+      ran = true;
+    }),
+  ).rejects.toThrow("no time left in the test to wait for a burst");
+  expect(ran).toBe(false);
+  expect(Desk.deadline(0)).toBeNull();
+  const deadline = Desk.deadline(240_000) as number;
+  expect(deadline - Date.now()).toBeGreaterThan(164_000);
+  expect(deadline - Date.now()).toBeLessThanOrEqual(165_000);
 });
 
 test("the mixer reads a channel as the newest state and the updates after it show it", async () => {

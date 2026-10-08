@@ -21,6 +21,8 @@ const DRIVE_EQ = { freq_hz: 1000, gain_db: 12.04 };
 const MIN_COUNT_S = 1.5;
 /** … within this long of the drive. */
 const COUNT_MS = 5_000;
+/** The drive starts only with this much of the burst left: the count, the counter's lag (X14), the Reset, the restore. */
+const DRIVE_NEEDS_MS = 14_000;
 
 /** A UI step inside the burst waits at most this long (and never past the burst, `desk.bound`). */
 const UI_MS = 5_000;
@@ -92,6 +94,8 @@ test.describe("the limiter on the real PC (S7)", () => {
       // The counter before the drive: the band's own count since its last Reset.
       const start = await mixer.activeSeconds();
 
+      // The drive, the counter's lag and the Reset fit in what is left of the burst.
+      desk.need(DRIVE_NEEDS_MS, "the drive");
       const drive = desk.mark();
       desk.change(
         mixer,

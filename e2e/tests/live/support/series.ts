@@ -3,7 +3,7 @@ import { SILENCE_DBFS } from "./tone";
 // The live specs' series (S7, #10): meter peaks the runner's socket got and
 // the frame peaks the page handed its talkback encoder, reduced to the numbers
 // a spec judges. Pure, and tested on synthetic series in the mock run
-// (`tests/live-series.spec.ts`).
+// (`tests/live-support.spec.ts`).
 
 /** −60 dBFS, linear: a meter peak below it reads as silence. */
 export const SILENT_PEAK = 0.001;
