@@ -46,6 +46,8 @@ use crate::site::GuardSite;
 use crate::state::{self, GuardState, Switching};
 use crate::switch_log::{Laps, LastSwitch, SwitchOutcome};
 
+mod reaper;
+
 /// The engine's warm-up window before `Arm` (design §5.2 step 7).
 pub const READY_S: u32 = 10;
 /// The HIL test signal's ceiling (design §7).
@@ -906,6 +908,8 @@ fn switch(pc: &mut dyn Pc, g: &mut Guard, from: Mode, to: Mode, checks: bool) ->
     let steps = plan(to, &pc.facts());
     g.begin(from, to, &steps, checks);
     let mut skip: Vec<Step> = Vec::new();
+    // A step that went on after asking the owner: the switch is not done.
+    let mut asked = false;
     for step in steps {
         if skip.contains(&step) {
             continue;
@@ -943,6 +947,10 @@ fn switch(pc: &mut dyn Pc, g: &mut Guard, from: Mode, to: Mode, checks: bool) ->
                         return back_to_event(pc, g, &why);
                     }
                     OnError::Continue => g.alarm(step, &why, false),
+                    OnError::ContinueAskOwner => {
+                        g.alarm(step, &why, true);
+                        asked = true;
+                    }
                     OnError::Skip(later) => {
                         g.alarm(step, &why, false);
                         skip.extend_from_slice(later);
@@ -966,7 +974,12 @@ fn switch(pc: &mut dyn Pc, g: &mut Guard, from: Mode, to: Mode, checks: bool) ->
     if !may_end(g, to) {
         return back_to_event(pc, g, "pre-empted by event");
     }
-    g.finish(pc, Outcome::Done, to)
+    let outcome = if asked {
+        Outcome::NeedsOwner
+    } else {
+        Outcome::Done
+    };
+    g.finish(pc, outcome, to)
 }
 
 /// Whether a switch into `to` may end as it is: an event plan always; one
@@ -1137,6 +1150,9 @@ fn run_step(pc: &mut dyn Pc, g: &mut Guard, step: Step, to: Mode) -> R<()> {
         Step::ReaperHandover => {
             // Unknown until this check has read REAPER's dialogs.
             g.reaper_notice = false;
+            // A REAPER runs first (#10: it may have ended, or still be
+            // ending, since the plan read its facts).
+            reaper::ensure(pc, g, &c)?;
             let f = pc.reaper_facts(&c)?;
             // REAPER's evaluation notice is named, never an alarm and never
             // closed (#9, 2026-09-28); every other dialog fails the verdict.
@@ -1946,7 +1962,7 @@ fn rehearse(pc: &mut dyn Pc, g: &mut Guard) -> (bool, String) {
                 );
                 return (false, format!("rehearsal stopped at {step:?}: {why}"));
             }
-            OnError::StopAskOwner => {
+            OnError::StopAskOwner | OnError::ContinueAskOwner => {
                 g.alarm(step, &format!("rehearsal: {why}; health {health:?}"), true);
                 return (false, format!("rehearsal stopped at {step:?}: {why}"));
             }

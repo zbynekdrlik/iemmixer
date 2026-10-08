@@ -1,7 +1,11 @@
 //! REAPER's web control (S6 design note §5.2): its replies are
 //! tab-separated lines that start with a verb (`NTRACK`, `TRACK`,
 //! `EXTSTATE`). A port of the S1a spike's `ConvertFrom-SpikeReaperLine`,
-//! plus the stage tracks' meters.
+//! plus the stage tracks' meters. And REAPER's crash on quit (#10): Windows
+//! Error Reporting's report of it, its exit codes, the hold, and the
+//! handover's load poll that ends when REAPER's process has ended.
+
+use std::time::Duration;
 
 /// A `TRACK` line carries its meters only with at least this many fields,
 /// the verb included; its 7th field is then the last meter peak in dB × 10
@@ -69,6 +73,60 @@ pub fn stage_peaks(text: &str, stage: &[u32]) -> Vec<Option<f64>> {
         .iter()
         .map(|s| all.iter().find(|(t, _)| t == s).map(|(_, db)| *db))
         .collect()
+}
+
+/// Windows Error Reporting's process, started for a crashed process; it
+/// holds that process until its report is done.
+pub const WER_IMAGE: &str = "WerFault.exe";
+
+/// How long a REAPER that crashed on quit may still be held by Windows Error
+/// Reporting before the guard gives up on it being gone (#10, 2026-10-08):
+/// REAPER crashes on quit routinely (`reaper_csurf.dll`, 37 times in 30
+/// days on the PC, long before iemmixer) and is usually gone within ~3 s,
+/// but once WER held it past the 30 s quit bound. The project's save was
+/// verified before the quit, so only the wait is longer. "Ide event" ends
+/// the wait at once.
+pub const CRASH_HOLD: Duration = Duration::from_secs(90);
+
+/// Whether a WerFault command line (`WerFault.exe -u -p <pid> -s <n>`, or
+/// a process snapshot's `-pss -s <n> -p <pid> -ip <pid>`) reports a crash
+/// of `pid`: the word right after a `-p` (any case) is that pid.
+pub fn wer_reports(command_line: &str, pid: u32) -> bool {
+    let words: Vec<&str> = command_line.split_whitespace().collect();
+    words.windows(2).any(|w| {
+        matches!(w, [flag, value]
+            if flag.eq_ignore_ascii_case("-p") && value.parse::<u32>().ok() == Some(pid))
+    })
+}
+
+/// REAPER's exit code is a crash's: an NTSTATUS error (`0xC…`, e.g.
+/// 0xC0000005, an access violation) or STATUS_FATAL_APP_EXIT (0x40000015),
+/// the two codes of its crashes on quit in the PC's Application log (#10).
+pub fn crashed(code: u32) -> bool {
+    code >= 0xC000_0000 || code == 0x4000_0015
+}
+
+/// One look of the handover's load poll (#10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Load {
+    /// REAPER reports the expected track count.
+    Loaded,
+    /// Not yet: look again until the bound.
+    Waiting,
+    /// REAPER's process ended (its exit code): the wait ends at once.
+    Ended(u32),
+}
+
+/// `loaded`: the project reports its tracks; `ended`: the watched REAPER's
+/// exit code once its process has ended. An ended process loads nothing
+/// more, so its end ends the poll whatever the tracks read (#10: the
+/// 2026-10-08 handover waited the full bound on a REAPER that had crashed).
+pub fn load_look(loaded: bool, ended: Option<u32>) -> Load {
+    match ended {
+        Some(code) => Load::Ended(code),
+        None if loaded => Load::Loaded,
+        None => Load::Waiting,
+    }
 }
 
 /// Keeps the loudest reading of each stage track; start from

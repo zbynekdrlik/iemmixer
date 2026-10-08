@@ -20,7 +20,7 @@ use iem_win::spawn::Placement;
 use crate::cancel::{Cancel, Preempted};
 use crate::effects::app::holders_text;
 use crate::effects::tuning::Logon;
-use crate::handover::{AppExit, ReaperFacts};
+use crate::handover::{AppExit, ReaperFacts, ReaperProcs};
 use crate::plan::{Facts, Health, Mode};
 use crate::proto::HilOut;
 use crate::state::{Child, Children};
@@ -491,8 +491,11 @@ pub trait Pc {
     /// refusing.
     fn precheck(&mut self, to: Mode, trial: bool) -> R<Option<String>>;
     /// 40026; project mtime changed ≤ 15 s; no dialog but REAPER's
-    /// evaluation notice (`handover::dialogs`); 40004; gone ≤ 30 s; driver
-    /// module unheld.
+    /// evaluation notice (`handover::dialogs`); 40004; gone ≤ 30 s, or, when
+    /// Windows Error Reporting reports its crash on quit, gone within
+    /// `effects::reaper::CRASH_HOLD` more (#10); driver module unheld. A
+    /// REAPER that has not ended when the step fails or is pre-empted stays
+    /// known as ending to [`Pc::reaper_procs`].
     fn reaper_save_quit(&mut self, c: &Cancel) -> R<()>;
     /// A handle first, then the tray's Exit command, then observe (design
     /// §5.3); the verdict is `handover::app_exit`.
@@ -553,8 +556,20 @@ pub trait Pc {
     /// Our task (or the direct start, `[guard] start_direct`); refuses with
     /// an engine or a driver-module holder.
     fn reaper_start(&mut self) -> R<()>;
-    /// ≤ 120 s for the track count; the meter bridge at most once; the
-    /// titles of REAPER's visible dialogs.
+    /// REAPER's processes for the handover's first part (#10): each one
+    /// runs, or is still ending (Windows Error Reporting reports its crash,
+    /// or the guard asked it to quit and it has not ended). Never waits; an
+    /// unreadable process list fails (it never reads as "no REAPER").
+    fn reaper_procs(&mut self) -> R<ReaperProcs>;
+    /// Waits up to `effects::reaper::CRASH_HOLD` for every REAPER that is
+    /// still ending to be gone ("ide event" ends the wait), and logs how
+    /// long it took (#10). After it the guard's own quit request no longer
+    /// marks a REAPER as ending; a crash Windows Error Reporting still
+    /// reports does.
+    fn reaper_await_end(&mut self, c: &Cancel) -> R<()>;
+    /// ≤ 120 s for the track count, ended at once when REAPER's process
+    /// has ended (#10); the meter bridge at most once; the titles of
+    /// REAPER's visible dialogs.
     fn reaper_facts(&mut self, c: &Cancel) -> R<ReaperFacts>;
     fn app_start(&mut self) -> R<()>;
     /// `/api/version`, the member count and the public host.

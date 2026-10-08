@@ -58,6 +58,15 @@ pub fn image_path(pid: u32) -> io::Result<String> {
     imp::image_path(pid)
 }
 
+/// The process's command line as Windows keeps it
+/// (`NtQueryInformationProcess`, `ProcessCommandLineInformation`, Windows
+/// 8.1 and later; limited query access is enough). The guard reads which
+/// process a Windows Error Reporting report is for from it (`WerFault.exe
+/// -u -p <pid> …`, #10).
+pub fn command_line(pid: u32) -> io::Result<String> {
+    imp::command_line(pid)
+}
+
 /// A handle to one process, opened to wait for its end and read its exit
 /// code (`SYNCHRONIZE` and limited query access). Opened **before** the
 /// process is asked to stop, it names that process only: a pid that ends and
@@ -135,6 +144,10 @@ mod imp {
         crate::unsupported()
     }
 
+    pub(super) fn command_line(_pid: u32) -> io::Result<String> {
+        crate::unsupported()
+    }
+
     pub(super) fn listening(_port: u16) -> io::Result<Option<u32>> {
         crate::unsupported()
     }
@@ -166,9 +179,13 @@ mod imp {
     use std::ptr;
     use std::time::Duration;
 
+    use windows_sys::Wdk::System::Threading::{
+        NtQueryInformationProcess, ProcessCommandLineInformation,
+    };
     use windows_sys::Win32::Foundation::{
         ERROR_BAD_LENGTH, ERROR_INSUFFICIENT_BUFFER, ERROR_NO_MORE_FILES, FALSE, FILETIME,
-        WAIT_OBJECT_0, WAIT_TIMEOUT,
+        STATUS_BUFFER_OVERFLOW, STATUS_BUFFER_TOO_SMALL, STATUS_INFO_LENGTH_MISMATCH,
+        UNICODE_STRING, WAIT_OBJECT_0, WAIT_TIMEOUT,
     };
     use windows_sys::Win32::NetworkManagement::IpHelper::{
         GetExtendedTcpTable, MIB_TCP6ROW_OWNER_PID, MIB_TCP6TABLE_OWNER_PID, MIB_TCPROW_OWNER_PID,
@@ -333,6 +350,71 @@ mod imp {
         Ok(String::from_utf16_lossy(
             buf.get(..len as usize).unwrap_or_default(),
         ))
+    }
+
+    pub(super) fn command_line(pid: u32) -> io::Result<String> {
+        let process = open(pid, PROCESS_QUERY_LIMITED_INFORMATION)?;
+        // A UNICODE_STRING followed by its text, in 8-byte aligned storage;
+        // when the buffer is too small the call names the size it needs.
+        let mut buf: Vec<u64> = vec![0; 64];
+        for _ in 0..8 {
+            let size = u32::try_from(size_of_val(buf.as_slice())).map_err(io::Error::other)?;
+            let mut needed = 0u32;
+            // SAFETY: a valid process handle with limited query access;
+            // `buf` holds `size` writable bytes, aligned for a
+            // UNICODE_STRING, and the call writes at most that many.
+            let status = unsafe {
+                NtQueryInformationProcess(
+                    process.as_raw_handle(),
+                    ProcessCommandLineInformation,
+                    buf.as_mut_ptr().cast(),
+                    size,
+                    &mut needed,
+                )
+            };
+            if status >= 0 {
+                return unicode_text(&buf);
+            }
+            let too_small = matches!(
+                status,
+                STATUS_INFO_LENGTH_MISMATCH | STATUS_BUFFER_TOO_SMALL | STATUS_BUFFER_OVERFLOW
+            );
+            if !too_small || needed <= size {
+                return Err(io::Error::other(format!(
+                    "the command line of process {pid}: NTSTATUS {status:#010x}"
+                )));
+            }
+            buf = vec![0; (needed as usize).div_ceil(8)];
+        }
+        Err(io::Error::other(format!(
+            "the command line of process {pid} kept growing"
+        )))
+    }
+
+    /// The text of the UNICODE_STRING at the start of `buf`, read only where
+    /// it lies inside `buf` (the call writes it right after the header).
+    fn unicode_text(buf: &[u64]) -> io::Result<String> {
+        let bytes = size_of_val(buf);
+        if bytes < size_of::<UNICODE_STRING>() {
+            return Err(io::Error::other("no room for the command line's header"));
+        }
+        // SAFETY: `buf` holds at least one UNICODE_STRING and is aligned for
+        // it (8-byte storage); the call wrote it.
+        let header = unsafe { buf.as_ptr().cast::<UNICODE_STRING>().read() };
+        let units = usize::from(header.Length) / 2;
+        if units == 0 {
+            return Ok(String::new());
+        }
+        let start = buf.as_ptr().addr();
+        let text = header.Buffer.addr();
+        let inside = text >= start && text.is_multiple_of(2) && text - start + units * 2 <= bytes;
+        if !inside {
+            return Err(io::Error::other("the command line lies outside its buffer"));
+        }
+        // SAFETY: `units` UTF-16 units at `header.Buffer` lie inside `buf`
+        // (checked above) and are aligned for u16; the call wrote them.
+        let wide = unsafe { std::slice::from_raw_parts(header.Buffer.cast_const(), units) };
+        Ok(String::from_utf16_lossy(wide))
     }
 
     #[derive(Debug)]

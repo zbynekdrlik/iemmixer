@@ -30,12 +30,13 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
 
+use iem_win::process::Handle;
 use iem_win::spawn::{self, Placement};
 use iem_win::window::{self, SessionEndWindow};
 use tracing::{info, warn};
 
 use crate::cancel::Cancel;
-use crate::handover::{AppExit, ReaperFacts};
+use crate::handover::{AppExit, ReaperFacts, ReaperProcs};
 use crate::pc::{
     self, Audience, EngineSeen, Images, Kid, Pc, Ports, PrefSeen, Procs, R, Status, StepError,
 };
@@ -61,6 +62,10 @@ pub struct WinPc {
     /// The engine pid whose control pipe's DACL was read, and the verdict.
     dacl: Option<(u32, bool)>,
     tray_quit: Option<TrayQuit>,
+    /// The REAPER this guard asked to quit (40004) and has not seen gone: a
+    /// crash on quit Windows Error Reporting holds, or a pre-empted wait.
+    /// The handover waits for it before it starts REAPER (#10).
+    quitting: Option<Handle>,
 }
 
 impl WinPc {
@@ -79,6 +84,7 @@ impl WinPc {
             sup: None,
             dacl: None,
             tray_quit: None,
+            quitting: None,
         }
     }
 
@@ -250,6 +256,14 @@ impl Pc for WinPc {
 
     fn reaper_start(&mut self) -> R<()> {
         reaper::start(self)
+    }
+
+    fn reaper_procs(&mut self) -> R<ReaperProcs> {
+        reaper::seen(self)
+    }
+
+    fn reaper_await_end(&mut self, c: &Cancel) -> R<()> {
+        reaper::await_end(self, c)
     }
 
     fn reaper_facts(&mut self, c: &Cancel) -> R<ReaperFacts> {

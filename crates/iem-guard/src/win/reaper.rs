@@ -1,6 +1,8 @@
 //! REAPER (design §5.2): its web control, the stage meters, the save and
-//! quit by its own actions, its start, and the facts of the handover.
-//! Nothing here ends REAPER.
+//! quit by its own actions, its crash on quit (#10: Windows Error Reporting
+//! may hold the crashed process), its start, and the facts of the handover.
+//! Nothing here ends REAPER or Windows Error Reporting: the guard only
+//! waits for them.
 
 use std::fs;
 use std::path::Path;
@@ -14,13 +16,17 @@ use super::procs;
 use super::{WinPc, tasks, web};
 use crate::cancel::Cancel;
 use crate::effects::app::{holders_text, one_pid};
+use crate::effects::reaper::{CRASH_HOLD, Load};
 use crate::effects::{reaper, tasks as task_names, web as decide};
-use crate::handover::{self, Bridge, ReaperFacts};
+use crate::handover::{self, Bridge, ReaperFacts, ReaperProcs};
 use crate::pc::{R, StepError};
 
 /// Save project, and quit.
 const SAVE: &str = "40026";
 const QUIT: &str = "40004";
+/// REAPER is gone within this after 40004 (then a crash Windows Error
+/// Reporting reports gets `CRASH_HOLD` more, #10).
+const QUIT_WAIT: Duration = Duration::from_secs(30);
 /// How often the stage meters are read.
 const METER_POLL: Duration = Duration::from_millis(250);
 /// REAPER's web control silent this long fails a meter read.
@@ -116,8 +122,11 @@ fn sample(pc: &WinPc, seconds: u32, c: &Cancel) -> R<Vec<f64>> {
 }
 
 /// 40026; the project's mtime changes ≤ 15 s; no dialog but the evaluation
-/// notice; 40004; gone ≤ 30 s; the driver module unheld.
-pub(super) fn save_quit(pc: &WinPc, c: &Cancel) -> R<()> {
+/// notice; 40004; gone ≤ 30 s, or within `CRASH_HOLD` more when Windows
+/// Error Reporting reports its crash on quit (#10); the driver module
+/// unheld. A REAPER that has not ended when the step fails or is pre-empted
+/// is remembered (`WinPc::quitting`): the handover waits for it.
+pub(super) fn save_quit(pc: &mut WinPc, c: &Cancel) -> R<()> {
     let pid = reaper_pid(pc)?;
     let handle = Handle::open_waitable(pid).map_err(|e| procs::failed("REAPER", e))?;
     let project = &pc.s.guard.reaper_project;
@@ -147,8 +156,19 @@ pub(super) fn save_quit(pc: &WinPc, c: &Cancel) -> R<()> {
         "a REAPER dialog is open after the save: REAPER is not quit",
     )?;
     action(pc, QUIT);
-    if procs::wait_exit(&handle, Duration::from_secs(30), c)?.is_none() {
-        return Err(StepError::failed("REAPER did not quit within 30 s"));
+    let ended = await_quit(&handle, c);
+    if ended.is_err() {
+        // Still ending, or the wait was pre-empted: the event plan's
+        // handover that follows waits for it before it starts REAPER.
+        pc.quitting = Some(handle);
+    }
+    let code = ended?;
+    pc.quitting = None;
+    if reaper::crashed(code) {
+        warn!(
+            "REAPER (pid {pid}) crashed on quit (exit {code:#x}); the project's save was \
+             verified before the quit"
+        );
     }
     let left = holders(pc)?;
     if !left.is_empty() {
@@ -158,6 +178,167 @@ pub(super) fn save_quit(pc: &WinPc, c: &Cancel) -> R<()> {
         )));
     }
     info!("REAPER saved and quit");
+    Ok(())
+}
+
+/// After 40004: REAPER's exit code once it is gone within [`QUIT_WAIT`].
+/// A REAPER still there whose crash Windows Error Reporting reports
+/// (REAPER crashes on quit routinely, #10) is waited for up to
+/// [`CRASH_HOLD`] more, and the log says how long WER held it; "ide event"
+/// ends either wait.
+fn await_quit(handle: &Handle, c: &Cancel) -> R<u32> {
+    let asked = Instant::now();
+    if let Some(code) = procs::wait_exit(handle, QUIT_WAIT, c)? {
+        return Ok(code);
+    }
+    let pid = handle.pid();
+    let Some(wer) = wer_for(pid) else {
+        return Err(StepError::failed(format!(
+            "REAPER did not quit within {} s",
+            QUIT_WAIT.as_secs()
+        )));
+    };
+    warn!(
+        "REAPER (pid {pid}) crashed on quit: Windows Error Reporting (WerFault pid {wer}) \
+         holds it; waiting up to {} s more for it to be gone",
+        CRASH_HOLD.as_secs()
+    );
+    let held = Instant::now();
+    match procs::wait_exit(handle, CRASH_HOLD, c)? {
+        Some(code) => {
+            info!(
+                "REAPER (pid {pid}) is gone (exit {code:#x}) {} ms after 40004; Windows Error \
+                 Reporting held it {} ms past the {} s quit bound",
+                asked.elapsed().as_millis(),
+                held.elapsed().as_millis(),
+                QUIT_WAIT.as_secs()
+            );
+            Ok(code)
+        }
+        None => Err(StepError::failed(format!(
+            "REAPER crashed on quit and Windows Error Reporting still holds it after {} + {} s",
+            QUIT_WAIT.as_secs(),
+            CRASH_HOLD.as_secs()
+        ))),
+    }
+}
+
+/// The WerFault process that reports a crash of `pid` (Windows Error
+/// Reporting holds the crashed process until its report is done), if any.
+/// An unreadable process list or command line is logged and counts as none.
+fn wer_for(pid: u32) -> Option<u32> {
+    let wer = match process::pids(reaper::WER_IMAGE) {
+        Ok(pids) => pids,
+        Err(e) => {
+            warn!("Windows Error Reporting's processes could not be read: {e}");
+            return None;
+        }
+    };
+    wer.into_iter().find(|&w| match process::command_line(w) {
+        Ok(line) => reaper::wer_reports(&line, pid),
+        Err(e) => {
+            warn!("the command line of WerFault (pid {w}) could not be read: {e}");
+            false
+        }
+    })
+}
+
+/// Whether the process `pid` the list shows has ended already (a handle
+/// someone keeps can keep it listed). One that cannot be opened counts as
+/// running, as the list says.
+fn has_ended(pid: u32) -> bool {
+    Handle::open_waitable(pid).is_ok_and(|h| matches!(h.wait(Duration::ZERO), Ok(Some(_))))
+}
+
+/// REAPER's processes for the handover's first part (#10): each one runs,
+/// or is still ending (Windows Error Reporting reports its crash, or this
+/// guard asked it to quit and it has not ended). One that has ended is
+/// neither. An unreadable process list fails the step: it never reads as
+/// "no REAPER", which would start a second one.
+pub(super) fn seen(pc: &mut WinPc) -> R<ReaperProcs> {
+    // The REAPER this guard asked to quit, forgotten once it has ended.
+    let asked = pc
+        .quitting
+        .as_ref()
+        .map(|h| (h.pid(), h.wait(Duration::ZERO)));
+    let quitting = match asked {
+        Some((pid, Ok(None))) => Some(pid),
+        Some((pid, Ok(Some(code)))) => {
+            info!("REAPER (pid {pid}), asked to quit, has ended (exit {code:#x})");
+            pc.quitting = None;
+            None
+        }
+        Some((pid, Err(e))) => {
+            warn!("watching REAPER (pid {pid}), asked to quit, failed: {e}");
+            pc.quitting = None;
+            None
+        }
+        None => None,
+    };
+    let pids =
+        process::pids(&pc.images.reaper).map_err(|e| procs::failed("the process list", e))?;
+    let mut out = ReaperProcs::default();
+    for pid in pids {
+        if quitting == Some(pid) {
+            info!("REAPER (pid {pid}) was asked to quit and has not ended");
+            out.ending += 1;
+        } else if let Some(wer) = wer_for(pid) {
+            info!(
+                "REAPER (pid {pid}) crashed: Windows Error Reporting (WerFault pid {wer}) holds it"
+            );
+            out.ending += 1;
+        } else if !has_ended(pid) {
+            out.running += 1;
+        }
+    }
+    Ok(out)
+}
+
+/// Waits up to `CRASH_HOLD` for every REAPER that is still ending to be
+/// gone ("ide event" ends the wait), logging how long each took. Then the
+/// guard's quit request no longer marks a REAPER as ending (one that never
+/// quit is checked like any other); a crash Windows Error Reporting still
+/// reports does.
+pub(super) fn await_end(pc: &mut WinPc, c: &Cancel) -> R<()> {
+    let start = Instant::now();
+    let quitting = pc.quitting.as_ref().map(Handle::pid);
+    let pids =
+        process::pids(&pc.images.reaper).map_err(|e| procs::failed("the process list", e))?;
+    let mut held = Vec::new();
+    for pid in pids {
+        if quitting == Some(pid) || wer_for(pid).is_none() {
+            continue;
+        }
+        match Handle::open_waitable(pid) {
+            Ok(h) => held.push(h),
+            Err(e) => warn!("REAPER (pid {pid}): {e}"),
+        }
+    }
+    if let Some(h) = pc.quitting.as_ref() {
+        wait_gone(h, start, c)?;
+    }
+    for h in &held {
+        wait_gone(h, start, c)?;
+    }
+    pc.quitting = None;
+    Ok(())
+}
+
+/// Waits for `h`'s process to end until `CRASH_HOLD` after `start`.
+fn wait_gone(h: &Handle, start: Instant, c: &Cancel) -> R<()> {
+    let left = CRASH_HOLD.saturating_sub(start.elapsed());
+    match procs::wait_exit(h, left, c)? {
+        Some(code) => info!(
+            "REAPER (pid {}) is gone (exit {code:#x}) {} ms after the handover began to wait",
+            h.pid(),
+            start.elapsed().as_millis()
+        ),
+        None => warn!(
+            "REAPER (pid {}) is still there {} s after the handover began to wait",
+            h.pid(),
+            CRASH_HOLD.as_secs()
+        ),
+    }
     Ok(())
 }
 
@@ -187,7 +368,8 @@ pub(super) fn start(pc: &WinPc) -> R<()> {
     }
 }
 
-/// ≤ 120 s for the track count; REAPER's visible dialogs by title (the
+/// ≤ 120 s for the track count, ended at once when REAPER's process has
+/// ended (#10); REAPER's visible dialogs by title (the
 /// verdict sorts out its evaluation notice); the meter bridge at most once
 /// and only while its state is empty (the 2026-09-27 lesson); the
 /// heartbeat; the driver module; a few seconds of stage meters. A project that never
@@ -196,11 +378,30 @@ pub(super) fn start(pc: &WinPc) -> R<()> {
 pub(super) fn facts(pc: &WinPc, c: &Cancel) -> R<ReaperFacts> {
     let g = &pc.s.guard;
     let mut tracks = None;
+    // REAPER's process, watched from the moment it shows (a start may show
+    // late): its end ends the wait at once (#10, 2026-10-08: the handover
+    // waited the full bound on a REAPER that had crashed).
+    let mut watched: Option<Handle> = None;
     let loaded = procs::poll(LOAD, c, || {
         if let Ok(body) = get(pc, "NTRACK") {
             tracks = reaper::ntrack(&body);
         }
-        Ok(handover::project_loaded(tracks, g.reaper_tracks))
+        if watched.is_none() {
+            let p = procs::list(pc);
+            if let [pid] = p.reaper.as_slice() {
+                watched = Handle::open_waitable(*pid).ok();
+            }
+        }
+        let ended = watched
+            .as_ref()
+            .and_then(|h| h.wait(Duration::ZERO).ok().flatten());
+        match reaper::load_look(handover::project_loaded(tracks, g.reaper_tracks), ended) {
+            Load::Loaded => Ok(true),
+            Load::Waiting => Ok(false),
+            Load::Ended(code) => Err(StepError::failed(format!(
+                "REAPER's process ended (exit {code:#x}) before its project loaded"
+            ))),
+        }
     })?;
     let pid = reaper_pid(pc)?;
     let dialogs = dialog_titles(pid)?;

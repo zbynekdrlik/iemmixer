@@ -261,11 +261,19 @@ pub enum OnError {
     KeepServing,
     /// Event plan: alarm, the plan ends here, the agent sends the prepared ❓.
     StopAskOwner,
+    /// Event plan: alarm with the prepared ❓ and go on with the next step
+    /// (the band keeps what still works); the switch ends `needs_owner`,
+    /// never `done` (#10: a failed REAPER handover).
+    ContinueAskOwner,
 }
 
 /// What a failed step means. `health` is read only after a failed `EngineStop`.
 /// Every failure of a dev or live entry unwinds, its `PrefCheck` before the
-/// engine included; `on_pref_fail` is the event plan's rule only.
+/// engine included; `on_pref_fail` is the event plan's rule only. A failed
+/// REAPER handover (REAPER could not be made to run, or a check failed)
+/// asks the owner and goes on to the app, as it went on before #10, but the
+/// switch no longer ends `done` (2026-10-08: it did, in event without
+/// REAPER).
 pub fn on_error(to: Mode, step: Step, health: Option<Health>, pref_fail: PrefFail) -> OnError {
     if to != Mode::Event {
         return OnError::Unwind;
@@ -280,6 +288,7 @@ pub fn on_error(to: Mode, step: Step, health: Option<Health>, pref_fail: PrefFai
             PrefFail::KeepReaperDown => OnError::StopAskOwner,
         },
         Step::HolderGone | Step::ReaperSaveQuit | Step::ReaperStart => OnError::StopAskOwner,
+        Step::ReaperHandover => OnError::ContinueAskOwner,
         Step::AppStop => OnError::Skip(&[Step::AppStart]),
         _ => OnError::Continue,
     }
