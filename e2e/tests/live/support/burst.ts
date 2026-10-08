@@ -29,6 +29,12 @@ export function celt20msStereo(packet: Uint8Array): boolean {
 
 /** `inBurst()` ends at the latest this long after a burst's `probe` (a burst is 30 s). */
 export const BURST_MS = 28_000;
+/**
+ * A `probe` begins a burst for the watch only after this many of the slot's
+ * own frames since the last `listening`: 5 s of 20 ms frames. Bursts are 30 s
+ * apart; a stall of the probe frames inside a burst gives one or a few.
+ */
+export const OWN_FRAMES_BEFORE_A_BURST = 250;
 
 export type Status = { status: string; at: number };
 
@@ -39,11 +45,14 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  * it sees every burst's edges and frames. One socket, opened after the build
  * check; a server close makes every later call throw (no reconnect).
  *
- * A burst counts only when the watch saw it begin: the slot's own frames
- * came after the last `listening` (the ListenStart answer or a burst's end)
- * and before its `probe`. The server's probe gate is per session, so a watch
- * opened in the middle of a burst gets `probe` with its first frame and
- * cannot know how much of the burst is left; it waits for the next one.
+ * A burst counts only when the watch saw it begin: 5 s of the slot's own
+ * frames came after the last `listening` (the ListenStart answer or a
+ * burst's end) and before its `probe`. The server's probe gate is per
+ * session, so a watch opened in the middle of a burst gets `probe` with its
+ * first frame, and a stall of the probe frames over the gate's 100 ms hold
+ * gives `listening`, an own frame and `probe` again in the middle of one:
+ * neither tells how much of the burst is left, and the watch waits for the
+ * next one.
  */
 export class BurstWatch {
   /** Every `AudioStatus` with its arrival time (ms). */
@@ -54,7 +63,7 @@ export class BurstWatch {
   private probeAt: number | null = null;
   /** The slot's own frames since the last `listening`. */
   private ownFrames = 0;
-  /** Inside a burst the watch did not see begin (opened in its middle). */
+  /** Inside a burst the watch did not see begin (opened in its middle, or after a stall). */
   private joined = false;
   private broken: string | null = null;
   private closed = false;
@@ -113,7 +122,7 @@ export class BurstWatch {
       const status = msg.data.status;
       this.statuses.push({ status, at: now });
       if (status === "probe") {
-        if (this.ownFrames > 0) this.probeAt = now;
+        if (this.ownFrames >= OWN_FRAMES_BEFORE_A_BURST) this.probeAt = now;
         else this.joined = true;
       }
       if (status === "listening") {
