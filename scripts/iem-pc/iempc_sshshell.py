@@ -9,12 +9,13 @@ writes three admin-only REG_SZ values (VALUES: the PC's own System32 cmd.exe,
 it, `"<shell>" /d /c "<command>"`, so no command iempc sends changes. A wrong
 value could cut ssh to the PC, so:
 
-1. Set-IemSshShell, elevated, imported only from the admin-only stage: both
-   modules come out of the fetched, attested bundle (`extract_member`, the
-   sums checked again), go by scp into the bootstrap run folder, are read
-   once on the PC, checked by their sha256 and staged (elevated_ps.staged),
-   IemPc.psm1 first because the new module imports it from its own folder,
-   and only the stage copy is imported. It saves the prior values, arms a
+1. Set-IemSshShell, elevated, imported only from the admin-only stage: the
+   three modules (STAGE) come out of the fetched, attested bundle
+   (`extract_member`, the sums checked again), go by scp into the bootstrap
+   run folder, are read once on the PC, checked by their sha256 and staged
+   (elevated_ps.staged), IemPc.psm1 and S1c's IemTuningStore.psm1 (its exact
+   registry save and restore) first because the new module imports both
+   from its own folder, and only the stage copy of the new one is imported. It saves the prior values, arms a
    one-shot SYSTEM task (UNDO_TASK, now + UNDO_MIN min) that restores them,
    then writes and reads back the values and the key's rights.
 2. A FRESH ssh session (every call is one; sshd reads the key per
@@ -39,10 +40,12 @@ import re
 import sys
 
 MODULE = "IemSshShell.psm1"
-# IemSshShell.psm1 imports IemPc.psm1 from its own folder (the elevated root,
-# file and task helpers): the stage gets IemPc.psm1 first, so that import never
-# reaches outside it.
-STAGE = ("IemPc.psm1", MODULE)
+# (bundle member, stage name): IemSshShell.psm1 imports IemPc.psm1 (the
+# elevated root, file and task helpers) and IemTuningStore.psm1 (Get-/Set-
+# IemRegRaw, the exact registry save and restore) from its own folder, so the
+# stage gets both first and those imports never reach outside it. The store is
+# the bundle's tuning/ copy.
+STAGE = (("IemPc.psm1", "IemPc.psm1"), ("tuning/IemTuningStore.psm1", "IemTuningStore.psm1"), (MODULE, MODULE))
 KEY = "HKLM:\\SOFTWARE\\OpenSSH"
 OPTION = "/d /c"
 ARGUMENTS = "/d"
@@ -63,9 +66,9 @@ SHELL_TAIL = "\\system32\\cmd.exe"
 
 
 def plan(sha: str) -> dict:
-    return {"sha": sha, "modules": list(STAGE), "key": KEY, "values": VALUES, "undo_task": UNDO_TASK,
+    return {"sha": sha, "modules": [member for member, _ in STAGE], "key": KEY, "values": VALUES, "undo_task": UNDO_TASK,
             "undo_after_min": UNDO_MIN,
-            "steps": [f"scp {' and '.join(STAGE)} of bundle {sha} into bootstrap/{sha}",
+            "steps": [f"scp {', '.join(member for member, _ in STAGE)} of bundle {sha} into bootstrap/{sha}",
                       f"{SET} from the admin-only stage: save the prior values, arm {UNDO_TASK} (now + {UNDO_MIN} min), "
                       "write and read back the values and the key's rights",
                       'a fresh ssh session: its shell must be System32\'s cmd.exe run as "<shell>" /d /c "<command>"',
@@ -114,14 +117,14 @@ def parse_probe(ip, r) -> dict:
 
 
 def staged_import(ctx, ip, sha: str, rec: dict) -> tuple[list, str]:
-    """The bundle's two modules (their sums checked again) and the statements
-    that stage both on the PC, IemPc.psm1 first, and import the new one from
-    its stage copy only (module_script's `pre`)."""
+    """The bundle's three modules (their sums checked again) and the
+    statements that stage them on the PC in STAGE's order and import the new
+    one from its stage copy only (module_script's `pre`)."""
     ep = ip.elevated_ps()
     rel = f"bootstrap/{sha}"
     uploads, mods = [], []
-    for name in STAGE:
-        local, hexd = ip.extract_member(sha, rec, name)
+    for member, name in STAGE:
+        local, hexd = ip.extract_member(sha, rec, member, nested="/" in member)
         uploads.append((local, name))
         mods.append((ip.ps_quote(ip.pc_join(ctx.env["PC_ROOT"], f"{rel}/{name}")), name, hexd))
     return uploads, f"{ep.staged(mods)} ; Import-Module $iemMod -Force ; "
@@ -131,7 +134,7 @@ def run(ctx, ip) -> int:
     """`iempc ssh-shell` (dev time, locked)."""
     sha = ip.check_sha(ctx.args.sha)
     rec = ip.need_record(sha)
-    missing = [name for name in STAGE if name not in (rec.get("sums") or {})]
+    missing = [member for member, _ in STAGE if member not in (rec.get("sums") or {})]
     if missing:
         raise ip.Refused(f"bundle {sha} has no {', '.join(missing)}: fetch a bundle built with #15's ssh-shell")
     if ctx.args.dry_run:
@@ -151,17 +154,25 @@ def run(ctx, ip) -> int:
         raise
     except ip.StepError as e:
         raise ip.StepError(f"{SET} failed: {e}; {undo_note(None)}") from None
+    again = f"run 'iempc ssh-shell --sha {sha}' again once that is settled"
     try:
         probe = parse_probe(ip, ip.run_module(env, PROBE, ip.STATUS_S, ctx.watch(abandon=True)))
-        confirm = None
-        if s["state"] in ARMED:
-            confirm = check_confirm(ip, ip.run_module(env, CONFIRM, ip.BOOTSTRAP_S, mode, pre=pre))
     except ip.EventNow:
         print(f"iempc: {SET} {s['state']}, not confirmed: {undo_note(s)}", file=sys.stderr, flush=True)
         raise
     except ip.StepError as e:
-        raise ip.StepError(f"{e}; not confirmed: {undo_note(s)}; run 'iempc ssh-shell --sha {sha}' again once that is "
-                           "settled (no further ssh call was made)") from None
+        raise ip.StepError(f"{e}; not confirmed: {undo_note(s)}; {again} (no further ssh call was made)") from None
+    confirm = None
+    if s["state"] in ARMED:
+        # Confirm changes the PC: a new flag lets it finish, so it may have confirmed before the event path.
+        try:
+            confirm = check_confirm(ip, ip.run_module(env, CONFIRM, ip.BOOTSTRAP_S, mode, pre=pre))
+        except ip.EventNow:
+            print(f"iempc: {CONFIRM} may have finished before the event path; if it did not, {undo_note(s)}",
+                  file=sys.stderr, flush=True)
+            raise
+        except ip.StepError as e:
+            raise ip.StepError(f"{CONFIRM} failed: {e}; unless it removed the undo task, {undo_note(s)}; {again}") from None
     ip.emit({"ssh_shell": confirm["state"] if confirm else s["state"], "sha": sha, "set": s["state"],
              "confirm": confirm["state"] if confirm else None, "shell": probe["shell"], "line": probe["line"],
              "values": s.get("values"), "undo_log": s.get("undo_log")})
