@@ -567,9 +567,9 @@ pub trait Pc {
     /// marks a REAPER as ending; a crash Windows Error Reporting still
     /// reports does.
     fn reaper_await_end(&mut self, c: &Cancel) -> R<()>;
-    /// ≤ 120 s for the track count, ended at once when REAPER's process
-    /// has ended (#10); the meter bridge at most once; the titles of
-    /// REAPER's visible dialogs.
+    /// ≤ 60 s for the track count (S7, #10: measured 6.0–6.3 s), ended at
+    /// once when REAPER's process has ended (#10); the meter bridge at most
+    /// once; the titles of REAPER's visible dialogs.
     fn reaper_facts(&mut self, c: &Cancel) -> R<ReaperFacts>;
     fn app_start(&mut self) -> R<()>;
     /// `/api/version`, the member count and the public host.

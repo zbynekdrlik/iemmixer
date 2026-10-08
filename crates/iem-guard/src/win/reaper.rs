@@ -31,8 +31,12 @@ const QUIT_WAIT: Duration = Duration::from_secs(30);
 const METER_POLL: Duration = Duration::from_millis(250);
 /// REAPER's web control silent this long fails a meter read.
 const SILENT: Duration = Duration::from_secs(5);
-/// The project loads within this (design §11: ≤ 120 s).
-const LOAD: Duration = Duration::from_secs(120);
+/// The project loads within this: 60 s since S7 (#10; the S6 design note's
+/// §5.2 step 7 and §11 set ≤ 120 s before the PC was measured).
+/// `reaper_handover` took 6.0–6.3 s over six runs on 2026-10-08 (three
+/// switch tests, the live → event, two event entries), so 60 s is about
+/// 10× the worst, inside spec §4.3's ≤ 90 s for the whole handover.
+const LOAD: Duration = Duration::from_secs(60);
 /// The meter bridge's heartbeat moves within this after a trigger.
 const HEARTBEAT: Duration = Duration::from_secs(20);
 
@@ -368,8 +372,8 @@ pub(super) fn start(pc: &WinPc) -> R<()> {
     }
 }
 
-/// ≤ 120 s for the track count, ended at once when REAPER's process has
-/// ended (#10); REAPER's visible dialogs by title (the
+/// ≤ [`LOAD`] (60 s) for the track count, ended at once when REAPER's
+/// process has ended (#10); REAPER's visible dialogs by title (the
 /// verdict sorts out its evaluation notice); the meter bridge at most once
 /// and only while its state is empty (the 2026-09-27 lesson); the
 /// heartbeat; the driver module; a few seconds of stage meters. A project that never
