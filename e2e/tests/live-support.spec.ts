@@ -1,11 +1,16 @@
 import { EventEmitter } from "node:events";
+import type { APIRequestContext } from "@playwright/test";
 import { test, expect } from "./support/fixtures";
 import { BurstWatch } from "./live/support/burst";
+import { Desk, LiveMixer, type Cmd } from "./live/support/desk";
+import { SILENT_PEAK, continuity, dbOf, median, spread, talkbackLevel } from "./live/support/series";
 
 // The live specs' support (S7, #10), run in the mock E2E job: the live specs
 // themselves run only from the ops live run, against the real PC. The burst
-// watch runs here on a local stand-in for the public host's socket (the
-// burst's edges and the frames are fed in). No page is used.
+// watch, the desk and its mixer socket run here on local stand-ins for the
+// public host's sockets (the burst's edges, the frames and the server's
+// answers are fed in); every series is synthetic with a known answer. No
+// page is used.
 
 /** What a stand-in socket was sent. */
 type Sent = { cmd: string; [field: string]: unknown };
@@ -89,4 +94,288 @@ test("the watch counts a burst only when it saw the burst begin", async () => {
   frame();
   expect(watch.inBurst()).toBe(false);
   expect(watch.burstFrames).toBe(3);
+});
+
+/** The engine's talkback gain into its input (program spec A4). */
+const TALKBACK_GAIN = 0.379934;
+
+/** `n` copies of `value`. */
+function constant(value: number, n: number): number[] {
+  return new Array<number>(n).fill(value);
+}
+
+test("dbOf reads a linear peak in dB with silence at -150 dB", () => {
+  expect(dbOf(1)).toBe(0);
+  expect(dbOf(0.1)).toBeCloseTo(-20, 10);
+  expect(dbOf(SILENT_PEAK)).toBeCloseTo(-60, 10);
+  expect(dbOf(2)).toBeCloseTo(6.0206, 4);
+  // Silence and anything quieter than the floor read the floor.
+  expect(dbOf(0)).toBe(-150);
+  expect(dbOf(1e-9)).toBe(-150);
+  expect(dbOf(10 ** (-149 / 20))).toBeCloseTo(-149, 10);
+  // A peak is never negative and always finite.
+  expect(() => dbOf(-0.1)).toThrow("dbOf");
+  expect(() => dbOf(Number.NaN)).toThrow("dbOf");
+  expect(() => dbOf(Number.POSITIVE_INFINITY)).toThrow("dbOf");
+});
+
+test("the median is the middle value, or the mean of the two middle ones, of an unsorted series", () => {
+  expect(median([3, 1, 2])).toBe(2);
+  expect(median([4, 1, 3, 2])).toBe(2.5);
+  expect(median([-8])).toBe(-8);
+  expect(median([5, 5, 1, 9, 9])).toBe(5);
+  // A few outliers move it not at all.
+  expect(median([-20, -20.1, -150, -19.9, -20, -150, -20])).toBe(-20);
+  // The series is left as it was.
+  const series = [3, 1, 2];
+  median(series);
+  expect(series).toEqual([3, 1, 2]);
+  expect(() => median([])).toThrow("median of no values");
+});
+
+test("the spread is the largest value less the smallest", () => {
+  expect(spread([1, 3, 2])).toBe(2);
+  expect(spread([-6.1, -6.0, -5.95])).toBeCloseTo(0.15, 10);
+  expect(spread([7])).toBe(0);
+  expect(() => spread([])).toThrow("spread of no values");
+});
+
+test("the talkback level is the meter's median against the encoder's in dB: the A4 gain reads -8.406 dB", () => {
+  // The page encodes a steady half-scale tone; the meter shows it at the engine's gain.
+  const input = constant(0.5, 150);
+  const meter = constant(0.5 * TALKBACK_GAIN, 30);
+  const level = talkbackLevel(meter, input);
+  expect(level.db).toBeCloseTo(-8.4058, 4);
+  expect(level.inputDb).toBeCloseTo(-6.0206, 4);
+  expect(level.meterDb).toBeCloseTo(-14.426, 3);
+  expect(level.inputSpreadDb).toBe(0);
+
+  // A frame at the window's edge and a lone dropout move neither median.
+  const edged = [...meter, 0, 0.5 * TALKBACK_GAIN * 0.5];
+  expect(talkbackLevel(edged, input).db).toBeCloseTo(-8.4058, 4);
+
+  // An input 0.25 dB louder halfway through is not steady (spread > 0.2 dB),
+  // one 0.1 dB louder is.
+  const stepped = [...constant(0.5, 75), ...constant(0.5 * 10 ** (0.25 / 20), 75)];
+  expect(talkbackLevel(meter, stepped).inputSpreadDb).toBeCloseTo(0.25, 10);
+  const nudged = [...constant(0.5, 75), ...constant(0.5 * 10 ** (0.1 / 20), 75)];
+  expect(talkbackLevel(meter, nudged).inputSpreadDb).toBeCloseTo(0.1, 10);
+
+  // A meter 0.3 dB off the gain reads 0.3 dB off it.
+  const off = constant(0.5 * TALKBACK_GAIN * 10 ** (0.3 / 20), 30);
+  expect(talkbackLevel(off, input).db).toBeCloseTo(-8.1058, 4);
+
+  expect(() => talkbackLevel([], input)).toThrow("median of no values");
+  expect(() => talkbackLevel(meter, [])).toThrow("median of no values");
+});
+
+test("continuity counts the frames above -60 dB and the longest silent run", () => {
+  const loud = 0.2;
+  // 50 frames, every fifth silent: 40 heard, never two silent in a row.
+  const fifths = Array.from({ length: 50 }, (_, i) => (i % 5 === 4 ? 0 : loud));
+  expect(continuity(fifths)).toEqual({ heard: 40, longestSilence: 1 });
+  // A hang of five frames in a row.
+  const hang = [...constant(loud, 20), ...constant(0, 5), ...constant(loud, 25)];
+  expect(continuity(hang)).toEqual({ heard: 45, longestSilence: 5 });
+  // −60 dB itself is heard; just below it is silent.
+  expect(continuity([SILENT_PEAK, SILENT_PEAK * 0.999])).toEqual({ heard: 1, longestSilence: 1 });
+  // A silent end is a run too.
+  expect(continuity([loud, 0, 0, 0])).toEqual({ heard: 1, longestSilence: 3 });
+  expect(continuity([])).toEqual({ heard: 0, longestSilence: 0 });
+});
+
+/** A watch as `BurstWatch.open` leaves it: ListenStart answered `listening`, and the slot's own frames coming. */
+function watchOn(): { watch: BurstWatch; status: (status: string) => void } {
+  const { watch, status, frame } = rawWatch();
+  status("listening");
+  frame();
+  return { watch, status };
+}
+
+/** A real LiveMixer on a stand-in socket. */
+function mixerOn(): { mixer: LiveMixer; socket: FakeSocket } {
+  const socket = new FakeSocket();
+  const mixer = new (LiveMixer as unknown as new (ws: unknown, label: string) => LiveMixer)(socket, "the test socket");
+  return { mixer, socket };
+}
+
+/** A command marked with `tag`, so the order of the sends reads back. */
+const cmd = (tag: string): Cmd => ({ cmd: "SetLevel", tag });
+
+/** A desk on `watch`; its `open` is not used here (it needs the public host). */
+function deskOn(watch: BurstWatch): Desk {
+  return new Desk(undefined as unknown as APIRequestContext, watch);
+}
+
+test("the desk refuses a change outside its burst and sends nothing then", async () => {
+  const { watch, status } = watchOn();
+  const { mixer, socket } = mixerOn();
+  const desk = deskOn(watch);
+  expect(() => desk.change(mixer, cmd("a"), cmd("undo a"))).toThrow("a change outside desk.during");
+
+  status("probe");
+  await expect(
+    desk.during(async () => {
+      // The burst ends: `listening` comes before the change.
+      status("listening");
+      desk.change(mixer, cmd("b"), cmd("undo b"));
+    }),
+  ).rejects.toThrow("a change came after the burst's end");
+  expect(socket.sent).toEqual([]);
+  expect(watch.statuses.map((s) => s.status)).toEqual(["listening", "probe", "listening"]);
+});
+
+test("the desk puts the changes back newest first, each in its own order, inside the burst", async () => {
+  const { watch, status } = watchOn();
+  const { mixer, socket } = mixerOn();
+  const desk = deskOn(watch);
+  status("probe");
+  const result = await desk.during(async () => {
+    desk.change(mixer, [cmd("a1"), cmd("a2")], [cmd("undo a1"), cmd("undo a2")]);
+    const mark = desk.mark();
+    desk.change(mixer, cmd("b"), [cmd("undo b1"), cmd("undo b2")]);
+    desk.change(mixer, cmd("c"), cmd("undo c"));
+    // Only the changes after the mark go back here.
+    await desk.restore(mark);
+    expect(socket.changes()).toEqual(["a1", "a2", "b", "c", "undo c", "undo b1", "undo b2"]);
+    expect(socket.barriers()).toBe(1);
+    return 7;
+  });
+  expect(result).toBe(7);
+  expect(socket.changes()).toEqual(["a1", "a2", "b", "c", "undo c", "undo b1", "undo b2", "undo a1", "undo a2"]);
+  // Each restore waited for the engine: a barrier after its undos.
+  expect(socket.barriers()).toBe(2);
+  expect(socket.sent[socket.sent.length - 1].cmd).toBe("GetLimiterParams");
+  // Nothing is left to put back at the end.
+  await desk.end();
+  expect(socket.changes().length).toBe(9);
+});
+
+test("a failing step still puts its changes back, and the step's failure is the test's", async () => {
+  const { watch, status } = watchOn();
+  const { mixer, socket } = mixerOn();
+  const desk = deskOn(watch);
+  status("probe");
+  await expect(
+    desk.during(async () => {
+      desk.change(mixer, cmd("a"), cmd("undo a"));
+      throw new Error("the step failed");
+    }),
+  ).rejects.toThrow("the step failed");
+  expect(socket.changes()).toEqual(["a", "undo a"]);
+  expect(socket.barriers()).toBe(1);
+});
+
+test("a restore after the burst's end fails, though the changes went back", async () => {
+  const { watch, status } = watchOn();
+  const { mixer, socket } = mixerOn();
+  const desk = deskOn(watch);
+  status("probe");
+  await expect(
+    desk.during(async () => {
+      desk.change(mixer, cmd("a"), cmd("undo a"));
+      status("listening");
+    }),
+  ).rejects.toThrow("the restore came after the burst's end");
+  expect(socket.changes()).toEqual(["a", "undo a"]);
+});
+
+test("the guard puts the changes back the moment the burst ends, and the steps fail", async () => {
+  const { watch, status } = watchOn();
+  const { mixer, socket } = mixerOn();
+  const desk = deskOn(watch);
+  status("probe");
+  await expect(
+    desk.during(async () => {
+      desk.change(mixer, [cmd("a1"), cmd("a2")], [cmd("undo a1"), cmd("undo a2")]);
+      desk.change(mixer, cmd("b"), cmd("undo b"));
+      // The burst ends while the step waits: the guard does not wait for it.
+      status("listening");
+      await expect.poll(() => socket.changes().length, { timeout: 1_000, intervals: [10] }).toBe(6);
+      expect(socket.changes()).toEqual(["a1", "a2", "b", "undo b", "undo a1", "undo a2"]);
+    }),
+  ).rejects.toThrow("the burst ended with changes in place: they went back after its end");
+  // Nothing went back twice.
+  expect(socket.changes().length).toBe(6);
+  // The guard stopped with the steps.
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  expect(socket.changes().length).toBe(6);
+});
+
+test("the desk's end puts back what an abandoned step left in place", async () => {
+  const { watch, status } = watchOn();
+  const { mixer, socket } = mixerOn();
+  const desk = deskOn(watch);
+  status("probe");
+  // A step that does not end, as one a test timeout abandons.
+  let changed = false;
+  let finish = (): void => undefined;
+  const abandoned = desk.during(async () => {
+    desk.change(mixer, cmd("a"), cmd("undo a"));
+    changed = true;
+    await new Promise<void>((resolve) => (finish = resolve));
+  });
+  await expect.poll(() => changed).toBe(true);
+  await desk.end();
+  expect(socket.changes()).toEqual(["a", "undo a"]);
+  expect(() => desk.change(mixer, cmd("b"), cmd("undo b"))).toThrow("a change outside desk.during");
+  // The abandoned step ends later: nothing is left for it to put back.
+  finish();
+  await abandoned;
+  expect(socket.changes()).toEqual(["a", "undo a"]);
+});
+
+test("a wait inside the burst is cut to the time left in it, and never to 0 (no timeout)", async () => {
+  const { watch, status } = watchOn();
+  const desk = deskOn(watch);
+  expect(desk.bound(5_000)).toBe(1);
+  status("probe");
+  expect(desk.bound(5_000)).toBe(5_000);
+  const left = desk.bound(60_000);
+  expect(left).toBeGreaterThan(27_000);
+  expect(left).toBeLessThanOrEqual(28_000);
+  status("listening");
+  expect(desk.bound(5_000)).toBe(1);
+});
+
+test("the mixer reads a channel as the newest state and the updates after it show it", async () => {
+  const { mixer, socket } = mixerOn();
+  const state = (level_db: number, mix: string) => ({
+    channels: [{ id: "mic1", level_db, muted: false, pan: 0.5 }],
+    connected: true,
+    mix,
+  });
+  expect(mixer.channel("mic1")).toBeUndefined();
+  expect(() => mixer.soloed()).toThrow("no solo state");
+  socket.event("State", state(-6, "member1"));
+  socket.event("SoloUpdate", { soloed: [] });
+  expect(mixer.channel("mic1")).toEqual({ id: "mic1", level_db: -6, muted: false, pan: 0.5 });
+  socket.event("ChannelUpdate", { id: "mic1", level_db: 3, muted: true, pan: 0.25 });
+  socket.event("ChannelUpdate", { id: "mic2", level_db: 9, muted: false, pan: 0.5 });
+  expect(mixer.channel("mic1")).toEqual({ id: "mic1", level_db: 3, muted: true, pan: 0.25 });
+  expect(mixer.channel("mic2")).toBeUndefined();
+  // A new state (an engine resync) replaces what came before it.
+  socket.event("State", state(0, "member2"));
+  expect(mixer.channel("mic1")).toEqual({ id: "mic1", level_db: 0, muted: false, pan: 0.5 });
+  expect(mixer.mixId()).toBe("member2");
+  expect(mixer.soloed()).toEqual([]);
+  socket.event("SoloUpdate", { soloed: ["mic1"] });
+  expect(mixer.soloed()).toEqual(["mic1"]);
+});
+
+test("the mixer reads meters by arrival, the louder side, and a server close fails it for good", async () => {
+  const { mixer, socket } = mixerOn();
+  const t0 = Date.now();
+  socket.event("Meters", { meters: { mic1: [0.1, 0.3], mic2: [0.5, 0.5] } });
+  socket.event("Meters", { meters: { mic2: [0.2, 0.1] } });
+  expect(mixer.meterFrames(t0)).toBe(2);
+  expect(mixer.meterFrames(t0, t0)).toBe(0);
+  expect(mixer.peaks("mic1", t0)).toEqual([0.3]);
+  expect(mixer.peaks("mic2", t0)).toEqual([0.5, 0.2]);
+  expect(mixer.peaks("mic2", Date.now() + 1)).toEqual([]);
+
+  socket.emit("close");
+  expect(() => mixer.check()).toThrow("the server closed the test socket (no reconnect)");
+  expect(() => mixer.send(cmd("a"))).toThrow("the server closed the test socket (no reconnect)");
+  expect(socket.sent).toEqual([]);
 });

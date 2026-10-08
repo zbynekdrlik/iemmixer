@@ -1,11 +1,13 @@
 import { test as base, expect } from "../../support/fixtures";
 import { BurstWatch } from "./burst";
+import { Desk } from "./desk";
 import { relaySockets, type Relay } from "./relay";
 
 // The live specs' `test`: the zero-console fixture of every spec, plus the
-// burst watch and the socket relay as fixtures, so their teardown runs even
-// after a timeout (a test body's `finally` does not): the watch's socket
-// closes, and the relay's rules are checked after every test.
+// burst watch, the socket relay and the desk as fixtures, so their teardown
+// runs even after a timeout (a test body's `finally` does not): the watch's
+// socket closes, the relay's rules are checked after every test, and the
+// desk puts back any change a timed-out body left in place.
 
 type LiveFixtures = {
   /** `/ws/audio` through the relay gains `&hil=1` (the listen probe); `test.use({ hil: true })`. */
@@ -14,6 +16,8 @@ type LiveFixtures = {
   watch: BurstWatch;
   /** Every page socket through the runner (`relaySockets`); checked after the test. */
   relay: Relay;
+  /** The runner's mixer sockets and their burst-only changes (`Desk`); put back, checked and closed after the test. */
+  desk: Desk;
 };
 
 export const test = base.extend<LiveFixtures>({
@@ -32,6 +36,15 @@ export const test = base.extend<LiveFixtures>({
     const relay = await relaySockets(page, { hil });
     await use(relay);
     relay.check();
+  },
+  desk: async ({ request, watch }, use) => {
+    const desk = new Desk(request, watch);
+    try {
+      await use(desk);
+    } finally {
+      // Before the watch closes: the restore is checked against its burst.
+      await desk.end();
+    }
   },
 });
 

@@ -31,6 +31,17 @@ export const ANALYSER_INIT = (): void => {
 };
 
 /**
+ * The tone the live talkback spec plays into Chromium's fake microphone
+ * (`toneWav`), and how long after the encoder's first frame the spec reads
+ * it: Chromium's capture processing (talkback.js asks for AGC and noise
+ * suppression) ramps the level for about 2.5 s (the last frame more than
+ * 0.05 dB off the steady level came 2.49 to 2.52 s after the first in three
+ * local runs), then holds it within 0.01 dB. The mock run checks this
+ * (`tests/talkback-capture.spec.ts`).
+ */
+export const TALK_TONE = { hz: 1000, amplitude: 0.5, settleMs: 2_700 } as const;
+
+/**
  * `page.addInitScript(TALK_INIT)`: each frame the page hands its talkback
  * encoder (talkback.js) is also measured: its peak (linear, plane 0) and
  * `performance.now()` go into `window.__live_talk_in`; a frame that cannot
