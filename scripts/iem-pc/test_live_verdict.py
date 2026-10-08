@@ -498,16 +498,16 @@ class Titles(unittest.TestCase):
         a = (r'''import { test, expect } from "../support/fixtures";
 test.describe("a burst", () => {
   test("first \"quoted\" title", async ({ page }) => {
-    await test.step("a step is no test", async () => {});
+    await test.step("a step is no test", async () => { run(); });
   });
 });
-mytest("an identifier ending in test is no test", () => {});
-test('second; with a semicolon', async () => {});
+mytest("an identifier ending in test is no test", () => { run(); });
+test('second; with a semicolon', async () => { run(); });
 ''')
         self.spec("probe.spec.ts", a)
-        self.spec("nested/frames.spec.ts", "test(`third title`, async () => {});\n")
-        self.spec("zz.test.ts", 'test("fourth, from a .test.ts file", async () => {});\n')
-        self.spec("support/relay.ts", 'test("a support file is no spec", async () => {});\n')
+        self.spec("nested/frames.spec.ts", "test(`third title`, async () => { run(); });\n")
+        self.spec("zz.test.ts", 'test("fourth, from a .test.ts file", async () => { run(); });\n')
+        self.spec("support/relay.ts", 'test("a support file is no spec", async () => { run(); });\n')
         self.spec("notes.md", 'test("a note is no spec")\n')
         self.spec("probe.spec.ts.orig", 'test("a copy is no spec")\n')
         want = ['first "quoted" title', "second; with a semicolon", "third title", "fourth, from a .test.ts file"]
@@ -517,7 +517,7 @@ test('second; with a semicolon', async () => {});
         self.assertIs(lv.PW_TEST, cpm.PW_TEST)
         self.assertEqual(set(lv.titles(self.dir)) - {want[2], want[3]}, cpm.playwright_titles(a))
         # A title twice stays twice: each needs its own test.
-        self.spec("nested/again.spec.ts", "test(`third title`, async () => {});\n")
+        self.spec("nested/again.spec.ts", "test(`third title`, async () => { run(); });\n")
         self.assertEqual(lv.titles(self.dir).count("third title"), 2)
 
     def test_each_files_titles_are_the_parity_checkers_on_every_e2e_spec(self):
@@ -537,7 +537,7 @@ test('second; with a semicolon', async () => {});
         self.assertEqual(lv.titles(self.dir), [])
         with self.assertRaises(lv.Bad):
             lv.titles(self.dir / "absent")
-        (self.dir / "bad.spec.ts").write_bytes(b'test("\xff", () => {});\n')
+        (self.dir / "bad.spec.ts").write_bytes(b'test("\xff", () => { run(); });\n')
         with self.assertRaises(lv.Bad):
             lv.titles(self.dir)
 
@@ -586,9 +586,9 @@ class Main(unittest.TestCase):
         self.assertEqual(self.report(), r.verdict())
         self.assertEqual(self.report()["summary"], GREEN)
         # The titles come from the --specs folder.
-        (self.specs / "more.spec.ts").write_text('test("a fourth title", async () => {});\n', encoding="utf-8")
+        (self.specs / "more.spec.ts").write_text('test("a fourth title", async () => { run(); });\n', encoding="utf-8")
         self.assertEqual(self.report()["first_failure"], "live test missing: a fourth title")
-        (self.specs / "more.spec.ts").write_bytes(b'test("\xff", () => {});\n')
+        (self.specs / "more.spec.ts").write_bytes(b'test("\xff", () => { run(); });\n')
         self.assertEqual(self.report()["first_failure"], "the live specs are unreadable")
         (self.specs / "more.spec.ts").unlink()
         # A burst line iemmode could not answer, and a line cut short.
