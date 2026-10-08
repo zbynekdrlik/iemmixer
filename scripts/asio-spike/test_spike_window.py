@@ -16,6 +16,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import spike_window as sw  # noqa: E402
+from test_window_stage import SUMS, bundle_record  # noqa: E402
 
 NUMERIC = {"PC_BUFFER_ORIGINAL": "64", "PC_NTRACK": "9"}
 FULL = "\n".join(f"{k}=v" for k in sw.REQUIRED if k not in NUMERIC) + "\n" + "".join(f"{k}={v}\n" for k, v in NUMERIC.items())
@@ -277,6 +278,9 @@ class WindowLockTests(unittest.TestCase):
             return {"ok": True}
 
         sw.ps = fake_ps
+        patch = mock.patch.object(sw, "plain_ps", fake_ps, create=True)   # the preempt's first call (#15)
+        patch.start()
+        self.addCleanup(patch.stop)
 
     def tearDown(self) -> None:
         sw.STATE, sw.EVENT_NOW, sw.ps, sw.alarm, sw.LOCK_WAIT_S = self.saved
@@ -415,7 +419,7 @@ class UnwindTuningTests(unittest.TestCase):
         done = sw.unwind(env, state, running=False)
         stops = [c for c in self.calls if "Stop-IemTrace" in c]
         self.assertEqual(len(stops), 1)
-        self.assertIn("'bin\\IemMeasure.psm1') -ArgumentList 'stop-only'", stops[0])
+        self.assertIn("Import-Module (Join-Path $iemStage 'IemMeasure.psm1') -ArgumentList 'stop-only'", stops[0])   # #15
         self.assertIn(f"Stop-IemTraceSessions -Dir 'C:\\t\\runs\\x' -TimeoutSeconds {sw.TRACE_STOP_LOGMAN_S}", stops[0])
         self.assertNotIn("IemTuning", stops[0])
         self.assertNotIn("Stop-IemTrace -Xperf", stops[0])
@@ -582,7 +586,7 @@ class RunTests(unittest.TestCase):
 
 
 class PreflightTests(unittest.TestCase):
-    GOOD = {"pref": 64, "reaper": 1, "app": 1, "spike": 0, "holders": ["reaper.exe:6496"], "task": True, "files": 6}
+    GOOD = {"pref": 64, "reaper": 1, "app": 1, "spike": 0, "holders": ["reaper.exe:6496"], "task": True, "files": 7}
 
     def test_good_state_passes(self) -> None:
         self.assertEqual(sw.preflight_problems(dict(self.GOOD), 64), [])
@@ -618,7 +622,7 @@ class DevTimeWindowTests(unittest.TestCase):
         sw.STATE, sw.EVENT_NOW = d / "spike-window.json", d / "EVENT-NOW"
         self.calls: list[str] = []
         self.pc = {"pref": 64, "kind": "DWord", "raw": "64", "reaper": 0, "app": 1, "spike": 0, "holders": [],
-                   "task": True, "files": 6}
+                   "task": True, "files": 7}
 
         def fake_ps(env, body, timeout=300, event="finish"):
             self.calls.append(body)
@@ -714,6 +718,12 @@ class BundleTests(unittest.TestCase):
 
     def test_a_complete_bundle_verifies(self) -> None:
         self.assertEqual(sw.verify_bundle(self.bundle()), sorted(sw.BUNDLE_FILES))
+
+    def test_the_bundle_carries_the_tuning_store_next_to_iemtuning(self) -> None:
+        # #34: IemTuning.psm1 loads IemTuningStore.psm1 from its own folder, so the
+        # store travels in the bundle and every window session stages it.
+        self.assertIn("IemTuningStore.psm1", sw.BUNDLE_FILES)
+        self.assertIn("IemTuningStore.psm1", sw.MODULES)
 
     def test_a_changed_file_fails(self) -> None:
         d = self.bundle()
@@ -950,6 +960,7 @@ class PsReplyTests(unittest.TestCase):
         self.saved = sw.guarded
         self.out = ""
         sw.guarded = lambda cmd, stdin, timeout, event: self.out
+        self.env = bundle_record(self)   # the window's attested bundle (#15)
 
     def tearDown(self) -> None:
         sw.guarded = self.saved
@@ -957,21 +968,21 @@ class PsReplyTests(unittest.TestCase):
     def test_an_error_reply_is_no_lost_reply(self) -> None:
         self.out = json.dumps({"ok": False, "error": "Access is denied"}) + "\n"
         with self.assertRaisesRegex(sw.StepError, "Access is denied") as cm:
-            sw.ps({"PC_ROOT": "R", "PC_SSH": "u@h"}, "x")
+            sw.ps(self.env, "x")
         self.assertNotIsInstance(cm.exception, sw.NoReply)
 
     def test_the_script_sent_is_ps_script(self) -> None:
         # One builder for what reaches the PC, so CI can run the same text (review m11).
         sent: list[str] = []
         sw.guarded = lambda cmd, stdin, timeout, event: sent.append(stdin) or json.dumps({"ok": True, "r": 1})
-        self.assertEqual(sw.ps({"PC_ROOT": "R", "PC_SSH": "u@h"}, "Get-X"), 1)
-        self.assertEqual(sent, [sw.ps_script("R", "Get-X") + "\n"])
+        self.assertEqual(sw.ps(self.env, "Get-X"), 1)
+        self.assertEqual(sent, [sw.ps_script("R", "Get-X", SUMS) + "\n"])
 
     def test_no_or_a_cut_reply_is_no_reply(self) -> None:
         for out in ("", "\n", '{"ok": tr\n'):
             self.out = out
             with self.assertRaises(sw.NoReply, msg=repr(out)):
-                sw.ps({"PC_ROOT": "R", "PC_SSH": "u@h"}, "x")
+                sw.ps(self.env, "x")
 
 
 if __name__ == "__main__":

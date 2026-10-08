@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """S1c tuning window on the dev box (design note §7, §8): the PC tuning
-modules (IemTuning.psm1, IemMeasure.psm1 from the verified spike bundle) and
-the measurement set, on top of spike_window.py's window, state, event guard
-and unwind. A window opens only with spike_window's `new --signal`; every
-command here checks the "ide event" flag and pre-empts like spike_window.
-Site values come only from the private env ($SPIKE_ENV) and profile
+modules (IemTuning.psm1 with its IemTuningStore.psm1, IemMeasure.psm1 from the
+verified spike bundle) and the measurement set, on top of spike_window.py's
+window, state, event guard and unwind. A window opens only with spike_window's
+`new --signal`; every command here checks the "ide event" flag and pre-empts
+like spike_window. Site values come only from the private env ($SPIKE_ENV) and profile
 ($TUNING_PROFILE). Nothing is ever ended by force; a reboot happens only on
 the owner's quoted approval, and it is an immediate restart that an app may
 veto (never a delayed one: Windows forces those, I8)."""
@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import os
 import re
@@ -132,7 +133,12 @@ def cmd_wpt_install(env, args) -> None:
     if not local.is_file():
         subprocess.run(["curl", "-fsSL", "-o", str(local), ADK_URL], check=True, timeout=300)
     sw.scp(str(local), f"{env['PC_SSH']}:{env['PC_TUNING_ROOT_SCP']}/adksetup.exe")
-    r = tps(env, f"Install-IemWpt -Setup {ps_quote(env['PC_TUNING_ROOT'] + chr(92) + 'adksetup.exe')} -Xperf {xperf(env)}", timeout=1800)
+    # The elevated session runs only an admin-only copy (#15, the last lane, item 3): the
+    # upload is read once and checked by this box's sha256, staged and read back; Install-IemWpt
+    # checks the stage copy's signature and runs that copy.
+    upload = ps_quote(env["PC_TUNING_ROOT"] + "\\adksetup.exe")
+    stage = sw.elevated_ps.staged([(upload, "adksetup.exe", hashlib.sha256(local.read_bytes()).hexdigest())])
+    r = tps(env, f"{stage} ; Install-IemWpt -Setup $iemMod -Xperf {xperf(env)}", timeout=1800)
     print(json.dumps({"wpt-install": r}))
 
 
@@ -412,10 +418,15 @@ def analysis_step(root: str, since: str, body: str) -> str:
 
 
 # The step body the Windows CI runner sends through analysis_step: the priority
-# the guard set, IemMeasure's clock, and whether IemTuning loaded too (IemMeasure
-# keeps a failed IemTuning load to itself, so Get-IemNow alone proves nothing).
+# the guard set, IemMeasure's clock, whether IemTuning loaded too (IemMeasure
+# keeps a failed IemTuning load to itself, so Get-IemNow alone proves nothing),
+# the temp folder the step runs with (#15: GetTempPath, which Add-Type's compile
+# reads, is the admin-only <elevated root>\temp, set before the tuning modules' import)
+# and where the five modules were imported from (#15, #34: the admin-only stage, never bin).
 ANALYSIS_PROBE = ("[pscustomobject]@{ priority = \"$((Get-Process -Id $PID).PriorityClass)\"; now = Get-IemNow; "
-                  "tuning = [bool](Get-Command -Name ConvertTo-IemLpNumber -ErrorAction SilentlyContinue) }")
+                  "tuning = [bool](Get-Command -Name ConvertTo-IemLpNumber -ErrorAction SilentlyContinue); "
+                  "temp = [IO.Path]::GetTempPath(); "
+                  "modules = @(Get-Module -Name SpikePc, GoldenPc, IemMeasure, IemTuning, IemTuningStore | ForEach-Object { $_.Path }) }")
 
 
 def read_text(path: Path) -> str:
@@ -817,16 +828,33 @@ def main(argv: list[str]) -> int:
     pp.add_argument("--governor", required=True)
     pp.add_argument("--pid", type=int, default=0)
     pp.add_argument("--tid", type=int, default=0)
+    pp.add_argument("--sums", required=True, help="the bundle's SHA256SUMS (the modules are checked against it, #15)")
     asc = sub.add_parser("analysis-script", help="print an analysis step's start (guard, import, a probe) exactly as sw.ps "
                                                  "sends it (for the Windows CI runner)")
     asc.add_argument("--root", required=True, help="a folder whose bin holds the spike bundle")
     asc.add_argument("--since", required=True, help="the analysis start, PC time (Get-IemNow)")
+    asc.add_argument("--sums", required=True, help="the bundle's SHA256SUMS (the modules are checked against it, #15)")
+    pre = sub.add_parser("preempt-script", help="print the preempt's first call (the spike's stop file, the spike count) "
+                                                "exactly as sw.plain_ps sends it (for the Windows CI runner, #15)")
+    pre.add_argument("--root", required=True, help="a folder with a queue folder")
+    tsc = sub.add_parser("trace-stop-script", help="print a trace stop exactly as sw.ps sends it (for the Windows CI "
+                                                   "runner, which times it against TRACE_STOP_CALL_S, #15)")
+    tsc.add_argument("--root", required=True, help="a folder whose bin holds the spike bundle")
+    tsc.add_argument("--dir", required=True, help="the trace's run folder")
+    tsc.add_argument("--sums", required=True, help="the bundle's SHA256SUMS (the modules are checked against it, #15)")
     args = ap.parse_args(argv)
-    if args.cmd == "poll-script":   # no window, no private env
-        print(sw.ps_script(args.root, poll_body(args.governor, args.pid, args.tid)))
+    if args.cmd == "preempt-script":   # no window, no private env, no bundle: it imports nothing
+        print(sw.plain_script(sw.stop_first_body({"PC_ROOT": args.root})))
         return 0
-    if args.cmd == "analysis-script":   # no window, no private env
-        print(sw.ps_script(args.root, analysis_step(args.root, args.since, ANALYSIS_PROBE)))
+    if args.cmd in ("poll-script", "analysis-script", "trace-stop-script"):   # no window, no private env
+        sums = sw.parse_sums(Path(args.sums).read_text(encoding="utf-8"))
+        if args.cmd == "poll-script":
+            body = poll_body(args.governor, args.pid, args.tid)
+        elif args.cmd == "analysis-script":
+            body = analysis_step(args.root, args.since, ANALYSIS_PROBE)
+        else:
+            body = sw.trace_stop_body({"PC_ROOT": args.root}, args.dir)
+        print(sw.ps_script(args.root, body, sums))
         return 0
     handlers = {"tuning-setup": cmd_tuning_setup, "inventory": cmd_inventory, "fingerprint": cmd_fingerprint, "wpt-install": cmd_wpt_install,
                 "enter": cmd_enter, "exit": cmd_exit, "apply": cmd_apply, "undo": cmd_undo, "state": cmd_state, "measure": cmd_measure,

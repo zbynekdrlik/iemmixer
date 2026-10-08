@@ -2,7 +2,9 @@
 //! sample_rate` seconds against absolute deadlines, with synthetic inputs
 //! (silence or a sine on every channel). For hosted E2E tests and soak runs;
 //! pacing is best effort (the host scheduler decides), and a thread more than
-//! eight periods behind resynchronises instead of bursting.
+//! eight periods behind resynchronises instead of bursting. Every interval
+//! between two callbacks and every callback's own time go into the stream
+//! histograms (S7, [`crate::hist`]).
 
 use std::io;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -11,6 +13,8 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use crate::hist::{HistSnapshot, StreamHists};
+use crate::telemetry::period_ns;
 use crate::{Block, Process, StreamStats, panic_message};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -46,6 +50,9 @@ struct Shared {
 pub struct NullRt<P: Process + 'static> {
     thread: JoinHandle<P>,
     shared: Arc<Shared>,
+    /// The stream histograms, allocated before the pacing thread starts and
+    /// shared with it (S7).
+    hists: Arc<StreamHists>,
     /// The frames per callback the pacing thread delivers.
     frames: u32,
 }
@@ -54,19 +61,27 @@ impl<P: Process + 'static> NullRt<P> {
     /// Starts the pacing thread; the processor comes back from [`NullRt::stop`].
     pub fn start(cfg: NullRtConfig, mut p: P) -> io::Result<Self> {
         let frames = u32::try_from(cfg.block.max(1)).unwrap_or(u32::MAX);
+        // The stream histograms (S7), sized from the pacing period and
+        // allocated before the thread starts.
+        let hists = Arc::new(StreamHists::new(period_ns(
+            frames,
+            f64::from(cfg.sample_rate.max(1)),
+        )));
         let shared = Arc::new(Shared::default());
         shared.running.store(true, Ordering::Release);
         let s = Arc::clone(&shared);
+        let h = Arc::clone(&hists);
         let thread = std::thread::Builder::new()
             .name("iem-nullrt".into())
             .spawn(move || {
-                pace(&cfg, &mut p, &s);
+                pace(&cfg, &mut p, &s, &h);
                 s.running.store(false, Ordering::Release);
                 p
             })?;
         Ok(Self {
             thread,
             shared,
+            hists,
             frames,
         })
     }
@@ -88,6 +103,12 @@ impl<P: Process + 'static> NullRt<P> {
             max_process_ns: s.max_ns.load(Ordering::Acquire),
             fault: s.fault.lock().ok().and_then(|f| f.clone()),
         }
+    }
+
+    /// The stream histograms since the start (S7): every interval between two
+    /// callbacks' starts and every callback's own time.
+    pub fn histograms(&self) -> HistSnapshot {
+        self.hists.snapshot()
     }
 
     /// Stops the thread and returns the processor (`None` if the thread died
@@ -138,7 +159,7 @@ fn step(deadline: Instant, now: Instant, period: Duration) -> Step {
     }
 }
 
-fn pace<P: Process>(cfg: &NullRtConfig, p: &mut P, s: &Shared) {
+fn pace<P: Process>(cfg: &NullRtConfig, p: &mut P, s: &Shared, h: &StreamHists) {
     let block = cfg.block.max(1);
     let rate = f64::from(cfg.sample_rate.max(1));
     let period = period(block, rate);
@@ -150,6 +171,8 @@ fn pace<P: Process>(cfg: &NullRtConfig, p: &mut P, s: &Shared) {
     };
     let mut phase = 0.0f64;
     let mut deadline = Instant::now();
+    // The previous callback's start: the interval's other end.
+    let mut prev: Option<Instant> = None;
     while !s.stop.load(Ordering::Acquire) {
         if amp != 0.0 {
             for i in 0..block {
@@ -164,12 +187,19 @@ fn pace<P: Process>(cfg: &NullRtConfig, p: &mut P, s: &Shared) {
         }
         output.fill(0.0);
         let started = Instant::now();
+        if let Some(before) = prev.replace(started) {
+            h.interval.record(
+                u64::try_from(started.saturating_duration_since(before).as_nanos())
+                    .unwrap_or(u64::MAX),
+            );
+        }
         let result = catch_unwind(AssertUnwindSafe(|| {
             let mut b = Block::new(block, &input, &mut output);
             p.process(&mut b);
         }));
         let ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
         s.max_ns.fetch_max(ns, Ordering::AcqRel);
+        h.process.record(ns);
         if let Err(payload) = result {
             output.fill(0.0);
             if let Ok(mut f) = s.fault.lock() {
@@ -353,6 +383,60 @@ mod tests {
         assert!(s.late >= 1, "{s:?}");
         assert!(s.max_process_ns >= 20_000_000, "{s:?}");
         assert!(rt.stop().unwrap().calls >= 100);
+    }
+
+    /// S7: every interval between two callbacks (one fewer than the
+    /// callbacks) and every callback's own time land in the stream
+    /// histograms, two periods at 32 samples wide.
+    #[test]
+    fn nullrt_records_every_interval_and_every_callback_time() {
+        let rt = NullRt::start(cfg(InputSignal::Silence), Count::default()).unwrap();
+        wait_for(&rt, |s| s.callbacks >= 200);
+        let s = rt.stats();
+        let h = rt.histograms();
+        let total = |v: &[(u32, u64)]| v.iter().map(|e| e.1).sum::<u64>();
+        assert_eq!(h.top_us, 667);
+        assert!(s.callbacks >= 200, "{s:?}");
+        assert!(total(&h.process) >= s.callbacks, "{h:?} {s:?}");
+        assert!(total(&h.interval) + 1 >= s.callbacks, "{h:?} {s:?}");
+        assert!(rt.stop().unwrap().calls >= 200);
+    }
+
+    #[test]
+    fn a_slow_callback_lands_in_both_overflow_buckets() {
+        let rt = NullRt::start(cfg(InputSignal::Silence), Slow { calls: 0 }).unwrap();
+        let start = Instant::now();
+        while rt.stats().callbacks < 100 && start.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let h = rt.histograms();
+        let overflow = |v: &[(u32, u64)]| v.iter().find(|e| e.0 == h.top_us).map_or(0, |e| e.1);
+        // Call 3 took 20 ms: its own time and the interval to call 4.
+        assert!(overflow(&h.process) >= 1, "{h:?}");
+        assert!(overflow(&h.interval) >= 1, "{h:?}");
+        assert_eq!(h.top_us, 667);
+        assert!(rt.stop().unwrap().calls >= 100);
+    }
+
+    /// S7, exact once the thread has ended: three callbacks ran (the third
+    /// panicked), so three callback times and the two intervals between their
+    /// starts; the faulting callback's time counts too.
+    #[test]
+    fn a_faulted_stream_counted_each_time_and_each_interval_once() {
+        let rt = NullRt::start(
+            cfg(InputSignal::Silence),
+            Count {
+                panic_at: Some(3),
+                ..Count::default()
+            },
+        )
+        .unwrap();
+        let s = wait_for(&rt, |s| s.faulted && !s.running);
+        assert!(s.faulted && !s.running, "{s:?}");
+        let h = rt.histograms();
+        let total = |v: &[(u32, u64)]| v.iter().map(|e| e.1).sum::<u64>();
+        assert_eq!((total(&h.process), total(&h.interval)), (3, 2), "{h:?}");
+        assert_eq!(rt.stop().unwrap().calls, 3);
     }
 
     #[test]

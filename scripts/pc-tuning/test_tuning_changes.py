@@ -13,11 +13,25 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tuning_window as tw  # noqa: E402
 import pc_change as pcc  # noqa: E402  (scripts/asio-spike, on sys.path through tuning_window)
 from test_tuning_window import ENV  # noqa: E402  (fixtures only)
+
+
+class FakeClock:
+    """`pc_change`'s `time`: `time()` moves only through `sleep()`."""
+
+    def __init__(self, t: float) -> None:
+        self.t = t
+
+    def time(self) -> float:
+        return self.t
+
+    def sleep(self, seconds: float) -> None:
+        self.t += seconds
 
 
 class TuningChangeTests(unittest.TestCase):
@@ -58,8 +72,8 @@ class TuningChangeTests(unittest.TestCase):
                             raise tw.StepError(f"PC step failed: {tw.sw.STEP_REFUSED} (the spike stop file exists: synthetic)")
                     self.events.append(f"{verb}:end")
                     return [{"key": "plan:active", "action": "written", "error": None}]
-            if body == "@(Get-Process -Name asio_spike -ErrorAction SilentlyContinue).Count":
-                return 0
+            if body.endswith("@(Get-Process -Name asio_spike -ErrorAction SilentlyContinue).Count"):
+                return 0   # alone, or after the preempt's stop file (#15)
             if "Stop-SpikeGracefully" in body:
                 return True
             if "holders = @(Get-GoldenAsioHolders" in body:
@@ -67,6 +81,9 @@ class TuningChangeTests(unittest.TestCase):
             return {"ok": True}   # the bring-back, the stop file's clean-up
 
         tw.sw.ps = fake_ps
+        patch = mock.patch.object(tw.sw, "plain_ps", fake_ps, create=True)   # the preempt's first call (#15)
+        patch.start()
+        self.addCleanup(patch.stop)
         tw.sw.save_state({"id": "w", "card": "free", "preflight": {"pref": 64}, "pref_original": 64, "pref_current": None,
                           "pref_restored": False, "runs": [], "closed": False})
         self.env = dict(ENV)
@@ -144,11 +161,17 @@ class TuningChangeTests(unittest.TestCase):
         # Bash timeout) with its journal intent live; the preempt deferred its exit to
         # a late handler that never runs. Once the settle is over, the preempt exits
         # itself, alarms and clears the intent: no mode lever stays through the event.
+        # On a fake clock that only the waits move: the intent is live when the
+        # preempt reads it whatever this process's speed (a loaded run once took
+        # longer than the 0.3 s bound before the preempt, so the intent read as
+        # stale and the deferred-exit path never ran).
+        clock = FakeClock(time.time())
         st = tw.sw.load_state()
-        st.update(tuning_mode=True, in_flight={"step": "enter", "started": time.time(), "bound_s": 0.3})
+        st.update(tuning_mode=True, in_flight={"step": "enter", "started": clock.time(), "bound_s": 0.3})
         tw.sw.save_state(st)
         (self.dir / "EVENT-NOW").touch()
-        tw.sw.cmd_preempt(self.env)
+        with mock.patch.object(pcc, "time", clock):
+            tw.sw.cmd_preempt(self.env)
         self.assertEqual(self.events, ["Exit-IemTuningMode:start", "Exit-IemTuningMode:end"])
         st = tw.sw.load_state()
         self.assertEqual((st["closed"], st["tuning_mode"], st.get("in_flight")), (True, False, None))

@@ -37,6 +37,23 @@ fn process_is_realtime_safe() {
         common::BLOCK as u64,
         "the loopback probe measured"
     );
+    // The listen probe ran under the sanitizer (S7), into both probe rings.
+    assert!(
+        s.handles.probes.iter().all(|c| c.slots() > 0),
+        "the probe path ran"
+    );
+    // The backends' histogram records ran under the sanitizer too (S7).
+    let h = s.hists.snapshot();
+    let total = |v: &[(u32, u64)]| v.iter().map(|e| e.1).sum::<u64>();
+    assert_eq!(
+        (total(&h.interval), total(&h.process)),
+        (3_000, 3_000),
+        "the histograms recorded every block"
+    );
+    assert!(
+        h.interval.iter().any(|&(b, _)| b == h.top_us),
+        "the overflow path ran"
+    );
 }
 
 /// Run by `rtsan_detects_a_violation` in a child process; on its own it only

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -500,13 +501,22 @@ class PollScriptTests(unittest.TestCase):
         self.assertNotIn("'unknown'", body)
         self.assertRegex(body, r"\$LASTEXITCODE -ne 0 -or -not \(\$pc -match '[^']+'\)\) \{ throw ")
 
+    def sums(self) -> tuple[str, dict]:
+        """A bundle's SHA256SUMS (synthetic), as the CI runner's bundle has it (#15)."""
+        sums = {n: f"{i:064x}" for i, n in enumerate(tw.sw.BUNDLE_FILES)}
+        path = Path(tempfile.mkdtemp()) / "SHA256SUMS"
+        path.write_text("".join(f"{h}  {n}\n" for n, h in sums.items()), encoding="utf-8")
+        return str(path), sums
+
     def test_poll_script_prints_what_sw_ps_sends(self) -> None:
         out = io.StringIO()
+        path, sums = self.sums()
         with mock.patch.dict(os.environ, {"SPIKE_ENV": "/nonexistent/asio-spike.env"}), contextlib.redirect_stdout(out):
-            code = tw.main(["poll-script", "--root", "C:\\r", "--governor", "EventLog", "--pid", "12", "--tid", "34"])
+            code = tw.main(["poll-script", "--root", "C:\\r", "--governor", "EventLog", "--pid", "12", "--tid", "34",
+                            "--sums", path])
         self.assertEqual(code, 0)
-        self.assertEqual(out.getvalue(), tw.sw.ps_script("C:\\r", tw.poll_body("EventLog", 12, 34)) + "\n")
-        self.assertIn("Import-Module (Join-Path 'C:\\r' 'bin\\SpikePc.psm1')", out.getvalue())
+        self.assertEqual(out.getvalue(), tw.sw.ps_script("C:\\r", tw.poll_body("EventLog", 12, 34), sums) + "\n")
+        self.assertIn("Import-Module (Join-Path $iemStage 'SpikePc.psm1')", out.getvalue())   # the stage copy (#15)
 
     def test_analysis_script_prints_an_analysis_steps_start_as_sw_ps_sends_it(self) -> None:
         # F2 round 3, m11: the PC side of the analysis guard (Idle, the stop file's
@@ -515,15 +525,35 @@ class PollScriptTests(unittest.TestCase):
         # _measure composes it (analysis_step), with a probe as the step's body.
         out = io.StringIO()
         root, since = "C:\\r", "2026-01-01T00:00:00.0000000Z"
+        path, sums = self.sums()
         with mock.patch.dict(os.environ, {"SPIKE_ENV": "/nonexistent/asio-spike.env"}), contextlib.redirect_stdout(out):
-            code = tw.main(["analysis-script", "--root", root, "--since", since])
+            code = tw.main(["analysis-script", "--root", root, "--since", since, "--sums", path])
         self.assertEqual(code, 0)
         step = tw.analysis_step(root, since, tw.ANALYSIS_PROBE)
-        self.assertEqual(out.getvalue(), tw.sw.ps_script(root, step) + "\n")
+        self.assertEqual(out.getvalue(), tw.sw.ps_script(root, step, sums) + "\n")
         self.assertEqual(step, " ; ".join([tw.analysis_guard(root, since), tw.sw.measure_import(root), tw.ANALYSIS_PROBE]))
         self.assertIn("PriorityClass", tw.ANALYSIS_PROBE)
         self.assertIn("Get-IemNow", tw.ANALYSIS_PROBE)              # IemMeasure loaded after the guard
         self.assertIn("Get-Command -Name ConvertTo-IemLpNumber", tw.ANALYSIS_PROBE)   # and IemTuning with it
+        self.assertIn("temp = [IO.Path]::GetTempPath()", tw.ANALYSIS_PROBE)    # the temp folder Add-Type reads (#15)
+
+    def test_the_tuning_modules_load_only_after_temp_points_at_the_admin_only_temp(self) -> None:
+        """#15: IemTuning's Add-Type has csc write and load a DLL in TEMP, and the
+        session user's TEMP is open to every process of the user: TEMP and TMP
+        point at <elevated root>\\temp (admin-only) before the import; the
+        stop-only import compiles nothing and sets up nothing."""
+        body = tw.sw.tuning_body(ENV, "Get-IemNow")
+        imp = body.index("Import-Module (Join-Path $iemStage 'IemMeasure.psm1') -Force -Global")
+        self.assertLess(body.index("$env:TEMP = $iemTemp ; $env:TMP = $iemTemp"), imp)
+        self.assertLess(body.index("& $iemDir $iemTemp"), body.index("$env:TEMP = $iemTemp"))
+        self.assertIn("$iemRoot = (Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'iemmixer')", body)
+        self.assertIn("$iemTemp = Join-Path $iemRoot 'temp'", body)
+        step = tw.analysis_step("R", "2026-01-01T00:00:00.0000000Z", "B")
+        self.assertLess(step.index("$env:TEMP = $iemTemp"), step.index("Import-Module (Join-Path $iemStage 'IemMeasure.psm1')"))
+        self.assertLess(step.index(tw.ANALYSIS_REFUSED), step.index("$env:TEMP"))   # a refused step sets up nothing
+        stop = tw.sw.trace_stop_body(ENV, "R\\run")
+        self.assertNotIn("TEMP", stop)
+        self.assertNotIn("$iemTemp", stop)   # the stage, never TEMP (#15)
 
 
 class RebootTests(unittest.TestCase):
@@ -652,7 +682,8 @@ class PostBootRunTests(unittest.TestCase):
 
         tw.sw.ps = fake_ps
         for patch in (mock.patch.object(tw.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)),
-                      mock.patch.object(tw.time, "sleep")):
+                      mock.patch.object(tw.time, "sleep"),
+                      mock.patch.object(tw.sw, "plain_ps", fake_ps, create=True)):   # the preempt's first call (#15)
             patch.start()
             self.addCleanup(patch.stop)
         tw.sw.save_state({"id": "w", "card": "rebooting", "pref_original": 64, "pref_current": 64, "pref_restored": True,
@@ -845,7 +876,15 @@ class TuningSetupTests(unittest.TestCase):
         tw.sw.guarded = fake_guarded
         tw.sw.scp = lambda src, dst: self.copies.append((src, dst))
         self.env = dict(ENV, PC_SSH="u@pc", PC_TUNING_ROOT="C:\\t", PC_TUNING_ROOT_SCP="/C:/t", RAW_DIR=str(self.dir / "raw"))
-        tw.sw.save_state({"id": "w", "card": "reaper", "closed": False})
+        # The bundle the window's PC holds, as fetch-bundle records it: every session checks the
+        # modules it stages against its sums (#15).
+        sha = "a" * 40
+        bundle = tw.sw.bundle_dir(self.env, sha)
+        bundle.mkdir(parents=True)
+        (bundle / "SHA256SUMS").write_text("".join(f"{i:064x}  {n}\n" for i, n in enumerate(tw.sw.BUNDLE_FILES)),
+                                           encoding="utf-8")
+        (bundle.parent / f"{sha}.source-sha").write_text(sha + "\n", encoding="utf-8")
+        tw.sw.save_state({"id": "w", "card": "reaper", "closed": False, "bundle_sha": sha})
 
     def tearDown(self) -> None:
         tw.sw.STATE, tw.sw.EVENT_NOW, tw.sw.guarded, tw.sw.scp, tw.PROFILE = self.saved
@@ -865,6 +904,26 @@ class TuningSetupTests(unittest.TestCase):
         with self.assertRaisesRegex(tw.StepError, "icacls"):
             tw.cmd_tuning_setup(self.env, argparse.Namespace())
         self.assertEqual(self.copies, [])
+
+    def test_wpt_install_runs_adksetup_only_from_the_admin_only_stage(self) -> None:
+        # #15, the last lane, item 3: the upload is read once, checked by this box's sha256,
+        # staged admin-only, read back and checked again; Install-IemWpt checks the stage
+        # copy's signature and runs it, never the upload.
+        local = Path(self.env["RAW_DIR"]) / "pc-tuning" / "adksetup.exe"
+        local.parent.mkdir(parents=True)
+        local.write_bytes(b"synthetic adksetup")
+        hexd = hashlib.sha256(b"synthetic adksetup").hexdigest()
+        tw.cmd_wpt_install(dict(self.env, PC_XPERF="C:\\wpt\\xperf.exe"), argparse.Namespace())
+        self.assertEqual(self.copies, [(str(local), "u@pc:/C:/t/adksetup.exe")])
+        script = next(x for x in self.scripts if "Install-IemWpt" in x)
+        upload = "'C:\\t\\adksetup.exe'"
+        at = 0
+        for step in (f"$iemB = [IO.File]::ReadAllBytes({upload})", f"if ($iemH -cne '{hexd}')",
+                     "$iemMod = Join-Path $iemStage 'adksetup.exe'", "& $iemOnly $iemMod",
+                     f"-cne '{hexd}') {{ throw ('sha256 mismatch after the copy: ' + $iemMod) }}",
+                     "Install-IemWpt -Setup $iemMod -Xperf 'C:\\wpt\\xperf.exe'"):
+            at = script.index(step, at)
+        self.assertEqual(script.count(upload), 2)   # read once, named in the mismatch
 
 
 if __name__ == "__main__":

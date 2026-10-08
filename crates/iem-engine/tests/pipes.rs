@@ -458,6 +458,17 @@ fn meters_and_status_flow() {
         s.process_max_us
     );
     assert_eq!(s.cmd_backlog, 0);
+    // NullRt's stream histograms (S7): two periods at 32 samples, every
+    // callback's time counted before its callback was.
+    let total = |v: &[(u32, u64)]| v.iter().map(|e| e.1).sum::<u64>();
+    assert_eq!(s.hist_top_us, 667);
+    assert!(
+        total(&s.process_hist) >= s.callbacks,
+        "{} callback times, {} callbacks",
+        total(&s.process_hist),
+        s.callbacks
+    );
+    assert!(total(&s.interval_hist) > 0, "no interval recorded");
     e.shutdown();
 }
 
@@ -915,6 +926,10 @@ fn a_held_engine_sounds_after_its_supervisor_arms_it() {
 /// The `iem-engine` binary through its command line.
 #[path = "pipes/binary.rs"]
 mod binary;
+
+/// The listen probe on the media pipe (S7).
+#[path = "pipes/probe.rs"]
+mod probe;
 
 /// Windows named pipes only (S6 design note §4): the private DACL, the
 /// first-instance flag and writes bounded like the Unix send timeout.

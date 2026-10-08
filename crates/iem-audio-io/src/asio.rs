@@ -53,6 +53,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 use crate::channels::{ChannelMap, MapError};
 use crate::format::{self, Refusal, SampleFormat};
+use crate::hist::{HistSnapshot, StreamHists};
 use crate::messages::{self, Messages, TOPICS};
 use crate::os;
 pub use crate::owner::StopOutcome;
@@ -883,6 +884,9 @@ struct Backend {
     /// stream (`BACKEND` cleared, `BACKEND_IN_FLIGHT == 0`).
     carry: UnsafeCell<Carry>,
     telemetry: Telemetry,
+    /// The stream histograms (S7): the owner's, cloned in at the open, so
+    /// they count across reopens. The callback only increments them (I7).
+    hists: Arc<StreamHists>,
     base: Instant,
     /// The sample positions of the first callbacks (the open's period).
     ring: [AtomicI64; owner::RING],
@@ -908,7 +912,11 @@ impl Backend {
                 .and_then(|d| d.sample_position().ok())
                 .map(|p| p.position)
         });
-        self.telemetry.on_callback(nanos(entry).max(1), position);
+        // The interval telemetry judged: never the warm-up after an open, so
+        // a reopen's gap stays out of the histogram.
+        if let Some(dt) = self.telemetry.on_callback(nanos(entry).max(1), position) {
+            self.hists.interval.record(dt);
+        }
         self.record(position);
         for ch in &self.outputs {
             zero(half(ch, second), self.bytes);
@@ -924,8 +932,9 @@ impl Backend {
                 self.output_ready.store(false, Ordering::Relaxed);
             }
         }
-        self.telemetry
-            .on_done(nanos(self.base.elapsed().saturating_sub(entry)));
+        let took = nanos(self.base.elapsed().saturating_sub(entry));
+        self.telemetry.on_done(took);
+        self.hists.process.record(took);
     }
 
     /// The first callbacks' positions, for the owner thread (single writer:
@@ -1229,6 +1238,8 @@ struct Owner {
     /// The D5(b) loopback return card inputs (S6 test 5), opened after `rx`.
     hil_rx: Vec<u16>,
     shared: Arc<Shared>,
+    /// The stream histograms (S7), handed to every open's backend.
+    hists: Arc<StreamHists>,
     budget: ResetBudget,
     /// The counters of the streams already closed.
     base: Counters,
@@ -1466,6 +1477,7 @@ impl Owner {
             tx: map.tx().to_vec(),
             carry: UnsafeCell::new(carry),
             telemetry: Telemetry::new(self.frames, rate),
+            hists: Arc::clone(&self.hists),
             base: Instant::now(),
             ring: [const { AtomicI64::new(NO_POSITION) }; owner::RING],
             ring_len: AtomicUsize::new(0),
@@ -1806,6 +1818,7 @@ struct Start {
     hil_rx: Vec<u16>,
     processor: Box<dyn Process>,
     shared: Arc<Shared>,
+    hists: Arc<StreamHists>,
 }
 
 fn owner_main(start: Start, ready: SyncSender<Result<(), AsioError>>) {
@@ -1817,6 +1830,7 @@ fn owner_main(start: Start, ready: SyncSender<Result<(), AsioError>>) {
         hil_rx,
         processor,
         shared,
+        hists,
     } = start;
     // The clock of the messages' times and the owner's log lines, before
     // any driver exists.
@@ -1837,6 +1851,7 @@ fn owner_main(start: Start, ready: SyncSender<Result<(), AsioError>>) {
         tx,
         hil_rx,
         shared: Arc::clone(&shared),
+        hists,
         budget: ResetBudget::default(),
         base: Counters::default(),
         live: None,
@@ -1957,6 +1972,8 @@ fn session_end(state: &RefCell<Owner>, shared: &Shared) {
 pub struct AsioStream<P: Process + 'static> {
     thread: Option<JoinHandle<()>>,
     shared: Arc<Shared>,
+    /// The stream histograms (S7), counted since `start` across reopens.
+    hists: Arc<StreamHists>,
     processor: PhantomData<fn(P)>,
 }
 
@@ -1987,6 +2004,9 @@ impl<P: Process + 'static> AsioStream<P> {
             return Err(AsioError::Busy);
         }
         let shared = Arc::new(Shared::default());
+        // Allocated here, before any stream exists (I7); every open's backend
+        // records into the same arrays.
+        let hists = Arc::new(StreamHists::new(telemetry::period_ns(frames, format::RATE)));
         let (ready, answer) = mpsc::sync_channel(1);
         let start = Start {
             card,
@@ -1996,6 +2016,7 @@ impl<P: Process + 'static> AsioStream<P> {
             hil_rx,
             processor: Box::new(processor),
             shared: Arc::clone(&shared),
+            hists: Arc::clone(&hists),
         };
         let spawned = thread::Builder::new()
             .name("iem-asio-owner".into())
@@ -2011,6 +2032,7 @@ impl<P: Process + 'static> AsioStream<P> {
             Ok(Ok(())) => Ok(Self {
                 thread: Some(thread),
                 shared,
+                hists,
                 processor: PhantomData,
             }),
             Ok(Err(e)) => {
@@ -2069,6 +2091,13 @@ impl<P: Process + 'static> AsioStream<P> {
             max_process_ns: s.max_ns.load(Ordering::Acquire),
             fault: s.fault.lock().ok().and_then(|f| f.clone()),
         }
+    }
+
+    /// The stream histograms (S7) since `start`, the reopens included: every
+    /// interval telemetry judged (never an open's warm-up) and every
+    /// callback's own time (decode, process and encode).
+    pub fn histograms(&self) -> HistSnapshot {
+        self.hists.snapshot()
     }
 
     /// `WM_ENDSESSION` reached the owner thread: the engine saves, fades out

@@ -25,6 +25,7 @@ STEPS = ("preflight", "save-quit", "app-stopped", "backup", "stage", "seed-res",
 CHANGING = STEPS[1:]
 TASK = "iemmixer-golden"
 STATE = Path(os.environ.get("GOLDEN_STATE", str(Path.home() / ".local/state/iemmixer/golden-window.json")))
+HERE = Path(__file__).resolve().parent
 
 
 class StepError(Exception):
@@ -112,27 +113,48 @@ def parse_holders(text: str) -> list[tuple[str, int]]:
 
 # ---- ssh / scp (the PC is the external dependency; no unit tests below) ----
 
+def elevated_ps():
+    """asio-spike's elevated_ps: the stage, the module path pin, the remote command (#15)."""
+    if str(HERE.parent / "asio-spike") not in sys.path:
+        sys.path.insert(0, str(HERE.parent / "asio-spike"))
+    import elevated_ps as ep
+    return ep
+
+
+def ssh_cmd(env: dict[str, str]) -> list[str]:
+    return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", env["PC_SSH"], elevated_ps().REMOTE]
+
+
 def ssh_raw(env: dict[str, str], script: str, timeout: int = 900) -> str:
-    proc = subprocess.run(
-        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", env["PC_SSH"],
-         "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command -"],
-        input=script + "\n", text=True, capture_output=True, timeout=timeout, check=False)
+    proc = subprocess.run(ssh_cmd(env), input=script + "\n", text=True, capture_output=True, timeout=timeout, check=False)
     if proc.returncode != 0:
         raise StepError(f"PC command failed (exit {proc.returncode}): {proc.stderr.strip()[-1500:]}")
     return proc.stdout
 
 
-def ps(env: dict[str, str], body: str, timeout: int = 900):
-    """Runs `body` (single-line statements, `-Command -` reads stdin line by
-    line) after importing the module. Errors are caught on the PC and come
-    back as {ok: false}; -InputObject keeps one-element arrays as arrays."""
-    script = "\n".join([
+def ps_script(env: dict[str, str], body: str) -> str:
+    """`body` (single-line statements, `-Command -` reads stdin line by line)
+    after importing GoldenPc. The session is elevated, so the module is read
+    once from PC_ROOT\\bin, checked against the copy setup uploads (this
+    box's GoldenPc.psm1) and imported only from the admin-only stage (#15,
+    asio-spike's elevated_ps). Errors are caught on the PC and come back as
+    {ok: false}; -InputObject keeps one-element arrays as arrays. PSModulePath
+    is pinned before the first command (elevated_ps.PIN)."""
+    ep = elevated_ps()
+    src = ps_quote(env["PC_ROOT"] + "\\bin\\GoldenPc.psm1")
+    hexd = hashlib.sha256((HERE / "GoldenPc.psm1").read_bytes()).hexdigest()
+    load = f"{ep.staged([(src, 'GoldenPc.psm1', hexd)])} ; {ep.import_staged('GoldenPc.psm1')}"
+    return "\n".join([
         "$ErrorActionPreference = 'Stop'",
         "$ProgressPreference = 'SilentlyContinue'",
-        f"try {{ Import-Module (Join-Path {ps_quote(env['PC_ROOT'])} 'bin\\GoldenPc.psm1') -Force ; $r = & {{ {body} }} ; $o = [pscustomobject]@{{ ok = $true; r = $r }} }} "
+        f"{ep.PIN} ; try {{ {load} ; $r = & {{ {body} }} ; $o = [pscustomobject]@{{ ok = $true; r = $r }} }} "
         f"catch {{ $o = [pscustomobject]@{{ ok = $false; error = \"$_\" }} }} ; ConvertTo-Json -InputObject $o -Depth 8 -Compress",
     ])
-    out = [line for line in ssh_raw(env, script, timeout).splitlines() if line.strip()]
+
+
+def ps(env: dict[str, str], body: str, timeout: int = 900):
+    """Runs `body` on the PC (ps_script)."""
+    out = [line for line in ssh_raw(env, ps_script(env, body), timeout).splitlines() if line.strip()]
     doc = json.loads(out[-1]) if out else {"ok": False, "error": "no output from the PC"}
     if not doc["ok"]:
         raise StepError(f"PC step failed: {doc['error']}")
@@ -324,8 +346,9 @@ def cmd_new(env, args) -> None:
 
 
 def cmd_setup(env, args) -> None:
-    here = Path(__file__).resolve().parent
-    ssh_raw(env, f"New-Item -ItemType Directory -Force -Path {', '.join(pc(env, d) for d in ('bin', 'queue', 'status', 'backups', 'jobs'))} | Out-Null")
+    here = HERE
+    ssh_raw(env, f"{elevated_ps().PIN} ; New-Item -ItemType Directory -Force -Path "
+                 f"{', '.join(pc(env, d) for d in ('bin', 'queue', 'status', 'backups', 'jobs'))} | Out-Null")
     for f in ("GoldenPc.psm1", "golden-task.ps1"):
         scp(env, str(here / f), remote(env, f"bin/{f}"))
     scp(env, env["PC_TREES"], remote(env, "bin/trees.json"))

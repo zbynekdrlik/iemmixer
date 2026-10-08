@@ -815,28 +815,40 @@ try {
     $e = ErrorOf { Install-IemElevatedFolder -Path $foreign -UserSid $me.sid }
     Assert ($e -like '*is owned by*refused*') "elevated-folder-refuses-a-folder-someone-else-made ($e)"
 
-    # S1c's tuning module is imported only from an admin-owned, admin-only folder.
+    # S1c's tuning module is imported only from an admin-owned, admin-only folder,
+    # its store (#34: IemTuning imports IemTuningStore.psm1 from its own folder) read
+    # back the same way.
     $fakeTuning = @'
+$global:IemFakeTempAtImport = $env:TEMP
 function Get-IemTuningState { param([string]$ProfilePath) return 'fake-state' }
 function Enter-IemTuningMode { param([string]$ProfilePath) return 'fake-enter' }
 function Exit-IemTuningMode { param([string]$ProfilePath) return 'fake-exit' }
 function Invoke-IemTuningApply { param([string]$ProfilePath, [int]$Tier) return ('fake-apply-{0}' -f $Tier) }
 '@
     $tmod = Join-Path $etuning 'IemTuning.psm1'
+    $tstore = Join-Path $etuning 'IemTuningStore.psm1'
     $tprof = Join-Path $etuning 'profile.json'
     function Write-FakeTuning {
-        foreach ($p in @($tmod, $tprof)) { if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Force } }
+        foreach ($p in @($tmod, $tstore, $tprof)) { if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Force } }
         [IO.File]::WriteAllText($tmod, $fakeTuning)
+        [IO.File]::WriteAllText($tstore, "function Get-IemFakeStore { 'fake-store' }")
         [IO.File]::WriteAllText($tprof, '{}')
-        foreach ($p in @($tmod, $tprof)) { Set-IemAdminsOwner -Path $p }
+        foreach ($p in @($tmod, $tstore, $tprof)) { Set-IemAdminsOwner -Path $p }
     }
     Write-FakeTuning
+    $savedTemp = @($env:TEMP, $env:TMP)
+    $global:IemFakeTempAtImport = ''
     Assert ((Invoke-IemTuningVerb -Verb 'state' -TuningDir $etuning) -ceq 'fake-state') 'tuning-imports-an-admin-only-module'
+    # The import ran with TEMP and TMP at the admin-only <elevated root>\temp (#15: IemTuning's Add-Type):
+    # the fake module read TEMP while it was imported.
+    $etemp = Join-Path (Split-Path -Parent $etuning) 'temp'
+    $tb = Test-IemElevatedItem -Path $etemp -UserSid $me.sid
+    Assert ($global:IemFakeTempAtImport -eq $etemp -and $env:TMP -eq $etemp -and $tb.Count -eq 0) "tuning-imports-with-the-admin-only-temp ($global:IemFakeTempAtImport; $($tb -join '; '))"
     Assert ((Invoke-IemTuningVerb -Verb 'apply-tier2' -TuningDir $etuning) -ceq 'fake-apply-2') 'tuning-apply-tier2-passes-tier-2'
     [IO.File]::WriteAllText((Join-Path $td 'tuning.request.json'), '{"id":"t-5","verb":"enter"}')
     $tr = Invoke-IemTaskRequest -Kind tuning -Root $root -OutDir $eout -TuningDir $etuning
     Assert ($tr.ok -and $tr.result -ceq 'fake-enter') 'tuning-request-runs-the-verified-module'
-    foreach ($p in @($tmod, $tprof)) {
+    foreach ($p in @($tmod, $tstore, $tprof)) {
         # The user may change it: refused.
         $fs = [IO.File]::GetAccessControl($p)
         $fs.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier $me.sid), 'Modify', 'Allow')))
@@ -854,6 +866,20 @@ function Invoke-IemTuningApply { param([string]$ProfilePath, [int]$Tier) return 
         Assert (-not $tr.ok -and $tr.error -like '*tuning module refused*') "tuning-request-refuses-an-unverified-module [$p]"
         Write-FakeTuning
     }
+    # A tuning folder from before #34 holds no IemTuningStore.psm1: its IemTuning needs
+    # none, so the verb runs (a newer IemTuning without its store fails its own import).
+    Remove-Item -LiteralPath $tstore -Force
+    Assert ((Invoke-IemTuningVerb -Verb 'state' -TuningDir $etuning) -ceq 'fake-state') 'tuning-imports-a-module-from-before-the-store'
+    # Anything else by the store's name is read back, a dangling link too (its
+    # target gone): refused, never followed.
+    $storeTarget = Join-Path $base 'store-target'
+    New-Item -ItemType Directory -Force -Path $storeTarget | Out-Null
+    New-Item -ItemType Junction -Path $tstore -Value $storeTarget | Out-Null
+    [IO.Directory]::Delete($storeTarget)
+    $e = ErrorOf { Invoke-IemTuningVerb -Verb 'state' -TuningDir $etuning }
+    Assert ($e -like '*tuning module refused*junction or a link*') "tuning-refuses-a-dangling-link-by-the-stores-name ($e)"
+    [IO.Directory]::Delete($tstore)
+    Write-FakeTuning
     # The tuning folder itself: a rule that lets the user add files, then a user owner.
     $dsec = [IO.Directory]::GetAccessControl($etuning)
     $dsec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier $me.sid), 'Modify', 'ContainerInherit, ObjectInherit', 'None', 'Allow')))
@@ -870,7 +896,9 @@ function Invoke-IemTuningApply { param([string]$ProfilePath, [int]$Tier) return 
     Assert ($e -like "*tuning module refused*owned by $($me.sid)*") "tuning-refuses-a-folder-owned-by-the-user ($e)"
     [IO.Directory]::SetAccessControl($etuning, (New-IemElevatedSecurity -UserSid $me.sid))
     Throws { Invoke-IemTuningVerb -Verb 'state' -TuningDir 'relative\tuning' } 'tuning-refuses-a-relative-folder'
-    foreach ($p in @($tmod, $tprof)) { Remove-Item -LiteralPath $p -Force }
+    foreach ($p in @($tmod, $tstore, $tprof)) { Remove-Item -LiteralPath $p -Force }
+    $env:TEMP = $savedTemp[0]
+    $env:TMP = $savedTemp[1]
 
     # The generated entry, as the task runs it (its results in tasks\out).
     [IO.File]::WriteAllText((Join-Path $td 'tuning.request.json'), '{"id":"t-4","verb":"exit"}')
@@ -1244,4 +1272,10 @@ exit 1
     Remove-Item -Path 'Env:\ACTIONS_RUNNER_INPUT_TOKEN' -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $base -Recurse -Force -ErrorAction SilentlyContinue
 }
+# Install-IemTuning (#15) in a process of its own: it imports S1c's IemTuning.psm1.
+& powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $here 'Test-IemTuningInstall.ps1')
+if ($LASTEXITCODE -ne 0) { throw "FAILED: Test-IemTuningInstall.ps1 (exit $LASTEXITCODE)" }
+# The bootstrap's admin-only stage (#15), the script iempc.py composes, in a process of its own.
+& powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $here 'Test-IemStage.ps1')
+if ($LASTEXITCODE -ne 0) { throw "FAILED: Test-IemStage.ps1 (exit $LASTEXITCODE)" }
 Write-Host 'Test-IemPc: all passed'

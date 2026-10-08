@@ -130,6 +130,13 @@ pub enum Cmd {
         dbfs: f64,
         ttl_s: f64,
         card_tx: Vec<u16>,
+        /// S7, additive (design note §6): the listen probe. While the signal
+        /// runs, the listen taps keep their silent frames and the probe streams
+        /// (`media::stream::ENGINEER_PROBE`, `MEMBER_PROBE`) carry the spare
+        /// outputs' sine, for the server's `&hil=1` listeners only. Every mix's
+        /// TX stays zero. An older engine ignores it.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        listen: bool,
     },
     /// HIL's forced reopen of the driver (S6 design note §7): the backend
     /// stops, releases and opens the card again (its reset budget applies;
@@ -410,6 +417,21 @@ pub struct Status {
     /// measured (the HIL signal on a spare output, looped back to the matching
     /// spare input in Dante); 0 while none. `loopback_ms` derives the time.
     pub loopback_samples: u64,
+    /// S7, additive (design note §3): the callback interval since the stream
+    /// opened, 1 µs buckets `[b, b + 1)` below two periods and the overflow
+    /// bucket `hist_top_us` (two periods or more: the card's `missed`), as
+    /// `[[bucket, count], …]`, non-empty buckets ascending. Absent without a
+    /// stream and from an older engine.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub interval_hist: Vec<(u32, u64)>,
+    /// S7, additive: the callback's own time, the span `process_max_us`
+    /// measures (decode, `process()` and encode on the card; `process()` on
+    /// NullRt), in the buckets of `interval_hist`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub process_hist: Vec<(u32, u64)>,
+    /// S7, additive: the overflow bucket's index, two periods in µs rounded
+    /// up (667 at 32 samples, 96 kHz; at most 1000); 0 without histograms.
+    pub hist_top_us: u32,
 }
 
 /// One of HIL's spare card outputs in a [`Status`] (S6): its card channel
@@ -621,6 +643,7 @@ mod tests {
                 dbfs: -30.0,
                 ttl_s: 10.0,
                 card_tx: vec![72],
+                listen: false,
             },
             Cmd::ForceReopen,
         ]
@@ -756,6 +779,42 @@ mod tests {
         assert!(from_old.hil.is_empty());
         let partial: Status = serde_json::from_str(r#"{"hil":[{"tx":94}]}"#).unwrap();
         assert_eq!(partial.hil, vec![HilOut { tx: 94, peak: 0.0 }]);
+    }
+
+    /// The stream histograms in `Status` (S7 design note §3): sparse
+    /// `[[bucket, count], …]`, additive both ways, absent without a stream.
+    #[test]
+    fn the_histograms_in_status_are_additive_and_sparse() {
+        let status = Status {
+            callbacks: 2991,
+            hist_top_us: 667,
+            interval_hist: vec![(333, 2990), (667, 1)],
+            process_hist: vec![(40, 2991)],
+            ..Status::default()
+        };
+        let json = serde_json::to_value(&status).unwrap();
+        assert_eq!(
+            json["interval_hist"],
+            serde_json::json!([[333, 2990], [667, 1]])
+        );
+        assert_eq!(json["process_hist"], serde_json::json!([[40, 2991]]));
+        assert_eq!(json["hist_top_us"], 667);
+        assert_eq!(
+            serde_json::from_value::<Status>(json.clone()).unwrap(),
+            status
+        );
+        // An old client reads the new message and ignores the new fields.
+        let old: OldStatus = serde_json::from_value(json).unwrap();
+        assert_eq!(old.callbacks, 2991);
+        // Without a stream: no histogram keys, the top 0.
+        let none = serde_json::to_value(Status::default()).unwrap();
+        assert_eq!(none.get("interval_hist"), None);
+        assert_eq!(none.get("process_hist"), None);
+        assert_eq!(none["hist_top_us"], 0);
+        // An old engine's message reads with empty histograms and top 0.
+        let from_old: Status = serde_json::from_str(r#"{"callbacks":4}"#).unwrap();
+        assert!(from_old.interval_hist.is_empty() && from_old.process_hist.is_empty());
+        assert_eq!(from_old.hist_top_us, 0);
     }
 
     #[test]
@@ -1106,3 +1165,7 @@ mod tests {
         );
     }
 }
+
+/// S7 (#10): the listen probe's flag on `HilTestSignal`.
+#[cfg(test)]
+mod s7_tests;

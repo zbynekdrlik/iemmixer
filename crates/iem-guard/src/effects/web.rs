@@ -25,7 +25,8 @@ pub fn is_success(status: u16) -> bool {
 }
 
 /// `iem-server`'s `/api/version` names the bundle: its `git_hash` (a short
-/// commit, at least 7 hex digits) starts `sha`.
+/// commit, at least 7 hex digits) starts `sha`. The same rule is in HIL v1's
+/// `Test-IemHilVersion` and the soak client's `names_build`.
 pub fn version_matches(body: &str, sha: &str) -> Result<(), String> {
     let v: Value = serde_json::from_str(body).map_err(|e| format!("/api/version: {e}"))?;
     let hash = v

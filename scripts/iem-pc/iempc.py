@@ -2,17 +2,22 @@
 """Dev-box control of the IEM PC (S6, design note §5.1, §5.5, §6, §7).
 
 `iemmode` over ssh with the EVENT-NOW discipline, attested bundles from CI
-(fetch, install, activate), HIL dispatch on the private ops repo, PC bootstrap through
-the bundle's IemPc.psm1 (dev time only), and the hand-over of an open S1a
-window.
+(fetch, install, activate), HIL and soak dispatch on the private ops repo
+(`dispatch-soak`: iempc_soak.py), the switch timing (`switch-test`:
+iempc_switch.py), PC bootstrap through
+the bundle's IemPc.psm1 (dev time only), S1c's tuning modules and profile into
+the PC's elevated tuning folder (`tuning-install`, refreshed after `activate`:
+iempc_tuning.py), a kernel DPC/ISR trace on the guard's engine (`trace`:
+iempc_trace.py, PC_XPERF below), and the hand-over of an open S1a window.
 
 "ide event": the flag file (~/.config/iemmixer/EVENT-NOW) exists. `event`
 writes it first when it is missing (a flag it cannot write is a warning,
 never a stop), pre-empts an open S1a/S1c spike window (spike_window.py
 preempt; after a failed one it closes the window under the window lock, so
-no queued window preempt starts a second bring-back), then runs `iemmode
-event`, and `iemmode event --direct` when the guard is unreachable (exit
-4). The event path has one budget that fits one
+no queued window preempt starts a second bring-back), stops a kernel trace
+whose `iempc trace` died with this box (its record, iempc_trace.stop_recorded;
+`dev` does too), then runs `iemmode event`, and `iemmode event --direct` when
+the guard is unreachable (exit 4). The event path has one budget that fits one
 Bash call (EVENT_BUDGET_S): the spike preempt gets SPIKE_SHARE_S of it, no
 `iemmode` call starts while the preempt still runs, and none starts with
 less than SWITCH_MIN_S left. `event` never waits for another iempc command;
@@ -26,8 +31,8 @@ read-only call or a switch the guard owns is abandoned (the guard pre-empts
 itself), a change the call makes itself completes first; then the command
 runs the event path itself (exit 10). `dev`, `rehearse-teardown`,
 `install` (except `--first`) and `activate` refuse while an S1a/S1c window
-is open: `handover-s1a` hands the card over first. `dispatch-hil` checks
-the flag again right before it dispatches.
+is open: `handover-s1a` hands the card over first. `dispatch-hil` and
+`dispatch-soak` check the flag again right before they dispatch.
 
 `activate --sha` runs `iemmode activate`, which the guard allows in dev
 and in an idle event (#9 2026-09-28: none of iemmixer's processes runs, no
@@ -39,31 +44,34 @@ exe was built with), at most HANDOVER_S; a status read that fails meanwhile
 is read again. A guard built before that rule refuses it in event:
 `activate --offline` then quits it gracefully (`iemmode quit`, then its
 processes read until none runs, QUIT_S), runs the bundle's own
-`bundles\\<sha>\\iemmixer-guard.exe activate <sha>` (its sha256 checked on
-the PC; it takes the guard's mutex and activates an idle event only) and
-waits for the hand-over the same way; the first status read starts the
+`iemmixer-guard.exe activate <sha>` (read once from `bundles\\<sha>`, its
+sha256 checked on the PC, run from the admin-only stage: iempc_bin; it takes
+the guard's mutex and activates an idle event only) and waits for the
+hand-over the same way; the first status read starts the
 guard's task, which runs the new exe. A refused offline step starts the
 guard again.
 
 Site values come only from the private env file ($PC_ENV, default
 ~/.config/iemmixer/iem-pc.env): PC_SSH (the ssh destination), PC_ROOT (the
 root folder on the PC, Windows form), PC_ROOT_SCP (the same folder as scp
-names it) and PC_BIN (optional, default: bin under PC_ROOT). Nothing is ever
-ended by force.
+names it), PC_BIN (optional, default: bin under PC_ROOT; iemmode runs from
+the admin-only %ProgramData%\\iemmixer\\bin copy instead when it reads back
+and the guard last seen runs its build, iempc_bin) and PC_XPERF
+(optional, xperf.exe's full path on the PC; `trace` refuses without it).
+Nothing is ever ended by force.
 
 Known limits (S6 Task 16): `iemmode event --direct` runs the switch inside
 the ssh session, so a session cut before it ends (a Bash timeout) stops it
 half-way; the next `iemmode event` resumes from the guard state. A
 pre-emption inside another command adds a whole event budget to that
-command's own time. The dev-entry count behind `dispatch-hil` sees only
-`iempc dev`, not a dev entry the guard makes by itself (rehearse-teardown's
-re-entry)."""
+command's own time. The dev-entry count behind `dispatch-hil` and
+`dispatch-soak` sees only `iempc dev` and switch-test's dev leg, not a dev
+entry the guard makes by itself (rehearse-teardown's re-entry)."""
 from __future__ import annotations
 
 import argparse
 import contextlib
 import datetime as dt
-import fcntl
 import hashlib
 import json
 import os
@@ -77,6 +85,12 @@ import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterator
+
+import iempc_bin
+import iempc_soak
+import iempc_switch
+import iempc_trace
+import iempc_tuning
 
 HERE = Path(__file__).resolve().parent
 SPIKE_DIR = HERE.parent / "asio-spike"
@@ -218,6 +232,12 @@ def now_iso() -> str:
     return dt.datetime.now().astimezone().isoformat(timespec="seconds")
 
 
+def event_clock() -> float:
+    """The event path's one clock (its budget, each call's share); the tests
+    run the path on a fake one, so no branch depends on this process's speed."""
+    return time.monotonic()
+
+
 def emit(obj: dict) -> None:
     print(json.dumps(obj, ensure_ascii=False), flush=True)
 
@@ -297,8 +317,8 @@ def remote(env: dict[str, str], rel: str) -> str:
 
 
 def ssh_cmd(env: dict[str, str]) -> list[str]:
-    return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", env["PC_SSH"],
-            "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command -"]
+    """Windows PowerShell by its full path (elevated_ps.REMOTE, #15)."""
+    return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", env["PC_SSH"], elevated_ps().REMOTE]
 
 
 def ssh_ps(env: dict[str, str], script: str, timeout: float, event: str) -> str:
@@ -327,32 +347,59 @@ def hash_check(path: str, hexd: str) -> str:
             f"'{hexd}') {{ throw ('sha256 mismatch: ' + {q}) }}")
 
 
-def native_script(exe: str, args: list[str], checks: tuple[str, ...] = ()) -> str:
-    """Runs a native program and prints {exit, out, err} as the last line;
-    `exit` is null when the program did not start (or a check threw)."""
+def native_script(exe: str, args: list[str], checks: tuple[str, ...] = (), then: str = "") -> str:
+    """Runs a native program and prints {exit, out, err, note} as the last line;
+    `exit` is null when the program did not start (or a check threw). `then`
+    runs once $x and $a are set and may point $x elsewhere (iempc_bin: the
+    admin-only copy, `note` saying why not, #15). PSModulePath is pinned
+    before the first command (elevated_ps.PIN, #15)."""
     pre = "".join(c + " ; " for c in checks)
     return "\n".join([
         "$ErrorActionPreference = 'Continue'",
         "$ProgressPreference = 'SilentlyContinue'",
-        f"try {{ {pre}$x = {ps_quote(exe)} ; $a = {ps_args(args)} ; $r = @(& $x @a 2>&1) ; $c = $LASTEXITCODE ; "
+        f"{elevated_ps().PIN} ; try {{ {pre}$x = {ps_quote(exe)} ; $a = {ps_args(args)} ; {then}$r = @(& $x @a 2>&1) ; "
+        "$c = $LASTEXITCODE ; "
         "$out = @($r | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] } | ForEach-Object { \"$_\" }) -join \"`n\" ; "
         "$err = @($r | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } | ForEach-Object { $_.Exception.Message }) -join \"`n\" ; "
-        "$o = [pscustomobject]@{ exit = $c; out = $out; err = $err } } "
-        "catch { $o = [pscustomobject]@{ exit = $null; out = ''; err = \"$_\" } } ; ConvertTo-Json -InputObject $o -Compress",
+        "$o = [pscustomobject]@{ exit = $c; out = $out; err = $err; note = $iemNote } } "
+        "catch { $o = [pscustomobject]@{ exit = $null; out = ''; err = \"$_\"; note = $iemNote } } ; "
+        "ConvertTo-Json -InputObject $o -Compress",
     ])
 
 
-def module_script(body: str, module: str | None = None, module_hex: str | None = None, pre: str = "", fin: str = "") -> str:
-    """Runs `body` (after importing `module`, checked by its sha256) and prints
-    {ok, r} or {ok: false, error} as the last line."""
+def elevated_ps():
+    """scripts/asio-spike/elevated_ps.py (#15): the module path pin and the
+    remote command every ssh call uses, the stage, the admin-only folders and
+    TEMP of an elevated ssh session. Loaded at the first PC call, never at
+    import: a module of constants and string composers that imports only `re`,
+    and no other S1a/S1c code reaches the event path."""
+    if str(SPIKE_DIR) not in sys.path:
+        sys.path.insert(0, str(SPIKE_DIR))
+    import elevated_ps as ep
+    return ep
+
+
+def module_script(body: str, module: str | None = None, module_hex: str | None = None, pre: str = "", fin: str = "",
+                  elevated_root: str | None = None) -> str:
+    """Runs `body` and prints {ok, r} or {ok: false, error} as the last line.
+    `module`: a module this box uploaded into a run folder of the user's root
+    (a bundle's IemPc.psm1): its bytes are read once and checked by
+    `module_hex`, staged admin-only under the elevated root, checked again
+    there and imported only from there (#15, elevated_ps.staged_import).
+    `elevated_root`: another elevated root than the PC's (the CI self-test).
+    PSModulePath is pinned before the first command (elevated_ps.PIN, #15)."""
+    ep = elevated_ps()
     load = ""
     if module is not None:
-        load = hash_check(module, module_hex or "") + f" ; Import-Module {ps_quote(module)} -Force ; "
+        if not HEX64.fullmatch(module_hex or ""):
+            raise StepError(f"not a sha256: {module_hex!r}")
+        root = ep.ROOT if elevated_root is None else ps_quote(elevated_root)
+        load = ep.staged_import(ps_quote(module), module.rsplit("\\", 1)[-1], module_hex, root) + " ; "
     tail = f" finally {{ {fin} }}" if fin else ""
     return "\n".join([
         "$ErrorActionPreference = 'Stop'",
         "$ProgressPreference = 'SilentlyContinue'",
-        f"try {{ {pre}{load}$r = & {{ {body} }} ; $o = [pscustomobject]@{{ ok = $true; r = $r }} }} "
+        f"{ep.PIN} ; try {{ {pre}{load}$r = & {{ {body} }} ; $o = [pscustomobject]@{{ ok = $true; r = $r }} }} "
         f"catch {{ $o = [pscustomobject]@{{ ok = $false; error = \"$_\" }} }}{tail} ; "
         "ConvertTo-Json -InputObject $o -Depth 8 -Compress",
     ])
@@ -372,11 +419,13 @@ def last_json(text: str) -> dict:
 
 
 def run_native(env: dict[str, str], exe: str, args: list[str], timeout: float, event: str,
-               checks: tuple[str, ...] = ()) -> dict:
-    doc = last_json(ssh_ps(env, native_script(exe, args, checks), timeout, event))
+               checks: tuple[str, ...] = (), then: str = "") -> dict:
+    doc = last_json(ssh_ps(env, native_script(exe, args, checks, then), timeout, event))
     code = doc.get("exit")
     if code is not None and not isinstance(code, int):
         raise StepError(f"the PC reported a non-numeric exit code: {code!r}")
+    if doc.get("note"):
+        iempc_bin.noted(str(doc["note"]))
     return {"exit": code, "out": doc.get("out") or "", "err": doc.get("err") or ""}
 
 
@@ -415,8 +464,8 @@ def owner_alarms(reply: dict | None) -> list[dict]:
 
 
 def call(env: dict[str, str], exe: str, args: list[str], timeout: float, event: str,
-         checks: tuple[str, ...] = (), json_reply: bool = True) -> tuple[int, dict | None, dict]:
-    raw = run_native(env, exe, args, timeout, event, checks)
+         checks: tuple[str, ...] = (), json_reply: bool = True, then: str = "") -> tuple[int, dict | None, dict]:
+    raw = run_native(env, exe, args, timeout, event, checks, then)
     if raw["exit"] is None:
         name = exe.rsplit("\\", 1)[-1]
         raise StepError(f"{name} did not run on the PC: {raw['err'][-800:]}")
@@ -436,7 +485,13 @@ def call(env: dict[str, str], exe: str, args: list[str], timeout: float, event: 
 
 def iemmode(env: dict[str, str], args: list[str], timeout: float, event: str,
             checks: tuple[str, ...] = ()) -> tuple[int, dict | None, dict]:
-    return call(env, pc_join(env["PC_BIN"], "iemmode.exe"), args, timeout, event, checks)
+    """iemmode from the admin-only bin while the guard last seen runs its
+    build and it reads back, else PC_BIN's (#15, iempc_bin); the reply's
+    guard_build is what the next call compares."""
+    code, reply, raw = call(env, pc_join(env["PC_BIN"], "iemmode.exe"), args, timeout, event, checks,
+                            then=iempc_bin.pick(sys.modules[__name__]))
+    iempc_bin.seen(sys.modules[__name__], reply)
+    return code, reply, raw
 
 
 def result(label: str, args: list[str], code: int, reply: dict | None, raw: dict) -> dict:
@@ -482,6 +537,7 @@ def state_lock(take: bool) -> Iterator[None]:
     if not take:
         yield
         return
+    import fcntl   # the dev box's lock; the Windows CI runner imports this module only to compose (Test-IemStage.ps1)
     with open(state_dir() / "iempc.lock", "a+", encoding="utf-8") as f:
         try:
             fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -491,11 +547,12 @@ def state_lock(take: bool) -> Iterator[None]:
 
 
 def current_entry() -> int:
-    """The dev entry: counted up by every successful `iempc dev` (0 before
-    the first). Known limit: the guard also enters dev by itself
-    (rehearse-teardown's re-entry), which this box never sees, so "once per
-    SHA per dev entry" means per `iempc dev` until the guard's status
-    exposes a dev-entry id to key the dispatch record on."""
+    """The dev entry: counted up by every successful `iempc dev` and
+    switch-test dev leg (0 before the first). Known limit: the guard also
+    enters dev by itself (rehearse-teardown's re-entry), which this box never
+    sees, so "once per SHA per dev entry" means per `iempc dev` or
+    switch-test dev leg until the guard's status exposes a dev-entry id to
+    key the dispatch record on."""
     return int(read_json(state_dir() / "entry.json", {}).get("entry", 0))
 
 
@@ -705,11 +762,12 @@ def latest_record_sha() -> str:
     return max(found)[1]
 
 
-def extract_member(sha: str, rec: dict, name: str) -> tuple[Path, str]:
-    """A top-level file of the fetched, verified zip, checked against its sums."""
+def extract_member(sha: str, rec: dict, name: str, nested: bool = False) -> tuple[Path, str]:
+    """A top-level file of the fetched, verified zip, checked against its sums;
+    with `nested` one under `tuning/` (S1c's modules, iempc_tuning)."""
     want = (rec.get("sums") or {}).get(name)
-    if "/" in name or want is None:
-        raise StepError(f"{name} is not a listed top-level file of bundle {sha}")
+    if ("/" in name) != nested or (nested and not name.startswith("tuning/")) or want is None:
+        raise StepError(f"{name} is not a listed {'tuning' if nested else 'top-level'} file of bundle {sha}")
     z = check_local_zip(sha, rec)
     with zipfile.ZipFile(z) as zf:
         infos = [i for i in zf.infolist() if i.filename.replace("\\", "/") == name]
@@ -719,7 +777,8 @@ def extract_member(sha: str, rec: dict, name: str) -> tuple[Path, str]:
     if hashlib.sha256(data).hexdigest() != want:
         raise StepError(f"{name} in {z.name} does not match SHA256SUMS")
     out = bundle_dir(sha) / name
-    tmp = out.with_name(name + ".tmp")
+    out.parent.mkdir(mode=0o700, exist_ok=True)
+    tmp = out.with_name(out.name + ".tmp")
     tmp.write_bytes(data)
     os.chmod(tmp, 0o600)
     tmp.replace(out)
@@ -816,7 +875,7 @@ def close_failed_window(deadline: float, error: str) -> None:
         if sw.intent_live(st.get("in_flight")):
             seen["in_flight"] = st["in_flight"]
 
-    wait = deadline - time.monotonic() - SWITCH_MIN_S
+    wait = deadline - event_clock() - SWITCH_MIN_S
     try:
         if wait <= 0:
             raise sw.StepError(f"no time left in the event budget to wait for the window lock ({max(wait, 0):.0f} s)")
@@ -844,7 +903,7 @@ def switch_timeout(deadline: float) -> float:
     """What an iemmode call of the event path may take: the rest of the one
     budget. It never starts with less than SWITCH_MIN_S left, since a cut
     `--direct` session stops its switch half-way."""
-    left = deadline - time.monotonic()
+    left = deadline - event_clock()
     if left < SWITCH_MIN_S:
         raise StepError(f"the event path has {max(left, 0):.0f} s of its {EVENT_BUDGET_S} s budget left, less than the "
                         f"{SWITCH_MIN_S} s an iemmode call gets: run 'iempc event' again (a new budget)")
@@ -855,7 +914,7 @@ def cmd_event(ctx: Ctx) -> int:
     """The flag, the spike preempt when a window is open, then `iemmode
     event` (and `--direct` on exit 4), all within EVENT_BUDGET_S."""
     dry = bool(getattr(ctx.args, "dry_run", False))
-    deadline = time.monotonic() + EVENT_BUDGET_S
+    deadline = event_clock() + EVENT_BUDGET_S
     if not dry:
         write_flag()
     if spike_window_open() or spike_window_settling():
@@ -871,6 +930,9 @@ def cmd_event(ctx: Ctx) -> int:
                                 "(spike_window.py status)")
             if not pre["ok"]:
                 close_failed_window(deadline, pre.get("error", ""))
+    if not dry:   # a trace whose dev-box process died (#15); never raises. guarded sees its
+        # bound only at its next poll: two polls stay with iemmode event's minimum.
+        iempc_trace.stop_recorded(ctx, sys.modules[__name__], deadline - event_clock() - SWITCH_MIN_S - 2 * POLL_S)
     args = ["event", "--dry-run"] if dry else ["event"]
     code, reply, raw = iemmode(ctx.env, args, switch_timeout(deadline), "ignore")
     emit(result("iemmode", args, code, reply, raw))
@@ -893,6 +955,10 @@ def cmd_dev(ctx: Ctx) -> int:
     dry = bool(ctx.args.dry_run)
     if dry:
         args.append("--dry-run")
+    else:   # a trace whose dev-box process died (#15); never raises
+        iempc_trace.stop_recorded(ctx, sys.modules[__name__], float("inf"))
+        if ctx.watch(abandon=True) != "ignore" and event_now():
+            raise EventNow()   # that stop ran with "ignore": a dev entry now would reach the guard after "ide event"
     code, reply, raw = iemmode(ctx.env, args, STATUS_S if dry else SWITCH_S, ctx.watch(abandon=True))
     out = result("iemmode", args, code, reply, raw)
     if code == 0 and not dry:
@@ -948,10 +1014,11 @@ def cmd_install(ctx: Ctx) -> int:
         exe_rel = f"incoming/iemmixer-guard-{sha}.exe"
         exe = pc_join(env["PC_ROOT"], exe_rel)
         scp(str(local), remote(env, exe_rel), mode)
-        checks.append(hash_check(exe, hexd))
+        guard, then = iempc_bin.staged_guard(sys.modules[__name__], exe, hexd)   # run from the stage (#15)
+        code, reply, raw = call(env, exe, ["install", pc_zip], INSTALL_S, mode, (*checks, *guard), json_reply=False,
+                                then=then)
     else:
-        exe = pc_join(env["PC_BIN"], "iemmode.exe")
-    code, reply, raw = call(env, exe, ["install", pc_zip], INSTALL_S, mode, tuple(checks), json_reply=not ctx.args.first)
+        code, reply, raw = iemmode(env, ["install", pc_zip], INSTALL_S, mode, tuple(checks))
     out = result("install", [sha], code, reply, raw)
     out["via"] = "iemmixer-guard (first bundle)" if ctx.args.first else "iemmode"
     emit(out)
@@ -1042,11 +1109,12 @@ def activate_offline(ctx: Ctx, sha: str) -> int:
     """`activate --offline` (#9 2026-09-28), for a guard too old to activate
     in event: a graceful `iemmode quit` of the running guard (skipped when
     none runs), the guard's processes read until none runs (QUIT_S), then the
-    bundle's own `bundles\\<sha>\\iemmixer-guard.exe activate <sha>` (its
-    sha256 from this box's fetch record checked on the PC first), which
-    takes the guard's mutex and activates in an idle event only; then the
-    hand-over as online (the first `iemmode status` starts the guard's task,
-    which runs the new exe from bin\\). A refused or failed offline step
+    bundle's own `iemmixer-guard.exe activate <sha>` (read once from
+    `bundles\\<sha>`, checked by this box's fetch record and run from the
+    admin-only stage: iempc_bin.staged_guard, #15), which takes the guard's
+    mutex and activates in an idle event only; then the admin-only iemmode and
+    the hand-over as online (the first `iemmode status` starts the guard's
+    task, which runs the new exe from bin\\). A refused or failed offline step
     starts the guard again (`iemmode status`). The quit and the offline step
     are changes: a new flag lets each finish, then the event path runs (it
     starts a guard); the reads are abandoned."""
@@ -1055,6 +1123,7 @@ def activate_offline(ctx: Ctx, sha: str) -> int:
     if not want:
         raise StepError(f"bundle {sha}'s fetch record lists no iemmixer-guard.exe: fetch it again")
     exe = pc_join(env["PC_ROOT"], f"bundles/{sha}/iemmixer-guard.exe")
+    checks, then = iempc_bin.staged_guard(sys.modules[__name__], exe, want)   # run from the stage (#15)
     if guard_processes(ctx):
         code, reply, raw = iemmode(env, ["quit"], STATUS_S, ctx.watch(abandon=False))
         emit(result("iemmode", ["quit"], code, reply, raw))
@@ -1063,7 +1132,7 @@ def activate_offline(ctx: Ctx, sha: str) -> int:
         emit({"guard_stopped": {"reads": await_guard_gone(ctx)}})
     args = ["activate", sha]
     try:
-        code, reply, raw = call(env, exe, args, INSTALL_S, ctx.watch(abandon=False), (hash_check(exe, want),))
+        code, reply, raw = call(env, exe, args, INSTALL_S, ctx.watch(abandon=False), checks, then=then)
     except StillRunning:
         raise  # it may still hold the guard's mutex: a guard started now would only wait for it
     except StepError:
@@ -1073,7 +1142,9 @@ def activate_offline(ctx: Ctx, sha: str) -> int:
     if code != 0:
         bring_guard_back(ctx)
         return code
+    iempc_bin.install_after_activate(ctx, sys.modules[__name__], sha)   # the new bins are in place (#15)
     emit({"handover": await_guard_build(ctx, sha)})
+    iempc_tuning.refresh_after_activate(ctx, sys.modules[__name__], sha)
     return 0
 
 
@@ -1095,8 +1166,23 @@ def cmd_activate(ctx: Ctx) -> int:
     emit(result("iemmode", args, code, reply, raw))
     if code != 0:
         return code
+    iempc_bin.install_after_activate(ctx, sys.modules[__name__], sha)   # the new bins are in place (#15)
     emit({"handover": await_guard_build(ctx, sha)})
+    iempc_tuning.refresh_after_activate(ctx, sys.modules[__name__], sha)
     return 0
+
+
+def cmd_tuning_install(ctx: Ctx) -> int:
+    """S1c's tuning modules and the profile into the elevated tuning folder, then
+    the bundle's iemmode.exe into the admin-only bin (iempc_tuning.py, iempc_bin.py; #15, #36)."""
+    code = iempc_tuning.install(ctx, sys.modules[__name__])
+    emit({"elevated_bin": ctx.args.sha, **iempc_bin.install(ctx, sys.modules[__name__], ctx.args.sha)})
+    return code
+
+
+def cmd_trace(ctx: Ctx) -> int:
+    """A kernel DPC/ISR trace on the guard's engine; the code lives in iempc_trace.py (#15, #36)."""
+    return iempc_trace.trace(ctx, sys.modules[__name__])
 
 
 def load_dispatches() -> list[dict]:
@@ -1123,12 +1209,23 @@ def cmd_dispatch_hil(ctx: Ctx) -> int:
     check_local_zip(sha, rec)
     if event_now():  # "ide event" during the gh waits above: HIL is dev-time work
         raise Refused(f"{EVENT_NOW} appeared: no HIL dispatch during an event (nothing was dispatched)")
+    iempc_bin.hil_dispatched(sys.modules[__name__], sha)   # the run activates `sha`: awaited from now (#15)
     gh(["workflow", "run", HIL_WORKFLOW, "-R", OPS_REPO, "-f", f"sha={sha}", "-f", f"branch={branch}",
         "-f", f"run={run}", "-f", f"digest={rec['digest']}"])
     record = {"sha": sha, "branch": branch, "run": run, "digest": rec["digest"], "entry": entry, "at": now_iso()}
     write_json(state_dir() / "dispatch.json", {"dispatches": (done + [record])[-200:]})
     emit({"dispatched": record})
     return 0
+
+
+def cmd_dispatch_soak(ctx: Ctx) -> int:
+    """S7 soak dispatch; the code lives in iempc_soak.py (#10, #36)."""
+    return iempc_soak.dispatch(ctx, sys.modules[__name__])
+
+
+def cmd_switch_test(ctx: Ctx) -> int:
+    """S7 switch timing; the code lives in iempc_switch.py (#10, #36)."""
+    return iempc_switch.switch_test(ctx, sys.modules[__name__])
 
 
 def read_only_function(name: str) -> bool:
@@ -1279,15 +1376,19 @@ COMMANDS: dict[str, Spec] = {
     "install": Spec(cmd_install, pc=True, dev_time=True, locked=True),
     "activate": Spec(cmd_activate, pc=True, dev_time=True, locked=True),
     "dispatch-hil": Spec(cmd_dispatch_hil, pc=False, dev_time=True, locked=True),
+    "dispatch-soak": Spec(cmd_dispatch_soak, pc=True, dev_time=True, locked=True),
+    "switch-test": Spec(cmd_switch_test, pc=True, dev_time=True, locked=True),
     "bootstrap": Spec(cmd_bootstrap, pc=True, dev_time=True, locked=True),
     "handover-s1a": Spec(cmd_handover_s1a, pc=True, dev_time=True, locked=True),
+    "tuning-install": Spec(cmd_tuning_install, pc=True, dev_time=True, locked=True),
+    "trace": Spec(cmd_trace, pc=True, dev_time=True, locked=True),
 }
 
 
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="iempc", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("rehearse-teardown", "probe-task", "handover-s1a"):
+    for name in ("rehearse-teardown", "probe-task", "handover-s1a", "switch-test"):
         sub.add_parser(name)
     sub.add_parser("status").add_argument("--pc", action="store_true",
                                           help="ask the guard even while the flag exists (it may start the guard)")
@@ -1304,10 +1405,22 @@ def build_parser() -> argparse.ArgumentParser:
     activate.add_argument("--offline", action="store_true",
                           help="a guard too old to activate in event: quit it, activate with the bundle's own guard")
     sub.add_parser("dispatch-hil").add_argument("--sha")
+    soak = sub.add_parser("dispatch-soak")
+    soak.add_argument("--sha", required=True, help="the bundle the PC runs in dev (its engine's build)")
+    soak.add_argument("--hours", type=int, default=iempc_soak.HOURS_DEFAULT,
+                      help=f"the soak's length, {iempc_soak.HOURS_MIN} to {iempc_soak.HOURS_MAX}")
     boot = sub.add_parser("bootstrap")
     boot.add_argument("--sha", help="the fetched bundle whose IemPc.psm1 runs (default: the newest fetched)")
     boot.add_argument("step", help="an IemPc.psm1 function, e.g. Get-IemBootstrapState")
     boot.add_argument("params", nargs=argparse.REMAINDER, help="-Name value pairs and -Switch flags")
+    tuning = sub.add_parser("tuning-install")
+    tuning.add_argument("--sha", required=True, help="the fetched bundle whose tuning modules and IemPc.psm1 run")
+    tuning.add_argument("--profile", help="the private tuning profile (default: $TUNING_PROFILE or ~/.config/iemmixer/pc-tuning.json)")
+    trace = sub.add_parser("trace")
+    trace.add_argument("--label", required=True, help="the run's name: 1 to 40 of a-z 0-9 -")
+    trace.add_argument("--seconds", type=int, required=True, help="how long the kernel trace runs")
+    trace.add_argument("--circular-mb", type=int, help="a circular kernel file of this size (a long soak)")
+    trace.add_argument("--profile", help="the private tuning profile whose card and audio processors are watched")
     return ap
 
 
@@ -1330,6 +1443,7 @@ def main(argv: list[str]) -> int:
         print(f"iempc: {e}", file=sys.stderr)
         return 1
     spec = COMMANDS[args.cmd]
+    iempc_bin.NOTED.clear()   # one note per command (#15)
     try:
         if spec.dev_time and flag_at_start:
             raise Refused(f"{EVENT_NOW} exists: an event is on; '{args.cmd}' runs only in dev time")

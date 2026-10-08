@@ -1,0 +1,310 @@
+"""The S1a/S1c/golden window sessions import our PowerShell modules only from
+the admin-only stage (#15, the review lane's findings of 2026-10-07): the
+elevated ssh session reads each module from PC_ROOT\\bin once, checks it
+against the fetched bundle record on this box (the CI artifact of a green dev
+push, its SHA256SUMS checked at fetch), stages it under
+<elevated root>\\bootstrap-stage (elevated_ps) and imports only that copy."""
+from __future__ import annotations
+
+import contextlib
+import hashlib
+import io
+import json
+import os
+import re
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE.parent / "pc-tuning"))
+sys.path.insert(0, str(HERE.parent / "golden"))
+import elevated_ps  # noqa: E402
+import golden_window as gw  # noqa: E402
+import spike_window as sw  # noqa: E402
+import tuning_window as tw  # noqa: E402
+
+SHA = "a" * 40
+SUMS = {n: hashlib.sha256(n.encode()).hexdigest() for n in sw.BUNDLE_FILES}
+ENV = {"PC_ROOT": "R", "PC_ROOT_SCP": "/R", "PC_SSH": "u@h", "PC_TUNING_ROOT": "T", "PC_XPERF": "xperf.exe"}
+STAGED = re.compile(r"Import-Module \(Join-Path \$iemStage '([A-Za-z]+\.psm1)'\)")
+# #15, the last lane, item 2: modules load only from Windows PowerShell's own folders,
+# and ssh starts Windows PowerShell by its full path, a literal one (the review: an
+# environment variable in it would be expanded from the session's environment, which
+# the user's HKCU\Environment feeds, and only by cmd.exe).
+PIN = ("$env:PSModulePath = [IO.Path]::Combine($PSHOME, 'Modules') + ';' + "
+       "[IO.Path]::Combine([Environment]::GetFolderPath('ProgramFiles'), 'WindowsPowerShell\\Modules')")
+REMOTE = ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe "
+          "-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command -")
+
+
+def bundle_record(test: unittest.TestCase, state: dict | None = None) -> dict[str, str]:
+    """A temp window state naming SHA as the bundle the PC holds, and that
+    bundle's record under RAW_DIR (SHA256SUMS and .source-sha, as fetch-bundle
+    leaves them). Returns the env."""
+    d = Path(tempfile.mkdtemp())
+    saved = sw.STATE
+    test.addCleanup(setattr, sw, "STATE", saved)
+    sw.STATE = d / "spike-window.json"
+    env = dict(ENV, RAW_DIR=str(d / "raw"))
+    bundle = sw.bundle_dir(env, SHA)
+    bundle.mkdir(parents=True)
+    (bundle / "SHA256SUMS").write_text("".join(f"{h}  {n}\n" for n, h in sorted(SUMS.items())), encoding="utf-8")
+    (bundle.parent / f"{SHA}.source-sha").write_text(SHA + "\n", encoding="utf-8")
+    sw.STATE.write_text(json.dumps(state if state is not None else {"id": "w", "closed": False, "bundle_sha": SHA}),
+                        encoding="utf-8")
+    return env
+
+
+class StageTests(unittest.TestCase):
+    def only_staged(self, script: str, names: list[str]) -> None:
+        """Every import in `script` is a stage copy, these in this order."""
+        self.assertEqual(STAGED.findall(script), names, script)
+        self.assertEqual(script.count("Import-Module"), len(names), script)
+
+    def staged_from_bin(self, script: str, root: str, name: str, want: str | None = None) -> int:
+        """`name` is read once from <root>\\bin, checked (by $iemSums or `want`),
+        and written into the stage; returns where its stage copy is read back."""
+        src = sw.ps_quote(f"{root}\\bin\\{name}")
+        want = want or f"$iemSums['{name}']"
+        self.assertEqual(script.count(src), 2, name)   # read once, named in the mismatch
+        at = 0   # each step searched after the one before: this module's own, in this order
+        for step in (f"$iemB = [IO.File]::ReadAllBytes({src})", f"if ($iemH -cne {want})",
+                     f"$iemMod = Join-Path $iemStage '{name}'", "& $iemOnly $iemMod"):
+            at = script.index(step, at)
+        return at
+
+    def test_every_window_session_imports_spikepc_only_from_the_stage(self) -> None:
+        s = sw.ps_script("C:\\r", "Get-X", SUMS)
+        self.only_staged(s, ["SpikePc.psm1"])
+        golden = self.staged_from_bin(s, "C:\\r", "GoldenPc.psm1")   # SpikePc loads it from its own folder
+        spike = self.staged_from_bin(s, "C:\\r", "SpikePc.psm1")
+        self.assertLess(golden, spike)
+        self.assertLess(spike, s.index("Import-Module (Join-Path $iemStage 'SpikePc.psm1') -Force"))
+        self.assertLess(s.index("Import-Module"), s.index("$r = & { Get-X }"))
+        table = s[s.index("$iemSums = @{"):]
+        for name in ("GoldenPc.psm1", "SpikePc.psm1", "IemTuningStore.psm1", "IemTuning.psm1", "IemMeasure.psm1"):
+            self.assertIn(f"'{name}' = '{SUMS[name]}'", table[:table.index("}")])
+        self.assertNotIn("asio_spike.exe", s)
+        with self.assertRaisesRegex(sw.StepError, "SpikePc.psm1"):
+            sw.ps_script("C:\\r", "Get-X", {k: v for k, v in SUMS.items() if k != "SpikePc.psm1"})
+
+    def test_the_tuning_modules_are_staged_after_temp_and_only_iemmeasure_is_imported(self) -> None:
+        for body in (sw.tuning_body(ENV, "Get-IemNow"), tw.analysis_step("R", "2026-01-01T00:00:00Z", "B")):
+            self.only_staged(body, ["IemMeasure.psm1"])
+            store = self.staged_from_bin(body, "R", "IemTuningStore.psm1")   # IemTuning loads it from its own folder (#34)
+            tuning = self.staged_from_bin(body, "R", "IemTuning.psm1")   # IemMeasure loads it from its own folder
+            measure = self.staged_from_bin(body, "R", "IemMeasure.psm1")
+            self.assertLess(body.index("$env:TEMP = $iemTemp"), store)
+            self.assertLess(store, tuning)
+            self.assertLess(tuning, measure)
+            self.assertIn("Import-Module (Join-Path $iemStage 'IemMeasure.psm1') -Force -Global", body)
+
+    def test_the_trace_stop_stages_iemmeasure_alone_and_sets_up_no_temp(self) -> None:
+        stop = sw.trace_stop_body(ENV, "R\\run")
+        self.only_staged(stop, ["IemMeasure.psm1"])
+        self.staged_from_bin(stop, "R", "IemMeasure.psm1")
+        self.assertIn("Import-Module (Join-Path $iemStage 'IemMeasure.psm1') -ArgumentList 'stop-only' -Force -Global", stop)
+        self.assertNotIn("IemTuning", stop)
+        self.assertNotIn("TEMP", stop)
+
+    def test_the_golden_session_imports_goldenpc_only_from_the_stage(self) -> None:
+        want = hashlib.sha256((HERE.parent / "golden" / "GoldenPc.psm1").read_bytes()).hexdigest()
+        s = gw.ps_script({"PC_ROOT": "R"}, "Get-X")
+        self.only_staged(s, ["GoldenPc.psm1"])
+        self.staged_from_bin(s, "R", "GoldenPc.psm1", want=f"'{want}'")
+        self.assertLess(s.index("Import-Module"), s.index("$r = & { Get-X }"))
+
+
+class StoreFirstTests(unittest.TestCase):
+    """#34: IemTuning.psm1 imports IemTuningStore.psm1 from its own folder, so a
+    session that stages IemTuning stages the store before it, in the same stage."""
+
+    def test_iemtuning_is_staged_only_after_its_store(self) -> None:
+        tuning = ("'R\\bin\\IemTuning.psm1'", "IemTuning.psm1", None)
+        store = ("'R\\bin\\IemTuningStore.psm1'", "IemTuningStore.psm1", None)
+        measure = ("'R\\bin\\IemMeasure.psm1'", "IemMeasure.psm1", None)
+        for mods in ([tuning], [tuning, store], [tuning, measure], [measure, tuning]):
+            with self.assertRaisesRegex(ValueError, "IemTuningStore.psm1"):
+                elevated_ps.staged(mods)
+        with self.assertRaisesRegex(ValueError, "IemTuningStore.psm1"):
+            elevated_ps.staged_import("'R\\up\\IemTuning.psm1'", "IemTuning.psm1", "0" * 64)
+        s = elevated_ps.staged([store, tuning, measure])
+        self.assertLess(s.index("$iemMod = Join-Path $iemStage 'IemTuningStore.psm1'"),
+                        s.index("$iemMod = Join-Path $iemStage 'IemTuning.psm1'"))
+        # A session without IemTuning stages what it needs (the stop-only import, SpikePc).
+        elevated_ps.staged([measure])
+        elevated_ps.staged([store])
+
+
+class StageWriteTests(unittest.TestCase):
+    """What the stage writes (#15, review): nothing on a folder that exists,
+    and a copy again when the one there is not admin-only."""
+
+    def test_an_existing_folder_is_only_read_back(self) -> None:
+        self.assertIn("if (-not [IO.Directory]::Exists($d)) { [void][IO.Directory]::CreateDirectory($d, $s) ; & $iemOwn $d ; "
+                      "[IO.Directory]::SetAccessControl($d, $s) } ; & $iemOnly $d }", elevated_ps.HELPERS)
+
+    def test_a_copy_others_may_change_is_written_again(self) -> None:
+        s = elevated_ps.staged([("'R\\bin\\SpikePc.psm1'", "SpikePc.psm1", None)])
+        keep = s[s.index("if (-not ([IO.File]::Exists($iemMod)"):s.index("[IO.File]::Delete($iemMod)")]
+        self.assertIn("(& { try { & $iemOnly $iemMod ; $true } catch { $false } })", keep)
+        self.assertLess(keep.index("& $iemOnly $iemMod"), keep.index("Get-FileHash"))
+
+
+class PinTests(unittest.TestCase):
+    """#15, the last lane, item 2: an elevated window session pins
+    PSModulePath to Windows PowerShell's own folders before its first command
+    (the user's Documents path comes first otherwise, and a module autoloaded
+    from there would run elevated), and ssh starts powershell.exe by its full
+    path (never one a user's PATH finds first)."""
+
+    def pinned_first(self, script: str, eap: str = "Stop") -> None:
+        self.assertEqual(script.count("$env:PSModulePath"), 1, script)
+        self.assertEqual(script[:script.index(PIN)], f"$ErrorActionPreference = '{eap}'\n$ProgressPreference = 'SilentlyContinue'\n")
+        self.assertTrue(script[script.index(PIN) + len(PIN):].startswith(" ; try { "), script)
+
+    def test_every_window_script_pins_the_module_path_before_any_command(self) -> None:
+        self.pinned_first(sw.ps_script("C:\\r", "Get-X", SUMS))
+        self.pinned_first(sw.plain_script(sw.stop_first_body({"PC_ROOT": "R"})))
+        self.pinned_first(gw.ps_script({"PC_ROOT": "R"}, "Get-X"))
+        self.assertEqual(elevated_ps.PIN, PIN)
+
+    def test_ssh_starts_windows_powershell_by_its_full_path(self) -> None:
+        self.assertEqual(sw.ssh_cmd(ENV), ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "u@h", REMOTE])
+        self.assertEqual(gw.ssh_cmd(ENV), ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "u@h", REMOTE])
+        for expanded in ("%", "$", "!"):   # nothing a shell expands from the session's environment
+            self.assertNotIn(expanded, elevated_ps.REMOTE)
+
+    def test_the_golden_setup_s_folders_script_is_pinned(self) -> None:
+        sent: list[str] = []
+        env = dict(ENV, PC_TREES="/x/trees.json")
+        with mock.patch.object(gw, "ssh_raw", lambda e, script, timeout=900: sent.append(script) or ""), \
+                mock.patch.object(gw, "scp"), mock.patch.object(gw, "ps"), contextlib.redirect_stdout(io.StringIO()):
+            gw.cmd_setup(env, None)
+        self.assertTrue(sent[0].startswith(f"{PIN} ; New-Item -ItemType Directory -Force -Path 'R\\bin', "), sent)
+
+
+class BundleRecordTests(unittest.TestCase):
+    """sw.ps takes the sums from the attested bundle the window's PC holds."""
+
+    def setUp(self) -> None:
+        saved = sw.guarded
+        self.addCleanup(setattr, sw, "guarded", saved)
+        self.sent: list[str] = []
+        sw.guarded = lambda cmd, stdin, timeout, event: self.sent.append(stdin) or json.dumps({"ok": True, "r": 1})
+
+    def test_ps_sends_the_sums_of_the_window_s_bundle_record(self) -> None:
+        env = bundle_record(self)
+        self.assertEqual(sw.ps(env, "Get-X"), 1)
+        self.assertEqual(self.sent, [sw.ps_script("R", "Get-X", SUMS) + "\n"])
+
+    def test_without_a_bundle_record_nothing_is_sent(self) -> None:
+        env = bundle_record(self, {"id": "w", "closed": False})
+        with self.assertRaisesRegex(sw.StepError, "setup --sha"):
+            sw.ps(env, "Get-X")
+        env = bundle_record(self)
+        (sw.bundle_dir(env, SHA).parent / f"{SHA}.source-sha").write_text("b" * 40 + "\n", encoding="utf-8")
+        with self.assertRaisesRegex(sw.StepError, "source-sha"):
+            sw.ps(env, "Get-X")
+        env = bundle_record(self)
+        (sw.bundle_dir(env, SHA) / "SHA256SUMS").unlink()
+        with self.assertRaisesRegex(sw.StepError, "cannot be read"):   # a StepError, never an OSError (review)
+            sw.ps(env, "Get-X")
+        (sw.bundle_dir(env, SHA) / "SHA256SUMS").write_text(f"{SUMS['GoldenPc.psm1']}  GoldenPc.psm1\n", encoding="utf-8")
+        with self.assertRaisesRegex(sw.StepError, "lists no IemMeasure.psm1, IemTuning.psm1, IemTuningStore.psm1, SpikePc.psm1"):
+            sw.ps(env, "Get-X")
+        self.assertEqual(self.sent, [])
+
+    def test_a_record_that_lists_more_than_the_modules_serves(self) -> None:
+        env = bundle_record(self)
+        extra = "".join(f"{h}  {n}\n" for n, h in sorted(SUMS.items())) + f"{'e' * 64}  later-file.txt\n"
+        (sw.bundle_dir(env, SHA) / "SHA256SUMS").write_text(extra, encoding="utf-8")
+        self.assertEqual(sw.ps(env, "Get-X"), 1)
+        self.assertEqual(self.sent, [sw.ps_script("R", "Get-X", SUMS) + "\n"])
+
+    def test_a_new_window_keeps_the_bundle_the_pc_holds(self) -> None:
+        env = bundle_record(self, {"id": "old", "closed": True, "bundle_sha": SHA})
+        with mock.patch.object(sw, "EVENT_NOW", sw.STATE.with_name("EVENT-NOW")), contextlib.redirect_stdout(io.StringIO()):
+            sw.cmd_new(dict(env, PC_BUFFER_ORIGINAL="64"),
+                       type("Args", (), {"signal": "owner, 13:07: event skončil", "dev_time": True})())
+        self.assertEqual(sw.load_state()["bundle_sha"], SHA)
+
+    def test_setup_records_the_bundle_before_its_pc_call(self) -> None:
+        env = bundle_record(self, {"id": "w", "closed": False})
+        bundle = sw.bundle_dir(env, SHA)
+        lines = []
+        for name in sw.BUNDLE_FILES:
+            (bundle / name).write_bytes(name.encode())
+            lines.append(f"{SUMS[name]}  {name}\n")
+        (bundle / "SHA256SUMS").write_text("".join(lines), encoding="utf-8")
+        seen: list[str | None] = []
+        with mock.patch.object(sw, "scp"), mock.patch.object(sw, "EVENT_NOW", sw.STATE.with_name("EVENT-NOW")), \
+                mock.patch.object(sw, "ps", lambda e, body, **kw: seen.append(sw.load_state().get("bundle_sha")) or []), \
+                contextlib.redirect_stdout(io.StringIO()):
+            sw.cmd_setup(env, type("Args", (), {"sha": SHA})())
+        self.assertEqual(seen, [SHA])
+        # Its folders' call is pinned like every composed script (#15, the last lane, item 2).
+        self.assertEqual(self.sent, [f"{PIN} ; New-Item -ItemType Directory -Force -Path 'R\\bin', 'R\\queue', 'R\\status' "
+                                     "| Out-Null\n"])
+
+    def test_the_preempts_first_call_imports_nothing_and_needs_no_bundle_record(self) -> None:
+        # #15, the last lane, item 1: without a bundle record every staged call refuses, yet
+        # the spike's stop file and the spike count go out first, in a script that imports nothing.
+        env = bundle_record(self, {"id": "w", "card": "free", "pref_original": 64, "pref_current": None,
+                                   "pref_restored": False, "runs": [], "closed": False})
+        with mock.patch.object(sw, "EVENT_NOW", sw.STATE.with_name("EVENT-NOW")), contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(sw.StepError, "setup --sha"):
+                sw.cmd_preempt(env)
+        self.assertEqual(len(self.sent), 1)
+        script = self.sent[0]
+        self.assertEqual(script, sw.plain_script(sw.stop_first_body(env)) + "\n")
+        for staged in ("Import-Module", "$iemSums", "ReadAllBytes", "bootstrap-stage", "SpikePc", "GoldenPc"):
+            self.assertNotIn(staged, script)
+        self.assertLess(script.index("New-Item -ItemType File -Force -Path 'R\\queue\\stop' | Out-Null"),
+                        script.index("@(Get-Process -Name asio_spike -ErrorAction SilentlyContinue).Count"))
+        self.assertTrue(script.endswith("ConvertTo-Json -InputObject $o -Depth 8 -Compress\n"))
+
+
+class CiScriptTests(unittest.TestCase):
+    """poll-script and analysis-script take the bundle's SHA256SUMS (the CI
+    runner's bundle), as the dev box takes the fetched record's."""
+
+    def test_the_ci_scripts_carry_the_bundle_s_sums(self) -> None:
+        sums = Path(tempfile.mkdtemp()) / "SHA256SUMS"
+        sums.write_text("".join(f"{h}  {n}\n" for n, h in sorted(SUMS.items())), encoding="utf-8")
+        for argv, body in ((["poll-script", "--governor", "G"], tw.poll_body("G", 0, 0)),
+                           (["analysis-script", "--since", "S"], tw.analysis_step("C:\\r", "S", tw.ANALYSIS_PROBE))):
+            out = io.StringIO()
+            with mock.patch.dict(os.environ, {"SPIKE_ENV": "/nonexistent/asio-spike.env"}), contextlib.redirect_stdout(out):
+                code = tw.main([*argv, "--root", "C:\\r", "--sums", str(sums)])
+            self.assertEqual(code, 0)
+            self.assertEqual(out.getvalue(), sw.ps_script("C:\\r", body, SUMS) + "\n")
+        # The CI runner asserts the five modules' paths are all in the stage (#15, #34).
+        self.assertIn("Get-Module -Name SpikePc, GoldenPc, IemMeasure, IemTuning, IemTuningStore", tw.ANALYSIS_PROBE)
+
+    def test_the_trace_stop_prints_as_sent(self) -> None:
+        # The asio-spike job times it against TRACE_STOP_CALL_S (#15, the last lane, item 5).
+        sums = Path(tempfile.mkdtemp()) / "SHA256SUMS"
+        sums.write_text("".join(f"{h}  {n}\n" for n, h in sorted(SUMS.items())), encoding="utf-8")
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"SPIKE_ENV": "/nonexistent/asio-spike.env"}), contextlib.redirect_stdout(out):
+            code = tw.main(["trace-stop-script", "--root", "C:\\r", "--dir", "C:\\r\\runs\\t", "--sums", str(sums)])
+        self.assertEqual(code, 0)
+        self.assertEqual(out.getvalue(),
+                         sw.ps_script("C:\\r", sw.trace_stop_body({"PC_ROOT": "C:\\r"}, "C:\\r\\runs\\t"), SUMS) + "\n")
+
+    def test_the_preempts_first_script_prints_as_sent(self) -> None:
+        # The asio-spike job runs it on Windows PowerShell 5.1 (#15, the last lane, item 1).
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"SPIKE_ENV": "/nonexistent/asio-spike.env"}), contextlib.redirect_stdout(out):
+            code = tw.main(["preempt-script", "--root", "C:\\r"])
+        self.assertEqual(code, 0)
+        self.assertEqual(out.getvalue(), sw.plain_script(sw.stop_first_body({"PC_ROOT": "C:\\r"})) + "\n")
+
+
+if __name__ == "__main__":
+    unittest.main()

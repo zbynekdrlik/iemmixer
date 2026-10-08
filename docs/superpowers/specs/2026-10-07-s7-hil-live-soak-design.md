@@ -69,20 +69,21 @@ The gates need distributions the engine does not export today. `Status` has `lat
   - Its `soak` job on the `iem-pc` runner has a 600 min timeout.
   - The soak changes no guard state: it starts no HIL job, so the engine keeps its production flags and the real topology. It only reads `iemmode status` and runs the client harness.
 - **Client harness `iem-soakclient`** (Rust, a new crate, built by CI into the bundle):
-  - It logs in as the engineer through the server's normal login (PIN from the ops secret in the job's environment).
+  - On the PC it signs its own short-lived engineer token with the server's `jwt_secret` (`--jwt-secret-file`; same user, the token never leaves the PC, no band PIN in GitHub; #10 decision 2026-10-07). In CI it logs in with the test server's engineer PIN (`IEM_SOAK_PIN`).
   - It opens one mixer socket and one listen socket on one member mix, at the LAN address the server names.
-  - It decodes the Opus frames and counts frames, gaps (> 60 ms without a frame), reconnects and meter frames, then writes a JSON summary.
+  - It first checks that `/api/version` names the soaked build (`--expect-build`), else `wrong-server`: after "ide event" the predecessor answers at the same address and accepts the same token, and a `ListenStart` there would mute members' sends in REAPER.
+  - It decodes the Opus frames and counts frames, gaps (> 60 ms without a frame) and meter frames, then writes a JSON summary. It never opens a socket twice: the first close, error or silence past the idle bound ends the run `connection-lost` (the summary's `reconnects` stays, always 0). Each socket ends with `ListenStop` (listen), a Close and a bounded wait for the peer's Close.
   - Its own CPU Set is the profile's housekeeping set when one is given.
 - **Polls:**
   - every 60 s: `iemmode status`;
-  - every 10 min: the guard's `tuning state` drift, read through `status`;
+  - the guard's own drift read (hourly, `DRIFT_EVERY`) raises `tuning drift: …` alarms that every poll carries; the verdict counts them as information (no guard request reads the tuning state on demand);
   - alongside: a circular DPC trace (1 GB, at most 5 cuts) through `iempc trace` (#15 design, 2026-10-07).
 - **Verdict:**
   - green, with ≥ 8 h of polls on one engine pid and one bundle, when:
     - missed +0 and resets +0;
     - late (§3) ≤ 0.2 %;
     - `process()` p99.9 ≤ 83 µs;
-    - harness gaps 0 and reconnects 0;
+    - harness gaps 0 and reconnects 0, and at least 99 % of the expected listen frames (gaps alone cannot tell a thinned stream from a full one);
   - any other end is red, naming the first failing number.
   - The ops `report` job posts `soak/iem-pc` on the SHA. `iemmode report` records it per bundle beside HIL.
 - **"Ide event":** the guard stops the runner, and the job ends cancelled (never red, never green).

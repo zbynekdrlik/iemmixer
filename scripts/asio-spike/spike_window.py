@@ -39,6 +39,7 @@ sys.modules.setdefault("spike_window", sys.modules[__name__])
 from pc_change import (JOURNAL_STEPS, REAPER_STEPS, RUN_START_S, SAVE_QUIT_S, SET_BUFFER_S, STEP_REFUSED, STOP_FILE,  # noqa: E402,F401
                        begin_change, changing, clear_stop, close_out, end_change, exit_on_signals, intent_live, pc_change,
                        reaper_on_card, settle_live, step_guard, unwind_closing, wait_for_settle)
+import elevated_ps  # noqa: E402  (TEMP before the tuning modules' import, #15)
 # The pure rules (env, request, undo plan, sums, verdict), re-exported.
 from spike_rules import (CPU_LIST, FRAMES, MAX_SECONDS, REQUIRED, buffer_args, buffer_touched,  # noqa: E402,F401
                          check_request, cpu_set, load_env, parse_sums, pick_run,
@@ -46,7 +47,10 @@ from spike_rules import (CPU_LIST, FRAMES, MAX_SECONDS, REQUIRED, buffer_args, b
 
 POLL_S = 2.0
 REPO = "zbynekdrlik/iemmixer"
-BUNDLE_FILES = ("GoldenPc.psm1", "IemMeasure.psm1", "IemTuning.psm1", "SpikePc.psm1", "asio_spike.exe", "spike-task.ps1")
+BUNDLE_FILES = ("GoldenPc.psm1", "IemMeasure.psm1", "IemTuning.psm1", "IemTuningStore.psm1", "SpikePc.psm1", "asio_spike.exe",
+                "spike-task.ps1")
+# The modules a window session stages from bin, checked by the bundle record's sums (#15).
+MODULES = tuple(n for n in BUNDLE_FILES if n.endswith(".psm1"))
 TASK = "-TaskPath '\\iemmixer\\' -TaskName 'iemmixer-asio-spike'"
 STATE = Path(os.environ.get("SPIKE_STATE", str(Path.home() / ".local/state/iemmixer/spike-window.json")))
 # Spike exit codes the owner must hear about at once (crates/iem-audio-io/examples/asio_spike/main.rs).
@@ -117,6 +121,32 @@ def verify_bundle(bundle: Path) -> list[str]:
     return sorted(sums)
 
 
+def bundle_sums(env: dict[str, str]) -> dict[str, str]:
+    """The sums of the bundle the window's PC holds in bin (state
+    `bundle_sha`, set by setup and kept by every new window): its fetched
+    record on this box (the CI artifact of a green dev push, its SHA256SUMS
+    checked at fetch; #15). Every window session checks the modules it stages
+    against them; the record must name each of MODULES."""
+    sha = load_state().get("bundle_sha")
+    if not sha:
+        raise StepError("no bundle is set up for this window: run 'setup --sha <bundle>' (#15: the PC's modules are "
+                        "checked against the fetched bundle's sums)")
+    bundle = bundle_dir(env, sha)
+    marker = bundle.parent / f"{sha}.source-sha"
+    try:
+        named = marker.read_text(encoding="utf-8").strip() if marker.is_file() else None
+        text = (bundle / "SHA256SUMS").read_text(encoding="utf-8") if named == sha else ""
+    except OSError as e:
+        raise StepError(f"bundle {sha}: its record on this box cannot be read ({e}): fetch-bundle it again") from None
+    if named != sha:
+        raise StepError(f"bundle {sha}: its .source-sha is missing or names another commit: fetch-bundle it again")
+    sums = parse_sums(text)
+    missing = [n for n in MODULES if n not in sums]
+    if missing:
+        raise StepError(f"bundle {sha}'s SHA256SUMS lists no {', '.join(missing)}: fetch-bundle it again")
+    return sums
+
+
 def guarded(cmd: list[str], stdin: str, timeout: float, event: str) -> str:
     """Runs `cmd` and checks the "ide event" flag every POLL_S seconds.
     event="abandon": a read-only call is left to end by itself and EventNow
@@ -151,20 +181,48 @@ def guarded(cmd: list[str], stdin: str, timeout: float, event: str) -> str:
 # ---- PC access (the PC is the external dependency; no unit tests below) ----
 
 def ssh_cmd(env: dict[str, str]) -> list[str]:
-    return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", env["PC_SSH"],
-            "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command -"]
+    return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", env["PC_SSH"], elevated_ps.REMOTE]
 
 
-def ps_script(root: str, body: str) -> str:
+def bin_modules(root: str, *names: str) -> list[tuple[str, str, None]]:
+    """staged()'s list: each module read from <root>\\bin, checked by $iemSums."""
+    return [(ps_quote(f"{root}\\bin\\{n}"), n, None) for n in names]
+
+
+def ps_script(root: str, body: str, sums: dict[str, str]) -> str:
     """The PowerShell text sw.ps sends to `powershell -Command -` on the PC:
-    `body` after importing SpikePc from <root>\\bin, its result or error as
-    one JSON line (single-line statements: `-Command -` reads stdin line by
-    line). The Windows CI runner executes it as printed (tuning_window
-    poll-script)."""
+    `body` after importing SpikePc, its result or error as one JSON line
+    (single-line statements: `-Command -` reads stdin line by line). SpikePc
+    and GoldenPc (which it loads from its own folder) are read from
+    <root>\\bin, checked against `sums` (the fetched bundle's) and imported
+    only from the admin-only stage (#15, elevated_ps); `$iemSums` serves the
+    body's own staged imports. The Windows CI runner executes it as printed
+    (tuning_window poll-script)."""
+    missing = [n for n in MODULES if n not in sums]
+    if missing:
+        raise StepError(f"the bundle's sums list no {', '.join(missing)}")
+    load = " ; ".join([elevated_ps.sums_table({n: sums[n] for n in MODULES}),
+                       elevated_ps.staged(bin_modules(root, "GoldenPc.psm1", "SpikePc.psm1")),
+                       elevated_ps.import_staged("SpikePc.psm1")])
+    return reply_script(f"{load} ; ", body)
+
+
+def plain_script(body: str) -> str:
+    """`body` as one JSON reply like ps_script, with no module import and no
+    stage (#15, the last lane, item 1): the preempt's first call, which must
+    depend neither on the stage nor on the bundle record. The asio-spike CI
+    job runs it as printed (tuning_window preempt-script)."""
+    return reply_script("", body)
+
+
+def reply_script(pre: str, body: str) -> str:
+    """`pre`, then `body`, its result or error as one JSON line (single-line
+    statements: `-Command -` reads stdin line by line). PSModulePath is pinned
+    before the first command (elevated_ps.PIN, #15)."""
     return "\n".join([
         "$ErrorActionPreference = 'Stop'",
         "$ProgressPreference = 'SilentlyContinue'",
-        f"try {{ Import-Module (Join-Path {ps_quote(root)} 'bin\\SpikePc.psm1') -Force ; $r = & {{ {body} }} ; $o = [pscustomobject]@{{ ok = $true; r = $r }} }} "
+        f"{elevated_ps.PIN} ; try {{ {pre}$r = & {{ {body} }} ; $o = [pscustomobject]@{{ ok = $true; r = $r }} }} "
         f"catch {{ $o = [pscustomobject]@{{ ok = $false; error = \"$_\" }} }} ; ConvertTo-Json -InputObject $o -Depth 8 -Compress",
     ])
 
@@ -172,7 +230,18 @@ def ps_script(root: str, body: str) -> str:
 def ps(env: dict[str, str], body: str, timeout: float = 300, event: str = "finish"):
     """Runs `body` on the PC (ps_script); PC errors come back as {ok: false}
     and raise StepError, a call without a complete reply raises NoReply."""
-    out = [line for line in guarded(ssh_cmd(env), ps_script(env["PC_ROOT"], body) + "\n", timeout, event).splitlines() if line.strip()]
+    return send(env, ps_script(env["PC_ROOT"], body, bundle_sums(env)), timeout, event)
+
+
+def plain_ps(env: dict[str, str], body: str, timeout: float = 300, event: str = "finish"):
+    """Runs `body` on the PC with no module and no stage (plain_script); the
+    reply as in ps."""
+    return send(env, plain_script(body), timeout, event)
+
+
+def send(env: dict[str, str], script: str, timeout: float, event: str):
+    """Sends a composed script over ssh (guarded) and reads its one JSON reply."""
+    out = [line for line in guarded(ssh_cmd(env), script + "\n", timeout, event).splitlines() if line.strip()]
     try:
         doc = json.loads(out[-1]) if out else None
     except ValueError:
@@ -350,8 +419,27 @@ def need_preflight(state: dict) -> None:
         raise StepError("run preflight first")
 
 
+SPIKE_COUNT = "@(Get-Process -Name asio_spike -ErrorAction SilentlyContinue).Count"
+
+
 def spike_running(env: dict[str, str], event: str = "abandon") -> bool:
-    return bool(ps(env, "@(Get-Process -Name asio_spike -ErrorAction SilentlyContinue).Count", timeout=60, event=event))
+    return bool(ps(env, SPIKE_COUNT, timeout=60, event=event))
+
+
+def stop_first_body(env: dict[str, str]) -> str:
+    return f"New-Item -ItemType File -Force -Path {pc(env, STOP_FILE)} | Out-Null ; {SPIKE_COUNT}"
+
+
+def stop_first(env: dict[str, str]) -> int:
+    """The preempt's first PC action (#15, the last lane, item 1): the spike's
+    stop file, then the spike count, in plain PowerShell (plain_ps: no module,
+    no stage, no bundle record). A running spike ends its run on the file and
+    its task refuses to start one, so a stage that fails after this leaves no
+    spike holding the card. Bounded like the spike check it replaces."""
+    n = plain_ps(env, stop_first_body(env), timeout=60, event="ignore")
+    if isinstance(n, bool) or not isinstance(n, int) or n < 0:
+        raise StepError(f"the PC's spike count after the stop file reads {n!r}, not a count")
+    return n
 
 
 # ---- commands ----
@@ -361,14 +449,17 @@ def cmd_new(env, args) -> None:
     if event_now():
         raise StepError(f"{EVENT_NOW} exists: an event is on, no window")
     with window_lock():
-        if STATE.is_file() and not json.loads(STATE.read_text(encoding="utf-8")).get("closed"):
+        last = json.loads(STATE.read_text(encoding="utf-8")) if STATE.is_file() else {}
+        if last and not last.get("closed"):
             raise StepError("the last window is still open: finish it (to-event) or run preempt")
         wid = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         # --dev-time: REAPER was already saved and quit, so the card is free from the start and
         # "ide event" (preempt, to-event) brings REAPER back with the handover checks.
         save_state({"id": wid, "signal": args.signal, "card": "free" if args.dev_time else "reaper", "dev_time": bool(args.dev_time),
                     "pref_original": int(env["PC_BUFFER_ORIGINAL"]), "pref_current": None, "pref_restored": False,
-                    "runs": [], "closed": False})
+                    "runs": [], "closed": False,
+                    # The bundle the PC's bin holds stays the window's until setup puts another (#15).
+                    **({"bundle_sha": last["bundle_sha"]} if last.get("bundle_sha") else {})})
     print(wid)
 
 
@@ -397,11 +488,12 @@ def cmd_setup(env, args) -> None:
         raise StepError("bundle .source-sha differs from --sha (P5: only the reviewed dev commit's bundle)")
     verify_bundle(bundle)
     dirs = ", ".join(pc(env, d) for d in ("bin", "queue", "status"))
-    guarded(ssh_cmd(env), f"New-Item -ItemType Directory -Force -Path {dirs} | Out-Null\n", 60, "finish")
+    guarded(ssh_cmd(env), f"{elevated_ps.PIN} ; New-Item -ItemType Directory -Force -Path {dirs} | Out-Null\n", 60, "finish")
     for name in (*BUNDLE_FILES, "SHA256SUMS"):
         scp(str(bundle / name), remote(env, f"bin/{name}"))
-    names = ps(env, f"$n = Test-SpikeSums -Bin {pc(env, 'bin')} ; Register-SpikeTask -Root {ps_quote(env['PC_ROOT'])} ; $n")
+    # The PC's bin holds this bundle now: its sums check every module a session stages (#15).
     update_state({"bundle_sha": args.sha})
+    names = ps(env, f"$n = Test-SpikeSums -Bin {pc(env, 'bin')} ; Register-SpikeTask -Root {ps_quote(env['PC_ROOT'])} ; $n")
     print(json.dumps({"setup": args.sha, "verified": names, "task": "registered"}))
 
 
@@ -573,8 +665,15 @@ def cmd_run(env, args, on_poll=None) -> dict:
 
 def measure_import(root: str) -> str:
     """The import of the S1c modules from the verified bundle (IemMeasure loads
-    IemTuning, whose Add-Type compiles)."""
-    return f"Import-Module (Join-Path {ps_quote(root)} 'bin\\IemMeasure.psm1') -Force -Global"
+    IemTuning from its own folder, whose Add-Type compiles, and IemTuning loads
+    IemTuningStore from its own, #34), TEMP and TMP first at the admin-only
+    <elevated root>\\temp: csc writes and loads its DLL there, never in the
+    session user's TEMP (#15, elevated_ps.temp_first). All three are read from
+    <root>\\bin, checked by ps_script's $iemSums and imported only from the
+    admin-only stage, each one staged before the module that loads it."""
+    return " ; ".join([elevated_ps.temp_first(),
+                       elevated_ps.staged(bin_modules(root, "IemTuningStore.psm1", "IemTuning.psm1", "IemMeasure.psm1")),
+                       elevated_ps.import_staged("IemMeasure.psm1", "-Force -Global")])
 
 
 def tuning_body(env: dict[str, str], body: str) -> str:
@@ -602,7 +701,9 @@ TRACE_STOP_CALL_S = 120
 
 
 def trace_stop_import(env: dict[str, str]) -> str:
-    return f"Import-Module (Join-Path {ps_quote(env['PC_ROOT'])} 'bin\\IemMeasure.psm1') -ArgumentList 'stop-only' -Force -Global"
+    """IemMeasure alone through the stage (#15): no IemTuning, no TEMP."""
+    return (f"{elevated_ps.staged(bin_modules(env['PC_ROOT'], 'IemMeasure.psm1'))} ; "
+            f"{elevated_ps.import_staged('IemMeasure.psm1', '-ArgumentList ' + ps_quote('stop-only') + ' -Force -Global')}")
 
 
 def trace_stop_call(trace_dir: str) -> str:
@@ -762,13 +863,15 @@ def cmd_to_event(env, args) -> None:
 def cmd_preempt(env, args=None) -> None:
     """Brings REAPER back once, whoever asks: under the window lock the state
     is read again, and a window another process already closed (REAPER back)
-    is left alone. A PC change in flight is settled after the bring-back, and
-    the stop file removed once the window closed (close_out)."""
+    is left alone. The first PC action writes the spike's stop file and counts
+    the spike without any module (stop_first, #15). A PC change in flight is
+    settled after the bring-back, and the stop file removed once the window
+    closed (close_out)."""
     with window_lock():
         state = load_state()
         closed = bool(state.get("closed"))
         if not closed:
-            running = spike_running(env, event="ignore")
+            running = stop_first(env) > 0
             intent = state.get("in_flight")
             print(json.dumps({"preempt": state["id"], "plan": undo_plan(state, running), "in_flight": intent}), flush=True)
             state["preempted"] = True

@@ -276,8 +276,15 @@ impl Pc for WinPc {
         procs::notify(self, audience, title, body)
     }
 
-    fn engine_hil_signal(&mut self, input: &str, dbfs: f64, ttl_s: f64, card_tx: &[u16]) -> R<()> {
-        engine::hil_signal(self, input, dbfs, ttl_s, card_tx)
+    fn engine_hil_signal(
+        &mut self,
+        input: &str,
+        dbfs: f64,
+        ttl_s: f64,
+        card_tx: &[u16],
+        listen: bool,
+    ) -> R<()> {
+        engine::hil_signal(self, input, dbfs, ttl_s, card_tx, listen)
     }
 
     fn engine_force_reopen(&mut self) -> R<()> {

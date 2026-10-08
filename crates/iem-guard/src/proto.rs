@@ -12,12 +12,14 @@ use serde::{Deserialize, Serialize};
 use crate::alarms::Alarm;
 use crate::plan::Mode;
 use crate::state::Switching;
+use crate::switch_log::LastSwitch;
 
 /// The guard pipe's name; the single-instance mutex is `Global\` + this.
 pub const NAME: &str = "iemmixer-guard";
 
-/// Largest frame body in bytes.
-pub const MAX_FRAME: usize = 64 * 1024;
+/// Largest frame body in bytes: a reply carries every kept alarm and the
+/// engine's two histograms (S7, #10): `the_largest_reply_fits_a_frame`.
+pub const MAX_FRAME: usize = 256 * 1024;
 
 /// The commit this exe was built from: CI builds every bundle with
 /// `GITHUB_SHA` (the bundle's SHA, as in the engine's `Hello.engine_build`),
@@ -59,6 +61,10 @@ pub enum Request {
         input: String,
         dbfs: f64,
         ttl_s: f64,
+        /// The listen probe (S7, #10): the engine's `HilTestSignal.listen`.
+        /// Additive: absent reads false, false is never written.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        listen: bool,
     },
     Report {
         sha: String,
@@ -130,6 +136,15 @@ pub struct Reply {
     /// absent from a guard older than it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guard_build: Option<String>,
+    /// The last switch that ended, with its steps timed and its in-ear
+    /// silence (S7); absent from an older guard and before the first switch,
+    /// none when this peer cannot read it (`switch_log::lenient`).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::switch_log::lenient"
+    )]
+    pub last_switch: Option<LastSwitch>,
 }
 
 /// The engine in a [`Reply`] (design §7: HIL v1 reads it through `iemmode
@@ -162,6 +177,20 @@ pub struct EngineStatus {
     pub loopback_samples: u64,
     /// The same round-trip in milliseconds (`loopback_samples` / 96 kHz).
     pub loopback_ms: f64,
+    /// The engine process the guard started or adopted (`GuardState.pids`):
+    /// the soak's "one pid" (S7 design note §4); null when unknown.
+    pub pid: Option<u32>,
+    /// S7, passed through from the engine's `Status` (design note §3): the
+    /// 1.5-period late counter (information), overruns, the longest callback,
+    /// and both histograms; an older engine's are 0 and absent.
+    pub late: u64,
+    pub overruns: u64,
+    pub process_max_us: f64,
+    pub hist_top_us: u32,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub interval_hist: Vec<(u32, u64)>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub process_hist: Vec<(u32, u64)>,
 }
 
 /// One of HIL's spare card outputs as the engine's `Status` reports it: its
@@ -215,7 +244,7 @@ pub enum FrameError {
     #[error("guard pipe i/o: {0}")]
     Io(#[from] io::Error),
     /// The announced or produced body exceeds [`MAX_FRAME`].
-    #[error("frame of {0} bytes exceeds the 64 KiB limit")]
+    #[error("frame of {0} bytes exceeds the 256 KiB limit")]
     TooLarge(usize),
     /// The peer closed the stream between frames.
     #[error("guard pipe closed")]
@@ -278,6 +307,29 @@ mod tests {
     use super::*;
     use crate::alarms::Alarms;
     use crate::plan::Step;
+    use crate::switch_log::{StepTime, SwitchOutcome};
+
+    /// A dev entry's record: its steps and its in-ear silence.
+    fn a_switch_record() -> LastSwitch {
+        let step = |step: Step, ms: u64| StepTime { step, ms };
+        LastSwitch::new(
+            &Switching {
+                from: Mode::Event,
+                to: Mode::Dev,
+                done: Vec::new(),
+                started: 1_790_000_000,
+            },
+            Mode::Dev,
+            SwitchOutcome::Done,
+            1_790_000_025,
+            vec![
+                step(Step::AppStop, 3000),
+                step(Step::ReaperSaveQuit, 8000),
+                step(Step::EngineStart, 700),
+                step(Step::EngineArm, 10_500),
+            ],
+        )
+    }
 
     fn every_request() -> Vec<Request> {
         vec![
@@ -306,6 +358,13 @@ mod tests {
                 input: "mic1".into(),
                 dbfs: -24.5,
                 ttl_s: 30.0,
+                listen: false,
+            },
+            Request::TestSignal {
+                input: "mic1".into(),
+                dbfs: -20.0,
+                ttl_s: 30.0,
+                listen: true,
             },
             Request::Report {
                 sha: "0123456789abcdef0123456789abcdef01234567".into(),
@@ -364,6 +423,14 @@ mod tests {
         assert_eq!(json(&Request::InjectFault), r#"{"cmd":"inject_fault"}"#);
         assert_eq!(json(&Request::InjectSeh), r#"{"cmd":"inject_seh"}"#);
         assert_eq!(json(&Request::InjectPark), r#"{"cmd":"inject_park"}"#);
+        // The listen probe (S7, #10): `listen` is read and written only when
+        // true, so an older iemmode's signal (no `listen`) stays a plain one.
+        for text in [
+            r#"{"cmd":"test_signal","input":"mic1","dbfs":-20.0,"ttl_s":30.0}"#,
+            r#"{"cmd":"test_signal","input":"mic1","dbfs":-20.0,"ttl_s":30.0,"listen":true}"#,
+        ] {
+            assert_eq!(json(&decode::<Request>(text.as_bytes()).unwrap()), text);
+        }
         assert_eq!(
             decode::<Request>(br#"{"cmd":"alarm_ack","id":3}"#).unwrap(),
             Request::AlarmAck { id: 3 }
@@ -402,12 +469,20 @@ mod tests {
             detail: "switching".into(),
             engine: Some(an_engine()),
             guard_build: Some("89abcdef0123456789abcdef0123456789abcdef".into()),
+            last_switch: Some(a_switch_record()),
         };
         let mut wire = Vec::new();
         write_frame(&mut wire, &reply).unwrap();
         assert_eq!(read_msg::<Reply, _>(&mut wire.as_slice()).unwrap(), reply);
-        // Older or newer peers: missing lists, texts, the engine and the
-        // guard's build default.
+        let v = serde_json::to_value(&reply).unwrap();
+        assert_eq!(v["last_switch"]["silence_ms"], 19_200);
+        assert_eq!(v["last_switch"]["outcome"], "done");
+        assert_eq!(
+            v["last_switch"]["steps"][1],
+            serde_json::json!({"step": "reaper_save_quit", "ms": 8000})
+        );
+        // Older or newer peers: missing lists, texts, the engine, the
+        // guard's build and the last switch default.
         assert_eq!(
             decode::<Reply>(br#"{"ok":true,"mode":"event","switching":null}"#).unwrap(),
             Reply {
@@ -418,8 +493,58 @@ mod tests {
                 detail: String::new(),
                 engine: None,
                 guard_build: None,
+                last_switch: None,
             }
         );
+    }
+
+    /// S7 (#10): a last switch this guard cannot read (another shape, a step
+    /// it does not have) leaves the reply readable, without the record; a
+    /// reply without one has no key at all.
+    #[test]
+    fn a_last_switch_this_peer_cannot_read_leaves_the_reply_readable() {
+        for body in [
+            &br#"{"ok":true,"mode":"dev","switching":null,"last_switch":{"from":7}}"#[..],
+            &br#"{"ok":true,"mode":"dev","switching":null,"last_switch":null}"#[..],
+        ] {
+            let r = decode::<Reply>(body).unwrap();
+            assert_eq!((r.ok, r.mode, r.last_switch), (true, Mode::Dev, None));
+        }
+        let mut newer = serde_json::to_value(Reply {
+            last_switch: Some(a_switch_record()),
+            ..a_state(Mode::Dev)
+        })
+        .unwrap();
+        newer["last_switch"]["steps"][0]["step"] = serde_json::json!("a_newer_step");
+        let r = decode::<Reply>(&serde_json::to_vec(&newer).unwrap()).unwrap();
+        assert_eq!(
+            (r.mode, r.alarms.len(), r.last_switch),
+            (Mode::Dev, 1, None)
+        );
+        let v = serde_json::to_value(a_state(Mode::Event)).unwrap();
+        assert_eq!(v.get("last_switch"), None);
+    }
+
+    /// S7 part 3 (#10): an unwind's record names the entry it unwinds over
+    /// the pipe; an older guard's record, without the key, reads whole, with
+    /// none.
+    #[test]
+    fn an_unwound_record_crosses_the_pipe_and_an_older_one_reads_without_it() {
+        let reply = Reply {
+            last_switch: Some(LastSwitch {
+                unwound: Some(Mode::Dev),
+                ..a_switch_record()
+            }),
+            ..a_state(Mode::Event)
+        };
+        let mut wire = Vec::new();
+        write_frame(&mut wire, &reply).unwrap();
+        assert_eq!(read_msg::<Reply, _>(&mut wire.as_slice()).unwrap(), reply);
+        let mut older = serde_json::to_value(&reply).unwrap();
+        let record = older["last_switch"].as_object_mut().unwrap();
+        assert_eq!(record.remove("unwound"), Some(serde_json::json!("dev")));
+        let r = decode::<Reply>(&serde_json::to_vec(&older).unwrap()).unwrap();
+        assert_eq!(r.last_switch, Some(a_switch_record()));
     }
 
     /// The guard's own build (#9 2026-09-28): after `activate` hands over
@@ -475,6 +600,13 @@ mod tests {
             ],
             loopback_samples: 0,
             loopback_ms: 0.0,
+            pid: Some(4242),
+            late: 5,
+            overruns: 1,
+            process_max_us: 61.5,
+            hist_top_us: 667,
+            interval_hist: vec![(333, 359_990), (400, 9)],
+            process_hist: vec![(60, 360_000)],
         }
     }
 
@@ -489,6 +621,7 @@ mod tests {
             detail: String::new(),
             engine: Some(an_engine()),
             guard_build: None,
+            last_switch: None,
         };
         let v = serde_json::to_value(&reply).unwrap();
         assert_eq!(
@@ -507,7 +640,20 @@ mod tests {
                 "hil": [{"tx": 94, "peak": 0.0316}, {"tx": 95, "peak": 0.0}],
                 "loopback_samples": 0,
                 "loopback_ms": 0.0,
+                "pid": 4242,
+                "late": 5,
+                "overruns": 1,
+                "process_max_us": 61.5,
+                "hist_top_us": 667,
+                "interval_hist": [[333, 359_990], [400, 9]],
+                "process_hist": [[60, 360_000]],
             })
+        );
+        assert_eq!(
+            decode::<Reply>(&serde_json::to_vec(&reply).unwrap())
+                .unwrap()
+                .engine,
+            Some(an_engine())
         );
         // No engine: no key at all, so replies without one stay as before.
         let idle = Reply {
@@ -532,6 +678,12 @@ mod tests {
         assert_eq!(fresh["last_exit"], serde_json::Value::Null);
         assert_eq!(fresh["spawns"], 0);
         assert_eq!(fresh["hil"], serde_json::json!([]));
+        // S7: no pid known is null; without histograms (an older engine) no
+        // histogram keys and the top 0.
+        assert_eq!(fresh["pid"], serde_json::Value::Null);
+        assert_eq!(fresh["hist_top_us"], 0);
+        assert_eq!(fresh.get("interval_hist"), None);
+        assert_eq!(fresh.get("process_hist"), None);
     }
 
     fn a_state(mode: Mode) -> Reply {
@@ -545,6 +697,7 @@ mod tests {
             detail: String::new(),
             engine: None,
             guard_build: None,
+            last_switch: None,
         }
     }
 
@@ -583,6 +736,7 @@ mod tests {
                 detail: String::new(),
                 engine: None,
                 guard_build: None,
+                last_switch: None,
             })
         );
     }
@@ -635,16 +789,113 @@ mod tests {
     }
 
     #[test]
-    fn the_frame_cap_is_64_kib() {
+    fn the_frame_cap_is_256_kib() {
         // The existing frame tests all measure against MAX_FRAME symbolically,
-        // so a mutated cap (e.g. 64 + 1024 = 1088) still passes them. Pin the
-        // concrete value, and accept a body between the two (2 KiB) that only
-        // the real 64 KiB cap admits.
-        assert_eq!(MAX_FRAME, 65_536);
-        let body = "x".repeat(2_048); // > 1088, well under 65_536
+        // so a mutated cap (e.g. 256 + 1024 = 1280) still passes them. Pin the
+        // concrete value, and accept a body above the old 64 KiB cap that
+        // only the real 256 KiB cap admits (S7, #10).
+        assert_eq!(MAX_FRAME, 262_144);
+        let body = "x".repeat(70_000);
         let mut wire = u32::try_from(body.len()).unwrap().to_le_bytes().to_vec();
         wire.extend_from_slice(body.as_bytes());
-        assert_eq!(read_frame(&mut wire.as_slice()).unwrap().len(), 2_048);
+        assert_eq!(read_frame(&mut wire.as_slice()).unwrap().len(), 70_000);
+    }
+
+    /// The guard's largest reply fits one frame (S7, #10): every kept alarm
+    /// and the detail at their character caps, a switch with every step,
+    /// and an engine with every spare output (8), both histograms as long as
+    /// `effects::engine::parse` reads them (1001 buckets each, the 1 ms cap)
+    /// and its counters at their largest, and an unwound last switch of
+    /// `2 × Step::ALL` steps (an unwind's record holds the entry's steps,
+    /// then its own; a plan runs each step once, the health read included,
+    /// S7 part 3). The texts go through `cut` as the
+    /// guard's do (it counts characters): once four-byte characters, the
+    /// longest a character is in UTF-8, once C0 control characters, which
+    /// JSON would escape to six bytes each and `cut` makes spaces (S7 Task 3
+    /// review). Each is above the old 64 KiB cap: the reason the cap is 256
+    /// KiB.
+    #[test]
+    fn the_largest_reply_fits_a_frame() {
+        use crate::daemon::{ALARM_CHARS, DETAIL_CHARS, cut};
+        use crate::effects::engine::{HIST_LEN_MAX, HIST_TOP_MAX};
+        let longest = Step::ALL
+            .into_iter()
+            .max_by_key(|s| serde_json::to_string(s).unwrap().len())
+            .unwrap();
+        let full = vec![(HIST_TOP_MAX, u64::MAX); HIST_LEN_MAX];
+        // An unwind's record: the entry's steps, then the unwind's; a plan
+        // runs a step at most once (S7 part 3).
+        let record = LastSwitch {
+            from: Mode::Event,
+            to: Mode::Event,
+            ended_in: Mode::Event,
+            outcome: SwitchOutcome::KeptServing,
+            started: u64::MAX,
+            ended: u64::MAX,
+            steps: vec![
+                StepTime {
+                    step: longest,
+                    ms: u64::MAX,
+                };
+                2 * Step::ALL.len()
+            ],
+            silence_ms: Some(u64::MAX),
+            unwound: Some(Mode::Live),
+        };
+        for chars in ["\u{1F3A7}", "\u{0}\u{1f}"] {
+            let text = |n: usize| cut(&chars.repeat(n), n);
+            let mut alarms = Alarms::default();
+            for _ in 0..Alarms::KEEP {
+                alarms.raise(u64::MAX, Some(longest), text(ALARM_CHARS), true);
+            }
+            let reply = Reply {
+                ok: false,
+                mode: Mode::Live,
+                switching: Some(Switching {
+                    from: Mode::Live,
+                    to: Mode::Event,
+                    done: Step::ALL.to_vec(),
+                    started: u64::MAX,
+                }),
+                alarms: alarms.all().to_vec(),
+                detail: text(DETAIL_CHARS),
+                engine: Some(EngineStatus {
+                    frames: u32::MAX,
+                    callbacks: u64::MAX,
+                    missed: u64::MAX,
+                    resets: u64::MAX,
+                    spawns: u64::MAX,
+                    last_exit: Some(i32::MIN),
+                    hil: vec![
+                        HilOut {
+                            tx: u16::MAX,
+                            peak: 0.0316,
+                        };
+                        8
+                    ],
+                    loopback_samples: u64::MAX,
+                    loopback_ms: 333.25,
+                    pid: Some(u32::MAX),
+                    late: u64::MAX,
+                    overruns: u64::MAX,
+                    process_max_us: 61.5,
+                    hist_top_us: u32::MAX,
+                    interval_hist: full.clone(),
+                    process_hist: full.clone(),
+                    ..an_engine()
+                }),
+                guard_build: Some(GUARD_BUILD.into()),
+                last_switch: Some(record.clone()),
+            };
+            let mut wire = Vec::new();
+            write_frame(&mut wire, &reply).unwrap_or_else(|e| panic!("{chars:?}: {e}"));
+            let body = wire.len() - 4;
+            assert!(
+                body > 64 * 1024,
+                "{chars:?}: {body} bytes: the old cap would do"
+            );
+            assert_eq!(read_msg::<Reply, _>(&mut wire.as_slice()).unwrap(), reply);
+        }
     }
 
     #[test]
@@ -735,7 +986,7 @@ mod tests {
         assert_eq!(FrameError::Closed.to_string(), "guard pipe closed");
         assert_eq!(
             FrameError::TooLarge(7).to_string(),
-            "frame of 7 bytes exceeds the 64 KiB limit"
+            "frame of 7 bytes exceeds the 256 KiB limit"
         );
         assert_eq!(
             FrameError::Bad("x".into()).to_string(),

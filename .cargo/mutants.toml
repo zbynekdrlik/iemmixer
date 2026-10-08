@@ -83,6 +83,14 @@ exclude_globs = [
   # the session window, the detached hand-over) around the mutated
   # iem_guard::{cli, daemon, install, pipe}, which hold every decision.
   "crates/iem-guard/src/bin/**",
+  # The soak client's binary (S7): argv, env, CPU Set and file glue; the
+  # decisions are in lib.rs (parse_args, pin_from, credential, read_secret,
+  # engineer_token, origin, Gaps, write_summary), net.rs (run) and tally.rs,
+  # mutated; CI runs the binary (tests/fake_server/ checks its exit codes,
+  # the e2e job's soak step runs it against the real server). Its
+  # #[cfg(windows)] CPU Set call is not compiled on the Linux runners, so no
+  # test there could catch its mutant.
+  "crates/iem-soakclient/src/main.rs",
 ]
 
 exclude_re = [
@@ -93,7 +101,9 @@ exclude_re = [
   # WebSocket upgrades and per-connection loops (S5): socket reads, writes and
   # timers; the message logic is in tested functions (view::command,
   # updates_for, own_echo, addressed, alert_catchup, slot_of, TalkLock, the
-  # talkback decoder) and the E2E suites drive the sockets end to end.
+  # talkback decoder; the listen probe's asks_for_probe, feeds, Feeds::next
+  # and listen_ws/probe_gate.rs) and the E2E suites drive the sockets end to
+  # end.
   "iem-server/src/mixer_ws\\.rs.*\\b(ws_mixer|session|close_reload)\\b",
   "iem-server/src/listen_ws\\.rs.*\\b(ws_audio|session)\\b",
   "iem-server/src/talkback_ws\\.rs.*\\b(ws_talkback|session)\\b",
@@ -189,8 +199,8 @@ exclude_re = [
   "iem-engine/src/rt\\.rs.*replace > with >= in Processor::render_mixes",
   # Equivalent (S3). With the budget spent, `budget >= 0` also cuts the segment at the
   # waiting command; rendering in two pieces is bit-identical (block-size invariance tests).
-  # anchor 1219: if budget > 0
-  "iem-engine/src/rt\\.rs:1219:.*replace > with >= in <impl Process for Processor>::process",
+  # anchor 1252: if budget > 0
+  "iem-engine/src/rt\\.rs:1252:.*replace > with >= in <impl Process for Processor>::process",
   # The fade wait's `elapsed < FADE_WAIT`: differs only at the exact nanosecond.
   "iem-engine/src/control\\.rs.*replace < with <= in Control::fade_out",
   # Unobservable (S3): the `!` only decides whether "solos cleared" is logged.
@@ -257,8 +267,8 @@ exclude_re = [
   # `if !(1..=MAX_BLOCK).contains(&cfg.block)`, which is NOT equivalent and IS
   # killed by `run_refuses_a_bad_block_and_a_bad_site`, and `delete ! in
   # run_hil` is killed too — both must stay mutated.
-  # anchor 436: if !hil.is_empty() {
-  "iem-engine/src/engine\\.rs:436:.*delete ! in run$",
+  # anchor 452: if !hil.is_empty() {
+  "iem-engine/src/engine\\.rs:452:.*delete ! in run$",
   # Equivalent (S6): the DER length fold `(n << 8) | usize::from(b)` shifts the
   # accumulator left by 8, so its low 8 bits are always zero; OR-ing in a byte
   # (0..=255) there equals XOR-ing it, so `| b` and `^ b` are identical (like

@@ -39,10 +39,11 @@ def sha256(data: bytes) -> str:
 def make_zip(path: Path, *, sha: str = SHA, branch: str = "dev", run: int = RUN, drop: tuple[str, ...] = (),
              tamper: str | None = None, unlisted: str | None = None, rename: dict | None = None,
              manifest: dict | None = None, sums_extra: str = "", manifest_raw: bytes | None = None,
-             sums_raw: bytes | None = None) -> Path:
-    """A bundle zip shaped like the CI `bundle` job's (plan Task 12)."""
+             sums_raw: bytes | None = None, extra: dict[str, bytes] | None = None) -> Path:
+    """A bundle zip shaped like the CI `bundle` job's (plan Task 12); `extra`: more listed files."""
     files = {n: f"synthetic {n}".encode() for n in ip.BUNDLE_REQUIRED if n != "manifest.json"}
     files["tuning/state.ps1"] = b"synthetic tuning"
+    files.update(extra or {})
     doc = manifest if manifest is not None else {"sha": sha, "branch": branch, "version": "2.0.0-dev.9", "run": run}
     files["manifest.json"] = json.dumps(doc).encode() if manifest_raw is None else manifest_raw
     for name in drop:
@@ -70,7 +71,8 @@ class FakePc:
     arguments, flag mode) and module call, answers with scripted replies, and
     ends a watched call on the flag the way `guarded` does."""
 
-    NATIVE = re.compile(r"\$x = ('(?:[^']|'')*') ; \$a = @\((.*?)\) ; \$r = ")
+    NATIVE = re.compile(r"\$x = ('(?:[^']|'')*') ; \$a = @\(((?:'(?:[^']|'')*'(?:, )?)*)\) ; .*?\$r = @\(& \$x @a")
+    WANT = re.compile(r"\$iemH -cne '([0-9a-f]{64})'")
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, list[str], str]] = []
@@ -80,6 +82,15 @@ class FakePc:
         self.scps: list[tuple[str, str, str]] = []
         self.replies: dict = {}  # args -> (exit, stdout[, stderr]) or a callable returning one
         self.module_result = "ok"
+        # A module script holding the text gets this result (or a callable's) instead: the
+        # elevated tuning folder's profile check after every activate (iempc_tuning) finds none,
+        # and the admin-only bin's install (#15) reads back the hash it was given.
+        self.texts: dict = {"profile.json": False, "$iemDst": self.bin_installed}
+        # An iemmode call's note (#15): the admin-only copy did not read back, PC_BIN ran.
+        self.bin_note = None
+
+    def bin_installed(self) -> str:
+        return self.WANT.findall(self.modules[-1][0])[-1]
 
     def ssh_ps(self, env, script, timeout, event):
         m = self.NATIVE.search(script)
@@ -91,10 +102,10 @@ class FakePc:
             self.native_scripts.append(script)
             reply = self.replies.get(tuple(args), (0, OK))
             code, out, err = (*(reply() if callable(reply) else reply), "")[:3]
-            doc = {"exit": code, "out": out, "err": err}
+            doc = {"exit": code, "out": out, "err": err, "note": self.bin_note if "$iemUse" in script else None}
         else:
             self.modules.append((script, event))
-            r = self.module_result
+            r = next((v for k, v in self.texts.items() if k in script), self.module_result)
             doc = {"ok": True, "r": r() if callable(r) else r}
         if event != "ignore" and ip.event_now():
             raise ip.EventNow()
@@ -147,6 +158,19 @@ class FakeGh:
 
     def named(self, *prefix: str) -> list[list[str]]:
         return [c for c in self.calls if c[:len(prefix)] == list(prefix)]
+
+
+class FakeClock:
+    """A monotonic clock that moves only when a fake reply waits (`sleep`)."""
+
+    def __init__(self) -> None:
+        self.t = 1024.0   # binary fractions below stay exact
+
+    def now(self) -> float:
+        return self.t
+
+    def sleep(self, seconds: float) -> None:
+        self.t += seconds
 
 
 class Base(unittest.TestCase):
@@ -341,6 +365,24 @@ class GuardedTests(Base):
 
 
 class ScriptTests(Base):
+    # #15, the last lane, item 2: the elevated session loads modules only from Windows
+    # PowerShell's own folders, pinned before its first command, and ssh starts
+    # powershell.exe by its full path.
+    PIN = ("$env:PSModulePath = [IO.Path]::Combine($PSHOME, 'Modules') + ';' + "
+           "[IO.Path]::Combine([Environment]::GetFolderPath('ProgramFiles'), 'WindowsPowerShell\\Modules')")
+
+    def test_every_script_pins_the_module_path_before_any_command(self) -> None:
+        for script, eap in ((ip.native_script("x.exe", ["a"], ("CHECK",)), "Continue"),
+                            (ip.module_script("Get-X", module="X:\\m.psm1", module_hex="cd" * 32, pre="P ; "), "Stop")):
+            self.assertEqual(script.count("$env:PSModulePath"), 1, script)
+            at = script.index(self.PIN)
+            self.assertEqual(script[:at], f"$ErrorActionPreference = '{eap}'\n$ProgressPreference = 'SilentlyContinue'\n")
+            self.assertTrue(script[at + len(self.PIN):].startswith(" ; try { "), script)
+
+    def test_ssh_starts_windows_powershell_by_its_full_path(self) -> None:
+        self.assertEqual(ip.ssh_cmd(ENV)[-1], "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe "
+                                              "-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command -")
+
     def test_the_program_and_each_argument_are_quoted(self) -> None:
         s = ip.native_script("X:\\root\\bin\\iemmode.exe", ["install", "X:\\it's\\a.zip"], ("CHECK",))
         self.assertEqual(s.splitlines()[0], "$ErrorActionPreference = 'Continue'")
@@ -364,11 +406,37 @@ class ScriptTests(Base):
             with self.assertRaises(ip.StepError, msg=bad):
                 ip.hash_check("X:\\z.zip", bad)
 
-    def test_a_module_is_imported_only_after_its_hash_check(self) -> None:
-        s = ip.module_script("Get-IemBootstrapState", module="X:\\m.psm1", module_hex="cd" * 32)
+    def test_a_module_is_imported_only_from_its_admin_only_stage(self) -> None:
+        """#15: the upload in the user's root is read once and checked; those
+        bytes go into <elevated root>\\bootstrap-stage (admin-only, read back),
+        are checked again there, and only that copy is imported."""
+        hexd = "cd" * 32
+        s = ip.module_script("Get-IemBootstrapState", module="X:\\run\\IemPc.psm1", module_hex=hexd)
         line = s.splitlines()[2]
-        self.assertLess(line.index("Get-FileHash -LiteralPath 'X:\\m.psm1'"), line.index("Import-Module 'X:\\m.psm1' -Force"))
-        self.assertLess(line.index("Import-Module"), line.index("$r = & { Get-IemBootstrapState }"))
+        order = ["[IO.File]::ReadAllBytes('X:\\run\\IemPc.psm1')", f"$iemH -cne '{hexd}'",
+                 "$iemRoot = (Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'iemmixer')",
+                 "$iemStage = Join-Path $iemRoot 'bootstrap-stage'", "& $iemDir $iemRoot", "& $iemDir $iemStage",
+                 "$iemMod = Join-Path $iemStage 'IemPc.psm1'", "[IO.File]::Delete($iemMod)",
+                 "[IO.File]::WriteAllBytes($iemMod, $iemB)", "& $iemOnly $iemMod",
+                 f"(Get-FileHash -LiteralPath $iemMod -Algorithm SHA256).Hash.ToLowerInvariant() -cne '{hexd}'",
+                 "Import-Module $iemMod -Force", "$r = & { Get-IemBootstrapState }"]
+        at = 0   # each step after the one before (the keep check reads the copy back too, #15 review)
+        for step in order:
+            at = line.index(step, at)
+        # The upload is read once (and named in the mismatch); nothing else reads or imports it.
+        self.assertEqual(line.count("'X:\\run\\IemPc.psm1'"), 2)
+        self.assertEqual(line.count("Import-Module"), 1)
+        # A folder: created with its security in one step, owner checked, the DACL set again, read back.
+        mk = line[line.index("$iemDir = {"):]
+        mk = [mk.index(t) for t in ("SetOwner((New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-544'))",
+                                    "SetAccessRuleProtection($true, $false)", "[IO.Directory]::CreateDirectory($d, $s)",
+                                    "& $iemOwn $d", "[IO.Directory]::SetAccessControl($d, $s)", "& $iemOnly $d")]
+        self.assertEqual(mk, sorted(mk))
+        # The CI runner's temp elevated root (Test-IemStage.ps1).
+        self.assertIn("$iemRoot = 'Y:\\er' ; ", ip.module_script("B", module="X:\\m.psm1", module_hex=hexd, elevated_root="Y:\\er"))
+        for bad in ("CD" * 32, "cd" * 31):
+            with self.assertRaises(ip.StepError, msg=bad):
+                ip.module_script("B", module="X:\\m.psm1", module_hex=bad)
         self.assertNotIn("finally", s)
         self.assertIn("} finally { F } ; ConvertTo-Json", ip.module_script("B", pre="P ; ", fin="F"))
         self.assertIn("try { P ; $r = & { B }", ip.module_script("B", pre="P ; ", fin="F"))
@@ -660,15 +728,21 @@ class EventTests(Base):
         self.assertEqual(self.pc.calls, [])
 
     def test_an_iemmode_call_never_starts_with_less_than_its_minimum(self) -> None:
+        # On a fake clock that only the replies move: the branch never depends on
+        # this process's own speed (a loaded run once ate the margin).
+        clock = FakeClock()
         ip.EVENT_BUDGET_S, ip.SWITCH_MIN_S = 1.0, 0.5
-        self.pc.replies[("event",)] = lambda: (time.sleep(0.6), (4, OK))[1]
-        code, _, err = self.run_main("event")
+        self.pc.replies[("event",)] = lambda: (clock.sleep(0.625), (4, OK))[1]
+        with mock.patch.object(ip, "event_clock", clock.now):
+            code, _, err = self.run_main("event")
         self.assertEqual((code, [c[1] for c in self.pc.calls]), (1, [["event"]]))
         self.assertIn("less than the 0.5 s an iemmode call gets: run 'iempc event' again", err)
         self.assertIn("alarm the owner now", err)
         self.pc.calls.clear()
-        self.pc.replies[("event",)] = lambda: (time.sleep(0.1), (4, OK))[1]
-        self.assertEqual(self.run_main("event")[0], 0)
+        # Exactly the minimum left is enough: 1.0 - 0.5 = 0.5.
+        self.pc.replies[("event",)] = lambda: (clock.sleep(0.5), (4, OK))[1]
+        with mock.patch.object(ip, "event_clock", clock.now):
+            self.assertEqual(self.run_main("event")[0], 0)
         self.assertEqual([c[1] for c in self.pc.calls], [["event"], ["event", "--direct"]])
 
     def test_an_unreachable_guard_falls_back_to_direct(self) -> None:
@@ -1017,7 +1091,13 @@ class InstallTests(Base):
         self.assertEqual(self.pc.scps[1], (str(ip.bundle_dir(SHA) / "iemmixer-guard.exe"),
                                            f"tester@pc.test:/X:/root/incoming/iemmixer-guard-{SHA}.exe", "finish"))
         self.assertEqual(self.pc.calls[0][0], f"iemmixer-guard-{SHA}.exe")
-        self.assertIn(ip.hash_check(guard, sha256(b"synthetic iemmixer-guard.exe")), self.pc.native_scripts[0])
+        # #15 (review): read once, checked, staged admin-only and run from the stage.
+        run, at = self.pc.native_scripts[0], 0
+        for step in (f"$iemB = [IO.File]::ReadAllBytes({ip.ps_quote(guard)})",
+                     f"$iemH -cne '{sha256(b'synthetic iemmixer-guard.exe')}'",
+                     "$iemMod = Join-Path $iemStage 'iemmixer-guard.exe'", "& $iemOnly $iemMod",
+                     "$x = $iemMod ; $r = @(& $x @a 2>&1)"):
+            at = run.index(step, at)
         self.assertEqual((docs[-1]["via"], docs[-1]["output"]), ("iemmixer-guard (first bundle)", "installed"))
 
     def test_an_open_spike_window_refuses_install_but_not_the_first_bundle(self) -> None:
@@ -1080,13 +1160,14 @@ class ActivateTests(Base):
         self.assertEqual(self.pc.timeouts, [ip.SWITCH_S] + [ip.STATUS_S] * 4)
         self.assertEqual({k: docs[0][k] for k in ("iemmode", "exit")}, {"iemmode": ["activate", SHA], "exit": 0})
         self.assertEqual(docs[0]["reply"]["detail"], f"activated {SHA}; the guard hands over to its new exe")
-        self.assertEqual(docs[1], {"handover": {"guard_build": SHA, "reads": 4, "mode": "event",
+        self.assertEqual(docs[1]["elevated_bin"], "failed")   # not fetched here; before the hand-over (#15)
+        self.assertEqual(docs[2], {"handover": {"guard_build": SHA, "reads": 4, "mode": "event",
                                                 "detail": "mode event; bundle " + SHA}})
 
     def test_a_guard_already_on_the_sha_is_read_once(self) -> None:
         self.statuses(self.status(SHA))
         code, docs, _ = self.run_main("activate", "--sha", SHA)
-        self.assertEqual((code, docs[-1]["handover"]["reads"]), (0, 1))
+        self.assertEqual((code, docs[2]["handover"]["reads"]), (0, 1))
         self.assertEqual(len(self.pc.calls), 2)
 
     def test_a_status_read_that_fails_is_read_again(self) -> None:
@@ -1096,7 +1177,7 @@ class ActivateTests(Base):
         self.statuses(ssh_cut, self.status(SHA))
         code, docs, err = self.run_main("activate", "--sha", SHA)
         self.assertEqual(code, 0, err)
-        self.assertEqual(docs[-1]["handover"]["reads"], 2)
+        self.assertEqual(docs[2]["handover"]["reads"], 2)
 
     def test_a_hand_over_that_never_names_the_sha_fails_within_its_bound(self) -> None:
         ip.HANDOVER_S = 0.2
@@ -1104,7 +1185,7 @@ class ActivateTests(Base):
         start = time.monotonic()
         code, docs, err = self.run_main("activate", "--sha", SHA)
         self.assertLess(time.monotonic() - start, 5)
-        self.assertEqual((code, len(docs)), (1, 1))
+        self.assertEqual((code, [next(iter(d)) for d in docs]), (1, ["iemmode", "elevated_bin"]))
         self.assertIn(f"the guard did not name build {SHA} within 0.2 s", err)
         self.assertIn(f"the last: exit 0, guard_build '{SHA2}'", err)
         self.assertIn("never force-end", err)
@@ -1206,14 +1287,21 @@ class OfflineActivateTests(Base):
                                          ("iemmixer-guard.exe", ["activate", SHA], "finish"),
                                          ("iemmode.exe", ["status"], "abandon")])
         self.assertEqual(self.reads(), ["abandon"] * 3)
+        # #15: the guard is read once from bundles\<sha>, checked by the fetch record, staged
+        # admin-only and run from the stage, never from the user's root.
         guard_run = self.pc.native_scripts[1]
-        self.assertIn(ip.hash_check(self.EXE, sha256(b"synthetic iemmixer-guard.exe")) + " ; $x = " + ip.ps_quote(self.EXE),
-                      guard_run)
+        at = 0
+        for step in (f"$iemB = [IO.File]::ReadAllBytes({ip.ps_quote(self.EXE)})",
+                     f"$iemH -cne '{sha256(b'synthetic iemmixer-guard.exe')}'", "$iemStage = Join-Path $iemRoot 'bootstrap-stage'",
+                     "$iemMod = Join-Path $iemStage 'iemmixer-guard.exe'", "& $iemOnly $iemMod", f"$x = {ip.ps_quote(self.EXE)}",
+                     "$x = $iemMod ; $r = @(& $x @a 2>&1)"):
+            at = guard_run.index(step, at)
+        self.assertEqual(guard_run.count(ip.ps_quote(self.EXE)), 3)   # read once, named in the mismatch, the fallback text
         self.assertEqual(self.pc.timeouts, [ip.STATUS_S, ip.INSTALL_S, ip.STATUS_S])
-        self.assertEqual([next(iter(d)) for d in docs], ["iemmode", "guard_stopped", "iemmixer-guard", "handover"])
+        self.assertEqual([next(iter(d)) for d in docs], ["iemmode", "guard_stopped", "iemmixer-guard", "elevated_bin", "handover"])
         self.assertEqual(docs[1], {"guard_stopped": {"reads": 2}})
         self.assertEqual((docs[2]["iemmixer-guard"], docs[2]["exit"]), (["activate", SHA], 0))
-        self.assertEqual(docs[3]["handover"]["guard_build"], SHA)
+        self.assertEqual(docs[4]["handover"]["guard_build"], SHA)
 
     def test_without_a_running_guard_nothing_is_quit(self) -> None:
         self.guards(0)
@@ -1409,8 +1497,10 @@ class BootstrapTests(Base):
                                          f"tester@pc.test:/X:/root/bootstrap/{SHA}/IemPc.psm1", "finish")])
         script, mode = self.pc.modules[-1]
         self.assertEqual(mode, "finish")
-        self.assertIn(ip.hash_check(self.MODULE, sha256(b"synthetic IemPc.psm1")) + f" ; Import-Module '{self.MODULE}' -Force ; "
-                      "$r = & { Grant-IemServiceRight -Service 'svc name' }", script)
+        self.assertIn(f"$iemB = [IO.File]::ReadAllBytes('{self.MODULE}')", script)
+        self.assertIn(f"$iemH -cne '{sha256(b'synthetic IemPc.psm1')}'", script)
+        self.assertIn("Import-Module $iemMod -Force ; $r = & { Grant-IemServiceRight -Service 'svc name' }", script)
+        self.assertNotIn(f"Import-Module '{self.MODULE}'", script)   # never from the run folder (#15)
         self.assertEqual(docs[-1], {"bootstrap": "Grant-IemServiceRight", "sha": SHA, "result": {"reaper": 1}})
 
     def test_a_read_only_step_is_refused_during_an_event(self) -> None:

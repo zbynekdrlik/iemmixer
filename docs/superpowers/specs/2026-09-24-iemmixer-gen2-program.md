@@ -32,7 +32,7 @@
   - **D2** zdieľanie počítača: okná otváraš ty správou (vyššie).
   - **D3** zvláštnosti REAPERa: mix presne ako dnes, 4 zvláštnosti opraviť.
   - **D4** prechod: 2 skúšky a 1 ostrá akcia na dočasnej adrese, potom súhlas zvukára a kapely, hlavná adresa a 8 týždňov možnosť návratu.
-  - D5 príde neskôr, pri príslušnej časti. D7 rozhodnuté: referenčné rendery robí REAPER na iem PC (záloha → render na kópii → obnova).
+  - D5 rozhodnuté 2026-10-08: žiadny Dante loopback (REAPER a iemmixer nikdy nespracujú ten istý živý vstup naraz, nahrávka by porovnávala dve rôzne chvíle); zvuk potvrdí slepý test s členom kapely. D7 rozhodnuté: referenčné rendery robí REAPER na iem PC (záloha → render na kópii → obnova).
 - **Pre kapelu sa nič nemení:** rovnaká adresa, rovnaké PINy, rovnaká appka v telefóne. Pri skúškach a pri prechode nemusia nič riešiť.
 
 ---
@@ -45,7 +45,7 @@
 
 **Non-goals:**
 - Nothing new before cutover: own-mic EQ, LUFS, channel reordering, hearing test, OSC trim sync, several talkers, absolute output ceiling, several member listen taps, Linux host, recording, auto-updater.
-- No Dante network change (owner rule; the only candidate exception is D5).
+- No Dante network change (owner rule; D5 decided (a), no exception).
 - No REAPER features; RPP serves only the importer, exporter and golden generator.
 - Deviations only per §3.4 and D3.
 
@@ -87,7 +87,7 @@ Numbers are tunable defaults unless they are parity requirements, tolerances (§
 
 **Licensing:** MIT OR Apache-2.0, except `iem-limiter-mga` (GPL-3.0-or-later, D1(a)); the engine links it, so its binary is GPL with licence text and source link. Server, UI, guard and tray are separate processes and stay permissive.
 
-**ASIO:** azo 0.2.1, vendored and pinned behind the backend trait. Fallbacks: patch the fork, our own IASIO host, then `asio-sys`.
+**ASIO:** azo 0.2.1, pinned exactly from crates.io (`=0.2.1` and the lockfile checksum, not copied into the repository) behind the backend trait; a newer azo only for a concrete reason and through HIL on the PC. Fallbacks: patch the fork, our own IASIO host, then `asio-sys`.
 
 ### 2.3 IPC and trust
 
@@ -176,7 +176,7 @@ Proof codes: **M** mock E2E, **L** live E2E/HIL, **S** server tests, **E** engin
 
 ### 3.3 Audio behaviour
 
-- **A1** Audio only on the 23 site TX channels, zeros elsewhere; sole exception: the D5(b) loopback pair during a `dev` test signal.
+- **A1** Audio only on the 23 site TX channels, zeros elsewhere (D5 decided (a): no loopback pair).
 - **A2** Mono inputs: L = R = x at unity, no input pan law (O, Method B).
 - **A3** Input mute zeroes every tap incl. pre-fader sends; on `ENG_MIC` it also silences talkback (G,O).
 - **A4** With processing on: trim → EQ → (`ENG_MIC` only) `+= 0.379934·talkback` (≈ −8.4 dB), before the mute gate (E,G).
@@ -335,7 +335,7 @@ Proof codes: **M** mock E2E, **L** live E2E/HIL, **S** server tests, **E** engin
 | S5 | Server and UI on the engine: Opus, taps, browser limiter, talk bind, handshake, `notify`, engineer-page login-failure counters, band-activity banner (removed: #38), "Back to REAPER" button (in the engineer's settings since #38), F29, F31, mock E2E | No | +2k/−3.6k, 0.8k UI, 4 wk | S3 |
 | S6 | ASIO backend, guard (modes, event signals, pin, alarms), bootstrap with alarm subscription, runner, `hil.yml`, F30 | Yes | ~1.5k + ops, 2–3 wk | S1a, S3, D2 |
 | S7 | Full HIL, live specs, ≥ 8 h PC soak, one manual 72 h NullRt soak, switch timing | Yes | ~1k + 3k TS, 2–3 wk | S5, S6 |
-| S8 | Shadow imports (≥ 2 weeks), D5 loopback, rollback drill, trials, sign-off, cutover, rollback window, decommissioning | Yes | ~0.5k; 3–4 wk + 8 wk | all; D3–D5 |
+| S8 | Shadow imports (≥ 2 weeks), rollback drill, trials, sign-off, cutover, rollback window, decommissioning | Yes | ~0.5k; 3–4 wk + 8 wk | all; D3–D5 |
 
 **Totals:** ~15k LoC Rust (0.8k of it UI) plus 3k TypeScript; ~22–25 weeks for one stream, then the 8-week rollback window. PC availability sets the calendar.
 
@@ -360,15 +360,15 @@ Proof codes: **M** mock E2E, **L** live E2E/HIL, **S** server tests, **E** engin
 
 ---
 
-## 8. Owner decisions (D1–D4 approved 2026-09-24, D7 2026-09-26; D5 pending)
+## 8. Owner decisions (D1–D4 approved 2026-09-24, D7 2026-09-26, D5 2026-10-08)
 
-D1–D4: the **bold** option was approved. D5 waits for S8; **bold** = recommended. (Former D6 and D8 are settled by P9 and the agent: PINs stay 4 digits; a renamed member's old history is imported archived and read-only.)
+D1–D4: the **bold** option was approved. D5: the owner chose (a) on 2026-10-08, not the recommended (b) (#11). (Former D6 and D8 are settled by P9 and the agent: PINs stay 4 digits; a renamed member's old history is imported archived and read-only.)
 
 - **D1 Licence** (blocks the first push): **(a) MIT OR Apache-2.0 with a GPL limiter crate (engine binary GPL).** (b) All GPL. (c) Permissive with a clean-room limiter: behavioural parity only, weak legal footing.
 - **D2 Sharing the PC — approved (owner model, 2026-09-24):** **the owner signals every event by message — "ide event" → `event`, "event skončil" → `dev`; the PC belongs to development in between; reboot = `event`; interlock and band-activity alarm kept; G2 procedural.** (Owner decision 2026-10-06, #38: neither the interlock nor the band-activity alarm remains; the owner's signal is the only gate.) (Superseded alternatives: 12 h owner-granted windows, signed grants, calendar-autonomous, unrestricted, owner-present only.)
 - **D3 REAPER quirks Q1–Q4** (blocks S8): **(a) exact mix math; fix all four (§3.4).** (b) Replicate any chosen item.
 - **D4 Cutover** (blocks S8): **(a) all gates green, 2 trial rehearsals and 1 service on the band's usual address, engineer and band sign-off, then iemmixer becomes the boot default; 8-week rollback window.** (b) 1 rehearsal, 12 weeks. (c) 4 rehearsals and 2 services, 6 weeks. The band's address never changes; trial mixes are discarded.
-- **D5 Dante self-loopback** (S8): (a) none. **(b) The owner subscribes a spare TX pair to a spare RX pair on the same card (the A1 exception).** (c) The same on a band pair.
+- **D5 Dante self-loopback** (S8; decided (a), 2026-10-08, #11: REAPER and iemmixer never hold the card at once, so a capture would compare two moments of different live mic and backing-track input; the band member's blind A/B is the acceptance): (a) none. **(b) The owner subscribes a spare TX pair to a spare RX pair on the same card (the A1 exception).** (c) The same on a band pair.
 - **D7 Golden renders — decided 2026-09-26:** REAPER is never installed on a dev box; renders run on the IEM PC's REAPER in dev time, with a full backup of REAPER's and the predecessor's state before and a verified restore after.
 
 ---

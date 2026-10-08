@@ -44,6 +44,7 @@ use crate::plan::{
 use crate::proto::{self, EngineStatus, Reply, Request};
 use crate::site::GuardSite;
 use crate::state::{self, GuardState, Switching};
+use crate::switch_log::{Laps, LastSwitch, SwitchOutcome};
 
 /// The engine's warm-up window before `Arm` (design §5.2 step 7).
 pub const READY_S: u32 = 10;
@@ -77,6 +78,16 @@ pub enum Outcome {
     KeptServing,
     /// The plan stopped; the owner gets the prepared ❓ (alarm flagged `owner_question`).
     NeedsOwner,
+}
+
+impl From<Outcome> for SwitchOutcome {
+    fn from(o: Outcome) -> Self {
+        match o {
+            Outcome::Done => Self::Done,
+            Outcome::KeptServing => Self::KeptServing,
+            Outcome::NeedsOwner => Self::NeedsOwner,
+        }
+    }
 }
 
 fn outcome_text(o: Option<Outcome>) -> &'static str {
@@ -113,9 +124,19 @@ pub fn mode_name(m: Mode) -> &'static str {
     }
 }
 
-/// The first `max` characters of `text`.
+/// The first `max` characters of `text`, each C0 control character but a
+/// line break and a tab as a space: JSON escapes those to six bytes each, so
+/// a reply of them could pass the frame (S7 Task 3 review, #10).
 pub fn cut(text: &str, max: usize) -> String {
-    text.chars().take(max).collect()
+    text.chars().take(max).map(plain).collect()
+}
+
+fn plain(c: char) -> char {
+    match c {
+        '\n' | '\t' => c,
+        '\0'..='\u{1f}' => ' ',
+        other => other,
+    }
 }
 
 /// The guard's own site settings the daemon decides with (`[guard]`).
@@ -203,6 +224,8 @@ pub struct View {
     pub session_done: bool,
     /// The running engine (`Reply.engine`), refreshed by the watch.
     pub engine: Option<EngineStatus>,
+    /// `GuardState.last_switch` (`Reply.last_switch`, S7).
+    pub last_switch: Option<LastSwitch>,
     /// Replies the daemon thread handed to the pipe's threads…
     pub replies_sent: u64,
     /// …and those the pipe's threads have written (or found their client
@@ -220,6 +243,7 @@ impl View {
             detail: cut(detail, DETAIL_CHARS),
             engine: self.engine.clone(),
             guard_build: Some(proto::GUARD_BUILD.to_owned()),
+            last_switch: self.last_switch.clone(),
         }
     }
 
@@ -508,6 +532,11 @@ pub struct Guard {
     spawns: u64,
     /// The exit code of the engine that ended last (the watch's).
     last_exit: Option<i32>,
+    /// The step clock of the switch running now (`LastSwitch.steps`, S7).
+    laps: Laps,
+    /// The entry the running switch unwinds (`back_to_event`): its target
+    /// and its `Switching.started`, so the unwind's record spans it.
+    unwinding: Option<(Mode, u64)>,
 }
 
 impl Guard {
@@ -548,6 +577,8 @@ impl Guard {
             seen: None,
             spawns: 0,
             last_exit: None,
+            laps: Laps::default(),
+            unwinding: None,
         };
         g.publish(|_| {});
         g
@@ -605,6 +636,7 @@ impl Guard {
         self.shared.update(|v| {
             v.mode = self.state.mode;
             v.switching.clone_from(&self.state.switching);
+            v.last_switch.clone_from(&self.state.last_switch);
             v.alarms = self.alarms.all().to_vec();
             v.status = status;
             v.engine = engine;
@@ -615,9 +647,10 @@ impl Guard {
     /// The running engine as `Reply.engine` shows it (design §7: HIL v1
     /// reads it through `iemmode status`); `None` while none runs.
     pub fn engine_status(&self) -> Option<EngineStatus> {
-        self.seen
-            .as_ref()
-            .map(|seen| crate::effects::engine::engine_status(seen, self.spawns, self.last_exit))
+        let pid = self.state.pids.engine.as_ref().map(|c| c.pid);
+        self.seen.as_ref().map(|seen| {
+            crate::effects::engine::engine_status(seen, self.spawns, self.last_exit, pid)
+        })
     }
 
     /// Looks at what the supervisor connection holds of the engine (no
@@ -687,6 +720,12 @@ impl Guard {
             done: Vec::new(),
             started: self.now(),
         });
+        // An unwind goes on with the entry's clock.
+        if self.unwinding.is_some() {
+            self.laps.resume(Instant::now());
+        } else {
+            self.laps.start(Instant::now());
+        }
         self.store();
         let cancel = self.cancel.clone();
         self.publish(|v| {
@@ -712,7 +751,8 @@ impl Guard {
     }
 
     fn finish(&mut self, pc: &mut dyn Pc, outcome: Outcome, mode: Mode) -> Outcome {
-        let from = self.state.switching.take().map(|s| s.from);
+        let sw = self.state.switching.take();
+        let from = sw.as_ref().map(|s| s.from);
         self.state.mode = mode;
         // A HIL job lives in dev only (an event plan without a runner has
         // no JobsCancel step).
@@ -720,6 +760,15 @@ impl Guard {
             self.state.job = None;
         }
         self.trial = false;
+        // The record of this switch (S7 design note §5), saved and replied
+        // from here on; an unwind's spans the entry it unwinds.
+        let entry = self.unwinding.take();
+        if let Some(s) = &sw {
+            let steps = self.laps.take();
+            let ended = self.now();
+            let record = LastSwitch::new(s, mode, outcome.into(), ended, steps);
+            self.state.last_switch = Some(record.unwinding(entry));
+        }
         info!(
             "switch ended in {}: {}",
             mode_name(mode),
@@ -768,6 +817,7 @@ impl Guard {
             detail: cut(&text, DETAIL_CHARS),
             engine: self.engine_status(),
             guard_build: Some(proto::GUARD_BUILD.to_owned()),
+            last_switch: self.state.last_switch.clone(),
         }
     }
 
@@ -864,13 +914,19 @@ fn switch(pc: &mut dyn Pc, g: &mut Guard, from: Mode, to: Mode, checks: bool) ->
             return back_to_event(pc, g, "pre-empted by event");
         }
         info!("step {step:?}");
-        match run_step(pc, g, step, to) {
+        let r = run_step(pc, g, step, to);
+        g.laps.lap(step, Instant::now());
+        match r {
             Ok(()) => g.done(pc, step),
             Err(StepError::Preempted) if to != Mode::Event => {
                 return back_to_event(pc, g, "pre-empted by event");
             }
             Err(e) => {
                 let (why, health, policy) = failure(pc, g, to, step, &e);
+                if health.is_some() {
+                    // The health read inserted after a failed engine stop.
+                    g.laps.lap(Step::EngineHealth, Instant::now());
+                }
                 match policy {
                     OnError::Unwind => {
                         // The rehearsal's re-entry stops for the owner,
@@ -921,9 +977,12 @@ fn may_end(g: &Guard, to: Mode) -> bool {
     to == Mode::Event || g.shared.end_unless_preempted()
 }
 
+/// The unwind of a failed or pre-empted dev or live entry: a switch to
+/// event whose record spans the entry (S7 part 3, `LastSwitch.unwound`).
 fn back_to_event(pc: &mut dyn Pc, g: &mut Guard, why: &str) -> Outcome {
     g.cancel.clear();
     g.info(format!("unwinding to event: {why}"));
+    g.unwinding = g.state.switching.as_ref().map(|s| (s.to, s.started));
     let now = g.state.mode;
     run_switch(pc, g, now, Mode::Event)
 }
@@ -1258,7 +1317,12 @@ pub fn handle(pc: &mut dyn Pc, g: &mut Guard, req: Request, seen: Generation) ->
         ),
         Request::Install { zip } => install_bundle(g, Path::new(&zip)),
         Request::Activate { sha } => activate(pc, g, &sha),
-        Request::TestSignal { input, dbfs, ttl_s } => test_signal(pc, g, &input, dbfs, ttl_s),
+        Request::TestSignal {
+            input,
+            dbfs,
+            ttl_s,
+            listen,
+        } => test_signal(pc, g, &input, dbfs, ttl_s, listen),
         Request::Report { sha, hil, detail } => report(g, &sha, &hil, &detail),
         Request::JobBegin { run } => job_begin(g, run),
         Request::JobEnd { run } => job_end(g, run),
@@ -1625,13 +1689,15 @@ fn restart_in_job(pc: &mut dyn Pc, g: &mut Guard) -> Result<(), String> {
 }
 
 /// The HIL test signal, card-masked to `[guard] hil_tx` (design §4), only
-/// inside a begun HIL job (design §7).
+/// inside a begun HIL job (design §7); `listen` adds the listen probe (S7,
+/// #10) behind the same gates.
 fn test_signal(
     pc: &mut dyn Pc,
     g: &mut Guard,
     input: &str,
     dbfs: f64,
     ttl_s: f64,
+    listen: bool,
 ) -> (bool, String) {
     if let Err(why) = g.need_dev("test-signal") {
         return (false, why);
@@ -1664,9 +1730,12 @@ fn test_signal(
         );
     }
     let tx = g.site.hil_tx.clone();
+    let probe = if listen { "; listen probe" } else { "" };
     outcome(
-        pc.engine_hil_signal(input, dbfs, ttl_s, &tx),
-        &format!("test signal on {input} at {dbfs} dBFS for {ttl_s} s on card outputs {tx:?}"),
+        pc.engine_hil_signal(input, dbfs, ttl_s, &tx, listen),
+        &format!(
+            "test signal on {input} at {dbfs} dBFS for {ttl_s} s on card outputs {tx:?}{probe}"
+        ),
     )
 }
 
@@ -2230,5 +2299,9 @@ pub fn direct_event<L>(pc: &mut dyn Pc, g: &mut Guard, lock: Option<L>, dry_run:
     g.reply(ok, &format!("direct: {detail}"))
 }
 
+#[cfg(test)]
+mod probe_tests;
+#[cfg(test)]
+mod record_tests;
 #[cfg(test)]
 mod tests;

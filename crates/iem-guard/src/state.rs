@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::bundle::{Pins, Record};
 use crate::plan::{Mode, Step};
+use crate::switch_log::LastSwitch;
 
 /// A switch in progress.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,6 +70,11 @@ pub struct GuardState {
     /// The `at` of the logon task's last result the guard took (G1): each
     /// run of it is taken once, also across guard restarts; a reset keeps it.
     pub logon_seen: Option<String>,
+    /// The last switch that ended (S7 design note §5); a reset keeps it. A
+    /// record this guard cannot read loads as none, never as an unreadable
+    /// state (`switch_log::lenient`).
+    #[serde(deserialize_with = "crate::switch_log::lenient")]
+    pub last_switch: Option<LastSwitch>,
 }
 
 /// Whether a starting guard must forget its saved mode: after a reboot, or
@@ -80,7 +86,8 @@ pub fn reset_to_event(st: &GuardState, boot_time: u64, reaper_or_app: bool, engi
 impl GuardState {
     /// The mode after [`reset_to_event`]: `event`, no switch in progress and
     /// no HIL job (`pref_held` and `logon_seen` stay: the next check reads
-    /// the preference again).
+    /// the preference again; `last_switch` stays until the next switch,
+    /// the start's checks included, ends).
     pub fn reset(&mut self) {
         self.mode = Mode::Event;
         self.switching = None;
@@ -139,6 +146,7 @@ pub fn load_json<T: DeserializeOwned + Default>(path: &Path) -> (T, Option<Strin
 mod tests {
     use super::*;
     use crate::bundle::Hil;
+    use crate::switch_log::{StepTime, SwitchOutcome};
 
     fn sample() -> GuardState {
         let mut bundles = BTreeMap::new();
@@ -180,6 +188,27 @@ mod tests {
                     .into(),
             ),
             logon_seen: Some("2026-09-28T06:00:00.1234567Z".into()),
+            last_switch: Some(LastSwitch::new(
+                &Switching {
+                    from: Mode::Event,
+                    to: Mode::Dev,
+                    done: Vec::new(),
+                    started: 1_790_000_150,
+                },
+                Mode::Dev,
+                SwitchOutcome::Done,
+                1_790_000_170,
+                vec![
+                    StepTime {
+                        step: Step::ReaperSaveQuit,
+                        ms: 8000,
+                    },
+                    StepTime {
+                        step: Step::EngineArm,
+                        ms: 10_500,
+                    },
+                ],
+            )),
         }
     }
 
@@ -392,5 +421,86 @@ mod tests {
         assert_eq!(st.pids, before.pids);
         assert_eq!(st.pref_held, before.pref_held);
         assert_eq!(st.logon_seen, before.logon_seen);
+    }
+
+    /// S7 (#10): the last switch is saved with the state, and a reset (a
+    /// reboot, or the band's system up) leaves it as it is; the start's
+    /// checks that follow a reset are a switch of their own and replace it
+    /// with their record when they end (`daemon::start`).
+    #[test]
+    fn the_last_switch_round_trips_and_a_reset_keeps_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("guard-state.json");
+        let mut st = sample();
+        assert!(st.last_switch.is_some());
+        st.save(&path, 1_790_000_300).unwrap();
+        let (back, err) = GuardState::load(&path);
+        assert_eq!(err, None);
+        assert_eq!(back.last_switch, st.last_switch);
+        st.reset();
+        assert_eq!(st.last_switch, sample().last_switch);
+    }
+
+    #[test]
+    fn an_older_guards_state_without_a_last_switch_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("guard-state.json");
+        fs::write(&path, br#"{"mode": "dev", "written_at": 7, "job": 42}"#).unwrap();
+        let (st, err) = GuardState::load(&path);
+        assert_eq!(err, None);
+        assert_eq!(
+            (st.mode, st.written_at, st.job, st.last_switch),
+            (Mode::Dev, 7, Some(42), None)
+        );
+    }
+
+    /// S7 part 3 (#10): an unwind's record names the entry it unwinds and
+    /// keeps it across a save; an older guard's record, without the key,
+    /// loads whole, with none.
+    #[test]
+    fn an_unwound_record_round_trips_and_an_older_one_loads_without_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("guard-state.json");
+        let mut st = sample();
+        st.last_switch = st.last_switch.map(|r| LastSwitch {
+            unwound: Some(Mode::Live),
+            ..r
+        });
+        st.save(&path, 1_790_000_300).unwrap();
+        let (back, err) = GuardState::load(&path);
+        assert_eq!(err, None);
+        assert_eq!(back.last_switch, st.last_switch);
+        let mut older = serde_json::to_value(&st).unwrap();
+        let record = older["last_switch"].as_object_mut().unwrap();
+        assert_eq!(record.remove("unwound"), Some(serde_json::json!("live")));
+        fs::write(&path, serde_json::to_vec(&older).unwrap()).unwrap();
+        let (back, err) = GuardState::load(&path);
+        assert_eq!(err, None);
+        assert_eq!(back.last_switch, sample().last_switch);
+    }
+
+    /// A record this guard cannot read (a newer guard's shape) is dropped:
+    /// the state loads, no alarm, nothing else is lost.
+    #[test]
+    fn a_last_switch_this_guard_cannot_read_is_dropped_not_the_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("guard-state.json");
+        for body in [
+            &br#"{"mode":"dev","last_switch":{"from":"dev"}}"#[..],
+            &br#"{"mode":"dev","last_switch":null}"#[..],
+            &br#"{"mode":"dev","last_switch":"later"}"#[..],
+        ] {
+            fs::write(&path, body).unwrap();
+            let (st, err) = GuardState::load(&path);
+            assert_eq!(err, None, "{body:?}");
+            assert_eq!(
+                st,
+                GuardState {
+                    mode: Mode::Dev,
+                    ..GuardState::default()
+                },
+                "{body:?}"
+            );
+        }
     }
 }

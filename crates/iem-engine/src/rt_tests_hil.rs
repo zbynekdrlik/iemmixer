@@ -91,7 +91,7 @@ fn discontinuity_restarts_the_fade_in() {
 
 /// HIL's spare outputs of the test site (`[guard] hil_tx`), as `run` opens
 /// them under the test-signal flag.
-const SPARE: [u16; 2] = [94, 95];
+pub(super) const SPARE: [u16; 2] = [94, 95];
 /// The D5(b) loopback round-trip (S6 test 5): the HIL sine leaves on the
 /// spare outputs; a synthetic loopback returns it on the spare inputs one
 /// block later; the probe measures exactly that delay, and it clears when a
@@ -117,6 +117,7 @@ fn the_loopback_round_trip_is_measured() {
             dbfs: -30.0,
             ttl_s: 0.1,
             card_tx: SPARE.to_vec(),
+            listen: false,
         },
     );
     const N: usize = 256;
@@ -155,6 +156,7 @@ fn the_loopback_round_trip_is_measured() {
             dbfs: -30.0,
             ttl_s: 0.1,
             card_tx: SPARE.to_vec(),
+            listen: false,
         },
     );
     let silent = vec![0.0; ins * N];
@@ -193,6 +195,7 @@ fn a_busy_loopback_return_gives_no_round_trip() {
             dbfs: -30.0,
             ttl_s: 0.1,
             card_tx: SPARE.to_vec(),
+            listen: false,
         },
     );
     for _ in 0..8 {
@@ -260,13 +263,13 @@ fn the_loopback_probe_reads_each_spare_by_its_offset() {
     );
 }
 
-const TEST_FLAG: Flags = Flags {
+pub(super) const TEST_FLAG: Flags = Flags {
     test_signal: true,
     fault_injection: false,
 };
 
 /// Unity fade-in: the output at full level from the first sample.
-const AT_ONCE: Options = Options {
+pub(super) const AT_ONCE: Options = Options {
     fade_in_ms: 0.0,
     hold: false,
 };
@@ -303,6 +306,7 @@ fn hil_test_signal_reaches_only_the_masked_spare_outputs() {
         dbfs,
         ttl_s: 0.1,
         card_tx,
+        listen: false,
     };
     // Above the test-signal cap (−20 dBFS), or naming a mix's TX: refused.
     assert_eq!(
@@ -438,6 +442,7 @@ fn the_spare_outputs_are_silent_without_a_hil_signal_and_while_held() {
             dbfs: -30.0,
             ttl_s: 0.05,
             card_tx: SPARE.to_vec(),
+            listen: false,
         },
     );
     let out = r.run(&Planar::new(rxn, 6_400), 97);
@@ -501,6 +506,7 @@ fn a_hil_signal_leaves_the_listen_taps_silent() {
             dbfs: -30.0,
             ttl_s: 0.05,
             card_tx: SPARE.to_vec(),
+            listen: false,
         },
     );
     // mic2 carries 0.3 into both mixes; the sine replaces mic1 for the TTL
