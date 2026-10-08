@@ -385,6 +385,64 @@ test("a page action's undo goes back in its place, and at once from the guard", 
   expect(socket.changes().slice(before)).toEqual(["release"]);
 });
 
+test("a page action's undo that hangs holds back no older undo", async () => {
+  const { watch, status } = watchOn();
+  const { mixer, socket } = mixerOn();
+  const desk = deskOn(watch);
+  status("probe");
+  await expect(
+    desk.during(async () => {
+      desk.change(mixer, cmd("a"), cmd("undo a"));
+      // A release that never ends (a hung page).
+      desk.track("Talk", () => new Promise<void>(() => undefined));
+    }),
+  ).rejects.toThrow("a page action's undo did not end within 2 s");
+  expect(socket.changes()).toEqual(["a", "undo a"]);
+  expect(socket.barriers()).toBe(1);
+});
+
+test("the desk's end waits for a restore a timed-out step left running, and closes after it", async () => {
+  const { watch, status } = watchOn();
+  const desk = deskOn(watch);
+  const { mixer, socket } = mixerOn();
+  const open = LiveMixer.open;
+  try {
+    LiveMixer.open = async () => mixer;
+    await desk.open("engineer", "engineer");
+  } finally {
+    LiveMixer.open = open;
+  }
+  status("probe");
+  let releasing = false;
+  // The steps end; their restore waits on Talk's release (a slow page) with the card's undo taken.
+  const steps = desk
+    .during(async () => {
+      desk.change(mixer, cmd("card"), cmd("undo card"));
+      desk.track("Talk", () => {
+        releasing = true;
+        return new Promise<void>(() => undefined);
+      });
+    })
+    .then(
+      () => "ended",
+      (e: Error) => e.message,
+    );
+  await expect.poll(() => releasing).toBe(true);
+  // The test's timeout: the desk's end, while that restore still waits.
+  await desk.end();
+  // The card's undo went out, and reached the engine, before the close.
+  expect(socket.changes()).toEqual(["card", "undo card"]);
+  expect(socket.closedAfter).toBe(socket.sent.length);
+  expect(socket.sent[socket.sent.length - 1].cmd).toBe("GetLimiterParams");
+  expect(socket.sent.map((c) => String(c.tag ?? c.cmd))).toEqual([
+    "card",
+    "undo card",
+    "GetLimiterParams",
+    "GetLimiterParams",
+  ]);
+  expect(await steps).toBe("a page action's undo did not end within 2 s");
+});
+
 test("a step that needs more of the burst than is left is refused before it starts", async () => {
   const { watch, status } = watchOn();
   const { mixer, socket } = mixerOn();

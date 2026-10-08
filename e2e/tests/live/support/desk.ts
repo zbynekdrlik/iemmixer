@@ -35,6 +35,23 @@ const BURST_WAIT_MS = 180_000;
 const ANSWER_MS = 5_000;
 /** How often `during` looks whether its burst ended while changes are in place. */
 const GUARD_MS = 50;
+/** A page action's undo (Talk's release) may take this long; then the older undos go on without it. */
+const ACT_MS = 2_000;
+/** The desk's end waits this long at most for a restore already running (its acts, then a barrier per socket). */
+const RUNNING_RESTORE_MS = 15_000;
+
+/** `promise`, or a failure naming `what` after `ms`. */
+async function limited(promise: Promise<void>, ms: number, what: string): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what} did not end within ${ms / 1000} s`)), ms);
+  });
+  try {
+    await Promise.race([promise, late]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /** One UI command (`iem_core::ws::ClientMsg`). */
 export type Cmd = { cmd: string; [field: string]: unknown };
@@ -282,6 +299,8 @@ export class Desk {
   private readonly unsettled = new Set<LiveMixer>();
   /** The test is over: nothing more may change. */
   private ending = false;
+  /** The restore running now (or the last one): the desk's end waits for it before it closes. */
+  private restoring: Promise<void> = Promise.resolve();
 
   /**
    * `deadline` (ms, `Date.now()` time): when `during` must have found its
@@ -294,9 +313,9 @@ export class Desk {
     private readonly deadline: number | null = null,
   ) {}
 
-  /** The deadline for a test of `timeoutMs` (0: none) whose desk is made now. */
-  static deadline(timeoutMs: number): number | null {
-    return timeoutMs > 0 ? Date.now() + timeoutMs - AFTER_BURST_MS : null;
+  /** The deadline for a test of `timeoutMs` (0: none) that started at `startedAt` (`Date.now()` time). */
+  static deadline(timeoutMs: number, startedAt = Date.now()): number | null {
+    return timeoutMs > 0 ? startedAt + timeoutMs - AFTER_BURST_MS : null;
   }
 
   /** Opens `page`'s socket with `who`'s token (`LiveMixer.open`), once per test; closed after it. */
@@ -450,10 +469,17 @@ export class Desk {
   /**
    * Puts back every change since `from` (default: all), newest first, waits
    * until the engine has them (and what the guard sent), and checks they
-   * landed inside the burst. A socket that broke cannot put its changes back:
-   * the first such failure is thrown after the others went back.
+   * landed inside the burst. A page action's undo gets `ACT_MS`, then the
+   * older undos go on without it. A socket that broke cannot put its changes
+   * back: the first such failure is thrown after the others went back.
    */
-  async restore(from = 0): Promise<void> {
+  restore(from = 0): Promise<void> {
+    const run = this.restoreNow(from);
+    this.restoring = run.catch(() => undefined);
+    return run;
+  }
+
+  private async restoreNow(from: number): Promise<void> {
     const pending = this.undos.splice(from).reverse();
     const sent = new Set<LiveMixer>(this.unsettled);
     this.unsettled.clear();
@@ -461,7 +487,7 @@ export class Desk {
     for (const undo of pending) {
       if ("act" in undo) {
         try {
-          await undo.act();
+          await limited(undo.act(), ACT_MS, "a page action's undo");
         } catch (e) {
           failure ??= e;
         }
@@ -488,18 +514,24 @@ export class Desk {
   }
 
   /**
-   * The test is over: nothing more may change; what a timed-out body left
-   * goes back; every socket's commands are in the engine before it closes
-   * (the server drops a closed socket's queued ones); a socket the server
-   * closed fails the test.
+   * The test is over: nothing more may change; a restore a timed-out body
+   * left running ends first (it holds undos already taken), then what the
+   * body left goes back; every socket's commands are in the engine before it
+   * closes (the server drops a closed socket's queued ones); a socket the
+   * server closed fails the test.
    */
   async end(): Promise<void> {
     this.ending = true;
     let failure: unknown = null;
     try {
-      await this.restore();
+      await limited(this.restoring, RUNNING_RESTORE_MS, "the restore running at the test's end");
     } catch (e) {
       failure = e;
+    }
+    try {
+      await this.restore();
+    } catch (e) {
+      failure ??= e;
     }
     this.stop();
     for (const mixer of this.mixers.values()) {

@@ -18,10 +18,14 @@ type LiveFixtures = {
   relay: Relay;
   /** The runner's mixer sockets and their burst-only changes (`Desk`); put back, checked and closed after the test. */
   desk: Desk;
+  /** When the test's fixtures began (`Date.now()` time): automatic, so it comes before the watch and the desk. */
+  startedAt: number;
 };
 
 export const test = base.extend<LiveFixtures>({
   hil: [false, { option: true }],
+  // Playwright reads a fixture's dependencies from its first argument: none here.
+  startedAt: [async ({}, use) => use(Date.now()), { auto: true }],
   watch: async ({ request }, use) => {
     const watch = await BurstWatch.open(request);
     try {
@@ -37,9 +41,10 @@ export const test = base.extend<LiveFixtures>({
     await use(relay);
     relay.check();
   },
-  desk: async ({ request, watch }, use, testInfo) => {
-    // A burst must come early enough for the steps and restores to end before the test's timeout.
-    const desk = new Desk(request, watch, Desk.deadline(testInfo.timeout));
+  desk: async ({ request, watch, startedAt }, use, testInfo) => {
+    // A burst must come early enough for the steps and restores to end before the test's
+    // timeout, counted from the test's start (the watch's open and the page's took part of it).
+    const desk = new Desk(request, watch, Desk.deadline(testInfo.timeout, startedAt));
     try {
       await use(desk);
     } finally {

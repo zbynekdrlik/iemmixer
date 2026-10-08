@@ -36,6 +36,8 @@ test.use({
 const HOLD_MS = 8_000;
 /** The release comes this long before `HOLD_MS` at the latest, should a step overrun. */
 const HOLD_MARGIN_MS = 200;
+/** After the release, the button shows Talk again within this long. */
+const BUTTON_MS = 1_000;
 /** Talk goes live (the server granted the lock) within this long of the press, … */
 const LIVE_MS = 1_500;
 /**
@@ -109,16 +111,19 @@ function encodedFrames(page: Page): Promise<number> {
  * `START_MS` (`body` gets when it came). Released when `body` ends or fails,
  * by a timer before `HOLD_MS` should a step overrun (`capped`), and by the
  * desk should the burst end first or the test time out (the release is the
- * press's undo). The page needs `TALK_INIT`.
+ * press's undo). `afterMs`: what the caller still does in the burst after
+ * the release, counted in the time the press needs. The page needs
+ * `TALK_INIT`.
  */
 async function holdTalk<T>(
   page: Page,
   desk: Desk,
+  afterMs: number,
   body: (t: { pressedAt: number; startedAt: number }) => Promise<T>,
 ): Promise<Hold<T>> {
   const talk = page.locator(".toolbar-btn-talk");
   await talk.hover({ timeout: desk.bound(5_000) });
-  desk.need(HOLD_MS + RESTORE_MS, "Talk");
+  desk.need(HOLD_MS + BUTTON_MS + afterMs + RESTORE_MS, "Talk");
   // One release for every caller (the step, the timer, the desk): each waits for the same.
   let held = false;
   let releasing: Promise<void> = Promise.resolve();
@@ -158,7 +163,7 @@ async function holdTalk<T>(
     await up();
   }
   const releasedAt = Date.now();
-  await expect(talk).toHaveText("🎤 Talk");
+  await expect(talk).toHaveText("🎤 Talk", { timeout: desk.bound(BUTTON_MS) });
   expect(releasedAt - pressedAt, "Talk held at most 8 s").toBeLessThanOrEqual(HOLD_MS);
   // The cap's release came inside the steps: what they read may hold the release.
   expect(capped, "the steps ended before the hold's cap released Talk").toBe(false);
@@ -207,7 +212,7 @@ test.describe("talkback on the real PC (S7)", () => {
 
     const series = await desk.during(async () => {
       await cardAway(desk, engineer, talkbackInput);
-      const hold = await holdTalk(page, desk, async ({ startedAt }) => {
+      const hold = await holdTalk(page, desk, 0, async ({ startedAt }) => {
         // The capture processing settles; the window ends before the hold does.
         await pause(startedAt + SETTLE_MS - Date.now());
         desk.inside("the talkback window");
@@ -244,7 +249,8 @@ test.describe("talkback on the real PC (S7)", () => {
 
     const meter = await desk.during(async () => {
       await cardAway(desk, engineer, talkbackInput);
-      const hold = await holdTalk(page, desk, async ({ pressedAt, startedAt }) => {
+      // After the release: the frames from RELEASE_MS to 300 ms later.
+      const hold = await holdTalk(page, desk, RELEASE_MS + 300, async ({ pressedAt, startedAt }) => {
         // Half a second for the first frames to reach the engine's meter,
         // then 50 frames (5 s) before the release's deadline.
         const from = startedAt + 500;
