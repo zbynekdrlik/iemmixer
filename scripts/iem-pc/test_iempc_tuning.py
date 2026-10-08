@@ -302,6 +302,21 @@ class RefreshTests(TuningBase):
         self.assertEqual(code, ip.PREEMPTED)
         self.assertEqual([c[1][0] for c in self.pc.calls], ["activate", "status", "event"])
 
+    def test_a_bundle_from_before_the_store_is_a_failed_refresh(self) -> None:
+        # #34 (review): activating a bundle from before the store still counts, but
+        # its modules never replace the installed ones: the refresh fails before
+        # anything of it reaches the PC, naming the missing member.
+        self.pc.texts["profile.json"] = True
+        shutil.rmtree(ip.bundle_dir(SHA))
+        self.gh.artifact = make_zip(self.tmp / "artifact-old" / f"iemmixer-{SHA}.zip",
+                                    extra={k: v for k, v in MODULES.items() if k != "tuning/IemTuningStore.psm1"})
+        self.fetched()
+        code, docs, err = self.run_main("activate", "--sha", SHA)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(docs[-1]["tuning_refresh"], "failed")
+        self.assertIn("tuning/IemTuningStore.psm1 is not a listed tuning file", docs[-1]["error"])
+        self.assertEqual((self.installs(), [s[1].rsplit("/", 1)[1] for s in self.pc.scps]), ([], [f"iemmode-{SHA}.exe"]))
+
     def test_an_unanswerable_profile_check_is_a_failed_refresh(self) -> None:
         self.pc.texts["profile.json"] = "ok"
         code, docs, err = self.run_main("activate", "--sha", SHA)

@@ -870,6 +870,15 @@ function Invoke-IemTuningApply { param([string]$ProfilePath, [int]$Tier) return 
     # none, so the verb runs (a newer IemTuning without its store fails its own import).
     Remove-Item -LiteralPath $tstore -Force
     Assert ((Invoke-IemTuningVerb -Verb 'state' -TuningDir $etuning) -ceq 'fake-state') 'tuning-imports-a-module-from-before-the-store'
+    # Anything else by the store's name is read back, a dangling link too (its
+    # target gone): refused, never followed.
+    $storeTarget = Join-Path $base 'store-target'
+    New-Item -ItemType Directory -Force -Path $storeTarget | Out-Null
+    New-Item -ItemType Junction -Path $tstore -Value $storeTarget | Out-Null
+    [IO.Directory]::Delete($storeTarget)
+    $e = ErrorOf { Invoke-IemTuningVerb -Verb 'state' -TuningDir $etuning }
+    Assert ($e -like '*tuning module refused*junction or a link*') "tuning-refuses-a-dangling-link-by-the-stores-name ($e)"
+    [IO.Directory]::Delete($tstore)
     Write-FakeTuning
     # The tuning folder itself: a rule that lets the user add files, then a user owner.
     $dsec = [IO.Directory]::GetAccessControl($etuning)
