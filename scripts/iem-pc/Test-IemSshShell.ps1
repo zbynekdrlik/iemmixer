@@ -220,13 +220,16 @@ try {
     # ---- a key that does not exist yet is made admin-only before any value is written ----
     $hklm.DeleteSubKeyTree($sub)
     $r = Set-IemSshShell @setArgs
-    $kacl = Get-Acl -LiteralPath $key
+    # Through the registry API: Windows PowerShell 5.1's Get-Acl -LiteralPath hands a registry
+    # key on as its bare provider path, which it then cannot find (PowerShell #13107).
+    $kk = $hklm.OpenSubKey($sub, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadSubTree, [System.Security.AccessControl.RegistryRights]::ReadPermissions)
+    try { $kacl = $kk.GetAccessControl() } finally { $kk.Close() }
     $userWrite = @($kacl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | Where-Object {
         $_.IdentityReference.Value -ne 'S-1-5-32-544' -and $_.IdentityReference.Value -ne 'S-1-5-18' -and ([int]$_.RegistryRights -band 0x500D0026) -ne 0 })
     $explicit = Sorted @($kacl.GetAccessRules($true, $false, [System.Security.Principal.SecurityIdentifier]) | ForEach-Object { '{0}={1}' -f $_.IdentityReference.Value, [int]$_.RegistryRights })
     Assert ($r.state -ceq 'set' -and (Read-Values) -ceq $ours -and $kacl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ceq 'S-1-5-32-544' -and
             $kacl.AreAccessRulesProtected -and $userWrite.Count -eq 0 -and
-            $explicit -ceq (Sorted @('S-1-5-32-544=983103', 'S-1-5-18=983103', 'S-1-5-32-545=131097'))) "set-creates-a-missing-key-admin-only-nothing-inherited ($($kacl.Sddl))"
+            $explicit -ceq (Sorted @('S-1-5-32-544=983103', 'S-1-5-18=983103', 'S-1-5-32-545=131097'))) "set-creates-a-missing-key-admin-only-nothing-inherited ($($kacl.GetSecurityDescriptorSddlForm('All')))"
     $u = Undo-IemSshShell @common
     Assert ($u.state -ceq 'restored' -and (Read-Values) -ceq $absent) "undo-after-a-created-key-deletes-the-values ($(Read-Values))"
     New-TestKey
