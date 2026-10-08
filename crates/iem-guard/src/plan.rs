@@ -255,17 +255,32 @@ pub enum OnError {
     Unwind,
     /// Event plan: alarm and go on with the next step.
     Continue,
-    /// Event plan: alarm and drop these later steps (they would act on a stale process).
-    Skip(&'static [Step]),
+    /// Event plan: alarm with the prepared ❓ and drop these later steps
+    /// (they would act on a stale process); the switch ends `needs_owner`,
+    /// never `done` (#10: a failed app stop leaves no app serving).
+    SkipAskOwner(&'static [Step]),
     /// Event plan: iemmixer keeps serving the band; alarm; the plan ends here.
     KeepServing,
     /// Event plan: alarm, the plan ends here, the agent sends the prepared ❓.
     StopAskOwner,
+    /// Event plan: alarm with the prepared ❓ and go on with the next step
+    /// (the band keeps what still works); the switch ends `needs_owner`,
+    /// never `done` (#10: a failed REAPER or app handover).
+    ContinueAskOwner,
 }
 
 /// What a failed step means. `health` is read only after a failed `EngineStop`.
 /// Every failure of a dev or live entry unwinds, its `PrefCheck` before the
-/// engine included; `on_pref_fail` is the event plan's rule only.
+/// engine included; `on_pref_fail` is the event plan's rule only. A failed
+/// REAPER handover (REAPER could not be made to run, or a check failed)
+/// asks the owner and goes on to the app, as it went on before #10, but the
+/// switch no longer ends `done` (2026-10-08: it did, in event without
+/// REAPER). An event switch that ends without the predecessor app serving
+/// is not done either (the coordinator's decision on #10, 2026-10-08:
+/// REAPER keeps playing the band's mixes, but the phones cannot change
+/// them): a failed app handover asks the owner and goes on; a failed app
+/// stop skips the app start (the old app may still run) and asks the owner,
+/// since the event plan stops only an app that does not serve.
 pub fn on_error(to: Mode, step: Step, health: Option<Health>, pref_fail: PrefFail) -> OnError {
     if to != Mode::Event {
         return OnError::Unwind;
@@ -280,7 +295,8 @@ pub fn on_error(to: Mode, step: Step, health: Option<Health>, pref_fail: PrefFai
             PrefFail::KeepReaperDown => OnError::StopAskOwner,
         },
         Step::HolderGone | Step::ReaperSaveQuit | Step::ReaperStart => OnError::StopAskOwner,
-        Step::AppStop => OnError::Skip(&[Step::AppStart]),
+        Step::ReaperHandover | Step::AppHandover => OnError::ContinueAskOwner,
+        Step::AppStop => OnError::SkipAskOwner(&[Step::AppStart]),
         _ => OnError::Continue,
     }
 }
@@ -1001,13 +1017,34 @@ mod tests {
         );
     }
 
+    /// A failed app stop skips the app start (the old app may still run),
+    /// and since #10 it asks the owner: the event plan stops only an app
+    /// that does not serve, so after the failure none serves and the phones
+    /// cannot change mixes (coordinator's decision, 2026-10-08).
     #[test]
-    fn a_failed_app_stop_skips_the_app_start() {
+    fn a_failed_app_stop_skips_the_app_start_and_asks_the_owner() {
         for pf in [PrefFail::StartReaperWithAlarm, PrefFail::KeepReaperDown] {
             assert_eq!(
                 on_error(Mode::Event, Step::AppStop, None, pf),
-                OnError::Skip(&[Step::AppStart])
+                OnError::SkipAskOwner(&[Step::AppStart])
             );
+        }
+    }
+
+    /// #10 (coordinator's decision, 2026-10-08): an event switch that ends
+    /// without the predecessor app serving is not done. A failed app
+    /// handover asks the owner and the plan goes on (the fingerprint);
+    /// REAPER keeps playing the band's mixes.
+    #[test]
+    fn a_failed_app_handover_asks_the_owner_and_goes_on() {
+        for pf in [PrefFail::StartReaperWithAlarm, PrefFail::KeepReaperDown] {
+            for h in [None, Some(Health::Dead)] {
+                assert_eq!(
+                    on_error(Mode::Event, Step::AppHandover, h, pf),
+                    OnError::ContinueAskOwner,
+                    "{pf:?} {h:?}"
+                );
+            }
         }
     }
 
@@ -1024,6 +1061,30 @@ mod tests {
         }
     }
 
+    /// #10 (2026-10-08): an event switch whose REAPER handover failed
+    /// (REAPER could not be made to run, or a check failed) never ends
+    /// `done`: the owner's prepared question, and the plan goes on to the
+    /// app as before (the band keeps what works). Into dev or live it
+    /// unwinds like every other step.
+    #[test]
+    fn a_failed_reaper_handover_asks_the_owner_and_goes_on() {
+        for pf in [PrefFail::StartReaperWithAlarm, PrefFail::KeepReaperDown] {
+            for h in [None, Some(Health::Dead), Some(Health::Healthy)] {
+                assert_eq!(
+                    on_error(Mode::Event, Step::ReaperHandover, h, pf),
+                    OnError::ContinueAskOwner,
+                    "{pf:?} {h:?}"
+                );
+            }
+            for to in [Mode::Dev, Mode::Live] {
+                assert_eq!(
+                    on_error(to, Step::ReaperHandover, None, pf),
+                    OnError::Unwind
+                );
+            }
+        }
+    }
+
     #[test]
     fn other_event_failures_alarm_and_go_on() {
         let special = [
@@ -1033,7 +1094,9 @@ mod tests {
             Step::HolderGone,
             Step::ReaperSaveQuit,
             Step::ReaperStart,
+            Step::ReaperHandover,
             Step::AppStop,
+            Step::AppHandover,
         ];
         for s in Step::ALL {
             if special.contains(&s) {

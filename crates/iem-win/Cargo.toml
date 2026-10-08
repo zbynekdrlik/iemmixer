@@ -16,6 +16,8 @@ test-helper = ["dep:tokio"]
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
+  # NtQueryInformationProcess: a process's command line (process.rs, #10).
+  "Wdk_System_Threading",
   "Win32_Foundation",
   "Win32_Graphics_Gdi",
   "Win32_NetworkManagement_IpHelper",

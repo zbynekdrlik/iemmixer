@@ -114,6 +114,58 @@ pub fn reaper_handover(f: &ReaperFacts) -> Result<Audio, Vec<String>> {
     })
 }
 
+/// REAPER's processes as the handover sees them before its checks (#10).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReaperProcs {
+    /// REAPER processes that run (and are not ending).
+    pub running: u32,
+    /// REAPER processes still ending: Windows Error Reporting reports their
+    /// crash, or the guard asked them to quit and they have not ended.
+    pub ending: u32,
+}
+
+/// What the handover does before its checks (#10, 2026-10-08: the event
+/// plan reads its facts once, so a REAPER it saw may have ended, or still
+/// be ending, by the time of the handover).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ensure {
+    /// A REAPER runs, or one was started (by this plan's `ReaperStart` or by
+    /// this handover) whose process may not show yet: the checks, whose
+    /// load poll waits for it.
+    Check,
+    /// A REAPER is still ending: wait for it to be gone, bounded by
+    /// `effects::reaper::CRASH_HOLD`, then look again.
+    AwaitEnd,
+    /// None runs and none was started: start one (the preference checked
+    /// first, I2; the start path refuses with an engine or another holder of
+    /// the driver module, I3), then look again.
+    Start,
+    /// Still ending after the wait: no REAPER is started next to it and
+    /// none is checked; the handover fails. On the PC only a crash Windows
+    /// Error Reporting still reports stays ending: after the wait the
+    /// guard's own quit request no longer counts (`Pc::reaper_await_end`),
+    /// so a REAPER that ignored it is checked like any other.
+    StillEnding,
+}
+
+/// `started`: this plan or this handover started REAPER; `waited`: the
+/// wait for an ending REAPER ran. A REAPER is started at most once and never
+/// next to one that is still ending.
+pub fn ensure_reaper(p: ReaperProcs, started: bool, waited: bool) -> Ensure {
+    if p.ending > 0 {
+        return if waited {
+            Ensure::StillEnding
+        } else {
+            Ensure::AwaitEnd
+        };
+    }
+    if p.running > 0 || started {
+        Ensure::Check
+    } else {
+        Ensure::Start
+    }
+}
+
 /// What the guard observed after posting the tray's Exit command (design §5.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AppExit {
@@ -510,5 +562,61 @@ mod tests {
         );
         // An unrecorded hash refuses too.
         assert!(app_binary("", &a).is_err());
+    }
+
+    fn procs(running: u32, ending: u32) -> ReaperProcs {
+        ReaperProcs { running, ending }
+    }
+
+    /// #10, 2026-10-08: the unwind's plan saw a REAPER that was crashing on
+    /// quit (Windows Error Reporting held it), so it planned no start; the
+    /// handover first waits for such a REAPER to be gone, once, whatever
+    /// else runs or was started.
+    #[test]
+    fn a_reaper_still_ending_is_waited_for_once() {
+        for running in 0..3 {
+            for started in [false, true] {
+                for ending in [1, 2] {
+                    assert_eq!(
+                        ensure_reaper(procs(running, ending), started, false),
+                        Ensure::AwaitEnd,
+                        "{running} {ending} {started}"
+                    );
+                    assert_eq!(
+                        ensure_reaper(procs(running, ending), started, true),
+                        Ensure::StillEnding,
+                        "{running} {ending} {started}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// With none running and none ending, REAPER is started, once: a start
+    /// of this plan (`ReaperStart`) or of this handover whose process does
+    /// not show yet is never followed by a second one.
+    #[test]
+    fn with_none_running_reaper_is_started_once() {
+        for waited in [false, true] {
+            assert_eq!(ensure_reaper(procs(0, 0), false, waited), Ensure::Start);
+            assert_eq!(ensure_reaper(procs(0, 0), true, waited), Ensure::Check);
+        }
+    }
+
+    /// A REAPER that runs (and is not ending) gets the handover's checks.
+    #[test]
+    fn a_running_reaper_is_checked() {
+        for running in [1, 2] {
+            for started in [false, true] {
+                for waited in [false, true] {
+                    assert_eq!(
+                        ensure_reaper(procs(running, 0), started, waited),
+                        Ensure::Check,
+                        "{running} {started} {waited}"
+                    );
+                }
+            }
+        }
+        assert_eq!(ReaperProcs::default(), procs(0, 0));
     }
 }

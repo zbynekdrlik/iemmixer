@@ -151,6 +151,20 @@ impl Laps {
     }
 }
 
+/// The reply's words for a switch that went on after steps asked the owner
+/// (#10; `outcome` stays `needs_owner`, the machine-readable field):
+/// `target` the switch's target, `now` the mode it ended in, `failed` each
+/// such step as "<Step> failed: <why>", in order. An entry whose unwind
+/// needed the owner says first that it was not entered.
+pub fn needs_owner_text(target: &str, now: &str, failed: &[String]) -> String {
+    let ended = format!("{now}: ended, needs the owner: {}", failed.join("; "));
+    if target == now {
+        ended
+    } else {
+        format!("{target}: not entered; {ended}")
+    }
+}
+
 /// `GuardState.last_switch` and `Reply.last_switch` as read: a record this
 /// guard cannot read is none, never an unreadable state or reply.
 pub fn lenient<'de, D: Deserializer<'de>>(d: D) -> Result<Option<LastSwitch>, D::Error> {
@@ -429,5 +443,26 @@ mod tests {
         assert_eq!(read(newer), None);
         let r = a_record();
         assert_eq!(read(serde_json::to_value(&r).unwrap()), Some(r));
+    }
+
+    /// #10: a switch that went on after steps asked the owner says it ended
+    /// and needs the owner, naming each failed step; an entry that unwound
+    /// says it was not entered first.
+    #[test]
+    fn a_switch_that_went_on_names_what_the_owner_must_see() {
+        let failed = [
+            "ReaperHandover failed: REAPER does not run".to_owned(),
+            "AppHandover failed: the app does not answer".to_owned(),
+        ];
+        assert_eq!(
+            needs_owner_text("event", "event", &failed),
+            "event: ended, needs the owner: ReaperHandover failed: REAPER does not run; \
+             AppHandover failed: the app does not answer"
+        );
+        assert_eq!(
+            needs_owner_text("dev", "event", &failed[..1]),
+            "dev: not entered; event: ended, needs the owner: ReaperHandover failed: \
+             REAPER does not run"
+        );
     }
 }
