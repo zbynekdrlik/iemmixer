@@ -59,6 +59,9 @@ pub(super) fn ensure(pc: &mut dyn Pc, g: &mut Guard, c: &Cancel) -> R<()> {
             }
         }
     }
+    // Not reached: `ensure_reaper` waits at most once and starts at most
+    // once, so the third look returns. A bound all the same, so a change
+    // there can never loop.
     Err(StepError::failed(format!(
         "REAPER's processes did not settle within {LOOKS} looks"
     )))
@@ -67,7 +70,11 @@ pub(super) fn ensure(pc: &mut dyn Pc, g: &mut Guard, c: &Cancel) -> R<()> {
 /// The plan's own order for a start: `PrefCheck` right before REAPER (I2:
 /// it never writes under a holder, and the REAPER that just ended no longer
 /// holds the card), its failure as `[guard] on_pref_fail` says, then
-/// `ReaperStart`'s path.
+/// `ReaperStart`'s path. Under `keep_reaper_down` a failed check fails the
+/// handover, which asks the owner and goes on to the app
+/// (`ContinueAskOwner`), where the plan's own failed `PrefCheck` stops
+/// before REAPER and the app (`StopAskOwner`); the site uses
+/// `start_reaper_with_alarm` (#9).
 fn start(pc: &mut dyn Pc, g: &mut Guard) -> R<()> {
     if let Err(e) = pref_step(pc, g, Mode::Event) {
         match on_error(Mode::Event, Step::PrefCheck, None, g.site.on_pref_fail) {

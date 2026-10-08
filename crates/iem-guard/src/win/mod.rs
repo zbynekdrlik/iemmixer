@@ -30,7 +30,6 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
 
-use iem_win::process::Handle;
 use iem_win::spawn::{self, Placement};
 use iem_win::window::{self, SessionEndWindow};
 use tracing::{info, warn};
@@ -65,7 +64,7 @@ pub struct WinPc {
     /// The REAPER this guard asked to quit (40004) and has not seen gone: a
     /// crash on quit Windows Error Reporting holds, or a pre-empted wait.
     /// The handover waits for it before it starts REAPER (#10).
-    quitting: Option<Handle>,
+    quitting: Option<reaper::Quitting>,
 }
 
 impl WinPc {

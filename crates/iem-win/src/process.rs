@@ -640,7 +640,7 @@ mod tests {
         let _ = child.wait();
         let line = line.unwrap();
         assert!(line.contains("-n 3 127.0.0.1"), "{line}");
-        // No process has this pid (pids are multiples of 4).
+        // No live process has this pid.
         assert!(command_line(u32::MAX - 2).is_err());
     }
 

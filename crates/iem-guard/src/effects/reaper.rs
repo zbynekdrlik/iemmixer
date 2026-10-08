@@ -88,6 +88,76 @@ pub const WER_IMAGE: &str = "WerFault.exe";
 /// the wait at once.
 pub const CRASH_HOLD: Duration = Duration::from_secs(90);
 
+/// REAPER is gone within this after its quit (40004); a crash Windows Error
+/// Reporting reports then gets [`CRASH_HOLD`] more.
+pub const QUIT_WAIT: Duration = Duration::from_secs(30);
+
+/// A REAPER the guard asked to quit `ago` counts as ending for the quit
+/// bound and the hold, no longer (#10): one that ignored the quit is then
+/// checked, or saved and quit, like any other, and only a crash Windows
+/// Error Reporting reports still makes it ending.
+pub fn asked_still_ending(ago: Duration) -> bool {
+    ago < QUIT_WAIT.saturating_add(CRASH_HOLD)
+}
+
+/// One REAPER process as the handover and the quit read it (#10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReaperState {
+    /// It runs (and is not ending).
+    Running,
+    /// The guard asked it to quit (within [`asked_still_ending`]), or
+    /// Windows Error Reporting reports its crash: it cannot answer a save,
+    /// a quit or the handover's checks; it is waited for.
+    Ending,
+    /// It has ended (a handle on it reads its exit code).
+    Gone,
+}
+
+/// `asked`: the guard asked it to quit and still counts it as ending;
+/// `wer`: Windows Error Reporting reports its crash; `ended`: its process
+/// has ended. An ended process is gone whatever else is true (a WerFault
+/// may outlive it by a moment).
+pub fn reaper_state(asked: bool, wer: bool, ended: bool) -> ReaperState {
+    if ended {
+        ReaperState::Gone
+    } else if asked || wer {
+        ReaperState::Ending
+    } else {
+        ReaperState::Running
+    }
+}
+
+/// What `ReaperSaveQuit` does (#10, review of the lane).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuitStep {
+    /// 40026, the save read back, 40004, the wait (and the crash hold).
+    SaveQuit,
+    /// The REAPER is already ending: no save and no quit (it cannot answer
+    /// them: a crashed REAPER has nothing left to save, and a quit the guard
+    /// asked for had its save verified then), only the wait for it to be
+    /// gone, bounded by [`CRASH_HOLD`].
+    AwaitEnd,
+    /// The REAPER this guard asked to quit has ended and no other is
+    /// listed: the quit is done (the event plan's restart after a
+    /// pre-empted dev entry).
+    Done,
+}
+
+/// `listed`: the state of the one REAPER the list shows ([`reaper_state`];
+/// several read as running, and the save then refuses them as before),
+/// `None` when none is; `asked_ended`: a REAPER this guard asked to quit
+/// has ended since. A REAPER that vanished without the guard's quit and
+/// without a crash report is saved and quit as before (the save fails), so
+/// a dev entry never goes on past a REAPER it did not see end.
+pub fn quit_step(listed: Option<ReaperState>, asked_ended: bool) -> QuitStep {
+    match listed {
+        Some(ReaperState::Ending) => QuitStep::AwaitEnd,
+        Some(ReaperState::Running) => QuitStep::SaveQuit,
+        Some(ReaperState::Gone) | None if asked_ended => QuitStep::Done,
+        Some(ReaperState::Gone) | None => QuitStep::SaveQuit,
+    }
+}
+
 /// Whether a WerFault command line (`WerFault.exe -u -p <pid> -s <n>`, or
 /// a process snapshot's `-pss -s <n> -p <pid> -ip <pid>`) reports a crash
 /// of `pid`: the word right after a `-p` (any case) is that pid.

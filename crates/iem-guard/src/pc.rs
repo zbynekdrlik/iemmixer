@@ -495,7 +495,9 @@ pub trait Pc {
     /// Windows Error Reporting reports its crash on quit, gone within
     /// `effects::reaper::CRASH_HOLD` more (#10); driver module unheld. A
     /// REAPER that has not ended when the step fails or is pre-empted stays
-    /// known as ending to [`Pc::reaper_procs`].
+    /// known as ending to [`Pc::reaper_procs`]. A REAPER already ending gets
+    /// no save and no quit, only the wait; the one the guard asked to quit
+    /// that has ended is a quit done (`effects::reaper::quit_step`).
     fn reaper_save_quit(&mut self, c: &Cancel) -> R<()>;
     /// A handle first, then the tray's Exit command, then observe (design
     /// §5.3); the verdict is `handover::app_exit`.

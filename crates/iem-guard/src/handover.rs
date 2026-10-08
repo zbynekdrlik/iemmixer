@@ -141,7 +141,10 @@ pub enum Ensure {
     /// the driver module, I3), then look again.
     Start,
     /// Still ending after the wait: no REAPER is started next to it and
-    /// none is checked; the handover fails.
+    /// none is checked; the handover fails. On the PC only a crash Windows
+    /// Error Reporting still reports stays ending: after the wait the
+    /// guard's own quit request no longer counts (`Pc::reaper_await_end`),
+    /// so a REAPER that ignored it is checked like any other.
     StillEnding,
 }
 
