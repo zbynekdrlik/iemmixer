@@ -899,7 +899,8 @@ fn an_event_unwind_does_not_recurse_when_a_step_is_preempted() {
 
 #[test]
 fn event_plan_failures_follow_the_policy() {
-    // A failed app stop skips the app start; the handover still runs.
+    // A failed app stop skips the app start; the handover still runs. No
+    // app serves then, so the owner is asked (#10).
     let (mut pc, mut g) = (
         FakePc::new(Facts {
             app_serves: false,
@@ -910,11 +911,12 @@ fn event_plan_failures_follow_the_policy() {
     pc.app_exit.exit_code = None;
     assert_eq!(
         run_switch(&mut pc, &mut g, Mode::Event, Mode::Event),
-        Outcome::Done
+        Outcome::NeedsOwner
     );
     assert!(pc.called(Call::AppStop) && !pc.called(Call::AppStart));
     assert!(pc.called(Call::AppAnswers) && pc.called(Call::Fingerprint));
     assert_eq!(texts(&g), ["AppStop: the app did not exit within 30 s"]);
+    assert!(g.alarms.last().unwrap().owner_question);
     // A REAPER handover that fails asks the owner and goes on to the app;
     // the switch never ends done (#10).
     let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Dev));

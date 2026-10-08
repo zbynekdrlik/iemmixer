@@ -430,4 +430,25 @@ mod tests {
         let r = a_record();
         assert_eq!(read(serde_json::to_value(&r).unwrap()), Some(r));
     }
+
+    /// #10: a switch that went on after steps asked the owner says it ended
+    /// and needs the owner, naming each failed step; an entry that unwound
+    /// says it was not entered first.
+    #[test]
+    fn a_switch_that_went_on_names_what_the_owner_must_see() {
+        let failed = [
+            "ReaperHandover failed: REAPER does not run".to_owned(),
+            "AppHandover failed: the app does not answer".to_owned(),
+        ];
+        assert_eq!(
+            needs_owner_text("event", "event", &failed),
+            "event: ended, needs the owner: ReaperHandover failed: REAPER does not run; \
+             AppHandover failed: the app does not answer"
+        );
+        assert_eq!(
+            needs_owner_text("dev", "event", &failed[..1]),
+            "dev: not entered; event: ended, needs the owner: ReaperHandover failed: \
+             REAPER does not run"
+        );
+    }
 }

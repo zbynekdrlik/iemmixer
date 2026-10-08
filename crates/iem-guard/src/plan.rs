@@ -1010,13 +1010,34 @@ mod tests {
         );
     }
 
+    /// A failed app stop skips the app start (the old app may still run),
+    /// and since #10 it asks the owner: the event plan stops only an app
+    /// that does not serve, so after the failure none serves and the phones
+    /// cannot change mixes (coordinator's decision, 2026-10-08).
     #[test]
-    fn a_failed_app_stop_skips_the_app_start() {
+    fn a_failed_app_stop_skips_the_app_start_and_asks_the_owner() {
         for pf in [PrefFail::StartReaperWithAlarm, PrefFail::KeepReaperDown] {
             assert_eq!(
                 on_error(Mode::Event, Step::AppStop, None, pf),
-                OnError::Skip(&[Step::AppStart])
+                OnError::SkipAskOwner(&[Step::AppStart])
             );
+        }
+    }
+
+    /// #10 (coordinator's decision, 2026-10-08): an event switch that ends
+    /// without the predecessor app serving is not done. A failed app
+    /// handover asks the owner and the plan goes on (the fingerprint);
+    /// REAPER keeps playing the band's mixes.
+    #[test]
+    fn a_failed_app_handover_asks_the_owner_and_goes_on() {
+        for pf in [PrefFail::StartReaperWithAlarm, PrefFail::KeepReaperDown] {
+            for h in [None, Some(Health::Dead)] {
+                assert_eq!(
+                    on_error(Mode::Event, Step::AppHandover, h, pf),
+                    OnError::ContinueAskOwner,
+                    "{pf:?} {h:?}"
+                );
+            }
         }
     }
 
@@ -1068,6 +1089,7 @@ mod tests {
             Step::ReaperStart,
             Step::ReaperHandover,
             Step::AppStop,
+            Step::AppHandover,
         ];
         for s in Step::ALL {
             if special.contains(&s) {

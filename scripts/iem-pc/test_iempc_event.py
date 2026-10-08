@@ -18,7 +18,8 @@ class EventVerdictTests(Base):
         `needs_owner`, never `done`; the guard answers ok false, iemmode exits 1,
         and so does iempc event, with the owner alarm (no --direct)."""
         reply = json.dumps({"ok": False, "mode": "event", "alarms": [],
-                            "detail": "event: stopped; the owner decides; the mode is event",
+                            "detail": "event: ended, needs the owner: ReaperHandover failed: REAPER "
+                                      "does not run",
                             "last_switch": {"from": "dev", "to": "event", "ended_in": "event",
                                             "outcome": "needs_owner"}})
         self.pc.replies[("event",)] = (1, reply)

@@ -4,9 +4,9 @@
 //! plan saw it and planned no start, its handover waited 120 s for a
 //! process that no longer ran, and the switch still ended `done` in event
 //! without REAPER). The handover now first makes sure a REAPER runs, and an
-//! event switch whose handover failed ends `needs_owner`. New daemon tests
-//! live here, since `daemon.rs` and `daemon/tests.rs` are over their size
-//! budget (#36).
+//! event switch whose REAPER or app handover failed ends `needs_owner`, its
+//! reply naming each failed step. New daemon tests live here, since
+//! `daemon.rs` and `daemon/tests.rs` are over their size budget (#36).
 
 use super::tests::{band_up, iemmixer_up};
 use super::*;
@@ -278,8 +278,9 @@ fn a_failed_reaper_handover_is_never_done() {
     assert!(!r.ok, "{r:?}");
     assert_eq!(crate::cli::exit_code(&r), 1);
     assert!(
-        r.detail
-            .starts_with("event: stopped; the owner decides; the mode is event"),
+        r.detail.starts_with(
+            "event: ended, needs the owner: ReaperHandover failed: REAPER does not run"
+        ),
         "{}",
         r.detail
     );
@@ -301,7 +302,131 @@ fn a_failed_reaper_handover_is_never_done() {
         (rec.outcome, rec.ended_in),
         (SwitchOutcome::NeedsOwner, Mode::Event)
     );
-    assert!(!g.shared.view().event_reply("routed").ok);
+    let routed = g.shared.view().event_reply("routed");
+    assert!(!routed.ok);
+    assert!(
+        routed.detail.starts_with(
+            "routed; event: ended, needs the owner: ReaperHandover failed: REAPER does not run"
+        ),
+        "{}",
+        routed.detail
+    );
+}
+
+/// The coordinator's decision on #10 (2026-10-08): an event switch that
+/// ends without the predecessor app serving is not done. REAPER keeps
+/// playing the band's mixes, but the phones cannot change them, so a
+/// failed app handover asks the owner; the plan goes on (the fingerprint).
+#[test]
+fn a_failed_app_handover_ends_the_switch_needs_owner_with_reaper_running() {
+    let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
+    pc.fail(Call::AppAnswers, "the app does not answer on port 80");
+    let seen = g.shared.generation();
+    let r = handle(&mut pc, &mut g, Request::Event { dry_run: false }, seen);
+    assert!(!r.ok, "{r:?}");
+    assert!(
+        r.detail.starts_with(
+            "event: ended, needs the owner: AppHandover failed: the app does not answer on \
+             port 80"
+        ),
+        "{}",
+        r.detail
+    );
+    assert_eq!(r.mode, Mode::Event);
+    assert!(pc.facts.reaper && pc.facts.reaper_holds_module);
+    assert!(pc.called(Call::Fingerprint));
+    assert_eq!(
+        texts(&g),
+        ["AppHandover: the app does not answer on port 80"]
+    );
+    let a = g.alarms.last().unwrap();
+    assert_eq!(a.step, Some(Step::AppHandover));
+    assert!(a.owner_question);
+    let rec = last(&g);
+    assert_eq!(
+        (rec.outcome, rec.ended_in),
+        (SwitchOutcome::NeedsOwner, Mode::Event)
+    );
+}
+
+/// A failed app stop leaves no app serving (the event plan stops only an
+/// app that does not serve, and skips the start after the failure): the
+/// switch ends `needs_owner`, the rest of the plan still runs.
+#[test]
+fn a_failed_app_stop_ends_the_switch_needs_owner() {
+    let (mut pc, mut g) = (
+        FakePc::new(Facts {
+            app_serves: false,
+            ..band_up()
+        }),
+        Guard::for_test(Mode::Event),
+    );
+    pc.app_exit.exit_code = None;
+    let seen = g.shared.generation();
+    let r = handle(&mut pc, &mut g, Request::Event { dry_run: false }, seen);
+    assert!(!r.ok, "{r:?}");
+    assert!(
+        r.detail.starts_with(
+            "event: ended, needs the owner: AppStop failed: the app did not exit within 30 s"
+        ),
+        "{}",
+        r.detail
+    );
+    assert!(!pc.called(Call::AppStart));
+    assert!(pc.called(Call::AppAnswers) && pc.called(Call::Fingerprint));
+    let a = g.alarms.last().unwrap();
+    assert_eq!(a.step, Some(Step::AppStop));
+    assert!(a.owner_question);
+}
+
+/// Every step that asked the owner while the plan went on is named, in
+/// order; an entry whose unwind needed the owner says it was not entered.
+#[test]
+fn the_reply_names_every_step_that_asked_the_owner() {
+    let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Event));
+    pc.reaper.heartbeat_advanced = false;
+    pc.fail(Call::AppAnswers, "the app does not answer");
+    let seen = g.shared.generation();
+    let r = handle(&mut pc, &mut g, Request::Event { dry_run: false }, seen);
+    assert!(
+        r.detail.starts_with(
+            "event: ended, needs the owner: ReaperHandover failed: the meter heartbeat does \
+             not advance; AppHandover failed: the app does not answer"
+        ),
+        "{}",
+        r.detail
+    );
+
+    let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
+    g.state.pins.current = Some(sha());
+    pc.fail(Call::ReaperSaveQuit, "REAPER did not quit within 30 s");
+    pc.fail(Call::ReaperFacts, "REAPER does not run");
+    let seen = g.shared.generation();
+    let r = handle(
+        &mut pc,
+        &mut g,
+        Request::Dev {
+            build: None,
+            dry_run: false,
+        },
+        seen,
+    );
+    assert!(!r.ok);
+    assert!(
+        r.detail.starts_with(
+            "dev: not entered; event: ended, needs the owner: ReaperHandover failed: REAPER \
+             does not run"
+        ),
+        "{}",
+        r.detail
+    );
+    // The next switch that needs nobody says done again.
+    let mut pc = FakePc::new(band_up());
+    let seen = g.shared.generation();
+    let r = handle(&mut pc, &mut g, Request::Event { dry_run: false }, seen);
+    assert!(r.ok, "{r:?}");
+    assert!(r.detail.starts_with("event: done"), "{}", r.detail);
+    assert!(g.shared.view().event_reply("routed").ok);
 }
 
 /// I2 inside the handover: the plan's check met the crashing REAPER on the
