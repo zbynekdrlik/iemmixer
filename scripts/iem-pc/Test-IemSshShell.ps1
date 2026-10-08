@@ -77,6 +77,12 @@ $ours = "String:$cmd ; String:/d /c ; String:/d"
 $absent = 'absent ; absent ; absent'
 $foreign = 'String:C:\Tools\othershell.exe ; ExpandString:-c %IEMTESTVAR% ; MultiString:-a|b c'
 
+function SidOf([string]$Name) {
+    # A task principal's UserId: Task Scheduler may give a name or the SID itself.
+    if ($Name -cmatch '^S-1-[0-9-]+$') { return $Name }
+    return (New-Object System.Security.Principal.NTAccount $Name).Translate([System.Security.Principal.SecurityIdentifier]).Value
+}
+
 function Get-UndoTask {
     $sch = Connect-IemScheduler
     return (Get-IemRegisteredTask -Scheduler $sch -Folder $folder -Name $taskName)
@@ -191,7 +197,7 @@ try {
     $t = Get-UndoTask
     Assert ($null -ne $t) 'set-arms-the-undo-task'
     $d = $t.Definition
-    Assert ((New-Object System.Security.Principal.NTAccount $d.Principal.UserId).Translate([System.Security.Principal.SecurityIdentifier]).Value -ceq 'S-1-5-18' -and
+    Assert ((SidOf ([string]$d.Principal.UserId)) -ceq 'S-1-5-18' -and
             [int]$d.Principal.LogonType -eq 5 -and [int]$d.Principal.RunLevel -eq 1) "undo-task-runs-as-system-highest ($($d.Principal.UserId), $($d.Principal.LogonType), $($d.Principal.RunLevel))"
     $tr = @($d.Triggers)
     $start = [datetime]$tr[0].StartBoundary
