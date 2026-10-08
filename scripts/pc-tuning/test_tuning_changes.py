@@ -21,6 +21,19 @@ import pc_change as pcc  # noqa: E402  (scripts/asio-spike, on sys.path through 
 from test_tuning_window import ENV  # noqa: E402  (fixtures only)
 
 
+class FakeClock:
+    """`pc_change`'s `time`: `time()` moves only through `sleep()`."""
+
+    def __init__(self, t: float) -> None:
+        self.t = t
+
+    def time(self) -> float:
+        return self.t
+
+    def sleep(self, seconds: float) -> None:
+        self.t += seconds
+
+
 class TuningChangeTests(unittest.TestCase):
     """F2 round 3, MAJOR, in the tuning window: enter, exit, apply and undo are
     PC changes with an intent (recorded under the lock before the call, cleared
@@ -148,11 +161,17 @@ class TuningChangeTests(unittest.TestCase):
         # Bash timeout) with its journal intent live; the preempt deferred its exit to
         # a late handler that never runs. Once the settle is over, the preempt exits
         # itself, alarms and clears the intent: no mode lever stays through the event.
+        # On a fake clock that only the waits move: the intent is live when the
+        # preempt reads it whatever this process's speed (a loaded run once took
+        # longer than the 0.3 s bound before the preempt, so the intent read as
+        # stale and the deferred-exit path never ran).
+        clock = FakeClock(time.time())
         st = tw.sw.load_state()
-        st.update(tuning_mode=True, in_flight={"step": "enter", "started": time.time(), "bound_s": 0.3})
+        st.update(tuning_mode=True, in_flight={"step": "enter", "started": clock.time(), "bound_s": 0.3})
         tw.sw.save_state(st)
         (self.dir / "EVENT-NOW").touch()
-        tw.sw.cmd_preempt(self.env)
+        with mock.patch.object(pcc, "time", clock):
+            tw.sw.cmd_preempt(self.env)
         self.assertEqual(self.events, ["Exit-IemTuningMode:start", "Exit-IemTuningMode:end"])
         st = tw.sw.load_state()
         self.assertEqual((st["closed"], st["tuning_mode"], st.get("in_flight")), (True, False, None))
