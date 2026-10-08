@@ -18,6 +18,7 @@ $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
 function Assert($cond, $what) { if (-not $cond) { throw "FAILED: $what" } ; Write-Host "ok  $what" }
 function ErrorOf([scriptblock]$b) { try { & $b; return '' } catch { return "$_" } }
+function Sorted($items) { return ((@($items) | ForEach-Object { "$_" } | Sort-Object) -join ',') }
 
 $id = [guid]::NewGuid().ToString('N').Substring(0, 8)
 $base = Join-Path ([IO.Path]::GetTempPath()) ('iem-sshshell-' + $id)
@@ -214,7 +215,7 @@ try {
     $wrong = $sums.Clone()
     $wrong['IemPc.psm1'] = '0' * 64
     $e = ErrorOf { Set-IemSshShell @common -ModuleSha256 $wrong }
-    Assert ($e -like '*IemPc.psm1*not the build*' -and (Read-Values) -eq $absent -and $null -eq (Get-UndoTask) -and -not (Test-Path -LiteralPath $prior)) "set-refuses-a-module-that-is-not-the-checked-build ($e)"
+    Assert ($e -like '*IemPc.psm1*not the build*' -and (Read-Values) -eq $absent -and $null -eq (Get-UndoTask) -and -not (Test-Path -LiteralPath $dir)) "set-refuses-a-module-that-is-not-the-checked-build-and-copies-nothing ($e)"
 
     # ---- a key that does not exist yet is made admin-only before any value is written ----
     $hklm.DeleteSubKeyTree($sub)
@@ -222,8 +223,10 @@ try {
     $kacl = Get-Acl -LiteralPath $key
     $userWrite = @($kacl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | Where-Object {
         $_.IdentityReference.Value -ne 'S-1-5-32-544' -and $_.IdentityReference.Value -ne 'S-1-5-18' -and ([int]$_.RegistryRights -band 0x500D0026) -ne 0 })
+    $explicit = Sorted @($kacl.GetAccessRules($true, $false, [System.Security.Principal.SecurityIdentifier]) | ForEach-Object { '{0}={1}' -f $_.IdentityReference.Value, [int]$_.RegistryRights })
     Assert ($r.state -ceq 'set' -and (Read-Values) -ceq $ours -and $kacl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ceq 'S-1-5-32-544' -and
-            $userWrite.Count -eq 0) "set-creates-a-missing-key-admin-only ($($kacl.Sddl))"
+            $kacl.AreAccessRulesProtected -and $userWrite.Count -eq 0 -and
+            $explicit -ceq (Sorted @('S-1-5-32-544=983103', 'S-1-5-18=983103', 'S-1-5-32-545=131097'))) "set-creates-a-missing-key-admin-only-nothing-inherited ($($kacl.Sddl))"
     $u = Undo-IemSshShell @common
     Assert ($u.state -ceq 'restored' -and (Read-Values) -ceq $absent) "undo-after-a-created-key-deletes-the-values ($(Read-Values))"
     New-TestKey
@@ -378,7 +381,21 @@ try {
     Assert ($said -like '*undo restored') "undo-task-logs-its-result ($said)"
     $r = Set-IemSshShell @setArgs
     Assert ($r.state -ceq 'set' -and $r.undo_log -like '*undo restored') "set-names-the-last-undo ($($r.undo_log))"
-    [void](Confirm-IemSshShell @common)
+
+    # ---- saved data not in its kind's form (binary hex with a line break): never written back;
+    # the task falls back to sshd's default and logs why ----
+    $j = [IO.File]::ReadAllText($prior) | ConvertFrom-Json
+    $j.values.DefaultShell = [pscustomobject]@{ kind = 'Binary'; data = "ab`n" }
+    [IO.File]::WriteAllText($prior, (ConvertTo-Json -InputObject $j -Depth 6), (New-Object System.Text.UTF8Encoding $false))
+    $lines = Get-LogLines
+    [void](Get-UndoTask).Run($null)
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    while (((Get-LogLines) -le $lines -or $null -ne (Get-UndoTask)) -and $clock.Elapsed.TotalSeconds -lt 120) { Start-Sleep -Milliseconds 500 }
+    $last = @([IO.File]::ReadAllLines($log) | Where-Object { $_.Trim() })[-1]
+    Assert ($last -like '*undo default: *DefaultShell is no value Set-IemRegRaw writes back*' -and (Read-Values) -ceq $absent -and
+            (Test-Path -LiteralPath $prior) -and $null -eq (Get-UndoTask)) "undo-task-falls-back-to-sshd-s-default-and-logs-why ($last; $(Read-Values))"
+    $e = ErrorOf { Set-IemSshShell @setArgs }
+    Assert ($e -like '*no value Set-IemRegRaw writes back*' -and (Read-Values) -ceq $absent) "set-refuses-saved-values-it-cannot-write-back ($e)"
 } finally {
     $sch = New-Object -ComObject 'Schedule.Service'
     $sch.Connect()
