@@ -61,8 +61,8 @@ pub fn hil_test_signal(input: &str, dbfs: f64, ttl_s: f64, card_tx: &[u16], list
         "ttl_s": ttl_s,
         "card_tx": card_tx,
     });
-    if listen {
-        cmd["listen"] = Value::Bool(true);
+    if listen && let Some(fields) = cmd.as_object_mut() {
+        fields.insert("listen".to_owned(), Value::Bool(true));
     }
     cmd
 }
