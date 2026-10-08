@@ -1577,6 +1577,23 @@ mod tests {
         assert!(!serves(&app(vec![]), None));
     }
 
+    /// The app handover's own check (#10): the app's one process owns
+    /// both ports. An iem-server that did not stop keeps them and answers
+    /// `/api/version` and `/api/members` itself, which the HTTP checks
+    /// alone took for the app.
+    #[test]
+    fn the_app_serves_only_while_its_one_process_owns_both_ports() {
+        assert!(app_serves(&[12], (Some(12), Some(12))));
+        assert!(!app_serves(&[12], (Some(14), Some(14))));
+        assert!(!app_serves(&[12], (Some(14), Some(12))));
+        assert!(!app_serves(&[12], (Some(12), Some(14))));
+        assert!(!app_serves(&[12], (None, Some(12))));
+        assert!(!app_serves(&[12], (Some(12), None)));
+        assert!(!app_serves(&[12], (None, None)));
+        assert!(!app_serves(&[], (Some(12), Some(12))));
+        assert!(!app_serves(&[12, 17], (Some(12), Some(12))));
+    }
+
     #[test]
     fn foreign_holders_are_all_but_reaper() {
         let h = vec![

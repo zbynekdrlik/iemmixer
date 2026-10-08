@@ -335,6 +335,9 @@ fn a_failed_app_handover_ends_the_switch_needs_owner_with_reaper_running() {
     assert_eq!(r.mode, Mode::Event);
     assert!(pc.facts.reaper && pc.facts.reaper_holds_module);
     assert!(pc.called(Call::Fingerprint));
+    // The plan ran to its end: the tuning drift is read as after any such
+    // switch.
+    assert!(pc.called(Call::TuningDrift));
     assert_eq!(
         texts(&g),
         ["AppHandover: the app does not answer on port 80"]
@@ -377,6 +380,22 @@ fn a_failed_app_stop_ends_the_switch_needs_owner() {
     let a = g.alarms.last().unwrap();
     assert_eq!(a.step, Some(Step::AppStop));
     assert!(a.owner_question);
+}
+
+/// A plan that stopped for the owner keeps its words, in the routed "ide
+/// event" reply too: no step went on after asking.
+#[test]
+fn a_stopped_plan_keeps_its_words_in_the_routed_reply() {
+    let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
+    pc.fail(Call::EngineStop, "no DriverReleased within 10 s");
+    pc.health(Health::Parked);
+    assert_eq!(
+        run_switch(&mut pc, &mut g, Mode::Dev, Mode::Event),
+        Outcome::NeedsOwner
+    );
+    let routed = g.shared.view().event_reply("routed");
+    assert!(!routed.ok);
+    assert_eq!(routed.detail, "routed; event: stopped; the owner decides");
 }
 
 /// Every step that asked the owner while the plan went on is named, in
