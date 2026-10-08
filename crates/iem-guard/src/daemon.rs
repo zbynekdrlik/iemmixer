@@ -78,7 +78,8 @@ pub enum Outcome {
     Done,
     /// "ide event" found a healthy engine that did not release: iemmixer keeps serving.
     KeptServing,
-    /// The plan stopped; the owner gets the prepared ❓ (alarm flagged `owner_question`).
+    /// The plan stopped, or went on after steps that asked the owner (#10);
+    /// the owner gets the prepared ❓ (alarm flagged `owner_question`).
     NeedsOwner,
 }
 
@@ -789,19 +790,12 @@ impl Guard {
             let record = LastSwitch::new(s, mode, outcome.into(), ended, steps);
             self.state.last_switch = Some(record.unwinding(entry));
         }
-        if self.owner_failed.is_empty() {
-            info!(
-                "switch ended in {}: {}",
-                mode_name(mode),
-                outcome_text(Some(outcome))
-            );
+        let how = if self.owner_failed.is_empty() {
+            outcome_text(Some(outcome)).to_owned()
         } else {
-            info!(
-                "switch ended in {}: needs the owner: {}",
-                mode_name(mode),
-                self.owner_failed.join("; ")
-            );
-        }
+            format!("needs the owner: {}", self.owner_failed.join("; "))
+        };
+        info!("switch ended in {}: {how}", mode_name(mode));
         self.store();
         let owner = self.owner_failed.clone();
         self.publish(|v| {
@@ -809,10 +803,11 @@ impl Guard {
             v.last = Some(outcome);
             v.last_owner = owner;
         });
-        // Tuning drift after every switch that ran. After any other change
+        // Tuning drift after every switch that ran to its end, one that went
+        // on after asking the owner included (#10). After any other change
         // of the mode (a plan that stopped for the owner) the watch reads it
         // at its next tick: nothing follows a stopped plan's last step.
-        if outcome == Outcome::Done {
+        if outcome == Outcome::Done || !self.owner_failed.is_empty() {
             self.drift(pc, Instant::now());
         } else if from != Some(mode) {
             self.last_drift = None;

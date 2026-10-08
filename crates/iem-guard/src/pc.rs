@@ -198,10 +198,7 @@ pub fn facts_from(p: &Procs, holders: Option<&[(u32, String)]>, ports: Option<Po
         None => (reaper, false),
     };
     let app_serves = match ports {
-        Some((http, https)) => match p.app.as_slice() {
-            [pid] => http == Some(*pid) && https == Some(*pid),
-            _ => false,
-        },
+        Some(ports) => app_serves(&p.app, ports),
         None => app,
     };
     Facts {
@@ -214,6 +211,17 @@ pub fn facts_from(p: &Procs, holders: Option<&[(u32, String)]>, ports: Option<Po
         reaper_holds_module,
         app_serves,
         other_module_holder,
+    }
+}
+
+/// The predecessor app serves the band: its one process owns both ports 80
+/// and 443. The plan's facts read it, and the app handover requires it
+/// (#10: an iem-server that did not stop keeps the ports and answers the
+/// app's HTTP checks itself).
+pub fn app_serves(app: &[u32], (http, https): Ports) -> bool {
+    match app {
+        [pid] => http == Some(*pid) && https == Some(*pid),
+        _ => false,
     }
 }
 
@@ -569,12 +577,13 @@ pub trait Pc {
     /// marks a REAPER as ending; a crash Windows Error Reporting still
     /// reports does.
     fn reaper_await_end(&mut self, c: &Cancel) -> R<()>;
-    /// ≤ 60 s for the track count (S7, #10: measured 6.0–6.3 s), ended at
-    /// once when REAPER's process has ended (#10); the meter bridge at most
-    /// once; the titles of REAPER's visible dialogs.
+    /// ≤ 60 s for the track count (S7, #10: the whole step measured
+    /// 6.0–6.3 s), ended at once when REAPER's process has ended (#10); the
+    /// meter bridge at most once; the titles of REAPER's visible dialogs.
     fn reaper_facts(&mut self, c: &Cancel) -> R<ReaperFacts>;
     fn app_start(&mut self) -> R<()>;
-    /// `/api/version`, the member count and the public host.
+    /// `/api/version`, the member count and the public host, and the app's
+    /// own process owns ports 80/443 ([`app_serves`], #10).
     fn app_answers(&mut self, c: &Cancel) -> R<()>;
     /// S1c's REAPER-mode fingerprint through the tuning task (`state`).
     fn fingerprint(&mut self) -> R<()>;

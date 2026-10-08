@@ -30,9 +30,11 @@ const METER_POLL: Duration = Duration::from_millis(250);
 const SILENT: Duration = Duration::from_secs(5);
 /// The project loads within this: 60 s since S7 (#10; the S6 design note's
 /// §5.2 step 7 and §11 set ≤ 120 s before the PC was measured).
-/// `reaper_handover` took 6.0–6.3 s over six runs on 2026-10-08 (three
-/// switch tests, the live → event, two event entries), so 60 s is about
-/// 10× the worst, inside spec §4.3's ≤ 90 s for the whole handover.
+/// The whole `reaper_handover` step took 6.0–6.3 s over six runs on
+/// 2026-10-08 (three switch tests, the live → event, two event entries),
+/// so 60 s is about 10× the worst. It bounds this poll only; the handover
+/// as a whole is checked against spec §4.3's ≤ 90 s by `iempc
+/// switch-test`.
 const LOAD: Duration = Duration::from_secs(60);
 /// The meter bridge's heartbeat moves within this after a trigger.
 const HEARTBEAT: Duration = Duration::from_secs(20);
