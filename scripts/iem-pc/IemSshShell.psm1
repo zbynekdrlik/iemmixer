@@ -224,13 +224,21 @@ function Test-IemShellKeyAcl {
     # KeyChange. The raw DACL is read, so a conditional (callback) entry counts
     # like any other; an entry of a type this cannot read is a difference.
     # Returns the differences. -Missing: a key that does not exist yet is none
-    # (Set creates it, then reads it back).
+    # (Set creates it, then reads it back). Read through the registry API in
+    # the 64-bit view sshd reads (New-IemShellKey's): Windows PowerShell 5.1's
+    # Get-Acl -LiteralPath hands a key on as its bare provider path and then
+    # cannot find it (PowerShell #13107; CI run 37741639195).
     param([Parameter(Mandatory)][string]$Key, [switch]$Missing)
-    if (-not (Test-Path -LiteralPath $Key)) {
-        if ($Missing) { return ,@() }
-        return ,@("$Key does not exist")
-    }
-    $acl = Get-Acl -LiteralPath $Key
+    $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
+    try {
+        $k = $base.OpenSubKey($Key.Substring('HKLM:\'.Length), [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadSubTree,
+            [System.Security.AccessControl.RegistryRights]::ReadPermissions)
+        if ($null -eq $k) {
+            if ($Missing) { return ,@() }
+            return ,@("$Key does not exist")
+        }
+        try { $acl = $k.GetAccessControl() } finally { $k.Close() }
+    } finally { $base.Close() }
     $bad = @()
     $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
     if ($script:KeyTrusted -notcontains $owner) { $bad += "$Key is owned by $owner" }
