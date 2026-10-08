@@ -17,28 +17,37 @@ CRLF):
   playwright.live.config.ts.
 
 A cut PC side is `cancelled`, never red ("ide event"): a cancelled pc-begin,
-pc or pc-end job, a begin record `left-dev` or `not-free`, a pc record
-`left-dev`, a job end `left-dev`. A cancelled browser job alone is red. Else
-the checks, in order; the first that fails leads a red summary (`red: <it>;
-<numbers>`), each step inside a check in the order written:
+pc or pc-end job; one of them that failed and left no record (the guard stops
+the runner at "ide event", and GitHub's conclusion for that job and whether its
+`always()` upload still runs are UNVERIFIED, plan Task 10, as for the soak);
+a begin record `left-dev` or `not-free`, a pc record `left-dev`, a job end
+`left-dev`. A PC job that succeeded or was skipped and left no record, and an
+unreadable record, are red; so is a cancelled browser job alone (a hosted
+runner the event does not touch). Known limit, as the soak's: a PC job that
+ran out of its `timeout-minutes` reads as cancelled if GitHub reports a
+timeout so (UNVERIFIED). Else the checks, in order; the first that fails leads
+a red summary (`red: <it>; <numbers>`), each step inside a check in the order
+written:
 
  1. begin ready: the record's reason `ready`, then the pc-begin job success;
  2. the pc job: its reason `browser-done`, at least one burst, every burst
     exit 0, then the pc job success;
  3. every expected title passed: the titles read from the spec files (the
     parity checker's `test(` rule, check_parity_manifest.PW_TEST), each with
-    as many tests in the report as it appears in the specs, every one passed
-    (status `expected`, expected status `passed`); then no other test in the
-    report that did not pass; then the browser job success;
+    at least as many tests in the report as it appears in the specs (another
+    project or a repeat adds some), every one passed (status `expected`,
+    expected status `passed`); then no other test in the report that did not
+    pass; then the browser job success;
  4. the client-log marker found;
  5. no push subscription left behind: push_after at most push_before;
  6. the job end ok, then the pc-end job success.
 
 Numbers come only from `live_number` annotations, `<key>=<number>` with a key
-of NUMBER_KEYS and a finite decimal number, the first of each key. The summary
-holds fixed codes, numbers and the titles read from the spec files (public,
-this repository): never a test's error text, a title only the report holds, a
-code outside the known ones or a value the records hold besides counts (P6)."""
+of NUMBER_KEYS and a finite ASCII decimal number, the first such one of each
+key. The summary holds fixed codes, numbers and the titles read from the spec
+files (public, this repository): never a test's error text, a title only the
+report holds, a code outside the known ones or a value the records hold
+besides counts and a burst's exit code within 32 bits (P6)."""
 from __future__ import annotations
 
 import argparse
@@ -63,7 +72,9 @@ CANCELLED = frozenset({"left-dev", "not-free"})
 NUMBER_KEYS = ("listen_hz", "listen_dbfs", "first_audio_ms", "talkback_db", "limiter_active_s", "meter_fps",
                "burst_input_dbfs", "opus_frames")
 LIVE_NUMBER = "live_number"
-NUMBER = re.compile(r"-?[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?")  # ASCII digits only: no "nan", "١", "1_000"
+# A decimal in ASCII digits only: float() alone also reads "nan", "1_000" and other scripts' digits.
+NUMBER = re.compile(r"-?[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?")
+EXIT_MIN, EXIT_MAX = -(2 ** 31), 2 ** 32 - 1  # PowerShell's signed exit code, Windows' DWORD
 CLIENT_LOG = frozenset({"found", "missing", "unreadable"})
 JOB_END = frozenset({"ok", "failed", "left-dev"})
 RESULTS = ("success", "failure", "cancelled", "skipped")  # a job's `needs.<job>.result`
@@ -197,7 +208,7 @@ def _pc(r: _Run) -> str | None:
         if type(code) is not int:
             return f"burst {n} has no exit code"
         if code != 0:
-            return f"burst {n} exited {code}"
+            return f"burst {n} exited {code if EXIT_MIN <= code <= EXIT_MAX else 'abnormally'}"
     return _job(r, "pc")
 
 
@@ -245,6 +256,9 @@ def _cancelled(r: _Run) -> str | None:
     for key in PC_SIDE:
         if r.jobs.get(key) == "cancelled":
             return f"the {JOBS[key]} job was cancelled"
+    for key, record in zip(PC_SIDE, (r.begin, r.pc, r.evidence)):
+        if record is None and r.jobs.get(key) == "failure":
+            return f"no record of the {JOBS[key]} job"
     for name, key, codes in CUTS:
         v = _get(getattr(r, name), key)
         if _is(v, codes):
@@ -325,10 +339,16 @@ def report(results: object, begin: object, pc: object, evidence: object, bursts:
             "numbers": numbers}
 
 
+def file_titles(text: str) -> list[str]:
+    """A spec file's `test(` titles in source order, unescaped as check_parity_manifest's
+    playwright_titles does (which returns them as a set)."""
+    return [re.sub(r"\\(.)", r"\1", m.group(2)) for m in PW_TEST.finditer(text)]
+
+
 def titles(specs: Path) -> list[str]:
     """The expected titles: every spec file under the folder (Playwright's default testMatch), in
-    path order, its `test(` titles in source order, unescaped as the parity checker does. Bad when
-    the folder is no folder or a spec file cannot be read as UTF-8."""
+    path order, its titles in source order. Bad when the folder is no folder or a spec file cannot
+    be read as UTF-8."""
     if not specs.is_dir():
         raise Bad("the live specs are unreadable")
     files = sorted((p for p in specs.rglob("*") if SPEC_FILE.search(p.name) and p.is_file()),
@@ -339,7 +359,7 @@ def titles(specs: Path) -> list[str]:
             text = p.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as e:
             raise Bad("the live specs are unreadable") from e
-        out += [re.sub(r"\\(.)", r"\1", m.group(2)) for m in PW_TEST.finditer(text)]
+        out += file_titles(text)
     return out
 
 
