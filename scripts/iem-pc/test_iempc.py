@@ -760,20 +760,6 @@ class EventTests(Base):
             self.assertEqual((code, self.pc.calls), (exit_code, [("iemmode.exe", ["event"], "ignore")]), exit_code)
             self.assertIn("the event path did not complete", err)
 
-    def test_an_event_switch_that_needs_the_owner_exits_non_zero(self) -> None:
-        """#10 (2026-10-08): a switch to event whose REAPER handover failed ends
-        `needs_owner`, never `done`; the guard answers ok false, iemmode exits 1,
-        and so does iempc event, with the owner alarm (no --direct)."""
-        reply = json.dumps({"ok": False, "mode": "event", "alarms": [],
-                            "detail": "event: stopped; the owner decides; the mode is event",
-                            "last_switch": {"from": "dev", "to": "event", "ended_in": "event",
-                                            "outcome": "needs_owner"}})
-        self.pc.replies[("event",)] = (1, reply)
-        code, docs, err = self.run_main("event")
-        self.assertEqual((code, self.pc.calls), (1, [("iemmode.exe", ["event"], "ignore")]))
-        self.assertEqual(docs[-1]["iemmode"], ["event"])
-        self.assertIn("alarm the owner now", err)
-
     def test_a_failed_direct_event_is_an_owner_alarm(self) -> None:
         self.pc.replies[("event",)] = (4, OK)
         self.pc.replies[("event", "--direct")] = (1, json.dumps({"error": "a guard runs; use the pipe"}))

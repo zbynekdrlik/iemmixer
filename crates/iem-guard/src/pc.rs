@@ -812,6 +812,8 @@ pub mod fake {
         /// A started REAPER's process shows only later: `reaper_start`
         /// leaves `facts.reaper` as it was.
         pub reaper_shows_late: bool,
+        /// `reaper_procs` fails with this (an unreadable process list).
+        pub reaper_procs_fail: Option<String>,
         calls: Vec<(Call, Instant)>,
         fails: HashMap<Call, String>,
         blocked: Vec<Call>,
@@ -891,6 +893,7 @@ pub mod fake {
                 reaper_held: false,
                 reaper_ends_at: None,
                 reaper_shows_late: false,
+                reaper_procs_fail: None,
                 calls: Vec::new(),
                 fails: HashMap::new(),
                 blocked: Vec::new(),
@@ -1222,6 +1225,9 @@ pub mod fake {
 
         /// A read of REAPER's processes (#10): not a recorded call.
         fn reaper_procs(&mut self) -> R<ReaperProcs> {
+            if let Some(why) = &self.reaper_procs_fail {
+                return Err(StepError::Failed(why.clone()));
+            }
             let up = u32::from(self.facts.reaper);
             Ok(if self.reaper_ending {
                 ReaperProcs {
@@ -1942,6 +1948,12 @@ mod tests {
         pc.fail(Call::ReaperAwaitEnd, "pre-empted");
         assert!(pc.reaper_await_end(&c).is_err());
         assert_eq!(pc.reaper_procs(), Ok(ending));
+        // An unreadable process list fails the read.
+        pc.reaper_procs_fail = Some("the process list: access denied".into());
+        assert_eq!(
+            pc.reaper_procs(),
+            Err(StepError::failed("the process list: access denied"))
+        );
     }
 
     #[test]

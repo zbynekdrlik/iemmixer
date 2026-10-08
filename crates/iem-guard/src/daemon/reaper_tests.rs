@@ -12,7 +12,7 @@ use super::tests::{band_up, iemmixer_up};
 use super::*;
 use crate::pc::fake::{Call, FakePc};
 use crate::plan::Facts;
-use crate::switch_log::SwitchOutcome;
+use crate::switch_log::{LastSwitch, SwitchOutcome};
 
 /// A synthetic bundle SHA: a dev entry's identity check names the pin.
 fn sha() -> String {
@@ -244,6 +244,25 @@ fn a_reaper_still_ending_after_the_hold_ends_the_switch_needs_owner() {
     );
     assert!(g.alarms.last().unwrap().owner_question);
     assert!(!pc.called(Call::ReaperFacts));
+}
+
+/// An unreadable process list is never "no REAPER" (review of the lane):
+/// the handover starts nothing, checks nothing, and the switch ends
+/// `needs_owner` with the owner's question.
+#[test]
+fn an_unreadable_process_list_starts_no_reaper() {
+    let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
+    pc.reaper_procs_fail = Some("the process list: access denied".into());
+    assert_eq!(
+        run_switch(&mut pc, &mut g, Mode::Event, Mode::Event),
+        Outcome::NeedsOwner
+    );
+    assert!(!pc.called(Call::ReaperStart) && !pc.called(Call::ReaperFacts));
+    assert_eq!(
+        texts(&g),
+        ["ReaperHandover: the process list: access denied"]
+    );
+    assert!(g.alarms.last().unwrap().owner_question);
 }
 
 /// #10's last line ("switch ended in event: done" without REAPER): a

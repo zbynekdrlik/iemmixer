@@ -294,6 +294,67 @@ mod tests {
     #[test]
     fn the_crash_hold_is_ninety_seconds() {
         assert_eq!(CRASH_HOLD, std::time::Duration::from_secs(90));
+        assert_eq!(QUIT_WAIT, std::time::Duration::from_secs(30));
+    }
+
+    /// A REAPER the guard asked to quit counts as ending for the quit bound
+    /// and the hold, no longer: one that never quit is then checked (or
+    /// saved and quit) like any other, and only Windows Error Reporting
+    /// still makes it ending.
+    #[test]
+    fn a_quit_asked_counts_as_ending_for_the_quit_bound_and_the_hold() {
+        assert!(asked_still_ending(Duration::ZERO));
+        assert!(asked_still_ending(Duration::from_millis(119_999)));
+        assert!(!asked_still_ending(Duration::from_secs(120)));
+        assert!(!asked_still_ending(Duration::from_secs(3600)));
+    }
+
+    /// One REAPER process as the handover and the quit read it (#10): an
+    /// ended process is gone whatever else is true; one asked to quit or
+    /// whose crash Windows Error Reporting reports is ending; anything else
+    /// runs.
+    #[test]
+    fn a_reaper_process_is_gone_ending_or_running() {
+        for asked in [false, true] {
+            for wer in [false, true] {
+                assert_eq!(
+                    reaper_state(asked, wer, true),
+                    ReaperState::Gone,
+                    "{asked} {wer}"
+                );
+            }
+        }
+        assert_eq!(reaper_state(true, false, false), ReaperState::Ending);
+        assert_eq!(reaper_state(false, true, false), ReaperState::Ending);
+        assert_eq!(reaper_state(true, true, false), ReaperState::Ending);
+        assert_eq!(reaper_state(false, false, false), ReaperState::Running);
+    }
+
+    /// `ReaperSaveQuit` (#10, review of the lane): a REAPER already ending
+    /// gets no save and no quit (it cannot answer them), only the wait; a
+    /// REAPER this guard asked to quit that has ended is a quit done (the
+    /// event plan's restart after a pre-empted dev entry); anything else is
+    /// saved and quit, so a REAPER that vanished by itself still fails the
+    /// save there.
+    #[test]
+    fn the_quit_waits_for_an_ending_reaper_and_counts_an_asked_one_gone() {
+        for asked_ended in [false, true] {
+            assert_eq!(
+                quit_step(Some(ReaperState::Ending), asked_ended),
+                QuitStep::AwaitEnd
+            );
+            assert_eq!(
+                quit_step(Some(ReaperState::Running), asked_ended),
+                QuitStep::SaveQuit
+            );
+        }
+        assert_eq!(quit_step(None, true), QuitStep::Done);
+        assert_eq!(quit_step(Some(ReaperState::Gone), true), QuitStep::Done);
+        assert_eq!(quit_step(None, false), QuitStep::SaveQuit);
+        assert_eq!(
+            quit_step(Some(ReaperState::Gone), false),
+            QuitStep::SaveQuit
+        );
     }
 
     #[test]
