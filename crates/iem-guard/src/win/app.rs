@@ -16,7 +16,9 @@ use crate::bundle;
 use crate::cancel::Cancel;
 use crate::effects::{app as decide, tasks as task_names, web as http};
 use crate::handover::{self, AppExit};
-use crate::pc::{Kid, PrecheckFacts, R, StepError, foreign_engine, precheck as verdict};
+use crate::pc::{
+    Kid, PrecheckFacts, R, StepError, app_serves, foreign_engine, precheck as verdict,
+};
 use crate::plan::Mode;
 use crate::site::{ENGINE_EXE, SERVER_EXE};
 
@@ -145,7 +147,9 @@ pub(super) fn start(pc: &WinPc) -> R<()> {
     }
 }
 
-/// `/api/version`, the member count and the public host, ≤ 60 s.
+/// `/api/version`, the member count, the public host, and the app's own
+/// process on ports 80/443 (`app_serves`, #10: an iem-server that did
+/// not stop answers the HTTP checks itself), ≤ 60 s.
 pub(super) fn answers(pc: &WinPc, c: &Cancel) -> R<()> {
     let mut problems = Vec::new();
     let answered = procs::poll(Duration::from_secs(60), c, || {
@@ -178,6 +182,13 @@ fn app_problems(pc: &WinPc, c: &Cancel) -> R<Vec<String>> {
         Ok(_) => {}
         Err(StepError::Preempted) => return Err(StepError::Preempted),
         Err(StepError::Failed(why)) => bad.push(format!("public host: {why}")),
+    }
+    match web::ports() {
+        Ok(ports) if app_serves(&procs::list(pc).app, ports) => {}
+        Ok((p80, p443)) => bad.push(format!(
+            "ports 80/443 are not the app's (80: {p80:?}, 443: {p443:?})"
+        )),
+        Err(e) => bad.push(e.to_string()),
     }
     Ok(bad)
 }

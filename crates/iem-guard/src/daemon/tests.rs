@@ -843,15 +843,17 @@ fn an_event_plan_clears_the_token_as_it_begins() {
         std::thread::sleep(Duration::from_millis(200));
         c.preempt();
     });
-    // A pre-emption during an event plan ends only that wait: the plan goes on.
+    // A pre-emption during an event plan ends only that wait: the plan goes
+    // on, and a handover cut short is no done (#10: the owner decides).
     let out = run_switch(&mut pc, &mut g, Mode::Event, Mode::Event);
     fired.join().unwrap();
     assert!(t.elapsed() >= Duration::from_millis(200));
-    assert_eq!(out, Outcome::Done);
+    assert_eq!(out, Outcome::NeedsOwner);
     assert_eq!(
         g.alarms.all()[0].text,
         "ReaperHandover: pre-empted inside the event plan"
     );
+    assert!(g.alarms.all()[0].owner_question);
     assert!(pc.called(Call::AppAnswers) && pc.called(Call::Fingerprint));
 }
 
@@ -860,8 +862,9 @@ fn an_event_unwind_does_not_recurse_when_a_step_is_preempted() {
     // A bounded, deterministic catch for the `to != Mode::Event` -> `true`
     // mutant of the preempted-step arm (daemon.rs:869). In an event plan
     // (to == Event) the real code treats a preempted step as an ordinary
-    // event-plan failure and goes on, so `run_switch` returns Done after a
-    // single ReaperFacts read. The mutant makes the guard `true`, so the
+    // event-plan failure and goes on, so `run_switch` returns after a
+    // single ReaperFacts read (NeedsOwner: a handover cut short is no done,
+    // #10). The mutant makes the guard `true`, so the
     // preempted ReaperHandover step sends the event switch to `back_to_event`,
     // which re-runs the whole event plan; that re-run's ReaperHandover then
     // blocks on ReaperFacts for `BLOCK_LIMIT` (10 s), the token never renewed.
@@ -874,7 +877,7 @@ fn an_event_unwind_does_not_recurse_when_a_step_is_preempted() {
     let (done_tx, done_rx) = mpsc::channel();
     std::thread::spawn(move || {
         let mut pc = FakePc::new(band_up());
-        // The handover step waits on the token; a preemption ends its wait.
+        // The handover step waits on the token; a pre-emption ends its wait.
         pc.block_until_cancel(Call::ReaperFacts);
         let mut g = Guard::for_test(Mode::Event);
         // Fire the single preemption only after PrefCheck (the step right
@@ -887,7 +890,7 @@ fn an_event_unwind_does_not_recurse_when_a_step_is_preempted() {
     });
     assert_eq!(
         done_rx.recv_timeout(Duration::from_secs(3)),
-        Ok((Outcome::Done, 1)),
+        Ok((Outcome::NeedsOwner, 1)),
         "an event switch recursed into back_to_event on a preempted step \
          instead of continuing the plan after one handover (or did not end \
          within 3 s)"
@@ -896,7 +899,8 @@ fn an_event_unwind_does_not_recurse_when_a_step_is_preempted() {
 
 #[test]
 fn event_plan_failures_follow_the_policy() {
-    // A failed app stop skips the app start; the handover still runs.
+    // A failed app stop skips the app start; the handover still runs. No
+    // app serves then, so the owner is asked (#10).
     let (mut pc, mut g) = (
         FakePc::new(Facts {
             app_serves: false,
@@ -907,24 +911,28 @@ fn event_plan_failures_follow_the_policy() {
     pc.app_exit.exit_code = None;
     assert_eq!(
         run_switch(&mut pc, &mut g, Mode::Event, Mode::Event),
-        Outcome::Done
+        Outcome::NeedsOwner
     );
     assert!(pc.called(Call::AppStop) && !pc.called(Call::AppStart));
     assert!(pc.called(Call::AppAnswers) && pc.called(Call::Fingerprint));
     assert_eq!(texts(&g), ["AppStop: the app did not exit within 30 s"]);
-    // A REAPER handover that fails alarms and goes on to the app.
+    assert!(g.alarms.last().unwrap().owner_question);
+    // A REAPER handover that fails asks the owner and goes on to the app;
+    // the switch never ends done (#10).
     let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Dev));
     pc.reaper.dialogs = vec!["Save changes?".into()];
     pc.reaper.heartbeat_advanced = false;
     assert_eq!(
         run_switch(&mut pc, &mut g, Mode::Dev, Mode::Event),
-        Outcome::Done
+        Outcome::NeedsOwner
     );
+    assert_eq!(g.state.mode, Mode::Event);
     assert!(pc.called(Call::AppStart));
     assert_eq!(
         texts(&g),
         ["ReaperHandover: a REAPER dialog is open; the meter heartbeat does not advance"]
     );
+    assert!(g.alarms.last().unwrap().owner_question);
     // A foreign holder that stays keeps REAPER down and asks the owner.
     let (mut pc, mut g) = (
         FakePc::new(Facts {

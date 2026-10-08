@@ -4,7 +4,8 @@
 //!
 //! - [`argv`]: `{placeholder}` arguments of configured commands;
 //! - [`data`]: the data refresh of an entry, command by command;
-//! - [`reaper`]: REAPER's web-control lines and meters;
+//! - [`reaper`]: REAPER's web-control lines and meters, its crash on quit
+//!   (Windows Error Reporting's report, the exit codes, the load poll);
 //! - [`app`]: the predecessor app's exit (one process, its log, temp files);
 //! - [`engine`]: the engine's supervisor pipe, readiness and health;
 //! - [`web`]: `/api/version`, the tunnel, `iem-server`'s CLI and the

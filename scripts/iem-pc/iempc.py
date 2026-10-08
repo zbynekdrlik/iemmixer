@@ -8,7 +8,8 @@ iempc_switch.py), PC bootstrap through
 the bundle's IemPc.psm1 (dev time only), S1c's tuning modules and profile into
 the PC's elevated tuning folder (`tuning-install`, refreshed after `activate`:
 iempc_tuning.py), a kernel DPC/ISR trace on the guard's engine (`trace`:
-iempc_trace.py, PC_XPERF below), and the hand-over of an open S1a window.
+iempc_trace.py, PC_XPERF below), the admin-only OpenSSH default shell
+(`ssh-shell`: iempc_sshshell.py), and the hand-over of an open S1a window.
 
 "ide event": the flag file (~/.config/iemmixer/EVENT-NOW) exists. `event`
 writes it first when it is missing (a flag it cannot write is a warning,
@@ -88,6 +89,7 @@ from typing import Callable, Iterator
 
 import iempc_bin
 import iempc_soak
+import iempc_sshshell
 import iempc_switch
 import iempc_trace
 import iempc_tuning
@@ -1180,6 +1182,11 @@ def cmd_tuning_install(ctx: Ctx) -> int:
     return code
 
 
+def cmd_ssh_shell(ctx: Ctx) -> int:
+    """The admin-only OpenSSH default shell, set, probed and confirmed; the code lives in iempc_sshshell.py (#15, #36)."""
+    return iempc_sshshell.run(ctx, sys.modules[__name__])
+
+
 def cmd_trace(ctx: Ctx) -> int:
     """A kernel DPC/ISR trace on the guard's engine; the code lives in iempc_trace.py (#15, #36)."""
     return iempc_trace.trace(ctx, sys.modules[__name__])
@@ -1382,6 +1389,7 @@ COMMANDS: dict[str, Spec] = {
     "handover-s1a": Spec(cmd_handover_s1a, pc=True, dev_time=True, locked=True),
     "tuning-install": Spec(cmd_tuning_install, pc=True, dev_time=True, locked=True),
     "trace": Spec(cmd_trace, pc=True, dev_time=True, locked=True),
+    "ssh-shell": Spec(cmd_ssh_shell, pc=True, dev_time=True, locked=True),
 }
 
 
@@ -1416,6 +1424,9 @@ def build_parser() -> argparse.ArgumentParser:
     tuning = sub.add_parser("tuning-install")
     tuning.add_argument("--sha", required=True, help="the fetched bundle whose tuning modules and IemPc.psm1 run")
     tuning.add_argument("--profile", help="the private tuning profile (default: $TUNING_PROFILE or ~/.config/iemmixer/pc-tuning.json)")
+    ssh_shell = sub.add_parser("ssh-shell")
+    ssh_shell.add_argument("--sha", required=True, help="the fetched bundle whose IemSshShell.psm1 and IemPc.psm1 run")
+    ssh_shell.add_argument("--dry-run", action="store_true", help="print the plan, touch nothing")
     trace = sub.add_parser("trace")
     trace.add_argument("--label", required=True, help="the run's name: 1 to 40 of a-z 0-9 -")
     trace.add_argument("--seconds", type=int, required=True, help="how long the kernel trace runs")

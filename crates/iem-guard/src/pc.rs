@@ -20,7 +20,7 @@ use iem_win::spawn::Placement;
 use crate::cancel::{Cancel, Preempted};
 use crate::effects::app::holders_text;
 use crate::effects::tuning::Logon;
-use crate::handover::{AppExit, ReaperFacts};
+use crate::handover::{AppExit, ReaperFacts, ReaperProcs};
 use crate::plan::{Facts, Health, Mode};
 use crate::proto::HilOut;
 use crate::state::{Child, Children};
@@ -198,10 +198,7 @@ pub fn facts_from(p: &Procs, holders: Option<&[(u32, String)]>, ports: Option<Po
         None => (reaper, false),
     };
     let app_serves = match ports {
-        Some((http, https)) => match p.app.as_slice() {
-            [pid] => http == Some(*pid) && https == Some(*pid),
-            _ => false,
-        },
+        Some(ports) => app_serves(&p.app, ports),
         None => app,
     };
     Facts {
@@ -214,6 +211,17 @@ pub fn facts_from(p: &Procs, holders: Option<&[(u32, String)]>, ports: Option<Po
         reaper_holds_module,
         app_serves,
         other_module_holder,
+    }
+}
+
+/// The predecessor app serves the band: its one process owns both ports 80
+/// and 443. The plan's facts read it, and the app handover requires it
+/// (#10: an iem-server that did not stop keeps the ports and answers the
+/// app's HTTP checks itself).
+pub fn app_serves(app: &[u32], (http, https): Ports) -> bool {
+    match app {
+        [pid] => http == Some(*pid) && https == Some(*pid),
+        _ => false,
     }
 }
 
@@ -491,8 +499,13 @@ pub trait Pc {
     /// refusing.
     fn precheck(&mut self, to: Mode, trial: bool) -> R<Option<String>>;
     /// 40026; project mtime changed ≤ 15 s; no dialog but REAPER's
-    /// evaluation notice (`handover::dialogs`); 40004; gone ≤ 30 s; driver
-    /// module unheld.
+    /// evaluation notice (`handover::dialogs`); 40004; gone ≤ 30 s, or, when
+    /// Windows Error Reporting reports its crash on quit, gone within
+    /// `effects::reaper::CRASH_HOLD` more (#10); driver module unheld. A
+    /// REAPER that has not ended when the step fails or is pre-empted stays
+    /// known as ending to [`Pc::reaper_procs`]. A REAPER already ending gets
+    /// no save and no quit, only the wait; the one the guard asked to quit
+    /// that has ended is a quit done (`effects::reaper::quit_step`).
     fn reaper_save_quit(&mut self, c: &Cancel) -> R<()>;
     /// A handle first, then the tray's Exit command, then observe (design
     /// §5.3); the verdict is `handover::app_exit`.
@@ -553,11 +566,24 @@ pub trait Pc {
     /// Our task (or the direct start, `[guard] start_direct`); refuses with
     /// an engine or a driver-module holder.
     fn reaper_start(&mut self) -> R<()>;
-    /// ≤ 120 s for the track count; the meter bridge at most once; the
-    /// titles of REAPER's visible dialogs.
+    /// REAPER's processes for the handover's first part (#10): each one
+    /// runs, or is still ending (Windows Error Reporting reports its crash,
+    /// or the guard asked it to quit and it has not ended). Never waits; an
+    /// unreadable process list fails (it never reads as "no REAPER").
+    fn reaper_procs(&mut self) -> R<ReaperProcs>;
+    /// Waits up to `effects::reaper::CRASH_HOLD` for every REAPER that is
+    /// still ending to be gone ("ide event" ends the wait), and logs how
+    /// long it took (#10). After it the guard's own quit request no longer
+    /// marks a REAPER as ending; a crash Windows Error Reporting still
+    /// reports does.
+    fn reaper_await_end(&mut self, c: &Cancel) -> R<()>;
+    /// ≤ 60 s for the track count (S7, #10: the whole step measured
+    /// 6.0–6.3 s), ended at once when REAPER's process has ended (#10); the
+    /// meter bridge at most once; the titles of REAPER's visible dialogs.
     fn reaper_facts(&mut self, c: &Cancel) -> R<ReaperFacts>;
     fn app_start(&mut self) -> R<()>;
-    /// `/api/version`, the member count and the public host.
+    /// `/api/version`, the member count and the public host, and the app's
+    /// own process owns ports 80/443 ([`app_serves`], #10).
     fn app_answers(&mut self, c: &Cancel) -> R<()>;
     /// S1c's REAPER-mode fingerprint through the tuning task (`state`).
     fn fingerprint(&mut self) -> R<()>;
@@ -659,6 +685,8 @@ pub mod fake {
         RunnerStop,
         HolderGone,
         ReaperStart,
+        /// The handover's wait for a REAPER that is still ending (#10).
+        ReaperAwaitEnd,
         ReaperFacts,
         AppStart,
         AppAnswers,
@@ -782,6 +810,21 @@ pub mod fake {
         pub lan_note: Option<String>,
         /// What `web_ports` reads (a read: not a recorded call).
         pub ports: Result<Ports, String>,
+        /// The REAPER that runs is still ending (#10: its crash on quit held
+        /// by Windows Error Reporting, or a quit the guard asked for):
+        /// `reaper_procs` names it ending until `reaper_await_end` sees it
+        /// gone.
+        pub reaper_ending: bool,
+        /// The ending REAPER outlasts the handover's wait.
+        pub reaper_held: bool,
+        /// REAPER's process ends by itself as this call begins (a crash on
+        /// quit that Windows let go after the plan read its facts); once.
+        pub reaper_ends_at: Option<Call>,
+        /// A started REAPER's process shows only later: `reaper_start`
+        /// leaves `facts.reaper` as it was.
+        pub reaper_shows_late: bool,
+        /// `reaper_procs` fails with this (an unreadable process list).
+        pub reaper_procs_fail: Option<String>,
         calls: Vec<(Call, Instant)>,
         fails: HashMap<Call, String>,
         blocked: Vec<Call>,
@@ -857,6 +900,11 @@ pub mod fake {
                 logon: None,
                 lan_note: None,
                 ports: Ok((None, None)),
+                reaper_ending: false,
+                reaper_held: false,
+                reaper_ends_at: None,
+                reaper_shows_late: false,
+                reaper_procs_fail: None,
                 calls: Vec::new(),
                 fails: HashMap::new(),
                 blocked: Vec::new(),
@@ -934,6 +982,12 @@ pub mod fake {
 
         fn record(&mut self, call: Call) {
             self.calls.push((call, Instant::now()));
+            if self.reaper_ends_at == Some(call) {
+                self.reaper_ends_at = None;
+                self.reaper_ending = false;
+                self.facts.reaper = false;
+                self.facts.reaper_holds_module = false;
+            }
         }
 
         fn pid(&mut self) -> u32 {
@@ -1173,8 +1227,39 @@ pub mod fake {
 
         fn reaper_start(&mut self) -> R<()> {
             self.enter(Call::ReaperStart, None)?;
-            self.facts.reaper = true;
-            self.facts.reaper_holds_module = true;
+            if !self.reaper_shows_late {
+                self.facts.reaper = true;
+                self.facts.reaper_holds_module = true;
+            }
+            Ok(())
+        }
+
+        /// A read of REAPER's processes (#10): not a recorded call.
+        fn reaper_procs(&mut self) -> R<ReaperProcs> {
+            if let Some(why) = &self.reaper_procs_fail {
+                return Err(StepError::Failed(why.clone()));
+            }
+            let up = u32::from(self.facts.reaper);
+            Ok(if self.reaper_ending {
+                ReaperProcs {
+                    running: 0,
+                    ending: up,
+                }
+            } else {
+                ReaperProcs {
+                    running: up,
+                    ending: 0,
+                }
+            })
+        }
+
+        fn reaper_await_end(&mut self, c: &Cancel) -> R<()> {
+            self.enter(Call::ReaperAwaitEnd, Some(c))?;
+            if self.reaper_ending && !self.reaper_held {
+                self.reaper_ending = false;
+                self.facts.reaper = false;
+                self.facts.reaper_holds_module = false;
+            }
             Ok(())
         }
 
@@ -1501,6 +1586,23 @@ mod tests {
         assert!(!serves(&app(vec![]), None));
     }
 
+    /// The app handover's own check (#10): the app's one process owns
+    /// both ports. An iem-server that did not stop keeps them and answers
+    /// `/api/version` and `/api/members` itself, which the HTTP checks
+    /// alone took for the app.
+    #[test]
+    fn the_app_serves_only_while_its_one_process_owns_both_ports() {
+        assert!(app_serves(&[12], (Some(12), Some(12))));
+        assert!(!app_serves(&[12], (Some(14), Some(14))));
+        assert!(!app_serves(&[12], (Some(14), Some(12))));
+        assert!(!app_serves(&[12], (Some(12), Some(14))));
+        assert!(!app_serves(&[12], (None, Some(12))));
+        assert!(!app_serves(&[12], (Some(12), None)));
+        assert!(!app_serves(&[12], (None, None)));
+        assert!(!app_serves(&[], (Some(12), Some(12))));
+        assert!(!app_serves(&[12, 17], (Some(12), Some(12))));
+    }
+
     #[test]
     fn foreign_holders_are_all_but_reaper() {
         let h = vec![
@@ -1822,6 +1924,64 @@ mod tests {
         assert!(pc.mutating_calls().contains(&Call::EngineStart));
         assert!(!pc.mutating_calls().contains(&Call::EngineReady));
         assert!(!pc.mutating_calls().contains(&Call::Identity));
+    }
+
+    /// #10: a REAPER still ending shows so until the wait sees it gone
+    /// (unless it outlasts the wait); one that ends by itself does so at
+    /// the scripted call, once; a start may show late.
+    #[test]
+    fn the_fake_ends_and_starts_reaper_like_the_pc() {
+        let c = Cancel::default();
+        let running = ReaperProcs {
+            running: 1,
+            ending: 0,
+        };
+        let ending = ReaperProcs {
+            running: 0,
+            ending: 1,
+        };
+        let mut pc = FakePc::new(up());
+        assert_eq!(pc.reaper_procs(), Ok(running));
+        pc.reaper_ending = true;
+        assert_eq!(pc.reaper_procs(), Ok(ending));
+        pc.reaper_held = true;
+        pc.reaper_await_end(&c).unwrap();
+        assert_eq!(pc.reaper_procs(), Ok(ending));
+        pc.reaper_held = false;
+        pc.reaper_await_end(&c).unwrap();
+        assert_eq!(pc.reaper_procs(), Ok(ReaperProcs::default()));
+        assert!(!pc.facts.reaper && !pc.facts.reaper_holds_module);
+        assert_eq!(pc.count(Call::ReaperAwaitEnd), 2);
+        assert!(!Call::ReaperAwaitEnd.mutates());
+        // The read is no call.
+        assert!(pc.calls().iter().all(|call| *call == Call::ReaperAwaitEnd));
+        pc.reaper_shows_late = true;
+        pc.reaper_start().unwrap();
+        assert_eq!(pc.reaper_procs(), Ok(ReaperProcs::default()));
+        pc.reaper_shows_late = false;
+        pc.reaper_start().unwrap();
+        assert_eq!(pc.reaper_procs(), Ok(running));
+        assert!(pc.facts.reaper_holds_module);
+        pc.reaper_ending = true;
+        pc.reaper_ends_at = Some(Call::Fingerprint);
+        pc.fingerprint().unwrap();
+        assert_eq!(pc.reaper_procs(), Ok(ReaperProcs::default()));
+        assert!(!pc.facts.reaper_holds_module);
+        // Once: a later call leaves a new REAPER alone.
+        pc.reaper_start().unwrap();
+        pc.fingerprint().unwrap();
+        assert_eq!(pc.reaper_procs(), Ok(running));
+        // A failed wait changes nothing.
+        pc.reaper_ending = true;
+        pc.fail(Call::ReaperAwaitEnd, "pre-empted");
+        assert!(pc.reaper_await_end(&c).is_err());
+        assert_eq!(pc.reaper_procs(), Ok(ending));
+        // An unreadable process list fails the read.
+        pc.reaper_procs_fail = Some("the process list: access denied".into());
+        assert_eq!(
+            pc.reaper_procs(),
+            Err(StepError::failed("the process list: access denied"))
+        );
     }
 
     #[test]

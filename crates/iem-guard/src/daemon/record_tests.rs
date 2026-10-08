@@ -90,8 +90,8 @@ fn a_record_names_when_its_switch_began_and_ended() {
 }
 
 /// A failed step is timed and kept: at "ide event" a failed `AppHandover`
-/// (policy `Continue`) is alarmed, the plan goes on, the record lists it
-/// with its time.
+/// (policy `ContinueAskOwner` since #10) is alarmed, the plan goes on, the
+/// record lists it with its time, and the switch ends `needs_owner`.
 #[test]
 fn a_failed_step_is_timed_and_kept_in_the_record() {
     let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
@@ -99,7 +99,7 @@ fn a_failed_step_is_timed_and_kept_in_the_record() {
     pc.delay(Call::AppAnswers, Duration::from_millis(50));
     assert_eq!(
         run_switch(&mut pc, &mut g, Mode::Dev, Mode::Event),
-        Outcome::Done
+        Outcome::NeedsOwner
     );
     let r = last(&g);
     assert_eq!(steps_of(&r), plan(Mode::Event, &iemmixer_up()));
@@ -107,7 +107,12 @@ fn a_failed_step_is_timed_and_kept_in_the_record() {
     assert!(failed.is_some_and(|s| s.ms >= 50), "{failed:?}");
     assert_eq!(
         (r.from, r.to, r.ended_in, r.outcome),
-        (Mode::Dev, Mode::Event, Mode::Event, SwitchOutcome::Done)
+        (
+            Mode::Dev,
+            Mode::Event,
+            Mode::Event,
+            SwitchOutcome::NeedsOwner
+        )
     );
     assert_eq!(
         r.silence_ms,
