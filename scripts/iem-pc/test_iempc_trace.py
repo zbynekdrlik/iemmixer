@@ -249,6 +249,17 @@ class TraceTests(TraceBase):
             self.assertIn("IemTuningStore.psm1 is", err, store)
             self.assertIn(f"iempc tuning-install --sha {SHA}", err, store)
 
+    def test_a_running_bundle_from_before_the_store_is_refused_before_the_pc(self) -> None:
+        # #34: its record names no tuning/IemTuningStore.psm1, so the folder's store
+        # could not be checked against it: no trace, nothing sent to the PC.
+        path = ip.bundle_dir(SHA) / "fetch.json"
+        rec = json.loads(path.read_text(encoding="utf-8"))
+        del rec["sums"]["tuning/IemTuningStore.psm1"]
+        path.write_text(json.dumps(rec), encoding="utf-8")
+        code, docs, err = self.trace()
+        self.assertEqual((code, docs, self.pc.modules), (1, [], []))
+        self.assertIn(f"no trace: bundle {SHA} lists no tuning/IemTuningStore.psm1", err)
+
     def test_a_running_bundle_this_box_never_fetched_is_refused_before_the_pc_changes(self) -> None:
         self.statuses(status(engine={**ENGINE, "build": SHA2}))
         code, _, err = self.trace()

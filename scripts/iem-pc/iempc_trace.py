@@ -10,12 +10,13 @@ PC while the guard's engine plays, in dev time.
    box), frames and its callbacks, missed periods and resets (`Reply.engine`).
 3. A read-only preflight: the elevated tuning folder (%ProgramData%\\iemmixer\\
    tuning as the PC resolves the known folder; filled by `iempc
-   tuning-install`) must hold that bundle's two tuning modules (their sha256
-   against its SHA256SUMS) and the local profile (its sha256: the watched
-   processors are the PC's), else no trace and the hint to run tuning-install.
-   Every later import re-checks the modules' hashes on the PC first
-   (`hash_check`; both, or IemMeasure's alone for the stop-only import, which
-   loads no IemTuning): the elevated ssh session imports nothing else, and
+   tuning-install`) must hold that bundle's three tuning modules (IemTuning,
+   its IemTuningStore since #34, IemMeasure: their sha256 against its
+   SHA256SUMS) and the local profile (its sha256: the watched processors are
+   the PC's), else no trace and the hint to run tuning-install. Every later
+   import re-checks the modules' hashes on the PC first (`hash_check`; all
+   three, or IemMeasure's alone for the stop-only import, which loads no
+   IemTuning): the elevated ssh session imports nothing else, and
    never the bundle's copy in the user's root. Only the stop of a recorded
    trace (below) reads the folder, its parent and IemMeasure back admin-only
    instead of the hash, so a refresh since that trace never blocks its stop.
@@ -94,12 +95,13 @@ COUNTERS = ("callbacks", "missed", "resets")
 SESSIONS = ("NT Kernel Logger", "IemMarkers")
 IDLE = "(Get-Process -Id $PID).PriorityClass = 'Idle'"
 # The preflight (read-only): the elevated tuning folder as the PC resolves it,
-# and the sha256 of its two modules and its profile (null for one that is absent).
+# and the sha256 of its three modules and its profile (null for one that is absent).
 PREFLIGHT = (f"$t = {iempc_tuning.TUNING_DIR_PS} ; "
              "$h = { param($p) if (Test-Path -LiteralPath $p -PathType Leaf) "
              "{ (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash.ToLowerInvariant() } } ; "
              "[pscustomobject]@{ dir = $t; tuning = (& $h (Join-Path $t 'IemTuning.psm1')); "
-             "measure = (& $h (Join-Path $t 'IemMeasure.psm1')); profile = (& $h (Join-Path $t 'profile.json')) }")
+             "measure = (& $h (Join-Path $t 'IemMeasure.psm1')); store = (& $h (Join-Path $t 'IemTuningStore.psm1')); "
+             "profile = (& $h (Join-Path $t 'profile.json')) }")
 DRIVE_PATH = re.compile(r"[A-Za-z]:\\[^\x00-\x1f\"]+")
 # The running trace in the state dir: written before Start-IemTrace, removed
 # after a confirmed stop (#15: a dev box that dies hard leaves the trace running).
@@ -187,13 +189,14 @@ def engine_seen(ip, code: int, reply: dict | None) -> dict:
 
 
 def tuning_modules(ctx, ip, build: str, profile: Path, local: str) -> dict[str, tuple[str, str]]:
-    """The elevated tuning folder's two modules as (path on the PC, sha256):
+    """The elevated tuning folder's three modules as (path on the PC, sha256):
     the running bundle's (fetched and attested here); its profile's sha256 must
     be the local profile's (`local`). Read by the preflight."""
     sums = ip.need_record(build).get("sums") or {}
     want = {key: sums.get(f"tuning/{name}") for key, name in iempc_tuning.MODULES.items()}
-    if not all(want.values()):
-        raise ip.Refused(f"no trace: bundle {build} lists no tuning modules")
+    missing = [f"tuning/{name}" for key, name in iempc_tuning.MODULES.items() if not want[key]]
+    if missing:
+        raise ip.Refused(f"no trace: bundle {build} lists no {', '.join(missing)}")
     fix = f"iempc tuning-install --sha {build}"
     r = ip.run_module(ctx.env, PREFLIGHT, ip.STATUS_S, ctx.watch(abandon=True))
     if not isinstance(r, dict) or not isinstance(r.get("dir"), str) or not DRIVE_PATH.fullmatch(r["dir"]):
@@ -211,18 +214,19 @@ def tuning_modules(ctx, ip, build: str, profile: Path, local: str) -> dict[str, 
 
 def measure_load(ip, mods: dict, pre: str = "", stop_only: bool = False) -> dict:
     """module_script's `pre` for a body after IemMeasure's import from the
-    elevated tuning folder, both modules' sha256 checked on the PC first (never
+    elevated tuning folder, the sha256 of every module it loads checked on the
+    PC first (IemTuning's store, #34, IemTuning, IemMeasure; never
     module_script's `module`, which stages an upload from the user's root:
     these are admin-only already), TEMP and TMP first at the admin-only
     <elevated root>\\temp, where IemTuning's Add-Type compiles (#15);
     `stop_only`: IemMeasure alone (its hash), IemTuning never loads (nothing
     compiles, no TEMP set up)."""
-    (tuning, tuning_hex), (measure, measure_hex) = mods["tuning"], mods["measure"]
+    measure, measure_hex = mods["measure"]
     if stop_only:
         return {"pre": f"{pre}{ip.hash_check(measure, measure_hex)} ; Import-Module {ip.ps_quote(measure)} "
                        "-ArgumentList 'stop-only' -Force ; "}
-    return {"pre": f"{pre}{ip.elevated_ps().temp_first()} ; {ip.hash_check(tuning, tuning_hex)} ; "
-                   f"{ip.hash_check(measure, measure_hex)} ; Import-Module {ip.ps_quote(measure)} -Force ; "}
+    checks = " ; ".join(ip.hash_check(*mods[key]) for key in ("store", "tuning", "measure"))
+    return {"pre": f"{pre}{ip.elevated_ps().temp_first()} ; {checks} ; Import-Module {ip.ps_quote(measure)} -Force ; "}
 
 
 def start_reply(ctx, ip, mods: dict, body: str) -> dict:

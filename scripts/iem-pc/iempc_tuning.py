@@ -1,10 +1,10 @@
 """`iempc tuning-install` and the refresh after `iempc activate` (#15, the
 re-plan of 2026-10-07, approach 1 step 1, with the decision on the trust model).
 
-S1c's tuning modules (IemTuning.psm1, IemMeasure.psm1) and the private profile
-reach the PC's elevated tuning folder (%ProgramData%\\iemmixer\\tuning,
-Administrators and SYSTEM change it, the user reads) only through the admin
-ssh path from this box, as `iempc bootstrap` runs IemPc.psm1: the modules come
+S1c's tuning modules (IemTuning.psm1, its IemTuningStore.psm1 since #34, and
+IemMeasure.psm1) and the private profile reach the PC's elevated tuning
+folder (%ProgramData%\\iemmixer\\tuning, Administrators and SYSTEM change it,
+the user reads) only through the admin ssh path from this box, as `iempc bootstrap` runs IemPc.psm1: the modules come
 out of the fetched, attested bundle (`extract_member`, its SHA256SUMS checked
 again), the profile from the private ~/.config/iemmixer/pc-tuning.json
 ($TUNING_PROFILE, or `--profile PATH`), its shapes checked here first
@@ -12,11 +12,11 @@ again), the profile from the private ~/.config/iemmixer/pc-tuning.json
 (`bootstrap/<sha>/tuning` under PC_ROOT) next to the bundle's IemPc.psm1, whose
 Install-IemTuning (elevated; the module's sha256 checked on the PC before its
 import) checks each file's sha256, the profile with IemTuning's own loader,
-then writes them fresh and reads them back. Its answer, the three hashes, must
+then writes them fresh and reads them back. Its answer, the four hashes, must
 equal what this box sent. The guard's elevated tuning task then finds them
 (`Invoke-IemTuningVerb`) instead of answering `absent`.
 
-`activate --sha` refreshes the two modules from the NEW bundle once its
+`activate --sha` refreshes the three modules from the NEW bundle once its
 hand-over is verified, online and offline, when the elevated tuning folder
 holds a profile (one read-only check): the installed profile stays as it is
 (`-KeepProfile`), so the module never drifts from the running bundle. A failed
@@ -34,13 +34,14 @@ from pathlib import Path
 
 PC_TUNING = Path(__file__).resolve().parent.parent / "pc-tuning"
 PROFILE = Path(os.environ.get("TUNING_PROFILE", str(Path.home() / ".config/iemmixer/pc-tuning.json")))
-# The bundle's tuning modules (`tuning/<name>`) by the key of their hash in Install-IemTuning's answer.
-MODULES = {"tuning": "IemTuning.psm1", "measure": "IemMeasure.psm1"}
+# The bundle's tuning modules (`tuning/<name>`) by the key of their hash in Install-IemTuning's answer:
+# IemTuning imports IemTuningStore from its own folder (#34), so the store goes wherever IemTuning goes.
+MODULES = {"tuning": "IemTuning.psm1", "measure": "IemMeasure.psm1", "store": "IemTuningStore.psm1"}
 # The elevated tuning folder as Register-IemTasks resolves the elevated root: the
 # ProgramData known folder, never an environment variable.
 TUNING_DIR_PS = "(Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'iemmixer\\tuning')"
 PROFILE_PRESENT = f"Test-Path -LiteralPath (Join-Path {TUNING_DIR_PS} 'profile.json') -PathType Leaf"
-HASH_KEYS = ("tuning", "measure", "profile")
+HASH_KEYS = (*MODULES, "profile")
 
 
 def tuning_rules():
@@ -62,10 +63,11 @@ def load_profile(ip, path: Path) -> dict:
 
 
 def check_hashes(ip, r, want: dict[str, str]) -> dict:
-    """Install-IemTuning's answer: the three hashes it read back, each the one
-    this box sent (the installed profile's is any sha256 with -KeepProfile)."""
+    """Install-IemTuning's answer: the hashes it read back (HASH_KEYS), each
+    the one this box sent (the installed profile's is any sha256 with
+    -KeepProfile)."""
     if not isinstance(r, dict) or sorted(r) != sorted(HASH_KEYS):
-        raise ip.StepError(f"Install-IemTuning answered {r!r}, not the three hashes")
+        raise ip.StepError(f"Install-IemTuning answered {r!r}, not the hashes of {', '.join(HASH_KEYS)}")
     for key in HASH_KEYS:
         got = r[key]
         if not isinstance(got, str) or not ip.HEX64.fullmatch(got):
@@ -76,7 +78,7 @@ def check_hashes(ip, r, want: dict[str, str]) -> dict:
 
 
 def run_install(ctx, ip, sha: str, profile: Path | None) -> dict:
-    """Uploads the bundle's IemPc.psm1 and two tuning modules (and `profile`,
+    """Uploads the bundle's IemPc.psm1 and three tuning modules (and `profile`,
     unless None: the installed one stays) and runs Install-IemTuning elevated.
     Every step changes the PC: a new flag lets each finish (then the event path)."""
     env = ctx.env
@@ -87,7 +89,8 @@ def run_install(ctx, ip, sha: str, profile: Path | None) -> dict:
     for key, name in MODULES.items():
         local, want[key] = ip.extract_member(sha, rec, f"tuning/{name}", nested=True)
         uploads.append((local, name))
-    args = f" -TuningSha256 {ip.ps_quote(want['tuning'])} -MeasureSha256 {ip.ps_quote(want['measure'])}"
+    args = (f" -TuningSha256 {ip.ps_quote(want['tuning'])} -MeasureSha256 {ip.ps_quote(want['measure'])}"
+            f" -StoreSha256 {ip.ps_quote(want['store'])}")
     if profile is None:
         args += " -KeepProfile"
     else:
@@ -117,7 +120,7 @@ def install(ctx, ip) -> int:
 
 
 def refresh_after_activate(ctx, ip, sha: str) -> None:
-    """After `activate --sha`'s verified hand-over: the new bundle's two modules
+    """After `activate --sha`'s verified hand-over: the new bundle's three modules
     when the elevated tuning folder holds a profile, which stays. A failure is
     reported and never raised, so the activation counts; a failure after a new
     flag goes on to main, which runs the event path; a new flag itself
