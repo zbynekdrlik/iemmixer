@@ -565,8 +565,16 @@ pub trait Pc {
     fn probe_task(&mut self) -> R<()>;
     fn notify(&mut self, audience: Audience, title: &str, body: &str) -> R<()>;
     /// The HIL test signal (design §4, §7): `HilTestSignal` over the
-    /// supervisor pipe, encoded only on `card_tx` (`[guard] hil_tx`).
-    fn engine_hil_signal(&mut self, input: &str, dbfs: f64, ttl_s: f64, card_tx: &[u16]) -> R<()>;
+    /// supervisor pipe, encoded only on `card_tx` (`[guard] hil_tx`); with
+    /// `listen` also the listen probe (S7, #10).
+    fn engine_hil_signal(
+        &mut self,
+        input: &str,
+        dbfs: f64,
+        ttl_s: f64,
+        card_tx: &[u16],
+        listen: bool,
+    ) -> R<()>;
     /// A forced reopen of the driver (HIL, design §7); the engine's reset
     /// budget applies.
     fn engine_force_reopen(&mut self) -> R<()>;
@@ -706,8 +714,8 @@ pub mod fake {
     /// that never pre-empts must not hang).
     pub const BLOCK_LIMIT: Duration = Duration::from_secs(10);
 
-    /// One HIL test signal as sent: input, dBFS, TTL, card outputs.
-    pub type SentSignal = (String, f64, f64, Vec<u16>);
+    /// One HIL test signal as sent: input, dBFS, TTL, card outputs, listen.
+    pub type SentSignal = (String, f64, f64, Vec<u16>, bool);
 
     /// A scripted PC. Every call is recorded with the instant it began.
     /// Starts and stops change `facts` the way the real ones change the PC,
@@ -734,7 +742,8 @@ pub mod fake {
         pub kids: Children,
         /// The windows `engine_ready` was asked for, in order.
         pub ready_secs: Vec<u32>,
-        /// Every HIL test signal sent: (input, dBFS, TTL, card outputs).
+        /// Every HIL test signal sent: (input, dBFS, TTL, card outputs,
+        /// listen).
         pub hil_signals: Vec<SentSignal>,
         /// The site files installed.
         pub sites: Vec<String>,
@@ -1206,10 +1215,11 @@ pub mod fake {
             dbfs: f64,
             ttl_s: f64,
             card_tx: &[u16],
+            listen: bool,
         ) -> R<()> {
             self.enter(Call::HilSignal, None)?;
             self.hil_signals
-                .push((input.to_owned(), dbfs, ttl_s, card_tx.to_vec()));
+                .push((input.to_owned(), dbfs, ttl_s, card_tx.to_vec(), listen));
             Ok(())
         }
 
@@ -1845,8 +1855,12 @@ mod tests {
         assert!(!pc.called(Call::AppStop));
         pc.engine_ready(10, &Cancel::default()).unwrap();
         assert_eq!(pc.ready_secs, [10]);
-        pc.engine_hil_signal("mic1", -30.0, 5.0, &[94]).unwrap();
-        assert_eq!(pc.hil_signals, [("mic1".to_owned(), -30.0, 5.0, vec![94])]);
+        pc.engine_hil_signal("mic1", -30.0, 5.0, &[94], true)
+            .unwrap();
+        assert_eq!(
+            pc.hil_signals,
+            [("mic1".to_owned(), -30.0, 5.0, vec![94], true)]
+        );
         pc.engine_force_reopen().unwrap();
         pc.engine_inject_fault().unwrap();
         pc.engine_inject_seh().unwrap();
@@ -1885,7 +1899,10 @@ mod tests {
         assert!(pc.install_site("bad.toml", &Cancel::default()).is_err());
         assert_eq!(pc.sites, ["site.toml"]);
         pc.fail(Call::HilSignal, "refused");
-        assert!(pc.engine_hil_signal("mic2", -30.0, 5.0, &[94]).is_err());
+        assert!(
+            pc.engine_hil_signal("mic2", -30.0, 5.0, &[94], false)
+                .is_err()
+        );
         assert_eq!(pc.hil_signals.len(), 1);
     }
 

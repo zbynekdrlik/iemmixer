@@ -1317,7 +1317,12 @@ pub fn handle(pc: &mut dyn Pc, g: &mut Guard, req: Request, seen: Generation) ->
         ),
         Request::Install { zip } => install_bundle(g, Path::new(&zip)),
         Request::Activate { sha } => activate(pc, g, &sha),
-        Request::TestSignal { input, dbfs, ttl_s } => test_signal(pc, g, &input, dbfs, ttl_s),
+        Request::TestSignal {
+            input,
+            dbfs,
+            ttl_s,
+            listen,
+        } => test_signal(pc, g, &input, dbfs, ttl_s, listen),
         Request::Report { sha, hil, detail } => report(g, &sha, &hil, &detail),
         Request::JobBegin { run } => job_begin(g, run),
         Request::JobEnd { run } => job_end(g, run),
@@ -1684,13 +1689,15 @@ fn restart_in_job(pc: &mut dyn Pc, g: &mut Guard) -> Result<(), String> {
 }
 
 /// The HIL test signal, card-masked to `[guard] hil_tx` (design §4), only
-/// inside a begun HIL job (design §7).
+/// inside a begun HIL job (design §7); `listen` adds the listen probe (S7,
+/// #10) behind the same gates.
 fn test_signal(
     pc: &mut dyn Pc,
     g: &mut Guard,
     input: &str,
     dbfs: f64,
     ttl_s: f64,
+    listen: bool,
 ) -> (bool, String) {
     if let Err(why) = g.need_dev("test-signal") {
         return (false, why);
@@ -1723,9 +1730,12 @@ fn test_signal(
         );
     }
     let tx = g.site.hil_tx.clone();
+    let probe = if listen { "; listen probe" } else { "" };
     outcome(
-        pc.engine_hil_signal(input, dbfs, ttl_s, &tx),
-        &format!("test signal on {input} at {dbfs} dBFS for {ttl_s} s on card outputs {tx:?}"),
+        pc.engine_hil_signal(input, dbfs, ttl_s, &tx, listen),
+        &format!(
+            "test signal on {input} at {dbfs} dBFS for {ttl_s} s on card outputs {tx:?}{probe}"
+        ),
     )
 }
 
@@ -2289,6 +2299,8 @@ pub fn direct_event<L>(pc: &mut dyn Pc, g: &mut Guard, lock: Option<L>, dry_run:
     g.reply(ok, &format!("direct: {detail}"))
 }
 
+#[cfg(test)]
+mod probe_tests;
 #[cfg(test)]
 mod record_tests;
 #[cfg(test)]

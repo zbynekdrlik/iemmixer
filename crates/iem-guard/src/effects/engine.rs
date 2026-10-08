@@ -48,16 +48,23 @@ pub fn request_cmd(id: u64, cmd: Value) -> Value {
 pub const HIL_HZ: f64 = 1000.0;
 
 /// `HilTestSignal` (design §4): the engine renders every mix as usual but
-/// encodes only the card outputs `card_tx` while the TTL runs.
-pub fn hil_test_signal(input: &str, dbfs: f64, ttl_s: f64, card_tx: &[u16]) -> Value {
-    json!({
+/// encodes only the card outputs `card_tx` while the TTL runs. With `listen`
+/// (the listen probe, S7 #10) the engine also emits the sine on its probe
+/// streams 2 and 3, for the server's `&hil=1` listeners; the key is written
+/// only when true, so a plain signal is what an older engine reads.
+pub fn hil_test_signal(input: &str, dbfs: f64, ttl_s: f64, card_tx: &[u16], listen: bool) -> Value {
+    let mut cmd = json!({
         "op": "hil_test_signal",
         "input": input,
         "hz": HIL_HZ,
         "dbfs": dbfs,
         "ttl_s": ttl_s,
         "card_tx": card_tx,
-    })
+    });
+    if listen {
+        cmd["listen"] = Value::Bool(true);
+    }
+    cmd
 }
 
 /// Reads one frame's body; `Ok(None)` when the stream ends cleanly before a

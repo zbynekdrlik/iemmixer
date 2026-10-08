@@ -61,6 +61,10 @@ pub enum Request {
         input: String,
         dbfs: f64,
         ttl_s: f64,
+        /// The listen probe (S7, #10): the engine's `HilTestSignal.listen`.
+        /// Additive: absent reads false, false is never written.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        listen: bool,
     },
     Report {
         sha: String,
@@ -354,6 +358,13 @@ mod tests {
                 input: "mic1".into(),
                 dbfs: -24.5,
                 ttl_s: 30.0,
+                listen: false,
+            },
+            Request::TestSignal {
+                input: "mic1".into(),
+                dbfs: -20.0,
+                ttl_s: 30.0,
+                listen: true,
             },
             Request::Report {
                 sha: "0123456789abcdef0123456789abcdef01234567".into(),
@@ -412,6 +423,14 @@ mod tests {
         assert_eq!(json(&Request::InjectFault), r#"{"cmd":"inject_fault"}"#);
         assert_eq!(json(&Request::InjectSeh), r#"{"cmd":"inject_seh"}"#);
         assert_eq!(json(&Request::InjectPark), r#"{"cmd":"inject_park"}"#);
+        // The listen probe (S7, #10): `listen` is read and written only when
+        // true, so an older iemmode's signal (no `listen`) stays a plain one.
+        for text in [
+            r#"{"cmd":"test_signal","input":"mic1","dbfs":-20.0,"ttl_s":30.0}"#,
+            r#"{"cmd":"test_signal","input":"mic1","dbfs":-20.0,"ttl_s":30.0,"listen":true}"#,
+        ] {
+            assert_eq!(json(&decode::<Request>(text.as_bytes()).unwrap()), text);
+        }
         assert_eq!(
             decode::<Request>(br#"{"cmd":"alarm_ack","id":3}"#).unwrap(),
             Request::AlarmAck { id: 3 }
