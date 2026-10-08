@@ -130,6 +130,13 @@ pub enum Cmd {
         dbfs: f64,
         ttl_s: f64,
         card_tx: Vec<u16>,
+        /// S7, additive (design note §6): the listen probe. While the signal
+        /// runs, the listen taps keep their silent frames and the probe streams
+        /// (`media::stream::ENGINEER_PROBE`, `MEMBER_PROBE`) carry the spare
+        /// outputs' sine, for the server's `&hil=1` listeners only. Every mix's
+        /// TX stays zero. An older engine ignores it.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        listen: bool,
     },
     /// HIL's forced reopen of the driver (S6 design note §7): the backend
     /// stops, releases and opens the card again (its reset budget applies;
@@ -636,6 +643,7 @@ mod tests {
                 dbfs: -30.0,
                 ttl_s: 10.0,
                 card_tx: vec![72],
+                listen: false,
             },
             Cmd::ForceReopen,
         ]
@@ -1157,3 +1165,7 @@ mod tests {
         );
     }
 }
+
+/// S7 (#10): the listen probe's flag on `HilTestSignal`.
+#[cfg(test)]
+mod s7_tests;

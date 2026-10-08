@@ -5,9 +5,9 @@
 //! - `worst`: all 230 EQ bands (inputs, mixes, group strips) enabled and
 //!   moving, every level and strip ramping, the limiters in gain reduction,
 //!   both listen taps, talkback, the HIL test signal on all eight spare
-//!   outputs with their D5(b) loopback returns open (busy returns: the
-//!   round-trip probe scans every return sample of every block) and a
-//!   512-command group every block.
+//!   outputs with its listen probe on both slots (S7) and their D5(b)
+//!   loopback returns open (busy returns: the round-trip probe scans every
+//!   return sample of every block) and a 512-command group every block.
 //!
 //! Prints p50/p99/p99.9/max per case, and beside them the p99.9 the stream
 //! histogram gives (S7: 1 µs buckets, the soak's rule, `hist::quantile_us`).
@@ -191,6 +191,7 @@ fn bench(name: &str, worst: bool) -> f64 {
                     amp: 0.1,
                     ttl: u64::MAX / 2,
                     mask: [true; MAX_HIL],
+                    listen: true,
                 },
             ],
         );
@@ -223,7 +224,7 @@ fn bench(name: &str, worst: bool) -> f64 {
             times.push(took.as_secs_f64() * 1e6);
             hist.record(u64::try_from(took.as_nanos()).unwrap_or(u64::MAX));
         }
-        for tap in &mut h.taps {
+        for tap in h.taps.iter_mut().chain(h.probes.iter_mut()) {
             let _ = tap.pop_partial_slice(&mut drain);
         }
     }

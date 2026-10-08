@@ -722,7 +722,7 @@ impl Core {
                         "a HIL test signal runs until its TTL ends",
                     ));
                 }
-                self.start_test(input, *hz, *dbfs, *ttl_s, None)
+                self.start_test(input, *hz, *dbfs, *ttl_s, None, false)
             }
             Cmd::HilTestSignal {
                 input,
@@ -730,6 +730,7 @@ impl Core {
                 dbfs,
                 ttl_s,
                 card_tx,
+                listen,
             } => {
                 self.test_flag()?;
                 // Refused above the X13 cap, never lowered: HIL checks the
@@ -741,7 +742,7 @@ impl Core {
                     ));
                 }
                 let mask = hil_mask(&self.topo, &self.hil, card_tx)?;
-                self.start_test(input, *hz, *dbfs, *ttl_s, Some(mask))
+                self.start_test(input, *hz, *dbfs, *ttl_s, Some(mask), *listen)
             }
             Cmd::StopTestSignal => Ok(if self.test.take().is_some() {
                 Partial::changed(
@@ -816,7 +817,8 @@ impl Core {
 
     /// X13: a sine replaces `input` for `ttl_s`, every TX capped; with
     /// `mask` (the HIL signal) it sounds only on those spare outputs
-    /// meanwhile, and no mix's TX carries anything.
+    /// meanwhile, and no mix's TX carries anything; `listen` (S7, HIL only)
+    /// adds the listen probe.
     fn start_test(
         &mut self,
         input: &InputId,
@@ -824,6 +826,7 @@ impl Core {
         dbfs: f64,
         ttl_s: f64,
         mask: Option<HilMask>,
+        listen: bool,
     ) -> Result<Partial, CmdError> {
         let i = ix(self.input(input)?);
         let hz = capped(hz, TEST_HZ, "hz")?;
@@ -847,6 +850,7 @@ impl Core {
                 amp,
                 ttl,
                 mask,
+                listen,
             },
         };
         Ok(Partial::changed(

@@ -640,28 +640,33 @@ fn outputs_do_not_depend_on_the_block_size() {
     );
 }
 
-/// The HIL outputs (S6; the owner's decision on #9 of 2026-09-28) keep the
-/// invariance: a HIL signal on one spare output, stopped inside a block, and
-/// one on both spare outputs that runs to its end, with random mix commands
-/// between them, render bit for bit alike at 32/64/97/256 on every output,
-/// the spare outputs after the topology's TX included.
-#[test]
-fn hil_outputs_do_not_depend_on_the_block_size() {
-    let topo = common::topology();
-    let mut rng = Rng(0x1b10_c512_e000_0002);
-    let state = common::open_state(&topo);
-    let frames = 24_000;
-    let input = hot_material(topo.rx.len(), frames, &mut rng);
+/// The HIL schedule: 30 random mix commands, a HIL signal on one spare
+/// output (1 003) stopped inside a block (6 011), and one on both spare
+/// outputs that runs to its end (12 007, 0.02 s). With `listen` both signals
+/// carry the listen probe (S7), and both listen slots are listened from 50.
+fn hil_schedule(
+    topo: &Arc<Topology>,
+    state: &MixState,
+    rng: &mut Rng,
+    listen: bool,
+) -> Vec<(u64, Vec<RtOp>)> {
     let flags = Flags {
         test_signal: true,
         fault_injection: false,
     };
-    let mut core = Core::new(Arc::clone(&topo), &state, 0, flags).with_hil(common::HIL.to_vec());
+    let mut core = Core::new(Arc::clone(topo), state, 0, flags).with_hil(common::HIL.to_vec());
     let mut schedule: Vec<(u64, Vec<RtOp>)> = Vec::new();
+    if listen {
+        for m in ["engineer", "member1"] {
+            let start = Cmd::StartListen { mix: MixId::new(m) };
+            schedule.push((50, core.apply(&start).unwrap().rt));
+        }
+    }
+    let random = schedule.len() + 30;
     let mut at = 100u64;
-    while schedule.len() < 30 {
+    while schedule.len() < random {
         at += 100 + rng.below(450) as u64;
-        let cmd = random_cmd(&topo, &mut rng);
+        let cmd = random_cmd(topo, rng);
         if let Ok(out) = core.apply(&cmd)
             && !out.rt.is_empty()
         {
@@ -674,6 +679,7 @@ fn hil_outputs_do_not_depend_on_the_block_size() {
         dbfs: -24.0,
         ttl_s,
         card_tx: card_tx.to_vec(),
+        listen,
     };
     for (at, cmd) in [
         (1_003, hil(0.1, &common::HIL[1..])),
@@ -683,6 +689,22 @@ fn hil_outputs_do_not_depend_on_the_block_size() {
         schedule.push((at, core.apply(&cmd).unwrap().rt));
     }
     schedule.sort_by_key(|(at, _)| *at);
+    schedule
+}
+
+/// The HIL outputs (S6; the owner's decision on #9 of 2026-09-28) keep the
+/// invariance: a HIL signal on one spare output, stopped inside a block, and
+/// one on both spare outputs that runs to its end, with random mix commands
+/// between them, render bit for bit alike at 32/64/97/256 on every output,
+/// the spare outputs after the topology's TX included.
+#[test]
+fn hil_outputs_do_not_depend_on_the_block_size() {
+    let topo = common::topology();
+    let mut rng = Rng(0x1b10_c512_e000_0002);
+    let state = common::open_state(&topo);
+    let frames = 24_000;
+    let input = hot_material(topo.rx.len(), frames, &mut rng);
+    let schedule = hil_schedule(&topo, &state, &mut rng, false);
     assert!(schedule.last().unwrap().0 < frames as u64);
     let tx = topo.tx.len();
     let run = |block: usize| {
@@ -726,5 +748,119 @@ fn hil_outputs_do_not_depend_on_the_block_size() {
         "HIL invariance max difference {worst:e} (blocks 32/64/97/256, {} commands, {frames} samples x {} outputs)",
         schedule.len(),
         tx + common::HIL.len()
+    );
+}
+
+/// Moves everything `c` holds to the end of `into`.
+fn drain(c: &mut rtrb::Consumer<f32>, into: &mut Vec<f32>) {
+    let mut got = vec![0.0f32; c.slots()];
+    c.pop_entire_slice(&mut got).unwrap();
+    into.extend(got);
+}
+
+/// The listen probe (S7, #10; the owner's rule of #9 2026-09-28) on the HIL
+/// schedule with `listen` and both listen slots listened: at 32/64/97/256
+/// every mix's TX is exactly 0.0 inside each signal, both listen taps carry
+/// exactly 0.0 there (their cadence kept), the probe taps carry the masked
+/// spare output's own samples, and outputs, taps and probe taps are bit for
+/// bit alike across the block sizes.
+#[test]
+fn a_listen_probe_keeps_every_mix_tx_zero_and_its_taps_do_not_depend_on_the_block_size() {
+    // Rendered in 50 ms pieces (the rings hold 200 ms), every ring drained
+    // after each.
+    const PIECE: usize = 4_800;
+    let topo = common::topology();
+    let mut rng = Rng(0x1b10_c512_e000_0002);
+    let state = common::open_state(&topo);
+    let frames = 24_000;
+    let input = hot_material(topo.rx.len(), frames, &mut rng);
+    let schedule = hil_schedule(&topo, &state, &mut rng, true);
+    // The signals: from 1 003 to the stop at 6 011 and its 50 ms fade-out;
+    // from 12 007 for 0.02 s and the fade-out. The taps start at 50.
+    let spans = [(1_003, 6_011 + 4_800), (12_007, 12_007 + 1_920 + 4_800)];
+    let first_tap = 50;
+    let (tx, rxn) = (topo.tx.len(), topo.rx.len());
+    let run = |block: usize| {
+        let (mut p, mut h) = Processor::with_hil(
+            Arc::clone(&topo),
+            &state,
+            &[],
+            Options::default(),
+            common::HIL.len(),
+            0,
+        );
+        for (at, ops) in &schedule {
+            assert!(push_group(&mut h.cmds, *at, ops));
+        }
+        let outs = p.outputs();
+        let mut out: Vec<Vec<f64>> = vec![Vec::new(); outs];
+        let mut taps: [Vec<f32>; 2] = Default::default();
+        let mut probes: [Vec<f32>; 2] = Default::default();
+        for start in (0..frames).step_by(PIECE) {
+            let mut piece = Planar::new(rxn, PIECE);
+            for ch in 0..rxn {
+                piece
+                    .channel_mut(ch)
+                    .copy_from_slice(&input.channel(ch)[start..start + PIECE]);
+            }
+            let rendered = Offline { block }.run(&mut p, &piece, outs);
+            assert!(rendered.fault.is_none());
+            for (ch, all) in out.iter_mut().enumerate() {
+                all.extend_from_slice(rendered.output.channel(ch));
+            }
+            for k in 0..2 {
+                drain(&mut h.taps[k], &mut taps[k]);
+                drain(&mut h.probes[k], &mut probes[k]);
+            }
+        }
+        (out, taps, probes)
+    };
+    let (reference, ref_taps, ref_probes) = run(32);
+    for &(a, b) in &spans {
+        for (ch, y) in reference[..tx].iter().enumerate() {
+            assert!(
+                y[a..b].iter().all(|v| *v == 0.0),
+                "TX {ch} sounded in {a}..{b}"
+            );
+        }
+    }
+    // Spare output 95 carries both signals: the probe's own samples.
+    let want: Vec<f32> = spans
+        .iter()
+        .flat_map(|&(a, b)| reference[tx + 1][a..b].iter().map(|y| *y as f32))
+        .collect();
+    assert!(want.iter().any(|y| y.abs() > 1e-3));
+    for k in 0..2 {
+        let tap = &ref_taps[k];
+        assert_eq!(tap.len(), 2 * (frames - first_tap), "tap {k}");
+        for &(a, b) in &spans {
+            let during = &tap[2 * (a - first_tap)..2 * (b - first_tap)];
+            assert!(
+                during.iter().all(|x| *x == 0.0),
+                "tap {k} carried its mix in {a}..{b}"
+            );
+        }
+        assert!(
+            tap.iter().any(|x| x.abs() > 0.01),
+            "tap {k} carries its mix outside the signals"
+        );
+        let probe = &ref_probes[k];
+        assert_eq!(probe.len(), 2 * want.len(), "probe {k}");
+        assert!(
+            probe.iter().step_by(2).eq(want.iter()),
+            "probe {k}: the spare output's own samples"
+        );
+        assert!(probe.chunks(2).all(|p| p[0] == p[1]), "probe {k}: l == r");
+    }
+    for block in [64, 97, 256] {
+        let (out, taps, probes) = run(block);
+        assert!(out == reference, "block {block}: the outputs differ");
+        assert!(taps == ref_taps, "block {block}: the listen taps differ");
+        assert!(probes == ref_probes, "block {block}: the probe taps differ");
+    }
+    println!(
+        "listen probe invariance: bit-identical (blocks 32/64/97/256, {} commands, {} probe frames x 2 slots)",
+        schedule.len(),
+        want.len()
     );
 }

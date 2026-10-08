@@ -20,6 +20,11 @@ pub mod stream {
     pub const ENGINEER_LISTEN: u8 = 0;
     /// One member's listen tap (X3 slot 1), stereo.
     pub const MEMBER_LISTEN: u8 = 1;
+    /// The listen probe of the engineer's slot (S7): the HIL sine, stereo,
+    /// for `&hil=1` listeners only; an older server drops it.
+    pub const ENGINEER_PROBE: u8 = 2;
+    /// The listen probe of the member's slot (S7), like `ENGINEER_PROBE`.
+    pub const MEMBER_PROBE: u8 = 3;
     /// Talkback from the server into the engine, mono.
     pub const TALKBACK: u8 = 16;
 }
@@ -123,6 +128,41 @@ mod tests {
         let got = read_media(&mut wire.as_slice(), &mut out).unwrap();
         assert_eq!(got, h);
         assert_eq!(out, samples);
+    }
+
+    /// The listen probe (S7): streams of its own, so the listen taps keep
+    /// their bytes; the v1 header is unchanged and the stream byte is the
+    /// mark.
+    #[test]
+    fn the_probe_streams_are_2_and_3_beside_the_listen_taps() {
+        assert_eq!((stream::ENGINEER_PROBE, stream::MEMBER_PROBE), (2, 3));
+        let ids = [
+            stream::ENGINEER_LISTEN,
+            stream::MEMBER_LISTEN,
+            stream::ENGINEER_PROBE,
+            stream::MEMBER_PROBE,
+            stream::TALKBACK,
+        ];
+        for (k, a) in ids.iter().enumerate() {
+            assert!(ids[k + 1..].iter().all(|b| b != a), "stream {a} twice");
+        }
+        let h = MediaHeader {
+            stream: stream::MEMBER_PROBE,
+            channels: 2,
+            seq: 7,
+            frames: 2,
+        };
+        let samples = [0.1, 0.1, -0.1, -0.1];
+        let mut wire = Vec::new();
+        write_media(&mut wire, &h, &samples).unwrap();
+        assert_eq!(&wire[..8], b"IEMF\x01\x03\x02\x00");
+        let mut out = Vec::new();
+        assert_eq!(read_media(&mut wire.as_slice(), &mut out).unwrap(), h);
+        assert_eq!(out, samples);
+        let mut engineer = wire.clone();
+        engineer[5] = stream::ENGINEER_PROBE;
+        let got = read_media(&mut engineer.as_slice(), &mut out).unwrap();
+        assert_eq!(got.stream, 2);
     }
 
     #[test]

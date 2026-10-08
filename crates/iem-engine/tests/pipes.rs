@@ -927,6 +927,10 @@ fn a_held_engine_sounds_after_its_supervisor_arms_it() {
 #[path = "pipes/binary.rs"]
 mod binary;
 
+/// The listen probe on the media pipe (S7).
+#[path = "pipes/probe.rs"]
+mod probe;
+
 /// Windows named pipes only (S6 design note §4): the private DACL, the
 /// first-instance flag and writes bounded like the Unix send timeout.
 #[cfg(windows)]
