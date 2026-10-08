@@ -464,6 +464,7 @@ mod tests {
         assert_eq!(kind(module_scan("test-card.dll")), Some(Unsupported));
         assert_eq!(kind(start_time(4242)), Some(Unsupported));
         assert_eq!(kind(image_path(4242)), Some(Unsupported));
+        assert_eq!(kind(command_line(4242)), Some(Unsupported));
         assert_eq!(kind(Handle::open_waitable(4242)), Some(Unsupported));
         assert_eq!(kind(listening(8080)), Some(Unsupported));
         assert_eq!(kind(boot_time()), Some(Unsupported));
@@ -531,6 +532,34 @@ mod tests {
             path.eq_ignore_ascii_case(&exe.to_string_lossy()),
             "{path} vs {exe:?}"
         );
+    }
+
+    /// The guard tells a WerFault report of REAPER's crash by its command
+    /// line (`-p <pid>`, #10): our own process's and a running child's.
+    #[cfg(windows)]
+    #[test]
+    fn the_command_line_of_our_own_process_and_of_a_child_is_read() {
+        use super::*;
+
+        let me = command_line(std::process::id()).unwrap();
+        assert!(
+            me.to_ascii_lowercase()
+                .contains(&own_image().to_ascii_lowercase()),
+            "{me}"
+        );
+        // ping ends by itself after about two seconds; its arguments are
+        // read while it runs.
+        let mut child = std::process::Command::new("ping")
+            .args(["-n", "3", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let line = command_line(child.id());
+        let _ = child.wait();
+        let line = line.unwrap();
+        assert!(line.contains("-n 3 127.0.0.1"), "{line}");
+        // No process has this pid (pids are multiples of 4).
+        assert!(command_line(u32::MAX - 2).is_err());
     }
 
     #[cfg(windows)]

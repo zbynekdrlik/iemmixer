@@ -659,6 +659,8 @@ pub mod fake {
         RunnerStop,
         HolderGone,
         ReaperStart,
+        /// The handover's wait for a REAPER that is still ending (#10).
+        ReaperAwaitEnd,
         ReaperFacts,
         AppStart,
         AppAnswers,
@@ -782,6 +784,19 @@ pub mod fake {
         pub lan_note: Option<String>,
         /// What `web_ports` reads (a read: not a recorded call).
         pub ports: Result<Ports, String>,
+        /// The REAPER that runs is still ending (#10: its crash on quit held
+        /// by Windows Error Reporting, or a quit the guard asked for):
+        /// `reaper_procs` names it ending until `reaper_await_end` sees it
+        /// gone.
+        pub reaper_ending: bool,
+        /// The ending REAPER outlasts the handover's wait.
+        pub reaper_held: bool,
+        /// REAPER's process ends by itself as this call begins (a crash on
+        /// quit that Windows let go after the plan read its facts); once.
+        pub reaper_ends_at: Option<Call>,
+        /// A started REAPER's process shows only later: `reaper_start`
+        /// leaves `facts.reaper` as it was.
+        pub reaper_shows_late: bool,
         calls: Vec<(Call, Instant)>,
         fails: HashMap<Call, String>,
         blocked: Vec<Call>,
@@ -857,6 +872,10 @@ pub mod fake {
                 logon: None,
                 lan_note: None,
                 ports: Ok((None, None)),
+                reaper_ending: false,
+                reaper_held: false,
+                reaper_ends_at: None,
+                reaper_shows_late: false,
                 calls: Vec::new(),
                 fails: HashMap::new(),
                 blocked: Vec::new(),
@@ -934,6 +953,12 @@ pub mod fake {
 
         fn record(&mut self, call: Call) {
             self.calls.push((call, Instant::now()));
+            if self.reaper_ends_at == Some(call) {
+                self.reaper_ends_at = None;
+                self.reaper_ending = false;
+                self.facts.reaper = false;
+                self.facts.reaper_holds_module = false;
+            }
         }
 
         fn pid(&mut self) -> u32 {
@@ -1173,8 +1198,36 @@ pub mod fake {
 
         fn reaper_start(&mut self) -> R<()> {
             self.enter(Call::ReaperStart, None)?;
-            self.facts.reaper = true;
-            self.facts.reaper_holds_module = true;
+            if !self.reaper_shows_late {
+                self.facts.reaper = true;
+                self.facts.reaper_holds_module = true;
+            }
+            Ok(())
+        }
+
+        /// A read of REAPER's processes (#10): not a recorded call.
+        fn reaper_procs(&mut self) -> R<ReaperProcs> {
+            let up = u32::from(self.facts.reaper);
+            Ok(if self.reaper_ending {
+                ReaperProcs {
+                    running: 0,
+                    ending: up,
+                }
+            } else {
+                ReaperProcs {
+                    running: up,
+                    ending: 0,
+                }
+            })
+        }
+
+        fn reaper_await_end(&mut self, c: &Cancel) -> R<()> {
+            self.enter(Call::ReaperAwaitEnd, Some(c))?;
+            if self.reaper_ending && !self.reaper_held {
+                self.reaper_ending = false;
+                self.facts.reaper = false;
+                self.facts.reaper_holds_module = false;
+            }
             Ok(())
         }
 
@@ -1822,6 +1875,58 @@ mod tests {
         assert!(pc.mutating_calls().contains(&Call::EngineStart));
         assert!(!pc.mutating_calls().contains(&Call::EngineReady));
         assert!(!pc.mutating_calls().contains(&Call::Identity));
+    }
+
+    /// #10: a REAPER still ending shows so until the wait sees it gone
+    /// (unless it outlasts the wait); one that ends by itself does so at
+    /// the scripted call, once; a start may show late.
+    #[test]
+    fn the_fake_ends_and_starts_reaper_like_the_pc() {
+        let c = Cancel::default();
+        let running = ReaperProcs {
+            running: 1,
+            ending: 0,
+        };
+        let ending = ReaperProcs {
+            running: 0,
+            ending: 1,
+        };
+        let mut pc = FakePc::new(up());
+        assert_eq!(pc.reaper_procs(), Ok(running));
+        pc.reaper_ending = true;
+        assert_eq!(pc.reaper_procs(), Ok(ending));
+        pc.reaper_held = true;
+        pc.reaper_await_end(&c).unwrap();
+        assert_eq!(pc.reaper_procs(), Ok(ending));
+        pc.reaper_held = false;
+        pc.reaper_await_end(&c).unwrap();
+        assert_eq!(pc.reaper_procs(), Ok(ReaperProcs::default()));
+        assert!(!pc.facts.reaper && !pc.facts.reaper_holds_module);
+        assert_eq!(pc.count(Call::ReaperAwaitEnd), 2);
+        assert!(!Call::ReaperAwaitEnd.mutates());
+        // The read is no call.
+        assert!(pc.calls().iter().all(|call| *call == Call::ReaperAwaitEnd));
+        pc.reaper_shows_late = true;
+        pc.reaper_start().unwrap();
+        assert_eq!(pc.reaper_procs(), Ok(ReaperProcs::default()));
+        pc.reaper_shows_late = false;
+        pc.reaper_start().unwrap();
+        assert_eq!(pc.reaper_procs(), Ok(running));
+        assert!(pc.facts.reaper_holds_module);
+        pc.reaper_ending = true;
+        pc.reaper_ends_at = Some(Call::Fingerprint);
+        pc.fingerprint().unwrap();
+        assert_eq!(pc.reaper_procs(), Ok(ReaperProcs::default()));
+        assert!(!pc.facts.reaper_holds_module);
+        // Once: a later call leaves a new REAPER alone.
+        pc.reaper_start().unwrap();
+        pc.fingerprint().unwrap();
+        assert_eq!(pc.reaper_procs(), Ok(running));
+        // A failed wait changes nothing.
+        pc.reaper_ending = true;
+        pc.fail(Call::ReaperAwaitEnd, "pre-empted");
+        assert!(pc.reaper_await_end(&c).is_err());
+        assert_eq!(pc.reaper_procs(), Ok(ending));
     }
 
     #[test]

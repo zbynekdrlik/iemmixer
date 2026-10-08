@@ -511,4 +511,60 @@ mod tests {
         // An unrecorded hash refuses too.
         assert!(app_binary("", &a).is_err());
     }
+
+    fn procs(running: u32, ending: u32) -> ReaperProcs {
+        ReaperProcs { running, ending }
+    }
+
+    /// #10, 2026-10-08: the unwind's plan saw a REAPER that was crashing on
+    /// quit (Windows Error Reporting held it), so it planned no start; the
+    /// handover first waits for such a REAPER to be gone, once, whatever
+    /// else runs or was started.
+    #[test]
+    fn a_reaper_still_ending_is_waited_for_once() {
+        for running in 0..3 {
+            for started in [false, true] {
+                for ending in [1, 2] {
+                    assert_eq!(
+                        ensure_reaper(procs(running, ending), started, false),
+                        Ensure::AwaitEnd,
+                        "{running} {ending} {started}"
+                    );
+                    assert_eq!(
+                        ensure_reaper(procs(running, ending), started, true),
+                        Ensure::StillEnding,
+                        "{running} {ending} {started}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// With none running and none ending, REAPER is started, once: a start
+    /// of this plan (`ReaperStart`) or of this handover whose process does
+    /// not show yet is never followed by a second one.
+    #[test]
+    fn with_none_running_reaper_is_started_once() {
+        for waited in [false, true] {
+            assert_eq!(ensure_reaper(procs(0, 0), false, waited), Ensure::Start);
+            assert_eq!(ensure_reaper(procs(0, 0), true, waited), Ensure::Check);
+        }
+    }
+
+    /// A REAPER that runs (and is not ending) gets the handover's checks.
+    #[test]
+    fn a_running_reaper_is_checked() {
+        for running in [1, 2] {
+            for started in [false, true] {
+                for waited in [false, true] {
+                    assert_eq!(
+                        ensure_reaper(procs(running, 0), started, waited),
+                        Ensure::Check,
+                        "{running} {started} {waited}"
+                    );
+                }
+            }
+        }
+        assert_eq!(ReaperProcs::default(), procs(0, 0));
+    }
 }

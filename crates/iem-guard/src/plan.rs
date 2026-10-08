@@ -1024,6 +1024,30 @@ mod tests {
         }
     }
 
+    /// #10 (2026-10-08): an event switch whose REAPER handover failed
+    /// (REAPER could not be made to run, or a check failed) never ends
+    /// `done`: the owner's prepared question, and the plan goes on to the
+    /// app as before (the band keeps what works). Into dev or live it
+    /// unwinds like every other step.
+    #[test]
+    fn a_failed_reaper_handover_asks_the_owner_and_goes_on() {
+        for pf in [PrefFail::StartReaperWithAlarm, PrefFail::KeepReaperDown] {
+            for h in [None, Some(Health::Dead), Some(Health::Healthy)] {
+                assert_eq!(
+                    on_error(Mode::Event, Step::ReaperHandover, h, pf),
+                    OnError::ContinueAskOwner,
+                    "{pf:?} {h:?}"
+                );
+            }
+            for to in [Mode::Dev, Mode::Live] {
+                assert_eq!(
+                    on_error(to, Step::ReaperHandover, None, pf),
+                    OnError::Unwind
+                );
+            }
+        }
+    }
+
     #[test]
     fn other_event_failures_alarm_and_go_on() {
         let special = [
@@ -1033,6 +1057,7 @@ mod tests {
             Step::HolderGone,
             Step::ReaperSaveQuit,
             Step::ReaperStart,
+            Step::ReaperHandover,
             Step::AppStop,
         ];
         for s in Step::ALL {

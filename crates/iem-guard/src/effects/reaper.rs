@@ -175,6 +175,69 @@ mod tests {
         assert!(stage_peaks(&text, &[]).is_empty());
     }
 
+    /// A WerFault command line as Windows Error Reporting starts it for a
+    /// crashed process (`-u -p <pid> -s <n>`; a process snapshot's report
+    /// is `-pss -s <n> -p <pid> -ip <pid>`).
+    #[test]
+    fn a_wer_command_line_reports_the_pid_after_its_p() {
+        let line = r#""C:\Windows\system32\WerFault.exe" -u -p 4242 -s 552"#;
+        assert!(wer_reports(line, 4242));
+        assert!(!wer_reports(line, 424));
+        assert!(!wer_reports(line, 42420));
+        assert!(!wer_reports(line, 552));
+        assert!(wer_reports("WerFault.exe -pss -s 516 -p 77 -ip 77", 77));
+        assert!(wer_reports(
+            r"C:\Windows\SysWOW64\WerFault.exe -u -P 9 -s 1",
+            9
+        ));
+        // Any whitespace separates the words.
+        assert!(wer_reports("WerFault.exe\t-u  -p\t13 -s 1", 13));
+        // Only the value right after `-p` counts: `-ip`, `-s`, a value
+        // before the flag, a glued or a non-numeric value never do.
+        assert!(!wer_reports("WerFault.exe -u -ip 77 -s 1", 77));
+        assert!(!wer_reports("WerFault.exe -u -s 77", 77));
+        assert!(!wer_reports("WerFault.exe 77 -p", 77));
+        assert!(!wer_reports("WerFault.exe -p77 -s 1", 77));
+        assert!(!wer_reports("WerFault.exe -p x77", 77));
+        assert!(!wer_reports("WerFault.exe -p", 0));
+        assert!(!wer_reports("", 0));
+        assert_eq!(WER_IMAGE, "WerFault.exe");
+    }
+
+    /// REAPER's two exit codes of a crash on quit (#10, 2026-10-08, the
+    /// PC's Application log: 0xc0000005 and 0x40000015 in
+    /// `reaper_csurf.dll`); a normal quit is 0.
+    #[test]
+    fn a_crash_is_an_ntstatus_error_or_a_fatal_app_exit() {
+        for code in [0xC000_0005, 0x4000_0015, 0xC000_0000, 0xC000_0409, u32::MAX] {
+            assert!(crashed(code), "{code:#x}");
+        }
+        for code in [0, 1, 0x4000_0014, 0x4000_0016, 0xBFFF_FFFF, 0x8000_0003] {
+            assert!(!crashed(code), "{code:#x}");
+        }
+    }
+
+    /// The handover's load poll (#10, 2026-10-08: it waited the full 120 s
+    /// on a REAPER that had crashed): an ended process ends the wait at
+    /// once, whatever the tracks read.
+    #[test]
+    fn the_load_poll_ends_at_once_when_reapers_process_ended() {
+        assert_eq!(load_look(false, None), Load::Waiting);
+        assert_eq!(load_look(true, None), Load::Loaded);
+        assert_eq!(
+            load_look(false, Some(0xC000_0005)),
+            Load::Ended(0xC000_0005)
+        );
+        assert_eq!(load_look(true, Some(0)), Load::Ended(0));
+    }
+
+    /// The crash hold (#10): Windows Error Reporting held the crashed
+    /// REAPER past the 30 s quit bound; 90 s more bounds the wait.
+    #[test]
+    fn the_crash_hold_is_ninety_seconds() {
+        assert_eq!(CRASH_HOLD, std::time::Duration::from_secs(90));
+    }
+
     #[test]
     fn the_loudest_reading_of_each_track_is_kept() {
         let mut loudest = vec![f64::NEG_INFINITY, -20.0, -30.0];

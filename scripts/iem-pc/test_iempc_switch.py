@@ -323,6 +323,22 @@ class LegTests(SwitchBase):
         self.assertEqual(ip.current_entry(), 0)
         self.assertFalse(ip.EVENT_NOW.exists())
 
+    def test_an_event_leg_that_needs_the_owner_is_red_and_gets_no_dev_leg(self) -> None:
+        """#10 (2026-10-08): REAPER's handover failed, the app still started; the
+        guard ends the switch `needs_owner` in event and iemmode exits 1. Red, and
+        the guard's state decides (no dev leg)."""
+        owner = record("dev", "event", EVENT_STEPS, 25_050, outcome="needs_owner", started=1_790_000_100)
+        self.pc.replies[("event",)] = answer("event", owner, code=1)
+        code, docs, err = self.switch()
+        self.assertEqual(code, 1, err)
+        self.assertEqual(self.calls(), [(["status"], "abandon"), (["event"], "ignore")])
+        out = self.result(docs)
+        self.assertEqual((out["event_leg"], out["dev_leg"], out["conclusion"]),
+                         (leg(1, owner, said("event")), None, "failure"))
+        self.assertEqual(out["first_failure"], "event leg: outcome needs_owner, ended in event")
+        self.assertEqual(out["no_dev_leg"], sw.EVENT_FAILED)
+        self.assertEqual(ip.current_entry(), 0)
+
     def test_an_iemmode_that_prints_no_json_or_crashes_gets_no_dev_leg(self) -> None:
         """A crashed iemmode.exe exits with a negative code in PowerShell, and
         output that is no JSON with a failing exit is no reply (iempc's `call`)."""
