@@ -81,29 +81,45 @@ def undo_note(s: dict | None) -> str:
         return f"if it armed {UNDO_TASK}, that task restores the prior OpenSSH default shell within {UNDO_MIN} min"
     if s["state"] not in ARMED:
         return "no undo task is armed (the values were already ours)"
-    return f"the SYSTEM task {UNDO_TASK} restores the prior OpenSSH default shell at {s['undo']['at']} (PC time)"
+    return f"the SYSTEM task {UNDO_TASK} restores the prior OpenSSH default shell at {s['undo']['at']} (UTC)"
 
 
 def check_set(ip, r) -> dict:
+    """Set's answer: its state, the DefaultShell it wrote (or found: the
+    probe's shell must be that one) and, when it armed the undo, its time."""
     if not isinstance(r, dict) or r.get("state") not in (*ARMED, "unchanged"):
         raise ip.StepError(f"{SET} answered {str(r)[:300]!r}, not set, rearmed or unchanged")
     undo = r.get("undo")
     if r["state"] in ARMED and not (isinstance(undo, dict) and isinstance(undo.get("at"), str) and undo["at"]):
         raise ip.StepError(f"{SET} answered {r['state']} without its undo task's time: {str(r)[:300]!r}")
+    if not isinstance(wrote(r), str):
+        raise ip.StepError(f"{SET} answered {r['state']} without the DefaultShell it wrote: {str(r)[:300]!r}")
     return r
 
 
-def check_confirm(ip, r) -> dict:
-    if not isinstance(r, dict) or r.get("state") not in ("confirmed", "unchanged"):
+def wrote(s: dict):
+    """The DefaultShell data in Set's answer, or None."""
+    values = s.get("values")
+    shell = values.get("DefaultShell") if isinstance(values, dict) else None
+    return shell.get("data") if isinstance(shell, dict) and shell.get("kind") == "String" else None
+
+
+def check_confirm(ip, r, armed: bool) -> dict:
+    """Confirm's answer. After a Set that armed the undo only `confirmed`
+    counts: `unchanged` would mean it found neither the saved values nor the
+    task, so what became of the undo is unknown."""
+    states = ("confirmed",) if armed else ("confirmed", "unchanged")
+    if not isinstance(r, dict) or r.get("state") not in states:
         raise ip.StepError(f"{CONFIRM} answered {str(r)[:300]!r}, not confirmed")
     return r
 
 
-def parse_probe(ip, r) -> dict:
+def parse_probe(ip, r, wanted: str | None = None) -> dict:
     """The fresh session's shell as PROBE read it (its parent process): sshd
     ran System32's cmd.exe as `"<shell>" /d /c "<command>"`, so cmd ran no
-    AutoRun. Returns {shell, line}; anything else raises StepError naming
-    what was read."""
+    AutoRun; with `wanted`, that cmd.exe is the DefaultShell Set wrote
+    (Windows paths, any case). Returns {shell, line}; anything else raises
+    StepError naming what was read."""
     if not isinstance(r, dict) or not isinstance(r.get("exe"), str) or not isinstance(r.get("line"), str):
         raise ip.StepError(f"the probe answered {str(r)[:300]!r}, not the session's shell and its command line")
     exe, line = r["exe"], r["line"]
@@ -113,21 +129,33 @@ def parse_probe(ip, r) -> dict:
     shell = m.group("shell")
     if not shell.lower().endswith(SHELL_TAIL) or shell.lower() != exe.lower():
         raise ip.StepError(f"the fresh session's shell is {exe}, run as {shell}: not System32's cmd.exe")
+    if wanted is not None and shell.lower() != wanted.lower():
+        raise ip.StepError(f"the fresh session's shell is {shell}, not the DefaultShell Set wrote ({wanted})")
     return {"shell": shell, "line": line}
 
 
-def staged_import(ctx, ip, sha: str, rec: dict) -> tuple[list, str]:
-    """The bundle's three modules (their sums checked again) and the
-    statements that stage them on the PC in STAGE's order and import the new
-    one from its stage copy only (module_script's `pre`)."""
+def staged_import(ctx, ip, sha: str, rec: dict) -> tuple[list, str, dict[str, str]]:
+    """The bundle's three modules (their sums checked again), the statements
+    that stage them on the PC in STAGE's order and import the new one from its
+    stage copy only (module_script's `pre`), and each one's sha256 by stage
+    name (Set copies them for its undo task only as these bytes)."""
     ep = ip.elevated_ps()
     rel = f"bootstrap/{sha}"
-    uploads, mods = [], []
+    uploads, mods, sums = [], [], {}
     for member, name in STAGE:
         local, hexd = ip.extract_member(sha, rec, member, nested="/" in member)
         uploads.append((local, name))
         mods.append((ip.ps_quote(ip.pc_join(ctx.env["PC_ROOT"], f"{rel}/{name}")), name, hexd))
-    return uploads, f"{ep.staged(mods)} ; Import-Module $iemMod -Force ; "
+        sums[name] = hexd
+    return uploads, f"{ep.staged(mods)} ; Import-Module $iemMod -Force ; ", sums
+
+
+def set_body(sums: dict[str, str]) -> str:
+    """Set-IemSshShell with the modules' sha256 (names and lowercase hex only)."""
+    for name, hexd in sums.items():
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", name) or not re.fullmatch(r"[0-9a-f]{64}", hexd):
+            raise ValueError(f"not a module name and a sha256: {name!r} {hexd!r}")
+    return f"{SET} -ModuleSha256 @{{ " + "; ".join(f"'{n}' = '{h}'" for n, h in sums.items()) + " }"
 
 
 def run(ctx, ip) -> int:
@@ -142,13 +170,13 @@ def run(ctx, ip) -> int:
         return 0
     env = ctx.env
     mode = ctx.watch(abandon=False)
-    uploads, pre = staged_import(ctx, ip, sha, rec)
+    uploads, pre, sums = staged_import(ctx, ip, sha, rec)
     rel = f"bootstrap/{sha}"
     ip.pc_mkdir(ctx, rel, mode)
     for local, name in uploads:
         ip.scp(str(local), ip.remote(env, f"{rel}/{name}"), mode)
     try:
-        s = check_set(ip, ip.run_module(env, SET, ip.BOOTSTRAP_S, mode, pre=pre))
+        s = check_set(ip, ip.run_module(env, set_body(sums), ip.BOOTSTRAP_S, mode, pre=pre))
     except ip.EventNow:
         print(f"iempc: {SET} may have run; {undo_note(None)}", file=sys.stderr, flush=True)
         raise
@@ -156,7 +184,7 @@ def run(ctx, ip) -> int:
         raise ip.StepError(f"{SET} failed: {e}; {undo_note(None)}") from None
     again = f"run 'iempc ssh-shell --sha {sha}' again once that is settled"
     try:
-        probe = parse_probe(ip, ip.run_module(env, PROBE, ip.STATUS_S, ctx.watch(abandon=True)))
+        probe = parse_probe(ip, ip.run_module(env, PROBE, ip.STATUS_S, ctx.watch(abandon=True)), wrote(s))
     except ip.EventNow:
         print(f"iempc: {SET} {s['state']}, not confirmed: {undo_note(s)}", file=sys.stderr, flush=True)
         raise
@@ -166,7 +194,7 @@ def run(ctx, ip) -> int:
     if s["state"] in ARMED:
         # Confirm changes the PC: a new flag lets it finish, so it may have confirmed before the event path.
         try:
-            confirm = check_confirm(ip, ip.run_module(env, CONFIRM, ip.BOOTSTRAP_S, mode, pre=pre))
+            confirm = check_confirm(ip, ip.run_module(env, CONFIRM, ip.BOOTSTRAP_S, mode, pre=pre), armed=True)
         except ip.EventNow:
             print(f"iempc: {CONFIRM} may have finished before the event path; if it did not, {undo_note(s)}",
                   file=sys.stderr, flush=True)

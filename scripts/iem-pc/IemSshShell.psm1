@@ -52,8 +52,15 @@ $script:LogName = 'undo.log'
 $script:PriorVersion = 1
 # The kinds Get-IemRegRaw saves (anything else it refuses).
 $script:Kinds = @('absent', 'String', 'ExpandString', 'MultiString', 'DWord', 'QWord', 'Binary')
+# Set, Confirm and Undo (the SYSTEM task included) never overlap: one Global\
+# lock, as IemTuningStore's boot lock (no DACL of its own: the .NET Framework
+# constructor opens an existing one with MUTEX_MODIFY_STATE | SYNCHRONIZE, which
+# every elevated caller and SYSTEM get from the creator's default DACL).
+$script:LockName = 'Global\iemmixer-ssh-shell'
+$script:LockWaitMs = 60000
 $script:SidAdmins = 'S-1-5-32-544'
 $script:SidSystem = 'S-1-5-18'
+$script:SidUsers = 'S-1-5-32-545'
 $script:SidTrustedInstaller = 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
 $script:KeyTrusted = @($script:SidAdmins, $script:SidSystem, $script:SidTrustedInstaller)
 # Registry rights that change a key's values or its rules: set value (2),
@@ -103,6 +110,29 @@ try {
 }
 exit $code
 '@
+
+# ---- the lock ----
+
+function Invoke-IemShellLocked {
+    # Runs -Body under the lock of Set, Confirm and Undo: waited for at most
+    # LockWaitMs, an abandoned one (its holder ended without releasing it) taken
+    # over, always released. Returns what -Body returns.
+    param([Parameter(Mandatory)][scriptblock]$Body)
+    $lock = New-Object -TypeName System.Threading.Mutex -ArgumentList $false, $script:LockName
+    $held = $false
+    try {
+        try { $held = $lock.WaitOne($script:LockWaitMs) }
+        catch {
+            if ($_.Exception.GetBaseException() -isnot [System.Threading.AbandonedMutexException]) { throw }
+            $held = $true
+        }
+        if (-not $held) { throw "the ssh-shell lock was not free within $($script:LockWaitMs / 1000) s (another Set, Confirm or Undo runs): nothing changed" }
+        return (& $Body)
+    } finally {
+        if ($held) { $lock.ReleaseMutex() }
+        $lock.Dispose()
+    }
+}
 
 # ---- the key and its values ----
 
@@ -156,6 +186,25 @@ function Get-IemOurShellValues {
         DefaultShellCommandOption = @{ kind = 'String'; data = $script:CommandOption }
         DefaultShellArguments = @{ kind = 'String'; data = $script:ShellArguments }
     }
+}
+
+function New-IemShellKey {
+    # A key that does not exist yet, created admin-only in one step (owner
+    # Administrators; Administrators and SYSTEM full, Users read; nothing
+    # inherited from HKLM\SOFTWARE) before any value goes into it.
+    param([Parameter(Mandatory)][string]$Key)
+    $sec = New-Object System.Security.AccessControl.RegistrySecurity
+    $sec.SetOwner((New-Object System.Security.Principal.SecurityIdentifier $script:SidAdmins))
+    $sec.SetAccessRuleProtection($true, $false)
+    foreach ($a in @(@($script:SidAdmins, 'FullControl'), @($script:SidSystem, 'FullControl'), @($script:SidUsers, 'ReadKey'))) {
+        $sec.AddAccessRule((New-Object System.Security.AccessControl.RegistryAccessRule((New-Object System.Security.Principal.SecurityIdentifier $a[0]),
+            [System.Security.AccessControl.RegistryRights]$a[1], 'ContainerInherit', 'None', 'Allow')))
+    }
+    $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
+    try {
+        $k = $base.CreateSubKey($Key.Substring('HKLM:\'.Length), [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, $sec)
+        $k.Close()
+    } finally { $base.Close() }
 }
 
 function Test-IemShellKeyAcl {
@@ -218,13 +267,34 @@ function Read-IemSavedShell {
     $values = Get-IemProp $doc 'values'
     if ($null -eq $values) { throw "$($Paths.prior) holds no values: refused" }
     foreach ($n in $script:Names) {
-        $v = Get-IemProp $values $n
-        $kind = [string](Get-IemProp $v 'kind')
-        if ($null -eq $v -or $script:Kinds -cnotcontains $kind -or ($kind -cne 'absent' -and $null -eq $v.PSObject.Properties['data'])) {
-            throw "$($Paths.prior): $n is no value Set-IemRegRaw writes back: refused"
-        }
+        if (-not (Test-IemSavedRaw -Raw (Get-IemProp $values $n))) { throw "$($Paths.prior): $n is no value Set-IemRegRaw writes back: refused" }
     }
     return $doc
+}
+
+function Test-IemSavedRaw {
+    # A saved value Set-IemRegRaw writes back whole: kind 'absent', or a kind
+    # Get-IemRegRaw saves with its data in that kind's form (checked before any
+    # value is written, so a restore never stops half-way on bad data).
+    param([AllowNull()]$Raw)
+    if ($null -eq $Raw) { return $false }
+    $kind = [string](Get-IemProp $Raw 'kind')
+    if ($kind -ceq 'absent') { return $true }
+    if ($script:Kinds -cnotcontains $kind -or $null -eq $Raw.PSObject.Properties['data']) { return $false }
+    $data = $Raw.data
+    switch ($kind) {
+        'MultiString' { return (@($data | Where-Object { $_ -isnot [string] }).Count -eq 0) }
+        'DWord' {
+            $n = 0
+            return ($data -is [string] -and [int]::TryParse($data, [Globalization.NumberStyles]::AllowLeadingSign, [Globalization.CultureInfo]::InvariantCulture, [ref]$n))
+        }
+        'QWord' {
+            $q = [int64]0
+            return ($data -is [string] -and [int64]::TryParse($data, [Globalization.NumberStyles]::AllowLeadingSign, [Globalization.CultureInfo]::InvariantCulture, [ref]$q))
+        }
+        'Binary' { return ($data -is [string] -and $data -cmatch '^([0-9a-f]{2})*$') }
+    }
+    return ($data -is [string])
 }
 
 function Write-IemSavedShell {
@@ -241,25 +311,48 @@ function Write-IemSavedShell {
     return $back
 }
 
-function Install-IemShellUndoFiles {
-    # The undo task's folder: the entry script and copies of the three modules
-    # (the stage copies the dev box checked), admin-only and read back. A file
-    # that already holds exactly those bytes admin-only is kept: an armed
-    # task's files are rewritten only for a new build.
-    param([Parameter(Mandatory)]$Paths, [Parameter(Mandatory)][string]$UserSid)
-    Install-IemElevatedFolder -Path $Paths.dir -UserSid $UserSid
-    $files = [ordered]@{}
-    $files[$Paths.entry] = $script:Utf8NoBom.GetBytes($script:UndoEntry)
-    foreach ($m in $script:ModuleFiles) { $files[(Join-Path $Paths.dir (Split-Path -Leaf $m))] = [IO.File]::ReadAllBytes($m) }
-    foreach ($p in @($files.Keys)) {
-        $want = Get-IemBytesSha256 -Bytes $files[$p]
-        $kept = (Test-Path -LiteralPath $p -PathType Leaf) -and (Test-IemElevatedItem -Path $p -UserSid $UserSid).Count -eq 0 -and
-                (Get-IemBytesSha256 -Bytes ([IO.File]::ReadAllBytes($p))) -ceq $want
-        if (-not $kept) { Write-IemElevatedFile -Path $p -Bytes $files[$p] }
-        $bad = Test-IemElevatedItem -Path $p -UserSid $UserSid
-        if ($bad.Count -gt 0) { throw ('undo file read-back: ' + ($bad -join '; ')) }
-        if ((Get-IemBytesSha256 -Bytes ([IO.File]::ReadAllBytes($p))) -cne $want) { throw "$p does not read back" }
+function Write-IemShellFile {
+    # One file of the undo folder holding exactly -Bytes admin-only, read
+    # back. A file that already does is kept; one whose rights read back but
+    # whose bytes differ (a new build) is swapped whole (File.Replace keeps its
+    # rules), so an armed task meets the old file or the new one, never part of
+    # one; anything else is written fresh (Write-IemElevatedFile).
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][byte[]]$Bytes, [Parameter(Mandatory)][string]$UserSid)
+    $want = Get-IemBytesSha256 -Bytes $Bytes
+    $rightsOk = (Test-Path -LiteralPath $Path -PathType Leaf) -and -not (Test-IemReparsePoint -Path $Path) -and
+                (Test-IemElevatedItem -Path $Path -UserSid $UserSid).Count -eq 0
+    if ($rightsOk -and (Get-IemBytesSha256 -Bytes ([IO.File]::ReadAllBytes($Path))) -ceq $want) { return }
+    if ($rightsOk) {
+        $tmp = $Path + '.tmp'
+        Write-IemElevatedFile -Path $tmp -Bytes $Bytes
+        [IO.File]::Replace($tmp, $Path, $null)
+    } else {
+        Write-IemElevatedFile -Path $Path -Bytes $Bytes
     }
+    $bad = Test-IemElevatedItem -Path $Path -UserSid $UserSid
+    if ($bad.Count -gt 0) { throw ('undo file read-back: ' + ($bad -join '; ')) }
+    if ((Get-IemBytesSha256 -Bytes ([IO.File]::ReadAllBytes($Path))) -cne $want) { throw "$Path does not read back" }
+}
+
+function Install-IemShellUndoFiles {
+    # The undo task's folder: the entry script and copies of the three modules,
+    # each read once and refused, before anything is written, unless its
+    # sha256 is the one iempc checked (-ModuleSha256: the stage is shared with
+    # other sessions, which stage their own builds), admin-only and read back.
+    param([Parameter(Mandatory)]$Paths, [Parameter(Mandatory)][string]$UserSid, [Parameter(Mandatory)][hashtable]$ModuleSha256)
+    $files = [ordered]@{}
+    foreach ($m in $script:ModuleFiles) {
+        $leaf = Split-Path -Leaf $m
+        $want = [string]$ModuleSha256[$leaf]
+        if ($want -cnotmatch '^[0-9a-f]{64}$') { throw "no sha256 for ${leaf}: refused, nothing changed" }
+        $bytes = [IO.File]::ReadAllBytes($m)
+        $got = Get-IemBytesSha256 -Bytes $bytes
+        if ($got -cne $want) { throw "the stage's $leaf (sha256 $got) is not the build iempc checked ($want): refused, nothing changed" }
+        $files[(Join-Path $Paths.dir $leaf)] = $bytes
+    }
+    $files[$Paths.entry] = $script:Utf8NoBom.GetBytes($script:UndoEntry)
+    Install-IemElevatedFolder -Path $Paths.dir -UserSid $UserSid
+    foreach ($p in @($files.Keys)) { Write-IemShellFile -Path $p -Bytes $files[$p] -UserSid $UserSid }
 }
 
 function Get-IemLastUndo {
@@ -328,20 +421,22 @@ function Remove-IemUndoTask {
 
 function Register-IemUndoTask {
     # The one-shot undo: a SYSTEM task in -TaskFolder that runs the entry
-    # script once at now + -Minutes (local time), and after a missed start as
-    # soon as it can (StartWhenAvailable: a reboot in between); only
-    # Administrators and SYSTEM may read, run or change it; never ended hard.
-    # Read back; returns its start time.
+    # script once at now + -Minutes (in UTC: a clock change moves nothing), and
+    # after a missed start as soon as it can (StartWhenAvailable: a reboot in
+    # between); only Administrators and SYSTEM may read, run or change it;
+    # never ended hard. A folder this makes is Administrators' and SYSTEM's
+    # only; an existing one (\iemmixer holds our other tasks) is kept as it is,
+    # the task's own descriptor is what is read back. Returns its start time.
     param([Parameter(Mandatory)]$Paths, [Parameter(Mandatory)][string]$Key, [Parameter(Mandatory)][string]$TaskFolder,
           [Parameter(Mandatory)][string]$TaskName, [Parameter(Mandatory)][string]$UserSid, [Parameter(Mandatory)][int]$Minutes)
     $sch = Connect-IemScheduler
     $f = Get-IemTaskFolder -Scheduler $sch -Path $TaskFolder
-    if ($null -eq $f) { $f = $sch.GetFolder('\').CreateFolder($TaskFolder.Trim('\')) }
+    if ($null -eq $f) { $f = $sch.GetFolder('\').CreateFolder($TaskFolder.Trim('\'), $script:TaskSddl) }
     $ps = Join-Path ([Environment]::GetFolderPath('System')) 'WindowsPowerShell\v1.0\powershell.exe'
     $taskArgs = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File ' + (Format-IemArg $Paths.entry) +
         ' -Key ' + (Format-IemArg $Key) + ' -TaskFolder ' + (Format-IemArg $TaskFolder) + ' -TaskName ' + (Format-IemArg $TaskName) +
         ' -UserSid ' + (Format-IemArg $UserSid)
-    $at = [DateTime]::Now.AddMinutes($Minutes).ToString('s', [Globalization.CultureInfo]::InvariantCulture)
+    $at = [DateTime]::UtcNow.AddMinutes($Minutes).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [Globalization.CultureInfo]::InvariantCulture)
     $d = $sch.NewTask(0)
     $d.RegistrationInfo.Description = 'iemmixer #15: restores the prior OpenSSH default shell unless iempc ssh-shell confirmed the new one'
     $d.Principal.LogonType = $script:LogonServiceAccount
@@ -354,6 +449,7 @@ function Register-IemUndoTask {
     $s.DisallowStartIfOnBatteries = $false
     $s.StopIfGoingOnBatteries = $false
     $s.RunOnlyIfIdle = $false
+    $s.RunOnlyIfNetworkAvailable = $false
     $s.IdleSettings.StopOnIdleEnd = $false
     $s.AllowHardTerminate = $false
     $s.AllowDemandStart = $true
@@ -384,141 +480,182 @@ function Register-IemUndoTask {
     if ($trs.Count -ne 1 -or [int]$trs[0].Type -ne $script:TriggerTime -or -not [bool]$trs[0].Enabled -or [datetime]$trs[0].StartBoundary -ne [datetime]$at) {
         $bad += ('triggers ' + (@($trs | ForEach-Object { '{0}@{1}' -f $_.Type, $_.StartBoundary }) -join ','))
     }
+    # Everything that decides whether it can run when due.
     $bs = $back.Settings
-    if (-not $bs.Enabled -or $bs.AllowHardTerminate -or -not $bs.StartWhenAvailable -or [string]$bs.ExecutionTimeLimit -cne 'PT0S') { $bad += 'settings' }
+    $runs = [bool]$bs.Enabled -and -not [bool]$bs.AllowHardTerminate -and [bool]$bs.StartWhenAvailable -and [bool]$bs.AllowDemandStart -and
+            -not [bool]$bs.DisallowStartIfOnBatteries -and -not [bool]$bs.StopIfGoingOnBatteries -and -not [bool]$bs.RunOnlyIfIdle -and
+            -not [bool]$bs.RunOnlyIfNetworkAvailable -and [int]$bs.MultipleInstances -eq 2 -and [string]$bs.ExecutionTimeLimit -ceq 'PT0S'
+    if (-not $runs) { $bad += 'settings' }
     $sddl = [string]$task.GetSecurityDescriptor(4)
     if (-not (Test-IemUndoTaskSddl -Sddl $sddl)) { $bad += "security descriptor $sddl" }
     if ($bad.Count -gt 0) { throw ("undo task read-back ($TaskFolder\$TaskName): " + ($bad -join '; ')) }
     return $at
 }
 
-# ---- the three functions iempc and the undo task run ----
+# ---- the three functions iempc and the undo task run (one at a time: Invoke-IemShellLocked) ----
 
 function Set-IemSshShell {
     # Idempotent. Values already ours with nothing saved: `unchanged` (an undo
     # task without saved values could restore nothing and is removed).
     # Otherwise the values as they are now are saved (`set`), or a pending
     # save is kept, since it holds the values from before our first change
-    # (`rearmed`); the undo task is armed (or moved to now + -UndoMinutes);
-    # only then are the three values written. Read back: each a REG_SZ with
-    # our data, DefaultShell an existing file equal to System32\cmd.exe, and
-    # the key's security (Test-IemShellKeyAcl). Refused before anything
-    # changes: an elevated root that is not admin-only, a key someone else may
-    # change, a value Get-IemRegRaw cannot save exactly, saved values that do
-    # not read back admin-only, an undo task that is queued or runs. A failure
-    # after the undo task was armed names it: it restores the prior values at
-    # its time.
-    param([string]$Key = $script:DefaultKey, [string]$TaskFolder = $script:DefaultTaskFolder, [string]$TaskName = $script:DefaultTaskName,
+    # (`rearmed`); the undo files go in (the modules only as -ModuleSha256
+    # says), the undo task is armed (or moved to now + -UndoMinutes); only then
+    # is a missing key created admin-only, its security read, and the three
+    # values written. Read back: each a REG_SZ with our data, DefaultShell an
+    # existing file equal to System32\cmd.exe, and the key's security
+    # (Test-IemShellKeyAcl). Refused before anything changes: an elevated root
+    # that is not admin-only, a key someone else may change, a value
+    # Get-IemRegRaw cannot save exactly, saved values that do not read back
+    # admin-only, an undo task that is queued or runs, a module that is not the
+    # checked build. A failure after the undo task was armed names it: it
+    # restores the prior values at its time.
+    param([Parameter(Mandatory)][hashtable]$ModuleSha256, [string]$Key = $script:DefaultKey,
+          [string]$TaskFolder = $script:DefaultTaskFolder, [string]$TaskName = $script:DefaultTaskName,
           [string]$ElevatedRoot = '', [string]$User = '', [ValidateRange(2, 60)][int]$UndoMinutes = $script:UndoMinutes)
     Assert-IemShellKey -Key $Key
-    $u = Resolve-IemUser -User $User
-    $paths = Get-IemShellPaths -ElevatedRoot $ElevatedRoot
-    $rootBad = Test-IemElevatedItem -Path $paths.root -UserSid $u.sid
-    if ($rootBad.Count -gt 0) { throw ('the elevated root is refused (Register-IemTasks makes it): ' + ($rootBad -join '; ')) }
-    $ours = Get-IemOurShellValues
-    # The key's security first, then its values: a key someone else may change is refused whatever it holds.
-    $keyBad = Test-IemShellKeyAcl -Key $Key -Missing
-    if ($keyBad.Count -gt 0) { throw ('refused, nothing changed: ' + ($keyBad -join '; ')) }
-    $current = Get-IemShellValues -Key $Key
-    $saved = Read-IemSavedShell -Paths $paths -Key $Key -UserSid $u.sid
-    $task = Get-IemUndoTask -TaskFolder $TaskFolder -TaskName $TaskName
-    if (Test-IemUndoTaskBusy -Task $task) {
-        throw "the undo task $TaskFolder\$TaskName is queued or runs now: nothing changed; run this again once it has ended"
+    Invoke-IemShellLocked {
+        $u = Resolve-IemUser -User $User
+        $paths = Get-IemShellPaths -ElevatedRoot $ElevatedRoot
+        $rootBad = Test-IemElevatedItem -Path $paths.root -UserSid $u.sid
+        if ($rootBad.Count -gt 0) { throw ('the elevated root is refused (Register-IemTasks makes it): ' + ($rootBad -join '; ')) }
+        $ours = Get-IemOurShellValues
+        # The key's security first, then its values: a key someone else may change is refused whatever it holds.
+        $keyBad = Test-IemShellKeyAcl -Key $Key -Missing
+        if ($keyBad.Count -gt 0) { throw ('refused, nothing changed: ' + ($keyBad -join '; ')) }
+        $current = Get-IemShellValues -Key $Key
+        $saved = Read-IemSavedShell -Paths $paths -Key $Key -UserSid $u.sid
+        $task = Get-IemUndoTask -TaskFolder $TaskFolder -TaskName $TaskName
+        if (Test-IemUndoTaskBusy -Task $task) {
+            throw "the undo task $TaskFolder\$TaskName is queued or runs now: nothing changed; run this again once it has ended"
+        }
+        if ($null -eq $saved -and (Test-IemSameShellValues $current $ours)) {
+            if ($null -ne $task) { [void](Remove-IemUndoTask -TaskFolder $TaskFolder -TaskName $TaskName) }
+            return [pscustomobject]@{ state = 'unchanged'; key = $Key; values = $current; prior = $null; undo = $null; undo_log = (Get-IemLastUndo -Paths $paths) }
+        }
+        $state = 'rearmed'
+        Install-IemShellUndoFiles -Paths $paths -UserSid $u.sid -ModuleSha256 $ModuleSha256
+        if ($null -eq $saved) {
+            $state = 'set'
+            $saved = Write-IemSavedShell -Paths $paths -Key $Key -Values $current -UserSid $u.sid
+        }
+        $at = Register-IemUndoTask -Paths $paths -Key $Key -TaskFolder $TaskFolder -TaskName $TaskName -UserSid $u.sid -Minutes $UndoMinutes
+        try {
+            if (-not (Test-Path -LiteralPath $Key)) { New-IemShellKey -Key $Key }
+            $keyBad = Test-IemShellKeyAcl -Key $Key
+            if ($keyBad.Count -gt 0) { throw ('nothing written: ' + ($keyBad -join '; ')) }
+            foreach ($n in $script:Names) { Set-IemRegRaw -Path $Key -Name $n -Raw (Get-IemProp $ours $n) }
+            $read = Get-IemShellValues -Key $Key
+            if (-not (Test-IemSameShellValues $read $ours)) { throw ('the values do not read back: ' + (Format-IemShellValues $read)) }
+            $keyBad = Test-IemShellKeyAcl -Key $Key
+            if ($keyBad.Count -gt 0) { throw ('the key reads back: ' + ($keyBad -join '; ')) }
+        } catch {
+            throw ("$_" + "; the undo task $TaskFolder\$TaskName stays armed: it restores the prior values at $at (UTC)")
+        }
+        return [pscustomobject]@{ state = $state; key = $Key; values = $read; prior = (Get-IemProp $saved 'values')
+                                  undo = [pscustomobject]@{ task = ($TaskFolder.TrimEnd('\') + '\' + $TaskName); at = $at }
+                                  undo_log = (Get-IemLastUndo -Paths $paths) }
     }
-    if ($null -eq $saved -and (Test-IemSameShellValues $current $ours)) {
-        if ($null -ne $task) { [void](Remove-IemUndoTask -TaskFolder $TaskFolder -TaskName $TaskName) }
-        return [pscustomobject]@{ state = 'unchanged'; key = $Key; values = $current; prior = $null; undo = $null; undo_log = (Get-IemLastUndo -Paths $paths) }
-    }
-    $state = 'rearmed'
-    Install-IemShellUndoFiles -Paths $paths -UserSid $u.sid
-    if ($null -eq $saved) {
-        $state = 'set'
-        $saved = Write-IemSavedShell -Paths $paths -Key $Key -Values $current -UserSid $u.sid
-    }
-    $at = Register-IemUndoTask -Paths $paths -Key $Key -TaskFolder $TaskFolder -TaskName $TaskName -UserSid $u.sid -Minutes $UndoMinutes
-    try {
-        foreach ($n in $script:Names) { Set-IemRegRaw -Path $Key -Name $n -Raw (Get-IemProp $ours $n) }
-        $read = Get-IemShellValues -Key $Key
-        if (-not (Test-IemSameShellValues $read $ours)) { throw ('the values do not read back: ' + (Format-IemShellValues $read)) }
-        $keyBad = Test-IemShellKeyAcl -Key $Key
-        if ($keyBad.Count -gt 0) { throw ('the key reads back: ' + ($keyBad -join '; ')) }
-    } catch {
-        throw ("$_" + "; the undo task $TaskFolder\$TaskName stays armed: it restores the prior values at $at")
-    }
-    [pscustomobject]@{ state = $state; key = $Key; values = $read; prior = (Get-IemProp $saved 'values')
-                       undo = [pscustomobject]@{ task = ($TaskFolder.TrimEnd('\') + '\' + $TaskName); at = $at }
-                       undo_log = (Get-IemLastUndo -Paths $paths) }
 }
 
 function Confirm-IemSshShell {
     # After a fresh session ran with /d: only when the three values are ours,
-    # the key reads back admin-only and the undo task is neither queued nor
-    # running. The saved values go first (an undo that starts later finds
-    # nothing to restore and removes itself), then the task; then the values
-    # and undo.log are read again, so an undo that ran meanwhile is never
-    # reported as confirmed. `confirmed`, or `unchanged` when nothing was armed.
+    # the key, the elevated root and the undo folder (with what it holds) read
+    # back admin-only and the undo task is neither queued nor running. The
+    # saved values go first (an undo that starts later finds nothing to
+    # restore and removes itself), then the task; then the values and undo.log
+    # are read again, so an undo that ran meanwhile is never reported as
+    # confirmed. `confirmed`, or `unchanged` when nothing was armed.
     param([string]$Key = $script:DefaultKey, [string]$TaskFolder = $script:DefaultTaskFolder, [string]$TaskName = $script:DefaultTaskName,
-          [string]$ElevatedRoot = '')
+          [string]$ElevatedRoot = '', [string]$User = '')
     Assert-IemShellKey -Key $Key
-    $paths = Get-IemShellPaths -ElevatedRoot $ElevatedRoot
-    $ours = Get-IemOurShellValues
-    $current = Get-IemShellValues -Key $Key
-    if (-not (Test-IemSameShellValues $current $ours)) {
-        throw ('the values are not ours (' + (Format-IemShellValues $current) + '): nothing confirmed; an armed undo task stays')
+    Invoke-IemShellLocked {
+        $u = Resolve-IemUser -User $User
+        $paths = Get-IemShellPaths -ElevatedRoot $ElevatedRoot
+        $ours = Get-IemOurShellValues
+        $current = Get-IemShellValues -Key $Key
+        if (-not (Test-IemSameShellValues $current $ours)) {
+            throw ('the values are not ours (' + (Format-IemShellValues $current) + '): nothing confirmed; an armed undo task stays')
+        }
+        $bad = Test-IemShellKeyAcl -Key $Key
+        foreach ($p in @($paths.root, $paths.dir, $paths.prior, $paths.log)) {
+            if ($p -ne $paths.root -and -not (Test-Path -LiteralPath $p) -and -not (Test-IemReparsePoint -Path $p)) { continue }
+            $bad += Test-IemElevatedItem -Path $p -UserSid $u.sid
+        }
+        if ($bad.Count -gt 0) { throw ('nothing confirmed, an armed undo task stays: ' + ($bad -join '; ')) }
+        if (Test-IemUndoTaskBusy -Task (Get-IemUndoTask -TaskFolder $TaskFolder -TaskName $TaskName)) {
+            throw "the undo task $TaskFolder\$TaskName is queued or runs now: nothing confirmed; run iempc ssh-shell again once it has ended"
+        }
+        $logBefore = Get-IemLastUndo -Paths $paths
+        $removed = @()
+        if (Test-Path -LiteralPath $paths.prior) {
+            [IO.File]::Delete($paths.prior)
+            $removed += 'saved values'
+        }
+        try { if (Remove-IemUndoTask -TaskFolder $TaskFolder -TaskName $TaskName) { $removed += 'undo task' } } catch {
+            throw "the saved values are removed, so the undo task restores nothing; it was not removed: $($_.Exception.Message)"
+        }
+        $after = Get-IemShellValues -Key $Key
+        if (-not (Test-IemSameShellValues $after $ours)) {
+            throw ('the undo restored the prior values meanwhile (' + (Format-IemShellValues $after) + '): nothing confirmed; run iempc ssh-shell again')
+        }
+        $logAfter = Get-IemLastUndo -Paths $paths
+        if ($logAfter -cne $logBefore) { throw "the undo task ran meanwhile ($logAfter): nothing confirmed; run iempc ssh-shell again" }
+        $state = 'unchanged'
+        if ($removed.Count -gt 0) { $state = 'confirmed' }
+        return [pscustomobject]@{ state = $state; removed = $removed; key = $Key }
     }
-    $keyBad = Test-IemShellKeyAcl -Key $Key
-    if ($keyBad.Count -gt 0) { throw ('nothing confirmed, an armed undo task stays: ' + ($keyBad -join '; ')) }
-    if (Test-IemUndoTaskBusy -Task (Get-IemUndoTask -TaskFolder $TaskFolder -TaskName $TaskName)) {
-        throw "the undo task $TaskFolder\$TaskName is queued or runs now: nothing confirmed; run iempc ssh-shell again once it has ended"
-    }
-    if (Test-IemReparsePoint -Path $paths.prior) { throw "$($paths.prior) is a junction or a link: refused" }
-    $logBefore = Get-IemLastUndo -Paths $paths
-    $removed = @()
-    if (Test-Path -LiteralPath $paths.prior) {
-        [IO.File]::Delete($paths.prior)
-        $removed += 'saved values'
-    }
-    try { if (Remove-IemUndoTask -TaskFolder $TaskFolder -TaskName $TaskName) { $removed += 'undo task' } } catch {
-        throw "the saved values are removed, so the undo task restores nothing; it was not removed: $($_.Exception.Message)"
-    }
-    $after = Get-IemShellValues -Key $Key
-    if (-not (Test-IemSameShellValues $after $ours)) {
-        throw ('the undo restored the prior values meanwhile (' + (Format-IemShellValues $after) + '): nothing confirmed; run iempc ssh-shell again')
-    }
-    $logAfter = Get-IemLastUndo -Paths $paths
-    if ($logAfter -cne $logBefore) { throw "the undo task ran meanwhile ($logAfter): nothing confirmed; run iempc ssh-shell again" }
-    $state = 'unchanged'
-    if ($removed.Count -gt 0) { $state = 'confirmed' }
-    [pscustomobject]@{ state = $state; removed = $removed; key = $Key }
 }
 
 function Undo-IemSshShell {
     # What the undo task runs (also by hand): the saved values written back
-    # exactly (Set-IemRegRaw; absent deletes the value) and read back, then the
-    # saved values and the task removed. Only from saved values that read back
-    # admin-only (-UserSid: the user in the elevated folders' rules, which the
-    # task passes, since it runs as SYSTEM). `restored`, or `nothing-saved` (a
-    # leftover task is removed).
+    # (Set-IemRegRaw; absent deletes the value) and read back, then the saved
+    # values and the task removed: `restored`. Only from saved values that read
+    # back admin-only and whole (-UserSid: the user in the elevated folders'
+    # rules, which the task passes, since it runs as SYSTEM). Saved values it
+    # cannot trust, or a write-back that fails, end in sshd's own default
+    # instead (the three values deleted: ssh answers as before any change),
+    # the saved file kept for inspection and the task removed: `default`, with
+    # `why`. Nothing saved: `nothing-saved` (a leftover task is removed).
     param([string]$Key = $script:DefaultKey, [string]$TaskFolder = $script:DefaultTaskFolder, [string]$TaskName = $script:DefaultTaskName,
           [string]$ElevatedRoot = '', [string]$User = '', [string]$UserSid = '')
     Assert-IemShellKey -Key $Key
-    $sid = $UserSid
-    if (-not $sid) { $sid = (Resolve-IemUser -User $User).sid }
-    $paths = Get-IemShellPaths -ElevatedRoot $ElevatedRoot
-    $saved = Read-IemSavedShell -Paths $paths -Key $Key -UserSid $sid
-    if ($null -eq $saved) {
+    Invoke-IemShellLocked {
+        $sid = $UserSid
+        if (-not $sid) { $sid = (Resolve-IemUser -User $User).sid }
+        $paths = Get-IemShellPaths -ElevatedRoot $ElevatedRoot
+        $why = $null
+        $saved = $null
+        try { $saved = Read-IemSavedShell -Paths $paths -Key $Key -UserSid $sid } catch { $why = "$_" }
+        if ($null -eq $why -and $null -eq $saved) {
+            [void](Remove-IemUndoTask -TaskFolder $TaskFolder -TaskName $TaskName)
+            return [pscustomobject]@{ state = 'nothing-saved'; key = $Key; values = (Get-IemShellValues -Key $Key) }
+        }
+        $restored = $false
+        if ($null -eq $why) {
+            $prior = Get-IemProp $saved 'values'
+            try {
+                foreach ($n in $script:Names) { Set-IemRegRaw -Path $Key -Name $n -Raw (Get-IemProp $prior $n) }
+                $read = Get-IemShellValues -Key $Key
+                if (-not (Test-IemSameShellValues $read $prior)) { throw ('they read back as ' + (Format-IemShellValues $read)) }
+                $restored = $true
+            } catch { $why = 'the saved values could not be written back: ' + "$_" }
+        }
+        if ($restored) {
+            [IO.File]::Delete($paths.prior)
+            try { [void](Remove-IemUndoTask -TaskFolder $TaskFolder -TaskName $TaskName) } catch {
+                throw "the prior values are restored; the undo task $TaskFolder\$TaskName was not removed: $($_.Exception.Message)"
+            }
+            return [pscustomobject]@{ state = 'restored'; key = $Key; values = $read }
+        }
+        foreach ($n in $script:Names) { Remove-IemRegValue -Path $Key -Name $n }
+        $read = Get-IemShellValues -Key $Key
+        # Get-IemRegRaw's values are hashtables: their keys are no PSObject properties (Get-IemProp).
+        $left = @($script:Names | Where-Object { [string](Get-IemProp $read $_).kind -cne 'absent' })
+        if ($left.Count -gt 0) { throw "$why; sshd's default could not be restored either: $(Format-IemShellValues $read)" }
         [void](Remove-IemUndoTask -TaskFolder $TaskFolder -TaskName $TaskName)
-        return [pscustomobject]@{ state = 'nothing-saved'; key = $Key; values = (Get-IemShellValues -Key $Key) }
+        return [pscustomobject]@{ state = 'default'; why = $why; key = $Key; values = $read }
     }
-    $prior = Get-IemProp $saved 'values'
-    foreach ($n in $script:Names) { Set-IemRegRaw -Path $Key -Name $n -Raw (Get-IemProp $prior $n) }
-    $read = Get-IemShellValues -Key $Key
-    if (-not (Test-IemSameShellValues $read $prior)) { throw ('the restored values do not read back: ' + (Format-IemShellValues $read)) }
-    [IO.File]::Delete($paths.prior)
-    try { [void](Remove-IemUndoTask -TaskFolder $TaskFolder -TaskName $TaskName) } catch {
-        throw "the prior values are restored; the undo task $TaskFolder\$TaskName was not removed: $($_.Exception.Message)"
-    }
-    [pscustomobject]@{ state = 'restored'; key = $Key; values = $read }
 }
 
 Export-ModuleMember -Function Set-IemSshShell, Confirm-IemSshShell, Undo-IemSshShell, Test-IemUndoTaskSddl
