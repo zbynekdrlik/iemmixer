@@ -99,27 +99,36 @@ export class Relay {
     };
     const { ws: real, opened } = liveSocket(url, path);
     this.sockets.add(real);
+    // Until the open, an error or a close is liveSocket's (it closes the
+    // socket after rejecting `opened`, and that error comes on a nextTick,
+    // before the catch below runs): its reason is the one recorded.
+    let isOpen = false;
     const queue: (string | Buffer)[] = [];
     route.onMessage((m) => {
       if (real.readyState === real.OPEN) real.send(m);
       else queue.push(m);
     });
-    // Replaces the handler's own onClose: the page's close now also ends the real socket.
+    // Replaces the handler's own onClose: the page's close now also ends the
+    // real socket, and completes the page's (a handled close is not forwarded).
     route.onClose(() => {
       side.gone = true;
       real.close();
+      void route.close(CLOSE);
     });
     real.once("open", () => {
+      isOpen = true;
       for (const m of queue.splice(0)) real.send(m);
     });
     real.on("message", (d: Buffer, binary: boolean) => {
       this.observe(path, d, binary);
       if (!side.gone) route.send(binary ? d : d.toString());
     });
-    real.on("error", () => fail(`${path} failed (socket error)`));
+    real.on("error", () => {
+      if (isOpen) fail(`${path} failed (socket error)`);
+    });
     real.on("close", () => {
       this.sockets.delete(real);
-      if (failed || side.gone || this.ending) return;
+      if (!isOpen || failed || side.gone || this.ending) return;
       this.serverClosed.push(path);
       void route.close(CLOSE);
     });
@@ -148,6 +157,7 @@ export async function relaySockets(page: Page, opts: { hil?: boolean } = {}): Pr
     const side: PageSide = { gone: false };
     route.onClose(() => {
       side.gone = true;
+      void route.close(CLOSE);
     });
     let path = "/ws/…";
     try {

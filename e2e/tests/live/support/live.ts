@@ -22,6 +22,8 @@ export const test = base.extend<LiveFixtures>({
     const watch = await BurstWatch.open(request);
     try {
       await use(watch);
+      // A server close after the test's last look at the watch fails it too.
+      watch.check();
     } finally {
       watch.close();
     }
@@ -36,16 +38,18 @@ export const test = base.extend<LiveFixtures>({
 export { expect };
 export type { Page } from "@playwright/test";
 
-/** The annotation keys `live_verdict.py` reads (its NUMBER_KEYS). */
-export type LiveNumberKey =
-  | "listen_hz"
-  | "listen_dbfs"
-  | "first_audio_ms"
-  | "talkback_db"
-  | "limiter_active_s"
-  | "meter_fps"
-  | "burst_input_dbfs"
-  | "opus_frames";
+/** The annotation keys `live_verdict.py` reads, in its order (its NUMBER_KEYS; tone.spec.ts compares them). */
+export const LIVE_NUMBER_KEYS = [
+  "listen_hz",
+  "listen_dbfs",
+  "first_audio_ms",
+  "talkback_db",
+  "limiter_active_s",
+  "meter_fps",
+  "burst_input_dbfs",
+  "opus_frames",
+] as const;
+export type LiveNumberKey = (typeof LIVE_NUMBER_KEYS)[number];
 
 /**
  * Hands `key=<value>` to the verdict as a `live_number` annotation, the only

@@ -3,6 +3,9 @@ import { toneOf } from "./live/support/tone";
 import { celt20msStereo } from "./live/support/burst";
 import { namesBuild } from "./live/support/env";
 import { ANALYSER_INIT, readTone } from "./live/support/audio";
+import { LIVE_NUMBER_KEYS } from "./live/support/live";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 
 // The live specs' pure estimators and their in-page analyser (S7, #10), run
 // in the mock E2E job: the live specs themselves run only from the ops live
@@ -178,4 +181,15 @@ test("the analyser init script reads what a real AudioContext plays: 1 kHz at -2
   expect(Math.abs(tone.hz - 1000), `${tone.hz} Hz`).toBeLessThanOrEqual(0.5);
   expect(Math.abs(tone.dbfs + 20), `${tone.dbfs} dBFS`).toBeLessThanOrEqual(0.1);
   expect(tone.gap).toBe(false);
+});
+
+test("the live specs' number keys are the live verdict's NUMBER_KEYS", () => {
+  // The verdict keeps a number only under one of its keys: a key the specs
+  // spell differently would vanish from the report without an error.
+  const verdict = readFileSync(resolve(__dirname, "../../scripts/iem-pc/live_verdict.py"), "utf8");
+  const tuple = /^NUMBER_KEYS = \(([^)]*)\)/m.exec(verdict);
+  expect(tuple, "NUMBER_KEYS in live_verdict.py").not.toBeNull();
+  const keys = [...(tuple as RegExpExecArray)[1].matchAll(/"([a-z_]+)"/g)].map((m) => m[1]);
+  expect(keys.length).toBeGreaterThan(0);
+  expect([...LIVE_NUMBER_KEYS]).toEqual(keys);
 });
