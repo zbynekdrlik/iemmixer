@@ -31,7 +31,9 @@ STOPPED = {"stopped": ["NT Kernel Logger", "IemMarkers"], "gone": [], "kept": []
 TDIR = "C:\\ProgramData\\iemmixer\\tuning"
 TUNING = TDIR + "\\IemTuning.psm1"
 MEASURE = TDIR + "\\IemMeasure.psm1"
+STORE = TDIR + "\\IemTuningStore.psm1"   # IemTuning loads it from its own folder (#34)
 HT, HM = sha256(MODULES["tuning/IemTuning.psm1"]), sha256(MODULES["tuning/IemMeasure.psm1"])
+HS = sha256(MODULES["tuning/IemTuningStore.psm1"])
 IDLE = "(Get-Process -Id $PID).PriorityClass = 'Idle'"
 # The preflight's own text (the elevated root's expression is in every TEMP setup too, #15).
 PREFLIGHT = "measure = (& $h"
@@ -60,7 +62,7 @@ class TraceBase(Base):
         self.gh.artifact = make_zip(self.tmp / "artifact-tuning" / f"iemmixer-{SHA}.zip", extra=MODULES)
         self.fetched()
         self.statuses(status(engine=ENGINE), status(engine={**ENGINE, "callbacks": 4000, "missed": 2, "resets": 1}))
-        self.answers: dict = {PREFLIGHT: {"dir": TDIR, "tuning": HT, "measure": HM,
+        self.answers: dict = {PREFLIGHT: {"dir": TDIR, "tuning": HT, "measure": HM, "store": HS,
                                                                           "profile": sha256(self.profile.read_bytes())},
                               "Start-IemTrace": {"dir": "x", "started": "2026-10-07T06:00:00Z"},
                               "Stop-IemTraceSessions": STOPPED, "'-merge'": None,
@@ -138,9 +140,12 @@ class TraceTests(TraceBase):
         pc_run = f"X:\\root\\traces\\{run}"
         preflight, start, stop, merge, dpcisr = (s for s, _ in self.pc.modules)
         self.assertIn("(Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'iemmixer\\tuning')", preflight)
+        self.assertIn("store = (& $h (Join-Path $t 'IemTuningStore.psm1'))", preflight)   # #34
         # TEMP and TMP first: IemTuning's Add-Type compiles there, never in the user's TEMP (#15).
         temp = ip.elevated_ps().temp_first()
-        load = f"{temp} ; {ip.hash_check(TUNING, HT)} ; {ip.hash_check(MEASURE, HM)} ; Import-Module '{MEASURE}' -Force ; "
+        # Every module the import loads is checked first: IemTuning's store too (#34).
+        load = (f"{temp} ; {ip.hash_check(STORE, HS)} ; {ip.hash_check(TUNING, HT)} ; {ip.hash_check(MEASURE, HM)} ; "
+                f"Import-Module '{MEASURE}' -Force ; ")
         self.assertIn(f"try {{ {load}$r = & {{ Start-IemTrace -Xperf '{XPERF}' -Dir '{pc_run}' }}", start)
         self.assertLess(start.index("$env:TEMP = $iemTemp ; $env:TMP = $iemTemp"), start.index(f"Import-Module '{MEASURE}'"))
         self.assertIn("$iemTemp = Join-Path $iemRoot 'temp'", temp)
@@ -225,14 +230,24 @@ class TraceTests(TraceBase):
             self.assertEqual(self.pc.calls, [("iemmode.exe", ["status"], "abandon")], why)
 
     def test_modules_that_are_not_the_running_bundle_s_are_refused_before_the_start(self) -> None:
-        for found in ({"dir": TDIR, "tuning": HT, "measure": "0" * 64}, {"dir": TDIR, "tuning": None, "measure": None},
-                      {"dir": "relative\\tuning", "tuning": HT, "measure": HM}, "ok"):
+        for found in ({"dir": TDIR, "tuning": HT, "measure": "0" * 64, "store": HS},
+                      {"dir": TDIR, "tuning": None, "measure": None, "store": None},
+                      {"dir": "relative\\tuning", "tuning": HT, "measure": HM, "store": HS}, "ok"):
             self.answers[PREFLIGHT] = found
             self.pc.modules.clear()
             code, docs, err = self.trace()
             self.assertEqual((code, docs, self.names()), (1, [], ["preflight"]), found)
             self.assertIn("no trace:", err, found)
         self.assertIn(f"iempc tuning-install --sha {SHA}", err)
+        # A folder from before #34 (no store), or another store, is not the running bundle's.
+        for store in (None, "0" * 64):
+            self.answers[PREFLIGHT] = {"dir": TDIR, "tuning": HT, "measure": HM, "store": store,
+                                       "profile": sha256(self.profile.read_bytes())}
+            self.pc.modules.clear()
+            code, docs, err = self.trace()
+            self.assertEqual((code, docs, self.names()), (1, [], ["preflight"]), store)
+            self.assertIn("IemTuningStore.psm1 is", err, store)
+            self.assertIn(f"iempc tuning-install --sha {SHA}", err, store)
 
     def test_a_running_bundle_this_box_never_fetched_is_refused_before_the_pc_changes(self) -> None:
         self.statuses(status(engine={**ENGINE, "build": SHA2}))
@@ -274,7 +289,7 @@ class TraceTests(TraceBase):
 
     def test_a_pc_profile_other_than_the_local_one_is_refused_before_the_start(self) -> None:
         for found in ("0" * 64, None):
-            self.answers[PREFLIGHT] = {"dir": TDIR, "tuning": HT, "measure": HM, "profile": found}
+            self.answers[PREFLIGHT] = {"dir": TDIR, "tuning": HT, "measure": HM, "store": HS, "profile": found}
             self.pc.modules.clear()
             code, docs, err = self.trace()
             self.assertEqual((code, docs, self.names()), (1, [], ["preflight"]), found)
