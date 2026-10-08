@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """S1c tuning window on the dev box (design note §7, §8): the PC tuning
-modules (IemTuning.psm1, IemMeasure.psm1 from the verified spike bundle) and
-the measurement set, on top of spike_window.py's window, state, event guard
-and unwind. A window opens only with spike_window's `new --signal`; every
-command here checks the "ide event" flag and pre-empts like spike_window.
-Site values come only from the private env ($SPIKE_ENV) and profile
+modules (IemTuning.psm1 with its IemTuningStore.psm1, IemMeasure.psm1 from the
+verified spike bundle) and the measurement set, on top of spike_window.py's
+window, state, event guard and unwind. A window opens only with spike_window's
+`new --signal`; every command here checks the "ide event" flag and pre-empts
+like spike_window. Site values come only from the private env ($SPIKE_ENV) and profile
 ($TUNING_PROFILE). Nothing is ever ended by force; a reboot happens only on
 the owner's quoted approval, and it is an immediate restart that an app may
 veto (never a delayed one: Windows forces those, I8)."""
@@ -422,11 +422,11 @@ def analysis_step(root: str, since: str, body: str) -> str:
 # keeps a failed IemTuning load to itself, so Get-IemNow alone proves nothing),
 # the temp folder the step runs with (#15: GetTempPath, which Add-Type's compile
 # reads, is the admin-only <elevated root>\temp, set before the tuning modules' import)
-# and where the four modules were imported from (#15: the admin-only stage, never bin).
+# and where the five modules were imported from (#15, #34: the admin-only stage, never bin).
 ANALYSIS_PROBE = ("[pscustomobject]@{ priority = \"$((Get-Process -Id $PID).PriorityClass)\"; now = Get-IemNow; "
                   "tuning = [bool](Get-Command -Name ConvertTo-IemLpNumber -ErrorAction SilentlyContinue); "
                   "temp = [IO.Path]::GetTempPath(); "
-                  "modules = @(Get-Module -Name SpikePc, GoldenPc, IemMeasure, IemTuning | ForEach-Object { $_.Path }) }")
+                  "modules = @(Get-Module -Name SpikePc, GoldenPc, IemMeasure, IemTuning, IemTuningStore | ForEach-Object { $_.Path }) }")
 
 
 def read_text(path: Path) -> str:

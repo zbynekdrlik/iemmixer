@@ -54,8 +54,11 @@ $script:RunnerSha256 = '1150692afa94e71f872017e254ea55b6eece1eece3fe7e3a6d4c93d0
 $script:OpsUrl = 'https://github.com/zbynekdrlik/iemmixer-ops'
 # The four verbs the tuning task accepts (design section 5.1).
 $script:TuningVerbs = @('enter', 'exit', 'state', 'apply-tier2')
-# The files Install-IemTuning puts into the elevated tuning folder (#15).
-$script:TuningFiles = @('IemTuning.psm1', 'IemMeasure.psm1', 'profile.json')
+# The files Install-IemTuning puts into the elevated tuning folder (#15), in the
+# order they go in: IemTuning imports IemTuningStore from its own folder (#34), so
+# the store goes in first: a new IemTuning never meets an older store, or none on
+# the first install after #34.
+$script:TuningFiles = @('IemTuningStore.psm1', 'IemTuning.psm1', 'IemMeasure.psm1', 'profile.json')
 
 # The elevated tasks' entry script, written by Register-IemTasks next to its
 # copy of this module.
@@ -985,8 +988,10 @@ function Install-IemTuning {
     # the dev box (`iempc tuning-install`, and `iempc activate`'s refresh): the
     # only path that installs them (#15, the decision of 2026-10-07: never from
     # the bundle in the user's root, which any process of the user may change).
-    # -SourceDir holds what the dev box uploaded: IemTuning.psm1, IemMeasure.psm1
-    # and, unless -KeepProfile, profile.json. Each is read once from there and
+    # -SourceDir holds what the dev box uploaded: IemTuning.psm1, its
+    # IemTuningStore.psm1 (#34: IemTuning imports it from its own folder, so the
+    # staged import below loads the staged store), IemMeasure.psm1 and, unless
+    # -KeepProfile, profile.json. Each is read once from there and
     # its SHA-256 must be the one the dev box computed (the modules from the
     # attested bundle, the profile from the private file). Those checked bytes
     # go into an admin-only staging folder (<Root>\tuning-stage), and nothing is
@@ -1002,12 +1007,13 @@ function Install-IemTuning {
     # none); a failure part-way leaves each file whole and is thrown, and a file
     # whose rename failed after its delete keeps its checked copy in the stage,
     # named in the error. Everything is read back (Test-IemElevatedItem, the
-    # hashes). Returns the three hashes, never the profile's content (site
+    # hashes). Returns the four hashes, never the profile's content (site
     # values, P6).
     param(
         [Parameter(Mandatory)][string]$SourceDir,
         [Parameter(Mandatory)][string]$TuningSha256,
         [Parameter(Mandatory)][string]$MeasureSha256,
+        [Parameter(Mandatory)][string]$StoreSha256,
         [string]$ProfileSha256 = '',
         [switch]$KeepProfile,
         [string]$Root = '',
@@ -1019,7 +1025,7 @@ function Install-IemTuning {
     $Root = Resolve-IemElevatedRoot -ElevatedRoot $Root
     $u = Resolve-IemUser -User $User
     $tuning = Join-Path $Root 'tuning'
-    $want = [ordered]@{ 'IemTuning.psm1' = $TuningSha256; 'IemMeasure.psm1' = $MeasureSha256 }
+    $want = [ordered]@{ 'IemTuningStore.psm1' = $StoreSha256; 'IemTuning.psm1' = $TuningSha256; 'IemMeasure.psm1' = $MeasureSha256 }
     if (-not $KeepProfile) { $want['profile.json'] = $ProfileSha256 }
     $bytes = @{}
     foreach ($name in @($want.Keys)) {
@@ -1082,7 +1088,8 @@ function Install-IemTuning {
         throw $err
     }
     Remove-IemTuningStage -Stage $stage
-    [pscustomobject]@{ tuning = $read['IemTuning.psm1']; measure = $read['IemMeasure.psm1']; profile = $read['profile.json'] }
+    [pscustomobject]@{ store = $read['IemTuningStore.psm1']; tuning = $read['IemTuning.psm1']; measure = $read['IemMeasure.psm1']
+                       profile = $read['profile.json'] }
 }
 
 # ---- firewall (P9) ----
@@ -1786,17 +1793,24 @@ function Invoke-IemTuningVerb {
     # (<elevated root>\tuning, from the task's command line); 'absent' until S1c
     # ships them. The module runs elevated, so it is imported only when its
     # folder, that folder's parent, the module and the profile are all owned
-    # by Administrators or SYSTEM and only they may change them.
+    # by Administrators or SYSTEM and only they may change them. IemTuning
+    # imports IemTuningStore.psm1 from the same folder (#34): read back the same
+    # way whenever anything is there by that name (a dangling link too). A
+    # folder from before #34 holds none and its IemTuning needs none; a newer
+    # IemTuning without it fails its own import.
     param([Parameter(Mandatory)][string]$Verb, [string]$TuningDir = '')
     if ($script:TuningVerbs -cnotcontains $Verb) { throw "tuning verb '$Verb' refused (enter, exit, state, apply-tier2)" }
     $TuningDir = $TuningDir.TrimEnd('\')
     if (-not $TuningDir -or -not [IO.Path]::IsPathRooted($TuningDir)) { throw 'the tuning folder (-TuningDir) is not an absolute path' }
     $module = Join-Path $TuningDir 'IemTuning.psm1'
+    $store = Join-Path $TuningDir 'IemTuningStore.psm1'
     $profilePath = Join-Path $TuningDir 'profile.json'
     if (-not (Test-Path -LiteralPath $module -PathType Leaf) -or -not (Test-Path -LiteralPath $profilePath -PathType Leaf)) { return 'absent' }
     $sid = Get-IemTaskUserSid
+    $check = @((Split-Path -Parent $TuningDir), $TuningDir, $module, $profilePath)
+    if ((Test-Path -LiteralPath $store) -or (Test-IemReparsePoint -Path $store)) { $check += $store }
     $bad = @()
-    foreach ($p in @((Split-Path -Parent $TuningDir), $TuningDir, $module, $profilePath)) {
+    foreach ($p in $check) {
         $b = Test-IemElevatedItem -Path $p -UserSid $sid
         $bad += $b
     }

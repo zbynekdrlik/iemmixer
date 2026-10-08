@@ -1,8 +1,9 @@
 #Requires -Version 5.1
 # Self-test of Install-IemTuning (IemPc.psm1, #15) on Windows PowerShell 5.1 (CI
 # job windows, started by Test-IemPc.ps1, an ephemeral administrator runner):
-# S1c's tuning modules and a synthetic profile into a temp elevated root. The
-# real IemTuning.psm1 checks the profiles (profile_cases.json's layouts), every
+# S1c's tuning modules (IemTuning.psm1 with its IemTuningStore.psm1, #34, and
+# IemMeasure.psm1) and a synthetic profile into a temp elevated root. The real
+# IemTuning.psm1 checks the profiles (profile_cases.json's layouts), every
 # refusal writes nothing, and nothing is written through a junction.
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -18,14 +19,14 @@ $base = Join-Path ([IO.Path]::GetTempPath()) ('iem-tuning-install-' + $id)
 $me = Resolve-IemUser
 $cases = Get-Content -LiteralPath (Join-Path $tuningSrc 'profile_cases.json') -Raw | ConvertFrom-Json
 $goodLayout = [ordered]@{ housekeeping = @(0); nic = @(1); card = @(2); audio = @(3) }
-$names = @('IemTuning.psm1', 'IemMeasure.psm1', 'profile.json')
+$names = @('IemTuningStore.psm1', 'IemTuning.psm1', 'IemMeasure.psm1', 'profile.json')
 
 function New-Source([string]$Name, $Layout, [string[]]$Drop = @(), [switch]$NoProfile) {
     # What the dev box uploads: the real modules and a synthetic profile
     # (processor numbers and test names only, no site value).
     $d = Join-Path $base $Name
     New-Item -ItemType Directory -Force -Path $d | Out-Null
-    foreach ($m in 'IemTuning.psm1', 'IemMeasure.psm1') { Copy-Item -LiteralPath (Join-Path $tuningSrc $m) -Destination $d }
+    foreach ($m in 'IemTuningStore.psm1', 'IemTuning.psm1', 'IemMeasure.psm1') { Copy-Item -LiteralPath (Join-Path $tuningSrc $m) -Destination $d }
     if ($NoProfile) { return $d }
     $p = [ordered]@{
         version = 1; journal = (Join-Path $d 'journal.json'); registry_root = 'HKCU:\Software\iemmixer-tuning-install-test'
@@ -50,7 +51,8 @@ function New-ElevatedRoot([string]$Name) {
 }
 
 function Get-SourceHashes([string]$Src) {
-    $h = @{ TuningSha256 = (FileSha (Join-Path $Src 'IemTuning.psm1')); MeasureSha256 = (FileSha (Join-Path $Src 'IemMeasure.psm1')) }
+    $h = @{ TuningSha256 = (FileSha (Join-Path $Src 'IemTuning.psm1')); MeasureSha256 = (FileSha (Join-Path $Src 'IemMeasure.psm1'))
+            StoreSha256 = (FileSha (Join-Path $Src 'IemTuningStore.psm1')) }
     if (Test-Path -LiteralPath (Join-Path $Src 'profile.json')) { $h.ProfileSha256 = (FileSha (Join-Path $Src 'profile.json')) }
     return $h
 }
@@ -78,8 +80,9 @@ try {
     $env:TEMP = Join-Path $base 'no-such-temp'
     $env:TMP = $env:TEMP
     $r = Install-IemTuning -Root $er -SourceDir $src @h
-    Assert ((@($r.PSObject.Properties.Name) -join ',') -ceq 'tuning,measure,profile') "tuning-install-returns-the-three-hashes-only ($(@($r.PSObject.Properties.Name) -join ','))"
-    Assert ($r.tuning -ceq $h.TuningSha256 -and $r.measure -ceq $h.MeasureSha256 -and $r.profile -ceq $h.ProfileSha256) 'tuning-install-returns-the-hashes-it-read-back'
+    Assert ((@($r.PSObject.Properties.Name) -join ',') -ceq 'store,tuning,measure,profile') "tuning-install-returns-the-four-hashes-only ($(@($r.PSObject.Properties.Name) -join ','))"
+    Assert ($r.store -ceq $h.StoreSha256 -and $r.tuning -ceq $h.TuningSha256 -and $r.measure -ceq $h.MeasureSha256 -and
+            $r.profile -ceq $h.ProfileSha256) 'tuning-install-returns-the-hashes-it-read-back'
     $tuning = Join-Path $er 'tuning'
     $tb = Test-IemElevatedItem -Path $tuning -UserSid $me.sid
     Assert ($tb.Count -eq 0) "tuning-install-makes-an-admin-only-tuning-folder ($($tb -join '; '))"
@@ -98,6 +101,9 @@ try {
     # folder, never again from the upload in the user's root.
     $loaded = & (Get-Module IemPc) { (Get-Module IemTuning).Path }
     Assert ("$loaded".StartsWith((Join-Path $er 'tuning-stage') + '\', [StringComparison]::OrdinalIgnoreCase)) "tuning-install-imports-the-staged-module-never-the-upload ($loaded)"
+    # IemTuning loaded its store from its own folder: the stage, never the upload (#34).
+    $loadedStore = & (Get-Module IemPc) { (Get-Module IemTuningStore).Path }
+    Assert ("$loadedStore".StartsWith((Join-Path $er 'tuning-stage') + '\', [StringComparison]::OrdinalIgnoreCase)) "tuning-install-imports-the-staged-store-never-the-upload ($loadedStore)"
     # IemTuning's Add-Type compiled in the admin-only <root>\temp, never in the user's TEMP (#15).
     $etemp = Join-Path $er 'temp'
     $eb = Test-IemElevatedItem -Path $etemp -UserSid $me.sid
@@ -121,6 +127,24 @@ try {
     $e = ErrorOf { Install-IemTuning -Root $empty -SourceDir $src @bad }
     Assert ($e -like '*not 64 lowercase hex*' -and (Test-Untouched $empty)) "tuning-install-refuses-a-hash-that-is-not-lowercase-hex ($e)"
 
+    # ---- IemTuning's store (#34): a wrong hash or a missing upload writes nothing ----
+    $srcS = New-Source 'src-store-changed' $goodLayout
+    Add-Content -LiteralPath (Join-Path $srcS 'IemTuningStore.psm1') -Value '# changed after the sums'
+    $hS = Get-SourceHashes $srcS
+    $hS.StoreSha256 = $h.StoreSha256
+    $e = ErrorOf { Install-IemTuning -Root $er -SourceDir $srcS @hS }
+    Assert ($e -like '*IemTuningStore.psm1: sha256*refused*' -and (Get-Installed $er) -ceq $installed) "tuning-install-a-wrong-store-hash-changes-nothing ($e)"
+    $e = ErrorOf { Install-IemTuning -Root $empty -SourceDir $srcS @hS }
+    Assert ($e -like '*IemTuningStore.psm1: sha256*refused*' -and (Test-Untouched $empty)) "tuning-install-a-wrong-store-hash-makes-no-folder ($e)"
+    $srcN = New-Source 'src-no-store' $goodLayout
+    Remove-Item -LiteralPath (Join-Path $srcN 'IemTuningStore.psm1')
+    $e = ErrorOf { Install-IemTuning -Root $er -SourceDir $srcN @h }
+    Assert ($e -like '*IemTuningStore.psm1*' -and (Get-Installed $er) -ceq $installed) "tuning-install-without-the-store-changes-nothing ($e)"
+    $bad = Get-SourceHashes $src
+    $bad.StoreSha256 = 'not-a-hash'
+    $e = ErrorOf { Install-IemTuning -Root $empty -SourceDir $src @bad }
+    Assert ($e -like '*IemTuningStore.psm1*not 64 lowercase hex*' -and (Test-Untouched $empty)) "tuning-install-refuses-a-store-hash-that-is-not-hex ($e)"
+
     # ---- a profile IemTuning's own loader refuses writes nothing ----
     $badLayouts = @('two-roles-share-a-processor', 'a-string', 'processor-64', 'a-null-role', 'a-scalar-role', 'a-layout-that-is-not-an-object')
     $picked = @($cases.layouts | Where-Object { $badLayouts -contains $_.name })
@@ -138,7 +162,7 @@ try {
     $hs = Get-SourceHashes $s
     $e = ErrorOf { Install-IemTuning -Root $er -SourceDir $s @hs }
     Assert ($e -like "*missing 'nic'*" -and (Get-Installed $er) -ceq $installed) "tuning-install-a-profile-without-a-key-writes-nothing ($e)"
-    $e = ErrorOf { Install-IemTuning -Root $er -SourceDir $src -TuningSha256 $h.TuningSha256 -MeasureSha256 $h.MeasureSha256 }
+    $e = ErrorOf { Install-IemTuning -Root $er -SourceDir $src -TuningSha256 $h.TuningSha256 -MeasureSha256 $h.MeasureSha256 -StoreSha256 $h.StoreSha256 }
     Assert ($e -like '*-ProfileSha256*-KeepProfile*' -and (Get-Installed $er) -ceq $installed) "tuning-install-needs-a-profile-or-keep-profile ($e)"
     $e = ErrorOf { Install-IemTuning -Root $er -SourceDir $src @h -KeepProfile }
     Assert ($e -like '*-ProfileSha256*-KeepProfile*' -and (Get-Installed $er) -ceq $installed) "tuning-install-refuses-a-profile-and-keep-profile ($e)"
@@ -148,7 +172,8 @@ try {
     Add-Content -LiteralPath (Join-Path $src3 'IemMeasure.psm1') -Value '# the next bundle'
     $h3 = Get-SourceHashes $src3
     $r3 = Install-IemTuning -Root $er -SourceDir $src3 @h3 -KeepProfile
-    Assert ($r3.measure -ceq $h3.MeasureSha256 -and $r3.measure -cne $h.MeasureSha256 -and $r3.profile -ceq $h.ProfileSha256) 'tuning-install-keep-profile-replaces-the-modules'
+    Assert ($r3.measure -ceq $h3.MeasureSha256 -and $r3.measure -cne $h.MeasureSha256 -and $r3.store -ceq $h3.StoreSha256 -and
+            $r3.profile -ceq $h.ProfileSha256) 'tuning-install-keep-profile-replaces-the-modules'
     Assert ((FileSha (Join-Path $tuning 'profile.json')) -ceq $h.ProfileSha256) 'tuning-install-keep-profile-leaves-the-profile'
     $e = ErrorOf { Install-IemTuning -Root $empty -SourceDir $src3 @h3 -KeepProfile }
     Assert ($e -like '*installed profile*' -and (Test-Untouched $empty)) "tuning-install-keep-profile-without-one-writes-nothing ($e)"

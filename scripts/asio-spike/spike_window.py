@@ -47,7 +47,8 @@ from spike_rules import (CPU_LIST, FRAMES, MAX_SECONDS, REQUIRED, buffer_args, b
 
 POLL_S = 2.0
 REPO = "zbynekdrlik/iemmixer"
-BUNDLE_FILES = ("GoldenPc.psm1", "IemMeasure.psm1", "IemTuning.psm1", "SpikePc.psm1", "asio_spike.exe", "spike-task.ps1")
+BUNDLE_FILES = ("GoldenPc.psm1", "IemMeasure.psm1", "IemTuning.psm1", "IemTuningStore.psm1", "SpikePc.psm1", "asio_spike.exe",
+                "spike-task.ps1")
 # The modules a window session stages from bin, checked by the bundle record's sums (#15).
 MODULES = tuple(n for n in BUNDLE_FILES if n.endswith(".psm1"))
 TASK = "-TaskPath '\\iemmixer\\' -TaskName 'iemmixer-asio-spike'"
@@ -664,12 +665,14 @@ def cmd_run(env, args, on_poll=None) -> dict:
 
 def measure_import(root: str) -> str:
     """The import of the S1c modules from the verified bundle (IemMeasure loads
-    IemTuning from its own folder, whose Add-Type compiles), TEMP and TMP first
-    at the admin-only <elevated root>\\temp: csc writes and loads its DLL
-    there, never in the session user's TEMP (#15, elevated_ps.temp_first). Both
-    are read from <root>\\bin, checked by ps_script's $iemSums and imported
-    only from the admin-only stage."""
-    return " ; ".join([elevated_ps.temp_first(), elevated_ps.staged(bin_modules(root, "IemTuning.psm1", "IemMeasure.psm1")),
+    IemTuning from its own folder, whose Add-Type compiles, and IemTuning loads
+    IemTuningStore from its own, #34), TEMP and TMP first at the admin-only
+    <elevated root>\\temp: csc writes and loads its DLL there, never in the
+    session user's TEMP (#15, elevated_ps.temp_first). All three are read from
+    <root>\\bin, checked by ps_script's $iemSums and imported only from the
+    admin-only stage, each one staged before the module that loads it."""
+    return " ; ".join([elevated_ps.temp_first(),
+                       elevated_ps.staged(bin_modules(root, "IemTuningStore.psm1", "IemTuning.psm1", "IemMeasure.psm1")),
                        elevated_ps.import_staged("IemMeasure.psm1", "-Force -Global")])
 
 

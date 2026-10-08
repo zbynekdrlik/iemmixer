@@ -86,7 +86,7 @@ class StageTests(unittest.TestCase):
         self.assertLess(spike, s.index("Import-Module (Join-Path $iemStage 'SpikePc.psm1') -Force"))
         self.assertLess(s.index("Import-Module"), s.index("$r = & { Get-X }"))
         table = s[s.index("$iemSums = @{"):]
-        for name in ("GoldenPc.psm1", "SpikePc.psm1", "IemTuning.psm1", "IemMeasure.psm1"):
+        for name in ("GoldenPc.psm1", "SpikePc.psm1", "IemTuningStore.psm1", "IemTuning.psm1", "IemMeasure.psm1"):
             self.assertIn(f"'{name}' = '{SUMS[name]}'", table[:table.index("}")])
         self.assertNotIn("asio_spike.exe", s)
         with self.assertRaisesRegex(sw.StepError, "SpikePc.psm1"):
@@ -95,9 +95,11 @@ class StageTests(unittest.TestCase):
     def test_the_tuning_modules_are_staged_after_temp_and_only_iemmeasure_is_imported(self) -> None:
         for body in (sw.tuning_body(ENV, "Get-IemNow"), tw.analysis_step("R", "2026-01-01T00:00:00Z", "B")):
             self.only_staged(body, ["IemMeasure.psm1"])
+            store = self.staged_from_bin(body, "R", "IemTuningStore.psm1")   # IemTuning loads it from its own folder (#34)
             tuning = self.staged_from_bin(body, "R", "IemTuning.psm1")   # IemMeasure loads it from its own folder
             measure = self.staged_from_bin(body, "R", "IemMeasure.psm1")
-            self.assertLess(body.index("$env:TEMP = $iemTemp"), tuning)
+            self.assertLess(body.index("$env:TEMP = $iemTemp"), store)
+            self.assertLess(store, tuning)
             self.assertLess(tuning, measure)
             self.assertIn("Import-Module (Join-Path $iemStage 'IemMeasure.psm1') -Force -Global", body)
 
@@ -115,6 +117,27 @@ class StageTests(unittest.TestCase):
         self.only_staged(s, ["GoldenPc.psm1"])
         self.staged_from_bin(s, "R", "GoldenPc.psm1", want=f"'{want}'")
         self.assertLess(s.index("Import-Module"), s.index("$r = & { Get-X }"))
+
+
+class StoreFirstTests(unittest.TestCase):
+    """#34: IemTuning.psm1 imports IemTuningStore.psm1 from its own folder, so a
+    session that stages IemTuning stages the store before it, in the same stage."""
+
+    def test_iemtuning_is_staged_only_after_its_store(self) -> None:
+        tuning = ("'R\\bin\\IemTuning.psm1'", "IemTuning.psm1", None)
+        store = ("'R\\bin\\IemTuningStore.psm1'", "IemTuningStore.psm1", None)
+        measure = ("'R\\bin\\IemMeasure.psm1'", "IemMeasure.psm1", None)
+        for mods in ([tuning], [tuning, store], [tuning, measure], [measure, tuning]):
+            with self.assertRaisesRegex(ValueError, "IemTuningStore.psm1"):
+                elevated_ps.staged(mods)
+        with self.assertRaisesRegex(ValueError, "IemTuningStore.psm1"):
+            elevated_ps.staged_import("'R\\up\\IemTuning.psm1'", "IemTuning.psm1", "0" * 64)
+        s = elevated_ps.staged([store, tuning, measure])
+        self.assertLess(s.index("$iemMod = Join-Path $iemStage 'IemTuningStore.psm1'"),
+                        s.index("$iemMod = Join-Path $iemStage 'IemTuning.psm1'"))
+        # A session without IemTuning stages what it needs (the stop-only import, SpikePc).
+        elevated_ps.staged([measure])
+        elevated_ps.staged([store])
 
 
 class StageWriteTests(unittest.TestCase):
@@ -192,7 +215,7 @@ class BundleRecordTests(unittest.TestCase):
         with self.assertRaisesRegex(sw.StepError, "cannot be read"):   # a StepError, never an OSError (review)
             sw.ps(env, "Get-X")
         (sw.bundle_dir(env, SHA) / "SHA256SUMS").write_text(f"{SUMS['GoldenPc.psm1']}  GoldenPc.psm1\n", encoding="utf-8")
-        with self.assertRaisesRegex(sw.StepError, "lists no IemMeasure.psm1, IemTuning.psm1, SpikePc.psm1"):
+        with self.assertRaisesRegex(sw.StepError, "lists no IemMeasure.psm1, IemTuning.psm1, IemTuningStore.psm1, SpikePc.psm1"):
             sw.ps(env, "Get-X")
         self.assertEqual(self.sent, [])
 
@@ -260,8 +283,8 @@ class CiScriptTests(unittest.TestCase):
                 code = tw.main([*argv, "--root", "C:\\r", "--sums", str(sums)])
             self.assertEqual(code, 0)
             self.assertEqual(out.getvalue(), sw.ps_script("C:\\r", body, SUMS) + "\n")
-        # The CI runner asserts the four modules' paths are all in the stage (#15).
-        self.assertIn("Get-Module -Name SpikePc, GoldenPc, IemMeasure, IemTuning", tw.ANALYSIS_PROBE)
+        # The CI runner asserts the five modules' paths are all in the stage (#15, #34).
+        self.assertIn("Get-Module -Name SpikePc, GoldenPc, IemMeasure, IemTuning, IemTuningStore", tw.ANALYSIS_PROBE)
 
     def test_the_trace_stop_prints_as_sent(self) -> None:
         # The asio-spike job times it against TRACE_STOP_CALL_S (#15, the last lane, item 5).

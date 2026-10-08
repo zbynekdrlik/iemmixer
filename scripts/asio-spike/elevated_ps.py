@@ -29,8 +29,8 @@ rule:
   $PSCommandPath (Install-IemElevatedDir copies it) is the staged copy too. A
   window session checks each module against `$iemSums` (sums_table: the
   fetched bundle record's sums, composed on the dev box), and a module that
-  loads another from its own folder (SpikePc GoldenPc, IemMeasure IemTuning)
-  has that one staged first;
+  loads another from its own folder (SpikePc GoldenPc, IemMeasure IemTuning,
+  IemTuning IemTuningStore: STAGED_FIRST, #34) has that one staged first;
 - TEMP and TMP point at <root>\\temp before IemTuning.psm1 loads: its Add-Type
   has csc write and then load a DLL in TEMP, and the session user's TEMP is open
   to every process of the user;
@@ -54,6 +54,12 @@ TEMP = "temp"
 BIN = "bin"   # the admin-only copies of our programs an elevated session runs (#15)
 NAME = re.compile(r"[A-Za-z0-9_.-]+")
 HEX64 = re.compile(r"[0-9a-f]{64}")
+# A module that always imports a sibling from its own folder, and that sibling
+# (#34: IemTuning.psm1 imports IemTuningStore.psm1, which holds its journal,
+# registry and boot functions): staged() stages the sibling first, so the import
+# never reaches outside the admin-only stage. IemMeasure's IemTuning is not
+# listed: its stop-only import loads IemMeasure alone.
+STAGED_FIRST = {"IemTuning.psm1": "IemTuningStore.psm1"}
 ADMINS = "(New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-544')"
 # An allow rule for anyone but Administrators and SYSTEM holding one of these
 # bits lets them change the item: write data and append (add a file, a folder),
@@ -129,7 +135,14 @@ def staged(mods: list[tuple[str, str, str | None]], root: str = ROOT) -> str:
     the module at `src` (a PowerShell string) read once and checked by `hexd`
     (None: `$iemSums[name]`), the stage made and read back, the copy written
     unless the stage already holds exactly those bytes, then read back
-    admin-only and checked again. `$iemMod` is the last one's stage copy."""
+    admin-only and checked again. `$iemMod` is the last one's stage copy.
+    A module that always loads a sibling from its own folder (STAGED_FIRST)
+    is refused unless that sibling is staged before it in the same list."""
+    names = [name for _, name, _ in mods]
+    for i, name in enumerate(names):
+        first = STAGED_FIRST.get(name)
+        if first and first not in names[:i]:
+            raise ValueError(f"stage: {name} loads {first} from its own folder: stage {first} before it")
     parts = []
     for i, (src, name, hexd) in enumerate(mods):
         want = _want(name, hexd)
