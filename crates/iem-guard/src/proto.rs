@@ -61,6 +61,10 @@ pub enum Request {
         input: String,
         dbfs: f64,
         ttl_s: f64,
+        /// The listen probe (S7, #10): the engine's `HilTestSignal.listen`.
+        /// Additive: absent reads false, false is never written.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        listen: bool,
     },
     Report {
         sha: String,

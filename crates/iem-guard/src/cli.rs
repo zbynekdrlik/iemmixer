@@ -25,7 +25,7 @@ pub const START_POLL: Duration = Duration::from_millis(500);
 
 pub const IEMMODE_USAGE: &str = "usage: iemmode status | event [--dry-run] [--direct]
   | dev [--build SHA] [--dry-run] | live --build SHA [--trial] [--dry-run]
-  | install <zip> | activate <sha> | test-signal <input> <dbfs> <ttl>
+  | install <zip> | activate <sha> | test-signal <input> <dbfs> <ttl> [--listen]
   | report <sha> <green|red> <detail> | job-begin <run> | job-end <run>
   | install-site <file> | force-reopen | inject-fault | inject-seh | inject-park | runner-stop
   | probe-task | rehearse-teardown | alarm-test | alarm-ack <id> | quit";
@@ -165,11 +165,18 @@ pub fn parse(args: &[String]) -> Result<Cli, String> {
             ask(Request::Activate { sha: sha(s)? })
         }
         "test-signal" => {
-            let [input, dbfs, ttl] = exactly(&rest)?;
+            // Only a trailing `--listen`, taken off before the three values,
+            // so a negative dB value never meets a flag parser.
+            let (listen, values) = match rest.split_last() {
+                Some((&"--listen", head)) => (true, head),
+                _ => (false, rest.as_slice()),
+            };
+            let [input, dbfs, ttl] = exactly(values)?;
             ask(Request::TestSignal {
                 input: input.to_owned(),
                 dbfs: number(dbfs)?,
                 ttl_s: number(ttl)?,
+                listen,
             })
         }
         "report" => {

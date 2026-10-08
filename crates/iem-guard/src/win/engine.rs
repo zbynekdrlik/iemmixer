@@ -428,18 +428,20 @@ pub(super) fn health(pc: &mut WinPc) -> R<Health> {
 }
 
 /// The HIL test signal (design §4, §7): `HilTestSignal`, encoded only on
-/// `card_tx`; the engine refuses it above its test-signal cap.
+/// `card_tx`, with `listen` also the listen probe (S7, #10); the engine
+/// refuses it above its test-signal cap.
 pub(super) fn hil_signal(
     pc: &mut WinPc,
     input: &str,
     dbfs: f64,
     ttl_s: f64,
     card_tx: &[u16],
+    listen: bool,
 ) -> R<()> {
     let sup = supervisor(pc, CONNECT, &Cancel::default())?;
     sup.command(
         "hil_test_signal",
-        proto::hil_test_signal(input, dbfs, ttl_s, card_tx),
+        proto::hil_test_signal(input, dbfs, ttl_s, card_tx, listen),
     )
     .map_err(StepError::Failed)
 }
