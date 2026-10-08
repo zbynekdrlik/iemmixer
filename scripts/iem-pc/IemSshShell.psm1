@@ -99,6 +99,9 @@ try {
     Import-Module ([IO.Path]::Combine($PSScriptRoot, 'IemSshShell.psm1')) -Force
     $r = Undo-IemSshShell -Key $Key -TaskFolder $TaskFolder -TaskName $TaskName -ElevatedRoot ([IO.Path]::GetDirectoryName($PSScriptRoot)) -UserSid $UserSid
     $line = 'undo ' + $r.state
+    foreach ($p in @('why', 'lock')) {
+        if ($null -ne $r.PSObject.Properties[$p] -and $r.$p) { $line += ': ' + ([string]$r.$p -replace '[\r\n]+', ' ') }
+    }
     $code = 0
 } catch {
     $line = 'undo failed: ' + ($_.Exception.Message -replace '[\r\n]+', ' ')
@@ -116,8 +119,11 @@ exit $code
 function Invoke-IemShellLocked {
     # Runs -Body under the lock of Set, Confirm and Undo: waited for at most
     # LockWaitMs, an abandoned one (its holder ended without releasing it) taken
-    # over, always released. Returns what -Body returns.
-    param([Parameter(Mandatory)][scriptblock]$Body)
+    # over, always released. Returns what -Body returns. A lock not free in
+    # time refuses, except with -GoOn (the one-shot undo: any process may
+    # create a Global\ name first, and the undo's job is to give ssh back):
+    # -Body then runs without it and its result says so (`lock`).
+    param([Parameter(Mandatory)][scriptblock]$Body, [switch]$GoOn)
     $lock = New-Object -TypeName System.Threading.Mutex -ArgumentList $false, $script:LockName
     $held = $false
     try {
@@ -126,8 +132,11 @@ function Invoke-IemShellLocked {
             if ($_.Exception.GetBaseException() -isnot [System.Threading.AbandonedMutexException]) { throw }
             $held = $true
         }
-        if (-not $held) { throw "the ssh-shell lock was not free within $($script:LockWaitMs / 1000) s (another Set, Confirm or Undo runs): nothing changed" }
-        return (& $Body)
+        $note = "the ssh-shell lock was not free within $($script:LockWaitMs / 1000) s (another Set, Confirm or Undo runs, or something else holds it)"
+        if (-not $held -and -not $GoOn) { throw "${note}: nothing changed" }
+        $r = & $Body
+        if (-not $held -and $r -is [pscustomobject]) { $r | Add-Member -NotePropertyName lock -NotePropertyValue "$note; went on without it" }
+        return $r
     } finally {
         if ($held) { $lock.ReleaseMutex() }
         $lock.Dispose()
@@ -292,7 +301,7 @@ function Test-IemSavedRaw {
             $q = [int64]0
             return ($data -is [string] -and [int64]::TryParse($data, [Globalization.NumberStyles]::AllowLeadingSign, [Globalization.CultureInfo]::InvariantCulture, [ref]$q))
         }
-        'Binary' { return ($data -is [string] -and $data -cmatch '^([0-9a-f]{2})*$') }
+        'Binary' { return ($data -is [string] -and $data -cmatch '\A([0-9a-f]{2})*\z') }
     }
     return ($data -is [string])
 }
@@ -325,7 +334,8 @@ function Write-IemShellFile {
     if ($rightsOk) {
         $tmp = $Path + '.tmp'
         Write-IemElevatedFile -Path $tmp -Bytes $Bytes
-        [IO.File]::Replace($tmp, $Path, $null)
+        # No backup file: NullString, since PowerShell would pass $null to a .NET string as '' (IemTuningStore's journal swap).
+        [IO.File]::Replace($tmp, $Path, [System.Management.Automation.Language.NullString]::Value)
     } else {
         Write-IemElevatedFile -Path $Path -Bytes $Bytes
     }
@@ -620,7 +630,7 @@ function Undo-IemSshShell {
     param([string]$Key = $script:DefaultKey, [string]$TaskFolder = $script:DefaultTaskFolder, [string]$TaskName = $script:DefaultTaskName,
           [string]$ElevatedRoot = '', [string]$User = '', [string]$UserSid = '')
     Assert-IemShellKey -Key $Key
-    Invoke-IemShellLocked {
+    Invoke-IemShellLocked -GoOn {
         $sid = $UserSid
         if (-not $sid) { $sid = (Resolve-IemUser -User $User).sid }
         $paths = Get-IemShellPaths -ElevatedRoot $ElevatedRoot
@@ -648,12 +658,16 @@ function Undo-IemSshShell {
             }
             return [pscustomobject]@{ state = 'restored'; key = $Key; values = $read }
         }
-        foreach ($n in $script:Names) { Remove-IemRegValue -Path $Key -Name $n }
-        $read = Get-IemShellValues -Key $Key
-        # Get-IemRegRaw's values are hashtables: their keys are no PSObject properties (Get-IemProp).
-        $left = @($script:Names | Where-Object { [string](Get-IemProp $read $_).kind -cne 'absent' })
-        if ($left.Count -gt 0) { throw "$why; sshd's default could not be restored either: $(Format-IemShellValues $read)" }
-        [void](Remove-IemUndoTask -TaskFolder $TaskFolder -TaskName $TaskName)
+        try {
+            foreach ($n in $script:Names) { Remove-IemRegValue -Path $Key -Name $n }
+            $read = Get-IemShellValues -Key $Key
+            # Get-IemRegRaw's values are hashtables: their keys are no PSObject properties (Get-IemProp).
+            $left = @($script:Names | Where-Object { [string](Get-IemProp $read $_).kind -cne 'absent' })
+            if ($left.Count -gt 0) { throw ('they read back as ' + (Format-IemShellValues $read)) }
+        } catch { throw "$why; sshd's default could not be restored either: $_" }
+        try { [void](Remove-IemUndoTask -TaskFolder $TaskFolder -TaskName $TaskName) } catch {
+            throw "$why; sshd's default is restored; the undo task $TaskFolder\$TaskName was not removed: $($_.Exception.Message)"
+        }
         return [pscustomobject]@{ state = 'default'; why = $why; key = $Key; values = $read }
     }
 }

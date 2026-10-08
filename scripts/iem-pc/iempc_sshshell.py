@@ -104,12 +104,11 @@ def wrote(s: dict):
     return shell.get("data") if isinstance(shell, dict) and shell.get("kind") == "String" else None
 
 
-def check_confirm(ip, r, armed: bool) -> dict:
-    """Confirm's answer. After a Set that armed the undo only `confirmed`
-    counts: `unchanged` would mean it found neither the saved values nor the
-    task, so what became of the undo is unknown."""
-    states = ("confirmed",) if armed else ("confirmed", "unchanged")
-    if not isinstance(r, dict) or r.get("state") not in states:
+def check_confirm(ip, r) -> dict:
+    """Confirm's answer (it runs only after a Set that armed the undo): only
+    `confirmed` counts; `unchanged` would mean it found neither the saved
+    values nor the task, so what became of the undo is unknown."""
+    if not isinstance(r, dict) or r.get("state") != "confirmed":
         raise ip.StepError(f"{CONFIRM} answered {str(r)[:300]!r}, not confirmed")
     return r
 
@@ -194,7 +193,7 @@ def run(ctx, ip) -> int:
     if s["state"] in ARMED:
         # Confirm changes the PC: a new flag lets it finish, so it may have confirmed before the event path.
         try:
-            confirm = check_confirm(ip, ip.run_module(env, CONFIRM, ip.BOOTSTRAP_S, mode, pre=pre), armed=True)
+            confirm = check_confirm(ip, ip.run_module(env, CONFIRM, ip.BOOTSTRAP_S, mode, pre=pre))
         except ip.EventNow:
             print(f"iempc: {CONFIRM} may have finished before the event path; if it did not, {undo_note(s)}",
                   file=sys.stderr, flush=True)
