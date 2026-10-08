@@ -101,7 +101,9 @@ exclude_re = [
   # WebSocket upgrades and per-connection loops (S5): socket reads, writes and
   # timers; the message logic is in tested functions (view::command,
   # updates_for, own_echo, addressed, alert_catchup, slot_of, TalkLock, the
-  # talkback decoder) and the E2E suites drive the sockets end to end.
+  # talkback decoder; the listen probe's asks_for_probe, feeds, Feeds::next
+  # and listen_ws/probe_gate.rs) and the E2E suites drive the sockets end to
+  # end.
   "iem-server/src/mixer_ws\\.rs.*\\b(ws_mixer|session|close_reload)\\b",
   "iem-server/src/listen_ws\\.rs.*\\b(ws_audio|session)\\b",
   "iem-server/src/talkback_ws\\.rs.*\\b(ws_talkback|session)\\b",

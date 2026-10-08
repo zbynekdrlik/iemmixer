@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use iem_engine::engine::{RunConfig, run};
-use iem_engine_proto::{ClientMsg, Cmd, EngineMsg, PROTO, Role};
+use iem_engine_proto::{ClientMsg, Cmd, EngineMsg, ErrorBody, PROTO, Role};
 
 use crate::AppState;
 use crate::engine::EngineClient;
@@ -131,6 +131,44 @@ impl EngineHarness {
         if !join_within(thread, Duration::from_secs(10)) {
             eprintln!("the test engine did not stop within 10 s; left running");
         }
+    }
+
+    /// `cmd` through a supervisor connection of its own (the guard's role,
+    /// S6; e.g. a HIL signal under `--test-signal`), in the pattern of
+    /// [`Self::shutdown`]: read until the engine answered it; the answer's
+    /// error, if any. Bounded: each read ≤ 1 s, no read starts after 5 s
+    /// (so ≤ 6 s in all).
+    pub fn supervise(&self, cmd: Cmd) -> Result<(), ErrorBody> {
+        let mut s = std::os::unix::net::UnixStream::connect(&self.pipe).expect("the control pipe");
+        s.set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("a read timeout");
+        let hello = ClientMsg::Hello {
+            proto: PROTO,
+            role: Role::Supervisor,
+            client: "test supervisor".into(),
+        };
+        let request = ClientMsg::Request {
+            id: 1,
+            origin: None,
+            cmd,
+        };
+        iem_engine_proto::write_frame(&mut s, &hello).expect("the hello");
+        iem_engine_proto::write_frame(&mut s, &request).expect("the request");
+        let t0 = Instant::now();
+        let mut buf = Vec::new();
+        while t0.elapsed() < Duration::from_secs(5) {
+            iem_engine_proto::read_frame(&mut s, &mut buf)
+                .expect("a frame from the engine within 1 s");
+            if let Ok(EngineMsg::Reply(r)) = serde_json::from_slice::<EngineMsg>(&buf)
+                && r.id == 1
+            {
+                return match r.error {
+                    None => Ok(()),
+                    Some(e) => Err(e),
+                };
+            }
+        }
+        panic!("the engine did not answer the supervisor's request within 5 s");
     }
 
     /// An app state connected to this engine (control and media pipes).
