@@ -37,6 +37,10 @@ fn a_listen_probe_goes_out_on_the_probe_streams_and_the_taps_stay_silent() {
     let media = media_client(&e.pipe);
     let mut sup = e.client();
     sup.hello(Role::Supervisor);
+    // The probe follows the output fade like the spare outputs: the engine's
+    // 500 ms start fade-in has ended by its first Status, which comes a
+    // second after the control loop began (after the stream started).
+    sup.wait(|m| matches!(m, EngineMsg::Status(_)).then_some(()));
     let probe = Cmd::HilTestSignal {
         input: InputId::new("mic1"),
         hz: 1000.0,
