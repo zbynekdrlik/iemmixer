@@ -6,9 +6,11 @@ directory (result.json, polls.jsonl: one `{"t", "exit", "status"}` per
 `iemmode status` poll, soakclient.json: the iem-soakclient summary) and
 prints one JSON object, `{"conclusion", "summary", "first_failure",
 "numbers"}`, whose summary is posted as `soak/iem-pc`. A cancelled PC job, a
-missing record or the reason `left-dev` is `cancelled`: "ide event" never
-makes red. Any other PC failure is `failure` naming its reason code; else the
-soak is judged. The checks, in order; the first that fails leads a red
+failed one that left no record, or the reason `left-dev` is `cancelled`: "ide
+event" never makes red. A PC job that succeeded or was skipped and left no
+record is red (it writes its record first and uploads it always(), so a broken
+report or harness lies behind it), as is any other PC failure, naming its
+reason code; else the soak is judged. The checks, in order; the first that fails leads a red
 summary (`red: <it>; <numbers>`):
 
  1. polls exist; each has exit 0, mode dev, no switch and an engine;
@@ -366,12 +368,16 @@ def _outcome(conclusion: str, summary: str, first: str | None = None) -> dict:
 
 
 def report(pc_result: str, record: object, polls: list | None, harness: object, sha: str, hours: float) -> dict:
-    """The ops report job's conclusion: cancelled for a cancelled PC job, a missing record or reason
-    left-dev ("ide event" never makes red); failure for any other PC failure, naming its reason code;
-    else verdict()."""
+    """The ops report job's conclusion: cancelled for a cancelled PC job, a failed one without a
+    record or reason left-dev ("ide event" never makes red); failure for a PC job that succeeded or
+    was skipped without a record and for any other PC failure, naming its reason code; else
+    verdict()."""
     reason = _get(record, "reason")
     if pc_result == "cancelled":
         return _outcome("cancelled", "cancelled: the pc job was cancelled")
+    if record is None and pc_result in ("success", "skipped"):
+        first = f"pc job {pc_result} left no record"
+        return _outcome("failure", f"red: {first}", first)
     if record is None:
         return _outcome("cancelled", "cancelled: no record of the pc job")
     if reason == "left-dev":
