@@ -151,6 +151,20 @@ impl Laps {
     }
 }
 
+/// The reply's words for a switch that went on after steps asked the owner
+/// (#10; `outcome` stays `needs_owner`, the machine-readable field):
+/// `target` the switch's target, `now` the mode it ended in, `failed` each
+/// such step as "<Step> failed: <why>", in order. An entry whose unwind
+/// needed the owner says first that it was not entered.
+pub fn needs_owner_text(target: &str, now: &str, failed: &[String]) -> String {
+    let ended = format!("{now}: ended, needs the owner: {}", failed.join("; "));
+    if target == now {
+        ended
+    } else {
+        format!("{target}: not entered; {ended}")
+    }
+}
+
 /// `GuardState.last_switch` and `Reply.last_switch` as read: a record this
 /// guard cannot read is none, never an unreadable state or reply.
 pub fn lenient<'de, D: Deserializer<'de>>(d: D) -> Result<Option<LastSwitch>, D::Error> {

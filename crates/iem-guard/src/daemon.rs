@@ -44,7 +44,7 @@ use crate::plan::{
 use crate::proto::{self, EngineStatus, Reply, Request};
 use crate::site::GuardSite;
 use crate::state::{self, GuardState, Switching};
-use crate::switch_log::{Laps, LastSwitch, SwitchOutcome};
+use crate::switch_log::{Laps, LastSwitch, SwitchOutcome, needs_owner_text};
 
 mod reaper;
 
@@ -101,13 +101,16 @@ fn outcome_text(o: Option<Outcome>) -> &'static str {
     }
 }
 
-/// How a switch to `to` went, the mode now being `now`.
-fn switch_text(to: Mode, out: Outcome, now: Mode) -> String {
+/// How a switch to `to` went, the mode now being `now`; `failed`: the
+/// steps that asked the owner while the plan went on (#10).
+fn switch_text(to: Mode, out: Outcome, now: Mode, failed: &[String]) -> String {
     let target = mode_name(to);
     if out == Outcome::Done && now == to {
         format!("{target}: done")
     } else if out == Outcome::Done {
         format!("{target}: not entered; unwound to {}", mode_name(now))
+    } else if out == Outcome::NeedsOwner && !failed.is_empty() {
+        needs_owner_text(target, mode_name(now), failed)
     } else {
         format!(
             "{target}: {}; the mode is {}",
@@ -202,6 +205,9 @@ pub struct View {
     pub running: Option<Mode>,
     /// How the last switch ended.
     pub last: Option<Outcome>,
+    /// The steps of the last switch that asked the owner while its plan
+    /// went on (#10), each "<Step> failed: <why>".
+    pub last_owner: Vec<String>,
     /// Counts the switches begun: a request queued before one began is
     /// answered as during it (a dev or live entry by `fence`).
     pub epoch: u64,
@@ -262,7 +268,12 @@ impl View {
     pub fn event_reply(&self, note: &str) -> Reply {
         let ok =
             self.running.is_none() && self.mode == Mode::Event && self.last == Some(Outcome::Done);
-        self.reply(ok, &format!("{note}; event: {}", outcome_text(self.last)))
+        let how = if self.last == Some(Outcome::NeedsOwner) && !self.last_owner.is_empty() {
+            needs_owner_text("event", mode_name(self.mode), &self.last_owner)
+        } else {
+            format!("event: {}", outcome_text(self.last))
+        };
+        self.reply(ok, &format!("{note}; {how}"))
     }
 }
 
@@ -539,6 +550,11 @@ pub struct Guard {
     /// The entry the running switch unwinds (`back_to_event`): its target
     /// and its `Switching.started`, so the unwind's record spans it.
     unwinding: Option<(Mode, u64)>,
+    /// The running switch's steps that asked the owner while its plan went
+    /// on (`ContinueAskOwner`, `SkipAskOwner`; #10), each "<Step> failed:
+    /// <why>": any makes the switch end `needs_owner`. Kept until the next
+    /// switch begins, for the reply.
+    owner_failed: Vec<String>,
 }
 
 impl Guard {
@@ -581,6 +597,7 @@ impl Guard {
             last_exit: None,
             laps: Laps::default(),
             unwinding: None,
+            owner_failed: Vec::new(),
         };
         g.publish(|_| {});
         g
@@ -722,6 +739,7 @@ impl Guard {
             done: Vec::new(),
             started: self.now(),
         });
+        self.owner_failed.clear();
         // An unwind goes on with the entry's clock.
         if self.unwinding.is_some() {
             self.laps.resume(Instant::now());
@@ -771,15 +789,25 @@ impl Guard {
             let record = LastSwitch::new(s, mode, outcome.into(), ended, steps);
             self.state.last_switch = Some(record.unwinding(entry));
         }
-        info!(
-            "switch ended in {}: {}",
-            mode_name(mode),
-            outcome_text(Some(outcome))
-        );
+        if self.owner_failed.is_empty() {
+            info!(
+                "switch ended in {}: {}",
+                mode_name(mode),
+                outcome_text(Some(outcome))
+            );
+        } else {
+            info!(
+                "switch ended in {}: needs the owner: {}",
+                mode_name(mode),
+                self.owner_failed.join("; ")
+            );
+        }
         self.store();
+        let owner = self.owner_failed.clone();
         self.publish(|v| {
             v.running = None;
             v.last = Some(outcome);
+            v.last_owner = owner;
         });
         // Tuning drift after every switch that ran. After any other change
         // of the mode (a plan that stopped for the owner) the watch reads it
@@ -908,8 +936,6 @@ fn switch(pc: &mut dyn Pc, g: &mut Guard, from: Mode, to: Mode, checks: bool) ->
     let steps = plan(to, &pc.facts());
     g.begin(from, to, &steps, checks);
     let mut skip: Vec<Step> = Vec::new();
-    // A step that went on after asking the owner: the switch is not done.
-    let mut asked = false;
     for step in steps {
         if skip.contains(&step) {
             continue;
@@ -947,12 +973,14 @@ fn switch(pc: &mut dyn Pc, g: &mut Guard, from: Mode, to: Mode, checks: bool) ->
                         return back_to_event(pc, g, &why);
                     }
                     OnError::Continue => g.alarm(step, &why, false),
+                    // The plan goes on, but the switch is not done (#10).
                     OnError::ContinueAskOwner => {
                         g.alarm(step, &why, true);
-                        asked = true;
+                        g.owner_failed.push(format!("{step:?} failed: {why}"));
                     }
-                    OnError::Skip(later) => {
-                        g.alarm(step, &why, false);
+                    OnError::SkipAskOwner(later) => {
+                        g.alarm(step, &why, true);
+                        g.owner_failed.push(format!("{step:?} failed: {why}"));
                         skip.extend_from_slice(later);
                     }
                     OnError::KeepServing => {
@@ -974,10 +1002,10 @@ fn switch(pc: &mut dyn Pc, g: &mut Guard, from: Mode, to: Mode, checks: bool) ->
     if !may_end(g, to) {
         return back_to_event(pc, g, "pre-empted by event");
     }
-    let outcome = if asked {
-        Outcome::NeedsOwner
-    } else {
+    let outcome = if g.owner_failed.is_empty() {
         Outcome::Done
+    } else {
+        Outcome::NeedsOwner
     };
     g.finish(pc, outcome, to)
 }
@@ -1401,7 +1429,7 @@ fn event_now(pc: &mut dyn Pc, g: &mut Guard) -> (bool, String) {
     let out = run_switch(pc, g, from, Mode::Event);
     (
         out == Outcome::Done && g.state.mode == Mode::Event,
-        switch_text(Mode::Event, out, g.state.mode),
+        switch_text(Mode::Event, out, g.state.mode, &g.owner_failed),
     )
 }
 
@@ -1438,7 +1466,7 @@ fn entry(pc: &mut dyn Pc, g: &mut Guard, e: Entry) -> (bool, String) {
     let out = run_switch(pc, g, from, e.to);
     (
         out == Outcome::Done && g.state.mode == e.to,
-        switch_text(e.to, out, g.state.mode),
+        switch_text(e.to, out, g.state.mode, &g.owner_failed),
     )
 }
 
@@ -1696,7 +1724,7 @@ fn restart_in_job(pc: &mut dyn Pc, g: &mut Guard) -> Result<(), String> {
                 let out = run_switch(pc, g, from, Mode::Event);
                 return Err(format!(
                     "{step:?}: {why}; {}",
-                    switch_text(Mode::Event, out, g.state.mode)
+                    switch_text(Mode::Event, out, g.state.mode, &g.owner_failed)
                 ));
             }
         }
@@ -1825,7 +1853,7 @@ fn install_site(pc: &mut dyn Pc, g: &mut Guard, path: &str) -> (bool, String) {
         out == Outcome::Done && g.state.mode == Mode::Dev,
         format!(
             "site installed; {}",
-            switch_text(Mode::Dev, out, g.state.mode)
+            switch_text(Mode::Dev, out, g.state.mode, &g.owner_failed)
         ),
     )
 }
@@ -1962,11 +1990,11 @@ fn rehearse(pc: &mut dyn Pc, g: &mut Guard) -> (bool, String) {
                 );
                 return (false, format!("rehearsal stopped at {step:?}: {why}"));
             }
-            OnError::StopAskOwner | OnError::ContinueAskOwner => {
+            OnError::StopAskOwner | OnError::ContinueAskOwner | OnError::SkipAskOwner(_) => {
                 g.alarm(step, &format!("rehearsal: {why}; health {health:?}"), true);
                 return (false, format!("rehearsal stopped at {step:?}: {why}"));
             }
-            OnError::Unwind | OnError::Continue | OnError::Skip(_) => {
+            OnError::Unwind | OnError::Continue => {
                 g.alarm(step, &format!("rehearsal: {why}"), false);
             }
         }
@@ -2012,7 +2040,10 @@ fn rehearse(pc: &mut dyn Pc, g: &mut Guard) -> (bool, String) {
     g.hold_unwind = false;
     (
         bad.is_empty() && out == Outcome::Done && g.state.mode == Mode::Dev,
-        format!("{verdict}; {}", switch_text(Mode::Dev, out, g.state.mode)),
+        format!(
+            "{verdict}; {}",
+            switch_text(Mode::Dev, out, g.state.mode, &g.owner_failed)
+        ),
     )
 }
 

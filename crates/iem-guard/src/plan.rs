@@ -255,15 +255,17 @@ pub enum OnError {
     Unwind,
     /// Event plan: alarm and go on with the next step.
     Continue,
-    /// Event plan: alarm and drop these later steps (they would act on a stale process).
-    Skip(&'static [Step]),
+    /// Event plan: alarm with the prepared ❓ and drop these later steps
+    /// (they would act on a stale process); the switch ends `needs_owner`,
+    /// never `done` (#10: a failed app stop leaves no app serving).
+    SkipAskOwner(&'static [Step]),
     /// Event plan: iemmixer keeps serving the band; alarm; the plan ends here.
     KeepServing,
     /// Event plan: alarm, the plan ends here, the agent sends the prepared ❓.
     StopAskOwner,
     /// Event plan: alarm with the prepared ❓ and go on with the next step
     /// (the band keeps what still works); the switch ends `needs_owner`,
-    /// never `done` (#10: a failed REAPER handover).
+    /// never `done` (#10: a failed REAPER or app handover).
     ContinueAskOwner,
 }
 
@@ -273,7 +275,12 @@ pub enum OnError {
 /// REAPER handover (REAPER could not be made to run, or a check failed)
 /// asks the owner and goes on to the app, as it went on before #10, but the
 /// switch no longer ends `done` (2026-10-08: it did, in event without
-/// REAPER).
+/// REAPER). An event switch that ends without the predecessor app serving
+/// is not done either (the coordinator's decision on #10, 2026-10-08:
+/// REAPER keeps playing the band's mixes, but the phones cannot change
+/// them): a failed app handover asks the owner and goes on; a failed app
+/// stop skips the app start (the old app may still run) and asks the owner,
+/// since the event plan stops only an app that does not serve.
 pub fn on_error(to: Mode, step: Step, health: Option<Health>, pref_fail: PrefFail) -> OnError {
     if to != Mode::Event {
         return OnError::Unwind;
@@ -288,8 +295,8 @@ pub fn on_error(to: Mode, step: Step, health: Option<Health>, pref_fail: PrefFai
             PrefFail::KeepReaperDown => OnError::StopAskOwner,
         },
         Step::HolderGone | Step::ReaperSaveQuit | Step::ReaperStart => OnError::StopAskOwner,
-        Step::ReaperHandover => OnError::ContinueAskOwner,
-        Step::AppStop => OnError::Skip(&[Step::AppStart]),
+        Step::ReaperHandover | Step::AppHandover => OnError::ContinueAskOwner,
+        Step::AppStop => OnError::SkipAskOwner(&[Step::AppStart]),
         _ => OnError::Continue,
     }
 }
