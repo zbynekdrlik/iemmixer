@@ -1,4 +1,58 @@
-//! The listen probe's gate for one `&hil=1` session (S7 design note §6, #10).
+//! The listen probe's gate for one `&hil=1` session (S7 design note §6, #10):
+//! probe frames go out as they come; the slot's own (silent) frames wait
+//! until no probe frame came for [`PROBE_HOLD`], so the player gets one
+//! stream. The first probe frame opens a burst and the first slot frame
+//! after the hold leaves it: the session tells the socket `probe` and
+//! `listening` there. Pure (the caller reads the clock), mutated.
+
+use std::time::{Duration, Instant};
+
+/// How long the slot's own frames stay dropped after the last probe frame:
+/// five 20 ms frames, so a probe frame a few frames late never lets a
+/// silent one in between.
+pub const PROBE_HOLD: Duration = Duration::from_millis(100);
+
+/// What happens to one of the slot's own frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pass {
+    /// Inside a burst: the probe frames stand in for it.
+    Drop,
+    /// Sent, as without a probe.
+    Send,
+    /// Sent, and it ends the burst: the socket is told `listening` first.
+    SendLeaving,
+}
+
+#[derive(Debug, Default)]
+pub struct ProbeGate {
+    last_probe: Option<Instant>,
+    in_burst: bool,
+}
+
+impl ProbeGate {
+    /// A probe frame at `now`: always sent; `true` when it opens a burst (the
+    /// socket is told `probe` first).
+    pub fn probe(&mut self, now: Instant) -> bool {
+        self.last_probe = Some(now);
+        !std::mem::replace(&mut self.in_burst, true)
+    }
+
+    /// One of the slot's own frames at `now`: dropped while the last probe
+    /// frame came less than [`PROBE_HOLD`] before; the first one after a
+    /// burst leaves it.
+    pub fn listen(&mut self, now: Instant) -> Pass {
+        let held = self
+            .last_probe
+            .is_some_and(|t| now.saturating_duration_since(t) < PROBE_HOLD);
+        if held {
+            Pass::Drop
+        } else if std::mem::take(&mut self.in_burst) {
+            Pass::SendLeaving
+        } else {
+            Pass::Send
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

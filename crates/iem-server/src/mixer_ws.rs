@@ -35,6 +35,9 @@ pub struct WsQuery {
     pub proto: Option<u16>,
     #[serde(default)]
     pub talk: Option<String>,
+    /// `/ws/audio`: `1` asks for the listen probe (S7, `listen_ws::asks_for_probe`).
+    #[serde(default)]
+    pub hil: Option<u8>,
 }
 
 type Reject = (StatusCode, Json<ApiError>);

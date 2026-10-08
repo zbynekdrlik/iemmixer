@@ -4,6 +4,13 @@
 //! frames; the wire format is the predecessor's. `ListenStart{member_id}`
 //! starts the engine's tap; the last listener of a mix leaving stops it; a
 //! second different mix while one is heard gets `no_source`.
+//!
+//! The listen probe (S7, #10): a session opened with `&hil=1` (engineer-only
+//! like every `/ws/audio` socket) also takes its slot's probe channel and,
+//! while probe frames come, sends them in place of the slot's own (silent)
+//! frames (`probe_gate`), telling the socket `AudioStatus` `probe` at a
+//! burst's first frame and `listening` after its last. Any other session
+//! never holds a probe receiver (`feeds`), whatever mix it hears.
 
 pub mod probe_gate;
 
@@ -16,6 +23,7 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
+use bytes::Bytes;
 use iem_core::{ApiError, ClientMsg, ServerMsg};
 use iem_engine_proto::{Cmd, ErrCode, MixId};
 use tokio::sync::broadcast;
@@ -23,7 +31,9 @@ use tokio::time::Instant;
 
 use crate::AppState;
 use crate::engine::client::EngineError;
+use crate::engine::media::MediaLink;
 use crate::mixer_ws::{WsQuery, claims_of};
+use probe_gate::{Pass, ProbeGate};
 
 type Reject = (StatusCode, Json<ApiError>);
 
@@ -49,7 +59,14 @@ pub async fn ws_audio(
             )),
         ));
     }
-    Ok(ws.on_upgrade(move |socket| session(socket, state)))
+    let hil = asks_for_probe(&query);
+    Ok(ws.on_upgrade(move |socket| session(socket, state, hil)))
+}
+
+/// `&hil=1` (S7): the session also takes its slot's listen probe. Any other
+/// value, or none, is a plain listener.
+pub fn asks_for_probe(query: &WsQuery) -> bool {
+    query.hil == Some(1)
 }
 
 fn status(s: &str, target: Option<String>) -> Message {
@@ -122,8 +139,8 @@ async fn stop(state: &AppState, mix: &MixId) {
 /// behind (a slow connection) skips the older ones and goes on from the
 /// newest, so it hears the band late by at most that many frames.
 async fn next_frame(
-    rx: &mut broadcast::Receiver<bytes::Bytes>,
-) -> Result<bytes::Bytes, broadcast::error::RecvError> {
+    rx: &mut broadcast::Receiver<Bytes>,
+) -> Result<Bytes, broadcast::error::RecvError> {
     loop {
         let frame = rx.recv().await?;
         if rx.len() <= MAX_BEHIND {
@@ -132,14 +149,100 @@ async fn next_frame(
     }
 }
 
-async fn session(mut socket: WebSocket, state: AppState) {
-    tracing::info!("Audio WebSocket connected");
+/// A session's subscriptions for the slot it listens to: the slot's own
+/// frames and, for a `&hil=1` session only, the slot's listen probe behind
+/// its gate.
+pub struct Feeds {
+    pub listen: broadcast::Receiver<Bytes>,
+    pub probe: Option<broadcast::Receiver<Bytes>>,
+    gate: ProbeGate,
+}
+
+/// The feeds of `slot` (`hil`: [`asks_for_probe`]); without `hil` there is
+/// no probe receiver at all.
+pub fn feeds(media: &MediaLink, slot: usize, hil: bool) -> Feeds {
+    Feeds {
+        listen: media.subscribe(slot),
+        probe: hil.then(|| media.subscribe_probe(slot)),
+        gate: ProbeGate::default(),
+    }
+}
+
+/// What a session sends next.
+#[derive(Debug)]
+pub enum Out {
+    /// A frame for the socket; `edge` (`probe` / `listening`) is the status
+    /// sent before it at a burst's edge. A probe frame never counts in the
+    /// listen diagnostics.
+    Frame {
+        data: Bytes,
+        probe: bool,
+        edge: Option<&'static str>,
+    },
+    /// Frames this many behind were lost (logged).
+    Lagged(u64),
+    /// The media link is gone.
+    Closed,
+}
+
+impl Feeds {
+    /// The next frame to send. Cancel-safe at its awaits (the session's
+    /// `select!`): a frame taken is sent or dropped before the next await.
+    pub async fn next(&mut self) -> Out {
+        self.next_at(std::time::Instant::now).await
+    }
+
+    /// [`Self::next`] on the clock `now`, read once per frame taken. Probe
+    /// frames first: they stand in for the slot's frames of the same moment.
+    async fn next_at(&mut self, mut now: impl FnMut() -> std::time::Instant) -> Out {
+        let Self {
+            listen,
+            probe,
+            gate,
+        } = self;
+        loop {
+            let probe_frame = async {
+                match probe.as_mut() {
+                    Some(rx) => next_frame(rx).await,
+                    None => std::future::pending().await,
+                }
+            };
+            let (from_probe, got) = tokio::select! {
+                biased;
+                got = probe_frame => (true, got),
+                got = next_frame(listen) => (false, got),
+            };
+            let data = match got {
+                Ok(data) => data,
+                Err(broadcast::error::RecvError::Lagged(n)) => return Out::Lagged(n),
+                Err(broadcast::error::RecvError::Closed) => return Out::Closed,
+            };
+            let edge = if from_probe {
+                gate.probe(now()).then_some("probe")
+            } else {
+                match gate.listen(now()) {
+                    Pass::Drop => continue,
+                    Pass::Send => None,
+                    Pass::SendLeaving => Some("listening"),
+                }
+            };
+            return Out::Frame {
+                data,
+                probe: from_probe,
+                edge,
+            };
+        }
+    }
+}
+
+async fn session(mut socket: WebSocket, state: AppState, hil: bool) {
+    tracing::info!(hil, "Audio WebSocket connected");
     let mut current: Option<(MixId, String)> = None;
-    let mut rx: Option<broadcast::Receiver<bytes::Bytes>> = None;
+    let mut feed: Option<Feeds> = None;
     let mut last_audio = Instant::now();
     let mut first_logged = false;
     loop {
-        let listening = rx.is_some();
+        let listening = feed.is_some();
         tokio::select! {
             msg = socket.recv() => match msg {
                 Some(Ok(Message::Text(text))) => match serde_json::from_str::<ClientMsg>(&text) {
@@ -147,7 +250,7 @@ async fn session(mut socket: WebSocket, state: AppState) {
                         if let Some((mix, _)) = current.take() {
                             stop(&state, &mix).await;
                         }
-                        rx = None;
+                        feed = None;
                         let Some(page) = state.page(&member_id) else {
                             if socket.send(status("no_source", None)).await.is_err() {
                                 break;
@@ -156,8 +259,8 @@ async fn session(mut socket: WebSocket, state: AppState) {
                         };
                         match start(&state, &page.mix).await {
                             Ok(()) => {
-                                tracing::info!(target = %member_id, mix = %page.mix, "Audio listen started");
-                                rx = Some(state.media.subscribe(slot_of(&state, &page.mix)));
+                                tracing::info!(target = %member_id, mix = %page.mix, hil, "Audio listen started");
+                                feed = Some(feeds(&state.media, slot_of(&state, &page.mix), hil));
                                 current = Some((page.mix.clone(), member_id.clone()));
                                 last_audio = Instant::now();
                                 if socket.send(status("listening", Some(member_id))).await.is_err() {
@@ -179,7 +282,7 @@ async fn session(mut socket: WebSocket, state: AppState) {
                         if let Some((mix, _)) = current.take() {
                             stop(&state, &mix).await;
                         }
-                        rx = None;
+                        feed = None;
                         if socket.send(status("stopped", None)).await.is_err() {
                             break;
                         }
@@ -189,23 +292,32 @@ async fn session(mut socket: WebSocket, state: AppState) {
                 Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
                 Some(Ok(_)) => {}
             },
-            frame = async { match rx.as_mut() { Some(r) => next_frame(r).await, None => std::future::pending().await } }, if listening => {
-                match frame {
-                    Ok(data) => {
+            out = async { match feed.as_mut() { Some(f) => f.next().await, None => std::future::pending().await } }, if listening => {
+                match out {
+                    Out::Frame { data, probe, edge } => {
                         last_audio = Instant::now();
+                        if let Some(edge) = edge {
+                            let target = current.as_ref().map(|(_, id)| id.clone());
+                            tracing::info!(edge, target = ?target, "listen probe");
+                            if socket.send(status(edge, target)).await.is_err() {
+                                break;
+                            }
+                        }
                         if socket.send(Message::Binary(data)).await.is_err() {
                             break;
                         }
-                        state.media.forwarded();
+                        if !probe {
+                            state.media.forwarded();
+                        }
                         if !first_logged {
                             tracing::info!("first binary frame forwarded on /ws/audio");
                             first_logged = true;
                         }
                     }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                    Out::Lagged(n) => {
                         tracing::debug!(skipped = n, "listen frames skipped");
                     }
-                    Err(broadcast::error::RecvError::Closed) => break,
+                    Out::Closed => break,
                 }
             }
             _ = tokio::time::sleep(Duration::from_secs(5)), if listening => {
