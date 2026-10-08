@@ -75,18 +75,23 @@ test("a dropout inside the window is a gap", () => {
   expect(Math.abs(run48[61])).toBeGreaterThan(0.09);
   expect(toneOf(run48, RATE).gap).toBe(true);
 
-  // Under 1e-5 counts as silent, at 1e-5 does not.
-  const quiet = sine(1000, -20);
+  // Under 1e-5 counts as silent, at 1e-5 does not (in doubles: a float32
+  // cannot hold 1e-5 exactly).
+  const quiet = Float64Array.from(sine(1000, -20));
   quiet.fill(0.99e-5, 1_000, 1_048);
   expect(toneOf(quiet, RATE).gap).toBe(true);
-  const audible = sine(1000, -20);
-  audible.fill(1.01e-5, 1_000, 1_048);
+  const audible = Float64Array.from(sine(1000, -20));
+  audible.fill(1e-5, 1_000, 1_048);
   expect(toneOf(audible, RATE).gap).toBe(false);
 });
 
 test("silence reads -150 dBFS", () => {
   const silence = toneOf(new Float32Array(WINDOW), RATE);
   expect(silence).toEqual({ hz: 0, dbfs: -150, gap: true });
+  // No period to count: one rising crossing reads 0 Hz, never NaN.
+  const step = new Float32Array(WINDOW).fill(0.1);
+  step.fill(-0.1, 0, WINDOW / 2);
+  expect(toneOf(step, RATE).hz).toBe(0);
   // A tone below the floor reads the floor, never less.
   expect(toneOf(sine(1000, -170), RATE).dbfs).toBe(-150);
   // Just above the floor it is measured.
