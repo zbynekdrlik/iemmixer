@@ -20,9 +20,10 @@ pub mod stream {
     pub const ENGINEER_LISTEN: u8 = 0;
     /// One member's listen tap (X3 slot 1), stereo.
     pub const MEMBER_LISTEN: u8 = 1;
-    /// The listen probe (S7): the HIL sine of the engineer slot / the member
-    /// slot, for `&hil=1` listeners only; an older server drops both.
+    /// The listen probe of the engineer's slot (S7): the HIL sine, stereo,
+    /// for `&hil=1` listeners only; an older server drops it.
     pub const ENGINEER_PROBE: u8 = 2;
+    /// The listen probe of the member's slot (S7), like `ENGINEER_PROBE`.
     pub const MEMBER_PROBE: u8 = 3;
     /// Talkback from the server into the engine, mono.
     pub const TALKBACK: u8 = 16;

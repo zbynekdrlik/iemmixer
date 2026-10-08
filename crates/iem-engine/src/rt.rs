@@ -974,6 +974,7 @@ impl Processor {
         let hil = test.as_ref().is_some_and(|t| t.mask.is_some());
         let probing = test.as_ref().is_some_and(|t| t.mask.is_some() && t.listen);
         let sine = test_buf.get(..n).unwrap_or_default();
+        let fade = fade_buf.get(..n).unwrap_or_default();
         let heard_from = topo.inputs.len();
         let mut trips = 0;
         for (m, spec) in topo.mixes.iter().enumerate() {
@@ -1040,7 +1041,6 @@ impl Processor {
             if listen[0] == Some(m) {
                 push_tap(&mut taps[0], (&*l, &*r), hil, tap_buf, &status.tap_overruns);
                 if probing {
-                    let fade = fade_buf.get(..n).unwrap_or_default();
                     probe::push_probe(&mut probes[0], sine, fade, tap_buf, &status.tap_overruns);
                 }
             }
@@ -1064,12 +1064,10 @@ impl Processor {
                     &status.tap_overruns,
                 );
                 if probing {
-                    let fade = fade_buf.get(..n).unwrap_or_default();
                     probe::push_probe(&mut probes[1], sine, fade, tap_buf, &status.tap_overruns);
                 }
             }
             let (tl, tr) = tx.get_mut(n);
-            let fade = fade_buf.get(..n).unwrap_or_default();
             for (((a, c), (x, y)), f) in tl
                 .iter_mut()
                 .zip(tr.iter_mut())

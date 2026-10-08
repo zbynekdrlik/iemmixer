@@ -54,7 +54,7 @@ fn a_listen_probe_goes_out_on_the_probe_streams_and_the_taps_stay_silent() {
     let mut seen = [0u32; 4];
     let mut peak = [0.0f32; 2];
     let start = Instant::now();
-    while (seen[2] < FRAMES || seen[3] < FRAMES) && start.elapsed() < WAIT {
+    while seen.iter().any(|n| *n < FRAMES) && start.elapsed() < WAIT {
         let (h, samples) = media.try_recv().unwrap();
         assert_eq!((h.channels, usize::from(h.frames)), (2, FRAME_48K));
         let s = usize::from(h.stream);

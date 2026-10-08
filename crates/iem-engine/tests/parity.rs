@@ -793,7 +793,7 @@ fn a_listen_probe_keeps_every_mix_tx_zero_and_its_taps_do_not_depend_on_the_bloc
             assert!(push_group(&mut h.cmds, *at, ops));
         }
         let outs = p.outputs();
-        let mut out = vec![Vec::with_capacity(frames); outs];
+        let mut out: Vec<Vec<f64>> = vec![Vec::new(); outs];
         let mut taps: [Vec<f32>; 2] = Default::default();
         let mut probes: [Vec<f32>; 2] = Default::default();
         for start in (0..frames).step_by(PIECE) {

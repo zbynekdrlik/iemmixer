@@ -197,8 +197,8 @@ exclude_re = [
   "iem-engine/src/rt\\.rs.*replace > with >= in Processor::render_mixes",
   # Equivalent (S3). With the budget spent, `budget >= 0` also cuts the segment at the
   # waiting command; rendering in two pieces is bit-identical (block-size invariance tests).
-  # anchor 1254: if budget > 0
-  "iem-engine/src/rt\\.rs:1254:.*replace > with >= in <impl Process for Processor>::process",
+  # anchor 1252: if budget > 0
+  "iem-engine/src/rt\\.rs:1252:.*replace > with >= in <impl Process for Processor>::process",
   # The fade wait's `elapsed < FADE_WAIT`: differs only at the exact nanosecond.
   "iem-engine/src/control\\.rs.*replace < with <= in Control::fade_out",
   # Unobservable (S3): the `!` only decides whether "solos cleared" is logged.
@@ -265,8 +265,8 @@ exclude_re = [
   # `if !(1..=MAX_BLOCK).contains(&cfg.block)`, which is NOT equivalent and IS
   # killed by `run_refuses_a_bad_block_and_a_bad_site`, and `delete ! in
   # run_hil` is killed too — both must stay mutated.
-  # anchor 450: if !hil.is_empty() {
-  "iem-engine/src/engine\\.rs:450:.*delete ! in run$",
+  # anchor 452: if !hil.is_empty() {
+  "iem-engine/src/engine\\.rs:452:.*delete ! in run$",
   # Equivalent (S6): the DER length fold `(n << 8) | usize::from(b)` shifts the
   # accumulator left by 8, so its low 8 bits are always zero; OR-ing in a byte
   # (0..=255) there equals XOR-ing it, so `| b` and `^ b` are identical (like
