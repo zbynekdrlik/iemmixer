@@ -6,9 +6,11 @@
 # folder. Every function runs against a TEST key
 # (HKLM:\SOFTWARE\iemmixer-ssh-test-<id>, made admin-only as the real one must
 # be), a test task folder \iemmixer-test-ssh-<id>\ and a temp elevated root:
-# never HKLM:\SOFTWARE\OpenSSH and never a task of \iemmixer. The undo task is
-# run once as registered (SYSTEM, its entry script and module copies). The
-# probe iempc composes runs through cmd.exe exactly as sshd starts it, with and
+# never HKLM:\SOFTWARE\OpenSSH and never a task of \iemmixer. Set gets the
+# modules' sha256 as iempc passes them. The undo task is run once as
+# registered (SYSTEM, its entry script and module copies); a stand-in under its
+# name that waits for a marker file shows the refusals while it runs. The probe
+# iempc composes runs through cmd.exe exactly as sshd starts it, with and
 # without /d, and iempc_sshshell.parse_probe judges both. Only its own test
 # objects are removed.
 Set-StrictMode -Version Latest
@@ -34,6 +36,10 @@ $taskName = 'iemmixer-ssh-shell-undo'
 $me = Resolve-IemUser
 $cmd = Join-Path ([Environment]::GetFolderPath('System')) 'cmd.exe'
 $common = @{ Key = $key; TaskFolder = $folder; ElevatedRoot = $er }
+# What iempc passes: the sha256 of each module copy as the dev box checked it.
+$sums = @{}
+foreach ($n in @($sources.Keys)) { $sums[$n] = (Get-FileHash -LiteralPath (Join-Path $mods $n) -Algorithm SHA256).Hash.ToLowerInvariant() }
+$setArgs = $common + @{ ModuleSha256 = $sums }
 $dir = Join-Path $er 'ssh-shell'
 $prior = Join-Path $dir 'prior.json'
 $log = Join-Path $dir 'undo.log'
@@ -186,28 +192,45 @@ try {
 
     # ---- refusals before anything is written ----
     New-TestKey
-    $e = ErrorOf { Set-IemSshShell @common }
+    $e = ErrorOf { Set-IemSshShell @setArgs }
     Assert ($e -like '*elevated root*refused*' -and (Read-Values) -eq $absent -and $null -eq (Get-UndoTask)) "set-refuses-a-missing-elevated-root ($e)"
     New-Item -ItemType Directory -Force -Path $er | Out-Null
-    $e = ErrorOf { Set-IemSshShell @common }
+    $e = ErrorOf { Set-IemSshShell @setArgs }
     Assert ($e -like '*elevated root*refused*' -and (Read-Values) -eq $absent -and $null -eq (Get-UndoTask) -and -not (Test-Path -LiteralPath $dir)) "set-refuses-an-elevated-root-the-user-may-change ($e)"
     Remove-Item -LiteralPath $er -Recurse -Force
     Install-IemElevatedFolder -Path $er -UserSid $me.sid
     Add-KeyRule 'SetValue' 'None' 'None'
-    $e = ErrorOf { Set-IemSshShell @common }
+    $e = ErrorOf { Set-IemSshShell @setArgs }
     Assert ($e -like "*may be changed by $sidUsers*" -and (Read-Values) -eq $absent -and $null -eq (Get-UndoTask) -and -not (Test-Path -LiteralPath $prior)) "set-refuses-a-key-users-may-write-and-writes-nothing ($e)"
     New-TestKey
     # A rule that reaches only subkeys (inherit-only) gives no right on the key's own values;
     # the key's rules are read first, so a refusal naming the value proves the rule passed.
     Add-KeyRule 'FullControl' 'ContainerInherit' 'InheritOnly'
     Set-TestValue 'DefaultShell' ([byte[]]@(1)) ([Microsoft.Win32.RegistryValueKind]::None)
-    $e = ErrorOf { Set-IemSshShell @common }
+    $e = ErrorOf { Set-IemSshShell @setArgs }
     Assert ($e -like '*DefaultShell*kind None refused*' -and $null -eq (Get-UndoTask) -and -not (Test-Path -LiteralPath $prior)) "set-passes-an-inherit-only-rule-and-refuses-a-value-it-cannot-write-back-exactly ($e)"
+    New-TestKey
+    # A module copy that is not the build iempc checked is never copied for the undo task.
+    $wrong = $sums.Clone()
+    $wrong['IemPc.psm1'] = '0' * 64
+    $e = ErrorOf { Set-IemSshShell @common -ModuleSha256 $wrong }
+    Assert ($e -like '*IemPc.psm1*not the build*' -and (Read-Values) -eq $absent -and $null -eq (Get-UndoTask) -and -not (Test-Path -LiteralPath $prior)) "set-refuses-a-module-that-is-not-the-checked-build ($e)"
+
+    # ---- a key that does not exist yet is made admin-only before any value is written ----
+    $hklm.DeleteSubKeyTree($sub)
+    $r = Set-IemSshShell @setArgs
+    $kacl = Get-Acl -LiteralPath $key
+    $userWrite = @($kacl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | Where-Object {
+        $_.IdentityReference.Value -ne 'S-1-5-32-544' -and $_.IdentityReference.Value -ne 'S-1-5-18' -and ([int]$_.RegistryRights -band 0x500D0026) -ne 0 })
+    Assert ($r.state -ceq 'set' -and (Read-Values) -ceq $ours -and $kacl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ceq 'S-1-5-32-544' -and
+            $userWrite.Count -eq 0) "set-creates-a-missing-key-admin-only ($($kacl.Sddl))"
+    $u = Undo-IemSshShell @common
+    Assert ($u.state -ceq 'restored' -and (Read-Values) -ceq $absent) "undo-after-a-created-key-deletes-the-values ($(Read-Values))"
     New-TestKey
 
     # ---- from absent: saved, armed, written, read back ----
     $before = Get-Date
-    $r = Set-IemSshShell @common
+    $r = Set-IemSshShell @setArgs
     Assert ($r.state -ceq 'set' -and (Read-Values) -ceq $ours) "set-from-absent-writes-the-three-values ($(Read-Values))"
     foreach ($n in $names) { Assert ([string](Get-IemProp (Get-IemProp $r.prior $n) 'kind') -ceq 'absent') "set-from-absent-saves-$n-absent" }
     foreach ($p in @($dir, $prior, (Join-Path $dir 'ssh-shell-undo.ps1'))) {
@@ -239,10 +262,40 @@ try {
     # ---- idempotent: a pending undo is re-armed with the saved values kept ----
     $savedBytes = [IO.File]::ReadAllBytes($prior)
     Start-Sleep -Milliseconds 1100
-    $r = Set-IemSshShell @common
+    $r = Set-IemSshShell @setArgs
     Assert ($r.state -ceq 'rearmed' -and (Read-Values) -ceq $ours) "set-again-while-pending-rearms ($($r.state))"
     Assert ((Get-IemBytesSha256 -Bytes ([IO.File]::ReadAllBytes($prior))) -ceq (Get-IemBytesSha256 -Bytes $savedBytes)) 'set-again-keeps-the-first-saved-values'
     Assert ([datetime]$r.undo.at -gt $start) "set-again-moves-the-undo-time ($($r.undo.at))"
+
+    # ---- an undo task that is queued or runs: Set and Confirm refuse and change nothing ----
+    $marker = Join-Path $base 'release'
+    $psExe = Join-Path ([Environment]::GetFolderPath('System')) 'WindowsPowerShell\v1.0\powershell.exe'
+    # It ends by itself once the marker exists, at the latest after 90 s (never ended by force).
+    $waitArgs = '-NoProfile -NonInteractive -Command "$t = [DateTime]::UtcNow.AddSeconds(90); while (-not (Test-Path -LiteralPath ''' +
+        $marker + ''') -and [DateTime]::UtcNow -lt $t) { Start-Sleep -Milliseconds 200 }"'
+    Register-ScheduledTask -TaskPath ($folder + '\') -TaskName $taskName -Action (New-ScheduledTaskAction -Execute $psExe -Argument $waitArgs) `
+        -Principal (New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest) -Force | Out-Null
+    Start-ScheduledTask -TaskPath ($folder + '\') -TaskName $taskName
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    while ("$((Get-ScheduledTask -TaskPath ($folder + '\') -TaskName $taskName).State)" -ne 'Running' -and $clock.Elapsed.TotalSeconds -lt 30) { Start-Sleep -Milliseconds 200 }
+    $savedBytes = [IO.File]::ReadAllBytes($prior)
+    $e = ErrorOf { Set-IemSshShell @setArgs }
+    Assert ($e -like '*queued or runs*' -and (Read-Values) -ceq $ours -and
+            (Get-IemBytesSha256 -Bytes ([IO.File]::ReadAllBytes($prior))) -ceq (Get-IemBytesSha256 -Bytes $savedBytes)) "set-refuses-while-the-undo-task-runs ($e)"
+    $e = ErrorOf { Confirm-IemSshShell @common }
+    Assert ($e -like '*queued or runs*' -and (Test-Path -LiteralPath $prior) -and $null -ne (Get-UndoTask)) "confirm-refuses-while-the-undo-task-runs ($e)"
+    New-Item -ItemType File -Path $marker | Out-Null
+    $clock.Restart()
+    while ("$((Get-ScheduledTask -TaskPath ($folder + '\') -TaskName $taskName).State)" -eq 'Running' -and $clock.Elapsed.TotalSeconds -lt 60) { Start-Sleep -Milliseconds 200 }
+    Assert ("$((Get-ScheduledTask -TaskPath ($folder + '\') -TaskName $taskName).State)" -ne 'Running') 'the-busy-stand-in-ended-by-itself'
+
+    # ---- a re-arm puts the undo task back and rewrites a copy that changed ----
+    $pcCopy = Join-Path $dir 'IemPc.psm1'
+    [IO.File]::AppendAllText($pcCopy, "`r`n# changed after the set`r`n")
+    $r = Set-IemSshShell @setArgs
+    $bad = Test-IemElevatedItem -Path $pcCopy -UserSid $me.sid
+    Assert ($r.state -ceq 'rearmed' -and $bad.Count -eq 0 -and (Get-FileHash -LiteralPath $pcCopy).Hash.ToLowerInvariant() -ceq $sums['IemPc.psm1']) "set-rewrites-an-undo-copy-that-changed ($($bad -join '; '))"
+    Assert (@((Get-UndoTask).Definition.Actions)[0].Arguments -clike '*ssh-shell-undo.ps1*') 'set-again-registers-the-undo-action-again'
 
     # ---- confirm refuses a key others may change, and keeps the undo armed ----
     Add-KeyRule 'SetValue' 'None' 'None'
@@ -261,14 +314,14 @@ try {
     Assert ($c.state -ceq 'confirmed' -and $null -eq (Get-UndoTask) -and -not (Test-Path -LiteralPath $prior) -and (Read-Values) -ceq $ours) "confirm-removes-the-undo-task-and-the-saved-values ($($c.state))"
     $c = Confirm-IemSshShell @common
     Assert ($c.state -ceq 'unchanged') 'confirm-again-is-unchanged'
-    $r = Set-IemSshShell @common
+    $r = Set-IemSshShell @setArgs
     Assert ($r.state -ceq 'unchanged' -and $null -eq (Get-UndoTask) -and -not (Test-Path -LiteralPath $prior)) "set-when-ours-and-nothing-pending-is-unchanged ($($r.state))"
     $u = Undo-IemSshShell @common
     Assert ($u.state -ceq 'nothing-saved' -and (Read-Values) -ceq $ours) "undo-with-nothing-saved-changes-nothing ($($u.state))"
 
     # ---- undo restores absent values (deleted) ----
     New-TestKey
-    $r = Set-IemSshShell @common
+    $r = Set-IemSshShell @setArgs
     Assert ($r.state -ceq 'set') 'set-again-from-absent'
     $u = Undo-IemSshShell @common
     Assert ($u.state -ceq 'restored' -and (Read-Values) -ceq $absent -and $null -eq (Get-UndoTask) -and -not (Test-Path -LiteralPath $prior)) "undo-restores-absent-values ($(Read-Values))"
@@ -277,7 +330,7 @@ try {
     Set-TestValue 'DefaultShellArguments' ([string[]]@()) ([Microsoft.Win32.RegistryValueKind]::MultiString)
     $empty = 'absent ; absent ; MultiString:0:'
     Assert ((Read-Values) -ceq $empty) "empty-multi-string-in-place ($(Read-Values))"
-    $r = Set-IemSshShell @common
+    $r = Set-IemSshShell @setArgs
     $u = Undo-IemSshShell @common
     Assert ($u.state -ceq 'restored' -and (Read-Values) -ceq $empty) "undo-restores-an-empty-multi-string-exactly ($(Read-Values))"
     New-TestKey
@@ -285,14 +338,14 @@ try {
     # ---- a foreign prior shell: saved and restored exactly, by hand and by the task ----
     Set-Foreign
     Assert ((Read-Values) -ceq $foreign) "foreign-prior-in-place ($(Read-Values))"
-    $r = Set-IemSshShell @common
+    $r = Set-IemSshShell @setArgs
     Assert ($r.state -ceq 'set' -and (Read-Values) -ceq $ours) 'set-from-a-foreign-shell'
     Assert ($r.prior.DefaultShellCommandOption.kind -ceq 'ExpandString' -and $r.prior.DefaultShellCommandOption.data -ceq '-c %IEMTESTVAR%') 'set-saves-an-expandable-string-unexpanded'
     $u = Undo-IemSshShell @common
     Assert ($u.state -ceq 'restored' -and (Read-Values) -ceq $foreign) "undo-restores-a-foreign-shell-exactly ($(Read-Values))"
 
     # ---- confirm refuses values that are not ours, and keeps the undo armed ----
-    $r = Set-IemSshShell @common
+    $r = Set-IemSshShell @setArgs
     Set-TestValue 'DefaultShellArguments' '/x' ([Microsoft.Win32.RegistryValueKind]::String)
     $e = ErrorOf { Confirm-IemSshShell @common }
     Assert ($e -like '*not ours*' -and $null -ne (Get-UndoTask) -and (Test-Path -LiteralPath $prior)) "confirm-refuses-values-that-are-not-ours ($e)"
@@ -302,13 +355,18 @@ try {
     $facl = Get-Acl -LiteralPath $prior
     $facl.AddAccessRule($rule)
     Set-Acl -LiteralPath $prior -AclObject $facl
-    $e = ErrorOf { Undo-IemSshShell @common }
-    Assert ($e -like '*saved values are refused*' -and (Read-Values) -like '*String:/x') "undo-refuses-a-saved-file-others-may-change ($e)"
-    $e = ErrorOf { Set-IemSshShell @common }
+    # Undo never restores from it: it falls back to sshd's own default (the three values
+    # deleted), keeps the file for inspection and removes the task.
+    $u = Undo-IemSshShell @common
+    Assert ($u.state -ceq 'default' -and "$($u.why)" -like '*saved values are refused*' -and (Read-Values) -ceq $absent -and
+            (Test-Path -LiteralPath $prior) -and $null -eq (Get-UndoTask)) "undo-from-saved-values-others-may-change-falls-back-to-sshd-s-default ($($u.state); $(Read-Values))"
+    $e = ErrorOf { Set-IemSshShell @setArgs }
     Assert ($e -like '*saved values are refused*') "set-refuses-a-saved-file-others-may-change ($e)"
     $facl = Get-Acl -LiteralPath $prior
     [void]$facl.RemoveAccessRule($rule)
     Set-Acl -LiteralPath $prior -AclObject $facl
+    $r = Set-IemSshShell @setArgs
+    Assert ($r.state -ceq 'rearmed' -and (Read-Values) -ceq $ours) "set-rearms-over-the-kept-saved-values ($($r.state))"
 
     # ---- the undo task as registered, run now: SYSTEM restores the foreign shell ----
     $lines = Get-LogLines
@@ -318,7 +376,7 @@ try {
     if (Test-Path -LiteralPath $log) { $said = ([IO.File]::ReadAllText($log)).Trim() }
     Assert ($done -and (Read-Values) -ceq $foreign) "undo-task-restores-the-prior-shell-as-system ($(Read-Values); log: $said)"
     Assert ($said -like '*undo restored') "undo-task-logs-its-result ($said)"
-    $r = Set-IemSshShell @common
+    $r = Set-IemSshShell @setArgs
     Assert ($r.state -ceq 'set' -and $r.undo_log -like '*undo restored') "set-names-the-last-undo ($($r.undo_log))"
     [void](Confirm-IemSshShell @common)
 } finally {

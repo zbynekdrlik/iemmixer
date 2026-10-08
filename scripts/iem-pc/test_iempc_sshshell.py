@@ -109,9 +109,16 @@ class SequenceTests(ShellBase):
             self.assertIn(f"$iemH -cne '{sha256(b'synthetic IemPc.psm1')}'", script)
             self.assertIn(f"$iemH -cne '{sha256(MODULES['tuning/IemTuningStore.psm1'])}'", script)
             self.assertIn(f"$iemH -cne '{sha256(MODULES['IemSshShell.psm1'])}'", script)
-            self.assertIn(f"Import-Module $iemMod -Force ; $r = & {{ {mark} }}", script[new:])
+            self.assertIn(f"Import-Module $iemMod -Force ; $r = & {{ {mark}", script[new:])
             self.assertNotIn(f"Import-Module '{UPLOADED}", script)   # never from the run folder (#15)
             self.assertEqual(script.count("Import-Module"), 1, mark)
+        # Set copies the modules for its undo task only as the bytes this box checked (the stage is shared).
+        sums = {"IemPc.psm1": sha256(b"synthetic IemPc.psm1"),
+                "IemTuningStore.psm1": sha256(MODULES["tuning/IemTuningStore.psm1"]),
+                "IemSshShell.psm1": sha256(MODULES["IemSshShell.psm1"])}
+        self.assertIn("$r = & { Set-IemSshShell -ModuleSha256 @{ " + "; ".join(f"'{n}' = '{h}'" for n, h in sums.items())
+                      + " } }", self.scripts(ss.SET)[0][0])
+        self.assertIn("$r = & { Confirm-IemSshShell }", self.scripts(ss.CONFIRM)[0][0])
         probe = self.scripts(PROBE_MARK)[0][0]
         self.assertNotIn("Import-Module", probe)   # the probe runs as any session does: no module, no stage
         self.assertIn(ip.elevated_ps().PIN, probe)
@@ -174,6 +181,25 @@ class FailureTests(ShellBase):
         self.assertIn("the values are not ours", err)
         self.assertIn(f"{ss.UNDO_TASK} restores the prior OpenSSH default shell at {AT}", err)
 
+    def test_after_an_armed_set_confirm_must_have_confirmed(self) -> None:
+        """`unchanged` from Confirm after Set armed the undo means it found
+        neither the saved values nor the task: what became of the undo is
+        unknown, so it is no success."""
+        self.fetched()
+        self.confirm_reply = {"state": "unchanged", "removed": []}
+        code, docs, err = self.run_main("ssh-shell", "--sha", SHA)
+        self.assertEqual(code, 1)
+        self.assertNotIn("ssh_shell", "".join(str(d) for d in docs))
+        self.assertIn(f"restores the prior OpenSSH default shell at {AT}", err)
+
+    def test_a_probe_of_another_shell_than_set_wrote_never_confirms(self) -> None:
+        self.fetched()
+        other = "D:\\Windows\\system32\\cmd.exe"
+        self.probe_reply = {"exe": other, "line": line("/d /c", other)}
+        code, _, err = self.run_main("ssh-shell", "--sha", SHA)
+        self.assertEqual(code, 1)
+        self.assert_unconfirmed(err)
+
     def test_a_confirm_answer_that_is_not_confirmed_is_an_error(self) -> None:
         self.fetched()
         self.confirm_reply = {"state": "kept"}
@@ -202,7 +228,10 @@ class FailureTests(ShellBase):
 
     def test_a_set_answer_without_a_state_or_undo_time_is_refused(self) -> None:
         self.fetched()
-        for bad in ({"state": "maybe"}, {"state": "set", "undo": None}, {"state": "set", "undo": {"at": ""}}, "ok"):
+        no_values = {"state": "set", "key": ss.KEY, "undo": {"task": ss.UNDO_TASK, "at": AT}}
+        no_shell = {"state": "unchanged", "key": ss.KEY, "undo": None, "values": {"DefaultShell": {"kind": "absent"}}}
+        for bad in ({"state": "maybe"}, {"state": "set", "undo": None}, {"state": "set", "undo": {"at": ""}}, "ok",
+                    no_values, no_shell):
             self.pc.modules.clear()
             self.set_reply = bad
             code, _, err = self.run_main("ssh-shell", "--sha", SHA)
@@ -334,6 +363,12 @@ class ProbeParseTests(unittest.TestCase):
         for r in refused:
             with self.assertRaises(ip.StepError, msg=repr(r)):
                 ss.parse_probe(ip, r)
+
+    def test_the_shell_must_be_the_one_set_wrote(self) -> None:
+        r = {"exe": CMD, "line": line("/d /c")}
+        self.assertEqual(ss.parse_probe(ip, r, CMD.lower())["shell"], CMD)   # Windows paths: any case
+        with self.assertRaisesRegex(ip.StepError, "not the DefaultShell"):
+            ss.parse_probe(ip, r, "D:\\Windows\\system32\\cmd.exe")
 
     def test_the_refusal_names_what_was_read(self) -> None:
         with self.assertRaisesRegex(ip.StepError, re.escape(f'"{CMD}" /c')):
