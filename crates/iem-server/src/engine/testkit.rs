@@ -136,7 +136,8 @@ impl EngineHarness {
     /// `cmd` through a supervisor connection of its own (the guard's role,
     /// S6; e.g. a HIL signal under `--test-signal`), in the pattern of
     /// [`Self::shutdown`]: read until the engine answered it; the answer's
-    /// error, if any. Bounded: each read ≤ 1 s, the exchange ≤ 5 s.
+    /// error, if any. Bounded: each read ≤ 1 s, no read starts after 5 s
+    /// (so ≤ 6 s in all).
     pub fn supervise(&self, cmd: Cmd) -> Result<(), ErrorBody> {
         let mut s = std::os::unix::net::UnixStream::connect(&self.pipe).expect("the control pipe");
         s.set_read_timeout(Some(Duration::from_secs(1)))
