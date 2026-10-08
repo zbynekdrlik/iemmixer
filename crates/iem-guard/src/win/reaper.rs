@@ -200,22 +200,37 @@ fn await_ending(pc: &mut WinPc, pid: u32, c: &Cancel) -> R<()> {
          Reporting reports): no save or quit is sent; waiting up to {} s for it to be gone",
         CRASH_HOLD.as_secs()
     );
-    match Handle::open_waitable(pid) {
-        Ok(handle) => {
-            let start = Instant::now();
-            if procs::wait_exit(&handle, CRASH_HOLD, c)?.is_none() {
-                return Err(StepError::failed(format!(
-                    "REAPER is still ending {} s later: it is not saved or quit again",
-                    CRASH_HOLD.as_secs()
-                )));
+    let start = Instant::now();
+    // The REAPER this guard asked to quit is watched through the handle it
+    // opened before the quit; another through a new one. A REAPER that
+    // cannot be opened is gone only when the list no longer shows it.
+    let gone = match pc.quitting.as_ref().filter(|q| q.handle.pid() == pid) {
+        Some(q) => procs::wait_exit(&q.handle, CRASH_HOLD, c)?.is_some(),
+        None => match Handle::open_waitable(pid) {
+            Ok(h) => procs::wait_exit(&h, CRASH_HOLD, c)?.is_some(),
+            Err(e) => {
+                let listed = process::pids(&pc.images.reaper)
+                    .map_err(|le| procs::failed("the process list", le))?;
+                if listed.contains(&pid) {
+                    return Err(StepError::failed(format!(
+                        "REAPER (pid {pid}) is ending but cannot be watched ({e}): it is not \
+                         saved or quit again"
+                    )));
+                }
+                true
             }
-            info!(
-                "REAPER (pid {pid}) is gone {} ms later",
-                start.elapsed().as_millis()
-            );
-        }
-        Err(e) => info!("REAPER (pid {pid}) cannot be opened any more ({e}): it has ended"),
+        },
+    };
+    if !gone {
+        return Err(StepError::failed(format!(
+            "REAPER is still ending {} s later: it is not saved or quit again",
+            CRASH_HOLD.as_secs()
+        )));
     }
+    info!(
+        "REAPER (pid {pid}) is gone {} ms later",
+        start.elapsed().as_millis()
+    );
     pc.quitting = None;
     unheld(pc)
 }
@@ -410,8 +425,13 @@ pub(super) fn await_end(pc: &mut WinPc, c: &Cancel) -> R<()> {
         if asked.is_some_and(|(asked_pid, _)| asked_pid == pid) {
             continue;
         }
-        let Ok(h) = Handle::open_waitable(pid) else {
-            continue;
+        let h = match Handle::open_waitable(pid) {
+            Ok(h) => h,
+            Err(e) => {
+                // `seen` reads it again after the wait.
+                warn!("REAPER (pid {pid}) cannot be watched: {e}");
+                continue;
+            }
         };
         let ended = matches!(h.wait(Duration::ZERO), Ok(Some(_)));
         if reaper::reaper_state(false, wer_for(pid).is_some(), ended) == ReaperState::Ending {
