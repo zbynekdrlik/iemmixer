@@ -145,6 +145,12 @@ class Verdict(unittest.TestCase):
         self.green(r)
         r.results["suites"][1]["specs"][-1] = case(T2, "unexpected")
         self.red(r, f"live test failed: {T2}")
+        # More tests of a title than the specs hold (another project, a repeat): green when all passed.
+        r = Record()
+        r.results["suites"][1]["specs"].append(case(T1))
+        self.green(r)
+        r.results["suites"][1]["specs"][-1] = case(T1, "flaky")
+        self.red(r, f"live test flaky: {T1}")
         # A test outside the read titles that did not pass (a title the regex cannot read).
         r = Record()
         r.results["suites"][1]["specs"].append(case("a title built at run time", "unexpected"))
@@ -371,9 +377,13 @@ class Numbers(unittest.TestCase):
                                       "listen_hz=1", {"description": "listen_hz=1"}), {})
         # Only finite decimal numbers.
         for text in ("nan", "inf", "-inf", "Infinity", "1e999", "-1e999", "1_000", " 5", "5 ", "0x10", "", "+5",
-                     "5.", ".5", "1e", "١", f"1 {SITE}", "true", "null"):
+                     "5.", ".5", "1e", "\u0661", f"1 {SITE}", "true", "null"):
             self.assertEqual(self.numbers({"type": "live_number", "description": f"listen_hz={text}"}), {}, text)
         self.assertEqual(self.numbers(number("listen_dbfs", "-1e308")), {"listen_dbfs": -1e308})
+        self.assertIs(type(self.numbers(number("listen_dbfs", "-1e308"))["listen_dbfs"]), float)
+        # A whole number becomes an integer only below 2**53, where its float is still exact.
+        self.assertIs(type(self.numbers(number("opus_frames", "9007199254740992"))["opus_frames"]), float)
+        self.assertIs(type(self.numbers(number("opus_frames", "9007199254740991"))["opus_frames"]), int)
         self.assertEqual(self.numbers(number("opus_frames", "1500"), number("meter_fps", "9.75"),
                                       number("talkback_db", "-8.4e0")),
                          {"opus_frames": 1500, "meter_fps": 9.75, "talkback_db": -8.4})
@@ -513,10 +523,10 @@ class Main(unittest.TestCase):
 
     def write_all(self, record: Record) -> None:
         # PowerShell's files: a BOM, CRLF; one burst per line.
-        self.write("begin.json", "﻿" + json.dumps(record.begin) + "\r\n")
-        self.write("pc.json", "﻿" + json.dumps(record.pc) + "\r\n")
-        self.write("evidence.json", "﻿" + json.dumps(record.evidence) + "\r\n")
-        self.write("bursts.jsonl", "﻿" + "".join(json.dumps(b) + "\r\n" for b in record.bursts))
+        self.write("begin.json", "\ufeff" + json.dumps(record.begin) + "\r\n")
+        self.write("pc.json", "\ufeff" + json.dumps(record.pc) + "\r\n")
+        self.write("evidence.json", "\ufeff" + json.dumps(record.evidence) + "\r\n")
+        self.write("bursts.jsonl", "\ufeff" + "".join(json.dumps(b) + "\r\n" for b in record.bursts))
         self.write("results.json", json.dumps(record.results, indent=2))
 
     def test_main_report_reads_the_record_and_prints_one_json(self):
