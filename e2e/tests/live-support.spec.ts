@@ -51,19 +51,35 @@ class FakeSocket extends EventEmitter {
 /** One listen frame: a CELT 20 ms stereo Opus packet (TOC config 31, s set, c = 0). */
 const FRAME = Buffer.from([(31 << 3) | 0b100, 0x5a, 0x5a]);
 
-/** A real BurstWatch on a stand-in socket, with functions that feed it an AudioStatus and a listen frame. */
-function rawWatch(): { watch: BurstWatch; status: (status: string) => void; frame: () => void } {
+/** 5 s of the slot's own 20 ms frames: what a watch sees between two bursts (30 s apart) at the least. */
+const FIVE_SECONDS_OF_FRAMES = 250;
+
+type RawWatch = {
+  watch: BurstWatch;
+  status: (status: string) => void;
+  /** One listen frame. */
+  frame: () => void;
+  /** `n` listen frames. */
+  frames: (n: number) => void;
+};
+
+/** A real BurstWatch on a stand-in socket, with functions that feed it an AudioStatus and listen frames. */
+function rawWatch(): RawWatch {
   const socket = new FakeSocket();
   const watch = new (BurstWatch as unknown as new (ws: unknown) => BurstWatch)(socket);
+  const frame = () => socket.emit("message", FRAME, true);
   return {
     watch,
     status: (status) => socket.event("AudioStatus", { status }),
-    frame: () => socket.emit("message", FRAME, true),
+    frame,
+    frames: (n) => {
+      for (let i = 0; i < n; i++) frame();
+    },
   };
 }
 
 test("the watch counts a burst only when it saw the burst begin", async () => {
-  const { watch, status, frame } = rawWatch();
+  const { watch, status, frame, frames } = rawWatch();
   // Opened in the middle of a burst: the ListenStart answer, then `probe`
   // with the first frame (the server's gate is per session).
   status("listening");
@@ -77,7 +93,7 @@ test("the watch counts a burst only when it saw the burst begin", async () => {
 
   // That burst ends; the slot's own frames come; the next burst begins in view.
   status("listening");
-  frame();
+  frames(FIVE_SECONDS_OF_FRAMES);
   expect(watch.inBurst()).toBe(false);
   status("probe");
   frame();
@@ -94,6 +110,31 @@ test("the watch counts a burst only when it saw the burst begin", async () => {
   frame();
   expect(watch.inBurst()).toBe(false);
   expect(watch.burstFrames).toBe(3);
+});
+
+test("a burst's edge after a stall is no burst begun: it needs 5 s of the slot's own frames before it", async () => {
+  const { watch, status, frame, frames } = rawWatch();
+  status("listening");
+  frames(FIVE_SECONDS_OF_FRAMES);
+  status("probe");
+  expect(watch.inBurst(), "a burst after 5 s of own frames").toBe(true);
+  // A stall of the probe frames inside the burst (over the server gate's
+  // 100 ms): `listening` with an own frame, then `probe` again. The burst
+  // did not begin there, and may end at any moment.
+  status("listening");
+  frame();
+  status("probe");
+  expect(watch.inBurst(), "a burst after one own frame").toBe(false);
+  expect(watch.leftMs()).toBe(0);
+  // One frame short of 5 s is still not enough.
+  status("listening");
+  frames(FIVE_SECONDS_OF_FRAMES - 1);
+  status("probe");
+  expect(watch.inBurst()).toBe(false);
+  status("listening");
+  frames(FIVE_SECONDS_OF_FRAMES);
+  status("probe");
+  expect(watch.inBurst()).toBe(true);
 });
 
 /** The engine's talkback gain into its input (program spec A4). */
@@ -186,9 +227,9 @@ test("continuity counts the frames above -60 dB and the longest silent run", () 
 
 /** A watch as `BurstWatch.open` leaves it: ListenStart answered `listening`, and the slot's own frames coming. */
 function watchOn(): { watch: BurstWatch; status: (status: string) => void } {
-  const { watch, status, frame } = rawWatch();
+  const { watch, status, frames } = rawWatch();
   status("listening");
-  frame();
+  frames(FIVE_SECONDS_OF_FRAMES);
   return { watch, status };
 }
 
