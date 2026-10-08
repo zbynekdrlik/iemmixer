@@ -636,6 +636,7 @@ mod tests {
                 dbfs: -30.0,
                 ttl_s: 10.0,
                 card_tx: vec![72],
+                listen: false,
             },
             Cmd::ForceReopen,
         ]
@@ -1157,3 +1158,7 @@ mod tests {
         );
     }
 }
+
+/// S7 (#10): the listen probe's flag on `HilTestSignal`.
+#[cfg(test)]
+mod s7_tests;

@@ -682,6 +682,7 @@ fn the_hil_test_signal_needs_the_flag_stays_under_the_cap_and_names_spare_output
         dbfs,
         ttl_s: 0.5,
         card_tx,
+        listen: false,
     };
     let mut off = hil_core(Flags::default());
     assert_eq!(code(off.apply(&hil(-30.0, vec![94]))), ErrCode::Forbidden);
@@ -720,11 +721,12 @@ fn the_hil_test_signal_needs_the_flag_stays_under_the_cap_and_names_spare_output
         amp,
         ttl,
         mask,
+        listen,
     } = out.rt[0]
     else {
         panic!("{:?}", out.rt)
     };
-    assert_eq!((i, hz, ttl), (2, 1000.0, 48_000));
+    assert_eq!((i, hz, ttl, listen), (2, 1000.0, 48_000, false));
     assert!((amp - 0.1).abs() < 1e-15, "{amp}");
     // HIL slots in the order the engine opened its spare outputs.
     let on: Vec<usize> = (0..MAX_HIL).filter(|k| mask[*k]).collect();
@@ -779,6 +781,7 @@ fn a_hil_signal_never_names_a_mixs_tx() {
                         dbfs: -30.0,
                         ttl_s: 0.5,
                         card_tx: card_tx.clone(),
+                        listen: false,
                     })
                     .unwrap_err();
                 if card_tx[0] == 94 && c.hil().is_empty() {
@@ -813,6 +816,7 @@ fn a_plain_test_signal_never_lifts_a_running_hil_mask() {
         dbfs: -30.0,
         ttl_s: 0.5,
         card_tx: vec![94],
+        listen: false,
     };
     let plain = Cmd::StartTestSignal {
         input: input("mic2"),
@@ -848,6 +852,7 @@ fn a_hil_output_beyond_the_mask_is_refused() {
         dbfs: -30.0,
         ttl_s: 0.5,
         card_tx: vec![ch],
+        listen: false,
     };
     let out = c.apply(&hil(spare[MAX_HIL - 1])).unwrap();
     let RtOp::HilTestSignal { mask, .. } = out.rt[0] else {

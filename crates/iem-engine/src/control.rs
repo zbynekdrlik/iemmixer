@@ -1356,6 +1356,7 @@ mod tests {
                 dbfs: -30.0,
                 ttl_s: 60.0,
                 card_tx: vec![SPARE[1]],
+                listen: false,
             }
         }
 

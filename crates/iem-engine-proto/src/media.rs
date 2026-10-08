@@ -125,6 +125,41 @@ mod tests {
         assert_eq!(out, samples);
     }
 
+    /// The listen probe (S7): streams of its own, so the listen taps keep
+    /// their bytes; the v1 header is unchanged and the stream byte is the
+    /// mark.
+    #[test]
+    fn the_probe_streams_are_2_and_3_beside_the_listen_taps() {
+        assert_eq!((stream::ENGINEER_PROBE, stream::MEMBER_PROBE), (2, 3));
+        let ids = [
+            stream::ENGINEER_LISTEN,
+            stream::MEMBER_LISTEN,
+            stream::ENGINEER_PROBE,
+            stream::MEMBER_PROBE,
+            stream::TALKBACK,
+        ];
+        for (k, a) in ids.iter().enumerate() {
+            assert!(ids[k + 1..].iter().all(|b| b != a), "stream {a} twice");
+        }
+        let h = MediaHeader {
+            stream: stream::MEMBER_PROBE,
+            channels: 2,
+            seq: 7,
+            frames: 2,
+        };
+        let samples = [0.1, 0.1, -0.1, -0.1];
+        let mut wire = Vec::new();
+        write_media(&mut wire, &h, &samples).unwrap();
+        assert_eq!(&wire[..8], b"IEMF\x01\x03\x02\x00");
+        let mut out = Vec::new();
+        assert_eq!(read_media(&mut wire.as_slice(), &mut out).unwrap(), h);
+        assert_eq!(out, samples);
+        let mut engineer = wire.clone();
+        engineer[5] = stream::ENGINEER_PROBE;
+        let got = read_media(&mut engineer.as_slice(), &mut out).unwrap();
+        assert_eq!(got.stream, 2);
+    }
+
     #[test]
     fn bad_frames_fail() {
         let mut wire = Vec::new();
