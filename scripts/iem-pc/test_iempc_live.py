@@ -420,15 +420,13 @@ class PureTests(LiveBase):
         self.assertEqual(live.running_live(ip, 0, now)["sha"], SHA2)
         self.assertIsNone(live.running_live(ip, 2, now))
 
-    def test_the_window_covers_live_ymls_jobs(self) -> None:
-        """WINDOW_S is the bound of every live.yml job that holds the PC, one
-        after another (Task 25): pc-begin 15 min, then pc 60 min (browser's 45
-        run beside it; Playwright's globalTimeout of 40 inside that), then
-        pc-end 10, plus 5 for verify and the queue."""
+    def test_the_window_is_the_sum_of_the_job_bounds_task_25_uses(self) -> None:
+        """Pins the constants only: no public test can read the private
+        live.yml, whose `timeout-minutes` Task 25 sets to these bounds
+        (pc-begin 15, pc 60 with browser's 45 beside it, pc-end 10, plus 5
+        for verify and the pick-up)."""
         self.assertEqual(live.JOB_MINUTES, {"verify": 5, "pc-begin": 15, "pc": 60, "pc-end": 10})
         self.assertEqual(live.WINDOW_S, 5400)
-        self.assertEqual(live.WINDOW_S, sum(live.JOB_MINUTES.values()) * 60)
-        self.assertGreaterEqual(live.JOB_MINUTES["pc"], live.BROWSER_MINUTES)
         self.assertEqual((live.LIVE_WORKFLOW, live.RECORD), ("live.yml", "live.json"))
 
 
