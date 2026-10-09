@@ -23,6 +23,7 @@ Gen 2 of the band's in-ear-monitor mixer: a native Rust audio engine replacing R
 - Golden renders on the IEM PC (generator, window driver, analysis) → `.claude/rules/golden-renders.md`
 - Guard, iemmode, PC install → `.claude/rules/guard.md`
 - Soak harness, verdict, dispatch-soak → `.claude/rules/soak.md`
+- Live E2E on the PC, live verdict, dispatch-live → `.claude/rules/live.md`
 
 ## Always-apply rules
 

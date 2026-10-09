@@ -34,14 +34,17 @@ export const BURST_CEILING_DBFS = -20;
 /** The failing hop when /api/version does not name the run's build. */
 export const NOT_THE_BUILD = "the public host does not answer with the run's build (tunnel or server)";
 
-function value(name: string): string {
-  const v = process.env[name];
+/** The variables a value is read from: the process's, or a test's own. */
+type Env = Record<string, string | undefined>;
+
+function value(name: string, env: Env = process.env): string {
+  const v = env[name];
   if (v === undefined || v === "") throw new Error(`${name} is not set`);
   return v;
 }
 
-function matching(name: string, re: RegExp, what: string): string {
-  const v = value(name);
+function matching(name: string, re: RegExp, what: string, env: Env = process.env): string {
+  const v = value(name, env);
   if (!re.test(v)) throw new Error(`${name} is not ${what}`);
   return v;
 }
@@ -81,6 +84,21 @@ function burstOf(name: string): number {
   const n = Number(v);
   if (!Number.isFinite(n) || n > BURST_CEILING_DBFS) throw new Error(`${name} is not a level of at most ${BURST_CEILING_DBFS} dBFS`);
   return n;
+}
+
+/** A run id or an attempt of GitHub Actions: decimal digits, at most 20 (a u64). */
+const RUN_NUMBER = /^[0-9]{1,20}$/;
+
+/**
+ * The client-error marker of this run, `iemmixer-live-marker-<run id>-<attempt>`,
+ * from `GITHUB_RUN_ID` and `GITHUB_RUN_ATTEMPT` (the ops live run's own:
+ * `pc-end` in the same run builds the same marker and looks for it in the
+ * server's log). Read on use; a refusal names the variable, never its value.
+ */
+export function runMarker(env: Env = process.env): string {
+  const id = matching("GITHUB_RUN_ID", RUN_NUMBER, "a run number (digits)", env);
+  const attempt = matching("GITHUB_RUN_ATTEMPT", RUN_NUMBER, "a run number (digits)", env);
+  return `iemmixer-live-marker-${id}-${attempt}`;
 }
 
 let cached: Live | null = null;
@@ -147,7 +165,7 @@ function authOf(who: Who): { token: string; member: string; engineer: boolean } 
 export async function openLive(page: Page, who: Who, path?: string): Promise<void> {
   const auth = authOf(who);
   const { baseURL } = live();
-  await navigate(page, new URL("/", baseURL).toString(), "the app's start page");
+  await openStart(page);
   await page.evaluate((a) => {
     localStorage.setItem("iem_token", JSON.stringify(a));
     sessionStorage.setItem("iem_redirected", "1");
@@ -155,6 +173,11 @@ export async function openLive(page: Page, who: Who, path?: string): Promise<voi
   const what = who === "engineer" ? "a mixer page" : "the member's mixer page";
   await navigate(page, new URL(`/${path ?? auth.member}`, baseURL).toString(), what);
   await expect(page.getByTestId("global-volume-fader")).toBeVisible({ timeout: 15_000 });
+}
+
+/** Opens the public host's start page (the band's landing page). */
+export async function openStart(page: Page): Promise<void> {
+  await navigate(page, new URL("/", live().baseURL).toString(), "the app's start page");
 }
 
 /**
@@ -177,18 +200,60 @@ async function navigate(page: Page, url: string, what: string): Promise<void> {
  * Playwright's own error text lists the request's headers, the token too.
  */
 export async function apiGet(request: APIRequestContext, who: Who, path: string): Promise<{ status: number; body: unknown }> {
-  if (!/^\/[^?#]*$/.test(path)) throw new Error("apiGet takes a path without a query");
-  const { baseURL } = live();
+  return api(request, "GET", who, path);
+}
+
+/**
+ * POST `data` as JSON to `path` (no query) on the public host with `who`'s
+ * token: its status and JSON body, as `apiGet`. A failure names the method
+ * and the path only, never the data (a push endpoint is a capability) or the
+ * token.
+ */
+export async function apiPost(
+  request: APIRequestContext,
+  who: Who,
+  path: string,
+  data: unknown,
+): Promise<{ status: number; body: unknown }> {
+  return api(request, "POST", who, path, data);
+}
+
+async function api(
+  request: APIRequestContext,
+  method: "GET" | "POST",
+  who: Who,
+  path: string,
+  data?: unknown,
+): Promise<{ status: number; body: unknown }> {
+  if (!/^\/[^?#]*$/.test(path)) throw new Error(`${method} takes a path without a query`);
+  return apiAt(request, { origin: live().baseURL, token: authOf(who).token }, method, path, data);
+}
+
+/**
+ * `method` `path` at `at.origin` with `at.token`; the request behind
+ * `apiGet` / `apiPost`, given its origin and token (the mock tests' seam).
+ * A request that gets no answer fails with the method and the path only:
+ * Playwright's own error text lists the URL and the request's headers.
+ */
+export async function apiAt(
+  request: Pick<APIRequestContext, "fetch">,
+  at: { origin: string; token: string },
+  method: "GET" | "POST",
+  path: string,
+  data?: unknown,
+): Promise<{ status: number; body: unknown }> {
   let response: APIResponse;
   try {
-    response = await request.get(new URL(path, baseURL).toString(), {
-      headers: { Authorization: `Bearer ${authOf(who).token}` },
+    response = await request.fetch(new URL(path, at.origin).toString(), {
+      method,
+      headers: { Authorization: `Bearer ${at.token}` },
+      data,
       timeout: 15_000,
       maxRedirects: 0,
       failOnStatusCode: false,
     });
   } catch {
-    throw new Error(`GET ${path} got no answer`);
+    throw new Error(`${method} ${path} got no answer`);
   }
   let body: unknown = null;
   try {
