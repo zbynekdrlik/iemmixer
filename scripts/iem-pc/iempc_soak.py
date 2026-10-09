@@ -5,6 +5,8 @@ authentication (no token in the public repo).
 The soak changes no guard state, so the PC must already run the bundle. In
 this order, nothing dispatched on any refusal:
 
+0. iempc.py's call site, first: a live run of this dev entry that may still
+   run (`iempc_live.refuse_while_live`: its pc-begin restarts the engine).
 1. Before any call: dev time (iempc's Spec: no EVENT-NOW flag at the start),
    a full SHA, hours HOURS_MIN..HOURS_MAX (the ops job's 600 min hold 9 h of
    polls, the client's start and its end), and no soak of this SHA in this dev
@@ -142,9 +144,11 @@ RUN_MARGIN_S = 1800
 def running_soak(ip, entry: int, now: dt.datetime) -> dict | None:
     """The newest soak dispatched in dev entry `entry` that may still run at
     `now` (an aware time), or None. A record whose time or hours cannot be
-    read may still run (fail safe)."""
+    read may still run (fail safe); one whose entry cannot be read (not an
+    integer) may be of this entry, bounded by its time and hours as any."""
     for d in reversed(load_soaks(ip)):
-        if d.get("entry") != entry:
+        own = d.get("entry")
+        if type(own) is int and own != entry:
             continue
         hours = d.get("hours")
         try:

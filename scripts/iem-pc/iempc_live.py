@@ -38,11 +38,23 @@ In this order, nothing dispatched on any refusal:
 A failed ops run of the same SHA and dev entry is repeated with `gh run rerun
 <id> -R <ops repo>` (the same verified inputs), never a second dispatch.
 
-Known limits: a run counts as possibly running for WINDOW_S after its
-dispatch, the sum of live.yml's job bounds; a run that waited longer for the
-PC's runner (held by a run dispatched from elsewhere) is not covered, and a
-live run dispatched from another box is not seen. A run of an earlier dev
-entry is not looked at: a switch out of dev ends it (`left-dev`).
+The window: from pc-begin's `iemmode job-begin` to pc-end's `iemmode
+job-end` the guard's HIL job itself refuses a soak and a switch test
+(`iempc_soak.settled_refusal`: no HIL job). WINDOW_S covers the rest, the
+dispatch up to job-begin and pc-end's steps around job-end: a run counts as
+possibly running for WINDOW_S after its dispatch, the sum of live.yml's job
+bounds that hold the PC one after another (JOB_MINUTES). Task 25 keeps every
+step of pc-end that changes the PC (the import of the saved project) before
+its `iemmode job-end`.
+
+Known limits: a run that waited longer than the window's pick-up allowance for
+a runner (the PC's, held by a run dispatched from elsewhere; or browser's
+hosted one, which pc-end waits for) is not covered past its job-end; a live
+run dispatched from another box is not seen. A run of an earlier dev entry is
+not looked at: a switch out of dev ends it (`left-dev`), and a dev entry while
+its HIL job runs is refused by the guard. The record is written only after gh
+succeeded, as the soak's: a dispatch GitHub took whose gh call then failed or
+timed out is not recorded.
 
 iempc.py passes itself in (`ip`), so this module never imports it (#36:
 iempc.py is over its size budget)."""
@@ -56,12 +68,12 @@ LIVE_WORKFLOW = "live.yml"
 RECORD = "live.json"
 KEEP = 200   # live runs kept in RECORD, the newest
 # live.yml's jobs that hold the PC, one after another (plan Task 25), as their
-# `timeout-minutes`, and 5 min for `verify` and the runner's pick-up. `browser`
+# `timeout-minutes`, and 5 min for `verify` and the runners' pick-up. `browser`
 # (45 min, Playwright's globalTimeout of 40 min inside it) runs beside `pc`,
-# which ends when browser has; `report` runs on a hosted runner after pc-end.
+# which waits for it to start (15 min) and to end; `report` runs on a hosted
+# runner after pc-end. Task 25's live.yml must use these bounds.
 JOB_MINUTES = {"verify": 5, "pc-begin": 15, "pc": 60, "pc-end": 10}
-BROWSER_MINUTES = 45
-WINDOW_S = sum(JOB_MINUTES.values()) * 60   # 5400 s: how long after its dispatch a live run may hold the PC
+WINDOW_S = sum(JOB_MINUTES.values()) * 60   # 5400 s after its dispatch a live run may still touch the PC
 NOTHING = {"dispatch-soak": ("no soak", "(nothing was dispatched)"),
            "switch-test": ("no switch test", "a switch would end it (nothing was switched)")}
 
@@ -82,20 +94,25 @@ def load_runs(ip) -> list[dict]:
     return runs
 
 
-def may_run(d: dict, entry: int, now: dt.datetime) -> bool:
-    """The record is a live run of dev entry `entry` that may still run at
-    `now` (an aware time). A record whose entry or time cannot be read may
-    (fail safe)."""
-    own = d.get("entry")
-    if type(own) is int and own != entry:
-        return False
+def dispatched_at(d: dict) -> dt.datetime | None:
+    """The record's dispatch time (aware), or None when it cannot be read."""
     try:
         at = dt.datetime.fromisoformat(str(d.get("at")))
     except ValueError:
-        return True
-    if at.tzinfo is None or type(own) is not int:
-        return True
-    return now < at + dt.timedelta(seconds=WINDOW_S)
+        return None
+    return at if at.tzinfo is not None else None
+
+
+def may_run(d: dict, entry: int, now: dt.datetime) -> bool:
+    """The record is a live run of dev entry `entry` that may still run at
+    `now` (an aware time). Fail safe: a record whose time cannot be read may;
+    one whose entry cannot be read (not an integer) may be of this entry,
+    bounded by its time as any."""
+    own = d.get("entry")
+    if type(own) is int and own != entry:
+        return False
+    at = dispatched_at(d)
+    return at is None or now < at + dt.timedelta(seconds=WINDOW_S)
 
 
 def running_live(ip, entry: int, now: dt.datetime) -> dict | None:
@@ -104,8 +121,13 @@ def running_live(ip, entry: int, now: dt.datetime) -> dict | None:
     return next((d for d in reversed(load_runs(ip)) if may_run(d, entry, now)), None)
 
 
-def described(d: dict) -> str:
-    return f"{d.get('sha')}, dispatched {d.get('at')}; live.yml's jobs hold the PC up to {WINDOW_S // 60} min"
+def described(ip, d: dict) -> str:
+    """A refusal's words for record `d`; one that cannot be read names the
+    file to check by hand (it may otherwise refuse until fixed)."""
+    text = f"{d.get('sha')}, dispatched {d.get('at')}; live.yml's jobs hold the PC up to {WINDOW_S // 60} min"
+    if type(d.get("entry")) is not int or dispatched_at(d) is None:
+        text += f"; its time or dev entry cannot be read: check {ip.state_dir() / RECORD} by hand"
+    return text
 
 
 def refuse_while_live(ip, command: str) -> None:
@@ -115,7 +137,7 @@ def refuse_while_live(ip, command: str) -> None:
     d = running_live(ip, ip.current_entry(), dt.datetime.now().astimezone())
     if d is not None:
         head, tail = NOTHING[command]
-        raise ip.Refused(f"{head}: a live run dispatched in this dev entry may still run ({described(d)}): {tail}")
+        raise ip.Refused(f"{head}: a live run dispatched in this dev entry may still run ({described(ip, d)}): {tail}")
 
 
 def refuse_overlap(ip, entry: int) -> None:
@@ -124,7 +146,7 @@ def refuse_overlap(ip, entry: int) -> None:
     now = dt.datetime.now().astimezone()
     d = running_live(ip, entry, now)
     if d is not None:
-        raise ip.Refused(f"no live run: a live run dispatched in this dev entry may still run ({described(d)}) "
+        raise ip.Refused(f"no live run: a live run dispatched in this dev entry may still run ({described(ip, d)}) "
                          f"(nothing was dispatched)")
     soak = iempc_soak.running_soak(ip, entry, now)
     if soak is not None:
