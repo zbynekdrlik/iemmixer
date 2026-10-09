@@ -193,7 +193,11 @@ mod tests {
 
     /// HIL v2's pipe owner (S7, #10): the process serving a pipe, read on a
     /// client's end, is the one that created it (with the first-instance
-    /// flag, as interprocess creates the engine's).
+    /// flag, as interprocess creates the engine's). Server and client are
+    /// one process here, so this proves the call and its id, not that the
+    /// id is the server's rather than the caller's: HIL v2's `pipe-owner`
+    /// check proves that on the PC, where the engine serves and the guard
+    /// reads.
     #[test]
     fn server_pid_names_the_listening_process() {
         let (server, client) = pair(&format!("iem-win-server-pid-{}", std::process::id()));

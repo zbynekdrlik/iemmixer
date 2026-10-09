@@ -126,8 +126,7 @@ impl Pc for WinPc {
             // end, and the next look connects to the respawned engine and
             // reads its DACL again. A faulted engine's last `Status` is in
             // this connection's inbox: its fault time is kept first.
-            engine::keep_fault(self);
-            self.sup = None;
+            engine::drop_supervisor(self);
             self.dacl = None;
         }
         p

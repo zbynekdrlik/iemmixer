@@ -184,15 +184,6 @@ impl Supervisor {
         iem_win::pipe::server_pid(pipe.inner().as_handle())
     }
 
-    /// The faulting callback's time of the newest status, when that status
-    /// is faulted (`effects::engine::fault_time`).
-    fn fault_time(&self) -> Option<f64> {
-        lock(&self.inbox)
-            .status
-            .as_ref()
-            .and_then(proto::fault_time)
-    }
-
     /// One frame to the engine, which must take it within [`SEND`]
     /// (`crate::pipe::Bounded`, never `&*self.stream`: interprocess's own
     /// writes wait for the engine without a bound). A failed send may have
@@ -287,23 +278,32 @@ fn newer_status(inbox: &Inbox, seen: u64) -> Option<(u64, Status)> {
     }
 }
 
-/// Keeps the newest status's fault time of the supervisor connection in
-/// `WinPc::last_fault` (S7 HIL v2): at every look, and before a connection
-/// is dropped or replaced, since a faulted engine's last `Status` (its
-/// faulting callback's time) is in that connection's inbox; so the
-/// respawned engine's reply still carries it.
-pub(super) fn keep_fault(pc: &mut WinPc) {
-    if let Some(us) = pc.sup.as_ref().and_then(Supervisor::fault_time) {
-        pc.last_fault = Some(us);
+/// Keeps the fault time of the supervisor connection's newest status in
+/// `WinPc::last_fault` (S7 HIL v2, `effects::engine::kept_fault`: a faulted
+/// status replaces it, none included): at every look, and before the
+/// connection is dropped or replaced ([`drop_supervisor`]), since a faulted
+/// engine's last `Status` (its faulting callback's time) is in that
+/// connection's inbox; so the respawned engine's reply still carries it.
+fn keep_fault(pc: &mut WinPc) {
+    if let Some(sup) = pc.sup.as_ref() {
+        let inbox = lock(&sup.inbox);
+        pc.last_fault = proto::kept_fault(pc.last_fault, inbox.status.as_ref());
     }
+}
+
+/// Drops the supervisor connection, its fault time kept first
+/// ([`keep_fault`]): every place that drops or replaces the connection goes
+/// through here.
+pub(super) fn drop_supervisor(pc: &mut WinPc) {
+    keep_fault(pc);
+    pc.sup = None;
 }
 
 /// The supervisor connection, made again when the last one closed; the
 /// engine's pipe may appear only a while after a start.
 fn supervisor<'a>(pc: &'a mut WinPc, limit: Duration, c: &Cancel) -> R<&'a mut Supervisor> {
     if !pc.sup.as_ref().is_some_and(Supervisor::open) {
-        keep_fault(pc);
-        pc.sup = None;
+        drop_supervisor(pc);
         let start = Instant::now();
         loop {
             match Supervisor::connect(&pc.s.pc.engine_pipe) {
@@ -344,8 +344,7 @@ pub(super) fn start(pc: &mut WinPc, hold: bool, hil: bool) -> R<u32> {
             .map_err(StepError::Failed)?;
     let mut cmd = Command::new(dir.join(ENGINE_EXE));
     cmd.args(args).current_dir(dir);
-    keep_fault(pc);
-    pc.sup = None;
+    drop_supervisor(pc);
     pc.dacl = None;
     procs::start_kid(pc, Kid::Engine, &mut cmd, false)
 }
@@ -438,8 +437,7 @@ pub(super) fn stop(pc: &mut WinPc, c: &Cancel) -> R<()> {
     }
     // Our end of the supervisor pipe goes now: this engine is going, and
     // the next step connects to the next one.
-    keep_fault(pc);
-    pc.sup = None;
+    drop_supervisor(pc);
     if procs::wait_exit(&handle, GONE, c)?.is_none() {
         return Err(StepError::failed(stopped.not_ended(GONE)));
     }
@@ -535,7 +533,7 @@ fn pipe_private(pipe: &str) -> Result<bool, String> {
 pub(super) fn seen(pc: &mut WinPc) -> Option<EngineSeen> {
     let pid = pc.kids.pid(Kid::Engine)?;
     if !pc.sup.as_ref().is_some_and(Supervisor::open) {
-        keep_fault(pc);
+        drop_supervisor(pc);
         pc.sup = Supervisor::connect(&pc.s.pc.engine_pipe).ok();
     }
     keep_fault(pc);

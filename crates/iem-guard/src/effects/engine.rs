@@ -266,6 +266,19 @@ pub fn fault_time(s: &Status) -> Option<f64> {
         .then_some(s.fault_callback_us)
 }
 
+/// The fault time the guard keeps (`EngineSeen.last_fault_us`) after a look
+/// at the supervisor connection's newest status: a faulted status replaces
+/// it with its own [`fault_time`], none included, so a fault without a
+/// callback time (the reopen budget, a structured exception, an older
+/// engine) never shows an earlier fault's; any other status, or none, keeps
+/// it (the respawned engine's statuses).
+pub fn kept_fault(kept: Option<f64>, newest: Option<&Status>) -> Option<f64> {
+    match newest {
+        Some(s) if s.faulted => fault_time(s),
+        _ => kept,
+    }
+}
+
 /// The guard's `Reply.engine` (design §7, what HIL v1 reads through
 /// `iemmode status`): the engine as the supervisor connection saw it, its
 /// build as the bare commit (the bundle's SHA), with the engine starts of
