@@ -33,13 +33,24 @@ the script polls `iemmode status` for at most -EngineWait seconds until the
 engine it expects shows (Test-IemHilEngineUp), then the check judges the last
 status. The panic check drives `iemmode inject-fault` and wants exit 70,
 exactly one respawn within -PanicWait seconds and the new engine streaming at
-32. F30 runs when -SiteChange and -SiteRevert name the synthetic site change
-and its revert.
+32.
 
-Not in HIL v1 (the guard does not report them; S6 plan Task 12, HIL v1
-scope): the pipes' first-instance flag (proved by the windows CI job's pipe
-tests), the tunnel's peer address, the forced reopen's duration (about 100 ms)
-and the fault callback's time (under 1 ms).
+HIL v2 (S7, #10, plan Task 31; the checks are IemHil.psm1's, imported from
+this folder): `pipe-owner` (the engine's pid serves its control pipe,
+Reply.engine.pipe_server_pid, and the pipes are private), `tunnel-peer` and
+`lan-peer` (/api/peer through the public host and on the LAN, as /api/site
+names them), `reopen-time` (Reply.engine.last_reopen_us of the forced reopen
+within -ReopenMaxMs), `fault-time` (Reply.engine.last_fault_us changed by the
+injection and under -FaultMaxUs), `alarm-ack` (once alarm-push passed: its own
+test alarm, the one new above the highest id read before alarm-test, then
+earlier runs' unacknowledged ones; only the guard's exact test text with no
+step and no owner question) and F30's bytes. A field an older guard or engine
+does not send fails its check ("lacks '<field>'"). F30 runs when -SiteChange,
+-SiteRevert and -SiteInstalled (the installed site's path) are given together
+(none: no f30 check at all): nothing is installed unless the revert file is the
+installed site byte for byte and the change file is not; then the installed
+site's sha256 after the change must differ and after the revert must equal the
+one before. A cancel at the revert names the change left installed in `why`.
 #>
 param(
     [string]$Sha = '',
@@ -55,11 +66,16 @@ param(
     [double]$PanicWait = 30,
     [double]$EngineWait = 30,
     [string]$SiteChange = '',
-    [string]$SiteRevert = ''
+    [string]$SiteRevert = '',
+    [string]$SiteInstalled = '',
+    # S1a's reopen, about 104 ms at 64 samples, doubled; tighten after the first HIL v2 run (Task 33).
+    [double]$ReopenMaxMs = 200,
+    [double]$FaultMaxUs = 1000
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'IemPc.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'IemHil.psm1') -Force
 
 if (-not $Iemmode) { $Iemmode = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'bin\iemmode.exe' }
 $script:checks = New-Object System.Collections.ArrayList
@@ -154,6 +170,18 @@ function Invoke-HilUrlCheck {
     }
 }
 
+function Invoke-HilPeerCheck {
+    # How the server classified a request to an address it names (/api/peer, fixed codes).
+    param([Parameter(Mandatory)][string]$Name, [string]$Base = '', [Parameter(Mandatory)][string]$Want)
+    if (-not $Base) { Add-HilCheck $Name $false 'the server names no such address (/api/site)'; return }
+    try {
+        $p = Test-IemHilPeer -Peer (Get-IemJson -Uri ($Base.TrimEnd('/') + '/api/peer')) -Want $Want
+        Add-HilCheck $Name $p.ok ('{0}: {1}' -f $Base, $p.detail) $p.numbers
+    } catch {
+        Add-HilCheck $Name $false ('{0}/api/peer: {1}' -f $Base, $_.Exception.Message)
+    }
+}
+
 function Invoke-HilChecks {
     $r = Invoke-Hil -A @('activate', $Sha)
     if ($script:cancelled) { return }
@@ -179,10 +207,15 @@ function Invoke-HilChecks {
     try { $site = Get-IemJson -Uri ($Local + '/api/site') } catch {
         Add-HilCheck 'site-links' $false ('{0}/api/site: {1}' -f $Local, $_.Exception.Message)
     }
-    Invoke-HilUrlCheck -Name 'lan' -Base ([string](Get-IemProp $site 'lan_url'))
+    $lanUrl = [string](Get-IemProp $site 'lan_url')
+    Invoke-HilUrlCheck -Name 'lan' -Base $lanUrl
     $public = [string](Get-IemProp $site 'public_host')
     if ($public -and $public -notmatch '^https?://') { $public = 'https://' + $public }
     Invoke-HilUrlCheck -Name 'public-host' -Base $public
+    # HIL v2: through the public host the server sees the tunnel (cloudflared on this
+    # host, CF-Connecting-IP); on the LAN it sees no tunnel.
+    Invoke-HilPeerCheck -Name 'tunnel-peer' -Base $public -Want 'tunnel'
+    Invoke-HilPeerCheck -Name 'lan-peer' -Base $lanUrl -Want 'lan'
 
     # The card over the window: measured 32, callbacks advancing, 0 missed, 0 resets.
     $a = Get-HilStatus
@@ -201,6 +234,9 @@ function Invoke-HilChecks {
     # Server <-> engine over Windows pipes: the DACL holds only the user and SYSTEM.
     $pipesPrivate = Get-IemProp (Get-IemProp $b 'engine') 'pipe_private'
     Add-HilCheck 'pipes' ($pipesPrivate -eq $true) ('engine pipes private: {0}' -f $pipesPrivate)
+    # HIL v2: the engine created its pipe's first instance and serves the guard's.
+    $po = Test-IemHilPipeOwner -Engine (Get-IemProp $b 'engine')
+    Add-HilCheck 'pipe-owner' $po.ok $po.detail $po.numbers
 
     # The test signal on HIL's spare card outputs (the guard sends it to [guard] hil_tx,
     # outputs no mix uses, so it never reaches a band member; #9, 2026-09-28). The engine's
@@ -236,6 +272,9 @@ function Invoke-HilChecks {
     if ($script:cancelled) { return }
     $ro = Test-IemHilReopen -Before (Get-IemProp $before 'engine') -After (Get-IemProp $after 'engine')
     Add-HilCheck 'reopen' ($reopened -and $ro.ok) ('{0}; {1}' -f (Get-IemModeText -Result $r), $ro.detail) $ro.numbers
+    # HIL v2: that reopen's time (the waited status), within -ReopenMaxMs.
+    $rt = Test-IemHilReopenTime -Engine (Get-IemProp $after 'engine') -MaxMs $ReopenMaxMs -Before $b0
+    Add-HilCheck 'reopen-time' ($reopened -and $rt.ok) $rt.detail $rt.numbers
 
     # RT panic -> exit 70, release, respawn, fade-in (design section 7): the
     # guard injects the fault (dev, this job); its engine start count and the
@@ -265,28 +304,89 @@ function Invoke-HilChecks {
     }
     $pk = Test-IemHilPanic -Before (Get-IemProp $before 'engine') -Respawned (Get-IemProp $respawned 'engine') -Later (Get-IemProp $later 'engine')
     Add-HilCheck 'panic' ($injected -and $pk.ok) ('{0}; {1}' -f (Get-IemModeText -Result $r), $pk.detail) $pk.numbers
+    # HIL v2: the faulting callback's time, which the guard keeps across the respawn;
+    # changed from the value before the injection (it is not tied to one engine start).
+    $ft = Test-IemHilFaultTime -Before (Get-IemProp $before 'engine') -After (Get-IemProp $later 'engine') -MaxUs $FaultMaxUs
+    Add-HilCheck 'fault-time' ($injected -and $ft.ok) $ft.detail $ft.numbers
 
     # The alarm push: iemmode alarm-test must reach at least one of the
-    # engineer's devices (the PWA's notification subscriptions).
+    # engineer's devices (the PWA's notification subscriptions). HIL v2 reads the
+    # highest alarm id first, so its own test alarm is the one new above it.
+    $pre = Get-HilStatus
+    if ($script:cancelled) { return }
+    $top = Get-IemHilMaxAlarmId -Reply $pre
     $r = Invoke-Hil -A @('alarm-test')
     if ($script:cancelled) { return }
-    Add-HilCheck 'alarm-push' (Test-IemModeOk -Result $r) (Get-IemModeText -Result $r)
-
-    # F30: a synthetic site change and its revert.
-    if ($SiteChange -or $SiteRevert) {
-        if (-not ($SiteChange -and $SiteRevert)) { Add-HilCheck 'f30' $false 'F30 needs both -SiteChange and -SiteRevert'; return }
-        $r1 = Invoke-Hil -A @('install-site', $SiteChange)
+    $pushed = Test-IemModeOk -Result $r
+    Add-HilCheck 'alarm-push' $pushed (Get-IemModeText -Result $r)
+    if ($pushed) {
+        Invoke-HilAlarmAck -Reply $r.reply -Above $top
         if ($script:cancelled) { return }
-        $r2 = Invoke-Hil -A @('install-site', $SiteRevert)
-        if ($script:cancelled) { return }
-        Add-HilCheck 'f30' ((Test-IemModeOk -Result $r1) -and (Test-IemModeOk -Result $r2)) `
-            ('change: {0}; revert: {1}' -f (Get-IemModeText -Result $r1), (Get-IemModeText -Result $r2))
     }
+
+    # F30: a synthetic site change and its revert (the three files together, Test-IemHilV2Inputs).
+    if ($SiteChange) { Invoke-HilF30 }
+}
+
+function Invoke-HilAlarmAck {
+    # HIL v2: acknowledge this run's test alarm, then earlier runs' (HIL v1 never did):
+    # only the guard's exact test text with no step and no owner question, never another
+    # alarm, and nothing at all when this run's own is not exactly one above -Above.
+    param($Reply, $Above)
+    if ($null -eq $Above) { Add-HilCheck 'alarm-ack' $false 'no alarm list read before alarm-test: nothing acknowledged'; return }
+    $ta = Get-IemHilTestAlarms -Reply $Reply -Above ([int64]$Above)
+    if ($null -eq $ta.own) { Add-HilCheck 'alarm-ack' $false ($ta.detail + ': nothing acknowledged'); return }
+    $failed = @()
+    foreach ($id in @(@($ta.own) + @($ta.stale))) {
+        $a = Invoke-Hil -A @('alarm-ack', ([string]$id))
+        if ($script:cancelled) { return }
+        if (-not (Test-IemModeOk -Result $a)) { $failed += ('{0}: {1}' -f $id, (Get-IemModeText -Result $a)) }
+    }
+    $detail = '{0}; acknowledged' -f $ta.detail
+    if ($failed.Count -gt 0) { $detail = '{0}; not acknowledged: {1}' -f $ta.detail, ($failed -join '; ') }
+    Add-HilCheck 'alarm-ack' ($failed.Count -eq 0) $detail ([pscustomobject]@{ own = $ta.own; stale = @($ta.stale) })
+}
+
+function Invoke-HilF30 {
+    # The synthetic site change and its revert through install-site; the installed site's
+    # sha256 before the change, after it and after the revert (Test-IemHilSiteRestored).
+    # Nothing is installed unless all three files read and the revert file is the installed
+    # site byte for byte (it can restore it) and the change file is not (Test-IemHilF30Ready).
+    $h0 = ''
+    $hc = ''
+    $hr = ''
+    try {
+        $h0 = Get-IemHilFileSha256 -Path $SiteInstalled
+        $hc = Get-IemHilFileSha256 -Path $SiteChange
+        $hr = Get-IemHilFileSha256 -Path $SiteRevert
+    } catch {
+        Add-HilCheck 'f30' $false ('F30 files: {0}; nothing installed' -f $_.Exception.Message); return
+    }
+    $ready = Test-IemHilF30Ready -Installed $h0 -Change $hc -Revert $hr
+    if (-not $ready.ok) { Add-HilCheck 'f30' $false ('{0}; nothing installed' -f $ready.detail); return }
+    $r1 = Invoke-Hil -A @('install-site', $SiteChange)
+    if ($script:cancelled) { return }
+    $h1 = ''
+    try { $h1 = Get-IemHilFileSha256 -Path $SiteInstalled } catch { $h1 = '' }
+    $r2 = Invoke-Hil -A @('install-site', $SiteRevert)
+    if ($script:cancelled) {
+        # The guard left dev at the revert: the change may still be installed (private `why`).
+        if (Test-IemModeOk -Result $r1) { $script:why += '; f30: the change was installed and its revert did not run: the installed site may still hold the change' }
+        return
+    }
+    $h2 = ''
+    try { $h2 = Get-IemHilFileSha256 -Path $SiteInstalled } catch { $h2 = '' }
+    $sr = Test-IemHilSiteRestored -Before $h0 -Changed $h1 -After $h2
+    Add-HilCheck 'f30' ((Test-IemModeOk -Result $r1) -and (Test-IemModeOk -Result $r2) -and $sr.ok) `
+        ('change: {0}; revert: {1}; {2}' -f (Get-IemModeText -Result $r1), (Get-IemModeText -Result $r2), $sr.detail) $sr.numbers
 }
 
 $started = (Get-Date).ToUniversalTime().ToString('o')
 $begun = $false
 $problems = Test-IemHilInputs -Sha $Sha -Branch $Branch -JobRun $JobRun -Out $Out -ScriptDir $PSScriptRoot -TestDbfs $TestDbfs -TestTtl $TestTtl
+$v2Problems = Test-IemHilV2Inputs -ReopenMaxMs $ReopenMaxMs -FaultMaxUs $FaultMaxUs -SiteChange $SiteChange -SiteRevert $SiteRevert `
+    -SiteInstalled $SiteInstalled
+$problems = @($problems) + @($v2Problems)
 if ($Out) {
     Write-IemJsonFile -Path $Out -Value (New-IemHilResult -Conclusion 'failure' -Summary 'HIL v1 did not finish' -Sha $Sha -Branch $Branch -JobRun $JobRun -Started $started)
 }

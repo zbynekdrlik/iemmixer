@@ -450,9 +450,12 @@ jobs:
       - name: Golden PC module self-test (Windows PowerShell 5.1, as on the PC)
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/golden/Test-GoldenPc.ps1
-      - name: Guard PC module and HIL v1 script self-test, parse check included (Windows PowerShell 5.1, as on the PC)
+      - name: Guard PC module self-test, parse check of every PC script included (Windows PowerShell 5.1, as on the PC)
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/iem-pc/Test-IemPc.ps1
+      - name: HIL script self-test (hil-v1.ps1 end to end against a stand-in iemmode, IemHil.psm1's checks; #10)
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/iem-pc/Test-IemHil.ps1
       - name: OpenSSH default shell self-test (a test key, task folder and elevated root; the probe through cmd.exe, #15)
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/iem-pc/Test-IemSshShell.ps1
@@ -529,8 +532,9 @@ jobs:
           # The soak client rides along (S7) but is not required: older bundles still install.
           $exes = 'iem-engine', 'iem-server', 'iemmixer-guard', 'iemmode', 'iem-tray', 'iem-migrate', 'iem-soakclient' | ForEach-Object { "target/release/$_.exe" }
           Copy-Item -LiteralPath $exes -Destination $b
-          # IemSshShell.psm1 (#15, iempc ssh-shell) is not required: older bundles still install.
-          Copy-Item -LiteralPath scripts/iem-pc/hil-v1.ps1, scripts/iem-pc/IemPc.psm1, scripts/iem-pc/IemSshShell.psm1 -Destination $b
+          # IemSshShell.psm1 (#15, iempc ssh-shell) and IemHil.psm1 (#10, HIL v2's checks, which
+          # hil-v1.ps1 imports from its own folder) are not required: older bundles still install.
+          Copy-Item -LiteralPath scripts/iem-pc/hil-v1.ps1, scripts/iem-pc/IemPc.psm1, scripts/iem-pc/IemSshShell.psm1, scripts/iem-pc/IemHil.psm1 -Destination $b
           Copy-Item -LiteralPath crates/iem-engine/LICENSE -Destination (Join-Path $b 'LICENSE-iem-engine')
           # The S1c tuning modules, one level deep (bundle names allow tuning/<name> only).
           if (Test-Path -LiteralPath scripts/pc-tuning) {
