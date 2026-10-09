@@ -257,7 +257,10 @@ mod tests {
         }
     }
 
-    fn wait_for(rt: &NullRt<Count>, what: impl Fn(&StreamStats) -> bool) -> StreamStats {
+    fn wait_for<P: Process + 'static>(
+        rt: &NullRt<P>,
+        what: impl Fn(&StreamStats) -> bool,
+    ) -> StreamStats {
         let start = Instant::now();
         loop {
             let s = rt.stats();
@@ -357,6 +360,50 @@ mod tests {
         assert_eq!(rt.stats().callbacks, 2);
         let p = rt.stop().unwrap();
         assert_eq!(p.calls, 3);
+    }
+
+    /// Panics once `fire` is set, after holding the callback for `hold`.
+    struct Trigger {
+        fire: Arc<AtomicBool>,
+        hold: Duration,
+    }
+
+    impl Process for Trigger {
+        fn process(&mut self, _: &mut Block<'_>) {
+            if self.fire.load(Ordering::Acquire) {
+                std::thread::sleep(self.hold);
+                panic!("boom on request");
+            }
+        }
+    }
+
+    /// HIL v2 (S7, #10): the faulting callback's own time, from its entry to
+    /// the caught panic; 0 until a callback faults. NullRt never reopens.
+    #[test]
+    fn a_panic_records_the_faulting_callbacks_own_time() {
+        let fire = Arc::new(AtomicBool::new(false));
+        let rt = NullRt::start(
+            cfg(InputSignal::Silence),
+            Trigger {
+                fire: Arc::clone(&fire),
+                hold: Duration::from_millis(3),
+            },
+        )
+        .unwrap();
+        let before = wait_for(&rt, |s| s.callbacks >= 5);
+        assert!(before.callbacks >= 5 && !before.faulted, "{before:?}");
+        assert_eq!((before.fault_callback_ns, before.last_reopen_us), (0, 0));
+        fire.store(true, Ordering::Release);
+        let s = wait_for(&rt, |s| s.faulted && !s.running);
+        assert!(s.faulted && !s.running, "{s:?}");
+        // The panic followed 3 ms of the callback's own time.
+        assert!(
+            (3_000_000..1_000_000_000).contains(&s.fault_callback_ns),
+            "{s:?}"
+        );
+        assert!(s.fault_callback_ns <= s.max_process_ns, "{s:?}");
+        assert_eq!(s.last_reopen_us, 0, "NullRt never reopens");
+        assert!(rt.stop().is_some());
     }
 
     struct Slow {

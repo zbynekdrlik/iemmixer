@@ -55,3 +55,43 @@ fn the_listen_flag_of_the_hil_signal_is_additive() {
     assert_eq!(serde_json::from_str::<OldCmd>(PROBE).unwrap(), old);
     assert_eq!(serde_json::from_str::<OldCmd>(PLAIN).unwrap(), old);
 }
+
+/// `Status` as a client before HIL v2 reads it: no reopen or fault time,
+/// and no `deny_unknown_fields`.
+#[derive(Debug, Deserialize)]
+struct BeforeHilV2 {
+    faulted: bool,
+    resets: u64,
+}
+
+/// HIL v2 (S7, #10): the last driver reopen's time and the faulting
+/// callback's time in `Status`, additive both ways: an older client reads
+/// the new message, an older engine's reads 0 and 0.0. Both are written at
+/// 0 too.
+#[test]
+fn the_reopen_and_fault_times_are_additive() {
+    let status = Status {
+        faulted: true,
+        resets: 1,
+        last_reopen_us: 104_000,
+        fault_callback_us: 412.5,
+        ..Status::default()
+    };
+    let json = serde_json::to_value(&status).unwrap();
+    assert_eq!(json["last_reopen_us"], 104_000);
+    assert_eq!(json["fault_callback_us"], 412.5);
+    assert_eq!(
+        serde_json::from_value::<Status>(json.clone()).unwrap(),
+        status
+    );
+    let before: BeforeHilV2 = serde_json::from_value(json).unwrap();
+    assert_eq!((before.faulted, before.resets), (true, 1));
+    let old: Status = serde_json::from_str(r#"{"callbacks":4}"#).unwrap();
+    assert_eq!(
+        (old.callbacks, old.last_reopen_us, old.fault_callback_us),
+        (4, 0, 0.0)
+    );
+    let zero = serde_json::to_value(Status::default()).unwrap();
+    assert_eq!(zero["last_reopen_us"], 0);
+    assert_eq!(zero["fault_callback_us"], 0.0);
+}

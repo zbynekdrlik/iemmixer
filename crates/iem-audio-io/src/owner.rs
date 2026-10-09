@@ -630,6 +630,21 @@ mod tests {
         assert!(!seh_faults(false, true));
     }
 
+    /// HIL v2 (S7, #10): a reopen's time, from the old stream's stop to the
+    /// new one's measured period, in whole µs; never 0 (a reopen happened),
+    /// and a time past u64 µs saturates.
+    #[test]
+    fn a_reopen_time_is_whole_microseconds_never_zero_and_saturates() {
+        assert_eq!(reopen_us(Duration::from_micros(104_250)), 104_250);
+        assert_eq!(reopen_us(Duration::from_nanos(104_250_999)), 104_250);
+        assert_eq!(reopen_us(Duration::from_micros(2)), 2);
+        assert_eq!(reopen_us(Duration::from_nanos(1_999)), 1);
+        assert_eq!(reopen_us(Duration::from_nanos(999)), 1);
+        assert_eq!(reopen_us(Duration::ZERO), 1);
+        assert_eq!(reopen_us(Duration::from_micros(u64::MAX)), u64::MAX);
+        assert_eq!(reopen_us(Duration::MAX), u64::MAX);
+    }
+
     #[test]
     fn stop_takes_the_owners_outcome_or_parks() {
         use StopOutcome::{Parked, Released};
