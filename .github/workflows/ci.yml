@@ -453,6 +453,9 @@ jobs:
       - name: Guard PC module and HIL v1 script self-test, parse check included (Windows PowerShell 5.1, as on the PC)
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/iem-pc/Test-IemPc.ps1
+      - name: HIL script self-test (hil-v1.ps1 end to end against a stand-in iemmode, IemHil.psm1's checks; #10)
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/iem-pc/Test-IemHil.ps1
       - name: OpenSSH default shell self-test (a test key, task folder and elevated root; the probe through cmd.exe, #15)
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/iem-pc/Test-IemSshShell.ps1
