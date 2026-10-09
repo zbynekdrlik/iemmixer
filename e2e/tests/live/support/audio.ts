@@ -71,17 +71,38 @@ export const TALK_INIT = (): void => {
   } as typeof AudioEncoder.prototype.encode;
 };
 
-/** The tone the player plays now: the analyser's window (`ANALYSER_INIT`) at its context's rate. */
+/**
+ * The tone the player plays now: the analyser's window (`ANALYSER_INIT`) at
+ * its context's rate. The window crosses the protocol as one base64 string
+ * of its float32 bytes (~15 ms). Returned as an array of 32768 numbers it
+ * took 200 to 500 ms, which held back the frames the runner's relay feeds
+ * the page: the player, 80 ms ahead, ran dry, and the next window held the
+ * gap (#10, live run 1; `tone.spec.ts` runs it on the real player).
+ */
 export async function readTone(page: Page): Promise<Tone> {
   const read = await page.evaluate(() => {
     const a = (window as unknown as { __live_analyser?: AnalyserNode }).__live_analyser;
     if (!a) return null;
     const buf = new Float32Array(a.fftSize);
     a.getFloatTimeDomainData(buf);
-    return { samples: Array.from(buf), rate: a.context.sampleRate };
+    const bytes = new Uint8Array(buf.buffer);
+    let text = "";
+    // In slices: one call with every byte as an argument would exceed the call stack.
+    for (let i = 0; i < bytes.length; i += 0x8000) text += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    return { base64: btoa(text), rate: a.context.sampleRate };
   });
   if (!read) throw new Error("the player's output has no analyser (no ANALYSER_INIT, or Listen never played)");
-  return toneOf(read.samples, read.rate);
+  // A fresh copy: a Float32Array needs its offset aligned to 4 bytes, which a pooled Buffer's need not be.
+  const bytes = new Uint8Array(Buffer.from(read.base64, "base64"));
+  return toneOf(new Float32Array(bytes.buffer), read.rate);
+}
+
+/** How often the player ran dry since Listen (`getStreamStats().dropouts`: a gap it played, not a late frame). */
+export function playerDropouts(page: Page): Promise<number> {
+  return page.evaluate(() => {
+    const stats = (window as unknown as { __iem_stream_stats?: () => { dropouts: number } }).__iem_stream_stats;
+    return typeof stats === "function" ? stats().dropouts : -1;
+  });
 }
 
 /** The level (dB) of the audio the player decoded last; −150 while it plays nothing. */
