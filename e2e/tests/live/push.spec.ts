@@ -37,8 +37,10 @@ import { PushLedger, SUBSCRIBE, UNSUBSCRIBE, bodyOf, browserEndpoint, endpointOf
  * `pushManager.subscribe()` registers with the browser's push service: 4.4,
  * 4.4, 27.7, 29.1, 30.3, 30.6, 31.3, 31.7 and 33.2 s with Playwright 1.58's
  * full Chromium 145 (nine runs, 2026-10-09, #10). Live run 1 ran out of the
- * old 30 s with no step of the app's subscribe failed (each failure warns
- * `[push] …`, and the console guard saw none). About three times the slowest.
+ * old 30 s with no failing step of the app's subscribe: every failing step
+ * warns `[push] …` and the console guard saw none; a skip only logs (the
+ * public host's VAPID key was checked served afterwards), and a `sw.ready()` still
+ * pending logs nothing. About three times the slowest.
  */
 const SUBSCRIBE_MS = 90_000;
 /** The logout's unsubscribe POST follows the browser's own unsubscribe. */

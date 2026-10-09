@@ -74,10 +74,11 @@ export const TALK_INIT = (): void => {
 /**
  * The tone the player plays now: the analyser's window (`ANALYSER_INIT`) at
  * its context's rate. The window crosses the protocol as one base64 string
- * of its float32 bytes (~15 ms). Returned as an array of 32768 numbers it
- * took 200 to 500 ms, which held back the frames the runner's relay feeds
- * the page: the player, 80 ms ahead, ran dry, and the next window held the
- * gap (#10, live run 1; `tone.spec.ts` runs it on the real player).
+ * of its float32 bytes (13 to 36 ms measured locally). Returned as an
+ * array of 32768 numbers it took 200 to 500 ms, which held back the frames
+ * the runner's relay feeds the page: the player, 80 ms ahead, ran dry, and
+ * the next window held the gap (#10, live run 1; `tone.spec.ts` runs it on
+ * the real player).
  */
 export async function readTone(page: Page): Promise<Tone> {
   const read = await page.evaluate(() => {
@@ -97,12 +98,19 @@ export async function readTone(page: Page): Promise<Tone> {
   return toneOf(new Float32Array(bytes.buffer), read.rate);
 }
 
-/** How often the player ran dry since Listen (`getStreamStats().dropouts`: a gap it played, not a late frame). */
-export function playerDropouts(page: Page): Promise<number> {
-  return page.evaluate(() => {
-    const stats = (window as unknown as { __iem_stream_stats?: () => { dropouts: number } }).__iem_stream_stats;
-    return typeof stats === "function" ? stats().dropouts : -1;
+/**
+ * How often the player ran dry since Listen: `getStreamStats().dropouts`
+ * (`playbackDropouts`, a decoded frame that found the schedule behind the
+ * clock, so a gap was played), not the arrival-gap count that only grows
+ * its buffer. Fails when the player exposes no stats.
+ */
+export async function playerDropouts(page: Page): Promise<number> {
+  const dropouts = await page.evaluate(() => {
+    const stats = (window as unknown as { __iem_stream_stats?: () => { dropouts: unknown } }).__iem_stream_stats;
+    return typeof stats === "function" ? stats().dropouts : null;
   });
+  if (typeof dropouts !== "number") throw new Error("the player exposes no stream stats (__iem_stream_stats)");
+  return dropouts;
 }
 
 /** The level (dB) of the audio the player decoded last; −150 while it plays nothing. */
