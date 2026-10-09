@@ -34,9 +34,11 @@ runs the event path itself (exit 10). `dev`, `rehearse-teardown`,
 `install` (except `--first`) and `activate` refuse while an S1a/S1c window
 is open: `handover-s1a` hands the card over first. `dispatch-hil`,
 `dispatch-soak` and `dispatch-live` check the flag again right before they
-dispatch. `activate`, `dispatch-hil`, `trace`, `dispatch-soak` and
-`switch-test` refuse first while a live run or a soak of this dev entry may
-still run (iempc_live); `dev` and `event` never do.
+dispatch. `activate`, `dispatch-hil` and `trace` refuse first, before any
+call, while a live run or a soak of this dev entry may still run;
+`dispatch-soak` and `switch-test` while a live run of it may (iempc_live;
+switch-test's own soak check follows its status read, iempc_switch); `dev`
+and `event` never refuse.
 
 `activate --sha` runs `iemmode activate`, which the guard allows in dev
 and in an idle event (#9 2026-09-28: none of iemmixer's processes runs, no
