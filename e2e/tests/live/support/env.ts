@@ -160,9 +160,16 @@ function authOf(who: Who): Auth {
     : { token: l.tokens.member, member: l.member, engineer: false };
 }
 
-/** Stores `auth` on `origin` as the UI keeps a login, from a page of that origin. */
+/**
+ * Stores `auth` on `origin` as the UI keeps a login, from `/api/version`: a
+ * page of the origin that declares no manifest. The full Chromium's install
+ * check fetches a manifest's icon once a page with one has loaded, and the
+ * next navigation cuts that download; when its answer has begun (the
+ * tunnel's latency), Chromium logs "Error while trying to use the following
+ * icon from the Manifest" into the next page (#10, live run 1).
+ */
 export async function storeLogin(page: Page, origin: string, auth: Auth): Promise<void> {
-  await navigate(page, new URL("/", origin).toString(), "the app's start page");
+  await navigate(page, new URL("/api/version", origin).toString(), "/api/version");
   await page.evaluate((a) => {
     localStorage.setItem("iem_token", JSON.stringify(a));
     sessionStorage.setItem("iem_redirected", "1");
