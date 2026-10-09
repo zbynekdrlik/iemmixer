@@ -18,6 +18,7 @@ pub mod login_guard;
 pub mod meters;
 pub mod mixer_ws;
 pub mod notify;
+pub mod peer_route;
 pub mod pepper;
 pub mod photo_store;
 pub mod pin_hash;
