@@ -31,8 +31,16 @@ import { PushLedger, SUBSCRIBE, UNSUBSCRIBE, bodyOf, browserEndpoint, endpointOf
 // subscription counts as the backstop. No error here carries the endpoint
 // (a capability), a URL or the token.
 
-/** From the wait's start: the page's open (two navigations, its state), then the fire-and-forget subscribe. */
-const SUBSCRIBE_MS = 30_000;
+/**
+ * From the wait's start: the page's open (two navigations, its state), then
+ * the fire-and-forget subscribe. A fresh profile's first
+ * `pushManager.subscribe()` registers with the browser's push service: 4.4,
+ * 4.4, 27.7, 29.1, 30.3, 30.6, 31.3, 31.7 and 33.2 s with Playwright 1.58's
+ * full Chromium 145 (nine runs, 2026-10-09, #10). Live run 1 ran out of the
+ * old 30 s with no step of the app's subscribe failed (each failure warns
+ * `[push] …`, and the console guard saw none). About three times the slowest.
+ */
+const SUBSCRIBE_MS = 90_000;
 /** The logout's unsubscribe POST follows the browser's own unsubscribe. */
 const UNSUBSCRIBE_MS = 15_000;
 
