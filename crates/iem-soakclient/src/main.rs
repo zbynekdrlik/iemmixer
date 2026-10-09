@@ -11,13 +11,14 @@
 //! `iem-soakclient token …` (S7 plan Task 23) is the PC's token for the
 //! live run ([`mint`]): 0 with the token in its `--out` file and only
 //! `token-written` on stdout, 1 with its code on stderr (`secret-unreadable`,
-//! `token-unwritable`), 2 on a usage error. The token is never printed.
+//! `token-unwritable`, `clock-unreadable`), 2 on a usage error. The token is
+//! never printed.
 
 #![forbid(unsafe_code)]
 
 use std::cell::Cell;
 use std::process::ExitCode;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 use iem_soakclient::mint;
 use iem_soakclient::net::{Limits, run};
@@ -28,7 +29,7 @@ fn main() -> ExitCode {
         .skip(1)
         .map(|arg| arg.into_string().ok())
         .collect();
-    if let Some(Some((command, rest))) = argv.as_deref().map(<[String]>::split_first)
+    if let Some((command, rest)) = argv.as_deref().and_then(<[String]>::split_first)
         && command == "token"
     {
         return token(rest);
@@ -90,10 +91,7 @@ fn token(argv: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    match mint::run(&args, now) {
+    match mint::unix_seconds(SystemTime::now()).and_then(|now| mint::run(&args, now)) {
         Ok(()) => {
             println!("{}", mint::WRITTEN);
             ExitCode::SUCCESS

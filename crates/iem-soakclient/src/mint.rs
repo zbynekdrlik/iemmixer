@@ -20,6 +20,7 @@ use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use jsonwebtoken::{EncodingKey, Header};
 use serde::Serialize;
@@ -27,9 +28,9 @@ use serde::Serialize;
 use crate::{ENGINEER, Reason, Secret, read_secret, valid_member};
 
 /// `--seconds` at least: a minute.
-pub const MIN_SECONDS: u64 = 60;
+pub const MIN_TOKEN_SECONDS: u64 = 60;
 /// `--seconds` at most: 2 h, twice the live run's 3600 s.
-pub const MAX_SECONDS: u64 = 7_200;
+pub const MAX_TOKEN_SECONDS: u64 = 7_200;
 /// The one line on stdout once the token is in its file.
 pub const WRITTEN: &str = "token-written";
 
@@ -58,7 +59,7 @@ pub struct TokenArgs {
     /// `--engineer`: the token's `engineer` claim; set exactly when `sub` is
     /// `engineer`.
     pub engineer: bool,
-    /// `--seconds`, [`MIN_SECONDS`] to [`MAX_SECONDS`].
+    /// `--seconds`, [`MIN_TOKEN_SECONDS`] to [`MAX_TOKEN_SECONDS`].
     pub seconds: u64,
     /// `--out`: the new file that gets the token.
     pub out: PathBuf,
@@ -123,9 +124,11 @@ pub fn parse_args(args: &[String]) -> Result<TokenArgs, String> {
         .ok_or("--seconds is required")?
         .parse::<u64>()
         .ok()
-        .filter(|s| (MIN_SECONDS..=MAX_SECONDS).contains(s))
+        .filter(|s| (MIN_TOKEN_SECONDS..=MAX_TOKEN_SECONDS).contains(s))
         .ok_or_else(|| {
-            format!("--seconds must be a whole number from {MIN_SECONDS} to {MAX_SECONDS}")
+            format!(
+                "--seconds must be a whole number from {MIN_TOKEN_SECONDS} to {MAX_TOKEN_SECONDS}"
+            )
         })?;
     let out = out.ok_or("--out is required")?;
     if out.is_empty() {
@@ -180,6 +183,9 @@ pub enum MintError {
     SecretUnreadable,
     /// `--out` exists already, or could not be created or written.
     TokenUnwritable,
+    /// The system clock reads before 1970: a token from it would be over
+    /// before it is used, so none is written.
+    ClockUnreadable,
 }
 
 impl MintError {
@@ -187,8 +193,18 @@ impl MintError {
         match self {
             MintError::SecretUnreadable => "secret-unreadable",
             MintError::TokenUnwritable => "token-unwritable",
+            MintError::ClockUnreadable => "clock-unreadable",
         }
     }
+}
+
+/// The Unix second of `t`, the token's `iat`, as the server's clock reads
+/// it (`mixer_ws::claims_of`; the server runs on the same PC). A clock
+/// before 1970 is `clock-unreadable`, never a token over since 1970.
+pub fn unix_seconds(t: SystemTime) -> Result<u64, MintError> {
+    t.duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .map_err(|_| MintError::ClockUnreadable)
 }
 
 /// Reads the secret, signs the token at the Unix second `now` and writes
@@ -203,9 +219,9 @@ pub fn run(args: &TokenArgs, now: u64) -> Result<(), MintError> {
 
 /// Writes `token` alone to `path`, a NEW file: one that exists (a symlink
 /// too) is never written through or replaced. On Unix it is created
-/// owner-only (0600); on Windows it takes its folder's permissions (the ops
-/// runner's work folder, its user's). A file that could not be written
-/// whole is removed, so a part of a token never stays behind.
+/// owner-only (0600); on Windows it inherits its folder's ACL, so the ops
+/// job makes that folder its runner user's only. A file that could not be
+/// written whole is removed, so a part of a token never stays behind.
 pub fn write_token(path: &Path, token: &str) -> io::Result<()> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
@@ -230,11 +246,11 @@ pub fn write_token(path: &Path, token: &str) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::time::Duration;
 
     use super::*;
     use crate::tests::{SECRET, as_server, unix_now};
-    use crate::{ENGINEER, TOKEN_MARGIN, engineer_token};
+    use crate::{TOKEN_MARGIN, engineer_token};
 
     fn parse(list: &[&str]) -> Result<TokenArgs, String> {
         let list: Vec<String> = list.iter().map(|s| (*s).to_owned()).collect();
@@ -384,7 +400,7 @@ mod tests {
             ])
             .map(|a| a.seconds)
         };
-        assert_eq!((MIN_SECONDS, MAX_SECONDS), (60, 7_200));
+        assert_eq!((MIN_TOKEN_SECONDS, MAX_TOKEN_SECONDS), (60, 7_200));
         assert_eq!(seconds("60"), Ok(60));
         assert_eq!(seconds("7200"), Ok(7_200));
         for bad in ["59", "7201", "0", "", "-60", "60.5", "1e3", "abc"] {
@@ -562,9 +578,47 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn a_symlink_at_out_is_never_written_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret_file = dir.path().join("jwt_secret");
+        std::fs::write(&secret_file, SECRET).unwrap();
+        let target = dir.path().join("target");
+        std::fs::write(&target, "zyxkept").unwrap();
+        let link = dir.path().join("link.token");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        // A dangling one too: create_new never follows it.
+        let dangling = dir.path().join("dangling.token");
+        let nowhere = dir.path().join("nowhere");
+        std::os::unix::fs::symlink(&nowhere, &dangling).unwrap();
+        for out in [link, dangling] {
+            let args = TokenArgs {
+                jwt_secret_file: secret_file.clone(),
+                sub: "member9".to_owned(),
+                engineer: false,
+                seconds: 60,
+                out,
+            };
+            assert_eq!(run(&args, unix_now()), Err(MintError::TokenUnwritable));
+        }
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "zyxkept");
+        assert!(!nowhere.exists());
+    }
+
+    #[test]
+    fn the_clock_gives_whole_unix_seconds_and_refuses_one_before_1970() {
+        let at = |s: u64, ms: u64| UNIX_EPOCH + Duration::from_secs(s) + Duration::from_millis(ms);
+        assert_eq!(unix_seconds(UNIX_EPOCH), Ok(0));
+        assert_eq!(unix_seconds(at(1_700_000_000, 999)), Ok(1_700_000_000));
+        let before = UNIX_EPOCH - Duration::from_secs(1);
+        assert_eq!(unix_seconds(before), Err(MintError::ClockUnreadable));
+    }
+
+    #[test]
     fn the_failures_are_fixed_codes() {
         assert_eq!(MintError::SecretUnreadable.code(), "secret-unreadable");
         assert_eq!(MintError::TokenUnwritable.code(), "token-unwritable");
+        assert_eq!(MintError::ClockUnreadable.code(), "clock-unreadable");
         assert_eq!(WRITTEN, "token-written");
         assert!(USAGE.starts_with("iem-soakclient token --jwt-secret-file"));
     }

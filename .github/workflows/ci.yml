@@ -378,10 +378,12 @@ jobs:
         # (never printed; curl reads each header from a file, so no token is
         # on a command line either), and the real server takes the engineer
         # one at the engineer-only /api/audio/diagnostics (200) and refuses
-        # the member one (403, routes.rs require_engineer). The step's own
-        # bound (both runs, the build checks, the login, the sockets' Close
-        # and the mint check fit in it) makes a hung client a failed step,
-        # so the upload still runs.
+        # the member one (403, routes.rs require_engineer). The mint prints
+        # nothing but token-written (its stderr must stay empty), and the
+        # token folder goes on every exit. The step's own bound (both runs,
+        # the build checks, the login, the sockets' Close and the mint check
+        # fit in it) makes a hung client a failed step, so the upload still
+        # runs.
         timeout-minutes: 15
         env:
           SOAK_SECONDS: ${{ github.event_name == 'push' && '600' || '120' }}
@@ -401,6 +403,7 @@ jobs:
             --member member9 --expect-build "$build" --seconds 30 --out "$secret_summary" || secret_status=$?
           python3 scripts/iem-pc/soak_verdict.py harness "$secret_summary" --min-seconds 29 --max-gaps 3
           tokens="$(mktemp -d "$RUNNER_TEMP/tokens.XXXXXX")"
+          trap 'rm -rf -- "$tokens"' EXIT
           jwt_secret="$(dirname "$IEMMIXER_CONFIG")/secrets/jwt_secret"
           for who in engineer member; do
             if [ "$who" = engineer ]; then
@@ -409,13 +412,14 @@ jobs:
               sub=(--sub member9)
             fi
             minted="$(./target/release/iem-soakclient token --jwt-secret-file "$jwt_secret" "${sub[@]}" \
-              --seconds 3600 --out "$tokens/$who")"
+              --seconds 3600 --out "$tokens/$who" 2> "$tokens/$who.err")" \
+              || { echo "iem-soakclient token failed for the $who"; exit 1; }
             [ "$minted" = token-written ] || { echo "iem-soakclient token printed something else for the $who"; exit 1; }
+            [ ! -s "$tokens/$who.err" ] || { echo "iem-soakclient token wrote to stderr for the $who"; exit 1; }
             { printf 'Authorization: Bearer '; cat "$tokens/$who"; printf '\n'; } > "$tokens/$who.header"
           done
           engineer_code="$(curl -sS -o /dev/null -w '%{http_code}' -H "@$tokens/engineer.header" http://127.0.0.1:8080/api/audio/diagnostics)"
           member_code="$(curl -sS -o /dev/null -w '%{http_code}' -H "@$tokens/member.header" http://127.0.0.1:8080/api/audio/diagnostics)"
-          rm -r -- "$tokens"
           echo "minted tokens at /api/audio/diagnostics: engineer $engineer_code, member $member_code"
           [ "$engineer_code" = 200 ] || { echo "the engineer token was not taken"; exit 1; }
           [ "$member_code" = 403 ] || { echo "the member token was not refused with 403"; exit 1; }
