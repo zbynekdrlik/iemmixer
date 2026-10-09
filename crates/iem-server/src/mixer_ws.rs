@@ -3,7 +3,9 @@
 //! mirror, pins and hides, solo, alerts, network mode and tunnel status.
 //! Commands become engine requests (tagged with this session as their
 //! origin); engine deltas become UI updates for every other session on the
-//! same page; meters arrive every 100 ms.
+//! same page; meters arrive every 100 ms. A client silent for
+//! [`ws_alive::SILENT_FOR`] (no command, no pong to the session's pings) is
+//! gone, and its session ends; every send is bounded (`ws_alive`, #10).
 
 use std::sync::{Mutex, PoisonError};
 use std::time::Instant;
@@ -22,6 +24,7 @@ use tokio::sync::{broadcast, mpsc};
 use crate::engine::client::EngineEvent;
 use crate::site_view::Page;
 use crate::view::{self, Viewer};
+use crate::ws_alive::{self, Due};
 use crate::{AppState, To};
 
 /// Close code telling a page without a (current) protocol to reload.
@@ -131,12 +134,12 @@ pub async fn ws_mixer(
 }
 
 async fn close_reload(mut socket: WebSocket) {
-    let _ = socket
-        .send(Message::Close(Some(CloseFrame {
-            code: CLOSE_RELOAD,
-            reason: "reload".into(),
-        })))
-        .await;
+    let close = Message::Close(Some(CloseFrame {
+        code: CLOSE_RELOAD,
+        reason: "reload".into(),
+    }));
+    // Bounded like every send of a session (`ws_alive`, #10).
+    let _ = ws_alive::within(ws_alive::CLOSE_WITHIN, socket.send(close)).await;
 }
 
 fn text(msg: &ServerMsg) -> Message {
@@ -250,7 +253,7 @@ async fn session(
         build: iem_core::VERSION.to_string(),
         min_client_proto: MIN_CLIENT_PROTO,
     };
-    if socket.send(text(&hello)).await.is_err() {
+    if !ws_alive::send(socket.send(text(&hello))).await {
         return;
     }
     if !proto_ok(proto) {
@@ -274,7 +277,7 @@ async fn session(
     first.push(ServerMsg::NetworkMode { mode: network_mode });
     first.push(crate::tunnel_watch::current_status_msg(&state).await);
     for m in &first {
-        if socket.send(text(m)).await.is_err() {
+        if !ws_alive::send(socket.send(text(m))).await {
             cleanup(&state, &page, session);
             return;
         }
@@ -293,20 +296,41 @@ async fn session(
         })
     };
 
+    // A client that answers nothing for `ws_alive::SILENT_FOR` is gone
+    // (#10): pinged, it answers by itself when it is there.
+    let mut alive = ws_alive::Keepalive::default();
     loop {
         let out: Vec<ServerMsg> = tokio::select! {
-            msg = socket.recv() => match msg {
-                Some(Ok(Message::Text(t))) => {
-                    match serde_json::from_str::<ClientMsg>(&t) {
-                        Ok(cmd) => {
-                            let _ = cmd_tx.send(cmd);
+            msg = socket.recv() => {
+                if matches!(msg, Some(Ok(_))) {
+                    alive.heard();
+                }
+                match msg {
+                    Some(Ok(Message::Text(t))) => {
+                        match serde_json::from_str::<ClientMsg>(&t) {
+                            Ok(cmd) => {
+                                let _ = cmd_tx.send(cmd);
+                            }
+                            Err(e) => tracing::warn!(page = %page.id, error = %e, "unreadable WS command"),
                         }
-                        Err(e) => tracing::warn!(page = %page.id, error = %e, "unreadable WS command"),
+                        Vec::new()
+                    }
+                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                    Some(Ok(_)) => Vec::new(),
+                }
+            },
+            due = alive.due() => match due {
+                Due::Gone(silent) => {
+                    tracing::warn!(page = %page.id, session, silent_s = silent.as_secs(), "WebSocket client silent: closing");
+                    let _ = ws_alive::within(ws_alive::CLOSE_WITHIN, socket.send(ws_alive::silent_close())).await;
+                    break;
+                }
+                Due::Ping => {
+                    if !ws_alive::send(socket.send(ws_alive::ping())).await {
+                        break;
                     }
                     Vec::new()
                 }
-                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
-                Some(Ok(_)) => Vec::new(),
             },
             ev = engine_rx.recv() => match ev {
                 Ok(ev) => engine_event(&state, session, &page, &viewer, ev),
@@ -334,7 +358,7 @@ async fn session(
         };
         let mut failed = false;
         for m in &out {
-            if socket.send(text(m)).await.is_err() {
+            if !ws_alive::send(socket.send(text(m))).await {
                 failed = true;
                 break;
             }

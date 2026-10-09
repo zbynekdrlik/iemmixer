@@ -1,4 +1,5 @@
 // Imported as NodeWebSocket, never WebSocket: see tests/support/wire.ts.
+import type { EventEmitter } from "node:events";
 import NodeWebSocket from "ws";
 import { devices } from "@playwright/test";
 import { live } from "./env";
@@ -48,4 +49,44 @@ export function liveSocket(url: string, label: string): { ws: NodeWebSocket; ope
     });
   });
   return { ws, opened };
+}
+
+/** `ms` in seconds with `digits` after the point. */
+const seconds = (ms: number, digits: number): string => (ms / 1000).toFixed(digits);
+
+/**
+ * The words of a socket's close from the far side, for a failure (live run 3,
+ * #10): its code (a number, else none), its UTC time (to match the PC's
+ * server.log, which names every close the server made or saw), how long after
+ * the open and after the last message it came. Never the close's reason text:
+ * the far side writes that (P6).
+ */
+export function closeFacts(f: { code: unknown; at: number; openedAt: number | null; lastAt: number | null }): string {
+  const code = typeof f.code === "number" ? `code ${f.code}` : "no code";
+  const opened = f.openedAt === null ? "before it opened" : `${seconds(f.at - f.openedAt, 1)} s after it opened`;
+  const last = f.lastAt === null ? "with no message before" : `${seconds(f.at - f.lastAt, 2)} s after its last message`;
+  return `${code} at ${new Date(f.at).toISOString()}, ${opened}, ${last}`;
+}
+
+/**
+ * When a runner socket opened and last got a message, for `closeFacts`. Its
+ * listeners go on the socket before it opens, beside the owner's own.
+ */
+export class Wire {
+  openedAt: number | null = null;
+  lastAt: number | null = null;
+
+  constructor(ws: EventEmitter) {
+    ws.on("open", () => {
+      this.openedAt = Date.now();
+    });
+    ws.on("message", () => {
+      this.lastAt = Date.now();
+    });
+  }
+
+  /** The words of a close with `code` now (`closeFacts`). */
+  closed(code: unknown): string {
+    return closeFacts({ code, at: Date.now(), openedAt: this.openedAt, lastAt: this.lastAt });
+  }
 }

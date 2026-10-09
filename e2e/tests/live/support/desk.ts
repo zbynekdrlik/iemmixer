@@ -3,7 +3,7 @@ import { expect, type APIRequestContext } from "@playwright/test";
 import type { Channel as PageChannel, ConsoleInput, EqBand } from "../../support/mixer-socket";
 import type { BurstWatch } from "./burst";
 import { expectBuild, live, type Who } from "./env";
-import { liveSocket } from "./socket";
+import { Wire, liveSocket } from "./socket";
 
 // The live specs' runner-side mixer sockets, and the one way a live spec
 // changes the engine (S7, #10). The owner's rule (#9 2026-09-28): a live spec
@@ -96,7 +96,9 @@ export class LiveMixer {
     ws.on("message", (d: Buffer, binary: boolean) => {
       if (!binary) this.take(d);
     });
-    ws.on("close", () => this.breaks(`the server closed ${label} (no reconnect)`));
+    // The far side: the server, or the tunnel between (live run 3, #10).
+    const wire = new Wire(ws);
+    ws.on("close", (code: unknown) => this.breaks(`the server closed ${label} (no reconnect): ${wire.closed(code)}`));
     // The error's own text can name the host: fixed words only.
     ws.on("error", () => this.breaks(`${label} failed (socket error)`));
   }

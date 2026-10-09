@@ -11,6 +11,8 @@ import { Desk, LiveMixer, RESTORE_MS, type Cmd } from "./live/support/desk";
 import { SILENT_PEAK, continuity, dbOf, median, spread, talkbackLevel } from "./live/support/series";
 import { apiAt, runMarker, storeLogin } from "./live/support/env";
 import { guardConsole, redacted } from "./live/support/console";
+import { Relay } from "./live/support/relay";
+import { closeFacts } from "./live/support/socket";
 import { PushLedger, bodyOf, endpointOf, isPostTo, postedEndpoint } from "./live/support/push";
 
 // The live specs' support (S7, #10), run in the mock E2E job: the live specs
@@ -151,6 +153,99 @@ test("a burst's edge after a stall is no burst begun: it needs 5 s of the slot's
   frames(FIVE_SECONDS_OF_FRAMES);
   status("probe");
   expect(watch.inBurst()).toBe(true);
+});
+
+// Live run 3 (#10, 2026-10-09): runner sockets closed from the far side while
+// the PC's server.log shows no disconnect of their sessions, and a watch saw
+// no burst for 163 s while bursts came. A failure now carries what the socket
+// saw (numbers, fixed words and the UTC time to match the server's log; never
+// the far side's reason text), so the next run tells the tunnel from the
+// server and a silent socket from a miscount.
+
+/** `<code> at <UTC time>, <s> s after it opened, <s> s after its last message`: the words of a far-side close. */
+const CLOSE_FACTS = /code 1006 at \d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z, \d+\.\d s after it opened, \d+\.\d\d s after its last message/;
+
+test("a far-side close of the watch names its code, its UTC time, and how long the socket was open and quiet", () => {
+  const socket = new FakeSocket();
+  const watch = new (BurstWatch as unknown as new (ws: unknown) => BurstWatch)(socket);
+  socket.emit("open");
+  socket.event("AudioStatus", { status: "listening" });
+  socket.emit("message", FRAME, true);
+  socket.emit("close", 1006, Buffer.from("the far side's own words"));
+  expect(() => watch.check()).toThrow("the server closed the burst watch's socket (no reconnect): code 1006 at ");
+  expect(() => watch.check()).toThrow(CLOSE_FACTS);
+  expect(() => watch.check()).toThrow(/; the last status listening \d+\.\d s before$/);
+  // The far side's reason is not the runner's to print (it can be anything).
+  expect(() => watch.check()).not.toThrow(/own words/);
+});
+
+test("a close with no code and no message says so", () => {
+  const socket = new FakeSocket();
+  const watch = new (BurstWatch as unknown as new (ws: unknown) => BurstWatch)(socket);
+  socket.emit("close");
+  expect(() => watch.check()).toThrow(
+    /\(no reconnect\): no code at \S+Z, before it opened, with no message before; no status before$/,
+  );
+});
+
+test("a watch that saw no burst says what it got and where it stands", async () => {
+  const { watch, status, frames } = rawWatch();
+  status("listening");
+  frames(7);
+  // A burst it did not see begin: joined, so no burst counts.
+  status("probe");
+  frames(3);
+  await expect(watch.burst({ within: 100 })).rejects.toThrow(
+    /^no burst within 0\.1 s \(the watch: 10 binary and 2 text frames, the last \d+\.\d\d s ago; statuses listening 1, probe 1, no_source 0, stopped 0, other 0; 7 own frames since the last listening; inside a burst it did not see begin\)$/,
+  );
+
+  status("listening");
+  status("odd");
+  frames(4);
+  await expect(watch.burst({ within: 100 })).rejects.toThrow(
+    /statuses listening 2, probe 1, no_source 0, stopped 0, other 1; 4 own frames since the last listening; outside a burst\)$/,
+  );
+
+  frames(FIVE_SECONDS_OF_FRAMES);
+  status("probe");
+  // Counted, but with less left than asked: in the probe's own millisecond
+  // all 28 s are left, so the ask comes a little later.
+  await new Promise((r) => setTimeout(r, 20));
+  await expect(watch.burst({ minLeftMs: 28_000, within: 100 })).rejects.toThrow(
+    /; inside a burst begun \d+\.\d s ago\)$/,
+  );
+});
+
+test("a far-side close of a page's socket in the relay names its code and times", () => {
+  const relay = new Relay();
+  relay.farClosed("/ws/audio", "code 1006 at 2026-10-09T18:40:23.512Z, 22.6 s after it opened, 0.02 s after its last message");
+  expect(() => relay.check()).toThrow(
+    "relay: the server closed /ws/audio (no reconnect): code 1006 at 2026-10-09T18:40:23.512Z, 22.6 s after it opened, 0.02 s after its last message",
+  );
+  expect(relay.serverClosed).toEqual(["/ws/audio"]);
+  const mixer = new Relay();
+  // A mixer page's path names the page (site data, P6): only its kind is named.
+  mixer.farClosed("/ws/member1", "no code at 2026-10-09T18:40:23.512Z, before it opened, with no message before");
+  expect(() => mixer.check()).toThrow(/^relay: the server closed the page's mixer socket \(no reconnect\): no code at /);
+});
+
+test("closeFacts words the numbers and nothing else", () => {
+  const at = Date.UTC(2026, 9, 9, 18, 40, 23, 512);
+  expect(closeFacts({ code: 1001, at, openedAt: at - 22_600, lastAt: at - 20 })).toBe(
+    "code 1001 at 2026-10-09T18:40:23.512Z, 22.6 s after it opened, 0.02 s after its last message",
+  );
+  expect(closeFacts({ code: "1006", at, openedAt: null, lastAt: null })).toBe(
+    "no code at 2026-10-09T18:40:23.512Z, before it opened, with no message before",
+  );
+});
+
+test("a far-side close of the runner's mixer socket names its code and times", () => {
+  const { mixer, socket } = mixerOn();
+  socket.emit("open");
+  socket.event("Meters", { meters: {} });
+  socket.emit("close", 1006, Buffer.from(""));
+  expect(() => mixer.check()).toThrow("the server closed the test socket (no reconnect): code 1006 at ");
+  expect(() => mixer.check()).toThrow(CLOSE_FACTS);
 });
 
 /** The engine's talkback gain into its input (program spec A4). */
