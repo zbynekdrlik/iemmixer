@@ -653,6 +653,19 @@ mod tests {
         assert_eq!(reopen_us(Duration::MAX), u64::MAX);
     }
 
+    /// The ASIO reopen race (S7, #10): the backend marks a panic at the end
+    /// of the faulting callback, so the owner may decide on a reopen before
+    /// the mark and find the stream faulted only once `finish` stopped it. A
+    /// faulted stream's processor is never opened again: its card is
+    /// released for good, the preference window closes, the fault stands.
+    #[test]
+    fn a_faulted_stream_is_released_for_good_never_reopened() {
+        assert_eq!(then_after_stop(Then::Reopen, false), Then::Reopen);
+        assert_eq!(then_after_stop(Then::Reopen, true), Then::Release);
+        assert_eq!(then_after_stop(Then::Release, false), Then::Release);
+        assert_eq!(then_after_stop(Then::Release, true), Then::Release);
+    }
+
     #[test]
     fn stop_takes_the_owners_outcome_or_parks() {
         use StopOutcome::{Parked, Released};
