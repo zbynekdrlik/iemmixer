@@ -450,7 +450,7 @@ jobs:
       - name: Golden PC module self-test (Windows PowerShell 5.1, as on the PC)
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/golden/Test-GoldenPc.ps1
-      - name: Guard PC module and HIL v1 script self-test, parse check included (Windows PowerShell 5.1, as on the PC)
+      - name: Guard PC module self-test, parse check of every PC script included (Windows PowerShell 5.1, as on the PC)
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/iem-pc/Test-IemPc.ps1
       - name: HIL script self-test (hil-v1.ps1 end to end against a stand-in iemmode, IemHil.psm1's checks; #10)

@@ -12,7 +12,9 @@
 # - alarm-ack: which alarms are the guard's own test alarm (the one new above
 #   the id read before alarm-test) and the stale ones of earlier runs: only the
 #   exact test text, no step, no owner question, not yet acknowledged;
-# - f30: the installed site's sha256 after the revert is the one before.
+# - f30: nothing is installed unless the revert file is the installed site byte for
+#   byte and the change file is not; the installed site's sha256 after the revert
+#   is the one before.
 # Every field an older guard or engine does not send fails its check with
 # "lacks '<field>'" (an older engine's field reads 0 or null in a newer
 # guard: the same). Nothing is ended by force (I8); no site value (P6).
@@ -122,7 +124,7 @@ function Test-IemHilFaultTime {
     # never faulted would leave an earlier fault's time.
     param($Before, $After, [Parameter(Mandatory)][double]$MaxUs)
     if ($null -eq $After) { return (New-IemHilVerdict $false $script:NoEngine) }
-    $lack = Get-IemHilLack -Object $After -Fields @('last_fault_us')
+    $lack = Get-IemHilLack -Object $After -Fields @('last_fault_us') -NonZero @('last_fault_us')
     if ($lack) { return (New-IemHilVerdict $false $lack) }
     if ($null -eq $Before) { return (New-IemHilVerdict $false 'no engine status before the injection') }
     $us = [double]$After.last_fault_us
@@ -204,6 +206,21 @@ function Test-IemHilSiteRestored {
     return (New-IemHilVerdict $true 'the installed site is byte for byte the one before the change' $numbers)
 }
 
+function Test-IemHilF30Ready {
+    # Before any install-site (the lane's review): the revert file is the installed site
+    # byte for byte, so the revert can restore it, and the change file is not, so the change
+    # changes something. Else nothing is installed: a revert of other bytes would leave the
+    # PC on a site that is not the original. '' = unread.
+    param([string]$Installed = '', [string]$Change = '', [string]$Revert = '')
+    $hex = '^[0-9a-f]{64}$'
+    if ($Installed -cnotmatch $hex) { return (New-IemHilVerdict $false 'the installed site could not be read') }
+    if ($Change -cnotmatch $hex) { return (New-IemHilVerdict $false 'the change file could not be read') }
+    if ($Revert -cnotmatch $hex) { return (New-IemHilVerdict $false 'the revert file could not be read') }
+    if ($Revert -cne $Installed) { return (New-IemHilVerdict $false 'the revert file is not the installed site byte for byte: it could not restore it') }
+    if ($Change -ceq $Installed) { return (New-IemHilVerdict $false 'the change file is the installed site: the change would change nothing') }
+    return (New-IemHilVerdict $true 'the revert restores the installed site, the change changes it')
+}
+
 function Get-IemHilFileSha256 {
     # A file's sha256, lowercase hex.
     param([Parameter(Mandatory)][string]$Path)
@@ -223,5 +240,5 @@ function Test-IemHilV2Inputs {
 }
 
 Export-ModuleMember -Function Get-IemHilTestAlarmText, Test-IemHilPipeOwner, Test-IemHilPeer, Test-IemHilReopenTime,
-    Test-IemHilFaultTime, Get-IemHilMaxAlarmId, Test-IemHilIsTestAlarm, Get-IemHilTestAlarms, Test-IemHilSiteRestored,
+    Test-IemHilFaultTime, Get-IemHilMaxAlarmId, Test-IemHilIsTestAlarm, Get-IemHilTestAlarms, Test-IemHilSiteRestored, Test-IemHilF30Ready,
     Get-IemHilFileSha256, Test-IemHilV2Inputs

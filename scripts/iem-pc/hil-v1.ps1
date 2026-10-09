@@ -46,9 +46,11 @@ test alarm, the one new above the highest id read before alarm-test, then
 earlier runs' unacknowledged ones; only the guard's exact test text with no
 step and no owner question) and F30's bytes. A field an older guard or engine
 does not send fails its check ("lacks '<field>'"). F30 runs when -SiteChange,
--SiteRevert and -SiteInstalled (the installed site's path) are given together:
-the installed site's sha256 before the change, after it (it must differ) and
-after the revert (it must equal the first).
+-SiteRevert and -SiteInstalled (the installed site's path) are given together
+(none: no f30 check at all): nothing is installed unless the revert file is the
+installed site byte for byte and the change file is not; then the installed
+site's sha256 after the change must differ and after the revert must equal the
+one before. A cancel at the revert names the change left installed in `why`.
 #>
 param(
     [string]$Sha = '',
@@ -348,16 +350,30 @@ function Invoke-HilAlarmAck {
 function Invoke-HilF30 {
     # The synthetic site change and its revert through install-site; the installed site's
     # sha256 before the change, after it and after the revert (Test-IemHilSiteRestored).
-    # An installed site that cannot be read before the change changes nothing.
-    try { $h0 = Get-IemHilFileSha256 -Path $SiteInstalled } catch {
-        Add-HilCheck 'f30' $false ('the installed site: {0}' -f $_.Exception.Message); return
+    # Nothing is installed unless all three files read and the revert file is the installed
+    # site byte for byte (it can restore it) and the change file is not (Test-IemHilF30Ready).
+    $h0 = ''
+    $hc = ''
+    $hr = ''
+    try {
+        $h0 = Get-IemHilFileSha256 -Path $SiteInstalled
+        $hc = Get-IemHilFileSha256 -Path $SiteChange
+        $hr = Get-IemHilFileSha256 -Path $SiteRevert
+    } catch {
+        Add-HilCheck 'f30' $false ('F30 files: {0}; nothing installed' -f $_.Exception.Message); return
     }
+    $ready = Test-IemHilF30Ready -Installed $h0 -Change $hc -Revert $hr
+    if (-not $ready.ok) { Add-HilCheck 'f30' $false ('{0}; nothing installed' -f $ready.detail); return }
     $r1 = Invoke-Hil -A @('install-site', $SiteChange)
     if ($script:cancelled) { return }
     $h1 = ''
     try { $h1 = Get-IemHilFileSha256 -Path $SiteInstalled } catch { $h1 = '' }
     $r2 = Invoke-Hil -A @('install-site', $SiteRevert)
-    if ($script:cancelled) { return }
+    if ($script:cancelled) {
+        # The guard left dev at the revert: the change may still be installed (private `why`).
+        if (Test-IemModeOk -Result $r1) { $script:why += '; f30: the change was installed and its revert did not run: the installed site may still hold the change' }
+        return
+    }
     $h2 = ''
     try { $h2 = Get-IemHilFileSha256 -Path $SiteInstalled } catch { $h2 = '' }
     $sr = Test-IemHilSiteRestored -Before $h0 -Changed $h1 -After $h2
