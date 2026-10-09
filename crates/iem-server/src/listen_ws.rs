@@ -32,6 +32,7 @@ use tokio::time::Instant;
 use crate::AppState;
 use crate::engine::client::EngineError;
 use crate::engine::media::MediaLink;
+use crate::mixer_ws::alive::{Heard, PING_EVERY};
 use crate::mixer_ws::{WsQuery, claims_of};
 use probe_gate::{Pass, ProbeGate};
 
@@ -241,57 +242,77 @@ async fn session(mut socket: WebSocket, state: AppState, hil: bool) {
     let mut feed: Option<Feeds> = None;
     let mut last_audio = Instant::now();
     let mut first_logged = false;
+    // A client that answers nothing for `alive::SILENT_FOR` is gone (#10): pinged
+    // every `PING_EVERY`, it answers by itself when it is there.
+    let mut heard = Heard::new(std::time::Instant::now());
+    let mut ping = tokio::time::interval_at(Instant::now() + PING_EVERY, PING_EVERY);
+    ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         let listening = feed.is_some();
         tokio::select! {
-            msg = socket.recv() => match msg {
-                Some(Ok(Message::Text(text))) => match serde_json::from_str::<ClientMsg>(&text) {
-                    Ok(ClientMsg::ListenStart { member_id }) => {
-                        if let Some((mix, _)) = current.take() {
-                            stop(&state, &mix).await;
-                        }
-                        feed = None;
-                        let Some(page) = state.page(&member_id) else {
-                            if socket.send(status("no_source", None)).await.is_err() {
-                                break;
+            msg = socket.recv() => {
+                if matches!(msg, Some(Ok(_))) {
+                    heard.heard(std::time::Instant::now());
+                }
+                match msg {
+                    Some(Ok(Message::Text(text))) => match serde_json::from_str::<ClientMsg>(&text) {
+                        Ok(ClientMsg::ListenStart { member_id }) => {
+                            if let Some((mix, _)) = current.take() {
+                                stop(&state, &mix).await;
                             }
-                            continue;
-                        };
-                        match start(&state, &page.mix).await {
-                            Ok(()) => {
-                                tracing::info!(target = %member_id, mix = %page.mix, hil, "Audio listen started");
-                                feed = Some(feeds(&state.media, slot_of(&state, &page.mix), hil));
-                                current = Some((page.mix.clone(), member_id.clone()));
-                                last_audio = Instant::now();
-                                if socket.send(status("listening", Some(member_id))).await.is_err() {
-                                    break;
-                                }
-                            }
-                            Err(e) => {
-                                if !matches!(&e, EngineError::Refused(b) if b.code == ErrCode::NoSource) {
-                                    tracing::warn!(error = %e, "listen start failed");
-                                }
+                            feed = None;
+                            let Some(page) = state.page(&member_id) else {
                                 if socket.send(status("no_source", None)).await.is_err() {
                                     break;
                                 }
+                                continue;
+                            };
+                            match start(&state, &page.mix).await {
+                                Ok(()) => {
+                                    tracing::info!(target = %member_id, mix = %page.mix, hil, "Audio listen started");
+                                    feed = Some(feeds(&state.media, slot_of(&state, &page.mix), hil));
+                                    current = Some((page.mix.clone(), member_id.clone()));
+                                    last_audio = Instant::now();
+                                    if socket.send(status("listening", Some(member_id))).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                Err(e) => {
+                                    if !matches!(&e, EngineError::Refused(b) if b.code == ErrCode::NoSource) {
+                                        tracing::warn!(error = %e, "listen start failed");
+                                    }
+                                    if socket.send(status("no_source", None)).await.is_err() {
+                                        break;
+                                    }
+                                }
                             }
                         }
-                    }
-                    Ok(ClientMsg::ListenStop) => {
-                        tracing::info!("Audio listen stopped");
-                        if let Some((mix, _)) = current.take() {
-                            stop(&state, &mix).await;
+                        Ok(ClientMsg::ListenStop) => {
+                            tracing::info!("Audio listen stopped");
+                            if let Some((mix, _)) = current.take() {
+                                stop(&state, &mix).await;
+                            }
+                            feed = None;
+                            if socket.send(status("stopped", None)).await.is_err() {
+                                break;
+                            }
                         }
-                        feed = None;
-                        if socket.send(status("stopped", None)).await.is_err() {
-                            break;
-                        }
-                    }
-                    _ => {}
-                },
-                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
-                Some(Ok(_)) => {}
+                        _ => {}
+                    },
+                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                    Some(Ok(_)) => {}
+                }
             },
+            _ = ping.tick() => {
+                let now = std::time::Instant::now();
+                if heard.gone(now) {
+                    tracing::warn!(silent_s = heard.silent(now).as_secs(), "Audio WebSocket client silent: closing");
+                    break;
+                }
+                if socket.send(Message::Ping(Bytes::new())).await.is_err() {
+                    break;
+                }
+            }
             out = async { match feed.as_mut() { Some(f) => f.next().await, None => std::future::pending().await } }, if listening => {
                 match out {
                     Out::Frame { data, probe, edge } => {

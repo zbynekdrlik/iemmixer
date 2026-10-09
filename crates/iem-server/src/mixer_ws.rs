@@ -3,7 +3,11 @@
 //! mirror, pins and hides, solo, alerts, network mode and tunnel status.
 //! Commands become engine requests (tagged with this session as their
 //! origin); engine deltas become UI updates for every other session on the
-//! same page; meters arrive every 100 ms.
+//! same page; meters arrive every 100 ms. A client silent for
+//! [`alive::SILENT_FOR`] (no command, no pong to the session's pings) is
+//! gone, and its session ends (`alive`, #10).
+
+pub mod alive;
 
 use std::sync::{Mutex, PoisonError};
 use std::time::Instant;
@@ -293,20 +297,44 @@ async fn session(
         })
     };
 
+    // A client that answers nothing for `alive::SILENT_FOR` is gone (#10):
+    // pinged every `alive::PING_EVERY`, it answers by itself when it is there.
+    let mut heard = alive::Heard::new(Instant::now());
+    let mut ping = tokio::time::interval_at(
+        tokio::time::Instant::now() + alive::PING_EVERY,
+        alive::PING_EVERY,
+    );
+    ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         let out: Vec<ServerMsg> = tokio::select! {
-            msg = socket.recv() => match msg {
-                Some(Ok(Message::Text(t))) => {
-                    match serde_json::from_str::<ClientMsg>(&t) {
-                        Ok(cmd) => {
-                            let _ = cmd_tx.send(cmd);
-                        }
-                        Err(e) => tracing::warn!(page = %page.id, error = %e, "unreadable WS command"),
-                    }
-                    Vec::new()
+            msg = socket.recv() => {
+                if matches!(msg, Some(Ok(_))) {
+                    heard.heard(Instant::now());
                 }
-                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
-                Some(Ok(_)) => Vec::new(),
+                match msg {
+                    Some(Ok(Message::Text(t))) => {
+                        match serde_json::from_str::<ClientMsg>(&t) {
+                            Ok(cmd) => {
+                                let _ = cmd_tx.send(cmd);
+                            }
+                            Err(e) => tracing::warn!(page = %page.id, error = %e, "unreadable WS command"),
+                        }
+                        Vec::new()
+                    }
+                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                    Some(Ok(_)) => Vec::new(),
+                }
+            },
+            _ = ping.tick() => {
+                let now = Instant::now();
+                if heard.gone(now) {
+                    tracing::warn!(page = %page.id, session, silent_s = heard.silent(now).as_secs(), "WebSocket client silent: closing");
+                    break;
+                }
+                if socket.send(Message::Ping(axum::body::Bytes::new())).await.is_err() {
+                    break;
+                }
+                Vec::new()
             },
             ev = engine_rx.recv() => match ev {
                 Ok(ev) => engine_event(&state, session, &page, &viewer, ev),
