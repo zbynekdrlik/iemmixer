@@ -2,9 +2,9 @@
 """Dev-box control of the IEM PC (S6, design note §5.1, §5.5, §6, §7).
 
 `iemmode` over ssh with the EVENT-NOW discipline, attested bundles from CI
-(fetch, install, activate), HIL and soak dispatch on the private ops repo
-(`dispatch-soak`: iempc_soak.py), the switch timing (`switch-test`:
-iempc_switch.py), PC bootstrap through
+(fetch, install, activate), HIL, soak and live-run dispatch on the private ops repo
+(`dispatch-soak`: iempc_soak.py; `dispatch-live`: iempc_live.py), the switch
+timing (`switch-test`: iempc_switch.py), PC bootstrap through
 the bundle's IemPc.psm1 (dev time only), S1c's tuning modules and profile into
 the PC's elevated tuning folder (`tuning-install`, refreshed after `activate`:
 iempc_tuning.py), a kernel DPC/ISR trace on the guard's engine (`trace`:
@@ -32,8 +32,9 @@ read-only call or a switch the guard owns is abandoned (the guard pre-empts
 itself), a change the call makes itself completes first; then the command
 runs the event path itself (exit 10). `dev`, `rehearse-teardown`,
 `install` (except `--first`) and `activate` refuse while an S1a/S1c window
-is open: `handover-s1a` hands the card over first. `dispatch-hil` and
-`dispatch-soak` check the flag again right before they dispatch.
+is open: `handover-s1a` hands the card over first. `dispatch-hil`,
+`dispatch-soak` and `dispatch-live` check the flag again right before they
+dispatch.
 
 `activate --sha` runs `iemmode activate`, which the guard allows in dev
 and in an idle event (#9 2026-09-28: none of iemmixer's processes runs, no
@@ -88,6 +89,7 @@ from pathlib import Path
 from typing import Callable, Iterator
 
 import iempc_bin
+import iempc_live
 import iempc_soak
 import iempc_sshshell
 import iempc_switch
@@ -1227,12 +1229,19 @@ def cmd_dispatch_hil(ctx: Ctx) -> int:
 
 def cmd_dispatch_soak(ctx: Ctx) -> int:
     """S7 soak dispatch; the code lives in iempc_soak.py (#10, #36)."""
+    iempc_live.refuse_while_live(sys.modules[__name__], "dispatch-soak")
     return iempc_soak.dispatch(ctx, sys.modules[__name__])
 
 
 def cmd_switch_test(ctx: Ctx) -> int:
     """S7 switch timing; the code lives in iempc_switch.py (#10, #36)."""
+    iempc_live.refuse_while_live(sys.modules[__name__], "switch-test")
     return iempc_switch.switch_test(ctx, sys.modules[__name__])
+
+
+def cmd_dispatch_live(ctx: Ctx) -> int:
+    """S7 live-run dispatch; the code lives in iempc_live.py (#10, #36)."""
+    return iempc_live.dispatch(ctx, sys.modules[__name__])
 
 
 def read_only_function(name: str) -> bool:
@@ -1385,6 +1394,7 @@ COMMANDS: dict[str, Spec] = {
     "dispatch-hil": Spec(cmd_dispatch_hil, pc=False, dev_time=True, locked=True),
     "dispatch-soak": Spec(cmd_dispatch_soak, pc=True, dev_time=True, locked=True),
     "switch-test": Spec(cmd_switch_test, pc=True, dev_time=True, locked=True),
+    "dispatch-live": Spec(cmd_dispatch_live, pc=True, dev_time=True, locked=True),
     "bootstrap": Spec(cmd_bootstrap, pc=True, dev_time=True, locked=True),
     "handover-s1a": Spec(cmd_handover_s1a, pc=True, dev_time=True, locked=True),
     "tuning-install": Spec(cmd_tuning_install, pc=True, dev_time=True, locked=True),
@@ -1417,6 +1427,8 @@ def build_parser() -> argparse.ArgumentParser:
     soak.add_argument("--sha", required=True, help="the bundle the PC runs in dev (its engine's build)")
     soak.add_argument("--hours", type=int, default=iempc_soak.HOURS_DEFAULT,
                       help=f"the soak's length, {iempc_soak.HOURS_MIN} to {iempc_soak.HOURS_MAX}")
+    sub.add_parser("dispatch-live").add_argument("--sha", required=True,
+                                                 help="the bundle the PC runs in dev (its engine's build)")
     boot = sub.add_parser("bootstrap")
     boot.add_argument("--sha", help="the fetched bundle whose IemPc.psm1 runs (default: the newest fetched)")
     boot.add_argument("step", help="an IemPc.psm1 function, e.g. Get-IemBootstrapState")

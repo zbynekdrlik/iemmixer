@@ -95,6 +95,13 @@ def playing_refusal(engine: dict, what: str) -> str | None:
 def soak_refusal(reply, sha: str) -> str | None:
     """Why the PC cannot be soaked at `sha` now, from one `iemmode status`
     reply (pure); None when it can."""
+    return runs_refusal(reply, sha, "a soak")
+
+
+def runs_refusal(reply, sha: str, what: str) -> str | None:
+    """Why the PC does not run bundle `sha` settled in dev with an engine that
+    plays, for `what` that measures it (a soak, a live run: iempc_live), from
+    one `iemmode status` reply (pure); None when it does."""
     why = settled_refusal(reply)
     if why:
         return why
@@ -106,7 +113,7 @@ def soak_refusal(reply, sha: str) -> str | None:
         return "no engine runs (the guard's status shows none)"
     if engine.get("build") != sha:
         return f"the running engine's build is {engine.get('build')!r}, not {sha}"
-    return playing_refusal(engine, "a soak")
+    return playing_refusal(engine, what)
 
 
 def check_hours(ip, hours) -> int:

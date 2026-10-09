@@ -19,6 +19,17 @@ Design note `docs/superpowers/specs/2026-10-07-s7-hil-live-soak-design.md` §6, 
 - Only from the ops `live.yml`, dispatched by `iempc dispatch-live --sha`: `verify` → `pc-begin` → `browser` and `pc` in parallel → `pc-end` (`if: always()`) → `report`. `browser` is a hosted Ubuntu runner with Chromium, against the band's public host through the tunnel (the members' real path); nothing of it runs on the PC.
 - Public CI only lists them: the e2e job's `--list` step, with no `LIVE_*` and the mock PINs removed. Locally: `--list` of both configs. The pure support runs in the mock job (`tone.spec.ts`, `live-support.spec.ts`).
 
+## Dispatch and the dispatch guards (`iempc_live.py`, Task 24)
+
+- `iempc dispatch-live --sha <bundle>` (dev time, locked, a PC command; iempc.py keeps the call site only, #36) dispatches `live.yml -f sha -f branch -f run` with this box's gh. Any refusal dispatches nothing. In order:
+  1. Before any call: the EVENT-NOW flag at the start, a full SHA, a live run of this SHA in this dev entry already (`<state>/live.json`, `{"runs": [{sha, branch, run, entry, at}]}`, the newest 200; a file of another shape is an error to check by hand; a failed ops run is `gh run rerun <id> -R <ops repo>`, never a second dispatch), another live run of this entry that may still run (it would queue behind the first in `live.yml`'s concurrency group and outlive its window), a soak of this entry that may still run (`iempc_soak.running_soak`: `pc-begin` restarts the engine in a HIL job).
+  2. `iemmode status` (a new flag abandons it, the event path follows): `live_refusal`, the soak's rule (`iempc_soak.runs_refusal`): ok, dev, no switch, no HIL job, active bundle and engine build the SHA, engine neither parked nor faulted.
+  3. `green_run` (P5); 4. the flag again right before the dispatch; 5. `gh workflow run`, then the record (a failed dispatch records nothing).
+- **The reverse guards:** `dispatch-soak` and `switch-test` call `refuse_while_live(ip, <command>)` first, before any call: a live run of this dev entry that may still run refuses them (a soak would meet the run's engine restart, a switch would end the run, `left-dev`).
+- **The window:** a run may still run `WINDOW_S` (5400 s) after its dispatch, the sum of `JOB_MINUTES`: `verify` and the pick-up 5, `pc-begin` 15, `pc` 60 (`browser`'s 45 beside it, Playwright's `globalTimeout` 40 inside that), `pc-end` 10 (`report` runs on a hosted runner). **`live.yml`'s `timeout-minutes` must match `JOB_MINUTES`** (`test_the_window_covers_live_ymls_jobs`): a longer job there needs a longer window here.
+- Fail safe: a record whose time (no ISO time, no zone) or dev entry (not an integer) cannot be read may still run. Known limits: only this box's `live.json` is read (a run dispatched elsewhere is not seen); a run that waited longer than 5 min for the PC's runner outlives its window; a run of an earlier dev entry is not looked at (a switch out of dev ends it).
+- Tests: `test_iempc_live.py` on `test_iempc.Base`; every guard on both sides (no Python mutation gate runs in CI).
+
 ## Variables, tokens and P6
 
 - `support/env.ts` reads every value on first use (`live()`, `runMarker()`), so `--list` needs none; a refusal names the variable, never its value. A new `LIVE_*` goes there, with validation.
