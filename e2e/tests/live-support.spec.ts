@@ -208,7 +208,9 @@ test("a watch that saw no burst says what it got and where it stands", async () 
 
   frames(FIVE_SECONDS_OF_FRAMES);
   status("probe");
-  // Counted, but with less left than asked.
+  // Counted, but with less left than asked: in the probe's own millisecond
+  // all 28 s are left, so the ask comes a little later.
+  await new Promise((r) => setTimeout(r, 20));
   await expect(watch.burst({ minLeftMs: 28_000, within: 100 })).rejects.toThrow(
     /; inside a burst begun \d+\.\d s ago\)$/,
   );
