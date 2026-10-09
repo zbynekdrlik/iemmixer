@@ -244,6 +244,12 @@ impl LoginGuard {
         }
     }
 
+    /// Whether `peer` is this host (loopback or one of the addresses the
+    /// guard trusts CF-Connecting-IP from): `/api/peer`'s `host`.
+    pub fn is_host(&self, peer: IpAddr) -> bool {
+        self.host.contains(peer)
+    }
+
     /// The budget key of a request from `peer` with `headers`.
     pub fn client(&self, peer: IpAddr, headers: &HeaderMap) -> ClientKey {
         ClientKey::from_request(peer, headers, &self.host)

@@ -1,5 +1,74 @@
 //! `GET /api/peer` (S7 HIL v2, design §7 "the tunnel peer"): how this server
-//! classified the request it answers, by `login_guard`'s rule.
+//! classified the request it answers, by `login_guard`'s rule: `origin`
+//! "tunnel" when the socket peer is this host and the request carries
+//! CF-Connecting-IP, else "lan"; `peer` "loopback" | "host" | "other". Fixed
+//! codes only, no address (P6); public like /api/version.
+
+use std::net::{IpAddr, SocketAddr};
+
+use axum::Json;
+use axum::extract::{ConnectInfo, State};
+use axum::http::HeaderMap;
+use serde::Serialize;
+
+use crate::AppState;
+use crate::login_guard::{LoginGuard, Origin};
+
+/// How the request's origin was classified: `login_guard`'s budget origin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PeerOrigin {
+    /// The socket peer is this host and CF-Connecting-IP names a client.
+    Tunnel,
+    /// Anything else, whatever header it sent.
+    Lan,
+}
+
+/// What the socket peer is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PeerKind {
+    Loopback,
+    /// One of this host's own addresses (`HostAddrs`), not loopback.
+    Host,
+    Other,
+}
+
+/// `/api/peer`'s answer: exactly these two codes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct PeerInfo {
+    pub origin: PeerOrigin,
+    pub peer: PeerKind,
+}
+
+/// A request from `peer` with `headers`, by the login guard's own rule
+/// (`LoginGuard::client`, so the answer is what a login from it would count
+/// as).
+pub fn classify(peer: IpAddr, headers: &HeaderMap, guard: &LoginGuard) -> PeerInfo {
+    let origin = match guard.client(peer, headers).origin {
+        Origin::Tunnel => PeerOrigin::Tunnel,
+        Origin::Lan => PeerOrigin::Lan,
+    };
+    let kind = if peer.to_canonical().is_loopback() {
+        PeerKind::Loopback
+    } else if guard.is_host(peer) {
+        PeerKind::Host
+    } else {
+        PeerKind::Other
+    };
+    PeerInfo { origin, peer: kind }
+}
+
+/// `GET /api/peer`: public, no token, like `/api/version`.
+pub async fn get_peer(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Json<PeerInfo> {
+    let info = classify(peer.ip(), &headers, &state.login_guard);
+    tracing::debug!(origin = ?info.origin, peer = ?info.peer, "/api/peer");
+    Json(info)
+}
 
 #[cfg(test)]
 mod tests {

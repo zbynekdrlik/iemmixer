@@ -51,6 +51,8 @@ pub fn api_routes(_state: AppState) -> Router<AppState> {
         .route("/api/version", get(get_version))
         // Where the mixer is reachable (LAN URL, public host)
         .route("/api/site", get(get_site_links))
+        // How this request was classified (HIL v2's tunnel and LAN peer)
+        .route("/api/peer", get(crate::peer_route::get_peer))
         // Auth login (returns JWT)
         .route("/api/auth", post(auth::login))
         // Member list (landing page)
