@@ -177,6 +177,17 @@ mod tests {
         (server, client)
     }
 
+    /// HIL v2's pipe owner (S7, #10): the process serving a pipe, read on a
+    /// client's end, is the one that created it (with the first-instance
+    /// flag, as interprocess creates the engine's).
+    #[test]
+    fn server_pid_names_the_listening_process() {
+        let (server, client) = pair(&format!("iem-win-server-pid-{}", std::process::id()));
+        assert_eq!(server_pid(client.as_handle()).unwrap(), std::process::id());
+        // The server's own end names it too.
+        assert_eq!(server_pid(server.as_handle()).unwrap(), std::process::id());
+    }
+
     #[test]
     fn a_write_the_peer_does_not_take_is_cancelled_after_the_limit() {
         let (server, mut client) = pair(&format!("iem-win-write-{}", std::process::id()));

@@ -19,6 +19,8 @@ fn status(frames: u32, callbacks: u64, missed: u64) -> Status {
         hist_top_us: 0,
         interval_hist: Vec::new(),
         process_hist: Vec::new(),
+        last_reopen_us: 0,
+        fault_callback_us: 0.0,
     }
 }
 
@@ -305,7 +307,29 @@ fn engine_messages_are_read_field_by_field() {
             hist_top_us: 0,
             interval_hist: Vec::new(),
             process_hist: Vec::new(),
+            last_reopen_us: 0,
+            fault_callback_us: 0.0,
         })
+    );
+    // S7 HIL v2 (#10): the last reopen's time and the faulting callback's
+    // time; an older engine's read 0.
+    assert_eq!(
+        p(
+            json!({"type": "status", "callbacks": 7, "faulted": true, "last_reopen_us": 104_000, "fault_callback_us": 412.5})
+        ),
+        Msg::Status(Status {
+            callbacks: 7,
+            faulted: true,
+            last_reopen_us: 104_000,
+            fault_callback_us: 412.5,
+            ..Status::default()
+        })
+    );
+    assert_eq!(
+        p(
+            json!({"type": "status", "callbacks": 7, "last_reopen_us": -1, "fault_callback_us": "x"})
+        ),
+        Msg::Status(status(0, 7, 0))
     );
     // S7: the soak's figures and both histograms (design note §3).
     assert_eq!(
@@ -489,8 +513,12 @@ fn the_reply_names_the_engine_by_its_commit() {
             hist_top_us: 667,
             interval_hist: vec![(333, 359_990), (400, 9)],
             process_hist: vec![(60, 360_000)],
+            last_reopen_us: 104_000,
+            fault_callback_us: 412.5,
         },
         pipe_private: true,
+        pipe_server_pid: Some(4242),
+        last_fault_us: Some(398.25),
     };
     assert_eq!(
         engine_status(&seen, 3, Some(70), Some(4242)),
@@ -515,6 +543,11 @@ fn the_reply_names_the_engine_by_its_commit() {
             hist_top_us: 667,
             interval_hist: vec![(333, 359_990), (400, 9)],
             process_hist: vec![(60, 360_000)],
+            // S7 HIL v2 (#10): the pipe's server, the last reopen, and the
+            // last fault the guard kept (not the running engine's status).
+            pipe_server_pid: Some(4242),
+            last_reopen_us: 104_000,
+            last_fault_us: Some(398.25),
         }
     );
     let quiet = EngineSeen {
@@ -528,6 +561,29 @@ fn the_reply_names_the_engine_by_its_commit() {
             ..EngineStatus::default()
         }
     );
+}
+
+/// HIL v2's fault time (S7, #10): the faulting callback's time of a
+/// faulted `Status`, which the guard keeps across the respawn; none from a
+/// status that is not faulted, or whose time is 0 (an older engine, a fault
+/// the backend raised itself), negative or not finite.
+#[test]
+fn the_last_fault_is_a_faulted_status_callback_time() {
+    let at = |faulted: bool, us: f64| {
+        fault_time(&Status {
+            faulted,
+            fault_callback_us: us,
+            ..Status::default()
+        })
+    };
+    assert_eq!(at(true, 412.5), Some(412.5));
+    assert_eq!(at(true, 0.001), Some(0.001));
+    assert_eq!(at(false, 412.5), None);
+    assert_eq!(at(true, 0.0), None);
+    assert_eq!(at(true, -1.0), None);
+    assert_eq!(at(true, f64::INFINITY), None);
+    assert_eq!(at(true, f64::NAN), None);
+    assert_eq!(at(false, 0.0), None);
 }
 
 /// The engine's pipe exists before its card opens: until the connection

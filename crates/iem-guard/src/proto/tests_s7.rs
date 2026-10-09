@@ -35,6 +35,9 @@ pub(super) fn an_engine() -> EngineStatus {
         hist_top_us: 667,
         interval_hist: vec![(333, 359_990), (400, 9)],
         process_hist: vec![(60, 360_000)],
+        pipe_server_pid: Some(4242),
+        last_reopen_us: 104_000,
+        last_fault_us: Some(412.5),
     }
 }
 
@@ -75,6 +78,9 @@ fn the_engine_carries_the_fields_hil_v1_reads() {
             "hist_top_us": 667,
             "interval_hist": [[333, 359_990], [400, 9]],
             "process_hist": [[60, 360_000]],
+            "pipe_server_pid": 4242,
+            "last_reopen_us": 104_000,
+            "last_fault_us": 412.5,
         })
     );
     assert_eq!(
@@ -112,6 +118,11 @@ fn the_engine_carries_the_fields_hil_v1_reads() {
     assert_eq!(fresh["hist_top_us"], 0);
     assert_eq!(fresh.get("interval_hist"), None);
     assert_eq!(fresh.get("process_hist"), None);
+    // S7 HIL v2 (#10): no server pid read and no fault kept are null, no
+    // reopen 0, so HIL v2 names what an older guard lacks.
+    assert_eq!(fresh["pipe_server_pid"], serde_json::Value::Null);
+    assert_eq!(fresh["last_reopen_us"], 0);
+    assert_eq!(fresh["last_fault_us"], serde_json::Value::Null);
 }
 
 /// The guard's largest reply fits one frame (S7, #10): every kept alarm
@@ -195,6 +206,9 @@ fn the_largest_reply_fits_a_frame() {
                 hist_top_us: u32::MAX,
                 interval_hist: full.clone(),
                 process_hist: full.clone(),
+                pipe_server_pid: Some(u32::MAX),
+                last_reopen_us: u64::MAX,
+                last_fault_us: Some(f64::MAX),
                 ..an_engine()
             }),
             guard_build: Some(GUARD_BUILD.into()),
