@@ -134,12 +134,12 @@ pub async fn ws_mixer(
 }
 
 async fn close_reload(mut socket: WebSocket) {
-    let _ = socket
-        .send(Message::Close(Some(CloseFrame {
-            code: CLOSE_RELOAD,
-            reason: "reload".into(),
-        })))
-        .await;
+    let close = Message::Close(Some(CloseFrame {
+        code: CLOSE_RELOAD,
+        reason: "reload".into(),
+    }));
+    // Bounded like every send of a session (`ws_alive`, #10).
+    let _ = ws_alive::within(ws_alive::CLOSE_WITHIN, socket.send(close)).await;
 }
 
 fn text(msg: &ServerMsg) -> Message {
