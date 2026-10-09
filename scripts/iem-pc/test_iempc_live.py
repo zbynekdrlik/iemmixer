@@ -160,8 +160,8 @@ class DispatchLiveTests(LiveBase):
             (ready(detail="mode dev; no bundle"), f"the active bundle is none, not {SHA}"),
             (engine(build=SHA2), f"the running engine's build is {SHA2!r}, not {SHA}"),
             (engine(build=...), f"the running engine's build is None, not {SHA}"),
-            (ready(engine=None), "no engine runs"),
-            (ready(engine="running"), "no engine runs"),
+            (ready(engine=None), "no engine runs (the guard's status shows none)"),
+            (ready(engine="running"), "no engine runs (the guard's status shows none)"),
         ]
         for state in ("parked", "faulted"):
             for value in (True, None, "false", 0, ...):
