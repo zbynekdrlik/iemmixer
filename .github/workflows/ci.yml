@@ -532,8 +532,9 @@ jobs:
           # The soak client rides along (S7) but is not required: older bundles still install.
           $exes = 'iem-engine', 'iem-server', 'iemmixer-guard', 'iemmode', 'iem-tray', 'iem-migrate', 'iem-soakclient' | ForEach-Object { "target/release/$_.exe" }
           Copy-Item -LiteralPath $exes -Destination $b
-          # IemSshShell.psm1 (#15, iempc ssh-shell) is not required: older bundles still install.
-          Copy-Item -LiteralPath scripts/iem-pc/hil-v1.ps1, scripts/iem-pc/IemPc.psm1, scripts/iem-pc/IemSshShell.psm1 -Destination $b
+          # IemSshShell.psm1 (#15, iempc ssh-shell) and IemHil.psm1 (#10, HIL v2's checks, which
+          # hil-v1.ps1 imports from its own folder) are not required: older bundles still install.
+          Copy-Item -LiteralPath scripts/iem-pc/hil-v1.ps1, scripts/iem-pc/IemPc.psm1, scripts/iem-pc/IemSshShell.psm1, scripts/iem-pc/IemHil.psm1 -Destination $b
           Copy-Item -LiteralPath crates/iem-engine/LICENSE -Destination (Join-Path $b 'LICENSE-iem-engine')
           # The S1c tuning modules, one level deep (bundle names allow tuning/<name> only).
           if (Test-Path -LiteralPath scripts/pc-tuning) {
