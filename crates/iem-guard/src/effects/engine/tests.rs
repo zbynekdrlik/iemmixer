@@ -586,6 +586,33 @@ fn the_last_fault_is_a_faulted_status_callback_time() {
     assert_eq!(at(false, 0.0), None);
 }
 
+/// The fault time the guard keeps (S7 HIL v2, lane review): a newer faulted
+/// status replaces it, also with none when that fault has no callback time
+/// (the reopen budget, a structured exception, an older engine), so an
+/// earlier fault's time never stands for a later fault; a status that is not
+/// faulted, or none, keeps it (the respawned engine's).
+#[test]
+fn the_kept_fault_is_the_newest_faulted_status() {
+    let faulted = |us: f64| Status {
+        faulted: true,
+        fault_callback_us: us,
+        ..Status::default()
+    };
+    let healthy = Status {
+        callbacks: 9,
+        fault_callback_us: 7.0,
+        ..Status::default()
+    };
+    assert_eq!(kept_fault(None, Some(&faulted(412.5))), Some(412.5));
+    assert_eq!(kept_fault(Some(398.25), Some(&faulted(412.5))), Some(412.5));
+    assert_eq!(kept_fault(Some(398.25), Some(&faulted(0.0))), None);
+    assert_eq!(kept_fault(Some(398.25), Some(&faulted(f64::NAN))), None);
+    assert_eq!(kept_fault(Some(398.25), Some(&healthy)), Some(398.25));
+    assert_eq!(kept_fault(None, Some(&healthy)), None);
+    assert_eq!(kept_fault(Some(398.25), None), Some(398.25));
+    assert_eq!(kept_fault(None, None), None);
+}
+
 /// The engine's pipe exists before its card opens: until the connection
 /// holds the hello's build and a `Status`, the guard shows no engine
 /// (`Reply.engine` absent), never an empty build with zero counters that
