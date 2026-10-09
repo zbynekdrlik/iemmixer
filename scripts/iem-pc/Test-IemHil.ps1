@@ -214,7 +214,9 @@ $reopens = @($lines | Where-Object { $_ -eq 'force-reopen' }).Count
 $mode = 'dev'
 if ($sc.event_after -gt 0 -and $n -gt $sc.event_after) { $mode = 'event' }
 $ok = -not (@($sc.refuse) -contains $cmd)
-if ($cmd -eq 'alarm-ack' -and @($alarms | Where-Object { [string]$_['id'] -ceq [string]$args[1] }).Count -ne 1) { $ok = $false }
+$ackId = ''
+if ($args.Count -gt 1) { $ackId = [string]$args[1] }
+if ($cmd -eq 'alarm-ack' -and @($alarms | Where-Object { [string]$_['id'] -ceq $ackId }).Count -ne 1) { $ok = $false }
 # `site` (optional): the installed site's path; `install-site <path>` writes the named
 # file's bytes there, as the guard's install-site does.
 if ($cmd -eq 'install-site' -and $ok -and $null -ne $sc.PSObject.Properties['site']) {
@@ -274,7 +276,7 @@ exit 1
     function CheckOk($res, [string]$name) { return @($res.checks | Where-Object { $_.name -eq $name -and $_.ok }).Count -eq 1 }
     function CheckFailed($res, [string]$name) { return @($res.checks | Where-Object { $_.name -eq $name -and -not $_.ok }).Count -eq 1 }
     function CheckDetail($res, [string]$name) { return (@($res.checks | Where-Object { $_.name -eq $name }) | ForEach-Object { $_.detail }) -join ' | ' }
-    function CheckOf($res, [string]$name) { return @($res.checks | Where-Object { $_.name -eq $name })[0] }
+    function CheckOf($res, [string]$name) { $c = @($res.checks | Where-Object { $_.name -eq $name }); if ($c.Count -eq 0) { return $null }; return $c[0] }
     function Scenario([hashtable]$More = @{}) {
         # The default scenario with $More's keys added (HIL v2's knobs: alarms, site, fault_us ...).
         $s = [ordered]@{ sha = $S; refuse = @(); silent = @(); event_after = 0 }
