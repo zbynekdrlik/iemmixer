@@ -6,8 +6,10 @@
 use super::*;
 
 /// A backend whose stream reports these figures; its stop releases.
+#[cfg(unix)]
 struct Streams(StreamStats);
 
+#[cfg(unix)]
 impl Driver for Streams {
     fn stats(&self) -> StreamStats {
         self.0.clone()
