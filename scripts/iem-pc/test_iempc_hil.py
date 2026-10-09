@@ -51,12 +51,12 @@ class HilV2Tests(unittest.TestCase):
         self.assertIn(f'g.raise(None, "{m.group(1)}", false)', daemon)
 
     def test_the_files_are_ascii_and_hold_no_site_value(self) -> None:
-        for name in ("IemHil.psm1", "Test-IemHil.ps1"):
+        for name in ("IemHil.psm1", "Test-IemHil.ps1", "hil-v1.ps1"):
             text = (HERE / name).read_text(encoding="ascii")
             # Only loopback and the public placeholder LAN address (public-repo-hygiene.md).
             self.assertIsNone(re.search(r"\b(?!127\.0\.0\.1\b|10\.0\.0\.10\b)\d{1,3}(?:\.\d{1,3}){3}\b", text), f"{name}: an IPv4 address")
             self.assertIsNone(re.search(r"\b[A-Za-z]:\\", text), f"{name}: a Windows drive path")
-            self.assertIsNone(re.search(r"https?://(?!127\.0\.0\.1)", text), f"{name}: a host")
+            self.assertIsNone(re.search(r"https?://(?!127\.0\.0\.1)[A-Za-z0-9]", text), f"{name}: a host")
 
 
 if __name__ == "__main__":

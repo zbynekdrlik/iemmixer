@@ -78,6 +78,8 @@ try {
     }
     $ft = Test-IemHilFaultTime -Before (EngF $null) -After (EngF $null) -MaxUs 1000
     Assert (-not $ft.ok -and $ft.detail -like "*lacks 'last_fault_us'*") "hil-fault-time-refuses-null ($($ft.detail))"
+    $ft = Test-IemHilFaultTime -Before (EngF $null) -After (EngF 0) -MaxUs 1000
+    Assert (-not $ft.ok -and $ft.detail -ceq "the engine status lacks 'last_fault_us' (0)") "hil-fault-time-0-is-no-time ($($ft.detail))"
     $ft = Test-IemHilFaultTime -Before (EngF $null) -After ([pscustomobject]@{ frames = 32 }) -MaxUs 1000
     Assert (-not $ft.ok -and $ft.detail -ceq "the engine status lacks 'last_fault_us'") "hil-fault-time-refuses-a-missing-field ($($ft.detail))"
     $ft = Test-IemHilFaultTime -Before (EngF 412.5) -After (EngF 412.5) -MaxUs 1000
@@ -112,6 +114,12 @@ try {
     Assert ($null -eq $ta.own -and $ta.detail -like '*2 test alarms above 9*' -and @($ta.stale).Count -eq 0) "hil-own-test-alarm-refuses-two-above ($($ta.detail))"
     $ta = Get-IemHilTestAlarms -Reply ([pscustomobject]@{ alarms = @((Al 10 $T 'engine_stop')) }) -Above 9
     Assert ($null -eq $ta.own) 'hil-own-test-alarm-refuses-one-with-a-step'
+    # Alarms the guard raised between the id read and alarm-test (another alarm, the test
+    # text as an owner's question) sit above the mark next to this run's own: only the own
+    # one is a test alarm.
+    $race = @((Al 10 'EngineStop: the engine did not stop' 'engine_stop' $false $true), (Al 11 $T), (Al 12 $T $null $false $true), (Al 13 $T 'engine_stop'))
+    $ta = Get-IemHilTestAlarms -Reply ([pscustomobject]@{ alarms = $race }) -Above 9
+    Assert ($ta.own -eq 11 -and @($ta.stale).Count -eq 0) "hil-own-test-alarm-among-alarms-raised-meanwhile ($($ta.detail))"
     $ta = Get-IemHilTestAlarms -Reply ([pscustomobject]@{ ok = $true }) -Above 0
     Assert ($null -eq $ta.own -and $ta.detail -like "*lacks 'alarms'*") "hil-test-alarms-refuse-a-reply-without-alarms ($($ta.detail))"
 
@@ -127,6 +135,18 @@ try {
     Assert (-not $sr.ok -and $sr.detail -like '*change*') "hil-site-refuses-a-change-that-never-reached-it ($($sr.detail))"
     foreach ($bad in @(@('', $hc, $h0), @($h0, $hc, ''), @($h0, '', $h0))) {
         Assert (-not (Test-IemHilSiteRestored -Before $bad[0] -Changed $bad[1] -After $bad[2]).ok) "hil-site-refuses-an-unread-hash [$($bad[0].Length) $($bad[1].Length) $($bad[2].Length)]"
+    }
+    # Before any install-site: the revert file is the installed site byte for byte (it can
+    # restore it) and the change file is not (it changes something); else nothing is installed.
+    $hr = 'c' * 64
+    $fr = Test-IemHilF30Ready -Installed $h0 -Change $hc -Revert $h0
+    Assert ($fr.ok) "hil-f30-ready-a-revert-that-restores-and-a-change-that-changes ($($fr.detail))"
+    $fr = Test-IemHilF30Ready -Installed $h0 -Change $hc -Revert $hr
+    Assert (-not $fr.ok -and $fr.detail -like '*revert*') "hil-f30-ready-refuses-a-revert-that-is-not-the-installed-site ($($fr.detail))"
+    $fr = Test-IemHilF30Ready -Installed $h0 -Change $h0 -Revert $h0
+    Assert (-not $fr.ok -and $fr.detail -like '*change*') "hil-f30-ready-refuses-a-change-that-changes-nothing ($($fr.detail))"
+    foreach ($bad in @(@('', $hc, $h0), @($h0, '', $h0), @($h0, $hc, ''))) {
+        Assert (-not (Test-IemHilF30Ready -Installed $bad[0] -Change $bad[1] -Revert $bad[2]).ok) "hil-f30-ready-refuses-an-unread-file [$($bad[0].Length) $($bad[1].Length) $($bad[2].Length)]"
     }
 
     # HIL v2's inputs: the bounds, and F30's three files together.
@@ -190,9 +210,10 @@ function Get-Knob([string]$Name, $Default) {
     return $Default
 }
 # HIL v2 (#10). `alarms` (optional): the guard's alarms; every `alarm-test` adds the guard's
-# test alarm with the next id (delivered: it fails when refused, as a push that reached no
+# test alarm with the next id (delivered, `notified`, unless refused: a push that reached no
 # device), every `alarm-ack <id>` acknowledges one (refused for an id the guard does not
-# hold). Every reply carries them, as the guard's does.
+# hold). Every reply carries them, as the guard's does. `alarm_meanwhile` (optional): an
+# alarm text the guard raises (a step, an owner's question) right before each test alarm.
 $alarms = New-Object System.Collections.ArrayList
 $top = 0
 foreach ($a in @(Get-Knob 'alarms' @())) {
@@ -201,11 +222,17 @@ foreach ($a in @(Get-Knob 'alarms' @())) {
     [void]$alarms.Add($o)
     if ([int64]$a.id -gt $top) { $top = [int64]$a.id }
 }
+$meanwhile = [string](Get-Knob 'alarm_meanwhile' '')
+$pushed = -not (@($sc.refuse) -contains 'alarm-test')
 foreach ($l in $lines) {
     $l = [string]$l
     if ($l -ceq 'alarm-test') {
+        if ($meanwhile) {
+            $top++
+            [void]$alarms.Add([ordered]@{ id = $top; at = 1; step = 'engine_stop'; text = $meanwhile; acked = $false; notified = $true; owner_question = $true })
+        }
         $top++
-        [void]$alarms.Add([ordered]@{ id = $top; at = 1; step = $null; text = 'alarm test (iemmode alarm-test)'; acked = $false; notified = $true; owner_question = $false })
+        [void]$alarms.Add([ordered]@{ id = $top; at = 1; step = $null; text = 'alarm test (iemmode alarm-test)'; acked = $false; notified = $pushed; owner_question = $false })
     } elseif ($l.StartsWith('alarm-ack ')) {
         foreach ($o in $alarms) { if ([string]$o['id'] -ceq $l.Substring(10)) { $o['acked'] = $true } }
     }
@@ -214,6 +241,15 @@ $reopens = @($lines | Where-Object { $_ -eq 'force-reopen' }).Count
 $mode = 'dev'
 if ($sc.event_after -gt 0 -and $n -gt $sc.event_after) { $mode = 'event' }
 $ok = -not (@($sc.refuse) -contains $cmd)
+# `refuse_calls` (optional): whole calls refused ("install-site <path>"). `event_on`
+# (optional): once a call starting with it was made the guard is in event and refuses
+# every call but status.
+if (@(Get-Knob 'refuse_calls' @()) -contains ($args -join ' ')) { $ok = $false }
+$eventOn = [string](Get-Knob 'event_on' '')
+if ($eventOn -and @($lines | Where-Object { ([string]$_).StartsWith($eventOn) }).Count -gt 0) {
+    $mode = 'event'
+    if ($cmd -ne 'status') { $ok = $false }
+}
 $ackId = ''
 if ($args.Count -gt 1) { $ackId = [string]$args[1] }
 if ($cmd -eq 'alarm-ack' -and @($alarms | Where-Object { [string]$_['id'] -ceq $ackId }).Count -ne 1) { $ok = $false }
@@ -394,6 +430,11 @@ exit 1
     # finds it stale), and no other alarm either.
     $h15 = Invoke-HilRun (Scenario @{ alarms = $al; refuse = @('alarm-test') })
     Assert ((CheckFailed $h15.result 'alarm-push') -and @($h15.calls | Where-Object { $_ -like 'alarm-ack *' }).Count -eq 0 -and $null -eq (CheckOf $h15.result 'alarm-ack')) "hil-run-acks-nothing-when-the-push-failed ($($h15.calls -join ' | '))"
+    # The guard raises another alarm (the test text as an owner's question) between the id
+    # read and the test alarm: it sits above the mark too (5), the own one is 6; never 5.
+    $h28 = Invoke-HilRun (Scenario @{ alarms = $al; alarm_meanwhile = $T })
+    $acks = @($h28.calls | Where-Object { $_ -like 'alarm-ack *' }) -join ','
+    Assert ($acks -ceq 'alarm-ack 6,alarm-ack 3' -and (CheckOk $h28.result 'alarm-ack')) "hil-run-an-alarm-raised-meanwhile-is-never-acknowledged ($acks)"
 
     # fault-time: a respawned engine whose guard kept no fault time, or the time an earlier
     # fault left (unchanged by this injection), fails fault-time alone; panic still passes.
@@ -425,9 +466,25 @@ exit 1
     $f = CheckOf $h20.result 'f30'
     Assert ($f.ok -and $f.numbers.restored -and [IO.File]::ReadAllText($installed) -ceq $orig) "hil-run-f30-restores-the-installed-site ($($f.detail))"
     Assert (([array]::IndexOf($h20.calls, "install-site $change") + 1) -eq [array]::IndexOf($h20.calls, "install-site $revert")) "hil-run-f30-changes-then-reverts ($($h20.calls -join ' | '))"
+    # A revert file that is not the installed site could never restore it: nothing is
+    # installed, the installed site stays as it was (review of the lane, MAJOR 1).
     [IO.File]::WriteAllText($installed, $orig)
     $h21 = Invoke-HilRun (Scenario @{ site = $installed }) 'dev' '0.2' @('-SiteChange', $change, '-SiteRevert', $other, '-SiteInstalled', $installed)
-    Assert ((CheckFailed $h21.result 'f30') -and (CheckDetail $h21.result 'f30') -like '*differs*') "hil-run-f30-a-revert-that-differs-fails ($(CheckDetail $h21.result 'f30'))"
+    Assert ((CheckFailed $h21.result 'f30') -and (CheckDetail $h21.result 'f30') -like '*revert*' -and @($h21.calls | Where-Object { $_ -like 'install-site *' }).Count -eq 0 -and [IO.File]::ReadAllText($installed) -ceq $orig) "hil-run-f30-a-revert-that-is-not-the-installed-site-installs-nothing ($(CheckDetail $h21.result 'f30'))"
+    # A refused revert: the installed site after it differs from before, f30 fails.
+    [IO.File]::WriteAllText($installed, $orig)
+    $h25 = Invoke-HilRun (Scenario @{ site = $installed; refuse_calls = @("install-site $revert") }) 'dev' '0.2' $f30
+    Assert ((CheckFailed $h25.result 'f30') -and (CheckDetail $h25.result 'f30') -like '*differs*') "hil-run-f30-a-revert-that-differs-fails ($(CheckDetail $h25.result 'f30'))"
+    # A refused change: the revert still runs, f30 fails (review of the lane, MINOR 4).
+    [IO.File]::WriteAllText($installed, $orig)
+    $h26 = Invoke-HilRun (Scenario @{ site = $installed; refuse_calls = @("install-site $change") }) 'dev' '0.2' $f30
+    Assert ((CheckFailed $h26.result 'f30') -and ($h26.calls -contains "install-site $revert") -and [IO.File]::ReadAllText($installed) -ceq $orig) "hil-run-f30-a-refused-change-still-reverts ($(CheckDetail $h26.result 'f30'))"
+    # The guard leaves dev at the revert, after the change was installed: the job is
+    # cancelled and its private `why` says the installed site may still hold the change
+    # (review of the lane, MINOR 2); the public summary stays a fixed phrase.
+    [IO.File]::WriteAllText($installed, $orig)
+    $h27 = Invoke-HilRun (Scenario @{ site = $installed; event_on = "install-site $revert" }) 'dev' '0.2' $f30
+    Assert ($h27.exit -eq 0 -and $h27.result.conclusion -ceq 'cancelled' -and $h27.result.why -like '*may still hold the change*' -and $h27.result.summary -ceq 'HIL v1 cancelled: the guard left dev') "hil-run-f30-a-cancelled-revert-is-named-in-why ($($h27.result.why))"
     # The change never reaches the installed site (a wrong -SiteInstalled): it proves nothing.
     [IO.File]::WriteAllText($installed, $orig)
     $h22 = Invoke-HilRun (Scenario @{}) 'dev' '0.2' $f30
