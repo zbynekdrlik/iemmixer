@@ -442,9 +442,13 @@ class RunningGuardCases:
         err = self.refused_before_any_call("a live run dispatched in this dev entry may still run")
         self.assertIn(f"check {ip.state_dir() / 'live.json'} by hand", err)
         self.write_runs([])
-        for bad in ({"at": "later"}, {"entry": None}, {"hours": "8"}):
+        for bad in ({"at": "later"}, {"at": "2026-10-09T10:00:00"}, {"entry": None}, {"hours": "8"}):
             self.write_soaks([{**soak_record(), **bad}])
-            self.refused_before_any_call(f"{self.HEAD}: a soak dispatched in this dev entry may still run", bad)
+            err = self.refused_before_any_call(f"{self.HEAD}: a soak dispatched in this dev entry may still run", bad)
+            self.assertIn(f"its time, hours or dev entry cannot be read: check {ip.state_dir() / 'soak.json'} by hand",
+                          err, bad)
+        self.write_soaks([soak_record()])
+        self.assertNotIn("cannot be read", self.refused_before_any_call("a soak dispatched in this dev entry"))
         self.write_soaks([])
         for name, text in (("live.json", "not json"), ("soak.json", json.dumps({"soaks": {"sha": SHA}}))):
             (ip.state_dir() / name).write_text(text, encoding="utf-8")
