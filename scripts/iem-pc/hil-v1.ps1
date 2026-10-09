@@ -69,7 +69,7 @@ param(
     [string]$SiteRevert = '',
     [string]$SiteInstalled = '',
     # S1a's reopen, about 104 ms at 64 samples, doubled; tighten after the first HIL v2 run (Task 33).
-    [double]$ReopenMaxMs = 200,
+    [double]$ReopenMaxMs = 150,
     [double]$FaultMaxUs = 1000
 )
 Set-StrictMode -Version Latest

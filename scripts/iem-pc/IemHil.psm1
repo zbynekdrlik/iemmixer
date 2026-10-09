@@ -229,7 +229,7 @@ function Get-IemHilFileSha256 {
 
 function Test-IemHilV2Inputs {
     # HIL v2's own inputs (hil.yml passes F30's three files, Task 32). Returns the problems.
-    param([double]$ReopenMaxMs = 200, [double]$FaultMaxUs = 1000, [string]$SiteChange = '', [string]$SiteRevert = '',
+    param([double]$ReopenMaxMs = 150, [double]$FaultMaxUs = 1000, [string]$SiteChange = '', [string]$SiteRevert = '',
           [string]$SiteInstalled = '')
     $p = @()
     if ([double]::IsNaN($ReopenMaxMs) -or [double]::IsInfinity($ReopenMaxMs) -or $ReopenMaxMs -le 0) { $p += 'ReopenMaxMs: a bound of more than 0 ms' }
