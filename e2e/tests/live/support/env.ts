@@ -225,13 +225,28 @@ async function api(
   path: string,
   data?: unknown,
 ): Promise<{ status: number; body: unknown }> {
-  if (!/^\/[^?#]*$/.test(path)) throw new Error(`api${method === "GET" ? "Get" : "Post"} takes a path without a query`);
-  const { baseURL } = live();
+  if (!/^\/[^?#]*$/.test(path)) throw new Error(`${method} takes a path without a query`);
+  return apiAt(request, { origin: live().baseURL, token: authOf(who).token }, method, path, data);
+}
+
+/**
+ * `method` `path` at `at.origin` with `at.token`; the request behind
+ * `apiGet` / `apiPost`, given its origin and token (the mock tests' seam).
+ * A request that gets no answer fails with the method and the path only:
+ * Playwright's own error text lists the URL and the request's headers.
+ */
+export async function apiAt(
+  request: Pick<APIRequestContext, "fetch">,
+  at: { origin: string; token: string },
+  method: "GET" | "POST",
+  path: string,
+  data?: unknown,
+): Promise<{ status: number; body: unknown }> {
   let response: APIResponse;
   try {
-    response = await request.fetch(new URL(path, baseURL).toString(), {
+    response = await request.fetch(new URL(path, at.origin).toString(), {
       method,
-      headers: { Authorization: `Bearer ${authOf(who).token}` },
+      headers: { Authorization: `Bearer ${at.token}` },
       data,
       timeout: 15_000,
       maxRedirects: 0,

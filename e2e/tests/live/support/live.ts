@@ -1,13 +1,15 @@
-import { test as base, expect } from "../../support/fixtures";
+import { test as base, expect, collectConsole } from "../../support/fixtures";
 import { BurstWatch } from "./burst";
+import { redacted } from "./console";
 import { Desk } from "./desk";
 import { relaySockets, type Relay } from "./relay";
 
-// The live specs' `test`: the zero-console fixture of every spec, plus the
-// burst watch, the socket relay and the desk as fixtures, so their teardown
-// runs even after a timeout (a test body's `finally` does not): the watch's
-// socket closes, the relay's rules are checked after every test, and the
-// desk puts back any change a timed-out body left in place.
+// The live specs' `test`: the zero-console fixture of every spec (its lines
+// redacted: a console line can name the host or a socket URL with its token,
+// P6), plus the burst watch, the socket relay and the desk as fixtures, so
+// their teardown runs even after a timeout (a test body's `finally` does
+// not): the watch's socket closes, the relay's rules are checked after every
+// test, and the desk puts back any change a timed-out body left in place.
 
 type LiveFixtures = {
   /** `/ws/audio` through the relay gains `&hil=1` (the listen probe); `test.use({ hil: true })`. */
@@ -24,6 +26,12 @@ type LiveFixtures = {
 
 export const test = base.extend<LiveFixtures>({
   hil: [false, { option: true }],
+  // An override keeps the base's options (automatic, per test).
+  consoleGuard: async ({ page, allowedConsole }, use) => {
+    const problems = collectConsole(page, allowedConsole, redacted);
+    await use();
+    expect(problems, "browser console must stay clean").toEqual([]);
+  },
   // Playwright reads a fixture's dependencies from its first argument: none here.
   startedAt: [async ({}, use) => use(Date.now()), { auto: true }],
   watch: async ({ request }, use) => {

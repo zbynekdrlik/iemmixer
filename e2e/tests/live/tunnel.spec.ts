@@ -1,7 +1,7 @@
 import type { APIRequestContext } from "@playwright/test";
 import { test, expect, type Page } from "./support/live";
 import type { Relay } from "./support/relay";
-import { apiGet, live, openLive, type Who } from "./support/env";
+import { apiGet, expectBuild, live, openLive, type Who } from "./support/env";
 
 // The tunnel status on the real PC (S7, #10; rows 735 and 736, reaperiem#202):
 // the page comes through the band's public host, so through the real
@@ -20,8 +20,13 @@ const FRAME_MS = 10_000;
 
 type TunnelStatus = { state?: unknown; ready_connections?: unknown; since_secs?: unknown; last_restart_ok?: unknown };
 
-/** GET /api/tunnel through the public host, as `who`; it must answer 200 with a status. */
+/**
+ * GET /api/tunnel through the public host, as `who`; it must answer 200 with
+ * a status. Only from the run's build: after "ide event" the predecessor
+ * answers at the same address, and the failure then names that hop.
+ */
 async function tunnelStatus(request: APIRequestContext, who: Who): Promise<TunnelStatus> {
+  await expectBuild(request);
   const { status, body } = await apiGet(request, who, "/api/tunnel");
   expect(status, "GET /api/tunnel").toBe(200);
   expect(typeof body === "object" && body !== null, "GET /api/tunnel answers a status").toBe(true);
@@ -46,15 +51,15 @@ function tunnelFrames(relay: Relay, page: string): TunnelStatus[] {
 
 /** Waits until the page's socket carried at least one `TunnelStatus`; returns them all. */
 async function framesArrived(relay: Relay, page: string): Promise<TunnelStatus[]> {
-  await expect
-    .poll(
-      () => {
-        relay.check();
-        return tunnelFrames(relay, page).length;
-      },
-      { timeout: FRAME_MS, message: "TunnelStatus frames on the page's socket" },
-    )
-    .toBeGreaterThan(0);
+  try {
+    await expect
+      .poll(() => tunnelFrames(relay, page).length, { timeout: FRAME_MS, message: "TunnelStatus frames on the page's socket" })
+      .toBeGreaterThan(0);
+  } catch (e) {
+    // A broken socket is the reason no frame came.
+    relay.check();
+    throw e;
+  }
   return tunnelFrames(relay, page);
 }
 

@@ -4,8 +4,9 @@ import { test, expect } from "./support/fixtures";
 import { BurstWatch } from "./live/support/burst";
 import { Desk, LiveMixer, RESTORE_MS, type Cmd } from "./live/support/desk";
 import { SILENT_PEAK, continuity, dbOf, median, spread, talkbackLevel } from "./live/support/series";
-import { runMarker } from "./live/support/env";
-import { endpointOf, isPostTo, redacted } from "./live/support/push";
+import { apiAt, runMarker } from "./live/support/env";
+import { guardConsole, redacted } from "./live/support/console";
+import { PushLedger, bodyOf, endpointOf, isPostTo, postedEndpoint } from "./live/support/push";
 
 // The live specs' support (S7, #10), run in the mock E2E job: the live specs
 // themselves run only from the ops live run, against the real PC. The burst
@@ -622,7 +623,7 @@ test("the run's marker is built from the run id and attempt, and a refusal names
   );
 });
 
-test("a push body's endpoint is read only as an https:// URL", () => {
+test("a push body's endpoint: any non-empty string the server stores, and an https:// URL for the browser's", () => {
   const endpoint = "https://push.example.invalid/send/zyxqwvn";
   expect(endpointOf({ endpoint, keys: { p256dh: "k", auth: "a" } })).toBe(endpoint);
   expect(endpointOf({ endpoint })).toBe(endpoint);
@@ -632,6 +633,99 @@ test("a push body's endpoint is read only as an https:// URL", () => {
   expect(endpointOf({})).toBeNull();
   expect(endpointOf(null)).toBeNull();
   expect(endpointOf(endpoint)).toBeNull();
+  // What the server stores is any non-empty endpoint (routes.rs push_subscribe), so cleanup reads it so.
+  expect(postedEndpoint({ endpoint: "not a url" })).toBe("not a url");
+  expect(postedEndpoint({ endpoint: "http://push.example.invalid/x" })).toBe("http://push.example.invalid/x");
+  expect(postedEndpoint({ endpoint: "" })).toBeNull();
+  expect(postedEndpoint({ endpoint: 7 })).toBeNull();
+  expect(postedEndpoint(null)).toBeNull();
+});
+
+/** A request stand-in: a method, a URL and a raw body. */
+function sentReq(method: string, url: string, body: string | null) {
+  return { method: () => method, url: () => url, postData: () => body };
+}
+
+test("a request's body is read without throwing, whatever it holds", () => {
+  expect(bodyOf(sentReq("POST", "https://mixer.example.org/a", '{"endpoint":"e"}'))).toEqual({ endpoint: "e" });
+  expect(bodyOf(sentReq("POST", "https://mixer.example.org/a", "{not json zyxqwvn"))).toBeNull();
+  expect(bodyOf(sentReq("GET", "https://mixer.example.org/a", null))).toBeNull();
+});
+
+test("the ledger keeps every posted endpoint until an unsubscribe of it answers 200", () => {
+  const ledger = new PushLedger();
+  const sub = (endpoint: string) => sentReq("POST", "https://mixer.example.org/api/push/subscribe", JSON.stringify({ endpoint }));
+  const unsub = (endpoint: string, status: number) => ({
+    status: () => status,
+    request: () => sentReq("POST", "https://mixer.example.org/api/push/unsubscribe", JSON.stringify({ endpoint })),
+  });
+  ledger.sent(sub("https://push.example.invalid/a"));
+  // A body that is not JSON, a GET, another route: nothing recorded, nothing thrown.
+  ledger.sent(sentReq("POST", "https://mixer.example.org/api/push/subscribe", "{zyxqwvn"));
+  ledger.sent(sentReq("GET", "https://mixer.example.org/api/push/subscribe", '{"endpoint":"x"}'));
+  ledger.sent(sentReq("POST", "https://mixer.example.org/api/client-error", '{"endpoint":"y"}'));
+  expect(ledger.pending()).toEqual(["https://push.example.invalid/a"]);
+  // A refused unsubscribe leaves it on the server.
+  ledger.answered(unsub("https://push.example.invalid/a", 403));
+  expect(ledger.pending()).toEqual(["https://push.example.invalid/a"]);
+  // A re-subscribe (the page drops the old one in the browser only) adds the new one.
+  ledger.sent(sub("https://push.example.invalid/b"));
+  ledger.answered(unsub("https://push.example.invalid/b", 200));
+  expect(ledger.pending()).toEqual(["https://push.example.invalid/a"]);
+  // A 200 subscribe answer is no revoke.
+  ledger.answered({ status: () => 200, request: () => sub("https://push.example.invalid/a") });
+  expect(ledger.pending()).toEqual(["https://push.example.invalid/a"]);
+  ledger.answered(unsub("https://push.example.invalid/a", 200));
+  expect(ledger.pending()).toEqual([]);
+});
+
+test("a request that gets no answer fails with the method and the path, never the URL or the token", async () => {
+  // A stand-in, not a credential: the test checks it never reaches the error.
+  const standIn = ["zyxqwvn", "stand", "in"].join(".");
+  const at = { origin: "https://mixer.example.org", token: standIn };
+  let seen: { url: string; method?: string; auth?: string } | null = null;
+  const failing = {
+    fetch: async (url: string, options?: { method?: string; headers?: Record<string, string> }) => {
+      seen = { url, method: options?.method, auth: options?.headers?.Authorization };
+      throw new Error(`apiRequestContext.fetch: ${url} Authorization: Bearer ${standIn}`);
+    },
+  } as unknown as Parameters<typeof apiAt>[0];
+  let message = "";
+  try {
+    await apiAt(failing, at, "POST", "/api/push/unsubscribe", { endpoint: "https://push.example.invalid/zyxqwvn" });
+  } catch (e) {
+    message = (e as Error).message;
+  }
+  expect(message).toBe("POST /api/push/unsubscribe got no answer");
+  expect(seen).toEqual({
+    url: "https://mixer.example.org/api/push/unsubscribe",
+    method: "POST",
+    auth: `Bearer ${standIn}`,
+  });
+});
+
+test("the live console guard keeps errors, warnings and page errors with their URLs redacted", async ({ browser }) => {
+  const context = await browser.newContext();
+  try {
+    const page = await context.newPage();
+    const problems = guardConsole(page);
+    await page.evaluate(() => {
+      console.log("plain log https://mixer.example.org/x");
+      console.warn("[push] failed for wss://mixer.example.org/ws/engineer?token=zyxqwvn");
+      console.error("boom https://push.example.invalid/send/zyxqwvn");
+      setTimeout(() => {
+        throw new Error("thrown at https://mixer.example.org/engineer?token=zyxqwvn");
+      }, 0);
+    });
+    await expect.poll(() => problems.length).toBe(3);
+    expect(problems).toEqual([
+      "[warning] [push] failed for <url>",
+      "[error] boom <url>",
+      "[pageerror] thrown at <url>",
+    ]);
+  } finally {
+    await context.close();
+  }
 });
 
 test("a push request is a POST to the route's path, whatever its host or query", () => {
