@@ -35,6 +35,7 @@ use std::time::{Duration, Instant};
 use jsonwebtoken::{EncodingKey, Header};
 use serde::{Deserialize, Serialize};
 
+pub mod mint;
 pub mod net;
 pub mod tally;
 

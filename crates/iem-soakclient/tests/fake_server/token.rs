@@ -3,7 +3,9 @@
 //! engineer's token itself and never logs in. The build check still comes
 //! first; an unreadable secret sends nothing at all. The fake takes a token
 //! only when it verifies with the script's secret, as the server's
-//! `extract_claims` does.
+//! `extract_claims` does. `iem-soakclient token` (S7 plan Task 23) mints
+//! the live run's tokens with the same secret: the binary's own test is
+//! here, its decisions are `mint.rs`'s.
 
 use std::path::Path;
 
@@ -200,4 +202,115 @@ fn the_binary_takes_the_secret_file_or_the_pin_never_both_nor_neither() {
         );
     }
     assert!(fake.seen().is_empty());
+}
+
+/// `iem-soakclient token` with `argv` after the subcommand (no PIN in its
+/// environment).
+fn mint(argv: &[&str]) -> Output {
+    let mut all = vec!["token".to_owned()];
+    all.extend(argv.iter().map(|a| (*a).to_owned()));
+    exe(all, None)
+}
+
+#[test]
+fn the_token_subcommand_writes_the_token_to_its_file_and_prints_only_a_fixed_word() {
+    let (dir, file) = secret_file(SECRET);
+    let secret = file.to_str().unwrap();
+    let out = |name: &str| dir.path().join(name);
+    let member_out = out("member.token");
+    let engineer_out = out("engineer.token");
+    let member = mint(&[
+        "--jwt-secret-file",
+        secret,
+        "--sub",
+        "member9",
+        "--seconds",
+        "3600",
+        "--out",
+        member_out.to_str().unwrap(),
+    ]);
+    let engineer = mint(&[
+        "--jwt-secret-file",
+        secret,
+        "--sub",
+        "engineer",
+        "--engineer",
+        "--seconds",
+        "60",
+        "--out",
+        engineer_out.to_str().unwrap(),
+    ]);
+    for (done, path, sub, engineer, seconds) in [
+        (&member, &member_out, "member9", false, 3_600),
+        (&engineer, &engineer_out, "engineer", true, 60),
+    ] {
+        let stdout = String::from_utf8_lossy(&done.stdout);
+        let stderr = String::from_utf8_lossy(&done.stderr);
+        assert_eq!(done.status.code(), Some(0), "{stderr}");
+        assert!(stderr.is_empty(), "{stderr}");
+        assert_eq!(stdout, "token-written\n");
+        // The file holds the token alone; the server reads it as `sub`.
+        let token = std::fs::read_to_string(path).unwrap();
+        let claims = claims(&token, SECRET).expect("the server's reading of it");
+        assert_eq!((claims.sub.as_str(), claims.engineer), (sub, engineer));
+        assert_eq!(claims.exp - claims.iat, seconds);
+        // No part of it reaches stdout or stderr.
+        for part in token.split('.') {
+            assert!(!stdout.contains(part) && !stderr.contains(part));
+        }
+    }
+    // A member with --engineer: 2, nothing written, no value printed.
+    let refused_out = out("refused.token");
+    let refused = mint(&[
+        "--jwt-secret-file",
+        secret,
+        "--sub",
+        "member9",
+        "--engineer",
+        "--seconds",
+        "60",
+        "--out",
+        refused_out.to_str().unwrap(),
+    ]);
+    assert_eq!(refused.status.code(), Some(2));
+    assert!(refused.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(stderr.starts_with("iem-soakclient token: "), "{stderr}");
+    for value in ["member9", secret, refused_out.to_str().unwrap()] {
+        assert!(!stderr.contains(value), "{stderr}");
+    }
+    assert!(!refused_out.exists());
+    // A missing secret: 1, the code alone, no file. An existing file: 1,
+    // the code alone, the file as it was.
+    let missing = dir.path().join("missing");
+    let unread_out = out("unread.token");
+    let unread = mint(&[
+        "--jwt-secret-file",
+        missing.to_str().unwrap(),
+        "--sub",
+        "member9",
+        "--seconds",
+        "60",
+        "--out",
+        unread_out.to_str().unwrap(),
+    ]);
+    let before = std::fs::read(&member_out).unwrap();
+    let again = mint(&[
+        "--jwt-secret-file",
+        secret,
+        "--sub",
+        "member9",
+        "--seconds",
+        "60",
+        "--out",
+        member_out.to_str().unwrap(),
+    ]);
+    for (failed, code) in [(&unread, "secret-unreadable"), (&again, "token-unwritable")] {
+        assert_eq!(failed.status.code(), Some(1));
+        assert!(failed.stdout.is_empty());
+        let stderr = String::from_utf8_lossy(&failed.stderr);
+        assert_eq!(stderr.trim_end(), format!("iem-soakclient: {code}"));
+    }
+    assert!(!unread_out.exists());
+    assert_eq!(std::fs::read(&member_out).unwrap(), before);
 }

@@ -1,0 +1,354 @@
+//! `iem-soakclient token` (S7 plan Task 23; the #10 decision of 2026-10-08:
+//! no band PIN in GitHub for the live run either). On the server's PC the
+//! ops `live.yml` job `pc-begin` mints the run's engineer token and one
+//! member token with the server's own JWT secret (`--jwt-secret-file`, read
+//! as [`read_secret`] reads it for the soak), valid for the run's length,
+//! and hands them to the browser job. Nothing logs in.
+//!
+//! The token goes only to the `--out` file: a new file (an existing one is
+//! never written through or replaced), owner-only where the platform allows
+//! it. Stdout gets the fixed word [`WRITTEN`]; stderr a usage message
+//! naming flags, or a fixed code ([`MintError::code`]). No token, secret,
+//! path or member id is ever printed (P6).
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::tests::{SECRET, as_server, unix_now};
+    use crate::{ENGINEER, TOKEN_MARGIN, engineer_token};
+
+    fn parse(list: &[&str]) -> Result<TokenArgs, String> {
+        let list: Vec<String> = list.iter().map(|s| (*s).to_owned()).collect();
+        parse_args(&list)
+    }
+
+    /// A member's arguments, with `extra` appended.
+    fn member(extra: &[&str]) -> Result<TokenArgs, String> {
+        let mut list = vec![
+            "--jwt-secret-file",
+            "secrets/jwt_secret",
+            "--sub",
+            "member9",
+            "--seconds",
+            "3600",
+            "--out",
+            "member.token",
+        ];
+        list.extend_from_slice(extra);
+        parse(&list)
+    }
+
+    /// The engineer's arguments, with `extra` appended.
+    fn engineer(extra: &[&str]) -> Result<TokenArgs, String> {
+        let mut list = vec![
+            "--jwt-secret-file",
+            "secrets/jwt_secret",
+            "--sub",
+            "engineer",
+            "--seconds",
+            "3600",
+            "--out",
+            "engineer.token",
+        ];
+        list.extend_from_slice(extra);
+        parse(&list)
+    }
+
+    fn secret() -> Secret {
+        Secret::from_text(SECRET).unwrap()
+    }
+
+    #[test]
+    fn a_member_token_reads_back_as_that_member_and_not_engineer() {
+        let now = unix_now();
+        let token = token(&secret(), "member9", false, now, 3_600).unwrap();
+        let claims = as_server(&token, SECRET).expect("the server reads it");
+        assert_eq!(claims.sub, "member9");
+        assert!(!claims.engineer);
+        assert_eq!(claims.iat, now);
+        assert_eq!(claims.exp, now + 3_600);
+        // HS256, the server's `Header::default()`; another secret is
+        // refused, and so is a token whose time is over.
+        let header = jsonwebtoken::decode_header(&token).unwrap();
+        assert_eq!(header.alg, jsonwebtoken::Algorithm::HS256);
+        assert!(as_server(&token, "another-synthetic-secret").is_none());
+        let old = token_at(now - 7_200, 60);
+        assert!(as_server(&old, SECRET).is_none());
+        // The browser puts it into a socket's query as it is.
+        let url_safe = |b: u8| b.is_ascii_alphanumeric() || b"-_.".contains(&b);
+        assert!(token.bytes().all(url_safe), "{token}");
+    }
+
+    fn token_at(now: u64, seconds: u64) -> String {
+        token(&secret(), "member9", false, now, seconds).unwrap()
+    }
+
+    #[test]
+    fn an_engineer_token_reads_back_as_the_engineer() {
+        let now = unix_now();
+        let token = token(&secret(), ENGINEER, true, now, 3_600).unwrap();
+        let claims = as_server(&token, SECRET).expect("the server reads it");
+        assert_eq!(claims.sub, "engineer");
+        assert!(claims.engineer);
+        assert_eq!(claims.iat, now);
+        assert_eq!(claims.exp, now + 3_600);
+        // The soak's own engineer token is this one, with the margin on
+        // top of the run's seconds: one signing path.
+        assert_eq!(
+            engineer_token(&secret(), now, 60),
+            mint_engineer(now, 60 + TOKEN_MARGIN)
+        );
+    }
+
+    fn mint_engineer(now: u64, seconds: u64) -> Result<String, crate::Reason> {
+        token(&secret(), ENGINEER, true, now, seconds)
+    }
+
+    #[test]
+    fn the_arguments_and_their_flags() {
+        assert_eq!(
+            member(&[]),
+            Ok(TokenArgs {
+                jwt_secret_file: PathBuf::from("secrets/jwt_secret"),
+                sub: "member9".to_owned(),
+                engineer: false,
+                seconds: 3_600,
+                out: PathBuf::from("member.token"),
+            })
+        );
+        let engineer = engineer(&["--engineer"]).unwrap();
+        assert_eq!(
+            (engineer.sub.as_str(), engineer.engineer),
+            ("engineer", true)
+        );
+        // The flag's place does not matter.
+        let first = parse(&[
+            "--engineer",
+            "--sub",
+            "engineer",
+            "--jwt-secret-file",
+            "s",
+            "--seconds",
+            "60",
+            "--out",
+            "o",
+        ]);
+        assert!(first.unwrap().engineer);
+    }
+
+    #[test]
+    fn the_arguments_refuse_a_member_with_engineer_and_engineer_without_it() {
+        let with = member(&["--engineer"]).unwrap_err();
+        let without = engineer(&[]).unwrap_err();
+        assert!(with.contains("--engineer"), "{with}");
+        assert!(without.contains("--engineer"), "{without}");
+        assert_ne!(with, without);
+        // The member's id is never repeated.
+        assert!(!with.contains("member9"), "{with}");
+        // Each alone is fine.
+        assert!(!member(&[]).unwrap().engineer);
+        assert!(engineer(&["--engineer"]).unwrap().engineer);
+    }
+
+    #[test]
+    fn seconds_are_60_to_7200() {
+        let seconds = |n: &str| {
+            parse(&[
+                "--jwt-secret-file",
+                "s",
+                "--sub",
+                "member9",
+                "--seconds",
+                n,
+                "--out",
+                "o",
+            ])
+            .map(|a| a.seconds)
+        };
+        assert_eq!((MIN_SECONDS, MAX_SECONDS), (60, 7_200));
+        assert_eq!(seconds("60"), Ok(60));
+        assert_eq!(seconds("7200"), Ok(7_200));
+        for bad in ["59", "7201", "0", "", "-60", "60.5", "1e3", "abc"] {
+            let e = seconds(bad).unwrap_err();
+            assert!(
+                e.contains("--seconds") && e.contains("60 to 7200"),
+                "{bad:?}: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bad_sub_is_a_usage_error_naming_no_value() {
+        let long = "z".repeat(65);
+        let bad = [
+            "zyxq wvq",
+            "zyxq/wvq",
+            "zyxqwvq.",
+            "zyxq:wvq",
+            "\u{10f}qxwzy",
+            long.as_str(),
+        ];
+        for sub in bad {
+            let e = parse(&[
+                "--jwt-secret-file",
+                "s",
+                "--sub",
+                sub,
+                "--seconds",
+                "60",
+                "--out",
+                "o",
+            ])
+            .unwrap_err();
+            assert!(e.contains("--sub"), "{e}");
+            assert!(!e.contains(sub), "{e}");
+        }
+        // 64 characters is still an id.
+        let longest = "z".repeat(64);
+        let ok = parse(&[
+            "--jwt-secret-file",
+            "s",
+            "--sub",
+            &longest,
+            "--seconds",
+            "60",
+            "--out",
+            "o",
+        ]);
+        assert_eq!(ok.map(|a| a.sub), Ok(longest));
+    }
+
+    #[test]
+    fn every_other_bad_argument_is_a_usage_error_naming_no_value() {
+        let all = [
+            "--jwt-secret-file",
+            "zyxsecretpath",
+            "--sub",
+            "member9",
+            "--seconds",
+            "60",
+            "--out",
+            "zyxoutpath",
+        ];
+        // Each value flag is required and needs a value.
+        for i in (0..all.len()).step_by(2) {
+            let flag = all[i];
+            let mut without = all.to_vec();
+            without.remove(i);
+            without.remove(i);
+            let e = parse(&without).unwrap_err();
+            assert!(e.contains(flag), "{flag}: {e}");
+            // Its value gone: the next flag (or the end) follows it.
+            let mut bare = all.to_vec();
+            bare.remove(i + 1);
+            let e = parse(&bare).unwrap_err();
+            assert!(e.contains(flag) && e.contains("value"), "{flag}: {e}");
+        }
+        for (flag, value) in [("--jwt-secret-file", ""), ("--out", "")] {
+            let mut empty = all.to_vec();
+            let at = empty.iter().position(|a| *a == flag).unwrap();
+            empty[at + 1] = value;
+            assert!(parse(&empty).unwrap_err().contains(flag), "{flag}");
+        }
+        // A flag's value never starts with `--`.
+        let mut swallowed = all.to_vec();
+        swallowed[1] = "--sub";
+        assert!(parse(&swallowed).is_err());
+        // Twice, unknown, a PIN: refused, and no value is repeated.
+        let mut errors = Vec::new();
+        for extra in [
+            &["--sub", "member8"][..],
+            &["--engineer", "--engineer"][..],
+            &["--zyxflag"][..],
+            &["--pin", "1234"][..],
+            &["--member", "member9"][..],
+        ] {
+            let mut list = all.to_vec();
+            list.extend_from_slice(extra);
+            errors.push(parse(&list).unwrap_err());
+        }
+        for e in &errors {
+            for value in ["zyxsecretpath", "zyxoutpath", "member8", "zyxflag", "1234"] {
+                assert!(!e.contains(value), "{e}");
+            }
+        }
+        assert!(errors[0].contains("--sub") && errors[0].contains("twice"));
+        assert!(errors[1].contains("--engineer") && errors[1].contains("twice"));
+    }
+
+    #[test]
+    fn the_arguments_print_no_member_and_no_path() {
+        let args = member(&[]).unwrap();
+        assert_eq!(
+            format!("{args:?}"),
+            "TokenArgs { engineer: false, seconds: 3600, .. }"
+        );
+    }
+
+    #[test]
+    fn the_token_goes_only_to_the_out_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret_file = dir.path().join("jwt_secret");
+        std::fs::write(&secret_file, format!("{SECRET}\n")).unwrap();
+        let args = |sub: &str, engineer: bool, out: &str| TokenArgs {
+            jwt_secret_file: secret_file.clone(),
+            sub: sub.to_owned(),
+            engineer,
+            seconds: 3_600,
+            out: dir.path().join(out),
+        };
+        let now = unix_now();
+        // The file holds the token alone, the same one `token` signs.
+        let member = args("member9", false, "member.token");
+        assert_eq!(run(&member, now), Ok(()));
+        let written = std::fs::read_to_string(&member.out).unwrap();
+        assert_eq!(
+            Ok(written.clone()),
+            token(&secret(), "member9", false, now, 3_600)
+        );
+        let claims = as_server(&written, SECRET).unwrap();
+        assert_eq!((claims.sub.as_str(), claims.engineer), ("member9", false));
+        let engineer = args(ENGINEER, true, "engineer.token");
+        assert_eq!(run(&engineer, now), Ok(()));
+        let claims = as_server(&std::fs::read_to_string(&engineer.out).unwrap(), SECRET);
+        assert_eq!(claims.map(|c| c.engineer), Some(true));
+        // Owner-only where the platform has modes.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&member.out).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        // An existing file is never written through or replaced.
+        assert_eq!(run(&member, now + 1), Err(MintError::TokenUnwritable));
+        assert_eq!(std::fs::read_to_string(&member.out).unwrap(), written);
+        // No directory for it: unwritable, nothing made.
+        let nowhere = args("member9", false, "missing/member.token");
+        assert_eq!(run(&nowhere, now), Err(MintError::TokenUnwritable));
+        assert!(!dir.path().join("missing").exists());
+        // An unreadable secret: no file at all.
+        let unread = TokenArgs {
+            jwt_secret_file: dir.path().join("no_secret"),
+            ..args("member9", false, "unread.token")
+        };
+        assert_eq!(run(&unread, now), Err(MintError::SecretUnreadable));
+        assert!(!unread.out.exists());
+        std::fs::write(dir.path().join("blank"), " \n").unwrap();
+        let blank = TokenArgs {
+            jwt_secret_file: dir.path().join("blank"),
+            ..args("member9", false, "blank.token")
+        };
+        assert_eq!(run(&blank, now), Err(MintError::SecretUnreadable));
+        assert!(!blank.out.exists());
+    }
+
+    #[test]
+    fn the_failures_are_fixed_codes() {
+        assert_eq!(MintError::SecretUnreadable.code(), "secret-unreadable");
+        assert_eq!(MintError::TokenUnwritable.code(), "token-unwritable");
+        assert_eq!(WRITTEN, "token-written");
+        assert!(USAGE.starts_with("iem-soakclient token --jwt-secret-file"));
+    }
+}
