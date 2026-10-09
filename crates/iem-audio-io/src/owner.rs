@@ -8,6 +8,8 @@
 //! - [`Watchdog`] and [`reset_step`]: the stall clock and the reopen request
 //!   put to the [`ResetBudget`] ([`crate::reset`]), its reasons ([`Asked`])
 //!   logged with the verdict;
+//! - [`reopen_us`]: a reopen's time as the stream's statistics carry it
+//!   (S7 HIL v2);
 //! - [`session_end_release`], [`seh_step`] and [`stop_step`]: the bounded
 //!   waits that end in a released (or parked) driver;
 //! - [`seh_release`] and [`seh_faults`]: the owner's answer to a structured
@@ -246,6 +248,12 @@ pub fn seh_release(seh: bool, hold: bool, done: bool) -> SehRelease {
 /// an OS restart).
 pub fn seh_faults(seh: bool, hold: bool) -> bool {
     seh && !hold
+}
+
+/// A reopen's time for `StreamStats::last_reopen_us` (S7 HIL v2): whole µs,
+/// at least 1 (a reopen happened), `u64::MAX` past it.
+pub fn reopen_us(took: Duration) -> u64 {
+    u64::try_from(took.as_micros()).unwrap_or(u64::MAX).max(1)
 }
 
 /// How a stream ended.
@@ -628,6 +636,21 @@ mod tests {
         assert!(!seh_faults(true, true));
         assert!(!seh_faults(false, false));
         assert!(!seh_faults(false, true));
+    }
+
+    /// HIL v2 (S7, #10): a reopen's time, from the old stream's stop to the
+    /// new one's measured period, in whole µs; never 0 (a reopen happened),
+    /// and a time past u64 µs saturates.
+    #[test]
+    fn a_reopen_time_is_whole_microseconds_never_zero_and_saturates() {
+        assert_eq!(reopen_us(Duration::from_micros(104_250)), 104_250);
+        assert_eq!(reopen_us(Duration::from_nanos(104_250_999)), 104_250);
+        assert_eq!(reopen_us(Duration::from_micros(2)), 2);
+        assert_eq!(reopen_us(Duration::from_nanos(1_999)), 1);
+        assert_eq!(reopen_us(Duration::from_nanos(999)), 1);
+        assert_eq!(reopen_us(Duration::ZERO), 1);
+        assert_eq!(reopen_us(Duration::from_micros(u64::MAX)), u64::MAX);
+        assert_eq!(reopen_us(Duration::MAX), u64::MAX);
     }
 
     #[test]

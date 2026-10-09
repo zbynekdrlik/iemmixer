@@ -884,6 +884,41 @@ fn fault_injection_releases_the_driver_and_exits() {
     assert_eq!(iem_engine::persist::decode(&saved).unwrap().rev, 1);
 }
 
+/// HIL v2 (S7, #10): the last `Status` before a fault's `DriverReleased`
+/// carries the fault and the faulting callback's own time (NullRt: its
+/// `process()` up to the caught panic), so the guard can keep it across the
+/// respawn.
+#[test]
+fn an_injected_fault_ends_with_a_status_that_times_the_faulting_callback() {
+    let mut e = Engine::start(
+        Flags {
+            test_signal: false,
+            fault_injection: true,
+        },
+        InputSignal::Silence,
+    );
+    let mut sup = e.client();
+    sup.hello(Role::Supervisor);
+    assert!(sup.request(1, Cmd::InjectFault).error.is_none());
+    let mut last = None;
+    sup.wait(|m| match m {
+        EngineMsg::Status(s) => {
+            last = Some(s.clone());
+            None
+        }
+        EngineMsg::DriverReleased { reason } if reason == "fault" => Some(()),
+        _ => None,
+    });
+    let last = last.expect("a Status before DriverReleased");
+    assert!(last.faulted, "{last:?}");
+    assert!(
+        last.fault_callback_us > 0.0 && last.fault_callback_us < 1e6,
+        "{last:?}"
+    );
+    assert_eq!(last.last_reopen_us, 0, "NullRt never reopens");
+    assert!(matches!(e.exit(), Exit::Fault(why) if why.contains("fault injection")));
+}
+
 #[test]
 fn a_held_engine_sounds_after_its_supervisor_arms_it() {
     let e = Engine::start_with(tempfile::tempdir().unwrap(), |cfg| cfg.hold = true);

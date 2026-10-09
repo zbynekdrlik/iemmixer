@@ -28,7 +28,8 @@
 //! called again and the fault is reported (§2.4 crash model). After a driver
 //! reopen the ASIO backend calls [`Process::discontinuity`] before the next
 //! block, and [`StreamStats`] carries the measured period, missed periods,
-//! overruns, resets and a parked stream.
+//! overruns, resets, the last reopen's time, a parked stream and the
+//! faulting callback's time.
 
 #![deny(unsafe_code)]
 // The rtsan CI job (nightly, `--cfg iem_rtsan`) marks `hist::PeriodHist::record`
@@ -170,6 +171,16 @@ pub struct StreamStats {
     pub running: bool,
     pub max_process_ns: u64,
     pub fault: Option<String>,
+    /// S7 HIL v2: the last driver reopen's time in µs, from `Owner::reopen`'s
+    /// entry (before the old stream stops) to the new stream's measured
+    /// period; 0 before any (ASIO; NullRt 0).
+    pub last_reopen_us: u64,
+    /// S7 HIL v2: the faulting callback's own time in ns, its entry to its
+    /// return with the caught panic, the span `max_process_ns` measures; 0
+    /// while no callback faulted (a fault the backend raised itself, e.g.
+    /// the reopen budget, has none, and so has a structured exception, whose
+    /// callback never returns).
+    pub fault_callback_ns: u64,
 }
 
 /// Multichannel audio, channel-major.
