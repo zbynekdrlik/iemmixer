@@ -248,7 +248,14 @@ test("three windows read 300 ms apart leave the real player playing: no dropout,
         const data = new Float32Array(2 * n);
         for (let i = 0; i < n; i++) data[i] = data[n + i] = 0.1 * Math.sin((2 * Math.PI * 1000 * (f * n + i)) / 48_000);
         encoder.encode(
-          new AudioData({ format: "f32-planar", sampleRate: 48_000, numberOfFrames: n, numberOfChannels: 2, timestamp: f * 20_000, data }),
+          new AudioData({
+            format: "f32-planar",
+            sampleRate: 48_000,
+            numberOfFrames: n,
+            numberOfChannels: 2,
+            timestamp: f * 20_000,
+            data,
+          }),
         );
       }
       await encoder.flush();
@@ -265,7 +272,9 @@ test("three windows read 300 ms apart leave the real player playing: no dropout,
       ws.onmessage = (m) => player.feedOpusFrame(m.data);
     });
     const stats = () =>
-      page.evaluate(() => (window as unknown as { __iem_stream_stats: () => { dropouts: number } }).__iem_stream_stats());
+      page.evaluate(() =>
+        (window as unknown as { __iem_stream_stats: () => { dropouts: number } }).__iem_stream_stats(),
+      );
     await expect
       .poll(() => page.evaluate(() => (window as unknown as { __iem_audio_level: () => number }).__iem_audio_level()))
       .toBeGreaterThan(-100);
