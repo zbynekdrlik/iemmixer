@@ -34,6 +34,7 @@ pub mod solo;
 pub mod talk;
 pub mod tunnel_watch;
 pub mod view;
+pub mod ws_alive;
 
 // Split cfgs: cargo-mutants skips a module only under a plain `#[cfg(test)]`.
 #[cfg(test)]

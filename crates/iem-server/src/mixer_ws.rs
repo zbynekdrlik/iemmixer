@@ -4,10 +4,8 @@
 //! Commands become engine requests (tagged with this session as their
 //! origin); engine deltas become UI updates for every other session on the
 //! same page; meters arrive every 100 ms. A client silent for
-//! [`alive::SILENT_FOR`] (no command, no pong to the session's pings) is
-//! gone, and its session ends (`alive`, #10).
-
-pub mod alive;
+//! [`ws_alive::SILENT_FOR`] (no command, no pong to the session's pings) is
+//! gone, and its session ends; every send is bounded (`ws_alive`, #10).
 
 use std::sync::{Mutex, PoisonError};
 use std::time::Instant;
@@ -26,6 +24,7 @@ use tokio::sync::{broadcast, mpsc};
 use crate::engine::client::EngineEvent;
 use crate::site_view::Page;
 use crate::view::{self, Viewer};
+use crate::ws_alive::{self, Due};
 use crate::{AppState, To};
 
 /// Close code telling a page without a (current) protocol to reload.
@@ -254,7 +253,7 @@ async fn session(
         build: iem_core::VERSION.to_string(),
         min_client_proto: MIN_CLIENT_PROTO,
     };
-    if socket.send(text(&hello)).await.is_err() {
+    if !ws_alive::send(socket.send(text(&hello))).await {
         return;
     }
     if !proto_ok(proto) {
@@ -278,7 +277,7 @@ async fn session(
     first.push(ServerMsg::NetworkMode { mode: network_mode });
     first.push(crate::tunnel_watch::current_status_msg(&state).await);
     for m in &first {
-        if socket.send(text(m)).await.is_err() {
+        if !ws_alive::send(socket.send(text(m))).await {
             cleanup(&state, &page, session);
             return;
         }
@@ -297,19 +296,14 @@ async fn session(
         })
     };
 
-    // A client that answers nothing for `alive::SILENT_FOR` is gone (#10):
-    // pinged every `alive::PING_EVERY`, it answers by itself when it is there.
-    let mut heard = alive::Heard::new(Instant::now());
-    let mut ping = tokio::time::interval_at(
-        tokio::time::Instant::now() + alive::PING_EVERY,
-        alive::PING_EVERY,
-    );
-    ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // A client that answers nothing for `ws_alive::SILENT_FOR` is gone
+    // (#10): pinged, it answers by itself when it is there.
+    let mut alive = ws_alive::Keepalive::default();
     loop {
         let out: Vec<ServerMsg> = tokio::select! {
             msg = socket.recv() => {
                 if matches!(msg, Some(Ok(_))) {
-                    heard.heard(Instant::now());
+                    alive.heard();
                 }
                 match msg {
                     Some(Ok(Message::Text(t))) => {
@@ -325,16 +319,18 @@ async fn session(
                     Some(Ok(_)) => Vec::new(),
                 }
             },
-            _ = ping.tick() => {
-                let now = Instant::now();
-                if heard.gone(now) {
-                    tracing::warn!(page = %page.id, session, silent_s = heard.silent(now).as_secs(), "WebSocket client silent: closing");
+            due = alive.due() => match due {
+                Due::Gone(silent) => {
+                    tracing::warn!(page = %page.id, session, silent_s = silent.as_secs(), "WebSocket client silent: closing");
+                    let _ = ws_alive::within(ws_alive::CLOSE_WITHIN, socket.send(ws_alive::silent_close())).await;
                     break;
                 }
-                if socket.send(Message::Ping(axum::body::Bytes::new())).await.is_err() {
-                    break;
+                Due::Ping => {
+                    if !ws_alive::send(socket.send(ws_alive::ping())).await {
+                        break;
+                    }
+                    Vec::new()
                 }
-                Vec::new()
             },
             ev = engine_rx.recv() => match ev {
                 Ok(ev) => engine_event(&state, session, &page, &viewer, ev),
@@ -362,7 +358,7 @@ async fn session(
         };
         let mut failed = false;
         for m in &out {
-            if socket.send(text(m)).await.is_err() {
+            if !ws_alive::send(socket.send(text(m))).await {
                 failed = true;
                 break;
             }

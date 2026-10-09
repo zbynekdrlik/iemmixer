@@ -32,8 +32,8 @@ use tokio::time::Instant;
 use crate::AppState;
 use crate::engine::client::EngineError;
 use crate::engine::media::MediaLink;
-use crate::mixer_ws::alive::{Heard, PING_EVERY};
 use crate::mixer_ws::{WsQuery, claims_of};
+use crate::ws_alive::{self, Due};
 use probe_gate::{Pass, ProbeGate};
 
 type Reject = (StatusCode, Json<ApiError>);
@@ -242,17 +242,15 @@ async fn session(mut socket: WebSocket, state: AppState, hil: bool) {
     let mut feed: Option<Feeds> = None;
     let mut last_audio = Instant::now();
     let mut first_logged = false;
-    // A client that answers nothing for `alive::SILENT_FOR` is gone (#10): pinged
-    // every `PING_EVERY`, it answers by itself when it is there.
-    let mut heard = Heard::new(std::time::Instant::now());
-    let mut ping = tokio::time::interval_at(Instant::now() + PING_EVERY, PING_EVERY);
-    ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // A client that answers nothing for `ws_alive::SILENT_FOR` is gone
+    // (#10): pinged, it answers by itself when it is there.
+    let mut alive = ws_alive::Keepalive::default();
     loop {
         let listening = feed.is_some();
         tokio::select! {
             msg = socket.recv() => {
                 if matches!(msg, Some(Ok(_))) {
-                    heard.heard(std::time::Instant::now());
+                    alive.heard();
                 }
                 match msg {
                     Some(Ok(Message::Text(text))) => match serde_json::from_str::<ClientMsg>(&text) {
@@ -262,7 +260,7 @@ async fn session(mut socket: WebSocket, state: AppState, hil: bool) {
                             }
                             feed = None;
                             let Some(page) = state.page(&member_id) else {
-                                if socket.send(status("no_source", None)).await.is_err() {
+                                if !ws_alive::send(socket.send(status("no_source", None))).await {
                                     break;
                                 }
                                 continue;
@@ -273,7 +271,7 @@ async fn session(mut socket: WebSocket, state: AppState, hil: bool) {
                                     feed = Some(feeds(&state.media, slot_of(&state, &page.mix), hil));
                                     current = Some((page.mix.clone(), member_id.clone()));
                                     last_audio = Instant::now();
-                                    if socket.send(status("listening", Some(member_id))).await.is_err() {
+                                    if !ws_alive::send(socket.send(status("listening", Some(member_id)))).await {
                                         break;
                                     }
                                 }
@@ -281,7 +279,7 @@ async fn session(mut socket: WebSocket, state: AppState, hil: bool) {
                                     if !matches!(&e, EngineError::Refused(b) if b.code == ErrCode::NoSource) {
                                         tracing::warn!(error = %e, "listen start failed");
                                     }
-                                    if socket.send(status("no_source", None)).await.is_err() {
+                                    if !ws_alive::send(socket.send(status("no_source", None))).await {
                                         break;
                                     }
                                 }
@@ -293,7 +291,7 @@ async fn session(mut socket: WebSocket, state: AppState, hil: bool) {
                                 stop(&state, &mix).await;
                             }
                             feed = None;
-                            if socket.send(status("stopped", None)).await.is_err() {
+                            if !ws_alive::send(socket.send(status("stopped", None))).await {
                                 break;
                             }
                         }
@@ -303,16 +301,19 @@ async fn session(mut socket: WebSocket, state: AppState, hil: bool) {
                     Some(Ok(_)) => {}
                 }
             },
-            _ = ping.tick() => {
-                let now = std::time::Instant::now();
-                if heard.gone(now) {
-                    tracing::warn!(silent_s = heard.silent(now).as_secs(), "Audio WebSocket client silent: closing");
+            due = alive.due() => match due {
+                Due::Gone(silent) => {
+                    let target = current.as_ref().map(|(_, id)| id.clone());
+                    tracing::warn!(silent_s = silent.as_secs(), target = ?target, hil, "Audio WebSocket client silent: closing");
+                    let _ = ws_alive::within(ws_alive::CLOSE_WITHIN, socket.send(ws_alive::silent_close())).await;
                     break;
                 }
-                if socket.send(Message::Ping(Bytes::new())).await.is_err() {
-                    break;
+                Due::Ping => {
+                    if !ws_alive::send(socket.send(ws_alive::ping())).await {
+                        break;
+                    }
                 }
-            }
+            },
             out = async { match feed.as_mut() { Some(f) => f.next().await, None => std::future::pending().await } }, if listening => {
                 match out {
                     Out::Frame { data, probe, edge } => {
@@ -320,11 +321,11 @@ async fn session(mut socket: WebSocket, state: AppState, hil: bool) {
                         if let Some(edge) = edge {
                             let target = current.as_ref().map(|(_, id)| id.clone());
                             tracing::info!(edge, target = ?target, "listen probe");
-                            if socket.send(status(edge, target)).await.is_err() {
+                            if !ws_alive::send(socket.send(status(edge, target))).await {
                                 break;
                             }
                         }
-                        if socket.send(Message::Binary(data)).await.is_err() {
+                        if !ws_alive::send(socket.send(Message::Binary(data))).await {
                             break;
                         }
                         if !probe {
@@ -343,7 +344,7 @@ async fn session(mut socket: WebSocket, state: AppState, hil: bool) {
             }
             _ = tokio::time::sleep(Duration::from_secs(5)), if listening => {
                 if last_audio.elapsed() > Duration::from_secs(5) {
-                    if socket.send(status("no_source", None)).await.is_err() {
+                    if !ws_alive::send(socket.send(status("no_source", None))).await {
                         break;
                     }
                     last_audio = Instant::now();
