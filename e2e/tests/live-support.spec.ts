@@ -1,10 +1,15 @@
 import { EventEmitter } from "node:events";
-import type { APIRequestContext } from "@playwright/test";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { createServer, type ServerResponse } from "node:http";
+import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { chromium, type APIRequestContext } from "@playwright/test";
 import { test, expect } from "./support/fixtures";
 import { BurstWatch } from "./live/support/burst";
 import { Desk, LiveMixer, RESTORE_MS, type Cmd } from "./live/support/desk";
 import { SILENT_PEAK, continuity, dbOf, median, spread, talkbackLevel } from "./live/support/series";
-import { apiAt, runMarker } from "./live/support/env";
+import { apiAt, runMarker, storeLogin } from "./live/support/env";
 import { guardConsole, redacted } from "./live/support/console";
 import { PushLedger, bodyOf, endpointOf, isPostTo, postedEndpoint } from "./live/support/push";
 
@@ -12,8 +17,9 @@ import { PushLedger, bodyOf, endpointOf, isPostTo, postedEndpoint } from "./live
 // themselves run only from the ops live run, against the real PC. The burst
 // watch, the desk and its mixer socket run here on local stand-ins for the
 // public host's sockets (the burst's edges, the frames and the server's
-// answers are fed in); every series is synthetic with a known answer. No
-// page is used.
+// answers are fed in); every series is synthetic with a known answer. Only
+// the console guard and the stored login use a page (the login's on a local
+// server).
 
 /** What a stand-in socket was sent. */
 type Sent = { cmd: string; [field: string]: unknown };
@@ -748,4 +754,85 @@ test("a console line keeps its words and loses every URL", () => {
   );
   expect(redacted('fetch "HTTPS://Mixer.example.org/api/auth" failed')).toBe('fetch "<url>" failed');
   expect(redacted("[push] engineer subscribed to Web Push")).toBe("[push] engineer subscribed to Web Push");
+});
+
+/** The app's manifest and its icons, as the server serves them. */
+const UI_FILES: Record<string, { file: string; type: string }> = {
+  "/manifest.json": { file: "manifest.json", type: "application/json" },
+  "/icon.svg": { file: "icon.svg", type: "image/svg+xml" },
+  "/icon-192.png": { file: "icon-192.png", type: "image/png" },
+  "/icon-512.png": { file: "icon-512.png", type: "image/png" },
+};
+
+test("storing the login leaves the next page no manifest icon download to cut (a console warning)", async () => {
+  // Live run 1 (#10): the push spec's full Chromium warned "Error while trying
+  // to use the following icon from the Manifest: … (Download error or
+  // resource isn't a valid image)". Chromium's install check fetches the
+  // manifest's icon when a page with a manifest has loaded; the next
+  // navigation cuts that download once its answer has begun, and Chromium
+  // logs the cut into the new page. Through the tunnel the answer is slow, so
+  // the page the login is stored from must start no such download. Here an
+  // icon's answer is held after its first bytes, as the tunnel's latency
+  // holds it, until the next page is asked for.
+  test.setTimeout(60_000);
+  let target = false;
+  let iconHeld!: () => void;
+  const held = new Promise<void>((done) => (iconHeld = done));
+  let iconServed!: () => void;
+  const served = new Promise<void>((done) => (iconServed = done));
+  const open: ServerResponse[] = [];
+  const html = (title: string) =>
+    `<!doctype html><html><head><title>${title}</title><link rel="manifest" href="/manifest.json"></head><body>${title}</body></html>`;
+  const server = createServer((req, res) => {
+    const path = req.url ?? "";
+    const ui = UI_FILES[path];
+    if (ui) {
+      const body = readFileSync(resolve(__dirname, "../../crates/iem-ui", ui.file));
+      res.writeHead(200, { "Content-Type": ui.type, "Content-Length": body.length });
+      if (path !== "/manifest.json" && !target) {
+        res.write(body.subarray(0, 64));
+        open.push(res);
+        iconHeld();
+        return;
+      }
+      res.end(body, () => {
+        if (path !== "/manifest.json") iconServed();
+      });
+      return;
+    }
+    if (path === "/api/version") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end('{"version":"2.0.0-dev.1"}');
+      return;
+    }
+    if (path === "/engineer") target = true;
+    res.writeHead(200, { "Content-Type": "text/html" });
+    res.end(html(path === "/engineer" ? "engineer" : "start"));
+  });
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+  const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const dir = mkdtempSync(join(tmpdir(), "iemmixer-login-"));
+  // The push spec's browser: the full Chromium in a persistent profile (the headless shell runs no install check).
+  const context = await chromium.launchPersistentContext(dir, { channel: "chromium" });
+  try {
+    const tab = context.pages()[0] ?? (await context.newPage());
+    const problems = guardConsole(tab);
+    // A stand-in, not a credential (the page only stores it).
+    const auth = { token: ["zyxqwvn", "stand", "in"].join("."), member: "engineer", engineer: true };
+    await storeLogin(tab, origin, auth);
+    // As the tunnel's latency would: the next page is asked for while an icon's answer is under way, if one is.
+    await Promise.race([held, new Promise((done) => setTimeout(done, 3_000))]);
+    await tab.goto(`${origin}/engineer`);
+    // The new page's own install check fetches its icon: wait for it, so a cut would have been logged.
+    await Promise.race([served, new Promise((done) => setTimeout(done, 5_000))]);
+    await tab.waitForTimeout(500);
+    expect(await tab.evaluate(() => localStorage.getItem("iem_token"))).toBe(JSON.stringify(auth));
+    expect(await tab.evaluate(() => sessionStorage.getItem("iem_redirected"))).toBe("1");
+    expect(problems).toEqual([]);
+  } finally {
+    for (const res of open) res.destroy();
+    await context.close();
+    server.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

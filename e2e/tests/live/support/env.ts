@@ -149,12 +149,24 @@ export async function expectBuild(request: APIRequestContext): Promise<void> {
   if (!namesBuild(gitHash, sha)) throw new Error(`${NOT_THE_BUILD}: ${answer}`);
 }
 
-/** The stored login of `who`, as the UI keeps it (`iem_token`). */
-function authOf(who: Who): { token: string; member: string; engineer: boolean } {
+/** A stored login, as the UI keeps it (`iem_token`). */
+export type Auth = { token: string; member: string; engineer: boolean };
+
+/** The stored login of `who`. */
+function authOf(who: Who): Auth {
   const l = live();
   return who === "engineer"
     ? { token: l.tokens.engineer, member: "engineer", engineer: true }
     : { token: l.tokens.member, member: l.member, engineer: false };
+}
+
+/** Stores `auth` on `origin` as the UI keeps a login, from a page of that origin. */
+export async function storeLogin(page: Page, origin: string, auth: Auth): Promise<void> {
+  await navigate(page, new URL("/", origin).toString(), "the app's start page");
+  await page.evaluate((a) => {
+    localStorage.setItem("iem_token", JSON.stringify(a));
+    sessionStorage.setItem("iem_redirected", "1");
+  }, auth);
 }
 
 /**
@@ -165,11 +177,7 @@ function authOf(who: Who): { token: string; member: string; engineer: boolean } 
 export async function openLive(page: Page, who: Who, path?: string): Promise<void> {
   const auth = authOf(who);
   const { baseURL } = live();
-  await openStart(page);
-  await page.evaluate((a) => {
-    localStorage.setItem("iem_token", JSON.stringify(a));
-    sessionStorage.setItem("iem_redirected", "1");
-  }, auth);
+  await storeLogin(page, baseURL, auth);
   const what = who === "engineer" ? "a mixer page" : "the member's mixer page";
   await navigate(page, new URL(`/${path ?? auth.member}`, baseURL).toString(), what);
   await expect(page.getByTestId("global-volume-fader")).toBeVisible({ timeout: 15_000 });
