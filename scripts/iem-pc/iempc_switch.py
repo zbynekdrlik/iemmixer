@@ -3,6 +3,8 @@ dev to event and one back, timed by the guard's own records (`last_switch`,
 iem-guard switch_log.rs), and a verdict on them. Dev time only (iempc's Spec:
 no EVENT-NOW flag at the start). In this order:
 
+0. iempc.py's call site, first: a live run of this dev entry that may still
+   run (`iempc_live.refuse_while_live`: a switch would end it).
 1. Refused before any switch: an open S1a/S1c window (as `iempc dev`), then
    one `iemmode status` (a new flag abandons it and runs the event path):
    the guard answers ok, in dev, no switch, no HIL job (iempc_soak's
