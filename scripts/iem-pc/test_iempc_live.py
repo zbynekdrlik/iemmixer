@@ -354,6 +354,26 @@ class ReverseGuardTests(LiveBase):
             self.assertIn("runs only in dev time", err, argv)
 
 
+class SoakRecordTests(LiveBase):
+    """A soak record whose dev entry cannot be read may still run (fail safe,
+    as a live record's): it refuses dispatch-live and switch-test (review of
+    the lane: iempc_soak.running_soak skipped it, and both went through)."""
+
+    def test_a_soak_record_whose_entry_cannot_be_read_refuses_a_live_run_and_a_switch_test(self) -> None:
+        for bad in (None, "0", True, 0.0):
+            self.write_soaks([dict(soak_record(hours=8, seconds_ago=60), entry=bad)])
+            self.refused_before_any_call("no live run: a soak dispatched in this dev entry may still run", bad)
+            self.pc.calls.clear()
+            code, docs, err = self.run_main("switch-test")
+            self.assertEqual((code, docs, ip.current_entry()), (1, [], 0), bad)
+            self.assertIn("no switch test: a soak dispatched in this dev entry may still run", err, bad)
+            self.assertEqual(self.pc.calls, [("iemmode.exe", ["status"], "abandon")], bad)
+        # Past its hours and margin it does not, whatever its entry.
+        self.write_soaks([dict(soak_record(hours=1, seconds_ago=3600 + iempc_soak.RUN_MARGIN_S + 60), entry=None)])
+        code, _, err = self.live()
+        self.assertEqual(code, 0, err)
+
+
 class PureTests(LiveBase):
     def test_live_refusal_is_pure_and_in_order(self) -> None:
         self.assertIsNone(live.live_refusal(READY, SHA))
