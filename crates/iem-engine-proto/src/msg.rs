@@ -432,6 +432,14 @@ pub struct Status {
     /// S7, additive: the overflow bucket's index, two periods in µs rounded
     /// up (667 at 32 samples, 96 kHz; at most 1000); 0 without histograms.
     pub hist_top_us: u32,
+    /// S7 HIL v2, additive: the last driver reopen, from the old stream's
+    /// stop to the new one's measured period, µs; 0 before any (NullRt: 0).
+    pub last_reopen_us: u64,
+    /// S7 HIL v2, additive: the faulting callback's own time, µs (its entry
+    /// to its return, the caught panic included); 0 while not faulted. A
+    /// fault sends one last `Status` carrying it before its alarm and
+    /// `DriverReleased`.
+    pub fault_callback_us: f64,
 }
 
 /// One of HIL's spare card outputs in a [`Status`] (S6): its card channel

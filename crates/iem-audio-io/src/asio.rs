@@ -896,6 +896,10 @@ struct Backend {
     /// A panic in the processor (or the owner's fault): the outputs stay
     /// zero and the processor is never called again.
     faulted: AtomicBool,
+    /// The faulting callback's own time, ns (S7 HIL v2): stored by that
+    /// callback right before `faulted`, so the owner reads it with the flag;
+    /// 0 for the owner's own fault.
+    fault_ns: AtomicU64,
     output_ready: AtomicBool,
     driver: *const azo::Driver,
 }
@@ -921,9 +925,7 @@ impl Backend {
         for ch in &self.outputs {
             zero(half(ch, second), self.bytes);
         }
-        if !self.faulted.load(Ordering::Acquire) {
-            self.render(second);
-        }
+        let panicked = !self.faulted.load(Ordering::Acquire) && self.render(second);
         if self.output_ready.load(Ordering::Relaxed) {
             // SAFETY: as above.
             let ok = unsafe { self.driver.as_ref() }.is_some_and(|d| d.output_ready().is_ok());
@@ -935,6 +937,12 @@ impl Backend {
         let took = nanos(self.base.elapsed().saturating_sub(entry));
         self.telemetry.on_done(took);
         self.hists.process.record(took);
+        if panicked {
+            // The faulting callback's own time, then the fault: two stores on
+            // the fault path only (I7). The outputs stayed zero.
+            self.fault_ns.store(took.max(1), Ordering::Relaxed);
+            self.faulted.store(true, Ordering::Release);
+        }
     }
 
     /// The first callbacks' positions, for the owner thread (single writer:
@@ -948,8 +956,9 @@ impl Backend {
     }
 
     /// Decode the engine's inputs, process, encode its outputs (the card's
-    /// outputs are already zero).
-    fn render(&self, second: bool) {
+    /// outputs are already zero). True when the processor panicked: the
+    /// outputs stay zero and the caller marks the stream faulted.
+    fn render(&self, second: bool) -> bool {
         // SAFETY: see `carry`: only this callback touches it now.
         let Carry {
             processor,
@@ -981,12 +990,13 @@ impl Backend {
                             .encode(src, writable(half(ch, second), self.bytes));
                     }
                 }
+                false
             }
             Err(payload) => {
                 // The outputs stay zero. The panic hook recorded the place in
                 // atomics; the payload is never freed on this thread.
-                self.faulted.store(true, Ordering::Release);
                 core::mem::forget(payload);
+                true
             }
         }
     }
@@ -1167,6 +1177,11 @@ struct Shared {
     overruns: AtomicU64,
     max_ns: AtomicU64,
     resets: AtomicU64,
+    /// The last reopen's time, µs (S7 HIL v2; `owner::reopen_us`).
+    reopen_us: AtomicU64,
+    /// The faulting callback's own time, ns (S7 HIL v2), copied from the
+    /// stream before `faulted` is set here.
+    fault_ns: AtomicU64,
     fault: Mutex<Option<String>>,
     pref_failure: Mutex<Option<String>>,
     /// The close that a preference window's `Drop` could not do (a driver
@@ -1483,6 +1498,7 @@ impl Owner {
             ring_len: AtomicUsize::new(0),
             discontinuity: AtomicBool::new(!first),
             faulted: AtomicBool::new(false),
+            fault_ns: AtomicU64::new(0),
             output_ready: AtomicBool::new(true),
             driver: ptr::from_ref(card.driver()),
         });
@@ -1686,6 +1702,11 @@ impl Owner {
         // SAFETY: the stream is live.
         let b = unsafe { &*live.backend };
         if b.faulted.load(Ordering::Acquire) {
+            // The faulting callback's time first: the control thread reads it
+            // once it sees `faulted` (0 for the owner's own fault).
+            self.shared
+                .fault_ns
+                .store(b.fault_ns.load(Ordering::Relaxed), Ordering::Release);
             if !self.shared.faulted.swap(true, Ordering::SeqCst) {
                 note(&self.shared.fault, panic_text());
             }
@@ -1709,7 +1730,11 @@ impl Owner {
     /// after the reopen follows `Process::discontinuity`. The preference
     /// window stays held across it (nothing is written); when the reopen
     /// fails no open follows, and it closes.
+    ///
+    /// Its time (S7 HIL v2) runs from here, before `finish` stops the old
+    /// stream, to the new stream's measured period: `last_reopen_us`.
     fn reopen(&mut self, live: Live) {
+        let began = Instant::now();
         let Some(carry) = self.finish(live, Then::Reopen) else {
             return;
         };
@@ -1719,12 +1744,23 @@ impl Owner {
             self.carry = Some(carry);
             return;
         }
-        if let Err(e) = self.open(carry, false) {
-            // The card is released and no open follows: REAPER's value goes
-            // back now (a failure is noted in `pref_failure`).
-            let _ = self.leave_pref();
-            if !matches!(e, AsioError::SessionEnd) {
-                self.fault(format!("the reopen failed: {e}"));
+        match self.open(carry, false) {
+            Ok(()) => {
+                let us = owner::reopen_us(began.elapsed());
+                self.shared.reopen_us.store(us, Ordering::SeqCst);
+                info!(
+                    "[{}] the reopen took {us} microseconds, from the old stream's stop to \
+                     the new one's measured period",
+                    when()
+                );
+            }
+            Err(e) => {
+                // The card is released and no open follows: REAPER's value
+                // goes back now (a failure is noted in `pref_failure`).
+                let _ = self.leave_pref();
+                if !matches!(e, AsioError::SessionEnd) {
+                    self.fault(format!("the reopen failed: {e}"));
+                }
             }
         }
     }
@@ -2090,6 +2126,9 @@ impl<P: Process + 'static> AsioStream<P> {
             running: s.running.load(Ordering::Acquire),
             max_process_ns: s.max_ns.load(Ordering::Acquire),
             fault: s.fault.lock().ok().and_then(|f| f.clone()),
+            last_reopen_us: s.reopen_us.load(Ordering::Acquire),
+            // Read after `faulted`, which the owner sets after it.
+            fault_callback_ns: s.fault_ns.load(Ordering::Acquire),
         }
     }
 

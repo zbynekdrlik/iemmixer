@@ -700,6 +700,8 @@ impl Control {
             interval_hist: h.interval,
             process_hist: h.process,
             hist_top_us: h.top_us,
+            last_reopen_us: st.last_reopen_us,
+            fault_callback_us: st.fault_callback_ns as f64 / 1000.0,
         }
     }
 
@@ -725,6 +727,10 @@ impl Control {
         }
         let stats = self.driver.as_ref().map(|d| d.stats()).unwrap_or_default();
         if stats.faulted {
+            // The last `Status` first (S7 HIL v2): it carries the faulting
+            // callback's time, which the guard keeps across the respawn.
+            let last = self.next_status(&stats);
+            self.broadcast(&EngineMsg::Status(last));
             return Some(self.fault(stats.fault.unwrap_or_else(|| "unknown".into())));
         }
         match self.driver.as_ref().and_then(|d| d.ending()) {

@@ -44,6 +44,9 @@ struct Shared {
     callbacks: AtomicU64,
     late: AtomicU64,
     max_ns: AtomicU64,
+    /// The faulting callback's own time, ns (S7 HIL v2); stored before
+    /// `faulted`, so a reader that sees the fault sees it.
+    fault_ns: AtomicU64,
     fault: Mutex<Option<String>>,
 }
 
@@ -102,6 +105,10 @@ impl<P: Process + 'static> NullRt<P> {
             running: s.running.load(Ordering::Acquire),
             max_process_ns: s.max_ns.load(Ordering::Acquire),
             fault: s.fault.lock().ok().and_then(|f| f.clone()),
+            // No card: no reopen.
+            last_reopen_us: 0,
+            // Read after `faulted`, which is stored after it.
+            fault_callback_ns: s.fault_ns.load(Ordering::Acquire),
         }
     }
 
@@ -205,6 +212,8 @@ fn pace<P: Process>(cfg: &NullRtConfig, p: &mut P, s: &Shared, h: &StreamHists) 
             if let Ok(mut f) = s.fault.lock() {
                 *f = Some(panic_message(&*payload));
             }
+            // The faulting callback's own time (S7 HIL v2), before the flag.
+            s.fault_ns.store(ns.max(1), Ordering::Release);
             s.faulted.store(true, Ordering::Release);
             return;
         }

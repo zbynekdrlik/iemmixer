@@ -8,6 +8,8 @@
 //! - [`Watchdog`] and [`reset_step`]: the stall clock and the reopen request
 //!   put to the [`ResetBudget`] ([`crate::reset`]), its reasons ([`Asked`])
 //!   logged with the verdict;
+//! - [`reopen_us`]: a reopen's time as the stream's statistics carry it
+//!   (S7 HIL v2);
 //! - [`session_end_release`], [`seh_step`] and [`stop_step`]: the bounded
 //!   waits that end in a released (or parked) driver;
 //! - [`seh_release`] and [`seh_faults`]: the owner's answer to a structured
@@ -246,6 +248,12 @@ pub fn seh_release(seh: bool, hold: bool, done: bool) -> SehRelease {
 /// an OS restart).
 pub fn seh_faults(seh: bool, hold: bool) -> bool {
     seh && !hold
+}
+
+/// A reopen's time for `StreamStats::last_reopen_us` (S7 HIL v2): whole µs,
+/// at least 1 (a reopen happened), `u64::MAX` past it.
+pub fn reopen_us(took: Duration) -> u64 {
+    u64::try_from(took.as_micros()).unwrap_or(u64::MAX).max(1)
 }
 
 /// How a stream ended.
