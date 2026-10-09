@@ -5,7 +5,9 @@
 //! nothing ends, and the engine's and the guard's writers (the guard pipe's
 //! replies, the supervisor connection's sends to the engine) give a peer a
 //! bounded time to take a message ([`write_within`]) instead of waiting for
-//! it forever. Windows only: the argument is a Windows handle.
+//! it forever. The guard also reads which process serves the engine's pipe
+//! ([`server_pid`], S7 HIL v2). Windows only: the argument is a Windows
+//! handle.
 
 use std::io;
 use std::os::windows::io::{AsRawHandle, BorrowedHandle};
@@ -17,7 +19,7 @@ use windows_sys::Win32::Storage::FileSystem::WriteFile;
 use windows_sys::Win32::System::IO::{
     CancelIoEx, GetOverlappedResult, GetOverlappedResultEx, OVERLAPPED,
 };
-use windows_sys::Win32::System::Pipes::PeekNamedPipe;
+use windows_sys::Win32::System::Pipes::{GetNamedPipeServerProcessId, PeekNamedPipe};
 use windows_sys::Win32::System::Threading::CreateEventW;
 
 use crate::decide::wait_ms;
@@ -41,6 +43,18 @@ pub fn available(pipe: BorrowedHandle<'_>) -> io::Result<u32> {
         )
     })?;
     Ok(waiting)
+}
+
+/// The process id of the pipe's server end (`GetNamedPipeServerProcessId`),
+/// read on either end: on a client's end, the process that created the pipe
+/// instance it is connected to (S7 HIL v2: the guard reads it on its
+/// supervisor connection, and HIL compares it with the engine's pid, which
+/// proves the engine created the first instance and serves the guard's).
+pub fn server_pid(pipe: BorrowedHandle<'_>) -> io::Result<u32> {
+    let mut pid = 0u32;
+    // SAFETY: a pipe handle valid for the call; only `pid` is written.
+    check(unsafe { GetNamedPipeServerProcessId(pipe.as_raw_handle(), &mut pid) })?;
+    Ok(pid)
 }
 
 /// Writes `buf` to a pipe opened for overlapped I/O (interprocess opens

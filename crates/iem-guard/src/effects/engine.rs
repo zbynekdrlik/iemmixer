@@ -208,6 +208,11 @@ pub fn parse(body: &[u8]) -> Result<Msg, String> {
                 hist_top_us: u32::try_from(number(&v, "hist_top_us")).unwrap_or(0),
                 interval_hist: hist(&v, "interval_hist"),
                 process_hist: hist(&v, "process_hist"),
+                last_reopen_us: number(&v, "last_reopen_us"),
+                fault_callback_us: v
+                    .get("fault_callback_us")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0),
             }),
             "reply" => Msg::Reply {
                 id: number(&v, "id"),
@@ -252,11 +257,21 @@ pub fn seen_status(build: Option<&str>, status: Option<&Status>) -> Option<Statu
     })
 }
 
+/// HIL v2's fault time (S7, #10): the faulting callback's time of a faulted
+/// `Status`, which the guard keeps across the respawn (`EngineSeen`'s
+/// `last_fault_us`); none unless the status is faulted with a finite time
+/// above 0 (an older engine, or a fault the backend raised itself, has 0).
+pub fn fault_time(s: &Status) -> Option<f64> {
+    (s.faulted && s.fault_callback_us.is_finite() && s.fault_callback_us > 0.0)
+        .then_some(s.fault_callback_us)
+}
+
 /// The guard's `Reply.engine` (design §7, what HIL v1 reads through
 /// `iemmode status`): the engine as the supervisor connection saw it, its
 /// build as the bare commit (the bundle's SHA), with the engine starts of
 /// this guard, the exit code of the engine before the running one and the
-/// running one's pid (`GuardState.pids`; S7, the soak's "one pid").
+/// running one's pid (`GuardState.pids`; S7, the soak's "one pid"); since
+/// S7 HIL v2 the pipe's server pid, the last reopen and the last fault.
 pub fn engine_status(
     seen: &EngineSeen,
     spawns: u64,
@@ -285,6 +300,9 @@ pub fn engine_status(
         hist_top_us: s.hist_top_us,
         interval_hist: s.interval_hist.clone(),
         process_hist: s.process_hist.clone(),
+        pipe_server_pid: seen.pipe_server_pid,
+        last_reopen_us: s.last_reopen_us,
+        last_fault_us: seen.last_fault_us,
     }
 }
 

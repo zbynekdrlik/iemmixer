@@ -191,6 +191,19 @@ pub struct EngineStatus {
     pub interval_hist: Vec<(u32, u64)>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub process_hist: Vec<(u32, u64)>,
+    /// S7 HIL v2 (#10): the process serving the guard's supervisor
+    /// connection to the engine's control pipe (`GetNamedPipeServerProcessId`,
+    /// read once per engine like the DACL); HIL compares it with `pid`. Null
+    /// while unread and from an older guard.
+    pub pipe_server_pid: Option<u32>,
+    /// The engine's last driver reopen in µs, from the old stream's stop to
+    /// the new one's measured period (the engine's `Status.last_reopen_us`);
+    /// 0 before any and from an older engine or guard.
+    pub last_reopen_us: u64,
+    /// The faulting callback's own time in µs of the last faulted `Status`
+    /// this guard read (`effects::engine::fault_time`), kept across the
+    /// respawn; null before any and from an older guard.
+    pub last_fault_us: Option<f64>,
 }
 
 /// One of HIL's spare card outputs as the engine's `Status` reports it: its
