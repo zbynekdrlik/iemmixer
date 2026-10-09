@@ -779,6 +779,7 @@ test("storing the login leaves the next page no manifest icon download to cut (a
   let iconHeld!: () => void;
   const held = new Promise<void>((done) => (iconHeld = done));
   let iconServed!: () => void;
+  let iconsServed = 0;
   const served = new Promise<void>((done) => (iconServed = done));
   const open: ServerResponse[] = [];
   const html = (title: string) =>
@@ -796,7 +797,9 @@ test("storing the login leaves the next page no manifest icon download to cut (a
         return;
       }
       res.end(body, () => {
-        if (path !== "/manifest.json") iconServed();
+        if (path === "/manifest.json") return;
+        iconsServed += 1;
+        iconServed();
       });
       return;
     }
@@ -828,6 +831,8 @@ test("storing the login leaves the next page no manifest icon download to cut (a
     await tab.waitForTimeout(500);
     expect(await tab.evaluate(() => localStorage.getItem("iem_token"))).toBe(JSON.stringify(auth));
     expect(await tab.evaluate(() => sessionStorage.getItem("iem_redirected"))).toBe("1");
+    // The check ran: the new page's install check fetched its icon whole (else the test would prove nothing).
+    expect(iconsServed, "manifest icons served to the next page").toBeGreaterThanOrEqual(1);
     expect(problems).toEqual([]);
   } finally {
     for (const res of open) res.destroy();
