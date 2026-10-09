@@ -1,7 +1,7 @@
 import type NodeWebSocket from "ws";
 import type { APIRequestContext } from "@playwright/test";
 import { expectBuild, live } from "./env";
-import { OPEN_MS, liveSocket } from "./socket";
+import { OPEN_MS, Wire, liveSocket } from "./socket";
 
 // The bursts (S7, #10): while the browser job runs, the PC fires the HIL test
 // signal with the listen probe in bursts of 30 s every 60 s. The server tells
@@ -40,6 +40,15 @@ export type Status = { status: string; at: number };
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** The statuses a failure counts by name; any other is counted as `other` (the server's words, never printed). */
+const KNOWN_STATUSES = ["listening", "probe", "no_source", "stopped"] as const;
+
+/** `ms` in seconds with `digits` after the point. */
+const seconds = (ms: number, digits: number): string => (ms / 1000).toFixed(digits);
+
+/** A status as a failure may name it: one of `KNOWN_STATUSES`, else `other`. */
+const statusName = (status: string): string => ((KNOWN_STATUSES as readonly string[]).includes(status) ? status : "other");
+
 /**
  * A runner-side `/ws/audio?…&hil=1` socket listening to the engineer's mix:
  * it sees every burst's edges and frames. One socket, opened after the build
@@ -59,6 +68,11 @@ export class BurstWatch {
   readonly statuses: Status[] = [];
   private frames = 0;
   private bad = 0;
+  /** Every binary and text frame the socket got (a failure names them). */
+  private binaries = 0;
+  private texts = 0;
+  /** When the socket opened and last got a message (`closeFacts`). */
+  private readonly wire: Wire;
   /** When the current burst's `probe` came; null outside a burst it saw begin. */
   private probeAt: number | null = null;
   /** The slot's own frames since the last `listening`. */
@@ -69,8 +83,14 @@ export class BurstWatch {
   private closed = false;
 
   private constructor(private readonly ws: NodeWebSocket) {
+    this.wire = new Wire(ws);
     ws.on("message", (d: Buffer, binary: boolean) => this.take(d, binary));
-    ws.on("close", () => this.breaks("the server closed the burst watch's socket (no reconnect)"));
+    // "The server" is the far side: the server, or the tunnel between (live
+    // run 3, #10). The code, the time and the last status tell them apart
+    // against the PC's server.log.
+    ws.on("close", (code: unknown) =>
+      this.breaks(`the server closed the burst watch's socket (no reconnect): ${this.wire.closed(code)}; ${this.lastStatus()}`),
+    );
     // The error's own text can name the host: fixed words only.
     ws.on("error", () => this.breaks("the burst watch's socket failed"));
   }
@@ -108,8 +128,34 @@ export class BurstWatch {
     if (!this.closed) this.broken ??= why;
   }
 
+  /** The newest status and how long before now it came, for a failure. */
+  private lastStatus(now = Date.now()): string {
+    const last = this.statuses[this.statuses.length - 1];
+    return last ? `the last status ${statusName(last.status)} ${seconds(now - last.at, 1)} s before` : "no status before";
+  }
+
+  /**
+   * The watch's own account, for a failure: what the socket got, the
+   * statuses by name, the slot's own frames since the last `listening`, and
+   * where it stands. Numbers and fixed words only.
+   */
+  private account(now = Date.now()): string {
+    const last = this.wire.lastAt === null ? "none yet" : `the last ${seconds(now - this.wire.lastAt, 2)} s ago`;
+    const counts = [...KNOWN_STATUSES, "other"]
+      .map((name) => `${name} ${this.statuses.filter((s) => statusName(s.status) === name).length}`)
+      .join(", ");
+    const where = this.joined
+      ? "inside a burst it did not see begin"
+      : this.probeAt !== null
+        ? `inside a burst begun ${seconds(now - this.probeAt, 1)} s ago`
+        : "outside a burst";
+    return `the watch: ${this.binaries} binary and ${this.texts} text frames, ${last}; statuses ${counts}; ${this.ownFrames} own frames since the last listening; ${where}`;
+  }
+
   private take(d: Buffer, binary: boolean): void {
     const now = Date.now();
+    if (binary) this.binaries += 1;
+    else this.texts += 1;
     if (!binary) {
       let msg: { event?: unknown; data?: { status?: unknown } };
       try {
@@ -169,7 +215,7 @@ export class BurstWatch {
     const deadline = Date.now() + within;
     for (;;) {
       if (this.leftMs() >= minLeftMs) return;
-      if (Date.now() > deadline) throw new Error(`no burst within ${within / 1000} s`);
+      if (Date.now() > deadline) throw new Error(`no burst within ${within / 1000} s (${this.account()})`);
       await sleep(50);
     }
   }

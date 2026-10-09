@@ -1,7 +1,7 @@
 import type NodeWebSocket from "ws";
 import type { Page, WebSocketRoute } from "@playwright/test";
 import { expectBuild, live } from "./env";
-import { liveSocket } from "./socket";
+import { Wire, liveSocket } from "./socket";
 
 // Every page socket of a live spec goes through the runner (the #10 decision
 // of 2026-10-07, applied to the browser): after "ide event" the predecessor
@@ -32,8 +32,10 @@ export class Relay {
   readonly opened = new Set<string>();
   /** Paths the page tried a second time: refused, never sent to the server. */
   readonly refused: string[] = [];
-  /** Paths the server closed (a live spec never reconnects). */
+  /** Paths the server closed (a live spec never reconnects): the far side, the server or the tunnel between. */
   readonly serverClosed: string[] = [];
+  /** The words of each such close (`closeFacts`): its code, UTC time, time open and since the last message. */
+  private readonly closes = new Map<string, string>();
   /** Sockets that never opened or broke, and why (the socket's name, `named`, and fixed words; no URL). */
   readonly failures: string[] = [];
   private readonly texts = new Map<string, RelayEvent[]>();
@@ -80,8 +82,17 @@ export class Relay {
   /** Throws the first broken rule: a socket that never opened or broke, a server close, a second attempt. */
   check(): void {
     if (this.failures.length > 0) throw new Error(`relay: ${this.failures[0]}`);
-    if (this.serverClosed.length > 0) throw new Error(`relay: the server closed ${named(this.serverClosed[0])} (no reconnect)`);
+    if (this.serverClosed.length > 0) {
+      const path = this.serverClosed[0];
+      throw new Error(`relay: the server closed ${named(path)} (no reconnect): ${this.closes.get(path) ?? "no facts"}`);
+    }
     if (this.refused.length > 0) throw new Error(`relay: the page tried ${named(this.refused[0])} again (no reconnect)`);
+  }
+
+  /** The far side closed the real socket on `path`; `facts` are its close's words (`closeFacts`). */
+  farClosed(path: string, facts: string): void {
+    this.serverClosed.push(path);
+    this.closes.set(path, facts);
   }
 
   /** The test is over: every real socket closes, and nothing after counts. */
@@ -106,6 +117,7 @@ export class Relay {
       void route.close(CLOSE);
     };
     const { ws: real, opened } = liveSocket(url, named(path));
+    const wire = new Wire(real);
     this.sockets.add(real);
     // Until the open, an error or a close is liveSocket's (it closes the
     // socket after rejecting `opened`, and that error comes on a nextTick,
@@ -134,10 +146,10 @@ export class Relay {
     real.on("error", () => {
       if (isOpen) fail(`${named(path)} failed (socket error)`);
     });
-    real.on("close", () => {
+    real.on("close", (code: unknown) => {
       this.sockets.delete(real);
       if (!isOpen || failed || side.gone || this.ending) return;
-      this.serverClosed.push(path);
+      this.farClosed(path, wire.closed(code));
       void route.close(CLOSE);
     });
     try {
