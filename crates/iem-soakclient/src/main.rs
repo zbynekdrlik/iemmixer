@@ -7,12 +7,19 @@
 //! too). Stderr never carries a site value or a secret (P6): usage messages
 //! name flags, not their values, and a run's end is a code. It ends no
 //! process: its sockets end with a WebSocket Close.
+//!
+//! `iem-soakclient token …` (S7 plan Task 23) is the PC's token for the
+//! live run ([`mint`]): 0 with the token in its `--out` file and only
+//! `token-written` on stdout, 1 with its code on stderr (`secret-unreadable`,
+//! `token-unwritable`), 2 on a usage error. The token is never printed.
 
 #![forbid(unsafe_code)]
 
 use std::cell::Cell;
 use std::process::ExitCode;
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use iem_soakclient::mint;
 use iem_soakclient::net::{Limits, run};
 use iem_soakclient::{PIN_ENV, Reason, Summary, USAGE, credential, parse_args, write_summary};
 
@@ -21,6 +28,11 @@ fn main() -> ExitCode {
         .skip(1)
         .map(|arg| arg.into_string().ok())
         .collect();
+    if let Some(Some((command, rest))) = argv.as_deref().map(<[String]>::split_first)
+        && command == "token"
+    {
+        return token(rest);
+    }
     let parsed = argv
         .ok_or_else(|| "arguments must be UTF-8".to_owned())
         .and_then(|argv| parse_args(&argv));
@@ -65,6 +77,31 @@ fn main() -> ExitCode {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
+    }
+}
+
+/// `iem-soakclient token`: the token goes to its file only ([`mint::run`]);
+/// stdout gets [`mint::WRITTEN`], stderr a usage message or a code.
+fn token(argv: &[String]) -> ExitCode {
+    let args = match mint::parse_args(argv) {
+        Ok(args) => args,
+        Err(e) => {
+            eprintln!("iem-soakclient token: {e}\n\n{}", mint::USAGE);
+            return ExitCode::from(2);
+        }
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    match mint::run(&args, now) {
+        Ok(()) => {
+            println!("{}", mint::WRITTEN);
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("iem-soakclient: {}", e.code());
+            ExitCode::FAILURE
+        }
     }
 }
 

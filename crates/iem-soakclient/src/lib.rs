@@ -13,7 +13,9 @@
 //! This file is the pure core: the arguments, the credential and the
 //! engineer token, the URLs, the gap clock, the event classes and the
 //! summary. [`tally`] counts a run into its summary (pure too); [`net`] is
-//! the wire: the sign-in and the socket threads.
+//! the wire: the sign-in and the socket threads. [`mint`] is the
+//! `iem-soakclient token` subcommand: a short-lived token, signed on the
+//! server's PC, written to a file for the live run (S7 plan Task 23).
 
 #![forbid(unsafe_code)]
 #![cfg_attr(
@@ -32,7 +34,6 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use jsonwebtoken::{EncodingKey, Header};
 use serde::{Deserialize, Serialize};
 
 pub mod mint;
@@ -77,6 +78,7 @@ pub const USAGE: &str = "\
 iem-soakclient --member ID --seconds N --out FILE --expect-build SHA
                [--jwt-secret-file PATH] [--base URL] [--direct]
                [--cpu-sets IDS]
+iem-soakclient token ...   a token in a file for the live run (its own usage)
 
 Goes to the LAN address the server at --base names (/api/site; with --direct
 to --base itself), checks that /api/version there names build SHA, signs in
@@ -322,30 +324,15 @@ pub fn read_secret(path: &Path) -> Result<Secret, Reason> {
     Secret::from_text(&text).ok_or(Reason::SecretUnreadable)
 }
 
-/// The engineer token's claims: the server's `AuthClaims` (`iem_core`; the
-/// tests read the token back into it).
-#[derive(Serialize)]
-struct Claims<'a> {
-    sub: &'a str,
-    engineer: bool,
-    exp: u64,
-    iat: u64,
-}
-
 /// The engineer's token as the server's login issues it
 /// (`iem_server::auth::issue_token`: the default header, HS256, the
 /// secret's bytes), issued at the Unix second `now` and valid for `seconds`
-/// and [`TOKEN_MARGIN`] more. A token that cannot be signed with the secret
-/// is `secret-unreadable` (after the build check: not seen with HS256).
+/// and [`TOKEN_MARGIN`] more: [`mint::token`], the one signing path, which
+/// `iem-soakclient token` uses too. A token that cannot be signed with the
+/// secret is `secret-unreadable` (after the build check: not seen with
+/// HS256).
 pub fn engineer_token(secret: &Secret, now: u64, seconds: u64) -> Result<String, Reason> {
-    let claims = Claims {
-        sub: ENGINEER,
-        engineer: true,
-        exp: now + seconds + TOKEN_MARGIN,
-        iat: now,
-    };
-    let key = EncodingKey::from_secret(secret.0.as_bytes());
-    jsonwebtoken::encode(&Header::default(), &claims, &key).map_err(|_| Reason::SecretUnreadable)
+    mint::token(secret, ENGINEER, true, now, seconds + TOKEN_MARGIN)
 }
 
 /// `http://HOST[:PORT]` of an `http://` URL (the scheme in any case; a

@@ -10,6 +10,223 @@
 //! it. Stdout gets the fixed word [`WRITTEN`]; stderr a usage message
 //! naming flags, or a fixed code ([`MintError::code`]). No token, secret,
 //! path or member id is ever printed (P6).
+//!
+//! The server reads these tokens as it reads its login's
+//! (`iem_server::auth::extract_claims`: HS256, the secret's bytes, the
+//! default validation), so [`token`] is the one signing path:
+//! [`crate::engineer_token`], the soak's own, calls it too.
+
+use std::fmt;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+
+use jsonwebtoken::{EncodingKey, Header};
+use serde::Serialize;
+
+use crate::{ENGINEER, Reason, Secret, read_secret, valid_member};
+
+/// `--seconds` at least: a minute.
+pub const MIN_SECONDS: u64 = 60;
+/// `--seconds` at most: 2 h, twice the live run's 3600 s.
+pub const MAX_SECONDS: u64 = 7_200;
+/// The one line on stdout once the token is in its file.
+pub const WRITTEN: &str = "token-written";
+
+pub const USAGE: &str = "\
+iem-soakclient token --jwt-secret-file PATH --sub ID [--engineer]
+                     --seconds N --out FILE
+
+Signs a token for ID with the server's JWT secret, valid for N seconds from
+now, and writes it to FILE alone: a new file, owner-only where the platform
+allows it. It prints only token-written; the token never reaches stdout or
+stderr. Nothing is sent anywhere.
+
+  --jwt-secret-file PATH  the server's jwt_secret file
+  --sub ID                engineer (with --engineer) or a member's id
+  --engineer              the engineer's token: --sub engineer, and only it
+  --seconds N             60 to 7200
+  --out FILE              must not exist yet";
+
+/// `iem-soakclient token`'s command line.
+#[derive(Clone, PartialEq, Eq)]
+pub struct TokenArgs {
+    /// `--jwt-secret-file`: the server's `jwt_secret`.
+    pub jwt_secret_file: PathBuf,
+    /// `--sub`: the token's subject, `engineer` or a member's id.
+    pub sub: String,
+    /// `--engineer`: the token's `engineer` claim; set exactly when `sub` is
+    /// `engineer`.
+    pub engineer: bool,
+    /// `--seconds`, [`MIN_SECONDS`] to [`MAX_SECONDS`].
+    pub seconds: u64,
+    /// `--out`: the new file that gets the token.
+    pub out: PathBuf,
+}
+
+/// Neither the member nor a path (P6).
+impl fmt::Debug for TokenArgs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TokenArgs")
+            .field("engineer", &self.engineer)
+            .field("seconds", &self.seconds)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Reads the arguments after `token`. `Err` is the usage error; it names
+/// flags, never a value.
+pub fn parse_args(args: &[String]) -> Result<TokenArgs, String> {
+    let mut jwt_secret_file = None;
+    let mut sub = None;
+    let mut engineer = false;
+    let mut seconds = None;
+    let mut out = None;
+    let mut it = args.iter();
+    while let Some(flag) = it.next() {
+        let slot: &mut Option<String> = match flag.as_str() {
+            "--engineer" => {
+                if engineer {
+                    return Err("--engineer is given twice".to_owned());
+                }
+                engineer = true;
+                continue;
+            }
+            "--jwt-secret-file" => &mut jwt_secret_file,
+            "--sub" => &mut sub,
+            "--seconds" => &mut seconds,
+            "--out" => &mut out,
+            _ => return Err("unknown argument (see the usage)".to_owned()),
+        };
+        if slot.is_some() {
+            return Err(format!("{flag} is given twice"));
+        }
+        match it.next() {
+            Some(value) if !value.starts_with("--") => *slot = Some(value.clone()),
+            _ => return Err(format!("{flag} needs a value")),
+        }
+    }
+    let jwt_secret_file = jwt_secret_file.ok_or("--jwt-secret-file is required")?;
+    if jwt_secret_file.is_empty() {
+        return Err("--jwt-secret-file needs a path".to_owned());
+    }
+    let sub = sub.ok_or("--sub is required")?;
+    if !valid_member(&sub) {
+        return Err("--sub must be 1 to 64 letters, digits, '_' or '-'".to_owned());
+    }
+    match (sub == ENGINEER, engineer) {
+        (true, false) => return Err(format!("--sub {ENGINEER} needs --engineer")),
+        (false, true) => return Err(format!("--engineer is for --sub {ENGINEER} only")),
+        _ => {}
+    }
+    let seconds = seconds
+        .ok_or("--seconds is required")?
+        .parse::<u64>()
+        .ok()
+        .filter(|s| (MIN_SECONDS..=MAX_SECONDS).contains(s))
+        .ok_or_else(|| {
+            format!("--seconds must be a whole number from {MIN_SECONDS} to {MAX_SECONDS}")
+        })?;
+    let out = out.ok_or("--out is required")?;
+    if out.is_empty() {
+        return Err("--out needs a path".to_owned());
+    }
+    Ok(TokenArgs {
+        jwt_secret_file: PathBuf::from(jwt_secret_file),
+        sub,
+        engineer,
+        seconds,
+        out: PathBuf::from(out),
+    })
+}
+
+/// A token's claims: the server's `AuthClaims` (`iem_core`; the tests read
+/// the tokens back into it).
+#[derive(Serialize)]
+struct Claims<'a> {
+    sub: &'a str,
+    engineer: bool,
+    exp: u64,
+    iat: u64,
+}
+
+/// The token for `sub` as the server's login issues one
+/// (`iem_server::auth::issue_token`: the default header, HS256, the
+/// secret's bytes), issued at the Unix second `now` and valid for `seconds`.
+/// A token that cannot be signed with the secret is `secret-unreadable`
+/// (not seen with HS256).
+pub fn token(
+    secret: &Secret,
+    sub: &str,
+    engineer: bool,
+    now: u64,
+    seconds: u64,
+) -> Result<String, Reason> {
+    let claims = Claims {
+        sub,
+        engineer,
+        exp: now + seconds,
+        iat: now,
+    };
+    let key = EncodingKey::from_secret(secret.0.as_bytes());
+    jsonwebtoken::encode(&Header::default(), &claims, &key).map_err(|_| Reason::SecretUnreadable)
+}
+
+/// Why `iem-soakclient token` wrote no token: a fixed code, never a value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MintError {
+    /// `--jwt-secret-file` is missing, unreadable, not UTF-8 or blank (as
+    /// for the soak, [`read_secret`]), or the token could not be signed.
+    SecretUnreadable,
+    /// `--out` exists already, or could not be created or written.
+    TokenUnwritable,
+}
+
+impl MintError {
+    pub fn code(self) -> &'static str {
+        match self {
+            MintError::SecretUnreadable => "secret-unreadable",
+            MintError::TokenUnwritable => "token-unwritable",
+        }
+    }
+}
+
+/// Reads the secret, signs the token at the Unix second `now` and writes
+/// it to `args.out` ([`write_token`]). The secret is read first: an
+/// unreadable one creates no file.
+pub fn run(args: &TokenArgs, now: u64) -> Result<(), MintError> {
+    let secret = read_secret(&args.jwt_secret_file).map_err(|_| MintError::SecretUnreadable)?;
+    let token = token(&secret, &args.sub, args.engineer, now, args.seconds)
+        .map_err(|_| MintError::SecretUnreadable)?;
+    write_token(&args.out, &token).map_err(|_| MintError::TokenUnwritable)
+}
+
+/// Writes `token` alone to `path`, a NEW file: one that exists (a symlink
+/// too) is never written through or replaced. On Unix it is created
+/// owner-only (0600); on Windows it takes its folder's permissions (the ops
+/// runner's work folder, its user's). A file that could not be written
+/// whole is removed, so a part of a token never stays behind.
+pub fn write_token(path: &Path, token: &str) -> io::Result<()> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    let written = file
+        .write_all(token.as_bytes())
+        .and_then(|()| file.sync_all());
+    if let Err(e) = written {
+        drop(file);
+        // The write's own error is the one reported; a part left behind
+        // holds no whole token and is refused as existing by the next run.
+        let _ = fs::remove_file(path);
+        return Err(e);
+    }
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {
