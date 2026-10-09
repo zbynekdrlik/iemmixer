@@ -60,6 +60,17 @@ test.describe("Service Worker — PWA with hashed asset caching", () => {
     expect(swRegistered).toBe("active");
   });
 
+  // A browser asks /favicon.ico for any page without its own icon link (the live
+  // specs store the login from /api/version, a JSON page): a 404 there is a console
+  // error on the real PC (#10, the second live run). The server answers with the app icon.
+  test("the server answers /favicon.ico with the app icon", async ({ request }) => {
+    const fav = await request.get(`${BASE_URL}/favicon.ico`);
+    expect(fav.status()).toBe(200);
+    expect(fav.headers()["content-type"]).toBe("image/png");
+    const icon = await request.get(`${BASE_URL}/icon-192.png`);
+    expect(Buffer.compare(await fav.body(), await icon.body())).toBe(0);
+  });
+
   test("the worker's asset pattern matches every Trunk hash length", async ({
     request,
   }) => {
