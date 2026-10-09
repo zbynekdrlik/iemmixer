@@ -231,16 +231,29 @@ class DispatchLiveTests(LiveBase):
         self.assertEqual(code, 0, err)
 
     def test_an_unreadable_live_record_counts_as_running(self) -> None:
-        """Fail safe: a record whose time, or whose dev entry, cannot be read
-        may still run; a record file of another shape is an error to check by
-        hand, never read as none."""
+        """Fail safe: a record whose time cannot be read may still run, one
+        whose dev entry cannot be read may be of this entry (its window still
+        bounds it); the refusal says to check the file by hand. A record file
+        of another shape is an error to check by hand, never read as none."""
         for rec in (run_record(sha=SHA2, at="later"), run_record(sha=SHA2, at=None),
                     run_record(sha=SHA2, at="2026-10-09T10:00:00"),   # no zone: whose clock?
-                    run_record(sha=SHA2, seconds_ago=live.WINDOW_S + 60, entry=None),
-                    run_record(sha=SHA2, seconds_ago=live.WINDOW_S + 60, entry="0"),
-                    run_record(sha=SHA2, seconds_ago=live.WINDOW_S + 60, entry=True)):
+                    run_record(sha=SHA2, at="later", entry=None),
+                    run_record(sha=SHA2, entry=None), run_record(sha=SHA2, entry="0"),
+                    run_record(sha=SHA2, entry=True)):
             self.write_runs([rec])
-            self.refused_before_any_call("a live run dispatched in this dev entry may still run", rec)
+            err = self.refused_before_any_call("a live run dispatched in this dev entry may still run", rec)
+            self.assertIn(f"its time or dev entry cannot be read: check {ip.state_dir() / 'live.json'} by hand",
+                          err, rec)
+        # A readable record names no such hint.
+        self.write_runs([run_record(sha=SHA2)])
+        err = self.refused_before_any_call("a live run dispatched in this dev entry may still run")
+        self.assertNotIn("cannot be read", err)
+        # Past its window an unreadable entry no longer counts: its time is known.
+        for bad in (None, "0", True):
+            self.write_runs([run_record(sha=SHA2, seconds_ago=live.WINDOW_S + 60, entry=bad)])
+            self.pc.calls.clear()
+            code, _, err = self.live()
+            self.assertEqual(code, 0, (bad, err))
         path = ip.state_dir() / "live.json"
         for text in ("[]", "not json", json.dumps({"runs": {"sha": SHA}}), json.dumps({"runs": [SHA]}),
                      json.dumps({"runs": None})):
