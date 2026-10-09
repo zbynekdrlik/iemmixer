@@ -4,6 +4,8 @@ import { test, expect } from "./support/fixtures";
 import { BurstWatch } from "./live/support/burst";
 import { Desk, LiveMixer, RESTORE_MS, type Cmd } from "./live/support/desk";
 import { SILENT_PEAK, continuity, dbOf, median, spread, talkbackLevel } from "./live/support/series";
+import { runMarker } from "./live/support/env";
+import { endpointOf, isPostTo, redacted } from "./live/support/push";
 
 // The live specs' support (S7, #10), run in the mock E2E job: the live specs
 // themselves run only from the ops live run, against the real PC. The burst
@@ -597,4 +599,59 @@ test("the mixer reads meters by arrival, the louder side, and a server close fai
   expect(() => mixer.check()).toThrow("the server closed the test socket (no reconnect)");
   expect(() => mixer.send(cmd("a"))).toThrow("the server closed the test socket (no reconnect)");
   expect(socket.sent).toEqual([]);
+});
+
+test("the run's marker is built from the run id and attempt, and a refusal names the variable, never its value", () => {
+  expect(runMarker({ GITHUB_RUN_ID: "18342255120", GITHUB_RUN_ATTEMPT: "2" })).toBe(
+    "iemmixer-live-marker-18342255120-2",
+  );
+  expect(() => runMarker({ GITHUB_RUN_ATTEMPT: "1" })).toThrow("GITHUB_RUN_ID is not set");
+  expect(() => runMarker({ GITHUB_RUN_ID: "", GITHUB_RUN_ATTEMPT: "1" })).toThrow("GITHUB_RUN_ID is not set");
+  expect(() => runMarker({ GITHUB_RUN_ID: "7" })).toThrow("GITHUB_RUN_ATTEMPT is not set");
+  for (const bad of ["1 ", "-1", "1.5", "1e3", "0x1f", "1;zyxqwvn", "1".repeat(21)]) {
+    let message = "";
+    try {
+      runMarker({ GITHUB_RUN_ID: "7", GITHUB_RUN_ATTEMPT: bad });
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    expect(message, `attempt ${JSON.stringify(bad)}`).toBe("GITHUB_RUN_ATTEMPT is not a run number (digits)");
+  }
+  expect(() => runMarker({ GITHUB_RUN_ID: "zyxqwvn", GITHUB_RUN_ATTEMPT: "1" })).toThrow(
+    "GITHUB_RUN_ID is not a run number (digits)",
+  );
+});
+
+test("a push body's endpoint is read only as an https:// URL", () => {
+  const endpoint = "https://push.example.invalid/send/zyxqwvn";
+  expect(endpointOf({ endpoint, keys: { p256dh: "k", auth: "a" } })).toBe(endpoint);
+  expect(endpointOf({ endpoint })).toBe(endpoint);
+  expect(endpointOf({ endpoint: "http://push.example.invalid/send/zyxqwvn" })).toBeNull();
+  expect(endpointOf({ endpoint: "not a url" })).toBeNull();
+  expect(endpointOf({ endpoint: 7 })).toBeNull();
+  expect(endpointOf({})).toBeNull();
+  expect(endpointOf(null)).toBeNull();
+  expect(endpointOf(endpoint)).toBeNull();
+});
+
+test("a push request is a POST to the route's path, whatever its host or query", () => {
+  const req = (method: string, url: string) => ({ method: () => method, url: () => url });
+  const path = "/api/push/subscribe";
+  expect(isPostTo(req("POST", "https://mixer.example.org/api/push/subscribe"), path)).toBe(true);
+  expect(isPostTo(req("POST", "http://10.0.0.10/api/push/subscribe?x=1"), path)).toBe(true);
+  expect(isPostTo(req("GET", "https://mixer.example.org/api/push/subscribe"), path)).toBe(false);
+  expect(isPostTo(req("POST", "https://mixer.example.org/api/push/unsubscribe"), path)).toBe(false);
+  expect(isPostTo(req("POST", "https://mixer.example.org/api/push/subscribe/x"), path)).toBe(false);
+  expect(isPostTo(req("POST", "not a url"), path)).toBe(false);
+});
+
+test("a console line keeps its words and loses every URL", () => {
+  expect(redacted("WebSocket connection to 'wss://mixer.example.org/ws/engineer?token=zyxqwvn' failed")).toBe(
+    "WebSocket connection to '<url>' failed",
+  );
+  expect(redacted("[push] a: https://push.example.invalid/send/zyxqwvn b: http://10.0.0.10/x")).toBe(
+    "[push] a: <url> b: <url>",
+  );
+  expect(redacted('fetch "HTTPS://Mixer.example.org/api/auth" failed')).toBe('fetch "<url>" failed');
+  expect(redacted("[push] engineer subscribed to Web Push")).toBe("[push] engineer subscribed to Web Push");
 });
