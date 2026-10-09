@@ -256,6 +256,24 @@ pub fn reopen_us(took: Duration) -> u64 {
     u64::try_from(took.as_micros()).unwrap_or(u64::MAX).max(1)
 }
 
+/// What follows a stream the owner stopped (the ASIO backend's `finish`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Then {
+    /// Another open (a reopen): the preference window stays held.
+    Reopen,
+    /// Nothing: the card is released for good and the window closes.
+    Release,
+}
+
+/// What `finish` does once no callback is inside the stopped stream (S7,
+/// #10): `asked`, unless the stream faulted. The backend marks a panic at
+/// the end of the faulting callback (after its time), so a reopen the owner
+/// decided before that mark finds it only here: a faulted processor is
+/// never handed to a new stream, its card is released for good.
+pub fn then_after_stop(asked: Then, faulted: bool) -> Then {
+    if faulted { Then::Release } else { asked }
+}
+
 /// How a stream ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopOutcome {
