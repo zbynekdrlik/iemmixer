@@ -55,8 +55,8 @@ fn status_carries_the_faulting_callbacks_time_in_microseconds() {
 }
 
 /// The tick that sees the fault broadcasts a `Status` with the faulting
-/// callback's time first, then the `Fault` alarm, then `DriverReleased`:
-/// the last word stays the driver's release.
+/// callback's time first, then the fault's save (`Saved`), the `Fault`
+/// alarm and `DriverReleased`: the last word stays the driver's release.
 #[cfg(unix)]
 #[test]
 fn a_fault_sends_a_last_status_with_the_faulting_callbacks_time() {
@@ -93,20 +93,20 @@ fn a_fault_sends_a_last_status_with_the_faulting_callbacks_time() {
         (last.callbacks, last.fault_callback_us, last.process_max_us),
         (3, 412.0, 412.0)
     );
-    let tail = msgs.len().checked_sub(3).map(|at| &msgs[at..]);
-    assert_eq!(
-        tail,
-        Some(
-            &[
-                EngineMsg::Status(last.clone()),
+    // `fault()` saves first: the save's `Saved` comes between them.
+    let tail = msgs.len().checked_sub(4).map(|at| &msgs[at..]);
+    assert!(
+        matches!(
+            tail,
+            Some([
+                EngineMsg::Status(s),
+                EngineMsg::Saved { .. },
                 EngineMsg::Alarm(Alarm {
                     code: AlarmCode::Fault,
-                    detail: "boom".into(),
+                    detail,
                 }),
-                EngineMsg::DriverReleased {
-                    reason: "fault".into(),
-                },
-            ][..]
+                EngineMsg::DriverReleased { reason },
+            ]) if s == last && detail == "boom" && reason == "fault"
         ),
         "{msgs:?}"
     );

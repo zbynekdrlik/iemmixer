@@ -178,7 +178,8 @@ pub struct StreamStats {
     /// S7 HIL v2: the faulting callback's own time in ns, its entry to its
     /// return with the caught panic, the span `max_process_ns` measures; 0
     /// while no callback faulted (a fault the backend raised itself, e.g.
-    /// the reopen budget, has none).
+    /// the reopen budget, has none, and so has a structured exception, whose
+    /// callback never returns).
     pub fault_callback_ns: u64,
 }
 
