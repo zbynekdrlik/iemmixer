@@ -57,7 +57,7 @@ use crate::hist::{HistSnapshot, StreamHists};
 use crate::messages::{self, Messages, TOPICS};
 use crate::os;
 pub use crate::owner::StopOutcome;
-use crate::owner::{self, Asked, OpenPeriod, SehRelease, SehStep, Watchdog};
+use crate::owner::{self, Asked, OpenPeriod, SehRelease, SehStep, Then, Watchdog};
 use crate::period::PeriodVerdict;
 use crate::reset::{ResetBudget, Verdict};
 use crate::rtpanic;
@@ -1142,15 +1142,6 @@ struct Prepared {
     buffers: Vec<[*mut c_void; 2]>,
 }
 
-/// What follows a finished stream.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Then {
-    /// Another open (a reopen): the preference window stays held.
-    Reopen,
-    /// Nothing: the card is released for good and the window closes.
-    Release,
-}
-
 /// The started stream, owned by the owner thread.
 struct Live {
     card: Card,
@@ -1552,14 +1543,26 @@ impl Owner {
         Ok(())
     }
 
+    /// [`Owner::stop_stream`] for a stream that ends for good: the carry.
+    fn finish(&mut self, live: Live, then: Then) -> Option<Carry> {
+        self.stop_stream(live, then).map(|(carry, _)| carry)
+    }
+
     /// Stops the stream, waits until no callback is inside it (bounded by
     /// [`STOP_WAIT`], pumping), disposes the buffers and releases the driver
     /// ([`Owner::release_card`]: with `Then::Release` the preference window
-    /// closes before `RELEASED` is set); returns the carry. `None` when a
-    /// callback stayed inside (R6): the stream and the driver are left alone,
-    /// never freed under a callback, the preference window stays held (the
-    /// card may be), and the owner is done (parked).
-    fn finish(&mut self, live: Live, then: Then) -> Option<Carry> {
+    /// closes before `RELEASED` is set); returns the carry and what followed
+    /// the release. `None` when a callback stayed inside (R6): the stream and
+    /// the driver are left alone, never freed under a callback, the
+    /// preference window stays held (the card may be), and the owner is done
+    /// (parked).
+    ///
+    /// The stream's `faulted` is read again once no callback is inside it
+    /// (S7, #10): a callback marks its panic at its end, after `watch` may
+    /// have decided on a reopen. A faulted stream is noted as `watch` notes
+    /// it and released for good (`owner::then_after_stop`): the panicked
+    /// processor is never opened again.
+    fn stop_stream(&mut self, live: Live, then: Then) -> Option<(Carry, Then)> {
         let Live { card, backend, .. } = live;
         let _ = card.driver().stop();
         BACKEND.store(ptr::null_mut(), Ordering::SeqCst);
@@ -1589,10 +1592,19 @@ impl Owner {
         // inside it, so this is the only reference; it came from Box::into_raw.
         let stream = unsafe { Box::from_raw(backend) };
         self.base = self.base.plus(stream.telemetry.counters());
+        let faulted = self.note_fault(&stream);
+        let then_now = owner::then_after_stop(then, faulted);
+        if then_now != then {
+            error!(
+                "[{}] the audio callback faulted while the card was stopped for a reopen: no \
+                 reopen, the card is released for good",
+                when()
+            );
+        }
         let _ = card.driver().dispose_all_buffers();
         let Backend { carry, .. } = *stream;
-        self.release_card(card, then);
-        Some(carry.into_inner())
+        self.release_card(card, then_now);
+        Some((carry.into_inner(), then_now))
     }
 
     /// Drops the driver instance (the driver is released), then, when no open
@@ -1696,20 +1708,29 @@ impl Owner {
         note(&self.shared.fault, why);
     }
 
+    /// Whether the stream faulted (a panic in the callback, or the owner's
+    /// own fault); a fault is noted in `shared` once: the faulting callback's
+    /// time first, since the control thread reads it once it sees `faulted`
+    /// (0 for the owner's own fault), then `faulted` and the panic's place.
+    fn note_fault(&self, b: &Backend) -> bool {
+        if !b.faulted.load(Ordering::Acquire) {
+            return false;
+        }
+        self.shared
+            .fault_ns
+            .store(b.fault_ns.load(Ordering::Relaxed), Ordering::Release);
+        if !self.shared.faulted.swap(true, Ordering::SeqCst) {
+            note(&self.shared.fault, panic_text());
+        }
+        true
+    }
+
     /// One look at the live stream: a panic in the callback, then the reopen
     /// question and its reasons.
     fn watch(&mut self, live: &mut Live, now: Instant) -> Option<(Asked, Verdict)> {
         // SAFETY: the stream is live.
         let b = unsafe { &*live.backend };
-        if b.faulted.load(Ordering::Acquire) {
-            // The faulting callback's time first: the control thread reads it
-            // once it sees `faulted` (0 for the owner's own fault).
-            self.shared
-                .fault_ns
-                .store(b.fault_ns.load(Ordering::Relaxed), Ordering::Release);
-            if !self.shared.faulted.swap(true, Ordering::SeqCst) {
-                note(&self.shared.fault, panic_text());
-            }
+        if self.note_fault(b) {
             return None;
         }
         let requested = b.telemetry.take_requests();
@@ -1735,9 +1756,16 @@ impl Owner {
     /// stream, to the new stream's measured period: `last_reopen_us`.
     fn reopen(&mut self, live: Live) {
         let began = Instant::now();
-        let Some(carry) = self.finish(live, Then::Reopen) else {
+        let Some((carry, then)) = self.stop_stream(live, Then::Reopen) else {
             return;
         };
+        if then == Then::Release {
+            // The processor panicked while the reopen was decided (S7, #10):
+            // the fault is noted and the card released for good (the window
+            // closed); the control thread ends the engine.
+            self.carry = Some(carry);
+            return;
+        }
         if self.shared.release_pending.load(Ordering::SeqCst) {
             // The session ended during the finish: no new open (the next
             // tick releases for good and closes the window).

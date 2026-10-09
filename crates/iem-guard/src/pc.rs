@@ -464,16 +464,30 @@ pub struct Status {
     /// `(bucket µs, count)` pairs, ascending.
     pub interval_hist: Vec<(u32, u64)>,
     pub process_hist: Vec<(u32, u64)>,
+    // S7 HIL v2 (#10), from the engine's `Status`; an older engine's are 0.
+    /// The last driver reopen, from the old stream's stop to the new one's
+    /// measured period, in µs; 0 before any.
+    pub last_reopen_us: u64,
+    /// The faulting callback's own time in µs; 0 while not faulted.
+    pub fault_callback_us: f64,
 }
 
 /// The running engine as the guard's supervisor connection saw it last
 /// (the guard's `Reply.engine`, design §7): the hello's build in
-/// `status.build`, the newest status, and whether the engine's control
-/// pipe's DACL reads back private (the user and SYSTEM only).
+/// `status.build`, the newest status, whether the engine's control pipe's
+/// DACL reads back private (the user and SYSTEM only), the process serving
+/// the supervisor connection's pipe, and the last fault the guard kept.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct EngineSeen {
     pub status: Status,
     pub pipe_private: bool,
+    /// `GetNamedPipeServerProcessId` on the supervisor connection, read once
+    /// per engine process like the DACL (S7 HIL v2); none while unread.
+    pub pipe_server_pid: Option<u32>,
+    /// The faulting callback's time of the last faulted `Status` this guard
+    /// read (`effects::engine::fault_time`), kept across the respawn (S7 HIL
+    /// v2); none before any.
+    pub last_fault_us: Option<f64>,
 }
 
 /// The PC as the guard sees and changes it. No method ends a process.
@@ -867,6 +881,8 @@ pub mod fake {
                     hist_top_us: 0,
                     interval_hist: Vec::new(),
                     process_hist: Vec::new(),
+                    last_reopen_us: 0,
+                    fault_callback_us: 0.0,
                 },
                 pref_attempts: 0,
                 pref_value: "32".into(),
@@ -892,6 +908,8 @@ pub mod fake {
                         ..Status::default()
                     },
                     pipe_private: true,
+                    pipe_server_pid: None,
+                    last_fault_us: None,
                 },
                 engine_up: true,
                 subscriptions: Some(1),
