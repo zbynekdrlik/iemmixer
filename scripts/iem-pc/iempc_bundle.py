@@ -232,6 +232,28 @@ def extract_member(sha: str, rec: dict, name: str, nested: bool = False) -> tupl
     return out, want
 
 
+def stage_modules(ctx: Ctx, sha: str, rec: dict, stage, event: str) -> tuple[str, dict[str, str]]:
+    """The bundle's modules `stage` names, as (bundle member, stage name)
+    pairs, the ones the last one imports from its own folder first (#15
+    ssh-shell, #11 cutover): each checked again against the zip's sums and
+    uploaded by scp into bootstrap/<sha> of the PC's root. Returns the
+    statements that stage them admin-only on the PC in that order and import
+    the last one from its stage copy only (module_script's `pre`,
+    elevated_ps.staged), and each one's sha256 by stage name."""
+    ep = core.elevated_ps()
+    rel = f"bootstrap/{sha}"
+    uploads, mods, sums = [], [], {}
+    for member, name in stage:
+        local, hexd = extract_member(sha, rec, member, nested="/" in member)
+        uploads.append((local, name))
+        mods.append((core.ps_quote(core.pc_join(ctx.env["PC_ROOT"], f"{rel}/{name}")), name, hexd))
+        sums[name] = hexd
+    core.pc_mkdir(ctx, rel, event)
+    for local, name in uploads:
+        core.scp(str(local), core.remote(ctx.env, f"{rel}/{name}"), event)
+    return f"{ep.staged(mods)} ; Import-Module $iemMod -Force ; ", sums
+
+
 def fetch_bundle(sha: str, branch: str | None = None) -> tuple[dict, bool]:
     """(record, fetched now). A fetched bundle is reused after its digest check."""
     rec = load_record(sha)

@@ -61,9 +61,12 @@ pub struct GuardState {
     /// every activation's build (S8 design note §3.4), so `current` was its
     /// active bundle and `previous` the one before. Read only for a state
     /// such a guard saved ([`GuardState::active_bundle`],
-    /// [`GuardState::way_back_bundle`]); never written since S8. An older guard
-    /// that takes over finds it as it last wrote it, so it runs the bundle
-    /// that was active then, not this guard's (a known limit, `guard.md`).
+    /// [`GuardState::way_back_bundle`]). Written as a mirror since S8 lane 2
+    /// ([`GuardState::set_active`]: `current` = the active bundle,
+    /// `previous` = the way back): an older guard that takes over (a
+    /// rollback to an older bundle) runs the active bundle, not the one an
+    /// older guard last activated (the PC, 2026-10-10). Never the pin: that
+    /// is the lifecycle's, so the mirror cannot promote one early.
     pub pins: Pins,
     /// The active bundle (S8, #11): the build the engine and the server run
     /// in dev and live, and the one `bin\`'s guard came from unless an entry
@@ -80,6 +83,12 @@ pub struct GuardState {
     /// (`lifecycle::lenient`); a reset keeps it.
     #[serde(deserialize_with = "crate::lifecycle::lenient")]
     pub lifecycle: Lifecycle,
+    /// The cutover in progress (S8 lane 2, design note §3.2): saved before
+    /// each of its steps, dropped once it is done or unwound (or kept with
+    /// the steps whose undo failed). A starting guard that finds one unwinds
+    /// it before anything else (`daemon::cutover::recover`); a reset keeps
+    /// it. An older guard drops it on its next save.
+    pub cutover: Option<crate::cutover::Run>,
     /// The HIL job that began and has not ended (its run id). Kept here so
     /// a guard that hands over to a new exe inside the job (HIL activates
     /// the bundle it tests) or restarts still serves the job (design §7).
@@ -124,7 +133,8 @@ impl GuardState {
 
     /// Makes `sha` the active bundle; the one active before it becomes the
     /// way back when it is another build, else the way back stays (the rule
-    /// `Pins::promote` had for the active bundle before S8).
+    /// `Pins::promote` had for the active bundle before S8). The legacy
+    /// `pins` mirror both, for an older guard that takes over.
     pub fn set_active(&mut self, sha: &str) {
         let before = self.active_bundle().map(str::to_owned);
         let kept = self.way_back_bundle().map(str::to_owned);
@@ -134,6 +144,10 @@ impl GuardState {
             before
         };
         self.active = Some(sha.to_owned());
+        self.pins = Pins {
+            current: self.active.clone(),
+            previous: self.way_back.clone(),
+        };
     }
 
     /// The mode after [`reset_to_event`]: `event`, no switch in progress and
@@ -241,6 +255,11 @@ mod tests {
             active: None,
             way_back: None,
             lifecycle: Lifecycle::Trial,
+            cutover: Some(crate::cutover::Run {
+                build: "a".repeat(40),
+                since: 1_790_000_250,
+                begun: vec![crate::cutover::CutStep::Import],
+            }),
             job: Some(4242),
             pref_held: Some(
                 "REAPER runs with the preferred buffer at 32; it is restored at REAPER's next start"
@@ -480,6 +499,8 @@ mod tests {
         assert_eq!(st.pids, before.pids);
         assert_eq!(st.pref_held, before.pref_held);
         assert_eq!(st.logon_seen, before.logon_seen);
+        // A cutover cut off by the reboot is the start's to unwind.
+        assert_eq!(st.cutover, before.cutover);
     }
 
     /// S7 (#10): the last switch is saved with the state, and a reset (a

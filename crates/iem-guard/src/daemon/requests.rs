@@ -9,6 +9,7 @@ use std::sync::mpsc::SyncSender;
 use tracing::info;
 
 use super::activation::{activate, install_site};
+use super::cutover::cutover;
 use super::hil::{
     inject_fault, inject_park, inject_seh, job_begin, job_end, report, runner_stop, test_signal,
 };
@@ -38,7 +39,7 @@ pub struct Job {
 fn stale(req: &Request, seen: Generation, v: &View) -> Option<Reply> {
     match req {
         Request::Status | Request::Subscribe => None,
-        Request::Dev { .. } | Request::Live { .. } => {
+        Request::Dev { .. } | Request::Live { .. } | Request::Cutover { .. } => {
             (seen.fence != v.fence).then(|| v.reply(false, &fenced(seen, v)))
         }
         _ if seen.epoch == v.epoch => None,
@@ -105,11 +106,12 @@ pub fn handle(pc: &mut dyn Pc, g: &mut Guard, req: Request, seen: Generation) ->
             g,
             Entry {
                 to: Mode::Live,
-                build: Some(build),
+                build,
                 trial,
                 dry_run,
             },
         ),
+        Request::Cutover { build, dry_run } => cutover(pc, g, &build, dry_run),
         Request::Install { zip } => install_bundle(g, Path::new(&zip)),
         Request::Activate { sha } => activate(pc, g, &sha),
         Request::TestSignal {

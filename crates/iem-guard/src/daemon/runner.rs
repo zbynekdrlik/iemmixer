@@ -11,6 +11,7 @@ use super::{Guard, Outcome, READY_S, mode_name, reaper};
 use crate::cancel::Cancel;
 use crate::crash;
 use crate::handover::{self, Audio};
+use crate::lifecycle::Lifecycle;
 use crate::pc::{Pc, PrefSeen, R, Status, StepError};
 use crate::plan::{Health, Mode, OnError, Step, on_error, plan};
 use crate::state::Switching;
@@ -335,7 +336,9 @@ pub(super) fn run_step(pc: &mut dyn Pc, g: &mut Guard, step: Step, to: Mode) -> 
             pc.engine_arm()
         }
         Step::ServerStart => {
-            let pid = pc.server_start(to)?;
+            // In prod the cutover's `pin_changes = true` is allowed (S8).
+            let prod = matches!(g.state.lifecycle, Lifecycle::Prod(_));
+            let pid = pc.server_start(to, prod)?;
             g.info(format!("server started (pid {pid})"));
             Ok(())
         }

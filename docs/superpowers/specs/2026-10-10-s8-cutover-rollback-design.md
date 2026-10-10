@@ -30,6 +30,8 @@ Refuses unless: `Trial`, the build is the active main bundle with green `hil/iem
 1. final import of the saved REAPER project (as `data_live`), state saved as a generation;
 2. export the predecessor's autostart values (task XML, run keys) to `<root>\cutover\autostarts-<ts>`, then disable them;
 3. the guard task gets its logon trigger;
+
+(Lane 2 as built, its review: steps 2 and 3 run the other way round, the logon trigger first, so at every moment the next boot starts the predecessor or the guard; the export lives in the elevated root, `<elevated root>\cutover\autostarts-<since>`, `<since>` being `Prod.since`; `.claude/rules/guard.md` holds its format.)
 4. `pin_changes = true` allowed in the server's config;
 5. lifecycle `Prod { since, pin = build }`, persisted and read back;
 6. post-cutover checks: identity (LAN, public host), engine on the card at 32, a member page loads.

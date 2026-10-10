@@ -133,22 +133,6 @@ def parse_probe(ip, r, wanted: str | None = None) -> dict:
     return {"shell": shell, "line": line}
 
 
-def staged_import(ctx, ip, sha: str, rec: dict) -> tuple[list, str, dict[str, str]]:
-    """The bundle's three modules (their sums checked again), the statements
-    that stage them on the PC in STAGE's order and import the new one from its
-    stage copy only (module_script's `pre`), and each one's sha256 by stage
-    name (Set copies them for its undo task only as these bytes)."""
-    ep = ip.elevated_ps()
-    rel = f"bootstrap/{sha}"
-    uploads, mods, sums = [], [], {}
-    for member, name in STAGE:
-        local, hexd = ip.extract_member(sha, rec, member, nested="/" in member)
-        uploads.append((local, name))
-        mods.append((ip.ps_quote(ip.pc_join(ctx.env["PC_ROOT"], f"{rel}/{name}")), name, hexd))
-        sums[name] = hexd
-    return uploads, f"{ep.staged(mods)} ; Import-Module $iemMod -Force ; ", sums
-
-
 def set_body(sums: dict[str, str]) -> str:
     """Set-IemSshShell with the modules' sha256 (names and lowercase hex only)."""
     for name, hexd in sums.items():
@@ -169,11 +153,8 @@ def run(ctx, ip) -> int:
         return 0
     env = ctx.env
     mode = ctx.watch(abandon=False)
-    uploads, pre, sums = staged_import(ctx, ip, sha, rec)
-    rel = f"bootstrap/{sha}"
-    ip.pc_mkdir(ctx, rel, mode)
-    for local, name in uploads:
-        ip.scp(str(local), ip.remote(env, f"{rel}/{name}"), mode)
+    # Set copies the modules for its undo task only as these sums.
+    pre, sums = ip.stage_modules(ctx, sha, rec, STAGE, mode)
     try:
         s = check_set(ip, ip.run_module(env, set_body(sums), ip.BOOTSTRAP_S, mode, pre=pre))
     except ip.EventNow:

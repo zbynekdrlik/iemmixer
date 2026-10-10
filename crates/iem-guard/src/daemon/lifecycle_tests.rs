@@ -24,9 +24,21 @@ fn other_pinned() -> Pins {
     }
 }
 
+/// The legacy record as this guard writes it (lane 2, the PC on
+/// 2026-10-10): `pins.current` mirrors the active bundle and `pins.previous`
+/// the way back, so an older guard that takes over runs the active bundle.
+/// The pin itself is the lifecycle's.
+fn mirrored(active: &str, way_back: Option<&str>) -> Pins {
+    Pins {
+        current: Some(active.into()),
+        previous: way_back.map(str::to_owned),
+    }
+}
+
 /// The pin bug (design §3.4): every dev or live entry promoted its build to
 /// the pin before any HIL result. An entry runs its build and leaves the
-/// pins as they were: a dev entry with a build, and a live trial.
+/// pin (the lifecycle's) as it was: a dev entry with a build, and a live
+/// trial. The legacy pins only mirror the active bundle and the way back.
 #[test]
 fn an_entry_never_promotes_the_pin() {
     let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Event));
@@ -41,10 +53,11 @@ fn an_entry_never_promotes_the_pin() {
     let r = handle(&mut pc, &mut g, dev, INIT);
     assert!(r.ok, "{r:?}");
     assert_eq!(g.state.mode, Mode::Dev);
+    assert_eq!(g.state.lifecycle, Lifecycle::Trial, "a dev entry pinned");
     assert_eq!(
         g.state.pins,
-        other_pinned(),
-        "a dev entry promoted its build"
+        mirrored(SHA, Some(OTHER)),
+        "the legacy pins mirror the active bundle and the way back"
     );
     assert_eq!(pc.bundle.as_deref(), Some(SHA), "the entry runs its build");
     let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
@@ -53,20 +66,21 @@ fn an_entry_never_promotes_the_pin() {
         .bundles
         .insert(SHA.into(), record(SHA, "main", Hil::Green));
     let trial = Request::Live {
-        build: SHA.into(),
+        build: Some(SHA.into()),
         trial: true,
         dry_run: false,
     };
     let r = handle(&mut pc, &mut g, trial, INIT);
     assert!(r.ok, "{r:?}");
     assert_eq!(g.state.mode, Mode::Live);
-    assert_eq!(g.state.pins, other_pinned(), "a trial promoted its build");
+    assert_eq!(g.state.lifecycle, Lifecycle::Trial, "a trial pinned");
+    assert_eq!(g.state.pins, mirrored(SHA, Some(OTHER)));
     assert_eq!(pc.bundle.as_deref(), Some(SHA));
 }
 
 /// `activate` makes its bundle the active one for dev (the engine and the
 /// server run it, the bundle before it keeps its Defender exclusions) and
-/// leaves the pins as they were.
+/// leaves the pin as it was; the legacy pins mirror the active bundle.
 #[test]
 fn an_activation_never_promotes_the_pin() {
     let dir = tempfile::tempdir().unwrap();
@@ -78,7 +92,8 @@ fn an_activation_never_promotes_the_pin() {
     let mut pc = FakePc::new(iemmixer_up());
     let r = handle(&mut pc, &mut g, Request::Activate { sha: SHA.into() }, INIT);
     assert!(r.ok, "{r:?}");
-    assert_eq!(g.state.pins, other_pinned(), "activate promoted its bundle");
+    assert_eq!(g.state.lifecycle, Lifecycle::Trial, "activate pinned");
+    assert_eq!(g.state.pins, mirrored(SHA, Some(OTHER)));
     assert_eq!(pc.bundle.as_deref(), Some(SHA));
     assert_eq!(pc.excluded, [(SHA.to_owned(), vec![OTHER.to_owned()])]);
 }
@@ -106,7 +121,7 @@ fn an_entry_s_build_stays_the_active_bundle_after_a_guard_restart() {
     assert_eq!(start(&mut pc, &mut g, 0), None);
     assert_eq!(g.state.mode, Mode::Dev);
     assert_eq!(pc.bundle.as_deref(), Some(SHA));
-    assert_eq!(g.state.pins, other_pinned());
+    assert_eq!(g.state.pins, mirrored(SHA, Some(OTHER)));
 }
 
 // ---- prod (test-only state: nothing in this lane sets it) ----
@@ -264,7 +279,7 @@ fn in_prod_a_failed_live_entry_keeps_the_pin_and_the_session() {
     }
     pc.fail(Call::Data, "iem-migrate band ended with Some(1)");
     let live = Request::Live {
-        build: NEW.into(),
+        build: Some(NEW.into()),
         trial: false,
         dry_run: false,
     };
@@ -296,7 +311,7 @@ fn an_entry_then_an_activation_of_its_build_keeps_the_way_back_s_exclusions() {
     assert!(r.ok, "{r:?}");
     assert_eq!(pc.excluded, [(SHA.to_owned(), vec![OTHER.to_owned()])]);
     assert_eq!(g.state.way_back_bundle(), Some(OTHER));
-    assert_eq!(g.state.pins, other_pinned());
+    assert_eq!(g.state.pins, mirrored(SHA, Some(OTHER)));
 }
 
 /// In prod an "ide event" stands across a guard restart: the band's system
@@ -372,7 +387,7 @@ fn in_prod_maintenance_ends_with_its_green_build_as_the_pin() {
             .insert(sha.into(), record(sha, "main", Hil::Green));
     }
     let live = |build: &str, trial| Request::Live {
-        build: build.into(),
+        build: Some(build.into()),
         trial,
         dry_run: false,
     };
@@ -405,7 +420,7 @@ fn in_prod_maintenance_ends_with_its_green_build_as_the_pin() {
     let note = format!("maintenance build {NEW} becomes the pin; {SHA} is the previous pin");
     // The dry run says what the entry would decide, and changes nothing.
     let dry = Request::Live {
-        build: NEW.into(),
+        build: Some(NEW.into()),
         trial: false,
         dry_run: true,
     };
@@ -429,7 +444,9 @@ fn in_prod_maintenance_ends_with_its_green_build_as_the_pin() {
             maintenance: None,
         })
     );
-    assert_eq!(g.state.pins, Pins::default(), "the older record stays");
+    // The legacy record mirrors the active bundle and the way back, never
+    // the pin: an older guard taking over runs NEW.
+    assert_eq!(g.state.pins, mirrored(NEW, Some(SHA)));
 }
 
 /// A crash loop in maintenance: iemmixer stops and live runs on the pin;
@@ -512,4 +529,30 @@ fn an_activation_in_prod_keeps_the_pins_exclusions() {
     let status = status_text(&g);
     let want = format!("bundle {NEW}; prod since {T0}: pin {SHA}, previous {OTHER}");
     assert!(status.contains(&want), "{status}");
+}
+
+/// S8 lane 2: in prod `live` needs no build; it runs the pin. Before the
+/// cutover it still needs one (a trial).
+#[test]
+fn in_prod_live_without_a_build_runs_the_pin() {
+    let live = Request::Live {
+        build: None,
+        trial: false,
+        dry_run: false,
+    };
+    let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
+    g.state.lifecycle = prod_on(None, None);
+    g.state.active = Some(OTHER.into());
+    green_main(&mut g, &[SHA, OTHER]);
+    let r = handle(&mut pc, &mut g, live.clone(), INIT);
+    assert!(r.ok, "{r:?}");
+    assert_eq!(g.state.mode, Mode::Live);
+    assert_eq!(pc.bundle.as_deref(), Some(SHA));
+    assert_eq!(g.state.active_bundle(), Some(SHA));
+    assert_eq!(g.state.lifecycle, prod_on(None, None));
+    let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
+    green_main(&mut g, &[SHA]);
+    let r = handle(&mut pc, &mut g, live, INIT);
+    assert_eq!((r.ok, r.detail.as_str()), (false, "live needs --build SHA"));
+    assert_eq!(g.state.mode, Mode::Dev);
 }

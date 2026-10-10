@@ -44,9 +44,19 @@ pub enum Request {
         build: Option<String>,
         dry_run: bool,
     },
+    /// Before the cutover `build` is required (a trial on a green `main`
+    /// build); in prod it is optional and defaults to the pin (S8 lane 2).
+    /// An older iemmode's string reads as `Some`.
     Live {
-        build: String,
+        build: Option<String>,
         trial: bool,
+        dry_run: bool,
+    },
+    /// The cutover onto `build` (S8 lane 2, design note §3.2): the owner's
+    /// message only; `dry_run` names the steps and the live trial's
+    /// precheck, nothing changes.
+    Cutover {
+        build: String,
         dry_run: bool,
     },
     Install {
@@ -361,9 +371,13 @@ mod tests {
                 dry_run: false,
             },
             Request::Live {
-                build: "0123456789abcdef0123456789abcdef01234567".into(),
+                build: Some("0123456789abcdef0123456789abcdef01234567".into()),
                 trial: true,
                 dry_run: false,
+            },
+            Request::Cutover {
+                build: "0123456789abcdef0123456789abcdef01234567".into(),
+                dry_run: true,
             },
             Request::Install {
                 zip: "C:\\bundles\\iemmixer.zip".into(),

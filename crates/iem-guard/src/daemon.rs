@@ -26,7 +26,8 @@
 //! runner), `requests` (the requests and the rehearsal), `activation` (bundle
 //! and site installs, activations), `hil` (HIL's jobs, test signal and
 //! injections), `watch` (the once-a-second watch), `startup` (the start and
-//! `--direct`) and `reaper` (the REAPER handover's first part). Here: the
+//! `--direct`), `reaper` (the REAPER handover's first part) and `cutover`
+//! (the cutover's steps and unwind, S8 lane 2). Here: the
 //! [`Guard`], its files and alarms, and the request loop.
 
 use std::fs;
@@ -49,6 +50,7 @@ use crate::state::{self, GuardState};
 use crate::switch_log::Laps;
 
 mod activation;
+mod cutover;
 mod hil;
 mod reaper;
 mod reply;
@@ -456,6 +458,8 @@ pub fn serve_requests(pc: &mut dyn Pc, g: &mut Guard, jobs: &Receiver<Job>) {
 
 #[cfg(test)]
 mod activation_tests;
+#[cfg(test)]
+mod cutover_tests;
 #[cfg(test)]
 mod hil_tests;
 #[cfg(test)]

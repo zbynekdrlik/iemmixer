@@ -123,6 +123,40 @@ pub fn pins_frozen(config: &str) -> Result<(), String> {
     }
 }
 
+/// The server config a start accepts (S8 lane 2, design note §3.2 step 4):
+/// before the cutover PINs are frozen ([`pins_frozen`]); in prod `pin_changes
+/// = true` is allowed (the cutover writes it), so any config that parses.
+pub fn pin_policy(config: &str, prod: bool) -> Result<(), String> {
+    if prod {
+        toml::from_str::<toml::Table>(config)
+            .map(|_| ())
+            .map_err(|e| format!("server config: {e}"))
+    } else {
+        pins_frozen(config)
+    }
+}
+
+/// The post-cutover member page (design §3.2 step 6): LAN 80's `/` serves
+/// the mixer's page and `/api/members` lists at least one member. Each is
+/// `(status, body)`; `Some` says what fails.
+pub fn member_page_problem(index: (u16, &str), members: (u16, &str)) -> Option<String> {
+    if !is_success(index.0) || index.1.is_empty() {
+        return Some(format!(
+            "LAN 80 /: HTTP {}, {} bytes",
+            index.0,
+            index.1.len()
+        ));
+    }
+    if !is_success(members.0) {
+        return Some(format!("LAN 80 /api/members: HTTP {}", members.0));
+    }
+    match member_count(members.1) {
+        Some(n) if n > 0 => None,
+        Some(_) => Some("/api/members lists no member".to_owned()),
+        None => Some("/api/members is not a list".to_owned()),
+    }
+}
+
 /// `iem-server notify --count alarm`: the number it printed (exit 0).
 pub fn subscriptions(code: Option<i32>, stdout: &str) -> Option<u32> {
     if code == Some(0) {
@@ -306,6 +340,55 @@ mod tests {
             server_cert(config, "= broken")
                 .unwrap_err()
                 .starts_with("server config: ")
+        );
+    }
+
+    /// S8 lane 2: in prod the cutover's `pin_changes = true` is allowed;
+    /// before it only a frozen config starts the server.
+    #[test]
+    fn in_prod_pin_changes_are_allowed() {
+        for config in [
+            "pin_changes = true\n",
+            "pin_changes = false\n",
+            "port = 80\n",
+        ] {
+            assert_eq!(pin_policy(config, true), Ok(()), "{config}");
+        }
+        assert!(
+            pin_policy("= broken", true)
+                .unwrap_err()
+                .starts_with("server config: ")
+        );
+        assert_eq!(pin_policy("pin_changes = false\n", false), Ok(()));
+        assert_eq!(
+            pin_policy("pin_changes = true\n", false),
+            Err("the server config does not set pin_changes = false".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_member_page_needs_the_page_and_a_member() {
+        let one = r#"[{"id":"member1"}]"#;
+        assert_eq!(member_page_problem((200, "<html>"), (200, one)), None);
+        assert_eq!(
+            member_page_problem((404, "x"), (200, one)),
+            Some("LAN 80 /: HTTP 404, 1 bytes".into())
+        );
+        assert_eq!(
+            member_page_problem((200, ""), (200, one)),
+            Some("LAN 80 /: HTTP 200, 0 bytes".into())
+        );
+        assert_eq!(
+            member_page_problem((200, "<html>"), (500, one)),
+            Some("LAN 80 /api/members: HTTP 500".into())
+        );
+        assert_eq!(
+            member_page_problem((200, "<html>"), (200, "[]")),
+            Some("/api/members lists no member".into())
+        );
+        assert_eq!(
+            member_page_problem((200, "<html>"), (200, "{}")),
+            Some("/api/members is not a list".into())
         );
     }
 

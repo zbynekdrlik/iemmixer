@@ -258,8 +258,10 @@ pub trait Pc {
     /// Two statuses about 1 s apart: callbacks advancing, not faulted, not
     /// parked.
     fn engine_health(&mut self) -> R<Health>;
-    /// With a config that freezes PIN changes before cutover.
-    fn server_start(&mut self, mode: Mode) -> R<u32>;
+    /// With a config that freezes PIN changes before the cutover; in prod
+    /// (`prod`) `pin_changes = true` is allowed (`effects::web::pin_policy`,
+    /// S8).
+    fn server_start(&mut self, mode: Mode, prod: bool) -> R<u32>;
     /// Ctrl-Break on its own console, gone ≤ 10 s, ports free.
     fn server_stop(&mut self, c: &Cancel) -> R<()>;
     fn tray_start(&mut self) -> R<()>;
@@ -358,6 +360,26 @@ pub trait Pc {
     /// The listening pids of ports 80 and 443: the rehearsal's check that
     /// the predecessor could bind them after the teardown. Never waits.
     fn web_ports(&mut self) -> R<Ports>;
+    /// The cutover task (`\iemmixer\iemmixer-cutover`, S8 lane 2;
+    /// `IemCutover.psm1`): the predecessor's autostarts it was installed
+    /// with exported to `<elevated root>\cutover\<export>` and then
+    /// disabled, each read back. What it did. A mutation: it finishes.
+    fn autostarts_off(&mut self, export: &str) -> R<String>;
+    /// The cutover task: every autostart `<export>` saved, back exactly as
+    /// it was, read back; no such export: nothing to do. What it did.
+    fn autostarts_on(&mut self, export: &str) -> R<String>;
+    /// The cutover task: the guard task's logon trigger on or off, read
+    /// back (after the cutover the guard starts at the user's logon).
+    fn guard_logon(&mut self, on: bool) -> R<()>;
+    /// The server's config file (`pc.toml` `server_config`) as text.
+    fn server_config(&mut self) -> R<String>;
+    /// Replaces the server's config whole (a temp file renamed over it), read
+    /// back byte for byte.
+    fn write_server_config(&mut self, text: &str) -> R<()>;
+    /// LAN 80 serves the mixer's page and `/api/members` lists the band
+    /// (`effects::web::member_page_problem`). Never waits beyond two local
+    /// requests.
+    fn member_page(&mut self) -> R<()>;
 }
 
 /// A scripted PC for the daemon's tests.

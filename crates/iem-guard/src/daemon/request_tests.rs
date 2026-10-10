@@ -62,7 +62,7 @@ fn jobs_are_refused_while_switching() {
         }
     }
     let live = Request::Live {
-        build: SHA.into(),
+        build: Some(SHA.into()),
         trial: false,
         dry_run: false,
     };
@@ -186,7 +186,7 @@ fn ide_event_preempts_or_waits_but_never_both() {
 fn an_entry_queued_before_a_switch_back_to_reaper_never_runs() {
     let ran = |from: &str, to: &str| format!("busy: a switch ran meanwhile ({from} → {to})");
     let live = Request::Live {
-        build: SHA.into(),
+        build: Some(SHA.into()),
         trial: false,
         dry_run: false,
     };
@@ -332,7 +332,7 @@ fn a_tray_start_forgets_a_quit_no_tray_took() {
 fn dry_run_changes_nothing() {
     // S8 (#11): before the cutover live is a trial.
     let live = Request::Live {
-        build: SHA.into(),
+        build: Some(SHA.into()),
         trial: true,
         dry_run: true,
     };
@@ -540,7 +540,7 @@ fn an_expired_lan_certificate_is_named_and_never_an_alarm() {
 #[test]
 fn a_live_entry_without_a_pwa_subscription_is_refused() {
     let live = |trial, dry_run| Request::Live {
-        build: SHA.into(),
+        build: Some(SHA.into()),
         trial,
         dry_run,
     };
@@ -581,7 +581,7 @@ const NO_PC_TESTS: &str =
 #[test]
 fn a_live_trial_needs_the_pc_tests_and_a_plain_live_entry_does_not() {
     let live = |trial, dry_run| Request::Live {
-        build: SHA.into(),
+        build: Some(SHA.into()),
         trial,
         dry_run,
     };
@@ -630,7 +630,7 @@ fn a_live_trial_needs_the_pc_tests_and_a_plain_live_entry_does_not() {
 #[test]
 fn live_needs_an_installed_green_main_bundle() {
     let live = |trial| Request::Live {
-        build: SHA.into(),
+        build: Some(SHA.into()),
         trial,
         dry_run: false,
     };
@@ -681,7 +681,7 @@ fn live_needs_an_installed_green_main_bundle() {
 }
 
 /// S8 (#11, design §3.4): a dev entry with a build runs it as the active
-/// bundle; the pins stay as they were.
+/// bundle; the legacy pins mirror it and the way back (lane 2).
 #[test]
 fn dev_with_a_build_runs_it() {
     let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Event));
@@ -700,8 +700,8 @@ fn dev_with_a_build_runs_it() {
     assert_eq!(
         g.state.pins,
         Pins {
-            current: Some(OTHER.into()),
-            previous: None,
+            current: Some(SHA.into()),
+            previous: Some(OTHER.into()),
         }
     );
     assert_eq!(g.state.active_bundle(), Some(SHA));

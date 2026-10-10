@@ -337,9 +337,24 @@ fn in_prod_live_runs_the_pin_and_ends_maintenance() {
             "in prod live runs the pin {PIN}: live --build {PIN}"
         ))
     );
+    // `live` without a build runs the pin.
+    assert_eq!(
+        entered(&lc, ask(Mode::Live, None, false), &b),
+        Ok(Entered {
+            runs: Some(PIN.into()),
+            lifecycle: lc.clone(),
+            note: None
+        })
+    );
     // A green maintenance build becomes the pin: live runs it.
     let lc = Lifecycle::Prod(prod(Some(PREV), Some(NEW)));
     let e = entered(&lc, ask(Mode::Live, Some(NEW), false), &b).unwrap();
+    // Without a build live runs the pin the session ends on (lane 2: `live
+    // --build` is optional in prod).
+    assert_eq!(
+        entered(&lc, ask(Mode::Live, None, false), &b),
+        Ok(e.clone())
+    );
     assert_eq!(e.runs.as_deref(), Some(NEW));
     assert_eq!(
         e.lifecycle,
@@ -700,12 +715,13 @@ fn the_way_back_moves_only_when_the_active_bundle_changes() {
         (st.active_bundle(), st.way_back_bundle()),
         (Some(NEW), Some(PIN))
     );
-    // The older record is never written.
+    // The older record mirrors them (lane 2, the PC on 2026-10-10): an
+    // older guard that takes over runs the active bundle.
     assert_eq!(
         st.pins,
         Pins {
-            current: Some(PIN.into()),
-            previous: Some(PREV.into()),
+            current: Some(NEW.into()),
+            previous: Some(PIN.into()),
         }
     );
     // From nothing: no way back.
@@ -715,5 +731,12 @@ fn the_way_back_moves_only_when_the_active_bundle_changes() {
     assert_eq!(
         (st.active_bundle(), st.way_back_bundle()),
         (Some(DEV), None)
+    );
+    assert_eq!(
+        st.pins,
+        Pins {
+            current: Some(DEV.into()),
+            previous: None,
+        }
     );
 }

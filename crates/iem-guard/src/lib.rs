@@ -14,6 +14,8 @@
 //! - [`state`]: the persistent state and the reboot rule;
 //! - [`lifecycle`]: before the cutover, after it, or rolling back: the
 //!   boot rule, the entry gates, the pin and the crash rules (S8);
+//! - [`cutover`]: the cutover's refusals, steps and undo, the cutover
+//!   task's request and the server config's `pin_changes` edit (S8);
 //! - [`switch_log`]: the last switch's record, its steps timed, and its
 //!   in-ear silence (S7);
 //! - [`alarms`]: the kept alarms;
@@ -55,6 +57,7 @@ pub mod bundle;
 pub mod cancel;
 pub mod cli;
 pub mod crash;
+pub mod cutover;
 pub mod daemon;
 pub mod effects;
 pub mod handover;

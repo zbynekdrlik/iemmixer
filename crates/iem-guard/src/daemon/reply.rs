@@ -124,6 +124,9 @@ pub fn status_text(g: &Guard) -> String {
     if let Some(lc) = lifecycle::status(&g.state.lifecycle) {
         parts.push(lc);
     }
+    if let Some(cut) = crate::cutover::status(g.state.cutover.as_ref()) {
+        parts.push(cut);
+    }
     if let Some(run) = g.state.job {
         parts.push(format!("HIL job {run}"));
     }

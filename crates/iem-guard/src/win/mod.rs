@@ -17,6 +17,7 @@
 
 mod app;
 mod card;
+mod cutover;
 mod engine;
 mod procs;
 mod reaper;
@@ -35,6 +36,7 @@ use iem_win::window::{self, SessionEndWindow};
 use tracing::{info, warn};
 
 use crate::cancel::Cancel;
+use crate::cutover::Verb;
 use crate::handover::{AppExit, ReaperFacts, ReaperProcs};
 use crate::pc::{
     self, Audience, EngineSeen, Images, Kid, Pc, Ports, PrefSeen, Procs, R, Status, StepError,
@@ -229,8 +231,8 @@ impl Pc for WinPc {
         engine::health(self)
     }
 
-    fn server_start(&mut self, mode: Mode) -> R<u32> {
-        procs::server_start(self, mode)
+    fn server_start(&mut self, mode: Mode, prod: bool) -> R<u32> {
+        procs::server_start(self, mode, prod)
     }
 
     fn server_stop(&mut self, c: &Cancel) -> R<()> {
@@ -340,6 +342,31 @@ impl Pc for WinPc {
         tasks::exclude(self, sha, keep)
     }
 
+    fn autostarts_off(&mut self, export: &str) -> R<String> {
+        cutover::task(self, Verb::AutostartsOff, Some(export))
+    }
+
+    fn autostarts_on(&mut self, export: &str) -> R<String> {
+        cutover::task(self, Verb::AutostartsOn, Some(export))
+    }
+
+    fn guard_logon(&mut self, on: bool) -> R<()> {
+        let verb = if on { Verb::LogonOn } else { Verb::LogonOff };
+        cutover::task(self, verb, None).map(|_| ())
+    }
+
+    fn server_config(&mut self) -> R<String> {
+        cutover::server_config(self)
+    }
+
+    fn write_server_config(&mut self, text: &str) -> R<()> {
+        cutover::write_server_config(self, text)
+    }
+
+    fn member_page(&mut self) -> R<()> {
+        web::member_page(self)
+    }
+
     /// `logon.result.json` in the elevated root's `tasks\out`; no file is
     /// no run yet.
     fn logon(&mut self) -> Option<crate::effects::tuning::Logon> {
@@ -435,7 +462,7 @@ mod tests {
         assert!(failed(pc.engine_start(true, false)));
         // No engine of ours runs: nothing to see, nothing connected.
         assert_eq!(pc.engine_seen(), None);
-        assert!(failed(pc.server_start(Mode::Dev)));
+        assert!(failed(pc.server_start(Mode::Dev, false)));
         assert!(matches!(
             pc.notify(Audience::Alarm, "t", "b"),
             Err(StepError::Failed(_))
