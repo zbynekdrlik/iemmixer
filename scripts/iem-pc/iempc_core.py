@@ -331,6 +331,20 @@ def parse_reply(text: str) -> dict:
     return doc
 
 
+# What the guard's status says of its lifecycle (`lifecycle::status`, Rust):
+# nothing before the cutover.
+PROD_SINCE = "prod since "
+
+
+def guard_lifecycle(reply) -> str | None:
+    """`trial` or `prod` from one guard reply's detail (pure, S8); None
+    without a reply or a detail."""
+    detail = reply.get("detail") if isinstance(reply, dict) else None
+    if not isinstance(detail, str):
+        return None
+    return "prod" if PROD_SINCE in detail else "trial"
+
+
 def owner_alarms(reply: dict | None) -> list[dict]:
     """Alarms the agent turns into the prepared owner question (not yet acknowledged).
 
