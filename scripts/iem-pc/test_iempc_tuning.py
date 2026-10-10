@@ -1,6 +1,6 @@
 """Tests for scripts/iem-pc/iempc_tuning.py: `iempc tuning-install` and the
 refresh of S1c's tuning modules after `iempc activate` (#15). They reuse
-test_iempc's fakes (FakePc stands in for ssh and scp, FakeGh for GitHub);
+iempc_test_support's fakes (FakePc stands in for ssh and scp, FakeGh for GitHub);
 every value is synthetic and the private profile is a temp file."""
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import iempc_tuning as it  # noqa: E402
-from test_iempc import SHA, Base, ip, make_zip, sha256  # noqa: E402
+from iempc_test_support import SHA, Base, ip, make_zip, sha256  # noqa: E402
 
 MODULES = {"tuning/IemTuning.psm1": b"synthetic IemTuning.psm1", "tuning/IemMeasure.psm1": b"synthetic IemMeasure.psm1",
            "tuning/IemTuningStore.psm1": b"synthetic IemTuningStore.psm1"}
@@ -175,7 +175,7 @@ class TuningInstallTests(TuningBase):
         self.assertIn("roles overlap", err)
 
     def test_a_bundle_without_the_tuning_modules_is_refused_before_the_pc(self) -> None:
-        self.gh.artifact = self.artifact   # test_iempc's bundle: tuning/state.ps1 only
+        self.gh.artifact = self.artifact   # iempc_test_support's bundle: tuning/state.ps1 only
         self.fetched()
         code, _, err = self.run_main("tuning-install", "--sha", SHA)
         self.assertEqual((code, self.pc.modules, self.pc.scps), (1, [], []))
@@ -223,16 +223,10 @@ class RefreshTests(TuningBase):
 
     def setUp(self) -> None:
         super().setUp()
-        saved = (ip.HANDOVER_S, ip.HANDOVER_POLL_S, ip.QUIT_S)
-        self.addCleanup(self.restore_bounds, saved)
-        ip.HANDOVER_S, ip.HANDOVER_POLL_S, ip.QUIT_S = 10.0, 0.01, 10.0
+        self.patch(HANDOVER_S=10.0, HANDOVER_POLL_S=0.01, QUIT_S=10.0)
         self.pc.replies[("activate", SHA)] = self.ACTIVATED
         self.pc.replies[("status",)] = self.STATUS
         self.fetched()
-
-    @staticmethod
-    def restore_bounds(saved: tuple[float, float, float]) -> None:
-        ip.HANDOVER_S, ip.HANDOVER_POLL_S, ip.QUIT_S = saved
 
     def test_an_installed_profile_gets_the_new_bundle_s_modules_and_stays(self) -> None:
         self.pc.texts["profile.json"] = True

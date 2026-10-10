@@ -1,7 +1,7 @@
 """Tests for scripts/iem-pc/iempc_sshshell.py: `iempc ssh-shell` (#15, the last
 item of the elevated chain): Set-IemSshShell from the admin-only stage, a probe
 of a fresh ssh session, then Confirm-IemSshShell; a failed probe never
-confirms. They reuse test_iempc's fakes (FakePc stands in for ssh and scp,
+confirms. They reuse iempc_test_support's fakes (FakePc stands in for ssh and scp,
 FakeGh for GitHub); every value is synthetic."""
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import iempc_sshshell as ss  # noqa: E402
-from test_iempc import SHA, Base, ip, make_zip, sha256  # noqa: E402
+from iempc_test_support import SHA, Base, ip, make_zip, sha256  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 MODULES = {"IemSshShell.psm1": b"synthetic IemSshShell.psm1", "tuning/IemTuningStore.psm1": b"synthetic IemTuningStore.psm1"}
@@ -56,7 +56,7 @@ class ShellBase(Base):
                     raise ip.StepError(error)
             return fake(env, script, timeout, event)
 
-        ip.ssh_ps = ssh_ps
+        self.patch(ssh_ps=ssh_ps)
 
     @staticmethod
     def answer(r):
@@ -308,7 +308,7 @@ class RefusalTests(ShellBase):
         self.assertEqual(doc["modules"], ["IemPc.psm1", "tuning/IemTuningStore.psm1", "IemSshShell.psm1"])
 
     def test_a_bundle_without_the_module_is_refused_before_the_pc(self) -> None:
-        self.gh.artifact = self.artifact   # test_iempc's zip: no IemSshShell.psm1, no tuning store
+        self.gh.artifact = self.artifact   # iempc_test_support's zip: no IemSshShell.psm1, no tuning store
         self.fetched()
         for argv in (("ssh-shell", "--sha", SHA), ("ssh-shell", "--sha", SHA, "--dry-run")):
             code, _, err = self.run_main(*argv)

@@ -106,7 +106,7 @@ Design note `docs/superpowers/specs/2026-10-07-s7-hil-live-soak-design.md` §4 a
   4. The flag again, right before the dispatch: one that came during the gh waits refuses (exit 1). A failed step once a new flag exists runs the event path instead (`Spec(pc=True)`).
   5. `gh workflow run soak.yml`, then the record: a failed dispatch records nothing. A failed ops soak run of the same SHA and entry is repeated with `gh run rerun <id> -R <ops repo>` (the same verified inputs), never a second dispatch.
   - A soak of this dev entry that may still run (its hours plus `RUN_MARGIN_S`, an unreadable record counts) also refuses `dispatch-live`, `activate`, `dispatch-hil` and `trace` before any call (`iempc_live.refuse_overlap` and `refuse_while_running`, `.claude/rules/live.md`; one whose time, hours or dev entry cannot be read names `soak.json` to check by hand) and `switch-test` after its status read (`iempc_switch`); `iempc dev` and `iempc event` never wait for it.
-  - Tests: `test_iempc_soak.py` on `test_iempc.Base` (`FakePc`, `FakeGh`). Every guard is tested on both sides; no Python mutation gate runs in CI, so a new guard needs its own refusal case.
+  - Tests: `test_iempc_soak.py` on `iempc_test_support.Base` (`FakePc`, `FakeGh`). Every guard is tested on both sides; no Python mutation gate runs in CI, so a new guard needs its own refusal case.
 
 ## The 72 h NullRt soak on a dev box (design §8, `scripts/soak/nullrt_soak.py`)
 

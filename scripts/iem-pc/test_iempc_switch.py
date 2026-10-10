@@ -1,5 +1,5 @@
 """Tests for scripts/iem-pc/iempc_switch.py: `iempc switch-test` (S7 part 3,
-#10; plan Task 14). They reuse test_iempc's fakes (FakePc stands in for ssh);
+#10; plan Task 14). They reuse iempc_test_support's fakes (FakePc stands in for ssh);
 every value is synthetic."""
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import iempc_switch as sw  # noqa: E402
-from test_iempc import SHA, SHA2, Base, ip  # noqa: E402
+from iempc_test_support import SHA, SHA2, Base, ip  # noqa: E402
 
 
 def st(step: str, ms: int) -> dict:
@@ -508,7 +508,7 @@ class FlagTests(SwitchBase):
             ("unwound", {("dev",): answer("event", UNWOUND, code=1)}, 1),
             ("refused", {("status",): (0, json.dumps(ready(mode="event")))}, 1),
         )
-        with mock.patch.object(ip, "ensure_flag", side_effect=AssertionError("the flag was written")):
+        with self.patched(ensure_flag=mock.Mock(side_effect=AssertionError("the flag was written"))):
             for name, replies, want in scenarios:
                 self.defaults()
                 self.pc.replies.update(replies)

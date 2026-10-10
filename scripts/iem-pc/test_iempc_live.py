@@ -1,6 +1,6 @@
 """Tests for scripts/iem-pc/iempc_live.py: `iempc dispatch-live` and the
 reverse guards of `dispatch-soak` and `switch-test` (S7 part 4, #10; plan
-Task 24, Review Focus 7). They reuse test_iempc's fakes (FakePc stands in for
+Task 24, Review Focus 7). They reuse iempc_test_support's fakes (FakePc stands in for
 ssh, FakeGh for GitHub); every value is synthetic."""
 from __future__ import annotations
 
@@ -16,8 +16,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import iempc_live as live  # noqa: E402
 import iempc_soak  # noqa: E402
-from test_iempc import RUN, SHA, SHA2, Base, ip  # noqa: E402
-import test_iempc  # noqa: E402  (ActivateTests by its module: imported by name it would run twice)
+from iempc_test_support import RUN, SHA, SHA2, Base, ip  # noqa: E402
+import test_iempc_bundle  # noqa: E402  (ActivateTests by its module: imported by name it would run twice)
 from test_iempc_soak import READY, SWITCHING, engine, ready  # noqa: E402
 import test_iempc_switch as sw  # noqa: E402
 from test_iempc_trace import TraceBase  # noqa: E402
@@ -274,7 +274,7 @@ class DispatchLiveTests(LiveBase):
         code, docs, err = self.live()
         self.assertEqual((code, docs, self.runs()), (1, [], []))
         self.assertIn("gh workflow run failed (exit 1): HTTP 422", err)
-        ip.gh = self.gh   # gh works again: the same SHA and entry is no repeat
+        self.patch(gh=self.gh)   # gh works again: the same SHA and entry is no repeat
         self.assertEqual(self.live()[0], 0)
         self.assertEqual(len(self.runs()), 1)
 
@@ -483,11 +483,9 @@ class ActivateGuardTests(RunningGuardCases, Base):
 
     def setUp(self) -> None:
         super().setUp()
-        saved = (ip.HANDOVER_S, ip.HANDOVER_POLL_S)
-        self.addCleanup(test_iempc.ActivateTests.restore_handover, saved)
-        ip.HANDOVER_S, ip.HANDOVER_POLL_S = 10.0, 0.01
-        self.pc.replies[("activate", SHA)] = test_iempc.ActivateTests.ACTIVATED
-        self.pc.replies[("status",)] = test_iempc.ActivateTests.status(SHA)
+        self.patch(HANDOVER_S=10.0, HANDOVER_POLL_S=0.01)
+        self.pc.replies[("activate", SHA)] = test_iempc_bundle.ActivateTests.ACTIVATED
+        self.pc.replies[("status",)] = test_iempc_bundle.ActivateTests.status(SHA)
 
     def passes(self) -> None:
         code, docs, err = self.run_main(*self.ARGV)
