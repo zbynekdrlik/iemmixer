@@ -91,6 +91,10 @@ pub(super) fn fixed(t: u64) -> Clock {
     Clock::Fixed(Arc::new(AtomicU64::new(t)))
 }
 
+/// What the event plan's check says of REAPER holding the card at 32.
+pub(super) const HELD: &str =
+    "REAPER runs with the preferred buffer at 32; it is restored at REAPER's next start";
+
 // ---- the plan's exact tests ----
 
 #[test]

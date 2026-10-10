@@ -6,7 +6,7 @@
 use std::time::{Duration, Instant};
 
 use super::tests::{
-    INIT, SHA, ask, band_up, dev, iemmixer_up, preempt_after, status_reply, steps, texts,
+    HELD, INIT, SHA, ask, band_up, dev, iemmixer_up, preempt_after, status_reply, steps, texts,
 };
 use super::*;
 use crate::crash;
@@ -178,10 +178,6 @@ fn a_dev_entry_restores_the_preference_right_before_the_engine_starts() {
         texts(&g)
     );
 }
-
-/// What the event plan's check says of REAPER holding the card at 32.
-const HELD: &str =
-    "REAPER runs with the preferred buffer at 32; it is restored at REAPER's next start";
 
 /// REAPER holds the card while the preference reads 32 (REAPER autostarted
 /// at 32 after a power loss in dev time, #9 2026-09-28): the driver most
