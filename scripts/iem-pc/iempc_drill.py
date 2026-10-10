@@ -12,7 +12,7 @@ the way back on the PC.
 3. `iempc status --pc`: prod on the pin SHA, live;
 4. `iempc rollback`: done, REAPER on the export;
 5. `iempc status --pc`: event, trial (no prod, nothing rolling back), the
-   last switch done in event;
+   last switch done in event; its end (`last_switch.ended`) is noted;
 6. the existing graceful reboot (S1c's window, scripts/pc-tuning):
    `spike_window.py new --signal`, `spike_window.py to-dev`,
    `tuning_window.py reboot-prepare`, `tuning_window.py reboot --approval`
@@ -20,7 +20,10 @@ the way back on the PC.
    post-boot`: REAPER came back by itself (the predecessor's autostarts the
    rollback restored), the post-boot checks clean;
 7. `iempc status --pc` again (it starts the guard, whose start runs the
-   event plan's checks): event, trial.
+   event plan's checks), read again every SETTLE_POLL_S, the flag looked at
+   before each, until no switch runs and the last one ended later than the
+   rollback's (the start's checks, not the rollback's record; S8 lane 5),
+   at most SETTLE_S: event, trial, done in event.
 
 It stops at the first failure. Every step is a process of its own (each
 honours the "ide event" flag itself: an iempc command runs the event path);
@@ -50,6 +53,9 @@ IEMPC = HERE / "iempc.py"
 SPIKE = HERE.parent / "asio-spike" / "spike_window.py"
 TUNING = HERE.parent / "pc-tuning" / "tuning_window.py"
 POLL_S = 2.0
+# After the reboot: the status is read until the start's checks ended (s).
+SETTLE_S = 900
+SETTLE_POLL_S = 10.0
 # Each step's bound (s): an iempc command's own bounds lie inside it (the
 # cutover: the GitHub read, the dry run, the install and the guard's cutover).
 BOUND_S = {"dev": 900, "cutover": 1800, "status": 300, "rollback": 900, "window": 900, "reboot-prepare": 900,
@@ -128,6 +134,20 @@ def prod_problem(reply: dict | None, sha: str) -> str | None:
     return None
 
 
+def switch_end(reply: dict | None) -> int | None:
+    """The end of the last switch a guard reply names (`last_switch.ended`,
+    epoch seconds), None without one."""
+    last = reply.get("last_switch") if isinstance(reply, dict) else None
+    ended = last.get("ended") if isinstance(last, dict) else None
+    return ended if isinstance(ended, int) and not isinstance(ended, bool) else None
+
+
+def settled_after(reply: dict | None, ended: int) -> bool:
+    """No switch runs and the last one ended later than `ended` (pure)."""
+    end = switch_end(reply)
+    return isinstance(reply, dict) and reply.get("switching") is None and end is not None and end > ended
+
+
 def event_problem(reply: dict | None) -> str | None:
     """Why the status is not event in trial with its last switch done in event."""
     if rb.lifecycle(reply) != "trial":
@@ -161,11 +181,43 @@ class Drill:
     def iempc(self, step: str, args: list[str], bound: str, fail: str) -> dict | None:
         return guard_reply(self.run(step, [sys.executable, str(IEMPC), *args], bound, fail))
 
-    def status(self, step: str, fail: str, problem) -> None:
+    def status(self, step: str, fail: str, problem) -> dict | None:
         reply = self.iempc(step, ["status", "--pc"], "status", fail)
         why = problem(reply)
         if why:
             raise Stop(fail, why)
+        return reply
+
+    def after_reboot(self, ended: int) -> None:
+        """Step 7: the first `iemmode` call starts the guard, and its status
+        may still name the rollback's switch before the start's checks ran
+        (S8 lane 5). Read again, the flag looked at before each read, until
+        no switch runs and the last one ended later than `ended`, at most
+        SETTLE_S; then that status must be event, trial, done in event. One
+        step in the output (the reads' time, the last exit)."""
+        argv = [sys.executable, str(IEMPC), "status", "--pc"]
+        began = time.monotonic()
+        deadline = began + SETTLE_S
+        reads = 0
+        while True:
+            if core.EVENT_NOW.exists():
+                raise Stop(EVENT, f"{core.EVENT_NOW} exists: the drill stops after the reboot; 'iempc event' runs "
+                                  "the event path")
+            code, out, err = call(argv, BOUND_S["status"])
+            reads += 1
+            reply = guard_reply(out) if code == 0 else None
+            if settled_after(reply, ended):
+                break
+            if time.monotonic() >= deadline:
+                self.steps.append({"step": "after-reboot", "exit": code, "seconds": round(time.monotonic() - began, 1)})
+                raise Stop(NOT_EVENT_AFTER_REBOOT, f"the start's checks were not seen ending within {SETTLE_S} s "
+                                                   f"({reads} status reads; the last exited {code}): "
+                                                   f"{err.strip()[-500:]}")
+            time.sleep(SETTLE_POLL_S)
+        self.steps.append({"step": "after-reboot", "exit": code, "seconds": round(time.monotonic() - began, 1)})
+        why = event_problem(reply)
+        if why:
+            raise Stop(NOT_EVENT_AFTER_REBOOT, why)
 
     def window_reboot(self) -> None:
         """The existing graceful reboot: S1c's window, its restart request and
@@ -198,9 +250,13 @@ class Drill:
         reply = self.iempc("rollback", ["rollback"], "rollback", ROLLBACK_FAILED)
         if rb.ON_EXPORT not in (reply or {}).get("detail", ""):
             raise Stop(NOT_ON_EXPORT, "the rollback did not say that REAPER runs on the export")
-        self.status("event", NOT_EVENT, event_problem)
+        rolled = self.status("event", NOT_EVENT, event_problem)
+        ended = switch_end(rolled)
+        if ended is None:
+            raise Stop(NOT_EVENT, "the rollback's last switch names no end (last_switch.ended): the start's checks "
+                                  "after the reboot could not be told from it")
         self.window_reboot()
-        self.status("after-reboot", NOT_EVENT_AFTER_REBOOT, event_problem)
+        self.after_reboot(ended)
 
 
 def plan(sha: str) -> list[str]:
@@ -209,7 +265,7 @@ def plan(sha: str) -> list[str]:
             "iempc rollback (REAPER on the export)", "iempc status --pc (event, trial)",
             "spike_window.py new --signal", "spike_window.py to-dev", "tuning_window.py reboot-prepare",
             "tuning_window.py reboot --approval", "tuning_window.py post-boot (REAPER back by itself)",
-            "iempc status --pc (event, trial)"]
+            "iempc status --pc until the start's checks ended (event, trial)"]
 
 
 def main(argv: list[str]) -> int:
