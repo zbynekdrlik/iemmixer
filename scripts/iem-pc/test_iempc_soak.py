@@ -1,5 +1,5 @@
 """Tests for scripts/iem-pc/iempc_soak.py: `iempc dispatch-soak` (S7, #10;
-plan Task 8, Review Focus 7). They reuse test_iempc's fakes (FakePc stands in
+plan Task 8, Review Focus 7). They reuse iempc_test_support's fakes (FakePc stands in
 for ssh, FakeGh for GitHub); every value is synthetic."""
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import iempc_soak as soak  # noqa: E402
-from test_iempc import RUN, SHA, SHA2, Base, ip  # noqa: E402
+from iempc_test_support import RUN, SHA, SHA2, Base, ip  # noqa: E402
 
 # The guard's `iemmode status` while the PC runs bundle SHA in dev, its engine playing.
 READY = {"ok": True, "mode": "dev", "switching": None, "detail": f"mode dev; bundle {SHA}", "alarms": [],
@@ -229,7 +229,7 @@ class DispatchSoakTests(SoakBase):
         code, docs, err = self.soak()
         self.assertEqual((code, docs, self.soaks()), (1, [], []))
         self.assertIn("gh workflow run failed (exit 1): HTTP 422", err)
-        ip.gh = self.gh   # gh works again: the same SHA and entry is no repeat
+        self.patch(gh=self.gh)   # gh works again: the same SHA and entry is no repeat
         self.assertEqual(self.soak()[0], 0)
         self.assertEqual(len(self.soaks()), 1)
 

@@ -24,9 +24,13 @@ exclude_globs = [
   # glitch_report.rs, spike_run.rs, channels.rs, period.rs, reset.rs,
   # owner.rs, messages.rs and iem-win's prefwin.rs.
   "crates/iem-audio-io/src/asio.rs",
+  # Its parts (#36: the spike's stream, the real-time callbacks, the owner
+  # thread, the preference window, the stream's handle, the SEH filter and
+  # the hosted-runner tests), excluded with it by path.
+  "crates/iem-audio-io/src/asio/**",
   # Windows-only placement/priority/clock/marker FFI (S1c): not compiled on
   # the Linux runners; the windows jobs build it. Only the S1a/S1c spike
-  # calls it (asio.rs's spike Host::start and examples/asio_spike/), in its
+  # calls it (asio/spike.rs's Host::start and examples/asio_spike/), in its
   # measurement windows on the PC; the S6 engine places and prioritises
   # itself through iem_win::power, so HIL never runs it. Its portable
   # placement logic (parse_lps, ids_for) lives in the mutated cpuset.rs; the
@@ -43,7 +47,8 @@ exclude_globs = [
   # The engine's ASIO start-up (S6): Windows effects, not compiled on the
   # Linux runners; the windows job lints it and runs its no-driver refusal.
   # Its decisions live in the mutated engine.rs (lock_due, the parser,
-  # check_site), control.rs (Ending, the lock report) and site.rs ([card]).
+  # check_site), control.rs (Ending), control/status.rs (the lock report)
+  # and site.rs ([card]).
   "crates/iem-engine/src/asio.rs",
   # The Windows side of the engine's pipes (S6): not compiled on Linux; the
   # windows job runs tests/pipes.rs over it. Its decisions are pipe.rs's
@@ -72,7 +77,8 @@ exclude_globs = [
   "crates/iem-win/src/bin/**",
   # The guard's Windows effects (WinPc, S6): not compiled on Linux; the
   # windows job builds and tests them. Their decisions live in the mutated
-  # pc.rs, site.rs, effects/ and handover.rs (parsers included).
+  # pc.rs and pc/, site.rs and site/, effects/ and handover.rs (parsers
+  # included).
   "crates/iem-guard/src/win/**",
   # The Windows side of the guard's pipe writes (the bounded, clean writer
   # over iem-win's write_within: the guard pipe's replies, the supervisor's
@@ -196,13 +202,13 @@ exclude_re = [
   # GR meter ±0: 20·log10(0) = −∞, floored by max(−150) to the else branch's −150.
   "iem-limiter-mga/src/lib\\.rs.*replace > with >= in Limiter::gr_db",
   # Equivalent (S3). `trips > 0` only skips adding zero trips to the counters.
-  "iem-engine/src/rt\\.rs.*replace > with >= in Processor::render_mixes",
+  "iem-engine/src/rt/render\\.rs.*replace > with >= in Processor::render_mixes",
   # Equivalent (S3). With the budget spent, `budget >= 0` also cuts the segment at the
   # waiting command; rendering in two pieces is bit-identical (block-size invariance tests).
-  # anchor 1252: if budget > 0
-  "iem-engine/src/rt\\.rs:1252:.*replace > with >= in <impl Process for Processor>::process",
+  # anchor 864: if budget > 0
+  "iem-engine/src/rt\\.rs:864:.*replace > with >= in <impl Process for Processor>::process",
   # The fade wait's `elapsed < FADE_WAIT`: differs only at the exact nanosecond.
-  "iem-engine/src/control\\.rs.*replace < with <= in Control::fade_out",
+  "iem-engine/src/control/stop\\.rs.*replace < with <= in Control::fade_out",
   # Unobservable (S3): the `!` only decides whether "solos cleared" is logged.
   "iem-engine/src/control\\.rs.*delete ! in Control::tick",
   # Equivalent (S4). The synthetic generator draws k/2^53; a draw equal to a
@@ -254,7 +260,7 @@ exclude_re = [
   "iem-guard/src/cli\\.rs.*replace < with <= in call_starting",
   # Equivalent (S6): the session end's wait for the engine, `elapsed <
   # session_wait`, differs from `<=` only at the exact nanosecond.
-  "iem-guard/src/daemon\\.rs.*replace < with <= in session_end$",
+  "iem-guard/src/daemon/watch\\.rs.*replace < with <= in session_end$",
   # Equivalent (S6): the first pipe instance's retry, `elapsed < limit`,
   # differs from `<=` only at the exact nanosecond.
   "iem-guard/src/pipe\\.rs.*replace < with <= in retry",

@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 # Self-test of the bootstrap's admin-only stage (#15) on Windows PowerShell 5.1
 # (CI job windows, started by Test-IemPc.ps1, an ephemeral administrator
-# runner): the script iempc.py's module_script composes (elevated_ps.py) runs
+# runner): the script iempc_core.py's module_script composes (elevated_ps.py) runs
 # here exactly as ssh sends it, against a temp elevated root. The upload is
 # read once and checked, only the staged copy is imported, every folder and the
 # staged file read back as Install-IemElevatedFolder makes them, and a junction

@@ -993,8 +993,6 @@ fn the_test_sine_starts_upwards_and_fades_out_after_its_ttl() {
 
 /// S6: the held output, the reopen fade-in, HIL's spare outputs and the
 /// D5(b) loopback return.
-#[path = "rt_tests_hil.rs"]
 mod hil;
 
-#[path = "rt_tests_probe.rs"]
 mod listen_probe;

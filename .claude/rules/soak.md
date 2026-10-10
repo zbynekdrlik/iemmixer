@@ -5,7 +5,6 @@ paths:
   - "scripts/iem-pc/test_soak_verdict.py"
   - "scripts/iem-pc/iempc_soak.py"
   - "scripts/iem-pc/test_iempc_soak.py"
-  - "scripts/soak/**"
 ---
 
 # Soak harness and verdict (S7, #10)
@@ -106,32 +105,8 @@ Design note `docs/superpowers/specs/2026-10-07-s7-hil-live-soak-design.md` §4 a
   4. The flag again, right before the dispatch: one that came during the gh waits refuses (exit 1). A failed step once a new flag exists runs the event path instead (`Spec(pc=True)`).
   5. `gh workflow run soak.yml`, then the record: a failed dispatch records nothing. A failed ops soak run of the same SHA and entry is repeated with `gh run rerun <id> -R <ops repo>` (the same verified inputs), never a second dispatch.
   - A soak of this dev entry that may still run (its hours plus `RUN_MARGIN_S`, an unreadable record counts) also refuses `dispatch-live`, `activate`, `dispatch-hil` and `trace` before any call (`iempc_live.refuse_overlap` and `refuse_while_running`, `.claude/rules/live.md`; one whose time, hours or dev entry cannot be read names `soak.json` to check by hand) and `switch-test` after its status read (`iempc_switch`); `iempc dev` and `iempc event` never wait for it.
-  - Tests: `test_iempc_soak.py` on `test_iempc.Base` (`FakePc`, `FakeGh`). Every guard is tested on both sides; no Python mutation gate runs in CI, so a new guard needs its own refusal case.
+  - Tests: `test_iempc_soak.py` on `iempc_test_support.Base` (`FakePc`, `FakeGh`). Every guard is tested on both sides; no Python mutation gate runs in CI, so a new guard needs its own refusal case.
 
-## The 72 h NullRt soak on a dev box (design §8, `scripts/soak/nullrt_soak.py`)
+## The 72 h NullRt soak: dropped (owner, 2026-10-10)
 
-- **What it judges:** long-run growth in the engine, the server and the client paths that 8 h on the PC may not show (memory, fds, threads, socket churn). NullRt counts no missed periods, so it judges growth, not real time: `late` and the engine's other counters are information only.
-- **The binaries:** the `e2e` job uploads `nullrt-soak-linux-<sha>` on every push (14 days): `iem-engine`, `iem-server` (`standalone,audio`, the real UI) and `iem-soakclient`, the release builds the job ran green, with `LICENSE-iem-engine` (the engine is GPL-3.0-or-later, as in the bundle). The zip keeps no file mode. Tier 0: never build them locally.
-- **The run** (in tmux: a closed terminal's SIGHUP stops the run):
-
-  ```
-  sha=<a dev push with a green ci.yml run>
-  run=$(gh run list -R zbynekdrlik/iemmixer --workflow ci.yml --commit "$sha" --event push --status success --json databaseId -q '.[0].databaseId')
-  gh run download "$run" -R zbynekdrlik/iemmixer -n "nullrt-soak-linux-$sha" -D ~/soak/bin-$sha
-  chmod +x ~/soak/bin-$sha/iem-*
-  tmux new -s nullrt-soak "python3 scripts/soak/nullrt_soak.py --bin ~/soak/bin-$sha --build $sha --out ~/soak/run-$sha"
-  ```
-
-  `--hours` (default 72, finite), `--every` (default 60 s, at most `EVERY_MAX_S` 600 s, so hour 1 to 2 and the last hour hold several samples), `--repo` (default: this checkout, for `config/test-site.toml`). `--out` must be a new folder (0700), outside `/tmp` (swept), short enough for the engine's Unix socket in it.
-- **What it starts:** the e2e job's provisioning (the test site copied into `<out>/site`, an engineer and a member PIN drawn per run and set through `iem-server pin` on stdin, never printed or stored but as the server's hashes; a call that does not end within `PIN_S` is left running and named, never ended by force); the NullRt engine (`--sine 1000`, its state in `<out>/engine-state`, its socket `<out>/engine.sock`); the server on a free port (it binds every address, so the box's LAN and tailnet reach it for the run, behind PINs nobody knows and a secret only the run folder holds); then the client legs. Before the first leg the server's `/api/version` must name `--build` (the client's own rule) and its `secrets/jwt_secret` must exist. Each process runs in a session of its own (a Ctrl-C reaches only the script) and logs into `<out>/<name>.log`.
-- **Legs:** the client runs at most `MAX_SECONDS` (36 000 s) and never opens a socket twice, so the run is cut into equal legs of at most `LEG_MAX_S` (8 h; 72 h = nine), `LEG_GAP_S` (5 s) apart so the server has ended the last leg's sessions (the member listen tap is one slot: a `ListenStart` while it is held answers `no_source`, and the leg ends `connection-lost`; UNVERIFIED that 5 s is always enough), each a new client process with its own summary `<out>/soakclient-leg<N>.json`. Each leg signs its engineer token with the server's secret (`--jwt-secret-file`, the PC's mode: no login, so no argon2 heap in the server's RSS and no login budget); `IEM_SOAK_PIN` is removed from its environment (both credentials are exit 2). `--member member9`, `--direct`, `--expect-build` the SHA.
-- **Samples** (`<out>/samples.jsonl`, one per `--every`): each live process's `rss_kb` (`VmRSS`), `threads` and `fds` (`/proc/<pid>/status`, `/proc/<pid>/fd`), or `alive: false` with its exit code; the engine's last `Status` (`STATUS_KEYS`, its age), read on an `observe` connection to its control pipe (read-only; a lost one is opened again at the next sample, `observer_reconnects`); the running leg's harness counters (`HARNESS_KEYS`, from its summary file).
-- **The verdict** (`<out>/verdict.json`; stdout one line `{conclusion, summary}`; exit 0 green, 1 red, 2 a usage error before anything started). Every check runs, the first failure leads:
-  1. stopped early (the engine or the server exited, a leg's client ended non-zero or outlived its seconds by `LEG_OVERRUN_S`, a signal, a setup error);
-  2. the samples span the hours (one interval short at most);
-  3. the engine and the server alive at every sample;
-  4. every leg: its client ended 0, then CI's harness check on its summary (`soak_verdict.harness_problems`, reused: complete, its seconds less one, gaps 0, no reconnect, at least one frame, a meter frame; the frames' share of the expected is information only, `frames_percent_min`: NullRt paces itself with the box's scheduler, the first smoke on a dev box read 98.91 % with 0 gaps); and every planned leg ran;
-  5. per process (`<name>#<pid>`, a leg's client too): RSS growth after hour 1 (the highest after it minus the first sample at or after it) at most 16 MB (`RSS_GROWTH_MAX_KB`, 15 625 kB, toward red); fds and threads flat: the last hour's lowest never above hour 1 to 2's highest (a leak raises the floor; a transient, such as a backup's blocking thread at the site's `backup_schedule`, only a peak; the last hour's highest is information). Leg boundaries fall outside both windows for legs of 2 h or more. A process that lived under 2 h is not judged; for the engine or the server that is red, and so is no readable sample in hour 1 to 2;
-  6. the graceful stop: the server and the engine ended, each with 0.
-- **The graceful stop** (I8, no forced end anywhere; `test_no_force_end_verb_in_the_tool`): the server gets SIGTERM, its own stop signal (≤ `SERVER_STOP_S`); a running client ends by itself once its sockets close (≤ `CLIENT_END_S`); the engine gets `Shutdown` as a supervisor on its control pipe (≤ `ENGINE_STOP_S`). A process that does not end is left running, named on stderr and red in the verdict. An error in the script itself still runs the graceful stop before its traceback.
-- **The numbers go to #10** with the verdict. Tests: `scripts/soak/test_nullrt_soak.py` (the `integrity` job): the pure parse, leg plan and verdict, and whole runs against stand-in binaries with the hour shrunk to a second. UNVERIFIED until the first run: the real binaries under the tool (the stand-ins speak the engine's frames and roles, the server's `/api/version` and `pin`, the client's flags and summary).
+- An event lasts at most 2 h and the PC has no 72 h between events; the owner dropped the 72 h NullRt soak as waste. The tool (`scripts/soak/`), its tests and the CI artifact are removed. A 5.2 h run before the stop showed no memory growth and flat fds and threads (numbers on #10, 2026-10-10). The PC's 8 h soak above remains the long-run evidence.

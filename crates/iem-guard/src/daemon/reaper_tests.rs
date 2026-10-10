@@ -5,13 +5,13 @@
 //! process that no longer ran, and the switch still ended `done` in event
 //! without REAPER). The handover now first makes sure a REAPER runs, and an
 //! event switch whose REAPER or app handover failed ends `needs_owner`, its
-//! reply naming each failed step. New daemon tests live here, since
-//! `daemon.rs` and `daemon/tests.rs` are over their size budget (#36).
+//! reply naming each failed step (`daemon/reaper.rs`, `daemon/runner.rs`).
 
 use super::tests::{band_up, iemmixer_up};
 use super::*;
 use crate::pc::fake::{Call, FakePc};
-use crate::plan::Facts;
+use crate::plan::{Facts, Health, plan};
+use crate::proto::Request;
 use crate::switch_log::{LastSwitch, SwitchOutcome};
 
 /// A synthetic bundle SHA: a dev entry's identity check names the pin.

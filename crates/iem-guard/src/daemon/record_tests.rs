@@ -1,12 +1,13 @@
 //! The daemon's records in its replies (S7, #10): the engine's pid, the last
 //! switch with its steps timed and its in-ear silence, and texts cut to fit
-//! a frame. New daemon tests live here, since `daemon.rs` and
-//! `daemon/tests.rs` are over their size budget (#36).
+//! a frame (`daemon/runner.rs`, `daemon/reply.rs`, `daemon/shared.rs`).
 
 use super::tests::{band_up, iemmixer_up};
 use super::*;
+use crate::pc::Kid;
 use crate::pc::fake::{Call, FakePc};
-use crate::plan::Facts;
+use crate::plan::{Facts, Health, plan};
+use crate::proto::Request;
 use crate::state::Child;
 use crate::switch_log::{LastSwitch, SwitchOutcome};
 

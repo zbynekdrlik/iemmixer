@@ -1,11 +1,11 @@
 //! The listen probe through the guard (S7 part 4, #10): `iemmode test-signal
 //! … --listen` reaches the engine as `HilTestSignal.listen`, behind the same
-//! HIL job gate as the plain signal. New daemon tests live here, since
-//! `daemon.rs` and `daemon/tests.rs` are over their size budget (#36).
+//! HIL job gate as the plain signal (`daemon/hil.rs`, `test_signal`).
 
 use super::tests::iemmixer_up;
 use super::*;
 use crate::pc::fake::{Call, FakePc};
+use crate::proto::Request;
 
 /// The generation of a guard that began no switch and routed no "ide event".
 const INIT: Generation = Generation { epoch: 0, fence: 0 };

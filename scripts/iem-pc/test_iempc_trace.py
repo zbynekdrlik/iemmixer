@@ -1,5 +1,5 @@
 """Tests for scripts/iem-pc/iempc_trace.py: `iempc trace` (#15), a kernel
-DPC/ISR trace on the guard's engine. They reuse test_iempc's fakes (FakePc
+DPC/ISR trace on the guard's engine. They reuse iempc_test_support's fakes (FakePc
 stands in for ssh, a fake scp writes the report) and latency_report's
 synthetic xperf fixture; every value is synthetic."""
 from __future__ import annotations
@@ -19,7 +19,7 @@ sys.path.insert(0, str(HERE.parent / "pc-tuning"))
 import iempc_trace  # noqa: E402,F401  (the module under test; `iempc trace` runs it)
 import iempc_tuning  # noqa: E402
 import latency_report as lr  # noqa: E402
-from test_iempc import OK, SHA, SHA2, Base, FakeClock, ip, make_zip, sha256  # noqa: E402
+from iempc_test_support import OK, SHA, SHA2, Base, FakeClock, ip, make_zip, sha256  # noqa: E402
 from test_iempc_tuning import MODULES, PROFILE  # noqa: E402
 from test_latency_report import DPCISR_XPERF  # noqa: E402
 
@@ -74,8 +74,7 @@ class TraceBase(Base):
         self.report = DPCISR_XPERF
         self.fetches: list[tuple[str, str, str]] = []
         self.bounds: list[tuple[str, float]] = []   # every PC script with its timeout
-        ip.scp = self.scp
-        ip.ssh_ps = self.ssh_ps
+        self.patch(scp=self.scp, ssh_ps=self.ssh_ps)
 
     def ssh_ps(self, env, script, timeout, event):
         """FakePc's answer; an answer {"pc_error": text} is the PC's own failure
@@ -313,7 +312,7 @@ class TraceStopTests(TraceBase):
     failure after the start stops it at once (the stop-only import, no merge)."""
 
     def test_a_flag_during_the_wait_stops_the_trace_at_once_and_runs_the_event_path(self) -> None:
-        with mock.patch.object(ip.time, "sleep", side_effect=lambda _s: self.flag()):
+        with mock.patch.object(time, "sleep", side_effect=lambda _s: self.flag()):
             code, docs, _ = self.trace()
         self.assertEqual(code, ip.PREEMPTED)
         self.assertEqual(self.steps(), [("preflight", "abandon"), ("start", "finish"), ("stop", "ignore")])
@@ -332,7 +331,7 @@ class TraceStopTests(TraceBase):
 
     def test_a_signal_during_the_wait_stops_the_trace_and_ends_the_command(self) -> None:
         before = signal.getsignal(signal.SIGTERM)
-        with mock.patch.object(ip.time, "sleep", side_effect=lambda _s: signal.raise_signal(signal.SIGTERM)):
+        with mock.patch.object(time, "sleep", side_effect=lambda _s: signal.raise_signal(signal.SIGTERM)):
             with self.assertRaises(SystemExit):
                 self.trace()
         self.assertEqual(self.steps(), [("preflight", "abandon"), ("start", "finish"), ("stop", "ignore")])
@@ -371,7 +370,7 @@ class TraceStopTests(TraceBase):
 
     def test_a_malformed_stop_reply_is_a_failed_stop_and_never_blocks_the_event_path(self) -> None:
         self.answers["Stop-IemTraceSessions"] = {"stopped": [{"name": "NT Kernel Logger"}], "gone": [], "kept": []}
-        with mock.patch.object(ip.time, "sleep", side_effect=lambda _s: self.flag()):
+        with mock.patch.object(time, "sleep", side_effect=lambda _s: self.flag()):
             code, docs, err = self.trace()
         self.assertEqual(code, ip.PREEMPTED)
         self.assertEqual(docs[0]["trace_stop"], "failed")
@@ -385,7 +384,7 @@ class TraceStopTests(TraceBase):
 
     def test_an_abandon_that_fails_unexpectedly_never_hides_the_cause(self) -> None:
         with mock.patch.object(iempc_trace, "abandon", side_effect=RuntimeError("synthetic")):
-            with mock.patch.object(ip.time, "sleep", side_effect=lambda _s: self.flag()):
+            with mock.patch.object(time, "sleep", side_effect=lambda _s: self.flag()):
                 code, docs, err = self.trace()
         self.assertEqual(code, ip.PREEMPTED)
         self.assertEqual(docs[0]["trace_stop"], "failed")
@@ -466,7 +465,7 @@ class TraceStopTests(TraceBase):
             raise ip.StepError("ssh: connection reset")
 
         self.answers["Stop-IemTraceSessions"] = cut
-        with mock.patch.object(ip.time, "sleep", side_effect=lambda _s: self.flag()):
+        with mock.patch.object(time, "sleep", side_effect=lambda _s: self.flag()):
             code, _, err = self.trace()
         self.assertEqual(code, ip.PREEMPTED)
         self.assertIn("WARNING: the kernel trace may still run", err)
@@ -511,7 +510,7 @@ class TraceRecordTests(TraceBase):
         self.assertIn("started", rec)
         self.assertFalse(self.record().exists())
         # A stop that stopped both sessions after a flag clears it too.
-        with mock.patch.object(ip.time, "sleep", side_effect=lambda _s: self.flag()):
+        with mock.patch.object(time, "sleep", side_effect=lambda _s: self.flag()):
             self.assertEqual(self.trace()[0], ip.PREEMPTED)
         self.assertFalse(self.record().exists())
 
@@ -582,7 +581,7 @@ class TraceRecordTests(TraceBase):
 
     def test_the_recorded_stop_fits_the_event_budget(self) -> None:
         self.write_record()
-        ip.EVENT_BUDGET_S, ip.SWITCH_MIN_S = 200.0, 120.0
+        self.patch(EVENT_BUDGET_S=200.0, SWITCH_MIN_S=120.0)
         self.assertEqual(self.run_main("event")[0], 0)
         [(_, bound)] = self.recorded_stops()
         self.assertLessEqual(bound, 80.0)
@@ -591,7 +590,7 @@ class TraceRecordTests(TraceBase):
         # Too little left for a stop: none starts, the record stays, iemmode event still runs.
         self.write_record()
         self.bounds.clear()
-        ip.EVENT_BUDGET_S = 140.0
+        self.patch(EVENT_BUDGET_S=140.0)
         code, docs, err = self.run_main("event")
         self.assertEqual((code, self.recorded_stops()), (0, []))
         self.assertTrue(self.record().exists())
@@ -605,7 +604,7 @@ class TraceRecordTests(TraceBase):
         # On a fake clock that only the stop's wait moves: the branch never
         # depends on this process's own speed (a loaded run once ate the slack).
         clock = FakeClock()
-        ip.EVENT_BUDGET_S, ip.SWITCH_MIN_S, ip.POLL_S = 2.0, 0.5, 0.2
+        self.patch(EVENT_BUDGET_S=2.0, SWITCH_MIN_S=0.5, POLL_S=0.2)
         inner = self.ssh_ps
 
         def slow(env, script, timeout, event):
@@ -615,8 +614,8 @@ class TraceRecordTests(TraceBase):
                 raise ip.StillRunning(f"ssh still running after {timeout} s (bounded on the PC; never force-end)")
             return inner(env, script, timeout, event)
 
-        ip.ssh_ps = slow
-        with mock.patch.object(iempc_trace, "RECORDED_STOP_MIN_S", 0.1), mock.patch.object(ip, "event_clock", clock.now):
+        self.patch(ssh_ps=slow)
+        with mock.patch.object(iempc_trace, "RECORDED_STOP_MIN_S", 0.1), self.patched(event_clock=clock.now):
             code, docs, err = self.run_main("event")
         self.assertEqual(code, 0, err)
         self.assertEqual(len(self.recorded_stops()), 1)
