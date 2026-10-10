@@ -34,7 +34,11 @@ runs the event path itself (exit 10). `dev`, `rehearse-teardown`,
 `install` (except `--first`) and `activate` refuse while an S1a/S1c window
 is open: `handover-s1a` hands the card over first. `dispatch-hil`,
 `dispatch-soak` and `dispatch-live` check the flag again right before they
-dispatch.
+dispatch. `activate`, `dispatch-hil` and `trace` refuse first, before any
+call, while a live run or a soak of this dev entry may still run;
+`dispatch-soak` and `switch-test` while a live run of it may (iempc_live;
+switch-test's own soak check follows its status read, iempc_switch); `dev`
+and `event` never refuse.
 
 `activate --sha` runs `iemmode activate`, which the guard allows in dev
 and in an idle event (#9 2026-09-28: none of iemmixer's processes runs, no
@@ -1161,6 +1165,7 @@ def cmd_activate(ctx: Ctx) -> int:
     (then the event path runs, so "ide event" is not queued behind it on the
     guard that is about to hand over) and abandons the status reads.
     `--offline`: `activate_offline`, for a guard too old for that."""
+    iempc_live.refuse_while_running(sys.modules[__name__], "activate")   # a live run or soak of this entry (#10)
     env, sha = ctx.env, check_sha(ctx.args.sha)
     refuse_open_window("activate")
     if ctx.args.offline:
@@ -1191,6 +1196,7 @@ def cmd_ssh_shell(ctx: Ctx) -> int:
 
 def cmd_trace(ctx: Ctx) -> int:
     """A kernel DPC/ISR trace on the guard's engine; the code lives in iempc_trace.py (#15, #36)."""
+    iempc_live.refuse_while_running(sys.modules[__name__], "trace")   # a live run or soak of this entry (#10)
     return iempc_trace.trace(ctx, sys.modules[__name__])
 
 
@@ -1202,6 +1208,7 @@ def cmd_dispatch_hil(ctx: Ctx) -> int:
     """Dispatches the ops hil.yml with this box's gh authentication (design
     §7): the SHA is a branch head with a green push run; branch, run and the
     attested digest come from that run; once per SHA per dev entry."""
+    iempc_live.refuse_while_running(sys.modules[__name__], "dispatch-hil")   # a live run or soak of this entry (#10)
     sha = check_sha(ctx.args.sha) if ctx.args.sha else branch_head("dev")
     branch = next((b for b in BRANCHES if branch_head(b) == sha), None)
     if branch is None:

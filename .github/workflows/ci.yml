@@ -34,6 +34,7 @@ jobs:
           python3 -m unittest discover -s scripts/asio-spike -p 'test_*.py' -v
           python3 -m unittest discover -s scripts/pc-tuning -p 'test_*.py' -v
           python3 -m unittest discover -s scripts/iem-pc -p 'test_*.py' -v
+          python3 -m unittest discover -s scripts/soak -p 'test_*.py' -v
           python3 scripts/test_check_disposal_safety.py
       - name: Golden tooling self-tests (numpy venv)
         run: |
@@ -425,6 +426,28 @@ jobs:
           [ "$member_code" = 403 ] || { echo "the member token was not refused with 403"; exit 1; }
           [ "$status" -eq 0 ] || exit "$status"
           exit "$secret_status"
+      - name: Stage the NullRt soak binaries with the engine's licence (pushes only)
+        # The release binaries this job built and ran green: the engine, the
+        # server with standalone,audio and the soak client, flat in one
+        # folder with LICENSE-iem-engine (GPL-3.0-or-later, as in the bundle).
+        # scripts/soak/nullrt_soak.py runs them by hand on a dev box
+        # (.claude/rules/soak.md).
+        if: github.event_name == 'push'
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/nullrt-soak"
+          mkdir -p "$stage"
+          cp target/release/iem-engine target/release/iem-server target/release/iem-soakclient "$stage/"
+          cp crates/iem-engine/LICENSE "$stage/LICENSE-iem-engine"
+      - name: Upload the NullRt soak binaries (pushes only; the 72 h dev-box soak, S7 design note section 8)
+        # The zip keeps no file mode: chmod +x after the download.
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nullrt-soak-linux-${{ github.sha }}
+          path: ${{ runner.temp }}/nullrt-soak/
+          retention-days: 14
+          if-no-files-found: error
       - name: Upload failure evidence
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

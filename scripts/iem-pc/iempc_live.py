@@ -14,6 +14,11 @@ So the three never overlap within a dev entry:
 - `dispatch-soak` and `switch-test` refuse while a live run of this dev entry
   may still run (`refuse_while_live`, their call sites in iempc.py): a soak
   would meet the run's engine restart, a switch would end the run.
+- `activate`, `dispatch-hil` and `trace` refuse while a live run or a soak
+  of this dev entry may still run (`refuse_while_running`, their call sites
+  in iempc.py): an activation restarts the engine, a HIL run restarts it in
+  its own job, a kernel trace weighs on the times both measure. `dev` (the
+  owner's "event skončil") and `event` are never refused.
 
 In this order, nothing dispatched on any refusal:
 
@@ -76,6 +81,12 @@ JOB_MINUTES = {"verify": 5, "pc-begin": 15, "pc": 60, "pc-end": 10}
 WINDOW_S = sum(JOB_MINUTES.values()) * 60   # 5400 s after its dispatch a live run may still touch the PC
 NOTHING = {"dispatch-soak": ("no soak", "(nothing was dispatched)"),
            "switch-test": ("no switch test", "a switch would end it (nothing was switched)")}
+# The commands refused while a live run or a soak of this dev entry may still
+# run (`refuse_while_running`): (head, why and what was not done).
+RUNNING = {"activate": ("no activation", "the activation restarts the engine (nothing was activated)"),
+           "dispatch-hil": ("no HIL dispatch", "the HIL run restarts the engine in its own job "
+                                               "(nothing was dispatched)"),
+           "trace": ("no trace", "a kernel trace weighs on the times it measures (nothing was traced)")}
 
 
 def live_refusal(reply, sha: str) -> str | None:
@@ -130,6 +141,25 @@ def described(ip, d: dict) -> str:
     return text
 
 
+def live_described(ip, d: dict) -> str:
+    """A refusal's words for a live run record that may still run."""
+    return f"a live run dispatched in this dev entry may still run ({described(ip, d)})"
+
+
+def soak_described(ip, soak: dict) -> str:
+    """A refusal's words for a soak record that may still run; one whose
+    time, hours or dev entry cannot be read names the file to check by hand
+    (it may otherwise refuse until its window has passed or it is fixed)."""
+    text = f"a soak dispatched in this dev entry may still run (dispatched {soak.get('at')}, {soak.get('hours')} h)"
+    try:
+        at = dt.datetime.fromisoformat(str(soak.get("at")))
+    except ValueError:
+        at = None
+    if at is None or at.tzinfo is None or type(soak.get("hours")) is not int or type(soak.get("entry")) is not int:
+        text += f"; its time, hours or dev entry cannot be read: check {ip.state_dir() / iempc_soak.RECORD} by hand"
+    return text
+
+
 def refuse_while_live(ip, command: str) -> None:
     """`dispatch-soak` and `switch-test` first: refused while a live run of
     this dev entry may still run (a soak would meet its engine restart, a
@@ -137,7 +167,22 @@ def refuse_while_live(ip, command: str) -> None:
     d = running_live(ip, ip.current_entry(), dt.datetime.now().astimezone())
     if d is not None:
         head, tail = NOTHING[command]
-        raise ip.Refused(f"{head}: a live run dispatched in this dev entry may still run ({described(ip, d)}): {tail}")
+        raise ip.Refused(f"{head}: {live_described(ip, d)}: {tail}")
+
+
+def refuse_while_running(ip, command: str) -> None:
+    """`activate`, `dispatch-hil` and `trace` first, before any call: refused
+    while a live run (named first) or a soak of this dev entry may still run.
+    An activation restarts the engine (inside the live run's HIL job too), a
+    HIL run begins its own job and restarts it, a kernel trace weighs on the
+    times both measure. `dev` (the owner's "event skončil") and `event` are
+    never refused."""
+    entry, now = ip.current_entry(), dt.datetime.now().astimezone()
+    head, tail = RUNNING[command]
+    d = running_live(ip, entry, now)
+    soak = None if d is not None else iempc_soak.running_soak(ip, entry, now)
+    if d is not None or soak is not None:
+        raise ip.Refused(f"{head}: {live_described(ip, d) if d is not None else soak_described(ip, soak)}: {tail}")
 
 
 def refuse_overlap(ip, entry: int) -> None:
@@ -146,12 +191,10 @@ def refuse_overlap(ip, entry: int) -> None:
     now = dt.datetime.now().astimezone()
     d = running_live(ip, entry, now)
     if d is not None:
-        raise ip.Refused(f"no live run: a live run dispatched in this dev entry may still run ({described(ip, d)}) "
-                         f"(nothing was dispatched)")
+        raise ip.Refused(f"no live run: {live_described(ip, d)} (nothing was dispatched)")
     soak = iempc_soak.running_soak(ip, entry, now)
     if soak is not None:
-        raise ip.Refused(f"no live run: a soak dispatched in this dev entry may still run (dispatched "
-                         f"{soak.get('at')}, {soak.get('hours')} h): the live run restarts the engine in a HIL job "
+        raise ip.Refused(f"no live run: {soak_described(ip, soak)}: the live run restarts the engine in a HIL job "
                          f"(nothing was dispatched)")
 
 

@@ -17,8 +17,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import iempc_live as live  # noqa: E402
 import iempc_soak  # noqa: E402
 from test_iempc import RUN, SHA, SHA2, Base, ip  # noqa: E402
+import test_iempc  # noqa: E402  (ActivateTests by its module: imported by name it would run twice)
 from test_iempc_soak import READY, SWITCHING, engine, ready  # noqa: E402
 import test_iempc_switch as sw  # noqa: E402
+from test_iempc_trace import TraceBase  # noqa: E402
 
 NOTHING = "(nothing was dispatched)"
 
@@ -385,6 +387,151 @@ class SoakRecordTests(LiveBase):
         self.write_soaks([dict(soak_record(hours=1, seconds_ago=3600 + iempc_soak.RUN_MARGIN_S + 60), entry=None)])
         code, _, err = self.live()
         self.assertEqual(code, 0, err)
+
+
+class RunningGuardCases:
+    """`activate`, `dispatch-hil` and `trace` refuse, before any call, while a
+    live run or a soak of this dev entry may still run (iempc_live.
+    refuse_while_running): an activation restarts the engine (inside the live
+    run's HIL job too), a HIL run begins its own job and restarts it, a
+    kernel trace weighs on the times both measure. A mixin: each subclass
+    names its command, its words and how it goes through."""
+    ARGV: tuple[str, ...] = ()
+    HEAD = ""
+    NOTHING = ""
+
+    def passes(self) -> None:
+        raise NotImplementedError
+
+    def write_runs(self, runs) -> None:
+        ip.write_json(ip.state_dir() / "live.json", {"runs": runs})
+
+    def write_soaks(self, soaks) -> None:
+        ip.write_json(ip.state_dir() / "soak.json", {"soaks": soaks})
+
+    def refused_before_any_call(self, words: str, what=None) -> str:
+        self.pc.calls.clear()
+        self.pc.modules.clear()
+        self.gh.calls.clear()
+        code, docs, err = self.run_main(*self.ARGV)
+        self.assertEqual((code, docs, self.pc.calls, self.pc.modules, self.gh.calls), (1, [], [], [], []), (what, err))
+        self.assertIn(words, err, what)
+        self.assertIn(self.NOTHING, err, what)
+        self.assertNotIn("Traceback", err, what)
+        return err
+
+    def test_a_live_run_of_this_entry_that_may_still_run_refuses(self) -> None:
+        self.write_runs([run_record(sha=SHA2, seconds_ago=live.WINDOW_S - 60)])
+        err = self.refused_before_any_call(f"{self.HEAD}: a live run dispatched in this dev entry may still run")
+        self.assertIn(SHA2, err)
+        self.assertNotIn("cannot be read", err)
+
+    def test_a_soak_of_this_entry_that_may_still_run_refuses(self) -> None:
+        self.write_soaks([soak_record(hours=1, seconds_ago=3600 + iempc_soak.RUN_MARGIN_S - 60)])
+        err = self.refused_before_any_call(f"{self.HEAD}: a soak dispatched in this dev entry may still run "
+                                           "(dispatched ")
+        self.assertIn(", 1 h)", err)
+
+    def test_the_live_run_is_named_before_the_soak(self) -> None:
+        self.write_runs([run_record(sha=SHA2)])
+        self.write_soaks([soak_record()])
+        self.refused_before_any_call(f"{self.HEAD}: a live run dispatched in this dev entry may still run")
+
+    def test_unreadable_records_count_as_running(self) -> None:
+        self.write_runs([run_record(sha=SHA2, at="later")])
+        err = self.refused_before_any_call("a live run dispatched in this dev entry may still run")
+        self.assertIn(f"check {ip.state_dir() / 'live.json'} by hand", err)
+        self.write_runs([])
+        for bad in ({"at": "later"}, {"at": "2026-10-09T10:00:00"}, {"entry": None}, {"hours": "8"}):
+            self.write_soaks([{**soak_record(), **bad}])
+            err = self.refused_before_any_call(f"{self.HEAD}: a soak dispatched in this dev entry may still run", bad)
+            self.assertIn(f"its time, hours or dev entry cannot be read: check {ip.state_dir() / 'soak.json'} by hand",
+                          err, bad)
+        self.write_soaks([soak_record()])
+        self.assertNotIn("cannot be read", self.refused_before_any_call("a soak dispatched in this dev entry"))
+        self.write_soaks([])
+        for name, text in (("live.json", "not json"), ("soak.json", json.dumps({"soaks": {"sha": SHA}}))):
+            (ip.state_dir() / name).write_text(text, encoding="utf-8")
+            self.pc.calls.clear()
+            self.gh.calls.clear()
+            code, docs, err = self.run_main(*self.ARGV)
+            self.assertEqual((code, docs, self.pc.calls, self.gh.calls), (1, [], [], []), name)
+            self.assertIn(name, err)
+            self.assertIn("check it by hand", err)
+            (ip.state_dir() / name).unlink()
+
+    def test_records_of_another_entry_or_past_their_window_refuse_nothing(self) -> None:
+        self.write_runs([run_record(sha=SHA2, entry=1), run_record(sha=SHA2, seconds_ago=live.WINDOW_S + 60)])
+        self.write_soaks([soak_record(entry=1),
+                          soak_record(hours=1, seconds_ago=3600 + iempc_soak.RUN_MARGIN_S + 60)])
+        self.passes()
+
+    def test_the_flag_still_refuses_first(self) -> None:
+        self.write_runs([run_record()])
+        self.write_soaks([soak_record()])
+        self.flag()
+        self.gh.calls.clear()   # TraceBase's own fetch
+        code, docs, err = self.run_main(*self.ARGV)
+        self.assertEqual((code, docs, self.pc.calls, self.gh.calls), (1, [], [], []))
+        self.assertIn("runs only in dev time", err)
+
+
+class ActivateGuardTests(RunningGuardCases, Base):
+    ARGV = ("activate", "--sha", SHA)
+    HEAD = "no activation"
+    NOTHING = "(nothing was activated)"
+
+    def setUp(self) -> None:
+        super().setUp()
+        saved = (ip.HANDOVER_S, ip.HANDOVER_POLL_S)
+        self.addCleanup(test_iempc.ActivateTests.restore_handover, saved)
+        ip.HANDOVER_S, ip.HANDOVER_POLL_S = 10.0, 0.01
+        self.pc.replies[("activate", SHA)] = test_iempc.ActivateTests.ACTIVATED
+        self.pc.replies[("status",)] = test_iempc.ActivateTests.status(SHA)
+
+    def passes(self) -> None:
+        code, docs, err = self.run_main(*self.ARGV)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.pc.calls[0], ("iemmode.exe", ["activate", SHA], "finish"))
+        self.assertEqual(docs[-1]["handover"]["guard_build"], SHA)
+
+
+class HilGuardTests(RunningGuardCases, Base):
+    ARGV = ("dispatch-hil", "--sha", SHA)
+    HEAD = "no HIL dispatch"
+    NOTHING = "(nothing was dispatched)"
+
+    def passes(self) -> None:
+        code, docs, err = self.run_main(*self.ARGV)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(self.gh.named("workflow", "run")), 1)
+        self.assertEqual(docs[-1]["dispatched"]["sha"], SHA)
+
+
+class TraceGuardTests(RunningGuardCases, TraceBase):
+    ARGV = ("trace", "--label", "base-test", "--seconds", "1")
+    HEAD = "no trace"
+    NOTHING = "(nothing was traced)"
+
+    def passes(self) -> None:
+        code, docs, err = self.run_main(*self.ARGV)
+        self.assertEqual(code, 0, err)
+        self.assertIn("start", self.names())
+
+
+class NeverRefusedTests(LiveBase):
+    """`iempc dev` is the owner's "event skončil" and `iempc event` his "ide
+    event": neither waits for a live run or a soak record."""
+
+    def test_dev_and_event_go_through_while_a_live_run_and_a_soak_may_still_run(self) -> None:
+        self.write_runs([run_record()])
+        self.write_soaks([soak_record()])
+        code, _, err = self.run_main("dev")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.pc.calls[-1], ("iemmode.exe", ["dev"], "abandon"))
+        code, _, err = self.run_main("event")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.pc.calls[-1], ("iemmode.exe", ["event"], "ignore"))
 
 
 class PureTests(LiveBase):
