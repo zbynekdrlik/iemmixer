@@ -446,7 +446,9 @@ test("the guard puts the changes back the moment the burst ends, and the steps f
       await expect.poll(() => socket.changes().length, { timeout: 1_000, intervals: [10] }).toBe(6);
       expect(socket.changes()).toEqual(["a1", "a2", "b", "undo b", "undo a1", "undo a2"]);
     }),
-  ).rejects.toThrow("the burst ended with changes in place: they went back after its end");
+  ).rejects.toThrow(
+    /^the burst ended with changes in place: they went back after its end \(the steps ran \d+\.\d s in a burst entered with \d+\.\d s left; ended by its listening status\)$/,
+  );
   // Nothing went back twice, and the steps' end waited until the engine had
   // the guard's undos (a barrier after them): the server drops a closed
   // socket's queued commands.
