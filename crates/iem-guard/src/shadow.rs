@@ -12,7 +12,7 @@
 //! project the refresh imports and the state the engine last saved. In prod
 //! there is no refresh (`lifecycle::refreshes_data`), and the shadow runs
 //! all the same: a report of how far REAPER's project has drifted from what
-//! iemmixer serves, the evidence a rollback's export starts from. No
+//! iemmixer serves. No
 //! `shadow` key, no step.
 //!
 //! It never fails an entry and never holds one up past [`LIMIT`]: a run

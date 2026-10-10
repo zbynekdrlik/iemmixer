@@ -54,11 +54,9 @@ pub struct View {
     pub engine: Option<EngineStatus>,
     /// `GuardState.last_switch` (`Reply.last_switch`, S7).
     pub last_switch: Option<LastSwitch>,
-    /// A plain `iemmode event` (the engineer's button) is a rollback
-    /// (`rollback::button_rolls_back`, S8 lane 3).
-    pub rolls_back: bool,
-    /// The lifecycle is prod (S8 lane 5): "ide event" waits for a switch to
-    /// live instead of pre-empting it, and live counts as its end.
+    /// The lifecycle is prod (`lifecycle::is_prod`, S8 lane 5): "ide event"
+    /// waits for a switch to live instead of pre-empting it, and live counts
+    /// as its end.
     pub prod: bool,
     /// Replies the daemon thread handed to the pipe's threads…
     pub replies_sent: u64,
@@ -112,10 +110,7 @@ impl View {
 /// Why a request is refused while a switch runs.
 pub fn while_switching(req: &Request) -> &'static str {
     match req {
-        Request::Dev { .. }
-        | Request::Live { .. }
-        | Request::Cutover { .. }
-        | Request::Rollback { .. } => "busy",
+        Request::Dev { .. } | Request::Live { .. } | Request::Cutover { .. } => "busy",
         _ => "switching",
     }
 }
@@ -204,27 +199,12 @@ impl Shared {
         match (req, v.running) {
             (Request::Subscribe, _) => Route::Subscribe,
             (Request::Status, _) => Route::Now(v.reply(true, &v.status)),
-            // In prod the button is the rollback (S8 lane 3): it runs after
-            // the switch in progress, never answered as its end; it pre-empts
-            // a dev or live entry, never an event plan (whose waits would
-            // fail on the token).
-            (
-                Request::Event {
-                    dry_run: false,
-                    signal: false,
-                },
-                Some(running),
-            ) if v.rolls_back => {
-                if running != Mode::Event {
-                    self.cancel.preempt();
-                }
-                Route::Queue(v.generation())
-            }
             (Request::Event { dry_run: false, .. }, Some(Mode::Event)) => {
                 Route::AwaitEnd("already switching to event")
             }
             // In prod "ide event" waits for a switch to live (S8 lane 5): it
-            // is the band's system, which an event keeps (`rollback::on_event`).
+            // is the band's system, which an event keeps (`lifecycle::on_event`);
+            // the button (no signal) pre-empts it as before the cutover.
             (
                 Request::Event {
                     dry_run: false,
@@ -241,13 +221,11 @@ impl Shared {
                 self.cancel.preempt();
                 Route::Queue(v.generation())
             }
-            (
-                Request::Dev { .. }
-                | Request::Live { .. }
-                | Request::Cutover { .. }
-                | Request::Rollback { .. },
-                Some(_),
-            ) if v.start_checks => Route::Queue(v.generation()),
+            (Request::Dev { .. } | Request::Live { .. } | Request::Cutover { .. }, Some(_))
+                if v.start_checks =>
+            {
+                Route::Queue(v.generation())
+            }
             (_, Some(_)) => Route::Now(v.reply(false, while_switching(req))),
             (_, None) => Route::Queue(v.generation()),
         }
@@ -336,7 +314,7 @@ impl Shared {
     }
 
     /// "Ide event"'s own switch to live in prod (S8 lane 5,
-    /// `rollback::OnEvent::Live`), claimed under the view's lock before
+    /// `lifecycle::OnEvent::Live`), claimed under the view's lock before
     /// anything is read for it: the token is cleared (a pre-emption routed
     /// before this, another "ide event" or the button, is answered by the
     /// queue as the switch's end or runs after it) and the view shows the

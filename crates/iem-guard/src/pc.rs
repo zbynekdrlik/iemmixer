@@ -26,7 +26,6 @@ use crate::effects::tuning::Logon;
 use crate::handover::{AppExit, ReaperFacts, ReaperProcs};
 use crate::plan::{Facts, Health, Mode};
 use crate::proto::HilOut;
-use crate::rollback::{Placed, Want};
 use crate::state::Children;
 
 mod precheck;
@@ -398,17 +397,6 @@ pub trait Pc {
     /// (`effects::web::member_page_problem`). Never waits beyond two local
     /// requests.
     fn member_page(&mut self) -> R<()>;
-    /// The rollback's export (S8 lane 3, design note §3.3): `pc.toml`'s
-    /// `rollback_export` (`iem-migrate export`, self-checked) writes the
-    /// band's data from the engine's saved state into a new project,
-    /// `rollback::export_path` of `[guard] reaper_project` and `at`; it
-    /// creates that file (never one that exists) and only reads the
-    /// original. What it reported. A mutation: it finishes.
-    fn export_project(&mut self, at: u64) -> R<String>;
-    /// The project's path made to hold `want` by renames only
-    /// (`rollback::moves`: a target never exists; the original kept as
-    /// `rollback::kept_path` of `at`), read back: what it holds now.
-    fn swap_project(&mut self, want: Want, at: u64) -> R<Placed>;
 }
 
 /// A scripted PC for the daemon's tests.

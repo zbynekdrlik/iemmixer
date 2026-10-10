@@ -173,9 +173,9 @@ fn a_refused_cutover_changes_nothing() {
 /// Prod lost to trial (an older guard took over, an unreadable state)
 /// leaves the predecessor's autostarts disabled in an export never
 /// restored, and `pin_changes = true`. A second cutover would export the
-/// disabled state, and its rollback would restore them disabled: it is
-/// refused, its dry run too, before anything changes; `iemmode rollback`
-/// repairs it (S8 lane 5, the cross-lane review's finding 2a).
+/// disabled state, and its undo would restore them disabled: it is
+/// refused, its dry run too, before anything changes; they are put back by
+/// hand (S8 lane 5, the cross-lane review's finding 2a; no rollback).
 #[test]
 fn a_cutover_after_a_lost_prod_is_refused() {
     for dry_run in [false, true] {
@@ -189,7 +189,11 @@ fn a_cutover_after_a_lost_prod_is_refused() {
             "{}",
             r.detail
         );
-        assert!(r.detail.contains("iemmode rollback"), "{}", r.detail);
+        assert!(
+            r.detail.contains("by hand before a cutover"),
+            "{}",
+            r.detail
+        );
         assert_eq!(pc.mutating_calls(), Vec::<Call>::new());
         let (mut pc, mut g) = ready();
         let earlier = export_name(T0 - 3_600);

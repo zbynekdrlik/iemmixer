@@ -104,11 +104,8 @@ fn activation_now(pc: &mut dyn Pc, g: &Guard) -> Activation {
 /// So a guard fix reaches a guard in event, whose own code may refuse the
 /// dev entry.
 pub(super) fn activate(pc: &mut dyn Pc, g: &mut Guard, sha: &str) -> (bool, String) {
-    // An older guard taking over would drop a kept cutover or rollback
-    // record (S8).
-    if let Some(why) = crate::cutover::activation_refusal(g.state.cutover.as_ref())
-        .or_else(|| crate::rollback::activation_refusal(g.state.rollback.as_ref()))
-    {
+    // An older guard taking over would drop a kept cutover record (S8).
+    if let Some(why) = crate::cutover::activation_refusal(g.state.cutover.as_ref()) {
         return (false, why);
     }
     let restart_job = match activation_now(pc, g) {
@@ -195,9 +192,7 @@ pub fn activate_offline<L>(pc: &mut dyn Pc, g: &mut Guard, lock: Option<L>, sha:
 }
 
 fn offline_activation(pc: &mut dyn Pc, g: &mut Guard, sha: &str) -> (bool, String) {
-    if let Some(why) = crate::cutover::activation_refusal(g.state.cutover.as_ref())
-        .or_else(|| crate::rollback::activation_refusal(g.state.rollback.as_ref()))
-    {
+    if let Some(why) = crate::cutover::activation_refusal(g.state.cutover.as_ref()) {
         return (false, why);
     }
     if g.state.mode != Mode::Event {

@@ -101,7 +101,8 @@ fn engine_exited(pc: &mut dyn Pc, g: &mut Guard, code: Option<i32>, at: Instant,
 
 /// A crash loop, as the lifecycle says (S8 design §3.4): back to REAPER
 /// (before the cutover), live on the pin (maintenance), the previous pin
-/// (prod live), or down with an alarm naming the rollback; a pin that may
+/// (prod live), or down with an alarm naming the way back to REAPER
+/// (`iemmode event`, the PC stays prod); a pin that may
 /// not go live is never a fallback (G8: REAPER from maintenance, down from
 /// live). A new engine on a pin starts a new crash window: "if that loops
 /// too" counts its own exits.
@@ -152,8 +153,8 @@ fn crash_loop(pc: &mut dyn Pc, g: &mut Guard, mode: Mode, n: usize, at: Instant)
             g.raise(
                 None,
                 &format!(
-                    "{crashed} {why}: the engine stays down; roll back to REAPER (iemmode \
-                     rollback)"
+                    "{crashed} {why}: the engine stays down; back to REAPER with iemmode \
+                     event (the PC stays in prod)"
                 ),
                 false,
             );

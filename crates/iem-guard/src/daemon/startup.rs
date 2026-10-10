@@ -117,12 +117,7 @@ pub fn start(pc: &mut dyn Pc, g: &mut Guard, boot: u64) -> Option<Outcome> {
     // Before the event plan: its check then adds no alarm for the same value.
     take_logon(pc, g);
     g.save();
-    // S8 lane 3: a rollback left (a crash, a reboot, a step that failed)
-    // goes on; its event plan is the start's.
-    let out = match super::rollback::resume(pc, g) {
-        Some(out) => Some(out),
-        None => start_plan(pc, g, target, next, live_note),
-    };
+    let out = start_plan(pc, g, target, next, live_note);
     // S8 lane 5: the cut-off cutover's elevated undos once REAPER is back.
     if let Some(found) = cut_off {
         super::cutover::finish_recovery(pc, g, &found);

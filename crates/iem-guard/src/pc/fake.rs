@@ -6,7 +6,6 @@ use std::time::{Duration, Instant};
 use super::*;
 use crate::daemon::{Route, Shared};
 use crate::proto::Request;
-use crate::rollback::{Files, moves, placed};
 
 /// Every `Pc` method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -65,10 +64,6 @@ pub enum Call {
     ServerConfig,
     WriteServerConfig,
     MemberPage,
-    /// The rollback's export of the band's data (S8 lane 3).
-    ExportProject,
-    /// The rollback's renames of the project files.
-    SwapProject,
 }
 
 impl Call {
@@ -108,8 +103,6 @@ impl Call {
                 | Call::AutostartsOn
                 | Call::GuardLogon
                 | Call::WriteServerConfig
-                | Call::ExportProject
-                | Call::SwapProject
         )
     }
 }
@@ -213,13 +206,6 @@ pub struct FakePc {
     /// The export the predecessor's autostarts were disabled into
     /// (`autostarts_off`); none while they are enabled.
     pub autostarts_in: Option<String>,
-    /// The project files the rollback exports and renames (`project` the
-    /// band's project, `export` its export under its own name, `kept` the
-    /// original kept beside it).
-    pub project: Files,
-    /// REAPER cannot open the export: its handover's facts name no track
-    /// while the project's path holds it.
-    pub export_unloadable: bool,
     /// `pc.toml` names a shadow command (S8 lane 4; default: none, so no
     /// entry plans the step). A read of the settings: not a recorded call.
     pub shadows: bool,
@@ -323,11 +309,6 @@ impl FakePc {
             config_sticks: false,
             guard_at_logon: false,
             autostarts_in: None,
-            project: Files {
-                project: true,
-                ..Files::default()
-            },
-            export_unloadable: false,
             shadows: false,
             waits_see_preemption: false,
             preempt_at: None,
@@ -727,13 +708,6 @@ impl Pc for FakePc {
 
     fn reaper_facts(&mut self, c: &Cancel) -> R<ReaperFacts> {
         self.enter(Call::ReaperFacts, Some(c))?;
-        let on_export = placed(Want::Export, self.project) == Some(Placed::Export);
-        if self.export_unloadable && on_export {
-            return Ok(ReaperFacts {
-                tracks: None,
-                ..self.reaper.clone()
-            });
-        }
         Ok(self.reaper.clone())
     }
 
@@ -870,25 +844,5 @@ impl Pc for FakePc {
 
     fn member_page(&mut self) -> R<()> {
         self.enter(Call::MemberPage, None)
-    }
-
-    fn export_project(&mut self, _at: u64) -> R<String> {
-        self.enter(Call::ExportProject, None)?;
-        if self.project.export {
-            return Err(StepError::failed(
-                "the export exists: an export never overwrites a file",
-            ));
-        }
-        self.project.export = true;
-        Ok("export: self-check passed".to_owned())
-    }
-
-    fn swap_project(&mut self, want: Want, _at: u64) -> R<Placed> {
-        self.enter(Call::SwapProject, None)?;
-        for m in moves(want, self.project).map_err(StepError::Failed)? {
-            self.project = m.apply(self.project);
-        }
-        placed(want, self.project)
-            .ok_or_else(|| StepError::failed("the project files do not read back"))
     }
 }

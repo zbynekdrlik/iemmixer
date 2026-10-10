@@ -46,7 +46,7 @@ pub(super) fn cutover(
     if let Some(why) = cutover::refusal(build, &facts) {
         return (false, why);
     }
-    // What a lost prod left (S8 lane 5): its rollback repairs it first.
+    // What a lost prod left (S8 lane 5): put back by hand first.
     match leftover(pc) {
         Ok(left) => {
             if let Some(why) = cutover::leftover_refusal(&left) {
@@ -235,7 +235,7 @@ fn restart_server(pc: &mut dyn Pc, g: &mut Guard) -> Result<(), String> {
 }
 
 /// Saves the state and reads it back from the state file (the guard's in
-/// memory when it has no files): the cutover's and the rollback's records
+/// memory when it has no files): the cutover's record
 /// and the lifecycle must be what the guard holds.
 pub(super) fn save_checked(g: &mut Guard) -> Result<(), String> {
     g.save();
@@ -253,12 +253,6 @@ pub(super) fn save_checked(g: &mut Guard) -> Result<(), String> {
         return Err(format!(
             "the guard state reads back with the record {:?} and the lifecycle {:?}",
             saved.cutover, saved.lifecycle
-        ));
-    }
-    if saved.rollback != g.state.rollback {
-        return Err(format!(
-            "the guard state reads back with the rollback record {:?}",
-            saved.rollback
         ));
     }
     Ok(())

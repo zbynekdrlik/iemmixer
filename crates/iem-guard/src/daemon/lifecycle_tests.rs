@@ -346,38 +346,6 @@ fn in_prod_a_guard_restart_with_the_band_up_stays_in_event() {
     assert!(!pc.called(Call::EngineStart) && !pc.called(Call::EngineStop));
 }
 
-/// A rollback goes on at a start, also without a reboot (design §3.1: a
-/// start in it continues the rollback to event, which ends in trial); no
-/// entry runs while the lifecycle is rolling back.
-#[test]
-fn a_start_while_rolling_back_goes_to_event() {
-    let dir = tempfile::tempdir().unwrap();
-    let st = GuardState {
-        mode: Mode::Live,
-        lifecycle: Lifecycle::RollingBack,
-        active: Some(SHA.into()),
-        ..GuardState::default()
-    };
-    let mut g = saved(dir.path(), st, 9_000);
-    let mut pc = FakePc::new(iemmixer_up());
-    assert_eq!(start(&mut pc, &mut g, 5_000), Some(Outcome::Done));
-    assert_eq!(g.state.mode, Mode::Event);
-    assert!(pc.called(Call::EngineStop) && pc.called(Call::ReaperStart));
-    assert_eq!(g.state.lifecycle, Lifecycle::Trial);
-    assert_eq!(g.state.rollback, None);
-    g.state.lifecycle = Lifecycle::RollingBack;
-    let dev = Request::Dev {
-        build: None,
-        dry_run: false,
-    };
-    let seen = g.shared.generation();
-    let r = handle(&mut pc, &mut g, dev, seen);
-    assert_eq!(
-        (r.ok, r.detail.as_str()),
-        (false, crate::lifecycle::ROLLING_BACK)
-    );
-}
-
 /// Maintenance (design §3.4): `dev --build NEW` runs NEW and the pin stays;
 /// the next live entry makes NEW (green, main) the pin and runs it. A trial
 /// and a live entry on another build are refused, nothing runs.
@@ -484,7 +452,7 @@ fn a_crash_loop_in_maintenance_goes_live_on_the_pin() {
 
 /// Prod live: a crash loop reverts to the previous pin; when the previous
 /// pin loops too (its own three exits), the engine stays down and the alarm
-/// names the rollback.
+/// names the way back to REAPER.
 #[test]
 fn in_prod_the_previous_pin_that_loops_too_stays_down() {
     let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Live));
@@ -503,7 +471,7 @@ fn in_prod_the_previous_pin_that_loops_too_stays_down() {
     tick(&mut pc, &mut g, at + Duration::from_secs(10));
     let down = format!(
         "the engine crashed 3 times in 10 min on the pin {OTHER}, and no previous pin is left: \
-         the engine stays down; roll back to REAPER (iemmode rollback)"
+         the engine stays down; back to REAPER with iemmode event (the PC stays in prod)"
     );
     assert_eq!(texts(&g).last(), Some(&down));
     tick(&mut pc, &mut g, at + Duration::from_secs(60));
@@ -538,12 +506,11 @@ fn an_activation_in_prod_keeps_the_pins_exclusions() {
 
 /// S8 lane 5 (the cross-lane review, finding 2c): an older guard taking
 /// over drops the lifecycle on its next save (prod reads back as trial).
-/// So in prod and while rolling back `activate`, online and offline,
-/// refuses a bundle whose manifest does not name `guard_lifecycle` (built
+/// So in prod `activate`, online and offline, refuses a bundle whose manifest does not name `guard_lifecycle` (built
 /// before the field); before the cutover it activates as always.
 #[test]
 fn in_prod_activate_refuses_a_bundle_whose_guard_predates_the_lifecycle() {
-    for lc in [prod_on(None, None), Lifecycle::RollingBack] {
+    for lc in [prod_on(None, None), prod_on(Some(OTHER), None)] {
         let dir = tempfile::tempdir().unwrap();
         let mut g = Guard::open(dir.path(), SiteConf::default(), fixed(T0));
         g.state.mode = Mode::Dev;

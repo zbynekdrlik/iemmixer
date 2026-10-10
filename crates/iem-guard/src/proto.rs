@@ -37,9 +37,9 @@ pub enum Request {
     Status,
     /// `signal`: the owner's "ide event" (`iempc event` sends `--signal`);
     /// without it the engineer's "Back to REAPER" (the site's
-    /// `back_to_reaper`) or a person's `iemmode event`. Before the cutover
-    /// both are the event plan; in prod the button is the rollback and "ide
-    /// event" never is (`rollback::on_event`, S8 lane 3). Additive: absent
+    /// `back_to_reaper`) or a person's `iemmode event`: the event plan in
+    /// every lifecycle; "ide event" in prod keeps the band's system
+    /// (`lifecycle::on_event`, S8 lane 3; no rollback). Additive: absent
     /// reads false, false is never written, so an older guard reads it as
     /// the event plan it always ran (it predates prod).
     Event {
@@ -66,11 +66,6 @@ pub enum Request {
     /// precheck, nothing changes.
     Cutover {
         build: String,
-        dry_run: bool,
-    },
-    /// The rollback to REAPER (S8 lane 3, design note §3.3): only in prod or
-    /// while a rollback is left; `dry_run` names the steps, nothing changes.
-    Rollback {
         dry_run: bool,
     },
     Install {
@@ -400,8 +395,6 @@ mod tests {
                 dry_run: false,
                 signal: true,
             },
-            Request::Rollback { dry_run: false },
-            Request::Rollback { dry_run: true },
             Request::Install {
                 zip: "C:\\bundles\\iemmixer.zip".into(),
             },
@@ -484,10 +477,6 @@ mod tests {
                 dry_run: true,
                 signal: false,
             }
-        );
-        assert_eq!(
-            json(&Request::Rollback { dry_run: false }),
-            r#"{"cmd":"rollback","dry_run":false}"#
         );
         assert_eq!(
             json(&Request::JobBegin { run: 1 }),

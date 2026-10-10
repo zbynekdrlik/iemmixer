@@ -654,7 +654,7 @@ fn a_crash_loop_in_prod_falls_back_to_the_previous_pin() {
             "the engine crashed 3 times in 10 min: back to the previous pin {OTHER}"
         )]
     );
-    // Without a previous pin it alarms, naming the rollback, and stays down.
+    // Without a previous pin it alarms, naming the way back, and stays down.
     let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Live));
     g.state.lifecycle = prod(None);
     pc.exited = vec![(Kid::Engine, Some(70)); 3];
@@ -663,7 +663,8 @@ fn a_crash_loop_in_prod_falls_back_to_the_previous_pin() {
         texts(&g),
         [format!(
             "the engine crashed 3 times in 10 min on the pin {SHA}, and no previous pin is \
-             left: the engine stays down; roll back to REAPER (iemmode rollback)"
+             left: the engine stays down; back to REAPER with iemmode event (the PC stays \
+             in prod)"
         )]
     );
     assert_eq!(g.state.lifecycle, prod(None));

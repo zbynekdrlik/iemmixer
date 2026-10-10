@@ -235,7 +235,7 @@ pub(super) fn data(pc: &WinPc, mode: Mode, c: &Cancel) -> R<String> {
     })
 }
 
-/// One `pc.toml` command (a data refresh's, the rollback's export) with its
+/// One `pc.toml` command (a data refresh's) with its
 /// placeholders, run in the bundle's folder within [`DATA_LIMIT`]; it
 /// finishes once started (a mutation) and must exit 0. What it printed.
 pub(super) fn command(

@@ -225,9 +225,6 @@ pub fn refusal(build: &str, f: &Facts<'_>) -> Option<String> {
                 p.since, p.pin
             ));
         }
-        Lifecycle::RollingBack => {
-            return Some("a rollback to REAPER runs: no cutover until it ends".to_owned());
-        }
     }
     if let Some(run) = f.unwinding {
         return Some(format!(
@@ -258,7 +255,7 @@ pub fn refusal(build: &str, f: &Facts<'_>) -> Option<String> {
 }
 
 /// The folder of the autostart export of the cutover begun at `since`
-/// (`<elevated root>\cutover\<name>`): the rollback (lane 3) re-enables
+/// (`<elevated root>\cutover\<name>`): a failed cutover's undo re-enables
 /// from it.
 pub fn export_name(since: u64) -> String {
     format!("{EXPORT_PREFIX}{since}")
@@ -322,8 +319,7 @@ impl Leftover {
         self.pins_open || !self.exports.is_empty()
     }
 
-    /// The newest export never restored: the one a repair rollback
-    /// restores from.
+    /// The newest export never restored.
     pub fn newest(&self) -> Option<u64> {
         self.exports.iter().max().copied()
     }
@@ -346,13 +342,15 @@ impl Leftover {
 
 /// A cutover on a PC with what a lost prod left is refused before anything
 /// changes (S8 lane 5): its export would save the predecessor's autostarts
-/// as the lost cutover left them, disabled, and its rollback would restore
-/// them so. `iemmode rollback` repairs it first (`rollback::repair`).
+/// as the lost cutover left them, disabled, and its undo would restore them
+/// so. They are put back by hand first (there is no rollback, the owner's
+/// ROZHODNUTÉ on #11).
 pub fn leftover_refusal(left: &Leftover) -> Option<String> {
     left.any().then(|| {
         format!(
             "{}: an earlier prod was lost to trial (an older guard took over, or the guard state \
-             could not be read); iemmode rollback repairs it before a cutover",
+             could not be read); put the autostarts back from that export and pin_changes = false \
+             by hand before a cutover",
             left.text()
         )
     })

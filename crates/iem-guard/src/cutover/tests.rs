@@ -71,13 +71,6 @@ fn every_refusal_names_why() {
         ),
         (
             Facts {
-                lifecycle: &Lifecycle::RollingBack,
-                ..facts(&trial, &green)
-            },
-            "a rollback to REAPER runs: no cutover until it ends".to_owned(),
-        ),
-        (
-            Facts {
                 unwinding: Some(&run),
                 ..facts(&trial, &green)
             },
@@ -515,7 +508,7 @@ fn what_a_lost_prod_left_refuses_a_cutover() {
         "{why}"
     );
     assert!(
-        why.ends_with("iemmode rollback repairs it before a cutover"),
+        why.ends_with("pin_changes = false by hand before a cutover"),
         "{why}"
     );
     let both = Leftover {

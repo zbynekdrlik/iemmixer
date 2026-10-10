@@ -5,7 +5,8 @@
 # Limited, so it asks the Highest task \iemmixer\iemmixer-cutover for each of
 # them ({"id", "verb", "export"} in <root>\guard\tasks\cutover.request.json,
 # the answer in <elevated root>\tasks\out\cutover.result.json, as for the
-# other Highest tasks); the rollback (lane 3) re-enables from the same export.
+# other Highest tasks); a failed cutover's undo re-enables from the same export
+# (there is no rollback: the owner's decision on #11).
 #
 # `iempc cutover` runs Install-IemCutover elevated from the admin-only stage
 # (iempc_cutover.py): the list of the predecessor's autostarts (site values,
@@ -192,13 +193,14 @@ function Get-IemUnrestoredExports {
 }
 
 function Get-IemAutostartRefusals {
-    # What a cutover never rolled back leaves (its prod lost to trial: an
+    # What a cutover never undone leaves (its prod lost to trial: an
     # older guard took over, or the guard's state could not be read), which a
-    # new export would save as the predecessor's state, so that its rollback
+    # new export would save as the predecessor's state, so that its undo
     # would restore them disabled: a listed task already disabled, a listed
     # Run value already absent, an earlier export never restored. A listed
     # task that does not exist is the caller's own refusal. Returns the
-    # problems; iemmode rollback repairs them.
+    # problems; they are put back by hand (Enable-IemAutostarts from that
+    # export) before a cutover.
     param([Parameter(Mandatory)]$List, [Parameter(Mandatory)]$Scheduler, [Parameter(Mandatory)][string]$CutoverDir, [string]$Except = '')
     $bad = @()
     foreach ($path in @($List.tasks)) {
@@ -273,7 +275,7 @@ function Export-IemAutostarts {
     # S8 lane 5: never an export of what an earlier cutover left disabled.
     $refused = Get-IemAutostartRefusals -List $List -Scheduler $sch -CutoverDir (Split-Path -Parent $Dir) -Except $Name
     if ($refused.Count -gt 0) {
-        throw (($refused -join '; ') + ': an earlier cutover was never rolled back (iemmode rollback repairs it); nothing exported, nothing changed')
+        throw (($refused -join '; ') + ': an earlier cutover was never undone (put them back by hand first); nothing exported, nothing changed')
     }
     Install-IemElevatedFolder -Path $Dir -UserSid $UserSid
     $tasks = @()
@@ -362,8 +364,8 @@ function Disable-IemAutostarts {
 }
 
 function Enable-IemAutostarts {
-    # Every autostart <export> saved back as it was (the rollback, lane 3,
-    # and the cutover's unwind): each task's enabled state as saved, read back
+    # Every autostart <export> saved back as it was (a failed cutover's undo,
+    # at its unwind or a later start): each task's enabled state as saved, read back
     # with its XML equal to the saved file's (Compare-IemTaskXml, named per
     # task); each Run value written back exactly (Set-IemRegRaw) unless it is
     # so already, read back. Every task must exist before anything is
@@ -421,7 +423,7 @@ function Enable-IemAutostarts {
 # ---- the guard task's logon trigger ----
 
 function Set-IemGuardLogon {
-    # The cutover's step 3 (and the rollback's): the guard task (as
+    # The cutover's step 3 (and its undo): the guard task (as
     # Register-IemTasks made it: its read-back must pass first, else nothing
     # changes) with exactly one logon trigger for the user (-On) or none;
     # registered again with our descriptor, read back: the same action, the
@@ -503,7 +505,7 @@ function Install-IemCutover {
     # guard's cutover. Refused before anything changes: a list
     # Test-IemAutostartList refuses, a task or Run value of it that does not
     # exist now (a typo would disable nothing and restore nothing), what an
-    # earlier cutover never rolled back left (Get-IemAutostartRefusals), an
+    # earlier cutover never undone left (Get-IemAutostartRefusals), an
     # elevated root that is not admin-only or that holds the user's root (or
     # the reverse), no task folder, a module that is not the build iempc
     # checked (-ModuleSha256: the stage is shared). Then <elevated root>\
@@ -537,7 +539,7 @@ function Install-IemCutover {
     # S8 lane 5: never a cutover over what an earlier one left disabled.
     $refused = Get-IemAutostartRefusals -List ([pscustomobject]@{ tasks = @($Tasks); run = @($RunValues) }) -Scheduler $sch -CutoverDir $paths.dir
     if ($refused.Count -gt 0) {
-        throw (($refused -join '; ') + ': an earlier cutover was never rolled back (iemmode rollback repairs it); refused, nothing changed')
+        throw (($refused -join '; ') + ': an earlier cutover was never undone (put them back by hand first); refused, nothing changed')
     }
     $files = [ordered]@{}
     $sums = [ordered]@{}

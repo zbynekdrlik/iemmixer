@@ -189,7 +189,7 @@ try {
     $r = Send-Request 'autostarts-off' '..\x'
     Assert (-not $r.ok -and $r.error -like "*export name '..\x' refused*" -and (Read-Run) -ceq $both) "task-refuses-another-export-name ($($r.error))"
     # S8 lane 5: a task already disabled or a Run value already absent (an
-    # earlier cutover never rolled back) refuses the export, nothing written.
+    # earlier cutover never undone) refuses the export, nothing written.
     (Get-PredTask 'other').Enabled = $false
     $r = Send-Request 'autostarts-off' $export
     Assert (-not $r.ok -and $r.error -like "*the task $pred\other is already disabled*" -and -not (Test-Path -LiteralPath (Join-Path $cutDir $export)) -and

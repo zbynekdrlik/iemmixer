@@ -79,20 +79,7 @@ fn the_synthetic_site_parses_with_its_defaults() {
     assert_eq!(s.pc.engine_pipe, "iemmixer-engine");
     assert_eq!(s.pc.tunnel_ready, "http://127.0.0.1:20241/ready");
     assert!(s.pc.data_live.is_empty());
-    assert!(s.pc.rollback_export.is_empty(), "an older pc.toml has none");
     assert_eq!(s.problems(), Vec::<String>::new());
-    // A rollback export that names both reads as good.
-    let mut with = s.pc.clone();
-    with.rollback_export = [
-        "{bundle}\\iem-migrate.exe",
-        "export",
-        "--rpp",
-        "{project}",
-        "--out={out}",
-    ]
-    .map(str::to_owned)
-    .to_vec();
-    assert_eq!(with.problems(), Vec::<String>::new());
     // No shadow import unless pc.toml names one (S8 lane 4); one that runs
     // `iem-migrate shadow` reads as good, its history under the root.
     assert!(s.pc.shadow.is_empty(), "an older pc.toml has none");
@@ -486,20 +473,6 @@ fn every_pc_toml_problem_is_named() {
                 ..good.clone()
             },
             "a data command is empty",
-        ),
-        (
-            PcToml {
-                rollback_export: vec!["{bundle}\\iem-migrate.exe".into(), "export".into()],
-                ..good.clone()
-            },
-            "rollback_export must name {project} and {out} (iem-migrate export --rpp, --out)",
-        ),
-        (
-            PcToml {
-                rollback_export: vec!["export".into(), "--rpp".into(), "{project}".into()],
-                ..good.clone()
-            },
-            "rollback_export must name {project} and {out} (iem-migrate export --rpp, --out)",
         ),
         (
             PcToml {
