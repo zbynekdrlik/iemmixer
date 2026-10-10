@@ -274,7 +274,7 @@ pub fn entry<'r>(
 /// §3; ROZHODNUTÉ on #11). In prod iemmixer's own state (PINs, mixes,
 /// snapshots the band changes) is the only authority, and the cutover's
 /// final import (its live trial entry, still in `Trial`) is the last
-/// import; while rolling back no entry runs.
+/// import.
 pub fn refreshes_data(lc: &Lifecycle) -> bool {
     matches!(lc, Lifecycle::Trial)
 }

@@ -6,7 +6,7 @@
 
 - One question matters: do the in-ears sound the same as with REAPER, and does a band member feel iemmixer is transparent? The blind A/B with a member is the acceptance. The agent does not track rehearsal dates.
 - No padding gates: an event lasts at most 2 h and the PC has short windows between events (the 72 h soak was dropped, #10). Evidence accrues from real use, never from waiting on a calendar.
-- D4 stands: trials (rehearsals and a service) on the band's usual address, the engineer's and the band's agreement, then iemmixer becomes the boot default with a rollback window. The owner says when.
+- D4 stands: trials (rehearsals and a service) on the band's usual address, the engineer's and the band's agreement, then iemmixer becomes the boot default. The owner says when. (The rollback window was dropped on 2026-10-10, §3.3: going back is the event switch.)
 
 ## 2. Where the code is (mapped 2026-10-10)
 
@@ -48,7 +48,7 @@ Refuses unless: `Trial`, the build is the active main bundle with green `hil/iem
 ### 3.4 Pin and maintenance (fixes the early promotion)
 
 - An entry never promotes the pin. `Prod` keeps `pin`; a maintenance dev entry `dev --build SHA` runs that build; when it ends (`live` again), the pin becomes SHA only if its HIL is green, else the old pin returns.
-- A crash loop in maintenance stops iemmixer and goes back to `live` on the pin; a crash loop in prod reverts to the previous pin and, if that loops too, stops and alarms naming rollback.
+- A crash loop in maintenance stops iemmixer and goes back to `live` on the pin; a crash loop in prod reverts to the previous pin and, if that loops too, stops and alarms naming the way back to REAPER (`iemmode event`, the PC staying prod).
 
 ### 3.5 Shadow imports without waiting
 
@@ -57,7 +57,7 @@ Every dev and live entry already imports the REAPER project. Add a report-only s
 (Lane 4 as built; `.claude/rules/guard.md` and `.claude/rules/migration.md` hold the detail.)
 - **The command:** `iem-migrate shadow --rpp --aliases --site --state-dir` (pure comparison `iem-migrate/src/shadow.rs`): one JSON object, the import's verdict (`writes`, `refuses_topology`, `refuses_fit`, `refuses_doubts`, `unmappable`), the counts, the topology against `site.toml`, the values the engine would drop or cap, and the state an import would write against the saved one as the engine would load it; each difference `{kind, id, field}`, never a value. It writes nothing: no state, no recovery, no `engine.lock`, no state directory created.
 - **Where it runs:** `pc.toml`'s optional `shadow` key names the command (no key, no shadow); the guard plans the step `Shadow` right after `TuningEnter` of an entry from event (REAPER saved and quit, the engine's state not yet refreshed), before `Data`.
-- **Prod (decided in the lane):** it runs there too, as a report. No entry refreshes the data in prod (lane 3), so the line is how far REAPER's project has drifted from what iemmixer serves, which is what a rollback's export would replace; it never feeds anything back.
+- **Prod (decided in the lane):** it runs there too, as a report. No entry refreshes the data in prod (lane 3), so the line is how far REAPER's project has drifted from what iemmixer serves, the drift a switch back to REAPER would meet; it never feeds anything back.
 - **Never fails or delays:** a wait bounded by 5 s ("ide event" ends it at once; past the bound it is asked to stop, Ctrl-Break as every wait, never force-ended); any failure is one `error` line (a fixed code and why) and a log line, never an alarm or a step failure. Its time is part of the entry's silence and shows as the step `shadow` in the switch record.
 - **The history format:** one JSON line per entry, `at` (Unix ms), `entry`, `bundle`, then the command's report or `error` and `why`; the guard is its one writer. `iempc shadow-report` prints counts and kinds only (clean entries, verdicts, errors by code, differences by `site|state.<kind>.<field>`).
 
@@ -71,15 +71,15 @@ The review of lanes 1–4 together found five gaps; each is fixed with a RED tes
 
 ### 3.6 Decommissioning
 
-After the rollback window the owner decides; a runbook in the ops repo lists the predecessor's tasks, ports and files to retire. No code beyond what cutover already exports.
+When the owner retires the predecessor (no rollback window, §3.3); a runbook in the ops repo lists the predecessor's tasks, ports and files to retire. No code beyond what cutover already exports.
 
 ## 4. Not in S8
 
-D5 (no loopback, decided). Any new feature (program §2 scope freeze). The rollback window's length is the owner's (D4: 8 weeks).
+D5 (no loopback, decided). Any new feature (program §2 scope freeze). The rollback (dropped by the owner, §3.3).
 
 ## 5. Proof
 
-Unit tests for `lifecycle` (every mode × lifecycle × request), the pin rules and the cutover/rollback step order with a fake PC; the PowerShell autostart export/disable/re-enable against a test task folder (windows job); on the PC: a switch test in `Prod` (event path from live; the drill went with the rollback, §3.3).
+Unit tests for `lifecycle` (every mode × lifecycle × request), the pin rules and the cutover step order with a fake PC; the PowerShell autostart export/disable/re-enable against a test task folder (windows job); on the PC: a switch test in `Prod` (event path from live; the drill went with the rollback, §3.3).
 
 ## 6. Lanes (one at a time)
 

@@ -319,11 +319,6 @@ impl Leftover {
         self.pins_open || !self.exports.is_empty()
     }
 
-    /// The newest export never restored.
-    pub fn newest(&self) -> Option<u64> {
-        self.exports.iter().max().copied()
-    }
-
     /// What it holds, in words.
     pub fn text(&self) -> String {
         let mut parts: Vec<String> = Vec::new();

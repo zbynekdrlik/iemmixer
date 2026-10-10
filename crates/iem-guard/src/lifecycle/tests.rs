@@ -559,20 +559,25 @@ fn the_lifecycle_and_the_active_bundle_round_trip_and_a_reset_keeps_them() {
 }
 
 /// The rollback is dropped (the owner's ROZHODNUTÉ on #11): a state lane
-/// 3's guard saved while rolling back reads as `Trial` (every boot event)
-/// and its load alarms it.
+/// 3's guard saved while rolling back, its rollback record included, loads:
+/// the lifecycle reads as `Trial` (every boot event), the record is ignored,
+/// and the load names the alarm.
 #[test]
 fn a_state_saved_while_rolling_back_reads_as_trial_with_an_alarm() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("guard-state.json");
-    std::fs::write(&path, r#"{"mode": "event", "lifecycle": "rolling_back"}"#).unwrap();
+    let old = format!(
+        r#"{{"mode": "event", "lifecycle": "rolling_back", "rollback": {{"pin": "{PIN}", "since": {SINCE}, "at": {SINCE}, "done": []}}}}"#
+    );
+    std::fs::write(&path, old).unwrap();
     let (st, err) = GuardState::load(&path);
-    assert_eq!((err, st.lifecycle), (None, Lifecycle::Trial));
-    let alarm = unreadable_in(&path).unwrap();
+    assert_eq!((st.lifecycle, st.mode), (Lifecycle::Trial, Mode::Event));
+    let alarm = err.expect("the load alarms it");
     assert!(
-        alarm.starts_with("the saved lifecycle is unreadable"),
+        alarm.starts_with("the saved lifecycle is unreadable (") && alarm.contains("rolling_back"),
         "{alarm}"
     );
+    assert_eq!(unreadable_in(&path), Some(alarm));
 }
 
 /// A state an older guard saved (no lifecycle, no active bundle, its pins)

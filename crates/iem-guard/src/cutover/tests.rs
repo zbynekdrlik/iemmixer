@@ -499,7 +499,6 @@ fn what_a_lost_prod_left_refuses_a_cutover() {
         pins_open: true,
     };
     assert!(pins.any());
-    assert_eq!(pins.newest(), None);
     let why = leftover_refusal(&pins).unwrap();
     assert!(
         why.starts_with(
@@ -515,7 +514,6 @@ fn what_a_lost_prod_left_refuses_a_cutover() {
         exports: vec![7, 9],
         pins_open: true,
     };
-    assert_eq!(both.newest(), Some(9));
     assert_eq!(
         both.text(),
         "the server config allows PIN changes (pin_changes = true); the autostart export \

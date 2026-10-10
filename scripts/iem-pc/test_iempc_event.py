@@ -289,7 +289,6 @@ class EventVerdictTests(Base):
         self.assertIn("alarm the owner now", err)
 
 
-
 PROD = f"mode live; bundle {SHA}; prod since 1790000000: pin {SHA}, previous none"
 
 
@@ -339,6 +338,7 @@ class EventSignalTests(Base):
         self.pc.replies[("event", "--signal")] = (2, "", "iemmode: no command")
         code, _, _ = self.run_main("event")
         self.assertEqual((code, [c[1] for c in self.pc.calls]), (2, [["event", "--signal"]]))
+
 
 if __name__ == "__main__":
     unittest.main()

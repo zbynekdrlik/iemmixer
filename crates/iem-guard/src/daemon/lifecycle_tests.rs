@@ -506,8 +506,9 @@ fn an_activation_in_prod_keeps_the_pins_exclusions() {
 
 /// S8 lane 5 (the cross-lane review, finding 2c): an older guard taking
 /// over drops the lifecycle on its next save (prod reads back as trial).
-/// So in prod `activate`, online and offline, refuses a bundle whose manifest does not name `guard_lifecycle` (built
-/// before the field); before the cutover it activates as always.
+/// So in prod `activate`, online and offline, refuses a bundle whose
+/// manifest does not name `guard_lifecycle` (built before the field);
+/// before the cutover it activates as always.
 #[test]
 fn in_prod_activate_refuses_a_bundle_whose_guard_predates_the_lifecycle() {
     for lc in [prod_on(None, None), prod_on(Some(OTHER), None)] {

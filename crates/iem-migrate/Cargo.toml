@@ -6,7 +6,7 @@ authors.workspace = true
 # D1(a): links iem-engine (site, graph, persist), which links the GPL limiter.
 license = "GPL-3.0-or-later"
 repository.workspace = true
-description = "iemmixer migration CLI: predecessor project and band data import, rollback export"
+description = "iemmixer migration CLI: predecessor project and band data import, export of the band data to a new project"
 
 [dependencies]
 iem-core = { path = "../iem-core" }
