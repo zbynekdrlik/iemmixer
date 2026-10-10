@@ -73,7 +73,8 @@ exclude_globs = [
   "crates/iem-win/src/bin/**",
   # The guard's Windows effects (WinPc, S6): not compiled on Linux; the
   # windows job builds and tests them. Their decisions live in the mutated
-  # pc.rs, site.rs, effects/ and handover.rs (parsers included).
+  # pc.rs and pc/, site.rs and site/, effects/ and handover.rs (parsers
+  # included).
   "crates/iem-guard/src/win/**",
   # The Windows side of the guard's pipe writes (the bounded, clean writer
   # over iem-win's write_within: the guard pipe's replies, the supervisor's
