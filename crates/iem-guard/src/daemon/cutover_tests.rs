@@ -225,7 +225,13 @@ fn the_dry_run_names_the_steps_and_the_trial_s_precheck_and_changes_nothing() {
             )
         )
     );
-    assert_eq!(pc.calls(), [Call::Precheck]);
+    // The reads of an earlier prod's leftovers (S8 lane 5), then the
+    // precheck; nothing changes.
+    assert_eq!(pc.mutating_calls(), Vec::<Call>::new());
+    assert_eq!(
+        (pc.count(Call::ServerConfig), pc.calls().last()),
+        (1, Some(&Call::Precheck))
+    );
     assert_eq!(
         (
             g.state.lifecycle.clone(),
@@ -335,10 +341,11 @@ fn a_failed_import_ends_in_event_with_nothing_else_begun() {
         Call::AutostartsOff,
         Call::AutostartsOn,
         Call::GuardLogon,
-        Call::ServerConfig,
+        Call::WriteServerConfig,
     ] {
         assert!(!pc.called(call), "{call:?}");
     }
+    assert_eq!(pc.count(Call::ServerConfig), 1, "the refusals' read only");
     assert_eq!(g.state.cutover, None);
 }
 
@@ -387,7 +394,11 @@ fn ide_event_during_a_step_unwinds_after_it() {
         "cutover of {SHA} failed at PinChanges: pre-empted by event; unwound to trial and event"
     );
     assert!(r.detail.starts_with(&head), "{}", r.detail);
-    assert!(!pc.called(Call::ServerConfig), "PinChanges never began");
+    assert_eq!(
+        pc.count(Call::ServerConfig),
+        1,
+        "the refusals' read only: PinChanges never began"
+    );
     assert_eq!(pc.count(Call::GuardLogon), 2, "on, then off");
     assert!(!pc.guard_at_logon);
     assert_eq!(pc.autostarts_in, None);
@@ -671,9 +682,14 @@ fn ide_event_during_the_import_unwinds_and_nothing_else_begins() {
     assert_eq!(g.state.mode, Mode::Event);
     assert_eq!(g.state.lifecycle, Lifecycle::Trial);
     assert_eq!(g.state.cutover, None);
-    for call in [Call::GuardLogon, Call::AutostartsOff, Call::ServerConfig] {
+    for call in [
+        Call::GuardLogon,
+        Call::AutostartsOff,
+        Call::WriteServerConfig,
+    ] {
         assert!(!pc.called(call), "{call:?}");
     }
+    assert_eq!(pc.count(Call::ServerConfig), 1, "the refusals' read only");
 }
 
 /// The autostarts' undo fails: the guard's logon trigger stays (the next
