@@ -14,6 +14,7 @@ use super::reply::switch_text;
 use super::requests::{Entry, dry_event, entry, event_now};
 use super::runner::{failure, run_step, run_switch};
 use super::{Guard, Outcome};
+use crate::cancel::Cancel;
 use crate::cutover::export_name;
 use crate::lifecycle::{self, Lifecycle};
 use crate::pc::Pc;
@@ -25,6 +26,12 @@ use crate::rollback::{self, OnEvent, Placed, RollStep, Want};
 /// (from maintenance), a healthy live left as it is, or the event plan
 /// (REAPER for this event) when iemmixer does not play.
 pub(super) fn event(pc: &mut dyn Pc, g: &mut Guard, dry_run: bool, signal: bool) -> (bool, String) {
+    // The pipe pre-empted the token as it routed this request ("ide event"
+    // and the button alike): that pre-emption is this request's, whatever it
+    // does (a stay, a refusal), never the next switch's.
+    if !dry_run {
+        g.cancel.clear();
+    }
     let lc = g.state.lifecycle.clone();
     let on = rollback::on_event(&lc, g.state.mode, signal, || {
         pc.engine_health() == Ok(Health::Healthy)
@@ -42,9 +49,6 @@ pub(super) fn event(pc: &mut dyn Pc, g: &mut Guard, dry_run: bool, signal: bool)
             ),
         ),
         OnEvent::Live => {
-            // The routed "ide event" pre-empted the token as it queued:
-            // this entry is that event's own.
-            g.cancel.clear();
             let ask = Entry {
                 to: Mode::Live,
                 build: None,
@@ -130,6 +134,9 @@ fn proceed(pc: &mut dyn Pc, g: &mut Guard) -> (bool, String) {
     let mut notes: Vec<String> = Vec::new();
     let mut left: Vec<String> = Vec::new();
     let mut failed: Vec<RollStep> = Vec::new();
+    // The event plan ended with REAPER but needs the owner (the app does not
+    // serve, #10): the rollback ends, not ok.
+    let mut owner = false;
     for step in rollback::STEPS {
         let Some(run) = g.state.rollback.clone() else {
             break;
@@ -142,7 +149,7 @@ fn proceed(pc: &mut dyn Pc, g: &mut Guard) -> (bool, String) {
             RollStep::Stop => stop(pc, g),
             RollStep::Export => export(pc, g, run.at, &mut notes),
             RollStep::Project => project(pc, g, &run, &mut notes),
-            RollStep::Reaper => reaper(pc, g, run.at, &mut notes),
+            RollStep::Reaper => reaper(pc, g, &run, &mut notes, &mut owner),
             RollStep::Autostarts => match run.since {
                 None => {
                     notes.push(
@@ -227,16 +234,25 @@ fn proceed(pc: &mut dyn Pc, g: &mut Guard) -> (bool, String) {
         // REAPER runs, but not as asked: the owner hears why.
         g.raise(None, &text, true);
     }
-    (true, text)
+    (!owner, text)
 }
 
 /// iemmixer stopped by the event plan's stops and error policy (a step
 /// that fails alarms and the next goes on; a healthy engine that does not
 /// stop keeps serving and a dead or parked one may hold the card: both stop
-/// the rollback, no REAPER). A queued "ide event" pre-empted the token: the
-/// stops are this rollback's.
+/// the rollback, no REAPER, and a dead one leaves the mode event as the
+/// event plan does, so the watch starts no engine). The stops run on a
+/// token of their own and finish as the event plan's do (the pipe never
+/// pre-empts those): an "ide event" routed meanwhile waits behind the
+/// rollback, whose end is REAPER anyway.
 fn stop(pc: &mut dyn Pc, g: &mut Guard) -> Did {
-    g.cancel.clear();
+    let routed = std::mem::take(&mut g.cancel);
+    let did = stops(pc, g);
+    g.cancel = routed;
+    did
+}
+
+fn stops(pc: &mut dyn Pc, g: &mut Guard) -> Did {
     for step in rollback::stops(&pc.facts()) {
         let Err(e) = run_step(pc, g, step, Mode::Event) else {
             continue;
@@ -249,6 +265,7 @@ fn stop(pc: &mut dyn Pc, g: &mut Guard) -> Did {
                 ));
             }
             OnError::StopAskOwner => {
+                g.state.mode = Mode::Event;
                 return Did::Halt(format!(
                     "{step:?}: {why}; health {health:?}: no REAPER while the card may be held"
                 ));
@@ -309,56 +326,102 @@ fn project(pc: &mut dyn Pc, g: &mut Guard, run: &rollback::Run, notes: &mut Vec<
     Did::Done
 }
 
-/// The event plan: REAPER, the app, the handover checks. A REAPER that does
-/// not run on the export (it could not open it) is quit when it runs, the
-/// original goes back in the project's place and the event plan runs
-/// again; REAPER is started whatever the files say.
-fn reaper(pc: &mut dyn Pc, g: &mut Guard, at: u64, notes: &mut Vec<String>) -> Did {
-    let from = g.state.mode;
-    let out = run_switch(pc, g, from, Mode::Event);
-    let said = switch_text(Mode::Event, out, g.state.mode, &g.owner_failed);
-    if rollback::reaper_runs(&pc.facts(), &g.owner_failed) {
-        g.info(format!("the event plan: {said}"));
-        return Did::Done;
+/// The event plan: REAPER, the app, the handover checks. Before it, when
+/// the export did not take the project's place, the original is settled in
+/// its place once more (a no-op when it is there; a swap that failed both
+/// ways may have left the path empty). A REAPER that does not run on what
+/// the path holds (it could not open the export) is saved and quit when it
+/// runs, the original goes back and the event plan runs again: REAPER is
+/// started whatever the files say. A plan that ends with REAPER but needs
+/// the owner (`owner`) ends the rollback not ok.
+fn reaper(
+    pc: &mut dyn Pc,
+    g: &mut Guard,
+    run: &rollback::Run,
+    notes: &mut Vec<String>,
+    owner: &mut bool,
+) -> Did {
+    if run.exported
+        && !run.on_export
+        && let Err(e) = pc.swap_project(Want::Original, run.at)
+    {
+        notes.push(format!(
+            "the original project could not be settled in its place before REAPER's start ({e})"
+        ));
     }
-    let on_export = g.state.rollback.as_ref().is_some_and(|r| r.on_export);
-    if !on_export {
+    let (runs, done, said) = event_plan(pc, g);
+    if runs {
+        return with_reaper(g, done, said, notes, owner);
+    }
+    if !run.exported {
         return Did::Left(format!("REAPER does not run: {said}"));
     }
     if pc.facts().reaper {
-        g.cancel.clear();
-        let c = g.cancel.clone();
-        if let Err(e) = pc.reaper_save_quit(&c) {
+        // Not pre-empted: REAPER must be quit before the files move.
+        if let Err(e) = pc.reaper_save_quit(&Cancel::default()) {
             return Did::Left(format!(
-                "REAPER did not open the export ({said}) and could not be quit ({e})"
+                "REAPER did not open the project ({said}) and could not be quit ({e})"
             ));
         }
     }
-    match pc.swap_project(Want::Original, at) {
+    let what = if run.on_export {
+        "REAPER could not open the export"
+    } else {
+        "REAPER did not run on what a failed swap left in the project's place"
+    };
+    match pc.swap_project(Want::Original, run.at) {
         Ok(_) => {
             if let Some(r) = g.state.rollback.as_mut() {
                 r.on_export = false;
             }
             notes.push(format!(
-                "REAPER could not open the export ({said}): the original project is back in its \
-                 place, the export kept under its own name"
+                "{what} ({said}): the original project is back in its place, the export kept \
+                 under its own name (REAPER's save on its quit may have written over it; the \
+                 engine's state can be exported again)"
             ));
         }
         Err(e) => notes.push(format!(
-            "REAPER could not open the export ({said}) and the original could not be put back \
-             ({e})"
+            "{what} ({said}) and the original could not be put back ({e})"
         )),
     }
     g.save();
-    let from = g.state.mode;
-    let out = run_switch(pc, g, from, Mode::Event);
-    let again = switch_text(Mode::Event, out, g.state.mode, &g.owner_failed);
-    if rollback::reaper_runs(&pc.facts(), &g.owner_failed) {
-        g.info(format!("the event plan on the original: {again}"));
-        Did::Done
+    let (runs, done, again) = event_plan(pc, g);
+    if runs {
+        with_reaper(g, done, again, notes, owner)
     } else {
         Did::Left(format!(
             "REAPER does not run on the original either: {again}"
         ))
     }
+}
+
+/// The event plan from the mode the PC is in: whether REAPER runs after it
+/// (`rollback::reaper_runs`), whether it ended done in event, and its text.
+fn event_plan(pc: &mut dyn Pc, g: &mut Guard) -> (bool, bool, String) {
+    let from = g.state.mode;
+    let out = run_switch(pc, g, from, Mode::Event);
+    let said = switch_text(Mode::Event, out, g.state.mode, &g.owner_failed);
+    let done = out == Outcome::Done && g.state.mode == Mode::Event;
+    (
+        rollback::reaper_runs(&pc.facts(), &g.owner_failed),
+        done,
+        said,
+    )
+}
+
+/// REAPER runs: the step is done; an event plan that needs the owner (the
+/// app, #10) is noted and ends the rollback not ok.
+fn with_reaper(
+    g: &mut Guard,
+    done: bool,
+    said: String,
+    notes: &mut Vec<String>,
+    owner: &mut bool,
+) -> Did {
+    if !done {
+        *owner = true;
+        notes.push(format!("the event plan needs the owner: {said}"));
+    }
+    g.info(format!("the event plan: {said}"));
+    Did::Done
 }

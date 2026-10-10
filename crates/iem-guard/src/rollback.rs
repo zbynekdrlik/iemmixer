@@ -325,6 +325,14 @@ pub enum OnEvent {
     Stay,
 }
 
+/// Whether a plain `iemmode event` (the engineer's button) is a rollback:
+/// in prod and while rolling back. The pipe's routing reads it from the
+/// view (`View::rolls_back`): such a request is queued even while a switch
+/// runs, never answered as the end of that switch.
+pub fn button_rolls_back(lc: &Lifecycle) -> bool {
+    matches!(lc, Lifecycle::Prod(_) | Lifecycle::RollingBack)
+}
+
 /// What `iemmode event` means (S8 lane 3). `signal`: the owner's "ide
 /// event" (`iempc event` sends `--signal`); without it the request is the
 /// engineer's "Back to REAPER" (`POST /api/mode/event`, the site's

@@ -212,6 +212,9 @@ pub struct FakePc {
     /// REAPER cannot open the export: its handover's facts name no track
     /// while the project's path holds it.
     pub export_unloadable: bool,
+    /// Every call that takes a token returns `Preempted` when its token is
+    /// pre-empted as it begins, as `WinPc`'s waits do within 1 s.
+    pub waits_see_preemption: bool,
     /// "ide event" pre-empts this token as this call begins (a test of what
     /// comes after a step during which it came); once.
     pub preempt_at: Option<(Call, Cancel)>,
@@ -308,6 +311,7 @@ impl FakePc {
                 ..Files::default()
             },
             export_unloadable: false,
+            waits_see_preemption: false,
             preempt_at: None,
             calls: Vec::new(),
             fails: HashMap::new(),
@@ -412,6 +416,9 @@ impl FakePc {
     /// Records `call`, then plays its script: blocked, delayed, failed.
     fn enter(&mut self, call: Call, c: Option<&Cancel>) -> R<()> {
         self.record(call);
+        if self.waits_see_preemption && c.is_some_and(Cancel::preempted) {
+            return Err(StepError::Preempted);
+        }
         if self.blocked.contains(&call) {
             let Some(c) = c else {
                 return Err(StepError::failed(format!(

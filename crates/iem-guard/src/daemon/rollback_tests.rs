@@ -401,6 +401,9 @@ fn an_engine_that_does_not_stop_stops_the_rollback_and_keeps_serving() {
         "{r:?}"
     );
     assert!(!pc.called(Call::ReaperStart));
+    // The mode is event, as the event plan leaves it: the watch starts no
+    // engine again.
+    assert_eq!(g.state.mode, Mode::Event);
 }
 
 /// A guard that starts with a rollback left continues it: its stops and
@@ -522,4 +525,169 @@ fn the_rollback_is_saved_for_the_next_guard() {
         (Lifecycle::Trial, None, Mode::Event)
     );
     assert!(!status_reply(&next).contains("prod since"));
+}
+
+/// "ide event" that leaves a healthy prod live as it is clears the
+/// pre-emption the pipe set as it routed it: the next switch (a maintenance
+/// entry) is not pre-empted back to REAPER (the lane's review).
+#[test]
+fn a_stay_leaves_no_preemption_for_the_next_switch() {
+    let (mut pc, mut g) = prod_live();
+    pc.health(Health::Healthy);
+    let req = event(true);
+    let Route::Queue(seen) = g.shared.route(&req) else {
+        panic!("not queued")
+    };
+    assert!(g.cancel.preempted());
+    let r = handle(&mut pc, &mut g, req, seen);
+    assert!(r.ok && r.detail.contains("nothing switched"), "{r:?}");
+    assert!(!g.cancel.preempted());
+    let r = ask(&mut pc, &mut g, super::tests::dev());
+    assert!(r.ok, "{r:?}");
+    assert_eq!(g.state.mode, Mode::Dev);
+    assert!(!pc.called(Call::ReaperStart));
+}
+
+/// The rollback's stops run on a token of their own: an "ide event" routed
+/// while they run (it pre-empts the pipe's token) does not cut them short;
+/// it waits behind the rollback.
+#[test]
+fn the_stops_finish_whatever_an_ide_event_routed_meanwhile() {
+    let (mut pc, mut g) = prod_live();
+    pc.waits_see_preemption = true;
+    pc.preempt_at = Some((Call::EngineStop, g.cancel.clone()));
+    let r = handle(&mut pc, &mut g, back(false), INIT);
+    assert!(r.ok, "{r:?}");
+    assert_rolled_back(&pc, &g);
+    assert_eq!(texts(&g), Vec::<String>::new());
+}
+
+/// A swap that fails both ways leaves the original where it is: REAPER on
+/// it, one more try to settle it before REAPER's start, the owner told.
+#[test]
+fn a_swap_that_fails_both_ways_brings_reaper_on_the_original() {
+    let (mut pc, mut g) = prod_live();
+    pc.fail(Call::SwapProject, "the export is held by another process");
+    let r = handle(&mut pc, &mut g, back(false), INIT);
+    assert!(r.ok, "{r:?}");
+    assert!(r.detail.contains(ON_ORIGINAL), "{}", r.detail);
+    assert!(
+        r.detail
+            .contains("the export could not take the project's place"),
+        "{}",
+        r.detail
+    );
+    assert_rolled_back(&pc, &g);
+    assert_eq!(pc.count(Call::SwapProject), 3);
+    assert_eq!(pc.count(Call::ReaperStart), 1);
+    assert_eq!(pc.project, on_original());
+    assert!(g.alarms.last().unwrap().owner_question);
+}
+
+/// An event plan that ends with REAPER but needs the owner (the app does
+/// not answer, #10) ends the rollback in trial, not ok.
+#[test]
+fn an_event_plan_that_needs_the_owner_ends_the_rollback_not_ok() {
+    let (mut pc, mut g) = prod_live();
+    pc.fail(Call::AppAnswers, "the app does not answer");
+    let r = handle(&mut pc, &mut g, back(false), INIT);
+    assert!(!r.ok, "{r:?}");
+    assert!(
+        r.detail.contains("the event plan needs the owner"),
+        "{}",
+        r.detail
+    );
+    assert_eq!(
+        (g.state.lifecycle.clone(), g.state.rollback.clone()),
+        (Lifecycle::Trial, None)
+    );
+    assert!(pc.facts.reaper);
+}
+
+/// The guard's logon trigger that does not go off keeps the rollback left.
+#[test]
+fn a_logon_trigger_that_does_not_go_off_keeps_the_rollback_left() {
+    let (mut pc, mut g) = prod_live();
+    pc.fail(Call::GuardLogon, "the cutover task did not answer");
+    let r = handle(&mut pc, &mut g, back(false), INIT);
+    assert!(!r.ok);
+    assert!(
+        r.detail
+            .starts_with("rollback not finished: GuardLogon: the cutover task did not answer"),
+        "{}",
+        r.detail
+    );
+    assert_eq!(g.state.lifecycle, Lifecycle::RollingBack);
+    assert_eq!(
+        (pc.autostarts_in.clone(), pc.server_config.as_str()),
+        (None, FROZEN)
+    );
+}
+
+/// In prod the button runs after a switch in progress, never answered as
+/// its end: it pre-empts a dev or live entry, never an event plan; "ide
+/// event" keeps the routing it had, and before the cutover so does the
+/// button. Queued before a switch ran, it is not stale.
+#[test]
+fn in_prod_the_button_runs_after_a_switch_in_progress() {
+    let (mut pc, mut g) = prod_live();
+    g.save();
+    for (running, preempts) in [(Mode::Live, true), (Mode::Dev, true), (Mode::Event, false)] {
+        g.cancel.clear();
+        g.shared.update(|v| v.running = Some(running));
+        assert!(
+            matches!(g.shared.route(&event(false)), Route::Queue(_)),
+            "{running:?}"
+        );
+        assert_eq!(g.cancel.preempted(), preempts, "{running:?}");
+    }
+    g.shared.update(|v| v.running = Some(Mode::Live));
+    assert!(matches!(g.shared.route(&event(true)), Route::AwaitEnd(_)));
+    let trial = Guard::for_test(Mode::Live);
+    trial.shared.update(|v| v.running = Some(Mode::Live));
+    assert!(matches!(
+        trial.shared.route(&event(false)),
+        Route::AwaitEnd(_)
+    ));
+    g.cancel.clear();
+    g.shared.update(|v| {
+        v.running = None;
+        v.epoch += 1;
+    });
+    let r = handle(&mut pc, &mut g, event(false), INIT);
+    assert!(r.ok && r.detail.starts_with("rollback done"), "{r:?}");
+}
+
+/// `iemmode rollback` is queued behind the start's checks and busy during
+/// any other switch; an offline activation is refused while a rollback is
+/// left.
+#[test]
+fn the_rollback_is_routed_like_an_entry() {
+    let g = Guard::for_test(Mode::Event);
+    g.shared.update(|v| {
+        v.running = Some(Mode::Event);
+        v.start_checks = true;
+    });
+    assert!(matches!(g.shared.route(&back(false)), Route::Queue(_)));
+    g.shared.update(|v| v.start_checks = false);
+    match g.shared.route(&back(false)) {
+        Route::Now(r) => assert_eq!((r.ok, r.detail.as_str()), (false, "busy")),
+        other => panic!("{other:?}"),
+    }
+    let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Event));
+    g.state.lifecycle = Lifecycle::RollingBack;
+    g.state.rollback = Some(Run {
+        pin: SHA.into(),
+        since: Some(T0),
+        at: T0,
+        done: Vec::new(),
+        exported: false,
+        on_export: false,
+    });
+    let r = activate_offline(&mut pc, &mut g, Some(()), SHA);
+    assert!(
+        !r.ok && r.detail.starts_with("the rollback from the pin"),
+        "{r:?}"
+    );
+    assert_eq!(pc.mutating_calls(), Vec::<Call>::new());
 }

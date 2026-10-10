@@ -54,6 +54,9 @@ pub struct View {
     pub engine: Option<EngineStatus>,
     /// `GuardState.last_switch` (`Reply.last_switch`, S7).
     pub last_switch: Option<LastSwitch>,
+    /// A plain `iemmode event` (the engineer's button) is a rollback
+    /// (`rollback::button_rolls_back`, S8 lane 3).
+    pub rolls_back: bool,
     /// Replies the daemon thread handed to the pipe's threads…
     pub replies_sent: u64,
     /// …and those the pipe's threads have written (or found their client
@@ -192,6 +195,22 @@ impl Shared {
         match (req, v.running) {
             (Request::Subscribe, _) => Route::Subscribe,
             (Request::Status, _) => Route::Now(v.reply(true, &v.status)),
+            // In prod the button is the rollback (S8 lane 3): it runs after
+            // the switch in progress, never answered as its end; it pre-empts
+            // a dev or live entry, never an event plan (whose waits would
+            // fail on the token).
+            (
+                Request::Event {
+                    dry_run: false,
+                    signal: false,
+                },
+                Some(running),
+            ) if v.rolls_back => {
+                if running != Mode::Event {
+                    self.cancel.preempt();
+                }
+                Route::Queue(v.generation())
+            }
             (Request::Event { dry_run: false, .. }, Some(Mode::Event)) => {
                 Route::AwaitEnd("already switching to event")
             }

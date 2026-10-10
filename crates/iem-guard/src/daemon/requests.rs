@@ -47,6 +47,12 @@ fn stale(req: &Request, seen: Generation, v: &View) -> Option<Reply> {
             (seen.fence != v.fence).then(|| v.reply(false, &fenced(seen, v)))
         }
         _ if seen.epoch == v.epoch => None,
+        // In prod the button is the rollback: no switch that ran meanwhile
+        // did it (S8 lane 3).
+        Request::Event {
+            dry_run: false,
+            signal: false,
+        } if v.rolls_back => None,
         Request::Event { dry_run: false, .. } => Some(v.event_reply("a switch ran meanwhile")),
         _ => Some(v.reply(false, while_switching(req))),
     }

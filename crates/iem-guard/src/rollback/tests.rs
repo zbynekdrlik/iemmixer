@@ -435,3 +435,12 @@ fn the_record_reads_back_and_reads_a_newer_guards_step_as_not_done() {
     assert_eq!(back.done, [RollStep::Stop, RollStep::Project]);
     assert!(!back.exported && !back.on_export);
 }
+
+/// The pipe queues the button as a rollback in prod and while rolling back,
+/// never before the cutover.
+#[test]
+fn the_button_rolls_back_in_prod_and_while_rolling_back() {
+    assert!(!button_rolls_back(&Lifecycle::Trial));
+    assert!(button_rolls_back(&prod()));
+    assert!(button_rolls_back(&Lifecycle::RollingBack));
+}
