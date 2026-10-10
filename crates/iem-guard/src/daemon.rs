@@ -458,10 +458,22 @@ pub fn serve_requests(pc: &mut dyn Pc, g: &mut Guard, jobs: &Receiver<Job>) {
 }
 
 #[cfg(test)]
+mod activation_tests;
+#[cfg(test)]
+mod hil_tests;
+#[cfg(test)]
 mod probe_tests;
 #[cfg(test)]
 mod reaper_tests;
 #[cfg(test)]
 mod record_tests;
+#[cfg(test)]
+mod request_tests;
+#[cfg(test)]
+mod runner_tests;
+#[cfg(test)]
+mod start_tests;
+#[cfg(test)]
+mod status_tests;
 #[cfg(test)]
 mod tests;
