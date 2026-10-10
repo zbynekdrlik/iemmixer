@@ -1,7 +1,10 @@
 //! S7 additions to the commands (#10), additive both ways: an older engine
 //! reads a newer request, and a newer engine reads an older one.
 
+use serde::Deserialize;
+
 use super::*;
+use crate::ids::InputId;
 
 /// `HilTestSignal` as an engine before S7 reads it: today's fields without
 /// `listen`, and no `deny_unknown_fields`.

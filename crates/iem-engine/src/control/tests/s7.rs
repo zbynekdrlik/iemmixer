@@ -61,6 +61,7 @@ fn status_carries_the_faulting_callbacks_time_in_microseconds() {
 #[test]
 fn a_fault_sends_a_last_status_with_the_faulting_callbacks_time() {
     use super::peers::{hello, peer, reader};
+    use iem_engine_proto::Status;
     let mut r = rig();
     r.c.driver = Some(Box::new(Streams(StreamStats {
         frames: 32,
