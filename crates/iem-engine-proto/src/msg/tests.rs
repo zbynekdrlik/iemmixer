@@ -1,8 +1,12 @@
 //! The protocol's tests: shapes, round trips, parsing and negotiation;
 //! `s7_tests` holds the S7 additions.
 
+use serde::Deserialize;
+
+use super::client::{MAX_MSG, short};
 use super::*;
-use crate::state::EqBand;
+use crate::ids::{EqTarget, GroupId, InputId, MixId, Source};
+use crate::state::{Eq, EqBand, Level, MixGroup, MixOut, MixState, Transient};
 
 fn mix(s: &str) -> MixId {
     MixId::new(s)
