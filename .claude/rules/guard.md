@@ -4,6 +4,7 @@ paths:
   - "crates/iem-win/**"
   - "scripts/iem-pc/**"
   - "crates/iem-audio-io/src/asio.rs"
+  - "crates/iem-audio-io/src/asio/**"
   - "crates/iem-audio-io/src/period.rs"
   - "crates/iem-audio-io/src/channels.rs"
   - "crates/iem-audio-io/src/reset.rs"

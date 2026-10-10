@@ -24,9 +24,13 @@ exclude_globs = [
   # glitch_report.rs, spike_run.rs, channels.rs, period.rs, reset.rs,
   # owner.rs, messages.rs and iem-win's prefwin.rs.
   "crates/iem-audio-io/src/asio.rs",
+  # Its parts (#36: the spike's stream, the real-time callbacks, the owner
+  # thread, the preference window, the stream's handle, the SEH filter and
+  # the hosted-runner tests), excluded with it by path.
+  "crates/iem-audio-io/src/asio/**",
   # Windows-only placement/priority/clock/marker FFI (S1c): not compiled on
   # the Linux runners; the windows jobs build it. Only the S1a/S1c spike
-  # calls it (asio.rs's spike Host::start and examples/asio_spike/), in its
+  # calls it (asio/spike.rs's Host::start and examples/asio_spike/), in its
   # measurement windows on the PC; the S6 engine places and prioritises
   # itself through iem_win::power, so HIL never runs it. Its portable
   # placement logic (parse_lps, ids_for) lives in the mutated cpuset.rs; the
