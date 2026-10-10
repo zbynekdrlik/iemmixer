@@ -5,8 +5,10 @@
 
 use super::tests::{band_up, iemmixer_up};
 use super::*;
+use crate::pc::Kid;
 use crate::pc::fake::{Call, FakePc};
-use crate::plan::Facts;
+use crate::plan::{Facts, Health, plan};
+use crate::proto::Request;
 use crate::state::Child;
 use crate::switch_log::{LastSwitch, SwitchOutcome};
 

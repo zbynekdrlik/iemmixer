@@ -8,14 +8,16 @@ use std::time::{Duration, Instant};
 use iem_win::spawn::Placement;
 
 use super::*;
-use crate::bundle::Pins;
+use crate::bundle::{Hil, Pins, Record};
+use crate::crash;
 use crate::effects::engine::{Ready, ReadyWindow};
 use crate::effects::tuning::{Logon, LogonPref};
 use crate::install;
 use crate::pc::fake::{Call, FakePc};
-use crate::pc::{CardHolders, PrefHeld, Status};
-use crate::plan::Facts;
-use crate::proto::GUARD_BUILD;
+use crate::pc::{CardHolders, Kid, PrefHeld, Status};
+use crate::plan::{Facts, Health};
+use crate::proto::{GUARD_BUILD, Reply, Request};
+use crate::state::Switching;
 
 const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
 const OTHER: &str = "89abcdef0123456789abcdef0123456789abcdef";

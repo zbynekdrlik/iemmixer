@@ -6,6 +6,7 @@
 use super::tests::iemmixer_up;
 use super::*;
 use crate::pc::fake::{Call, FakePc};
+use crate::proto::Request;
 
 /// The generation of a guard that began no switch and routed no "ide event".
 const INIT: Generation = Generation { epoch: 0, fence: 0 };

@@ -11,7 +11,8 @@
 use super::tests::{band_up, iemmixer_up};
 use super::*;
 use crate::pc::fake::{Call, FakePc};
-use crate::plan::Facts;
+use crate::plan::{Facts, Health, plan};
+use crate::proto::Request;
 use crate::switch_log::{LastSwitch, SwitchOutcome};
 
 /// A synthetic bundle SHA: a dev entry's identity check names the pin.
