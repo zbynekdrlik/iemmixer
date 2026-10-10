@@ -229,7 +229,7 @@ fn dry_entry(
     note: Option<String>,
 ) -> (bool, String) {
     // `trial` decides only the precheck (below), never a step of the plan.
-    let steps = plan(e.to, &pc.facts());
+    let steps = lifecycle::plan(&g.state.lifecycle, e.to, &pc.facts());
     let bundle = runs
         .or_else(|| g.state.active_bundle().map(str::to_owned))
         .unwrap_or_else(|| "none".to_owned());

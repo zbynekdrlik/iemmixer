@@ -22,7 +22,7 @@ use std::path::Path;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::bundle::{Record, may_go_live};
-use crate::plan::Mode;
+use crate::plan::{self, Facts, Mode, Step};
 
 /// Where the PC is in its life (design §3.1).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -276,6 +276,28 @@ pub fn entry<'r>(
             })
         }
     }
+}
+
+/// Whether an entry refreshes the band's data from the predecessor (the
+/// data step: `pc.toml`'s `data_dev`/`data_live`). Only before the cutover:
+/// the REAPER project is the data authority only until then (program spec
+/// §3; ROZHODNUTÉ on #11). In prod iemmixer's own state (PINs, mixes,
+/// snapshots the band changes) is the only authority, and the cutover's
+/// final import (its live trial entry, still in `Trial`) is the last
+/// import; while rolling back no entry runs.
+pub fn refreshes_data(lc: &Lifecycle) -> bool {
+    matches!(lc, Lifecycle::Trial)
+}
+
+/// A switch's steps as the lifecycle runs them: `plan::plan`, without the
+/// data step where [`refreshes_data`] says no. The runner and the dry run
+/// both plan through it.
+pub fn plan(lc: &Lifecycle, to: Mode, facts: &Facts) -> Vec<Step> {
+    let mut steps = plan::plan(to, facts);
+    if !refreshes_data(lc) {
+        steps.retain(|s| *s != Step::Data);
+    }
+    steps
 }
 
 /// What a crash loop (3 abnormal engine exits in 10 min) means.

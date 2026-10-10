@@ -11,9 +11,9 @@ use super::{Guard, Outcome, READY_S, mode_name, reaper};
 use crate::cancel::Cancel;
 use crate::crash;
 use crate::handover::{self, Audio};
-use crate::lifecycle::Lifecycle;
+use crate::lifecycle::{self, Lifecycle};
 use crate::pc::{Pc, PrefSeen, R, Status, StepError};
-use crate::plan::{Health, Mode, OnError, Step, on_error, plan};
+use crate::plan::{Health, Mode, OnError, Step, on_error};
 use crate::state::Switching;
 use crate::switch_log::LastSwitch;
 
@@ -137,7 +137,9 @@ pub(super) fn switch(
     to: Mode,
     checks: bool,
 ) -> Outcome {
-    let steps = plan(to, &pc.facts());
+    // The prod data rule: the lifecycle drops the data step after the
+    // cutover (`lifecycle::refreshes_data`).
+    let steps = lifecycle::plan(&g.state.lifecycle, to, &pc.facts());
     g.begin(from, to, &steps, checks);
     let mut skip: Vec<Step> = Vec::new();
     for step in steps {

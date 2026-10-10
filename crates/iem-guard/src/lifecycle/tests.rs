@@ -740,3 +740,32 @@ fn the_way_back_moves_only_when_the_active_bundle_changes() {
         }
     );
 }
+
+/// The prod data rule (ROZHODNUTÉ on #11): only a trial's entries refresh
+/// the data from the predecessor; in prod and while rolling back the plan
+/// has no data step and is otherwise the planner's, step for step.
+#[test]
+fn only_a_trial_refreshes_the_data_from_the_predecessor() {
+    let lifecycles = [
+        Lifecycle::Trial,
+        Lifecycle::Prod(prod(None, None)),
+        Lifecycle::Prod(prod(Some(PREV), Some(NEW))),
+        Lifecycle::RollingBack,
+    ];
+    for lc in &lifecycles {
+        let trial = *lc == Lifecycle::Trial;
+        assert_eq!(refreshes_data(lc), trial, "{lc:?}");
+        for to in [Mode::Event, Mode::Dev, Mode::Live] {
+            for bits in 0..(1 << plan::FACT_BITS) {
+                let facts = Facts::from_bits(bits);
+                let want: Vec<Step> = plan::plan(to, &facts)
+                    .into_iter()
+                    .filter(|s| trial || *s != Step::Data)
+                    .collect();
+                assert_eq!(super::plan(lc, to, &facts), want, "{lc:?} {to:?} {bits}");
+            }
+        }
+    }
+    let entry = super::plan(&Lifecycle::Trial, Mode::Live, &Facts::default());
+    assert!(entry.contains(&Step::Data), "a trial imports: {entry:?}");
+}
