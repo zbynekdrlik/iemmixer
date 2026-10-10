@@ -1,18 +1,15 @@
 """Tests for scripts/iem-pc/iempc.py. A fake ssh runner stands in for the PC
 and a fake gh for GitHub; every value is synthetic, and the private env file
-is never read (a temp file takes its place)."""
+is never read (a temp file takes its place). The fakes and `Base` live in
+iempc_test_support.py (#36)."""
 from __future__ import annotations
 
-import contextlib
 import fcntl
-import hashlib
-import io
 import json
 import os
 import re
 import shutil
 import sys
-import tempfile
 import threading
 import time
 import unittest
@@ -22,248 +19,7 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import iempc as ip  # noqa: E402
-
-REAL_GH = ip.gh  # Base puts a FakeGh in its place for every test
-SHA ="1234567890abcdef1234567890abcdef12345678"
-SHA2 = "abcdefabcdefabcdefabcdefabcdefabcdefabcd"
-RUN = 987654
-ENV = {"PC_SSH": "tester@pc.test", "PC_ROOT": "X:\\root", "PC_ROOT_SCP": "/X:/root", "PC_BIN": "X:\\root\\bin"}
-OK = json.dumps({"ok": True, "alarms": []})
-
-
-def sha256(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
-
-
-def make_zip(path: Path, *, sha: str = SHA, branch: str = "dev", run: int = RUN, drop: tuple[str, ...] = (),
-             tamper: str | None = None, unlisted: str | None = None, rename: dict | None = None,
-             manifest: dict | None = None, sums_extra: str = "", manifest_raw: bytes | None = None,
-             sums_raw: bytes | None = None, extra: dict[str, bytes] | None = None) -> Path:
-    """A bundle zip shaped like the CI `bundle` job's (plan Task 12); `extra`: more listed files."""
-    files = {n: f"synthetic {n}".encode() for n in ip.BUNDLE_REQUIRED if n != "manifest.json"}
-    files["tuning/state.ps1"] = b"synthetic tuning"
-    files.update(extra or {})
-    doc = manifest if manifest is not None else {"sha": sha, "branch": branch, "version": "2.0.0-dev.9", "run": run}
-    files["manifest.json"] = json.dumps(doc).encode() if manifest_raw is None else manifest_raw
-    for name in drop:
-        files.pop(name)
-    sums = "".join(f"{sha256(b)}  {n}\n" for n, b in sorted(files.items())) + sums_extra
-    if tamper:
-        files[tamper] = b"changed after the sums"
-    if unlisted:
-        files[unlisted] = b"not in the sums"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(path, "w") as z:
-        z.writestr("tuning/", b"")  # a directory entry, as Compress-Archive writes one
-        for name, data in files.items():
-            z.writestr((rename or {}).get(name, name), data)
-        z.writestr("SHA256SUMS", sums if sums_raw is None else sums_raw)
-    return path
-
-
-def unquote(text: str) -> str:
-    return text[1:-1].replace("''", "'")
-
-
-class FakePc:
-    """Stands in for `ssh_ps` and `scp`: records each native call (program,
-    arguments, flag mode) and module call, answers with scripted replies, and
-    ends a watched call on the flag the way `guarded` does."""
-
-    NATIVE = re.compile(r"\$x = ('(?:[^']|'')*') ; \$a = @\(((?:'(?:[^']|'')*'(?:, )?)*)\) ; .*?\$r = @\(& \$x @a")
-    WANT = re.compile(r"\$iemH -cne '([0-9a-f]{64})'")
-
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, list[str], str]] = []
-        self.timeouts: list[float] = []
-        self.native_scripts: list[str] = []
-        self.modules: list[tuple[str, str]] = []
-        self.scps: list[tuple[str, str, str]] = []
-        self.replies: dict = {}  # args -> (exit, stdout[, stderr]) or a callable returning one
-        self.module_result = "ok"
-        # A module script holding the text gets this result (or a callable's) instead: the
-        # elevated tuning folder's profile check after every activate (iempc_tuning) finds none,
-        # and the admin-only bin's install (#15) reads back the hash it was given.
-        self.texts: dict = {"profile.json": False, "$iemDst": self.bin_installed}
-        # An iemmode call's note (#15): the admin-only copy did not read back, PC_BIN ran.
-        self.bin_note = None
-
-    def bin_installed(self) -> str:
-        return self.WANT.findall(self.modules[-1][0])[-1]
-
-    def ssh_ps(self, env, script, timeout, event):
-        m = self.NATIVE.search(script)
-        if m:
-            exe = unquote(m.group(1))
-            args = [unquote(a) for a in re.findall(r"'(?:[^']|'')*'", m.group(2))]
-            self.calls.append((exe.rsplit("\\", 1)[-1], args, event))
-            self.timeouts.append(timeout)
-            self.native_scripts.append(script)
-            reply = self.replies.get(tuple(args), (0, OK))
-            code, out, err = (*(reply() if callable(reply) else reply), "")[:3]
-            doc = {"exit": code, "out": out, "err": err, "note": self.bin_note if "$iemUse" in script else None}
-        else:
-            self.modules.append((script, event))
-            r = next((v for k, v in self.texts.items() if k in script), self.module_result)
-            doc = {"ok": True, "r": r() if callable(r) else r}
-        if event != "ignore" and ip.event_now():
-            raise ip.EventNow()
-        return "PowerShell noise\n" + json.dumps(doc) + "\n"
-
-    def scp(self, src, dst, event):
-        self.scps.append((src, dst, event))
-
-
-class FakeGh:
-    def __init__(self, artifact: Path) -> None:
-        self.calls: list[list[str]] = []
-        self.heads = {"dev": SHA, "main": SHA2}
-        self.runs = [{"databaseId": RUN, "headSha": SHA, "event": "push", "headBranch": "dev", "conclusion": "success"}]
-        self.jobs = {RUN: [{"name": "bundle", "conclusion": "success"}, {"name": "attest", "conclusion": "success"}]}
-        self.artifact = artifact
-        self.attest_ok = True
-        self.runner_reply = "A" * 29
-        self.on_list = None
-        self.on_download = None
-
-    def __call__(self, args, timeout=ip.GH_S):
-        args = list(args)
-        self.calls.append(args)
-        if args[0] == "api" and args[1].startswith(f"repos/{ip.REPO}/git/ref/heads/"):
-            return self.heads[args[1].rsplit("/", 1)[1]] + "\n"
-        if args[:2] == ["run", "list"]:
-            if self.on_list:
-                self.on_list()
-            sha = args[args.index("--commit") + 1]
-            return json.dumps([r for r in self.runs if r["headSha"] == sha])
-        if args[:2] == ["run", "view"]:
-            return json.dumps({"jobs": self.jobs.get(int(args[2]), [])})
-        if args[:2] == ["run", "download"]:
-            dest = Path(args[args.index("-D") + 1])
-            dest.mkdir(parents=True, exist_ok=True)
-            shutil.copy(self.artifact, dest / self.artifact.name)
-            if self.on_download:
-                self.on_download()
-            return ""
-        if args[:2] == ["attestation", "verify"]:
-            if not self.attest_ok:
-                raise ip.StepError("gh attestation verify failed (exit 1): no attestation matched")
-            return ""
-        if args[:2] == ["workflow", "run"]:
-            return ""
-        if args[:3] == ["api", "-X", "POST"]:
-            return self.runner_reply + "\n"
-        raise AssertionError(f"unexpected gh call {args}")
-
-    def named(self, *prefix: str) -> list[list[str]]:
-        return [c for c in self.calls if c[:len(prefix)] == list(prefix)]
-
-
-class FakeClock:
-    """A monotonic clock that moves only when a fake reply waits (`sleep`)."""
-
-    def __init__(self) -> None:
-        self.t = 1024.0   # binary fractions below stay exact
-
-    def now(self) -> float:
-        return self.t
-
-    def sleep(self, seconds: float) -> None:
-        self.t += seconds
-
-
-class Base(unittest.TestCase):
-    PATCHED = ("EVENT_NOW", "STATE_DIR", "SPIKE_STATE", "SPIKE", "POLL_S", "ssh_ps", "scp", "gh", "env_path",
-               "EVENT_BUDGET_S", "SPIKE_SHARE_S", "SWITCH_MIN_S")
-
-    def setUp(self) -> None:
-        self.tmp = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, self.tmp, True)
-        saved = {name: getattr(ip, name) for name in self.PATCHED}
-        self.addCleanup(self.restore, saved)
-        ip.EVENT_NOW = self.tmp / "config" / "EVENT-NOW"
-        ip.STATE_DIR = self.tmp / "state"
-        ip.SPIKE_STATE = self.tmp / "spike-window.json"
-        ip.POLL_S = 0.05
-        self.spike_log = self.tmp / "spike.log"
-        self.spike_done = self.tmp / "spike.done"
-        ip.SPIKE = self.write_spike(0)
-        envfile = self.tmp / "iem-pc.env"
-        envfile.write_text("".join(f"{k}={v}\n" for k, v in ENV.items()), encoding="utf-8")
-        ip.env_path = lambda: envfile
-        self.pc = FakePc()
-        ip.ssh_ps, ip.scp = self.pc.ssh_ps, self.pc.scp
-        self.artifact = make_zip(self.tmp / "artifact" / f"iemmixer-{SHA}.zip")
-        self.gh = FakeGh(self.artifact)
-        ip.gh = self.gh
-
-    @staticmethod
-    def restore(saved: dict) -> None:
-        for name, value in saved.items():
-            setattr(ip, name, value)
-
-    def write_spike(self, code: int, delay: float = 0.0) -> Path:
-        """A stand-in spike_window.py: logs its arguments at start, takes
-        `delay` seconds, marks its end in spike_done, exits with `code`."""
-        p = self.tmp / "spike_window.py"
-        p.write_text(f"import sys, time\nopen({str(self.spike_log)!r}, 'a').write(' '.join(sys.argv[1:]) + '\\n')\n"
-                     f"time.sleep({delay})\nopen({str(self.spike_done)!r}, 'a').write('ended\\n')\n"
-                     f"print('preempted')\nsys.exit({code})\n", encoding="utf-8")
-        return p
-
-    def wait_for_spike_end(self) -> None:
-        """A spike stand-in left running ends by itself (never force-ended)."""
-        deadline = time.monotonic() + 15
-        while not self.spike_done.exists() and time.monotonic() < deadline:
-            time.sleep(0.05)
-        self.assertTrue(self.spike_done.exists(), "the spike stand-in never ended")
-
-    def route_to_real_gh(self, *prefix: str) -> None:
-        """gh calls starting with `prefix` go through the real wrapper (and a
-        stand-in gh program on PATH); every other call stays with FakeGh."""
-        fake = self.gh
-
-        def mixed(args, timeout=ip.GH_S):
-            if list(args[:len(prefix)]) == list(prefix):
-                return REAL_GH(args, timeout)
-            return fake(args, timeout)
-
-        ip.gh = mixed
-
-    def gh_program(self, body: str) -> None:
-        """A stand-in `gh` program first on PATH, running `body` (sys, time imported)."""
-        d = self.tmp / "bin"
-        d.mkdir(exist_ok=True)
-        p = d / "gh"
-        p.write_text(f"#!{sys.executable}\nimport sys, time\n{body}\n", encoding="utf-8")
-        p.chmod(0o755)
-        self.set_path(f"{d}{os.pathsep}{os.environ.get('PATH', '')}")
-
-    def set_path(self, path: str) -> None:
-        patcher = mock.patch.dict(os.environ, {"PATH": path})
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
-    def flag(self) -> None:
-        ip.EVENT_NOW.parent.mkdir(parents=True, exist_ok=True)
-        ip.EVENT_NOW.write_text("2026-09-27T20:00:00+02:00\n", encoding="utf-8")
-
-    def open_window(self, **kw) -> None:
-        state = {"id": "w1", "card": "free", "pref_original": 64, "pref_current": None, "closed": False}
-        state.update(kw)
-        ip.SPIKE_STATE.write_text(json.dumps(state), encoding="utf-8")
-
-    def run_main(self, *argv: str) -> tuple[int, list[dict], str]:
-        out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = ip.main(list(argv))
-        return code, [json.loads(line) for line in out.getvalue().splitlines() if line.strip()], err.getvalue()
-
-    def fetched(self) -> dict:
-        code, docs, err = self.run_main("fetch-bundle", "--sha", SHA)
-        self.assertEqual(code, 0, err)
-        return docs[-1]
+from iempc_test_support import ENV, MODULES, OK, REAL_GH, RUN, SHA, SHA2, Base, FakeClock, ip, make_zip, sha256  # noqa: E402
 
 
 class EnvTests(Base):
@@ -300,12 +56,15 @@ class EnvTests(Base):
             self.assertEqual(self.real_env_path(), Path.home() / ".config/iemmixer/iem-pc.env")
 
     def test_no_site_values_in_the_module(self) -> None:
-        text = Path(ip.__file__).read_text(encoding="utf-8")
-        self.assertIsNone(re.search(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", text), "an IPv4 address")
-        self.assertIsNone(re.search(r"\b[A-Za-z]:\\", text), "a Windows drive path")
-        self.assertIsNone(re.search(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", text), "an ssh destination or email")
-        self.assertIsNone(re.search(r"\b[a-z0-9-]+\.(?:lan|home|internal|corp)\b", text), "a site host name")
-        self.assertEqual(set(re.findall(r"zbynekdrlik/[\w-]+", text)), {ip.REPO, ip.OPS_REPO})
+        repos = set()
+        for module in MODULES:   # iempc.py and the modules it is split into (#36)
+            text = Path(module.__file__).read_text(encoding="utf-8")
+            self.assertIsNone(re.search(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", text), ("an IPv4 address", module.__name__))
+            self.assertIsNone(re.search(r"\b[A-Za-z]:\\", text), ("a Windows drive path", module.__name__))
+            self.assertIsNone(re.search(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", text), ("an ssh destination or email", module.__name__))
+            self.assertIsNone(re.search(r"\b[a-z0-9-]+\.(?:lan|home|internal|corp)\b", text), ("a site host name", module.__name__))
+            repos |= set(re.findall(r"zbynekdrlik/[\w-]+", text))
+        self.assertEqual(repos, {ip.REPO, ip.OPS_REPO})
 
 
 class GuardedTests(Base):
@@ -449,15 +208,15 @@ class ScriptTests(Base):
                 ip.last_json(bad)
 
     def test_a_program_that_did_not_start_is_an_error(self) -> None:
-        ip.ssh_ps = lambda env, script, timeout, event: json.dumps({"exit": None, "out": None, "err": "not recognized"})
+        self.patch(ssh_ps=lambda env, script, timeout, event: json.dumps({"exit": None, "out": None, "err": "not recognized"}))
         with self.assertRaisesRegex(ip.StepError, "iemmode.exe did not run on the PC: not recognized"):
             ip.iemmode(ENV, ["status"], 10, "abandon")
-        ip.ssh_ps = lambda env, script, timeout, event: json.dumps({"exit": "zero", "out": "", "err": ""})
+        self.patch(ssh_ps=lambda env, script, timeout, event: json.dumps({"exit": "zero", "out": "", "err": ""}))
         with self.assertRaisesRegex(ip.StepError, "non-numeric"):
             ip.iemmode(ENV, ["status"], 10, "abandon")
 
     def test_a_module_error_is_raised(self) -> None:
-        ip.ssh_ps = lambda env, script, timeout, event: json.dumps({"ok": False, "error": "access denied"})
+        self.patch(ssh_ps=lambda env, script, timeout, event: json.dumps({"ok": False, "error": "access denied"}))
         with self.assertRaisesRegex(ip.StepError, "PC step failed: access denied"):
             ip.run_module(ENV, "Get-IemBootstrapState", 10, "abandon")
 
@@ -582,7 +341,7 @@ class FlagTests(Base):
     def test_a_flag_that_cannot_be_written_never_stops_the_event_path(self) -> None:
         blocker = self.tmp / "not-a-folder"
         blocker.write_text("a file where the flag's folder should be", encoding="utf-8")
-        ip.EVENT_NOW = blocker / "EVENT-NOW"
+        self.patch(EVENT_NOW=blocker / "EVENT-NOW")
         self.open_window()
         code, docs, err = self.run_main("event")
         self.assertEqual(code, 0)
@@ -613,7 +372,7 @@ class EventTests(Base):
 
     def test_a_failed_spike_preempt_still_runs_iemmode_event(self) -> None:
         self.open_window()
-        ip.SPIKE = self.write_spike(3)
+        self.patch(SPIKE=self.write_spike(3))
         code, docs, err = self.run_main("event")
         self.assertEqual((code, docs[1]["spike_preempt"]["ok"], "running" in docs[1]["spike_preempt"]), (0, False, False))
         self.assertIn("exit 3", docs[1]["spike_preempt"]["error"])
@@ -625,7 +384,7 @@ class EventTests(Base):
     # queued finds it closed and starts no second bring-back next to the guard's.
     def test_a_failed_spike_preempt_closes_the_window_before_iemmode_event(self) -> None:
         self.open_window()
-        ip.SPIKE = self.write_spike(3)
+        self.patch(SPIKE=self.write_spike(3))
         seen: list[dict] = []
         self.pc.replies[("event",)] = lambda: (seen.append(json.loads(ip.SPIKE_STATE.read_text(encoding="utf-8"))), (0, OK))[1]
         code, docs, err = self.run_main("event")
@@ -642,7 +401,7 @@ class EventTests(Base):
         # late handler and the guard take it from here, and the agent hears which step.
         intent = {"step": "set-buffer", "started": time.time(), "bound_s": 60}
         self.open_window(in_flight=intent)
-        ip.SPIKE = self.write_spike(3)
+        self.patch(SPIKE=self.write_spike(3))
         code, docs, err = self.run_main("event")
         self.assertEqual(code, 0, err)
         self.assertIn({"spike_window": "closed", "after": "a failed spike preempt", "in_flight": intent}, docs)
@@ -667,8 +426,7 @@ class EventTests(Base):
         # The lock wait fits the event budget: a window process that holds it (a
         # bring-back of its own?) is never raced by the guard's.
         self.open_window()
-        ip.SPIKE = self.write_spike(3)
-        ip.EVENT_BUDGET_S, ip.SWITCH_MIN_S = 2.0, 1.0
+        self.patch(SPIKE=self.write_spike(3), EVENT_BUDGET_S=2.0, SWITCH_MIN_S=1.0)
         sw = ip.spike_module()
         saved = sw.STATE
         self.addCleanup(setattr, sw, "STATE", saved)
@@ -705,7 +463,7 @@ class EventTests(Base):
 
     def test_iemmode_event_gets_what_the_spike_preempt_left(self) -> None:
         self.open_window()
-        ip.SPIKE = self.write_spike(0, delay=0.4)
+        self.patch(SPIKE=self.write_spike(0, delay=0.4))
         self.assertEqual(self.run_main("event")[0], 0)
         self.assertEqual(self.pc.calls, [("iemmode.exe", ["event"], "ignore")])
         self.assertLessEqual(self.pc.timeouts[0], ip.EVENT_BUDGET_S - 0.4)
@@ -713,8 +471,7 @@ class EventTests(Base):
 
     def test_no_iemmode_call_while_the_spike_preempt_outlives_its_share(self) -> None:
         self.open_window()
-        ip.SPIKE = self.write_spike(0, delay=3)
-        ip.SPIKE_SHARE_S = 0.3
+        self.patch(SPIKE=self.write_spike(0, delay=3), SPIKE_SHARE_S=0.3)
         t = time.monotonic()
         code, docs, err = self.run_main("event")
         spike_still_runs = not self.spike_done.exists()
@@ -731,9 +488,9 @@ class EventTests(Base):
         # On a fake clock that only the replies move: the branch never depends on
         # this process's own speed (a loaded run once ate the margin).
         clock = FakeClock()
-        ip.EVENT_BUDGET_S, ip.SWITCH_MIN_S = 1.0, 0.5
+        self.patch(EVENT_BUDGET_S=1.0, SWITCH_MIN_S=0.5)
         self.pc.replies[("event",)] = lambda: (clock.sleep(0.625), (4, OK))[1]
-        with mock.patch.object(ip, "event_clock", clock.now):
+        with self.patched(event_clock=clock.now):
             code, _, err = self.run_main("event")
         self.assertEqual((code, [c[1] for c in self.pc.calls]), (1, [["event"]]))
         self.assertIn("less than the 0.5 s an iemmode call gets: run 'iempc event' again", err)
@@ -741,7 +498,7 @@ class EventTests(Base):
         self.pc.calls.clear()
         # Exactly the minimum left is enough: 1.0 - 0.5 = 0.5.
         self.pc.replies[("event",)] = lambda: (clock.sleep(0.5), (4, OK))[1]
-        with mock.patch.object(ip, "event_clock", clock.now):
+        with self.patched(event_clock=clock.now):
             self.assertEqual(self.run_main("event")[0], 0)
         self.assertEqual([c[1] for c in self.pc.calls], [["event"], ["event", "--direct"]])
 
@@ -1123,14 +880,8 @@ class ActivateTests(Base):
 
     def setUp(self) -> None:
         super().setUp()
-        saved = (ip.HANDOVER_S, ip.HANDOVER_POLL_S)
-        self.addCleanup(self.restore_handover, saved)
-        ip.HANDOVER_S, ip.HANDOVER_POLL_S = 10.0, 0.01
+        self.patch(HANDOVER_S=10.0, HANDOVER_POLL_S=0.01)
         self.pc.replies[("activate", SHA)] = self.ACTIVATED
-
-    @staticmethod
-    def restore_handover(saved: tuple[float, float]) -> None:
-        ip.HANDOVER_S, ip.HANDOVER_POLL_S = saved
 
     @staticmethod
     def status(build: str | None) -> tuple[int, str]:
@@ -1180,7 +931,7 @@ class ActivateTests(Base):
         self.assertEqual(docs[2]["handover"]["reads"], 2)
 
     def test_a_hand_over_that_never_names_the_sha_fails_within_its_bound(self) -> None:
-        ip.HANDOVER_S = 0.2
+        self.patch(HANDOVER_S=0.2)
         self.statuses(self.status(SHA2))
         start = time.monotonic()
         code, docs, err = self.run_main("activate", "--sha", SHA)
@@ -1237,9 +988,9 @@ class ActivateTests(Base):
                          [("activate", "finish"), ("status", "abandon"), ("event", "ignore")])
 
     def test_a_new_flag_between_two_reads_runs_the_event_path(self) -> None:
-        ip.HANDOVER_POLL_S = 1.0
+        self.patch(HANDOVER_POLL_S=1.0)
         self.statuses(self.status(SHA2))
-        with mock.patch.object(ip.time, "sleep", side_effect=lambda _s: self.flag()):
+        with mock.patch.object(time, "sleep", side_effect=lambda _s: self.flag()):
             code, _, _ = self.run_main("activate", "--sha", SHA)
         self.assertEqual(code, ip.PREEMPTED)
         self.assertEqual([c[1][0] for c in self.pc.calls], ["activate", "status", "event"])
@@ -1259,18 +1010,12 @@ class OfflineActivateTests(Base):
 
     def setUp(self) -> None:
         super().setUp()
-        saved = (ip.HANDOVER_S, ip.HANDOVER_POLL_S, ip.QUIT_S)
-        self.addCleanup(self.restore_bounds, saved)
-        ip.HANDOVER_S, ip.HANDOVER_POLL_S, ip.QUIT_S = 10.0, 0.01, 10.0
+        self.patch(HANDOVER_S=10.0, HANDOVER_POLL_S=0.01, QUIT_S=10.0)
         self.fetched()
         self.pc.replies[("quit",)] = self.QUIT
         self.pc.replies[("activate", SHA)] = self.OFFLINE
         self.pc.replies[("status",)] = ActivateTests.status(SHA)
         self.guards(1, 1, 0)
-
-    @staticmethod
-    def restore_bounds(saved: tuple[float, float, float]) -> None:
-        ip.HANDOVER_S, ip.HANDOVER_POLL_S, ip.QUIT_S = saved
 
     def guards(self, *counts: int) -> None:
         """The guard processes the PC reads in turn, then the last again."""
@@ -1337,7 +1082,7 @@ class OfflineActivateTests(Base):
         self.assertEqual([c[1][0] for c in self.pc.calls], ["quit"])
 
     def test_a_guard_that_does_not_end_is_waited_for_within_a_bound_never_forced(self) -> None:
-        ip.QUIT_S = 0.2
+        self.patch(QUIT_S=0.2)
         self.guards(1)
         start = time.monotonic()
         code, _, err = self.run_main("activate", "--sha", SHA, "--offline")
@@ -1465,7 +1210,7 @@ class DispatchTests(Base):
         self.assertEqual((code, docs), (1, []))
         self.assertIn("gh workflow run failed (exit 1): HTTP 422", err)
         self.assertEqual(ip.load_dispatches(), [])
-        ip.gh = self.gh  # gh works again: the same SHA and entry is no repeat
+        self.patch(gh=self.gh)  # gh works again: the same SHA and entry is no repeat
         self.assertEqual(self.run_main("dispatch-hil", "--sha", SHA)[0], 0)
         self.assertEqual(len(ip.load_dispatches()), 1)
 

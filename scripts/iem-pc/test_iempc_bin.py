@@ -1,6 +1,6 @@
 """Tests for scripts/iem-pc/iempc_bin.py (#15, ROZHODNUTE of 2026-10-07: the
 elevated ssh session runs only admin-only copies of our executables). They
-reuse test_iempc's fakes (FakePc stands in for ssh and scp, FakeGh for
+reuse iempc_test_support's fakes (FakePc stands in for ssh and scp, FakeGh for
 GitHub); every value is synthetic."""
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import iempc_bin as ib  # noqa: E402
-from test_iempc import ENV, SHA, SHA2, Base, ip, sha256  # noqa: E402
+from iempc_test_support import ENV, SHA, SHA2, Base, ip, sha256  # noqa: E402
 from test_iempc_tuning import TuningBase  # noqa: E402
 
 IEMMODE = sha256(b"synthetic iemmode.exe")
@@ -203,7 +203,7 @@ class PickTests(Base):
     def test_the_build_is_written_only_when_it_changes(self) -> None:
         self.record()
         stamps = iter(["t1", "t2", "t3"])
-        with mock.patch.object(ip, "now_iso", lambda: next(stamps)):
+        with self.patched(now_iso=lambda: next(stamps)):
             self.picks(STATUS, STATUS, STATUS)
         self.assertEqual(ip.read_json(ip.state_dir() / ib.SEEN, None), {"build": SHA, "at": "t1"})
 

@@ -1,5 +1,5 @@
 """Tests for `iempc event` on the guard's verdict (#10). They reuse
-test_iempc's fakes (FakePc stands in for ssh); every value is synthetic.
+iempc_test_support's fakes (FakePc stands in for ssh); every value is synthetic.
 A file of its own: test_iempc.py is over its size budget (#36)."""
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_iempc import Base  # noqa: E402
+from iempc_test_support import Base  # noqa: E402
 
 
 class EventVerdictTests(Base):
