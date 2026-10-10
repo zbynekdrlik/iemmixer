@@ -486,6 +486,77 @@ fn a_cut_off_cutover_is_unwound_at_the_start_and_the_pc_goes_to_event() {
     );
 }
 
+/// A boot after a power loss in the middle of the cutover (prod already
+/// saved) is never silent for the elevated undos (each up to 120 s, not
+/// cancellable): the lifecycle goes back to trial first, a local save read
+/// back, so the boot goes to event, not live on the pin; the start's event
+/// plan brings REAPER; then the autostarts come back and only then the
+/// guard's logon trigger goes (S8 lane 5, finding 4).
+#[test]
+fn a_boot_after_a_cut_off_cutover_brings_reaper_before_the_elevated_undos() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut st = GuardState {
+        mode: Mode::Live,
+        lifecycle: prod(),
+        cutover: Some(Run {
+            build: SHA.into(),
+            since: T0,
+            begun: vec![
+                CutStep::Import,
+                CutStep::GuardLogon,
+                CutStep::Autostarts,
+                CutStep::PinChanges,
+                CutStep::Lifecycle,
+                CutStep::Checks,
+            ],
+        }),
+        ..GuardState::default()
+    };
+    st.bundles
+        .insert(SHA.into(), record(SHA, "main", Hil::Green));
+    st.set_active(SHA);
+    let gdir = dir.path().join("guard");
+    std::fs::create_dir_all(&gdir).unwrap();
+    st.save(&gdir.join(STATE_FILE), 1_000).unwrap();
+    let mut g = Guard::open(dir.path(), SiteConf::default(), fixed(T0 + 5));
+    // Nothing runs after the power loss; the boot is later than the state.
+    let mut pc = FakePc::new(Facts::default());
+    pc.guard_at_logon = true;
+    pc.autostarts_in = Some(export_name(T0));
+    pc.server_config = OPEN.into();
+    assert_eq!(start(&mut pc, &mut g, 5_000), Some(Outcome::Done));
+    assert_eq!(g.state.mode, Mode::Event);
+    assert!(!pc.called(Call::EngineStart), "never live on the pin");
+    assert!(
+        pc.index(Call::WriteServerConfig) < pc.index(Call::ReaperStart),
+        "{:?}",
+        pc.calls()
+    );
+    assert!(
+        pc.index(Call::ReaperStart) < pc.index(Call::AutostartsOn),
+        "{:?}",
+        pc.calls()
+    );
+    assert!(pc.index(Call::AutostartsOn) < pc.index(Call::GuardLogon));
+    assert_eq!(
+        (g.state.lifecycle.clone(), g.state.cutover.clone()),
+        (Lifecycle::Trial, None)
+    );
+    assert_eq!(
+        (
+            pc.guard_at_logon,
+            pc.autostarts_in.clone(),
+            pc.server_config.as_str()
+        ),
+        (false, None, FROZEN)
+    );
+    let back = Guard::open(dir.path(), SiteConf::default(), fixed(T0 + 9));
+    assert_eq!(
+        (back.state.lifecycle, back.state.cutover),
+        (Lifecycle::Trial, None)
+    );
+}
+
 /// The record is read back from the state file before any step: when the
 /// state does not save, the cutover is refused and nothing changes (a
 /// restart could not find what it would have to unwind).
