@@ -66,7 +66,7 @@ fn an_entry_never_promotes_the_pin() {
         .bundles
         .insert(SHA.into(), record(SHA, "main", Hil::Green));
     let trial = Request::Live {
-        build: SHA.into(),
+        build: Some(SHA.into()),
         trial: true,
         dry_run: false,
     };
@@ -279,7 +279,7 @@ fn in_prod_a_failed_live_entry_keeps_the_pin_and_the_session() {
     }
     pc.fail(Call::Data, "iem-migrate band ended with Some(1)");
     let live = Request::Live {
-        build: NEW.into(),
+        build: Some(NEW.into()),
         trial: false,
         dry_run: false,
     };
@@ -387,7 +387,7 @@ fn in_prod_maintenance_ends_with_its_green_build_as_the_pin() {
             .insert(sha.into(), record(sha, "main", Hil::Green));
     }
     let live = |build: &str, trial| Request::Live {
-        build: build.into(),
+        build: Some(build.into()),
         trial,
         dry_run: false,
     };
@@ -420,7 +420,7 @@ fn in_prod_maintenance_ends_with_its_green_build_as_the_pin() {
     let note = format!("maintenance build {NEW} becomes the pin; {SHA} is the previous pin");
     // The dry run says what the entry would decide, and changes nothing.
     let dry = Request::Live {
-        build: NEW.into(),
+        build: Some(NEW.into()),
         trial: false,
         dry_run: true,
     };
@@ -529,4 +529,30 @@ fn an_activation_in_prod_keeps_the_pins_exclusions() {
     let status = status_text(&g);
     let want = format!("bundle {NEW}; prod since {T0}: pin {SHA}, previous {OTHER}");
     assert!(status.contains(&want), "{status}");
+}
+
+/// S8 lane 2: in prod `live` needs no build; it runs the pin. Before the
+/// cutover it still needs one (a trial).
+#[test]
+fn in_prod_live_without_a_build_runs_the_pin() {
+    let live = Request::Live {
+        build: None,
+        trial: false,
+        dry_run: false,
+    };
+    let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
+    g.state.lifecycle = prod_on(None, None);
+    g.state.active = Some(OTHER.into());
+    green_main(&mut g, &[SHA, OTHER]);
+    let r = handle(&mut pc, &mut g, live.clone(), INIT);
+    assert!(r.ok, "{r:?}");
+    assert_eq!(g.state.mode, Mode::Live);
+    assert_eq!(pc.bundle.as_deref(), Some(SHA));
+    assert_eq!(g.state.active_bundle(), Some(SHA));
+    assert_eq!(g.state.lifecycle, prod_on(None, None));
+    let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
+    green_main(&mut g, &[SHA]);
+    let r = handle(&mut pc, &mut g, live, INIT);
+    assert_eq!((r.ok, r.detail.as_str()), (false, "live needs --build SHA"));
+    assert_eq!(g.state.mode, Mode::Dev);
 }

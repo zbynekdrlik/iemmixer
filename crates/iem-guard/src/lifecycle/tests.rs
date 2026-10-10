@@ -337,9 +337,24 @@ fn in_prod_live_runs_the_pin_and_ends_maintenance() {
             "in prod live runs the pin {PIN}: live --build {PIN}"
         ))
     );
+    // `live` without a build runs the pin.
+    assert_eq!(
+        entered(&lc, ask(Mode::Live, None, false), &b),
+        Ok(Entered {
+            runs: Some(PIN.into()),
+            lifecycle: lc.clone(),
+            note: None
+        })
+    );
     // A green maintenance build becomes the pin: live runs it.
     let lc = Lifecycle::Prod(prod(Some(PREV), Some(NEW)));
     let e = entered(&lc, ask(Mode::Live, Some(NEW), false), &b).unwrap();
+    // Without a build live runs the pin the session ends on (lane 2: `live
+    // --build` is optional in prod).
+    assert_eq!(
+        entered(&lc, ask(Mode::Live, None, false), &b),
+        Ok(e.clone())
+    );
     assert_eq!(e.runs.as_deref(), Some(NEW));
     assert_eq!(
         e.lifecycle,

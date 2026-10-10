@@ -105,7 +105,7 @@ pub fn handle(pc: &mut dyn Pc, g: &mut Guard, req: Request, seen: Generation) ->
             g,
             Entry {
                 to: Mode::Live,
-                build: Some(build),
+                build,
                 trial,
                 dry_run,
             },

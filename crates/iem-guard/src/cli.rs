@@ -24,7 +24,7 @@ pub const START_WAIT: Duration = Duration::from_secs(15);
 pub const START_POLL: Duration = Duration::from_millis(500);
 
 pub const IEMMODE_USAGE: &str = "usage: iemmode status | event [--dry-run] [--direct]
-  | dev [--build SHA] [--dry-run] | live --build SHA [--trial] [--dry-run]
+  | dev [--build SHA] [--dry-run] | live [--build SHA] [--trial] [--dry-run]
   | install <zip> | activate <sha> | test-signal <input> <dbfs> <ttl> [--listen]
   | report <sha> <green|red> <detail> | job-begin <run> | job-end <run>
   | install-site <file> | force-reopen | inject-fault | inject-seh | inject-park | runner-stop
@@ -146,10 +146,11 @@ pub fn parse(args: &[String]) -> Result<Cli, String> {
             })
         }
         "live" => {
+            // The guard decides whether a build is needed (before the
+            // cutover: always; in prod it defaults to the pin).
             let f = Flags::read(&rest, &["--trial", "--dry-run"], &["--build"])?;
-            let build = f.value("--build").ok_or("live needs --build SHA")?;
             ask(Request::Live {
-                build: sha(build)?,
+                build: f.value("--build").map(sha).transpose()?,
                 trial: f.has("--trial"),
                 dry_run: f.has("--dry-run"),
             })
@@ -367,7 +368,7 @@ mod tests {
         assert_eq!(
             ask(&["live", "--trial", "--build", SHA]),
             Request::Live {
-                build: SHA.into(),
+                build: Some(SHA.into()),
                 trial: true,
                 dry_run: false
             }
@@ -375,7 +376,7 @@ mod tests {
         assert_eq!(
             ask(&["live", "--build", SHA, "--dry-run"]),
             Request::Live {
-                build: SHA.into(),
+                build: Some(SHA.into()),
                 trial: false,
                 dry_run: true
             }
@@ -485,8 +486,19 @@ mod tests {
             err(&["dev", "--build", "abc"]),
             "\"abc\" is not a 40-digit lowercase commit SHA"
         );
-        assert_eq!(err(&["live"]), "live needs --build SHA");
-        assert_eq!(err(&["live", "--trial"]), "live needs --build SHA");
+        // S8 lane 2: the build is the guard's to require (before the
+        // cutover always; in prod `live` runs the pin).
+        for (args, trial) in [(&["live"][..], false), (&["live", "--trial"][..], true)] {
+            assert_eq!(
+                parse(&args.iter().map(|a| (*a).to_owned()).collect::<Vec<_>>()),
+                Ok(Cli::Ask(Request::Live {
+                    build: None,
+                    trial,
+                    dry_run: false
+                })),
+                "{args:?}"
+            );
+        }
         assert_eq!(
             err(&["live", "--build", &SHA.to_uppercase()]),
             format!(

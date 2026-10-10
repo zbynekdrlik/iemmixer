@@ -44,8 +44,11 @@ pub enum Request {
         build: Option<String>,
         dry_run: bool,
     },
+    /// Before the cutover `build` is required (a trial on a green `main`
+    /// build); in prod it is optional and defaults to the pin (S8 lane 2).
+    /// An older iemmode's string reads as `Some`.
     Live {
-        build: String,
+        build: Option<String>,
         trial: bool,
         dry_run: bool,
     },
@@ -361,7 +364,7 @@ mod tests {
                 dry_run: false,
             },
             Request::Live {
-                build: "0123456789abcdef0123456789abcdef01234567".into(),
+                build: Some("0123456789abcdef0123456789abcdef01234567".into()),
                 trial: true,
                 dry_run: false,
             },

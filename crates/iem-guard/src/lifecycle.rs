@@ -207,8 +207,8 @@ pub const ROLLING_BACK: &str = "a rollback to REAPER runs: no dev or live entry 
 /// `Trial`: dev on any build; live only a trial, on a green `main` build
 /// ([`may_go_live`]). `Prod`: no trial; dev is maintenance (with a build,
 /// the session's build); live ends maintenance and runs the pin
-/// ([`Prod::end_maintenance`]), so its build must be that pin.
-/// `RollingBack`: none.
+/// ([`Prod::end_maintenance`]): without a build it runs the pin, a build
+/// must be that pin. `RollingBack`: none.
 pub fn entry<'r>(
     lc: &Lifecycle,
     ask: Ask<'_>,
@@ -262,7 +262,7 @@ pub fn entry<'r>(
             if let Some(why) = pin_refusal(&next.pin, &record) {
                 return Err(format!("in prod live runs the pin, and {why}"));
             }
-            if ask.build != Some(next.pin.as_str()) {
+            if ask.build.is_some_and(|b| b != next.pin) {
                 let why = note.map_or_else(String::new, |n| format!(" ({n})"));
                 return Err(format!(
                     "in prod live runs the pin {pin}{why}: live --build {pin}",

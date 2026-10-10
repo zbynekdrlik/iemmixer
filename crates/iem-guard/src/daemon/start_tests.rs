@@ -198,7 +198,7 @@ fn a_dev_routed_during_the_start_checks_is_queued_and_runs_after_them() {
     let routed = std::thread::spawn(move || {
         await_running(&shared);
         let live = Request::Live {
-            build: SHA.into(),
+            build: Some(SHA.into()),
             trial: false,
             dry_run: false,
         };
