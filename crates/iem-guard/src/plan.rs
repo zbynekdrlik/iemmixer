@@ -4,8 +4,17 @@
 //! it acts, so re-running a plan is safe; a failed or interrupted switch into
 //! dev/live unwinds with `plan(Mode::Event, facts)`. The mode it starts
 //! from changes nothing: the facts say what runs.
+//!
+//! Its parts: `policy.rs` (the error policy: `on_error`) and
+//! `activation.rs` (what `activate` does per mode).
 
 use serde::{Deserialize, Deserializer, Serialize};
+
+mod activation;
+mod policy;
+
+pub use self::activation::{Activation, Busy, activation};
+pub use self::policy::{Health, OnError, PrefFail, on_error};
 
 /// What the PC runs: REAPER and the predecessor app (`event`), or iemmixer
 /// (`dev` before cutover, `live` after it or as a trial). After a reboot the
@@ -228,143 +237,6 @@ pub fn plan(to: Mode, f: &Facts) -> Vec<Step> {
         }
     }
     out
-}
-
-/// `[guard] on_pref_fail`: required in the site, decided on #9
-/// (`start_reaper_with_alarm`, 2026-09-27).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PrefFail {
-    StartReaperWithAlarm,
-    KeepReaperDown,
-}
-
-/// The engine as read over the supervisor pipe after a failed release.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Health {
-    /// Callbacks advancing, not faulted, not parked: it still serves the band.
-    Healthy,
-    Dead,
-    Parked,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OnError {
-    /// Into dev/live: alarm, then the event plan.
-    Unwind,
-    /// Event plan: alarm and go on with the next step.
-    Continue,
-    /// Event plan: alarm with the prepared ❓ and drop these later steps
-    /// (they would act on a stale process); the switch ends `needs_owner`,
-    /// never `done` (#10: a failed app stop leaves no app serving).
-    SkipAskOwner(&'static [Step]),
-    /// Event plan: iemmixer keeps serving the band; alarm; the plan ends here.
-    KeepServing,
-    /// Event plan: alarm, the plan ends here, the agent sends the prepared ❓.
-    StopAskOwner,
-    /// Event plan: alarm with the prepared ❓ and go on with the next step
-    /// (the band keeps what still works); the switch ends `needs_owner`,
-    /// never `done` (#10: a failed REAPER or app handover).
-    ContinueAskOwner,
-}
-
-/// What a failed step means. `health` is read only after a failed `EngineStop`.
-/// Every failure of a dev or live entry unwinds, its `PrefCheck` before the
-/// engine included; `on_pref_fail` is the event plan's rule only. A failed
-/// REAPER handover (REAPER could not be made to run, or a check failed)
-/// asks the owner and goes on to the app, as it went on before #10, but the
-/// switch no longer ends `done` (2026-10-08: it did, in event without
-/// REAPER). An event switch that ends without the predecessor app serving
-/// is not done either (the coordinator's decision on #10, 2026-10-08:
-/// REAPER keeps playing the band's mixes, but the phones cannot change
-/// them): a failed app handover asks the owner and goes on; a failed app
-/// stop skips the app start (the old app may still run) and asks the owner,
-/// since the event plan stops only an app that does not serve.
-pub fn on_error(to: Mode, step: Step, health: Option<Health>, pref_fail: PrefFail) -> OnError {
-    if to != Mode::Event {
-        return OnError::Unwind;
-    }
-    match step {
-        Step::EngineStop | Step::EngineHealth => match health {
-            Some(Health::Healthy) => OnError::KeepServing,
-            _ => OnError::StopAskOwner,
-        },
-        Step::PrefCheck => match pref_fail {
-            PrefFail::StartReaperWithAlarm => OnError::Continue,
-            PrefFail::KeepReaperDown => OnError::StopAskOwner,
-        },
-        Step::HolderGone | Step::ReaperSaveQuit | Step::ReaperStart => OnError::StopAskOwner,
-        Step::ReaperHandover | Step::AppHandover => OnError::ContinueAskOwner,
-        Step::AppStop => OnError::SkipAskOwner(&[Step::AppStart]),
-        _ => OnError::Continue,
-    }
-}
-
-/// What the guard has going on when `activate` arrives.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Busy {
-    /// A switch is persisted as unfinished.
-    pub switching: bool,
-    /// The HIL job that began and has not ended.
-    pub job: Option<u64>,
-}
-
-/// What `activate <sha>` does (design §5.5; #9 2026-09-28).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Activation {
-    /// The bundle's guard and `iemmode` into `bin\`, the pin, its Defender
-    /// exclusions, then the hand-over to a changed guard exe.
-    Files,
-    /// Dev inside a HIL job: the same, with the engine and the server
-    /// started again from the new bundle before the hand-over.
-    FilesThenJobRestart,
-    /// Nothing is done, for this reason.
-    Refused(String),
-}
-
-/// `activate` per mode. In `dev` as always. In `event` only while the
-/// guard runs none of iemmixer's processes (in event it has none) and no
-/// switch or HIL job waits: then it only copies files and hands over, and
-/// REAPER and the predecessor app are never touched (in event the guard
-/// only reads them). This is how a guard fix reaches a guard in event,
-/// whose own code may refuse the dev entry. In `live` never: `live
-/// --build` activates its bundle.
-pub fn activation(mode: Mode, f: &Facts, busy: Busy) -> Activation {
-    match mode {
-        Mode::Dev if busy.job.is_some() => Activation::FilesThenJobRestart,
-        Mode::Dev => Activation::Files,
-        Mode::Live => Activation::Refused(
-            "activate is for dev and an idle event; the mode is live \
-             (live --build activates its bundle)"
-                .to_owned(),
-        ),
-        Mode::Event => idle_event(f, busy).map_or(Activation::Files, Activation::Refused),
-    }
-}
-
-/// Why an event guard is not idle enough to activate, if it is not.
-fn idle_event(f: &Facts, busy: Busy) -> Option<String> {
-    let running: Vec<&str> = [
-        (f.engine, "engine"),
-        (f.server, "server"),
-        (f.tray, "tray"),
-        (f.runner, "runner"),
-    ]
-    .into_iter()
-    .filter_map(|(runs, name)| runs.then_some(name))
-    .collect();
-    if !running.is_empty() {
-        return Some(format!(
-            "activate in event needs no iemmixer process; running: {}",
-            running.join(", ")
-        ));
-    }
-    if busy.switching {
-        return Some("a switch is in progress: activate waits for its end".to_owned());
-    }
-    busy.job
-        .map(|run| format!("HIL job {run} runs: activate waits for its end"))
 }
 
 #[cfg(test)]

@@ -1,3 +1,6 @@
+//! The planner and its error policy (`plan.rs`, `plan/policy.rs`), every
+//! combination of facts; the fixtures the activation tests share.
+
 use super::*;
 
 fn at(p: &[Step], s: Step) -> Option<usize> {

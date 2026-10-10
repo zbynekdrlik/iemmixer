@@ -1,3 +1,5 @@
+//! `activate` per mode (`plan/activation.rs`), every combination of facts.
+
 use super::tests::{band_up, iemmixer_up};
 use super::*;
 
