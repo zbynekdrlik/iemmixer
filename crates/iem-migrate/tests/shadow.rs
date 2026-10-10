@@ -239,6 +239,19 @@ fn bad_inputs_fail_and_name_why() {
     assert!(e.msg.contains("not a state directory"), "{}", e.msg);
 }
 
+/// A state directory that cannot be looked at (here a path through a file:
+/// `ENOTDIR`, where Windows says "not found") fails, never reads as nothing
+/// saved.
+#[cfg(unix)]
+#[test]
+fn a_state_directory_that_cannot_be_looked_at_fails() {
+    let w = World::new(8);
+    let file = w.path("state-file");
+    std::fs::write(&file, "x").unwrap();
+    let e = run(&w.args("shadow", &file.join("state"))).unwrap_err();
+    assert_eq!(e.code, EXIT_IO, "{}", e.msg);
+}
+
 #[test]
 fn the_binary_prints_the_report_on_stdout() {
     let w = World::new(7);
