@@ -300,14 +300,33 @@ fn export(pc: &mut dyn Pc, g: &mut Guard, at: u64, notes: &mut Vec<String>) -> D
 }
 
 /// The export in the project's place while REAPER is down; a swap that
-/// fails puts the original back (noted).
+/// fails puts the original back (noted). A REAPER that runs (the unwind of
+/// a dev or live entry the button cancelled started it on the original,
+/// S8 lane 5) is saved and quit gracefully first, as the `Reaper` step's
+/// fallback does; one that does not quit keeps running on the original
+/// (noted), and the `Reaper` step's event plan finds it there.
 fn project(pc: &mut dyn Pc, g: &mut Guard, run: &rollback::Run, notes: &mut Vec<String>) -> Did {
     if !run.exported {
         return Did::Done;
     }
     if pc.facts().reaper {
-        notes.push("REAPER already runs: the export does not take the project's place".to_owned());
-        return Did::Done;
+        // Not pre-empted: REAPER must be quit before the files move.
+        let quit = pc.reaper_save_quit(&Cancel::default());
+        if let Err(e) = quit {
+            notes.push(format!(
+                "REAPER runs and could not be quit ({e}): the export does not take the project's \
+                 place"
+            ));
+            return Did::Done;
+        }
+        g.info("REAPER ran on the original project: saved and quit before the swap");
+        if pc.facts().reaper {
+            notes.push(
+                "REAPER still runs after its quit: the export does not take the project's place"
+                    .to_owned(),
+            );
+            return Did::Done;
+        }
     }
     let placed = match pc.swap_project(Want::Export, run.at) {
         Ok(p) => Ok(p),
