@@ -76,46 +76,53 @@ entry the guard makes by itself (rehearse-teardown's re-entry)."""
 from __future__ import annotations
 
 import argparse
-import contextlib
-import datetime as dt
 import hashlib
 import json
 import os
 import re
 import shutil
-import subprocess
 import sys
 import time
 import zipfile
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterator
+from typing import Callable
 
 import iempc_bin
+import iempc_core as core
 import iempc_live
 import iempc_soak
 import iempc_sshshell
 import iempc_switch
 import iempc_trace
 import iempc_tuning
+from iempc_core import (BOOTSTRAP_S, BRANCHES, INSTALL_S, OPS_REPO, REPO, SHA, SPIKE_DIR, STATUS_S, SWITCH_S, Ctx,
+                        EventNow, Refused, StepError, StillRunning, call, check_sha, current_entry, emit, event_now,
+                        guarded, hash_check, iemmode, load_env, next_entry, pause, pc_join, pc_mkdir, ps_quote,
+                        read_json, refuse_open_window, remote, result, run_module, spike_module, spike_window_open,
+                        spike_window_settling, state_dir, state_lock, write_json)
 
-HERE = Path(__file__).resolve().parent
-SPIKE_DIR = HERE.parent / "asio-spike"
+# The modules iempc.py is split into (#36). `iempc.<name>` reads any of their
+# names live (PEP 562), so siblings handed this module (`ip`) and the tests
+# reach the one binding a test patches, never a copy of it.
+SPLIT = (core,)
+
+
+def __getattr__(name: str):
+    for module in SPLIT:
+        if name in vars(module):
+            return vars(module)[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 SPIKE = SPIKE_DIR / "spike_window.py"
-REPO = "zbynekdrlik/iemmixer"
-OPS_REPO = "zbynekdrlik/iemmixer-ops"
 CI_WORKFLOW = "ci.yml"
 HIL_WORKFLOW = "hil.yml"
-BRANCHES = ("dev", "main")
-REQUIRED = ("PC_SSH", "PC_ROOT", "PC_ROOT_SCP")
 # The bundle job's files (plan Task 12); the guard's install checks the same set.
 BUNDLE_REQUIRED = (
     "iem-engine.exe", "iem-server.exe", "iemmixer-guard.exe", "iemmode.exe", "iem-tray.exe", "iem-migrate.exe",
     "hil-v1.ps1", "IemPc.psm1", "manifest.json",
 )
-SHA = re.compile(r"[0-9a-f]{40}")
-HEX64 = re.compile(r"[0-9a-f]{64}")
 # A bundle member: a file name, or one directory level (`tuning/<name>`).
 MEMBER = re.compile(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)?")
 SUMS_LINE = re.compile(r"([0-9a-f]{64})  (\S+)")
@@ -124,23 +131,14 @@ READ_ONLY_VERBS = ("Get", "Test")
 PARAM_NAME = re.compile(r"-[A-Za-z][A-Za-z0-9]*")
 RUNNER_FUNCTION = "Register-IemRunner"
 RUNNER_TOKEN = re.compile(r"[A-Za-z0-9]{20,200}")
-# PowerShell ends a single-quoted string at any of these; each is doubled inside one.
-PS_SINGLE_QUOTES = "'\u2018\u2019\u201a\u201b"
 GUARD_UNREACHABLE = 4
 PREEMPTED = 10
-POLL_S = 2.0
-STATUS_S = 120
-SWITCH_S = 540
-INSTALL_S = 540
-BOOTSTRAP_S = 540
-SCP_S = 540
 # The event path, all of it: one Bash call ends at 10 min, the plan's waits stay within 9.
 EVENT_BUDGET_S = 540
 # spike_window.py preempt's part of it (its bring-back starts REAPER itself).
 SPIKE_SHARE_S = 360
 # An iemmode call of the event path never starts with less than this left.
 SWITCH_MIN_S = 120
-GH_S = 120
 DOWNLOAD_S = 540
 # After `iemmode activate`: the old guard's last reply and exit, the new exe's mutex (<= 10 s) and pipe
 # (<= 10 s), and iemmode's own start of the guard task (<= 15 s) when it reads in between.
@@ -153,70 +151,22 @@ QUIT_S = 60
 # What reading a zip member can raise besides StepError: bad JSON or UTF-8, a
 # CRC error, a cut or corrupt deflate stream, an unknown compression method.
 UNREADABLE = (ValueError, EOFError, NotImplementedError, zipfile.BadZipFile, zlib.error)
-EVENT_NOW = Path(os.environ.get("IEMMIXER_EVENT_NOW", str(Path.home() / ".config/iemmixer/EVENT-NOW")))
-STATE_DIR = Path(os.environ.get("IEMPC_STATE", str(Path.home() / ".local/share/iemmixer/iem-pc")))
-SPIKE_STATE = Path(os.environ.get("SPIKE_STATE", str(Path.home() / ".local/state/iemmixer/spike-window.json")))
 OWNER_ALARM = ("iempc: the event path did not complete: alarm the owner now with the prepared question (ops runbook "
                "docs/s6-pc-runbook.md); before the guard is installed, the interim switch (event runbook) applies; the "
                "last resort is the owner's reboot, which comes back in event mode. Never force-end anything.")
 
 
-class StepError(Exception):
-    """A step failed; the message says what to do next."""
-
-
-class Refused(StepError):
-    """Refused before anything was touched (no event path follows)."""
-
-
-class StillRunning(StepError):
-    """A call outlived its bound and was left running (never force-ended)."""
-
-
-class EventNow(Exception):
-    """The owner said "ide event" (the flag file appeared): pre-empt."""
-
-
 # ---- env, flag, output ----
-
-def env_path() -> Path:
-    return Path(os.environ.get("PC_ENV", str(Path.home() / ".config/iemmixer/iem-pc.env")))
-
-
-def load_env(path: Path) -> dict[str, str]:
-    if not path.is_file():
-        raise StepError(f"{path}: missing (private env, ops runbook docs/s6-pc-runbook.md)")
-    env: dict[str, str] = {}
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        key, sep, value = line.partition("=")
-        if not sep:
-            raise StepError(f"{path}: not KEY=VALUE: {key}")
-        env[key.strip()] = value.strip().strip('"')
-    missing = [k for k in REQUIRED if not env.get(k)]
-    if missing:
-        raise StepError(f"{path}: missing {', '.join(missing)}")
-    if env["PC_SSH"].startswith("-"):
-        raise StepError(f"{path}: PC_SSH must be an ssh destination, not an option")
-    if not env.get("PC_BIN"):
-        env["PC_BIN"] = pc_join(env["PC_ROOT"], "bin")
-    return env
-
-
-def event_now() -> bool:
-    return EVENT_NOW.exists()
 
 
 def ensure_flag() -> bool:
     """Writes the "ide event" flag (`date -Iseconds`) unless it exists; True when written."""
     if event_now():
         return False
-    EVENT_NOW.parent.mkdir(parents=True, exist_ok=True)
+    core.EVENT_NOW.parent.mkdir(parents=True, exist_ok=True)
     try:
-        with open(EVENT_NOW, "x", encoding="utf-8") as f:
-            f.write(now_iso() + "\n")
+        with open(core.EVENT_NOW, "x", encoding="utf-8") as f:
+            f.write(core.now_iso() + "\n")
     except FileExistsError:
         return False
     return True
@@ -228,379 +178,18 @@ def write_flag() -> None:
     try:
         written = ensure_flag()
     except OSError as e:
-        print(f"iempc: WARNING: the flag {EVENT_NOW} was not written ({e}); the event path goes on; write the flag by "
+        print(f"iempc: WARNING: the flag {core.EVENT_NOW} was not written ({e}); the event path goes on; write the flag by "
               "hand so no dev-time command runs", file=sys.stderr, flush=True)
-        emit({"flag": str(EVENT_NOW), "written": False, "error": str(e)})
+        emit({"flag": str(core.EVENT_NOW), "written": False, "error": str(e)})
         return
     if written:
-        emit({"flag": str(EVENT_NOW), "written": True})
-
-
-def now_iso() -> str:
-    return dt.datetime.now().astimezone().isoformat(timespec="seconds")
+        emit({"flag": str(core.EVENT_NOW), "written": True})
 
 
 def event_clock() -> float:
     """The event path's one clock (its budget, each call's share); the tests
     run the path on a fake one, so no branch depends on this process's speed."""
     return time.monotonic()
-
-
-def emit(obj: dict) -> None:
-    print(json.dumps(obj, ensure_ascii=False), flush=True)
-
-
-def check_sha(text: str) -> str:
-    if not SHA.fullmatch(text or ""):
-        raise Refused(f"not a full commit SHA (40 lowercase hex): {text!r}")
-    return text
-
-
-# ---- waits (the EVENT-NOW discipline of spike_window.py) ----
-
-def guarded(cmd: list[str], stdin: str, timeout: float, event: str) -> str:
-    """Runs `cmd` and checks the "ide event" flag every POLL_S seconds.
-    event="abandon": a read-only call is left to end by itself and EventNow
-    is raised at once; "finish": a changing call completes, then EventNow;
-    "ignore": the pre-emption itself, or a read-only call started while the
-    flag already existed. A flag seen once counts even when it is gone by the
-    end. Past `timeout` the call is left running and StillRunning is raised.
-    Never ends anything by force."""
-    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                            encoding="utf-8", errors="replace")
-    deadline = time.monotonic() + timeout
-    seen = False
-    data: str | None = stdin
-    while True:
-        try:
-            out, err = proc.communicate(data, timeout=POLL_S)
-            break
-        except subprocess.TimeoutExpired:
-            data = None  # already handed over; a retry must not send it again
-            if event != "ignore" and event_now():
-                seen = True
-                if event == "abandon":
-                    raise EventNow() from None
-            if time.monotonic() > deadline:
-                raise StillRunning(f"{Path(cmd[0]).name} still running after {timeout} s (bounded on the PC; "
-                                   "check 'iempc status', never force-end)") from None
-    if proc.returncode != 0:
-        raise StepError(f"{Path(cmd[0]).name} failed (exit {proc.returncode}): {err.strip()[-1500:]}")
-    if event != "ignore" and (seen or event_now()):
-        raise EventNow()
-    return out
-
-
-@dataclass(frozen=True)
-class Ctx:
-    env: dict[str, str]
-    args: argparse.Namespace
-    flag_at_start: bool
-
-    def watch(self, abandon: bool) -> str:
-        """How a wait reacts to the flag: only a flag that appears after the
-        command started pre-empts it (changing commands refuse an existing
-        one). "abandon" for a read-only call or a switch the guard owns (the
-        guard goes on without its client and pre-empts itself within 1 s when
-        `iemmode event` arrives); "finish" for a change the call makes itself
-        (a copy, an install, a bootstrap step)."""
-        if self.flag_at_start:
-            return "ignore"
-        return "abandon" if abandon else "finish"
-
-
-# ---- the PC: ssh, scp, PowerShell ----
-
-def ps_quote(value: str) -> str:
-    out = "".join(c + c if c in PS_SINGLE_QUOTES else c for c in value)
-    return "'" + out + "'"
-
-
-def pc_join(base: str, rel: str) -> str:
-    return base.rstrip("\\") + "\\" + rel.replace("/", "\\")
-
-
-def remote(env: dict[str, str], rel: str) -> str:
-    return f"{env['PC_SSH']}:{env['PC_ROOT_SCP'].rstrip('/')}/{rel}"
-
-
-def ssh_cmd(env: dict[str, str]) -> list[str]:
-    """Windows PowerShell by its full path (elevated_ps.REMOTE, #15)."""
-    return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", env["PC_SSH"], elevated_ps().REMOTE]
-
-
-def ssh_ps(env: dict[str, str], script: str, timeout: float, event: str) -> str:
-    """Sends `script` (complete single-line statements: `-Command -` reads
-    stdin line by line) and returns the PC's stdout."""
-    return guarded(ssh_cmd(env), script + "\n", timeout, event)
-
-
-def scp(src: str, dst: str, event: str) -> None:
-    guarded(["scp", "-q", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", src, dst], "", SCP_S, event)
-
-
-def ps_args(args: list[str]) -> str:
-    for a in args:
-        if '"' in a or any(ord(c) < 32 for c in a):
-            raise StepError(f"argument not allowed on the PC: {a!r}")
-    return "@(" + ", ".join(ps_quote(a) for a in args) + ")"
-
-
-def hash_check(path: str, hexd: str) -> str:
-    """A PowerShell statement that throws unless `path` has this sha256."""
-    if not HEX64.fullmatch(hexd):
-        raise StepError(f"not a sha256: {hexd!r}")
-    q = ps_quote(path)
-    return (f"if ((Get-FileHash -LiteralPath {q} -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() -ne "
-            f"'{hexd}') {{ throw ('sha256 mismatch: ' + {q}) }}")
-
-
-def native_script(exe: str, args: list[str], checks: tuple[str, ...] = (), then: str = "") -> str:
-    """Runs a native program and prints {exit, out, err, note} as the last line;
-    `exit` is null when the program did not start (or a check threw). `then`
-    runs once $x and $a are set and may point $x elsewhere (iempc_bin: the
-    admin-only copy, `note` saying why not, #15). PSModulePath is pinned
-    before the first command (elevated_ps.PIN, #15)."""
-    pre = "".join(c + " ; " for c in checks)
-    return "\n".join([
-        "$ErrorActionPreference = 'Continue'",
-        "$ProgressPreference = 'SilentlyContinue'",
-        f"{elevated_ps().PIN} ; try {{ {pre}$x = {ps_quote(exe)} ; $a = {ps_args(args)} ; {then}$r = @(& $x @a 2>&1) ; "
-        "$c = $LASTEXITCODE ; "
-        "$out = @($r | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] } | ForEach-Object { \"$_\" }) -join \"`n\" ; "
-        "$err = @($r | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } | ForEach-Object { $_.Exception.Message }) -join \"`n\" ; "
-        "$o = [pscustomobject]@{ exit = $c; out = $out; err = $err; note = $iemNote } } "
-        "catch { $o = [pscustomobject]@{ exit = $null; out = ''; err = \"$_\"; note = $iemNote } } ; "
-        "ConvertTo-Json -InputObject $o -Compress",
-    ])
-
-
-def elevated_ps():
-    """scripts/asio-spike/elevated_ps.py (#15): the module path pin and the
-    remote command every ssh call uses, the stage, the admin-only folders and
-    TEMP of an elevated ssh session. Loaded at the first PC call, never at
-    import: a module of constants and string composers that imports only `re`,
-    and no other S1a/S1c code reaches the event path."""
-    if str(SPIKE_DIR) not in sys.path:
-        sys.path.insert(0, str(SPIKE_DIR))
-    import elevated_ps as ep
-    return ep
-
-
-def module_script(body: str, module: str | None = None, module_hex: str | None = None, pre: str = "", fin: str = "",
-                  elevated_root: str | None = None) -> str:
-    """Runs `body` and prints {ok, r} or {ok: false, error} as the last line.
-    `module`: a module this box uploaded into a run folder of the user's root
-    (a bundle's IemPc.psm1): its bytes are read once and checked by
-    `module_hex`, staged admin-only under the elevated root, checked again
-    there and imported only from there (#15, elevated_ps.staged_import).
-    `elevated_root`: another elevated root than the PC's (the CI self-test).
-    PSModulePath is pinned before the first command (elevated_ps.PIN, #15)."""
-    ep = elevated_ps()
-    load = ""
-    if module is not None:
-        if not HEX64.fullmatch(module_hex or ""):
-            raise StepError(f"not a sha256: {module_hex!r}")
-        root = ep.ROOT if elevated_root is None else ps_quote(elevated_root)
-        load = ep.staged_import(ps_quote(module), module.rsplit("\\", 1)[-1], module_hex, root) + " ; "
-    tail = f" finally {{ {fin} }}" if fin else ""
-    return "\n".join([
-        "$ErrorActionPreference = 'Stop'",
-        "$ProgressPreference = 'SilentlyContinue'",
-        f"{ep.PIN} ; try {{ {pre}{load}$r = & {{ {body} }} ; $o = [pscustomobject]@{{ ok = $true; r = $r }} }} "
-        f"catch {{ $o = [pscustomobject]@{{ ok = $false; error = \"$_\" }} }}{tail} ; "
-        "ConvertTo-Json -InputObject $o -Depth 8 -Compress",
-    ])
-
-
-def last_json(text: str) -> dict:
-    lines = [line for line in text.splitlines() if line.strip()]
-    if not lines:
-        raise StepError("no output from the PC")
-    try:
-        doc = json.loads(lines[-1].lstrip("\ufeff"))
-    except ValueError:
-        raise StepError(f"the PC's last line is not JSON: {lines[-1][-300:]!r}") from None
-    if not isinstance(doc, dict):
-        raise StepError(f"the PC's last line is not a JSON object: {lines[-1][-300:]!r}")
-    return doc
-
-
-def run_native(env: dict[str, str], exe: str, args: list[str], timeout: float, event: str,
-               checks: tuple[str, ...] = (), then: str = "") -> dict:
-    doc = last_json(ssh_ps(env, native_script(exe, args, checks, then), timeout, event))
-    code = doc.get("exit")
-    if code is not None and not isinstance(code, int):
-        raise StepError(f"the PC reported a non-numeric exit code: {code!r}")
-    if doc.get("note"):
-        iempc_bin.noted(str(doc["note"]))
-    return {"exit": code, "out": doc.get("out") or "", "err": doc.get("err") or ""}
-
-
-def run_module(env: dict[str, str], body: str, timeout: float, event: str, **kw):
-    doc = last_json(ssh_ps(env, module_script(body, **kw), timeout, event))
-    if doc.get("ok") is not True:
-        raise StepError(f"PC step failed: {doc.get('error')}")
-    return doc.get("r")
-
-
-def parse_reply(text: str) -> dict:
-    """iemmode prints one JSON object (compact or indented)."""
-    t = text.lstrip("\ufeff").strip()
-    if not t:
-        raise StepError("iemmode printed nothing")
-    try:
-        doc = json.loads(t)
-    except ValueError:
-        try:
-            doc = json.loads(t.splitlines()[-1])
-        except ValueError:
-            raise StepError(f"the iemmode reply is not JSON: {t[-300:]!r}") from None
-    if not isinstance(doc, dict):
-        raise StepError(f"the iemmode reply is not a JSON object: {t[-300:]!r}")
-    return doc
-
-
-def owner_alarms(reply: dict | None) -> list[dict]:
-    """Alarms the agent turns into the prepared owner question (not yet acknowledged).
-
-    The guard's Alarm serializes its acknowledgement as `acked`.
-    """
-    if not reply or not isinstance(reply.get("alarms"), list):
-        return []
-    return [a for a in reply["alarms"] if isinstance(a, dict) and a.get("owner_question") is True and not a.get("acked")]
-
-
-def call(env: dict[str, str], exe: str, args: list[str], timeout: float, event: str,
-         checks: tuple[str, ...] = (), json_reply: bool = True, then: str = "") -> tuple[int, dict | None, dict]:
-    raw = run_native(env, exe, args, timeout, event, checks, then)
-    if raw["exit"] is None:
-        name = exe.rsplit("\\", 1)[-1]
-        raise StepError(f"{name} did not run on the PC: {raw['err'][-800:]}")
-    code = raw["exit"]
-    reply = None
-    if json_reply:
-        try:
-            reply = parse_reply(raw["out"])
-        except StepError:
-            if code == 0:
-                raise
-    for alarm in owner_alarms(reply):
-        print("OWNER QUESTION (send the prepared question from the ops runbook): " + json.dumps(alarm, ensure_ascii=False),
-              file=sys.stderr, flush=True)
-    return code, reply, raw
-
-
-def iemmode(env: dict[str, str], args: list[str], timeout: float, event: str,
-            checks: tuple[str, ...] = ()) -> tuple[int, dict | None, dict]:
-    """iemmode from the admin-only bin while the guard last seen runs its
-    build and it reads back, else PC_BIN's (#15, iempc_bin); the reply's
-    guard_build is what the next call compares."""
-    code, reply, raw = call(env, pc_join(env["PC_BIN"], "iemmode.exe"), args, timeout, event, checks,
-                            then=iempc_bin.pick(sys.modules[__name__]))
-    iempc_bin.seen(sys.modules[__name__], reply)
-    return code, reply, raw
-
-
-def result(label: str, args: list[str], code: int, reply: dict | None, raw: dict) -> dict:
-    out: dict = {label: args, "exit": code, "reply": reply}
-    if reply is None:
-        out["output"] = raw["out"][-2000:]
-    if raw["err"]:
-        out["stderr"] = raw["err"][-2000:]
-    return out
-
-
-# ---- dev-box state ($STATE, chmod 700) ----
-
-def state_dir() -> Path:
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    os.chmod(STATE_DIR, 0o700)
-    return STATE_DIR
-
-
-def read_json(path: Path, default):
-    """A state file of this box: absent → `default`; anything but a JSON object is an error."""
-    if not path.is_file():
-        return default
-    try:
-        doc = json.loads(path.read_text(encoding="utf-8"))
-    except ValueError:
-        doc = None
-    if not isinstance(doc, dict):
-        raise StepError(f"{path}: not a JSON object; check it by hand")
-    return doc
-
-
-def write_json(path: Path, doc) -> None:
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(doc, indent=1), encoding="utf-8")
-    os.chmod(tmp, 0o600)
-    tmp.replace(path)
-
-
-@contextlib.contextmanager
-def state_lock(take: bool) -> Iterator[None]:
-    """One changing command at a time on this box; `event` never takes it."""
-    if not take:
-        yield
-        return
-    import fcntl   # the dev box's lock; the Windows CI runner imports this module only to compose (Test-IemStage.ps1)
-    with open(state_dir() / "iempc.lock", "a+", encoding="utf-8") as f:
-        try:
-            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise Refused("another iempc command runs on this box; wait for it ('iempc event' never waits)") from None
-        yield
-
-
-def current_entry() -> int:
-    """The dev entry: counted up by every successful `iempc dev` and
-    switch-test dev leg (0 before the first). Known limit: the guard also
-    enters dev by itself (rehearse-teardown's re-entry), which this box never
-    sees, so "once per SHA per dev entry" means per `iempc dev` or
-    switch-test dev leg until the guard's status exposes a dev-entry id to
-    key the dispatch record on."""
-    return int(read_json(state_dir() / "entry.json", {}).get("entry", 0))
-
-
-def next_entry(build: str | None) -> int:
-    n = current_entry() + 1
-    write_json(state_dir() / "entry.json", {"entry": n, "build": build, "at": now_iso()})
-    return n
-
-
-def spike_window_open() -> bool:
-    """An S1a/S1c window is open (spike_window.py's state file); an
-    unreadable state counts as open, so the spike tool decides."""
-    if not SPIKE_STATE.is_file():
-        return False
-    try:
-        state = json.loads(SPIKE_STATE.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return True
-    return not (isinstance(state, dict) and state.get("closed") is True)
-
-
-def spike_window_settling() -> bool:
-    """A closed S1a/S1c window whose preempt (or to-event) still watches a PC
-    change that was in flight (spike_window's settle, without the lock): its
-    `settling` record is there and its bound not over. `spike_window.py
-    preempt` waits for that watch, so iemmode event never starts the guard's
-    bring-back next to the settle's (review of lane G2, finding 1)."""
-    try:
-        state = json.loads(SPIKE_STATE.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return False
-    s = state.get("settling") if isinstance(state, dict) else None
-    return isinstance(s, dict) and isinstance(s.get("until"), (int, float)) and time.time() <= s["until"]
-
-
-def refuse_open_window(cmd: str) -> None:
-    """The card goes to the guard only after the S1a/S1c window handed it over."""
-    if spike_window_open():
-        raise Refused(f"an S1a/S1c spike window is open ({SPIKE_STATE}): '{cmd}' waits until 'iempc handover-s1a' "
-                      "has handed the card over")
 
 
 # ---- bundles (P5: a green push run on dev/main, attested by digest) ----
@@ -688,20 +277,6 @@ def verify_zip(path: Path, sha: str, branch: str, run: int) -> dict[str, str]:
     return sums
 
 
-def gh(args: list[str], timeout: float = GH_S) -> str:
-    """The dev box's gh (its own authentication); dev-box work only."""
-    try:
-        proc = subprocess.run(["gh", *args], capture_output=True, text=True, timeout=timeout, check=False)
-    except FileNotFoundError:
-        raise StepError("gh is not installed on this box") from None
-    except subprocess.TimeoutExpired:
-        raise StepError(f"gh {' '.join(args[:2])}: no answer within {timeout} s") from None
-    if proc.returncode != 0:
-        hint = " (this gh has no 'attestation' command: install gh >= 2.49)" if "unknown command" in proc.stderr else ""
-        raise StepError(f"gh {' '.join(args[:2])} failed (exit {proc.returncode}){hint}: {proc.stderr.strip()[-800:]}")
-    return proc.stdout
-
-
 def pick_runs(runs: list[dict], sha: str, branches: tuple[str, ...]) -> list[dict]:
     """Successful push runs of exactly `sha` on the allowed branches (P5)."""
     return [r for r in runs if r.get("headSha") == sha and r.get("event") == "push"
@@ -713,10 +288,10 @@ def job_ok(jobs: list[dict], name: str) -> bool:
 
 
 def green_run(sha: str, branches: tuple[str, ...]) -> tuple[int, str]:
-    listing = gh(["run", "list", "-R", REPO, "--workflow", CI_WORKFLOW, "--event", "push", "--commit", sha,
+    listing = core.gh(["run", "list", "-R", REPO, "--workflow", CI_WORKFLOW, "--event", "push", "--commit", sha,
                   "--limit", "20", "--json", "databaseId,headSha,event,headBranch,conclusion"])
     for r in pick_runs(json.loads(listing or "[]"), sha, branches):
-        jobs = json.loads(gh(["run", "view", str(r["databaseId"]), "-R", REPO, "--json", "jobs"])).get("jobs") or []
+        jobs = json.loads(core.gh(["run", "view", str(r["databaseId"]), "-R", REPO, "--json", "jobs"])).get("jobs") or []
         if job_ok(jobs, "bundle") and job_ok(jobs, "attest"):
             return int(r["databaseId"]), r["headBranch"]
     raise StepError(f"no green push run of {CI_WORKFLOW} on {'/'.join(branches)} for {sha} with its 'bundle' and "
@@ -724,7 +299,7 @@ def green_run(sha: str, branches: tuple[str, ...]) -> tuple[int, str]:
 
 
 def branch_head(branch: str) -> str:
-    head = gh(["api", f"repos/{REPO}/git/ref/heads/{branch}", "--jq", ".object.sha"]).strip()
+    head = core.gh(["api", f"repos/{REPO}/git/ref/heads/{branch}", "--jq", ".object.sha"]).strip()
     if not SHA.fullmatch(head):
         raise StepError(f"the head of {branch} reads {head!r}")
     return head
@@ -811,18 +386,18 @@ def fetch_bundle(sha: str, branch: str | None = None) -> tuple[dict, bool]:
     partial.mkdir(parents=True)
     os.chmod(partial, 0o700)
     try:
-        gh(["run", "download", str(run), "-R", REPO, "-n", f"iemmixer-bundle-{sha}", "-D", str(partial)], DOWNLOAD_S)
+        core.gh(["run", "download", str(run), "-R", REPO, "-n", f"iemmixer-bundle-{sha}", "-D", str(partial)], DOWNLOAD_S)
         z = partial / f"iemmixer-{sha}.zip"
         if not z.is_file():
             raise StepError(f"the artifact of run {run} has no iemmixer-{sha}.zip")
         digest = "sha256:" + sha256_file(z)
         sums = verify_zip(z, sha, run_branch, run)
-        gh(["attestation", "verify", str(z), "-R", REPO, "--signer-workflow", f"{REPO}/.github/workflows/{CI_WORKFLOW}",
+        core.gh(["attestation", "verify", str(z), "-R", REPO, "--signer-workflow", f"{REPO}/.github/workflows/{CI_WORKFLOW}",
             "--source-ref", f"refs/heads/{run_branch}", "--deny-self-hosted-runners"])
     except BaseException:
         shutil.rmtree(partial)  # a refused or cut download is never kept
         raise
-    rec = {"sha": sha, "branch": run_branch, "run": run, "digest": digest, "sums": sums, "fetched_at": now_iso()}
+    rec = {"sha": sha, "branch": run_branch, "run": run, "digest": digest, "sums": sums, "fetched_at": core.now_iso()}
     write_json(partial / "fetch.json", rec)
     partial.rename(dest)
     return rec, True
@@ -839,7 +414,7 @@ def cmd_status(ctx: Ctx) -> int:
     box's, unless --pc: `iemmode status` may start the guard, and a guard's
     start runs the event plan's checks (and restarts what does not serve)."""
     if ctx.flag_at_start and not ctx.args.pc:
-        emit({"iemmode": None, "skipped": f"{EVENT_NOW} exists: no PC step during an event ('status --pc' asks the "
+        emit({"iemmode": None, "skipped": f"{core.EVENT_NOW} exists: no PC step during an event ('status --pc' asks the "
                                           "guard anyway)", **box_state()})
         return 0
     code, reply, raw = iemmode(ctx.env, ["status"], STATUS_S, ctx.watch(abandon=True))
@@ -879,7 +454,7 @@ def close_failed_window(deadline: float, error: str) -> None:
     def close(st: dict) -> None:
         if not st.get("closed"):
             st["closed"] = True
-            st["closed_by"] = {"by": "iempc event after a failed spike preempt", "at": now_iso(), "error": error[-500:]}
+            st["closed_by"] = {"by": "iempc event after a failed spike preempt", "at": core.now_iso(), "error": error[-500:]}
         if sw.intent_live(st.get("in_flight")):
             seen["in_flight"] = st["in_flight"]
 
@@ -940,7 +515,7 @@ def cmd_event(ctx: Ctx) -> int:
                 close_failed_window(deadline, pre.get("error", ""))
     if not dry:   # a trace whose dev-box process died (#15); never raises. guarded sees its
         # bound only at its next poll: two polls stay with iemmode event's minimum.
-        iempc_trace.stop_recorded(ctx, sys.modules[__name__], deadline - event_clock() - SWITCH_MIN_S - 2 * POLL_S)
+        iempc_trace.stop_recorded(ctx, sys.modules[__name__], deadline - event_clock() - SWITCH_MIN_S - 2 * core.POLL_S)
     args = ["event", "--dry-run"] if dry else ["event"]
     code, reply, raw = iemmode(ctx.env, args, switch_timeout(deadline), "ignore")
     emit(result("iemmode", args, code, reply, raw))
@@ -995,11 +570,6 @@ def cmd_fetch_bundle(ctx: Ctx) -> int:
     return 0
 
 
-def pc_mkdir(ctx: Ctx, rel: str, event: str) -> None:
-    run_module(ctx.env, f"New-Item -ItemType Directory -Force -Path {ps_quote(pc_join(ctx.env['PC_ROOT'], rel))} | Out-Null ; 'ok'",
-               STATUS_S, event)
-
-
 def cmd_install(ctx: Ctx) -> int:
     """The verified zip to the PC, then the guard installs it: `iemmode
     install`, or for the first bundle (no iemmode on the PC yet) the zip's
@@ -1015,13 +585,13 @@ def cmd_install(ctx: Ctx) -> int:
     zip_rel = f"incoming/iemmixer-{sha}.zip"
     pc_zip = pc_join(env["PC_ROOT"], zip_rel)
     pc_mkdir(ctx, "incoming", mode)
-    scp(str(z), remote(env, zip_rel), mode)
+    core.scp(str(z), remote(env, zip_rel), mode)
     checks = [hash_check(pc_zip, rec["digest"].split(":", 1)[1])]
     if ctx.args.first:
         local, hexd = extract_member(sha, rec, "iemmixer-guard.exe")
         exe_rel = f"incoming/iemmixer-guard-{sha}.exe"
         exe = pc_join(env["PC_ROOT"], exe_rel)
-        scp(str(local), remote(env, exe_rel), mode)
+        core.scp(str(local), remote(env, exe_rel), mode)
         guard, then = iempc_bin.staged_guard(sys.modules[__name__], exe, hexd)   # run from the stage (#15)
         code, reply, raw = call(env, exe, ["install", pc_zip], INSTALL_S, mode, (*checks, *guard), json_reply=False,
                                 then=then)
@@ -1031,19 +601,6 @@ def cmd_install(ctx: Ctx) -> int:
     out["via"] = "iemmixer-guard (first bundle)" if ctx.args.first else "iemmode"
     emit(out)
     return code
-
-
-def pause(ctx: Ctx, seconds: float) -> None:
-    """Waits `seconds`, looking at the flag every POLL_S: a flag that
-    appeared after the command started pre-empts (EventNow), as in `guarded`."""
-    end = time.monotonic() + seconds
-    while True:
-        if ctx.watch(abandon=True) != "ignore" and event_now():
-            raise EventNow()
-        left = end - time.monotonic()
-        if left <= 0:
-            return
-        time.sleep(min(POLL_S, left))
 
 
 def await_guard_build(ctx: Ctx, sha: str) -> dict:
@@ -1224,11 +781,11 @@ def cmd_dispatch_hil(ctx: Ctx) -> int:
                         "bundle and fetch again")
     check_local_zip(sha, rec)
     if event_now():  # "ide event" during the gh waits above: HIL is dev-time work
-        raise Refused(f"{EVENT_NOW} appeared: no HIL dispatch during an event (nothing was dispatched)")
+        raise Refused(f"{core.EVENT_NOW} appeared: no HIL dispatch during an event (nothing was dispatched)")
     iempc_bin.hil_dispatched(sys.modules[__name__], sha)   # the run activates `sha`: awaited from now (#15)
-    gh(["workflow", "run", HIL_WORKFLOW, "-R", OPS_REPO, "-f", f"sha={sha}", "-f", f"branch={branch}",
+    core.gh(["workflow", "run", HIL_WORKFLOW, "-R", OPS_REPO, "-f", f"sha={sha}", "-f", f"branch={branch}",
         "-f", f"run={run}", "-f", f"digest={rec['digest']}"])
-    record = {"sha": sha, "branch": branch, "run": run, "digest": rec["digest"], "entry": entry, "at": now_iso()}
+    record = {"sha": sha, "branch": branch, "run": run, "digest": rec["digest"], "entry": entry, "at": core.now_iso()}
     write_json(state_dir() / "dispatch.json", {"dispatches": (done + [record])[-200:]})
     emit({"dispatched": record})
     return 0
@@ -1286,7 +843,7 @@ def cmd_bootstrap(ctx: Ctx) -> int:
     pre = fin = ""
     if fn == RUNNER_FUNCTION:
         # The one-time registration token reaches the PC on stdin only, never a command line.
-        token = gh(["api", "-X", "POST", f"repos/{OPS_REPO}/actions/runners/registration-token", "--jq", ".token"]).strip()
+        token = core.gh(["api", "-X", "POST", f"repos/{OPS_REPO}/actions/runners/registration-token", "--jq", ".token"]).strip()
         if not RUNNER_TOKEN.fullmatch(token):
             raise StepError("the runner registration token has an unexpected form")
         pre = f"$env:ACTIONS_RUNNER_INPUT_TOKEN = {ps_quote(token)} ; "
@@ -1294,7 +851,7 @@ def cmd_bootstrap(ctx: Ctx) -> int:
     mode = ctx.watch(abandon=read_only_function(fn))
     rel = f"bootstrap/{sha}"
     pc_mkdir(ctx, rel, mode)
-    scp(str(local), remote(env, f"{rel}/IemPc.psm1"), mode)
+    core.scp(str(local), remote(env, f"{rel}/IemPc.psm1"), mode)
     r = run_module(env, fn + params, BOOTSTRAP_S, mode, module=pc_join(env["PC_ROOT"], f"{rel}/IemPc.psm1"),
                    module_hex=hexd, pre=pre, fin=fin)
     emit({"bootstrap": fn, "sha": sha, "result": r})
@@ -1312,19 +869,6 @@ def handover_problems(r: dict, original: int) -> list[str]:
     if r.get("task"):
         problems.append("the spike task runs")
     return problems
-
-
-def spike_module():
-    """spike_window.py, imported for the hand-over and for closing a window
-    after a failed preempt (the preempt itself runs as its own process). Its
-    state file is the one this box reads (SPIKE_STATE), so both lock and read
-    one file."""
-    if str(SPIKE_DIR) not in sys.path:
-        sys.path.insert(0, str(SPIKE_DIR))
-    import spike_window
-
-    spike_window.STATE = SPIKE_STATE
-    return spike_window
 
 
 def cmd_handover_s1a(ctx: Ctx) -> int:
@@ -1369,7 +913,7 @@ def cmd_handover_s1a(ctx: Ctx) -> int:
             raise StepError(f"S1a window {state.get('id')}: a PC step is in flight now ({st['in_flight'].get('step')}): "
                             "the window stays open")
         st["closed"] = True
-        st["handed_over"] = {"to": "iemmixer guard (S6)", "at": now_iso(), "checks": r}
+        st["handed_over"] = {"to": "iemmixer guard (S6)", "at": core.now_iso(), "checks": r}
 
     try:
         sw.update_state(change=hand_over)
@@ -1468,7 +1012,7 @@ def main(argv: list[str]) -> int:
     args = build_parser().parse_args(argv)
     flag_at_start = event_now()
     try:
-        env = load_env(env_path())
+        env = load_env(core.env_path())
     except StepError as e:
         print(f"iempc: {e}", file=sys.stderr)
         return 1
@@ -1476,7 +1020,7 @@ def main(argv: list[str]) -> int:
     iempc_bin.NOTED.clear()   # one note per command (#15)
     try:
         if spec.dev_time and flag_at_start:
-            raise Refused(f"{EVENT_NOW} exists: an event is on; '{args.cmd}' runs only in dev time")
+            raise Refused(f"{core.EVENT_NOW} exists: an event is on; '{args.cmd}' runs only in dev time")
         with state_lock(spec.locked):
             return spec.fn(Ctx(env, args, flag_at_start))
     except Refused as e:

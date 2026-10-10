@@ -173,7 +173,7 @@ class FakeClock:
 
 # The modules iempc is made of (#36): a test patches a name in the one module that
 # holds it, where the code that reads it looks it up. `ip.<name>` reads it live.
-MODULES = (ip,)
+MODULES = (ip, *ip.SPLIT)
 IEMPC_NAMES = frozenset(vars(ip))
 
 
