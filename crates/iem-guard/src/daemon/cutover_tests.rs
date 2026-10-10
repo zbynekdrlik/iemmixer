@@ -263,9 +263,10 @@ fn a_failed_step_unwinds_to_trial_and_event() {
             (false, None, FROZEN),
             "{call:?}"
         );
-        // The undo follows the event plan (its last step, then its drift
-        // read), then the alarm's notice.
-        let mut after = vec![Call::TuningDrift];
+        // The undo follows the event plan (its last step, the children read
+        // after every step done, then its drift read), then the alarm's
+        // notice.
+        let mut after = vec![Call::Children, Call::TuningDrift];
         after.extend(undo);
         after.push(Call::Notify);
         assert_eq!(pc.calls_after(Call::Fingerprint), after, "{call:?}");
