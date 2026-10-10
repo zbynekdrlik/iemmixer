@@ -410,3 +410,176 @@ async fn the_switch_is_the_engineers_and_needs_the_engineer_pin() {
         StatusCode::NOT_FOUND
     );
 }
+
+/// `GET uri` without a token: the status, the content type and the body.
+async fn get_raw(app: &Router, uri: &str) -> (StatusCode, Option<String>, Vec<u8>) {
+    let resp = app
+        .clone()
+        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let content_type = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .map(|v| v.to_str().unwrap().to_owned());
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    (status, content_type, bytes.to_vec())
+}
+
+/// F22: anyone reads a member's photo; only the member or the engineer
+/// changes it, with valid base64 of at most 256 KiB.
+#[tokio::test]
+async fn photos_are_read_by_anyone_and_changed_by_their_member_up_to_256_kib() {
+    use base64::Engine as _;
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = app(dir.path());
+    let m1 = token("member1", false);
+    let m2 = token("member2", false);
+    let eng = token("engineer", true);
+    let uri = "/api/members/member1/photo";
+    let photo = |bytes: &[u8]| {
+        serde_json::json!({ "photo": base64::engine::general_purpose::STANDARD.encode(bytes) })
+            .to_string()
+    };
+    let limit = vec![0xA5_u8; 256 * 1024];
+    let over = vec![0x5A_u8; 256 * 1024 + 1];
+    let small = photo(&b"jpeg"[..]);
+
+    assert_eq!(get_raw(&app, uri).await.0, StatusCode::NOT_FOUND);
+    for (bearer, want) in [
+        (None, StatusCode::UNAUTHORIZED),
+        (Some(m2.as_str()), StatusCode::FORBIDDEN),
+    ] {
+        let (status, _) = call(&app, Method::POST, uri, bearer, Some(small.as_str())).await;
+        assert_eq!(status, want);
+    }
+    let (status, json) = call(
+        &app,
+        Method::POST,
+        uri,
+        Some(&m1),
+        Some(r#"{"photo":"%%%"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json["code"], "INVALID_DATA");
+    let too_large = photo(&over[..]);
+    let (status, json) = call(&app, Method::POST, uri, Some(&m1), Some(too_large.as_str())).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json["code"], "TOO_LARGE");
+    assert!(!state.photo_store.exists("member1"), "nothing saved yet");
+
+    let at_limit = photo(&limit[..]);
+    let (status, json) = call(&app, Method::POST, uri, Some(&m1), Some(at_limit.as_str())).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json, serde_json::json!({"ok": true}));
+    let (status, content_type, body) = get_raw(&app, uri).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(content_type.as_deref(), Some("image/jpeg"));
+    assert_eq!(body, limit, "exactly 256 KiB is kept");
+
+    let (status, _) = call(&app, Method::POST, uri, Some(&eng), Some(small.as_str())).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the engineer changes any member's photo"
+    );
+    assert_eq!(get_raw(&app, uri).await.2, b"jpeg".to_vec());
+
+    assert_eq!(
+        call(&app, Method::DELETE, uri, Some(&m2), None).await.0,
+        StatusCode::FORBIDDEN
+    );
+    let (status, json) = call(&app, Method::DELETE, uri, Some(&m1), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json, serde_json::json!({"ok": true}));
+    assert_eq!(get_raw(&app, uri).await.0, StatusCode::NOT_FOUND);
+    assert!(!state.photo_store.exists("member1"));
+}
+
+/// F21: only the engineer subscribes a device, and only with its endpoint
+/// and both keys.
+#[tokio::test]
+async fn push_subscriptions_are_the_engineers_and_need_every_field() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = app(dir.path());
+    let eng = token("engineer", true);
+    let m1 = token("member1", false);
+    let uri = "/api/push/subscribe";
+    let full = r#"{"endpoint":"https://push.example.org/e1","keys":{"p256dh":"k1","auth":"a1"}}"#;
+
+    for bearer in [None, Some(m1.as_str())] {
+        let (status, json) = call(&app, Method::POST, uri, bearer, Some(full)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(json["error"], "engineer access required");
+    }
+    for missing in [
+        r#"{"keys":{"p256dh":"k1","auth":"a1"}}"#,
+        r#"{"endpoint":"https://push.example.org/e1","keys":{"auth":"a1"}}"#,
+        r#"{"endpoint":"https://push.example.org/e1","keys":{"p256dh":"k1"}}"#,
+    ] {
+        let (status, json) = call(&app, Method::POST, uri, Some(&eng), Some(missing)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{missing}");
+        assert_eq!(json["error"], "missing endpoint, p256dh, or auth");
+    }
+    assert!(state.push_store.read().await.all().is_empty());
+
+    let (status, json) = call(&app, Method::POST, uri, Some(&eng), Some(full)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json, serde_json::json!({"ok": true}));
+    let store = state.push_store.read().await;
+    assert_eq!(store.all().len(), 1);
+    let sub = &store.all()[0];
+    assert_eq!(
+        (
+            sub.endpoint.as_str(),
+            sub.p256dh.as_str(),
+            sub.auth.as_str()
+        ),
+        ("https://push.example.org/e1", "k1", "a1")
+    );
+}
+
+/// F28: the listen and talkback diagnostics are the engineer's.
+#[cfg(feature = "audio")]
+#[tokio::test]
+async fn the_audio_diagnostics_are_the_engineers() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_s, app) = app(dir.path());
+    let eng = token("engineer", true);
+    let m1 = token("member1", false);
+    for uri in ["/api/audio/diagnostics", "/api/talkback/diagnostics"] {
+        for (bearer, want) in [
+            (None, StatusCode::UNAUTHORIZED),
+            (Some(m1.as_str()), StatusCode::FORBIDDEN),
+        ] {
+            let (status, _) = call(&app, Method::GET, uri, bearer, None).await;
+            assert_eq!(status, want, "{uri}");
+        }
+    }
+    let (status, json) = call(
+        &app,
+        Method::GET,
+        "/api/audio/diagnostics",
+        Some(&eng),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["receiving_oiem"], false);
+    assert_eq!(json["frames_forwarded"], 0);
+    let (status, json) = call(
+        &app,
+        Method::GET,
+        "/api/talkback/diagnostics",
+        Some(&eng),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["packets_in"], 0);
+    assert_eq!(json["active_talker"], serde_json::Value::Null);
+}

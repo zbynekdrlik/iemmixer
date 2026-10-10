@@ -94,7 +94,7 @@ pub fn api_routes(_state: AppState) -> Router<AppState> {
         .route(
             "/api/client-error",
             // 10_240 bytes = 10 KiB, written as a literal so cargo-mutants has
-            // no operator to mutate; pinned by the router tests below.
+            // no operator to mutate; pinned by api_tests.rs (client_errors_*).
             post(client_error).layer(axum::extract::DefaultBodyLimit::max(10_240)),
         )
         .route("/api/push/subscribe", post(push_subscribe))

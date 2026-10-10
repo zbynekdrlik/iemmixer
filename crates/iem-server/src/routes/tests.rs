@@ -119,6 +119,46 @@ fn test_content_hash_detection_with_directory() {
     assert!(has_content_hash("assets/iem-ui-c72f48fccb666eb9.js"));
 }
 
+/// The UI's index answers `/` and an SPA route alike, never cached, and
+/// without the CDN header only the service worker carries.
+#[tokio::test]
+async fn the_index_answers_the_root_and_spa_routes_uncached() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::new(iem_core::Config::default(), dir.path());
+    let app = static_routes().with_state(state);
+    let mut pages = Vec::new();
+    for uri in ["/", "/member1"] {
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+        let headers = resp.headers();
+        assert_eq!(
+            headers.get(header::CONTENT_TYPE).unwrap(),
+            "text/html",
+            "{uri}"
+        );
+        assert_eq!(
+            headers.get(header::CACHE_CONTROL).unwrap(),
+            "no-cache, must-revalidate",
+            "{uri}"
+        );
+        assert!(headers.get("CDN-Cache-Control").is_none(), "{uri}");
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        assert!(!body.is_empty(), "{uri}");
+        pages.push(body);
+    }
+    assert_eq!(pages[0], pages[1], "an SPA route gets the index");
+}
+
 // ---- Auth gate tests for push_unsubscribe (reaperiem#188) ----
 //
 // Verifies the boolean returned by `header_has_engineer_token` matches
