@@ -462,6 +462,8 @@ mod activation_tests;
 #[cfg(test)]
 mod hil_tests;
 #[cfg(test)]
+mod lifecycle_tests;
+#[cfg(test)]
 mod probe_tests;
 #[cfg(test)]
 mod reaper_tests;
