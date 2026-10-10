@@ -62,11 +62,13 @@ pub fn start(pc: &mut dyn Pc, g: &mut Guard, boot: u64) -> Option<Outcome> {
     if let Some(n) = g.job_note {
         info!("{n}");
     }
-    // A cutover cut off between two steps (a crash, a power loss) is
-    // unwound before anything else, and the PC goes to event (S8).
+    // A cutover cut off between two steps (a crash, a power loss): its
+    // local undos (the lifecycle back to trial) before anything else, and
+    // the PC goes to event (S8); its elevated undos after the event plan.
     let cut_off = super::cutover::recover(pc, g);
     let p = pc.procs();
-    let reset = cut_off || state::reset_to_event(&g.state, boot, p.band_up(), !p.engine.is_empty());
+    let reset = cut_off.is_some()
+        || state::reset_to_event(&g.state, boot, p.band_up(), !p.engine.is_empty());
     let rebooted = boot > g.state.written_at;
     // S8: the lifecycle decides (before the cutover: event, as G1 says).
     let Started {
@@ -115,14 +117,26 @@ pub fn start(pc: &mut dyn Pc, g: &mut Guard, boot: u64) -> Option<Outcome> {
     // Before the event plan: its check then adds no alarm for the same value.
     take_logon(pc, g);
     g.save();
-    // S8 lane 3: a rollback left (a crash, a reboot, a step that failed)
-    // goes on; its event plan is the start's.
-    if let Some(out) = super::rollback::resume(pc, g) {
-        send_notices(pc, g);
-        return Some(out);
+    let out = start_plan(pc, g, target, next, live_note);
+    // S8 lane 5: the cut-off cutover's elevated undos once REAPER is back.
+    if let Some(found) = cut_off {
+        super::cutover::finish_recovery(pc, g, &found);
     }
+    send_notices(pc, g);
+    out
+}
+
+/// The start's plan: the pin's own live entry in prod after a reboot, else
+/// the event plan when the start goes to event or a switch was left.
+fn start_plan(
+    pc: &mut dyn Pc,
+    g: &mut Guard,
+    target: Option<Mode>,
+    next: crate::lifecycle::Lifecycle,
+    live_note: Option<String>,
+) -> Option<Outcome> {
     let resume = g.state.switching.is_some();
-    let out = match target {
+    match target {
         // Prod after a reboot: no trial, the pin's own entry. The pin a
         // maintenance session ended on holds once the PC is live.
         Some(Mode::Live) => {
@@ -141,9 +155,7 @@ pub fn start(pc: &mut dyn Pc, g: &mut Guard, boot: u64) -> Option<Outcome> {
             Some(switch(pc, g, from, Mode::Event, from == Mode::Event))
         }
         _ => None,
-    };
-    send_notices(pc, g);
-    out
+    }
 }
 
 /// `iemmode event --direct` (design §5.1): without a guard, the same event

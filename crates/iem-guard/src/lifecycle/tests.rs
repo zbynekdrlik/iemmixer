@@ -204,34 +204,13 @@ fn in_prod_a_reboot_on_a_pin_that_may_not_go_live_stays_in_event() {
     assert_eq!((s.start, s.alarm), (Start::Live(NEW.into()), None));
 }
 
-#[test]
-fn a_rollback_goes_on_to_event_at_every_start() {
-    let b = installed();
-    for (reset, rebooted) in [(true, true), (true, false), (false, false)] {
-        let s = start(&Lifecycle::RollingBack, reset, rebooted, |sha| b.get(sha));
-        assert_eq!(
-            s,
-            Started {
-                start: Start::Event,
-                lifecycle: Lifecycle::RollingBack,
-                note: Some("a rollback to REAPER runs: the PC goes to event".into()),
-                alarm: None
-            }
-        );
-    }
-}
-
 // ---- the entry gates ----
 
 #[test]
 fn a_build_must_be_installed_in_every_lifecycle() {
     let b = installed();
     let missing = "cccccccccccccccccccccccccccccccccccccccc";
-    for lc in [
-        Lifecycle::Trial,
-        Lifecycle::Prod(prod(None, None)),
-        Lifecycle::RollingBack,
-    ] {
+    for lc in [Lifecycle::Trial, Lifecycle::Prod(prod(None, None))] {
         for to in [Mode::Dev, Mode::Live] {
             assert_eq!(
                 entered(&lc, ask(to, Some(missing), to == Mode::Live), &b),
@@ -414,7 +393,7 @@ fn in_prod_a_red_maintenance_build_leaves_the_pin() {
 }
 
 #[test]
-fn in_prod_there_are_no_trials_and_in_a_rollback_no_entries() {
+fn in_prod_there_are_no_trials() {
     let b = installed();
     let lc = Lifecycle::Prod(prod(None, None));
     for to in [Mode::Dev, Mode::Live] {
@@ -423,17 +402,6 @@ fn in_prod_there_are_no_trials_and_in_a_rollback_no_entries() {
             Err(format!(
                 "after the cutover there are no trials: live runs the pin {PIN}"
             ))
-        );
-    }
-    for (to, build, trial) in [
-        (Mode::Dev, None, false),
-        (Mode::Dev, Some(DEV), false),
-        (Mode::Live, Some(PIN), false),
-        (Mode::Live, Some(PIN), true),
-    ] {
-        assert_eq!(
-            entered(&Lifecycle::RollingBack, ask(to, build, trial), &b),
-            Err(ROLLING_BACK.to_owned())
         );
     }
 }
@@ -445,10 +413,11 @@ fn a_crash_loop_in_every_lifecycle_and_mode() {
     let b = installed();
     let at = |lc: &Lifecycle, mode| crash_loop(lc, mode, |sha| b.get(sha));
     let modes = [Mode::Event, Mode::Dev, Mode::Live];
-    for lc in [Lifecycle::Trial, Lifecycle::RollingBack] {
-        for mode in modes {
-            assert_eq!(at(&lc, mode), (Fallback::Event, lc.clone()));
-        }
+    for mode in modes {
+        assert_eq!(
+            at(&Lifecycle::Trial, mode),
+            (Fallback::Event, Lifecycle::Trial)
+        );
     }
     let lc = Lifecycle::Prod(prod(Some(PREV), Some(NEW)));
     assert_eq!(at(&lc, Mode::Event), (Fallback::Event, lc.clone()));
@@ -525,7 +494,7 @@ fn the_active_bundle_before_and_the_prod_pins_keep_their_exclusions() {
     assert_eq!(kept(&Lifecycle::Trial, Some(PREV), PIN), [PREV]);
     assert_eq!(kept(&Lifecycle::Trial, None, PIN), Vec::<String>::new());
     assert_eq!(
-        kept(&Lifecycle::RollingBack, Some(PIN), PIN),
+        kept(&Lifecycle::Trial, Some(PIN), PIN),
         Vec::<String>::new()
     );
     let lc = Lifecycle::Prod(prod(Some(PREV), None));
@@ -540,10 +509,6 @@ fn the_active_bundle_before_and_the_prod_pins_keep_their_exclusions() {
 #[test]
 fn the_status_names_the_lifecycle_after_the_trial_only() {
     assert_eq!(status(&Lifecycle::Trial), None);
-    assert_eq!(
-        status(&Lifecycle::RollingBack).as_deref(),
-        Some("rolling back to REAPER")
-    );
     assert_eq!(
         status(&Lifecycle::Prod(prod(None, None))),
         Some(format!("prod since {SINCE}: pin {PIN}, previous none"))
@@ -565,7 +530,6 @@ fn the_lifecycle_and_the_active_bundle_round_trip_and_a_reset_keeps_them() {
     for lc in [
         Lifecycle::Trial,
         Lifecycle::Prod(prod(Some(PREV), Some(NEW))),
-        Lifecycle::RollingBack,
     ] {
         let mut st = GuardState {
             mode: Mode::Live,
@@ -592,10 +556,28 @@ fn the_lifecycle_and_the_active_bundle_round_trip_and_a_reset_keeps_them() {
         serde_json::to_string(&Lifecycle::Trial).unwrap(),
         r#""trial""#
     );
-    assert_eq!(
-        serde_json::to_string(&Lifecycle::RollingBack).unwrap(),
-        r#""rolling_back""#
+}
+
+/// The rollback is dropped (the owner's ROZHODNUTÉ on #11): a state lane
+/// 3's guard saved while rolling back, its rollback record included, loads:
+/// the lifecycle reads as `Trial` (every boot event), the record is ignored,
+/// and the load names the alarm.
+#[test]
+fn a_state_saved_while_rolling_back_reads_as_trial_with_an_alarm() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("guard-state.json");
+    let old = format!(
+        r#"{{"mode": "event", "lifecycle": "rolling_back", "rollback": {{"pin": "{PIN}", "since": {SINCE}, "at": {SINCE}, "done": []}}}}"#
     );
+    std::fs::write(&path, old).unwrap();
+    let (st, err) = GuardState::load(&path);
+    assert_eq!((st.lifecycle, st.mode), (Lifecycle::Trial, Mode::Event));
+    let alarm = err.expect("the load alarms it");
+    assert!(
+        alarm.starts_with("the saved lifecycle is unreadable (") && alarm.contains("rolling_back"),
+        "{alarm}"
+    );
+    assert_eq!(unreadable_in(&path), Some(alarm));
 }
 
 /// A state an older guard saved (no lifecycle, no active bundle, its pins)
@@ -742,15 +724,14 @@ fn the_way_back_moves_only_when_the_active_bundle_changes() {
 }
 
 /// The prod data rule (ROZHODNUTÉ on #11): only a trial's entries refresh
-/// the data from the predecessor; in prod and while rolling back the plan
-/// has no data step and is otherwise the planner's, step for step.
+/// the data from the predecessor; in prod the plan has no data step and is
+/// otherwise the planner's, step for step.
 #[test]
 fn only_a_trial_refreshes_the_data_from_the_predecessor() {
     let lifecycles = [
         Lifecycle::Trial,
         Lifecycle::Prod(prod(None, None)),
         Lifecycle::Prod(prod(Some(PREV), Some(NEW))),
-        Lifecycle::RollingBack,
     ];
     for lc in &lifecycles {
         let trial = *lc == Lifecycle::Trial;
@@ -768,4 +749,69 @@ fn only_a_trial_refreshes_the_data_from_the_predecessor() {
     }
     let entry = super::plan(&Lifecycle::Trial, Mode::Live, &Facts::default());
     assert!(entry.contains(&Step::Data), "a trial imports: {entry:?}");
+}
+
+/// S8 lane 5: in prod `activate` takes only a bundle whose guard keeps the
+/// lifecycle; before the cutover the manifest is not even read.
+#[test]
+fn activate_after_the_cutover_takes_only_a_guard_that_keeps_the_lifecycle() {
+    let unread = || -> Result<bool, String> { panic!("read in trial") };
+    assert_eq!(activation_refusal(&Lifecycle::Trial, NEW, unread), None);
+    for lc in [
+        Lifecycle::Prod(prod(None, None)),
+        Lifecycle::Prod(prod(Some(PREV), Some(NEW))),
+    ] {
+        assert_eq!(activation_refusal(&lc, NEW, || Ok(true)), None, "{lc:?}");
+        let older = activation_refusal(&lc, NEW, || Ok(false)).unwrap();
+        assert!(
+            older.starts_with(&format!(
+                "{NEW}'s guard predates the lifecycle (its manifest names no guard_lifecycle): in "
+            )),
+            "{older}"
+        );
+        assert!(older.contains(&status(&lc).unwrap()), "{older}");
+        let unreadable =
+            activation_refusal(&lc, NEW, || Err("manifest.json: not found".to_owned())).unwrap();
+        assert!(
+            unreadable.starts_with(&format!(
+                "{NEW}'s manifest cannot be read (manifest.json: not found)"
+            )),
+            "{unreadable}"
+        );
+    }
+}
+
+/// What `iemmode event` means: the button (no signal) is the event plan in
+/// every lifecycle and mode, the rollback dropped (the owner's ROZHODNUTÉ on
+/// #11); "ide event" in prod keeps the band's system (lane 3). The engine's
+/// health is read only in prod live on "ide event".
+#[test]
+fn the_button_is_the_event_plan_and_ide_event_keeps_prod_s_band_system() {
+    let p = Lifecycle::Prod(prod(None, None));
+    for mode in [Mode::Event, Mode::Dev, Mode::Live] {
+        for lc in [&Lifecycle::Trial, &p] {
+            assert_eq!(on_event(lc, mode, false, || panic!("read")), OnEvent::Plan);
+        }
+        if mode != Mode::Live {
+            assert_eq!(
+                on_event(&Lifecycle::Trial, mode, true, || panic!("read")),
+                OnEvent::Plan
+            );
+        }
+    }
+    assert_eq!(
+        on_event(&Lifecycle::Trial, Mode::Live, true, || true),
+        OnEvent::Plan
+    );
+    assert_eq!(
+        on_event(&p, Mode::Dev, true, || panic!("read")),
+        OnEvent::Live
+    );
+    assert_eq!(
+        on_event(&p, Mode::Event, true, || panic!("read")),
+        OnEvent::Plan
+    );
+    assert_eq!(on_event(&p, Mode::Live, true, || true), OnEvent::Stay);
+    assert_eq!(on_event(&p, Mode::Live, true, || false), OnEvent::Plan);
+    assert!(is_prod(&p) && !is_prod(&Lifecycle::Trial));
 }

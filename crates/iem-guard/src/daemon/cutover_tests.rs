@@ -170,6 +170,51 @@ fn a_refused_cutover_changes_nothing() {
     assert_eq!(g.state.lifecycle, Lifecycle::Trial);
 }
 
+/// Prod lost to trial (an older guard took over, an unreadable state)
+/// leaves the predecessor's autostarts disabled in an export never
+/// restored, and `pin_changes = true`. A second cutover would export the
+/// disabled state, and its undo would restore them disabled: it is
+/// refused, its dry run too, before anything changes; they are put back by
+/// hand (S8 lane 5, the cross-lane review's finding 2a; no rollback).
+#[test]
+fn a_cutover_after_a_lost_prod_is_refused() {
+    for dry_run in [false, true] {
+        let (mut pc, mut g) = ready();
+        pc.server_config = OPEN.into();
+        let r = handle(&mut pc, &mut g, cut(dry_run), INIT);
+        assert!(!r.ok, "{r:?}");
+        assert!(
+            r.detail
+                .starts_with("the server config allows PIN changes (pin_changes = true)"),
+            "{}",
+            r.detail
+        );
+        assert!(
+            r.detail.contains("by hand before a cutover"),
+            "{}",
+            r.detail
+        );
+        assert_eq!(pc.mutating_calls(), Vec::<Call>::new());
+        let (mut pc, mut g) = ready();
+        let earlier = export_name(T0 - 3_600);
+        pc.autostarts_in = Some(earlier.clone());
+        let r = handle(&mut pc, &mut g, cut(dry_run), INIT);
+        assert!(!r.ok, "{r:?}");
+        assert!(
+            r.detail.starts_with(&format!(
+                "the autostart export {earlier} of an earlier cutover"
+            )),
+            "{}",
+            r.detail
+        );
+        assert_eq!(pc.mutating_calls(), Vec::<Call>::new());
+        assert_eq!(
+            (g.state.lifecycle.clone(), g.state.cutover.clone()),
+            (Lifecycle::Trial, None)
+        );
+    }
+}
+
 #[test]
 fn the_dry_run_names_the_steps_and_the_trial_s_precheck_and_changes_nothing() {
     let (mut pc, mut g) = ready();
@@ -184,7 +229,13 @@ fn the_dry_run_names_the_steps_and_the_trial_s_precheck_and_changes_nothing() {
             )
         )
     );
-    assert_eq!(pc.calls(), [Call::Precheck]);
+    // The reads of an earlier prod's leftovers (S8 lane 5), then the
+    // precheck; nothing changes.
+    assert_eq!(pc.mutating_calls(), Vec::<Call>::new());
+    assert_eq!(
+        (pc.count(Call::ServerConfig), pc.calls().last()),
+        (1, Some(&Call::Precheck))
+    );
     assert_eq!(
         (
             g.state.lifecycle.clone(),
@@ -294,10 +345,11 @@ fn a_failed_import_ends_in_event_with_nothing_else_begun() {
         Call::AutostartsOff,
         Call::AutostartsOn,
         Call::GuardLogon,
-        Call::ServerConfig,
+        Call::WriteServerConfig,
     ] {
         assert!(!pc.called(call), "{call:?}");
     }
+    assert_eq!(pc.count(Call::ServerConfig), 1, "the refusals' read only");
     assert_eq!(g.state.cutover, None);
 }
 
@@ -346,7 +398,11 @@ fn ide_event_during_a_step_unwinds_after_it() {
         "cutover of {SHA} failed at PinChanges: pre-empted by event; unwound to trial and event"
     );
     assert!(r.detail.starts_with(&head), "{}", r.detail);
-    assert!(!pc.called(Call::ServerConfig), "PinChanges never began");
+    assert_eq!(
+        pc.count(Call::ServerConfig),
+        1,
+        "the refusals' read only: PinChanges never began"
+    );
     assert_eq!(pc.count(Call::GuardLogon), 2, "on, then off");
     assert!(!pc.guard_at_logon);
     assert_eq!(pc.autostarts_in, None);
@@ -444,17 +500,19 @@ fn a_cut_off_cutover_is_unwound_at_the_start_and_the_pc_goes_to_event() {
     pc.server_config = OPEN.into();
     // Booted before the state was written: a guard restart, not a reboot.
     assert_eq!(start(&mut pc, &mut g, 0), Some(Outcome::Done));
+    // The local undos first (the lifecycle, pin_changes), then the start's
+    // event plan, then the elevated ones (S8 lane 5: they may take minutes).
     assert_eq!(
-        &pc.calls()[..6],
+        &pc.calls()[..4],
         [
             Call::ServerConfig,
             Call::WriteServerConfig,
             Call::ServerConfig,
-            Call::AutostartsOn,
-            Call::GuardLogon,
             Call::Procs,
         ]
     );
+    assert!(pc.index(Call::ReaperStart) < pc.index(Call::AutostartsOn));
+    assert!(pc.index(Call::AutostartsOn) < pc.index(Call::GuardLogon));
     assert_eq!(g.state.mode, Mode::Event);
     assert_eq!(g.state.lifecycle, Lifecycle::Trial);
     assert_eq!(g.state.cutover, None);
@@ -466,14 +524,88 @@ fn a_cut_off_cutover_is_unwound_at_the_start_and_the_pc_goes_to_event() {
         ),
         (false, None, FROZEN)
     );
-    assert_eq!(
-        texts(&g).first(),
-        Some(&format!(
-            "the cutover of {SHA} was cut off (begun: [Import, GuardLogon, Autostarts, \
-             PinChanges, Lifecycle]): unwound to trial; the PC goes to event"
-        ))
+    let cut_off = format!(
+        "the cutover of {SHA} was cut off (begun: [Import, GuardLogon, Autostarts, PinChanges, \
+         Lifecycle]): unwound to trial; the PC goes to event"
     );
-    assert!(g.alarms.iter().next().is_some_and(|a| !a.owner_question));
+    assert!(
+        g.alarms
+            .iter()
+            .any(|a| a.text == cut_off && !a.owner_question),
+        "{:?}",
+        texts(&g)
+    );
+    let back = Guard::open(dir.path(), SiteConf::default(), fixed(T0 + 9));
+    assert_eq!(
+        (back.state.lifecycle, back.state.cutover),
+        (Lifecycle::Trial, None)
+    );
+}
+
+/// A boot after a power loss in the middle of the cutover (prod already
+/// saved) is never silent for the elevated undos (each up to 120 s, not
+/// cancellable): the lifecycle goes back to trial first, a local save read
+/// back, so the boot goes to event, not live on the pin; the start's event
+/// plan brings REAPER; then the autostarts come back and only then the
+/// guard's logon trigger goes (S8 lane 5, finding 4).
+#[test]
+fn a_boot_after_a_cut_off_cutover_brings_reaper_before_the_elevated_undos() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut st = GuardState {
+        mode: Mode::Live,
+        lifecycle: prod(),
+        cutover: Some(Run {
+            build: SHA.into(),
+            since: T0,
+            begun: vec![
+                CutStep::Import,
+                CutStep::GuardLogon,
+                CutStep::Autostarts,
+                CutStep::PinChanges,
+                CutStep::Lifecycle,
+                CutStep::Checks,
+            ],
+        }),
+        ..GuardState::default()
+    };
+    st.bundles
+        .insert(SHA.into(), record(SHA, "main", Hil::Green));
+    st.set_active(SHA);
+    let gdir = dir.path().join("guard");
+    std::fs::create_dir_all(&gdir).unwrap();
+    st.save(&gdir.join(STATE_FILE), 1_000).unwrap();
+    let mut g = Guard::open(dir.path(), SiteConf::default(), fixed(T0 + 5));
+    // Nothing runs after the power loss; the boot is later than the state.
+    let mut pc = FakePc::new(Facts::default());
+    pc.guard_at_logon = true;
+    pc.autostarts_in = Some(export_name(T0));
+    pc.server_config = OPEN.into();
+    assert_eq!(start(&mut pc, &mut g, 5_000), Some(Outcome::Done));
+    assert_eq!(g.state.mode, Mode::Event);
+    assert!(!pc.called(Call::EngineStart), "never live on the pin");
+    assert!(
+        pc.index(Call::WriteServerConfig) < pc.index(Call::ReaperStart),
+        "{:?}",
+        pc.calls()
+    );
+    assert!(
+        pc.index(Call::ReaperStart) < pc.index(Call::AutostartsOn),
+        "{:?}",
+        pc.calls()
+    );
+    assert!(pc.index(Call::AutostartsOn) < pc.index(Call::GuardLogon));
+    assert_eq!(
+        (g.state.lifecycle.clone(), g.state.cutover.clone()),
+        (Lifecycle::Trial, None)
+    );
+    assert_eq!(
+        (
+            pc.guard_at_logon,
+            pc.autostarts_in.clone(),
+            pc.server_config.as_str()
+        ),
+        (false, None, FROZEN)
+    );
     let back = Guard::open(dir.path(), SiteConf::default(), fixed(T0 + 9));
     assert_eq!(
         (back.state.lifecycle, back.state.cutover),
@@ -554,9 +686,14 @@ fn ide_event_during_the_import_unwinds_and_nothing_else_begins() {
     assert_eq!(g.state.mode, Mode::Event);
     assert_eq!(g.state.lifecycle, Lifecycle::Trial);
     assert_eq!(g.state.cutover, None);
-    for call in [Call::GuardLogon, Call::AutostartsOff, Call::ServerConfig] {
+    for call in [
+        Call::GuardLogon,
+        Call::AutostartsOff,
+        Call::WriteServerConfig,
+    ] {
         assert!(!pc.called(call), "{call:?}");
     }
+    assert_eq!(pc.count(Call::ServerConfig), 1, "the refusals' read only");
 }
 
 /// The autostarts' undo fails: the guard's logon trigger stays (the next

@@ -1,13 +1,15 @@
 //! The PC's lifecycle (S8 design note
 //! `docs/superpowers/specs/2026-10-10-s8-cutover-rollback-design.md` §3.1,
-//! §3.4; program spec §4.1): `Trial` before the cutover, `Prod` after it,
-//! `RollingBack` while a rollback to REAPER runs. Persisted in
-//! `GuardState.lifecycle`.
+//! §3.4; program spec §4.1): `Trial` before the cutover, `Prod` after it.
+//! Persisted in `GuardState.lifecycle`. There is no rollback (the owner's
+//! ROZHODNUTÉ on #11, 2026-10-10): REAPER and the predecessor stay
+//! installed, and going back to REAPER after the cutover is the event
+//! switch; prod stays prod.
 //!
 //! Pure: the daemon asks it where a starting guard goes, which dev or live
-//! entry may run and on which build, what a crash loop means, and which
-//! bundles keep their Defender exclusions. The daemon only applies the
-//! answers.
+//! entry may run and on which build, what a crash loop means, what `iemmode
+//! event` means, and which bundles keep their Defender exclusions. The
+//! daemon only applies the answers.
 //!
 //! Nothing here turns `Trial` into `Prod`: the cutover does (S8 lane 2).
 //! The pin changes only by the rules below (a maintenance session that ends
@@ -34,10 +36,9 @@ pub enum Lifecycle {
     Trial,
     /// After the cutover: a boot goes `live` on the pin; a crash loop in
     /// live falls back to the previous pin; a dev entry is maintenance.
+    /// A state lane 3's guard saved `rolling_back` in (a rollback, dropped
+    /// since) reads as `Trial`, alarmed ([`lenient`], [`unreadable_in`]).
     Prod(Prod),
-    /// A rollback to REAPER runs (set first by the rollback, `Trial` when it
-    /// ends): a start continues it to `event`, and no entry runs.
-    RollingBack,
 }
 
 /// The cutover's record and the pins (design §3.1, §3.4).
@@ -122,7 +123,7 @@ pub struct Started {
     /// The lifecycle once `start` ran to its end: for `Start::Live`, saved
     /// only when the PC is live (a failed entry keeps the one before).
     pub lifecycle: Lifecycle,
-    /// What the start decided about the pin or the rollback, for the log.
+    /// What the start decided about the pin, for the log.
     pub note: Option<String>,
     /// An alarm to raise: prod's pin may not run live, so the PC goes to
     /// event instead.
@@ -136,7 +137,6 @@ pub struct Started {
 /// pin and ends a maintenance session ([`Prod::end_maintenance`]), unless
 /// that pin may not run live (`pin_refusal`: event and an alarm); the
 /// band's system up after a guard restart is event (an "ide event" stands).
-/// `RollingBack`: always event, the rollback goes on.
 pub fn start<'r>(
     lc: &Lifecycle,
     reset: bool,
@@ -144,12 +144,6 @@ pub fn start<'r>(
     record: impl Fn(&str) -> Option<&'r Record>,
 ) -> Started {
     let (start, lifecycle, note, alarm) = match lc {
-        Lifecycle::RollingBack => (
-            Start::Event,
-            Lifecycle::RollingBack,
-            Some("a rollback to REAPER runs: the PC goes to event".to_owned()),
-            None,
-        ),
         Lifecycle::Prod(p) if rebooted => {
             let (next, note) = p.end_maintenance(&record);
             match pin_refusal(&next.pin, &record) {
@@ -200,15 +194,12 @@ pub struct Entered {
     pub note: Option<String>,
 }
 
-/// The refusal of every entry while a rollback runs.
-pub const ROLLING_BACK: &str = "a rollback to REAPER runs: no dev or live entry until it ends";
-
 /// The entry gates (design §3.1, §3.4). Any build must be installed.
 /// `Trial`: dev on any build; live only a trial, on a green `main` build
 /// ([`may_go_live`]). `Prod`: no trial; dev is maintenance (with a build,
 /// the session's build); live ends maintenance and runs the pin
 /// ([`Prod::end_maintenance`]): without a build it runs the pin, a build
-/// must be that pin. `RollingBack`: none.
+/// must be that pin.
 pub fn entry<'r>(
     lc: &Lifecycle,
     ask: Ask<'_>,
@@ -223,7 +214,6 @@ pub fn entry<'r>(
     }
     let runs = ask.build.map(str::to_owned);
     match lc {
-        Lifecycle::RollingBack => Err(ROLLING_BACK.to_owned()),
         Lifecycle::Trial => {
             if ask.to == Mode::Live {
                 let (sha, rec) = ask.build.zip(rec).ok_or("live needs --build SHA")?;
@@ -284,7 +274,7 @@ pub fn entry<'r>(
 /// §3; ROZHODNUTÉ on #11). In prod iemmixer's own state (PINs, mixes,
 /// snapshots the band changes) is the only authority, and the cutover's
 /// final import (its live trial entry, still in `Trial`) is the last
-/// import; while rolling back no entry runs.
+/// import.
 pub fn refreshes_data(lc: &Lifecycle) -> bool {
     matches!(lc, Lifecycle::Trial)
 }
@@ -303,8 +293,8 @@ pub fn plan(lc: &Lifecycle, to: Mode, facts: &Facts) -> Vec<Step> {
 /// What a crash loop (3 abnormal engine exits in 10 min) means.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Fallback {
-    /// Back to REAPER: before the cutover (dev or a trial), in a rollback,
-    /// or an engine in event.
+    /// Back to REAPER: before the cutover (dev or a trial), or an engine in
+    /// event.
     Event,
     /// Maintenance: iemmixer stops and live runs on this pin; the session's
     /// build never becomes the pin.
@@ -316,8 +306,9 @@ pub enum Fallback {
     /// on (no previous pin is left).
     Previous(String),
     /// Prod live with no previous pin it may go to (none, it looped too, or
-    /// it may not go live): no respawn, an alarm that names the rollback;
-    /// the pin stays. The text says on which pin and why.
+    /// it may not go live): no respawn, an alarm that names the way back
+    /// to REAPER (`iemmode event`); the pin stays. The text says on which
+    /// pin and why.
     Down(String),
 }
 
@@ -375,7 +366,7 @@ pub fn kept(lc: &Lifecycle, way_back: Option<&str>, sha: &str) -> Vec<String> {
     let mut keep: Vec<String> = Vec::new();
     let pins = match lc {
         Lifecycle::Prod(p) => [Some(p.pin.as_str()), p.previous.as_deref()],
-        Lifecycle::Trial | Lifecycle::RollingBack => [None, None],
+        Lifecycle::Trial => [None, None],
     };
     for b in [way_back].into_iter().chain(pins).flatten() {
         if b != sha && !keep.iter().any(|k| k == b) {
@@ -383,6 +374,35 @@ pub fn kept(lc: &Lifecycle, way_back: Option<&str>, sha: &str) -> Vec<String> {
         }
     }
     keep
+}
+
+/// `activate` (online and offline) in prod takes only a bundle whose
+/// guard keeps the lifecycle (S8 lane 5,
+/// `bundle::keeps_lifecycle`): an older guard that took over would drop it
+/// on its next save, and prod would read back as trial with pin_changes
+/// open and the predecessor's autostarts disabled. Before the cutover any
+/// bundle activates. `keeps` reads the bundle's manifest, only when it
+/// matters.
+pub fn activation_refusal(
+    lc: &Lifecycle,
+    sha: &str,
+    keeps: impl FnOnce() -> Result<bool, String>,
+) -> Option<String> {
+    if *lc == Lifecycle::Trial {
+        return None;
+    }
+    let state = status(lc).unwrap_or_default();
+    match keeps() {
+        Ok(true) => None,
+        Ok(false) => Some(format!(
+            "{sha}'s guard predates the lifecycle (its manifest names no guard_lifecycle): in \
+             {state} no activation of a guard that would drop it"
+        )),
+        Err(why) => Some(format!(
+            "{sha}'s manifest cannot be read ({why}): in {state} no activation of a guard that \
+             may not keep the lifecycle"
+        )),
+    }
 }
 
 /// The lifecycle in `iemmode status`; none in `Trial` (the status reads as
@@ -402,7 +422,48 @@ pub fn status(lc: &Lifecycle) -> Option<String> {
             }
             Some(text)
         }
-        Lifecycle::RollingBack => Some("rolling back to REAPER".to_owned()),
+    }
+}
+
+/// Whether the lifecycle is prod: the pipe's routing reads it from the
+/// view (`View.prod`, S8 lane 5): in prod an "ide event" waits for a
+/// switch to live and never pre-empts it.
+pub fn is_prod(lc: &Lifecycle) -> bool {
+    matches!(lc, Lifecycle::Prod(_))
+}
+
+/// What `iemmode event` does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnEvent {
+    /// The event plan.
+    Plan,
+    /// Prod's band system: live on the pin (a maintenance session ends).
+    Live,
+    /// Prod live with a healthy engine: iemmixer already serves the band.
+    Stay,
+}
+
+/// What `iemmode event` means (S8 lane 3; the rollback dropped, the
+/// owner's ROZHODNUTÉ on #11). `signal`: the owner's "ide event" (`iempc
+/// event` sends `--signal`); without it the engineer's "Back to REAPER"
+/// (`POST /api/mode/event`, the site's `back_to_reaper`) or a person's
+/// `iemmode event`: the event plan in every lifecycle (in prod the PC stays
+/// prod; the next boot goes live on the pin). Before the cutover "ide event"
+/// is the event plan too. After it iemmixer serves the band at an event, so
+/// "ide event" ends a maintenance session (dev) with live on the pin, leaves
+/// a healthy live as it is, and runs the event plan, REAPER for this event,
+/// when the engine does not play or the PC is already in event. `healthy`
+/// reads the engine, only for prod live.
+pub fn on_event(
+    lc: &Lifecycle,
+    mode: Mode,
+    signal: bool,
+    healthy: impl FnOnce() -> bool,
+) -> OnEvent {
+    match (lc, mode) {
+        (Lifecycle::Prod(_), Mode::Dev) if signal => OnEvent::Live,
+        (Lifecycle::Prod(_), Mode::Live) if signal && healthy() => OnEvent::Stay,
+        _ => OnEvent::Plan,
     }
 }
 

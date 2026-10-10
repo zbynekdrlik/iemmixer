@@ -26,9 +26,8 @@
 //! runner), `requests` (the requests and the rehearsal), `activation` (bundle
 //! and site installs, activations), `hil` (HIL's jobs, test signal and
 //! injections), `watch` (the once-a-second watch), `startup` (the start and
-//! `--direct`), `reaper` (the REAPER handover's first part), `cutover`
-//! (the cutover's steps and unwind, S8 lane 2) and `rollback` (the
-//! rollback's steps, and what `iemmode event` means in prod, S8 lane 3).
+//! `--direct`), `reaper` (the REAPER handover's first part) and `cutover`
+//! (the cutover's steps and unwind, S8 lane 2).
 //! Here: the [`Guard`], its files and alarms, and the request loop.
 
 use std::fs;
@@ -56,7 +55,6 @@ mod hil;
 mod reaper;
 mod reply;
 mod requests;
-mod rollback;
 mod runner;
 mod shared;
 mod startup;
@@ -311,7 +309,7 @@ impl Guard {
             v.mode = self.state.mode;
             v.switching.clone_from(&self.state.switching);
             v.last_switch.clone_from(&self.state.last_switch);
-            v.rolls_back = crate::rollback::button_rolls_back(&self.state.lifecycle);
+            v.prod = crate::lifecycle::is_prod(&self.state.lifecycle);
             v.alarms = self.alarms.all().to_vec();
             v.status = status;
             v.engine = engine;
@@ -464,6 +462,8 @@ mod activation_tests;
 #[cfg(test)]
 mod cutover_tests;
 #[cfg(test)]
+mod event_tests;
+#[cfg(test)]
 mod hil_tests;
 #[cfg(test)]
 mod lifecycle_tests;
@@ -475,8 +475,6 @@ mod reaper_tests;
 mod record_tests;
 #[cfg(test)]
 mod request_tests;
-#[cfg(test)]
-mod rollback_tests;
 #[cfg(test)]
 mod runner_tests;
 #[cfg(test)]

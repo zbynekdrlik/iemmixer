@@ -398,6 +398,40 @@ def bring_guard_back(ctx: Ctx) -> None:
     emit(result("iemmode", ["status"], code, reply, raw))
 
 
+# The bundle's guard keeps the S8 lifecycle (manifest.json `guard_lifecycle`,
+# the guard's bundle::GUARD_LIFECYCLE; S8 lane 5).
+GUARD_LIFECYCLE = 1
+
+
+def keeps_lifecycle(manifest) -> bool:
+    """The manifest names `guard_lifecycle` GUARD_LIFECYCLE or later (pure)."""
+    v = manifest.get("guard_lifecycle") if isinstance(manifest, dict) else None
+    return isinstance(v, int) and not isinstance(v, bool) and v >= GUARD_LIFECYCLE
+
+
+def refuse_older_guard(ctx: Ctx, sha: str, rec: dict) -> None:
+    """Offline the bundle's OWN guard activates, so the running guard's
+    refusal (S8 lane 5: in prod no activation of a guard that would drop the
+    lifecycle) never runs for a bundle built before `guard_lifecycle`. Such a
+    bundle is refused here, before any quit, unless `iemmode status` (a
+    read; a new flag abandons it) says the PC is before the cutover; an
+    unreadable lifecycle refuses too."""
+    path, _ = extract_member(sha, rec, "manifest.json")
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as e:
+        raise StepError(f"bundle {sha}'s manifest.json is unreadable ({type(e).__name__})") from None
+    if keeps_lifecycle(manifest):
+        return
+    code, reply, raw = iemmode(ctx.env, ["status"], STATUS_S, ctx.watch(abandon=True))
+    emit(result("iemmode", ["status"], code, reply, raw))
+    state = core.guard_lifecycle(reply) if code == 0 else None
+    if state != "trial":
+        raise Refused(f"bundle {sha}'s guard predates the lifecycle (its manifest names no guard_lifecycle), and the "
+                      f"guard is {state or 'unreadable'} (status exit {code}): offline its own guard would activate "
+                      "and drop prod; activate a bundle that names guard_lifecycle")
+
+
 def activate_offline(ctx: Ctx, ip, sha: str) -> int:
     """`activate --offline` (#9 2026-09-28), for a guard too old to activate
     in event: a graceful `iemmode quit` of the running guard (skipped when
@@ -408,13 +442,17 @@ def activate_offline(ctx: Ctx, ip, sha: str) -> int:
     mutex and activates in an idle event only; then the admin-only iemmode and
     the hand-over as online (the first `iemmode status` starts the guard's
     task, which runs the new exe from bin\\). A refused or failed offline step
-    starts the guard again (`iemmode status`). The quit and the offline step
+    starts the guard again (`iemmode status`). After the cutover a bundle
+    built before `guard_lifecycle` is refused first (`refuse_older_guard`,
+    S8 lane 5). The quit and the offline step
     are changes: a new flag lets each finish, then the event path runs (it
     starts a guard); the reads are abandoned."""
     env = ctx.env
-    want = (need_record(sha).get("sums") or {}).get("iemmixer-guard.exe")
+    rec = need_record(sha)
+    want = (rec.get("sums") or {}).get("iemmixer-guard.exe")
     if not want:
         raise StepError(f"bundle {sha}'s fetch record lists no iemmixer-guard.exe: fetch it again")
+    refuse_older_guard(ctx, sha, rec)
     exe = pc_join(env["PC_ROOT"], f"bundles/{sha}/iemmixer-guard.exe")
     checks, then = iempc_bin.staged_guard(ip, exe, want)   # run from the stage (#15)
     if guard_processes(ctx):

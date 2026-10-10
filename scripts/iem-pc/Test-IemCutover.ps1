@@ -121,14 +121,13 @@ try {
     [void](Register-IemTasks -Root $root -AppExe $appExe -Folder $folder -ElevatedRoot $er @prefArgs)
     Assert ((Get-GuardTriggers) -ceq '') 'guard-task-starts-with-no-trigger-before-the-cutover'
 
-    # ---- the predecessor: two tasks (one disabled) and two Run values ----
+    # ---- the predecessor: two tasks and two Run values ----
     foreach ($n in @('appstart', 'other')) {
         Register-ScheduledTask -TaskPath ($pred + '\') -TaskName $n `
             -Action (New-ScheduledTaskAction -Execute 'cmd.exe' -Argument '/c exit 0') `
             -Trigger (New-ScheduledTaskTrigger -AtLogOn -User $me.name) `
             -Principal (New-ScheduledTaskPrincipal -UserId $me.name -LogonType Interactive -RunLevel Limited) | Out-Null
     }
-    (Get-PredTask 'other').Enabled = $false
     $xmlBefore = @{}
     foreach ($n in @('appstart', 'other')) { $xmlBefore[$n] = [string](Get-PredTask $n).Xml }
 
@@ -145,6 +144,11 @@ try {
     Assert ($e -like "*the value $runKey|tray does not exist*" -and -not (Test-Path -LiteralPath $cutDir)) "install-refuses-each-missing-run-value ($e)"
     New-ItemProperty -LiteralPath $runKey -Name 'tray' -Value '%IEMTESTVAR%\tray.exe' -PropertyType ExpandString | Out-Null
     Assert ((Read-Run) -ceq $both) "run-values-as-the-predecessor-left-them ($(Read-Run))"
+    # S8 lane 5: a listed task already disabled is an earlier cutover's state.
+    (Get-PredTask 'other').Enabled = $false
+    $e = ErrorOf { Install-IemCutover @install }
+    Assert ($e -like "*the task $pred\other is already disabled*" -and -not (Test-Path -LiteralPath $cutDir)) "install-refuses-a-task-already-disabled ($e)"
+    (Get-PredTask 'other').Enabled = $true
     $wrong = $install.Clone()
     $wrong.ModuleSha256 = $sums.Clone()
     $wrong.ModuleSha256['IemCutover.psm1'] = '0' * 64
@@ -184,6 +188,19 @@ try {
     Assert (-not $r.ok -and $r.error -like "*cutover verb 'reboot' refused*") "task-refuses-another-verb ($($r.error))"
     $r = Send-Request 'autostarts-off' '..\x'
     Assert (-not $r.ok -and $r.error -like "*export name '..\x' refused*" -and (Read-Run) -ceq $both) "task-refuses-another-export-name ($($r.error))"
+    # S8 lane 5: a task already disabled or a Run value already absent (an
+    # earlier cutover never undone) refuses the export, nothing written.
+    (Get-PredTask 'other').Enabled = $false
+    $r = Send-Request 'autostarts-off' $export
+    Assert (-not $r.ok -and $r.error -like "*the task $pred\other is already disabled*" -and -not (Test-Path -LiteralPath (Join-Path $cutDir $export)) -and
+            (Read-Run) -ceq $both -and [bool](Get-PredTask 'appstart').Enabled) "disable-refuses-a-task-already-disabled ($($r.error))"
+    (Get-PredTask 'other').Enabled = $true
+    Remove-ItemProperty -LiteralPath $runKey -Name 'tray'
+    $r = Send-Request 'autostarts-off' $export
+    Assert (-not $r.ok -and $r.error -like "*the value $runKey|tray is absent*" -and -not (Test-Path -LiteralPath (Join-Path $cutDir $export)) -and
+            [bool](Get-PredTask 'appstart').Enabled -and [bool](Get-PredTask 'other').Enabled) "disable-refuses-a-run-value-already-absent ($($r.error))"
+    New-ItemProperty -LiteralPath $runKey -Name 'tray' -Value '%IEMTESTVAR%\tray.exe' -PropertyType ExpandString | Out-Null
+    Assert ((Read-Run) -ceq $both) "run-values-back-after-the-refusals ($(Read-Run))"
 
     # ---- disable: exported, then disabled, each read back ----
     $r = Send-Request 'autostarts-off' $export
@@ -195,7 +212,7 @@ try {
     Assert ($ex.version -eq 1 -and $ex.export -ceq $export) 'export-names-itself'
     $byPath = @{}
     foreach ($t in @($ex.tasks)) { $byPath[[string]$t.path] = $t }
-    Assert ([bool]$byPath[$pred + '\appstart'].enabled -and -not [bool]$byPath[$pred + '\other'].enabled) 'export-saves-each-task-s-enabled-state'
+    Assert ([bool]$byPath[$pred + '\appstart'].enabled -and [bool]$byPath[$pred + '\other'].enabled) 'export-saves-each-task-s-enabled-state'
     foreach ($n in @('appstart', 'other')) {
         $t = $byPath[$pred + '\' + $n]
         $f = Join-Path $exDir ([string]$t.xml)
@@ -212,11 +229,16 @@ try {
     Assert ((Test-IemElevatedItem -Path $exDir -UserSid $me.sid).Count -eq 0 -and (Test-IemElevatedItem -Path (Join-Path $exDir 'export.json') -UserSid $me.sid).Count -eq 0) 'export-is-admin-only'
     $r = Send-Request 'autostarts-off' $export
     Assert (-not $r.ok -and $r.error -like '*an export is never overwritten*') "disable-never-overwrites-an-export ($($r.error))"
+    $r = Send-Request 'autostarts-off' 'autostarts-5'
+    Assert (-not $r.ok -and $r.error -like "*the export $export of an earlier cutover was never restored*" -and
+            -not (Test-Path -LiteralPath (Join-Path $cutDir 'autostarts-5'))) "disable-refuses-while-an-earlier-export-is-not-restored ($($r.error))"
 
     # ---- enable: back exactly as saved, then nothing more ----
     $r = Send-Request 'autostarts-on' $export
     Assert ($r.ok -and $r.result.state -ceq 'enabled' -and $r.result.values -eq 2) "enable-answers ($(ConvertTo-Json -InputObject $r -Compress -Depth 6))"
-    Assert ([bool](Get-PredTask 'appstart').Enabled -and -not [bool](Get-PredTask 'other').Enabled) 'enable-restores-each-task-s-saved-state'
+    Assert ([bool](Get-PredTask 'appstart').Enabled -and [bool](Get-PredTask 'other').Enabled) 'enable-restores-each-task-s-saved-state'
+    $marker = Join-Path $exDir 'restored.json'
+    Assert ((Test-Path -LiteralPath $marker -PathType Leaf) -and (Test-IemElevatedItem -Path $marker -UserSid $me.sid).Count -eq 0) 'enable-marks-the-export-restored-admin-only'
     foreach ($s in @($r.result.tasks)) {
         Assert (@('exact', 'enabled-element') -ccontains [string]$s.xml) "enable-reads-back-the-xml-of $($s.task) ($($s.xml))"
         Write-Host "     $($s.task): $($s.xml)"
@@ -239,6 +261,14 @@ try {
     [IO.File]::WriteAllBytes($xmlFile, $orig)
     $r = Send-Request 'autostarts-on' 'autostarts-2'
     Assert ($r.ok -and (Read-Run) -ceq $both -and [bool](Get-PredTask 'appstart').Enabled) 'enable-from-the-restored-file'
+    # An export without its restore mark counts as never restored, whatever
+    # the autostarts are now; enabling from it again marks it.
+    Remove-Item -LiteralPath (Join-Path $ex2 'restored.json')
+    $r = Send-Request 'autostarts-off' 'autostarts-4'
+    Assert (-not $r.ok -and $r.error -like '*the export autostarts-2 of an earlier cutover was never restored*' -and
+            -not (Test-Path -LiteralPath (Join-Path $cutDir 'autostarts-4')) -and (Read-Run) -ceq $both) "disable-refuses-an-export-without-its-restore-mark ($($r.error))"
+    $r = Send-Request 'autostarts-on' 'autostarts-2'
+    Assert ($r.ok -and (Test-Path -LiteralPath (Join-Path $ex2 'restored.json') -PathType Leaf)) 'enable-again-marks-the-export-restored'
 
     # ---- a task that is gone: nothing re-enabled, its saved XML named ----
     $r = Send-Request 'autostarts-off' 'autostarts-3'

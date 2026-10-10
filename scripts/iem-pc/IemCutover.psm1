@@ -5,7 +5,8 @@
 # Limited, so it asks the Highest task \iemmixer\iemmixer-cutover for each of
 # them ({"id", "verb", "export"} in <root>\guard\tasks\cutover.request.json,
 # the answer in <elevated root>\tasks\out\cutover.result.json, as for the
-# other Highest tasks); the rollback (lane 3) re-enables from the same export.
+# other Highest tasks); a failed cutover's undo re-enables from the same export
+# (there is no rollback: the owner's decision on #11).
 #
 # `iempc cutover` runs Install-IemCutover elevated from the admin-only stage
 # (iempc_cutover.py): the list of the predecessor's autostarts (site values,
@@ -23,8 +24,11 @@
 # Scheduler gives it, UTF-16 with its byte-order mark (the encoding its
 # declaration names), and export.json (version, export, at, tasks: [{path,
 # enabled, xml, sha256}], run: [{key, name, raw}], raw as Get-IemRegRaw saves
-# a value: its kind and its data, or kind absent). Nothing is ended by force
-# (I8); no site value lives here (P6).
+# a value: its kind and its data, or kind absent); restored.json, written by
+# Enable-IemAutostarts once everything it saved is back (S8 lane 5: an export
+# without it, and a listed task already disabled or Run value already absent,
+# refuse a new export and the install). Nothing is ended by force (I8); no
+# site value lives here (P6).
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'IemPc.psm1') -Force -Global
@@ -37,6 +41,10 @@ $script:StateDirName = 'cutover'
 $script:ListName = 'autostarts.json'
 $script:EntryName = 'iem-cutover.ps1'
 $script:ExportFile = 'export.json'
+# The mark Enable-IemAutostarts writes into an export once everything it
+# saved is back (S8 lane 5): an export that saved something (export.json)
+# without it may hold the predecessor's autostarts disabled.
+$script:RestoredFile = 'restored.json'
 $script:ListVersion = 1
 $script:ExportVersion = 1
 $script:ExportPattern = '^autostarts-[0-9]{1,20}$'
@@ -166,6 +174,48 @@ function Write-IemCutoverFile {
     if ((Get-IemBytesSha256 -Bytes ([IO.File]::ReadAllBytes($Path))) -cne (Get-IemBytesSha256 -Bytes $Bytes)) { throw "$Path does not read back" }
 }
 
+# ---- what an earlier cutover left (S8 lane 5) ----
+
+function Get-IemUnrestoredExports {
+    # The exports in -CutoverDir that saved something (export.json) and were
+    # never restored (no restored.json), but -Except.
+    param([Parameter(Mandatory)][string]$CutoverDir, [string]$Except = '')
+    $names = @()
+    if (-not (Test-Path -LiteralPath $CutoverDir -PathType Container)) { return ,$names }
+    foreach ($d in @(Get-ChildItem -LiteralPath $CutoverDir -Directory -Force)) {
+        $n = [string]$d.Name
+        if ($n -cnotmatch $script:ExportPattern -or $n -ceq $Except) { continue }
+        $saved = Test-Path -LiteralPath (Join-Path $d.FullName $script:ExportFile) -PathType Leaf
+        $restored = Test-Path -LiteralPath (Join-Path $d.FullName $script:RestoredFile)
+        if ($saved -and -not $restored) { $names += $n }
+    }
+    return ,$names
+}
+
+function Get-IemAutostartRefusals {
+    # What a cutover never undone leaves (its prod lost to trial: an
+    # older guard took over, or the guard's state could not be read), which a
+    # new export would save as the predecessor's state, so that its undo
+    # would restore them disabled: a listed task already disabled, a listed
+    # Run value already absent, an earlier export never restored. A listed
+    # task that does not exist is the caller's own refusal. Returns the
+    # problems; they are put back by hand (Enable-IemAutostarts from that
+    # export) before a cutover.
+    param([Parameter(Mandatory)]$List, [Parameter(Mandatory)]$Scheduler, [Parameter(Mandatory)][string]$CutoverDir, [string]$Except = '')
+    $bad = @()
+    foreach ($path in @($List.tasks)) {
+        $t = Get-IemTaskByPath -Scheduler $Scheduler -Path $path
+        if ($null -ne $t -and -not [bool]$t.Enabled) { $bad += "the task $path is already disabled" }
+    }
+    foreach ($v in @($List.run)) {
+        $rv = Split-IemRunValue -Value $v
+        if ([string](Get-IemRegRaw -Path $rv.key -Name $rv.name).kind -ceq 'absent') { $bad += "the value $($rv.key)|$($rv.name) is absent" }
+    }
+    $unrestored = Get-IemUnrestoredExports -CutoverDir $CutoverDir -Except $Except
+    foreach ($n in @($unrestored)) { $bad += "the export $n of an earlier cutover was never restored" }
+    return ,$bad
+}
+
 # ---- the export ----
 
 function Read-IemAutostartExport {
@@ -216,10 +266,16 @@ function Export-IemAutostarts {
     # enabled state and the file's sha256; each Run value exactly as
     # Get-IemRegRaw saves it (absent too). export.json goes in last, written
     # beside its place and moved there, then read back (Read-IemAutostartExport).
+    # Refused before anything is written: Get-IemAutostartRefusals (S8 lane 5).
     param([Parameter(Mandatory)]$List, [Parameter(Mandatory)][string]$Dir, [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$UserSid)
     $sch = Connect-IemScheduler
     foreach ($path in @($List.tasks)) {
         if ($null -eq (Get-IemTaskByPath -Scheduler $sch -Path $path)) { throw "the task $path does not exist: nothing exported, nothing changed" }
+    }
+    # S8 lane 5: never an export of what an earlier cutover left disabled.
+    $refused = Get-IemAutostartRefusals -List $List -Scheduler $sch -CutoverDir (Split-Path -Parent $Dir) -Except $Name
+    if ($refused.Count -gt 0) {
+        throw (($refused -join '; ') + ': an earlier cutover was never undone (put them back by hand first); nothing exported, nothing changed')
     }
     Install-IemElevatedFolder -Path $Dir -UserSid $UserSid
     $tasks = @()
@@ -308,12 +364,13 @@ function Disable-IemAutostarts {
 }
 
 function Enable-IemAutostarts {
-    # Every autostart <export> saved back as it was (the rollback, lane 3,
-    # and the cutover's unwind): each task's enabled state as saved, read back
+    # Every autostart <export> saved back as it was (a failed cutover's undo,
+    # at its unwind or a later start): each task's enabled state as saved, read back
     # with its XML equal to the saved file's (Compare-IemTaskXml, named per
     # task); each Run value written back exactly (Set-IemRegRaw) unless it is
     # so already, read back. Every task must exist before anything is
-    # written. No such export (or one without export.json): 'none', nothing
+    # written. Then the export's restored.json (S8 lane 5), unless it is
+    # there. No such export (or one without export.json): 'none', nothing
     # to do. Run again: nothing changes.
     param([Parameter(Mandatory)][string]$Export, [string]$ElevatedRoot = '', [Parameter(Mandatory)][string]$UserSid)
     if ($Export -cnotmatch $script:ExportPattern) { throw "export name '$Export' refused" }
@@ -353,13 +410,20 @@ function Enable-IemAutostarts {
         if (-not (Test-IemRegRawSame -A (Get-IemRegRaw -Path $key -Name $name) -B $raw)) { Set-IemRegRaw -Path $key -Name $name -Raw $raw }
         if (-not (Test-IemRegRawSame -A (Get-IemRegRaw -Path $key -Name $name) -B $raw)) { throw "the value $key|$name does not read back as saved" }
     }
+    # S8 lane 5: everything is back; a later cutover may export again.
+    $mark = Join-Path $dir $script:RestoredFile
+    if (Test-IemReparsePoint -Path $mark) { throw "$mark is a junction or a link: refused (inspect it by hand)" }
+    if (-not (Test-Path -LiteralPath $mark -PathType Leaf)) {
+        $doc = [pscustomobject][ordered]@{ version = $script:ExportVersion; export = $Export; at = [DateTime]::UtcNow.ToString('o') }
+        Write-IemCutoverFile -Path $mark -Bytes ($script:Utf8NoBom.GetBytes((ConvertTo-Json -InputObject $doc))) -UserSid $UserSid
+    }
     return [pscustomobject]@{ state = 'enabled'; export = $Export; tasks = $states; values = @($saved.run).Count }
 }
 
 # ---- the guard task's logon trigger ----
 
 function Set-IemGuardLogon {
-    # The cutover's step 3 (and the rollback's): the guard task (as
+    # The cutover's step 3 (and its undo): the guard task (as
     # Register-IemTasks made it: its read-back must pass first, else nothing
     # changes) with exactly one logon trigger for the user (-On) or none;
     # registered again with our descriptor, read back: the same action, the
@@ -440,7 +504,8 @@ function Install-IemCutover {
     # Run elevated by `iempc cutover` from the admin-only stage, before the
     # guard's cutover. Refused before anything changes: a list
     # Test-IemAutostartList refuses, a task or Run value of it that does not
-    # exist now (a typo would disable nothing and restore nothing), an
+    # exist now (a typo would disable nothing and restore nothing), what an
+    # earlier cutover never undone left (Get-IemAutostartRefusals), an
     # elevated root that is not admin-only or that holds the user's root (or
     # the reverse), no task folder, a module that is not the build iempc
     # checked (-ModuleSha256: the stage is shared). Then <elevated root>\
@@ -470,6 +535,11 @@ function Install-IemCutover {
     foreach ($r in @($RunValues)) {
         $rv = Split-IemRunValue -Value $r
         if ([string](Get-IemRegRaw -Path $rv.key -Name $rv.name).kind -ceq 'absent') { throw "the value $r does not exist: refused, nothing changed" }
+    }
+    # S8 lane 5: never a cutover over what an earlier one left disabled.
+    $refused = Get-IemAutostartRefusals -List ([pscustomobject]@{ tasks = @($Tasks); run = @($RunValues) }) -Scheduler $sch -CutoverDir $paths.dir
+    if ($refused.Count -gt 0) {
+        throw (($refused -join '; ') + ': an earlier cutover was never undone (put them back by hand first); refused, nothing changed')
     }
     $files = [ordered]@{}
     $sums = [ordered]@{}

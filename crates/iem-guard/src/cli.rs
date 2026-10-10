@@ -25,7 +25,7 @@ pub const START_POLL: Duration = Duration::from_millis(500);
 
 pub const IEMMODE_USAGE: &str = "usage: iemmode status | event [--dry-run] [--direct] [--signal]
   | dev [--build SHA] [--dry-run] | live [--build SHA] [--trial] [--dry-run]
-  | cutover --build SHA [--dry-run] | rollback [--dry-run]
+  | cutover --build SHA [--dry-run]
   | install <zip> | activate <sha> | test-signal <input> <dbfs> <ttl> [--listen]
   | report <sha> <green|red> <detail> | job-begin <run> | job-end <run>
   | install-site <file> | force-reopen | inject-fault | inject-seh | inject-park | runner-stop
@@ -144,12 +144,6 @@ pub fn parse(args: &[String]) -> Result<Cli, String> {
                     signal: f.has("--signal"),
                 })
             }
-        }
-        "rollback" => {
-            let f = Flags::read(&rest, &["--dry-run"], &[])?;
-            ask(Request::Rollback {
-                dry_run: f.has("--dry-run"),
-            })
         }
         "dev" => {
             let f = Flags::read(&rest, &["--dry-run"], &["--build"])?;
@@ -394,11 +388,6 @@ mod tests {
                 dry_run: true,
                 signal: true,
             }
-        );
-        assert_eq!(ask(&["rollback"]), Request::Rollback { dry_run: false });
-        assert_eq!(
-            ask(&["rollback", "--dry-run"]),
-            Request::Rollback { dry_run: true }
         );
         assert_eq!(
             ask(&["dev"]),

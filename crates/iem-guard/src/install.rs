@@ -156,12 +156,17 @@ fn read_sums(dir: &Path) -> Result<Vec<(String, String)>, String> {
     bundle::parse_sums(text.strip_prefix('\u{feff}').unwrap_or(&text))
 }
 
+/// The manifest of the unpacked bundle in `dir`.
+pub fn read_manifest(dir: &Path) -> Result<Manifest, String> {
+    let text = fs::read_to_string(dir.join(MANIFEST)).map_err(|e| format!("{MANIFEST}: {e}"))?;
+    Manifest::parse(&text)
+}
+
 /// Checks the unpacked bundle in `dir` for the commit `sha`: every file
 /// summed and matching, the required ones there, the manifest naming `sha`.
 pub fn verify_dir(dir: &Path, sha: &str) -> Result<(), String> {
     let sums = read_sums(dir)?;
-    let text = fs::read_to_string(dir.join(MANIFEST)).map_err(|e| format!("{MANIFEST}: {e}"))?;
-    let manifest = Manifest::parse(&text)?;
+    let manifest = read_manifest(dir)?;
     let files = digests(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     bundle::verify(&files, &sums, &manifest, sha).map_err(|bad| bad.join("; "))
 }
@@ -352,18 +357,33 @@ pub(crate) mod tests {
 
     pub(crate) const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
 
-    /// The files of a complete synthetic bundle for `sha`.
+    /// The files of a complete synthetic bundle for `sha`, its manifest as
+    /// the CI `bundle` job writes it (S8 lane 5: `guard_lifecycle`).
     pub(crate) fn files(sha: &str) -> Vec<(String, Vec<u8>)> {
+        files_with(
+            sha,
+            &format!(
+                r#"{{"sha":"{sha}","branch":"dev","version":"2.0.0-dev.9","run":4242,"guard_lifecycle":1}}"#
+            ),
+        )
+    }
+
+    /// The files of a bundle built before S8 lane 5: its manifest names no
+    /// `guard_lifecycle`.
+    pub(crate) fn older_files(sha: &str) -> Vec<(String, Vec<u8>)> {
+        files_with(
+            sha,
+            &format!(r#"{{"sha":"{sha}","branch":"dev","version":"2.0.0-dev.9","run":4242}}"#),
+        )
+    }
+
+    fn files_with(sha: &str, manifest: &str) -> Vec<(String, Vec<u8>)> {
         let mut out: Vec<(String, Vec<u8>)> = REQUIRED
             .iter()
             .filter(|n| **n != MANIFEST)
             .map(|n| ((*n).to_owned(), format!("{n} of {sha}").into_bytes()))
             .collect();
-        out.push((
-            MANIFEST.to_owned(),
-            format!(r#"{{"sha":"{sha}","branch":"dev","version":"2.0.0-dev.9","run":4242}}"#)
-                .into_bytes(),
-        ));
+        out.push((MANIFEST.to_owned(), manifest.as_bytes().to_vec()));
         out.push((
             "tuning/IemTuning.psm1".to_owned(),
             b"tuning module".to_vec(),
@@ -396,7 +416,15 @@ pub(crate) mod tests {
 
     /// A complete, correctly summed bundle zip for `sha`.
     pub(crate) fn good_zip(dir: &Path, sha: &str) -> PathBuf {
-        let mut entries = files(sha);
+        summed_zip(dir, sha, files(sha))
+    }
+
+    /// The same, built before S8 lane 5 (no `guard_lifecycle`).
+    pub(crate) fn older_zip(dir: &Path, sha: &str) -> PathBuf {
+        summed_zip(dir, sha, older_files(sha))
+    }
+
+    fn summed_zip(dir: &Path, sha: &str, mut entries: Vec<(String, Vec<u8>)>) -> PathBuf {
         let text = sums(&entries);
         entries.push((SUMS.to_owned(), text.into_bytes()));
         let path = dir.join(format!("{sha}.zip"));

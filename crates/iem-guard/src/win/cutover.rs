@@ -5,6 +5,7 @@
 //! The decisions are `crate::cutover`'s (mutated).
 
 use std::fs;
+use std::io;
 use std::time::Duration;
 
 use tracing::info;
@@ -33,6 +34,35 @@ pub(super) fn task(pc: &WinPc, verb: Verb, export: Option<&str>) -> R<String> {
     let detail = elevated(pc, cutover::KIND, cutover::TASK, &id, &request, LIMIT)?;
     info!("the cutover task, {}: {detail}", verb.as_str());
     Ok(detail)
+}
+
+/// The autostart exports in `<elevated root>\cutover` never restored (S8
+/// lane 5): each folder, whether it holds `export.json` and the restore
+/// mark; `cutover::unrestored` decides. No cutover folder: none.
+pub(super) fn unrestored_exports(pc: &WinPc) -> R<Vec<u64>> {
+    let dir = pc.s.pc.elevated_root.join("cutover");
+    let name = dir.display().to_string();
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(procs::failed(&name, e)),
+    };
+    let mut seen = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| procs::failed(&name, e))?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        seen.push(cutover::ExportSeen {
+            name: entry.file_name().to_string_lossy().into_owned(),
+            saved: path.join(cutover::EXPORT_FILE).is_file(),
+            restored: path.join(cutover::RESTORED_FILE).exists(),
+        });
+    }
+    let unrestored = cutover::unrestored(&seen);
+    info!("autostart exports never restored: {unrestored:?}");
+    Ok(unrestored)
 }
 
 /// The server's config as text.

@@ -1,9 +1,11 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use super::*;
-use crate::rollback::{Files, moves, placed};
+use crate::daemon::{Route, Shared};
+use crate::proto::Request;
 
 /// Every `Pc` method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -57,13 +59,11 @@ pub enum Call {
     AutostartsOn,
     /// The cutover task's guard logon trigger.
     GuardLogon,
+    /// The read of the autostart exports never restored (S8 lane 5).
+    CutoverExports,
     ServerConfig,
     WriteServerConfig,
     MemberPage,
-    /// The rollback's export of the band's data (S8 lane 3).
-    ExportProject,
-    /// The rollback's renames of the project files.
-    SwapProject,
 }
 
 impl Call {
@@ -103,8 +103,6 @@ impl Call {
                 | Call::AutostartsOn
                 | Call::GuardLogon
                 | Call::WriteServerConfig
-                | Call::ExportProject
-                | Call::SwapProject
         )
     }
 }
@@ -208,13 +206,6 @@ pub struct FakePc {
     /// The export the predecessor's autostarts were disabled into
     /// (`autostarts_off`); none while they are enabled.
     pub autostarts_in: Option<String>,
-    /// The project files the rollback exports and renames (`project` the
-    /// band's project, `export` its export under its own name, `kept` the
-    /// original kept beside it).
-    pub project: Files,
-    /// REAPER cannot open the export: its handover's facts name no track
-    /// while the project's path holds it.
-    pub export_unloadable: bool,
     /// `pc.toml` names a shadow command (S8 lane 4; default: none, so no
     /// entry plans the step). A read of the settings: not a recorded call.
     pub shadows: bool,
@@ -224,6 +215,12 @@ pub struct FakePc {
     /// "ide event" pre-empts this token as this call begins (a test of what
     /// comes after a step during which it came); once.
     pub preempt_at: Option<(Call, Cancel)>,
+    /// The pipe routes this request as this call begins (a request that
+    /// comes while the switch runs: a second "ide event"); once. Its route
+    /// is kept in `routed`.
+    pub route_at: Option<(Call, Arc<Shared>, Request)>,
+    /// How the pipe routed `route_at`'s request.
+    pub routed: Option<Route>,
     calls: Vec<(Call, Instant)>,
     fails: HashMap<Call, String>,
     blocked: Vec<Call>,
@@ -312,14 +309,11 @@ impl FakePc {
             config_sticks: false,
             guard_at_logon: false,
             autostarts_in: None,
-            project: Files {
-                project: true,
-                ..Files::default()
-            },
-            export_unloadable: false,
             shadows: false,
             waits_see_preemption: false,
             preempt_at: None,
+            route_at: None,
+            routed: None,
             calls: Vec::new(),
             fails: HashMap::new(),
             blocked: Vec::new(),
@@ -406,6 +400,11 @@ impl FakePc {
             && let Some((_, token)) = self.preempt_at.take()
         {
             token.preempt();
+        }
+        if self.route_at.as_ref().is_some_and(|(at, _, _)| *at == call)
+            && let Some((_, shared, req)) = self.route_at.take()
+        {
+            self.routed = Some(shared.route(&req));
         }
         if self.reaper_ends_at == Some(call) {
             self.reaper_ends_at = None;
@@ -709,13 +708,6 @@ impl Pc for FakePc {
 
     fn reaper_facts(&mut self, c: &Cancel) -> R<ReaperFacts> {
         self.enter(Call::ReaperFacts, Some(c))?;
-        let on_export = placed(Want::Export, self.project) == Some(Placed::Export);
-        if self.export_unloadable && on_export {
-            return Ok(ReaperFacts {
-                tracks: None,
-                ..self.reaper.clone()
-            });
-        }
         Ok(self.reaper.clone())
     }
 
@@ -826,6 +818,17 @@ impl Pc for FakePc {
         Ok(())
     }
 
+    /// The export the autostarts are disabled into, while they are: an
+    /// `autostarts_on` from it restores them (and marks it restored).
+    fn cutover_exports(&mut self) -> R<Vec<u64>> {
+        self.enter(Call::CutoverExports, None)?;
+        Ok(self
+            .autostarts_in
+            .iter()
+            .filter_map(|e| e.strip_prefix(crate::cutover::EXPORT_PREFIX)?.parse().ok())
+            .collect())
+    }
+
     fn server_config(&mut self) -> R<String> {
         self.enter(Call::ServerConfig, None)?;
         Ok(self.server_config.clone())
@@ -841,25 +844,5 @@ impl Pc for FakePc {
 
     fn member_page(&mut self) -> R<()> {
         self.enter(Call::MemberPage, None)
-    }
-
-    fn export_project(&mut self, _at: u64) -> R<String> {
-        self.enter(Call::ExportProject, None)?;
-        if self.project.export {
-            return Err(StepError::failed(
-                "the export exists: an export never overwrites a file",
-            ));
-        }
-        self.project.export = true;
-        Ok("export: self-check passed".to_owned())
-    }
-
-    fn swap_project(&mut self, want: Want, _at: u64) -> R<Placed> {
-        self.enter(Call::SwapProject, None)?;
-        for m in moves(want, self.project).map_err(StepError::Failed)? {
-            self.project = m.apply(self.project);
-        }
-        placed(want, self.project)
-            .ok_or_else(|| StepError::failed("the project files do not read back"))
     }
 }

@@ -14,7 +14,7 @@ use tracing::info;
 use super::reply::switch_text;
 use super::runner::run_switch;
 use super::{Guard, Outcome, STATE_FILE};
-use crate::cutover::{self, CutStep, Run};
+use crate::cutover::{self, CutStep, Leftover, Run};
 use crate::lifecycle::{self, Lifecycle, Prod};
 use crate::pc::{Pc, StepError};
 use crate::plan::Mode;
@@ -45,6 +45,20 @@ pub(super) fn cutover(
     };
     if let Some(why) = cutover::refusal(build, &facts) {
         return (false, why);
+    }
+    // What a lost prod left (S8 lane 5): put back by hand first.
+    match leftover(pc) {
+        Ok(left) => {
+            if let Some(why) = cutover::leftover_refusal(&left) {
+                return (false, why);
+            }
+        }
+        Err(why) => {
+            return (
+                false,
+                format!("what an earlier cutover left cannot be read ({why}): refused"),
+            );
+        }
     }
     let since = g.now();
     if dry_run {
@@ -108,6 +122,16 @@ pub(super) fn cutover(
     );
     info!("{done}");
     (true, done)
+}
+
+/// What a cutover whose prod was lost left (S8 lane 5,
+/// `cutover::Leftover`): the autostart exports never restored and the
+/// server config's `pin_changes`. Reads only.
+pub(super) fn leftover(pc: &mut dyn Pc) -> Result<Leftover, String> {
+    let exports = pc.cutover_exports().map_err(text)?;
+    let config = pc.server_config().map_err(text)?;
+    let pins_open = cutover::pins_open(&config)? == Some(true);
+    Ok(Leftover { exports, pins_open })
 }
 
 /// One step, read back.
@@ -211,7 +235,7 @@ fn restart_server(pc: &mut dyn Pc, g: &mut Guard) -> Result<(), String> {
 }
 
 /// Saves the state and reads it back from the state file (the guard's in
-/// memory when it has no files): the cutover's and the rollback's records
+/// memory when it has no files): the cutover's record
 /// and the lifecycle must be what the guard holds.
 pub(super) fn save_checked(g: &mut Guard) -> Result<(), String> {
     g.save();
@@ -229,12 +253,6 @@ pub(super) fn save_checked(g: &mut Guard) -> Result<(), String> {
         return Err(format!(
             "the guard state reads back with the record {:?} and the lifecycle {:?}",
             saved.cutover, saved.lifecycle
-        ));
-    }
-    if saved.rollback != g.state.rollback {
-        return Err(format!(
-            "the guard state reads back with the rollback record {:?}",
-            saved.rollback
         ));
     }
     Ok(())
@@ -259,7 +277,7 @@ fn unwind(pc: &mut dyn Pc, g: &mut Guard, step: CutStep, why: &str) -> (bool, St
         let out = run_switch(pc, g, from, Mode::Event);
         out == Outcome::Done && g.state.mode == Mode::Event
     };
-    let left = undo(pc, g, &run);
+    let left = undo(pc, g, &run, |_| true);
     let (detail, ask) = cutover::unwound(&head, event, &left);
     g.raise(None, &detail, ask);
     (false, detail)
@@ -270,13 +288,19 @@ fn unwind(pc: &mut dyn Pc, g: &mut Guard, step: CutStep, why: &str) -> (bool, St
 /// closed, the autostarts back from their export, then the guard's logon
 /// trigger off, unless the autostarts are not back (`cutover::may_undo`:
 /// the next boot must start something). Every undo is a no-op on what is
-/// already as before, so a step that failed half-way is undone too. The
+/// already as before, so a step that failed half-way is undone too. Only
+/// the steps `now` takes run; the others stay in the record for a later
+/// call (a starting guard's elevated undos after its event plan). The
 /// record is dropped, or kept with the steps left (the next start tries
 /// them again). What is left, by step.
-fn undo(pc: &mut dyn Pc, g: &mut Guard, run: &Run) -> Vec<String> {
+fn undo(pc: &mut dyn Pc, g: &mut Guard, run: &Run, now: impl Fn(CutStep) -> bool) -> Vec<String> {
     let mut left = Vec::new();
     let mut kept = Vec::new();
     for step in cutover::undo(&run.begun) {
+        if !now(step) {
+            kept.push(step);
+            continue;
+        }
         if !cutover::may_undo(step, &kept) {
             left.push(format!(
                 "{step:?}: kept while the autostarts are not back (the guard starts at the \
@@ -313,15 +337,28 @@ fn undo(pc: &mut dyn Pc, g: &mut Guard, run: &Run) -> Vec<String> {
 }
 
 /// A starting guard that finds a cutover record (cut off between two
-/// steps, or an unwind that left steps) changes back what it begun, before
-/// anything else, and alarms (`cutover::recovered`); the start then goes
-/// to event. Whether it found one.
-pub(super) fn recover(pc: &mut dyn Pc, g: &mut Guard) -> bool {
-    let Some(run) = g.state.cutover.clone() else {
-        return false;
+/// steps, or an unwind that left steps) first changes back what is local
+/// and quick (`CutStep::local`: the lifecycle to trial, saved and read
+/// back, and `pin_changes`), so the start goes to event, never live on the
+/// pin; the elevated undos wait for [`finish_recovery`], after the start's
+/// event plan (S8 lane 5: a boot after a power loss mid-cutover is not
+/// silent for them). The record as found, if any.
+pub(super) fn recover(pc: &mut dyn Pc, g: &mut Guard) -> Option<Run> {
+    let run = g.state.cutover.clone()?;
+    undo(pc, g, &run, CutStep::local);
+    Some(run)
+}
+
+/// After the start's event plan: every undo still in the record (the
+/// elevated ones, and a local one that failed before the plan), then the
+/// alarm (`cutover::recovered`) naming `found`, the record the start
+/// found, and what is still left (the owner's question; the record keeps
+/// it for the next start, as before).
+pub(super) fn finish_recovery(pc: &mut dyn Pc, g: &mut Guard, found: &Run) {
+    let left = match g.state.cutover.clone() {
+        Some(run) => undo(pc, g, &run, |_| true),
+        None => Vec::new(),
     };
-    let left = undo(pc, g, &run);
-    let (detail, ask) = cutover::recovered(&run, &left);
+    let (detail, ask) = cutover::recovered(found, &left);
     g.raise(None, &detail, ask);
-    true
 }

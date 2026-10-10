@@ -11,8 +11,7 @@ iempc_tuning.py), a kernel DPC/ISR trace on the guard's engine (`trace`:
 iempc_trace.py, PC_XPERF below), the admin-only OpenSSH default shell
 (`ssh-shell`: iempc_sshshell.py), the cutover on the owner's message
 (`cutover`: iempc_cutover.py, PC_AUTOSTART_TASKS and PC_AUTOSTART_RUN below),
-the rollback to REAPER (`rollback`: iempc_rollback.py), the shadow imports'
-summary (`shadow-report`: iempc_shadow.py, read-only), and the hand-over of
+the shadow imports' summary (`shadow-report`: iempc_shadow.py, read-only), and the hand-over of
 an open S1a window.
 
 "ide event": the flag file (~/.config/iemmixer/EVENT-NOW) exists. `event`
@@ -94,7 +93,6 @@ import iempc_core as core
 import iempc_cutover
 import iempc_event
 import iempc_live
-import iempc_rollback
 import iempc_shadow
 import iempc_soak
 import iempc_sshshell
@@ -212,11 +210,6 @@ def cmd_cutover(ctx: Ctx) -> int:
     return iempc_cutover.run(ctx, sys.modules[__name__])
 
 
-def cmd_rollback(ctx: Ctx) -> int:
-    """The rollback to REAPER on the owner's word; the code lives in iempc_rollback.py (#11)."""
-    return iempc_rollback.run(ctx, sys.modules[__name__])
-
-
 def cmd_shadow_report(ctx: Ctx) -> int:
     """The shadow imports' history, summarised; the code lives in iempc_shadow.py (#11)."""
     return iempc_shadow.run(ctx, sys.modules[__name__])
@@ -279,7 +272,6 @@ COMMANDS: dict[str, Spec] = {
     "trace": Spec(cmd_trace, pc=True, dev_time=True, locked=True),
     "ssh-shell": Spec(cmd_ssh_shell, pc=True, dev_time=True, locked=True),
     "cutover": Spec(cmd_cutover, pc=True, dev_time=True, locked=True),
-    "rollback": Spec(cmd_rollback, pc=True, dev_time=True, locked=True),
     "shadow-report": Spec(cmd_shadow_report, pc=True, dev_time=True, locked=False),
 }
 
@@ -323,8 +315,6 @@ def build_parser() -> argparse.ArgumentParser:
     cutover = sub.add_parser("cutover")
     cutover.add_argument("--sha", required=True, help="the active main bundle the PC runs in dev or a live trial")
     cutover.add_argument("--dry-run", action="store_true", help="the guard's refusals and the trial's precheck only")
-    sub.add_parser("rollback").add_argument("--dry-run", action="store_true",
-                                            help="the guard's refusal and the rollback's steps, nothing changed")
     trace = sub.add_parser("trace")
     trace.add_argument("--label", required=True, help="the run's name: 1 to 40 of a-z 0-9 -")
     trace.add_argument("--seconds", type=int, required=True, help="how long the kernel trace runs")
