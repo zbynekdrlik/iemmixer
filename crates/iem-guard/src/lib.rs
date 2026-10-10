@@ -19,6 +19,8 @@
 //! - [`rollback`]: the rollback's steps and record, the export's and the
 //!   kept original's names and moves, and what `iemmode event` means in
 //!   each lifecycle (S8);
+//! - [`shadow`]: the report-only shadow import of an entry from event,
+//!   its place in the plan and its history line (S8);
 //! - [`switch_log`]: the last switch's record, its steps timed, and its
 //!   in-ear silence (S7);
 //! - [`alarms`]: the kept alarms;
@@ -71,6 +73,7 @@ pub mod pipe;
 pub mod plan;
 pub mod proto;
 pub mod rollback;
+pub mod shadow;
 pub mod site;
 pub mod state;
 pub mod switch_log;

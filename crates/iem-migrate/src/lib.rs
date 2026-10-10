@@ -7,7 +7,11 @@
 //! - `export`: engine state → a **new** project from the original (rollback);
 //! - `band`: the predecessor's data directory → the server's band directory
 //!   (presets, snapshots, customizations, photos, PINs, secrets, push,
-//!   certificate, PIN-free backup archive), written transactionally.
+//!   certificate, PIN-free backup archive), written transactionally;
+//! - `shadow`: a report-only import (S8, iemmixer#11): what an import of the
+//!   saved project would write against the engine's saved state and
+//!   `site.toml`, one JSON object of counts and named differences; it
+//!   writes nothing.
 //!
 //! GPL-3.0-or-later: it links `iem-engine` (D1).
 
@@ -17,6 +21,8 @@ pub mod args;
 pub mod band_cmd;
 pub mod export_cmd;
 pub mod import_cmd;
+pub mod shadow;
+pub mod shadow_cmd;
 pub mod site;
 pub mod stage;
 
@@ -33,10 +39,11 @@ iem-migrate import --rpp PROJECT --aliases ALIASES --site SITE [--backup BACKUP.
 iem-migrate export --rpp ORIGINAL --aliases ALIASES --site SITE --state-dir DIR --out NEW
 iem-migrate band   --legacy DIR --aliases ALIASES --eras ERAS --site SITE --out BAND_DIR
                    [--legacy-default-pins FILE] [--partial] [--dry-run]
+iem-migrate shadow --rpp PROJECT --aliases ALIASES --site SITE --state-dir DIR
 
 Reads files only. Exit codes: 0 ok, 1 I/O, 2 usage or unmappable input,
 3 the project's topology differs from site.toml. Reports never print a PIN,
-secret or key.";
+secret or key. `shadow` writes nothing and prints one JSON object.";
 
 /// Why a command stopped: the exit code and the message for stderr.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,6 +80,7 @@ pub fn run(args: &[String]) -> Result<String, Failure> {
         Some("import") => import_cmd::run(rest),
         Some("export") => export_cmd::run(rest),
         Some("band") => band_cmd::run(rest),
+        Some("shadow") => shadow_cmd::run(rest),
         Some("help" | "--help" | "-h") => Ok(USAGE.to_owned()),
         _ => Err(Failure::input(USAGE)),
     }

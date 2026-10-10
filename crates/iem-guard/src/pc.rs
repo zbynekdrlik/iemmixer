@@ -239,6 +239,18 @@ pub trait Pc {
     /// started command finishes (a mutation); "ide event" stops the refresh
     /// between two commands and after the last.
     fn data(&mut self, mode: Mode, c: &Cancel) -> R<String>;
+    /// Whether `pc.toml` names a shadow command (`crate::shadow::plan`). A
+    /// read of the settings, never waits.
+    fn shadows(&self) -> bool;
+    /// The report-only shadow import of an entry from event into `to`
+    /// (S8 lane 4, `crate::shadow`): `pc.toml`'s `shadow` command, which
+    /// writes nothing, bounded by `shadow::LIMIT` (then asked to stop, never
+    /// force-ended); its line (`shadow::record`) is appended to the history,
+    /// `shadow::HISTORY` in `shadow::DIR` under `pc.toml`'s `root`. A wait,
+    /// not a mutation: "ide event" ends it at once (`Preempted`, and the
+    /// line says so). Every other outcome, a history that cannot be written
+    /// included, is `Ok` with what it says (a log line, never an alarm).
+    fn shadow(&mut self, to: Mode, c: &Cancel) -> R<String>;
     /// `hold`: silent until `Arm`. `hil`: with the engine's test-signal and
     /// fault-injection flags, only in dev while a HIL job runs (design §7,
     /// never in live).

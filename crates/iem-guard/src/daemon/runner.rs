@@ -14,6 +14,7 @@ use crate::handover::{self, Audio};
 use crate::lifecycle::{self, Lifecycle};
 use crate::pc::{Pc, PrefSeen, R, Status, StepError};
 use crate::plan::{Health, Mode, OnError, Step, on_error};
+use crate::shadow;
 use crate::state::Switching;
 use crate::switch_log::LastSwitch;
 
@@ -138,8 +139,10 @@ pub(super) fn switch(
     checks: bool,
 ) -> Outcome {
     // The prod data rule: the lifecycle drops the data step after the
-    // cutover (`lifecycle::refreshes_data`).
+    // cutover (`lifecycle::refreshes_data`); an entry from event gets the
+    // shadow import when `pc.toml` names one (S8 lane 4).
     let steps = lifecycle::plan(&g.state.lifecycle, to, &pc.facts());
+    let steps = shadow::plan(steps, from, to, pc.shadows());
     g.begin(from, to, &steps, checks);
     let mut skip: Vec<Step> = Vec::new();
     for step in steps {
@@ -309,6 +312,12 @@ pub(super) fn run_step(pc: &mut dyn Pc, g: &mut Guard, step: Step, to: Mode) -> 
         Step::TuningEnter => {
             let r = pc.tuning("enter", &c)?;
             g.info(format!("tuning enter: {r}"));
+            Ok(())
+        }
+        Step::Shadow => {
+            // Report-only: only "ide event" ends it early (#11 lane 4).
+            let said = shadow::never_fails(pc.shadow(to, &c))?;
+            g.info(said);
             Ok(())
         }
         Step::Data => {

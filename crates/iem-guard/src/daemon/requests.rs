@@ -24,6 +24,7 @@ use crate::lifecycle;
 use crate::pc::{Pc, PrefSeen};
 use crate::plan::{Mode, OnError, Step, plan};
 use crate::proto::{Reply, Request};
+use crate::shadow;
 
 /// A request from the pipe with the switch generation it saw, and where
 /// its reply goes.
@@ -242,6 +243,7 @@ fn dry_entry(
 ) -> (bool, String) {
     // `trial` decides only the precheck (below), never a step of the plan.
     let steps = lifecycle::plan(&g.state.lifecycle, e.to, &pc.facts());
+    let steps = shadow::plan(steps, g.state.mode, e.to, pc.shadows());
     let bundle = runs
         .or_else(|| g.state.active_bundle().map(str::to_owned))
         .unwrap_or_else(|| "none".to_owned());

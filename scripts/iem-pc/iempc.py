@@ -11,7 +11,8 @@ iempc_tuning.py), a kernel DPC/ISR trace on the guard's engine (`trace`:
 iempc_trace.py, PC_XPERF below), the admin-only OpenSSH default shell
 (`ssh-shell`: iempc_sshshell.py), the cutover on the owner's message
 (`cutover`: iempc_cutover.py, PC_AUTOSTART_TASKS and PC_AUTOSTART_RUN below),
-the rollback to REAPER (`rollback`: iempc_rollback.py), and the hand-over of
+the rollback to REAPER (`rollback`: iempc_rollback.py), the shadow imports'
+summary (`shadow-report`: iempc_shadow.py, read-only), and the hand-over of
 an open S1a window.
 
 "ide event": the flag file (~/.config/iemmixer/EVENT-NOW) exists. `event`
@@ -94,6 +95,7 @@ import iempc_cutover
 import iempc_event
 import iempc_live
 import iempc_rollback
+import iempc_shadow
 import iempc_soak
 import iempc_sshshell
 import iempc_switch
@@ -215,6 +217,11 @@ def cmd_rollback(ctx: Ctx) -> int:
     return iempc_rollback.run(ctx, sys.modules[__name__])
 
 
+def cmd_shadow_report(ctx: Ctx) -> int:
+    """The shadow imports' history, summarised; the code lives in iempc_shadow.py (#11)."""
+    return iempc_shadow.run(ctx, sys.modules[__name__])
+
+
 def cmd_trace(ctx: Ctx) -> int:
     """A kernel DPC/ISR trace on the guard's engine; the code lives in iempc_trace.py (#15, #36)."""
     iempc_live.refuse_while_running(sys.modules[__name__], "trace")   # a live run or soak of this entry (#10)
@@ -273,13 +280,14 @@ COMMANDS: dict[str, Spec] = {
     "ssh-shell": Spec(cmd_ssh_shell, pc=True, dev_time=True, locked=True),
     "cutover": Spec(cmd_cutover, pc=True, dev_time=True, locked=True),
     "rollback": Spec(cmd_rollback, pc=True, dev_time=True, locked=True),
+    "shadow-report": Spec(cmd_shadow_report, pc=True, dev_time=True, locked=False),
 }
 
 
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="iempc", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("rehearse-teardown", "probe-task", "handover-s1a", "switch-test"):
+    for name in ("rehearse-teardown", "probe-task", "handover-s1a", "switch-test", "shadow-report"):
         sub.add_parser(name)
     sub.add_parser("status").add_argument("--pc", action="store_true",
                                           help="ask the guard even while the flag exists (it may start the guard)")

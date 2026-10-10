@@ -35,6 +35,10 @@ pub enum Step {
     AppStop,
     ReaperSaveQuit,
     TuningEnter,
+    /// The report-only shadow import of an entry from event (S8, #11;
+    /// `crate::shadow`): inserted by `shadow::plan` when `pc.toml` names
+    /// one (never planned here); it never fails the entry.
+    Shadow,
     Data,
     EngineStart,
     EngineArm,
@@ -61,11 +65,12 @@ pub enum Step {
 
 impl Step {
     /// Every step, in declaration order (tests and status listings).
-    pub const ALL: [Step; 25] = [
+    pub const ALL: [Step; 26] = [
         Step::Precheck,
         Step::AppStop,
         Step::ReaperSaveQuit,
         Step::TuningEnter,
+        Step::Shadow,
         Step::Data,
         Step::EngineStart,
         Step::EngineArm,
