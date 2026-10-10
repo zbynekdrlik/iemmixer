@@ -71,7 +71,7 @@ fn topo() -> Topology {
 /// What `Topology::diff` prints before a difference's values.
 fn printed_site(d: &Diff) -> String {
     match (d.kind, d.field.as_str()) {
-        ("engineer", _) => "engineer: ".to_owned(),
+        ("engineer", _) => format!("engineer: {} in the project", d.id),
         (kind, ONLY_PROJECT) => format!("{kind} {}: in the project, not in site.toml", d.id),
         (kind, ONLY_SITE) => format!("{kind} {}: in site.toml, not in the project", d.id),
         (kind, field) => format!("{kind} {}: {field} ", d.id),

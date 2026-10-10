@@ -12,9 +12,10 @@ This command only reads: one `Test-Path` of that file over ssh, then scp
 into a temporary folder in this box's state folder (removed when done), and
 prints one JSON object (`summarise`): how many entries and of which kind,
 how many were clean (no error, the import would write, no difference, no
-doubt about the saved state, a saved state compared), the import's verdicts, the errors by code, and the
-differences by kind (`site.<kind>.<field>`, `state.<kind>.<field>`: in how
-many entries, how many in all). Counts and kinds only: never an id, a value
+doubt about the saved state, a saved state compared), the import's
+verdicts, the errors by code, and the differences by kind
+(`site.<kind>.<field>`, `state.<kind>.<field>`: in how many entries, how
+many in all). Counts and kinds only: never an id, a value
 or an error's words (P6 discipline; the file itself names ids and stays on
 the PC).
 

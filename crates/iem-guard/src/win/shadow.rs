@@ -11,7 +11,7 @@ use std::io::Write as _;
 use std::path::Path;
 use std::process::Command;
 
-use tracing::warn;
+use tracing::{info, warn};
 
 use super::WinPc;
 use super::procs::{self, OnCancel};
@@ -74,8 +74,10 @@ pub(super) fn shadow(pc: &WinPc, to: Mode, c: &Cancel) -> R<String> {
         warn!("the shadow history {}: {e}", history.display());
         said.push_str(&format!("; the history could not be written ({e})"));
     }
-    // The runner's report logs `said` (`Guard::info`).
+    // The runner's report logs `said` (`Guard::info`), except after "ide
+    // event", which ends the step before it.
     if preempted {
+        info!("{said}");
         return Err(StepError::Preempted);
     }
     Ok(said)
