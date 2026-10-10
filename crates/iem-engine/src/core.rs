@@ -8,17 +8,19 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use iem_engine_proto::{
-    Change, Cmd, EqTarget, ErrCode, ErrorBody, GroupId, InputId, InputState, Level, Mix, MixGroup,
-    MixId, MixOut, MixState, Solo, Source, TestSignal, Transient, db_to_lin,
+    Change, Cmd, ErrCode, ErrorBody, GroupId, InputId, InputState, Level, MixGroup, MixId, MixOut,
+    MixState, Solo, Source, TestSignal, Transient, db_to_lin,
 };
 
 use crate::cmd::{HilMask, MAX_HIL, RtOp};
-use crate::params::{
-    FADER_DB, LIMIT_DB, PAN, Range, TEST_DBFS, TEST_HZ, TEST_TTL_S, TRIM_DB, cap, cap_eq,
-    cap_group, cap_input, cap_level, cap_out, eq_is_finite, eq_params, input_params,
-};
+use crate::params::{Range, cap, eq_params, input_params};
 use crate::topology::Topology;
-use crate::{MAX_BATCH, MAX_CMDS_PER_BLOCK, MAX_SOLO, SAMPLE_RATE};
+use crate::{MAX_BATCH, MAX_CMDS_PER_BLOCK, MAX_SOLO};
+
+mod commands;
+mod state;
+
+pub use self::state::{MixRec, Reconciled, defaults_muted, reconcile, to_state};
 
 /// The HIL signal's outputs (`HilTestSignal.card_tx`; S6 design note §4,
 /// the owner's decision on #9 of 2026-09-28): the HIL slots of the listed
@@ -111,22 +113,6 @@ impl From<CmdError> for ErrorBody {
     }
 }
 
-/// One mix in topology order: its output, its level slots (every input, then
-/// the mixes it hears) and its group strips.
-#[derive(Debug, Clone, PartialEq)]
-pub struct MixRec {
-    pub out: MixOut,
-    pub levels: Vec<Level>,
-    pub groups: Vec<MixGroup>,
-}
-
-/// The mix state in topology order.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Reconciled {
-    pub inputs: Vec<InputState>,
-    pub mixes: Vec<MixRec>,
-}
-
 /// At most 64 bytes of an id for messages (ids may come from anyone).
 fn clip(s: &str) -> &str {
     let mut end = s.len().min(64);
@@ -134,131 +120,6 @@ fn clip(s: &str) -> &str {
         end -= 1;
     }
     s.get(..end).unwrap_or_default()
-}
-
-/// The state for this topology: known ids capped, missing ones defaulted;
-/// returns what the topology does not have.
-pub fn reconcile(topo: &Topology, state: &MixState) -> (Reconciled, Vec<String>) {
-    let inputs = topo
-        .inputs
-        .iter()
-        .map(|n| state.inputs.get(&n.id).map(cap_input).unwrap_or_default())
-        .collect();
-    let mut dropped: Vec<String> = state
-        .inputs
-        .keys()
-        .filter(|id| topo.input_index(id).is_none())
-        .map(|id| format!("input {}", clip(&id.0)))
-        .collect();
-    let mut mixes = Vec::with_capacity(topo.mixes.len());
-    for (m, node) in topo.mixes.iter().enumerate() {
-        let given = state.mixes.get(&node.id);
-        let mut levels = Vec::with_capacity(topo.levels(m));
-        for i in &topo.inputs {
-            let level = given.and_then(|x| x.inputs.get(&i.id));
-            levels.push(level.map(cap_level).unwrap_or_default());
-        }
-        for &s in &node.mixes {
-            let heard = topo.mixes.get(s).and_then(|h| given?.mixes.get(&h.id));
-            levels.push(heard.map(cap_level).unwrap_or_default());
-        }
-        let groups = topo
-            .groups
-            .iter()
-            .map(|g| {
-                given
-                    .and_then(|x| x.groups.get(&g.id))
-                    .map(cap_group)
-                    .unwrap_or_default()
-            })
-            .collect();
-        if let Some(x) = given {
-            let mix = clip(&node.id.0);
-            dropped.extend(
-                x.inputs
-                    .keys()
-                    .filter(|id| topo.input_index(id).is_none())
-                    .map(|id| format!("mix {mix} input {}", clip(&id.0))),
-            );
-            dropped.extend(
-                x.groups
-                    .keys()
-                    .filter(|id| topo.group_index(id).is_none())
-                    .map(|id| format!("mix {mix} group {}", clip(&id.0))),
-            );
-            dropped.extend(
-                x.mixes
-                    .keys()
-                    .filter(|id| topo.slot(m, &Source::Mix((*id).clone())).is_none())
-                    .map(|id| format!("mix {mix} hearing {}", clip(&id.0))),
-            );
-        }
-        mixes.push(MixRec {
-            out: given.map(|x| cap_out(&x.out)).unwrap_or_default(),
-            levels,
-            groups,
-        });
-    }
-    dropped.extend(
-        state
-            .mixes
-            .keys()
-            .filter(|id| topo.mix_index(id).is_none())
-            .map(|id| format!("mix {}", clip(&id.0))),
-    );
-    (Reconciled { inputs, mixes }, dropped)
-}
-
-/// The protocol form of a reconciled state.
-pub fn to_state(topo: &Topology, r: &Reconciled) -> MixState {
-    let mixes = topo
-        .mixes
-        .iter()
-        .zip(&r.mixes)
-        .enumerate()
-        .map(|(m, (node, rec))| {
-            let mut mix = Mix {
-                out: rec.out,
-                ..Mix::default()
-            };
-            for (k, level) in rec.levels.iter().enumerate() {
-                match topo.source(m, k) {
-                    Some(Source::Input(id)) => {
-                        mix.inputs.insert(id, *level);
-                    }
-                    Some(Source::Mix(id)) => {
-                        mix.mixes.insert(id, *level);
-                    }
-                    None => {}
-                }
-            }
-            mix.groups = topo
-                .groups
-                .iter()
-                .zip(&rec.groups)
-                .map(|(g, s)| (g.id.clone(), *s))
-                .collect();
-            (node.id.clone(), mix)
-        })
-        .collect();
-    MixState {
-        inputs: topo
-            .inputs
-            .iter()
-            .zip(&r.inputs)
-            .map(|(n, s)| (n.id.clone(), *s))
-            .collect(),
-        mixes,
-    }
-}
-
-/// The end of the load chain (§2.4): defaults with every mix muted.
-pub fn defaults_muted(topo: &Topology) -> MixState {
-    let mut r = reconcile(topo, &MixState::default()).0;
-    for rec in &mut r.mixes {
-        rec.out.muted = true;
-    }
-    to_state(topo, &r)
 }
 
 fn ix(i: usize) -> u16 {
@@ -508,19 +369,6 @@ impl Core {
         Ok(all)
     }
 
-    /// Fault injection and HIL's forced reopen run only under the
-    /// `--fault-injection` launch flag.
-    fn need_fault_injection(&self) -> Result<(), CmdError> {
-        if self.flags.fault_injection {
-            Ok(())
-        } else {
-            Err(CmdError::new(
-                ErrCode::Forbidden,
-                "the engine runs without the fault-injection flag",
-            ))
-        }
-    }
-
     fn input(&self, id: &InputId) -> Result<usize, CmdError> {
         self.topo.input_index(id).ok_or_else(|| {
             CmdError::new(ErrCode::UnknownId, format!("unknown input {}", clip(&id.0)))
@@ -559,306 +407,6 @@ impl Core {
             .and_then(|r| r.groups.get(g))
             .copied()
             .unwrap_or_default()
-    }
-
-    fn one(&mut self, cmd: &Cmd) -> Result<Partial, CmdError> {
-        match cmd {
-            Cmd::SetInput {
-                input,
-                trim_db,
-                muted,
-                processing,
-            } => {
-                let i = self.input(input)?;
-                let mut new = self.s.inputs.get(i).copied().unwrap_or_default();
-                if let Some(v) = trim_db {
-                    new.trim_db = capped(*v, TRIM_DB, "trim_db")?;
-                }
-                if let Some(v) = muted {
-                    new.muted = *v;
-                }
-                if let Some(v) = processing {
-                    new.processing = *v;
-                }
-                Ok(self.set_input(i, new))
-            }
-            Cmd::SetMix {
-                mix,
-                volume_db,
-                muted,
-            } => {
-                let m = self.mix(mix)?;
-                let mut new = self.out(m);
-                if let Some(v) = volume_db {
-                    new.volume_db = capped(*v, FADER_DB, "volume_db")?;
-                }
-                if let Some(v) = muted {
-                    new.muted = *v;
-                }
-                Ok(self.set_out(m, new))
-            }
-            Cmd::SetLevel {
-                mix,
-                source,
-                gain_db,
-                pan,
-                muted,
-            } => {
-                let m = self.mix(mix)?;
-                let k = self.topo.slot(m, source).ok_or_else(|| {
-                    CmdError::new(
-                        ErrCode::UnknownId,
-                        format!(
-                            "mix {} does not hear {}",
-                            clip(&mix.0),
-                            clip(&source.to_string())
-                        ),
-                    )
-                })?;
-                let mut new = self.level(m, k);
-                if let Some(v) = gain_db {
-                    new.gain_db = capped(*v, FADER_DB, "gain_db")?;
-                }
-                if let Some(v) = pan {
-                    new.pan = capped(*v, PAN, "pan")?;
-                }
-                if let Some(v) = muted {
-                    new.muted = *v;
-                }
-                Ok(self.set_level(m, k, new))
-            }
-            Cmd::SetGroup {
-                mix,
-                group,
-                gain_db,
-                muted,
-            } => {
-                let m = self.mix(mix)?;
-                let g = self.group(group)?;
-                let mut new = self.strip(m, g);
-                if let Some(v) = gain_db {
-                    new.gain_db = capped(*v, FADER_DB, "gain_db")?;
-                }
-                if let Some(v) = muted {
-                    new.muted = *v;
-                }
-                Ok(self.set_group(m, g, new))
-            }
-            Cmd::SetEq { target, eq } => {
-                if !eq_is_finite(eq) {
-                    return Err(CmdError::new(
-                        ErrCode::BadValue,
-                        "an EQ value is not finite",
-                    ));
-                }
-                let eq = cap_eq(eq);
-                match target {
-                    EqTarget::Input(id) => {
-                        let i = self.input(id)?;
-                        let old = self.s.inputs.get(i).copied().unwrap_or_default();
-                        Ok(self.set_input(i, InputState { eq, ..old }))
-                    }
-                    EqTarget::Mix(id) => {
-                        let m = self.mix(id)?;
-                        let old = self.out(m);
-                        Ok(self.set_out(m, MixOut { eq, ..old }))
-                    }
-                    EqTarget::Group { mix, group } => {
-                        let m = self.mix(mix)?;
-                        let g = self.group(group)?;
-                        let old = self.strip(m, g);
-                        Ok(self.set_group(m, g, MixGroup { eq, ..old }))
-                    }
-                }
-            }
-            Cmd::SetLimiter {
-                mix,
-                enabled,
-                limit_db,
-            } => {
-                let m = self.mix(mix)?;
-                let mut new = self.out(m);
-                if let Some(v) = limit_db {
-                    new.limiter.limit_db = capped(*v, LIMIT_DB, "limit_db")?;
-                }
-                if let Some(v) = enabled {
-                    new.limiter.enabled = *v;
-                }
-                Ok(self.set_out(m, new))
-            }
-            Cmd::ResetLimiterStats { mix } => {
-                let m = self.mix(mix)?;
-                Ok(Partial::changed(
-                    vec![Change::LimiterStatsReset { mix: mix.clone() }],
-                    vec![RtOp::ResetLimiter { m: ix(m) }],
-                ))
-            }
-            Cmd::SetSolo { mix, sources } => self.set_solo(mix, sources),
-            Cmd::StartListen { mix } => self.start_listen(mix),
-            Cmd::StopListen { mix } => {
-                let m = self.mix(mix)?;
-                let mut rt = Vec::new();
-                for (slot, l) in self.listen.iter_mut().enumerate() {
-                    if *l == Some(m) {
-                        *l = None;
-                        rt.push(RtOp::Listen {
-                            slot: slot as u8,
-                            mix: None,
-                        });
-                    }
-                }
-                Ok(self.listen_partial(rt))
-            }
-            Cmd::StartTestSignal {
-                input,
-                hz,
-                dbfs,
-                ttl_s,
-            } => {
-                self.test_flag()?;
-                if self.hil_test && self.test.is_some() {
-                    return Err(CmdError::new(
-                        ErrCode::Forbidden,
-                        "a HIL test signal runs until its TTL ends",
-                    ));
-                }
-                self.start_test(input, *hz, *dbfs, *ttl_s, None, false)
-            }
-            Cmd::HilTestSignal {
-                input,
-                hz,
-                dbfs,
-                ttl_s,
-                card_tx,
-                listen,
-            } => {
-                self.test_flag()?;
-                // Refused above the X13 cap, never lowered: HIL checks the
-                // level it asked for.
-                if *dbfs > TEST_DBFS.1 {
-                    return Err(CmdError::new(
-                        ErrCode::BadValue,
-                        "dbfs is above the test-signal cap of -20 dBFS",
-                    ));
-                }
-                let mask = hil_mask(&self.topo, &self.hil, card_tx)?;
-                self.start_test(input, *hz, *dbfs, *ttl_s, Some(mask), *listen)
-            }
-            Cmd::StopTestSignal => Ok(if self.test.take().is_some() {
-                Partial::changed(
-                    vec![Change::TestSignal { signal: None }],
-                    vec![RtOp::StopTestSignal],
-                )
-            } else {
-                Partial::default()
-            }),
-            Cmd::InjectFault => {
-                self.need_fault_injection()?;
-                Ok(Partial {
-                    rt: vec![RtOp::Panic],
-                    ..Partial::default()
-                })
-            }
-            Cmd::InjectSeh => {
-                self.need_fault_injection()?;
-                Ok(Partial {
-                    rt: vec![RtOp::Seh],
-                    ..Partial::default()
-                })
-            }
-            // The parked-engine test (design §10 test #2, #35): the SEH
-            // test's exception under the backend's test hold.
-            Cmd::InjectPark => {
-                self.need_fault_injection()?;
-                Ok(Partial {
-                    rt: vec![RtOp::Park],
-                    ..Partial::default()
-                })
-            }
-            Cmd::ForceReopen => {
-                self.need_fault_injection()?;
-                Ok(Partial::effect(Effect::Reopen))
-            }
-            Cmd::Batch { .. } => Err(CmdError::new(ErrCode::BadRequest, "nested batch")),
-            Cmd::ImportState { state, baseline } => {
-                self.s = reconcile(&self.topo, state).0;
-                Ok(Partial {
-                    rt: self.full_sync(),
-                    effect: Some(Effect::Imported {
-                        baseline: *baseline,
-                    }),
-                    bump: true,
-                    ..Partial::default()
-                })
-            }
-            Cmd::GetState => Ok(Partial::effect(Effect::SendState)),
-            Cmd::GetTopology => Ok(Partial::effect(Effect::SendTopology)),
-            Cmd::SaveNow => Ok(Partial::effect(Effect::Save)),
-            Cmd::Shutdown => Ok(Partial::effect(Effect::Shutdown)),
-            Cmd::Ping => Ok(Partial::default()),
-            // Neither state nor revision: the processor's fade-in starts.
-            Cmd::Arm => Ok(Partial {
-                rt: vec![RtOp::Arm],
-                ..Partial::default()
-            }),
-        }
-    }
-
-    fn test_flag(&self) -> Result<(), CmdError> {
-        if self.flags.test_signal {
-            Ok(())
-        } else {
-            Err(CmdError::new(
-                ErrCode::Forbidden,
-                "the engine runs without the test-signal flag",
-            ))
-        }
-    }
-
-    /// X13: a sine replaces `input` for `ttl_s`, every TX capped; with
-    /// `mask` (the HIL signal) it sounds only on those spare outputs
-    /// meanwhile, and no mix's TX carries anything; `listen` (S7, HIL only)
-    /// adds the listen probe.
-    fn start_test(
-        &mut self,
-        input: &InputId,
-        hz: f64,
-        dbfs: f64,
-        ttl_s: f64,
-        mask: Option<HilMask>,
-        listen: bool,
-    ) -> Result<Partial, CmdError> {
-        let i = ix(self.input(input)?);
-        let hz = capped(hz, TEST_HZ, "hz")?;
-        let dbfs = capped(dbfs, TEST_DBFS, "dbfs")?;
-        let ttl_s = capped(ttl_s, TEST_TTL_S, "ttl_s")?;
-        let signal = TestSignal {
-            input: input.clone(),
-            hz,
-            dbfs,
-            ttl_s,
-        };
-        self.test = Some(signal.clone());
-        self.hil_test = mask.is_some();
-        let amp = db_to_lin(dbfs);
-        let ttl = (ttl_s * f64::from(SAMPLE_RATE)).round() as u64;
-        let op = match mask {
-            None => RtOp::TestSignal { i, hz, amp, ttl },
-            Some(mask) => RtOp::HilTestSignal {
-                i,
-                hz,
-                amp,
-                ttl,
-                mask,
-                listen,
-            },
-        };
-        Ok(Partial::changed(
-            vec![Change::TestSignal {
-                signal: Some(signal),
-            }],
-            vec![op],
-        ))
     }
 
     fn set_input(&mut self, i: usize, new: InputState) -> Partial {
@@ -1098,5 +646,4 @@ fn group_op(m: usize, g: usize, s: &MixGroup) -> RtOp {
 }
 
 #[cfg(test)]
-#[path = "core_tests.rs"]
 mod tests;
