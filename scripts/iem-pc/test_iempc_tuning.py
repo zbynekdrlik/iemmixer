@@ -95,7 +95,9 @@ class TuningInstallTests(TuningBase):
         code, docs, err = self.run_main("tuning-install", "--sha", SHA)
         self.assertEqual(code, 0, err)
         dest = f"tester@pc.test:/X:/root/bootstrap/{SHA}"
-        self.assertEqual(self.pc.scps, [(str(ip.bundle_dir(SHA) / "IemPc.psm1"), f"{dest}/IemPc.psm1", "finish"),
+        # IemPc.psm1's siblings (#36) go up before it, each checked against the zip's sums.
+        self.assertEqual(self.pc.scps, [*((str(ip.bundle_dir(SHA) / n), f"{dest}/{n}", "finish") for n in ip.PC_SIBLINGS),
+                                        (str(ip.bundle_dir(SHA) / "IemPc.psm1"), f"{dest}/IemPc.psm1", "finish"),
                                         (self.staged("IemTuning.psm1"), f"{dest}/tuning/IemTuning.psm1", "finish"),
                                         (self.staged("IemMeasure.psm1"), f"{dest}/tuning/IemMeasure.psm1", "finish"),
                                         # IemTuning's store (#34), from the same attested zip
@@ -110,6 +112,12 @@ class TuningInstallTests(TuningBase):
         self.assertEqual(mode, "finish")
         self.assertIn(f"$iemB = [IO.File]::ReadAllBytes('{MODULE}')", script)
         self.assertIn(f"$iemH -cne '{sha256(b'synthetic IemPc.psm1')}'", script)
+        at = [script.index(f"$iemB = [IO.File]::ReadAllBytes('X:\\root\\bootstrap\\{SHA}\\{n}')")
+              for n in (*ip.PC_SIBLINGS, "IemPc.psm1")]
+        self.assertEqual(at, sorted(at))   # each sibling staged and checked before the module (#36)
+        for n in ip.PC_SIBLINGS:
+            self.assertIn(f"$iemH -cne '{sha256(f'synthetic {n}'.encode())}'", script)
+        self.assertEqual(script.count("Import-Module"), 1)
         self.assertIn("Import-Module $iemMod -Force ; $r = & { Install-IemTuning ", script)
         self.assertNotIn(f"Import-Module '{MODULE}'", script)   # never from the run folder (#15)
         [m] = self.installs()
@@ -239,7 +247,8 @@ class RefreshTests(TuningBase):
         self.assertEqual(m.groups(), (SOURCE, sums["tuning/IemTuning.psm1"], sums["tuning/IemMeasure.psm1"],
                                       sums["tuning/IemTuningStore.psm1"], None, " -KeepProfile"))
         self.assertEqual([s[1].rsplit("/", 1)[1] for s in self.pc.scps],
-                         [f"iemmode-{SHA}.exe", "IemPc.psm1", "IemTuning.psm1", "IemMeasure.psm1", "IemTuningStore.psm1"])
+                         [f"iemmode-{SHA}.exe", *ip.PC_SIBLINGS, "IemPc.psm1", "IemTuning.psm1", "IemMeasure.psm1",
+                          "IemTuningStore.psm1"])
         self.assertEqual({s[2] for s in self.pc.scps}, {"finish"})
         install = next(s for s, _ in self.pc.modules if "Install-IemTuning" in s)
         self.assertIn("Import-Module $iemMod -Force ; $r = & { Install-IemTuning ", install)   # the staged copy (#15)

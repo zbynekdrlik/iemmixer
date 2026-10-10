@@ -5,7 +5,10 @@
 # here exactly as ssh sends it, against a temp elevated root. The upload is
 # read once and checked, only the staged copy is imported, every folder and the
 # staged file read back as Install-IemElevatedFolder makes them, and a junction
-# or a foreign stage folder is refused with nothing written. The admin-only bin
+# or a foreign stage folder is refused with nothing written. IemPc.psm1's
+# siblings (#36) are uploaded and staged before it the same way (module_script's
+# `first`); one that is not staged is never imported from anywhere else, and
+# one with other bytes refuses the whole import. The admin-only bin
 # (#15): iempc_bin's install puts a checked iemmode.exe into <root>\bin through
 # the stage, and the iemmode call iempc composes runs that copy only while it
 # reads back admin-only, else PC_BIN's with a note.
@@ -19,12 +22,14 @@ function FileSha([string]$Path) { return (Get-FileHash -LiteralPath $Path -Algor
 $id = [guid]::NewGuid().ToString('N').Substring(0, 8)
 $base = Join-Path ([IO.Path]::GetTempPath()) ('iem-stage-' + $id)
 $me = Resolve-IemUser
-$compose = 'import sys; sys.path.insert(0, sys.argv[1]); import iempc; print(iempc.module_script(sys.argv[2], module=sys.argv[3], module_hex=sys.argv[4], elevated_root=sys.argv[5]))'
-$probe = '[pscustomobject]@{ path = (Get-Module IemPc).Path }'
+# `first` (the siblings) as path|sha256;path|sha256 (chr 124 and 59: Windows PowerShell 5.1 drops
+# the double quotes of a native command's argument, so neither string holds one).
+$compose = 'import sys; sys.path.insert(0, sys.argv[1]); import iempc; first = [tuple(x.split(chr(124))) for x in sys.argv[6].split(chr(59))]; print(iempc.module_script(sys.argv[2], module=sys.argv[3], module_hex=sys.argv[4], elevated_root=sys.argv[5], first=first))'
+$probe = '[pscustomobject]@{ path = (Get-Module IemPc).Path; siblings = @(Get-Module -Name IemPc?* | ForEach-Object { $_.Path }) }'
 
-function Invoke-Staged([string]$Module, [string]$Hex, [string]$Root) {
+function Invoke-Staged([string]$Module, [string]$Hex, [string]$Root, [string]$First = $script:first) {
     # The composed script, piped into a new Windows PowerShell as ssh pipes it.
-    $script = @(& python -c $compose $here $probe $Module $Hex $Root)
+    $script = @(& python -c $compose $here $probe $Module $Hex $Root $First)
     if ($LASTEXITCODE -ne 0) { throw "python exited $LASTEXITCODE" }
     $out = @($script | powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command -)
     if ($LASTEXITCODE -ne 0) { throw "powershell exited $LASTEXITCODE" }
@@ -61,6 +66,14 @@ try {
     $src = Join-Path $up 'IemPc.psm1'
     Copy-Item -LiteralPath (Join-Path $here 'IemPc.psm1') -Destination $src
     $hex = FileSha $src
+    # Its siblings next to it, each by its own sha256 (#36), as iempc uploads them.
+    $sibNames = @(Get-IemPcModuleFiles | ForEach-Object { Split-Path -Leaf $_ } | Where-Object { $_ -cne 'IemPc.psm1' })
+    $sibs = @()
+    foreach ($n in $sibNames) {
+        Copy-Item -LiteralPath (Join-Path $here $n) -Destination (Join-Path $up $n)
+        $sibs += ('{0}|{1}' -f (Join-Path $up $n), (FileSha (Join-Path $up $n)))
+    }
+    $script:first = $sibs -join ';'
 
     # ---- the happy path: a new elevated root, the stage, the staged copy imported ----
     $er = Join-Path $base 'er-new'
@@ -73,6 +86,13 @@ try {
         Assert ($bad.Count -eq 0) "stage-reads-back-as-an-elevated-item [$p] ($($bad -join '; '))"
     }
     Assert ((FileSha $staged) -ceq $hex) 'stage-holds-the-checked-bytes'
+    $sibPaths = @(Get-IemProp $doc.r 'siblings')
+    Assert ($sibPaths.Count -eq $sibNames.Count -and @($sibPaths | Where-Object { (Split-Path -Parent $_) -ne $stage }).Count -eq 0) "stage-imports-the-siblings-from-the-stage-only ($($sibPaths -join ', '))"
+    foreach ($n in $sibNames) {
+        $sp = Join-Path $stage $n
+        $bad = Test-IemElevatedItem -Path $sp -UserSid $me.sid
+        Assert ($bad.Count -eq 0 -and (FileSha $sp) -ceq (FileSha (Join-Path $up $n))) "stage-holds-the-checked-sibling-admin-only [$n] ($($bad -join '; '))"
+    }
     # A stage that already holds exactly the checked bytes is read, never rewritten: sessions that
     # run at the same time (a window's poll and a preempt) never write under another's import.
     $written = (Get-Item -LiteralPath $staged).LastWriteTimeUtc
@@ -87,6 +107,24 @@ try {
     Assert ((Get-IemProp $doc 'ok') -eq $false -and "$(Get-IemProp $doc 'error')" -like '*sha256 mismatch*') "stage-refuses-an-upload-with-another-hash ($(Get-Result $doc))"
     Assert ((FileSha $staged) -ceq $hex) 'stage-keeps-the-copy-it-had-after-a-refusal'
     Copy-Item -LiteralPath (Join-Path $here 'IemPc.psm1') -Destination $src -Force
+
+    # ---- a sibling with other bytes than its sha256: refused, nothing imported (#36) ----
+    $sib = Join-Path $up $sibNames[0]
+    Add-Content -LiteralPath $sib -Value '# changed after the sums'
+    $doc = Invoke-Staged $src $hex $er
+    Assert ((Get-IemProp $doc 'ok') -eq $false -and "$(Get-IemProp $doc 'error')" -like "*sha256 mismatch*$($sibNames[0])*") "stage-refuses-a-sibling-with-another-hash ($(Get-Result $doc))"
+    Assert ((FileSha (Join-Path $stage $sibNames[0])) -ceq (FileSha (Join-Path $here $sibNames[0]))) 'stage-keeps-the-sibling-it-had-after-a-refusal'
+    Copy-Item -LiteralPath (Join-Path $here $sibNames[0]) -Destination $sib -Force
+    # A sibling named but not uploaded: refused.
+    $gone = Join-Path $up 'IemPcGone.psm1'
+    $doc = Invoke-Staged $src $hex $er ($script:first + ';' + $gone + '|' + ('0' * 64))
+    Assert ((Get-IemProp $doc 'ok') -eq $false -and "$(Get-IemProp $doc 'error')" -like '*IemPcGone.psm1*') "stage-refuses-a-sibling-that-was-not-uploaded ($(Get-Result $doc))"
+    # A sibling not staged (left out of `first`) in a new stage: the module's import fails;
+    # the copy next to the upload, in the user's root, is never imported.
+    $nr = Join-Path $base 'er-no-sibling'
+    $doc = Invoke-Staged $src $hex $nr ((@($sibs | Select-Object -Skip 1)) -join ';')
+    Assert ((Get-IemProp $doc 'ok') -eq $false -and "$(Get-IemProp $doc 'error')" -like "*$($sibNames[0])*" -and
+            -not (Test-Path -LiteralPath (Join-Path $nr "bootstrap-stage\$($sibNames[0])"))) "stage-never-imports-a-sibling-it-did-not-stage ($(Get-Result $doc))"
 
     # ---- a junction in place of the stage: refused, nothing written through it ----
     $outside = Join-Path $base 'outside'

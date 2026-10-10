@@ -5,6 +5,7 @@ synthetic."""
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 import time
 import unittest
@@ -37,15 +38,46 @@ class BootstrapTests(Base):
         self.pc.module_result = {"reaper": 1}
         code, docs, _ = self.run_main("bootstrap", "Grant-IemServiceRight", "-Service", "svc name")
         self.assertEqual(code, 0)
-        self.assertEqual(self.pc.scps, [(str(ip.bundle_dir(SHA) / "IemPc.psm1"),
-                                         f"tester@pc.test:/X:/root/bootstrap/{SHA}/IemPc.psm1", "finish")])
+        # IemPc.psm1's siblings (#36) go up first, each checked against the zip's sums, then the module.
+        names = [*ip.PC_SIBLINGS, "IemPc.psm1"]
+        self.assertEqual(self.pc.scps, [(str(ip.bundle_dir(SHA) / n), f"tester@pc.test:/X:/root/bootstrap/{SHA}/{n}", "finish")
+                                        for n in names])
         script, mode = self.pc.modules[-1]
         self.assertEqual(mode, "finish")
-        self.assertIn(f"$iemB = [IO.File]::ReadAllBytes('{self.MODULE}')", script)
-        self.assertIn(f"$iemH -cne '{sha256(b'synthetic IemPc.psm1')}'", script)
+        line = script.splitlines()[2]
+        at = 0   # each one read once, checked, staged and checked again, in that order, the module last
+        for n in names:
+            src = f"X:\\root\\bootstrap\\{SHA}\\{n}"
+            for step in (f"$iemB = [IO.File]::ReadAllBytes('{src}')", f"$iemH -cne '{sha256(f'synthetic {n}'.encode())}'",
+                         f"$iemMod = Join-Path $iemStage '{n}'", "& $iemOnly $iemMod"):
+                at = line.index(step, at)
+            self.assertEqual(line.count(f"'{src}'"), 2, n)   # read, and named in the mismatch
+        self.assertEqual(line.count("Import-Module"), 1)   # the module only; its siblings load from the stage
         self.assertIn("Import-Module $iemMod -Force ; $r = & { Grant-IemServiceRight -Service 'svc name' }", script)
         self.assertNotIn(f"Import-Module '{self.MODULE}'", script)   # never from the run folder (#15)
         self.assertEqual(docs[-1], {"bootstrap": "Grant-IemServiceRight", "sha": SHA, "result": {"reaper": 1}})
+
+    def test_a_bundle_from_before_the_split_stages_its_one_module(self) -> None:
+        """#36: a bundle without IemPc.psm1's siblings holds the module as one
+        file, which imports none: it still bootstraps."""
+        self.gh.artifact = make_zip(self.tmp / "artifact-old" / f"iemmixer-{SHA}.zip", drop=ip.PC_SIBLINGS)
+        self.fetched()
+        self.assertEqual(self.run_main("bootstrap", "Get-IemBootstrapState")[0], 0)
+        self.assertEqual([s[1].rsplit("/", 1)[1] for s in self.pc.scps], ["IemPc.psm1"])
+        self.assertNotIn("IemPcAcl.psm1", self.pc.modules[-1][0])
+
+    def test_a_bundle_with_some_siblings_or_an_unknown_one_is_refused_before_the_pc(self) -> None:
+        """#36: its IemPc.psm1 would import a missing sibling or one another
+        session left in the shared stage."""
+        for i, (kw, words) in enumerate(((dict(drop=("IemPcPref.psm1",)), "but not IemPcPref.psm1"),
+                                         (dict(extra={"IemPcLater.psm1": b"x"}), "IemPcLater.psm1, an IemPc.psm1 sibling"))):
+            self.gh.artifact = make_zip(self.tmp / f"artifact-part{i}" / f"iemmixer-{SHA}.zip", **kw)
+            if ip.bundle_dir(SHA).exists():
+                shutil.rmtree(ip.bundle_dir(SHA))
+            self.fetched()
+            code, _, err = self.run_main("bootstrap", "Get-IemBootstrapState")
+            self.assertEqual((code, self.pc.modules, self.pc.scps, self.pc.calls), (1, [], [], []), words)
+            self.assertIn(words, err)
 
     def test_a_read_only_step_is_refused_during_an_event(self) -> None:
         self.fetched()

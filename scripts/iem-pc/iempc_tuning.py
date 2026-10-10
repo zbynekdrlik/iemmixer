@@ -78,12 +78,12 @@ def check_hashes(ip, r, want: dict[str, str]) -> dict:
 
 
 def run_install(ctx, ip, sha: str, profile: Path | None) -> dict:
-    """Uploads the bundle's IemPc.psm1 and three tuning modules (and `profile`,
+    """Uploads the bundle's IemPc.psm1 (its siblings too, #36) and three tuning modules (and `profile`,
     unless None: the installed one stays) and runs Install-IemTuning elevated.
     Every step changes the PC: a new flag lets each finish (then the event path)."""
     env = ctx.env
     rec = ip.need_record(sha)
-    pc_module, pc_module_hex = ip.extract_member(sha, rec, "IemPc.psm1")
+    pc_files = ip.pc_module_files(sha, rec)   # IemPc.psm1 and its siblings (#36)
     uploads = []
     want: dict[str, str] = {}
     for key, name in MODULES.items():
@@ -101,12 +101,11 @@ def run_install(ctx, ip, sha: str, profile: Path | None) -> dict:
     rel = f"bootstrap/{sha}"
     src = f"{rel}/tuning"
     ip.pc_mkdir(ctx, src, mode)
-    ip.scp(str(pc_module), ip.remote(env, f"{rel}/IemPc.psm1"), mode)
+    load = ip.upload_pc_module(ctx, rel, pc_files, mode)
     for local, name in uploads:
         ip.scp(str(local), ip.remote(env, f"{src}/{name}"), mode)
     body = f"Install-IemTuning -SourceDir {ip.ps_quote(ip.pc_join(env['PC_ROOT'], src))}{args}"
-    r = ip.run_module(env, body, ip.BOOTSTRAP_S, mode, module=ip.pc_join(env["PC_ROOT"], f"{rel}/IemPc.psm1"),
-                      module_hex=pc_module_hex)
+    r = ip.run_module(env, body, ip.BOOTSTRAP_S, mode, **load)
     return check_hashes(ip, r, want)
 
 

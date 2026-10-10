@@ -44,7 +44,8 @@ MODULE = "IemSshShell.psm1"
 # elevated root, file and task helpers) and IemTuningStore.psm1 (Get-/Set-
 # IemRegRaw, the exact registry save and restore) from its own folder, so the
 # stage gets both first and those imports never reach outside it. The store is
-# the bundle's tuning/ copy.
+# the bundle's tuning/ copy. stage_modules puts IemPc.psm1's siblings right
+# before it (#36: iempc_bundle.pc_stage).
 STAGE = (("IemPc.psm1", "IemPc.psm1"), ("tuning/IemTuningStore.psm1", "IemTuningStore.psm1"), (MODULE, MODULE))
 KEY = "HKLM:\\SOFTWARE\\OpenSSH"
 OPTION = "/d /c"
@@ -65,10 +66,11 @@ LINE = re.compile(r'"(?P<shell>[^"]+)"\s+/d /c\s+"')
 SHELL_TAIL = "\\system32\\cmd.exe"
 
 
-def plan(sha: str) -> dict:
-    return {"sha": sha, "modules": [member for member, _ in STAGE], "key": KEY, "values": VALUES, "undo_task": UNDO_TASK,
+def plan(sha: str, stage=STAGE) -> dict:
+    """`stage`: STAGE with IemPc.psm1's siblings (iempc_bundle.pc_stage, #36)."""
+    return {"sha": sha, "modules": [member for member, _ in stage], "key": KEY, "values": VALUES, "undo_task": UNDO_TASK,
             "undo_after_min": UNDO_MIN,
-            "steps": [f"scp {', '.join(member for member, _ in STAGE)} of bundle {sha} into bootstrap/{sha}",
+            "steps": [f"scp {', '.join(member for member, _ in stage)} of bundle {sha} into bootstrap/{sha}",
                       f"{SET} from the admin-only stage: save the prior values, arm {UNDO_TASK} (now + {UNDO_MIN} min), "
                       "write and read back the values and the key's rights",
                       'a fresh ssh session: its shell must be System32\'s cmd.exe run as "<shell>" /d /c "<command>"',
@@ -145,11 +147,13 @@ def run(ctx, ip) -> int:
     """`iempc ssh-shell` (dev time, locked)."""
     sha = ip.check_sha(ctx.args.sha)
     rec = ip.need_record(sha)
-    missing = [member for member, _ in STAGE if member not in (rec.get("sums") or {})]
+    # IemPc.psm1's siblings go with it (#36); pc_stage refuses a bundle with only some.
+    stage = ip.pc_stage(sha, rec, STAGE)
+    missing = [member for member, _ in stage if member not in (rec.get("sums") or {})]
     if missing:
         raise ip.Refused(f"bundle {sha} has no {', '.join(missing)}: fetch a bundle built with #15's ssh-shell")
     if ctx.args.dry_run:
-        ip.emit({"ssh_shell": "dry-run", **plan(sha)})
+        ip.emit({"ssh_shell": "dry-run", **plan(sha, stage)})
         return 0
     env = ctx.env
     mode = ctx.watch(abandon=False)

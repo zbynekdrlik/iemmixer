@@ -195,9 +195,29 @@ class ScriptTests(Base):
         for bad in ("CD" * 32, "cd" * 31):
             with self.assertRaises(ip.StepError, msg=bad):
                 ip.module_script("B", module="X:\\m.psm1", module_hex=bad)
+            with self.assertRaises(ip.StepError, msg=bad):
+                ip.module_script("B", module="X:\\m.psm1", module_hex=hexd, first=[("X:\\run\\IemPcAcl.psm1", bad)])
+        with self.assertRaises(ip.StepError):
+            ip.module_script("B", first=[("X:\\run\\IemPcAcl.psm1", hexd)])
         self.assertNotIn("finally", s)
         self.assertIn("} finally { F } ; ConvertTo-Json", ip.module_script("B", pre="P ; ", fin="F"))
         self.assertIn("try { P ; $r = & { B }", ip.module_script("B", pre="P ; ", fin="F"))
+
+    def test_the_siblings_are_staged_before_the_module_and_never_imported(self) -> None:
+        """#36: IemPc.psm1 imports its siblings from its own folder, so each is
+        read once, checked, staged and checked again before it; only the module
+        is imported (from its stage copy, which loads the staged siblings)."""
+        mod, acl, tasks = "cd" * 32, "ab" * 32, "ef" * 32
+        line = ip.module_script("B", module="X:\\run\\IemPc.psm1", module_hex=mod,
+                                first=[("X:\\run\\IemPcAcl.psm1", acl), ("X:\\run\\IemPcTasks.psm1", tasks)]).splitlines()[2]
+        at = 0
+        for name, hexd in (("IemPcAcl.psm1", acl), ("IemPcTasks.psm1", tasks), ("IemPc.psm1", mod)):
+            for step in (f"[IO.File]::ReadAllBytes('X:\\run\\{name}')", f"$iemH -cne '{hexd}'", f"$iemMod = Join-Path $iemStage '{name}'",
+                         "& $iemOnly $iemMod", f"(Get-FileHash -LiteralPath $iemMod -Algorithm SHA256).Hash.ToLowerInvariant() -cne '{hexd}'"):
+                at = line.index(step, at)
+        self.assertEqual(line.count("Import-Module"), 1)
+        self.assertLess(at, line.index("Import-Module $iemMod -Force ; $r = & { B }"))
+        self.assertEqual(line.count("$iemStage = Join-Path $iemRoot 'bootstrap-stage'"), 1)   # one stage, made once
 
     def test_the_last_line_is_the_envelope(self) -> None:
         self.assertEqual(ip.last_json("noise\n{\"exit\": 0}\n\n"), {"exit": 0})

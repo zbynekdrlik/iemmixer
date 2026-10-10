@@ -30,7 +30,9 @@ rule:
   window session checks each module against `$iemSums` (sums_table: the
   fetched bundle record's sums, composed on the dev box), and a module that
   loads another from its own folder (SpikePc GoldenPc, IemMeasure IemTuning,
-  IemTuning IemTuningStore: STAGED_FIRST, #34) has that one staged first;
+  IemTuning IemTuningStore: STAGED_FIRST, #34) has that one staged first,
+  as the bootstrap's IemPc.psm1 has its siblings (staged_import's `first`,
+  #36; iempc_bundle.pc_siblings decides which a bundle has);
 - TEMP and TMP point at <root>\\temp before IemTuning.psm1 loads: its Add-Type
   has csc write and then load a DLL in TEMP, and the session user's TEMP is open
   to every process of the user;
@@ -161,11 +163,15 @@ def staged(mods: list[tuple[str, str, str | None]], root: str = ROOT) -> str:
     return " ; ".join(parts)
 
 
-def staged_import(src: str, name: str, hexd: str, root: str = ROOT) -> str:
+def staged_import(src: str, name: str, hexd: str, root: str = ROOT,
+                  first: list[tuple[str, str, str]] | tuple = ()) -> str:
     """Statements that import the module uploaded at `src` (a PowerShell string)
     only from its admin-only stage copy `name`, checked by `hexd` before and
-    after the copy. `root`: the elevated root (a PowerShell expression)."""
-    return f"{staged([(src, name, hexd)], root)} ; Import-Module $iemMod -Force"
+    after the copy. `root`: the elevated root (a PowerShell expression).
+    `first`: (src, name, hexd) of the modules it imports from its own folder,
+    staged before it the same way (IemPc.psm1's siblings, #36), so its imports
+    never reach outside the stage."""
+    return f"{staged([*first, (src, name, hexd)], root)} ; Import-Module $iemMod -Force"
 
 
 def sums_table(sums: dict[str, str]) -> str:

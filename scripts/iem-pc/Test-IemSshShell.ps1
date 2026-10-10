@@ -1,8 +1,8 @@
 #Requires -Version 5.1
 # Self-test of IemSshShell.psm1 (#15, the admin-only OpenSSH default shell) on
 # Windows PowerShell 5.1 (CI job windows, an ephemeral administrator runner).
-# The module runs as the stage holds it: next to IemPc.psm1 and S1c's
-# IemTuningStore.psm1 (its exact registry save and restore), copied into one
+# The module runs as the stage holds it: next to IemPc.psm1 (with its
+# siblings, #36) and S1c's IemTuningStore.psm1 (its exact registry save and restore), copied into one
 # folder. Every function runs against a TEST key
 # (HKLM:\SOFTWARE\iemmixer-ssh-test-<id>, made admin-only as the real one must
 # be), a test task folder \iemmixer-test-ssh-<id>\ and a temp elevated root:
@@ -25,6 +25,11 @@ $base = Join-Path ([IO.Path]::GetTempPath()) ('iem-sshshell-' + $id)
 $mods = Join-Path $base 'modules'
 $sources = @{ 'IemPc.psm1' = (Join-Path $here 'IemPc.psm1'); 'IemSshShell.psm1' = (Join-Path $here 'IemSshShell.psm1')
               'IemTuningStore.psm1' = (Join-Path (Split-Path -Parent $here) 'pc-tuning\IemTuningStore.psm1') }
+# IemPc.psm1's siblings (#36), which it imports from its own folder: the stage holds them too
+# (by their names; test_iempc_bundle checks that these files are exactly its $script:SiblingNames).
+$pcSiblings = @(Get-ChildItem -LiteralPath $here -File | Where-Object { $_.Name -cmatch '^IemPc[A-Za-z0-9]+\.psm1$' } | ForEach-Object { $_.FullName })
+foreach ($f in $pcSiblings) { $sources[(Split-Path -Leaf $f)] = $f }
+$pcSiblingNames = @($pcSiblings | ForEach-Object { Split-Path -Leaf $_ })
 New-Item -ItemType Directory -Force -Path $mods | Out-Null
 foreach ($n in @($sources.Keys)) { Copy-Item -LiteralPath $sources[$n] -Destination (Join-Path $mods $n) }
 Import-Module (Join-Path $mods 'IemSshShell.psm1') -Force
@@ -216,6 +221,11 @@ try {
     $wrong['IemPc.psm1'] = '0' * 64
     $e = ErrorOf { Set-IemSshShell @common -ModuleSha256 $wrong }
     Assert ($e -like '*IemPc.psm1*not the build*' -and (Read-Values) -eq $absent -and $null -eq (Get-UndoTask) -and -not (Test-Path -LiteralPath $dir)) "set-refuses-a-module-that-is-not-the-checked-build-and-copies-nothing ($e)"
+    # IemPc.psm1's siblings (#36) go to the undo task's folder the same way.
+    $wrong = $sums.Clone()
+    $wrong[$pcSiblingNames[0]] = '0' * 64
+    $e = ErrorOf { Set-IemSshShell @common -ModuleSha256 $wrong }
+    Assert ($e -like "*$($pcSiblingNames[0])*not the build*" -and (Read-Values) -eq $absent -and $null -eq (Get-UndoTask) -and -not (Test-Path -LiteralPath $dir)) "set-refuses-a-sibling-that-is-not-the-checked-build-and-copies-nothing ($e)"
 
     # ---- a key that does not exist yet is made admin-only before any value is written ----
     $hklm.DeleteSubKeyTree($sub)
