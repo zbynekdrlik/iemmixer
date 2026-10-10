@@ -141,7 +141,10 @@ The gates need distributions the engine does not export today. `Status` has `lat
 
 The hwlat probe (S1c hand-off) is **not** added: it needs the spike executable and a CPU it can take. The soak's engine intervals and the DPC trace measure the same risk on the real engine.
 
-## 8. 72 h NullRt soak (manual, once)
+## 8. 72 h NullRt soak (manual, once): DROPPED by the owner on 2026-10-10
+
+An event lasts at most 2 h and the PC has no 72 h between events; the owner called the 72 h run waste. A 5.2 h run before the stop showed no growth (numbers on #10). The tool was removed. The text below is kept as history.
+
 
 - **Purpose:** long-run growth in the engine, server and client paths that 8 h may not show:
   - memory;

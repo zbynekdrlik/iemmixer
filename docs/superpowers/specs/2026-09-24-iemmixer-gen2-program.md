@@ -334,7 +334,7 @@ Proof codes: **M** mock E2E, **L** live E2E/HIL, **S** server tests, **E** engin
 | S4 | Importer, exporter, legacy data, certificate, PIN rule | No | ~0.9k, 1.5 wk | S3 |
 | S5 | Server and UI on the engine: Opus, taps, browser limiter, talk bind, handshake, `notify`, engineer-page login-failure counters, band-activity banner (removed: #38), "Back to REAPER" button (in the engineer's settings since #38), F29, F31, mock E2E | No | +2k/−3.6k, 0.8k UI, 4 wk | S3 |
 | S6 | ASIO backend, guard (modes, event signals, pin, alarms), bootstrap with alarm subscription, runner, `hil.yml`, F30 | Yes | ~1.5k + ops, 2–3 wk | S1a, S3, D2 |
-| S7 | Full HIL, live specs, ≥ 8 h PC soak, one manual 72 h NullRt soak, switch timing | Yes | ~1k + 3k TS, 2–3 wk | S5, S6 |
+| S7 | Full HIL, live specs, ≥ 8 h PC soak, switch timing (the 72 h NullRt soak dropped by the owner, 2026-10-10) | Yes | ~1k + 3k TS, 2–3 wk | S5, S6 |
 | S8 | Shadow imports (≥ 2 weeks), rollback drill, trials, sign-off, cutover, rollback window, decommissioning | Yes | ~0.5k; 3–4 wk + 8 wk | all; D3–D5 |
 
 **Totals:** ~15k LoC Rust (0.8k of it UI) plus 3k TypeScript; ~22–25 weeks for one stream, then the 8-week rollback window. PC availability sets the calendar.
