@@ -127,8 +127,11 @@ try {
     # A sibling not staged (left out of `first`): another set, so another folder, and the
     # module's import fails. Neither the checked copy the first set left in this stage nor
     # the one next to the upload, in the user's root, is ever imported.
+    # The refused set above (IemPcGone) left its own folder: the new set's folder is the
+    # one this call adds.
+    $before = @(Get-ChildItem -LiteralPath $stage -Directory | ForEach-Object { $_.FullName })
     $doc = Invoke-Staged $src $hex $er ((@($sibs | Select-Object -Skip 1)) -join ';')
-    $others = @(Get-ChildItem -LiteralPath $stage -Directory | Where-Object { $_.FullName -ne $own })
+    $others = @(Get-ChildItem -LiteralPath $stage -Directory | Where-Object { $before -notcontains $_.FullName })
     Assert ((Get-IemProp $doc 'ok') -eq $false -and "$(Get-IemProp $doc 'error')" -like "*$($sibNames[0])*" -and $others.Count -eq 1 -and
             -not (Test-Path -LiteralPath (Join-Path $others[0].FullName $sibNames[0]))) "stage-never-imports-a-sibling-it-did-not-stage ($(Get-Result $doc))"
 
