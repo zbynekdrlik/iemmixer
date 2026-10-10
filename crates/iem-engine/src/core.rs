@@ -369,19 +369,6 @@ impl Core {
         Ok(all)
     }
 
-    /// Fault injection and HIL's forced reopen run only under the
-    /// `--fault-injection` launch flag.
-    fn need_fault_injection(&self) -> Result<(), CmdError> {
-        if self.flags.fault_injection {
-            Ok(())
-        } else {
-            Err(CmdError::new(
-                ErrCode::Forbidden,
-                "the engine runs without the fault-injection flag",
-            ))
-        }
-    }
-
     fn input(&self, id: &InputId) -> Result<usize, CmdError> {
         self.topo.input_index(id).ok_or_else(|| {
             CmdError::new(ErrCode::UnknownId, format!("unknown input {}", clip(&id.0)))

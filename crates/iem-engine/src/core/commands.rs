@@ -269,6 +269,19 @@ impl Core {
         }
     }
 
+    /// Fault injection and HIL's forced reopen run only under the
+    /// `--fault-injection` launch flag.
+    fn need_fault_injection(&self) -> Result<(), CmdError> {
+        if self.flags.fault_injection {
+            Ok(())
+        } else {
+            Err(CmdError::new(
+                ErrCode::Forbidden,
+                "the engine runs without the fault-injection flag",
+            ))
+        }
+    }
+
     /// X13: a sine replaces `input` for `ttl_s`, every TX capped; with
     /// `mask` (the HIL signal) it sounds only on those spare outputs
     /// meanwhile, and no mix's TX carries anything; `listen` (S7, HIL only)
