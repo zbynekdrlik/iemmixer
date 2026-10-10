@@ -233,7 +233,7 @@ fn in_prod_a_failed_boot_into_live_unwinds_to_reaper() {
     };
     let mut g = saved(dir.path(), st, 1_000);
     let mut pc = FakePc::new(Facts::default());
-    pc.fail(Call::Data, "iem-migrate band ended with Some(1)");
+    pc.fail(Call::EngineStart, "the engine did not start");
     assert_eq!(start(&mut pc, &mut g, 5_000), Some(Outcome::Done));
     assert_eq!(g.state.mode, Mode::Event);
     assert!(pc.called(Call::ReaperStart) && pc.called(Call::AppStart));
@@ -277,7 +277,7 @@ fn in_prod_a_failed_live_entry_keeps_the_pin_and_the_session() {
             .bundles
             .insert(sha.into(), record(sha, "main", Hil::Green));
     }
-    pc.fail(Call::Data, "iem-migrate band ended with Some(1)");
+    pc.fail(Call::EngineStart, "the engine did not start");
     let live = Request::Live {
         build: Some(NEW.into()),
         trial: false,
