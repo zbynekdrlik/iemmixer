@@ -13,7 +13,8 @@
 //! The pin changes only by the rules below (a maintenance session that ends
 //! on a green `main` build, a prod crash loop's revert); never by an entry
 //! or an activation, which change the active bundle only
-//! (`GuardState.active`).
+//! (`GuardState.active`, mirrored into the legacy `GuardState.pins` for an
+//! older guard).
 
 use std::fs;
 use std::path::Path;

@@ -191,9 +191,11 @@ pub fn may_go_live(r: &Record) -> Result<(), String> {
 
 /// The pins as a guard before S8 kept them: it promoted every entry's and
 /// every activation's build, so `current` was the active bundle. Kept in
-/// `GuardState.pins` only so a state such a guard saved still names its
-/// active bundle (`GuardState::active_bundle`), and an older guard that
-/// takes over finds what it wrote; the pin itself is `lifecycle::Prod`'s.
+/// `GuardState.pins` so a state such a guard saved still names its active
+/// bundle (`GuardState::active_bundle`), and written as a mirror of the
+/// active bundle and the way back (`GuardState::set_active`) so an older
+/// guard that takes over runs the active bundle; the pin itself is
+/// `lifecycle::Prod`'s.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Pins {
