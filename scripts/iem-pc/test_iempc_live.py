@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import iempc_live as live  # noqa: E402
 import iempc_soak  # noqa: E402
 from iempc_test_support import RUN, SHA, SHA2, Base, ip  # noqa: E402
-import test_iempc  # noqa: E402  (ActivateTests by its module: imported by name it would run twice)
+import test_iempc_bundle  # noqa: E402  (ActivateTests by its module: imported by name it would run twice)
 from test_iempc_soak import READY, SWITCHING, engine, ready  # noqa: E402
 import test_iempc_switch as sw  # noqa: E402
 from test_iempc_trace import TraceBase  # noqa: E402
@@ -484,8 +484,8 @@ class ActivateGuardTests(RunningGuardCases, Base):
     def setUp(self) -> None:
         super().setUp()
         self.patch(HANDOVER_S=10.0, HANDOVER_POLL_S=0.01)
-        self.pc.replies[("activate", SHA)] = test_iempc.ActivateTests.ACTIVATED
-        self.pc.replies[("status",)] = test_iempc.ActivateTests.status(SHA)
+        self.pc.replies[("activate", SHA)] = test_iempc_bundle.ActivateTests.ACTIVATED
+        self.pc.replies[("status",)] = test_iempc_bundle.ActivateTests.status(SHA)
 
     def passes(self) -> None:
         code, docs, err = self.run_main(*self.ARGV)
