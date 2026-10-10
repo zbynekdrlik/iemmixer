@@ -13,7 +13,7 @@ fail-fast = { max-fail = 1, terminate = "immediate" }
 # counts as failed (on-timeout defaults to "fail"), which with fail-fast above
 # ends the run and catches the mutant. Without it, a mutant that makes every
 # `process` call loop forever fills all test threads with hung tests, the
-# bounded ones (`rt_tests::run_bounded`) never get a thread, and cargo-mutants
+# bounded ones (`rt::tests::run_bounded`) never get a thread, and cargo-mutants
 # reports TIMEOUT. A catch by a timeout is only provisional: the post-check
 # tests that mutant again with `mutants-recheck` below. Give a slower package
 # or test its own override here, from its measured time (the mutation-warmup

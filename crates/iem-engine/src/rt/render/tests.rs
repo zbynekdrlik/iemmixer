@@ -1,4 +1,4 @@
-//! The pipeline's tests that `rt_tests.rs` does not hold (#36): the mix's
+//! The pipeline's tests that `rt/tests.rs` does not hold (#36): the mix's
 //! own sanitiser count, which the move to this module made new to the
 //! diff-scoped mutation gate and which no other test reached (an input and
 //! a group strip trip there, a mix behind its limiter never does).

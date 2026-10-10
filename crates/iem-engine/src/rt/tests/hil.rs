@@ -1,4 +1,4 @@
-//! Unit tests of the RT processor for S6 (split from `rt_tests.rs`, #32):
+//! Unit tests of the RT processor for S6 (split from `rt/tests.rs`, #32):
 //! the held output, the reopen fade-in, HIL's spare outputs and the D5(b)
 //! loopback return.
 
