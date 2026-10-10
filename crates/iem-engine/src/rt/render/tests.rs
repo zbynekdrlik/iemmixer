@@ -36,7 +36,7 @@ fn a_tripping_mix_counts_in_the_status_and_the_meters() {
     let mut core = Core::new(Arc::clone(&topo), &MixState::default(), 0, Flags::default());
     let m1 = MixId::new("m1");
     // 9e5 passes the input (X1 at 1e6); +12 dB at the level and at the
-    // volume, with the limiter off, trips the mix once per block.
+    // volume trips the mix once per block once its limiter is out.
     for cmd in [
         Cmd::SetLevel {
             mix: m1.clone(),
@@ -66,11 +66,18 @@ fn a_tripping_mix_counts_in_the_status_and_the_meters() {
     let mut input = Planar::new(topo.rx.len(), 3200);
     input.channel_mut(0).fill(9e5);
     let outs = p.outputs();
+    // A limiter disabled at start still fades out over its first 10 ms
+    // (960 samples, A13), so the first meter period trips only from then on.
+    let warm = Offline { block: 32 }.run(&mut p, &input, outs);
+    assert!(warm.fault.is_none(), "{:?}", warm.fault);
+    let before = h.status.trips.load(Ordering::Relaxed);
+    assert!(before > 0, "the mix trips once its limiter is out");
     let run = Offline { block: 32 }.run(&mut p, &input, outs);
     assert!(run.fault.is_none(), "{:?}", run.fault);
-    assert_eq!(h.status.trips.load(Ordering::Relaxed), 100);
+    let trips = h.status.trips.load(Ordering::Relaxed);
+    assert_eq!(trips - before, 100, "once per 32-sample block");
     let f = h.meters.read().clone();
-    assert_eq!((f.seq, f.trips), (1, 100));
+    assert_eq!((f.seq, f.trips), (2, trips));
     let m = topo.mix_index(&m1).unwrap();
     assert_eq!(f.mixes[m], [0.0, 0.0], "a tripping mix is silenced");
     assert!(
