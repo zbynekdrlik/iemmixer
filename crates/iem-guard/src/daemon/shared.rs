@@ -344,12 +344,10 @@ impl Shared {
     /// never pre-empts it. Its `begin` (or the event plan when the pin may
     /// not go live) follows.
     pub fn claim_live(&self) {
-        let mut v = self.lock();
-        self.cancel.clear();
-        v.running = Some(Mode::Live);
-        v.version += 1;
-        drop(v);
-        self.changed.notify_all();
+        self.update(|v| {
+            self.cancel.clear();
+            v.running = Some(Mode::Live);
+        });
     }
 
     /// A switch into dev or live is about to end. Under the view's lock:

@@ -73,6 +73,15 @@ Every dev and live entry already imports the REAPER project. Add a report-only s
 - **Never fails or delays:** a wait bounded by 5 s ("ide event" ends it at once; past the bound it is asked to stop, Ctrl-Break as every wait, never force-ended); any failure is one `error` line (a fixed code and why) and a log line, never an alarm or a step failure. Its time is part of the entry's silence and shows as the step `shadow` in the switch record.
 - **The history format:** one JSON line per entry, `at` (Unix ms), `entry`, `bundle`, then the command's report or `error` and `why`; the guard is its one writer. `iempc shadow-report` prints counts and kinds only (clean entries, verdicts, errors by code, differences by `site|state.<kind>.<field>`).
 
+### 3.5a The cross-lane review's fixes (lane 5)
+
+The review of lanes 1–4 together found five gaps; each is fixed with a RED test first (`.claude/rules/guard.md` holds the detail).
+- **"Ide event" never cancels a switch to live in prod.** A second owner's signal (an in-flight iempc command's own `iemmode event --signal`) routed while the first one's dev → live entry runs waits for it and counts live as done; the first one claims the view before its first step, so one routed earlier waits too. The button still pre-empts.
+- **A prod lost to trial** (an older guard took over, an unreadable state) left `pin_changes` open and the autostarts disabled. (a) The cutover refuses what such a prod leaves (an export never restored, `pin_changes = true`), and the cutover task refuses a listed task already disabled, a Run value already absent or an export never restored before writing anything; `Enable-IemAutostarts` marks an export restored (`restored.json`), so the drill's export does not block the owner's cutover. (Decided in the lane: "an earlier export exists" counts only when it was never restored; counted as written, the drill's own export would refuse every later cutover.) (b) `iemmode rollback` repairs it in trial, same steps and guarantees. (c) `manifest.json` names `guard_lifecycle: 1`; `activate` in prod and while rolling back refuses a bundle without it.
+- **The drill** reads the status after the reboot until the start's checks ended (no switch, a later `last_switch.ended`).
+- **A boot after a power loss mid-cutover**: the lifecycle back to trial and `pin_changes` first (local), the start's event plan, then the elevated undos.
+- **The button cancelling an entry in prod**: the rollback saves and quits the REAPER that entry's unwind started on the original, then swaps, so REAPER ends on the export; REAPER runs at the end whatever fails.
+
 ### 3.6 Decommissioning
 
 After the rollback window the owner decides; a runbook in the ops repo lists the predecessor's tasks, ports and files to retire. No code beyond what cutover already exports.
@@ -91,4 +100,5 @@ Unit tests for `lifecycle` (every mode × lifecycle × request), the pin rules a
 2. `cutover` (guard + iempc + the autostart PowerShell) (~350).
 3. `rollback` + button routing + the drill script (~350).
 4. Shadow imports + report (~150).
+5. The cross-lane review's five fixes (§3.5a).
 Then the drill on the PC, then the owner's trials and cutover message.
