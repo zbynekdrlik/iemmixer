@@ -21,7 +21,7 @@ Missing: a persisted cutover state (`SiteConf.prod` is always false, every boot 
 `GuardState.lifecycle: Trial | Prod { since, pin } | RollingBack` (persisted, additive, default `Trial`).
 - `Trial` (today): every boot is `event` (G1); `live` only with `--trial`.
 - `Prod`: the boot restores `live` on the pin; `SiteConf.prod` is true (the crash-loop branch becomes live); a dev entry is maintenance (§3.4).
-- `RollingBack`: set first by rollback, cleared to `Trial` when it ends; a boot in it continues the rollback to `event`.
+- `RollingBack`: set first by rollback, cleared to `Trial` when it ends; a boot in it continues the rollback to `event`. (Removed in lane 5 with the rollback, §3.3: a state that holds it reads as `Trial`, alarmed.)
 A pure `lifecycle` module decides the boot mode, the entry gates and the crash rule (mutated, unit-tested), the daemon has call sites only.
 
 ### 3.2 `iemmode cutover --build <main sha>` (owner's message only)
@@ -37,25 +37,13 @@ Refuses unless: `Trial`, the build is the active main bundle with green `hil/iem
 6. post-cutover checks: identity (LAN, public host), engine on the card at 32, a member page loads.
 `iempc cutover --sha` wraps it (EVENT-NOW refusal, dev-box lock).
 
-### 3.3 `iemmode rollback` and the drill
+### 3.3 No rollback (the owner's decision, 2026-10-10)
 
-Refuses unless `Prod` (or `RollingBack`). Steps, logged, each read back:
-1. lifecycle `RollingBack` persisted;
-2. export band data to a **new** RPP (`iem-migrate export`, self-checked; the original is never overwritten);
-3. stop iemmixer (the usual graceful stops), remove the guard's logon trigger;
-4. re-enable the exported autostarts (from step 2 of cutover);
-5. start the predecessor and REAPER on the verified export (fallback: the original project, plus an alarm);
-6. handover checks (as the event path), lifecycle `Trial`, mode `event`, persisted and read back.
-The "Back to REAPER" button calls `iemmode event` in `Trial` and `iemmode rollback` in `Prod` (same endpoint, the guard decides).
-**Drill:** before the first cutover, on the PC in dev time, with a scratch lifecycle: cutover onto the current main, then rollback, then a reboot that must come back in `event` with REAPER on the export. Recorded on #11.
-
-(Lane 3 as built; `.claude/rules/guard.md` holds the detail.)
-- **Order:** stop, export, the export in the project's place, the event plan (REAPER), then the autostarts back, the guard's logon trigger off (only once the autostarts are back: lane 2's rule that the next boot always starts the predecessor or the guard), `pin_changes = false`, trial. The export runs after the engine stopped, so it reads the engine's last save; the elevated tasks run after REAPER is back, so the in-ears are silent only for the stops, the export, the swap and the event plan.
-- **The export's path:** a new file in the REAPER project's own folder, `<stem>.rollback-<at>.<ext>`. Not the elevated root: the guard runs as the user and may not write there, and REAPER saves into the project it runs.
-- **REAPER "on the export":** the export takes the project's path by renames, the original kept beside it as `<stem>.before-rollback-<at>.<ext>` (never overwritten). The site's StartREAPER task, the guard's save check, the trial's import and the predecessor's autostarts all name the project's path, so a REAPER started on a file elsewhere would split the band's data from all of them. REAPER that cannot open the export is quit, the original goes back and REAPER starts on it, with an alarm.
-- **The button and "ide event":** plain `iemmode event` (the button's command, the server's route unchanged) is the rollback in prod; `iemmode event --signal` is the owner's "ide event" (`iempc event` sends it). After the cutover iemmixer serves the band at an event, so "ide event" in prod never rolls back: maintenance ends with live on the pin (REAPER if the pin may not go live), a healthy live stays, and an engine that does not play (or a PC already in event) gets the event plan, REAPER for this event, the PC still in prod.
-- **Robustness:** a step left keeps `RollingBack` and the record; a guard restart (its stops and event plan first) or another `iemmode rollback` continues it. A healthy engine that does not stop keeps serving and a dead one may hold the card: either stops the rollback with no REAPER, as the event plan does.
-- **The drill:** `scripts/iem-pc/iempc_drill.py`; the reboot is S1c's graceful one (`spike_window`/`tuning_window`), after which REAPER must come back by itself from the restored autostarts.
+**ROZHODNUTÉ on #11: no rollback machinery.** REAPER and the predecessor stay installed on the PC and in git; going back to REAPER after the cutover is the same event switch as today (the event plan: iemmixer stopped, REAPER and the predecessor app started), run by hand when needed. Program spec D4's rollback window is dropped. Lane 3 built a rollback (`iemmode rollback`/`iempc rollback`, a persisted record and `RollingBack`, an export of the band's data swapped into the REAPER project's place, the button rolling back in prod, the drill); lane 5 removed it, with the review's findings 2(b), 3 and 5 on it.
+- **`iemmode event`:** the button (`iemmode event`, no flag) is the event plan in every lifecycle; in prod the lifecycle stays prod and the next boot goes live on the pin. "Ide event" (`--signal`, `iempc event`) keeps lane 3's prod behaviour: maintenance ends live on the pin (REAPER when the pin may not go live), a healthy live stays, and an engine that does not play or a PC already in event gets the event plan, still prod.
+- **A state lane 3's guard saved** while rolling back reads as trial (every boot event) and its load alarms it.
+- **What a lost prod leaves** (an older guard took over: `pin_changes` open, the predecessor's autostarts disabled) is put back by hand; the next cutover refuses until it is (§3.5a).
+- `iempc switch-test` runs in trial and in prod: its plain event leg is the event plan.
 
 ### 3.4 Pin and maintenance (fixes the early promotion)
 
@@ -77,10 +65,9 @@ Every dev and live entry already imports the REAPER project. Add a report-only s
 
 The review of lanes 1–4 together found five gaps; each is fixed with a RED test first (`.claude/rules/guard.md` holds the detail).
 - **"Ide event" never cancels a switch to live in prod.** A second owner's signal (an in-flight iempc command's own `iemmode event --signal`) routed while the first one's dev → live entry runs waits for it and counts live as done; the first one claims the view before its first step, so one routed earlier waits too. The button still pre-empts.
-- **A prod lost to trial** (an older guard took over, an unreadable state) left `pin_changes` open and the autostarts disabled. (a) The cutover refuses what such a prod leaves (an export never restored, `pin_changes = true`), and the cutover task refuses a listed task already disabled, a Run value already absent or an export never restored before writing anything; `Enable-IemAutostarts` marks an export restored (`restored.json`), so the drill's export does not block the owner's cutover. (Decided in the lane: "an earlier export exists" counts only when it was never restored; counted as written, the drill's own export would refuse every later cutover.) (b) `iemmode rollback` repairs it in trial, same steps and guarantees. (c) `manifest.json` names `guard_lifecycle: 1`; `activate` in prod and while rolling back refuses a bundle without it.
-- **The drill** reads the status after the reboot until the start's checks ended (no switch, a later `last_switch.ended`).
+- **A prod lost to trial** (an older guard took over, an unreadable state) left `pin_changes` open and the autostarts disabled. (a) The cutover refuses what such a prod leaves (an export never restored, `pin_changes = true`), and the cutover task refuses a listed task already disabled, a Run value already absent or an export never restored before writing anything; `Enable-IemAutostarts` marks an export restored (`restored.json`), so an earlier cutover that was undone cleanly does not block the next. (Decided in the lane: "an earlier export exists" counts only when it was never restored; counted as written, any earlier export, a cleanly undone one too, would refuse every later cutover.) (c) `manifest.json` names `guard_lifecycle: 1`; `activate` in prod refuses a bundle without it, and `iempc activate --offline` (whose step is the bundle's own guard) refuses such a bundle unless the guard says trial. (b), the repair rollback, was built and then removed with the rollback (§3.3).
 - **A boot after a power loss mid-cutover**: the lifecycle back to trial and `pin_changes` first (local), the start's event plan, then the elevated undos.
-- **The button cancelling an entry in prod**: the rollback saves and quits the REAPER that entry's unwind started on the original, then swaps, so REAPER ends on the export; REAPER runs at the end whatever fails.
+- **Findings 3 (the drill) and 5 (the rollback's project swap)** were fixed and then removed with the rollback (§3.3).
 
 ### 3.6 Decommissioning
 
@@ -92,13 +79,13 @@ D5 (no loopback, decided). Any new feature (program §2 scope freeze). The rollb
 
 ## 5. Proof
 
-Unit tests for `lifecycle` (every mode × lifecycle × request), the pin rules and the cutover/rollback step order with a fake PC; the PowerShell autostart export/disable/re-enable against a test task folder (windows job); on the PC: the drill (§3.3) and a switch test in `Prod` (event path from live).
+Unit tests for `lifecycle` (every mode × lifecycle × request), the pin rules and the cutover/rollback step order with a fake PC; the PowerShell autostart export/disable/re-enable against a test task folder (windows job); on the PC: a switch test in `Prod` (event path from live; the drill went with the rollback, §3.3).
 
 ## 6. Lanes (one at a time)
 
 1. `lifecycle` state, boot rule, gates, pin fix (~250 Rust).
 2. `cutover` (guard + iempc + the autostart PowerShell) (~350).
-3. `rollback` + button routing + the drill script (~350).
+3. `rollback` + button routing + the drill script (~350; removed in lane 5, §3.3).
 4. Shadow imports + report (~150).
 5. The cross-lane review's five fixes (§3.5a).
-Then the drill on the PC, then the owner's trials and cutover message.
+Then the owner's trials and cutover message (the drill went with the rollback, §3.3).
