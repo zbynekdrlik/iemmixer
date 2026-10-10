@@ -76,6 +76,16 @@ impl CutStep {
     pub fn changes(self) -> bool {
         !matches!(self, CutStep::Import | CutStep::Checks)
     }
+
+    /// Whether its undo is the guard's own, quick and local (the state
+    /// file, the server's config), not the elevated cutover task's (up to
+    /// `win::cutover::LIMIT` each, not cancellable). A starting guard undoes
+    /// the local ones before its event plan and the elevated ones after it
+    /// (S8 lane 5), so a boot after a cut-off cutover is never silent for
+    /// them.
+    pub fn local(self) -> bool {
+        matches!(self, CutStep::Lifecycle | CutStep::PinChanges)
+    }
 }
 
 /// What a failed cutover changes back, newest first: every begun step that
