@@ -6,7 +6,8 @@
 use std::time::{Duration, Instant};
 
 use super::tests::{
-    HELD, INIT, SHA, ask, band_up, dev, iemmixer_up, preempt_after, status_reply, steps, texts,
+    HELD, INIT, SHA, ask, band_up, dev, event, iemmixer_up, preempt_after, status_reply, steps,
+    texts,
 };
 use super::*;
 use crate::crash;
@@ -51,15 +52,7 @@ fn the_kept_serving_alarm_says_so() {
     let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
     pc.fail(Call::EngineStop, "no DriverReleased within 10 s");
     pc.health(Health::Healthy);
-    let r = handle(
-        &mut pc,
-        &mut g,
-        Request::Event {
-            dry_run: false,
-            signal: false,
-        },
-        INIT,
-    );
+    let r = handle(&mut pc, &mut g, event(false), INIT);
     assert!(!r.ok);
     assert!(
         r.detail.starts_with(
@@ -200,14 +193,7 @@ fn an_event_plan_never_writes_the_preference_under_a_reaper_that_holds_the_card(
         g.site.on_pref_fail = choice;
         g.state.pins.current = Some(SHA.into());
         pc.pref_attempts = 1;
-        let r = ask(
-            &mut pc,
-            &mut g,
-            Request::Event {
-                dry_run: false,
-                signal: false,
-            },
-        );
+        let r = ask(&mut pc, &mut g, event(false));
         assert!(r.ok, "{choice:?}: {r:?}");
         assert_eq!(
             r.detail,
@@ -246,25 +232,8 @@ fn a_preference_left_under_reaper_is_restored_once_reaper_quits() {
     let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
     g.state.pins.current = Some(SHA.into());
     pc.pref_attempts = 1;
-    assert!(
-        ask(
-            &mut pc,
-            &mut g,
-            Request::Event {
-                dry_run: false,
-                signal: false,
-            }
-        )
-        .ok
-    );
-    let r = ask(
-        &mut pc,
-        &mut g,
-        Request::Event {
-            dry_run: false,
-            signal: false,
-        },
-    );
+    assert!(ask(&mut pc, &mut g, event(false)).ok);
+    let r = ask(&mut pc, &mut g, event(false));
     assert!(r.ok, "{r:?}");
     assert_eq!(
         r.detail,
@@ -297,14 +266,7 @@ fn a_preference_left_under_reaper_is_restored_once_reaper_quits() {
 fn an_event_plan_restores_the_preference_when_nothing_holds_the_card() {
     let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
     pc.pref_attempts = 1;
-    let r = ask(
-        &mut pc,
-        &mut g,
-        Request::Event {
-            dry_run: false,
-            signal: false,
-        },
-    );
+    let r = ask(&mut pc, &mut g, event(false));
     assert!(r.ok, "{r:?}");
     assert!(
         r.detail
@@ -326,17 +288,7 @@ fn an_event_plan_restores_the_preference_when_nothing_holds_the_card() {
         Guard::for_test(Mode::Event),
     );
     pc.pref_attempts = 1;
-    assert!(
-        ask(
-            &mut pc,
-            &mut g,
-            Request::Event {
-                dry_run: false,
-                signal: false,
-            }
-        )
-        .ok
-    );
+    assert!(ask(&mut pc, &mut g, event(false)).ok);
     assert_eq!(pc.pref_writes, 1);
     assert!(pc.index(Call::PrefCheck) < pc.index(Call::ReaperSaveQuit));
     assert!(pc.index(Call::ReaperSaveQuit) < pc.index(Call::ReaperStart));
@@ -350,14 +302,7 @@ fn an_event_plan_restores_the_preference_when_nothing_holds_the_card() {
         Guard::for_test(Mode::Dev),
     );
     pc.pref_attempts = 1;
-    let r = ask(
-        &mut pc,
-        &mut g,
-        Request::Event {
-            dry_run: false,
-            signal: false,
-        },
-    );
+    let r = ask(&mut pc, &mut g, event(false));
     assert!(r.ok, "{r:?}");
     assert_eq!(pc.pref_writes, 1);
     assert!(pc.index(Call::HolderGone) < pc.index(Call::PrefCheck));
@@ -782,15 +727,7 @@ fn the_handover_reports_what_it_saw() {
     let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Event));
     pc.reaper.peaks = vec![f64::NEG_INFINITY];
     pc.pref_attempts = 2;
-    let r = handle(
-        &mut pc,
-        &mut g,
-        Request::Event {
-            dry_run: false,
-            signal: false,
-        },
-        INIT,
-    );
+    let r = handle(&mut pc, &mut g, event(false), INIT);
     assert!(r.ok, "{r:?}");
     assert_eq!(
         r.detail,
@@ -799,15 +736,7 @@ fn the_handover_reports_what_it_saw() {
     );
     // A preference already at the original is not reported.
     let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
-    let r = handle(
-        &mut pc,
-        &mut g,
-        Request::Event {
-            dry_run: false,
-            signal: false,
-        },
-        INIT,
-    );
+    let r = handle(&mut pc, &mut g, event(false), INIT);
     assert_eq!(r.detail, "event: done; tuning exit: exit: ok");
 }
 
@@ -820,14 +749,7 @@ const NOTICE: &str = "About REAPER v7.65/win64 rev 0a1b2c";
 fn reapers_evaluation_notice_is_reported_and_never_an_alarm() {
     let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
     pc.reaper.dialogs = vec![NOTICE.into()];
-    let r = ask(
-        &mut pc,
-        &mut g,
-        Request::Event {
-            dry_run: false,
-            signal: false,
-        },
-    );
+    let r = ask(&mut pc, &mut g, event(false));
     assert!(r.ok, "{r:?}");
     assert_eq!(
         r.detail,
@@ -845,14 +767,7 @@ fn reapers_evaluation_notice_is_reported_and_never_an_alarm() {
     // Any other dialog beside it fails the handover as before; the report
     // still names the notice.
     pc.reaper.dialogs.push("Save changes?".into());
-    let r = ask(
-        &mut pc,
-        &mut g,
-        Request::Event {
-            dry_run: false,
-            signal: false,
-        },
-    );
+    let r = ask(&mut pc, &mut g, event(false));
     assert_eq!(texts(&g), ["ReaperHandover: a REAPER dialog is open"]);
     assert!(
         r.detail.contains(r#"; reaper_notice: "evaluation""#),
@@ -861,14 +776,7 @@ fn reapers_evaluation_notice_is_reported_and_never_an_alarm() {
     );
     // Without it the report and the status do not name it.
     pc.reaper.dialogs.clear();
-    let r = ask(
-        &mut pc,
-        &mut g,
-        Request::Event {
-            dry_run: false,
-            signal: false,
-        },
-    );
+    let r = ask(&mut pc, &mut g, event(false));
     assert!(!r.detail.contains("reaper_notice"), "{}", r.detail);
     assert!(
         !status_reply(&g).contains("reaper_notice"),
@@ -883,17 +791,7 @@ fn the_status_names_the_notice_only_as_the_last_handover_saw_it() {
     let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
     g.state.pins.current = Some(SHA.into());
     pc.reaper.dialogs = vec![NOTICE.into()];
-    assert!(
-        ask(
-            &mut pc,
-            &mut g,
-            Request::Event {
-                dry_run: false,
-                signal: false,
-            }
-        )
-        .ok
-    );
+    assert!(ask(&mut pc, &mut g, event(false)).ok);
     assert!(
         status_reply(&g).contains("reaper_notice"),
         "{}",
@@ -914,26 +812,9 @@ fn the_status_names_the_notice_only_as_the_last_handover_saw_it() {
     // A handover that cannot read REAPER does not repeat an old notice.
     let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
     pc.reaper.dialogs = vec![NOTICE.into()];
-    assert!(
-        ask(
-            &mut pc,
-            &mut g,
-            Request::Event {
-                dry_run: false,
-                signal: false,
-            }
-        )
-        .ok
-    );
+    assert!(ask(&mut pc, &mut g, event(false)).ok);
     pc.fail(Call::ReaperFacts, "REAPER's windows: access denied");
-    let r = ask(
-        &mut pc,
-        &mut g,
-        Request::Event {
-            dry_run: false,
-            signal: false,
-        },
-    );
+    let r = ask(&mut pc, &mut g, event(false));
     assert!(!r.detail.contains("reaper_notice"), "{}", r.detail);
     assert_eq!(
         texts(&g),
@@ -956,15 +837,7 @@ fn the_jobs_are_cancelled_before_the_runner_stops() {
         Guard::for_test(Mode::Dev),
     );
     g.state.job = Some(4242);
-    let r = handle(
-        &mut pc,
-        &mut g,
-        Request::Event {
-            dry_run: false,
-            signal: false,
-        },
-        INIT,
-    );
+    let r = handle(&mut pc, &mut g, event(false), INIT);
     assert!(r.ok, "{r:?}");
     assert_eq!(g.state.job, None);
     assert!(r.detail.contains("HIL job 4242 cancelled"), "{}", r.detail);

@@ -6,7 +6,8 @@
 use std::time::{Duration, Instant};
 
 use super::tests::{
-    INIT, OTHER, SHA, ask, band_up, dev, iemmixer_up, prod_on, record, status_reply, steps, texts,
+    INIT, OTHER, SHA, ask, band_up, dev, event, iemmixer_up, prod_on, record, status_reply, steps,
+    texts,
 };
 use super::*;
 use crate::bundle::{Hil, Pins};
@@ -53,10 +54,7 @@ fn jobs_are_refused_while_switching() {
         Request::AlarmTest,
         Request::AlarmAck { id: 1 },
         Request::Quit,
-        Request::Event {
-            dry_run: true,
-            signal: false,
-        },
+        event(true),
     ];
     for req in &refused {
         match shared.route(req) {
@@ -99,15 +97,7 @@ fn jobs_are_refused_while_switching() {
         (false, "busy: a switch ran meanwhile (dev → event)")
     );
     assert!(pc.calls().is_empty());
-    let r = handle(
-        &mut pc,
-        &mut g,
-        Request::Event {
-            dry_run: false,
-            signal: false,
-        },
-        seen,
-    );
+    let r = handle(&mut pc, &mut g, event(false), seen);
     assert!(!r.ok);
     assert_eq!(r.detail, "a switch ran meanwhile; event: no switch yet");
     assert!(pc.calls().is_empty());
@@ -150,10 +140,7 @@ fn ide_event_preempts_or_waits_but_never_both() {
     // moves the fence, so a dev or live entry queued before it never runs
     // after it (#42).
     assert_eq!(
-        shared.route(&Request::Event {
-            dry_run: false,
-            signal: false,
-        }),
+        shared.route(&event(false)),
         Route::Queue(Generation { epoch: 0, fence: 1 })
     );
     assert!(cancel.preempted());
@@ -164,10 +151,7 @@ fn ide_event_preempts_or_waits_but_never_both() {
         v.epoch = 3;
     });
     assert_eq!(
-        shared.route(&Request::Event {
-            dry_run: false,
-            signal: false,
-        }),
+        shared.route(&event(false)),
         Route::AwaitEnd("already switching to event")
     );
     assert!(!cancel.preempted());
@@ -175,10 +159,7 @@ fn ide_event_preempts_or_waits_but_never_both() {
     // During any other switch: pre-empt it and wait.
     shared.update(|v| v.running = Some(Mode::Live));
     assert_eq!(
-        shared.route(&Request::Event {
-            dry_run: false,
-            signal: false,
-        }),
+        shared.route(&event(false)),
         Route::AwaitEnd("pre-empted the switch in progress")
     );
     assert!(cancel.preempted());
@@ -188,13 +169,7 @@ fn ide_event_preempts_or_waits_but_never_both() {
     shared.update(|v| v.running = None);
     let now = Generation { epoch: 3, fence: 3 };
     assert_eq!(shared.route(&Request::Quit), Route::Queue(now));
-    assert_eq!(
-        shared.route(&Request::Event {
-            dry_run: true,
-            signal: false,
-        }),
-        Route::Queue(now)
-    );
+    assert_eq!(shared.route(&event(true)), Route::Queue(now));
     assert_eq!(shared.route(&dev()), Route::Queue(now));
     assert!(matches!(shared.route(&Request::Status), Route::Now(_)));
     assert_eq!(shared.route(&Request::Subscribe), Route::Subscribe);
@@ -231,17 +206,7 @@ fn an_entry_queued_before_a_switch_back_to_reaper_never_runs() {
     // "Ide event" from dev: dev → event.
     let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
     let seen = g.shared.generation();
-    assert!(
-        ask(
-            &mut pc,
-            &mut g,
-            Request::Event {
-                dry_run: false,
-                signal: false,
-            }
-        )
-        .ok
-    );
+    assert!(ask(&mut pc, &mut g, event(false)).ok);
     let made = pc.calls().len();
     let r = handle(&mut pc, &mut g, dev(), seen);
     assert_eq!((r.ok, r.detail), (false, ran("dev", "event")));
@@ -252,17 +217,7 @@ fn an_entry_queued_before_a_switch_back_to_reaper_never_runs() {
     let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
     g.state.pins.current = Some(SHA.into());
     let seen = g.shared.generation();
-    assert!(
-        ask(
-            &mut pc,
-            &mut g,
-            Request::Event {
-                dry_run: false,
-                signal: false,
-            }
-        )
-        .ok
-    );
+    assert!(ask(&mut pc, &mut g, event(false)).ok);
     let made = pc.calls().len();
     for req in [dev(), live] {
         let r = handle(&mut pc, &mut g, req, seen);
@@ -383,14 +338,7 @@ fn dry_run_changes_nothing() {
         build: None,
         dry_run: true,
     };
-    for req in [
-        Request::Event {
-            dry_run: true,
-            signal: false,
-        },
-        dry_dev,
-        live,
-    ] {
+    for req in [event(true), dry_dev, live] {
         let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
         g.state
             .bundles
@@ -435,15 +383,7 @@ fn dry_run_changes_nothing() {
         "{}",
         r.detail
     );
-    let r = handle(
-        &mut pc,
-        &mut g,
-        Request::Event {
-            dry_run: true,
-            signal: false,
-        },
-        INIT,
-    );
+    let r = handle(&mut pc, &mut g, event(true), INIT);
     assert_eq!(
         r.detail,
         "dry run: TuningExit, PrefCheck, ReaperHandover, AppHandover, Fingerprint"
@@ -569,17 +509,7 @@ fn an_expired_lan_certificate_is_named_and_never_an_alarm() {
     );
     // Back in event the predecessor serves the same certificate: still
     // named.
-    assert!(
-        ask(
-            &mut pc,
-            &mut g,
-            Request::Event {
-                dry_run: false,
-                signal: false,
-            }
-        )
-        .ok
-    );
+    assert!(ask(&mut pc, &mut g, event(false)).ok);
     assert!(status_reply(&g).contains(LAN_NOTE), "{}", status_reply(&g));
     // The next check that names nothing drops it.
     pc.lan_note = None;
@@ -589,30 +519,10 @@ fn an_expired_lan_certificate_is_named_and_never_an_alarm() {
     assert_eq!(status_reply(&g), format!("mode dev; bundle {SHA}"));
     // A failed check does not repeat an old note.
     pc.lan_note = Some(LAN_NOTE.into());
-    assert!(
-        ask(
-            &mut pc,
-            &mut g,
-            Request::Event {
-                dry_run: false,
-                signal: false,
-            }
-        )
-        .ok
-    );
+    assert!(ask(&mut pc, &mut g, event(false)).ok);
     assert!(ask(&mut pc, &mut g, dev()).ok);
     assert!(status_reply(&g).contains(LAN_NOTE), "{}", status_reply(&g));
-    assert!(
-        ask(
-            &mut pc,
-            &mut g,
-            Request::Event {
-                dry_run: false,
-                signal: false,
-            }
-        )
-        .ok
-    );
+    assert!(ask(&mut pc, &mut g, event(false)).ok);
     pc.fail(Call::Identity, "LAN 443: serves another certificate");
     let r = ask(&mut pc, &mut g, dev());
     assert!(!r.ok, "{r:?}");
