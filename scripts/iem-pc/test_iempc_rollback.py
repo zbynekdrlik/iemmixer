@@ -110,25 +110,44 @@ class RollbackTests(Base):
 
 
 class EventSignalTests(Base):
+    OLD = (2, "", 'iemmode: unknown argument "--signal"\nusage: iemmode status')
+    TRIAL = reply(True, f"mode event; bundle {SHA}")
+
     def test_ide_event_is_the_owner_s_signal(self) -> None:
         code, _, _ = self.run_main("event")
         self.assertEqual((code, [c[1] for c in self.pc.calls]), (0, [["event", "--signal"]]))
 
-    def test_an_iemmode_that_does_not_know_the_signal_gets_the_plain_event(self) -> None:
-        # An iemmode older than S8 lane 3 refuses the flag before any guard call (exit 2);
-        # its guard predates prod, so the plain event is the same there.
-        self.pc.replies[("event", "--signal")] = (2, "", 'iemmode: unknown argument "--signal"\nusage: iemmode status')
+    def test_an_iemmode_that_does_not_know_the_signal_gets_the_plain_event_before_the_cutover(self) -> None:
+        # An iemmode older than S8 lane 3 refuses the flag before any guard call (exit 2):
+        # the guard's status says it is before the cutover, so the plain event is the same.
+        self.pc.replies[("event", "--signal")] = self.OLD
+        self.pc.replies[("status",)] = self.TRIAL
         code, docs, err = self.run_main("event")
         self.assertEqual(code, 0, err)
-        self.assertEqual([c[1] for c in self.pc.calls], [["event", "--signal"], ["event"]])
-        self.assertEqual([d.get("iemmode") for d in docs[1:]], [["event", "--signal"], ["event"]])
+        self.assertEqual([c[1] for c in self.pc.calls], [["event", "--signal"], ["status"], ["event"]])
+        self.assertEqual([d.get("iemmode") for d in docs[1:]], [["event", "--signal"], ["status"], ["event"]])
+
+    def test_past_the_cutover_the_plain_event_is_never_sent(self) -> None:
+        # An older iemmode with a prod guard: a plain event would be the button's rollback.
+        for status in (reply(True, PROD), reply(True, "mode event; rolling back to REAPER"),
+                       (0, json.dumps({"ok": True})), (1, "")):
+            self.pc.calls.clear()
+            self.pc.replies[("event", "--signal")] = self.OLD
+            self.pc.replies[("status",)] = status
+            code, _, err = self.run_main("event")
+            self.assertEqual((code, [c[1] for c in self.pc.calls]), (1, [["event", "--signal"], ["status"]]), status)
+            self.assertIn("a plain 'iemmode event' would be the rollback", err)
+            self.assertIn("alarm the owner", err)
 
     def test_the_fall_back_keeps_the_direct_path(self) -> None:
-        self.pc.replies[("event", "--signal")] = (2, "", 'iemmode: unknown argument "--signal"')
+        # The guard unreachable (its status too): the plain event, then --direct.
+        self.pc.replies[("event", "--signal")] = self.OLD
+        self.pc.replies[("status",)] = (4, OK)
         self.pc.replies[("event",)] = (4, OK)
         code, _, err = self.run_main("event")
         self.assertEqual(code, 0, err)
-        self.assertEqual([c[1] for c in self.pc.calls], [["event", "--signal"], ["event"], ["event", "--direct"]])
+        self.assertEqual([c[1] for c in self.pc.calls],
+                         [["event", "--signal"], ["status"], ["event"], ["event", "--direct"]])
 
     def test_another_usage_error_is_not_retried(self) -> None:
         self.pc.replies[("event", "--signal")] = (2, "", "iemmode: no command")

@@ -19,6 +19,7 @@ import sys
 import time
 
 import iempc_core as core
+import iempc_rollback
 import iempc_trace
 from iempc_core import (SPIKE_DIR, Ctx, StepError, StillRunning, emit, event_now, guarded, iemmode, result,
                         spike_module, spike_window_open, spike_window_settling)
@@ -30,7 +31,8 @@ USAGE = 2
 # engineer's "Back to REAPER", the rollback; with it the guard never rolls back.
 SIGNAL = "--signal"
 # What an iemmode older than S8 lane 3 says to it (a usage error, exit 2, before
-# any guard call); its guard predates prod, so the plain event is the same there.
+# any guard call). The plain event is the same only before the cutover: the
+# guard's status says so first (an older iemmode with a newer guard in prod).
 UNKNOWN_SIGNAL = 'unknown argument "--signal"'
 # The event path, all of it: one Bash call ends at 10 min, the plan's waits stay within 9.
 EVENT_BUDGET_S = 540
@@ -145,6 +147,20 @@ def switch_timeout(deadline: float) -> float:
     return left
 
 
+def plain_event_allowed(ctx: Ctx, deadline: float) -> None:
+    """An iemmode that does not know --signal gets the plain `iemmode event`
+    only while the guard is before the cutover (or unreachable: then
+    `--direct` runs the event plan): past it the plain event is the engineer's
+    button, the rollback. Anything else stops the event path for the owner."""
+    code, reply, raw = iemmode(ctx.env, ["status"], switch_timeout(deadline), "ignore")
+    emit(result("iemmode", ["status"], code, reply, raw))
+    if code == GUARD_UNREACHABLE or iempc_rollback.lifecycle(reply) == "trial":
+        return
+    raise StepError(f"the PC's iemmode does not know --signal, and the guard is {iempc_rollback.lifecycle(reply)} "
+                    f"(status exit {code}): a plain 'iemmode event' would be the rollback, so none was sent; "
+                    "'iempc activate' of the running build brings an iemmode that knows the owner's signal")
+
+
 def cmd_event(ctx: Ctx, ip) -> int:
     """The flag, the spike preempt when a window is open, then `iemmode
     event --signal` (and `--direct` on exit 4), all within EVENT_BUDGET_S.
@@ -175,6 +191,7 @@ def cmd_event(ctx: Ctx, ip) -> int:
     code, reply, raw = iemmode(ctx.env, args, switch_timeout(deadline), "ignore")
     emit(result("iemmode", args, code, reply, raw))
     if code == USAGE and UNKNOWN_SIGNAL in (raw.get("err") or ""):
+        plain_event_allowed(ctx, deadline)
         args = [a for a in args if a != SIGNAL]
         code, reply, raw = iemmode(ctx.env, args, switch_timeout(deadline), "ignore")
         emit(result("iemmode", args, code, reply, raw))
