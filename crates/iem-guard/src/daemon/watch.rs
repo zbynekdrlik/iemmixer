@@ -13,7 +13,8 @@ use super::runner::pref_step;
 use super::startup::take_logon;
 use super::{DRIFT_EVERY, Guard, PARKED_ALARM, run_switch, send_notices};
 use crate::cancel::Cancel;
-use crate::crash::{self, After};
+use crate::crash::{self, After, CrashLoop};
+use crate::lifecycle::{self, Fallback};
 use crate::pc::{Kid, Pc, Procs};
 use crate::plan::Mode;
 
@@ -83,7 +84,7 @@ fn engine_exited(pc: &mut dyn Pc, g: &mut Guard, code: Option<i32>, at: Instant,
     }
     let mode = g.state.mode;
     let n = g.crash.in_window();
-    match crash::after_exit(code, mode, g.site.prod, session, looped, n, streak) {
+    match crash::after_exit(code, session, looped, n, streak) {
         After::Stay { alarm } => {
             if let Some(why) = alarm {
                 g.raise(None, &format!("{why} (exit {code:?})"), false);
@@ -94,30 +95,62 @@ fn engine_exited(pc: &mut dyn Pc, g: &mut Guard, code: Option<i32>, at: Instant,
                 g.respawn_at = Some(at + delay);
             }
         }
-        After::ToEvent => {
-            g.raise(
-                None,
-                &format!("the engine crashed {n} times in 10 min: back to REAPER"),
-                false,
-            );
+        After::Loop => crash_loop(pc, g, mode, n, at),
+    }
+}
+
+/// A crash loop, as the lifecycle says (S8 design §3.4): back to REAPER
+/// (before the cutover), live on the pin (maintenance), the previous pin
+/// (prod live), or down with an alarm naming the rollback. A new engine on
+/// a pin starts a new crash window: "if that loops too" counts its own
+/// exits.
+fn crash_loop(pc: &mut dyn Pc, g: &mut Guard, mode: Mode, n: usize, at: Instant) {
+    let (fallback, next) = lifecycle::crash_loop(&g.state.lifecycle, mode);
+    g.state.lifecycle = next;
+    let crashed = format!("the engine crashed {n} times in 10 min");
+    match fallback {
+        Fallback::Event => {
+            g.raise(None, &format!("{crashed}: back to REAPER"), false);
             run_switch(pc, g, mode, Mode::Event);
         }
-        After::PreviousPin => match g.state.pins.revert() {
-            Ok(sha) => {
-                g.raise(
-                    None,
-                    &format!(
-                        "the engine crashed {n} times in 10 min: back to the previous pin {sha}"
-                    ),
-                    false,
-                );
-                pc.set_bundle(Some(sha.as_str()));
-                g.respawn_at = Some(at);
-            }
-            Err(why) => {
-                g.raise(None, &format!("crash loop in prod: {why}"), false);
-            }
-        },
+        Fallback::Pin(pin) => {
+            g.raise(
+                None,
+                &format!("{crashed} in maintenance: back to live on the pin {pin}"),
+                false,
+            );
+            // The switch starts the pin's engine: no respawn of the
+            // session's one, and a new crash window.
+            g.respawn_at = None;
+            g.crash = CrashLoop::default();
+            pc.set_bundle(Some(pin.as_str()));
+            g.state.active = Some(pin);
+            run_switch(pc, g, mode, Mode::Live);
+        }
+        Fallback::Previous(sha) => {
+            g.raise(
+                None,
+                &format!("{crashed}: back to the previous pin {sha}"),
+                false,
+            );
+            g.crash = CrashLoop::default();
+            pc.set_bundle(Some(sha.as_str()));
+            g.state.active = Some(sha);
+            g.respawn_at = Some(at);
+        }
+        Fallback::Down(pin) => {
+            g.raise(
+                None,
+                &format!(
+                    "{crashed} on the pin {pin}, and no previous pin is left: the engine stays \
+                     down; roll back to REAPER (iemmode rollback)"
+                ),
+                false,
+            );
+            // Stops respawning: a respawn an earlier exit of this tick asked
+            // for is dropped too.
+            g.respawn_at = None;
+        }
     }
 }
 

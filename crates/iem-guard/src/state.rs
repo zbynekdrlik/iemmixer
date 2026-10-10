@@ -12,6 +12,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::bundle::{Pins, Record};
+use crate::lifecycle::Lifecycle;
 use crate::plan::{Mode, Step};
 use crate::switch_log::LastSwitch;
 
@@ -56,7 +57,22 @@ pub struct GuardState {
     pub pids: Children,
     /// Installed bundles by SHA.
     pub bundles: BTreeMap<String, Record>,
+    /// The record an older guard kept: its `current` was the active bundle
+    /// (it promoted every entry's and every activation's build, S8 design
+    /// note §3.4). Read only by [`GuardState::active_bundle`] for a state
+    /// such a guard saved; never written since S8, so an older guard that
+    /// takes over finds what it last wrote.
     pub pins: Pins,
+    /// The active bundle (S8, #11): the build the engine and the server run
+    /// in dev and live, and the one `bin\`'s guard came from unless an entry
+    /// named another. Set by `activate` and by an entry's build (a prod
+    /// entry: the pin), never the pin itself (`lifecycle`).
+    pub active: Option<String>,
+    /// Before the cutover, after it, or rolling back (S8 design note §3.1).
+    /// A state an older guard saved has none: `Trial`
+    /// (`lifecycle::lenient`); a reset keeps it.
+    #[serde(deserialize_with = "crate::lifecycle::lenient")]
+    pub lifecycle: Lifecycle,
     /// The HIL job that began and has not ended (its run id). Kept here so
     /// a guard that hands over to a new exe inside the job (HIL activates
     /// the bundle it tests) or restarts still serves the job (design §7).
@@ -84,6 +100,12 @@ pub fn reset_to_event(st: &GuardState, boot_time: u64, reaper_or_app: bool, engi
 }
 
 impl GuardState {
+    /// The active bundle: [`GuardState::active`], or for a state an older
+    /// guard saved, its `pins.current`.
+    pub fn active_bundle(&self) -> Option<&str> {
+        self.active.as_deref().or(self.pins.current.as_deref())
+    }
+
     /// The mode after [`reset_to_event`]: `event`, no switch in progress and
     /// no HIL job (`pref_held` and `logon_seen` stay: the next check reads
     /// the preference again; `last_switch` stays until the next switch,
@@ -182,6 +204,10 @@ mod tests {
                 current: Some("a".repeat(40)),
                 previous: None,
             },
+            // S8 (#11): the lifecycle's own round trips are in
+            // `lifecycle/tests.rs`.
+            active: None,
+            lifecycle: Lifecycle::Trial,
             job: Some(4242),
             pref_held: Some(
                 "REAPER runs with the preferred buffer at 32; it is restored at REAPER's next start"

@@ -9,6 +9,7 @@ use super::runner::run_step;
 use super::{Guard, Outcome, mode_name, run_switch};
 use crate::bundle::Record;
 use crate::install::{self, InstallError};
+use crate::lifecycle;
 use crate::pc::{Pc, StepError};
 use crate::plan::{Activation, Busy, Mode, Step, activation};
 use crate::proto::Reply;
@@ -51,15 +52,15 @@ pub fn install_bundle(g: &mut Guard, zip: &Path) -> (bool, String) {
 }
 
 /// `iemmixer-guard install <zip>` without a guard: the install, and for the
-/// very first bundle (no pin yet) its activation into `bin\`, so `iemmode`
-/// exists from then on.
+/// very first bundle (no active bundle yet) its activation into `bin\`, so
+/// `iemmode` exists from then on.
 pub fn install_offline(g: &mut Guard, zip: &Path) -> (bool, String) {
     let (sha, what) = match install_record(g, zip) {
         Ok(done) => done,
         Err(why) => return (false, why),
     };
     let detail = format!("bundle {sha} {what}");
-    if g.state.pins.current.is_some() {
+    if g.state.active_bundle().is_some() {
         return (true, detail);
     }
     match activate_files(g, &sha) {
@@ -68,8 +69,9 @@ pub fn install_offline(g: &mut Guard, zip: &Path) -> (bool, String) {
     }
 }
 
-/// Copies the bundle's guard and `iemmode` into `bin\` and pins it; true
-/// when the guard's exe changed.
+/// Copies the bundle's guard and `iemmode` into `bin\` and makes it the
+/// active bundle (never the pin, S8 design §3.4); true when the guard's exe
+/// changed.
 pub fn activate_files(g: &mut Guard, sha: &str) -> Result<bool, String> {
     let root = g
         .root
@@ -80,7 +82,7 @@ pub fn activate_files(g: &mut Guard, sha: &str) -> Result<bool, String> {
         &install::bin_dir(&root),
         sha,
     )?;
-    g.state.pins.promote(sha);
+    g.state.active = Some(sha.to_owned());
     g.save();
     Ok(changed)
 }
@@ -124,11 +126,12 @@ pub(super) fn activate(pc: &mut dyn Pc, g: &mut Guard, sha: &str) -> (bool, Stri
 }
 
 /// The activation `plan::activation` allowed: the bundle's guard and
-/// `iemmode` into `bin\`, the pin, its Defender exclusions (a failure
-/// alarms, the activation stands); with `restart_job` (dev, inside a HIL
-/// job) the engine and the server then run the new bundle (HIL checks
-/// their versions, design §7). The detail and whether the guard's exe
-/// changed.
+/// `iemmode` into `bin\`, the active bundle, its Defender exclusions (a
+/// failure alarms, the activation stands; the bundle active before it and,
+/// in prod, the pins keep theirs: `lifecycle::kept`); with `restart_job`
+/// (dev, inside a HIL job) the engine and the server then run the new
+/// bundle (HIL checks their versions, design §7). The detail and whether
+/// the guard's exe changed.
 fn activate_bundle(
     pc: &mut dyn Pc,
     g: &mut Guard,
@@ -138,17 +141,10 @@ fn activate_bundle(
     if !g.state.bundles.contains_key(sha) {
         return Err(format!("bundle {sha} is not installed"));
     }
+    let before = g.state.active_bundle().map(str::to_owned);
     let changed = activate_files(g, sha).map_err(|why| format!("activation failed: {why}"))?;
     pc.set_bundle(Some(sha));
-    // The other pin keeps its exclusions (a revert needs them).
-    let keep: Vec<String> = g
-        .state
-        .pins
-        .previous
-        .iter()
-        .filter(|p| p.as_str() != sha)
-        .cloned()
-        .collect();
+    let keep = lifecycle::kept(&g.state.lifecycle, before.as_deref(), sha);
     if let Err(e) = pc.exclude(sha, &keep) {
         g.raise(None, &format!("Defender exclusions for {sha}: {e}"), false);
     }
@@ -167,9 +163,9 @@ fn activate_bundle(
 /// event (its own code refuses it). `lock` is the guard's mutex, held for
 /// the whole run (`None`: a guard holds it). Only in an idle event: the
 /// saved mode must be event, then the same `plan::activation` on the saved
-/// state and the process list; then `activate_bundle` (the bins, the pin,
-/// the exclusions through the elevated task as online; the state and any
-/// alarm are saved). It starts no guard: the next `iemmode` call starts
+/// state and the process list; then `activate_bundle` (the bins, the active
+/// bundle, the exclusions through the elevated task as online; the state
+/// and any alarm are saved). It starts no guard: the next `iemmode` call starts
 /// the guard's task, which runs the new exe from `bin\`.
 pub fn activate_offline<L>(pc: &mut dyn Pc, g: &mut Guard, lock: Option<L>, sha: &str) -> Reply {
     let Some(_held) = lock else {

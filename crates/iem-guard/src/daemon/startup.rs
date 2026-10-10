@@ -7,6 +7,7 @@ use tracing::{info, warn};
 use super::requests::{dry_event, event_now};
 use super::runner::switch;
 use super::{Guard, Outcome, send_notices};
+use crate::lifecycle::{self, Start};
 use crate::pc::{Pc, job_note};
 use crate::plan::Mode;
 use crate::proto::Reply;
@@ -45,11 +46,13 @@ pub(super) fn take_logon(pc: &mut dyn Pc, g: &mut Guard) {
 }
 
 /// A starting guard (design §5.2): the job its children start in (logged,
-/// and named in the status while they stay in it, §5.1), the reboot rule,
-/// then the children a previous guard started, then an unfinished switch
-/// unwinds to event (or resumes, when it was one). From event the event
-/// plan is the start's checks: a dev or live entry the pipe queues
-/// meanwhile runs after them (#42). The outcome of an event plan that ran.
+/// and named in the status while they stay in it, §5.1), the reboot rule
+/// as the lifecycle applies it (S8: `lifecycle::start`; before the cutover
+/// event, in prod a reboot goes live on the pin), then the children a
+/// previous guard started, then an unfinished switch unwinds to event (or
+/// resumes, when it was one). From event the event plan is the start's
+/// checks: a dev or live entry the pipe queues meanwhile runs after them
+/// (#42). The outcome of a plan that ran.
 pub fn start(pc: &mut dyn Pc, g: &mut Guard, boot: u64) -> Option<Outcome> {
     let job = pc.job();
     if let Err(e) = &job {
@@ -61,22 +64,50 @@ pub fn start(pc: &mut dyn Pc, g: &mut Guard, boot: u64) -> Option<Outcome> {
     }
     let p = pc.procs();
     let reset = state::reset_to_event(&g.state, boot, p.band_up(), !p.engine.is_empty());
-    if reset {
-        g.info("after a reboot, or with the band's system up, the PC is in event");
-        g.state.reset();
+    let rebooted = boot > g.state.written_at;
+    // S8: the lifecycle decides (before the cutover: event, as G1 says).
+    let started = lifecycle::start(&g.state.lifecycle, reset, rebooted, |sha| {
+        g.state.bundles.get(sha)
+    });
+    g.state.lifecycle = started.lifecycle;
+    if let Some(n) = started.note {
+        g.info(n);
     }
+    let target = match started.start {
+        Start::Keep => None,
+        Start::Event => {
+            if reset {
+                g.info("after a reboot, or with the band's system up, the PC is in event");
+            }
+            g.state.reset();
+            Some(Mode::Event)
+        }
+        Start::Live(pin) => {
+            g.info(format!(
+                "after a reboot in prod the PC goes live on the pin {pin}"
+            ));
+            g.state.reset();
+            g.state.active = Some(pin);
+            Some(Mode::Live)
+        }
+    };
     let saved = g.state.pids.clone();
     g.state.pids = pc.adopt(&saved);
-    pc.set_bundle(g.state.pins.current.as_deref());
+    pc.set_bundle(g.state.active_bundle());
     g.look(pc);
     // Before the event plan: its check then adds no alarm for the same value.
     take_logon(pc, g);
     g.save();
     let resume = g.state.switching.is_some();
-    let out = (reset || resume).then(|| {
-        let from = g.state.mode;
-        switch(pc, g, from, Mode::Event, from == Mode::Event)
-    });
+    let out = match target {
+        // Prod after a reboot: no trial, the pin's own entry.
+        Some(Mode::Live) => Some(switch(pc, g, Mode::Event, Mode::Live, false)),
+        _ if target.is_some() || resume => {
+            let from = g.state.mode;
+            Some(switch(pc, g, from, Mode::Event, from == Mode::Event))
+        }
+        _ => None,
+    };
     send_notices(pc, g);
     out
 }
@@ -90,7 +121,7 @@ pub fn direct_event<L>(pc: &mut dyn Pc, g: &mut Guard, lock: Option<L>, dry_run:
     };
     let saved = g.state.pids.clone();
     g.state.pids = pc.adopt(&saved);
-    pc.set_bundle(g.state.pins.current.as_deref());
+    pc.set_bundle(g.state.active_bundle());
     let (ok, detail) = if dry_run {
         dry_event(pc)
     } else {

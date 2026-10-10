@@ -9,7 +9,8 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use super::*;
-use crate::bundle::{Hil, Pins, Record};
+use crate::bundle::{Hil, Record};
+use crate::lifecycle::{Lifecycle, Prod};
 use crate::pc::Kid;
 use crate::pc::fake::{Call, FakePc};
 use crate::plan::{Facts, Health};
@@ -604,16 +605,30 @@ fn a_crash_loop_goes_back_to_reaper() {
 
 #[test]
 fn a_crash_loop_in_prod_falls_back_to_the_previous_pin() {
-    let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Live));
-    g.site.prod = true;
-    g.state.pins = Pins {
-        current: Some(SHA.into()),
-        previous: Some(OTHER.into()),
+    // S8 (#11): prod and its pins are the lifecycle's (`lifecycle::crash_loop`).
+    let prod = |previous: Option<&str>| {
+        Lifecycle::Prod(Prod {
+            since: T0,
+            pin: SHA.into(),
+            previous: previous.map(str::to_owned),
+            maintenance: None,
+        })
     };
+    let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Live));
+    g.state.lifecycle = prod(Some(OTHER));
     pc.exited = vec![(Kid::Engine, Some(70)); 3];
     tick(&mut pc, &mut g, Instant::now());
     assert_eq!(g.state.mode, Mode::Live);
-    assert_eq!(g.state.pins.current.as_deref(), Some(OTHER));
+    assert_eq!(
+        g.state.lifecycle,
+        Lifecycle::Prod(Prod {
+            since: T0,
+            pin: OTHER.into(),
+            previous: None,
+            maintenance: None,
+        })
+    );
+    assert_eq!(g.state.active_bundle(), Some(OTHER));
     assert_eq!(pc.bundle.as_deref(), Some(OTHER));
     assert_eq!(pc.count(Call::EngineStart), 1);
     assert_eq!(
@@ -622,16 +637,22 @@ fn a_crash_loop_in_prod_falls_back_to_the_previous_pin() {
             "the engine crashed 3 times in 10 min: back to the previous pin {OTHER}"
         )]
     );
-    // Without a previous pin it alarms and stays.
+    // Without a previous pin it alarms, naming the rollback, and stays down.
     let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Live));
-    g.site.prod = true;
+    g.state.lifecycle = prod(None);
     pc.exited = vec![(Kid::Engine, Some(70)); 3];
     tick(&mut pc, &mut g, Instant::now());
     assert_eq!(
         texts(&g),
-        ["crash loop in prod: no previous pin to revert to"]
+        [format!(
+            "the engine crashed 3 times in 10 min on the pin {SHA}, and no previous pin is \
+             left: the engine stays down; roll back to REAPER (iemmode rollback)"
+        )]
     );
+    assert_eq!(g.state.lifecycle, prod(None));
+    tick(&mut pc, &mut g, Instant::now() + Duration::from_secs(20));
     assert!(!pc.called(Call::EngineStart));
+    assert_eq!(g.state.mode, Mode::Live);
 }
 
 #[test]

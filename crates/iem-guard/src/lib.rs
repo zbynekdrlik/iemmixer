@@ -12,6 +12,8 @@
 //! - [`handover`]: the REAPER, meter-bridge and predecessor-exit verdicts;
 //! - [`proto`]: the guard pipe's requests, replies and frames;
 //! - [`state`]: the persistent state and the reboot rule;
+//! - [`lifecycle`]: before the cutover, after it, or rolling back: the
+//!   boot rule, the entry gates, the pin and the crash rules (S8);
 //! - [`switch_log`]: the last switch's record, its steps timed, and its
 //!   in-ear silence (S7);
 //! - [`alarms`]: the kept alarms;
@@ -57,6 +59,7 @@ pub mod daemon;
 pub mod effects;
 pub mod handover;
 pub mod install;
+pub mod lifecycle;
 pub mod pc;
 pub mod pipe;
 pub mod plan;

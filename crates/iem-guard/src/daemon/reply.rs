@@ -5,6 +5,7 @@
 
 use super::{DETAIL_CHARS, Guard};
 use crate::handover;
+use crate::lifecycle;
 use crate::pc::R;
 use crate::plan::Mode;
 use crate::proto::{self, Reply};
@@ -115,10 +116,14 @@ impl Guard {
 /// `iemmode status`: one line.
 pub fn status_text(g: &Guard) -> String {
     let mut parts = vec![format!("mode {}", mode_name(g.state.mode))];
-    parts.push(match &g.state.pins.current {
+    parts.push(match g.state.active_bundle() {
         Some(sha) => format!("bundle {sha}"),
         None => "no bundle".to_owned(),
     });
+    // Before the cutover nothing: the status reads as before S8.
+    if let Some(lc) = lifecycle::status(&g.state.lifecycle) {
+        parts.push(lc);
+    }
     if let Some(run) = g.state.job {
         parts.push(format!("HIL job {run}"));
     }

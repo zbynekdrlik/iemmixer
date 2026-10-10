@@ -10,10 +10,22 @@ use super::tests::{
 };
 use super::*;
 use crate::bundle::{Hil, Pins};
+use crate::lifecycle::{Lifecycle, Prod};
 use crate::pc::Kid;
 use crate::pc::fake::{Call, FakePc};
 use crate::plan::Facts;
 use crate::proto::Request;
+
+/// Prod on `pin` (S8): a live entry that is no trial is prod's; before the
+/// cutover live is a trial.
+fn prod_on(pin: &str) -> Lifecycle {
+    Lifecycle::Prod(Prod {
+        since: 1_790_000_000,
+        pin: pin.to_owned(),
+        previous: None,
+        maintenance: None,
+    })
+}
 
 #[test]
 fn jobs_are_refused_while_switching() {
@@ -330,9 +342,10 @@ fn a_tray_start_forgets_a_quit_no_tray_took() {
 
 #[test]
 fn dry_run_changes_nothing() {
+    // S8 (#11): before the cutover live is a trial.
     let live = Request::Live {
         build: SHA.into(),
-        trial: false,
+        trial: true,
         dry_run: true,
     };
     let dry_dev = Request::Dev {
@@ -548,6 +561,9 @@ fn a_live_entry_without_a_pwa_subscription_is_refused() {
         g.state
             .bundles
             .insert(SHA.into(), record(SHA, "main", Hil::Green));
+        if !trial {
+            g.state.lifecycle = prod_on(SHA);
+        }
         pc.subscriptions = Some(0);
         let r = ask(&mut pc, &mut g, live(trial, true));
         assert!(!r.ok, "{r:?}");
@@ -612,8 +628,9 @@ fn a_live_trial_needs_the_pc_tests_and_a_plain_live_entry_does_not() {
     let r = ask(&mut pc, &mut g, live(true, false));
     assert!(r.ok, "{r:?}");
     assert_eq!(g.state.mode, Mode::Live);
-    // A live entry that is no trial does not read them.
+    // A live entry that is no trial (prod's, S8) does not read them.
     let (mut pc, mut g) = fresh(false);
+    g.state.lifecycle = prod_on(SHA);
     let r = ask(&mut pc, &mut g, live(false, true));
     assert!(r.ok, "{r:?}");
     assert!(r.detail.ends_with("; precheck ok"), "{}", r.detail);
@@ -649,13 +666,23 @@ fn live_needs_an_installed_green_main_bundle() {
     g.state
         .bundles
         .insert(SHA.into(), record(SHA, "main", Hil::Green));
+    // S8 (#11): before the cutover live is a trial; a plain live is refused.
     let r = handle(&mut pc, &mut g, live(false), INIT);
+    assert_eq!(
+        (r.ok, r.detail),
+        (
+            false,
+            format!("before the cutover live is a trial: live --build {SHA} --trial")
+        )
+    );
+    assert!(pc.calls().is_empty());
+    // A trial (the band there on purpose) enters, on its build.
+    let r = handle(&mut pc, &mut g, live(true), INIT);
     assert!(r.ok, "{r:?}");
     assert_eq!(g.state.mode, Mode::Live);
-    assert_eq!(g.state.pins.current.as_deref(), Some(SHA));
+    assert_eq!(g.state.active_bundle(), Some(SHA));
     assert_eq!(pc.bundle.as_deref(), Some(SHA));
     assert!(!pc.called(Call::RunnerStart));
-    // A trial (the band there on purpose) enters the same way.
     let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
     g.state
         .bundles
@@ -665,8 +692,10 @@ fn live_needs_an_installed_green_main_bundle() {
     assert_eq!(g.state.mode, Mode::Live);
 }
 
+/// S8 (#11, design §3.4): a dev entry with a build runs it as the active
+/// bundle; the pins stay as they were.
 #[test]
-fn dev_with_a_build_pins_it() {
+fn dev_with_a_build_runs_it() {
     let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Event));
     let build = |sha: &str| Request::Dev {
         build: Some(sha.into()),
@@ -683,10 +712,11 @@ fn dev_with_a_build_pins_it() {
     assert_eq!(
         g.state.pins,
         Pins {
-            current: Some(SHA.into()),
-            previous: Some(OTHER.into()),
+            current: Some(OTHER.into()),
+            previous: None,
         }
     );
+    assert_eq!(g.state.active_bundle(), Some(SHA));
     assert_eq!(pc.bundle.as_deref(), Some(SHA));
 }
 
