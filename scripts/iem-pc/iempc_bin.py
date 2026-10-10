@@ -44,7 +44,9 @@ may have replaced. Two rules:
   for the first bundle), checked by this box's fetch record, staged, checked
   again and run from there (`staged_guard`).
 
-iempc.py passes itself in (`ip`), so this module never imports it (#36)."""
+iempc.py passes itself in (`ip`), so this module never imports it (#36).
+`pick` and `seen` also get iempc_core (from `iempc_core.iemmode`, which
+passes its own module): they read only names iempc_core holds."""
 from __future__ import annotations
 
 import json
