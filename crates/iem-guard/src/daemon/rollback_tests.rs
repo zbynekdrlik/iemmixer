@@ -238,6 +238,25 @@ fn in_prod_the_button_rolls_back_and_ide_event_never_does() {
     }
 }
 
+/// "ide event --dry-run" in maintenance changes nothing, a pin that may not
+/// go live included (the real one would bring REAPER).
+#[test]
+fn a_dry_ide_event_in_maintenance_changes_nothing() {
+    for hil in [Hil::Green, Hil::Red] {
+        let (mut pc, mut g) = prod_live();
+        g.state.mode = Mode::Dev;
+        g.state.bundles.insert(SHA.into(), record(SHA, "main", hil));
+        let dry = Request::Event {
+            dry_run: true,
+            signal: true,
+        };
+        let r = handle(&mut pc, &mut g, dry, INIT);
+        assert_eq!(r.ok, hil == Hil::Green, "{r:?}");
+        assert_eq!(pc.mutating_calls(), Vec::<Call>::new(), "{hil:?}");
+        assert_eq!(g.state.mode, Mode::Dev);
+    }
+}
+
 /// A failed export leaves the original in place: REAPER on it, the
 /// rollback done, and the owner hears that iemmixer's changes stayed
 /// behind.
