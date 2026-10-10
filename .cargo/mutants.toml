@@ -43,7 +43,8 @@ exclude_globs = [
   # The engine's ASIO start-up (S6): Windows effects, not compiled on the
   # Linux runners; the windows job lints it and runs its no-driver refusal.
   # Its decisions live in the mutated engine.rs (lock_due, the parser,
-  # check_site), control.rs (Ending, the lock report) and site.rs ([card]).
+  # check_site), control.rs (Ending), control/status.rs (the lock report)
+  # and site.rs ([card]).
   "crates/iem-engine/src/asio.rs",
   # The Windows side of the engine's pipes (S6): not compiled on Linux; the
   # windows job runs tests/pipes.rs over it. Its decisions are pipe.rs's
@@ -202,7 +203,7 @@ exclude_re = [
   # anchor 1252: if budget > 0
   "iem-engine/src/rt\\.rs:1252:.*replace > with >= in <impl Process for Processor>::process",
   # The fade wait's `elapsed < FADE_WAIT`: differs only at the exact nanosecond.
-  "iem-engine/src/control\\.rs.*replace < with <= in Control::fade_out",
+  "iem-engine/src/control/stop\\.rs.*replace < with <= in Control::fade_out",
   # Unobservable (S3): the `!` only decides whether "solos cleared" is logged.
   "iem-engine/src/control\\.rs.*delete ! in Control::tick",
   # Equivalent (S4). The synthetic generator draws k/2^53; a draw equal to a

@@ -1,6 +1,6 @@
 use super::*;
 use crate::pipe::{control_name, listen};
-use iem_engine_proto::{InputId, MixId, MixState, read_frame};
+use iem_engine_proto::{ClientMsg, Cmd, ErrCode, InputId, MixId, MixState, PROTO, read_frame};
 use interprocess::local_socket::Stream;
 use interprocess::local_socket::prelude::*;
 

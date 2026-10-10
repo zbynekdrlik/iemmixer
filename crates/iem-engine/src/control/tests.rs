@@ -1,6 +1,13 @@
 //! The control loop's tests: a `Control` on the test site with a fake
 //! `Driver`; `peers` adds connections (Unix only), `s7` the HIL v2 times.
 
+use std::sync::atomic::Ordering;
+
+use iem_engine_proto::HilOut;
+
+use super::connections::{engine_build, push_alarm};
+use super::saving::unix_ms;
+use super::status::meters_msg;
 use super::*;
 
 fn alarm(k: usize) -> Alarm {
