@@ -317,6 +317,48 @@ fn reaper_that_cannot_open_the_export_comes_back_on_the_original() {
     );
 }
 
+/// In prod the button that cancels a running dev or live entry finds REAPER
+/// started by that entry's unwind, on the original project: the rollback
+/// saves and quits it gracefully, puts the export in the project's place
+/// and starts REAPER on it (S8 lane 5, finding 5). A REAPER that does not
+/// quit keeps running on the original: REAPER runs at the end either way.
+#[test]
+fn a_reaper_an_unwind_started_is_quit_so_the_export_takes_its_place() {
+    let (mut pc, mut g) = prod_live();
+    pc.facts = band_up();
+    g.state.mode = Mode::Event;
+    let r = handle(&mut pc, &mut g, event(false), INIT);
+    assert!(r.ok, "{r:?}");
+    assert!(r.detail.contains(ON_EXPORT), "{}", r.detail);
+    assert_rolled_back(&pc, &g);
+    assert_eq!(pc.project, on_export());
+    let order = [
+        Call::ExportProject,
+        Call::ReaperSaveQuit,
+        Call::SwapProject,
+        Call::ReaperStart,
+    ];
+    let at: Vec<usize> = order.iter().map(|c| pc.index(*c)).collect();
+    assert!(at.windows(2).all(|w| w[0] < w[1]), "{:?}", pc.calls());
+    assert_eq!(texts(&g), Vec::<String>::new(), "nothing fell back");
+    // REAPER that does not quit: the original stays in place, REAPER runs.
+    let (mut pc, mut g) = prod_live();
+    pc.facts = band_up();
+    g.state.mode = Mode::Event;
+    pc.fail(Call::ReaperSaveQuit, "REAPER did not quit within 30 s");
+    let r = handle(&mut pc, &mut g, event(false), INIT);
+    assert!(r.ok, "{r:?}");
+    assert!(r.detail.contains(ON_ORIGINAL), "{}", r.detail);
+    assert!(
+        r.detail.contains("REAPER did not quit within 30 s"),
+        "{}",
+        r.detail
+    );
+    assert_rolled_back(&pc, &g);
+    assert!(!pc.called(Call::SwapProject) || !pc.project.kept);
+    assert!(g.alarms.last().unwrap().owner_question);
+}
+
 /// The autostarts that do not come back keep the guard at the logon (the
 /// next boot starts it, which continues) and the rollback left; REAPER
 /// runs meanwhile. Another `iemmode rollback` finishes it without touching
