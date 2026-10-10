@@ -128,7 +128,7 @@ class DispatchLiveTests(LiveBase):
         code, docs, _ = self.live()
         self.assertEqual(code, ip.PREEMPTED)
         self.assertEqual(self.pc.calls[0], ("iemmode.exe", ["status"], "abandon"))
-        self.assertEqual(self.pc.calls[-1], ("iemmode.exe", ["event"], "ignore"))
+        self.assertEqual(self.pc.calls[-1], ("iemmode.exe", ["event", "--signal"], "ignore"))
         self.assertEqual(docs[0], {"event": "ide event (flag file)", "action": "iempc event"})
         self.assertEqual((self.gh.calls, self.runs()), ([], []))
 
@@ -147,7 +147,7 @@ class DispatchLiveTests(LiveBase):
         code, _, err = self.live()
         self.assertEqual(code, ip.PREEMPTED)
         self.assertIn("no green push run", err)
-        self.assertEqual(self.pc.calls[-1], ("iemmode.exe", ["event"], "ignore"))
+        self.assertEqual(self.pc.calls[-1], ("iemmode.exe", ["event", "--signal"], "ignore"))
         self.assertEqual((self.dispatched(), self.runs()), ([], []))
 
     def test_not_settled_another_bundle_or_engine_or_parked_is_refused(self) -> None:
@@ -529,7 +529,7 @@ class NeverRefusedTests(LiveBase):
         self.assertEqual(self.pc.calls[-1], ("iemmode.exe", ["dev"], "abandon"))
         code, _, err = self.run_main("event")
         self.assertEqual(code, 0, err)
-        self.assertEqual(self.pc.calls[-1], ("iemmode.exe", ["event"], "ignore"))
+        self.assertEqual(self.pc.calls[-1], ("iemmode.exe", ["event", "--signal"], "ignore"))
 
 
 class PureTests(LiveBase):

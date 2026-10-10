@@ -163,7 +163,7 @@ class HandoverTests(Base):
         self.sw.ps = flag_appears
         code, _, _ = self.run_main("handover-s1a")
         self.assertEqual((code, self.spike_log.read_text(encoding="utf-8")), (ip.PREEMPTED, "preempt\n"))
-        self.assertEqual(self.pc.calls, [("iemmode.exe", ["event"], "ignore")])
+        self.assertEqual(self.pc.calls, [("iemmode.exe", ["event", "--signal"], "ignore")])
         self.assertFalse(self.state()["closed"])
 
     # F2 round 3, m5: the hand-over writes the state as saved when it closes it,

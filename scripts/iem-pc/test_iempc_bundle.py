@@ -344,7 +344,7 @@ class ActivateTests(Base):
         self.pc.replies[("activate", SHA)] = lambda: (self.flag(), self.ACTIVATED)[1]
         code, docs, _ = self.run_main("activate", "--sha", SHA)
         self.assertEqual(code, ip.PREEMPTED)
-        self.assertEqual(self.pc.calls, [("iemmode.exe", ["activate", SHA], "finish"), ("iemmode.exe", ["event"], "ignore")])
+        self.assertEqual(self.pc.calls, [("iemmode.exe", ["activate", SHA], "finish"), ("iemmode.exe", ["event", "--signal"], "ignore")])
         self.assertEqual(docs[0], {"event": "ide event (flag file)", "action": "iempc event"})
 
     def test_a_new_flag_during_a_status_read_abandons_it_and_runs_the_event_path(self) -> None:
@@ -482,7 +482,7 @@ class OfflineActivateTests(Base):
         self.pc.replies[("quit",)] = lambda: (self.flag(), self.QUIT)[1]
         code, _, _ = self.run_main("activate", "--sha", SHA, "--offline")
         self.assertEqual(code, ip.PREEMPTED)
-        self.assertEqual(self.pc.calls, [("iemmode.exe", ["quit"], "finish"), ("iemmode.exe", ["event"], "ignore")])
+        self.assertEqual(self.pc.calls, [("iemmode.exe", ["quit"], "finish"), ("iemmode.exe", ["event", "--signal"], "ignore")])
 
     def test_a_new_flag_during_the_offline_step_lets_it_finish_then_runs_the_event_path(self) -> None:
         self.pc.replies[("activate", SHA)] = lambda: (self.flag(), self.OFFLINE)[1]

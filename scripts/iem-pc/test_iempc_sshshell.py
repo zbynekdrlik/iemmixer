@@ -251,7 +251,7 @@ class FailureTests(ShellBase):
         self.assertEqual(code, ip.PREEMPTED)
         self.assertEqual([e for _, e in self.scripts(ss.SET)], ["finish"])
         self.assertEqual((self.scripts(PROBE_MARK), self.scripts(ss.CONFIRM)), ([], []))
-        self.assertEqual(self.pc.calls, [("iemmode.exe", ["event"], "ignore")])
+        self.assertEqual(self.pc.calls, [("iemmode.exe", ["event", "--signal"], "ignore")])
         self.assertIn(f"if it armed {ss.UNDO_TASK}", err)
 
     def test_a_new_flag_during_confirm_lets_it_finish_then_runs_the_event_path(self) -> None:
@@ -265,7 +265,7 @@ class FailureTests(ShellBase):
         code, docs, err = self.run_main("ssh-shell", "--sha", SHA)
         self.assertEqual(code, ip.PREEMPTED)
         self.assertEqual([e for _, e in self.scripts(ss.CONFIRM)], ["finish"])
-        self.assertEqual(self.pc.calls, [("iemmode.exe", ["event"], "ignore")])
+        self.assertEqual(self.pc.calls, [("iemmode.exe", ["event", "--signal"], "ignore")])
         # Confirm may have finished on the PC: never called unconfirmed outright.
         self.assertIn("may have finished", err)
         self.assertIn(f"restores the prior OpenSSH default shell at {AT}", err)
@@ -281,7 +281,7 @@ class FailureTests(ShellBase):
         code, docs, err = self.run_main("ssh-shell", "--sha", SHA)
         self.assertEqual(code, ip.PREEMPTED)
         self.assertEqual(self.scripts(ss.CONFIRM), [])
-        self.assertEqual(self.pc.calls, [("iemmode.exe", ["event"], "ignore")])
+        self.assertEqual(self.pc.calls, [("iemmode.exe", ["event", "--signal"], "ignore")])
         self.assertEqual(docs[0], {"event": "ide event (flag file)", "action": "iempc event"})
         self.assertIn(f"restores the prior OpenSSH default shell at {AT}", err)
 
