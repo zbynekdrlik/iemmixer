@@ -742,5 +742,13 @@ class RefusalTests(unittest.TestCase):
         self.assertEqual(READY, before)
 
 
+
+class SwitchTestInProdTests(unittest.TestCase):
+    def test_the_switch_test_runs_past_the_cutover(self) -> None:
+        # No rollback (#11): in prod the plain `iemmode event` is the event plan.
+        prod = f"mode dev; bundle {SHA}; prod since 1790000000: pin {SHA}, previous none"
+        self.assertIsNone(sw.switch_refusal(ready(detail=prod)))
+        self.assertIsNone(sw.switch_refusal(READY))
+
 if __name__ == "__main__":
     unittest.main()

@@ -289,5 +289,56 @@ class EventVerdictTests(Base):
         self.assertIn("alarm the owner now", err)
 
 
+
+PROD = f"mode live; bundle {SHA}; prod since 1790000000: pin {SHA}, previous none"
+
+
+class LifecycleTests(unittest.TestCase):
+    def test_the_guard_s_status_names_the_lifecycle(self) -> None:
+        self.assertEqual(ip.guard_lifecycle({"detail": f"mode event; bundle {SHA}"}), "trial")
+        self.assertEqual(ip.guard_lifecycle({"detail": PROD}), "prod")
+        for bad in (None, "text", {}, {"detail": None}, {"detail": 7}):
+            self.assertIsNone(ip.guard_lifecycle(bad), bad)
+
+    def test_the_phrase_is_the_guard_s(self) -> None:
+        # The Rust text it reads (lifecycle::status).
+        root = Path(__file__).resolve().parents[2] / "crates" / "iem-guard" / "src"
+        lifecycle = (root / "lifecycle.rs").read_text(encoding="utf-8")
+        self.assertIn('"prod since {}: pin {}, previous {}"', lifecycle)
+        self.assertIn(f'"{ip.PROD_SINCE}', '"prod since {}: pin {}, previous {}"')
+
+
+class EventSignalTests(Base):
+    """"ide event" is `iemmode event --signal` (S8 lane 3); an iemmode that
+    does not know the flag gets the plain event, the event plan in every
+    lifecycle (no rollback, #11)."""
+
+    OLD = (2, "", 'iemmode: unknown argument "--signal"\nusage: iemmode status')
+
+    def test_ide_event_is_the_owner_s_signal(self) -> None:
+        code, _, _ = self.run_main("event")
+        self.assertEqual((code, [c[1] for c in self.pc.calls]), (0, [["event", "--signal"]]))
+
+    def test_an_iemmode_that_does_not_know_the_signal_gets_the_plain_event(self) -> None:
+        # An iemmode older than S8 lane 3 refuses the flag before any guard call (exit 2).
+        self.pc.replies[("event", "--signal")] = self.OLD
+        code, docs, err = self.run_main("event")
+        self.assertEqual(code, 0, err)
+        self.assertEqual([c[1] for c in self.pc.calls], [["event", "--signal"], ["event"]])
+        self.assertEqual([d.get("iemmode") for d in docs[1:]], [["event", "--signal"], ["event"]])
+
+    def test_the_fall_back_keeps_the_direct_path(self) -> None:
+        # The guard unreachable: the plain event, then --direct.
+        self.pc.replies[("event", "--signal")] = self.OLD
+        self.pc.replies[("event",)] = (4, OK)
+        code, _, err = self.run_main("event")
+        self.assertEqual(code, 0, err)
+        self.assertEqual([c[1] for c in self.pc.calls], [["event", "--signal"], ["event"], ["event", "--direct"]])
+
+    def test_another_usage_error_is_not_retried(self) -> None:
+        self.pc.replies[("event", "--signal")] = (2, "", "iemmode: no command")
+        code, _, _ = self.run_main("event")
+        self.assertEqual((code, [c[1] for c in self.pc.calls]), (2, [["event", "--signal"]]))
+
 if __name__ == "__main__":
     unittest.main()
