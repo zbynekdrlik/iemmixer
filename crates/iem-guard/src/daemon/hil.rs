@@ -2,7 +2,7 @@
 //! spare card outputs, the bundle's result, the fault injections and the
 //! idle runner's stop.
 
-use super::requests::outcome;
+use super::reply::outcome;
 use super::{Guard, HIL_MAX_DBFS, HIL_MAX_TTL_S};
 use crate::bundle::Hil;
 use crate::pc::Pc;

@@ -12,14 +12,14 @@ use super::activation::{activate, install_site};
 use super::hil::{
     inject_fault, inject_park, inject_seh, job_begin, job_end, report, runner_stop, test_signal,
 };
-use super::reply::switch_text;
+use super::reply::{outcome, switch_text};
 use super::runner::{failure, run_step};
 use super::{
     Generation, Guard, Outcome, View, alarm_test, install_bundle, mode_name, run_switch,
     send_notices, status_text, while_switching,
 };
 use crate::bundle;
-use crate::pc::{Pc, PrefSeen, R};
+use crate::pc::{Pc, PrefSeen};
 use crate::plan::{Mode, OnError, Step, plan};
 use crate::proto::{Reply, Request};
 
@@ -152,13 +152,6 @@ pub fn handle(pc: &mut dyn Pc, g: &mut Guard, req: Request, seen: Generation) ->
     send_notices(pc, g);
     g.look(pc);
     g.reply(ok, &detail)
-}
-
-pub(super) fn outcome(r: R<()>, done: &str) -> (bool, String) {
-    match r {
-        Ok(()) => (true, done.to_owned()),
-        Err(e) => (false, e.to_string()),
-    }
 }
 
 fn plan_text(steps: &[Step]) -> String {

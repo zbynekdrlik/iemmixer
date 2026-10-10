@@ -1,9 +1,11 @@
 //! The texts of the guard's replies (design §5.1): how a switch ended, a
-//! mode's name, the cut that keeps a reply inside one frame, a request's
-//! reply and `iemmode status`'s line.
+//! mode's name, the cut that keeps a reply inside one frame, a step's
+//! result as a request's answer, a request's reply and `iemmode status`'s
+//! line.
 
 use super::{DETAIL_CHARS, Guard};
 use crate::handover;
+use crate::pc::R;
 use crate::plan::Mode;
 use crate::proto::{self, Reply};
 use crate::switch_log::{SwitchOutcome, needs_owner_text};
@@ -78,6 +80,13 @@ fn plain(c: char) -> char {
         '\n' | '\t' => c,
         '\0'..='\u{1f}' => ' ',
         other => other,
+    }
+}
+
+pub(super) fn outcome(r: R<()>, done: &str) -> (bool, String) {
+    match r {
+        Ok(()) => (true, done.to_owned()),
+        Err(e) => (false, e.to_string()),
     }
 }
 
