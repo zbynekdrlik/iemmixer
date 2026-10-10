@@ -43,7 +43,9 @@ def make_zip(path: Path, *, sha: str = SHA, branch: str = "dev", run: int = RUN,
     files = {n: f"synthetic {n}".encode() for n in ip.BUNDLE_REQUIRED if n != "manifest.json"}
     files["tuning/state.ps1"] = b"synthetic tuning"
     files.update(extra or {})
-    doc = manifest if manifest is not None else {"sha": sha, "branch": branch, "version": "2.0.0-dev.9", "run": run}
+    # As the CI `bundle` job writes it (guard_lifecycle since S8 lane 5).
+    doc = manifest if manifest is not None else {"sha": sha, "branch": branch, "version": "2.0.0-dev.9", "run": run,
+                                                 "guard_lifecycle": 1}
     files["manifest.json"] = json.dumps(doc).encode() if manifest_raw is None else manifest_raw
     for name in drop:
         files.pop(name)
