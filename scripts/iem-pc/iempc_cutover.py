@@ -2,10 +2,12 @@
 docs/superpowers/specs/2026-10-10-s8-cutover-rollback-design.md section 3.2;
 #11): the owner's cutover message, and nothing else, runs it.
 
-1. The guard's refusals and the live trial's precheck first, through `iemmode
+1. The build's newest `live/iem-pc` check run (the ops live run's verdict,
+   which the guard does not record) must be green (design section 3.2); then
+   the guard's refusals and the live trial's precheck, through `iemmode
    cutover --build SHA --dry-run` (only from trial, on the active bundle, a
-   green main build, in dev or a live trial on it, no HIL job): a refusal
-   changes nothing on the PC.
+   green main build with its HIL recorded, in dev or a live trial on it, no
+   HIL job): a refusal changes nothing on the PC.
 2. Install-IemCutover, elevated, imported only from the admin-only stage
    (STAGE: IemPc.psm1 and S1c's IemTuningStore.psm1 first, which the new
    module imports from its own folder, each checked by the zip's sha256, as
@@ -28,11 +30,14 @@ Dev time only (the EVENT-NOW flag refuses it, --dry-run too), the dev-box
 lock, and never with an S1a/S1c window open. `--dry-run` runs step 1 only. A
 new flag during the install lets it finish, then the event path runs; during
 the guard's cutover this client is abandoned at once (the guard pre-empts
-itself and unwinds) and the event path runs.
+itself and unwinds) and the event path runs. A guard's cutover that outlives
+this client's bound goes on: it ends in prod or unwinds by itself (`iempc
+status --pc` reads which).
 
 iempc.py passes itself in (`ip`), so this module never imports it (#36)."""
 from __future__ import annotations
 
+import json
 import re
 
 MODULE = "IemCutover.psm1"
@@ -42,6 +47,8 @@ INSTALL = "Install-IemCutover"
 TASKS_KEY = "PC_AUTOSTART_TASKS"
 RUN_KEY = "PC_AUTOSTART_RUN"
 TASK = "\\iemmixer\\iemmixer-cutover"
+# The ops live run's verdict on a build (S7, live_verdict.py).
+LIVE_CHECK = "live/iem-pc"
 # What IemCutover's Test-IemAutostartList takes (checked here first, so a typo
 # in the env never reaches the PC).
 TASK_PATH = re.compile(r'\\[^"%!^&|<>\r\n\t]*[^"%!^&|<>\r\n\t\\]')
@@ -79,26 +86,28 @@ def quoted(ip, items: list[str]) -> str:
     return ", ".join(ip.ps_quote(i) for i in items)
 
 
+def live_green(ip, sha: str) -> dict:
+    """Design section 3.2's gate the guard does not record: the build's newest
+    `live/iem-pc` check run completed with success."""
+    try:
+        doc = json.loads(ip.gh(["api", f"repos/{ip.REPO}/commits/{sha}/check-runs?check_name={LIVE_CHECK}"]))
+    except ValueError:
+        raise ip.StepError(f"the {LIVE_CHECK} check runs of {sha} are not JSON") from None
+    runs = [r for r in (doc.get("check_runs") if isinstance(doc, dict) else None) or []
+            if isinstance(r, dict) and r.get("name") == LIVE_CHECK and isinstance(r.get("id"), int)]
+    if not runs:
+        raise ip.Refused(f"{sha} has no {LIVE_CHECK} result: run 'iempc dispatch-live --sha {sha}' in a dev entry first")
+    last = max(runs, key=lambda r: r["id"])
+    if last.get("status") != "completed" or last.get("conclusion") != "success":
+        raise ip.Refused(f"the newest {LIVE_CHECK} of {sha} is {last.get('status')} {last.get('conclusion')}, not green")
+    return {"id": last["id"], "conclusion": "success"}
+
+
 def check_install(ip, r) -> dict:
     """Install's answer: installed, the cutover task named."""
     if not isinstance(r, dict) or r.get("state") != "installed" or r.get("task") != TASK:
         raise ip.StepError(f"{INSTALL} answered {str(r)[:300]!r}, not installed {TASK}")
     return r
-
-
-def staged_import(ip, ctx, sha: str, rec: dict) -> tuple[list, str, dict[str, str]]:
-    """The bundle's three modules (their sums checked again), the statements
-    that stage them on the PC in STAGE's order and import the new one from
-    its stage copy only, and each one's sha256 by stage name."""
-    ep = ip.elevated_ps()
-    rel = f"bootstrap/{sha}"
-    uploads, mods, sums = [], [], {}
-    for member, name in STAGE:
-        local, hexd = ip.extract_member(sha, rec, member, nested="/" in member)
-        uploads.append((local, name))
-        mods.append((ip.ps_quote(ip.pc_join(ctx.env["PC_ROOT"], f"{rel}/{name}")), name, hexd))
-        sums[name] = hexd
-    return uploads, f"{ep.staged(mods)} ; Import-Module $iemMod -Force ; ", sums
 
 
 def run(ctx, ip) -> int:
@@ -110,27 +119,29 @@ def run(ctx, ip) -> int:
     if missing:
         raise ip.Refused(f"bundle {sha} has no {', '.join(missing)}: fetch a bundle built with S8's cutover")
     tasks, values = autostarts(ip, ctx.env)
+    live = live_green(ip, sha)
     dry = ["cutover", "--build", sha, "--dry-run"]
     code, reply, raw = ip.iemmode(ctx.env, dry, ip.STATUS_S, ctx.watch(abandon=True))
     if code != 0 or ctx.args.dry_run:
         out = ip.result("iemmode", dry, code, reply, raw)
-        out.update({"cutover": "dry-run" if code == 0 else "refused", "sha": sha, "tasks": tasks, "run": values})
+        out.update({"cutover": "dry-run" if code == 0 else "refused", "sha": sha, "live": live, "tasks": tasks,
+                    "run": values})
         ip.emit(out)
         return code
     env = ctx.env
     mode = ctx.watch(abandon=False)
-    uploads, pre, sums = staged_import(ip, ctx, sha, rec)
-    rel = f"bootstrap/{sha}"
-    ip.pc_mkdir(ctx, rel, mode)
-    for local, name in uploads:
-        ip.scp(str(local), ip.remote(env, f"{rel}/{name}"), mode)
+    pre, sums = ip.stage_modules(ctx, sha, rec, STAGE, mode)
     body = install_body(ip, sums, env["PC_ROOT"], tasks, values)
     try:
         installed = check_install(ip, ip.run_module(env, body, ip.BOOTSTRAP_S, mode, pre=pre))
     except ip.StepError as e:
         raise ip.StepError(f"{INSTALL} failed: {e}; the guard's cutover did not run") from None
     args = ["cutover", "--build", sha]
-    code, reply, raw = ip.iemmode(env, args, ip.SWITCH_S, ctx.watch(abandon=True))
+    try:
+        code, reply, raw = ip.iemmode(env, args, ip.SWITCH_S, ctx.watch(abandon=True))
+    except ip.StillRunning as e:
+        raise ip.StepError(f"{e}; the guard's cutover goes on: it ends in prod or unwinds to trial and event by "
+                           "itself ('iempc status --pc' reads which)") from None
     out = ip.result("iemmode", args, code, reply, raw)
     out.update({"cutover": "done" if code == 0 else "failed", "sha": sha, "install": installed})
     ip.emit(out)

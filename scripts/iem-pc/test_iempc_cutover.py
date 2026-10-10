@@ -36,6 +36,16 @@ class CutoverBase(Base):
         self.write_env({"PC_AUTOSTART_TASKS": TASKS, "PC_AUTOSTART_RUN": RUN})
         self.install_reply: object = installed()
         self.pc.texts[cut.INSTALL] = lambda: self.install_reply() if callable(self.install_reply) else self.install_reply
+        # The ops live run's verdicts on SHA (newest last by id); every other gh call is FakeGh's.
+        self.live_runs: list[dict] = [{"id": 7, "name": cut.LIVE_CHECK, "status": "completed", "conclusion": "success"}]
+        fake = self.gh
+
+        def gh(args, timeout=ip.GH_S):
+            if list(args[:2]) == ["api", f"repos/{ip.REPO}/commits/{SHA}/check-runs?check_name={cut.LIVE_CHECK}"]:
+                return json.dumps({"total_count": len(self.live_runs), "check_runs": self.live_runs})
+            return fake(args, timeout)
+
+        self.patch(gh=gh)
 
     def write_env(self, extra: dict[str, str]) -> None:
         envfile = self.tmp / "iem-pc-cutover.env"
@@ -98,6 +108,7 @@ class SequenceTests(CutoverBase):
         self.assertEqual((self.pc.modules, self.pc.scps), ([], []))
         self.assertEqual((docs[-1]["cutover"], docs[-1]["tasks"], docs[-1]["run"]),
                          ("dry-run", ["\\Pred\\appstart", "\\Pred\\other"], [RUN]))
+        self.assertEqual(docs[-1]["live"], {"id": 7, "conclusion": "success"})
 
 
 class RefusalTests(CutoverBase):
@@ -156,6 +167,38 @@ class RefusalTests(CutoverBase):
         self.assertEqual((self.pc.modules, self.pc.calls), ([], []))
 
 
+class LiveGateTests(CutoverBase):
+    """Design section 3.2: the build's newest live/iem-pc must be green, before
+    anything reaches the PC (the guard records only HIL)."""
+
+    def run_refused(self, why: str) -> None:
+        self.fetched()
+        for argv in (("cutover", "--sha", SHA), ("cutover", "--sha", SHA, "--dry-run")):
+            code, _, err = self.run_main(*argv)
+            self.assertEqual(code, 1, argv)
+            self.assertIn(why, err)
+        self.assertEqual((self.pc.modules, self.pc.scps, self.pc.calls), ([], [], []))
+
+    def test_no_live_result_refuses_it(self) -> None:
+        self.live_runs = [{"id": 9, "name": "hil/iem-pc", "status": "completed", "conclusion": "success"}]
+        self.run_refused(f"{SHA} has no {cut.LIVE_CHECK} result")
+
+    def test_a_red_or_unfinished_newest_live_result_refuses_it(self) -> None:
+        for newest in ({"status": "completed", "conclusion": "failure"}, {"status": "in_progress", "conclusion": None}):
+            with self.subTest(newest=newest):
+                self.live_runs = [{"id": 7, "name": cut.LIVE_CHECK, "status": "completed", "conclusion": "success"},
+                                  {"id": 8, "name": cut.LIVE_CHECK, **newest}]
+                self.run_refused(f"the newest {cut.LIVE_CHECK} of {SHA} is {newest['status']}")
+
+    def test_an_older_red_result_before_a_green_one_passes(self) -> None:
+        self.fetched()
+        self.live_runs = [{"id": 8, "name": cut.LIVE_CHECK, "status": "completed", "conclusion": "success"},
+                          {"id": 3, "name": cut.LIVE_CHECK, "status": "completed", "conclusion": "failure"}]
+        code, docs, err = self.run_main("cutover", "--sha", SHA, "--dry-run")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(docs[-1]["live"], {"id": 8, "conclusion": "success"})
+
+
 class FailureTests(CutoverBase):
     def test_a_failed_install_never_runs_the_guard_s_cutover(self) -> None:
         self.fetched()
@@ -164,6 +207,17 @@ class FailureTests(CutoverBase):
         self.assertEqual(code, 1)
         self.assertIn("the guard's cutover did not run", err)
         self.assertEqual(self.iemmode_calls(), [(list(DRY), "abandon")])
+
+    def test_a_cutover_that_outlives_the_client_s_bound_says_it_goes_on(self) -> None:
+        self.fetched()
+
+        def slow():
+            raise ip.StillRunning("iemmode.exe still running after 540 s")
+
+        self.pc.replies[GO] = slow
+        code, _, err = self.run_main("cutover", "--sha", SHA)
+        self.assertEqual(code, 1)
+        self.assertIn("the guard's cutover goes on: it ends in prod or unwinds to trial and event by itself", err)
 
     def test_a_failed_cutover_says_so_with_the_guard_s_reply(self) -> None:
         self.fetched()
