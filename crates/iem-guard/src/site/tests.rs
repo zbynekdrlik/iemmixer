@@ -83,6 +83,7 @@ fn the_synthetic_site_parses_with_its_defaults() {
     // No shadow import unless pc.toml names one (S8 lane 4); one that runs
     // `iem-migrate shadow` reads as good, its history under the root.
     assert!(s.pc.shadow.is_empty(), "an older pc.toml has none");
+    let mut with = s.pc.clone();
     with.shadow = [
         "{bundle}\\iem-migrate.exe",
         "shadow",
