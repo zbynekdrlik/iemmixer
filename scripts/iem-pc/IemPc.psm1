@@ -553,6 +553,11 @@ function Register-IemTasks {
     $f = Get-IemTaskFolder -Scheduler $sch -Path $Folder
     Install-IemElevatedDir -Root $ElevatedRoot -UserSid $u.sid
 
+    # After the cutover (S8, IemCutover's Set-IemGuardLogon) the guard task
+    # starts at the logon: registering again keeps that trigger.
+    $guardTask = Get-IemRegisteredTask -Scheduler $sch -Folder $Folder -Name 'iemmixer-guard'
+    $guardTrigger = ''
+    if ($null -ne $guardTask -and @((Get-IemTaskReport -Task $guardTask -UserSid $u.sid).triggers) -contains $script:TriggerLogon) { $guardTrigger = 'logon' }
     $ps = Join-Path $system 'WindowsPowerShell\v1.0\powershell.exe'
     $common = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File ' +
         (Format-IemArg (Join-Path $tasksDir 'iem-task.ps1')) + ' -Root ' + (Format-IemArg $Root) +
@@ -560,7 +565,7 @@ function Register-IemTasks {
     $logonArgs = $common + ' -Kind logon -PrefKey ' + (Format-IemArg $PrefKey) + ' -PrefName ' + (Format-IemArg $PrefName) +
         ' -PrefOriginal ' + (Format-IemArg $PrefOriginal) + ' -Module ' + (Format-IemArg $Module)
     $specs = @(
-        @{ name = 'iemmixer-guard'; level = $script:RunLevelLimited; exe = (Join-Path $Root 'bin\iemmixer-guard.exe'); args = 'run'; dir = $Root; trigger = '' },
+        @{ name = 'iemmixer-guard'; level = $script:RunLevelLimited; exe = (Join-Path $Root 'bin\iemmixer-guard.exe'); args = 'run'; dir = $Root; trigger = $guardTrigger },
         @{ name = 'iemmixer-StartApp'; level = $script:RunLevelLimited; exe = $AppExe; args = ''; dir = (Split-Path -Parent $AppExe); trigger = '' },
         @{ name = 'iemmixer-probe'; level = $script:RunLevelLimited; exe = (Join-Path $system 'cmd.exe'); args = '/c exit 0'; dir = ''; trigger = '' },
         @{ name = 'iemmixer-tuning'; level = $script:RunLevelHighest; exe = $ps; args = ($common + ' -Kind tuning'); dir = $tasksDir; trigger = '' },
