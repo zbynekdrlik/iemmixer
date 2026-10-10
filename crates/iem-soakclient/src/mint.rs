@@ -154,7 +154,7 @@ struct Claims<'a> {
 }
 
 /// The token for `sub` as the server's login issues one
-/// (`iem_server::auth::issue_token`: the default header, HS256, the
+/// (iem-server's `auth::issue_token`, private: the default header, HS256, the
 /// secret's bytes), issued at the Unix second `now` and valid for `seconds`.
 /// A token that cannot be signed with the secret is `secret-unreadable`
 /// (not seen with HS256).

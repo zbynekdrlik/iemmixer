@@ -9,9 +9,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::{
     Json,
-    extract::{ConnectInfo, Request, State},
+    extract::{ConnectInfo, State},
     http::{HeaderMap, StatusCode, header},
-    middleware::Next,
     response::{IntoResponse, Response},
 };
 use iem_core::{ApiError, AuthClaims};
@@ -402,53 +401,6 @@ fn extract_claims_from_header(
 
     extract_claims(token, jwt_secret)
         .ok_or_else(|| (StatusCode::UNAUTHORIZED, Json(ApiError::unauthorized())))
-}
-
-/// Verify JWT and return claims
-pub async fn verify_token(
-    State(state): State<AppState>,
-    req: Request,
-    next: Next,
-) -> Result<Response, (StatusCode, Json<ApiError>)> {
-    let config = state.config.read().await;
-
-    // Extract token from Authorization header
-    let auth_header = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok());
-
-    let token = match auth_header {
-        Some(header) if header.starts_with("Bearer ") => &header[7..],
-        _ => {
-            return Err((StatusCode::UNAUTHORIZED, Json(ApiError::unauthorized())));
-        }
-    };
-
-    // Validate token
-    let token_data = decode::<AuthClaims>(
-        token,
-        &DecodingKey::from_secret(config.jwt_secret.as_bytes()),
-        &Validation::default(),
-    )
-    .map_err(|_| (StatusCode::UNAUTHORIZED, Json(ApiError::unauthorized())))?;
-
-    // Check expiration
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-
-    if token_data.claims.exp < now {
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            Json(ApiError::new("TOKEN_EXPIRED", "Token has expired")),
-        ));
-    }
-
-    // Continue with request
-    drop(config);
-    Ok(next.run(req).await)
 }
 
 /// Verify that the authenticated user has access to the specified member's mixer.
