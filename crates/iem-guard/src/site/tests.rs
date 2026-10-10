@@ -1,7 +1,10 @@
 //! The guard's settings against a synthetic site and `pc.toml` (P6), and
 //! the fixtures other modules' tests read (`PC`, `SITE`, `settings`).
 
+use iem_win::prefwin::{Kind, Pref};
+
 use super::*;
+use crate::plan::PrefFail;
 
 pub(crate) const PC: &str = r#"
 root = 'C:\IEM\iemmixer'
