@@ -6,7 +6,9 @@
 
 use std::time::{Duration, Instant};
 
-use super::tests::{INIT, OTHER, SHA, T0, band_up, fixed, iemmixer_up, prod_on, record, texts};
+use super::tests::{
+    INIT, OTHER, SHA, T0, ask, band_up, fixed, iemmixer_up, prod_on, record, texts,
+};
 use super::*;
 use crate::bundle::{Hil, Pins};
 use crate::install;
@@ -555,4 +557,60 @@ fn in_prod_live_without_a_build_runs_the_pin() {
     let r = handle(&mut pc, &mut g, live, INIT);
     assert_eq!((r.ok, r.detail.as_str()), (false, "live needs --build SHA"));
     assert_eq!(g.state.mode, Mode::Dev);
+}
+
+/// The prod data rule (ROZHODNUTÉ on #11; program spec §3: the REAPER
+/// project is the data authority only before the cutover): in prod no
+/// entry refreshes the band's data from the predecessor. The boot's live
+/// entry on the pin, a maintenance dev entry and the live entry that ends
+/// it run no data step, and the dry run lists none; iemmixer's own state is
+/// the only authority. A trial still imports.
+#[test]
+fn in_prod_no_entry_refreshes_the_data_from_the_predecessor() {
+    let dir = tempfile::tempdir().unwrap();
+    let st = GuardState {
+        lifecycle: prod_on(None, None),
+        ..GuardState::default()
+    };
+    let mut g = saved(dir.path(), st, 1_000);
+    let mut pc = FakePc::new(Facts::default());
+    assert_eq!(start(&mut pc, &mut g, 5_000), Some(Outcome::Done));
+    assert_eq!(g.state.mode, Mode::Live);
+    assert!(
+        !pc.called(Call::Data),
+        "the boot's live entry refreshed the data"
+    );
+    let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Live));
+    g.state.lifecycle = prod_on(None, None);
+    g.state.active = Some(SHA.into());
+    green_main(&mut g, &[SHA, NEW]);
+    let maintenance = Request::Dev {
+        build: Some(NEW.into()),
+        dry_run: false,
+    };
+    let r = handle(&mut pc, &mut g, maintenance, INIT);
+    assert!(r.ok, "{r:?}");
+    assert_eq!(g.state.mode, Mode::Dev);
+    let live = |dry_run| Request::Live {
+        build: None,
+        trial: false,
+        dry_run,
+    };
+    let r = ask(&mut pc, &mut g, live(true));
+    assert!(r.ok, "{r:?}");
+    assert!(!r.detail.contains("Data"), "{}", r.detail);
+    let r = ask(&mut pc, &mut g, live(false));
+    assert!(r.ok, "{r:?}");
+    assert_eq!(g.state.mode, Mode::Live);
+    assert!(!pc.called(Call::Data), "a prod entry refreshed the data");
+    // Before the cutover a trial imports the band's REAPER mix, as before.
+    let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
+    green_main(&mut g, &[SHA]);
+    let trial = Request::Live {
+        build: Some(SHA.into()),
+        trial: true,
+        dry_run: false,
+    };
+    assert!(handle(&mut pc, &mut g, trial, INIT).ok);
+    assert_eq!(pc.count(Call::Data), 1);
 }
