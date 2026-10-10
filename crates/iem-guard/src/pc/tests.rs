@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use super::fake::FakePc;
 use super::*;
+use crate::state::Child;
 
 fn images() -> Images {
     Images {

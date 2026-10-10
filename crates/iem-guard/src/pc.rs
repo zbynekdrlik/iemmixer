@@ -11,19 +11,32 @@
 //!
 //! The decisions of the effects live here and in [`crate::effects`],
 //! portable and mutation-tested; `win` only reads and acts.
+//!
+//! Its parts: `procs.rs` (the process list, the facts of a plan, the
+//! module's holders, adoption), `pref.rs` (what `PrefCheck` found and who
+//! holds the driver), `precheck.rs` (the dev/live entry's precheck) and
+//! `fake.rs` (the scripted PC of the tests).
 
 use std::fmt;
 
-use iem_win::prefwin::Checked;
 use iem_win::spawn::Placement;
 
 use crate::cancel::{Cancel, Preempted};
-use crate::effects::app::holders_text;
 use crate::effects::tuning::Logon;
 use crate::handover::{AppExit, ReaperFacts, ReaperProcs};
 use crate::plan::{Facts, Health, Mode};
 use crate::proto::HilOut;
-use crate::state::{Child, Children};
+use crate::state::Children;
+
+mod precheck;
+mod pref;
+mod procs;
+
+pub use self::precheck::{PrecheckFacts, precheck};
+pub use self::pref::{CardHolders, PREF_ATTEMPTS, PrefHeld, PrefSeen, card_holders};
+pub use self::procs::{
+    Images, Ports, Procs, adoptable, app_serves, facts_from, foreign_engine, foreign_holders,
+};
 
 pub type R<T> = Result<T, StepError>;
 
@@ -96,320 +109,6 @@ impl Kid {
             Self::Tray => "tray",
             Self::Runner => "runner",
         }
-    }
-}
-
-impl Children {
-    /// The record of `kid`, if the guard started or adopted one.
-    pub fn of(&self, kid: Kid) -> Option<&Child> {
-        match kid {
-            Kid::Engine => self.engine.as_ref(),
-            Kid::Server => self.server.as_ref(),
-            Kid::Tray => self.tray.as_ref(),
-            Kid::Runner => self.runner.as_ref(),
-        }
-    }
-}
-
-/// The image names the process list is read for.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Images {
-    pub reaper: String,
-    pub app: String,
-    pub engine: String,
-    pub server: String,
-    pub tray: String,
-    pub runner: String,
-}
-
-/// The once-a-second look (P10): the pids of each image, and the children of
-/// ours that ended since the last look.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Procs {
-    pub reaper: Vec<u32>,
-    pub app: Vec<u32>,
-    pub engine: Vec<u32>,
-    pub server: Vec<u32>,
-    pub tray: Vec<u32>,
-    pub runner: Vec<u32>,
-    /// Our children that ended, with their exit codes (`None`: no code could
-    /// be read); the daemon applies `crash::after_exit` to the engine's.
-    pub exited: Vec<(Kid, Option<i32>)>,
-}
-
-impl Procs {
-    /// Picks the images out of a process list (names compare without ASCII
-    /// case, as Windows does).
-    pub fn from_list(list: &[(u32, String)], images: &Images) -> Self {
-        let pick = |image: &str| -> Vec<u32> {
-            list.iter()
-                .filter(|(_, name)| name.eq_ignore_ascii_case(image))
-                .map(|(pid, _)| *pid)
-                .collect()
-        };
-        Self {
-            reaper: pick(&images.reaper),
-            app: pick(&images.app),
-            engine: pick(&images.engine),
-            server: pick(&images.server),
-            tray: pick(&images.tray),
-            runner: pick(&images.runner),
-            exited: Vec::new(),
-        }
-    }
-
-    /// REAPER or the predecessor app runs: the band's system is up (design
-    /// §5.2, the reboot rule).
-    pub fn band_up(&self) -> bool {
-        !self.reaper.is_empty() || !self.app.is_empty()
-    }
-
-    /// The pids of one of our children's images.
-    pub fn of(&self, kid: Kid) -> &[u32] {
-        match kid {
-            Kid::Engine => &self.engine,
-            Kid::Server => &self.server,
-            Kid::Tray => &self.tray,
-            Kid::Runner => &self.runner,
-        }
-    }
-}
-
-/// The listening pids of ports 80 and 443 (`None`: free).
-pub type Ports = (Option<u32>, Option<u32>);
-
-/// The facts of a plan (design §5.1) from the process list, the driver
-/// module's holders and the owners of ports 80/443.
-///
-/// An unreadable holder list assumes a running REAPER holds the card (the
-/// handover checks it) and no foreign holder (`reaper_start` reads again and
-/// refuses on one); unreadable ports assume a running app serves (the app
-/// handover checks it). So a failed read never restarts a REAPER or an app
-/// that serves the band.
-pub fn facts_from(p: &Procs, holders: Option<&[(u32, String)]>, ports: Option<Ports>) -> Facts {
-    let reaper = !p.reaper.is_empty();
-    let app = !p.app.is_empty();
-    let (reaper_holds_module, other_module_holder) = match holders {
-        Some(h) => (
-            h.iter().any(|(pid, _)| p.reaper.contains(pid)),
-            h.iter()
-                .any(|(pid, _)| !p.reaper.contains(pid) && !p.engine.contains(pid)),
-        ),
-        None => (reaper, false),
-    };
-    let app_serves = match ports {
-        Some(ports) => app_serves(&p.app, ports),
-        None => app,
-    };
-    Facts {
-        reaper,
-        app,
-        engine: !p.engine.is_empty(),
-        server: !p.server.is_empty(),
-        tray: !p.tray.is_empty(),
-        runner: !p.runner.is_empty(),
-        reaper_holds_module,
-        app_serves,
-        other_module_holder,
-    }
-}
-
-/// The predecessor app serves the band: its one process owns both ports 80
-/// and 443. The plan's facts read it, and the app handover requires it
-/// (#10: an iem-server that did not stop keeps the ports and answers the
-/// app's HTTP checks itself).
-pub fn app_serves(app: &[u32], (http, https): Ports) -> bool {
-    match app {
-        [pid] => http == Some(*pid) && https == Some(*pid),
-        _ => false,
-    }
-}
-
-/// The driver module's holders other than REAPER: they must leave before
-/// REAPER starts (design §5.2 "back to event" step 4, I3).
-pub fn foreign_holders(holders: &[(u32, String)], reaper: &[u32]) -> Vec<(u32, String)> {
-    holders
-        .iter()
-        .filter(|(pid, _)| !reaper.contains(pid))
-        .cloned()
-        .collect()
-}
-
-/// `PrefCheck`'s restore: up to this many writes, each read back.
-pub const PREF_ATTEMPTS: u32 = 3;
-
-/// Who holds the driver module when `PrefCheck` finds something other than
-/// REAPER's original (#9 2026-09-28).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CardHolders {
-    /// REAPER is one of them.
-    pub reaper: bool,
-    /// Every holder: image and pid.
-    pub names: String,
-}
-
-/// The holders `PrefCheck` must not write under; `None` while nothing holds
-/// the driver module (the restore may write). Anything counts, our engine
-/// too. An unreadable list assumes that a running REAPER holds it (as
-/// [`facts_from`] does), so a failed read never writes under a REAPER that
-/// may hold the card.
-pub fn card_holders(holders: Option<&[(u32, String)]>, reaper: &[u32]) -> Option<CardHolders> {
-    let assumed: Vec<(u32, String)> = match holders {
-        Some(_) => Vec::new(),
-        None => reaper
-            .iter()
-            .map(|pid| (*pid, "REAPER".to_owned()))
-            .collect(),
-    };
-    let list = holders.unwrap_or(&assumed);
-    (!list.is_empty()).then(|| CardHolders {
-        reaper: list.iter().any(|(pid, _)| reaper.contains(pid)),
-        names: holders_text(list),
-    })
-}
-
-/// A preference that is not REAPER's original while the driver module is
-/// held: `PrefCheck` wrote nothing.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PrefHeld {
-    /// What the preference reads (`None`: unreadable).
-    pub value: Option<String>,
-    pub by: CardHolders,
-}
-
-impl PrefHeld {
-    /// The alarm, the report line and the status line.
-    pub fn text(&self) -> String {
-        let at = self
-            .value
-            .as_ref()
-            .map_or_else(|| "unreadable".to_owned(), |v| format!("at {v}"));
-        if self.by.reaper {
-            format!(
-                "REAPER runs with the preferred buffer {at}; it is restored at REAPER's next start"
-            )
-        } else {
-            format!(
-                "the driver module is held by {} with the preferred buffer {at}; nothing was \
-                 written",
-                self.by.names
-            )
-        }
-    }
-}
-
-/// What `PrefCheck` found (design §5.2; #9 2026-09-28).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PrefSeen {
-    /// REAPER's original is there, after this many writes (each read back;
-    /// 0: it already was).
-    Original(u32),
-    /// Not the original while the driver module is held: nothing written.
-    Held(PrefHeld),
-}
-
-impl From<Checked<CardHolders>> for PrefSeen {
-    fn from(c: Checked<CardHolders>) -> Self {
-        match c {
-            Checked::Original(writes) => Self::Original(writes),
-            Checked::Open { found, by } => Self::Held(PrefHeld {
-                value: found.map(|p| p.raw),
-                by,
-            }),
-        }
-    }
-}
-
-/// Whether an engine runs that is not the guard's own child (`ours`).
-pub fn foreign_engine(running: &[u32], ours: Option<u32>) -> bool {
-    running.iter().any(|pid| Some(*pid) != ours)
-}
-
-/// Whether a running process is the child a previous guard started: the
-/// same image path (without ASCII case) and the same start time, so a
-/// recycled pid never passes for it (design §5.1, adoption).
-pub fn adoptable(saved: &Child, image_path: &str, start_time: u64) -> bool {
-    saved.image.eq_ignore_ascii_case(image_path) && saved.start_time == start_time
-}
-
-/// What the precheck of a dev/live entry reads (design §5.2 step 1). The
-/// bundle's record and HIL result are the daemon's (`bundle::may_go_live`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PrecheckFacts {
-    pub to: Mode,
-    pub trial: bool,
-    /// The current bundle's engine is installed.
-    pub bundle: bool,
-    /// `[guard] pc_tests_passed` (design §10).
-    pub pc_tests_passed: bool,
-    /// The PWA notification subscriptions an alarm goes to (`iem-server
-    /// notify --count alarm`); `None`: unreadable.
-    pub subscriptions: Option<u32>,
-    /// An engine the guard did not start runs (ours is stopped by the plan).
-    pub foreign_engine: bool,
-    /// `handover::app_binary` of the predecessor's exe.
-    pub app_binary: Result<(), String>,
-}
-
-/// Why the guard's alarms would reach no phone (design §5.4); `None`: at
-/// least one PWA notification subscription.
-fn no_subscription(subscriptions: Option<u32>) -> Option<&'static str> {
-    match subscriptions {
-        None => Some("the PWA notification subscriptions cannot be read"),
-        Some(0) => {
-            Some("no PWA notification subscription: no engineer device allowed notifications")
-        }
-        Some(_) => None,
-    }
-}
-
-/// How a dev entry's note goes on after [`no_subscription`].
-const DEV_WITHOUT_SUBSCRIPTION: &str =
-    " (not needed for dev: the alarms stay in the guard's alarm file)";
-
-/// The precheck's verdict: `Err` refuses the entry with every problem;
-/// `Ok(Some(note))` lets it go on and names what it found. A PWA
-/// notification subscription (the engineer's, where the alarms go, #9
-/// 2026-09-28) is required for live and live trials only: the predecessor's
-/// arrive with the band import, a later step of the entry, and a new one
-/// only through iem-server, which runs only in dev and live (in event the
-/// predecessor holds the band's address). Dev without one names it, and
-/// the alarms stay in the guard's alarm file.
-pub fn precheck(f: &PrecheckFacts) -> R<Option<String>> {
-    let mut bad = Vec::new();
-    let mut note = None;
-    if f.to == Mode::Event {
-        bad.push("the precheck is for dev and live".to_owned());
-    }
-    if !f.bundle {
-        bad.push("no installed bundle is active".to_owned());
-    }
-    if f.trial && f.to != Mode::Live {
-        bad.push("a trial is a live switch".to_owned());
-    }
-    if f.to == Mode::Live && f.trial && !f.pc_tests_passed {
-        bad.push(
-            "[guard] pc_tests_passed is false: no trial before the owner-approved PC tests"
-                .to_owned(),
-        );
-    }
-    if let Some(why) = no_subscription(f.subscriptions) {
-        if f.to == Mode::Live || f.trial {
-            bad.push(why.to_owned());
-        } else {
-            note = Some(format!("{why}{DEV_WITHOUT_SUBSCRIPTION}"));
-        }
-    }
-    if f.foreign_engine {
-        bad.push("an engine the guard did not start runs".to_owned());
-    }
-    if let Err(e) = &f.app_binary {
-        bad.push(e.clone());
-    }
-    if bad.is_empty() {
-        Ok(note)
-    } else {
-        Err(StepError::Failed(bad.join("; ")))
     }
 }
 

@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use super::fake::{Call, FakePc};
 use super::tests::up;
 use super::*;
+use crate::state::Child;
 
 #[test]
 fn the_fake_reports_its_facts_and_processes() {
