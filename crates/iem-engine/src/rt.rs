@@ -885,5 +885,4 @@ impl Process for Processor {
 }
 
 #[cfg(test)]
-#[path = "rt_tests.rs"]
 mod tests;
