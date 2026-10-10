@@ -57,17 +57,24 @@ pub struct GuardState {
     pub pids: Children,
     /// Installed bundles by SHA.
     pub bundles: BTreeMap<String, Record>,
-    /// The record an older guard kept: its `current` was the active bundle
-    /// (it promoted every entry's and every activation's build, S8 design
-    /// note §3.4). Read only by [`GuardState::active_bundle`] for a state
-    /// such a guard saved; never written since S8, so an older guard that
-    /// takes over finds what it last wrote.
+    /// The record a guard before S8 kept: it promoted every entry's and
+    /// every activation's build (S8 design note §3.4), so `current` was its
+    /// active bundle and `previous` the one before. Read only for a state
+    /// such a guard saved ([`GuardState::active_bundle`],
+    /// [`GuardState::way_back_bundle`]); never written since S8. An older guard
+    /// that takes over finds it as it last wrote it, so it runs the bundle
+    /// that was active then, not this guard's (a known limit, `guard.md`).
     pub pins: Pins,
     /// The active bundle (S8, #11): the build the engine and the server run
     /// in dev and live, and the one `bin\`'s guard came from unless an entry
     /// named another. Set by `activate` and by an entry's build (a prod
-    /// entry: the pin), never the pin itself (`lifecycle`).
+    /// entry: the pin) through [`GuardState::set_active`], never the pin
+    /// itself (`lifecycle`).
     pub active: Option<String>,
+    /// The bundle active before the active one (another build): the way
+    /// back, whose Defender exclusions an activation keeps
+    /// (`lifecycle::kept`), as `pins.previous` was before S8.
+    pub way_back: Option<String>,
     /// Before the cutover, after it, or rolling back (S8 design note §3.1).
     /// A state an older guard saved has none: `Trial`
     /// (`lifecycle::lenient`); a reset keeps it.
@@ -106,6 +113,29 @@ impl GuardState {
         self.active.as_deref().or(self.pins.current.as_deref())
     }
 
+    /// The way back: [`GuardState::way_back`] once this guard set an active
+    /// bundle, else (a state an older guard saved) its `pins.previous`.
+    pub fn way_back_bundle(&self) -> Option<&str> {
+        match self.active {
+            Some(_) => self.way_back.as_deref(),
+            None => self.pins.previous.as_deref(),
+        }
+    }
+
+    /// Makes `sha` the active bundle; the one active before it becomes the
+    /// way back when it is another build, else the way back stays (the rule
+    /// `Pins::promote` had for the active bundle before S8).
+    pub fn set_active(&mut self, sha: &str) {
+        let before = self.active_bundle().map(str::to_owned);
+        let kept = self.way_back_bundle().map(str::to_owned);
+        self.way_back = if before.as_deref() == Some(sha) {
+            kept
+        } else {
+            before
+        };
+        self.active = Some(sha.to_owned());
+    }
+
     /// The mode after [`reset_to_event`]: `event`, no switch in progress and
     /// no HIL job (`pref_held` and `logon_seen` stay: the next check reads
     /// the preference again; `last_switch` stays until the next switch,
@@ -120,10 +150,12 @@ impl GuardState {
     /// unreadable one gives the defaults and the text of the alarm to raise.
     pub fn load(path: &Path) -> (Self, Option<String>) {
         let (st, err) = load_json::<Self>(path);
-        (
-            st,
-            err.map(|e| format!("guard state unreadable ({e}); starting in event")),
-        )
+        let err = match err {
+            Some(e) => Some(format!("guard state unreadable ({e}); starting in event")),
+            // A lifecycle this guard cannot read loads as trial: alarmed.
+            None => crate::lifecycle::unreadable_in(path),
+        };
+        (st, err)
     }
 
     /// Stamps `written_at` with `now` and saves atomically.
@@ -207,6 +239,7 @@ mod tests {
             // S8 (#11): the lifecycle's own round trips are in
             // `lifecycle/tests.rs`.
             active: None,
+            way_back: None,
             lifecycle: Lifecycle::Trial,
             job: Some(4242),
             pref_held: Some(

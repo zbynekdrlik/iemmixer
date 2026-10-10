@@ -15,8 +15,10 @@
 //! or an activation, which change the active bundle only
 //! (`GuardState.active`).
 
+use std::fs;
+use std::path::Path;
+
 use serde::{Deserialize, Deserializer, Serialize};
-use tracing::warn;
 
 use crate::bundle::{Record, may_go_live};
 use crate::plan::Mode;
@@ -62,7 +64,7 @@ impl Prod {
     /// report (none without a session's build).
     pub fn end_maintenance<'r>(
         &self,
-        record: impl Fn(&str) -> Option<&'r Record>,
+        record: &impl Fn(&str) -> Option<&'r Record>,
     ) -> (Self, Option<String>) {
         let mut next = Self {
             maintenance: None,
@@ -90,6 +92,16 @@ impl Prod {
     }
 }
 
+/// Why `pin` may not run live: not installed, or not a green `main` build
+/// ([`may_go_live`], G8). The boot and every prod live entry check it: the
+/// state file is the user's, and HIL may report the pin red later.
+fn pin_refusal<'r>(pin: &str, record: &impl Fn(&str) -> Option<&'r Record>) -> Option<String> {
+    match record(pin) {
+        None => Some(format!("the pin {pin} is not installed")),
+        Some(r) => may_go_live(r).err(),
+    }
+}
+
 /// Where a starting guard goes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Start {
@@ -106,16 +118,22 @@ pub enum Start {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Started {
     pub start: Start,
+    /// The lifecycle once `start` ran to its end: for `Start::Live`, saved
+    /// only when the PC is live (a failed entry keeps the one before).
     pub lifecycle: Lifecycle,
     /// What the start decided about the pin or the rollback, for the log.
     pub note: Option<String>,
+    /// An alarm to raise: prod's pin may not run live, so the PC goes to
+    /// event instead.
+    pub alarm: Option<String>,
 }
 
 /// Where a starting guard goes (design §3.1). `reset`:
 /// `state::reset_to_event` (a reboot, or the band's system up without our
 /// engine); `rebooted`: the boot is later than the saved state. `Trial`:
 /// event on `reset` (G1, as before S8). `Prod`: a reboot goes live on the
-/// pin and ends a maintenance session ([`Prod::end_maintenance`]); the
+/// pin and ends a maintenance session ([`Prod::end_maintenance`]), unless
+/// that pin may not run live (`pin_refusal`: event and an alarm); the
 /// band's system up after a guard restart is event (an "ide event" stands).
 /// `RollingBack`: always event, the rollback goes on.
 pub fn start<'r>(
@@ -124,23 +142,40 @@ pub fn start<'r>(
     rebooted: bool,
     record: impl Fn(&str) -> Option<&'r Record>,
 ) -> Started {
-    let (start, lifecycle, note) = match lc {
+    let (start, lifecycle, note, alarm) = match lc {
         Lifecycle::RollingBack => (
             Start::Event,
             Lifecycle::RollingBack,
             Some("a rollback to REAPER runs: the PC goes to event".to_owned()),
+            None,
         ),
         Lifecycle::Prod(p) if rebooted => {
-            let (next, note) = p.end_maintenance(record);
-            (Start::Live(next.pin.clone()), Lifecycle::Prod(next), note)
+            let (next, note) = p.end_maintenance(&record);
+            match pin_refusal(&next.pin, &record) {
+                None => (
+                    Start::Live(next.pin.clone()),
+                    Lifecycle::Prod(next),
+                    note,
+                    None,
+                ),
+                Some(why) => (
+                    Start::Event,
+                    lc.clone(),
+                    note,
+                    Some(format!(
+                        "after a reboot in prod: {why}; the PC stays in event"
+                    )),
+                ),
+            }
         }
-        _ if reset => (Start::Event, lc.clone(), None),
-        _ => (Start::Keep, lc.clone(), None),
+        _ if reset => (Start::Event, lc.clone(), None, None),
+        _ => (Start::Keep, lc.clone(), None, None),
     };
     Started {
         start,
         lifecycle,
         note,
+        alarm,
     }
 }
 
@@ -158,7 +193,7 @@ pub struct Entered {
     /// The bundle the entry runs, which becomes the active bundle; none:
     /// the active bundle as it is.
     pub runs: Option<String>,
-    /// The lifecycle from the entry on.
+    /// The lifecycle once the entry is done (saved only when it entered).
     pub lifecycle: Lifecycle,
     /// What the entry decided about the pin, for its report.
     pub note: Option<String>,
@@ -222,7 +257,10 @@ pub fn entry<'r>(
                     note: None,
                 });
             }
-            let (next, note) = p.end_maintenance(record);
+            let (next, note) = p.end_maintenance(&record);
+            if let Some(why) = pin_refusal(&next.pin, &record) {
+                return Err(format!("in prod live runs the pin, and {why}"));
+            }
             if ask.build != Some(next.pin.as_str()) {
                 let why = note.map_or_else(String::new, |n| format!(" ({n})"));
                 return Err(format!(
@@ -283,16 +321,16 @@ pub fn crash_loop(lc: &Lifecycle, mode: Mode) -> (Fallback, Lifecycle) {
 }
 
 /// The bundles that keep their Defender exclusions when `sha` is activated:
-/// the one active before it (a way back, as before S8) and, in prod, the pin
-/// and the previous pin (a boot and a crash loop go back to them); never
-/// `sha`, each once.
-pub fn kept(lc: &Lifecycle, before: Option<&str>, sha: &str) -> Vec<String> {
+/// the way back (`GuardState::way_back_bundle` after the activation, as
+/// `pins.previous` before S8) and, in prod, the pin and the previous pin (a
+/// boot and a crash loop go back to them); never `sha`, each once.
+pub fn kept(lc: &Lifecycle, way_back: Option<&str>, sha: &str) -> Vec<String> {
     let mut keep: Vec<String> = Vec::new();
     let pins = match lc {
         Lifecycle::Prod(p) => [Some(p.pin.as_str()), p.previous.as_deref()],
         Lifecycle::Trial | Lifecycle::RollingBack => [None, None],
     };
-    for b in [before].into_iter().chain(pins).flatten() {
+    for b in [way_back].into_iter().chain(pins).flatten() {
         if b != sha && !keep.iter().any(|k| k == b) {
             keep.push(b.to_owned());
         }
@@ -323,16 +361,25 @@ pub fn status(lc: &Lifecycle) -> Option<String> {
 
 /// `GuardState.lifecycle` as a guard reads it: missing is `Trial` (a state
 /// an older guard saved); one this guard cannot read (a newer guard's
-/// shape) is `Trial` too, logged: every boot is then `event`, never `live`
-/// on a pin it could not read.
+/// shape) is `Trial` too, alarmed ([`unreadable_in`]): every boot is then
+/// `event`, never `live` on a pin it could not read.
 pub fn lenient<'de, D: Deserializer<'de>>(d: D) -> Result<Lifecycle, D::Error> {
     let v = Option::<serde_json::Value>::deserialize(d)?;
-    Ok(v.map_or(Lifecycle::Trial, |v| {
-        serde_json::from_value(v).unwrap_or_else(|e| {
-            warn!("the saved lifecycle is unreadable ({e}): trial, every boot in event");
-            Lifecycle::Trial
-        })
-    }))
+    Ok(v.and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default())
+}
+
+/// The alarm for a saved state at `path` whose lifecycle [`lenient`] read as
+/// `Trial` because it could not read it; none for a missing or null one, or
+/// a file that is no JSON object (the state's own load names that).
+pub fn unreadable_in(path: &Path) -> Option<String> {
+    let bytes = fs::read(path).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let lc = value.get("lifecycle").filter(|lc| !lc.is_null())?;
+    let e = serde_json::from_value::<Lifecycle>(lc.clone()).err()?;
+    Some(format!(
+        "the saved lifecycle is unreadable ({e}): trial, every boot in event"
+    ))
 }
 
 #[cfg(test)]

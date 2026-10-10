@@ -56,7 +56,7 @@ fn entered(lc: &Lifecycle, a: Ask<'_>, b: &BTreeMap<String, Record>) -> Result<E
 #[test]
 fn maintenance_ends_on_a_green_main_build_as_the_pin() {
     let b = installed();
-    let (next, note) = prod(Some(PREV), Some(NEW)).end_maintenance(|s| b.get(s));
+    let (next, note) = prod(Some(PREV), Some(NEW)).end_maintenance(&|s: &str| b.get(s));
     assert_eq!(
         next,
         Prod {
@@ -86,7 +86,7 @@ fn maintenance_on_anything_else_leaves_the_pin() {
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb is not installed".to_owned(),
         ),
     ] {
-        let (next, note) = prod(Some(PREV), Some(m)).end_maintenance(|s| b.get(s));
+        let (next, note) = prod(Some(PREV), Some(m)).end_maintenance(&|s: &str| b.get(s));
         assert_eq!(next, prod(Some(PREV), None), "{m}");
         assert_eq!(
             note,
@@ -96,7 +96,7 @@ fn maintenance_on_anything_else_leaves_the_pin() {
     }
     // No session's build, or the pin itself: nothing to say.
     for m in [None, Some(PIN)] {
-        let (next, note) = prod(Some(PREV), m).end_maintenance(|s| b.get(s));
+        let (next, note) = prod(Some(PREV), m).end_maintenance(&|s: &str| b.get(s));
         assert_eq!((next, note), (prod(Some(PREV), None), None), "{m:?}");
     }
 }
@@ -117,7 +117,8 @@ fn before_the_cutover_a_start_is_event_on_reset_as_before() {
             Started {
                 start: want,
                 lifecycle: Lifecycle::Trial,
-                note: None
+                note: None,
+                alarm: None
             },
             "{reset} {rebooted}"
         );
@@ -134,7 +135,8 @@ fn in_prod_a_reboot_goes_live_on_the_pin_and_a_guard_restart_keeps_event() {
         Started {
             start: Start::Live(PIN.into()),
             lifecycle: lc.clone(),
-            note: None
+            note: None,
+            alarm: None
         }
     );
     // A guard restart with the band's system up: event stands.
@@ -164,6 +166,44 @@ fn a_reboot_ends_a_maintenance_session() {
     assert_eq!(s.lifecycle, lc);
 }
 
+/// G8 at the boot (review of lane 1): the state file is the user's, and
+/// HIL may report the pin red later. A pin that is no installed green main
+/// build goes nowhere: event, an alarm, the lifecycle as it was.
+#[test]
+fn in_prod_a_reboot_on_a_pin_that_may_not_go_live_stays_in_event() {
+    let mut b = installed();
+    b.insert(PIN.into(), rec(PIN, "main", Hil::Red));
+    let lc = Lifecycle::Prod(prod(Some(PREV), None));
+    assert_eq!(
+        start(&lc, true, true, |sha| b.get(sha)),
+        Started {
+            start: Start::Event,
+            lifecycle: lc.clone(),
+            note: None,
+            alarm: Some(format!(
+                "after a reboot in prod: {PIN}: HIL Red; live needs green; the PC stays in \
+                 event"
+            ))
+        }
+    );
+    b.remove(PIN);
+    let s = start(&lc, true, true, |sha| b.get(sha));
+    assert_eq!((s.start, s.lifecycle), (Start::Event, lc.clone()));
+    assert_eq!(
+        s.alarm,
+        Some(format!(
+            "after a reboot in prod: the pin {PIN} is not installed; the PC stays in event"
+        ))
+    );
+    // A maintenance build that becomes the pin is checked by then.
+    let mut b = installed();
+    b.insert(PIN.into(), rec(PIN, "main", Hil::Red));
+    let s = start(&Lifecycle::Prod(prod(None, Some(NEW))), true, true, |sha| {
+        b.get(sha)
+    });
+    assert_eq!((s.start, s.alarm), (Start::Live(NEW.into()), None));
+}
+
 #[test]
 fn a_rollback_goes_on_to_event_at_every_start() {
     let b = installed();
@@ -174,7 +214,8 @@ fn a_rollback_goes_on_to_event_at_every_start() {
             Started {
                 start: Start::Event,
                 lifecycle: Lifecycle::RollingBack,
-                note: Some("a rollback to REAPER runs: the PC goes to event".into())
+                note: Some("a rollback to REAPER runs: the PC goes to event".into()),
+                alarm: None
             }
         );
     }
@@ -317,6 +358,21 @@ fn in_prod_live_runs_the_pin_and_ends_maintenance() {
              the previous pin): live --build {NEW}"
         ))
     );
+}
+
+#[test]
+fn in_prod_live_is_refused_on_a_pin_that_may_not_go_live() {
+    let mut b = installed();
+    b.insert(PIN.into(), rec(PIN, "main", Hil::Red));
+    let lc = Lifecycle::Prod(prod(None, None));
+    assert_eq!(
+        entered(&lc, ask(Mode::Live, Some(PIN), false), &b),
+        Err(format!(
+            "in prod live runs the pin, and {PIN}: HIL Red; live needs green"
+        ))
+    );
+    // Dev (maintenance) is no live: it runs.
+    assert!(entered(&lc, ask(Mode::Dev, Some(NEW), false), &b).is_ok());
 }
 
 #[test]
@@ -510,21 +566,26 @@ fn an_older_guards_state_is_trial_and_its_pin_is_the_active_bundle() {
 }
 
 /// A lifecycle this guard cannot read (a newer guard's shape, a pin
-/// missing) is `Trial`, never an unreadable state: every boot is event.
+/// missing) is `Trial`, never an unreadable state: every boot is event, and
+/// the load names it (the guard raises it); a null one is trial quietly.
 #[test]
 fn an_unreadable_lifecycle_is_trial_not_an_unreadable_state() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("guard-state.json");
-    for lc in [
-        r#""drill""#,
-        r#"{"prod": {"since": 1}}"#,
-        r#"{"later": {}}"#,
-        "null",
-        "7",
+    for (lc, alarmed) in [
+        (r#""drill""#, true),
+        (r#"{"prod": {"since": 1}}"#, true),
+        (r#"{"later": {}}"#, true),
+        ("7", true),
+        ("null", false),
     ] {
         std::fs::write(&path, format!(r#"{{"mode": "live", "lifecycle": {lc}}}"#)).unwrap();
         let (st, err) = GuardState::load(&path);
-        assert_eq!(err, None, "{lc}");
+        assert_eq!(err.is_some(), alarmed, "{lc}: {err:?}");
+        if let Some(e) = err {
+            assert!(e.starts_with("the saved lifecycle is unreadable ("), "{e}");
+            assert!(e.ends_with("): trial, every boot in event"), "{e}");
+        }
         assert_eq!(
             st,
             GuardState {
@@ -558,5 +619,59 @@ fn a_newer_guards_fields_are_skipped_and_the_pins_kept() {
     assert_eq!(
         value["pins"],
         serde_json::json!({"current": PIN, "previous": PREV})
+    );
+}
+
+/// The way back (review of lane 1): as `Pins::promote` kept it before S8,
+/// the bundle active before the active one, moved only when the active
+/// bundle changes to another build. HIL's `dev --build B` then `activate B`
+/// keeps A's Defender exclusions.
+#[test]
+fn the_way_back_moves_only_when_the_active_bundle_changes() {
+    // A state an older guard saved: its pins are the active bundle and the
+    // way back.
+    let mut st = GuardState {
+        pins: Pins {
+            current: Some(PIN.into()),
+            previous: Some(PREV.into()),
+        },
+        ..GuardState::default()
+    };
+    assert_eq!(
+        (st.active_bundle(), st.way_back_bundle()),
+        (Some(PIN), Some(PREV))
+    );
+    // The same build again: nothing moves.
+    st.set_active(PIN);
+    assert_eq!(
+        (st.active_bundle(), st.way_back_bundle()),
+        (Some(PIN), Some(PREV))
+    );
+    // Another build: the active one becomes the way back.
+    st.set_active(NEW);
+    assert_eq!(
+        (st.active_bundle(), st.way_back_bundle()),
+        (Some(NEW), Some(PIN))
+    );
+    st.set_active(NEW);
+    assert_eq!(
+        (st.active_bundle(), st.way_back_bundle()),
+        (Some(NEW), Some(PIN))
+    );
+    // The older record is never written.
+    assert_eq!(
+        st.pins,
+        Pins {
+            current: Some(PIN.into()),
+            previous: Some(PREV.into()),
+        }
+    );
+    // From nothing: no way back.
+    let mut st = GuardState::default();
+    assert_eq!(st.way_back_bundle(), None);
+    st.set_active(DEV);
+    assert_eq!(
+        (st.active_bundle(), st.way_back_bundle()),
+        (Some(DEV), None)
     );
 }

@@ -58,6 +58,17 @@ pub(super) fn record(sha: &str, branch: &str, hil: Hil) -> Record {
     }
 }
 
+/// Prod (S8, #11) on the pin `SHA`, `previous` before it, `maintenance`
+/// running: test-only state (nothing in lane 1 sets prod).
+pub(super) fn prod_on(previous: Option<&str>, maintenance: Option<&str>) -> Lifecycle {
+    Lifecycle::Prod(Prod {
+        since: T0,
+        pin: SHA.into(),
+        previous: previous.map(str::to_owned),
+        maintenance: maintenance.map(str::to_owned),
+    })
+}
+
 /// The calls without the reads every step makes (facts, children).
 pub(super) fn steps(pc: &FakePc) -> Vec<Call> {
     pc.calls()
@@ -606,14 +617,7 @@ fn a_crash_loop_goes_back_to_reaper() {
 #[test]
 fn a_crash_loop_in_prod_falls_back_to_the_previous_pin() {
     // S8 (#11): prod and its pins are the lifecycle's (`lifecycle::crash_loop`).
-    let prod = |previous: Option<&str>| {
-        Lifecycle::Prod(Prod {
-            since: T0,
-            pin: SHA.into(),
-            previous: previous.map(str::to_owned),
-            maintenance: None,
-        })
-    };
+    let prod = |previous: Option<&str>| prod_on(previous, None);
     let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Live));
     g.state.lifecycle = prod(Some(OTHER));
     pc.exited = vec![(Kid::Engine, Some(70)); 3];

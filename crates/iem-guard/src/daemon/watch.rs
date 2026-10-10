@@ -124,7 +124,7 @@ fn crash_loop(pc: &mut dyn Pc, g: &mut Guard, mode: Mode, n: usize, at: Instant)
             g.respawn_at = None;
             g.crash = CrashLoop::default();
             pc.set_bundle(Some(pin.as_str()));
-            g.state.active = Some(pin);
+            g.state.set_active(&pin);
             run_switch(pc, g, mode, Mode::Live);
         }
         Fallback::Previous(sha) => {
@@ -135,7 +135,7 @@ fn crash_loop(pc: &mut dyn Pc, g: &mut Guard, mode: Mode, n: usize, at: Instant)
             );
             g.crash = CrashLoop::default();
             pc.set_bundle(Some(sha.as_str()));
-            g.state.active = Some(sha);
+            g.state.set_active(&sha);
             g.respawn_at = Some(at);
         }
         Fallback::Down(pin) => {

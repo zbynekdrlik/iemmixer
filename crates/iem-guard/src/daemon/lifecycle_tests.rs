@@ -6,7 +6,7 @@
 
 use std::time::{Duration, Instant};
 
-use super::tests::{INIT, OTHER, SHA, T0, band_up, fixed, iemmixer_up, record, texts};
+use super::tests::{INIT, OTHER, SHA, T0, band_up, fixed, iemmixer_up, prod_on, record, texts};
 use super::*;
 use crate::bundle::{Hil, Pins};
 use crate::install;
@@ -114,16 +114,6 @@ fn an_entry_s_build_stays_the_active_bundle_after_a_guard_restart() {
 /// A third build: the maintenance session's.
 const NEW: &str = "fedcba9876543210fedcba9876543210fedcba98";
 
-/// Prod on `SHA`, `previous` before it, `maintenance` running.
-fn prod_on(previous: Option<&str>, maintenance: Option<&str>) -> Lifecycle {
-    Lifecycle::Prod(Prod {
-        since: T0,
-        pin: SHA.into(),
-        previous: previous.map(str::to_owned),
-        maintenance: maintenance.map(str::to_owned),
-    })
-}
-
 /// A guard whose saved state is `st`, written at `at`, with `SHA`, `OTHER`
 /// and `NEW` installed green from main.
 fn saved(dir: &Path, mut st: GuardState, at: u64) -> Guard {
@@ -160,15 +150,38 @@ fn in_prod_a_reboot_goes_live_on_the_pin() {
         (false, Some((Mode::Event, Mode::Live)))
     );
     assert_eq!(g.state.lifecycle, prod_on(None, None));
+    // A reboot during maintenance on a green main build ends it: live on
+    // that build, which is the pin from then on (saved).
+    let dir = tempfile::tempdir().unwrap();
+    let st = GuardState {
+        lifecycle: prod_on(None, Some(NEW)),
+        active: Some(NEW.into()),
+        ..GuardState::default()
+    };
+    let mut g = saved(dir.path(), st, 1_000);
+    let mut pc = FakePc::new(Facts::default());
+    assert_eq!(start(&mut pc, &mut g, 5_000), Some(Outcome::Done));
+    assert_eq!(g.state.mode, Mode::Live);
+    assert_eq!(pc.bundle.as_deref(), Some(NEW));
+    let promoted = Lifecycle::Prod(Prod {
+        since: T0,
+        pin: NEW.into(),
+        previous: Some(SHA.into()),
+        maintenance: None,
+    });
+    assert_eq!(g.state.lifecycle, promoted);
+    let (back, _) = GuardState::load(&dir.path().join("guard").join(STATE_FILE));
+    assert_eq!(back.lifecycle, promoted);
 }
 
 /// The boot's live entry is an entry like any other: a failure unwinds to
-/// REAPER.
+/// REAPER. A maintenance build it would have made the pin is not (the
+/// review of lane 1): the lifecycle changes only once the PC is live.
 #[test]
 fn in_prod_a_failed_boot_into_live_unwinds_to_reaper() {
     let dir = tempfile::tempdir().unwrap();
     let st = GuardState {
-        lifecycle: prod_on(None, None),
+        lifecycle: prod_on(None, Some(NEW)),
         ..GuardState::default()
     };
     let mut g = saved(dir.path(), st, 1_000);
@@ -177,7 +190,79 @@ fn in_prod_a_failed_boot_into_live_unwinds_to_reaper() {
     assert_eq!(start(&mut pc, &mut g, 5_000), Some(Outcome::Done));
     assert_eq!(g.state.mode, Mode::Event);
     assert!(pc.called(Call::ReaperStart) && pc.called(Call::AppStart));
+    assert_eq!(pc.bundle.as_deref(), Some(NEW), "it tried the new pin");
+    assert_eq!(g.state.lifecycle, prod_on(None, Some(NEW)));
+}
+
+/// G8 at the boot: a pin that is no green main build goes nowhere live;
+/// the start's checks run in event and the alarm names it.
+#[test]
+fn in_prod_a_reboot_on_a_red_pin_stays_in_event_with_an_alarm() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut st = GuardState {
+        lifecycle: prod_on(None, None),
+        ..GuardState::default()
+    };
+    st.bundles.insert(SHA.into(), record(SHA, "main", Hil::Red));
+    let gdir = dir.path().join("guard");
+    std::fs::create_dir_all(&gdir).unwrap();
+    st.save(&gdir.join(STATE_FILE), 1_000).unwrap();
+    let mut g = Guard::open(dir.path(), SiteConf::default(), fixed(T0));
+    let mut pc = FakePc::new(band_up());
+    assert_eq!(start(&mut pc, &mut g, 5_000), Some(Outcome::Done));
+    assert_eq!(g.state.mode, Mode::Event);
+    assert!(!pc.called(Call::EngineStart) && !pc.called(Call::ReaperSaveQuit));
+    let alarm =
+        format!("after a reboot in prod: {SHA}: HIL Red; live needs green; the PC stays in event");
+    assert_eq!(texts(&g).first(), Some(&alarm));
     assert_eq!(g.state.lifecycle, prod_on(None, None));
+}
+
+/// A prod live entry that fails keeps the pin it would have ended
+/// maintenance on (the review of lane 1).
+#[test]
+fn in_prod_a_failed_live_entry_keeps_the_pin_and_the_session() {
+    let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
+    g.state.lifecycle = prod_on(None, Some(NEW));
+    g.state.active = Some(NEW.into());
+    for sha in [SHA, NEW] {
+        g.state
+            .bundles
+            .insert(sha.into(), record(sha, "main", Hil::Green));
+    }
+    pc.fail(Call::Data, "iem-migrate band ended with Some(1)");
+    let live = Request::Live {
+        build: NEW.into(),
+        trial: false,
+        dry_run: false,
+    };
+    let r = handle(&mut pc, &mut g, live, INIT);
+    assert!(!r.ok, "{r:?}");
+    assert_eq!(g.state.mode, Mode::Event);
+    assert_eq!(g.state.lifecycle, prod_on(None, Some(NEW)));
+    assert!(!r.detail.contains("becomes the pin"), "{}", r.detail);
+}
+
+/// The Trial exclusions (the review of lane 1): HIL's `dev --build B` then
+/// `activate B` keeps the way back A's Defender exclusions, as before S8.
+#[test]
+fn an_entry_then_an_activation_of_its_build_keeps_the_way_back_s_exclusions() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut g = Guard::open(dir.path(), SiteConf::default(), fixed(T0));
+    let zip = install::tests::good_zip(dir.path(), SHA);
+    assert!(install_bundle(&mut g, &zip).0);
+    g.state.pins = other_pinned();
+    let mut pc = FakePc::new(Facts::default());
+    let dev = Request::Dev {
+        build: Some(SHA.into()),
+        dry_run: false,
+    };
+    assert!(handle(&mut pc, &mut g, dev, INIT).ok);
+    let r = handle(&mut pc, &mut g, Request::Activate { sha: SHA.into() }, INIT);
+    assert!(r.ok, "{r:?}");
+    assert_eq!(pc.excluded, [(SHA.to_owned(), vec![OTHER.to_owned()])]);
+    assert_eq!(g.state.way_back_bundle(), Some(OTHER));
+    assert_eq!(g.state.pins, other_pinned());
 }
 
 /// In prod an "ide event" stands across a guard restart: the band's system

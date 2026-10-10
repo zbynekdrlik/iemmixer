@@ -82,7 +82,7 @@ pub fn activate_files(g: &mut Guard, sha: &str) -> Result<bool, String> {
         &install::bin_dir(&root),
         sha,
     )?;
-    g.state.active = Some(sha.to_owned());
+    g.state.set_active(sha);
     g.save();
     Ok(changed)
 }
@@ -127,8 +127,8 @@ pub(super) fn activate(pc: &mut dyn Pc, g: &mut Guard, sha: &str) -> (bool, Stri
 
 /// The activation `plan::activation` allowed: the bundle's guard and
 /// `iemmode` into `bin\`, the active bundle, its Defender exclusions (a
-/// failure alarms, the activation stands; the bundle active before it and,
-/// in prod, the pins keep theirs: `lifecycle::kept`); with `restart_job`
+/// failure alarms, the activation stands; the way back and, in prod, the
+/// pins keep theirs: `lifecycle::kept`); with `restart_job`
 /// (dev, inside a HIL job) the engine and the server then run the new
 /// bundle (HIL checks their versions, design §7). The detail and whether
 /// the guard's exe changed.
@@ -141,10 +141,9 @@ fn activate_bundle(
     if !g.state.bundles.contains_key(sha) {
         return Err(format!("bundle {sha} is not installed"));
     }
-    let before = g.state.active_bundle().map(str::to_owned);
     let changed = activate_files(g, sha).map_err(|why| format!("activation failed: {why}"))?;
     pc.set_bundle(Some(sha));
-    let keep = lifecycle::kept(&g.state.lifecycle, before.as_deref(), sha);
+    let keep = lifecycle::kept(&g.state.lifecycle, g.state.way_back_bundle(), sha);
     if let Err(e) = pc.exclude(sha, &keep) {
         g.raise(None, &format!("Defender exclusions for {sha}: {e}"), false);
     }

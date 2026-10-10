@@ -7,7 +7,7 @@ use tracing::{info, warn};
 use super::requests::{dry_event, event_now};
 use super::runner::switch;
 use super::{Guard, Outcome, send_notices};
-use crate::lifecycle::{self, Start};
+use crate::lifecycle::{self, Start, Started};
 use crate::pc::{Pc, job_note};
 use crate::plan::Mode;
 use crate::proto::Reply;
@@ -66,14 +66,21 @@ pub fn start(pc: &mut dyn Pc, g: &mut Guard, boot: u64) -> Option<Outcome> {
     let reset = state::reset_to_event(&g.state, boot, p.band_up(), !p.engine.is_empty());
     let rebooted = boot > g.state.written_at;
     // S8: the lifecycle decides (before the cutover: event, as G1 says).
-    let started = lifecycle::start(&g.state.lifecycle, reset, rebooted, |sha| {
+    let Started {
+        start: go,
+        lifecycle: next,
+        note,
+        alarm,
+    } = lifecycle::start(&g.state.lifecycle, reset, rebooted, |sha| {
         g.state.bundles.get(sha)
     });
-    g.state.lifecycle = started.lifecycle;
-    if let Some(n) = started.note {
+    if let Some(n) = note {
         g.info(n);
     }
-    let target = match started.start {
+    if let Some(why) = alarm {
+        g.raise(None, &why, false);
+    }
+    let target = match go {
         Start::Keep => None,
         Start::Event => {
             if reset {
@@ -87,7 +94,7 @@ pub fn start(pc: &mut dyn Pc, g: &mut Guard, boot: u64) -> Option<Outcome> {
                 "after a reboot in prod the PC goes live on the pin {pin}"
             ));
             g.state.reset();
-            g.state.active = Some(pin);
+            g.state.set_active(&pin);
             Some(Mode::Live)
         }
     };
@@ -100,8 +107,16 @@ pub fn start(pc: &mut dyn Pc, g: &mut Guard, boot: u64) -> Option<Outcome> {
     g.save();
     let resume = g.state.switching.is_some();
     let out = match target {
-        // Prod after a reboot: no trial, the pin's own entry.
-        Some(Mode::Live) => Some(switch(pc, g, Mode::Event, Mode::Live, false)),
+        // Prod after a reboot: no trial, the pin's own entry. The pin a
+        // maintenance session ended on holds once the PC is live.
+        Some(Mode::Live) => {
+            let out = switch(pc, g, Mode::Event, Mode::Live, false);
+            if g.state.mode == Mode::Live {
+                g.state.lifecycle = next;
+                g.save();
+            }
+            Some(out)
+        }
         _ if target.is_some() || resume => {
             let from = g.state.mode;
             Some(switch(pc, g, from, Mode::Event, from == Mode::Event))

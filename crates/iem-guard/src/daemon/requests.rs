@@ -181,7 +181,9 @@ pub(super) fn event_now(pc: &mut dyn Pc, g: &mut Guard) -> (bool, String) {
 /// whether the PC may change, so no step waits for a quiet stage or refuses
 /// on activity (#38, owner 2026-10-06). The lifecycle's gates decide
 /// whether it may run and on which build (S8: `lifecycle::entry`); the
-/// build becomes the active bundle, never the pin.
+/// build becomes the active bundle, never the pin, and the lifecycle's
+/// change (a maintenance build, the pin it ends on) holds only once the
+/// entry is in.
 fn entry(pc: &mut dyn Pc, g: &mut Guard, e: Entry) -> (bool, String) {
     let ask = lifecycle::Ask {
         to: e.to,
@@ -193,29 +195,37 @@ fn entry(pc: &mut dyn Pc, g: &mut Guard, e: Entry) -> (bool, String) {
         Err(why) => return (false, why),
     };
     if e.dry_run {
-        return dry_entry(pc, g, &e, entered.runs);
+        return dry_entry(pc, g, &e, entered.runs, entered.note);
     }
-    if let Some(n) = entered.note {
-        g.info(n);
-    }
-    g.state.lifecycle = entered.lifecycle;
     if let Some(sha) = entered.runs {
         pc.set_bundle(Some(sha.as_str()));
-        g.state.active = Some(sha);
+        g.state.set_active(&sha);
     }
     g.trial = e.trial;
     let from = g.state.mode;
     let out = run_switch(pc, g, from, e.to);
-    (
-        out == Outcome::Done && g.state.mode == e.to,
-        switch_text(e.to, out, g.state.mode, &g.owner_failed),
-    )
+    let done = out == Outcome::Done && g.state.mode == e.to;
+    if done {
+        g.state.lifecycle = entered.lifecycle;
+        if let Some(n) = entered.note {
+            g.info(n);
+        }
+        g.save();
+    }
+    (done, switch_text(e.to, out, g.state.mode, &g.owner_failed))
 }
 
 /// `dev|live --dry-run`: the plan and the read-only checks (the precheck's
 /// bundle, PWA notification subscriptions, foreign engine and app exe),
-/// nothing changed. `runs`: the build the entry would run.
-fn dry_entry(pc: &mut dyn Pc, g: &mut Guard, e: &Entry, runs: Option<String>) -> (bool, String) {
+/// nothing changed. `runs`: the build the entry would run; `note`: what it
+/// would decide about the pin.
+fn dry_entry(
+    pc: &mut dyn Pc,
+    g: &mut Guard,
+    e: &Entry,
+    runs: Option<String>,
+    note: Option<String>,
+) -> (bool, String) {
     // `trial` decides only the precheck (below), never a step of the plan.
     let steps = plan(e.to, &pc.facts());
     let bundle = runs
@@ -227,10 +237,11 @@ fn dry_entry(pc: &mut dyn Pc, g: &mut Guard, e: &Entry, runs: Option<String>) ->
         Ok(Some(note)) => format!("ok; {note}"),
         Err(why) => why.to_string(),
     };
+    let pin = note.map_or_else(String::new, |n| format!("; {n}"));
     (
         check.is_ok(),
         format!(
-            "dry run: {}; bundle {bundle}; precheck {verdict}",
+            "dry run: {}; bundle {bundle}; precheck {verdict}{pin}",
             plan_text(&steps)
         ),
     )

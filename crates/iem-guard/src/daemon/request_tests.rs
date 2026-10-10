@@ -6,26 +6,14 @@
 use std::time::{Duration, Instant};
 
 use super::tests::{
-    INIT, OTHER, SHA, ask, band_up, dev, iemmixer_up, record, status_reply, steps, texts,
+    INIT, OTHER, SHA, ask, band_up, dev, iemmixer_up, prod_on, record, status_reply, steps, texts,
 };
 use super::*;
 use crate::bundle::{Hil, Pins};
-use crate::lifecycle::{Lifecycle, Prod};
 use crate::pc::Kid;
 use crate::pc::fake::{Call, FakePc};
 use crate::plan::Facts;
 use crate::proto::Request;
-
-/// Prod on `pin` (S8): a live entry that is no trial is prod's; before the
-/// cutover live is a trial.
-fn prod_on(pin: &str) -> Lifecycle {
-    Lifecycle::Prod(Prod {
-        since: 1_790_000_000,
-        pin: pin.to_owned(),
-        previous: None,
-        maintenance: None,
-    })
-}
 
 #[test]
 fn jobs_are_refused_while_switching() {
@@ -562,7 +550,7 @@ fn a_live_entry_without_a_pwa_subscription_is_refused() {
             .bundles
             .insert(SHA.into(), record(SHA, "main", Hil::Green));
         if !trial {
-            g.state.lifecycle = prod_on(SHA);
+            g.state.lifecycle = prod_on(None, None);
         }
         pc.subscriptions = Some(0);
         let r = ask(&mut pc, &mut g, live(trial, true));
@@ -630,7 +618,7 @@ fn a_live_trial_needs_the_pc_tests_and_a_plain_live_entry_does_not() {
     assert_eq!(g.state.mode, Mode::Live);
     // A live entry that is no trial (prod's, S8) does not read them.
     let (mut pc, mut g) = fresh(false);
-    g.state.lifecycle = prod_on(SHA);
+    g.state.lifecycle = prod_on(None, None);
     let r = ask(&mut pc, &mut g, live(false, true));
     assert!(r.ok, "{r:?}");
     assert!(r.detail.ends_with("; precheck ok"), "{}", r.detail);
