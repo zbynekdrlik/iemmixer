@@ -35,7 +35,7 @@ fn the_fake_starts_and_stops_like_the_pc() {
     let engine = pc.engine_start(true, false).unwrap();
     pc.engine_ready(10, &c).unwrap();
     pc.engine_arm().unwrap();
-    let server = pc.server_start(Mode::Dev).unwrap();
+    let server = pc.server_start(Mode::Dev, false).unwrap();
     assert!(server > engine);
     pc.tray_start().unwrap();
     assert_eq!(pc.identity("a", &c), Ok(None));

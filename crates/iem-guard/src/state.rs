@@ -83,6 +83,12 @@ pub struct GuardState {
     /// (`lifecycle::lenient`); a reset keeps it.
     #[serde(deserialize_with = "crate::lifecycle::lenient")]
     pub lifecycle: Lifecycle,
+    /// The cutover in progress (S8 lane 2, design note §3.2): saved before
+    /// each of its steps, dropped once it is done or unwound (or kept with
+    /// the steps whose undo failed). A starting guard that finds one unwinds
+    /// it before anything else (`daemon::cutover::recover`); a reset keeps
+    /// it. An older guard drops it on its next save.
+    pub cutover: Option<crate::cutover::Run>,
     /// The HIL job that began and has not ended (its run id). Kept here so
     /// a guard that hands over to a new exe inside the job (HIL activates
     /// the bundle it tests) or restarts still serves the job (design §7).
@@ -249,6 +255,11 @@ mod tests {
             active: None,
             way_back: None,
             lifecycle: Lifecycle::Trial,
+            cutover: Some(crate::cutover::Run {
+                build: "a".repeat(40),
+                since: 1_790_000_250,
+                begun: vec![crate::cutover::CutStep::Import],
+            }),
             job: Some(4242),
             pref_held: Some(
                 "REAPER runs with the preferred buffer at 32; it is restored at REAPER's next start"
@@ -488,6 +499,8 @@ mod tests {
         assert_eq!(st.pids, before.pids);
         assert_eq!(st.pref_held, before.pref_held);
         assert_eq!(st.logon_seen, before.logon_seen);
+        // A cutover cut off by the reboot is the start's to unwind.
+        assert_eq!(st.cutover, before.cutover);
     }
 
     /// S7 (#10): the last switch is saved with the state, and a reset (a

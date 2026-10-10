@@ -48,6 +48,15 @@ pub enum Call {
     InjectPark,
     InstallSite,
     Exclude,
+    /// The cutover task's export and disable (S8 lane 2).
+    AutostartsOff,
+    /// The cutover task's re-enable.
+    AutostartsOn,
+    /// The cutover task's guard logon trigger.
+    GuardLogon,
+    ServerConfig,
+    WriteServerConfig,
+    MemberPage,
 }
 
 impl Call {
@@ -82,6 +91,10 @@ impl Call {
                 | Call::InjectPark
                 | Call::InstallSite
                 | Call::Exclude
+                | Call::AutostartsOff
+                | Call::AutostartsOn
+                | Call::GuardLogon
+                | Call::WriteServerConfig
         )
     }
 }
@@ -173,6 +186,21 @@ pub struct FakePc {
     pub reaper_shows_late: bool,
     /// `reaper_procs` fails with this (an unreadable process list).
     pub reaper_procs_fail: Option<String>,
+    /// The server's config (`server_config`, `write_server_config`); a
+    /// server start applies `effects::web::pin_policy` to it as `WinPc`
+    /// does.
+    pub server_config: String,
+    /// `write_server_config` answers Ok but the file keeps its bytes (the
+    /// read-back must see it).
+    pub config_sticks: bool,
+    /// The guard task's logon trigger (`guard_logon`).
+    pub guard_at_logon: bool,
+    /// The export the predecessor's autostarts were disabled into
+    /// (`autostarts_off`); none while they are enabled.
+    pub autostarts_in: Option<String>,
+    /// "ide event" pre-empts this token as this call begins (a test of what
+    /// comes after a step during which it came); once.
+    pub preempt_at: Option<(Call, Cancel)>,
     calls: Vec<(Call, Instant)>,
     fails: HashMap<Call, String>,
     blocked: Vec<Call>,
@@ -257,6 +285,11 @@ impl FakePc {
             reaper_ends_at: None,
             reaper_shows_late: false,
             reaper_procs_fail: None,
+            server_config: "port = 80\npin_changes = false\n".to_owned(),
+            config_sticks: false,
+            guard_at_logon: false,
+            autostarts_in: None,
+            preempt_at: None,
             calls: Vec::new(),
             fails: HashMap::new(),
             blocked: Vec::new(),
@@ -334,6 +367,11 @@ impl FakePc {
 
     fn record(&mut self, call: Call) {
         self.calls.push((call, Instant::now()));
+        if self.preempt_at.as_ref().is_some_and(|(at, _)| *at == call)
+            && let Some((_, token)) = self.preempt_at.take()
+        {
+            token.preempt();
+        }
         if self.reaper_ends_at == Some(call) {
             self.reaper_ends_at = None;
             self.reaper_ending = false;
@@ -530,8 +568,10 @@ impl Pc for FakePc {
         Ok(self.health)
     }
 
-    fn server_start(&mut self, _mode: Mode) -> R<u32> {
+    /// The PIN rule as `WinPc` reads it from the config (S8).
+    fn server_start(&mut self, _mode: Mode, prod: bool) -> R<u32> {
         self.enter(Call::ServerStart, None)?;
+        crate::effects::web::pin_policy(&self.server_config, prod).map_err(StepError::Failed)?;
         self.facts.server = true;
         Ok(self.pid())
     }
@@ -702,5 +742,45 @@ impl Pc for FakePc {
 
     fn logon(&mut self) -> Option<Logon> {
         self.logon.clone()
+    }
+
+    fn autostarts_off(&mut self, export: &str) -> R<String> {
+        self.enter(Call::AutostartsOff, None)?;
+        self.autostarts_in = Some(export.to_owned());
+        Ok(format!("exported to {export}; 2 disabled"))
+    }
+
+    /// Re-enables what `export` saved; any other export saved nothing.
+    fn autostarts_on(&mut self, export: &str) -> R<String> {
+        self.enter(Call::AutostartsOn, None)?;
+        if self.autostarts_in.as_deref() == Some(export) {
+            self.autostarts_in = None;
+            Ok(format!("2 re-enabled from {export}"))
+        } else {
+            Ok(format!("no export {export}: nothing to re-enable"))
+        }
+    }
+
+    fn guard_logon(&mut self, on: bool) -> R<()> {
+        self.enter(Call::GuardLogon, None)?;
+        self.guard_at_logon = on;
+        Ok(())
+    }
+
+    fn server_config(&mut self) -> R<String> {
+        self.enter(Call::ServerConfig, None)?;
+        Ok(self.server_config.clone())
+    }
+
+    fn write_server_config(&mut self, text: &str) -> R<()> {
+        self.enter(Call::WriteServerConfig, None)?;
+        if !self.config_sticks {
+            self.server_config = text.to_owned();
+        }
+        Ok(())
+    }
+
+    fn member_page(&mut self) -> R<()> {
+        self.enter(Call::MemberPage, None)
     }
 }

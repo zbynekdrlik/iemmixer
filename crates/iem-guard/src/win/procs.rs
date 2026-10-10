@@ -298,11 +298,11 @@ fn stop_by_break(pc: &mut WinPc, kid: Kid, limit: Duration, c: &Cancel) -> R<()>
     Ok(())
 }
 
-pub(super) fn server_start(pc: &mut WinPc, mode: Mode) -> R<u32> {
+pub(super) fn server_start(pc: &mut WinPc, mode: Mode, prod: bool) -> R<u32> {
     let run_mode = decide::server_mode(mode).map_err(StepError::Failed)?;
     let config = pc.s.pc.server_config.clone();
     let text = fs::read_to_string(&config).map_err(|e| failed(&config.display().to_string(), e))?;
-    decide::pins_frozen(&text).map_err(StepError::Failed)?;
+    decide::pin_policy(&text, prod).map_err(StepError::Failed)?;
     let dir = pc.bundle_dir()?;
     let mut cmd = Command::new(dir.join(SERVER_EXE));
     cmd.env("IEMMIXER_CONFIG", &config)

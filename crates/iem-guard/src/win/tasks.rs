@@ -103,7 +103,7 @@ pub(super) fn probe() -> R<()> {
 /// then its answer with our id in the elevated root. The task changes the
 /// PC, so its answer is awaited without the token (a mutation finishes
 /// first).
-fn elevated(
+pub(super) fn elevated(
     pc: &WinPc,
     kind: &str,
     task: &str,

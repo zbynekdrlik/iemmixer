@@ -25,6 +25,7 @@ pub const START_POLL: Duration = Duration::from_millis(500);
 
 pub const IEMMODE_USAGE: &str = "usage: iemmode status | event [--dry-run] [--direct]
   | dev [--build SHA] [--dry-run] | live [--build SHA] [--trial] [--dry-run]
+  | cutover --build SHA [--dry-run]
   | install <zip> | activate <sha> | test-signal <input> <dbfs> <ttl> [--listen]
   | report <sha> <green|red> <detail> | job-begin <run> | job-end <run>
   | install-site <file> | force-reopen | inject-fault | inject-seh | inject-park | runner-stop
@@ -152,6 +153,14 @@ pub fn parse(args: &[String]) -> Result<Cli, String> {
             ask(Request::Live {
                 build: f.value("--build").map(sha).transpose()?,
                 trial: f.has("--trial"),
+                dry_run: f.has("--dry-run"),
+            })
+        }
+        "cutover" => {
+            let f = Flags::read(&rest, &["--dry-run"], &["--build"])?;
+            let build = f.value("--build").ok_or("cutover needs --build SHA")?;
+            ask(Request::Cutover {
+                build: sha(build)?,
                 dry_run: f.has("--dry-run"),
             })
         }
@@ -382,6 +391,20 @@ mod tests {
             }
         );
         assert_eq!(
+            ask(&["cutover", "--build", SHA]),
+            Request::Cutover {
+                build: SHA.into(),
+                dry_run: false
+            }
+        );
+        assert_eq!(
+            ask(&["cutover", "--dry-run", "--build", SHA]),
+            Request::Cutover {
+                build: SHA.into(),
+                dry_run: true
+            }
+        );
+        assert_eq!(
             ask(&["activate", SHA]),
             Request::Activate { sha: SHA.into() }
         );
@@ -505,6 +528,13 @@ mod tests {
                 "{:?} is not a 40-digit lowercase commit SHA",
                 SHA.to_uppercase()
             )
+        );
+        assert_eq!(err(&["cutover"]), "cutover needs --build SHA");
+        assert_eq!(err(&["cutover", "--dry-run"]), "cutover needs --build SHA");
+        assert_eq!(err(&["cutover", "--trial"]), "unknown argument \"--trial\"");
+        assert_eq!(
+            err(&["cutover", "--build", "abc"]),
+            "\"abc\" is not a 40-digit lowercase commit SHA"
         );
         assert_eq!(err(&["activate"]), "1 arguments expected, 0 given");
         assert_eq!(

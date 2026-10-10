@@ -100,7 +100,7 @@ impl View {
 /// Why a request is refused while a switch runs.
 pub fn while_switching(req: &Request) -> &'static str {
     match req {
-        Request::Dev { .. } | Request::Live { .. } => "busy",
+        Request::Dev { .. } | Request::Live { .. } | Request::Cutover { .. } => "busy",
         _ => "switching",
     }
 }
@@ -201,7 +201,9 @@ impl Shared {
                 self.cancel.preempt();
                 Route::Queue(v.generation())
             }
-            (Request::Dev { .. } | Request::Live { .. }, Some(_)) if v.start_checks => {
+            (Request::Dev { .. } | Request::Live { .. } | Request::Cutover { .. }, Some(_))
+                if v.start_checks =>
+            {
                 Route::Queue(v.generation())
             }
             (_, Some(_)) => Route::Now(v.reply(false, while_switching(req))),

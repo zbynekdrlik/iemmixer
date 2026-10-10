@@ -52,6 +52,13 @@ pub enum Request {
         trial: bool,
         dry_run: bool,
     },
+    /// The cutover onto `build` (S8 lane 2, design note §3.2): the owner's
+    /// message only; `dry_run` names the steps and the live trial's
+    /// precheck, nothing changes.
+    Cutover {
+        build: String,
+        dry_run: bool,
+    },
     Install {
         zip: String,
     },
@@ -367,6 +374,10 @@ mod tests {
                 build: Some("0123456789abcdef0123456789abcdef01234567".into()),
                 trial: true,
                 dry_run: false,
+            },
+            Request::Cutover {
+                build: "0123456789abcdef0123456789abcdef01234567".into(),
+                dry_run: true,
             },
             Request::Install {
                 zip: "C:\\bundles\\iemmixer.zip".into(),

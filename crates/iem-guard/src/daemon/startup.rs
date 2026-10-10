@@ -62,8 +62,11 @@ pub fn start(pc: &mut dyn Pc, g: &mut Guard, boot: u64) -> Option<Outcome> {
     if let Some(n) = g.job_note {
         info!("{n}");
     }
+    // A cutover cut off between two steps (a crash, a power loss) is
+    // unwound before anything else, and the PC goes to event (S8).
+    let cut_off = super::cutover::recover(pc, g);
     let p = pc.procs();
-    let reset = state::reset_to_event(&g.state, boot, p.band_up(), !p.engine.is_empty());
+    let reset = cut_off || state::reset_to_event(&g.state, boot, p.band_up(), !p.engine.is_empty());
     let rebooted = boot > g.state.written_at;
     // S8: the lifecycle decides (before the cutover: event, as G1 says).
     let Started {
