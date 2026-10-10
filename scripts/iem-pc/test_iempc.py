@@ -218,6 +218,22 @@ class ScriptTests(Base):
         self.assertEqual(line.count("Import-Module"), 1)
         self.assertLess(at, line.index("Import-Module $iemMod -Force ; $r = & { B }"))
         self.assertEqual(line.count("$iemStage = Join-Path $iemRoot 'bootstrap-stage'"), 1)   # one stage, made once
+        # ... into the set's own folder below it, made and read back admin-only before the first copy:
+        # another build, or the same module with a sibling left out, never shares it (#36).
+        mods = [("'X:\\run\\IemPcAcl.psm1'", "IemPcAcl.psm1", acl), ("'X:\\run\\IemPcTasks.psm1'", "IemPcTasks.psm1", tasks),
+                ("'X:\\run\\IemPc.psm1'", "IemPc.psm1", mod)]
+        own = ip.elevated_ps().set_folder(mods)
+        self.assertRegex(own, r"^set-[0-9a-f]{16}$")
+        made = line.index(f"$iemStage = Join-Path $iemStage '{own}' ; & $iemDir $iemStage")
+        self.assertLess(line.index("& $iemDir $iemRoot"), made)
+        self.assertLess(made, line.index("$iemMod = Join-Path $iemStage 'IemPcAcl.psm1'"))
+        ep = ip.elevated_ps()
+        self.assertNotEqual(own, ep.set_folder([mods[0], mods[1], (mods[2][0], mods[2][1], "aa" * 32)]))
+        self.assertNotEqual(own, ep.set_folder([mods[1], mods[2]]))
+        self.assertNotEqual(own, ep.set_folder([(mods[0][0], mods[0][1], "aa" * 32), mods[1], mods[2]]))
+        with self.assertRaises(ValueError):
+            ep.set_folder([("'X:\\b\\SpikePc.psm1'", "SpikePc.psm1", None)])   # a window's $iemSums: no set folder
+        self.assertNotIn("set-", ep.staged([("'X:\\b\\SpikePc.psm1'", "SpikePc.psm1", None)]))   # windows keep the stage
 
     def test_the_last_line_is_the_envelope(self) -> None:
         self.assertEqual(ip.last_json("noise\n{\"exit\": 0}\n\n"), {"exit": 0})

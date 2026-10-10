@@ -131,21 +131,24 @@ function Install-IemElevatedDir {
     # tasks' results) and tuning\ (S1c's module). Every folder is owned by
     # Administrators with a protected DACL (Administrators and SYSTEM change
     # it, the user only reads), our files are written fresh, and all of it
-    # reads back. Each module file (Get-IemPcModuleFiles: the siblings first,
-    # #36) is copied from the folder this module was imported from (in the
-    # bootstrap, the admin-only stage, where iempc checked each by the zip's
-    # sha256) and must hash as its source; a sibling missing there refuses
-    # before the module and the entry are written.
+    # reads back. The module files (Get-IemPcModuleFiles: the siblings, then
+    # IemPc.psm1; #36) are read once from the folder this module was imported
+    # from (in the bootstrap, the admin-only stage, where iempc checked each
+    # one against the zip's sha256 before the import) before anything is
+    # written, so a sibling missing there refuses with nothing changed; they
+    # are written in that order, and each copy must hash as the bytes read.
     param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][string]$UserSid)
     $tasks = Join-Path $Root 'tasks'
+    $read = [ordered]@{}
+    foreach ($m in @(Get-IemPcModuleFiles)) { $read[$m] = [IO.File]::ReadAllBytes($m) }
     foreach ($d in @($Root, $tasks, (Join-Path $tasks 'out'), (Join-Path $Root 'tuning'))) {
         Install-IemElevatedFolder -Path $d -UserSid $UserSid
     }
     $copies = [ordered]@{}
-    foreach ($m in @(Get-IemPcModuleFiles)) { $copies[$m] = Join-Path $tasks (Split-Path -Leaf $m) }
+    foreach ($m in @($read.Keys)) { $copies[$m] = Join-Path $tasks (Split-Path -Leaf $m) }
     $entry = Join-Path $tasks 'iem-task.ps1'
     foreach ($m in @($copies.Keys)) {
-        if ($copies[$m] -ne $m) { Write-IemElevatedFile -Path $copies[$m] -Bytes ([IO.File]::ReadAllBytes($m)) }
+        if ($copies[$m] -ne $m) { Write-IemElevatedFile -Path $copies[$m] -Bytes $read[$m] }
     }
     Write-IemElevatedFile -Path $entry -Bytes ($script:Utf8NoBom.GetBytes($script:TaskEntry))
     foreach ($f in @(@($copies.Values) + @($entry))) {
@@ -153,8 +156,8 @@ function Install-IemElevatedDir {
         if ($bad.Count -gt 0) { throw ('elevated file read-back: ' + ($bad -join '; ')) }
     }
     foreach ($m in @($copies.Keys)) {
-        $h1 = (Get-FileHash -LiteralPath $m -Algorithm SHA256).Hash
-        $h2 = (Get-FileHash -LiteralPath $copies[$m] -Algorithm SHA256).Hash
+        $h1 = Get-IemBytesSha256 -Bytes $read[$m]
+        $h2 = (Get-FileHash -LiteralPath $copies[$m] -Algorithm SHA256).Hash.ToLowerInvariant()
         if ($h1 -cne $h2) { throw "the copy of $(Split-Path -Leaf $m) in $tasks does not match the module" }
     }
     if ([IO.File]::ReadAllText($entry) -cne $script:TaskEntry) { throw "the entry script in $tasks does not read back" }

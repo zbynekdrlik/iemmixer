@@ -226,6 +226,10 @@ try {
     $wrong[$pcSiblingNames[0]] = '0' * 64
     $e = ErrorOf { Set-IemSshShell @common -ModuleSha256 $wrong }
     Assert ($e -like "*$($pcSiblingNames[0])*not the build*" -and (Read-Values) -eq $absent -and $null -eq (Get-UndoTask) -and -not (Test-Path -LiteralPath $dir)) "set-refuses-a-sibling-that-is-not-the-checked-build-and-copies-nothing ($e)"
+    $wrong = $sums.Clone()
+    $wrong.Remove($pcSiblingNames[-1])
+    $e = ErrorOf { Set-IemSshShell @common -ModuleSha256 $wrong }
+    Assert ($e -like "*no sha256 for $($pcSiblingNames[-1])*" -and (Read-Values) -eq $absent -and $null -eq (Get-UndoTask) -and -not (Test-Path -LiteralPath $dir)) "set-refuses-a-sibling-without-its-sha256-and-copies-nothing ($e)"
 
     # ---- a key that does not exist yet is made admin-only before any value is written ----
     $hklm.DeleteSubKeyTree($sub)

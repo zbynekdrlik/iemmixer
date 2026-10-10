@@ -298,7 +298,8 @@ def stage_modules(ctx: Ctx, sha: str, rec: dict, stage, event: str) -> tuple[str
     ssh-shell, #11 cutover; IemPc.psm1's siblings before it, #36: pc_stage):
     each checked again against the zip's sums and
     uploaded by scp into bootstrap/<sha> of the PC's root. Returns the
-    statements that stage them admin-only on the PC in that order and import
+    statements that stage them admin-only on the PC in that order, in the
+    set's own folder below the stage (elevated_ps.set_folder, #36), and import
     the last one from its stage copy only (module_script's `pre`,
     elevated_ps.staged), and each one's sha256 by stage name."""
     ep = core.elevated_ps()
@@ -312,7 +313,7 @@ def stage_modules(ctx: Ctx, sha: str, rec: dict, stage, event: str) -> tuple[str
     core.pc_mkdir(ctx, rel, event)
     for local, name in uploads:
         core.scp(str(local), core.remote(ctx.env, f"{rel}/{name}"), event)
-    return f"{ep.staged(mods)} ; Import-Module $iemMod -Force ; ", sums
+    return f"{ep.staged(mods, own=True)} ; Import-Module $iemMod -Force ; ", sums
 
 
 def fetch_bundle(sha: str, branch: str | None = None) -> tuple[dict, bool]:

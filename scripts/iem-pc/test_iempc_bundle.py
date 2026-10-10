@@ -675,6 +675,21 @@ class SiblingTests(unittest.TestCase):
             self.assertRegex(name, ip.PC_SIBLING)
             self.assertNotIn(name, ip.BUNDLE_REQUIRED)   # an older bundle still installs
 
+    def test_every_module_imports_iempc_into_the_global_session_state(self) -> None:
+        """The siblings reach IemPc.psm1's functions, and each other's, through
+        the global session state (#36): a module that imported IemPc.psm1 into
+        its own session state would leave them unresolved at the first call."""
+        for root in (self.HERE, self.HERE.parent / "pc-tuning", self.HERE.parent / "asio-spike", self.HERE.parent / "golden"):
+            for module in sorted(root.glob("*.psm1")):
+                text = False   # inside a here-string: an entry script's text (a script imports globally)
+                for line in module.read_text(encoding="utf-8").splitlines():
+                    if text:
+                        text = not line.startswith("'@")
+                    elif line.rstrip().endswith("@'"):
+                        text = True
+                    elif re.search(r"Import-Module\b.*IemPc(?:[A-Za-z0-9]+)?\.psm1", line):
+                        self.assertIn("-Global", line, f"{module.name}: {line.strip()}")
+
     def test_the_bundle_job_ships_every_sibling(self) -> None:
         ci = (self.HERE.parent.parent / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         # The bundle job's copies into its folder $b (the zip's top level).

@@ -363,6 +363,27 @@ try {
     }
     $eb = Test-IemElevatedItem -Path $elevated -UserSid $me.sid
     Assert ($eb.Count -eq 0) "elevated-root-reads-back ($($eb -join '; '))"
+    # A module file missing where the module was imported from (#36): Install-IemElevatedDir
+    # reads them all before it writes, so it refuses and the tasks folder stays as it was.
+    $pcCopy = Join-Path $base 'pc-copy'
+    New-Item -ItemType Directory -Force -Path $pcCopy | Out-Null
+    foreach ($f in $pcFiles) { Copy-Item -LiteralPath $f -Destination $pcCopy }
+    $child = Join-Path $base 'missing-module-file.ps1'
+    $childText = @'
+param([string]$Dir, [string]$Root, [string]$Sid, [string]$Gone)
+$ErrorActionPreference = 'Stop'
+Import-Module (Join-Path $Dir 'IemPc.psm1') -Force
+[IO.File]::Delete((Join-Path $Dir $Gone))
+try { Install-IemElevatedDir -Root $Root -UserSid $Sid ; exit 0 } catch { [Console]::Error.WriteLine("refused: $_") ; exit 3 }
+'@
+    [IO.File]::WriteAllText($child, $childText)
+    function TasksFolder { return ((@(Get-ChildItem -LiteralPath $etasks -File | Sort-Object Name | ForEach-Object { '{0}={1}@{2}' -f $_.Name, (Get-FileHash -LiteralPath $_.FullName).Hash, $_.LastWriteTimeUtc.Ticks })) -join ';') }
+    $tasksBefore = TasksFolder
+    $ErrorActionPreference = 'Continue'
+    $said = (& powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $child -Dir $pcCopy -Root $elevated -Sid $me.sid -Gone 'IemPcState.psm1' 2>&1 | ForEach-Object { "$_" }) -join ' '
+    $code = $LASTEXITCODE
+    $ErrorActionPreference = 'Stop'
+    Assert ($code -eq 3 -and $said -like '*IemPcState.psm1*' -and (TasksFolder) -ceq $tasksBefore) "elevated-folder-refuses-a-missing-module-file-and-changes-nothing (exit $code; $said)"
     Throws { Register-IemTasks -Root $root -AppExe $appExe -Folder $folder -ElevatedRoot (Join-Path $root 'elevated') @prefArgs } 'tasks-refuse-an-elevated-root-inside-the-users-root'
     Throws { Register-IemTasks -Root $root -AppExe $appExe -Folder $folder -ElevatedRoot 'relative\elevated' @prefArgs } 'tasks-refuse-a-relative-elevated-root'
     # A descriptor loosened after registration (here Users may run the guard's
