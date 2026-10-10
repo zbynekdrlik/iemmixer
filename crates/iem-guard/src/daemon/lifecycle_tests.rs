@@ -536,6 +536,68 @@ fn an_activation_in_prod_keeps_the_pins_exclusions() {
     assert!(status.contains(&want), "{status}");
 }
 
+/// S8 lane 5 (the cross-lane review, finding 2c): an older guard taking
+/// over drops the lifecycle on its next save (prod reads back as trial).
+/// So in prod and while rolling back `activate`, online and offline,
+/// refuses a bundle whose manifest does not name `guard_lifecycle` (built
+/// before the field); before the cutover it activates as always.
+#[test]
+fn in_prod_activate_refuses_a_bundle_whose_guard_predates_the_lifecycle() {
+    for lc in [prod_on(None, None), Lifecycle::RollingBack] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut g = Guard::open(dir.path(), SiteConf::default(), fixed(T0));
+        g.state.mode = Mode::Dev;
+        g.state.lifecycle = lc.clone();
+        g.state.active = Some(SHA.into());
+        let zip = install::tests::older_zip(dir.path(), NEW);
+        assert!(install_bundle(&mut g, &zip).0);
+        let mut pc = FakePc::new(iemmixer_up());
+        let r = handle(&mut pc, &mut g, Request::Activate { sha: NEW.into() }, INIT);
+        assert!(!r.ok, "{lc:?}: {r:?}");
+        assert!(
+            r.detail
+                .starts_with(&format!("{NEW}'s guard predates the lifecycle")),
+            "{lc:?}: {}",
+            r.detail
+        );
+        assert_eq!(g.state.active_bundle(), Some(SHA), "{lc:?}");
+        assert!(
+            !pc.called(Call::SetBundle) && !pc.called(Call::Exclude),
+            "{lc:?}"
+        );
+        // Without a guard too.
+        g.state.mode = Mode::Event;
+        let mut pc = FakePc::new(Facts::default());
+        let r = activate_offline(&mut pc, &mut g, Some(()), NEW);
+        assert!(
+            !r.ok
+                && r.detail
+                    .starts_with(&format!("{NEW}'s guard predates the lifecycle")),
+            "{lc:?}: {r:?}"
+        );
+        assert_eq!(g.state.active_bundle(), Some(SHA), "{lc:?}");
+    }
+    // A bundle that names it activates in prod; an older one before the
+    // cutover.
+    for (lc, older) in [(prod_on(None, None), false), (Lifecycle::Trial, true)] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut g = Guard::open(dir.path(), SiteConf::default(), fixed(T0));
+        g.state.mode = Mode::Dev;
+        g.state.lifecycle = lc.clone();
+        g.state.active = Some(SHA.into());
+        let zip = if older {
+            install::tests::older_zip(dir.path(), NEW)
+        } else {
+            install::tests::good_zip(dir.path(), NEW)
+        };
+        assert!(install_bundle(&mut g, &zip).0);
+        let mut pc = FakePc::new(iemmixer_up());
+        let r = handle(&mut pc, &mut g, Request::Activate { sha: NEW.into() }, INIT);
+        assert!(r.ok, "{lc:?}: {r:?}");
+        assert_eq!(g.state.active_bundle(), Some(NEW), "{lc:?}");
+    }
+}
+
 /// S8 lane 2: in prod `live` needs no build; it runs the pin. Before the
 /// cutover it still needs one (a trial).
 #[test]

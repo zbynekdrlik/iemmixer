@@ -170,6 +170,47 @@ fn a_refused_cutover_changes_nothing() {
     assert_eq!(g.state.lifecycle, Lifecycle::Trial);
 }
 
+/// Prod lost to trial (an older guard took over, an unreadable state)
+/// leaves the predecessor's autostarts disabled in an export never
+/// restored, and `pin_changes = true`. A second cutover would export the
+/// disabled state, and its rollback would restore them disabled: it is
+/// refused, its dry run too, before anything changes; `iemmode rollback`
+/// repairs it (S8 lane 5, the cross-lane review's finding 2a).
+#[test]
+fn a_cutover_after_a_lost_prod_is_refused() {
+    for dry_run in [false, true] {
+        let (mut pc, mut g) = ready();
+        pc.server_config = OPEN.into();
+        let r = handle(&mut pc, &mut g, cut(dry_run), INIT);
+        assert!(!r.ok, "{r:?}");
+        assert!(
+            r.detail
+                .starts_with("the server config allows PIN changes (pin_changes = true)"),
+            "{}",
+            r.detail
+        );
+        assert!(r.detail.contains("iemmode rollback"), "{}", r.detail);
+        assert_eq!(pc.mutating_calls(), Vec::<Call>::new());
+        let (mut pc, mut g) = ready();
+        let earlier = export_name(T0 - 3_600);
+        pc.autostarts_in = Some(earlier.clone());
+        let r = handle(&mut pc, &mut g, cut(dry_run), INIT);
+        assert!(!r.ok, "{r:?}");
+        assert!(
+            r.detail.starts_with(&format!(
+                "the autostart export {earlier} of an earlier cutover"
+            )),
+            "{}",
+            r.detail
+        );
+        assert_eq!(pc.mutating_calls(), Vec::<Call>::new());
+        assert_eq!(
+            (g.state.lifecycle.clone(), g.state.cutover.clone()),
+            (Lifecycle::Trial, None)
+        );
+    }
+}
+
 #[test]
 fn the_dry_run_names_the_steps_and_the_trial_s_precheck_and_changes_nothing() {
     let (mut pc, mut g) = ready();

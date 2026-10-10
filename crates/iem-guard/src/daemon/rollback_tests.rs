@@ -242,6 +242,45 @@ fn in_prod_the_button_rolls_back_and_ide_event_never_does() {
     }
 }
 
+/// Prod lost to trial (an older guard took over, an unreadable state)
+/// leaves the cutover's export never restored, the autostarts disabled,
+/// the guard at the logon and `pin_changes = true`: every entry fails at
+/// `ServerStart`. `iemmode rollback` runs there as a repair, its steps and
+/// guarantees as in prod: REAPER at the end, the autostarts back from the
+/// newest export never restored, the logon trigger off, pin_changes closed
+/// (S8 lane 5, the cross-lane review's finding 2b). Without either it is
+/// refused as before.
+#[test]
+fn a_repair_rollback_runs_in_trial_after_a_lost_prod() {
+    let mut pc = FakePc::new(iemmixer_up());
+    pc.server_config = OPEN.into();
+    pc.autostarts_in = Some(export_name(T0));
+    pc.guard_at_logon = true;
+    let mut g = Guard::for_test(Mode::Live);
+    g.state
+        .bundles
+        .insert(SHA.into(), record(SHA, "main", Hil::Green));
+    g.state.set_active(SHA);
+    let r = handle(&mut pc, &mut g, back(true), INIT);
+    assert!(r.ok, "{r:?}");
+    assert!(r.detail.starts_with("dry run: "), "{}", r.detail);
+    assert!(r.detail.contains(&export_name(T0)), "{}", r.detail);
+    assert_eq!(pc.mutating_calls(), Vec::<Call>::new());
+    let r = ask(&mut pc, &mut g, back(false));
+    assert!(r.ok, "{r:?}");
+    assert!(r.detail.contains(ON_EXPORT), "{}", r.detail);
+    assert_rolled_back(&pc, &g);
+    // Only pin_changes left open: the rollback closes it, REAPER runs.
+    let mut pc = FakePc::new(iemmixer_up());
+    pc.server_config = OPEN.into();
+    let mut g = Guard::for_test(Mode::Live);
+    let r = handle(&mut pc, &mut g, back(false), INIT);
+    assert!(r.detail.starts_with("rollback done"), "{r:?}");
+    assert_eq!(pc.server_config, FROZEN);
+    assert!(pc.facts.reaper && g.state.lifecycle == Lifecycle::Trial);
+    assert_eq!(g.state.mode, Mode::Event);
+}
+
 /// "ide event --dry-run" in maintenance changes nothing, a pin that may not
 /// go live included (the real one would bring REAPER).
 #[test]
