@@ -700,12 +700,13 @@ fn the_way_back_moves_only_when_the_active_bundle_changes() {
         (st.active_bundle(), st.way_back_bundle()),
         (Some(NEW), Some(PIN))
     );
-    // The older record is never written.
+    // The older record mirrors them (lane 2, the PC on 2026-10-10): an
+    // older guard that takes over runs the active bundle.
     assert_eq!(
         st.pins,
         Pins {
-            current: Some(PIN.into()),
-            previous: Some(PREV.into()),
+            current: Some(NEW.into()),
+            previous: Some(PIN.into()),
         }
     );
     // From nothing: no way back.
@@ -715,5 +716,12 @@ fn the_way_back_moves_only_when_the_active_bundle_changes() {
     assert_eq!(
         (st.active_bundle(), st.way_back_bundle()),
         (Some(DEV), None)
+    );
+    assert_eq!(
+        st.pins,
+        Pins {
+            current: Some(DEV.into()),
+            previous: None,
+        }
     );
 }

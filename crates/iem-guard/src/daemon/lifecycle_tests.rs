@@ -24,9 +24,21 @@ fn other_pinned() -> Pins {
     }
 }
 
+/// The legacy record as this guard writes it (lane 2, the PC on
+/// 2026-10-10): `pins.current` mirrors the active bundle and `pins.previous`
+/// the way back, so an older guard that takes over runs the active bundle.
+/// The pin itself is the lifecycle's.
+fn mirrored(active: &str, way_back: Option<&str>) -> Pins {
+    Pins {
+        current: Some(active.into()),
+        previous: way_back.map(str::to_owned),
+    }
+}
+
 /// The pin bug (design §3.4): every dev or live entry promoted its build to
 /// the pin before any HIL result. An entry runs its build and leaves the
-/// pins as they were: a dev entry with a build, and a live trial.
+/// pin (the lifecycle's) as it was: a dev entry with a build, and a live
+/// trial. The legacy pins only mirror the active bundle and the way back.
 #[test]
 fn an_entry_never_promotes_the_pin() {
     let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Event));
@@ -41,10 +53,11 @@ fn an_entry_never_promotes_the_pin() {
     let r = handle(&mut pc, &mut g, dev, INIT);
     assert!(r.ok, "{r:?}");
     assert_eq!(g.state.mode, Mode::Dev);
+    assert_eq!(g.state.lifecycle, Lifecycle::Trial, "a dev entry pinned");
     assert_eq!(
         g.state.pins,
-        other_pinned(),
-        "a dev entry promoted its build"
+        mirrored(SHA, Some(OTHER)),
+        "the legacy pins mirror the active bundle and the way back"
     );
     assert_eq!(pc.bundle.as_deref(), Some(SHA), "the entry runs its build");
     let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
@@ -60,13 +73,14 @@ fn an_entry_never_promotes_the_pin() {
     let r = handle(&mut pc, &mut g, trial, INIT);
     assert!(r.ok, "{r:?}");
     assert_eq!(g.state.mode, Mode::Live);
-    assert_eq!(g.state.pins, other_pinned(), "a trial promoted its build");
+    assert_eq!(g.state.lifecycle, Lifecycle::Trial, "a trial pinned");
+    assert_eq!(g.state.pins, mirrored(SHA, Some(OTHER)));
     assert_eq!(pc.bundle.as_deref(), Some(SHA));
 }
 
 /// `activate` makes its bundle the active one for dev (the engine and the
 /// server run it, the bundle before it keeps its Defender exclusions) and
-/// leaves the pins as they were.
+/// leaves the pin as it was; the legacy pins mirror the active bundle.
 #[test]
 fn an_activation_never_promotes_the_pin() {
     let dir = tempfile::tempdir().unwrap();
@@ -78,7 +92,8 @@ fn an_activation_never_promotes_the_pin() {
     let mut pc = FakePc::new(iemmixer_up());
     let r = handle(&mut pc, &mut g, Request::Activate { sha: SHA.into() }, INIT);
     assert!(r.ok, "{r:?}");
-    assert_eq!(g.state.pins, other_pinned(), "activate promoted its bundle");
+    assert_eq!(g.state.lifecycle, Lifecycle::Trial, "activate pinned");
+    assert_eq!(g.state.pins, mirrored(SHA, Some(OTHER)));
     assert_eq!(pc.bundle.as_deref(), Some(SHA));
     assert_eq!(pc.excluded, [(SHA.to_owned(), vec![OTHER.to_owned()])]);
 }
@@ -106,7 +121,7 @@ fn an_entry_s_build_stays_the_active_bundle_after_a_guard_restart() {
     assert_eq!(start(&mut pc, &mut g, 0), None);
     assert_eq!(g.state.mode, Mode::Dev);
     assert_eq!(pc.bundle.as_deref(), Some(SHA));
-    assert_eq!(g.state.pins, other_pinned());
+    assert_eq!(g.state.pins, mirrored(SHA, Some(OTHER)));
 }
 
 // ---- prod (test-only state: nothing in this lane sets it) ----
@@ -296,7 +311,7 @@ fn an_entry_then_an_activation_of_its_build_keeps_the_way_back_s_exclusions() {
     assert!(r.ok, "{r:?}");
     assert_eq!(pc.excluded, [(SHA.to_owned(), vec![OTHER.to_owned()])]);
     assert_eq!(g.state.way_back_bundle(), Some(OTHER));
-    assert_eq!(g.state.pins, other_pinned());
+    assert_eq!(g.state.pins, mirrored(SHA, Some(OTHER)));
 }
 
 /// In prod an "ide event" stands across a guard restart: the band's system
@@ -429,7 +444,9 @@ fn in_prod_maintenance_ends_with_its_green_build_as_the_pin() {
             maintenance: None,
         })
     );
-    assert_eq!(g.state.pins, Pins::default(), "the older record stays");
+    // The legacy record mirrors the active bundle and the way back, never
+    // the pin: an older guard taking over runs NEW.
+    assert_eq!(g.state.pins, mirrored(NEW, Some(SHA)));
 }
 
 /// A crash loop in maintenance: iemmixer stops and live runs on the pin;

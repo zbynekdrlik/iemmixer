@@ -681,7 +681,7 @@ fn live_needs_an_installed_green_main_bundle() {
 }
 
 /// S8 (#11, design §3.4): a dev entry with a build runs it as the active
-/// bundle; the pins stay as they were.
+/// bundle; the legacy pins mirror it and the way back (lane 2).
 #[test]
 fn dev_with_a_build_runs_it() {
     let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Event));
@@ -700,8 +700,8 @@ fn dev_with_a_build_runs_it() {
     assert_eq!(
         g.state.pins,
         Pins {
-            current: Some(OTHER.into()),
-            previous: None,
+            current: Some(SHA.into()),
+            previous: Some(OTHER.into()),
         }
     );
     assert_eq!(g.state.active_bundle(), Some(SHA));
