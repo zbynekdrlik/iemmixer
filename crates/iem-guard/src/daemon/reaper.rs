@@ -5,7 +5,7 @@
 //! or still be ending, by the time of the handover (the first live trial's
 //! unwind planned no start and then waited for a process that no longer
 //! ran). The decision is `handover::ensure_reaper`; this runs it against
-//! the PC. Kept out of `daemon.rs`, which is over its size budget (#36).
+//! the PC, for the runner's `ReaperHandover` step (`daemon/runner.rs`).
 
 use super::Guard;
 use super::runner::pref_step;

@@ -5,8 +5,7 @@
 //! process that no longer ran, and the switch still ended `done` in event
 //! without REAPER). The handover now first makes sure a REAPER runs, and an
 //! event switch whose REAPER or app handover failed ends `needs_owner`, its
-//! reply naming each failed step. New daemon tests live here, since
-//! `daemon.rs` and `daemon/tests.rs` are over their size budget (#36).
+//! reply naming each failed step (`daemon/reaper.rs`, `daemon/runner.rs`).
 
 use super::tests::{band_up, iemmixer_up};
 use super::*;

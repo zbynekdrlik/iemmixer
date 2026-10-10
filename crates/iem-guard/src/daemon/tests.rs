@@ -235,7 +235,7 @@ pub(super) fn preempt_after(g: &Guard, step: Step) -> std::thread::JoinHandle<()
 #[test]
 fn an_event_unwind_does_not_recurse_when_a_step_is_preempted() {
     // A bounded, deterministic catch for the `to != Mode::Event` -> `true`
-    // mutant of the preempted-step arm (daemon.rs:869). In an event plan
+    // mutant of the preempted-step arm (`daemon/runner.rs`, `switch`). In an event plan
     // (to == Event) the real code treats a preempted step as an ordinary
     // event-plan failure and goes on, so `run_switch` returns after a
     // single ReaperFacts read (NeedsOwner: a handover cut short is no done,
@@ -332,7 +332,7 @@ fn session_end_stops_respawning() {
 fn session_end_does_not_wait_when_no_engine_is_left() {
     // A bounded, deterministic catch for both loop-condition mutants of
     // `while !p.engine.is_empty() && start.elapsed() < g.session_wait`
-    // (daemon.rs:2149). With no engine process left the real loop never runs
+    // (`daemon/watch.rs`). With no engine process left the real loop never runs
     // and `session_end` returns at once. The `&&`->`||` mutant
     // (`!p.engine.is_empty() || elapsed < wait`) and the `delete !` mutant
     // (`p.engine.is_empty() && elapsed < wait`) both keep looping until the full
@@ -770,7 +770,7 @@ fn the_loop_answers_requests_and_ends_on_quit() {
 #[test]
 fn the_loop_ends_at_once_when_a_handover_is_already_set() {
     // A bounded, deterministic catch for the `&&`->`||` mutant of the loop
-    // condition `while !g.quit && g.handover.is_none()` (daemon.rs:2217). With
+    // condition `while !g.quit && g.handover.is_none()` (`daemon.rs`). With
     // a handover already set and quit false the condition is
     // `!false && Some.is_none()` = false, so `serve_requests` returns before
     // running a step. The mutant makes it `!false || Some.is_none()` = true, so
