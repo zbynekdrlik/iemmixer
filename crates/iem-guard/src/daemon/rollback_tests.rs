@@ -88,7 +88,8 @@ fn a_rollback_ends_in_trial_with_reaper_on_the_export() {
         "rollback done: trial, event; {ON_EXPORT}; the original project is kept as \
          before-rollback-{T0}"
     );
-    assert_eq!(r.detail, done);
+    // The guard's report lines of the steps follow the result.
+    assert!(r.detail.starts_with(&done), "{}", r.detail);
     assert_rolled_back(&pc, &g);
     assert_eq!(pc.project, on_export());
     // The engine stops (it saves its state) before the export reads it;

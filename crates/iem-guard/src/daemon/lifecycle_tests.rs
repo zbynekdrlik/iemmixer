@@ -346,8 +346,9 @@ fn in_prod_a_guard_restart_with_the_band_up_stays_in_event() {
     assert!(!pc.called(Call::EngineStart) && !pc.called(Call::EngineStop));
 }
 
-/// A rollback goes on to event at a start, also without a reboot, and no
-/// entry runs while it does.
+/// A rollback goes on at a start, also without a reboot (design §3.1: a
+/// start in it continues the rollback to event, which ends in trial); no
+/// entry runs while the lifecycle is rolling back.
 #[test]
 fn a_start_while_rolling_back_goes_to_event() {
     let dir = tempfile::tempdir().unwrap();
@@ -362,7 +363,9 @@ fn a_start_while_rolling_back_goes_to_event() {
     assert_eq!(start(&mut pc, &mut g, 5_000), Some(Outcome::Done));
     assert_eq!(g.state.mode, Mode::Event);
     assert!(pc.called(Call::EngineStop) && pc.called(Call::ReaperStart));
-    assert_eq!(g.state.lifecycle, Lifecycle::RollingBack);
+    assert_eq!(g.state.lifecycle, Lifecycle::Trial);
+    assert_eq!(g.state.rollback, None);
+    g.state.lifecycle = Lifecycle::RollingBack;
     let dev = Request::Dev {
         build: None,
         dry_run: false,
