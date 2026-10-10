@@ -1,5 +1,5 @@
 //! Decisions of the ASIO backend's owner thread (S6 design note §3), portable
-//! and mutation-tested. `asio.rs` (Windows only, excluded from mutation)
+//! and mutation-tested. `asio/` (Windows only, excluded from mutation)
 //! observes the driver, calls these with what it saw and acts on the answer:
 //!
 //! - [`frames`]: the configured buffer, checked before anything is written;

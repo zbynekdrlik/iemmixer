@@ -1,9 +1,9 @@
 //! The backend's owner thread (S6 design note §3): it makes every driver
-//! call and pumps the thread's messages. Each open (I3 module holders, the
-//! preference window, `createBuffers`, `start`, the measured period), the
-//! watch and reopen through the reset budget, the release for good, the
-//! parked-engine test's hold, and the session end's release. Its decisions
-//! live in the portable, mutation-tested `crate::owner`.
+//! call and pumps the thread's messages. It runs each open (I3 module
+//! holders, the preference window, `createBuffers`, `start`, the measured
+//! period), the watch and reopen through the reset budget, the release for
+//! good, the parked-engine test's hold and the session end's release. Its
+//! decisions live in the portable, mutation-tested `crate::owner`.
 
 use core::cell::{RefCell, UnsafeCell};
 use core::ffi::c_void;

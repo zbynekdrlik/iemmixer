@@ -433,7 +433,7 @@ struct Backend {
     inputs: Vec<[*mut c_void; 2]>,
     outputs: Vec<[*mut c_void; 2]>,
     /// The card input of each engine input, the card output of each engine
-    /// output ([`ChannelMap`]).
+    /// output ([`ChannelMap`](crate::channels::ChannelMap)).
     rx: Vec<usize>,
     tx: Vec<usize>,
     /// Touched by the callback while the stream runs (ASIO callbacks never
