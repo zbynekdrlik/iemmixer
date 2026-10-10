@@ -271,6 +271,93 @@ pub fn valid_export(name: &str) -> bool {
         .is_some_and(|ts| (1..=20).contains(&ts.len()) && ts.bytes().all(|b| b.is_ascii_digit()))
 }
 
+/// The export's own record, written last by `Export-IemAutostarts`: a
+/// folder without it saved nothing and disabled nothing.
+pub const EXPORT_FILE: &str = "export.json";
+/// The mark `Enable-IemAutostarts` writes into an export once everything
+/// it saved is back (S8 lane 5). An export without it may hold the
+/// predecessor's autostarts disabled.
+pub const RESTORED_FILE: &str = "restored.json";
+
+/// One folder of `<elevated root>\cutover` as the guard reads it (the user
+/// may read the elevated root, never write it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportSeen {
+    pub name: String,
+    /// It holds [`EXPORT_FILE`].
+    pub saved: bool,
+    /// It holds [`RESTORED_FILE`].
+    pub restored: bool,
+}
+
+/// The `since` of every autostart export that saved something and was
+/// never restored, oldest first; a folder whose name [`export_name`] does
+/// not make is no export.
+pub fn unrestored(seen: &[ExportSeen]) -> Vec<u64> {
+    let mut out: Vec<u64> = seen
+        .iter()
+        .filter(|e| e.saved && !e.restored && valid_export(&e.name))
+        .filter_map(|e| e.name.strip_prefix(EXPORT_PREFIX)?.parse().ok())
+        .collect();
+    out.sort_unstable();
+    out
+}
+
+/// What a cutover whose prod was lost leaves on a PC back in trial (S8
+/// lane 5: an older guard took over, or the state could not be read,
+/// `lifecycle::lenient`): the autostart exports never restored (the
+/// predecessor's autostarts may still be disabled) and the server config's
+/// `pin_changes = true` (every entry in trial then fails at `ServerStart`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Leftover {
+    /// [`unrestored`]'s exports.
+    pub exports: Vec<u64>,
+    /// The server config reads `pin_changes = true`.
+    pub pins_open: bool,
+}
+
+impl Leftover {
+    /// Anything a lost prod left.
+    pub fn any(&self) -> bool {
+        self.pins_open || !self.exports.is_empty()
+    }
+
+    /// The newest export never restored: the one a repair rollback
+    /// restores from.
+    pub fn newest(&self) -> Option<u64> {
+        self.exports.iter().max().copied()
+    }
+
+    /// What it holds, in words.
+    pub fn text(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        if self.pins_open {
+            parts.push("the server config allows PIN changes (pin_changes = true)".to_owned());
+        }
+        for since in &self.exports {
+            parts.push(format!(
+                "the autostart export {} of an earlier cutover was never restored",
+                export_name(*since)
+            ));
+        }
+        parts.join("; ")
+    }
+}
+
+/// A cutover on a PC with what a lost prod left is refused before anything
+/// changes (S8 lane 5): its export would save the predecessor's autostarts
+/// as the lost cutover left them, disabled, and its rollback would restore
+/// them so. `iemmode rollback` repairs it first (`rollback::repair`).
+pub fn leftover_refusal(left: &Leftover) -> Option<String> {
+    left.any().then(|| {
+        format!(
+            "{}: an earlier prod was lost to trial (an older guard took over, or the guard state \
+             could not be read); iemmode rollback repairs it before a cutover",
+            left.text()
+        )
+    })
+}
+
 /// The cutover task's verbs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verb {

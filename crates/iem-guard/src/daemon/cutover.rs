@@ -14,7 +14,7 @@ use tracing::info;
 use super::reply::switch_text;
 use super::runner::run_switch;
 use super::{Guard, Outcome, STATE_FILE};
-use crate::cutover::{self, CutStep, Run};
+use crate::cutover::{self, CutStep, Leftover, Run};
 use crate::lifecycle::{self, Lifecycle, Prod};
 use crate::pc::{Pc, StepError};
 use crate::plan::Mode;
@@ -45,6 +45,20 @@ pub(super) fn cutover(
     };
     if let Some(why) = cutover::refusal(build, &facts) {
         return (false, why);
+    }
+    // What a lost prod left (S8 lane 5): its rollback repairs it first.
+    match leftover(pc) {
+        Ok(left) => {
+            if let Some(why) = cutover::leftover_refusal(&left) {
+                return (false, why);
+            }
+        }
+        Err(why) => {
+            return (
+                false,
+                format!("what an earlier cutover left cannot be read ({why}): refused"),
+            );
+        }
     }
     let since = g.now();
     if dry_run {
@@ -108,6 +122,16 @@ pub(super) fn cutover(
     );
     info!("{done}");
     (true, done)
+}
+
+/// What a cutover whose prod was lost left (S8 lane 5,
+/// `cutover::Leftover`): the autostart exports never restored and the
+/// server config's `pin_changes`. Reads only.
+pub(super) fn leftover(pc: &mut dyn Pc) -> Result<Leftover, String> {
+    let exports = pc.cutover_exports().map_err(text)?;
+    let config = pc.server_config().map_err(text)?;
+    let pins_open = cutover::pins_open(&config)? == Some(true);
+    Ok(Leftover { exports, pins_open })
 }
 
 /// One step, read back.

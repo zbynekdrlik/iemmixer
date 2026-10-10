@@ -384,6 +384,11 @@ pub trait Pc {
     /// The cutover task: the guard task's logon trigger on or off, read
     /// back (after the cutover the guard starts at the user's logon).
     fn guard_logon(&mut self, on: bool) -> R<()>;
+    /// The autostart exports in `<elevated root>\cutover` that saved
+    /// something and were never restored (`cutover::unrestored`; S8 lane 5:
+    /// what a lost prod leaves). A read of a folder the user may read;
+    /// none there: none. Never waits.
+    fn cutover_exports(&mut self) -> R<Vec<u64>>;
     /// The server's config file (`pc.toml` `server_config`) as text.
     fn server_config(&mut self) -> R<String>;
     /// Replaces the server's config whole (a temp file renamed over it), read

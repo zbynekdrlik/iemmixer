@@ -769,3 +769,31 @@ fn only_a_trial_refreshes_the_data_from_the_predecessor() {
     let entry = super::plan(&Lifecycle::Trial, Mode::Live, &Facts::default());
     assert!(entry.contains(&Step::Data), "a trial imports: {entry:?}");
 }
+
+/// S8 lane 5: in prod and while rolling back `activate` takes only a bundle
+/// whose guard keeps the lifecycle; before the cutover the manifest is not
+/// even read.
+#[test]
+fn activate_after_the_cutover_takes_only_a_guard_that_keeps_the_lifecycle() {
+    let unread = || -> Result<bool, String> { panic!("read in trial") };
+    assert_eq!(activation_refusal(&Lifecycle::Trial, NEW, unread), None);
+    for lc in [Lifecycle::Prod(prod(None, None)), Lifecycle::RollingBack] {
+        assert_eq!(activation_refusal(&lc, NEW, || Ok(true)), None, "{lc:?}");
+        let older = activation_refusal(&lc, NEW, || Ok(false)).unwrap();
+        assert!(
+            older.starts_with(&format!(
+                "{NEW}'s guard predates the lifecycle (its manifest names no guard_lifecycle): in "
+            )),
+            "{older}"
+        );
+        assert!(older.contains(&status(&lc).unwrap()), "{older}");
+        let unreadable =
+            activation_refusal(&lc, NEW, || Err("manifest.json: not found".to_owned())).unwrap();
+        assert!(
+            unreadable.starts_with(&format!(
+                "{NEW}'s manifest cannot be read (manifest.json: not found)"
+            )),
+            "{unreadable}"
+        );
+    }
+}

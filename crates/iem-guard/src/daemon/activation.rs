@@ -148,6 +148,18 @@ fn activate_bundle(
     if !g.state.bundles.contains_key(sha) {
         return Err(format!("bundle {sha} is not installed"));
     }
+    // In prod an older guard taking over would drop the lifecycle (S8 lane 5).
+    let keeps = || {
+        let root = g
+            .root
+            .as_ref()
+            .ok_or_else(|| "the guard has no bundle directory".to_owned())?;
+        install::read_manifest(&install::bundles_dir(root).join(sha))
+            .map(|m| crate::bundle::keeps_lifecycle(&m))
+    };
+    if let Some(why) = lifecycle::activation_refusal(&g.state.lifecycle, sha, keeps) {
+        return Err(why);
+    }
     let changed = activate_files(g, sha).map_err(|why| format!("activation failed: {why}"))?;
     pc.set_bundle(Some(sha));
     let keep = lifecycle::kept(&g.state.lifecycle, g.state.way_back_bundle(), sha);

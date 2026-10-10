@@ -554,7 +554,9 @@ jobs:
           }
           if (-not $version) { throw 'no [workspace.package] version in Cargo.toml' }
           $branch = if ($env:GITHUB_REF -like 'refs/heads/*') { $env:GITHUB_REF.Substring(11) } else { 'pr' }
-          [ordered]@{ sha = $env:GITHUB_SHA; branch = $branch; version = $version; run = [int64]$env:GITHUB_RUN_ID } | ConvertTo-Json |
+          # guard_lifecycle (S8 lane 5, #11): this build's guard keeps the lifecycle; in prod
+          # `activate` refuses a bundle without it (bundle::keeps_lifecycle).
+          [ordered]@{ sha = $env:GITHUB_SHA; branch = $branch; version = $version; run = [int64]$env:GITHUB_RUN_ID; guard_lifecycle = 1 } | ConvertTo-Json |
             Set-Content -Encoding utf8NoBOM -LiteralPath (Join-Path $b 'manifest.json')
           $lines = Get-ChildItem -LiteralPath $b -File -Recurse | Sort-Object FullName | ForEach-Object {
             '{0}  {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.FullName.Substring($b.Length + 1).Replace('\', '/')

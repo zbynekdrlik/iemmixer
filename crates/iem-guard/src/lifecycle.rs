@@ -385,6 +385,35 @@ pub fn kept(lc: &Lifecycle, way_back: Option<&str>, sha: &str) -> Vec<String> {
     keep
 }
 
+/// `activate` (online and offline) in prod and while rolling back takes
+/// only a bundle whose guard keeps the lifecycle (S8 lane 5,
+/// `bundle::keeps_lifecycle`): an older guard that took over would drop it
+/// on its next save, and prod would read back as trial with pin_changes
+/// open and the predecessor's autostarts disabled. Before the cutover any
+/// bundle activates. `keeps` reads the bundle's manifest, only when it
+/// matters.
+pub fn activation_refusal(
+    lc: &Lifecycle,
+    sha: &str,
+    keeps: impl FnOnce() -> Result<bool, String>,
+) -> Option<String> {
+    if *lc == Lifecycle::Trial {
+        return None;
+    }
+    let state = status(lc).unwrap_or_default();
+    match keeps() {
+        Ok(true) => None,
+        Ok(false) => Some(format!(
+            "{sha}'s guard predates the lifecycle (its manifest names no guard_lifecycle): in \
+             {state} no activation of a guard that would drop it"
+        )),
+        Err(why) => Some(format!(
+            "{sha}'s manifest cannot be read ({why}): in {state} no activation of a guard that \
+             may not keep the lifecycle"
+        )),
+    }
+}
+
 /// The lifecycle in `iemmode status`; none in `Trial` (the status reads as
 /// before S8).
 pub fn status(lc: &Lifecycle) -> Option<String> {

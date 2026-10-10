@@ -156,12 +156,17 @@ fn read_sums(dir: &Path) -> Result<Vec<(String, String)>, String> {
     bundle::parse_sums(text.strip_prefix('\u{feff}').unwrap_or(&text))
 }
 
+/// The manifest of the unpacked bundle in `dir`.
+pub fn read_manifest(dir: &Path) -> Result<Manifest, String> {
+    let text = fs::read_to_string(dir.join(MANIFEST)).map_err(|e| format!("{MANIFEST}: {e}"))?;
+    Manifest::parse(&text)
+}
+
 /// Checks the unpacked bundle in `dir` for the commit `sha`: every file
 /// summed and matching, the required ones there, the manifest naming `sha`.
 pub fn verify_dir(dir: &Path, sha: &str) -> Result<(), String> {
     let sums = read_sums(dir)?;
-    let text = fs::read_to_string(dir.join(MANIFEST)).map_err(|e| format!("{MANIFEST}: {e}"))?;
-    let manifest = Manifest::parse(&text)?;
+    let manifest = read_manifest(dir)?;
     let files = digests(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     bundle::verify(&files, &sums, &manifest, sha).map_err(|bad| bad.join("; "))
 }

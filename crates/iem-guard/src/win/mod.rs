@@ -367,6 +367,10 @@ impl Pc for WinPc {
         cutover::task(self, verb, None).map(|_| ())
     }
 
+    fn cutover_exports(&mut self) -> R<Vec<u64>> {
+        cutover::unrestored_exports(self)
+    }
+
     fn server_config(&mut self) -> R<String> {
         cutover::server_config(self)
     }

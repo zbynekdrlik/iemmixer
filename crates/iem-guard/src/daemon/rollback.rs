@@ -9,7 +9,7 @@
 
 use tracing::info;
 
-use super::cutover::{save_checked, set_pins};
+use super::cutover::{leftover, save_checked, set_pins};
 use super::reply::switch_text;
 use super::requests::{Entry, dry_event, entry, event_now};
 use super::runner::{failure, run_step, run_switch};
@@ -72,13 +72,29 @@ pub(super) fn event(pc: &mut dyn Pc, g: &mut Guard, dry_run: bool, signal: bool)
     }
 }
 
-/// `iemmode rollback [--dry-run]`: refused before the cutover; otherwise
-/// the record and `RollingBack` saved and read back (a record that does not
-/// save changes nothing), then every step not done yet.
+/// `iemmode rollback [--dry-run]`: refused before the cutover, unless a
+/// lost prod left something there (S8 lane 5: then it runs as a repair,
+/// `rollback::repair`); otherwise the record and `RollingBack` saved and
+/// read back (a record that does not save changes nothing), then every
+/// step not done yet.
 pub(super) fn rollback(pc: &mut dyn Pc, g: &mut Guard, dry_run: bool) -> (bool, String) {
     let run = match rollback::begin(&g.state.lifecycle, g.state.rollback.as_ref(), g.now()) {
         Ok(run) => run,
-        Err(why) => return (false, why),
+        Err(why) => match leftover(pc) {
+            Ok(left) => match rollback::repair(&left, g.now()) {
+                Some(run) => {
+                    g.info(rollback::repair_note(&left));
+                    run
+                }
+                None => return (false, why),
+            },
+            Err(read) => {
+                return (
+                    false,
+                    format!("{why} (what an earlier cutover left cannot be read: {read})"),
+                );
+            }
+        },
     };
     if dry_run {
         return (

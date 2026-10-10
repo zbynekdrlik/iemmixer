@@ -60,6 +60,8 @@ pub enum Call {
     AutostartsOn,
     /// The cutover task's guard logon trigger.
     GuardLogon,
+    /// The read of the autostart exports never restored (S8 lane 5).
+    CutoverExports,
     ServerConfig,
     WriteServerConfig,
     MemberPage,
@@ -840,6 +842,17 @@ impl Pc for FakePc {
         self.enter(Call::GuardLogon, None)?;
         self.guard_at_logon = on;
         Ok(())
+    }
+
+    /// The export the autostarts are disabled into, while they are: an
+    /// `autostarts_on` from it restores them (and marks it restored).
+    fn cutover_exports(&mut self) -> R<Vec<u64>> {
+        self.enter(Call::CutoverExports, None)?;
+        Ok(self
+            .autostarts_in
+            .iter()
+            .filter_map(|e| e.strip_prefix(crate::cutover::EXPORT_PREFIX)?.parse().ok())
+            .collect())
     }
 
     fn server_config(&mut self) -> R<String> {

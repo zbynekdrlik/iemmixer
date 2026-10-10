@@ -56,6 +56,33 @@ fn a_rollback_begins_from_prod_or_continues_its_record() {
     assert!(lost.done.is_empty() && !lost.exported && !lost.on_export);
 }
 
+/// S8 lane 5: in trial a rollback runs only as a repair of what a lost prod
+/// left, from the newest export never restored.
+#[test]
+fn a_repair_rollback_runs_only_on_what_a_lost_prod_left() {
+    assert_eq!(repair(&Leftover::default(), AT), None);
+    let left = Leftover {
+        exports: vec![5, 8],
+        pins_open: false,
+    };
+    let run = repair(&left, AT).unwrap();
+    assert_eq!(
+        (run.pin.as_str(), run.since, run.at),
+        (UNKNOWN_PIN, Some(8), AT)
+    );
+    assert!(run.done.is_empty() && !run.exported && !run.on_export);
+    let pins = Leftover {
+        exports: Vec::new(),
+        pins_open: true,
+    };
+    assert_eq!(repair(&pins, AT).map(|r| r.since), Some(None));
+    assert_eq!(
+        repair_note(&pins),
+        "a repair rollback in trial: the server config allows PIN changes (pin_changes = \
+         true) (an earlier prod was lost to trial)"
+    );
+}
+
 #[test]
 fn a_continued_rollback_stops_and_brings_reaper_again() {
     let mut r = run();

@@ -27,6 +27,7 @@
 
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::cutover::Leftover;
 use crate::lifecycle::Lifecycle;
 use crate::plan::{self, Facts, Mode, Step};
 
@@ -128,7 +129,7 @@ pub fn begin(lc: &Lifecycle, run: Option<&Run>, now: u64) -> Result<Run, String>
             );
         }
         Lifecycle::Prod(p) => (p.pin.clone(), Some(p.since)),
-        Lifecycle::RollingBack => ("unknown".to_owned(), None),
+        Lifecycle::RollingBack => (UNKNOWN_PIN.to_owned(), None),
     };
     Ok(Run {
         pin,
@@ -138,6 +139,35 @@ pub fn begin(lc: &Lifecycle, run: Option<&Run>, now: u64) -> Result<Run, String>
         exported: false,
         on_export: false,
     })
+}
+
+/// The pin of a rollback whose record of prod was lost.
+pub const UNKNOWN_PIN: &str = "unknown";
+
+/// The repair rollback (S8 lane 5, the cross-lane review's finding 2b): a
+/// PC back in trial with what a lost prod left (`Leftover::any`: an older
+/// guard took over, or the state could not be read) rolls back as from
+/// prod, its steps and guarantees the same (REAPER at the end), the
+/// predecessor's autostarts back from the newest export never restored
+/// (none: not restored, noted, and the guard keeps its logon trigger).
+/// `None`: nothing to repair, and [`begin`]'s refusal stands.
+pub fn repair(left: &Leftover, now: u64) -> Option<Run> {
+    left.any().then(|| Run {
+        pin: UNKNOWN_PIN.to_owned(),
+        since: left.newest(),
+        at: now,
+        done: Vec::new(),
+        exported: false,
+        on_export: false,
+    })
+}
+
+/// The report line of a repair rollback: why it runs in trial.
+pub fn repair_note(left: &Leftover) -> String {
+    format!(
+        "a repair rollback in trial: {} (an earlier prod was lost to trial)",
+        left.text()
+    )
 }
 
 /// The rollback a starting guard continues: its event plan runs again

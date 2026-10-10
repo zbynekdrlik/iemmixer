@@ -32,6 +32,10 @@ pub const REQUIRED: [&str; 9] = [
     MANIFEST,
 ];
 
+/// What a bundle's `guard_lifecycle` names when its guard keeps the S8
+/// lifecycle (lane 5): written by the CI `bundle` job.
+pub const GUARD_LIFECYCLE: u32 = 1;
+
 /// `manifest.json`, written by the CI `bundle` job.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Manifest {
@@ -40,6 +44,11 @@ pub struct Manifest {
     pub version: String,
     /// The CI run id.
     pub run: u64,
+    /// The bundle's guard keeps the S8 lifecycle (lane 5): its state's
+    /// `lifecycle` survives the guard's saves. Additive: a bundle built
+    /// before the field names none and reads as not aware.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard_lifecycle: Option<u32>,
 }
 
 impl Manifest {
@@ -178,6 +187,13 @@ pub fn verify(
     if bad.is_empty() { Ok(()) } else { Err(bad) }
 }
 
+/// Whether the bundle's guard keeps the S8 lifecycle (its manifest names
+/// [`GUARD_LIFECYCLE`] or later): an older guard that takes over drops it on
+/// its next save, and prod reads back as trial.
+pub fn keeps_lifecycle(m: &Manifest) -> bool {
+    m.guard_lifecycle.is_some_and(|v| v >= GUARD_LIFECYCLE)
+}
+
 /// `live --build` takes only a bundle from `main` whose HIL is green (G8).
 pub fn may_go_live(r: &Record) -> Result<(), String> {
     if r.branch != "main" {
@@ -233,6 +249,7 @@ mod tests {
             branch: "dev".into(),
             version: "2.0.0-dev.9".into(),
             run: 42,
+            guard_lifecycle: None,
         }
     }
 
@@ -488,6 +505,32 @@ mod tests {
         );
         let err = Manifest::parse("{}").unwrap_err();
         assert!(err.starts_with("manifest.json: "), "{err}");
+    }
+
+    /// S8 lane 5: `guard_lifecycle` is additive: an older manifest reads as
+    /// a guard that does not keep the lifecycle and writes back as it was.
+    #[test]
+    fn the_manifest_names_a_guard_that_keeps_the_lifecycle() {
+        let json = format!(
+            r#"{{"sha":"{SHA}","branch":"dev","version":"2.0.0-dev.9","run":42,"guard_lifecycle":1}}"#
+        );
+        let m = Manifest::parse(&json).unwrap();
+        assert_eq!(m.guard_lifecycle, Some(GUARD_LIFECYCLE));
+        assert!(keeps_lifecycle(&m));
+        let later = Manifest {
+            guard_lifecycle: Some(GUARD_LIFECYCLE + 1),
+            ..manifest()
+        };
+        assert!(keeps_lifecycle(&later));
+        let zero = Manifest {
+            guard_lifecycle: Some(0),
+            ..manifest()
+        };
+        assert!(!keeps_lifecycle(&zero));
+        assert!(!keeps_lifecycle(&manifest()));
+        let older = serde_json::to_string(&manifest()).unwrap();
+        assert!(!older.contains("guard_lifecycle"), "{older}");
+        assert_eq!(Manifest::parse(&older).unwrap(), manifest());
     }
 
     #[test]

@@ -470,3 +470,79 @@ fn the_dry_run_names_every_step() {
         )
     );
 }
+
+fn folder(name: &str, saved: bool, restored: bool) -> ExportSeen {
+    ExportSeen {
+        name: name.to_owned(),
+        saved,
+        restored,
+    }
+}
+
+/// S8 lane 5: an export counts as never restored when it saved something
+/// (`export.json`) and holds no restore mark; other folders are no export.
+#[test]
+fn only_a_saved_export_without_its_restore_mark_is_unrestored() {
+    let folders = [
+        folder("autostarts-30", true, false),
+        folder("autostarts-10", true, false),
+        folder("autostarts-20", true, true),
+        folder("autostarts-40", false, false),
+        folder("autostarts-", true, false),
+        folder("autostarts-5x", true, false),
+        folder("other-50", true, false),
+        folder("autostarts-123456789012345678901", true, false),
+    ];
+    assert_eq!(unrestored(&folders), [10, 30]);
+    assert_eq!(unrestored(&[]), Vec::<u64>::new());
+}
+
+#[test]
+fn what_a_lost_prod_left_refuses_a_cutover() {
+    assert_eq!(leftover_refusal(&Leftover::default()), None);
+    assert!(!Leftover::default().any());
+    let pins = Leftover {
+        exports: Vec::new(),
+        pins_open: true,
+    };
+    assert!(pins.any());
+    assert_eq!(pins.newest(), None);
+    let why = leftover_refusal(&pins).unwrap();
+    assert!(
+        why.starts_with(
+            "the server config allows PIN changes (pin_changes = true): an earlier prod was lost"
+        ),
+        "{why}"
+    );
+    assert!(
+        why.ends_with("iemmode rollback repairs it before a cutover"),
+        "{why}"
+    );
+    let both = Leftover {
+        exports: vec![7, 9],
+        pins_open: true,
+    };
+    assert_eq!(both.newest(), Some(9));
+    assert_eq!(
+        both.text(),
+        "the server config allows PIN changes (pin_changes = true); the autostart export \
+         autostarts-7 of an earlier cutover was never restored; the autostart export \
+         autostarts-9 of an earlier cutover was never restored"
+    );
+    let export = Leftover {
+        exports: vec![3],
+        pins_open: false,
+    };
+    assert!(export.any());
+    assert!(
+        leftover_refusal(&export)
+            .unwrap()
+            .starts_with("the autostart export autostarts-3 of an earlier cutover")
+    );
+}
+
+#[test]
+fn only_the_lifecycle_and_pin_changes_are_undone_locally() {
+    let local: Vec<CutStep> = STEPS.into_iter().filter(|s| s.local()).collect();
+    assert_eq!(local, [CutStep::PinChanges, CutStep::Lifecycle]);
+}
