@@ -13,6 +13,7 @@ import shutil
 import sys
 import tempfile
 import time
+import types
 import unittest
 import zipfile
 from pathlib import Path
@@ -174,7 +175,22 @@ class FakeClock:
 # The modules iempc is made of (#36): a test patches a name in the one module that
 # holds it, where the code that reads it looks it up. `ip.<name>` reads it live.
 MODULES = (ip, *ip.SPLIT)
-IEMPC_NAMES = frozenset(vars(ip))
+
+
+class GuardedIempc(types.ModuleType):
+    """iempc's module type in the tests (#36): a name set on iempc itself would
+    shadow the binding the moved code reads, and `mock.patch.object(ip, ...)`
+    removes its name again when the block ends, so any write or delete fails
+    at once. Base.patch writes through `swap`."""
+
+    def __setattr__(self, name: str, value) -> None:
+        raise AssertionError(f"iempc.{name} set directly: patch it with Base.patch (#36)")
+
+    def __delattr__(self, name: str) -> None:
+        raise AssertionError(f"iempc.{name} deleted directly: patch it with Base.patch (#36)")
+
+
+ip.__class__ = GuardedIempc
 
 
 def owner(name: str):
@@ -190,7 +206,6 @@ class Base(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp, True)
-        self.addCleanup(self.nothing_set_on_iempc)
         self.patch(EVENT_NOW=self.tmp / "config" / "EVENT-NOW", STATE_DIR=self.tmp / "state",
                    SPIKE_STATE=self.tmp / "spike-window.json", POLL_S=0.05)
         self.spike_log = self.tmp / "spike.log"
@@ -212,7 +227,7 @@ class Base(unittest.TestCase):
         for name, value in values.items():
             module = owner(name)
             saved[name] = getattr(module, name)
-            setattr(module, name, value)
+            types.ModuleType.__setattr__(module, name, value)   # past GuardedIempc for iempc's own names
         return saved
 
     def patch(self, **values) -> None:
@@ -227,14 +242,6 @@ class Base(unittest.TestCase):
             yield
         finally:
             self.swap(saved)
-
-    def nothing_set_on_iempc(self) -> None:
-        """A name set on `ip` itself never reaches a moved module's code (#36):
-        use `patch`."""
-        added = set(vars(ip)) - IEMPC_NAMES
-        for name in added:
-            delattr(ip, name)
-        self.assertEqual(added, set(), "set on iempc itself: patch it with Base.patch")
 
     def write_spike(self, code: int, delay: float = 0.0) -> Path:
         """A stand-in spike_window.py: logs its arguments at start, takes
