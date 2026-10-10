@@ -65,8 +65,11 @@ def run_samples(hours: float, every: float = 600, legs: int = 1, engine=None, se
 
 
 def legs_of(n: int, total_s: int, **kw) -> list[dict]:
-    return [{"leg": i + 1, "seconds": s, "exit": 0, "summary": summary(**kw)}
+    """Every planned leg whole: its summary ran its seconds at every expected frame."""
+    legs = [{"leg": i + 1, "seconds": s, "exit": 0, "summary": summary(seconds=float(s), **kw)}
             for i, s in enumerate(ns.plan_legs(total_s))]
+    assert len(legs) == n, (len(legs), n)
+    return legs
 
 
 STOPS = {"server": {"ended": True, "exit": 0}, "engine": {"ended": True, "exit": 0}}
@@ -151,17 +154,32 @@ class JudgeTests(unittest.TestCase):
         self.assertEqual((fails, nums["rss_growth_kb"]), ([], 0))
 
     def test_fds_and_threads_must_stay_flat(self) -> None:
+        """A leak raises the floor; a transient (a backup's blocking thread, a
+        socket between two legs) raises only a peak."""
         for key in ("fds", "threads"):
             grows = {key: lambda t: 20 + (1 if t > 70 * H else 0)}
             fails, nums = ns.judge_process("server#2", series(72, **grows))
-            self.assertEqual(fails, [f"server#2: {key} not flat: the last hour's highest 21, hour 1 to 2's 20"], key)
-            self.assertEqual((nums[f"{key}_hour2_max"], nums[f"{key}_last_hour_max"]), (20, 21))
-            # A rise that is gone before the last hour, or a fall, is flat.
-            for f in (lambda t: 20 + (5 if 10 * H < t < 11 * H else 0), lambda t: 20 - (3 if t > 5 * H else 0)):
+            self.assertEqual(fails, [f"server#2: {key} not flat: the last hour's lowest 21, above hour 1 to 2's "
+                                     "highest 20"], key)
+            self.assertEqual((nums[f"{key}_hour2_max"], nums[f"{key}_last_hour_min"], nums[f"{key}_last_hour_max"]),
+                             (20, 21, 21))
+            # A slow leak of one per 8 h leg is caught too.
+            leak = {key: lambda t: 20 + int(t // (8 * H))}
+            self.assertEqual(len(ns.judge_process("server#2", series(72, **leak))[0]), 1, key)
+            # A one-sample spike in the last hour, a rise gone before it, or a fall, is flat.
+            for f in (lambda t: 20 + (9 if abs(t - 71.5 * H) < 1 else 0),
+                      lambda t: 20 + (5 if 10 * H < t < 11 * H else 0), lambda t: 20 - (3 if t > 5 * H else 0)):
                 self.assertEqual(ns.judge_process("server#2", series(72, **{key: f}))[0], [], key)
-            # The baseline is hour 1 to 2's highest: a spike there allows the last hour that high.
-            spike = {key: lambda t: 30 if 1.5 * H <= t < 1.5 * H + 60 else (30 if t > 71.5 * H else 20)}
+            # The baseline is hour 1 to 2's highest: a spike there allows a last hour that high.
+            spike = {key: lambda t: 30 if 1.5 * H <= t < 1.5 * H + 60 else (30 if t > 71 * H else 20)}
             self.assertEqual(ns.judge_process("server#2", series(72, **spike))[0], [], key)
+
+    def test_no_sample_in_hour_one_to_two_is_a_failure_never_a_crash(self) -> None:
+        pts = [(t, p) for t, p in series(5) if not H <= t < 2 * H]
+        fails, nums = ns.judge_process("engine#1", pts)
+        self.assertEqual((fails, nums["judged"]), (["engine#1: no readable sample in hour 1 to 2"], False))
+        v = ns.verdict([{"t": t, "procs": {"engine": p, "server": p}} for t, p in pts], [], {}, 5 * 3600, 600)
+        self.assertIn("engine#100: no readable sample in hour 1 to 2", v["failures"])
 
     def test_a_process_under_two_hours_is_not_judged(self) -> None:
         fails, nums = ns.judge_process("client#9", series(1.95, rss=lambda t: int(t * 1000)))
@@ -205,7 +223,7 @@ class VerdictTests(unittest.TestCase):
         self.assertEqual(v["conclusion"], "failure")
         self.assertEqual(v["failures"][:3], ["stopped early: the engine exited (70)",
                                              f"the engine exited (70) by {samples[-1]['t']:.0f} s",
-                                             "leg 4: harness gaps 2, not 0"])
+                                             "leg 4: gaps 2"])
         self.assertEqual(v["summary"], "red: stopped early: the engine exited (70)")
 
     def test_each_rule_alone_is_red(self) -> None:
@@ -218,15 +236,22 @@ class VerdictTests(unittest.TestCase):
         legs = legs_of(9, self.TOTAL)
         legs[0]["exit"] = 1
         cases.append(({"legs": legs}, "leg 1: the client ended 1, not 0"))
+        # Each leg gets CI's harness check (soak_verdict.harness_problems), gaps 0.
+        for n, change, words in ((8, None, "no harness summary"), (8, [1], "the harness summary is unreadable"),
+                                 (2, {"complete": False, "error": "connection-lost"},
+                                  "harness incomplete (connection-lost)"),
+                                 (2, {"complete": False}, "harness incomplete"),
+                                 (2, {"seconds": 28798.9}, "harness ran 28798.9 s of 28799 s"),
+                                 (2, {"gaps": 1}, "gaps 1"), (2, {"reconnects": 1}, "reconnects 1"),
+                                 (2, {"frames": 0}, "no listen frames"),
+                                 (2, {"frames": 4949}, "frames 98.98 % of expected"),
+                                 (2, {"meter_frames": 0}, "no meter frames")):
+            legs = legs_of(9, self.TOTAL)
+            legs[n]["summary"] = change if not isinstance(change, dict) else {**legs[n]["summary"], **change}
+            cases.append(({"legs": legs}, f"leg {n + 1}: {words}"))
         legs = legs_of(9, self.TOTAL)
-        legs[8]["summary"] = None
-        cases.append(({"legs": legs}, "leg 9: the harness summary is unreadable"))
-        legs = legs_of(9, self.TOTAL)
-        legs[2]["summary"]["error"] = "connection-lost"
-        cases.append(({"legs": legs}, "leg 3: the harness is not complete (error 'connection-lost')"))
-        legs = legs_of(9, self.TOTAL)
-        legs[2]["summary"]["complete"] = False
-        cases.append(({"legs": legs}, "leg 3: the harness is not complete (error None)"))
+        legs[2]["summary"]["frames"] = 4950   # 99 % exactly passes
+        self.assertEqual(self.green(legs=legs)["failures"], [])
         cases.append(({"legs": legs_of(9, self.TOTAL)[:8]}, "8 of the 9 legs ended"))
         cases.append(({"stops": {**STOPS, "engine": {"ended": False, "exit": None}}},
                       "the engine did not end within its graceful stop (left running)"))
@@ -270,6 +295,8 @@ assert args[0] == "run", args
 pipe = args[args.index("--pipe") + 1]
 log = open(os.environ["FAKE_LOG"], "a")
 die_after = float(os.environ.get("FAKE_ENGINE_EXIT_AFTER", "0"))
+drop_once = [os.environ.get("FAKE_ENGINE_DROP_OBSERVER_ONCE") == "1"]
+ignore = os.environ.get("FAKE_ENGINE_IGNORE_SHUTDOWN") == "1"
 done = threading.Event()
 start = time.monotonic()
 def frame(m):
@@ -301,10 +328,19 @@ def serve(c):
                 c.sendall(frame({"type": "status", "callbacks": n * 300, "late": 1, "missed": 0, "faulted": False,
                                  "parked": False, "interval_hist": [[333, n]]}))
                 time.sleep(0.05)
+                if drop_once[0] and n == 3:
+                    drop_once[0] = False
+                    log.write("observer dropped\n"); log.flush()
+                    c.close()
+                    return
         elif role == "supervisor":
             req = read(c)
             log.write(f"request {json.dumps(req)}\n"); log.flush()
-            if req and req["cmd"] == {"op": "shutdown"}:
+            if req and req["cmd"] == {"op": "shutdown"} and ignore:
+                log.write("shutdown ignored\n"); log.flush()
+                threading.Timer(3, done.set).start()   # it ends by itself later, never forced
+                c.sendall(frame({"type": "reply", "id": req["id"], "rev": 0}))
+            elif req and req["cmd"] == {"op": "shutdown"}:
                 done.set()   # first: the peer may close after the reply, as the real engine ends regardless
                 c.sendall(frame({"type": "reply", "id": req["id"], "rev": 0}))
                 c.sendall(frame({"type": "driver_released", "reason": "shutdown"}))
@@ -333,6 +369,9 @@ log = open(os.environ["FAKE_LOG"], "a")
 if sys.argv[1:2] == ["pin"]:
     pin = sys.stdin.readline().strip()
     log.write(f"pin {' '.join(sys.argv[2:])} {len(pin)} {pin.isdigit()} {pin in ' '.join(sys.argv)}\n")
+    log.flush()
+    import time
+    time.sleep(float(os.environ.get("FAKE_PIN_SLEEP", "0")))
     sys.exit(0)
 config = Path(os.environ["IEMMIXER_CONFIG"])
 (config.parent / "secrets").mkdir(exist_ok=True)
@@ -375,7 +414,11 @@ while time.monotonic() < end:
     if readable and held.recv(1) == b"":
         write(error="connection-lost"); sys.exit(1)
     write(seconds=seconds - (end - time.monotonic()), frames=1)
-write(complete=True, seconds=seconds, frames=50, expected_frames=50)
+while os.environ.get("FAKE_CLIENT_OVERRUN") == "1":   # past its seconds, until the server goes
+    readable, _, _ = select.select([held], [], [], 0.1)
+    if readable and held.recv(1) == b"":
+        write(error="connection-lost"); sys.exit(1)
+write(complete=True, seconds=seconds, frames=50, expected_frames=50, meter_frames=30)
 '''
 
 
@@ -396,7 +439,8 @@ class RunTests(unittest.TestCase):
         env = {"FAKE_LOG": str(self.log), "FAKE_HASH": BUILD[:7], "IEM_SOAK_PIN": "1234"}
         patches = [mock.patch.dict(os.environ, env)]
         for name, value in (("HOUR", 1), ("LEG_MAX_S", 3), ("TICK_S", 0.05), ("READY_S", 10), ("SERVER_STOP_S", 10),
-                            ("CLIENT_END_S", 10), ("ENGINE_STOP_S", 10), ("LEG_OVERRUN_S", 10)):
+                            ("CLIENT_END_S", 10), ("ENGINE_STOP_S", 10), ("LEG_OVERRUN_S", 10), ("LEG_GAP_S", 0.2),
+                            ("PIN_S", 10)):
             patches.append(mock.patch.object(ns, name, value))
         for p in patches:
             p.start()
@@ -410,6 +454,19 @@ class RunTests(unittest.TestCase):
             code = ns.main(["--bin", str(self.bin), "--build", BUILD, "--out", str(self.out), "--hours", hours,
                             "--every", "0.25", "--repo", str(ROOT), *extra])
         return code, out.getvalue(), err.getvalue()
+
+    def ended_by_itself(self, pid: int) -> None:
+        """A stand-in left running ends by itself (never force-ended): gone, or a zombie of this process."""
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            try:
+                state = Path(f"/proc/{pid}/status").read_text(encoding="utf-8")
+            except FileNotFoundError:
+                return
+            if "\nState:\tZ" in state:
+                return
+            time.sleep(0.1)
+        self.fail(f"the stand-in {pid} never ended")
 
     def fake_log(self) -> list[str]:
         return self.log.read_text(encoding="utf-8").splitlines()
@@ -457,6 +514,10 @@ class RunTests(unittest.TestCase):
         self.assertEqual(mid["observer_reconnects"], 0)
         self.assertEqual(samples[-1]["procs"].get("client"), None)
         self.assertGreaterEqual(samples[-1]["t"], 8)
+        # Between two legs the server gets LEG_GAP_S to end the last leg's sessions.
+        gaps = [s for s in samples if s["leg"] is None]
+        self.assertTrue(gaps)
+        self.assertTrue(all("client" not in s["procs"] for s in gaps))
         # The run folder is the owner's only.
         self.assertEqual(stat.S_IMODE(self.out.stat().st_mode), 0o700)
 
@@ -475,7 +536,9 @@ class RunTests(unittest.TestCase):
         self.assertNotIn("request", " ".join(self.fake_log()))   # no Shutdown to an engine that had ended
 
     def test_a_stop_request_ends_the_run_gracefully_red(self) -> None:
-        threading.Timer(1.5, signal.raise_signal, (signal.SIGINT,)).start()
+        timer = threading.Timer(1.5, signal.raise_signal, (signal.SIGINT,))
+        self.addCleanup(timer.cancel)
+        timer.start()
         code, _, _ = self.run_soak()
         v = self.verdict()
         self.assertEqual(code, 1)
@@ -499,8 +562,11 @@ class RunTests(unittest.TestCase):
 
     def test_usage_errors_start_nothing(self) -> None:
         cases = [(["--build", "abc"], "--build must be the artifact's full commit SHA"),
-                 (["--hours", "0"], "--hours must be at least 1 s"),
-                 (["--every", "0"], "--every above 0"),
+                 (["--hours", "0"], "--hours must be finite and at least 1 s"),
+                 (["--hours", "nan"], "--hours must be finite and at least 1 s"),
+                 (["--hours", "inf"], "--hours must be finite and at least 1 s"),
+                 (["--every", "0"], "--every must be above 0 and at most 600 s"),
+                 (["--every", "601"], "--every must be above 0 and at most 600 s"),
                  (["--repo", str(self.tmp)], "config/test-site.toml is missing")]
         for extra, words in cases:
             code, _, err = self.run_soak(*extra)
@@ -517,6 +583,52 @@ class RunTests(unittest.TestCase):
         self.assertEqual((code, self.log.exists()), (2, False))
         self.assertIn("exists: each run gets a new folder", err)
 
+    def test_an_engine_that_ignores_shutdown_is_left_running_and_named_red(self) -> None:
+        with mock.patch.object(ns, "ENGINE_STOP_S", 1), \
+                mock.patch.dict(os.environ, {"FAKE_ENGINE_IGNORE_SHUTDOWN": "1"}):
+            code, _, err = self.run_soak()
+        v = self.verdict()
+        self.assertEqual(code, 1)
+        self.assertEqual(v["failures"], ["the engine did not end within its graceful stop (left running)"])
+        self.assertEqual((v["stops"]["engine"]["ended"], v["stops"]["engine"]["exit"]), (False, None))
+        pid = v["stops"]["engine"]["pid"]
+        self.assertIn(f"engine (pid {pid}) did not end within its graceful stop: left running, never forced", err)
+        self.assertIn("shutdown ignored", self.fake_log())
+        self.ended_by_itself(pid)
+
+    def test_a_lost_observe_connection_is_opened_again(self) -> None:
+        with mock.patch.dict(os.environ, {"FAKE_ENGINE_DROP_OBSERVER_ONCE": "1"}):
+            code, _, err = self.run_soak()
+        self.assertEqual(code, 0, (self.verdict()["failures"], err))
+        log = self.fake_log()
+        self.assertIn("observer dropped", log)
+        self.assertEqual(log.count("hello observe 1"), 2)
+        samples = self.samples()
+        self.assertEqual(samples[-1]["observer_reconnects"], 1)
+        self.assertGreater(samples[-1]["engine"]["callbacks"], 0)
+
+    def test_a_leg_that_outlives_its_seconds_stops_the_run_red(self) -> None:
+        with mock.patch.object(ns, "LEG_OVERRUN_S", 1), mock.patch.dict(os.environ, {"FAKE_CLIENT_OVERRUN": "1"}):
+            code, _, _ = self.run_soak()
+        v = self.verdict()
+        self.assertEqual(code, 1)
+        self.assertEqual(v["failures"][0], "stopped early: leg 1's client outlived its seconds by 1 s")
+        # The server's graceful stop closed its connection: the client ended by itself.
+        self.assertEqual((v["stops"]["client"]["ended"], v["stops"]["client"]["exit"]), (True, 1))
+        self.assertEqual(v["legs"][0]["harness"]["error"], "connection-lost")
+
+    def test_a_pin_call_that_does_not_end_is_left_running_never_forced(self) -> None:
+        with mock.patch.object(ns, "PIN_S", 1), mock.patch.dict(os.environ, {"FAKE_PIN_SLEEP": "3"}):
+            code, _, err = self.run_soak()
+        v = self.verdict()
+        self.assertEqual(code, 1)
+        m = re.search(r"setup: iem-server pin set-engineer did not end within 1 s \(pid (\d+), left running\)",
+                      v["failures"][0])
+        self.assertIsNotNone(m, v["failures"])
+        self.assertEqual((v["legs"], v["stops"]), ([], {}))
+        self.assertNotIn("start engine", err)
+        self.ended_by_itself(int(m.group(1)))
+
     def test_no_force_end_verb_in_the_tool(self) -> None:
         """I8: the integrity scan refuses force-end verbs; the tool stops with
         SIGTERM to the server and Shutdown to the engine only."""
@@ -526,6 +638,8 @@ class RunTests(unittest.TestCase):
         self.assertIsNone(check_integrity.FORCE_KILL.search(text))
         self.assertIn("send_signal(signal.SIGTERM)", text)
         self.assertEqual(text.count("send_signal("), 1)
+        # subprocess.run(timeout=) ends its child by force when the time is up: never used here.
+        self.assertNotIn("subprocess.run(", text)
 
 
 if __name__ == "__main__":
