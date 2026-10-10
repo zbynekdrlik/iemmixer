@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
+use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
@@ -230,21 +231,33 @@ pub(super) fn data(pc: &WinPc, mode: Mode, c: &Cancel) -> R<String> {
     let dir = pc.bundle_dir()?;
     let vars = pc.s.vars(&dir);
     refresh(mode, pc.s.data_commands(mode), c, |template| {
-        let command = argv::expand(template, &vars).map_err(StepError::Failed)?;
-        let Some((exe, args)) = command.split_first() else {
-            return Err(StepError::failed("pc.toml has an empty data command"));
-        };
-        let mut cmd = Command::new(exe);
-        cmd.args(args).current_dir(&dir);
-        let out = procs::run(exe, &mut cmd, DATA_LIMIT, c, OnCancel::Finish)?;
-        let name = site::file_name(exe);
-        if out.code != Some(0) {
-            return Err(StepError::failed(format!(
-                "{name} ended with {:?}: {}",
-                out.code,
-                effects::tail(&out.stderr, 300)
-            )));
-        }
-        Ok(format!("{name}: {}", effects::tail(&out.stdout, 200)))
+        command(&dir, template, &vars, c)
     })
+}
+
+/// One `pc.toml` command (a data refresh's, the rollback's export) with its
+/// placeholders, run in the bundle's folder within [`DATA_LIMIT`]; it
+/// finishes once started (a mutation) and must exit 0. What it printed.
+pub(super) fn command(
+    dir: &Path,
+    template: &[String],
+    vars: &[(&str, String)],
+    c: &Cancel,
+) -> R<String> {
+    let command = argv::expand(template, vars).map_err(StepError::Failed)?;
+    let Some((exe, args)) = command.split_first() else {
+        return Err(StepError::failed("pc.toml has an empty data command"));
+    };
+    let mut cmd = Command::new(exe);
+    cmd.args(args).current_dir(dir);
+    let out = procs::run(exe, &mut cmd, DATA_LIMIT, c, OnCancel::Finish)?;
+    let name = site::file_name(exe);
+    if out.code != Some(0) {
+        return Err(StepError::failed(format!(
+            "{name} ended with {:?}: {}",
+            out.code,
+            effects::tail(&out.stderr, 300)
+        )));
+    }
+    Ok(format!("{name}: {}", effects::tail(&out.stdout, 200)))
 }

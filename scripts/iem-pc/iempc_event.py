@@ -4,7 +4,8 @@ warning, never a stop), the spike preempt of an open S1a/S1c window or of a
 closed one still settling (`spike_preempt`), the window closed under its lock
 after a failed preempt (`close_failed_window`), a kernel trace a dead `iempc
 trace` left recorded stopped (iempc_trace.stop_recorded), then `iemmode
-event`, and `iemmode event --direct` when the guard is unreachable (exit 4):
+event --signal` (the owner's "ide event", which in prod never rolls back; S8
+lane 3), and `iemmode event --direct` when the guard is unreachable (exit 4):
 all within one budget (EVENT_BUDGET_S) on one clock (`event_clock`).
 iempc.py's docstring states the whole rule.
 
@@ -18,12 +19,21 @@ import sys
 import time
 
 import iempc_core as core
+import iempc_rollback
 import iempc_trace
 from iempc_core import (SPIKE_DIR, Ctx, StepError, StillRunning, emit, event_now, guarded, iemmode, result,
                         spike_module, spike_window_open, spike_window_settling)
 
 SPIKE = SPIKE_DIR / "spike_window.py"
 GUARD_UNREACHABLE = 4
+USAGE = 2
+# The owner's "ide event" (S8 lane 3): in prod `iemmode event` without it is the
+# engineer's "Back to REAPER", the rollback; with it the guard never rolls back.
+SIGNAL = "--signal"
+# What an iemmode older than S8 lane 3 says to it (a usage error, exit 2, before
+# any guard call). The plain event is the same only before the cutover: the
+# guard's status says so first (an older iemmode with a newer guard in prod).
+UNKNOWN_SIGNAL = 'unknown argument "--signal"'
 # The event path, all of it: one Bash call ends at 10 min, the plan's waits stay within 9.
 EVENT_BUDGET_S = 540
 # spike_window.py preempt's part of it (its bring-back starts REAPER itself).
@@ -137,9 +147,26 @@ def switch_timeout(deadline: float) -> float:
     return left
 
 
+def plain_event_allowed(ctx: Ctx, deadline: float) -> None:
+    """An iemmode that does not know --signal gets the plain `iemmode event`
+    only while the guard is before the cutover (or unreachable: then
+    `--direct` runs the event plan): past it the plain event is the engineer's
+    button, the rollback. Anything else stops the event path for the owner."""
+    code, reply, raw = iemmode(ctx.env, ["status"], switch_timeout(deadline), "ignore")
+    emit(result("iemmode", ["status"], code, reply, raw))
+    if code == GUARD_UNREACHABLE or iempc_rollback.lifecycle(reply) == "trial":
+        return
+    raise StepError(f"the PC's iemmode does not know --signal, and the guard is {iempc_rollback.lifecycle(reply)} "
+                    f"(status exit {code}): a plain 'iemmode event' would be the rollback, so none was sent; "
+                    "'iempc activate' of the running build brings an iemmode that knows the owner's signal")
+
+
 def cmd_event(ctx: Ctx, ip) -> int:
     """The flag, the spike preempt when a window is open, then `iemmode
-    event` (and `--direct` on exit 4), all within EVENT_BUDGET_S."""
+    event --signal` (and `--direct` on exit 4), all within EVENT_BUDGET_S.
+    `--signal` makes it the owner's "ide event": in prod (after the cutover)
+    the guard never rolls back for it (S8 lane 3); an iemmode that does not
+    know it (exit 2, UNKNOWN_SIGNAL) gets the plain `iemmode event`."""
     dry = bool(getattr(ctx.args, "dry_run", False))
     deadline = event_clock() + EVENT_BUDGET_S
     if not dry:
@@ -160,9 +187,14 @@ def cmd_event(ctx: Ctx, ip) -> int:
     if not dry:   # a trace whose dev-box process died (#15); never raises. guarded sees its
         # bound only at its next poll: two polls stay with iemmode event's minimum.
         iempc_trace.stop_recorded(ctx, ip, deadline - event_clock() - SWITCH_MIN_S - 2 * core.POLL_S)
-    args = ["event", "--dry-run"] if dry else ["event"]
+    args = ["event", "--dry-run", SIGNAL] if dry else ["event", SIGNAL]
     code, reply, raw = iemmode(ctx.env, args, switch_timeout(deadline), "ignore")
     emit(result("iemmode", args, code, reply, raw))
+    if code == USAGE and UNKNOWN_SIGNAL in (raw.get("err") or ""):
+        plain_event_allowed(ctx, deadline)
+        args = [a for a in args if a != SIGNAL]
+        code, reply, raw = iemmode(ctx.env, args, switch_timeout(deadline), "ignore")
+        emit(result("iemmode", args, code, reply, raw))
     if code == GUARD_UNREACHABLE:
         args = [*args, "--direct"]
         code, reply, raw = iemmode(ctx.env, args, switch_timeout(deadline), "ignore")

@@ -23,9 +23,9 @@ pub const START_WAIT: Duration = Duration::from_secs(15);
 /// …this often.
 pub const START_POLL: Duration = Duration::from_millis(500);
 
-pub const IEMMODE_USAGE: &str = "usage: iemmode status | event [--dry-run] [--direct]
+pub const IEMMODE_USAGE: &str = "usage: iemmode status | event [--dry-run] [--direct] [--signal]
   | dev [--build SHA] [--dry-run] | live [--build SHA] [--trial] [--dry-run]
-  | cutover --build SHA [--dry-run]
+  | cutover --build SHA [--dry-run] | rollback [--dry-run]
   | install <zip> | activate <sha> | test-signal <input> <dbfs> <ttl> [--listen]
   | report <sha> <green|red> <detail> | job-begin <run> | job-end <run>
   | install-site <file> | force-reopen | inject-fault | inject-seh | inject-park | runner-stop
@@ -131,13 +131,25 @@ pub fn parse(args: &[String]) -> Result<Cli, String> {
     match cmd.as_str() {
         "status" => bare(Request::Status),
         "event" => {
-            let f = Flags::read(&rest, &["--dry-run", "--direct"], &[])?;
+            // `--signal`: the owner's "ide event" (`iempc event`), which in
+            // prod never rolls back; `--direct` runs the event plan here,
+            // whatever it says.
+            let f = Flags::read(&rest, &["--dry-run", "--direct", "--signal"], &[])?;
             let dry_run = f.has("--dry-run");
             if f.has("--direct") {
                 Ok(Cli::Direct { dry_run })
             } else {
-                ask(Request::Event { dry_run })
+                ask(Request::Event {
+                    dry_run,
+                    signal: f.has("--signal"),
+                })
             }
+        }
+        "rollback" => {
+            let f = Flags::read(&rest, &["--dry-run"], &[])?;
+            ask(Request::Rollback {
+                dry_run: f.has("--dry-run"),
+            })
         }
         "dev" => {
             let f = Flags::read(&rest, &["--dry-run"], &["--build"])?;
@@ -355,10 +367,38 @@ mod tests {
     #[test]
     fn every_command_parses() {
         assert_eq!(ask(&["status"]), Request::Status);
-        assert_eq!(ask(&["event"]), Request::Event { dry_run: false });
+        assert_eq!(
+            ask(&["event"]),
+            Request::Event {
+                dry_run: false,
+                signal: false,
+            }
+        );
         assert_eq!(
             ask(&["event", "--dry-run"]),
-            Request::Event { dry_run: true }
+            Request::Event {
+                dry_run: true,
+                signal: false,
+            }
+        );
+        assert_eq!(
+            ask(&["event", "--signal"]),
+            Request::Event {
+                dry_run: false,
+                signal: true,
+            }
+        );
+        assert_eq!(
+            ask(&["event", "--signal", "--dry-run"]),
+            Request::Event {
+                dry_run: true,
+                signal: true,
+            }
+        );
+        assert_eq!(ask(&["rollback"]), Request::Rollback { dry_run: false });
+        assert_eq!(
+            ask(&["rollback", "--dry-run"]),
+            Request::Rollback { dry_run: true }
         );
         assert_eq!(
             ask(&["dev"]),
@@ -462,6 +502,11 @@ mod tests {
         assert_eq!(
             parse(&args(&["event", "--dry-run", "--direct"])),
             Ok(Cli::Direct { dry_run: true })
+        );
+        // `iempc event` sends --signal; without a guard the event plan runs.
+        assert_eq!(
+            parse(&args(&["event", "--signal", "--direct"])),
+            Ok(Cli::Direct { dry_run: false })
         );
     }
 

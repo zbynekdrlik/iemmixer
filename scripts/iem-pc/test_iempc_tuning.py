@@ -210,7 +210,7 @@ class TuningInstallTests(TuningBase):
         code, docs, _ = self.run_main("tuning-install", "--sha", SHA)
         self.assertEqual(code, ip.PREEMPTED)
         self.assertEqual(self.pc.modules[-1][1], "finish")
-        self.assertEqual(self.pc.calls, [("iemmode.exe", ["event"], "ignore")])
+        self.assertEqual(self.pc.calls, [("iemmode.exe", ["event", "--signal"], "ignore")])
         self.assertEqual(docs[0], {"event": "ide event (flag file)", "action": "iempc event"})
 
 

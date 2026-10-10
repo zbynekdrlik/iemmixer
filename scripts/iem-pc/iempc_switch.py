@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import datetime as dt
 
+import iempc_rollback
 import iempc_soak
 import iempc_trace
 
@@ -109,6 +110,9 @@ def switch_refusal(reply) -> str | None:
     why = iempc_soak.settled_refusal(reply)
     if why:
         return why
+    if iempc_rollback.lifecycle(reply) in ("prod", "rolling_back"):
+        # S8 lane 3: past the cutover a plain `iemmode event` is the rollback.
+        return "the PC is past the cutover: its event leg would be the rollback (a switch test is the trial's)"
     bundle = iempc_soak.active_bundle(reply)
     if bundle is None:
         return "no active bundle (the guard's status names none)"

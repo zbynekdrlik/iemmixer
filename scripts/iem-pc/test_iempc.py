@@ -307,7 +307,7 @@ class PreemptionTests(Base):
         self.pc.replies[("dev", "--build", SHA)] = lambda: (self.flag(), (0, OK))[1]
         code, docs, _ = self.run_main("dev", "--build", SHA)
         self.assertEqual(code, ip.PREEMPTED)
-        self.assertEqual(self.pc.calls, [("iemmode.exe", ["dev", "--build", SHA], "abandon"), ("iemmode.exe", ["event"], "ignore")])
+        self.assertEqual(self.pc.calls, [("iemmode.exe", ["dev", "--build", SHA], "abandon"), ("iemmode.exe", ["event", "--signal"], "ignore")])
         self.assertEqual(docs[0], {"event": "ide event (flag file)", "action": "iempc event"})
         self.assertEqual(ip.current_entry(), 0)
 
@@ -320,7 +320,7 @@ class PreemptionTests(Base):
         code, docs, _ = self.run_main("rehearse-teardown")
         self.assertEqual(code, ip.PREEMPTED)
         self.assertEqual(docs[0]["event"], "ide event (flag file) after a failed step")
-        self.assertEqual(self.pc.calls[-1], ("iemmode.exe", ["event"], "ignore"))
+        self.assertEqual(self.pc.calls[-1], ("iemmode.exe", ["event", "--signal"], "ignore"))
 
     def test_a_failed_step_without_the_flag_does_not(self) -> None:
         def fail():
@@ -349,7 +349,7 @@ class PreemptionTests(Base):
 
     def test_a_failed_event_after_a_preemption_is_reported(self) -> None:
         self.pc.replies[("probe-task",)] = lambda: (self.flag(), (0, OK))[1]
-        self.pc.replies[("event",)] = (1, OK)
+        self.pc.replies[("event", "--signal")] = (1, OK)
         code, _, err = self.run_main("probe-task")
         self.assertEqual(code, 1)
         self.assertIn("alarm the owner now", err)
@@ -407,7 +407,7 @@ class LockTests(Base):
             self.assertEqual(self.run_main("event")[0], 0)
         ip.EVENT_NOW.unlink()  # "event skončil"
         self.assertEqual(self.run_main("probe-task")[0], 0)
-        self.assertEqual([c[1] for c in self.pc.calls], [["status"], ["event"], ["probe-task"]])
+        self.assertEqual([c[1] for c in self.pc.calls], [["status"], ["event", "--signal"], ["probe-task"]])
 
 
 class PatchTests(Base):

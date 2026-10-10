@@ -14,6 +14,7 @@ use super::hil::{
     inject_fault, inject_park, inject_seh, job_begin, job_end, report, runner_stop, test_signal,
 };
 use super::reply::{outcome, switch_text};
+use super::rollback::{event, rollback};
 use super::runner::{failure, run_step};
 use super::{
     Generation, Guard, Outcome, View, alarm_test, install_bundle, mode_name, run_switch,
@@ -39,11 +40,20 @@ pub struct Job {
 fn stale(req: &Request, seen: Generation, v: &View) -> Option<Reply> {
     match req {
         Request::Status | Request::Subscribe => None,
-        Request::Dev { .. } | Request::Live { .. } | Request::Cutover { .. } => {
+        Request::Dev { .. }
+        | Request::Live { .. }
+        | Request::Cutover { .. }
+        | Request::Rollback { .. } => {
             (seen.fence != v.fence).then(|| v.reply(false, &fenced(seen, v)))
         }
         _ if seen.epoch == v.epoch => None,
-        Request::Event { dry_run: false } => Some(v.event_reply("a switch ran meanwhile")),
+        // In prod the button is the rollback: no switch that ran meanwhile
+        // did it (S8 lane 3).
+        Request::Event {
+            dry_run: false,
+            signal: false,
+        } if v.rolls_back => None,
+        Request::Event { dry_run: false, .. } => Some(v.event_reply("a switch ran meanwhile")),
         _ => Some(v.reply(false, while_switching(req))),
     }
 }
@@ -65,11 +75,11 @@ fn fenced(seen: Generation, v: &View) -> String {
 
 /// A dev or live entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Entry {
-    to: Mode,
-    build: Option<String>,
-    trial: bool,
-    dry_run: bool,
+pub(super) struct Entry {
+    pub(super) to: Mode,
+    pub(super) build: Option<String>,
+    pub(super) trial: bool,
+    pub(super) dry_run: bool,
 }
 
 /// Handles one request on the daemon thread.
@@ -85,8 +95,9 @@ pub fn handle(pc: &mut dyn Pc, g: &mut Guard, req: Request, seen: Generation) ->
     let (ok, detail) = match req {
         Request::Status => (true, status_text(g)),
         Request::Subscribe => (true, "subscriptions are served by the pipe".to_owned()),
-        Request::Event { dry_run: true } => dry_event(pc),
-        Request::Event { dry_run: false } => event_now(pc, g),
+        // What it means is the lifecycle's (S8 lane 3: in prod the button
+        // rolls back, "ide event" never does).
+        Request::Event { dry_run, signal } => event(pc, g, dry_run, signal),
         Request::Dev { build, dry_run } => entry(
             pc,
             g,
@@ -112,6 +123,7 @@ pub fn handle(pc: &mut dyn Pc, g: &mut Guard, req: Request, seen: Generation) ->
             },
         ),
         Request::Cutover { build, dry_run } => cutover(pc, g, &build, dry_run),
+        Request::Rollback { dry_run } => rollback(pc, g, dry_run),
         Request::Install { zip } => install_bundle(g, Path::new(&zip)),
         Request::Activate { sha } => activate(pc, g, &sha),
         Request::TestSignal {
@@ -186,7 +198,7 @@ pub(super) fn event_now(pc: &mut dyn Pc, g: &mut Guard) -> (bool, String) {
 /// build becomes the active bundle, never the pin, and the lifecycle's
 /// change (a maintenance build, the pin it ends on) holds only once the
 /// entry is in.
-fn entry(pc: &mut dyn Pc, g: &mut Guard, e: Entry) -> (bool, String) {
+pub(super) fn entry(pc: &mut dyn Pc, g: &mut Guard, e: Entry) -> (bool, String) {
     let ask = lifecycle::Ask {
         to: e.to,
         build: e.build.as_deref(),
@@ -229,7 +241,7 @@ fn dry_entry(
     note: Option<String>,
 ) -> (bool, String) {
     // `trial` decides only the precheck (below), never a step of the plan.
-    let steps = plan(e.to, &pc.facts());
+    let steps = lifecycle::plan(&g.state.lifecycle, e.to, &pc.facts());
     let bundle = runs
         .or_else(|| g.state.active_bundle().map(str::to_owned))
         .unwrap_or_else(|| "none".to_owned());

@@ -247,7 +247,7 @@ class SwitchTestTests(SwitchBase):
         self.pc.replies[("status",)] = lambda: (self.flag(), (0, json.dumps(READY)))[1]
         code, docs, _ = self.switch()
         self.assertEqual(code, ip.PREEMPTED)
-        self.assertEqual(self.calls(), [(["status"], "abandon"), (["event"], "ignore")])
+        self.assertEqual(self.calls(), [(["status"], "abandon"), (["event", "--signal"], "ignore")])
         self.assertEqual(docs[0], {"event": "ide event (flag file)", "action": "iempc event"})
         self.assertEqual(self.flag_text(), OWNER_FLAG)
 
@@ -433,7 +433,7 @@ class FlagTests(SwitchBase):
         code, docs, err = self.switch()
         self.assertEqual(code, ip.PREEMPTED, err)
         # No `iemmode dev`: the event path's `iemmode event` follows the event leg.
-        self.assertEqual(self.calls(), [(["status"], "abandon"), (["event"], "ignore"), (["event"], "ignore")])
+        self.assertEqual(self.calls(), [(["status"], "abandon"), (["event"], "ignore"), (["event", "--signal"], "ignore")])
         self.assertEqual(docs[0], {"switch_test": {
             "conclusion": "cancelled", "summary": "cancelled: no dev leg; event-leg silence 25050 ms, handover "
                                                   "34000 ms, dev-leg silence none",
@@ -450,7 +450,7 @@ class FlagTests(SwitchBase):
         code, docs, _ = self.switch()
         self.assertEqual(code, ip.PREEMPTED)
         self.assertEqual(self.calls(), [(["status"], "abandon"), (["event"], "ignore"), (["status"], "ignore"),
-                                        (["event"], "ignore")])
+                                        (["event", "--signal"], "ignore")])
         out = self.result(docs)
         self.assertEqual((out["event_leg"], out["dev_leg"], out["no_dev_leg"]), (leg(0, EVENT, said("event")), None, sw.FLAG_BEFORE))
 
@@ -464,7 +464,7 @@ class FlagTests(SwitchBase):
                                               answer("event", EVENT))
         code, docs, _ = self.switch()
         self.assertEqual(code, ip.PREEMPTED)
-        self.assertEqual(self.calls(), [(["status"], "abandon"), (["event"], "ignore"), (["event"], "ignore")])
+        self.assertEqual(self.calls(), [(["status"], "abandon"), (["event"], "ignore"), (["event", "--signal"], "ignore")])
         out = self.result(docs)
         self.assertEqual((out["event_leg"], out["dev_leg"], out["no_dev_leg"], out["first_failure"]),
                          (leg(1, kept, said("dev")), None, sw.FLAG_FAILED, "event leg: outcome kept_serving, ended in dev"))
@@ -487,7 +487,7 @@ class FlagTests(SwitchBase):
         code, docs, _ = self.switch()
         self.assertEqual(code, ip.PREEMPTED)
         self.assertEqual(self.calls(), [(["status"], "abandon"), (["event"], "ignore"), (["dev"], "abandon"),
-                                        (["event"], "ignore")])
+                                        (["event", "--signal"], "ignore")])
         out = self.result(docs)
         self.assertEqual((out["conclusion"], out["event_leg"], out["dev_leg"], out["no_dev_leg"]),
                          ("cancelled", leg(0, EVENT, said("event")), None, sw.FLAG_DURING))
@@ -662,7 +662,7 @@ class TraceRecordTests(SwitchBase):
         self.pc.texts["Stop-IemTraceSessions"] = lambda: (self.flag(), stopped)[1]
         code, docs, _ = self.switch()
         self.assertEqual(code, ip.PREEMPTED)
-        self.assertEqual(self.calls(), [(["status"], "abandon"), (["event"], "ignore")])
+        self.assertEqual(self.calls(), [(["status"], "abandon"), (["event", "--signal"], "ignore")])
         self.assertFalse(any("switch_test" in d for d in docs))
         self.assertEqual(self.flag_text(), OWNER_FLAG)
 

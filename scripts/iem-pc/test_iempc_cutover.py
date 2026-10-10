@@ -238,7 +238,7 @@ class FailureTests(CutoverBase):
         code, docs, err = self.run_main("cutover", "--sha", SHA)
         self.assertEqual(code, ip.PREEMPTED)
         self.assertEqual([e for _, e in self.scripts(cut.INSTALL)], ["finish"])
-        self.assertEqual(self.iemmode_calls(), [(list(DRY), "abandon"), (["event"], "ignore")])
+        self.assertEqual(self.iemmode_calls(), [(list(DRY), "abandon"), (["event", "--signal"], "ignore")])
 
     def test_a_new_flag_during_the_guard_s_cutover_runs_the_event_path(self) -> None:
         self.fetched()
@@ -250,7 +250,7 @@ class FailureTests(CutoverBase):
         self.pc.replies[GO] = flag_then_reply
         code, docs, err = self.run_main("cutover", "--sha", SHA)
         self.assertEqual(code, ip.PREEMPTED)
-        self.assertEqual(self.iemmode_calls(), [(list(DRY), "abandon"), (list(GO), "abandon"), (["event"], "ignore")])
+        self.assertEqual(self.iemmode_calls(), [(list(DRY), "abandon"), (list(GO), "abandon"), (["event", "--signal"], "ignore")])
         self.assertEqual(docs[0], {"event": "ide event (flag file)", "action": "iempc event"})
 
 

@@ -238,7 +238,10 @@ fn ide_event_during_the_start_checks_fences_a_dev_queued_before_it() {
     let routed = std::thread::spawn(move || {
         await_running(&shared);
         let during = shared.route(&dev());
-        let event = shared.route(&Request::Event { dry_run: false });
+        let event = shared.route(&Request::Event {
+            dry_run: false,
+            signal: false,
+        });
         let answer = shared.await_end("already switching to event", Duration::from_secs(10));
         (during, event, answer)
     });
@@ -268,7 +271,10 @@ fn ide_event_during_the_start_checks_fences_a_dev_queued_before_it() {
     let mut queue = [
         dev(),
         Request::AlarmAck { id: 99 },
-        Request::Event { dry_run: false },
+        Request::Event {
+            dry_run: false,
+            signal: false,
+        },
     ]
     .map(|req| match g.shared.route(&req) {
         Route::Queue(seen) => (req, seen),

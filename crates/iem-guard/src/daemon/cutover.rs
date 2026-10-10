@@ -180,7 +180,7 @@ fn import(pc: &mut dyn Pc, g: &mut Guard, build: &str) -> Result<(), String> {
 
 /// The server config's `pin_changes` set to `open` (`cutover::set_pins`:
 /// that value only, so closing gives the bytes back), read back.
-fn set_pins(pc: &mut dyn Pc, open: bool) -> Result<(), String> {
+pub(super) fn set_pins(pc: &mut dyn Pc, open: bool) -> Result<(), String> {
     let config = pc.server_config().map_err(text)?;
     if let Some(edited) = cutover::set_pins(&config, open)? {
         pc.write_server_config(&edited).map_err(text)?;
@@ -211,9 +211,9 @@ fn restart_server(pc: &mut dyn Pc, g: &mut Guard) -> Result<(), String> {
 }
 
 /// Saves the state and reads it back from the state file (the guard's in
-/// memory when it has no files): the cutover's record and the lifecycle
-/// must be what the guard holds.
-fn save_checked(g: &mut Guard) -> Result<(), String> {
+/// memory when it has no files): the cutover's and the rollback's records
+/// and the lifecycle must be what the guard holds.
+pub(super) fn save_checked(g: &mut Guard) -> Result<(), String> {
     g.save();
     let saved = match g.root() {
         Some(root) => {
@@ -229,6 +229,12 @@ fn save_checked(g: &mut Guard) -> Result<(), String> {
         return Err(format!(
             "the guard state reads back with the record {:?} and the lifecycle {:?}",
             saved.cutover, saved.lifecycle
+        ));
+    }
+    if saved.rollback != g.state.rollback {
+        return Err(format!(
+            "the guard state reads back with the rollback record {:?}",
+            saved.rollback
         ));
     }
     Ok(())

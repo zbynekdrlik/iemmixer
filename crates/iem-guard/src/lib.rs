@@ -16,6 +16,9 @@
 //!   boot rule, the entry gates, the pin and the crash rules (S8);
 //! - [`cutover`]: the cutover's refusals, steps and undo, the cutover
 //!   task's request and the server config's `pin_changes` edit (S8);
+//! - [`rollback`]: the rollback's steps and record, the export's and the
+//!   kept original's names and moves, and what `iemmode event` means in
+//!   each lifecycle (S8);
 //! - [`switch_log`]: the last switch's record, its steps timed, and its
 //!   in-ear silence (S7);
 //! - [`alarms`]: the kept alarms;
@@ -67,6 +70,7 @@ pub mod pc;
 pub mod pipe;
 pub mod plan;
 pub mod proto;
+pub mod rollback;
 pub mod site;
 pub mod state;
 pub mod switch_log;

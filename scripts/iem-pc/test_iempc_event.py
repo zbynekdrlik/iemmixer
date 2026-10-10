@@ -39,12 +39,12 @@ class FlagTests(Base):
         self.flag()
         code, docs, _ = self.run_main("event")
         self.assertEqual(code, 0)
-        self.assertEqual(self.pc.calls, [("iemmode.exe", ["event"], "ignore")])
+        self.assertEqual(self.pc.calls, [("iemmode.exe", ["event", "--signal"], "ignore")])
         self.assertNotIn("flag", docs[0])
 
     def test_event_writes_the_flag_before_anything_else(self) -> None:
         seen = []
-        self.pc.replies[("event",)] = lambda: (seen.append(ip.event_now()), (0, OK))[1]
+        self.pc.replies[("event", "--signal")] = lambda: (seen.append(ip.event_now()), (0, OK))[1]
         code, docs, _ = self.run_main("event")
         self.assertEqual((code, seen, docs[0]), (0, [True], {"flag": str(ip.EVENT_NOW), "written": True}))
         self.assertRegex(ip.EVENT_NOW.read_text(encoding="utf-8"), r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d\d:\d\d\n$")
@@ -64,7 +64,7 @@ class FlagTests(Base):
         self.assertEqual({k: docs[0][k] for k in ("flag", "written")}, {"flag": str(ip.EVENT_NOW), "written": False})
         self.assertIn("File exists", docs[0]["error"])
         self.assertEqual(self.spike_log.read_text(encoding="utf-8"), "preempt\n")
-        self.assertEqual(self.pc.calls, [("iemmode.exe", ["event"], "ignore")])
+        self.assertEqual(self.pc.calls, [("iemmode.exe", ["event", "--signal"], "ignore")])
         self.assertIn("was not written", err)
         self.assertNotIn("alarm the owner", err)
 
@@ -73,7 +73,7 @@ class EventTests(Base):
     def test_an_open_spike_window_is_preempted_before_iemmode(self) -> None:
         self.open_window()
         seen = []
-        self.pc.replies[("event",)] = lambda: (seen.append(self.spike_log.is_file()), (0, OK))[1]
+        self.pc.replies[("event", "--signal")] = lambda: (seen.append(self.spike_log.is_file()), (0, OK))[1]
         code, docs, _ = self.run_main("event")
         self.assertEqual((code, seen, self.spike_log.read_text(encoding="utf-8")), (0, [True], "preempt\n"))
         self.assertEqual(docs[1], {"spike_preempt": {"ok": True, "output": "preempted\n"}})
@@ -92,7 +92,7 @@ class EventTests(Base):
         code, docs, err = self.run_main("event")
         self.assertEqual((code, docs[1]["spike_preempt"]["ok"], "running" in docs[1]["spike_preempt"]), (0, False, False))
         self.assertIn("exit 3", docs[1]["spike_preempt"]["error"])
-        self.assertEqual(self.pc.calls, [("iemmode.exe", ["event"], "ignore")])
+        self.assertEqual(self.pc.calls, [("iemmode.exe", ["event", "--signal"], "ignore")])
         self.assertIn("spike preempt", err)
 
     # F2 round 3, m2 and decision 2: after a FAILED spike preempt the window is closed
@@ -102,7 +102,7 @@ class EventTests(Base):
         self.open_window()
         self.patch(SPIKE=self.write_spike(3))
         seen: list[dict] = []
-        self.pc.replies[("event",)] = lambda: (seen.append(json.loads(ip.SPIKE_STATE.read_text(encoding="utf-8"))), (0, OK))[1]
+        self.pc.replies[("event", "--signal")] = lambda: (seen.append(json.loads(ip.SPIKE_STATE.read_text(encoding="utf-8"))), (0, OK))[1]
         code, docs, err = self.run_main("event")
         self.assertEqual(code, 0, err)
         self.assertEqual(len(seen), 1)
@@ -129,7 +129,7 @@ class EventTests(Base):
         # waits for that watch, so iemmode event never runs next to its bring-back.
         self.open_window(card="reaper", closed=True, settling={"step": "to-dev", "until": time.time() + 60})
         seen = []
-        self.pc.replies[("event",)] = lambda: (seen.append(self.spike_log.is_file()), (0, OK))[1]
+        self.pc.replies[("event", "--signal")] = lambda: (seen.append(self.spike_log.is_file()), (0, OK))[1]
         code, docs, _ = self.run_main("event")
         self.assertEqual((code, seen, self.spike_log.read_text(encoding="utf-8")), (0, [True], "preempt\n"))
         # A watch past its bound (its process died) is no window to pre-empt.
@@ -170,7 +170,7 @@ class EventTests(Base):
     def test_the_event_path_has_one_budget_that_fits_a_bash_call(self) -> None:
         self.assertLessEqual(ip.EVENT_BUDGET_S, 540)  # a Bash call ends at 10 min; the plan's waits stay within 9
         self.assertLessEqual(ip.SPIKE_SHARE_S + ip.SWITCH_MIN_S, ip.EVENT_BUDGET_S)
-        self.pc.replies[("event",)] = (4, OK)
+        self.pc.replies[("event", "--signal")] = (4, OK)
         self.assertEqual(self.run_main("event")[0], 0)
         first, direct = self.pc.timeouts
         self.assertLessEqual(first, ip.EVENT_BUDGET_S)
@@ -181,7 +181,7 @@ class EventTests(Base):
         self.open_window()
         self.patch(SPIKE=self.write_spike(0, delay=0.4))
         self.assertEqual(self.run_main("event")[0], 0)
-        self.assertEqual(self.pc.calls, [("iemmode.exe", ["event"], "ignore")])
+        self.assertEqual(self.pc.calls, [("iemmode.exe", ["event", "--signal"], "ignore")])
         self.assertLessEqual(self.pc.timeouts[0], ip.EVENT_BUDGET_S - 0.4)
         self.assertGreater(self.pc.timeouts[0], ip.EVENT_BUDGET_S - 10)
 
@@ -205,37 +205,37 @@ class EventTests(Base):
         # this process's own speed (a loaded run once ate the margin).
         clock = FakeClock()
         self.patch(EVENT_BUDGET_S=1.0, SWITCH_MIN_S=0.5)
-        self.pc.replies[("event",)] = lambda: (clock.sleep(0.625), (4, OK))[1]
+        self.pc.replies[("event", "--signal")] = lambda: (clock.sleep(0.625), (4, OK))[1]
         with self.patched(event_clock=clock.now):
             code, _, err = self.run_main("event")
-        self.assertEqual((code, [c[1] for c in self.pc.calls]), (1, [["event"]]))
+        self.assertEqual((code, [c[1] for c in self.pc.calls]), (1, [["event", "--signal"]]))
         self.assertIn("less than the 0.5 s an iemmode call gets: run 'iempc event' again", err)
         self.assertIn("alarm the owner now", err)
         self.pc.calls.clear()
         # Exactly the minimum left is enough: 1.0 - 0.5 = 0.5.
-        self.pc.replies[("event",)] = lambda: (clock.sleep(0.5), (4, OK))[1]
+        self.pc.replies[("event", "--signal")] = lambda: (clock.sleep(0.5), (4, OK))[1]
         with self.patched(event_clock=clock.now):
             self.assertEqual(self.run_main("event")[0], 0)
-        self.assertEqual([c[1] for c in self.pc.calls], [["event"], ["event", "--direct"]])
+        self.assertEqual([c[1] for c in self.pc.calls], [["event", "--signal"], ["event", "--signal", "--direct"]])
 
     def test_an_unreachable_guard_falls_back_to_direct(self) -> None:
-        self.pc.replies[("event",)] = (4, json.dumps({"error": "guard unreachable"}))
+        self.pc.replies[("event", "--signal")] = (4, json.dumps({"error": "guard unreachable"}))
         code, docs, _ = self.run_main("event")
         self.assertEqual(code, 0)
-        self.assertEqual(self.pc.calls, [("iemmode.exe", ["event"], "ignore"), ("iemmode.exe", ["event", "--direct"], "ignore")])
-        self.assertEqual([d.get("iemmode") for d in docs[1:]], [["event"], ["event", "--direct"]])
+        self.assertEqual(self.pc.calls, [("iemmode.exe", ["event", "--signal"], "ignore"), ("iemmode.exe", ["event", "--signal", "--direct"], "ignore")])
+        self.assertEqual([d.get("iemmode") for d in docs[1:]], [["event", "--signal"], ["event", "--signal", "--direct"]])
 
     def test_only_exit_4_falls_back(self) -> None:
         for exit_code in (1, 2, 3, 5, 70):
             self.pc.calls.clear()
-            self.pc.replies[("event",)] = (exit_code, OK)
+            self.pc.replies[("event", "--signal")] = (exit_code, OK)
             code, _, err = self.run_main("event")
-            self.assertEqual((code, self.pc.calls), (exit_code, [("iemmode.exe", ["event"], "ignore")]), exit_code)
+            self.assertEqual((code, self.pc.calls), (exit_code, [("iemmode.exe", ["event", "--signal"], "ignore")]), exit_code)
             self.assertIn("the event path did not complete", err)
 
     def test_a_failed_direct_event_is_an_owner_alarm(self) -> None:
-        self.pc.replies[("event",)] = (4, OK)
-        self.pc.replies[("event", "--direct")] = (1, json.dumps({"error": "a guard runs; use the pipe"}))
+        self.pc.replies[("event", "--signal")] = (4, OK)
+        self.pc.replies[("event", "--signal", "--direct")] = (1, json.dumps({"error": "a guard runs; use the pipe"}))
         code, _, err = self.run_main("event")
         self.assertEqual((code, len(self.pc.calls)), (1, 2))
         self.assertIn("alarm the owner now", err)
@@ -244,7 +244,7 @@ class EventTests(Base):
         def down():
             raise ip.StepError("ssh failed (exit 255): no route")
 
-        self.pc.replies[("event",)] = down
+        self.pc.replies[("event", "--signal")] = down
         code, _, err = self.run_main("event")
         self.assertEqual(code, 1)
         self.assertIn("no route", err)
@@ -252,19 +252,19 @@ class EventTests(Base):
 
     def test_a_dry_run_writes_no_flag_and_preempts_nothing(self) -> None:
         self.open_window()
-        self.pc.replies[("event", "--dry-run")] = (4, OK)
+        self.pc.replies[("event", "--dry-run", "--signal")] = (4, OK)
         code, docs, err = self.run_main("event", "--dry-run")
         self.assertEqual((code, ip.event_now(), self.spike_log.exists()), (0, False, False))
         self.assertEqual(docs[0], {"spike_window": "open", "plan": "spike_window.py preempt"})
-        self.assertEqual(self.pc.calls, [("iemmode.exe", ["event", "--dry-run"], "ignore"),
-                                         ("iemmode.exe", ["event", "--dry-run", "--direct"], "ignore")])
+        self.assertEqual(self.pc.calls, [("iemmode.exe", ["event", "--dry-run", "--signal"], "ignore"),
+                                         ("iemmode.exe", ["event", "--dry-run", "--signal", "--direct"], "ignore")])
         self.assertNotIn("alarm the owner", err)
 
     def test_a_failed_dry_run_is_no_owner_alarm(self) -> None:
         def down():
             raise ip.StepError("ssh failed (exit 255): no route")
 
-        self.pc.replies[("event", "--dry-run")] = down
+        self.pc.replies[("event", "--dry-run", "--signal")] = down
         code, _, err = self.run_main("event", "--dry-run")
         self.assertEqual((code, ip.event_now()), (1, False))
         self.assertIn("no route", err)
@@ -282,10 +282,10 @@ class EventVerdictTests(Base):
                                       "does not run",
                             "last_switch": {"from": "dev", "to": "event", "ended_in": "event",
                                             "outcome": "needs_owner"}})
-        self.pc.replies[("event",)] = (1, reply)
+        self.pc.replies[("event", "--signal")] = (1, reply)
         code, docs, err = self.run_main("event")
-        self.assertEqual((code, self.pc.calls), (1, [("iemmode.exe", ["event"], "ignore")]))
-        self.assertEqual(docs[-1]["iemmode"], ["event"])
+        self.assertEqual((code, self.pc.calls), (1, [("iemmode.exe", ["event", "--signal"], "ignore")]))
+        self.assertEqual(docs[-1]["iemmode"], ["event", "--signal"])
         self.assertIn("alarm the owner now", err)
 
 

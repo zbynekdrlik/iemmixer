@@ -569,7 +569,14 @@ mod tests {
             });
         });
         let t = Instant::now();
-        let reply = call(&s.name, &Request::Event { dry_run: false }).unwrap();
+        let reply = call(
+            &s.name,
+            &Request::Event {
+                dry_run: false,
+                signal: false,
+            },
+        )
+        .unwrap();
         ender.join().unwrap();
         assert!(t.elapsed() >= Duration::from_millis(200));
         assert!(reply.ok, "{reply:?}");
