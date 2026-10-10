@@ -93,6 +93,26 @@ fn the_synthetic_site_parses_with_its_defaults() {
     .map(str::to_owned)
     .to_vec();
     assert_eq!(with.problems(), Vec::<String>::new());
+    // No shadow import unless pc.toml names one (S8 lane 4); one that runs
+    // `iem-migrate shadow` reads as good, its history under the root.
+    assert!(s.pc.shadow.is_empty(), "an older pc.toml has none");
+    with.shadow = [
+        "{bundle}\\iem-migrate.exe",
+        "shadow",
+        "--rpp",
+        "{project}",
+        "--state-dir",
+        "{root}\\engine",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    assert_eq!(with.problems(), Vec::<String>::new());
+    assert_eq!(
+        s.shadow_history(),
+        PathBuf::from(r"C:\IEM\iemmixer")
+            .join("shadow")
+            .join("history.jsonl")
+    );
 }
 
 #[test]
@@ -480,6 +500,20 @@ fn every_pc_toml_problem_is_named() {
                 ..good.clone()
             },
             "rollback_export must name {project} and {out} (iem-migrate export --rpp, --out)",
+        ),
+        (
+            PcToml {
+                shadow: vec!["{bundle}\\iem-migrate.exe".into(), "import".into()],
+                ..good.clone()
+            },
+            "shadow must be `<iem-migrate> shadow …` (report-only, never import)",
+        ),
+        (
+            PcToml {
+                shadow: vec!["shadow".into()],
+                ..good.clone()
+            },
+            "shadow must be `<iem-migrate> shadow …` (report-only, never import)",
         ),
         (
             PcToml {

@@ -19,6 +19,8 @@ pub enum Call {
     Tuning,
     TuningDrift,
     PrefCheck,
+    /// The report-only shadow import of an entry from event (S8 lane 4).
+    Shadow,
     Data,
     EngineStart,
     EngineReady,
@@ -73,6 +75,7 @@ impl Call {
                 | Call::AppStop
                 | Call::Tuning
                 | Call::PrefCheck
+                | Call::Shadow
                 | Call::Data
                 | Call::EngineStart
                 | Call::EngineArm
@@ -212,6 +215,9 @@ pub struct FakePc {
     /// REAPER cannot open the export: its handover's facts name no track
     /// while the project's path holds it.
     pub export_unloadable: bool,
+    /// `pc.toml` names a shadow command (S8 lane 4; default: none, so no
+    /// entry plans the step). A read of the settings: not a recorded call.
+    pub shadows: bool,
     /// Every call that takes a token returns `Preempted` when its token is
     /// pre-empted as it begins, as `WinPc`'s waits do within 1 s.
     pub waits_see_preemption: bool,
@@ -311,6 +317,7 @@ impl FakePc {
                 ..Files::default()
             },
             export_unloadable: false,
+            shadows: false,
             waits_see_preemption: false,
             preempt_at: None,
             calls: Vec::new(),
@@ -555,6 +562,20 @@ impl Pc for FakePc {
     fn data(&mut self, mode: Mode, c: &Cancel) -> R<String> {
         self.enter(Call::Data, Some(c))?;
         Ok(format!("{mode:?} data refreshed"))
+    }
+
+    fn shadows(&self) -> bool {
+        self.shadows
+    }
+
+    /// A wait: a blocked or failing script plays as for any call; else the
+    /// line is taken as recorded.
+    fn shadow(&mut self, to: Mode, c: &Cancel) -> R<String> {
+        self.enter(Call::Shadow, Some(c))?;
+        Ok(format!(
+            "shadow import ({}): import writes, 0 site and 0 state difference(s)",
+            crate::shadow::entry(to)
+        ))
     }
 
     fn engine_start(&mut self, hold: bool, hil: bool) -> R<u32> {

@@ -480,6 +480,8 @@ mod rollback_tests;
 #[cfg(test)]
 mod runner_tests;
 #[cfg(test)]
+mod shadow_tests;
+#[cfg(test)]
 mod start_tests;
 #[cfg(test)]
 mod status_tests;

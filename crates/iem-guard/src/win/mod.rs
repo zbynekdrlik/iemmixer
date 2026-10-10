@@ -22,6 +22,7 @@ mod engine;
 mod procs;
 mod reaper;
 mod rollback;
+mod shadow;
 mod tasks;
 mod web;
 
@@ -207,6 +208,15 @@ impl Pc for WinPc {
     /// event" stops the refresh between two commands and after the last.
     fn data(&mut self, mode: Mode, c: &Cancel) -> R<String> {
         tasks::data(self, mode, c)
+    }
+
+    fn shadows(&self) -> bool {
+        !self.s.pc.shadow.is_empty()
+    }
+
+    /// A wait: "ide event" ends it at once; it never fails otherwise.
+    fn shadow(&mut self, to: Mode, c: &Cancel) -> R<String> {
+        shadow::shadow(self, to, c)
     }
 
     fn engine_start(&mut self, hold: bool, hil: bool) -> R<u32> {
