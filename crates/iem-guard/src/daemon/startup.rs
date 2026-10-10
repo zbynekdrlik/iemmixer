@@ -74,6 +74,13 @@ pub fn start(pc: &mut dyn Pc, g: &mut Guard, boot: u64) -> Option<Outcome> {
     } = lifecycle::start(&g.state.lifecycle, reset, rebooted, |sha| {
         g.state.bundles.get(sha)
     });
+    // A pin the boot's live entry would end maintenance on is logged once
+    // the PC is live, as the entry does.
+    let (note, live_note) = if matches!(go, Start::Live(_)) {
+        (None, note)
+    } else {
+        (note, None)
+    };
     if let Some(n) = note {
         g.info(n);
     }
@@ -113,6 +120,9 @@ pub fn start(pc: &mut dyn Pc, g: &mut Guard, boot: u64) -> Option<Outcome> {
             let out = switch(pc, g, Mode::Event, Mode::Live, false);
             if g.state.mode == Mode::Live {
                 g.state.lifecycle = next;
+                if let Some(n) = live_note {
+                    g.info(n);
+                }
                 g.save();
             }
             Some(out)

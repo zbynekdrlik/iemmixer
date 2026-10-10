@@ -286,35 +286,59 @@ pub enum Fallback {
     /// Maintenance: iemmixer stops and live runs on this pin; the session's
     /// build never becomes the pin.
     Pin(String),
+    /// Maintenance whose pin may not go live (`pin_refusal`, why): back to
+    /// REAPER; the session's build is dropped.
+    Reaper(String),
     /// Prod live: the engine of the previous pin, which is the pin from now
     /// on (no previous pin is left).
     Previous(String),
-    /// Prod live with no previous pin (none, or it looped too): no respawn,
-    /// an alarm that names the rollback; this pin stays.
+    /// Prod live with no previous pin it may go to (none, it looped too, or
+    /// it may not go live): no respawn, an alarm that names the rollback;
+    /// the pin stays. The text says on which pin and why.
     Down(String),
 }
 
 /// The crash rules (design §3.4; program spec §4.1) and the lifecycle after
-/// them.
-pub fn crash_loop(lc: &Lifecycle, mode: Mode) -> (Fallback, Lifecycle) {
+/// them. A pin the fallback would go live on is checked as at the boot
+/// (`pin_refusal`, G8).
+pub fn crash_loop<'r>(
+    lc: &Lifecycle,
+    mode: Mode,
+    record: impl Fn(&str) -> Option<&'r Record>,
+) -> (Fallback, Lifecycle) {
     match (lc, mode) {
-        (Lifecycle::Prod(p), Mode::Dev) => (
-            Fallback::Pin(p.pin.clone()),
-            Lifecycle::Prod(Prod {
+        (Lifecycle::Prod(p), Mode::Dev) => {
+            let next = Lifecycle::Prod(Prod {
                 maintenance: None,
                 ..p.clone()
-            }),
-        ),
-        (Lifecycle::Prod(p), Mode::Live) => match &p.previous {
-            Some(previous) => (
-                Fallback::Previous(previous.clone()),
-                Lifecycle::Prod(Prod {
-                    pin: previous.clone(),
-                    previous: None,
-                    ..p.clone()
-                }),
+            });
+            match pin_refusal(&p.pin, &record) {
+                None => (Fallback::Pin(p.pin.clone()), next),
+                Some(why) => (Fallback::Reaper(why), next),
+            }
+        }
+        (Lifecycle::Prod(p), Mode::Live) => match p.previous.as_deref() {
+            None => (
+                Fallback::Down(format!("on the pin {}, and no previous pin is left", p.pin)),
+                lc.clone(),
             ),
-            None => (Fallback::Down(p.pin.clone()), lc.clone()),
+            Some(previous) => match pin_refusal(previous, &record) {
+                None => (
+                    Fallback::Previous(previous.to_owned()),
+                    Lifecycle::Prod(Prod {
+                        pin: previous.to_owned(),
+                        previous: None,
+                        ..p.clone()
+                    }),
+                ),
+                Some(why) => (
+                    Fallback::Down(format!(
+                        "on the pin {}, and the previous pin may not go live ({why})",
+                        p.pin
+                    )),
+                    lc.clone(),
+                ),
+            },
         },
         _ => (Fallback::Event, lc.clone()),
     }

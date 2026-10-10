@@ -620,6 +620,10 @@ fn a_crash_loop_in_prod_falls_back_to_the_previous_pin() {
     let prod = |previous: Option<&str>| prod_on(previous, None);
     let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Live));
     g.state.lifecycle = prod(Some(OTHER));
+    // The previous pin is a green main build (G8, `lifecycle::crash_loop`).
+    g.state
+        .bundles
+        .insert(OTHER.into(), record(OTHER, "main", Hil::Green));
     pc.exited = vec![(Kid::Engine, Some(70)); 3];
     tick(&mut pc, &mut g, Instant::now());
     assert_eq!(g.state.mode, Mode::Live);

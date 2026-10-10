@@ -427,17 +427,19 @@ fn in_prod_there_are_no_trials_and_in_a_rollback_no_entries() {
 
 #[test]
 fn a_crash_loop_in_every_lifecycle_and_mode() {
+    let b = installed();
+    let at = |lc: &Lifecycle, mode| crash_loop(lc, mode, |sha| b.get(sha));
     let modes = [Mode::Event, Mode::Dev, Mode::Live];
     for lc in [Lifecycle::Trial, Lifecycle::RollingBack] {
         for mode in modes {
-            assert_eq!(crash_loop(&lc, mode), (Fallback::Event, lc.clone()));
+            assert_eq!(at(&lc, mode), (Fallback::Event, lc.clone()));
         }
     }
     let lc = Lifecycle::Prod(prod(Some(PREV), Some(NEW)));
-    assert_eq!(crash_loop(&lc, Mode::Event), (Fallback::Event, lc.clone()));
+    assert_eq!(at(&lc, Mode::Event), (Fallback::Event, lc.clone()));
     // Maintenance: live on the pin, the session's build dropped.
     assert_eq!(
-        crash_loop(&lc, Mode::Dev),
+        at(&lc, Mode::Dev),
         (
             Fallback::Pin(PIN.into()),
             Lifecycle::Prod(prod(Some(PREV), None))
@@ -445,7 +447,7 @@ fn a_crash_loop_in_every_lifecycle_and_mode() {
     );
     // Prod live: the previous pin, which is the pin from now on.
     let lc = Lifecycle::Prod(prod(Some(PREV), None));
-    let (fallback, next) = crash_loop(&lc, Mode::Live);
+    let (fallback, next) = at(&lc, Mode::Live);
     assert_eq!(fallback, Fallback::Previous(PREV.into()));
     assert_eq!(
         next,
@@ -456,8 +458,48 @@ fn a_crash_loop_in_every_lifecycle_and_mode() {
     );
     // It loops too: down, the pin stays.
     assert_eq!(
-        crash_loop(&next, Mode::Live),
-        (Fallback::Down(PREV.into()), next.clone())
+        at(&next, Mode::Live),
+        (
+            Fallback::Down(format!("on the pin {PREV}, and no previous pin is left")),
+            next.clone()
+        )
+    );
+}
+
+/// G8 on the crash paths (the review of lane 1): a pin the fallback would
+/// go live on is checked like at the boot. Maintenance on a red pin goes
+/// back to REAPER; prod live with a red previous pin stays down.
+#[test]
+fn a_crash_loop_never_falls_back_live_on_a_pin_that_may_not_go_live() {
+    let mut b = installed();
+    b.insert(PIN.into(), rec(PIN, "main", Hil::Red));
+    b.insert(PREV.into(), rec(PREV, "dev", Hil::Green));
+    let lc = Lifecycle::Prod(prod(Some(PREV), Some(NEW)));
+    assert_eq!(
+        crash_loop(&lc, Mode::Dev, |sha| b.get(sha)),
+        (
+            Fallback::Reaper(format!("{PIN}: HIL Red; live needs green")),
+            Lifecycle::Prod(prod(Some(PREV), None))
+        )
+    );
+    let lc = Lifecycle::Prod(prod(Some(PREV), None));
+    assert_eq!(
+        crash_loop(&lc, Mode::Live, |sha| b.get(sha)),
+        (
+            Fallback::Down(format!(
+                "on the pin {PIN}, and the previous pin may not go live ({PREV} is from \
+                 \"dev\"; live needs main)"
+            )),
+            lc.clone()
+        )
+    );
+    b.remove(PREV);
+    assert_eq!(
+        crash_loop(&lc, Mode::Live, |sha| b.get(sha)).0,
+        Fallback::Down(format!(
+            "on the pin {PIN}, and the previous pin may not go live (the pin {PREV} is not \
+             installed)"
+        ))
     );
 }
 

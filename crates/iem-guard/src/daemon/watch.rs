@@ -101,16 +101,26 @@ fn engine_exited(pc: &mut dyn Pc, g: &mut Guard, code: Option<i32>, at: Instant,
 
 /// A crash loop, as the lifecycle says (S8 design §3.4): back to REAPER
 /// (before the cutover), live on the pin (maintenance), the previous pin
-/// (prod live), or down with an alarm naming the rollback. A new engine on
-/// a pin starts a new crash window: "if that loops too" counts its own
-/// exits.
+/// (prod live), or down with an alarm naming the rollback; a pin that may
+/// not go live is never a fallback (G8: REAPER from maintenance, down from
+/// live). A new engine on a pin starts a new crash window: "if that loops
+/// too" counts its own exits.
 fn crash_loop(pc: &mut dyn Pc, g: &mut Guard, mode: Mode, n: usize, at: Instant) {
-    let (fallback, next) = lifecycle::crash_loop(&g.state.lifecycle, mode);
+    let (fallback, next) =
+        lifecycle::crash_loop(&g.state.lifecycle, mode, |sha| g.state.bundles.get(sha));
     g.state.lifecycle = next;
     let crashed = format!("the engine crashed {n} times in 10 min");
     match fallback {
         Fallback::Event => {
             g.raise(None, &format!("{crashed}: back to REAPER"), false);
+            run_switch(pc, g, mode, Mode::Event);
+        }
+        Fallback::Reaper(why) => {
+            g.raise(
+                None,
+                &format!("{crashed} in maintenance, and {why}: back to REAPER"),
+                false,
+            );
             run_switch(pc, g, mode, Mode::Event);
         }
         Fallback::Pin(pin) => {
@@ -138,12 +148,12 @@ fn crash_loop(pc: &mut dyn Pc, g: &mut Guard, mode: Mode, n: usize, at: Instant)
             g.state.set_active(&sha);
             g.respawn_at = Some(at);
         }
-        Fallback::Down(pin) => {
+        Fallback::Down(why) => {
             g.raise(
                 None,
                 &format!(
-                    "{crashed} on the pin {pin}, and no previous pin is left: the engine stays \
-                     down; roll back to REAPER (iemmode rollback)"
+                    "{crashed} {why}: the engine stays down; roll back to REAPER (iemmode \
+                     rollback)"
                 ),
                 false,
             );

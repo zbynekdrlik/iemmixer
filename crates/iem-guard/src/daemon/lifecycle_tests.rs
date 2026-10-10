@@ -127,6 +127,38 @@ fn saved(dir: &Path, mut st: GuardState, at: u64) -> Guard {
     Guard::open(dir, SiteConf::default(), fixed(T0))
 }
 
+/// `shas` installed as green main builds (a pin a fallback may go to, G8).
+fn green_main(g: &mut Guard, shas: &[&str]) {
+    for sha in shas {
+        g.state
+            .bundles
+            .insert((*sha).into(), record(sha, "main", Hil::Green));
+    }
+}
+
+/// G8 on the crash path: a crash loop in maintenance whose pin HIL reported
+/// red goes back to REAPER, never live on it (the review of lane 1).
+#[test]
+fn a_crash_loop_in_maintenance_on_a_red_pin_goes_back_to_reaper() {
+    let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Dev));
+    g.state.lifecycle = prod_on(None, Some(NEW));
+    g.state
+        .bundles
+        .insert(SHA.into(), record(SHA, "main", Hil::Red));
+    pc.exited = vec![(Kid::Engine, Some(70)); 3];
+    tick(&mut pc, &mut g, Instant::now());
+    assert_eq!(g.state.mode, Mode::Event);
+    assert!(pc.called(Call::ReaperStart) && !pc.called(Call::EngineStart));
+    assert_eq!(g.state.lifecycle, prod_on(None, None));
+    assert_eq!(
+        texts(&g),
+        [format!(
+            "the engine crashed 3 times in 10 min in maintenance, and {SHA}: HIL Red; live \
+             needs green: back to REAPER"
+        )]
+    );
+}
+
 #[test]
 fn in_prod_a_reboot_goes_live_on_the_pin() {
     let dir = tempfile::tempdir().unwrap();
@@ -258,7 +290,9 @@ fn an_entry_then_an_activation_of_its_build_keeps_the_way_back_s_exclusions() {
         dry_run: false,
     };
     assert!(handle(&mut pc, &mut g, dev, INIT).ok);
-    let r = handle(&mut pc, &mut g, Request::Activate { sha: SHA.into() }, INIT);
+    // Sent after the entry's reply: the generation of that moment.
+    let seen = g.shared.generation();
+    let r = handle(&mut pc, &mut g, Request::Activate { sha: SHA.into() }, seen);
     assert!(r.ok, "{r:?}");
     assert_eq!(pc.excluded, [(SHA.to_owned(), vec![OTHER.to_owned()])]);
     assert_eq!(g.state.way_back_bundle(), Some(OTHER));
@@ -368,10 +402,21 @@ fn in_prod_maintenance_ends_with_its_green_build_as_the_pin() {
     assert_eq!(pc.bundle.as_deref(), Some(NEW));
     assert_eq!(g.state.lifecycle, prod_on(Some(OTHER), Some(NEW)));
     assert!(status_text(&g).contains(&format!("maintenance {NEW}")));
+    let note = format!("maintenance build {NEW} becomes the pin; {SHA} is the previous pin");
+    // The dry run says what the entry would decide, and changes nothing.
+    let dry = Request::Live {
+        build: NEW.into(),
+        trial: false,
+        dry_run: true,
+    };
+    let seen = g.shared.generation();
+    let r = handle(&mut pc, &mut g, dry, seen);
+    assert!(r.ok, "{r:?}");
+    assert!(r.detail.ends_with(&format!("; {note}")), "{}", r.detail);
+    assert_eq!(g.state.lifecycle, prod_on(Some(OTHER), Some(NEW)));
     let seen = g.shared.generation();
     let r = handle(&mut pc, &mut g, live(NEW, false), seen);
     assert!(r.ok, "{r:?}");
-    let note = format!("maintenance build {NEW} becomes the pin; {SHA} is the previous pin");
     assert!(r.detail.contains(&note), "{}", r.detail);
     assert_eq!(g.state.mode, Mode::Live);
     assert_eq!(pc.bundle.as_deref(), Some(NEW));
@@ -395,6 +440,7 @@ fn a_crash_loop_in_maintenance_goes_live_on_the_pin() {
     let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Dev));
     g.state.lifecycle = prod_on(None, Some(NEW));
     g.state.active = Some(NEW.into());
+    green_main(&mut g, &[SHA, NEW]);
     pc.exited = vec![(Kid::Engine, Some(70)); 3];
     let at = Instant::now();
     tick(&mut pc, &mut g, at);
@@ -421,6 +467,7 @@ fn a_crash_loop_in_maintenance_goes_live_on_the_pin() {
 fn in_prod_the_previous_pin_that_loops_too_stays_down() {
     let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Live));
     g.state.lifecycle = prod_on(Some(OTHER), None);
+    green_main(&mut g, &[SHA, OTHER]);
     let at = Instant::now();
     pc.exited = vec![(Kid::Engine, Some(70)); 3];
     tick(&mut pc, &mut g, at);
