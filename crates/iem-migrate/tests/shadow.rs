@@ -231,6 +231,12 @@ fn bad_inputs_fail_and_name_why() {
     let mut a = w.args("shadow", &dir);
     a[2] = s(&w.path("missing.RPP"));
     assert_eq!(run(&a).unwrap_err().code, EXIT_IO);
+    // A state directory that is a file is never "nothing saved".
+    let file = w.path("state-file");
+    std::fs::write(&file, "x").unwrap();
+    let e = run(&w.args("shadow", &file)).unwrap_err();
+    assert_eq!(e.code, EXIT_INPUT);
+    assert!(e.msg.contains("not a state directory"), "{}", e.msg);
 }
 
 #[test]

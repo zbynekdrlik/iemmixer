@@ -68,6 +68,46 @@ fn topo() -> Topology {
     }
 }
 
+/// What `Topology::diff` prints before a difference's values.
+fn printed_site(d: &Diff) -> String {
+    match (d.kind, d.field.as_str()) {
+        ("engineer", _) => "engineer: ".to_owned(),
+        (kind, ONLY_PROJECT) => format!("{kind} {}: in the project, not in site.toml", d.id),
+        (kind, ONLY_SITE) => format!("{kind} {}: in site.toml, not in the project", d.id),
+        (kind, field) => format!("{kind} {}: {field} ", d.id),
+    }
+}
+
+/// What `import::compare` prints before a difference's values.
+fn printed_state(d: &Diff) -> String {
+    let (mix, of) = d.id.split_once('/').unwrap_or((d.id.as_str(), ""));
+    let who = match d.kind {
+        "input" | "mix" => format!("{} {}", d.kind, d.id),
+        "level" | "mix_level" => format!("mix {mix} level {of}"),
+        "group" => format!("mix {mix} group {of}"),
+        other => panic!("kind {other}"),
+    };
+    let field = d.field.as_str();
+    if field == ONLY_IMPORT || field == ONLY_LIVE {
+        return format!("{who}: in one state only");
+    }
+    if let Some(rest) = field.strip_prefix("eq.band") {
+        let (n, what) = rest.split_once('.').unwrap();
+        let what = if what == "hz" { "Hz" } else { what };
+        return format!("{who} band {n}: {what} ");
+    }
+    let what = if field == "eq.gain" { "EQ gain" } else { field };
+    format!("{who}: {what} ")
+}
+
+/// Each named difference is the one `iem_rpp` prints at the same place.
+fn same_as_printed(named: &[Diff], printed: &[String], as_printed: fn(&Diff) -> String) {
+    assert_eq!(named.len(), printed.len(), "{named:#?}\n{printed:#?}");
+    for (d, line) in named.iter().zip(printed) {
+        assert!(line.starts_with(&as_printed(d)), "{d:?} vs {line:?}");
+    }
+}
+
 fn changed(f: impl FnOnce(&mut Topology)) -> Topology {
     let mut t = topo();
     f(&mut t);
@@ -184,7 +224,7 @@ fn every_topology_difference_is_named_by_kind_id_and_field() {
         let site = changed(|t| change(t));
         let got = site_diffs(&topo(), &site);
         assert_eq!(&got, want, "case {i}");
-        assert_eq!(got.len(), topo().diff(&site).len(), "case {i}");
+        same_as_printed(&got, &topo().diff(&site), printed_site);
     }
     // A project without an engineer names `none`.
     let project = changed(|t| t.engineer = None);
@@ -455,11 +495,7 @@ fn every_state_difference_is_named_by_kind_id_and_field() {
         change(&mut live);
         let got = state_diffs(&t, &r, &import, &live, TOL);
         assert_eq!(&got, want, "case {i}");
-        assert_eq!(
-            got.len(),
-            compare(&t, &r, &import, &live, TOL).len(),
-            "case {i}"
-        );
+        same_as_printed(&got, &compare(&t, &r, &import, &live, TOL), printed_state);
         // The other way round, an id on one side only is the live state's.
         let back = state_diffs(&t, &r, &live, &import, TOL);
         let flipped: Vec<Diff> = want
@@ -476,10 +512,12 @@ fn every_state_difference_is_named_by_kind_id_and_field() {
 #[test]
 fn an_import_refuses_on_its_topology_first_then_on_what_does_not_fit() {
     let one = [d("input", "mic1", "rx")];
-    assert_eq!(verdict(&[], 0), "writes");
-    assert_eq!(verdict(&[], 1), "refuses_fit");
-    assert_eq!(verdict(&one, 0), "refuses_topology");
-    assert_eq!(verdict(&one, 2), "refuses_topology");
+    assert_eq!(verdict(&[], 0, 0), "writes");
+    assert_eq!(verdict(&[], 1, 0), "refuses_fit");
+    assert_eq!(verdict(&[], 1, 1), "refuses_fit");
+    assert_eq!(verdict(&[], 0, 1), "refuses_doubts");
+    assert_eq!(verdict(&one, 0, 0), "refuses_topology");
+    assert_eq!(verdict(&one, 2, 1), "refuses_topology");
 }
 
 #[test]
@@ -574,7 +612,7 @@ fn a_project_equal_to_the_saved_state_is_clean() {
         "{r:?}"
     );
     assert_eq!(r.counts.tracks, 45);
-    assert_eq!(verdict(&r.site, r.fit), "writes");
+    assert_eq!(verdict(&r.site, r.fit, r.doubts), "writes");
 }
 
 #[test]
@@ -594,8 +632,8 @@ fn the_state_an_import_would_write_is_compared_with_the_saved_one() {
         &loaded.persisted.state,
         CAP_TOLERANCE_DB,
     );
-    assert!(!r.state.is_empty());
-    assert_eq!(r.state.len(), printed.len());
+    assert!(r.state.len() > 100, "{}", r.state.len());
+    same_as_printed(&r.state, &printed, printed_state);
     assert_eq!((r.state_from, r.doubts, r.fit), ("current", 1, 0));
     // Nothing saved: nothing compared, whatever the directory holds.
     let empty = tempfile::tempdir().unwrap();
@@ -627,10 +665,9 @@ fn values_the_engine_would_drop_or_cap_are_counted_and_refused() {
     }
     let r = shadow(&imported(&sf, project), &sf, None);
     assert_eq!(r.fit, 3, "{r:?}");
-    assert_eq!(verdict(&r.site, r.fit), "refuses_fit");
+    assert_eq!(verdict(&r.site, r.fit, r.doubts), "refuses_fit");
     // A project whose topology differs refuses on it.
     let mut imp = imported(&sf, MixState::default());
-    // The first input is no group's (a group's would differ too).
     imp.topology.inputs.remove(0);
     let r = shadow(&imp, &sf, None);
     assert_eq!(r.site.len(), 1, "{r:?}");

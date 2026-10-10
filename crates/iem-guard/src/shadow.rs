@@ -16,23 +16,25 @@
 //! `shadow` key, no step.
 //!
 //! It never fails an entry and never holds one up past [`LIMIT`]: a run
-//! that fails, exits non-zero, prints no report or outlives the limit (left
-//! to end by itself, never ended by force) is one `error` line in the
-//! history and a log line, never an alarm, and the entry goes on. "Ide
-//! event" during it ends the wait at once (the run is a wait, not a
-//! mutation) and pre-empts the entry, as it does any step.
+//! that fails, exits non-zero, prints no report or outlives the limit
+//! (asked to stop, Ctrl-Break as every wait, never force-ended) is one
+//! `error` line in the history and a log line, never an alarm, and the
+//! entry goes on. "Ide event" during it ends the wait at once (the run is a
+//! wait, not a mutation) and pre-empts the entry, as it does any step.
 
 use std::time::Duration;
 
 use serde_json::{Map, Value};
 
+use crate::effects::tail;
 use crate::pc::{R, StepError};
 use crate::plan::{Mode, Step};
 use crate::view::mode_name;
 
-/// How long an entry waits for the shadow: past it the run is left to end
-/// by itself and its report is dropped (an `error` line). It reads one
-/// project and one state file: well under a second on the PC.
+/// How long an entry waits for the shadow: past it the run is asked to stop
+/// (Ctrl-Break, never force-ended) and its report is dropped (an `error`
+/// line). It reads one project and one state file: well under a second on
+/// the PC.
 pub const LIMIT: Duration = Duration::from_secs(5);
 /// The history's folder under `pc.toml`'s `root`, and its file: one JSON
 /// line per entry, appended, never rewritten.
@@ -65,11 +67,23 @@ pub enum Run {
     Printed(String),
     /// Another exit (none: no code), and the end of its stderr.
     Exited(Option<i32>, String),
-    /// It could not start, or did not end within [`LIMIT`] (left to end by
-    /// itself): why.
+    /// It could not start, or did not end within [`LIMIT`] (asked to stop):
+    /// why.
     Failed(String),
     /// "Ide event" came while it ran: the entry unwinds.
     Preempted,
+}
+
+/// How a run ended, from its exit code, stdout and stderr (`WinPc`'s
+/// bounded run): exit 0 is its report, any other exit keeps the end of
+/// stderr (300 characters), a run that failed or was pre-empted says so.
+pub fn ended(r: R<(Option<i32>, String, String)>) -> Run {
+    match r {
+        Ok((Some(0), stdout, _)) => Run::Printed(stdout),
+        Ok((code, _, stderr)) => Run::Exited(code, tail(&stderr, 300).to_owned()),
+        Err(StepError::Preempted) => Run::Preempted,
+        Err(StepError::Failed(why)) => Run::Failed(why),
+    }
 }
 
 fn error(line: &mut Map<String, Value>, code: &str, why: String) -> String {

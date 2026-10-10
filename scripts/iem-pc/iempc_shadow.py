@@ -11,8 +11,8 @@ line to <root>\\shadow\\history.jsonl on the PC: `at` (Unix ms), `entry`
 This command only reads: one `Test-Path` of that file over ssh, then scp
 into a temporary folder in this box's state folder (removed when done), and
 prints one JSON object (`summarise`): how many entries and of which kind,
-how many were clean (no error, the import would write, no difference, a
-saved state compared), the import's verdicts, the errors by code, and the
+how many were clean (no error, the import would write, no difference, no
+doubt about the saved state, a saved state compared), the import's verdicts, the errors by code, and the
 differences by kind (`site.<kind>.<field>`, `state.<kind>.<field>`: in how
 many entries, how many in all). Counts and kinds only: never an id, a value
 or an error's words (P6 discipline; the file itself names ids and stays on
@@ -56,7 +56,7 @@ def _diffs(doc: dict, against: str) -> list[str]:
 
 
 def _clean(doc: dict, kinds: list[str]) -> bool:
-    return (doc.get("import") == "writes" and not kinds and doc.get("fit", 0) == 0
+    return (doc.get("import") == "writes" and not kinds and doc.get("fit", 0) == 0 and doc.get("doubts", 0) == 0
             and isinstance(doc.get("state_from"), str) and doc.get("state_from") != "none")
 
 

@@ -2,20 +2,21 @@
 //! `pc.toml`'s `shadow` command (`iem-migrate shadow`, which writes
 //! nothing) in the active bundle's folder, bounded by `shadow::LIMIT`, and
 //! its line appended to `<root>\shadow\history.jsonl`. The decisions (where
-//! it runs, the line, that it never fails an entry) are `crate::shadow`'s
-//! (mutated).
+//! it runs, how it ended, the line, that it never fails an entry) are
+//! `crate::shadow`'s (mutated); `win::tests` runs these effects on the
+//! Windows runner.
 
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::path::Path;
 use std::process::Command;
 
-use tracing::{info, warn};
+use tracing::warn;
 
 use super::WinPc;
 use super::procs::{self, OnCancel};
 use crate::cancel::Cancel;
-use crate::effects::{self, argv};
+use crate::effects::argv;
 use crate::pc::{R, StepError};
 use crate::plan::Mode;
 use crate::shadow::{self, Run};
@@ -23,8 +24,8 @@ use crate::site;
 
 /// The command with `{root}`, `{bundle}`, `{site}`, `{server_config}` and
 /// `{project}` (`[guard] reaper_project`), run in the bundle's folder. A
-/// wait: "ide event" sends Ctrl-Break to its own process group and ends
-/// the wait at once; past the limit it is left to end by itself.
+/// wait: "ide event", or the limit, sends Ctrl-Break to its own process
+/// group and ends the wait at once; nothing is force-ended.
 fn run(pc: &WinPc, c: &Cancel) -> Run {
     let dir = match pc.bundle_dir() {
         Ok(dir) => dir,
@@ -44,18 +45,14 @@ fn run(pc: &WinPc, c: &Cancel) -> Run {
     };
     let mut cmd = Command::new(exe);
     cmd.args(args).current_dir(&dir);
-    match procs::run(
+    let out = procs::run(
         site::file_name(exe),
         &mut cmd,
         shadow::LIMIT,
         c,
         OnCancel::Break,
-    ) {
-        Ok(out) if out.code == Some(0) => Run::Printed(out.stdout),
-        Ok(out) => Run::Exited(out.code, effects::tail(&out.stderr, 300).to_owned()),
-        Err(StepError::Preempted) => Run::Preempted,
-        Err(StepError::Failed(why)) => Run::Failed(why),
-    }
+    );
+    shadow::ended(out.map(|o| (o.code, o.stdout, o.stderr)))
 }
 
 /// Appends one line (the folder made when missing).
@@ -77,7 +74,7 @@ pub(super) fn shadow(pc: &WinPc, to: Mode, c: &Cancel) -> R<String> {
         warn!("the shadow history {}: {e}", history.display());
         said.push_str(&format!("; the history could not be written ({e})"));
     }
-    info!("{said}");
+    // The runner's report logs `said` (`Guard::info`).
     if preempted {
         return Err(StepError::Preempted);
     }

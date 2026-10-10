@@ -76,7 +76,8 @@ class SummaryTests(unittest.TestCase):
             "errors": {}, "with_differences": 0, "first": None, "last": None, "differences": {}})
 
     def test_clean_needs_a_write_no_difference_and_a_compared_state(self) -> None:
-        for doc, clean in ((line(), True), (line(fit=1), False), (line(state_from="none"), False),
+        for doc, clean in ((line(), True), (line(fit=1), False), (line(doubts=1), False),
+                           (line(state_from="none"), False),
                            (line(state_from=None), False), (line(**{"import": "refuses_fit"}), False),
                            (line(site=[diff("mix", "member1", "tx")]), False),
                            (line(state=[diff("input", "mic1", "trim")]), False)):

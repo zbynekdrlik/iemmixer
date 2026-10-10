@@ -12,6 +12,7 @@
 //! (`Store::open` would create it). The guard runs it at each entry from
 //! event and keeps its line in `<root>\shadow\history.jsonl`.
 
+use std::io::ErrorKind;
 use std::path::Path;
 
 use iem_engine::persist::{Loaded, Store};
@@ -24,10 +25,19 @@ use crate::site::SiteFile;
 use crate::{Failure, read_text, shadow, site};
 
 /// The engine's saved state as it would load it; none without a state
-/// directory, which is then left uncreated.
+/// directory, which is then left uncreated. A path that cannot be looked at
+/// or is no directory fails: it is never read as "nothing saved".
 fn saved(dir: &Path, site: &SiteFile) -> Result<Option<Loaded>, Failure> {
-    if !dir.is_dir() {
-        return Ok(None);
+    match std::fs::metadata(dir) {
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(Failure::io(format!("{}: {e}", dir.display()))),
+        Ok(m) if !m.is_dir() => {
+            return Err(Failure::input(format!(
+                "{}: not a state directory",
+                dir.display()
+            )));
+        }
+        Ok(_) => {}
     }
     let store = Store::open(dir).map_err(|e| Failure::io(format!("{}: {e}", dir.display())))?;
     Ok(Some(store.load(&site.compiled)))

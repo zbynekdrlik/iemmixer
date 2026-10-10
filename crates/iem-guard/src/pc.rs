@@ -244,8 +244,8 @@ pub trait Pc {
     fn shadows(&self) -> bool;
     /// The report-only shadow import of an entry from event into `to`
     /// (S8 lane 4, `crate::shadow`): `pc.toml`'s `shadow` command, which
-    /// writes nothing, bounded by `shadow::LIMIT` (then left to end by
-    /// itself); its line (`shadow::record`) is appended to the history,
+    /// writes nothing, bounded by `shadow::LIMIT` (then asked to stop, never
+    /// force-ended); its line (`shadow::record`) is appended to the history,
     /// `shadow::HISTORY` in `shadow::DIR` under `pc.toml`'s `root`. A wait,
     /// not a mutation: "ide event" ends it at once (`Preempted`, and the
     /// line says so). Every other outcome, a history that cannot be written

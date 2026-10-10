@@ -276,14 +276,17 @@ pub fn state_diffs(
     c.out
 }
 
-/// What an import would do, as `import` decides it: refuse on a topology
-/// that differs from `site.toml`, then on values the engine would drop or
-/// cap (`fit`), else write.
-pub fn verdict(site: &[Diff], fit: usize) -> &'static str {
+/// What a plain import would do, as `import` decides it: refuse on a
+/// topology that differs from `site.toml`, then on values the engine would
+/// drop or cap (`fit`), then on doubts its load has about the saved state
+/// (`recover_before_save`), else write.
+pub fn verdict(site: &[Diff], fit: usize, doubts: usize) -> &'static str {
     if !site.is_empty() {
         "refuses_topology"
     } else if fit > 0 {
         "refuses_fit"
+    } else if doubts > 0 {
+        "refuses_doubts"
     } else {
         "writes"
     }
@@ -366,7 +369,7 @@ impl Report {
     pub fn json(&self) -> Value {
         let c = &self.counts;
         json!({
-            "import": verdict(&self.site, self.fit),
+            "import": verdict(&self.site, self.fit, self.doubts),
             "counts": {
                 "tracks": c.tracks,
                 "sends": c.sends,

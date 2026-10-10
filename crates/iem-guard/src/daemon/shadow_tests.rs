@@ -94,15 +94,11 @@ fn a_failed_shadow_never_fails_the_entry() {
 fn ide_event_during_the_shadow_unwinds_the_entry_at_once() {
     let (mut pc, mut g) = (with_shadow(band_up()), Guard::for_test(Mode::Event));
     g.state.pins.current = Some(SHA.into());
+    // "Ide event" comes as the shadow begins; the shadow waits for it.
+    pc.preempt_at = Some((Call::Shadow, g.cancel.clone()));
     pc.block_until_cancel(Call::Shadow);
-    let c = g.cancel.clone();
-    let fired = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(300));
-        c.preempt();
-    });
     let began = Instant::now();
     let r = handle(&mut pc, &mut g, dev(), INIT);
-    fired.join().unwrap();
     // Far inside the fake's 10 s block: the wait ended at the event.
     assert!(
         began.elapsed() < Duration::from_secs(3),
@@ -113,6 +109,7 @@ fn ide_event_during_the_shadow_unwinds_the_entry_at_once() {
     assert_eq!(g.state.mode, Mode::Event);
     assert!(!pc.called(Call::Data), "the refresh ran after the event");
     assert!(pc.index(Call::ReaperStart) > pc.index(Call::Shadow));
+    assert_eq!(pc.count(Call::Shadow), 1);
 }
 
 #[test]

@@ -168,6 +168,28 @@ fn every_failure_is_a_line_with_its_code_and_why() {
 }
 
 #[test]
+fn a_run_ends_in_a_report_an_exit_a_failure_or_a_preemption() {
+    assert_eq!(
+        ended(Ok((Some(0), "{}".into(), "noise".into()))),
+        Run::Printed("{}".into())
+    );
+    let long = format!("{}tail", "x".repeat(400));
+    assert_eq!(
+        ended(Ok((Some(2), "out".into(), long))),
+        Run::Exited(Some(2), format!("{}tail", "x".repeat(296)))
+    );
+    assert_eq!(
+        ended(Ok((None, String::new(), " why \n".into()))),
+        Run::Exited(None, "why".into())
+    );
+    assert_eq!(
+        ended(Err(StepError::failed("x did not finish within 5 s"))),
+        Run::Failed("x did not finish within 5 s".into())
+    );
+    assert_eq!(ended(Err(StepError::Preempted)), Run::Preempted);
+}
+
+#[test]
 fn the_shadow_never_fails_an_entry_but_event_still_preempts_it() {
     assert_eq!(never_fails(Ok("said".into())), Ok("said".into()));
     assert_eq!(
