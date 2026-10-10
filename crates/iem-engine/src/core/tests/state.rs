@@ -2,7 +2,7 @@
 //! defaults, the full sync and the state's round trip through the topology.
 
 use super::*;
-use iem_engine_proto::Limiter;
+use iem_engine_proto::{Limiter, Mix};
 
 #[test]
 fn import_replaces_state_and_fits_one_block() {

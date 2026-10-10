@@ -1,6 +1,6 @@
 use super::*;
 use crate::test_support::test_site;
-use iem_engine_proto::{DB_OFF, Eq};
+use iem_engine_proto::{DB_OFF, Eq, EqTarget};
 
 fn core(flags: Flags) -> Core {
     Core::new(Arc::new(test_site()), &MixState::default(), 0, flags)
