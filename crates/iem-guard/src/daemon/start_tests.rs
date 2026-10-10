@@ -527,7 +527,6 @@ fn site_settings_and_clocks() {
         SiteConf {
             on_pref_fail: PrefFail::StartReaperWithAlarm,
             hil_tx: vec![94, 95],
-            prod: false,
         }
     );
     assert_eq!(
@@ -535,7 +534,6 @@ fn site_settings_and_clocks() {
         SiteConf {
             on_pref_fail: PrefFail::StartReaperWithAlarm,
             hil_tx: Vec::new(),
-            prod: false,
         }
     );
     let now = SystemTime::now()
