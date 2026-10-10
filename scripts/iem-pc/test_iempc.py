@@ -410,6 +410,35 @@ class LockTests(Base):
         self.assertEqual([c[1] for c in self.pc.calls], [["status"], ["event"], ["probe-task"]])
 
 
+class PatchTests(Base):
+    """#36: iempc is split into modules, and a patch reaches the code only in
+    the one module that holds the name (iempc_test_support.Base.patch)."""
+
+    def test_a_patch_reaches_the_owner_and_reads_live_through_iempc(self) -> None:
+        self.patch(now_iso=lambda: "2026-10-10T12:00:00+02:00")
+        self.assertEqual(ip.SPLIT[0].now_iso(), "2026-10-10T12:00:00+02:00")
+        self.assertEqual(ip.now_iso(), "2026-10-10T12:00:00+02:00")
+        self.assertEqual(ip.next_entry(None), 1)
+        self.assertEqual(ip.read_json(ip.state_dir() / "entry.json", {})["at"], "2026-10-10T12:00:00+02:00")
+
+    def test_a_name_set_on_iempc_itself_fails_at_once(self) -> None:
+        # Such a name would shadow the moved module's binding, which the code reads.
+        with self.assertRaisesRegex(AssertionError, "Base.patch"):
+            ip.EVENT_NOW = self.tmp / "elsewhere"
+        with self.assertRaisesRegex(AssertionError, "Base.patch"):
+            with mock.patch.object(ip, "ensure_flag", side_effect=AssertionError("never reached")):
+                pass
+        with self.assertRaisesRegex(AssertionError, "Base.patch"):
+            del ip.event_now
+
+    def test_a_name_held_by_two_modules_is_refused(self) -> None:
+        module = ip.SPLIT[-1]
+        module.now_iso = ip.now_iso   # a copy: a patch of the owner would never reach it
+        self.addCleanup(delattr, module, "now_iso")
+        with self.assertRaisesRegex(AssertionError, "now_iso is held by"):
+            self.patch(now_iso=lambda: "x")
+
+
 class GhTests(Base):
     """The real gh wrapper, with a stand-in `gh` program first on PATH: the P5
     gate rests on its exit-code check."""
