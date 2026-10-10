@@ -41,6 +41,8 @@ def make_zip(path: Path, *, sha: str = SHA, branch: str = "dev", run: int = RUN,
              sums_raw: bytes | None = None, extra: dict[str, bytes] | None = None) -> Path:
     """A bundle zip shaped like the CI `bundle` job's (plan Task 12); `extra`: more listed files."""
     files = {n: f"synthetic {n}".encode() for n in ip.BUNDLE_REQUIRED if n != "manifest.json"}
+    # IemPc.psm1's siblings, as every bundle since #36 ships them (`drop` them for an older one).
+    files.update({n: f"synthetic {n}".encode() for n in ip.PC_SIBLINGS})
     files["tuning/state.ps1"] = b"synthetic tuning"
     files.update(extra or {})
     # As the CI `bundle` job writes it (guard_lifecycle since S8 lane 5).

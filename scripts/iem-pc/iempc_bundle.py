@@ -39,6 +39,16 @@ BUNDLE_REQUIRED = (
     "iem-engine.exe", "iem-server.exe", "iemmixer-guard.exe", "iemmode.exe", "iem-tray.exe", "iem-migrate.exe",
     "hil-v1.ps1", "IemPc.psm1", "manifest.json",
 )
+# IemPc.psm1 and its siblings (#36): the modules IemPc.psm1 imports from its own
+# folder, in its order (its $script:SiblingNames; test_iempc_bundle compares
+# them). Every admin-only copy of IemPc.psm1 carries them, staged before it,
+# each checked by the zip's sha256. Not in BUNDLE_REQUIRED (nor bundle.rs
+# REQUIRED): a bundle from before #36 still installs, and its IemPc.psm1 is
+# one file.
+PC_MODULE = "IemPc.psm1"
+PC_SIBLINGS = ("IemPcAcl.psm1", "IemPcTasks.psm1", "IemPcBootPref.psm1", "IemPcFastStartup.psm1", "IemPcPref.psm1",
+               "IemPcState.psm1", "IemPcHilV1.psm1")
+PC_SIBLING = re.compile(r"IemPc[A-Za-z0-9]+\.psm1")
 # A bundle member: a file name, or one directory level (`tuning/<name>`).
 MEMBER = re.compile(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)?")
 SUMS_LINE = re.compile(r"([0-9a-f]{64})  (\S+)")
@@ -232,18 +242,70 @@ def extract_member(sha: str, rec: dict, name: str, nested: bool = False) -> tupl
     return out, want
 
 
+def pc_siblings(sha: str, rec: dict) -> tuple[str, ...]:
+    """The siblings the bundle's IemPc.psm1 imports from its own folder (#36):
+    all of PC_SIBLINGS in a bundle built since the split, none in an older one
+    (its IemPc.psm1 is one file and imports none). Refused: a bundle with only
+    some (its IemPc.psm1 would import a missing sibling, or an older one another
+    session left in the shared stage), or with an IemPc sibling this box does
+    not know (a bundle newer than this iempc)."""
+    sums = rec.get("sums") or {}
+    have = tuple(n for n in PC_SIBLINGS if n in sums)
+    if have and have != PC_SIBLINGS:
+        missing = [n for n in PC_SIBLINGS if n not in sums]
+        raise Refused(f"bundle {sha} has {PC_MODULE}'s siblings but not {', '.join(missing)}: refused, nothing staged")
+    unknown = sorted(n for n in sums if PC_SIBLING.fullmatch(n) and n not in PC_SIBLINGS)
+    if unknown:
+        raise Refused(f"bundle {sha} has {', '.join(unknown)}, an {PC_MODULE} sibling this iempc does not stage: update "
+                      "this box's checkout first")
+    return have
+
+
+def pc_stage(sha: str, rec: dict, stage) -> tuple:
+    """`stage` ((bundle member, stage name) pairs) with IemPc.psm1's siblings
+    (pc_siblings) right before it, so they are staged first (#36)."""
+    out = []
+    for member, name in stage:
+        if member == PC_MODULE:
+            out += [(s, s) for s in pc_siblings(sha, rec)]
+        out.append((member, name))
+    return tuple(out)
+
+
+def pc_module_files(sha: str, rec: dict) -> list[tuple[str, Path, str]]:
+    """The bundle's IemPc.psm1 and its siblings (pc_siblings), siblings first:
+    (name, local copy, sha256), each checked again against the zip's sums.
+    Only this box's files: a refusal changes nothing on the PC."""
+    return [(name, *extract_member(sha, rec, name)) for name in (*pc_siblings(sha, rec), PC_MODULE)]
+
+
+def upload_pc_module(ctx: Ctx, rel: str, files: list[tuple[str, Path, str]], event: str) -> dict:
+    """Uploads `files` (pc_module_files) by scp into `rel` of the PC's root
+    (made before). Returns module_script's keywords: IemPc.psm1 and its sha256,
+    and its siblings (`first`, PC path and sha256), which the composed script
+    stages before it, each read once and checked (#36)."""
+    paths = []
+    for name, local, hexd in files:
+        core.scp(str(local), core.remote(ctx.env, f"{rel}/{name}"), event)
+        paths.append((pc_join(ctx.env["PC_ROOT"], f"{rel}/{name}"), hexd))
+    *first, (module, module_hex) = paths
+    return {"module": module, "module_hex": module_hex, "first": first}
+
+
 def stage_modules(ctx: Ctx, sha: str, rec: dict, stage, event: str) -> tuple[str, dict[str, str]]:
     """The bundle's modules `stage` names, as (bundle member, stage name)
     pairs, the ones the last one imports from its own folder first (#15
-    ssh-shell, #11 cutover): each checked again against the zip's sums and
+    ssh-shell, #11 cutover; IemPc.psm1's siblings before it, #36: pc_stage):
+    each checked again against the zip's sums and
     uploaded by scp into bootstrap/<sha> of the PC's root. Returns the
-    statements that stage them admin-only on the PC in that order and import
+    statements that stage them admin-only on the PC in that order, in the
+    set's own folder below the stage (elevated_ps.set_folder, #36), and import
     the last one from its stage copy only (module_script's `pre`,
     elevated_ps.staged), and each one's sha256 by stage name."""
     ep = core.elevated_ps()
     rel = f"bootstrap/{sha}"
     uploads, mods, sums = [], [], {}
-    for member, name in stage:
+    for member, name in pc_stage(sha, rec, stage):
         local, hexd = extract_member(sha, rec, member, nested="/" in member)
         uploads.append((local, name))
         mods.append((core.ps_quote(core.pc_join(ctx.env["PC_ROOT"], f"{rel}/{name}")), name, hexd))
@@ -251,7 +313,7 @@ def stage_modules(ctx: Ctx, sha: str, rec: dict, stage, event: str) -> tuple[str
     core.pc_mkdir(ctx, rel, event)
     for local, name in uploads:
         core.scp(str(local), core.remote(ctx.env, f"{rel}/{name}"), event)
-    return f"{ep.staged(mods)} ; Import-Module $iemMod -Force ; ", sums
+    return f"{ep.staged(mods, own=True)} ; Import-Module $iemMod -Force ; ", sums
 
 
 def fetch_bundle(sha: str, branch: str | None = None) -> tuple[dict, bool]:

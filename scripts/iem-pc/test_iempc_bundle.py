@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sys
 import time
@@ -25,7 +26,9 @@ class BundleTests(Base):
 
     def test_a_complete_bundle_verifies_with_its_tuning_folder(self) -> None:
         sums = ip.verify_zip(self.zip(), SHA, "dev", RUN)
-        self.assertEqual(sorted(sums), sorted([*ip.BUNDLE_REQUIRED, "tuning/state.ps1"]))
+        self.assertEqual(sorted(sums), sorted([*ip.BUNDLE_REQUIRED, *ip.PC_SIBLINGS, "tuning/state.ps1"]))
+        # IemPc.psm1's siblings (#36) are not required: a bundle from before the split still verifies.
+        self.assertNotIn("IemPcAcl.psm1", ip.verify_zip(self.zip(drop=ip.PC_SIBLINGS), SHA, "dev", RUN))
         self.assertEqual(sums["iemmode.exe"], sha256(b"synthetic iemmode.exe"))
 
     def test_backslash_entry_names_are_read_as_folders(self) -> None:
@@ -41,7 +44,8 @@ class BundleTests(Base):
 
     def test_the_manifest_must_name_this_sha_branch_and_run(self) -> None:
         good = {"sha": SHA, "branch": "dev", "run": RUN}
-        self.assertEqual(len(ip.verify_zip(self.zip(manifest=dict(good, run=str(RUN))), SHA, "dev", RUN)), 10)
+        self.assertEqual(len(ip.verify_zip(self.zip(manifest=dict(good, run=str(RUN))), SHA, "dev", RUN)),
+                         10 + len(ip.PC_SIBLINGS))
         for change in ({"sha": SHA2}, {"branch": "main"}, {"run": RUN + 1}):
             with self.assertRaisesRegex(ip.StepError, "manifest.json names", msg=str(change)):
                 ip.verify_zip(self.zip(manifest=dict(good, **change)), SHA, "dev", RUN)
@@ -649,6 +653,70 @@ class ExtractTests(Base):
             rec = {"digest": "sha256:" + sha256(z.read_bytes()), "sums": {"iemmode.exe": want}}
             with self.assertRaisesRegex(ip.StepError, f"iemmode.exe is not in iemmixer-{SHA}.zip exactly once", msg=copies):
                 ip.extract_member(SHA, rec, "iemmode.exe")
+
+
+class SiblingTests(unittest.TestCase):
+    """#36: iempc stages exactly the siblings IemPc.psm1 imports, and the
+    bundle job ships every one of them."""
+    HERE = Path(__file__).resolve().parent
+
+    def names(self) -> tuple[str, ...]:
+        text = (self.HERE / "IemPc.psm1").read_text(encoding="ascii")
+        self.assertIn("foreach ($iemSibling in $script:SiblingNames) { Import-Module (Join-Path $PSScriptRoot $iemSibling) "
+                      "-Force -Global }", text)
+        decl = re.findall(r"^\$script:SiblingNames = @\(([^)]*)\)$", text, re.M)
+        self.assertEqual(len(decl), 1)
+        return tuple(re.findall(r"'([^']+)'", decl[0]))
+
+    def test_the_siblings_are_the_ones_iempc_psm1_imports(self) -> None:
+        self.assertEqual(self.names(), ip.PC_SIBLINGS)
+        self.assertEqual(sorted(p.name for p in self.HERE.glob("IemPc?*.psm1")), sorted(ip.PC_SIBLINGS))
+        for name in ip.PC_SIBLINGS:
+            self.assertRegex(name, ip.PC_SIBLING)
+            self.assertNotIn(name, ip.BUNDLE_REQUIRED)   # an older bundle still installs
+
+    def test_every_module_imports_iempc_into_the_global_session_state(self) -> None:
+        """The siblings reach IemPc.psm1's functions, and each other's, through
+        the global session state (#36): a module that imported IemPc.psm1 into
+        its own session state would leave them unresolved at the first call."""
+        for root in (self.HERE, self.HERE.parent / "pc-tuning", self.HERE.parent / "asio-spike", self.HERE.parent / "golden"):
+            for module in sorted(root.glob("*.psm1")):
+                text = False   # inside a here-string: an entry script's text (a script imports globally)
+                for line in module.read_text(encoding="utf-8").splitlines():
+                    if text:
+                        text = not line.startswith("'@")
+                    elif line.rstrip().endswith("@'"):
+                        text = True
+                    elif re.search(r"Import-Module\b.*IemPc(?:[A-Za-z0-9]+)?\.psm1", line):
+                        self.assertIn("-Global", line, f"{module.name}: {line.strip()}")
+
+    def test_the_bundle_job_ships_every_sibling(self) -> None:
+        ci = (self.HERE.parent.parent / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        # The bundle job's copies into its folder $b (the zip's top level).
+        shipped = [n for line in ci.splitlines() if line.strip().startswith("Copy-Item -LiteralPath scripts/iem-pc/")
+                   and line.rstrip().endswith("-Destination $b") for n in re.findall(r"scripts/iem-pc/([A-Za-z0-9_.-]+)", line)]
+        for name in ("IemPc.psm1", *self.names()):
+            self.assertEqual(shipped.count(name), 1, name)
+
+    def test_the_windows_job_runs_every_test_script(self) -> None:
+        """#36 split Test-IemPc.ps1: each self-test is a step of its own (one
+        native command per step) or one Test-IemPc.ps1 starts."""
+        ci = (self.HERE.parent.parent / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        run = r"^\s+run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/iem-pc/(Test-[A-Za-z0-9]+\.ps1)$"
+        steps = set(re.findall(run, ci, re.M))
+        started = set(re.findall(r"-File \(Join-Path \$here '(Test-[A-Za-z0-9]+\.ps1)'\)",
+                                 (self.HERE / "Test-IemPc.ps1").read_text(encoding="ascii")))
+        self.assertIn("Test-IemPc.ps1", steps)
+        for script in sorted(p.name for p in self.HERE.glob("Test-*.ps1")):
+            self.assertTrue((script in steps) != (script in started), script)
+        self.assertTrue({"Test-IemPcBootstrap.ps1", "Test-IemPcHilV1.ps1"} <= steps)
+
+    def test_the_stage_puts_the_siblings_right_before_the_module(self) -> None:
+        rec = {"sums": {n: "ab" * 32 for n in (*ip.PC_SIBLINGS, "IemPc.psm1", "X.psm1")}}
+        stage = (("IemPc.psm1", "IemPc.psm1"), ("X.psm1", "X.psm1"))
+        self.assertEqual(ip.pc_stage(SHA, rec, stage), (*((n, n) for n in ip.PC_SIBLINGS), *stage))
+        old = {"sums": {"IemPc.psm1": "ab" * 32}}
+        self.assertEqual(ip.pc_stage(SHA, old, stage), stage)
 
 
 if __name__ == "__main__":

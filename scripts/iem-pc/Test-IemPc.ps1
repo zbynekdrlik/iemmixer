@@ -1,10 +1,12 @@
 #Requires -Version 5.1
-# Self-test of the S6 PC module (IemPc.psm1) and its HIL helpers on Windows
+# Self-test of the S6 PC module (IemPc.psm1 and its siblings, #36) on Windows
 # PowerShell 5.1 (CI job windows, an ephemeral administrator runner), against
 # real backends: a test task folder \iemmixer-test\ (security descriptors read
-# back), a temp root, an HKCU test key, a disabled test firewall rule and a
-# test service. Defender and the runner run with -WhatIf (no Defender to
-# change there, no ops token). Only its own test objects are removed.
+# back), a temp root, an HKCU test key and a disabled test firewall rule. Only
+# its own test objects are removed. Split by responsibility (#36), each its
+# own step of the windows job: Test-IemPcBootstrap.ps1 (the service right, the
+# bundle sums and Defender, the runner, the tunnel and the predecessor's
+# facts) and Test-IemPcHilV1.ps1 (HIL v1's helpers).
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
@@ -27,7 +29,6 @@ $root = Join-Path $base 'root'
 $elevated = Join-Path $base 'elevated'
 $folder = '\iemmixer-test'
 $ruleName = 'iemmixer-test-http-' + $id
-$svcName = 'iemmixer-test-' + $id
 $regKey = 'HKCU:\Software\iemmixer-iempc-test-' + $id
 $appExe = Join-Path $env:SystemRoot 'System32\cmd.exe'
 $me = Resolve-IemUser
@@ -37,6 +38,30 @@ New-Item -Path $regKey -Force | Out-Null
 New-ItemProperty -LiteralPath $regKey -Name 'Pref' -Value 64 -PropertyType DWord | Out-Null
 
 try {
+    # ---- the split (#36): one module every caller imports, its siblings from its own folder ----
+    $pcFiles = @(Get-IemPcModuleFiles)
+    $pcNames = @($pcFiles | ForEach-Object { Split-Path -Leaf $_ })
+    Assert ($pcFiles.Count -ge 2 -and $pcFiles[-1] -eq (Join-Path $here 'IemPc.psm1') -and
+            @($pcFiles | Where-Object { (Split-Path -Parent $_) -ne $here }).Count -eq 0) "pc-module-files-the-siblings-then-the-module ($($pcNames -join ', '))"
+    $pcModules = @($pcNames | ForEach-Object { [IO.Path]::GetFileNameWithoutExtension($_) })
+    foreach ($i in 0..($pcFiles.Count - 2)) {
+        $m = @(Get-Module -Name $pcModules[$i])
+        Assert ($m.Count -eq 1 -and $m[0].Path -eq $pcFiles[$i]) "pc-sibling-loaded-from-this-folder [$($pcModules[$i])]"
+    }
+    # Each function in exactly one of them, and every one the module had before the split (93) plus Get-IemPcModuleFiles.
+    $pcFunctions = @(Get-Command -CommandType Function | Where-Object { $pcModules -contains $_.ModuleName })
+    $twice = @($pcFunctions | Group-Object -Property Name | Where-Object { $_.Count -gt 1 } | ForEach-Object { $_.Name })
+    Assert ($pcFunctions.Count -eq 94 -and $twice.Count -eq 0) "pc-modules-hold-every-function-once ($($pcFunctions.Count); twice: $($twice -join ', '))"
+    # A value more than one of them reads is the same in each (the moved bodies read their own module's).
+    foreach ($v in @('SidAdmins', 'SidSystem', 'ModulePattern', 'BootPrefLog')) {
+        $vals = @{}
+        foreach ($n in $pcModules) {
+            $x = & (Get-Module -Name $n) { param($name) Get-Variable -Scope Script -Name $name -ValueOnly -ErrorAction SilentlyContinue } $v
+            if ($null -ne $x) { $vals[$n] = "$x" }
+        }
+        Assert ($vals.Count -ge 2 -and @($vals.Values | Sort-Object -Unique).Count -eq 1) "pc-constant-the-same-in-each-module [$v] ($(@($vals.Keys) -join ','))"
+    }
+
     # ---- task security descriptors (pure) ----
     $userSid = 'S-1-5-21-1000000001-1000000002-1000000003-1001'
     Assert ((Get-IemTaskSddl -UserSid $userSid) -ceq "D:(A;;GRGX;;;$userSid)(A;;FA;;;BA)(A;;FA;;;SY)") 'task-sddl-is-the-design-string'
@@ -314,6 +339,10 @@ try {
     # The elevated root: this module and the entry, the results and the tuning
     # folder, owned by Administrators and changeable only by them and SYSTEM.
     Assert ((Get-FileHash -LiteralPath (Join-Path $etasks 'IemPc.psm1')).Hash -eq (Get-FileHash -LiteralPath (Join-Path $here 'IemPc.psm1')).Hash) 'elevated-folder-holds-this-module'
+    # ... and each of its siblings (#36), which the entry's IemPc.psm1 imports from that folder.
+    foreach ($n in $pcNames) {
+        Assert ((Get-FileHash -LiteralPath (Join-Path $etasks $n)).Hash -eq (Get-FileHash -LiteralPath (Join-Path $here $n)).Hash) "elevated-folder-holds-the-module-file [$n]"
+    }
     $tokens = $null; $errors = $null
     [void][System.Management.Automation.Language.Parser]::ParseFile($entry, [ref]$tokens, [ref]$errors)
     Assert ($errors.Count -eq 0) 'elevated-entry-parses'
@@ -325,7 +354,7 @@ try {
         Assert ((Sorted ($er | ForEach-Object { $_.IdentityReference.Value })) -eq (Sorted @($me.sid, 'S-1-5-18', 'S-1-5-32-544'))) "elevated-folder-user-system-administrators [$d]"
         Assert ($ea.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -eq 'S-1-5-32-544') "elevated-folder-owned-by-administrators [$d]"
     }
-    foreach ($f in @((Join-Path $etasks 'IemPc.psm1'), $entry)) {
+    foreach ($f in @(@($pcNames | ForEach-Object { Join-Path $etasks $_ }) + @($entry))) {
         $fa = Get-Acl -LiteralPath $f
         $fr = @($fa.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
         Assert ($fa.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -eq 'S-1-5-32-544' -and $fr.Count -eq 3 -and @($fr | Where-Object { -not $_.IsInherited }).Count -eq 0) "elevated-file-owned-by-administrators-rules-inherited [$f]"
@@ -334,6 +363,27 @@ try {
     }
     $eb = Test-IemElevatedItem -Path $elevated -UserSid $me.sid
     Assert ($eb.Count -eq 0) "elevated-root-reads-back ($($eb -join '; '))"
+    # A module file missing where the module was imported from (#36): Install-IemElevatedDir
+    # reads them all before it writes, so it refuses and the tasks folder stays as it was.
+    $pcCopy = Join-Path $base 'pc-copy'
+    New-Item -ItemType Directory -Force -Path $pcCopy | Out-Null
+    foreach ($f in $pcFiles) { Copy-Item -LiteralPath $f -Destination $pcCopy }
+    $child = Join-Path $base 'missing-module-file.ps1'
+    $childText = @'
+param([string]$Dir, [string]$Root, [string]$Sid, [string]$Gone)
+$ErrorActionPreference = 'Stop'
+Import-Module (Join-Path $Dir 'IemPc.psm1') -Force
+[IO.File]::Delete((Join-Path $Dir $Gone))
+try { Install-IemElevatedDir -Root $Root -UserSid $Sid ; exit 0 } catch { [Console]::Error.WriteLine("refused: $_") ; exit 3 }
+'@
+    [IO.File]::WriteAllText($child, $childText)
+    function TasksFolder { return ((@(Get-ChildItem -LiteralPath $etasks -File | Sort-Object Name | ForEach-Object { '{0}={1}@{2}' -f $_.Name, (Get-FileHash -LiteralPath $_.FullName).Hash, $_.LastWriteTimeUtc.Ticks })) -join ';') }
+    $tasksBefore = TasksFolder
+    $ErrorActionPreference = 'Continue'
+    $said = (& powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $child -Dir $pcCopy -Root $elevated -Sid $me.sid -Gone 'IemPcState.psm1' 2>&1 | ForEach-Object { "$_" }) -join ' '
+    $code = $LASTEXITCODE
+    $ErrorActionPreference = 'Stop'
+    Assert ($code -eq 3 -and $said -like '*IemPcState.psm1*' -and (TasksFolder) -ceq $tasksBefore) "elevated-folder-refuses-a-missing-module-file-and-changes-nothing (exit $code; $said)"
     Throws { Register-IemTasks -Root $root -AppExe $appExe -Folder $folder -ElevatedRoot (Join-Path $root 'elevated') @prefArgs } 'tasks-refuse-an-elevated-root-inside-the-users-root'
     Throws { Register-IemTasks -Root $root -AppExe $appExe -Folder $folder -ElevatedRoot 'relative\elevated' @prefArgs } 'tasks-refuse-a-relative-elevated-root'
     # A descriptor loosened after registration (here Users may run the guard's
@@ -487,131 +537,6 @@ try {
     Set-NetFirewallRule -Name $ruleName -LocalPort 8080
     $f3 = Add-IemFirewallRule -Name $ruleName -Disabled
     Assert ($f3.changed -and (Sorted ($fr | Get-NetFirewallPortFilter).LocalPort) -eq '443,80') 'firewall-rule-drift-is-repaired'
-
-    # ---- service right ----
-    New-Service -Name $svcName -BinaryPathName ('"' + $appExe + '" /c exit 0') -StartupType Manual | Out-Null
-    Assert (-not (Test-IemServiceRight -Service $svcName).granted) 'service-right-absent-on-a-new-service'
-    $g1 = Grant-IemServiceRight -Service $svcName
-    Assert ($g1.changed -and $g1.granted -and $g1.after -ne $g1.before) 'service-right-granted-and-read-back'
-    $g2 = Grant-IemServiceRight -Service $svcName
-    Assert (-not $g2.changed -and $g2.after -eq $g1.after) 'service-right-second-run-changes-nothing'
-    Assert ((Test-IemServiceRight -Service $svcName).granted) 'service-right-test-sees-the-grant'
-    Assert (Test-IemServiceGrant -Sddl "D:(A;;RPWPLO;;;$userSid)" -Sid $userSid) 'service-grant-rp-wp-lo'
-    Assert (-not (Test-IemServiceGrant -Sddl "D:(A;;RPLO;;;$userSid)" -Sid $userSid)) 'service-grant-needs-stop-too'
-    Assert (-not (Test-IemServiceGrant -Sddl "D:(A;;RPWPLO;;;$userSid)(D;;WP;;;$userSid)" -Sid $userSid)) 'service-grant-refuses-a-deny'
-    Assert (-not (Test-IemServiceGrant -Sddl "D:(A;;RPWPLO;;;BA)" -Sid $userSid)) 'service-grant-needs-the-users-own-ace'
-    # An inherit-only ACE does not apply to the service itself; a deny counts, inherited or not.
-    Assert (-not (Test-IemServiceGrant -Sddl "D:(A;CIIO;RPWPLO;;;$userSid)" -Sid $userSid)) 'service-grant-skips-an-inherit-only-ace'
-    Assert (-not (Test-IemServiceGrant -Sddl "D:(A;;RPWPLO;;;$userSid)(D;ID;WP;;;$userSid)" -Sid $userSid)) 'service-grant-refuses-an-inherited-deny'
-
-    # ---- bundle sums and Defender exclusions ----
-    $sha = '0123456789abcdef0123456789abcdef01234567'
-    $keepSha = '2222222222222222222222222222222222222222'
-    $oldSha = '1111111111111111111111111111111111111111'
-    $bdir = Join-Path $root "bundles\$sha"
-    New-Item -ItemType Directory -Force -Path (Join-Path $bdir 'tuning') | Out-Null
-    $files = @('iem-engine.exe', 'iemmode.exe', 'hil-v1.ps1', 'tuning\IemTuning.psm1')
-    foreach ($n in $files) { Set-Content -LiteralPath (Join-Path $bdir $n) -Value "content of $n" }
-    function Write-Sums([string]$dir, [string[]]$extra = @()) {
-        $lines = @(Get-ChildItem -LiteralPath $dir -File -Recurse | Where-Object { $_.Name -ne 'SHA256SUMS' } | Sort-Object FullName | ForEach-Object {
-            '{0}  {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.FullName.Substring($dir.Length + 1).Replace('\', '/')
-        }) + $extra
-        [IO.File]::WriteAllText((Join-Path $dir 'SHA256SUMS'), (($lines -join "`n") + "`n"))
-    }
-    Write-Sums $bdir
-    $names = Test-IemBundleSums -Dir $bdir
-    Assert ((Sorted $names) -ceq (Sorted @('hil-v1.ps1', 'iem-engine.exe', 'iemmode.exe', 'tuning/IemTuning.psm1'))) 'sums-list-the-bundle-and-its-tuning-folder'
-    Set-Content -LiteralPath (Join-Path $bdir 'iemmode.exe') -Value 'tampered'
-    Throws { Test-IemBundleSums -Dir $bdir } 'sums-detect-a-changed-file'
-    Set-Content -LiteralPath (Join-Path $bdir 'iemmode.exe') -Value 'content of iemmode.exe'
-    Set-Content -LiteralPath (Join-Path $bdir 'extra.txt') -Value 'x'
-    $e = ErrorOf { Test-IemBundleSums -Dir $bdir }
-    Assert ($e -like '*not in SHA256SUMS: extra.txt*') "sums-refuse-an-unlisted-file ($e)"
-    Remove-Item -LiteralPath (Join-Path $bdir 'extra.txt')
-    New-Item -ItemType Directory -Force -Path (Join-Path $bdir 'other') | Out-Null
-    Set-Content -LiteralPath (Join-Path $bdir 'other\x.txt') -Value 'x'
-    Write-Sums $bdir
-    $e = ErrorOf { Test-IemBundleSums -Dir $bdir }
-    Assert ($e -like '*name refused: other/x.txt*') "sums-refuse-a-folder-other-than-tuning ($e)"
-    Remove-Item -LiteralPath (Join-Path $bdir 'other') -Recurse -Force
-    $h = (Get-FileHash -LiteralPath (Join-Path $bdir 'iemmode.exe')).Hash.ToLowerInvariant()
-    foreach ($line in @("$h  ../iemmode.exe", "$h  tuning/..", "$($h.ToUpperInvariant())  iemmode.exe", "$h iemmode.exe", "$h  SHA256SUMS", "$h  a\b.exe")) {
-        Write-Sums $bdir @($line)
-        Throws { Test-IemBundleSums -Dir $bdir } "sums-refuse-the-line [$line]"
-    }
-    Write-Sums $bdir @("$h  iemmode.exe")
-    $e = ErrorOf { Test-IemBundleSums -Dir $bdir }
-    Assert ($e -like '*lists iemmode.exe twice*') "sums-refuse-a-name-listed-twice ($e)"
-    Write-Sums $bdir @("$h  gone.exe")
-    $e = ErrorOf { Test-IemBundleSums -Dir $bdir }
-    Assert ($e -like '*listed in SHA256SUMS but missing: gone.exe*') "sums-refuse-a-missing-file ($e)"
-    Write-Sums $bdir
-
-    $pre = (Join-Path $root 'bundles') + '\'
-    $want = @("$pre$sha\iem-engine.exe", "$pre$sha\iemmode.exe")
-    $current = @("$pre$oldSha\iem-engine.exe", "$pre$keepSha\iem-engine.exe", 'C:\Other\tool.exe', $want[0].ToUpperInvariant(), "$pre$sha\gone.exe")
-    $plan = Get-IemExclusionPlan -Root $root -Sha $sha -Want $want -Keep @($keepSha) -Current $current
-    Assert ((Sorted $plan.add) -ceq $want[1]) 'exclusions-add-only-what-is-missing-ignoring-case'
-    Assert ((Sorted $plan.remove) -ceq (Sorted @("$pre$oldSha\iem-engine.exe", "$pre$sha\gone.exe"))) 'exclusions-remove-unkept-bundles-and-stale-entries-only'
-    $plan = Get-IemExclusionPlan -Root $root -Sha $sha -Want $want -Keep @() -Current @()
-    Assert ((Sorted $plan.add) -ceq (Sorted $want) -and @($plan.remove).Count -eq 0) 'exclusions-from-nothing'
-    $d = Set-IemDefenderExclusion -Root $root -Sha $sha -Keep @($keepSha) -WhatIf
-    Assert ($d.whatif -and (Sorted $d.add) -ceq (Sorted $want) -and @($d.remove).Count -eq 0) "defender-whatif-plans-this-bundles-executables ($($d.defender))"
-    Throws { Set-IemDefenderExclusion -Root $root -Sha 'ABC' -WhatIf } 'defender-refuses-a-bad-sha'
-    Throws { Set-IemDefenderExclusion -Root $root -Sha $sha -Keep @('x') -WhatIf } 'defender-refuses-a-bad-kept-sha'
-    Set-Content -LiteralPath (Join-Path $bdir 'iem-engine.exe') -Value 'tampered'
-    Throws { Set-IemDefenderExclusion -Root $root -Sha $sha -WhatIf } 'defender-re-verifies-the-bundle'
-    Set-Content -LiteralPath (Join-Path $bdir 'iem-engine.exe') -Value 'content of iem-engine.exe'
-
-    # ---- runner (-WhatIf; the token never reaches a command line) ----
-    $env:ACTIONS_RUNNER_INPUT_TOKEN = 'SYNTHETICTOKEN0000000000'
-    $rw = Register-IemRunner -Dir (Join-Path $base 'runner') -WhatIf
-    Assert ($rw.whatif -and $rw.token_present -and -not $rw.configured -and $rw.version -eq '2.337.0') 'runner-whatif-plans-the-pinned-version'
-    Assert (($rw.args -join ' ') -ceq '--unattended --url https://github.com/zbynekdrlik/iemmixer-ops --labels iem-pc --work _work --replace') 'runner-config-arguments'
-    Assert (($rw.args -join ' ') -notlike '*SYNTHETICTOKEN*' -and -not (Test-Path -LiteralPath (Join-Path $base 'runner'))) 'runner-token-never-on-the-command-line-and-nothing-touched'
-    Throws { Register-IemRunner -Dir (Join-Path $base 'runner') -Url 'https://example.org/x/y' -WhatIf } 'runner-refuses-another-host'
-    Throws { Register-IemRunner -Dir (Join-Path $base 'runner') -Sha256 'abc' -WhatIf } 'runner-needs-a-pinned-hash'
-    Throws { Register-IemRunner -Dir (Join-Path $base 'runner') -Label 'iem pc' -WhatIf } 'runner-refuses-a-bad-label'
-    $done = Join-Path $base 'runner-done'
-    New-Item -ItemType Directory -Force -Path $done | Out-Null
-    [IO.File]::WriteAllText((Join-Path $done '.runner'), '{"agentName":"x","gitHubUrl":"https://github.com/zbynekdrlik/iemmixer-ops"}')
-    $rr = Register-IemRunner -Dir $done
-    Assert ($rr.configured -and -not $rr.changed) 'runner-already-registered-is-a-no-op'
-    Assert (-not (Test-Path -LiteralPath 'Env:\ACTIONS_RUNNER_INPUT_TOKEN')) 'runner-drops-the-token-from-the-environment'
-    [IO.File]::WriteAllText((Join-Path $done '.runner'), '{"agentName":"x","gitHubUrl":"https://github.com/someone/else"}')
-    Throws { Register-IemRunner -Dir $done } 'runner-registered-elsewhere-refuses'
-    $env:ACTIONS_RUNNER_INPUT_TOKEN = ''
-    $e = ErrorOf { Register-IemRunner -Dir (Join-Path $base 'runner-no-token') -Zip (Join-Path $base 'no-such.zip') }
-    Assert ($e -like '*missing from ACTIONS_RUNNER_INPUT_TOKEN*' -and -not (Test-Path -LiteralPath (Join-Path $base 'runner-no-token'))) "runner-refuses-without-a-token ($e)"
-
-    # ---- tunnel origin (read only) ----
-    $cfg = '{"version":3,"config":{"ingress":[{"hostname":"mixer.example.org","service":"http://localhost:80","originRequest":{}},{"service":"http_status:404"}],"warp-routing":{"enabled":false}}}' | ConvertFrom-Json
-    $tc = ConvertFrom-IemTunnelConfig -Config $cfg -Metrics 'http://127.0.0.1:20241'
-    Assert ($tc.rules.Count -eq 2 -and $tc.rules[0].origin -and $tc.rules[0].loopback -and $tc.rules[0].port -eq 80 -and $tc.rules[0].scheme -eq 'http') 'tunnel-config-loopback-origin'
-    Assert (-not $tc.rules[1].origin -and $tc.all_loopback -and $tc.version -eq 3) 'tunnel-config-the-catch-all-is-no-origin'
-    Assert ($tc.summary -ceq '2 rule(s); origins: http :80 loopback' -and $tc.summary -notlike '*example*') 'tunnel-summary-names-no-host'
-    $remote = ConvertFrom-IemTunnelConfig -Config ('{"config":{"ingress":[{"hostname":"a.example.org","service":"https://10.0.0.10:443"},{"hostname":"b.example.org","service":"http://127.0.0.1:80"},{"service":"http_status:404"}]}}' | ConvertFrom-Json)
-    Assert (-not $remote.all_loopback -and $remote.rules[0].port -eq 443 -and -not $remote.rules[0].loopback -and $remote.rules[1].loopback) 'tunnel-config-a-remote-origin'
-    $e = ErrorOf { Get-IemTunnelOrigin -Ports @(9) }
-    Assert ($e -like '*no tunnel connector answered*') "tunnel-origin-refuses-without-a-connector ($e)"
-
-    # ---- predecessor facts (read only) ----
-    $noop = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument '/c exit 0'
-    Register-ScheduledTask -TaskPath '\iemmixer-test\' -TaskName 'test-daily' -Action $noop -Trigger (New-ScheduledTaskTrigger -Daily -At '03:00') | Out-Null
-    Register-ScheduledTask -TaskPath '\iemmixer-test\' -TaskName 'test-logon' -Action $noop -Trigger (New-ScheduledTaskTrigger -AtLogOn) | Out-Null
-    $pd = Get-IemPredecessorFacts -ReaperTask '\iemmixer-test\test-daily' -AppExe $appExe
-    Assert ($pd.reaper_task.may_fire_in_dev_time -and $pd.reaper_task.triggers[0].kind -eq 'daily' -and $pd.reaper_task.xml -like '*CalendarTrigger*') 'predecessor-a-daily-trigger-may-fire-in-dev-time'
-    Assert ($pd.app.sha256 -ceq (Get-FileHash -LiteralPath $appExe -Algorithm SHA256).Hash.ToLowerInvariant() -and $pd.app.file_version) 'predecessor-app-version-and-hash'
-    $pl = Get-IemPredecessorFacts -ReaperTask '\iemmixer-test\test-logon' -AppExe $appExe
-    Assert (-not $pl.reaper_task.may_fire_in_dev_time -and $pl.reaper_task.triggers[0].kind -eq 'logon') 'predecessor-a-logon-trigger-fires-only-at-logon'
-    Disable-ScheduledTask -TaskPath '\iemmixer-test\' -TaskName 'test-daily' | Out-Null
-    Assert (-not (Get-IemPredecessorFacts -ReaperTask '\iemmixer-test\test-daily' -AppExe $appExe).reaper_task.may_fire_in_dev_time) 'predecessor-a-disabled-task-never-fires'
-    Throws { Get-IemPredecessorFacts -ReaperTask '\iemmixer-test\no-such-task' -AppExe $appExe } 'predecessor-a-missing-task-refuses'
-    $trig = @([pscustomobject]@{ type = 8; enabled = $true }, [pscustomobject]@{ type = 1; enabled = $false })
-    Assert (-not (Test-IemTriggersMayFire -Enabled $true -Triggers $trig)) 'triggers-boot-and-a-disabled-time-trigger-never-fire'
-    $trig += [pscustomobject]@{ type = 6; enabled = $true }
-    Assert (Test-IemTriggersMayFire -Enabled $true -Triggers $trig) 'triggers-an-idle-trigger-may-fire'
-    Assert (-not (Test-IemTriggersMayFire -Enabled $true -Triggers @())) 'triggers-none-never-fire'
 
     # ---- the preference check's decision (pure): the guard's PrefCheck rule (#9 2026-09-28) ----
     $pa = Get-IemPrefAction -IsOriginal $true -Holders @('reaper.exe:11')
@@ -907,6 +832,23 @@ function Invoke-IemTuningApply { param([string]$ProfilePath, [int]$Tier) return 
     $res = Get-Content -LiteralPath (Join-Path $eout 'tuning.result.json') -Raw | ConvertFrom-Json
     Assert ($code -eq 0 -and $res.ok -and $res.id -ceq 't-4') "elevated-entry-runs-a-request (exit $code)"
     Assert (-not (Test-Path -LiteralPath (Join-Path $td 'tuning.result.json'))) 'elevated-entry-writes-no-result-into-the-users-root'
+    # Its IemPc.psm1 imports the siblings from the tasks folder only (#36): with one
+    # missing there the entry refuses (exit 2), names it, and answers nothing.
+    $sib = Join-Path $etasks 'IemPcPref.psm1'
+    $aside = Join-Path $etasks 'IemPcPref.aside'
+    [IO.File]::Move($sib, $aside)
+    Remove-Item -LiteralPath (Join-Path $eout 'tuning.result.json') -Force
+    [IO.File]::WriteAllText((Join-Path $td 'tuning.request.json'), '{"id":"t-5","verb":"exit"}')
+    $ErrorActionPreference = 'Continue'
+    $said = (& powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $entry -Kind tuning -Root $root -TuningDir $noTuning 2>&1 | ForEach-Object { "$_" }) -join ' '
+    $code = $LASTEXITCODE
+    $ErrorActionPreference = 'Stop'
+    [IO.File]::Move($aside, $sib)
+    Assert ($code -eq 2 -and $said -like '*IemPcPref.psm1*' -and -not (Test-Path -LiteralPath (Join-Path $eout 'tuning.result.json'))) "elevated-entry-refuses-without-a-sibling-in-its-folder (exit $code; $said)"
+    & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $entry -Kind tuning -Root $root -TuningDir $noTuning | Out-Null
+    $code = $LASTEXITCODE
+    $res = Get-Content -LiteralPath (Join-Path $eout 'tuning.result.json') -Raw | ConvertFrom-Json
+    Assert ($code -eq 0 -and $res.ok -and $res.id -ceq 't-5') "elevated-entry-runs-again-with-its-siblings (exit $code)"
 
     # ---- bootstrap state (read only) ----
     $bs = Get-IemBootstrapState -Root $root -Module 'iemmixer-no-such-module.dll' -PrefKey $regKey -PrefName 'Pref' -AppImage 'iemmixer-no-such-app.exe' -Folder $folder -FirewallRule $ruleName -ElevatedRoot $elevated
@@ -943,149 +885,6 @@ function Invoke-IemTuningApply { param([string]$ProfilePath, [int]$Tier) return 
     Assert ($fix.changed -and (@($fix.reset) -join ',') -ceq 'bundles\x.txt') "root-acl-resets-only-the-item-that-differs ($(@($fix.reset) -join ','))"
     Assert ((Get-IemModuleHolders -Module 'kernel32.dll').Count -gt 1) 'module-holders-lists-processes'
     Throws { Get-IemModuleHolders -Module 'a|b.dll' } 'module-holders-refuse-a-bad-name'
-
-    # ---- HIL helpers (pure) ----
-    $S = '0123456789abcdef0123456789abcdef01234567'
-    Assert ((Test-IemHilVersion -Sha $S -Version ([pscustomobject]@{ git_hash = '0123456' })).ok) 'hil-version-a-short-hash-prefix'
-    Assert ((Test-IemHilVersion -Sha $S -Version ([pscustomobject]@{ git_hash = $S })).ok) 'hil-version-the-full-sha'
-    foreach ($v in @('012345', '1123456', '0123456789ABCDEF', '')) {
-        Assert (-not (Test-IemHilVersion -Sha $S -Version ([pscustomobject]@{ git_hash = $v })).ok) "hil-version-refuses [$v]"
-    }
-    Assert (-not (Test-IemHilVersion -Sha $S -Version ([pscustomobject]@{ version = '2.0.0' })).ok) 'hil-version-refuses-a-missing-hash'
-    Assert (-not (Test-IemHilVersion -Sha $S -Version $null).ok) 'hil-version-refuses-no-answer'
-
-    function Eng($cb, $missed, $resets, $frames = 32, $parked = $false, $faulted = $false) {
-        [pscustomobject]@{ frames = $frames; callbacks = $cb; missed = $missed; resets = $resets; parked = $parked; faulted = $faulted }
-    }
-    $c = Test-IemHilCard -Before (Eng 1000 2 1) -After (Eng 343000 2 1) -Seconds 120
-    Assert ($c.ok -and $c.numbers.callbacks -eq 342000 -and $c.numbers.missed -eq 0 -and $c.numbers.resets -eq 0) 'hil-card-passes-at-the-floor'
-    Assert (-not (Test-IemHilCard -Before (Eng 1000 2 1) -After (Eng 342999 2 1) -Seconds 120).ok) 'hil-card-refuses-one-below-the-floor'
-    Assert (-not (Test-IemHilCard -Before (Eng 0 0 0) -After (Eng 360000 1 0) -Seconds 120).ok) 'hil-card-refuses-one-missed-period'
-    Assert (-not (Test-IemHilCard -Before (Eng 0 0 0) -After (Eng 360000 0 1) -Seconds 120).ok) 'hil-card-refuses-one-reset'
-    Assert (-not (Test-IemHilCard -Before (Eng 0 0 0) -After (Eng 360000 0 0 64) -Seconds 120).ok) 'hil-card-refuses-a-measured-64'
-    Assert (-not (Test-IemHilCard -Before (Eng 0 0 0) -After (Eng 360000 0 0 32 $true) -Seconds 120).ok) 'hil-card-refuses-parked'
-    Assert (-not (Test-IemHilCard -Before (Eng 0 0 0) -After (Eng 360000 0 0 32 $false $true) -Seconds 120).ok) 'hil-card-refuses-faulted'
-    $gap = Test-IemHilCard -Before (Eng 0 0 0) -After ([pscustomobject]@{ frames = 32; callbacks = 360000 }) -Seconds 120
-    Assert (-not $gap.ok -and $gap.detail -like "*lacks 'missed'*") 'hil-card-refuses-a-status-without-its-fields'
-    Assert ((Test-IemHilCard -Before $null -After (Eng 0 0 0) -Seconds 1).detail -like '*no engine status*') 'hil-card-refuses-no-engine-status'
-    Assert ((Test-IemHilReopen -Before (Eng 100 0 2) -After (Eng 200 0 3)).ok) 'hil-reopen-one-reset'
-    Assert (-not (Test-IemHilReopen -Before (Eng 100 0 2) -After (Eng 200 0 2)).ok) 'hil-reopen-refuses-no-reset'
-    Assert (-not (Test-IemHilReopen -Before (Eng 100 0 2) -After (Eng 200 0 4)).ok) 'hil-reopen-refuses-two-resets'
-    Assert (-not (Test-IemHilReopen -Before (Eng 100 0 2) -After (Eng 100 0 3)).ok) 'hil-reopen-refuses-a-stalled-card'
-    Assert (-not (Test-IemHilReopen -Before (Eng 100 0 2) -After (Eng 200 0 3 64)).ok) 'hil-reopen-refuses-a-measured-64'
-    function EngP($cb, $spawns, $last, $frames = 32, $parked = $false, $faulted = $false) {
-        [pscustomobject]@{ frames = $frames; callbacks = $cb; missed = 0; resets = 0; parked = $parked; faulted = $faulted; spawns = $spawns; last_exit = $last }
-    }
-    $p0 = EngP 5000 1 $null
-    $pOk = Test-IemHilPanic -Before $p0 -Respawned (EngP 10 2 70) -Later (EngP 11 2 70)
-    Assert ($pOk.ok -and $pOk.numbers.spawns -eq 1 -and $pOk.numbers.callbacks -eq 1) 'hil-panic-exit-70-one-respawn-streaming'
-    Assert (-not (Test-IemHilPanic -Before $p0 -Respawned (EngP 10 2 70) -Later (EngP 10 2 70)).ok) 'hil-panic-refuses-a-new-engine-that-does-not-stream'
-    Assert (-not (Test-IemHilPanic -Before $p0 -Respawned (EngP 10 2 1) -Later (EngP 6010 2 1)).ok) 'hil-panic-refuses-another-exit-code'
-    Assert (-not (Test-IemHilPanic -Before $p0 -Respawned (EngP 10 2 $null) -Later (EngP 6010 2 $null)).ok) 'hil-panic-refuses-no-exit-code'
-    Assert (-not (Test-IemHilPanic -Before $p0 -Respawned (EngP 10 3 70) -Later (EngP 6010 3 70)).ok) 'hil-panic-refuses-two-respawns'
-    Assert (-not (Test-IemHilPanic -Before $p0 -Respawned (EngP 10 2 70) -Later (EngP 6010 2 70 64)).ok) 'hil-panic-refuses-a-measured-64'
-    Assert (-not (Test-IemHilPanic -Before $p0 -Respawned (EngP 10 2 70) -Later (EngP 6010 2 70 32 $true)).ok) 'hil-panic-refuses-parked'
-    Assert (-not (Test-IemHilPanic -Before $p0 -Respawned (EngP 10 2 70) -Later (EngP 6010 2 70 32 $false $true)).ok) 'hil-panic-refuses-faulted'
-    $pn = Test-IemHilPanic -Before $p0 -Respawned $null -Later $null
-    Assert (-not $pn.ok -and $pn.detail -ceq 'no new engine within the wait') 'hil-panic-refuses-no-respawn'
-    $pg = Test-IemHilPanic -Before ([pscustomobject]@{ frames = 32 }) -Respawned (EngP 10 2 70) -Later (EngP 6010 2 70)
-    Assert (-not $pg.ok -and $pg.detail -like "*lacks 'spawns'*") 'hil-panic-refuses-a-status-without-spawns'
-    # What HIL v1's waits look for: the guard shows no engine until its hello and first
-    # Status, and that first Status may come before the card streams (frames 0).
-    function EngU($cb, $frames = 32, $resets = 2, $build = $S) {
-        [pscustomobject]@{ build = $build; frames = $frames; callbacks = $cb; resets = $resets }
-    }
-    Assert (Test-IemHilEngineUp -Engine (EngU 3000)) 'hil-engine-up-streaming-at-32'
-    Assert (-not (Test-IemHilEngineUp -Engine $null)) 'hil-engine-up-refuses-no-engine'
-    Assert (-not (Test-IemHilEngineUp -Engine (EngU 0 0 0))) 'hil-engine-up-refuses-the-first-status-before-the-card'
-    Assert (-not (Test-IemHilEngineUp -Engine (EngU 3000 64))) 'hil-engine-up-refuses-a-measured-64'
-    Assert (-not (Test-IemHilEngineUp -Engine ([pscustomobject]@{ frames = 32 }))) 'hil-engine-up-refuses-a-status-without-callbacks'
-    Assert (Test-IemHilEngineUp -Engine (EngU 3000) -Sha $S) 'hil-engine-up-names-the-bundle'
-    Assert (-not (Test-IemHilEngineUp -Engine (EngU 3000 32 2 ('f' + $S.Substring(1))) -Sha $S)) 'hil-engine-up-refuses-another-build'
-    Assert (-not (Test-IemHilEngineUp -Engine (EngU 3000 32 2 '') -Sha $S)) 'hil-engine-up-refuses-an-empty-build'
-    Assert (Test-IemHilEngineUp -Engine (EngU 3000) -Callbacks 2999) 'hil-engine-up-callbacks-above'
-    Assert (-not (Test-IemHilEngineUp -Engine (EngU 3000) -Callbacks 3000)) 'hil-engine-up-refuses-callbacks-not-above'
-    Assert (Test-IemHilEngineUp -Engine (EngU 3000) -Resets 1) 'hil-engine-up-resets-above'
-    Assert (-not (Test-IemHilEngineUp -Engine (EngU 3000) -Resets 2)) 'hil-engine-up-refuses-resets-not-above'
-    Assert (-not (Test-IemHilEngineUp -Engine ([pscustomobject]@{ frames = 32; callbacks = 3000 }) -Resets 0)) 'hil-engine-up-refuses-a-status-without-resets'
-    # The test signal on HIL's spare outputs (engine.hil: each spare card output and its
-    # peak since the engine's previous Status; #9, 2026-09-28).
-    function EngH([double[]]$peaks) {
-        $outs = @()
-        $tx = 94
-        foreach ($p in $peaks) { $outs += [pscustomobject]@{ tx = $tx; peak = $p }; $tx++ }
-        [pscustomobject]@{ frames = 32; callbacks = 3000; faulted = $false; hil = $outs }
-    }
-    $lvl = [math]::Pow(10, -30 / 20)
-    Assert (Test-IemHilSilent -Engine (EngH @(0, 0))) 'hil-silent-every-spare-output-at-zero'
-    Assert (-not (Test-IemHilSilent -Engine (EngH @(0, 0.001)))) 'hil-silent-refuses-one-that-sounds'
-    Assert (-not (Test-IemHilSilent -Engine (EngH @()))) 'hil-silent-refuses-no-spare-output'
-    Assert (-not (Test-IemHilSilent -Engine (EngU 3000))) 'hil-silent-refuses-a-status-without-hil'
-    Assert (-not (Test-IemHilSilent -Engine $null)) 'hil-silent-refuses-no-engine'
-    # A status that carried the signal on some spare output: HIL v1's silence wait takes a
-    # silent status as "after" only once one of these was read.
-    Assert (Test-IemHilHeard -Engine (EngH @(0, 0.001))) 'hil-heard-one-spare-output-that-sounds'
-    Assert (Test-IemHilHeard -Engine (EngH @($lvl, $lvl))) 'hil-heard-every-spare-output-at-the-level'
-    Assert (-not (Test-IemHilHeard -Engine (EngH @(0, 0)))) 'hil-heard-refuses-silence'
-    Assert (-not (Test-IemHilHeard -Engine (EngH @()))) 'hil-heard-refuses-no-spare-output'
-    Assert (-not (Test-IemHilHeard -Engine (EngU 3000))) 'hil-heard-refuses-a-status-without-hil'
-    Assert (-not (Test-IemHilHeard -Engine $null)) 'hil-heard-refuses-no-engine'
-    $quietAfter = EngH @(0, 0)
-    $sg = Test-IemHilSignal -During @((EngH @(0, 0)), (EngH @($lvl, ($lvl * 0.99))), $null) -After $quietAfter -Dbfs (-30)
-    Assert ($sg.ok -and $sg.numbers.outputs -eq 2 -and $sg.numbers.after -eq 0 -and [math]::Abs($sg.numbers.highest_dbfs + 30) -lt 1e-9) "hil-signal-heard-at-the-level-then-silent ($($sg.detail))"
-    Assert ($sg.detail -ceq '2 spare output(s) at -30.1 dBFS (asked -30.0), silent after the TTL') "hil-signal-detail ($($sg.detail))"
-    $sg = Test-IemHilSignal -During @((EngH @($lvl, 0))) -After $quietAfter -Dbfs (-30)
-    Assert (-not $sg.ok -and $sg.detail -like '*peaked at -150.0 dBFS*') "hil-signal-refuses-a-spare-output-never-heard ($($sg.detail))"
-    foreach ($p in @(($lvl * 0.9), ($lvl * 1.1), 0.1)) {
-        $sg = Test-IemHilSignal -During @((EngH @($p, $p))) -After $quietAfter -Dbfs (-30)
-        Assert (-not $sg.ok) "hil-signal-refuses-another-level [$p]"
-    }
-    $sg = Test-IemHilSignal -During @((EngH @($lvl, $lvl))) -After (EngH @(0, $lvl)) -Dbfs (-30)
-    Assert (-not $sg.ok -and $sg.numbers.after -eq 1 -and $sg.detail -like '*1 spare output(s) still sound after the TTL*') "hil-signal-refuses-one-still-sounding ($($sg.detail))"
-    Assert (-not (Test-IemHilSignal -During @() -After $quietAfter -Dbfs (-30)).ok) 'hil-signal-refuses-no-status-during-the-ttl'
-    Assert ((Test-IemHilSignal -During @((EngH @($lvl))) -After (EngU 3000) -Dbfs (-30)).detail -ceq "the engine status lacks 'hil'") 'hil-signal-refuses-a-status-without-hil'
-    Assert ((Test-IemHilSignal -During @() -After (EngH @()) -Dbfs (-30)).detail -ceq 'the engine opened no HIL output ([guard] hil_tx)') 'hil-signal-refuses-an-engine-without-spare-outputs'
-
-    $ok1 = New-IemHilCheck -Name 'a' -Ok $true
-    $bad1 = New-IemHilCheck -Name 'b' -Ok $false -Detail 'no'
-    Assert ((Get-IemHilConclusion -Checks @($ok1, $ok1)) -ceq 'success') 'hil-conclusion-success'
-    Assert ((Get-IemHilConclusion -Checks @($ok1, $bad1)) -ceq 'failure') 'hil-conclusion-a-failed-check-fails'
-    Assert ((Get-IemHilConclusion -Checks @()) -ceq 'failure') 'hil-conclusion-no-check-fails'
-    Assert ((Get-IemHilConclusion -Checks @($ok1) -Cancelled) -ceq 'cancelled') 'hil-conclusion-cancelled-wins'
-    Assert ((Get-IemHilSummary -Conclusion 'failure' -Checks @($ok1, $bad1)) -ceq 'HIL v1 failure: b (1 of 2 ok)') 'hil-summary-names-the-failed-checks-only'
-    Assert ((Get-IemHilSummary -Conclusion 'success' -Checks @($ok1, $ok1)) -ceq 'HIL v1 success: 2 checks ok') 'hil-summary-success'
-    # The summary is public (hil/iem-pc on the public repo, P6): a cancelled
-    # job names a fixed reason, never the guard's free text.
-    Assert ((Get-IemHilSummary -Conclusion 'cancelled' -Reason 'left-dev') -ceq 'HIL v1 cancelled: the guard left dev') 'hil-summary-cancelled-left-dev-is-a-fixed-phrase'
-    Assert ((Get-IemHilSummary -Conclusion 'cancelled' -Reason 'not-free') -ceq 'HIL v1 cancelled: the PC was not free (job-begin refused)') 'hil-summary-cancelled-not-free-is-a-fixed-phrase'
-    Throws { Get-IemHilSummary -Conclusion 'cancelled' -Reason 'input mic7 refused in C:\Users\member1' } 'hil-summary-cancelled-takes-a-reason-code-never-text'
-    Assert ((Get-IemHilSummary -Conclusion 'failure' -Checks @($ok1, $bad1) -Reason 'left-dev') -ceq 'HIL v1 failure: b (1 of 2 ok)') 'hil-summary-a-reason-never-changes-a-failure'
-
-    Assert ((ConvertFrom-IemReply -Text '{"ok":true,"mode":"dev"}').mode -ceq 'dev') 'reply-compact'
-    Assert ((ConvertFrom-IemReply -Text "{`n  `"ok`": false,`n  `"mode`": `"event`"`n}").mode -ceq 'event') 'reply-indented'
-    Assert ((ConvertFrom-IemReply -Text "a log line`n{`"ok`":true,`"mode`":`"dev`"}").ok -eq $true) 'reply-after-a-log-line'
-    foreach ($t in @('', '   ', '[1,2]', '42', 'not json')) { Assert ($null -eq (ConvertFrom-IemReply -Text $t)) "reply-refuses [$t]" }
-    Assert (-not (Test-IemHilSwitchStarted -Reply ([pscustomobject]@{ mode = 'dev'; switching = $null }))) 'switch-dev-idle-is-not-a-switch'
-    Assert (Test-IemHilSwitchStarted -Reply ([pscustomobject]@{ mode = 'event'; switching = $null })) 'switch-event-mode'
-    Assert (Test-IemHilSwitchStarted -Reply ([pscustomobject]@{ mode = 'dev'; switching = [pscustomobject]@{ to = 'event' } })) 'switch-running'
-    Assert (-not (Test-IemHilSwitchStarted -Reply $null)) 'switch-unknown-without-a-reply'
-    $hilDir = Join-Path $base "bundles\$S"
-    Assert ((Test-IemHilInputs -Sha $S -Branch 'dev' -JobRun '4242' -Out 'r.json' -ScriptDir $hilDir).Count -eq 0) 'hil-inputs-valid'
-    Assert ((Test-IemHilInputs -Sha $S -Branch 'feature' -JobRun '42a' -Out '' -ScriptDir (Join-Path $base 'elsewhere')).Count -eq 4) 'hil-inputs-branch-run-out-and-place'
-    Assert ((Test-IemHilInputs -Sha $S.ToUpperInvariant() -Branch 'main' -JobRun '1' -Out 'r.json' -ScriptDir $hilDir).Count -eq 2) 'hil-inputs-an-uppercase-sha-and-its-folder'
-    $hi = @{ Sha = $S; Branch = 'dev'; JobRun = '1'; Out = 'r.json'; ScriptDir = $hilDir }
-    Assert ((Test-IemHilInputs @hi -TestDbfs (-20) -TestTtl 60).Count -eq 0) 'hil-inputs-the-test-signal-at-its-limits'
-    Assert ((Test-IemHilInputs @hi -TestDbfs (-120) -TestTtl 0.001).Count -eq 0) 'hil-inputs-a-quiet-short-test-signal'
-    foreach ($db in @(-19.9, 0, 6, [double]::NaN, [double]::PositiveInfinity, [double]::NegativeInfinity)) {
-        $bad = Test-IemHilInputs @hi -TestDbfs $db -TestTtl 10
-        Assert ($bad.Count -eq 1 -and $bad[0] -like 'TestDbfs:*') "hil-inputs-refuse-the-level [$db]"
-    }
-    foreach ($ttl in @(0, -1, 60.001, [double]::NaN)) {
-        $bad = Test-IemHilInputs @hi -TestDbfs (-30) -TestTtl $ttl
-        Assert ($bad.Count -eq 1 -and $bad[0] -like 'TestTtl:*') "hil-inputs-refuse-the-ttl [$ttl]"
-    }
-    $m = Invoke-IemMode -Exe (Join-Path $base 'no-such-iemmode.exe') -Arguments @('status')
-    Assert ($null -eq $m.exit -and $null -eq $m.reply -and -not (Test-IemModeOk -Result $m)) 'iemmode-that-does-not-start'
 } finally {
     $sch = New-Object -ComObject 'Schedule.Service'
     $sch.Connect()
@@ -1097,9 +896,7 @@ function Invoke-IemTuningApply { param([string]$ProfilePath, [int]$Tier) return 
         } catch { Write-Host "cleanup: task folder $p ($($_.Exception.Message))" }
     }
     Remove-NetFirewallRule -Name $ruleName -ErrorAction SilentlyContinue
-    if (Get-Service -Name $svcName -ErrorAction SilentlyContinue) { & sc.exe delete $svcName | Out-Null }
     Remove-Item -LiteralPath $regKey -Recurse -Force -ErrorAction SilentlyContinue
-    Remove-Item -Path 'Env:\ACTIONS_RUNNER_INPUT_TOKEN' -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $base -Recurse -Force -ErrorAction SilentlyContinue
 }
 # Install-IemTuning (#15) in a process of its own: it imports S1c's IemTuning.psm1.

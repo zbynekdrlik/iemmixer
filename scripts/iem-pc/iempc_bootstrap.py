@@ -1,7 +1,8 @@
 """PC bootstrap and the S1a hand-over of iempc.py (S6 design note §6; split
 out of iempc.py, #36): `bootstrap` runs one IemPc.psm1 function over ssh
 from a fetched, verified bundle (dev time only, read-only functions too; the
-module staged admin-only and checked by its sha256 before the import;
+module and its siblings (#36) staged admin-only, each checked by its sha256,
+before the import;
 `Register-IemRunner`'s token on stdin only), and `handover-s1a` closes an
 open S1a window whose card is free, after which "ide event" is the guard's.
 
@@ -13,9 +14,9 @@ import re
 from pathlib import Path
 
 import iempc_core as core
-from iempc_bundle import extract_member, latest_record_sha, need_record
-from iempc_core import (BOOTSTRAP_S, OPS_REPO, STATUS_S, Ctx, EventNow, Refused, StepError, check_sha, emit, pc_join,
-                        pc_mkdir, ps_quote, remote, run_module, spike_module)
+from iempc_bundle import latest_record_sha, need_record, pc_module_files, upload_pc_module
+from iempc_core import (BOOTSTRAP_S, OPS_REPO, STATUS_S, Ctx, EventNow, Refused, StepError, check_sha, emit,
+                        pc_mkdir, ps_quote, run_module, spike_module)
 
 FUNCTION = re.compile(r"(Get|Test|Set|Add|Register|Grant|Remove)-Iem[A-Za-z0-9]+")
 READ_ONLY_VERBS = ("Get", "Test")
@@ -55,7 +56,7 @@ def cmd_bootstrap(ctx: Ctx) -> int:
     params = ps_params(ctx.args.params)
     sha = check_sha(ctx.args.sha) if ctx.args.sha else latest_record_sha()
     rec = need_record(sha)
-    local, hexd = extract_member(sha, rec, "IemPc.psm1")
+    files = pc_module_files(sha, rec)   # IemPc.psm1 and its siblings (#36)
     pre = fin = ""
     if fn == RUNNER_FUNCTION:
         # The one-time registration token reaches the PC on stdin only, never a command line.
@@ -67,9 +68,7 @@ def cmd_bootstrap(ctx: Ctx) -> int:
     mode = ctx.watch(abandon=read_only_function(fn))
     rel = f"bootstrap/{sha}"
     pc_mkdir(ctx, rel, mode)
-    core.scp(str(local), remote(env, f"{rel}/IemPc.psm1"), mode)
-    r = run_module(env, fn + params, BOOTSTRAP_S, mode, module=pc_join(env["PC_ROOT"], f"{rel}/IemPc.psm1"),
-                   module_hex=hexd, pre=pre, fin=fin)
+    r = run_module(env, fn + params, BOOTSTRAP_S, mode, pre=pre, fin=fin, **upload_pc_module(ctx, rel, files, mode))
     emit({"bootstrap": fn, "sha": sha, "result": r})
     return 0
 

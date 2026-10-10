@@ -9,8 +9,9 @@ docs/superpowers/specs/2026-10-10-s8-cutover-rollback-design.md section 3.2;
    green main build with its HIL recorded, in dev or a live trial on it, no
    HIL job): a refusal changes nothing on the PC.
 2. Install-IemCutover, elevated, imported only from the admin-only stage
-   (STAGE: IemPc.psm1 and S1c's IemTuningStore.psm1 first, which the new
-   module imports from its own folder, each checked by the zip's sha256, as
+   (STAGE: IemPc.psm1, its siblings before it since #36, and S1c's
+   IemTuningStore.psm1 first, which the new module imports from its own
+   folder, each checked by the zip's sha256, as
    iempc ssh-shell stages its module): the predecessor's autostarts from the
    private env (PC_AUTOSTART_TASKS, `;`-separated task paths
    `\\folder\\name`; PC_AUTOSTART_RUN, `;`-separated Run values
@@ -41,7 +42,8 @@ import json
 import re
 
 MODULE = "IemCutover.psm1"
-# (bundle member, stage name): IemCutover.psm1 imports both from its own folder.
+# (bundle member, stage name): IemCutover.psm1 imports both from its own folder;
+# stage_modules puts IemPc.psm1's siblings right before it (#36: pc_stage).
 STAGE = (("IemPc.psm1", "IemPc.psm1"), ("tuning/IemTuningStore.psm1", "IemTuningStore.psm1"), (MODULE, MODULE))
 INSTALL = "Install-IemCutover"
 TASKS_KEY = "PC_AUTOSTART_TASKS"
@@ -115,7 +117,8 @@ def run(ctx, ip) -> int:
     ip.refuse_open_window("cutover")
     sha = ip.check_sha(ctx.args.sha)
     rec = ip.need_record(sha)
-    missing = [member for member, _ in STAGE if member not in (rec.get("sums") or {})]
+    # IemPc.psm1's siblings go with it (#36); pc_stage refuses a bundle with only some.
+    missing = [member for member, _ in ip.pc_stage(sha, rec, STAGE) if member not in (rec.get("sums") or {})]
     if missing:
         raise ip.Refused(f"bundle {sha} has no {', '.join(missing)}: fetch a bundle built with S8's cutover")
     tasks, values = autostarts(ip, ctx.env)

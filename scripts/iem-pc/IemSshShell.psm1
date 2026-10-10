@@ -22,7 +22,8 @@
 # imported from the admin-only stage (iempc_sshshell.py). This module imports
 # two modules from its own folder, so they go wherever it goes (the stage, and
 # the undo task's folder): IemPc.psm1 (the elevated root, file and task
-# helpers) and S1c's IemTuningStore.psm1, whose Get-IemRegRaw, Set-IemRegRaw
+# helpers; with its siblings since #36, which it imports from its own folder)
+# and S1c's IemTuningStore.psm1, whose Get-IemRegRaw, Set-IemRegRaw
 # and Test-IemRegRawSame save one registry value and write it back exactly
 # (absent deletes it). Nothing is ended by force (I8); no site value lives
 # here (P6): the key, the task folder and the elevated root are parameters
@@ -33,8 +34,10 @@ Import-Module (Join-Path $PSScriptRoot 'IemPc.psm1') -Force -Global
 Import-Module (Join-Path $PSScriptRoot 'IemTuningStore.psm1') -Force -Global
 
 $script:ModuleFile = $PSCommandPath
-# The modules the undo task's folder carries: this one and the two it imports.
-$script:ModuleFiles = @($PSCommandPath, (Join-Path $PSScriptRoot 'IemPc.psm1'), (Join-Path $PSScriptRoot 'IemTuningStore.psm1'))
+# The modules the undo task's folder carries: this one and the two it imports,
+# with IemPc.psm1's siblings before it (#36: Get-IemPcModuleFiles, the folder
+# IemPc was imported from, this one's).
+$script:ModuleFiles = @($PSCommandPath) + @(Get-IemPcModuleFiles) + @((Join-Path $PSScriptRoot 'IemTuningStore.psm1'))
 $script:Utf8NoBom = New-Object System.Text.UTF8Encoding $false
 $script:DefaultKey = 'HKLM:\SOFTWARE\OpenSSH'
 $script:Names = @('DefaultShell', 'DefaultShellCommandOption', 'DefaultShellArguments')
@@ -353,7 +356,8 @@ function Write-IemShellFile {
 }
 
 function Install-IemShellUndoFiles {
-    # The undo task's folder: the entry script and copies of the three modules,
+    # The undo task's folder: the entry script and copies of the modules
+    # ($script:ModuleFiles: IemPc.psm1's siblings too, #36),
     # each read once and refused, before anything is written, unless its
     # sha256 is the one iempc checked (-ModuleSha256: the stage is shared with
     # other sessions, which stage their own builds), admin-only and read back.

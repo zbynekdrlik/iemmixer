@@ -170,6 +170,8 @@ try {
     $hdir = Join-Path $hb "bundles\$S"
     New-Item -ItemType Directory -Force -Path $hdir | Out-Null
     Copy-Item -LiteralPath (Join-Path $here 'hil-v1.ps1'), (Join-Path $here 'IemPc.psm1'), (Join-Path $here 'IemHil.psm1') -Destination $hdir
+    # IemPc.psm1's siblings (#36), which it imports from its own folder, as the bundle holds them.
+    Copy-Item -LiteralPath @(Get-IemPcModuleFiles | Where-Object { (Split-Path -Leaf $_) -cne 'IemPc.psm1' }) -Destination $hdir
     $fake = Join-Path $hb 'fake-iemmode.ps1'
     $fakeText = @'
 # A stand-in for iemmode.exe (Test-IemHil.ps1): replies as scenario.json says and logs every call.

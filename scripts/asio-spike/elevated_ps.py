@@ -30,7 +30,13 @@ rule:
   window session checks each module against `$iemSums` (sums_table: the
   fetched bundle record's sums, composed on the dev box), and a module that
   loads another from its own folder (SpikePc GoldenPc, IemMeasure IemTuning,
-  IemTuning IemTuningStore: STAGED_FIRST, #34) has that one staged first;
+  IemTuning IemTuningStore: STAGED_FIRST, #34) has that one staged first,
+  as the bootstrap's IemPc.psm1 has its siblings (staged_import's `first`,
+  #36; iempc_bundle.pc_siblings decides which a bundle has). iempc's modules
+  (staged_import, iempc_bundle.stage_modules) go into a folder of their own
+  below the stage, one per set of modules and sha256s (set_folder, #36): a
+  module that imports others from its own folder never meets a set another
+  session left there;
 - TEMP and TMP point at <root>\\temp before IemTuning.psm1 loads: its Add-Type
   has csc write and then load a DLL in TEMP, and the session user's TEMP is open
   to every process of the user;
@@ -46,6 +52,7 @@ in Test-IemStage.ps1 (through iempc.module_script), TEMP in the asio-spike job's
 analysis step (through tuning_window analysis-script)."""
 from __future__ import annotations
 
+import hashlib
 import re
 
 ROOT = "(Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'iemmixer')"
@@ -130,19 +137,40 @@ def _owned(path: str) -> str:
             f"[IO.File]::SetAccessControl({path}, $iemF)")
 
 
-def staged(mods: list[tuple[str, str, str | None]], root: str = ROOT) -> str:
+def set_folder(mods: list[tuple[str, str, str | None]]) -> str:
+    """The stage's own folder for one set of modules (#36): `set-` and 16 hex
+    of the sha256 over each name and sha256, in order. A module that loads
+    others from its own folder (IemPc.psm1 its siblings; IemCutover.psm1 and
+    IemSshShell.psm1 IemPc.psm1 and the store) staged there only ever meets
+    the modules staged with it: another set (another build, a set with a
+    sibling left out) has another folder, and a session staging the same set
+    writes the same bytes (an identical copy is kept, never rewritten)."""
+    for _, name, hexd in mods:
+        if hexd is None:
+            raise ValueError(f"stage: {name}: a set folder needs each module's sha256")
+        _want(name, hexd)
+    return "set-" + hashlib.sha256("".join(f"{name}={hexd};" for _, name, hexd in mods).encode()).hexdigest()[:16]
+
+
+def staged(mods: list[tuple[str, str, str | None]], root: str = ROOT, own: bool = False) -> str:
     """Statements that put each (src, name, hexd) into the admin-only stage:
     the module at `src` (a PowerShell string) read once and checked by `hexd`
     (None: `$iemSums[name]`), the stage made and read back, the copy written
     unless the stage already holds exactly those bytes, then read back
     admin-only and checked again. `$iemMod` is the last one's stage copy.
     A module that always loads a sibling from its own folder (STAGED_FIRST)
-    is refused unless that sibling is staged before it in the same list."""
+    is refused unless that sibling is staged before it in the same list.
+    `own`: into the set's own folder below the stage (set_folder, made and
+    read back admin-only like the stage; iempc's modules, #36), never the
+    stage itself, so nothing another session staged is imported with them."""
     names = [name for _, name, _ in mods]
     for i, name in enumerate(names):
         first = STAGED_FIRST.get(name)
         if first and first not in names[:i]:
             raise ValueError(f"stage: {name} loads {first} from its own folder: stage {first} before it")
+    stage = folder("iemStage", STAGE, root)
+    if own:
+        stage += f" ; $iemStage = Join-Path $iemStage '{set_folder(mods)}' ; & $iemDir $iemStage"
     parts = []
     for i, (src, name, hexd) in enumerate(mods):
         want = _want(name, hexd)
@@ -151,7 +179,7 @@ def staged(mods: list[tuple[str, str, str | None]], root: str = ROOT) -> str:
             "$iemX = [Security.Cryptography.SHA256]::Create() ; "
             "$iemH = -join @($iemX.ComputeHash($iemB) | ForEach-Object { $_.ToString('x2') }) ; $iemX.Dispose()",
             f"if ($iemH -cne {want}) {{ throw ('sha256 mismatch: ' + {src}) }}",
-            *([folder("iemStage", STAGE, root)] if i == 0 else []),
+            *([stage] if i == 0 else []),
             f"$iemMod = Join-Path $iemStage '{name}'",
             f"if (-not {_same('$iemMod', want)}) {{ [IO.File]::Delete($iemMod) ; [IO.File]::WriteAllBytes($iemMod, $iemB) ; "
             f"{_owned('$iemMod')} }}",
@@ -161,11 +189,16 @@ def staged(mods: list[tuple[str, str, str | None]], root: str = ROOT) -> str:
     return " ; ".join(parts)
 
 
-def staged_import(src: str, name: str, hexd: str, root: str = ROOT) -> str:
+def staged_import(src: str, name: str, hexd: str, root: str = ROOT,
+                  first: list[tuple[str, str, str]] | tuple = ()) -> str:
     """Statements that import the module uploaded at `src` (a PowerShell string)
     only from its admin-only stage copy `name`, checked by `hexd` before and
-    after the copy. `root`: the elevated root (a PowerShell expression)."""
-    return f"{staged([(src, name, hexd)], root)} ; Import-Module $iemMod -Force"
+    after the copy. `root`: the elevated root (a PowerShell expression).
+    `first`: (src, name, hexd) of the modules it imports from its own folder,
+    staged before it the same way (IemPc.psm1's siblings, #36). All of them go
+    into the set's own folder (staged(own=True)), so the module's imports never
+    reach outside what this session staged and checked."""
+    return f"{staged([*first, (src, name, hexd)], root, own=True)} ; Import-Module $iemMod -Force"
 
 
 def sums_table(sums: dict[str, str]) -> str:
