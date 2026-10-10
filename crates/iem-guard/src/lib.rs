@@ -12,6 +12,13 @@
 //! - [`handover`]: the REAPER, meter-bridge and predecessor-exit verdicts;
 //! - [`proto`]: the guard pipe's requests, replies and frames;
 //! - [`state`]: the persistent state and the reboot rule;
+//! - [`lifecycle`]: before the cutover or after it: the boot rule, the
+//!   entry gates, the pin and the crash rules, what `iemmode event` means
+//!   (S8);
+//! - [`cutover`]: the cutover's refusals, steps and undo, the cutover
+//!   task's request and the server config's `pin_changes` edit (S8);
+//! - [`shadow`]: the report-only shadow import of an entry from event,
+//!   its place in the plan and its history line (S8);
 //! - [`switch_log`]: the last switch's record, its steps timed, and its
 //!   in-ear silence (S7);
 //! - [`alarms`]: the kept alarms;
@@ -53,14 +60,17 @@ pub mod bundle;
 pub mod cancel;
 pub mod cli;
 pub mod crash;
+pub mod cutover;
 pub mod daemon;
 pub mod effects;
 pub mod handover;
 pub mod install;
+pub mod lifecycle;
 pub mod pc;
 pub mod pipe;
 pub mod plan;
 pub mod proto;
+pub mod shadow;
 pub mod site;
 pub mod state;
 pub mod switch_log;

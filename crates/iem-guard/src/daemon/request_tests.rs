@@ -6,7 +6,8 @@
 use std::time::{Duration, Instant};
 
 use super::tests::{
-    INIT, OTHER, SHA, ask, band_up, dev, iemmixer_up, record, status_reply, steps, texts,
+    INIT, OTHER, SHA, ask, band_up, dev, event, iemmixer_up, prod_on, record, status_reply, steps,
+    texts,
 };
 use super::*;
 use crate::bundle::{Hil, Pins};
@@ -53,7 +54,7 @@ fn jobs_are_refused_while_switching() {
         Request::AlarmTest,
         Request::AlarmAck { id: 1 },
         Request::Quit,
-        Request::Event { dry_run: true },
+        event(true),
     ];
     for req in &refused {
         match shared.route(req) {
@@ -62,7 +63,7 @@ fn jobs_are_refused_while_switching() {
         }
     }
     let live = Request::Live {
-        build: SHA.into(),
+        build: Some(SHA.into()),
         trial: false,
         dry_run: false,
     };
@@ -96,7 +97,7 @@ fn jobs_are_refused_while_switching() {
         (false, "busy: a switch ran meanwhile (dev → event)")
     );
     assert!(pc.calls().is_empty());
-    let r = handle(&mut pc, &mut g, Request::Event { dry_run: false }, seen);
+    let r = handle(&mut pc, &mut g, event(false), seen);
     assert!(!r.ok);
     assert_eq!(r.detail, "a switch ran meanwhile; event: no switch yet");
     assert!(pc.calls().is_empty());
@@ -139,7 +140,7 @@ fn ide_event_preempts_or_waits_but_never_both() {
     // moves the fence, so a dev or live entry queued before it never runs
     // after it (#42).
     assert_eq!(
-        shared.route(&Request::Event { dry_run: false }),
+        shared.route(&event(false)),
         Route::Queue(Generation { epoch: 0, fence: 1 })
     );
     assert!(cancel.preempted());
@@ -150,7 +151,7 @@ fn ide_event_preempts_or_waits_but_never_both() {
         v.epoch = 3;
     });
     assert_eq!(
-        shared.route(&Request::Event { dry_run: false }),
+        shared.route(&event(false)),
         Route::AwaitEnd("already switching to event")
     );
     assert!(!cancel.preempted());
@@ -158,7 +159,7 @@ fn ide_event_preempts_or_waits_but_never_both() {
     // During any other switch: pre-empt it and wait.
     shared.update(|v| v.running = Some(Mode::Live));
     assert_eq!(
-        shared.route(&Request::Event { dry_run: false }),
+        shared.route(&event(false)),
         Route::AwaitEnd("pre-empted the switch in progress")
     );
     assert!(cancel.preempted());
@@ -168,10 +169,7 @@ fn ide_event_preempts_or_waits_but_never_both() {
     shared.update(|v| v.running = None);
     let now = Generation { epoch: 3, fence: 3 };
     assert_eq!(shared.route(&Request::Quit), Route::Queue(now));
-    assert_eq!(
-        shared.route(&Request::Event { dry_run: true }),
-        Route::Queue(now)
-    );
+    assert_eq!(shared.route(&event(true)), Route::Queue(now));
     assert_eq!(shared.route(&dev()), Route::Queue(now));
     assert!(matches!(shared.route(&Request::Status), Route::Now(_)));
     assert_eq!(shared.route(&Request::Subscribe), Route::Subscribe);
@@ -186,7 +184,7 @@ fn ide_event_preempts_or_waits_but_never_both() {
 fn an_entry_queued_before_a_switch_back_to_reaper_never_runs() {
     let ran = |from: &str, to: &str| format!("busy: a switch ran meanwhile ({from} → {to})");
     let live = Request::Live {
-        build: SHA.into(),
+        build: Some(SHA.into()),
         trial: false,
         dry_run: false,
     };
@@ -208,7 +206,7 @@ fn an_entry_queued_before_a_switch_back_to_reaper_never_runs() {
     // "Ide event" from dev: dev → event.
     let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
     let seen = g.shared.generation();
-    assert!(ask(&mut pc, &mut g, Request::Event { dry_run: false }).ok);
+    assert!(ask(&mut pc, &mut g, event(false)).ok);
     let made = pc.calls().len();
     let r = handle(&mut pc, &mut g, dev(), seen);
     assert_eq!((r.ok, r.detail), (false, ran("dev", "event")));
@@ -219,7 +217,7 @@ fn an_entry_queued_before_a_switch_back_to_reaper_never_runs() {
     let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
     g.state.pins.current = Some(SHA.into());
     let seen = g.shared.generation();
-    assert!(ask(&mut pc, &mut g, Request::Event { dry_run: false }).ok);
+    assert!(ask(&mut pc, &mut g, event(false)).ok);
     let made = pc.calls().len();
     for req in [dev(), live] {
         let r = handle(&mut pc, &mut g, req, seen);
@@ -330,16 +328,17 @@ fn a_tray_start_forgets_a_quit_no_tray_took() {
 
 #[test]
 fn dry_run_changes_nothing() {
+    // S8 (#11): before the cutover live is a trial.
     let live = Request::Live {
-        build: SHA.into(),
-        trial: false,
+        build: Some(SHA.into()),
+        trial: true,
         dry_run: true,
     };
     let dry_dev = Request::Dev {
         build: None,
         dry_run: true,
     };
-    for req in [Request::Event { dry_run: true }, dry_dev, live] {
+    for req in [event(true), dry_dev, live] {
         let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
         g.state
             .bundles
@@ -384,7 +383,7 @@ fn dry_run_changes_nothing() {
         "{}",
         r.detail
     );
-    let r = handle(&mut pc, &mut g, Request::Event { dry_run: true }, INIT);
+    let r = handle(&mut pc, &mut g, event(true), INIT);
     assert_eq!(
         r.detail,
         "dry run: TuningExit, PrefCheck, ReaperHandover, AppHandover, Fingerprint"
@@ -510,7 +509,7 @@ fn an_expired_lan_certificate_is_named_and_never_an_alarm() {
     );
     // Back in event the predecessor serves the same certificate: still
     // named.
-    assert!(ask(&mut pc, &mut g, Request::Event { dry_run: false }).ok);
+    assert!(ask(&mut pc, &mut g, event(false)).ok);
     assert!(status_reply(&g).contains(LAN_NOTE), "{}", status_reply(&g));
     // The next check that names nothing drops it.
     pc.lan_note = None;
@@ -520,10 +519,10 @@ fn an_expired_lan_certificate_is_named_and_never_an_alarm() {
     assert_eq!(status_reply(&g), format!("mode dev; bundle {SHA}"));
     // A failed check does not repeat an old note.
     pc.lan_note = Some(LAN_NOTE.into());
-    assert!(ask(&mut pc, &mut g, Request::Event { dry_run: false }).ok);
+    assert!(ask(&mut pc, &mut g, event(false)).ok);
     assert!(ask(&mut pc, &mut g, dev()).ok);
     assert!(status_reply(&g).contains(LAN_NOTE), "{}", status_reply(&g));
-    assert!(ask(&mut pc, &mut g, Request::Event { dry_run: false }).ok);
+    assert!(ask(&mut pc, &mut g, event(false)).ok);
     pc.fail(Call::Identity, "LAN 443: serves another certificate");
     let r = ask(&mut pc, &mut g, dev());
     assert!(!r.ok, "{r:?}");
@@ -539,7 +538,7 @@ fn an_expired_lan_certificate_is_named_and_never_an_alarm() {
 #[test]
 fn a_live_entry_without_a_pwa_subscription_is_refused() {
     let live = |trial, dry_run| Request::Live {
-        build: SHA.into(),
+        build: Some(SHA.into()),
         trial,
         dry_run,
     };
@@ -548,6 +547,9 @@ fn a_live_entry_without_a_pwa_subscription_is_refused() {
         g.state
             .bundles
             .insert(SHA.into(), record(SHA, "main", Hil::Green));
+        if !trial {
+            g.state.lifecycle = prod_on(None, None);
+        }
         pc.subscriptions = Some(0);
         let r = ask(&mut pc, &mut g, live(trial, true));
         assert!(!r.ok, "{r:?}");
@@ -577,7 +579,7 @@ const NO_PC_TESTS: &str =
 #[test]
 fn a_live_trial_needs_the_pc_tests_and_a_plain_live_entry_does_not() {
     let live = |trial, dry_run| Request::Live {
-        build: SHA.into(),
+        build: Some(SHA.into()),
         trial,
         dry_run,
     };
@@ -612,8 +614,9 @@ fn a_live_trial_needs_the_pc_tests_and_a_plain_live_entry_does_not() {
     let r = ask(&mut pc, &mut g, live(true, false));
     assert!(r.ok, "{r:?}");
     assert_eq!(g.state.mode, Mode::Live);
-    // A live entry that is no trial does not read them.
+    // A live entry that is no trial (prod's, S8) does not read them.
     let (mut pc, mut g) = fresh(false);
+    g.state.lifecycle = prod_on(None, None);
     let r = ask(&mut pc, &mut g, live(false, true));
     assert!(r.ok, "{r:?}");
     assert!(r.detail.ends_with("; precheck ok"), "{}", r.detail);
@@ -625,7 +628,7 @@ fn a_live_trial_needs_the_pc_tests_and_a_plain_live_entry_does_not() {
 #[test]
 fn live_needs_an_installed_green_main_bundle() {
     let live = |trial| Request::Live {
-        build: SHA.into(),
+        build: Some(SHA.into()),
         trial,
         dry_run: false,
     };
@@ -649,13 +652,23 @@ fn live_needs_an_installed_green_main_bundle() {
     g.state
         .bundles
         .insert(SHA.into(), record(SHA, "main", Hil::Green));
+    // S8 (#11): before the cutover live is a trial; a plain live is refused.
     let r = handle(&mut pc, &mut g, live(false), INIT);
+    assert_eq!(
+        (r.ok, r.detail),
+        (
+            false,
+            format!("before the cutover live is a trial: live --build {SHA} --trial")
+        )
+    );
+    assert!(pc.calls().is_empty());
+    // A trial (the band there on purpose) enters, on its build.
+    let r = handle(&mut pc, &mut g, live(true), INIT);
     assert!(r.ok, "{r:?}");
     assert_eq!(g.state.mode, Mode::Live);
-    assert_eq!(g.state.pins.current.as_deref(), Some(SHA));
+    assert_eq!(g.state.active_bundle(), Some(SHA));
     assert_eq!(pc.bundle.as_deref(), Some(SHA));
     assert!(!pc.called(Call::RunnerStart));
-    // A trial (the band there on purpose) enters the same way.
     let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
     g.state
         .bundles
@@ -665,8 +678,10 @@ fn live_needs_an_installed_green_main_bundle() {
     assert_eq!(g.state.mode, Mode::Live);
 }
 
+/// S8 (#11, design §3.4): a dev entry with a build runs it as the active
+/// bundle; the legacy pins mirror it and the way back (lane 2).
 #[test]
-fn dev_with_a_build_pins_it() {
+fn dev_with_a_build_runs_it() {
     let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Event));
     let build = |sha: &str| Request::Dev {
         build: Some(sha.into()),
@@ -687,6 +702,7 @@ fn dev_with_a_build_pins_it() {
             previous: Some(OTHER.into()),
         }
     );
+    assert_eq!(g.state.active_bundle(), Some(SHA));
     assert_eq!(pc.bundle.as_deref(), Some(SHA));
 }
 

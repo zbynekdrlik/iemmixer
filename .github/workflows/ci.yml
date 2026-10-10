@@ -459,6 +459,9 @@ jobs:
       - name: OpenSSH default shell self-test (a test key, task folder and elevated root; the probe through cmd.exe, #15)
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/iem-pc/Test-IemSshShell.ps1
+      - name: Cutover self-test (the predecessor's autostarts exported, disabled and re-enabled, the guard's logon trigger; test task folders, an HKCU test key, a temp elevated root; S8, #11)
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/iem-pc/Test-IemCutover.ps1
       - name: Rust toolchain (rust-toolchain.toml)
         run: rustup toolchain install
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -532,9 +535,10 @@ jobs:
           # The soak client rides along (S7) but is not required: older bundles still install.
           $exes = 'iem-engine', 'iem-server', 'iemmixer-guard', 'iemmode', 'iem-tray', 'iem-migrate', 'iem-soakclient' | ForEach-Object { "target/release/$_.exe" }
           Copy-Item -LiteralPath $exes -Destination $b
-          # IemSshShell.psm1 (#15, iempc ssh-shell) and IemHil.psm1 (#10, HIL v2's checks, which
-          # hil-v1.ps1 imports from its own folder) are not required: older bundles still install.
-          Copy-Item -LiteralPath scripts/iem-pc/hil-v1.ps1, scripts/iem-pc/IemPc.psm1, scripts/iem-pc/IemSshShell.psm1, scripts/iem-pc/IemHil.psm1 -Destination $b
+          # IemSshShell.psm1 (#15, iempc ssh-shell), IemHil.psm1 (#10, HIL v2's checks, which
+          # hil-v1.ps1 imports from its own folder) and IemCutover.psm1 (#11, iempc cutover) are
+          # not required: older bundles still install.
+          Copy-Item -LiteralPath scripts/iem-pc/hil-v1.ps1, scripts/iem-pc/IemPc.psm1, scripts/iem-pc/IemSshShell.psm1, scripts/iem-pc/IemHil.psm1, scripts/iem-pc/IemCutover.psm1 -Destination $b
           Copy-Item -LiteralPath crates/iem-engine/LICENSE -Destination (Join-Path $b 'LICENSE-iem-engine')
           # The S1c tuning modules, one level deep (bundle names allow tuning/<name> only).
           if (Test-Path -LiteralPath scripts/pc-tuning) {
@@ -550,7 +554,9 @@ jobs:
           }
           if (-not $version) { throw 'no [workspace.package] version in Cargo.toml' }
           $branch = if ($env:GITHUB_REF -like 'refs/heads/*') { $env:GITHUB_REF.Substring(11) } else { 'pr' }
-          [ordered]@{ sha = $env:GITHUB_SHA; branch = $branch; version = $version; run = [int64]$env:GITHUB_RUN_ID } | ConvertTo-Json |
+          # guard_lifecycle (S8 lane 5, #11): this build's guard keeps the lifecycle; in prod
+          # `activate` refuses a bundle without it (bundle::keeps_lifecycle).
+          [ordered]@{ sha = $env:GITHUB_SHA; branch = $branch; version = $version; run = [int64]$env:GITHUB_RUN_ID; guard_lifecycle = 1 } | ConvertTo-Json |
             Set-Content -Encoding utf8NoBOM -LiteralPath (Join-Path $b 'manifest.json')
           $lines = Get-ChildItem -LiteralPath $b -File -Recurse | Sort-Object FullName | ForEach-Object {
             '{0}  {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.FullName.Substring($b.Length + 1).Replace('\', '/')

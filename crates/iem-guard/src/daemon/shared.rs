@@ -54,6 +54,10 @@ pub struct View {
     pub engine: Option<EngineStatus>,
     /// `GuardState.last_switch` (`Reply.last_switch`, S7).
     pub last_switch: Option<LastSwitch>,
+    /// The lifecycle is prod (`lifecycle::is_prod`, S8 lane 5): "ide event"
+    /// waits for a switch to live instead of pre-empting it, and live counts
+    /// as its end.
+    pub prod: bool,
     /// Replies the daemon thread handed to the pipe's threads…
     pub replies_sent: u64,
     /// …and those the pipe's threads have written (or found their client
@@ -84,14 +88,20 @@ impl View {
     }
 
     /// "ide event" once no switch runs: done when the last switch ended in
-    /// `event`.
+    /// `event`, or in prod in `live` (S8 lane 5: after the cutover iemmixer
+    /// serves the band at an event, so a switch to live is what "ide event"
+    /// waits for, never what it cancels).
     pub fn event_reply(&self, note: &str) -> Reply {
-        let ok =
-            self.running.is_none() && self.mode == Mode::Event && self.last == Some(Outcome::Done);
+        let target = if self.prod && self.mode == Mode::Live {
+            Mode::Live
+        } else {
+            Mode::Event
+        };
+        let ok = self.running.is_none() && self.mode == target && self.last == Some(Outcome::Done);
         let how = if self.last == Some(Outcome::NeedsOwner) && !self.last_owner.is_empty() {
             needs_owner_text("event", mode_name(self.mode), &self.last_owner)
         } else {
-            format!("event: {}", outcome_text(self.last))
+            format!("{}: {}", mode_name(target), outcome_text(self.last))
         };
         self.reply(ok, &format!("{note}; {how}"))
     }
@@ -100,7 +110,7 @@ impl View {
 /// Why a request is refused while a switch runs.
 pub fn while_switching(req: &Request) -> &'static str {
     match req {
-        Request::Dev { .. } | Request::Live { .. } => "busy",
+        Request::Dev { .. } | Request::Live { .. } | Request::Cutover { .. } => "busy",
         _ => "switching",
     }
 }
@@ -183,25 +193,37 @@ impl Shared {
     /// run is queued behind them (#42).
     pub fn route(&self, req: &Request) -> Route {
         let mut v = self.lock();
-        if matches!(req, Request::Event { dry_run: false }) {
+        if matches!(req, Request::Event { dry_run: false, .. }) {
             v.fence += 1;
         }
         match (req, v.running) {
             (Request::Subscribe, _) => Route::Subscribe,
             (Request::Status, _) => Route::Now(v.reply(true, &v.status)),
-            (Request::Event { dry_run: false }, Some(Mode::Event)) => {
+            (Request::Event { dry_run: false, .. }, Some(Mode::Event)) => {
                 Route::AwaitEnd("already switching to event")
             }
-            (Request::Event { dry_run: false }, Some(_)) => {
+            // In prod "ide event" waits for a switch to live (S8 lane 5): it
+            // is the band's system, which an event keeps (`lifecycle::on_event`);
+            // the button (no signal) pre-empts it as before the cutover.
+            (
+                Request::Event {
+                    dry_run: false,
+                    signal: true,
+                },
+                Some(Mode::Live),
+            ) if v.prod => Route::AwaitEnd("waited for the switch to live in prod"),
+            (Request::Event { dry_run: false, .. }, Some(_)) => {
                 self.cancel.preempt();
                 Route::AwaitEnd("pre-empted the switch in progress")
             }
-            (Request::Event { dry_run: false }, None) => {
+            (Request::Event { dry_run: false, .. }, None) => {
                 // A request queued before it pre-empts at its start.
                 self.cancel.preempt();
                 Route::Queue(v.generation())
             }
-            (Request::Dev { .. } | Request::Live { .. }, Some(_)) if v.start_checks => {
+            (Request::Dev { .. } | Request::Live { .. } | Request::Cutover { .. }, Some(_))
+                if v.start_checks =>
+            {
                 Route::Queue(v.generation())
             }
             (_, Some(_)) => Route::Now(v.reply(false, while_switching(req))),
@@ -289,6 +311,21 @@ impl Shared {
     pub fn await_replies(&self, limit: Duration) -> bool {
         let v = self.wait_while(limit, |v| v.replies_done < v.replies_sent);
         v.replies_done >= v.replies_sent
+    }
+
+    /// "Ide event"'s own switch to live in prod (S8 lane 5,
+    /// `lifecycle::OnEvent::Live`), claimed under the view's lock before
+    /// anything is read for it: the token is cleared (a pre-emption routed
+    /// before this, another "ide event" or the button, is answered by the
+    /// queue as the switch's end or runs after it) and the view shows the
+    /// switch to live, so an "ide event" routed from now on waits for it and
+    /// never pre-empts it. Its `begin` (or the event plan when the pin may
+    /// not go live) follows.
+    pub fn claim_live(&self) {
+        self.update(|v| {
+            self.cancel.clear();
+            v.running = Some(Mode::Live);
+        });
     }
 
     /// A switch into dev or live is about to end. Under the view's lock:

@@ -117,7 +117,7 @@ fn activate_in_an_idle_event_hands_over_and_leaves_reaper_and_the_app_alone() {
     assert_eq!(pc.excluded, [(SHA.to_owned(), vec![OTHER.to_owned()])]);
     assert_eq!(pc.bundle.as_deref(), Some(SHA));
     assert_eq!(
-        (g.state.mode, g.state.pins.current.as_deref()),
+        (g.state.mode, g.state.active_bundle()),
         (Mode::Event, Some(SHA))
     );
     assert_eq!(
@@ -132,7 +132,7 @@ fn activate_in_an_idle_event_hands_over_and_leaves_reaper_and_the_app_alone() {
     let mut pc = FakePc::new(band_up());
     assert_eq!(start(&mut pc, &mut g, 0), Some(Outcome::Done));
     assert_eq!(
-        (g.state.mode, g.state.pins.current.as_deref()),
+        (g.state.mode, g.state.active_bundle()),
         (Mode::Event, Some(SHA))
     );
     assert_eq!(pc.bundle.as_deref(), Some(SHA));
@@ -193,7 +193,7 @@ fn activate_in_event_is_refused_while_the_guard_is_not_idle() {
     assert!(steps(&pc).is_empty(), "{:?}", pc.calls());
     assert!(!bin_guard.exists());
     assert_eq!(
-        (g.state.pins.current.as_deref(), g.handover.as_ref()),
+        (g.state.active_bundle(), g.handover.as_ref()),
         (Some(OTHER), None)
     );
     // Idle again: a bundle that is not installed is named.
@@ -232,7 +232,7 @@ fn activate_in_live_is_refused() {
     );
     assert!(steps(&pc).is_empty(), "{:?}", pc.calls());
     assert!(pc.excluded.is_empty());
-    assert_eq!(g.state.pins.current, None);
+    assert_eq!(g.state.active_bundle(), None);
 }
 
 /// Every reply names the build of the guard that answered, so a hand-over
@@ -298,7 +298,7 @@ fn activate_offline_in_an_idle_event_copies_pins_and_starts_no_guard() {
     // Saved: the guard the next iemmode call starts finds the pin.
     let back = Guard::open(dir.path(), SiteConf::default(), fixed(T0));
     assert_eq!(
-        (back.state.mode, back.state.pins.current.as_deref()),
+        (back.state.mode, back.state.active_bundle()),
         (Mode::Event, Some(SHA))
     );
     // Exclusions that fail alarm (the alarm is kept for the next guard);
@@ -316,7 +316,7 @@ fn activate_offline_in_an_idle_event_copies_pins_and_starts_no_guard() {
             "Defender exclusions for {SHA}: the exclude task ended with 1"
         )]
     );
-    assert_eq!(back.state.pins.current.as_deref(), Some(SHA));
+    assert_eq!(back.state.active_bundle(), Some(SHA));
 }
 
 #[test]
@@ -363,7 +363,7 @@ fn activate_offline_is_refused_while_a_guard_runs_or_the_event_is_not_idle() {
     // Nothing was copied, pinned or excluded.
     assert!(steps(&pc).is_empty(), "{:?}", pc.calls());
     assert!(!bin_guard.exists());
-    assert_eq!(g.state.pins.current.as_deref(), Some(OTHER));
+    assert_eq!(g.state.active_bundle(), Some(OTHER));
 }
 
 #[test]
@@ -572,7 +572,10 @@ fn ide_event_ends_the_site_check_at_once() {
     let fired = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(200));
         // No switch runs: "ide event" pre-empts the token and queues.
-        let route = shared.route(&Request::Event { dry_run: false });
+        let route = shared.route(&Request::Event {
+            dry_run: false,
+            signal: false,
+        });
         (route, Instant::now())
     });
     let r = handle(

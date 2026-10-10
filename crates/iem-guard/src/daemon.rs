@@ -26,8 +26,9 @@
 //! runner), `requests` (the requests and the rehearsal), `activation` (bundle
 //! and site installs, activations), `hil` (HIL's jobs, test signal and
 //! injections), `watch` (the once-a-second watch), `startup` (the start and
-//! `--direct`) and `reaper` (the REAPER handover's first part). Here: the
-//! [`Guard`], its files and alarms, and the request loop.
+//! `--direct`), `reaper` (the REAPER handover's first part) and `cutover`
+//! (the cutover's steps and unwind, S8 lane 2).
+//! Here: the [`Guard`], its files and alarms, and the request loop.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -49,6 +50,7 @@ use crate::state::{self, GuardState};
 use crate::switch_log::Laps;
 
 mod activation;
+mod cutover;
 mod hil;
 mod reaper;
 mod reply;
@@ -94,10 +96,9 @@ pub const PARKED_ALARM: &str = "the engine's stream is parked outside a HIL job:
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SiteConf {
     pub on_pref_fail: PrefFail,
-    /// The card outputs a HIL test signal may reach.
+    /// The card outputs a HIL test signal may reach. (Before or after the
+    /// cutover is no site setting: `GuardState.lifecycle`, S8.)
     pub hil_tx: Vec<u16>,
-    /// After the cutover (S8): a crash loop falls back to the previous pin.
-    pub prod: bool,
 }
 
 impl SiteConf {
@@ -105,19 +106,17 @@ impl SiteConf {
         Self {
             on_pref_fail: g.on_pref_fail,
             hil_tx: g.hil_tx.clone(),
-            prod: false,
         }
     }
 }
 
 impl Default for SiteConf {
     /// Without a site (`iemmixer-guard install` of the first bundle): the
-    /// choice recorded on #9, no HIL outputs, before the cutover.
+    /// choice recorded on #9, no HIL outputs.
     fn default() -> Self {
         Self {
             on_pref_fail: PrefFail::StartReaperWithAlarm,
             hil_tx: Vec::new(),
-            prod: false,
         }
     }
 }
@@ -310,6 +309,7 @@ impl Guard {
             v.mode = self.state.mode;
             v.switching.clone_from(&self.state.switching);
             v.last_switch.clone_from(&self.state.last_switch);
+            v.prod = crate::lifecycle::is_prod(&self.state.lifecycle);
             v.alarms = self.alarms.all().to_vec();
             v.status = status;
             v.engine = engine;
@@ -460,7 +460,13 @@ pub fn serve_requests(pc: &mut dyn Pc, g: &mut Guard, jobs: &Receiver<Job>) {
 #[cfg(test)]
 mod activation_tests;
 #[cfg(test)]
+mod cutover_tests;
+#[cfg(test)]
+mod event_tests;
+#[cfg(test)]
 mod hil_tests;
+#[cfg(test)]
+mod lifecycle_tests;
 #[cfg(test)]
 mod probe_tests;
 #[cfg(test)]
@@ -471,6 +477,8 @@ mod record_tests;
 mod request_tests;
 #[cfg(test)]
 mod runner_tests;
+#[cfg(test)]
+mod shadow_tests;
 #[cfg(test)]
 mod start_tests;
 #[cfg(test)]

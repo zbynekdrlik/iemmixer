@@ -123,6 +123,18 @@ fn identity_problems(pc: &WinPc, sha: &str, c: &Cancel) -> R<(Vec<String>, Optio
     Ok((bad, note))
 }
 
+/// The post-cutover member page (S8 lane 2): LAN 80's `/` and
+/// `/api/members` (`decide::member_page_problem`).
+pub(super) fn member_page(pc: &WinPc) -> R<()> {
+    let read = |path: &str| get(pc, &decide::local_url(path)).map_err(StepError::Failed);
+    let index = read("/")?;
+    let members = read("/api/members")?;
+    match decide::member_page_problem((index.0, &index.1), (members.0, &members.1)) {
+        None => Ok(()),
+        Some(why) => Err(StepError::Failed(why)),
+    }
+}
+
 /// LAN 443 against the certificate the server's config names.
 fn lan_443(pc: &WinPc, sha: &str, c: &Cancel) -> R<Option<String>> {
     let config_path = &pc.s.pc.server_config;

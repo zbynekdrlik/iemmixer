@@ -9,6 +9,7 @@ use std::sync::mpsc::SyncSender;
 use tracing::info;
 
 use super::activation::{activate, install_site};
+use super::cutover::cutover;
 use super::hil::{
     inject_fault, inject_park, inject_seh, job_begin, job_end, report, runner_stop, test_signal,
 };
@@ -18,10 +19,11 @@ use super::{
     Generation, Guard, Outcome, View, alarm_test, install_bundle, mode_name, run_switch,
     send_notices, status_text, while_switching,
 };
-use crate::bundle;
+use crate::lifecycle::{self, OnEvent};
 use crate::pc::{Pc, PrefSeen};
-use crate::plan::{Mode, OnError, Step, plan};
+use crate::plan::{Health, Mode, OnError, Step, plan};
 use crate::proto::{Reply, Request};
+use crate::shadow;
 
 /// A request from the pipe with the switch generation it saw, and where
 /// its reply goes.
@@ -38,11 +40,18 @@ pub struct Job {
 fn stale(req: &Request, seen: Generation, v: &View) -> Option<Reply> {
     match req {
         Request::Status | Request::Subscribe => None,
-        Request::Dev { .. } | Request::Live { .. } => {
+        Request::Dev { .. } | Request::Live { .. } | Request::Cutover { .. } => {
             (seen.fence != v.fence).then(|| v.reply(false, &fenced(seen, v)))
         }
         _ if seen.epoch == v.epoch => None,
-        Request::Event { dry_run: false } => Some(v.event_reply("a switch ran meanwhile")),
+        // In prod the button runs, the event plan: "ide event"'s switch to
+        // live that ran meanwhile cleared its pre-emption as it claimed the
+        // view (`Shared::claim_live`), and live is no end for the button.
+        Request::Event {
+            dry_run: false,
+            signal: false,
+        } if v.prod => None,
+        Request::Event { dry_run: false, .. } => Some(v.event_reply("a switch ran meanwhile")),
         _ => Some(v.reply(false, while_switching(req))),
     }
 }
@@ -64,11 +73,11 @@ fn fenced(seen: Generation, v: &View) -> String {
 
 /// A dev or live entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Entry {
-    to: Mode,
-    build: Option<String>,
-    trial: bool,
-    dry_run: bool,
+pub(super) struct Entry {
+    pub(super) to: Mode,
+    pub(super) build: Option<String>,
+    pub(super) trial: bool,
+    pub(super) dry_run: bool,
 }
 
 /// Handles one request on the daemon thread.
@@ -84,8 +93,9 @@ pub fn handle(pc: &mut dyn Pc, g: &mut Guard, req: Request, seen: Generation) ->
     let (ok, detail) = match req {
         Request::Status => (true, status_text(g)),
         Request::Subscribe => (true, "subscriptions are served by the pipe".to_owned()),
-        Request::Event { dry_run: true } => dry_event(pc),
-        Request::Event { dry_run: false } => event_now(pc, g),
+        // What it means is the lifecycle's (S8 lane 3: in prod "ide event"
+        // keeps the band's system; the button is the event plan).
+        Request::Event { dry_run, signal } => event(pc, g, dry_run, signal),
         Request::Dev { build, dry_run } => entry(
             pc,
             g,
@@ -105,11 +115,12 @@ pub fn handle(pc: &mut dyn Pc, g: &mut Guard, req: Request, seen: Generation) ->
             g,
             Entry {
                 to: Mode::Live,
-                build: Some(build),
+                build,
                 trial,
                 dry_run,
             },
         ),
+        Request::Cutover { build, dry_run } => cutover(pc, g, &build, dry_run),
         Request::Install { zip } => install_bundle(g, Path::new(&zip)),
         Request::Activate { sha } => activate(pc, g, &sha),
         Request::TestSignal {
@@ -166,6 +177,57 @@ pub(super) fn dry_event(pc: &mut dyn Pc) -> (bool, String) {
     (true, format!("dry run: {}", plan_text(&steps)))
 }
 
+/// `iemmode event [--signal] [--dry-run]` (`lifecycle::on_event`): the
+/// event plan; in prod "ide event" (`--signal`) instead goes live on the pin
+/// from maintenance, or leaves a healthy live as it is (S8 lane 3; the
+/// rollback dropped, the owner's ROZHODNUTÉ on #11: in prod the button is
+/// the event plan and the PC stays prod).
+fn event(pc: &mut dyn Pc, g: &mut Guard, dry_run: bool, signal: bool) -> (bool, String) {
+    // The pipe pre-empted the token as it routed this request: that
+    // pre-emption is this request's, whatever it does (a stay, a refusal),
+    // never the next switch's.
+    if !dry_run {
+        g.cancel.clear();
+    }
+    let lc = g.state.lifecycle.clone();
+    let on = lifecycle::on_event(&lc, g.state.mode, signal, || {
+        pc.engine_health() == Ok(Health::Healthy)
+    });
+    info!("event (signal {signal}) in {lc:?}: {on:?}");
+    match on {
+        OnEvent::Plan if dry_run => dry_event(pc),
+        OnEvent::Plan => event_now(pc, g),
+        OnEvent::Stay => (
+            true,
+            format!(
+                "ide event in prod: iemmixer already serves the band live ({}); nothing switched",
+                lifecycle::status(&lc).unwrap_or_default()
+            ),
+        ),
+        OnEvent::Live => {
+            // A second "ide event" routed from here on waits for this switch
+            // to live and never cancels it (S8 lane 5).
+            if !dry_run {
+                g.shared.claim_live();
+            }
+            let ask = Entry {
+                to: Mode::Live,
+                build: None,
+                trial: false,
+                dry_run,
+            };
+            let (ok, detail) = entry(pc, g, ask);
+            if ok || dry_run || g.state.mode != Mode::Dev {
+                return (ok, detail);
+            }
+            // The pin may not go live (refused before any step): REAPER
+            // serves this event.
+            let (ok, plan) = event_now(pc, g);
+            (ok, format!("{detail}; {plan}"))
+        }
+    }
+}
+
 /// "ide event": the event plan from the current mode (in `event` its
 /// checks, plus a restart of what runs but does not serve).
 pub(super) fn event_now(pc: &mut dyn Pc, g: &mut Guard) -> (bool, String) {
@@ -177,53 +239,60 @@ pub(super) fn event_now(pc: &mut dyn Pc, g: &mut Guard) -> (bool, String) {
     )
 }
 
-/// Why the entry's build may not run: not installed, or (live) not a green
-/// `main` bundle.
-fn build_refusal(g: &Guard, e: &Entry) -> Option<String> {
-    let sha = e.build.as_ref()?;
-    let Some(rec) = g.state.bundles.get(sha) else {
-        return Some(format!("bundle {sha} is not installed"));
-    };
-    if e.to == Mode::Live {
-        bundle::may_go_live(rec).err()
-    } else {
-        None
-    }
-}
-
 /// A dev or live entry runs at once: only the owner's signal decides
 /// whether the PC may change, so no step waits for a quiet stage or refuses
-/// on activity (#38, owner 2026-10-06).
-fn entry(pc: &mut dyn Pc, g: &mut Guard, e: Entry) -> (bool, String) {
-    if let Some(why) = build_refusal(g, &e) {
-        return (false, why);
-    }
+/// on activity (#38, owner 2026-10-06). The lifecycle's gates decide
+/// whether it may run and on which build (S8: `lifecycle::entry`); the
+/// build becomes the active bundle, never the pin, and the lifecycle's
+/// change (a maintenance build, the pin it ends on) holds only once the
+/// entry is in.
+pub(super) fn entry(pc: &mut dyn Pc, g: &mut Guard, e: Entry) -> (bool, String) {
+    let ask = lifecycle::Ask {
+        to: e.to,
+        build: e.build.as_deref(),
+        trial: e.trial,
+    };
+    let entered = match lifecycle::entry(&g.state.lifecycle, ask, |sha| g.state.bundles.get(sha)) {
+        Ok(entered) => entered,
+        Err(why) => return (false, why),
+    };
     if e.dry_run {
-        return dry_entry(pc, g, &e);
+        return dry_entry(pc, g, &e, entered.runs, entered.note);
     }
-    if let Some(sha) = e.build.as_deref() {
-        g.state.pins.promote(sha);
-        pc.set_bundle(Some(sha));
+    if let Some(sha) = entered.runs {
+        pc.set_bundle(Some(sha.as_str()));
+        g.state.set_active(&sha);
     }
     g.trial = e.trial;
     let from = g.state.mode;
     let out = run_switch(pc, g, from, e.to);
-    (
-        out == Outcome::Done && g.state.mode == e.to,
-        switch_text(e.to, out, g.state.mode, &g.owner_failed),
-    )
+    let done = out == Outcome::Done && g.state.mode == e.to;
+    if done {
+        g.state.lifecycle = entered.lifecycle;
+        if let Some(n) = entered.note {
+            g.info(n);
+        }
+        g.save();
+    }
+    (done, switch_text(e.to, out, g.state.mode, &g.owner_failed))
 }
 
 /// `dev|live --dry-run`: the plan and the read-only checks (the precheck's
 /// bundle, PWA notification subscriptions, foreign engine and app exe),
-/// nothing changed.
-fn dry_entry(pc: &mut dyn Pc, g: &mut Guard, e: &Entry) -> (bool, String) {
+/// nothing changed. `runs`: the build the entry would run; `note`: what it
+/// would decide about the pin.
+fn dry_entry(
+    pc: &mut dyn Pc,
+    g: &mut Guard,
+    e: &Entry,
+    runs: Option<String>,
+    note: Option<String>,
+) -> (bool, String) {
     // `trial` decides only the precheck (below), never a step of the plan.
-    let steps = plan(e.to, &pc.facts());
-    let bundle = e
-        .build
-        .clone()
-        .or_else(|| g.state.pins.current.clone())
+    let steps = lifecycle::plan(&g.state.lifecycle, e.to, &pc.facts());
+    let steps = shadow::plan(steps, g.state.mode, e.to, pc.shadows());
+    let bundle = runs
+        .or_else(|| g.state.active_bundle().map(str::to_owned))
         .unwrap_or_else(|| "none".to_owned());
     let check = pc.precheck(e.to, e.trial);
     let verdict = match &check {
@@ -231,10 +300,11 @@ fn dry_entry(pc: &mut dyn Pc, g: &mut Guard, e: &Entry) -> (bool, String) {
         Ok(Some(note)) => format!("ok; {note}"),
         Err(why) => why.to_string(),
     };
+    let pin = note.map_or_else(String::new, |n| format!("; {n}"));
     (
         check.is_ok(),
         format!(
-            "dry run: {}; bundle {bundle}; precheck {verdict}",
+            "dry run: {}; bundle {bundle}; precheck {verdict}{pin}",
             plan_text(&steps)
         ),
     )

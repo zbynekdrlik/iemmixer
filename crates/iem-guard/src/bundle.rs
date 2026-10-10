@@ -1,4 +1,5 @@
-//! Bundles, their records and the pins (S6 design note §5.5; P5/G8).
+//! Bundles, their records and the pins an older guard kept (S6 design note
+//! §5.5; P5/G8; the pin itself is `lifecycle`'s since S8).
 //!
 //! A bundle is one commit's binaries and scripts, zipped by CI with a
 //! `manifest.json` and a `SHA256SUMS`, and attested by digest. This module
@@ -31,6 +32,10 @@ pub const REQUIRED: [&str; 9] = [
     MANIFEST,
 ];
 
+/// What a bundle's `guard_lifecycle` names when its guard keeps the S8
+/// lifecycle (lane 5): written by the CI `bundle` job.
+pub const GUARD_LIFECYCLE: u32 = 1;
+
 /// `manifest.json`, written by the CI `bundle` job.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Manifest {
@@ -39,6 +44,11 @@ pub struct Manifest {
     pub version: String,
     /// The CI run id.
     pub run: u64,
+    /// The bundle's guard keeps the S8 lifecycle (lane 5): its state's
+    /// `lifecycle` survives the guard's saves. Additive: a bundle built
+    /// before the field names none and reads as not aware.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard_lifecycle: Option<u32>,
 }
 
 impl Manifest {
@@ -177,6 +187,13 @@ pub fn verify(
     if bad.is_empty() { Ok(()) } else { Err(bad) }
 }
 
+/// Whether the bundle's guard keeps the S8 lifecycle (its manifest names
+/// [`GUARD_LIFECYCLE`] or later): an older guard that takes over drops it on
+/// its next save, and prod reads back as trial.
+pub fn keeps_lifecycle(m: &Manifest) -> bool {
+    m.guard_lifecycle.is_some_and(|v| v >= GUARD_LIFECYCLE)
+}
+
 /// `live --build` takes only a bundle from `main` whose HIL is green (G8).
 pub fn may_go_live(r: &Record) -> Result<(), String> {
     if r.branch != "main" {
@@ -188,35 +205,18 @@ pub fn may_go_live(r: &Record) -> Result<(), String> {
     Ok(())
 }
 
-/// The live pins: `current` runs, `previous` is the revert target (and the
-/// engine a prod crash loop falls back to, design §5.4).
+/// The pins as a guard before S8 kept them: it promoted every entry's and
+/// every activation's build, so `current` was the active bundle. Kept in
+/// `GuardState.pins` so a state such a guard saved still names its active
+/// bundle (`GuardState::active_bundle`), and written as a mirror of the
+/// active bundle and the way back (`GuardState::set_active`) so an older
+/// guard that takes over runs the active bundle; the pin itself is
+/// `lifecycle::Prod`'s.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Pins {
     pub current: Option<String>,
     pub previous: Option<String>,
-}
-
-impl Pins {
-    /// `sha` becomes current and the old current previous; promoting the
-    /// current pin again changes nothing.
-    pub fn promote(&mut self, sha: &str) {
-        if self.current.as_deref() == Some(sha) {
-            return;
-        }
-        self.previous = self.current.replace(sha.to_owned());
-    }
-
-    /// Back to the previous pin, which becomes current (no previous is left);
-    /// returns it.
-    pub fn revert(&mut self) -> Result<String, String> {
-        let previous = self
-            .previous
-            .take()
-            .ok_or_else(|| "no previous pin to revert to".to_owned())?;
-        self.current = Some(previous.clone());
-        Ok(previous)
-    }
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -249,6 +249,7 @@ mod tests {
             branch: "dev".into(),
             version: "2.0.0-dev.9".into(),
             run: 42,
+            guard_lifecycle: None,
         }
     }
 
@@ -506,6 +507,32 @@ mod tests {
         assert!(err.starts_with("manifest.json: "), "{err}");
     }
 
+    /// S8 lane 5: `guard_lifecycle` is additive: an older manifest reads as
+    /// a guard that does not keep the lifecycle and writes back as it was.
+    #[test]
+    fn the_manifest_names_a_guard_that_keeps_the_lifecycle() {
+        let json = format!(
+            r#"{{"sha":"{SHA}","branch":"dev","version":"2.0.0-dev.9","run":42,"guard_lifecycle":1}}"#
+        );
+        let m = Manifest::parse(&json).unwrap();
+        assert_eq!(m.guard_lifecycle, Some(GUARD_LIFECYCLE));
+        assert!(keeps_lifecycle(&m));
+        let later = Manifest {
+            guard_lifecycle: Some(GUARD_LIFECYCLE + 1),
+            ..manifest()
+        };
+        assert!(keeps_lifecycle(&later));
+        let zero = Manifest {
+            guard_lifecycle: Some(0),
+            ..manifest()
+        };
+        assert!(!keeps_lifecycle(&zero));
+        assert!(!keeps_lifecycle(&manifest()));
+        let older = serde_json::to_string(&manifest()).unwrap();
+        assert!(!older.contains("guard_lifecycle"), "{older}");
+        assert_eq!(Manifest::parse(&older).unwrap(), manifest());
+    }
+
     #[test]
     fn an_installed_record_waits_for_hil() {
         assert_eq!(
@@ -540,47 +567,6 @@ mod tests {
             may_go_live(&r("main", Hil::Red)),
             Err(format!("{SHA}: HIL Red; live needs green"))
         );
-    }
-
-    #[test]
-    fn pins_promote_and_revert() {
-        let mut p = Pins::default();
-        assert_eq!(p.revert(), Err("no previous pin to revert to".to_owned()));
-        p.promote("a");
-        assert_eq!(
-            p,
-            Pins {
-                current: Some("a".into()),
-                previous: None
-            }
-        );
-        p.promote("b");
-        assert_eq!(
-            p,
-            Pins {
-                current: Some("b".into()),
-                previous: Some("a".into())
-            }
-        );
-        // Promoting the current pin again keeps the revert target.
-        p.promote("b");
-        assert_eq!(
-            p,
-            Pins {
-                current: Some("b".into()),
-                previous: Some("a".into())
-            }
-        );
-        assert_eq!(p.revert(), Ok("a".to_owned()));
-        assert_eq!(
-            p,
-            Pins {
-                current: Some("a".into()),
-                previous: None
-            }
-        );
-        assert_eq!(p.revert(), Err("no previous pin to revert to".to_owned()));
-        assert_eq!(p.current.as_deref(), Some("a"));
     }
 
     #[test]

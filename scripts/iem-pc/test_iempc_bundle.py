@@ -344,7 +344,7 @@ class ActivateTests(Base):
         self.pc.replies[("activate", SHA)] = lambda: (self.flag(), self.ACTIVATED)[1]
         code, docs, _ = self.run_main("activate", "--sha", SHA)
         self.assertEqual(code, ip.PREEMPTED)
-        self.assertEqual(self.pc.calls, [("iemmode.exe", ["activate", SHA], "finish"), ("iemmode.exe", ["event"], "ignore")])
+        self.assertEqual(self.pc.calls, [("iemmode.exe", ["activate", SHA], "finish"), ("iemmode.exe", ["event", "--signal"], "ignore")])
         self.assertEqual(docs[0], {"event": "ide event (flag file)", "action": "iempc event"})
 
     def test_a_new_flag_during_a_status_read_abandons_it_and_runs_the_event_path(self) -> None:
@@ -482,7 +482,7 @@ class OfflineActivateTests(Base):
         self.pc.replies[("quit",)] = lambda: (self.flag(), self.QUIT)[1]
         code, _, _ = self.run_main("activate", "--sha", SHA, "--offline")
         self.assertEqual(code, ip.PREEMPTED)
-        self.assertEqual(self.pc.calls, [("iemmode.exe", ["quit"], "finish"), ("iemmode.exe", ["event"], "ignore")])
+        self.assertEqual(self.pc.calls, [("iemmode.exe", ["quit"], "finish"), ("iemmode.exe", ["event", "--signal"], "ignore")])
 
     def test_a_new_flag_during_the_offline_step_lets_it_finish_then_runs_the_event_path(self) -> None:
         self.pc.replies[("activate", SHA)] = lambda: (self.flag(), self.OFFLINE)[1]
@@ -491,6 +491,38 @@ class OfflineActivateTests(Base):
         self.assertEqual([(c[0], c[1][0], c[2]) for c in self.pc.calls],
                          [("iemmode.exe", "quit", "finish"), ("iemmixer-guard.exe", "activate", "finish"),
                           ("iemmode.exe", "event", "ignore")])
+
+    def older_bundle(self) -> None:
+        """The fetched bundle built before S8 lane 5: its manifest names no
+        guard_lifecycle, so its own guard would drop the lifecycle."""
+        shutil.rmtree(ip.bundle_dir(SHA))
+        self.gh.artifact = make_zip(self.tmp / "artifact-older" / f"iemmixer-{SHA}.zip",
+                                    manifest={"sha": SHA, "branch": "dev", "version": "2.0.0-dev.9", "run": RUN})
+        self.fetched()
+
+    def test_after_the_cutover_an_older_bundle_is_never_activated_offline(self) -> None:
+        """S8 lane 5 (the cross-lane review, finding 2c): offline the bundle's
+        OWN guard activates, so the running guard's refusal never runs for a
+        bundle built before `guard_lifecycle`: its guard would drop the
+        lifecycle and lose prod. This box refuses it, before any quit, unless
+        `iemmode status` says the PC is before the cutover; an unreadable
+        lifecycle refuses too."""
+        self.older_bundle()
+        prod = (0, json.dumps({"ok": True, "mode": "live", "alarms": [], "guard_build": SHA2,
+                               "detail": f"mode live; bundle {SHA2}; prod since 1790000000: pin {SHA2}, previous none"}))
+        for reply in (prod, ActivateTests.UNREACHABLE):
+            self.pc.calls.clear()
+            self.pc.replies[("status",)] = reply
+            code, _, err = self.run_main("activate", "--sha", SHA, "--offline")
+            self.assertEqual(code, 1, err)
+            self.assertIn("predates the lifecycle", err)
+            self.assertEqual(self.pc.calls, [("iemmode.exe", ["status"], "abandon")])
+        # Before the cutover it activates as always.
+        self.pc.calls.clear()
+        self.pc.replies[("status",)] = ActivateTests.status(SHA)
+        code, _, err = self.run_main("activate", "--sha", SHA, "--offline")
+        self.assertEqual(code, 0, err)
+        self.assertEqual([c[1][0] for c in self.pc.calls], ["status", "quit", "activate", "status"])
 
     def test_a_new_flag_while_the_guard_ends_runs_the_event_path(self) -> None:
         def count():

@@ -23,8 +23,9 @@ pub const START_WAIT: Duration = Duration::from_secs(15);
 /// …this often.
 pub const START_POLL: Duration = Duration::from_millis(500);
 
-pub const IEMMODE_USAGE: &str = "usage: iemmode status | event [--dry-run] [--direct]
-  | dev [--build SHA] [--dry-run] | live --build SHA [--trial] [--dry-run]
+pub const IEMMODE_USAGE: &str = "usage: iemmode status | event [--dry-run] [--direct] [--signal]
+  | dev [--build SHA] [--dry-run] | live [--build SHA] [--trial] [--dry-run]
+  | cutover --build SHA [--dry-run]
   | install <zip> | activate <sha> | test-signal <input> <dbfs> <ttl> [--listen]
   | report <sha> <green|red> <detail> | job-begin <run> | job-end <run>
   | install-site <file> | force-reopen | inject-fault | inject-seh | inject-park | runner-stop
@@ -130,12 +131,18 @@ pub fn parse(args: &[String]) -> Result<Cli, String> {
     match cmd.as_str() {
         "status" => bare(Request::Status),
         "event" => {
-            let f = Flags::read(&rest, &["--dry-run", "--direct"], &[])?;
+            // `--signal`: the owner's "ide event" (`iempc event`), which in
+            // prod never rolls back; `--direct` runs the event plan here,
+            // whatever it says.
+            let f = Flags::read(&rest, &["--dry-run", "--direct", "--signal"], &[])?;
             let dry_run = f.has("--dry-run");
             if f.has("--direct") {
                 Ok(Cli::Direct { dry_run })
             } else {
-                ask(Request::Event { dry_run })
+                ask(Request::Event {
+                    dry_run,
+                    signal: f.has("--signal"),
+                })
             }
         }
         "dev" => {
@@ -146,11 +153,20 @@ pub fn parse(args: &[String]) -> Result<Cli, String> {
             })
         }
         "live" => {
+            // The guard decides whether a build is needed (before the
+            // cutover: always; in prod it defaults to the pin).
             let f = Flags::read(&rest, &["--trial", "--dry-run"], &["--build"])?;
-            let build = f.value("--build").ok_or("live needs --build SHA")?;
             ask(Request::Live {
-                build: sha(build)?,
+                build: f.value("--build").map(sha).transpose()?,
                 trial: f.has("--trial"),
+                dry_run: f.has("--dry-run"),
+            })
+        }
+        "cutover" => {
+            let f = Flags::read(&rest, &["--dry-run"], &["--build"])?;
+            let build = f.value("--build").ok_or("cutover needs --build SHA")?;
+            ask(Request::Cutover {
+                build: sha(build)?,
                 dry_run: f.has("--dry-run"),
             })
         }
@@ -345,10 +361,33 @@ mod tests {
     #[test]
     fn every_command_parses() {
         assert_eq!(ask(&["status"]), Request::Status);
-        assert_eq!(ask(&["event"]), Request::Event { dry_run: false });
+        assert_eq!(
+            ask(&["event"]),
+            Request::Event {
+                dry_run: false,
+                signal: false,
+            }
+        );
         assert_eq!(
             ask(&["event", "--dry-run"]),
-            Request::Event { dry_run: true }
+            Request::Event {
+                dry_run: true,
+                signal: false,
+            }
+        );
+        assert_eq!(
+            ask(&["event", "--signal"]),
+            Request::Event {
+                dry_run: false,
+                signal: true,
+            }
+        );
+        assert_eq!(
+            ask(&["event", "--signal", "--dry-run"]),
+            Request::Event {
+                dry_run: true,
+                signal: true,
+            }
         );
         assert_eq!(
             ask(&["dev"]),
@@ -367,7 +406,7 @@ mod tests {
         assert_eq!(
             ask(&["live", "--trial", "--build", SHA]),
             Request::Live {
-                build: SHA.into(),
+                build: Some(SHA.into()),
                 trial: true,
                 dry_run: false
             }
@@ -375,8 +414,22 @@ mod tests {
         assert_eq!(
             ask(&["live", "--build", SHA, "--dry-run"]),
             Request::Live {
-                build: SHA.into(),
+                build: Some(SHA.into()),
                 trial: false,
+                dry_run: true
+            }
+        );
+        assert_eq!(
+            ask(&["cutover", "--build", SHA]),
+            Request::Cutover {
+                build: SHA.into(),
+                dry_run: false
+            }
+        );
+        assert_eq!(
+            ask(&["cutover", "--dry-run", "--build", SHA]),
+            Request::Cutover {
+                build: SHA.into(),
                 dry_run: true
             }
         );
@@ -439,6 +492,11 @@ mod tests {
             parse(&args(&["event", "--dry-run", "--direct"])),
             Ok(Cli::Direct { dry_run: true })
         );
+        // `iempc event` sends --signal; without a guard the event plan runs.
+        assert_eq!(
+            parse(&args(&["event", "--signal", "--direct"])),
+            Ok(Cli::Direct { dry_run: false })
+        );
     }
 
     #[test]
@@ -485,14 +543,32 @@ mod tests {
             err(&["dev", "--build", "abc"]),
             "\"abc\" is not a 40-digit lowercase commit SHA"
         );
-        assert_eq!(err(&["live"]), "live needs --build SHA");
-        assert_eq!(err(&["live", "--trial"]), "live needs --build SHA");
+        // S8 lane 2: the build is the guard's to require (before the
+        // cutover always; in prod `live` runs the pin).
+        for (args, trial) in [(&["live"][..], false), (&["live", "--trial"][..], true)] {
+            assert_eq!(
+                parse(&args.iter().map(|a| (*a).to_owned()).collect::<Vec<_>>()),
+                Ok(Cli::Ask(Request::Live {
+                    build: None,
+                    trial,
+                    dry_run: false
+                })),
+                "{args:?}"
+            );
+        }
         assert_eq!(
             err(&["live", "--build", &SHA.to_uppercase()]),
             format!(
                 "{:?} is not a 40-digit lowercase commit SHA",
                 SHA.to_uppercase()
             )
+        );
+        assert_eq!(err(&["cutover"]), "cutover needs --build SHA");
+        assert_eq!(err(&["cutover", "--dry-run"]), "cutover needs --build SHA");
+        assert_eq!(err(&["cutover", "--trial"]), "unknown argument \"--trial\"");
+        assert_eq!(
+            err(&["cutover", "--build", "abc"]),
+            "\"abc\" is not a 40-digit lowercase commit SHA"
         );
         assert_eq!(err(&["activate"]), "1 arguments expected, 0 given");
         assert_eq!(

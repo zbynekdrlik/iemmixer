@@ -17,9 +17,11 @@
 
 mod app;
 mod card;
+mod cutover;
 mod engine;
 mod procs;
 mod reaper;
+mod shadow;
 mod tasks;
 mod web;
 
@@ -35,6 +37,7 @@ use iem_win::window::{self, SessionEndWindow};
 use tracing::{info, warn};
 
 use crate::cancel::Cancel;
+use crate::cutover::Verb;
 use crate::handover::{AppExit, ReaperFacts, ReaperProcs};
 use crate::pc::{
     self, Audience, EngineSeen, Images, Kid, Pc, Ports, PrefSeen, Procs, R, Status, StepError,
@@ -205,6 +208,15 @@ impl Pc for WinPc {
         tasks::data(self, mode, c)
     }
 
+    fn shadows(&self) -> bool {
+        !self.s.pc.shadow.is_empty()
+    }
+
+    /// A wait: "ide event" ends it at once; it never fails otherwise.
+    fn shadow(&mut self, to: Mode, c: &Cancel) -> R<String> {
+        shadow::shadow(self, to, c)
+    }
+
     fn engine_start(&mut self, hold: bool, hil: bool) -> R<u32> {
         engine::start(self, hold, hil)
     }
@@ -229,8 +241,8 @@ impl Pc for WinPc {
         engine::health(self)
     }
 
-    fn server_start(&mut self, mode: Mode) -> R<u32> {
-        procs::server_start(self, mode)
+    fn server_start(&mut self, mode: Mode, prod: bool) -> R<u32> {
+        procs::server_start(self, mode, prod)
     }
 
     fn server_stop(&mut self, c: &Cancel) -> R<()> {
@@ -340,6 +352,35 @@ impl Pc for WinPc {
         tasks::exclude(self, sha, keep)
     }
 
+    fn autostarts_off(&mut self, export: &str) -> R<String> {
+        cutover::task(self, Verb::AutostartsOff, Some(export))
+    }
+
+    fn autostarts_on(&mut self, export: &str) -> R<String> {
+        cutover::task(self, Verb::AutostartsOn, Some(export))
+    }
+
+    fn guard_logon(&mut self, on: bool) -> R<()> {
+        let verb = if on { Verb::LogonOn } else { Verb::LogonOff };
+        cutover::task(self, verb, None).map(|_| ())
+    }
+
+    fn cutover_exports(&mut self) -> R<Vec<u64>> {
+        cutover::unrestored_exports(self)
+    }
+
+    fn server_config(&mut self) -> R<String> {
+        cutover::server_config(self)
+    }
+
+    fn write_server_config(&mut self, text: &str) -> R<()> {
+        cutover::write_server_config(self, text)
+    }
+
+    fn member_page(&mut self) -> R<()> {
+        web::member_page(self)
+    }
+
     /// `logon.result.json` in the elevated root's `tasks\out`; no file is
     /// no run yet.
     fn logon(&mut self) -> Option<crate::effects::tuning::Logon> {
@@ -435,7 +476,7 @@ mod tests {
         assert!(failed(pc.engine_start(true, false)));
         // No engine of ours runs: nothing to see, nothing connected.
         assert_eq!(pc.engine_seen(), None);
-        assert!(failed(pc.server_start(Mode::Dev)));
+        assert!(failed(pc.server_start(Mode::Dev, false)));
         assert!(matches!(
             pc.notify(Audience::Alarm, "t", "b"),
             Err(StepError::Failed(_))
@@ -444,5 +485,52 @@ mod tests {
         assert!(pc.bundle_dir().is_ok());
         pc.set_bundle(None);
         assert!(pc.bundle_dir().is_err());
+    }
+
+    /// The shadow import's effects (S8 lane 4, #11) on the CI's Windows
+    /// runner: whatever the run does (no bundle, no folder to run in, a
+    /// non-zero exit), the entry gets `Ok` and the history one line each,
+    /// appended, its folder made.
+    #[test]
+    fn every_shadow_run_is_one_history_line_and_never_a_failure() {
+        const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+        let root = tempfile::tempdir().unwrap();
+        let mut s = settings();
+        s.pc.root = root.path().to_path_buf();
+        let cmd = procs::system_exe("cmd.exe").to_string_lossy().into_owned();
+        s.pc.shadow = [cmd.as_str(), "/d", "/c", "exit 3"]
+            .map(str::to_owned)
+            .to_vec();
+        let mut pc = WinPc::new(s);
+        assert!(pc.shadows());
+        // No active bundle, then a bundle whose folder is missing, then one
+        // that is there: cmd ends with 3.
+        let first = pc.shadow(Mode::Dev, &Cancel::default()).unwrap();
+        pc.set_bundle(Some(SHA));
+        let second = pc.shadow(Mode::Live, &Cancel::default()).unwrap();
+        std::fs::create_dir_all(root.path().join("bundles").join(SHA)).unwrap();
+        let third = pc.shadow(Mode::Dev, &Cancel::default()).unwrap();
+        assert_eq!(
+            [first, second, third],
+            [
+                "shadow import (event→dev): not recorded (failed), see shadow\\history.jsonl",
+                "shadow import (event→live): not recorded (failed), see shadow\\history.jsonl",
+                "shadow import (event→dev): not recorded (exit), see shadow\\history.jsonl",
+            ]
+        );
+        let path = root.path().join("shadow").join("history.jsonl");
+        let text = std::fs::read_to_string(path).unwrap();
+        let lines: Vec<serde_json::Value> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 3, "{text}");
+        assert_eq!(lines[0]["why"], "no bundle is active");
+        assert_eq!(lines[0]["bundle"], serde_json::Value::Null);
+        assert_eq!(lines[1]["error"], "failed");
+        assert_eq!(lines[1]["bundle"], SHA);
+        assert_eq!(lines[2]["error"], "exit");
+        assert_eq!(lines[2]["exit"], 3);
+        assert_eq!(lines[2]["entry"], "event→dev");
     }
 }

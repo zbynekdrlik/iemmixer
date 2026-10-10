@@ -1,8 +1,11 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use super::*;
+use crate::daemon::{Route, Shared};
+use crate::proto::Request;
 
 /// Every `Pc` method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -18,6 +21,8 @@ pub enum Call {
     Tuning,
     TuningDrift,
     PrefCheck,
+    /// The report-only shadow import of an entry from event (S8 lane 4).
+    Shadow,
     Data,
     EngineStart,
     EngineReady,
@@ -48,6 +53,17 @@ pub enum Call {
     InjectPark,
     InstallSite,
     Exclude,
+    /// The cutover task's export and disable (S8 lane 2).
+    AutostartsOff,
+    /// The cutover task's re-enable.
+    AutostartsOn,
+    /// The cutover task's guard logon trigger.
+    GuardLogon,
+    /// The read of the autostart exports never restored (S8 lane 5).
+    CutoverExports,
+    ServerConfig,
+    WriteServerConfig,
+    MemberPage,
 }
 
 impl Call {
@@ -59,6 +75,7 @@ impl Call {
                 | Call::AppStop
                 | Call::Tuning
                 | Call::PrefCheck
+                | Call::Shadow
                 | Call::Data
                 | Call::EngineStart
                 | Call::EngineArm
@@ -82,6 +99,10 @@ impl Call {
                 | Call::InjectPark
                 | Call::InstallSite
                 | Call::Exclude
+                | Call::AutostartsOff
+                | Call::AutostartsOn
+                | Call::GuardLogon
+                | Call::WriteServerConfig
         )
     }
 }
@@ -173,6 +194,33 @@ pub struct FakePc {
     pub reaper_shows_late: bool,
     /// `reaper_procs` fails with this (an unreadable process list).
     pub reaper_procs_fail: Option<String>,
+    /// The server's config (`server_config`, `write_server_config`); a
+    /// server start applies `effects::web::pin_policy` to it as `WinPc`
+    /// does.
+    pub server_config: String,
+    /// `write_server_config` answers Ok but the file keeps its bytes (the
+    /// read-back must see it).
+    pub config_sticks: bool,
+    /// The guard task's logon trigger (`guard_logon`).
+    pub guard_at_logon: bool,
+    /// The export the predecessor's autostarts were disabled into
+    /// (`autostarts_off`); none while they are enabled.
+    pub autostarts_in: Option<String>,
+    /// `pc.toml` names a shadow command (S8 lane 4; default: none, so no
+    /// entry plans the step). A read of the settings: not a recorded call.
+    pub shadows: bool,
+    /// Every call that takes a token returns `Preempted` when its token is
+    /// pre-empted as it begins, as `WinPc`'s waits do within 1 s.
+    pub waits_see_preemption: bool,
+    /// "ide event" pre-empts this token as this call begins (a test of what
+    /// comes after a step during which it came); once.
+    pub preempt_at: Option<(Call, Cancel)>,
+    /// The pipe routes this request as this call begins (a request that
+    /// comes while the switch runs: a second "ide event"); once. Its route
+    /// is kept in `routed`.
+    pub route_at: Option<(Call, Arc<Shared>, Request)>,
+    /// How the pipe routed `route_at`'s request.
+    pub routed: Option<Route>,
     calls: Vec<(Call, Instant)>,
     fails: HashMap<Call, String>,
     blocked: Vec<Call>,
@@ -257,6 +305,15 @@ impl FakePc {
             reaper_ends_at: None,
             reaper_shows_late: false,
             reaper_procs_fail: None,
+            server_config: "port = 80\npin_changes = false\n".to_owned(),
+            config_sticks: false,
+            guard_at_logon: false,
+            autostarts_in: None,
+            shadows: false,
+            waits_see_preemption: false,
+            preempt_at: None,
+            route_at: None,
+            routed: None,
             calls: Vec::new(),
             fails: HashMap::new(),
             blocked: Vec::new(),
@@ -269,6 +326,11 @@ impl FakePc {
     /// `call` fails with `why` (and changes nothing).
     pub fn fail(&mut self, call: Call, why: &str) {
         self.fails.insert(call, why.to_owned());
+    }
+
+    /// `call` succeeds again (a failure that went away).
+    pub fn heal(&mut self, call: Call) {
+        self.fails.remove(&call);
     }
 
     /// `call` waits until its token is pre-empted, as `WinPc` waits, and
@@ -334,6 +396,16 @@ impl FakePc {
 
     fn record(&mut self, call: Call) {
         self.calls.push((call, Instant::now()));
+        if self.preempt_at.as_ref().is_some_and(|(at, _)| *at == call)
+            && let Some((_, token)) = self.preempt_at.take()
+        {
+            token.preempt();
+        }
+        if self.route_at.as_ref().is_some_and(|(at, _, _)| *at == call)
+            && let Some((_, shared, req)) = self.route_at.take()
+        {
+            self.routed = Some(shared.route(&req));
+        }
         if self.reaper_ends_at == Some(call) {
             self.reaper_ends_at = None;
             self.reaper_ending = false;
@@ -350,6 +422,9 @@ impl FakePc {
     /// Records `call`, then plays its script: blocked, delayed, failed.
     fn enter(&mut self, call: Call, c: Option<&Cancel>) -> R<()> {
         self.record(call);
+        if self.waits_see_preemption && c.is_some_and(Cancel::preempted) {
+            return Err(StepError::Preempted);
+        }
         if self.blocked.contains(&call) {
             let Some(c) = c else {
                 return Err(StepError::failed(format!(
@@ -488,6 +563,20 @@ impl Pc for FakePc {
         Ok(format!("{mode:?} data refreshed"))
     }
 
+    fn shadows(&self) -> bool {
+        self.shadows
+    }
+
+    /// A wait: a blocked or failing script plays as for any call; else the
+    /// line is taken as recorded.
+    fn shadow(&mut self, to: Mode, c: &Cancel) -> R<String> {
+        self.enter(Call::Shadow, Some(c))?;
+        Ok(format!(
+            "shadow import ({}): import writes, 0 site and 0 state difference(s)",
+            crate::shadow::entry(to)
+        ))
+    }
+
     fn engine_start(&mut self, hold: bool, hil: bool) -> R<u32> {
         self.enter(Call::EngineStart, None)?;
         self.engine_starts.push((hold, hil));
@@ -530,8 +619,10 @@ impl Pc for FakePc {
         Ok(self.health)
     }
 
-    fn server_start(&mut self, _mode: Mode) -> R<u32> {
+    /// The PIN rule as `WinPc` reads it from the config (S8).
+    fn server_start(&mut self, _mode: Mode, prod: bool) -> R<u32> {
         self.enter(Call::ServerStart, None)?;
+        crate::effects::web::pin_policy(&self.server_config, prod).map_err(StepError::Failed)?;
         self.facts.server = true;
         Ok(self.pid())
     }
@@ -702,5 +793,56 @@ impl Pc for FakePc {
 
     fn logon(&mut self) -> Option<Logon> {
         self.logon.clone()
+    }
+
+    fn autostarts_off(&mut self, export: &str) -> R<String> {
+        self.enter(Call::AutostartsOff, None)?;
+        self.autostarts_in = Some(export.to_owned());
+        Ok(format!("exported to {export}; 2 disabled"))
+    }
+
+    /// Re-enables what `export` saved; any other export saved nothing.
+    fn autostarts_on(&mut self, export: &str) -> R<String> {
+        self.enter(Call::AutostartsOn, None)?;
+        if self.autostarts_in.as_deref() == Some(export) {
+            self.autostarts_in = None;
+            Ok(format!("2 re-enabled from {export}"))
+        } else {
+            Ok(format!("no export {export}: nothing to re-enable"))
+        }
+    }
+
+    fn guard_logon(&mut self, on: bool) -> R<()> {
+        self.enter(Call::GuardLogon, None)?;
+        self.guard_at_logon = on;
+        Ok(())
+    }
+
+    /// The export the autostarts are disabled into, while they are: an
+    /// `autostarts_on` from it restores them (and marks it restored).
+    fn cutover_exports(&mut self) -> R<Vec<u64>> {
+        self.enter(Call::CutoverExports, None)?;
+        Ok(self
+            .autostarts_in
+            .iter()
+            .filter_map(|e| e.strip_prefix(crate::cutover::EXPORT_PREFIX)?.parse().ok())
+            .collect())
+    }
+
+    fn server_config(&mut self) -> R<String> {
+        self.enter(Call::ServerConfig, None)?;
+        Ok(self.server_config.clone())
+    }
+
+    fn write_server_config(&mut self, text: &str) -> R<()> {
+        self.enter(Call::WriteServerConfig, None)?;
+        if !self.config_sticks {
+            self.server_config = text.to_owned();
+        }
+        Ok(())
+    }
+
+    fn member_page(&mut self) -> R<()> {
+        self.enter(Call::MemberPage, None)
     }
 }

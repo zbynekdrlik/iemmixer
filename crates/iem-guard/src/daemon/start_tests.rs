@@ -198,7 +198,7 @@ fn a_dev_routed_during_the_start_checks_is_queued_and_runs_after_them() {
     let routed = std::thread::spawn(move || {
         await_running(&shared);
         let live = Request::Live {
-            build: SHA.into(),
+            build: Some(SHA.into()),
             trial: false,
             dry_run: false,
         };
@@ -238,7 +238,10 @@ fn ide_event_during_the_start_checks_fences_a_dev_queued_before_it() {
     let routed = std::thread::spawn(move || {
         await_running(&shared);
         let during = shared.route(&dev());
-        let event = shared.route(&Request::Event { dry_run: false });
+        let event = shared.route(&Request::Event {
+            dry_run: false,
+            signal: false,
+        });
         let answer = shared.await_end("already switching to event", Duration::from_secs(10));
         (during, event, answer)
     });
@@ -268,7 +271,10 @@ fn ide_event_during_the_start_checks_fences_a_dev_queued_before_it() {
     let mut queue = [
         dev(),
         Request::AlarmAck { id: 99 },
-        Request::Event { dry_run: false },
+        Request::Event {
+            dry_run: false,
+            signal: false,
+        },
     ]
     .map(|req| match g.shared.route(&req) {
         Route::Queue(seen) => (req, seen),
@@ -427,7 +433,7 @@ fn install_records_the_bundle_and_refuses_other_sums() {
 }
 
 #[test]
-fn activation_pins_copies_excludes_and_hands_over() {
+fn activation_sets_the_active_bundle_copies_excludes_and_hands_over() {
     let dir = tempfile::tempdir().unwrap();
     let mut g = Guard::open(dir.path(), SiteConf::default(), fixed(T0));
     g.state.mode = Mode::Dev;
@@ -448,7 +454,8 @@ fn activation_pins_copies_excludes_and_hands_over() {
     let bin = install::bin_dir(dir.path());
     assert_eq!(g.handover, Some(bin.join(install::GUARD_EXE)));
     assert!(bin.join(install::IEMMODE_EXE).is_file());
-    assert_eq!(g.state.pins.current.as_deref(), Some(SHA));
+    // S8 (#11): the active bundle, never the pin.
+    assert_eq!(g.state.active_bundle(), Some(SHA));
     assert_eq!(pc.bundle.as_deref(), Some(SHA));
     assert!(pc.called(Call::Exclude));
     // The same bundle again: the guard's exe did not change.
@@ -496,7 +503,7 @@ fn the_first_offline_install_activates_it() {
         install_offline(&mut g, &zip),
         (true, format!("bundle {SHA} installed; activated into bin"))
     );
-    assert_eq!(g.state.pins.current.as_deref(), Some(SHA));
+    assert_eq!(g.state.active_bundle(), Some(SHA));
     assert!(
         install::bin_dir(dir.path())
             .join(install::GUARD_EXE)
@@ -508,7 +515,7 @@ fn the_first_offline_install_activates_it() {
         install_offline(&mut g, &zip),
         (true, format!("bundle {OTHER} installed"))
     );
-    assert_eq!(g.state.pins.current.as_deref(), Some(SHA));
+    assert_eq!(g.state.active_bundle(), Some(SHA));
     // A refused zip is reported as such.
     let (ok, why) = install_offline(&mut g, &dir.path().join("none.zip"));
     assert!(!ok);
@@ -526,7 +533,6 @@ fn site_settings_and_clocks() {
         SiteConf {
             on_pref_fail: PrefFail::StartReaperWithAlarm,
             hil_tx: vec![94, 95],
-            prod: false,
         }
     );
     assert_eq!(
@@ -534,7 +540,6 @@ fn site_settings_and_clocks() {
         SiteConf {
             on_pref_fail: PrefFail::StartReaperWithAlarm,
             hil_tx: Vec::new(),
-            prod: false,
         }
     );
     let now = SystemTime::now()

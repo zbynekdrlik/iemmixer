@@ -60,7 +60,7 @@ pub fn tuning_request(id: &str, verb: &str) -> String {
     json!({"id": id, "verb": verb}).to_string()
 }
 
-/// The exclusions of bundle `sha`; those of `keep` (the other pin) stay,
+/// The exclusions of bundle `sha`; those of `keep` (`lifecycle::kept`) stay,
 /// every other bundle's go (`Set-IemDefenderExclusion`).
 pub fn exclude_request(id: &str, sha: &str, keep: &[String]) -> String {
     json!({"id": id, "sha": sha, "keep": keep}).to_string()

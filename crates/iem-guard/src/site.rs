@@ -171,6 +171,14 @@ impl Settings {
         self.pc.elevated_root.join("tasks").join("out")
     }
 
+    /// The shadow imports' history (S8 lane 4): `<root>\shadow\history.jsonl`.
+    pub fn shadow_history(&self) -> PathBuf {
+        self.pc
+            .root
+            .join(crate::shadow::DIR)
+            .join(crate::shadow::HISTORY)
+    }
+
     /// S1c's record of what its tuning applied (the drift check).
     pub fn tuning_record(&self) -> PathBuf {
         self.pc

@@ -11,8 +11,10 @@ use super::{Guard, Outcome, READY_S, mode_name, reaper};
 use crate::cancel::Cancel;
 use crate::crash;
 use crate::handover::{self, Audio};
+use crate::lifecycle::{self, Lifecycle};
 use crate::pc::{Pc, PrefSeen, R, Status, StepError};
-use crate::plan::{Health, Mode, OnError, Step, on_error, plan};
+use crate::plan::{Health, Mode, OnError, Step, on_error};
+use crate::shadow;
 use crate::state::Switching;
 use crate::switch_log::LastSwitch;
 
@@ -136,7 +138,11 @@ pub(super) fn switch(
     to: Mode,
     checks: bool,
 ) -> Outcome {
-    let steps = plan(to, &pc.facts());
+    // The prod data rule: the lifecycle drops the data step after the
+    // cutover (`lifecycle::refreshes_data`); an entry from event gets the
+    // shadow import when `pc.toml` names one (S8 lane 4).
+    let steps = lifecycle::plan(&g.state.lifecycle, to, &pc.facts());
+    let steps = shadow::plan(steps, from, to, pc.shadows());
     g.begin(from, to, &steps, checks);
     let mut skip: Vec<Step> = Vec::new();
     for step in steps {
@@ -308,6 +314,12 @@ pub(super) fn run_step(pc: &mut dyn Pc, g: &mut Guard, step: Step, to: Mode) -> 
             g.info(format!("tuning enter: {r}"));
             Ok(())
         }
+        Step::Shadow => {
+            // Report-only: only "ide event" ends it early (#11 lane 4).
+            let said = shadow::never_fails(pc.shadow(to, &c))?;
+            g.info(said);
+            Ok(())
+        }
         Step::Data => {
             let r = pc.data(to, &c)?;
             g.info(r);
@@ -335,7 +347,9 @@ pub(super) fn run_step(pc: &mut dyn Pc, g: &mut Guard, step: Step, to: Mode) -> 
             pc.engine_arm()
         }
         Step::ServerStart => {
-            let pid = pc.server_start(to)?;
+            // In prod the cutover's `pin_changes = true` is allowed (S8).
+            let prod = matches!(g.state.lifecycle, Lifecycle::Prod(_));
+            let pid = pc.server_start(to, prod)?;
             g.info(format!("server started (pid {pid})"));
             Ok(())
         }
@@ -348,9 +362,8 @@ pub(super) fn run_step(pc: &mut dyn Pc, g: &mut Guard, step: Step, to: Mode) -> 
             g.lan_note = None;
             let sha = g
                 .state
-                .pins
-                .current
-                .clone()
+                .active_bundle()
+                .map(str::to_owned)
                 .ok_or_else(|| StepError::failed("no active bundle"))?;
             g.lan_note = pc.identity(&sha, &c)?;
             if let Some(n) = g.lan_note.clone() {

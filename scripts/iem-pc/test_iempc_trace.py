@@ -317,7 +317,7 @@ class TraceStopTests(TraceBase):
         self.assertEqual(code, ip.PREEMPTED)
         self.assertEqual(self.steps(), [("preflight", "abandon"), ("start", "finish"), ("stop", "ignore")])
         self.assertIn("-ArgumentList 'stop-only'", self.pc.modules[2][0])
-        self.assertEqual(self.pc.calls, [("iemmode.exe", ["status"], "abandon"), ("iemmode.exe", ["event"], "ignore")])
+        self.assertEqual(self.pc.calls, [("iemmode.exe", ["status"], "abandon"), ("iemmode.exe", ["event", "--signal"], "ignore")])
         self.assertEqual(docs[0], {"event": "ide event (flag file)", "action": "iempc event"})
         self.assertEqual(self.fetches, [])
 
@@ -326,7 +326,7 @@ class TraceStopTests(TraceBase):
         code, _, _ = self.trace()
         self.assertEqual(code, ip.PREEMPTED)
         self.assertEqual(self.names(), ["preflight", "start", "stop", "merge"])
-        self.assertEqual(self.pc.calls[-1], ("iemmode.exe", ["event"], "ignore"))
+        self.assertEqual(self.pc.calls[-1], ("iemmode.exe", ["event", "--signal"], "ignore"))
         self.assertEqual(self.fetches, [])
 
     def test_a_signal_during_the_wait_stops_the_trace_and_ends_the_command(self) -> None:
@@ -375,7 +375,7 @@ class TraceStopTests(TraceBase):
         self.assertEqual(code, ip.PREEMPTED)
         self.assertEqual(docs[0]["trace_stop"], "failed")
         self.assertIn("WARNING: the kernel trace may still run", err)
-        self.assertEqual(self.pc.calls[-1], ("iemmode.exe", ["event"], "ignore"))
+        self.assertEqual(self.pc.calls[-1], ("iemmode.exe", ["event", "--signal"], "ignore"))
         ip.EVENT_NOW.unlink()
         (ip.STATE_DIR / "trace.json").unlink(missing_ok=True)   # the first run's record (#15): this run alone
         code, docs, err = self.trace()
@@ -438,7 +438,7 @@ class TraceStopTests(TraceBase):
         self.assertEqual(code, ip.PREEMPTED)
         self.assertEqual(docs[0]["trace_stop"], "failed")
         self.assertIn("the kernel trace may still run on the PC", err)
-        self.assertEqual(self.pc.calls[-1], ("iemmode.exe", ["event"], "ignore"))
+        self.assertEqual(self.pc.calls[-1], ("iemmode.exe", ["event", "--signal"], "ignore"))
 
     def test_a_stop_that_is_not_confirmed_fails_and_analyses_nothing(self) -> None:
         self.answers["Stop-IemTraceSessions"] = {"stopped": [], "gone": [], "kept": ["NT Kernel Logger"], "notes": []}
@@ -469,7 +469,7 @@ class TraceStopTests(TraceBase):
             code, _, err = self.trace()
         self.assertEqual(code, ip.PREEMPTED)
         self.assertIn("WARNING: the kernel trace may still run", err)
-        self.assertEqual(self.pc.calls[-1], ("iemmode.exe", ["event"], "ignore"))
+        self.assertEqual(self.pc.calls[-1], ("iemmode.exe", ["event", "--signal"], "ignore"))
 
     def test_an_unreadable_report_fails_naming_the_saved_file(self) -> None:
         self.report = "not an xperf report\n"
@@ -532,7 +532,7 @@ class TraceRecordTests(TraceBase):
     def test_event_stops_the_recorded_trace_before_iemmode_event(self) -> None:
         self.write_record()
         at_event = []
-        self.pc.replies[("event",)] = lambda: (at_event.append((len(self.recorded_stops()), self.record().exists())), (0, OK))[1]
+        self.pc.replies[("event", "--signal")] = lambda: (at_event.append((len(self.recorded_stops()), self.record().exists())), (0, OK))[1]
         code, docs, err = self.run_main("event")
         self.assertEqual(code, 0, err)
         self.assertEqual(at_event, [(1, False)])
@@ -557,18 +557,20 @@ class TraceRecordTests(TraceBase):
             self.answers["Stop-IemTraceSessions"] = answer
             code, docs, err = self.run_main("event")
             self.assertEqual(code, 0, err)
-            self.assertEqual(self.pc.calls, [("iemmode.exe", ["event"], "ignore")])
+            self.assertEqual(self.pc.calls, [("iemmode.exe", ["event", "--signal"], "ignore")])
             self.assertEqual(json.loads(self.record().read_text(encoding="utf-8"))["dir"], OLD)
             self.assertIn("ALARM", err)
             self.assertIn(f"Stop-IemTraceSessions -Dir {OLD}", err)
             self.assertEqual([d["recorded_trace"] for d in docs if "recorded_trace" in d], ["failed"])
 
     def test_no_record_means_no_extra_call(self) -> None:
-        for argv in (["dev"], ["event"]):   # dev first: event writes the flag
+        # dev first: event writes the flag. `iempc event` sends the owner's
+        # signal (`iemmode event --signal`, S8 lane 3).
+        for argv, sent in ((["dev"], ["dev"]), (["event"], ["event", "--signal"])):
             self.pc.calls.clear()
             code, _, err = self.run_main(*argv)
             self.assertEqual(code, 0, err)
-            self.assertEqual((self.pc.modules, [c[1] for c in self.pc.calls]), ([], [argv]))
+            self.assertEqual((self.pc.modules, [c[1] for c in self.pc.calls]), ([], [sent]))
 
     def test_a_record_whose_trace_is_gone_is_cleared_quietly(self) -> None:
         self.write_record()
@@ -595,7 +597,7 @@ class TraceRecordTests(TraceBase):
         self.assertEqual((code, self.recorded_stops()), (0, []))
         self.assertTrue(self.record().exists())
         self.assertIn("ALARM", err)
-        self.assertEqual(self.pc.calls[-1], ("iemmode.exe", ["event"], "ignore"))
+        self.assertEqual(self.pc.calls[-1], ("iemmode.exe", ["event", "--signal"], "ignore"))
 
     def test_a_recorded_stop_that_outlives_its_bound_still_leaves_iemmode_event_its_minimum(self) -> None:
         """guarded notices a bound only at its next poll: a stop left running
@@ -619,7 +621,7 @@ class TraceRecordTests(TraceBase):
             code, docs, err = self.run_main("event")
         self.assertEqual(code, 0, err)
         self.assertEqual(len(self.recorded_stops()), 1)
-        self.assertEqual(self.pc.calls, [("iemmode.exe", ["event"], "ignore")])
+        self.assertEqual(self.pc.calls, [("iemmode.exe", ["event", "--signal"], "ignore")])
         self.assertGreaterEqual(self.pc.timeouts[-1], ip.SWITCH_MIN_S)
         self.assertTrue(self.record().exists())
 
@@ -630,14 +632,14 @@ class TraceRecordTests(TraceBase):
         self.write_record()
         self.answers["Stop-IemTraceSessions"] = lambda: (self.flag(), STOPPED)[1]
         code, _, _ = self.run_main("dev")
-        self.assertEqual((code, [c[1] for c in self.pc.calls]), (ip.PREEMPTED, [["event"]]))
+        self.assertEqual((code, [c[1] for c in self.pc.calls]), (ip.PREEMPTED, [["event", "--signal"]]))
         ip.EVENT_NOW.unlink()
         self.write_record()
         self.pc.modules.clear()
         self.pc.calls.clear()
         code, _, _ = self.trace()
         self.assertEqual((code, self.names()), (ip.PREEMPTED, ["preflight", "stop"]))
-        self.assertEqual(self.pc.calls[-1], ("iemmode.exe", ["event"], "ignore"))
+        self.assertEqual(self.pc.calls[-1], ("iemmode.exe", ["event", "--signal"], "ignore"))
 
     def test_a_start_that_never_answered_keeps_its_record_until_both_sessions_stop(self) -> None:
         """Review (#32 B5's rule for the record): a start whose reply was never

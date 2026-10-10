@@ -12,6 +12,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::bundle::{Pins, Record};
+use crate::lifecycle::Lifecycle;
 use crate::plan::{Mode, Step};
 use crate::switch_log::LastSwitch;
 
@@ -56,7 +57,38 @@ pub struct GuardState {
     pub pids: Children,
     /// Installed bundles by SHA.
     pub bundles: BTreeMap<String, Record>,
+    /// The record a guard before S8 kept: it promoted every entry's and
+    /// every activation's build (S8 design note §3.4), so `current` was its
+    /// active bundle and `previous` the one before. Read only for a state
+    /// such a guard saved ([`GuardState::active_bundle`],
+    /// [`GuardState::way_back_bundle`]). Written as a mirror since S8 lane 2
+    /// ([`GuardState::set_active`]: `current` = the active bundle,
+    /// `previous` = the way back): an older guard that takes over (a
+    /// rollback to an older bundle) runs the active bundle, not the one an
+    /// older guard last activated (the PC, 2026-10-10). Never the pin: that
+    /// is the lifecycle's, so the mirror cannot promote one early.
     pub pins: Pins,
+    /// The active bundle (S8, #11): the build the engine and the server run
+    /// in dev and live, and the one `bin\`'s guard came from unless an entry
+    /// named another. Set by `activate` and by an entry's build (a prod
+    /// entry: the pin) through [`GuardState::set_active`], never the pin
+    /// itself (`lifecycle`).
+    pub active: Option<String>,
+    /// The bundle active before the active one (another build): the way
+    /// back, whose Defender exclusions an activation keeps
+    /// (`lifecycle::kept`), as `pins.previous` was before S8.
+    pub way_back: Option<String>,
+    /// Before the cutover or after it (S8 design note §3.1).
+    /// A state an older guard saved has none: `Trial`
+    /// (`lifecycle::lenient`); a reset keeps it.
+    #[serde(deserialize_with = "crate::lifecycle::lenient")]
+    pub lifecycle: Lifecycle,
+    /// The cutover in progress (S8 lane 2, design note §3.2): saved before
+    /// each of its steps, dropped once it is done or unwound (or kept with
+    /// the steps whose undo failed). A starting guard that finds one unwinds
+    /// it before anything else (`daemon::cutover::recover`); a reset keeps
+    /// it. An older guard drops it on its next save.
+    pub cutover: Option<crate::cutover::Run>,
     /// The HIL job that began and has not ended (its run id). Kept here so
     /// a guard that hands over to a new exe inside the job (HIL activates
     /// the bundle it tests) or restarts still serves the job (design §7).
@@ -84,6 +116,40 @@ pub fn reset_to_event(st: &GuardState, boot_time: u64, reaper_or_app: bool, engi
 }
 
 impl GuardState {
+    /// The active bundle: [`GuardState::active`], or for a state an older
+    /// guard saved, its `pins.current`.
+    pub fn active_bundle(&self) -> Option<&str> {
+        self.active.as_deref().or(self.pins.current.as_deref())
+    }
+
+    /// The way back: [`GuardState::way_back`] once this guard set an active
+    /// bundle, else (a state an older guard saved) its `pins.previous`.
+    pub fn way_back_bundle(&self) -> Option<&str> {
+        match self.active {
+            Some(_) => self.way_back.as_deref(),
+            None => self.pins.previous.as_deref(),
+        }
+    }
+
+    /// Makes `sha` the active bundle; the one active before it becomes the
+    /// way back when it is another build, else the way back stays (the rule
+    /// `Pins::promote` had for the active bundle before S8). The legacy
+    /// `pins` mirror both, for an older guard that takes over.
+    pub fn set_active(&mut self, sha: &str) {
+        let before = self.active_bundle().map(str::to_owned);
+        let kept = self.way_back_bundle().map(str::to_owned);
+        self.way_back = if before.as_deref() == Some(sha) {
+            kept
+        } else {
+            before
+        };
+        self.active = Some(sha.to_owned());
+        self.pins = Pins {
+            current: self.active.clone(),
+            previous: self.way_back.clone(),
+        };
+    }
+
     /// The mode after [`reset_to_event`]: `event`, no switch in progress and
     /// no HIL job (`pref_held` and `logon_seen` stay: the next check reads
     /// the preference again; `last_switch` stays until the next switch,
@@ -98,10 +164,12 @@ impl GuardState {
     /// unreadable one gives the defaults and the text of the alarm to raise.
     pub fn load(path: &Path) -> (Self, Option<String>) {
         let (st, err) = load_json::<Self>(path);
-        (
-            st,
-            err.map(|e| format!("guard state unreadable ({e}); starting in event")),
-        )
+        let err = match err {
+            Some(e) => Some(format!("guard state unreadable ({e}); starting in event")),
+            // A lifecycle this guard cannot read loads as trial: alarmed.
+            None => crate::lifecycle::unreadable_in(path),
+        };
+        (st, err)
     }
 
     /// Stamps `written_at` with `now` and saves atomically.
@@ -182,6 +250,16 @@ mod tests {
                 current: Some("a".repeat(40)),
                 previous: None,
             },
+            // S8 (#11): the lifecycle's own round trips are in
+            // `lifecycle/tests.rs`.
+            active: None,
+            way_back: None,
+            lifecycle: Lifecycle::Trial,
+            cutover: Some(crate::cutover::Run {
+                build: "a".repeat(40),
+                since: 1_790_000_250,
+                begun: vec![crate::cutover::CutStep::Import],
+            }),
             job: Some(4242),
             pref_held: Some(
                 "REAPER runs with the preferred buffer at 32; it is restored at REAPER's next start"
@@ -421,6 +499,8 @@ mod tests {
         assert_eq!(st.pids, before.pids);
         assert_eq!(st.pref_held, before.pref_held);
         assert_eq!(st.logon_seen, before.logon_seen);
+        // A cutover cut off by the reboot is the start's to unwind.
+        assert_eq!(st.cutover, before.cutover);
     }
 
     /// S7 (#10): the last switch is saved with the state, and a reset (a

@@ -19,7 +19,8 @@ fn default_elevated_root() -> PathBuf {
 }
 
 /// `pc.toml`: where things are on this PC (written at bootstrap). Command
-/// arguments may name `{root}`, `{bundle}`, `{site}` and `{server_config}`.
+/// arguments may name `{root}`, `{bundle}`, `{site}` and `{server_config}`;
+/// `shadow` also `{project}`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PcToml {
@@ -45,6 +46,13 @@ pub struct PcToml {
     pub data_dev: Vec<Vec<String>>,
     #[serde(default)]
     pub data_live: Vec<Vec<String>>,
+    /// The report-only shadow import at each entry from event (S8 lane 4,
+    /// `crate::shadow`): `iem-migrate shadow --rpp {project} --aliases …
+    /// --site {site} --state-dir …`, in the active bundle's folder; it
+    /// writes nothing, the guard appends its report to the history. Empty
+    /// (no key): no shadow.
+    #[serde(default)]
+    pub shadow: Vec<String>,
     /// cloudflared's readiness URL (the tunnel watchdog's).
     #[serde(default = "default_tunnel_ready")]
     pub tunnel_ready: String,
@@ -94,6 +102,12 @@ impl PcToml {
                 .chain(&self.data_live)
                 .all(|c| !c.is_empty()),
             "a data command is empty",
+        );
+        // Only the report-only subcommand: an `import` here would write the
+        // engine's state at every entry, after the cutover too.
+        check(
+            self.shadow.is_empty() || self.shadow.get(1).is_some_and(|a| a == "shadow"),
+            "shadow must be `<iem-migrate> shadow …` (report-only, never import)",
         );
         check(
             self.tunnel_ready.starts_with("http://"),
