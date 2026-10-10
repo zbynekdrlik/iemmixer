@@ -444,17 +444,19 @@ fn a_cut_off_cutover_is_unwound_at_the_start_and_the_pc_goes_to_event() {
     pc.server_config = OPEN.into();
     // Booted before the state was written: a guard restart, not a reboot.
     assert_eq!(start(&mut pc, &mut g, 0), Some(Outcome::Done));
+    // The local undos first (the lifecycle, pin_changes), then the start's
+    // event plan, then the elevated ones (S8 lane 5: they may take minutes).
     assert_eq!(
-        &pc.calls()[..6],
+        &pc.calls()[..4],
         [
             Call::ServerConfig,
             Call::WriteServerConfig,
             Call::ServerConfig,
-            Call::AutostartsOn,
-            Call::GuardLogon,
             Call::Procs,
         ]
     );
+    assert!(pc.index(Call::ReaperStart) < pc.index(Call::AutostartsOn));
+    assert!(pc.index(Call::AutostartsOn) < pc.index(Call::GuardLogon));
     assert_eq!(g.state.mode, Mode::Event);
     assert_eq!(g.state.lifecycle, Lifecycle::Trial);
     assert_eq!(g.state.cutover, None);
@@ -466,14 +468,17 @@ fn a_cut_off_cutover_is_unwound_at_the_start_and_the_pc_goes_to_event() {
         ),
         (false, None, FROZEN)
     );
-    assert_eq!(
-        texts(&g).first(),
-        Some(&format!(
-            "the cutover of {SHA} was cut off (begun: [Import, GuardLogon, Autostarts, \
-             PinChanges, Lifecycle]): unwound to trial; the PC goes to event"
-        ))
+    let cut_off = format!(
+        "the cutover of {SHA} was cut off (begun: [Import, GuardLogon, Autostarts, PinChanges, \
+         Lifecycle]): unwound to trial; the PC goes to event"
     );
-    assert!(g.alarms.iter().next().is_some_and(|a| !a.owner_question));
+    assert!(
+        g.alarms
+            .iter()
+            .any(|a| a.text == cut_off && !a.owner_question),
+        "{:?}",
+        texts(&g)
+    );
     let back = Guard::open(dir.path(), SiteConf::default(), fixed(T0 + 9));
     assert_eq!(
         (back.state.lifecycle, back.state.cutover),
