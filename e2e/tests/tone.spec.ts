@@ -5,6 +5,8 @@ import { namesBuild } from "./live/support/env";
 import { ANALYSER_INIT, readTone } from "./live/support/audio";
 import { LIVE_NUMBER_KEYS } from "./live/support/live";
 import { readFileSync } from "node:fs";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { resolve } from "node:path";
 
 // The live specs' pure estimators and their in-page analyser (S7, #10), run
@@ -181,6 +183,114 @@ test("the analyser init script reads what a real AudioContext plays: 1 kHz at -2
   expect(Math.abs(tone.hz - 1000), `${tone.hz} Hz`).toBeLessThanOrEqual(0.5);
   expect(Math.abs(tone.dbfs + 20), `${tone.dbfs} dBFS`).toBeLessThanOrEqual(0.1);
   expect(tone.gap).toBe(false);
+});
+
+/** The player and its limiter worklet, served as the server serves them (a worklet's module never reaches `page.route`). */
+const PLAYER_FILES: Record<string, string> = {
+  "/audio_player.js": resolve(__dirname, "../../crates/iem-ui/audio_player.js"),
+  "/listen-limiter-worklet.js": resolve(__dirname, "../../crates/iem-ui/listen-limiter-worklet.js"),
+};
+
+test("three windows read 300 ms apart leave the real player playing: no dropout, the player never ran dry", async ({
+  page,
+}) => {
+  // The live listen probe's measurement (#10, live run 1: window 1 clean,
+  // window 2 a dropout) on the real player, fed as the live relay feeds it: a
+  // 20 ms Opus frame every 20 ms from this process through
+  // `page.routeWebSocket`, at 1 kHz and -20 dBFS. Reading a window must not
+  // starve that feed or the page: the player keeps only 80 ms ahead.
+  test.setTimeout(60_000);
+  const server = createServer((req, res) => {
+    const file = PLAYER_FILES[req.url ?? ""];
+    if (file) {
+      res.writeHead(200, { "Content-Type": "text/javascript" });
+      res.end(readFileSync(file));
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "text/html" });
+    res.end("<!doctype html><title>player</title>");
+  });
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+  const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  let frames: Buffer[] = [];
+  let feeding = true;
+  try {
+    await page.routeWebSocket(/\/ws\/audio$/, (ws) => {
+      const start = Date.now();
+      let sent = 0;
+      const tick = () => {
+        if (!feeding) return;
+        if (frames.length > 0) ws.send(frames[sent % frames.length]);
+        sent += 1;
+        // Drift-free: frame n leaves at start + 20·n ms.
+        setTimeout(tick, Math.max(0, start + sent * 20 - Date.now()));
+      };
+      tick();
+    });
+    await page.addInitScript(ANALYSER_INIT);
+    await page.goto(`${origin}/`);
+    // 2 s of 1 kHz at -20 dBFS in 20 ms Opus frames (20 periods each, so the loop is seamless before coding).
+    const encoded = await page.evaluate(async () => {
+      const out: string[] = [];
+      const encoder = new AudioEncoder({
+        output: (chunk) => {
+          const bytes = new Uint8Array(chunk.byteLength);
+          chunk.copyTo(bytes);
+          out.push(btoa(String.fromCharCode(...bytes)));
+        },
+        error: (e) => {
+          throw e;
+        },
+      });
+      encoder.configure({ codec: "opus", sampleRate: 48_000, numberOfChannels: 2, bitrate: 128_000 });
+      const n = 960;
+      for (let f = 0; f < 100; f++) {
+        const data = new Float32Array(2 * n);
+        for (let i = 0; i < n; i++) data[i] = data[n + i] = 0.1 * Math.sin((2 * Math.PI * 1000 * (f * n + i)) / 48_000);
+        encoder.encode(
+          new AudioData({
+            format: "f32-planar",
+            sampleRate: 48_000,
+            numberOfFrames: n,
+            numberOfChannels: 2,
+            timestamp: f * 20_000,
+            data,
+          }),
+        );
+      }
+      await encoder.flush();
+      return out;
+    });
+    // The encoder's first frames hold its start-up: the loop takes the steady ones.
+    frames = encoded.slice(10).map((b) => Buffer.from(b, "base64"));
+    expect(frames.length).toBeGreaterThanOrEqual(80);
+    await page.evaluate(async () => {
+      const player = await import("/audio_player.js");
+      player.initAudioPlayer();
+      const ws = new WebSocket(`ws://${location.host}/ws/audio`);
+      ws.binaryType = "arraybuffer";
+      ws.onmessage = (m) => player.feedOpusFrame(m.data);
+    });
+    const stats = () =>
+      page.evaluate(() =>
+        (window as unknown as { __iem_stream_stats: () => { dropouts: number } }).__iem_stream_stats(),
+      );
+    await expect
+      .poll(() => page.evaluate(() => (window as unknown as { __iem_audio_level: () => number }).__iem_audio_level()))
+      .toBeGreaterThan(-100);
+    // As the live spec: a second of settling, then three windows 300 ms apart.
+    await page.waitForTimeout(1_000);
+    for (let k = 1; k <= 3; k++) {
+      if (k > 1) await page.waitForTimeout(300);
+      const tone = await readTone(page);
+      expect(tone.gap, `window ${k} has no dropout`).toBe(false);
+      expect(Math.abs(tone.dbfs + 20), `window ${k}: ${tone.dbfs} dBFS`).toBeLessThanOrEqual(1);
+    }
+    expect((await stats()).dropouts, "the player never ran dry").toBe(0);
+  } finally {
+    feeding = false;
+    server.close();
+  }
 });
 
 test("the live specs' number keys are the live verdict's NUMBER_KEYS", () => {

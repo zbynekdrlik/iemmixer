@@ -18,6 +18,7 @@ pub mod login_guard;
 pub mod meters;
 pub mod mixer_ws;
 pub mod notify;
+pub mod peer_route;
 pub mod pepper;
 pub mod photo_store;
 pub mod pin_hash;
@@ -34,6 +35,7 @@ pub mod solo;
 pub mod talk;
 pub mod tunnel_watch;
 pub mod view;
+pub mod ws_alive;
 
 // Split cfgs: cargo-mutants skips a module only under a plain `#[cfg(test)]`.
 #[cfg(test)]

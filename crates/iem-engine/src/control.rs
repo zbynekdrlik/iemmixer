@@ -700,6 +700,8 @@ impl Control {
             interval_hist: h.interval,
             process_hist: h.process,
             hist_top_us: h.top_us,
+            last_reopen_us: st.last_reopen_us,
+            fault_callback_us: st.fault_callback_ns as f64 / 1000.0,
         }
     }
 
@@ -725,6 +727,10 @@ impl Control {
         }
         let stats = self.driver.as_ref().map(|d| d.stats()).unwrap_or_default();
         if stats.faulted {
+            // The last `Status` first (S7 HIL v2): it carries the faulting
+            // callback's time, which the guard keeps across the respawn.
+            let last = self.next_status(&stats);
+            self.broadcast(&EngineMsg::Status(last));
             return Some(self.fault(stats.fault.unwrap_or_else(|| "unknown".into())));
         }
         match self.driver.as_ref().and_then(|d| d.ending()) {
@@ -984,6 +990,8 @@ mod tests {
             running: true,
             max_process_ns: 2_500_000,
             fault: None,
+            last_reopen_us: 0,
+            fault_callback_ns: 0,
         };
         let s = r.c.status_msg(&st);
         assert_eq!((s.callbacks, s.late, s.faulted), (7, 1, false));
@@ -1241,7 +1249,7 @@ mod tests {
         const WAIT: Duration = Duration::from_secs(5);
 
         /// The engine's end and the client's end of one connection.
-        fn peer(dir: &std::path::Path) -> (Conn, Stream) {
+        pub(super) fn peer(dir: &std::path::Path) -> (Conn, Stream) {
             peer_named(dir, "ctl")
         }
 
@@ -1267,7 +1275,7 @@ mod tests {
         }
 
         /// Reads every message until the engine closes the connection (or 5 s pass).
-        fn reader(mut client: Stream) -> std::thread::JoinHandle<Vec<EngineMsg>> {
+        pub(super) fn reader(mut client: Stream) -> std::thread::JoinHandle<Vec<EngineMsg>> {
             std::thread::spawn(move || {
                 let mut out = Vec::new();
                 let mut buf = Vec::new();
@@ -1285,7 +1293,7 @@ mod tests {
             }
         }
 
-        fn hello() -> CtlMsg {
+        pub(super) fn hello() -> CtlMsg {
             frame(&ClientMsg::Hello {
                 proto: PROTO,
                 role: Role::Control,
@@ -1739,4 +1747,8 @@ mod tests {
             assert_eq!(saved.topology_hash, r.c.core.topology().hash);
         }
     }
+
+    /// S7 HIL v2 (#10, plan Task 28): the reopen's time and the faulting
+    /// callback's time in `Status`.
+    mod s7;
 }

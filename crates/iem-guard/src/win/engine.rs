@@ -12,6 +12,7 @@
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
+use std::os::windows::io::AsHandle;
 use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -175,6 +176,14 @@ impl Supervisor {
         lock(&self.inbox).closed.is_none()
     }
 
+    /// The process serving this connection's pipe instance
+    /// (`GetNamedPipeServerProcessId` on our end, S7 HIL v2): the engine
+    /// that created the pipe and accepted us.
+    fn server_pid(&self) -> io::Result<u32> {
+        let Stream::NamedPipe(pipe) = &*self.stream;
+        iem_win::pipe::server_pid(pipe.inner().as_handle())
+    }
+
     /// One frame to the engine, which must take it within [`SEND`]
     /// (`crate::pipe::Bounded`, never `&*self.stream`: interprocess's own
     /// writes wait for the engine without a bound). A failed send may have
@@ -269,11 +278,32 @@ fn newer_status(inbox: &Inbox, seen: u64) -> Option<(u64, Status)> {
     }
 }
 
+/// Keeps the fault time of the supervisor connection's newest status in
+/// `WinPc::last_fault` (S7 HIL v2, `effects::engine::kept_fault`: a faulted
+/// status replaces it, none included): at every look, and before the
+/// connection is dropped or replaced ([`drop_supervisor`]), since a faulted
+/// engine's last `Status` (its faulting callback's time) is in that
+/// connection's inbox; so the respawned engine's reply still carries it.
+fn keep_fault(pc: &mut WinPc) {
+    if let Some(sup) = pc.sup.as_ref() {
+        let inbox = lock(&sup.inbox);
+        pc.last_fault = proto::kept_fault(pc.last_fault, inbox.status.as_ref());
+    }
+}
+
+/// Drops the supervisor connection, its fault time kept first
+/// ([`keep_fault`]): every place that drops or replaces the connection goes
+/// through here.
+pub(super) fn drop_supervisor(pc: &mut WinPc) {
+    keep_fault(pc);
+    pc.sup = None;
+}
+
 /// The supervisor connection, made again when the last one closed; the
 /// engine's pipe may appear only a while after a start.
 fn supervisor<'a>(pc: &'a mut WinPc, limit: Duration, c: &Cancel) -> R<&'a mut Supervisor> {
     if !pc.sup.as_ref().is_some_and(Supervisor::open) {
-        pc.sup = None;
+        drop_supervisor(pc);
         let start = Instant::now();
         loop {
             match Supervisor::connect(&pc.s.pc.engine_pipe) {
@@ -314,7 +344,7 @@ pub(super) fn start(pc: &mut WinPc, hold: bool, hil: bool) -> R<u32> {
             .map_err(StepError::Failed)?;
     let mut cmd = Command::new(dir.join(ENGINE_EXE));
     cmd.args(args).current_dir(dir);
-    pc.sup = None;
+    drop_supervisor(pc);
     pc.dacl = None;
     procs::start_kid(pc, Kid::Engine, &mut cmd, false)
 }
@@ -407,7 +437,7 @@ pub(super) fn stop(pc: &mut WinPc, c: &Cancel) -> R<()> {
     }
     // Our end of the supervisor pipe goes now: this engine is going, and
     // the next step connects to the next one.
-    pc.sup = None;
+    drop_supervisor(pc);
     if procs::wait_exit(&handle, GONE, c)?.is_none() {
         return Err(StepError::failed(stopped.not_ended(GONE)));
     }
@@ -498,36 +528,49 @@ fn pipe_private(pipe: &str) -> Result<bool, String> {
 /// `Reply.engine`): one attempt to connect when there is no connection,
 /// never a wait. `None` until the connection holds the engine's hello and
 /// a `Status` (`effects::engine::seen_status`): an engine coming up is
-/// absent from the reply, not zeroed.
+/// absent from the reply, not zeroed. The last fault the guard kept
+/// (`keep_fault`) goes with it, also once the engine was respawned.
 pub(super) fn seen(pc: &mut WinPc) -> Option<EngineSeen> {
     let pid = pc.kids.pid(Kid::Engine)?;
     if !pc.sup.as_ref().is_some_and(Supervisor::open) {
+        drop_supervisor(pc);
         pc.sup = Supervisor::connect(&pc.s.pc.engine_pipe).ok();
     }
+    keep_fault(pc);
     let sup = pc.sup.as_ref()?;
     let status = {
         let inbox = lock(&sup.inbox);
         proto::seen_status(inbox.build.as_deref(), inbox.status.as_ref())?
     };
     // Read once per engine process, and again at the next look after a
-    // failed read.
-    let cached = pc.dacl;
-    let private = match cached {
-        Some((of, private)) if of == pid => private,
-        _ => match pipe_private(&pc.s.pc.engine_pipe) {
-            Ok(private) => {
-                pc.dacl = Some((pid, private));
-                private
-            }
-            Err(why) => {
-                warn!("the engine pipe's DACL: {why}");
-                false
-            }
-        },
+    // failed read: the DACL (a moment's connection to the pipe) and the
+    // pipe's server (a call on our own end of it).
+    let (private, server) = match pc.dacl {
+        Some((of, private, server)) if of == pid => (Some(private), server),
+        _ => (None, None),
     };
+    let private = private.or_else(|| match pipe_private(&pc.s.pc.engine_pipe) {
+        Ok(private) => Some(private),
+        Err(why) => {
+            warn!("the engine pipe's DACL: {why}");
+            None
+        }
+    });
+    let server = server.or_else(|| match sup.server_pid() {
+        Ok(server) => Some(server),
+        Err(e) => {
+            warn!("the engine pipe's server process: {e}");
+            None
+        }
+    });
+    if let Some(private) = private {
+        pc.dacl = Some((pid, private, server));
+    }
     Some(EngineSeen {
         status,
-        pipe_private: private,
+        pipe_private: private.unwrap_or(false),
+        pipe_server_pid: server,
+        last_fault_us: pc.last_fault,
     })
 }
 

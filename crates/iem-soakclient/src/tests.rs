@@ -143,14 +143,14 @@ fn every_bad_argument_is_a_usage_error() {
 }
 
 /// A synthetic JWT secret (P6: never a site's).
-const SECRET: &str = "synthetic-jwt-secret";
+pub(crate) const SECRET: &str = "synthetic-jwt-secret";
 
 /// The claims of `token` as the server reads them (the body of
 /// `iem_server::auth::extract_claims`: HS256 with the secret's bytes and the
 /// default validation, which checks `exp`). The tests link no server crate:
 /// it embeds the UI's `dist`, and its axum, tokio and argon2 are no
-/// client's.
-fn as_server(token: &str, secret: &str) -> Option<iem_core::AuthClaims> {
+/// client's. `mint`'s tests read their tokens with it too.
+pub(crate) fn as_server(token: &str, secret: &str) -> Option<iem_core::AuthClaims> {
     let key = jsonwebtoken::DecodingKey::from_secret(secret.as_bytes());
     let validation = jsonwebtoken::Validation::default();
     jsonwebtoken::decode::<iem_core::AuthClaims>(token, &key, &validation)
@@ -158,7 +158,7 @@ fn as_server(token: &str, secret: &str) -> Option<iem_core::AuthClaims> {
         .map(|data| data.claims)
 }
 
-fn unix_now() -> u64 {
+pub(crate) fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()

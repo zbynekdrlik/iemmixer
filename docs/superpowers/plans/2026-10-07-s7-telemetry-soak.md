@@ -2264,7 +2264,7 @@ Tasks 28 to 31 are lanes, one at a time; 30 may share a lane with 29 if the diff
   - `nullrt.rs`: `a_panic_records_the_faulting_callbacks_own_time` (the `nullrt_panic_marks_the_stream_faulted_and_stops_calling` processor; `0 < fault_callback_ns < 1 s`; 0 before the panic).
   - `msg/s7_tests.rs`: `the_reopen_and_fault_times_are_additive` (an old `{"callbacks":4}` reads 0 and 0.0).
   - `control/tests/s7.rs`:
-    - `a_fault_sends_a_last_status_with_the_faulting_callbacks_time`: a `scripted` driver whose stats are faulted with `fault_callback_ns` 412_000; the broadcasts end `Status{faulted: true, fault_callback_us: 412.0}`, then the `Fault` alarm, then `DriverReleased`.
+    - `a_fault_sends_a_last_status_with_the_faulting_callbacks_time`: a `scripted` driver whose stats are faulted with `fault_callback_ns` 412_000; the broadcasts end `Status{faulted: true, fault_callback_us: 412.0}`, then the fault's `Saved`, the `Fault` alarm, then `DriverReleased`.
     - `status_carries_the_last_reopen`.
   - `tests/pipes.rs`, `an_injected_fault_ends_with_a_status_that_times_the_faulting_callback`: NullRt with `--fault-injection`, a supervisor `InjectFault`; the last `Status` before `DriverReleased` has `faulted` and `0 < fault_callback_us < 1e6`.
 

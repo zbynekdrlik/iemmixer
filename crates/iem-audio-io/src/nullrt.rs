@@ -44,6 +44,9 @@ struct Shared {
     callbacks: AtomicU64,
     late: AtomicU64,
     max_ns: AtomicU64,
+    /// The faulting callback's own time, ns (S7 HIL v2); stored before
+    /// `faulted`, so a reader that sees the fault sees it.
+    fault_ns: AtomicU64,
     fault: Mutex<Option<String>>,
 }
 
@@ -102,6 +105,10 @@ impl<P: Process + 'static> NullRt<P> {
             running: s.running.load(Ordering::Acquire),
             max_process_ns: s.max_ns.load(Ordering::Acquire),
             fault: s.fault.lock().ok().and_then(|f| f.clone()),
+            // No card: no reopen.
+            last_reopen_us: 0,
+            // Read after `faulted`, which is stored after it.
+            fault_callback_ns: s.fault_ns.load(Ordering::Acquire),
         }
     }
 
@@ -205,6 +212,8 @@ fn pace<P: Process>(cfg: &NullRtConfig, p: &mut P, s: &Shared, h: &StreamHists) 
             if let Ok(mut f) = s.fault.lock() {
                 *f = Some(panic_message(&*payload));
             }
+            // The faulting callback's own time (S7 HIL v2), before the flag.
+            s.fault_ns.store(ns.max(1), Ordering::Release);
             s.faulted.store(true, Ordering::Release);
             return;
         }
@@ -257,7 +266,10 @@ mod tests {
         }
     }
 
-    fn wait_for(rt: &NullRt<Count>, what: impl Fn(&StreamStats) -> bool) -> StreamStats {
+    fn wait_for<P: Process + 'static>(
+        rt: &NullRt<P>,
+        what: impl Fn(&StreamStats) -> bool,
+    ) -> StreamStats {
         let start = Instant::now();
         loop {
             let s = rt.stats();
@@ -357,6 +369,50 @@ mod tests {
         assert_eq!(rt.stats().callbacks, 2);
         let p = rt.stop().unwrap();
         assert_eq!(p.calls, 3);
+    }
+
+    /// Panics once `fire` is set, after holding the callback for `hold`.
+    struct Trigger {
+        fire: Arc<AtomicBool>,
+        hold: Duration,
+    }
+
+    impl Process for Trigger {
+        fn process(&mut self, _: &mut Block<'_>) {
+            if self.fire.load(Ordering::Acquire) {
+                std::thread::sleep(self.hold);
+                panic!("boom on request");
+            }
+        }
+    }
+
+    /// HIL v2 (S7, #10): the faulting callback's own time, from its entry to
+    /// the caught panic; 0 until a callback faults. NullRt never reopens.
+    #[test]
+    fn a_panic_records_the_faulting_callbacks_own_time() {
+        let fire = Arc::new(AtomicBool::new(false));
+        let rt = NullRt::start(
+            cfg(InputSignal::Silence),
+            Trigger {
+                fire: Arc::clone(&fire),
+                hold: Duration::from_millis(3),
+            },
+        )
+        .unwrap();
+        let before = wait_for(&rt, |s| s.callbacks >= 5);
+        assert!(before.callbacks >= 5 && !before.faulted, "{before:?}");
+        assert_eq!((before.fault_callback_ns, before.last_reopen_us), (0, 0));
+        fire.store(true, Ordering::Release);
+        let s = wait_for(&rt, |s| s.faulted && !s.running);
+        assert!(s.faulted && !s.running, "{s:?}");
+        // The panic followed 3 ms of the callback's own time.
+        assert!(
+            (3_000_000..1_000_000_000).contains(&s.fault_callback_ns),
+            "{s:?}"
+        );
+        assert!(s.fault_callback_ns <= s.max_process_ns, "{s:?}");
+        assert_eq!(s.last_reopen_us, 0, "NullRt never reopens");
+        assert!(rt.stop().is_some());
     }
 
     struct Slow {

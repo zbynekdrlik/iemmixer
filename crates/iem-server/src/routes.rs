@@ -51,6 +51,8 @@ pub fn api_routes(_state: AppState) -> Router<AppState> {
         .route("/api/version", get(get_version))
         // Where the mixer is reachable (LAN URL, public host)
         .route("/api/site", get(get_site_links))
+        // How this request was classified (HIL v2's tunnel and LAN peer)
+        .route("/api/peer", get(crate::peer_route::get_peer))
         // Auth login (returns JWT)
         .route("/api/auth", post(auth::login))
         // Member list (landing page)
@@ -683,6 +685,8 @@ pub fn static_routes() -> Router<AppState> {
         // Serve index.html for SPA routes
         .route("/", get(serve_index))
         .route("/login", get(serve_index))
+        // Browsers ask /favicon.ico for a page without its own icon link (#10).
+        .route("/favicon.ico", get(serve_favicon))
         // Serve static assets
         .route("/assets/{*path}", get(serve_asset))
         // Catch-all: serve files or SPA index for member routes
@@ -692,6 +696,11 @@ pub fn static_routes() -> Router<AppState> {
 /// Serve index.html
 async fn serve_index() -> impl IntoResponse {
     serve_embedded_file("index.html")
+}
+
+/// The app icon at /favicon.ico (a PNG; every current browser takes one there).
+async fn serve_favicon() -> impl IntoResponse {
+    serve_embedded_file("icon-192.png")
 }
 
 /// Serve index.html for SPA routes or static files

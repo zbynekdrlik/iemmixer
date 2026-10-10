@@ -58,8 +58,14 @@ pub struct WinPc {
     kids: procs::Kids,
     http: ureq::Agent,
     sup: Option<engine::Supervisor>,
-    /// The engine pid whose control pipe's DACL was read, and the verdict.
-    dacl: Option<(u32, bool)>,
+    /// The engine pid whose control pipe's DACL was read, the verdict, and
+    /// the process serving the supervisor connection's pipe once read
+    /// (`GetNamedPipeServerProcessId`, S7 HIL v2): read once per engine.
+    dacl: Option<(u32, bool, Option<u32>)>,
+    /// The faulting callback's time of the last faulted `Status` the
+    /// supervisor connection read (`engine::keep_fault`), kept across the
+    /// respawn (S7 HIL v2): `Reply.engine.last_fault_us`.
+    last_fault: Option<f64>,
     tray_quit: Option<TrayQuit>,
     /// The REAPER this guard asked to quit (40004) and has not seen gone: a
     /// crash on quit Windows Error Reporting holds, or a pre-empted wait.
@@ -82,6 +88,7 @@ impl WinPc {
             http: ureq::Agent::new_with_config(config),
             sup: None,
             dacl: None,
+            last_fault: None,
             tray_quit: None,
             quitting: None,
         }
@@ -117,8 +124,9 @@ impl Pc for WinPc {
         if p.exited.iter().any(|(kid, _)| *kid == Kid::Engine) {
             // A dead engine's stream is dropped at once: it only reads the
             // end, and the next look connects to the respawned engine and
-            // reads its DACL again.
-            self.sup = None;
+            // reads its DACL again. A faulted engine's last `Status` is in
+            // this connection's inbox: its fault time is kept first.
+            engine::drop_supervisor(self);
             self.dacl = None;
         }
         p

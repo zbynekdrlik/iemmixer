@@ -57,7 +57,7 @@ use crate::hist::{HistSnapshot, StreamHists};
 use crate::messages::{self, Messages, TOPICS};
 use crate::os;
 pub use crate::owner::StopOutcome;
-use crate::owner::{self, Asked, OpenPeriod, SehRelease, SehStep, Watchdog};
+use crate::owner::{self, Asked, OpenPeriod, SehRelease, SehStep, Then, Watchdog};
 use crate::period::PeriodVerdict;
 use crate::reset::{ResetBudget, Verdict};
 use crate::rtpanic;
@@ -896,6 +896,10 @@ struct Backend {
     /// A panic in the processor (or the owner's fault): the outputs stay
     /// zero and the processor is never called again.
     faulted: AtomicBool,
+    /// The faulting callback's own time, ns (S7 HIL v2): stored by that
+    /// callback right before `faulted`, so the owner reads it with the flag;
+    /// 0 for the owner's own fault.
+    fault_ns: AtomicU64,
     output_ready: AtomicBool,
     driver: *const azo::Driver,
 }
@@ -921,9 +925,7 @@ impl Backend {
         for ch in &self.outputs {
             zero(half(ch, second), self.bytes);
         }
-        if !self.faulted.load(Ordering::Acquire) {
-            self.render(second);
-        }
+        let panicked = !self.faulted.load(Ordering::Acquire) && self.render(second);
         if self.output_ready.load(Ordering::Relaxed) {
             // SAFETY: as above.
             let ok = unsafe { self.driver.as_ref() }.is_some_and(|d| d.output_ready().is_ok());
@@ -935,6 +937,12 @@ impl Backend {
         let took = nanos(self.base.elapsed().saturating_sub(entry));
         self.telemetry.on_done(took);
         self.hists.process.record(took);
+        if panicked {
+            // The faulting callback's own time, then the fault: two stores on
+            // the fault path only (I7). The outputs stayed zero.
+            self.fault_ns.store(took.max(1), Ordering::Relaxed);
+            self.faulted.store(true, Ordering::Release);
+        }
     }
 
     /// The first callbacks' positions, for the owner thread (single writer:
@@ -948,8 +956,9 @@ impl Backend {
     }
 
     /// Decode the engine's inputs, process, encode its outputs (the card's
-    /// outputs are already zero).
-    fn render(&self, second: bool) {
+    /// outputs are already zero). True when the processor panicked: the
+    /// outputs stay zero and the caller marks the stream faulted.
+    fn render(&self, second: bool) -> bool {
         // SAFETY: see `carry`: only this callback touches it now.
         let Carry {
             processor,
@@ -981,12 +990,13 @@ impl Backend {
                             .encode(src, writable(half(ch, second), self.bytes));
                     }
                 }
+                false
             }
             Err(payload) => {
                 // The outputs stay zero. The panic hook recorded the place in
                 // atomics; the payload is never freed on this thread.
-                self.faulted.store(true, Ordering::Release);
                 core::mem::forget(payload);
+                true
             }
         }
     }
@@ -1132,15 +1142,6 @@ struct Prepared {
     buffers: Vec<[*mut c_void; 2]>,
 }
 
-/// What follows a finished stream.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Then {
-    /// Another open (a reopen): the preference window stays held.
-    Reopen,
-    /// Nothing: the card is released for good and the window closes.
-    Release,
-}
-
 /// The started stream, owned by the owner thread.
 struct Live {
     card: Card,
@@ -1167,6 +1168,11 @@ struct Shared {
     overruns: AtomicU64,
     max_ns: AtomicU64,
     resets: AtomicU64,
+    /// The last reopen's time, µs (S7 HIL v2; `owner::reopen_us`).
+    reopen_us: AtomicU64,
+    /// The faulting callback's own time, ns (S7 HIL v2), copied from the
+    /// stream before `faulted` is set here.
+    fault_ns: AtomicU64,
     fault: Mutex<Option<String>>,
     pref_failure: Mutex<Option<String>>,
     /// The close that a preference window's `Drop` could not do (a driver
@@ -1483,6 +1489,7 @@ impl Owner {
             ring_len: AtomicUsize::new(0),
             discontinuity: AtomicBool::new(!first),
             faulted: AtomicBool::new(false),
+            fault_ns: AtomicU64::new(0),
             output_ready: AtomicBool::new(true),
             driver: ptr::from_ref(card.driver()),
         });
@@ -1536,14 +1543,26 @@ impl Owner {
         Ok(())
     }
 
+    /// [`Owner::stop_stream`] for a stream that ends for good: the carry.
+    fn finish(&mut self, live: Live, then: Then) -> Option<Carry> {
+        self.stop_stream(live, then).map(|(carry, _)| carry)
+    }
+
     /// Stops the stream, waits until no callback is inside it (bounded by
     /// [`STOP_WAIT`], pumping), disposes the buffers and releases the driver
     /// ([`Owner::release_card`]: with `Then::Release` the preference window
-    /// closes before `RELEASED` is set); returns the carry. `None` when a
-    /// callback stayed inside (R6): the stream and the driver are left alone,
-    /// never freed under a callback, the preference window stays held (the
-    /// card may be), and the owner is done (parked).
-    fn finish(&mut self, live: Live, then: Then) -> Option<Carry> {
+    /// closes before `RELEASED` is set); returns the carry and what followed
+    /// the release. `None` when a callback stayed inside (R6): the stream and
+    /// the driver are left alone, never freed under a callback, the
+    /// preference window stays held (the card may be), and the owner is done
+    /// (parked).
+    ///
+    /// The stream's `faulted` is read again once no callback is inside it
+    /// (S7, #10): a callback marks its panic at its end, after `watch` may
+    /// have decided on a reopen. A faulted stream is noted as `watch` notes
+    /// it and released for good (`owner::then_after_stop`): the panicked
+    /// processor is never opened again.
+    fn stop_stream(&mut self, live: Live, then: Then) -> Option<(Carry, Then)> {
         let Live { card, backend, .. } = live;
         let _ = card.driver().stop();
         BACKEND.store(ptr::null_mut(), Ordering::SeqCst);
@@ -1573,10 +1592,19 @@ impl Owner {
         // inside it, so this is the only reference; it came from Box::into_raw.
         let stream = unsafe { Box::from_raw(backend) };
         self.base = self.base.plus(stream.telemetry.counters());
+        let faulted = self.note_fault(&stream);
+        let then_now = owner::then_after_stop(then, faulted);
+        if then_now != then {
+            error!(
+                "[{}] the audio callback faulted while the card was stopped for a reopen: no \
+                 reopen, the card is released for good",
+                when()
+            );
+        }
         let _ = card.driver().dispose_all_buffers();
         let Backend { carry, .. } = *stream;
-        self.release_card(card, then);
-        Some(carry.into_inner())
+        self.release_card(card, then_now);
+        Some((carry.into_inner(), then_now))
     }
 
     /// Drops the driver instance (the driver is released), then, when no open
@@ -1680,15 +1708,29 @@ impl Owner {
         note(&self.shared.fault, why);
     }
 
+    /// Whether the stream faulted (a panic in the callback, or the owner's
+    /// own fault); a fault is noted in `shared` once: the faulting callback's
+    /// time first, since the control thread reads it once it sees `faulted`
+    /// (0 for the owner's own fault), then `faulted` and the panic's place.
+    fn note_fault(&self, b: &Backend) -> bool {
+        if !b.faulted.load(Ordering::Acquire) {
+            return false;
+        }
+        self.shared
+            .fault_ns
+            .store(b.fault_ns.load(Ordering::Relaxed), Ordering::Release);
+        if !self.shared.faulted.swap(true, Ordering::SeqCst) {
+            note(&self.shared.fault, panic_text());
+        }
+        true
+    }
+
     /// One look at the live stream: a panic in the callback, then the reopen
     /// question and its reasons.
     fn watch(&mut self, live: &mut Live, now: Instant) -> Option<(Asked, Verdict)> {
         // SAFETY: the stream is live.
         let b = unsafe { &*live.backend };
-        if b.faulted.load(Ordering::Acquire) {
-            if !self.shared.faulted.swap(true, Ordering::SeqCst) {
-                note(&self.shared.fault, panic_text());
-            }
+        if self.note_fault(b) {
             return None;
         }
         let requested = b.telemetry.take_requests();
@@ -1709,22 +1751,44 @@ impl Owner {
     /// after the reopen follows `Process::discontinuity`. The preference
     /// window stays held across it (nothing is written); when the reopen
     /// fails no open follows, and it closes.
+    ///
+    /// Its time (S7 HIL v2) runs from here, before `finish` stops the old
+    /// stream, to the new stream's measured period: `last_reopen_us`.
     fn reopen(&mut self, live: Live) {
-        let Some(carry) = self.finish(live, Then::Reopen) else {
+        let began = Instant::now();
+        let Some((carry, then)) = self.stop_stream(live, Then::Reopen) else {
             return;
         };
+        if then == Then::Release {
+            // The processor panicked while the reopen was decided (S7, #10):
+            // the fault is noted and the card released for good (the window
+            // closed); the control thread ends the engine.
+            self.carry = Some(carry);
+            return;
+        }
         if self.shared.release_pending.load(Ordering::SeqCst) {
             // The session ended during the finish: no new open (the next
             // tick releases for good and closes the window).
             self.carry = Some(carry);
             return;
         }
-        if let Err(e) = self.open(carry, false) {
-            // The card is released and no open follows: REAPER's value goes
-            // back now (a failure is noted in `pref_failure`).
-            let _ = self.leave_pref();
-            if !matches!(e, AsioError::SessionEnd) {
-                self.fault(format!("the reopen failed: {e}"));
+        match self.open(carry, false) {
+            Ok(()) => {
+                let us = owner::reopen_us(began.elapsed());
+                self.shared.reopen_us.store(us, Ordering::SeqCst);
+                info!(
+                    "[{}] the reopen took {us} microseconds, from the old stream's stop to \
+                     the new one's measured period",
+                    when()
+                );
+            }
+            Err(e) => {
+                // The card is released and no open follows: REAPER's value
+                // goes back now (a failure is noted in `pref_failure`).
+                let _ = self.leave_pref();
+                if !matches!(e, AsioError::SessionEnd) {
+                    self.fault(format!("the reopen failed: {e}"));
+                }
             }
         }
     }
@@ -2090,6 +2154,9 @@ impl<P: Process + 'static> AsioStream<P> {
             running: s.running.load(Ordering::Acquire),
             max_process_ns: s.max_ns.load(Ordering::Acquire),
             fault: s.fault.lock().ok().and_then(|f| f.clone()),
+            last_reopen_us: s.reopen_us.load(Ordering::Acquire),
+            // Read after `faulted`, which the owner sets after it.
+            fault_callback_ns: s.fault_ns.load(Ordering::Acquire),
         }
     }
 

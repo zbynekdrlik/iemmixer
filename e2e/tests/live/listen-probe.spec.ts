@@ -1,6 +1,6 @@
 import { test, expect, liveNumber, type Page } from "./support/live";
 import type { Relay } from "./support/relay";
-import { ANALYSER_INIT, audioError, audioLevel, readTone } from "./support/audio";
+import { ANALYSER_INIT, audioError, audioLevel, playerDropouts, readTone } from "./support/audio";
 import { apiGet, live, openLive } from "./support/env";
 import type { Tone } from "./support/tone";
 
@@ -83,6 +83,10 @@ test.describe("the listen probe on the real PC (S7)", () => {
     await openLive(page, "engineer");
     await watch.burst();
     await listenPlays(page, relay);
+    // The player's underruns from here on, so window 1's audio is inside the
+    // span: a gap it played because frames came late counts, silence it was
+    // handed (decoded) does not.
+    const dryBefore = await playerDropouts(page);
     // Settling: the analyser's window (32768 samples, 0.68 s) then holds
     // only the burst as the player plays it.
     await page.waitForTimeout(1_000);
@@ -95,9 +99,11 @@ test.describe("the listen probe on the real PC (S7)", () => {
       const tone = await readTone(page);
       expect(watch.inBurst(), `window ${k} ends inside the burst`).toBe(true);
       relay.check();
-      expect(tone.gap, `window ${k} has no dropout`).toBe(false);
+      const dry = (await playerDropouts(page)) - dryBefore;
+      expect(tone.gap, `window ${k} has no dropout (the player ran dry ${dry} times since the settling began)`).toBe(false);
       tones.push(tone);
     }
+    expect((await playerDropouts(page)) - dryBefore, "the player never ran dry from the settling to the last window").toBe(0);
     const hz = middle(tones.map((t) => t.hz));
     const dbfs = middle(tones.map((t) => t.dbfs));
     liveNumber("listen_hz", hz, 3);

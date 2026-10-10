@@ -31,6 +31,17 @@ export const ANALYSER_INIT = (): void => {
 };
 
 /**
+ * The tone the live talkback spec plays into Chromium's fake microphone
+ * (`toneWav`), and how long after the encoder's first frame the spec reads
+ * it: Chromium's capture processing (talkback.js asks for AGC and noise
+ * suppression) ramps the level for about 2.5 s (the last frame more than
+ * 0.05 dB off the steady level came 2.49 to 2.52 s after the first in three
+ * local runs), then holds it within 0.01 dB. The mock run checks this
+ * (`tests/talkback-capture.spec.ts`).
+ */
+export const TALK_TONE = { hz: 1000, amplitude: 0.5, settleMs: 2_700 } as const;
+
+/**
  * `page.addInitScript(TALK_INIT)`: each frame the page hands its talkback
  * encoder (talkback.js) is also measured: its peak (linear, plane 0) and
  * `performance.now()` go into `window.__live_talk_in`; a frame that cannot
@@ -60,17 +71,46 @@ export const TALK_INIT = (): void => {
   } as typeof AudioEncoder.prototype.encode;
 };
 
-/** The tone the player plays now: the analyser's window (`ANALYSER_INIT`) at its context's rate. */
+/**
+ * The tone the player plays now: the analyser's window (`ANALYSER_INIT`) at
+ * its context's rate. The window crosses the protocol as one base64 string
+ * of its float32 bytes (13 to 36 ms measured locally). Returned as an
+ * array of 32768 numbers it took 200 to 500 ms, which held back the frames
+ * the runner's relay feeds the page: the player, 80 ms ahead, ran dry, and
+ * the next window held the gap (#10, live run 1; `tone.spec.ts` runs it on
+ * the real player).
+ */
 export async function readTone(page: Page): Promise<Tone> {
   const read = await page.evaluate(() => {
     const a = (window as unknown as { __live_analyser?: AnalyserNode }).__live_analyser;
     if (!a) return null;
     const buf = new Float32Array(a.fftSize);
     a.getFloatTimeDomainData(buf);
-    return { samples: Array.from(buf), rate: a.context.sampleRate };
+    const bytes = new Uint8Array(buf.buffer);
+    let text = "";
+    // In slices: one call with every byte as an argument would exceed the call stack.
+    for (let i = 0; i < bytes.length; i += 0x8000) text += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    return { base64: btoa(text), rate: a.context.sampleRate };
   });
   if (!read) throw new Error("the player's output has no analyser (no ANALYSER_INIT, or Listen never played)");
-  return toneOf(read.samples, read.rate);
+  // A fresh copy: a Float32Array needs its offset aligned to 4 bytes, which a pooled Buffer's need not be.
+  const bytes = new Uint8Array(Buffer.from(read.base64, "base64"));
+  return toneOf(new Float32Array(bytes.buffer), read.rate);
+}
+
+/**
+ * How often the player ran dry since Listen: `getStreamStats().dropouts`
+ * (`playbackDropouts`, a decoded frame that found the schedule behind the
+ * clock, so a gap was played), not the arrival-gap count that only grows
+ * its buffer. Fails when the player exposes no stats.
+ */
+export async function playerDropouts(page: Page): Promise<number> {
+  const dropouts = await page.evaluate(() => {
+    const stats = (window as unknown as { __iem_stream_stats?: () => { dropouts: unknown } }).__iem_stream_stats;
+    return typeof stats === "function" ? stats().dropouts : null;
+  });
+  if (typeof dropouts !== "number") throw new Error("the player exposes no stream stats (__iem_stream_stats)");
+  return dropouts;
 }
 
 /** The level (dB) of the audio the player decoded last; −150 while it plays nothing. */
