@@ -7,7 +7,8 @@
 //! ran). The decision is `handover::ensure_reaper`; this runs it against
 //! the PC. Kept out of `daemon.rs`, which is over its size budget (#36).
 
-use super::{Guard, pref_step};
+use super::Guard;
+use super::runner::pref_step;
 use crate::cancel::Cancel;
 use crate::effects::reaper::CRASH_HOLD;
 use crate::handover::{self, Ensure};
