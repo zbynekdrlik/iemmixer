@@ -1098,5 +1098,4 @@ fn group_op(m: usize, g: usize, s: &MixGroup) -> RtOp {
 }
 
 #[cfg(test)]
-#[path = "core_tests.rs"]
 mod tests;
