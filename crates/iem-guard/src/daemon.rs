@@ -20,23 +20,30 @@
 //! mutations finish first, and they bound the longest
 //! an "ide event" waits behind a request: activate's Defender exclusion task
 //! (≤ 120 s), a bundle's unzip (local files), the probe task (≤ 15 s).
+//!
+//! The parts: `shared` (what the pipe's threads share: the view and the
+//! routing), `reply` (the texts of the replies), `runner` (the switch
+//! runner), `requests` (the requests and the rehearsal), `activation` (bundle
+//! and site installs, activations), `hil` (HIL's jobs, test signal and
+//! injections), `watch` (the once-a-second watch), `startup` (the start and
+//! `--direct`) and `reaper` (the REAPER handover's first part). Here: the
+//! [`Guard`], its files and alarms, and the request loop.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
-use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tracing::{info, warn};
 
 use crate::alarms::Alarms;
 use crate::cancel::Cancel;
-use crate::crash::{self, After, CrashLoop};
-use crate::pc::{Audience, EngineSeen, Kid, Pc, Procs, job_note};
+use crate::crash::CrashLoop;
+use crate::pc::{Audience, EngineSeen, Pc};
 use crate::plan::{Mode, PrefFail, Step};
-use crate::proto::{EngineStatus, Reply};
+use crate::proto::EngineStatus;
 use crate::site::GuardSite;
 use crate::state::{self, GuardState};
 use crate::switch_log::Laps;
@@ -48,15 +55,16 @@ mod reply;
 mod requests;
 mod runner;
 mod shared;
+mod startup;
+mod watch;
 
 pub use self::activation::{activate_files, activate_offline, install_bundle, install_offline};
 pub use self::reply::{Outcome, cut, mode_name, status_text};
 pub use self::requests::{Job, handle};
 pub use self::runner::run_switch;
 pub use self::shared::{Generation, Route, Shared, View, while_switching};
-
-use self::requests::{dry_event, event_now};
-use self::runner::{pref_step, switch};
+pub use self::startup::{direct_event, start};
+pub use self::watch::{session_end, tick};
 
 /// The engine's warm-up window before `Arm` (design §5.2 step 7).
 pub const READY_S: u32 = 10;
@@ -407,38 +415,6 @@ pub fn send_notices(pc: &mut dyn Pc, g: &mut Guard) {
     }
 }
 
-/// What the elevated logon task (G1) left, taken once per run of it (its
-/// `at`, `GuardState::logon_seen`), at the guard's start and hourly (#9
-/// 2026-09-28). The task follows `PrefCheck`'s rule, so a preference it did
-/// not write under a holder of the driver module is remembered and alarmed
-/// once with `PrefCheck`'s text (the event plan's check that finds the same
-/// adds no alarm); a run at REAPER's original drops what was remembered; a
-/// failed run is logged (the next plan's `PrefCheck` reads the preference).
-fn take_logon(pc: &mut dyn Pc, g: &mut Guard) {
-    let Some(logon) = pc.logon() else {
-        return;
-    };
-    if g.state.logon_seen.as_deref() == Some(logon.at.as_str()) {
-        return;
-    }
-    info!("the logon task's run of {}: {:?}", logon.at, logon.pref);
-    g.state.logon_seen = Some(logon.at);
-    match logon.pref {
-        crate::effects::tuning::LogonPref::Original => g.state.pref_held = None,
-        crate::effects::tuning::LogonPref::Held(held) => {
-            let text = held.text();
-            if g.state.pref_held.as_deref() != Some(text.as_str()) {
-                g.state.pref_held = Some(text.clone());
-                g.raise(None, &format!("logon task: {text}"), false);
-            }
-        }
-        crate::effects::tuning::LogonPref::Failed(why) => {
-            warn!("the logon task did not restore the preference: {why}");
-        }
-    }
-    g.save();
-}
-
 /// `iemmode alarm-test`. Kept here with the alarms: HIL's `alarm-ack`
 /// acknowledges only this text, and `scripts/iem-pc/test_iempc_hil.py` and
 /// `Test-IemHil.ps1` read it from this file.
@@ -452,258 +428,6 @@ fn alarm_test(pc: &mut dyn Pc, g: &mut Guard) -> (bool, String) {
         "the test alarm was not delivered"
     };
     (sent, text.to_owned())
-}
-
-// ---- the watch ----
-
-/// The once-a-second watch (P10: the process list only): exits of our
-/// children, REAPER or the app appearing in dev/live, a due respawn, hourly
-/// drift, the end of the session.
-pub fn tick(pc: &mut dyn Pc, g: &mut Guard, at: Instant) {
-    // What the watch did is logged; no request reads it.
-    g.report.clear();
-    let p = pc.procs();
-    g.look(pc);
-    for (kid, code) in &p.exited {
-        exited(pc, g, *kid, *code, at);
-    }
-    if g.session_ending.load(Ordering::SeqCst) && !g.session_done {
-        session_end(pc, g);
-    }
-    watch_band(g, &p);
-    watch_parked(g);
-    if g.respawn_at.is_some_and(|due| due <= at) {
-        g.respawn_at = None;
-        respawn(pc, g);
-    }
-    if g.last_drift
-        .is_none_or(|t| at.saturating_duration_since(t) >= DRIFT_EVERY)
-    {
-        g.drift(pc, at);
-        take_logon(pc, g);
-    }
-    send_notices(pc, g);
-}
-
-fn exited(pc: &mut dyn Pc, g: &mut Guard, kid: Kid, code: Option<i32>, at: Instant) {
-    let session = g.session_ending.load(Ordering::SeqCst);
-    info!("the {} ended with {code:?}", kid.id());
-    match kid {
-        Kid::Engine => engine_exited(pc, g, code, at, session),
-        Kid::Server if g.state.mode != Mode::Event && !session => {
-            g.raise(None, &format!("the server ended ({code:?})"), false);
-        }
-        Kid::Server | Kid::Tray | Kid::Runner => {}
-    }
-    g.state.pids = pc.children();
-    g.save();
-}
-
-fn engine_exited(pc: &mut dyn Pc, g: &mut Guard, code: Option<i32>, at: Instant, session: bool) {
-    g.last_exit = code;
-    // #32 minor-4: a busy state directory is no crash; it is tried again,
-    // up to `crash::BUSY_LIMIT` times in a row, then each counts as one
-    // (F3-r4 3: something the guard does not watch holds it).
-    let streak = g.crash.busy(!session && code == Some(crash::STATE_BUSY));
-    let busy = !session && crash::busy_retry(code, streak);
-    let abnormal = !session && !busy && !matches!(code, Some(0 | 2 | 3));
-    let looped = abnormal && g.crash.record(at);
-    if streak == crash::BUSY_ALARM {
-        g.raise(
-            None,
-            &format!(
-                "the engine's state directory stayed in use {} times in a row (exit {}): \
-                 starting it again",
-                crash::BUSY_ALARM,
-                crash::STATE_BUSY
-            ),
-            false,
-        );
-    }
-    let mode = g.state.mode;
-    let n = g.crash.in_window();
-    match crash::after_exit(code, mode, g.site.prod, session, looped, n, streak) {
-        After::Stay { alarm } => {
-            if let Some(why) = alarm {
-                g.raise(None, &format!("{why} (exit {code:?})"), false);
-            }
-        }
-        After::Respawn(delay) => {
-            if mode != Mode::Event {
-                g.respawn_at = Some(at + delay);
-            }
-        }
-        After::ToEvent => {
-            g.raise(
-                None,
-                &format!("the engine crashed {n} times in 10 min: back to REAPER"),
-                false,
-            );
-            run_switch(pc, g, mode, Mode::Event);
-        }
-        After::PreviousPin => match g.state.pins.revert() {
-            Ok(sha) => {
-                g.raise(
-                    None,
-                    &format!(
-                        "the engine crashed {n} times in 10 min: back to the previous pin {sha}"
-                    ),
-                    false,
-                );
-                pc.set_bundle(Some(sha.as_str()));
-                g.respawn_at = Some(at);
-            }
-            Err(why) => {
-                g.raise(None, &format!("crash loop in prod: {why}"), false);
-            }
-        },
-    }
-}
-
-fn respawn(pc: &mut dyn Pc, g: &mut Guard) {
-    // "ide event" may have come between the exit and the respawn.
-    if g.state.mode == Mode::Event {
-        return;
-    }
-    // An engine that ended while it held the card left 32, and the new one
-    // refuses the card unless REAPER's original is back (#9 2026-09-28).
-    // The old engine is gone, so nothing of ours holds the driver; a failed
-    // restore (or a holder) starts nothing, as a failed start.
-    let mode = g.state.mode;
-    if let Err(e) = pref_step(pc, g, mode) {
-        g.raise(
-            None,
-            &format!("the engine could not be started again: {e}"),
-            false,
-        );
-        return;
-    }
-    let hil = g.hil_engine(mode);
-    match pc.engine_start(false, hil) {
-        Ok(pid) => {
-            g.spawns += 1;
-            info!("the engine was started again, unheld (pid {pid})");
-            g.state.pids = pc.children();
-            g.save();
-        }
-        Err(e) => {
-            g.raise(
-                None,
-                &format!("the engine could not be started again: {e}"),
-                false,
-            );
-        }
-    }
-}
-
-/// REAPER or the predecessor app appearing in dev/live alarms once per
-/// appearance; nothing is ended.
-fn watch_band(g: &mut Guard, p: &Procs) {
-    let up = p.band_up() && g.state.mode != Mode::Event;
-    if up && !g.band_seen {
-        g.raise(
-            None,
-            "REAPER or the predecessor app started while iemmixer runs; nothing is ended",
-            false,
-        );
-    }
-    g.band_seen = up;
-}
-
-/// A parked engine outside a HIL job (#35, supervisor decision of
-/// 2026-10-07): its stream stopped with the card held, so nothing plays
-/// until the engine ends. One alarm per parked engine, by its state alone
-/// (no level, #38); none inside a HIL job (test #2 parks it on purpose). An
-/// engine is known by the guard's start count (`spawns`: every respawn and
-/// plan start counts), so it alarms again only after an engine was seen
-/// unparked or the guard started a new one; a look without an engine (one
-/// coming up, or the connection renewed to the same engine) changes
-/// nothing. Nothing is ended: an "ide event" or a job's engine restart ends
-/// it with `Shutdown`.
-fn watch_parked(g: &mut Guard) {
-    let Some(seen) = &g.seen else {
-        return;
-    };
-    if !seen.status.parked {
-        if g.parked_alarmed.take().is_some() {
-            info!("the engine is no longer parked: its parked alarm is armed again");
-        }
-    } else if g.state.job.is_none() && g.parked_alarmed != Some(g.spawns) {
-        g.parked_alarmed = Some(g.spawns);
-        g.raise(None, PARKED_ALARM, false);
-    }
-}
-
-/// The end of the Windows session (design §5.4): no respawn, the engine
-/// gets [`Guard::session_wait`] to release the card and exit by itself,
-/// then the server and the tray are asked to stop.
-pub fn session_end(pc: &mut dyn Pc, g: &mut Guard) {
-    g.session_done = true;
-    g.respawn_at = None;
-    info!("the Windows session ends: no respawn");
-    let start = Instant::now();
-    let mut p = pc.procs();
-    while !p.engine.is_empty() && start.elapsed() < g.session_wait {
-        thread::sleep(Duration::from_millis(100));
-        p = pc.procs();
-    }
-    info!(
-        "engine processes left at the end of the session: {}",
-        p.engine.len()
-    );
-    let c = Cancel::default();
-    if !p.server.is_empty()
-        && let Err(e) = pc.server_stop(&c)
-    {
-        warn!("the server at the end of the session: {e}");
-    }
-    if !p.tray.is_empty()
-        && let Err(e) = pc.tray_stop(&c)
-    {
-        warn!("the tray at the end of the session: {e}");
-    }
-    g.state.pids = pc.children();
-    g.save();
-    g.shared.update(|v| v.session_done = true);
-}
-
-// ---- start, loop, direct ----
-
-/// A starting guard (design §5.2): the job its children start in (logged,
-/// and named in the status while they stay in it, §5.1), the reboot rule,
-/// then the children a previous guard started, then an unfinished switch
-/// unwinds to event (or resumes, when it was one). From event the event
-/// plan is the start's checks: a dev or live entry the pipe queues
-/// meanwhile runs after them (#42). The outcome of an event plan that ran.
-pub fn start(pc: &mut dyn Pc, g: &mut Guard, boot: u64) -> Option<Outcome> {
-    let job = pc.job();
-    if let Err(e) = &job {
-        warn!("the guard's job could not be read: {e}");
-    }
-    g.job_note = job_note(&job);
-    if let Some(n) = g.job_note {
-        info!("{n}");
-    }
-    let p = pc.procs();
-    let reset = state::reset_to_event(&g.state, boot, p.band_up(), !p.engine.is_empty());
-    if reset {
-        g.info("after a reboot, or with the band's system up, the PC is in event");
-        g.state.reset();
-    }
-    let saved = g.state.pids.clone();
-    g.state.pids = pc.adopt(&saved);
-    pc.set_bundle(g.state.pins.current.as_deref());
-    g.look(pc);
-    // Before the event plan: its check then adds no alarm for the same value.
-    take_logon(pc, g);
-    g.save();
-    let resume = g.state.switching.is_some();
-    let out = (reset || resume).then(|| {
-        let from = g.state.mode;
-        switch(pc, g, from, Mode::Event, from == Mode::Event)
-    });
-    send_notices(pc, g);
-    out
 }
 
 /// The daemon's loop: requests one at a time, the watch once a second.
@@ -731,26 +455,6 @@ pub fn serve_requests(pc: &mut dyn Pc, g: &mut Guard, jobs: &Receiver<Job>) {
             next = now + TICK;
         }
     }
-}
-
-/// `iemmode event --direct` (design §5.1): without a guard, the same event
-/// plan in this process. `lock` is the guard's mutex; `None`: a guard holds
-/// it.
-pub fn direct_event<L>(pc: &mut dyn Pc, g: &mut Guard, lock: Option<L>, dry_run: bool) -> Reply {
-    let Some(_held) = lock else {
-        return g.reply(false, "a guard runs; use the pipe");
-    };
-    let saved = g.state.pids.clone();
-    g.state.pids = pc.adopt(&saved);
-    pc.set_bundle(g.state.pins.current.as_deref());
-    let (ok, detail) = if dry_run {
-        dry_event(pc)
-    } else {
-        event_now(pc, g)
-    };
-    send_notices(pc, g);
-    g.look(pc);
-    g.reply(ok, &format!("direct: {detail}"))
 }
 
 #[cfg(test)]
