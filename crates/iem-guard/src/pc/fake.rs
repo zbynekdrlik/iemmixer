@@ -3,6 +3,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::*;
+use crate::rollback::{Files, moves, placed};
 
 /// Every `Pc` method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -57,6 +58,10 @@ pub enum Call {
     ServerConfig,
     WriteServerConfig,
     MemberPage,
+    /// The rollback's export of the band's data (S8 lane 3).
+    ExportProject,
+    /// The rollback's renames of the project files.
+    SwapProject,
 }
 
 impl Call {
@@ -95,6 +100,8 @@ impl Call {
                 | Call::AutostartsOn
                 | Call::GuardLogon
                 | Call::WriteServerConfig
+                | Call::ExportProject
+                | Call::SwapProject
         )
     }
 }
@@ -198,6 +205,13 @@ pub struct FakePc {
     /// The export the predecessor's autostarts were disabled into
     /// (`autostarts_off`); none while they are enabled.
     pub autostarts_in: Option<String>,
+    /// The project files the rollback exports and renames (`project` the
+    /// band's project, `export` its export under its own name, `kept` the
+    /// original kept beside it).
+    pub project: Files,
+    /// REAPER cannot open the export: its handover's facts name no track
+    /// while the project's path holds it.
+    pub export_unloadable: bool,
     /// "ide event" pre-empts this token as this call begins (a test of what
     /// comes after a step during which it came); once.
     pub preempt_at: Option<(Call, Cancel)>,
@@ -289,6 +303,11 @@ impl FakePc {
             config_sticks: false,
             guard_at_logon: false,
             autostarts_in: None,
+            project: Files {
+                project: true,
+                ..Files::default()
+            },
+            export_unloadable: false,
             preempt_at: None,
             calls: Vec::new(),
             fails: HashMap::new(),
@@ -302,6 +321,11 @@ impl FakePc {
     /// `call` fails with `why` (and changes nothing).
     pub fn fail(&mut self, call: Call, why: &str) {
         self.fails.insert(call, why.to_owned());
+    }
+
+    /// `call` succeeds again (a failure that went away).
+    pub fn heal(&mut self, call: Call) {
+        self.fails.remove(&call);
     }
 
     /// `call` waits until its token is pre-empted, as `WinPc` waits, and
@@ -657,6 +681,13 @@ impl Pc for FakePc {
 
     fn reaper_facts(&mut self, c: &Cancel) -> R<ReaperFacts> {
         self.enter(Call::ReaperFacts, Some(c))?;
+        let on_export = placed(Want::Export, self.project) == Some(Placed::Export);
+        if self.export_unloadable && on_export {
+            return Ok(ReaperFacts {
+                tracks: None,
+                ..self.reaper.clone()
+            });
+        }
         Ok(self.reaper.clone())
     }
 
@@ -782,5 +813,25 @@ impl Pc for FakePc {
 
     fn member_page(&mut self) -> R<()> {
         self.enter(Call::MemberPage, None)
+    }
+
+    fn export_project(&mut self, _at: u64) -> R<String> {
+        self.enter(Call::ExportProject, None)?;
+        if self.project.export {
+            return Err(StepError::failed(
+                "the export exists: an export never overwrites a file",
+            ));
+        }
+        self.project.export = true;
+        Ok("export: self-check passed".to_owned())
+    }
+
+    fn swap_project(&mut self, want: Want, _at: u64) -> R<Placed> {
+        self.enter(Call::SwapProject, None)?;
+        for m in moves(want, self.project).map_err(StepError::Failed)? {
+            self.project = m.apply(self.project);
+        }
+        placed(want, self.project)
+            .ok_or_else(|| StepError::failed("the project files do not read back"))
     }
 }

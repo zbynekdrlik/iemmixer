@@ -137,7 +137,15 @@ fn a_reaper_that_ended_after_the_plan_is_started_inside_the_handover() {
     let (mut pc, mut g) = (FakePc::new(band_up()), Guard::for_test(Mode::Event));
     pc.reaper_ends_at = Some(Call::PrefCheck);
     let seen = g.shared.generation();
-    let r = handle(&mut pc, &mut g, Request::Event { dry_run: false }, seen);
+    let r = handle(
+        &mut pc,
+        &mut g,
+        Request::Event {
+            dry_run: false,
+            signal: false,
+        },
+        seen,
+    );
     assert!(r.ok, "{r:?}");
     assert!(
         r.detail.starts_with("event: done; tuning exit: exit: ok; "),
@@ -274,7 +282,15 @@ fn a_failed_reaper_handover_is_never_done() {
     let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Event));
     pc.fail(Call::ReaperFacts, "REAPER does not run");
     let seen = g.shared.generation();
-    let r = handle(&mut pc, &mut g, Request::Event { dry_run: false }, seen);
+    let r = handle(
+        &mut pc,
+        &mut g,
+        Request::Event {
+            dry_run: false,
+            signal: false,
+        },
+        seen,
+    );
     assert!(!r.ok, "{r:?}");
     assert_eq!(crate::cli::exit_code(&r), 1);
     assert!(
@@ -322,7 +338,15 @@ fn a_failed_app_handover_ends_the_switch_needs_owner_with_reaper_running() {
     let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
     pc.fail(Call::AppAnswers, "the app does not answer on port 80");
     let seen = g.shared.generation();
-    let r = handle(&mut pc, &mut g, Request::Event { dry_run: false }, seen);
+    let r = handle(
+        &mut pc,
+        &mut g,
+        Request::Event {
+            dry_run: false,
+            signal: false,
+        },
+        seen,
+    );
     assert!(!r.ok, "{r:?}");
     assert!(
         r.detail.starts_with(
@@ -366,7 +390,15 @@ fn a_failed_app_stop_ends_the_switch_needs_owner() {
     );
     pc.app_exit.exit_code = None;
     let seen = g.shared.generation();
-    let r = handle(&mut pc, &mut g, Request::Event { dry_run: false }, seen);
+    let r = handle(
+        &mut pc,
+        &mut g,
+        Request::Event {
+            dry_run: false,
+            signal: false,
+        },
+        seen,
+    );
     assert!(!r.ok, "{r:?}");
     assert!(
         r.detail.starts_with(
@@ -406,7 +438,15 @@ fn the_reply_names_every_step_that_asked_the_owner() {
     pc.reaper.heartbeat_advanced = false;
     pc.fail(Call::AppAnswers, "the app does not answer");
     let seen = g.shared.generation();
-    let r = handle(&mut pc, &mut g, Request::Event { dry_run: false }, seen);
+    let r = handle(
+        &mut pc,
+        &mut g,
+        Request::Event {
+            dry_run: false,
+            signal: false,
+        },
+        seen,
+    );
     assert!(
         r.detail.starts_with(
             "event: ended, needs the owner: ReaperHandover failed: the meter heartbeat does \
@@ -442,7 +482,15 @@ fn the_reply_names_every_step_that_asked_the_owner() {
     // The next switch that needs nobody says done again.
     let mut pc = FakePc::new(band_up());
     let seen = g.shared.generation();
-    let r = handle(&mut pc, &mut g, Request::Event { dry_run: false }, seen);
+    let r = handle(
+        &mut pc,
+        &mut g,
+        Request::Event {
+            dry_run: false,
+            signal: false,
+        },
+        seen,
+    );
     assert!(r.ok, "{r:?}");
     assert!(r.detail.starts_with("event: done"), "{}", r.detail);
     assert!(g.shared.view().event_reply("routed").ok);

@@ -21,6 +21,7 @@ mod cutover;
 mod engine;
 mod procs;
 mod reaper;
+mod rollback;
 mod tasks;
 mod web;
 
@@ -42,6 +43,7 @@ use crate::pc::{
     self, Audience, EngineSeen, Images, Kid, Pc, Ports, PrefSeen, Procs, R, Status, StepError,
 };
 use crate::plan::{Facts, Health, Mode};
+use crate::rollback::{Placed, Want};
 use crate::site::{self, Settings};
 use crate::state::Children;
 
@@ -365,6 +367,14 @@ impl Pc for WinPc {
 
     fn member_page(&mut self) -> R<()> {
         web::member_page(self)
+    }
+
+    fn export_project(&mut self, at: u64) -> R<String> {
+        rollback::export(self, at)
+    }
+
+    fn swap_project(&mut self, want: Want, at: u64) -> R<Placed> {
+        rollback::swap(self, want, at)
     }
 
     /// `logon.result.json` in the elevated root's `tasks\out`; no file is

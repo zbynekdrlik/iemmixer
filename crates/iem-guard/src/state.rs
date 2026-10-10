@@ -89,6 +89,13 @@ pub struct GuardState {
     /// it before anything else (`daemon::cutover::recover`); a reset keeps
     /// it. An older guard drops it on its next save.
     pub cutover: Option<crate::cutover::Run>,
+    /// The rollback in progress (S8 lane 3, design note §3.3): saved with
+    /// `RollingBack` before its first step and after each, dropped when it
+    /// ends in trial (or kept with what is left). A starting guard that
+    /// finds one continues it (`daemon::rollback::resume`); a reset keeps
+    /// it. An older guard drops it on its next save, so `activate` is
+    /// refused while it is kept.
+    pub rollback: Option<crate::rollback::Run>,
     /// The HIL job that began and has not ended (its run id). Kept here so
     /// a guard that hands over to a new exe inside the job (HIL activates
     /// the bundle it tests) or restarts still serves the job (design §7).
@@ -259,6 +266,14 @@ mod tests {
                 build: "a".repeat(40),
                 since: 1_790_000_250,
                 begun: vec![crate::cutover::CutStep::Import],
+            }),
+            rollback: Some(crate::rollback::Run {
+                pin: "a".repeat(40),
+                since: Some(1_790_000_250),
+                at: 1_790_000_300,
+                done: vec![crate::rollback::RollStep::Stop],
+                exported: false,
+                on_export: false,
             }),
             job: Some(4242),
             pref_held: Some(
@@ -499,8 +514,10 @@ mod tests {
         assert_eq!(st.pids, before.pids);
         assert_eq!(st.pref_held, before.pref_held);
         assert_eq!(st.logon_seen, before.logon_seen);
-        // A cutover cut off by the reboot is the start's to unwind.
+        // A cutover cut off by the reboot is the start's to unwind, a
+        // rollback the start's to continue.
         assert_eq!(st.cutover, before.cutover);
+        assert_eq!(st.rollback, before.rollback);
     }
 
     /// S7 (#10): the last switch is saved with the state, and a reset (a

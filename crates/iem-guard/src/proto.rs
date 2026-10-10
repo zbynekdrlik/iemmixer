@@ -35,8 +35,17 @@ pub const GUARD_BUILD: &str = match option_env!("GITHUB_SHA") {
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Request {
     Status,
+    /// `signal`: the owner's "ide event" (`iempc event` sends `--signal`);
+    /// without it the engineer's "Back to REAPER" (the site's
+    /// `back_to_reaper`) or a person's `iemmode event`. Before the cutover
+    /// both are the event plan; in prod the button is the rollback and "ide
+    /// event" never is (`rollback::on_event`, S8 lane 3). Additive: absent
+    /// reads false, false is never written, so an older guard reads it as
+    /// the event plan it always ran (it predates prod).
     Event {
         dry_run: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        signal: bool,
     },
     /// An older iemmode's `force` (it skipped the interlock, gone with #38)
     /// is read and ignored.
@@ -57,6 +66,11 @@ pub enum Request {
     /// precheck, nothing changes.
     Cutover {
         build: String,
+        dry_run: bool,
+    },
+    /// The rollback to REAPER (S8 lane 3, design note §3.3): only in prod or
+    /// while a rollback is left; `dry_run` names the steps, nothing changes.
+    Rollback {
         dry_run: bool,
     },
     Install {
@@ -361,7 +375,10 @@ mod tests {
     fn every_request() -> Vec<Request> {
         vec![
             Request::Status,
-            Request::Event { dry_run: true },
+            Request::Event {
+                dry_run: true,
+                signal: false,
+            },
             Request::Dev {
                 build: Some("0123456789abcdef0123456789abcdef01234567".into()),
                 dry_run: true,
@@ -379,6 +396,12 @@ mod tests {
                 build: "0123456789abcdef0123456789abcdef01234567".into(),
                 dry_run: true,
             },
+            Request::Event {
+                dry_run: false,
+                signal: true,
+            },
+            Request::Rollback { dry_run: false },
+            Request::Rollback { dry_run: true },
             Request::Install {
                 zip: "C:\\bundles\\iemmixer.zip".into(),
             },
@@ -440,8 +463,31 @@ mod tests {
         let json = |r: &Request| serde_json::to_string(r).unwrap();
         assert_eq!(json(&Request::Status), r#"{"cmd":"status"}"#);
         assert_eq!(
-            json(&Request::Event { dry_run: false }),
+            json(&Request::Event {
+                dry_run: false,
+                signal: false,
+            }),
             r#"{"cmd":"event","dry_run":false}"#
+        );
+        // "ide event" (S8 lane 3): `signal` is written only when true, so a
+        // plain event reads as before, and an older guard ignores it.
+        assert_eq!(
+            json(&Request::Event {
+                dry_run: false,
+                signal: true,
+            }),
+            r#"{"cmd":"event","dry_run":false,"signal":true}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<Request>(r#"{"cmd":"event","dry_run":true}"#).unwrap(),
+            Request::Event {
+                dry_run: true,
+                signal: false,
+            }
+        );
+        assert_eq!(
+            json(&Request::Rollback { dry_run: false }),
+            r#"{"cmd":"rollback","dry_run":false}"#
         );
         assert_eq!(
             json(&Request::JobBegin { run: 1 }),

@@ -115,6 +115,12 @@ pub fn start(pc: &mut dyn Pc, g: &mut Guard, boot: u64) -> Option<Outcome> {
     // Before the event plan: its check then adds no alarm for the same value.
     take_logon(pc, g);
     g.save();
+    // S8 lane 3: a rollback left (a crash, a reboot, a step that failed)
+    // goes on; its event plan is the start's.
+    if let Some(out) = super::rollback::resume(pc, g) {
+        send_notices(pc, g);
+        return Some(out);
+    }
     let resume = g.state.switching.is_some();
     let out = match target {
         // Prod after a reboot: no trial, the pin's own entry. The pin a

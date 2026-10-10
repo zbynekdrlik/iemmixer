@@ -26,9 +26,10 @@
 //! runner), `requests` (the requests and the rehearsal), `activation` (bundle
 //! and site installs, activations), `hil` (HIL's jobs, test signal and
 //! injections), `watch` (the once-a-second watch), `startup` (the start and
-//! `--direct`), `reaper` (the REAPER handover's first part) and `cutover`
-//! (the cutover's steps and unwind, S8 lane 2). Here: the
-//! [`Guard`], its files and alarms, and the request loop.
+//! `--direct`), `reaper` (the REAPER handover's first part), `cutover`
+//! (the cutover's steps and unwind, S8 lane 2) and `rollback` (the
+//! rollback's steps, and what `iemmode event` means in prod, S8 lane 3).
+//! Here: the [`Guard`], its files and alarms, and the request loop.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -55,6 +56,7 @@ mod hil;
 mod reaper;
 mod reply;
 mod requests;
+mod rollback;
 mod runner;
 mod shared;
 mod startup;
@@ -472,6 +474,8 @@ mod reaper_tests;
 mod record_tests;
 #[cfg(test)]
 mod request_tests;
+#[cfg(test)]
+mod rollback_tests;
 #[cfg(test)]
 mod runner_tests;
 #[cfg(test)]

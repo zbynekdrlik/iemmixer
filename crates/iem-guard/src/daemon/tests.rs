@@ -203,7 +203,15 @@ fn a_parked_engine_at_ide_event_is_no_success() {
     let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
     pc.fail(Call::EngineStop, "no DriverReleased within 10 s");
     pc.health(Health::Parked);
-    let r = handle(&mut pc, &mut g, Request::Event { dry_run: false }, INIT);
+    let r = handle(
+        &mut pc,
+        &mut g,
+        Request::Event {
+            dry_run: false,
+            signal: false,
+        },
+        INIT,
+    );
     assert!(!r.ok);
     assert_eq!(r.mode, Mode::Event);
     assert!(
@@ -468,7 +476,15 @@ fn a_respawn_due_after_ide_event_starts_nothing() {
     pc.exited.push((Kid::Engine, Some(70)));
     let at = Instant::now();
     tick(&mut pc, &mut g, at);
-    let r = handle(&mut pc, &mut g, Request::Event { dry_run: false }, INIT);
+    let r = handle(
+        &mut pc,
+        &mut g,
+        Request::Event {
+            dry_run: false,
+            signal: false,
+        },
+        INIT,
+    );
     assert!(r.ok, "{r:?}");
     tick(&mut pc, &mut g, at + Duration::from_secs(5));
     assert!(!pc.called(Call::EngineStart));

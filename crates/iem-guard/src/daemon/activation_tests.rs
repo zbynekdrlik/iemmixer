@@ -572,7 +572,10 @@ fn ide_event_ends_the_site_check_at_once() {
     let fired = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(200));
         // No switch runs: "ide event" pre-empts the token and queues.
-        let route = shared.route(&Request::Event { dry_run: false });
+        let route = shared.route(&Request::Event {
+            dry_run: false,
+            signal: false,
+        });
         (route, Instant::now())
     });
     let r = handle(

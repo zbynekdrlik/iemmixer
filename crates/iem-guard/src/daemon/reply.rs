@@ -127,6 +127,9 @@ pub fn status_text(g: &Guard) -> String {
     if let Some(cut) = crate::cutover::status(g.state.cutover.as_ref()) {
         parts.push(cut);
     }
+    if let Some(back) = crate::rollback::status(g.state.rollback.as_ref()) {
+        parts.push(back);
+    }
     if let Some(run) = g.state.job {
         parts.push(format!("HIL job {run}"));
     }

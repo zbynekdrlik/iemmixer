@@ -19,7 +19,8 @@ fn default_elevated_root() -> PathBuf {
 }
 
 /// `pc.toml`: where things are on this PC (written at bootstrap). Command
-/// arguments may name `{root}`, `{bundle}`, `{site}` and `{server_config}`.
+/// arguments may name `{root}`, `{bundle}`, `{site}` and `{server_config}`;
+/// `rollback_export` also `{project}` and `{out}`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PcToml {
@@ -45,6 +46,13 @@ pub struct PcToml {
     pub data_dev: Vec<Vec<String>>,
     #[serde(default)]
     pub data_live: Vec<Vec<String>>,
+    /// The rollback's export of the band's data (S8 lane 3): `iem-migrate
+    /// export` with `{project}` (the `[guard] reaper_project` it reads) and
+    /// `{out}` (the new project it creates, `rollback::export_path`), in
+    /// the active bundle's folder. Empty: the rollback cannot export, and
+    /// REAPER comes back on the original project with an alarm.
+    #[serde(default)]
+    pub rollback_export: Vec<String>,
     /// cloudflared's readiness URL (the tunnel watchdog's).
     #[serde(default = "default_tunnel_ready")]
     pub tunnel_ready: String,
@@ -94,6 +102,11 @@ impl PcToml {
                 .chain(&self.data_live)
                 .all(|c| !c.is_empty()),
             "a data command is empty",
+        );
+        let names = |key: &str| self.rollback_export.iter().any(|a| a.contains(key));
+        check(
+            self.rollback_export.is_empty() || (names("{project}") && names("{out}")),
+            "rollback_export must name {project} and {out} (iem-migrate export --rpp, --out)",
         );
         check(
             self.tunnel_ready.starts_with("http://"),

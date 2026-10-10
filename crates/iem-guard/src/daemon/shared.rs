@@ -100,7 +100,10 @@ impl View {
 /// Why a request is refused while a switch runs.
 pub fn while_switching(req: &Request) -> &'static str {
     match req {
-        Request::Dev { .. } | Request::Live { .. } | Request::Cutover { .. } => "busy",
+        Request::Dev { .. }
+        | Request::Live { .. }
+        | Request::Cutover { .. }
+        | Request::Rollback { .. } => "busy",
         _ => "switching",
     }
 }
@@ -183,29 +186,31 @@ impl Shared {
     /// run is queued behind them (#42).
     pub fn route(&self, req: &Request) -> Route {
         let mut v = self.lock();
-        if matches!(req, Request::Event { dry_run: false }) {
+        if matches!(req, Request::Event { dry_run: false, .. }) {
             v.fence += 1;
         }
         match (req, v.running) {
             (Request::Subscribe, _) => Route::Subscribe,
             (Request::Status, _) => Route::Now(v.reply(true, &v.status)),
-            (Request::Event { dry_run: false }, Some(Mode::Event)) => {
+            (Request::Event { dry_run: false, .. }, Some(Mode::Event)) => {
                 Route::AwaitEnd("already switching to event")
             }
-            (Request::Event { dry_run: false }, Some(_)) => {
+            (Request::Event { dry_run: false, .. }, Some(_)) => {
                 self.cancel.preempt();
                 Route::AwaitEnd("pre-empted the switch in progress")
             }
-            (Request::Event { dry_run: false }, None) => {
+            (Request::Event { dry_run: false, .. }, None) => {
                 // A request queued before it pre-empts at its start.
                 self.cancel.preempt();
                 Route::Queue(v.generation())
             }
-            (Request::Dev { .. } | Request::Live { .. } | Request::Cutover { .. }, Some(_))
-                if v.start_checks =>
-            {
-                Route::Queue(v.generation())
-            }
+            (
+                Request::Dev { .. }
+                | Request::Live { .. }
+                | Request::Cutover { .. }
+                | Request::Rollback { .. },
+                Some(_),
+            ) if v.start_checks => Route::Queue(v.generation()),
             (_, Some(_)) => Route::Now(v.reply(false, while_switching(req))),
             (_, None) => Route::Queue(v.generation()),
         }
