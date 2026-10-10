@@ -13,15 +13,17 @@ every 60 s for N hours (default 72) and judges long-run growth, not real time
 - the harness counters, the client's own summary file, rewritten every minute.
 
 Green (design §8): no exit (the engine and the server run to the end, every
-client leg ends 0 with a complete summary); RSS growth after hour 1 at most
-16 MB per process; fds and threads flat (the last hour's highest never above
-the highest of hour 1 to 2); harness gaps 0 in every leg; and the run lasted
-its hours. Everything else is information.
+client leg ends 0); RSS growth after hour 1 at most 16 MB per process; fds and
+threads flat (the last hour's lowest never above the highest of hour 1 to 2:
+a leak raises the floor, a transient only a peak); every leg passes CI's
+harness check (`soak_verdict.harness_problems`) with gaps 0; and the run
+lasted its hours. Everything else is information.
 
 The client runs at most `MAX_SECONDS` (36 000 s) per run and never opens a
 socket twice, so the run is cut into equal legs of at most LEG_MAX_S (8 h),
-one client process each, back to back: 72 h is nine legs. A leg's harness
-counters are its own; the seconds between two legs belong to no leg.
+one client process each, LEG_GAP_S apart (the server ends the last leg's
+sessions, the member listen tap is one slot): 72 h is nine legs. A leg's
+harness counters are its own; the seconds between two legs belong to no leg.
 
 Provisioning is the e2e job's: config/test-site.toml copied into a new site
 folder, an engineer and a member PIN drawn per run (never printed, never
@@ -34,7 +36,8 @@ own stop signal; a client leg ends by itself (at its seconds, or about 12 s
 after the server closed its sockets); the engine gets `Shutdown` on its
 control pipe as a supervisor. Each wait is bounded, and a process that does
 not end within it is left running, named on stderr and in the verdict (red),
-never ended by force. Children run in a session of their own, so a Ctrl-C at
+never ended by force (nor through subprocess's run with a timeout, which ends
+its child by force when the time is up: Popen and communicate instead). Children run in a session of their own, so a Ctrl-C at
 the terminal reaches only this script, which then stops them gracefully.
 
 Stdlib only, Linux only. Exit 0 green, 1 red, 2 a usage or setup error before
@@ -60,6 +63,9 @@ import tomllib
 import urllib.request
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "iem-pc"))
+import soak_verdict  # noqa: E402  (the PC soak's harness check, reused per leg)
+
 HOUR = 3600
 LEG_MAX_S = 8 * HOUR       # the client's MAX_SECONDS is 36 000 s; legs stay below it
 RSS_GROWTH_MAX_KB = 15625  # 16 MB (16 000 000 bytes) in /proc's kB (1024 bytes): 15 625 kB, toward red
@@ -76,6 +82,9 @@ SERVER_STOP_S = 30    # SIGTERM to the server's end
 CLIENT_END_S = 30     # a client after its server closed: idle 10 s + close 2 s, with room
 ENGINE_STOP_S = 30    # Shutdown to the engine's end
 LEG_OVERRUN_S = 300   # a leg's client past its seconds: its build check, opens and closes, with room
+LEG_GAP_S = 5.0       # between two legs: the server ends the last leg's sessions (the one member listen tap)
+PIN_S = 60            # each `iem-server pin` call
+EVERY_MAX_S = 600     # a sample at least every 10 min: hour 1 to 2 and the last hour hold several
 TICK_S = 1.0          # the loop's look at the processes and the stop request
 SHA = re.compile(r"[0-9a-f]{40}")
 
@@ -164,34 +173,33 @@ def judge_process(name: str, points: list[tuple[float, dict]]) -> tuple[list[str
     after = [p for t, p in pts if t >= HOUR]
     base = [p for t, p in pts if HOUR <= t < 2 * HOUR]
     last = [p for t, p in pts if t >= end - HOUR]
+    if not base:   # a stall of an hour, or samples too far apart: nothing to judge against
+        return [f"{name}: no readable sample in hour 1 to 2"], {**nums, "judged": False}
     growth = max(p["rss_kb"] for p in after) - after[0]["rss_kb"]
     nums.update(judged=True, rss_growth_kb=growth)
     fails = []
     if growth > RSS_GROWTH_MAX_KB:
         fails.append(f"{name}: RSS grew {growth} kB after hour 1 (at most {RSS_GROWTH_MAX_KB} kB, 16 MB)")
-    for key in ("fds", "threads"):
-        b, l_ = max(p[key] for p in base), max(p[key] for p in last)
-        nums[f"{key}_hour2_max"], nums[f"{key}_last_hour_max"] = b, l_
-        if l_ > b:
-            fails.append(f"{name}: {key} not flat: the last hour's highest {l_}, hour 1 to 2's {b}")
+    for key in ("fds", "threads"):   # a leak raises the floor; a transient (a backup's thread) only a peak
+        b, floor = max(p[key] for p in base), min(p[key] for p in last)
+        nums[f"{key}_hour2_max"], nums[f"{key}_last_hour_min"] = b, floor
+        nums[f"{key}_last_hour_max"] = max(p[key] for p in last)
+        if floor > b:
+            fails.append(f"{name}: {key} not flat: the last hour's lowest {floor}, above hour 1 to 2's highest {b}")
     return fails, nums
 
 
 def leg_failures(legs: list[dict]) -> list[str]:
-    """Each leg: its client ended 0, its summary complete with no error and
-    gaps 0 (check order: exit, summary, gaps)."""
+    """Each leg: its client ended 0, then CI's harness check on its summary
+    (`soak_verdict.harness_problems`: complete, its seconds less one, gaps 0,
+    no reconnect, at least one frame and 99 % of the expected, a meter
+    frame), each problem named with its leg."""
     fails = []
     for leg in legs:
-        n, s = leg["leg"], leg.get("summary")
+        n = leg["leg"]
         if leg.get("exit") != 0:
             fails.append(f"leg {n}: the client ended {leg.get('exit')!r}, not 0")
-        if not isinstance(s, dict):
-            fails.append(f"leg {n}: the harness summary is unreadable")
-            continue
-        if s.get("complete") is not True or s.get("error") is not None:
-            fails.append(f"leg {n}: the harness is not complete (error {s.get('error')!r})")
-        if s.get("gaps") != 0:
-            fails.append(f"leg {n}: harness gaps {s.get('gaps')!r}, not 0")
+        fails += [f"leg {n}: {p}" for p in soak_verdict.harness_problems(leg.get("summary"), leg["seconds"] - 1, 0)]
     return fails
 
 
@@ -357,8 +365,9 @@ class Run:
         self.config = self.site / "iemmixer.toml"
         self.sock = str(self.out / "engine.sock")
         self.port = 0
-        self.total_s = round(args.hours * HOUR)
+        self.total_s = 0
         self.legs_plan: list[int] = []
+        self.next_leg_at = 0.0
         self.engine: subprocess.Popen | None = None
         self.server: subprocess.Popen | None = None
         self.client: subprocess.Popen | None = None
@@ -376,8 +385,11 @@ class Run:
         a = self.args
         if not SHA.fullmatch(a.build):
             raise SetupError("--build must be the artifact's full commit SHA (40 lower-case hex)")
-        if not (self.total_s >= 1 and a.every > 0):
-            raise SetupError("--hours must be at least 1 s and --every above 0")
+        if not (math.isfinite(a.hours) and a.hours * HOUR >= 1):
+            raise SetupError("--hours must be finite and at least 1 s")
+        if not 0 < a.every <= EVERY_MAX_S:
+            raise SetupError(f"--every must be above 0 and at most {EVERY_MAX_S} s")
+        self.total_s = round(a.hours * HOUR)
         self.legs_plan = plan_legs(self.total_s)
         for name in BINARIES:
             p = self.bin / name
@@ -412,13 +424,18 @@ class Run:
         server = str(self.bin / "iem-server")
         steps = [(["pin", "set-engineer"], eng)] + [(["pin", "set-member", m["id"]], mem)
                                                     for m in site["members"] if m["id"] != "engineer"]
-        for argv, pin in steps:
-            r = subprocess.run([server, *argv], input=pin + "\n", env=self.env(), capture_output=True, text=True,
-                               timeout=60, check=False)
-            if r.returncode != 0:   # the PIN is never in argv, so the output names none
-                raise SetupError(f"iem-server {' '.join(argv)} failed (exit {r.returncode}): {r.stderr[-400:]}")
-        with socket.socket() as s:   # a free port on this box, for the server
-            s.bind(("127.0.0.1", 0))
+        for argv, pin in steps:   # the PIN on stdin only, never in argv
+            child = subprocess.Popen([server, *argv], env=self.env(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE, text=True, start_new_session=True)
+            try:
+                _, err = child.communicate(pin + "\n", timeout=PIN_S)
+            except subprocess.TimeoutExpired:   # never ended by force: named, left to end by itself
+                raise SetupError(f"iem-server {' '.join(argv)} did not end within {PIN_S} s "
+                                 f"(pid {child.pid}, left running)") from None
+            if child.returncode != 0:   # its output names no PIN: the PIN never left stdin
+                raise SetupError(f"iem-server {' '.join(argv)} failed (exit {child.returncode}): {err[-400:]}")
+        with socket.socket() as s:   # a free port on every address: the server binds 0.0.0.0
+            s.bind(("0.0.0.0", 0))
             self.port = s.getsockname()[1]
 
     def start(self) -> None:
@@ -429,8 +446,10 @@ class Run:
         self.ready(lambda: Path(self.sock).is_socket(), self.engine, "the engine's control pipe")
         self.server = self.spawn("server", [str(self.bin / "iem-server")],
                                  self.env(IEMMIXER_ENGINE_PIPE=self.sock, PORT=str(self.port)))
-        self.ready(lambda: self.version() is not None, self.server, "the server's /api/version")
-        got = self.version().get("git_hash")
+        answers: list[dict] = []
+        self.ready(lambda: answers.append(self.version()) or answers[-1] is not None, self.server,
+                   "the server's /api/version")
+        got = answers[-1].get("git_hash")
         if not (isinstance(got, str) and len(got) >= 7 and self.args.build.startswith(got)):
             raise SetupError(f"the server names build {got!r}, not a prefix of --build {self.args.build}")
         if not (self.site / "secrets" / "jwt_secret").is_file():
@@ -516,10 +535,12 @@ class Run:
                     if len(self.legs) == len(self.legs_plan):
                         self.sample()
                         return None
-                    self.start_leg()
+                    self.next_leg_at = time.monotonic() + LEG_GAP_S
                 elif late:
                     self.sample()
                     return f"leg {self.client_leg['leg']}'s client outlived its seconds by {LEG_OVERRUN_S} s"
+            elif time.monotonic() >= self.next_leg_at:
+                self.start_leg()
             if time.monotonic() - self.t0 >= k * self.args.every:
                 self.sample()
                 k = math.floor((time.monotonic() - self.t0) / self.args.every) + 1
