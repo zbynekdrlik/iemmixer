@@ -34,9 +34,17 @@ def status(mode: str, detail: str, last=None) -> str:
     return iempc_out(["status"], {"ok": True, "mode": mode, "detail": detail, "alarms": [], "last_switch": last})
 
 
-DONE_EVENT = {"from": "live", "to": "event", "ended_in": "event", "outcome": "done", "steps": []}
+# The rollback's switch (step 5) and the start's checks after the reboot (a later end).
+DONE_EVENT = {"from": "live", "to": "event", "ended_in": "event", "outcome": "done", "steps": [],
+              "ended": 1790000100}
+STARTED = {**DONE_EVENT, "from": "event", "ended": 1790000400}
 PROD = status("live", f"mode live; bundle {SHA}; prod since 1790000000: pin {SHA}, previous none")
 TRIAL = status("event", f"mode event; bundle {SHA}", DONE_EVENT)
+AFTER = status("event", f"mode event; bundle {SHA}", STARTED)
+# The start's checks still running: the rollback's record, a switch in progress.
+SWITCHING = iempc_out(["status"], {"ok": True, "mode": "event", "detail": f"mode event; bundle {SHA}", "alarms": [],
+                                   "switching": {"from": "event", "to": "event", "done": []},
+                                   "last_switch": DONE_EVENT})
 ROLLED = iempc_out(["rollback"], {"ok": True, "mode": "event", "detail": f"rollback done: trial, event; "
                                   f"{drill.rb.ON_EXPORT}; the original project is kept as before-rollback-1 "
                                   f"{SITE_WORD}"}, rollback="done")
@@ -76,7 +84,7 @@ class DrillTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp, True)
         FakePopen.started = []
         FakePopen.timeout_on = set()
-        self.statuses = [PROD, TRIAL, TRIAL]
+        self.statuses = [PROD, TRIAL, AFTER]
         FakePopen.script = {
             ("iempc.py", "dev"): (0, iempc_out(["dev"], {"ok": True, "mode": "dev", "detail": "dev: done"}), ""),
             ("iempc.py", "cutover"): (0, iempc_out(["cutover"], {"ok": True, "detail": "cutover done"}), ""),
@@ -88,8 +96,12 @@ class DrillTests(unittest.TestCase):
             ("tuning_window.py", "reboot"): (0, json.dumps({"reboot": "requested", "in_s": 0}) + "\n", ""),
             ("tuning_window.py", "post-boot"): (0, POST_BOOT, ""),
         }
+        self.slept: list = []
         patches = [mock.patch.object(drill.subprocess, "Popen", FakePopen),
-                   mock.patch.object(drill.core, "EVENT_NOW", self.tmp / "EVENT-NOW")]
+                   mock.patch.object(drill.core, "EVENT_NOW", self.tmp / "EVENT-NOW"),
+                   # After the reboot: one status read, then the bound (a test raises it).
+                   mock.patch.object(drill, "SETTLE_S", 0, create=True),
+                   mock.patch.object(drill.time, "sleep", self.slept.append)]
         for p in patches:
             p.start()
             self.addCleanup(p.stop)
@@ -153,12 +165,39 @@ class DrillTests(unittest.TestCase):
             ([PROD, status("event", f"mode event; bundle {SHA}", {**DONE_EVENT, "outcome": "needs_owner"})],
              "NOT_EVENT", 5),
             ([PROD, TRIAL, status("event", f"mode event; bundle {SHA}", None)], "NOT_EVENT_AFTER_REBOOT", 11),
+            # The rollback's own record must name its end (the start's checks are told by a later one).
+            ([PROD, status("event", f"mode event; bundle {SHA}", {k: v for k, v in DONE_EVENT.items() if k != "ended"})],
+             "NOT_EVENT", 5),
+            # After the reboot the start's checks ended in REAPER, but not done.
+            ([PROD, TRIAL, status("event", f"mode event; bundle {SHA}", {**STARTED, "outcome": "needs_owner"})],
+             "NOT_EVENT_AFTER_REBOOT", 11),
         )
         for statuses, want, started in cases:
             self.setUp()
             self.statuses = list(statuses)
             code, doc, _ = self.run_drill()
             self.assertEqual((code, doc["code"], len(FakePopen.started)), (1, want, started), want)
+
+    def test_after_the_reboot_it_waits_for_the_start_s_checks(self) -> None:
+        """S8 lane 5 (finding 3): the first status after the reboot can still
+        name the rollback's switch (the guard has not begun its start's
+        checks) or a switch in progress: the drill reads the status again,
+        bounded, until no switch runs and the last one ended later than the
+        rollback's, and only then checks it."""
+        self.statuses = [PROD, TRIAL, TRIAL, SWITCHING, AFTER]
+        with mock.patch.object(drill, "SETTLE_S", 600, create=True):
+            code, doc, err = self.run_drill()
+        self.assertEqual((code, doc["code"]), (0, "GREEN"), err)
+        self.assertEqual(FakePopen.started[-3:], [("iempc.py", "status")] * 3)
+        self.assertEqual(len(FakePopen.started), 13)
+        self.assertEqual([s["step"] for s in doc["steps"]][-1], "after-reboot")
+        self.assertEqual(len(self.slept), 2)
+        # Never seen to end within the bound: the drill stops there.
+        self.setUp()
+        self.statuses = [PROD, TRIAL, TRIAL]
+        code, doc, err = self.run_drill()
+        self.assertEqual((code, doc["code"], len(FakePopen.started)), (1, "NOT_EVENT_AFTER_REBOOT", 11))
+        self.assertIn("the start's checks", err)
 
     def test_reaper_must_be_on_the_export_after_the_rollback(self) -> None:
         on_original = iempc_out(["rollback"], {"ok": True, "detail": f"rollback done: trial, event; {drill.rb.ON_ORIGINAL}"})
