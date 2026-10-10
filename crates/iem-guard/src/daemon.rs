@@ -94,10 +94,9 @@ pub const PARKED_ALARM: &str = "the engine's stream is parked outside a HIL job:
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SiteConf {
     pub on_pref_fail: PrefFail,
-    /// The card outputs a HIL test signal may reach.
+    /// The card outputs a HIL test signal may reach. (Before or after the
+    /// cutover is no site setting: `GuardState.lifecycle`, S8.)
     pub hil_tx: Vec<u16>,
-    /// After the cutover (S8): a crash loop falls back to the previous pin.
-    pub prod: bool,
 }
 
 impl SiteConf {
@@ -105,19 +104,17 @@ impl SiteConf {
         Self {
             on_pref_fail: g.on_pref_fail,
             hil_tx: g.hil_tx.clone(),
-            prod: false,
         }
     }
 }
 
 impl Default for SiteConf {
     /// Without a site (`iemmixer-guard install` of the first bundle): the
-    /// choice recorded on #9, no HIL outputs, before the cutover.
+    /// choice recorded on #9, no HIL outputs.
     fn default() -> Self {
         Self {
             on_pref_fail: PrefFail::StartReaperWithAlarm,
             hil_tx: Vec::new(),
-            prod: false,
         }
     }
 }
@@ -461,6 +458,8 @@ pub fn serve_requests(pc: &mut dyn Pc, g: &mut Guard, jobs: &Receiver<Job>) {
 mod activation_tests;
 #[cfg(test)]
 mod hil_tests;
+#[cfg(test)]
+mod lifecycle_tests;
 #[cfg(test)]
 mod probe_tests;
 #[cfg(test)]

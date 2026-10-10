@@ -342,7 +342,7 @@ pub trait Pc {
     /// them through `c`.
     fn install_site(&mut self, path: &str, c: &Cancel) -> R<String>;
     /// `\iemmixer\iemmixer-exclude`: Defender process exclusions for the
-    /// verified bundle `sha` (design §5.1); `keep`'s (the other pin) stay,
+    /// verified bundle `sha` (design §5.1); `keep`'s (`lifecycle::kept`) stay,
     /// every other bundle's go.
     fn exclude(&mut self, sha: &str, keep: &[String]) -> R<()>;
     /// Where this process's long-lived children start (design §5.1, I9):

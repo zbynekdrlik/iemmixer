@@ -18,7 +18,7 @@ use super::{
     Generation, Guard, Outcome, View, alarm_test, install_bundle, mode_name, run_switch,
     send_notices, status_text, while_switching,
 };
-use crate::bundle;
+use crate::lifecycle;
 use crate::pc::{Pc, PrefSeen};
 use crate::plan::{Mode, OnError, Step, plan};
 use crate::proto::{Reply, Request};
@@ -177,53 +177,59 @@ pub(super) fn event_now(pc: &mut dyn Pc, g: &mut Guard) -> (bool, String) {
     )
 }
 
-/// Why the entry's build may not run: not installed, or (live) not a green
-/// `main` bundle.
-fn build_refusal(g: &Guard, e: &Entry) -> Option<String> {
-    let sha = e.build.as_ref()?;
-    let Some(rec) = g.state.bundles.get(sha) else {
-        return Some(format!("bundle {sha} is not installed"));
-    };
-    if e.to == Mode::Live {
-        bundle::may_go_live(rec).err()
-    } else {
-        None
-    }
-}
-
 /// A dev or live entry runs at once: only the owner's signal decides
 /// whether the PC may change, so no step waits for a quiet stage or refuses
-/// on activity (#38, owner 2026-10-06).
+/// on activity (#38, owner 2026-10-06). The lifecycle's gates decide
+/// whether it may run and on which build (S8: `lifecycle::entry`); the
+/// build becomes the active bundle, never the pin, and the lifecycle's
+/// change (a maintenance build, the pin it ends on) holds only once the
+/// entry is in.
 fn entry(pc: &mut dyn Pc, g: &mut Guard, e: Entry) -> (bool, String) {
-    if let Some(why) = build_refusal(g, &e) {
-        return (false, why);
-    }
+    let ask = lifecycle::Ask {
+        to: e.to,
+        build: e.build.as_deref(),
+        trial: e.trial,
+    };
+    let entered = match lifecycle::entry(&g.state.lifecycle, ask, |sha| g.state.bundles.get(sha)) {
+        Ok(entered) => entered,
+        Err(why) => return (false, why),
+    };
     if e.dry_run {
-        return dry_entry(pc, g, &e);
+        return dry_entry(pc, g, &e, entered.runs, entered.note);
     }
-    if let Some(sha) = e.build.as_deref() {
-        g.state.pins.promote(sha);
-        pc.set_bundle(Some(sha));
+    if let Some(sha) = entered.runs {
+        pc.set_bundle(Some(sha.as_str()));
+        g.state.set_active(&sha);
     }
     g.trial = e.trial;
     let from = g.state.mode;
     let out = run_switch(pc, g, from, e.to);
-    (
-        out == Outcome::Done && g.state.mode == e.to,
-        switch_text(e.to, out, g.state.mode, &g.owner_failed),
-    )
+    let done = out == Outcome::Done && g.state.mode == e.to;
+    if done {
+        g.state.lifecycle = entered.lifecycle;
+        if let Some(n) = entered.note {
+            g.info(n);
+        }
+        g.save();
+    }
+    (done, switch_text(e.to, out, g.state.mode, &g.owner_failed))
 }
 
 /// `dev|live --dry-run`: the plan and the read-only checks (the precheck's
 /// bundle, PWA notification subscriptions, foreign engine and app exe),
-/// nothing changed.
-fn dry_entry(pc: &mut dyn Pc, g: &mut Guard, e: &Entry) -> (bool, String) {
+/// nothing changed. `runs`: the build the entry would run; `note`: what it
+/// would decide about the pin.
+fn dry_entry(
+    pc: &mut dyn Pc,
+    g: &mut Guard,
+    e: &Entry,
+    runs: Option<String>,
+    note: Option<String>,
+) -> (bool, String) {
     // `trial` decides only the precheck (below), never a step of the plan.
     let steps = plan(e.to, &pc.facts());
-    let bundle = e
-        .build
-        .clone()
-        .or_else(|| g.state.pins.current.clone())
+    let bundle = runs
+        .or_else(|| g.state.active_bundle().map(str::to_owned))
         .unwrap_or_else(|| "none".to_owned());
     let check = pc.precheck(e.to, e.trial);
     let verdict = match &check {
@@ -231,10 +237,11 @@ fn dry_entry(pc: &mut dyn Pc, g: &mut Guard, e: &Entry) -> (bool, String) {
         Ok(Some(note)) => format!("ok; {note}"),
         Err(why) => why.to_string(),
     };
+    let pin = note.map_or_else(String::new, |n| format!("; {n}"));
     (
         check.is_ok(),
         format!(
-            "dry run: {}; bundle {bundle}; precheck {verdict}",
+            "dry run: {}; bundle {bundle}; precheck {verdict}{pin}",
             plan_text(&steps)
         ),
     )

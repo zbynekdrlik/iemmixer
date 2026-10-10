@@ -1,12 +1,11 @@
 //! What the guard does when the engine exits (spec §2.4, §4.1; design §5.4).
 //!
 //! The guard never ends the engine itself: it only decides whether to start
-//! it again, stay down with an alarm, or leave iemmixer for REAPER.
+//! it again, stay down with an alarm, or call it a crash loop, whose meaning
+//! the lifecycle decides (`lifecycle::crash_loop`, S8).
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
-
-use crate::plan::Mode;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum After {
@@ -15,10 +14,9 @@ pub enum After {
     Stay {
         alarm: Option<&'static str>,
     },
-    /// Crash loop before cutover or in dev: back to REAPER.
-    ToEvent,
-    /// Crash loop in prod: the previous pin's engine.
-    PreviousPin,
+    /// A crash loop: `lifecycle::crash_loop` says where it goes (REAPER
+    /// before the cutover, the pin or the previous pin after it).
+    Loop,
 }
 
 /// Abnormal engine exits within the last [`CrashLoop::WINDOW`], and the
@@ -106,11 +104,10 @@ pub fn backoff(abnormal_in_window: usize) -> Duration {
 /// The engine's exit codes: 0 shut down, 1 i/o, 2 usage or site, 3 card
 /// refused, 70 RT fault, 75 state directory busy ([`STATE_BUSY`]: tried
 /// again while `busy_streak` allows, [`busy_retry`], then like a crash);
-/// `None` when it ended without a code.
+/// `None` when it ended without a code. The mode and the lifecycle decide
+/// only what a loop means (`lifecycle::crash_loop`, S8).
 pub fn after_exit(
     code: Option<i32>,
-    mode: Mode,
-    prod: bool,
     session_ending: bool,
     looped: bool,
     n: usize,
@@ -126,8 +123,7 @@ pub fn after_exit(
         },
         _ if session_ending => After::Stay { alarm: None },
         _ if busy_retry(code, busy_streak) => After::Respawn(BUSY_RETRY),
-        _ if looped && mode == Mode::Live && prod => After::PreviousPin,
-        _ if looped => After::ToEvent,
+        _ if looped => After::Loop,
         _ => After::Respawn(backoff(n)),
     }
 }
@@ -135,8 +131,6 @@ pub fn after_exit(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const MODES: [Mode; 3] = [Mode::Event, Mode::Dev, Mode::Live];
 
     #[test]
     fn backoff_doubles_up_to_ten_seconds() {
@@ -173,26 +167,22 @@ mod tests {
 
     #[test]
     fn clean_and_hopeless_exits_never_respawn() {
-        for mode in MODES {
-            for prod in [false, true] {
-                for looped in [false, true] {
-                    for ending in [false, true] {
-                        let after = |c| after_exit(Some(c), mode, prod, ending, looped, 1, 1);
-                        assert_eq!(after(0), After::Stay { alarm: None });
-                        assert_eq!(
-                            after(2),
-                            After::Stay {
-                                alarm: Some("engine site or usage error")
-                            }
-                        );
-                        assert_eq!(
-                            after(3),
-                            After::Stay {
-                                alarm: Some("the card refused the engine")
-                            }
-                        );
+        for looped in [false, true] {
+            for ending in [false, true] {
+                let after = |c| after_exit(Some(c), ending, looped, 1, 1);
+                assert_eq!(after(0), After::Stay { alarm: None });
+                assert_eq!(
+                    after(2),
+                    After::Stay {
+                        alarm: Some("engine site or usage error")
                     }
-                }
+                );
+                assert_eq!(
+                    after(3),
+                    After::Stay {
+                        alarm: Some("the card refused the engine")
+                    }
+                );
             }
         }
     }
@@ -200,41 +190,23 @@ mod tests {
     #[test]
     fn session_end_never_respawns() {
         for code in [None, Some(1), Some(70), Some(-1)] {
-            for mode in MODES {
-                for looped in [false, true] {
-                    assert_eq!(
-                        after_exit(code, mode, true, true, looped, 2, 1),
-                        After::Stay { alarm: None },
-                        "{code:?} {mode:?} {looped}"
-                    );
-                }
+            for looped in [false, true] {
+                assert_eq!(
+                    after_exit(code, true, looped, 2, 1),
+                    After::Stay { alarm: None },
+                    "{code:?} {looped}"
+                );
             }
         }
     }
 
+    /// S8 (#11): a loop is a loop in every mode and lifecycle; where it goes
+    /// (REAPER, the pin, the previous pin) is `lifecycle::crash_loop`'s.
     #[test]
-    fn a_loop_goes_to_event_except_in_prod_live() {
-        assert_eq!(
-            after_exit(Some(70), Mode::Live, true, false, true, 3, 1),
-            After::PreviousPin
-        );
-        // A trial (live before cutover) and dev go back to REAPER.
-        assert_eq!(
-            after_exit(Some(70), Mode::Live, false, false, true, 3, 1),
-            After::ToEvent
-        );
-        assert_eq!(
-            after_exit(Some(70), Mode::Dev, true, false, true, 3, 1),
-            After::ToEvent
-        );
-        assert_eq!(
-            after_exit(None, Mode::Dev, false, false, true, 3, 1),
-            After::ToEvent
-        );
-        assert_eq!(
-            after_exit(Some(1), Mode::Event, true, false, true, 3, 1),
-            After::ToEvent
-        );
+    fn a_loop_is_named_for_the_lifecycle_to_decide() {
+        for code in [None, Some(1), Some(70)] {
+            assert_eq!(after_exit(code, false, true, 3, 1), After::Loop, "{code:?}");
+        }
     }
 
     #[test]
@@ -242,21 +214,17 @@ mod tests {
         // #32 minor-4: exit 75 = the engine waited for its state directory
         // (another engine's lock not yet released); no crash, so neither
         // the backoff nor a loop applies. A session ending still wins.
-        for mode in MODES {
-            for prod in [false, true] {
-                for looped in [false, true] {
-                    for n in [0, 1, 3, 7] {
-                        assert_eq!(
-                            after_exit(Some(75), mode, prod, false, looped, n, 1),
-                            After::Respawn(Duration::from_secs(2)),
-                            "{mode:?} {prod} {looped} {n}"
-                        );
-                    }
-                }
+        for looped in [false, true] {
+            for n in [0, 1, 3, 7] {
+                assert_eq!(
+                    after_exit(Some(75), false, looped, n, 1),
+                    After::Respawn(Duration::from_secs(2)),
+                    "{looped} {n}"
+                );
             }
         }
         assert_eq!(
-            after_exit(Some(75), Mode::Dev, false, true, false, 1, 1),
+            after_exit(Some(75), true, false, 1, 1),
             After::Stay { alarm: None }
         );
     }
@@ -269,33 +237,20 @@ mod tests {
         assert!(busy_retry(Some(75), 1) && busy_retry(Some(75), 10));
         assert!(!busy_retry(Some(75), 11));
         assert!(!busy_retry(Some(70), 1) && !busy_retry(None, 1));
-        for mode in MODES {
-            assert_eq!(
-                after_exit(Some(75), mode, false, false, false, 1, 10),
-                After::Respawn(BUSY_RETRY),
-                "{mode:?}"
-            );
-            // The backoff of the third abnormal exit (4 s), not BUSY_RETRY.
-            assert_eq!(
-                after_exit(Some(75), mode, false, false, false, 3, 11),
-                After::Respawn(Duration::from_secs(4)),
-                "{mode:?}"
-            );
-            assert_eq!(
-                after_exit(Some(75), mode, false, false, true, 3, 12),
-                After::ToEvent,
-                "{mode:?}"
-            );
-            // A session ending still wins.
-            assert_eq!(
-                after_exit(Some(75), mode, true, true, true, 3, 12),
-                After::Stay { alarm: None },
-                "{mode:?}"
-            );
-        }
         assert_eq!(
-            after_exit(Some(75), Mode::Live, true, false, true, 3, 13),
-            After::PreviousPin
+            after_exit(Some(75), false, false, 1, 10),
+            After::Respawn(BUSY_RETRY)
+        );
+        // The backoff of the third abnormal exit (4 s), not BUSY_RETRY.
+        assert_eq!(
+            after_exit(Some(75), false, false, 3, 11),
+            After::Respawn(Duration::from_secs(4))
+        );
+        assert_eq!(after_exit(Some(75), false, true, 3, 12), After::Loop);
+        // A session ending still wins.
+        assert_eq!(
+            after_exit(Some(75), true, true, 3, 12),
+            After::Stay { alarm: None }
         );
     }
 
@@ -326,18 +281,14 @@ mod tests {
     #[test]
     fn other_exits_respawn_after_the_backoff() {
         for code in [None, Some(1), Some(70), Some(-1073741819)] {
-            for mode in MODES {
-                for prod in [false, true] {
-                    assert_eq!(
-                        after_exit(code, mode, prod, false, false, 3, 1),
-                        After::Respawn(Duration::from_secs(4)),
-                        "{code:?} {mode:?} {prod}"
-                    );
-                }
-            }
+            assert_eq!(
+                after_exit(code, false, false, 3, 1),
+                After::Respawn(Duration::from_secs(4)),
+                "{code:?}"
+            );
         }
         assert_eq!(
-            after_exit(None, Mode::Live, true, false, false, 5, 1),
+            after_exit(None, false, false, 5, 1),
             After::Respawn(Duration::from_secs(10))
         );
     }

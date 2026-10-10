@@ -348,9 +348,8 @@ pub(super) fn run_step(pc: &mut dyn Pc, g: &mut Guard, step: Step, to: Mode) -> 
             g.lan_note = None;
             let sha = g
                 .state
-                .pins
-                .current
-                .clone()
+                .active_bundle()
+                .map(str::to_owned)
                 .ok_or_else(|| StepError::failed("no active bundle"))?;
             g.lan_note = pc.identity(&sha, &c)?;
             if let Some(n) = g.lan_note.clone() {
