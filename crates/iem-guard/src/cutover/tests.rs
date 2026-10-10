@@ -141,12 +141,14 @@ fn every_refusal_names_why() {
 
 #[test]
 fn the_steps_run_in_the_design_s_order_and_unwind_newest_first() {
+    // The guard's logon trigger before the autostarts go: at every moment
+    // something starts at the next boot (the review of lane 2).
     assert_eq!(
         STEPS,
         [
             CutStep::Import,
-            CutStep::Autostarts,
             CutStep::GuardLogon,
+            CutStep::Autostarts,
             CutStep::PinChanges,
             CutStep::Lifecycle,
             CutStep::Checks,
@@ -157,20 +159,35 @@ fn the_steps_run_in_the_design_s_order_and_unwind_newest_first() {
         [
             CutStep::Lifecycle,
             CutStep::PinChanges,
-            CutStep::GuardLogon,
             CutStep::Autostarts,
+            CutStep::GuardLogon,
         ]
     );
     // A step that failed half-way is undone too; the import and the checks
     // change nothing of their own (the event plan ends the live entry).
     assert_eq!(
-        undo(&[CutStep::Import, CutStep::Autostarts]),
-        [CutStep::Autostarts]
+        undo(&[CutStep::Import, CutStep::GuardLogon]),
+        [CutStep::GuardLogon]
     );
     assert_eq!(undo(&[CutStep::Import]), Vec::<CutStep>::new());
     assert_eq!(undo(&[]), Vec::<CutStep>::new());
     let changes: Vec<bool> = STEPS.iter().map(|s| s.changes()).collect();
     assert_eq!(changes, [false, true, true, true, true, false]);
+}
+
+/// The guard's logon trigger stays while the autostarts are not back; every
+/// other undo goes ahead whatever is kept.
+#[test]
+fn the_logon_trigger_is_undone_only_once_the_autostarts_are_back() {
+    for step in STEPS {
+        assert!(may_undo(step, &[]), "{step:?}");
+        assert!(
+            may_undo(step, &[CutStep::Lifecycle, CutStep::PinChanges]),
+            "{step:?}"
+        );
+        let blocked = step == CutStep::GuardLogon;
+        assert_eq!(may_undo(step, &[CutStep::Autostarts]), !blocked, "{step:?}");
+    }
 }
 
 #[test]
@@ -187,6 +204,98 @@ fn the_record_round_trips_in_snake_case() {
                            "begun": ["import", "guard_logon", "pin_changes"]})
     );
     assert_eq!(serde_json::from_value::<Run>(v).unwrap(), run);
+}
+
+/// A record a newer guard saved with a step this guard does not know reads
+/// as every step that changes something: the undo leaves nothing behind.
+#[test]
+fn a_record_with_a_step_this_guard_does_not_know_undoes_everything() {
+    let v = serde_json::json!({"build": BUILD, "since": 5,
+                               "begun": ["import", "later_step"]});
+    let run: Run = serde_json::from_value(v).unwrap();
+    assert_eq!(
+        run.begun,
+        [
+            CutStep::GuardLogon,
+            CutStep::Autostarts,
+            CutStep::PinChanges,
+            CutStep::Lifecycle,
+        ]
+    );
+    let none: Run =
+        serde_json::from_value(serde_json::json!({"build": BUILD, "since": 5, "begun": []}))
+            .unwrap();
+    assert_eq!(none.begun, Vec::<CutStep>::new());
+}
+
+#[test]
+fn the_record_is_named_in_the_status_and_refuses_an_activation() {
+    let run = Run {
+        build: BUILD.into(),
+        since: 5,
+        begun: vec![CutStep::GuardLogon],
+    };
+    assert_eq!(status(None), None);
+    assert_eq!(
+        status(Some(&run)),
+        Some(format!(
+            "cutover of {BUILD} since 5: [GuardLogon] begun (in progress, or not fully unwound: \
+             a guard restart tries again)"
+        ))
+    );
+    assert_eq!(activation_refusal(None), None);
+    assert_eq!(
+        activation_refusal(Some(&run)),
+        Some(format!(
+            "the cutover of {BUILD} is not fully unwound ([GuardLogon] left): no activation until \
+             a guard restart has unwound it"
+        ))
+    );
+}
+
+/// The reply and the alarm of a failed cutover, and whether the alarm is
+/// the owner's question: anything left, or an event plan that did not end
+/// done.
+#[test]
+fn an_unwind_says_what_is_left_and_asks_the_owner_only_then() {
+    let left = vec!["GuardLogon: no answer".to_owned()];
+    assert_eq!(
+        unwound("h", true, &[]),
+        ("h; unwound to trial and event".to_owned(), false)
+    );
+    assert_eq!(
+        unwound("h", false, &[]),
+        (
+            "h; unwound to trial; the event plan did not end done".to_owned(),
+            true
+        )
+    );
+    assert_eq!(
+        unwound("h", true, &left),
+        (
+            "h; unwound to trial and event; not undone: GuardLogon: no answer; a guard restart \
+             tries again"
+                .to_owned(),
+            true
+        )
+    );
+    let run = Run {
+        build: BUILD.into(),
+        since: 5,
+        begun: vec![CutStep::Import, CutStep::GuardLogon],
+    };
+    let head = format!(
+        "the cutover of {BUILD} was cut off (begun: [Import, GuardLogon]): unwound to trial; \
+         the PC goes to event"
+    );
+    assert_eq!(recovered(&run, &[]), (head.clone(), false));
+    assert_eq!(
+        recovered(&run, &left),
+        (
+            format!("{head}; not undone: GuardLogon: no answer; a guard restart tries again"),
+            true
+        )
+    );
 }
 
 #[test]
@@ -354,8 +463,8 @@ fn the_dry_run_names_every_step() {
     assert_eq!(
         plan_text(BUILD, 5),
         format!(
-            "Import (a live trial entry on {BUILD}: the final import), Autostarts (exported to \
-             autostarts-5 and disabled), GuardLogon (the guard task at logon), PinChanges \
+            "Import (a live trial entry on {BUILD}: the final import), GuardLogon (the guard task \
+             at logon), Autostarts (exported to autostarts-5 and disabled), PinChanges \
              (pin_changes = true, the server started again), Lifecycle (prod since 5, pin \
              {BUILD}), Checks (the band's address, a member page, the engine at 32)"
         )

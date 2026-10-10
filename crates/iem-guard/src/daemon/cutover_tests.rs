@@ -10,7 +10,7 @@ use crate::bundle::Hil;
 use crate::cutover::{CutStep, Run, export_name, plan_text};
 use crate::lifecycle::{Lifecycle, Prod};
 use crate::pc::fake::{Call, FakePc};
-use crate::plan::Health;
+use crate::plan::{Facts, Health};
 use crate::proto::Request;
 
 /// The server config as the cutover leaves it, and as before.
@@ -62,12 +62,13 @@ fn a_cutover_runs_its_steps_in_order_and_ends_in_prod() {
     assert_eq!(g.state.cutover, None);
     assert_eq!(g.state.mode, Mode::Live);
     assert_eq!(pc.bundle.as_deref(), Some(SHA));
-    // The final import is the live trial's data refresh, before anything else.
-    assert!(pc.index(Call::Data) < pc.index(Call::AutostartsOff));
+    // The final import is the live trial's data refresh, before anything
+    // else; the guard's logon trigger before the autostarts go.
+    assert!(pc.index(Call::Data) < pc.index(Call::GuardLogon));
     assert_eq!(
-        pc.calls_after(Call::AutostartsOff),
+        pc.calls_after(Call::GuardLogon),
         [
-            Call::GuardLogon,
+            Call::AutostartsOff,
             Call::ServerConfig,
             Call::WriteServerConfig,
             Call::ServerConfig,
@@ -213,15 +214,19 @@ fn the_dry_run_names_the_steps_and_the_trial_s_precheck_and_changes_nothing() {
 #[test]
 fn a_failed_step_unwinds_to_trial_and_event() {
     for (call, step, undo) in [
-        (Call::AutostartsOff, "Autostarts", vec![Call::AutostartsOn]),
+        (
+            Call::AutostartsOff,
+            "Autostarts",
+            vec![Call::AutostartsOn, Call::GuardLogon],
+        ),
         (
             Call::WriteServerConfig,
             "PinChanges",
             vec![
                 Call::ServerConfig,
                 Call::ServerConfig,
-                Call::GuardLogon,
                 Call::AutostartsOn,
+                Call::GuardLogon,
             ],
         ),
         (
@@ -231,8 +236,8 @@ fn a_failed_step_unwinds_to_trial_and_event() {
                 Call::ServerConfig,
                 Call::WriteServerConfig,
                 Call::ServerConfig,
-                Call::GuardLogon,
                 Call::AutostartsOn,
+                Call::GuardLogon,
             ],
         ),
     ] {
@@ -334,7 +339,7 @@ fn a_config_that_does_not_read_back_fails_its_step() {
 #[test]
 fn ide_event_during_a_step_unwinds_after_it() {
     let (mut pc, mut g) = ready();
-    pc.preempt_at = Some((Call::GuardLogon, g.cancel.clone()));
+    pc.preempt_at = Some((Call::AutostartsOff, g.cancel.clone()));
     let r = handle(&mut pc, &mut g, cut(false), INIT);
     let head = format!(
         "cutover of {SHA} failed at PinChanges: pre-empted by event; unwound to trial and event"
@@ -370,9 +375,26 @@ fn an_undo_that_fails_is_kept_and_asks_the_owner() {
             begun: vec![CutStep::GuardLogon],
         })
     );
-    assert_eq!(pc.autostarts_in, None, "the autostarts are back");
+    assert!(!pc.called(Call::AutostartsOff), "the autostarts never went");
     assert_eq!(g.state.lifecycle, Lifecycle::Trial);
     assert!(g.alarms.iter().last().is_some_and(|a| a.owner_question));
+    // The status names the record; an activation is refused while it is kept.
+    assert!(
+        status_text(&g).contains(&format!("cutover of {SHA} since {T0}: [GuardLogon] begun")),
+        "{}",
+        status_text(&g)
+    );
+    let r = ask(&mut pc, &mut g, Request::Activate { sha: SHA.into() });
+    assert_eq!(
+        (r.ok, r.detail),
+        (
+            false,
+            format!(
+                "the cutover of {SHA} is not fully unwound ([GuardLogon] left): no activation \
+                 until a guard restart has unwound it"
+            )
+        )
+    );
     let r = ask(&mut pc, &mut g, cut(false));
     assert_eq!(
         (r.ok, r.detail),
@@ -400,8 +422,8 @@ fn a_cut_off_cutover_is_unwound_at_the_start_and_the_pc_goes_to_event() {
             since: T0,
             begun: vec![
                 CutStep::Import,
-                CutStep::Autostarts,
                 CutStep::GuardLogon,
+                CutStep::Autostarts,
                 CutStep::PinChanges,
                 CutStep::Lifecycle,
             ],
@@ -427,8 +449,8 @@ fn a_cut_off_cutover_is_unwound_at_the_start_and_the_pc_goes_to_event() {
             Call::ServerConfig,
             Call::WriteServerConfig,
             Call::ServerConfig,
-            Call::GuardLogon,
             Call::AutostartsOn,
+            Call::GuardLogon,
             Call::Procs,
         ]
     );
@@ -446,7 +468,7 @@ fn a_cut_off_cutover_is_unwound_at_the_start_and_the_pc_goes_to_event() {
     assert_eq!(
         texts(&g).first(),
         Some(&format!(
-            "the cutover of {SHA} was cut off (begun: [Import, Autostarts, GuardLogon, \
+            "the cutover of {SHA} was cut off (begun: [Import, GuardLogon, Autostarts, \
              PinChanges, Lifecycle]): unwound to trial; the PC goes to event"
         ))
     );
@@ -458,10 +480,11 @@ fn a_cut_off_cutover_is_unwound_at_the_start_and_the_pc_goes_to_event() {
     );
 }
 
-/// The lifecycle is read back from the state file: a save that does not
-/// land fails its step, and the unwind reads trial back.
+/// The record is read back from the state file before any step: when the
+/// state does not save, the cutover is refused and nothing changes (a
+/// restart could not find what it would have to unwind).
 #[test]
-fn a_lifecycle_that_does_not_read_back_fails_its_step() {
+fn a_record_that_does_not_save_refuses_the_cutover() {
     let dir = tempfile::tempdir().unwrap();
     // A folder where the state's temp file goes: every save fails.
     std::fs::create_dir_all(dir.path().join("guard").join("guard-state.tmp")).unwrap();
@@ -474,22 +497,24 @@ fn a_lifecycle_that_does_not_read_back_fails_its_step() {
     let mut pc = FakePc::new(iemmixer_up());
     pc.health(Health::Healthy);
     let r = handle(&mut pc, &mut g, cut(false), INIT);
+    assert!(!r.ok);
     assert!(
-        r.detail.starts_with(&format!(
-            "cutover of {SHA} failed at Lifecycle: the saved lifecycle reads back as Trial, not \
-             Prod("
-        )),
+        r.detail.starts_with(
+            "the cutover's record does not save (the guard state reads back with the record \
+             None and the lifecycle Trial): nothing changed"
+        ),
         "{}",
         r.detail
     );
-    assert!(
-        r.detail.contains("; unwound to trial and event"),
-        "{}",
-        r.detail
+    assert_eq!(pc.mutating_calls(), Vec::<Call>::new());
+    assert_eq!(
+        (
+            g.state.lifecycle.clone(),
+            g.state.cutover.clone(),
+            g.state.mode
+        ),
+        (Lifecycle::Trial, None, Mode::Dev)
     );
-    assert!(!r.detail.contains("not undone"), "{}", r.detail);
-    assert_eq!(g.state.lifecycle, Lifecycle::Trial);
-    assert_eq!(pc.server_config, FROZEN);
 }
 
 /// An unwind whose event plan needs the owner says so, and the alarm is
@@ -509,4 +534,76 @@ fn an_unwind_whose_event_plan_needs_the_owner_says_so() {
     assert!(g.alarms.iter().last().is_some_and(|a| a.owner_question));
     assert_eq!(g.state.lifecycle, Lifecycle::Trial);
     assert_eq!(g.state.cutover, None);
+}
+
+/// "ide event" during the import's live entry: the entry unwinds itself to
+/// event, and nothing else begins.
+#[test]
+fn ide_event_during_the_import_unwinds_and_nothing_else_begins() {
+    let (mut pc, mut g) = ready();
+    pc.preempt_at = Some((Call::TrayStart, g.cancel.clone()));
+    let r = handle(&mut pc, &mut g, cut(false), INIT);
+    assert!(
+        r.detail.starts_with(&format!(
+            "cutover of {SHA} failed at Import: the live entry: "
+        )),
+        "{}",
+        r.detail
+    );
+    assert_eq!(g.state.mode, Mode::Event);
+    assert_eq!(g.state.lifecycle, Lifecycle::Trial);
+    assert_eq!(g.state.cutover, None);
+    for call in [Call::GuardLogon, Call::AutostartsOff, Call::ServerConfig] {
+        assert!(!pc.called(call), "{call:?}");
+    }
+}
+
+/// The autostarts' undo fails: the guard's logon trigger stays (the next
+/// boot starts the guard, which tries again), both stay in the record, and
+/// the start that finds it goes to event.
+#[test]
+fn the_logon_trigger_stays_while_the_autostarts_are_not_back() {
+    let (mut pc, mut g) = ready();
+    pc.fail(Call::MemberPage, "refused");
+    pc.fail(Call::AutostartsOn, "the task did not answer");
+    let r = handle(&mut pc, &mut g, cut(false), INIT);
+    let detail = format!(
+        "cutover of {SHA} failed at Checks: refused; unwound to trial and event; not undone: \
+         Autostarts: the task did not answer; GuardLogon: kept while the autostarts are not \
+         back (the guard starts at the logon and tries again); a guard restart tries again"
+    );
+    assert!(r.detail.starts_with(&detail), "{}", r.detail);
+    assert_eq!(pc.count(Call::GuardLogon), 1, "never turned off");
+    assert!(pc.guard_at_logon);
+    assert_eq!(pc.server_config, FROZEN);
+    assert_eq!(g.state.lifecycle, Lifecycle::Trial);
+    assert_eq!(
+        g.state.cutover.as_ref().map(|r| r.begun.clone()),
+        Some(vec![CutStep::GuardLogon, CutStep::Autostarts])
+    );
+    // A guard that starts with it tries again, and goes to event whatever
+    // is still left.
+    let mut pc2 = FakePc::new(iemmixer_up());
+    pc2.guard_at_logon = true;
+    pc2.autostarts_in = Some(export_name(T0));
+    pc2.fail(Call::AutostartsOn, "the task did not answer");
+    assert_eq!(start(&mut pc2, &mut g, 0), Some(Outcome::Done));
+    assert_eq!(g.state.mode, Mode::Event);
+    assert!(pc2.guard_at_logon);
+    assert!(g.state.cutover.is_some());
+    assert!(
+        g.alarms
+            .iter()
+            .any(|a| a.owner_question && a.text.starts_with("the cutover of")),
+        "{:?}",
+        texts(&g)
+    );
+    // Once the task answers, the next start undoes both.
+    let mut pc3 = FakePc::new(Facts::default());
+    pc3.guard_at_logon = true;
+    pc3.autostarts_in = Some(export_name(T0));
+    start(&mut pc3, &mut g, 0);
+    assert_eq!(g.state.cutover, None);
+    assert!(!pc3.guard_at_logon);
+    assert_eq!(pc3.autostarts_in, None);
 }

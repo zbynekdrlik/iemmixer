@@ -12,7 +12,7 @@
 //! `event`; a guard that starts with a record still saved (a crash or a
 //! power loss between two steps) unwinds it first.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::json;
 
 use crate::bundle::{Record, may_go_live};
@@ -33,18 +33,22 @@ pub const FRAMES: u32 = 32;
 /// The prefix of an autostart export's folder in `<elevated root>\cutover`.
 pub const EXPORT_PREFIX: &str = "autostarts-";
 
-/// The cutover's steps (design §3.2), each read back.
+/// The cutover's steps (design §3.2), each read back. The guard's logon
+/// trigger comes before the predecessor's autostarts go (the review of lane
+/// 2; the design note lists them the other way round): at every moment
+/// something starts at the next boot, the predecessor or the guard, whose
+/// start unwinds a cutover that was cut off and runs the event plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CutStep {
     /// The final import: a live trial entry on the build (its data refresh
     /// imports the saved REAPER project as `data_live`).
     Import,
+    /// The guard task's logon trigger.
+    GuardLogon,
     /// The predecessor's autostarts exported to
     /// `<elevated root>\cutover\autostarts-<since>` and disabled.
     Autostarts,
-    /// The guard task's logon trigger.
-    GuardLogon,
     /// `pin_changes = true` in the server's config; the server started
     /// again so it serves with it.
     PinChanges,
@@ -58,8 +62,8 @@ pub enum CutStep {
 /// The steps in their order.
 pub const STEPS: [CutStep; 6] = [
     CutStep::Import,
-    CutStep::Autostarts,
     CutStep::GuardLogon,
+    CutStep::Autostarts,
     CutStep::PinChanges,
     CutStep::Lifecycle,
     CutStep::Checks,
@@ -86,6 +90,27 @@ pub fn undo(begun: &[CutStep]) -> Vec<CutStep> {
         .collect()
 }
 
+/// Whether `step` may be changed back now that the undos before it left
+/// `kept`: the guard's logon trigger stays while the predecessor's
+/// autostarts are not back, so the next boot still starts the guard, which
+/// tries again.
+pub fn may_undo(step: CutStep, kept: &[CutStep]) -> bool {
+    !(step == CutStep::GuardLogon && kept.contains(&CutStep::Autostarts))
+}
+
+/// A record's begun steps as this guard reads them: a step it does not
+/// know (a newer guard's) reads as every step that changes something, so
+/// the undo leaves nothing behind (each undo is a no-op where nothing
+/// changed).
+fn known_begun<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<CutStep>, D::Error> {
+    let names = Vec::<serde_json::Value>::deserialize(d)?;
+    let steps: Option<Vec<CutStep>> = names
+        .into_iter()
+        .map(|v| serde_json::from_value(v).ok())
+        .collect();
+    Ok(steps.unwrap_or_else(|| STEPS.iter().copied().filter(|s| s.changes()).collect()))
+}
+
 /// A cutover in progress (`GuardState.cutover`): saved before each step,
 /// dropped once it is done or unwound. A guard that starts with one saved
 /// unwinds it before anything else.
@@ -97,7 +122,68 @@ pub struct Run {
     pub since: u64,
     /// The steps begun, in order: after an unwind, those whose undo
     /// failed (the next start tries them again).
+    #[serde(deserialize_with = "known_begun")]
     pub begun: Vec<CutStep>,
+}
+
+/// The record in `iemmode status` (in progress, or not fully unwound).
+pub fn status(run: Option<&Run>) -> Option<String> {
+    run.map(|r| {
+        format!(
+            "cutover of {} since {}: {:?} begun (in progress, or not fully unwound: a guard \
+             restart tries again)",
+            r.build, r.since, r.begun
+        )
+    })
+}
+
+/// `activate` is refused while a record is kept: an older guard taking
+/// over would drop it, and with it the undo.
+pub fn activation_refusal(run: Option<&Run>) -> Option<String> {
+    run.map(|r| {
+        format!(
+            "the cutover of {} is not fully unwound ({:?} left): no activation until a guard \
+             restart has unwound it",
+            r.build, r.begun
+        )
+    })
+}
+
+/// A failed cutover's reply and alarm: `head` (the step and why), whether
+/// the event plan ended done in event, what could not be undone; and
+/// whether the alarm is the owner's question (anything left, or event not
+/// done).
+pub fn unwound(head: &str, event: bool, left: &[String]) -> (String, bool) {
+    let mut detail = format!("{head}; unwound to trial");
+    detail.push_str(if event {
+        " and event"
+    } else {
+        "; the event plan did not end done"
+    });
+    if !left.is_empty() {
+        detail.push_str(&format!(
+            "; not undone: {}; a guard restart tries again",
+            left.join("; ")
+        ));
+    }
+    (detail, !(event && left.is_empty()))
+}
+
+/// The alarm of a start that found `run` (cut off between two steps, or an
+/// unwind that left steps) and what it could not undo; the owner's question
+/// when anything is left.
+pub fn recovered(run: &Run, left: &[String]) -> (String, bool) {
+    let mut detail = format!(
+        "the cutover of {} was cut off (begun: {:?}): unwound to trial; the PC goes to event",
+        run.build, run.begun
+    );
+    if !left.is_empty() {
+        detail.push_str(&format!(
+            "; not undone: {}; a guard restart tries again",
+            left.join("; ")
+        ));
+    }
+    (detail, !left.is_empty())
 }
 
 /// What the refusals read.
@@ -305,8 +391,8 @@ pub fn engine_check(health: Health, seen: Option<&EngineSeen>) -> Result<(), Str
 /// `cutover --dry-run`: the steps as they would run.
 pub fn plan_text(build: &str, since: u64) -> String {
     format!(
-        "Import (a live trial entry on {build}: the final import), Autostarts (exported to {} \
-         and disabled), GuardLogon (the guard task at logon), PinChanges (pin_changes = true, \
+        "Import (a live trial entry on {build}: the final import), GuardLogon (the guard task \
+         at logon), Autostarts (exported to {} and disabled), PinChanges (pin_changes = true, \
          the server started again), Lifecycle (prod since {since}, pin {build}), Checks (the \
          band's address, a member page, the engine at {FRAMES})",
         export_name(since)

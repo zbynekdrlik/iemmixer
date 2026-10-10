@@ -1,9 +1,10 @@
 //! The cutover on the daemon thread (S8 design note §3.2; lane 2): the
 //! owner's message (`iemmode cutover --build SHA`, which `iempc cutover`
 //! wraps) turns the PC from trial into prod. `crate::cutover` decides the
-//! refusals, the steps and what a failed one changes back; here each step's
-//! `Pc` calls and its read-back, the record saved before every step
-//! (`GuardState.cutover`), and the unwind to trial and event when a step
+//! refusals, the steps, what a failed one changes back and what the reply
+//! says; here each step's `Pc` calls and its read-back, the record saved and
+//! read back before every step (`GuardState.cutover`: no step runs that a
+//! restart could not find), and the unwind to trial and event when a step
 //! fails or "ide event" pre-empts it. A guard that starts with a record
 //! saved (a crash or a power loss between two steps) unwinds it first
 //! ([`recover`]).
@@ -25,7 +26,9 @@ fn text(e: StepError) -> String {
 
 /// `iemmode cutover --build SHA [--dry-run]`: refused unless
 /// `cutover::refusal` passes; then every step in order, the record saved
-/// before each. A failed or pre-empted step unwinds ([`unwind`]).
+/// and read back before each (a record that does not save refuses the
+/// cutover before anything changes, or unwinds it). A failed or pre-empted
+/// step unwinds ([`unwind`]).
 pub(super) fn cutover(
     pc: &mut dyn Pc,
     g: &mut Guard,
@@ -65,7 +68,14 @@ pub(super) fn cutover(
         since,
         begun: Vec::new(),
     });
-    g.save();
+    if let Err(why) = save_checked(g) {
+        g.state.cutover = None;
+        g.save();
+        return (
+            false,
+            format!("the cutover's record does not save ({why}): nothing changed"),
+        );
+    }
     for step in cutover::STEPS {
         if g.cancel.preempted() {
             return unwind(pc, g, step, "pre-empted by event");
@@ -73,14 +83,24 @@ pub(super) fn cutover(
         if let Some(run) = g.state.cutover.as_mut() {
             run.begun.push(step);
         }
-        g.save();
+        if let Err(why) = save_checked(g) {
+            return unwind(pc, g, step, &format!("its record does not save ({why})"));
+        }
         info!("cutover step {step:?}");
         if let Err(why) = run_step(pc, g, step, build, since) {
             return unwind(pc, g, step, &why);
         }
     }
-    g.state.cutover = None;
-    g.save();
+    let run = g.state.cutover.take();
+    if let Err(why) = save_checked(g) {
+        g.state.cutover = run;
+        return unwind(
+            pc,
+            g,
+            CutStep::Checks,
+            &format!("the end of the record does not save ({why})"),
+        );
+    }
     let done = format!(
         "cutover done: prod since {since} on the pin {build}; the predecessor's autostarts \
          are saved in {}",
@@ -100,6 +120,7 @@ fn run_step(
 ) -> Result<(), String> {
     match step {
         CutStep::Import => import(pc, g, build),
+        CutStep::GuardLogon => pc.guard_logon(true).map_err(text),
         CutStep::Autostarts => {
             let did = pc
                 .autostarts_off(&cutover::export_name(since))
@@ -107,21 +128,18 @@ fn run_step(
             g.info(format!("the predecessor's autostarts: {did}"));
             Ok(())
         }
-        CutStep::GuardLogon => pc.guard_logon(true).map_err(text),
         CutStep::PinChanges => {
             set_pins(pc, true)?;
             restart_server(pc, g)
         }
         CutStep::Lifecycle => {
-            let prod = Lifecycle::Prod(Prod {
+            g.state.lifecycle = Lifecycle::Prod(Prod {
                 since,
                 pin: build.to_owned(),
                 previous: None,
                 maintenance: None,
             });
-            g.state.lifecycle = prod.clone();
-            g.save();
-            read_back_lifecycle(g, &prod)
+            save_checked(g)
         }
         CutStep::Checks => {
             let c = g.cancel.clone();
@@ -192,33 +210,35 @@ fn restart_server(pc: &mut dyn Pc, g: &mut Guard) -> Result<(), String> {
     Ok(())
 }
 
-/// The lifecycle as the state file holds it (the guard's in memory when it
-/// has no files) must be `want`.
-fn read_back_lifecycle(g: &Guard, want: &Lifecycle) -> Result<(), String> {
+/// Saves the state and reads it back from the state file (the guard's in
+/// memory when it has no files): the cutover's record and the lifecycle
+/// must be what the guard holds.
+fn save_checked(g: &mut Guard) -> Result<(), String> {
+    g.save();
     let saved = match g.root() {
         Some(root) => {
             let (st, bad) = GuardState::load(&root.join("guard").join(STATE_FILE));
             if let Some(why) = bad {
                 return Err(why);
             }
-            st.lifecycle
+            st
         }
-        None => g.state.lifecycle.clone(),
+        None => g.state.clone(),
     };
-    if saved == *want {
-        Ok(())
-    } else {
-        Err(format!(
-            "the saved lifecycle reads back as {saved:?}, not {want:?}"
-        ))
+    if saved.cutover != g.state.cutover || saved.lifecycle != g.state.lifecycle {
+        return Err(format!(
+            "the guard state reads back with the record {:?} and the lifecycle {:?}",
+            saved.cutover, saved.lifecycle
+        ));
     }
+    Ok(())
 }
 
 /// A failed or pre-empted step: the event plan first (the band back on
 /// REAPER; after a failed import the entry's own unwind already ran it),
 /// then every begun step that changed something changed back
-/// ([`undo`]), the step that failed included; the alarm names the step,
-/// why, and anything left (then the owner's question).
+/// ([`undo`]), the step that failed included; the reply and the alarm
+/// (`cutover::unwound`) name the step, why, and anything left.
 fn unwind(pc: &mut dyn Pc, g: &mut Guard, step: CutStep, why: &str) -> (bool, String) {
     let Some(run) = g.state.cutover.clone() else {
         return (false, why.to_owned());
@@ -234,37 +254,35 @@ fn unwind(pc: &mut dyn Pc, g: &mut Guard, step: CutStep, why: &str) -> (bool, St
         out == Outcome::Done && g.state.mode == Mode::Event
     };
     let left = undo(pc, g, &run);
-    let mut detail = format!("{head}; unwound to trial");
-    detail.push_str(if event {
-        " and event"
-    } else {
-        "; the event plan did not end done"
-    });
-    if !left.is_empty() {
-        detail.push_str(&format!(
-            "; not undone: {}; a guard restart tries again",
-            left.join("; ")
-        ));
-    }
-    g.raise(None, &detail, !(event && left.is_empty()));
+    let (detail, ask) = cutover::unwound(&head, event, &left);
+    g.raise(None, &detail, ask);
     (false, detail)
 }
 
 /// Changes back what the begun steps of `run` changed, newest first
-/// (`cutover::undo`): the lifecycle to trial, `pin_changes` closed, the
-/// guard's logon trigger off, the autostarts back from their export. Every
-/// undo is a no-op on what is already as before, so a step that failed
-/// half-way is undone too. The record is dropped, or kept with the steps
-/// whose undo failed (the next start tries them again). What failed, by step.
+/// (`cutover::undo`): the lifecycle to trial (read back), `pin_changes`
+/// closed, the autostarts back from their export, then the guard's logon
+/// trigger off, unless the autostarts are not back (`cutover::may_undo`:
+/// the next boot must start something). Every undo is a no-op on what is
+/// already as before, so a step that failed half-way is undone too. The
+/// record is dropped, or kept with the steps left (the next start tries
+/// them again). What is left, by step.
 fn undo(pc: &mut dyn Pc, g: &mut Guard, run: &Run) -> Vec<String> {
     let mut left = Vec::new();
     let mut kept = Vec::new();
     for step in cutover::undo(&run.begun) {
+        if !cutover::may_undo(step, &kept) {
+            left.push(format!(
+                "{step:?}: kept while the autostarts are not back (the guard starts at the \
+                 logon and tries again)"
+            ));
+            kept.push(step);
+            continue;
+        }
         let done = match step {
             CutStep::Lifecycle => {
                 g.state.lifecycle = Lifecycle::Trial;
-                g.save();
-                read_back_lifecycle(g, &Lifecycle::Trial)
+                save_checked(g)
             }
             CutStep::PinChanges => set_pins(pc, false),
             CutStep::GuardLogon => pc.guard_logon(false).map_err(text),
@@ -290,23 +308,14 @@ fn undo(pc: &mut dyn Pc, g: &mut Guard, run: &Run) -> Vec<String> {
 
 /// A starting guard that finds a cutover record (cut off between two
 /// steps, or an unwind that left steps) changes back what it begun, before
-/// anything else, and alarms; the start then goes to event. Whether it
-/// found one.
+/// anything else, and alarms (`cutover::recovered`); the start then goes
+/// to event. Whether it found one.
 pub(super) fn recover(pc: &mut dyn Pc, g: &mut Guard) -> bool {
     let Some(run) = g.state.cutover.clone() else {
         return false;
     };
     let left = undo(pc, g, &run);
-    let mut detail = format!(
-        "the cutover of {} was cut off (begun: {:?}): unwound to trial; the PC goes to event",
-        run.build, run.begun
-    );
-    if !left.is_empty() {
-        detail.push_str(&format!(
-            "; not undone: {}; a guard restart tries again",
-            left.join("; ")
-        ));
-    }
-    g.raise(None, &detail, !left.is_empty());
+    let (detail, ask) = cutover::recovered(&run, &left);
+    g.raise(None, &detail, ask);
     true
 }
