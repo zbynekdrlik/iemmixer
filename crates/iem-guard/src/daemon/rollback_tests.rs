@@ -4,6 +4,9 @@
 //! is left and what a restart continues, and what `iemmode event` means in
 //! each lifecycle (the button rolls back in prod, "ide event" never does).
 
+use std::sync::Arc;
+use std::time::Duration;
+
 use super::tests::{
     INIT, OTHER, SHA, T0, ask, band_up, fixed, iemmixer_up, prod_on, record, status_reply, texts,
 };
@@ -657,6 +660,67 @@ fn in_prod_the_button_runs_after_a_switch_in_progress() {
     });
     let r = handle(&mut pc, &mut g, event(false), INIT);
     assert!(r.ok && r.detail.starts_with("rollback done"), "{r:?}");
+}
+
+/// In prod "ide event" routed while a switch to live runs (an in-flight
+/// iempc command's own `iemmode event --signal` next to the owner's) waits
+/// for it and never pre-empts it: after the cutover live is the band's
+/// system, so the entry goes on and its end counts as done (S8 lane 5,
+/// finding 1). Before the cutover it pre-empts as before, and live is no
+/// event done.
+#[test]
+fn in_prod_ide_event_waits_for_a_switch_to_live() {
+    let (_, mut g) = prod_live();
+    g.save();
+    g.shared.update(|v| v.running = Some(Mode::Live));
+    assert!(matches!(g.shared.route(&event(true)), Route::AwaitEnd(_)));
+    assert!(
+        !g.cancel.preempted(),
+        "a switch to live in prod is never pre-empted"
+    );
+    g.shared.update(|v| {
+        v.running = None;
+        v.last = Some(Outcome::Done);
+    });
+    let r = g.shared.await_end("waited", Duration::ZERO);
+    assert!(r.ok && r.mode == Mode::Live, "{r:?}");
+    assert!(r.detail.starts_with("waited; live: "), "{}", r.detail);
+    let trial = Guard::for_test(Mode::Live);
+    trial.shared.update(|v| v.running = Some(Mode::Live));
+    assert!(matches!(
+        trial.shared.route(&event(true)),
+        Route::AwaitEnd(_)
+    ));
+    assert!(trial.cancel.preempted(), "before the cutover it pre-empts");
+    trial.shared.update(|v| {
+        v.running = None;
+        v.last = Some(Outcome::Done);
+    });
+    assert!(!trial.shared.await_end("waited", Duration::ZERO).ok);
+}
+
+/// The whole case: the first "ide event" in maintenance goes live on the
+/// pin, and a second one routed meanwhile, before the entry began its steps
+/// or during them, waits for it; REAPER never starts.
+#[test]
+fn a_second_ide_event_in_prod_never_cancels_the_first_one_s_live_entry() {
+    for at in [Call::SetBundle, Call::EngineStart] {
+        let (mut pc, mut g) = prod_live();
+        g.state.mode = Mode::Dev;
+        g.save();
+        pc.route_at = Some((at, Arc::clone(&g.shared), event(true)));
+        let r = handle(&mut pc, &mut g, event(true), INIT);
+        assert!(r.ok, "{at:?}: {r:?}");
+        assert_eq!(g.state.mode, Mode::Live, "{at:?}");
+        assert!(!pc.called(Call::ReaperStart), "{at:?}: {:?}", pc.calls());
+        assert!(
+            matches!(pc.routed, Some(Route::AwaitEnd(_))),
+            "{at:?}: {:?}",
+            pc.routed
+        );
+        let second = g.shared.await_end("waited", Duration::ZERO);
+        assert!(second.ok && second.mode == Mode::Live, "{at:?}: {second:?}");
+    }
 }
 
 /// `iemmode rollback` is queued behind the start's checks and busy during

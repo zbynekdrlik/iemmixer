@@ -1,8 +1,11 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use super::*;
+use crate::daemon::{Route, Shared};
+use crate::proto::Request;
 use crate::rollback::{Files, moves, placed};
 
 /// Every `Pc` method.
@@ -224,6 +227,12 @@ pub struct FakePc {
     /// "ide event" pre-empts this token as this call begins (a test of what
     /// comes after a step during which it came); once.
     pub preempt_at: Option<(Call, Cancel)>,
+    /// The pipe routes this request as this call begins (a request that
+    /// comes while the switch runs: a second "ide event"); once. Its route
+    /// is kept in `routed`.
+    pub route_at: Option<(Call, Arc<Shared>, Request)>,
+    /// How the pipe routed `route_at`'s request.
+    pub routed: Option<Route>,
     calls: Vec<(Call, Instant)>,
     fails: HashMap<Call, String>,
     blocked: Vec<Call>,
@@ -320,6 +329,8 @@ impl FakePc {
             shadows: false,
             waits_see_preemption: false,
             preempt_at: None,
+            route_at: None,
+            routed: None,
             calls: Vec::new(),
             fails: HashMap::new(),
             blocked: Vec::new(),
@@ -406,6 +417,11 @@ impl FakePc {
             && let Some((_, token)) = self.preempt_at.take()
         {
             token.preempt();
+        }
+        if self.route_at.as_ref().is_some_and(|(at, _, _)| *at == call)
+            && let Some((_, shared, req)) = self.route_at.take()
+        {
+            self.routed = Some(shared.route(&req));
         }
         if self.reaper_ends_at == Some(call) {
             self.reaper_ends_at = None;
