@@ -57,6 +57,9 @@ pub struct View {
     /// A plain `iemmode event` (the engineer's button) is a rollback
     /// (`rollback::button_rolls_back`, S8 lane 3).
     pub rolls_back: bool,
+    /// The lifecycle is prod (S8 lane 5): "ide event" waits for a switch to
+    /// live instead of pre-empting it, and live counts as its end.
+    pub prod: bool,
     /// Replies the daemon thread handed to the pipe's threads…
     pub replies_sent: u64,
     /// …and those the pipe's threads have written (or found their client
@@ -87,14 +90,20 @@ impl View {
     }
 
     /// "ide event" once no switch runs: done when the last switch ended in
-    /// `event`.
+    /// `event`, or in prod in `live` (S8 lane 5: after the cutover iemmixer
+    /// serves the band at an event, so a switch to live is what "ide event"
+    /// waits for, never what it cancels).
     pub fn event_reply(&self, note: &str) -> Reply {
-        let ok =
-            self.running.is_none() && self.mode == Mode::Event && self.last == Some(Outcome::Done);
+        let target = if self.prod && self.mode == Mode::Live {
+            Mode::Live
+        } else {
+            Mode::Event
+        };
+        let ok = self.running.is_none() && self.mode == target && self.last == Some(Outcome::Done);
         let how = if self.last == Some(Outcome::NeedsOwner) && !self.last_owner.is_empty() {
             needs_owner_text("event", mode_name(self.mode), &self.last_owner)
         } else {
-            format!("event: {}", outcome_text(self.last))
+            format!("{}: {}", mode_name(target), outcome_text(self.last))
         };
         self.reply(ok, &format!("{note}; {how}"))
     }
@@ -214,6 +223,15 @@ impl Shared {
             (Request::Event { dry_run: false, .. }, Some(Mode::Event)) => {
                 Route::AwaitEnd("already switching to event")
             }
+            // In prod "ide event" waits for a switch to live (S8 lane 5): it
+            // is the band's system, which an event keeps (`rollback::on_event`).
+            (
+                Request::Event {
+                    dry_run: false,
+                    signal: true,
+                },
+                Some(Mode::Live),
+            ) if v.prod => Route::AwaitEnd("waited for the switch to live in prod"),
             (Request::Event { dry_run: false, .. }, Some(_)) => {
                 self.cancel.preempt();
                 Route::AwaitEnd("pre-empted the switch in progress")
@@ -315,6 +333,23 @@ impl Shared {
     pub fn await_replies(&self, limit: Duration) -> bool {
         let v = self.wait_while(limit, |v| v.replies_done < v.replies_sent);
         v.replies_done >= v.replies_sent
+    }
+
+    /// "Ide event"'s own switch to live in prod (S8 lane 5,
+    /// `rollback::OnEvent::Live`), claimed under the view's lock before
+    /// anything is read for it: the token is cleared (a pre-emption routed
+    /// before this, another "ide event" or the button, is answered by the
+    /// queue as the switch's end or runs after it) and the view shows the
+    /// switch to live, so an "ide event" routed from now on waits for it and
+    /// never pre-empts it. Its `begin` (or the event plan when the pin may
+    /// not go live) follows.
+    pub fn claim_live(&self) {
+        let mut v = self.lock();
+        self.cancel.clear();
+        v.running = Some(Mode::Live);
+        v.version += 1;
+        drop(v);
+        self.changed.notify_all();
     }
 
     /// A switch into dev or live is about to end. Under the view's lock:

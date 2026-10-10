@@ -312,6 +312,7 @@ impl Guard {
             v.switching.clone_from(&self.state.switching);
             v.last_switch.clone_from(&self.state.last_switch);
             v.rolls_back = crate::rollback::button_rolls_back(&self.state.lifecycle);
+            v.prod = matches!(self.state.lifecycle, crate::lifecycle::Lifecycle::Prod(_));
             v.alarms = self.alarms.all().to_vec();
             v.status = status;
             v.engine = engine;

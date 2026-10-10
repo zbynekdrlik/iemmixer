@@ -49,6 +49,11 @@ pub(super) fn event(pc: &mut dyn Pc, g: &mut Guard, dry_run: bool, signal: bool)
             ),
         ),
         OnEvent::Live => {
+            // A second "ide event" routed from here on waits for this switch
+            // to live and never cancels it (S8 lane 5).
+            if !dry_run {
+                g.shared.claim_live();
+            }
             let ask = Entry {
                 to: Mode::Live,
                 build: None,
