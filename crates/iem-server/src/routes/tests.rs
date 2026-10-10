@@ -1,5 +1,7 @@
 //! The routes' unit tests: private IPs, network mode, content hashes and the push gate.
 
+use super::push::header_has_engineer_token;
+use super::static_files::has_content_hash;
 use super::*;
 
 #[test]

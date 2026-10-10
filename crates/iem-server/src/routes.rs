@@ -2,18 +2,28 @@
 
 use axum::{
     Json, Router,
-    body::Body,
     extract::Path,
     http::{StatusCode, header},
-    response::{IntoResponse, Response},
+    response::IntoResponse,
     routing::{delete, get, post, put},
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
-use crate::{AppState, Assets, auth, backup_routes, preset_routes, snapshot_routes};
+use crate::{AppState, auth, backup_routes, preset_routes, snapshot_routes};
 use axum::extract::State;
 use iem_core::ApiError;
-use rust_embed::RustEmbed;
+
+mod audio;
+mod photos;
+mod push;
+mod static_files;
+
+use self::audio::{
+    audio_diagnostics_handler, talkback_diagnostics_handler, ws_audio_handler, ws_talkback_handler,
+};
+use self::photos::{delete_photo, get_photo, post_photo};
+use self::push::{get_vapid_key, push_subscribe, push_unsubscribe};
+pub use self::static_files::static_routes;
 
 /// Version information for deployment verification
 #[derive(Serialize)]
@@ -244,124 +254,6 @@ pub async fn client_error(
     axum::http::StatusCode::NO_CONTENT
 }
 
-/// Return the VAPID public key for browser push subscription (reaperiem#133).
-async fn get_vapid_key(
-    axum::extract::State(state): axum::extract::State<AppState>,
-) -> impl IntoResponse {
-    let config = state.config.read().await;
-    if config.vapid_private_key.is_empty() {
-        return (StatusCode::OK, Json(serde_json::json!({ "key": null })));
-    }
-    match iem_core::config::Config::vapid_public_key_base64url(&config.vapid_private_key) {
-        Ok(pub_key) => (StatusCode::OK, Json(serde_json::json!({ "key": pub_key }))),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": "invalid VAPID key" })),
-        ),
-    }
-}
-
-/// Store a push subscription (engineer-only) (reaperiem#133).
-async fn push_subscribe(
-    axum::extract::State(state): axum::extract::State<AppState>,
-    headers: axum::http::HeaderMap,
-    Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    // Verify engineer token
-    let config = state.config.read().await;
-    let claims = match auth::extract_claims(
-        headers
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|h| h.strip_prefix("Bearer "))
-            .unwrap_or(""),
-        &config.jwt_secret,
-    ) {
-        Some(c) if c.engineer => c,
-        _ => {
-            return (
-                StatusCode::FORBIDDEN,
-                Json(serde_json::json!({ "error": "engineer access required" })),
-            );
-        }
-    };
-    drop(config);
-    // Suppress unused variable warning (claims used only for engineer check)
-    let _ = claims;
-
-    // Parse subscription
-    let endpoint = body["endpoint"].as_str().unwrap_or("").to_string();
-    let p256dh = body["keys"]["p256dh"].as_str().unwrap_or("").to_string();
-    let auth_key = body["keys"]["auth"].as_str().unwrap_or("").to_string();
-
-    if endpoint.is_empty() || p256dh.is_empty() || auth_key.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "missing endpoint, p256dh, or auth" })),
-        );
-    }
-
-    let sub = crate::push_store::PushSubscription {
-        endpoint,
-        p256dh,
-        auth: auth_key,
-    };
-    let mut store = state.push_store.write().await;
-    match store.add(sub) {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": format!("save failed: {}", e) })),
-        ),
-    }
-}
-
-/// Returns true iff the request's `Authorization: Bearer <jwt>` header decodes
-/// to a valid engineer claim under the given secret. Pulled out as a function
-/// so its decision can be unit-tested independently of the handler's
-/// `AppState` plumbing — the boolean check is exactly what cargo-mutants tries
-/// to flip. (reaperiem#188)
-fn header_has_engineer_token(headers: &axum::http::HeaderMap, jwt_secret: &str) -> bool {
-    let token = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|h| h.strip_prefix("Bearer "))
-        .unwrap_or("");
-    matches!(auth::extract_claims(token, jwt_secret), Some(c) if c.engineer)
-}
-
-/// Remove a stored push subscription by endpoint URL (engineer-only) (reaperiem#188).
-///
-/// Idempotent: returns 200 even if the endpoint is not in the store. The leaving
-/// client is the source of truth for which endpoint to forget — the server has
-/// no per-member association to look it up otherwise.
-async fn push_unsubscribe(
-    axum::extract::State(state): axum::extract::State<AppState>,
-    headers: axum::http::HeaderMap,
-    Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    let config = state.config.read().await;
-    if !header_has_engineer_token(&headers, &config.jwt_secret) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({ "error": "engineer access required" })),
-        );
-    }
-    drop(config);
-
-    let endpoint = body["endpoint"].as_str().unwrap_or("").to_string();
-    if endpoint.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "missing endpoint" })),
-        );
-    }
-
-    let mut store = state.push_store.write().await;
-    store.remove_endpoint(&endpoint);
-    (StatusCode::OK, Json(serde_json::json!({ "ok": true })))
-}
-
 /// Detect network mode from request headers.
 ///
 /// Since all traffic goes through Cloudflare Tunnel (mixer.example.org),
@@ -509,123 +401,6 @@ async fn put_customization(
     Ok((StatusCode::OK, Json(c)))
 }
 
-#[derive(Deserialize)]
-struct PhotoUpload {
-    photo: String, // base64-encoded JPEG
-}
-
-/// Get a member's profile photo (no auth — landing page needs it)
-async fn get_photo(
-    State(state): State<AppState>,
-    Path(member_id): Path<String>,
-) -> Result<Response, StatusCode> {
-    match state.photo_store.load(&member_id) {
-        Some(data) => Ok(Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, "image/jpeg")
-            .header(header::CACHE_CONTROL, "public, max-age=3600")
-            .body(Body::from(data))
-            .unwrap()),
-        None => Err(StatusCode::NOT_FOUND),
-    }
-}
-
-/// Upload a member's profile photo (auth: own or engineer)
-async fn post_photo(
-    State(state): State<AppState>,
-    Path(member_id): Path<String>,
-    headers: axum::http::HeaderMap,
-    Json(payload): Json<PhotoUpload>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<iem_core::ApiError>)> {
-    let config = state.config.read().await;
-    crate::auth::verify_member_access(&headers, &member_id, &config.jwt_secret)?;
-    drop(config);
-
-    use base64::Engine;
-    let data = base64::engine::general_purpose::STANDARD
-        .decode(&payload.photo)
-        .map_err(|_| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(iem_core::ApiError::new("INVALID_DATA", "Invalid base64")),
-            )
-        })?;
-
-    if data.len() > 256 * 1024 {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(iem_core::ApiError::new("TOO_LARGE", "Photo exceeds 256 KB")),
-        ));
-    }
-
-    state.photo_store.save(&member_id, &data).map_err(|e| {
-        tracing::error!("Failed to save photo: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(iem_core::ApiError::new("IO_ERROR", "Failed to save photo")),
-        )
-    })?;
-
-    Ok(Json(serde_json::json!({ "ok": true })))
-}
-
-/// Delete a member's profile photo (auth: own or engineer)
-async fn delete_photo(
-    State(state): State<AppState>,
-    Path(member_id): Path<String>,
-    headers: axum::http::HeaderMap,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<iem_core::ApiError>)> {
-    let config = state.config.read().await;
-    crate::auth::verify_member_access(&headers, &member_id, &config.jwt_secret)?;
-    drop(config);
-
-    state.photo_store.delete(&member_id).map_err(|e| {
-        tracing::error!("Failed to delete photo: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(iem_core::ApiError::new(
-                "IO_ERROR",
-                "Failed to delete photo",
-            )),
-        )
-    })?;
-
-    Ok(Json(serde_json::json!({ "ok": true })))
-}
-
-/// Listen WebSocket (engineer)
-#[cfg(feature = "audio")]
-async fn ws_audio_handler(
-    ws: axum::extract::ws::WebSocketUpgrade,
-    state: State<AppState>,
-    query: axum::extract::Query<crate::mixer_ws::WsQuery>,
-) -> Result<impl IntoResponse, Reject> {
-    crate::listen_ws::ws_audio(ws, state, query).await
-}
-
-#[cfg(not(feature = "audio"))]
-async fn ws_audio_handler() -> impl IntoResponse {
-    (
-        StatusCode::NOT_FOUND,
-        "Audio streaming not available (compiled without audio feature)",
-    )
-}
-
-/// Talkback WebSocket (engineer, bound to the talk id)
-#[cfg(feature = "audio")]
-async fn ws_talkback_handler(
-    ws: axum::extract::ws::WebSocketUpgrade,
-    state: State<AppState>,
-    query: axum::extract::Query<crate::mixer_ws::WsQuery>,
-) -> Result<impl IntoResponse, Reject> {
-    crate::talkback_ws::ws_talkback(ws, state, query).await
-}
-
-#[cfg(not(feature = "audio"))]
-async fn ws_talkback_handler() -> impl IntoResponse {
-    (StatusCode::NOT_FOUND, "Talkback not available")
-}
-
 /// The engineer's token from the Authorization header, or the rejection.
 pub async fn require_engineer(
     state: &AppState,
@@ -646,134 +421,6 @@ pub async fn require_engineer(
         ));
     }
     Ok(claims)
-}
-
-#[cfg(feature = "audio")]
-async fn talkback_diagnostics_handler(
-    State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
-) -> Result<Json<serde_json::Value>, Reject> {
-    require_engineer(&state, &headers).await?;
-    Ok(Json(crate::talkback_ws::diagnostics(&state)))
-}
-
-#[cfg(not(feature = "audio"))]
-async fn talkback_diagnostics_handler() -> impl IntoResponse {
-    Json(serde_json::json!({"error": "not available"}))
-}
-
-#[cfg(feature = "audio")]
-async fn audio_diagnostics_handler(
-    State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
-) -> Result<Json<crate::engine::media::AudioDiagnostics>, Reject> {
-    require_engineer(&state, &headers).await?;
-    Ok(Json(state.media.diagnostics()))
-}
-
-#[cfg(not(feature = "audio"))]
-async fn audio_diagnostics_handler() -> impl IntoResponse {
-    (
-        StatusCode::NOT_FOUND,
-        "Audio diagnostics not available (compiled without audio feature)",
-    )
-}
-
-/// Static file routes (WASM assets)
-pub fn static_routes() -> Router<AppState> {
-    Router::new()
-        // Serve index.html for SPA routes
-        .route("/", get(serve_index))
-        .route("/login", get(serve_index))
-        // Browsers ask /favicon.ico for a page without its own icon link (#10).
-        .route("/favicon.ico", get(serve_favicon))
-        // Serve static assets
-        .route("/assets/{*path}", get(serve_asset))
-        // Catch-all: serve files or SPA index for member routes
-        .route("/{*path}", get(serve_spa_route))
-}
-
-/// Serve index.html
-async fn serve_index() -> impl IntoResponse {
-    serve_embedded_file("index.html")
-}
-
-/// The app icon at /favicon.ico (a PNG; every current browser takes one there).
-async fn serve_favicon() -> impl IntoResponse {
-    serve_embedded_file("icon-192.png")
-}
-
-/// Serve index.html for SPA routes or static files
-async fn serve_spa_route(Path(path): Path<String>) -> Response {
-    // Check if it looks like a file request (has extension)
-    if path.contains('.') {
-        serve_embedded_file(&path)
-    } else {
-        // SPA route - serve index.html
-        serve_embedded_file("index.html")
-    }
-}
-
-/// Serve an asset from /assets/
-async fn serve_asset(Path(path): Path<String>) -> impl IntoResponse {
-    serve_embedded_file(&format!("assets/{}", path))
-}
-
-/// Check if a filename contains a content hash (12+ contiguous hex chars).
-/// Content-hashed files are safe for immutable long-term caching.
-/// Files without content hashes (e.g. snippets/*/audio_player.js) must not
-/// be cached, as CDN caches stale content causing SRI hash mismatches.
-fn has_content_hash(path: &str) -> bool {
-    let filename = path.rsplit('/').next().unwrap_or(path);
-    filename.len() >= 12
-        && filename
-            .as_bytes()
-            .windows(12)
-            .any(|w| w.iter().all(|b| b.is_ascii_hexdigit()))
-}
-
-/// Serve an embedded file
-fn serve_embedded_file(path: &str) -> Response {
-    // Try exact path first
-    if let Some(file) = <Assets as RustEmbed>::get(path) {
-        let mime = mime_guess::from_path(path)
-            .first_or_octet_stream()
-            .to_string();
-
-        let cache_control = if has_content_hash(path) {
-            "public, max-age=31536000, immutable"
-        } else {
-            "no-cache, must-revalidate"
-        };
-
-        let mut resp = Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, mime)
-            .header(header::CACHE_CONTROL, cache_control);
-
-        // Service worker must never be cached by CDN — stale sw.js breaks push notifications
-        if path == "sw.js" {
-            resp = resp.header("CDN-Cache-Control", "no-store");
-        }
-
-        return resp.body(Body::from(file.data.into_owned())).unwrap();
-    }
-
-    // Try with .html extension
-    let html_path = format!("{}.html", path);
-    if let Some(file) = <Assets as RustEmbed>::get(&html_path) {
-        return Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, "text/html")
-            .body(Body::from(file.data.into_owned()))
-            .unwrap();
-    }
-
-    // 404
-    Response::builder()
-        .status(StatusCode::NOT_FOUND)
-        .body(Body::from("Not found"))
-        .unwrap()
 }
 
 #[cfg(test)]

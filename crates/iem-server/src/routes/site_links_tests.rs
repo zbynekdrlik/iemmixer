@@ -1,6 +1,7 @@
 //! `GET /api/site`: the site links come from the site config.
 
 use super::*;
+use axum::body::Body;
 use axum::http::Request;
 use tower::util::ServiceExt;
 

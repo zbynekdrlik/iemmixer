@@ -1,4 +1,5 @@
 use super::*;
+use axum::body::Body;
 use axum::extract::connect_info::MockConnectInfo;
 use axum::http::{Method, Request};
 use std::net::SocketAddr;
