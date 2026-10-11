@@ -529,13 +529,13 @@ function Disable-IemAutostarts {
     $list = Read-IemAutostartList -Paths $paths -UserSid $UserSid
     $dir = Join-Path $paths.dir $Export
     if ((Test-Path -LiteralPath $dir) -or (Test-IemReparsePoint -Path $dir)) { throw "$dir exists: an export is never overwritten (nothing changed)" }
-    $startupDir = Resolve-IemListedStartup -Names $list.startup -UserSid $UserSid -StartupDir $StartupDir
-    $saved = Export-IemAutostarts -List $list -Dir $dir -Name $Export -UserSid $UserSid -StartupDir $startupDir
+    $linkDir = Resolve-IemListedStartup -Names $list.startup -UserSid $UserSid -StartupDir $StartupDir
+    $saved = Export-IemAutostarts -List $list -Dir $dir -Name $Export -UserSid $UserSid -StartupDir $linkDir
     try {
         # Every shortcut still the bytes just saved, before anything is disabled.
         foreach ($s in @($saved.startup)) {
             $name = [string](Get-IemProp $s 'name')
-            $now = Read-IemShortcut -Dir $startupDir -Name $name
+            $now = Read-IemShortcut -Dir $linkDir -Name $name
             if ($null -eq $now -or (Get-IemBytesSha256 -Bytes $now) -cne [string](Get-IemProp $s 'sha256')) { throw "the shortcut $name changed since its export: nothing disabled" }
         }
         $sch = Connect-IemScheduler
@@ -551,7 +551,7 @@ function Disable-IemAutostarts {
             if ([string](Get-IemRegRaw -Path $key -Name $name).kind -cne 'absent') { throw "the value $key|$name reads back present" }
         }
         foreach ($s in @($saved.startup)) {
-            Remove-IemShortcut -Dir $startupDir -Name ([string](Get-IemProp $s 'name')) -Sha256 ([string](Get-IemProp $s 'sha256')) -UserSid $UserSid -StartupDir $StartupDir
+            Remove-IemShortcut -Dir $linkDir -Name ([string](Get-IemProp $s 'name')) -Sha256 ([string](Get-IemProp $s 'sha256')) -UserSid $UserSid -StartupDir $StartupDir
         }
     } catch {
         $why = $_.Exception.Message
@@ -628,17 +628,17 @@ function Enable-IemAutostarts {
     }
     $restored = @()
     $failed = @()
-    $startupDir = ''
+    $linkDir = ''
     if ($shortcuts.Count -gt 0) {
-        try { $startupDir = Resolve-IemStartupDir -UserSid $UserSid -StartupDir $StartupDir } catch { $failed += $_.Exception.Message }
+        try { $linkDir = Resolve-IemStartupDir -UserSid $UserSid -StartupDir $StartupDir } catch { $failed += $_.Exception.Message }
     }
     foreach ($s in $shortcuts) {
-        if (-not $startupDir) { $restored += [pscustomobject]@{ shortcut = $s.name; state = 'refused' }; continue }
+        if (-not $linkDir) { $restored += [pscustomobject]@{ shortcut = $s.name; state = 'refused' }; continue }
         $how = 'written'
         try {
-            $now = Read-IemShortcut -Dir $startupDir -Name $s.name
+            $now = Read-IemShortcut -Dir $linkDir -Name $s.name
             if ($null -eq $now) {
-                Write-IemShortcut -Dir $startupDir -Name $s.name -Bytes $s.bytes -Sha256 $s.sum -UserSid $UserSid -StartupDir $StartupDir
+                Write-IemShortcut -Dir $linkDir -Name $s.name -Bytes $s.bytes -Sha256 $s.sum -UserSid $UserSid -StartupDir $StartupDir
             } elseif ((Get-IemBytesSha256 -Bytes $now) -ceq $s.sum) {
                 $how = 'kept'
             } else {
@@ -786,13 +786,13 @@ function Install-IemCutover {
         if ([string](Get-IemRegRaw -Path $rv.key -Name $rv.name).kind -ceq 'absent') { throw "the value $r does not exist: refused, nothing changed" }
     }
     # S8 lane 6: the user's Startup folder, resolved in this session as the task resolves it.
-    $startupDir = Resolve-IemListedStartup -Names $Startup -UserSid $u.sid -StartupDir $StartupDir
+    $linkDir = Resolve-IemListedStartup -Names $Startup -UserSid $u.sid -StartupDir $StartupDir
     foreach ($n in @($Startup)) {
-        if ($null -eq (Read-IemShortcut -Dir $startupDir -Name $n)) { throw "the shortcut $n does not exist in the Startup folder ${startupDir}: refused, nothing changed" }
+        if ($null -eq (Read-IemShortcut -Dir $linkDir -Name $n)) { throw "the shortcut $n does not exist in the Startup folder ${linkDir}: refused, nothing changed" }
     }
     # S8 lane 5: never a cutover over what an earlier one left disabled.
     $refused = Get-IemAutostartRefusals -List ([pscustomobject]@{ tasks = @($Tasks); run = @($RunValues); startup = @($Startup) }) -Scheduler $sch `
-        -CutoverDir $paths.dir -StartupDir $startupDir
+        -CutoverDir $paths.dir -StartupDir $linkDir
     if ($refused.Count -gt 0) {
         throw (($refused -join '; ') + ': an earlier cutover was never undone (put them back by hand first); refused, nothing changed')
     }
