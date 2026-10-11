@@ -215,7 +215,7 @@ fn is_commit(s: &str) -> bool {
 /// commit, never this one; any other answer names none.
 ///
 /// The same rule has two other copies: HIL v1's `Test-IemHilVersion`
-/// (`scripts/iem-pc/IemPc.psm1`, lower case and an ordinal prefix, as here)
+/// (`scripts/iem-pc/IemPcHilV1.psm1`, lower case and an ordinal prefix, as here)
 /// and the guard's `iem_guard::effects::web::version_matches` (any case).
 /// This crate links no server or guard crate, so the rule is repeated; a
 /// change to one is made to all three.

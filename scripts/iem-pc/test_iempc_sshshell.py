@@ -93,7 +93,9 @@ class SequenceTests(ShellBase):
         the new module is imported (elevated_ps.staged)."""
         self.fetched()
         self.assertEqual(self.run_main("ssh-shell", "--sha", SHA)[0], 0)
+        # IemPc.psm1's siblings (#36) right before it: the undo task's folder gets them too.
         self.assertEqual(self.pc.scps, [
+            *((str(ip.bundle_dir(SHA) / n), f"tester@pc.test:/X:/root/bootstrap/{SHA}/{n}", "finish") for n in ip.PC_SIBLINGS),
             (str(ip.bundle_dir(SHA) / "IemPc.psm1"), f"tester@pc.test:/X:/root/bootstrap/{SHA}/IemPc.psm1", "finish"),
             (str(ip.bundle_dir(SHA) / "tuning" / "IemTuningStore.psm1"),
              f"tester@pc.test:/X:/root/bootstrap/{SHA}/IemTuningStore.psm1", "finish"),
@@ -101,9 +103,14 @@ class SequenceTests(ShellBase):
              "finish")])
         for mark in (ss.SET, ss.CONFIRM):
             script = self.scripts(mark)[0][0]
+            sibs = [script.index(f"$iemB = [IO.File]::ReadAllBytes('{UPLOADED}{n}')") for n in ip.PC_SIBLINGS]
             pc = script.index(f"$iemB = [IO.File]::ReadAllBytes('{UPLOADED}IemPc.psm1')")
             store = script.index(f"$iemB = [IO.File]::ReadAllBytes('{UPLOADED}IemTuningStore.psm1')")
             new = script.index(f"$iemB = [IO.File]::ReadAllBytes('{UPLOADED}IemSshShell.psm1')")
+            self.assertEqual(sibs, sorted(sibs), mark)
+            self.assertLess(sibs[-1], pc, mark)
+            for n in ip.PC_SIBLINGS:
+                self.assertIn(f"$iemH -cne '{sha256(f'synthetic {n}'.encode())}'", script)
             self.assertLess(pc, new, mark)
             self.assertLess(store, new, mark)
             self.assertIn(f"$iemH -cne '{sha256(b'synthetic IemPc.psm1')}'", script)
@@ -113,7 +120,8 @@ class SequenceTests(ShellBase):
             self.assertNotIn(f"Import-Module '{UPLOADED}", script)   # never from the run folder (#15)
             self.assertEqual(script.count("Import-Module"), 1, mark)
         # Set copies the modules for its undo task only as the bytes this box checked (the stage is shared).
-        sums = {"IemPc.psm1": sha256(b"synthetic IemPc.psm1"),
+        sums = {**{n: sha256(f"synthetic {n}".encode()) for n in ip.PC_SIBLINGS},
+                "IemPc.psm1": sha256(b"synthetic IemPc.psm1"),
                 "IemTuningStore.psm1": sha256(MODULES["tuning/IemTuningStore.psm1"]),
                 "IemSshShell.psm1": sha256(MODULES["IemSshShell.psm1"])}
         self.assertIn("$r = & { Set-IemSshShell -ModuleSha256 @{ " + "; ".join(f"'{n}' = '{h}'" for n, h in sums.items())
@@ -305,7 +313,7 @@ class RefusalTests(ShellBase):
         self.assertEqual((doc["ssh_shell"], doc["sha"], doc["key"], doc["undo_task"], doc["undo_after_min"]),
                          ("dry-run", SHA, "HKLM:\\SOFTWARE\\OpenSSH", "\\iemmixer\\iemmixer-ssh-shell-undo", 10))
         self.assertEqual((doc["values"]["DefaultShellCommandOption"], doc["values"]["DefaultShellArguments"]), ("/d /c", "/d"))
-        self.assertEqual(doc["modules"], ["IemPc.psm1", "tuning/IemTuningStore.psm1", "IemSshShell.psm1"])
+        self.assertEqual(doc["modules"], [*ip.PC_SIBLINGS, "IemPc.psm1", "tuning/IemTuningStore.psm1", "IemSshShell.psm1"])
 
     def test_a_bundle_without_the_module_is_refused_before_the_pc(self) -> None:
         self.gh.artifact = self.artifact   # iempc_test_support's zip: no IemSshShell.psm1, no tuning store

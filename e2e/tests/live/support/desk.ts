@@ -297,6 +297,8 @@ export class Desk {
   private guard: ReturnType<typeof setInterval> | null = null;
   /** Why the guard had to put changes back after the burst's end; null while it did not. */
   private late: string | null = null;
+  /** When `during` entered its burst and how much of it was left then; null outside `during`. */
+  private entered: { at: number; leftMs: number } | null = null;
   /** The sockets the guard sent undos on, not yet known to be in the engine. */
   private readonly unsettled = new Set<LiveMixer>();
   /** The test is over: nothing more may change. */
@@ -345,6 +347,7 @@ export class Desk {
       await this.watch.burst({ minLeftMs, within });
     }
     this.since = this.watch.statuses.length;
+    this.entered = { at: Date.now(), leftMs: this.watch.leftMs() };
     this.late = null;
     this.guard = setInterval(() => this.guardBurst(), GUARD_MS);
     let result: T;
@@ -405,14 +408,38 @@ export class Desk {
       // `restore` and `end` wait until the engine has them.
       this.unsettled.add(undo.mixer);
     }
-    this.late ??= unsent
-      ? "the burst ended with changes in place, and a broken socket could not put its change back"
-      : "the burst ended with changes in place: they went back after its end";
+    this.late ??= `${
+      unsent
+        ? "the burst ended with changes in place, and a broken socket could not put its change back"
+        : "the burst ended with changes in place: they went back after its end"
+    } (${this.overrun()})`;
+  }
+
+  /**
+   * Times only (no site value): how long the steps ran from the burst's
+   * entry, how much of the burst was left then, and what ended it (its
+   * `listening` status, or the watch's 30 s count), so an overrun names
+   * where the time went.
+   */
+  private overrun(): string {
+    const entered = this.entered;
+    const since = this.since;
+    let listening = false;
+    try {
+      listening = since !== null && this.watch.statuses.slice(since).some((s) => s.status === "listening");
+    } catch {
+      // A broken watch: the count alone is named.
+    }
+    const ran = entered === null ? "?" : ((Date.now() - entered.at) / 1000).toFixed(1);
+    const left = entered === null ? "?" : (entered.leftMs / 1000).toFixed(1);
+    const by = listening ? "its listening status" : "the watch's count";
+    return `the steps ran ${ran} s in a burst entered with ${left} s left; ended by ${by}`;
   }
 
   private stop(): void {
     if (this.guard !== null) clearInterval(this.guard);
     this.guard = null;
+    this.entered = null;
     this.since = null;
   }
 

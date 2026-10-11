@@ -453,6 +453,12 @@ jobs:
       - name: Guard PC module self-test, parse check of every PC script included (Windows PowerShell 5.1, as on the PC)
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/iem-pc/Test-IemPc.ps1
+      - name: Guard PC module self-test, the other bootstrap steps (service right, bundle sums and Defender, runner, tunnel and predecessor facts; #36)
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/iem-pc/Test-IemPcBootstrap.ps1
+      - name: Guard PC module self-test, HIL v1's helpers (#36)
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/iem-pc/Test-IemPcHilV1.ps1
       - name: HIL script self-test (hil-v1.ps1 end to end against a stand-in iemmode, IemHil.psm1's checks; #10)
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/iem-pc/Test-IemHil.ps1
@@ -539,6 +545,10 @@ jobs:
           # hil-v1.ps1 imports from its own folder) and IemCutover.psm1 (#11, iempc cutover) are
           # not required: older bundles still install.
           Copy-Item -LiteralPath scripts/iem-pc/hil-v1.ps1, scripts/iem-pc/IemPc.psm1, scripts/iem-pc/IemSshShell.psm1, scripts/iem-pc/IemHil.psm1, scripts/iem-pc/IemCutover.psm1 -Destination $b
+          # IemPc.psm1's siblings (#36: it imports them from its own folder; iempc stages them before
+          # it on every admin-only path). Not required either: a bundle from before the split still
+          # installs, and its IemPc.psm1 is one file.
+          Copy-Item -LiteralPath scripts/iem-pc/IemPcAcl.psm1, scripts/iem-pc/IemPcTasks.psm1, scripts/iem-pc/IemPcBootPref.psm1, scripts/iem-pc/IemPcFastStartup.psm1, scripts/iem-pc/IemPcPref.psm1, scripts/iem-pc/IemPcState.psm1, scripts/iem-pc/IemPcHilV1.psm1 -Destination $b
           Copy-Item -LiteralPath crates/iem-engine/LICENSE -Destination (Join-Path $b 'LICENSE-iem-engine')
           # The S1c tuning modules, one level deep (bundle names allow tuning/<name> only).
           if (Test-Path -LiteralPath scripts/pc-tuning) {

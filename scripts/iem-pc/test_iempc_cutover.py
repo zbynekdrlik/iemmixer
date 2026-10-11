@@ -78,21 +78,27 @@ class SequenceTests(CutoverBase):
     def test_the_install_gets_the_modules_as_checked_and_the_env_s_autostarts(self) -> None:
         self.fetched()
         self.assertEqual(self.run_main("cutover", "--sha", SHA)[0], 0)
+        # IemPc.psm1's siblings (#36) right before it: the cutover folder gets them too.
         self.assertEqual(self.pc.scps, [
+            *((str(ip.bundle_dir(SHA) / n), f"tester@pc.test:/X:/root/bootstrap/{SHA}/{n}", "finish") for n in ip.PC_SIBLINGS),
             (str(ip.bundle_dir(SHA) / "IemPc.psm1"), f"tester@pc.test:/X:/root/bootstrap/{SHA}/IemPc.psm1", "finish"),
             (str(ip.bundle_dir(SHA) / "tuning" / "IemTuningStore.psm1"),
              f"tester@pc.test:/X:/root/bootstrap/{SHA}/IemTuningStore.psm1", "finish"),
             (str(ip.bundle_dir(SHA) / "IemCutover.psm1"), f"tester@pc.test:/X:/root/bootstrap/{SHA}/IemCutover.psm1",
              "finish")])
         script = self.scripts(cut.INSTALL)[0][0]
+        sibs = [script.index(f"$iemB = [IO.File]::ReadAllBytes('{UPLOADED}{n}')") for n in ip.PC_SIBLINGS]
         pc = script.index(f"$iemB = [IO.File]::ReadAllBytes('{UPLOADED}IemPc.psm1')")
         store = script.index(f"$iemB = [IO.File]::ReadAllBytes('{UPLOADED}IemTuningStore.psm1')")
         new = script.index(f"$iemB = [IO.File]::ReadAllBytes('{UPLOADED}IemCutover.psm1')")
+        self.assertEqual(sibs, sorted(sibs))
+        self.assertLess(sibs[-1], pc)
         self.assertLess(pc, new)
         self.assertLess(store, new)
         self.assertNotIn(f"Import-Module '{UPLOADED}", script)   # never from the run folder (#15)
         self.assertEqual(script.count("Import-Module"), 1)
-        sums = {"IemPc.psm1": sha256(b"synthetic IemPc.psm1"),
+        sums = {**{n: sha256(f"synthetic {n}".encode()) for n in ip.PC_SIBLINGS},
+                "IemPc.psm1": sha256(b"synthetic IemPc.psm1"),
                 "IemTuningStore.psm1": sha256(MODULES["tuning/IemTuningStore.psm1"]),
                 "IemCutover.psm1": sha256(MODULES["IemCutover.psm1"])}
         want = ("$r = & { Install-IemCutover -ModuleSha256 @{ " + "; ".join(f"'{n}' = '{h}'" for n, h in sums.items())

@@ -2,8 +2,8 @@
 # Self-test of IemCutover.psm1 (S8 lane 2, #11: the predecessor's autostarts
 # exported, disabled and re-enabled, the guard task's logon trigger) on
 # Windows PowerShell 5.1 (CI job windows, an ephemeral administrator runner).
-# The module runs as the stage holds it: next to IemPc.psm1 and S1c's
-# IemTuningStore.psm1, copied into one folder. Everything runs against TEST
+# The module runs as the stage holds it: next to IemPc.psm1 (with its
+# siblings, #36) and S1c's IemTuningStore.psm1, copied into one folder. Everything runs against TEST
 # objects: our tasks in \iemmixer-test-cut-<id>\ (registered by
 # Register-IemTasks, as on the PC), the "predecessor's" tasks in
 # \iemmixer-test-cut-<id>-pred\, its Run values under
@@ -22,6 +22,11 @@ $base = Join-Path ([IO.Path]::GetTempPath()) ('iem-cutover-' + $id)
 $mods = Join-Path $base 'modules'
 $sources = @{ 'IemPc.psm1' = (Join-Path $here 'IemPc.psm1'); 'IemCutover.psm1' = (Join-Path $here 'IemCutover.psm1')
               'IemTuningStore.psm1' = (Join-Path (Split-Path -Parent $here) 'pc-tuning\IemTuningStore.psm1') }
+# IemPc.psm1's siblings (#36), which it imports from its own folder: the stage holds them too
+# (by their names; test_iempc_bundle checks that these files are exactly its $script:SiblingNames).
+$pcSiblings = @(Get-ChildItem -LiteralPath $here -File | Where-Object { $_.Name -cmatch '^IemPc[A-Za-z0-9]+\.psm1$' } | ForEach-Object { $_.FullName })
+foreach ($f in $pcSiblings) { $sources[(Split-Path -Leaf $f)] = $f }
+$pcSiblingNames = @($pcSiblings | ForEach-Object { Split-Path -Leaf $_ })
 New-Item -ItemType Directory -Force -Path $mods | Out-Null
 foreach ($n in @($sources.Keys)) { Copy-Item -LiteralPath $sources[$n] -Destination (Join-Path $mods $n) }
 Import-Module (Join-Path $mods 'IemCutover.psm1') -Force
@@ -154,6 +159,15 @@ try {
     $wrong.ModuleSha256['IemCutover.psm1'] = '0' * 64
     $e = ErrorOf { Install-IemCutover @wrong }
     Assert ($e -like '*is not the build iempc checked*' -and -not (Test-Path -LiteralPath $cutDir)) "install-refuses-a-module-that-is-not-the-checked-build ($e)"
+    # A sibling of IemPc.psm1 (#36) is checked as the module is: other bytes, or no sha256 for it.
+    $wrong.ModuleSha256 = $sums.Clone()
+    $wrong.ModuleSha256[$pcSiblingNames[0]] = '0' * 64
+    $e = ErrorOf { Install-IemCutover @wrong }
+    Assert ($e -like "*$($pcSiblingNames[0])*is not the build iempc checked*" -and -not (Test-Path -LiteralPath $cutDir)) "install-refuses-a-sibling-that-is-not-the-checked-build ($e)"
+    $wrong.ModuleSha256 = $sums.Clone()
+    $wrong.ModuleSha256.Remove($pcSiblingNames[-1])
+    $e = ErrorOf { Install-IemCutover @wrong }
+    Assert ($e -like "*no sha256 for $($pcSiblingNames[-1])*" -and -not (Test-Path -LiteralPath $cutDir)) "install-refuses-a-sibling-without-its-sha256 ($e)"
     $noFolder = $install.Clone()
     $noFolder.Folder = $folder + '-none'
     $e = ErrorOf { Install-IemCutover @noFolder }
@@ -166,11 +180,11 @@ try {
     # ---- the install ----
     $r = Install-IemCutover @install
     Assert ($r.state -ceq 'installed' -and $r.task -ceq ($folder + '\iemmixer-cutover')) "install-registers-the-cutover-task ($($r.task))"
-    foreach ($n in @('IemCutover.psm1', 'IemPc.psm1', 'IemTuningStore.psm1', 'iem-cutover.ps1', 'autostarts.json')) {
+    foreach ($n in @(@('IemCutover.psm1', 'IemPc.psm1', 'IemTuningStore.psm1', 'iem-cutover.ps1', 'autostarts.json') + $pcSiblingNames)) {
         $p = Join-Path $cutDir $n
         Assert ((Test-IemElevatedItem -Path $p -UserSid $me.sid).Count -eq 0) "install-writes-$n-admin-only"
     }
-    foreach ($n in @('IemCutover.psm1', 'IemPc.psm1', 'IemTuningStore.psm1')) {
+    foreach ($n in @(@('IemCutover.psm1', 'IemPc.psm1', 'IemTuningStore.psm1') + $pcSiblingNames)) {
         Assert ((Get-FileHash -LiteralPath (Join-Path $cutDir $n) -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $sums[$n]) "install-copies-$n-as-checked"
     }
     $list = [IO.File]::ReadAllText((Join-Path $cutDir 'autostarts.json')) | ConvertFrom-Json

@@ -11,9 +11,10 @@
 # `iempc cutover` runs Install-IemCutover elevated from the admin-only stage
 # (iempc_cutover.py): the list of the predecessor's autostarts (site values,
 # from the private env, never in this module), the entry script and copies of
-# this module and the two it imports from its own folder (IemPc.psm1: the
-# elevated root, file and task helpers; S1c's IemTuningStore.psm1: the exact
-# registry save and restore) go admin-only into <elevated root>\cutover, and
+# this module and the two it imports from its own folder (IemPc.psm1, with its
+# siblings since #36: the elevated root, file and task helpers; S1c's
+# IemTuningStore.psm1: the exact registry save and restore) go admin-only into
+# <elevated root>\cutover, and
 # the cutover task is registered as Register-IemTasks registers the other
 # Highest tasks. The task trusts nothing in the user's root but the request:
 # a verb and an export name it checks; what it disables is the admin-only
@@ -34,8 +35,10 @@ $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'IemPc.psm1') -Force -Global
 Import-Module (Join-Path $PSScriptRoot 'IemTuningStore.psm1') -Force -Global
 
-# The modules the cutover folder carries: this one and the two it imports.
-$script:ModuleFiles = @($PSCommandPath, (Join-Path $PSScriptRoot 'IemPc.psm1'), (Join-Path $PSScriptRoot 'IemTuningStore.psm1'))
+# The modules the cutover folder carries: this one and the two it imports, with
+# IemPc.psm1's siblings before it (#36: Get-IemPcModuleFiles, the folder IemPc
+# was imported from, this one's).
+$script:ModuleFiles = @($PSCommandPath) + @(Get-IemPcModuleFiles) + @((Join-Path $PSScriptRoot 'IemTuningStore.psm1'))
 $script:Utf8NoBom = New-Object System.Text.UTF8Encoding $false
 $script:StateDirName = 'cutover'
 $script:ListName = 'autostarts.json'

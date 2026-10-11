@@ -258,21 +258,28 @@ def elevated_ps():
 
 
 def module_script(body: str, module: str | None = None, module_hex: str | None = None, pre: str = "", fin: str = "",
-                  elevated_root: str | None = None) -> str:
+                  elevated_root: str | None = None, first: list[tuple[str, str]] | tuple = ()) -> str:
     """Runs `body` and prints {ok, r} or {ok: false, error} as the last line.
     `module`: a module this box uploaded into a run folder of the user's root
     (a bundle's IemPc.psm1): its bytes are read once and checked by
     `module_hex`, staged admin-only under the elevated root, checked again
     there and imported only from there (#15, elevated_ps.staged_import).
+    `first`: (PC path, sha256) of the modules it imports from its own folder,
+    uploaded next to it (IemPc.psm1's siblings, #36: upload_pc_module), each
+    staged before it the same way, so its imports never leave the stage.
     `elevated_root`: another elevated root than the PC's (the CI self-test).
     PSModulePath is pinned before the first command (elevated_ps.PIN, #15)."""
     ep = elevated_ps()
     load = ""
     if module is not None:
-        if not HEX64.fullmatch(module_hex or ""):
-            raise StepError(f"not a sha256: {module_hex!r}")
+        for hexd in (module_hex, *(h for _, h in first)):
+            if not HEX64.fullmatch(hexd or ""):
+                raise StepError(f"not a sha256: {hexd!r}")
         root = ep.ROOT if elevated_root is None else ps_quote(elevated_root)
-        load = ep.staged_import(ps_quote(module), module.rsplit("\\", 1)[-1], module_hex, root) + " ; "
+        firsts = [(ps_quote(path), path.rsplit("\\", 1)[-1], hexd) for path, hexd in first]
+        load = ep.staged_import(ps_quote(module), module.rsplit("\\", 1)[-1], module_hex, root, firsts) + " ; "
+    elif first:
+        raise StepError("modules to stage first, but no module")
     tail = f" finally {{ {fin} }}" if fin else ""
     return "\n".join([
         "$ErrorActionPreference = 'Stop'",
