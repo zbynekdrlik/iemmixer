@@ -140,10 +140,13 @@ try {
     Assert ((Test-IemAutostartList -Startup $links).Count -eq 0) 'list-takes-shortcuts-alone'
     Assert ((Test-IemAutostartList -Startup @('Zyx (x64).LNK')).Count -eq 0) 'list-takes-a-shortcut-with-an-upper-case-extension'
     foreach ($s in @('sub\zyx.lnk', 'sub/zyx.lnk', '..\zyx.lnk', 'zyx..lnk', 'C:zyx.lnk', 'zyx.lnk:alt', 'zyx.txt', '.lnk', 'zyx".lnk',
-                     '%zyx%.lnk', 'zyx!.lnk', 'zyx^.lnk', 'zyx&.lnk', 'zyx|.lnk', 'zyx<.lnk', 'zyx*.lnk', 'zyx?.lnk', ("zyx`t.lnk"))) {
+                     '%zyx%.lnk', 'zyx!.lnk', 'zyx^.lnk', 'zyx&.lnk', 'zyx|.lnk', 'zyx<.lnk', 'zyx*.lnk', 'zyx?.lnk', ("zyx`t.lnk"),
+                     ("zyx.lnk`n"), ('zy' + [char]0xE9 + '.lnk'))) {
         $bad = Test-IemAutostartList -Startup @($s)
         Assert ($bad.Count -gt 0 -and ($bad -join ' | ') -like "*shortcut '*' refused*") "list-refuses-the-shortcut [$s] ($($bad -join ' | '))"
     }
+    # The whole value, as iempc's fullmatch: .NET's $ would also match before a final line break.
+    Assert ((Test-IemAutostartList -Tasks @("\a\b`n")).Count -gt 0 -and (Test-IemAutostartList -RunValues @("HKCU:\x|app`n")).Count -gt 0) 'list-refuses-a-final-line-break'
     $bad = Test-IemAutostartList -Startup @('zyx.lnk', 'ZYX.LNK')
     Assert (($bad -join ' | ') -like '*named twice*') "list-refuses-a-shortcut-named-twice ($($bad -join ' | '))"
     # The task XML's comparison (pure): exact, but for the Settings' Enabled element, or not.
@@ -217,8 +220,41 @@ try {
     $e = ErrorOf { Install-IemCutover @install }
     Assert ($e -like '*zyxother.lnk is a junction or a link: refused*' -and -not (Test-Path -LiteralPath $cutDir)) "install-refuses-a-shortcut-that-is-a-link ($e)"
     [IO.File]::Delete((Join-Path $startup 'zyxother.lnk'))
+    # A folder by a listed shortcut's name, an empty shortcut and one past the size cap.
+    New-Item -ItemType Directory -Path (Join-Path $startup 'zyxother.lnk') | Out-Null
+    $e = ErrorOf { Install-IemCutover @install }
+    Assert ($e -like '*zyxother.lnk is no file: refused*' -and -not (Test-Path -LiteralPath $cutDir)) "install-refuses-a-folder-by-a-shortcut-s-name ($e)"
+    Remove-Item -LiteralPath (Join-Path $startup 'zyxother.lnk')
+    Write-Link 'zyxother.lnk' ([byte[]]@())
+    $e = ErrorOf { Install-IemCutover @install }
+    Assert ($e -like '*the shortcut zyxother.lnk is empty*' -and -not (Test-Path -LiteralPath $cutDir)) "install-refuses-an-empty-shortcut ($e)"
+    Write-Link 'zyxother.lnk' (New-Object byte[] 1048577)
+    $e = ErrorOf { Install-IemCutover @install }
+    Assert ($e -like '*zyxother.lnk is larger than 1048576 bytes: refused*' -and -not (Test-Path -LiteralPath $cutDir)) "install-refuses-a-shortcut-past-the-cap ($e)"
+    [IO.File]::Delete((Join-Path $startup 'zyxother.lnk'))
     Move-Item -LiteralPath $aside -Destination (Join-Path $startup 'zyxother.lnk')
     Assert ((Read-Links) -ceq 'same ; same') "shortcuts-back-after-the-link ($(Read-Links))"
+    $missingDir = $install.Clone()
+    $missingDir.StartupDir = Join-Path $local ('iem-cut-missing-' + $id)
+    $e = ErrorOf { Install-IemCutover @missingDir }
+    Assert ($e -like '*the Startup folder * does not exist: refused*' -and -not (Test-Path -LiteralPath $cutDir)) "install-refuses-a-startup-folder-that-does-not-exist ($e)"
+    # Without -StartupDir the folder is this session's own (the task's way), inside the profile.
+    $cut = Get-Module IemCutover
+    $own = [Environment]::GetFolderPath('Startup')
+    $e = ErrorOf { $script:resolved = & $cut { param($sid) Resolve-IemStartupDir -UserSid $sid } $me.sid }
+    if ($own) {
+        Assert ($e -eq '' -and $script:resolved -ceq [IO.Path]::GetFullPath($own).TrimEnd('\')) "resolve-takes-this-session-s-startup-folder ($e)"
+    } else {
+        Assert ($e -like "*this session's Startup folder is '': refused*") "resolve-refuses-a-session-without-a-startup-folder ($e)"
+    }
+    # The profile as ProfileList records it: literal, or from %SystemDrive%; nothing else.
+    $drive = [IO.Path]::GetPathRoot([Environment]::SystemDirectory).TrimEnd('\')
+    Assert ((& $cut { ConvertFrom-IemProfilePath -Raw '%SystemDrive%\Users\zyxuser' }) -ceq ($drive + '\Users\zyxuser')) 'profile-from-the-system-drive'
+    Assert ((& $cut { ConvertFrom-IemProfilePath -Raw 'D:\Users\zyxuser\' }) -ceq 'D:\Users\zyxuser') 'profile-taken-literally'
+    foreach ($p in @('%USERPROFILE%', 'Users\zyxuser', '\\host\share\zyxuser', '', '%SystemDrive%\%x%')) {
+        $e = ErrorOf { & $cut { param($x) ConvertFrom-IemProfilePath -Raw $x } $p }
+        Assert ($e -like '*a profile recorded as * is refused*') "profile-refuses [$p] ($e)"
+    }
     # S8 lane 5: a listed task already disabled is an earlier cutover's state.
     (Get-PredTask 'other').Enabled = $false
     $e = ErrorOf { Install-IemCutover @install }
@@ -381,25 +417,40 @@ try {
     $r = Send-Request 'autostarts-off' 'autostarts-6'
     Assert ($r.ok -and (Read-Links) -ceq 'absent ; absent' -and (Read-Run) -ceq 'absent ; absent') 'disable-into-a-shortcut-export'
     $ex6 = Join-Path $cutDir 'autostarts-6'
-    Write-Link 'zyxother.lnk' ([byte[]](0x4C, 0, 0, 0, 1))
-    $r = Send-Request 'autostarts-on' 'autostarts-6'
-    Assert (-not $r.ok -and $r.error -like '*the shortcut zyxother.lnk is in the Startup folder with other bytes than the export saved: refused, never overwritten*' -and
-            (Read-Links) -ceq 'absent ; other' -and (Read-Run) -ceq 'absent ; absent' -and -not [bool](Get-PredTask 'appstart').Enabled -and
-            -not (Test-Path -LiteralPath (Join-Path $ex6 'restored.json'))) "enable-refuses-a-shortcut-with-other-bytes-and-writes-nothing ($($r.error))"
-    Remove-Item -LiteralPath (Join-Path $startup 'zyxother.lnk')
-    # A changed copy in the export is never written back.
+    $marker6 = Join-Path $ex6 'restored.json'
+    # A changed copy in the export is never written back: nothing is restored.
     $copy = Join-Path $ex6 'startup-1.lnk'
     $orig = [IO.File]::ReadAllBytes($copy)
     [IO.File]::WriteAllBytes($copy, [byte[]]($orig + [byte[]](0x00)))
     $r = Send-Request 'autostarts-on' 'autostarts-6'
     Assert (-not $r.ok -and $r.error -like '*startup-1.lnk is not the file the export saved*' -and (Read-Links) -ceq 'absent ; absent' -and
-            (Read-Run) -ceq 'absent ; absent') "enable-refuses-a-shortcut-copy-that-changed ($($r.error))"
+            (Read-Run) -ceq 'absent ; absent' -and -not [bool](Get-PredTask 'appstart').Enabled) "enable-refuses-a-shortcut-copy-that-changed ($($r.error))"
     [IO.File]::WriteAllBytes($copy, $orig)
-    # One put back by hand with the saved bytes is kept, the other written.
-    Write-Link 'Zyxtray App.lnk' $linkBytes['Zyxtray App.lnk']
+    # A shortcut there with other bytes is refused, never overwritten; the
+    # tasks, the values and the other shortcut come back, the export stays unrestored.
+    Write-Link 'zyxother.lnk' ([byte[]](0x4C, 0, 0, 0, 1))
     $r = Send-Request 'autostarts-on' 'autostarts-6'
-    Assert ($r.ok -and (Read-Links) -ceq 'same ; same' -and (Read-Run) -ceq $both -and
+    Assert (-not $r.ok -and $r.error -like '*the tasks and the Run values are back, not every shortcut*' -and
+            $r.error -like '*the shortcut zyxother.lnk is in the Startup folder with other bytes than the export saved: refused, never overwritten*' -and
+            (Read-Links) -ceq 'same ; other' -and (Read-Run) -ceq $both -and [bool](Get-PredTask 'appstart').Enabled -and [bool](Get-PredTask 'other').Enabled -and
+            -not (Test-Path -LiteralPath $marker6)) "enable-refuses-a-shortcut-with-other-bytes-and-restores-the-rest ($($r.error))"
+    $r = Send-Request 'autostarts-off' 'autostarts-8'
+    Assert (-not $r.ok -and $r.error -like '*the export autostarts-6 of an earlier cutover was never restored*' -and
+            -not (Test-Path -LiteralPath (Join-Path $cutDir 'autostarts-8'))) "an-export-left-unrestored-refuses-the-next ($($r.error))"
+    # Put right by hand: the one with the saved bytes is kept, the other written.
+    Remove-Item -LiteralPath (Join-Path $startup 'zyxother.lnk')
+    $r = Send-Request 'autostarts-on' 'autostarts-6'
+    Assert ($r.ok -and (Read-Links) -ceq 'same ; same' -and (Read-Run) -ceq $both -and (Test-Path -LiteralPath $marker6 -PathType Leaf) -and
             (@($r.result.shortcuts | ForEach-Object { $_.state }) -join ',') -ceq 'kept,written') "enable-keeps-a-shortcut-with-the-saved-bytes ($(ConvertTo-Json -InputObject $r.result.shortcuts -Compress))"
+
+    # ---- S8 lane 6: a removal that fails puts back what the disable changed ----
+    $ro = Join-Path $startup 'zyxother.lnk'
+    [IO.File]::SetAttributes($ro, [IO.FileAttributes]::ReadOnly)
+    $r = Send-Request 'autostarts-off' 'autostarts-7'
+    [IO.File]::SetAttributes($ro, [IO.FileAttributes]::Normal)
+    Assert (-not $r.ok -and $r.error -like '*what was disabled is enabled again*' -and (Read-Links) -ceq 'same ; same' -and (Read-Run) -ceq $both -and
+            [bool](Get-PredTask 'appstart').Enabled -and [bool](Get-PredTask 'other').Enabled -and
+            (Test-Path -LiteralPath (Join-Path $cutDir 'autostarts-7\restored.json') -PathType Leaf)) "disable-that-fails-at-a-shortcut-puts-everything-back ($($r.error))"
 
     # ---- a task that is gone: nothing re-enabled, its saved XML named ----
     $r = Send-Request 'autostarts-off' 'autostarts-3'

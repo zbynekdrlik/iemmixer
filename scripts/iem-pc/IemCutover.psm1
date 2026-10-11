@@ -53,20 +53,26 @@ $script:ExportFile = 'export.json'
 $script:RestoredFile = 'restored.json'
 $script:ListVersion = 1
 $script:ExportVersion = 1
-$script:ExportPattern = '^autostarts-[0-9]{1,20}$'
+$script:ExportPattern = '^autostarts-[0-9]{1,20}\z'
 $script:DefaultFolder = '\iemmixer'
 $script:TaskName = 'iemmixer-cutover'
 $script:GuardTask = 'iemmixer-guard'
 $script:Verbs = @('autostarts-off', 'autostarts-on', 'logon-on', 'logon-off')
-# A task of the predecessor: \folder\name, nothing a command line or cmd reads.
-$script:TaskPathPattern = '^\\[^"%!^&|<>\r\n\t]*[^"%!^&|<>\r\n\t\\]$'
+# A task of the predecessor: \folder\name, nothing a command line or cmd reads
+# (\z: the whole value, as iempc's fullmatch; S8 lane 6).
+$script:TaskPathPattern = '^\\[^"%!^&|<>\r\n\t]*[^"%!^&|<>\r\n\t\\]\z'
 # A Run value: an HKCU:\ or HKLM:\ key, |, the value's name.
-$script:RunPattern = '^(HKCU|HKLM):\\[^|"\r\n]*[^|"\r\n\\]\|[^|"\r\n]+$'
-# A shortcut in the user's Startup folder (S8 lane 6): a bare .lnk name, no
-# path, no '..', nothing a command line, cmd or a wildcard reads.
-$script:StartupPattern = '^(?!.*\.\.)[^\\/:*?"<>|%!^&\x00-\x1f]+\.[Ll][Nn][Kk]$'
+$script:RunPattern = '^(HKCU|HKLM):\\[^|"\r\n]*[^|"\r\n\\]\|[^|"\r\n]+\z'
+# A shortcut in the user's Startup folder (S8 lane 6): a bare .lnk name of
+# printable ASCII (iempc's script reaches the PC on stdin, which Windows
+# PowerShell decodes in the OEM code page), no path, no '..', none of what a
+# path or cmd reads (\ / : * ? " < > | % ! ^ &). \z, not $: .NET's $ also
+# matches before a final line break (iempc_cutover.STARTUP_NAME, fullmatch).
+$script:StartupPattern = '^(?!.*\.\.)(?:(?![\\/:*?"<>|%!^&])[ -~])+\.[Ll][Nn][Kk]\z'
 # A shortcut's copy in an export.
-$script:StartupFilePattern = '^startup-[0-9]+\.lnk$'
+$script:StartupFilePattern = '^startup-[0-9]+\.lnk\z'
+# The largest shortcut copied (a .lnk is a few KiB).
+$script:ShortcutMax = 1048576
 # Where Windows records each account's profile folder (only Administrators and
 # SYSTEM may change it): the anchor a Startup folder must lie in.
 $script:ProfileList = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList'
@@ -187,21 +193,29 @@ function Read-IemAutostartList {
 
 # ---- the user's Startup folder (S8 lane 6) ----
 
+function ConvertFrom-IemProfilePath {
+    # A ProfileImagePath as recorded (unexpanded): a literal rooted path, or
+    # one that begins with %SystemDrive%, which becomes the drive of the
+    # system directory (no environment gives it). Anything else is refused.
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Raw)
+    $p = $Raw
+    if ($p.StartsWith($script:SystemDriveVar, [StringComparison]::OrdinalIgnoreCase)) {
+        $p = [IO.Path]::GetPathRoot([Environment]::SystemDirectory).TrimEnd('\') + $p.Substring($script:SystemDriveVar.Length)
+    }
+    if (-not $p -or $p.Contains('%') -or -not [IO.Path]::IsPathRooted($p) -or $p.StartsWith('\\')) { throw "a profile recorded as '$Raw' is refused" }
+    return [IO.Path]::GetFullPath($p).TrimEnd('\')
+}
+
 function Get-IemProfileDir {
     # The profile folder of the account -UserSid as Windows records it
     # (ProfileList, which only Administrators and SYSTEM may change), never
-    # from an environment variable or the user's HKCU. Only a literal path,
-    # or one that begins with %SystemDrive% (the drive of the system
-    # directory, which no environment gives), is taken.
+    # from an environment variable or the user's HKCU
+    # (ConvertFrom-IemProfilePath).
     param([Parameter(Mandatory)][string]$UserSid)
-    if ($UserSid -cnotmatch '^S-1-[0-9]+(-[0-9]+)+$') { throw "'$UserSid' is no SID: refused" }
+    if ($UserSid -cnotmatch '^S-1-[0-9]+(-[0-9]+)+\z') { throw "'$UserSid' is no SID: refused" }
     $key = Get-Item -LiteralPath (Join-Path $script:ProfileList $UserSid)
     try { $raw = [string]$key.GetValue('ProfileImagePath', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) } finally { $key.Close() }
-    if ($raw.StartsWith($script:SystemDriveVar, [StringComparison]::OrdinalIgnoreCase)) {
-        $raw = [IO.Path]::GetPathRoot([Environment]::SystemDirectory).TrimEnd('\') + $raw.Substring($script:SystemDriveVar.Length)
-    }
-    if (-not $raw -or $raw.Contains('%') -or -not [IO.Path]::IsPathRooted($raw)) { throw "the profile of $UserSid is recorded as '$raw': refused" }
-    return [IO.Path]::GetFullPath($raw).TrimEnd('\')
+    return (ConvertFrom-IemProfilePath -Raw $raw)
 }
 
 function Resolve-IemStartupDir {
@@ -233,14 +247,62 @@ function Resolve-IemStartupDir {
 
 function Read-IemShortcut {
     # A shortcut's bytes in the Startup folder -Dir, $null when there is none.
-    # The name must be a bare name.lnk; no junction or link, a file.
+    # The name must be a bare name.lnk; no junction or link, a file of at most
+    # $script:ShortcutMax bytes (a shortcut is a few KiB; nothing larger is
+    # copied into the export).
     param([Parameter(Mandatory)][string]$Dir, [Parameter(Mandatory)][string]$Name)
     if ($Name -cnotmatch $script:StartupPattern) { throw "shortcut '$Name' refused" }
     $path = Join-Path $Dir $Name
     if (Test-IemReparsePoint -Path $path) { throw "$path is a junction or a link: refused" }
     if (-not (Test-Path -LiteralPath $path)) { return $null }
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "$path is no file: refused" }
-    return ,([IO.File]::ReadAllBytes($path))
+    if ((New-Object IO.FileInfo $path).Length -gt $script:ShortcutMax) { throw "$path is larger than $($script:ShortcutMax) bytes: refused" }
+    $bytes = [IO.File]::ReadAllBytes($path)
+    if ($bytes.Length -gt $script:ShortcutMax) { throw "$path is larger than $($script:ShortcutMax) bytes: refused" }
+    return ,$bytes
+}
+
+function Confirm-IemStartupDir {
+    # Right before a removal or a write in the Startup folder -Dir: it
+    # resolves again to the same folder (no junction or link has appeared
+    # from the profile down, it was not moved). By path: only the moment of
+    # use is left open, as Reset-IemInheritedItem's.
+    param([Parameter(Mandatory)][string]$Dir, [Parameter(Mandatory)][string]$UserSid, [string]$StartupDir = '')
+    $again = Resolve-IemStartupDir -UserSid $UserSid -StartupDir $StartupDir
+    if ($again -cne $Dir) { throw "the Startup folder is now $again, not ${Dir}: refused" }
+}
+
+function Remove-IemShortcut {
+    # The cutover's removal of one shortcut: only while the folder resolves as
+    # before and the file holds -Sha256 (the bytes the export saved), then
+    # read back absent.
+    param([Parameter(Mandatory)][string]$Dir, [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$Sha256,
+          [Parameter(Mandatory)][string]$UserSid, [string]$StartupDir = '')
+    Confirm-IemStartupDir -Dir $Dir -UserSid $UserSid -StartupDir $StartupDir
+    $now = Read-IemShortcut -Dir $Dir -Name $Name
+    if ($null -eq $now -or (Get-IemBytesSha256 -Bytes $now) -cne $Sha256) { throw "the shortcut $Name is not the one the export saved: not removed" }
+    [IO.File]::Delete((Join-Path $Dir $Name))
+    if ($null -ne (Read-IemShortcut -Dir $Dir -Name $Name)) { throw "the shortcut $Name reads back present" }
+}
+
+function Write-IemShortcut {
+    # One saved shortcut written back: only while the folder resolves as
+    # before, as a new file (CreateNew: never over one that appeared
+    # meanwhile; a write that fails part-way removes the file it created, so
+    # no other bytes are left for the next restore to refuse), read back.
+    param([Parameter(Mandatory)][string]$Dir, [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][byte[]]$Bytes,
+          [Parameter(Mandatory)][string]$Sha256, [Parameter(Mandatory)][string]$UserSid, [string]$StartupDir = '')
+    Confirm-IemStartupDir -Dir $Dir -UserSid $UserSid -StartupDir $StartupDir
+    if ($null -ne (Read-IemShortcut -Dir $Dir -Name $Name)) { throw "the shortcut $Name appeared meanwhile: not written" }
+    $path = Join-Path $Dir $Name
+    $fs = [IO.File]::Open($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    $done = $false
+    try { $fs.Write($Bytes, 0, $Bytes.Length); $fs.Flush(); $done = $true } finally {
+        $fs.Dispose()
+        if (-not $done) { [IO.File]::Delete($path) }
+    }
+    $back = Read-IemShortcut -Dir $Dir -Name $Name
+    if ($null -eq $back -or (Get-IemBytesSha256 -Bytes $back) -cne $Sha256) { throw "the shortcut $Name does not read back as saved" }
 }
 
 function Resolve-IemListedStartup {
@@ -333,7 +395,7 @@ function Read-IemAutostartExport {
     $tasks = @(Get-IemProp $doc 'tasks' | Where-Object { $null -ne $_ })
     foreach ($t in $tasks) {
         $file = [string](Get-IemProp $t 'xml')
-        if ($file -cnotmatch '^task-[0-9]+\.xml$') { throw "$final names the file '$file': refused" }
+        if ($file -cnotmatch '^task-[0-9]+\.xml\z') { throw "$final names the file '$file': refused" }
         if ([string](Get-IemProp $t 'path') -cnotmatch $script:TaskPathPattern -or (Get-IemProp $t 'enabled') -isnot [bool]) {
             throw "$final holds a task it cannot restore ($(Get-IemProp $t 'path')): refused"
         }
@@ -357,7 +419,7 @@ function Read-IemAutostartExport {
     foreach ($s in $startup) {
         $file = [string](Get-IemProp $s 'file')
         if ($file -cnotmatch $script:StartupFilePattern) { throw "$final names the file '$file': refused" }
-        if ([string](Get-IemProp $s 'name') -cnotmatch $script:StartupPattern -or [string](Get-IemProp $s 'sha256') -cnotmatch '^[0-9a-f]{64}$') {
+        if ([string](Get-IemProp $s 'name') -cnotmatch $script:StartupPattern -or [string](Get-IemProp $s 'sha256') -cnotmatch '^[0-9a-f]{64}\z') {
             throw "$final holds a shortcut it cannot restore ($(Get-IemProp $s 'name')): refused"
         }
         $p = Join-Path $Dir $file
@@ -470,6 +532,12 @@ function Disable-IemAutostarts {
     $startupDir = Resolve-IemListedStartup -Names $list.startup -UserSid $UserSid -StartupDir $StartupDir
     $saved = Export-IemAutostarts -List $list -Dir $dir -Name $Export -UserSid $UserSid -StartupDir $startupDir
     try {
+        # Every shortcut still the bytes just saved, before anything is disabled.
+        foreach ($s in @($saved.startup)) {
+            $name = [string](Get-IemProp $s 'name')
+            $now = Read-IemShortcut -Dir $startupDir -Name $name
+            if ($null -eq $now -or (Get-IemBytesSha256 -Bytes $now) -cne [string](Get-IemProp $s 'sha256')) { throw "the shortcut $name changed since its export: nothing disabled" }
+        }
         $sch = Connect-IemScheduler
         foreach ($t in @($saved.tasks)) {
             $path = [string](Get-IemProp $t 'path')
@@ -483,13 +551,7 @@ function Disable-IemAutostarts {
             if ([string](Get-IemRegRaw -Path $key -Name $name).kind -cne 'absent') { throw "the value $key|$name reads back present" }
         }
         foreach ($s in @($saved.startup)) {
-            $name = [string](Get-IemProp $s 'name')
-            $now = Read-IemShortcut -Dir $startupDir -Name $name
-            if ($null -eq $now -or (Get-IemBytesSha256 -Bytes $now) -cne [string](Get-IemProp $s 'sha256')) {
-                throw "the shortcut $name is not the one the export saved: not removed"
-            }
-            [IO.File]::Delete((Join-Path $startupDir $name))
-            if ($null -ne (Read-IemShortcut -Dir $startupDir -Name $name)) { throw "the shortcut $name reads back present" }
+            Remove-IemShortcut -Dir $startupDir -Name ([string](Get-IemProp $s 'name')) -Sha256 ([string](Get-IemProp $s 'sha256')) -UserSid $UserSid -StartupDir $StartupDir
         }
     } catch {
         $why = $_.Exception.Message
@@ -506,14 +568,17 @@ function Enable-IemAutostarts {
     # at its unwind or a later start): each task's enabled state as saved, read back
     # with its XML equal to the saved file's (Compare-IemTaskXml, named per
     # task); each Run value written back exactly (Set-IemRegRaw) unless it is
-    # so already, read back; each shortcut written back into the Startup
-    # folder from its copy (its sha256 checked again) and read back, unless
-    # it is there with those bytes (S8 lane 6). Every task must exist, and
-    # every shortcut be absent or those bytes (one with other bytes is
-    # refused, never overwritten), before anything is written. Then the
-    # export's restored.json (S8 lane 5), unless it is there. No such export
-    # (or one without export.json): 'none', nothing to do. Run again: nothing
-    # changes. -StartupDir: the self-test's Startup folder only.
+    # so already, read back; then each shortcut (S8 lane 6) written back into
+    # the Startup folder from its copy (Write-IemShortcut) unless it is there
+    # with those bytes ('kept'). Every task must exist and every copy hold its
+    # sha256 before anything is written. A shortcut there with other bytes is
+    # refused, never overwritten, and a Startup folder that does not resolve
+    # refuses its shortcuts: the tasks, the values and every other shortcut
+    # are put back all the same (the predecessor's autostarts as far as they
+    # can be), then the call fails naming each one, without restored.json.
+    # Then the export's restored.json (S8 lane 5), unless it is there. No
+    # such export (or one without export.json): 'none', nothing to do. Run
+    # again: nothing changes. -StartupDir: the self-test's Startup folder only.
     param([Parameter(Mandatory)][string]$Export, [string]$ElevatedRoot = '', [Parameter(Mandatory)][string]$UserSid, [string]$StartupDir = '')
     if ($Export -cnotmatch $script:ExportPattern) { throw "export name '$Export' refused" }
     $paths = Get-IemCutoverPaths -ElevatedRoot $ElevatedRoot
@@ -525,7 +590,7 @@ function Enable-IemAutostarts {
         if ($bad.Count -gt 0) { throw ('the export is refused (inspect it by hand): ' + ($bad -join '; ')) }
         $saved = Read-IemAutostartExport -Dir $dir -Name $Export -UserSid $UserSid
     }
-    if ($null -eq $saved) { return [pscustomobject]@{ state = 'none'; export = $Export; tasks = @(); values = 0 } }
+    if ($null -eq $saved) { return [pscustomobject]@{ state = 'none'; export = $Export; tasks = @(); values = 0; shortcuts = @() } }
     $sch = Connect-IemScheduler
     foreach ($t in @($saved.tasks)) {
         $path = [string](Get-IemProp $t 'path')
@@ -533,22 +598,14 @@ function Enable-IemAutostarts {
             throw "the task $path no longer exists: nothing re-enabled (its saved XML: $(Join-Path $dir ([string](Get-IemProp $t 'xml'))))"
         }
     }
-    # S8 lane 6: every shortcut absent or the saved bytes, before anything is written.
-    $names = @($saved.startup | ForEach-Object { [string](Get-IemProp $_ 'name') })
-    $startupDir = Resolve-IemListedStartup -Names $names -UserSid $UserSid -StartupDir $StartupDir
+    # S8 lane 6: each shortcut's copy read once and checked, before anything is written.
     $shortcuts = @()
     foreach ($s in @($saved.startup)) {
-        $name = [string](Get-IemProp $s 'name')
         $sum = [string](Get-IemProp $s 'sha256')
         $copy = Join-Path $dir ([string](Get-IemProp $s 'file'))
         $bytes = [IO.File]::ReadAllBytes($copy)
         if ((Get-IemBytesSha256 -Bytes $bytes) -cne $sum) { throw "$copy is not the file the export saved: nothing re-enabled" }
-        $now = Read-IemShortcut -Dir $startupDir -Name $name
-        $there = $null -ne $now
-        if ($there -and (Get-IemBytesSha256 -Bytes $now) -cne $sum) {
-            throw "the shortcut $name is in the Startup folder with other bytes than the export saved: refused, never overwritten, nothing re-enabled (the saved one: $copy)"
-        }
-        $shortcuts += [pscustomobject]@{ name = $name; sum = $sum; bytes = $bytes; there = $there }
+        $shortcuts += [pscustomobject]@{ name = [string](Get-IemProp $s 'name'); sum = $sum; bytes = $bytes; copy = $copy }
     }
     $states = @()
     foreach ($t in @($saved.tasks)) {
@@ -570,19 +627,31 @@ function Enable-IemAutostarts {
         if (-not (Test-IemRegRawSame -A (Get-IemRegRaw -Path $key -Name $name) -B $raw)) { throw "the value $key|$name does not read back as saved" }
     }
     $restored = @()
+    $failed = @()
+    $startupDir = ''
+    if ($shortcuts.Count -gt 0) {
+        try { $startupDir = Resolve-IemStartupDir -UserSid $UserSid -StartupDir $StartupDir } catch { $failed += $_.Exception.Message }
+    }
     foreach ($s in $shortcuts) {
-        $path = Join-Path $startupDir $s.name
-        if (-not $s.there) {
-            if (Test-IemReparsePoint -Path $path) { throw "$path is a junction or a link: refused" }
-            # CreateNew: a file that appeared since the check is never overwritten.
-            $fs = [IO.File]::Open($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
-            try { $fs.Write($s.bytes, 0, $s.bytes.Length) } finally { $fs.Dispose() }
-        }
-        $back = Read-IemShortcut -Dir $startupDir -Name $s.name
-        if ($null -eq $back -or (Get-IemBytesSha256 -Bytes $back) -cne $s.sum) { throw "the shortcut $($s.name) does not read back as saved" }
+        if (-not $startupDir) { $restored += [pscustomobject]@{ shortcut = $s.name; state = 'refused' }; continue }
         $how = 'written'
-        if ($s.there) { $how = 'kept' }
+        try {
+            $now = Read-IemShortcut -Dir $startupDir -Name $s.name
+            if ($null -eq $now) {
+                Write-IemShortcut -Dir $startupDir -Name $s.name -Bytes $s.bytes -Sha256 $s.sum -UserSid $UserSid -StartupDir $StartupDir
+            } elseif ((Get-IemBytesSha256 -Bytes $now) -ceq $s.sum) {
+                $how = 'kept'
+            } else {
+                throw "the shortcut $($s.name) is in the Startup folder with other bytes than the export saved: refused, never overwritten (the saved one: $($s.copy))"
+            }
+        } catch {
+            $how = 'refused'
+            $failed += $_.Exception.Message
+        }
         $restored += [pscustomobject]@{ shortcut = $s.name; state = $how }
+    }
+    if ($failed.Count -gt 0) {
+        throw ('the tasks and the Run values are back, not every shortcut: ' + ($failed -join '; ') + ' (the export stays unrestored)')
     }
     # S8 lane 5: everything is back; a later cutover may export again.
     $mark = Join-Path $dir $script:RestoredFile
@@ -732,7 +801,7 @@ function Install-IemCutover {
     foreach ($m in $script:ModuleFiles) {
         $leaf = Split-Path -Leaf $m
         $want = [string]$ModuleSha256[$leaf]
-        if ($want -cnotmatch '^[0-9a-f]{64}$') { throw "no sha256 for ${leaf}: refused, nothing changed" }
+        if ($want -cnotmatch '^[0-9a-f]{64}\z') { throw "no sha256 for ${leaf}: refused, nothing changed" }
         $bytes = [IO.File]::ReadAllBytes($m)
         $got = Get-IemBytesSha256 -Bytes $bytes
         if ($got -cne $want) { throw "the stage's $leaf (sha256 $got) is not the build iempc checked ($want): refused, nothing changed" }

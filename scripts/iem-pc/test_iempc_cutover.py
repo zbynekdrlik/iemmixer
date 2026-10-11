@@ -293,7 +293,8 @@ class BodyTests(unittest.TestCase):
     def test_a_shortcut_is_a_bare_lnk_name(self) -> None:
         for good in ("zyx.lnk", "Zyx Tray App.LNK", "zyx.v2.lnk", "zyx's (x64).lnk", "zyx-1_2.lnk"):
             self.assertIsNotNone(cut.STARTUP_NAME.fullmatch(good), good)
-        for bad in ("zyx", "zyx.lnk\n", "a\\zyx.lnk", "..lnk", "a..b.lnk", "zyx.lnk ", "zyx:.lnk"):
+        for bad in ("zyx", "zyx.lnk\n", "a\\zyx.lnk", "..lnk", "a..b.lnk", "zyx.lnk ", "zyx:.lnk", "zy\u00e9.lnk", "zyx\x7f.lnk",
+                    "zyx\U0001f600.lnk"):
             self.assertIsNone(cut.STARTUP_NAME.fullmatch(bad), bad)
 
     def test_the_install_answer_must_name_the_cutover_task(self) -> None:
@@ -324,11 +325,12 @@ class AgreementTests(unittest.TestCase):
             self.assertIn(f'"{verb}"', rust)
             self.assertIn(f"'{verb}'", text)
         self.assertIn('pub const EXPORT_PREFIX: &str = "autostarts-";', rust)
-        self.assertIn("$script:ExportPattern = '^autostarts-[0-9]{1,20}$'", text)
-        # The env's forms are the module's.
-        self.assertIn("$script:TaskPathPattern = '^" + cut.TASK_PATH.pattern + "$'", text)
-        self.assertIn("$script:RunPattern = '^" + cut.RUN_VALUE.pattern + "$'", text)
-        self.assertIn("$script:StartupPattern = '^" + cut.STARTUP_NAME.pattern + "$'", text)
+        self.assertIn("$script:ExportPattern = '^autostarts-[0-9]{1,20}\\z'", text)
+        # The env's forms are the module's, anchored at the very end (\z: .NET's $
+        # also matches before a final line break, Python's fullmatch does not).
+        self.assertIn("$script:TaskPathPattern = '^" + cut.TASK_PATH.pattern + "\\z'", text)
+        self.assertIn("$script:RunPattern = '^" + cut.RUN_VALUE.pattern + "\\z'", text)
+        self.assertIn("$script:StartupPattern = '^" + cut.STARTUP_NAME.pattern + "\\z'", text)
         # The task's entry never names a Startup folder: the self-test's override stays the self-test's.
         entry = text[text.index("$script:Entry = @'"):text.index("\n'@\n")]
         self.assertIn("Invoke-IemCutoverRequest -Root $Root", entry)

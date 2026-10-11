@@ -59,8 +59,10 @@ LIVE_CHECK = "live/iem-pc"
 # in the env never reaches the PC).
 TASK_PATH = re.compile(r'\\[^"%!^&|<>\r\n\t]*[^"%!^&|<>\r\n\t\\]')
 RUN_VALUE = re.compile(r'(HKCU|HKLM):\\[^|"\r\n]*[^|"\r\n\\]\|[^|"\r\n]+')
-# A shortcut in the user's Startup folder: a bare name.lnk, no path, no '..'.
-STARTUP_NAME = re.compile(r'(?!.*\.\.)[^\\/:*?"<>|%!^&\x00-\x1f]+\.[Ll][Nn][Kk]')
+# A shortcut in the user's Startup folder: a bare name.lnk of printable ASCII
+# (the script reaches the PC on stdin, which Windows PowerShell reads in the
+# OEM code page), no path, no '..', none of \ / : * ? " < > | % ! ^ &.
+STARTUP_NAME = re.compile(r'(?!.*\.\.)(?:(?![\\/:*?"<>|%!^&])[ -~])+\.[Ll][Nn][Kk]')
 
 
 def env_list(env: dict[str, str], key: str) -> list[str]:
