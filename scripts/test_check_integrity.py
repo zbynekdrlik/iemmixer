@@ -55,6 +55,15 @@ class IntegrityTests(unittest.TestCase):
         self.put("scripts/stop.ps1", "taskkill /F /IM engine.exe\n")
         self.assertEqual(len(ci.violations(self.root)), 1)
 
+    def test_a_local_that_is_a_parameter_in_another_case_is_refused(self) -> None:
+        # #11 lane 6: `$startupDir = ''` overwrote the parameter $StartupDir.
+        self.put("scripts/iem-pc/M.psm1",
+                 "function Enable-X {\n    param([string]$StartupDir = '')\n    $linkDir = ''\n"
+                 "    if ($true) { $startupDir = '' }\n    return $StartupDir\n}\n"
+                 "function Ok-X {\n    param([string]$Name)\n    $Name = $Name.Trim()\n    $other = 1\n}\n")
+        self.assertEqual(ci.violations(self.root),
+                         ["scripts/iem-pc/M.psm1:4: $startupDir in Enable-X is its parameter $StartupDir (PowerShell names ignore case)"])
+
     def test_force_kill_in_a_powershell_module_is_found(self) -> None:
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
