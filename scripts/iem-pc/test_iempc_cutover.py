@@ -20,20 +20,23 @@ MODULES = {"IemCutover.psm1": b"synthetic IemCutover.psm1", "tuning/IemTuningSto
 UPLOADED = "X:\\root\\bootstrap\\" + SHA + "\\"
 TASKS = "\\Pred\\appstart;\\Pred\\other"
 RUN = "HKCU:\\Software\\Pred\\Run|app"
+# Invented shortcut names (P6), one with a space and an upper-case extension.
+STARTUP = " Zyxtray App.lnk ; zyxother.LNK"
+STARTUP_NAMES = ["Zyxtray App.lnk", "zyxother.LNK"]
 DRY = ("cutover", "--build", SHA, "--dry-run")
 GO = ("cutover", "--build", SHA)
 
 
 def installed() -> dict:
     return {"state": "installed", "task": cut.TASK, "dir": "X:\\elevated\\cutover", "tasks": ["\\Pred\\appstart", "\\Pred\\other"],
-            "run": [RUN], "modules": {}}
+            "run": [RUN], "startup": STARTUP_NAMES, "modules": {}}
 
 
 class CutoverBase(Base):
     def setUp(self) -> None:
         super().setUp()
         self.gh.artifact = make_zip(self.tmp / "artifact-cut" / f"iemmixer-{SHA}.zip", extra=MODULES)
-        self.write_env({"PC_AUTOSTART_TASKS": TASKS, "PC_AUTOSTART_RUN": RUN})
+        self.write_env({"PC_AUTOSTART_TASKS": TASKS, "PC_AUTOSTART_RUN": RUN, "PC_AUTOSTART_STARTUP": STARTUP})
         self.install_reply: object = installed()
         self.pc.texts[cut.INSTALL] = lambda: self.install_reply() if callable(self.install_reply) else self.install_reply
         # The ops live run's verdicts on SHA (newest last by id); every other gh call is FakeGh's.
@@ -103,8 +106,10 @@ class SequenceTests(CutoverBase):
                 "IemCutover.psm1": sha256(MODULES["IemCutover.psm1"])}
         want = ("$r = & { Install-IemCutover -ModuleSha256 @{ " + "; ".join(f"'{n}' = '{h}'" for n, h in sums.items())
                 + " } -Root 'X:\\root' -Tasks @('\\Pred\\appstart', '\\Pred\\other') "
-                  "-RunValues @('HKCU:\\Software\\Pred\\Run|app') }")
+                  "-RunValues @('HKCU:\\Software\\Pred\\Run|app') -Startup @('Zyxtray App.lnk', 'zyxother.LNK') }")
         self.assertIn(want, script)
+        # The PC resolves the user's Startup folder itself: the dev box never names one.
+        self.assertNotIn("StartupDir", script)
 
     def test_dry_run_asks_the_guard_only(self) -> None:
         self.fetched()
@@ -112,9 +117,16 @@ class SequenceTests(CutoverBase):
         self.assertEqual(code, 0, err)
         self.assertEqual(self.iemmode_calls(), [(list(DRY), "abandon")])
         self.assertEqual((self.pc.modules, self.pc.scps), ([], []))
-        self.assertEqual((docs[-1]["cutover"], docs[-1]["tasks"], docs[-1]["run"]),
-                         ("dry-run", ["\\Pred\\appstart", "\\Pred\\other"], [RUN]))
+        self.assertEqual((docs[-1]["cutover"], docs[-1]["tasks"], docs[-1]["run"], docs[-1]["startup"]),
+                         ("dry-run", ["\\Pred\\appstart", "\\Pred\\other"], [RUN], STARTUP_NAMES))
         self.assertEqual(docs[-1]["live"], {"id": 7, "conclusion": "success"})
+
+    def test_shortcuts_alone_are_an_autostart_list(self) -> None:
+        self.fetched()
+        self.write_env({"PC_AUTOSTART_STARTUP": "zyxonly.lnk"})
+        code, docs, err = self.run_main("cutover", "--sha", SHA)
+        self.assertEqual(code, 0, err)
+        self.assertIn("-Tasks @() -RunValues @() -Startup @('zyxonly.lnk') }", self.scripts(cut.INSTALL)[0][0])
 
 
 class RefusalTests(CutoverBase):
@@ -146,17 +158,23 @@ class RefusalTests(CutoverBase):
 
     def test_without_the_predecessor_s_autostarts_nothing_runs(self) -> None:
         self.fetched()
-        self.write_env({})
-        code, _, err = self.run_main("cutover", "--sha", SHA)
-        self.assertEqual(code, 1)
-        self.assertIn("the private env names no autostart of the predecessor", err)
+        for env in ({}, {"PC_AUTOSTART_TASKS": " ; ", "PC_AUTOSTART_RUN": "", "PC_AUTOSTART_STARTUP": ";"}):
+            self.write_env(env)
+            code, _, err = self.run_main("cutover", "--sha", SHA)
+            self.assertEqual(code, 1, env)
+            self.assertIn("the private env names no autostart of the predecessor", err)
+            self.assertIn("PC_AUTOSTART_STARTUP", err)
         self.assertEqual((self.pc.modules, self.pc.scps, self.pc.calls), ([], [], []))
 
     def test_an_autostart_not_in_the_module_s_form_is_refused_before_the_pc(self) -> None:
         self.fetched()
         for extra in ({"PC_AUTOSTART_TASKS": "Pred\\appstart"}, {"PC_AUTOSTART_TASKS": "\\Pred\\x\\"},
                       {"PC_AUTOSTART_RUN": "HKU:\\x\\Run|app"}, {"PC_AUTOSTART_RUN": "HKCU:\\Software\\Run"},
-                      {"PC_AUTOSTART_TASKS": "\\Pred\\a\"b"}):
+                      {"PC_AUTOSTART_TASKS": "\\Pred\\a\"b"},
+                      *({"PC_AUTOSTART_STARTUP": s} for s in (
+                          "sub\\zyx.lnk", "sub/zyx.lnk", "..\\zyx.lnk", "zyx..lnk", "C:zyx.lnk", "zyx.lnk:alt", "zyx.txt",
+                          "zyx.lnk.txt", ".lnk", "zyx\".lnk", "%zyx%.lnk", "zyx!.lnk", "zyx^.lnk", "zyx&.lnk", "zyx|.lnk",
+                          "zyx<.lnk", "zyx>.lnk", "zyx*.lnk", "zyx?.lnk", "zyx\x01.lnk", "zyx\t.lnk"))):
             self.write_env(extra)
             code, _, err = self.run_main("cutover", "--sha", SHA)
             self.assertEqual(code, 1, extra)
@@ -263,13 +281,21 @@ class FailureTests(CutoverBase):
 class BodyTests(unittest.TestCase):
     def test_every_value_is_quoted_and_a_quote_doubled(self) -> None:
         body = cut.install_body(ip, {"IemCutover.psm1": "a" * 64}, "X:\\root", ["\\Pred\\it's"],
-                                ["HKCU:\\Software\\O'Brien\\Run|app"])
+                                ["HKCU:\\Software\\O'Brien\\Run|app"], ["Zyx's Tray.lnk"])
         self.assertEqual(body, f"Install-IemCutover -ModuleSha256 @{{ 'IemCutover.psm1' = '{'a' * 64}' }} "
-                               "-Root 'X:\\root' -Tasks @('\\Pred\\it''s') -RunValues @('HKCU:\\Software\\O''Brien\\Run|app')")
-        self.assertIn("-Tasks @() -RunValues @('x')", cut.install_body(ip, {}, "X:\\root", [], ["x"]))
+                               "-Root 'X:\\root' -Tasks @('\\Pred\\it''s') -RunValues @('HKCU:\\Software\\O''Brien\\Run|app') "
+                               "-Startup @('Zyx''s Tray.lnk')")
+        self.assertIn("-Tasks @() -RunValues @('x') -Startup @()", cut.install_body(ip, {}, "X:\\root", [], ["x"], []))
         for bad in ({"a b": "a" * 64}, {"IemCutover.psm1": "A" * 64}, {"IemCutover.psm1": "a" * 63}):
             with self.assertRaises(ValueError):
-                cut.install_body(ip, bad, "X:\\root", [], [])
+                cut.install_body(ip, bad, "X:\\root", [], [], [])
+
+    def test_a_shortcut_is_a_bare_lnk_name(self) -> None:
+        for good in ("zyx.lnk", "Zyx Tray App.LNK", "zyx.v2.lnk", "zyx's (x64).lnk", "zyx-1_2.lnk"):
+            self.assertIsNotNone(cut.STARTUP_NAME.fullmatch(good), good)
+        for bad in ("zyx", "zyx.lnk\n", "a\\zyx.lnk", "..lnk", "a..b.lnk", "zyx.lnk ", "zyx:.lnk", "zy\u00e9.lnk", "zyx\x7f.lnk",
+                    "zyx\U0001f600.lnk"):
+            self.assertIsNone(cut.STARTUP_NAME.fullmatch(bad), bad)
 
     def test_the_install_answer_must_name_the_cutover_task(self) -> None:
         self.assertEqual(cut.check_install(ip, installed()), installed())
@@ -299,10 +325,17 @@ class AgreementTests(unittest.TestCase):
             self.assertIn(f'"{verb}"', rust)
             self.assertIn(f"'{verb}'", text)
         self.assertIn('pub const EXPORT_PREFIX: &str = "autostarts-";', rust)
-        self.assertIn("$script:ExportPattern = '^autostarts-[0-9]{1,20}$'", text)
-        # The env's forms are the module's.
-        self.assertIn("$script:TaskPathPattern = '^" + cut.TASK_PATH.pattern + "$'", text)
-        self.assertIn("$script:RunPattern = '^" + cut.RUN_VALUE.pattern + "$'", text)
+        self.assertIn("$script:ExportPattern = '^autostarts-[0-9]{1,20}\\z'", text)
+        # The env's forms are the module's, anchored at the very end (\z: .NET's $
+        # also matches before a final line break, Python's fullmatch does not).
+        self.assertIn("$script:TaskPathPattern = '^" + cut.TASK_PATH.pattern + "\\z'", text)
+        self.assertIn("$script:RunPattern = '^" + cut.RUN_VALUE.pattern + "\\z'", text)
+        self.assertIn("$script:StartupPattern = '^" + cut.STARTUP_NAME.pattern + "\\z'", text)
+        # The task's entry never names a Startup folder: the self-test's override stays the self-test's.
+        entry = text[text.index("$script:Entry = @'"):text.index("\n'@\n")]
+        self.assertIn("Invoke-IemCutoverRequest -Root $Root", entry)
+        self.assertNotIn("Startup", entry)
+        self.assertIn("[Environment]::GetFolderPath('Startup')", text)
 
     def test_the_bundle_job_ships_the_module_and_the_windows_job_tests_it(self) -> None:
         ci = (HERE.parent.parent / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
