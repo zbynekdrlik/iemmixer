@@ -15,14 +15,17 @@ docs/superpowers/specs/2026-10-10-s8-cutover-rollback-design.md section 3.2;
    iempc ssh-shell stages its module): the predecessor's autostarts from the
    private env (PC_AUTOSTART_TASKS, `;`-separated task paths
    `\\folder\\name`; PC_AUTOSTART_RUN, `;`-separated Run values
-   `HKCU:\\...|name` or `HKLM:\\...|name`: site values, never in the
+   `HKCU:\\...|name` or `HKLM:\\...|name`; PC_AUTOSTART_STARTUP (S8 lane 6),
+   `;`-separated shortcut names `name.lnk` in the desktop user's Startup
+   folder, which the PC resolves itself: site values, never in the
    repository) checked to exist, the module copies (only as the sha256 this
    box checked: the stage is shared), the entry script and the list
    admin-only into <elevated root>\\cutover, and the cutover task
    \\iemmixer\\iemmixer-cutover registered. Run again: the same.
 3. `iemmode cutover --build SHA`: the guard runs the six steps (the final
    import as a live trial entry, the autostarts exported to
-   <elevated root>\\cutover\\autostarts-<since> and disabled, the guard task's
+   <elevated root>\\cutover\\autostarts-<since> and disabled (a shortcut
+   removed from the Startup folder only once its copy read back), the guard task's
    logon trigger, pin_changes = true and the server started again, Prod saved
    and read back, the post-cutover checks), each read back; any failure
    unwinds to trial and event (the guard's reply and alarm name the step).
@@ -48,6 +51,7 @@ STAGE = (("IemPc.psm1", "IemPc.psm1"), ("tuning/IemTuningStore.psm1", "IemTuning
 INSTALL = "Install-IemCutover"
 TASKS_KEY = "PC_AUTOSTART_TASKS"
 RUN_KEY = "PC_AUTOSTART_RUN"
+STARTUP_KEY = "PC_AUTOSTART_STARTUP"
 TASK = "\\iemmixer\\iemmixer-cutover"
 # The ops live run's verdict on a build (S7, live_verdict.py).
 LIVE_CHECK = "live/iem-pc"
@@ -55,32 +59,42 @@ LIVE_CHECK = "live/iem-pc"
 # in the env never reaches the PC).
 TASK_PATH = re.compile(r'\\[^"%!^&|<>\r\n\t]*[^"%!^&|<>\r\n\t\\]')
 RUN_VALUE = re.compile(r'(HKCU|HKLM):\\[^|"\r\n]*[^|"\r\n\\]\|[^|"\r\n]+')
+# A shortcut in the user's Startup folder: a bare name.lnk, no path, no '..'.
+STARTUP_NAME = re.compile(r'(?!.*\.\.)[^\\/:*?"<>|%!^&\x00-\x1f]+\.[Ll][Nn][Kk]')
 
 
-def autostarts(ip, env: dict[str, str]) -> tuple[list[str], list[str]]:
-    """The predecessor's autostarts from the private env: task paths and Run
-    values, at least one, each in IemCutover's form."""
-    tasks = [t.strip() for t in env.get(TASKS_KEY, "").split(";") if t.strip()]
-    run = [r.strip() for r in env.get(RUN_KEY, "").split(";") if r.strip()]
-    if not tasks and not run:
-        raise ip.Refused(f"the private env names no autostart of the predecessor ({TASKS_KEY}, {RUN_KEY}): "
-                         "the cutover would disable nothing")
-    bad = [t for t in tasks if not TASK_PATH.fullmatch(t)] + [r for r in run if not RUN_VALUE.fullmatch(r)]
+def env_list(env: dict[str, str], key: str) -> list[str]:
+    """A `;`-separated key of the private env, each item stripped."""
+    return [x.strip() for x in env.get(key, "").split(";") if x.strip()]
+
+
+def autostarts(ip, env: dict[str, str]) -> tuple[list[str], list[str], list[str]]:
+    """The predecessor's autostarts from the private env: task paths, Run
+    values and Startup-folder shortcuts, at least one, each in IemCutover's
+    form."""
+    tasks, run, startup = env_list(env, TASKS_KEY), env_list(env, RUN_KEY), env_list(env, STARTUP_KEY)
+    if not tasks and not run and not startup:
+        raise ip.Refused(f"the private env names no autostart of the predecessor ({TASKS_KEY}, {RUN_KEY}, "
+                         f"{STARTUP_KEY}): the cutover would disable nothing")
+    bad = ([t for t in tasks if not TASK_PATH.fullmatch(t)] + [r for r in run if not RUN_VALUE.fullmatch(r)]
+           + [s for s in startup if not STARTUP_NAME.fullmatch(s)])
     if bad:
         raise ip.Refused(f"the private env's autostarts are refused: {', '.join(repr(b) for b in bad)} "
-                         "(tasks \\folder\\name; Run values HKCU:\\...|name or HKLM:\\...|name)")
-    return tasks, run
+                         "(tasks \\folder\\name; Run values HKCU:\\...|name or HKLM:\\...|name; "
+                         "shortcuts a bare name.lnk)")
+    return tasks, run, startup
 
 
-def install_body(ip, sums: dict[str, str], root: str, tasks: list[str], run: list[str]) -> str:
+def install_body(ip, sums: dict[str, str], root: str, tasks: list[str], run: list[str], startup: list[str]) -> str:
     """Install-IemCutover with the modules' sha256 (names and lowercase hex
-    only), the user's root and the lists, each value quoted."""
+    only), the user's root and the lists, each value quoted. The Startup
+    folder is never named: the PC resolves it in the user's session."""
     for name, hexd in sums.items():
         if not re.fullmatch(r"[A-Za-z0-9_.-]+", name) or not re.fullmatch(r"[0-9a-f]{64}", hexd):
             raise ValueError(f"not a module name and a sha256: {name!r} {hexd!r}")
     sha = "; ".join(f"'{n}' = '{h}'" for n, h in sums.items())
     return (f"{INSTALL} -ModuleSha256 @{{ {sha} }} -Root {ip.ps_quote(root)} -Tasks @({quoted(ip, tasks)}) "
-            f"-RunValues @({quoted(ip, run)})")
+            f"-RunValues @({quoted(ip, run)}) -Startup @({quoted(ip, startup)})")
 
 
 def quoted(ip, items: list[str]) -> str:
@@ -121,20 +135,20 @@ def run(ctx, ip) -> int:
     missing = [member for member, _ in ip.pc_stage(sha, rec, STAGE) if member not in (rec.get("sums") or {})]
     if missing:
         raise ip.Refused(f"bundle {sha} has no {', '.join(missing)}: fetch a bundle built with S8's cutover")
-    tasks, values = autostarts(ip, ctx.env)
+    tasks, values, startup = autostarts(ip, ctx.env)
     live = live_green(ip, sha)
     dry = ["cutover", "--build", sha, "--dry-run"]
     code, reply, raw = ip.iemmode(ctx.env, dry, ip.STATUS_S, ctx.watch(abandon=True))
     if code != 0 or ctx.args.dry_run:
         out = ip.result("iemmode", dry, code, reply, raw)
         out.update({"cutover": "dry-run" if code == 0 else "refused", "sha": sha, "live": live, "tasks": tasks,
-                    "run": values})
+                    "run": values, "startup": startup})
         ip.emit(out)
         return code
     env = ctx.env
     mode = ctx.watch(abandon=False)
     pre, sums = ip.stage_modules(ctx, sha, rec, STAGE, mode)
-    body = install_body(ip, sums, env["PC_ROOT"], tasks, values)
+    body = install_body(ip, sums, env["PC_ROOT"], tasks, values, startup)
     try:
         installed = check_install(ip, ip.run_module(env, body, ip.BOOTSTRAP_S, mode, pre=pre))
     except ip.StepError as e:
