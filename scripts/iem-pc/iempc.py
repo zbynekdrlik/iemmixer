@@ -10,7 +10,8 @@ the PC's elevated tuning folder (`tuning-install`, refreshed after `activate`:
 iempc_tuning.py), a kernel DPC/ISR trace on the guard's engine (`trace`:
 iempc_trace.py, PC_XPERF below), the admin-only OpenSSH default shell
 (`ssh-shell`: iempc_sshshell.py), the cutover on the owner's message
-(`cutover`: iempc_cutover.py, PC_AUTOSTART_TASKS and PC_AUTOSTART_RUN below),
+(`cutover`: iempc_cutover.py, PC_AUTOSTART_TASKS, PC_AUTOSTART_RUN and
+PC_AUTOSTART_STARTUP below),
 the shadow imports' summary (`shadow-report`: iempc_shadow.py, read-only), and the hand-over of
 an open S1a window.
 
@@ -67,9 +68,10 @@ names it), PC_BIN (optional, default: bin under PC_ROOT; iemmode runs from
 the admin-only %ProgramData%\\iemmixer\\bin copy instead when it reads back
 and the guard last seen runs its build, iempc_bin) and PC_XPERF
 (optional, xperf.exe's full path on the PC; `trace` refuses without it),
-PC_AUTOSTART_TASKS and PC_AUTOSTART_RUN (the predecessor's autostarts the
-cutover disables: `;`-separated task paths and Run values; `cutover` refuses
-without either).
+PC_AUTOSTART_TASKS, PC_AUTOSTART_RUN and PC_AUTOSTART_STARTUP (the
+predecessor's autostarts the cutover disables: `;`-separated task paths, Run
+values and shortcut names `name.lnk` in the desktop user's Startup folder;
+`cutover` refuses when all three are empty).
 Nothing is ever ended by force.
 
 Known limits (S6 Task 16): `iemmode event --direct` runs the switch inside

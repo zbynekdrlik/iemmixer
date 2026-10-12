@@ -111,6 +111,49 @@ STEP_NAME = re.compile(r"^\s*-\s*name:\s*(.+?)\s*$")
 COPY_ITEM = re.compile(r"\bCopy-Item\s+-LiteralPath\s+(.+?)\s+-Destination\b")
 
 
+PS_FUNCTION = re.compile(r"\bfunction\s+([\w-]+)\s*(?:\([^)]*\))?\s*\{")
+PS_PARAM = re.compile(r"\bparam\s*\(", re.IGNORECASE)
+PS_ASSIGN = re.compile(r"\$(\w+)\s*=(?!=)")
+
+
+def ps_shadowed_params(text: str) -> list[tuple[int, str, str, str]]:
+    """PowerShell variable names ignore case, so a local `$startupDir = ...`
+    in a function with the parameter `$StartupDir` overwrites the parameter
+    (#11 lane 6: the restore lost its -StartupDir and wrote the shortcuts into
+    another folder). Each such assignment as (line, function, param, local).
+    Braces are counted naively (strings holding braces can shift a body's end;
+    the modules here have none that matter)."""
+    found: list[tuple[int, str, str, str]] = []
+    for match in PS_FUNCTION.finditer(text):
+        start = match.end()
+        depth, i = 1, start
+        while i < len(text) and depth:
+            if text[i] == "{":
+                depth += 1
+            elif text[i] == "}":
+                depth -= 1
+            i += 1
+        body = text[start:i]
+        head = PS_PARAM.search(body)
+        if not head:
+            continue
+        depth, j = 1, head.end()
+        while j < len(body) and depth:
+            if body[j] == "(":
+                depth += 1
+            elif body[j] == ")":
+                depth -= 1
+            j += 1
+        params = {name.lower(): name for name in re.findall(r"\$(\w+)", body[head.end():j])}
+        for assign in PS_ASSIGN.finditer(body, j):
+            local = assign.group(1)
+            param = params.get(local.lower())
+            if param is not None and param != local:
+                line = text.count("\n", 0, start + assign.start()) + 1
+                found.append((line, match.group(1), param, local))
+    return found
+
+
 def files(root: Path, base: str, suffixes: tuple[str, ...]) -> list[Path]:
     top = root / base
     if not top.is_dir():
@@ -203,6 +246,10 @@ def violations(root: Path, repository: bool = False) -> list[str]:
                     found.append(f"{rel}:{n}: {RESTART}")
                 if BREAKAWAY.search(line) and not rel.startswith(BREAKAWAY_HOME):
                     found.append(f"{rel}:{n}: job breakaway outside iem-win (S6 design note §5.1)")
+            if path.suffix in (".ps1", ".psm1"):
+                text = path.read_text(encoding="utf-8", errors="replace")
+                found += [f"{rel}:{n}: ${local} in {func} is its parameter ${param} (PowerShell names ignore case)"
+                          for n, func, param, local in ps_shadowed_params(text)]
     goldens = root / "goldens"
     if goldens.is_dir():
         total = sum(p.stat().st_size for p in goldens.rglob("*") if p.is_file())
