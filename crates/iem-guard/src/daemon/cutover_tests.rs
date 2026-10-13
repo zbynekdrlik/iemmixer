@@ -97,7 +97,6 @@ fn a_cutover_runs_its_steps_in_order_and_ends_in_prod() {
 fn a_cutover_from_the_live_trial_keeps_the_band_s_state() {
     let (mut pc, mut g) = ready();
     g.state.mode = Mode::Live;
-    g.trial = true;
     let r = handle(&mut pc, &mut g, cut(true), INIT);
     assert_eq!(
         (r.ok, r.detail),
@@ -119,6 +118,7 @@ fn a_cutover_from_the_live_trial_keeps_the_band_s_state() {
         r.detail
     );
     assert_eq!(g.state.lifecycle, prod());
+    assert_eq!(g.state.cutover, None);
     assert_eq!(g.state.mode, Mode::Live);
     assert_eq!((pc.count(Call::Data), pc.count(Call::EngineStop)), (0, 0));
     assert_eq!(
@@ -418,6 +418,29 @@ fn an_engine_not_at_32_fails_the_checks() {
         )),
         "{}",
         r.detail
+    );
+    assert_eq!(g.state.lifecycle, Lifecycle::Trial);
+}
+
+/// The kept live trial is read back before anything changes: an engine
+/// not at 32 fails the Import step, so no autostart is touched and the
+/// unwind is the event plan alone (review of the keep, #11 2026-10-13).
+#[test]
+fn a_kept_live_trial_not_at_32_fails_the_import_before_anything_changes() {
+    let (mut pc, mut g) = ready();
+    g.state.mode = Mode::Live;
+    pc.seen.status.frames = 64;
+    let r = handle(&mut pc, &mut g, cut(false), INIT);
+    assert!(
+        r.detail.starts_with(&format!(
+            "cutover of {SHA} failed at Import: the engine runs at 64 frames per period, not 32"
+        )),
+        "{}",
+        r.detail
+    );
+    assert_eq!(
+        (pc.count(Call::GuardLogon), pc.count(Call::AutostartsOff)),
+        (0, 0)
     );
     assert_eq!(g.state.lifecycle, Lifecycle::Trial);
 }
