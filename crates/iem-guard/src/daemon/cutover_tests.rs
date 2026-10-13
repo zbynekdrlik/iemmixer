@@ -87,6 +87,59 @@ fn a_cutover_runs_its_steps_in_order_and_ends_in_prod() {
     assert_eq!(texts(&g), Vec::<String>::new());
 }
 
+/// From a live trial on the build the band last played on iemmixer (the
+/// first event on iemmixer, ROZHODNUTÉ on #11 2026-10-13): the cutover keeps
+/// that state. No switch runs, so neither the data refresh that would bring
+/// back the REAPER project saved before the trial nor an engine stop the
+/// band would hear; the steps after the import are the same, and the dry
+/// run and the reply say so.
+#[test]
+fn a_cutover_from_the_live_trial_keeps_the_band_s_state() {
+    let (mut pc, mut g) = ready();
+    g.state.mode = Mode::Live;
+    g.trial = true;
+    let r = handle(&mut pc, &mut g, cut(true), INIT);
+    assert_eq!(
+        (r.ok, r.detail),
+        (
+            true,
+            format!(
+                "dry run: cutover of {SHA}: {}; precheck ok",
+                plan_text(SHA, T0, Mode::Live)
+            )
+        )
+    );
+    let r = handle(&mut pc, &mut g, cut(false), INIT);
+    assert!(r.ok, "{r:?}");
+    assert!(
+        r.detail.contains(&format!(
+            "the live trial on {SHA} is kept: the band's state as it plays, no import"
+        )),
+        "{}",
+        r.detail
+    );
+    assert_eq!(g.state.lifecycle, prod());
+    assert_eq!(g.state.mode, Mode::Live);
+    assert_eq!((pc.count(Call::Data), pc.count(Call::EngineStop)), (0, 0));
+    assert_eq!(
+        pc.calls_after(Call::GuardLogon),
+        [
+            Call::AutostartsOff,
+            Call::ServerConfig,
+            Call::WriteServerConfig,
+            Call::ServerConfig,
+            Call::Facts,
+            Call::ServerStop,
+            Call::ServerStart,
+            Call::Children,
+            Call::Identity,
+            Call::MemberPage,
+            Call::EngineHealth,
+        ]
+    );
+    assert_eq!(texts(&g), Vec::<String>::new());
+}
+
 /// Saved and read back: a new guard finds prod on the pin and no cutover
 /// in progress.
 #[test]
@@ -225,7 +278,7 @@ fn the_dry_run_names_the_steps_and_the_trial_s_precheck_and_changes_nothing() {
             true,
             format!(
                 "dry run: cutover of {SHA}: {}; precheck ok",
-                plan_text(SHA, T0)
+                plan_text(SHA, T0, Mode::Dev)
             )
         )
     );
@@ -251,7 +304,7 @@ fn the_dry_run_names_the_steps_and_the_trial_s_precheck_and_changes_nothing() {
     assert!(
         r.detail.starts_with(&format!(
             "dry run: cutover of {SHA}: {}; precheck ",
-            plan_text(SHA, T0)
+            plan_text(SHA, T0, Mode::Dev)
         )),
         "{}",
         r.detail
