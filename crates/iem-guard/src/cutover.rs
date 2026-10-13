@@ -42,7 +42,8 @@ pub const EXPORT_PREFIX: &str = "autostarts-";
 #[serde(rename_all = "snake_case")]
 pub enum CutStep {
     /// The final import: a live trial entry on the build (its data refresh
-    /// imports the saved REAPER project as `data_live`).
+    /// imports the saved REAPER project as `data_live`), or, in a live
+    /// trial on the build, that state kept ([`keeps_state`]).
     Import,
     /// The guard task's logon trigger.
     GuardLogon,
@@ -478,13 +479,33 @@ pub fn engine_check(health: Health, seen: Option<&EngineSeen>) -> Result<(), Str
     Ok(())
 }
 
-/// `cutover --dry-run`: the steps as they would run.
-pub fn plan_text(build: &str, since: u64) -> String {
+/// Whether the cutover keeps the state the engine runs instead of the final
+/// import: in a live trial (`refusal` lets only the build's own through)
+/// the band plays on iemmixer, so its state is newer than the REAPER
+/// project saved before the trial, which the import's live entry would
+/// bring back (ROZHODNUTÉ on #11, 2026-10-13: the first event on iemmixer
+/// is a live trial, the cutover follows it). From dev the import runs.
+pub fn keeps_state(mode: Mode) -> bool {
+    mode == Mode::Live
+}
+
+/// The Import step's text: the final import, or the live trial kept.
+pub fn import_text(build: &str, mode: Mode) -> String {
+    if keeps_state(mode) {
+        format!("the live trial on {build} is kept: the band's state as it plays, no import")
+    } else {
+        format!("a live trial entry on {build}: the final import")
+    }
+}
+
+/// `cutover --dry-run`: the steps as they would run from `mode`.
+pub fn plan_text(build: &str, since: u64, mode: Mode) -> String {
     format!(
-        "Import (a live trial entry on {build}: the final import), GuardLogon (the guard task \
-         at logon), Autostarts (exported to {} and disabled), PinChanges (pin_changes = true, \
-         the server started again), Lifecycle (prod since {since}, pin {build}), Checks (the \
-         band's address, a member page, the engine at {FRAMES})",
+        "Import ({}), GuardLogon (the guard task at logon), Autostarts (exported to {} and \
+         disabled), PinChanges (pin_changes = true, the server started again), Lifecycle (prod \
+         since {since}, pin {build}), Checks (the band's address, a member page, the engine at \
+         {FRAMES})",
+        import_text(build, mode),
         export_name(since)
     )
 }

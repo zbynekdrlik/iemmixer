@@ -27,7 +27,7 @@ A pure `lifecycle` module decides the boot mode, the entry gates and the crash r
 ### 3.2 `iemmode cutover --build <main sha>` (owner's message only)
 
 Refuses unless: `Trial`, the build is the active main bundle with green `hil/iem-pc` and `live/iem-pc` recorded, the guard is in `live --trial` on that build or in dev. Steps, each read back, any failure unwinds to `Trial` + `event`:
-1. final import of the saved REAPER project (as `data_live`), state saved as a generation;
+1. final import of the saved REAPER project (as `data_live`), state saved as a generation; from a live trial on the build the band's state is kept instead (no switch: ROZHODNUTÉ on #11 2026-10-13, the first event on iemmixer runs as a live trial and the cutover follows it);
 2. export the predecessor's autostart values (task XML, run keys) to `<root>\cutover\autostarts-<ts>`, then disable them;
 3. the guard task gets its logon trigger;
 

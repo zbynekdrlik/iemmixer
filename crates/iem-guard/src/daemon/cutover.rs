@@ -72,7 +72,7 @@ pub(super) fn cutover(
             check.is_ok(),
             format!(
                 "dry run: cutover of {build}: {}; precheck {verdict}",
-                cutover::plan_text(build, since)
+                cutover::plan_text(build, since, g.state.mode)
             ),
         );
     }
@@ -179,8 +179,14 @@ fn run_step(
 
 /// The final import: a live trial entry on the build, by the entry's own
 /// gate (`lifecycle::entry`) and plan (its data refresh imports the saved
-/// project as `data_live`); the build is the active bundle.
+/// project as `data_live`); the build is the active bundle. In a live trial
+/// on the build the band's state is kept instead (`cutover::keeps_state`):
+/// no switch, so no import and no engine stop.
 fn import(pc: &mut dyn Pc, g: &mut Guard, build: &str) -> Result<(), String> {
+    if cutover::keeps_state(g.state.mode) {
+        g.info(cutover::import_text(build, g.state.mode));
+        return Ok(());
+    }
     let ask = lifecycle::Ask {
         to: Mode::Live,
         build: Some(build),
