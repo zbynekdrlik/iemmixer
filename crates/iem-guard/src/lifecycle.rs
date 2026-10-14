@@ -272,9 +272,9 @@ pub fn entry<'r>(
 /// data step: `pc.toml`'s `data_dev`/`data_live`). Only before the cutover:
 /// the REAPER project is the data authority only until then (program spec
 /// §3; ROZHODNUTÉ on #11). In prod iemmixer's own state (PINs, mixes,
-/// snapshots the band changes) is the only authority, and the cutover's
-/// final import (its live trial entry, still in `Trial`) is the last
-/// import.
+/// snapshots the band changes) is the only authority, and the last import
+/// is the cutover's final import (its live trial entry, still in `Trial`)
+/// or, when the cutover keeps a live trial, that trial's own entry.
 pub fn refreshes_data(lc: &Lifecycle) -> bool {
     matches!(lc, Lifecycle::Trial)
 }

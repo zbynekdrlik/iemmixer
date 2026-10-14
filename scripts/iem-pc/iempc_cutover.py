@@ -23,7 +23,8 @@ docs/superpowers/specs/2026-10-10-s8-cutover-rollback-design.md section 3.2;
    admin-only into <elevated root>\\cutover, and the cutover task
    \\iemmixer\\iemmixer-cutover registered. Run again: the same.
 3. `iemmode cutover --build SHA`: the guard runs the six steps (the final
-   import as a live trial entry, the autostarts exported to
+   import as a live trial entry, or, from a live trial on the build, that
+   trial kept as the band plays it, the autostarts exported to
    <elevated root>\\cutover\\autostarts-<since> and disabled (a shortcut
    removed from the Startup folder only once its copy read back), the guard task's
    logon trigger, pin_changes = true and the server started again, Prod saved

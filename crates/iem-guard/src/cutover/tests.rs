@@ -454,7 +454,7 @@ fn the_engine_must_be_healthy_at_32() {
 #[test]
 fn the_dry_run_names_every_step() {
     assert_eq!(
-        plan_text(BUILD, 5),
+        plan_text(BUILD, 5, Mode::Dev),
         format!(
             "Import (a live trial entry on {BUILD}: the final import), GuardLogon (the guard task \
              at logon), Autostarts (exported to autostarts-5 and disabled), PinChanges \
@@ -462,6 +462,17 @@ fn the_dry_run_names_every_step() {
              {BUILD}), Checks (the band's address, a member page, the engine at 32)"
         )
     );
+    // From a live trial the band's state is kept (ROZHODNUTÉ on #11
+    // 2026-10-13); the other steps read the same.
+    let live = plan_text(BUILD, 5, Mode::Live);
+    assert!(
+        live.starts_with(&format!(
+            "Import (the live trial on {BUILD} is kept: the band's state as it plays, no \
+             import), GuardLogon (the guard task at logon)"
+        )),
+        "{live}"
+    );
+    assert!(live.ends_with("the engine at 32)"), "{live}");
 }
 
 fn folder(name: &str, saved: bool, restored: bool) -> ExportSeen {
