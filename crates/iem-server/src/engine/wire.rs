@@ -18,6 +18,10 @@ pub enum WireError {
     Io(#[from] io::Error),
     #[error("frame of {0} bytes exceeds the limit")]
     TooLarge(usize),
+    /// A media header announcing more samples than a frame may hold (the
+    /// count is samples, not bytes).
+    #[error("media frame of {0} samples exceeds the limit")]
+    TooManySamples(usize),
     #[error("the peer closed the pipe")]
     Closed,
     #[error("malformed frame: {0}")]
@@ -104,7 +108,7 @@ pub async fn read_media_frame<R: AsyncRead + Unpin>(
         .map_or(0, |b| usize::from(u16::from_le_bytes([b[0], b[1]])));
     let n = channels * frames;
     if n > MAX_SAMPLES {
-        return Err(WireError::TooLarge(n));
+        return Err(WireError::TooManySamples(n));
     }
     frame.resize(MEDIA_HEADER + 4 * n, 0);
     r.read_exact(frame.get_mut(MEDIA_HEADER..).unwrap_or_default())
@@ -222,7 +226,7 @@ mod tests {
         huge[16..18].copy_from_slice(&960u16.to_le_bytes());
         assert!(matches!(
             read_media_frame(&mut &huge[..]).await,
-            Err(WireError::TooLarge(4800))
+            Err(WireError::TooManySamples(4800))
         ));
         // A wrong magic is malformed.
         let mut bad = Vec::new();
