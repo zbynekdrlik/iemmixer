@@ -24,6 +24,11 @@ use super::wire;
 pub const LISTEN_BITRATE: i32 = 128_000;
 /// Talkback frames waiting for the pipe at most (then the newest is dropped).
 pub const TALK_QUEUE: usize = 16;
+/// How long one talkback write may take: the engine's own send timeout
+/// (`iem_engine::pipe::SEND_TIMEOUT`). A write the engine never takes ends
+/// the connection, and the reconnect brings talkback back (the reads run in
+/// a loop of their own, so listen frames no longer end it).
+pub const TALK_WRITE_WITHIN: Duration = Duration::from_secs(1);
 
 /// Listen-pipeline health (`GET /api/audio/diagnostics`, F28): the
 /// predecessor's field names, now fed by the engine's media pipe.
@@ -356,9 +361,20 @@ impl MediaLink {
                                 frames: u16::try_from(frame.len()).unwrap_or(0),
                             };
                             seq += 1;
-                            if let Err(e) = wire::write_media_frame(&mut w, &h, &frame).await {
-                                tracing::warn!(error = %e, "talkback write failed");
-                                return;
+                            let write = wire::write_media_frame(&mut w, &h, &frame);
+                            match tokio::time::timeout(TALK_WRITE_WITHIN, write).await {
+                                Ok(Ok(())) => {}
+                                Ok(Err(e)) => {
+                                    tracing::warn!(error = %e, "talkback write failed");
+                                    return;
+                                }
+                                Err(_) => {
+                                    tracing::warn!(
+                                        within = ?TALK_WRITE_WITHIN,
+                                        "talkback write stalled: the engine takes no talkback"
+                                    );
+                                    return;
+                                }
                             }
                         }
                         // The link holds the sender, so this never ends.
