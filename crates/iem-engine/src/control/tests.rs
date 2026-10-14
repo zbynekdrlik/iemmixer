@@ -81,7 +81,7 @@ struct Rig {
     c: Control,
     meters: triple_buffer::Input<MeterFrame>,
     status: Arc<RtStatus>,
-    _ring: rtrb::Consumer<RtCmd>,
+    ring: rtrb::Consumer<RtCmd>,
     dir: tempfile::TempDir,
 }
 
@@ -137,7 +137,7 @@ fn rig_with(flags: crate::core::Flags, hold: bool) -> Rig {
         c,
         meters: meters_in,
         status,
-        _ring: ring,
+        ring,
         dir,
     }
 }
@@ -406,9 +406,17 @@ fn a_card_refused_while_running_ends_with_exit_3_and_no_fade() {
     let mut r = rig();
     let why = "the preferred buffer was not restored";
     r.c.driver = Some(scripted(Some(Ending::Card(why.into())), false).0);
-    let t0 = Instant::now();
     assert_eq!(r.c.tick(Instant::now()), Some(Exit::Card(why.into())));
-    assert!(t0.elapsed() < FADE_WAIT, "{:?}", t0.elapsed());
+    // No fade was asked of the callback, neither sent nor waiting: read
+    // from the ring, not timed (the state save's file I/O took 538 ms on a
+    // hosted Windows runner, main run 38532263136).
+    let fade = |op: &crate::cmd::RtOp| matches!(op, crate::cmd::RtOp::FadeOut);
+    let mut sent = Vec::new();
+    while let Ok(cmd) = r.ring.pop() {
+        sent.push(cmd.op);
+    }
+    assert!(!sent.iter().any(fade), "a fade was sent");
+    assert!(!r.c.pending.iter().flatten().any(fade), "a fade waits");
     assert!(r.dir.path().join("state/current.json").exists(), "saved");
     assert!(r.c.driver.is_none(), "released");
 }
