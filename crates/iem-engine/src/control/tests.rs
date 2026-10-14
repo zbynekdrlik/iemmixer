@@ -399,6 +399,17 @@ fn a_session_end_takes_the_shutdown_path() {
     );
     assert!(r.dir.path().join("state/current.json").exists(), "saved");
     assert!(r.c.driver.is_none(), "released");
+    // The shutdown's fade reaches the RT ring: the refused card's "no fade"
+    // check reads the same ring.
+    let mut sent = Vec::new();
+    while let Ok(cmd) = r.ring.pop() {
+        sent.push(cmd.op);
+    }
+    assert!(
+        sent.iter()
+            .any(|op| matches!(op, crate::cmd::RtOp::FadeOut)),
+        "the fade was not sent"
+    );
 }
 
 #[test]
