@@ -330,30 +330,43 @@ impl MediaLink {
                 Ok((mut r, mut w)) => {
                     tracing::info!(pipe = %self.inner.pipe, "media pipe connected");
                     self.inner.connected.store(true, Ordering::Release);
-                    let mut seq = 0u64;
-                    loop {
-                        tokio::select! {
-                            frame = wire::read_media_frame(&mut r) => match frame {
+                    // Two loops for the life of the connection, never a
+                    // read future per turn of a `select!`: a media read
+                    // dropped half done loses the frame boundary (the live
+                    // run of 2026-10-14, a held Talk). The first loop to end
+                    // ends the connection.
+                    let reads = async {
+                        loop {
+                            match wire::read_media_frame(&mut r).await {
                                 Ok((h, samples)) => self.listen_frame(&mut enc, &h, &samples),
                                 Err(e) => {
                                     tracing::warn!(error = %e, "media pipe closed");
-                                    break;
-                                }
-                            },
-                            Some(frame) = talk_rx.recv() => {
-                                let h = MediaHeader {
-                                    stream: stream::TALKBACK,
-                                    channels: 1,
-                                    seq,
-                                    frames: u16::try_from(frame.len()).unwrap_or(0),
-                                };
-                                seq += 1;
-                                if let Err(e) = wire::write_media_frame(&mut w, &h, &frame).await {
-                                    tracing::warn!(error = %e, "talkback write failed");
-                                    break;
+                                    return;
                                 }
                             }
                         }
+                    };
+                    let writes = async {
+                        let mut seq = 0u64;
+                        while let Some(frame) = talk_rx.recv().await {
+                            let h = MediaHeader {
+                                stream: stream::TALKBACK,
+                                channels: 1,
+                                seq,
+                                frames: u16::try_from(frame.len()).unwrap_or(0),
+                            };
+                            seq += 1;
+                            if let Err(e) = wire::write_media_frame(&mut w, &h, &frame).await {
+                                tracing::warn!(error = %e, "talkback write failed");
+                                return;
+                            }
+                        }
+                        // The link holds the sender, so this never ends.
+                        std::future::pending::<()>().await;
+                    };
+                    tokio::select! {
+                        () = reads => {}
+                        () = writes => {}
                     }
                     self.inner.connected.store(false, Ordering::Release);
                 }
