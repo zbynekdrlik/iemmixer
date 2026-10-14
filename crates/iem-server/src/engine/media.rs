@@ -24,6 +24,11 @@ use super::wire;
 pub const LISTEN_BITRATE: i32 = 128_000;
 /// Talkback frames waiting for the pipe at most (then the newest is dropped).
 pub const TALK_QUEUE: usize = 16;
+/// How long one talkback write may take: the engine's own send timeout
+/// (`iem_engine::pipe::SEND_TIMEOUT`). A write the engine never takes ends
+/// the connection, and the reconnect brings talkback back (the reads run in
+/// a loop of their own, so listen frames no longer end it).
+pub const TALK_WRITE_WITHIN: Duration = Duration::from_secs(1);
 
 /// Listen-pipeline health (`GET /api/audio/diagnostics`, F28): the
 /// predecessor's field names, now fed by the engine's media pipe.
@@ -356,9 +361,20 @@ impl MediaLink {
                                 frames: u16::try_from(frame.len()).unwrap_or(0),
                             };
                             seq += 1;
-                            if let Err(e) = wire::write_media_frame(&mut w, &h, &frame).await {
-                                tracing::warn!(error = %e, "talkback write failed");
-                                return;
+                            let write = wire::write_media_frame(&mut w, &h, &frame);
+                            match tokio::time::timeout(TALK_WRITE_WITHIN, write).await {
+                                Ok(Ok(())) => {}
+                                Ok(Err(e)) => {
+                                    tracing::warn!(error = %e, "talkback write failed");
+                                    return;
+                                }
+                                Err(_) => {
+                                    tracing::warn!(
+                                        within = ?TALK_WRITE_WITHIN,
+                                        "talkback write stalled: the engine takes no talkback"
+                                    );
+                                    return;
+                                }
                             }
                         }
                         // The link holds the sender, so this never ends.
@@ -564,7 +580,10 @@ mod tests {
             )
             .unwrap();
             for piece in bytes.chunks(997) {
-                to_server.write_all(piece).await.unwrap();
+                timeout(Duration::from_secs(5), to_server.write_all(piece))
+                    .await
+                    .expect("the server reads the listen frames")
+                    .unwrap();
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
         }
@@ -580,6 +599,55 @@ mod tests {
         );
         talk.abort();
         drain.abort();
+    }
+
+    /// A talkback write the engine never takes ends the connection within a
+    /// few seconds, as the engine ends a client that stalls its writes (review
+    /// of PR #53: with the reads in a loop of their own, listen frames that
+    /// keep coming no longer end a stuck talkback write, so talkback stayed
+    /// dead until a restart). The fake engine keeps writing listen frames and
+    /// never reads: the server must connect again.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_talkback_write_the_engine_never_takes_ends_the_connection() {
+        use tokio::io::AsyncWriteExt;
+        use tokio::time::timeout;
+        let dir = tempfile::tempdir().unwrap();
+        let pipe = dir.path().join("engine").to_str().unwrap().to_owned();
+        let listener = tokio::net::UnixListener::bind(wire::media_pipe(&pipe)).unwrap();
+        let link = MediaLink::spawn(pipe);
+        let (engine, _) = timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        // Never read: the talkback writes fill the socket and stall.
+        let (_from_server, mut to_server) = engine.into_split();
+        let talker = link.clone();
+        let talk = tokio::spawn(async move {
+            loop {
+                talker.send_talkback(vec![0.0; FRAME_48K]);
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        });
+        let listen = tokio::spawn(async move {
+            let mut frame = Vec::new();
+            iem_engine_proto::write_media(
+                &mut frame,
+                &head(stream::ENGINEER_LISTEN, 0),
+                &tone(1000.0, 0.25, 0),
+            )
+            .unwrap();
+            while to_server.write_all(&frame).await.is_ok() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        });
+        let again = timeout(Duration::from_secs(5), listener.accept()).await;
+        assert!(
+            matches!(again, Ok(Ok(_))),
+            "the stalled talkback never ended the connection: {again:?}"
+        );
+        talk.abort();
+        listen.abort();
     }
 
     fn head(stream: u8, seq: u64) -> MediaHeader {
