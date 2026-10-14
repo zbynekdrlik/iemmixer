@@ -508,6 +508,67 @@ mod tests {
         assert_eq!(MediaLink::detached().pipe(), "");
     }
 
+    /// A media read is never cut short by a talkback write (the live run of
+    /// 2026-10-14: a held Talk sent a talkback frame while a media frame was
+    /// half read; the `select!` dropped that read, the next one began inside
+    /// a frame, found a header of 31 707 samples and closed the pipe, so
+    /// talkback and listen stopped for 0.5 s at a time). The engine writes
+    /// each frame in pieces while talkback frames come every millisecond:
+    /// every frame arrives, on the one connection.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn talkback_writes_never_cut_a_media_read_short() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::time::timeout;
+        const FRAMES: u64 = 40;
+        let dir = tempfile::tempdir().unwrap();
+        let pipe = dir.path().join("engine").to_str().unwrap().to_owned();
+        let listener = tokio::net::UnixListener::bind(wire::media_pipe(&pipe)).unwrap();
+        let link = MediaLink::spawn(pipe);
+        let mut listen = link.subscribe(0);
+        let (engine, _) = timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let (mut from_server, mut to_server) = engine.into_split();
+        let drain = tokio::spawn(async move {
+            let mut buf = vec![0u8; 1 << 16];
+            while matches!(from_server.read(&mut buf).await, Ok(n) if n > 0) {}
+        });
+        let talker = link.clone();
+        let talk = tokio::spawn(async move {
+            loop {
+                talker.send_talkback(vec![0.0; FRAME_48K]);
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        });
+        for k in 0..FRAMES {
+            let mut bytes = Vec::new();
+            iem_engine_proto::write_media(
+                &mut bytes,
+                &head(stream::ENGINEER_LISTEN, k),
+                &tone(1000.0, 0.25, k as usize),
+            )
+            .unwrap();
+            for piece in bytes.chunks(997) {
+                to_server.write_all(piece).await.unwrap();
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }
+        for k in 0..FRAMES {
+            let got = timeout(Duration::from_secs(5), listen.recv()).await;
+            assert!(matches!(got, Ok(Ok(_))), "listen frame {k}: {got:?}");
+        }
+        assert!(
+            timeout(Duration::from_millis(800), listener.accept())
+                .await
+                .is_err(),
+            "the server dropped the pipe and connected again"
+        );
+        talk.abort();
+        drain.abort();
+    }
+
     fn head(stream: u8, seq: u64) -> MediaHeader {
         MediaHeader {
             stream,
