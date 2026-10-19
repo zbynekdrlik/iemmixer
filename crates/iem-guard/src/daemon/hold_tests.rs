@@ -1,10 +1,12 @@
 //! In prod nothing goes to REAPER on its own (the owner's decision on #11,
 //! 2026-10-19): what a dev or live entry that stops leaves, against
-//! `FakePc` (the review of PR #56). An entry that stops after a step changed
-//! what runs ends in event, where the crash watch respawns nothing and both
-//! ways on run from; one that changed nothing stays in the mode it began
-//! from. The same rule holds for an entry a restarted guard finds cut off.
-//! The entry's build becomes the active bundle only once its engine starts.
+//! `FakePc` (the review of PR #56). An entry whose engine armed stays in its
+//! target with that engine; one that stopped or started what plays the band
+//! (or sent such a stop) ends in event, where the crash watch respawns
+//! nothing and both ways on run from; one that changed nothing stays in the
+//! mode it began from. The same rule holds for an entry a restarted guard
+//! finds cut off, the step it was in being unknown. The entry's build
+//! becomes the active bundle only once its engine starts.
 
 use std::time::{Duration, Instant};
 
@@ -605,6 +607,38 @@ fn a_cut_off_prod_entry_after_its_engine_armed_is_in_with_the_adopted_engine() {
     assert_eq!(g.state.mode, Mode::Event);
     assert_eq!(g.state.lifecycle, prod_on(None, Some(OTHER)));
     assert_eq!(texts(&g), [format!("{head}; {}", no_reaper(OTHER))]);
+    // A maintenance entry on a dev build from live, cut off after its engine
+    // armed: dev with that engine, the session's build recorded.
+    let (mut pc, mut g) = prod_live();
+    g.state.set_active(OTHER);
+    g.state.pids.engine = Some(crate::state::Child {
+        pid: 4242,
+        start_time: 1,
+        image: "iem-engine.exe".into(),
+    });
+    g.state.switching = Some(Switching {
+        from: Mode::Live,
+        to: Mode::Dev,
+        done: vec![
+            Step::Precheck,
+            Step::EngineStop,
+            Step::EngineStart,
+            Step::EngineArm,
+        ],
+        started: T0,
+    });
+    g.state.written_at = 0;
+    assert_eq!(start(&mut pc, &mut g, 0), None);
+    assert_eq!(g.state.mode, Mode::Dev);
+    assert_eq!(g.state.lifecycle, prod_on(None, Some(OTHER)));
+    assert_eq!(
+        texts(&g),
+        [
+            "the guard started again during the switch live → dev (4 steps done); in prod \
+             nothing goes to REAPER on its own: its engine was armed, so the PC is in dev with \
+             it (asking for it again tries again)"
+        ]
+    );
 }
 
 /// The review of PR #56, finding 8: only the boot's last miss named its
