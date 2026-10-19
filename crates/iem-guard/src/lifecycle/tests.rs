@@ -526,6 +526,33 @@ fn in_prod_a_stopped_entry_names_the_ways_on() {
     assert_eq!(ways_on(&lc, |sha| b.get(sha)), Some(ways(PIN)));
 }
 
+/// Where a prod dev or live entry that stops ends (the review of PR #56,
+/// finding 1): in the mode it began from while no step but its precheck is
+/// done (nothing changed what runs), else in event (the app, REAPER or the
+/// old engine stopped, or the entry's held engine started), where the crash
+/// watch respawns nothing and both ways on run from.
+#[test]
+fn a_stopped_entry_ends_where_it_began_only_while_nothing_changed() {
+    let changed: [&[Step]; 4] = [
+        &[Step::Precheck, Step::EngineStop],
+        &[Step::Precheck, Step::AppStop],
+        &[Step::Precheck, Step::ReaperSaveQuit, Step::TuningEnter],
+        &[Step::EngineStop],
+    ];
+    for from in [Mode::Event, Mode::Dev, Mode::Live] {
+        for done in [&[][..], &[Step::Precheck][..]] {
+            let left = stops_in(from, done);
+            assert_eq!(left, Left::Unchanged(from), "{from:?} {done:?}");
+            assert_eq!(left.mode(), from, "{from:?} {done:?}");
+        }
+        for done in changed {
+            let left = stops_in(from, done);
+            assert_eq!(left, Left::Changed, "{from:?} {done:?}");
+            assert_eq!(left.mode(), Mode::Event, "{from:?} {done:?}");
+        }
+    }
+}
+
 // ---- exclusions and status ----
 
 #[test]
