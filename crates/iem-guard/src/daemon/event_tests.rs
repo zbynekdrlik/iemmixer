@@ -9,7 +9,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::tests::{INIT, SHA, T0, ask, band_up, iemmixer_up, prod_on, record, texts};
+use super::tests::{INIT, OTHER, SHA, T0, ask, band_up, iemmixer_up, prod_on, record, texts};
 use super::*;
 use crate::bundle::Hil;
 use crate::lifecycle::Lifecycle;
@@ -257,6 +257,92 @@ fn in_prod_ide_event_waits_for_a_switch_to_live() {
         v.last = Some(Outcome::Done);
     });
     assert!(!trial.shared.await_end("waited", Duration::ZERO).ok);
+}
+
+/// The review of PR #56, finding 2: in prod the owner's "ide event" routed
+/// while a dev entry runs pre-empted it like the button, and the entry
+/// unwound to the event plan: REAPER on its own. In prod it is queued, the
+/// token untouched (the button still pre-empts: it is the request for the
+/// event plan); before the cutover it pre-empts as before.
+#[test]
+fn in_prod_ide_event_routed_during_a_dev_switch_is_queued() {
+    let (_, mut g) = prod_live();
+    g.save();
+    g.shared.update(|v| v.running = Some(Mode::Dev));
+    let seen = g.shared.generation();
+    assert_eq!(
+        g.shared.route(&event(true)),
+        Route::Queue(Generation {
+            epoch: seen.epoch,
+            fence: seen.fence + 1,
+        })
+    );
+    assert!(
+        !g.cancel.preempted(),
+        "ide event never pre-empts it in prod"
+    );
+    assert_eq!(
+        g.shared.route(&event(false)),
+        Route::AwaitEnd("pre-empted the switch in progress")
+    );
+    assert!(g.cancel.preempted(), "the button pre-empts it");
+    let mut trial = Guard::for_test(Mode::Dev);
+    trial.save();
+    trial.shared.update(|v| v.running = Some(Mode::Dev));
+    assert_eq!(
+        trial.shared.route(&event(true)),
+        Route::AwaitEnd("pre-empted the switch in progress")
+    );
+    assert!(trial.cancel.preempted(), "before the cutover it pre-empts");
+}
+
+/// The whole case (the review of PR #56, finding 2): the owner's "ide
+/// event" comes while a maintenance entry on a dev build runs; the entry
+/// goes on to dev, then "ide event" goes live on the pin. REAPER and the app
+/// never start. The button routed at the same moment pre-empts the entry,
+/// which unwinds to the event plan.
+#[test]
+fn in_prod_ide_event_during_a_dev_entry_goes_live_on_the_pin_after_it() {
+    let maintenance = || {
+        let (pc, mut g) = prod_live();
+        g.state
+            .bundles
+            .insert(OTHER.into(), record(OTHER, "dev", Hil::Pending));
+        g.save();
+        (pc, g)
+    };
+    let dev_other = || Request::Dev {
+        build: Some(OTHER.into()),
+        dry_run: false,
+    };
+    let (mut pc, mut g) = maintenance();
+    pc.route_at = Some((Call::EngineStart, Arc::clone(&g.shared), event(true)));
+    let r = handle(&mut pc, &mut g, dev_other(), INIT);
+    assert!(r.ok, "{r:?}");
+    assert_eq!(g.state.mode, Mode::Dev);
+    let Some(Route::Queue(seen)) = pc.routed.clone() else {
+        panic!("not queued: {:?}", pc.routed)
+    };
+    let r = handle(&mut pc, &mut g, event(true), seen);
+    assert!(r.ok, "{r:?}");
+    assert_eq!(g.state.mode, Mode::Live);
+    assert_eq!(pc.bundle.as_deref(), Some(SHA));
+    assert_eq!(g.state.lifecycle, prod_on(None, None));
+    for c in [Call::ReaperSaveQuit, Call::ReaperStart, Call::AppStart] {
+        assert!(!pc.called(c), "{c:?}");
+    }
+    // The button: the entry unwinds to the event plan.
+    let (mut pc, mut g) = maintenance();
+    pc.route_at = Some((Call::EngineStart, Arc::clone(&g.shared), event(false)));
+    let r = handle(&mut pc, &mut g, dev_other(), INIT);
+    assert!(!r.ok, "{r:?}");
+    assert!(
+        matches!(pc.routed, Some(Route::AwaitEnd(_))),
+        "{:?}",
+        pc.routed
+    );
+    assert_eq!(g.state.mode, Mode::Event);
+    assert!(pc.called(Call::ReaperStart) && pc.called(Call::AppStart));
 }
 
 /// The whole case: the first "ide event" in maintenance goes live on the
