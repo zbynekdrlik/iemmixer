@@ -64,6 +64,15 @@ impl Guard {
         if let Some(s) = self.state.switching.as_mut() {
             s.done.push(step);
         }
+        self.keep_children(pc);
+    }
+
+    /// The guard's children as the PC has them now, saved, so a restarted
+    /// guard adopts what runs: after every step done, and after every
+    /// engine stop and start inside `EngineArm` (`engine_ready`'s restarts;
+    /// the review of PR #56: a failed step saved none of them, and the
+    /// engine that ran read as foreign).
+    pub(super) fn keep_children(&mut self, pc: &mut dyn Pc) {
         self.state.pids = pc.children();
         self.save();
     }
@@ -334,6 +343,7 @@ fn engine_ready(pc: &mut dyn Pc, g: &mut Guard, to: Mode, c: &Cancel) -> R<Statu
         pref_step(pc, g, to)?;
         let pid = pc.engine_start(true, g.hil_engine(to))?;
         g.spawns += 1;
+        g.keep_children(pc);
         g.info(format!("engine started again, held (pid {pid})"));
     }
 }
@@ -376,10 +386,12 @@ fn restart_after_miss(
         g.boot_arm_spacing
     ));
     pc.engine_stop(c)?;
+    g.keep_children(pc);
     c.sleep(g.boot_arm_spacing)?;
     pref_step(pc, g, to)?;
     let pid = pc.engine_start(true, g.hil_engine(to))?;
     g.spawns += 1;
+    g.keep_children(pc);
     g.info(format!(
         "engine started again, held (pid {pid}): attempt {} of {attempts}",
         attempt + 1
