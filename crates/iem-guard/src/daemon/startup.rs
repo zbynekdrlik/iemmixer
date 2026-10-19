@@ -205,10 +205,10 @@ fn cut_off_left(g: &Guard, left: &Switching) -> Left {
 /// finds cut off in prod (#11, 2026-10-19: in prod nothing goes to REAPER
 /// on its own): it stops where it was with what runs as it is, never the
 /// event plan; as `stopped` says ([`cut_off_left`]): with its armed engine
-/// in its target, whose entry's lifecycle change then holds as a failed
-/// entry's does ([`armed_lifecycle`]), in the mode it began from only when
-/// it was cut off in its precheck, else in event (a HIL job lives in dev
-/// only). The alarm asks the owner with `ways` (`lifecycle::after_stop`).
+/// in its target, a live entry's lifecycle change then holding as a failed
+/// entry's does ([`armed_live_lifecycle`]), in the mode it began from only
+/// when it was cut off in its precheck, else in event (a HIL job lives in
+/// dev only). The alarm asks the owner with `ways` (`lifecycle::after_stop`).
 /// An event plan that was left resumes as before: it was asked for.
 fn hold_cut_off(g: &mut Guard, left: &Switching, stopped: Left, ways: &str) {
     let ends = stopped.mode();
@@ -223,10 +223,13 @@ fn hold_cut_off(g: &mut Guard, left: &Switching, stopped: Left, ways: &str) {
     if ends != Mode::Dev {
         g.state.job = None;
     }
-    if let Left::Armed(to) = stopped
-        && let Some(next) = armed_lifecycle(g, to)
+    if stopped == Left::Armed(Mode::Live)
+        && let Some((next, note)) = armed_live_lifecycle(g)
     {
         g.state.lifecycle = next;
+        if let Some(n) = note {
+            g.info(n);
+        }
     }
     g.raise(
         None,
@@ -240,19 +243,23 @@ fn hold_cut_off(g: &mut Guard, left: &Switching, stopped: Left, ways: &str) {
     );
 }
 
-/// The lifecycle a cut-off entry into `to` whose engine was armed is in:
-/// its entry's own change (`lifecycle::entry` on the active bundle, the
-/// build that engine runs since its `EngineStart`), when the entry would run
-/// that build; none when it would not (the PC's lifecycle stays).
-fn armed_lifecycle(g: &Guard, to: Mode) -> Option<Lifecycle> {
+/// The lifecycle a cut-off live entry whose engine was armed is in, with
+/// what it decided about the pin: the live entry's own change
+/// (`lifecycle::entry`: a maintenance build that becomes the pin), when it
+/// runs the active bundle, the build that engine runs since its
+/// `EngineStart`; none when it does not (the PC's lifecycle stays). A
+/// cut-off dev entry keeps the lifecycle: whether it named a build is not
+/// known (a plain `dev` keeps the session; the third review of the fixes
+/// for PR #56).
+fn armed_live_lifecycle(g: &Guard) -> Option<(Lifecycle, Option<String>)> {
     let active = g.state.active_bundle()?;
     let ask = lifecycle::Ask {
-        to,
-        build: (to == Mode::Dev).then_some(active),
+        to: Mode::Live,
+        build: None,
         trial: false,
     };
     let entered = lifecycle::entry(&g.state.lifecycle, ask, |sha| g.state.bundles.get(sha)).ok()?;
-    (entered.runs.as_deref() == Some(active)).then_some(entered.lifecycle)
+    (entered.runs.as_deref() == Some(active)).then_some((entered.lifecycle, entered.note))
 }
 
 /// `iemmode event --direct` (design §5.1): without a guard, the same event
