@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use super::*;
 use crate::daemon::{Route, Shared};
 use crate::proto::Request;
+use crate::state::Child;
 
 /// Every `Pc` method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -570,13 +571,21 @@ impl Pc for FakePc {
         ))
     }
 
+    /// The started engine is the guard's child until it is stopped
+    /// (`children` names it, as `WinPc`'s does).
     fn engine_start(&mut self, hold: bool, hil: bool) -> R<u32> {
         self.enter(Call::EngineStart, None)?;
         self.engine_starts.push((hold, hil));
         self.facts.engine = true;
         self.ending = (!self.early_exits.is_empty()).then(|| self.early_exits.remove(0));
         self.exit = None;
-        Ok(self.pid())
+        let pid = self.pid();
+        self.kids.engine = Some(Child {
+            pid,
+            start_time: u64::from(pid),
+            image: "iem-engine.exe".to_owned(),
+        });
+        Ok(pid)
     }
 
     fn engine_ready(&mut self, secs: u32, c: &Cancel) -> Result<Status, NotReady> {
@@ -608,6 +617,7 @@ impl Pc for FakePc {
     fn engine_stop(&mut self, c: &Cancel) -> R<()> {
         self.enter(Call::EngineStop, Some(c))?;
         self.facts.engine = false;
+        self.kids.engine = None;
         Ok(())
     }
 

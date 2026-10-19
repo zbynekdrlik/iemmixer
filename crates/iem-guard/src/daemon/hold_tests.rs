@@ -11,9 +11,10 @@ use std::time::{Duration, Instant};
 use super::tests::{INIT, OTHER, SHA, T0, ask, iemmixer_up, no_reaper, prod_on, record, texts};
 use super::*;
 use crate::bundle::{Hil, Pins};
+use crate::crash;
 use crate::pc::Kid;
 use crate::pc::fake::{Call, FakePc};
-use crate::plan::Health;
+use crate::plan::{Facts, Health};
 use crate::proto::Request;
 use crate::state::Switching;
 
@@ -240,4 +241,49 @@ fn an_entry_s_build_becomes_the_active_bundle_only_once_its_engine_starts() {
         (Some(OTHER), Some(SHA))
     );
     assert_eq!(pc.bundle.as_deref(), Some(OTHER));
+}
+
+/// A guard live in prod on the pin `SHA` whose state was written before
+/// the boot at 5000, on a PC where nothing runs: its start is the boot's
+/// live entry, whose attempts wait 10 ms between them.
+fn booted_in_prod() -> (FakePc, Guard) {
+    let mut g = Guard::for_test(Mode::Live);
+    g.state.written_at = 1_000;
+    g.state.lifecycle = prod_on(None, None);
+    g.state
+        .bundles
+        .insert(SHA.into(), record(SHA, "main", Hil::Green));
+    g.boot_arm_spacing = Duration::from_millis(10);
+    (FakePc::new(Facts::default()), g)
+}
+
+/// The review of PR #56, finding 4: only a finished step saved the guard's
+/// children (`Guard::done`), so an engine `EngineArm` started again (the
+/// boot's attempts, the busy restart) was not saved when the step then
+/// failed: the saved pids named the engine stopped before it, and a guard
+/// restarted without a reboot found the engine that runs foreign (its
+/// precheck refuses every entry). Each start inside the step is saved.
+#[test]
+fn an_engine_started_again_inside_the_arm_is_saved_as_the_guard_s_child() {
+    let (mut pc, mut g) = booted_in_prod();
+    pc.ready_misses = vec![1; 4];
+    assert_eq!(start(&mut pc, &mut g, 5_000), Some(Outcome::NeedsOwner));
+    assert_eq!(pc.engine_starts.len(), 4);
+    assert_eq!(g.state.pids.engine.as_ref().map(|k| k.pid), Some(1004));
+    assert_eq!(g.state.pids, pc.kids);
+    // A prod live entry (one attempt): its engine ended busy, was started
+    // again, and missed periods.
+    let (mut pc, mut g) = prod_live();
+    pc.early_exits = vec![Some(crash::STATE_BUSY)];
+    pc.ready_misses = vec![1];
+    let live = Request::Live {
+        build: None,
+        trial: false,
+        dry_run: false,
+    };
+    let r = handle(&mut pc, &mut g, live, INIT);
+    assert!(!r.ok, "{r:?}");
+    assert_eq!(pc.engine_starts.len(), 2);
+    assert_eq!(g.state.pids.engine.as_ref().map(|k| k.pid), Some(1002));
+    assert_eq!(g.state.pids, pc.kids);
 }

@@ -68,6 +68,38 @@ fn the_fake_starts_and_stops_like_the_pc() {
     assert!(!pc.mutating_calls().contains(&Call::Identity));
 }
 
+/// The engine the fake starts is the guard's child until it is stopped, as
+/// `WinPc`'s `children` names it (the review of PR #56, finding 4: the
+/// saved children of an engine started again inside a step); a failed start
+/// or stop changes nothing.
+#[test]
+fn the_fake_names_the_engine_it_started_as_the_guard_s_child() {
+    let c = Cancel::default();
+    let mut pc = FakePc::new(Facts::default());
+    let pid = |pc: &mut FakePc| pc.children().engine.map(|k| k.pid);
+    assert_eq!(pid(&mut pc), None);
+    let first = pc.engine_start(true, false).unwrap();
+    assert_eq!(pid(&mut pc), Some(first));
+    let second = pc.engine_start(true, false).unwrap();
+    assert_eq!(
+        pc.children().engine,
+        Some(Child {
+            pid: second,
+            start_time: u64::from(second),
+            image: "iem-engine.exe".into(),
+        })
+    );
+    pc.engine_stop(&c).unwrap();
+    assert_eq!(pid(&mut pc), None);
+    let third = pc.engine_start(true, false).unwrap();
+    pc.fail(Call::EngineStop, "no DriverReleased within 10 s");
+    assert!(pc.engine_stop(&c).is_err());
+    assert_eq!(pid(&mut pc), Some(third));
+    pc.fail(Call::EngineStart, "refused");
+    assert!(pc.engine_start(true, false).is_err());
+    assert_eq!(pid(&mut pc), Some(third));
+}
+
 /// #10: a REAPER still ending shows so until the wait sees it gone
 /// (unless it outlasts the wait); one that ends by itself does so at
 /// the scripted call, once; a start may show late.
