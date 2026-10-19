@@ -693,4 +693,6 @@ pub fn unreadable_in(path: &Path) -> Option<String> {
 }
 
 #[cfg(test)]
+mod stop_tests;
+#[cfg(test)]
 mod tests;
