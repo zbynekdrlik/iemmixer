@@ -1,7 +1,8 @@
 //! The switch runner (design §5.2): a plan's steps one at a time with the
 //! error policy (`plan::on_error`), "ide event"'s pre-emption, the unwind of
 //! a failed or pre-empted dev or live entry (in prod a failed one stops
-//! where it is instead, `lifecycle::ways_on`), and each step's `Pc` call.
+//! where it is instead, in event once a step changed what runs:
+//! `lifecycle::stops_in`, `lifecycle::ways_on`), and each step's `Pc` call.
 
 use std::time::Instant;
 
@@ -180,17 +181,24 @@ pub(super) fn switch(
                             return g.finish(pc, Outcome::NeedsOwner, from);
                         }
                         // In prod nothing goes to REAPER on its own (#11,
-                        // 2026-10-19): the entry stops where it is, in the
-                        // mode it began from, and asks the owner, unless
-                        // "ide event" pre-empted it meanwhile (that is the
-                        // request for the event plan).
+                        // 2026-10-19): the entry stops where it is and asks
+                        // the owner, unless "ide event" pre-empted it
+                        // meanwhile (that is the request for the event
+                        // plan); in the mode it began from only while none
+                        // of its steps changed what runs, else in event
+                        // (the review of PR #56: `lifecycle::stops_in`).
+                        let left = lifecycle::stops_in(from, done_steps(g));
                         if let Some(ways) =
                             lifecycle::ways_on(&g.state.lifecycle, |sha| g.state.bundles.get(sha))
                             && may_end(g, to)
                         {
-                            info!("{step:?} failed in prod: no event plan, the entry stops");
+                            let ends = left.mode();
+                            info!(
+                                "{step:?} failed in prod: no event plan, the entry stops in {}",
+                                mode_name(ends)
+                            );
                             g.alarm(step, &format!("{why}; {ways}"), true);
-                            return g.finish(pc, Outcome::NeedsOwner, from);
+                            return g.finish(pc, Outcome::NeedsOwner, ends);
                         }
                         g.alarm(step, &why, false);
                         return back_to_event(pc, g, &why);
@@ -231,6 +239,14 @@ pub(super) fn switch(
         Outcome::NeedsOwner
     };
     g.finish(pc, outcome, to)
+}
+
+/// The steps the running switch finished, in order (none without one).
+fn done_steps(g: &Guard) -> &[Step] {
+    g.state
+        .switching
+        .as_ref()
+        .map_or(&[][..], |s| s.done.as_slice())
 }
 
 /// Whether a switch into `to` may end as it is: an event plan always; one

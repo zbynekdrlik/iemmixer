@@ -207,6 +207,47 @@ pub fn ways_on<'r>(lc: &Lifecycle, record: impl Fn(&str) -> Option<&'r Record>) 
     ))
 }
 
+/// What a prod dev or live entry that stops ([`ways_on`]) leaves running:
+/// [`stops_in`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Left {
+    /// No step it finished changed what runs: the PC stays in the mode the
+    /// entry began from, as it was.
+    Unchanged(Mode),
+    /// A step changed what runs (the app, REAPER or the old engine stopped,
+    /// or the entry's own engine started, held): the PC is in event, where
+    /// the crash watch respawns nothing and both ways on run from.
+    Changed,
+}
+
+impl Left {
+    /// The mode the stopped entry ends in.
+    pub fn mode(self) -> Mode {
+        match self {
+            Self::Unchanged(from) => from,
+            Self::Changed => Mode::Event,
+        }
+    }
+}
+
+/// Where a prod dev or live entry that stops ends, from the steps it
+/// finished (`done`; the review of PR #56, #11 2026-10-19): in the mode it
+/// began from (`from`) while none but its precheck finished, else in event.
+/// An entry that stopped in live after it stopped the old engine and
+/// started its own, held, left a silent engine in live: "ide event" read
+/// its advancing callbacks as the band's system, and its crash respawned it
+/// unheld in live, whatever its build (G8). In event nothing respawns, and
+/// both ways on (a live entry on the pin, the explicit event plan) run
+/// from there. A restarted guard that finds an entry cut off
+/// (`daemon::startup`) applies the same rule.
+pub fn stops_in(from: Mode, done: &[Step]) -> Left {
+    if done.iter().all(|s| *s == Step::Precheck) {
+        Left::Unchanged(from)
+    } else {
+        Left::Changed
+    }
+}
+
 /// A dev or live entry as asked (`iemmode dev|live`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ask<'a> {

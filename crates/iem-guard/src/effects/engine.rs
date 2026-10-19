@@ -197,6 +197,7 @@ pub fn parse(body: &[u8]) -> Result<Msg, String> {
                 resets: number(&v, "resets"),
                 faulted: flag(&v, "faulted"),
                 parked: flag(&v, "parked"),
+                held: flag(&v, "held"),
                 hil: hil_outs(&v),
                 loopback_samples: number(&v, "loopback_samples"),
                 late: number(&v, "late"),
@@ -402,11 +403,14 @@ impl ReadyWindow {
 }
 
 /// The engine's health from two statuses about 1 s apart (design §5.2
-/// "back to event" step 2).
+/// "back to event" step 2). A held engine (started with `--hold`, not armed
+/// yet) plays nothing, whatever its callbacks do, so it is never healthy
+/// (the review of PR #56, #11 2026-10-19: the owner's "ide event" in prod
+/// left one as the band's system); the newer status decides.
 pub fn health(first: &Status, second: &Status) -> Health {
     if first.parked || second.parked {
         Health::Parked
-    } else if !second.faulted && second.callbacks > first.callbacks {
+    } else if !second.faulted && !second.held && second.callbacks > first.callbacks {
         Health::Healthy
     } else {
         Health::Dead

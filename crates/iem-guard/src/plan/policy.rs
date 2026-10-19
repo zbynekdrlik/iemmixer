@@ -17,7 +17,8 @@ pub enum PrefFail {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Health {
-    /// Callbacks advancing, not faulted, not parked: it still serves the band.
+    /// Callbacks advancing, not faulted, not parked, armed (not held): it
+    /// still serves the band.
     Healthy,
     Dead,
     Parked,

@@ -173,6 +173,10 @@ pub struct Status {
     pub faulted: bool,
     /// A stream is parked (a callback still in flight after a stop, R6).
     pub parked: bool,
+    /// Started with `--hold` and not armed yet: every output is silent, so
+    /// the engine serves no one whatever its callbacks do (the review of PR
+    /// #56, #11 2026-10-19). An older engine's reads false.
+    pub held: bool,
     /// HIL's spare outputs and their peaks since the previous `Status`.
     pub hil: Vec<HilOut>,
     /// The D5(b) loopback round-trip in samples, once measured (S6 test 5); 0

@@ -183,17 +183,25 @@ fn start_plan(
 
 /// A dev or live entry a restarted guard (no reboot: a crash, a hand-over)
 /// finds cut off in prod (#11, 2026-10-19: in prod nothing goes to REAPER
-/// on its own): it stops where it was, in the mode it began from with what
-/// runs as it is, never the event plan; the alarm asks the owner with the
-/// ways on. An event plan that was left resumes as before: it was asked
-/// for.
+/// on its own): it stops where it was with what runs as it is, never the
+/// event plan; in the mode it began from only while none of the steps it
+/// finished changed what runs, else in event (the review of PR #56:
+/// `lifecycle::stops_in`, as a failed entry stops; a HIL job lives in dev
+/// only). The alarm asks the owner with the ways on. An event plan that was
+/// left resumes as before: it was asked for.
 fn hold_cut_off(g: &mut Guard, left: &Switching, ways: &str) {
+    let ends = lifecycle::stops_in(left.from, &left.done).mode();
     info!(
-        "a switch {} → {} was left in prod: it stops, no event plan",
+        "a switch {} → {} was left in prod: it stops in {}, no event plan",
         mode_name(left.from),
-        mode_name(left.to)
+        mode_name(left.to),
+        mode_name(ends)
     );
     g.state.switching = None;
+    g.state.mode = ends;
+    if ends != Mode::Dev {
+        g.state.job = None;
+    }
     g.raise(
         None,
         &format!(
