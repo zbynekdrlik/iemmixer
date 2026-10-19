@@ -12,6 +12,7 @@ use super::tests::{INIT, OTHER, SHA, T0, ask, iemmixer_up, no_reaper, prod_on, r
 use super::*;
 use crate::bundle::{Hil, Pins};
 use crate::crash;
+use crate::lifecycle::Lifecycle;
 use crate::pc::Kid;
 use crate::pc::fake::{Call, FakePc};
 use crate::plan::{Facts, Health};
@@ -286,4 +287,96 @@ fn an_engine_started_again_inside_the_arm_is_saved_as_the_guard_s_child() {
     assert_eq!(pc.engine_starts.len(), 2);
     assert_eq!(g.state.pids.engine.as_ref().map(|k| k.pid), Some(1002));
     assert_eq!(g.state.pids, pc.kids);
+}
+
+/// The review of PR #56, finding 5: in prod a guard restarted without a
+/// reboot, with the band's system up and no engine, reset the state before
+/// it looked for a left entry, so the owner's "ide event" (a live entry
+/// that had stopped the app when the guard died, REAPER not yet quit)
+/// became the event plan: the app started again, REAPER kept, all on its
+/// own. A left dev or live entry is held first (`hold_cut_off`, in event
+/// here: the app stopped), and the owner's ways on run from there; an event
+/// plan that was left resumes, a restart with none left runs the event
+/// checks as before, a reboot goes live on the pin, and before the cutover
+/// a left entry unwinds as before.
+#[test]
+fn in_prod_a_guard_restart_with_reaper_up_holds_a_left_entry() {
+    let restarted = |lifecycle: Lifecycle, left: Option<Switching>| {
+        // REAPER runs on the card; the app is gone.
+        let pc = FakePc::new(Facts {
+            reaper: true,
+            reaper_holds_module: true,
+            ..Facts::default()
+        });
+        let mut g = Guard::for_test(Mode::Event);
+        g.state.lifecycle = lifecycle;
+        g.state
+            .bundles
+            .insert(SHA.into(), record(SHA, "main", Hil::Green));
+        g.state.switching = left;
+        (pc, g)
+    };
+    let entry = Switching {
+        from: Mode::Event,
+        to: Mode::Live,
+        done: vec![Step::Precheck, Step::AppStop],
+        started: T0,
+    };
+    let prod = || prod_on(None, None);
+    let (mut pc, mut g) = restarted(prod(), Some(entry.clone()));
+    assert_eq!(start(&mut pc, &mut g, 0), None);
+    assert_eq!(
+        (g.state.mode, g.state.switching.clone()),
+        (Mode::Event, None)
+    );
+    for c in [
+        Call::ReaperSaveQuit,
+        Call::ReaperStart,
+        Call::AppStop,
+        Call::AppStart,
+        Call::EngineStart,
+    ] {
+        assert!(!pc.called(c), "{c:?}");
+    }
+    assert_eq!(
+        texts(&g),
+        [format!(
+            "the guard started again during the switch event → live (2 steps done); {}",
+            no_reaper(SHA)
+        )]
+    );
+    assert!(g.alarms.last().unwrap().owner_question);
+    // "ide event" from there: live on the pin, REAPER saved and quit.
+    let r = ask(&mut pc, &mut g, event(true));
+    assert!(r.ok, "{r:?}");
+    assert_eq!(g.state.mode, Mode::Live);
+    assert!(pc.called(Call::ReaperSaveQuit) && pc.called(Call::EngineStart));
+    assert!(!pc.called(Call::ReaperStart) && !pc.called(Call::AppStart));
+    // An event plan that was left resumes: it was asked for.
+    let plan = Switching {
+        from: Mode::Live,
+        to: Mode::Event,
+        done: vec![Step::EngineStop],
+        started: T0,
+    };
+    let (mut pc, mut g) = restarted(prod(), Some(plan));
+    assert!(start(&mut pc, &mut g, 0).is_some());
+    assert_eq!(g.state.mode, Mode::Event);
+    assert!(pc.called(Call::AppStart));
+    // None left: the event checks as before.
+    let (mut pc, mut g) = restarted(prod(), None);
+    assert!(start(&mut pc, &mut g, 0).is_some());
+    assert!(pc.called(Call::AppStart));
+    assert!(g.alarms.all().is_empty(), "{:?}", texts(&g));
+    // A reboot: the boot's live entry on the pin, whatever was left.
+    let (mut pc, mut g) = restarted(prod(), Some(entry.clone()));
+    g.state.written_at = 1_000;
+    assert_eq!(start(&mut pc, &mut g, 5_000), Some(Outcome::Done));
+    assert_eq!(g.state.mode, Mode::Live);
+    assert!(!pc.called(Call::AppStart) && !pc.called(Call::ReaperStart));
+    // Before the cutover a left entry unwinds to the event plan.
+    let (mut pc, mut g) = restarted(Lifecycle::Trial, Some(entry));
+    assert!(start(&mut pc, &mut g, 0).is_some());
+    assert_eq!(g.state.mode, Mode::Event);
+    assert!(pc.called(Call::AppStart));
 }

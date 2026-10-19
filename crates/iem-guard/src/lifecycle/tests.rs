@@ -526,6 +526,23 @@ fn in_prod_a_stopped_entry_names_the_ways_on() {
     assert_eq!(ways_on(&lc, |sha| b.get(sha)), Some(ways(PIN)));
 }
 
+/// A restarted guard (no reboot) holds a dev or live entry it finds left in
+/// prod before the reboot rule could reset it to the event plan (the review
+/// of PR #56, finding 5): never after a reboot (the boot's live entry),
+/// never an event plan that was left (it resumes), never before the cutover
+/// (it unwinds).
+#[test]
+fn a_restarted_guard_in_prod_holds_a_left_entry_before_any_reset() {
+    let p = Lifecycle::Prod(prod(None, None));
+    for to in [Mode::Dev, Mode::Live] {
+        assert!(holds_cut_off(&p, false, Some(to)), "{to:?}");
+        assert!(!holds_cut_off(&p, true, Some(to)), "{to:?}");
+        assert!(!holds_cut_off(&Lifecycle::Trial, false, Some(to)), "{to:?}");
+    }
+    assert!(!holds_cut_off(&p, false, Some(Mode::Event)));
+    assert!(!holds_cut_off(&p, false, None));
+}
+
 /// Where a prod dev or live entry that stops ends (the review of PR #56,
 /// finding 1): in the mode it began from while no step but its precheck is
 /// done (nothing changed what runs), else in event (the app, REAPER or the
