@@ -526,6 +526,49 @@ fn in_prod_a_stopped_entry_names_the_ways_on() {
     assert_eq!(ways_on(&lc, |sha| b.get(sha)), Some(ways(PIN)));
 }
 
+/// What a prod alarm says after an entry stopped (the review of PR #56,
+/// finding 6): after a stop that changed nothing from live or dev, that
+/// iemmixer plays (runs) on as before and the same request tries again,
+/// never a live entry that would restart a healthy engine; after one that
+/// changed what runs, or from event, the ways on ([`ways_on`]). Before the
+/// cutover none.
+#[test]
+fn a_stop_that_changed_nothing_says_iemmixer_plays_on() {
+    let b = installed();
+    let lc = Lifecycle::Prod(prod(None, None));
+    let ways = ways_on(&lc, |sha| b.get(sha));
+    assert!(ways.is_some());
+    for left in [Left::Changed, Left::Unchanged(Mode::Event)] {
+        assert_eq!(after_stop(&lc, left, |sha| b.get(sha)), ways, "{left:?}");
+    }
+    let on = |what: &str| {
+        Some(format!(
+            "in prod nothing goes to REAPER on its own: no step done changed what runs, so \
+             iemmixer {what} as before (the same request tries again)"
+        ))
+    };
+    assert_eq!(
+        after_stop(&lc, Left::Unchanged(Mode::Live), |sha| b.get(sha)),
+        on("keeps playing live")
+    );
+    assert_eq!(
+        after_stop(&lc, Left::Unchanged(Mode::Dev), |sha| b.get(sha)),
+        on("keeps running in dev")
+    );
+    for left in [
+        Left::Changed,
+        Left::Unchanged(Mode::Event),
+        Left::Unchanged(Mode::Dev),
+        Left::Unchanged(Mode::Live),
+    ] {
+        assert_eq!(
+            after_stop(&Lifecycle::Trial, left, |sha| b.get(sha)),
+            None,
+            "{left:?}"
+        );
+    }
+}
+
 /// A restarted guard (no reboot) holds a dev or live entry it finds left in
 /// prod before the reboot rule could reset it to the event plan (the review
 /// of PR #56, finding 5): never after a reboot (the boot's live entry),

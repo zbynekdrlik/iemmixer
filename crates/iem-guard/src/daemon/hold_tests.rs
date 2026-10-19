@@ -380,3 +380,70 @@ fn in_prod_a_guard_restart_with_reaper_up_holds_a_left_entry() {
     assert_eq!(g.state.mode, Mode::Event);
     assert!(pc.called(Call::AppStart));
 }
+
+/// What a prod alarm says after a hold from live that changed nothing.
+const PLAYS_ON: &str = "in prod nothing goes to REAPER on its own: no step done changed what \
+                        runs, so iemmixer keeps playing live as before (the same request \
+                        tries again)";
+
+/// …and after one from dev (maintenance).
+const RUNS_ON: &str = "in prod nothing goes to REAPER on its own: no step done changed what \
+                       runs, so iemmixer keeps running in dev as before (the same request \
+                       tries again)";
+
+/// The review of PR #56, finding 6: after a hold that changed nothing (the
+/// PC in the mode it began from, the old engine still playing) the alarm
+/// named `iemmode live --build <pin>` as the way on, which would restart a
+/// healthy engine. Such an alarm says iemmixer plays (or runs in dev) as
+/// before and that the same request tries again; a hold from event, and one
+/// that changed what runs (now in event, nothing of iemmixer playing), keep
+/// the ways on.
+#[test]
+fn an_alarm_after_a_hold_that_changed_nothing_says_iemmixer_plays_on() {
+    const REFUSED: &str = "no PWA notification subscription";
+    let live = || Request::Live {
+        build: None,
+        trial: false,
+        dry_run: false,
+    };
+    let (mut pc, mut g) = prod_live();
+    pc.fail(Call::Precheck, REFUSED);
+    assert!(!handle(&mut pc, &mut g, dev_other(), INIT).ok);
+    assert_eq!(g.state.mode, Mode::Live);
+    assert_eq!(texts(&g), [format!("Precheck: {REFUSED}; {PLAYS_ON}")]);
+    // From dev, the live entry that would end maintenance.
+    let (mut pc, mut g) = prod_live();
+    g.state.mode = Mode::Dev;
+    pc.fail(Call::Precheck, REFUSED);
+    assert!(!handle(&mut pc, &mut g, live(), INIT).ok);
+    assert_eq!(g.state.mode, Mode::Dev);
+    assert_eq!(texts(&g), [format!("Precheck: {REFUSED}; {RUNS_ON}")]);
+    // From event nothing of iemmixer played: the ways on.
+    let (mut pc, mut g) = prod_live();
+    g.state.mode = Mode::Event;
+    pc.facts = Facts::default();
+    pc.fail(Call::Precheck, REFUSED);
+    assert!(!handle(&mut pc, &mut g, live(), INIT).ok);
+    assert_eq!(g.state.mode, Mode::Event);
+    assert_eq!(
+        texts(&g),
+        [format!("Precheck: {REFUSED}; {}", no_reaper(SHA))]
+    );
+    // A cut-off entry from live that changed nothing says the same.
+    let (mut pc, mut g) = prod_live();
+    g.state.switching = Some(Switching {
+        from: Mode::Live,
+        to: Mode::Dev,
+        done: vec![Step::Precheck],
+        started: T0,
+    });
+    g.state.written_at = 0;
+    assert_eq!(start(&mut pc, &mut g, 0), None);
+    assert_eq!(g.state.mode, Mode::Live);
+    assert_eq!(
+        texts(&g),
+        [format!(
+            "the guard started again during the switch live → dev (1 steps done); {PLAYS_ON}"
+        )]
+    );
+}

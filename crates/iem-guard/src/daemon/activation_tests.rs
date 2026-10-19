@@ -457,6 +457,38 @@ fn in_prod_a_failed_job_restart_stops_without_reaper() {
     assert!(g.alarms.last().unwrap().owner_question);
 }
 
+/// The review of PR #56, finding 6: a HIL job's engine restart in prod
+/// whose first step (the engine's stop) failed changed nothing, so its
+/// alarm says iemmixer runs in dev as before instead of naming a live
+/// entry that would restart it.
+#[test]
+fn in_prod_a_job_restart_that_changed_nothing_says_iemmixer_runs_on() {
+    let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
+    g.state.lifecycle = prod_on(None, None);
+    g.state
+        .bundles
+        .insert(SHA.into(), record(SHA, "main", Hil::Green));
+    g.state.pins.current = Some(SHA.into());
+    g.state.job = Some(7);
+    pc.fail(Call::EngineStop, "no DriverReleased within 10 s");
+    let site = Request::InstallSite {
+        path: "site.toml".into(),
+    };
+    let r = handle(&mut pc, &mut g, site, INIT);
+    assert!(!r.ok, "{r:?}");
+    let failed = "EngineStop: no DriverReleased within 10 s; in prod nothing goes to REAPER on \
+                  its own: no step done changed what runs, so iemmixer keeps running in dev as \
+                  before (the same request tries again)";
+    assert!(
+        r.detail.starts_with(&format!("site installed; {failed}")),
+        "{}",
+        r.detail
+    );
+    assert_eq!(texts(&g), [failed]);
+    assert_eq!((g.state.mode, g.state.job), (Mode::Dev, Some(7)));
+    assert!(!pc.called(Call::EngineStart) && !pc.called(Call::ReaperStart));
+}
+
 /// Inside a HIL job the engine starts without a plan (`restart_in_job`,
 /// for activate and install-site): an engine that ended holding the card
 /// left 32, and the new one refuses the card unless it finds REAPER's
