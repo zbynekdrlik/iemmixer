@@ -7,12 +7,12 @@ use std::time::Instant;
 use tracing::{info, warn};
 
 use super::reply::outcome_text;
-use super::{Guard, Outcome, READY_S, mode_name, reaper};
+use super::{BOOT_ARM_RETRIES, Guard, Outcome, READY_S, mode_name, reaper};
 use crate::cancel::Cancel;
 use crate::crash;
 use crate::handover::{self, Audio};
 use crate::lifecycle::{self, Lifecycle};
-use crate::pc::{Pc, PrefSeen, R, Status, StepError};
+use crate::pc::{NotReady, Pc, PrefSeen, R, Status, StepError};
 use crate::plan::{Health, Mode, OnError, Step, on_error};
 use crate::shadow;
 use crate::state::Switching;
@@ -262,13 +262,33 @@ pub(super) fn failure(
 /// again, held, once, after `crash::BUSY_RETRY`, inside the step, with the
 /// preference checked right before as for every start (#32 F3-r4 4); any
 /// other end, or a second busy one, is the step's failure (the plan's
-/// error policy unwinds).
+/// error policy unwinds). In the boot's live entry in prod
+/// (`Guard::boot_entry`) an engine that missed periods after its warm-up
+/// restart is stopped and started again the same way after
+/// `Guard::boot_arm_spacing`, up to [`BOOT_ARM_RETRIES`] times (#11,
+/// 2026-10-19: the boot's own load); every other entry, and every other
+/// failure, fails at once as before.
 fn engine_ready(pc: &mut dyn Pc, g: &mut Guard, to: Mode, c: &Cancel) -> R<Status> {
     let mut restarted = false;
+    let mut attempt: u32 = 1;
     loop {
         let e = match pc.engine_ready(READY_S, c) {
-            Err(StepError::Failed(why)) => why,
-            done => return done,
+            Ok(status) => return Ok(status),
+            Err(NotReady::Missed(missed)) => {
+                let why = NotReady::Missed(missed).to_string();
+                if !boot_retry(g.boot_entry, attempt) {
+                    return Err(StepError::Failed(missed_failure(
+                        why,
+                        g.boot_entry,
+                        attempt,
+                    )));
+                }
+                restart_after_miss(pc, g, to, c, &why, attempt)?;
+                attempt += 1;
+                continue;
+            }
+            Err(NotReady::Step(StepError::Failed(why))) => why,
+            Err(NotReady::Step(e)) => return Err(e),
         };
         if !crash::ready_restart(pc.engine_exit(), restarted) {
             return Err(StepError::Failed(e));
@@ -286,6 +306,55 @@ fn engine_ready(pc: &mut dyn Pc, g: &mut Guard, to: Mode, c: &Cancel) -> R<Statu
         g.spawns += 1;
         g.info(format!("engine started again, held (pid {pid})"));
     }
+}
+
+/// Whether a ready wait whose engine missed periods starts it again: only
+/// in the boot's live entry (`boot`), while its `attempt` (1: the plan's own
+/// start) is at most [`BOOT_ARM_RETRIES`], so `1 + BOOT_ARM_RETRIES`
+/// attempts at most.
+fn boot_retry(boot: bool, attempt: u32) -> bool {
+    boot && attempt <= BOOT_ARM_RETRIES
+}
+
+/// The step's failure after missed periods: the window's sentence, which
+/// the boot's live entry follows with its attempts.
+fn missed_failure(why: String, boot: bool, attempts: u32) -> String {
+    if boot {
+        format!("{why} ({attempts} attempts after the boot)")
+    } else {
+        why
+    }
+}
+
+/// The boot's live entry starts an engine that missed periods again (#11,
+/// 2026-10-19): the engine stopped as `EngineStop` stops it, the boot's
+/// load given `Guard::boot_arm_spacing` ("ide event" ends the wait), the
+/// preference checked as before every start, then the engine started again,
+/// held, as the busy restart starts it. Each attempt is logged.
+fn restart_after_miss(
+    pc: &mut dyn Pc,
+    g: &mut Guard,
+    to: Mode,
+    c: &Cancel,
+    why: &str,
+    attempt: u32,
+) -> R<()> {
+    let attempts = BOOT_ARM_RETRIES + 1;
+    g.info(format!(
+        "the boot's live entry, attempt {attempt} of {attempts}: {why}; the engine stops and \
+         starts again after {:?}",
+        g.boot_arm_spacing
+    ));
+    pc.engine_stop(c)?;
+    c.sleep(g.boot_arm_spacing)?;
+    pref_step(pc, g, to)?;
+    let pid = pc.engine_start(true, g.hil_engine(to))?;
+    g.spawns += 1;
+    g.info(format!(
+        "engine started again, held (pid {pid}): attempt {} of {attempts}",
+        attempt + 1
+    ));
+    Ok(())
 }
 
 /// One step, one `Pc` call (plus the verdicts of `handover`).

@@ -678,10 +678,10 @@ fn one_warm_up_miss_restarts_the_window_once() {
     let mut w = ReadyWindow::new(10);
     assert_eq!(w.observe(&status(32, 1000, 0), at(0)), Ready::Wait);
     assert_eq!(w.observe(&status(32, 2000, 1), at(1)), Ready::Wait);
-    assert_eq!(
-        w.observe(&status(32, 3000, 3), at(2)),
-        Ready::Failed("2 periods missed after the warm-up restart".into())
-    );
+    // A second miss fails, by its own variant (#11, 2026-10-19: the boot's
+    // live entry starts such an engine again), with the periods missed
+    // since the restart.
+    assert_eq!(w.observe(&status(32, 3000, 3), at(2)), Ready::Missed(2));
 }
 
 #[test]

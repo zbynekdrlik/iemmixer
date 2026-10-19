@@ -54,6 +54,38 @@ fn step_errors_read_as_sentences_and_come_from_a_preemption() {
     assert_eq!(r, Err(StepError::Preempted));
 }
 
+/// #11, 2026-10-19: a ready wait that missed periods after the warm-up
+/// restart is its own failure, by type (the boot's live entry starts such
+/// an engine again); it reads as the window's sentence. Every other
+/// failure, "ide event" included, is the step's error as it was.
+#[test]
+fn a_ready_wait_tells_missed_periods_from_every_other_failure() {
+    assert_eq!(
+        NotReady::Missed(1).to_string(),
+        "1 periods missed after the warm-up restart"
+    );
+    assert_eq!(
+        NotReady::Missed(3).to_string(),
+        "3 periods missed after the warm-up restart"
+    );
+    assert_eq!(
+        NotReady::from(StepError::failed("the engine faulted")),
+        NotReady::Step(StepError::Failed("the engine faulted".into()))
+    );
+    assert_eq!(
+        NotReady::from(StepError::Preempted),
+        NotReady::Step(StepError::Preempted)
+    );
+    assert_eq!(
+        NotReady::Step(StepError::failed("the engine faulted")).to_string(),
+        "the engine faulted"
+    );
+    assert_eq!(
+        NotReady::Step(StepError::Preempted).to_string(),
+        "pre-empted by event"
+    );
+}
+
 #[test]
 fn audiences_and_kids_have_their_names() {
     assert_eq!(Audience::Alarm.arg(), "alarm");

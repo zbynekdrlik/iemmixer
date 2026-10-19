@@ -40,7 +40,8 @@ use crate::cancel::Cancel;
 use crate::cutover::Verb;
 use crate::handover::{AppExit, ReaperFacts, ReaperProcs};
 use crate::pc::{
-    self, Audience, EngineSeen, Images, Kid, Pc, Ports, PrefSeen, Procs, R, Status, StepError,
+    self, Audience, EngineSeen, Images, Kid, NotReady, Pc, Ports, PrefSeen, Procs, R, Status,
+    StepError,
 };
 use crate::plan::{Facts, Health, Mode};
 use crate::site::{self, Settings};
@@ -221,7 +222,7 @@ impl Pc for WinPc {
         engine::start(self, hold, hil)
     }
 
-    fn engine_ready(&mut self, secs: u32, c: &Cancel) -> R<Status> {
+    fn engine_ready(&mut self, secs: u32, c: &Cancel) -> Result<Status, NotReady> {
         engine::ready(self, secs, c)
     }
 

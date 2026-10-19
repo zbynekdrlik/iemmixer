@@ -1,18 +1,21 @@
 //! The switch runner against `FakePc` (`daemon/runner.rs`): a dev entry's
 //! plan, the preference check before REAPER and before the engine, the
 //! logon task's result, the unwind of a failed entry, the engine's
-//! readiness, "ide event"'s pre-emption and the event plan's error policy.
+//! readiness (the boot's live entry's attempts in prod, #11), "ide event"'s
+//! pre-emption and the event plan's error policy.
 
 use std::time::{Duration, Instant};
 
 use super::tests::{
-    HELD, INIT, SHA, ask, band_up, dev, event, iemmixer_up, preempt_after, status_reply, steps,
-    texts,
+    HELD, INIT, SHA, ask, band_up, dev, event, iemmixer_up, preempt_after, prod_on, record,
+    status_reply, steps, texts,
 };
 use super::*;
+use crate::bundle::Hil;
 use crate::crash;
 use crate::effects::engine::{Ready, ReadyWindow};
 use crate::effects::tuning::{Logon, LogonPref};
+use crate::lifecycle::Lifecycle;
 use crate::pc::fake::{Call, FakePc};
 use crate::pc::{CardHolders, PrefHeld, Status};
 use crate::plan::{Facts, Health};
@@ -506,21 +509,17 @@ fn engine_ready_restarts_its_window_once() {
     let mut w = ReadyWindow::new(READY_S);
     w.observe(&status(100, 0), at(0));
     w.observe(&status(200, 1), at(1));
-    assert!(matches!(
-        w.observe(&status(300, 2), at(2)),
-        Ready::Failed(_)
-    ));
+    assert_eq!(w.observe(&status(300, 2), at(2)), Ready::Missed(1));
     // The arm step: the 10 s readiness, then Arm; a failed readiness never
-    // arms and unwinds to event.
+    // arms and unwinds to event. A dev entry gets one attempt (only the
+    // boot's live entry in prod starts the engine again, #11 2026-10-19).
     let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Event));
     g.state.pins.current = Some(SHA.into());
-    pc.fail(
-        Call::EngineReady,
-        "2 periods missed after the warm-up restart",
-    );
+    pc.ready_misses = vec![2];
     let r = handle(&mut pc, &mut g, dev(), INIT);
     assert!(!r.ok);
     assert_eq!(pc.ready_secs, [10]);
+    assert_eq!(pc.engine_starts.len(), 1);
     assert!(!pc.called(Call::EngineArm));
     assert!(pc.index(Call::EngineStop) > pc.index(Call::EngineReady));
     assert_eq!(
@@ -562,6 +561,220 @@ fn an_engine_that_finds_its_state_directory_busy_is_started_again_within_the_ste
         assert!(!pc.called(Call::EngineArm), "{exits:?}");
         assert_eq!(g.state.mode, Mode::Event, "{exits:?}");
     }
+}
+
+// ---- the boot's live entry in prod: an engine that missed periods (#11) ----
+
+/// The boot after which the guards below start: later than their state.
+const BOOT: u64 = 5_000;
+
+/// A guard live in prod on the pin `SHA` (a green `main` build) whose state
+/// was written before [`BOOT`], on a PC where nothing runs: its start is the
+/// boot's live entry on the pin (`startup::start_plan`). Its attempts wait
+/// 10 ms between them, not `BOOT_ARM_SPACING`.
+fn booted_in_prod() -> (FakePc, Guard) {
+    let mut g = Guard::for_test(Mode::Live);
+    g.state.written_at = 1_000;
+    g.state.lifecycle = prod_on(None, None);
+    g.state
+        .bundles
+        .insert(SHA.into(), record(SHA, "main", Hil::Green));
+    g.boot_arm_spacing = Duration::from_millis(10);
+    (FakePc::new(Facts::default()), g)
+}
+
+/// `iemmode live` in prod: the pin's live entry.
+fn live() -> Request {
+    Request::Live {
+        build: None,
+        trial: false,
+        dry_run: false,
+    }
+}
+
+/// The texts of the `EngineArm` alarms, oldest first.
+fn arm_alarms(g: &Guard) -> Vec<String> {
+    g.alarms
+        .iter()
+        .filter(|a| a.step == Some(Step::EngineArm))
+        .map(|a| a.text.clone())
+        .collect()
+}
+
+/// #11, 2026-10-19, right after the cutover: after a graceful reboot in
+/// prod the boot's live entry started the engine 30 s after Windows booted,
+/// and 7 s later its arm failed with "1 periods missed after the warm-up
+/// restart" (the boot's own load: every manual switch armed with none), so
+/// the PC unwound to REAPER. In the boot's entry such an engine is stopped,
+/// the boot's load gets `boot_arm_spacing`, the preference is checked and
+/// the engine starts again, held, inside the step; the window is the same
+/// at every attempt, and each attempt is logged.
+#[test]
+fn the_boot_s_live_entry_starts_an_engine_that_missed_periods_again() {
+    let (mut pc, mut g) = booted_in_prod();
+    pc.ready_misses = vec![1, 2];
+    assert_eq!(start(&mut pc, &mut g, BOOT), Some(Outcome::Done));
+    assert_eq!(g.state.mode, Mode::Live);
+    assert_eq!(pc.engine_starts, [(true, false); 3]);
+    assert_eq!(g.spawns, 3);
+    assert_eq!(pc.ready_secs, [READY_S; 3], "the same window every time");
+    assert!(pc.ready_misses.is_empty());
+    assert_eq!(pc.count(Call::EngineArm), 1);
+    let arm: Vec<Call> = steps(&pc)
+        .into_iter()
+        .skip_while(|c| *c != Call::EngineStart)
+        .take_while(|c| *c != Call::ServerStart)
+        .collect();
+    assert_eq!(
+        arm,
+        [
+            Call::EngineStart,
+            Call::EngineReady,
+            Call::EngineStop,
+            Call::PrefCheck,
+            Call::EngineStart,
+            Call::EngineReady,
+            Call::EngineStop,
+            Call::PrefCheck,
+            Call::EngineStart,
+            Call::EngineReady,
+            Call::EngineArm,
+        ]
+    );
+    // No event plan ran, and nothing alarmed.
+    assert!(!pc.called(Call::ReaperStart) && !pc.called(Call::AppStart));
+    assert!(g.alarms.all().is_empty(), "{:?}", texts(&g));
+    let said: Vec<&str> = g
+        .report
+        .iter()
+        .map(String::as_str)
+        .filter(|l| l.contains(" of 4"))
+        .collect();
+    assert_eq!(
+        said,
+        [
+            "the boot's live entry, attempt 1 of 4: 1 periods missed after the warm-up restart; \
+             the engine stops and starts again after 10ms",
+            "engine started again, held (pid 1002): attempt 2 of 4",
+            "the boot's live entry, attempt 2 of 4: 2 periods missed after the warm-up restart; \
+             the engine stops and starts again after 10ms",
+            "engine started again, held (pid 1003): attempt 3 of 4",
+        ]
+    );
+}
+
+/// The boot's attempts are bounded: after the plan's start and
+/// `BOOT_ARM_RETRIES` more, a miss fails the step as before (the unwind to
+/// REAPER, the PC staying prod) and the alarm names the attempts. The boot's
+/// entry ends with its switch: a later manual live entry gets one attempt.
+#[test]
+fn the_boot_s_live_entry_unwinds_to_event_after_its_last_attempt() {
+    assert_eq!(BOOT_ARM_RETRIES, 3);
+    let (mut pc, mut g) = booted_in_prod();
+    pc.ready_misses = vec![1; 4];
+    assert_eq!(start(&mut pc, &mut g, BOOT), Some(Outcome::Done));
+    assert_eq!(g.state.mode, Mode::Event);
+    assert_eq!(pc.engine_starts.len(), 4);
+    assert_eq!(g.spawns, 4);
+    assert_eq!(pc.count(Call::EngineReady), 4);
+    assert!(pc.ready_misses.is_empty());
+    assert!(!pc.called(Call::EngineArm) && !pc.called(Call::ServerStart));
+    assert!(pc.called(Call::ReaperStart) && pc.called(Call::AppStart));
+    assert_eq!(
+        arm_alarms(&g),
+        ["EngineArm: 1 periods missed after the warm-up restart (4 attempts after the boot)"]
+    );
+    assert_eq!(g.state.lifecycle, prod_on(None, None));
+    pc.ready_misses = vec![1, 1];
+    let r = ask(&mut pc, &mut g, live());
+    assert!(!r.ok, "{r:?}");
+    assert_eq!(g.state.mode, Mode::Event);
+    assert_eq!(pc.engine_starts.len(), 5);
+    assert_eq!(pc.ready_misses, [1]);
+    assert_eq!(
+        arm_alarms(&g).last().map(String::as_str),
+        Some("EngineArm: 1 periods missed after the warm-up restart")
+    );
+}
+
+/// Only the boot's entry gets more attempts: a manual live entry in prod
+/// and a live trial fail at their first miss after the warm-up restart, as
+/// before, and unwind to event (a dev entry: `engine_ready_restarts_its_
+/// window_once`).
+#[test]
+fn a_manual_live_entry_or_a_trial_fails_at_its_first_miss() {
+    let trial = Request::Live {
+        build: Some(SHA.into()),
+        trial: true,
+        dry_run: false,
+    };
+    let cases = [
+        (prod_on(None, None), Mode::Dev, iemmixer_up(), live()),
+        (Lifecycle::Trial, Mode::Event, band_up(), trial),
+    ];
+    for (lifecycle, mode, facts, entry) in cases {
+        let (mut pc, mut g) = (FakePc::new(facts), Guard::for_test(mode));
+        g.state.lifecycle = lifecycle.clone();
+        g.state
+            .bundles
+            .insert(SHA.into(), record(SHA, "main", Hil::Green));
+        g.boot_arm_spacing = Duration::from_millis(10);
+        pc.ready_misses = vec![1; 4];
+        let r = handle(&mut pc, &mut g, entry, INIT);
+        assert!(!r.ok, "{lifecycle:?}: {r:?}");
+        assert_eq!(g.state.mode, Mode::Event, "{lifecycle:?}");
+        assert_eq!(pc.engine_starts.len(), 1, "{lifecycle:?}");
+        assert_eq!(pc.count(Call::EngineReady), 1, "{lifecycle:?}");
+        assert_eq!(pc.ready_misses, [1; 3], "{lifecycle:?}");
+        assert!(!pc.called(Call::EngineArm), "{lifecycle:?}");
+        assert_eq!(
+            arm_alarms(&g),
+            ["EngineArm: 1 periods missed after the warm-up restart"],
+            "{lifecycle:?}"
+        );
+        assert!(!r.detail.contains("attempt"), "{lifecycle:?}: {}", r.detail);
+    }
+}
+
+/// Only missed periods are the boot's load: any other failure of the boot's
+/// ready wait (a fault, a parked stream, another period, callbacks that
+/// stopped, an engine that ended) fails the step at once, as before.
+#[test]
+fn the_boot_s_live_entry_retries_only_missed_periods() {
+    let (mut pc, mut g) = booted_in_prod();
+    pc.fail(Call::EngineReady, "the engine faulted");
+    assert_eq!(start(&mut pc, &mut g, BOOT), Some(Outcome::Done));
+    assert_eq!(g.state.mode, Mode::Event);
+    assert_eq!(pc.engine_starts.len(), 1);
+    assert_eq!(pc.count(Call::EngineReady), 1);
+    assert!(!pc.called(Call::EngineArm));
+    assert_eq!(arm_alarms(&g), ["EngineArm: the engine faulted"]);
+    let (mut pc, mut g) = booted_in_prod();
+    pc.early_exits = vec![Some(70)];
+    assert_eq!(start(&mut pc, &mut g, BOOT), Some(Outcome::Done));
+    assert_eq!(g.state.mode, Mode::Event);
+    assert_eq!(pc.engine_starts.len(), 1);
+    assert_eq!(
+        arm_alarms(&g),
+        ["EngineArm: the engine ended (Some(70)) before it was ready"]
+    );
+}
+
+/// The wait between two of the boot's attempts takes the switch's token:
+/// a pre-emption ends it at once and the entry unwinds, no further start.
+#[test]
+fn a_preemption_ends_the_boot_s_wait_between_two_attempts() {
+    let (mut pc, mut g) = booted_in_prod();
+    g.boot_arm_spacing = Duration::from_secs(30);
+    pc.ready_misses = vec![1];
+    pc.preempt_at = Some((Call::EngineStop, g.cancel.clone()));
+    let t = Instant::now();
+    assert_eq!(start(&mut pc, &mut g, BOOT), Some(Outcome::Done));
+    assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+    assert_eq!(g.state.mode, Mode::Event);
+    assert_eq!(pc.engine_starts.len(), 1);
+    assert!(!pc.called(Call::EngineArm));
+    assert!(pc.called(Call::ReaperStart) && pc.called(Call::AppStart));
 }
 
 #[test]

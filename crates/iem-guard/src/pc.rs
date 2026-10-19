@@ -71,6 +71,36 @@ impl fmt::Display for StepError {
 
 impl std::error::Error for StepError {}
 
+/// Why [`Pc::engine_ready`] found the engine not ready. Missed periods
+/// after the warm-up restart are told apart by type (#11, 2026-10-19): the
+/// boot's live entry in prod starts such an engine again
+/// (`daemon::runner::engine_ready`), and only such an engine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotReady {
+    /// The window's second miss (`effects::engine::Ready::Missed`): the
+    /// periods missed since the warm-up restart.
+    Missed(u64),
+    /// Every other failure (a fault, a parked stream, another period,
+    /// callbacks that stopped, an engine that ended, the pipe), or "ide
+    /// event".
+    Step(StepError),
+}
+
+impl From<StepError> for NotReady {
+    fn from(e: StepError) -> Self {
+        Self::Step(e)
+    }
+}
+
+impl fmt::Display for NotReady {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Missed(n) => write!(f, "{n} periods missed after the warm-up restart"),
+            Self::Step(e) => fmt::Display::fmt(e, f),
+        }
+    }
+}
+
 /// What a notice is (`iem-server notify --to`, design §5.4). It goes to the
 /// engineer's devices: the mixer app's (the PWA's) notification
 /// subscriptions, as the predecessor's alerts did (#9 2026-09-28).
@@ -255,8 +285,10 @@ pub trait Pc {
     /// never in live).
     fn engine_start(&mut self, hold: bool, hil: bool) -> R<u32>;
     /// Hello names the bundle; measured frames 32, callbacks advancing, no
-    /// missed period for `secs` (one warm-up miss restarts the window once).
-    fn engine_ready(&mut self, secs: u32, c: &Cancel) -> R<Status>;
+    /// missed period for `secs` (one warm-up miss restarts the window once;
+    /// a second is [`NotReady::Missed`], any other failure
+    /// [`NotReady::Step`]).
+    fn engine_ready(&mut self, secs: u32, c: &Cancel) -> Result<Status, NotReady>;
     /// Whether the engine this guard started (or adopted) has ended, and
     /// its exit code (`Some(None)`: none): `None` while it runs or none is
     /// watched. A look only: the crash watch still sees the exit unless a

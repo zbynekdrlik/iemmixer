@@ -208,6 +208,31 @@ fn the_fake_answers_the_reads() {
     assert_eq!(pc.hil_signals.len(), 1);
 }
 
+/// #11, 2026-10-19: the scripted ready waits miss periods in call order
+/// (`NotReady::Missed`, typed as `WinPc`'s window says it); the engine
+/// still runs; a scripted failure stays a step's failure.
+#[test]
+fn the_fake_s_ready_waits_miss_periods_as_scripted() {
+    let c = Cancel::default();
+    let mut pc = FakePc::new(Facts::default());
+    pc.engine_start(true, false).unwrap();
+    pc.ready_misses = vec![2, 1];
+    assert_eq!(pc.engine_ready(10, &c), Err(NotReady::Missed(2)));
+    assert!(pc.facts.engine, "an engine that missed periods still runs");
+    assert_eq!(pc.engine_exit(), None);
+    assert_eq!(pc.engine_ready(10, &c), Err(NotReady::Missed(1)));
+    let ready = pc.status.clone();
+    assert_eq!(pc.engine_ready(10, &c), Ok(ready));
+    assert_eq!(pc.count(Call::EngineReady), 3);
+    pc.fail(Call::EngineReady, "the engine faulted");
+    pc.ready_misses = vec![1];
+    assert_eq!(
+        pc.engine_ready(10, &c),
+        Err(NotReady::Step(StepError::failed("the engine faulted")))
+    );
+    assert_eq!(pc.ready_misses, [1], "a failed wait took no miss");
+}
+
 #[test]
 fn a_failed_fake_call_changes_nothing() {
     let c = Cancel::default();
