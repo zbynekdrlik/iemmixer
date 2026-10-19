@@ -428,6 +428,11 @@ pub(super) fn run_step(pc: &mut dyn Pc, g: &mut Guard, step: Step, to: Mode) -> 
             let hil = g.hil_engine(to);
             let pid = pc.engine_start(true, hil)?;
             g.spawns += 1;
+            // The entry's build runs from now on: the active bundle
+            // (`requests::entry`; the review of PR #56).
+            if let Some(sha) = g.entry_build.take() {
+                g.state.set_active(&sha);
+            }
             if hil {
                 g.info(format!(
                     "engine started, held, with its HIL flags (pid {pid})"

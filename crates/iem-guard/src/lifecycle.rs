@@ -259,8 +259,8 @@ pub struct Ask<'a> {
 /// What an allowed entry does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entered {
-    /// The bundle the entry runs, which becomes the active bundle; none:
-    /// the active bundle as it is.
+    /// The bundle the entry runs, which becomes the active bundle once its
+    /// engine starts; none: the active bundle as it is.
     pub runs: Option<String>,
     /// The lifecycle once the entry is done (saved only when it entered).
     pub lifecycle: Lifecycle,

@@ -176,6 +176,11 @@ pub struct Guard {
     /// The request of the switch in progress (`live --trial`), read by its
     /// precheck.
     trial: bool,
+    /// The build the dev or live entry in progress runs (`requests::entry`):
+    /// the active bundle once its engine starts (`EngineStart`), so an entry
+    /// that stops before then leaves the active bundle, its way back and
+    /// `pc`'s bundle as they were (the review of PR #56, #11 2026-10-19).
+    entry_build: Option<String>,
     /// The switch in progress is the boot's live entry in prod
     /// (`startup::start_plan`): its `EngineArm` starts an engine that
     /// missed periods again, up to [`BOOT_ARM_RETRIES`] times (#11).
@@ -251,6 +256,7 @@ impl Guard {
             root,
             clock,
             trial: false,
+            entry_build: None,
             boot_entry: false,
             boot_arm_spacing: BOOT_ARM_SPACING,
             report: Vec::new(),
