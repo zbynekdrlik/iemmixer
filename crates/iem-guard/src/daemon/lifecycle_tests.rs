@@ -207,7 +207,8 @@ fn in_prod_a_crash_loop_in_event_stays_down() {
 /// A dev or live entry a restarted guard (no reboot) finds cut off in prod
 /// stops where it was: no event plan, the switch dropped, an alarm naming
 /// it and the ways on, the owner's question (#11, 2026-10-19: in prod
-/// nothing goes to REAPER on its own). An event plan that was left resumes
+/// nothing goes to REAPER on its own); in event here, since it had stopped
+/// the engine (the review of PR #56). An event plan that was left resumes
 /// as before: it was asked for. Before the cutover a cut-off entry unwinds.
 #[test]
 fn in_prod_a_cut_off_entry_stops_at_a_guard_restart() {
@@ -225,7 +226,10 @@ fn in_prod_a_cut_off_entry_stops_at_a_guard_restart() {
     };
     let (mut pc, mut g) = left(Mode::Dev, Mode::Live);
     assert_eq!(start(&mut pc, &mut g, 0), None);
-    assert_eq!((g.state.mode, g.state.switching.clone()), (Mode::Dev, None));
+    assert_eq!(
+        (g.state.mode, g.state.switching.clone()),
+        (Mode::Event, None)
+    );
     for c in [
         Call::EngineStop,
         Call::EngineStart,
@@ -367,8 +371,9 @@ fn in_prod_a_reboot_on_a_red_pin_stays_in_event_with_an_alarm() {
 
 /// A prod live entry that fails keeps the pin it would have ended
 /// maintenance on (the review of lane 1), and since the owner's decision of
-/// 2026-10-19 (#11: in prod nothing goes to REAPER on its own) it stops in
-/// the mode it began from, maintenance here, with the ways on.
+/// 2026-10-19 (#11: in prod nothing goes to REAPER on its own) it stops
+/// where it is, with the ways on: in event, since it had stopped
+/// maintenance's engine before the start failed (the review of PR #56).
 #[test]
 fn in_prod_a_failed_live_entry_keeps_the_pin_and_the_session() {
     let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
@@ -387,7 +392,7 @@ fn in_prod_a_failed_live_entry_keeps_the_pin_and_the_session() {
     };
     let r = handle(&mut pc, &mut g, live, INIT);
     assert!(!r.ok, "{r:?}");
-    assert_eq!(g.state.mode, Mode::Dev);
+    assert_eq!(g.state.mode, Mode::Event);
     assert!(!pc.called(Call::ReaperStart) && !pc.called(Call::AppStart));
     assert_eq!(g.state.lifecycle, prod_on(None, Some(NEW)));
     assert!(!r.detail.contains("becomes the pin"), "{}", r.detail);
