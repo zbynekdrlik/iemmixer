@@ -7,8 +7,8 @@
 use std::time::{Duration, Instant};
 
 use super::tests::{
-    HELD, INIT, SHA, ask, band_up, dev, event, iemmixer_up, no_reaper, preempt_after, prod_on,
-    record, status_reply, steps, texts,
+    BOOT, HELD, INIT, SHA, ask, band_up, booted_in_prod, dev, event, iemmixer_up, no_reaper,
+    preempt_after, prod_on, record, status_reply, steps, texts,
 };
 use super::*;
 use crate::bundle::Hil;
@@ -564,24 +564,6 @@ fn an_engine_that_finds_its_state_directory_busy_is_started_again_within_the_ste
 }
 
 // ---- the boot's live entry in prod: an engine that missed periods (#11) ----
-
-/// The boot after which the guards below start: later than their state.
-const BOOT: u64 = 5_000;
-
-/// A guard live in prod on the pin `SHA` (a green `main` build) whose state
-/// was written before [`BOOT`], on a PC where nothing runs: its start is the
-/// boot's live entry on the pin (`startup::start_plan`). Its attempts wait
-/// 10 ms between them, not `BOOT_ARM_SPACING`.
-fn booted_in_prod() -> (FakePc, Guard) {
-    let mut g = Guard::for_test(Mode::Live);
-    g.state.written_at = 1_000;
-    g.state.lifecycle = prod_on(None, None);
-    g.state
-        .bundles
-        .insert(SHA.into(), record(SHA, "main", Hil::Green));
-    g.boot_arm_spacing = Duration::from_millis(10);
-    (FakePc::new(Facts::default()), g)
-}
 
 /// `iemmode live` in prod: the pin's live entry.
 fn live() -> Request {

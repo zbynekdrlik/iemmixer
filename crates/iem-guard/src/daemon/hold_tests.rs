@@ -8,7 +8,9 @@
 
 use std::time::{Duration, Instant};
 
-use super::tests::{INIT, OTHER, SHA, T0, ask, iemmixer_up, no_reaper, prod_on, record, texts};
+use super::tests::{
+    BOOT, INIT, OTHER, SHA, T0, ask, booted_in_prod, iemmixer_up, no_reaper, prod_on, record, texts,
+};
 use super::*;
 use crate::bundle::{Hil, Pins};
 use crate::crash;
@@ -93,8 +95,10 @@ fn a_prod_entry_from_live_that_stops_after_its_stops_ends_in_event() {
     tick(&mut pc, &mut g, at + Duration::from_secs(20));
     assert_eq!(pc.engine_starts, [(true, false)], "no respawn");
     assert_eq!(g.state.mode, Mode::Event);
-    // "ide event": live on the pin, never a stay on the held engine, whose
-    // callbacks advance.
+    // "ide event": live on the pin. From event it reads no health, so the
+    // held engine never passes for the band's system here, whatever its
+    // health would read (`effects::engine::health` reads a held engine as
+    // never healthy: `a_held_engine_is_never_healthy`).
     let (mut pc, mut g) = held();
     pc.health(Health::Healthy);
     let r = ask(&mut pc, &mut g, event(true));
@@ -242,20 +246,6 @@ fn an_entry_s_build_becomes_the_active_bundle_only_once_its_engine_starts() {
     assert_eq!(pc.bundle.as_deref(), Some(OTHER));
 }
 
-/// A guard live in prod on the pin `SHA` whose state was written before
-/// the boot at 5000, on a PC where nothing runs: its start is the boot's
-/// live entry, whose attempts wait 10 ms between them.
-fn booted_in_prod() -> (FakePc, Guard) {
-    let mut g = Guard::for_test(Mode::Live);
-    g.state.written_at = 1_000;
-    g.state.lifecycle = prod_on(None, None);
-    g.state
-        .bundles
-        .insert(SHA.into(), record(SHA, "main", Hil::Green));
-    g.boot_arm_spacing = Duration::from_millis(10);
-    (FakePc::new(Facts::default()), g)
-}
-
 /// The review of PR #56, finding 4: only a finished step saved the guard's
 /// children (`Guard::done`), so an engine `EngineArm` started again (the
 /// boot's attempts, the busy restart) was not saved when the step then
@@ -266,7 +256,7 @@ fn booted_in_prod() -> (FakePc, Guard) {
 fn an_engine_started_again_inside_the_arm_is_saved_as_the_guard_s_child() {
     let (mut pc, mut g) = booted_in_prod();
     pc.ready_misses = vec![1; 4];
-    assert_eq!(start(&mut pc, &mut g, 5_000), Some(Outcome::NeedsOwner));
+    assert_eq!(start(&mut pc, &mut g, BOOT), Some(Outcome::NeedsOwner));
     assert_eq!(pc.engine_starts.len(), 4);
     assert_eq!(g.state.pids.engine.as_ref().map(|k| k.pid), Some(1004));
     assert_eq!(g.state.pids, pc.kids);
@@ -369,7 +359,7 @@ fn in_prod_a_guard_restart_with_reaper_up_holds_a_left_entry() {
     // A reboot: the boot's live entry on the pin, whatever was left.
     let (mut pc, mut g) = restarted(prod(), Some(entry.clone()));
     g.state.written_at = 1_000;
-    assert_eq!(start(&mut pc, &mut g, 5_000), Some(Outcome::Done));
+    assert_eq!(start(&mut pc, &mut g, BOOT), Some(Outcome::Done));
     assert_eq!(g.state.mode, Mode::Live);
     assert!(!pc.called(Call::AppStart) && !pc.called(Call::ReaperStart));
     // Before the cutover a left entry unwinds to the event plan.
@@ -535,7 +525,7 @@ fn a_prod_hold_after_its_engine_armed_keeps_that_engine_in_the_entry_s_mode() {
     // The boot's live entry: live with the pin's engine.
     let (mut pc, mut g) = booted_in_prod();
     pc.fail(Call::ServerStart, HELD);
-    assert_eq!(start(&mut pc, &mut g, 5_000), Some(Outcome::NeedsOwner));
+    assert_eq!(start(&mut pc, &mut g, BOOT), Some(Outcome::NeedsOwner));
     assert_eq!(g.state.mode, Mode::Live);
     assert_eq!(texts(&g), armed("live"));
     assert!(!pc.called(Call::ReaperStart) && !pc.called(Call::AppStart));
@@ -552,7 +542,7 @@ fn every_failure_after_the_boot_s_first_attempt_names_it() {
     let failed = |script: &dyn Fn(&mut FakePc)| {
         let (mut pc, mut g) = booted_in_prod();
         script(&mut pc);
-        assert_eq!(start(&mut pc, &mut g, 5_000), Some(Outcome::NeedsOwner));
+        assert_eq!(start(&mut pc, &mut g, BOOT), Some(Outcome::NeedsOwner));
         assert_eq!(g.state.mode, Mode::Event);
         assert!(!pc.called(Call::ReaperStart) && !pc.called(Call::AppStart));
         texts(&g)
