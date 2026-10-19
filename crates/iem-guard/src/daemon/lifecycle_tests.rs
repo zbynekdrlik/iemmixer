@@ -354,7 +354,8 @@ fn in_prod_a_reboot_on_a_red_pin_stays_in_event_with_an_alarm() {
     let mut pc = FakePc::new(Facts::default());
     assert_eq!(start(&mut pc, &mut g, 5_000), None);
     assert_eq!(g.state.mode, Mode::Event);
-    assert_eq!(pc.mutating_calls(), Vec::<Call>::new());
+    // Nothing started; the only call is the alarm's notice to the engineer.
+    assert_eq!(pc.mutating_calls(), vec![Call::Notify]);
     let alarm = format!(
         "after a reboot in prod: {SHA}: HIL Red; live needs green; the PC stays in event with \
          nothing started (in prod nothing goes to REAPER on its own): iemmode event starts \
