@@ -51,7 +51,9 @@ pub(super) fn take_logon(pc: &mut dyn Pc, g: &mut Guard) {
 /// event, in prod a reboot goes live on the pin), then the children a
 /// previous guard started, then an unfinished switch unwinds to event (or
 /// resumes, when it was one; in prod an unfinished dev or live entry stops
-/// instead, #11 2026-10-19). From event the event plan is the start's
+/// instead, #11 2026-10-19, also with the band's system up: it is held
+/// before the reboot rule could reset it, `lifecycle::holds_cut_off`). From
+/// event the event plan is the start's
 /// checks: a dev or live entry the pipe queues meanwhile runs after them
 /// (#42). The outcome of a plan that ran.
 pub fn start(pc: &mut dyn Pc, g: &mut Guard, boot: u64) -> Option<Outcome> {
@@ -68,9 +70,13 @@ pub fn start(pc: &mut dyn Pc, g: &mut Guard, boot: u64) -> Option<Outcome> {
     // the PC goes to event (S8); its elevated undos after the event plan.
     let cut_off = super::cutover::recover(pc, g);
     let p = pc.procs();
-    let reset = cut_off.is_some()
-        || state::reset_to_event(&g.state, boot, p.band_up(), !p.engine.is_empty());
     let rebooted = boot > g.state.written_at;
+    // In prod a left dev or live entry is held before the reboot rule could
+    // reset it to the event plan (`lifecycle::holds_cut_off`).
+    let left = g.state.switching.as_ref().map(|s| s.to);
+    let held = lifecycle::holds_cut_off(&g.state.lifecycle, rebooted, left);
+    let reset = cut_off.is_some()
+        || (!held && state::reset_to_event(&g.state, boot, p.band_up(), !p.engine.is_empty()));
     // S8: the lifecycle decides (before the cutover: event, as G1 says).
     let Started {
         start: go,

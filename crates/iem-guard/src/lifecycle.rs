@@ -185,6 +185,20 @@ pub fn start<'r>(
     }
 }
 
+/// Whether a starting guard holds the switch it finds left (`left`: its
+/// target) instead of applying the reboot rule (`state::reset_to_event`):
+/// in prod, after a guard restart (no reboot), a dev or live entry stops
+/// where it was (`daemon::startup::hold_cut_off`), even with the band's
+/// system up and no engine of ours (the review of PR #56: a guard that died
+/// during "ide event"'s live entry, the app stopped and REAPER not yet
+/// quit, ran the event plan at its restart, so the owner's live request
+/// silently became REAPER). An event plan that was left resumes, and a
+/// start with none left keeps the rule; after a reboot the PC goes live on
+/// the pin ([`start`]); before the cutover a left entry unwinds.
+pub fn holds_cut_off(lc: &Lifecycle, rebooted: bool, left: Option<Mode>) -> bool {
+    is_prod(lc) && !rebooted && left.is_some_and(|to| to != Mode::Event)
+}
+
 /// In prod nothing goes to REAPER on its own (the owner's decision on #11,
 /// 2026-10-19, "na reaper sa už nevraciame"): a dev or live entry that
 /// fails (`daemon::runner`), one a restarted guard finds cut off
