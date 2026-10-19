@@ -425,8 +425,10 @@ fn install_site_in_a_job_restarts_only_the_engine_and_the_server() {
 }
 
 /// In prod a HIL job's engine restart that fails stops where it is, in dev
-/// with the job, and names the ways on: never the event plan (the owner's
-/// decision on #11, 2026-10-19: in prod nothing goes to REAPER on its own).
+/// with the job: never the event plan (the owner's decision on #11,
+/// 2026-10-19: in prod nothing goes to REAPER on its own). Its server
+/// failed after its engine armed, so the alarm says dev runs with that
+/// engine.
 #[test]
 fn in_prod_a_failed_job_restart_stops_without_reaper() {
     let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
@@ -442,10 +444,10 @@ fn in_prod_a_failed_job_restart_stops_without_reaper() {
     };
     let r = handle(&mut pc, &mut g, site, INIT);
     assert!(!r.ok, "{r:?}");
-    let failed = format!(
-        "ServerStart: ports 80/443 are still held; {}",
-        no_reaper(SHA)
-    );
+    let failed = "ServerStart: ports 80/443 are still held; in prod nothing goes to REAPER on \
+                  its own: its engine was armed, so the PC is in dev with it (asking for it \
+                  again tries again)"
+        .to_owned();
     assert!(
         r.detail.starts_with(&format!("site installed; {failed}")),
         "{}",
