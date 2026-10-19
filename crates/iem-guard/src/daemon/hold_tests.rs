@@ -406,14 +406,14 @@ fn an_alarm_after_a_hold_that_changed_nothing_says_the_pc_stays_as_it_was() {
     assert_eq!(g.state.mode, Mode::Dev);
     assert_eq!(texts(&g), [format!("Precheck: {REFUSED}; {RUNS_ON}")]);
     // The HIL job and its runner are nothing that plays: a runner that did
-    // not stop changed nothing either.
+    // not stop changed nothing either, and the job it still runs is kept.
     let (mut pc, mut g) = prod_live();
     g.state.mode = Mode::Dev;
     g.state.job = Some(7);
     pc.facts.runner = true;
     pc.fail(Call::RunnerStop, "the runner did not stop");
     assert!(!handle(&mut pc, &mut g, live(), INIT).ok);
-    assert_eq!(g.state.mode, Mode::Dev);
+    assert_eq!((g.state.mode, g.state.job), (Mode::Dev, Some(7)));
     assert!(pc.facts.engine && !pc.called(Call::EngineStop));
     assert_eq!(
         texts(&g),
@@ -461,9 +461,17 @@ fn an_alarm_after_a_hold_that_changed_nothing_says_the_pc_stays_as_it_was() {
 fn a_prod_hold_after_its_engine_armed_keeps_that_engine_in_the_entry_s_mode() {
     const HELD: &str = "ports 80/443 are still held";
     let armed = |m: &str| {
+        let ways = if m == "live" {
+            format!(
+                " (ide event keeps it as it is): iemmode live --build {SHA} starts it all \
+                 again, iemmode event starts REAPER (the PC stays prod)"
+            )
+        } else {
+            " (asking for it again tries again)".to_owned()
+        };
         [format!(
             "ServerStart: {HELD}; in prod nothing goes to REAPER on its own: its engine was \
-             armed, so the PC is in {m} with it (asking for it again tries again)"
+             armed, so the PC is in {m} with it{ways}"
         )]
     };
     let live = || Request::Live {
@@ -529,6 +537,74 @@ fn a_prod_hold_after_its_engine_armed_keeps_that_engine_in_the_entry_s_mode() {
     assert_eq!(g.state.mode, Mode::Live);
     assert_eq!(texts(&g), armed("live"));
     assert!(!pc.called(Call::ReaperStart) && !pc.called(Call::AppStart));
+}
+
+/// The second review of the fixes for PR #56: a restarted guard that finds
+/// a prod entry cut off after its engine armed is in the entry's target
+/// with that engine only when it adopted an engine (else nothing of it
+/// runs: event), and then the entry's lifecycle change holds as for a
+/// failed one (here the live entry that ends maintenance on a green main
+/// build makes it the pin).
+#[test]
+fn a_cut_off_prod_entry_after_its_engine_armed_is_in_with_the_adopted_engine() {
+    let cut_off = |adopted: bool| {
+        let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
+        g.state.lifecycle = prod_on(None, Some(OTHER));
+        for sha in [SHA, OTHER] {
+            g.state
+                .bundles
+                .insert(sha.into(), record(sha, "main", Hil::Green));
+        }
+        g.state.set_active(OTHER);
+        g.state.pids.engine = adopted.then(|| crate::state::Child {
+            pid: 4242,
+            start_time: 1,
+            image: "iem-engine.exe".into(),
+        });
+        g.state.switching = Some(Switching {
+            from: Mode::Dev,
+            to: Mode::Live,
+            done: vec![
+                Step::Precheck,
+                Step::EngineStop,
+                Step::ServerStop,
+                Step::TrayStop,
+                Step::TuningEnter,
+                Step::PrefCheck,
+                Step::EngineStart,
+                Step::EngineArm,
+            ],
+            started: T0,
+        });
+        assert_eq!(start(&mut pc, &mut g, 0), None);
+        assert!(!pc.called(Call::EngineStart) && !pc.called(Call::ReaperStart));
+        assert!(g.alarms.last().unwrap().owner_question);
+        g
+    };
+    let head = "the guard started again during the switch dev → live (8 steps done)";
+    let g = cut_off(true);
+    assert_eq!(g.state.mode, Mode::Live);
+    assert_eq!(
+        g.state.lifecycle,
+        Lifecycle::Prod(Prod {
+            since: T0,
+            pin: OTHER.into(),
+            previous: Some(SHA.into()),
+            maintenance: None,
+        })
+    );
+    assert_eq!(
+        texts(&g),
+        [format!(
+            "{head}; in prod nothing goes to REAPER on its own: its engine was armed, so the PC \
+             is in live with it (ide event keeps it as it is): iemmode live --build {OTHER} \
+             starts it all again, iemmode event starts REAPER (the PC stays prod)"
+        )]
+    );
+    let g = cut_off(false);
+    assert_eq!(g.state.mode, Mode::Event);
+    assert_eq!(g.state.lifecycle, prod_on(None, Some(OTHER)));
+    assert_eq!(texts(&g), [format!("{head}; {}", no_reaper(OTHER))]);
 }
 
 /// The review of PR #56, finding 8: only the boot's last miss named its

@@ -530,9 +530,12 @@ fn in_prod_a_stopped_entry_names_the_ways_on() {
 /// finding 6): after a stop that changed nothing in live or dev, that the PC
 /// stays there as it was and asking again tries again, never a live entry
 /// that would restart a healthy engine (nor a claim that anything plays);
-/// after one whose engine was armed, that the PC is in its target with that
-/// engine; after one that changed what runs, or from event, the ways on
-/// ([`ways_on`]). Before the cutover none.
+/// after a dev entry whose engine was armed, that the PC is in dev with it;
+/// after a live entry whose engine was armed, that the PC is in live with
+/// it, which "ide event" keeps as it is, and the ways that start it again or
+/// go to REAPER (asking "ide event" again would retry nothing); after one
+/// that changed what runs, or from event, the ways on ([`ways_on`]). Before
+/// the cutover none.
 #[test]
 fn a_stop_that_changed_nothing_says_the_pc_stays_as_it_was() {
     let b = installed();
@@ -558,10 +561,6 @@ fn a_stop_that_changed_nothing_says_the_pc_stays_as_it_was() {
             "no step done changed what runs, so the PC stays in dev as it was",
         ),
         (
-            Left::Armed(Mode::Live),
-            "its engine was armed, so the PC is in live with it",
-        ),
-        (
             Left::Armed(Mode::Dev),
             "its engine was armed, so the PC is in dev with it",
         ),
@@ -572,6 +571,23 @@ fn a_stop_that_changed_nothing_says_the_pc_stays_as_it_was() {
             "{left:?}"
         );
     }
+    let armed_live = |pin: &str| {
+        Some(format!(
+            "in prod nothing goes to REAPER on its own: its engine was armed, so the PC is in \
+             live with it (ide event keeps it as it is): iemmode live --build {pin} starts it \
+             all again, iemmode event starts REAPER (the PC stays prod)"
+        ))
+    };
+    assert_eq!(
+        after_stop(&lc, Left::Armed(Mode::Live), |sha| b.get(sha)),
+        armed_live(PIN)
+    );
+    // The pin a live entry runs: a maintenance build that becomes it.
+    let maintenance = Lifecycle::Prod(prod(None, Some(NEW)));
+    assert_eq!(
+        after_stop(&maintenance, Left::Armed(Mode::Live), |sha| b.get(sha)),
+        armed_live(NEW)
+    );
     for left in [
         Left::Changed,
         Left::Unchanged(Mode::Event),
