@@ -168,31 +168,34 @@ fn a_reboot_ends_a_maintenance_session() {
 
 /// G8 at the boot (review of lane 1): the state file is the user's, and
 /// HIL may report the pin red later. A pin that is no installed green main
-/// build goes nowhere: event, an alarm, the lifecycle as it was.
+/// build goes nowhere: the PC stays in event with nothing started (the
+/// owner's decision on #11, 2026-10-19: in prod nothing goes to REAPER on
+/// its own), an alarm, the lifecycle as it was.
 #[test]
 fn in_prod_a_reboot_on_a_pin_that_may_not_go_live_stays_in_event() {
     let mut b = installed();
     b.insert(PIN.into(), rec(PIN, "main", Hil::Red));
     let lc = Lifecycle::Prod(prod(Some(PREV), None));
+    let nothing = "the PC stays in event with nothing started (in prod nothing goes to REAPER \
+                   on its own): iemmode event starts REAPER, the PC stays prod";
     assert_eq!(
         start(&lc, true, true, |sha| b.get(sha)),
         Started {
-            start: Start::Event,
+            start: Start::Hold,
             lifecycle: lc.clone(),
             note: None,
             alarm: Some(format!(
-                "after a reboot in prod: {PIN}: HIL Red; live needs green; the PC stays in \
-                 event"
+                "after a reboot in prod: {PIN}: HIL Red; live needs green; {nothing}"
             ))
         }
     );
     b.remove(PIN);
     let s = start(&lc, true, true, |sha| b.get(sha));
-    assert_eq!((s.start, s.lifecycle), (Start::Event, lc.clone()));
+    assert_eq!((s.start, s.lifecycle), (Start::Hold, lc.clone()));
     assert_eq!(
         s.alarm,
         Some(format!(
-            "after a reboot in prod: the pin {PIN} is not installed; the PC stays in event"
+            "after a reboot in prod: the pin {PIN} is not installed; {nothing}"
         ))
     );
     // A maintenance build that becomes the pin is checked by then.
@@ -420,7 +423,15 @@ fn a_crash_loop_in_every_lifecycle_and_mode() {
         );
     }
     let lc = Lifecycle::Prod(prod(Some(PREV), Some(NEW)));
-    assert_eq!(at(&lc, Mode::Event), (Fallback::Event, lc.clone()));
+    // In prod nothing goes to REAPER on its own (#11, 2026-10-19): an
+    // engine in event stays down.
+    assert_eq!(
+        at(&lc, Mode::Event),
+        (
+            Fallback::Down(format!("in event on the pin {PIN}")),
+            lc.clone()
+        )
+    );
     // Maintenance: live on the pin, the session's build dropped.
     assert_eq!(
         at(&lc, Mode::Dev),
@@ -451,8 +462,10 @@ fn a_crash_loop_in_every_lifecycle_and_mode() {
 }
 
 /// G8 on the crash paths (the review of lane 1): a pin the fallback would
-/// go live on is checked like at the boot. Maintenance on a red pin goes
-/// back to REAPER; prod live with a red previous pin stays down.
+/// go live on is checked like at the boot. Maintenance on a red pin stays
+/// down, the session's build dropped (the owner's decision on #11,
+/// 2026-10-19: in prod nothing goes to REAPER on its own); prod live with a
+/// red previous pin stays down.
 #[test]
 fn a_crash_loop_never_falls_back_live_on_a_pin_that_may_not_go_live() {
     let mut b = installed();
@@ -462,7 +475,10 @@ fn a_crash_loop_never_falls_back_live_on_a_pin_that_may_not_go_live() {
     assert_eq!(
         crash_loop(&lc, Mode::Dev, |sha| b.get(sha)),
         (
-            Fallback::Reaper(format!("{PIN}: HIL Red; live needs green")),
+            Fallback::Down(format!(
+                "in maintenance, and the pin {PIN} may not go live ({PIN}: HIL Red; live needs \
+                 green)"
+            )),
             Lifecycle::Prod(prod(Some(PREV), None))
         )
     );
@@ -783,8 +799,11 @@ fn activate_after_the_cutover_takes_only_a_guard_that_keeps_the_lifecycle() {
 
 /// What `iemmode event` means: the button (no signal) is the event plan in
 /// every lifecycle and mode, the rollback dropped (the owner's ROZHODNUTÉ on
-/// #11); "ide event" in prod keeps the band's system (lane 3). The engine's
-/// health is read only in prod live on "ide event".
+/// #11); "ide event" in prod keeps the band's system (lane 3), and since the
+/// owner's decision of 2026-10-19 (#11: in prod nothing goes to REAPER on
+/// its own) it goes live on the pin from an engine that does not play and
+/// from event too. The engine's health is read only in prod live on "ide
+/// event".
 #[test]
 fn the_button_is_the_event_plan_and_ide_event_keeps_prod_s_band_system() {
     let p = Lifecycle::Prod(prod(None, None));
@@ -809,9 +828,9 @@ fn the_button_is_the_event_plan_and_ide_event_keeps_prod_s_band_system() {
     );
     assert_eq!(
         on_event(&p, Mode::Event, true, || panic!("read")),
-        OnEvent::Plan
+        OnEvent::Live
     );
     assert_eq!(on_event(&p, Mode::Live, true, || true), OnEvent::Stay);
-    assert_eq!(on_event(&p, Mode::Live, true, || false), OnEvent::Plan);
+    assert_eq!(on_event(&p, Mode::Live, true, || false), OnEvent::Live);
     assert!(is_prod(&p) && !is_prod(&Lifecycle::Trial));
 }

@@ -9,7 +9,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::tests::{INIT, SHA, T0, ask, band_up, iemmixer_up, prod_on, record};
+use super::tests::{INIT, SHA, T0, ask, band_up, iemmixer_up, prod_on, record, texts};
 use super::*;
 use crate::bundle::Hil;
 use crate::lifecycle::Lifecycle;
@@ -38,7 +38,9 @@ fn prod_live() -> (FakePc, Guard) {
 
 /// The button (plain `iemmode event`) is the event plan in prod as before
 /// the cutover, and the PC stays prod (the next boot goes live on the pin);
-/// the owner's "ide event" keeps the band's system.
+/// the owner's "ide event" keeps the band's system, and since the owner's
+/// decision of 2026-10-19 (#11: in prod nothing goes to REAPER on its own)
+/// it never runs the event plan in prod.
 #[test]
 fn in_prod_the_button_is_the_event_plan_and_ide_event_keeps_the_band_s_system() {
     let (mut pc, mut g) = prod_live();
@@ -66,14 +68,16 @@ fn in_prod_the_button_is_the_event_plan_and_ide_event_keeps_the_band_s_system() 
         (g.state.mode, g.state.lifecycle.clone()),
         (Mode::Live, prod_on(None, None))
     );
-    // …with an engine that does not play: REAPER for this event, still prod.
+    // …with an engine that does not play: live on the pin again, never
+    // REAPER (the owner's decision on #11, 2026-10-19).
     let (mut pc, mut g) = prod_live();
     pc.health(Health::Dead);
     let r = handle(&mut pc, &mut g, event(true), INIT);
     assert!(r.ok, "{r:?}");
-    assert_eq!(g.state.mode, Mode::Event);
+    assert_eq!(g.state.mode, Mode::Live);
     assert_eq!(g.state.lifecycle, prod_on(None, None));
-    assert!(pc.called(Call::ReaperStart));
+    assert!(pc.called(Call::EngineStart));
+    assert!(!pc.called(Call::ReaperStart) && !pc.called(Call::AppStart));
     // …in maintenance: live on the pin, the session's build dropped by its
     // rule (here none).
     let (mut pc, mut g) = prod_live();
@@ -83,29 +87,45 @@ fn in_prod_the_button_is_the_event_plan_and_ide_event_keeps_the_band_s_system() 
     assert_eq!(g.state.mode, Mode::Live);
     assert_eq!(g.state.lifecycle, prod_on(None, None));
     assert!(!pc.called(Call::ReaperStart) && !pc.called(Call::Data));
-    // …in maintenance on a pin that may not go live: REAPER serves.
+    // …in maintenance on a pin that may not go live: nothing switches, and
+    // an alarm names the way to REAPER (the owner's decision on #11,
+    // 2026-10-19: never REAPER on its own).
     let (mut pc, mut g) = prod_live();
     g.state.mode = Mode::Dev;
     g.state
         .bundles
         .insert(SHA.into(), record(SHA, "main", Hil::Red));
     let r = handle(&mut pc, &mut g, event(true), INIT);
-    assert_eq!(g.state.mode, Mode::Event, "{r:?}");
-    assert!(
-        r.detail.starts_with("in prod live runs the pin"),
-        "{}",
-        r.detail
+    assert!(!r.ok, "{r:?}");
+    assert_eq!(g.state.mode, Mode::Dev, "{r:?}");
+    let refused = format!(
+        "ide event in prod: in prod live runs the pin, and {SHA}: HIL Red; live needs green; \
+         nothing switched (in prod nothing goes to REAPER on its own): iemmode event starts \
+         REAPER, the PC stays prod"
     );
-    assert!(pc.called(Call::ReaperStart));
+    assert!(r.detail.starts_with(&refused), "{}", r.detail);
+    assert_eq!(texts(&g), [refused]);
+    assert!(g.alarms.last().unwrap().owner_question);
+    assert!(!pc.called(Call::ReaperStart) && !pc.called(Call::EngineStop));
     assert_eq!(g.shared.view().running, None, "no switch left showing");
-    // …in event (a red pin at the boot): REAPER's checks, nothing else.
+    // …in event with a pin that is not installed: nothing switches either.
     let mut pc = FakePc::new(band_up());
     let mut g = Guard::for_test(Mode::Event);
     g.state.lifecycle = prod_on(None, None);
     let r = handle(&mut pc, &mut g, event(true), INIT);
-    assert!(r.ok, "{r:?}");
+    assert!(!r.ok, "{r:?}");
     assert_eq!(g.state.lifecycle, prod_on(None, None));
-    assert!(!pc.called(Call::EngineStart));
+    assert_eq!(g.state.mode, Mode::Event);
+    assert!(!pc.called(Call::EngineStart) && !pc.called(Call::ReaperSaveQuit));
+    assert!(!pc.called(Call::ReaperStart) && !pc.called(Call::AppStop));
+    assert_eq!(
+        texts(&g),
+        [format!(
+            "ide event in prod: in prod live runs the pin, and the pin {SHA} is not installed; \
+             nothing switched (in prod nothing goes to REAPER on its own): iemmode event starts \
+             REAPER, the PC stays prod"
+        )]
+    );
     // Before the cutover both are the event plan, as always.
     for signal in [false, true] {
         let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
@@ -119,7 +139,8 @@ fn in_prod_the_button_is_the_event_plan_and_ide_event_keeps_the_band_s_system() 
 }
 
 /// "ide event --dry-run" in maintenance changes nothing, a pin that may not
-/// go live included (the real one would bring REAPER).
+/// go live included (the real one only alarms since the owner's decision
+/// of 2026-10-19 on #11, no REAPER).
 #[test]
 fn a_dry_ide_event_in_maintenance_changes_nothing() {
     for hil in [Hil::Green, Hil::Red] {
